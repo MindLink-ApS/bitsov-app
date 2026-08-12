@@ -1,0 +1,16 @@
+:root { --bg:#0F0B08; --surface:#17110C; --ink:#F3E9DE; --muted:#A6968A; --accent:#F7931A; --ok:#4FBF7B; --err:#D9603F; }
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; margin: 0; }
+body { background: var(--bg); color: var(--ink); font-family: system-ui, -apple-system, sans-serif; }
+.shell { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 28px; padding: 32px; text-align: center; }
+.mark { font-size: 30px; font-weight: 700; letter-spacing: -0.02em; }
+.mark span { color: var(--accent); }
+.state { display: flex; flex-direction: column; align-items: center; gap: 12px; color: var(--muted); }
+.state.ready { color: var(--ink); }
+.node-id { font-family: ui-monospace, monospace; font-size: 18px; color: var(--accent); background: var(--surface); border: 1px solid #2E231A; border-radius: 10px; padding: 10px 16px; }
+.dot { width: 10px; height: 10px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 12px var(--ok); }
+.spinner { width: 24px; height: 24px; border: 3px solid #2E231A; border-top-color: var(--accent); border-radius: 50%; animation: spin 0.9s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.error { color: var(--err); }
+.error code { font-size: 12px; color: var(--muted); background: var(--surface); padding: 8px 10px; border-radius: 8px; max-width: 320px; overflow-wrap: anywhere; }
+.hint { font-size: 12px; color: var(--muted); max-width: 300px; line-height: 1.5; }
