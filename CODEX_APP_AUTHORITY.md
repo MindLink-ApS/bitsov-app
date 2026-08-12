@@ -16,7 +16,7 @@ charter, the build is wrong.
 
 ## A. Immutable invariants (any violation = NO-GO, blocks ship)
 1. **Payment gate never bypassed.** No app path sends/acts on an inbound unit of work without a
-   settled, recipient-bound payment. The app uses `POST /messages/compose` (node obtains the
+   settled, recipient-bound payment. The app uses `POST /api/v1/messages/compose` (node obtains the
    proof); it must **never** reintroduce a free-send path or stub the gate. Grep the app for any
    direct-transport send that skips `compose`/`messages`; confirm `PaymentGate::verify` is
    fail-closed and unmodified in the pinned protocol release the app bundles.
@@ -100,14 +100,14 @@ Run from the app repo root; adjust the Website path to your checkout. **Any FAIL
 ```bash
 # FAIL if any konsensus-* is a path/git dependency (must be a bundled BINARY, not a linked crate)
 ! grep -REn 'konsensus[-_][a-z]+[[:space:]]*=[[:space:]]*\{?[[:space:]]*(path|git)' src-tauri/Cargo.toml Cargo.toml 2>/dev/null
-test -x src-tauri/bin/konsensus-node* || echo "FAIL: node not bundled as a binary resource"
+test -x src-tauri/bin/konsensus-node* || { echo "FAIL: node not bundled as a binary resource"; false; }
 # pinned node integrity: this sha256 must equal the pinned release SHA256SUMS entry
 shasum -a 256 src-tauri/bin/konsensus-node* | awk '{print $1}'
 ```
 **G2 — no non-loopback client before transport confidentiality exists**
 ```bash
 # until a TLS/Noise remote channel ships, the control plane binds loopback ONLY
-! grep -REn 'https?://(?!127\.0\.0\.1|localhost)[^"'"'"' )]*/api/v1' src/ src-tauri/ 2>/dev/null
+if grep -REoh 'https?://[^"'"'"' )]*/api/v1' src/ src-tauri/ 2>/dev/null | grep -vE '://(127\.0\.0\.1|localhost)([:/]|$)'; then echo "FAIL: non-loopback control-plane URL"; false; fi
 ```
 **G3 / G4 / honesty ceiling — copy-claims scan (must return NOTHING)**
 ```bash
