@@ -4,6 +4,15 @@
 set -uo pipefail
 fail=0
 chk(){ if eval "$2"; then echo "  PASS  $1"; else echo "  FAIL  $1"; fail=1; fi; }
+png_icons_ok(){
+  local found=0
+  local f
+  while IFS= read -r -d '' f; do
+    found=1
+    file "$f" | grep -Eq "PNG image data.*RGBA" || return 1
+  done < <(find src-tauri/icons -type f -name '*.png' -print0)
+  [ "$found" -eq 1 ]
+}
 
 echo "== charter gates =="
 chk "G1: no konsensus-* path/git dependency" \
@@ -20,7 +29,7 @@ chk "CSP is set (not null)" \
   'grep -Eq "\"csp\"[[:space:]]*:[[:space:]]*\"" src-tauri/tauri.conf.json'
 
 echo "== build readiness =="
-chk "app icon present" 'test -s src-tauri/icons/icon.png'
+chk "app icons are valid RGBA PNG files" 'png_icons_ok'
 chk "npm lockfile committed" 'test -s package-lock.json'
 chk "cargo lockfile committed" 'test -s src-tauri/Cargo.lock'
 chk "signed-sidecar fetch script present + executable" 'test -x scripts/fetch-node-sidecar.sh'
