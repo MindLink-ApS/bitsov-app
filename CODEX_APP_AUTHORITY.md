@@ -91,9 +91,54 @@ Must-fix before next ship: <list>
   (mobile/paired/hosted/calls/AI) — the current expected state until G2 + relay land.
 - **NO-GO** on any A violation or an unmet gate for the thing being shipped.
 
+## G. Executable checks (run these — don't eyeball it)
+Pinned protocol: **release `v0.3.0-rc4`, source-ref `aa159189…`, repo `MindLink-ApS/BitSov-bitsov`**.
+Re-pin when the app upgrades the bundled node. Exact route contract: `bitsov-app/docs/API_READINESS.md`.
+Run from the app repo root; adjust the Website path to your checkout. **Any FAIL = that gate FAILs.**
+
+**G1 — no forked / in-process protocol logic**
+```bash
+# FAIL if any konsensus-* is a path/git dependency (must be a bundled BINARY, not a linked crate)
+! grep -REn 'konsensus[-_][a-z]+[[:space:]]*=[[:space:]]*\{?[[:space:]]*(path|git)' src-tauri/Cargo.toml Cargo.toml 2>/dev/null
+test -x src-tauri/bin/konsensus-node* || echo "FAIL: node not bundled as a binary resource"
+# pinned node integrity: this sha256 must equal the pinned release SHA256SUMS entry
+shasum -a 256 src-tauri/bin/konsensus-node* | awk '{print $1}'
+```
+**G2 — no non-loopback client before transport confidentiality exists**
+```bash
+# until a TLS/Noise remote channel ships, the control plane binds loopback ONLY
+! grep -REn 'https?://(?!127\.0\.0\.1|localhost)[^"'"'"' )]*/api/v1' src/ src-tauri/ 2>/dev/null
+```
+**G3 / G4 / honesty ceiling — copy-claims scan (must return NOTHING)**
+```bash
+grep -REin 'download now|app store|google play|replaces (slack|zoom|workspace)|surveillance-proof|unhackable|node in your pocket|always-on node|call (anyone|any phone)|\bAI (agent|participant|assistant)\b' \
+  src/ ../Website/src/pages/BitSovRelease/ 2>/dev/null
+```
+**G5 — website download gate stays closed until a real signed app binary**
+```bash
+jq -e '.public_downloads_enabled==false and .public_repositories.app=="" and (.artifacts|length)==0' \
+  ../Website/public/bitsov/website-release-metadata.json
+```
+**G6 — /auth/local hardened before the funds "your bank" framing ships**
+```bash
+grep -REn 'auth/local' src-tauri/ src/   # confirm app-binding OR an explicit local-trust disclosure
+```
+**Payment-gate not bypassed (static)** — the only send paths are `/messages/compose` (node-managed)
+or `/messages` with a real proof; FAIL if the app builds+delivers an envelope itself.
+```bash
+grep -REn 'messages/compose|/api/v1/messages\b' src/ | head
+```
+**Local-auth smoke (runtime, against the running bundled node on its configured port)**
+```bash
+JWT=$(curl -s -X POST http://127.0.0.1:$PORT/api/v1/auth/local | jq -r .token)
+test -n "$JWT" && curl -s -H "Authorization: Bearer $JWT" http://127.0.0.1:$PORT/api/v1/identity | jq -e .node_id
+```
+Report each as one line in the §E verdict: `<check> → PASS/FAIL`.
+
 ## F. Cadence & bootstrap
 - **Now:** the charter is set; no app code exists yet. First authority pass runs against **CS-1
-  (app shell + node embed)** — verify G1 (API-consumer, no crate linking) before anything else.
-- **Every milestone merge + weekly** while active. Re-read this file and the goal file each pass;
-  verify claims against the pinned protocol release, not memory.
-- Record each verdict (append to a `bitsov-app/docs/authority/` ledger once the repo exists).
+  (app shell + node embed)** — run §G's G1 checks (API-consumer, no crate linking, bundled node
+  integrity) before anything else, against `bitsov-app/docs/API_READINESS.md`.
+- **Every milestone merge + weekly** while active. Re-read this file + the goal file + the readiness
+  doc each pass; run §G; verify claims against the pinned protocol release, not memory.
+- Record each verdict (append to `bitsov-app/docs/authority/` — format §E).

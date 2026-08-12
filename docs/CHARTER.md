@@ -1,12 +1,14 @@
 # CLAUDE_GOAL_BITSOV_APP — the sovereign conversational client
 
-> Point `/goal` at this file. Objective: ship **one downloadable app** — iPhone,
-> Android, Mac, PC — where a person can **fund their node and start talking**. The
-> app is the human-friendly face of a Bitcoin-anchored sovereign node: the user
-> carries their own **node / bank / (later) AI**, connects to their own node and to
-> others, and everything collapses into a conversation organized as **rooms**.
-> Ship human connection first (chat/call/meet); pull AI in where it naturally fits,
-> later. A sovereign, federated network — a person can hold.
+> Point `/goal` at this file. **Objective (v1): ship the desktop self-host MVP now** —
+> a **Mac/PC** app where a person can **fund their node and start talking**, keys and
+> Lightning hidden behind the UX. **Roadmap (preserved, gated):** the same one app
+> extends to **Mac, PC, iPhone, Android**; the user carries their own
+> **node / bank / (later) AI**, connects to their own node and to others, and
+> everything collapses into a conversation organized as **rooms**. Ship human
+> connection first (chat, then files/scheduling); **mobile, calls, hosted, and AI stay
+> gated behind their blockers (§7)** and are never marketed as shipped before they
+> exist. A sovereign, federated network — a person can hold.
 
 **Status:** charter (2026-08-12). Protocol is PUBLIC (source-first developer debut,
 `MindLink-ApS/BitSov-bitsov`). This is the *consumer* build that turns the protocol
@@ -19,9 +21,12 @@ into a product. Grounded by a 5-agent discovery + adversarial charter audit
 - **Payment IS the connection.** Every inbound unit of work is backed by a settled,
   recipient-bound Bitcoin/Lightning payment. The app hides Lightning behind UX but
   **never** removes or bypasses the per-message gate (`PaymentGate::verify`).
-- **Zero plaintext at any layer.** E2EE end to end. This extends to **remote
-  transport** — a paired/mobile/hosted client MUST NOT move plaintext or the node
-  token across a network in the clear (see Gate G2).
+- **No plaintext outside the user's chosen trust boundary.** The protocol is E2EE,
+  zero-plaintext end to end (immutable). The app must never leak plaintext or the node
+  token beyond the boundary the user has explicitly chosen — **on-device by default**;
+  **all remote transport must be confidential** (TLS/Noise — Gate G2). A hosted tier is
+  an explicit, disclosed extension of that boundary the user opts into (§4), never the
+  default and never blurred into a sovereignty claim.
 - **The node is the identity anchor.** The app is a *face*, not the authority.
 - **Honesty ceiling.** No "replaces Slack/Zoom/Workspace", no "surveillance-proof /
   unhackable", no "node in your pocket / always-on" before the relay ships, no
@@ -93,22 +98,24 @@ E2EE-encrypts and Lightning-pays per message) → `ws` (live receive, own-node p
 
 ---
 
-## 6. Milestones
-| # | Milestone | Repo | AI-gated | Depends |
-|---|---|---|---|---|
-| M0 | App shell + local node embed/supervise (desktop); `/auth/local` | bitsov-app | no | — |
-| M1 | First-run fund flow (mnemonic, funding QR, balance) — keys hidden | bitsov-app | no | M0 |
-| M2 | Conversation MVP: rooms + threaded chat + long-form; transparent E2EE; payment-gated send behind one "sending" state | bitsov-app | no | M1 |
-| M3 | Files + calendar/scheduling inline in rooms | bitsov-app | no | M2 |
-| **G2** | **Remote control-plane transport confidentiality (TLS/Noise) + per-device delegated auth** — *prereq for anything non-loopback* | BitSov-bitsov | no | M1 |
-| M5 | Device pairing core (device_attestation L1/L2/L3, DeviceWhitelist, pair routes) | BitSov-bitsov | no | G2 |
-| M6 | Mobile paired companion (iOS+Android as paired thin client) | bitsov-app | no | M5 |
-| M4 | 1:1 VoIP for **directly-reachable** peers (kinds 400–403 → WebRTC) — *not marketed as "calling" until NAT traversal* | bitsov-app | no | M2 |
-| M7 | Ciphertext relay live (#216): SEAM-B dispatch 600–604 + SEAM-C store, push-wake | BitSov-bitsov | no | M2 |
-| M8 | Phone-native thin node (reachable via relay+push) — the honest "node in your pocket" | bitsov-app | no | M7 |
-| M9 | Multi-party meet (MLS 960–962 + relay/SFU fan-out) | bitsov-app | no | M7 |
-| M10 | Hosted convenience tier (honest disclosure; ciphertext-relay preferred) | Website/services | no | M7 |
-| M11 | Sovereign AI participant (node_id-as-agent, invoked inline only) | BitSov-bitsov | **yes** | M6 |
+## 6. Milestones (phases)
+**Gates G1–G6 (§9) are pass/fail conditions, NOT build steps.** Ordered by dependency; a
+phase does not start until its entry gate passes. M-numbers are stable IDs (not order).
+
+| Phase | # | Milestone | Repo | Depends | Entry gate |
+|---|---|---|---|---|---|
+| **1 · Desktop MVP (ship now · T-SELF)** | M0 | App shell + node embed/supervise; `/auth/local` | bitsov-app | — | **G1** |
+| 1 | M1 | First-run fund flow (mnemonic, funding QR, balance) — keys hidden | bitsov-app | M0 | — |
+| 1 | M2 | Conversation MVP: rooms + threaded chat + long-form; transparent E2EE; payment-gated send behind one "sending" state | bitsov-app | M1 | — |
+| 1 | M3 | Files + calendar/scheduling inline in rooms | bitsov-app | M2 | — |
+| **2 · Mobile prerequisites (protocol)** | M5 | Device pairing core (device_attestation L1/L2/L3, DeviceWhitelist, pair routes) | BitSov-bitsov | M1 | **G2** |
+| **3 · Mobile** | M6 | Mobile paired companion (iOS+Android as paired thin client) | bitsov-app | M5 | G2 |
+| **4 · Reachability & scale** | M7 | Ciphertext relay live (#216): SEAM-B dispatch 600–604 + SEAM-C store, push-wake | BitSov-bitsov | M2 | — |
+| 4 | M8 | Phone-native thin node (relay+push) — the honest "node in your pocket" | bitsov-app | M7 | — |
+| 4 | M9 | Multi-party meet (MLS 960–962 + relay/SFU fan-out) | bitsov-app | M7 | — |
+| **gated track** | M4 | 1:1 VoIP, directly-reachable peers only (kinds 400–403 → WebRTC) — **do NOT market as calling** | bitsov-app | M2 | **G3** |
+| gated track | M10 | Hosted convenience tier (honest disclosure; ciphertext-relay preferred) | Website/services | M7 | — |
+| gated track | M11 | Sovereign AI participant (node_id-as-agent, invoked inline only) | BitSov-bitsov | M6 | **G4** |
 
 ## 7. Blockers
 - **B1 [critical]** — Ciphertext relay #216 not live (`relay.rs` is R3 SEAM-A engine only, dead_code, default-off). Gates phone-native reachability, offline store-and-forward, push-wake. *The* gating blocker for the phone vision.
