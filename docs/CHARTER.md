@@ -1,9 +1,11 @@
 # CLAUDE_GOAL_BITSOV_APP — the sovereign conversational client
 
-> Point `/goal` at this file. **Objective (v1): ship the desktop self-host MVP now** —
-> a **Mac/PC** app where a person can **fund their node and start talking**, keys and
-> Lightning hidden behind the UX. **Roadmap (preserved, gated):** the same one app
-> extends to **Mac, PC, iPhone, Android**; the user carries their own
+> Point `/goal` at this file. **Objective (v1): ship the Linux desktop self-host MVP now** —
+> a **Linux desktop** app (today the only OS with a signed, released node binary) where a
+> person can **fund their node and start talking**, keys and Lightning hidden behind the UX.
+> **Roadmap (preserved, gated):** the same one app extends to **macOS, Windows, iPhone,
+> Android** — each unlocked as its **signed node binary + gates** land (macOS/Windows node
+> binaries are not published yet — blocker B10). The user carries their own
 > **node / bank / (later) AI**, connects to their own node and to others, and
 > everything collapses into a conversation organized as **rooms**. Ship human
 > connection first (chat, then files/scheduling); **mobile, calls, hosted, and AI stay
@@ -127,6 +129,7 @@ phase does not start until its entry gate passes. M-numbers are stable IDs (not 
 - **B7 [medium]** — Payment-UX vs charter: funding is mandatory friction; hide Lightning, never remove the gate.
 - **B8 [medium]** — Group-crypto maturity: MLS 960–962 scaffolded; verify production-ready before multi-party meet / large rooms.
 - **B9 [low]** — AI-deferral discipline: keep participants as node_ids; do NOT build an agent runtime now.
+- **B10 [high]** — Only **Linux** node binaries are published (rc4 = `bitsov-linux-x86_64/aarch64`). A Mac/Windows app can't bundle a signed released node → **CS-1 is Linux-only**. Unblock by adding macOS + Windows targets to the protocol `release-cli` matrix and publishing signed binaries; until then desktop = Linux, and the app must never ship a Mac/Windows build without a verified signed node sidecar.
 
 ## 8. Coding sessions (hand to a builder)
 **bitsov-app:** CS-1 shell+node embed · CS-2 first-run fund · CS-3 rooms+conversation UI ·

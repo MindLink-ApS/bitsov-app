@@ -1,12 +1,15 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "CS-1: run the bundled konsensus node sidecar and reach it over loopback only.",
+  "description": "CS-1: the app may run ONLY the bundled konsensus node sidecar. No general shell access; no shell API exposed to the renderer beyond this scoped sidecar.",
   "windows": ["main"],
   "permissions": [
     "core:default",
-    "shell:allow-execute",
-    "shell:allow-spawn",
-    "shell:allow-kill"
+    {
+      "identifier": "shell:allow-execute",
+      "allow": [
+        { "name": "bin/konsensus", "sidecar": true, "args": true }
+      ]
+    }
   ]
 }

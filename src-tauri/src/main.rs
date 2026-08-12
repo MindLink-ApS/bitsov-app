@@ -78,8 +78,20 @@ async fn bootstrap_node(app: tauri::AppHandle) {
                     "--tier",
                     "full",
                 ]);
-                if let Err(e) = cmd.status().await {
-                    return set_error(&state, format!("node init failed: {e}"));
+                match cmd.output().await {
+                    Ok(out) if out.status.success() => {}
+                    Ok(out) => {
+                        let stderr = String::from_utf8_lossy(&out.stderr);
+                        return set_error(
+                            &state,
+                            format!(
+                                "node init failed (exit {:?}): {}",
+                                out.status.code(),
+                                stderr.trim()
+                            ),
+                        );
+                    }
+                    Err(e) => return set_error(&state, format!("node init could not run: {e}")),
                 }
             }
             Err(e) => return set_error(&state, format!("cannot resolve node sidecar: {e}")),

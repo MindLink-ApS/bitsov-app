@@ -1,38 +1,31 @@
-# CS-1 runbook — desktop app shell
+# CS-1 runbook — desktop app shell (**Linux-only**, blocker B10)
 
 **Scope (only):** app shell → bundle/spawn the node → loopback auth (`/auth/local`) →
-identity screen → authority verdict. No funding, rooms, messaging, mobile, calls,
-hosted, or AI (see `CLAUDE_GOAL_BITSOV_APP.md` §6/§9, `CODEX_APP_AUTHORITY.md`).
+identity screen → authority verdict. No funding, rooms, messaging, mobile, calls, hosted, AI.
 
 ## Prerequisites
-- Rust stable + the Tauri v2 system deps for your OS (webkit2gtk on Linux, Xcode CLT on macOS).
-- Node 20+.
+- **Linux** (x86_64 or aarch64) — the only OS with a signed released node binary today.
+- Rust stable + Tauri v2 system deps (webkit2gtk, etc.). Node 20+. `gh` + `gpg` (for the
+  signed sidecar fetch; import `RELEASE_KEY.asc` from BitSov-bitsov to verify).
 
-## Build & run
+## Build & run (clean checkout)
 ```bash
-npm install
-# 1) drop + verify the pinned node binary into src-tauri/bin/ (see src-tauri/bin/README.md)
-# 2) generate app icons: npm run tauri icon path/to/bitsov-1024.png
-npm run tauri dev      # spawns the node, waits for /health, mints a loopback JWT, shows node_id
+npm ci                              # uses the committed package-lock.json
+./scripts/fetch-node-sidecar.sh     # fetch + VERIFY the signed node, place it as the sidecar
+scripts/authority-check.sh          # must print AUTHORITY: PASS before you build
+npm run tauri dev                   # spawns node → /health → /auth/local → identity screen
 ```
+A clean `cargo check` fails until the sidecar is fetched (the node binary is intentionally
+not committed) — run `fetch-node-sidecar.sh` first. The app icon (`src-tauri/icons/`) and
+both lockfiles (`package-lock.json`, `src-tauri/Cargo.lock`) are committed.
 
 ## What it does
-1. Rust host (`src-tauri/src/main.rs`) resolves the app data dir, runs `konsensus init`
-   on first run, then `konsensus start --config …` as a supervised **sidecar** (killed on exit).
-2. Polls `http://127.0.0.1:3141/api/v1/health` (node ApiConfig default), then
-   `POST /auth/local` → JWT, then `GET /identity` → `node_id`.
-3. SolidJS UI reflects state: *Starting your node…* → *Your node is running* + `node_id`,
-   or an error with a pointer to `bin/README.md`.
+1. Rust host runs `konsensus init` on first run, then `konsensus start --config …` as a
+   **supervised sidecar** (killed on exit; init exit status + stderr are checked).
+2. Polls `http://127.0.0.1:3141/api/v1/health`, then `POST /auth/local` → JWT, `GET /identity`.
+3. SolidJS UI reflects state; it never talks to the node directly and holds no shell/kill authority.
 
-## Expected first-build friction (this is the point of a focused PR, per Codex)
-- **Icons** missing → `tauri build` fails until `tauri icon` is run.
-- **Capability scoping** for the shell sidecar may need tightening to the exact `konsensus`
-  command in `src-tauri/capabilities/default.json` (currently broad allow-execute/spawn).
-- **Tauri v2 API** specifics (sidecar `.status()`/`.spawn()` signatures, `CommandEvent`) may
-  need minor adjustment on first `cargo build`.
-- **Node CLI flags**: `konsensus init --dir --non-interactive --tier full` then
-  `konsensus start --config` are pinned from source at v0.3.0-rc4; re-confirm on node upgrade.
-
-## Boundary (Gate G1 — do not break)
-The node is a **bundled binary**, never a linked crate. `src-tauri/Cargo.toml` has **no**
-`konsensus-*` dependency. The control plane is **loopback only** (Gate G2).
+## Boundary (do not break)
+Node = bundled binary, no `konsensus-*` crate dep (G1). Control plane loopback-only (G2).
+Shell capability is scoped to the `konsensus` sidecar only; CSP is set (not null). Node CLI +
+API paths pinned to BitSov-bitsov `v0.3.0-rc4 / aa159189`. `scripts/authority-check.sh` enforces all of this.
