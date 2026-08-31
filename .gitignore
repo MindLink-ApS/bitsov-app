@@ -6,3 +6,6 @@ src-tauri/target/
 *.log
 .env
 .env.*
+src-tauri/gen/
+src-tauri/bin/konsensus-*
+!src-tauri/bin/README.md

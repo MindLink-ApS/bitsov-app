@@ -1,0 +1,20 @@
+name: Authority Check
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  authority-check:
+    name: Authority Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run app authority gate
+        run: scripts/authority-check.sh

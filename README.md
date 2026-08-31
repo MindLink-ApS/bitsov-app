@@ -27,6 +27,20 @@ The Rust host spawns/supervises the node binary and authenticates over `127.0.0.
 - Authority checks (Codex, adversarial): `CODEX_APP_AUTHORITY.md`; verdicts logged in `docs/authority/`.
 - Protocol: https://github.com/MindLink-ApS/BitSov-bitsov
 
+## CS-1 local run
+
+```bash
+npm ci
+./scripts/fetch-node-sidecar.sh
+npm run authority
+npm run smoke:cs1
+npm run tauri dev
+```
+
+`npm run smoke:cs1` is the local Linux pass/fail smoke: it starts the signed
+node sidecar on loopback, posts to `/auth/local`, reads `/identity`, and prints
+`SMOKE: PASS node_id=<node_id>` when the identity path is working.
+
 ## Immutable constraints (inherited from the protocol charter)
 Payment IS the connection · zero plaintext at any layer (incl. remote transport) · the node
 is the identity anchor · honesty ceiling (no "replaces Slack/Zoom", no "surveillance-proof",
