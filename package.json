@@ -7,6 +7,8 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
+    "authority": "scripts/authority-check.sh",
+    "smoke:cs1": "scripts/cs1-local-smoke.sh",
     "tauri": "tauri"
   },
   "dependencies": {

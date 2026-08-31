@@ -13,6 +13,7 @@ identity screen → authority verdict. No funding, rooms, messaging, mobile, cal
 npm ci                              # uses the committed package-lock.json
 ./scripts/fetch-node-sidecar.sh     # fetch + VERIFY the signed node, place it as the sidecar
 scripts/authority-check.sh          # must print AUTHORITY: PASS before you build
+npm run smoke:cs1                   # Linux local smoke: sidecar -> /auth/local -> identity node_id
 npm run tauri dev                   # spawns node → /health → /auth/local → identity screen
 ```
 A clean `cargo check` fails until the sidecar is fetched (the node binary is intentionally
@@ -29,3 +30,18 @@ both lockfiles (`package-lock.json`, `src-tauri/Cargo.lock`) are committed.
 Node = bundled binary, no `konsensus-*` crate dep (G1). Control plane loopback-only (G2).
 Shell capability is scoped to the `konsensus` sidecar only; CSP is set (not null). Node CLI +
 API paths pinned to BitSov-bitsov `v0.3.0-rc4 / aa159189`. `scripts/authority-check.sh` enforces all of this.
+
+## Local pass/fail smoke
+
+Run on Linux after the signed sidecar is available:
+
+```bash
+npm run smoke:cs1
+```
+
+Pass condition: prints `SMOKE: PASS node_id=<node_id>`.
+
+The smoke starts the signed sidecar on loopback, waits for `/health`, calls
+`POST /api/v1/auth/local`, reads `/identity`, and asserts the renderer binds
+`node_status.node_id` into the identity screen. It deliberately does not touch
+funding, rooms, messaging, mobile, calls, hosted, AI, relay, merge, or deploy.

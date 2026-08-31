@@ -13,3 +13,8 @@ Build readiness (scripts/authority-check.sh): icon ✓ · lockfiles ✓ · sidec
 
 VERDICT: QUALIFIED-GO to merge (Linux). RUNTIME (node boot + live identity on Linux) still to be confirmed by a Linux builder running the runbook. Rust source verified to compile by Codex; the init exit-check edit is a safe swap.
 Must-fix before M1: G6 /auth/local hardening; confirm live identity on Linux; then wire scripts/authority-check.sh into CI.
+
+2026-08-31 CS-1 factory tick:
+- `scripts/authority-check.sh` is wired into GitHub Actions as required check name `Authority Check`.
+- Local Linux smoke command added: `npm run smoke:cs1`.
+- Smoke pass condition: signed sidecar boots on loopback, `POST /api/v1/auth/local` returns a JWT, `/identity` returns a `node_id`, and the renderer binds `node_status.node_id` into the identity screen.
