@@ -60,3 +60,26 @@ pointed at by `KONSENSUS_SQLITE_MIGRATIONS_DIR` in `src-tauri/src/main.rs` and t
 
 Config-only deployment workaround for the released rc4, **not a protocol fork**. **Remove when a
 node release ships or embeds its migrations** — tracked as a `BitSov-bitsov` issue.
+
+## CS-1.1 — durable two-run identity contract
+
+`scripts/cs1-local-smoke.sh` proves the node identity is **durable across a restart**, matching
+the app (`src-tauri/src/main.rs`): init once into the persistent data dir, skip re-init when
+`konsensus.toml` already exists.
+
+**Two runs, one data dir (no `rm` between them):**
+1. **Run 1** — `init --tier full` + `start` → `/health` → `/auth/local` → `/identity` → `node_id A`. Stop the node (no cleanup).
+2. **Run 2** — `start` from the **same** dir. `konsensus.toml` exists, so init is **skipped** (durable-identity restart). → `node_id B`. Stop.
+
+**Verdict:**
+- `A == B` and both non-empty →
+  ```
+  SMOKE: PASS node_id=<id>
+  SMOKE: IDENTITY_STABLE node_id=<id>
+  ```
+- otherwise → `SMOKE: FAIL - identity not durable (run1=<A> run2=<B>)` (exit 1).
+
+The temp data dir is removed **only** on EXIT (after run 2, or on FAIL) — never between the two
+runs, since the dir surviving the restart is what proves durability. Non-Linux hosts still
+`SMOKE: SKIP` (exit 2), not PASS. The CS-1.5.1 rc4 workarounds (P2P `:9736` on collision,
+`KONSENSUS_SQLITE_MIGRATIONS_DIR`) are preserved and applied before every `start`.
