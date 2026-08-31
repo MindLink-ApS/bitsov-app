@@ -55,6 +55,64 @@ fn set_error(state: &NodeState, msg: impl Into<String>) {
     *state.error.lock().unwrap() = Some(msg.into());
 }
 
+/// rc4 workaround: `konsensus init --tier full` writes `[network].listen_addr` (P2P) and
+/// `[lightning].listening_address` both on `0.0.0.0:9735`, and `konsensus start` fail-closes on
+/// the collision. Move ONLY `[network].listen_addr` to `:9736` (the node's own hint) when it
+/// collides with Lightning. Section-aware so it never touches `[api].listen_addr` (shares the key
+/// name) or Lightning. Idempotent. Config-only workaround for the released rc4 `init`, NOT a
+/// protocol fork — remove when a node release emits non-colliding defaults. See
+/// docs/CS1_RUNBOOK.md and the BitSov-bitsov issue.
+fn dodge_rc4_port_collision(config: &std::path::Path) {
+    let Ok(text) = std::fs::read_to_string(config) else {
+        return;
+    };
+    let port_in = |section: &str, key: &str| -> Option<String> {
+        let mut in_section = false;
+        for line in text.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with('[') {
+                in_section = trimmed.trim_end() == section;
+                continue;
+            }
+            if in_section {
+                if let Some(rest) = trimmed.strip_prefix(key) {
+                    let rest = rest.trim_start();
+                    if rest.starts_with('=') {
+                        let value = rest.trim_start_matches('=').trim().trim_matches('"');
+                        return value.rsplit_once(':').map(|(_, port)| port.to_string());
+                    }
+                }
+            }
+        }
+        None
+    };
+    let (Some(p2p), Some(lightning)) = (
+        port_in("[network]", "listen_addr"),
+        port_in("[lightning]", "listening_address"),
+    ) else {
+        return;
+    };
+    if p2p != lightning {
+        return;
+    }
+    let mut in_network = false;
+    let patched: Vec<String> = text
+        .lines()
+        .map(|line| {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with('[') {
+                in_network = trimmed.trim_end() == "[network]";
+                return line.to_string();
+            }
+            if in_network && trimmed.starts_with("listen_addr") && line.contains(&format!(":{p2p}")) {
+                return line.replacen(&format!(":{p2p}"), ":9736", 1);
+            }
+            line.to_string()
+        })
+        .collect();
+    let _ = std::fs::write(config, format!("{}\n", patched.join("\n")));
+}
+
 /// Ensure a node config exists (first run), then start + supervise the node,
 /// wait for /health, mint a loopback JWT via /auth/local, and read /identity.
 async fn bootstrap_node(app: tauri::AppHandle) {
@@ -66,11 +124,18 @@ async fn bootstrap_node(app: tauri::AppHandle) {
     let _ = std::fs::create_dir_all(&data_dir);
     let config = data_dir.join("konsensus.toml");
 
+    // rc4 workaround: the released node resolves SQLite migrations at runtime from
+    // KONSENSUS_SQLITE_MIGRATIONS_DIR (else the build-host CARGO_MANIFEST_DIR, absent on the
+    // target). Point it at the migrations bundled beside the node binary (fetched pinned to the
+    // node's source-ref by fetch-node-sidecar.sh, bundled via tauri.conf resources). See
+    // docs/CS1_RUNBOOK.md + the BitSov-bitsov issue; remove when a release embeds/ships migrations.
+    let migrations_dir = app.path().resource_dir().ok().map(|d| d.join("migrations"));
+
     // First run: `konsensus init` generates identity + config (tier full = fund-your-node).
     if !config.exists() {
         match app.shell().sidecar("konsensus") {
             Ok(cmd) => {
-                let cmd = cmd.args([
+                let mut cmd = cmd.args([
                     "init",
                     "--dir",
                     &data_dir.to_string_lossy(),
@@ -78,6 +143,12 @@ async fn bootstrap_node(app: tauri::AppHandle) {
                     "--tier",
                     "full",
                 ]);
+                if let Some(ref dir) = migrations_dir {
+                    cmd = cmd.env(
+                        "KONSENSUS_SQLITE_MIGRATIONS_DIR",
+                        dir.to_string_lossy().to_string(),
+                    );
+                }
                 match cmd.output().await {
                     Ok(out) if out.status.success() => {}
                     Ok(out) => {
@@ -98,9 +169,23 @@ async fn bootstrap_node(app: tauri::AppHandle) {
         }
     }
 
-    // Start + supervise the node.
+    // rc4 workaround (docs/CS1_RUNBOOK.md + BitSov-bitsov issue): `konsensus init --tier full`
+    // emits `[network].listen_addr` (P2P) and `[lightning].listening_address` both on
+    // 0.0.0.0:9735; `konsensus start` fail-closes on it. Move only P2P to :9736 before start.
+    dodge_rc4_port_collision(&config);
+
+    // Start + supervise the node (with the migrations dir env for the released rc4 node).
     let start = match app.shell().sidecar("konsensus") {
-        Ok(cmd) => cmd.args(["start", "--config", &config.to_string_lossy()]),
+        Ok(cmd) => {
+            let mut cmd = cmd.args(["start", "--config", &config.to_string_lossy()]);
+            if let Some(ref dir) = migrations_dir {
+                cmd = cmd.env(
+                    "KONSENSUS_SQLITE_MIGRATIONS_DIR",
+                    dir.to_string_lossy().to_string(),
+                );
+            }
+            cmd
+        }
         Err(e) => return set_error(&state, format!("cannot resolve node sidecar: {e}")),
     };
     let (mut rx, child) = match start.spawn() {

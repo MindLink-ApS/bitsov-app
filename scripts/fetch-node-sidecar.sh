@@ -34,3 +34,18 @@ mkdir -p src-tauri/bin
 install -m 0755 "$TMP/$ASSET" "src-tauri/bin/konsensus-$TRIPLE"
 echo "✓ sidecar ready: src-tauri/bin/konsensus-$TRIPLE"
 echo "  sha256: $(shasum -a 256 "src-tauri/bin/konsensus-$TRIPLE" | awk '{print $1}')"
+
+# rc4 workaround: the released node resolves SQLite migrations at runtime from
+# KONSENSUS_SQLITE_MIGRATIONS_DIR (else the build-host CARGO_MANIFEST_DIR, absent on the target),
+# but the rc4 release ships only the binary. Fetch the migrations from the SAME source-ref as the
+# node binary ($TAG) so schema and binary match; they are bundled beside the node (tauri.conf
+# resources) and pointed at by KONSENSUS_SQLITE_MIGRATIONS_DIR in main.rs / the smoke. Remove when
+# a node release embeds/ships migrations. See docs/CS1_RUNBOOK.md + the BitSov-bitsov issue.
+echo "→ fetching node SQLite migrations pinned to $TAG"
+mkdir -p src-tauri/migrations
+gh api "repos/$REPO/contents/crates/konsensus-storage/migrations?ref=$TAG" \
+  --jq '.[] | select(.name | endswith(".sql")) | "\(.name)\t\(.download_url)"' \
+  | while IFS=$'\t' read -r name url; do
+      curl -fsSL "$url" -o "src-tauri/migrations/$name"
+    done
+echo "✓ migrations ready: $(ls src-tauri/migrations/*.sql 2>/dev/null | wc -l | tr -d ' ') file(s) in src-tauri/migrations/ (pinned $TAG)"

@@ -45,3 +45,18 @@ The smoke starts the signed sidecar on loopback, waits for `/health`, calls
 `POST /api/v1/auth/local`, reads `/identity`, and asserts the renderer binds
 `node_status.node_id` into the identity screen. It deliberately does not touch
 funding, rooms, messaging, mobile, calls, hosted, AI, relay, merge, or deploy.
+
+## rc4 boot workaround — SQLite migrations not shipped (temporary)
+
+The released `v0.3.0-rc4` node resolves its SQLite migrations at runtime from
+`KONSENSUS_SQLITE_MIGRATIONS_DIR`, falling back to the **build host's** `CARGO_MANIFEST_DIR/migrations`
+(which does not exist on any target machine) — and the release ships **only the binary, not the
+migrations**. So `konsensus start` fail-closes with `migration error: ... No such file or directory`.
+
+`scripts/fetch-node-sidecar.sh` therefore also fetches the 19 migration SQL files from the **same
+source-ref as the node binary** (`v0.3.0-rc4` / `aa159189`, so schema and binary match) into
+`src-tauri/migrations/`; they are bundled beside the node (`tauri.conf.json` `bundle.resources`) and
+pointed at by `KONSENSUS_SQLITE_MIGRATIONS_DIR` in `src-tauri/src/main.rs` and the CS-1 smoke.
+
+Config-only deployment workaround for the released rc4, **not a protocol fork**. **Remove when a
+node release ships or embeds its migrations** — tracked as a `BitSov-bitsov` issue.
