@@ -89,6 +89,64 @@ registers_cs2_commands() {
   done
 }
 
+# The body of one top-level `fn` / `async fn` in the host, up to its column-0 brace.
+host_fn() {
+  awk -v name="$1" '
+    index($0, "fn " name "(") == 1       { inside = 1 }
+    index($0, "async fn " name "(") == 1 { inside = 1 }
+    inside                               { print }
+    inside && /^}/                       { exit }
+  ' "$HOST"
+}
+
+# CS-2.1: adopt the 3141 listener only when GET /identity matches RestoreResponse.node_id.
+# RestoreOutcome.restarted stays false unless that listener restarted onto the restored id.
+# POST restore writes files; a still-running node keeps the old id until that process is
+# replaced. Otherwise actually restart the listener that holds 3141. RestoreOutcome.restarted
+# is true only after the process answering 3141 restarted onto the restored identity.
+adopt_only_matching_identity() {
+  host_fn adopt_matching_identity | grep -q 'fetch_node_id' &&
+    host_fn adopt_matching_identity | grep -q 'expected_node_id' &&
+    host_fn adopt_matching_identity | grep -Fq 'live != expected_node_id' &&
+    host_fn restart_node | grep -q 'adopt_matching_identity' &&
+    host_fn restart_node | grep -q 'stop_loopback_listener' &&
+    host_fn restart_node | grep -q 'expected_node_id' &&
+    host_fn identity_restore | grep -q 'restart_node(&app, &restored.node_id)' &&
+    host_fn identity_restore | grep -Fq 'restarted,' &&
+    ! host_fn identity_restore | grep -q 'restarted: restored.restart_required'
+}
+# A random healthy loopback process is never adopted.
+never_adopt_random_healthy() {
+  ! grep -q 'adopt_healthy_loopback' "$HOST" &&
+    grep -q 'A random healthy loopback process is never adopted' "$HOST" &&
+    host_fn adopt_matching_identity | grep -q 'live != expected_node_id'
+}
+http_timeouts_on_health_auth() {
+  grep -q 'connect_timeout' "$HOST" &&
+    grep -q '\.timeout(' "$HOST"
+}
+wait_for_health_fails_on_terminated() {
+  host_fn wait_for_health | grep -q 'sidecar_terminated' &&
+    host_fn spawn_node | grep -q 'CommandEvent::Terminated' &&
+    host_fn spawn_node | grep -q 'sidecar_terminated'
+}
+# IdentityGate restore retry/error is NOT gated on ready.
+restore_error_not_gated_on_ready() {
+  grep -q 'showIdentityGate' "$APP" &&
+    grep -q 'restoreError' "$APP" &&
+    grep -q 'setRestoreError' "$APP" &&
+    grep -q 'status().ready || restoring() || restoreError()' "$APP" &&
+    grep -q 'when={trustAck()}' "$APP" &&
+    grep -q 'Keep IdentityGate visible while ready is false' "$APP"
+}
+# A restart re-uses the identity that was just restored: init stays on the first-run path.
+restore_path_never_inits() {
+  ! host_fn restart_node | grep -q 'init_node' &&
+    ! host_fn adopt_matching_identity | grep -q 'init_node' &&
+    ! host_fn identity_restore | grep -q 'init_node' &&
+    ! host_fn stop_loopback_listener | grep -q 'init_node'
+}
+
 echo "== host: fund commands over the loopback control plane =="
 chk "host registers the CS-2 commands (and keeps node_status)" \
   registers_cs2_commands
@@ -108,6 +166,24 @@ chk "POST /identity/restore" \
   has '/identity/restore' "$HOST"
 chk "restore restarts the supervised node, never re-inits" \
   has 'restart_node' "$HOST"
+chk "adopt only if GET /identity matches RestoreResponse.node_id" \
+  adopt_only_matching_identity
+chk "do not adopt a random healthy loopback process" \
+  never_adopt_random_healthy
+chk "wrong-identity listener on 3141 is actually restarted" \
+  has 'stop_loopback_listener' "$HOST"
+chk "HTTP timeouts on health/auth so restore cannot hang" \
+  http_timeouts_on_health_auth
+chk "wait_for_health fails when the sidecar Terminated" \
+  wait_for_health_fails_on_terminated
+chk "restore retry/error path is not gated on ready" \
+  restore_error_not_gated_on_ready
+chk "restart kills the supervised child before replacing 3141" \
+  has 'state\.child\.lock\(\)\.unwrap\(\)\.take\(\)' "$HOST"
+chk "restart keeps the node's migrations env (KONSENSUS_SQLITE_MIGRATIONS_DIR)" \
+  has 'KONSENSUS_SQLITE_MIGRATIONS_DIR' "$HOST"
+chk "restore never re-runs init_node" \
+  restore_path_never_inits
 
 echo "== keys stay in the host =="
 chk "JWT is held in host state and attached there" \
