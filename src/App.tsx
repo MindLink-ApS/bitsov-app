@@ -35,7 +35,8 @@ export default function App() {
   const [trustAck, setTrustAck] = createSignal(false);
   const [restoring, setRestoring] = createSignal(false);
   // Lifted so IdentityGate can stay mounted when ready is false (restart_node
-  // clears ready). Restore retry/error must not be gated on ready.
+  // clears ready). Restore retry/error must not be gated on ready: IdentityGate
+  // must still show restore errors if ready is false.
   const [restoreError, setRestoreError] = createSignal<string | null>(null);
   const showIdentityGate = () => status().ready || restoring() || restoreError() !== null;
 
