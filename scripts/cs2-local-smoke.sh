@@ -100,6 +100,7 @@ host_fn() {
 }
 
 # CS-2.1: adopt the 3141 listener only when GET /identity matches RestoreResponse.node_id.
+# RestoreOutcome.restarted stays false unless that listener restarted onto the restored id.
 # POST restore writes files; a still-running node keeps the old id until that process is
 # replaced. Otherwise actually restart the listener that holds 3141. RestoreOutcome.restarted
 # is true only after the process answering 3141 restarted onto the restored identity.
