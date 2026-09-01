@@ -29,7 +29,7 @@ both lockfiles (`package-lock.json`, `src-tauri/Cargo.lock`) are committed.
 ## Boundary (do not break)
 Node = bundled binary, no `konsensus-*` crate dep (G1). Control plane loopback-only (G2).
 Shell capability is scoped to the `konsensus` sidecar only; CSP is set (not null). Node CLI +
-API paths pinned to BitSov-bitsov `v0.3.0-rc4 / aa159189`. `scripts/authority-check.sh` enforces all of this.
+API paths pinned to BitSov-bitsov `v0.3.0-rc5 / 1ae4d8c9`. `scripts/authority-check.sh` enforces all of this.
 
 ## Local pass/fail smoke
 
@@ -46,19 +46,19 @@ The smoke starts the signed sidecar on loopback, waits for `/health`, calls
 `node_status.node_id` into the identity screen. It deliberately does not touch
 funding, rooms, messaging, mobile, calls, hosted, AI, relay, merge, or deploy.
 
-## rc4 boot workaround — SQLite migrations not shipped (temporary)
+## rc5 boot workaround — SQLite migrations not shipped (temporary)
 
-The released `v0.3.0-rc4` node resolves its SQLite migrations at runtime from
+The released `v0.3.0-rc5` node resolves its SQLite migrations at runtime from
 `KONSENSUS_SQLITE_MIGRATIONS_DIR`, falling back to the **build host's** `CARGO_MANIFEST_DIR/migrations`
 (which does not exist on any target machine) — and the release ships **only the binary, not the
 migrations**. So `konsensus start` fail-closes with `migration error: ... No such file or directory`.
 
 `scripts/fetch-node-sidecar.sh` therefore also fetches the 19 migration SQL files from the **same
-source-ref as the node binary** (`v0.3.0-rc4` / `aa159189`, so schema and binary match) into
+source-ref as the node binary** (`v0.3.0-rc5` / `1ae4d8c9`, so schema and binary match) into
 `src-tauri/migrations/`; they are bundled beside the node (`tauri.conf.json` `bundle.resources`) and
 pointed at by `KONSENSUS_SQLITE_MIGRATIONS_DIR` in `src-tauri/src/main.rs` and the CS-1 smoke.
 
-Config-only deployment workaround for the released rc4, **not a protocol fork**. **Remove when a
+Config-only deployment workaround for the released rc5, **not a protocol fork**. **Remove when a
 node release ships or embeds its migrations** — tracked as a `BitSov-bitsov` issue.
 
 ## CS-1.1 — durable two-run identity contract

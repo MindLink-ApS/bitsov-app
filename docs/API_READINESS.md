@@ -1,12 +1,12 @@
 # API_READINESS — the node contract CS-1..CS-6 build against
 
-**Pinned protocol:** release **`v0.3.0-rc4`**, source-ref **`aa159189ae280a17c5eee136ee6018128206e046`**,
+**Pinned protocol:** release **`v0.3.0-rc5`**, source-ref **`1ae4d8c9`**,
 repo `MindLink-ApS/BitSov-bitsov`. All paths below were verified **present in this source**
-(route grep at `aa15918`). Re-verify on every node upgrade and re-pin this header.
+(route grep at `1ae4d8c9`). Re-verify on every node upgrade and re-pin this header.
 Base URL: `http://127.0.0.1:$PORT/api/v1` (loopback only — Gate G2). Auth: `Authorization: Bearer <jwt>`
 on REST; `bitsov.v1` + `bitsov.jwt.<token>` subprotocols on `/ws`.
 
-## MVP contract — "fund your node and start talking" (all VERIFIED PRESENT at aa15918)
+## MVP contract — "fund your node and start talking" (all VERIFIED PRESENT at 1ae4d8c9)
 | MVP step | Method | Path | Purpose | Static |
 |---|---|---|---|---|
 | Boot/auth | POST | `/auth/local` | mint JWT for the loopback (desktop) app | ✅ |
@@ -40,7 +40,7 @@ on REST; `bitsov.v1` + `bitsov.jwt.<token>` subprotocols on `/ws`.
 ## Verification
 **Static (no running node) — re-pin check:**
 ```bash
-git -C <BitSov-bitsov checkout> checkout aa159189
+git -C <BitSov-bitsov checkout> checkout 1ae4d8c9
 grep -rhoE '\.route\("(/api/v1/[^"]+)"' crates/konsensus-api/src | grep -oE '/api/v1/[^"]+' | sort -u
 # every path in the MVP table above must appear.
 ```
