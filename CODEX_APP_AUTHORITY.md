@@ -1,5 +1,7 @@
 # CODEX_APP_AUTHORITY — periodic authority check for the BitSov consumer app
 
+**Live lane ledger:** `BOARD.md` (queue-head, blocked, human, charter locks). Dated tickets: `LEDGER.md`. Do not duplicate the board here. This file remains the authority-check charter; do not rewrite gates from a board refresh.
+
 **Role.** Codex acts as the standing **authority checker** for `bitsov-app` (charter:
 `~/Desktop/CLAUDE_GOAL_BITSOV_APP.md`). Run this pass **once in a while** — before any
 milestone merge, before any mobile/paired/hosted/AI/calls copy or code ships, and on a
