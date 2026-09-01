@@ -92,7 +92,7 @@ Must-fix before next ship: <list>
 - **NO-GO** on any A violation or an unmet gate for the thing being shipped.
 
 ## G. Executable checks (run these — don't eyeball it)
-Pinned protocol: **release `v0.3.0-rc4`, source-ref `aa159189…`, repo `MindLink-ApS/BitSov-bitsov`**.
+Pinned protocol: **release `v0.3.0-rc5`, source-ref `1ae4d8c9…`, repo `MindLink-ApS/BitSov-bitsov`**.
 Re-pin when the app upgrades the bundled node. Exact route contract: `bitsov-app/docs/API_READINESS.md`.
 Run from the app repo root; adjust the Website path to your checkout. **Any FAIL = that gate FAILs.**
 
