@@ -14,8 +14,12 @@ sidecar, mints a loopback JWT via `/auth/local`, and reads `/identity`.
    instead, the recovery-phrase form calls `POST /api/v1/identity/restore {mnemonic}`; the node
    answers `restart_required: true`, and the host restarts the sidecar it already supervises —
    **same data dir, no re-init** (a re-init would mint a fresh identity over the restored one).
-   CS-2.1: if a node is already healthy on `127.0.0.1:3141` the host **adopts** it (re-auth,
-   re-read `/identity`, `ready`) instead of waiting out a health drop that never comes.
+   CS-2.1: adopt the listener on `127.0.0.1:3141` only when `GET /identity` matches the
+   restored `node_id`. POST restore writes files; a still-running node keeps the old id
+   until that process is replaced — otherwise the host restarts the listener that holds
+   3141. `RestoreOutcome.restarted` is true only after that restart. HTTP health/auth
+   calls time out, and `wait_for_health` fails if the sidecar `Terminated` instead of
+   burning 60s. The restore retry/error path is not gated on `ready`.
 2. **Local-trust disclosure (Gate G6).** The funding UI is unreachable until the user reads and
    accepts it. See "Why the disclosure is not optional" below.
 3. **Start funding.** `POST /api/v1/onboarding/start {tier: "full", funding_amount_sats: <u32>}`.

@@ -34,6 +34,10 @@ export default function App() {
   // Gate G6: the funds UI stays behind an explicit local-trust disclosure.
   const [trustAck, setTrustAck] = createSignal(false);
   const [restoring, setRestoring] = createSignal(false);
+  // Lifted so IdentityGate can stay mounted when ready is false (restart_node
+  // clears ready). Restore retry/error must not be gated on ready.
+  const [restoreError, setRestoreError] = createSignal<string | null>(null);
+  const showIdentityGate = () => status().ready || restoring() || restoreError() !== null;
 
   let timer: number | undefined;
   const poll = async () => {
@@ -59,14 +63,14 @@ export default function App() {
       </div>
 
       <Show
-        when={status().ready}
+        when={showIdentityGate()}
         fallback={
           <Show
             when={status().error}
             fallback={
               <div class="state">
                 <div class="spinner" />
-                {restoring() ? 'Restarting with your restored identity…' : 'Starting your node…'}
+                Starting your node…
               </div>
             }
           >
@@ -82,12 +86,14 @@ export default function App() {
         }
       >
         <Show
-          when={trustAck()}
+          when={trustAck() && status().ready}
           fallback={
             <IdentityGate
               nodeId={() => status().node_id}
               onContinue={() => setTrustAck(true)}
               onRestoring={setRestoring}
+              restoreError={restoreError}
+              setRestoreError={setRestoreError}
             />
           }
         >
@@ -107,6 +113,8 @@ function IdentityGate(props: {
   nodeId: () => string | null;
   onContinue: () => void;
   onRestoring: (value: boolean) => void;
+  restoreError: () => string | null;
+  setRestoreError: (value: string | null) => void;
 }) {
   const [showRestore, setShowRestore] = createSignal(false);
   const [phrase, setPhrase] = createSignal('');
@@ -126,21 +134,33 @@ function IdentityGate(props: {
     }
     setBusy(true);
     setError(null);
+    // restoring() first so showIdentityGate stays true while ready is false.
     props.onRestoring(true);
+    props.setRestoreError(null);
     try {
       const outcome = await invoke<RestoreOutcome>('identity_restore', { mnemonic: value });
       setRestored(outcome.node_id);
       setShowRestore(false);
+      props.setRestoreError(null);
     } catch (e) {
-      setError(String(e));
+      const message = String(e);
+      setError(message);
+      // Keep IdentityGate visible while ready is false so the user can retry.
+      props.setRestoreError(message);
     } finally {
       setBusy(false);
       props.onRestoring(false);
     }
   };
 
+  const displayError = () => error() ?? props.restoreError();
+
   return (
     <div class="state ready">
+      <Show when={busy()}>
+        <div class="spinner" />
+        <div>Restarting with your restored identity…</div>
+      </Show>
       <div class="dot" />
       <div>Your node is running.</div>
       <div class="node-id" title={props.nodeId() ?? ''}>
@@ -213,8 +233,8 @@ function IdentityGate(props: {
         </form>
       </Show>
 
-      <Show when={error()}>
-        <p class="err-note">{error()}</p>
+      <Show when={displayError()}>
+        <p class="err-note">{displayError()}</p>
       </Show>
     </div>
   );

@@ -18,6 +18,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -48,7 +49,6 @@ struct NodePaths {
     migrations: Option<PathBuf>,
 }
 
-#[derive(Default)]
 struct NodeState {
     ready: Mutex<bool>,
     node_id: Mutex<Option<String>>,
@@ -60,7 +60,30 @@ struct NodeState {
     paths: Mutex<Option<NodePaths>>,
     /// Last throttled re-mint attempt, for `REMINT_COOLDOWN`.
     last_remint: Mutex<Option<Instant>>,
+    /// Set when the supervised sidecar emits `CommandEvent::Terminated`.
+    sidecar_terminated: AtomicBool,
     http: reqwest::Client,
+}
+
+impl Default for NodeState {
+    fn default() -> Self {
+        Self {
+            ready: Mutex::new(false),
+            node_id: Mutex::new(None),
+            error: Mutex::new(None),
+            child: Mutex::new(None),
+            token: Mutex::new(None),
+            paths: Mutex::new(None),
+            last_remint: Mutex::new(None),
+            sidecar_terminated: AtomicBool::new(false),
+            // Bounded so a hung loopback /health or /auth/local cannot pin restoring().
+            http: reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(2))
+                .timeout(Duration::from_secs(5))
+                .build()
+                .expect("reqwest client"),
+        }
+    }
 }
 
 #[derive(Serialize, Clone)]
@@ -243,14 +266,22 @@ fn spawn_node(app: &AppHandle, paths: &NodePaths) -> Result<(), String> {
             dir.to_string_lossy().to_string(),
         );
     }
+    let state = app.state::<NodeState>();
+    state.sidecar_terminated.store(false, Ordering::SeqCst);
     let (mut rx, child) = cmd.spawn().map_err(|e| format!("node start failed: {e}"))?;
-    *app.state::<NodeState>().child.lock().unwrap() = Some(child);
+    *state.child.lock().unwrap() = Some(child);
 
     // Drain node stdout/stderr to the app log (never render node plaintext in the UI).
+    // Terminated is the wait_for_health fail-fast signal: do not burn 60s on a dead child.
+    let handle = app.clone();
     tauri::async_runtime::spawn(async move {
         while let Some(event) = rx.recv().await {
             if let CommandEvent::Terminated(payload) = event {
                 eprintln!("[node] terminated: {:?}", payload);
+                handle
+                    .state::<NodeState>()
+                    .sidecar_terminated
+                    .store(true, Ordering::SeqCst);
                 break;
             }
         }
@@ -273,49 +304,82 @@ async fn wait_for_health(state: &NodeState) -> Result<(), String> {
         if health_ok(state).await {
             return Ok(());
         }
+        if state.sidecar_terminated.load(Ordering::SeqCst) {
+            return Err("node sidecar terminated before becoming healthy".into());
+        }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
     Err("node did not become healthy within 60s".into())
 }
 
-/// Take over a node that is ALREADY serving the loopback control plane: mint a
-/// fresh JWT against it and re-read the identity it runs under, then report ready.
-///
-/// The app does not require the healthy listener to be the child it spawned. A node
-/// the user runs themselves on 127.0.0.1:3141 over the same data dir is the same
-/// node — it has already picked up the restored identity — so adopting it is the
-/// honest answer, and the only one that does not strand the UI behind `ready`.
-/// Adoption starts no process and re-inits nothing; it only re-authenticates.
-async fn adopt_healthy_loopback(state: &NodeState) -> Result<(), String> {
-    mint_token(state).await?;
-    let node_id = fetch_node_id(state).await?;
-    *state.node_id.lock().unwrap() = Some(node_id);
-    *state.error.lock().unwrap() = None;
-    *state.ready.lock().unwrap() = true;
-    Ok(())
+/// PIDs listening on the loopback control plane. POST /identity/restore only writes
+/// files; whoever still answers 3141 keeps the old id until that process is replaced.
+fn loopback_listener_pids() -> Vec<u32> {
+    let mut pids = Vec::new();
+    if let Ok(out) = std::process::Command::new("lsof")
+        .args(["-nP", "-iTCP:3141", "-sTCP:LISTEN", "-t"])
+        .output()
+    {
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            if let Ok(pid) = line.trim().parse::<u32>() {
+                pids.push(pid);
+            }
+        }
+    }
+    pids.sort_unstable();
+    pids.dedup();
+    pids
 }
 
-/// Restart the node in place: same data dir, same config, **no re-init** (a re-init
-/// would mint a fresh identity over the one just restored), then re-authenticate and
-/// re-read the identity the node now runs under.
+/// Stop the process that holds 127.0.0.1:3141 so a restart can bind the restored identity.
+fn stop_loopback_listener() {
+    let our_pid = std::process::id();
+    for pid in loopback_listener_pids() {
+        if pid == our_pid {
+            continue;
+        }
+        let _ = std::process::Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .status();
+    }
+}
+
+/// Re-auth and mark ready only when GET /identity equals `expected_node_id`.
+/// A random healthy loopback process is never adopted.
+async fn adopt_matching_identity(
+    state: &NodeState,
+    expected_node_id: &str,
+) -> Result<bool, String> {
+    if !health_ok(state).await {
+        return Ok(false);
+    }
+    mint_token(state).await?;
+    let live = fetch_node_id(state).await?;
+    if live != expected_node_id {
+        *state.token.lock().unwrap() = None;
+        return Ok(false);
+    }
+    *state.node_id.lock().unwrap() = Some(live);
+    *state.error.lock().unwrap() = None;
+    *state.ready.lock().unwrap() = true;
+    Ok(true)
+}
+
+/// Restart whoever answers 3141 onto `expected_node_id` (the id POST /identity/restore
+/// just wrote). Adopt that listener only when GET /identity already matches; a still-
+/// running node keeps the old id until it is actually replaced.
 ///
-/// `ready` must end up true whenever /health is ok, whichever process is answering:
-/// the restore screen is gated on it, so every path here either adopts a healthy
-/// loopback node or returns why it could not.
-async fn restart_node(app: &AppHandle) -> Result<(), String> {
+/// Returns whether the process answering 3141 restarted onto the restored identity.
+/// `RestoreOutcome.restarted` must stay false unless that happened.
+async fn restart_node(app: &AppHandle, expected_node_id: &str) -> Result<bool, String> {
     let state = app.state::<NodeState>();
     *state.ready.lock().unwrap() = false;
     *state.node_id.lock().unwrap() = None;
     *state.token.lock().unwrap() = None;
 
-    // Only ever kill the child we supervise; a node we did not start is not ours to stop.
     let previous = state.child.lock().unwrap().take();
     if let Some(child) = previous {
         let _ = child.kill();
-        // Give OUR process a moment to release the loopback port before the new one
-        // binds. Bounded to a couple of seconds on purpose: if health is still up
-        // after that, the listener is not the process we just killed, and waiting out
-        // a drop that will never come is exactly what hung the restore.
         for _ in 0..4 {
             if !health_ok(&state).await {
                 break;
@@ -324,11 +388,21 @@ async fn restart_node(app: &AppHandle) -> Result<(), String> {
         }
     }
 
-    // Health up here means a node is already serving this data dir — either one we
-    // never supervised, or one that outlived the child we killed. Adopt it rather
-    // than racing a second node onto the same port.
     if health_ok(&state).await {
-        return adopt_healthy_loopback(&state).await;
+        if adopt_matching_identity(&state, expected_node_id).await? {
+            return Ok(false);
+        }
+        // Wrong identity: actually restart the listener that holds 3141.
+        stop_loopback_listener();
+        for _ in 0..20 {
+            if !health_ok(&state).await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        if health_ok(&state).await {
+            return Err("could not free 127.0.0.1:3141 after identity restore".into());
+        }
     }
 
     let paths = state
@@ -337,18 +411,19 @@ async fn restart_node(app: &AppHandle) -> Result<(), String> {
         .unwrap()
         .clone()
         .ok_or_else(|| "node paths are unknown".to_string())?;
-    // A spawn failure is only terminal if nothing is serving the loopback API: a lost
-    // bind race, or a sidecar this host cannot start (the released node fail-closes
-    // when its esplora backend is unreachable), still leaves an already-healthy node
-    // perfectly usable.
     if let Err(e) = spawn_node(app, &paths) {
-        if health_ok(&state).await {
-            return adopt_healthy_loopback(&state).await;
+        if adopt_matching_identity(&state, expected_node_id).await? {
+            return Ok(false);
         }
         return Err(e);
     }
     wait_for_health(&state).await?;
-    adopt_healthy_loopback(&state).await
+    if !adopt_matching_identity(&state, expected_node_id).await? {
+        return Err(
+            "node came back as a different identity than the one just restored".into(),
+        );
+    }
+    Ok(true)
 }
 
 /// Ensure a node config exists (first run), then start + supervise the node,
@@ -623,24 +698,47 @@ async fn identity_restore(
     let restored: RestoreResponse = decode("/identity/restore", status, &body)?;
 
     // The node writes the phrase to its data dir and reports restart_required; the
-    // restored identity only takes effect on the next start. Restart the sidecar we
-    // already supervise — same data dir, no re-init.
+    // restored identity only takes effect on the next start. Restart whoever answers
+    // 3141 onto that identity — same data dir, no re-init.
+    let mut restarted = false;
     if restored.restart_required {
-        if let Err(e) = restart_node(&app).await {
+        match restart_node(&app, &restored.node_id).await {
+            Ok(did_restart) => restarted = did_restart,
+            Err(e) => {
+                let message = format!(
+                    "the recovery phrase was saved, but the node did not come back: {e}. \
+                     Quit and reopen BitSov to finish."
+                );
+                // Also record it on the node state so the boot screen can show it if
+                // IdentityGate is not mounted; the renderer also keeps a restoreError.
+                set_error(state.inner(), message.clone());
+                return Err(message);
+            }
+        }
+    }
+
+    // Never report success (or restarted) against a random healthy loopback process.
+    let live = match fetch_node_id(state.inner()).await {
+        Ok(id) => id,
+        Err(e) => {
             let message = format!(
-                "the recovery phrase was saved, but the node did not come back: {e}. \
-                 Quit and reopen BitSov to finish."
+                "the recovery phrase was saved, but the restored identity could not be confirmed: {e}.                  Quit and reopen BitSov to finish."
             );
-            // Also record it on the node state: with the node down the renderer falls
-            // back to the boot screen, where this command's own error is never shown.
             set_error(state.inner(), message.clone());
             return Err(message);
         }
+    };
+    if live != restored.node_id {
+        let message = "the recovery phrase was saved, but 127.0.0.1:3141 still serves a different identity.              Quit and reopen BitSov to finish."
+            .to_string();
+        set_error(state.inner(), message.clone());
+        return Err(message);
     }
+
     Ok(RestoreOutcome {
         node_id: restored.node_id,
         restart_required: restored.restart_required,
-        restarted: restored.restart_required,
+        restarted,
     })
 }
 

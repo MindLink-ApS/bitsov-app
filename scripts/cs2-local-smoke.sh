@@ -99,22 +99,51 @@ host_fn() {
   ' "$HOST"
 }
 
-# CS-2.1: the restore UI is gated on `ready`, so a restart must never be able to stick
-# on "Restarting" while the loopback node is healthy. Every exit from restart_node
-# either adopts the healthy node (kill path, no-child path, spawn-failure path) or
-# reports why it could not, and adopting means re-auth + identity + ready.
-restart_adopts_when_healthy() {
-  host_fn restart_node | grep -q 'return adopt_healthy_loopback' &&
-    [ "$(host_fn restart_node | grep -c 'adopt_healthy_loopback')" -ge 3 ] &&
-    host_fn adopt_healthy_loopback | grep -q 'mint_token' &&
-    host_fn adopt_healthy_loopback | grep -q 'fetch_node_id' &&
-    host_fn adopt_healthy_loopback | grep -Fq 'ready.lock().unwrap() = true'
+# CS-2.1: adopt the 3141 listener only when GET /identity matches RestoreResponse.node_id.
+# POST restore writes files; a still-running node keeps the old id until that process is
+# replaced. Otherwise actually restart the listener that holds 3141. RestoreOutcome.restarted
+# is true only after the process answering 3141 restarted onto the restored identity.
+adopt_only_matching_identity() {
+  host_fn adopt_matching_identity | grep -q 'fetch_node_id' &&
+    host_fn adopt_matching_identity | grep -q 'expected_node_id' &&
+    host_fn adopt_matching_identity | grep -Fq 'live != expected_node_id' &&
+    host_fn restart_node | grep -q 'adopt_matching_identity' &&
+    host_fn restart_node | grep -q 'stop_loopback_listener' &&
+    host_fn restart_node | grep -q 'expected_node_id' &&
+    host_fn identity_restore | grep -q 'restart_node(&app, &restored.node_id)' &&
+    host_fn identity_restore | grep -Fq 'restarted,' &&
+    ! host_fn identity_restore | grep -q 'restarted: restored.restart_required'
+}
+# A random healthy loopback process is never adopted.
+never_adopt_random_healthy() {
+  ! grep -q 'adopt_healthy_loopback' "$HOST" &&
+    grep -q 'A random healthy loopback process is never adopted' "$HOST" &&
+    host_fn adopt_matching_identity | grep -q 'live != expected_node_id'
+}
+http_timeouts_on_health_auth() {
+  grep -q 'connect_timeout' "$HOST" &&
+    grep -q '\.timeout(' "$HOST"
+}
+wait_for_health_fails_on_terminated() {
+  host_fn wait_for_health | grep -q 'sidecar_terminated' &&
+    host_fn spawn_node | grep -q 'CommandEvent::Terminated' &&
+    host_fn spawn_node | grep -q 'sidecar_terminated'
+}
+# IdentityGate restore retry/error is NOT gated on ready.
+restore_error_not_gated_on_ready() {
+  grep -q 'showIdentityGate' "$APP" &&
+    grep -q 'restoreError' "$APP" &&
+    grep -q 'setRestoreError' "$APP" &&
+    grep -q 'status().ready || restoring() || restoreError()' "$APP" &&
+    grep -q 'trustAck() && status().ready' "$APP" &&
+    grep -q 'Keep IdentityGate visible while ready is false' "$APP"
 }
 # A restart re-uses the identity that was just restored: init stays on the first-run path.
 restore_path_never_inits() {
   ! host_fn restart_node | grep -q 'init_node' &&
-    ! host_fn adopt_healthy_loopback | grep -q 'init_node' &&
-    ! host_fn identity_restore | grep -q 'init_node'
+    ! host_fn adopt_matching_identity | grep -q 'init_node' &&
+    ! host_fn identity_restore | grep -q 'init_node' &&
+    ! host_fn stop_loopback_listener | grep -q 'init_node'
 }
 
 echo "== host: fund commands over the loopback control plane =="
@@ -136,11 +165,19 @@ chk "POST /identity/restore" \
   has '/identity/restore' "$HOST"
 chk "restore restarts the supervised node, never re-inits" \
   has 'restart_node' "$HOST"
-chk "restart adopts an already-healthy loopback node instead of hanging" \
-  has 'adopt_healthy_loopback' "$HOST"
-chk "restart re-authenticates against the adopted node and reports ready" \
-  restart_adopts_when_healthy
-chk "restart only kills the child it supervises" \
+chk "adopt only if GET /identity matches RestoreResponse.node_id" \
+  adopt_only_matching_identity
+chk "do not adopt a random healthy loopback process" \
+  never_adopt_random_healthy
+chk "wrong-identity listener on 3141 is actually restarted" \
+  has 'stop_loopback_listener' "$HOST"
+chk "HTTP timeouts on health/auth so restore cannot hang" \
+  http_timeouts_on_health_auth
+chk "wait_for_health fails when the sidecar Terminated" \
+  wait_for_health_fails_on_terminated
+chk "restore retry/error path is not gated on ready" \
+  restore_error_not_gated_on_ready
+chk "restart kills the supervised child before replacing 3141" \
   has 'state\.child\.lock\(\)\.unwrap\(\)\.take\(\)' "$HOST"
 chk "restart keeps the node's migrations env (KONSENSUS_SQLITE_MIGRATIONS_DIR)" \
   has 'KONSENSUS_SQLITE_MIGRATIONS_DIR' "$HOST"
@@ -175,7 +212,7 @@ chk "disclosure element is present and marked" \
 chk "disclosure names the loopback full-access risk" \
   has '127\.0\.0\.1' "$APP"
 chk "funding UI renders only after the disclosure is accepted" \
-  has 'when=\{trustAck\(\)\}' "$APP"
+  has 'when=\{trustAck\(\) && status\(\)\.ready\}' "$APP"
 
 echo "== recovery phrase is write-only =="
 chk "phrase input is masked" \
