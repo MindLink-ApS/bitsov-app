@@ -87,7 +87,7 @@ export default function App() {
         }
       >
         <Show
-          when={trustAck() && status().ready}
+          when={trustAck()}
           fallback={
             <IdentityGate
               nodeId={() => status().node_id}
@@ -98,7 +98,9 @@ export default function App() {
             />
           }
         >
-          <Fund ready={() => status().ready} />
+          <Show when={status().ready}>
+            <Fund ready={() => status().ready} />
+          </Show>
         </Show>
       </Show>
     </main>

@@ -136,7 +136,7 @@ restore_error_not_gated_on_ready() {
     grep -q 'restoreError' "$APP" &&
     grep -q 'setRestoreError' "$APP" &&
     grep -q 'status().ready || restoring() || restoreError()' "$APP" &&
-    grep -q 'trustAck() && status().ready' "$APP" &&
+    grep -q 'when={trustAck()}' "$APP" &&
     grep -q 'Keep IdentityGate visible while ready is false' "$APP"
 }
 # A restart re-uses the identity that was just restored: init stays on the first-run path.
@@ -213,7 +213,7 @@ chk "disclosure element is present and marked" \
 chk "disclosure names the loopback full-access risk" \
   has '127\.0\.0\.1' "$APP"
 chk "funding UI renders only after the disclosure is accepted" \
-  has 'when=\{trustAck\(\) && status\(\)\.ready\}' "$APP"
+  has 'when=\{trustAck\(\)\}' "$APP"
 
 echo "== recovery phrase is write-only =="
 chk "phrase input is masked" \
