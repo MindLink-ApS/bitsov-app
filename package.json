@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "authority": "scripts/authority-check.sh",
     "smoke:cs1": "scripts/cs1-local-smoke.sh",
+    "smoke:cs2": "scripts/cs2-local-smoke.sh",
     "tauri": "tauri"
   },
   "dependencies": {

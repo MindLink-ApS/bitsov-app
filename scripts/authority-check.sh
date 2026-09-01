@@ -4,6 +4,10 @@
 set -uo pipefail
 fail=0
 chk(){ if eval "$2"; then echo "  PASS  $1"; else echo "  FAIL  $1"; fail=1; fi; }
+# The gates audit SOURCE. Cargo/Tauri build output is generated, gitignored and never
+# shipped, but it embeds crate URLs and would otherwise fail G2 on any machine that has
+# run `cargo check` (CI checks out clean, so this only ever bit local runs).
+SRC_ONLY='--exclude-dir=target --exclude-dir=gen --exclude-dir=node_modules --exclude-dir=dist'
 png_icons_ok(){
   local found=0
   local f
@@ -20,9 +24,13 @@ chk "G1: no konsensus-* path/git dependency" \
 chk "G1: node declared as bundled sidecar (externalBin)" \
   'grep -q "\"externalBin\"" src-tauri/tauri.conf.json && grep -q "bin/konsensus" src-tauri/tauri.conf.json'
 chk "G2: no non-loopback control-plane URL" \
-  '! (grep -REoh "https?://[^\"'"'"' )]*/api/v1" src/ src-tauri/ 2>/dev/null | grep -qvE "://(127\.0\.0\.1|localhost)([:/]|\$)")'
+  '! (grep -REoh $SRC_ONLY "https?://[^\"'"'"' )]*/api/v1" src/ src-tauri/ 2>/dev/null | grep -qvE "://(127\.0\.0\.1|localhost)([:/]|\$)")'
 chk "G3/G4/honesty: no banned/premature claims in copy" \
   '! grep -REqin "download now|app store|google play|replaces (slack|zoom|workspace)|surveillance-proof|unhackable|node in your pocket|always-on node|call (anyone|any phone)" src/ 2>/dev/null'
+chk "G6: explicit local-trust disclosure gates the funds UI" \
+  'grep -q "data-gate=\"g6-local-trust\"" src/App.tsx && grep -q "when={trustAck()}" src/App.tsx'
+chk "G2: renderer holds no node credential and makes no direct node call" \
+  '! grep -REqn "fetch\(|new WebSocket|XMLHttpRequest|https?://" src/ 2>/dev/null'
 chk "shell capability: no broad spawn/kill, sidecar-scoped only" \
   '! grep -Eq "\"shell:allow-(spawn|kill)\"" src-tauri/capabilities/default.json && grep -q "\"sidecar\": true" src-tauri/capabilities/default.json'
 chk "CSP is set (not null)" \
