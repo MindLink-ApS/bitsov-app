@@ -23,6 +23,7 @@ Tauri v2 (Rust host) + SolidJS frontend → one codebase to iOS + Android + macO
 The Rust host spawns/supervises the node binary and authenticates over `127.0.0.1`.
 
 ## Charter & governance
+- Live lane ledger: `BOARD.md` (queue-head, blocked, human). Dated tickets: `LEDGER.md`.
 - Product charter / milestones / blockers: operator's `CLAUDE_GOAL_BITSOV_APP.md` (also `docs/CHARTER.md`).
 - Authority checks (Codex, adversarial): `CODEX_APP_AUTHORITY.md`; verdicts logged in `docs/authority/`.
 - Protocol: https://github.com/MindLink-ApS/BitSov-bitsov
