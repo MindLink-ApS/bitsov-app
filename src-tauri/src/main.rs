@@ -278,25 +278,57 @@ async fn wait_for_health(state: &NodeState) -> Result<(), String> {
     Err("node did not become healthy within 60s".into())
 }
 
-/// Restart the supervised node in place: same data dir, same config, **no re-init**
-/// (a re-init would mint a fresh identity over the one just restored), then
-/// re-authenticate and re-read the identity the node now runs under.
+/// Take over a node that is ALREADY serving the loopback control plane: mint a
+/// fresh JWT against it and re-read the identity it runs under, then report ready.
+///
+/// The app does not require the healthy listener to be the child it spawned. A node
+/// the user runs themselves on 127.0.0.1:3141 over the same data dir is the same
+/// node — it has already picked up the restored identity — so adopting it is the
+/// honest answer, and the only one that does not strand the UI behind `ready`.
+/// Adoption starts no process and re-inits nothing; it only re-authenticates.
+async fn adopt_healthy_loopback(state: &NodeState) -> Result<(), String> {
+    mint_token(state).await?;
+    let node_id = fetch_node_id(state).await?;
+    *state.node_id.lock().unwrap() = Some(node_id);
+    *state.error.lock().unwrap() = None;
+    *state.ready.lock().unwrap() = true;
+    Ok(())
+}
+
+/// Restart the node in place: same data dir, same config, **no re-init** (a re-init
+/// would mint a fresh identity over the one just restored), then re-authenticate and
+/// re-read the identity the node now runs under.
+///
+/// `ready` must end up true whenever /health is ok, whichever process is answering:
+/// the restore screen is gated on it, so every path here either adopts a healthy
+/// loopback node or returns why it could not.
 async fn restart_node(app: &AppHandle) -> Result<(), String> {
     let state = app.state::<NodeState>();
     *state.ready.lock().unwrap() = false;
     *state.node_id.lock().unwrap() = None;
     *state.token.lock().unwrap() = None;
 
+    // Only ever kill the child we supervise; a node we did not start is not ours to stop.
     let previous = state.child.lock().unwrap().take();
     if let Some(child) = previous {
         let _ = child.kill();
-    }
-    // Let the old process release the loopback port before the new one binds.
-    for _ in 0..30 {
-        if !health_ok(&state).await {
-            break;
+        // Give OUR process a moment to release the loopback port before the new one
+        // binds. Bounded to a couple of seconds on purpose: if health is still up
+        // after that, the listener is not the process we just killed, and waiting out
+        // a drop that will never come is exactly what hung the restore.
+        for _ in 0..4 {
+            if !health_ok(&state).await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    // Health up here means a node is already serving this data dir — either one we
+    // never supervised, or one that outlived the child we killed. Adopt it rather
+    // than racing a second node onto the same port.
+    if health_ok(&state).await {
+        return adopt_healthy_loopback(&state).await;
     }
 
     let paths = state
@@ -305,14 +337,18 @@ async fn restart_node(app: &AppHandle) -> Result<(), String> {
         .unwrap()
         .clone()
         .ok_or_else(|| "node paths are unknown".to_string())?;
-    spawn_node(app, &paths)?;
+    // A spawn failure is only terminal if nothing is serving the loopback API: a lost
+    // bind race, or a sidecar this host cannot start (the released node fail-closes
+    // when its esplora backend is unreachable), still leaves an already-healthy node
+    // perfectly usable.
+    if let Err(e) = spawn_node(app, &paths) {
+        if health_ok(&state).await {
+            return adopt_healthy_loopback(&state).await;
+        }
+        return Err(e);
+    }
     wait_for_health(&state).await?;
-    mint_token(&state).await?;
-    let node_id = fetch_node_id(&state).await?;
-    *state.node_id.lock().unwrap() = Some(node_id);
-    *state.error.lock().unwrap() = None;
-    *state.ready.lock().unwrap() = true;
-    Ok(())
+    adopt_healthy_loopback(&state).await
 }
 
 /// Ensure a node config exists (first run), then start + supervise the node,

@@ -89,6 +89,34 @@ registers_cs2_commands() {
   done
 }
 
+# The body of one top-level `fn` / `async fn` in the host, up to its column-0 brace.
+host_fn() {
+  awk -v name="$1" '
+    index($0, "fn " name "(") == 1       { inside = 1 }
+    index($0, "async fn " name "(") == 1 { inside = 1 }
+    inside                               { print }
+    inside && /^}/                       { exit }
+  ' "$HOST"
+}
+
+# CS-2.1: the restore UI is gated on `ready`, so a restart must never be able to stick
+# on "Restarting" while the loopback node is healthy. Every exit from restart_node
+# either adopts the healthy node (kill path, no-child path, spawn-failure path) or
+# reports why it could not, and adopting means re-auth + identity + ready.
+restart_adopts_when_healthy() {
+  host_fn restart_node | grep -q 'return adopt_healthy_loopback' &&
+    [ "$(host_fn restart_node | grep -c 'adopt_healthy_loopback')" -ge 3 ] &&
+    host_fn adopt_healthy_loopback | grep -q 'mint_token' &&
+    host_fn adopt_healthy_loopback | grep -q 'fetch_node_id' &&
+    host_fn adopt_healthy_loopback | grep -Fq 'ready.lock().unwrap() = true'
+}
+# A restart re-uses the identity that was just restored: init stays on the first-run path.
+restore_path_never_inits() {
+  ! host_fn restart_node | grep -q 'init_node' &&
+    ! host_fn adopt_healthy_loopback | grep -q 'init_node' &&
+    ! host_fn identity_restore | grep -q 'init_node'
+}
+
 echo "== host: fund commands over the loopback control plane =="
 chk "host registers the CS-2 commands (and keeps node_status)" \
   registers_cs2_commands
@@ -108,6 +136,16 @@ chk "POST /identity/restore" \
   has '/identity/restore' "$HOST"
 chk "restore restarts the supervised node, never re-inits" \
   has 'restart_node' "$HOST"
+chk "restart adopts an already-healthy loopback node instead of hanging" \
+  has 'adopt_healthy_loopback' "$HOST"
+chk "restart re-authenticates against the adopted node and reports ready" \
+  restart_adopts_when_healthy
+chk "restart only kills the child it supervises" \
+  has 'state\.child\.lock\(\)\.unwrap\(\)\.take\(\)' "$HOST"
+chk "restart keeps the node's migrations env (KONSENSUS_SQLITE_MIGRATIONS_DIR)" \
+  has 'KONSENSUS_SQLITE_MIGRATIONS_DIR' "$HOST"
+chk "restore never re-runs init_node" \
+  restore_path_never_inits
 
 echo "== keys stay in the host =="
 chk "JWT is held in host state and attached there" \
