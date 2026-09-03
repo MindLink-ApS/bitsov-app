@@ -50,16 +50,19 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-check-
 
-      # tauri_build validates bundle.externalBin at check time ("resource path
-      # bin/konsensus-<triple> doesn't exist"), so fetch the REAL signed node sidecar the app
-      # ships — the same pinned script every dev and the smoke use. Import the release key
-      # first so the GPG verify actually runs rather than falling back to sha256-only.
-      - name: Fetch signed node sidecar (pinned by scripts/fetch-node-sidecar.sh)
-        env:
-          GH_TOKEN: ${{ github.token }}
+      # tauri_build validates that bundle.externalBin (bin/konsensus-<triple>) and
+      # bundle.resources (migrations/*) EXIST at check time. This gate must prove OUR Rust
+      # compiles without depending on a genome release being downloadable (v0.3.0-rc5 is a
+      # draft -> `release not found` for the repo-scoped GITHUB_TOKEN), so satisfy those checks
+      # with empty CI-only placeholders. The REAL signed sidecar + migrations are fetched by
+      # scripts/fetch-node-sidecar.sh for the smoke and for `tauri build`; both paths are
+      # gitignored and never committed.
+      - name: Placeholders for tauri_build existence checks (cargo check only)
         run: |
-          gh api repos/MindLink-ApS/BitSov-bitsov/contents/RELEASE_KEY.asc --jq '.content' | base64 -d | gpg --import
-          ./scripts/fetch-node-sidecar.sh
+          TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
+          mkdir -p src-tauri/bin src-tauri/migrations
+          : > "src-tauri/bin/konsensus-${TRIPLE}"
+          : > src-tauri/migrations/000_ci_placeholder.sql
 
       - name: Rust — cargo check (src-tauri)
         working-directory: src-tauri
