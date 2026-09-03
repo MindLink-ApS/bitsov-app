@@ -5,7 +5,7 @@
 # node. It is static on purpose: the runtime half of CS-2 ends in "the node saw your
 # deposit", which needs real on-chain funds and cannot be asserted in a smoke. The
 # node-side contract itself is pinned and verified in docs/API_READINESS.md; the
-# runtime identity path stays covered by scripts/cs1-local-smoke.sh (Linux-only).
+# runtime identity path stays covered by scripts/cs1-local-smoke.sh (Linux + macOS).
 #
 # Checks, in charter terms:
 #   - the fund flow is host-mediated: renderer -> Tauri command -> loopback API (G2)

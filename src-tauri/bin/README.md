@@ -19,7 +19,8 @@ produce a sidecar:
 
 Release assets carry **no `.exe` suffix on any host**; only the installed Windows sidecar is
 renamed to `.exe`, because that is what Tauri's resolver looks for. `npm run smoke:cs1`
-remains Linux-only and still reports `SMOKE: SKIP` elsewhere.
+runs on Linux and macOS (the Darwin `SKIP` was retired with `v0.3.0-rc5`) and still reports
+`SMOKE: SKIP` on hosts without a signed sidecar.
 
 ## Fetch + verify (do this before building)
 ```bash

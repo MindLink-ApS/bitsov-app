@@ -1,4 +1,4 @@
-# CS-1 runbook — desktop app shell (**Linux-only**, blocker B10)
+# CS-1 runbook — desktop app shell (Linux + macOS since `v0.3.0-rc5`; B10 landed)
 
 **Scope (only):** app shell → bundle/spawn the node → loopback auth (`/auth/local`) →
 identity screen → authority verdict. No funding, rooms, messaging, mobile, calls, hosted, AI.

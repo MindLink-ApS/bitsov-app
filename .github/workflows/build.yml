@@ -1,0 +1,66 @@
+name: Build
+
+# Compile gate. Authority Check only greps source text; this job proves the app actually
+# builds: TypeScript type-check + Vite bundle, then `cargo check` on the Tauri crate. Make it
+# a REQUIRED status on main so review happens on a compiled SHA, not on greps.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build (tsc + vite + cargo check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Frontend — tsc --noEmit && vite build
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
+      # Tauri v2 Linux prerequisites. `cargo check` still runs the gtk/webkit -sys build
+      # scripts, which resolve these via pkg-config.
+      - name: Tauri Linux prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
+            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            src-tauri/target/
+          key: ${{ runner.os }}-cargo-check-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-check-
+
+      # tauri_build validates bundle.externalBin at check time ("resource path
+      # bin/konsensus-<triple> doesn't exist"), so fetch the REAL signed node sidecar the app
+      # ships — the same pinned script every dev and the smoke use. Import the release key
+      # first so the GPG verify actually runs rather than falling back to sha256-only.
+      - name: Fetch signed node sidecar (pinned by scripts/fetch-node-sidecar.sh)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api repos/MindLink-ApS/BitSov-bitsov/contents/RELEASE_KEY.asc --jq '.content' | base64 -d | gpg --import
+          ./scripts/fetch-node-sidecar.sh
+
+      - name: Rust — cargo check (src-tauri)
+        working-directory: src-tauri
+        run: cargo check --locked
