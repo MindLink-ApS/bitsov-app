@@ -41,7 +41,7 @@ npm run smoke:cs2                   # static binding checks — runs on any OS
 npm run tauri dev
 ```
 
-`npm run smoke:cs1` (durable identity, **Linux-only**, `SKIP` exit 2 elsewhere) is unchanged.
+`npm run smoke:cs1` (durable identity, Linux + macOS; `SKIP` exit 2 on hosts without a signed sidecar) is unchanged.
 
 ## Boundary (do not break)
 
@@ -87,5 +87,5 @@ convenience.** Rendering is inline SVG, so the CSP needs no `img-src data:` rela
 - **Funding is on-chain.** Confirmation latency is the chain's, not the app's; the screen says so.
 - **Restore is pre-funding.** The recovery form lives on the identity screen, before money exists
   on the node. Restoring after funding would swap the identity out from under a funded wallet.
-- **Darwin still has no signed node sidecar**, so the CS-1 runtime smoke stays `SKIP` (exit 2)
-  there. The CS-2 smoke is static and runs everywhere.
+- **Darwin has signed node sidecars since `v0.3.0-rc5`** (B10), so the CS-1 runtime smoke runs
+  on macOS too — the Darwin `SKIP` is retired. The CS-2 smoke is static and runs everywhere.

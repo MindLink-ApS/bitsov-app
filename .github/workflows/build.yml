@@ -1,0 +1,69 @@
+name: Build
+
+# Compile gate. Authority Check only greps source text; this job proves the app actually
+# builds: TypeScript type-check + Vite bundle, then `cargo check` on the Tauri crate. Make it
+# a REQUIRED status on main so review happens on a compiled SHA, not on greps.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build (tsc + vite + cargo check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Frontend — tsc --noEmit && vite build
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
+      # Tauri v2 Linux prerequisites. `cargo check` still runs the gtk/webkit -sys build
+      # scripts, which resolve these via pkg-config.
+      - name: Tauri Linux prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
+            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            src-tauri/target/
+          key: ${{ runner.os }}-cargo-check-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-check-
+
+      # tauri_build validates that bundle.externalBin (bin/konsensus-<triple>) and
+      # bundle.resources (migrations/*) EXIST at check time. This gate must prove OUR Rust
+      # compiles without depending on a genome release being downloadable (v0.3.0-rc5 is a
+      # draft -> `release not found` for the repo-scoped GITHUB_TOKEN), so satisfy those checks
+      # with empty CI-only placeholders. The REAL signed sidecar + migrations are fetched by
+      # scripts/fetch-node-sidecar.sh for the smoke and for `tauri build`; both paths are
+      # gitignored and never committed.
+      - name: Placeholders for tauri_build existence checks (cargo check only)
+        run: |
+          TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
+          mkdir -p src-tauri/bin src-tauri/migrations
+          : > "src-tauri/bin/konsensus-${TRIPLE}"
+          : > src-tauri/migrations/000_ci_placeholder.sql
+
+      - name: Rust — cargo check (src-tauri)
+        working-directory: src-tauri
+        run: cargo check --locked

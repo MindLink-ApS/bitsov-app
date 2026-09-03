@@ -9,8 +9,9 @@
 # app (src-tauri/src/main.rs): init once into the Tauri app_data_dir, skip re-init when
 # konsensus.toml already exists.
 #
-# Linux-only (CS-1 has signed Linux node sidecars only). Does not test funding, rooms,
-# messaging, mobile, calls, hosted, AI, relay, merge, or deploy.
+# Runs on Linux and macOS (signed node sidecars ship for both since v0.3.0-rc5; the Darwin
+# SKIP was retired then). Other hosts SKIP (exit 2). Does not test funding, rooms, messaging,
+# mobile, calls, hosted, AI, relay, merge, or deploy.
 set -euo pipefail
 
 PORT="${PORT:-3141}"
@@ -19,11 +20,13 @@ OS="$(uname -s)"
 ARCH="$(uname -m)"
 
 case "$OS/$ARCH" in
-  Linux/x86_64)  TRIPLE="x86_64-unknown-linux-gnu" ;;
-  Linux/aarch64) TRIPLE="aarch64-unknown-linux-gnu" ;;
+  Linux/x86_64)                TRIPLE="x86_64-unknown-linux-gnu" ;;
+  Linux/aarch64)               TRIPLE="aarch64-unknown-linux-gnu" ;;
+  Darwin/arm64|Darwin/aarch64) TRIPLE="aarch64-apple-darwin" ;;
+  Darwin/x86_64)               TRIPLE="x86_64-apple-darwin" ;;
   *)
-    echo "SMOKE: SKIP - CS-1 sidecar smoke is Linux-only; got $OS/$ARCH." >&2
-    echo "Fetch/run the app on Linux x86_64 or aarch64 for this smoke." >&2
+    echo "SMOKE: SKIP - no signed node sidecar for this host; got $OS/$ARCH." >&2
+    echo "Run this smoke on Linux (x86_64/aarch64) or macOS (arm64/x86_64)." >&2
     exit 2
     ;;
 esac
