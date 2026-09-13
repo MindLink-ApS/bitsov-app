@@ -12,6 +12,14 @@
 # Runs on Linux and macOS (signed node sidecars ship for both since v0.3.0-rc5; the Darwin
 # SKIP was retired then). Other hosts SKIP (exit 2). Does not test funding, rooms, messaging,
 # mobile, calls, hosted, AI, relay, merge, or deploy.
+#
+# Both runs start konsensus.toml exactly as `konsensus init` wrote it: no port or migrations
+# edits. The node's init defaults are non-colliding and its migrations are embedded since
+# v0.3.0-rc6 (BitSov-bitsov #56/#57, fixed in #61).
+#
+# Optional, for CI / throttled networks only (BitSov-bitsov #66): CS1_SMOKE_ESPLORA_FALLBACK
+# and CS1_SMOKE_ESPLORA_PRIMARY set the chain endpoints a user would put in konsensus.toml
+# (see apply_chain_env). With neither set, the config is never touched.
 set -euo pipefail
 
 PORT="${PORT:-3141}"
@@ -71,11 +79,34 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# rc4 workaround: point the released node at its SQLite migrations (fetched pinned beside the
-# sidecar by fetch-node-sidecar.sh). Both runs inherit it; without it the node fail-closes
-# resolving migrations.
-export KONSENSUS_SQLITE_MIGRATIONS_DIR="$(pwd)/src-tauri/migrations"
-echo "SMOKE: migrations dir = $KONSENSUS_SQLITE_MIGRATIONS_DIR ($(ls "$KONSENSUS_SQLITE_MIGRATIONS_DIR"/*.sql 2>/dev/null | wc -l | tr -d ' ') files)"
+# Chain-endpoint choice, applied right after init ONLY when the env is set (BitSov-bitsov #66).
+# rc6 `init` writes mempool.space as the sole Esplora endpoint with no fallback, and LDK
+# fail-closes at `start` when ldk-node's fee-estimate fetch from that endpoint fails -- which
+# it does from GitHub runners even though the provider's own 2xx probe passes there, so a
+# configured fallback alone is never consulted. The node already supports the keys a user
+# would set in konsensus.toml: `[lightning].esplora_url` / `esplora_url_fallback` (with /api;
+# LdkProvider::new probes the primary, then falls back) and `[chain].api_url` /
+# `esplora_url_fallback` (base URL, no /api). This is that config choice, not a code splint;
+# it never runs on a dev machine that leaves the env unset.
+#   CS1_SMOKE_ESPLORA_PRIMARY=https://blockstream.info   -> replaces the primary in both
+#   CS1_SMOKE_ESPLORA_FALLBACK=https://mempool.space     -> adds esplora_url_fallback to both
+apply_chain_env() {
+  local primary="${CS1_SMOKE_ESPLORA_PRIMARY:-}" fallback="${CS1_SMOKE_ESPLORA_FALLBACK:-}"
+  [ -n "${primary}${fallback}" ] || return 0
+  primary="${primary%/}"; fallback="${fallback%/}"
+  awk -v p="$primary" -v f="$fallback" '
+    /^[[:space:]]*\[/ {
+      s=$0; print
+      if (f != "" && s == "[lightning]") print "esplora_url_fallback = \"" f "/api\""
+      if (f != "" && s == "[chain]")     print "esplora_url_fallback = \"" f "\""
+      next
+    }
+    p != "" && s == "[lightning]" && /^[[:space:]]*esplora_url[[:space:]]*=/ { print "esplora_url = \"" p "/api\""; next }
+    p != "" && s == "[chain]"     && /^[[:space:]]*api_url[[:space:]]*=/     { print "api_url = \"" p "\""; next }
+    { print }
+  ' "$CONFIG" > "${CONFIG}.tmp" && mv "${CONFIG}.tmp" "$CONFIG"
+  echo "SMOKE: environment-forced chain fallback (genome #66): primary=${primary:-as written} fallback=${fallback:-none}"
+}
 
 # init-if-needed -- mirrors main.rs `if !config.exists()`: run 1 inits, run 2 reuses.
 ensure_init() {
@@ -90,22 +121,7 @@ ensure_init() {
     sed -n '1,120p' "$LOG_FILE" >&2
     exit 1
   fi
-}
-
-# rc4 workaround (section-aware, idempotent): `konsensus init --tier full` writes
-# [network].listen_addr (P2P) and [lightning].listening_address both on 0.0.0.0:9735; `start`
-# fail-closes on the collision. Move ONLY [network].listen_addr to :9736 when it collides with
-# Lightning. Must not touch [api].listen_addr (shares the key name). Called before every start,
-# mirroring main.rs. Idempotent -- after run 1 the ports no longer collide, so run 2 is a no-op.
-port_in() { awk -v sec="[$1]" -v key="$2" '/^[[:space:]]*\[/{s=$0} s==sec && $0 ~ ("^[[:space:]]*" key "[[:space:]]*=") {if(match($0,/:[0-9]+/)){print substr($0,RSTART+1,RLENGTH-1);exit}}' "$CONFIG"; }
-patch_ports() {
-  local net ln
-  net=$(port_in network listen_addr)
-  ln=$(port_in lightning listening_address)
-  if [ -n "$net" ] && [ "$net" = "$ln" ]; then
-    awk '/^[[:space:]]*\[/{s=$0} {if(s=="[network]" && $0 ~ /^[[:space:]]*listen_addr[[:space:]]*=/) sub(/:[0-9]+"/, ":9736\""); print}' "$CONFIG" > "${CONFIG}.tmp" && mv "${CONFIG}.tmp" "$CONFIG"
-    echo "SMOKE: rc4 workaround - [network] listen_addr -> :9736 (collided with Lightning :${ln}); [api] untouched"
-  fi
+  apply_chain_env
 }
 
 # Start the (already-init'd) node, probe /health -> /auth/local -> /identity. Runs in the PARENT
@@ -153,14 +169,12 @@ stop_node() {
 
 # ---- Run 1: fresh init, capture identity A ----
 ensure_init
-patch_ports
 run_node "run 1"
 NODE_ID_A="$RESULT_NODE_ID"
 stop_node
 
 # ---- Run 2: SAME dir, no re-init (config exists), capture identity B ----
 ensure_init
-patch_ports
 run_node "run 2"
 NODE_ID_B="$RESULT_NODE_ID"
 stop_node

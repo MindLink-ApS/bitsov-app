@@ -5,8 +5,9 @@ identity screen → authority verdict. No funding, rooms, messaging, mobile, cal
 
 ## Prerequisites
 - **Linux** (x86_64 or aarch64) — the only OS with a signed released node binary today.
-- Rust stable + Tauri v2 system deps (webkit2gtk, etc.). Node 20+. `gh` + `gpg` (for the
-  signed sidecar fetch; import `RELEASE_KEY.asc` from BitSov-bitsov to verify).
+- Rust stable + Tauri v2 system deps (webkit2gtk, etc.). Node 20+. `gh` + `gpg` for the
+  signed sidecar fetch: it verifies against the pinned release key and, if that key is not in
+  your keyring, imports `RELEASE_KEY.asc` from BitSov-bitsov into a throwaway keyring.
 
 ## Build & run (clean checkout)
 ```bash
@@ -29,7 +30,7 @@ both lockfiles (`package-lock.json`, `src-tauri/Cargo.lock`) are committed.
 ## Boundary (do not break)
 Node = bundled binary, no `konsensus-*` crate dep (G1). Control plane loopback-only (G2).
 Shell capability is scoped to the `konsensus` sidecar only; CSP is set (not null). Node CLI +
-API paths pinned to BitSov-bitsov `v0.3.0-rc5 / 1ae4d8c9`. `scripts/authority-check.sh` enforces all of this.
+API paths pinned to BitSov-bitsov `v0.3.0-rc6 / c22414e`. `scripts/authority-check.sh` enforces all of this.
 
 ## Local pass/fail smoke
 
@@ -46,20 +47,35 @@ The smoke starts the signed sidecar on loopback, waits for `/health`, calls
 `node_status.node_id` into the identity screen. It deliberately does not touch
 funding, rooms, messaging, mobile, calls, hosted, AI, relay, merge, or deploy.
 
-## rc5 boot workaround — SQLite migrations not shipped (temporary)
+## rc4/rc5 boot workarounds — removed at rc6
 
-The released `v0.3.0-rc5` node resolves its SQLite migrations at runtime from
-`KONSENSUS_SQLITE_MIGRATIONS_DIR`, falling back to the **build host's** `CARGO_MANIFEST_DIR/migrations`
-(which does not exist on any target machine) — and the release ships **only the binary, not the
-migrations**. So `konsensus start` fail-closes with `migration error: ... No such file or directory`.
+Two splints carried since CS-1.5.1 are gone: the node fixed both at the root in `v0.3.0-rc6`
+(BitSov-bitsov PR #61; issues #56 and #57).
 
-`scripts/fetch-node-sidecar.sh` therefore also fetches the 19 migration SQL files from the **same
-source-ref as the node binary** (`v0.3.0-rc5` / `1ae4d8c9`, so schema and binary match) into
-`src-tauri/migrations/`; they are bundled beside the node (`tauri.conf.json` `bundle.resources`) and
-pointed at by `KONSENSUS_SQLITE_MIGRATIONS_DIR` in `src-tauri/src/main.rs` and the CS-1 smoke.
+- **Port collision (#56).** rc4/rc5 `init --tier full` wrote `[network].listen_addr` and
+  `[lightning].listening_address` both on `0.0.0.0:9735`, and `start` fail-closed. The app
+  moved `[network]` to `:9736` before every start (`dodge_rc4_port_collision` in
+  `src-tauri/src/main.rs`; `patch_ports`/`port_in` in the CS-1 smoke). rc6's `init` defaults are
+  P2P `0.0.0.0:9736`, Lightning `0.0.0.0:9735` — the patch is **deleted**.
+- **Migrations not shipped (#57).** rc4/rc5 resolved SQLite migrations at runtime from
+  `KONSENSUS_SQLITE_MIGRATIONS_DIR` and the release carried none, so the app fetched them pinned
+  to the node's source-ref, bundled them as a Tauri resource and set the env var on `init`,
+  `start` and restart. rc6 embeds the migrations in the binary (the env var remains an optional
+  override the app does not set) — the fetch, `bundle.resources`, the env wiring and the CI
+  placeholder that existed only for `resources` are **deleted**.
 
-Config-only deployment workaround for the released rc5, **not a protocol fork**. **Remove when a
-node release ships or embeds its migrations** — tracked as a `BitSov-bitsov` issue.
+`konsensus start` now runs `konsensus.toml` exactly as `init` wrote it; the host never edits it.
+Proof: `npm run smoke:cs1` boots rc6 with zero config edits; the non-gating `sidecar` CI job
+runs the same smoke against the published release on every PR.
+
+One caveat that is not a splint (BitSov-bitsov #66): rc6 `init` writes mempool.space as the only
+Esplora endpoint, and LDK fail-closes at `start` if ldk-node's fee-estimate fetch from that
+endpoint fails. It does from GitHub runners, even though the provider's own 2xx probe passes
+there, so a fallback alone is never consulted. On such a network set
+`CS1_SMOKE_ESPLORA_PRIMARY=https://blockstream.info` (and optionally
+`CS1_SMOKE_ESPLORA_FALLBACK=https://mempool.space`) and the smoke writes the same
+`[lightning]`/`[chain]` endpoint keys a user would put in `konsensus.toml`, printing one
+`environment-forced chain fallback` line. Unset, the config is never touched.
 
 ## CS-1.1 — durable two-run identity contract
 
@@ -80,6 +96,6 @@ the app (`src-tauri/src/main.rs`): init once into the persistent data dir, skip 
 - otherwise → `SMOKE: FAIL - identity not durable (run1=<A> run2=<B>)` (exit 1).
 
 The temp data dir is removed **only** on EXIT (after run 2, or on FAIL) — never between the two
-runs, since the dir surviving the restart is what proves durability. Non-Linux hosts still
-`SMOKE: SKIP` (exit 2), not PASS. The CS-1.5.1 rc4 workarounds (P2P `:9736` on collision,
-`KONSENSUS_SQLITE_MIGRATIONS_DIR`) are preserved and applied before every `start`.
+runs, since the dir surviving the restart is what proves durability. Hosts without a signed
+sidecar still `SMOKE: SKIP` (exit 2), not PASS. Both runs start the config exactly as `init`
+wrote it — the CS-1.5.1 rc4/rc5 splints were removed at rc6 (see above).

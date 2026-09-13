@@ -19,6 +19,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Unit test of THIS repo's fail-closed signature predicate (scripts/fetch-node-sidecar.sh
+      # verify_release_signature): local throwaway keys, no network, no release dependency.
+      # Proves revoked / expired keys, expired or bad signatures and missing keys are refused
+      # even though GnuPG still emits VALIDSIG for several of them.
+      - name: Unit test — fetch script signature predicate (no network)
+        run: bash scripts/test-fetch-verify.sh
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -50,20 +57,70 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-check-
 
-      # tauri_build validates that bundle.externalBin (bin/konsensus-<triple>) and
-      # bundle.resources (migrations/*) EXIST at check time. This gate must prove OUR Rust
-      # compiles without depending on a genome release being downloadable (v0.3.0-rc5 is a
-      # draft -> `release not found` for the repo-scoped GITHUB_TOKEN), so satisfy those checks
-      # with empty CI-only placeholders. The REAL signed sidecar + migrations are fetched by
-      # scripts/fetch-node-sidecar.sh for the smoke and for `tauri build`; both paths are
-      # gitignored and never committed.
-      - name: Placeholders for tauri_build existence checks (cargo check only)
+      # tauri_build validates that bundle.externalBin (bin/konsensus-<triple>) EXISTS at check
+      # time. This gate must prove OUR Rust compiles without depending on a genome release
+      # download (network, release availability), so satisfy that check with an empty CI-only
+      # placeholder. The REAL signed sidecar is fetched by scripts/fetch-node-sidecar.sh — see
+      # the `sidecar` job below, the smoke, and `tauri build`; bin/konsensus-* is gitignored and
+      # never committed.
+      - name: Placeholder for the tauri_build externalBin existence check (cargo check only)
         run: |
           TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
-          mkdir -p src-tauri/bin src-tauri/migrations
+          mkdir -p src-tauri/bin
           : > "src-tauri/bin/konsensus-${TRIPLE}"
-          : > src-tauri/migrations/000_ci_placeholder.sql
 
       - name: Rust — cargo check (src-tauri)
         working-directory: src-tauri
         run: cargo check --locked
+
+  # NOT a merge gate: keep this job OUT of the required status checks. It depends on the
+  # genome's published release and on network, not on this repo's source. It exercises the
+  # REAL sidecar path end to end against the pinned release: download, fail-closed signature
+  # verification (RELEASE_KEY.asc from the genome's main, imported into a throwaway keyring,
+  # fingerprint pinned), sha256 check against the signed SHA256SUMS, then the CS-1 smoke boots
+  # the fetched node exactly as `init` configured it — zero port or migrations edits — and
+  # proves the identity is durable across a restart.
+  sidecar:
+    name: Sidecar (fetch + verify rc6, CS-1 smoke) — not a merge gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch + verify the pinned signed node (throwaway keyring)
+        run: |
+          # An empty GNUPGHOME forces the script's RELEASE_KEY.asc import path; the runner's
+          # keyring is never touched either way.
+          export GNUPGHOME="$(mktemp -d)"
+          ./scripts/fetch-node-sidecar.sh
+          SIDECAR="src-tauri/bin/konsensus-x86_64-unknown-linux-gnu"   # ubuntu-latest is x86_64
+          test -x "$SIDECAR"
+          "$SIDECAR" --version
+
+      # Evidence for BitSov-bitsov #66, never a gate: show what THIS runner gets from the two
+      # public fee-estimate endpoints (status, headers, first bytes) so a boot failure below can
+      # be read against the actual responses instead of guessed at.
+      - name: Chain endpoint diagnostics (evidence for #66; never fails the job)
+        run: |
+          for u in https://mempool.space/api/fee-estimates https://blockstream.info/api/fee-estimates; do
+            echo "=== GET $u ==="
+            curl -sS -m 8 -D - "$u" -o body.tmp || echo "(curl failed: $?)"
+            head -c 400 body.tmp 2>/dev/null; echo; rm -f body.tmp
+          done || true
+
+      # rc6 `init` writes mempool.space as the only Esplora endpoint (no fallback). From GitHub
+      # runners the provider's startup probe (any 2xx on /fee-estimates) PASSES on mempool.space,
+      # yet ldk-node's own fee-estimate fetch on that same endpoint fails and `start` fail-closes
+      # ("Failed to update fee rate estimates") — so a configured fallback alone is never consulted
+      # (BitSov-bitsov #66: rc7 init should write a fallback; the probe should match what LDK
+      # requires). Point the runner's node at blockstream.info as primary, mempool.space as
+      # fallback — the same `[lightning]`/`[chain]` keys a user edits in konsensus.toml; the smoke
+      # applies them only because these envs are set. A config choice, not a code splint — ports
+      # and migrations stay exactly as init wrote them.
+      - name: CS-1 smoke — boot rc6 from init defaults (+ chain endpoints, #66), durable identity
+        env:
+          CS1_SMOKE_ESPLORA_PRIMARY: https://blockstream.info
+          CS1_SMOKE_ESPLORA_FALLBACK: https://mempool.space
+        run: bash scripts/cs1-local-smoke.sh

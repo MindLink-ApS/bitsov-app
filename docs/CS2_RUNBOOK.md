@@ -54,7 +54,7 @@ npm run tauri dev
   carries a token, mnemonic, or private key, and the app never asks for the seed
   (`/identity/mnemonic` needs a fresh signed challenge and is not called). The recovery-phrase
   input is write-only: masked, `autocomplete="off"`, cleared the moment it is submitted.
-- **Pinned contract** — BitSov-bitsov `v0.3.0-rc5` / `1ae4d8c9`. The `funding-seen` literal lives
+- **Pinned contract** — BitSov-bitsov `v0.3.0-rc6` / `c22414e`. The `funding-seen` literal lives
   in `src-tauri/src/main.rs` only; the renderer reads a derived `funded` boolean.
 
 `scripts/cs2-local-smoke.sh` enforces all of the above statically, and
@@ -79,6 +79,14 @@ as rendered in the app decodes back to the displayed address under a platform ba
 
 The address is always shown as text beside the QR: **the text is authoritative, the QR is a
 convenience.** Rendering is inline SVG, so the CSP needs no `img-src data:` relaxation.
+
+## Node boot workarounds — removed at rc6
+
+The rc4/rc5 splints the host applied around `init`, `start` and the restore restart — the
+`[network]` port patch and the bundled-migrations env — are gone since the node fixed both at
+the root in `v0.3.0-rc6` (BitSov-bitsov #61). `restart_node` starts `konsensus.toml` exactly
+as `init` wrote it, and `scripts/cs2-local-smoke.sh` now asserts the host carries neither
+splint. Details: `docs/CS1_RUNBOOK.md`, "rc4/rc5 boot workarounds — removed at rc6".
 
 ## Known gaps (by design, not defects)
 

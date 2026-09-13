@@ -5,8 +5,8 @@ protocol crates, and the binary is **never committed** — it is fetched + verif
 time (see `scripts/fetch-node-sidecar.sh`). Sidecars are named with the Rust target triple
 Tauri's resolver expects: `bin/konsensus-<target-triple>[.exe]`.
 
-## Hosts published at `v0.3.0-rc5`
-`v0.3.0-rc5` publishes Linux, macOS and Windows node binaries, so all three hosts can
+## Hosts published at `v0.3.0-rc6`
+`v0.3.0-rc6` publishes Linux, macOS and Windows node binaries, so all three hosts can
 produce a sidecar:
 
 | host | release asset | installed sidecar |
@@ -26,8 +26,10 @@ runs on Linux and macOS (the Darwin `SKIP` was retired with `v0.3.0-rc5`) and st
 ```bash
 ./scripts/fetch-node-sidecar.sh     # downloads the pinned binary for this host, verifies GPG + sha256, installs it
 ```
-The script pins `v0.3.0-rc5` and verifies against key `B299274C…` (import `RELEASE_KEY.asc`
-from BitSov-bitsov first). rc5 is still a **draft** release — `gh release download` reaches it
-with an authenticated `gh`, and nothing here publishes it. Record the sha256 in the authority
+The script pins `v0.3.0-rc6` and verifies, fail-closed, that `SHA256SUMS.asc` is a valid
+signature by the pinned release key `B299274C…`; if that key is not in your keyring it imports
+`RELEASE_KEY.asc` from BitSov-bitsov `main` into a throwaway keyring (fingerprint checked against
+the pin; your keyring is never written). rc6 is a published pre-release, so any `gh` reaches it,
+and nothing here publishes anything. Record the sha256 in the authority
 ledger; `scripts/authority-check.sh` and `CODEX_APP_AUTHORITY.md §G` re-check integrity. The
 released artifact is the `konsensus` binary (CLI `konsensus init` / `konsensus start`).
