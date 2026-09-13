@@ -69,11 +69,13 @@ Proof: `npm run smoke:cs1` boots rc6 with zero config edits; the non-gating `sid
 runs the same smoke against the published release on every PR.
 
 One caveat that is not a splint (BitSov-bitsov #66): rc6 `init` writes mempool.space as the only
-Esplora endpoint, and LDK fail-closes at `start` if that endpoint refuses its fee-estimate probe
-(it does from GitHub runners). On such a network set `CS1_SMOKE_ESPLORA_FALLBACK=https://blockstream.info`
-(or `CS1_SMOKE_ESPLORA_PRIMARY`) and the smoke writes the same `esplora_url_fallback` keys a user
-would put in `konsensus.toml`, printing one `environment-forced chain fallback` line. Unset, the
-config is never touched.
+Esplora endpoint, and LDK fail-closes at `start` if ldk-node's fee-estimate fetch from that
+endpoint fails. It does from GitHub runners, even though the provider's own 2xx probe passes
+there, so a fallback alone is never consulted. On such a network set
+`CS1_SMOKE_ESPLORA_PRIMARY=https://blockstream.info` (and optionally
+`CS1_SMOKE_ESPLORA_FALLBACK=https://mempool.space`) and the smoke writes the same
+`[lightning]`/`[chain]` endpoint keys a user would put in `konsensus.toml`, printing one
+`environment-forced chain fallback` line. Unset, the config is never touched.
 
 ## CS-1.1 — durable two-run identity contract
 

@@ -92,13 +92,28 @@ jobs:
           test -x "$SIDECAR"
           "$SIDECAR" --version
 
-      # rc6 `init` writes mempool.space as the only Esplora endpoint (no fallback) and LDK
-      # fail-closes at `start` when that endpoint refuses its fee-estimate probe — which it does
-      # from GitHub runners (BitSov-bitsov #66: rc7 init should write a fallback). Give the
-      # runner the fallback a user would put in konsensus.toml (`[lightning]`/`[chain]`
-      # esplora_url_fallback); the smoke applies it only because this env is set. A config
-      # choice, not a code splint — ports and migrations stay exactly as init wrote them.
-      - name: CS-1 smoke — boot rc6 from init defaults (+ chain fallback, #66), durable identity
+      # Evidence for BitSov-bitsov #66, never a gate: show what THIS runner gets from the two
+      # public fee-estimate endpoints (status, headers, first bytes) so a boot failure below can
+      # be read against the actual responses instead of guessed at.
+      - name: Chain endpoint diagnostics (evidence for #66; never fails the job)
+        run: |
+          for u in https://mempool.space/api/fee-estimates https://blockstream.info/api/fee-estimates; do
+            echo "=== GET $u ==="
+            curl -sS -m 8 -D - "$u" -o body.tmp || echo "(curl failed: $?)"
+            head -c 400 body.tmp 2>/dev/null; echo; rm -f body.tmp
+          done || true
+
+      # rc6 `init` writes mempool.space as the only Esplora endpoint (no fallback). From GitHub
+      # runners the provider's startup probe (any 2xx on /fee-estimates) PASSES on mempool.space,
+      # yet ldk-node's own fee-estimate fetch on that same endpoint fails and `start` fail-closes
+      # ("Failed to update fee rate estimates") — so a configured fallback alone is never consulted
+      # (BitSov-bitsov #66: rc7 init should write a fallback; the probe should match what LDK
+      # requires). Point the runner's node at blockstream.info as primary, mempool.space as
+      # fallback — the same `[lightning]`/`[chain]` keys a user edits in konsensus.toml; the smoke
+      # applies them only because these envs are set. A config choice, not a code splint — ports
+      # and migrations stay exactly as init wrote them.
+      - name: CS-1 smoke — boot rc6 from init defaults (+ chain endpoints, #66), durable identity
         env:
-          CS1_SMOKE_ESPLORA_FALLBACK: https://blockstream.info
+          CS1_SMOKE_ESPLORA_PRIMARY: https://blockstream.info
+          CS1_SMOKE_ESPLORA_FALLBACK: https://mempool.space
         run: bash scripts/cs1-local-smoke.sh

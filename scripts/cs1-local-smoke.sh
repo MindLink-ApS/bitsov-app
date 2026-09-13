@@ -81,13 +81,15 @@ trap cleanup EXIT
 
 # Chain-endpoint choice, applied right after init ONLY when the env is set (BitSov-bitsov #66).
 # rc6 `init` writes mempool.space as the sole Esplora endpoint with no fallback, and LDK
-# fail-closes at `start` when that endpoint refuses its fee-estimate probe -- which it does
-# from GitHub runners. The node already supports the keys a user would set in konsensus.toml:
-# `[lightning].esplora_url_fallback` (with /api; LdkProvider::new probes primary then falls
-# back) and `[chain].esplora_url_fallback` (base URL, no /api). This is that config choice,
-# not a code splint; it never runs on a dev machine that leaves the env unset.
-#   CS1_SMOKE_ESPLORA_FALLBACK=https://blockstream.info  -> adds esplora_url_fallback to both
+# fail-closes at `start` when ldk-node's fee-estimate fetch from that endpoint fails -- which
+# it does from GitHub runners even though the provider's own 2xx probe passes there, so a
+# configured fallback alone is never consulted. The node already supports the keys a user
+# would set in konsensus.toml: `[lightning].esplora_url` / `esplora_url_fallback` (with /api;
+# LdkProvider::new probes the primary, then falls back) and `[chain].api_url` /
+# `esplora_url_fallback` (base URL, no /api). This is that config choice, not a code splint;
+# it never runs on a dev machine that leaves the env unset.
 #   CS1_SMOKE_ESPLORA_PRIMARY=https://blockstream.info   -> replaces the primary in both
+#   CS1_SMOKE_ESPLORA_FALLBACK=https://mempool.space     -> adds esplora_url_fallback to both
 apply_chain_env() {
   local primary="${CS1_SMOKE_ESPLORA_PRIMARY:-}" fallback="${CS1_SMOKE_ESPLORA_FALLBACK:-}"
   [ -n "${primary}${fallback}" ] || return 0
