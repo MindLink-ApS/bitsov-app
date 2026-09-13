@@ -50,20 +50,47 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-check-
 
-      # tauri_build validates that bundle.externalBin (bin/konsensus-<triple>) and
-      # bundle.resources (migrations/*) EXIST at check time. This gate must prove OUR Rust
-      # compiles without depending on a genome release being downloadable (v0.3.0-rc5 is a
-      # draft -> `release not found` for the repo-scoped GITHUB_TOKEN), so satisfy those checks
-      # with empty CI-only placeholders. The REAL signed sidecar + migrations are fetched by
-      # scripts/fetch-node-sidecar.sh for the smoke and for `tauri build`; both paths are
-      # gitignored and never committed.
-      - name: Placeholders for tauri_build existence checks (cargo check only)
+      # tauri_build validates that bundle.externalBin (bin/konsensus-<triple>) EXISTS at check
+      # time. This gate must prove OUR Rust compiles without depending on a genome release
+      # download (network, release availability), so satisfy that check with an empty CI-only
+      # placeholder. The REAL signed sidecar is fetched by scripts/fetch-node-sidecar.sh — see
+      # the `sidecar` job below, the smoke, and `tauri build`; bin/konsensus-* is gitignored and
+      # never committed.
+      - name: Placeholder for the tauri_build externalBin existence check (cargo check only)
         run: |
           TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
-          mkdir -p src-tauri/bin src-tauri/migrations
+          mkdir -p src-tauri/bin
           : > "src-tauri/bin/konsensus-${TRIPLE}"
-          : > src-tauri/migrations/000_ci_placeholder.sql
 
       - name: Rust — cargo check (src-tauri)
         working-directory: src-tauri
         run: cargo check --locked
+
+  # NOT a merge gate: keep this job OUT of the required status checks. It depends on the
+  # genome's published release and on network, not on this repo's source. It exercises the
+  # REAL sidecar path end to end against the pinned release: download, fail-closed signature
+  # verification (RELEASE_KEY.asc from the genome's main, imported into a throwaway keyring,
+  # fingerprint pinned), sha256 check against the signed SHA256SUMS, then the CS-1 smoke boots
+  # the fetched node exactly as `init` configured it — zero port or migrations edits — and
+  # proves the identity is durable across a restart.
+  sidecar:
+    name: Sidecar (fetch + verify rc6, CS-1 smoke) — not a merge gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch + verify the pinned signed node (throwaway keyring)
+        run: |
+          # An empty GNUPGHOME forces the script's RELEASE_KEY.asc import path; the runner's
+          # keyring is never touched either way.
+          export GNUPGHOME="$(mktemp -d)"
+          ./scripts/fetch-node-sidecar.sh
+          SIDECAR="src-tauri/bin/konsensus-x86_64-unknown-linux-gnu"   # ubuntu-latest is x86_64
+          test -x "$SIDECAR"
+          "$SIDECAR" --version
+
+      - name: CS-1 smoke — boot rc6 from init defaults, durable identity across a restart
+        run: bash scripts/cs1-local-smoke.sh
