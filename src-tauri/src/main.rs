@@ -32,7 +32,7 @@ use tauri_plugin_shell::ShellExt;
 /// confidential remote transport + delegated auth exist.
 const API_BASE: &str = "http://127.0.0.1:3141/api/v1";
 
-/// Pinned onboarding contract (BitSov-bitsov `v0.3.0-rc5` / `1ae4d8c9`): the funding
+/// Pinned onboarding contract (BitSov-bitsov `v0.3.0-rc6` / `c22414e`): the funding
 /// state machine moves to this step once the node has observed the required deposit
 /// in its own wallet. Kept host-side so the renderer never re-implements the contract.
 const FUNDING_SEEN: &str = "funding-seen";
@@ -40,14 +40,6 @@ const FUNDING_SEEN: &str = "funding-seen";
 /// The node throttles `/auth/local` to 5 mints per minute (SEC1). Only the 401
 /// refresh path is rate-limited here — a persistent 401 must not grind that budget.
 const REMINT_COOLDOWN: Duration = Duration::from_secs(30);
-
-/// Where the supervised node lives. Captured at bootstrap so a restore can restart
-/// the SAME data dir without re-running `init`.
-#[derive(Clone)]
-struct NodePaths {
-    config: PathBuf,
-    migrations: Option<PathBuf>,
-}
 
 struct NodeState {
     ready: Mutex<bool>,
@@ -57,7 +49,9 @@ struct NodeState {
     child: Mutex<Option<CommandChild>>,
     /// The loopback JWT lives here and nowhere else (see the KEYS note above).
     token: Mutex<Option<String>>,
-    paths: Mutex<Option<NodePaths>>,
+    /// The supervised node's `konsensus.toml`. Captured at bootstrap so a restore can
+    /// restart the SAME data dir without re-running `init`.
+    config: Mutex<Option<PathBuf>>,
     /// Last throttled re-mint attempt, for `REMINT_COOLDOWN`.
     last_remint: Mutex<Option<Instant>>,
     /// Set when the supervised sidecar emits `CommandEvent::Terminated`.
@@ -73,7 +67,7 @@ impl Default for NodeState {
             error: Mutex::new(None),
             child: Mutex::new(None),
             token: Mutex::new(None),
-            paths: Mutex::new(None),
+            config: Mutex::new(None),
             last_remint: Mutex::new(None),
             sidecar_terminated: AtomicBool::new(false),
             // Bounded so a hung loopback /health or /auth/local cannot pin restoring().
@@ -148,73 +142,11 @@ fn set_error(state: &NodeState, msg: impl Into<String>) {
     *state.error.lock().unwrap() = Some(msg.into());
 }
 
-/// rc4 workaround: `konsensus init --tier full` writes `[network].listen_addr` (P2P) and
-/// `[lightning].listening_address` both on `0.0.0.0:9735`, and `konsensus start` fail-closes on
-/// the collision. Move ONLY `[network].listen_addr` to `:9736` (the node's own hint) when it
-/// collides with Lightning. Section-aware so it never touches `[api].listen_addr` (shares the key
-/// name) or Lightning. Idempotent. Config-only workaround for the released rc4 `init`, NOT a
-/// protocol fork — remove when a node release emits non-colliding defaults. See
-/// docs/CS1_RUNBOOK.md and the BitSov-bitsov issue.
-fn dodge_rc4_port_collision(config: &std::path::Path) {
-    let Ok(text) = std::fs::read_to_string(config) else {
-        return;
-    };
-    let port_in = |section: &str, key: &str| -> Option<String> {
-        let mut in_section = false;
-        for line in text.lines() {
-            let trimmed = line.trim_start();
-            if trimmed.starts_with('[') {
-                in_section = trimmed.trim_end() == section;
-                continue;
-            }
-            if in_section {
-                if let Some(rest) = trimmed.strip_prefix(key) {
-                    let rest = rest.trim_start();
-                    if rest.starts_with('=') {
-                        let value = rest.trim_start_matches('=').trim().trim_matches('"');
-                        return value.rsplit_once(':').map(|(_, port)| port.to_string());
-                    }
-                }
-            }
-        }
-        None
-    };
-    let (Some(p2p), Some(lightning)) = (
-        port_in("[network]", "listen_addr"),
-        port_in("[lightning]", "listening_address"),
-    ) else {
-        return;
-    };
-    if p2p != lightning {
-        return;
-    }
-    let mut in_network = false;
-    let patched: Vec<String> = text
-        .lines()
-        .map(|line| {
-            let trimmed = line.trim_start();
-            if trimmed.starts_with('[') {
-                in_network = trimmed.trim_end() == "[network]";
-                return line.to_string();
-            }
-            if in_network && trimmed.starts_with("listen_addr") && line.contains(&format!(":{p2p}")) {
-                return line.replacen(&format!(":{p2p}"), ":9736", 1);
-            }
-            line.to_string()
-        })
-        .collect();
-    let _ = std::fs::write(config, format!("{}\n", patched.join("\n")));
-}
-
 // ---- node supervision -----------------------------------------------------
 
 /// First run only: `konsensus init` generates identity + config (tier full = fund-your-node).
-async fn init_node(
-    app: &AppHandle,
-    data_dir: &Path,
-    migrations: Option<&Path>,
-) -> Result<(), String> {
-    let mut cmd = app
+async fn init_node(app: &AppHandle, data_dir: &Path) -> Result<(), String> {
+    let cmd = app
         .shell()
         .sidecar("konsensus")
         .map_err(|e| format!("cannot resolve node sidecar: {e}"))?
@@ -226,17 +158,6 @@ async fn init_node(
             "--tier",
             "full",
         ]);
-    // rc4 workaround: the released node resolves SQLite migrations at runtime from
-    // KONSENSUS_SQLITE_MIGRATIONS_DIR (else the build-host CARGO_MANIFEST_DIR, absent on the
-    // target). Point it at the migrations bundled beside the node binary (fetched pinned to the
-    // node's source-ref by fetch-node-sidecar.sh, bundled via tauri.conf resources). See
-    // docs/CS1_RUNBOOK.md + the BitSov-bitsov issue; remove when a release embeds/ships migrations.
-    if let Some(dir) = migrations {
-        cmd = cmd.env(
-            "KONSENSUS_SQLITE_MIGRATIONS_DIR",
-            dir.to_string_lossy().to_string(),
-        );
-    }
     match cmd.output().await {
         Ok(out) if out.status.success() => Ok(()),
         Ok(out) => Err(format!(
@@ -249,23 +170,14 @@ async fn init_node(
 }
 
 /// Start + supervise `konsensus start`. Never re-inits: the caller guarantees the
-/// config (and therefore the identity) already exists.
-fn spawn_node(app: &AppHandle, paths: &NodePaths) -> Result<(), String> {
-    // rc4 workaround (docs/CS1_RUNBOOK.md + BitSov-bitsov issue), idempotent: keep P2P off the
-    // Lightning port before every start, or `konsensus start` fail-closes on the collision.
-    dodge_rc4_port_collision(&paths.config);
-
-    let mut cmd = app
+/// config (and therefore the identity) already exists. The config is started exactly
+/// as `init` wrote it — this host never edits it.
+fn spawn_node(app: &AppHandle, config: &Path) -> Result<(), String> {
+    let cmd = app
         .shell()
         .sidecar("konsensus")
         .map_err(|e| format!("cannot resolve node sidecar: {e}"))?
-        .args(["start", "--config", &paths.config.to_string_lossy()]);
-    if let Some(ref dir) = paths.migrations {
-        cmd = cmd.env(
-            "KONSENSUS_SQLITE_MIGRATIONS_DIR",
-            dir.to_string_lossy().to_string(),
-        );
-    }
+        .args(["start", "--config", &config.to_string_lossy()]);
     let state = app.state::<NodeState>();
     state.sidecar_terminated.store(false, Ordering::SeqCst);
     let (mut rx, child) = cmd.spawn().map_err(|e| format!("node start failed: {e}"))?;
@@ -405,13 +317,13 @@ async fn restart_node(app: &AppHandle, expected_node_id: &str) -> Result<bool, S
         }
     }
 
-    let paths = state
-        .paths
+    let config = state
+        .config
         .lock()
         .unwrap()
         .clone()
-        .ok_or_else(|| "node paths are unknown".to_string())?;
-    if let Err(e) = spawn_node(app, &paths) {
+        .ok_or_else(|| "node config path is unknown".to_string())?;
+    if let Err(e) = spawn_node(app, &config) {
         if adopt_matching_identity(&state, expected_node_id).await? {
             return Ok(false);
         }
@@ -436,18 +348,16 @@ async fn bootstrap_node(app: AppHandle) {
     };
     let _ = std::fs::create_dir_all(&data_dir);
     let config = data_dir.join("konsensus.toml");
-    let migrations = app.path().resource_dir().ok().map(|d| d.join("migrations"));
 
     if !config.exists() {
-        if let Err(e) = init_node(&app, &data_dir, migrations.as_deref()).await {
+        if let Err(e) = init_node(&app, &data_dir).await {
             return set_error(&state, e);
         }
     }
 
-    let paths = NodePaths { config, migrations };
-    *state.paths.lock().unwrap() = Some(paths.clone());
+    *state.config.lock().unwrap() = Some(config.clone());
 
-    if let Err(e) = spawn_node(&app, &paths) {
+    if let Err(e) = spawn_node(&app, &config) {
         return set_error(&state, e);
     }
     if let Err(e) = wait_for_health(&state).await {

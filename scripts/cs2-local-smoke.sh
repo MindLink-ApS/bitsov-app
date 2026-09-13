@@ -12,7 +12,8 @@
 #   - no node credential can reach the renderer (invariant A.3)
 #   - the funds UI sits behind an explicit local-trust disclosure (G6)
 #   - the recovery-phrase input is write-only and cleared on submit
-#   - the pinned onboarding contract (v0.3.0-rc5 / 1ae4d8c9) is what the host calls
+#   - the pinned onboarding contract (v0.3.0-rc6 / c22414e) is what the host calls
+#   - the host starts konsensus.toml as `init` wrote it: no rc4/rc5 port or migrations splints
 #
 # Runs on any OS. Does not touch funding at runtime, rooms, messaging, mobile, calls,
 # hosted, AI, relay, merge, or deploy.
@@ -156,7 +157,7 @@ chk "tier is \"full\" (fund-your-own-node)" \
   has '"tier":\s*"full"' "$HOST"
 chk "GET /onboarding/state polled for the funding step" \
   has '/onboarding/state' "$HOST"
-chk "pinned step literal funding-seen (v0.3.0-rc5 / 1ae4d8c9)" \
+chk "pinned step literal funding-seen (v0.3.0-rc6 / c22414e)" \
   has 'funding-seen' "$HOST"
 chk "GET /payments/funding-address" \
   has '/payments/funding-address' "$HOST"
@@ -180,8 +181,8 @@ chk "restore retry/error path is not gated on ready" \
   restore_error_not_gated_on_ready
 chk "restart kills the supervised child before replacing 3141" \
   has 'state\.child\.lock\(\)\.unwrap\(\)\.take\(\)' "$HOST"
-chk "restart keeps the node's migrations env (KONSENSUS_SQLITE_MIGRATIONS_DIR)" \
-  has 'KONSENSUS_SQLITE_MIGRATIONS_DIR' "$HOST"
+chk "host starts konsensus.toml as init wrote it (no rc4/rc5 port or migrations splints)" \
+  lacks 'KONSENSUS_SQLITE_MIGRATIONS_DIR|dodge_rc4_port_collision|resource_dir' "$HOST"
 chk "restore never re-runs init_node" \
   restore_path_never_inits
 
