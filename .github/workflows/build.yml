@@ -92,5 +92,13 @@ jobs:
           test -x "$SIDECAR"
           "$SIDECAR" --version
 
-      - name: CS-1 smoke — boot rc6 from init defaults, durable identity across a restart
+      # rc6 `init` writes mempool.space as the only Esplora endpoint (no fallback) and LDK
+      # fail-closes at `start` when that endpoint refuses its fee-estimate probe — which it does
+      # from GitHub runners (BitSov-bitsov #66: rc7 init should write a fallback). Give the
+      # runner the fallback a user would put in konsensus.toml (`[lightning]`/`[chain]`
+      # esplora_url_fallback); the smoke applies it only because this env is set. A config
+      # choice, not a code splint — ports and migrations stay exactly as init wrote them.
+      - name: CS-1 smoke — boot rc6 from init defaults (+ chain fallback, #66), durable identity
+        env:
+          CS1_SMOKE_ESPLORA_FALLBACK: https://blockstream.info
         run: bash scripts/cs1-local-smoke.sh
