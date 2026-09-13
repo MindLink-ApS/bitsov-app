@@ -1,11 +1,12 @@
 # CLAUDE_GOAL_BITSOV_APP — the sovereign conversational client
 
 > Point `/goal` at this file. **Objective (v1): ship the Linux desktop self-host MVP now** —
-> a **Linux desktop** app (today the only OS with a signed, released node binary) where a
-> person can **fund their node and start talking**, keys and Lightning hidden behind the UX.
-> **Roadmap (preserved, gated):** the same one app extends to **macOS, Windows, iPhone,
-> Android** — each unlocked as its **signed node binary + gates** land (macOS/Windows node
-> binaries are not published yet — blocker B10). The user carries their own
+> a **Linux desktop** app (Linux was the only OS with a signed, released node binary until
+> `v0.3.0-rc5`) where a person can **fund their node and start talking**, keys and Lightning
+> hidden behind the UX. **Roadmap (preserved, gated):** the same one app extends to **macOS,
+> Windows, iPhone, Android** — each unlocked as its **signed node binary + gates** land
+> (macOS/Windows node binaries ship since `v0.3.0-rc5` — B10 landed — but are not yet
+> notarized / Authenticode-signed). The user carries their own
 > **node / bank / (later) AI**, connects to their own node and to others, and
 > everything collapses into a conversation organized as **rooms**. Ship human
 > connection first (chat, then files/scheduling); **mobile, calls, hosted, and AI stay
@@ -87,7 +88,7 @@ fork or vendor protocol logic. "Must remain optional" per `PUBLIC_REPO_DECISION.
 |---|---|---|---|
 | **T-SELF** | **now** | full | desktop bundles + runs the user's own node; keys+plaintext local. Shippable today. |
 | **T-PAIRED** | M6 | full (user-custodied) | phone/laptop = remote face of your home node via device attestation; mnemonic never leaves primary device. Needs pairing (unbuilt) + transport confidentiality (G2). |
-| **T-HOSTED** | M10 | **convenience, NOT sovereignty** | operator runs compute; a key-holding host sees keys+plaintext → **must be sold honestly**. Prefer **ciphertext-relay hosting** (operator holds only ciphertext). |
+| **T-HOSTED** | M10 | **reachability convenience, NOT custody** | "MindLink-hosted" means **only** a **ciphertext relay** (keys, funds and the node stay on the user's device; the relay holds ciphertext — disclose what a relay operator can see) or **NaaS** (the user's seed on a box the user controls). **Never a key-holding hosted node**; never "MindLink funds/opens your channels". Matches the genome charter line. |
 | **T-PHONE-NATIVE** | M8 | reduced-sovereign | "node in your pocket," reachable via relay+push. **BLOCKED on #216 relay (B1)** — never claim before it's live. |
 
 ## 5. MVP — desktop-first, humans-only ("fund your node and start talking")
@@ -116,7 +117,7 @@ phase does not start until its entry gate passes. M-numbers are stable IDs (not 
 | 4 | M8 | Phone-native thin node (relay+push) — the honest "node in your pocket" | bitsov-app | M7 | — |
 | 4 | M9 | Multi-party meet (MLS 960–962 + relay/SFU fan-out) | bitsov-app | M7 | — |
 | **gated track** | M4 | 1:1 VoIP, directly-reachable peers only (kinds 400–403 → WebRTC) — **do NOT market as calling** | bitsov-app | M2 | **G3** |
-| gated track | M10 | Hosted convenience tier (honest disclosure; ciphertext-relay preferred) | Website/services | M7 | — |
+| gated track | M10 | Hosted convenience tier (ciphertext relay or NaaS only — no key-holding hosted node; disclose relay-operator visibility) | Website/services | M7 | — |
 | gated track | M11 | Sovereign AI participant (node_id-as-agent, invoked inline only) | BitSov-bitsov | M6 | **G4** |
 
 ## 7. Blockers
@@ -124,12 +125,12 @@ phase does not start until its entry gate passes. M-numbers are stable IDs (not 
 - **B2 [high]** — Multi-device pairing is design-only (`REMOTE_ACCESS_IDENTITY.md` specs L1/L2/L3; no `device_attestation.rs`). Only same-key `/auth/token` + loopback `/auth/local` exist → phone-as-remote-face impossible until built.
 - **B3 [high]** — Call media transport missing (no WebRTC/RTP/TURN in-repo). Only direct-reachable 1:1 calls; "call any phone" needs NAT traversal (→ B1).
 - **B4 [high]** — Mobile-node-vs-paired unresolved: a real node (LDK + esplora + always-listening) can't honestly run reachable on a sleeping/NATed phone → phones ship as paired-thin (B2) or honest-hosted (B5); native is strictly post-relay.
-- **B5 [high]** — Honest custody: a key-holding hosted node sees keys+plaintext; ship with "not full sovereignty" disclosure; prefer ciphertext-relay hosting.
+- **B5 [high]** — Honest custody: a key-holding hosted node would see keys+plaintext, so it is **not offered**. "MindLink-hosted" = ciphertext relay or NaaS only (§4), with disclosure of what a relay operator can see; never "MindLink funds/opens your channels".
 - **B6 [medium]** — Greenfield: no app repo/code exists; shell + node-embed + first-run funding is the critical path.
 - **B7 [medium]** — Payment-UX vs charter: funding is mandatory friction; hide Lightning, never remove the gate.
 - **B8 [medium]** — Group-crypto maturity: MLS 960–962 scaffolded; verify production-ready before multi-party meet / large rooms.
 - **B9 [low]** — AI-deferral discipline: keep participants as node_ids; do NOT build an agent runtime now.
-- **B10 [high]** — Only **Linux** node binaries are published (rc4 = `bitsov-linux-x86_64/aarch64`). A Mac/Windows app can't bundle a signed released node → **CS-1 is Linux-only**. Unblock by adding macOS + Windows targets to the protocol `release-cli` matrix and publishing signed binaries; until then desktop = Linux, and the app must never ship a Mac/Windows build without a verified signed node sidecar.
+- **B10 [landed — `v0.3.0-rc5`, 2026-09-03]** — rc4 published only Linux node binaries (`bitsov-linux-x86_64/aarch64`), so CS-1 shipped Linux-only. rc5 (and rc6, 2026-09-13) publish five signed CLI targets — linux x86_64/aarch64, darwin aarch64/x86_64, windows x86_64 — with `SHA256SUMS` signed by release key `B299…EF6E`; the app fetches macOS/Windows sidecars (PR #4) and the CS-1 smoke runs on Linux + macOS (Darwin SKIP retired, PR #9). **Residual:** Darwin/Windows binaries are not notarized / Authenticode-signed (Gatekeeper/SmartScreen block by default), and the standing rule holds — the app must never ship a Mac/Windows build without a verified signed node sidecar.
 
 ## 8. Coding sessions (hand to a builder)
 **bitsov-app:** CS-1 shell+node embed · CS-2 first-run fund · CS-3 rooms+conversation UI ·
