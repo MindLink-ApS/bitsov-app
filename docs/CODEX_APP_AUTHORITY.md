@@ -65,9 +65,11 @@ charter, the build is wrong.
 - **Mobile push is wake-only/opaque.** APNs/FCM payloads transit Apple/Google. Enforce as an
   acceptance criterion: **no plaintext and no relationship metadata in push payloads** — wake tokens
   only.
-- **Custody tiers honest.** T-HOSTED copy says "operator holds keys+plaintext — convenience, not
-  full sovereignty" verbatim; ciphertext-relay hosting preferred; hosted never blurred into a
-  sovereignty claim.
+- **Custody tiers honest.** T-HOSTED copy matches the genome charter line: "MindLink-hosted"
+  means **only** a ciphertext relay (keys/funds/node on the user's device) or NaaS (the user's
+  seed on a box the user controls) — never a key-holding hosted node, never "MindLink funds/opens
+  your channels"; disclose what a relay operator can see. FAIL any copy that offers a key-holding
+  hosted node or blurs hosting into a sovereignty claim.
 
 ## D. Sequencing rules (do not let order break the charter)
 - No mobile/paired client work merges before **G2 (transport confidentiality) + device pairing
@@ -94,17 +96,24 @@ Must-fix before next ship: <list>
 - **NO-GO** on any A violation or an unmet gate for the thing being shipped.
 
 ## G. Executable checks (run these — don't eyeball it)
-Pinned protocol: **release `v0.3.0-rc5`, source-ref `1ae4d8c9…`, repo `MindLink-ApS/BitSov-bitsov`**.
-Re-pin when the app upgrades the bundled node. Exact route contract: `bitsov-app/docs/API_READINESS.md`.
-Run from the app repo root; adjust the Website path to your checkout. **Any FAIL = that gate FAILs.**
+Pinned protocol: **release `v0.3.0-rc5`, source-ref `1ae4d8c9…`, repo `MindLink-ApS/BitSov-bitsov`**
+(published 2026-09-03; five signed CLI targets — linux x86_64/aarch64, darwin aarch64/x86_64,
+windows x86_64 — `SHA256SUMS` signed by release key `B299…EF6E`; Darwin/Windows binaries are not
+notarized / Authenticode-signed). `v0.3.0-rc6` is published (2026-09-13; fixes #56 P2P default
+port 9736, #57 embedded SQLite migrations) — the re-pin is tracked as Q4-APP-RC6 (PR #10).
+Re-pin here when the app upgrades the bundled node. Exact route contract: `bitsov-app/docs/API_READINESS.md`.
+Machine form of these checks: `scripts/authority-check.sh` (CI "Authority Check"; the "Build" job
+is the compile gate, PR #9). Run from the app repo root; adjust the Website path to your checkout.
+**Any FAIL = that gate FAILs.**
 
 **G1 — no forked / in-process protocol logic**
 ```bash
 # FAIL if any konsensus-* is a path/git dependency (must be a bundled BINARY, not a linked crate)
 ! grep -REn 'konsensus[-_][a-z]+[[:space:]]*=[[:space:]]*\{?[[:space:]]*(path|git)' src-tauri/Cargo.toml Cargo.toml 2>/dev/null
-test -x src-tauri/bin/konsensus-node* || { echo "FAIL: node not bundled as a binary resource"; false; }
+test -x src-tauri/bin/konsensus-* || { echo "FAIL: node not bundled as a binary resource"; false; }
 # pinned node integrity: this sha256 must equal the pinned release SHA256SUMS entry
-shasum -a 256 src-tauri/bin/konsensus-node* | awk '{print $1}'
+# (sidecar is bin/konsensus-<host triple>, fetched + GPG/sha256-verified by scripts/fetch-node-sidecar.sh)
+shasum -a 256 src-tauri/bin/konsensus-* | awk '{print $1}'
 ```
 **G2 — no non-loopback client before transport confidentiality exists**
 ```bash
@@ -138,9 +147,12 @@ test -n "$JWT" && curl -s -H "Authorization: Bearer $JWT" http://127.0.0.1:$PORT
 Report each as one line in the §E verdict: `<check> → PASS/FAIL`.
 
 ## F. Cadence & bootstrap
-- **Now:** the charter is set; no app code exists yet. First authority pass runs against **CS-1
-  (app shell + node embed)** — run §G's G1 checks (API-consumer, no crate linking, bundled node
-  integrity) before anything else, against `bitsov-app/docs/API_READINESS.md`.
+- **Now:** CS-1 (app shell + node embed + durable two-run identity — `SMOKE: PASS` +
+  `SMOKE: IDENTITY_STABLE`; PRs #1/#3) and CS-2 (first-run fund PR #6, restore/restart PR #8) are
+  **shipped** on main; the first authority pass ran against CS-1
+  (`docs/authority/2026-08-12-cs1-scaffold.md`). `scripts/authority-check.sh` and the compile
+  gate (PR #9) run on every PR. Next pass runs against **CS-3 (rooms + conversation UI)** — run
+  §G before anything else, against `bitsov-app/docs/API_READINESS.md`.
 - **Every milestone merge + weekly** while active. Re-read this file + the goal file + the readiness
   doc each pass; run §G; verify claims against the pinned protocol release, not memory.
 - Record each verdict (append to `bitsov-app/docs/authority/` — format §E).
