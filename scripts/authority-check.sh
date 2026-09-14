@@ -5,9 +5,10 @@ set -uo pipefail
 fail=0
 chk(){ if eval "$2"; then echo "  PASS  $1"; else echo "  FAIL  $1"; fail=1; fi; }
 # The gates audit SOURCE. Cargo/Tauri build output is generated, gitignored and never
-# shipped, but it embeds crate URLs and would otherwise fail G2 on any machine that has
-# run `cargo check` (CI checks out clean, so this only ever bit local runs).
-SRC_ONLY='--exclude-dir=target --exclude-dir=gen --exclude-dir=node_modules --exclude-dir=dist'
+# audited here, but it embeds crate URLs and would otherwise fail G2 on any machine that
+# has run `cargo check`. The separately signature-verified sidecar under bin/ also contains
+# protocol URLs; G2 below checks the app source, not the node binary's embedded strings.
+SRC_ONLY='--exclude-dir=target --exclude-dir=gen --exclude-dir=node_modules --exclude-dir=dist --exclude-dir=bin'
 png_icons_ok(){
   local found=0
   local f
