@@ -15,6 +15,14 @@ GNUPGHOME="$(mktemp -d)" bash scripts/fetch-node-sidecar.sh
 bash scripts/test-authority-source.sh
 npm run authority
 npm run tauri -- build --bundles app --no-sign --ci -- --locked
+
+APP=src-tauri/target/release/bundle/macos/BitSov.app
+test -x "$APP/Contents/MacOS/bitsov-app" &&
+test -x "$APP/Contents/MacOS/konsensus" &&
+test -s "$APP/Contents/Resources/icon.icns" &&
+plutil -lint "$APP/Contents/Info.plist" &&
+cmp src-tauri/bin/konsensus-aarch64-apple-darwin "$APP/Contents/MacOS/konsensus" &&
+echo 'PACKAGE: PASS (structure and sidecar integrity only)'
 ```
 
 Expected bundle: `src-tauri/target/release/bundle/macos/BitSov.app`.
@@ -44,27 +52,48 @@ Host: macOS 26.6.2, arm64; Rust 1.91.1; Node 22.19.0; Tauri CLI 2.11.4.
 - Frontend: TypeScript and Vite release build PASS.
 - Rust release build: PASS, `Finished release profile [optimized] ... in 4m 27s`.
   The produced app executable is Mach-O arm64. No executable was launched.
-- Mac package: FAIL (command exit 1), after compilation:
+- First Mac package attempt: FAIL (command exit 1), after compilation:
 
   ```text
   Bundling BitSov.app
   failed to bundle project: Failed to create app icon: `No matching IconType`
   ```
 
-  The configured icon is only `icons/icon.png` (1024 x 1024, RGBA). Valid PNG
+  The original configured icon was only `icons/icon.png` (1024 x 1024, RGBA). Valid PNG
   checks do not establish macOS icon conversion compatibility. The bundler left
   no usable `.app`; do not treat the release executable as a complete package.
 
-## Next bounded ticket
+## Approved follow-up: package PASS
 
-Generate a macOS ICNS from the existing brand PNG with Tauri's icon tool, wire
-that explicit icon into `bundle.icon`, and repeat the same unsigned package
-command once. Inspect the completed bundle and compare its sidecar bytes to the
-verified download. This is a proposed fix, not tested evidence from this spike.
-Do not expand into an installer, signing, or runtime work in that ticket.
+After explicit approval to continue, generated `icons/icon.icns` from the
+existing brand PNG with the locked Tauri CLI and added it to `bundle.icon`:
 
-This spike stopped after one build attempt. No public artifact was uploaded,
-and no Apple submission was attempted; the blocker precedes notarization.
+```bash
+npm run tauri -- icon src-tauri/icons/icon.png --output /tmp/bitsov-generated-icons
+```
+
+Only the generated `icon.icns` was brought into the repository; other platform
+icons and the existing source PNG were not changed.
+
+The second package command exited 0; cached Rust compilation took 10.77 seconds.
+Tauri reported `Finished 1 bundle`. Static inspection established:
+
+- A complete 66 MiB `BitSov.app`, with both executable files, icon, and Info.plist.
+- Both executables are Mach-O arm64; bundled sidecar matches the verified rc6
+  binary byte-for-byte (`cmp` exit 0).
+- Info.plist names `bitsov-app`, `icon.icns`, and identifier `tech.mindlink.bitsov`.
+- `otool -L` lists only Apple system libraries/frameworks for both executables,
+  with no Homebrew/local build dependency paths in that direct dependency list.
+- No Developer ID signing: `codesign -dvv` reports a linker ad-hoc signature,
+  no TeamIdentifier, no sealed resources, and an unbound Info.plist.
+- Authority and all three source-gate regression cases still PASS.
+
+The second attempt closes the icon packaging blocker, not the runtime milestone.
+No executable was launched. No installer/public artifact was uploaded or Apple
+submission attempted. Clean-machine startup, supported macOS version, runtime
+identity/recovery, Developer ID signing, and notarization remain separate gates.
+In particular, the default Info.plist says macOS 10.13 while the arm64 sidecar's
+Mach-O minimum is 11.0; this is not evidence of support for either version.
 
 Signing/notarization ownership remains with Rasmus. This spike does not inspect
 private signing identities, enroll an account, submit to Apple, or establish any
