@@ -54,7 +54,7 @@ npm run tauri dev
   carries a token, mnemonic, or private key, and the app never asks for the seed
   (`/identity/mnemonic` needs a fresh signed challenge and is not called). The recovery-phrase
   input is write-only: masked, `autocomplete="off"`, cleared the moment it is submitted.
-- **Pinned contract** — BitSov-bitsov `v0.3.0-rc6` / `c22414e`. The `funding-seen` literal lives
+- **Pinned contract** — BitSov-bitsov `v0.3.0-rc7` / `958e399`. The `funding-seen` literal lives
   in `src-tauri/src/main.rs` only; the renderer reads a derived `funded` boolean.
 
 `scripts/cs2-local-smoke.sh` enforces all of the above statically, and

@@ -36,4 +36,11 @@ printf '\0https://example.com/api/v1\0' > src-tauri/bin/konsensus-aarch64-apple-
 expect_gate 0 'downloaded binary is outside the app source gate'
 printf '\n// https://example.com/api/v1\n' >> src-tauri/src/main.rs
 expect_gate 1 'non-loopback URL in app Rust source is still rejected'
+cp "$ROOT/src-tauri/src/main.rs" src-tauri/src/main.rs
+mkdir -p src-tauri/src/bin src/bin
+printf 'fn main() { let _ = "https://example.com/api/v1"; }\n' > src-tauri/src/bin/helper.rs
+expect_gate 1 'nested Rust bin directory remains in the source gate'
+rm src-tauri/src/bin/helper.rs
+printf 'const endpoint = "https://example.com/api/v1";\n' > src/bin/tool.ts
+expect_gate 1 'nested frontend bin directory remains in the source gate'
 echo 'AUTHORITY SOURCE TESTS: PASS'

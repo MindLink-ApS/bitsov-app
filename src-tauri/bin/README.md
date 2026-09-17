@@ -1,12 +1,14 @@
 # Bundled node binary (Tauri sidecar) — Gate G1
 
 The app runs the **released** BitSov node as a **sidecar binary**; it does not link the
-protocol crates, and the binary is **never committed** — it is fetched + verified at build
-time (see `scripts/fetch-node-sidecar.sh`). Sidecars are named with the Rust target triple
+protocol crates, and the binary is **never committed**. Run the fetch/verify step immediately
+before a package build (see `scripts/fetch-node-sidecar.sh`). The bundler itself does not yet
+re-verify a pre-existing sidecar; closing that gap is required before public distribution.
+Sidecars are named with the Rust target triple
 Tauri's resolver expects: `bin/konsensus-<target-triple>[.exe]`.
 
-## Hosts published at `v0.3.0-rc6`
-`v0.3.0-rc6` publishes Linux, macOS and Windows node binaries, so all three hosts can
+## Hosts published at `v0.3.0-rc7`
+`v0.3.0-rc7` publishes Linux, macOS and Windows node binaries, so all three hosts can
 produce a sidecar:
 
 | host | release asset | installed sidecar |
@@ -26,10 +28,10 @@ runs on Linux and macOS (the Darwin `SKIP` was retired with `v0.3.0-rc5`) and st
 ```bash
 ./scripts/fetch-node-sidecar.sh     # downloads the pinned binary for this host, verifies GPG + sha256, installs it
 ```
-The script pins `v0.3.0-rc6` and verifies, fail-closed, that `SHA256SUMS.asc` is a valid
+The script pins `v0.3.0-rc7` and verifies, fail-closed, that `SHA256SUMS.asc` is a valid
 signature by the pinned release key `B299274C…`; if that key is not in your keyring it imports
 `RELEASE_KEY.asc` from BitSov-bitsov `main` into a throwaway keyring (fingerprint checked against
-the pin; your keyring is never written). rc6 is a published pre-release, so any `gh` reaches it,
+the pin; your keyring is never written). rc7 is a published pre-release, so any `gh` reaches it,
 and nothing here publishes anything. Record the sha256 in the authority
-ledger; `scripts/authority-check.sh` and `CODEX_APP_AUTHORITY.md §G` re-check integrity. The
+ledger; `scripts/authority-check.sh` checks source/configuration, not sidecar integrity. The
 released artifact is the `konsensus` binary (CLI `konsensus init` / `konsensus start`).

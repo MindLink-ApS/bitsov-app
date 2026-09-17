@@ -32,7 +32,7 @@ use tauri_plugin_shell::ShellExt;
 /// confidential remote transport + delegated auth exist.
 const API_BASE: &str = "http://127.0.0.1:3141/api/v1";
 
-/// Pinned onboarding contract (BitSov-bitsov `v0.3.0-rc6` / `c22414e`): the funding
+/// Pinned onboarding contract (BitSov-bitsov `v0.3.0-rc7` / `958e399`): the funding
 /// state machine moves to this step once the node has observed the required deposit
 /// in its own wallet. Kept host-side so the renderer never re-implements the contract.
 const FUNDING_SEEN: &str = "funding-seen";

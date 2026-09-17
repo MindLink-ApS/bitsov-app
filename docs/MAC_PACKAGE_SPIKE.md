@@ -98,3 +98,28 @@ Mach-O minimum is 11.0; this is not evidence of support for either version.
 Signing/notarization ownership remains with Rasmus. This spike does not inspect
 private signing identities, enroll an account, submit to Apple, or establish any
 account/notarization lead time. The website download gate remains closed.
+
+## rc7 re-pin evidence: 2026-09-17
+
+Follow-up to PR #13, based on its reviewed head `0889f17`. Historical rc6
+results above remain unchanged. The commands above now fetch the rc7 pin.
+
+- Fresh fetch of `v0.3.0-rc7` Darwin arm64: pinned GPG signature and SHA256
+  verification PASS, using a temporary keyring (no personal signing keys).
+- `npm run tauri -- build --bundles app --no-sign --ci -- --locked`: exit 0,
+  one `BitSov.app` produced; TypeScript, Vite, and Rust release build passed.
+- Package executables and icon present; `plutil -lint` PASS; both executables
+  Mach-O arm64. `cmp` confirms the packaged sidecar matches the freshly
+  verified download. Direct `otool -L` dependencies are Apple system paths.
+- `npm run authority`: PASS. `bash scripts/test-authority-source.sh`: five
+  cases PASS, including rejection of external API URLs in `src-tauri/src/bin/`
+  and `src/bin/`. Only the exact `src-tauri/bin/` sidecar path is exempt.
+- No app or node was launched locally. Linux runtime evidence belongs to the
+  PR's sidecar CI job, which now tests rc7's untouched init defaults. Retired
+  rc6 endpoint override variables cause the smoke script to fail explicitly.
+
+This is an internal, unsigned package check, not a public distribution or
+macOS runtime PASS. The bundler still does not independently verify an existing
+sidecar: package-time rejection of stale/tampered binaries remains a separate
+pre-public-download gate. Developer ID/notarization, minimum-OS alignment, and
+isolated Mac runtime/recovery remain open.
