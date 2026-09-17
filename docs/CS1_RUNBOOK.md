@@ -4,7 +4,7 @@
 identity screen → authority verdict. No funding, rooms, messaging, mobile, calls, hosted, AI.
 
 ## Prerequisites
-- **Linux** (x86_64 or aarch64) — the only OS with a signed released node binary today.
+- **Linux** (x86_64/aarch64) or **macOS** (arm64/x86_64) for this smoke.
 - Rust stable + Tauri v2 system deps (webkit2gtk, etc.). Node 20+. `gh` + `gpg` for the
   signed sidecar fetch: it verifies against the pinned release key and, if that key is not in
   your keyring, imports `RELEASE_KEY.asc` from BitSov-bitsov into a throwaway keyring.
@@ -14,7 +14,7 @@ identity screen → authority verdict. No funding, rooms, messaging, mobile, cal
 npm ci                              # uses the committed package-lock.json
 ./scripts/fetch-node-sidecar.sh     # fetch + VERIFY the signed node, place it as the sidecar
 scripts/authority-check.sh          # must print AUTHORITY: PASS before you build
-npm run smoke:cs1                   # Linux local smoke: sidecar -> /auth/local -> identity node_id
+npm run smoke:cs1                   # isolated Linux/Mac host only: starts a temporary node on standard ports
 npm run tauri dev                   # spawns node → /health → /auth/local → identity screen
 ```
 A clean `cargo check` fails until the sidecar is fetched (the node binary is intentionally
@@ -30,11 +30,13 @@ both lockfiles (`package-lock.json`, `src-tauri/Cargo.lock`) are committed.
 ## Boundary (do not break)
 Node = bundled binary, no `konsensus-*` crate dep (G1). Control plane loopback-only (G2).
 Shell capability is scoped to the `konsensus` sidecar only; CSP is set (not null). Node CLI +
-API paths pinned to BitSov-bitsov `v0.3.0-rc6 / c22414e`. `scripts/authority-check.sh` enforces all of this.
+API paths pinned to BitSov-bitsov `v0.3.0-rc7 / 958e399`. `scripts/authority-check.sh` checks the app-source boundary;
+`fetch-node-sidecar.sh` verifies sidecar authenticity and integrity.
 
 ## Local pass/fail smoke
 
-Run on Linux after the signed sidecar is available:
+Run on an isolated Linux or macOS machine after the signed sidecar is available.
+Do not run against the operator's live app: the smoke uses standard ports, including 3141.
 
 ```bash
 npm run smoke:cs1
@@ -65,17 +67,16 @@ Two splints carried since CS-1.5.1 are gone: the node fixed both at the root in 
   placeholder that existed only for `resources` are **deleted**.
 
 `konsensus start` now runs `konsensus.toml` exactly as `init` wrote it; the host never edits it.
-Proof: `npm run smoke:cs1` boots rc6 with zero config edits; the non-gating `sidecar` CI job
+Acceptance: `npm run smoke:cs1` must boot rc7 with zero config edits; the non-gating `sidecar` CI job
 runs the same smoke against the published release on every PR.
 
-One caveat that is not a splint (BitSov-bitsov #66): rc6 `init` writes mempool.space as the only
-Esplora endpoint, and LDK fail-closes at `start` if ldk-node's fee-estimate fetch from that
-endpoint fails. It does from GitHub runners, even though the provider's own 2xx probe passes
-there, so a fallback alone is never consulted. On such a network set
-`CS1_SMOKE_ESPLORA_PRIMARY=https://blockstream.info` (and optionally
-`CS1_SMOKE_ESPLORA_FALLBACK=https://mempool.space`) and the smoke writes the same
-`[lightning]`/`[chain]` endpoint keys a user would put in `konsensus.toml`, printing one
-`environment-forced chain fallback` line. Unset, the config is never touched.
+rc7 fixes #66: fresh init writes a primary/fallback pair, and startup validates
+fee-estimate payloads before selecting an endpoint. The old rc6
+`CS1_SMOKE_ESPLORA_PRIMARY` / `CS1_SMOKE_ESPLORA_FALLBACK` overrides are retired:
+the smoke rejects them rather than silently testing a modified configuration.
+Existing operator configurations retain their previous endpoints. Startup
+selection is not runtime failover; both providers being unavailable may still
+prevent startup. Do not mask a failed default-config smoke with an endpoint patch.
 
 ## CS-1.1 — durable two-run identity contract
 

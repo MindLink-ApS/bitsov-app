@@ -18,3 +18,6 @@ jobs:
 
       - name: Run app authority gate
         run: scripts/authority-check.sh
+
+      - name: Test source gate with a downloaded sidecar present
+        run: bash scripts/test-authority-source.sh

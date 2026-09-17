@@ -81,7 +81,7 @@ jobs:
   # the fetched node exactly as `init` configured it — zero port or migrations edits — and
   # proves the identity is durable across a restart.
   sidecar:
-    name: Sidecar (fetch + verify rc6, CS-1 smoke) — not a merge gate
+    name: Sidecar (fetch + verify rc7, CS-1 smoke) — not a merge gate
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -110,17 +110,7 @@ jobs:
             head -c 400 body.tmp 2>/dev/null; echo; rm -f body.tmp
           done || true
 
-      # rc6 `init` writes mempool.space as the only Esplora endpoint (no fallback). From GitHub
-      # runners the provider's startup probe (any 2xx on /fee-estimates) PASSES on mempool.space,
-      # yet ldk-node's own fee-estimate fetch on that same endpoint fails and `start` fail-closes
-      # ("Failed to update fee rate estimates") — so a configured fallback alone is never consulted
-      # (BitSov-bitsov #66: rc7 init should write a fallback; the probe should match what LDK
-      # requires). Point the runner's node at blockstream.info as primary, mempool.space as
-      # fallback — the same `[lightning]`/`[chain]` keys a user edits in konsensus.toml; the smoke
-      # applies them only because these envs are set. A config choice, not a code splint — ports
-      # and migrations stay exactly as init wrote them.
-      - name: CS-1 smoke — boot rc6 from init defaults (+ chain endpoints, #66), durable identity
-        env:
-          CS1_SMOKE_ESPLORA_PRIMARY: https://blockstream.info
-          CS1_SMOKE_ESPLORA_FALLBACK: https://mempool.space
+      # rc7 fixes #66 at the node: fresh init writes the provider pair and the
+      # probe validates fee data. Test those defaults with NO endpoint override.
+      - name: CS-1 smoke — boot rc7 from untouched init defaults, durable identity
         run: bash scripts/cs1-local-smoke.sh

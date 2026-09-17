@@ -1,15 +1,19 @@
 # API_READINESS — the node contract CS-1..CS-6 build against
 
-**Pinned protocol:** release **`v0.3.0-rc6`**, source-ref **`c22414e`**,
+**Pinned protocol:** release **`v0.3.0-rc7`**, source-ref **`958e3997f9969497c1d270f557282b9bb591fe85`**,
 repo `MindLink-ApS/BitSov-bitsov`. All paths below were verified **present in this source**
-(route grep at `c22414e`, 2026-09-13). Re-verify on every node upgrade and re-pin this header.
+(route grep at `958e399`, 2026-09-17; API/onboarding source unchanged from rc6).
+Re-verify on every node upgrade and re-pin this header.
+rc7 validates fee-estimate payloads and writes a primary/fallback pair on fresh init;
+existing configurations retain their chosen/default providers. This is startup selection,
+not continuous failover.
 rc6 fixed at the root the two rc5 boot defects the app had splinted around (#56 P2P/Lightning
 port collision, #57 unshipped SQLite migrations; PR #61): `konsensus start` boots the `init`
 config with zero edits and needs no `KONSENSUS_SQLITE_MIGRATIONS_DIR`.
 Base URL: `http://127.0.0.1:$PORT/api/v1` (loopback only — Gate G2). Auth: `Authorization: Bearer <jwt>`
 on REST; `bitsov.v1` + `bitsov.jwt.<token>` subprotocols on `/ws`.
 
-## MVP contract — "fund your node and start talking" (all VERIFIED PRESENT at c22414e)
+## MVP contract — "fund your node and start talking" (all VERIFIED PRESENT at 958e399)
 | MVP step | Method | Path | Purpose | Static |
 |---|---|---|---|---|
 | Boot/auth | POST | `/auth/local` | mint JWT for the loopback (desktop) app | ✅ |
@@ -43,7 +47,7 @@ on REST; `bitsov.v1` + `bitsov.jwt.<token>` subprotocols on `/ws`.
 ## Verification
 **Static (no running node) — re-pin check:**
 ```bash
-git -C <BitSov-bitsov checkout> checkout c22414e
+git -C <BitSov-bitsov checkout> checkout 958e3997f9969497c1d270f557282b9bb591fe85
 grep -rhoE '"/api/v1/[^"]+"' crates/konsensus-api/src | tr -d '"' | sort -u
 # every path in the MVP table above must appear. String-literal grep on purpose: the
 # room-member routes are declared across lines, which a single-line `.route("…")` grep misses.

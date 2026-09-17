@@ -17,10 +17,14 @@
 # edits. The node's init defaults are non-colliding and its migrations are embedded since
 # v0.3.0-rc6 (BitSov-bitsov #56/#57, fixed in #61).
 #
-# Optional, for CI / throttled networks only (BitSov-bitsov #66): CS1_SMOKE_ESPLORA_FALLBACK
-# and CS1_SMOKE_ESPLORA_PRIMARY set the chain endpoints a user would put in konsensus.toml
-# (see apply_chain_env). With neither set, the config is never touched.
+# rc7 fixes #66 at the node. This smoke tests fresh init defaults without the
+# old rc6 endpoint overrides; existing operator data/config is never used.
 set -euo pipefail
+
+if [ -n "${CS1_SMOKE_ESPLORA_PRIMARY:-}${CS1_SMOKE_ESPLORA_FALLBACK:-}" ]; then
+  echo "SMOKE: FAIL - rc6 endpoint overrides are retired; unset CS1_SMOKE_ESPLORA_PRIMARY and CS1_SMOKE_ESPLORA_FALLBACK to test rc7 defaults." >&2
+  exit 1
+fi
 
 PORT="${PORT:-3141}"
 BASE="http://127.0.0.1:${PORT}/api/v1"
@@ -79,35 +83,6 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Chain-endpoint choice, applied right after init ONLY when the env is set (BitSov-bitsov #66).
-# rc6 `init` writes mempool.space as the sole Esplora endpoint with no fallback, and LDK
-# fail-closes at `start` when ldk-node's fee-estimate fetch from that endpoint fails -- which
-# it does from GitHub runners even though the provider's own 2xx probe passes there, so a
-# configured fallback alone is never consulted. The node already supports the keys a user
-# would set in konsensus.toml: `[lightning].esplora_url` / `esplora_url_fallback` (with /api;
-# LdkProvider::new probes the primary, then falls back) and `[chain].api_url` /
-# `esplora_url_fallback` (base URL, no /api). This is that config choice, not a code splint;
-# it never runs on a dev machine that leaves the env unset.
-#   CS1_SMOKE_ESPLORA_PRIMARY=https://blockstream.info   -> replaces the primary in both
-#   CS1_SMOKE_ESPLORA_FALLBACK=https://mempool.space     -> adds esplora_url_fallback to both
-apply_chain_env() {
-  local primary="${CS1_SMOKE_ESPLORA_PRIMARY:-}" fallback="${CS1_SMOKE_ESPLORA_FALLBACK:-}"
-  [ -n "${primary}${fallback}" ] || return 0
-  primary="${primary%/}"; fallback="${fallback%/}"
-  awk -v p="$primary" -v f="$fallback" '
-    /^[[:space:]]*\[/ {
-      s=$0; print
-      if (f != "" && s == "[lightning]") print "esplora_url_fallback = \"" f "/api\""
-      if (f != "" && s == "[chain]")     print "esplora_url_fallback = \"" f "\""
-      next
-    }
-    p != "" && s == "[lightning]" && /^[[:space:]]*esplora_url[[:space:]]*=/ { print "esplora_url = \"" p "/api\""; next }
-    p != "" && s == "[chain]"     && /^[[:space:]]*api_url[[:space:]]*=/     { print "api_url = \"" p "\""; next }
-    { print }
-  ' "$CONFIG" > "${CONFIG}.tmp" && mv "${CONFIG}.tmp" "$CONFIG"
-  echo "SMOKE: environment-forced chain fallback (genome #66): primary=${primary:-as written} fallback=${fallback:-none}"
-}
-
 # init-if-needed -- mirrors main.rs `if !config.exists()`: run 1 inits, run 2 reuses.
 ensure_init() {
   if [ -s "$CONFIG" ]; then
@@ -121,7 +96,6 @@ ensure_init() {
     sed -n '1,120p' "$LOG_FILE" >&2
     exit 1
   fi
-  apply_chain_env
 }
 
 # Start the (already-init'd) node, probe /health -> /auth/local -> /identity. Runs in the PARENT

@@ -9,7 +9,7 @@ LANE: BitSov app factory (`MindLink-ApS/bitsov-app`)
 
 ## QUEUE-HEAD
 
-**Next reversible factory loop after CS-2** (CS-2 complete on main: PR #6 `eafb30d` fund flow + PR #8 `98bb49d` restore/restart; CI compile gate PR #9 `0052412`). Open factory PRs: #10 (Q4-APP-RC6 rc6 re-pin) + Q5b-APP-DOCS (this reconciliation).
+**rc7 app re-pin and internal Mac package check** (2026-09-17). PR #10 (rc6 re-pin) and #11 (docs reconciliation) are merged. PR #13 (Mac package spike) awaits human merge; the rc7 follow-up builds on its reviewed head `0889f17`. Claude independently reviews the follow-up. No public package, live runtime start, or mill arming.
 
 Runs on Linux + macOS since `v0.3.0-rc5` (Darwin SKIP retired, PR #9). Publish stays human. No PriceOpen, no live relay, no cloud/seed.
 
@@ -17,15 +17,16 @@ Runs on Linux + macOS since `v0.3.0-rc5` (Darwin SKIP retired, PR #9). Publish s
 
 | What | SHA / ref |
 |---|---|
-| origin/main | `0052412` — PR #9 CI compile gate; CS-2 = PR #6 `eafb30d` first-run fund flow + PR #8 `98bb49d` restore/restart |
-| Protocol pin | `v0.3.0-rc5` source-ref `1ae4d8c9…` (`MindLink-ApS/BitSov-bitsov`) — rc5 published 2026-09-03; rc6 published 2026-09-13 (re-pin tracked as Q4-APP-RC6, PR #10) |
-| Local node | `node_id` `93acaebf…` on NOVA loopback |
-| Open factory PRs | 0 |
+| Main baseline | `93c56e0a` at start of this follow-up; includes #10 and #11 |
+| Protocol pin | This branch: `v0.3.0-rc7`, source `958e3997`; main baseline uses rc6. rc7 published 2026-09-15 |
+| Internal Mac package | rc7 build and sidecar byte-match PASS; see `docs/MAC_PACKAGE_SPIKE.md`. No local runtime test |
+| Local node | Not inspected or changed in this ticket; no current health/identity claim |
+| Open factory PRs | Query GitHub before dispatch; do not rely on a stored count |
 
 ## BLOCKED
 
 - **Darwin / Windows notarization** — signed macOS/Windows node sidecars ship since `v0.3.0-rc5` (B10 landed; Darwin SKIP retired, PR #9), but they are GPG-signed only, not notarized / Authenticode-signed — Gatekeeper/SmartScreen block by default. No Mac/Win app build ships without a verified signed node sidecar; publish stays human.
-- **Publish** — human-only. Genome rc5 (2026-09-03) and rc6 (2026-09-13) are published; the app itself is unpublished (`/bitsov/app` stays a waitlist, G5).
+- **Publish** — human-only. Genome rc7 is published; the app itself is unpublished (`/bitsov/app` stays a waitlist, G5). Package-time sidecar verification must be enforced before public downloads.
 
 ## HUMAN
 
@@ -35,8 +36,8 @@ Publish stays human. No PriceOpen. No live relay. No cloud/seed.
 
 | Owner | Loop | Next reversible action |
 |---|---|---|
-| Atlas / factory | Next factory loop after CS-2 | Pick the next reversible CS step; not publish |
-| Human | Publish / rc6 re-pin | rc5 + rc6 published; app publish stays human; rc6 re-pin lands via Q4-APP-RC6 (PR #10) |
+| Codex / Claude | rc7 re-pin | Code, CI smoke, internal package evidence, then independent Claude review |
+| Human | Merge / publish | Review #13 and its dependent rc7 follow-up; no public app release in this ticket |
 
 ## HUDDLE
 
