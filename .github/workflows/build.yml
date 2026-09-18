@@ -80,7 +80,7 @@ jobs:
       # gtk/webkit toolchain.
       - name: Rust — stop-policy behaviour tests
         working-directory: src-tauri
-        run: cargo test --locked stop_policy_tests
+        run: cargo test --locked stop_adapter_tests
 
   # NOT a merge gate: keep this job OUT of the required status checks. It depends on the
   # genome's published release and on network, not on this repo's source. It exercises the

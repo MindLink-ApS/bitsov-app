@@ -32,18 +32,24 @@ if awk '/fn stop_supervised_node/,/^}/' "$MAIN" | grep -qE 'lsof|-iTCP|3141'; th
 else
   ok "teardown targets the owned child only, never a port holder"
 fi
-# The ORDERING is proven behaviourally by stop_policy_tests in main.rs. This only
-# asserts the binding: that stop_supervised_node actually routes through the tested
-# policy rather than signalling on its own (a bypass would keep those tests green).
-if awk '/fn stop_supervised_node/,/^}/' "$MAIN" | grep -q 'graceful_stop_policy'; then
-  ok "teardown routes through the behaviourally-tested graceful_stop_policy"
+# Signal ordering and escalation are proven behaviourally by stop_adapter_tests
+# against real subprocesses. These guards cover what those tests cannot: that the
+# adapter keeps using the ownership-safe primitive rather than a raw pid.
+if awk '/fn stop_supervised_node/,/^}/' "$MAIN" | grep -q 'send_signal'; then
+  ok "teardown signals through SharedChild (waitid — pid is never freed for reuse)"
 else
-  no "stop_supervised_node must call graceful_stop_policy — otherwise its unit tests prove nothing about it"
+  no "stop_supervised_node must signal via SharedChild::send_signal, not a raw pid"
 fi
-if awk '/fn stop_supervised_node/,/^}/' "$MAIN" | grep -q 'pid_is_our_sidecar'; then
-  ok "ownership is proven before any raw signal (pid reuse)"
+if grep -qE 'child: Mutex<Option<Arc<SharedChild>>>' "$MAIN"; then
+  ok "the node handle is owned as SharedChild, not a bare pid holder"
 else
-  no "stop_supervised_node must verify pid ownership before signalling"
+  no "the supervised child must be held as Arc<SharedChild> for safe signalling"
+fi
+# A raw kill(1) on a stored pid is the exact race this ticket removed.
+if awk '/fn stop_supervised_node/,/^}/' "$MAIN" | grep -qE '"kill"|kill -TERM'; then
+  no "teardown must not shell out to kill(1) on a pid — that reintroduces the reuse race"
+else
+  ok "no raw kill(1) on a pid in the teardown path"
 fi
 
 # ---- 2. bundle test --------------------------------------------------------------

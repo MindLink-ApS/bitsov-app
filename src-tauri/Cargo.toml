@@ -9,6 +9,12 @@ default-run = "bitsov-app"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+# app #16: own the node process through the same primitive tauri-plugin-shell uses
+# internally. SharedChild waits with POSIX waitid, which reaps WITHOUT freeing the
+# pid for reuse, so `send_signal` is safe against the pid-reuse race that a
+# check-then-`kill(2)` adapter cannot close.
+shared_child = "1.1"
+libc = "0.2"
 tauri = { version = "2", features = [] }
 tauri-plugin-shell = "2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
@@ -19,3 +25,6 @@ tokio = { version = "1", features = ["time", "rt", "macros"] }
 # GATE G1 (docs/ARCHITECTURE_BOUNDARY.md): NO konsensus-* dependency here — the node
 # is a bundled BINARY (see tauri.conf.json `externalBin`), never a linked crate. A
 # konsensus-* path/git dep in this file is an automatic G1 FAIL (CODEX_APP_AUTHORITY.md §G).
+
+[dev-dependencies]
+tempfile = "3"

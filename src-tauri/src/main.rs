@@ -19,12 +19,13 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+use shared_child::unix::SharedChildExt;
+use shared_child::SharedChild;
 use tauri::{AppHandle, Manager, RunEvent, State};
-use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
 
 /// Node API bind — konsensus ApiConfig `default_api_addr()` = 127.0.0.1:3141.
@@ -48,16 +49,18 @@ const REMINT_COOLDOWN: Duration = Duration::from_secs(30);
 /// before any raw signal is sent (app #16 review, finding 1).
 const SIDECAR_BIN: &str = "konsensus";
 
-const NODE_SHUTDOWN_POLL: Duration = Duration::from_millis(250);
-const NODE_SHUTDOWN_BUDGET_SECS: u32 = 30;
-const NODE_SHUTDOWN_WAIT_STEPS: u32 = NODE_SHUTDOWN_BUDGET_SECS * 4;
+/// Must exceed the node's own shutdown cost: it allows up to 15s for the Lightning
+/// backend alone so LDK can flush ChannelMonitor persistence.
+const NODE_SHUTDOWN_BUDGET: Duration = Duration::from_secs(30);
 
 struct NodeState {
     ready: Mutex<bool>,
     node_id: Mutex<Option<String>>,
     error: Mutex<Option<String>>,
     /// Supervised node process; killed on app exit so no orphan node is left running.
-    child: Mutex<Option<CommandChild>>,
+    /// The supervised node, owned through `SharedChild` so signalling stays
+    /// synchronised with reaping (app #16 review).
+    child: Mutex<Option<Arc<SharedChild>>>,
     /// The loopback JWT lives here and nowhere else (see the KEYS note above).
     token: Mutex<Option<String>>,
     /// The supervised node's `konsensus.toml`. Captured at bootstrap so a restore can
@@ -65,7 +68,7 @@ struct NodeState {
     config: Mutex<Option<PathBuf>>,
     /// Last throttled re-mint attempt, for `REMINT_COOLDOWN`.
     last_remint: Mutex<Option<Instant>>,
-    /// Set when the supervised sidecar emits `CommandEvent::Terminated`.
+    /// Set by the wait thread when the supervised node exits.
     sidecar_terminated: AtomicBool,
     http: reqwest::Client,
 }
@@ -183,33 +186,87 @@ async fn init_node(app: &AppHandle, data_dir: &Path) -> Result<(), String> {
 /// Start + supervise `konsensus start`. Never re-inits: the caller guarantees the
 /// config (and therefore the identity) already exists. The config is started exactly
 /// as `init` wrote it — this host never edits it.
+/// Resolve the bundled sidecar exactly as `tauri-plugin-shell` does, so the path is
+/// identical in dev and in a bundle: next to the current executable, stepping out of
+/// `deps/` when running under a test harness.
+fn sidecar_path(name: &str) -> Result<PathBuf, String> {
+    let exe = tauri::utils::platform::current_exe()
+        .map_err(|e| format!("cannot resolve current exe: {e}"))?;
+    let dir = exe
+        .parent()
+        .ok_or_else(|| "current exe has no parent".to_string())?;
+    let base = if dir.ends_with("deps") {
+        dir.parent().unwrap_or(dir)
+    } else {
+        dir
+    };
+    let mut path = base.join(name);
+    if cfg!(windows) && path.extension().is_none() {
+        path.set_extension("exe");
+    }
+    Ok(path)
+}
+
+/// Start the node and take ownership of the process.
+///
+/// We spawn through `SharedChild` rather than the shell plugin (app #16 review). The
+/// plugin hands back only a pid and a SIGKILL, and it reaps on its own thread — so a
+/// graceful `kill -TERM <pid>` from us could land on a reused pid. `SharedChild` waits
+/// with POSIX `waitid`, which does NOT free the pid for reuse, making `send_signal`
+/// safe by construction rather than by a check we race against.
+///
+/// Everything the plugin gave us is preserved explicitly: stdout/stderr are drained to
+/// the app log, and a wait thread records termination for the health fail-fast.
 fn spawn_node(app: &AppHandle, config: &Path) -> Result<(), String> {
-    let cmd = app
-        .shell()
-        .sidecar("konsensus")
-        .map_err(|e| format!("cannot resolve node sidecar: {e}"))?
-        .args(["start", "--config", &config.to_string_lossy()]);
+    let program = sidecar_path(SIDECAR_BIN)?;
+    let mut cmd = std::process::Command::new(&program);
+    cmd.args(["start", "--config", &config.to_string_lossy()])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
     let state = app.state::<NodeState>();
     state.sidecar_terminated.store(false, Ordering::SeqCst);
-    let (mut rx, child) = cmd.spawn().map_err(|e| format!("node start failed: {e}"))?;
-    *state.child.lock().unwrap() = Some(child);
+    let child =
+        Arc::new(SharedChild::spawn(&mut cmd).map_err(|e| format!("node start failed: {e}"))?);
+    *state.child.lock().unwrap() = Some(child.clone());
 
-    // Drain node stdout/stderr to the app log (never render node plaintext in the UI).
-    // Terminated is the wait_for_health fail-fast signal: do not burn 60s on a dead child.
-    let handle = app.clone();
-    tauri::async_runtime::spawn(async move {
-        while let Some(event) = rx.recv().await {
-            if let CommandEvent::Terminated(payload) = event {
-                eprintln!("[node] terminated: {:?}", payload);
-                handle
-                    .state::<NodeState>()
-                    .sidecar_terminated
-                    .store(true, Ordering::SeqCst);
-                break;
-            }
+    // Drain node output to the app log — never render node plaintext in the UI.
+    for (label, pipe) in [
+        ("out", child.take_stdout().map(PipeKind::Out)),
+        ("err", child.take_stderr().map(PipeKind::Err)),
+    ] {
+        if let Some(pipe) = pipe {
+            std::thread::spawn(move || {
+                let reader: Box<dyn std::io::Read + Send> = match pipe {
+                    PipeKind::Out(p) => Box::new(p),
+                    PipeKind::Err(p) => Box::new(p),
+                };
+                let reader = std::io::BufReader::new(reader);
+                for line in std::io::BufRead::lines(reader).map_while(Result::ok) {
+                    eprintln!("[node/{label}] {line}");
+                }
+            });
         }
+    }
+
+    // Exit detection: the fail-fast signal for wait_for_health, so a dead child does
+    // not burn the full health budget.
+    let handle = app.clone();
+    let waiter = child.clone();
+    std::thread::spawn(move || {
+        let status = waiter.wait();
+        eprintln!("[node] terminated: {status:?}");
+        handle
+            .state::<NodeState>()
+            .sidecar_terminated
+            .store(true, Ordering::SeqCst);
     });
     Ok(())
+}
+
+enum PipeKind {
+    Out(std::process::ChildStdout),
+    Err(std::process::ChildStderr),
 }
 
 async fn health_ok(state: &NodeState) -> bool {
@@ -302,7 +359,7 @@ async fn restart_node(app: &AppHandle, expected_node_id: &str) -> Result<bool, S
 
     let previous = state.child.lock().unwrap().take();
     if let Some(child) = previous {
-        let _ = child.kill();
+        stop_supervised_node(&child, NODE_SHUTDOWN_BUDGET);
         for _ in 0..4 {
             if !health_ok(&state).await {
                 break;
@@ -657,129 +714,57 @@ async fn identity_restore(
     })
 }
 
-/// What a stop attempt actually did. Returned so the policy can be asserted in
-/// tests rather than inferred from source text (app #16 review, finding 3).
+/// What a stop attempt actually did. Returned so the REAL adapter can be asserted
+/// against disposable subprocesses, not just an injectable policy (app #16 review).
 #[derive(Debug, PartialEq, Eq)]
 enum StopOutcome {
-    /// The child was already reaped — nothing was signalled.
+    /// The process had already exited — nothing was signalled.
     AlreadyExited,
-    /// The pid is no longer ours (exited and reused). Nothing was signalled.
-    NotOwned,
     /// SIGTERM was sent and the process exited within the budget.
     TermedAndExited,
-    /// SIGTERM was sent, the budget elapsed, SIGKILL was the fallback.
+    /// SIGTERM was sent, the budget elapsed, SIGKILL finished the job.
     Killed,
 }
 
-/// The stop policy, with every effect injected so it can be unit-tested without
-/// spawning a process or signalling anything.
+/// Stop the node this app spawned: SIGTERM, bounded wait, SIGKILL as a last resort.
 ///
-/// Order matters and is the point of the test: never signal a pid we cannot prove
-/// is still our child; SIGTERM first so the node can flush; SIGKILL only after the
-/// budget elapses.
-fn graceful_stop_policy(
-    already_terminated: bool,
-    owns_pid: &mut dyn FnMut() -> bool,
-    send_term: &mut dyn FnMut(),
-    is_alive: &mut dyn FnMut() -> bool,
-    send_kill: &mut dyn FnMut(),
-    steps: u32,
-) -> StopOutcome {
-    if already_terminated {
+/// Ownership is structural, not checked. `SharedChild` waits with POSIX `waitid`,
+/// which reaps WITHOUT releasing the pid for reuse, so `send_signal` cannot land on
+/// an unrelated process — and it is documented to be a no-op once the child has been
+/// waited on. That closes the check-then-signal race a `ps`-based ownership test
+/// could only narrow: there is no window between "still ours" and "signal sent",
+/// because the pid is not returned to the OS while we hold this handle.
+///
+/// We never hunt for whoever holds port 3141 — a node the app did not start belongs
+/// to someone else and must survive our quit.
+///
+/// The graceful step matters: the node's own shutdown path (konsensus-node `main.rs`,
+/// comment L0e) stops the Lightning backend explicitly because "LDK queues
+/// ChannelMonitor persistence calls during shutdown; if we wait for Drop ... those
+/// persistence calls can be silently lost — real-fund-loss class on a live channel".
+/// It allows itself 15s for that, so the SIGKILL fallback sits beyond it. rc7 installs
+/// a real `SignalKind::terminate()` handler, so SIGTERM lands on an orderly path.
+///
+/// Returns once the process is confirmed gone.
+fn stop_supervised_node(child: &SharedChild, budget: Duration) -> StopOutcome {
+    if matches!(child.try_wait(), Ok(Some(_))) {
         return StopOutcome::AlreadyExited;
     }
-    if !owns_pid() {
-        return StopOutcome::NotOwned;
-    }
-    send_term();
-    for _ in 0..steps {
-        if !is_alive() {
-            return StopOutcome::TermedAndExited;
+    // No-op if the child was reaped between the check above and here — that is the
+    // guarantee `ps`-based ownership could not give us.
+    let _ = child.send_signal(libc::SIGTERM);
+    match child.wait_timeout(budget) {
+        Ok(Some(_)) => StopOutcome::TermedAndExited,
+        _ => {
+            eprintln!(
+                "[node] pid {} ignored SIGTERM for {budget:?}; sending SIGKILL",
+                child.id()
+            );
+            let _ = child.kill();
+            let _ = child.wait(); // confirm completion rather than assume it
+            StopOutcome::Killed
         }
     }
-    send_kill();
-    StopOutcome::Killed
-}
-
-/// Is `pid` still the child THIS process spawned?
-///
-/// A raw pid does not prove ownership (app #16 review, finding 1): the plugin may
-/// already have reaped the child, after which the OS may hand that number to an
-/// unrelated process and our signal would hit a stranger. `CommandChild::kill()` is
-/// safe here — it holds an `Arc<SharedChild>` synchronised against reaping — but a
-/// bare `kill -TERM <pid>` is not. So we require BOTH that the pid's parent is us
-/// and that its command line is the sidecar we launched.
-#[cfg(unix)]
-fn pid_is_our_sidecar(pid: u32) -> bool {
-    let out = match std::process::Command::new("ps")
-        .args(["-o", "ppid=,command=", "-p", &pid.to_string()])
-        .output()
-    {
-        Ok(o) if o.status.success() => o,
-        _ => return false,
-    };
-    let line = String::from_utf8_lossy(&out.stdout);
-    let line = line.trim();
-    let (ppid, command) = match line.split_once(char::is_whitespace) {
-        Some((a, b)) => (a.trim(), b.trim()),
-        None => return false,
-    };
-    ppid.parse::<u32>().ok() == Some(std::process::id()) && command.contains(SIDECAR_BIN)
-}
-
-/// Stop the node this app spawned: SIGTERM, wait, SIGKILL only as a last resort.
-///
-/// Only ever called with the `CommandChild` from our own `spawn_node`, and only after
-/// [`pid_is_our_sidecar`] confirms the pid still belongs to us. We deliberately do NOT
-/// hunt for whoever holds port 3141 — a node the app did not start belongs to someone
-/// else and must survive our quit (app #16).
-///
-/// The graceful step is not a nicety. `CommandChild::kill()` is SIGKILL, and the node's
-/// own shutdown path (konsensus-node `main.rs`, comment L0e) stops the Lightning backend
-/// explicitly because "LDK queues ChannelMonitor persistence calls during shutdown; if we
-/// wait for Drop ... those persistence calls can be silently lost — real-fund-loss class
-/// on a live channel". The node allows itself up to 15s for that, so the SIGKILL fallback
-/// sits beyond it. rc7 installs a real SIGTERM handler (`SignalKind::terminate()`).
-fn stop_supervised_node(
-    child: tauri_plugin_shell::process::CommandChild,
-    already_terminated: bool,
-) {
-    let pid = child.pid();
-    #[cfg(unix)]
-    {
-        let outcome = graceful_stop_policy(
-            already_terminated,
-            &mut || pid_is_our_sidecar(pid),
-            &mut || {
-                let _ = std::process::Command::new("kill")
-                    .args(["-TERM", &pid.to_string()])
-                    .status();
-            },
-            &mut || {
-                std::thread::sleep(NODE_SHUTDOWN_POLL);
-                std::process::Command::new("kill")
-                    .args(["-0", &pid.to_string()])
-                    .status()
-                    .map(|s| s.success())
-                    .unwrap_or(false)
-            },
-            &mut || {},
-            NODE_SHUTDOWN_WAIT_STEPS,
-        );
-        match outcome {
-            StopOutcome::AlreadyExited | StopOutcome::TermedAndExited => return,
-            StopOutcome::NotOwned => {
-                eprintln!("[node] pid {pid} is no longer our sidecar — not signalling");
-                return;
-            }
-            StopOutcome::Killed => {
-                eprintln!("[node] pid {pid} ignored SIGTERM for {NODE_SHUTDOWN_BUDGET_SECS}s; sending SIGKILL");
-            }
-        }
-    }
-    // SIGKILL through the plugin handle: synchronised against reaping, so this
-    // cannot land on a reused pid.
-    let _ = child.kill();
 }
 
 fn main() {
@@ -813,96 +798,153 @@ fn main() {
             //
             // `take()` makes a repeated shutdown event a no-op: the second one finds None.
             if matches!(event, RunEvent::ExitRequested { .. } | RunEvent::Exit) {
-                let state = app.state::<NodeState>();
-                let terminated = state.sidecar_terminated.load(Ordering::SeqCst);
-                let child = state.child.lock().unwrap().take();
+                let child = app.state::<NodeState>().child.lock().unwrap().take();
                 if let Some(child) = child {
-                    stop_supervised_node(child, terminated);
+                    stop_supervised_node(&child, NODE_SHUTDOWN_BUDGET);
                 }
             }
         });
 }
 
 #[cfg(test)]
-mod stop_policy_tests {
+mod stop_adapter_tests {
+    //! Tests the REAL adapter against disposable subprocesses (app #16 review).
+    //! Policy tests with injected effects could not prove the adapter avoids pid
+    //! reuse or actually signals anything; these drive `stop_supervised_node` itself.
     use super::*;
 
-    /// Drives the policy with scripted liveness and records every effect.
-    fn run(already: bool, owns: bool, alive_for: u32, steps: u32) -> (StopOutcome, u32, u32, u32) {
-        let (mut terms, mut kills, mut polls) = (0u32, 0u32, 0u32);
-        let outcome = graceful_stop_policy(
-            already,
-            &mut || owns,
-            &mut || terms += 1,
-            &mut || {
-                polls += 1;
-                polls <= alive_for
-            },
-            &mut || kills += 1,
-            steps,
+    /// Spawn a disposable child and WAIT until it has installed its signal handler.
+    ///
+    /// Without this the tests race the fixture: the adapter signals immediately, and a
+    /// shell that has not yet executed its `trap` line dies on the default SIGTERM
+    /// disposition — which looks like a graceful exit and silently passes the
+    /// escalation test. The child touches a readiness file after the trap is in place,
+    /// so the handshake is deterministic rather than a sleep.
+    fn spawn_ready(script_before_loop: &str) -> (Arc<SharedChild>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ready = dir.path().join("ready");
+        let got_term = dir.path().join("got_term");
+        // {TERM_MARKER} lets a fixture record that its SIGTERM handler actually ran,
+        // so a test can tell "exited because we asked politely" from "was SIGKILLed" —
+        // indistinguishable from the outside otherwise.
+        let script = format!(
+            "{}; : > '{}'; while :; do sleep 0.05; done",
+            script_before_loop.replace("{TERM_MARKER}", &got_term.display().to_string()),
+            ready.display()
         );
-        (outcome, terms, kills, polls)
+        let mut c = std::process::Command::new("/bin/sh");
+        c.args(["-c", &script]);
+        let child = Arc::new(SharedChild::spawn(&mut c).expect("spawn test child"));
+        for _ in 0..200 {
+            if ready.exists() {
+                return (child, dir);
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("test child never signalled readiness");
+    }
+    /// Exits on SIGTERM, like a well-behaved node, recording that it did.
+    const HONOURS_TERM: &str = r#"trap ": > '{TERM_MARKER}'; exit 0" TERM"#;
+    /// Ignores SIGTERM entirely — forces the escalation path.
+    const IGNORES_TERM: &str = r#"trap '' TERM"#;
+
+    fn alive(pid: u32) -> bool {
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
     }
 
     #[test]
-    fn already_reaped_child_is_never_signalled() {
-        let (outcome, terms, kills, _) = run(true, true, 99, 8);
-        assert_eq!(outcome, StopOutcome::AlreadyExited);
+    fn graceful_exit_needs_no_sigkill() {
+        let (child, dir) = spawn_ready(HONOURS_TERM);
+        let pid = child.id();
+        let t = Instant::now();
         assert_eq!(
-            (terms, kills),
-            (0, 0),
-            "a reaped child must receive no signal"
+            stop_supervised_node(&child, Duration::from_secs(10)),
+            StopOutcome::TermedAndExited,
+            "a child that honours SIGTERM must not be escalated to SIGKILL"
         );
+        assert!(
+            dir.path().join("got_term").exists(),
+            "the child's SIGTERM handler must have run — a SIGKILL-first adapter would \
+             also end the process, and the outcome alone cannot tell them apart"
+        );
+        assert!(
+            t.elapsed() < Duration::from_secs(5),
+            "should exit promptly, took {:?}",
+            t.elapsed()
+        );
+        assert!(!alive(pid), "process must be gone when the call returns");
     }
 
     #[test]
-    fn foreign_pid_is_never_signalled() {
-        // The pid outlived our child and was reused: ownership check fails.
-        let (outcome, terms, kills, _) = run(false, false, 99, 8);
-        assert_eq!(outcome, StopOutcome::NotOwned);
+    fn timeout_escalates_to_sigkill_and_confirms_exit() {
+        let (child, _d) = spawn_ready(IGNORES_TERM);
+        let pid = child.id();
         assert_eq!(
-            (terms, kills),
-            (0, 0),
-            "never signal a pid we cannot prove is ours"
+            stop_supervised_node(&child, Duration::from_millis(400)),
+            StopOutcome::Killed,
+            "a child ignoring SIGTERM must be escalated once the budget elapses"
+        );
+        assert!(
+            !alive(pid),
+            "adapter must confirm completion, not assume it"
         );
     }
 
     #[test]
-    fn sigterm_alone_suffices_when_the_node_exits() {
-        let (outcome, terms, kills, _) = run(false, true, 2, 8);
-        assert_eq!(outcome, StopOutcome::TermedAndExited);
-        assert_eq!(terms, 1, "exactly one SIGTERM");
+    fn already_exited_child_is_reported_not_signalled() {
+        let mut c = std::process::Command::new("/bin/sh");
+        c.args(["-c", "exit 0"]);
+        let child = Arc::new(SharedChild::spawn(&mut c).expect("spawn"));
+        child.wait().expect("reap");
         assert_eq!(
-            kills, 0,
-            "SIGKILL must NOT be used when the node exits gracefully"
+            stop_supervised_node(&child, Duration::from_secs(5)),
+            StopOutcome::AlreadyExited
         );
     }
 
     #[test]
-    fn sigkill_is_the_fallback_only_after_the_budget() {
-        let (outcome, terms, kills, polls) = run(false, true, u32::MAX, 8);
-        assert_eq!(outcome, StopOutcome::Killed);
-        assert_eq!(terms, 1, "SIGTERM is still sent first");
-        assert_eq!(kills, 1);
-        assert_eq!(polls, 8, "the full budget is waited before escalating");
+    fn repeated_shutdown_is_harmless() {
+        let (child, _d) = spawn_ready(HONOURS_TERM);
+        assert_eq!(
+            stop_supervised_node(&child, Duration::from_secs(10)),
+            StopOutcome::TermedAndExited
+        );
+        // A second shutdown event must not signal anything or hang.
+        assert_eq!(
+            stop_supervised_node(&child, Duration::from_secs(5)),
+            StopOutcome::AlreadyExited
+        );
     }
 
     #[test]
-    fn graceful_precedes_forceful() {
-        // Ordering, not just presence: a SIGKILL-first implementation would exit
-        // at the first poll with kills==1 and terms==0.
-        let (_, terms, kills, _) = run(false, true, 1, 4);
-        assert!(terms == 1 && kills == 0, "SIGTERM must precede any SIGKILL");
+    fn a_foreign_process_is_untouched() {
+        // The hazard the ownership work exists for: stopping ours must never disturb
+        // a process we do not own, even one started from the same binary.
+        let (ours, _d1) = spawn_ready(HONOURS_TERM);
+        let (foreign, _d2) = spawn_ready(HONOURS_TERM);
+        let foreign_pid = foreign.id();
+        assert_eq!(
+            stop_supervised_node(&ours, Duration::from_secs(10)),
+            StopOutcome::TermedAndExited
+        );
+        assert!(
+            alive(foreign_pid),
+            "a process we do not own must survive our stop"
+        );
+        let _ = stop_supervised_node(&foreign, Duration::from_secs(10)); // cleanup
     }
 
     #[test]
     fn budget_exceeds_the_nodes_own_lightning_shutdown_window() {
-        // konsensus-node allows itself 15s to flush LDK ChannelMonitor state.
-        // Escalating before that would cut off the persistence it protects.
-        let budget = NODE_SHUTDOWN_POLL * NODE_SHUTDOWN_WAIT_STEPS;
+        // konsensus-node allows itself 15s to flush LDK ChannelMonitor state;
+        // escalating before that would cut off the persistence it protects.
         assert!(
-            budget >= Duration::from_secs(20),
-            "SIGKILL fallback at {budget:?} is inside the node's 15s Lightning flush window"
+            NODE_SHUTDOWN_BUDGET >= Duration::from_secs(20),
+            "SIGKILL fallback at {NODE_SHUTDOWN_BUDGET:?} is inside the node's 15s flush window"
         );
     }
 }
