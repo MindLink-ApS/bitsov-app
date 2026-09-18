@@ -136,8 +136,6 @@ jobs:
     # promise Windows support. Keep it out of branch protection.
     name: Windows compile check (not a merge gate)
     runs-on: windows-latest
-    needs: changes
-    if: needs.changes.outputs.rust == 'true'
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
