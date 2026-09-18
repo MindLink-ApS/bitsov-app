@@ -139,13 +139,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Placeholder sidecar for the tauri_build externalBin check
+      - name: Placeholders for the tauri_build checks (sidecar + Windows icon)
         shell: bash
         run: |
           set -euo pipefail
           TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
           mkdir -p src-tauri/bin
           : > "src-tauri/bin/konsensus-${TRIPLE}.exe"
+          # tauri-build needs icons/icon.ico to emit a Windows Resource file, and the
+          # repo has no Windows icon yet (app #18). This job checks that the RUST
+          # compiles on Windows, so a throwaway icon is generated here rather than
+          # committed — same pattern as the sidecar placeholder above. It is never
+          # part of a release artifact.
+          python3 - <<'PYICO'
+          import struct
+          png = open("src-tauri/icons/icon.png", "rb").read()
+          # ICO container with a single PNG-compressed 256x256 entry.
+          header = struct.pack("<HHH", 0, 1, 1)
+          entry = struct.pack("<BBBBHHII", 0, 0, 0, 0, 1, 32, len(png), 6 + 16)
+          open("src-tauri/icons/icon.ico", "wb").write(header + entry + png)
+          print("placeholder icon.ico written")
+          PYICO
       - name: cargo check (src-tauri)
         working-directory: src-tauri
         run: cargo check --locked
