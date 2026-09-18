@@ -123,3 +123,31 @@ jobs:
       # probe validates fee data. Test those defaults with NO endpoint override.
       - name: CS-1 smoke — boot rc7 from untouched init defaults, durable identity
         run: bash scripts/cs1-local-smoke.sh
+
+  windows-compile:
+    # app #16 review: a Unix-only import (`shared_child::unix`) and an ungated
+    # `send_signal` broke the Windows build, and Linux CI could not see it. The app
+    # ships a Windows sidecar target, so the code must at least COMPILE there. This
+    # cannot be checked from macOS — cross-compiling to MSVC needs a Windows C
+    # toolchain (`ring`'s build script fails) — so it is checked on a Windows runner.
+    #
+    # NOT a merge gate: Windows is not a supported target today (unsigned, untested
+    # package), and this job exists to catch platform-gating regressions, not to
+    # promise Windows support. Keep it out of branch protection.
+    name: Windows compile check (not a merge gate)
+    runs-on: windows-latest
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Placeholder sidecar for the tauri_build externalBin check
+        shell: bash
+        run: |
+          set -euo pipefail
+          TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
+          mkdir -p src-tauri/bin
+          : > "src-tauri/bin/konsensus-${TRIPLE}.exe"
+      - name: cargo check (src-tauri)
+        working-directory: src-tauri
+        run: cargo check --locked

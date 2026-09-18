@@ -23,6 +23,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+#[cfg(unix)]
 use shared_child::unix::SharedChildExt;
 use shared_child::SharedChild;
 use tauri::{AppHandle, Manager, RunEvent, State};
@@ -750,21 +751,36 @@ fn stop_supervised_node(child: &SharedChild, budget: Duration) -> StopOutcome {
     if matches!(child.try_wait(), Ok(Some(_))) {
         return StopOutcome::AlreadyExited;
     }
-    // No-op if the child was reaped between the check above and here — that is the
-    // guarantee `ps`-based ownership could not give us.
-    let _ = child.send_signal(libc::SIGTERM);
-    match child.wait_timeout(budget) {
-        Ok(Some(_)) => StopOutcome::TermedAndExited,
-        _ => {
-            eprintln!(
-                "[node] pid {} ignored SIGTERM for {budget:?}; sending SIGKILL",
-                child.id()
-            );
-            let _ = child.kill();
-            let _ = child.wait(); // confirm completion rather than assume it
-            StopOutcome::Killed
+
+    // Unix: ask politely first. No-op if the child was reaped between the check above
+    // and here — the guarantee `ps`-based ownership could not give us.
+    #[cfg(unix)]
+    {
+        let _ = child.send_signal(libc::SIGTERM);
+        match child.wait_timeout(budget) {
+            Ok(Some(_)) => return StopOutcome::TermedAndExited,
+            _ => {
+                eprintln!(
+                    "[node] pid {} ignored SIGTERM for {budget:?}; escalating",
+                    child.id()
+                );
+            }
         }
     }
+
+    // Windows has no SIGTERM: `TerminateProcess` (what `kill` maps to) is the only
+    // stop available, so there is no graceful step to skip — we go straight to it
+    // rather than silently doing nothing on that platform. The node therefore does
+    // not get to flush LDK ChannelMonitor state on Windows; that is a real gap and
+    // belongs to whatever ticket makes Windows a supported target (it is not one
+    // today — the Windows sidecar is unsigned and untested). Kept explicit here so
+    // it is visible rather than implied by an absent branch.
+    #[cfg(not(unix))]
+    let _ = budget;
+
+    let _ = child.kill();
+    let _ = child.wait(); // confirm completion rather than assume it
+    StopOutcome::Killed
 }
 
 fn main() {
@@ -806,7 +822,7 @@ fn main() {
         });
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod stop_adapter_tests {
     //! Tests the REAL adapter against disposable subprocesses (app #16 review).
     //! Policy tests with injected effects could not prove the adapter avoids pid

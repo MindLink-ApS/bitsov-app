@@ -14,7 +14,6 @@ tauri-build = { version = "2", features = [] }
 # pid for reuse, so `send_signal` is safe against the pid-reuse race that a
 # check-then-`kill(2)` adapter cannot close.
 shared_child = "1.1"
-libc = "0.2"
 tauri = { version = "2", features = [] }
 tauri-plugin-shell = "2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
@@ -25,6 +24,10 @@ tokio = { version = "1", features = ["time", "rt", "macros"] }
 # GATE G1 (docs/ARCHITECTURE_BOUNDARY.md): NO konsensus-* dependency here — the node
 # is a bundled BINARY (see tauri.conf.json `externalBin`), never a linked crate. A
 # konsensus-* path/git dep in this file is an automatic G1 FAIL (CODEX_APP_AUTHORITY.md §G).
+
+# SIGTERM is Unix-only; the Windows stop path uses TerminateProcess via kill().
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
