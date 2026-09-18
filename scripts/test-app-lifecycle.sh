@@ -51,6 +51,27 @@ if awk '/fn stop_supervised_node/,/^}/' "$MAIN" | grep -qE '"kill"|kill -TERM'; 
 else
   ok "no raw kill(1) on a pid in the teardown path"
 fi
+# Quit during a restore (Codex R2G on 3ff4e60e). stop_adapter_tests prove the NodeState
+# methods; these guards prove the real call sites still go through them. A restore
+# that takes the child out of the slot itself hides it from quit; a spawn that bypasses
+# spawn_child can start a node after quit has looked.
+if awk '/^async fn restart_node/,/^}/' "$MAIN" | grep -q 'stop_for_restart' \
+  && ! awk '/^async fn restart_node/,/^}/' "$MAIN" | grep -q 'child\.lock'; then
+  ok "a restore stops the old node through stop_for_restart (stays registered until gone)"
+else
+  no "restart_node must stop the old node via stop_for_restart, never touch the child slot itself"
+fi
+if awk '/^fn spawn_node/,/^}/' "$MAIN" | grep -q 'spawn_child' \
+  && ! awk '/^fn spawn_node/,/^}/' "$MAIN" | grep -q 'SharedChild::spawn'; then
+  ok "the node is spawned through spawn_child (refused once quit has begun)"
+else
+  no "spawn_node must spawn via NodeState::spawn_child so quit can refuse a replacement"
+fi
+if grep -q 'stop_for_quit(NODE_SHUTDOWN_BUDGET)' "$MAIN"; then
+  ok "the exit handler stops the node through stop_for_quit"
+else
+  no "the exit handler must call stop_for_quit"
+fi
 
 # ---- 2. bundle test --------------------------------------------------------------
 # The bundle layer LAUNCHES a node. A production-identifier bundle uses the real

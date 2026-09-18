@@ -60,8 +60,12 @@ struct NodeState {
     error: Mutex<Option<String>>,
     /// Supervised node process; killed on app exit so no orphan node is left running.
     /// The supervised node, owned through `SharedChild` so signalling stays
-    /// synchronised with reaping (app #16 review).
+    /// synchronised with reaping (app #16 review). A node being stopped for a restart
+    /// stays registered here until it has exited, so a quit meanwhile still finds it.
     child: Mutex<Option<Arc<SharedChild>>>,
+    /// Set by the exit handler, under the `child` lock, before it takes the node. Once
+    /// set, no node is spawned again (see `NodeState::spawn_child`).
+    quitting: AtomicBool,
     /// The loopback JWT lives here and nowhere else (see the KEYS note above).
     token: Mutex<Option<String>>,
     /// The supervised node's `konsensus.toml`. Captured at bootstrap so a restore can
@@ -81,6 +85,7 @@ impl Default for NodeState {
             node_id: Mutex::new(None),
             error: Mutex::new(None),
             child: Mutex::new(None),
+            quitting: AtomicBool::new(false),
             token: Mutex::new(None),
             config: Mutex::new(None),
             last_remint: Mutex::new(None),
@@ -227,9 +232,7 @@ fn spawn_node(app: &AppHandle, config: &Path) -> Result<(), String> {
 
     let state = app.state::<NodeState>();
     state.sidecar_terminated.store(false, Ordering::SeqCst);
-    let child =
-        Arc::new(SharedChild::spawn(&mut cmd).map_err(|e| format!("node start failed: {e}"))?);
-    *state.child.lock().unwrap() = Some(child.clone());
+    let child = state.spawn_child(&mut cmd)?;
 
     // Drain node output to the app log — never render node plaintext in the UI.
     for (label, pipe) in [
@@ -358,9 +361,7 @@ async fn restart_node(app: &AppHandle, expected_node_id: &str) -> Result<bool, S
     *state.node_id.lock().unwrap() = None;
     *state.token.lock().unwrap() = None;
 
-    let previous = state.child.lock().unwrap().take();
-    if let Some(child) = previous {
-        stop_supervised_node(&child, NODE_SHUTDOWN_BUDGET);
+    if state.stop_for_restart(NODE_SHUTDOWN_BUDGET) {
         for _ in 0..4 {
             if !health_ok(&state).await {
                 break;
@@ -783,6 +784,58 @@ fn stop_supervised_node(child: &SharedChild, budget: Duration) -> StopOutcome {
     StopOutcome::Killed
 }
 
+/// Registration of the supervised node, coordinated with quit (Codex R2G on 3ff4e60e).
+///
+/// The hazard: the host process ends as soon as the exit handler returns, taking every
+/// other thread with it. So whatever the exit handler cannot see — a node deregistered
+/// by a restore that is still stopping it, or a node spawned after the handler ran —
+/// outlives the app with the user's keys loaded.
+impl NodeState {
+    /// Spawn the node and register it in one step, unless quit has begun. The check and
+    /// the registration happen under the lock the exit handler takes, so either the node
+    /// is registered before quit looks (and quit stops it), or quit came first and
+    /// nothing is spawned.
+    fn spawn_child(&self, cmd: &mut std::process::Command) -> Result<Arc<SharedChild>, String> {
+        let mut slot = self.child.lock().unwrap();
+        if self.quitting.load(Ordering::SeqCst) {
+            return Err("the app is quitting; the node was not started".into());
+        }
+        let child =
+            Arc::new(SharedChild::spawn(cmd).map_err(|e| format!("node start failed: {e}"))?);
+        *slot = Some(child.clone());
+        Ok(child)
+    }
+
+    /// Stop the registered node ahead of a restart. It stays registered for the whole
+    /// stop — up to `budget` — and is deregistered only once its exit is confirmed, and
+    /// only if the slot still holds it (quit may have taken it meanwhile).
+    ///
+    /// Returns whether there was a node to stop.
+    fn stop_for_restart(&self, budget: Duration) -> bool {
+        let Some(child) = self.child.lock().unwrap().as_ref().cloned() else {
+            return false;
+        };
+        stop_supervised_node(&child, budget);
+        let mut slot = self.child.lock().unwrap();
+        if slot.as_ref().is_some_and(|c| Arc::ptr_eq(c, &child)) {
+            *slot = None;
+        }
+        true
+    }
+
+    /// The exit handler: refuse any further spawn, then stop the registered node —
+    /// including one a restore is still stopping — and return only once it is confirmed
+    /// gone. `take()` makes a repeated shutdown event a no-op: the second finds `None`.
+    fn stop_for_quit(&self, budget: Duration) -> Option<StopOutcome> {
+        let child = {
+            let mut slot = self.child.lock().unwrap();
+            self.quitting.store(true, Ordering::SeqCst);
+            slot.take()
+        };
+        child.map(|child| stop_supervised_node(&child, budget))
+    }
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -812,12 +865,10 @@ fn main() {
             // the user's keys loaded, still holding 3141/9735/9736. Reproduced before the
             // fix — the node's ppid went from the GUI's pid to 1 on quit.
             //
-            // `take()` makes a repeated shutdown event a no-op: the second one finds None.
+            // A repeated shutdown event is a no-op, and a restore in flight can neither
+            // hide its old node from this nor start a new one after it (`stop_for_quit`).
             if matches!(event, RunEvent::ExitRequested { .. } | RunEvent::Exit) {
-                let child = app.state::<NodeState>().child.lock().unwrap().take();
-                if let Some(child) = child {
-                    stop_supervised_node(&child, NODE_SHUTDOWN_BUDGET);
-                }
+                app.state::<NodeState>().stop_for_quit(NODE_SHUTDOWN_BUDGET);
             }
         });
 }
@@ -837,6 +888,18 @@ mod stop_adapter_tests {
     /// escalation test. The child touches a readiness file after the trap is in place,
     /// so the handshake is deterministic rather than a sleep.
     fn spawn_ready(script_before_loop: &str) -> (Arc<SharedChild>, tempfile::TempDir) {
+        let (mut c, dir) = fixture(script_before_loop);
+        let child = Arc::new(SharedChild::spawn(&mut c).expect("spawn test child"));
+        await_file(
+            &dir.path().join("ready"),
+            "test child never signalled readiness",
+        );
+        (child, dir)
+    }
+
+    /// The command behind `spawn_ready`, for tests that must spawn it through
+    /// `NodeState::spawn_child` — the registration the exit handler relies on.
+    fn fixture(script_before_loop: &str) -> (std::process::Command, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("tempdir");
         let ready = dir.path().join("ready");
         let got_term = dir.path().join("got_term");
@@ -850,19 +913,24 @@ mod stop_adapter_tests {
         );
         let mut c = std::process::Command::new("/bin/sh");
         c.args(["-c", &script]);
-        let child = Arc::new(SharedChild::spawn(&mut c).expect("spawn test child"));
+        (c, dir)
+    }
+
+    fn await_file(path: &Path, failure: &str) {
         for _ in 0..200 {
-            if ready.exists() {
-                return (child, dir);
+            if path.exists() {
+                return;
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        panic!("test child never signalled readiness");
+        panic!("{failure}");
     }
     /// Exits on SIGTERM, like a well-behaved node, recording that it did.
     const HONOURS_TERM: &str = r#"trap ": > '{TERM_MARKER}'; exit 0" TERM"#;
     /// Ignores SIGTERM entirely — forces the escalation path.
     const IGNORES_TERM: &str = r#"trap '' TERM"#;
+    /// Records SIGTERM but keeps running — a node hanging in its own shutdown.
+    const RECORDS_BUT_IGNORES_TERM: &str = r#"trap ": > '{TERM_MARKER}'" TERM"#;
 
     fn alive(pid: u32) -> bool {
         std::process::Command::new("kill")
@@ -952,6 +1020,102 @@ mod stop_adapter_tests {
             "a process we do not own must survive our stop"
         );
         let _ = stop_supervised_node(&foreign, Duration::from_secs(10)); // cleanup
+    }
+
+    #[test]
+    fn quit_during_a_restart_stop_still_stops_the_node() {
+        // Codex R2G on 3ff4e60e: the restore deregistered the old node before its
+        // stop, so a quit meanwhile found nothing, the host exited and took the restore
+        // worker — and its SIGKILL fallback — with it, leaving the node running.
+        let state = NodeState::default();
+        let (mut cmd, dir) = fixture(RECORDS_BUT_IGNORES_TERM);
+        let child = state
+            .spawn_child(&mut cmd)
+            .expect("spawn through NodeState");
+        await_file(
+            &dir.path().join("ready"),
+            "test child never signalled readiness",
+        );
+        let pid = child.id();
+
+        std::thread::scope(|s| {
+            // The restore worker, part-way through a stop the node is not honouring.
+            let restore = s.spawn(|| state.stop_for_restart(Duration::from_secs(10)));
+            await_file(
+                &dir.path().join("got_term"),
+                "the restore never sent SIGTERM",
+            );
+
+            let outcome = state.stop_for_quit(Duration::from_millis(300));
+            // Nothing runs after the exit handler returns, so the node must be gone
+            // NOW — not when the restore worker's own budget would have run out.
+            assert_eq!(
+                outcome,
+                Some(StopOutcome::Killed),
+                "quit must find the node a restore is still stopping"
+            );
+            assert!(
+                !alive(pid),
+                "quit returned with the node still running — it would outlive the app"
+            );
+            assert!(restore.join().expect("restore worker"));
+        });
+        assert!(state.child.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn a_restore_cannot_start_a_node_once_quit_has_begun() {
+        // The other half of R2G: a restore still in flight when quit arrives must not
+        // start the replacement — it would start after the exit handler looked.
+        let state = NodeState::default();
+        assert_eq!(state.stop_for_quit(Duration::from_secs(1)), None);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let started = dir.path().join("started");
+        let mut cmd = std::process::Command::new("/bin/sh");
+        cmd.args(["-c", &format!(": > '{}'", started.display())]);
+        assert!(
+            state.spawn_child(&mut cmd).is_err(),
+            "spawning after quit must be refused"
+        );
+        assert!(state.child.lock().unwrap().is_none());
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!started.exists(), "no process may be started after quit");
+    }
+
+    #[test]
+    fn a_restart_without_quit_replaces_the_node() {
+        // The quit coordination must not get in the way of an ordinary restore.
+        let state = NodeState::default();
+        let (mut cmd, old_dir) = fixture(HONOURS_TERM);
+        let old_pid = state.spawn_child(&mut cmd).expect("spawn").id();
+        await_file(
+            &old_dir.path().join("ready"),
+            "old child never signalled readiness",
+        );
+
+        assert!(state.stop_for_restart(Duration::from_secs(10)));
+        assert!(
+            !alive(old_pid),
+            "the old node must be gone before the restart proceeds"
+        );
+        assert!(
+            state.child.lock().unwrap().is_none(),
+            "a node confirmed gone is deregistered"
+        );
+
+        let (mut cmd, new_dir) = fixture(HONOURS_TERM);
+        let new_pid = state.spawn_child(&mut cmd).expect("replacement").id();
+        await_file(
+            &new_dir.path().join("ready"),
+            "new child never signalled readiness",
+        );
+        assert_eq!(
+            state.stop_for_quit(Duration::from_secs(10)),
+            Some(StopOutcome::TermedAndExited),
+            "quit must stop the replacement"
+        );
+        assert!(!alive(new_pid));
     }
 
     #[test]
