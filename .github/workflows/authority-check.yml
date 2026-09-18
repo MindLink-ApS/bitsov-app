@@ -28,9 +28,3 @@ jobs:
       # runs on macOS with a built .app.
       - name: App lifecycle guards (quit must stop the owned node)
         run: bash scripts/test-app-lifecycle.sh
-
-      # Behavioural coverage of the stop policy itself: ordering, the timeout
-      # escalation, and the two never-signal cases. Text guards cannot prove these.
-      - name: Stop-policy behaviour tests
-        working-directory: src-tauri
-        run: cargo test --locked stop_policy_tests

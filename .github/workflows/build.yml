@@ -73,6 +73,15 @@ jobs:
         working-directory: src-tauri
         run: cargo check --locked
 
+      # app #16. Behavioural coverage of the node-shutdown policy: signal ordering,
+      # the timeout escalation, and the two cases that must never signal at all
+      # (an already-reaped child, and a pid that is no longer ours). Lives here
+      # rather than in Authority Check because that job is shell-only and has no
+      # gtk/webkit toolchain.
+      - name: Rust — stop-policy behaviour tests
+        working-directory: src-tauri
+        run: cargo test --locked stop_policy_tests
+
   # NOT a merge gate: keep this job OUT of the required status checks. It depends on the
   # genome's published release and on network, not on this repo's source. It exercises the
   # REAL sidecar path end to end against the pinned release: download, fail-closed signature
