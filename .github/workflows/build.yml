@@ -73,6 +73,15 @@ jobs:
         working-directory: src-tauri
         run: cargo check --locked
 
+      # app #16. Behavioural coverage of the node-shutdown policy: signal ordering,
+      # the timeout escalation, and the two cases that must never signal at all
+      # (an already-reaped child, and a pid that is no longer ours). Lives here
+      # rather than in Authority Check because that job is shell-only and has no
+      # gtk/webkit toolchain.
+      - name: Rust — stop-policy behaviour tests
+        working-directory: src-tauri
+        run: cargo test --locked stop_adapter_tests
+
   # NOT a merge gate: keep this job OUT of the required status checks. It depends on the
   # genome's published release and on network, not on this repo's source. It exercises the
   # REAL sidecar path end to end against the pinned release: download, fail-closed signature
@@ -114,3 +123,43 @@ jobs:
       # probe validates fee data. Test those defaults with NO endpoint override.
       - name: CS-1 smoke — boot rc7 from untouched init defaults, durable identity
         run: bash scripts/cs1-local-smoke.sh
+
+  windows-compile:
+    # app #16 review: a Unix-only import (`shared_child::unix`) and an ungated
+    # `send_signal` broke the Windows build, and Linux CI could not see it. The app
+    # ships a Windows sidecar target, so the code must at least COMPILE there. This
+    # cannot be checked from macOS — cross-compiling to MSVC needs a Windows C
+    # toolchain (`ring`'s build script fails) — so it is checked on a Windows runner.
+    #
+    # NOT a merge gate: Windows is not a supported target today (unsigned, untested
+    # package), and this job exists to catch platform-gating regressions, not to
+    # promise Windows support. Keep it out of branch protection.
+    name: Windows compile check (not a merge gate)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Placeholders for the tauri_build checks (sidecar + Windows icon)
+        shell: bash
+        run: |
+          set -euo pipefail
+          TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
+          mkdir -p src-tauri/bin
+          : > "src-tauri/bin/konsensus-${TRIPLE}.exe"
+          # tauri-build needs icons/icon.ico to emit a Windows Resource file, and the
+          # repo has no Windows icon yet (app #18). This job checks that the RUST
+          # compiles on Windows, so a throwaway icon is generated here rather than
+          # committed — same pattern as the sidecar placeholder above. It is never
+          # part of a release artifact.
+          python3 - <<'PYICO'
+          import struct
+          png = open("src-tauri/icons/icon.png", "rb").read()
+          # ICO container with a single PNG-compressed 256x256 entry.
+          header = struct.pack("<HHH", 0, 1, 1)
+          entry = struct.pack("<BBBBHHII", 0, 0, 0, 0, 1, 32, len(png), 6 + 16)
+          open("src-tauri/icons/icon.ico", "wb").write(header + entry + png)
+          print("placeholder icon.ico written")
+          PYICO
+      - name: cargo check (src-tauri)
+        working-directory: src-tauri
+        run: cargo check --locked

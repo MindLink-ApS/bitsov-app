@@ -21,3 +21,10 @@ jobs:
 
       - name: Test source gate with a downloaded sidecar present
         run: bash scripts/test-authority-source.sh
+
+      # app #16. The source-guard layer needs no bundle and no macOS: it asserts the
+      # run loop still handles BOTH RunEvent variants, that teardown never hunts a
+      # port, and that SIGTERM precedes SIGKILL. The live-bundle layer skips here and
+      # runs on macOS with a built .app.
+      - name: App lifecycle guards (quit must stop the owned node)
+        run: bash scripts/test-app-lifecycle.sh
