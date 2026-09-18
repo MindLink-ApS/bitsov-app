@@ -41,6 +41,14 @@ const FUNDING_SEEN: &str = "funding-seen";
 /// refresh path is rate-limited here — a persistent 401 must not grind that budget.
 const REMINT_COOLDOWN: Duration = Duration::from_secs(30);
 
+/// Graceful-shutdown budget for the supervised node on quit (app #16).
+/// Must exceed the node's own shutdown cost: it allows up to 15s for the
+/// Lightning backend alone so LDK can flush ChannelMonitor persistence.
+const NODE_SHUTDOWN_POLL: Duration = Duration::from_millis(250);
+const NODE_SHUTDOWN_BUDGET_SECS: u32 = 30;
+const NODE_SHUTDOWN_WAIT_STEPS: u32 = NODE_SHUTDOWN_BUDGET_SECS * 4;
+
+
 struct NodeState {
     ready: Mutex<bool>,
     node_id: Mutex<Option<String>>,
@@ -652,6 +660,45 @@ async fn identity_restore(
     })
 }
 
+
+/// Stop the node this app spawned: SIGTERM, wait, SIGKILL only as a last resort.
+///
+/// Only ever called with the `CommandChild` from our own `spawn_node`. We deliberately
+/// do NOT hunt for whoever holds port 3141 — a node the app did not start belongs to
+/// someone else and must survive our quit (app #16).
+///
+/// The graceful step is not a nicety. `CommandChild::kill()` is SIGKILL, and the node's
+/// own shutdown path (konsensus-node `main.rs`, comment L0e) stops the Lightning backend
+/// explicitly because "LDK queues ChannelMonitor persistence calls during shutdown; if we
+/// wait for Drop ... those persistence calls can be silently lost — real-fund-loss class
+/// on a live channel". The node allows itself up to 15s for that, so our SIGKILL fallback
+/// must sit comfortably beyond it or we would cut off the very persistence it protects.
+/// rc7 installs a real SIGTERM handler (`SignalKind::terminate()`), so the signal lands on
+/// an orderly path rather than killing the process outright.
+fn stop_supervised_node(child: tauri_plugin_shell::process::CommandChild) {
+    let pid = child.pid();
+    #[cfg(unix)]
+    {
+        let _ = std::process::Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .status();
+        for _ in 0..NODE_SHUTDOWN_WAIT_STEPS {
+            std::thread::sleep(NODE_SHUTDOWN_POLL);
+            // `kill -0` succeeds only while the pid is still alive.
+            let alive = std::process::Command::new("kill")
+                .args(["-0", &pid.to_string()])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if !alive {
+                return;
+            }
+        }
+        eprintln!("[node] pid {pid} ignored SIGTERM for {NODE_SHUTDOWN_BUDGET_SECS}s; sending SIGKILL");
+    }
+    let _ = child.kill();
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -672,10 +719,20 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("error building bitsov-app")
         .run(|app, event| {
-            // Kill the supervised node on exit — no orphan node with the user's keys.
-            if let RunEvent::ExitRequested { .. } = event {
-                if let Some(child) = app.state::<NodeState>().child.lock().unwrap().take() {
-                    let _ = child.kill();
+            // Stop the supervised node on exit — no orphan node with the user's keys.
+            //
+            // BOTH events are required (app #16). `ExitRequested` fires when the last
+            // window closes, which on macOS does NOT quit the app; Cmd-Q goes through
+            // NSApplication terminate and emits `Exit`. Matching only `ExitRequested`
+            // therefore never ran on macOS: every quit left a mainnet node running with
+            // the user's keys loaded, still holding 3141/9735/9736. Reproduced before the
+            // fix — the node's ppid went from the GUI's pid to 1 on quit.
+            //
+            // `take()` makes a repeated shutdown event a no-op: the second one finds None.
+            if matches!(event, RunEvent::ExitRequested { .. } | RunEvent::Exit) {
+                let child = app.state::<NodeState>().child.lock().unwrap().take();
+                if let Some(child) = child {
+                    stop_supervised_node(child);
                 }
             }
         });
