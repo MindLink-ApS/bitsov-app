@@ -10,6 +10,10 @@
 // funding-seen, balance) and mnemonic restore. No channels, rooms, messaging,
 // pricing, mobile, calls, hosted, or AI.
 //
+// A dev-only `assistant` window can display text. It is not a model, it has no
+// network, and it cannot call privileged commands (capability ACL + the
+// window-label check below).
+//
 // KEYS (charter invariant A.3): the node is the identity anchor. This host never
 // holds, derives, or displays key material. The loopback JWT lives in `NodeState`
 // and is attached to requests here — it is never returned to the renderer, and no
@@ -26,7 +30,8 @@ use serde::{Deserialize, Serialize};
 #[cfg(unix)]
 use shared_child::unix::SharedChildExt;
 use shared_child::SharedChild;
-use tauri::{AppHandle, Manager, RunEvent, State};
+use tauri::menu::{Menu, MenuItem};
+use tauri::{AppHandle, Manager, RunEvent, State, WebviewWindow};
 use tauri_plugin_shell::ShellExt;
 
 /// Node API bind — konsensus ApiConfig `default_api_addr()` = 127.0.0.1:3141.
@@ -561,23 +566,114 @@ async fn fetch_node_id(state: &NodeState) -> Result<String, String> {
         .ok_or_else(|| "identity returned no node_id".to_string())
 }
 
+// ---- sealed assistant window ----------------------------------------------
+
+/// Label of the display-only window. Privileged commands refuse this label.
+const ASSISTANT_WINDOW_LABEL: &str = "assistant";
+
+/// Dev builds open the window only when this variable is exactly `1`.
+const ASSISTANT_DEV_FLAG: &str = "BITSOV_ASSISTANT";
+
+/// `true` for the main window. `false` for the assistant window.
+fn window_may_run_privileged_command(label: &str) -> bool {
+    label != ASSISTANT_WINDOW_LABEL
+}
+
+/// Refuse the assistant webview. `window` is the Tauri caller, not a name the
+/// frontend supplied.
+fn reject_sealed_window(window: &WebviewWindow) -> Result<(), String> {
+    if window_may_run_privileged_command(window.label()) {
+        Ok(())
+    } else {
+        Err("the assistant window cannot run this command".into())
+    }
+}
+
+fn assistant_dev_enabled_from(debug_build: bool, flag: Option<&str>) -> bool {
+    debug_build && flag == Some("1")
+}
+
+fn assistant_dev_enabled() -> bool {
+    let flag = std::env::var(ASSISTANT_DEV_FLAG).ok();
+    assistant_dev_enabled_from(cfg!(debug_assertions), flag.as_deref())
+}
+
+/// Document navigations the assistant webview may commit to. Anything else,
+/// including `javascript:` and remote origins, is cancelled.
+fn assistant_document_allowed(scheme: &str, host: Option<&str>, path: &str) -> bool {
+    let host_ok = matches!(host, Some("localhost" | "127.0.0.1" | "tauri.localhost"));
+    let scheme_ok = matches!(scheme, "tauri" | "http" | "https") && host_ok;
+    scheme_ok && path == "/assistant.html"
+}
+
+/// Create the assistant window on demand. Not called at startup.
+fn open_assistant_window(app: &AppHandle) -> Result<(), String> {
+    if !assistant_dev_enabled() {
+        return Err("the assistant window is unavailable".into());
+    }
+    if let Some(existing) = app.get_webview_window(ASSISTANT_WINDOW_LABEL) {
+        existing.show().map_err(|e| e.to_string())?;
+        let _ = existing.set_focus();
+        return Ok(());
+    }
+    let _window = tauri::WebviewWindowBuilder::new(
+        app,
+        ASSISTANT_WINDOW_LABEL,
+        tauri::WebviewUrl::App("assistant.html".into()),
+    )
+    .title("Assistant")
+    .inner_size(420.0, 640.0)
+    .min_inner_size(320.0, 240.0)
+    .resizable(true)
+    .incognito(true)
+    .enable_clipboard_access()
+    .on_navigation(|url| assistant_document_allowed(url.scheme(), url.host_str(), url.path()))
+    .on_new_window(|_url, _features| tauri::webview::NewWindowResponse::Deny)
+    .build()
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Menu item present only when the dev flag is set. Release builds never install it.
+fn install_assistant_menu(app: &tauri::App) -> tauri::Result<()> {
+    let item = MenuItem::with_id(app, "open-assistant", "Assistant", true, None::<&str>)?;
+    if let Some(menu) = app.menu() {
+        menu.append(&item)?;
+    } else {
+        let menu = Menu::with_items(app, &[&item])?;
+        app.set_menu(menu)?;
+    }
+    app.on_menu_event(|app, event| {
+        if event.id() == "open-assistant" {
+            let _ = open_assistant_window(app);
+        }
+    });
+    Ok(())
+}
+
 // ---- commands -------------------------------------------------------------
 
 /// Frontend reads node state here (identity screen). Synchronous — the async
 /// bootstrap task populates the state; the command just reflects it.
 #[tauri::command]
-fn node_status(state: State<'_, NodeState>) -> Status {
-    Status {
+fn node_status(window: WebviewWindow, state: State<'_, NodeState>) -> Result<Status, String> {
+    reject_sealed_window(&window)?;
+    Ok(Status {
         ready: *state.ready.lock().unwrap(),
         node_id: state.node_id.lock().unwrap().clone(),
         error: state.error.lock().unwrap().clone(),
-    }
+    })
 }
 
 /// `GET /onboarding/state`. `None` means the first-run funding flow has not been
 /// started yet — the node answers 404 until `/onboarding/start` has run once.
 #[tauri::command(rename_all = "snake_case")]
-async fn fund_state(state: State<'_, NodeState>) -> Result<Option<FundState>, String> {
+async fn fund_state(
+    window: WebviewWindow,
+    state: State<'_, NodeState>,
+) -> Result<Option<FundState>, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
     let (status, body) = call_api(
         state.inner(),
         reqwest::Method::GET,
@@ -597,9 +693,12 @@ async fn fund_state(state: State<'_, NodeState>) -> Result<Option<FundState>, St
 /// node declares `deny_unknown_fields`, so the body carries exactly these two.
 #[tauri::command(rename_all = "snake_case")]
 async fn fund_start(
+    window: WebviewWindow,
     state: State<'_, NodeState>,
     funding_amount_sats: u32,
 ) -> Result<FundState, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
     if funding_amount_sats == 0 {
         return Err("the funding amount must be at least 1 sat".into());
     }
@@ -621,7 +720,12 @@ async fn fund_start(
 
 /// `GET /payments/funding-address` — the deposit address shown as text + QR.
 #[tauri::command(rename_all = "snake_case")]
-async fn funding_address(state: State<'_, NodeState>) -> Result<FundingAddress, String> {
+async fn funding_address(
+    window: WebviewWindow,
+    state: State<'_, NodeState>,
+) -> Result<FundingAddress, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
     let (status, body) = call_api(
         state.inner(),
         reqwest::Method::GET,
@@ -634,7 +738,12 @@ async fn funding_address(state: State<'_, NodeState>) -> Result<FundingAddress, 
 
 /// `GET /payments/balance`.
 #[tauri::command(rename_all = "snake_case")]
-async fn payments_balance(state: State<'_, NodeState>) -> Result<Balance, String> {
+async fn payments_balance(
+    window: WebviewWindow,
+    state: State<'_, NodeState>,
+) -> Result<Balance, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
     let (status, body) = call_api(
         state.inner(),
         reqwest::Method::GET,
@@ -653,10 +762,13 @@ async fn payments_balance(state: State<'_, NodeState>) -> Result<Balance, String
 /// own rejection messages identify bad words by index, not by content.
 #[tauri::command(rename_all = "snake_case")]
 async fn identity_restore(
+    window: WebviewWindow,
     app: AppHandle,
     state: State<'_, NodeState>,
     mnemonic: String,
 ) -> Result<RestoreOutcome, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
     let phrase = mnemonic.trim();
     let words = phrase.split_whitespace().count();
     if words != 12 && words != 24 {
@@ -849,6 +961,9 @@ fn main() {
             identity_restore
         ])
         .setup(|app| {
+            if assistant_dev_enabled() {
+                install_assistant_menu(app)?;
+            }
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(bootstrap_node(handle));
             Ok(())
@@ -1126,5 +1241,390 @@ mod stop_adapter_tests {
             NODE_SHUTDOWN_BUDGET >= Duration::from_secs(20),
             "SIGKILL fallback at {NODE_SHUTDOWN_BUDGET:?} is inside the node's 15s flush window"
         );
+    }
+}
+
+#[cfg(test)]
+mod assistant_acl_tests {
+    use super::{assistant_dev_enabled_from, assistant_document_allowed, window_may_run_privileged_command};
+    use std::collections::BTreeSet;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn manifest_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    }
+
+    fn glob_match(pattern: &str, text: &str) -> bool {
+        fn rec(pattern: &[u8], text: &[u8]) -> bool {
+            let (mut pi, mut ti) = (0, 0);
+            let mut star: Option<usize> = None;
+            let mut mark = 0;
+            while ti < text.len() {
+                if pi < pattern.len() && (pattern[pi] == b'?' || pattern[pi] == text[ti]) {
+                    pi += 1;
+                    ti += 1;
+                } else if pi < pattern.len() && pattern[pi] == b'*' {
+                    star = Some(pi);
+                    mark = ti;
+                    pi += 1;
+                } else if let Some(star_pi) = star {
+                    pi = star_pi + 1;
+                    mark += 1;
+                    ti = mark;
+                } else {
+                    return false;
+                }
+            }
+            while pi < pattern.len() && pattern[pi] == b'*' {
+                pi += 1;
+            }
+            pi == pattern.len()
+        }
+        rec(pattern.as_bytes(), text.as_bytes())
+    }
+
+    fn permission_slug(command: &str) -> String {
+        command.replace('_', "-")
+    }
+
+    fn allow_perm(command: &str) -> String {
+        format!("allow-{}", permission_slug(command))
+    }
+
+    fn deny_perm(command: &str) -> String {
+        format!("deny-{}", permission_slug(command))
+    }
+
+    fn quoted_list(source: &str, marker: &str) -> Vec<String> {
+        let start = source
+            .find(marker)
+            .unwrap_or_else(|| panic!("missing {marker}"));
+        let rest = &source[start + marker.len()..];
+        let end = rest.find(']').unwrap_or_else(|| panic!("{marker} has no ]"));
+        rest[..end]
+            .split('"')
+            .enumerate()
+            .filter_map(|(index, part)| (index % 2 == 1).then(|| part.to_string()))
+            .collect()
+    }
+
+    fn handler_commands(source: &str) -> Vec<String> {
+        let marker = "generate_handler![";
+        let start = source.find(marker).expect("generate_handler");
+        let rest = &source[start + marker.len()..];
+        let end = rest.find(']').expect("generate_handler end");
+        rest[..end]
+            .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .collect()
+    }
+
+    fn function_source<'a>(source: &'a str, name: &str) -> &'a str {
+        let async_pat = format!("async fn {name}(");
+        let sync_pat = format!("fn {name}(");
+        let start = if let Some(index) = source.find(&async_pat) {
+            index
+        } else {
+            source
+                .match_indices(&sync_pat)
+                .find(|(index, _)| *index == 0 || source.as_bytes().get(index - 1) == Some(&b'\n'))
+                .map(|(index, _)| index)
+                .unwrap_or_else(|| panic!("missing fn {name}"))
+        };
+        let rest = &source[start..];
+        let mut offset = 0;
+        for (index, line) in rest.lines().enumerate() {
+            if index > 0 && line == "}" {
+                return &rest[..offset + line.len()];
+            }
+            offset += line.len() + 1;
+        }
+        panic!("unterminated fn {name}");
+    }
+
+    fn string_list(value: &serde_json::Value, key: &str) -> Vec<String> {
+        value
+            .get(key)
+            .and_then(|v| v.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn permission_identifiers(value: &serde_json::Value) -> Vec<String> {
+        value
+            .get("permissions")
+            .and_then(|v| v.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|entry| match entry {
+                        serde_json::Value::String(id) => Some(id.clone()),
+                        serde_json::Value::Object(map) => map
+                            .get("identifier")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_owned),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn applies_to(cap: &serde_json::Value, label: &str) -> bool {
+        string_list(cap, "windows")
+            .iter()
+            .chain(string_list(cap, "webviews").iter())
+            .any(|pattern| glob_match(pattern, label))
+    }
+
+    fn load_capabilities() -> Vec<serde_json::Value> {
+        let dir = manifest_dir().join("capabilities");
+        let mut caps = Vec::new();
+        for entry in fs::read_dir(&dir).expect("capabilities dir") {
+            let path = entry.expect("capability entry").path();
+            match path.extension().and_then(|ext| ext.to_str()) {
+                Some("json") => {
+                    let text = fs::read_to_string(&path).expect("read capability");
+                    caps.push(serde_json::from_str(&text).expect("capability json"));
+                }
+                Some("toml") => panic!("unparsed capability {} — extend the ACL test", path.display()),
+                _ => {}
+            }
+        }
+        assert!(!caps.is_empty(), "no capability files");
+        caps
+    }
+
+    fn production_source() -> String {
+        let source = fs::read_to_string(manifest_dir().join("src/main.rs")).expect("main.rs");
+        source
+            .split("mod assistant_acl_tests")
+            .next()
+            .expect("split")
+            .to_string()
+    }
+
+    #[test]
+    fn assistant_label_cannot_run_privileged_commands() {
+        assert!(!window_may_run_privileged_command("assistant"));
+        assert!(window_may_run_privileged_command("main"));
+        assert!(window_may_run_privileged_command("Assistant"));
+    }
+
+    #[test]
+    fn assistant_window_stays_behind_the_dev_flag() {
+        assert!(!assistant_dev_enabled_from(false, Some("1")));
+        assert!(!assistant_dev_enabled_from(true, None));
+        assert!(!assistant_dev_enabled_from(true, Some("0")));
+        assert!(!assistant_dev_enabled_from(true, Some("true")));
+        assert!(assistant_dev_enabled_from(true, Some("1")));
+    }
+
+    #[test]
+    fn assistant_navigation_rejects_remote_and_script_urls() {
+        assert!(assistant_document_allowed(
+            "http",
+            Some("localhost"),
+            "/assistant.html"
+        ));
+        assert!(assistant_document_allowed(
+            "http",
+            Some("127.0.0.1"),
+            "/assistant.html"
+        ));
+        assert!(assistant_document_allowed(
+            "https",
+            Some("tauri.localhost"),
+            "/assistant.html"
+        ));
+        assert!(assistant_document_allowed(
+            "tauri",
+            Some("localhost"),
+            "/assistant.html"
+        ));
+        assert!(!assistant_document_allowed(
+            "javascript",
+            None,
+            "alert(1)"
+        ));
+        assert!(!assistant_document_allowed("data", None, "/assistant.html"));
+        assert!(!assistant_document_allowed(
+            "https",
+            Some("evil.example"),
+            "/assistant.html"
+        ));
+        assert!(!assistant_document_allowed(
+            "http",
+            Some("localhost.evil.example"),
+            "/assistant.html"
+        ));
+        assert!(!assistant_document_allowed(
+            "http",
+            Some("localhost"),
+            "/index.html"
+        ));
+        assert!(!assistant_document_allowed("file", Some("localhost"), "/assistant.html"));
+    }
+
+    #[test]
+    fn assistant_capability_denies_every_custom_command() {
+        let source = production_source();
+        let commands = handler_commands(&source);
+        let required = [
+            "node_status",
+            "fund_state",
+            "fund_start",
+            "funding_address",
+            "payments_balance",
+            "identity_restore",
+        ];
+        for name in required {
+            assert!(commands.iter().any(|command| command == name), "missing {name}");
+        }
+
+        let build_rs = fs::read_to_string(manifest_dir().join("build.rs")).expect("build.rs");
+        let manifest = quoted_list(&build_rs, ".commands(&[");
+        assert_eq!(
+            commands.iter().cloned().collect::<BTreeSet<_>>(),
+            manifest.iter().cloned().collect::<BTreeSet<_>>(),
+            "every custom command must be in AppManifest or Tauri allows it on every window"
+        );
+
+        let caps = load_capabilities();
+        let assistant_caps: Vec<_> = caps.iter().filter(|cap| applies_to(cap, "assistant")).collect();
+        assert!(
+            !assistant_caps.is_empty(),
+            "the assistant window needs its own capability so it is not covered by a wildcard"
+        );
+
+        let mut denied = BTreeSet::new();
+        for cap in &assistant_caps {
+            assert!(
+                cap.get("remote").map(|v| v.is_null()).unwrap_or(true),
+                "assistant capability must not allow remote origins"
+            );
+            for id in permission_identifiers(cap) {
+                assert!(
+                    commands.iter().any(|command| id == deny_perm(command)),
+                    "assistant capability grants {id}"
+                );
+                denied.insert(id);
+            }
+        }
+        for command in &commands {
+            assert!(
+                denied.contains(&deny_perm(command)),
+                "assistant is not explicitly denied {command}"
+            );
+            assert!(
+                !denied.contains(&allow_perm(command)),
+                "assistant is allowed {command}"
+            );
+        }
+
+        let main_caps: Vec<_> = caps.iter().filter(|cap| applies_to(cap, "main")).collect();
+        assert_eq!(main_caps.len(), 1, "main must keep a single capability");
+        let main = main_caps[0];
+        assert_eq!(string_list(main, "windows"), vec!["main".to_string()]);
+        assert!(!applies_to(main, "assistant"));
+        let main_perms = permission_identifiers(main);
+        assert!(main_perms.iter().any(|id| id == "core:default"));
+        for command in &commands {
+            assert!(
+                main_perms.iter().any(|id| id == &allow_perm(command)),
+                "main lost {command}"
+            );
+            assert!(
+                !main_perms.iter().any(|id| id == &deny_perm(command)),
+                "main is denied {command}"
+            );
+        }
+        let shell = main
+            .get("permissions")
+            .and_then(|v| v.as_array())
+            .and_then(|items| {
+                items.iter().find(|entry| {
+                    entry.get("identifier").and_then(|v| v.as_str()) == Some("shell:allow-execute")
+                })
+            })
+            .expect("main keeps the sidecar execute permission");
+        let allow = shell.get("allow").and_then(|v| v.as_array()).expect("shell allow");
+        assert_eq!(allow.len(), 1);
+        assert_eq!(allow[0].get("name").and_then(|v| v.as_str()), Some("bin/konsensus"));
+        assert_eq!(allow[0].get("sidecar").and_then(|v| v.as_bool()), Some(true));
+        assert!(main_perms.iter().all(|id| id != "shell:allow-spawn" && id != "shell:allow-kill"));
+
+        let conf: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(manifest_dir().join("tauri.conf.json")).expect("tauri.conf"),
+        )
+        .expect("tauri.conf json");
+        let windows = conf["app"]["windows"].as_array().expect("windows");
+        assert_eq!(windows.len(), 1);
+        assert!(windows[0].get("label").is_none() || windows[0]["label"] == "main");
+        let text = fs::read_to_string(manifest_dir().join("tauri.conf.json")).expect("conf text");
+        assert!(!text.contains("assistant"));
+        if let Some(inlined) = conf["app"]["security"].get("capabilities").and_then(|v| v.as_array())
+        {
+            assert!(
+                inlined.iter().all(|entry| entry.is_string()),
+                "inline capability objects would bypass this directory scan"
+            );
+        }
+    }
+
+    #[test]
+    fn every_privileged_handler_checks_the_caller_window() {
+        let source = production_source();
+        let guard = function_source(&source, "reject_sealed_window");
+        assert!(guard.contains("window.label()"));
+        assert!(guard.contains("window_may_run_privileged_command"));
+        assert!(!guard.contains("label: String"));
+
+        for name in handler_commands(&source) {
+            let body = function_source(&source, &name);
+            assert!(
+                body.contains("window: WebviewWindow"),
+                "{name} must take the trusted WebviewWindow"
+            );
+            let after = body.split_once('{').expect("body").1;
+            let first = after
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty() && !line.starts_with("//"))
+                .unwrap_or("");
+            assert_eq!(
+                first, "reject_sealed_window(&window)?;",
+                "{name} must reject the assistant window before doing anything else"
+            );
+            assert!(!body.contains("window_label"));
+            assert!(!body.contains("label:"));
+        }
+
+        let opener = function_source(&source, "open_assistant_window");
+        assert!(opener.contains("assistant_dev_enabled()"));
+        assert!(opener.contains("ASSISTANT_WINDOW_LABEL"));
+        assert!(opener.contains("assistant_document_allowed"));
+        assert!(opener.contains("enable_clipboard_access()"));
+        assert!(opener.contains("NewWindowResponse::Deny"));
+        assert!(!opener.contains("WebviewUrl::External"));
+        assert_eq!(source.matches("open_assistant_window(").count(), 2);
+        assert!(source.contains("if assistant_dev_enabled()"));
+    }
+
+    #[test]
+    fn window_globs_that_would_cover_the_assistant_match() {
+        assert!(glob_match("*", "assistant"));
+        assert!(glob_match("assistant", "assistant"));
+        assert!(glob_match("assistant*", "assistant"));
+        assert!(glob_match("*assistant", "assistant"));
+        assert!(!glob_match("main", "assistant"));
+        assert!(!glob_match("assistant?", "assistant"));
     }
 }
