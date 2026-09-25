@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "assistant",
+  "description": "Sealed assistant window. No grants. Do not add deny entries: Tauri 2.11 applies a command deny to every window.",
+  "windows": ["assistant"],
+  "permissions": []
+}

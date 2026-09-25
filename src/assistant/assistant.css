@@ -1,0 +1,53 @@
+:root {
+  --bg: #0f0b08;
+  --surface: #17110c;
+  --ink: #f3e9de;
+  --accent: #f7931a;
+  --line: #2e231a;
+}
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; margin: 0; }
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: system-ui, -apple-system, sans-serif;
+}
+.assistant-seal {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+}
+.assistant-output {
+  flex: 1;
+  margin: 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, monospace;
+  font-size: 13px;
+  line-height: 1.5;
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px;
+}
+.assistant-copy {
+  align-self: flex-end;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  color: #1a1206;
+  background: var(--accent);
+  border: none;
+  border-radius: 10px;
+  padding: 10px 16px;
+  cursor: pointer;
+}
+.assistant-copy-sink {
+  position: fixed;
+  left: -9999px;
+  top: 0;
+}
