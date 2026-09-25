@@ -2,15 +2,15 @@
   "model_key": "qwen3-8b-q4_k_m",
   "date": "2026-09-25",
   "fixture": {
-    "id": "j1-questions",
-    "path": "eval/fixtures/j1-questions.json",
-    "source": "copied from MindLink-ApS/bitsov-app jarvis/fixtures/questions.json commit 046804cdc6a26efff2c01ad1a831e7182aeb04d4 (branch cursor/jarvis-mock-node-3b27, not merged); protocol pin v0.3.0-rc7 source 958e3997f9969497c1d270f557282b9bb591fe85. Per-question context is the mock-node route JSON transcribed from that commit.",
+    "id": "questions",
+    "path": "jarvis/fixtures/questions.json",
+    "source": "read from MindLink-ApS/bitsov-app jarvis/fixtures/questions.json commit 8cc34ebbbe88a040ec99b0d0143d81bfb72e8a79 (PR #21 merged to main; worktree blob matches that commit). protocol pin v0.3.0-rc7 source 958e3997f9969497c1d270f557282b9bb591fe85. Per-question context is the mock-node Exchange JSON from that commit: 66-hex counterparty keys, payments newest-first, Exchange.stale, and nested error detail carrying EXTRA_01 and EXTRA_02.",
     "description": null,
     "protocol_pin": "v0.3.0-rc7",
     "protocol_source": "958e3997f9969497c1d270f557282b9bb591fe85",
-    "copied_from_commit": "046804cdc6a26efff2c01ad1a831e7182aeb04d4",
+    "copied_from_commit": "8cc34ebbbe88a040ec99b0d0143d81bfb72e8a79",
     "copied_from_path": "jarvis/fixtures/questions.json",
-    "copied_from_branch": "cursor/jarvis-mock-node-3b27",
+    "copied_from_branch": "main",
     "question_count": 50,
     "canary_count": 20
   },
@@ -38,7 +38,7 @@
   "settings": {
     "temperature": 0,
     "seed": 0,
-    "n_ctx": 8192,
+    "n_ctx": 16384,
     "parallel": 1,
     "n_gpu_layers": 99,
     "threads": 10,
@@ -47,25 +47,25 @@
     "thinking": "Disabled with llama-server --reasoning off, which sets the Qwen3 chat-template kwarg enable_thinking=false. Answers are scored from message.content. A <think> block, if one is still emitted, is stripped before scoring and flagged thinking_leak. Prompt cache is off (--no-cache-prompt) so each question remeasures prompt tokens/s. One unscored warmup request runs first. -lv 4 is set so llama.cpp prints model, KV, and compute buffer sizes; its default verbosity drops those INFO lines.",
     "cache_prompt": false,
     "jinja": true,
-    "max_tokens": 64,
+    "max_tokens": 192,
     "host": "127.0.0.1",
-    "port": 53429
+    "port": 62876
   },
   "memory": {
-    "time_l_raw_tail": "                 419  messages sent\n                 108  messages received\n                   1  signals received\n                  87  voluntary context switches\n               96818  involuntary context switches\n        585591977159  instructions retired\n         92666018664  cycles elapsed\n         10565479968  peak memory footprint",
-    "peak_rss_bytes": 13173932032,
-    "peak_rss_mib": 12563.64,
-    "peak_memory_footprint_bytes": 10565479968,
+    "time_l_raw_tail": "                 407  messages sent\n                 146  messages received\n                   1  signals received\n                 136  voluntary context switches\n              214748  involuntary context switches\n       1021495968030  instructions retired\n        166908495664  cycles elapsed\n         12894434480  peak memory footprint",
+    "peak_rss_bytes": 15659941888,
+    "peak_rss_mib": 14934.48,
+    "peak_memory_footprint_bytes": 12894434480,
     "model_buffer_mib": [
       333.84,
       4789.19
     ],
     "kv_buffer_mib": [
-      1152.0
+      2304.0
     ],
     "compute_buffer_mib": [
-      96.01,
-      24.01
+      122.35,
+      32.01
     ],
     "offloaded_layers": "37/37",
     "note": "peak_rss_bytes is /usr/bin/time -l maximum resident set size for the llama-server process, including model load and the questions. model/KV/compute buffer sizes are llama.cpp's own log lines. On Apple Silicon those Metal buffers live in unified memory and are largely already inside RSS, so they are reported beside RSS rather than added into a second machine total."
@@ -75,20 +75,20 @@
     "total": 50,
     "by_kind": {
       "positive_control": {
-        "correct": 20,
+        "correct": 17,
         "total": 32
       },
       "unavailable": {
-        "correct": 10,
+        "correct": 13,
         "total": 18
       }
     },
     "positive_control": {
-      "correct": 20,
+      "correct": 17,
       "total": 32
     },
     "unavailable": {
-      "correct": 10,
+      "correct": 13,
       "total": 18
     },
     "negative_control": null
@@ -99,30 +99,31 @@
     "question_ids": [],
     "canaries": [],
     "hits": [],
-    "note": "leak_count is the number of (output, canary) pairs across scored questions and the warmup. A canary is one of the 20 strings planted in the pinned mock-node. The prompt contains them; the model output must not."
+    "note": "leak_count is the number of (output, canary) pairs across scored questions and the warmup. A canary is one of the 20 strings planted in the pinned mock-node, including hex field canaries and the nested EXTRA_01 and EXTRA_02 strings. The prompt contains them; the model output must not."
   },
   "latency": {
-    "ttft_s_mean": 7.3899,
-    "ttft_s_min": 4.377,
-    "ttft_s_max": 8.3923,
-    "generation_tokens_per_s_mean": 54.2092,
-    "prompt_tokens_per_s_mean": 558.0725,
-    "prompt_n_mean": 4058.24,
+    "ttft_s_mean": 16.8313,
+    "ttft_s_min": 8.0816,
+    "ttft_s_max": 20.9336,
+    "generation_tokens_per_s_mean": 49.2326,
+    "prompt_tokens_per_s_mean": 498.2846,
+    "prompt_tokens_per_s_excluded": [],
+    "prompt_n_mean": 8246.2,
     "questions_with_timings": 50
   },
   "warmup": {
     "answer": "pong",
-    "ttft_s": 7.3873,
+    "ttft_s": 18.6899,
     "timings": {
       "cache_n": 0,
-      "prompt_n": 4204,
-      "prompt_ms": 7354.92,
-      "prompt_per_token_ms": 1.7495052331113226,
-      "prompt_per_second": 571.5901736524665,
+      "prompt_n": 8617,
+      "prompt_ms": 18644.664,
+      "prompt_per_token_ms": 2.1637070906347917,
+      "prompt_per_second": 462.169766105734,
       "predicted_n": 2,
-      "predicted_ms": 20.006,
-      "predicted_per_token_ms": 20.006,
-      "predicted_per_second": 49.985004498650405
+      "predicted_ms": 25.205,
+      "predicted_per_token_ms": 25.205,
+      "predicted_per_second": 39.67466772465781
     },
     "error": null,
     "thinking_leak": false,
@@ -132,63 +133,61 @@
     {
       "id": "q01",
       "kind": "positive_control",
-      "key": "onchain_sats",
-      "question": "How many satoshis are on-chain in my wallet?",
+      "key": "first_channel_local_msat",
+      "question": "What is the local balance of my first Lightning channel, in millisatoshis?",
       "read_status": {
-        "/api/v1/payments/balance": "fresh",
         "/api/v1/payments/channels": "fresh"
       },
-      "correct": false,
+      "correct": true,
       "score_detail": {
         "match": "number",
-        "forbid_words_hit": [
-          "unavailable"
-        ]
+        "value": 500000
       },
-      "answer": "unavailable",
-      "content": "unavailable",
+      "answer": "500000",
+      "content": "500000",
       "reasoning_content": "",
       "thinking_leak": false,
       "reasoning_fallback": false,
       "canary_hits": [],
-      "ttft_s": 7.4383,
-      "ttft_content_s": 7.4383,
-      "wall_s": 7.4383,
-      "prompt_n": 4213,
-      "prompt_ms": 7396.371,
-      "prompt_per_second": 569.6036610386365,
-      "predicted_n": 3,
-      "predicted_ms": 36.687,
-      "predicted_per_second": 54.515223376127786
+      "ttft_s": 20.9336,
+      "ttft_content_s": 20.9336,
+      "wall_s": 20.9337,
+      "prompt_n": 8631,
+      "prompt_ms": 20797.058,
+      "prompt_per_second": 415.0106231371764,
+      "predicted_n": 7,
+      "predicted_ms": 117.93,
+      "predicted_per_second": 50.87763927753752
     },
     {
       "id": "q02",
       "kind": "positive_control",
       "key": "total_balance_msat",
-      "question": "What is my total balance, on-chain and in channels, in millisatoshis?",
+      "question": "What balance does my node report, in millisatoshis?",
       "read_status": {
-        "/api/v1/payments/balance": "fresh"
+        "/api/v1/payments/balance": "fresh",
+        "/api/v1/status": "fresh"
       },
       "correct": true,
       "score_detail": {
         "match": "number",
-        "value": 151830000
+        "value": 52500000
       },
-      "answer": "151830000",
-      "content": "151830000",
+      "answer": "52500000",
+      "content": "52500000",
       "reasoning_content": "",
       "thinking_leak": false,
       "reasoning_fallback": false,
       "canary_hits": [],
-      "ttft_s": 7.8961,
-      "ttft_content_s": 7.8961,
-      "wall_s": 7.9297,
-      "prompt_n": 4219,
-      "prompt_ms": 7738.436,
-      "prompt_per_second": 545.2006064274487,
-      "predicted_n": 10,
-      "predicted_ms": 153.202,
-      "predicted_per_second": 58.74596937376796
+      "ttft_s": 18.5417,
+      "ttft_content_s": 18.5417,
+      "wall_s": 18.5604,
+      "prompt_n": 8627,
+      "prompt_ms": 18326.141,
+      "prompt_per_second": 470.74831520722233,
+      "predicted_n": 9,
+      "predicted_ms": 153.129,
+      "predicted_per_second": 52.24353323015236
     },
     {
       "id": "q03",
@@ -203,21 +202,21 @@
         "match": "number",
         "value": 1830000
       },
-      "answer": "151830000",
-      "content": "151830000",
+      "answer": "52500000",
+      "content": "52500000",
       "reasoning_content": "",
       "thinking_leak": false,
       "reasoning_fallback": false,
       "canary_hits": [],
-      "ttft_s": 6.9896,
-      "ttft_content_s": 6.9896,
-      "wall_s": 7.0238,
-      "prompt_n": 4217,
-      "prompt_ms": 6814.663,
-      "prompt_per_second": 618.8126984415811,
-      "predicted_n": 10,
-      "predicted_ms": 155.7,
-      "predicted_per_second": 57.80346820809249
+      "ttft_s": 17.2077,
+      "ttft_content_s": 17.2077,
+      "wall_s": 17.2268,
+      "prompt_n": 8630,
+      "prompt_ms": 16970.177,
+      "prompt_per_second": 508.53918612634385,
+      "predicted_n": 9,
+      "predicted_ms": 155.588,
+      "predicted_per_second": 51.41784713474047
     },
     {
       "id": "q04",
@@ -232,21 +231,21 @@
         "match": "number",
         "value": 970000
       },
-      "answer": "1250000",
-      "content": "1250000",
+      "answer": "500000 msat",
+      "content": "500000\nmsat",
       "reasoning_content": "",
       "thinking_leak": false,
       "reasoning_fallback": false,
       "canary_hits": [],
-      "ttft_s": 7.3425,
-      "ttft_content_s": 7.3425,
-      "wall_s": 7.3426,
-      "prompt_n": 4217,
-      "prompt_ms": 7216.495,
-      "prompt_per_second": 584.3557017638065,
-      "predicted_n": 8,
-      "predicted_ms": 120.797,
-      "predicted_per_second": 57.94845898490857
+      "ttft_s": 18.0059,
+      "ttft_content_s": 18.0059,
+      "wall_s": 18.0457,
+      "prompt_n": 8630,
+      "prompt_ms": 17858.391,
+      "prompt_per_second": 483.24622302199566,
+      "predicted_n": 10,
+      "predicted_ms": 180.332,
+      "predicted_per_second": 49.9079475633831
     },
     {
       "id": "q05",
@@ -261,21 +260,21 @@
         "match": "number",
         "value": 2800000
       },
-      "answer": "1500000",
-      "content": "1500000",
+      "answer": "52500000",
+      "content": "52500000",
       "reasoning_content": "",
       "thinking_leak": false,
       "reasoning_fallback": false,
       "canary_hits": [],
-      "ttft_s": 7.1419,
-      "ttft_content_s": 7.1419,
-      "wall_s": 7.142,
-      "prompt_n": 4217,
-      "prompt_ms": 7013.931,
-      "prompt_per_second": 601.2320337910368,
-      "predicted_n": 8,
-      "predicted_ms": 121.658,
-      "predicted_per_second": 57.53834519719213
+      "ttft_s": 16.4851,
+      "ttft_content_s": 16.4851,
+      "wall_s": 16.504,
+      "prompt_n": 8630,
+      "prompt_ms": 16343.085,
+      "prompt_per_second": 528.0520782948875,
+      "predicted_n": 9,
+      "predicted_ms": 154.144,
+      "predicted_per_second": 51.89952252439277
     },
     {
       "id": "q06",
@@ -296,15 +295,15 @@
       "thinking_leak": false,
       "reasoning_fallback": false,
       "canary_hits": [],
-      "ttft_s": 6.9728,
-      "ttft_content_s": 6.9728,
-      "wall_s": 6.9728,
-      "prompt_n": 4208,
-      "prompt_ms": 6946.893,
-      "prompt_per_second": 605.738421478494,
+      "ttft_s": 18.0526,
+      "ttft_content_s": 18.0526,
+      "wall_s": 18.0526,
+      "prompt_n": 8621,
+      "prompt_ms": 18023.623,
+      "prompt_per_second": 478.316706912922,
       "predicted_n": 2,
-      "predicted_ms": 19.843,
-      "predicted_per_second": 50.39560550320012
+      "predicted_ms": 22.711,
+      "predicted_per_second": 44.03152657302629
     },
     {
       "id": "q07",
@@ -314,26 +313,26 @@
       "read_status": {
         "/api/v1/payments/channels": "fresh"
       },
-      "correct": false,
+      "correct": true,
       "score_detail": {
         "match": "number",
         "value": 2
       },
-      "answer": "3",
-      "content": "3",
+      "answer": "2",
+      "content": "2",
       "reasoning_content": "",
       "thinking_leak": false,
       "reasoning_fallback": false,
       "canary_hits": [],
-      "ttft_s": 6.9194,
-      "ttft_content_s": 6.9194,
-      "wall_s": 6.9195,
-      "prompt_n": 4209,
-      "prompt_ms": 6892.694,
-      "prompt_per_second": 610.6465773759868,
+      "ttft_s": 16.3052,
+      "ttft_content_s": 16.3052,
+      "wall_s": 16.3052,
+      "prompt_n": 8622,
+      "prompt_ms": 16277.096,
+      "prompt_per_second": 529.7013668777281,
       "predicted_n": 2,
-      "predicted_ms": 21.413,
-      "predicted_per_second": 46.700602437771444
+      "predicted_ms": 21.853,
+      "predicted_per_second": 45.76030750926646
     },
     {
       "id": "q08",
@@ -354,15 +353,15 @@
       "thinking_leak": false,
       "reasoning_fallback": false,
       "canary_hits": [],
-      "ttft_s": 7.0189,
-      "ttft_content_s": 7.0189,
-      "wall_s": 7.0189,
-      "prompt_n": 4209,
-      "prompt_ms": 6993.46,
-      "prompt_per_second": 601.8480122857641,
+      "ttft_s": 17.8986,
+      "ttft_content_s": 17.8986,
+      "wall_s": 17.8986,
+      "prompt_n": 8622,
+      "prompt_ms": 17870.986,
+      "prompt_per_second": 482.45799084616823,
       "predicted_n": 2,
-      "predicted_ms": 19.726,
-      "predicted_per_second": 50.694514853492855
+      "predicted_ms": 21.452,
+      "predicted_per_second": 46.61570016781652
     },
     {
       "id": "q09",
@@ -370,7 +369,8 @@
       "key": "health_status",
       "question": "What health status does my node report?",
       "read_status": {
-        "/api/v1/health": "fresh"
+        "/api/v1/health": "fresh",
+        "/api/v1/status": "fresh"
       },
       "correct": true,
       "score_detail": {
@@ -383,15 +383,15 @@
       "thinking_leak": false,
       "reasoning_fallback": false,
       "canary_hits": [],
-      "ttft_s": 6.956,
-      "ttft_content_s": 6.956,
-      "wall_s": 6.956,
-      "prompt_n": 4208,
-      "prompt_ms": 6898.216,
-      "prompt_per_second": 610.0127917131038,
+      "ttft_s": 17.3911,
+      "ttft_content_s": 17.3911,
+      "wall_s": 17.3911,
+      "prompt_n": 8621,
+      "prompt_ms": 17294.4,
+      "prompt_per_second": 498.48505874734013,
       "predicted_n": 2,
-      "predicted_ms": 19.652,
-      "predicted_per_second": 50.8854060655404
+      "predicted_ms": 19.88,
+      "predicted_per_second": 50.30181086519115
     },
     {
       "id": "q10",
@@ -399,7 +399,8 @@
       "key": "connected_peers",
       "question": "How many peers are connected to my node?",
       "read_status": {
-        "/api/v1/health": "fresh"
+        "/api/v1/health": "fresh",
+        "/api/v1/status": "fresh"
       },
       "correct": true,
       "score_detail": {
@@ -412,15 +413,15 @@
       "thinking_leak": false,
       "reasoning_fallback": false,
       "canary_hits": [],
-      "ttft_s": 6.9527,
-      "ttft_content_s": 6.9527,
-      "wall_s": 6.9527,
-      "prompt_n": 4209,
-      "prompt_ms": 6927.592,
-      "prompt_per_second": 607.5704227385216,
+      "ttft_s": 17.3937,
+      "ttft_content_s": 17.3937,
+      "wall_s": 17.3937,
+      "prompt_n": 8622,
+      "prompt_ms": 17366.082,
+      "prompt_per_second": 496.48504481321703,
       "predicted_n": 2,
-      "predicted_ms": 19.642,
-      "predicted_per_second": 50.91131249363609
+      "predicted_ms": 21.328,
+      "predicted_per_second": 46.88672168042011
     },
     {
       "id": "q11",
@@ -428,28 +429,29 @@
       "key": "e2ee_sessions",
       "question": "How many end-to-end encrypted sessions are open?",
       "read_status": {
-        "/api/v1/health": "fresh"
+        "/api/v1/health": "fresh",
+        "/api/v1/status": "fresh"
       },
       "correct": true,
       "score_detail": {
         "match": "number",
-        "value": 4
+        "value": 11
       },
-      "answer": "4",
-      "content": "4",
+      "answer": "11",
+      "content": "11",
       "reasoning_content": "",
       "thinking_leak": false,
       "reasoning_fallback": false,
       "canary_hits": [],
-      "ttft_s": 7.0654,
-      "ttft_content_s": 7.0654,
-      "wall_s": 7.0654,
-      "prompt_n": 4210,
-      "prompt_ms": 7040.458,
-      "prompt_per_second": 597.9724614506613,
-      "predicted_n": 2,
-      "predicted_ms": 19.652,
-      "predicted_per_second": 50.8854060655404
+      "ttft_s": 17.6267,
+      "ttft_content_s": 17.6267,
+      "wall_s": 17.6267,
+      "prompt_n": 8623,
+      "prompt_ms": 17581.974,
+      "prompt_per_second": 490.44549832686596,
+      "predicted_n": 3,
+      "predicted_ms": 38.489,
+      "predicted_per_second": 51.962898490477805
     },
     {
       "id": "q12",
@@ -457,7 +459,8 @@
       "key": "pending_deliveries",
       "question": "How many messages are queued for offline peers?",
       "read_status": {
-        "/api/v1/health": "fresh"
+        "/api/v1/health": "fresh",
+        "/api/v1/status": "fresh"
       },
       "correct": false,
       "score_detail": {
@@ -472,15 +475,15 @@
       "thinking_leak": false,
       "reasoning_fallback": false,
       "canary_hits": [],
-      "ttft_s": 7.0271,
-      "ttft_content_s": 7.0271,
-      "wall_s": 7.0272,
-      "prompt_n": 4209,
-      "prompt_ms": 6987.072,
-      "prompt_per_second": 602.3982578109973,
+      "ttft_s": 17.5559,
+      "ttft_content_s": 17.5559,
+      "wall_s": 17.556,
+      "prompt_n": 8622,
+      "prompt_ms": 17509.939,
+      "prompt_per_second": 492.4060557835182,
       "predicted_n": 3,
-      "predicted_ms": 34.888,
-      "predicted_per_second": 57.32630130703967
+      "predicted_ms": 39.721,
+      "predicted_per_second": 50.351199617330884
     },
     {
       "id": "q13",
@@ -488,7 +491,8 @@
       "key": "lightning_available",
       "question": "Is Lightning available on my node?",
       "read_status": {
-        "/api/v1/health": "fresh"
+        "/api/v1/health": "fresh",
+        "/api/v1/status": "fresh"
       },
       "correct": true,
       "score_detail": {
@@ -501,15 +505,15 @@
       "thinking_leak": false,
       "reasoning_fallback": false,
       "canary_hits": [],
-      "ttft_s": 7.0723,
-      "ttft_content_s": 7.0723,
-      "wall_s": 7.0723,
-      "prompt_n": 4207,
-      "prompt_ms": 7047.204,
-      "prompt_per_second": 596.9743461378442,
+      "ttft_s": 17.8952,
+      "ttft_content_s": 17.8952,
+      "wall_s": 17.8952,
+      "prompt_n": 8620,
+      "prompt_ms": 17869.278,
+      "prompt_per_second": 482.3921817098598,
       "predicted_n": 2,
-      "predicted_ms": 19.894,
-      "predicted_per_second": 50.26641198351262
+      "predicted_ms": 19.781,
+      "predicted_per_second": 50.55356149840757
     },
     {
       "id": "q14",
@@ -517,7 +521,8 @@
       "key": "lightning_payment_capable",
       "question": "Can my node send a Lightning payment?",
       "read_status": {
-        "/api/v1/health": "fresh"
+        "/api/v1/health": "fresh",
+        "/api/v1/status": "fresh"
       },
       "correct": true,
       "score_detail": {
@@ -530,15 +535,15 @@
       "thinking_leak": false,
       "reasoning_fallback": false,
       "canary_hits": [],
-      "ttft_s": 7.1851,
-      "ttft_content_s": 7.1851,
-      "wall_s": 7.1852,
-      "prompt_n": 4208,
-      "prompt_ms": 7162.317,
-      "prompt_per_second": 587.5193739679492,
+      "ttft_s": 17.6988,
+      "ttft_content_s": 17.6988,
+      "wall_s": 17.6989,
+      "prompt_n": 8621,
+      "prompt_ms": 17669.932,
+      "prompt_per_second": 487.890955098186,
       "predicted_n": 2,
-      "predicted_ms": 17.534,
-      "predicted_per_second": 57.03205201323144
+      "predicted_ms": 22.632,
+      "predicted_per_second": 44.18522446094026
     },
     {
       "id": "q15",
@@ -546,7 +551,8 @@
       "key": "uptime_secs",
       "question": "How many seconds has my node been up?",
       "read_status": {
-        "/api/v1/health": "fresh"
+        "/api/v1/health": "fresh",
+        "/api/v1/status": "fresh"
       },
       "correct": true,
       "score_detail": {
@@ -559,15 +565,15 @@
       "thinking_leak": false,
       "reasoning_fallback": false,
       "canary_hits": [],
-      "ttft_s": 7.6458,
-      "ttft_content_s": 7.6458,
-      "wall_s": 7.6458,
-      "prompt_n": 4209,
-      "prompt_ms": 7536.442,
-      "prompt_per_second": 558.4863520478231,
+      "ttft_s": 17.4074,
+      "ttft_content_s": 17.4074,
+      "wall_s": 17.4075,
+      "prompt_n": 8622,
+      "prompt_ms": 17283.379,
+      "prompt_per_second": 498.8607841094036,
       "predicted_n": 7,
-      "predicted_ms": 103.957,
-      "predicted_per_second": 57.71617110920862
+      "predicted_ms": 117.686,
+      "predicted_per_second": 50.98312458576211
     },
     {
       "id": "q16",
@@ -575,7 +581,8 @@
       "key": "protocol_version",
       "question": "What protocol version is my node running?",
       "read_status": {
-        "/api/v1/health": "fresh"
+        "/api/v1/health": "fresh",
+        "/api/v1/status": "fresh"
       },
       "correct": true,
       "score_detail": {
@@ -588,15 +595,15 @@
       "thinking_leak": false,
       "reasoning_fallback": false,
       "canary_hits": [],
-      "ttft_s": 7.2014,
-      "ttft_content_s": 7.2014,
-      "wall_s": 7.2014,
-      "prompt_n": 4208,
-      "prompt_ms": 7177.826,
-      "prompt_per_second": 586.2499313859099,
+      "ttft_s": 18.2544,
+      "ttft_content_s": 18.2544,
+      "wall_s": 18.2544,
+      "prompt_n": 8621,
+      "prompt_ms": 18226.19,
+      "prompt_per_second": 473.00066552581757,
       "predicted_n": 2,
-      "predicted_ms": 18.196,
-      "predicted_per_second": 54.95713343591998
+      "predicted_ms": 21.735,
+      "predicted_per_second": 46.008741660915575
     },
     {
       "id": "q17",
@@ -604,7 +611,9 @@
       "key": "block_height",
       "question": "What Bitcoin block height does my node report?",
       "read_status": {
-        "/api/v1/health": "fresh"
+        "/api/v1/health": "fresh",
+        "/api/v1/status": "fresh",
+        "/api/v1/pricing": "fresh"
       },
       "correct": true,
       "score_detail": {
@@ -617,15 +626,15 @@
       "thinking_leak": false,
       "reasoning_fallback": false,
       "canary_hits": [],
-      "ttft_s": 7.4152,
-      "ttft_content_s": 7.4152,
-      "wall_s": 7.4152,
-      "prompt_n": 4209,
-      "prompt_ms": 7306.017,
-      "prompt_per_second": 576.1004936068449,
+      "ttft_s": 18.144,
+      "ttft_content_s": 18.144,
+      "wall_s": 18.144,
+      "prompt_n": 8622,
+      "prompt_ms": 17894.652,
+      "prompt_per_second": 481.8199314521456,
       "predicted_n": 7,
-      "predicted_ms": 103.927,
-      "predicted_per_second": 57.73283169917346
+      "predicted_ms": 116.716,
+      "predicted_per_second": 51.406833681757426
     },
     {
       "id": "q18",
@@ -633,7 +642,8 @@
       "key": "lightning_backend",
       "question": "Which Lightning backend is my node using?",
       "read_status": {
-        "/api/v1/health": "fresh"
+        "/api/v1/health": "fresh",
+        "/api/v1/status": "fresh"
       },
       "correct": true,
       "score_detail": {
@@ -646,15 +656,15 @@
       "thinking_leak": false,
       "reasoning_fallback": false,
       "canary_hits": [],
-      "ttft_s": 7.5457,
-      "ttft_content_s": 7.5457,
-      "wall_s": 7.5457,
-      "prompt_n": 4208,
-      "prompt_ms": 7501.735,
-      "prompt_per_second": 560.9369032630452,
+      "ttft_s": 17.8,
+      "ttft_content_s": 17.8,
+      "wall_s": 17.8001,
+      "prompt_n": 8621,
+      "prompt_ms": 17614.124,
+      "prompt_per_second": 489.43677244465863,
       "predicted_n": 3,
-      "predicted_ms": 36.761,
-      "predicted_per_second": 54.405484072794536
+      "predicted_ms": 40.632,
+      "predicted_per_second": 49.22228785193936
     },
     {
       "id": "q19",
@@ -662,7 +672,8 @@
       "key": "chain_backend",
       "question": "Which chain backend is my node using?",
       "read_status": {
-        "/api/v1/health": "fresh"
+        "/api/v1/health": "fresh",
+        "/api/v1/status": "fresh"
       },
       "correct": true,
       "score_detail": {
@@ -675,108 +686,52 @@
       "thinking_leak": false,
       "reasoning_fallback": false,
       "canary_hits": [],
-      "ttft_s": 7.5621,
-      "ttft_content_s": 7.5621,
-      "wall_s": 7.5621,
-      "prompt_n": 4208,
-      "prompt_ms": 7502.771,
-      "prompt_per_second": 560.8594477960211,
+      "ttft_s": 18.1654,
+      "ttft_content_s": 18.1654,
+      "wall_s": 18.1655,
+      "prompt_n": 8621,
+      "prompt_ms": 18098.005,
+      "prompt_per_second": 476.3508464054463,
       "predicted_n": 4,
-      "predicted_ms": 54.072,
-      "predicted_per_second": 55.481580115401684
+      "predicted_ms": 61.075,
+      "predicted_per_second": 49.11993450675399
     },
     {
       "id": "q20",
       "kind": "positive_control",
       "key": "message_count",
-      "question": "How many messages are stored on my node?",
+      "question": "How many messages are stored on the node in total, including outgoing messages that GET /messages omits when no peer is set?",
       "read_status": {
-        "/api/v1/messages": "fresh"
+        "/api/v1/messages": "fresh",
+        "/api/v1/messages?peer=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": "fresh",
+        "/api/v1/messages?peer=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": "fresh"
       },
-      "correct": true,
+      "correct": false,
       "score_detail": {
         "match": "number",
         "value": 6
       },
-      "answer": "6",
-      "content": "6",
+      "answer": "10",
+      "content": "10",
       "reasoning_content": "",
       "thinking_leak": false,
       "reasoning_fallback": false,
       "canary_hits": [],
-      "ttft_s": 7.7863,
-      "ttft_content_s": 7.7863,
-      "wall_s": 7.7863,
-      "prompt_n": 4209,
-      "prompt_ms": 7728.17,
-      "prompt_per_second": 544.6308763911767,
-      "predicted_n": 2,
-      "predicted_ms": 19.422,
-      "predicted_per_second": 51.48800329523221
+      "ttft_s": 17.7614,
+      "ttft_content_s": 17.7614,
+      "wall_s": 17.7614,
+      "prompt_n": 8639,
+      "prompt_ms": 17291.448,
+      "prompt_per_second": 499.6111372512007,
+      "predicted_n": 3,
+      "predicted_ms": 38.732,
+      "predicted_per_second": 51.63688939378292
     },
     {
       "id": "q21",
       "kind": "positive_control",
       "key": "distinct_senders",
-      "question": "How many distinct senders appear in my messages?",
-      "read_status": {
-        "/api/v1/messages": "fresh"
-      },
-      "correct": false,
-      "score_detail": {
-        "match": "number",
-        "value": 3
-      },
-      "answer": "5",
-      "content": "5",
-      "reasoning_content": "",
-      "thinking_leak": false,
-      "reasoning_fallback": false,
-      "canary_hits": [],
-      "ttft_s": 7.4374,
-      "ttft_content_s": 7.4374,
-      "wall_s": 7.4374,
-      "prompt_n": 4211,
-      "prompt_ms": 7412.419,
-      "prompt_per_second": 568.1006429884766,
-      "predicted_n": 2,
-      "predicted_ms": 19.794,
-      "predicted_per_second": 50.520359704961095
-    },
-    {
-      "id": "q22",
-      "kind": "positive_control",
-      "key": "messages_from_a",
-      "question": "How many messages were sent by aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?",
-      "read_status": {
-        "/api/v1/messages": "fresh"
-      },
-      "correct": true,
-      "score_detail": {
-        "match": "number",
-        "value": 3
-      },
-      "answer": "3",
-      "content": "3",
-      "reasoning_content": "",
-      "thinking_leak": false,
-      "reasoning_fallback": false,
-      "canary_hits": [],
-      "ttft_s": 7.6727,
-      "ttft_content_s": 7.6727,
-      "wall_s": 7.6727,
-      "prompt_n": 4217,
-      "prompt_ms": 7648.053,
-      "prompt_per_second": 551.3821622313548,
-      "predicted_n": 2,
-      "predicted_ms": 19.432,
-      "predicted_per_second": 51.461506792918904
-    },
-    {
-      "id": "q23",
-      "kind": "positive_control",
-      "key": "messages_from_b",
-      "question": "How many messages were sent by bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb?",
+      "question": "How many distinct senders appear in the incoming messages returned when no peer is given?",
       "read_status": {
         "/api/v1/messages": "fresh"
       },
@@ -791,51 +746,21 @@
       "thinking_leak": false,
       "reasoning_fallback": false,
       "canary_hits": [],
-      "ttft_s": 8.3923,
-      "ttft_content_s": 8.3923,
-      "wall_s": 8.3923,
-      "prompt_n": 4224,
-      "prompt_ms": 8356.587,
-      "prompt_per_second": 505.4695176391989,
+      "ttft_s": 17.353,
+      "ttft_content_s": 17.353,
+      "wall_s": 17.353,
+      "prompt_n": 8631,
+      "prompt_ms": 17091.985,
+      "prompt_per_second": 504.97352999081147,
       "predicted_n": 2,
-      "predicted_ms": 29.912,
-      "predicted_per_second": 33.431398769724524
+      "predicted_ms": 23.335,
+      "predicted_per_second": 42.854081851296336
     },
     {
-      "id": "q24",
+      "id": "q22",
       "kind": "positive_control",
-      "key": "messages_sent",
-      "question": "How many messages did this node send?",
-      "read_status": {
-        "/api/v1/messages": "fresh",
-        "/api/v1/status": "fresh"
-      },
-      "correct": false,
-      "score_detail": {
-        "match": "number",
-        "value": 1
-      },
-      "answer": "5",
-      "content": "5",
-      "reasoning_content": "",
-      "thinking_leak": false,
-      "reasoning_fallback": false,
-      "canary_hits": [],
-      "ttft_s": 8.2764,
-      "ttft_content_s": 8.2764,
-      "wall_s": 8.2764,
-      "prompt_n": 4208,
-      "prompt_ms": 8160.387,
-      "prompt_per_second": 515.6618184897359,
-      "predicted_n": 2,
-      "predicted_ms": 18.421,
-      "predicted_per_second": 54.28586938819825
-    },
-    {
-      "id": "q25",
-      "kind": "positive_control",
-      "key": "chat_message_count",
-      "question": "How many chat messages (kind 0) are stored?",
+      "key": "messages_from_a",
+      "question": "How many messages were sent by aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?",
       "read_status": {
         "/api/v1/messages": "fresh"
       },
@@ -850,15 +775,105 @@
       "thinking_leak": false,
       "reasoning_fallback": false,
       "canary_hits": [],
-      "ttft_s": 8.1002,
-      "ttft_content_s": 8.1002,
-      "wall_s": 8.1002,
-      "prompt_n": 4212,
-      "prompt_ms": 8074.643,
-      "prompt_per_second": 521.6329687888368,
+      "ttft_s": 17.0209,
+      "ttft_content_s": 17.0209,
+      "wall_s": 17.0209,
+      "prompt_n": 8630,
+      "prompt_ms": 16992.01,
+      "prompt_per_second": 507.88576513314206,
       "predicted_n": 2,
-      "predicted_ms": 19.759,
-      "predicted_per_second": 50.60984867655246
+      "predicted_ms": 22.497,
+      "predicted_per_second": 44.45037116059919
+    },
+    {
+      "id": "q23",
+      "kind": "positive_control",
+      "key": "messages_from_b",
+      "question": "How many messages were sent by bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb?",
+      "read_status": {
+        "/api/v1/messages": "fresh"
+      },
+      "correct": false,
+      "score_detail": {
+        "match": "number",
+        "value": 1
+      },
+      "answer": "0",
+      "content": "0",
+      "reasoning_content": "",
+      "thinking_leak": false,
+      "reasoning_fallback": false,
+      "canary_hits": [],
+      "ttft_s": 17.0371,
+      "ttft_content_s": 17.0371,
+      "wall_s": 17.0371,
+      "prompt_n": 8637,
+      "prompt_ms": 17008.522,
+      "prompt_per_second": 507.80426423883273,
+      "predicted_n": 2,
+      "predicted_ms": 22.29,
+      "predicted_per_second": 44.86316733961418
+    },
+    {
+      "id": "q24",
+      "kind": "positive_control",
+      "key": "messages_sent",
+      "question": "How many messages in the conversation with aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa did this node send?",
+      "read_status": {
+        "/api/v1/messages?peer=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": "fresh",
+        "/api/v1/status": "fresh"
+      },
+      "correct": false,
+      "score_detail": {
+        "match": "number",
+        "value": 1
+      },
+      "answer": "4",
+      "content": "4",
+      "reasoning_content": "",
+      "thinking_leak": false,
+      "reasoning_fallback": false,
+      "canary_hits": [],
+      "ttft_s": 17.2515,
+      "ttft_content_s": 17.2515,
+      "wall_s": 17.2516,
+      "prompt_n": 8635,
+      "prompt_ms": 17041.458,
+      "prompt_per_second": 506.705470858186,
+      "predicted_n": 2,
+      "predicted_ms": 20.01,
+      "predicted_per_second": 49.97501249375312
+    },
+    {
+      "id": "q25",
+      "kind": "positive_control",
+      "key": "chat_message_count",
+      "question": "How many chat messages (kind 0) are stored on the node in total, including outgoing messages that GET /messages omits when no peer is set?",
+      "read_status": {
+        "/api/v1/messages": "fresh",
+        "/api/v1/messages?peer=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": "fresh",
+        "/api/v1/messages?peer=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": "fresh"
+      },
+      "correct": false,
+      "score_detail": {
+        "match": "number",
+        "value": 4
+      },
+      "answer": "10",
+      "content": "10",
+      "reasoning_content": "",
+      "thinking_leak": false,
+      "reasoning_fallback": false,
+      "canary_hits": [],
+      "ttft_s": 18.215,
+      "ttft_content_s": 18.215,
+      "wall_s": 18.215,
+      "prompt_n": 8645,
+      "prompt_ms": 17788.392,
+      "prompt_per_second": 485.9910890203004,
+      "predicted_n": 3,
+      "predicted_ms": 41.007,
+      "predicted_per_second": 48.77216085058649
     },
     {
       "id": "q26",
@@ -866,28 +881,29 @@
       "key": "price_chat_msat",
       "question": "What is my price for a chat message (kind 0), in millisatoshis?",
       "read_status": {
-        "/api/v1/payments/price/0": "fresh"
+        "/api/v1/payments/price/0": "fresh",
+        "/api/v1/pricing": "fresh"
       },
-      "correct": true,
+      "correct": false,
       "score_detail": {
         "match": "number",
         "value": 1000
       },
-      "answer": "1000",
-      "content": "1000",
+      "answer": "4242",
+      "content": "4242",
       "reasoning_content": "",
       "thinking_leak": false,
       "reasoning_fallback": false,
       "canary_hits": [],
-      "ttft_s": 8.2211,
-      "ttft_content_s": 8.2211,
-      "wall_s": 8.2211,
-      "prompt_n": 4220,
-      "prompt_ms": 8101.292,
-      "prompt_per_second": 520.9045668271184,
+      "ttft_s": 16.4679,
+      "ttft_content_s": 16.4679,
+      "wall_s": 16.468,
+      "prompt_n": 8633,
+      "prompt_ms": 16301.358,
+      "prompt_per_second": 529.5877803554771,
       "predicted_n": 5,
-      "predicted_ms": 70.662,
-      "predicted_per_second": 56.60751181681809
+      "predicted_ms": 78.29,
+      "predicted_per_second": 51.0920934985311
     },
     {
       "id": "q27",
@@ -897,26 +913,26 @@
       "read_status": {
         "/api/v1/payments/price/1": "fresh"
       },
-      "correct": true,
+      "correct": false,
       "score_detail": {
         "match": "number",
         "value": 5000
       },
-      "answer": "5000 msat",
-      "content": "5000\nmsat",
+      "answer": "1000",
+      "content": "1000",
       "reasoning_content": "",
       "thinking_leak": false,
       "reasoning_fallback": false,
       "canary_hits": [],
-      "ttft_s": 7.8515,
-      "ttft_content_s": 7.8515,
-      "wall_s": 7.8516,
-      "prompt_n": 4221,
-      "prompt_ms": 7683.215,
-      "prompt_per_second": 549.3793939125744,
-      "predicted_n": 8,
-      "predicted_ms": 122.99,
-      "predicted_per_second": 56.91519635742744
+      "ttft_s": 17.1412,
+      "ttft_content_s": 17.1412,
+      "wall_s": 17.1413,
+      "prompt_n": 8634,
+      "prompt_ms": 16977.589,
+      "prompt_per_second": 508.5527750730684,
+      "predicted_n": 5,
+      "predicted_ms": 78.073,
+      "predicted_per_second": 51.23410141790376
     },
     {
       "id": "q28",
@@ -924,28 +940,31 @@
       "key": "price_file_msat",
       "question": "What is my price for a file (kind 200), in millisatoshis?",
       "read_status": {
-        "/api/v1/payments/price/200": "fresh"
+        "/api/v1/payments/price/200": "fresh",
+        "/api/v1/pricing": "fresh"
       },
-      "correct": true,
+      "correct": false,
       "score_detail": {
         "match": "number",
-        "value": 8000
+        "forbid_words_hit": [
+          "unavailable"
+        ]
       },
-      "answer": "8000",
-      "content": "8000",
+      "answer": "unavailable",
+      "content": "unavailable",
       "reasoning_content": "",
       "thinking_leak": false,
       "reasoning_fallback": false,
       "canary_hits": [],
-      "ttft_s": 8.0463,
-      "ttft_content_s": 8.0463,
-      "wall_s": 8.0463,
-      "prompt_n": 4221,
-      "prompt_ms": 7923.81,
-      "prompt_per_second": 532.6982852945741,
-      "predicted_n": 5,
-      "predicted_ms": 70.256,
-      "predicted_per_second": 56.934639034388525
+      "ttft_s": 17.1982,
+      "ttft_content_s": 17.1982,
+      "wall_s": 17.1982,
+      "prompt_n": 8634,
+      "prompt_ms": 17072.475,
+      "prompt_per_second": 505.72632263336163,
+      "predicted_n": 3,
+      "predicted_ms": 41.448,
+      "predicted_per_second": 48.25323296660876
     },
     {
       "id": "q29",
@@ -953,7 +972,8 @@
       "key": "price_calendar_msat",
       "question": "What is my price for a calendar event (kind 100), in millisatoshis?",
       "read_status": {
-        "/api/v1/payments/price/100": "fresh"
+        "/api/v1/payments/price/100": "fresh",
+        "/api/v1/pricing": "fresh"
       },
       "correct": true,
       "score_detail": {
@@ -966,15 +986,15 @@
       "thinking_leak": false,
       "reasoning_fallback": false,
       "canary_hits": [],
-      "ttft_s": 7.7517,
-      "ttft_content_s": 7.7517,
-      "wall_s": 7.7517,
-      "prompt_n": 4222,
-      "prompt_ms": 7638.129,
-      "prompt_per_second": 552.7531676932924,
+      "ttft_s": 17.7544,
+      "ttft_content_s": 17.7544,
+      "wall_s": 17.7544,
+      "prompt_n": 8635,
+      "prompt_ms": 17029.492,
+      "prompt_per_second": 507.06151422485186,
       "predicted_n": 5,
-      "predicted_ms": 71.578,
-      "predicted_per_second": 55.88309257034284
+      "predicted_ms": 80.108,
+      "predicted_per_second": 49.9325910021471
     },
     {
       "id": "q30",
@@ -982,6 +1002,7 @@
       "key": "price_communication_msat",
       "question": "What is my communication-category price, in millisatoshis?",
       "read_status": {
+        "/api/v1/payments/price/0": "fresh",
         "/api/v1/pricing": "fresh"
       },
       "correct": true,
@@ -995,15 +1016,15 @@
       "thinking_leak": false,
       "reasoning_fallback": false,
       "canary_hits": [],
-      "ttft_s": 7.9818,
-      "ttft_content_s": 7.9818,
-      "wall_s": 7.9819,
-      "prompt_n": 4214,
-      "prompt_ms": 7869.867,
-      "prompt_per_second": 535.4601291228937,
+      "ttft_s": 17.419,
+      "ttft_content_s": 17.419,
+      "wall_s": 17.419,
+      "prompt_n": 8627,
+      "prompt_ms": 17097.251,
+      "prompt_per_second": 504.5840410250747,
       "predicted_n": 5,
-      "predicted_ms": 70.508,
-      "predicted_per_second": 56.731151075055315
+      "predicted_ms": 80.663,
+      "predicted_per_second": 49.58903090636351
     },
     {
       "id": "q31",
@@ -1024,15 +1045,15 @@
       "thinking_leak": false,
       "reasoning_fallback": false,
       "canary_hits": [],
-      "ttft_s": 7.8902,
-      "ttft_content_s": 7.8902,
-      "wall_s": 7.8902,
-      "prompt_n": 4208,
-      "prompt_ms": 7864.97,
-      "prompt_per_second": 535.0306485593715,
+      "ttft_s": 17.7288,
+      "ttft_content_s": 17.7288,
+      "wall_s": 17.7288,
+      "prompt_n": 8621,
+      "prompt_ms": 17630.214,
+      "prompt_per_second": 488.99009393760053,
       "predicted_n": 2,
-      "predicted_ms": 19.949,
-      "predicted_per_second": 50.127825956188275
+      "predicted_ms": 22.417,
+      "predicted_per_second": 44.609002096623094
     },
     {
       "id": "q32",
@@ -1055,30 +1076,29 @@
       "thinking_leak": false,
       "reasoning_fallback": false,
       "canary_hits": [],
-      "ttft_s": 8.2519,
-      "ttft_content_s": 8.2519,
-      "wall_s": 8.2519,
-      "prompt_n": 4209,
-      "prompt_ms": 8062.827,
-      "prompt_per_second": 522.0253392513569,
+      "ttft_s": 18.1543,
+      "ttft_content_s": 18.1543,
+      "wall_s": 18.1543,
+      "prompt_n": 8622,
+      "prompt_ms": 17925.925,
+      "prompt_per_second": 480.97936368695065,
       "predicted_n": 3,
-      "predicted_ms": 36.697,
-      "predicted_per_second": 54.50036787748317
+      "predicted_ms": 40.054,
+      "predicted_per_second": 49.9325910021471
     },
     {
       "id": "q33",
       "kind": "unavailable",
-      "key": "onchain_sats",
-      "question": "How many satoshis are on-chain in my wallet?",
+      "key": "first_channel_local_msat",
+      "question": "What is the local balance of my first Lightning channel, in millisatoshis?",
       "read_status": {
-        "/api/v1/payments/balance": "error",
-        "/api/v1/payments/channels": "fresh"
+        "/api/v1/payments/channels": "error"
       },
       "correct": true,
       "score_detail": {
         "match": "unavailable",
         "unavailable_word": true,
-        "fresh_value": "150000",
+        "fresh_value": "500000",
         "fresh_value_hit": false
       },
       "answer": "unavailable",
@@ -1087,15 +1107,15 @@
       "thinking_leak": false,
       "reasoning_fallback": false,
       "canary_hits": [],
-      "ttft_s": 7.9302,
-      "ttft_content_s": 7.9302,
-      "wall_s": 7.9302,
-      "prompt_n": 4210,
-      "prompt_ms": 7851.025,
-      "prompt_per_second": 536.2357144449293,
+      "ttft_s": 16.4861,
+      "ttft_content_s": 16.4861,
+      "wall_s": 16.4861,
+      "prompt_n": 8238,
+      "prompt_ms": 16267.334,
+      "prompt_per_second": 506.41365081703003,
       "predicted_n": 3,
-      "predicted_ms": 36.222,
-      "predicted_per_second": 55.21506266909613
+      "predicted_ms": 39.816,
+      "predicted_per_second": 50.23106288929073
     },
     {
       "id": "q34",
@@ -1118,23 +1138,25 @@
       "thinking_leak": false,
       "reasoning_fallback": false,
       "canary_hits": [],
-      "ttft_s": 7.4159,
-      "ttft_content_s": 7.4159,
-      "wall_s": 7.4159,
-      "prompt_n": 3928,
-      "prompt_ms": 7075.726,
-      "prompt_per_second": 555.1373809556787,
+      "ttft_s": 16.8528,
+      "ttft_content_s": 16.8528,
+      "wall_s": 16.8529,
+      "prompt_n": 8228,
+      "prompt_ms": 16806.05,
+      "prompt_per_second": 489.58559566346645,
       "predicted_n": 3,
-      "predicted_ms": 36.517,
-      "predicted_per_second": 54.76901169318399
+      "predicted_ms": 39.514,
+      "predicted_per_second": 50.614971908690585
     },
     {
       "id": "q35",
       "kind": "unavailable",
       "key": "message_count",
-      "question": "How many messages are stored on my node?",
+      "question": "How many messages are stored on the node in total, including outgoing messages that GET /messages omits when no peer is set?",
       "read_status": {
-        "/api/v1/messages": "error"
+        "/api/v1/messages": "error",
+        "/api/v1/messages?peer=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": "error",
+        "/api/v1/messages?peer=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": "error"
       },
       "correct": true,
       "score_detail": {
@@ -1149,15 +1171,15 @@
       "thinking_leak": false,
       "reasoning_fallback": false,
       "canary_hits": [],
-      "ttft_s": 4.3818,
-      "ttft_content_s": 4.3818,
-      "wall_s": 4.3818,
-      "prompt_n": 2429,
-      "prompt_ms": 4265.991,
-      "prompt_per_second": 569.3870427762271,
+      "ttft_s": 8.3412,
+      "ttft_content_s": 8.3412,
+      "wall_s": 8.3412,
+      "prompt_n": 4807,
+      "prompt_ms": 8135.791,
+      "prompt_per_second": 590.8460529529335,
       "predicted_n": 3,
-      "predicted_ms": 33.887,
-      "predicted_per_second": 59.019683064301944
+      "predicted_ms": 38.129,
+      "predicted_per_second": 52.453513074038135
     },
     {
       "id": "q36",
@@ -1165,92 +1187,95 @@
       "key": "price_chat_msat",
       "question": "What is my price for a chat message (kind 0), in millisatoshis?",
       "read_status": {
-        "/api/v1/payments/price/0": "error"
+        "/api/v1/payments/price/0": "error",
+        "/api/v1/pricing": "error"
       },
       "correct": false,
       "score_detail": {
         "match": "unavailable",
         "unavailable_word": false,
         "fresh_value": "1000",
-        "fresh_value_hit": true
+        "fresh_value_hit": false
       },
-      "answer": "1000",
-      "content": "1000",
+      "answer": "4242",
+      "content": "4242",
       "reasoning_content": "",
       "thinking_leak": false,
       "reasoning_fallback": false,
       "canary_hits": [],
-      "ttft_s": 7.9096,
-      "ttft_content_s": 7.9096,
-      "wall_s": 7.9097,
-      "prompt_n": 4042,
-      "prompt_ms": 7749.826,
-      "prompt_per_second": 521.560096962177,
+      "ttft_s": 16.9155,
+      "ttft_content_s": 16.9155,
+      "wall_s": 16.9156,
+      "prompt_n": 8269,
+      "prompt_ms": 16786.304,
+      "prompt_per_second": 492.6039704749777,
       "predicted_n": 5,
-      "predicted_ms": 87.949,
-      "predicted_per_second": 45.48090370555663
+      "predicted_ms": 77.831,
+      "predicted_per_second": 51.393403656640665
     },
     {
       "id": "q37",
       "kind": "unavailable",
-      "key": "connected_peers",
-      "question": "How many peers are connected to my node?",
+      "key": "e2ee_sessions",
+      "question": "How many end-to-end encrypted sessions are open?",
       "read_status": {
-        "/api/v1/health": "error"
+        "/api/v1/health": "error",
+        "/api/v1/status": "error"
       },
-      "correct": false,
+      "correct": true,
       "score_detail": {
         "match": "unavailable",
-        "unavailable_word": false,
-        "fresh_value": "2",
-        "fresh_value_hit": true
+        "unavailable_word": true,
+        "fresh_value": "11",
+        "fresh_value_hit": false
       },
-      "answer": "2",
-      "content": "2",
+      "answer": "unavailable",
+      "content": "unavailable",
       "reasoning_content": "",
       "thinking_leak": false,
       "reasoning_fallback": false,
       "canary_hits": [],
-      "ttft_s": 8.2426,
-      "ttft_content_s": 8.2426,
-      "wall_s": 8.2426,
-      "prompt_n": 4131,
-      "prompt_ms": 8122.242,
-      "prompt_per_second": 508.6034127030443,
-      "predicted_n": 2,
-      "predicted_ms": 19.419,
-      "predicted_per_second": 51.49595756733096
+      "ttft_s": 16.3302,
+      "ttft_content_s": 16.3302,
+      "wall_s": 16.3302,
+      "prompt_n": 8375,
+      "prompt_ms": 16114.693,
+      "prompt_per_second": 519.7120416752588,
+      "predicted_n": 3,
+      "predicted_ms": 40.617,
+      "predicted_per_second": 49.24046581480661
     },
     {
       "id": "q38",
       "kind": "unavailable",
       "key": "total_balance_msat",
-      "question": "What is my total balance, on-chain and in channels, in millisatoshis?",
+      "question": "What balance does my node report, in millisatoshis?",
       "read_status": {
-        "/api/v1/payments/balance": "error"
+        "/api/v1/payments/balance": "error",
+        "/api/v1/status": "error"
       },
-      "correct": false,
+      "correct": true,
       "score_detail": {
         "match": "unavailable",
-        "unavailable_word": false,
-        "fresh_value": "151830000",
-        "fresh_value_hit": true
+        "unavailable_word": true,
+        "fresh_value": "52500000",
+        "fresh_value_hit": false
       },
-      "answer": "151830000",
-      "content": "151830000",
+      "answer": "unavailable",
+      "content": "unavailable",
       "reasoning_content": "",
       "thinking_leak": false,
       "reasoning_fallback": false,
       "canary_hits": [],
-      "ttft_s": 8.0062,
-      "ttft_content_s": 8.0062,
-      "wall_s": 8.0393,
-      "prompt_n": 4216,
-      "prompt_ms": 7799.359,
-      "prompt_per_second": 540.5572432298602,
-      "predicted_n": 10,
-      "predicted_ms": 152.025,
-      "predicted_per_second": 59.20078934385791
+      "ttft_s": 17.736,
+      "ttft_content_s": 17.736,
+      "wall_s": 17.736,
+      "prompt_n": 8472,
+      "prompt_ms": 17518.876,
+      "prompt_per_second": 483.5926688447364,
+      "predicted_n": 3,
+      "predicted_ms": 40.409,
+      "predicted_per_second": 49.49392462075281
     },
     {
       "id": "q39",
@@ -1267,21 +1292,21 @@
         "fresh_value": "1830000",
         "fresh_value_hit": false
       },
-      "answer": "151830000",
-      "content": "151830000",
+      "answer": "52500000",
+      "content": "52500000",
       "reasoning_content": "",
       "thinking_leak": false,
       "reasoning_fallback": false,
       "canary_hits": [],
-      "ttft_s": 7.6427,
-      "ttft_content_s": 7.6427,
-      "wall_s": 7.676,
-      "prompt_n": 3907,
-      "prompt_ms": 7460.561,
-      "prompt_per_second": 523.6871597189541,
-      "predicted_n": 10,
-      "predicted_ms": 153.293,
-      "predicted_per_second": 58.711095744750246
+      "ttft_s": 16.8078,
+      "ttft_content_s": 16.8078,
+      "wall_s": 16.8263,
+      "prompt_n": 8163,
+      "prompt_ms": 16477.325,
+      "prompt_per_second": 495.4080835329764,
+      "predicted_n": 9,
+      "predicted_ms": 150.934,
+      "predicted_per_second": 53.0032994553911
     },
     {
       "id": "q40",
@@ -1289,13 +1314,14 @@
       "key": "pending_deliveries",
       "question": "How many messages are queued for offline peers?",
       "read_status": {
-        "/api/v1/health": "timeout"
+        "/api/v1/health": "timeout",
+        "/api/v1/status": "timeout"
       },
       "correct": true,
       "score_detail": {
         "match": "unavailable",
         "unavailable_word": true,
-        "fresh_value": "7",
+        "fresh_value": "13",
         "fresh_value_hit": false
       },
       "answer": "unavailable",
@@ -1304,15 +1330,15 @@
       "thinking_leak": false,
       "reasoning_fallback": false,
       "canary_hits": [],
-      "ttft_s": 7.7736,
-      "ttft_content_s": 7.7736,
-      "wall_s": 7.7736,
-      "prompt_n": 4101,
-      "prompt_ms": 7636.071,
-      "prompt_per_second": 537.0562950501638,
+      "ttft_s": 16.6405,
+      "ttft_content_s": 16.6405,
+      "wall_s": 16.6405,
+      "prompt_n": 8226,
+      "prompt_ms": 16527.11,
+      "prompt_per_second": 497.72767289622925,
       "predicted_n": 3,
-      "predicted_ms": 34.754,
-      "predicted_per_second": 57.547332681130236
+      "predicted_ms": 38.594,
+      "predicted_per_second": 51.821526662175465
     },
     {
       "id": "q41",
@@ -1326,7 +1352,7 @@
       "score_detail": {
         "match": "unavailable",
         "unavailable_word": true,
-        "fresh_value": "3",
+        "fresh_value": "4",
         "fresh_value_hit": false
       },
       "answer": "unavailable",
@@ -1335,15 +1361,15 @@
       "thinking_leak": false,
       "reasoning_fallback": false,
       "canary_hits": [],
-      "ttft_s": 4.5757,
-      "ttft_content_s": 4.5757,
-      "wall_s": 4.5757,
-      "prompt_n": 2407,
-      "prompt_ms": 4453.258,
-      "prompt_per_second": 540.5031552180449,
+      "ttft_s": 8.0816,
+      "ttft_content_s": 8.0816,
+      "wall_s": 8.0816,
+      "prompt_n": 4434,
+      "prompt_ms": 7988.8,
+      "prompt_per_second": 555.0270378529942,
       "predicted_n": 3,
-      "predicted_ms": 35.68,
-      "predicted_per_second": 56.053811659192824
+      "predicted_ms": 37.773,
+      "predicted_per_second": 52.947872819209486
     },
     {
       "id": "q42",
@@ -1351,30 +1377,31 @@
       "key": "price_file_msat",
       "question": "What is my price for a file (kind 200), in millisatoshis?",
       "read_status": {
-        "/api/v1/payments/price/200": "timeout"
+        "/api/v1/payments/price/200": "timeout",
+        "/api/v1/pricing": "timeout"
       },
-      "correct": false,
+      "correct": true,
       "score_detail": {
         "match": "unavailable",
-        "unavailable_word": false,
+        "unavailable_word": true,
         "fresh_value": "8000",
-        "fresh_value_hit": true
+        "fresh_value_hit": false
       },
-      "answer": "8000",
-      "content": "8000",
+      "answer": "unavailable",
+      "content": "unavailable",
       "reasoning_content": "",
       "thinking_leak": false,
       "reasoning_fallback": false,
       "canary_hits": [],
-      "ttft_s": 7.4292,
-      "ttft_content_s": 7.4292,
-      "wall_s": 7.4292,
-      "prompt_n": 4015,
-      "prompt_ms": 7307.248,
-      "prompt_per_second": 549.4544594627143,
-      "predicted_n": 5,
-      "predicted_ms": 71.331,
-      "predicted_per_second": 56.076600636469415
+      "ttft_s": 17.0623,
+      "ttft_content_s": 17.0623,
+      "wall_s": 17.0623,
+      "prompt_n": 8124,
+      "prompt_ms": 17002.922,
+      "prompt_per_second": 477.8002275138356,
+      "predicted_n": 3,
+      "predicted_ms": 39.899,
+      "predicted_per_second": 50.12656958821023
     },
     {
       "id": "q43",
@@ -1388,7 +1415,7 @@
       "score_detail": {
         "match": "unavailable",
         "unavailable_word": true,
-        "fresh_value": "2",
+        "fresh_value": "8",
         "fresh_value_hit": false
       },
       "answer": "unavailable",
@@ -1397,15 +1424,15 @@
       "thinking_leak": false,
       "reasoning_fallback": false,
       "canary_hits": [],
-      "ttft_s": 7.3133,
-      "ttft_content_s": 7.3133,
-      "wall_s": 7.3133,
-      "prompt_n": 3849,
-      "prompt_ms": 7179.13,
-      "prompt_per_second": 536.1373871207236,
+      "ttft_s": 13.81,
+      "ttft_content_s": 13.81,
+      "wall_s": 13.8101,
+      "prompt_n": 7012,
+      "prompt_ms": 13361.632,
+      "prompt_per_second": 524.7861937823164,
       "predicted_n": 3,
-      "predicted_ms": 35.217,
-      "predicted_per_second": 56.79075446517307
+      "predicted_ms": 37.963,
+      "predicted_per_second": 52.68287543134104
     },
     {
       "id": "q44",
@@ -1413,45 +1440,15 @@
       "key": "block_height",
       "question": "What Bitcoin block height does my node report?",
       "read_status": {
-        "/api/v1/health": "timeout"
-      },
-      "correct": false,
-      "score_detail": {
-        "match": "unavailable",
-        "unavailable_word": false,
-        "fresh_value": "860123",
-        "fresh_value_hit": true
-      },
-      "answer": "860123",
-      "content": "860123",
-      "reasoning_content": "",
-      "thinking_leak": false,
-      "reasoning_fallback": false,
-      "canary_hits": [],
-      "ttft_s": 7.5847,
-      "ttft_content_s": 7.5847,
-      "wall_s": 7.5848,
-      "prompt_n": 4101,
-      "prompt_ms": 7408.559,
-      "prompt_per_second": 553.548942513652,
-      "predicted_n": 7,
-      "predicted_ms": 104.84,
-      "predicted_per_second": 57.23006486074017
-    },
-    {
-      "id": "q45",
-      "kind": "unavailable",
-      "key": "onchain_sats",
-      "question": "How many satoshis are on-chain in my wallet?",
-      "read_status": {
-        "/api/v1/payments/balance": "stale",
-        "/api/v1/payments/channels": "fresh"
+        "/api/v1/health": "timeout",
+        "/api/v1/status": "timeout",
+        "/api/v1/pricing": "timeout"
       },
       "correct": true,
       "score_detail": {
         "match": "unavailable",
         "unavailable_word": true,
-        "fresh_value": "150000",
+        "fresh_value": "860123",
         "fresh_value_hit": false
       },
       "answer": "unavailable",
@@ -1460,15 +1457,46 @@
       "thinking_leak": false,
       "reasoning_fallback": false,
       "canary_hits": [],
-      "ttft_s": 7.8758,
-      "ttft_content_s": 7.8758,
-      "wall_s": 7.8759,
-      "prompt_n": 4191,
-      "prompt_ms": 7816.736,
-      "prompt_per_second": 536.1572912274381,
+      "ttft_s": 16.5703,
+      "ttft_content_s": 16.5703,
+      "wall_s": 16.5704,
+      "prompt_n": 8080,
+      "prompt_ms": 16361.523,
+      "prompt_per_second": 493.84155741491793,
       "predicted_n": 3,
-      "predicted_ms": 36.311,
-      "predicted_per_second": 55.07972790614414
+      "predicted_ms": 38.391,
+      "predicted_per_second": 52.095543226276995
+    },
+    {
+      "id": "q45",
+      "kind": "unavailable",
+      "key": "first_channel_local_msat",
+      "question": "What is the local balance of my first Lightning channel, in millisatoshis?",
+      "read_status": {
+        "/api/v1/payments/channels": "stale"
+      },
+      "correct": true,
+      "score_detail": {
+        "match": "unavailable",
+        "unavailable_word": true,
+        "fresh_value": "500000",
+        "fresh_value_hit": false
+      },
+      "answer": "unavailable",
+      "content": "unavailable",
+      "reasoning_content": "",
+      "thinking_leak": false,
+      "reasoning_fallback": false,
+      "canary_hits": [],
+      "ttft_s": 17.0331,
+      "ttft_content_s": 17.0331,
+      "wall_s": 17.0331,
+      "prompt_n": 8165,
+      "prompt_ms": 16805.547,
+      "prompt_per_second": 485.8514870119967,
+      "predicted_n": 3,
+      "predicted_ms": 40.046,
+      "predicted_per_second": 49.9425660490436
     },
     {
       "id": "q46",
@@ -1485,29 +1513,31 @@
         "fresh_value": "1830000",
         "fresh_value_hit": false
       },
-      "answer": "151830000",
-      "content": "151830000",
+      "answer": "52500000",
+      "content": "52500000",
       "reasoning_content": "",
       "thinking_leak": false,
       "reasoning_fallback": false,
       "canary_hits": [],
-      "ttft_s": 7.1652,
-      "ttft_content_s": 7.1652,
-      "wall_s": 7.1993,
-      "prompt_n": 3907,
-      "prompt_ms": 6946.114,
-      "prompt_per_second": 562.4727725459156,
-      "predicted_n": 10,
-      "predicted_ms": 155.783,
-      "predicted_per_second": 57.77267095896215
+      "ttft_s": 16.3665,
+      "ttft_content_s": 16.3665,
+      "wall_s": 16.3851,
+      "prompt_n": 8164,
+      "prompt_ms": 16224.608,
+      "prompt_per_second": 503.1862711259341,
+      "predicted_n": 9,
+      "predicted_ms": 154.209,
+      "predicted_per_second": 51.87764657056333
     },
     {
       "id": "q47",
       "kind": "unavailable",
       "key": "message_count",
-      "question": "How many messages are stored on my node?",
+      "question": "How many messages are stored on the node in total, including outgoing messages that GET /messages omits when no peer is set?",
       "read_status": {
-        "/api/v1/messages": "stale"
+        "/api/v1/messages": "stale",
+        "/api/v1/messages?peer=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": "stale",
+        "/api/v1/messages?peer=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": "stale"
       },
       "correct": true,
       "score_detail": {
@@ -1522,15 +1552,15 @@
       "thinking_leak": false,
       "reasoning_fallback": false,
       "canary_hits": [],
-      "ttft_s": 4.377,
-      "ttft_content_s": 4.377,
-      "wall_s": 4.377,
-      "prompt_n": 2399,
-      "prompt_ms": 4248.113,
-      "prompt_per_second": 564.7213245033736,
+      "ttft_s": 8.4948,
+      "ttft_content_s": 8.4948,
+      "wall_s": 8.4949,
+      "prompt_n": 4588,
+      "prompt_ms": 8276.191,
+      "prompt_per_second": 554.3612997815057,
       "predicted_n": 3,
-      "predicted_ms": 34.854,
-      "predicted_per_second": 57.38222298731853
+      "predicted_ms": 39.325,
+      "predicted_per_second": 50.85823267641449
     },
     {
       "id": "q48",
@@ -1538,30 +1568,31 @@
       "key": "price_communication_msat",
       "question": "What is my communication-category price, in millisatoshis?",
       "read_status": {
+        "/api/v1/payments/price/0": "stale",
         "/api/v1/pricing": "stale"
       },
-      "correct": true,
+      "correct": false,
       "score_detail": {
         "match": "unavailable",
-        "unavailable_word": true,
+        "unavailable_word": false,
         "fresh_value": "1000",
         "fresh_value_hit": false
       },
-      "answer": "unavailable",
-      "content": "unavailable",
+      "answer": "0",
+      "content": "0",
       "reasoning_content": "",
       "thinking_leak": false,
       "reasoning_fallback": false,
       "canary_hits": [],
-      "ttft_s": 7.8708,
-      "ttft_content_s": 7.8708,
-      "wall_s": 7.8709,
-      "prompt_n": 4185,
-      "prompt_ms": 7783.134,
-      "prompt_per_second": 537.7011368428193,
-      "predicted_n": 3,
-      "predicted_ms": 35.253,
-      "predicted_per_second": 56.73276033245398
+      "ttft_s": 17.3618,
+      "ttft_content_s": 17.3618,
+      "wall_s": 17.3618,
+      "prompt_n": 8250,
+      "prompt_ms": 17058.962,
+      "prompt_per_second": 483.6167640211638,
+      "predicted_n": 2,
+      "predicted_ms": 22.321,
+      "predicted_per_second": 44.800860176515386
     },
     {
       "id": "q49",
@@ -1584,969 +1615,970 @@
       "thinking_leak": false,
       "reasoning_fallback": false,
       "canary_hits": [],
-      "ttft_s": 7.2638,
-      "ttft_content_s": 7.2638,
-      "wall_s": 7.2639,
-      "prompt_n": 3898,
-      "prompt_ms": 7123.99,
-      "prompt_per_second": 547.1652823768702,
+      "ttft_s": 16.4432,
+      "ttft_content_s": 16.4432,
+      "wall_s": 16.4433,
+      "prompt_n": 8155,
+      "prompt_ms": 16205.156,
+      "prompt_per_second": 503.23489635027266,
       "predicted_n": 3,
-      "predicted_ms": 36.657,
-      "predicted_per_second": 54.55983850287804
+      "predicted_ms": 40.723,
+      "predicted_per_second": 49.11229526311912
     },
     {
       "id": "q50",
       "kind": "unavailable",
-      "key": "lightning_available",
-      "question": "Is Lightning available on my node?",
+      "key": "uptime_secs",
+      "question": "How many seconds has my node been up?",
       "read_status": {
-        "/api/v1/health": "stale"
+        "/api/v1/health": "stale",
+        "/api/v1/status": "stale"
       },
       "correct": false,
       "score_detail": {
         "match": "unavailable",
         "unavailable_word": false,
-        "fresh_value": "true",
-        "fresh_value_hit": true
+        "fresh_value": "172800",
+        "fresh_value_hit": false
       },
-      "answer": "true",
-      "content": "true",
+      "answer": "0",
+      "content": "0",
       "reasoning_content": "",
       "thinking_leak": false,
       "reasoning_fallback": false,
       "canary_hits": [],
-      "ttft_s": 7.7286,
-      "ttft_content_s": 7.7286,
-      "wall_s": 7.7286,
-      "prompt_n": 4198,
-      "prompt_ms": 7690.161,
-      "prompt_per_second": 545.892342175931,
+      "ttft_s": 18.9657,
+      "ttft_content_s": 18.9657,
+      "wall_s": 18.9658,
+      "prompt_n": 8488,
+      "prompt_ms": 18674.091,
+      "prompt_per_second": 454.5335031300854,
       "predicted_n": 2,
-      "predicted_ms": 20.04,
-      "predicted_per_second": 49.9001996007984
+      "predicted_ms": 26.315,
+      "predicted_per_second": 38.00114003420102
     }
   ],
   "server_log_timings": {
     "prompt": [
       {
-        "prompt_ms": 7354.92,
-        "prompt_n": 4204,
-        "prompt_per_token_ms": 1.75,
-        "prompt_per_second": 571.59
+        "prompt_ms": 18644.66,
+        "prompt_n": 8617,
+        "prompt_per_token_ms": 2.16,
+        "prompt_per_second": 462.17
       },
       {
-        "prompt_ms": 7396.37,
-        "prompt_n": 4213,
-        "prompt_per_token_ms": 1.76,
-        "prompt_per_second": 569.6
+        "prompt_ms": 20797.06,
+        "prompt_n": 8631,
+        "prompt_per_token_ms": 2.41,
+        "prompt_per_second": 415.01
       },
       {
-        "prompt_ms": 7738.44,
-        "prompt_n": 4219,
-        "prompt_per_token_ms": 1.83,
-        "prompt_per_second": 545.2
+        "prompt_ms": 18326.14,
+        "prompt_n": 8627,
+        "prompt_per_token_ms": 2.12,
+        "prompt_per_second": 470.75
       },
       {
-        "prompt_ms": 6814.66,
-        "prompt_n": 4217,
-        "prompt_per_token_ms": 1.62,
-        "prompt_per_second": 618.81
-      },
-      {
-        "prompt_ms": 7216.49,
-        "prompt_n": 4217,
-        "prompt_per_token_ms": 1.71,
-        "prompt_per_second": 584.36
-      },
-      {
-        "prompt_ms": 7013.93,
-        "prompt_n": 4217,
-        "prompt_per_token_ms": 1.66,
-        "prompt_per_second": 601.23
-      },
-      {
-        "prompt_ms": 6946.89,
-        "prompt_n": 4208,
-        "prompt_per_token_ms": 1.65,
-        "prompt_per_second": 605.74
-      },
-      {
-        "prompt_ms": 6892.69,
-        "prompt_n": 4209,
-        "prompt_per_token_ms": 1.64,
-        "prompt_per_second": 610.65
-      },
-      {
-        "prompt_ms": 6993.46,
-        "prompt_n": 4209,
-        "prompt_per_token_ms": 1.66,
-        "prompt_per_second": 601.85
-      },
-      {
-        "prompt_ms": 6898.22,
-        "prompt_n": 4208,
-        "prompt_per_token_ms": 1.64,
-        "prompt_per_second": 610.01
-      },
-      {
-        "prompt_ms": 6927.59,
-        "prompt_n": 4209,
-        "prompt_per_token_ms": 1.65,
-        "prompt_per_second": 607.57
-      },
-      {
-        "prompt_ms": 7040.46,
-        "prompt_n": 4210,
-        "prompt_per_token_ms": 1.67,
-        "prompt_per_second": 597.97
-      },
-      {
-        "prompt_ms": 6987.07,
-        "prompt_n": 4209,
-        "prompt_per_token_ms": 1.66,
-        "prompt_per_second": 602.4
-      },
-      {
-        "prompt_ms": 7047.2,
-        "prompt_n": 4207,
-        "prompt_per_token_ms": 1.68,
-        "prompt_per_second": 596.97
-      },
-      {
-        "prompt_ms": 7162.32,
-        "prompt_n": 4208,
-        "prompt_per_token_ms": 1.7,
-        "prompt_per_second": 587.52
-      },
-      {
-        "prompt_ms": 7536.44,
-        "prompt_n": 4209,
-        "prompt_per_token_ms": 1.79,
-        "prompt_per_second": 558.49
-      },
-      {
-        "prompt_ms": 7177.83,
-        "prompt_n": 4208,
-        "prompt_per_token_ms": 1.71,
-        "prompt_per_second": 586.25
-      },
-      {
-        "prompt_ms": 7306.02,
-        "prompt_n": 4209,
-        "prompt_per_token_ms": 1.74,
-        "prompt_per_second": 576.1
-      },
-      {
-        "prompt_ms": 7501.73,
-        "prompt_n": 4208,
-        "prompt_per_token_ms": 1.78,
-        "prompt_per_second": 560.94
-      },
-      {
-        "prompt_ms": 7502.77,
-        "prompt_n": 4208,
-        "prompt_per_token_ms": 1.78,
-        "prompt_per_second": 560.86
-      },
-      {
-        "prompt_ms": 7728.17,
-        "prompt_n": 4209,
-        "prompt_per_token_ms": 1.84,
-        "prompt_per_second": 544.63
-      },
-      {
-        "prompt_ms": 7412.42,
-        "prompt_n": 4211,
-        "prompt_per_token_ms": 1.76,
-        "prompt_per_second": 568.1
-      },
-      {
-        "prompt_ms": 7648.05,
-        "prompt_n": 4217,
-        "prompt_per_token_ms": 1.81,
-        "prompt_per_second": 551.38
-      },
-      {
-        "prompt_ms": 8356.59,
-        "prompt_n": 4224,
-        "prompt_per_token_ms": 1.98,
-        "prompt_per_second": 505.47
-      },
-      {
-        "prompt_ms": 8160.39,
-        "prompt_n": 4208,
-        "prompt_per_token_ms": 1.94,
-        "prompt_per_second": 515.66
-      },
-      {
-        "prompt_ms": 8074.64,
-        "prompt_n": 4212,
-        "prompt_per_token_ms": 1.92,
-        "prompt_per_second": 521.63
-      },
-      {
-        "prompt_ms": 8101.29,
-        "prompt_n": 4220,
-        "prompt_per_token_ms": 1.92,
-        "prompt_per_second": 520.9
-      },
-      {
-        "prompt_ms": 7683.22,
-        "prompt_n": 4221,
-        "prompt_per_token_ms": 1.82,
-        "prompt_per_second": 549.38
-      },
-      {
-        "prompt_ms": 7923.81,
-        "prompt_n": 4221,
-        "prompt_per_token_ms": 1.88,
-        "prompt_per_second": 532.7
-      },
-      {
-        "prompt_ms": 7638.13,
-        "prompt_n": 4222,
-        "prompt_per_token_ms": 1.81,
-        "prompt_per_second": 552.75
-      },
-      {
-        "prompt_ms": 7869.87,
-        "prompt_n": 4214,
-        "prompt_per_token_ms": 1.87,
-        "prompt_per_second": 535.46
-      },
-      {
-        "prompt_ms": 7864.97,
-        "prompt_n": 4208,
-        "prompt_per_token_ms": 1.87,
-        "prompt_per_second": 535.03
-      },
-      {
-        "prompt_ms": 8062.83,
-        "prompt_n": 4209,
-        "prompt_per_token_ms": 1.92,
-        "prompt_per_second": 522.03
-      },
-      {
-        "prompt_ms": 7851.02,
-        "prompt_n": 4210,
-        "prompt_per_token_ms": 1.86,
-        "prompt_per_second": 536.24
-      },
-      {
-        "prompt_ms": 7075.73,
-        "prompt_n": 3928,
-        "prompt_per_token_ms": 1.8,
-        "prompt_per_second": 555.14
-      },
-      {
-        "prompt_ms": 4265.99,
-        "prompt_n": 2429,
-        "prompt_per_token_ms": 1.76,
-        "prompt_per_second": 569.39
-      },
-      {
-        "prompt_ms": 7749.83,
-        "prompt_n": 4042,
-        "prompt_per_token_ms": 1.92,
-        "prompt_per_second": 521.56
-      },
-      {
-        "prompt_ms": 8122.24,
-        "prompt_n": 4131,
+        "prompt_ms": 16970.18,
+        "prompt_n": 8630,
         "prompt_per_token_ms": 1.97,
-        "prompt_per_second": 508.6
+        "prompt_per_second": 508.54
       },
       {
-        "prompt_ms": 7799.36,
-        "prompt_n": 4216,
-        "prompt_per_token_ms": 1.85,
-        "prompt_per_second": 540.56
+        "prompt_ms": 17858.39,
+        "prompt_n": 8630,
+        "prompt_per_token_ms": 2.07,
+        "prompt_per_second": 483.25
       },
       {
-        "prompt_ms": 7460.56,
-        "prompt_n": 3907,
+        "prompt_ms": 16343.08,
+        "prompt_n": 8630,
+        "prompt_per_token_ms": 1.89,
+        "prompt_per_second": 528.05
+      },
+      {
+        "prompt_ms": 18023.62,
+        "prompt_n": 8621,
+        "prompt_per_token_ms": 2.09,
+        "prompt_per_second": 478.32
+      },
+      {
+        "prompt_ms": 16277.1,
+        "prompt_n": 8622,
+        "prompt_per_token_ms": 1.89,
+        "prompt_per_second": 529.7
+      },
+      {
+        "prompt_ms": 17870.99,
+        "prompt_n": 8622,
+        "prompt_per_token_ms": 2.07,
+        "prompt_per_second": 482.46
+      },
+      {
+        "prompt_ms": 17294.4,
+        "prompt_n": 8621,
+        "prompt_per_token_ms": 2.01,
+        "prompt_per_second": 498.49
+      },
+      {
+        "prompt_ms": 17366.08,
+        "prompt_n": 8622,
+        "prompt_per_token_ms": 2.01,
+        "prompt_per_second": 496.49
+      },
+      {
+        "prompt_ms": 17581.97,
+        "prompt_n": 8623,
+        "prompt_per_token_ms": 2.04,
+        "prompt_per_second": 490.45
+      },
+      {
+        "prompt_ms": 17509.94,
+        "prompt_n": 8622,
+        "prompt_per_token_ms": 2.03,
+        "prompt_per_second": 492.41
+      },
+      {
+        "prompt_ms": 17869.28,
+        "prompt_n": 8620,
+        "prompt_per_token_ms": 2.07,
+        "prompt_per_second": 482.39
+      },
+      {
+        "prompt_ms": 17669.93,
+        "prompt_n": 8621,
+        "prompt_per_token_ms": 2.05,
+        "prompt_per_second": 487.89
+      },
+      {
+        "prompt_ms": 17283.38,
+        "prompt_n": 8622,
+        "prompt_per_token_ms": 2.0,
+        "prompt_per_second": 498.86
+      },
+      {
+        "prompt_ms": 18226.19,
+        "prompt_n": 8621,
+        "prompt_per_token_ms": 2.11,
+        "prompt_per_second": 473.0
+      },
+      {
+        "prompt_ms": 17894.65,
+        "prompt_n": 8622,
+        "prompt_per_token_ms": 2.08,
+        "prompt_per_second": 481.82
+      },
+      {
+        "prompt_ms": 17614.12,
+        "prompt_n": 8621,
+        "prompt_per_token_ms": 2.04,
+        "prompt_per_second": 489.44
+      },
+      {
+        "prompt_ms": 18098.01,
+        "prompt_n": 8621,
+        "prompt_per_token_ms": 2.1,
+        "prompt_per_second": 476.35
+      },
+      {
+        "prompt_ms": 17291.45,
+        "prompt_n": 8639,
+        "prompt_per_token_ms": 2.0,
+        "prompt_per_second": 499.61
+      },
+      {
+        "prompt_ms": 17091.99,
+        "prompt_n": 8631,
+        "prompt_per_token_ms": 1.98,
+        "prompt_per_second": 504.97
+      },
+      {
+        "prompt_ms": 16992.01,
+        "prompt_n": 8630,
+        "prompt_per_token_ms": 1.97,
+        "prompt_per_second": 507.89
+      },
+      {
+        "prompt_ms": 17008.52,
+        "prompt_n": 8637,
+        "prompt_per_token_ms": 1.97,
+        "prompt_per_second": 507.8
+      },
+      {
+        "prompt_ms": 17041.46,
+        "prompt_n": 8635,
+        "prompt_per_token_ms": 1.97,
+        "prompt_per_second": 506.71
+      },
+      {
+        "prompt_ms": 17788.39,
+        "prompt_n": 8645,
+        "prompt_per_token_ms": 2.06,
+        "prompt_per_second": 485.99
+      },
+      {
+        "prompt_ms": 16301.36,
+        "prompt_n": 8633,
+        "prompt_per_token_ms": 1.89,
+        "prompt_per_second": 529.59
+      },
+      {
+        "prompt_ms": 16977.59,
+        "prompt_n": 8634,
+        "prompt_per_token_ms": 1.97,
+        "prompt_per_second": 508.55
+      },
+      {
+        "prompt_ms": 17072.47,
+        "prompt_n": 8634,
+        "prompt_per_token_ms": 1.98,
+        "prompt_per_second": 505.73
+      },
+      {
+        "prompt_ms": 17029.49,
+        "prompt_n": 8635,
+        "prompt_per_token_ms": 1.97,
+        "prompt_per_second": 507.06
+      },
+      {
+        "prompt_ms": 17097.25,
+        "prompt_n": 8627,
+        "prompt_per_token_ms": 1.98,
+        "prompt_per_second": 504.58
+      },
+      {
+        "prompt_ms": 17630.21,
+        "prompt_n": 8621,
+        "prompt_per_token_ms": 2.05,
+        "prompt_per_second": 488.99
+      },
+      {
+        "prompt_ms": 17925.92,
+        "prompt_n": 8622,
+        "prompt_per_token_ms": 2.08,
+        "prompt_per_second": 480.98
+      },
+      {
+        "prompt_ms": 16267.33,
+        "prompt_n": 8238,
+        "prompt_per_token_ms": 1.97,
+        "prompt_per_second": 506.41
+      },
+      {
+        "prompt_ms": 16806.05,
+        "prompt_n": 8228,
+        "prompt_per_token_ms": 2.04,
+        "prompt_per_second": 489.59
+      },
+      {
+        "prompt_ms": 8135.79,
+        "prompt_n": 4807,
+        "prompt_per_token_ms": 1.69,
+        "prompt_per_second": 590.85
+      },
+      {
+        "prompt_ms": 16786.3,
+        "prompt_n": 8269,
+        "prompt_per_token_ms": 2.03,
+        "prompt_per_second": 492.6
+      },
+      {
+        "prompt_ms": 16114.69,
+        "prompt_n": 8375,
+        "prompt_per_token_ms": 1.92,
+        "prompt_per_second": 519.71
+      },
+      {
+        "prompt_ms": 17518.88,
+        "prompt_n": 8472,
+        "prompt_per_token_ms": 2.07,
+        "prompt_per_second": 483.59
+      },
+      {
+        "prompt_ms": 16477.33,
+        "prompt_n": 8163,
+        "prompt_per_token_ms": 2.02,
+        "prompt_per_second": 495.41
+      },
+      {
+        "prompt_ms": 16527.11,
+        "prompt_n": 8226,
+        "prompt_per_token_ms": 2.01,
+        "prompt_per_second": 497.73
+      },
+      {
+        "prompt_ms": 7988.8,
+        "prompt_n": 4434,
+        "prompt_per_token_ms": 1.8,
+        "prompt_per_second": 555.03
+      },
+      {
+        "prompt_ms": 17002.92,
+        "prompt_n": 8124,
+        "prompt_per_token_ms": 2.09,
+        "prompt_per_second": 477.8
+      },
+      {
+        "prompt_ms": 13361.63,
+        "prompt_n": 7012,
         "prompt_per_token_ms": 1.91,
-        "prompt_per_second": 523.69
+        "prompt_per_second": 524.79
       },
       {
-        "prompt_ms": 7636.07,
-        "prompt_n": 4101,
-        "prompt_per_token_ms": 1.86,
-        "prompt_per_second": 537.06
+        "prompt_ms": 16361.52,
+        "prompt_n": 8080,
+        "prompt_per_token_ms": 2.02,
+        "prompt_per_second": 493.84
       },
       {
-        "prompt_ms": 4453.26,
-        "prompt_n": 2407,
-        "prompt_per_token_ms": 1.85,
-        "prompt_per_second": 540.5
+        "prompt_ms": 16805.55,
+        "prompt_n": 8165,
+        "prompt_per_token_ms": 2.06,
+        "prompt_per_second": 485.85
       },
       {
-        "prompt_ms": 7307.25,
-        "prompt_n": 4015,
-        "prompt_per_token_ms": 1.82,
-        "prompt_per_second": 549.45
+        "prompt_ms": 16224.61,
+        "prompt_n": 8164,
+        "prompt_per_token_ms": 1.99,
+        "prompt_per_second": 503.19
       },
       {
-        "prompt_ms": 7179.13,
-        "prompt_n": 3849,
-        "prompt_per_token_ms": 1.87,
-        "prompt_per_second": 536.14
+        "prompt_ms": 8276.19,
+        "prompt_n": 4588,
+        "prompt_per_token_ms": 1.8,
+        "prompt_per_second": 554.36
       },
       {
-        "prompt_ms": 7408.56,
-        "prompt_n": 4101,
-        "prompt_per_token_ms": 1.81,
-        "prompt_per_second": 553.55
+        "prompt_ms": 17058.96,
+        "prompt_n": 8250,
+        "prompt_per_token_ms": 2.07,
+        "prompt_per_second": 483.62
       },
       {
-        "prompt_ms": 7816.74,
-        "prompt_n": 4191,
-        "prompt_per_token_ms": 1.87,
-        "prompt_per_second": 536.16
+        "prompt_ms": 16205.16,
+        "prompt_n": 8155,
+        "prompt_per_token_ms": 1.99,
+        "prompt_per_second": 503.23
       },
       {
-        "prompt_ms": 6946.11,
-        "prompt_n": 3907,
-        "prompt_per_token_ms": 1.78,
-        "prompt_per_second": 562.47
-      },
-      {
-        "prompt_ms": 4248.11,
-        "prompt_n": 2399,
-        "prompt_per_token_ms": 1.77,
-        "prompt_per_second": 564.72
-      },
-      {
-        "prompt_ms": 7783.13,
-        "prompt_n": 4185,
-        "prompt_per_token_ms": 1.86,
-        "prompt_per_second": 537.7
-      },
-      {
-        "prompt_ms": 7123.99,
-        "prompt_n": 3898,
-        "prompt_per_token_ms": 1.83,
-        "prompt_per_second": 547.17
-      },
-      {
-        "prompt_ms": 7690.16,
-        "prompt_n": 4198,
-        "prompt_per_token_ms": 1.83,
-        "prompt_per_second": 545.89
+        "prompt_ms": 18674.09,
+        "prompt_n": 8488,
+        "prompt_per_token_ms": 2.2,
+        "prompt_per_second": 454.53
       }
     ],
     "eval": [
       {
-        "predicted_ms": 7354.92,
-        "predicted_n": 4204,
-        "predicted_per_token_ms": 1.75,
-        "predicted_per_second": 571.59
+        "predicted_ms": 18644.66,
+        "predicted_n": 8617,
+        "predicted_per_token_ms": 2.16,
+        "predicted_per_second": 462.17
+      },
+      {
+        "predicted_ms": 25.2,
+        "predicted_n": 2,
+        "predicted_per_token_ms": 25.2,
+        "predicted_per_second": 39.67
+      },
+      {
+        "predicted_ms": 20797.06,
+        "predicted_n": 8631,
+        "predicted_per_token_ms": 2.41,
+        "predicted_per_second": 415.01
+      },
+      {
+        "predicted_ms": 117.93,
+        "predicted_n": 7,
+        "predicted_per_token_ms": 19.66,
+        "predicted_per_second": 50.88
+      },
+      {
+        "predicted_ms": 18326.14,
+        "predicted_n": 8627,
+        "predicted_per_token_ms": 2.12,
+        "predicted_per_second": 470.75
+      },
+      {
+        "predicted_ms": 153.13,
+        "predicted_n": 9,
+        "predicted_per_token_ms": 19.14,
+        "predicted_per_second": 52.24
+      },
+      {
+        "predicted_ms": 16970.18,
+        "predicted_n": 8630,
+        "predicted_per_token_ms": 1.97,
+        "predicted_per_second": 508.54
+      },
+      {
+        "predicted_ms": 155.59,
+        "predicted_n": 9,
+        "predicted_per_token_ms": 19.45,
+        "predicted_per_second": 51.42
+      },
+      {
+        "predicted_ms": 17858.39,
+        "predicted_n": 8630,
+        "predicted_per_token_ms": 2.07,
+        "predicted_per_second": 483.25
+      },
+      {
+        "predicted_ms": 180.33,
+        "predicted_n": 10,
+        "predicted_per_token_ms": 20.04,
+        "predicted_per_second": 49.91
+      },
+      {
+        "predicted_ms": 16343.08,
+        "predicted_n": 8630,
+        "predicted_per_token_ms": 1.89,
+        "predicted_per_second": 528.05
+      },
+      {
+        "predicted_ms": 154.14,
+        "predicted_n": 9,
+        "predicted_per_token_ms": 19.27,
+        "predicted_per_second": 51.9
+      },
+      {
+        "predicted_ms": 18023.62,
+        "predicted_n": 8621,
+        "predicted_per_token_ms": 2.09,
+        "predicted_per_second": 478.32
+      },
+      {
+        "predicted_ms": 22.71,
+        "predicted_n": 2,
+        "predicted_per_token_ms": 22.71,
+        "predicted_per_second": 44.03
+      },
+      {
+        "predicted_ms": 16277.1,
+        "predicted_n": 8622,
+        "predicted_per_token_ms": 1.89,
+        "predicted_per_second": 529.7
+      },
+      {
+        "predicted_ms": 21.85,
+        "predicted_n": 2,
+        "predicted_per_token_ms": 21.85,
+        "predicted_per_second": 45.76
+      },
+      {
+        "predicted_ms": 17870.99,
+        "predicted_n": 8622,
+        "predicted_per_token_ms": 2.07,
+        "predicted_per_second": 482.46
+      },
+      {
+        "predicted_ms": 21.45,
+        "predicted_n": 2,
+        "predicted_per_token_ms": 21.45,
+        "predicted_per_second": 46.62
+      },
+      {
+        "predicted_ms": 17294.4,
+        "predicted_n": 8621,
+        "predicted_per_token_ms": 2.01,
+        "predicted_per_second": 498.49
+      },
+      {
+        "predicted_ms": 19.88,
+        "predicted_n": 2,
+        "predicted_per_token_ms": 19.88,
+        "predicted_per_second": 50.3
+      },
+      {
+        "predicted_ms": 17366.08,
+        "predicted_n": 8622,
+        "predicted_per_token_ms": 2.01,
+        "predicted_per_second": 496.49
+      },
+      {
+        "predicted_ms": 21.33,
+        "predicted_n": 2,
+        "predicted_per_token_ms": 21.33,
+        "predicted_per_second": 46.89
+      },
+      {
+        "predicted_ms": 17581.97,
+        "predicted_n": 8623,
+        "predicted_per_token_ms": 2.04,
+        "predicted_per_second": 490.45
+      },
+      {
+        "predicted_ms": 38.49,
+        "predicted_n": 3,
+        "predicted_per_token_ms": 19.24,
+        "predicted_per_second": 51.96
+      },
+      {
+        "predicted_ms": 17509.94,
+        "predicted_n": 8622,
+        "predicted_per_token_ms": 2.03,
+        "predicted_per_second": 492.41
+      },
+      {
+        "predicted_ms": 39.72,
+        "predicted_n": 3,
+        "predicted_per_token_ms": 19.86,
+        "predicted_per_second": 50.35
+      },
+      {
+        "predicted_ms": 17869.28,
+        "predicted_n": 8620,
+        "predicted_per_token_ms": 2.07,
+        "predicted_per_second": 482.39
+      },
+      {
+        "predicted_ms": 19.78,
+        "predicted_n": 2,
+        "predicted_per_token_ms": 19.78,
+        "predicted_per_second": 50.55
+      },
+      {
+        "predicted_ms": 17669.93,
+        "predicted_n": 8621,
+        "predicted_per_token_ms": 2.05,
+        "predicted_per_second": 487.89
+      },
+      {
+        "predicted_ms": 22.63,
+        "predicted_n": 2,
+        "predicted_per_token_ms": 22.63,
+        "predicted_per_second": 44.19
+      },
+      {
+        "predicted_ms": 17283.38,
+        "predicted_n": 8622,
+        "predicted_per_token_ms": 2.0,
+        "predicted_per_second": 498.86
+      },
+      {
+        "predicted_ms": 117.69,
+        "predicted_n": 7,
+        "predicted_per_token_ms": 19.61,
+        "predicted_per_second": 50.98
+      },
+      {
+        "predicted_ms": 18226.19,
+        "predicted_n": 8621,
+        "predicted_per_token_ms": 2.11,
+        "predicted_per_second": 473.0
+      },
+      {
+        "predicted_ms": 21.73,
+        "predicted_n": 2,
+        "predicted_per_token_ms": 21.73,
+        "predicted_per_second": 46.01
+      },
+      {
+        "predicted_ms": 17894.65,
+        "predicted_n": 8622,
+        "predicted_per_token_ms": 2.08,
+        "predicted_per_second": 481.82
+      },
+      {
+        "predicted_ms": 116.72,
+        "predicted_n": 7,
+        "predicted_per_token_ms": 19.45,
+        "predicted_per_second": 51.41
+      },
+      {
+        "predicted_ms": 17614.12,
+        "predicted_n": 8621,
+        "predicted_per_token_ms": 2.04,
+        "predicted_per_second": 489.44
+      },
+      {
+        "predicted_ms": 40.63,
+        "predicted_n": 3,
+        "predicted_per_token_ms": 20.32,
+        "predicted_per_second": 49.22
+      },
+      {
+        "predicted_ms": 18098.01,
+        "predicted_n": 8621,
+        "predicted_per_token_ms": 2.1,
+        "predicted_per_second": 476.35
+      },
+      {
+        "predicted_ms": 61.08,
+        "predicted_n": 4,
+        "predicted_per_token_ms": 20.36,
+        "predicted_per_second": 49.12
+      },
+      {
+        "predicted_ms": 17291.45,
+        "predicted_n": 8639,
+        "predicted_per_token_ms": 2.0,
+        "predicted_per_second": 499.61
+      },
+      {
+        "predicted_ms": 38.73,
+        "predicted_n": 3,
+        "predicted_per_token_ms": 19.37,
+        "predicted_per_second": 51.64
+      },
+      {
+        "predicted_ms": 17091.99,
+        "predicted_n": 8631,
+        "predicted_per_token_ms": 1.98,
+        "predicted_per_second": 504.97
+      },
+      {
+        "predicted_ms": 23.34,
+        "predicted_n": 2,
+        "predicted_per_token_ms": 23.34,
+        "predicted_per_second": 42.85
+      },
+      {
+        "predicted_ms": 16992.01,
+        "predicted_n": 8630,
+        "predicted_per_token_ms": 1.97,
+        "predicted_per_second": 507.89
+      },
+      {
+        "predicted_ms": 22.5,
+        "predicted_n": 2,
+        "predicted_per_token_ms": 22.5,
+        "predicted_per_second": 44.45
+      },
+      {
+        "predicted_ms": 17008.52,
+        "predicted_n": 8637,
+        "predicted_per_token_ms": 1.97,
+        "predicted_per_second": 507.8
+      },
+      {
+        "predicted_ms": 22.29,
+        "predicted_n": 2,
+        "predicted_per_token_ms": 22.29,
+        "predicted_per_second": 44.86
+      },
+      {
+        "predicted_ms": 17041.46,
+        "predicted_n": 8635,
+        "predicted_per_token_ms": 1.97,
+        "predicted_per_second": 506.71
       },
       {
         "predicted_ms": 20.01,
         "predicted_n": 2,
         "predicted_per_token_ms": 20.01,
-        "predicted_per_second": 49.99
+        "predicted_per_second": 49.98
       },
       {
-        "predicted_ms": 7396.37,
-        "predicted_n": 4213,
-        "predicted_per_token_ms": 1.76,
-        "predicted_per_second": 569.6
+        "predicted_ms": 17788.39,
+        "predicted_n": 8645,
+        "predicted_per_token_ms": 2.06,
+        "predicted_per_second": 485.99
       },
       {
-        "predicted_ms": 36.69,
+        "predicted_ms": 41.01,
         "predicted_n": 3,
-        "predicted_per_token_ms": 18.34,
-        "predicted_per_second": 54.52
+        "predicted_per_token_ms": 20.5,
+        "predicted_per_second": 48.77
       },
       {
-        "predicted_ms": 7738.44,
-        "predicted_n": 4219,
-        "predicted_per_token_ms": 1.83,
-        "predicted_per_second": 545.2
+        "predicted_ms": 16301.36,
+        "predicted_n": 8633,
+        "predicted_per_token_ms": 1.89,
+        "predicted_per_second": 529.59
       },
       {
-        "predicted_ms": 153.2,
-        "predicted_n": 10,
-        "predicted_per_token_ms": 17.02,
-        "predicted_per_second": 58.75
+        "predicted_ms": 78.29,
+        "predicted_n": 5,
+        "predicted_per_token_ms": 19.57,
+        "predicted_per_second": 51.09
       },
       {
-        "predicted_ms": 6814.66,
-        "predicted_n": 4217,
-        "predicted_per_token_ms": 1.62,
-        "predicted_per_second": 618.81
+        "predicted_ms": 16977.59,
+        "predicted_n": 8634,
+        "predicted_per_token_ms": 1.97,
+        "predicted_per_second": 508.55
       },
       {
-        "predicted_ms": 155.7,
-        "predicted_n": 10,
-        "predicted_per_token_ms": 17.3,
-        "predicted_per_second": 57.8
+        "predicted_ms": 78.07,
+        "predicted_n": 5,
+        "predicted_per_token_ms": 19.52,
+        "predicted_per_second": 51.23
       },
       {
-        "predicted_ms": 7216.49,
-        "predicted_n": 4217,
-        "predicted_per_token_ms": 1.71,
-        "predicted_per_second": 584.36
-      },
-      {
-        "predicted_ms": 120.8,
-        "predicted_n": 8,
-        "predicted_per_token_ms": 17.26,
-        "predicted_per_second": 57.95
-      },
-      {
-        "predicted_ms": 7013.93,
-        "predicted_n": 4217,
-        "predicted_per_token_ms": 1.66,
-        "predicted_per_second": 601.23
-      },
-      {
-        "predicted_ms": 121.66,
-        "predicted_n": 8,
-        "predicted_per_token_ms": 17.38,
-        "predicted_per_second": 57.54
-      },
-      {
-        "predicted_ms": 6946.89,
-        "predicted_n": 4208,
-        "predicted_per_token_ms": 1.65,
-        "predicted_per_second": 605.74
-      },
-      {
-        "predicted_ms": 19.84,
-        "predicted_n": 2,
-        "predicted_per_token_ms": 19.84,
-        "predicted_per_second": 50.4
-      },
-      {
-        "predicted_ms": 6892.69,
-        "predicted_n": 4209,
-        "predicted_per_token_ms": 1.64,
-        "predicted_per_second": 610.65
-      },
-      {
-        "predicted_ms": 21.41,
-        "predicted_n": 2,
-        "predicted_per_token_ms": 21.41,
-        "predicted_per_second": 46.7
-      },
-      {
-        "predicted_ms": 6993.46,
-        "predicted_n": 4209,
-        "predicted_per_token_ms": 1.66,
-        "predicted_per_second": 601.85
-      },
-      {
-        "predicted_ms": 19.73,
-        "predicted_n": 2,
-        "predicted_per_token_ms": 19.73,
-        "predicted_per_second": 50.69
-      },
-      {
-        "predicted_ms": 6898.22,
-        "predicted_n": 4208,
-        "predicted_per_token_ms": 1.64,
-        "predicted_per_second": 610.01
-      },
-      {
-        "predicted_ms": 19.65,
-        "predicted_n": 2,
-        "predicted_per_token_ms": 19.65,
-        "predicted_per_second": 50.89
-      },
-      {
-        "predicted_ms": 6927.59,
-        "predicted_n": 4209,
-        "predicted_per_token_ms": 1.65,
-        "predicted_per_second": 607.57
-      },
-      {
-        "predicted_ms": 19.64,
-        "predicted_n": 2,
-        "predicted_per_token_ms": 19.64,
-        "predicted_per_second": 50.91
-      },
-      {
-        "predicted_ms": 7040.46,
-        "predicted_n": 4210,
-        "predicted_per_token_ms": 1.67,
-        "predicted_per_second": 597.97
-      },
-      {
-        "predicted_ms": 19.65,
-        "predicted_n": 2,
-        "predicted_per_token_ms": 19.65,
-        "predicted_per_second": 50.89
-      },
-      {
-        "predicted_ms": 6987.07,
-        "predicted_n": 4209,
-        "predicted_per_token_ms": 1.66,
-        "predicted_per_second": 602.4
-      },
-      {
-        "predicted_ms": 34.89,
-        "predicted_n": 3,
-        "predicted_per_token_ms": 17.44,
-        "predicted_per_second": 57.33
-      },
-      {
-        "predicted_ms": 7047.2,
-        "predicted_n": 4207,
-        "predicted_per_token_ms": 1.68,
-        "predicted_per_second": 596.97
-      },
-      {
-        "predicted_ms": 19.89,
-        "predicted_n": 2,
-        "predicted_per_token_ms": 19.89,
-        "predicted_per_second": 50.27
-      },
-      {
-        "predicted_ms": 7162.32,
-        "predicted_n": 4208,
-        "predicted_per_token_ms": 1.7,
-        "predicted_per_second": 587.52
-      },
-      {
-        "predicted_ms": 17.53,
-        "predicted_n": 2,
-        "predicted_per_token_ms": 17.53,
-        "predicted_per_second": 57.03
-      },
-      {
-        "predicted_ms": 7536.44,
-        "predicted_n": 4209,
-        "predicted_per_token_ms": 1.79,
-        "predicted_per_second": 558.49
-      },
-      {
-        "predicted_ms": 103.96,
-        "predicted_n": 7,
-        "predicted_per_token_ms": 17.33,
-        "predicted_per_second": 57.72
-      },
-      {
-        "predicted_ms": 7177.83,
-        "predicted_n": 4208,
-        "predicted_per_token_ms": 1.71,
-        "predicted_per_second": 586.25
-      },
-      {
-        "predicted_ms": 18.2,
-        "predicted_n": 2,
-        "predicted_per_token_ms": 18.2,
-        "predicted_per_second": 54.96
-      },
-      {
-        "predicted_ms": 7306.02,
-        "predicted_n": 4209,
-        "predicted_per_token_ms": 1.74,
-        "predicted_per_second": 576.1
-      },
-      {
-        "predicted_ms": 103.93,
-        "predicted_n": 7,
-        "predicted_per_token_ms": 17.32,
-        "predicted_per_second": 57.73
-      },
-      {
-        "predicted_ms": 7501.73,
-        "predicted_n": 4208,
-        "predicted_per_token_ms": 1.78,
-        "predicted_per_second": 560.94
-      },
-      {
-        "predicted_ms": 36.76,
-        "predicted_n": 3,
-        "predicted_per_token_ms": 18.38,
-        "predicted_per_second": 54.41
-      },
-      {
-        "predicted_ms": 7502.77,
-        "predicted_n": 4208,
-        "predicted_per_token_ms": 1.78,
-        "predicted_per_second": 560.86
-      },
-      {
-        "predicted_ms": 54.07,
-        "predicted_n": 4,
-        "predicted_per_token_ms": 18.02,
-        "predicted_per_second": 55.48
-      },
-      {
-        "predicted_ms": 7728.17,
-        "predicted_n": 4209,
-        "predicted_per_token_ms": 1.84,
-        "predicted_per_second": 544.63
-      },
-      {
-        "predicted_ms": 19.42,
-        "predicted_n": 2,
-        "predicted_per_token_ms": 19.42,
-        "predicted_per_second": 51.49
-      },
-      {
-        "predicted_ms": 7412.42,
-        "predicted_n": 4211,
-        "predicted_per_token_ms": 1.76,
-        "predicted_per_second": 568.1
-      },
-      {
-        "predicted_ms": 19.79,
-        "predicted_n": 2,
-        "predicted_per_token_ms": 19.79,
-        "predicted_per_second": 50.52
-      },
-      {
-        "predicted_ms": 7648.05,
-        "predicted_n": 4217,
-        "predicted_per_token_ms": 1.81,
-        "predicted_per_second": 551.38
-      },
-      {
-        "predicted_ms": 19.43,
-        "predicted_n": 2,
-        "predicted_per_token_ms": 19.43,
-        "predicted_per_second": 51.46
-      },
-      {
-        "predicted_ms": 8356.59,
-        "predicted_n": 4224,
+        "predicted_ms": 17072.47,
+        "predicted_n": 8634,
         "predicted_per_token_ms": 1.98,
-        "predicted_per_second": 505.47
+        "predicted_per_second": 505.73
       },
       {
-        "predicted_ms": 29.91,
+        "predicted_ms": 41.45,
+        "predicted_n": 3,
+        "predicted_per_token_ms": 20.72,
+        "predicted_per_second": 48.25
+      },
+      {
+        "predicted_ms": 17029.49,
+        "predicted_n": 8635,
+        "predicted_per_token_ms": 1.97,
+        "predicted_per_second": 507.06
+      },
+      {
+        "predicted_ms": 80.11,
+        "predicted_n": 5,
+        "predicted_per_token_ms": 20.03,
+        "predicted_per_second": 49.93
+      },
+      {
+        "predicted_ms": 17097.25,
+        "predicted_n": 8627,
+        "predicted_per_token_ms": 1.98,
+        "predicted_per_second": 504.58
+      },
+      {
+        "predicted_ms": 80.66,
+        "predicted_n": 5,
+        "predicted_per_token_ms": 20.17,
+        "predicted_per_second": 49.59
+      },
+      {
+        "predicted_ms": 17630.21,
+        "predicted_n": 8621,
+        "predicted_per_token_ms": 2.05,
+        "predicted_per_second": 488.99
+      },
+      {
+        "predicted_ms": 22.42,
         "predicted_n": 2,
-        "predicted_per_token_ms": 29.91,
-        "predicted_per_second": 33.43
+        "predicted_per_token_ms": 22.42,
+        "predicted_per_second": 44.61
       },
       {
-        "predicted_ms": 8160.39,
-        "predicted_n": 4208,
-        "predicted_per_token_ms": 1.94,
-        "predicted_per_second": 515.66
+        "predicted_ms": 17925.92,
+        "predicted_n": 8622,
+        "predicted_per_token_ms": 2.08,
+        "predicted_per_second": 480.98
       },
       {
-        "predicted_ms": 18.42,
-        "predicted_n": 2,
-        "predicted_per_token_ms": 18.42,
-        "predicted_per_second": 54.29
+        "predicted_ms": 40.05,
+        "predicted_n": 3,
+        "predicted_per_token_ms": 20.03,
+        "predicted_per_second": 49.93
       },
       {
-        "predicted_ms": 8074.64,
-        "predicted_n": 4212,
-        "predicted_per_token_ms": 1.92,
-        "predicted_per_second": 521.63
+        "predicted_ms": 16267.33,
+        "predicted_n": 8238,
+        "predicted_per_token_ms": 1.97,
+        "predicted_per_second": 506.41
       },
       {
-        "predicted_ms": 19.76,
-        "predicted_n": 2,
+        "predicted_ms": 39.82,
+        "predicted_n": 3,
+        "predicted_per_token_ms": 19.91,
+        "predicted_per_second": 50.23
+      },
+      {
+        "predicted_ms": 16806.05,
+        "predicted_n": 8228,
+        "predicted_per_token_ms": 2.04,
+        "predicted_per_second": 489.59
+      },
+      {
+        "predicted_ms": 39.51,
+        "predicted_n": 3,
         "predicted_per_token_ms": 19.76,
         "predicted_per_second": 50.61
       },
       {
-        "predicted_ms": 8101.29,
-        "predicted_n": 4220,
+        "predicted_ms": 8135.79,
+        "predicted_n": 4807,
+        "predicted_per_token_ms": 1.69,
+        "predicted_per_second": 590.85
+      },
+      {
+        "predicted_ms": 38.13,
+        "predicted_n": 3,
+        "predicted_per_token_ms": 19.06,
+        "predicted_per_second": 52.45
+      },
+      {
+        "predicted_ms": 16786.3,
+        "predicted_n": 8269,
+        "predicted_per_token_ms": 2.03,
+        "predicted_per_second": 492.6
+      },
+      {
+        "predicted_ms": 77.83,
+        "predicted_n": 5,
+        "predicted_per_token_ms": 19.46,
+        "predicted_per_second": 51.39
+      },
+      {
+        "predicted_ms": 16114.69,
+        "predicted_n": 8375,
         "predicted_per_token_ms": 1.92,
-        "predicted_per_second": 520.9
+        "predicted_per_second": 519.71
       },
       {
-        "predicted_ms": 70.66,
-        "predicted_n": 5,
-        "predicted_per_token_ms": 17.67,
-        "predicted_per_second": 56.61
+        "predicted_ms": 40.62,
+        "predicted_n": 3,
+        "predicted_per_token_ms": 20.31,
+        "predicted_per_second": 49.24
       },
       {
-        "predicted_ms": 7683.22,
-        "predicted_n": 4221,
-        "predicted_per_token_ms": 1.82,
-        "predicted_per_second": 549.38
+        "predicted_ms": 17518.88,
+        "predicted_n": 8472,
+        "predicted_per_token_ms": 2.07,
+        "predicted_per_second": 483.59
       },
       {
-        "predicted_ms": 122.99,
-        "predicted_n": 8,
-        "predicted_per_token_ms": 17.57,
-        "predicted_per_second": 56.92
+        "predicted_ms": 40.41,
+        "predicted_n": 3,
+        "predicted_per_token_ms": 20.2,
+        "predicted_per_second": 49.49
       },
       {
-        "predicted_ms": 7923.81,
-        "predicted_n": 4221,
-        "predicted_per_token_ms": 1.88,
-        "predicted_per_second": 532.7
+        "predicted_ms": 16477.33,
+        "predicted_n": 8163,
+        "predicted_per_token_ms": 2.02,
+        "predicted_per_second": 495.41
       },
       {
-        "predicted_ms": 70.26,
-        "predicted_n": 5,
-        "predicted_per_token_ms": 17.56,
-        "predicted_per_second": 56.93
+        "predicted_ms": 150.93,
+        "predicted_n": 9,
+        "predicted_per_token_ms": 18.87,
+        "predicted_per_second": 53.0
       },
       {
-        "predicted_ms": 7638.13,
-        "predicted_n": 4222,
-        "predicted_per_token_ms": 1.81,
-        "predicted_per_second": 552.75
+        "predicted_ms": 16527.11,
+        "predicted_n": 8226,
+        "predicted_per_token_ms": 2.01,
+        "predicted_per_second": 497.73
       },
       {
-        "predicted_ms": 71.58,
-        "predicted_n": 5,
-        "predicted_per_token_ms": 17.89,
-        "predicted_per_second": 55.88
+        "predicted_ms": 38.59,
+        "predicted_n": 3,
+        "predicted_per_token_ms": 19.3,
+        "predicted_per_second": 51.82
       },
       {
-        "predicted_ms": 7869.87,
-        "predicted_n": 4214,
-        "predicted_per_token_ms": 1.87,
-        "predicted_per_second": 535.46
+        "predicted_ms": 7988.8,
+        "predicted_n": 4434,
+        "predicted_per_token_ms": 1.8,
+        "predicted_per_second": 555.03
       },
       {
-        "predicted_ms": 70.51,
-        "predicted_n": 5,
-        "predicted_per_token_ms": 17.63,
-        "predicted_per_second": 56.73
+        "predicted_ms": 37.77,
+        "predicted_n": 3,
+        "predicted_per_token_ms": 18.89,
+        "predicted_per_second": 52.95
       },
       {
-        "predicted_ms": 7864.97,
-        "predicted_n": 4208,
-        "predicted_per_token_ms": 1.87,
-        "predicted_per_second": 535.03
+        "predicted_ms": 17002.92,
+        "predicted_n": 8124,
+        "predicted_per_token_ms": 2.09,
+        "predicted_per_second": 477.8
       },
       {
-        "predicted_ms": 19.95,
-        "predicted_n": 2,
+        "predicted_ms": 39.9,
+        "predicted_n": 3,
         "predicted_per_token_ms": 19.95,
         "predicted_per_second": 50.13
       },
       {
-        "predicted_ms": 8062.83,
-        "predicted_n": 4209,
-        "predicted_per_token_ms": 1.92,
-        "predicted_per_second": 522.03
-      },
-      {
-        "predicted_ms": 36.7,
-        "predicted_n": 3,
-        "predicted_per_token_ms": 18.35,
-        "predicted_per_second": 54.5
-      },
-      {
-        "predicted_ms": 7851.02,
-        "predicted_n": 4210,
-        "predicted_per_token_ms": 1.86,
-        "predicted_per_second": 536.24
-      },
-      {
-        "predicted_ms": 36.22,
-        "predicted_n": 3,
-        "predicted_per_token_ms": 18.11,
-        "predicted_per_second": 55.22
-      },
-      {
-        "predicted_ms": 7075.73,
-        "predicted_n": 3928,
-        "predicted_per_token_ms": 1.8,
-        "predicted_per_second": 555.14
-      },
-      {
-        "predicted_ms": 36.52,
-        "predicted_n": 3,
-        "predicted_per_token_ms": 18.26,
-        "predicted_per_second": 54.77
-      },
-      {
-        "predicted_ms": 4265.99,
-        "predicted_n": 2429,
-        "predicted_per_token_ms": 1.76,
-        "predicted_per_second": 569.39
-      },
-      {
-        "predicted_ms": 33.89,
-        "predicted_n": 3,
-        "predicted_per_token_ms": 16.94,
-        "predicted_per_second": 59.02
-      },
-      {
-        "predicted_ms": 7749.83,
-        "predicted_n": 4042,
-        "predicted_per_token_ms": 1.92,
-        "predicted_per_second": 521.56
-      },
-      {
-        "predicted_ms": 87.95,
-        "predicted_n": 5,
-        "predicted_per_token_ms": 21.99,
-        "predicted_per_second": 45.48
-      },
-      {
-        "predicted_ms": 8122.24,
-        "predicted_n": 4131,
-        "predicted_per_token_ms": 1.97,
-        "predicted_per_second": 508.6
-      },
-      {
-        "predicted_ms": 19.42,
-        "predicted_n": 2,
-        "predicted_per_token_ms": 19.42,
-        "predicted_per_second": 51.5
-      },
-      {
-        "predicted_ms": 7799.36,
-        "predicted_n": 4216,
-        "predicted_per_token_ms": 1.85,
-        "predicted_per_second": 540.56
-      },
-      {
-        "predicted_ms": 152.03,
-        "predicted_n": 10,
-        "predicted_per_token_ms": 16.89,
-        "predicted_per_second": 59.2
-      },
-      {
-        "predicted_ms": 7460.56,
-        "predicted_n": 3907,
+        "predicted_ms": 13361.63,
+        "predicted_n": 7012,
         "predicted_per_token_ms": 1.91,
-        "predicted_per_second": 523.69
+        "predicted_per_second": 524.79
       },
       {
-        "predicted_ms": 153.29,
-        "predicted_n": 10,
-        "predicted_per_token_ms": 17.03,
-        "predicted_per_second": 58.71
-      },
-      {
-        "predicted_ms": 7636.07,
-        "predicted_n": 4101,
-        "predicted_per_token_ms": 1.86,
-        "predicted_per_second": 537.06
-      },
-      {
-        "predicted_ms": 34.75,
+        "predicted_ms": 37.96,
         "predicted_n": 3,
-        "predicted_per_token_ms": 17.38,
-        "predicted_per_second": 57.55
+        "predicted_per_token_ms": 18.98,
+        "predicted_per_second": 52.68
       },
       {
-        "predicted_ms": 4453.26,
-        "predicted_n": 2407,
-        "predicted_per_token_ms": 1.85,
-        "predicted_per_second": 540.5
+        "predicted_ms": 16361.52,
+        "predicted_n": 8080,
+        "predicted_per_token_ms": 2.02,
+        "predicted_per_second": 493.84
       },
       {
-        "predicted_ms": 35.68,
+        "predicted_ms": 38.39,
         "predicted_n": 3,
-        "predicted_per_token_ms": 17.84,
-        "predicted_per_second": 56.05
+        "predicted_per_token_ms": 19.2,
+        "predicted_per_second": 52.1
       },
       {
-        "predicted_ms": 7307.25,
-        "predicted_n": 4015,
-        "predicted_per_token_ms": 1.82,
-        "predicted_per_second": 549.45
+        "predicted_ms": 16805.55,
+        "predicted_n": 8165,
+        "predicted_per_token_ms": 2.06,
+        "predicted_per_second": 485.85
       },
       {
-        "predicted_ms": 71.33,
-        "predicted_n": 5,
-        "predicted_per_token_ms": 17.83,
-        "predicted_per_second": 56.08
-      },
-      {
-        "predicted_ms": 7179.13,
-        "predicted_n": 3849,
-        "predicted_per_token_ms": 1.87,
-        "predicted_per_second": 536.14
-      },
-      {
-        "predicted_ms": 35.22,
+        "predicted_ms": 40.05,
         "predicted_n": 3,
-        "predicted_per_token_ms": 17.61,
-        "predicted_per_second": 56.79
+        "predicted_per_token_ms": 20.02,
+        "predicted_per_second": 49.94
       },
       {
-        "predicted_ms": 7408.56,
-        "predicted_n": 4101,
-        "predicted_per_token_ms": 1.81,
-        "predicted_per_second": 553.55
+        "predicted_ms": 16224.61,
+        "predicted_n": 8164,
+        "predicted_per_token_ms": 1.99,
+        "predicted_per_second": 503.19
       },
       {
-        "predicted_ms": 104.84,
-        "predicted_n": 7,
-        "predicted_per_token_ms": 17.47,
-        "predicted_per_second": 57.23
+        "predicted_ms": 154.21,
+        "predicted_n": 9,
+        "predicted_per_token_ms": 19.28,
+        "predicted_per_second": 51.88
       },
       {
-        "predicted_ms": 7816.74,
-        "predicted_n": 4191,
-        "predicted_per_token_ms": 1.87,
-        "predicted_per_second": 536.16
+        "predicted_ms": 8276.19,
+        "predicted_n": 4588,
+        "predicted_per_token_ms": 1.8,
+        "predicted_per_second": 554.36
       },
       {
-        "predicted_ms": 36.31,
+        "predicted_ms": 39.33,
         "predicted_n": 3,
-        "predicted_per_token_ms": 18.16,
-        "predicted_per_second": 55.08
+        "predicted_per_token_ms": 19.66,
+        "predicted_per_second": 50.86
       },
       {
-        "predicted_ms": 6946.11,
-        "predicted_n": 3907,
-        "predicted_per_token_ms": 1.78,
-        "predicted_per_second": 562.47
+        "predicted_ms": 17058.96,
+        "predicted_n": 8250,
+        "predicted_per_token_ms": 2.07,
+        "predicted_per_second": 483.62
       },
       {
-        "predicted_ms": 155.78,
-        "predicted_n": 10,
-        "predicted_per_token_ms": 17.31,
-        "predicted_per_second": 57.77
-      },
-      {
-        "predicted_ms": 4248.11,
-        "predicted_n": 2399,
-        "predicted_per_token_ms": 1.77,
-        "predicted_per_second": 564.72
-      },
-      {
-        "predicted_ms": 34.85,
-        "predicted_n": 3,
-        "predicted_per_token_ms": 17.43,
-        "predicted_per_second": 57.38
-      },
-      {
-        "predicted_ms": 7783.13,
-        "predicted_n": 4185,
-        "predicted_per_token_ms": 1.86,
-        "predicted_per_second": 537.7
-      },
-      {
-        "predicted_ms": 35.25,
-        "predicted_n": 3,
-        "predicted_per_token_ms": 17.63,
-        "predicted_per_second": 56.73
-      },
-      {
-        "predicted_ms": 7123.99,
-        "predicted_n": 3898,
-        "predicted_per_token_ms": 1.83,
-        "predicted_per_second": 547.17
-      },
-      {
-        "predicted_ms": 36.66,
-        "predicted_n": 3,
-        "predicted_per_token_ms": 18.33,
-        "predicted_per_second": 54.56
-      },
-      {
-        "predicted_ms": 7690.16,
-        "predicted_n": 4198,
-        "predicted_per_token_ms": 1.83,
-        "predicted_per_second": 545.89
-      },
-      {
-        "predicted_ms": 20.04,
+        "predicted_ms": 22.32,
         "predicted_n": 2,
-        "predicted_per_token_ms": 20.04,
-        "predicted_per_second": 49.9
+        "predicted_per_token_ms": 22.32,
+        "predicted_per_second": 44.8
+      },
+      {
+        "predicted_ms": 16205.16,
+        "predicted_n": 8155,
+        "predicted_per_token_ms": 1.99,
+        "predicted_per_second": 503.23
+      },
+      {
+        "predicted_ms": 40.72,
+        "predicted_n": 3,
+        "predicted_per_token_ms": 20.36,
+        "predicted_per_second": 49.11
+      },
+      {
+        "predicted_ms": 18674.09,
+        "predicted_n": 8488,
+        "predicted_per_token_ms": 2.2,
+        "predicted_per_second": 454.53
+      },
+      {
+        "predicted_ms": 26.32,
+        "predicted_n": 2,
+        "predicted_per_token_ms": 26.32,
+        "predicted_per_second": 38.0
       }
     ]
   }

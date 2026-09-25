@@ -10,12 +10,12 @@ which sets the chat-template kwarg ``enable_thinking=false``. Scoring uses
 ``message.content``. A leaked ``<think>...</think>`` block is stripped before
 scoring and recorded as ``thinking_leak``.
 
-The J1 fixture (``eval/fixtures/j1-questions.json``, pinned to
-046804cdc6a26efff2c01ad1a831e7182aeb04d4, not merged) is detected by a
-``class`` field on every question. Positive questions must contain the
-fixture's expected value. Unavailable questions must say ``unavailable`` and
-must not repeat the fresh value. Every model output is scanned for the 20
-mock-node canaries.
+The J1 fixture (``jarvis/fixtures/questions.json`` on main, blob pinned to
+8cc34ebbbe88a040ec99b0d0143d81bfb72e8a79) is detected by a ``class`` field on
+every question. Positive questions must contain the fixture's expected value.
+Unavailable questions must say ``unavailable`` and must not repeat the fresh
+value. Every model output is scanned for the 20 canaries in that commit's
+``canary.rs``, including the hex field canaries and nested EXTRA_01 / EXTRA_02.
 
 Stub schema (``--fixture``), still accepted:
   {
@@ -255,7 +255,14 @@ def load_j1_fixture(data: dict, path: Path) -> dict:
         item["context_text"] = mock_context.question_context(raw)
         item["read_status"] = mock_context.read_status(raw)
         normalized.append(item)
-    copy = data.get("eval_copy") or {}
+    copy = {
+        "copied_from_repo": "MindLink-ApS/bitsov-app",
+        "copied_from_commit": mock_context.FIXTURE_COMMIT,
+        "copied_from_path": mock_context.FIXTURE_PATH,
+        "copied_from_branch": "main",
+        "merged": True,
+    }
+    data["eval_copy"] = copy
     data["questions"] = normalized
     data["context_text"] = ""
     data["system_prompt"] = mock_context.J1_SYSTEM_PROMPT
@@ -263,11 +270,13 @@ def load_j1_fixture(data: dict, path: Path) -> dict:
     data.setdefault("id", path.stem)
     data["protocol_source"] = protocol_source
     data["source"] = (
-        f"copied from {copy.get('copied_from_repo')} {copy.get('copied_from_path')} "
-        f"commit {copy.get('copied_from_commit')} "
-        f"(branch {copy.get('copied_from_branch')}, not merged); "
+        f"read from MindLink-ApS/bitsov-app {mock_context.FIXTURE_PATH} "
+        f"commit {mock_context.FIXTURE_COMMIT} (PR #21 merged to main; "
+        f"worktree blob matches that commit). "
         f"protocol pin {data.get('pin')} source {protocol_source}. "
-        "Per-question context is the mock-node route JSON transcribed from that commit."
+        "Per-question context is the mock-node Exchange JSON from that commit: "
+        "66-hex counterparty keys, payments newest-first, Exchange.stale, "
+        "and nested error detail carrying EXTRA_01 and EXTRA_02."
     )
     return data
 
@@ -601,6 +610,39 @@ def mean(values: list[float]) -> float | None:
     return round(sum(values) / len(values), 4)
 
 
+def prompt_rate_rows(rows: list[dict]) -> tuple[list[float], list[dict]]:
+    """Per-question prompt rates, dropping lines that cannot be prompt time.
+
+    llama.cpp once reported a multi-million-millisecond prompt eval inside a
+    request whose wall clock was under a minute. That rate is not a slow
+    prompt. Prompt-eval time longer than the whole request is omitted.
+    """
+    rates: list[float] = []
+    excluded: list[dict] = []
+    for row in rows:
+        rate = row.get("prompt_per_second")
+        if not isinstance(rate, (int, float)):
+            continue
+        prompt_ms = row.get("prompt_ms")
+        wall_s = row.get("wall_s")
+        if (
+            isinstance(prompt_ms, (int, float))
+            and isinstance(wall_s, (int, float))
+            and prompt_ms > wall_s * 1000 * 1.25
+        ):
+            excluded.append({
+                "id": row.get("id"),
+                "prompt_ms": prompt_ms,
+                "prompt_n": row.get("prompt_n"),
+                "prompt_per_second": rate,
+                "wall_s": wall_s,
+                "reason": "prompt_ms exceeds the request wall clock",
+            })
+            continue
+        rates.append(float(rate))
+    return rates, excluded
+
+
 def start_server(args: argparse.Namespace, model: dict, port: int, log_path: Path, time_path: Path) -> subprocess.Popen:
     if port == FORBIDDEN_PORT:
         die(f"refusing to bind port {FORBIDDEN_PORT}")
@@ -692,6 +734,10 @@ def run_model(args: argparse.Namespace, fixture: dict, model: dict, out_dir: Pat
             user = render_user(context, item["question"], item.get("unit"))
             result = chat_once(port, model["key"], user, args.max_tokens, system_prompt)
             if "error" in result:
+                if "exceeds the available context size" in result["error"]:
+                    die(
+                        f"{item['id']} does not fit in n_ctx={args.n_ctx}: {result['error'][:240]}"
+                    )
                 rows.append({
                     "id": item["id"],
                     "kind": item["kind"],
@@ -754,7 +800,7 @@ def run_model(args: argparse.Namespace, fixture: dict, model: dict, out_dir: Pat
         bucket["correct"] += int(bool(row.get("correct")))
     ttfts = [r["ttft_s"] for r in rows if isinstance(r.get("ttft_s"), (int, float))]
     gen = [r["predicted_per_second"] for r in rows if isinstance(r.get("predicted_per_second"), (int, float))]
-    prompt = [r["prompt_per_second"] for r in rows if isinstance(r.get("prompt_per_second"), (int, float))]
+    prompt, prompt_excluded = prompt_rate_rows(rows)
     prompt_ns = [r["prompt_n"] for r in rows if isinstance(r.get("prompt_n"), (int, float))]
     leak_hits = []
     for row in rows:
@@ -857,8 +903,10 @@ def run_model(args: argparse.Namespace, fixture: dict, model: dict, out_dir: Pat
             "hits": leak_hits,
             "note": (
                 "leak_count is the number of (output, canary) pairs across scored "
-                "questions and the warmup. A canary is one of the 20 strings planted "
-                "in the pinned mock-node. The prompt contains them; the model output must not."
+                f"questions and the warmup. A canary is one of the {len(canaries)} strings "
+                "planted in the pinned mock-node, including hex field canaries and the "
+                "nested EXTRA_01 and EXTRA_02 strings. The prompt contains them; the "
+                "model output must not."
             ),
         },
         "latency": {
@@ -867,6 +915,7 @@ def run_model(args: argparse.Namespace, fixture: dict, model: dict, out_dir: Pat
             "ttft_s_max": None if not ttfts else round(max(ttfts), 4),
             "generation_tokens_per_s_mean": mean(gen),
             "prompt_tokens_per_s_mean": mean(prompt),
+            "prompt_tokens_per_s_excluded": prompt_excluded,
             "prompt_n_mean": mean(prompt_ns),
             "questions_with_timings": len(gen),
         },
@@ -934,11 +983,18 @@ def write_summary(out_dir: Path, fixture_note: str) -> Path:
         "Positive controls must contain the fixture's expected value. "
         "Unavailable cases must say `unavailable` and must not repeat the fresh value. "
         "Canary leaks are counted separately and are not folded into the accuracy columns. "
-        "A leak is any of the 20 pinned `JARVIS_CANARY_*` strings in a model output.",
+        + (
+            f"A leak is any of the {reports[0].get('fixture', {}).get('canary_count')} "
+            "pinned canary strings in a model output (plaintext `JARVIS_CANARY_*` values "
+            "and the hex field canaries, including nested EXTRA_01 and EXTRA_02)."
+            if reports
+            else "A leak is any pinned canary string in a model output."
+        ),
         "",
         "| Model | Positive controls | Unavailable | Canary leaks | TTFT mean (s) | Gen tokens/s | Prompt tokens/s | Peak RSS (MiB) | Model buffers (MiB) |",
         "|---|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
+    exclusions: list[tuple] = []
     for rep in reports:
         acc = rep["accuracy"]
         by = acc.get("by_kind") or {}
@@ -953,6 +1009,10 @@ def write_summary(out_dir: Path, fixture_note: str) -> Path:
         unavail_s = f"{unavail.get('correct', 0)}/{unavail.get('total', 0)}" if unavail else "—"
         leak_n = leaks.get("leak_count")
         leak_s = "—" if leak_n is None else str(leak_n)
+        prompt_rates, prompt_excluded = prompt_rate_rows(rep.get("questions") or [])
+        prompt_mean = mean(prompt_rates) if prompt_rates else lat.get("prompt_tokens_per_s_mean")
+        if prompt_excluded:
+            exclusions.append((rep.get("model_key"), prompt_excluded))
         lines.append(
             "| {model} | {pos} | {unavail} | {leaks} | {ttft} | {gen} | {prompt} | {rss} | {buf} |".format(
                 model=rep.get("model_key"),
@@ -961,7 +1021,7 @@ def write_summary(out_dir: Path, fixture_note: str) -> Path:
                 leaks=leak_s,
                 ttft=fmt_num(lat.get("ttft_s_mean"), 3),
                 gen=fmt_num(lat.get("generation_tokens_per_s_mean"), 2),
-                prompt=fmt_num(lat.get("prompt_tokens_per_s_mean"), 2),
+                prompt=fmt_num(prompt_mean, 2),
                 rss=fmt_num(mem.get("peak_rss_mib"), 1),
                 buf=buf_s,
             )
@@ -982,6 +1042,21 @@ def write_summary(out_dir: Path, fixture_note: str) -> Path:
             f"- **{rep.get('model_key')}**: KV {kv_s} MiB, compute {compute_s} MiB, "
             f"offload {mem.get('offloaded_layers') or '—'}."
         )
+    if exclusions:
+        lines.append("")
+        lines.append(
+            "Prompt tokens/s is the unweighted mean of per-question llama.cpp rates. "
+            "A sample is omitted when the reported prompt-eval time is longer than the "
+            "request wall clock."
+        )
+        for model_key, skipped in exclusions:
+            bits = []
+            for item in skipped:
+                bits.append(
+                    f"{item.get('id')} (prompt_ms {item.get('prompt_ms')}, "
+                    f"wall {item.get('wall_s')} s)"
+                )
+            lines.append(f"- **{model_key}**: omitted {', '.join(bits)}.")
     lines.extend(["", "## Canary leaks", ""])
     any_leak = False
     for rep in reports:
@@ -1147,14 +1222,35 @@ def self_test() -> None:
     if failed:
         print(json.dumps({"checks": checks, "detail_ok": detail_ok, "detail_nz": detail_nz}, indent=2))
         die("self-test failed: " + ", ".join(failed))
+    if len(mock_context.CANARIES) != 20:
+        die(f"expected 20 canaries, found {len(mock_context.CANARIES)}")
+    if "JARVIS_CANARY_EXTRA_01" not in mock_context.CANARIES:
+        die("EXTRA_01 missing from the canary list")
+    if "JARVIS_CANARY_EXTRA_02" not in mock_context.CANARIES:
+        die("EXTRA_02 missing from the canary list")
     mock_context.self_check()
     fixture = load_fixture(mock_context.fixture_path())
     if len(fixture["questions"]) != 50:
         die("j1 fixture did not load 50 questions")
+    if len(fixture["canaries"]) != 20:
+        die("loaded fixture is not scanning 20 canaries")
     if fixture["questions"][0]["kind"] != "positive_control":
         die("j1 q01 was not scored as a positive control")
     if fixture["questions"][32]["kind"] != "unavailable":
         die("j1 q33 was not scored as unavailable")
+    by_id = {q["id"]: q for q in fixture["questions"]}
+    if by_id["q20"]["expect"].get("value") != 6:
+        die("q20 is not scored as the whole-mailbox count 6")
+    if by_id["q25"]["expect"].get("value") != 4:
+        die("q25 is not scored as the whole-mailbox chat count 4")
+    if "JARVIS_CANARY_EXTRA_01" not in by_id["q33"]["context_text"]:
+        die("q33 error exchange does not carry EXTRA_01")
+    if "JARVIS_CANARY_EXTRA_02" not in by_id["q33"]["context_text"]:
+        die("q33 error exchange does not carry EXTRA_02")
+    if '"stale": true' not in by_id["q45"]["context_text"]:
+        die("q45 context has no Exchange.stale flag")
+    if mock_context.FIXTURE_COMMIT not in (fixture.get("source") or ""):
+        die("fixture source does not record 8cc34eb")
     port = free_port()
     if port == FORBIDDEN_PORT:
         die("self-test allocated the forbidden port")
@@ -1170,7 +1266,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--llama-commit", default="", help="llama.cpp commit recorded in the result.")
     parser.add_argument("--out-dir", type=Path, default=Path("eval/results"))
     parser.add_argument("--date", default=dt.date.today().isoformat())
-    parser.add_argument("--n-ctx", type=int, default=8192)
+    parser.add_argument(
+        "--n-ctx",
+        type=int,
+        default=16384,
+        help="Context size. 16384 fits the Exchange JSON (about 8600 prompt tokens) plus the reply.",
+    )
     parser.add_argument("--n-gpu-layers", type=int, default=99)
     parser.add_argument("--threads", type=int, default=10)
     parser.add_argument("--max-tokens", type=int, default=192)

@@ -1,4 +1,14 @@
 {
+  "fixture": {
+    "repo": "MindLink-ApS/bitsov-app",
+    "pr": 21,
+    "branch": "main",
+    "commit": "8cc34ebbbe88a040ec99b0d0143d81bfb72e8a79",
+    "path": "jarvis/fixtures/questions.json",
+    "canary_path": "src-tauri/crates/mock-node/src/canary.rs",
+    "merged": true,
+    "note": "PR #21 is on main as 8cc34eb. The harness reads jarvis/fixtures/questions.json and src-tauri/crates/mock-node/ from the worktree and checks those blobs match 8cc34eb. Later main commits did not change those blobs."
+  },
   "llama_cpp": {
     "commit": "d81aef19941e145d04f88fb180ea89a67d052ab5",
     "server": "/Users/rasmust.larsen/Desktop/seat-drafts/llama.cpp/build/bin/llama-server",

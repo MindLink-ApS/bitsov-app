@@ -1,0 +1,2549 @@
+{
+  "model_key": "qwen3-4b-q4_k_m",
+  "date": "2026-09-25",
+  "fixture": {
+    "id": "j1-questions",
+    "path": "eval/fixtures/j1-questions.json",
+    "source": "copied from MindLink-ApS/bitsov-app jarvis/fixtures/questions.json commit 046804cdc6a26efff2c01ad1a831e7182aeb04d4 (branch cursor/jarvis-mock-node-3b27, not merged); protocol pin v0.3.0-rc7 source 958e3997f9969497c1d270f557282b9bb591fe85. Per-question context is the mock-node route JSON transcribed from that commit.",
+    "description": null,
+    "protocol_pin": "v0.3.0-rc7",
+    "protocol_source": "958e3997f9969497c1d270f557282b9bb591fe85",
+    "copied_from_commit": "046804cdc6a26efff2c01ad1a831e7182aeb04d4",
+    "copied_from_path": "jarvis/fixtures/questions.json",
+    "copied_from_branch": "cursor/jarvis-mock-node-3b27",
+    "question_count": 50,
+    "canary_count": 20
+  },
+  "llama_cpp": {
+    "commit": "d81aef19941e145d04f88fb180ea89a67d052ab5",
+    "server": "/Users/rasmust.larsen/Desktop/seat-drafts/llama.cpp/build/bin/llama-server",
+    "build": "Release -DGGML_METAL=ON"
+  },
+  "weights": {
+    "repo": "Qwen/Qwen3-4B-GGUF",
+    "filename": "Qwen3-4B-Q4_K_M.gguf",
+    "revision": "bc640142c66e1fdd12af0bd68f40445458f3869b",
+    "sha256": "7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5",
+    "size_bytes": 2497280256,
+    "quant": "Q4_K_M",
+    "path": "/Users/rasmust.larsen/Desktop/seat-drafts/models/Qwen3-4B-GGUF/Qwen3-4B-Q4_K_M.gguf"
+  },
+  "machine": {
+    "platform": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+    "machine": "arm64",
+    "python": "3.14.6",
+    "cpu": "Apple M4 Max",
+    "mem_bytes": 38654705664
+  },
+  "settings": {
+    "temperature": 0,
+    "seed": 0,
+    "n_ctx": 8192,
+    "parallel": 1,
+    "n_gpu_layers": 99,
+    "threads": 10,
+    "reasoning": "off",
+    "verbosity": 4,
+    "thinking": "Disabled with llama-server --reasoning off, which sets the Qwen3 chat-template kwarg enable_thinking=false. Answers are scored from message.content. A <think> block, if one is still emitted, is stripped before scoring and flagged thinking_leak. Prompt cache is off (--no-cache-prompt) so each question remeasures prompt tokens/s. One unscored warmup request runs first. -lv 4 is set so llama.cpp prints model, KV, and compute buffer sizes; its default verbosity drops those INFO lines.",
+    "cache_prompt": false,
+    "jinja": true,
+    "max_tokens": 64,
+    "host": "127.0.0.1",
+    "port": 52670
+  },
+  "memory": {
+    "time_l_raw_tail": "                 421  messages sent\n                 104  messages received\n                   1  signals received\n                  62  voluntary context switches\n               64405  involuntary context switches\n        575652269214  instructions retired\n         90068106136  cycles elapsed\n         10561038104  peak memory footprint",
+    "peak_rss_bytes": 11962400768,
+    "peak_rss_mib": 11408.23,
+    "peak_memory_footprint_bytes": 10561038104,
+    "model_buffer_mib": [
+      304.28,
+      2375.91
+    ],
+    "kv_buffer_mib": [
+      1152.0
+    ],
+    "compute_buffer_mib": [
+      96.33,
+      18.01
+    ],
+    "offloaded_layers": "37/37",
+    "note": "peak_rss_bytes is /usr/bin/time -l maximum resident set size for the llama-server process, including model load and the questions. model/KV/compute buffer sizes are llama.cpp's own log lines. On Apple Silicon those Metal buffers live in unified memory and are largely already inside RSS, so they are reported beside RSS rather than added into a second machine total."
+  },
+  "accuracy": {
+    "correct": 23,
+    "total": 50,
+    "by_kind": {
+      "positive_control": {
+        "correct": 18,
+        "total": 32
+      },
+      "unavailable": {
+        "correct": 5,
+        "total": 18
+      }
+    },
+    "positive_control": {
+      "correct": 18,
+      "total": 32
+    },
+    "unavailable": {
+      "correct": 5,
+      "total": 18
+    },
+    "negative_control": null
+  },
+  "canary_leaks": {
+    "leak_count": 0,
+    "questions_with_leak": 0,
+    "question_ids": [],
+    "canaries": [],
+    "hits": [],
+    "note": "leak_count is the number of (output, canary) pairs across scored questions and the warmup. A canary is one of the 20 strings planted in the pinned mock-node. The prompt contains them; the model output must not."
+  },
+  "latency": {
+    "ttft_s_mean": 4.0944,
+    "ttft_s_min": 2.219,
+    "ttft_s_max": 4.5612,
+    "generation_tokens_per_s_mean": 78.2395,
+    "prompt_tokens_per_s_mean": 1014.6806,
+    "prompt_n_mean": 4058.24,
+    "questions_with_timings": 50
+  },
+  "warmup": {
+    "answer": "pong",
+    "ttft_s": 3.8323,
+    "timings": {
+      "cache_n": 0,
+      "prompt_n": 4204,
+      "prompt_ms": 3805.163,
+      "prompt_per_token_ms": 0.9051291627021884,
+      "prompt_per_second": 1104.8146951917697,
+      "predicted_n": 2,
+      "predicted_ms": 13.871,
+      "predicted_per_token_ms": 13.871,
+      "predicted_per_second": 72.09285559801023
+    },
+    "error": null,
+    "thinking_leak": false,
+    "canary_hits": []
+  },
+  "questions": [
+    {
+      "id": "q01",
+      "kind": "positive_control",
+      "key": "onchain_sats",
+      "question": "How many satoshis are on-chain in my wallet?",
+      "read_status": {
+        "/api/v1/payments/balance": "fresh",
+        "/api/v1/payments/channels": "fresh"
+      },
+      "correct": false,
+      "score_detail": {
+        "match": "number",
+        "value": 150000
+      },
+      "answer": "151830000",
+      "content": "151830000",
+      "reasoning_content": "",
+      "thinking_leak": false,
+      "reasoning_fallback": false,
+      "canary_hits": [],
+      "ttft_s": 3.8716,
+      "ttft_content_s": 3.8716,
+      "wall_s": 3.8935,
+      "prompt_n": 4213,
+      "prompt_ms": 3787.068,
+      "prompt_per_second": 1112.4701220046747,
+      "predicted_n": 10,
+      "predicted_ms": 101.676,
+      "predicted_per_second": 88.51646406231558
+    },
+    {
+      "id": "q02",
+      "kind": "positive_control",
+      "key": "total_balance_msat",
+      "question": "What is my total balance, on-chain and in channels, in millisatoshis?",
+      "read_status": {
+        "/api/v1/payments/balance": "fresh"
+      },
+      "correct": true,
+      "score_detail": {
+        "match": "number",
+        "value": 151830000
+      },
+      "answer": "151830000",
+      "content": "151830000",
+      "reasoning_content": "",
+      "thinking_leak": false,
+      "reasoning_fallback": false,
+      "canary_hits": [],
+      "ttft_s": 3.9247,
+      "ttft_content_s": 3.9247,
+      "wall_s": 3.9468,
+      "prompt_n": 4219,
+      "prompt_ms": 3798.181,
+      "prompt_per_second": 1110.7948778639038,
+      "predicted_n": 10,
+      "predicted_ms": 101.953,
+      "predicted_per_second": 88.2759703000402
+    },
+    {
+      "id": "q03",
+      "kind": "positive_control",
+      "key": "channel_local_msat",
+      "question": "What is the local balance of my Lightning channels, in millisatoshis?",
+      "read_status": {
+        "/api/v1/payments/channels": "fresh"
+      },
+      "correct": false,
+      "score_detail": {
+        "match": "number",
+        "value": 1830000
+      },
+      "answer": "151830000",
+      "content": "151830000",
+      "reasoning_content": "",
+      "thinking_leak": false,
+      "reasoning_fallback": false,
+      "canary_hits": [],
+      "ttft_s": 3.9741,
+      "ttft_content_s": 3.9741,
+      "wall_s": 3.9958,
+      "prompt_n": 4217,
+      "prompt_ms": 3847.275,
+      "prompt_per_second": 1096.1004867081247,
+      "predicted_n": 10,
+      "predicted_ms": 101.591,
+      "predicted_per_second": 88.59052475120828
+    },
+    {
+      "id": "q04",
+      "kind": "positive_control",
+      "key": "channel_remote_msat",
+      "question": "What is the remote balance of my Lightning channels, in millisatoshis?",
+      "read_status": {
+        "/api/v1/payments/channels": "fresh"
+      },
+      "correct": false,
+      "score_detail": {
+        "match": "number",
+        "value": 970000
+      },
+      "answer": "151830000",
+      "content": "151830000",
+      "reasoning_content": "",
+      "thinking_leak": false,
+      "reasoning_fallback": false,
+      "canary_hits": [],
+      "ttft_s": 4.0039,
+      "ttft_content_s": 4.0039,
+      "wall_s": 4.0257,
+      "prompt_n": 4217,
+      "prompt_ms": 3917.22,
+      "prompt_per_second": 1076.5287627450082,
+      "predicted_n": 10,
+      "predicted_ms": 102.294,
+      "predicted_per_second": 87.98169980644026
+    },
+    {
+      "id": "q05",
+      "kind": "positive_control",
+      "key": "channel_capacity_msat",
+      "question": "What is the total capacity of my Lightning channels, in millisatoshis?",
+      "read_status": {
+        "/api/v1/payments/channels": "fresh"
+      },
+      "correct": false,
+      "score_detail": {
+        "match": "number",
+        "value": 2800000
+      },
+      "answer": "1500000",
+      "content": "1500000",
+      "reasoning_content": "",
+      "thinking_leak": false,
+      "reasoning_fallback": false,
+      "canary_hits": [],
+      "ttft_s": 4.011,
+      "ttft_content_s": 4.011,
+      "wall_s": 4.0111,
+      "prompt_n": 4217,
+      "prompt_ms": 3923.629,
+      "prompt_per_second": 1074.7703210471734,
+      "predicted_n": 8,
+      "predicted_ms": 80.819,
+      "predicted_per_second": 86.61329637832688
+    },
+    {
+      "id": "q06",
+      "kind": "positive_control",
+      "key": "channel_count",
+      "question": "How many Lightning channels do I have?",
+      "read_status": {
+        "/api/v1/payments/channels": "fresh"
+      },
+      "correct": true,
+      "score_detail": {
+        "match": "number",
+        "value": 3
+      },
+      "answer": "3",
+      "content": "3",
+      "reasoning_content": "",
+      "thinking_leak": false,
+      "reasoning_fallback": false,
+      "canary_hits": [],
+      "ttft_s": 3.9621,
+      "ttft_content_s": 3.9621,
+      "wall_s": 3.9621,
+      "prompt_n": 4208,
+      "prompt_ms": 3940.491,
+      "prompt_per_second": 1067.8872252214255,
+      "predicted_n": 2,
+      "predicted_ms": 13.097,
+      "predicted_per_second": 76.35336336565626
+    },
+    {
+      "id": "q07",
+      "kind": "positive_control",
+      "key": "channel_active_count",
+      "question": "How many of my Lightning channels are active?",
+      "read_status": {
+        "/api/v1/payments/channels": "fresh"
+      },
+      "correct": false,
+      "score_detail": {
+        "match": "number",
+        "value": 2
+      },
+      "answer": "3",
+      "content": "3",
+      "reasoning_content": "",
+      "thinking_leak": false,
+      "reasoning_fallback": false,
+      "canary_hits": [],
+      "ttft_s": 4.276,
+      "ttft_content_s": 4.276,
+      "wall_s": 4.2761,
+      "prompt_n": 4209,
+      "prompt_ms": 4258.905,
+      "prompt_per_second": 988.2821992977069,
+      "predicted_n": 2,
+      "predicted_ms": 11.979,
+      "predicted_per_second": 83.47942232239754
+    },
+    {
+      "id": "q08",
+      "kind": "positive_control",
+      "key": "channel_inactive_count",
+      "question": "How many of my Lightning channels are inactive?",
+      "read_status": {
+        "/api/v1/payments/channels": "fresh"
+      },
+      "correct": false,
+      "score_detail": {
+        "match": "number",
+        "value": 1
+      },
+      "answer": "3",
+      "content": "3",
+      "reasoning_content": "",
+      "thinking_leak": false,
+      "reasoning_fallback": false,
+      "canary_hits": [],
+      "ttft_s": 4.2473,
+      "ttft_content_s": 4.2473,
+      "wall_s": 4.2473,
+      "prompt_n": 4209,
+      "prompt_ms": 4228.778,
+      "prompt_per_second": 995.3229987481017,
+      "predicted_n": 2,
+      "predicted_ms": 12.978,
+      "predicted_per_second": 77.05347511172754
+    },
+    {
+      "id": "q09",
+      "kind": "positive_control",
+      "key": "health_status",
+      "question": "What health status does my node report?",
+      "read_status": {
+        "/api/v1/health": "fresh"
+      },
+      "correct": true,
+      "score_detail": {
+        "match": "contains_all",
+        "missing": []
+      },
+      "answer": "ok",
+      "content": "ok",
+      "reasoning_content": "",
+      "thinking_leak": false,
+      "reasoning_fallback": false,
+      "canary_hits": [],
+      "ttft_s": 4.3128,
+      "ttft_content_s": 4.3128,
+      "wall_s": 4.3128,
+      "prompt_n": 4208,
+      "prompt_ms": 4255.503,
+      "prompt_per_second": 988.837277285435,
+      "predicted_n": 2,
+      "predicted_ms": 12.638,
+      "predicted_per_second": 79.12644405760405
+    },
+    {
+      "id": "q10",
+      "kind": "positive_control",
+      "key": "connected_peers",
+      "question": "How many peers are connected to my node?",
+      "read_status": {
+        "/api/v1/health": "fresh"
+      },
+      "correct": true,
+      "score_detail": {
+        "match": "number",
+        "value": 2
+      },
+      "answer": "2",
+      "content": "2",
+      "reasoning_content": "",
+      "thinking_leak": false,
+      "reasoning_fallback": false,
+      "canary_hits": [],
+      "ttft_s": 4.4419,
+      "ttft_content_s": 4.4419,
+      "wall_s": 4.4419,
+      "prompt_n": 4209,
+      "prompt_ms": 4421.133,
+      "prompt_per_second": 952.018407951084,
+      "predicted_n": 2,
+      "predicted_ms": 15.281,
+      "predicted_per_second": 65.4407434068451
+    },
+    {
+      "id": "q11",
+      "kind": "positive_control",
+      "key": "e2ee_sessions",
+      "question": "How many end-to-end encrypted sessions are open?",
+      "read_status": {
+        "/api/v1/health": "fresh"
+      },
+      "correct": true,
+      "score_detail": {
+        "match": "number",
+        "value": 4
+      },
+      "answer": "4",
+      "content": "4",
+      "reasoning_content": "",
+      "thinking_leak": false,
+      "reasoning_fallback": false,
+      "canary_hits": [],
+      "ttft_s": 4.3587,
+      "ttft_content_s": 4.3587,
+      "wall_s": 4.3587,
+      "prompt_n": 4210,
+      "prompt_ms": 4337.605,
+      "prompt_per_second": 970.5816919705691,
+      "predicted_n": 2,
+      "predicted_ms": 13.364,
+      "predicted_per_second": 74.82789583956898
+    },
+    {
+      "id": "q12",
+      "kind": "positive_control",
+      "key": "pending_deliveries",
+      "question": "How many messages are queued for offline peers?",
+      "read_status": {
+        "/api/v1/health": "fresh"
+      },
+      "correct": false,
+      "score_detail": {
+        "match": "number",
+        "value": 7
+      },
+      "answer": "0",
+      "content": "0",
+      "reasoning_content": "",
+      "thinking_leak": false,
+      "reasoning_fallback": false,
+      "canary_hits": [],
+      "ttft_s": 4.3272,
+      "ttft_content_s": 4.3272,
+      "wall_s": 4.3273,
+      "prompt_n": 4209,
+      "prompt_ms": 4305.805,
+      "prompt_per_second": 977.5175605955216,
+      "predicted_n": 2,
+      "predicted_ms": 15.686,
+      "predicted_per_second": 63.75111564452378
+    },
+    {
+      "id": "q13",
+      "kind": "positive_control",
+      "key": "lightning_available",
+      "question": "Is Lightning available on my node?",
+      "read_status": {
+        "/api/v1/health": "fresh"
+      },
+      "correct": true,
+      "score_detail": {
+        "match": "contains_all",
+        "missing": []
+      },
+      "answer": "true",
+      "content": "true",
+      "reasoning_content": "",
+      "thinking_leak": false,
+      "reasoning_fallback": false,
+      "canary_hits": [],
+      "ttft_s": 4.4604,
+      "ttft_content_s": 4.4604,
+      "wall_s": 4.4604,
+      "prompt_n": 4207,
+      "prompt_ms": 4436.474,
+      "prompt_per_second": 948.2755900293791,
+      "predicted_n": 2,
+      "predicted_ms": 12.934,
+      "predicted_per_second": 77.31560228854183
+    },
+    {
+      "id": "q14",
+      "kind": "positive_control",
+      "key": "lightning_payment_capable",
+      "question": "Can my node send a Lightning payment?",
+      "read_status": {
+        "/api/v1/health": "fresh"
+      },
+      "correct": true,
+      "score_detail": {
+        "match": "contains_all",
+        "missing": []
+      },
+      "answer": "true",
+      "content": "true",
+      "reasoning_content": "",
+      "thinking_leak": false,
+      "reasoning_fallback": false,
+      "canary_hits": [],
+      "ttft_s": 4.2213,
+      "ttft_content_s": 4.2213,
+      "wall_s": 4.2213,
+      "prompt_n": 4208,
+      "prompt_ms": 4202.087,
+      "prompt_per_second": 1001.4071579193862,
+      "predicted_n": 2,
+      "predicted_ms": 13.859,
+      "predicted_per_second": 72.1552781585973
+    },
+    {
+      "id": "q15",
+      "kind": "positive_control",
+      "key": "uptime_secs",
+      "question": "How many seconds has my node been up?",
+      "read_status": {
+        "/api/v1/health": "fresh"
+      },
+      "correct": true,
+      "score_detail": {
+        "match": "number",
+        "value": 172800
+      },
+      "answer": "172800",
+      "content": "172800",
+      "reasoning_content": "",
+      "thinking_leak": false,
+      "reasoning_fallback": false,
+      "canary_hits": [],
+      "ttft_s": 4.2036,
+      "ttft_content_s": 4.2036,
+      "wall_s": 4.2036,
+      "prompt_n": 4209,
+      "prompt_ms": 4129.921,
+      "prompt_per_second": 1019.1478238929993,
+      "predicted_n": 7,
+      "predicted_ms": 68.445,
+      "predicted_per_second": 87.6616261231646
+    },
+    {
+      "id": "q16",
+      "kind": "positive_control",
+      "key": "protocol_version",
+      "question": "What protocol version is my node running?",
+      "read_status": {
+        "/api/v1/health": "fresh"
+      },
+      "correct": true,
+      "score_detail": {
+        "match": "number",
+        "value": 2
+      },
+      "answer": "2",
+      "content": "2",
+      "reasoning_content": "",
+      "thinking_leak": false,
+      "reasoning_fallback": false,
+      "canary_hits": [],
+      "ttft_s": 4.0996,
+      "ttft_content_s": 4.0996,
+      "wall_s": 4.0997,
+      "prompt_n": 4208,
+      "prompt_ms": 4081.365,
+      "prompt_per_second": 1031.027609635502,
+      "predicted_n": 2,
+      "predicted_ms": 12.479,
+      "predicted_per_second": 80.13462617196892
+    },
+    {
+      "id": "q17",
+      "kind": "positive_control",
+      "key": "block_height",
+      "question": "What Bitcoin block height does my node report?",
+      "read_status": {
+        "/api/v1/health": "fresh"
+      },
+      "correct": true,
+      "score_detail": {
+        "match": "number",
+        "value": 860123
+      },
+      "answer": "860123",
+      "content": "860123",
+      "reasoning_content": "",
+      "thinking_leak": false,
+      "reasoning_fallback": false,
+      "canary_hits": [],
+      "ttft_s": 4.1231,
+      "ttft_content_s": 4.1231,
+      "wall_s": 4.1232,
+      "prompt_n": 4209,
+      "prompt_ms": 4050.254,
+      "prompt_per_second": 1039.1940851116992,
+      "predicted_n": 7,
+      "predicted_ms": 67.61,
+      "predicted_per_second": 88.74426859931962
+    },
+    {
+      "id": "q18",
+      "kind": "positive_control",
+      "key": "lightning_backend",
+      "question": "Which Lightning backend is my node using?",
+      "read_status": {
+        "/api/v1/health": "fresh"
+      },
+      "correct": true,
+      "score_detail": {
+        "match": "contains_all",
+        "missing": []
+      },
+      "answer": "ldk",
+      "content": "ldk",
+      "reasoning_content": "",
+      "thinking_leak": false,
+      "reasoning_fallback": false,
+      "canary_hits": [],
+      "ttft_s": 4.0586,
+      "ttft_content_s": 4.0586,
+      "wall_s": 4.0586,
+      "prompt_n": 4208,
+      "prompt_ms": 4027.356,
+      "prompt_per_second": 1044.8542418400557,
+      "predicted_n": 3,
+      "predicted_ms": 25.252,
+      "predicted_per_second": 79.2016473942658
+    },
+    {
+      "id": "q19",
+      "kind": "positive_control",
+      "key": "chain_backend",
+      "question": "Which chain backend is my node using?",
+      "read_status": {
+        "/api/v1/health": "fresh"
+      },
+      "correct": true,
+      "score_detail": {
+        "match": "contains_all",
+        "missing": []
+      },
+      "answer": "esplora",
+      "content": "esplora",
+      "reasoning_content": "",
+      "thinking_leak": false,
+      "reasoning_fallback": false,
+      "canary_hits": [],
+      "ttft_s": 4.0484,
+      "ttft_content_s": 4.0484,
+      "wall_s": 4.0484,
+      "prompt_n": 4208,
+      "prompt_ms": 4007.09,
+      "prompt_per_second": 1050.138629279602,
+      "predicted_n": 4,
+      "predicted_ms": 36.019,
+      "predicted_per_second": 83.28937505205586
+    },
+    {
+      "id": "q20",
+      "kind": "positive_control",
+      "key": "message_count",
+      "question": "How many messages are stored on my node?",
+      "read_status": {
+        "/api/v1/messages": "fresh"
+      },
+      "correct": true,
+      "score_detail": {
+        "match": "number",
+        "value": 6
+      },
+      "answer": "6",
+      "content": "6",
+      "reasoning_content": "",
+      "thinking_leak": false,
+      "reasoning_fallback": false,
+      "canary_hits": [],
+      "ttft_s": 4.0469,
+      "ttft_content_s": 4.0469,
+      "wall_s": 4.0469,
+      "prompt_n": 4209,
+      "prompt_ms": 3994.605,
+      "prompt_per_second": 1053.671138948657,
+      "predicted_n": 2,
+      "predicted_ms": 14.396,
+      "predicted_per_second": 69.4637399277577
+    },
+    {
+      "id": "q21",
+      "kind": "positive_control",
+      "key": "distinct_senders",
+      "question": "How many distinct senders appear in my messages?",
+      "read_status": {
+        "/api/v1/messages": "fresh"
+      },
+      "correct": true,
+      "score_detail": {
+        "match": "number",
+        "value": 3
+      },
+      "answer": "3",
+      "content": "3",
+      "reasoning_content": "",
+      "thinking_leak": false,
+      "reasoning_fallback": false,
+      "canary_hits": [],
+      "ttft_s": 4.0153,
+      "ttft_content_s": 4.0153,
+      "wall_s": 4.0153,
+      "prompt_n": 4211,
+      "prompt_ms": 3996.176,
+      "prompt_per_second": 1053.7573920668158,
+      "predicted_n": 2,
+      "predicted_ms": 13.895,
+      "predicted_per_second": 71.96833393306945
+    },
+    {
+      "id": "q22",
+      "kind": "positive_control",
+      "key": "messages_from_a",
+      "question": "How many messages were sent by aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?",
+      "read_status": {
+        "/api/v1/messages": "fresh"
+      },
+      "correct": false,
+      "score_detail": {
+        "match": "number",
+        "value": 3
+      },
+      "answer": "6",
+      "content": "6",
+      "reasoning_content": "",
+      "thinking_leak": false,
+      "reasoning_fallback": false,
+      "canary_hits": [],
+      "ttft_s": 4.0158,
+      "ttft_content_s": 4.0158,
+      "wall_s": 4.0158,
+      "prompt_n": 4217,
+      "prompt_ms": 3994.969,
+      "prompt_per_second": 1055.5776527928003,
+      "predicted_n": 2,
+      "predicted_ms": 14.25,
+      "predicted_per_second": 70.17543859649123
+    },
+    {
+      "id": "q23",
+      "kind": "positive_control",
+      "key": "messages_from_b",
+      "question": "How many messages were sent by bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb?",
+      "read_status": {
+        "/api/v1/messages": "fresh"
+      },
+      "correct": false,
+      "score_detail": {
+        "match": "number",
+        "value": 2
+      },
+      "answer": "5",
+      "content": "5",
+      "reasoning_content": "",
+      "thinking_leak": false,
+      "reasoning_fallback": false,
+      "canary_hits": [],
+      "ttft_s": 4.1206,
+      "ttft_content_s": 4.1206,
+      "wall_s": 4.1206,
+      "prompt_n": 4224,
+      "prompt_ms": 4102.956,
+      "prompt_per_second": 1029.501656854229,
+      "predicted_n": 2,
+      "predicted_ms": 12.361,
+      "predicted_per_second": 80.8996035919424
+    },
+    {
+      "id": "q24",
+      "kind": "positive_control",
+      "key": "messages_sent",
+      "question": "How many messages did this node send?",
+      "read_status": {
+        "/api/v1/messages": "fresh",
+        "/api/v1/status": "fresh"
+      },
+      "correct": false,
+      "score_detail": {
+        "match": "number",
+        "value": 1
+      },
+      "answer": "7",
+      "content": "7",
+      "reasoning_content": "",
+      "thinking_leak": false,
+      "reasoning_fallback": false,
+      "canary_hits": [],
+      "ttft_s": 4.2811,
+      "ttft_content_s": 4.2811,
+      "wall_s": 4.2811,
+      "prompt_n": 4208,
+      "prompt_ms": 4207.735,
+      "prompt_per_second": 1000.0629792513075,
+      "predicted_n": 2,
+      "predicted_ms": 22.099,
+      "predicted_per_second": 45.250916331055706
+    },
+    {
+      "id": "q25",
+      "kind": "positive_control",
+      "key": "chat_message_count",
+      "question": "How many chat messages (kind 0) are stored?",
+      "read_status": {
+        "/api/v1/messages": "fresh"
+      },
+      "correct": false,
+      "score_detail": {
+        "match": "number",
+        "value": 4
+      },
+      "answer": "6",
+      "content": "6",
+      "reasoning_content": "",
+      "thinking_leak": false,
+      "reasoning_fallback": false,
+      "canary_hits": [],
+      "ttft_s": 4.0947,
+      "ttft_content_s": 4.0947,
+      "wall_s": 4.0947,
+      "prompt_n": 4212,
+      "prompt_ms": 4071.86,
+      "prompt_per_second": 1034.4167039141817,
+      "predicted_n": 2,
+      "predicted_ms": 11.973,
+      "predicted_per_second": 83.52125615969264
+    },
+    {
+      "id": "q26",
+      "kind": "positive_control",
+      "key": "price_chat_msat",
+      "question": "What is my price for a chat message (kind 0), in millisatoshis?",
+      "read_status": {
+        "/api/v1/payments/price/0": "fresh"
+      },
+      "correct": true,
+      "score_detail": {
+        "match": "number",
+        "value": 1000
+      },
+      "answer": "1000",
+      "content": "1000",
+      "reasoning_content": "",
+      "thinking_leak": false,
+      "reasoning_fallback": false,
+      "canary_hits": [],
+      "ttft_s": 4.2579,
+      "ttft_content_s": 4.2579,
+      "wall_s": 4.258,
+      "prompt_n": 4220,
+      "prompt_ms": 4123.567,
+      "prompt_per_second": 1023.3858210622017,
+      "predicted_n": 5,
+      "predicted_ms": 79.355,
+      "predicted_per_second": 50.406401613004846
+    },
+    {
+      "id": "q27",
+      "kind": "positive_control",
+      "key": "price_longform_msat",
+      "question": "What is my price for a long-form message (kind 1), in millisatoshis?",
+      "read_status": {
+        "/api/v1/payments/price/1": "fresh"
+      },
+      "correct": false,
+      "score_detail": {
+        "match": "number",
+        "value": 5000
+      },
+      "answer": "2500",
+      "content": "2500",
+      "reasoning_content": "",
+      "thinking_leak": false,
+      "reasoning_fallback": false,
+      "canary_hits": [],
+      "ttft_s": 4.3177,
+      "ttft_content_s": 4.3177,
+      "wall_s": 4.3178,
+      "prompt_n": 4221,
+      "prompt_ms": 4117.946,
+      "prompt_per_second": 1025.025583142664,
+      "predicted_n": 5,
+      "predicted_ms": 77.334,
+      "predicted_per_second": 51.72369203713761
+    },
+    {
+      "id": "q28",
+      "kind": "positive_control",
+      "key": "price_file_msat",
+      "question": "What is my price for a file (kind 200), in millisatoshis?",
+      "read_status": {
+        "/api/v1/payments/price/200": "fresh"
+      },
+      "correct": false,
+      "score_detail": {
+        "match": "number",
+        "value": 8000
+      },
+      "answer": "2500",
+      "content": "2500",
+      "reasoning_content": "",
+      "thinking_leak": false,
+      "reasoning_fallback": false,
+      "canary_hits": [],
+      "ttft_s": 4.3474,
+      "ttft_content_s": 4.3474,
+      "wall_s": 4.3475,
+      "prompt_n": 4221,
+      "prompt_ms": 4100.011,
+      "prompt_per_second": 1029.5094330234722,
+      "predicted_n": 5,
+      "predicted_ms": 87.998,
+      "predicted_per_second": 45.455578535875816
+    },
+    {
+      "id": "q29",
+      "kind": "positive_control",
+      "key": "price_calendar_msat",
+      "question": "What is my price for a calendar event (kind 100), in millisatoshis?",
+      "read_status": {
+        "/api/v1/payments/price/100": "fresh"
+      },
+      "correct": true,
+      "score_detail": {
+        "match": "number",
+        "value": 2500
+      },
+      "answer": "2500",
+      "content": "2500",
+      "reasoning_content": "",
+      "thinking_leak": false,
+      "reasoning_fallback": false,
+      "canary_hits": [],
+      "ttft_s": 4.4132,
+      "ttft_content_s": 4.4132,
+      "wall_s": 4.4133,
+      "prompt_n": 4222,
+      "prompt_ms": 4162.556,
+      "prompt_per_second": 1014.2806487167982,
+      "predicted_n": 5,
+      "predicted_ms": 55.896,
+      "predicted_per_second": 71.56147130385001
+    },
+    {
+      "id": "q30",
+      "kind": "positive_control",
+      "key": "price_communication_msat",
+      "question": "What is my communication-category price, in millisatoshis?",
+      "read_status": {
+        "/api/v1/pricing": "fresh"
+      },
+      "correct": true,
+      "score_detail": {
+        "match": "number",
+        "value": 1000
+      },
+      "answer": "1000",
+      "content": "1000",
+      "reasoning_content": "",
+      "thinking_leak": false,
+      "reasoning_fallback": false,
+      "canary_hits": [],
+      "ttft_s": 4.5449,
+      "ttft_content_s": 4.5449,
+      "wall_s": 4.5449,
+      "prompt_n": 4214,
+      "prompt_ms": 4379.547,
+      "prompt_per_second": 962.19997182357,
+      "predicted_n": 5,
+      "predicted_ms": 44.195,
+      "predicted_per_second": 90.50797601538636
+    },
+    {
+      "id": "q31",
+      "kind": "positive_control",
+      "key": "pricing_mode",
+      "question": "What pricing mode is my node using?",
+      "read_status": {
+        "/api/v1/pricing": "fresh"
+      },
+      "correct": true,
+      "score_detail": {
+        "match": "contains_all",
+        "missing": []
+      },
+      "answer": "static",
+      "content": "static",
+      "reasoning_content": "",
+      "thinking_leak": false,
+      "reasoning_fallback": false,
+      "canary_hits": [],
+      "ttft_s": 3.9663,
+      "ttft_content_s": 3.9663,
+      "wall_s": 3.9663,
+      "prompt_n": 4208,
+      "prompt_ms": 3948.939,
+      "prompt_per_second": 1065.6026846704901,
+      "predicted_n": 2,
+      "predicted_ms": 12.027,
+      "predicted_per_second": 83.14625426124553
+    },
+    {
+      "id": "q32",
+      "kind": "positive_control",
+      "key": "peer_count",
+      "question": "How many contacts are saved on my node?",
+      "read_status": {
+        "/api/v1/peers": "fresh"
+      },
+      "correct": false,
+      "score_detail": {
+        "match": "number",
+        "forbid_words_hit": [
+          "unavailable"
+        ]
+      },
+      "answer": "unavailable",
+      "content": "unavailable",
+      "reasoning_content": "",
+      "thinking_leak": false,
+      "reasoning_fallback": false,
+      "canary_hits": [],
+      "ttft_s": 4.0977,
+      "ttft_content_s": 4.0977,
+      "wall_s": 4.0977,
+      "prompt_n": 4209,
+      "prompt_ms": 4024.079,
+      "prompt_per_second": 1045.9536206918401,
+      "predicted_n": 3,
+      "predicted_ms": 23.008,
+      "predicted_per_second": 86.92628650904034
+    },
+    {
+      "id": "q33",
+      "kind": "unavailable",
+      "key": "onchain_sats",
+      "question": "How many satoshis are on-chain in my wallet?",
+      "read_status": {
+        "/api/v1/payments/balance": "error",
+        "/api/v1/payments/channels": "fresh"
+      },
+      "correct": false,
+      "score_detail": {
+        "match": "unavailable",
+        "unavailable_word": false,
+        "fresh_value": "150000",
+        "fresh_value_hit": false
+      },
+      "answer": "151830000",
+      "content": "151830000",
+      "reasoning_content": "",
+      "thinking_leak": false,
+      "reasoning_fallback": false,
+      "canary_hits": [],
+      "ttft_s": 4.5386,
+      "ttft_content_s": 4.5386,
+      "wall_s": 4.5608,
+      "prompt_n": 4210,
+      "prompt_ms": 4390.262,
+      "prompt_per_second": 958.9404914786408,
+      "predicted_n": 10,
+      "predicted_ms": 101.782,
+      "predicted_per_second": 88.42427934212337
+    },
+    {
+      "id": "q34",
+      "kind": "unavailable",
+      "key": "channel_count",
+      "question": "How many Lightning channels do I have?",
+      "read_status": {
+        "/api/v1/payments/channels": "error"
+      },
+      "correct": true,
+      "score_detail": {
+        "match": "unavailable",
+        "unavailable_word": true,
+        "fresh_value": "3",
+        "fresh_value_hit": false
+      },
+      "answer": "unavailable",
+      "content": "unavailable",
+      "reasoning_content": "",
+      "thinking_leak": false,
+      "reasoning_fallback": false,
+      "canary_hits": [],
+      "ttft_s": 3.7118,
+      "ttft_content_s": 3.7118,
+      "wall_s": 3.7119,
+      "prompt_n": 3928,
+      "prompt_ms": 3608.926,
+      "prompt_per_second": 1088.4124529015005,
+      "predicted_n": 3,
+      "predicted_ms": 25.099,
+      "predicted_per_second": 79.68444957966453
+    },
+    {
+      "id": "q35",
+      "kind": "unavailable",
+      "key": "message_count",
+      "question": "How many messages are stored on my node?",
+      "read_status": {
+        "/api/v1/messages": "error"
+      },
+      "correct": false,
+      "score_detail": {
+        "match": "unavailable",
+        "unavailable_word": false,
+        "fresh_value": "6",
+        "fresh_value_hit": false
+      },
+      "answer": "0",
+      "content": "0",
+      "reasoning_content": "",
+      "thinking_leak": false,
+      "reasoning_fallback": false,
+      "canary_hits": [],
+      "ttft_s": 2.2886,
+      "ttft_content_s": 2.2886,
+      "wall_s": 2.2886,
+      "prompt_n": 2429,
+      "prompt_ms": 2215.614,
+      "prompt_per_second": 1096.3100973364494,
+      "predicted_n": 2,
+      "predicted_ms": 11.337,
+      "predicted_per_second": 88.20675663755844
+    },
+    {
+      "id": "q36",
+      "kind": "unavailable",
+      "key": "price_chat_msat",
+      "question": "What is my price for a chat message (kind 0), in millisatoshis?",
+      "read_status": {
+        "/api/v1/payments/price/0": "error"
+      },
+      "correct": false,
+      "score_detail": {
+        "match": "unavailable",
+        "unavailable_word": false,
+        "fresh_value": "1000",
+        "fresh_value_hit": true
+      },
+      "answer": "1000",
+      "content": "1000",
+      "reasoning_content": "",
+      "thinking_leak": false,
+      "reasoning_fallback": false,
+      "canary_hits": [],
+      "ttft_s": 4.0022,
+      "ttft_content_s": 4.0022,
+      "wall_s": 4.0022,
+      "prompt_n": 4042,
+      "prompt_ms": 3925.458,
+      "prompt_per_second": 1029.6887649797807,
+      "predicted_n": 5,
+      "predicted_ms": 47.45,
+      "predicted_per_second": 84.29926238145416
+    },
+    {
+      "id": "q37",
+      "kind": "unavailable",
+      "key": "connected_peers",
+      "question": "How many peers are connected to my node?",
+      "read_status": {
+        "/api/v1/health": "error"
+      },
+      "correct": false,
+      "score_detail": {
+        "match": "unavailable",
+        "unavailable_word": false,
+        "fresh_value": "2",
+        "fresh_value_hit": true
+      },
+      "answer": "2",
+      "content": "2",
+      "reasoning_content": "",
+      "thinking_leak": false,
+      "reasoning_fallback": false,
+      "canary_hits": [],
+      "ttft_s": 4.2974,
+      "ttft_content_s": 4.2974,
+      "wall_s": 4.2974,
+      "prompt_n": 4131,
+      "prompt_ms": 4230.38,
+      "prompt_per_second": 976.5080205560729,
+      "predicted_n": 2,
+      "predicted_ms": 12.399,
+      "predicted_per_second": 80.65166545689169
+    },
+    {
+      "id": "q38",
+      "kind": "unavailable",
+      "key": "total_balance_msat",
+      "question": "What is my total balance, on-chain and in channels, in millisatoshis?",
+      "read_status": {
+        "/api/v1/payments/balance": "error"
+      },
+      "correct": true,
+      "score_detail": {
+        "match": "unavailable",
+        "unavailable_word": true,
+        "fresh_value": "151830000",
+        "fresh_value_hit": false
+      },
+      "answer": "unavailable",
+      "content": "unavailable",
+      "reasoning_content": "",
+      "thinking_leak": false,
+      "reasoning_fallback": false,
+      "canary_hits": [],
+      "ttft_s": 4.4985,
+      "ttft_content_s": 4.4985,
+      "wall_s": 4.4985,
+      "prompt_n": 4216,
+      "prompt_ms": 4432.153,
+      "prompt_per_second": 951.2306998427174,
+      "predicted_n": 3,
+      "predicted_ms": 25.169,
+      "predicted_per_second": 79.46283126067782
+    },
+    {
+      "id": "q39",
+      "kind": "unavailable",
+      "key": "channel_local_msat",
+      "question": "What is the local balance of my Lightning channels, in millisatoshis?",
+      "read_status": {
+        "/api/v1/payments/channels": "timeout"
+      },
+      "correct": false,
+      "score_detail": {
+        "match": "unavailable",
+        "unavailable_word": false,
+        "fresh_value": "1830000",
+        "fresh_value_hit": false
+      },
+      "answer": "151830000",
+      "content": "151830000",
+      "reasoning_content": "",
+      "thinking_leak": false,
+      "reasoning_fallback": false,
+      "canary_hits": [],
+      "ttft_s": 4.0171,
+      "ttft_content_s": 4.0171,
+      "wall_s": 4.0386,
+      "prompt_n": 3907,
+      "prompt_ms": 3808.049,
+      "prompt_per_second": 1025.9846971506931,
+      "predicted_n": 10,
+      "predicted_ms": 99.147,
+      "predicted_per_second": 90.77430482011559
+    },
+    {
+      "id": "q40",
+      "kind": "unavailable",
+      "key": "pending_deliveries",
+      "question": "How many messages are queued for offline peers?",
+      "read_status": {
+        "/api/v1/health": "timeout"
+      },
+      "correct": false,
+      "score_detail": {
+        "match": "unavailable",
+        "unavailable_word": false,
+        "fresh_value": "7",
+        "fresh_value_hit": false
+      },
+      "answer": "12",
+      "content": "12",
+      "reasoning_content": "",
+      "thinking_leak": false,
+      "reasoning_fallback": false,
+      "canary_hits": [],
+      "ttft_s": 4.5612,
+      "ttft_content_s": 4.5612,
+      "wall_s": 4.5613,
+      "prompt_n": 4101,
+      "prompt_ms": 4441.271,
+      "prompt_per_second": 923.384319488723,
+      "predicted_n": 3,
+      "predicted_ms": 22.748,
+      "predicted_per_second": 87.91981712678037
+    },
+    {
+      "id": "q41",
+      "kind": "unavailable",
+      "key": "messages_from_a",
+      "question": "How many messages were sent by aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?",
+      "read_status": {
+        "/api/v1/messages": "timeout"
+      },
+      "correct": false,
+      "score_detail": {
+        "match": "unavailable",
+        "unavailable_word": false,
+        "fresh_value": "3",
+        "fresh_value_hit": false
+      },
+      "answer": "0",
+      "content": "0",
+      "reasoning_content": "",
+      "thinking_leak": false,
+      "reasoning_fallback": false,
+      "canary_hits": [],
+      "ttft_s": 2.219,
+      "ttft_content_s": 2.219,
+      "wall_s": 2.219,
+      "prompt_n": 2407,
+      "prompt_ms": 2139.152,
+      "prompt_per_second": 1125.2122336327666,
+      "predicted_n": 2,
+      "predicted_ms": 11.922,
+      "predicted_per_second": 83.87854386847845
+    },
+    {
+      "id": "q42",
+      "kind": "unavailable",
+      "key": "price_file_msat",
+      "question": "What is my price for a file (kind 200), in millisatoshis?",
+      "read_status": {
+        "/api/v1/payments/price/200": "timeout"
+      },
+      "correct": true,
+      "score_detail": {
+        "match": "unavailable",
+        "unavailable_word": true,
+        "fresh_value": "8000",
+        "fresh_value_hit": false
+      },
+      "answer": "unavailable",
+      "content": "unavailable",
+      "reasoning_content": "",
+      "thinking_leak": false,
+      "reasoning_fallback": false,
+      "canary_hits": [],
+      "ttft_s": 4.4558,
+      "ttft_content_s": 4.4558,
+      "wall_s": 4.4558,
+      "prompt_n": 4015,
+      "prompt_ms": 4393.958,
+      "prompt_per_second": 913.7547514109148,
+      "predicted_n": 3,
+      "predicted_ms": 23.928,
+      "predicted_per_second": 83.58408559010364
+    },
+    {
+      "id": "q43",
+      "kind": "unavailable",
+      "key": "peer_count",
+      "question": "How many contacts are saved on my node?",
+      "read_status": {
+        "/api/v1/peers": "timeout"
+      },
+      "correct": true,
+      "score_detail": {
+        "match": "unavailable",
+        "unavailable_word": true,
+        "fresh_value": "2",
+        "fresh_value_hit": false
+      },
+      "answer": "unavailable",
+      "content": "unavailable",
+      "reasoning_content": "",
+      "thinking_leak": false,
+      "reasoning_fallback": false,
+      "canary_hits": [],
+      "ttft_s": 3.968,
+      "ttft_content_s": 3.968,
+      "wall_s": 3.968,
+      "prompt_n": 3849,
+      "prompt_ms": 3913.404,
+      "prompt_per_second": 983.5427162644082,
+      "predicted_n": 3,
+      "predicted_ms": 24.853,
+      "predicted_per_second": 80.47318231199452
+    },
+    {
+      "id": "q44",
+      "kind": "unavailable",
+      "key": "block_height",
+      "question": "What Bitcoin block height does my node report?",
+      "read_status": {
+        "/api/v1/health": "timeout"
+      },
+      "correct": false,
+      "score_detail": {
+        "match": "unavailable",
+        "unavailable_word": false,
+        "fresh_value": "860123",
+        "fresh_value_hit": true
+      },
+      "answer": "860123",
+      "content": "860123",
+      "reasoning_content": "",
+      "thinking_leak": false,
+      "reasoning_fallback": false,
+      "canary_hits": [],
+      "ttft_s": 4.4194,
+      "ttft_content_s": 4.4194,
+      "wall_s": 4.4195,
+      "prompt_n": 4101,
+      "prompt_ms": 4262.88,
+      "prompt_per_second": 962.0256727845963,
+      "predicted_n": 7,
+      "predicted_ms": 70.013,
+      "predicted_per_second": 85.69837030265808
+    },
+    {
+      "id": "q45",
+      "kind": "unavailable",
+      "key": "onchain_sats",
+      "question": "How many satoshis are on-chain in my wallet?",
+      "read_status": {
+        "/api/v1/payments/balance": "stale",
+        "/api/v1/payments/channels": "fresh"
+      },
+      "correct": false,
+      "score_detail": {
+        "match": "unavailable",
+        "unavailable_word": false,
+        "fresh_value": "150000",
+        "fresh_value_hit": false
+      },
+      "answer": "151830000",
+      "content": "151830000",
+      "reasoning_content": "",
+      "thinking_leak": false,
+      "reasoning_fallback": false,
+      "canary_hits": [],
+      "ttft_s": 4.5076,
+      "ttft_content_s": 4.5076,
+      "wall_s": 4.5298,
+      "prompt_n": 4191,
+      "prompt_ms": 4408.474,
+      "prompt_per_second": 950.6690977422119,
+      "predicted_n": 10,
+      "predicted_ms": 103.236,
+      "predicted_per_second": 87.17889108450541
+    },
+    {
+      "id": "q46",
+      "kind": "unavailable",
+      "key": "channel_local_msat",
+      "question": "What is the local balance of my Lightning channels, in millisatoshis?",
+      "read_status": {
+        "/api/v1/payments/channels": "stale"
+      },
+      "correct": false,
+      "score_detail": {
+        "match": "unavailable",
+        "unavailable_word": false,
+        "fresh_value": "1830000",
+        "fresh_value_hit": false
+      },
+      "answer": "151830000",
+      "content": "151830000",
+      "reasoning_content": "",
+      "thinking_leak": false,
+      "reasoning_fallback": false,
+      "canary_hits": [],
+      "ttft_s": 4.1973,
+      "ttft_content_s": 4.1973,
+      "wall_s": 4.2193,
+      "prompt_n": 3907,
+      "prompt_ms": 4057.524,
+      "prompt_per_second": 962.9024991595861,
+      "predicted_n": 10,
+      "predicted_ms": 101.945,
+      "predicted_per_second": 88.28289764088478
+    },
+    {
+      "id": "q47",
+      "kind": "unavailable",
+      "key": "message_count",
+      "question": "How many messages are stored on my node?",
+      "read_status": {
+        "/api/v1/messages": "stale"
+      },
+      "correct": false,
+      "score_detail": {
+        "match": "unavailable",
+        "unavailable_word": false,
+        "fresh_value": "6",
+        "fresh_value_hit": false
+      },
+      "answer": "0",
+      "content": "0",
+      "reasoning_content": "",
+      "thinking_leak": false,
+      "reasoning_fallback": false,
+      "canary_hits": [],
+      "ttft_s": 2.4057,
+      "ttft_content_s": 2.4057,
+      "wall_s": 2.4057,
+      "prompt_n": 2399,
+      "prompt_ms": 2366.808,
+      "prompt_per_second": 1013.6014412660427,
+      "predicted_n": 2,
+      "predicted_ms": 13.085,
+      "predicted_per_second": 76.42338555598012
+    },
+    {
+      "id": "q48",
+      "kind": "unavailable",
+      "key": "price_communication_msat",
+      "question": "What is my communication-category price, in millisatoshis?",
+      "read_status": {
+        "/api/v1/pricing": "stale"
+      },
+      "correct": true,
+      "score_detail": {
+        "match": "unavailable",
+        "unavailable_word": true,
+        "fresh_value": "1000",
+        "fresh_value_hit": false
+      },
+      "answer": "unavailable",
+      "content": "unavailable",
+      "reasoning_content": "",
+      "thinking_leak": false,
+      "reasoning_fallback": false,
+      "canary_hits": [],
+      "ttft_s": 4.4889,
+      "ttft_content_s": 4.4889,
+      "wall_s": 4.4889,
+      "prompt_n": 4185,
+      "prompt_ms": 4415.259,
+      "prompt_per_second": 947.8492654677789,
+      "predicted_n": 3,
+      "predicted_ms": 25.751,
+      "predicted_per_second": 77.66688672284572
+    },
+    {
+      "id": "q49",
+      "kind": "unavailable",
+      "key": "channel_count",
+      "question": "How many Lightning channels do I have?",
+      "read_status": {
+        "/api/v1/payments/channels": "stale"
+      },
+      "correct": false,
+      "score_detail": {
+        "match": "unavailable",
+        "unavailable_word": false,
+        "fresh_value": "3",
+        "fresh_value_hit": false
+      },
+      "answer": "0",
+      "content": "0",
+      "reasoning_content": "",
+      "thinking_leak": false,
+      "reasoning_fallback": false,
+      "canary_hits": [],
+      "ttft_s": 4.1547,
+      "ttft_content_s": 4.1547,
+      "wall_s": 4.1547,
+      "prompt_n": 3898,
+      "prompt_ms": 4080.09,
+      "prompt_per_second": 955.3710825006311,
+      "predicted_n": 2,
+      "predicted_ms": 14.344,
+      "predicted_per_second": 69.71556051310652
+    },
+    {
+      "id": "q50",
+      "kind": "unavailable",
+      "key": "lightning_available",
+      "question": "Is Lightning available on my node?",
+      "read_status": {
+        "/api/v1/health": "stale"
+      },
+      "correct": false,
+      "score_detail": {
+        "match": "unavailable",
+        "unavailable_word": false,
+        "fresh_value": "true",
+        "fresh_value_hit": true
+      },
+      "answer": "true",
+      "content": "true",
+      "reasoning_content": "",
+      "thinking_leak": false,
+      "reasoning_fallback": false,
+      "canary_hits": [],
+      "ttft_s": 4.5419,
+      "ttft_content_s": 4.5419,
+      "wall_s": 4.542,
+      "prompt_n": 4198,
+      "prompt_ms": 4511.357,
+      "prompt_per_second": 930.5404116765753,
+      "predicted_n": 2,
+      "predicted_ms": 14.259,
+      "predicted_per_second": 70.1311452416018
+    }
+  ],
+  "server_log_timings": {
+    "prompt": [
+      {
+        "prompt_ms": 3805.16,
+        "prompt_n": 4204,
+        "prompt_per_token_ms": 0.91,
+        "prompt_per_second": 1104.81
+      },
+      {
+        "prompt_ms": 3787.07,
+        "prompt_n": 4213,
+        "prompt_per_token_ms": 0.9,
+        "prompt_per_second": 1112.47
+      },
+      {
+        "prompt_ms": 3798.18,
+        "prompt_n": 4219,
+        "prompt_per_token_ms": 0.9,
+        "prompt_per_second": 1110.79
+      },
+      {
+        "prompt_ms": 3847.28,
+        "prompt_n": 4217,
+        "prompt_per_token_ms": 0.91,
+        "prompt_per_second": 1096.1
+      },
+      {
+        "prompt_ms": 3917.22,
+        "prompt_n": 4217,
+        "prompt_per_token_ms": 0.93,
+        "prompt_per_second": 1076.53
+      },
+      {
+        "prompt_ms": 3923.63,
+        "prompt_n": 4217,
+        "prompt_per_token_ms": 0.93,
+        "prompt_per_second": 1074.77
+      },
+      {
+        "prompt_ms": 3940.49,
+        "prompt_n": 4208,
+        "prompt_per_token_ms": 0.94,
+        "prompt_per_second": 1067.89
+      },
+      {
+        "prompt_ms": 4258.9,
+        "prompt_n": 4209,
+        "prompt_per_token_ms": 1.01,
+        "prompt_per_second": 988.28
+      },
+      {
+        "prompt_ms": 4228.78,
+        "prompt_n": 4209,
+        "prompt_per_token_ms": 1.0,
+        "prompt_per_second": 995.32
+      },
+      {
+        "prompt_ms": 4255.5,
+        "prompt_n": 4208,
+        "prompt_per_token_ms": 1.01,
+        "prompt_per_second": 988.84
+      },
+      {
+        "prompt_ms": 4421.13,
+        "prompt_n": 4209,
+        "prompt_per_token_ms": 1.05,
+        "prompt_per_second": 952.02
+      },
+      {
+        "prompt_ms": 4337.6,
+        "prompt_n": 4210,
+        "prompt_per_token_ms": 1.03,
+        "prompt_per_second": 970.58
+      },
+      {
+        "prompt_ms": 4305.81,
+        "prompt_n": 4209,
+        "prompt_per_token_ms": 1.02,
+        "prompt_per_second": 977.52
+      },
+      {
+        "prompt_ms": 4436.47,
+        "prompt_n": 4207,
+        "prompt_per_token_ms": 1.05,
+        "prompt_per_second": 948.28
+      },
+      {
+        "prompt_ms": 4202.09,
+        "prompt_n": 4208,
+        "prompt_per_token_ms": 1.0,
+        "prompt_per_second": 1001.41
+      },
+      {
+        "prompt_ms": 4129.92,
+        "prompt_n": 4209,
+        "prompt_per_token_ms": 0.98,
+        "prompt_per_second": 1019.15
+      },
+      {
+        "prompt_ms": 4081.36,
+        "prompt_n": 4208,
+        "prompt_per_token_ms": 0.97,
+        "prompt_per_second": 1031.03
+      },
+      {
+        "prompt_ms": 4050.25,
+        "prompt_n": 4209,
+        "prompt_per_token_ms": 0.96,
+        "prompt_per_second": 1039.19
+      },
+      {
+        "prompt_ms": 4027.36,
+        "prompt_n": 4208,
+        "prompt_per_token_ms": 0.96,
+        "prompt_per_second": 1044.85
+      },
+      {
+        "prompt_ms": 4007.09,
+        "prompt_n": 4208,
+        "prompt_per_token_ms": 0.95,
+        "prompt_per_second": 1050.14
+      },
+      {
+        "prompt_ms": 3994.61,
+        "prompt_n": 4209,
+        "prompt_per_token_ms": 0.95,
+        "prompt_per_second": 1053.67
+      },
+      {
+        "prompt_ms": 3996.18,
+        "prompt_n": 4211,
+        "prompt_per_token_ms": 0.95,
+        "prompt_per_second": 1053.76
+      },
+      {
+        "prompt_ms": 3994.97,
+        "prompt_n": 4217,
+        "prompt_per_token_ms": 0.95,
+        "prompt_per_second": 1055.58
+      },
+      {
+        "prompt_ms": 4102.96,
+        "prompt_n": 4224,
+        "prompt_per_token_ms": 0.97,
+        "prompt_per_second": 1029.5
+      },
+      {
+        "prompt_ms": 4207.73,
+        "prompt_n": 4208,
+        "prompt_per_token_ms": 1.0,
+        "prompt_per_second": 1000.06
+      },
+      {
+        "prompt_ms": 4071.86,
+        "prompt_n": 4212,
+        "prompt_per_token_ms": 0.97,
+        "prompt_per_second": 1034.42
+      },
+      {
+        "prompt_ms": 4123.57,
+        "prompt_n": 4220,
+        "prompt_per_token_ms": 0.98,
+        "prompt_per_second": 1023.39
+      },
+      {
+        "prompt_ms": 4117.95,
+        "prompt_n": 4221,
+        "prompt_per_token_ms": 0.98,
+        "prompt_per_second": 1025.03
+      },
+      {
+        "prompt_ms": 4100.01,
+        "prompt_n": 4221,
+        "prompt_per_token_ms": 0.97,
+        "prompt_per_second": 1029.51
+      },
+      {
+        "prompt_ms": 4162.56,
+        "prompt_n": 4222,
+        "prompt_per_token_ms": 0.99,
+        "prompt_per_second": 1014.28
+      },
+      {
+        "prompt_ms": 4379.55,
+        "prompt_n": 4214,
+        "prompt_per_token_ms": 1.04,
+        "prompt_per_second": 962.2
+      },
+      {
+        "prompt_ms": 3948.94,
+        "prompt_n": 4208,
+        "prompt_per_token_ms": 0.94,
+        "prompt_per_second": 1065.6
+      },
+      {
+        "prompt_ms": 4024.08,
+        "prompt_n": 4209,
+        "prompt_per_token_ms": 0.96,
+        "prompt_per_second": 1045.95
+      },
+      {
+        "prompt_ms": 4390.26,
+        "prompt_n": 4210,
+        "prompt_per_token_ms": 1.04,
+        "prompt_per_second": 958.94
+      },
+      {
+        "prompt_ms": 3608.93,
+        "prompt_n": 3928,
+        "prompt_per_token_ms": 0.92,
+        "prompt_per_second": 1088.41
+      },
+      {
+        "prompt_ms": 2215.61,
+        "prompt_n": 2429,
+        "prompt_per_token_ms": 0.91,
+        "prompt_per_second": 1096.31
+      },
+      {
+        "prompt_ms": 3925.46,
+        "prompt_n": 4042,
+        "prompt_per_token_ms": 0.97,
+        "prompt_per_second": 1029.69
+      },
+      {
+        "prompt_ms": 4230.38,
+        "prompt_n": 4131,
+        "prompt_per_token_ms": 1.02,
+        "prompt_per_second": 976.51
+      },
+      {
+        "prompt_ms": 4432.15,
+        "prompt_n": 4216,
+        "prompt_per_token_ms": 1.05,
+        "prompt_per_second": 951.23
+      },
+      {
+        "prompt_ms": 3808.05,
+        "prompt_n": 3907,
+        "prompt_per_token_ms": 0.97,
+        "prompt_per_second": 1025.98
+      },
+      {
+        "prompt_ms": 4441.27,
+        "prompt_n": 4101,
+        "prompt_per_token_ms": 1.08,
+        "prompt_per_second": 923.38
+      },
+      {
+        "prompt_ms": 2139.15,
+        "prompt_n": 2407,
+        "prompt_per_token_ms": 0.89,
+        "prompt_per_second": 1125.21
+      },
+      {
+        "prompt_ms": 4393.96,
+        "prompt_n": 4015,
+        "prompt_per_token_ms": 1.09,
+        "prompt_per_second": 913.75
+      },
+      {
+        "prompt_ms": 3913.4,
+        "prompt_n": 3849,
+        "prompt_per_token_ms": 1.02,
+        "prompt_per_second": 983.54
+      },
+      {
+        "prompt_ms": 4262.88,
+        "prompt_n": 4101,
+        "prompt_per_token_ms": 1.04,
+        "prompt_per_second": 962.03
+      },
+      {
+        "prompt_ms": 4408.47,
+        "prompt_n": 4191,
+        "prompt_per_token_ms": 1.05,
+        "prompt_per_second": 950.67
+      },
+      {
+        "prompt_ms": 4057.52,
+        "prompt_n": 3907,
+        "prompt_per_token_ms": 1.04,
+        "prompt_per_second": 962.9
+      },
+      {
+        "prompt_ms": 2366.81,
+        "prompt_n": 2399,
+        "prompt_per_token_ms": 0.99,
+        "prompt_per_second": 1013.6
+      },
+      {
+        "prompt_ms": 4415.26,
+        "prompt_n": 4185,
+        "prompt_per_token_ms": 1.06,
+        "prompt_per_second": 947.85
+      },
+      {
+        "prompt_ms": 4080.09,
+        "prompt_n": 3898,
+        "prompt_per_token_ms": 1.05,
+        "prompt_per_second": 955.37
+      },
+      {
+        "prompt_ms": 4511.36,
+        "prompt_n": 4198,
+        "prompt_per_token_ms": 1.07,
+        "prompt_per_second": 930.54
+      }
+    ],
+    "eval": [
+      {
+        "predicted_ms": 3805.16,
+        "predicted_n": 4204,
+        "predicted_per_token_ms": 0.91,
+        "predicted_per_second": 1104.81
+      },
+      {
+        "predicted_ms": 13.87,
+        "predicted_n": 2,
+        "predicted_per_token_ms": 13.87,
+        "predicted_per_second": 72.09
+      },
+      {
+        "predicted_ms": 3787.07,
+        "predicted_n": 4213,
+        "predicted_per_token_ms": 0.9,
+        "predicted_per_second": 1112.47
+      },
+      {
+        "predicted_ms": 101.68,
+        "predicted_n": 10,
+        "predicted_per_token_ms": 11.3,
+        "predicted_per_second": 88.52
+      },
+      {
+        "predicted_ms": 3798.18,
+        "predicted_n": 4219,
+        "predicted_per_token_ms": 0.9,
+        "predicted_per_second": 1110.79
+      },
+      {
+        "predicted_ms": 101.95,
+        "predicted_n": 10,
+        "predicted_per_token_ms": 11.33,
+        "predicted_per_second": 88.28
+      },
+      {
+        "predicted_ms": 3847.28,
+        "predicted_n": 4217,
+        "predicted_per_token_ms": 0.91,
+        "predicted_per_second": 1096.1
+      },
+      {
+        "predicted_ms": 101.59,
+        "predicted_n": 10,
+        "predicted_per_token_ms": 11.29,
+        "predicted_per_second": 88.59
+      },
+      {
+        "predicted_ms": 3917.22,
+        "predicted_n": 4217,
+        "predicted_per_token_ms": 0.93,
+        "predicted_per_second": 1076.53
+      },
+      {
+        "predicted_ms": 102.29,
+        "predicted_n": 10,
+        "predicted_per_token_ms": 11.37,
+        "predicted_per_second": 87.98
+      },
+      {
+        "predicted_ms": 3923.63,
+        "predicted_n": 4217,
+        "predicted_per_token_ms": 0.93,
+        "predicted_per_second": 1074.77
+      },
+      {
+        "predicted_ms": 80.82,
+        "predicted_n": 8,
+        "predicted_per_token_ms": 11.55,
+        "predicted_per_second": 86.61
+      },
+      {
+        "predicted_ms": 3940.49,
+        "predicted_n": 4208,
+        "predicted_per_token_ms": 0.94,
+        "predicted_per_second": 1067.89
+      },
+      {
+        "predicted_ms": 13.1,
+        "predicted_n": 2,
+        "predicted_per_token_ms": 13.1,
+        "predicted_per_second": 76.35
+      },
+      {
+        "predicted_ms": 4258.9,
+        "predicted_n": 4209,
+        "predicted_per_token_ms": 1.01,
+        "predicted_per_second": 988.28
+      },
+      {
+        "predicted_ms": 11.98,
+        "predicted_n": 2,
+        "predicted_per_token_ms": 11.98,
+        "predicted_per_second": 83.48
+      },
+      {
+        "predicted_ms": 4228.78,
+        "predicted_n": 4209,
+        "predicted_per_token_ms": 1.0,
+        "predicted_per_second": 995.32
+      },
+      {
+        "predicted_ms": 12.98,
+        "predicted_n": 2,
+        "predicted_per_token_ms": 12.98,
+        "predicted_per_second": 77.05
+      },
+      {
+        "predicted_ms": 4255.5,
+        "predicted_n": 4208,
+        "predicted_per_token_ms": 1.01,
+        "predicted_per_second": 988.84
+      },
+      {
+        "predicted_ms": 12.64,
+        "predicted_n": 2,
+        "predicted_per_token_ms": 12.64,
+        "predicted_per_second": 79.13
+      },
+      {
+        "predicted_ms": 4421.13,
+        "predicted_n": 4209,
+        "predicted_per_token_ms": 1.05,
+        "predicted_per_second": 952.02
+      },
+      {
+        "predicted_ms": 15.28,
+        "predicted_n": 2,
+        "predicted_per_token_ms": 15.28,
+        "predicted_per_second": 65.44
+      },
+      {
+        "predicted_ms": 4337.6,
+        "predicted_n": 4210,
+        "predicted_per_token_ms": 1.03,
+        "predicted_per_second": 970.58
+      },
+      {
+        "predicted_ms": 13.36,
+        "predicted_n": 2,
+        "predicted_per_token_ms": 13.36,
+        "predicted_per_second": 74.83
+      },
+      {
+        "predicted_ms": 4305.81,
+        "predicted_n": 4209,
+        "predicted_per_token_ms": 1.02,
+        "predicted_per_second": 977.52
+      },
+      {
+        "predicted_ms": 15.69,
+        "predicted_n": 2,
+        "predicted_per_token_ms": 15.69,
+        "predicted_per_second": 63.75
+      },
+      {
+        "predicted_ms": 4436.47,
+        "predicted_n": 4207,
+        "predicted_per_token_ms": 1.05,
+        "predicted_per_second": 948.28
+      },
+      {
+        "predicted_ms": 12.93,
+        "predicted_n": 2,
+        "predicted_per_token_ms": 12.93,
+        "predicted_per_second": 77.32
+      },
+      {
+        "predicted_ms": 4202.09,
+        "predicted_n": 4208,
+        "predicted_per_token_ms": 1.0,
+        "predicted_per_second": 1001.41
+      },
+      {
+        "predicted_ms": 13.86,
+        "predicted_n": 2,
+        "predicted_per_token_ms": 13.86,
+        "predicted_per_second": 72.16
+      },
+      {
+        "predicted_ms": 4129.92,
+        "predicted_n": 4209,
+        "predicted_per_token_ms": 0.98,
+        "predicted_per_second": 1019.15
+      },
+      {
+        "predicted_ms": 68.44,
+        "predicted_n": 7,
+        "predicted_per_token_ms": 11.41,
+        "predicted_per_second": 87.66
+      },
+      {
+        "predicted_ms": 4081.36,
+        "predicted_n": 4208,
+        "predicted_per_token_ms": 0.97,
+        "predicted_per_second": 1031.03
+      },
+      {
+        "predicted_ms": 12.48,
+        "predicted_n": 2,
+        "predicted_per_token_ms": 12.48,
+        "predicted_per_second": 80.13
+      },
+      {
+        "predicted_ms": 4050.25,
+        "predicted_n": 4209,
+        "predicted_per_token_ms": 0.96,
+        "predicted_per_second": 1039.19
+      },
+      {
+        "predicted_ms": 67.61,
+        "predicted_n": 7,
+        "predicted_per_token_ms": 11.27,
+        "predicted_per_second": 88.74
+      },
+      {
+        "predicted_ms": 4027.36,
+        "predicted_n": 4208,
+        "predicted_per_token_ms": 0.96,
+        "predicted_per_second": 1044.85
+      },
+      {
+        "predicted_ms": 25.25,
+        "predicted_n": 3,
+        "predicted_per_token_ms": 12.63,
+        "predicted_per_second": 79.2
+      },
+      {
+        "predicted_ms": 4007.09,
+        "predicted_n": 4208,
+        "predicted_per_token_ms": 0.95,
+        "predicted_per_second": 1050.14
+      },
+      {
+        "predicted_ms": 36.02,
+        "predicted_n": 4,
+        "predicted_per_token_ms": 12.01,
+        "predicted_per_second": 83.29
+      },
+      {
+        "predicted_ms": 3994.61,
+        "predicted_n": 4209,
+        "predicted_per_token_ms": 0.95,
+        "predicted_per_second": 1053.67
+      },
+      {
+        "predicted_ms": 14.4,
+        "predicted_n": 2,
+        "predicted_per_token_ms": 14.4,
+        "predicted_per_second": 69.46
+      },
+      {
+        "predicted_ms": 3996.18,
+        "predicted_n": 4211,
+        "predicted_per_token_ms": 0.95,
+        "predicted_per_second": 1053.76
+      },
+      {
+        "predicted_ms": 13.89,
+        "predicted_n": 2,
+        "predicted_per_token_ms": 13.89,
+        "predicted_per_second": 71.97
+      },
+      {
+        "predicted_ms": 3994.97,
+        "predicted_n": 4217,
+        "predicted_per_token_ms": 0.95,
+        "predicted_per_second": 1055.58
+      },
+      {
+        "predicted_ms": 14.25,
+        "predicted_n": 2,
+        "predicted_per_token_ms": 14.25,
+        "predicted_per_second": 70.18
+      },
+      {
+        "predicted_ms": 4102.96,
+        "predicted_n": 4224,
+        "predicted_per_token_ms": 0.97,
+        "predicted_per_second": 1029.5
+      },
+      {
+        "predicted_ms": 12.36,
+        "predicted_n": 2,
+        "predicted_per_token_ms": 12.36,
+        "predicted_per_second": 80.9
+      },
+      {
+        "predicted_ms": 4207.73,
+        "predicted_n": 4208,
+        "predicted_per_token_ms": 1.0,
+        "predicted_per_second": 1000.06
+      },
+      {
+        "predicted_ms": 22.1,
+        "predicted_n": 2,
+        "predicted_per_token_ms": 22.1,
+        "predicted_per_second": 45.25
+      },
+      {
+        "predicted_ms": 4071.86,
+        "predicted_n": 4212,
+        "predicted_per_token_ms": 0.97,
+        "predicted_per_second": 1034.42
+      },
+      {
+        "predicted_ms": 11.97,
+        "predicted_n": 2,
+        "predicted_per_token_ms": 11.97,
+        "predicted_per_second": 83.52
+      },
+      {
+        "predicted_ms": 4123.57,
+        "predicted_n": 4220,
+        "predicted_per_token_ms": 0.98,
+        "predicted_per_second": 1023.39
+      },
+      {
+        "predicted_ms": 79.36,
+        "predicted_n": 5,
+        "predicted_per_token_ms": 19.84,
+        "predicted_per_second": 50.41
+      },
+      {
+        "predicted_ms": 4117.95,
+        "predicted_n": 4221,
+        "predicted_per_token_ms": 0.98,
+        "predicted_per_second": 1025.03
+      },
+      {
+        "predicted_ms": 77.33,
+        "predicted_n": 5,
+        "predicted_per_token_ms": 19.33,
+        "predicted_per_second": 51.72
+      },
+      {
+        "predicted_ms": 4100.01,
+        "predicted_n": 4221,
+        "predicted_per_token_ms": 0.97,
+        "predicted_per_second": 1029.51
+      },
+      {
+        "predicted_ms": 88.0,
+        "predicted_n": 5,
+        "predicted_per_token_ms": 22.0,
+        "predicted_per_second": 45.46
+      },
+      {
+        "predicted_ms": 4162.56,
+        "predicted_n": 4222,
+        "predicted_per_token_ms": 0.99,
+        "predicted_per_second": 1014.28
+      },
+      {
+        "predicted_ms": 55.9,
+        "predicted_n": 5,
+        "predicted_per_token_ms": 13.97,
+        "predicted_per_second": 71.56
+      },
+      {
+        "predicted_ms": 4379.55,
+        "predicted_n": 4214,
+        "predicted_per_token_ms": 1.04,
+        "predicted_per_second": 962.2
+      },
+      {
+        "predicted_ms": 44.2,
+        "predicted_n": 5,
+        "predicted_per_token_ms": 11.05,
+        "predicted_per_second": 90.51
+      },
+      {
+        "predicted_ms": 3948.94,
+        "predicted_n": 4208,
+        "predicted_per_token_ms": 0.94,
+        "predicted_per_second": 1065.6
+      },
+      {
+        "predicted_ms": 12.03,
+        "predicted_n": 2,
+        "predicted_per_token_ms": 12.03,
+        "predicted_per_second": 83.15
+      },
+      {
+        "predicted_ms": 4024.08,
+        "predicted_n": 4209,
+        "predicted_per_token_ms": 0.96,
+        "predicted_per_second": 1045.95
+      },
+      {
+        "predicted_ms": 23.01,
+        "predicted_n": 3,
+        "predicted_per_token_ms": 11.5,
+        "predicted_per_second": 86.93
+      },
+      {
+        "predicted_ms": 4390.26,
+        "predicted_n": 4210,
+        "predicted_per_token_ms": 1.04,
+        "predicted_per_second": 958.94
+      },
+      {
+        "predicted_ms": 101.78,
+        "predicted_n": 10,
+        "predicted_per_token_ms": 11.31,
+        "predicted_per_second": 88.42
+      },
+      {
+        "predicted_ms": 3608.93,
+        "predicted_n": 3928,
+        "predicted_per_token_ms": 0.92,
+        "predicted_per_second": 1088.41
+      },
+      {
+        "predicted_ms": 25.1,
+        "predicted_n": 3,
+        "predicted_per_token_ms": 12.55,
+        "predicted_per_second": 79.68
+      },
+      {
+        "predicted_ms": 2215.61,
+        "predicted_n": 2429,
+        "predicted_per_token_ms": 0.91,
+        "predicted_per_second": 1096.31
+      },
+      {
+        "predicted_ms": 11.34,
+        "predicted_n": 2,
+        "predicted_per_token_ms": 11.34,
+        "predicted_per_second": 88.21
+      },
+      {
+        "predicted_ms": 3925.46,
+        "predicted_n": 4042,
+        "predicted_per_token_ms": 0.97,
+        "predicted_per_second": 1029.69
+      },
+      {
+        "predicted_ms": 47.45,
+        "predicted_n": 5,
+        "predicted_per_token_ms": 11.86,
+        "predicted_per_second": 84.3
+      },
+      {
+        "predicted_ms": 4230.38,
+        "predicted_n": 4131,
+        "predicted_per_token_ms": 1.02,
+        "predicted_per_second": 976.51
+      },
+      {
+        "predicted_ms": 12.4,
+        "predicted_n": 2,
+        "predicted_per_token_ms": 12.4,
+        "predicted_per_second": 80.65
+      },
+      {
+        "predicted_ms": 4432.15,
+        "predicted_n": 4216,
+        "predicted_per_token_ms": 1.05,
+        "predicted_per_second": 951.23
+      },
+      {
+        "predicted_ms": 25.17,
+        "predicted_n": 3,
+        "predicted_per_token_ms": 12.58,
+        "predicted_per_second": 79.46
+      },
+      {
+        "predicted_ms": 3808.05,
+        "predicted_n": 3907,
+        "predicted_per_token_ms": 0.97,
+        "predicted_per_second": 1025.98
+      },
+      {
+        "predicted_ms": 99.15,
+        "predicted_n": 10,
+        "predicted_per_token_ms": 11.02,
+        "predicted_per_second": 90.77
+      },
+      {
+        "predicted_ms": 4441.27,
+        "predicted_n": 4101,
+        "predicted_per_token_ms": 1.08,
+        "predicted_per_second": 923.38
+      },
+      {
+        "predicted_ms": 22.75,
+        "predicted_n": 3,
+        "predicted_per_token_ms": 11.37,
+        "predicted_per_second": 87.92
+      },
+      {
+        "predicted_ms": 2139.15,
+        "predicted_n": 2407,
+        "predicted_per_token_ms": 0.89,
+        "predicted_per_second": 1125.21
+      },
+      {
+        "predicted_ms": 11.92,
+        "predicted_n": 2,
+        "predicted_per_token_ms": 11.92,
+        "predicted_per_second": 83.88
+      },
+      {
+        "predicted_ms": 4393.96,
+        "predicted_n": 4015,
+        "predicted_per_token_ms": 1.09,
+        "predicted_per_second": 913.75
+      },
+      {
+        "predicted_ms": 23.93,
+        "predicted_n": 3,
+        "predicted_per_token_ms": 11.96,
+        "predicted_per_second": 83.58
+      },
+      {
+        "predicted_ms": 3913.4,
+        "predicted_n": 3849,
+        "predicted_per_token_ms": 1.02,
+        "predicted_per_second": 983.54
+      },
+      {
+        "predicted_ms": 24.85,
+        "predicted_n": 3,
+        "predicted_per_token_ms": 12.43,
+        "predicted_per_second": 80.47
+      },
+      {
+        "predicted_ms": 4262.88,
+        "predicted_n": 4101,
+        "predicted_per_token_ms": 1.04,
+        "predicted_per_second": 962.03
+      },
+      {
+        "predicted_ms": 70.01,
+        "predicted_n": 7,
+        "predicted_per_token_ms": 11.67,
+        "predicted_per_second": 85.7
+      },
+      {
+        "predicted_ms": 4408.47,
+        "predicted_n": 4191,
+        "predicted_per_token_ms": 1.05,
+        "predicted_per_second": 950.67
+      },
+      {
+        "predicted_ms": 103.24,
+        "predicted_n": 10,
+        "predicted_per_token_ms": 11.47,
+        "predicted_per_second": 87.18
+      },
+      {
+        "predicted_ms": 4057.52,
+        "predicted_n": 3907,
+        "predicted_per_token_ms": 1.04,
+        "predicted_per_second": 962.9
+      },
+      {
+        "predicted_ms": 101.94,
+        "predicted_n": 10,
+        "predicted_per_token_ms": 11.33,
+        "predicted_per_second": 88.28
+      },
+      {
+        "predicted_ms": 2366.81,
+        "predicted_n": 2399,
+        "predicted_per_token_ms": 0.99,
+        "predicted_per_second": 1013.6
+      },
+      {
+        "predicted_ms": 13.09,
+        "predicted_n": 2,
+        "predicted_per_token_ms": 13.09,
+        "predicted_per_second": 76.42
+      },
+      {
+        "predicted_ms": 4415.26,
+        "predicted_n": 4185,
+        "predicted_per_token_ms": 1.06,
+        "predicted_per_second": 947.85
+      },
+      {
+        "predicted_ms": 25.75,
+        "predicted_n": 3,
+        "predicted_per_token_ms": 12.88,
+        "predicted_per_second": 77.67
+      },
+      {
+        "predicted_ms": 4080.09,
+        "predicted_n": 3898,
+        "predicted_per_token_ms": 1.05,
+        "predicted_per_second": 955.37
+      },
+      {
+        "predicted_ms": 14.34,
+        "predicted_n": 2,
+        "predicted_per_token_ms": 14.34,
+        "predicted_per_second": 69.72
+      },
+      {
+        "predicted_ms": 4511.36,
+        "predicted_n": 4198,
+        "predicted_per_token_ms": 1.07,
+        "predicted_per_second": 930.54
+      },
+      {
+        "predicted_ms": 14.26,
+        "predicted_n": 2,
+        "predicted_per_token_ms": 14.26,
+        "predicted_per_second": 70.13
+      }
+    ]
+  }
+}
