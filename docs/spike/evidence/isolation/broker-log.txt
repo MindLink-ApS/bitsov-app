@@ -1,7 +1,10 @@
-LISTEN pid=74011 port=50150
+LISTEN pid=35131 port=57788 v6=1 egress_port=24638
 ACCEPT node-tcp
+ACCEPT node-tcp6
 ACCEPT control.sock
+ACCEPT egress
 ACCEPT llm.sock
+UDP recv
 ACCEPT broker.sock
 SIGUSR1 count=1
 ACCEPT llm.sock

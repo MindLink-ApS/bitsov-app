@@ -1,0 +1,3 @@
+baseline stop_victim_stat=T term_victim=exit=143 kill_victim=exit=137 ptrace_victim_stat=gone
+confined-assistant stop_victim_stat=S term_victim=alive:S kill_victim=alive:S ptrace_victim_stat=S
+confined-llm stop_victim_stat=S term_victim=alive:S kill_victim=alive:S ptrace_victim_stat=S

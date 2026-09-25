@@ -19,8 +19,19 @@
 //   --write ID=DIR          (rep) a protected dir holding DIR/canary.txt; all mutations must fail
 //   --mach NAME             (rep) a mach service that must not be reachable
 //   --listen PATH           try to serve a unix socket at PATH (only the LLM role may)
-//   --mode baseline|confined  baseline skips destructive signals and ptrace
+//   --listen-other PATH     a SECOND socket path; must be refused even for the LLM role
+//   --egress IP:PORT        a non-loopback TCP endpoint (the dummy broker on this host's LAN
+//                           address) — must be unreachable
+//   --victim-stop/--victim-term/--victim-kill/--victim-ptrace PID
+//                           disposable processes that receive the destructive signals and the
+//                           ptrace attach in BOTH modes, so every one has a same-operation baseline
+//   --mode baseline|confined  label only; both modes attempt the same operations
+//   --cat PATH              internal: the re-exec'd child for exec.child_inherits_sandbox
+//
+// Secrets are never printed: the bootstrap secret is reported as length + sha256, and inherited
+// descriptors are classified (hostprivate/canary/other) without echoing their contents.
 
+#include <CommonCrypto/CommonDigest.h>
 #include <arpa/inet.h>
 #include <dirent.h>
 #include <errno.h>
@@ -49,8 +60,9 @@
 extern char **environ;
 
 #define MAXN 64
-static const char *scratch, *control_path, *llm_path, *broker_ipc_path, *listen_path;
+static const char *scratch, *control_path, *llm_path, *broker_ipc_path, *listen_path, *listen_other, *egress, *self_path;
 static int node_port = 0, broker_pid = 0, confined = 0;
+static int victim_stop = 0, victim_term = 0, victim_kill = 0, victim_ptrace = 0;
 static char *reads[MAXN], *writes[MAXN], *machs[MAXN];
 static int nreads, nwrites, nmachs;
 
@@ -88,6 +100,12 @@ static void rep(const char *id, int ok, int err, const char *fmt, ...) {
     va_end(ap);
     for (char *p = detail; *p; p++) if (*p == '\n') *p = ' ';
     printf("R %s %s %s %s\n", id, ok ? "OK" : "DENIED", ok ? "0" : ename(err), detail);
+}
+
+static void sha256_hex(const void *d, size_t n, char out[65]) {
+    unsigned char h[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256(d, (CC_LONG)n, h);
+    for (int k = 0; k < CC_SHA256_DIGEST_LENGTH; k++) snprintf(out + 2 * k, 3, "%02x", h[k]);
 }
 
 // Returns bytes read into buf (>=0) or -errno.
@@ -291,14 +309,22 @@ static void test_net(void) {
         r = connect_tcp(AF_INET, "127.0.0.1", node_port, 2000, buf, sizeof buf);
         rep("net.node_tcp_127.0.0.1", r >= 0, -r, "port %d reply=%s", node_port, r > 0 ? buf : "");
         r = connect_tcp(AF_INET6, "::1", node_port, 2000, buf, sizeof buf);
-        rep("net.node_tcp_::1", r >= 0, -r, "port %d (listener is v4 only; informational)", node_port);
+        rep("net.node_tcp_::1", r >= 0, -r, "port %d reply=%s", node_port, r > 0 ? buf : "");
     }
     if (control_path) {
         r = connect_unix(control_path, buf, sizeof buf);
         rep("net.control_sock", r >= 0, -r, "%s reply=%s", control_path, r > 0 ? buf : "");
     }
-    r = connect_tcp(AF_INET, "192.0.2.1", 443, 1500, buf, sizeof buf);  // TEST-NET-1, never routed
-    rep("net.egress_tcp_testnet", r >= 0, -r, "192.0.2.1:443 (EPERM = sandbox; timeout/unreach = network)");
+    if (egress) {  // non-loopback remote address (this host's own LAN IPv4, dummy broker listening)
+        char host[64];
+        snprintf(host, sizeof host, "%s", egress);
+        char *colon = strrchr(host, ':');
+        if (colon) {
+            *colon = 0;
+            r = connect_tcp(AF_INET, host, atoi(colon + 1), 2000, buf, sizeof buf);
+            rep("net.egress_tcp_nonloopback", r > 0 && strstr(buf, "pong"), r < 0 ? -r : EIO, "%s:%s reply=%s", host, colon + 1, r > 0 ? buf : "");
+        }
+    }
     {
         int fd = socket(AF_INET, SOCK_DGRAM, 0);
         struct sockaddr_in a = {0};
@@ -333,12 +359,23 @@ static void test_net(void) {
         if (fd >= 0) close(fd);
         if (r == 0) unlink(listen_path);
     }
+    if (listen_other) {  // a second socket: the LLM role serves exactly one path
+        int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        struct sockaddr_un a = {0};
+        a.sun_family = AF_UNIX;
+        strncpy(a.sun_path, listen_other, sizeof a.sun_path - 1);
+        r = (fd >= 0 && bind(fd, (struct sockaddr *)&a, sizeof a) == 0 && listen(fd, 1) == 0) ? 0 : -1;
+        rep("net.listen_unix_other", r == 0, errno, "bind+listen %s", listen_other);
+        if (fd >= 0) close(fd);
+        if (r == 0) unlink(listen_other);
+    }
     for (int i = 0; i < nmachs; i++) {
         mach_port_t port = MACH_PORT_NULL;
         kern_return_t kr = bootstrap_look_up(bootstrap_port, machs[i], &port);
         char tid[160];
         snprintf(tid, sizeof tid, "mach.%s", machs[i]);
-        printf("R %s %s %s kr=%d (%s)\n", tid, kr == KERN_SUCCESS ? "OK" : "DENIED", kr == KERN_SUCCESS ? "0" : "BOOTSTRAP_ERR", kr, bootstrap_strerror(kr));
+        // KR1100 = BOOTSTRAP_NOT_PRIVILEGED (sandbox); KR1102 = BOOTSTRAP_UNKNOWN_SERVICE (absent).
+        printf("R %s %s KR%d (%s)\n", tid, kr == KERN_SUCCESS ? "OK" : "DENIED", kr, bootstrap_strerror(kr));
         if (port != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), port);
     }
 }
@@ -348,12 +385,12 @@ static void test_proc(void) {
     if (!broker_pid) return;
     mach_port_t task = MACH_PORT_NULL;
     kern_return_t kr = task_for_pid(mach_task_self(), broker_pid, &task);
-    printf("R proc.task_for_pid %s %s kr=%d (%s)\n", kr == KERN_SUCCESS ? "OK" : "DENIED", kr == KERN_SUCCESS ? "0" : "KERN_FAILURE", kr, mach_error_string(kr));
+    printf("R proc.task_for_pid %s KR%d (%s)\n", kr == KERN_SUCCESS ? "OK" : "DENIED", kr, mach_error_string(kr));
     if (task != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), task);
 
     mach_port_t tn = MACH_PORT_NULL;
     kr = task_name_for_pid(mach_task_self(), broker_pid, &tn);
-    printf("R proc.task_name_for_pid %s %s kr=%d (informational)\n", kr == KERN_SUCCESS ? "OK" : "DENIED", kr == KERN_SUCCESS ? "0" : "KERN_FAILURE", kr);
+    printf("R proc.task_name_for_pid %s KR%d (%s)\n", kr == KERN_SUCCESS ? "OK" : "DENIED", kr, mach_error_string(kr));
     if (tn != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), tn);
 
     struct proc_bsdinfo bi;
@@ -377,22 +414,36 @@ static void test_proc(void) {
         int found = sr == 0 && len > 0 && kp.kp_proc.p_pid == broker_pid;
         rep("proc.sysctl_kern_proc_pid", found, sr == 0 ? ESRCH : errno, "sysctl KERN_PROC_PID %d len=%zu comm=%s", broker_pid, len, found ? kp.kp_proc.p_comm : "");
     }
+    // argv/environment of another process (what `ps -E` uses): kern.procargs / kern.procargs2.
+    {
+        static const struct { const char *id; int op; } pa[] = {
+            {"proc.sysctl_kern_procargs2", KERN_PROCARGS2}, {"proc.sysctl_kern_procargs", KERN_PROCARGS}};
+        for (int k = 0; k < 2; k++) {
+            int mib[3] = {CTL_KERN, pa[k].op, broker_pid};
+            static char args[65536];
+            size_t len = sizeof args;
+            int sr = sysctl(mib, 3, args, &len, NULL, 0);
+            rep(pa[k].id, sr == 0 && len > 0, sr == 0 ? ENOENT : errno, "sysctl {kern,%d,%d} len=%zu", pa[k].op, broker_pid, sr == 0 ? len : 0);
+        }
+    }
 
     int r = kill(broker_pid, 0);
     rep("sig.kill0", r == 0, errno, "kill(%d, 0)", broker_pid);
     r = kill(broker_pid, SIGUSR1);
     rep("sig.SIGUSR1", r == 0, errno, "kill(%d, SIGUSR1)", broker_pid);
-    if (confined) {
-        r = kill(broker_pid, SIGSTOP);
-        rep("sig.SIGSTOP", r == 0, errno, "kill(%d, SIGSTOP)", broker_pid);
-        if (r == 0) kill(broker_pid, SIGCONT);
-        r = kill(broker_pid, SIGTERM);
-        rep("sig.SIGTERM", r == 0, errno, "kill(%d, SIGTERM)", broker_pid);
-        r = kill(broker_pid, SIGKILL);
-        rep("sig.SIGKILL", r == 0, errno, "kill(%d, SIGKILL)", broker_pid);
-        r = ptrace(PT_ATTACHEXC, broker_pid, 0, 0);
-        rep("proc.ptrace_attach", r == 0, errno, "ptrace(PT_ATTACHEXC, %d)", broker_pid);
-        if (r == 0) ptrace(PT_DETACH, broker_pid, (caddr_t)1, 0);
+}
+
+// Destructive signals and ptrace go to disposable victims, in BOTH modes, so each has a
+// same-operation baseline. The runner checks the victims' fate independently (ps / wait status).
+static void test_victims(void) {
+    int r;
+    if (victim_stop) { r = kill(victim_stop, SIGSTOP); rep("sig.SIGSTOP", r == 0, errno, "kill(victim %d, SIGSTOP)", victim_stop); }
+    if (victim_term) { r = kill(victim_term, SIGTERM); rep("sig.SIGTERM", r == 0, errno, "kill(victim %d, SIGTERM)", victim_term); }
+    if (victim_kill) { r = kill(victim_kill, SIGKILL); rep("sig.SIGKILL", r == 0, errno, "kill(victim %d, SIGKILL)", victim_kill); }
+    if (victim_ptrace) {
+        r = ptrace(PT_ATTACHEXC, victim_ptrace, 0, 0);
+        rep("proc.ptrace_attach", r == 0, errno, "ptrace(PT_ATTACHEXC, victim %d)", victim_ptrace);
+        if (r == 0) ptrace(PT_DETACH, victim_ptrace, (caddr_t)1, 0);
     }
 }
 
@@ -413,61 +464,166 @@ static void test_env(void) {
         for (int b = 0; bad[b]; b++) if (strstr(up, bad[b])) hits++;
         if (eq && strstr(eq, "canary-token")) hits++;
     }
+    // Names only (values are never printed). The runner requires the exact launcher set.
     printf("R env.no_sensitive_vars %s %s names=[%s] sensitive_hits=%d\n", hits ? "FOUND" : "CLEAN", hits ? "LEAK" : "0", names, hits);
+}
 
-    char fds[1024] = "";
-    int count = 0;
-    for (int fd = 0; fd < 4096; fd++) {
-        if (fcntl(fd, F_GETFD) < 0) continue;
-        struct stat st;
-        const char *t = "?";
-        if (fstat(fd, &st) == 0) {
-            if (S_ISFIFO(st.st_mode)) t = "pipe";
-            else if (S_ISSOCK(st.st_mode)) t = "socket";
-            else if (S_ISREG(st.st_mode)) t = "file";
-            else if (S_ISCHR(st.st_mode)) t = "chr";
-            else if (S_ISDIR(st.st_mode)) t = "dir";
+// Classifies what an inherited descriptor would leak, without printing it.
+static const char *fd_content_class(int fd, int is_pipe) {
+    char b[64] = {0};
+    ssize_t n;
+    if (is_pipe) {
+        int fl = fcntl(fd, F_GETFL);
+        if (fl >= 0) fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+        n = read(fd, b, sizeof b - 1);
+    } else n = pread(fd, b, sizeof b - 1, 0);
+    static char e[32];
+    if (n < 0) { snprintf(e, sizeof e, "unreadable:%s", ename(errno)); return e; }
+    if (n == 0) return "empty";
+    if (!strncmp(b, "J0-HOSTPRIVATE-", 15)) return "hostprivate";
+    if (!strncmp(b, "CANARY-", 7)) return "canary";
+    return "other";
+}
+
+// Every open descriptor, from two independent sources, neither bounded by RLIMIT_NOFILE:
+//   fd.inventory — the kernel's descriptor table, proc_pidinfo(self, PROC_PIDLISTFDS)
+//   fd.scan      — fcntl(F_GETFD) on every number below kern.maxfilesperproc
+// Every descriptor above 3 is read (pipes) or pread (files) and its content classified.
+static void test_fds(void) {
+    char list[4096] = "";
+    int count = 0, ok = 0;
+    int sz = proc_pidinfo(getpid(), PROC_PIDLISTFDS, 0, NULL, 0);
+    struct proc_fdinfo *fdi = sz > 0 ? malloc((size_t)sz + 64 * PROC_PIDLISTFD_SIZE) : NULL;
+    int n = fdi ? proc_pidinfo(getpid(), PROC_PIDLISTFDS, 0, fdi, sz + 64 * (int)PROC_PIDLISTFD_SIZE) : -1;
+    int listerr = errno;
+    int highfds[256], nhigh = 0, hightype[256];
+    if (n >= 0) {
+        ok = 1;
+        for (int k = 0; k < n / (int)PROC_PIDLISTFD_SIZE; k++) {
+            int fd = fdi[k].proc_fd;
+            const char *t = "?";
+            switch (fdi[k].proc_fdtype) {
+            case PROX_FDTYPE_VNODE: t = "vnode"; break;
+            case PROX_FDTYPE_SOCKET: t = "socket"; break;
+            case PROX_FDTYPE_PIPE: t = "pipe"; break;
+            case PROX_FDTYPE_KQUEUE: t = "kqueue"; break;
+            case PROX_FDTYPE_PSHM: t = "pshm"; break;
+            case PROX_FDTYPE_PSEM: t = "psem"; break;
+            }
+            char one[64];
+            snprintf(one, sizeof one, "%d:%s ", fd, t);
+            strlcat(list, one, sizeof list);
+            count++;
+            if (fd > 3 && nhigh < 256) { hightype[nhigh] = fdi[k].proc_fdtype; highfds[nhigh++] = fd; }
         }
-        char pathb[MAXPATHLEN] = "";
-        if (fcntl(fd, F_GETPATH, pathb) != 0) pathb[0] = 0;
-        char one[256];
-        snprintf(one, sizeof one, "%d:%s%s%s ", fd, t, pathb[0] ? ":" : "", pathb);
-        strncat(fds, one, sizeof fds - strlen(fds) - 1);
-        count++;
     }
-    printf("R fd.inventory INFO %d open=[%s]\n", count, fds);
+    free(fdi);
+    if (ok) printf("R fd.inventory INFO %d open=[%s]\n", count, list);
+    else printf("R fd.inventory ERROR %s proc_pidinfo(PROC_PIDLISTFDS) failed\n", ename(listerr));
 
+    int maxf = 0;
+    size_t ml = sizeof maxf;
+    if (sysctlbyname("kern.maxfilesperproc", &maxf, &ml, NULL, 0) != 0 || maxf < 65536) maxf = 1 << 18;
+    char scan[4096] = "";
+    int scount = 0;
+    for (int fd = 0; fd < maxf; fd++) {
+        if (fcntl(fd, F_GETFD) < 0) continue;
+        char one[32];
+        snprintf(one, sizeof one, "%d ", fd);
+        strlcat(scan, one, sizeof scan);
+        scount++;
+    }
+    printf("R fd.scan INFO %d open=[%s] limit=%d\n", scount, scan, maxf);
+
+    for (int k = 0; k < nhigh; k++) {
+        char id[64];
+        snprintf(id, sizeof id, "fd.content.%d", highfds[k]);
+        const char *c = hightype[k] == PROX_FDTYPE_SOCKET ? "socket(not read)" : fd_content_class(highfds[k], hightype[k] == PROX_FDTYPE_PIPE);
+        printf("R %s INFO %s\n", id, c);
+    }
+}
+
+static void test_bootstrap(void) {
     char b[128] = {0};
     ssize_t n = read(3, b, sizeof b - 1);
-    rep("pos.bootstrap_pipe_fd3", n > 0 && !strncmp(b, "J0-BOOTSTRAP-", 13), errno, "read %zd bytes: %.18s…", n, b);
+    int e = errno;
+    char h[65] = "";
+    if (n > 0) sha256_hex(b, (size_t)n, h);
+    int ok = n > 0 && !strncmp(b, "J0-BOOTSTRAP-", 13);
+    memset_s(b, sizeof b, 0, sizeof b);
+    rep("pos.bootstrap_pipe_fd3", ok, e, "read %zd bytes sha256=%s", n, n > 0 ? h : "-");
 }
 
 // ---------- exec inheritance ----------
-static void test_exec_inherits(void) {
-    if (!nreads) return;
-    char *id, *path;
-    split(reads[0], &id, &path);
+// Runs argv in a child with stdout+stderr captured. Returns posix_spawn's error (0 = spawned).
+static int spawn_capture(char *const argv[], char *out, size_t ol, int *status) {
     int p[2];
-    if (pipe(p) != 0) return;
+    if (pipe(p) != 0) return errno;
     posix_spawn_file_actions_t fa;
     posix_spawn_file_actions_init(&fa);
     posix_spawn_file_actions_adddup2(&fa, p[1], 1);
     posix_spawn_file_actions_adddup2(&fa, p[1], 2);
     posix_spawn_file_actions_addclose(&fa, p[0]);
-    char *args[] = {"/bin/cat", path, NULL};
     pid_t pid;
-    int r = posix_spawn(&pid, "/bin/cat", &fa, NULL, args, environ);
+    int r = posix_spawn(&pid, argv[0], &fa, NULL, argv, environ);
+    posix_spawn_file_actions_destroy(&fa);
     close(p[1]);
-    char out[256] = {0};
-    ssize_t n = 0;
-    if (r == 0) { n = read(p[0], out, sizeof out - 1); int st; waitpid(pid, &st, 0); r = WIFEXITED(st) ? WEXITSTATUS(st) : 99; }
+    out[0] = 0;
+    *status = -1;
+    if (r == 0) {
+        size_t got = 0;
+        ssize_t n;
+        while (got < ol - 1 && (n = read(p[0], out + got, ol - 1 - got)) > 0) got += (size_t)n;
+        out[got] = 0;
+        int st;
+        waitpid(pid, &st, 0);
+        *status = WIFEXITED(st) ? WEXITSTATUS(st) : 128 + WTERMSIG(st);
+    }
     close(p[0]);
-    int leaked = strstr(out, "CANARY") != NULL;
-    rep("exec.child_inherits_sandbox", leaked, leaked ? 0 : EPERM, "/bin/cat %s exit=%d out=%.60s", path, r, n > 0 ? out : "");
+    return r;
+}
+
+// A descendant stays confined: the probe re-execs ITSELF (allowed: EXEC_DIR) in --cat mode and
+// the grandchild tries to read the node-data canary. It reports "CAT-ERR <errno>" or "CAT-OK".
+static int cat_mode(const char *path) {
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) { printf("CAT-ERR %s\n", ename(errno)); return 1; }
+    char b[64] = {0};
+    ssize_t n = read(fd, b, sizeof b - 1);
+    close(fd);
+    printf("CAT-OK %s\n", n > 0 && !strncmp(b, "CANARY-", 7) ? "canary" : "other");
+    return 0;
+}
+
+static void test_exec(void) {
+    char out[256];
+    int st, r;
+    if (nreads && self_path) {
+        char *id, *path;
+        split(reads[0], &id, &path);
+        char *a[] = {(char *)self_path, "--cat", path, NULL};
+        r = spawn_capture(a, out, sizeof out, &st);
+        int leaked = r == 0 && strstr(out, "CAT-OK canary") != NULL;
+        char e[32] = "E?";
+        char *ce = strstr(out, "CAT-ERR ");
+        if (r != 0) snprintf(e, sizeof e, "%s", ename(r));
+        else if (ce) sscanf(ce + 8, "%31s", e);
+        printf("R exec.child_inherits_sandbox %s %s spawn=%s exit=%d grandchild read %s\n",
+               leaked ? "OK" : "DENIED", leaked ? "0" : e, ename(r), st, path);
+    }
+    // System binaries (a shell, coreutils) are not executable in the shipping profile.
+    char *sh[] = {"/bin/sh", "-c", "exit 0", NULL};
+    r = spawn_capture(sh, out, sizeof out, &st);
+    rep("exec.system_shell", r == 0 && st == 0, r ? r : EIO, "posix_spawn /bin/sh exit=%d", st);
+    char *cat[] = {"/bin/cat", "/dev/null", NULL};
+    r = spawn_capture(cat, out, sizeof out, &st);
+    rep("exec.system_bin_cat", r == 0 && st == 0, r ? r : EIO, "posix_spawn /bin/cat exit=%d", st);
 }
 
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IOLBF, 0);
+    if (argc == 3 && !strcmp(argv[1], "--cat")) return cat_mode(argv[2]);
+    if (argv[0][0] == '/') self_path = argv[0];
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
         const char *v = i + 1 < argc ? argv[i + 1] : NULL;
@@ -479,6 +635,12 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--broker-ipc")) broker_ipc_path = v;
         else if (!strcmp(a, "--broker-pid")) broker_pid = atoi(v);
         else if (!strcmp(a, "--listen")) listen_path = v;
+        else if (!strcmp(a, "--listen-other")) listen_other = v;
+        else if (!strcmp(a, "--egress")) egress = v;
+        else if (!strcmp(a, "--victim-stop")) victim_stop = atoi(v);
+        else if (!strcmp(a, "--victim-term")) victim_term = atoi(v);
+        else if (!strcmp(a, "--victim-kill")) victim_kill = atoi(v);
+        else if (!strcmp(a, "--victim-ptrace")) victim_ptrace = atoi(v);
         else if (!strcmp(a, "--read") && nreads < MAXN) reads[nreads++] = strdup(v);
         else if (!strcmp(a, "--write") && nwrites < MAXN) writes[nwrites++] = strdup(v);
         else if (!strcmp(a, "--mach") && nmachs < MAXN) machs[nmachs++] = strdup(v);
@@ -488,11 +650,14 @@ int main(int argc, char **argv) {
     }
     if (node_port == 3141) { fprintf(stderr, "refusing port 3141\n"); return 2; }
     printf("# j0probe pid=%d mode=%s\n", getpid(), confined ? "confined" : "baseline");
+    test_fds();  // first: before the probe opens anything itself
     test_env();
+    test_bootstrap();
     test_reads();
-    test_exec_inherits();
+    test_exec();
     test_net();
     test_proc();
+    test_victims();
     for (int i = 0; i < nwrites; i++) {
         char *id, *dir;
         split(writes[i], &id, &dir);

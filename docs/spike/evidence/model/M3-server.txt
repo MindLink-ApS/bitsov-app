@@ -1,19 +1,19 @@
-0.00.000.067 I srv  llama_server: initializing ...
-0.03.379.900 I cmn  common_param: common_params_print_info: verbosity = 3 (adjust with the `-lv N` CLI arg)
-0.03.379.972 I srv  init_listene: The UI is disabled
-0.03.379.973 I srv  init_listene: Use --ui/--no-ui (or deprecated --webui/--no-webui) to enable/disable
-0.03.380.005 W srv  llama_server: security: no API key is set and CORS allows all origins (see https://github.com/ggml-org/llama.cpp/pull/25655)
-0.03.381.716 I srv    load_model: loading model '/Users/rasmust.larsen/Desktop/seat-drafts/models/Qwen3-4B-GGUF/Qwen3-4B-Q4_K_M.gguf'
-0.03.567.845 W load: control-looking token: 128247 '</s>' was not control-type; this is probably a bug in the model. its type will be overridden
-0.03.742.151 I cmn          init: llama threadpool init, n_threads = 10
-0.03.908.776 I srv    load_model: initializing, n_slots = 4, n_ctx_slot = 4096, kv_unified = 'true'
-0.03.913.205 I srv  llama_server: model loaded
-0.03.913.208 I srv  llama_server: listening on unix:///private/tmp/j0-canary-model-2cRw/ipc/llm/llm.sock
-0.04.561.158 I slot get_availabl: id  3 | task -1 | selected slot by LRU, t_last = -1
-0.04.561.169 I slot launch_slot_: id  3 | task 0 | processing task, is_child = 0
-0.04.943.868 I slot print_timing: id  3 | task 0 | prompt eval time =      97.45 ms /     7 tokens (   13.92 ms per token,    71.83 tokens per second)
-0.04.943.871 I slot print_timing: id  3 | task 0 |        eval time =     285.23 ms /    32 tokens (    9.20 ms per token,   108.68 tokens per second)
-0.04.943.872 I slot print_timing: id  3 | task 0 |       total time =     382.69 ms /    39 tokens
-0.04.943.872 I slot print_timing: id  3 | task 0 |    graphs reused =         31
-0.04.943.884 I slot      release: id  3 | task 0 | stop processing: n_tokens = 38, truncated = 0
-0.04.954.548 I srv    operator(): operator(): cleaning up before exit...
+0.00.000.150 I srv  llama_server: initializing ...
+0.05.172.348 I cmn  common_param: common_params_print_info: verbosity = 3 (adjust with the `-lv N` CLI arg)
+0.05.172.463 I srv  init_listene: The UI is disabled
+0.05.172.463 I srv  init_listene: Use --ui/--no-ui (or deprecated --webui/--no-webui) to enable/disable
+0.05.172.499 W srv  llama_server: security: no API key is set and CORS allows all origins (see https://github.com/ggml-org/llama.cpp/pull/25655)
+0.05.175.138 I srv    load_model: loading model '~/Desktop/seat-drafts/models/Qwen3-4B-GGUF/Qwen3-4B-Q4_K_M.gguf'
+0.05.609.057 W load: control-looking token: 128247 '</s>' was not control-type; this is probably a bug in the model. its type will be overridden
+0.05.895.328 I cmn          init: llama threadpool init, n_threads = 10
+0.06.341.343 I srv    load_model: initializing, n_slots = 4, n_ctx_slot = 4096, kv_unified = 'true'
+0.06.352.041 I srv  llama_server: model loaded
+0.06.352.050 I srv  llama_server: listening on unix:///private/tmp/j0-canary-model-XO8HGYsa/ipc/llm/llm.sock
+0.06.816.983 I slot get_availabl: id  3 | task -1 | selected slot by LRU, t_last = -1
+0.06.817.007 I slot launch_slot_: id  3 | task 0 | processing task, is_child = 0
+0.09.836.159 I slot print_timing: id  3 | task 0 | prompt eval time =     267.56 ms /     7 tokens (   38.22 ms per token,    26.16 tokens per second)
+0.09.836.167 I slot print_timing: id  3 | task 0 |        eval time =    2751.56 ms /    32 tokens (   88.76 ms per token,    11.27 tokens per second)
+0.09.836.168 I slot print_timing: id  3 | task 0 |       total time =    3019.12 ms /    39 tokens
+0.09.836.169 I slot print_timing: id  3 | task 0 |    graphs reused =         31
+0.09.836.190 I slot      release: id  3 | task 0 | stop processing: n_tokens = 38, truncated = 0
+0.09.892.174 I srv    operator(): operator(): cleaning up before exit...
