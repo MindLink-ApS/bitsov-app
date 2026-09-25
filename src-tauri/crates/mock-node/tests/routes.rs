@@ -391,6 +391,36 @@ fn messages_follow_the_rc7_list_rules() {
     let body = common::body_of(faulted.serve(&format!("{}?peer=zz", paths::MESSAGES)));
     assert_eq!(body["code"], 500);
     assert_eq!(body["error"], mock_node::ERROR_BODY_01);
+
+    let sent = node
+        .read(&format!("{}?sent=1", paths::MESSAGES))
+        .expect("sent");
+    let sent = sent.as_array().expect("array");
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0]["sender"], NODE_ID);
+    assert_eq!(sent[0]["recipient"], SENDER_A);
+    assert_eq!(sent[0]["direction"], "outgoing");
+    assert_eq!(sent[0]["kind"], 0);
+    assert_eq!(sent[0]["outbound_note"], mock_node::SENT_NOTE_01);
+    assert!(sent[0]["plaintext"].as_str().is_some());
+    assert!(incoming
+        .iter()
+        .all(|msg| msg.get("outbound_note").is_none()));
+    let to_a = node
+        .read(&format!("{}?sent=1&peer={SENDER_A}", paths::MESSAGES))
+        .expect("sent to a");
+    assert_eq!(to_a.as_array().expect("array").len(), 1);
+    let to_b = node
+        .read(&format!("{}?sent=1&peer={SENDER_B}", paths::MESSAGES))
+        .expect("sent to b");
+    assert_eq!(to_b.as_array().expect("array").len(), 0);
+    assert_eq!(
+        node.answer(AnswerKey::MessagesSent),
+        Answer::Value("1".into())
+    );
+    let invalid = common::body_of(node.serve(&format!("{}?sent=0", paths::MESSAGES)));
+    assert_eq!(invalid["code"], 400);
+    assert_eq!(invalid["error"], "invalid sent");
 }
 
 #[test]

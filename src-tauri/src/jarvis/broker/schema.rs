@@ -267,10 +267,15 @@ pub struct SenderCount {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MessageMetadata {
-    /// Messages returned by this page, not a mailbox total.
+    /// Messages returned by the incoming page, not a mailbox total.
     pub returned_count: Amount<u64>,
     pub senders: Vec<SenderCount>,
     pub withheld_senders: Amount<u64>,
+    /// Messages this node sent (`GET /messages?sent=1`). Not folded into
+    /// [`MessageMetadata::senders`], which stays the incoming page.
+    pub sent_count: Amount<u64>,
+    /// Kind 0 messages on the incoming page plus sent mail.
+    pub chat_count: Amount<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

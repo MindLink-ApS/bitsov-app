@@ -370,7 +370,6 @@ struct MessageWire {
     sender: String,
     #[allow(dead_code)]
     id: String,
-    #[allow(dead_code)]
     kind: u16,
     #[allow(dead_code)]
     recipient: String,
@@ -395,15 +394,19 @@ pub(super) fn messages(
     limit: u32,
     log: &mut Vec<ReadLog>,
 ) -> Report<MessageMetadata> {
-    let listed = fetch::<Vec<MessageWire>>(node, ReadRoute::Messages { limit }, log);
-    project(listed, project_messages)
+    let incoming = fetch::<Vec<MessageWire>>(node, ReadRoute::Messages { limit }, log);
+    let sent = fetch::<Vec<MessageWire>>(node, ReadRoute::SentMessages, log);
+    match (incoming, sent) {
+        (Ok(incoming), Ok(sent)) => project_messages(incoming, sent),
+        (Err(reason), _) | (_, Err(reason)) => Report::Unavailable { reason },
+    }
 }
 
-fn project_messages(list: Vec<MessageWire>) -> Report<MessageMetadata> {
-    let returned = list.len() as u64;
+fn project_messages(incoming: Vec<MessageWire>, sent: Vec<MessageWire>) -> Report<MessageMetadata> {
+    let returned = incoming.len() as u64;
     let mut counts: BTreeMap<String, u64> = BTreeMap::new();
     let mut withheld = 0u64;
-    for message in list {
+    for message in &incoming {
         match checked_sender(&message.sender) {
             Some(sender) => *counts.entry(sender).or_default() += 1,
             None => withheld += 1,
@@ -416,13 +419,27 @@ fn project_messages(list: Vec<MessageWire>) -> Report<MessageMetadata> {
             count: available(count, Unit::Count, SourceField::Sender),
         })
         .collect();
+    let chat_count = match kind_count(&incoming, 0).checked_add(kind_count(&sent, 0)) {
+        Some(count) => available(count, Unit::Count, SourceField::Messages),
+        None => unavailable(
+            Unit::Count,
+            SourceField::Messages,
+            UnavailableReason::Overflow,
+        ),
+    };
     Report::Ready {
         value: MessageMetadata {
             returned_count: available(returned, Unit::Count, SourceField::Messages),
             senders,
             withheld_senders: available(withheld, Unit::Count, SourceField::Sender),
+            sent_count: available(sent.len() as u64, Unit::Count, SourceField::Sender),
+            chat_count,
         },
     }
+}
+
+fn kind_count(list: &[MessageWire], kind: u16) -> u64 {
+    list.iter().filter(|message| message.kind == kind).count() as u64
 }
 
 fn checked_sender(sender: &str) -> Option<String> {

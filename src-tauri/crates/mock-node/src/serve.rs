@@ -29,6 +29,7 @@ use serde_json::{json, Value};
 use crate::canary::{
     ALIAS_01, ALIAS_02, COUNTERPARTY_01, COUNTERPARTY_02, COUNTERPARTY_03, ERROR_BODY_01, EXTRA_01,
     EXTRA_02, MEMO_01, MEMO_02, MSG_BODIES, MSG_CIPHER_01, MSG_NESTED_01, PREIMAGE_01, PREIMAGE_02,
+    SENT_NOTE_01,
 };
 use crate::ids::{
     BLOCK_HEIGHT, CATEGORY_COMMUNICATION_MSAT, CHANNEL_LOCAL_MSAT, CHANNEL_REMOTE_MSAT,
@@ -119,6 +120,7 @@ impl Route {
                 format!("{}?limit=1", paths::MESSAGES),
                 format!("{}?before=1725000005000", paths::MESSAGES),
                 format!("{}?peer=zz", paths::MESSAGES),
+                format!("{}?sent=1", paths::MESSAGES),
             ],
         }
     }
@@ -158,6 +160,8 @@ struct MessageQuery {
     limit: u32,
     before: Option<u64>,
     peer: Option<PeerFilter>,
+    /// `sent=1`: mail this node sent. The no-peer list stays incoming-only.
+    sent: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -234,6 +238,7 @@ impl MockNode {
                         limit: DEFAULT_LIST_LIMIT,
                         before: None,
                         peer: None,
+                        sent: false,
                     }));
                 }
                 return failed(400, body);
@@ -558,6 +563,16 @@ fn messages_body(query: &MessageQuery, stale: bool) -> Value {
 }
 
 fn message_visible(msg: &StoredMessage, query: &MessageQuery) -> bool {
+    if query.sent {
+        if msg.sender != NODE_ID {
+            return false;
+        }
+        return match &query.peer {
+            None => true,
+            Some(PeerFilter::Room) => false,
+            Some(PeerFilter::Node(peer)) => msg.recipient == peer,
+        };
+    }
     match &query.peer {
         None => msg.recipient == NODE_ID,
         Some(PeerFilter::Room) => false,
@@ -582,6 +597,10 @@ fn message_json(msg: &StoredMessage) -> Value {
     });
     if !msg.references.is_empty() {
         body["references"] = json!(msg.references);
+    }
+    if msg.sender == NODE_ID {
+        body["direction"] = json!("outgoing");
+        body["outbound_note"] = json!(SENT_NOTE_01);
     }
     body
 }
@@ -679,6 +698,7 @@ fn parse_message_query(query: &str) -> Result<MessageQuery, Value> {
     let mut limit = DEFAULT_LIST_LIMIT;
     let mut before = None;
     let mut peer = None;
+    let mut sent = false;
     if !query.is_empty() {
         for pair in query.split('&') {
             if pair.is_empty() {
@@ -699,6 +719,12 @@ fn parse_message_query(query: &str) -> Result<MessageQuery, Value> {
                     );
                 }
                 "peer" => peer = Some(value.to_string()),
+                "sent" => {
+                    if value != "1" {
+                        return Err(bad_request("invalid sent"));
+                    }
+                    sent = true;
+                }
                 _ => {}
             }
         }
@@ -711,6 +737,7 @@ fn parse_message_query(query: &str) -> Result<MessageQuery, Value> {
         limit: limit.min(MAX_LIST_LIMIT),
         before,
         peer,
+        sent,
     })
 }
 

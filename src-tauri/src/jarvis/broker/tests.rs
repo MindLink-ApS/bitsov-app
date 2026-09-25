@@ -100,7 +100,11 @@ fn assert_reads_allowlisted(node: &Fake) {
         assert!(route::segments_allowed(target.path));
         assert!(route::path_allowed(target.path));
         if let Some(query) = target.query {
-            assert_eq!(query.key, "limit");
+            assert!(
+                query.key == "limit" || (query.key == "sent" && query.value == 1),
+                "{}",
+                query.key
+            );
         }
     }
 }
@@ -207,7 +211,7 @@ fn allowlist_is_exactly_the_phase1_reads() {
 
 #[test]
 fn every_route_target_is_an_allowlisted_get() {
-    let mut seen = [false; 5];
+    let mut seen = [false; 6];
     for route in route::sample_routes() {
         let target = route.target();
         assert_eq!(target.method, "GET");
@@ -236,16 +240,22 @@ fn every_route_target_is_an_allowlisted_get() {
                 assert_eq!(target.query.map(|query| query.value), Some(limit));
                 3
             }
+            ReadRoute::SentMessages => {
+                assert_eq!(target.path, route::MESSAGES);
+                assert_eq!(target.query.map(|query| query.key), Some("sent"));
+                assert_eq!(target.query.map(|query| query.value), Some(1));
+                4
+            }
             ReadRoute::OwnPricing => {
                 assert_eq!(target.path, route::OWN_PRICING);
                 assert!(target.query.is_none());
-                4
+                5
             }
         };
         assert!(!seen[slot]);
         seen[slot] = true;
     }
-    assert_eq!(seen, [true; 5]);
+    assert_eq!(seen, [true; 6]);
 }
 
 #[test]
@@ -966,6 +976,7 @@ fn forbidden_output_keys_are_absent_from_a_hostile_success_page() {
     for forbidden in [
         "plaintext",
         "ciphertext",
+        "outbound_note",
         "memo",
         "preimage",
         "body",
@@ -1112,6 +1123,39 @@ fn a_failed_health_read_does_not_claim_wallet_contents() {
     assert!(done.log.iter().any(|entry| {
         entry.path == route::HEALTH && matches!(entry.outcome, LogOutcome::Http { status: 500 })
     }));
+}
+
+const _: fn() = || {
+    // `Dispatch` must not implement `Serialize`. If it does, both impls apply
+    // and this method resolution fails to compile. The model bytes are
+    // [`Dispatch::output`] only.
+    trait AmbiguousIfImpl<A> {
+        fn some_item() {}
+    }
+    impl<T: ?Sized> AmbiguousIfImpl<()> for T {}
+    impl<T: ?Sized + serde::Serialize> AmbiguousIfImpl<u8> for T {}
+    let _ = <super::Dispatch as AmbiguousIfImpl<_>>::some_item;
+};
+
+#[test]
+fn only_dispatch_output_reaches_the_model() {
+    let node = Fake::new()
+        .json(route::PAYMENTS_BALANCE, r#"{"balance_msat":2500}"#)
+        .json(route::PAYMENTS_CHANNELS, channels_body())
+        .json(route::HEALTH, &health_body("ldk"));
+    let done = dispatch(
+        &node,
+        ToolCall::Balance {
+            input: BalanceInput {},
+        },
+    );
+    let model = serde_json::to_string(done.output()).expect("json");
+    assert!(model.contains("2500"), "{model}");
+    assert!(!model.contains("/api/v1/"), "{model}");
+    assert!(!model.contains("outcome"), "{model}");
+    let host = format!("{:?}", done.log);
+    assert!(host.contains("/api/v1/payments/balance"), "{host}");
+    assert!(!model.contains("payments/balance"), "{model}");
 }
 
 fn assert_no_json_number(value: &Value, forbidden: u64) {

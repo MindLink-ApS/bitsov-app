@@ -24,6 +24,9 @@ pub const MSG_NESTED_01: &str = "4a41525649535f43414e4152595f4d53475f4e455354454
 /// Ciphertext of the newest incoming message. Hex of the ciphertext label.
 pub const MSG_CIPHER_01: &str = "4a41525649535f43414e4152595f4d53475f4349504845525f3031";
 
+/// Free-text note on mail this node sent. Not a body. Broker output must not copy it.
+pub const SENT_NOTE_01: &str = "JARVIS_CANARY_SENT_NOTE_01";
+
 /// Invoice memos on `GET /payments`.
 pub const MEMO_01: &str = "JARVIS_CANARY_MEMO_01";
 pub const MEMO_02: &str = "JARVIS_CANARY_MEMO_02";
@@ -63,6 +66,7 @@ pub const CANARIES: &[&str] = &[
     MSG_BODY_06,
     MSG_NESTED_01,
     MSG_CIPHER_01,
+    SENT_NOTE_01,
     MEMO_01,
     MEMO_02,
     PREIMAGE_01,
