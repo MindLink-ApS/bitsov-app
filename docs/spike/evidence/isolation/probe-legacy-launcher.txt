@@ -1,0 +1,13 @@
+j0fdplant: planted=5000,70000 failed= soft_limit=256
+# j0probe pid=35247 mode=confined
+R fd.inventory INFO 6 open=[0:vnode 1:vnode 2:vnode 3:pipe 5000:pipe 70000:pipe ]
+R fd.scan INFO 6 open=[0 1 2 3 5000 70000 ] limit=138240
+R fd.content.5000 INFO hostprivate
+R fd.content.70000 INFO hostprivate
+R env.no_sensitive_vars CLEAN 0 names=[PATH,HOME,TMPDIR,LANG,] sensitive_hits=0
+R pos.bootstrap_pipe_fd3 OK 0 read 46 bytes sha256=b16aecec0cfea9e54e6b767f3513bfbca1f7d4ac0e4c407e4f89afb4d6753b8e
+R exec.system_shell DENIED EPERM posix_spawn /bin/sh exit=-1
+R exec.system_bin_cat DENIED EPERM posix_spawn /bin/cat exit=-1
+R net.udp_loopback_send DENIED EPERM 127.0.0.1:0
+R net.tcp_listen_loopback DENIED EPERM bind+listen 127.0.0.1:0
+# j0probe done

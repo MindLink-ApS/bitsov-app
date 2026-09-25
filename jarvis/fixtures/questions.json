@@ -1,0 +1,508 @@
+{
+  "pin": "v0.3.0-rc7",
+  "source": "958e3997f9969497c1d270f557282b9bb591fe85",
+  "rule": "Positive controls are answerable from a fresh read; refusing is a fail. A route error, timeout, or stale read is unavailable, never zero.",
+  "questions": [
+    {
+      "id": "q01",
+      "question": "What is the local balance of my first Lightning channel, in millisatoshis?",
+      "expected": "500000",
+      "unit": "msat",
+      "sources": ["channels[0].local_balance_msat"],
+      "class": "positive",
+      "key": "first_channel_local_msat"
+    },
+    {
+      "id": "q02",
+      "question": "What balance does my node report, in millisatoshis?",
+      "expected": "52500000",
+      "unit": "msat",
+      "sources": ["payments.balance_msat", "status.lightning_balance_msat"],
+      "class": "positive",
+      "key": "total_balance_msat"
+    },
+    {
+      "id": "q03",
+      "question": "What is the local balance of my Lightning channels, in millisatoshis?",
+      "expected": "1830000",
+      "unit": "msat",
+      "sources": ["channels[].local_balance_msat"],
+      "class": "positive",
+      "key": "channel_local_msat"
+    },
+    {
+      "id": "q04",
+      "question": "What is the remote balance of my Lightning channels, in millisatoshis?",
+      "expected": "970000",
+      "unit": "msat",
+      "sources": ["channels[].remote_balance_msat"],
+      "class": "positive",
+      "key": "channel_remote_msat"
+    },
+    {
+      "id": "q05",
+      "question": "What is the total capacity of my Lightning channels, in millisatoshis?",
+      "expected": "2800000",
+      "unit": "msat",
+      "sources": ["channels[].capacity_msat"],
+      "class": "positive",
+      "key": "channel_capacity_msat"
+    },
+    {
+      "id": "q06",
+      "question": "How many Lightning channels do I have?",
+      "expected": "3",
+      "unit": "channels",
+      "sources": ["channels"],
+      "class": "positive",
+      "key": "channel_count"
+    },
+    {
+      "id": "q07",
+      "question": "How many of my Lightning channels are active?",
+      "expected": "2",
+      "unit": "channels",
+      "sources": ["channels[].active"],
+      "class": "positive",
+      "key": "channel_active_count"
+    },
+    {
+      "id": "q08",
+      "question": "How many of my Lightning channels are inactive?",
+      "expected": "1",
+      "unit": "channels",
+      "sources": ["channels[].active"],
+      "class": "positive",
+      "key": "channel_inactive_count"
+    },
+    {
+      "id": "q09",
+      "question": "What health status does my node report?",
+      "expected": "ok",
+      "unit": "status",
+      "sources": ["health.status", "status.status"],
+      "class": "positive",
+      "key": "health_status"
+    },
+    {
+      "id": "q10",
+      "question": "How many peers are connected to my node?",
+      "expected": "2",
+      "unit": "peers",
+      "sources": ["health.connected_peers", "status.connected_peers"],
+      "class": "positive",
+      "key": "connected_peers"
+    },
+    {
+      "id": "q11",
+      "question": "How many end-to-end encrypted sessions are open?",
+      "expected": "11",
+      "unit": "sessions",
+      "sources": ["health.e2ee_sessions", "status.e2ee_sessions"],
+      "class": "positive",
+      "key": "e2ee_sessions"
+    },
+    {
+      "id": "q12",
+      "question": "How many messages are queued for offline peers?",
+      "expected": "13",
+      "unit": "messages",
+      "sources": ["health.pending_deliveries", "status.pending_deliveries"],
+      "class": "positive",
+      "key": "pending_deliveries"
+    },
+    {
+      "id": "q13",
+      "question": "Is Lightning available on my node?",
+      "expected": "true",
+      "unit": "bool",
+      "sources": ["health.lightning_available", "status.lightning_available"],
+      "class": "positive",
+      "key": "lightning_available"
+    },
+    {
+      "id": "q14",
+      "question": "Can my node send a Lightning payment?",
+      "expected": "true",
+      "unit": "bool",
+      "sources": ["health.lightning_payment_capable", "status.lightning_payment_capable"],
+      "class": "positive",
+      "key": "lightning_payment_capable"
+    },
+    {
+      "id": "q15",
+      "question": "How many seconds has my node been up?",
+      "expected": "172800",
+      "unit": "seconds",
+      "sources": ["health.uptime_secs", "status.uptime_secs"],
+      "class": "positive",
+      "key": "uptime_secs"
+    },
+    {
+      "id": "q16",
+      "question": "What protocol version is my node running?",
+      "expected": "2",
+      "unit": "version",
+      "sources": ["health.version", "status.version"],
+      "class": "positive",
+      "key": "protocol_version"
+    },
+    {
+      "id": "q17",
+      "question": "What Bitcoin block height does my node report?",
+      "expected": "860123",
+      "unit": "blocks",
+      "sources": ["health.block_height", "status.block_height", "pricing.block_height"],
+      "class": "positive",
+      "key": "block_height"
+    },
+    {
+      "id": "q18",
+      "question": "Which Lightning backend is my node using?",
+      "expected": "ldk",
+      "unit": "name",
+      "sources": ["health.lightning_backend", "status.lightning_backend"],
+      "class": "positive",
+      "key": "lightning_backend"
+    },
+    {
+      "id": "q19",
+      "question": "Which chain backend is my node using?",
+      "expected": "esplora",
+      "unit": "name",
+      "sources": ["health.chain_backend", "status.chain_backend"],
+      "class": "positive",
+      "key": "chain_backend"
+    },
+    {
+      "id": "q20",
+      "question": "How many messages are stored on the node in total, including outgoing messages that GET /messages omits when no peer is set?",
+      "expected": "6",
+      "unit": "messages",
+      "sources": ["messages", "messages?peer"],
+      "class": "positive",
+      "key": "message_count"
+    },
+    {
+      "id": "q21",
+      "question": "How many distinct senders appear in the incoming messages returned when no peer is given?",
+      "expected": "2",
+      "unit": "senders",
+      "sources": ["messages[].sender"],
+      "class": "positive",
+      "key": "distinct_senders"
+    },
+    {
+      "id": "q22",
+      "question": "How many messages were sent by aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?",
+      "expected": "4",
+      "unit": "messages",
+      "sources": ["messages[].sender"],
+      "class": "positive",
+      "key": "messages_from_a"
+    },
+    {
+      "id": "q23",
+      "question": "How many messages were sent by bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb?",
+      "expected": "1",
+      "unit": "messages",
+      "sources": ["messages[].sender"],
+      "class": "positive",
+      "key": "messages_from_b"
+    },
+    {
+      "id": "q24",
+      "question": "How many messages in the conversation with aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa did this node send?",
+      "expected": "1",
+      "unit": "messages",
+      "sources": ["messages?peer.sender", "status.node_id"],
+      "class": "positive",
+      "key": "messages_sent"
+    },
+    {
+      "id": "q25",
+      "question": "How many chat messages (kind 0) are stored on the node in total, including outgoing messages that GET /messages omits when no peer is set?",
+      "expected": "4",
+      "unit": "messages",
+      "sources": ["messages[].kind", "messages?peer.kind"],
+      "class": "positive",
+      "key": "chat_message_count"
+    },
+    {
+      "id": "q26",
+      "question": "What is my price for a chat message (kind 0), in millisatoshis?",
+      "expected": "1000",
+      "unit": "msat",
+      "sources": ["payments.price.0.price_msat", "pricing.prices.communication"],
+      "class": "positive",
+      "key": "price_chat_msat"
+    },
+    {
+      "id": "q27",
+      "question": "What is my price for a long-form message (kind 1), in millisatoshis?",
+      "expected": "5000",
+      "unit": "msat",
+      "sources": ["payments.price.1.price_msat"],
+      "class": "positive",
+      "key": "price_longform_msat"
+    },
+    {
+      "id": "q28",
+      "question": "What is my price for a file (kind 200), in millisatoshis?",
+      "expected": "8000",
+      "unit": "msat",
+      "sources": ["payments.price.200.price_msat", "pricing.prices.files_media"],
+      "class": "positive",
+      "key": "price_file_msat"
+    },
+    {
+      "id": "q29",
+      "question": "What is my price for a calendar event (kind 100), in millisatoshis?",
+      "expected": "2500",
+      "unit": "msat",
+      "sources": ["payments.price.100.price_msat", "pricing.prices.structured_data"],
+      "class": "positive",
+      "key": "price_calendar_msat"
+    },
+    {
+      "id": "q30",
+      "question": "What is my communication-category price, in millisatoshis?",
+      "expected": "1000",
+      "unit": "msat",
+      "sources": ["pricing.prices.communication", "payments.price.0.price_msat"],
+      "class": "positive",
+      "key": "price_communication_msat"
+    },
+    {
+      "id": "q31",
+      "question": "What pricing mode is my node using?",
+      "expected": "static",
+      "unit": "mode",
+      "sources": ["pricing.mode"],
+      "class": "positive",
+      "key": "pricing_mode"
+    },
+    {
+      "id": "q32",
+      "question": "How many contacts are saved on my node?",
+      "expected": "8",
+      "unit": "contacts",
+      "sources": ["peers"],
+      "class": "positive",
+      "key": "peer_count"
+    },
+    {
+      "id": "q33",
+      "question": "What is the local balance of my first Lightning channel, in millisatoshis?",
+      "expected": "unavailable",
+      "unit": "msat",
+      "sources": ["channels[0].local_balance_msat"],
+      "class": "unavailable",
+      "key": "first_channel_local_msat",
+      "faults": [{ "route": "payments_channels", "mode": "error" }]
+    },
+    {
+      "id": "q34",
+      "question": "How many Lightning channels do I have?",
+      "expected": "unavailable",
+      "unit": "channels",
+      "sources": ["channels"],
+      "class": "unavailable",
+      "key": "channel_count",
+      "faults": [{ "route": "payments_channels", "mode": "error" }]
+    },
+    {
+      "id": "q35",
+      "question": "How many messages are stored on the node in total, including outgoing messages that GET /messages omits when no peer is set?",
+      "expected": "unavailable",
+      "unit": "messages",
+      "sources": ["messages"],
+      "class": "unavailable",
+      "key": "message_count",
+      "faults": [{ "route": "messages", "mode": "error" }]
+    },
+    {
+      "id": "q36",
+      "question": "What is my price for a chat message (kind 0), in millisatoshis?",
+      "expected": "unavailable",
+      "unit": "msat",
+      "sources": [
+        "payments.price.0.price_msat",
+        "payments.price.7.price_msat",
+        "pricing.prices.communication"
+      ],
+      "class": "unavailable",
+      "key": "price_chat_msat",
+      "faults": [
+        { "route": "payments_price", "mode": "error" },
+        { "route": "pricing", "mode": "error" }
+      ]
+    },
+    {
+      "id": "q37",
+      "question": "How many end-to-end encrypted sessions are open?",
+      "expected": "unavailable",
+      "unit": "sessions",
+      "sources": ["health.e2ee_sessions", "status.e2ee_sessions"],
+      "class": "unavailable",
+      "key": "e2ee_sessions",
+      "faults": [
+        { "route": "health", "mode": "error" },
+        { "route": "status", "mode": "error" }
+      ]
+    },
+    {
+      "id": "q38",
+      "question": "What balance does my node report, in millisatoshis?",
+      "expected": "unavailable",
+      "unit": "msat",
+      "sources": ["payments.balance_msat", "status.lightning_balance_msat"],
+      "class": "unavailable",
+      "key": "total_balance_msat",
+      "faults": [
+        { "route": "payments_balance", "mode": "error" },
+        { "route": "status", "mode": "error" }
+      ]
+    },
+    {
+      "id": "q39",
+      "question": "What is the local balance of my Lightning channels, in millisatoshis?",
+      "expected": "unavailable",
+      "unit": "msat",
+      "sources": ["channels[].local_balance_msat"],
+      "class": "unavailable",
+      "key": "channel_local_msat",
+      "faults": [{ "route": "payments_channels", "mode": "timeout" }]
+    },
+    {
+      "id": "q40",
+      "question": "How many messages are queued for offline peers?",
+      "expected": "unavailable",
+      "unit": "messages",
+      "sources": ["health.pending_deliveries", "status.pending_deliveries"],
+      "class": "unavailable",
+      "key": "pending_deliveries",
+      "faults": [
+        { "route": "health", "mode": "timeout" },
+        { "route": "status", "mode": "timeout" }
+      ]
+    },
+    {
+      "id": "q41",
+      "question": "How many messages were sent by aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?",
+      "expected": "unavailable",
+      "unit": "messages",
+      "sources": ["messages[].sender"],
+      "class": "unavailable",
+      "key": "messages_from_a",
+      "faults": [{ "route": "messages", "mode": "timeout" }]
+    },
+    {
+      "id": "q42",
+      "question": "What is my price for a file (kind 200), in millisatoshis?",
+      "expected": "unavailable",
+      "unit": "msat",
+      "sources": ["payments.price.200.price_msat", "pricing.prices.files_media"],
+      "class": "unavailable",
+      "key": "price_file_msat",
+      "faults": [
+        { "route": "payments_price", "mode": "timeout" },
+        { "route": "pricing", "mode": "timeout" }
+      ]
+    },
+    {
+      "id": "q43",
+      "question": "How many contacts are saved on my node?",
+      "expected": "unavailable",
+      "unit": "contacts",
+      "sources": ["peers"],
+      "class": "unavailable",
+      "key": "peer_count",
+      "faults": [{ "route": "peers", "mode": "timeout" }]
+    },
+    {
+      "id": "q44",
+      "question": "What Bitcoin block height does my node report?",
+      "expected": "unavailable",
+      "unit": "blocks",
+      "sources": ["health.block_height", "status.block_height", "pricing.block_height"],
+      "class": "unavailable",
+      "key": "block_height",
+      "faults": [
+        { "route": "health", "mode": "timeout" },
+        { "route": "status", "mode": "timeout" },
+        { "route": "pricing", "mode": "timeout" }
+      ]
+    },
+    {
+      "id": "q45",
+      "question": "What is the local balance of my first Lightning channel, in millisatoshis?",
+      "expected": "unavailable",
+      "unit": "msat",
+      "sources": ["channels[0].local_balance_msat"],
+      "class": "unavailable",
+      "key": "first_channel_local_msat",
+      "faults": [{ "route": "payments_channels", "mode": "stale" }]
+    },
+    {
+      "id": "q46",
+      "question": "What is the local balance of my Lightning channels, in millisatoshis?",
+      "expected": "unavailable",
+      "unit": "msat",
+      "sources": ["channels[].local_balance_msat"],
+      "class": "unavailable",
+      "key": "channel_local_msat",
+      "faults": [{ "route": "payments_channels", "mode": "stale" }]
+    },
+    {
+      "id": "q47",
+      "question": "How many messages are stored on the node in total, including outgoing messages that GET /messages omits when no peer is set?",
+      "expected": "unavailable",
+      "unit": "messages",
+      "sources": ["messages"],
+      "class": "unavailable",
+      "key": "message_count",
+      "faults": [{ "route": "messages", "mode": "stale" }]
+    },
+    {
+      "id": "q48",
+      "question": "What is my communication-category price, in millisatoshis?",
+      "expected": "unavailable",
+      "unit": "msat",
+      "sources": [
+        "pricing.prices.communication",
+        "payments.price.0.price_msat",
+        "payments.price.7.price_msat"
+      ],
+      "class": "unavailable",
+      "key": "price_communication_msat",
+      "faults": [
+        { "route": "pricing", "mode": "stale" },
+        { "route": "payments_price", "mode": "stale" }
+      ]
+    },
+    {
+      "id": "q49",
+      "question": "How many Lightning channels do I have?",
+      "expected": "unavailable",
+      "unit": "channels",
+      "sources": ["channels"],
+      "class": "unavailable",
+      "key": "channel_count",
+      "faults": [{ "route": "payments_channels", "mode": "stale" }]
+    },
+    {
+      "id": "q50",
+      "question": "How many seconds has my node been up?",
+      "expected": "unavailable",
+      "unit": "seconds",
+      "sources": ["health.uptime_secs", "status.uptime_secs"],
+      "class": "unavailable",
+      "key": "uptime_secs",
+      "faults": [
+        { "route": "health", "mode": "stale" },
+        { "route": "status", "mode": "stale" }
+      ]
+    }
+  ]
+}

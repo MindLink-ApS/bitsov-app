@@ -1,0 +1,26 @@
+--- baseline (unconfined): touch new file in weights dir
+exit=0
+created=yes
+removed own artefact .j0-m2-baseline-zxfaG0j9X3EU
+--- baseline (unconfined): open model for append (zero bytes written)
+exit=0
+--- baseline (unconfined): hard-link model into scratch
+exit=0
+--- confined: touch new file in weights dir
+j0spawn: child pid=46881
+j0spawn: bootstrap sha256=f1ae46c69ede27a1418224ba262a459a90e23c8a745fb6727f9148dd59958e3b len=46
+touch: ~/Desktop/seat-drafts/models/Qwen3-4B-GGUF/.j0-m2-confined-xOl01Kg6JGVY: Operation not permitted
+exit=1
+created=no
+--- confined: open model for append (zero bytes written)
+j0spawn: child pid=46884
+j0spawn: bootstrap sha256=4f572b3d0c1cb35c694ee6648b9635ee8a58821bc5b99f040ed38c701f43dd2a len=46
+Error opening /private/var/select/sh: Operation not permitted
+sh: ~/Desktop/seat-drafts/models/Qwen3-4B-GGUF/Qwen3-4B-Q4_K_M.gguf: Operation not permitted
+exit=1
+--- confined: hard-link model into own scratch
+j0spawn: child pid=46886
+j0spawn: bootstrap sha256=41dddcb31495ba910a538fe8df5a2e8d28b0329be5dae215ad55ddc49510b47b len=46
+ln: /private/tmp/j0-canary-model-XO8HGYsa/scratch-llm/model-hardlink.gguf: Operation not permitted
+exit=1
+created=no

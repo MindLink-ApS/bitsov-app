@@ -1,0 +1,22 @@
+--- baseline: security find-generic-password (unconfined)
+exit=0 secret_in_output=yes
+<SECRET>
+--- baseline: security dump-keychain (unconfined, no -d)
+exit=0 secret_in_output=no
+keychain: "/private/tmp/j0-canary-7GryiCNR/keychain/j0-throwaway.keychain-db"
+    "acct"<blob>="j0"
+    "svce"<blob>="j0-canary"
+--- confined assistant: security find-generic-password
+exit=44 secret_in_output=no
+j0spawn: child pid=36087
+security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain.
+--- confined assistant: security dump-keychain (no -d)
+exit=0 secret_in_output=no
+j0spawn: child pid=36094
+--- confined llm: security find-generic-password
+exit=44 secret_in_output=no
+j0spawn: child pid=36102
+security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain.
+--- confined llm: security dump-keychain (no -d)
+exit=0 secret_in_output=no
+j0spawn: child pid=36109

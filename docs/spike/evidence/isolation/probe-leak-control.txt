@@ -1,0 +1,15 @@
+j0fdplant: planted=5000,70000 failed= soft_limit=256
+# j0probe pid=35243 mode=baseline
+R fd.inventory INFO 7 open=[0:vnode 1:vnode 2:vnode 7:vnode 8:vnode 5000:pipe 70000:pipe ]
+R fd.scan INFO 7 open=[0 1 2 7 8 5000 70000 ] limit=138240
+R fd.content.7 INFO other
+R fd.content.8 INFO canary
+R fd.content.5000 INFO hostprivate
+R fd.content.70000 INFO hostprivate
+R env.no_sensitive_vars FOUND LEAK names=[PATH,BITSOV_TOKEN,HTTPS_PROXY,] sensitive_hits=4
+R pos.bootstrap_pipe_fd3 DENIED EBADF read -1 bytes sha256=-
+R exec.system_shell DENIED EPERM posix_spawn /bin/sh exit=-1
+R exec.system_bin_cat DENIED EPERM posix_spawn /bin/cat exit=-1
+R net.udp_loopback_send DENIED EPERM 127.0.0.1:0
+R net.tcp_listen_loopback DENIED EPERM bind+listen 127.0.0.1:0
+# j0probe done

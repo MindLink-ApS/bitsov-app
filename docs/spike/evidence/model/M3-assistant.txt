@@ -1,0 +1,12 @@
+--- server ready=1; server pid=46954
+--- lsof -nP -a -p <server>: rc=0, 23 lines, IPv4/IPv6 lines=0, unix lines=1
+4u unix /private/tmp/j0-canary-model-XO8HGYsa/ipc/llm/llm.sock
+--- confined assistant: POST /completion over the unix socket (client exit=0)
+HTTP/1.1 200 OK
+Server: llama.cpp
+Access-Control-Allow-Origin: 
+Content-Type: application/json; charset=utf-8
+Content-Length: 1899
+Connection: close
+
+{"index":0,"content":" red, green, and blue. When these colors are combined in equal parts, they produce white light. However, in the context of pigment colors, the three","tokens":[],"id_slot":3,"stop":true,"model":"~/Desktop/seat-drafts/models/Qwen3-4B-GGUF/Qwen3-4B-Q4_K_M.gguf","tokens_predicted":32,"tokens_evaluated":7,"generation_settings":{"seed":4294967295,"temperature":

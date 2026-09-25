@@ -1,0 +1,26 @@
+9a989bb580011140 -rw-r--r-- 1790338486 29 xattr=[com.apple.provenance,] /private/tmp/j0-canary-7GryiCNR/canary.txt
+dir drwxr-xr-x 1790338485 128 xattr=[com.apple.provenance,] /private/tmp/j0-canary-7GryiCNR/hostcode
+103a0b5975462bea -rwxr-xr-x 1790338485 39 xattr=[com.apple.provenance,] /private/tmp/j0-canary-7GryiCNR/hostcode/bitsov-app
+7ec5593553cd62d2 -rw-r--r-- 1790338485 33 xattr=[com.apple.provenance,] /private/tmp/j0-canary-7GryiCNR/hostcode/canary.txt
+dir drwxr-xr-x 1790338485 128 xattr=[com.apple.provenance,] /private/tmp/j0-canary-7GryiCNR/hostconfig
+10cec887301c2a49 -rw-r--r-- 1790338485 35 xattr=[com.apple.provenance,] /private/tmp/j0-canary-7GryiCNR/hostconfig/canary.txt
+7ec194f778f36830 -rw-r--r-- 1790338485 31 xattr=[com.apple.provenance,] /private/tmp/j0-canary-7GryiCNR/hostconfig/tauri.conf.json
+dir drwxr-xr-x 1790338482 128 xattr=[com.apple.provenance,] /private/tmp/j0-canary-7GryiCNR/keychain
+e3b0c44298fc1c14 -r--r--r-- 1790338482 0 xattr=[com.apple.provenance,] /private/tmp/j0-canary-7GryiCNR/keychain/.fl0BF0576A
+6822a74a62546263 -rw-r--r-- 1790338482 21776 xattr=[com.apple.provenance,] /private/tmp/j0-canary-7GryiCNR/keychain/j0-throwaway.keychain-db
+dir drwxr-xr-x 1790338485 192 xattr=[com.apple.provenance,] /private/tmp/j0-canary-7GryiCNR/nodedata
+dir drwxr-xr-x 1790338486 96 xattr=[com.apple.provenance,] /private/tmp/j0-canary-7GryiCNR/nodedata-dv
+c9ad11d6093815a7 -rw-r--r-- 1790338486 36 xattr=[com.apple.provenance,] /private/tmp/j0-canary-7GryiCNR/nodedata-dv/canary.txt
+948c4ac70fd52b84 -rw-r--r-- 1790338485 33 xattr=[com.apple.provenance,] /private/tmp/j0-canary-7GryiCNR/nodedata/canary.txt
+dir drwxr-xr-x 1790338486 160 xattr=[com.apple.provenance,] /private/tmp/j0-canary-7GryiCNR/nodedata/pairing
+f2e879de540f6dae -rw-r--r-- 1790338486 36 xattr=[com.apple.provenance,] /private/tmp/j0-canary-7GryiCNR/nodedata/pairing/canary.txt
+d2cb2752c5117578 -rw-r--r-- 1790338485 42 xattr=[com.apple.provenance,] /private/tmp/j0-canary-7GryiCNR/nodedata/pairing/challenge-0001.txt
+f315c0501a9d7182 -rw-r--r-- 1790338485 38 xattr=[com.apple.provenance,] /private/tmp/j0-canary-7GryiCNR/nodedata/pairing/owner-console.nonce
+c68ce7ab9a4bce5e -rw-r--r-- 1790338485 34 xattr=[com.apple.provenance,] /private/tmp/j0-canary-7GryiCNR/nodedata/wallet.db
+dir drwxr-xr-x 1790338486 96 xattr=[com.apple.provenance,] /private/tmp/j0-canary-7GryiCNR/scratch
+01e125b74d6d12a8 -rw-r--r-- 1790338486 42 xattr=[com.apple.provenance,] /private/tmp/j0-canary-7GryiCNR/scratch/canary.txt
+dir drwxr-xr-x 1790338486 96 xattr=[com.apple.provenance,] /private/tmp/j0-canary-7GryiCNR/sibling-child
+13fff7e6be6d4ad2 -rw-r--r-- 1790338486 32 xattr=[com.apple.provenance,] /private/tmp/j0-canary-7GryiCNR/sibling-child/canary.txt
+dir drwxr-xr-x 1790338486 96 xattr=[com.apple.provenance,] /private/tmp/j0-canary-7GryiCNR/weights
+084ae5045f3546a6 -rw-r--r-- 1790338486 32 xattr=[com.apple.provenance,] /private/tmp/j0-canary-7GryiCNR/weights/canary.txt
+root-entries: bin broker.state canary.txt gta.plist hostcode hostconfig ipc keychain llm-listen nodedata nodedata-dv scratch scratch-llm sibling-child weights 

@@ -1,8 +1,9 @@
 name: Build
 
 # Compile gate. Authority Check only greps source text; this job proves the app actually
-# builds: TypeScript type-check + Vite bundle, then `cargo check` on the Tauri crate. Make it
-# a REQUIRED status on main so review happens on a compiled SHA, not on greps.
+# builds: TypeScript type-check + Vite bundle, then `cargo check` and `cargo test` on the
+# Tauri crate. Make it a REQUIRED status on main so review happens on a compiled SHA, not
+# on greps.
 on:
   pull_request:
     branches: [main]
@@ -81,6 +82,13 @@ jobs:
       - name: Rust — stop-policy behaviour tests
         working-directory: src-tauri
         run: cargo test --locked stop_adapter_tests
+
+      # Unfiltered: assistant ACL, Jarvis broker, and mock-node, plus the
+      # stop-policy tests above. Same stable toolchain as `cargo check`. Linux
+      # only — this job is the required Build check, not a new workflow job.
+      - name: Rust — cargo test (src-tauri)
+        working-directory: src-tauri
+        run: cargo test --locked
 
   # NOT a merge gate: keep this job OUT of the required status checks. It depends on the
   # genome's published release and on network, not on this repo's source. It exercises the
