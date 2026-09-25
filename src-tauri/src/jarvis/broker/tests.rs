@@ -10,16 +10,16 @@ use serde_json::{json, Value};
 use super::route::{self, ReadRoute};
 use super::schema::{
     Amount, BalanceInput, ChannelsInput, HealthInput, LocalPricesInput, MessageCountsInput,
-    PricingMode, Report, ToolCall, ToolOutput, TrustLevel, UnavailableReason,
-    WalletBalanceComposition, MAX_MESSAGE_LIMIT,
+    PricingMode, Report, ToolCall, ToolOutput, TrustLevel, UnavailableReason, WalletBalanceLabel,
+    MAX_MESSAGE_LIMIT,
 };
-use super::{Broker, Dispatch, NodeRead, RawRead, TransportFault, ALLOWED_PATHS};
+use super::{Broker, Dispatch, LogOutcome, NodeRead, RawRead, TransportFault, ALLOWED_PATHS};
 
 const CANARY: &str = "CANARY_9f3e2a";
 
 const ERROR_BODY: &str = r#"{"error":"CANARY_9f3e2a","code":500,"memo":"CANARY_9f3e2a","preimage":"CANARY_9f3e2a","nested":{"body":"CANARY_9f3e2a","plaintext":"CANARY_9f3e2a"}}"#;
 
-const UNKNOWN_OBJECT: &str = r#"{"balance_msat":1,"status":"ok","memo":"CANARY_9f3e2a","preimage":"CANARY_9f3e2a","plaintext":"CANARY_9f3e2a","nested":{"body":"CANARY_9f3e2a"}}"#;
+const UNKNOWN_OBJECT: &str = r#"{"balance_msat":"CANARY_9f3e2a","status":"ok","memo":"CANARY_9f3e2a","preimage":"CANARY_9f3e2a","plaintext":"CANARY_9f3e2a","nested":{"body":"CANARY_9f3e2a"}}"#;
 
 const SENDER: &str = "abababababababababababababababababababababababababababababababab";
 const PUBKEY: &str = "02abababababababababababababababababababababababababababababababab";
@@ -206,20 +206,46 @@ fn allowlist_is_exactly_the_phase1_reads() {
 }
 
 #[test]
-fn every_route_is_an_allowlisted_get() {
+fn every_route_target_is_an_allowlisted_get() {
+    let mut seen = [false; 5];
     for route in route::sample_routes() {
-        match route {
-            ReadRoute::PaymentsBalance
-            | ReadRoute::PaymentsChannels
-            | ReadRoute::Health
-            | ReadRoute::Messages { .. }
-            | ReadRoute::OwnPricing => {}
-        }
         let target = route.target();
         assert_eq!(target.method, "GET");
-        assert!(ALLOWED_PATHS.contains(&target.path));
+        assert!(route::path_allowed(target.path), "{}", target.path);
         assert!(route::segments_allowed(target.path));
+        assert!(ALLOWED_PATHS.contains(&target.path));
+        let slot = match route {
+            ReadRoute::PaymentsBalance => {
+                assert_eq!(target.path, route::PAYMENTS_BALANCE);
+                assert!(target.query.is_none());
+                0
+            }
+            ReadRoute::PaymentsChannels => {
+                assert_eq!(target.path, route::PAYMENTS_CHANNELS);
+                assert!(target.query.is_none());
+                1
+            }
+            ReadRoute::Health => {
+                assert_eq!(target.path, route::HEALTH);
+                assert!(target.query.is_none());
+                2
+            }
+            ReadRoute::Messages { limit } => {
+                assert_eq!(target.path, route::MESSAGES);
+                assert_eq!(target.query.map(|query| query.key), Some("limit"));
+                assert_eq!(target.query.map(|query| query.value), Some(limit));
+                3
+            }
+            ReadRoute::OwnPricing => {
+                assert_eq!(target.path, route::OWN_PRICING);
+                assert!(target.query.is_none());
+                4
+            }
+        };
+        assert!(!seen[slot]);
+        seen[slot] = true;
     }
+    assert_eq!(seen, [true; 5]);
 }
 
 #[test]
@@ -299,17 +325,24 @@ fn error_bodies_become_unavailable_and_drop_the_canary() {
     assert!(ERROR_BODY.contains("\"plaintext\""));
     for call in calls() {
         let done = dispatch(&node, call);
-        assert!(matches!(
+        assert_eq!(
             unavailable_reason(&done.output),
-            UnavailableReason::Http { status: 500 }
-        ));
+            UnavailableReason::UpstreamError
+        );
         assert_no_canary(&done, ERROR_BODY);
-        assert_no_available_zero(&serde_json::to_value(&done.output).expect("json"));
+        let output = serde_json::to_value(&done.output).expect("json");
+        assert_no_available_zero(&output);
+        assert_reasons_carry_no_payload(&output);
+        assert_no_json_number(&output, 500);
+        assert!(done
+            .log
+            .iter()
+            .any(|entry| { matches!(entry.outcome, LogOutcome::Http { status: 500 }) }));
     }
 }
 
 #[test]
-fn unknown_fields_become_unavailable_and_drop_the_canary() {
+fn mistyped_responses_are_malformed_and_drop_the_canary() {
     let node = Fake::new()
         .json(route::PAYMENTS_BALANCE, UNKNOWN_OBJECT)
         .json(route::PAYMENTS_CHANNELS, UNKNOWN_OBJECT)
@@ -319,7 +352,10 @@ fn unknown_fields_become_unavailable_and_drop_the_canary() {
     assert!(UNKNOWN_OBJECT.contains("\"nested\""));
     for call in calls() {
         let done = dispatch(&node, call);
-        assert_eq!(unavailable_reason(&done.output), UnavailableReason::Decode);
+        assert_eq!(
+            unavailable_reason(&done.output),
+            UnavailableReason::Malformed
+        );
         assert_no_canary(&done, UNKNOWN_OBJECT);
         assert_no_available_zero(&serde_json::to_value(&done.output).expect("json"));
     }
@@ -334,10 +370,7 @@ fn transport_failure_is_unavailable_not_zero() {
             input: BalanceInput {},
         },
     );
-    assert_eq!(
-        unavailable_reason(&done.output),
-        UnavailableReason::Transport
-    );
+    assert_eq!(unavailable_reason(&done.output), UnavailableReason::Timeout);
     let rendered = render(&done);
     assert!(!rendered.contains("\"value\""));
 }
@@ -355,7 +388,8 @@ fn raw_read_debug_redacts_the_body() {
 fn balance_projects_wallet_and_channel_figures_with_units() {
     let node = Fake::new()
         .json(route::PAYMENTS_BALANCE, r#"{"balance_msat":2500}"#)
-        .json(route::PAYMENTS_CHANNELS, channels_body());
+        .json(route::PAYMENTS_CHANNELS, channels_body())
+        .json(route::HEALTH, health_body("ldk"));
     let done = dispatch(
         &node,
         ToolCall::Balance {
@@ -368,10 +402,7 @@ fn balance_projects_wallet_and_channel_figures_with_units() {
     else {
         panic!("{:?}", done.output);
     };
-    assert_eq!(
-        value.composition,
-        WalletBalanceComposition::OnchainPlusLightning
-    );
+    assert_eq!(value.label, WalletBalanceLabel::LdkOnchainPlusLightning);
     assert_eq!(
         value.wallet_balance,
         Amount::Available {
@@ -400,6 +431,12 @@ fn balance_projects_wallet_and_channel_figures_with_units() {
     assert!(rendered.contains("\"unit\":\"msat\""));
     assert!(rendered.contains("\"source_field\":\"balance_msat\""));
     assert!(rendered.contains("\"source_field\":\"local_balance_msat\""));
+}
+
+fn health_body(lightning_backend: &str) -> String {
+    format!(
+        r#"{{"status":"ok","connected_peers":1,"e2ee_sessions":0,"pending_deliveries":0,"lightning_available":true,"lightning_payment_capable":true,"uptime_secs":3,"version":2,"lightning_backend":"{lightning_backend}","chain_backend":"esplora","block_height":100}}"#
+    )
 }
 
 fn channels_body() -> &'static str {
@@ -465,13 +502,21 @@ fn a_failed_wallet_read_does_not_zero_the_channel_figures() {
     else {
         panic!("{:?}", done.output);
     };
+    assert_eq!(value.label, WalletBalanceLabel::NodeReported);
     assert!(matches!(
         value.wallet_balance,
         Amount::Unavailable {
-            reason: UnavailableReason::Http { status: 502 },
+            reason: UnavailableReason::UpstreamError,
             ..
         }
     ));
+    let output = serde_json::to_value(&done.output).expect("json");
+    assert_reasons_carry_no_payload(&output);
+    assert_no_json_number(&output, 502);
+    assert!(done.log.iter().any(|entry| {
+        entry.path == route::PAYMENTS_BALANCE
+            && matches!(entry.outcome, LogOutcome::Http { status: 502 })
+    }));
     assert!(matches!(
         value.channel_local_balance,
         Amount::Available { value: 400, .. }
@@ -636,8 +681,7 @@ fn message_metadata_drops_bodies_memos_and_bad_senders() {
     let body = format!(
         r#"[{{"id":"CANARY_9f3e2a","kind":100,"sender":"{SENDER}","recipient":"CANARY_9f3e2a","timestamp":1,"ciphertext":"CANARY_9f3e2a","payment_amount_msat":0,"payment_hash":"CANARY_9f3e2a","plaintext":"CANARY_9f3e2a body","references":["CANARY_9f3e2a"]}},{{"id":"dd","kind":2,"sender":"CANARY_9f3e2a","recipient":"room","timestamp":2,"ciphertext":"CANARY_9f3e2a","payment_amount_msat":5,"payment_hash":"CANARY_9f3e2a","memo":"CANARY_9f3e2a","preimage":"CANARY_9f3e2a","nested":{{"plaintext":"CANARY_9f3e2a"}}}}]"#
     );
-    // The second object carries unknown memo/preimage/nested fields, so the
-    // page must fail closed rather than return a partial count of 1.
+    // Unknown memo/preimage/nested fields are ignored. The canary sender is withheld.
     let node = Fake::new().json(route::MESSAGES, &body);
     let done = dispatch(
         &node,
@@ -646,8 +690,22 @@ fn message_metadata_drops_bodies_memos_and_bad_senders() {
         },
     );
     assert_no_canary(&done, body);
-    assert_eq!(unavailable_reason(&done.output), UnavailableReason::Decode);
-    assert_no_available_zero(&serde_json::to_value(&done.output).expect("json"));
+    let ToolOutput::MessageCounts {
+        report: Report::Ready { value },
+    } = &done.output
+    else {
+        panic!("{:?}", done.output);
+    };
+    assert!(matches!(
+        value.returned_count,
+        Amount::Available { value: 2, .. }
+    ));
+    assert!(matches!(
+        value.withheld_senders,
+        Amount::Available { value: 1, .. }
+    ));
+    assert_eq!(value.senders.len(), 1);
+    assert_eq!(value.senders[0].sender, SENDER);
     assert!(matches!(node.seen()[0], ReadRoute::Messages { limit: 25 }));
 }
 
@@ -812,7 +870,7 @@ fn stale_chain_anchor_is_unavailable_not_zero() {
 }
 
 #[test]
-fn nested_message_fields_fail_closed() {
+fn nested_unknown_message_fields_are_ignored() {
     let body = format!(
         r#"[{{"id":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","kind":1,"sender":"{SENDER}","recipient":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","timestamp":1,"ciphertext":"abcdef","payment_amount_msat":1,"payment_hash":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","plaintext":"CANARY_9f3e2a","memo":"CANARY_9f3e2a","preimage":"CANARY_9f3e2a","nested":{{"body":"CANARY_9f3e2a"}}}}]"#
     );
@@ -824,7 +882,18 @@ fn nested_message_fields_fail_closed() {
         },
     );
     assert_no_canary(&done, body);
-    assert_eq!(unavailable_reason(&done.output), UnavailableReason::Decode);
+    let ToolOutput::MessageCounts {
+        report: Report::Ready { value },
+    } = &done.output
+    else {
+        panic!("{:?}", done.output);
+    };
+    assert!(matches!(
+        value.returned_count,
+        Amount::Available { value: 1, .. }
+    ));
+    assert_eq!(value.senders.len(), 1);
+    assert_eq!(value.senders[0].sender, SENDER);
 }
 
 #[test]
@@ -905,6 +974,181 @@ fn forbidden_output_keys_are_absent_from_a_hostile_success_page() {
             !keys.iter().any(|key| key == forbidden),
             "{forbidden} in {keys:?}"
         );
+    }
+}
+
+#[test]
+fn extra_response_fields_decode_and_the_canary_stays_out() {
+    let balance =
+        r#"{"balance_msat":2500,"memo":"CANARY_9f3e2a","nested":{"preimage":"CANARY_9f3e2a"}}"#;
+    let channels = format!(
+        r#"[{{"channel_id":"7","peer_pubkey":"{PUBKEY}","capacity_msat":1000,"local_balance_msat":400,"remote_balance_msat":60,"active":true,"short_channel_id":"1x2x3","memo":"CANARY_9f3e2a","nested":{{"preimage":"CANARY_9f3e2a"}}}}]"#
+    );
+    let health = r#"{"status":"ok","connected_peers":1,"e2ee_sessions":0,"pending_deliveries":0,"lightning_available":true,"lightning_payment_capable":true,"uptime_secs":3,"version":2,"lightning_backend":"lnd","chain_backend":"esplora","block_height":100,"memo":"CANARY_9f3e2a","nested":{"plaintext":"CANARY_9f3e2a"}}"#;
+    let messages = format!(
+        r#"[{{"id":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","kind":1,"sender":"{SENDER}","recipient":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","timestamp":1,"ciphertext":"CANARY_9f3e2a","payment_amount_msat":1,"payment_hash":"CANARY_9f3e2a","memo":"CANARY_9f3e2a","preimage":"CANARY_9f3e2a","nested":{{"body":"CANARY_9f3e2a"}}}}]"#
+    );
+    let pricing = r#"{"mode":"static","prices":{"communication":9},"block_height":10,"valid_blocks":72,"trust_level":"spv","difficulty_epoch_position":1,"peer_tables_cached":0,"memo":"CANARY_9f3e2a","fee_rates_by_target":{"6":{"raw_sat_per_vbyte":1.0,"ema_sat_per_vbyte":1.0,"preimage":"CANARY_9f3e2a"}},"nested":{"plaintext":"CANARY_9f3e2a"}}"#;
+    let node = Fake::new()
+        .json(route::PAYMENTS_BALANCE, balance)
+        .json(route::PAYMENTS_CHANNELS, &channels)
+        .json(route::HEALTH, health)
+        .json(route::MESSAGES, &messages)
+        .json(route::OWN_PRICING, pricing);
+    let fixture = format!("{balance}{channels}{health}{messages}{pricing}");
+    for call in calls() {
+        let done = dispatch(&node, call);
+        assert!(
+            matches!(
+                &done.output,
+                ToolOutput::Balance {
+                    report: Report::Ready { .. }
+                } | ToolOutput::Channels {
+                    report: Report::Ready { .. }
+                } | ToolOutput::Health {
+                    report: Report::Ready { .. }
+                } | ToolOutput::MessageCounts {
+                    report: Report::Ready { .. }
+                } | ToolOutput::LocalPrices {
+                    report: Report::Ready { .. }
+                }
+            ),
+            "{:?}",
+            done.output
+        );
+        assert_no_canary(&done, &fixture);
+    }
+    let balance_done = dispatch(
+        &node,
+        ToolCall::Balance {
+            input: BalanceInput {},
+        },
+    );
+    let ToolOutput::Balance {
+        report: Report::Ready { value },
+    } = &balance_done.output
+    else {
+        panic!("{:?}", balance_done.output);
+    };
+    assert_eq!(value.label, WalletBalanceLabel::LndChannelBalance);
+    assert!(matches!(
+        value.wallet_balance,
+        Amount::Available { value: 2500, .. }
+    ));
+}
+
+#[test]
+fn wallet_label_follows_the_lightning_backend() {
+    let cases = [
+        ("ldk", WalletBalanceLabel::LdkOnchainPlusLightning),
+        ("lnd", WalletBalanceLabel::LndChannelBalance),
+        ("lnbits", WalletBalanceLabel::NodeReported),
+        ("mock", WalletBalanceLabel::NodeReported),
+        ("void", WalletBalanceLabel::NodeReported),
+        ("CANARY_9f3e2a", WalletBalanceLabel::NodeReported),
+    ];
+    for (backend, label) in cases {
+        let health = health_body(backend);
+        let node = Fake::new()
+            .json(route::PAYMENTS_BALANCE, r#"{"balance_msat":2500}"#)
+            .json(route::PAYMENTS_CHANNELS, channels_body())
+            .json(route::HEALTH, &health);
+        let done = dispatch(
+            &node,
+            ToolCall::Balance {
+                input: BalanceInput {},
+            },
+        );
+        if health.contains(CANARY) {
+            assert_no_canary(&done, &health);
+        }
+        let ToolOutput::Balance {
+            report: Report::Ready { value },
+        } = &done.output
+        else {
+            panic!("{:?}", done.output);
+        };
+        assert_eq!(value.label, label, "{backend}");
+        assert!(matches!(
+            value.wallet_balance,
+            Amount::Available { value: 2500, .. }
+        ));
+    }
+}
+
+#[test]
+fn a_failed_health_read_does_not_claim_wallet_contents() {
+    let node = Fake::new()
+        .json(route::PAYMENTS_BALANCE, r#"{"balance_msat":2500}"#)
+        .json(route::PAYMENTS_CHANNELS, channels_body())
+        .http(route::HEALTH, 500, ERROR_BODY);
+    let done = dispatch(
+        &node,
+        ToolCall::Balance {
+            input: BalanceInput {},
+        },
+    );
+    assert_no_canary(&done, ERROR_BODY);
+    let ToolOutput::Balance {
+        report: Report::Ready { value },
+    } = &done.output
+    else {
+        panic!("{:?}", done.output);
+    };
+    assert_eq!(value.label, WalletBalanceLabel::NodeReported);
+    assert!(matches!(
+        value.wallet_balance,
+        Amount::Available { value: 2500, .. }
+    ));
+    let output = serde_json::to_value(&done.output).expect("json");
+    assert_reasons_carry_no_payload(&output);
+    assert_no_json_number(&output, 500);
+    assert!(done.log.iter().any(|entry| {
+        entry.path == route::HEALTH && matches!(entry.outcome, LogOutcome::Http { status: 500 })
+    }));
+}
+
+fn assert_no_json_number(value: &Value, forbidden: u64) {
+    match value {
+        Value::Number(number) => {
+            assert_ne!(number.as_u64(), Some(forbidden), "{value}");
+        }
+        Value::Object(map) => {
+            for child in map.values() {
+                assert_no_json_number(child, forbidden);
+            }
+        }
+        Value::Array(items) => {
+            for child in items {
+                assert_no_json_number(child, forbidden);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::String(_) => {}
+    }
+}
+
+fn assert_reasons_carry_no_payload(value: &Value) {
+    match value {
+        Value::Object(map) => {
+            if let Some(kind) = map.get("kind").and_then(Value::as_str) {
+                match kind {
+                    "timeout" | "upstream_error" | "malformed" | "absent" | "stale"
+                    | "overflow" => {
+                        assert_eq!(map.len(), 1, "reason carries a payload: {map:?}");
+                    }
+                    _ => {}
+                }
+            }
+            for child in map.values() {
+                assert_reasons_carry_no_payload(child);
+            }
+        }
+        Value::Array(items) => {
+            for child in items {
+                assert_reasons_carry_no_payload(child);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
     }
 }
 

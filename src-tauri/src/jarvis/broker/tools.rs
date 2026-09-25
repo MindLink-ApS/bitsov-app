@@ -2,8 +2,9 @@
 //!
 //! Wire structs accept the real route shape, including fields the assistant
 //! must never see (`ciphertext`, `plaintext`, `payment_hash`). Those fields
-//! are not `Debug` and are not copied into the report. Unknown JSON fields
-//! fail the decode, which becomes [`UnavailableReason::Decode`] with no body.
+//! are not `Debug` and are not copied into the report. Unknown response fields
+//! are ignored and are not stored. A body that does not match the route shape
+//! becomes [`UnavailableReason::Malformed`] with no body.
 
 use std::collections::BTreeMap;
 
@@ -15,7 +16,7 @@ use super::schema::{
     Amount, BalanceReport, CategoryFeeTarget, CategoryPrice, ChainBackend, ChannelSummary,
     ChannelsReport, CopiedId, HealthReport, LightningBackend, Liveness, LocalPrices,
     MessageMetadata, PriceCategory, PricingMode, Report, SenderCount, SourceField, TargetFee,
-    TrustLevel, UnavailableReason, Unit, WalletBalanceComposition,
+    TrustLevel, UnavailableReason, Unit, WalletBalanceLabel,
 };
 use super::{LogOutcome, NodeRead, RawRead, ReadLog, TransportFault};
 
@@ -29,9 +30,9 @@ enum FetchFail {
 impl From<FetchFail> for UnavailableReason {
     fn from(fail: FetchFail) -> Self {
         match fail {
-            FetchFail::Transport => Self::Transport,
-            FetchFail::Http { status } => Self::Http { status },
-            FetchFail::Decode => Self::Decode,
+            FetchFail::Transport => Self::Timeout,
+            FetchFail::Http { .. } => Self::UpstreamError,
+            FetchFail::Decode => Self::Malformed,
         }
     }
 }
@@ -96,13 +97,11 @@ fn project<T, U>(
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct BalanceWire {
     balance_msat: u64,
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct ChannelWire {
     channel_id: String,
     peer_pubkey: String,
@@ -133,12 +132,26 @@ pub(super) fn balance(node: &impl NodeRead, log: &mut Vec<ReadLog>) -> Report<Ba
     };
     Report::Ready {
         value: BalanceReport {
-            composition: WalletBalanceComposition::OnchainPlusLightning,
+            label: wallet_label(node, log),
             wallet_balance,
             channel_local_balance: sums.local,
             channel_remote_balance: sums.remote,
             channel_capacity: sums.capacity,
         },
+    }
+}
+
+fn wallet_label(node: &impl NodeRead, log: &mut Vec<ReadLog>) -> WalletBalanceLabel {
+    let Ok(wire) = fetch::<HealthWire>(node, ReadRoute::Health, log) else {
+        return WalletBalanceLabel::NodeReported;
+    };
+    match lightning_backend(&wire.lightning_backend) {
+        LightningBackend::Ldk => WalletBalanceLabel::LdkOnchainPlusLightning,
+        LightningBackend::Lnd => WalletBalanceLabel::LndChannelBalance,
+        LightningBackend::Lnbits
+        | LightningBackend::Mock
+        | LightningBackend::Void
+        | LightningBackend::Other => WalletBalanceLabel::NodeReported,
     }
 }
 
@@ -274,7 +287,6 @@ fn copy_short_channel_id(value: &str) -> CopiedId {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct HealthWire {
     status: String,
     connected_peers: u64,
@@ -360,7 +372,6 @@ fn chain_backend(name: &str) -> ChainBackend {
 /// `MessageResponse` at 958e399. Body-bearing fields stay on this struct so a
 /// real payload decodes, and nowhere else.
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct MessageWire {
     sender: String,
     #[allow(dead_code)]
@@ -429,7 +440,6 @@ fn checked_sender(sender: &str) -> Option<String> {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct FeeWire {
     raw_sat_per_vbyte: f64,
     ema_sat_per_vbyte: f64,
@@ -437,7 +447,6 @@ struct FeeWire {
 
 /// `OwnPricingResponse` at 958e399.
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct PricingWire {
     mode: String,
     prices: BTreeMap<String, u64>,
@@ -635,7 +644,7 @@ fn finite_float_unit(value: f64, unit: Unit, source_field: SourceField) -> Amoun
     if value.is_finite() && value >= 0.0 {
         available(value, unit, source_field)
     } else {
-        unavailable(unit, source_field, UnavailableReason::Decode)
+        unavailable(unit, source_field, UnavailableReason::Malformed)
     }
 }
 

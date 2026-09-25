@@ -179,23 +179,53 @@ pub const fn segments_allowed(path: &str) -> bool {
     true
 }
 
-/// Construction-time check: every sample route is GET, on the allowlist, and
-/// free of mutating segments. [`crate::jarvis::broker::Broker::new`] calls this.
+const fn query_ok(query: Option<Query>) -> bool {
+    match query {
+        None => true,
+        Some(query) => const_eq(query.key, "limit"),
+    }
+}
+
+/// True when [`ReadRoute::target`] is an allowlisted GET for this variant.
+///
+/// The path compared here is `route.target().path`, not a free-standing copy
+/// of the path constant.
+const fn mapping_ok(route: ReadRoute) -> bool {
+    let target = route.target();
+    let expected = match route {
+        ReadRoute::PaymentsBalance => PAYMENTS_BALANCE,
+        ReadRoute::PaymentsChannels => PAYMENTS_CHANNELS,
+        ReadRoute::Health => HEALTH,
+        ReadRoute::Messages { .. } => MESSAGES,
+        ReadRoute::OwnPricing => OWN_PRICING,
+    };
+    const_eq(target.method, "GET")
+        && const_eq(target.path, expected)
+        && path_allowed(target.path)
+        && segments_allowed(target.path)
+        && query_ok(target.query)
+}
+
+/// Slot per variant. A new `ReadRoute` fails this match until it is numbered,
+/// and the const block requires every slot to appear in [`sample_routes`].
+const fn variant_slot(route: ReadRoute) -> usize {
+    match route {
+        ReadRoute::PaymentsBalance => 0,
+        ReadRoute::PaymentsChannels => 1,
+        ReadRoute::Health => 2,
+        ReadRoute::Messages { .. } => 3,
+        ReadRoute::OwnPricing => 4,
+    }
+}
+
+/// Construction-time check: every sample route's [`ReadRoute::target`] is an
+/// allowlisted GET. [`crate::jarvis::broker::Broker::new`] calls this.
 pub fn enforce() -> Result<(), ()> {
-    let mut index = 0;
     let samples = sample_routes();
+    let mut index = 0;
     while index < samples.len() {
-        let target = samples[index].target();
-        if !const_eq(target.method, "GET")
-            || !path_allowed(target.path)
-            || !segments_allowed(target.path)
-        {
+        if !mapping_ok(samples[index]) {
             return Err(());
-        }
-        if let Some(query) = target.query {
-            if !const_eq(query.key, "limit") {
-                return Err(());
-            }
         }
         index += 1;
     }
@@ -203,16 +233,23 @@ pub fn enforce() -> Result<(), ()> {
 }
 
 const _: () = {
-    assert!(path_allowed(PAYMENTS_BALANCE));
-    assert!(path_allowed(PAYMENTS_CHANNELS));
-    assert!(path_allowed(HEALTH));
-    assert!(path_allowed(MESSAGES));
-    assert!(path_allowed(OWN_PRICING));
-    assert!(segments_allowed(PAYMENTS_BALANCE));
-    assert!(segments_allowed(PAYMENTS_CHANNELS));
-    assert!(segments_allowed(HEALTH));
-    assert!(segments_allowed(MESSAGES));
-    assert!(segments_allowed(OWN_PRICING));
+    let routes = sample_routes();
+    let mut seen = [false; 5];
+    let mut index = 0;
+    while index < routes.len() {
+        let route = routes[index];
+        assert!(mapping_ok(route));
+        let slot = variant_slot(route);
+        assert!(slot < seen.len());
+        assert!(!seen[slot]);
+        seen[slot] = true;
+        index += 1;
+    }
+    let mut slot = 0;
+    while slot < seen.len() {
+        assert!(seen[slot]);
+        slot += 1;
+    }
     assert!(!path_allowed("/api/v1/payments/pay"));
     assert!(!path_allowed("/api/v1/payments/invoice"));
     assert!(!path_allowed("/api/v1/payments/keysend"));

@@ -1,8 +1,8 @@
 //! Typed tool inputs and allowlisted outputs.
 //!
-//! Every struct rejects unknown fields. Numeric figures carry a unit and the
-//! genome field they were read from. A missing, failed, or stale figure is
-//! [`Amount::Unavailable`] and has no numeric value.
+//! Tool inputs and outputs reject unknown fields. Numeric figures carry a unit
+//! and the genome field they were read from. A missing, failed, or stale figure
+//! is [`Amount::Unavailable`] and carries a closed reason with no numeric payload.
 
 use serde::{Deserialize, Serialize};
 
@@ -82,17 +82,24 @@ pub enum SourceField {
     CategoryFeeTargets,
 }
 
+/// Why a figure or report has no number.
+///
+/// Every variant is a unit. An HTTP status stays on the host log
+/// ([`super::LogOutcome`]) and is not part of tool output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum UnavailableReason {
-    Transport,
-    Http {
-        status: u16,
-    },
-    Decode,
+    /// The read did not complete.
+    Timeout,
+    /// The node returned a non-success status. The code is not stored here.
+    UpstreamError,
+    /// The body could not be projected into the allowlisted shape.
+    Malformed,
+    /// The node omitted a field that has no documented zero.
     Absent,
     /// The node used its documented "not available" sentinel instead of a figure.
     Stale,
+    /// A sum did not fit in `u64`. The wrapped total is not stored.
     Overflow,
 }
 
@@ -159,21 +166,24 @@ impl Default for MessageCountsInput {
     }
 }
 
-/// How the pinned node fills `balance_msat`.
+/// What tool output claims `balance_msat` includes.
 ///
-/// LDK `get_balance_msat` adds spendable on-chain sats and lightning sats into
-/// that single HTTP field. The route does not return the two addends.
+/// LDK reports spendable on-chain plus lightning. LND rc7 reports the channel
+/// balance. Every other case is the node-reported wallet balance, with no
+/// claim about which balances that field includes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum WalletBalanceComposition {
-    OnchainPlusLightning,
+pub enum WalletBalanceLabel {
+    LdkOnchainPlusLightning,
+    LndChannelBalance,
+    NodeReported,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BalanceReport {
-    pub composition: WalletBalanceComposition,
-    /// `GET /payments/balance` field `balance_msat` (on-chain + lightning, summed).
+    pub label: WalletBalanceLabel,
+    /// `GET /payments/balance` field `balance_msat`. See [`BalanceReport::label`].
     pub wallet_balance: Amount<u64>,
     /// Sum of `local_balance_msat` (outbound capacity) from `GET /payments/channels`.
     pub channel_local_balance: Amount<u64>,

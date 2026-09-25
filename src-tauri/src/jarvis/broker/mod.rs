@@ -15,7 +15,7 @@ pub use schema::{
     ChannelSummary, ChannelsInput, ChannelsReport, CopiedId, HealthInput, HealthReport,
     LightningBackend, Liveness, LocalPrices, LocalPricesInput, MessageCountsInput, MessageMetadata,
     PriceCategory, PricingMode, Report, SenderCount, SourceField, TargetFee, ToolCall, ToolOutput,
-    TrustLevel, UnavailableReason, Unit, WalletBalanceComposition, MAX_MESSAGE_LIMIT,
+    TrustLevel, UnavailableReason, Unit, WalletBalanceLabel, MAX_MESSAGE_LIMIT,
 };
 
 use std::fmt;
@@ -57,7 +57,10 @@ pub trait NodeRead {
 pub enum LogOutcome {
     Ready,
     Transport,
-    Http { status: u16 },
+    /// HTTP status for the host log. Tool output does not carry this number.
+    Http {
+        status: u16,
+    },
     Decode,
 }
 
