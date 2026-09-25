@@ -1,8 +1,8 @@
 //! Answers computed from fresh route JSON.
 //!
 //! A route error, a timeout, or a stale body never becomes `0`. The read fails
-//! and the answer is [`Answer::Unavailable`]. A genuine zero on a fresh route
-//! would still be returned; this fixture's answerable fields are not zero.
+//! and the answer is [`Answer::Unavailable`]. Every route that carries the
+//! value is read, so faulting any one of them is unavailable too.
 
 use std::collections::BTreeSet;
 
@@ -16,7 +16,7 @@ use crate::serve::{paths, MockNode, ReadFailure};
 )]
 #[serde(rename_all = "snake_case")]
 pub enum AnswerKey {
-    OnchainSats,
+    FirstChannelLocalMsat,
     TotalBalanceMsat,
     ChannelLocalMsat,
     ChannelRemoteMsat,
@@ -52,7 +52,7 @@ pub enum AnswerKey {
 
 impl AnswerKey {
     pub const ALL: [AnswerKey; 32] = [
-        Self::OnchainSats,
+        Self::FirstChannelLocalMsat,
         Self::TotalBalanceMsat,
         Self::ChannelLocalMsat,
         Self::ChannelRemoteMsat,
@@ -86,20 +86,22 @@ impl AnswerKey {
         Self::PeerCount,
     ];
 
+    /// Every route whose fresh JSON can answer this key. Faulting any one of
+    /// them makes [`MockNode::answer`] unavailable.
     pub fn routes(self) -> &'static [crate::Route] {
         use crate::Route::{
             Health, Messages, PaymentsBalance, PaymentsChannels, PaymentsPrice, Peers, Pricing,
             Status,
         };
         match self {
-            Self::OnchainSats => &[PaymentsBalance, PaymentsChannels],
-            Self::TotalBalanceMsat => &[PaymentsBalance],
-            Self::ChannelLocalMsat
+            Self::FirstChannelLocalMsat
+            | Self::ChannelLocalMsat
             | Self::ChannelRemoteMsat
             | Self::ChannelCapacityMsat
             | Self::ChannelCount
             | Self::ChannelActiveCount
             | Self::ChannelInactiveCount => &[PaymentsChannels],
+            Self::TotalBalanceMsat => &[PaymentsBalance, Status],
             Self::HealthStatus
             | Self::ConnectedPeers
             | Self::E2eeSessions
@@ -108,9 +110,9 @@ impl AnswerKey {
             | Self::LightningPaymentCapable
             | Self::UptimeSecs
             | Self::ProtocolVersion
-            | Self::BlockHeight
             | Self::LightningBackend
-            | Self::ChainBackend => &[Health],
+            | Self::ChainBackend => &[Health, Status],
+            Self::BlockHeight => &[Health, Status, Pricing],
             Self::MessageCount
             | Self::DistinctSenders
             | Self::MessagesFromA
@@ -118,10 +120,11 @@ impl AnswerKey {
             | Self::ChatMessageCount => &[Messages],
             Self::MessagesSent => &[Messages, Status],
             Self::PriceChatMsat
-            | Self::PriceLongformMsat
             | Self::PriceFileMsat
-            | Self::PriceCalendarMsat => &[PaymentsPrice],
-            Self::PriceCommunicationMsat | Self::PricingMode => &[Pricing],
+            | Self::PriceCalendarMsat
+            | Self::PriceCommunicationMsat => &[PaymentsPrice, Pricing],
+            Self::PriceLongformMsat => &[PaymentsPrice],
+            Self::PricingMode => &[Pricing],
             Self::PeerCount => &[Peers],
         }
     }
@@ -153,53 +156,115 @@ impl MockNode {
 
 fn compute(node: &MockNode, key: AnswerKey) -> Result<String, ReadFailure> {
     match key {
-        AnswerKey::OnchainSats => onchain_sats(node),
-        AnswerKey::TotalBalanceMsat => field_u64(node, paths::BALANCE, "balance_msat"),
+        AnswerKey::FirstChannelLocalMsat => first_channel_local(node),
+        AnswerKey::TotalBalanceMsat => same_u64(
+            node,
+            &[
+                (paths::BALANCE, "balance_msat"),
+                (paths::STATUS, "lightning_balance_msat"),
+            ],
+        ),
         AnswerKey::ChannelLocalMsat => channel_sum(node, "local_balance_msat"),
         AnswerKey::ChannelRemoteMsat => channel_sum(node, "remote_balance_msat"),
         AnswerKey::ChannelCapacityMsat => channel_sum(node, "capacity_msat"),
         AnswerKey::ChannelCount => array_len(node, paths::CHANNELS),
         AnswerKey::ChannelActiveCount => channel_active(node, true),
         AnswerKey::ChannelInactiveCount => channel_active(node, false),
-        AnswerKey::HealthStatus => field_str(node, paths::HEALTH, "status"),
-        AnswerKey::ConnectedPeers => field_u64(node, paths::HEALTH, "connected_peers"),
-        AnswerKey::E2eeSessions => field_u64(node, paths::HEALTH, "e2ee_sessions"),
-        AnswerKey::PendingDeliveries => field_u64(node, paths::HEALTH, "pending_deliveries"),
-        AnswerKey::LightningAvailable => field_bool(node, paths::HEALTH, "lightning_available"),
-        AnswerKey::LightningPaymentCapable => {
-            field_bool(node, paths::HEALTH, "lightning_payment_capable")
-        }
-        AnswerKey::UptimeSecs => field_u64(node, paths::HEALTH, "uptime_secs"),
-        AnswerKey::ProtocolVersion => field_u64(node, paths::HEALTH, "version"),
-        AnswerKey::BlockHeight => field_u64(node, paths::HEALTH, "block_height"),
-        AnswerKey::LightningBackend => field_str(node, paths::HEALTH, "lightning_backend"),
-        AnswerKey::ChainBackend => field_str(node, paths::HEALTH, "chain_backend"),
+        AnswerKey::HealthStatus => same_str(
+            node,
+            &[(paths::HEALTH, "status"), (paths::STATUS, "status")],
+        ),
+        AnswerKey::ConnectedPeers => same_u64(
+            node,
+            &[
+                (paths::HEALTH, "connected_peers"),
+                (paths::STATUS, "connected_peers"),
+            ],
+        ),
+        AnswerKey::E2eeSessions => same_u64(
+            node,
+            &[
+                (paths::HEALTH, "e2ee_sessions"),
+                (paths::STATUS, "e2ee_sessions"),
+            ],
+        ),
+        AnswerKey::PendingDeliveries => same_u64(
+            node,
+            &[
+                (paths::HEALTH, "pending_deliveries"),
+                (paths::STATUS, "pending_deliveries"),
+            ],
+        ),
+        AnswerKey::LightningAvailable => same_bool(
+            node,
+            &[
+                (paths::HEALTH, "lightning_available"),
+                (paths::STATUS, "lightning_available"),
+            ],
+        ),
+        AnswerKey::LightningPaymentCapable => same_bool(
+            node,
+            &[
+                (paths::HEALTH, "lightning_payment_capable"),
+                (paths::STATUS, "lightning_payment_capable"),
+            ],
+        ),
+        AnswerKey::UptimeSecs => same_u64(
+            node,
+            &[
+                (paths::HEALTH, "uptime_secs"),
+                (paths::STATUS, "uptime_secs"),
+            ],
+        ),
+        AnswerKey::ProtocolVersion => same_u64(
+            node,
+            &[(paths::HEALTH, "version"), (paths::STATUS, "version")],
+        ),
+        AnswerKey::BlockHeight => same_u64(
+            node,
+            &[
+                (paths::HEALTH, "block_height"),
+                (paths::STATUS, "block_height"),
+                (paths::PRICING, "block_height"),
+            ],
+        ),
+        AnswerKey::LightningBackend => same_str(
+            node,
+            &[
+                (paths::HEALTH, "lightning_backend"),
+                (paths::STATUS, "lightning_backend"),
+            ],
+        ),
+        AnswerKey::ChainBackend => same_str(
+            node,
+            &[
+                (paths::HEALTH, "chain_backend"),
+                (paths::STATUS, "chain_backend"),
+            ],
+        ),
         AnswerKey::MessageCount => array_len(node, paths::MESSAGES),
         AnswerKey::DistinctSenders => distinct_senders(node),
         AnswerKey::MessagesFromA => messages_from(node, SENDER_A),
         AnswerKey::MessagesFromB => messages_from(node, SENDER_B),
         AnswerKey::MessagesSent => messages_sent(node),
         AnswerKey::ChatMessageCount => chat_messages(node),
-        AnswerKey::PriceChatMsat => kind_price(node, 0),
+        AnswerKey::PriceChatMsat => price_agrees(node, 0, "communication"),
         AnswerKey::PriceLongformMsat => kind_price(node, 1),
-        AnswerKey::PriceFileMsat => kind_price(node, 200),
-        AnswerKey::PriceCalendarMsat => kind_price(node, 100),
-        AnswerKey::PriceCommunicationMsat => category_price(node, "communication"),
+        AnswerKey::PriceFileMsat => price_agrees(node, 200, "files_media"),
+        AnswerKey::PriceCalendarMsat => price_agrees(node, 100, "structured_data"),
+        AnswerKey::PriceCommunicationMsat => price_agrees(node, 0, "communication"),
         AnswerKey::PricingMode => field_str(node, paths::PRICING, "mode"),
         AnswerKey::PeerCount => array_len(node, paths::PEERS),
     }
 }
 
-fn onchain_sats(node: &MockNode) -> Result<String, ReadFailure> {
-    let balance = node.read(paths::BALANCE)?;
+fn first_channel_local(node: &MockNode) -> Result<String, ReadFailure> {
     let channels = node.read(paths::CHANNELS)?;
-    let total = require_u64(&balance, "balance_msat")?;
-    let local = sum_field(&channels, "local_balance_msat")?;
-    let onchain_msat = total.checked_sub(local).ok_or(ReadFailure::Unreadable)?;
-    if onchain_msat % 1000 != 0 {
-        return Err(ReadFailure::Unreadable);
-    }
-    Ok((onchain_msat / 1000).to_string())
+    let first = channels
+        .as_array()
+        .and_then(|items| items.first())
+        .ok_or(ReadFailure::Unreadable)?;
+    Ok(require_u64(first, "local_balance_msat")?.to_string())
 }
 
 fn channel_sum(node: &MockNode, field: &str) -> Result<String, ReadFailure> {
@@ -249,7 +314,15 @@ fn messages_sent(node: &MockNode) -> Result<String, ReadFailure> {
     if me != NODE_ID {
         return Err(ReadFailure::Unreadable);
     }
-    messages_from(node, me)
+    let path = format!("{}?peer={SENDER_A}", paths::MESSAGES);
+    let messages = node.read(&path)?;
+    let mut n = 0u64;
+    for msg in messages.as_array().ok_or(ReadFailure::Unreadable)? {
+        if require_str(msg, "sender")? == me {
+            n = n.checked_add(1).ok_or(ReadFailure::Unreadable)?;
+        }
+    }
+    Ok(n.to_string())
 }
 
 fn chat_messages(node: &MockNode) -> Result<String, ReadFailure> {
@@ -272,15 +345,19 @@ fn kind_price(node: &MockNode, kind: u16) -> Result<String, ReadFailure> {
     Ok(require_u64(&body, "price_msat")?.to_string())
 }
 
+fn price_agrees(node: &MockNode, kind: u16, category: &str) -> Result<String, ReadFailure> {
+    let from_kind = kind_price(node, kind)?;
+    let from_category = category_price(node, category)?;
+    if from_kind != from_category {
+        return Err(ReadFailure::Unreadable);
+    }
+    Ok(from_kind)
+}
+
 fn category_price(node: &MockNode, category: &str) -> Result<String, ReadFailure> {
     let body = node.read(paths::PRICING)?;
     let prices = body.get("prices").ok_or(ReadFailure::Unreadable)?;
     Ok(require_u64(prices, category)?.to_string())
-}
-
-fn field_u64(node: &MockNode, path: &str, field: &str) -> Result<String, ReadFailure> {
-    let body = node.read(path)?;
-    Ok(require_u64(&body, field)?.to_string())
 }
 
 fn field_str(node: &MockNode, path: &str, field: &str) -> Result<String, ReadFailure> {
@@ -288,13 +365,53 @@ fn field_str(node: &MockNode, path: &str, field: &str) -> Result<String, ReadFai
     Ok(require_str(&body, field)?.to_string())
 }
 
-fn field_bool(node: &MockNode, path: &str, field: &str) -> Result<String, ReadFailure> {
-    let body = node.read(path)?;
-    let value = body
-        .get(field)
-        .and_then(Value::as_bool)
-        .ok_or(ReadFailure::Unreadable)?;
-    Ok(value.to_string())
+fn same_u64(node: &MockNode, reads: &[(&str, &str)]) -> Result<String, ReadFailure> {
+    let mut found = None;
+    for (path, field) in reads {
+        let body = node.read(path)?;
+        let value = require_u64(&body, field)?;
+        match found {
+            None => found = Some(value),
+            Some(prev) if prev != value => return Err(ReadFailure::Unreadable),
+            Some(_) => {}
+        }
+    }
+    found
+        .map(|value| value.to_string())
+        .ok_or(ReadFailure::Unreadable)
+}
+
+fn same_str(node: &MockNode, reads: &[(&str, &str)]) -> Result<String, ReadFailure> {
+    let mut found: Option<String> = None;
+    for (path, field) in reads {
+        let body = node.read(path)?;
+        let value = require_str(&body, field)?.to_string();
+        match &found {
+            None => found = Some(value),
+            Some(prev) if prev != &value => return Err(ReadFailure::Unreadable),
+            Some(_) => {}
+        }
+    }
+    found.ok_or(ReadFailure::Unreadable)
+}
+
+fn same_bool(node: &MockNode, reads: &[(&str, &str)]) -> Result<String, ReadFailure> {
+    let mut found = None;
+    for (path, field) in reads {
+        let body = node.read(path)?;
+        let value = body
+            .get(*field)
+            .and_then(Value::as_bool)
+            .ok_or(ReadFailure::Unreadable)?;
+        match found {
+            None => found = Some(value),
+            Some(prev) if prev != value => return Err(ReadFailure::Unreadable),
+            Some(_) => {}
+        }
+    }
+    found
+        .map(|value| value.to_string())
+        .ok_or(ReadFailure::Unreadable)
 }
 
 fn array_len(node: &MockNode, path: &str) -> Result<String, ReadFailure> {

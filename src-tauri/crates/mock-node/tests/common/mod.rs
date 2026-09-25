@@ -81,7 +81,7 @@ pub fn rust_canary_literals(dir: &Path) -> BTreeSet<String> {
 }
 
 pub fn fresh_paths() -> Vec<String> {
-    let mut paths = vec![
+    let paths = vec![
         mock_node::paths::HEALTH.into(),
         mock_node::paths::STATUS.into(),
         mock_node::paths::BALANCE.into(),
@@ -92,10 +92,15 @@ pub fn fresh_paths() -> Vec<String> {
         mock_node::paths::PEERS.into(),
         mock_node::paths::price(0),
         mock_node::paths::price(1),
+        mock_node::paths::price(7),
         mock_node::paths::price(100),
         mock_node::paths::price(200),
+        format!(
+            "{}?peer={}",
+            mock_node::paths::MESSAGES,
+            mock_node::SENDER_A
+        ),
     ];
-    paths.extend(["/health", "/payments/balance"].map(str::to_string));
     paths
 }
 

@@ -44,7 +44,7 @@ fn every_planted_canary_is_exported_and_every_export_is_planted() {
         let error = MockNode::canonical().fault(route, Fault::Error);
         let path = match route {
             Route::PaymentsPrice => paths::price(0),
-            other => common::sample_path(other, mock_node::AnswerKey::OnchainSats),
+            other => common::sample_path(other, mock_node::AnswerKey::FirstChannelLocalMsat),
         };
         found.extend(common::canaries_in(&common::body_of(stale.serve(&path))));
         found.extend(common::canaries_in(&common::body_of(error.serve(&path))));
@@ -62,7 +62,7 @@ fn every_planted_canary_is_exported_and_every_export_is_planted() {
         node.serve("/missing"),
     )));
     found.extend(common::canaries_in(&common::body_of(
-        node.serve("/api/v1/payments/price/7"),
+        node.serve("/api/v1/payments/price/700"),
     )));
 
     let expected: BTreeSet<&str> = CANARIES.iter().copied().collect();
@@ -99,6 +99,16 @@ fn the_error_body_uses_the_genome_error_shape() {
     let node = MockNode::canonical().fault(Route::PaymentsBalance, Fault::Error);
     let body = common::body_of(node.serve(paths::BALANCE));
     assert_eq!(body["code"], 502);
-    assert_eq!(body["error"], format!("lightning error: {ERROR_BODY_01}"));
+    assert_eq!(body["error"], ERROR_BODY_01);
     assert_eq!(body.as_object().expect("object").len(), 2);
+
+    let messages = MockNode::canonical().fault(Route::Messages, Fault::Error);
+    let body = common::body_of(messages.serve(paths::MESSAGES));
+    assert_eq!(body["code"], 500);
+    assert_eq!(body["error"], ERROR_BODY_01);
+
+    let price = MockNode::canonical().fault(Route::PaymentsPrice, Fault::Error);
+    let body = common::body_of(price.serve(&paths::price(0)));
+    assert_eq!(body["code"], 400);
+    assert_eq!(body["error"], ERROR_BODY_01);
 }

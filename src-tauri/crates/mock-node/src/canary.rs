@@ -2,7 +2,9 @@
 //!
 //! Each string is unique and greppable. Later leak tests compare an answer
 //! against [`CANARIES`] and fail if any entry appears. The strings are defined
-//! once, here, and the mock copies these constants into the excluded fields.
+//! once, here, and the mock copies these constants into fields rc7 already
+//! serializes. rc7 response structs do not emit unknown keys, so this list has
+//! no extra-field canaries.
 
 /// Message plaintext. One per stored message.
 pub const MSG_BODY_01: &str = "JARVIS_CANARY_MSG_BODY_01";
@@ -12,10 +14,10 @@ pub const MSG_BODY_04: &str = "JARVIS_CANARY_MSG_BODY_04";
 pub const MSG_BODY_05: &str = "JARVIS_CANARY_MSG_BODY_05";
 pub const MSG_BODY_06: &str = "JARVIS_CANARY_MSG_BODY_06";
 
-/// Plaintext nested under an unknown object on the first message.
+/// Hex message id in `references` on the newest incoming message.
 pub const MSG_NESTED_01: &str = "JARVIS_CANARY_MSG_NESTED_01";
 
-/// Ciphertext of the first message. Not valid ciphertext, on purpose.
+/// Ciphertext of the newest incoming message. Not valid ciphertext, on purpose.
 pub const MSG_CIPHER_01: &str = "JARVIS_CANARY_MSG_CIPHER_01";
 
 /// Invoice memos on `GET /payments`.
@@ -35,11 +37,8 @@ pub const COUNTERPARTY_01: &str = "JARVIS_CANARY_COUNTERPARTY_01";
 pub const COUNTERPARTY_02: &str = "JARVIS_CANARY_COUNTERPARTY_02";
 pub const COUNTERPARTY_03: &str = "JARVIS_CANARY_COUNTERPARTY_03";
 
-/// Unknown fields the genome schema does not define.
-pub const EXTRA_01: &str = "JARVIS_CANARY_EXTRA_01";
-pub const EXTRA_02: &str = "JARVIS_CANARY_EXTRA_02";
-
 /// Body of an injected route-error response (`{"error","code"}`).
+/// rc7 puts the inner string in `error`, not the Display prefix.
 pub const ERROR_BODY_01: &str = "JARVIS_CANARY_ERROR_BODY_01";
 
 /// Every canary the mock can emit. Completeness tests require this list and
@@ -62,8 +61,6 @@ pub const CANARIES: &[&str] = &[
     COUNTERPARTY_01,
     COUNTERPARTY_02,
     COUNTERPARTY_03,
-    EXTRA_01,
-    EXTRA_02,
     ERROR_BODY_01,
 ];
 

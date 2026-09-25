@@ -30,11 +30,14 @@ fn two_canonical_nodes_agree() {
 }
 
 #[test]
-fn the_app_relative_path_matches_the_prefixed_path() {
+fn prefix_less_paths_are_not_routes() {
     let node = MockNode::canonical();
-    assert_eq!(node.serve("/payments/balance"), node.serve(paths::BALANCE));
-    assert_eq!(node.serve("/health"), node.serve(paths::HEALTH));
-    assert_eq!(node.serve("/messages"), node.serve(paths::MESSAGES));
+    for path in ["/payments/balance", "/health", "/messages", "/status"] {
+        assert_eq!(node.read(path), Err(ReadFailure::NotFound), "{path}");
+        let body = common::body_of(node.serve(path));
+        assert_eq!(body["code"], 404);
+        assert_eq!(body["error"], "route");
+    }
 }
 
 #[test]
