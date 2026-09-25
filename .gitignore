@@ -9,3 +9,10 @@ src-tauri/target/
 src-tauri/gen/
 src-tauri/bin/konsensus-*
 !src-tauri/bin/README.md
+
+# Local model weights stay outside git (see ~/Desktop/seat-drafts/models).
+*.gguf
+models/
+eval/results/.*
+__pycache__/
+*.pyc

@@ -1,0 +1,88 @@
+{
+  "id": "stub-5",
+  "source": "local stub — no J1 mock-node/fixture PR was open on MindLink-ApS/bitsov-app when this run started",
+  "description": "Five questions over a clearly fake mock node. Three positive controls are copied from the context, one asks for a sum that is determined by the context, and one asks for a fact the context does not contain.",
+  "context": {
+    "disclaimer": "FAKE mock node state for a harness. Not a live BitSov node, not a wallet, not a real peer.",
+    "node_alias": "mock-northwind-07",
+    "node_id": "02mocknode0000000000000000000000000000000000000000000000000007",
+    "network": "mock-signet",
+    "synced": true,
+    "block_height": 900001,
+    "on_chain_balance_sats": 1234567,
+    "channel_count": 3,
+    "channels": [
+      {
+        "channel_id": "mock-ch-amber-1",
+        "peer_alias": "mock-peer-amber",
+        "active": true,
+        "capacity_sats": 500000,
+        "local_balance_sats": 400000,
+        "remote_balance_sats": 100000
+      },
+      {
+        "channel_id": "mock-ch-birch-2",
+        "peer_alias": "mock-peer-birch",
+        "active": true,
+        "capacity_sats": 1000000,
+        "local_balance_sats": 250000,
+        "remote_balance_sats": 750000
+      },
+      {
+        "channel_id": "mock-ch-cedar-3",
+        "peer_alias": "mock-peer-cedar",
+        "active": false,
+        "capacity_sats": 800000,
+        "local_balance_sats": 0,
+        "remote_balance_sats": 800000
+      }
+    ]
+  },
+  "questions": [
+    {
+      "id": "pc-alias",
+      "kind": "positive_control",
+      "question": "What is node_alias?",
+      "expect": {
+        "match": "contains_all",
+        "values": ["mock-northwind-07"]
+      }
+    },
+    {
+      "id": "pc-onchain",
+      "kind": "positive_control",
+      "question": "What is on_chain_balance_sats? Include the unit sats.",
+      "expect": {
+        "match": "number",
+        "value": 1234567
+      }
+    },
+    {
+      "id": "pc-cedar-active",
+      "kind": "positive_control",
+      "question": "Is channel mock-ch-cedar-3 active?",
+      "expect": {
+        "match": "contains_any",
+        "values": ["inactive", "not active", "false", "no"],
+        "forbid_words": ["yes"]
+      }
+    },
+    {
+      "id": "q-local-sum",
+      "kind": "question",
+      "question": "What is the sum of local_balance_sats across every channel, in sats?",
+      "expect": {
+        "match": "number",
+        "value": 650000
+      }
+    },
+    {
+      "id": "neg-messages",
+      "kind": "negative_control",
+      "question": "How many messages did Maria send this node in the last 7 days?",
+      "expect": {
+        "match": "abstain"
+      }
+    }
+  ]
+}

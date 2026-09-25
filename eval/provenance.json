@@ -1,0 +1,29 @@
+{
+  "llama_cpp": {
+    "commit": "d81aef19941e145d04f88fb180ea89a67d052ab5",
+    "server": "/Users/rasmust.larsen/Desktop/seat-drafts/llama.cpp/build/bin/llama-server",
+    "build": "Release -DGGML_METAL=ON"
+  },
+  "models": [
+    {
+      "key": "qwen3-4b-q4_k_m",
+      "repo": "Qwen/Qwen3-4B-GGUF",
+      "filename": "Qwen3-4B-Q4_K_M.gguf",
+      "revision": "bc640142c66e1fdd12af0bd68f40445458f3869b",
+      "sha256": "7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5",
+      "size_bytes": 2497280256,
+      "quant": "Q4_K_M",
+      "path": "/Users/rasmust.larsen/Desktop/seat-drafts/models/Qwen3-4B-GGUF/Qwen3-4B-Q4_K_M.gguf"
+    },
+    {
+      "key": "qwen3-8b-q4_k_m",
+      "repo": "Qwen/Qwen3-8B-GGUF",
+      "filename": "Qwen3-8B-Q4_K_M.gguf",
+      "revision": "7c41481f57cb95916b40956ab2f0b139b296d974",
+      "sha256": "d98cdcbd03e17ce47681435b5150e34c1417f50b5c0019dd560e4882c5745785",
+      "size_bytes": 5027783488,
+      "quant": "Q4_K_M",
+      "path": "/Users/rasmust.larsen/Desktop/seat-drafts/models/Qwen3-8B-GGUF/Qwen3-8B-Q4_K_M.gguf"
+    }
+  ]
+}
