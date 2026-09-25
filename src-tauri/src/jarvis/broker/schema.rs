@@ -197,7 +197,6 @@ pub struct BalanceReport {
 #[serde(deny_unknown_fields)]
 pub struct ChannelSummary {
     pub channel_id: CopiedId,
-    pub peer_pubkey: CopiedId,
     pub capacity: Amount<u64>,
     pub local_balance: Amount<u64>,
     pub remote_balance: Amount<u64>,

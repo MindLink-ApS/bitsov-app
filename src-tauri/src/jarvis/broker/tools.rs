@@ -1,10 +1,10 @@
 //! Project allowlisted tool output from pinned genome JSON.
 //!
 //! Wire structs accept the real route shape, including fields the assistant
-//! must never see (`ciphertext`, `plaintext`, `payment_hash`). Those fields
-//! are not `Debug` and are not copied into the report. Unknown response fields
-//! are ignored and are not stored. A body that does not match the route shape
-//! becomes [`UnavailableReason::Malformed`] with no body.
+//! must never see (`ciphertext`, `plaintext`, `payment_hash`, `peer_pubkey`).
+//! Those fields are not `Debug` and are not copied into the report. Unknown
+//! response fields are ignored and are not stored. A body that does not match
+//! the route shape becomes [`UnavailableReason::Malformed`] with no body.
 
 use std::collections::BTreeMap;
 
@@ -18,11 +18,12 @@ use super::schema::{
     MessageMetadata, PriceCategory, PricingMode, Report, SenderCount, SourceField, TargetFee,
     TrustLevel, UnavailableReason, Unit, WalletBalanceLabel,
 };
-use super::{LogOutcome, NodeRead, RawRead, ReadLog, TransportFault};
+use super::{LogOutcome, NodeRead, RawRead, ReadFault, ReadLog};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FetchFail {
     Transport,
+    Stale,
     Http { status: u16 },
     Decode,
 }
@@ -31,6 +32,7 @@ impl From<FetchFail> for UnavailableReason {
     fn from(fail: FetchFail) -> Self {
         match fail {
             FetchFail::Transport => Self::Timeout,
+            FetchFail::Stale => Self::Stale,
             FetchFail::Http { .. } => Self::UpstreamError,
             FetchFail::Decode => Self::Malformed,
         }
@@ -44,12 +46,14 @@ fn fetch<T: DeserializeOwned>(
 ) -> Result<T, UnavailableReason> {
     let target = route.target();
     let decoded = match node.read(route) {
-        Err(TransportFault) => Err(FetchFail::Transport),
+        Err(ReadFault::Transport) => Err(FetchFail::Transport),
+        Err(ReadFault::Stale) => Err(FetchFail::Stale),
         Ok(raw) => decode(raw),
     };
     let outcome = match &decoded {
         Ok(_) => LogOutcome::Ready,
         Err(FetchFail::Transport) => LogOutcome::Transport,
+        Err(FetchFail::Stale) => LogOutcome::Stale,
         Err(FetchFail::Http { status }) => LogOutcome::Http { status: *status },
         Err(FetchFail::Decode) => LogOutcome::Decode,
     };
@@ -104,7 +108,6 @@ struct BalanceWire {
 #[derive(Deserialize)]
 struct ChannelWire {
     channel_id: String,
-    peer_pubkey: String,
     capacity_msat: u64,
     local_balance_msat: u64,
     remote_balance_msat: u64,
@@ -213,7 +216,6 @@ fn project_channels(list: Vec<ChannelWire>) -> Report<ChannelsReport> {
         }
         channels.push(ChannelSummary {
             channel_id: copy_channel_id(&channel.channel_id),
-            peer_pubkey: copy_pubkey(&channel.peer_pubkey),
             capacity: available(channel.capacity_msat, Unit::Msat, SourceField::CapacityMsat),
             local_balance: available(
                 channel.local_balance_msat,
@@ -243,14 +245,6 @@ fn project_channels(list: Vec<ChannelWire>) -> Report<ChannelsReport> {
 
 fn copy_channel_id(value: &str) -> CopiedId {
     copy_hex(value, 1, 64)
-}
-
-fn copy_pubkey(value: &str) -> CopiedId {
-    if value.len() == 64 || value.len() == 66 {
-        copy_hex(value, value.len(), value.len())
-    } else {
-        CopiedId::Withheld
-    }
 }
 
 fn copy_hex(value: &str, min: usize, max: usize) -> CopiedId {
