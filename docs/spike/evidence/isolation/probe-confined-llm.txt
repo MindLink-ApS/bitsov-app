@@ -36,7 +36,7 @@ R exec.system_bin_cat DENIED EPERM posix_spawn /bin/cat exit=-1
 R net.node_tcp_127.0.0.1 DENIED EPERM port 57788 reply=
 R net.node_tcp_::1 DENIED EPERM port 57788 reply=
 R net.control_sock DENIED EPERM /private/tmp/j0-canary-7GryiCNR/nodedata/control.sock reply=
-R net.egress_tcp_nonloopback DENIED EPERM 172.20.10.5:24638 reply=
+R net.egress_tcp_nonloopback DENIED EPERM <lan-ip>:24638 reply=
 R net.udp_loopback_send DENIED EPERM 127.0.0.1:57788
 R net.tcp_listen_loopback DENIED EPERM bind+listen 127.0.0.1:0
 R pos.llm_sock DENIED EPERM /private/tmp/j0-canary-7GryiCNR/ipc/llm.sock reply=

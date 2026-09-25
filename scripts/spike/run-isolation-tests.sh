@@ -22,6 +22,9 @@
 # control targets a dummy listener on this host's own LAN address that only answers itself.
 #
 # Usage: scripts/spike/run-isolation-tests.sh [--keep] [--evidence-dir DIR]
+#   DIR must not exist or be an empty directory (else refused before anything runs). Evidence is
+#   exported only after a completed run; nothing in DIR is ever deleted except files this run
+#   wrote there (see j0-evidence.sh).
 # Exit 0 iff FAIL=0 and WEAK=0.
 
 set -uo pipefail
@@ -38,6 +41,8 @@ while [ $# -gt 0 ]; do
   shift
 done
 die() { echo "FATAL: $*" >&2; exit 2; }
+. "$HERE/j0-evidence.sh" || die "j0-evidence.sh"
+evid_check "$EVID" || exit 2
 
 ROOT="$(mktemp -d /tmp/j0-canary-XXXXXXXX)" || die "mktemp"
 ROOT="$(cd "$ROOT" && pwd -P)" || die "canonicalize"
@@ -47,23 +52,13 @@ SIB="$ROOT/sibling-child"; DV="$ROOT/nodedata-dv"; WEIGHTS="$ROOT/weights"; IPC=
 SCRATCH_LLM="$ROOT/scratch-llm"; LISTEN="$ROOT/llm-listen"; NOIPC="$ROOT/no-ipc-for-llm"
 KCDIR="$ROOT/keychain"; KC="$KCDIR/j0-throwaway.keychain-db"; RES="$ROOT/results"
 PROFILE="$HERE/j0-confined-child.sb"
-BROKER_PID=""; KC_CREATED=0; VICTIMS=(); EVID_DONE=0
+BROKER_PID=""; KC_CREATED=0; VICTIMS=()
 
-# Evidence is copied with the home directory and user name redacted.
-redact() { /usr/bin/perl -pe 'BEGIN{$h=shift @ARGV; $u=shift @ARGV} s/\Q$h\E/~/g; s#/Users/[^/\s]+#/Users/<user>#g; s/\Q$u\E/<user>/g' "$HOME" "$(id -un)" "$1"; }
-copy_evidence() {
-  [ -n "$EVID" ] && [ -d "$RES" ] || return 0
-  mkdir -p "$EVID" || return 1
-  rm -f "$EVID"/*.txt "$EVID"/*.diff 2>/dev/null
-  for f in "$RES"/*; do [ -f "$f" ] && redact "$f" > "$EVID/$(basename "$f")"; done
-  EVID_DONE=1
-}
 cleanup() {
   for v in "${VICTIMS[@]:-}"; do [ -n "$v" ] && kill -KILL "$v" 2>/dev/null; done
   if [ -n "$BROKER_PID" ] && kill -0 "$BROKER_PID" 2>/dev/null; then kill "$BROKER_PID" 2>/dev/null; wait "$BROKER_PID" 2>/dev/null; fi
   wait 2>/dev/null
   if [ "$KC_CREATED" = 1 ]; then security delete-keychain "$KC" && echo "cleanup: deleted throwaway keychain (exact path under $ROOT)"; fi
-  [ "$EVID_DONE" = 1 ] || copy_evidence
   case "$ROOT" in
     /private/tmp/j0-canary-????????) if [ "$KEEP" = 0 ]; then rm -rf "$ROOT"; else echo "kept $ROOT"; fi ;;
   esac
@@ -505,7 +500,8 @@ grep -rqF "$BITSOV_TOKEN_VAL" "$RES" && LEAKED="$LEAKED planted-token-value"
 
 echo "---"
 echo "PASS=$PASS WEAK=$WEAK FAIL=$FAIL  (WEAK = denied but inconclusive; not counted as PASS)" | tee -a "$RES/summary.txt"
-copy_evidence
+# Export only here, after a completed run (the EXIT trap never exports).
+evid_export "$EVID" "$RES" "$ROOT/evidence-manifest.txt" || FAIL=$((FAIL+1))
 if [ -n "$EVID" ] && grep -rqF "$HOME" "$EVID"; then echo "WARNING: home path survived redaction in $EVID"; FAIL=$((FAIL+1)); fi
 echo "results: $RES"
 [ "$FAIL" = 0 ] && [ "$WEAK" = 0 ]

@@ -78,12 +78,16 @@ static int close_all_above_bootstrap(void) {
         struct proc_fdinfo *fds = malloc((size_t)sz);
         if (!fds) return -1;
         int n = proc_pidinfo(getpid(), PROC_PIDLISTFDS, 0, fds, sz);
-        if (n < 0) { free(fds); return -1; }
-        int cnt = n / (int)PROC_PIDLISTFD_SIZE, left = 0;
+        // A complete inventory is never empty (the bootstrap pipe is open at fd 3): refuse an
+        // empty or malformed result instead of reading it as "nothing to close".
+        if (n <= 0 || n % (int)PROC_PIDLISTFD_SIZE != 0) { free(fds); return -1; }
+        int cnt = n / (int)PROC_PIDLISTFD_SIZE, left = 0, saw_bootstrap = 0;
         for (int k = 0; k < cnt; k++) {
+            if (fds[k].proc_fd == BOOTSTRAP_FD) saw_bootstrap = 1;
             if (fds[k].proc_fd > BOOTSTRAP_FD) { close(fds[k].proc_fd); left++; }
         }
         free(fds);
+        if (!saw_bootstrap) return -1;
         if (left == 0) return 0;  // this enumeration found nothing above 3
     }
     return -1;

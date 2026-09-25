@@ -36,7 +36,7 @@ R exec.system_bin_cat OK 0 posix_spawn /bin/cat exit=0
 R net.node_tcp_127.0.0.1 OK 0 port 57788 reply=pong node-tcp 
 R net.node_tcp_::1 OK 0 port 57788 reply=pong node-tcp6 
 R net.control_sock OK 0 /private/tmp/j0-canary-7GryiCNR/nodedata/control.sock reply=pong control.sock 
-R net.egress_tcp_nonloopback OK 0 172.20.10.5:24638 reply=pong egress 
+R net.egress_tcp_nonloopback OK 0 <lan-ip>:24638 reply=pong egress 
 R net.udp_loopback_send OK 0 127.0.0.1:57788
 R net.tcp_listen_loopback OK 0 bind+listen 127.0.0.1:0
 R pos.llm_sock OK 0 /private/tmp/j0-canary-7GryiCNR/ipc/llm.sock reply=pong llm.sock 

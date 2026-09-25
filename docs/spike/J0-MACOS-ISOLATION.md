@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Date | 2026-09-25 (fix pass after Codex FAIL of `8c64b3bf`) |
+| Date | 2026-09-25 (fix passes after Codex FAILs of `8c64b3bf` and `15b28bcf`) |
 | Branch / base | `spike/j0-macos-isolation` from `origin/main` `0190baa` |
 | Host | Apple M4 Max, macOS 26.6.2 (25G83), SIP enabled, Developer Mode off, user in `_developer`, application firewall off |
 | Scope | ARCHITECTURE §3.1 isolation contract, ROADMAP Phase 1 "Isolation — reads" and "Isolation — writes", for the **assistant** and **LLM runtime** children |
@@ -24,6 +24,36 @@ Every required control is PASS under the stricter scoring introduced in this pas
 - presence in the results (a missing ID is a FAIL).
 
 No required control is only WEAK/INCONCLUSIVE. The 4 INFO lines are the legacy mach names `com.apple.securityd` and `com.apple.secd`, for both roles. They do not exist on macOS 26 (the baseline gets `1102 unknown service`), and their live replacements are required controls with baselines (§3). The verdict covers the assistant and LLM-runtime children on this machine and OS version. See §6 for the residual risks.
+
+---
+
+## 0a. Changes since `15b28bcf` (Codex FAIL, fix pass 2)
+
+The suites were **not re-run** for this pass. The recorded results above are from `15b28bcf`. This pass changes only how evidence is exported, the M2 baseline-create mechanics, one launcher sanity check and some evaluator strictness. It does not change the profile, the probe or any control's pass condition. The changed code was checked with a compile and a dry test (below).
+
+| # | Codex finding | Fix |
+|---|---|---|
+| P1 | Both runners ran `rm -f "$EVID"/*.txt` (and `*.diff`) on the caller's `--evidence-dir`, including from the EXIT trap after an early exit or build failure. | New shared `scripts/spike/j0-evidence.sh`. **(1)** `evid_check` runs at argument time, before any temp dir, build or keychain exists. It **refuses** a `--evidence-dir` that exists and is not an empty real directory. Symlinks and unlistable dirs are also refused. **(2)** Export happens **only** at the very end of a completed run. The EXIT trap no longer exports, so an early exit, build failure, `die` or signal leaves the dir untouched. **(3)** `evid_export` re-checks, creates the dir only if it is absent (the parent must already exist, no `mkdir -p`), writes each file exclusively (`set -C`, O_EXCL) and records its name in a run manifest (`$ROOT/evidence-manifest.txt`, outside the evidence dir). **(4)** On any export error it removes exactly the files named in the manifest, and removes the dir only if this call created it. No wildcard delete remains. Re-exporting into `docs/spike/evidence/*` therefore needs an empty dir first (e.g. `git rm` the old files). |
+| P2 | M2 create race: `mktemp -u` + absence check + non-exclusive `touch`. | The unconfined baseline create is now `mktemp` itself (O_CREAT\|O_EXCL). The file it returns is ours by construction, and it is removed only if it is still the same regular non-symlink file (dev:inode recorded at creation). The **confined** target is never deleted: if the confined create ever succeeded (a FAIL), the file is left in place and its path reported. The committed `M2-weights-write.txt` still shows the `15b28bcf` `touch` baseline. |
+| P2 | `j0spawn.c:80` accepted an empty `PROC_PIDLISTFDS` result as success. | `close_all_above_bootstrap` now refuses `n <= 0`, a size that is not a multiple of `PROC_PIDLISTFD_SIZE`, and any enumeration that does not contain fd 3 (the bootstrap pipe is always open there). Refusal means exit 125 before exec, as before. |
+| P2 (part) | M2 evaluator: `exit=0` rejected, but an exit record was not required; missing pid records were not rejected. | Each confined M2 attempt now needs a nonzero `exit=` record and its `j0spawn: child pid=` record, and kernel corroboration needs exactly 3 pids. |
+| Scrub | Private LAN address in committed evidence. | `172.20.10.5` → `<lan-ip>` in `probe-baseline.txt` and `probe-confined-{assistant,llm}.txt`. The redactor now also rewrites private and link-local IPv4 (10/8, 172.16/12, 192.168/16, 169.254/16) to `<lan-ip>`, so re-runs stay clean. |
+
+**Not fixed (documented, §6 #13 and #15):** isolation-log correlation is still per pid and operation class, not per target, and the debugger branch still accepts any `debugserver(<pid>)` deny. Removing the confined-create file is not atomic with its dev:inode check, so a same-user process could swap it in that window (same-user malware is out of scope, §6 #7).
+
+**Dry test (fresh `mktemp -d /tmp/j0-evid-dry-*`, deleted afterwards), all as expected:**
+
+1. A non-empty dir (`report.txt`, `notes.diff`) was refused by `evid_check` and `evid_export`, and by **both runners at startup (exit 2, no `/tmp/j0-canary-*` created)**. Both files survived with their content.
+2. An absent dir was created and got 2 files, with a matching manifest.
+3. An empty dir got 2 files.
+4. A symlinked dir was refused.
+5. With an absent parent, the export failed and nothing was created.
+6. **Build-failure path.** In a copy of the scripts with a deliberate `#error` in `j0spawn.c`, both runners died at `build j0spawn`. An empty evidence dir stayed empty. An absent one was not created. No canary root was left.
+7. **Mid-export failure** (redactor failing on the 2nd file): only the 2 manifest files were removed, and a dir this call created was removed.
+8. **A foreign file appearing mid-export** (`b.diff`) was not overwritten (noclobber) and survived. Only this run's `a.txt` was removed.
+9. Redaction test: `172.20.10.5:24638` and `192.168.1.20` → `<lan-ip>`. A version string `26.0.1` was untouched.
+
+All five C helpers and the `-DJ0_LEGACY_RLIMIT_CLOSE` launcher build with `-Wall` and no warnings. An unconfined `j0spawn` smoke run under `j0fdplant --fd 5000 --soft-limit 256` still closes fd 5000 and execs.
 
 ---
 
@@ -125,7 +155,7 @@ Re-run:
 
 ```bash
 scripts/spike/run-isolation-tests.sh                        # exit 0 iff FAIL=0 and WEAK=0
-scripts/spike/run-isolation-tests.sh --evidence-dir DIR     # also copy redacted raw logs
+scripts/spike/run-isolation-tests.sh --evidence-dir DIR     # also export redacted raw logs (DIR: absent or empty)
 scripts/spike/run-model-load.sh --model /path/to/model.gguf [--llama-bin DIR] [--evidence-dir DIR]
 ```
 
@@ -257,9 +287,9 @@ The launcher (`j0spawn.c`) supplies what a profile cannot:
 10. **Channels without runtime coverage:** POSIX shared memory and semaphores, System V IPC, pseudo-terminals, `nvram`, and `user-preference-read`. None is allowed by the profile (deny-default), but none is exercised by a test. Apple Events: only the mach lookup is tested; no event is sent, because of the no-GUI-automation rule.
 11. **Egress is tested to this host's own LAN address, not the internet** (the mock-only rule). The profile has no TCP/UDP rule at all, so the remote address is irrelevant to the decision. During the run the dummy broker listens on the LAN address for a few seconds, and answers only this host.
 12. **`task_for_pid` denial code is generic** (`KR5`). It is backed by the OK baseline, the lldb kernel log (`process-info-pidinfo others`) and the victim checks.
-13. **Kernel-log corroboration depends on `log show`** returning Sandbox records for the user's own processes, as it does here, with a few seconds' delay. Where the log is unavailable, the affected controls score WEAK, not PASS.
+13. **Kernel-log corroboration depends on `log show`** returning Sandbox records for the user's own processes, as it does here, with a few seconds' delay. Where the log is unavailable, the affected controls score WEAK, not PASS. Matching is per pid and operation class, not per target, and the debugger branch accepts any `debugserver(<pid>)` process-info/task-port deny. The committed records name the intended targets, but the matcher does not require it.
 14. **Integrity manifest** does not track atime.
-15. **The unconfined baselines** (M0, and the M2 unconfined attempts) run real tools outside the sandbox. Their side effects outside the temp dirs are not audited, apart from the model dir: one random-named file was created and removed by exact path, and the model's sha256 is unchanged.
+15. **The unconfined baselines** (M0, and the M2 unconfined attempts) run real tools outside the sandbox. Their side effects outside the temp dirs are not audited, apart from the model dir: one random-named file was created (since `15b28bcf`: by `mktemp`, O_EXCL) and removed only if its dev:inode was unchanged, and the model's sha256 is unchanged. The dev:inode check and the `rm` are not atomic.
 16. **Only the assistant and LLM roles were tested.** Other children need their own parameter sets through this suite. The §3.1a command boundary and the renderer tests are separate Phase 0.5 items.
 
 ---
@@ -275,6 +305,7 @@ The launcher (`j0spawn.c`) supplies what a profile cannot:
 | `scripts/spike/dummy_broker.c` | Fake node port (v4, v6, UDP), `control.sock`, LLM and broker sockets, LAN egress target, SIGUSR1 counter, `--victim` mode |
 | `scripts/spike/run-isolation-tests.sh` | Re-runnable isolation suite (PASS/WEAK/FAIL scoring, required-ID enumeration, kernel-log corroboration, redacted evidence) |
 | `scripts/spike/j0uclient.c` | Minimal HTTP-over-unix-socket client (the assistant stand-in in M3) |
+| `scripts/spike/j0-evidence.sh` | Shared evidence export: refuse a non-empty `--evidence-dir`, export only after a completed run, exclusive writes, manifest-only cleanup, redaction (home, user, private IPv4) |
 | `scripts/spike/run-model-load.sh` | Confined model load, weights immutability, socket-only server and assistant, GPU role split |
 | `docs/spike/evidence/` | Redacted raw logs of the recorded runs |
 | `.gitignore` | `*.gguf`, `*.safetensors`: weights never enter git |

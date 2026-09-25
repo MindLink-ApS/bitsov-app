@@ -16,11 +16,14 @@
 # Scoring as in run-isolation-tests.sh: PASS / WEAK (no successful baseline or no kernel
 # corroboration: inconclusive, not counted as PASS) / FAIL.
 #
-# Nothing is ever deleted from the model directory except a file this run itself created there:
-# M2 uses fresh random names (mktemp -u), refuses to run if one already exists, and removes only
-# that exact path, only after proving it was absent before.
+# Nothing is ever deleted from the model directory except the one file this run itself created
+# there: the M2 baseline create uses mktemp (O_CREAT|O_EXCL), and that file is removed only if it
+# is still the same regular file (dev:inode). The confined create target is a fresh random name;
+# if the confined create ever succeeded (a FAIL), that file is left in place and reported.
 # Weights are never copied into the repo. Nothing binds TCP; port 3141 is never used.
 # Usage: scripts/spike/run-model-load.sh --model FILE.gguf [--llama-bin DIR] [--evidence-dir DIR] [--keep]
+#   DIR must not exist or be an empty directory (else refused before anything runs); evidence is
+#   exported only after a completed run and nothing else in DIR is touched (see j0-evidence.sh).
 
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -38,6 +41,8 @@ while [ $# -gt 0 ]; do
   shift
 done
 die() { echo "FATAL: $*" >&2; exit 2; }
+. "$HERE/j0-evidence.sh" || die "j0-evidence.sh"
+evid_check "$EVID" || exit 2
 [ -f "$MODEL" ] || die "need --model FILE.gguf"
 LLAMA_BIN="$(cd "$LLAMA_BIN" && pwd -P)" || die "llama bin"
 MODEL="$(cd "$(dirname "$MODEL")" && pwd -P)/$(basename "$MODEL")" || die "model path"
@@ -49,18 +54,9 @@ case "$ROOT" in /private/tmp/j0-canary-model-????????) ;; *) die "unexpected tem
 BIN="$ROOT/bin"; S_LLM="$ROOT/scratch-llm"; S_AS="$ROOT/scratch-assistant"
 IPC="$ROOT/ipc"; LISTEN="$IPC/llm"; RES="$ROOT/results"
 mkdir -p "$BIN" "$S_LLM" "$S_AS" "$LISTEN" "$RES" || die "mkdir"
-SERVER_PID=""; EVID_DONE=0
-redact() { /usr/bin/perl -pe 'BEGIN{$h=shift @ARGV; $u=shift @ARGV} s/\Q$h\E/~/g; s#/Users/[^/\s]+#/Users/<user>#g; s/\Q$u\E/<user>/g' "$HOME" "$(id -un)" "$1"; }
-copy_evidence() {
-  [ -n "$EVID" ] && [ -d "$RES" ] || return 0
-  mkdir -p "$EVID" || return 1
-  rm -f "$EVID"/*.txt 2>/dev/null
-  for f in "$RES"/*; do [ -f "$f" ] && redact "$f" > "$EVID/$(basename "$f")"; done
-  EVID_DONE=1
-}
+SERVER_PID=""
 cleanup() {
   if [ -n "$SERVER_PID" ] && kill -0 "$SERVER_PID" 2>/dev/null; then kill "$SERVER_PID"; wait "$SERVER_PID" 2>/dev/null; fi
-  [ "$EVID_DONE" = 1 ] || copy_evidence
   case "$ROOT" in
     /private/tmp/j0-canary-model-????????) if [ "$KEEP" = 0 ]; then rm -rf "$ROOT"; else echo "kept $ROOT"; fi ;;
   esac
@@ -113,22 +109,27 @@ if [ "$M1RC" = 0 ] && full_offload "$RES/M1-confined.txt" && completed "$RES/M1-
 else out FAIL M1.confined_model_load_and_complete "exit=$M1RC offload='$OFF' (see M1-confined.txt)"; fi
 
 echo "== M2 weights immutable from the confined LLM"
-# Fresh random names in the model dir; refuse if either exists (never touch a pre-existing file).
-NEW_B=$(mktemp -u "$WDIR/.j0-m2-baseline-XXXXXXXXXXXX"); NEW_C=$(mktemp -u "$WDIR/.j0-m2-confined-XXXXXXXXXXXX")
-[ ! -e "$NEW_B" ] && [ ! -L "$NEW_B" ] && [ ! -e "$NEW_C" ] && [ ! -L "$NEW_C" ] || die "M2 test name already exists; refusing"
+# The confined target is a fresh random name; refuse if it exists (never touch a pre-existing file).
+NEW_C=$(mktemp -u "$WDIR/.j0-m2-confined-XXXXXXXXXXXX")
+[ ! -e "$NEW_C" ] && [ ! -L "$NEW_C" ] || die "M2 test name already exists; refusing"
 TOOL_P=("${LLM_P[@]}" --param "SYSTEM_EXEC=yes")
-# Removes $1 only if it is a regular file created by this run (proved absent above).
-rm_own() { if [ -f "$1" ] && [ ! -L "$1" ]; then rm -f -- "$1" && echo "removed own artefact $(basename "$1")"; fi; }
 {
-  echo "--- baseline (unconfined): touch new file in weights dir"
-  /usr/bin/touch "$NEW_B" 2>&1; echo "exit=$?"; [ -f "$NEW_B" ] && echo "created=yes" || echo "created=no"; rm_own "$NEW_B"
+  echo "--- baseline (unconfined): create new file in weights dir (mktemp, O_CREAT|O_EXCL)"
+  # mktemp creates exclusively, so the file it names is ours; it is removed only if it is still
+  # that same regular file (dev:inode recorded at creation).
+  NEW_B=$(mktemp "$WDIR/.j0-m2-baseline-XXXXXXXXXXXX" 2>&1); rc=$?; echo "exit=$rc"
+  if [ "$rc" = 0 ] && [ -f "$NEW_B" ] && [ ! -L "$NEW_B" ]; then
+    echo "created=yes"; ID_B=$(stat -f '%d:%i' "$NEW_B")
+    [ -f "$NEW_B" ] && [ ! -L "$NEW_B" ] && [ "$(stat -f '%d:%i' "$NEW_B")" = "$ID_B" ] && rm -f -- "$NEW_B" && echo "removed own artefact $(basename "$NEW_B")"
+  else echo "created=no $NEW_B"; fi
   echo "--- baseline (unconfined): open model for append (zero bytes written)"
   /bin/sh -c 'exec 3>>"$1"' sh "$MODEL" 2>&1; echo "exit=$?"
   echo "--- baseline (unconfined): hard-link model into scratch"
   /bin/ln "$MODEL" "$S_LLM/model-hardlink-baseline.gguf" 2>&1; echo "exit=$?"; rm -f "$S_LLM/model-hardlink-baseline.gguf"
   echo "--- confined: touch new file in weights dir"
   "$BIN/j0spawn" --profile "$PROFILE" --report "${TOOL_P[@]}" "${LLM_E[@]}" -- /usr/bin/touch "$NEW_C" </dev/null 2>&1; echo "exit=$?"
-  [ -e "$NEW_C" ] && echo "created=yes" || echo "created=no"; rm_own "$NEW_C"
+  # Not deleted even if present: a confined create cannot be proven to be ours (and is a FAIL).
+  [ -e "$NEW_C" ] && echo "created=yes (left in place for inspection: $NEW_C)" || echo "created=no"
   echo "--- confined: open model for append (zero bytes written)"
   "$BIN/j0spawn" --profile "$PROFILE" --report "${TOOL_P[@]}" "${LLM_E[@]}" -- /bin/sh -c 'exec 3>>"$1"' sh "$MODEL" </dev/null 2>&1; echo "exit=$?"
   echo "--- confined: hard-link model into own scratch"
@@ -137,17 +138,19 @@ rm_own() { if [ -f "$1" ] && [ ! -L "$1" ]; then rm -f -- "$1" && echo "removed 
 } > "$RES/M2-weights-write.txt" 2>&1
 blk() { awk -v h="--- $1" 'index($0,h)==1{f=1;next} /^--- /{f=0} f' "$RES/M2-weights-write.txt"; }
 M2B_OK=yes
-blk "baseline (unconfined): touch" | grep -q '^created=yes' || M2B_OK=no
+blk "baseline (unconfined): create" | grep -q '^created=yes' || M2B_OK=no
 blk "baseline (unconfined): open model" | grep -q '^exit=0$' || M2B_OK=no
 blk "baseline (unconfined): hard-link" | grep -q '^exit=0$' || M2B_OK=no
 M2C_OK=yes; M2_PIDS=""
 for t in "confined: touch|$NEW_C: Operation not permitted" "confined: open model|$MODEL: Operation not permitted" \
          "confined: hard-link|model-hardlink.gguf: Operation not permitted"; do
   b=$(blk "${t%%|*}")
-  echo "$b" | grep -q '^exit=0$' && M2C_OK=no
+  echo "$b" | grep -qE '^exit=[1-9][0-9]*$' || M2C_OK=no   # an exit record is required, and nonzero
   echo "$b" | grep -q '^created=yes' && M2C_OK=no
   echo "$b" | grep -qF "${t#*|}" || M2C_OK=no
-  M2_PIDS="$M2_PIDS $(echo "$b" | grep -o 'j0spawn: child pid=[0-9]*' | cut -d= -f2)"
+  p=$(echo "$b" | grep -o 'j0spawn: child pid=[0-9]*' | cut -d= -f2)
+  [ -n "$p" ] || M2C_OK=no                                   # every attempt needs its pid record
+  M2_PIDS="$M2_PIDS $p"
 done
 
 echo "== M3 confined llama-server on a unix socket, queried by a confined assistant"
@@ -213,7 +216,7 @@ done
 PIDRE=$(echo $M2_PIDS | tr ' ' '|')
 /usr/bin/log show --start "$LOG_START" --style compact --predicate 'sender == "Sandbox"' 2>/dev/null |
   grep -E "Sandbox: [^ ]+\((${PIDRE:-none})\) deny" | sed -E 's/^([0-9-]+ [0-9:.]+).*Sandbox: /\1 /' > "$RES/sandbox-log.txt"
-M2_LOGGED=yes
+M2_LOGGED=yes; [ "$(echo $M2_PIDS | wc -w | tr -d ' ')" = 3 ] || M2_LOGGED=no
 for p in $M2_PIDS; do grep -qE "\($p\) deny\([0-9]+\) (file-write|file-link|forbidden-link)" "$RES/sandbox-log.txt" || M2_LOGGED=no; done
 if [ "$M2C_OK" = yes ]; then
   if [ "$M2B_OK" = yes ] && [ "$M2_LOGGED" = yes ]; then out PASS M2.weights_immutable "create, append-open, hard-link-out: baseline OK, confined 'Operation not permitted' + kernel Sandbox deny each"
@@ -221,6 +224,7 @@ if [ "$M2C_OK" = yes ]; then
 else out FAIL M2.weights_immutable "a confined write succeeded or failed without EPERM (see M2-weights-write.txt)"; fi
 
 echo "---"; echo "PASS=$PASS WEAK=$WEAK FAIL=$FAIL" | tee -a "$RES/summary.txt"
-copy_evidence
+# Export only here, after a completed run (the EXIT trap never exports).
+evid_export "$EVID" "$RES" "$ROOT/evidence-manifest.txt" || FAIL=$((FAIL+1))
 [ -n "$EVID" ] && grep -rqF "$HOME" "$EVID" && { echo "WARNING: home path survived redaction"; FAIL=$((FAIL+1)); }
 [ "$FAIL" = 0 ] && [ "$WEAK" = 0 ]
