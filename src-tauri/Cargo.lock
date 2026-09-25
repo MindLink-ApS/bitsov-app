@@ -1919,6 +1919,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "mock-node"
+version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "muda"
 version = "0.19.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
