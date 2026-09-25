@@ -39,7 +39,7 @@ The suites were **not re-run** for this pass. The recorded results above are fro
 | P2 (part) | M2 evaluator: `exit=0` rejected, but an exit record was not required; missing pid records were not rejected. | Each confined M2 attempt now needs a nonzero `exit=` record and its `j0spawn: child pid=` record, and kernel corroboration needs exactly 3 pids. |
 | Scrub | Private LAN address in committed evidence. | `172.20.10.5` → `<lan-ip>` in `probe-baseline.txt` and `probe-confined-{assistant,llm}.txt`. The redactor now also rewrites private and link-local IPv4 (10/8, 172.16/12, 192.168/16, 169.254/16) to `<lan-ip>`, so re-runs stay clean. |
 
-**Not fixed (documented, §6 #13 and #15):** isolation-log correlation is still per pid and operation class, not per target, and the debugger branch still accepts any `debugserver(<pid>)` deny. Removing the confined-create file is not atomic with its dev:inode check, so a same-user process could swap it in that window (same-user malware is out of scope, §6 #7).
+**Not fixed (documented, §6 #13 and #15):** isolation-log correlation is still per pid and operation class, not per target, and the debugger branch still accepts any `debugserver(<pid>)` deny. Removing the M2 baseline-create file is not atomic with its dev:inode check, so a same-user process could swap it in that window (same-user malware is out of scope, §6 #7).
 
 **Dry test (fresh `mktemp -d /tmp/j0-evid-dry-*`, deleted afterwards), all as expected:**
 
