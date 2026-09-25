@@ -323,7 +323,7 @@ fn messages_follow_the_rc7_list_rules() {
     assert_eq!(incoming.len(), 5);
     assert_eq!(
         node.answer(AnswerKey::MessageCount),
-        Answer::Value("6".into())
+        Answer::Value("7".into())
     );
     assert_eq!(
         node.answer(AnswerKey::ChatMessageCount),
@@ -396,13 +396,16 @@ fn messages_follow_the_rc7_list_rules() {
         .read(&format!("{}?sent=1", paths::MESSAGES))
         .expect("sent");
     let sent = sent.as_array().expect("array");
-    assert_eq!(sent.len(), 1);
-    assert_eq!(sent[0]["sender"], NODE_ID);
+    assert_eq!(sent.len(), 2);
+    assert!(sent.iter().all(|msg| msg["sender"] == NODE_ID));
     assert_eq!(sent[0]["recipient"], SENDER_A);
     assert_eq!(sent[0]["direction"], "outgoing");
     assert_eq!(sent[0]["kind"], 0);
     assert_eq!(sent[0]["outbound_note"], mock_node::SENT_NOTE_01);
     assert!(sent[0]["plaintext"].as_str().is_some());
+    assert_eq!(sent[1]["recipient"], SENDER_B);
+    assert_eq!(sent[1]["kind"], 1);
+    assert_eq!(sent[1]["outbound_note"], mock_node::SENT_NOTE_01);
     assert!(incoming
         .iter()
         .all(|msg| msg.get("outbound_note").is_none()));
@@ -413,7 +416,9 @@ fn messages_follow_the_rc7_list_rules() {
     let to_b = node
         .read(&format!("{}?sent=1&peer={SENDER_B}", paths::MESSAGES))
         .expect("sent to b");
-    assert_eq!(to_b.as_array().expect("array").len(), 0);
+    let to_b = to_b.as_array().expect("array");
+    assert_eq!(to_b.len(), 1);
+    assert_eq!(to_b[0]["recipient"], SENDER_B);
     assert_eq!(
         node.answer(AnswerKey::MessagesSent),
         Answer::Value("1".into())

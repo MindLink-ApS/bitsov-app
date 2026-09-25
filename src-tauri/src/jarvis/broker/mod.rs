@@ -15,8 +15,8 @@ pub use schema::{
     Amount, BalanceInput, BalanceReport, CategoryFeeTarget, CategoryPrice, ChainBackend,
     ChannelSummary, ChannelsInput, ChannelsReport, CopiedId, HealthInput, HealthReport,
     LightningBackend, Liveness, LocalPrices, LocalPricesInput, MessageCountsInput, MessageMetadata,
-    PriceCategory, PricingMode, Report, SenderCount, SourceField, TargetFee, ToolCall, ToolOutput,
-    TrustLevel, UnavailableReason, Unit, WalletBalanceLabel, MAX_MESSAGE_LIMIT,
+    PriceCategory, PricingMode, Report, SenderCount, SentToPeer, SourceField, TargetFee, ToolCall,
+    ToolOutput, TrustLevel, UnavailableReason, Unit, WalletBalanceLabel, MAX_MESSAGE_LIMIT,
 };
 
 use std::fmt;

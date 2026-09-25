@@ -63,8 +63,10 @@ pub enum ReadRoute {
     Messages {
         limit: u32,
     },
-    /// `GET /api/v1/messages?sent=1`. Mail this node sent. Same allowlisted
-    /// path as [`ReadRoute::Messages`]. The query value is the constant `1`.
+    /// `GET /api/v1/messages?sent=1`. Mail this node sent, unfiltered.
+    /// The broker groups it by recipient. A peer id is not a query value:
+    /// [`Query::value`] is a `u32`, and a caller-supplied id would widen this
+    /// allowlist. Same path as [`ReadRoute::Messages`].
     SentMessages,
     OwnPricing,
 }

@@ -123,8 +123,8 @@ fn prices_call() -> ToolCall {
 ///
 /// q20 is the stored mailbox total. The incoming page omits mail this node
 /// sent, and `returned_count` is that page, not the total. q27 is only
-/// `GET /payments/price/:kind`. q32 is only `GET /peers`. q24 and q25 are
-/// answered from `GET /messages?sent=1` (`sent_count`, `chat_count`).
+/// `GET /payments/price/:kind`. q32 is only `GET /peers`. q24 reads the
+/// `sent_to` row for one peer. q25 reads `chat_count`.
 const EXPECTED_UNAVAILABLE: &[&str] = &["q20", "q27", "q32"];
 
 const BROKER_ROUTES: [Route; 5] = [
@@ -680,12 +680,41 @@ fn assert_question(question: &Question) {
                 assert_down(&done, reason, question);
             } else {
                 let report = ready_messages(&done, question);
+                let row = report
+                    .sent_to
+                    .iter()
+                    .find(|row| row.peer == SENDER_A)
+                    .unwrap_or_else(|| {
+                        panic!("{} missing sent mail to the asked peer", question.id)
+                    });
                 assert_u64(
-                    &report.sent_count,
+                    &row.count,
                     question,
                     Unit::Count,
-                    SourceField::Sender,
+                    SourceField::Messages,
                     "messages",
+                );
+                let mut total = 0u64;
+                for row in &report.sent_to {
+                    assert_eq!(row.peer.len(), 64, "{}", question.id);
+                    assert!(
+                        row.peer.bytes().all(|byte| byte.is_ascii_hexdigit()),
+                        "{}",
+                        question.id
+                    );
+                    total +=
+                        available_u64(&row.count, Unit::Count, SourceField::Messages, question);
+                }
+                assert!(
+                    report.sent_to.iter().any(|row| row.peer == SENDER_B),
+                    "{} fixture must include sent mail to a second peer",
+                    question.id
+                );
+                assert_ne!(
+                    total.to_string(),
+                    question.expected,
+                    "{} is one conversation; a mailbox-wide sent count is {total}",
+                    question.id
                 );
                 assert_message_bodies_withheld(&done, question);
             }

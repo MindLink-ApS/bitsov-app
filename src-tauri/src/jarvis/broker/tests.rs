@@ -695,9 +695,10 @@ fn omitted_block_height_is_absent_not_zero() {
 #[test]
 fn message_metadata_drops_bodies_memos_and_bad_senders() {
     let body = format!(
-        r#"[{{"id":"CANARY_9f3e2a","kind":100,"sender":"{SENDER}","recipient":"CANARY_9f3e2a","timestamp":1,"ciphertext":"CANARY_9f3e2a","payment_amount_msat":0,"payment_hash":"CANARY_9f3e2a","plaintext":"CANARY_9f3e2a body","references":["CANARY_9f3e2a"]}},{{"id":"dd","kind":2,"sender":"CANARY_9f3e2a","recipient":"room","timestamp":2,"ciphertext":"CANARY_9f3e2a","payment_amount_msat":5,"payment_hash":"CANARY_9f3e2a","memo":"CANARY_9f3e2a","preimage":"CANARY_9f3e2a","nested":{{"plaintext":"CANARY_9f3e2a"}}}}]"#
+        r#"[{{"id":"CANARY_9f3e2a","kind":100,"sender":"{SENDER}","recipient":"CANARY_9f3e2a","timestamp":1,"ciphertext":"CANARY_9f3e2a","payment_amount_msat":0,"payment_hash":"CANARY_9f3e2a","plaintext":"CANARY_9f3e2a body","references":["CANARY_9f3e2a"]}},{{"id":"dd","kind":2,"sender":"CANARY_9f3e2a","recipient":"room","timestamp":2,"ciphertext":"CANARY_9f3e2a","payment_amount_msat":5,"payment_hash":"CANARY_9f3e2a","memo":"CANARY_9f3e2a","preimage":"CANARY_9f3e2a","nested":{{"plaintext":"CANARY_9f3e2a"}}}},{{"id":"ee","kind":1,"sender":"{SENDER}","recipient":"{PUBKEY}","timestamp":3,"ciphertext":"CANARY_9f3e2a","payment_amount_msat":0,"payment_hash":"CANARY_9f3e2a","plaintext":"CANARY_9f3e2a"}}]"#
     );
     // Unknown memo/preimage/nested fields are ignored. The canary sender is withheld.
+    // A 66-hex channel pubkey is not a peer id and is not copied into sent_to.
     let node = Fake::new().json(route::MESSAGES, &body);
     let done = dispatch(
         &node,
@@ -714,7 +715,7 @@ fn message_metadata_drops_bodies_memos_and_bad_senders() {
     };
     assert!(matches!(
         value.returned_count,
-        Amount::Available { value: 2, .. }
+        Amount::Available { value: 3, .. }
     ));
     assert!(matches!(
         value.withheld_senders,
@@ -722,7 +723,15 @@ fn message_metadata_drops_bodies_memos_and_bad_senders() {
     ));
     assert_eq!(value.senders.len(), 1);
     assert_eq!(value.senders[0].sender, SENDER);
+    assert!(value.sent_to.is_empty());
+    assert!(matches!(
+        value.withheld_recipients,
+        Amount::Available { value: 3, .. }
+    ));
+    let rendered = render(&done);
+    assert!(!rendered.contains(PUBKEY), "{rendered}");
     assert!(matches!(node.seen()[0], ReadRoute::Messages { limit: 25 }));
+    assert!(matches!(node.seen()[1], ReadRoute::SentMessages));
 }
 
 #[test]
@@ -762,7 +771,18 @@ fn message_page_counts_senders_and_strips_plaintext() {
         value.senders[0].count,
         Amount::Available { value: 1, .. }
     ));
+    assert_eq!(value.sent_to.len(), 1);
+    assert_eq!(value.sent_to[0].peer.len(), 64);
+    assert!(matches!(
+        value.sent_to[0].count,
+        Amount::Available { value: 1, .. }
+    ));
+    assert!(matches!(
+        value.withheld_recipients,
+        Amount::Available { value: 1, .. }
+    ));
     assert!(matches!(node.seen()[0], ReadRoute::Messages { limit: 50 }));
+    assert!(matches!(node.seen()[1], ReadRoute::SentMessages));
 }
 
 #[test]
@@ -986,6 +1006,8 @@ fn forbidden_output_keys_are_absent_from_a_hostile_success_page() {
         "description",
         "mnemonic",
         "payment_hash",
+        "peer_pubkey",
+        "recipient",
     ] {
         assert!(
             !keys.iter().any(|key| key == forbidden),

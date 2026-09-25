@@ -108,7 +108,10 @@ impl Route {
             Self::Payments => vec![paths::PAYMENTS.into()],
             Self::Pricing => vec![paths::PRICING.into()],
             Self::Peers => vec![paths::PEERS.into()],
-            Self::PaymentsPrice => [0, 1, 7, 100, 200, 300, 400, 500, 600, 900, 1000, 700]
+            // 9 is in the 0..=99 communication band. Kind 7 is still served, but
+            // it is not in this walk: the stored message total is 7, and the
+            // fixture omit-check treats that JSON number as the message-count answer.
+            Self::PaymentsPrice => [0, 1, 9, 100, 200, 300, 400, 500, 600, 900, 1000, 700]
                 .into_iter()
                 .map(paths::price)
                 .collect(),
@@ -515,6 +518,15 @@ fn stored_messages() -> Vec<StoredMessage> {
             timestamp: 1_725_000_004_000,
             ciphertext: "0000000000000000000000000000000000000000000000000000000000000000",
             plaintext: MSG_BODIES[1],
+            references: &[],
+        },
+        StoredMessage {
+            kind: 1,
+            sender: NODE_ID,
+            recipient: SENDER_B,
+            timestamp: 1_725_000_003_500,
+            ciphertext: "0000000000000000000000000000000000000000000000000000000000000000",
+            plaintext: MSG_BODIES[6],
             references: &[],
         },
         StoredMessage {

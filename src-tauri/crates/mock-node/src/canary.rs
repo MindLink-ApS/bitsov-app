@@ -17,6 +17,7 @@ pub const MSG_BODY_03: &str = "JARVIS_CANARY_MSG_BODY_03";
 pub const MSG_BODY_04: &str = "JARVIS_CANARY_MSG_BODY_04";
 pub const MSG_BODY_05: &str = "JARVIS_CANARY_MSG_BODY_05";
 pub const MSG_BODY_06: &str = "JARVIS_CANARY_MSG_BODY_06";
+pub const MSG_BODY_07: &str = "JARVIS_CANARY_MSG_BODY_07";
 
 /// Hex message id in `references` (32 bytes). Hex of the nested-message label.
 pub const MSG_NESTED_01: &str = "4a41525649535f43414e4152595f4d53475f4e45535445445f30311111111111";
@@ -64,6 +65,7 @@ pub const CANARIES: &[&str] = &[
     MSG_BODY_04,
     MSG_BODY_05,
     MSG_BODY_06,
+    MSG_BODY_07,
     MSG_NESTED_01,
     MSG_CIPHER_01,
     SENT_NOTE_01,
@@ -81,11 +83,12 @@ pub const CANARIES: &[&str] = &[
     ERROR_BODY_01,
 ];
 
-pub const MSG_BODIES: [&str; 6] = [
+pub const MSG_BODIES: [&str; 7] = [
     MSG_BODY_01,
     MSG_BODY_02,
     MSG_BODY_03,
     MSG_BODY_04,
     MSG_BODY_05,
     MSG_BODY_06,
+    MSG_BODY_07,
 ];

@@ -177,7 +177,7 @@
     {
       "id": "q20",
       "question": "How many messages are stored on the node in total, including outgoing messages that GET /messages omits when no peer is set?",
-      "expected": "6",
+      "expected": "7",
       "unit": "messages",
       "sources": ["messages", "messages?peer"],
       "class": "positive",

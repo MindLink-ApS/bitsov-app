@@ -15,8 +15,8 @@ use super::route::ReadRoute;
 use super::schema::{
     Amount, BalanceReport, CategoryFeeTarget, CategoryPrice, ChainBackend, ChannelSummary,
     ChannelsReport, CopiedId, HealthReport, LightningBackend, Liveness, LocalPrices,
-    MessageMetadata, PriceCategory, PricingMode, Report, SenderCount, SourceField, TargetFee,
-    TrustLevel, UnavailableReason, Unit, WalletBalanceLabel,
+    MessageMetadata, PriceCategory, PricingMode, Report, SenderCount, SentToPeer, SourceField,
+    TargetFee, TrustLevel, UnavailableReason, Unit, WalletBalanceLabel,
 };
 use super::{LogOutcome, NodeRead, RawRead, ReadFault, ReadLog};
 
@@ -371,7 +371,6 @@ struct MessageWire {
     #[allow(dead_code)]
     id: String,
     kind: u16,
-    #[allow(dead_code)]
     recipient: String,
     #[allow(dead_code)]
     timestamp: u64,
@@ -407,7 +406,7 @@ fn project_messages(incoming: Vec<MessageWire>, sent: Vec<MessageWire>) -> Repor
     let mut counts: BTreeMap<String, u64> = BTreeMap::new();
     let mut withheld = 0u64;
     for message in &incoming {
-        match checked_sender(&message.sender) {
+        match checked_node_id(&message.sender) {
             Some(sender) => *counts.entry(sender).or_default() += 1,
             None => withheld += 1,
         }
@@ -419,6 +418,7 @@ fn project_messages(incoming: Vec<MessageWire>, sent: Vec<MessageWire>) -> Repor
             count: available(count, Unit::Count, SourceField::Sender),
         })
         .collect();
+    let (sent_to, withheld_recipients) = sent_by_peer(&sent);
     let chat_count = match kind_count(&incoming, 0).checked_add(kind_count(&sent, 0)) {
         Some(count) => available(count, Unit::Count, SourceField::Messages),
         None => unavailable(
@@ -432,19 +432,41 @@ fn project_messages(incoming: Vec<MessageWire>, sent: Vec<MessageWire>) -> Repor
             returned_count: available(returned, Unit::Count, SourceField::Messages),
             senders,
             withheld_senders: available(withheld, Unit::Count, SourceField::Sender),
-            sent_count: available(sent.len() as u64, Unit::Count, SourceField::Sender),
+            sent_to,
+            withheld_recipients: available(withheld_recipients, Unit::Count, SourceField::Messages),
             chat_count,
         },
     }
+}
+
+/// Group sent mail by recipient. A 66-hex channel pubkey fails [`checked_node_id`]
+/// and is counted in `withheld`, not copied.
+fn sent_by_peer(sent: &[MessageWire]) -> (Vec<SentToPeer>, u64) {
+    let mut counts: BTreeMap<String, u64> = BTreeMap::new();
+    let mut withheld = 0u64;
+    for message in sent {
+        match checked_node_id(&message.recipient) {
+            Some(peer) => *counts.entry(peer).or_default() += 1,
+            None => withheld += 1,
+        }
+    }
+    let sent_to = counts
+        .into_iter()
+        .map(|(peer, count)| SentToPeer {
+            peer,
+            count: available(count, Unit::Count, SourceField::Messages),
+        })
+        .collect();
+    (sent_to, withheld)
 }
 
 fn kind_count(list: &[MessageWire], kind: u16) -> u64 {
     list.iter().filter(|message| message.kind == kind).count() as u64
 }
 
-fn checked_sender(sender: &str) -> Option<String> {
-    if sender.len() == 64 && sender.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        Some(sender.to_string())
+fn checked_node_id(id: &str) -> Option<String> {
+    if id.len() == 64 && id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        Some(id.to_string())
     } else {
         None
     }
