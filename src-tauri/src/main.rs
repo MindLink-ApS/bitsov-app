@@ -10,6 +10,10 @@
 // funding-seen, balance) and mnemonic restore. No channels, rooms, messaging,
 // pricing, mobile, calls, hosted, or AI.
 //
+// A dev-only `assistant` window can display text. It is not a model, it has no
+// network, and it cannot call privileged commands (capability ACL + the
+// window-label check below).
+//
 // KEYS (charter invariant A.3): the node is the identity anchor. This host never
 // holds, derives, or displays key material. The loopback JWT lives in `NodeState`
 // and is attached to requests here — it is never returned to the renderer, and no
@@ -26,7 +30,8 @@ use serde::{Deserialize, Serialize};
 #[cfg(unix)]
 use shared_child::unix::SharedChildExt;
 use shared_child::SharedChild;
-use tauri::{AppHandle, Manager, RunEvent, State};
+use tauri::menu::{Menu, MenuItem};
+use tauri::{AppHandle, Manager, RunEvent, State, WebviewWindow};
 use tauri_plugin_shell::ShellExt;
 
 // Phase 1 read broker. Not invoked by any command and not exposed to the renderer.
@@ -227,7 +232,7 @@ fn sidecar_path(name: &str) -> Result<PathBuf, String> {
 ///
 /// Everything the plugin gave us is preserved explicitly: stdout/stderr are drained to
 /// the app log, and a wait thread records termination for the health fail-fast.
-fn spawn_node(app: &AppHandle, config: &Path) -> Result<(), String> {
+fn spawn_node(app: &AppHandle<impl tauri::Runtime>, config: &Path) -> Result<(), String> {
     let program = sidecar_path(SIDECAR_BIN)?;
     let mut cmd = std::process::Command::new(&program);
     cmd.args(["start", "--config", &config.to_string_lossy()])
@@ -359,7 +364,10 @@ async fn adopt_matching_identity(
 ///
 /// Returns whether the process answering 3141 restarted onto the restored identity.
 /// `RestoreOutcome.restarted` must stay false unless that happened.
-async fn restart_node(app: &AppHandle, expected_node_id: &str) -> Result<bool, String> {
+async fn restart_node(
+    app: &AppHandle<impl tauri::Runtime>,
+    expected_node_id: &str,
+) -> Result<bool, String> {
     let state = app.state::<NodeState>();
     *state.ready.lock().unwrap() = false;
     *state.node_id.lock().unwrap() = None;
@@ -565,23 +573,163 @@ async fn fetch_node_id(state: &NodeState) -> Result<String, String> {
         .ok_or_else(|| "identity returned no node_id".to_string())
 }
 
+// ---- sealed assistant window ----------------------------------------------
+
+/// Label of the display-only window. Privileged commands refuse this label.
+const ASSISTANT_WINDOW_LABEL: &str = "assistant";
+
+/// Dev builds open the window only when this variable is exactly `1`.
+const ASSISTANT_DEV_FLAG: &str = "BITSOV_ASSISTANT";
+
+/// Privileged commands run only in the main window. Every other label is refused.
+const MAIN_WINDOW_LABEL: &str = "main";
+
+fn window_may_run_privileged_command(label: &str) -> bool {
+    label == MAIN_WINDOW_LABEL
+}
+
+/// Refuse every caller except the main window. `window` is the Tauri caller,
+/// not a name the frontend supplied.
+fn reject_sealed_window(window: &WebviewWindow<impl tauri::Runtime>) -> Result<(), String> {
+    if window_may_run_privileged_command(window.label()) {
+        Ok(())
+    } else {
+        Err("this command is only available to the main window".into())
+    }
+}
+
+fn assistant_dev_enabled_from(debug_build: bool, flag: Option<&str>) -> bool {
+    debug_build && flag == Some("1")
+}
+
+fn assistant_dev_enabled() -> bool {
+    let flag = std::env::var(ASSISTANT_DEV_FLAG).ok();
+    assistant_dev_enabled_from(cfg!(debug_assertions), flag.as_deref())
+}
+
+/// `build.devUrl` in tauri.conf.json. Debug builds may open the assistant there.
+const ASSISTANT_DEV_SCHEME: &str = "http";
+const ASSISTANT_DEV_HOST: &str = "localhost";
+const ASSISTANT_DEV_PORT: u16 = 1420;
+
+/// The bundled assistant document, plus the dev server in debug builds.
+///
+/// The canonical bundled origin has no explicit port: `tauri` on `localhost`
+/// for Linux, macOS, and iOS; `http` on `tauri.localhost` for Windows and
+/// Android (`useHttpsScheme` is off). An explicit `:80` or `:443` is rejected.
+/// Debug builds also allow exactly `devUrl` + `/assistant.html`.
+fn assistant_document_allowed(
+    debug_build: bool,
+    scheme: &str,
+    host: Option<&str>,
+    port: Option<u16>,
+    path: &str,
+) -> bool {
+    if path != "/assistant.html" {
+        return false;
+    }
+    if debug_build
+        && scheme == ASSISTANT_DEV_SCHEME
+        && host == Some(ASSISTANT_DEV_HOST)
+        && port == Some(ASSISTANT_DEV_PORT)
+    {
+        return true;
+    }
+    if port.is_some() {
+        return false;
+    }
+    bundled_assistant_origin(scheme, host)
+}
+
+fn bundled_assistant_origin(scheme: &str, host: Option<&str>) -> bool {
+    #[cfg(any(windows, target_os = "android"))]
+    {
+        scheme == "http" && host == Some("tauri.localhost")
+    }
+    #[cfg(not(any(windows, target_os = "android")))]
+    {
+        scheme == "tauri" && host == Some("localhost")
+    }
+}
+
+/// Create the assistant window on demand. Not called at startup.
+fn open_assistant_window(app: &AppHandle) -> Result<(), String> {
+    if !assistant_dev_enabled() {
+        return Err("the assistant window is unavailable".into());
+    }
+    if let Some(existing) = app.get_webview_window(ASSISTANT_WINDOW_LABEL) {
+        existing.show().map_err(|e| e.to_string())?;
+        let _ = existing.set_focus();
+        return Ok(());
+    }
+    let _window = tauri::WebviewWindowBuilder::new(
+        app,
+        ASSISTANT_WINDOW_LABEL,
+        tauri::WebviewUrl::App("assistant.html".into()),
+    )
+    .title("Assistant")
+    .inner_size(420.0, 640.0)
+    .min_inner_size(320.0, 240.0)
+    .resizable(true)
+    .incognito(true)
+    .on_navigation(|url| {
+        assistant_document_allowed(
+            cfg!(debug_assertions),
+            url.scheme(),
+            url.host_str(),
+            url.port(),
+            url.path(),
+        )
+    })
+    .on_new_window(|_url, _features| tauri::webview::NewWindowResponse::Deny)
+    .build()
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Menu item present only when the dev flag is set. Release builds never install it.
+fn install_assistant_menu(app: &tauri::App) -> tauri::Result<()> {
+    let item = MenuItem::with_id(app, "open-assistant", "Assistant", true, None::<&str>)?;
+    if let Some(menu) = app.menu() {
+        menu.append(&item)?;
+    } else {
+        let menu = Menu::with_items(app, &[&item])?;
+        app.set_menu(menu)?;
+    }
+    app.on_menu_event(|app, event| {
+        if event.id() == "open-assistant" {
+            let _ = open_assistant_window(app);
+        }
+    });
+    Ok(())
+}
+
 // ---- commands -------------------------------------------------------------
 
 /// Frontend reads node state here (identity screen). Synchronous — the async
 /// bootstrap task populates the state; the command just reflects it.
 #[tauri::command]
-fn node_status(state: State<'_, NodeState>) -> Status {
-    Status {
+fn node_status(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+) -> Result<Status, String> {
+    reject_sealed_window(&window)?;
+    Ok(Status {
         ready: *state.ready.lock().unwrap(),
         node_id: state.node_id.lock().unwrap().clone(),
         error: state.error.lock().unwrap().clone(),
-    }
+    })
 }
 
 /// `GET /onboarding/state`. `None` means the first-run funding flow has not been
 /// started yet — the node answers 404 until `/onboarding/start` has run once.
 #[tauri::command(rename_all = "snake_case")]
-async fn fund_state(state: State<'_, NodeState>) -> Result<Option<FundState>, String> {
+async fn fund_state(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+) -> Result<Option<FundState>, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
     let (status, body) = call_api(
         state.inner(),
         reqwest::Method::GET,
@@ -601,9 +749,12 @@ async fn fund_state(state: State<'_, NodeState>) -> Result<Option<FundState>, St
 /// node declares `deny_unknown_fields`, so the body carries exactly these two.
 #[tauri::command(rename_all = "snake_case")]
 async fn fund_start(
+    window: WebviewWindow<impl tauri::Runtime>,
     state: State<'_, NodeState>,
     funding_amount_sats: u32,
 ) -> Result<FundState, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
     if funding_amount_sats == 0 {
         return Err("the funding amount must be at least 1 sat".into());
     }
@@ -625,7 +776,12 @@ async fn fund_start(
 
 /// `GET /payments/funding-address` — the deposit address shown as text + QR.
 #[tauri::command(rename_all = "snake_case")]
-async fn funding_address(state: State<'_, NodeState>) -> Result<FundingAddress, String> {
+async fn funding_address(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+) -> Result<FundingAddress, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
     let (status, body) = call_api(
         state.inner(),
         reqwest::Method::GET,
@@ -638,7 +794,12 @@ async fn funding_address(state: State<'_, NodeState>) -> Result<FundingAddress, 
 
 /// `GET /payments/balance`.
 #[tauri::command(rename_all = "snake_case")]
-async fn payments_balance(state: State<'_, NodeState>) -> Result<Balance, String> {
+async fn payments_balance(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+) -> Result<Balance, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
     let (status, body) = call_api(
         state.inner(),
         reqwest::Method::GET,
@@ -657,10 +818,13 @@ async fn payments_balance(state: State<'_, NodeState>) -> Result<Balance, String
 /// own rejection messages identify bad words by index, not by content.
 #[tauri::command(rename_all = "snake_case")]
 async fn identity_restore(
-    app: AppHandle,
+    window: WebviewWindow<impl tauri::Runtime>,
+    app: AppHandle<impl tauri::Runtime>,
     state: State<'_, NodeState>,
     mnemonic: String,
 ) -> Result<RestoreOutcome, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
     let phrase = mnemonic.trim();
     let words = phrase.split_whitespace().count();
     if words != 12 && words != 24 {
@@ -853,6 +1017,9 @@ fn main() {
             identity_restore
         ])
         .setup(|app| {
+            if assistant_dev_enabled() {
+                install_assistant_menu(app)?;
+            }
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(bootstrap_node(handle));
             Ok(())
@@ -1130,5 +1297,708 @@ mod stop_adapter_tests {
             NODE_SHUTDOWN_BUDGET >= Duration::from_secs(20),
             "SIGKILL fallback at {NODE_SHUTDOWN_BUDGET:?} is inside the node's 15s flush window"
         );
+    }
+}
+
+#[cfg(test)]
+mod assistant_acl_tests {
+    use super::{
+        assistant_dev_enabled_from, assistant_document_allowed, window_may_run_privileged_command,
+        ASSISTANT_DEV_HOST, ASSISTANT_DEV_PORT, ASSISTANT_DEV_SCHEME,
+    };
+    use std::collections::BTreeSet;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn manifest_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    }
+
+    fn glob_match(pattern: &str, text: &str) -> bool {
+        fn rec(pattern: &[u8], text: &[u8]) -> bool {
+            let (mut pi, mut ti) = (0, 0);
+            let mut star: Option<usize> = None;
+            let mut mark = 0;
+            while ti < text.len() {
+                if pi < pattern.len() && (pattern[pi] == b'?' || pattern[pi] == text[ti]) {
+                    pi += 1;
+                    ti += 1;
+                } else if pi < pattern.len() && pattern[pi] == b'*' {
+                    star = Some(pi);
+                    mark = ti;
+                    pi += 1;
+                } else if let Some(star_pi) = star {
+                    pi = star_pi + 1;
+                    mark += 1;
+                    ti = mark;
+                } else {
+                    return false;
+                }
+            }
+            while pi < pattern.len() && pattern[pi] == b'*' {
+                pi += 1;
+            }
+            pi == pattern.len()
+        }
+        rec(pattern.as_bytes(), text.as_bytes())
+    }
+
+    fn permission_slug(command: &str) -> String {
+        command.replace('_', "-")
+    }
+
+    fn allow_perm(command: &str) -> String {
+        format!("allow-{}", permission_slug(command))
+    }
+
+    fn deny_perm(command: &str) -> String {
+        format!("deny-{}", permission_slug(command))
+    }
+
+    fn quoted_list(source: &str, marker: &str) -> Vec<String> {
+        let start = source
+            .find(marker)
+            .unwrap_or_else(|| panic!("missing {marker}"));
+        let rest = &source[start + marker.len()..];
+        let end = rest.find(']').unwrap_or_else(|| panic!("{marker} has no ]"));
+        rest[..end]
+            .split('"')
+            .enumerate()
+            .filter_map(|(index, part)| (index % 2 == 1).then(|| part.to_string()))
+            .collect()
+    }
+
+    fn handler_commands(source: &str) -> Vec<String> {
+        let marker = "generate_handler![";
+        let start = source.find(marker).expect("generate_handler");
+        let rest = &source[start + marker.len()..];
+        let end = rest.find(']').expect("generate_handler end");
+        rest[..end]
+            .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .collect()
+    }
+
+    fn function_source<'a>(source: &'a str, name: &str) -> &'a str {
+        let async_pat = format!("async fn {name}(");
+        let sync_pat = format!("fn {name}(");
+        let start = if let Some(index) = source.find(&async_pat) {
+            index
+        } else {
+            source
+                .match_indices(&sync_pat)
+                .find(|(index, _)| *index == 0 || source.as_bytes().get(index - 1) == Some(&b'\n'))
+                .map(|(index, _)| index)
+                .unwrap_or_else(|| panic!("missing fn {name}"))
+        };
+        let rest = &source[start..];
+        let mut offset = 0;
+        for (index, line) in rest.lines().enumerate() {
+            if index > 0 && line == "}" {
+                return &rest[..offset + line.len()];
+            }
+            offset += line.len() + 1;
+        }
+        panic!("unterminated fn {name}");
+    }
+
+    fn string_list(value: &serde_json::Value, key: &str) -> Vec<String> {
+        value
+            .get(key)
+            .and_then(|v| v.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn permission_identifiers(value: &serde_json::Value) -> Vec<String> {
+        value
+            .get("permissions")
+            .and_then(|v| v.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|entry| match entry {
+                        serde_json::Value::String(id) => Some(id.clone()),
+                        serde_json::Value::Object(map) => map
+                            .get("identifier")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_owned),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn applies_to(cap: &serde_json::Value, label: &str) -> bool {
+        string_list(cap, "windows")
+            .iter()
+            .chain(string_list(cap, "webviews").iter())
+            .any(|pattern| glob_match(pattern, label))
+    }
+
+    fn load_capabilities() -> Vec<serde_json::Value> {
+        let dir = manifest_dir().join("capabilities");
+        let mut caps = Vec::new();
+        for entry in fs::read_dir(&dir).expect("capabilities dir") {
+            let path = entry.expect("capability entry").path();
+            match path.extension().and_then(|ext| ext.to_str()) {
+                Some("json") => {
+                    let text = fs::read_to_string(&path).expect("read capability");
+                    caps.push(serde_json::from_str(&text).expect("capability json"));
+                }
+                Some("toml") => panic!("unparsed capability {} — extend the ACL test", path.display()),
+                _ => {}
+            }
+        }
+        assert!(!caps.is_empty(), "no capability files");
+        caps
+    }
+
+    fn production_source() -> String {
+        let source = fs::read_to_string(manifest_dir().join("src/main.rs")).expect("main.rs");
+        source
+            .split("mod assistant_acl_tests")
+            .next()
+            .expect("split")
+            .to_string()
+    }
+
+    #[test]
+    fn only_the_main_window_may_run_privileged_commands() {
+        assert!(window_may_run_privileged_command("main"));
+        assert!(!window_may_run_privileged_command("assistant"));
+        assert!(!window_may_run_privileged_command("Assistant"));
+        assert!(!window_may_run_privileged_command("main-extra"));
+        assert!(!window_may_run_privileged_command(""));
+    }
+
+    #[test]
+    fn assistant_window_stays_behind_the_dev_flag() {
+        assert!(!assistant_dev_enabled_from(false, Some("1")));
+        assert!(!assistant_dev_enabled_from(true, None));
+        assert!(!assistant_dev_enabled_from(true, Some("0")));
+        assert!(!assistant_dev_enabled_from(true, Some("true")));
+        assert!(assistant_dev_enabled_from(true, Some("1")));
+    }
+
+    fn dev_url_parts() -> (String, String, u16) {
+        let conf: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(manifest_dir().join("tauri.conf.json")).expect("tauri.conf"),
+        )
+        .expect("tauri.conf json");
+        let raw = conf["build"]["devUrl"].as_str().expect("devUrl");
+        let (scheme, rest) = raw.split_once("://").expect("devUrl scheme");
+        let (host, port) = rest.split_once(':').expect("devUrl port");
+        assert!(port.chars().all(|c| c.is_ascii_digit()), "devUrl port");
+        (
+            scheme.to_string(),
+            host.to_string(),
+            port.parse().expect("devUrl port number"),
+        )
+    }
+
+    #[test]
+    fn assistant_navigation_allows_the_bundled_page_and_debug_dev_url() {
+        let (scheme, host, port) = dev_url_parts();
+        assert_eq!(scheme, ASSISTANT_DEV_SCHEME);
+        assert_eq!(host, ASSISTANT_DEV_HOST);
+        assert_eq!(port, ASSISTANT_DEV_PORT);
+
+        assert!(assistant_document_allowed(
+            true,
+            ASSISTANT_DEV_SCHEME,
+            Some(ASSISTANT_DEV_HOST),
+            Some(ASSISTANT_DEV_PORT),
+            "/assistant.html"
+        ));
+        assert!(!assistant_document_allowed(
+            false,
+            ASSISTANT_DEV_SCHEME,
+            Some(ASSISTANT_DEV_HOST),
+            Some(ASSISTANT_DEV_PORT),
+            "/assistant.html"
+        ));
+        assert!(!assistant_document_allowed(
+            true,
+            "https",
+            Some("localhost"),
+            Some(ASSISTANT_DEV_PORT),
+            "/assistant.html"
+        ));
+        assert!(!assistant_document_allowed(
+            true,
+            "http",
+            Some("127.0.0.1"),
+            Some(ASSISTANT_DEV_PORT),
+            "/assistant.html"
+        ));
+        assert!(!assistant_document_allowed(
+            true,
+            "http",
+            Some("localhost"),
+            Some(1421),
+            "/assistant.html"
+        ));
+        assert!(!assistant_document_allowed(
+            true,
+            "http",
+            Some("localhost"),
+            None,
+            "/assistant.html"
+        ));
+        assert!(!assistant_document_allowed(
+            true,
+            "http",
+            Some("localhost"),
+            Some(ASSISTANT_DEV_PORT),
+            "/index.html"
+        ));
+
+        assert_bundled_origin(true);
+        assert_bundled_origin(false);
+        assert!(!assistant_document_allowed(
+            true,
+            "http",
+            Some("tauri.localhost"),
+            Some(80),
+            "/assistant.html"
+        ));
+        assert!(!assistant_document_allowed(
+            false,
+            "https",
+            Some("tauri.localhost"),
+            Some(443),
+            "/assistant.html"
+        ));
+        assert!(!assistant_document_allowed(
+            true,
+            "javascript",
+            None,
+            None,
+            "alert(1)"
+        ));
+        assert!(!assistant_document_allowed(
+            true,
+            "data",
+            None,
+            None,
+            "/assistant.html"
+        ));
+        assert!(!assistant_document_allowed(
+            true,
+            "https",
+            Some("evil.example"),
+            None,
+            "/assistant.html"
+        ));
+        assert!(!assistant_document_allowed(
+            true,
+            "http",
+            Some("localhost.evil.example"),
+            None,
+            "/assistant.html"
+        ));
+        assert!(!assistant_document_allowed(
+            true,
+            "file",
+            Some("localhost"),
+            None,
+            "/assistant.html"
+        ));
+    }
+
+    fn assert_bundled_origin(debug_build: bool) {
+        #[cfg(any(windows, target_os = "android"))]
+        {
+            assert!(assistant_document_allowed(
+                debug_build,
+                "http",
+                Some("tauri.localhost"),
+                None,
+                "/assistant.html"
+            ));
+            assert!(!assistant_document_allowed(
+                debug_build,
+                "https",
+                Some("tauri.localhost"),
+                None,
+                "/assistant.html"
+            ));
+            assert!(!assistant_document_allowed(
+                debug_build,
+                "tauri",
+                Some("localhost"),
+                None,
+                "/assistant.html"
+            ));
+            assert!(!assistant_document_allowed(
+                debug_build,
+                "http",
+                Some("tauri.localhost"),
+                None,
+                "/index.html"
+            ));
+        }
+        #[cfg(not(any(windows, target_os = "android")))]
+        {
+            assert!(assistant_document_allowed(
+                debug_build,
+                "tauri",
+                Some("localhost"),
+                None,
+                "/assistant.html"
+            ));
+            assert!(!assistant_document_allowed(
+                debug_build,
+                "http",
+                Some("tauri.localhost"),
+                None,
+                "/assistant.html"
+            ));
+            assert!(!assistant_document_allowed(
+                debug_build,
+                "https",
+                Some("tauri.localhost"),
+                None,
+                "/assistant.html"
+            ));
+            assert!(!assistant_document_allowed(
+                debug_build,
+                "tauri",
+                Some("localhost"),
+                None,
+                "/index.html"
+            ));
+        }
+    }
+
+    #[test]
+    fn assistant_capability_grants_nothing_and_main_keeps_allows() {
+        let source = production_source();
+        let commands = handler_commands(&source);
+        let required = [
+            "node_status",
+            "fund_state",
+            "fund_start",
+            "funding_address",
+            "payments_balance",
+            "identity_restore",
+        ];
+        for name in required {
+            assert!(commands.iter().any(|command| command == name), "missing {name}");
+        }
+
+        let build_rs = fs::read_to_string(manifest_dir().join("build.rs")).expect("build.rs");
+        let manifest = quoted_list(&build_rs, ".commands(&[");
+        assert_eq!(
+            commands.iter().cloned().collect::<BTreeSet<_>>(),
+            manifest.iter().cloned().collect::<BTreeSet<_>>(),
+            "every custom command must be in AppManifest or Tauri allows it on every window"
+        );
+
+        let caps = load_capabilities();
+        assert!(
+            build_rs.contains("PROFILE") && build_rs.contains("capabilities/default.json"),
+            "release builds must compile the main capability only"
+        );
+        let vite = fs::read_to_string(manifest_dir().join("../vite.config.ts")).expect("vite");
+        assert!(
+            vite.contains("TAURI_ENV_DEBUG") && vite.contains("assistant.html"),
+            "release frontend builds must be able to omit assistant.html"
+        );
+
+        let assistant_caps: Vec<_> = caps.iter().filter(|cap| applies_to(cap, "assistant")).collect();
+        assert_eq!(
+            assistant_caps.len(),
+            1,
+            "the assistant window needs its own capability so it is not covered by a wildcard"
+        );
+        assert!(
+            permission_identifiers(assistant_caps[0]).is_empty(),
+            "a window with no grant already gets nothing; deny entries apply to every window"
+        );
+        assert!(
+            assistant_caps[0].get("remote").map(|v| v.is_null()).unwrap_or(true),
+            "assistant capability must not allow remote origins"
+        );
+        for cap in &caps {
+            let ids = permission_identifiers(cap);
+            for command in &commands {
+                assert!(
+                    !ids.iter().any(|id| id == &deny_perm(command)),
+                    "{} grants {}, which Tauri 2.11 applies to every window",
+                    cap.get("identifier").and_then(|v| v.as_str()).unwrap_or("capability"),
+                    deny_perm(command)
+                );
+            }
+            assert!(
+                !cap.to_string().to_lowercase().contains("clipboard"),
+                "clipboard permissions are not granted"
+            );
+        }
+
+        let main_caps: Vec<_> = caps.iter().filter(|cap| applies_to(cap, "main")).collect();
+        assert_eq!(main_caps.len(), 1, "main must keep a single capability");
+        let main = main_caps[0];
+        assert_eq!(string_list(main, "windows"), vec!["main".to_string()]);
+        assert!(!applies_to(main, "assistant"));
+        let main_perms = permission_identifiers(main);
+        assert!(main_perms.iter().any(|id| id == "core:default"));
+        for command in &commands {
+            assert!(
+                main_perms.iter().any(|id| id == &allow_perm(command)),
+                "main lost {command}"
+            );
+            assert!(
+                !main_perms.iter().any(|id| id == &deny_perm(command)),
+                "main is denied {command}"
+            );
+        }
+        let shell = main
+            .get("permissions")
+            .and_then(|v| v.as_array())
+            .and_then(|items| {
+                items.iter().find(|entry| {
+                    entry.get("identifier").and_then(|v| v.as_str()) == Some("shell:allow-execute")
+                })
+            })
+            .expect("main keeps the sidecar execute permission");
+        let allow = shell.get("allow").and_then(|v| v.as_array()).expect("shell allow");
+        assert_eq!(allow.len(), 1);
+        assert_eq!(allow[0].get("name").and_then(|v| v.as_str()), Some("bin/konsensus"));
+        assert_eq!(allow[0].get("sidecar").and_then(|v| v.as_bool()), Some(true));
+        assert!(main_perms.iter().all(|id| id != "shell:allow-spawn" && id != "shell:allow-kill"));
+
+        let conf: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(manifest_dir().join("tauri.conf.json")).expect("tauri.conf"),
+        )
+        .expect("tauri.conf json");
+        let windows = conf["app"]["windows"].as_array().expect("windows");
+        assert_eq!(windows.len(), 1);
+        assert!(windows[0].get("label").is_none() || windows[0]["label"] == "main");
+        let text = fs::read_to_string(manifest_dir().join("tauri.conf.json")).expect("conf text");
+        assert!(!text.contains("assistant"));
+        if let Some(inlined) = conf["app"]["security"].get("capabilities").and_then(|v| v.as_array())
+        {
+            assert!(
+                inlined.iter().all(|entry| entry.is_string()),
+                "inline capability objects would bypass this directory scan"
+            );
+        }
+    }
+
+    #[test]
+    fn every_privileged_handler_checks_the_caller_window() {
+        let source = production_source();
+        let guard = function_source(&source, "reject_sealed_window");
+        assert!(guard.contains("window.label()"));
+        assert!(guard.contains("window_may_run_privileged_command"));
+        assert!(!guard.contains("label: String"));
+
+        for name in handler_commands(&source) {
+            let body = function_source(&source, &name);
+            assert!(
+                body.contains("window: WebviewWindow"),
+                "{name} must take the trusted WebviewWindow"
+            );
+            let after = body.split_once('{').expect("body").1;
+            let first = after
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty() && !line.starts_with("//"))
+                .unwrap_or("");
+            assert_eq!(
+                first, "reject_sealed_window(&window)?;",
+                "{name} must reject the assistant window before doing anything else"
+            );
+            assert!(!body.contains("window_label"));
+            assert!(!body.contains("label:"));
+        }
+
+        let opener = function_source(&source, "open_assistant_window");
+        assert!(opener.contains("assistant_dev_enabled()"));
+        assert!(opener.contains("ASSISTANT_WINDOW_LABEL"));
+        assert!(opener.contains("assistant_document_allowed"));
+        assert!(opener.contains("debug_assertions"));
+        assert!(!opener.contains("enable_clipboard_access"));
+        assert!(!source.contains("clipboard-manager"));
+        assert!(opener.contains("NewWindowResponse::Deny"));
+        assert!(!opener.contains("WebviewUrl::External"));
+        assert_eq!(source.matches("open_assistant_window(").count(), 2);
+        assert!(source.contains("if assistant_dev_enabled()"));
+
+        let copy = fs::read_to_string(manifest_dir().join("../src/assistant/copy.ts")).expect("copy");
+        assert!(copy.contains("clipboard.writeText"));
+        assert!(!copy.contains("@tauri-apps/plugin-clipboard"));
+        assert!(!copy.contains("invoke("));
+    }
+
+    #[test]
+    fn window_globs_that_would_cover_the_assistant_match() {
+        assert!(glob_match("*", "assistant"));
+        assert!(glob_match("assistant", "assistant"));
+        assert!(glob_match("assistant*", "assistant"));
+        assert!(glob_match("*assistant", "assistant"));
+        assert!(!glob_match("main", "assistant"));
+        assert!(!glob_match("assistant?", "assistant"));
+    }
+
+    fn local_ipc_url() -> tauri::webview::Url {
+        // Split so this file has no `http://` literal. Linux/macOS use the tauri
+        // scheme; Windows and Android serve the bundled origin as http on
+        // tauri.localhost. Either way the origin is local to Tauri's ACL.
+        let raw = if cfg!(any(windows, target_os = "android")) {
+            format!("{}://tauri.localhost", "http")
+        } else {
+            format!("{}://localhost", "tauri")
+        };
+        raw.parse().expect("local ipc url")
+    }
+
+    fn invoke(
+        webview: &tauri::WebviewWindow<tauri::test::MockRuntime>,
+        cmd: &str,
+        body: serde_json::Value,
+    ) -> Result<tauri::ipc::InvokeResponseBody, serde_json::Value> {
+        tauri::test::get_ipc_response(
+            webview,
+            tauri::webview::InvokeRequest {
+                cmd: cmd.into(),
+                callback: tauri::ipc::CallbackFn(0),
+                error: tauri::ipc::CallbackFn(1),
+                url: local_ipc_url(),
+                body: tauri::ipc::InvokeBody::Json(body),
+                headers: Default::default(),
+                invoke_key: tauri::test::INVOKE_KEY.to_string(),
+            },
+        )
+    }
+
+    fn error_text(value: &serde_json::Value) -> String {
+        value.as_str().map(str::to_owned).unwrap_or_else(|| value.to_string())
+    }
+
+    fn assert_handler_ran(result: Result<tauri::ipc::InvokeResponseBody, serde_json::Value>, marker: &str) {
+        match result {
+            Ok(body) => panic!("{marker} returned Ok({body:?}); the handler was not the expected rejection"),
+            Err(value) => {
+                let text = error_text(&value);
+                assert!(
+                    text.contains(marker),
+                    "main window should reach the handler ({marker}), got {text}"
+                );
+                assert!(
+                    !text.contains("not allowed"),
+                    "main window was blocked by the ACL before {marker}: {text}"
+                );
+            }
+        }
+    }
+
+    fn assert_acl_denied(result: Result<tauri::ipc::InvokeResponseBody, serde_json::Value>, cmd: &str) {
+        match result {
+            Ok(body) => panic!("{cmd} from the assistant window returned Ok({body:?})"),
+            Err(value) => {
+                let text = error_text(&value);
+                assert!(
+                    text.contains("not allowed"),
+                    "{cmd} from the assistant window should be denied by the ACL, got {text}"
+                );
+                assert!(
+                    !text.contains("only available to the main window"),
+                    "{cmd} reached the handler guard instead of the ACL: {text}"
+                );
+                assert!(!text.contains("at least 1 sat"), "{text}");
+                assert!(!text.contains("12 or 24"), "{text}");
+                assert!(!text.contains("not authenticated"), "{text}");
+            }
+        }
+    }
+
+    #[test]
+    fn real_acl_allows_main_and_denies_assistant() {
+        let app = tauri::test::mock_builder()
+            .manage(super::NodeState::default())
+            .invoke_handler(tauri::generate_handler![
+                super::node_status,
+                super::fund_state,
+                super::fund_start,
+                super::funding_address,
+                super::payments_balance,
+                super::identity_restore,
+            ])
+            // `test = true` skips the macOS Info.plist embed. A second plain
+            // generate_context!() defines `_EMBED_INFO_PLIST` again and cargo
+            // test fails to link on macOS.
+            .build(tauri::generate_context!(test = true))
+            .expect("test app");
+
+        let main = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .expect("main window");
+        let assistant = tauri::WebviewWindowBuilder::new(&app, "assistant", Default::default())
+            .build()
+            .expect("assistant window");
+
+        let status = invoke(&main, "node_status", serde_json::json!({}))
+            .expect("main node_status is granted");
+        match status {
+            tauri::ipc::InvokeResponseBody::Json(body) => {
+                assert!(body.contains("\"ready\""), "node_status body: {body}");
+            }
+            tauri::ipc::InvokeResponseBody::Raw(bytes) => {
+                panic!("node_status returned raw bytes ({} bytes)", bytes.len());
+            }
+        }
+
+        assert_handler_ran(
+            invoke(
+                &main,
+                "fund_start",
+                serde_json::json!({ "funding_amount_sats": 0 }),
+            ),
+            "at least 1 sat",
+        );
+        assert_handler_ran(
+            invoke(&main, "identity_restore", serde_json::json!({ "mnemonic": "nope" })),
+            "12 or 24",
+        );
+        for cmd in ["fund_state", "funding_address", "payments_balance"] {
+            assert_handler_ran(
+                invoke(&main, cmd, serde_json::json!({})),
+                "not authenticated",
+            );
+        }
+
+        assert_acl_denied(
+            invoke(&assistant, "node_status", serde_json::json!({})),
+            "node_status",
+        );
+        assert_acl_denied(
+            invoke(
+                &assistant,
+                "fund_start",
+                serde_json::json!({ "funding_amount_sats": 0 }),
+            ),
+            "fund_start",
+        );
+        assert_acl_denied(
+            invoke(
+                &assistant,
+                "identity_restore",
+                serde_json::json!({ "mnemonic": "nope" }),
+            ),
+            "identity_restore",
+        );
+        for cmd in ["fund_state", "funding_address", "payments_balance"] {
+            assert_acl_denied(invoke(&assistant, cmd, serde_json::json!({})), cmd);
+        }
     }
 }
