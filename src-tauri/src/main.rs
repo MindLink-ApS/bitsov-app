@@ -603,24 +603,48 @@ fn assistant_dev_enabled() -> bool {
     assistant_dev_enabled_from(cfg!(debug_assertions), flag.as_deref())
 }
 
-/// The bundled assistant document only.
+/// `build.devUrl` in tauri.conf.json. Debug builds may open the assistant there.
+const ASSISTANT_DEV_SCHEME: &str = "http";
+const ASSISTANT_DEV_HOST: &str = "localhost";
+const ASSISTANT_DEV_PORT: u16 = 1420;
+
+/// The bundled assistant document, plus the dev server in debug builds.
 ///
-/// Linux and macOS serve it as `tauri` on host `localhost` with no port.
-/// Windows serves it as http(s) on host `tauri.localhost` with the default port.
-/// A localhost dev server, on any port, is rejected.
+/// The canonical bundled origin has no explicit port: `tauri` on `localhost`
+/// for Linux, macOS, and iOS; `http` on `tauri.localhost` for Windows and
+/// Android (`useHttpsScheme` is off). An explicit `:80` or `:443` is rejected.
+/// Debug builds also allow exactly `devUrl` + `/assistant.html`.
 fn assistant_document_allowed(
+    debug_build: bool,
     scheme: &str,
     host: Option<&str>,
     port: Option<u16>,
     path: &str,
 ) -> bool {
-    if port.is_some() || path != "/assistant.html" {
+    if path != "/assistant.html" {
         return false;
     }
-    match (scheme, host) {
-        ("tauri", Some("localhost")) => true,
-        ("http" | "https", Some("tauri.localhost")) => true,
-        _ => false,
+    if debug_build
+        && scheme == ASSISTANT_DEV_SCHEME
+        && host == Some(ASSISTANT_DEV_HOST)
+        && port == Some(ASSISTANT_DEV_PORT)
+    {
+        return true;
+    }
+    if port.is_some() {
+        return false;
+    }
+    bundled_assistant_origin(scheme, host)
+}
+
+fn bundled_assistant_origin(scheme: &str, host: Option<&str>) -> bool {
+    #[cfg(any(windows, target_os = "android"))]
+    {
+        scheme == "http" && host == Some("tauri.localhost")
+    }
+    #[cfg(not(any(windows, target_os = "android")))]
+    {
+        scheme == "tauri" && host == Some("localhost")
     }
 }
 
@@ -645,7 +669,13 @@ fn open_assistant_window(app: &AppHandle) -> Result<(), String> {
     .resizable(true)
     .incognito(true)
     .on_navigation(|url| {
-        assistant_document_allowed(url.scheme(), url.host_str(), url.port(), url.path())
+        assistant_document_allowed(
+            cfg!(debug_assertions),
+            url.scheme(),
+            url.host_str(),
+            url.port(),
+            url.path(),
+        )
     })
     .on_new_window(|_url, _features| tauri::webview::NewWindowResponse::Deny)
     .build()
@@ -1268,7 +1298,10 @@ mod stop_adapter_tests {
 
 #[cfg(test)]
 mod assistant_acl_tests {
-    use super::{assistant_dev_enabled_from, assistant_document_allowed, window_may_run_privileged_command};
+    use super::{
+        assistant_dev_enabled_from, assistant_document_allowed, window_may_run_privileged_command,
+        ASSISTANT_DEV_HOST, ASSISTANT_DEV_PORT, ASSISTANT_DEV_SCHEME,
+    };
     use std::collections::BTreeSet;
     use std::fs;
     use std::path::PathBuf;
@@ -1451,93 +1484,195 @@ mod assistant_acl_tests {
         assert!(assistant_dev_enabled_from(true, Some("1")));
     }
 
+    fn dev_url_parts() -> (String, String, u16) {
+        let conf: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(manifest_dir().join("tauri.conf.json")).expect("tauri.conf"),
+        )
+        .expect("tauri.conf json");
+        let raw = conf["build"]["devUrl"].as_str().expect("devUrl");
+        let (scheme, rest) = raw.split_once("://").expect("devUrl scheme");
+        let (host, port) = rest.split_once(':').expect("devUrl port");
+        assert!(port.chars().all(|c| c.is_ascii_digit()), "devUrl port");
+        (
+            scheme.to_string(),
+            host.to_string(),
+            port.parse().expect("devUrl port number"),
+        )
+    }
+
     #[test]
-    fn assistant_navigation_allows_only_the_bundled_page() {
+    fn assistant_navigation_allows_the_bundled_page_and_debug_dev_url() {
+        let (scheme, host, port) = dev_url_parts();
+        assert_eq!(scheme, ASSISTANT_DEV_SCHEME);
+        assert_eq!(host, ASSISTANT_DEV_HOST);
+        assert_eq!(port, ASSISTANT_DEV_PORT);
+
         assert!(assistant_document_allowed(
-            "tauri",
-            Some("localhost"),
-            None,
+            true,
+            ASSISTANT_DEV_SCHEME,
+            Some(ASSISTANT_DEV_HOST),
+            Some(ASSISTANT_DEV_PORT),
             "/assistant.html"
         ));
-        assert!(assistant_document_allowed(
-            "http",
-            Some("tauri.localhost"),
-            None,
+        assert!(!assistant_document_allowed(
+            false,
+            ASSISTANT_DEV_SCHEME,
+            Some(ASSISTANT_DEV_HOST),
+            Some(ASSISTANT_DEV_PORT),
             "/assistant.html"
         ));
-        assert!(assistant_document_allowed(
+        assert!(!assistant_document_allowed(
+            true,
             "https",
-            Some("tauri.localhost"),
-            None,
-            "/assistant.html"
-        ));
-        assert!(!assistant_document_allowed(
-            "http",
             Some("localhost"),
-            Some(1420),
+            Some(ASSISTANT_DEV_PORT),
             "/assistant.html"
         ));
         assert!(!assistant_document_allowed(
-            "http",
-            Some("localhost"),
-            None,
-            "/assistant.html"
-        ));
-        assert!(!assistant_document_allowed(
+            true,
             "http",
             Some("127.0.0.1"),
-            Some(1420),
+            Some(ASSISTANT_DEV_PORT),
             "/assistant.html"
         ));
         assert!(!assistant_document_allowed(
+            true,
             "http",
-            Some("127.0.0.1"),
+            Some("localhost"),
+            Some(1421),
+            "/assistant.html"
+        ));
+        assert!(!assistant_document_allowed(
+            true,
+            "http",
+            Some("localhost"),
             None,
             "/assistant.html"
         ));
         assert!(!assistant_document_allowed(
-            "https",
-            Some("tauri.localhost"),
-            Some(443),
-            "/assistant.html"
+            true,
+            "http",
+            Some("localhost"),
+            Some(ASSISTANT_DEV_PORT),
+            "/index.html"
         ));
+
+        assert_bundled_origin(true);
+        assert_bundled_origin(false);
         assert!(!assistant_document_allowed(
+            true,
             "http",
             Some("tauri.localhost"),
             Some(80),
             "/assistant.html"
         ));
         assert!(!assistant_document_allowed(
-            "tauri",
-            Some("localhost"),
-            None,
-            "/index.html"
+            false,
+            "https",
+            Some("tauri.localhost"),
+            Some(443),
+            "/assistant.html"
         ));
         assert!(!assistant_document_allowed(
+            true,
             "javascript",
             None,
             None,
             "alert(1)"
         ));
-        assert!(!assistant_document_allowed("data", None, None, "/assistant.html"));
         assert!(!assistant_document_allowed(
+            true,
+            "data",
+            None,
+            None,
+            "/assistant.html"
+        ));
+        assert!(!assistant_document_allowed(
+            true,
             "https",
             Some("evil.example"),
             None,
             "/assistant.html"
         ));
         assert!(!assistant_document_allowed(
+            true,
             "http",
             Some("localhost.evil.example"),
             None,
             "/assistant.html"
         ));
         assert!(!assistant_document_allowed(
+            true,
             "file",
             Some("localhost"),
             None,
             "/assistant.html"
         ));
+    }
+
+    fn assert_bundled_origin(debug_build: bool) {
+        #[cfg(any(windows, target_os = "android"))]
+        {
+            assert!(assistant_document_allowed(
+                debug_build,
+                "http",
+                Some("tauri.localhost"),
+                None,
+                "/assistant.html"
+            ));
+            assert!(!assistant_document_allowed(
+                debug_build,
+                "https",
+                Some("tauri.localhost"),
+                None,
+                "/assistant.html"
+            ));
+            assert!(!assistant_document_allowed(
+                debug_build,
+                "tauri",
+                Some("localhost"),
+                None,
+                "/assistant.html"
+            ));
+            assert!(!assistant_document_allowed(
+                debug_build,
+                "http",
+                Some("tauri.localhost"),
+                None,
+                "/index.html"
+            ));
+        }
+        #[cfg(not(any(windows, target_os = "android")))]
+        {
+            assert!(assistant_document_allowed(
+                debug_build,
+                "tauri",
+                Some("localhost"),
+                None,
+                "/assistant.html"
+            ));
+            assert!(!assistant_document_allowed(
+                debug_build,
+                "http",
+                Some("tauri.localhost"),
+                None,
+                "/assistant.html"
+            ));
+            assert!(!assistant_document_allowed(
+                debug_build,
+                "https",
+                Some("tauri.localhost"),
+                None,
+                "/assistant.html"
+            ));
+            assert!(!assistant_document_allowed(
+                debug_build,
+                "tauri",
+                Some("localhost"),
+                None,
+                "/index.html"
+            ));
+        }
     }
 
     #[test]
@@ -1687,6 +1822,7 @@ mod assistant_acl_tests {
         assert!(opener.contains("assistant_dev_enabled()"));
         assert!(opener.contains("ASSISTANT_WINDOW_LABEL"));
         assert!(opener.contains("assistant_document_allowed"));
+        assert!(opener.contains("debug_assertions"));
         assert!(!opener.contains("enable_clipboard_access"));
         assert!(!source.contains("clipboard-manager"));
         assert!(opener.contains("NewWindowResponse::Deny"));
@@ -1794,7 +1930,10 @@ mod assistant_acl_tests {
                 super::payments_balance,
                 super::identity_restore,
             ])
-            .build(tauri::generate_context!())
+            // `test = true` skips the macOS Info.plist embed. A second plain
+            // generate_context!() defines `_EMBED_INFO_PLIST` again and cargo
+            // test fails to link on macOS.
+            .build(tauri::generate_context!(test = true))
             .expect("test app");
 
         let main = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())

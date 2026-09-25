@@ -146,6 +146,14 @@ describe('sealed assistant surface', () => {
     expect(csp).toContain("base-uri 'none'");
     expect(csp).not.toContain('unsafe-inline');
     expect(csp).not.toContain('unsafe-eval');
+
+    const vite = readFileSync(resolve(rootDir, 'vite.config.ts'), 'utf8');
+    const devCsp = vite.slice(vite.indexOf('function assistantDevCsp'));
+    expect(devCsp).toContain('if (!ctx.server) return html');
+    expect(devCsp).toContain("style-src 'self' 'unsafe-inline'");
+    expect(devCsp.indexOf('if (!ctx.server) return html')).toBeLessThan(
+      devCsp.indexOf("style-src 'self' 'unsafe-inline'"),
+    );
     expect(csp).not.toMatch(/https?:/);
     expect(html).not.toMatch(/<a\s/i);
     expect(html).toContain('/src/assistant/main.tsx');
