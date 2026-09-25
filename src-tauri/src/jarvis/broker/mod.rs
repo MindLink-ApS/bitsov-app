@@ -44,13 +44,18 @@ impl fmt::Debug for RawRead {
     }
 }
 
-/// Transport failed before a response existed. Carries no error string.
+/// A read failed before a usable body existed. Neither variant carries a string or a body.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TransportFault;
+pub enum ReadFault {
+    /// Transport failed before a response existed.
+    Transport,
+    /// The node marked the body stale. The body is not attached.
+    Stale,
+}
 
 /// What the trusted side may call. Implementors must not log `RawRead`'s body.
 pub trait NodeRead {
-    fn read(&self, route: ReadRoute) -> Result<RawRead, TransportFault>;
+    fn read(&self, route: ReadRoute) -> Result<RawRead, ReadFault>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,6 +67,8 @@ pub enum LogOutcome {
         status: u16,
     },
     Decode,
+    /// The node marked the body stale. The body was not decoded.
+    Stale,
 }
 
 /// Host log of a read. Paths come from the allowlist, never from a response.
@@ -150,5 +157,7 @@ pub fn default_limit() -> u32 {
     default_message_limit()
 }
 
+#[cfg(test)]
+mod mock_read;
 #[cfg(test)]
 mod tests;

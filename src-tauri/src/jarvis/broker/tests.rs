@@ -13,7 +13,7 @@ use super::schema::{
     PricingMode, Report, ToolCall, ToolOutput, TrustLevel, UnavailableReason, WalletBalanceLabel,
     MAX_MESSAGE_LIMIT,
 };
-use super::{Broker, Dispatch, LogOutcome, NodeRead, RawRead, TransportFault, ALLOWED_PATHS};
+use super::{Broker, Dispatch, LogOutcome, NodeRead, RawRead, ReadFault, ALLOWED_PATHS};
 
 const CANARY: &str = "CANARY_9f3e2a";
 
@@ -60,10 +60,10 @@ impl Fake {
 }
 
 impl NodeRead for Fake {
-    fn read(&self, route: ReadRoute) -> Result<RawRead, TransportFault> {
+    fn read(&self, route: ReadRoute) -> Result<RawRead, ReadFault> {
         self.seen.lock().expect("seen").push(route);
         if self.transport {
-            return Err(TransportFault);
+            return Err(ReadFault::Transport);
         }
         let path = route.target().path;
         let (status, body) = match self.files.get(path) {
@@ -77,7 +77,7 @@ impl NodeRead for Fake {
 struct PanicNode;
 
 impl NodeRead for PanicNode {
-    fn read(&self, route: ReadRoute) -> Result<RawRead, TransportFault> {
+    fn read(&self, route: ReadRoute) -> Result<RawRead, ReadFault> {
         panic!("node read during a rejected call: {}", route.target().path);
     }
 }
@@ -550,8 +550,8 @@ fn channel_summary_withholds_ids_that_fail_the_charset_check() {
         Amount::Available { value: 1, .. }
     ));
     assert!(matches!(
-        value.channels[0].peer_pubkey,
-        super::CopiedId::Withheld
+        value.channels[0].local_balance,
+        Amount::Available { value: 4, .. }
     ));
     assert!(matches!(
         value.channels[0].short_channel_id,
@@ -562,9 +562,15 @@ fn channel_summary_withholds_ids_that_fail_the_charset_check() {
         super::CopiedId::Withheld
     ));
     assert!(matches!(
-        value.channels[1].peer_pubkey,
-        super::CopiedId::Value { .. }
+        value.channels[1].capacity,
+        Amount::Available { value: 3, .. }
     ));
+    let rendered = render(&done);
+    assert!(!rendered.contains("peer_pubkey"), "{rendered}");
+    assert!(
+        !rendered.contains("02abababababababababababababababababababababababababababababababab"),
+        "{rendered}"
+    );
 }
 
 #[test]

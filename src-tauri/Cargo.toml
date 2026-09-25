@@ -34,9 +34,11 @@ tempfile = "3"
 # `tauri::test` (MockRuntime + IPC) is feature-gated. Cargo enables this for
 # `cargo test` only; `cargo check` / `cargo build` keep the default features.
 tauri = { version = "2", features = ["test"] }
+# In-process stand-in for broker tests. The app binary does not link this.
+mock-node = { path = "crates/mock-node" }
 
-# Jarvis Phase 1 test bed. This package does not depend on it, and the app
-# binary does not link it. `cargo test` in this directory builds it.
+# Jarvis Phase 1 test bed. The app binary does not link it. `cargo test`
+# in this directory builds it, and the broker tests above use it in-process.
 [workspace]
 members = [".", "crates/mock-node"]
 default-members = [".", "crates/mock-node"]

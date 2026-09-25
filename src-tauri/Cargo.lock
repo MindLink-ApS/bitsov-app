@@ -129,6 +129,7 @@ name = "bitsov-app"
 version = "0.0.1"
 dependencies = [
  "libc",
+ "mock-node",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
