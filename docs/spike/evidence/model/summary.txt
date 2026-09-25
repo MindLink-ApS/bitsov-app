@@ -1,0 +1,6 @@
+PASS M1.confined_model_load_and_complete      offloaded 37/37 layers to GPU; GPU name:   MTL0 ; confined speed: 73.85 t/s vs unconfined speed: 96.39 t/s
+PASS M2.weights_immutable                     create, append-open and hard-link-out all denied
+PASS M3.socket_only_server_and_assistant      confined server answered a confined assistant over /private/tmp/j0-canary-model-2cRw/ipc/llm/llm.sock; no TCP listener
+PASS M5.gpu_only_for_llm_role                 llm: MTL0: Apple M4 Max ; assistant: no Metal device
+PASS M4.model_bytes_unchanged                 sha256 7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5
+PASS=5 FAIL=0

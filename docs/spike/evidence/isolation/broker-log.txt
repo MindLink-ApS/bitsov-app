@@ -1,0 +1,8 @@
+LISTEN pid=74011 port=50150
+ACCEPT node-tcp
+ACCEPT control.sock
+ACCEPT llm.sock
+ACCEPT broker.sock
+SIGUSR1 count=1
+ACCEPT llm.sock
+ACCEPT broker.sock

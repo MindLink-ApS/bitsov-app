@@ -1,0 +1,13 @@
+--- server ready=1; TCP listeners owned by the confined server:
+server pid=93622
+(none)
+--- confined assistant: POST /completion over the unix socket
+HTTP/1.1 200 OK
+Server: llama.cpp
+Access-Control-Allow-Origin: 
+Content-Type: application/json; charset=utf-8
+Content-Length: 1897
+Connection: close
+
+{"index":0,"content":" red, green, and blue. When these colors are combined in equal parts, they produce white light. However, in the context of pigment colors, the three","tokens":[],"id_slot":3,"stop":true,"model":"/Users/rasmust.larsen/Desktop/seat-drafts/models/Qwen3-4B-GGUF/Qwen3-4B-Q4_K_M.gguf","tokens_predicted":32,"tokens_evaluated":7,"generation_settings":{"seed":4294967295,"temperature":0.0,"dynatemp_range":0.0,"dynatemp_exponent":1.0,"top_k":40,"top_p":0.949999988079071,"min_p":0.05000000074505806,"top_n_sigma":-1.0,"xtc_probability":0.0,"xtc_threshold":0.10000000149011612,"typical_p":1.0,"repeat_last_n":64,"repeat_penalty":1.0,"presence_penalty":0.0,"frequency_penalty":0.0,"dry_multiplier":0.0,"dry_base":1.75,"dry_allowed_length":2,"dry_penalty_last_n":64,"dry_sequence_breakers":["\n",":","\"","*"],"mirostat":0,"mirostat_tau":5.0,"mirostat_eta":0.10000000149011612,"adaptive_target":-1.0,"adaptive_decay":0.8999999761581421,"stop":[],"max_tokens":32,"n_predict":32,"n_keep":0,"n_discard":0,"ignore_eos":false,"stream":false,"logit_bias":[],"n_probs":0,"min_keep":0,"grammar":"","grammar_lazy":false,"grammar_triggers":[],"preserved_tokens":[],"chat_format":"Content-only","reasoning_format":"deepseek","reasoning_in_content":false,"generation_prompt":"","samplers":["penalties","dry","top_n_sigma","top_k","typ_p","top_p","min_p","xtc","temperature"],"speculative.types":"none","timings_per_token":false,"post_sampling_probs":false,"backend_sampling":false,"lora":[]},"prompt":"The three primary colors of light are","has_new_line":false,"truncated":false,"stop_type":"limit","stopping_word":"","tokens_cached":38,"timings":{"cache_n":0,"prompt_n":7,"prompt_ms":97.455,"prompt_per_token_ms":13.922142857142857,"prompt_per_second":71.82802319019035,"predicted_n":32,"predicted_ms":285.23,"predicted_per_token_ms":9.200967741935484,"predicted_per_second":108.68421975248044}}
+exit=0

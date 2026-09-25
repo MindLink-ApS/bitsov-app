@@ -1,0 +1,203 @@
+# j0probe pid=75554 mode=confined
+R env.no_sensitive_vars CLEAN 0 names=[PATH,HOME,TMPDIR,LANG,] sensitive_hits=0
+R fd.inventory INFO 4 open=[0:chr:/dev/null 1:?:/private/tmp/j0-canary-Hm8R/results/probe-confined-llm.txt 2:?:/private/tmp/j0-canary-Hm8R/results/probe-confined-llm.txt 3:pipe ]
+R pos.bootstrap_pipe_fd3 OK 0 read 46 bytes: J0-BOOTSTRAP-45960…
+R read.nodedata_file.stat DENIED EPERM /private/tmp/j0-canary-Hm8R/nodedata/canary.txt (stat: existence, size, times)
+R read.nodedata_file.open DENIED EPERM /private/tmp/j0-canary-Hm8R/nodedata/canary.txt
+R read.nodedata_wallet.stat DENIED EPERM /private/tmp/j0-canary-Hm8R/nodedata/wallet.db (stat: existence, size, times)
+R read.nodedata_wallet.open DENIED EPERM /private/tmp/j0-canary-Hm8R/nodedata/wallet.db
+R read.nodedata_dir.stat DENIED EPERM /private/tmp/j0-canary-Hm8R/nodedata (stat: existence, size, times)
+R read.nodedata_dir.listdir DENIED EPERM /private/tmp/j0-canary-Hm8R/nodedata
+R read.pairing_challenge.stat DENIED EPERM /private/tmp/j0-canary-Hm8R/nodedata/pairing/challenge-0001.txt (stat: existence, size, times)
+R read.pairing_challenge.open DENIED EPERM /private/tmp/j0-canary-Hm8R/nodedata/pairing/challenge-0001.txt
+R read.pairing_nonce.stat DENIED EPERM /private/tmp/j0-canary-Hm8R/nodedata/pairing/owner-console.nonce (stat: existence, size, times)
+R read.pairing_nonce.open DENIED EPERM /private/tmp/j0-canary-Hm8R/nodedata/pairing/owner-console.nonce
+R read.pairing_dir.stat DENIED EPERM /private/tmp/j0-canary-Hm8R/nodedata/pairing (stat: existence, size, times)
+R read.pairing_dir.listdir DENIED EPERM /private/tmp/j0-canary-Hm8R/nodedata/pairing
+R read.keychain_file.stat DENIED EPERM /private/tmp/j0-canary-Hm8R/keychain/j0-throwaway.keychain-db (stat: existence, size, times)
+R read.keychain_file.open DENIED EPERM /private/tmp/j0-canary-Hm8R/keychain/j0-throwaway.keychain-db
+R read.hostconfig_file.stat DENIED EPERM /private/tmp/j0-canary-Hm8R/hostconfig/tauri.conf.json (stat: existence, size, times)
+R read.hostconfig_file.open DENIED EPERM /private/tmp/j0-canary-Hm8R/hostconfig/tauri.conf.json
+R read.sibling_file.stat DENIED EPERM /private/tmp/j0-canary-Hm8R/sibling-child/canary.txt (stat: existence, size, times)
+R read.sibling_file.open DENIED EPERM /private/tmp/j0-canary-Hm8R/sibling-child/canary.txt
+R read.hostcode_file.stat DENIED EPERM /private/tmp/j0-canary-Hm8R/hostcode/canary.txt (stat: existence, size, times)
+R read.hostcode_file.open DENIED EPERM /private/tmp/j0-canary-Hm8R/hostcode/canary.txt
+R exec.child_inherits_sandbox DENIED EPERM /bin/cat /private/tmp/j0-canary-Hm8R/nodedata/canary.txt exit=1 out=cat: /private/tmp/j0-canary-Hm8R/nodedata/canary.txt: Operat
+R net.node_tcp_127.0.0.1 DENIED EPERM port 50150 reply=
+R net.node_tcp_::1 DENIED EPERM port 50150 (listener is v4 only; informational)
+R net.control_sock DENIED EPERM /private/tmp/j0-canary-Hm8R/nodedata/control.sock reply=
+R net.egress_tcp_testnet DENIED EPERM 192.0.2.1:443 (EPERM = sandbox; timeout/unreach = network)
+R net.udp_loopback_send DENIED EPERM 127.0.0.1:50150
+R net.tcp_listen_loopback DENIED EPERM bind+listen 127.0.0.1:0
+R pos.llm_sock DENIED EPERM /private/tmp/j0-canary-Hm8R/ipc/llm.sock reply=
+R pos.broker_ipc_sock DENIED EPERM /private/tmp/j0-canary-Hm8R/ipc/broker.sock reply=
+R net.listen_unix OK 0 bind+listen /private/tmp/j0-canary-Hm8R/llm-listen/llm.sock
+R mach.com.apple.SecurityServer DENIED BOOTSTRAP_ERR kr=1100 (Permission denied)
+R mach.com.apple.securityd DENIED BOOTSTRAP_ERR kr=1100 (Permission denied)
+R mach.com.apple.securityd.xpc DENIED BOOTSTRAP_ERR kr=1100 (Permission denied)
+R mach.com.apple.secd DENIED BOOTSTRAP_ERR kr=1100 (Permission denied)
+R mach.com.apple.coreservices.appleevents DENIED BOOTSTRAP_ERR kr=1100 (Permission denied)
+R mach.com.apple.tccd DENIED BOOTSTRAP_ERR kr=1100 (Permission denied)
+R mach.com.apple.tccd.system DENIED BOOTSTRAP_ERR kr=1100 (Permission denied)
+R mach.com.apple.pasteboard.1 DENIED BOOTSTRAP_ERR kr=1100 (Permission denied)
+R mach.com.apple.windowserver.active DENIED BOOTSTRAP_ERR kr=1100 (Permission denied)
+R mach.com.apple.CoreServices.coreservicesd DENIED BOOTSTRAP_ERR kr=1100 (Permission denied)
+R mach.com.apple.lsd.mapdb DENIED BOOTSTRAP_ERR kr=1100 (Permission denied)
+R mach.com.apple.distributed_notifications@Uv3 DENIED BOOTSTRAP_ERR kr=1100 (Permission denied)
+R proc.task_for_pid DENIED KERN_FAILURE kr=5 ((os/kern) failure)
+R proc.task_name_for_pid DENIED KERN_FAILURE kr=5 (informational)
+R proc.pidinfo DENIED EPERM proc_pidinfo(PROC_PIDTBSDINFO) on broker
+R proc.pidpath DENIED EPERM 
+R proc.listallpids DENIED EPERM proc_listallpids -> 0
+R proc.sysctl_kern_proc_pid DENIED EPERM sysctl KERN_PROC_PID 74011 len=648 comm=
+R sig.kill0 DENIED EPERM kill(74011, 0)
+R sig.SIGUSR1 DENIED EPERM kill(74011, SIGUSR1)
+R sig.SIGSTOP DENIED EPERM kill(74011, SIGSTOP)
+R sig.SIGTERM DENIED EPERM kill(74011, SIGTERM)
+R sig.SIGKILL DENIED EPERM kill(74011, SIGKILL)
+R proc.ptrace_attach DENIED EPERM ptrace(PT_ATTACHEXC, 74011)
+R write.other_child_scratch.create DENIED EPERM /private/tmp/j0-canary-Hm8R/scratch/j0-created-75554
+R write.other_child_scratch.mkdir DENIED EPERM /private/tmp/j0-canary-Hm8R/scratch/j0-dir-75554
+R write.other_child_scratch.write DENIED EPERM /private/tmp/j0-canary-Hm8R/scratch/canary.txt
+R write.other_child_scratch.truncate DENIED EPERM /private/tmp/j0-canary-Hm8R/scratch/canary.txt
+R write.other_child_scratch.open_trunc DENIED EPERM /private/tmp/j0-canary-Hm8R/scratch/canary.txt
+R write.other_child_scratch.chmod DENIED EPERM /private/tmp/j0-canary-Hm8R/scratch/canary.txt
+R write.other_child_scratch.utimes DENIED EPERM /private/tmp/j0-canary-Hm8R/scratch/canary.txt
+R write.other_child_scratch.setxattr DENIED EPERM /private/tmp/j0-canary-Hm8R/scratch/canary.txt
+R write.other_child_scratch.rename_in_place DENIED EPERM /private/tmp/j0-canary-Hm8R/scratch/canary.txt -> /private/tmp/j0-canary-Hm8R/scratch/canary.renamed
+R write.other_child_scratch.rename_out_to_scratch DENIED EPERM /private/tmp/j0-canary-Hm8R/scratch/canary.txt -> /private/tmp/j0-canary-Hm8R/scratch-llm/stolen-other_child_scratch-75554
+R write.other_child_scratch.rename_in_from_scratch DENIED EPERM /private/tmp/j0-canary-Hm8R/scratch-llm/own-75554.txt -> /private/tmp/j0-canary-Hm8R/scratch/j0-planted-75554
+R write.other_child_scratch.symlink_create_in_target DENIED EPERM /private/tmp/j0-canary-Hm8R/scratch/j0-symlink-75554 -> /private/tmp/j0-canary-Hm8R/scratch-llm
+R write.other_child_scratch.symlink_escape_write DENIED EPERM write via /private/tmp/j0-canary-Hm8R/scratch-llm/sl-other_child_scratch-75554 -> /private/tmp/j0-canary-Hm8R/scratch/canary.txt
+R write.other_child_scratch.hardlink_create_in_target DENIED EPERM /private/tmp/j0-canary-Hm8R/scratch/j0-hardlink-75554 <- /private/tmp/j0-canary-Hm8R/scratch-llm/own-75554.txt
+R write.other_child_scratch.hardlink_escape DENIED EPERM link /private/tmp/j0-canary-Hm8R/scratch/canary.txt -> /private/tmp/j0-canary-Hm8R/scratch-llm/hl-other_child_scratch-75554
+R write.other_child_scratch.unlink DENIED EPERM /private/tmp/j0-canary-Hm8R/scratch/canary.txt
+R write.hostcode.create DENIED EPERM /private/tmp/j0-canary-Hm8R/hostcode/j0-created-75554
+R write.hostcode.mkdir DENIED EPERM /private/tmp/j0-canary-Hm8R/hostcode/j0-dir-75554
+R write.hostcode.write DENIED EPERM /private/tmp/j0-canary-Hm8R/hostcode/canary.txt
+R write.hostcode.truncate DENIED EPERM /private/tmp/j0-canary-Hm8R/hostcode/canary.txt
+R write.hostcode.open_trunc DENIED EPERM /private/tmp/j0-canary-Hm8R/hostcode/canary.txt
+R write.hostcode.chmod DENIED EPERM /private/tmp/j0-canary-Hm8R/hostcode/canary.txt
+R write.hostcode.utimes DENIED EPERM /private/tmp/j0-canary-Hm8R/hostcode/canary.txt
+R write.hostcode.setxattr DENIED EPERM /private/tmp/j0-canary-Hm8R/hostcode/canary.txt
+R write.hostcode.rename_in_place DENIED EPERM /private/tmp/j0-canary-Hm8R/hostcode/canary.txt -> /private/tmp/j0-canary-Hm8R/hostcode/canary.renamed
+R write.hostcode.rename_out_to_scratch DENIED EPERM /private/tmp/j0-canary-Hm8R/hostcode/canary.txt -> /private/tmp/j0-canary-Hm8R/scratch-llm/stolen-hostcode-75554
+R write.hostcode.rename_in_from_scratch DENIED EPERM /private/tmp/j0-canary-Hm8R/scratch-llm/own-75554.txt -> /private/tmp/j0-canary-Hm8R/hostcode/j0-planted-75554
+R write.hostcode.symlink_create_in_target DENIED EPERM /private/tmp/j0-canary-Hm8R/hostcode/j0-symlink-75554 -> /private/tmp/j0-canary-Hm8R/scratch-llm
+R write.hostcode.symlink_escape_write DENIED EPERM write via /private/tmp/j0-canary-Hm8R/scratch-llm/sl-hostcode-75554 -> /private/tmp/j0-canary-Hm8R/hostcode/canary.txt
+R write.hostcode.hardlink_create_in_target DENIED EPERM /private/tmp/j0-canary-Hm8R/hostcode/j0-hardlink-75554 <- /private/tmp/j0-canary-Hm8R/scratch-llm/own-75554.txt
+R write.hostcode.hardlink_escape DENIED EPERM link /private/tmp/j0-canary-Hm8R/hostcode/canary.txt -> /private/tmp/j0-canary-Hm8R/scratch-llm/hl-hostcode-75554
+R write.hostcode.unlink DENIED EPERM /private/tmp/j0-canary-Hm8R/hostcode/canary.txt
+R write.hostconfig.create DENIED EPERM /private/tmp/j0-canary-Hm8R/hostconfig/j0-created-75554
+R write.hostconfig.mkdir DENIED EPERM /private/tmp/j0-canary-Hm8R/hostconfig/j0-dir-75554
+R write.hostconfig.write DENIED EPERM /private/tmp/j0-canary-Hm8R/hostconfig/canary.txt
+R write.hostconfig.truncate DENIED EPERM /private/tmp/j0-canary-Hm8R/hostconfig/canary.txt
+R write.hostconfig.open_trunc DENIED EPERM /private/tmp/j0-canary-Hm8R/hostconfig/canary.txt
+R write.hostconfig.chmod DENIED EPERM /private/tmp/j0-canary-Hm8R/hostconfig/canary.txt
+R write.hostconfig.utimes DENIED EPERM /private/tmp/j0-canary-Hm8R/hostconfig/canary.txt
+R write.hostconfig.setxattr DENIED EPERM /private/tmp/j0-canary-Hm8R/hostconfig/canary.txt
+R write.hostconfig.rename_in_place DENIED EPERM /private/tmp/j0-canary-Hm8R/hostconfig/canary.txt -> /private/tmp/j0-canary-Hm8R/hostconfig/canary.renamed
+R write.hostconfig.rename_out_to_scratch DENIED EPERM /private/tmp/j0-canary-Hm8R/hostconfig/canary.txt -> /private/tmp/j0-canary-Hm8R/scratch-llm/stolen-hostconfig-75554
+R write.hostconfig.rename_in_from_scratch DENIED EPERM /private/tmp/j0-canary-Hm8R/scratch-llm/own-75554.txt -> /private/tmp/j0-canary-Hm8R/hostconfig/j0-planted-75554
+R write.hostconfig.symlink_create_in_target DENIED EPERM /private/tmp/j0-canary-Hm8R/hostconfig/j0-symlink-75554 -> /private/tmp/j0-canary-Hm8R/scratch-llm
+R write.hostconfig.symlink_escape_write DENIED EPERM write via /private/tmp/j0-canary-Hm8R/scratch-llm/sl-hostconfig-75554 -> /private/tmp/j0-canary-Hm8R/hostconfig/canary.txt
+R write.hostconfig.hardlink_create_in_target DENIED EPERM /private/tmp/j0-canary-Hm8R/hostconfig/j0-hardlink-75554 <- /private/tmp/j0-canary-Hm8R/scratch-llm/own-75554.txt
+R write.hostconfig.hardlink_escape DENIED EPERM link /private/tmp/j0-canary-Hm8R/hostconfig/canary.txt -> /private/tmp/j0-canary-Hm8R/scratch-llm/hl-hostconfig-75554
+R write.hostconfig.unlink DENIED EPERM /private/tmp/j0-canary-Hm8R/hostconfig/canary.txt
+R write.nodedata.create DENIED EPERM /private/tmp/j0-canary-Hm8R/nodedata/j0-created-75554
+R write.nodedata.mkdir DENIED EPERM /private/tmp/j0-canary-Hm8R/nodedata/j0-dir-75554
+R write.nodedata.write DENIED EPERM /private/tmp/j0-canary-Hm8R/nodedata/canary.txt
+R write.nodedata.truncate DENIED EPERM /private/tmp/j0-canary-Hm8R/nodedata/canary.txt
+R write.nodedata.open_trunc DENIED EPERM /private/tmp/j0-canary-Hm8R/nodedata/canary.txt
+R write.nodedata.chmod DENIED EPERM /private/tmp/j0-canary-Hm8R/nodedata/canary.txt
+R write.nodedata.utimes DENIED EPERM /private/tmp/j0-canary-Hm8R/nodedata/canary.txt
+R write.nodedata.setxattr DENIED EPERM /private/tmp/j0-canary-Hm8R/nodedata/canary.txt
+R write.nodedata.rename_in_place DENIED EPERM /private/tmp/j0-canary-Hm8R/nodedata/canary.txt -> /private/tmp/j0-canary-Hm8R/nodedata/canary.renamed
+R write.nodedata.rename_out_to_scratch DENIED EPERM /private/tmp/j0-canary-Hm8R/nodedata/canary.txt -> /private/tmp/j0-canary-Hm8R/scratch-llm/stolen-nodedata-75554
+R write.nodedata.rename_in_from_scratch DENIED EPERM /private/tmp/j0-canary-Hm8R/scratch-llm/own-75554.txt -> /private/tmp/j0-canary-Hm8R/nodedata/j0-planted-75554
+R write.nodedata.symlink_create_in_target DENIED EPERM /private/tmp/j0-canary-Hm8R/nodedata/j0-symlink-75554 -> /private/tmp/j0-canary-Hm8R/scratch-llm
+R write.nodedata.symlink_escape_write DENIED EPERM write via /private/tmp/j0-canary-Hm8R/scratch-llm/sl-nodedata-75554 -> /private/tmp/j0-canary-Hm8R/nodedata/canary.txt
+R write.nodedata.hardlink_create_in_target DENIED EPERM /private/tmp/j0-canary-Hm8R/nodedata/j0-hardlink-75554 <- /private/tmp/j0-canary-Hm8R/scratch-llm/own-75554.txt
+R write.nodedata.hardlink_escape DENIED EPERM link /private/tmp/j0-canary-Hm8R/nodedata/canary.txt -> /private/tmp/j0-canary-Hm8R/scratch-llm/hl-nodedata-75554
+R write.nodedata.unlink DENIED EPERM /private/tmp/j0-canary-Hm8R/nodedata/canary.txt
+R write.pairing.create DENIED EPERM /private/tmp/j0-canary-Hm8R/nodedata/pairing/j0-created-75554
+R write.pairing.mkdir DENIED EPERM /private/tmp/j0-canary-Hm8R/nodedata/pairing/j0-dir-75554
+R write.pairing.write DENIED EPERM /private/tmp/j0-canary-Hm8R/nodedata/pairing/canary.txt
+R write.pairing.truncate DENIED EPERM /private/tmp/j0-canary-Hm8R/nodedata/pairing/canary.txt
+R write.pairing.open_trunc DENIED EPERM /private/tmp/j0-canary-Hm8R/nodedata/pairing/canary.txt
+R write.pairing.chmod DENIED EPERM /private/tmp/j0-canary-Hm8R/nodedata/pairing/canary.txt
+R write.pairing.utimes DENIED EPERM /private/tmp/j0-canary-Hm8R/nodedata/pairing/canary.txt
+R write.pairing.setxattr DENIED EPERM /private/tmp/j0-canary-Hm8R/nodedata/pairing/canary.txt
+R write.pairing.rename_in_place DENIED EPERM /private/tmp/j0-canary-Hm8R/nodedata/pairing/canary.txt -> /private/tmp/j0-canary-Hm8R/nodedata/pairing/canary.renamed
+R write.pairing.rename_out_to_scratch DENIED EPERM /private/tmp/j0-canary-Hm8R/nodedata/pairing/canary.txt -> /private/tmp/j0-canary-Hm8R/scratch-llm/stolen-pairing-75554
+R write.pairing.rename_in_from_scratch DENIED EPERM /private/tmp/j0-canary-Hm8R/scratch-llm/own-75554.txt -> /private/tmp/j0-canary-Hm8R/nodedata/pairing/j0-planted-75554
+R write.pairing.symlink_create_in_target DENIED EPERM /private/tmp/j0-canary-Hm8R/nodedata/pairing/j0-symlink-75554 -> /private/tmp/j0-canary-Hm8R/scratch-llm
+R write.pairing.symlink_escape_write DENIED EPERM write via /private/tmp/j0-canary-Hm8R/scratch-llm/sl-pairing-75554 -> /private/tmp/j0-canary-Hm8R/nodedata/pairing/canary.txt
+R write.pairing.hardlink_create_in_target DENIED EPERM /private/tmp/j0-canary-Hm8R/nodedata/pairing/j0-hardlink-75554 <- /private/tmp/j0-canary-Hm8R/scratch-llm/own-75554.txt
+R write.pairing.hardlink_escape DENIED EPERM link /private/tmp/j0-canary-Hm8R/nodedata/pairing/canary.txt -> /private/tmp/j0-canary-Hm8R/scratch-llm/hl-pairing-75554
+R write.pairing.unlink DENIED EPERM /private/tmp/j0-canary-Hm8R/nodedata/pairing/canary.txt
+R write.sibling.create DENIED EPERM /private/tmp/j0-canary-Hm8R/sibling-child/j0-created-75554
+R write.sibling.mkdir DENIED EPERM /private/tmp/j0-canary-Hm8R/sibling-child/j0-dir-75554
+R write.sibling.write DENIED EPERM /private/tmp/j0-canary-Hm8R/sibling-child/canary.txt
+R write.sibling.truncate DENIED EPERM /private/tmp/j0-canary-Hm8R/sibling-child/canary.txt
+R write.sibling.open_trunc DENIED EPERM /private/tmp/j0-canary-Hm8R/sibling-child/canary.txt
+R write.sibling.chmod DENIED EPERM /private/tmp/j0-canary-Hm8R/sibling-child/canary.txt
+R write.sibling.utimes DENIED EPERM /private/tmp/j0-canary-Hm8R/sibling-child/canary.txt
+R write.sibling.setxattr DENIED EPERM /private/tmp/j0-canary-Hm8R/sibling-child/canary.txt
+R write.sibling.rename_in_place DENIED EPERM /private/tmp/j0-canary-Hm8R/sibling-child/canary.txt -> /private/tmp/j0-canary-Hm8R/sibling-child/canary.renamed
+R write.sibling.rename_out_to_scratch DENIED EPERM /private/tmp/j0-canary-Hm8R/sibling-child/canary.txt -> /private/tmp/j0-canary-Hm8R/scratch-llm/stolen-sibling-75554
+R write.sibling.rename_in_from_scratch DENIED EPERM /private/tmp/j0-canary-Hm8R/scratch-llm/own-75554.txt -> /private/tmp/j0-canary-Hm8R/sibling-child/j0-planted-75554
+R write.sibling.symlink_create_in_target DENIED EPERM /private/tmp/j0-canary-Hm8R/sibling-child/j0-symlink-75554 -> /private/tmp/j0-canary-Hm8R/scratch-llm
+R write.sibling.symlink_escape_write DENIED EPERM write via /private/tmp/j0-canary-Hm8R/scratch-llm/sl-sibling-75554 -> /private/tmp/j0-canary-Hm8R/sibling-child/canary.txt
+R write.sibling.hardlink_create_in_target DENIED EPERM /private/tmp/j0-canary-Hm8R/sibling-child/j0-hardlink-75554 <- /private/tmp/j0-canary-Hm8R/scratch-llm/own-75554.txt
+R write.sibling.hardlink_escape DENIED EPERM link /private/tmp/j0-canary-Hm8R/sibling-child/canary.txt -> /private/tmp/j0-canary-Hm8R/scratch-llm/hl-sibling-75554
+R write.sibling.unlink DENIED EPERM /private/tmp/j0-canary-Hm8R/sibling-child/canary.txt
+R write.weights.create DENIED EPERM /private/tmp/j0-canary-Hm8R/weights/j0-created-75554
+R write.weights.mkdir DENIED EPERM /private/tmp/j0-canary-Hm8R/weights/j0-dir-75554
+R write.weights.write DENIED EPERM /private/tmp/j0-canary-Hm8R/weights/canary.txt
+R write.weights.truncate DENIED EPERM /private/tmp/j0-canary-Hm8R/weights/canary.txt
+R write.weights.open_trunc DENIED EPERM /private/tmp/j0-canary-Hm8R/weights/canary.txt
+R write.weights.chmod DENIED EPERM /private/tmp/j0-canary-Hm8R/weights/canary.txt
+R write.weights.utimes DENIED EPERM /private/tmp/j0-canary-Hm8R/weights/canary.txt
+R write.weights.setxattr DENIED EPERM /private/tmp/j0-canary-Hm8R/weights/canary.txt
+R write.weights.rename_in_place DENIED EPERM /private/tmp/j0-canary-Hm8R/weights/canary.txt -> /private/tmp/j0-canary-Hm8R/weights/canary.renamed
+R write.weights.rename_out_to_scratch DENIED EPERM /private/tmp/j0-canary-Hm8R/weights/canary.txt -> /private/tmp/j0-canary-Hm8R/scratch-llm/stolen-weights-75554
+R write.weights.rename_in_from_scratch DENIED EPERM /private/tmp/j0-canary-Hm8R/scratch-llm/own-75554.txt -> /private/tmp/j0-canary-Hm8R/weights/j0-planted-75554
+R write.weights.symlink_create_in_target DENIED EPERM /private/tmp/j0-canary-Hm8R/weights/j0-symlink-75554 -> /private/tmp/j0-canary-Hm8R/scratch-llm
+R write.weights.symlink_escape_write DENIED EPERM write via /private/tmp/j0-canary-Hm8R/scratch-llm/sl-weights-75554 -> /private/tmp/j0-canary-Hm8R/weights/canary.txt
+R write.weights.hardlink_create_in_target DENIED EPERM /private/tmp/j0-canary-Hm8R/weights/j0-hardlink-75554 <- /private/tmp/j0-canary-Hm8R/scratch-llm/own-75554.txt
+R write.weights.hardlink_escape DENIED EPERM link /private/tmp/j0-canary-Hm8R/weights/canary.txt -> /private/tmp/j0-canary-Hm8R/scratch-llm/hl-weights-75554
+R write.weights.unlink DENIED EPERM /private/tmp/j0-canary-Hm8R/weights/canary.txt
+R write.canary_root.create DENIED EPERM /private/tmp/j0-canary-Hm8R/j0-created-75554
+R write.canary_root.mkdir DENIED EPERM /private/tmp/j0-canary-Hm8R/j0-dir-75554
+R write.canary_root.write DENIED EPERM /private/tmp/j0-canary-Hm8R/canary.txt
+R write.canary_root.truncate DENIED EPERM /private/tmp/j0-canary-Hm8R/canary.txt
+R write.canary_root.open_trunc DENIED EPERM /private/tmp/j0-canary-Hm8R/canary.txt
+R write.canary_root.chmod DENIED EPERM /private/tmp/j0-canary-Hm8R/canary.txt
+R write.canary_root.utimes DENIED EPERM /private/tmp/j0-canary-Hm8R/canary.txt
+R write.canary_root.setxattr DENIED EPERM /private/tmp/j0-canary-Hm8R/canary.txt
+R write.canary_root.rename_in_place DENIED EPERM /private/tmp/j0-canary-Hm8R/canary.txt -> /private/tmp/j0-canary-Hm8R/canary.renamed
+R write.canary_root.rename_out_to_scratch DENIED EPERM /private/tmp/j0-canary-Hm8R/canary.txt -> /private/tmp/j0-canary-Hm8R/scratch-llm/stolen-canary_root-75554
+R write.canary_root.rename_in_from_scratch DENIED EPERM /private/tmp/j0-canary-Hm8R/scratch-llm/own-75554.txt -> /private/tmp/j0-canary-Hm8R/j0-planted-75554
+R write.canary_root.symlink_create_in_target DENIED EPERM /private/tmp/j0-canary-Hm8R/j0-symlink-75554 -> /private/tmp/j0-canary-Hm8R/scratch-llm
+R write.canary_root.symlink_escape_write DENIED EPERM write via /private/tmp/j0-canary-Hm8R/scratch-llm/sl-canary_root-75554 -> /private/tmp/j0-canary-Hm8R/canary.txt
+R write.canary_root.hardlink_create_in_target DENIED EPERM /private/tmp/j0-canary-Hm8R/j0-hardlink-75554 <- /private/tmp/j0-canary-Hm8R/scratch-llm/own-75554.txt
+R write.canary_root.hardlink_escape DENIED EPERM link /private/tmp/j0-canary-Hm8R/canary.txt -> /private/tmp/j0-canary-Hm8R/scratch-llm/hl-canary_root-75554
+R write.canary_root.unlink DENIED EPERM /private/tmp/j0-canary-Hm8R/canary.txt
+R write.scratch.create OK 0 /private/tmp/j0-canary-Hm8R/scratch-llm/j0-created-75554
+R write.scratch.mkdir OK 0 /private/tmp/j0-canary-Hm8R/scratch-llm/j0-dir-75554
+R write.scratch.write OK 0 /private/tmp/j0-canary-Hm8R/scratch-llm/canary.txt
+R write.scratch.truncate OK 0 /private/tmp/j0-canary-Hm8R/scratch-llm/canary.txt
+R write.scratch.open_trunc OK 0 /private/tmp/j0-canary-Hm8R/scratch-llm/canary.txt
+R write.scratch.chmod OK 0 /private/tmp/j0-canary-Hm8R/scratch-llm/canary.txt
+R write.scratch.utimes OK 0 /private/tmp/j0-canary-Hm8R/scratch-llm/canary.txt
+R write.scratch.setxattr OK 0 /private/tmp/j0-canary-Hm8R/scratch-llm/canary.txt
+R write.scratch.rename_in_place OK 0 /private/tmp/j0-canary-Hm8R/scratch-llm/canary.txt -> /private/tmp/j0-canary-Hm8R/scratch-llm/canary.renamed
+R write.scratch.rename_out_to_scratch OK 0 /private/tmp/j0-canary-Hm8R/scratch-llm/canary.txt -> /private/tmp/j0-canary-Hm8R/scratch-llm/stolen-scratch-75554
+R write.scratch.rename_in_from_scratch OK 0 /private/tmp/j0-canary-Hm8R/scratch-llm/own-75554.txt -> /private/tmp/j0-canary-Hm8R/scratch-llm/j0-planted-75554
+R write.scratch.symlink_create_in_target OK 0 /private/tmp/j0-canary-Hm8R/scratch-llm/j0-symlink-75554 -> /private/tmp/j0-canary-Hm8R/scratch-llm
+R write.scratch.symlink_escape_write OK 0 write via /private/tmp/j0-canary-Hm8R/scratch-llm/sl-scratch-75554
+R write.scratch.hardlink_create_in_target OK 0 /private/tmp/j0-canary-Hm8R/scratch-llm/j0-hardlink-75554 <- /private/tmp/j0-canary-Hm8R/scratch-llm/own-75554.txt
+R write.scratch.hardlink_escape OK 0 link created AND written via /private/tmp/j0-canary-Hm8R/scratch-llm/hl-scratch-75554
+R write.scratch.unlink OK 0 /private/tmp/j0-canary-Hm8R/scratch-llm/canary.txt
+# j0probe done

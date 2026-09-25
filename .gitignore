@@ -9,3 +9,8 @@ src-tauri/target/
 src-tauri/gen/
 src-tauri/bin/konsensus-*
 !src-tauri/bin/README.md
+
+# J0 spike: model weights never enter git
+*.gguf
+*.safetensors
+*.gguf.part

@@ -1,0 +1,11 @@
+--- touch new file in weights dir
+touch: /Users/rasmust.larsen/Desktop/seat-drafts/models/Qwen3-4B-GGUF/j0-created-by-confined-llm: Operation not permitted
+exit=1
+--- open model for append (zero bytes written)
+Error opening /private/var/select/sh: Operation not permitted
+shell-init: error retrieving current directory: getcwd: cannot access parent directories: Operation not permitted
+sh: /Users/rasmust.larsen/Desktop/seat-drafts/models/Qwen3-4B-GGUF/Qwen3-4B-Q4_K_M.gguf: Operation not permitted
+exit=1
+--- hard-link model into own scratch
+ln: /private/tmp/j0-canary-model-2cRw/scratch-llm/model-hardlink.gguf: Operation not permitted
+exit=1

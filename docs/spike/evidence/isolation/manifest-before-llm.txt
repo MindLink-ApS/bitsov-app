@@ -1,0 +1,16 @@
+4f8e1f1a2e9fc0e5 /private/tmp/j0-canary-Hm8R/canary.txt
+103a0b5975462bea /private/tmp/j0-canary-Hm8R/hostcode/bitsov-app
+051ef1094a266aae /private/tmp/j0-canary-Hm8R/hostcode/canary.txt
+8bc8b74eee0d5802 /private/tmp/j0-canary-Hm8R/hostconfig/canary.txt
+7ec194f778f36830 /private/tmp/j0-canary-Hm8R/hostconfig/tauri.conf.json
+e3b0c44298fc1c14 /private/tmp/j0-canary-Hm8R/keychain/.fl0BF0576A
+ab9b7bffd2df5b54 /private/tmp/j0-canary-Hm8R/keychain/j0-throwaway.keychain-db
+902772cb1bcb12b8 /private/tmp/j0-canary-Hm8R/nodedata/canary.txt
+dir /private/tmp/j0-canary-Hm8R/nodedata/pairing
+efa0a3d1d98f52c5 /private/tmp/j0-canary-Hm8R/nodedata/pairing/canary.txt
+392da987d46e1757 /private/tmp/j0-canary-Hm8R/nodedata/pairing/challenge-0001.txt
+1187c32cc5fc3471 /private/tmp/j0-canary-Hm8R/nodedata/pairing/owner-console.nonce
+0013426f2417159e /private/tmp/j0-canary-Hm8R/nodedata/wallet.db
+53e75623164e353f /private/tmp/j0-canary-Hm8R/scratch/canary.txt
+0d877c10acd5d92d /private/tmp/j0-canary-Hm8R/sibling-child/canary.txt
+9d14c49196a60958 /private/tmp/j0-canary-Hm8R/weights/canary.txt
