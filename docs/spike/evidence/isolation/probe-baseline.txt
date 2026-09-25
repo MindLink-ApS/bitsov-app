@@ -1,0 +1,235 @@
+j0fdplant: planted=5000,70000 failed= soft_limit=256
+j0spawn: child pid=35196
+j0spawn: bootstrap sha256=61922bf84ec9209d7936664e3a80e4d960421d4cf9f26f78612d2a9d4faf6586 len=46
+# j0probe pid=35196 mode=baseline
+R fd.inventory INFO 4 open=[0:vnode 1:vnode 2:vnode 3:pipe ]
+R fd.scan INFO 4 open=[0 1 2 3 ] limit=138240
+R env.no_sensitive_vars CLEAN 0 names=[PATH,HOME,TMPDIR,LANG,] sensitive_hits=0
+R pos.bootstrap_pipe_fd3 OK 0 read 46 bytes sha256=61922bf84ec9209d7936664e3a80e4d960421d4cf9f26f78612d2a9d4faf6586
+R read.nodedata_file.stat OK 0 /private/tmp/j0-canary-7GryiCNR/nodedata/canary.txt (stat: existence, size, times)
+R read.nodedata_file.open OK 0 /private/tmp/j0-canary-7GryiCNR/nodedata/canary.txt read 33 bytes: CANARY-nodedata ee5b6fa8
+R read.nodedata_wallet.stat OK 0 /private/tmp/j0-canary-7GryiCNR/nodedata/wallet.db (stat: existence, size, times)
+R read.nodedata_wallet.open OK 0 /private/tmp/j0-canary-7GryiCNR/nodedata/wallet.db read 34 bytes: CANARY-wallet-db b8a2a84
+R read.nodedata_dir.stat OK 0 /private/tmp/j0-canary-7GryiCNR/nodedata (stat: existence, size, times)
+R read.nodedata_dir.listdir OK 0 /private/tmp/j0-canary-7GryiCNR/nodedata entries=6
+R read.pairing_challenge.stat OK 0 /private/tmp/j0-canary-7GryiCNR/nodedata/pairing/challenge-0001.txt (stat: existence, size, times)
+R read.pairing_challenge.open OK 0 /private/tmp/j0-canary-7GryiCNR/nodedata/pairing/challenge-0001.txt read 42 bytes: CANARY-pairing-challenge
+R read.pairing_nonce.stat OK 0 /private/tmp/j0-canary-7GryiCNR/nodedata/pairing/owner-console.nonce (stat: existence, size, times)
+R read.pairing_nonce.open OK 0 /private/tmp/j0-canary-7GryiCNR/nodedata/pairing/owner-console.nonce read 38 bytes: CANARY-pairing-nonce af6
+R read.pairing_dir.stat OK 0 /private/tmp/j0-canary-7GryiCNR/nodedata/pairing (stat: existence, size, times)
+R read.pairing_dir.listdir OK 0 /private/tmp/j0-canary-7GryiCNR/nodedata/pairing entries=5
+R read.keychain_file.stat OK 0 /private/tmp/j0-canary-7GryiCNR/keychain/j0-throwaway.keychain-db (stat: existence, size, times)
+R read.keychain_file.open OK 0 /private/tmp/j0-canary-7GryiCNR/keychain/j0-throwaway.keychain-db read 63 bytes: kych
+R read.hostconfig_file.stat OK 0 /private/tmp/j0-canary-7GryiCNR/hostconfig/tauri.conf.json (stat: existence, size, times)
+R read.hostconfig_file.open OK 0 /private/tmp/j0-canary-7GryiCNR/hostconfig/tauri.conf.json read 31 bytes: {"CANARY":"fake tauri co
+R read.sibling_file.stat OK 0 /private/tmp/j0-canary-7GryiCNR/sibling-child/canary.txt (stat: existence, size, times)
+R read.sibling_file.open OK 0 /private/tmp/j0-canary-7GryiCNR/sibling-child/canary.txt read 32 bytes: CANARY-sibling 312a5ef33
+R read.hostcode_file.stat OK 0 /private/tmp/j0-canary-7GryiCNR/hostcode/canary.txt (stat: existence, size, times)
+R read.hostcode_file.open OK 0 /private/tmp/j0-canary-7GryiCNR/hostcode/canary.txt read 33 bytes: CANARY-hostcode c1614947
+R read.nodedata_via_datavol.stat OK 0 /System/Volumes/Data/private/tmp/j0-canary-7GryiCNR/nodedata/canary.txt (stat: existence, size, times)
+R read.nodedata_via_datavol.open OK 0 /System/Volumes/Data/private/tmp/j0-canary-7GryiCNR/nodedata/canary.txt read 33 bytes: CANARY-nodedata ee5b6fa8
+R read.users_dir.stat OK 0 /Users (stat: existence, size, times)
+R read.users_dir.listdir OK 0 /Users entries=5
+R exec.child_inherits_sandbox OK 0 spawn=0 exit=0 grandchild read /private/tmp/j0-canary-7GryiCNR/nodedata/canary.txt
+R exec.system_shell OK 0 posix_spawn /bin/sh exit=0
+R exec.system_bin_cat OK 0 posix_spawn /bin/cat exit=0
+R net.node_tcp_127.0.0.1 OK 0 port 57788 reply=pong node-tcp 
+R net.node_tcp_::1 OK 0 port 57788 reply=pong node-tcp6 
+R net.control_sock OK 0 /private/tmp/j0-canary-7GryiCNR/nodedata/control.sock reply=pong control.sock 
+R net.egress_tcp_nonloopback OK 0 <lan-ip>:24638 reply=pong egress 
+R net.udp_loopback_send OK 0 127.0.0.1:57788
+R net.tcp_listen_loopback OK 0 bind+listen 127.0.0.1:0
+R pos.llm_sock OK 0 /private/tmp/j0-canary-7GryiCNR/ipc/llm.sock reply=pong llm.sock 
+R pos.broker_ipc_sock OK 0 /private/tmp/j0-canary-7GryiCNR/ipc/broker.sock reply=pong broker.sock 
+R net.listen_unix OK 0 bind+listen /private/tmp/j0-canary-7GryiCNR/ipc/assistant-may-not-serve.sock
+R net.listen_unix_other OK 0 bind+listen /private/tmp/j0-canary-7GryiCNR/scratch/assistant-other.sock
+R mach.com.apple.SecurityServer OK KR0 (Success)
+R mach.com.apple.securityd.xpc OK KR0 (Success)
+R mach.com.apple.securityd.general OK KR0 (Success)
+R mach.com.apple.security.octagon OK KR0 (Success)
+R mach.com.apple.ctkd.token-client OK KR0 (Success)
+R mach.com.apple.coreservices.appleevents OK KR0 (Success)
+R mach.com.apple.tccd OK KR0 (Success)
+R mach.com.apple.tccd.system OK KR0 (Success)
+R mach.com.apple.pasteboard.1 OK KR0 (Success)
+R mach.com.apple.windowserver.active OK KR0 (Success)
+R mach.com.apple.CoreServices.coreservicesd OK KR0 (Success)
+R mach.com.apple.lsd.mapdb OK KR0 (Success)
+R mach.com.apple.distributed_notifications@Uv3 OK KR0 (Success)
+R mach.com.apple.securityd DENIED KR1102 (Unknown service name)
+R mach.com.apple.secd DENIED KR1102 (Unknown service name)
+R proc.task_for_pid OK KR0 ((os/kern) successful)
+R proc.task_name_for_pid OK KR0 ((os/kern) successful)
+R proc.pidinfo OK 0 proc_pidinfo(PROC_PIDTBSDINFO) on broker
+R proc.pidpath OK 0 /private/tmp/j0-canary-7GryiCNR/bin/dummy_broker
+R proc.listallpids OK 0 proc_listallpids -> 990
+R proc.sysctl_kern_proc_pid OK 0 sysctl KERN_PROC_PID 35131 len=648 comm=dummy_broker
+R proc.sysctl_kern_procargs2 OK 0 sysctl {kern,49,35131} len=9532
+R proc.sysctl_kern_procargs OK 0 sysctl {kern,38,35131} len=9596
+R sig.kill0 OK 0 kill(35131, 0)
+R sig.SIGUSR1 OK 0 kill(35131, SIGUSR1)
+R sig.SIGSTOP OK 0 kill(victim 35187, SIGSTOP)
+R sig.SIGTERM OK 0 kill(victim 35188, SIGTERM)
+R sig.SIGKILL OK 0 kill(victim 35189, SIGKILL)
+R proc.ptrace_attach OK 0 ptrace(PT_ATTACHEXC, victim 35190)
+R write.other_child_scratch.create OK 0 /private/tmp/j0-canary-7GryiCNR/scratch-llm/j0-created-35196
+R write.other_child_scratch.mkdir OK 0 /private/tmp/j0-canary-7GryiCNR/scratch-llm/j0-dir-35196
+R write.other_child_scratch.write OK 0 /private/tmp/j0-canary-7GryiCNR/scratch-llm/canary.txt
+R write.other_child_scratch.truncate OK 0 /private/tmp/j0-canary-7GryiCNR/scratch-llm/canary.txt
+R write.other_child_scratch.open_trunc OK 0 /private/tmp/j0-canary-7GryiCNR/scratch-llm/canary.txt
+R write.other_child_scratch.chmod OK 0 /private/tmp/j0-canary-7GryiCNR/scratch-llm/canary.txt
+R write.other_child_scratch.utimes OK 0 /private/tmp/j0-canary-7GryiCNR/scratch-llm/canary.txt
+R write.other_child_scratch.setxattr OK 0 /private/tmp/j0-canary-7GryiCNR/scratch-llm/canary.txt
+R write.other_child_scratch.rename_in_place OK 0 /private/tmp/j0-canary-7GryiCNR/scratch-llm/canary.txt -> /private/tmp/j0-canary-7GryiCNR/scratch-llm/canary.renamed
+R write.other_child_scratch.rename_out_to_scratch OK 0 /private/tmp/j0-canary-7GryiCNR/scratch-llm/canary.txt -> /private/tmp/j0-canary-7GryiCNR/scratch/stolen-other_child_scratch-35196
+R write.other_child_scratch.rename_in_from_scratch OK 0 /private/tmp/j0-canary-7GryiCNR/scratch/own-35196.txt -> /private/tmp/j0-canary-7GryiCNR/scratch-llm/j0-planted-35196
+R write.other_child_scratch.symlink_create_in_target OK 0 /private/tmp/j0-canary-7GryiCNR/scratch-llm/j0-symlink-35196 -> /private/tmp/j0-canary-7GryiCNR/scratch
+R write.other_child_scratch.symlink_escape_write OK 0 write via /private/tmp/j0-canary-7GryiCNR/scratch/sl-other_child_scratch-35196
+R write.other_child_scratch.hardlink_create_in_target OK 0 /private/tmp/j0-canary-7GryiCNR/scratch-llm/j0-hardlink-35196 <- /private/tmp/j0-canary-7GryiCNR/scratch/own-35196.txt
+R write.other_child_scratch.hardlink_escape OK 0 link created AND written via /private/tmp/j0-canary-7GryiCNR/scratch/hl-other_child_scratch-35196
+R write.other_child_scratch.unlink OK 0 /private/tmp/j0-canary-7GryiCNR/scratch-llm/canary.txt
+R write.hostcode.create OK 0 /private/tmp/j0-canary-7GryiCNR/hostcode/j0-created-35196
+R write.hostcode.mkdir OK 0 /private/tmp/j0-canary-7GryiCNR/hostcode/j0-dir-35196
+R write.hostcode.write OK 0 /private/tmp/j0-canary-7GryiCNR/hostcode/canary.txt
+R write.hostcode.truncate OK 0 /private/tmp/j0-canary-7GryiCNR/hostcode/canary.txt
+R write.hostcode.open_trunc OK 0 /private/tmp/j0-canary-7GryiCNR/hostcode/canary.txt
+R write.hostcode.chmod OK 0 /private/tmp/j0-canary-7GryiCNR/hostcode/canary.txt
+R write.hostcode.utimes OK 0 /private/tmp/j0-canary-7GryiCNR/hostcode/canary.txt
+R write.hostcode.setxattr OK 0 /private/tmp/j0-canary-7GryiCNR/hostcode/canary.txt
+R write.hostcode.rename_in_place OK 0 /private/tmp/j0-canary-7GryiCNR/hostcode/canary.txt -> /private/tmp/j0-canary-7GryiCNR/hostcode/canary.renamed
+R write.hostcode.rename_out_to_scratch OK 0 /private/tmp/j0-canary-7GryiCNR/hostcode/canary.txt -> /private/tmp/j0-canary-7GryiCNR/scratch/stolen-hostcode-35196
+R write.hostcode.rename_in_from_scratch OK 0 /private/tmp/j0-canary-7GryiCNR/scratch/own-35196.txt -> /private/tmp/j0-canary-7GryiCNR/hostcode/j0-planted-35196
+R write.hostcode.symlink_create_in_target OK 0 /private/tmp/j0-canary-7GryiCNR/hostcode/j0-symlink-35196 -> /private/tmp/j0-canary-7GryiCNR/scratch
+R write.hostcode.symlink_escape_write OK 0 write via /private/tmp/j0-canary-7GryiCNR/scratch/sl-hostcode-35196
+R write.hostcode.hardlink_create_in_target OK 0 /private/tmp/j0-canary-7GryiCNR/hostcode/j0-hardlink-35196 <- /private/tmp/j0-canary-7GryiCNR/scratch/own-35196.txt
+R write.hostcode.hardlink_escape OK 0 link created AND written via /private/tmp/j0-canary-7GryiCNR/scratch/hl-hostcode-35196
+R write.hostcode.unlink OK 0 /private/tmp/j0-canary-7GryiCNR/hostcode/canary.txt
+R write.hostconfig.create OK 0 /private/tmp/j0-canary-7GryiCNR/hostconfig/j0-created-35196
+R write.hostconfig.mkdir OK 0 /private/tmp/j0-canary-7GryiCNR/hostconfig/j0-dir-35196
+R write.hostconfig.write OK 0 /private/tmp/j0-canary-7GryiCNR/hostconfig/canary.txt
+R write.hostconfig.truncate OK 0 /private/tmp/j0-canary-7GryiCNR/hostconfig/canary.txt
+R write.hostconfig.open_trunc OK 0 /private/tmp/j0-canary-7GryiCNR/hostconfig/canary.txt
+R write.hostconfig.chmod OK 0 /private/tmp/j0-canary-7GryiCNR/hostconfig/canary.txt
+R write.hostconfig.utimes OK 0 /private/tmp/j0-canary-7GryiCNR/hostconfig/canary.txt
+R write.hostconfig.setxattr OK 0 /private/tmp/j0-canary-7GryiCNR/hostconfig/canary.txt
+R write.hostconfig.rename_in_place OK 0 /private/tmp/j0-canary-7GryiCNR/hostconfig/canary.txt -> /private/tmp/j0-canary-7GryiCNR/hostconfig/canary.renamed
+R write.hostconfig.rename_out_to_scratch OK 0 /private/tmp/j0-canary-7GryiCNR/hostconfig/canary.txt -> /private/tmp/j0-canary-7GryiCNR/scratch/stolen-hostconfig-35196
+R write.hostconfig.rename_in_from_scratch OK 0 /private/tmp/j0-canary-7GryiCNR/scratch/own-35196.txt -> /private/tmp/j0-canary-7GryiCNR/hostconfig/j0-planted-35196
+R write.hostconfig.symlink_create_in_target OK 0 /private/tmp/j0-canary-7GryiCNR/hostconfig/j0-symlink-35196 -> /private/tmp/j0-canary-7GryiCNR/scratch
+R write.hostconfig.symlink_escape_write OK 0 write via /private/tmp/j0-canary-7GryiCNR/scratch/sl-hostconfig-35196
+R write.hostconfig.hardlink_create_in_target OK 0 /private/tmp/j0-canary-7GryiCNR/hostconfig/j0-hardlink-35196 <- /private/tmp/j0-canary-7GryiCNR/scratch/own-35196.txt
+R write.hostconfig.hardlink_escape OK 0 link created AND written via /private/tmp/j0-canary-7GryiCNR/scratch/hl-hostconfig-35196
+R write.hostconfig.unlink OK 0 /private/tmp/j0-canary-7GryiCNR/hostconfig/canary.txt
+R write.nodedata.create OK 0 /private/tmp/j0-canary-7GryiCNR/nodedata/j0-created-35196
+R write.nodedata.mkdir OK 0 /private/tmp/j0-canary-7GryiCNR/nodedata/j0-dir-35196
+R write.nodedata.write OK 0 /private/tmp/j0-canary-7GryiCNR/nodedata/canary.txt
+R write.nodedata.truncate OK 0 /private/tmp/j0-canary-7GryiCNR/nodedata/canary.txt
+R write.nodedata.open_trunc OK 0 /private/tmp/j0-canary-7GryiCNR/nodedata/canary.txt
+R write.nodedata.chmod OK 0 /private/tmp/j0-canary-7GryiCNR/nodedata/canary.txt
+R write.nodedata.utimes OK 0 /private/tmp/j0-canary-7GryiCNR/nodedata/canary.txt
+R write.nodedata.setxattr OK 0 /private/tmp/j0-canary-7GryiCNR/nodedata/canary.txt
+R write.nodedata.rename_in_place OK 0 /private/tmp/j0-canary-7GryiCNR/nodedata/canary.txt -> /private/tmp/j0-canary-7GryiCNR/nodedata/canary.renamed
+R write.nodedata.rename_out_to_scratch OK 0 /private/tmp/j0-canary-7GryiCNR/nodedata/canary.txt -> /private/tmp/j0-canary-7GryiCNR/scratch/stolen-nodedata-35196
+R write.nodedata.rename_in_from_scratch OK 0 /private/tmp/j0-canary-7GryiCNR/scratch/own-35196.txt -> /private/tmp/j0-canary-7GryiCNR/nodedata/j0-planted-35196
+R write.nodedata.symlink_create_in_target OK 0 /private/tmp/j0-canary-7GryiCNR/nodedata/j0-symlink-35196 -> /private/tmp/j0-canary-7GryiCNR/scratch
+R write.nodedata.symlink_escape_write OK 0 write via /private/tmp/j0-canary-7GryiCNR/scratch/sl-nodedata-35196
+R write.nodedata.hardlink_create_in_target OK 0 /private/tmp/j0-canary-7GryiCNR/nodedata/j0-hardlink-35196 <- /private/tmp/j0-canary-7GryiCNR/scratch/own-35196.txt
+R write.nodedata.hardlink_escape OK 0 link created AND written via /private/tmp/j0-canary-7GryiCNR/scratch/hl-nodedata-35196
+R write.nodedata.unlink OK 0 /private/tmp/j0-canary-7GryiCNR/nodedata/canary.txt
+R write.pairing.create OK 0 /private/tmp/j0-canary-7GryiCNR/nodedata/pairing/j0-created-35196
+R write.pairing.mkdir OK 0 /private/tmp/j0-canary-7GryiCNR/nodedata/pairing/j0-dir-35196
+R write.pairing.write OK 0 /private/tmp/j0-canary-7GryiCNR/nodedata/pairing/canary.txt
+R write.pairing.truncate OK 0 /private/tmp/j0-canary-7GryiCNR/nodedata/pairing/canary.txt
+R write.pairing.open_trunc OK 0 /private/tmp/j0-canary-7GryiCNR/nodedata/pairing/canary.txt
+R write.pairing.chmod OK 0 /private/tmp/j0-canary-7GryiCNR/nodedata/pairing/canary.txt
+R write.pairing.utimes OK 0 /private/tmp/j0-canary-7GryiCNR/nodedata/pairing/canary.txt
+R write.pairing.setxattr OK 0 /private/tmp/j0-canary-7GryiCNR/nodedata/pairing/canary.txt
+R write.pairing.rename_in_place OK 0 /private/tmp/j0-canary-7GryiCNR/nodedata/pairing/canary.txt -> /private/tmp/j0-canary-7GryiCNR/nodedata/pairing/canary.renamed
+R write.pairing.rename_out_to_scratch OK 0 /private/tmp/j0-canary-7GryiCNR/nodedata/pairing/canary.txt -> /private/tmp/j0-canary-7GryiCNR/scratch/stolen-pairing-35196
+R write.pairing.rename_in_from_scratch OK 0 /private/tmp/j0-canary-7GryiCNR/scratch/own-35196.txt -> /private/tmp/j0-canary-7GryiCNR/nodedata/pairing/j0-planted-35196
+R write.pairing.symlink_create_in_target OK 0 /private/tmp/j0-canary-7GryiCNR/nodedata/pairing/j0-symlink-35196 -> /private/tmp/j0-canary-7GryiCNR/scratch
+R write.pairing.symlink_escape_write OK 0 write via /private/tmp/j0-canary-7GryiCNR/scratch/sl-pairing-35196
+R write.pairing.hardlink_create_in_target OK 0 /private/tmp/j0-canary-7GryiCNR/nodedata/pairing/j0-hardlink-35196 <- /private/tmp/j0-canary-7GryiCNR/scratch/own-35196.txt
+R write.pairing.hardlink_escape OK 0 link created AND written via /private/tmp/j0-canary-7GryiCNR/scratch/hl-pairing-35196
+R write.pairing.unlink OK 0 /private/tmp/j0-canary-7GryiCNR/nodedata/pairing/canary.txt
+R write.sibling.create OK 0 /private/tmp/j0-canary-7GryiCNR/sibling-child/j0-created-35196
+R write.sibling.mkdir OK 0 /private/tmp/j0-canary-7GryiCNR/sibling-child/j0-dir-35196
+R write.sibling.write OK 0 /private/tmp/j0-canary-7GryiCNR/sibling-child/canary.txt
+R write.sibling.truncate OK 0 /private/tmp/j0-canary-7GryiCNR/sibling-child/canary.txt
+R write.sibling.open_trunc OK 0 /private/tmp/j0-canary-7GryiCNR/sibling-child/canary.txt
+R write.sibling.chmod OK 0 /private/tmp/j0-canary-7GryiCNR/sibling-child/canary.txt
+R write.sibling.utimes OK 0 /private/tmp/j0-canary-7GryiCNR/sibling-child/canary.txt
+R write.sibling.setxattr OK 0 /private/tmp/j0-canary-7GryiCNR/sibling-child/canary.txt
+R write.sibling.rename_in_place OK 0 /private/tmp/j0-canary-7GryiCNR/sibling-child/canary.txt -> /private/tmp/j0-canary-7GryiCNR/sibling-child/canary.renamed
+R write.sibling.rename_out_to_scratch OK 0 /private/tmp/j0-canary-7GryiCNR/sibling-child/canary.txt -> /private/tmp/j0-canary-7GryiCNR/scratch/stolen-sibling-35196
+R write.sibling.rename_in_from_scratch OK 0 /private/tmp/j0-canary-7GryiCNR/scratch/own-35196.txt -> /private/tmp/j0-canary-7GryiCNR/sibling-child/j0-planted-35196
+R write.sibling.symlink_create_in_target OK 0 /private/tmp/j0-canary-7GryiCNR/sibling-child/j0-symlink-35196 -> /private/tmp/j0-canary-7GryiCNR/scratch
+R write.sibling.symlink_escape_write OK 0 write via /private/tmp/j0-canary-7GryiCNR/scratch/sl-sibling-35196
+R write.sibling.hardlink_create_in_target OK 0 /private/tmp/j0-canary-7GryiCNR/sibling-child/j0-hardlink-35196 <- /private/tmp/j0-canary-7GryiCNR/scratch/own-35196.txt
+R write.sibling.hardlink_escape OK 0 link created AND written via /private/tmp/j0-canary-7GryiCNR/scratch/hl-sibling-35196
+R write.sibling.unlink OK 0 /private/tmp/j0-canary-7GryiCNR/sibling-child/canary.txt
+R write.weights.create OK 0 /private/tmp/j0-canary-7GryiCNR/weights/j0-created-35196
+R write.weights.mkdir OK 0 /private/tmp/j0-canary-7GryiCNR/weights/j0-dir-35196
+R write.weights.write OK 0 /private/tmp/j0-canary-7GryiCNR/weights/canary.txt
+R write.weights.truncate OK 0 /private/tmp/j0-canary-7GryiCNR/weights/canary.txt
+R write.weights.open_trunc OK 0 /private/tmp/j0-canary-7GryiCNR/weights/canary.txt
+R write.weights.chmod OK 0 /private/tmp/j0-canary-7GryiCNR/weights/canary.txt
+R write.weights.utimes OK 0 /private/tmp/j0-canary-7GryiCNR/weights/canary.txt
+R write.weights.setxattr OK 0 /private/tmp/j0-canary-7GryiCNR/weights/canary.txt
+R write.weights.rename_in_place OK 0 /private/tmp/j0-canary-7GryiCNR/weights/canary.txt -> /private/tmp/j0-canary-7GryiCNR/weights/canary.renamed
+R write.weights.rename_out_to_scratch OK 0 /private/tmp/j0-canary-7GryiCNR/weights/canary.txt -> /private/tmp/j0-canary-7GryiCNR/scratch/stolen-weights-35196
+R write.weights.rename_in_from_scratch OK 0 /private/tmp/j0-canary-7GryiCNR/scratch/own-35196.txt -> /private/tmp/j0-canary-7GryiCNR/weights/j0-planted-35196
+R write.weights.symlink_create_in_target OK 0 /private/tmp/j0-canary-7GryiCNR/weights/j0-symlink-35196 -> /private/tmp/j0-canary-7GryiCNR/scratch
+R write.weights.symlink_escape_write OK 0 write via /private/tmp/j0-canary-7GryiCNR/scratch/sl-weights-35196
+R write.weights.hardlink_create_in_target OK 0 /private/tmp/j0-canary-7GryiCNR/weights/j0-hardlink-35196 <- /private/tmp/j0-canary-7GryiCNR/scratch/own-35196.txt
+R write.weights.hardlink_escape OK 0 link created AND written via /private/tmp/j0-canary-7GryiCNR/scratch/hl-weights-35196
+R write.weights.unlink OK 0 /private/tmp/j0-canary-7GryiCNR/weights/canary.txt
+R write.canary_root.create OK 0 /private/tmp/j0-canary-7GryiCNR/j0-created-35196
+R write.canary_root.mkdir OK 0 /private/tmp/j0-canary-7GryiCNR/j0-dir-35196
+R write.canary_root.write OK 0 /private/tmp/j0-canary-7GryiCNR/canary.txt
+R write.canary_root.truncate OK 0 /private/tmp/j0-canary-7GryiCNR/canary.txt
+R write.canary_root.open_trunc OK 0 /private/tmp/j0-canary-7GryiCNR/canary.txt
+R write.canary_root.chmod OK 0 /private/tmp/j0-canary-7GryiCNR/canary.txt
+R write.canary_root.utimes OK 0 /private/tmp/j0-canary-7GryiCNR/canary.txt
+R write.canary_root.setxattr OK 0 /private/tmp/j0-canary-7GryiCNR/canary.txt
+R write.canary_root.rename_in_place OK 0 /private/tmp/j0-canary-7GryiCNR/canary.txt -> /private/tmp/j0-canary-7GryiCNR/canary.renamed
+R write.canary_root.rename_out_to_scratch OK 0 /private/tmp/j0-canary-7GryiCNR/canary.txt -> /private/tmp/j0-canary-7GryiCNR/scratch/stolen-canary_root-35196
+R write.canary_root.rename_in_from_scratch OK 0 /private/tmp/j0-canary-7GryiCNR/scratch/own-35196.txt -> /private/tmp/j0-canary-7GryiCNR/j0-planted-35196
+R write.canary_root.symlink_create_in_target OK 0 /private/tmp/j0-canary-7GryiCNR/j0-symlink-35196 -> /private/tmp/j0-canary-7GryiCNR/scratch
+R write.canary_root.symlink_escape_write OK 0 write via /private/tmp/j0-canary-7GryiCNR/scratch/sl-canary_root-35196
+R write.canary_root.hardlink_create_in_target OK 0 /private/tmp/j0-canary-7GryiCNR/j0-hardlink-35196 <- /private/tmp/j0-canary-7GryiCNR/scratch/own-35196.txt
+R write.canary_root.hardlink_escape OK 0 link created AND written via /private/tmp/j0-canary-7GryiCNR/scratch/hl-canary_root-35196
+R write.canary_root.unlink OK 0 /private/tmp/j0-canary-7GryiCNR/canary.txt
+R write.nodedata_via_datavol.create OK 0 /System/Volumes/Data/private/tmp/j0-canary-7GryiCNR/nodedata-dv/j0-created-35196
+R write.nodedata_via_datavol.mkdir OK 0 /System/Volumes/Data/private/tmp/j0-canary-7GryiCNR/nodedata-dv/j0-dir-35196
+R write.nodedata_via_datavol.write OK 0 /System/Volumes/Data/private/tmp/j0-canary-7GryiCNR/nodedata-dv/canary.txt
+R write.nodedata_via_datavol.truncate OK 0 /System/Volumes/Data/private/tmp/j0-canary-7GryiCNR/nodedata-dv/canary.txt
+R write.nodedata_via_datavol.open_trunc OK 0 /System/Volumes/Data/private/tmp/j0-canary-7GryiCNR/nodedata-dv/canary.txt
+R write.nodedata_via_datavol.chmod OK 0 /System/Volumes/Data/private/tmp/j0-canary-7GryiCNR/nodedata-dv/canary.txt
+R write.nodedata_via_datavol.utimes OK 0 /System/Volumes/Data/private/tmp/j0-canary-7GryiCNR/nodedata-dv/canary.txt
+R write.nodedata_via_datavol.setxattr OK 0 /System/Volumes/Data/private/tmp/j0-canary-7GryiCNR/nodedata-dv/canary.txt
+R write.nodedata_via_datavol.rename_in_place OK 0 /System/Volumes/Data/private/tmp/j0-canary-7GryiCNR/nodedata-dv/canary.txt -> /System/Volumes/Data/private/tmp/j0-canary-7GryiCNR/nodedata-dv/canary.renamed
+R write.nodedata_via_datavol.rename_out_to_scratch OK 0 /System/Volumes/Data/private/tmp/j0-canary-7GryiCNR/nodedata-dv/canary.txt -> /private/tmp/j0-canary-7GryiCNR/scratch/stolen-nodedata_via_datavol-35196
+R write.nodedata_via_datavol.rename_in_from_scratch OK 0 /private/tmp/j0-canary-7GryiCNR/scratch/own-35196.txt -> /System/Volumes/Data/private/tmp/j0-canary-7GryiCNR/nodedata-dv/j0-planted-35196
+R write.nodedata_via_datavol.symlink_create_in_target OK 0 /System/Volumes/Data/private/tmp/j0-canary-7GryiCNR/nodedata-dv/j0-symlink-35196 -> /private/tmp/j0-canary-7GryiCNR/scratch
+R write.nodedata_via_datavol.symlink_escape_write OK 0 write via /private/tmp/j0-canary-7GryiCNR/scratch/sl-nodedata_via_datavol-35196
+R write.nodedata_via_datavol.hardlink_create_in_target OK 0 /System/Volumes/Data/private/tmp/j0-canary-7GryiCNR/nodedata-dv/j0-hardlink-35196 <- /private/tmp/j0-canary-7GryiCNR/scratch/own-35196.txt
+R write.nodedata_via_datavol.hardlink_escape OK 0 link created AND written via /private/tmp/j0-canary-7GryiCNR/scratch/hl-nodedata_via_datavol-35196
+R write.nodedata_via_datavol.unlink OK 0 /System/Volumes/Data/private/tmp/j0-canary-7GryiCNR/nodedata-dv/canary.txt
+R write.scratch.create OK 0 /private/tmp/j0-canary-7GryiCNR/scratch/j0-created-35196
+R write.scratch.mkdir OK 0 /private/tmp/j0-canary-7GryiCNR/scratch/j0-dir-35196
+R write.scratch.write OK 0 /private/tmp/j0-canary-7GryiCNR/scratch/canary.txt
+R write.scratch.truncate OK 0 /private/tmp/j0-canary-7GryiCNR/scratch/canary.txt
+R write.scratch.open_trunc OK 0 /private/tmp/j0-canary-7GryiCNR/scratch/canary.txt
+R write.scratch.chmod OK 0 /private/tmp/j0-canary-7GryiCNR/scratch/canary.txt
+R write.scratch.utimes OK 0 /private/tmp/j0-canary-7GryiCNR/scratch/canary.txt
+R write.scratch.setxattr OK 0 /private/tmp/j0-canary-7GryiCNR/scratch/canary.txt
+R write.scratch.rename_in_place OK 0 /private/tmp/j0-canary-7GryiCNR/scratch/canary.txt -> /private/tmp/j0-canary-7GryiCNR/scratch/canary.renamed
+R write.scratch.rename_out_to_scratch OK 0 /private/tmp/j0-canary-7GryiCNR/scratch/canary.txt -> /private/tmp/j0-canary-7GryiCNR/scratch/stolen-scratch-35196
+R write.scratch.rename_in_from_scratch OK 0 /private/tmp/j0-canary-7GryiCNR/scratch/own-35196.txt -> /private/tmp/j0-canary-7GryiCNR/scratch/j0-planted-35196
+R write.scratch.symlink_create_in_target OK 0 /private/tmp/j0-canary-7GryiCNR/scratch/j0-symlink-35196 -> /private/tmp/j0-canary-7GryiCNR/scratch
+R write.scratch.symlink_escape_write OK 0 write via /private/tmp/j0-canary-7GryiCNR/scratch/sl-scratch-35196
+R write.scratch.hardlink_create_in_target OK 0 /private/tmp/j0-canary-7GryiCNR/scratch/j0-hardlink-35196 <- /private/tmp/j0-canary-7GryiCNR/scratch/own-35196.txt
+R write.scratch.hardlink_escape OK 0 link created AND written via /private/tmp/j0-canary-7GryiCNR/scratch/hl-scratch-35196
+R write.scratch.unlink OK 0 /private/tmp/j0-canary-7GryiCNR/scratch/canary.txt
+# j0probe done

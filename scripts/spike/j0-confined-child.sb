@@ -1,0 +1,126 @@
+;; j0-confined-child.sb — Seatbelt (SBPL) profile for a confined Jarvis child on macOS.
+;; J0 Phase 0.5 spike, mock only. One profile serves the assistant and the LLM runtime;
+;; they differ only in parameters (which scratch dir, which sockets, whether weights are mounted).
+;;
+;; Parameters (all REAL paths — /tmp must be given as /private/tmp):
+;;   SCRATCH      the child's own scratch dir: the ONLY writable place
+;;   IPC_DIR      ROLE=assistant: dir holding the sockets it may connect to (broker IPC / LLM
+;;                socket). Ignored for ROLE=llm, which has no outbound channel at all.
+;;   EXEC_DIR     dir holding the child's own executable(s) (read + exec)
+;;   WEIGHTS      read-only model weights dir (use a nonexistent path for children without a model)
+;;   LIB_DIR      read-only dir with the child's own dylibs (e.g. llama.cpp build/bin); may equal EXEC_DIR
+;;   ROLE         "assistant" (default) or "llm"
+;;   LISTEN_SOCK  ROLE=llm only: the ONE unix socket path the runtime may create and serve
+;;   SYSTEM_EXEC  TEST-ONLY. "yes" lets the child exec /bin and /usr/bin so the suite can run
+;;                real attack tools (security, touch, ln, sh) confined. It only makes the attacker
+;;                stronger; the shipping profile never sets it.
+;;
+;; Default is DENY. Everything below is an explicit allowance.
+
+(version 1)
+(deny default)
+
+;; Apple-maintained rules needed to bootstrap dyld (shared cache in the OS cryptex on macOS 13+).
+;; It also grants file-read* on the literal "/" (the root directory itself, not recursive).
+;; That cannot be taken back: with (deny file-read-data (literal "/")) dyld aborts before main
+;; (measured on macOS 26.6.2). A confined child can therefore list the top-level names of "/"
+;; (Applications, Library, System, Users, ...), and nothing below them.
+(import "dyld-support.sb")
+
+;; ---------- process ----------
+(allow process-fork)
+(allow process-exec
+    (subpath (param "EXEC_DIR"))
+    (subpath (param "LIB_DIR")))
+(if (equal? (param "SYSTEM_EXEC") "yes")
+    (allow process-exec file-read* (subpath "/bin") (subpath "/usr/bin")))
+;; Inspect and signal ONLY ourselves. The explicit (deny process-info*) matters: under
+;; (deny default) alone, proc_pidinfo/proc_pidpath/proc_listallpids on other pids still succeed.
+(deny process-info*)
+(allow process-info* (target self))
+(allow signal (target self))
+;; No task ports for anyone else: no debugger attach, no memory access.
+(deny mach-priv-task-port)
+(deny mach-task-name)
+
+;; sysctl reads (hardware/OS info the runtimes need), but not the process table (kern.proc.*,
+;; what ps(1) uses to enumerate processes) and not other processes' argv/environment
+;; (kern.procargs / kern.procargs2, what `ps -E` uses).
+(allow sysctl-read)
+(deny sysctl-read
+    (sysctl-name-prefix "kern.proc.")
+    (sysctl-name-prefix "kern.procargs"))
+
+;; ---------- filesystem: read ----------
+;; OS runtime (dyld shared cache, system frameworks, Metal compiler, locale data).
+(allow file-read*
+    (subpath "/System")
+    (subpath "/usr/lib")
+    (subpath "/usr/share")
+    (subpath "/Library/Apple/System")
+    (subpath "/private/var/db/dyld")
+    (subpath "/private/var/db/timezone")
+    (literal "/private/etc/localtime")
+    (literal "/dev/null")
+    (literal "/dev/zero")
+    (literal "/dev/random")
+    (literal "/dev/urandom"))
+;; The Data-volume firmlink view (/System/Volumes/Data/Users/..., /System/Volumes/Data/private/tmp/...)
+;; is NOT part of the OS runtime. The kernel reports canonical paths, but deny it explicitly so the
+;; /System allowance above can never be read as covering user data.
+(deny file-read* (subpath "/System/Volumes/Data"))
+;; Metadata (stat) only for the ancestors of the paths this child uses, so path resolution
+;; works while the existence, size and timestamps of everything else stay hidden.
+(allow file-read-metadata
+    (literal "/")
+    (path-ancestors (param "SCRATCH"))
+    (path-ancestors (param "EXEC_DIR"))
+    (path-ancestors (param "LIB_DIR"))
+    (path-ancestors (param "WEIGHTS"))
+    (literal "/tmp") (literal "/var") (literal "/etc"))
+;; The child's own code, libraries, weights and scratch.
+(allow file-read*
+    (subpath (param "EXEC_DIR"))
+    (subpath (param "LIB_DIR"))
+    (subpath (param "WEIGHTS"))
+    (subpath (param "SCRATCH")))
+
+;; ---------- filesystem: write ----------
+;; The ONLY writable location. Everything else (host code, host config, node data,
+;; siblings, weights) is immutable: create/write/truncate/rename/unlink/link all denied.
+(allow file-write* (subpath (param "SCRATCH")))
+(allow file-write-data (literal "/dev/null"))
+
+;; ---------- network ----------
+;; No TCP/UDP at all (loopback included), no listening.
+
+;; ---------- mach / IPC ----------
+;; No mach service is reachable by default: no securityd (keychain), no Apple Events,
+;; no TCC, no pasteboard, no window server, no LaunchServices, no notifications.
+
+;; ---------- ROLE=assistant ----------
+;; Outbound connects ONLY to the unix sockets inside IPC_DIR (broker IPC and the LLM socket).
+(if (not (equal? (param "ROLE") "llm"))
+  (begin
+    (allow file-read-metadata (path-ancestors (param "IPC_DIR")))
+    (allow file-read* (subpath (param "IPC_DIR")))
+    (allow network-outbound
+        (remote unix-socket (subpath (param "IPC_DIR"))))))
+
+;; ---------- ROLE=llm: the model runtime ----------
+;; Serves exactly ONE unix socket, LISTEN_SOCK (the socket node itself is the only extra path it
+;; may create), and gets the Metal/GPU allowances. No outbound at all, no TCP/UDP.
+(if (equal? (param "ROLE") "llm")
+  (begin
+    (allow file-read-metadata (path-ancestors (param "LISTEN_SOCK")))
+    (allow file-read* file-write* (literal (param "LISTEN_SOCK")))
+    (allow network-bind network-inbound
+        (local unix-socket (literal (param "LISTEN_SOCK"))))
+    (allow iokit-open
+        (iokit-user-client-class "AGXDeviceUserClient")
+        (iokit-user-client-class "AGXSharedUserClient")
+        (iokit-user-client-class "IOSurfaceRootUserClient"))
+    (allow iokit-get-properties)
+    (allow mach-lookup
+        (global-name "com.apple.MTLCompilerService")
+        (global-name "com.apple.gpumemd.source"))))
