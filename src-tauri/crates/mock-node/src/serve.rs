@@ -18,6 +18,8 @@
 //!
 //! Paths are the full `/api/v1/...` routes only. A faulted route is an error,
 //! a timeout, or a stale body, and [`crate::MockNode::read`] refuses all three.
+//! Staleness is [`Exchange::stale`], not a zero in the JSON. A fresh body may
+//! contain a real zero. A consumer maps `stale == true` to `Unavailable::stale`.
 
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
@@ -25,8 +27,8 @@ use std::collections::BTreeMap;
 use serde_json::{json, Value};
 
 use crate::canary::{
-    ALIAS_01, ALIAS_02, COUNTERPARTY_01, COUNTERPARTY_02, COUNTERPARTY_03, ERROR_BODY_01, MEMO_01,
-    MEMO_02, MSG_BODIES, MSG_CIPHER_01, MSG_NESTED_01, PREIMAGE_01, PREIMAGE_02,
+    ALIAS_01, ALIAS_02, COUNTERPARTY_01, COUNTERPARTY_02, COUNTERPARTY_03, ERROR_BODY_01, EXTRA_01,
+    EXTRA_02, MEMO_01, MEMO_02, MSG_BODIES, MSG_CIPHER_01, MSG_NESTED_01, PREIMAGE_01, PREIMAGE_02,
 };
 use crate::ids::{
     BLOCK_HEIGHT, CATEGORY_COMMUNICATION_MSAT, CHANNEL_LOCAL_MSAT, CHANNEL_REMOTE_MSAT,
@@ -81,12 +83,59 @@ pub enum Fault {
     Stale,
 }
 
+impl Route {
+    pub const ALL: [Route; 9] = [
+        Self::Health,
+        Self::Status,
+        Self::PaymentsBalance,
+        Self::PaymentsChannels,
+        Self::Payments,
+        Self::PaymentsPrice,
+        Self::Messages,
+        Self::Pricing,
+        Self::Peers,
+    ];
+
+    /// Every concrete path this route serves, including query forms and the
+    /// not-priceable kind. Tests walk this list instead of a hand-picked sample.
+    pub fn paths(self) -> Vec<String> {
+        match self {
+            Self::Health => vec![paths::HEALTH.into()],
+            Self::Status => vec![paths::STATUS.into()],
+            Self::PaymentsBalance => vec![paths::BALANCE.into()],
+            Self::PaymentsChannels => vec![paths::CHANNELS.into()],
+            Self::Payments => vec![paths::PAYMENTS.into()],
+            Self::Pricing => vec![paths::PRICING.into()],
+            Self::Peers => vec![paths::PEERS.into()],
+            Self::PaymentsPrice => [0, 1, 7, 100, 200, 300, 400, 500, 600, 900, 1000, 700]
+                .into_iter()
+                .map(paths::price)
+                .collect(),
+            Self::Messages => vec![
+                paths::MESSAGES.into(),
+                format!("{}?peer={SENDER_A}", paths::MESSAGES),
+                format!("{}?peer={SENDER_B}", paths::MESSAGES),
+                format!("{}?limit=0", paths::MESSAGES),
+                format!("{}?limit=1", paths::MESSAGES),
+                format!("{}?before=1725000005000", paths::MESSAGES),
+                format!("{}?peer=zz", paths::MESSAGES),
+            ],
+        }
+    }
+}
+
+/// One mock HTTP response.
+///
+/// `stale` is the signal a consumer maps to `Unavailable::stale`. It is not
+/// encoded only as zeros in `body`: a fresh pricing body has
+/// `peer_tables_cached: 0` with `stale: false`. Timeout sets `timed_out` and
+/// leaves `body` empty; `stale` is false on timeout.
 #[derive(Clone, Debug, PartialEq)]
-pub enum Exchange {
-    Ready { status: u16, body: Value },
-    Failed { status: u16, body: Value },
-    TimedOut,
-    Stale { status: u16, body: Value },
+pub struct Exchange {
+    pub status: u16,
+    pub body: Option<Value>,
+    pub stale: bool,
+    pub timed_out: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -187,48 +236,56 @@ impl MockNode {
                         peer: None,
                     }));
                 }
-                return Exchange::Failed { status: 400, body };
+                return failed(400, body);
             }
             Parsed::Ready(req) => req,
         };
         if let Request::Price { kind } = req {
             if self.fault_of(Route::PaymentsPrice) == Fault::None && kind_price(kind).is_none() {
-                return Exchange::Failed {
-                    status: 400,
-                    body: json!({
+                return failed(
+                    400,
+                    json!({
                         "error": format!("kind {kind} is not priceable"),
                         "code": 400,
                     }),
-                };
+                );
             }
         }
         self.dispatch(req)
     }
 
-    /// A fresh 200 body, or why the read cannot be used. A stale 200 is a
-    /// failure here: the numeric decoy in that body is not a value.
+    /// A fresh 200 body, or why the read cannot be used. [`Exchange::stale`]
+    /// is the stale signal; the numeric decoy in that body is not a value.
     pub fn read(&self, path: &str) -> Result<Value, ReadFailure> {
-        match self.serve(path) {
-            Exchange::Ready { status: 200, body } => Ok(body),
-            Exchange::Ready { .. } => Err(ReadFailure::Unreadable),
-            Exchange::Failed { status: 404, .. } => Err(ReadFailure::NotFound),
-            Exchange::Failed { .. } => Err(ReadFailure::RouteError),
-            Exchange::TimedOut => Err(ReadFailure::Timeout),
-            Exchange::Stale { .. } => Err(ReadFailure::Stale),
+        let response = self.serve(path);
+        if response.timed_out {
+            return Err(ReadFailure::Timeout);
+        }
+        if response.stale {
+            return Err(ReadFailure::Stale);
+        }
+        match response.status {
+            200 => response.body.ok_or(ReadFailure::Unreadable),
+            404 => Err(ReadFailure::NotFound),
+            _ => Err(ReadFailure::RouteError),
         }
     }
 
     fn dispatch(&self, req: Request) -> Exchange {
         match self.fault_of(req.route()) {
-            Fault::None => Exchange::Ready {
-                status: 200,
-                body: payload(&req, false),
-            },
+            Fault::None => ready(payload(&req, false)),
             Fault::Error => error_exchange(req.route()),
-            Fault::Timeout => Exchange::TimedOut,
-            Fault::Stale => Exchange::Stale {
+            Fault::Timeout => Exchange {
+                status: 0,
+                body: None,
+                stale: false,
+                timed_out: true,
+            },
+            Fault::Stale => Exchange {
                 status: 200,
-                body: payload(&req, true),
+                body: Some(payload(&req, true)),
+                stale: true,
+                timed_out: false,
             },
         }
     }
@@ -263,11 +320,26 @@ fn kind_price(kind: u16) -> Option<u64> {
     })
 }
 
-fn not_found() -> Exchange {
-    Exchange::Failed {
-        status: 404,
-        body: json!({"error": "route", "code": 404}),
+fn ready(body: Value) -> Exchange {
+    Exchange {
+        status: 200,
+        body: Some(body),
+        stale: false,
+        timed_out: false,
     }
+}
+
+fn failed(status: u16, body: Value) -> Exchange {
+    Exchange {
+        status,
+        body: Some(body),
+        stale: false,
+        timed_out: false,
+    }
+}
+
+fn not_found() -> Exchange {
+    failed(404, json!({"error": "route", "code": 404}))
 }
 
 /// Lightning handlers map to 502. `get_price` maps to 400. Storage-backed
@@ -279,10 +351,17 @@ fn error_exchange(route: Route) -> Exchange {
         Route::PaymentsPrice => 400,
         Route::Health | Route::Status | Route::Messages | Route::Pricing | Route::Peers => 500,
     };
-    Exchange::Failed {
+    failed(
         status,
-        body: json!({"error": ERROR_BODY_01, "code": status}),
-    }
+        json!({
+            "error": ERROR_BODY_01,
+            "code": status,
+            "detail": {
+                "unknown_field": EXTRA_01,
+                "nested": { "unknown_field": EXTRA_02 }
+            }
+        }),
+    )
 }
 
 fn payload(req: &Request, stale: bool) -> Value {
@@ -347,7 +426,7 @@ fn channels_body(stale: bool) -> Value {
     let mut out = Vec::with_capacity(3);
     for i in 0..3 {
         out.push(json!({
-            "channel_id": (i + 1).to_string(),
+            "channel_id": format!("UserChannelId({})", i + 1),
             "peer_pubkey": peers[i],
             "capacity_msat": CHANNEL_LOCAL_MSAT[i] + CHANNEL_REMOTE_MSAT[i],
             "local_balance_msat": CHANNEL_LOCAL_MSAT[i],
@@ -363,10 +442,13 @@ fn payments_body(stale: bool) -> Value {
     if stale {
         return json!([]);
     }
-    json!([
+    let mut payments = vec![
         payment(PREIMAGE_01, MEMO_01, 21_000, 100, 1_725_000_000),
         payment(PREIMAGE_02, MEMO_02, 42_000, 250, 1_725_000_100),
-    ])
+    ];
+    // rc7 `list_payments` sorts by timestamp descending.
+    payments.sort_by_key(|payment| Reverse(payment["timestamp"].as_u64().unwrap_or(0)));
+    Value::Array(payments)
 }
 
 fn payment(preimage: &str, memo: &str, amount: u64, fee: u64, timestamp: u64) -> Value {

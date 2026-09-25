@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::fs;
 
-use mock_node::{paths, AnswerKey, Fault, MockNode, Route, CANARIES, SENDER_A};
+use mock_node::{AnswerKey, Fault, MockNode, Route, CANARIES};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -174,12 +174,9 @@ fn assert_unfaulted_routes_omit(
         if faulted.contains(&route) {
             continue;
         }
-        let body = match node.serve(&path) {
-            mock_node::Exchange::Ready { body, .. }
-            | mock_node::Exchange::Failed { body, .. }
-            | mock_node::Exchange::Stale { body, .. } => body,
-            mock_node::Exchange::TimedOut => panic!("{id} {path} timed out without a fault"),
-        };
+        let response = node.serve(&path);
+        assert!(!response.timed_out, "{id} {path} timed out without a fault");
+        let body = response.body.expect("body");
         assert!(
             !json_contains_answer(&body, answer),
             "{id} answer {answer} is still on unfaulted {path}"
@@ -188,26 +185,10 @@ fn assert_unfaulted_routes_omit(
 }
 
 fn read_surfaces() -> Vec<(Route, String)> {
-    vec![
-        (Route::Health, paths::HEALTH.into()),
-        (Route::Status, paths::STATUS.into()),
-        (Route::PaymentsBalance, paths::BALANCE.into()),
-        (Route::PaymentsChannels, paths::CHANNELS.into()),
-        (Route::Payments, paths::PAYMENTS.into()),
-        (Route::Messages, paths::MESSAGES.into()),
-        (
-            Route::Messages,
-            format!("{}?peer={SENDER_A}", paths::MESSAGES),
-        ),
-        (Route::Pricing, paths::PRICING.into()),
-        (Route::Peers, paths::PEERS.into()),
-        (Route::PaymentsPrice, paths::price(0)),
-        (Route::PaymentsPrice, paths::price(1)),
-        (Route::PaymentsPrice, paths::price(7)),
-        (Route::PaymentsPrice, paths::price(100)),
-        (Route::PaymentsPrice, paths::price(200)),
-        (Route::PaymentsPrice, paths::price(700)),
-    ]
+    Route::ALL
+        .into_iter()
+        .flat_map(|route| route.paths().into_iter().map(move |path| (route, path)))
+        .collect()
 }
 
 fn json_contains_answer(value: &Value, answer: &str) -> bool {

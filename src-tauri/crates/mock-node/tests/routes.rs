@@ -42,7 +42,11 @@ fn fresh_reads_use_the_genome_shapes() {
         node.read(paths::BALANCE).expect("balance")["balance_msat"]
     );
 
-    let channel = &node.read(paths::CHANNELS).expect("channels")[0];
+    let channels = node.read(paths::CHANNELS).expect("channels");
+    let channel = &channels[0];
+    assert_eq!(channel["channel_id"], "UserChannelId(1)");
+    assert_eq!(channels[1]["channel_id"], "UserChannelId(2)");
+    assert_eq!(channels[2]["channel_id"], "UserChannelId(3)");
     for key in [
         "channel_id",
         "peer_pubkey",
@@ -145,6 +149,10 @@ fn fresh_reads_use_the_genome_shapes() {
     }
     assert_eq!(payment["status"], "settled");
     assert_eq!(payment["direction"], "outgoing");
+    let payments = node.read(paths::PAYMENTS).expect("payments");
+    let first = payments[0]["timestamp"].as_u64().expect("ts");
+    let second = payments[1]["timestamp"].as_u64().expect("ts");
+    assert!(first > second, "rc7 lists payments newest first");
 }
 
 #[test]
@@ -213,8 +221,17 @@ fn collect_u64(value: &serde_json::Value, out: &mut Vec<u64>) {
 
 #[test]
 fn a_real_zero_on_a_fresh_route_stays_a_zero() {
-    let pricing = MockNode::canonical().read(paths::PRICING).expect("pricing");
+    let response = MockNode::canonical().serve(paths::PRICING);
+    assert!(!response.stale);
+    assert!(!response.timed_out);
+    let pricing = response.body.expect("body");
     assert_eq!(pricing["peer_tables_cached"], 0);
+    let stale = MockNode::canonical()
+        .fault(Route::Pricing, Fault::Stale)
+        .serve(paths::PRICING);
+    assert!(stale.stale);
+    assert_eq!(stale.status, 200);
+    assert!(stale.body.expect("body")["peer_tables_cached"] == 0);
 }
 
 #[test]
@@ -238,10 +255,12 @@ fn faults_are_unavailable_and_never_zero() {
                     Fault::Error => assert_eq!(node.read(&path), Err(ReadFailure::RouteError)),
                     Fault::Timeout => {
                         assert_eq!(node.read(&path), Err(ReadFailure::Timeout));
-                        assert!(matches!(node.serve(&path), mock_node::Exchange::TimedOut));
+                        assert!(node.serve(&path).timed_out);
                     }
                     Fault::Stale => {
                         assert_eq!(node.read(&path), Err(ReadFailure::Stale));
+                        let response = node.serve(&path);
+                        assert!(response.stale, "{key:?} stale flag");
                         assert!(stale_decoy_is_vacuous(&node, *route, key), "{key:?}");
                     }
                     Fault::None => unreachable!("the loop only injects failures"),
@@ -302,6 +321,14 @@ fn messages_follow_the_rc7_list_rules() {
     assert!(incoming.iter().all(|msg| msg["recipient"] == NODE_ID));
     assert!(incoming.iter().all(|msg| msg["sender"] != NODE_ID));
     assert_eq!(incoming.len(), 5);
+    assert_eq!(
+        node.answer(AnswerKey::MessageCount),
+        Answer::Value("6".into())
+    );
+    assert_eq!(
+        node.answer(AnswerKey::ChatMessageCount),
+        Answer::Value("4".into())
+    );
     let stamps: Vec<u64> = incoming
         .iter()
         .map(|msg| msg["timestamp"].as_u64().expect("ts"))

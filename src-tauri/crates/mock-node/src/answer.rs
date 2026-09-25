@@ -4,7 +4,7 @@
 //! and the answer is [`Answer::Unavailable`]. Every route that carries the
 //! value is read, so faulting any one of them is unavailable too.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
 
@@ -242,12 +242,12 @@ fn compute(node: &MockNode, key: AnswerKey) -> Result<String, ReadFailure> {
                 (paths::STATUS, "chain_backend"),
             ],
         ),
-        AnswerKey::MessageCount => array_len(node, paths::MESSAGES),
+        AnswerKey::MessageCount => stored_message_count(node),
         AnswerKey::DistinctSenders => distinct_senders(node),
         AnswerKey::MessagesFromA => messages_from(node, SENDER_A),
         AnswerKey::MessagesFromB => messages_from(node, SENDER_B),
         AnswerKey::MessagesSent => messages_sent(node),
-        AnswerKey::ChatMessageCount => chat_messages(node),
+        AnswerKey::ChatMessageCount => stored_chat_count(node),
         AnswerKey::PriceChatMsat => price_agrees(node, 0, "communication"),
         AnswerKey::PriceLongformMsat => kind_price(node, 1),
         AnswerKey::PriceFileMsat => price_agrees(node, 200, "files_media"),
@@ -288,6 +288,38 @@ fn channel_active(node: &MockNode, want: bool) -> Result<String, ReadFailure> {
     Ok(n.to_string())
 }
 
+/// Every stored message. The no-peer list hides outgoing mail, so the total
+/// is the union of that list and the conversations with each known sender.
+fn stored_rows(node: &MockNode) -> Result<Vec<Value>, ReadFailure> {
+    let mut by_id = BTreeMap::new();
+    for path in [
+        paths::MESSAGES.to_string(),
+        format!("{}?peer={SENDER_A}", paths::MESSAGES),
+        format!("{}?peer={SENDER_B}", paths::MESSAGES),
+    ] {
+        let body = node.read(&path)?;
+        for msg in body.as_array().ok_or(ReadFailure::Unreadable)? {
+            let id = require_str(msg, "id")?.to_string();
+            by_id.entry(id).or_insert_with(|| msg.clone());
+        }
+    }
+    Ok(by_id.into_values().collect())
+}
+
+fn stored_message_count(node: &MockNode) -> Result<String, ReadFailure> {
+    Ok(stored_rows(node)?.len().to_string())
+}
+
+fn stored_chat_count(node: &MockNode) -> Result<String, ReadFailure> {
+    let mut n = 0u64;
+    for msg in stored_rows(node)? {
+        if require_u64(&msg, "kind")? == 0 {
+            n = n.checked_add(1).ok_or(ReadFailure::Unreadable)?;
+        }
+    }
+    Ok(n.to_string())
+}
+
 fn distinct_senders(node: &MockNode) -> Result<String, ReadFailure> {
     let messages = node.read(paths::MESSAGES)?;
     let mut senders = BTreeSet::new();
@@ -319,17 +351,6 @@ fn messages_sent(node: &MockNode) -> Result<String, ReadFailure> {
     let mut n = 0u64;
     for msg in messages.as_array().ok_or(ReadFailure::Unreadable)? {
         if require_str(msg, "sender")? == me {
-            n = n.checked_add(1).ok_or(ReadFailure::Unreadable)?;
-        }
-    }
-    Ok(n.to_string())
-}
-
-fn chat_messages(node: &MockNode) -> Result<String, ReadFailure> {
-    let messages = node.read(paths::MESSAGES)?;
-    let mut n = 0u64;
-    for msg in messages.as_array().ok_or(ReadFailure::Unreadable)? {
-        if require_u64(msg, "kind")? == 0 {
             n = n.checked_add(1).ok_or(ReadFailure::Unreadable)?;
         }
     }

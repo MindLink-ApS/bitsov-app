@@ -176,16 +176,16 @@
     },
     {
       "id": "q20",
-      "question": "How many messages are stored on my node?",
-      "expected": "5",
+      "question": "How many messages are stored on the node in total, including outgoing messages that GET /messages omits when no peer is set?",
+      "expected": "6",
       "unit": "messages",
-      "sources": ["messages"],
+      "sources": ["messages", "messages?peer"],
       "class": "positive",
       "key": "message_count"
     },
     {
       "id": "q21",
-      "question": "How many distinct senders appear in my messages?",
+      "question": "How many distinct senders appear in the incoming messages returned when no peer is given?",
       "expected": "2",
       "unit": "senders",
       "sources": ["messages[].sender"],
@@ -221,10 +221,10 @@
     },
     {
       "id": "q25",
-      "question": "How many chat messages (kind 0) are stored?",
-      "expected": "3",
+      "question": "How many chat messages (kind 0) are stored on the node in total, including outgoing messages that GET /messages omits when no peer is set?",
+      "expected": "4",
       "unit": "messages",
-      "sources": ["messages[].kind"],
+      "sources": ["messages[].kind", "messages?peer.kind"],
       "class": "positive",
       "key": "chat_message_count"
     },
@@ -313,7 +313,7 @@
     },
     {
       "id": "q35",
-      "question": "How many messages are stored on my node?",
+      "question": "How many messages are stored on the node in total, including outgoing messages that GET /messages omits when no peer is set?",
       "expected": "unavailable",
       "unit": "messages",
       "sources": ["messages"],
@@ -456,7 +456,7 @@
     },
     {
       "id": "q47",
-      "question": "How many messages are stored on my node?",
+      "question": "How many messages are stored on the node in total, including outgoing messages that GET /messages omits when no peer is set?",
       "expected": "unavailable",
       "unit": "messages",
       "sources": ["messages"],

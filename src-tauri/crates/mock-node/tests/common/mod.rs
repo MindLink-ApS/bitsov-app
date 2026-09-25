@@ -64,51 +64,47 @@ pub fn rust_canary_literals(dir: &Path) -> BTreeSet<String> {
             continue;
         }
         let text = fs::read_to_string(&path).expect("read source");
-        let mut rest = text.as_str();
-        let needle = "JARVIS_CANARY_";
-        while let Some(index) = rest.find(needle) {
-            let tail = &rest[index..];
-            let end = tail
-                .char_indices()
-                .find(|(_, ch)| !ch.is_ascii_uppercase() && !ch.is_ascii_digit() && *ch != '_')
-                .map(|(i, _)| i)
-                .unwrap_or(tail.len());
-            found.insert(tail[..end].to_string());
-            rest = &tail[end..];
+        for literal in quoted_strings(&text) {
+            let hex_canary = literal.len() >= 32
+                && literal.chars().all(|ch| ch.is_ascii_hexdigit())
+                && literal.contains("4a4152564953");
+            if literal.starts_with("JARVIS_CANARY_") || hex_canary {
+                found.insert(literal);
+            }
         }
     }
     found
 }
 
+fn quoted_strings(text: &str) -> Vec<String> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'"' {
+            let start = index + 1;
+            index += 1;
+            while index < bytes.len() && bytes[index] != b'"' {
+                index += 1;
+            }
+            if index < bytes.len() {
+                out.push(text[start..index].to_string());
+                index += 1;
+            }
+        } else {
+            index += 1;
+        }
+    }
+    out
+}
+
 pub fn fresh_paths() -> Vec<String> {
-    let paths = vec![
-        mock_node::paths::HEALTH.into(),
-        mock_node::paths::STATUS.into(),
-        mock_node::paths::BALANCE.into(),
-        mock_node::paths::CHANNELS.into(),
-        mock_node::paths::PAYMENTS.into(),
-        mock_node::paths::MESSAGES.into(),
-        mock_node::paths::PRICING.into(),
-        mock_node::paths::PEERS.into(),
-        mock_node::paths::price(0),
-        mock_node::paths::price(1),
-        mock_node::paths::price(7),
-        mock_node::paths::price(100),
-        mock_node::paths::price(200),
-        format!(
-            "{}?peer={}",
-            mock_node::paths::MESSAGES,
-            mock_node::SENDER_A
-        ),
-    ];
-    paths
+    mock_node::Route::ALL
+        .into_iter()
+        .flat_map(|route| route.paths())
+        .collect()
 }
 
 pub fn body_of(exchange: Exchange) -> Value {
-    match exchange {
-        Exchange::Ready { body, .. }
-        | Exchange::Failed { body, .. }
-        | Exchange::Stale { body, .. } => body,
-        Exchange::TimedOut => panic!("timeout has no body"),
-    }
+    exchange.body.expect("timeout has no body")
 }
