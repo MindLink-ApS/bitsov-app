@@ -1,10 +1,11 @@
 //! Mock-only SIT reader: broker + in-process mock node over the 50-question fixture.
 //!
-//! No network, no node sidecar, no wallet, no Tauri window. A person runs:
+//! No network, no node sidecar, no wallet. A person runs:
 //! `cargo run --example jarvis_sit_mock --features sit-mock` from `src-tauri/`.
+//! A debug app built with `--features sit-mock` also shows these rows in the
+//! sealed assistant window (see [`assistant_init_script`]).
 
 use std::fmt;
-use std::fs;
 
 use mock_node::{AnswerKey, Fault, MockNode, Route, SENDER_A, SENDER_B};
 use serde::Deserialize;
@@ -146,12 +147,11 @@ struct FaultSpec {
     mode: Fault,
 }
 
+/// Compiled in, so the assistant window does not depend on the checkout path.
+const FIXTURE_JSON: &str = include_str!("../../../jarvis/fixtures/questions.json");
+
 fn load_fixture() -> Fixture {
-    let path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../jarvis/fixtures/questions.json"
-    );
-    serde_json::from_str(&fs::read_to_string(path).expect("fixture")).expect("fixture json")
+    serde_json::from_str(FIXTURE_JSON).expect("fixture json")
 }
 
 fn node_for(question: &Question) -> MockRead {
@@ -273,9 +273,7 @@ fn answer(question: &Question) -> String {
                 .unwrap_or_else(|| UNAVAILABLE.to_string())
         }
         AnswerKey::ChannelLocalMsat => channel_sum(&read, |report| &report.channel_local_balance),
-        AnswerKey::ChannelRemoteMsat => {
-            channel_sum(&read, |report| &report.channel_remote_balance)
-        }
+        AnswerKey::ChannelRemoteMsat => channel_sum(&read, |report| &report.channel_remote_balance),
         AnswerKey::ChannelCapacityMsat => channel_sum(&read, |report| &report.channel_capacity),
         AnswerKey::ChannelCount => {
             let output = exec(&read, channels_call());
@@ -426,19 +424,54 @@ fn price_category(read: &MockRead, category: PriceCategory) -> String {
         .unwrap_or_else(|| UNAVAILABLE.to_string())
 }
 
-/// Drive the mock broker over every fixture question. One line per question:
-/// `{id} {answer|Unavailable}`.
+/// Drive the mock broker over every fixture question. One `(id, answer)` pair
+/// per question, in fixture order. The answer is a value or `Unavailable`.
+pub fn rows() -> Vec<(String, String)> {
+    load_fixture()
+        .questions
+        .iter()
+        .map(|question| (question.id.clone(), answer(question)))
+        .collect()
+}
+
+/// One line per question: `{id} {answer|Unavailable}`.
 pub fn render() -> String {
-    let fixture = load_fixture();
     let mut out = String::new();
-    for question in &fixture.questions {
-        let value = answer(question);
-        out.push_str(&question.id);
+    for (id, value) in rows() {
+        out.push_str(&id);
         out.push(' ');
         out.push_str(&value);
         out.push('\n');
     }
     out
+}
+
+/// Global the sealed assistant page reads. Must match `src/assistant/rows.ts`.
+pub const ASSISTANT_ROWS_GLOBAL: &str = "__BITSOV_SIT_ROWS__";
+
+/// Initialization script for the sealed assistant window.
+///
+/// Defines one frozen, read-only global holding `[[id, answer], ...]` as a JSON
+/// literal. The window has no IPC grants and `connect-src 'none'`, so the rows
+/// are handed over before the page loads rather than fetched.
+pub fn assistant_init_script(rows: &[(String, String)]) -> String {
+    let pairs: Vec<[&str; 2]> = rows
+        .iter()
+        .map(|(id, value)| [id.as_str(), value.as_str()])
+        .collect();
+    // serde_json escapes quotes, backslashes and control characters. Escape `<`
+    // and the JS line separators too so the literal cannot close a script tag
+    // or break a statement.
+    let json = serde_json::to_string(&pairs)
+        .expect("rows json")
+        .replace('<', "\\u003c")
+        .replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029");
+    format!(
+        "Object.defineProperty(window, '{ASSISTANT_ROWS_GLOBAL}', \
+         {{ value: Object.freeze({json}.map(Object.freeze)), \
+         writable: false, configurable: false }});"
+    )
 }
 
 /// Print the fixture report to stdout.
@@ -476,6 +509,122 @@ mod tests {
         assert!(
             answer.parse::<u64>().is_err(),
             "sent-mail total must not print as a number: {answer}"
+        );
+    }
+
+    #[test]
+    fn assistant_script_carries_fifty_rows() {
+        let rows = rows();
+        assert_eq!(rows.len(), 50);
+        assert!(rows.iter().all(|(_, value)| !value.is_empty()));
+
+        let script = assistant_init_script(&rows);
+        assert!(script.starts_with(&format!(
+            "Object.defineProperty(window, '{ASSISTANT_ROWS_GLOBAL}'"
+        )));
+        let start = script.find("Object.freeze(").expect("freeze") + "Object.freeze(".len();
+        let end = script.find(".map(Object.freeze)").expect("map");
+        let decoded: Vec<[String; 2]> = serde_json::from_str(&script[start..end]).expect("json");
+        assert_eq!(decoded.len(), 50);
+        for ((id, value), [got_id, got_value]) in rows.iter().zip(&decoded) {
+            assert_eq!(id, got_id);
+            assert_eq!(value, got_value);
+        }
+    }
+
+    #[test]
+    fn assistant_script_escapes_markup_and_line_separators() {
+        let hostile = vec![(
+            "q01".to_string(),
+            "</script><img src=x>'\"\\\u{2028}\u{2029}".to_string(),
+        )];
+        let script = assistant_init_script(&hostile);
+        assert!(!script.contains('<'), "{script}");
+        assert!(!script.contains('\u{2028}') && !script.contains('\u{2029}'));
+        let start = script.find("Object.freeze(").expect("freeze") + "Object.freeze(".len();
+        let end = script.find(".map(Object.freeze)").expect("map");
+        let decoded: Vec<[String; 2]> = serde_json::from_str(&script[start..end]).expect("json");
+        assert_eq!(decoded[0][1], hostile[0].1);
+    }
+
+    /// The assistant data path is this file, the mock node, and the example.
+    /// None of them may reach the network client or the node API.
+    #[test]
+    fn assistant_data_path_has_no_network_client() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let forbidden = [
+            "reqwest",
+            "call_api",
+            "API_BASE",
+            "127.0.0.1:3141",
+            "http://",
+            "TcpStream",
+            "UdpSocket",
+            "std::net",
+            "tokio::net",
+            "hyper",
+            "ureq",
+        ];
+
+        let mut files = vec![
+            root.join("src/jarvis/sit_mock.rs"),
+            root.join("examples/jarvis_sit_mock.rs"),
+        ];
+        for entry in std::fs::read_dir(root.join("crates/mock-node/src")).expect("mock-node src") {
+            files.push(entry.expect("entry").path());
+        }
+        for file in &files {
+            let source = std::fs::read_to_string(file).expect("source");
+            // Skip this test's own literal list.
+            let source = source.split("mod tests").next().expect("split");
+            for token in forbidden {
+                assert!(!source.contains(token), "{} uses {token}", file.display());
+            }
+        }
+
+        let manifest =
+            std::fs::read_to_string(root.join("crates/mock-node/Cargo.toml")).expect("manifest");
+        let deps = manifest
+            .split("[dependencies]")
+            .nth(1)
+            .expect("mock-node dependencies");
+        let names: Vec<&str> = deps
+            .lines()
+            .take_while(|line| !line.starts_with('['))
+            .filter_map(|line| line.split('=').next())
+            .map(str::trim)
+            .filter(|name| !name.is_empty() && !name.starts_with('#'))
+            .collect();
+        assert_eq!(
+            names,
+            ["serde", "serde_json"],
+            "mock-node gained a dependency"
+        );
+
+        // The window wiring in main.rs: the rows helper and the window builder.
+        let main = std::fs::read_to_string(root.join("src/main.rs")).expect("main.rs");
+        let section = main
+            .split("// ---- sealed assistant window")
+            .nth(1)
+            .and_then(|rest| rest.split("// ---- commands").next())
+            .expect("sealed assistant section");
+        for token in forbidden {
+            assert!(
+                !section.contains(token),
+                "sealed assistant section uses {token}"
+            );
+        }
+        assert!(
+            section.contains("sit_mock::assistant_init_script(&sit_mock::rows())"),
+            "the sit-mock rows are not the window's rows"
+        );
+        assert!(
+            section.contains(".initialization_script(assistant_rows_script())"),
+            "the assistant window does not receive its rows"
+        );
+        assert!(
+            main.contains("fn assistant_mock_builder("),
+            "missing assistant-only startup that skips the node"
         );
     }
 }

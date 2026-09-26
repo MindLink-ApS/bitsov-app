@@ -6,6 +6,9 @@
 //! ```text
 //! cargo run --example jarvis_sit_mock --features sit-mock
 //! ```
+//!
+//! The same rows (`sit_mock::rows`) fill the sealed assistant window in a debug
+//! app built with the same feature: `npm run tauri:assistant`.
 
 fn main() {
     bitsov_app::jarvis::sit_mock::run();

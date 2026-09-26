@@ -12,7 +12,10 @@
 //
 // A dev-only `assistant` window can display text. It is not a model, it has no
 // network, and it cannot call privileged commands (capability ACL + the
-// window-label check below).
+// window-label check below). With `--features sit-mock` and BITSOV_ASSISTANT=1
+// (`npm run tauri:assistant`) startup is assistant-only: sealed window, no
+// NodeState, no wallet commands, no bootstrap_node / konsensus. Release and
+// normal debug startup are unchanged.
 //
 // KEYS (charter invariant A.3): the node is the identity anchor. This host never
 // holds, derives, or displays key material. The loopback JWT lives in `NodeState`
@@ -648,7 +651,27 @@ fn bundled_assistant_origin(scheme: &str, host: Option<&str>) -> bool {
     }
 }
 
-/// Create the assistant window on demand. Not called at startup.
+/// Initialization script that hands the sealed window its rows.
+///
+/// With `sit-mock` the rows come from the in-process mock broker over the
+/// 50-question fixture: no node, no socket. Without it the script still defines
+/// the global, as an empty list, and the page says how to get rows.
+#[cfg(all(debug_assertions, feature = "sit-mock"))]
+fn assistant_rows_script() -> String {
+    use bitsov_app::jarvis::sit_mock;
+    sit_mock::assistant_init_script(&sit_mock::rows())
+}
+
+#[cfg(not(all(debug_assertions, feature = "sit-mock")))]
+fn assistant_rows_script() -> String {
+    // Same shape as `sit_mock::assistant_init_script`, which is not compiled here.
+    "Object.defineProperty(window, '__BITSOV_SIT_ROWS__', \
+     { value: Object.freeze([]), writable: false, configurable: false });"
+        .to_string()
+}
+
+/// Create the sealed assistant window. Called from the menu in a normal debug
+/// build, and at startup on the sit-mock assistant-only path.
 fn open_assistant_window(app: &AppHandle) -> Result<(), String> {
     if !assistant_dev_enabled() {
         return Err("the assistant window is unavailable".into());
@@ -668,6 +691,7 @@ fn open_assistant_window(app: &AppHandle) -> Result<(), String> {
     .min_inner_size(320.0, 240.0)
     .resizable(true)
     .incognito(true)
+    .initialization_script(assistant_rows_script())
     .on_navigation(|url| {
         assistant_document_allowed(
             cfg!(debug_assertions),
@@ -1001,6 +1025,51 @@ impl NodeState {
 }
 
 fn main() {
+    // Assistant mock path: sealed window only. Never construct NodeState (that
+    // builds a reqwest client), never register wallet commands, never spawn the
+    // node. Release and ordinary debug builds take `app_builder` below.
+    //
+    // One `generate_context!` only: a second expansion duplicates the embedded
+    // Info.plist symbol when `--features sit-mock` compiles both paths.
+    #[cfg(all(debug_assertions, feature = "sit-mock"))]
+    let builder = if assistant_dev_enabled() {
+        assistant_mock_builder()
+    } else {
+        app_builder()
+    };
+    #[cfg(not(all(debug_assertions, feature = "sit-mock")))]
+    let builder = app_builder();
+
+    let app = builder
+        .build(tauri::generate_context!())
+        .expect("error building bitsov-app");
+
+    #[cfg(all(debug_assertions, feature = "sit-mock"))]
+    if assistant_dev_enabled() {
+        app.run(|_app, _event| {});
+        return;
+    }
+
+    app.run(|app, event| {
+        // Stop the supervised node on exit — no orphan node with the user's keys.
+        //
+        // BOTH events are required (app #16). `ExitRequested` fires when the last
+        // window closes, which on macOS does NOT quit the app; Cmd-Q goes through
+        // NSApplication terminate and emits `Exit`. Matching only `ExitRequested`
+        // therefore never ran on macOS: every quit left a mainnet node running with
+        // the user's keys loaded, still holding 3141/9735/9736. Reproduced before the
+        // fix — the node's ppid went from the GUI's pid to 1 on quit.
+        //
+        // A repeated shutdown event is a no-op, and a restore in flight can neither
+        // hide its old node from this nor start a new one after it (`stop_for_quit`).
+        if matches!(event, RunEvent::ExitRequested { .. } | RunEvent::Exit) {
+            app.state::<NodeState>().stop_for_quit(NODE_SHUTDOWN_BUDGET);
+        }
+    });
+}
+
+/// Normal CS-1 / CS-2 desktop shell: NodeState, wallet commands, bootstrap.
+fn app_builder() -> tauri::Builder<tauri::Wry> {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .manage(NodeState::default())
@@ -1020,24 +1089,28 @@ fn main() {
             tauri::async_runtime::spawn(bootstrap_node(handle));
             Ok(())
         })
-        .build(tauri::generate_context!())
-        .expect("error building bitsov-app")
-        .run(|app, event| {
-            // Stop the supervised node on exit — no orphan node with the user's keys.
-            //
-            // BOTH events are required (app #16). `ExitRequested` fires when the last
-            // window closes, which on macOS does NOT quit the app; Cmd-Q goes through
-            // NSApplication terminate and emits `Exit`. Matching only `ExitRequested`
-            // therefore never ran on macOS: every quit left a mainnet node running with
-            // the user's keys loaded, still holding 3141/9735/9736. Reproduced before the
-            // fix — the node's ppid went from the GUI's pid to 1 on quit.
-            //
-            // A repeated shutdown event is a no-op, and a restore in flight can neither
-            // hide its old node from this nor start a new one after it (`stop_for_quit`).
-            if matches!(event, RunEvent::ExitRequested { .. } | RunEvent::Exit) {
-                app.state::<NodeState>().stop_for_quit(NODE_SHUTDOWN_BUDGET);
+}
+
+/// Sealed assistant only: mock rows, no node, no wallet, no network client.
+///
+/// Compiled only for debug + `sit-mock`. Entered from `main` when
+/// `BITSOV_ASSISTANT=1`. Must not touch NodeState, bootstrap_node, the shell
+/// sidecar plugin, or privileged invoke handlers.
+#[cfg(all(debug_assertions, feature = "sit-mock"))]
+fn assistant_mock_builder() -> tauri::Builder<tauri::Wry> {
+    tauri::Builder::default()
+        .invoke_handler(tauri::generate_handler![])
+        .setup(|app| {
+            // Open the sealed window first so closing the config main window
+            // does not leave the process with zero windows.
+            open_assistant_window(app.handle()).map_err(|e| -> Box<dyn std::error::Error> {
+                e.into()
+            })?;
+            if let Some(main) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+                let _ = main.close();
             }
-        });
+            Ok(())
+        })
 }
 
 #[cfg(all(test, unix))]
@@ -1827,13 +1900,100 @@ mod assistant_acl_tests {
         assert!(!source.contains("clipboard-manager"));
         assert!(opener.contains("NewWindowResponse::Deny"));
         assert!(!opener.contains("WebviewUrl::External"));
-        assert_eq!(source.matches("open_assistant_window(").count(), 2);
+        // definition + menu handler + sit-mock assistant-only setup
+        assert_eq!(source.matches("open_assistant_window(").count(), 3);
         assert!(source.contains("if assistant_dev_enabled()"));
+        assert!(source.contains("fn app_builder("));
+        assert!(source.contains("fn assistant_mock_builder("));
+        assert!(
+            source.contains("assistant_mock_builder()"),
+            "BITSOV_ASSISTANT + sit-mock must take the assistant-only path"
+        );
 
         let copy = fs::read_to_string(manifest_dir().join("../src/assistant/copy.ts")).expect("copy");
         assert!(copy.contains("clipboard.writeText"));
         assert!(!copy.contains("@tauri-apps/plugin-clipboard"));
         assert!(!copy.contains("invoke("));
+    }
+
+    /// `npm run tauri:assistant` must never construct NodeState (reqwest client),
+    /// register wallet commands, spawn konsensus, or call bootstrap_node.
+    #[test]
+    fn assistant_mock_startup_does_not_touch_node_or_network() {
+        let source = production_source();
+        let mock = function_source(&source, "assistant_mock_builder");
+        let forbidden = [
+            "NodeState",
+            "bootstrap_node",
+            "spawn_node",
+            "spawn_child",
+            "SIDECAR_BIN",
+            "konsensus",
+            "tauri_plugin_shell",
+            "manage(",
+            "reqwest",
+            "call_api",
+            "API_BASE",
+            "mint_token",
+            "3141",
+            "TcpStream",
+            "UdpSocket",
+            "std::net",
+            "tokio::net",
+            "hyper",
+            "ureq",
+            "node_status",
+            "fund_state",
+            "fund_start",
+            "funding_address",
+            "payments_balance",
+            "identity_restore",
+            "generate_context",
+            "bootstrap",
+        ];
+        for token in forbidden {
+            assert!(
+                !mock.contains(token),
+                "assistant_mock_builder must not use {token}:\n{mock}"
+            );
+        }
+        assert!(
+            mock.contains("open_assistant_window"),
+            "mock path must open the sealed assistant"
+        );
+        assert!(
+            mock.contains("generate_handler![]"),
+            "mock path must register no privileged commands"
+        );
+
+        // main() must branch to the mock builder under sit-mock + the flag, and
+        // release/normal debug must still call app_builder (unchanged bootstrap).
+        let main_fn = function_source(&source, "main");
+        assert!(main_fn.contains("assistant_mock_builder()"));
+        assert!(main_fn.contains("app_builder()"));
+        assert!(main_fn.contains("assistant_dev_enabled()"));
+        assert!(main_fn.contains("feature = \"sit-mock\""));
+        // A second generate_context in the mock path duplicates Info.plist.
+        assert_eq!(
+            source.matches("tauri::generate_context!").count(),
+            1,
+            "exactly one generate_context so sit-mock still links"
+        );
+
+        let app = function_source(&source, "app_builder");
+        assert!(app.contains("NodeState::default()"));
+        assert!(app.contains("bootstrap_node"));
+        assert!(app.contains("tauri_plugin_shell"));
+        for cmd in [
+            "node_status",
+            "fund_state",
+            "fund_start",
+            "funding_address",
+            "payments_balance",
+            "identity_restore",
+        ] {
+            assert!(app.contains(cmd), "app_builder lost {cmd}");
+        }
     }
 
     #[test]
