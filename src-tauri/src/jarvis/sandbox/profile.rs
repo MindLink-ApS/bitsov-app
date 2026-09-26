@@ -43,7 +43,8 @@ pub enum ProfileError {
     /// A character that can close an SBPL string and inject a rule.
     IllegalCharacter,
     /// The model, scratch or binary directory sits in the home directory,
-    /// under `/Users`, or on the Data-volume firmlink.
+    /// under `/Users`, on the Data-volume firmlink, or is an ancestor of a
+    /// fixed denied root (so a later allow would reopen it).
     InsideDeniedRoot,
     /// An allowed directory would cover a denied one, or scratch would cover
     /// the model or the binary.
@@ -147,7 +148,7 @@ fn check_layout(paths: &SandboxPaths) -> Result<(), ProfileError> {
         }
         for root in DENIED_ROOTS {
             let root = Path::new(root);
-            if allow == root || allow.starts_with(root) {
+            if same_or_inside(allow, root) || same_or_inside(root, allow) {
                 return Err(ProfileError::InsideDeniedRoot);
             }
         }
@@ -467,6 +468,19 @@ mod tests {
         assert_eq!(render_profile(&paths), Err(ProfileError::InsideDeniedRoot));
         paths = sample();
         paths.exec_dir = PathBuf::from("/Users/other/bin");
+        assert_eq!(render_profile(&paths), Err(ProfileError::InsideDeniedRoot));
+    }
+
+    #[test]
+    fn profile_rejects_allowed_ancestors_of_denied_roots() {
+        let mut paths = sample();
+        paths.model_dir = PathBuf::from("/System/Volumes");
+        assert_eq!(render_profile(&paths), Err(ProfileError::InsideDeniedRoot));
+        paths = sample();
+        paths.scratch_dir = PathBuf::from("/Users");
+        assert_eq!(render_profile(&paths), Err(ProfileError::InsideDeniedRoot));
+        paths = sample();
+        paths.exec_dir = PathBuf::from("/System");
         assert_eq!(render_profile(&paths), Err(ProfileError::InsideDeniedRoot));
     }
 

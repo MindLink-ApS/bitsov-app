@@ -1,11 +1,13 @@
 //! Start the local model under the J0 deny-by-default profile.
 //!
-//! `sandbox-exec -f` applies the profile. The child inherits stdin and stdout
-//! as the only broker channel, and stderr for a launch failure. Every other
-//! descriptor is closed with `POSIX_SPAWN_CLOEXEC_DEFAULT` (Apple's
-//! `spawn.h`, `0x4000`). That is the multithreaded equivalent of the spike's
-//! `PROC_PIDLISTFDS` sweep: calling `proc_pidinfo` after `fork` can deadlock
-//! a process that already has other threads.
+//! `sandbox-exec -p` applies the rendered profile from an argument, so the
+//! policy never sits in a path the confined child can overwrite. The child
+//! inherits stdin and stdout as the only broker channel, and stderr for a
+//! launch failure. Every other descriptor is closed with
+//! `POSIX_SPAWN_CLOEXEC_DEFAULT` (Apple's `spawn.h`, `0x4000`). That is the
+//! multithreaded equivalent of the spike's `PROC_PIDLISTFDS` sweep: calling
+//! `proc_pidinfo` after `fork` can deadlock a process that already has other
+//! threads.
 //!
 //! App Sandbox remains the fallback named in
 //! `docs/spike/J0-MACOS-ISOLATION.md` §1 if Apple removes custom SBPL. It is
@@ -15,13 +17,11 @@
 #[allow(dead_code)]
 mod macos {
     use std::ffi::{CString, OsStr, OsString};
-    use std::fs::{self, File, OpenOptions};
+    use std::fs::{self, File};
     use std::io::{self, Write};
     use std::os::fd::{AsRawFd, FromRawFd};
     use std::os::unix::ffi::OsStrExt;
-    use std::os::unix::fs::OpenOptionsExt;
     use std::path::{Component, Path, PathBuf};
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -104,7 +104,6 @@ mod macos {
         stdin: File,
         stdout: File,
         stderr: File,
-        profile_path: PathBuf,
         exit: Option<i32>,
     }
 
@@ -219,9 +218,6 @@ mod macos {
                     }
                 }
             }
-            if !self.profile_path.as_os_str().is_empty() {
-                let _ = fs::remove_file(&self.profile_path);
-            }
         }
     }
 
@@ -240,8 +236,7 @@ mod macos {
         if !Path::new(SANDBOX_EXEC).is_file() {
             return Err(LaunchError::SandboxExecMissing);
         }
-        let profile_path = write_profile(&prepared.profile)?;
-        spawn(&prepared, profile_path)
+        spawn(&prepared)
     }
 
     fn prepare(request: &LaunchRequest) -> Result<Prepared, LaunchError> {
@@ -305,29 +300,7 @@ mod macos {
         Err(LaunchError::NotFound)
     }
 
-    fn write_profile(body: &str) -> Result<PathBuf, LaunchError> {
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "bitsov-model-{}-{}.sb",
-            std::process::id(),
-            SEQ.fetch_add(1, Ordering::Relaxed)
-        ));
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&path)
-            .map_err(LaunchError::Io)?;
-        file.write_all(body.as_bytes()).map_err(LaunchError::Io)?;
-        file.sync_all().map_err(LaunchError::Io)?;
-        Ok(path)
-    }
-
-    fn spawn(prepared: &Prepared, profile_path: PathBuf) -> Result<ModelChild, LaunchError> {
-        let mut profile_file = ProfileFile {
-            path: profile_path,
-            keep: false,
-        };
+    fn spawn(prepared: &Prepared) -> Result<ModelChild, LaunchError> {
         let (stdin_r, stdin_w) = anon_pipe()?;
         let (stdout_r, stdout_w) = anon_pipe()?;
         let (stderr_r, stderr_w) = anon_pipe()?;
@@ -374,10 +347,12 @@ mod macos {
             posix_spawn_file_actions_addchdir_np(state.actions.as_mut_ptr(), cwd.as_ptr())
         })?;
 
+        // Pass the profile as an argument (`-p`) so it never lands in a
+        // directory the confined child can overwrite between write and open.
         let mut owned = Vec::new();
         owned.push(c_os(OsStr::new(SANDBOX_EXEC))?);
-        owned.push(c_os(OsStr::new("-f"))?);
-        owned.push(c_os(profile_file.path.as_os_str())?);
+        owned.push(c_os(OsStr::new("-p"))?);
+        owned.push(c_os(OsStr::new(&prepared.profile))?);
         owned.push(c_os(prepared.program.as_os_str())?);
         for arg in &prepared.args {
             owned.push(c_os(arg)?);
@@ -418,28 +393,13 @@ mod macos {
         drop(stdin_r);
         drop(stdout_w);
         drop(stderr_w);
-        profile_file.keep = true;
         Ok(ModelChild {
             pid,
             stdin: stdin_w,
             stdout: stdout_r,
             stderr: stderr_r,
-            profile_path: std::mem::replace(&mut profile_file.path, PathBuf::new()),
             exit: None,
         })
-    }
-
-    struct ProfileFile {
-        path: PathBuf,
-        keep: bool,
-    }
-
-    impl Drop for ProfileFile {
-        fn drop(&mut self) {
-            if !self.keep && !self.path.as_os_str().is_empty() {
-                let _ = fs::remove_file(&self.path);
-            }
-        }
     }
 
     struct SpawnState {
@@ -710,8 +670,24 @@ mod macos {
             let fix = fixture();
             let mut request = fix.request(&[]);
             request.program = fix.model.join("missing-binary");
-            let err = launch(&request).expect_err("missing program");
-            assert!(matches!(err, LaunchError::NotFound));
+            assert!(matches!(launch(&request), Err(LaunchError::NotFound)));
+        }
+
+        #[test]
+        fn launch_passes_the_profile_as_an_argument() {
+            let fix = fixture();
+            let prepared = prepare(&fix.request(&["echo"])).expect("prepare");
+            assert!(prepared.profile.starts_with("(version 1)\n(deny default)\n"));
+            // Regression: the profile must stay in argv (`-p`), never a temp
+            // path under a child-writable tree such as scratch or TMPDIR.
+            let mut child = spawn(&prepared).expect("spawn with -p profile");
+            writeln!(child.stdin(), "hello-broker").unwrap();
+            child.stdin().flush().unwrap();
+            let code = child.wait_timeout(Duration::from_secs(20)).expect("wait");
+            let out = slurp(child.stdout());
+            let err = slurp(child.stderr());
+            assert_eq!(code, 0, "stdout={out} stderr={err}");
+            assert_eq!(out.trim(), "echo hello-broker");
         }
 
         #[test]
