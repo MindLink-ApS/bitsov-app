@@ -430,15 +430,34 @@ fn the_app_package_does_not_depend_on_this_crate() {
     let manifest =
         std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.toml"))
             .expect("app manifest");
-    let dependencies = manifest
-        .split("[dependencies]")
-        .nth(1)
-        .expect("dependencies")
-        .split("[dev-dependencies]")
-        .next()
-        .expect("dev-dependencies");
+    // Required dependency tables only. The sit-mock example may opt into
+    // mock-node, and only as a non-default optional dependency.
+    let required = manifest.split("[features]").next().expect("features");
     assert!(
-        !dependencies.contains("mock-node"),
+        !required.contains("mock-node"),
         "the app must not link the mock"
+    );
+    assert!(
+        manifest.contains("default = []"),
+        "sit-mock must not be a default feature"
+    );
+    let feature = manifest
+        .split("sit-mock = ")
+        .nth(1)
+        .expect("sit-mock feature")
+        .split('\n')
+        .next()
+        .expect("feature line");
+    assert_eq!(feature.trim(), "[\"dep:mock-node\"]");
+    let optional = manifest
+        .split("[dependencies.mock-node]")
+        .nth(1)
+        .expect("optional mock-node dependency")
+        .split("\n[")
+        .next()
+        .expect("optional table");
+    assert!(
+        optional.contains("optional = true"),
+        "the app must not link the mock unless sit-mock is requested"
     );
 }

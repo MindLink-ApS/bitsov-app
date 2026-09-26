@@ -34,10 +34,6 @@ use tauri::menu::{Menu, MenuItem};
 use tauri::{AppHandle, Manager, RunEvent, State, WebviewWindow};
 use tauri_plugin_shell::ShellExt;
 
-// Phase 1 read broker. Not invoked by any command and not exposed to the renderer.
-#[allow(dead_code)]
-mod jarvis;
-
 /// Node API bind — konsensus ApiConfig `default_api_addr()` = 127.0.0.1:3141.
 /// Loopback ONLY (Gate G2): never point this at a non-loopback host until a
 /// confidential remote transport + delegated auth exist.

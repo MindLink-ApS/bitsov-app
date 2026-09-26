@@ -29,6 +29,15 @@ tokio = { version = "1", features = ["time", "rt", "macros"] }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+[features]
+default = []
+# Mock-only SIT reader example. Pulls in `mock-node`; not part of the app binary.
+sit-mock = ["dep:mock-node"]
+
+[dependencies.mock-node]
+path = "crates/mock-node"
+optional = true
+
 [dev-dependencies]
 tempfile = "3"
 # `tauri::test` (MockRuntime + IPC) is feature-gated. Cargo enables this for
@@ -36,6 +45,10 @@ tempfile = "3"
 tauri = { version = "2", features = ["test"] }
 # In-process stand-in for broker tests. The app binary does not link this.
 mock-node = { path = "crates/mock-node" }
+
+[[example]]
+name = "jarvis_sit_mock"
+required-features = ["sit-mock"]
 
 # Jarvis Phase 1 test bed. The app binary does not link it. `cargo test`
 # in this directory builds it, and the broker tests above use it in-process.
