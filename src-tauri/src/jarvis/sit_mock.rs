@@ -622,5 +622,9 @@ mod tests {
             section.contains(".initialization_script(assistant_rows_script())"),
             "the assistant window does not receive its rows"
         );
+        assert!(
+            main.contains("fn assistant_mock_builder("),
+            "missing assistant-only startup that skips the node"
+        );
     }
 }
