@@ -107,6 +107,7 @@ impl Route {
             Self::Payments => vec![paths::PAYMENTS.into()],
             Self::Pricing => vec![paths::PRICING.into()],
             Self::Peers => vec![paths::PEERS.into()],
+            // 7 is in the 0..=99 communication band.
             Self::PaymentsPrice => [0, 1, 7, 100, 200, 300, 400, 500, 600, 900, 1000, 700]
                 .into_iter()
                 .map(paths::price)

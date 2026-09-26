@@ -1,8 +1,10 @@
 //! Closed set of node routes the broker may read.
 //!
 //! Paths are the pinned BitSov-bitsov `v0.3.0-rc7` (`958e399`) GET routes.
-//! `RequestTarget::method` is fixed to GET. There is no constructor that
-//! accepts a caller-supplied path or HTTP method.
+//! `RequestTarget::method` is fixed to GET. The only query key is `limit`.
+//! There is no constructor that accepts a caller-supplied path or HTTP method.
+//! `ListMessagesQuery` also documents `before` and `peer`; those are not
+//! broker query values (`Query::value` is a `u32`).
 
 /// `GET /api/v1/payments/balance`
 pub const PAYMENTS_BALANCE: &str = "/api/v1/payments/balance";
@@ -58,6 +60,8 @@ pub enum ReadRoute {
     Health,
     /// `limit` is a page size, not a path. The dispatcher rejects `0` and
     /// values above the genome cap (1000) before building this route.
+    /// Incoming mail only: with no peer the pinned handler returns messages
+    /// addressed to this node and does not support a `sent=` selector.
     Messages {
         limit: u32,
     },

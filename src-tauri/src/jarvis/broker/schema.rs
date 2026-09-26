@@ -267,7 +267,8 @@ pub struct SenderCount {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MessageMetadata {
-    /// Messages returned by this page, not a mailbox total.
+    /// Messages returned by this incoming page, not a mailbox total.
+    /// A caller `limit` (including 1 or the default 50) is a page size.
     pub returned_count: Amount<u64>,
     pub senders: Vec<SenderCount>,
     pub withheld_senders: Amount<u64>,

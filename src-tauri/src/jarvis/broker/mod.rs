@@ -1,7 +1,8 @@
 //! Dispatcher over the closed Phase 1 read tools.
 //!
 //! The only node operation is [`NodeRead::read`] with a [`ReadRoute`]. Tool
-//! calls that are not one of the five read tools never reach it.
+//! calls that are not one of the five read tools never reach it. The model
+//! may be shown only [`Dispatch::output`]; the host log stays in this module.
 
 mod route;
 mod schema;
@@ -14,8 +15,8 @@ pub use schema::{
     Amount, BalanceInput, BalanceReport, CategoryFeeTarget, CategoryPrice, ChainBackend,
     ChannelSummary, ChannelsInput, ChannelsReport, CopiedId, HealthInput, HealthReport,
     LightningBackend, Liveness, LocalPrices, LocalPricesInput, MessageCountsInput, MessageMetadata,
-    PriceCategory, PricingMode, Report, SenderCount, SourceField, TargetFee, ToolCall, ToolOutput,
-    TrustLevel, UnavailableReason, Unit, WalletBalanceLabel, MAX_MESSAGE_LIMIT,
+    PriceCategory, PricingMode, Report, SenderCount, SourceField, TargetFee, ToolCall,
+    ToolOutput, TrustLevel, UnavailableReason, Unit, WalletBalanceLabel, MAX_MESSAGE_LIMIT,
 };
 
 use std::fmt;
@@ -80,10 +81,22 @@ pub struct ReadLog {
     pub outcome: LogOutcome,
 }
 
+/// One read-tool execution.
+///
+/// Only [`Dispatch::output`] may be serialized and forwarded to the model.
+/// `log` is a host record of allowlisted paths and outcomes. It is private
+/// and does not implement `Serialize`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Dispatch {
-    pub output: ToolOutput,
-    pub log: Vec<ReadLog>,
+    output: ToolOutput,
+    log: Vec<ReadLog>,
+}
+
+impl Dispatch {
+    /// The only value that may reach the model.
+    pub fn output(&self) -> &ToolOutput {
+        &self.output
+    }
 }
 
 /// The route table failed its construction-time check.

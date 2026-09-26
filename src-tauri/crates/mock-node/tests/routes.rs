@@ -391,6 +391,19 @@ fn messages_follow_the_rc7_list_rules() {
     let body = common::body_of(faulted.serve(&format!("{}?peer=zz", paths::MESSAGES)));
     assert_eq!(body["code"], 500);
     assert_eq!(body["error"], mock_node::ERROR_BODY_01);
+
+    // Pinned ListMessagesQuery accepts limit/before/peer only. `sent=1` is
+    // ignored; the no-peer list stays incoming-only.
+    let ignored = node
+        .read(&format!("{}?sent=1", paths::MESSAGES))
+        .expect("sent ignored");
+    let ignored = ignored.as_array().expect("array");
+    assert_eq!(ignored.len(), incoming.len());
+    assert!(ignored.iter().all(|msg| msg["recipient"] == NODE_ID));
+    assert_eq!(
+        node.answer(AnswerKey::MessagesSent),
+        Answer::Value("1".into())
+    );
 }
 
 #[test]

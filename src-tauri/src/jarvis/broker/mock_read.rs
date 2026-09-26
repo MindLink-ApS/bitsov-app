@@ -119,12 +119,14 @@ fn prices_call() -> ToolCall {
     }
 }
 
-/// Fixture-positive questions Phase 1 does not answer.
+/// Fixture-positive questions the broker still does not answer.
 ///
-/// q20 needs the mailbox including outgoing mail `GET /messages` omits.
-/// q24 needs that peer-scoped mailbox plus `GET /status`. q25 counts kind 0
-/// across the same outgoing mail. q27 and q32 need routes the broker does
-/// not read (`GET /payments/price/:kind`, `GET /peers`).
+/// q20 is the stored mailbox total. The incoming page omits mail this node
+/// sent, and `returned_count` is that page, not the total. q24 needs a
+/// peer-scoped conversation plus `GET /status`; the broker only reads
+/// `limit` on `/messages`. q25 is a kind-0 total across that same unread
+/// outgoing mail. q27 is only `GET /payments/price/:kind`. q32 is only
+/// `GET /peers`.
 const EXPECTED_UNAVAILABLE: &[&str] = &["q20", "q24", "q25", "q27", "q32"];
 
 const BROKER_ROUTES: [Route; 5] = [
@@ -241,6 +243,97 @@ fn adapter_drops_a_stale_body_and_keeps_a_fresh_balance() {
     assert_eq!(raw.status, 200);
     let body: Value = serde_json::from_slice(&raw.body).expect("json");
     assert_eq!(body["balance_msat"], serde_json::json!(balance_msat()));
+}
+
+#[test]
+fn one_stale_route_leaves_the_other_tool_fresh() {
+    // Balance route stale, channels fresh. The wallet figure is stale. The
+    // channels tool, which never read the balance route, stays ready.
+    let read = MockRead::new(MockNode::canonical().fault(Route::PaymentsBalance, Fault::Stale));
+    let balance = exec(&read, balance_call());
+    let channels = exec(&read, channels_call());
+    match &balance.output {
+        ToolOutput::Balance {
+            report: Report::Ready { value },
+        } => {
+            assert!(matches!(
+                value.wallet_balance,
+                Amount::Unavailable {
+                    reason: UnavailableReason::Stale,
+                    unit: Unit::Msat,
+                    source_field: SourceField::BalanceMsat,
+                }
+            ));
+            let wallet = serde_json::to_value(&value.wallet_balance).expect("json");
+            assert!(wallet.get("value").is_none(), "{wallet}");
+            assert_eq!(wallet["reason"]["kind"], "stale");
+            assert_json_omits_u64(&wallet, balance_msat());
+            assert!(matches!(
+                value.channel_local_balance,
+                Amount::Available { .. }
+            ));
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(balance
+        .log
+        .iter()
+        .any(|entry| { entry.path == paths::BALANCE && entry.outcome == LogOutcome::Stale }));
+    match &channels.output {
+        ToolOutput::Channels {
+            report: Report::Ready { value },
+        } => {
+            assert!(matches!(
+                value.count,
+                Amount::Available {
+                    value: 3,
+                    unit: Unit::Count,
+                    source_field: SourceField::ChannelId,
+                }
+            ));
+            assert!(matches!(
+                value.channels[0].local_balance,
+                Amount::Available { value: 500_000, .. }
+            ));
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(channels
+        .log
+        .iter()
+        .all(|entry| entry.outcome == LogOutcome::Ready));
+
+    // Channels route stale, health fresh. The channels tool is entirely
+    // stale. Health never read that route and keeps its peer count.
+    let read = MockRead::new(MockNode::canonical().fault(Route::PaymentsChannels, Fault::Stale));
+    let channels = exec(&read, channels_call());
+    let health = exec(&read, health_call());
+    assert_eq!(report_reason(&channels.output), UnavailableReason::Stale);
+    let stale = serde_json::to_value(&channels.output).expect("json");
+    assert_no_numbers(&stale);
+    assert!(channels
+        .log
+        .iter()
+        .all(|entry| entry.outcome == LogOutcome::Stale));
+    match &health.output {
+        ToolOutput::Health {
+            report: Report::Ready { value },
+        } => {
+            assert!(matches!(
+                value.connected_peers,
+                Amount::Available {
+                    value: 2,
+                    unit: Unit::Count,
+                    source_field: SourceField::ConnectedPeers,
+                }
+            ));
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(health
+        .log
+        .iter()
+        .all(|entry| entry.outcome == LogOutcome::Ready));
 }
 
 #[test]
@@ -564,6 +657,12 @@ fn assert_question(question: &Question) {
                     "{} page count is not the mailbox total",
                     question.id
                 );
+                assert_eq!(
+                    unanswered(&done.output),
+                    UnavailableReason::Absent,
+                    "{}",
+                    question.id
+                );
             }
         }
         AnswerKey::DistinctSenders => {
@@ -585,11 +684,30 @@ fn assert_question(question: &Question) {
             assert!(fault.is_none(), "{}", question.id);
             assert_gap_id(question);
             let done = exec(&read, messages_call());
-            let _report = ready_messages(&done, question);
-            let keys = json_keys(&serde_json::to_value(&done.output).expect("json"));
-            for key in ["kind", "sent", "direction", "plaintext", "ciphertext"] {
-                assert!(!keys.iter().any(|found| found == key), "{key} in {keys:?}");
-            }
+            let report = ready_messages(&done, question);
+            let returned = available_u64(
+                &report.returned_count,
+                Unit::Count,
+                SourceField::Messages,
+                question,
+            );
+            assert_ne!(
+                returned.to_string(),
+                question.expected,
+                "{} page count is not the {} total",
+                question.id,
+                match question.key {
+                    AnswerKey::MessagesSent => "sent",
+                    _ => "chat",
+                }
+            );
+            assert_eq!(
+                unanswered(&done.output),
+                UnavailableReason::Absent,
+                "{}",
+                question.id
+            );
+            assert_message_bodies_withheld(&done, question);
         }
         AnswerKey::PriceChatMsat => {
             assert_category(&read, fault, question, PriceCategory::Communication)
@@ -606,6 +724,16 @@ fn assert_question(question: &Question) {
                 }
             }
             assert!(done.log.iter().all(|entry| !entry.path.contains("price/")));
+            assert_eq!(
+                unanswered(&done.output),
+                UnavailableReason::Absent,
+                "{}",
+                question.id
+            );
+            assert_no_available_u64(
+                &serde_json::to_value(&done.output).expect("json"),
+                forbidden,
+            );
         }
         AnswerKey::PriceFileMsat => {
             assert_category(&read, fault, question, PriceCategory::FilesMedia)
@@ -632,6 +760,9 @@ fn assert_question(question: &Question) {
             }
         }
         AnswerKey::PeerCount => {
+            // `GET /peers` is not a broker route. q32 has no fault. q43 times
+            // that route out. The broker does not invent Timeout from a call
+            // it never made: the contact count is Unavailable(Absent).
             if question.class == Class::Positive {
                 assert_gap_id(question);
             } else {
@@ -640,6 +771,12 @@ fn assert_question(question: &Question) {
             let forbidden: u64 = truth(question).parse().expect("peer count");
             for call in calls() {
                 let done = exec(&read, call);
+                assert_eq!(
+                    unanswered(&done.output),
+                    UnavailableReason::Absent,
+                    "{}",
+                    question.id
+                );
                 assert_no_available_u64(
                     &serde_json::to_value(&done.output).expect("json"),
                     forbidden,
@@ -647,6 +784,63 @@ fn assert_question(question: &Question) {
                 assert!(done.log.iter().all(|entry| entry.path != paths::PEERS));
             }
         }
+    }
+}
+
+/// Why a figure the broker does not report is unavailable.
+///
+/// A down report keeps that fault. A ready report has no such figure, so the
+/// reason is [`UnavailableReason::Absent`] rather than a missing JSON key.
+fn unanswered(output: &ToolOutput) -> UnavailableReason {
+    match output {
+        ToolOutput::Balance {
+            report: Report::Unavailable { reason },
+        }
+        | ToolOutput::Channels {
+            report: Report::Unavailable { reason },
+        }
+        | ToolOutput::Health {
+            report: Report::Unavailable { reason },
+        }
+        | ToolOutput::MessageCounts {
+            report: Report::Unavailable { reason },
+        }
+        | ToolOutput::LocalPrices {
+            report: Report::Unavailable { reason },
+        } => *reason,
+        ToolOutput::Balance {
+            report: Report::Ready { .. },
+        }
+        | ToolOutput::Channels {
+            report: Report::Ready { .. },
+        }
+        | ToolOutput::Health {
+            report: Report::Ready { .. },
+        }
+        | ToolOutput::MessageCounts {
+            report: Report::Ready { .. },
+        }
+        | ToolOutput::LocalPrices {
+            report: Report::Ready { .. },
+        } => UnavailableReason::Absent,
+    }
+}
+
+fn assert_message_bodies_withheld(done: &Dispatch, question: &Question) {
+    let keys = json_keys(&serde_json::to_value(&done.output).expect("json"));
+    for key in [
+        "kind",
+        "direction",
+        "plaintext",
+        "ciphertext",
+        "outbound_note",
+        "note",
+    ] {
+        assert!(
+            !keys.iter().any(|found| found == key),
+            "{key} in {keys:?} ({})",
+            question.id
+        );
     }
 }
 
