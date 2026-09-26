@@ -100,11 +100,7 @@ fn assert_reads_allowlisted(node: &Fake) {
         assert!(route::segments_allowed(target.path));
         assert!(route::path_allowed(target.path));
         if let Some(query) = target.query {
-            assert!(
-                query.key == "limit" || (query.key == "sent" && query.value == 1),
-                "{}",
-                query.key
-            );
+            assert!(query.key == "limit", "{}", query.key);
         }
     }
 }
@@ -211,7 +207,7 @@ fn allowlist_is_exactly_the_phase1_reads() {
 
 #[test]
 fn every_route_target_is_an_allowlisted_get() {
-    let mut seen = [false; 6];
+    let mut seen = [false; 5];
     for route in route::sample_routes() {
         let target = route.target();
         assert_eq!(target.method, "GET");
@@ -240,22 +236,16 @@ fn every_route_target_is_an_allowlisted_get() {
                 assert_eq!(target.query.map(|query| query.value), Some(limit));
                 3
             }
-            ReadRoute::SentMessages => {
-                assert_eq!(target.path, route::MESSAGES);
-                assert_eq!(target.query.map(|query| query.key), Some("sent"));
-                assert_eq!(target.query.map(|query| query.value), Some(1));
-                4
-            }
             ReadRoute::OwnPricing => {
                 assert_eq!(target.path, route::OWN_PRICING);
                 assert!(target.query.is_none());
-                5
+                4
             }
         };
         assert!(!seen[slot]);
         seen[slot] = true;
     }
-    assert_eq!(seen, [true; 6]);
+    assert_eq!(seen, [true; 5]);
 }
 
 #[test]
@@ -698,7 +688,6 @@ fn message_metadata_drops_bodies_memos_and_bad_senders() {
         r#"[{{"id":"CANARY_9f3e2a","kind":100,"sender":"{SENDER}","recipient":"CANARY_9f3e2a","timestamp":1,"ciphertext":"CANARY_9f3e2a","payment_amount_msat":0,"payment_hash":"CANARY_9f3e2a","plaintext":"CANARY_9f3e2a body","references":["CANARY_9f3e2a"]}},{{"id":"dd","kind":2,"sender":"CANARY_9f3e2a","recipient":"room","timestamp":2,"ciphertext":"CANARY_9f3e2a","payment_amount_msat":5,"payment_hash":"CANARY_9f3e2a","memo":"CANARY_9f3e2a","preimage":"CANARY_9f3e2a","nested":{{"plaintext":"CANARY_9f3e2a"}}}},{{"id":"ee","kind":1,"sender":"{SENDER}","recipient":"{PUBKEY}","timestamp":3,"ciphertext":"CANARY_9f3e2a","payment_amount_msat":0,"payment_hash":"CANARY_9f3e2a","plaintext":"CANARY_9f3e2a"}}]"#
     );
     // Unknown memo/preimage/nested fields are ignored. The canary sender is withheld.
-    // A 66-hex channel pubkey is not a peer id and is not copied into sent_to.
     let node = Fake::new().json(route::MESSAGES, &body);
     let done = dispatch(
         &node,
@@ -723,15 +712,10 @@ fn message_metadata_drops_bodies_memos_and_bad_senders() {
     ));
     assert_eq!(value.senders.len(), 1);
     assert_eq!(value.senders[0].sender, SENDER);
-    assert!(value.sent_to.is_empty());
-    assert!(matches!(
-        value.withheld_recipients,
-        Amount::Available { value: 3, .. }
-    ));
     let rendered = render(&done);
     assert!(!rendered.contains(PUBKEY), "{rendered}");
+    assert_eq!(node.seen().len(), 1);
     assert!(matches!(node.seen()[0], ReadRoute::Messages { limit: 25 }));
-    assert!(matches!(node.seen()[1], ReadRoute::SentMessages));
 }
 
 #[test]
@@ -771,18 +755,88 @@ fn message_page_counts_senders_and_strips_plaintext() {
         value.senders[0].count,
         Amount::Available { value: 1, .. }
     ));
-    assert_eq!(value.sent_to.len(), 1);
-    assert_eq!(value.sent_to[0].peer.len(), 64);
-    assert!(matches!(
-        value.sent_to[0].count,
-        Amount::Available { value: 1, .. }
-    ));
-    assert!(matches!(
-        value.withheld_recipients,
-        Amount::Available { value: 1, .. }
-    ));
+    assert_eq!(node.seen().len(), 1);
     assert!(matches!(node.seen()[0], ReadRoute::Messages { limit: 50 }));
-    assert!(matches!(node.seen()[1], ReadRoute::SentMessages));
+}
+
+#[test]
+fn a_limit_of_one_is_a_page_not_a_mailbox_total() {
+    // The node applies limit before returning. This body is the one-message
+    // page for limit=1; the unread mailbox is larger. returned_count is that
+    // page, and the broker must not invent a chat/sent/stored total from it.
+    let body = format!(
+        r#"[{{"id":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","kind":0,"sender":"{SENDER}","recipient":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","timestamp":5,"ciphertext":"x","payment_amount_msat":0,"payment_hash":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}}]"#
+    );
+    let node = Fake::new().json(route::MESSAGES, &body);
+    let done = dispatch(
+        &node,
+        ToolCall::MessageCounts {
+            input: MessageCountsInput { limit: 1 },
+        },
+    );
+    let ToolOutput::MessageCounts {
+        report: Report::Ready { value },
+    } = &done.output
+    else {
+        panic!("{:?}", done.output);
+    };
+    assert!(matches!(
+        value.returned_count,
+        Amount::Available { value: 1, .. }
+    ));
+    assert_eq!(value.senders.len(), 1);
+    let keys = json_keys(&serde_json::to_value(&done.output).expect("json"));
+    for forbidden in ["chat_count", "sent_to", "sent_count", "sent"] {
+        assert!(
+            !keys.iter().any(|found| found == forbidden),
+            "{forbidden} must not appear as a total from a page: {keys:?}"
+        );
+    }
+    assert_eq!(node.seen().len(), 1);
+    assert!(matches!(node.seen()[0], ReadRoute::Messages { limit: 1 }));
+}
+
+#[test]
+fn incoming_recipients_are_not_counted_as_sent_mail() {
+    // A default 50-message page whose unread sent history would exceed one
+    // page. Incoming recipients must not become invented sent totals.
+    let mut messages = Vec::new();
+    for index in 0u32..50 {
+        let recipient = format!("{index:064x}");
+        messages.push(format!(
+            r#"{{"id":"{recipient}","kind":0,"sender":"{SENDER}","recipient":"{recipient}","timestamp":{ts},"ciphertext":"x","payment_amount_msat":0,"payment_hash":"{recipient}"}}"#,
+            ts = 1_000 + index
+        ));
+    }
+    let body = format!("[{}]", messages.join(","));
+    let node = Fake::new().json(route::MESSAGES, &body);
+    let done = dispatch(
+        &node,
+        ToolCall::MessageCounts {
+            input: MessageCountsInput { limit: 50 },
+        },
+    );
+    let ToolOutput::MessageCounts {
+        report: Report::Ready { value },
+    } = &done.output
+    else {
+        panic!("{:?}", done.output);
+    };
+    assert!(matches!(
+        value.returned_count,
+        Amount::Available { value: 50, .. }
+    ));
+    assert_eq!(value.senders.len(), 1);
+    assert_eq!(value.senders[0].sender, SENDER);
+    let keys = json_keys(&serde_json::to_value(&done.output).expect("json"));
+    for forbidden in ["chat_count", "sent_to", "sent_count", "recipient"] {
+        assert!(
+            !keys.iter().any(|found| found == forbidden),
+            "must not invent sent totals from an incoming page: {forbidden} in {keys:?}"
+        );
+    }
+    assert_eq!(node.seen().len(), 1);
+    assert!(matches!(node.seen()[0], ReadRoute::Messages { limit: 50 }));
 }
 
 #[test]

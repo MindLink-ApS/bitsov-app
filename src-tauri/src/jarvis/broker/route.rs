@@ -1,9 +1,10 @@
 //! Closed set of node routes the broker may read.
 //!
 //! Paths are the pinned BitSov-bitsov `v0.3.0-rc7` (`958e399`) GET routes.
-//! `RequestTarget::method` is fixed to GET. Query keys are `limit` and the
-//! fixed `sent=1` selector. There is no constructor that accepts a
-//! caller-supplied path or HTTP method.
+//! `RequestTarget::method` is fixed to GET. The only query key is `limit`.
+//! There is no constructor that accepts a caller-supplied path or HTTP method.
+//! `ListMessagesQuery` also documents `before` and `peer`; those are not
+//! broker query values (`Query::value` is a `u32`).
 
 /// `GET /api/v1/payments/balance`
 pub const PAYMENTS_BALANCE: &str = "/api/v1/payments/balance";
@@ -59,15 +60,11 @@ pub enum ReadRoute {
     Health,
     /// `limit` is a page size, not a path. The dispatcher rejects `0` and
     /// values above the genome cap (1000) before building this route.
-    /// Incoming mail only: the mock omits messages this node sent.
+    /// Incoming mail only: with no peer the pinned handler returns messages
+    /// addressed to this node and does not support a `sent=` selector.
     Messages {
         limit: u32,
     },
-    /// `GET /api/v1/messages?sent=1`. Mail this node sent, unfiltered.
-    /// The broker groups it by recipient. A peer id is not a query value:
-    /// [`Query::value`] is a `u32`, and a caller-supplied id would widen this
-    /// allowlist. Same path as [`ReadRoute::Messages`].
-    SentMessages,
     OwnPricing,
 }
 
@@ -97,13 +94,6 @@ impl ReadRoute {
                     value: limit,
                 }),
             ),
-            Self::SentMessages => (
-                MESSAGES,
-                Some(Query {
-                    key: "sent",
-                    value: 1,
-                }),
-            ),
             Self::OwnPricing => (OWN_PRICING, None),
         };
         RequestTarget {
@@ -114,13 +104,12 @@ impl ReadRoute {
     }
 }
 
-pub const fn sample_routes() -> [ReadRoute; 6] {
+pub const fn sample_routes() -> [ReadRoute; 5] {
     [
         ReadRoute::PaymentsBalance,
         ReadRoute::PaymentsChannels,
         ReadRoute::Health,
         ReadRoute::Messages { limit: 1 },
-        ReadRoute::SentMessages,
         ReadRoute::OwnPricing,
     ]
 }
@@ -197,9 +186,7 @@ pub const fn segments_allowed(path: &str) -> bool {
 const fn query_ok(query: Option<Query>) -> bool {
     match query {
         None => true,
-        Some(query) => {
-            const_eq(query.key, "limit") || (const_eq(query.key, "sent") && query.value == 1)
-        }
+        Some(query) => const_eq(query.key, "limit"),
     }
 }
 
@@ -213,7 +200,7 @@ const fn mapping_ok(route: ReadRoute) -> bool {
         ReadRoute::PaymentsBalance => PAYMENTS_BALANCE,
         ReadRoute::PaymentsChannels => PAYMENTS_CHANNELS,
         ReadRoute::Health => HEALTH,
-        ReadRoute::Messages { .. } | ReadRoute::SentMessages => MESSAGES,
+        ReadRoute::Messages { .. } => MESSAGES,
         ReadRoute::OwnPricing => OWN_PRICING,
     };
     const_eq(target.method, "GET")
@@ -231,8 +218,7 @@ const fn variant_slot(route: ReadRoute) -> usize {
         ReadRoute::PaymentsChannels => 1,
         ReadRoute::Health => 2,
         ReadRoute::Messages { .. } => 3,
-        ReadRoute::SentMessages => 4,
-        ReadRoute::OwnPricing => 5,
+        ReadRoute::OwnPricing => 4,
     }
 }
 
@@ -252,7 +238,7 @@ pub fn enforce() -> Result<(), ()> {
 
 const _: () = {
     let routes = sample_routes();
-    let mut seen = [false; 6];
+    let mut seen = [false; 5];
     let mut index = 0;
     while index < routes.len() {
         let route = routes[index];

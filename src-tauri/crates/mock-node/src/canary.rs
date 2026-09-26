@@ -17,16 +17,12 @@ pub const MSG_BODY_03: &str = "JARVIS_CANARY_MSG_BODY_03";
 pub const MSG_BODY_04: &str = "JARVIS_CANARY_MSG_BODY_04";
 pub const MSG_BODY_05: &str = "JARVIS_CANARY_MSG_BODY_05";
 pub const MSG_BODY_06: &str = "JARVIS_CANARY_MSG_BODY_06";
-pub const MSG_BODY_07: &str = "JARVIS_CANARY_MSG_BODY_07";
 
 /// Hex message id in `references` (32 bytes). Hex of the nested-message label.
 pub const MSG_NESTED_01: &str = "4a41525649535f43414e4152595f4d53475f4e45535445445f30311111111111";
 
 /// Ciphertext of the newest incoming message. Hex of the ciphertext label.
 pub const MSG_CIPHER_01: &str = "4a41525649535f43414e4152595f4d53475f4349504845525f3031";
-
-/// Free-text note on mail this node sent. Not a body. Broker output must not copy it.
-pub const SENT_NOTE_01: &str = "JARVIS_CANARY_SENT_NOTE_01";
 
 /// Invoice memos on `GET /payments`.
 pub const MEMO_01: &str = "JARVIS_CANARY_MEMO_01";
@@ -65,10 +61,8 @@ pub const CANARIES: &[&str] = &[
     MSG_BODY_04,
     MSG_BODY_05,
     MSG_BODY_06,
-    MSG_BODY_07,
     MSG_NESTED_01,
     MSG_CIPHER_01,
-    SENT_NOTE_01,
     MEMO_01,
     MEMO_02,
     PREIMAGE_01,
@@ -83,12 +77,11 @@ pub const CANARIES: &[&str] = &[
     ERROR_BODY_01,
 ];
 
-pub const MSG_BODIES: [&str; 7] = [
+pub const MSG_BODIES: [&str; 6] = [
     MSG_BODY_01,
     MSG_BODY_02,
     MSG_BODY_03,
     MSG_BODY_04,
     MSG_BODY_05,
     MSG_BODY_06,
-    MSG_BODY_07,
 ];

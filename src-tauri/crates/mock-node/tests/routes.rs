@@ -323,7 +323,7 @@ fn messages_follow_the_rc7_list_rules() {
     assert_eq!(incoming.len(), 5);
     assert_eq!(
         node.answer(AnswerKey::MessageCount),
-        Answer::Value("7".into())
+        Answer::Value("6".into())
     );
     assert_eq!(
         node.answer(AnswerKey::ChatMessageCount),
@@ -392,40 +392,18 @@ fn messages_follow_the_rc7_list_rules() {
     assert_eq!(body["code"], 500);
     assert_eq!(body["error"], mock_node::ERROR_BODY_01);
 
-    let sent = node
+    // Pinned ListMessagesQuery accepts limit/before/peer only. `sent=1` is
+    // ignored; the no-peer list stays incoming-only.
+    let ignored = node
         .read(&format!("{}?sent=1", paths::MESSAGES))
-        .expect("sent");
-    let sent = sent.as_array().expect("array");
-    assert_eq!(sent.len(), 2);
-    assert!(sent.iter().all(|msg| msg["sender"] == NODE_ID));
-    assert_eq!(sent[0]["recipient"], SENDER_A);
-    assert_eq!(sent[0]["direction"], "outgoing");
-    assert_eq!(sent[0]["kind"], 0);
-    assert_eq!(sent[0]["outbound_note"], mock_node::SENT_NOTE_01);
-    assert!(sent[0]["plaintext"].as_str().is_some());
-    assert_eq!(sent[1]["recipient"], SENDER_B);
-    assert_eq!(sent[1]["kind"], 1);
-    assert_eq!(sent[1]["outbound_note"], mock_node::SENT_NOTE_01);
-    assert!(incoming
-        .iter()
-        .all(|msg| msg.get("outbound_note").is_none()));
-    let to_a = node
-        .read(&format!("{}?sent=1&peer={SENDER_A}", paths::MESSAGES))
-        .expect("sent to a");
-    assert_eq!(to_a.as_array().expect("array").len(), 1);
-    let to_b = node
-        .read(&format!("{}?sent=1&peer={SENDER_B}", paths::MESSAGES))
-        .expect("sent to b");
-    let to_b = to_b.as_array().expect("array");
-    assert_eq!(to_b.len(), 1);
-    assert_eq!(to_b[0]["recipient"], SENDER_B);
+        .expect("sent ignored");
+    let ignored = ignored.as_array().expect("array");
+    assert_eq!(ignored.len(), incoming.len());
+    assert!(ignored.iter().all(|msg| msg["recipient"] == NODE_ID));
     assert_eq!(
         node.answer(AnswerKey::MessagesSent),
         Answer::Value("1".into())
     );
-    let invalid = common::body_of(node.serve(&format!("{}?sent=0", paths::MESSAGES)));
-    assert_eq!(invalid["code"], 400);
-    assert_eq!(invalid["error"], "invalid sent");
 }
 
 #[test]

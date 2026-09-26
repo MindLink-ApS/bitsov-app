@@ -264,29 +264,14 @@ pub struct SenderCount {
     pub count: Amount<u64>,
 }
 
-/// Mail this node sent to one peer. `peer` is a 64-hex node id.
-/// A channel pubkey is 66 hex and is not stored here.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SentToPeer {
-    pub peer: String,
-    pub count: Amount<u64>,
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MessageMetadata {
-    /// Messages returned by the incoming page, not a mailbox total.
+    /// Messages returned by this incoming page, not a mailbox total.
+    /// A caller `limit` (including 1 or the default 50) is a page size.
     pub returned_count: Amount<u64>,
     pub senders: Vec<SenderCount>,
     pub withheld_senders: Amount<u64>,
-    /// Per-peer counts from `GET /messages?sent=1`. A conversation question
-    /// reads one row. The mailbox total is the sum, and is not a field.
-    pub sent_to: Vec<SentToPeer>,
-    /// Sent-mail recipients that are not a 64-hex node id.
-    pub withheld_recipients: Amount<u64>,
-    /// Kind 0 messages on the incoming page plus sent mail.
-    pub chat_count: Amount<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
