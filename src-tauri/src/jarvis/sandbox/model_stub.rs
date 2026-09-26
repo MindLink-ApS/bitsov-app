@@ -7,14 +7,24 @@
 use std::io::{self, Write};
 use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::os::unix::net::UnixListener;
+use std::path::PathBuf;
 use std::time::Duration;
 
 extern "C" {
     fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+    fn fork() -> i32;
+    fn getpid() -> i32;
+    fn close(fd: i32) -> i32;
 }
 
 /// `F_GETFD` on macOS.
 const F_GETFD: i32 = 1;
+
+fn libc_close(fd: i32) {
+    unsafe {
+        let _ = close(fd);
+    }
+}
 
 fn main() {
     let mut args = std::env::args();
@@ -31,6 +41,7 @@ fn main() {
         "udp" => udp(),
         "unix" => unix_bind(&extra),
         "fds" => fds(),
+        "fork-linger" => fork_linger(),
         _ => "unknown".to_string(),
     };
     report(&result);
@@ -110,6 +121,38 @@ fn fds() -> String {
         }
     }
     format!("fds {}", open.join(","))
+}
+
+/// Fork a worker that stays alive after this leader exits.
+///
+/// Writes `$TMPDIR/worker.pid` so the launch test can assert Drop reaps the
+/// process group even when the leader exit status is already cached. The
+/// worker closes the broker fds so the parent's pipes can EOF when the
+/// leader exits.
+fn fork_linger() -> String {
+    match unsafe { fork() } {
+        -1 => format!("other {}", io::Error::last_os_error().raw_os_error().unwrap_or(0)),
+        0 => {
+            // Detach from the broker pipes; otherwise Drop/wait tests hang on
+            // stdout EOF while this worker still holds the write end.
+            for fd in 0..=2 {
+                unsafe {
+                    libc_close(fd);
+                }
+            }
+            let pid = unsafe { getpid() };
+            let path = PathBuf::from(std::env::var_os("TMPDIR").unwrap_or_default()).join("worker.pid");
+            let _ = std::fs::write(&path, format!("{pid}\n"));
+            loop {
+                std::thread::sleep(Duration::from_secs(3600));
+            }
+        }
+        _ => {
+            // Give the worker time to record its pid before the leader exits.
+            std::thread::sleep(Duration::from_millis(100));
+            "forked".to_string()
+        }
+    }
 }
 
 fn class(err: io::Error) -> String {

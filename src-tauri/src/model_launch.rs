@@ -97,8 +97,9 @@ mod macos {
         }
     }
 
-    /// The model process. Stdin and stdout are the broker pipe. Drop kills
-    /// the process group if it is still running.
+    /// The model process. Stdin and stdout are the broker pipe. Drop always
+    /// SIGKILLs the process group so forked workers cannot keep pipes or
+    /// scratch after the leader exits (the profile allows `process-fork`).
     pub struct ModelChild {
         pid: libc::pid_t,
         stdin: File,
@@ -185,39 +186,50 @@ mod macos {
             }
         }
 
+        /// Signal every member of the leader's process group.
+        ///
+        /// Spawn used `POSIX_SPAWN_SETPGROUP`, so the group id equals the
+        /// leader pid. Only `kill(-pgid, …)` is used: after `waitpid` has
+        /// reaped the leader, signalling that pid would race with reuse.
         fn kill_group(&self) {
-            let pgid = unsafe { libc::getpgid(self.pid) };
-            if pgid == self.pid {
+            if self.pid > 0 {
                 unsafe {
                     libc::kill(-self.pid, libc::SIGKILL);
                 }
             }
-            unsafe {
-                libc::kill(self.pid, libc::SIGKILL);
+        }
+
+        fn reap_leader(&mut self) {
+            if self.exit.is_some() || self.pid <= 0 {
+                return;
+            }
+            let mut status = 0;
+            loop {
+                let pid = unsafe { libc::waitpid(self.pid, &mut status, 0) };
+                if pid == self.pid {
+                    self.exit = Some(decode(status));
+                    return;
+                }
+                if pid < 0 {
+                    let err = io::Error::last_os_error();
+                    if err.raw_os_error() == Some(libc::EINTR) {
+                        continue;
+                    }
+                    return;
+                }
             }
         }
     }
 
     impl Drop for ModelChild {
         fn drop(&mut self) {
-            if self.exit.is_none() && self.pid > 0 {
-                self.kill_group();
-                let mut status = 0;
-                loop {
-                    let pid = unsafe { libc::waitpid(self.pid, &mut status, 0) };
-                    if pid == self.pid {
-                        self.exit = Some(decode(status));
-                        break;
-                    }
-                    if pid < 0 {
-                        let err = io::Error::last_os_error();
-                        if err.raw_os_error() == Some(libc::EINTR) {
-                            continue;
-                        }
-                        break;
-                    }
-                }
+            if self.pid <= 0 {
+                return;
             }
+            // Leader exit may already be cached. Forked workers can still be
+            // alive and holding broker pipes or scratch; tear the group down.
+            self.kill_group();
+            self.reap_leader();
         }
     }
 
@@ -789,6 +801,52 @@ mod macos {
             );
             assert_eq!(listed_fds(&line(&fix, true, &["fds"])), vec![0, 1, 2]);
             unsafe { libc::close(planted) };
+        }
+
+        fn pid_exists(pid: libc::pid_t) -> bool {
+            unsafe { libc::kill(pid, 0) == 0 }
+        }
+
+        /// The profile allows `process-fork`. After the leader exits and its
+        /// status is cached, Drop must still SIGKILL the process group so a
+        /// worker cannot keep pipes or scratch. Signalling the reaped leader
+        /// pid is unsafe (reuse); only `-pgid` is used.
+        #[test]
+        fn drop_reaps_forked_descendants_after_leader_exits() {
+            let fix = fixture();
+            let worker_pid_path = fix.scratch.join("worker.pid");
+            let mut child = launch(&fix.request(&["fork-linger"])).expect("launch");
+            let code = child.wait_timeout(Duration::from_secs(20)).expect("wait");
+            let out = slurp(child.stdout());
+            let err = slurp(child.stderr());
+            assert_eq!(code, 0, "stdout={out} stderr={err}");
+            assert_eq!(out.trim(), "forked");
+
+            let worker_pid: libc::pid_t = fs::read_to_string(&worker_pid_path)
+                .unwrap_or_else(|e| panic!("worker.pid missing ({e}); stdout={out} stderr={err}"))
+                .trim()
+                .parse()
+                .expect("worker pid");
+            assert!(
+                worker_pid > 1,
+                "worker pid {worker_pid} from {}",
+                worker_pid_path.display()
+            );
+            assert!(
+                pid_exists(worker_pid),
+                "forked worker {worker_pid} must still be alive after the leader exit is cached"
+            );
+
+            drop(child);
+
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while pid_exists(worker_pid) && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(20));
+            }
+            assert!(
+                !pid_exists(worker_pid),
+                "Drop must reap owned descendants in the process group; worker {worker_pid} survived"
+            );
         }
     }
 }
