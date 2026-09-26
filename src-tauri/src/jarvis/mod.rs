@@ -5,3 +5,9 @@
 #![forbid(unsafe_code)]
 
 pub mod broker;
+
+/// Mock-only SIT reader over the 50-question fixture. Compiles for `cargo test`
+/// and for `cargo run --example jarvis_sit_mock --features sit-mock`. The default
+/// app binary does not link `mock-node`.
+#[cfg(any(test, feature = "sit-mock"))]
+pub mod sit_mock;
