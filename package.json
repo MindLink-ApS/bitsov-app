@@ -11,7 +11,8 @@
     "authority": "scripts/authority-check.sh",
     "smoke:cs1": "scripts/cs1-local-smoke.sh",
     "smoke:cs2": "scripts/cs2-local-smoke.sh",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "tauri:assistant": "BITSOV_ASSISTANT=1 tauri dev --features sit-mock"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

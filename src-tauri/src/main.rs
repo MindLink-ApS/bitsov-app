@@ -12,7 +12,8 @@
 //
 // A dev-only `assistant` window can display text. It is not a model, it has no
 // network, and it cannot call privileged commands (capability ACL + the
-// window-label check below).
+// window-label check below) With `--features sit-mock` it shows the Jarvis
+// fixture rows from the in-process mock broker.
 //
 // KEYS (charter invariant A.3): the node is the identity anchor. This host never
 // holds, derives, or displays key material. The loopback JWT lives in `NodeState`
@@ -648,6 +649,25 @@ fn bundled_assistant_origin(scheme: &str, host: Option<&str>) -> bool {
     }
 }
 
+/// Initialization script that hands the sealed window its rows.
+///
+/// With `sit-mock` the rows come from the in-process mock broker over the
+/// 50-question fixture: no node, no socket. Without it the script still defines
+/// the global, as an empty list, and the page says how to get rows.
+#[cfg(all(debug_assertions, feature = "sit-mock"))]
+fn assistant_rows_script() -> String {
+    use bitsov_app::jarvis::sit_mock;
+    sit_mock::assistant_init_script(&sit_mock::rows())
+}
+
+#[cfg(not(all(debug_assertions, feature = "sit-mock")))]
+fn assistant_rows_script() -> String {
+    // Same shape as `sit_mock::assistant_init_script`, which is not compiled here.
+    "Object.defineProperty(window, '__BITSOV_SIT_ROWS__', \
+     { value: Object.freeze([]), writable: false, configurable: false });"
+        .to_string()
+}
+
 /// Create the assistant window on demand. Not called at startup.
 fn open_assistant_window(app: &AppHandle) -> Result<(), String> {
     if !assistant_dev_enabled() {
@@ -668,6 +688,7 @@ fn open_assistant_window(app: &AppHandle) -> Result<(), String> {
     .min_inner_size(320.0, 240.0)
     .resizable(true)
     .incognito(true)
+    .initialization_script(assistant_rows_script())
     .on_navigation(|url| {
         assistant_document_allowed(
             cfg!(debug_assertions),
