@@ -4,7 +4,21 @@
 // fresh the node's figures are.
 
 import { ago, sats, satUnit, shortId } from './format';
-import type { LinkState, LiveEvent, Message, NodeOverview, Peer, PriceQuote, TrackRef } from './types';
+import type {
+  ActionError,
+  Artifact,
+  Delivery,
+  LinkState,
+  LiveEvent,
+  Message,
+  NodeOverview,
+  Peer,
+  PriceQuote,
+  RoomQuote,
+  SendReceipt,
+  SpendView,
+  TrackRef,
+} from './types';
 
 export type Threads = Record<string, Message[]>;
 export type Unread = Record<string, number>;
@@ -68,23 +82,30 @@ export type Cost = {
   estimate: boolean;
 };
 
+/** The node floors every message payment at one sat. */
+export const MIN_PAYMENT_MSAT = 1000;
+
+/** First contact pays the recipient's admission price, which the node caps here. */
+export const ADMISSION_MAX_MSAT = 100_000;
+
 /**
  * What one text message on this track costs before it is sent. The recipient
  * sets the price; when the node has not cached the peer's table the figure is
  * this node's own price, labelled as an estimate — never passed off as theirs.
+ * A room costs the sum of each member's own price, from `room_quote`.
  */
 export function costToSend(
   track: TrackRef,
   quote: PriceQuote | null,
-  opts: { name?: string; members?: number; nowMs?: number } = {},
+  opts: { name?: string; room?: RoomQuote | null; nowMs?: number } = {},
 ): Cost | null {
-  if (!quote) return null;
   if (track.kind === 'peer') {
+    if (!quote) return null;
     if (quote.peer_msat !== null) {
       const age = quote.peer_age_secs ?? 0;
       const when = ago((opts.nowMs ?? Date.now()) - age * 1000, opts.nowMs ?? Date.now());
       return {
-        msat: quote.peer_msat,
+        msat: Math.max(quote.peer_msat, MIN_PAYMENT_MSAT),
         basis: quote.peer_stale
           ? `${opts.name ?? 'Their'} price, from a stale table (${when})`
           : `${opts.name ?? 'Their'} price, updated ${when}`,
@@ -92,20 +113,95 @@ export function costToSend(
       };
     }
     return {
-      msat: quote.own_msat,
+      msat: Math.max(quote.own_msat, MIN_PAYMENT_MSAT),
       basis: `Estimate from your own price; ${opts.name ?? 'this peer'} has not shared theirs yet`,
       estimate: true,
     };
   }
   if (track.kind === 'room') {
-    const n = Math.max(0, opts.members ?? 0);
+    const room = opts.room;
+    if (!room) return null;
+    const n = room.members.length;
+    const own = room.members.filter((m) => !m.advertised).length;
     return {
-      msat: quote.own_msat * n,
-      basis: `Estimate: ${n} ${n === 1 ? 'member' : 'members'} × ${sats(quote.own_msat)} ${satUnit(quote.own_msat)}, each paid separately`,
-      estimate: true,
+      msat: room.total_msat,
+      basis:
+        `${n} ${n === 1 ? 'member' : 'members'}, each paid their own price` +
+        (own > 0 ? `; ${own} estimated from yours` : ''),
+      estimate: room.estimate,
     };
   }
   return null;
+}
+
+/** Any rejection from the host, as an action error. */
+export function asActionError(e: unknown): ActionError {
+  if (e && typeof e === 'object' && 'code' in e && 'message' in e) {
+    const { code, message } = e as ActionError;
+    return { code, message: String(message) };
+  }
+  return { code: 'node', message: typeof e === 'string' ? e : String((e as Error)?.message ?? e) };
+}
+
+/** Errors that mean "the owner must approve (again)", not "the send failed". */
+export const needsApproval = (e: ActionError) =>
+  e.code === 'spend_locked' || e.code === 'spend_expired';
+
+export type Deliveries = Record<string, Delivery>;
+
+/** A send's first status, from the node's reply. */
+export const deliveryFromReceipt = (r: { delivered: boolean }): Delivery =>
+  r.delivered ? { status: 'sent', reason: null } : { status: 'queued', reason: null };
+
+/** Fold a `/ws` delivery event in. The recipient's node decides; its reason is shown as sent. */
+export function applyDelivery(deliveries: Deliveries, event: LiveEvent): Deliveries {
+  if (event.type !== 'delivery') return deliveries;
+  const status = event.status === 'delivered' ? 'delivered' : event.status === 'rejected' ? 'rejected' : null;
+  if (!status) return deliveries;
+  return { ...deliveries, [event.message_id]: { status, reason: status === 'rejected' ? event.reason ?? 'no reason given' : null } };
+}
+
+/** The message a send just produced, shown until `/ws` echoes the real one. */
+export function sentMessage(receipt: SendReceipt, ownId: string, plaintext: string): Message {
+  return {
+    id: receipt.message_id,
+    kind: 0,
+    sender: ownId,
+    recipient: receipt.recipient,
+    timestamp: receipt.sent_at_ms,
+    plaintext,
+    payment_amount_msat: receipt.amount_msat,
+  };
+}
+
+export type StreamItem = { type: 'message'; at: number; message: Message } | { type: 'artifact'; at: number; artifact: Artifact };
+
+/** Messages and this track's artifacts, in time order. */
+export function streamItems(messages: Message[], artifacts: Artifact[]): StreamItem[] {
+  const items: StreamItem[] = [
+    ...messages.map((message) => ({ type: 'message' as const, at: message.timestamp, message })),
+    ...artifacts.map((artifact) => ({ type: 'artifact' as const, at: artifact.at, artifact })),
+  ];
+  return items.sort((a, b) => a.at - b.at);
+}
+
+/** The composer's spend line. */
+export function spendLine(view: SpendView | null, nowMs: number): { open: boolean; text: string } {
+  if (!view) return { open: false, text: 'Checking spending approval…' };
+  switch (view.state) {
+    case 'open': {
+      const left = Math.max(0, Math.ceil(((view.open_until_ms ?? nowMs) - nowMs) / 60_000));
+      return { open: left > 0, text: `Spending approved, ${left} min left` };
+    }
+    case 'pending':
+      return { open: false, text: 'Waiting for your approval at the node' };
+    case 'unavailable':
+      return { open: false, text: 'This node cannot grant spending to the app' };
+    case 'expired':
+      return { open: false, text: 'Spending approval expired' };
+    default:
+      return { open: false, text: 'Spending needs your approval' };
+  }
 }
 
 /** Figures older than this are marked stale in the panels. */

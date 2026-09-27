@@ -108,3 +108,94 @@ export type FundState = {
 export type FundingAddress = { address: string; network: string | null; note: string | null };
 export type Balance = { balance_msat: number };
 export type RestoreOutcome = { node_id: string; restart_required: boolean; restarted: boolean };
+
+// ---- actions (slice B) ------------------------------------------------------
+// Each mirrors a `bitsov_app::act` struct (src-tauri/src/act.rs). Receipts carry
+// amounts and status only: no preimage, payment hash or token.
+
+/** A refused or failed action, as the host rejects it. */
+export type ActionError = {
+  code:
+    | 'spend_locked'
+    | 'spend_expired'
+    | 'spend_refused'
+    | 'owner_only'
+    | 'room_unreachable'
+    | 'not_ready'
+    | 'invalid'
+    | 'node';
+  message: string;
+};
+
+export type SpendState = 'locked' | 'pending' | 'unavailable' | 'open' | 'expired';
+
+/** `app_lock`: rc7 scopes nothing, the window is the app's own. `node_grant`: an owner-written grant. */
+export type SpendBasis = 'app_lock' | 'node_grant';
+
+export type Elevation = {
+  op_id: string;
+  expires_at_ms: number;
+  /** The node's own words for what the owner must run. Shown verbatim. */
+  owner_action: string;
+  owner_can_grant: boolean;
+};
+
+/** `spend_status` / `spend_request` / `spend_lock`. */
+export type SpendView = {
+  state: SpendState;
+  basis: SpendBasis | null;
+  open_until_ms: number | null;
+  pending: Elevation | null;
+  window_ms: number;
+};
+
+/** `message_send`. */
+export type SendReceipt = {
+  message_id: string;
+  recipient: string;
+  is_room: boolean;
+  delivered: boolean;
+  amount_msat: number;
+  sent_at_ms: number;
+};
+
+export type MemberCost = { node_id: string; msat: number; advertised: boolean; connected: boolean };
+
+/** `room_quote`: each member's own price, summed. */
+export type RoomQuote = {
+  room_id: string;
+  members: MemberCost[];
+  total_msat: number;
+  unreachable: string[];
+  estimate: boolean;
+};
+
+export type InvoiceView = { bolt11: string; amount_msat: number; note: string | null; expires_at_ms: number };
+export type InvoiceAmount = { amount_msat: number; network: string };
+export type PaymentReceipt = {
+  method: 'invoice' | 'keysend';
+  amount_msat: number;
+  status: 'settled' | 'pending' | 'inflight' | 'failed';
+  paid_at_ms: number;
+};
+export type InviteView = { invite_id: string; invite_link: string; invitee: string; expires_at_ms: number };
+export type RedeemView = { inviter_pubkey: string; addr: string };
+export type FileReceipt = {
+  message_id: string;
+  recipient: string;
+  filename: string;
+  size_bytes: number;
+  delivered: boolean;
+  amount_msat: number;
+  sent_at_ms: number;
+};
+
+/** Delivery of one sent message, from the send reply and then `/ws`. */
+export type Delivery = { status: 'sent' | 'queued' | 'delivered' | 'rejected'; reason: string | null };
+
+/** A local, inline artifact in a track: the result of an action taken there. */
+export type Artifact =
+  | { id: string; at: number; type: 'invoice'; invoice: InvoiceView }
+  | { id: string; at: number; type: 'payment'; receipt: PaymentReceipt }
+  | { id: string; at: number; type: 'file'; receipt: FileReceipt }
+  | { id: string; at: number; type: 'failed'; action: string; error: ActionError };

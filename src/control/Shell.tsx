@@ -4,21 +4,44 @@ import { qrSvg } from '../qr';
 import { clock, day, sats, satsWhole, satUnit, shortId, uptime } from './format';
 import type { Source } from './source';
 import {
+  ADMISSION_MAX_MSAT,
+  applyDelivery,
   applyLive,
+  asActionError,
   costToSend,
+  deliveryFromReceipt,
   freshness,
   isOutgoing,
   mergeMessages,
+  needsApproval,
   nodePill,
   peerName,
+  sentMessage,
+  spendLine,
+  streamItems,
   trackKey,
+  type Deliveries,
   type Threads,
   type Unread,
 } from './state';
-import type { LinkState, Message, NodeOverview, Peer, PriceQuote, Room, TrackRef, WalletOverview } from './types';
+import type {
+  ActionError,
+  Artifact,
+  Delivery,
+  LinkState,
+  Message,
+  NodeOverview,
+  Peer,
+  PriceQuote,
+  Room,
+  RoomQuote,
+  SpendView,
+  TrackRef,
+  WalletOverview,
+} from './types';
 
 /** How often each panel re-reads while the shell is open. Peers and balance have no live event. */
-const REFRESH_MS = { overview: 10_000, peers: 15_000, wallet: 20_000, rooms: 30_000, clock: 5_000 } as const;
+const REFRESH_MS = { overview: 10_000, peers: 15_000, wallet: 20_000, rooms: 30_000, clock: 5_000, spend: 3_000 } as const;
 
 type Props = {
   source: Source;
@@ -33,6 +56,26 @@ type Props = {
   fund?: JSX.Element;
 };
 
+/** The result of one action: its value, or why it did not happen. */
+type Outcome<T> = { ok: true; value: T } | { ok: false; error: ActionError };
+
+/** What the conversation can do. Every spending call is refused by the host outside the spend window. */
+export type Actions = {
+  approve: () => Promise<void>;
+  lock: () => Promise<void>;
+  send: (t: TrackRef, text: string) => Promise<Outcome<unknown>>;
+  invoice: (t: TrackRef, sats: number, note: string) => Promise<Outcome<unknown>>;
+  amountOf: (bolt11: string) => Promise<Outcome<number>>;
+  pay: (t: TrackRef, bolt11: string, msat: number) => Promise<Outcome<unknown>>;
+  keysend: (t: TrackRef, pubkey: string, msat: number, memo: string) => Promise<Outcome<unknown>>;
+  file: (t: TrackRef, file: File) => Promise<Outcome<unknown>>;
+};
+
+let artifactSeq = 0;
+
+/** An artifact before it has an id; `at` defaults to now. Distributes over the union. */
+type NewArtifact = Artifact extends infer A ? (A extends Artifact ? Omit<A, 'id' | 'at'> & { at?: number } : never) : never;
+
 export function ControlCenter(props: Props) {
   const [now, setNow] = createSignal(Date.now());
   const [overview, setOverview] = createSignal<NodeOverview | null>(null);
@@ -44,6 +87,13 @@ export function ControlCenter(props: Props) {
   const [threads, setThreads] = createStore<{ t: Threads; unread: Unread; fresh: Record<string, true> }>({ t: {}, unread: {}, fresh: {} });
   const [track, setTrack] = createSignal<TrackRef | null>(null);
   const [quote, setQuote] = createSignal<PriceQuote | null>(null);
+  const [roomQuote, setRoomQuote] = createSignal<RoomQuote | null>(null);
+  const [filePrice, setFilePrice] = createSignal<number | null>(null);
+  const [spend, setSpend] = createSignal<SpendView | null>(null);
+  const [deliveries, setDeliveries] = createStore<Deliveries>({});
+  /** What each send actually paid, by message id: a room echo carries one member's share only. */
+  const [paid, setPaid] = createStore<Record<string, number>>({});
+  const [artifacts, setArtifacts] = createStore<Record<string, Artifact[]>>({});
   const [errors, setErrors] = createStore<Record<string, string | undefined>>({});
   const [contextOpen, setContextOpen] = createSignal(false);
   const [tab, setTab] = createSignal<'node' | 'wallet'>('node');
@@ -57,13 +107,14 @@ export function ControlCenter(props: Props) {
       apply(await run());
       setErrors(area, undefined);
     } catch (e) {
-      setErrors(area, String(e));
+      setErrors(area, typeof e === 'string' ? e : asActionError(e).message);
     }
   };
   const loadOverview = () => attempt('overview', () => props.source.nodeOverview(), setOverview);
   const loadPeers = () => attempt('peers', () => props.source.peers(), setPeers);
   const loadRooms = () => attempt('rooms', () => props.source.rooms(), setRooms);
   const loadWallet = () => attempt('wallet', () => props.source.wallet(), setWallet);
+  const loadSpend = () => attempt('spend', () => props.source.spendStatus(), setSpend);
   const loadThread = (t: TrackRef) => {
     if (t.kind !== 'peer' && t.kind !== 'room') return;
     const key = trackKey(t);
@@ -72,7 +123,7 @@ export function ControlCenter(props: Props) {
     );
   };
 
-  const clock = setInterval(() => setNow(Date.now()), REFRESH_MS.clock);
+  const clockTimer = setInterval(() => setNow(Date.now()), REFRESH_MS.clock);
   let timers: ReturnType<typeof setInterval>[] = [];
   let unlisten: (() => void) | undefined;
   // Bumped on every stop so a subscription that resolves late is closed at once.
@@ -102,11 +153,14 @@ export function ControlCenter(props: Props) {
         });
         void loadRooms();
         void loadWallet();
+        void loadSpend();
         timers.push(
           setInterval(() => void loadOverview(), REFRESH_MS.overview),
           setInterval(() => void loadPeers(), REFRESH_MS.peers),
           setInterval(() => void loadWallet(), REFRESH_MS.wallet),
           setInterval(() => void loadRooms(), REFRESH_MS.rooms),
+          // Cheap: the host asks the node only while an elevation request is pending.
+          setInterval(() => void loadSpend(), REFRESH_MS.spend),
         );
         props.source
           .onLive((event) => {
@@ -114,6 +168,11 @@ export function ControlCenter(props: Props) {
               setLink(event.state);
               // Back after a gap: re-read the open track so nothing is missed.
               if (event.state === 'open' && track()) loadThread(track()!);
+              return;
+            }
+            if (event.type === 'delivery') {
+              const next = applyDelivery(deliveries, event);
+              if (next !== deliveries) setDeliveries(event.message_id, next[event.message_id]);
               return;
             }
             const next = applyLive(threads.t, threads.unread, openKey(), event, ownId());
@@ -137,10 +196,14 @@ export function ControlCenter(props: Props) {
       if (!t || !props.active) return;
       setThreads('unread', trackKey(t), 0);
       setQuote(null);
+      setRoomQuote(null);
       loadThread(t);
-      if (t.kind === 'peer') void attempt('quote', () => props.source.priceQuote(t.id), setQuote);
+      if (t.kind === 'peer') {
+        void attempt('quote', () => props.source.priceQuote(t.id), setQuote);
+        if (filePrice() === null) void attempt('quote', () => props.source.filePrice(), setFilePrice);
+      }
       if (t.kind === 'room') {
-        void attempt('quote', () => props.source.priceQuote(), setQuote);
+        void attempt('quote', () => props.source.roomQuote(t.id), setRoomQuote);
         void attempt('members', () => props.source.roomMembers(t.id), (m) => setMembers(t.id, m));
       }
       setContextOpen(false);
@@ -148,9 +211,94 @@ export function ControlCenter(props: Props) {
   );
 
   onCleanup(() => {
-    clearInterval(clock);
+    clearInterval(clockTimer);
     stop();
   });
+
+  // ---- actions ------------------------------------------------------------
+
+  const addArtifact = (t: TrackRef, artifact: NewArtifact) => {
+    const key = trackKey(t);
+    const full = { id: `local-${artifactSeq++}`, at: artifact.at ?? Date.now(), ...artifact } as Artifact;
+    setArtifacts(key, (old) => [...(old ?? []), full]);
+  };
+
+  /** Run one action. An approval error re-reads the window; the caller shows the rest. */
+  const act = async <T,>(run: () => Promise<T>): Promise<Outcome<T>> => {
+    try {
+      return { ok: true, value: await run() };
+    } catch (e) {
+      const error = asActionError(e);
+      if (needsApproval(error) || error.code === 'spend_refused') void loadSpend();
+      return { ok: false, error };
+    }
+  };
+  /** A failed action that is not an approval question stays in the track as a record. */
+  const recordFailure = (t: TrackRef, action: string, outcome: Outcome<unknown>) => {
+    if (!outcome.ok && !needsApproval(outcome.error)) addArtifact(t, { type: 'failed', action, error: outcome.error });
+    return outcome;
+  };
+
+  const actions: Actions = {
+    approve: async () => {
+      const r = await act(() => props.source.spendRequest());
+      if (r.ok) setSpend(r.value);
+      else setErrors('spend', r.error.message);
+    },
+    lock: async () => {
+      const r = await act(() => props.source.spendLock());
+      if (r.ok) setSpend(r.value);
+    },
+    send: async (t, text) => {
+      if (t.kind !== 'peer' && t.kind !== 'room') return { ok: false, error: { code: 'invalid', message: 'nothing to send to' } };
+      const r = await act(() => props.source.send(t.id, t.kind === 'room', text));
+      if (r.ok) {
+        const receipt = r.value;
+        setPaid(receipt.message_id, receipt.amount_msat);
+        if (!deliveries[receipt.message_id]) setDeliveries(receipt.message_id, deliveryFromReceipt(receipt));
+        setThreads('t', trackKey(t), (old) => mergeMessages(old ?? [], [sentMessage(receipt, ownId(), text)]));
+        setThreads('fresh', receipt.message_id, true);
+      }
+      return recordFailure(t, 'Message not sent', r);
+    },
+    invoice: async (t, amount, note) => {
+      const r = await act(() => props.source.invoiceCreate(Math.round(amount * 1000), note));
+      if (r.ok) addArtifact(t, { type: 'invoice', invoice: r.value });
+      return r;
+    },
+    amountOf: async (bolt11) => {
+      const r = await act(() => props.source.invoiceAmount(bolt11));
+      return r.ok ? { ok: true, value: r.value.amount_msat } : r;
+    },
+    pay: async (t, bolt11, msat) => {
+      const r = await act(() => props.source.pay(bolt11, msat));
+      if (r.ok) {
+        addArtifact(t, { type: 'payment', receipt: r.value, at: r.value.paid_at_ms });
+        void loadWallet();
+      }
+      return recordFailure(t, 'Payment not sent', r);
+    },
+    keysend: async (t, pubkey, msat, memo) => {
+      const r = await act(() => props.source.keysend(pubkey, msat, memo.trim() || null));
+      if (r.ok) {
+        addArtifact(t, { type: 'payment', receipt: r.value, at: r.value.paid_at_ms });
+        void loadWallet();
+      }
+      return recordFailure(t, 'Payment not sent', r);
+    },
+    file: async (t, file) => {
+      if (t.kind !== 'peer') return { ok: false, error: { code: 'invalid', message: 'Files go to one peer at a time.' } };
+      const data = await readBase64(file).catch(() => null);
+      if (data === null) return { ok: false, error: { code: 'invalid', message: 'the file could not be read' } };
+      const r = await act(() => props.source.fileSend(t.id, file.name, file.type, data));
+      if (r.ok) {
+        setPaid(r.value.message_id, r.value.amount_msat);
+        if (!deliveries[r.value.message_id]) setDeliveries(r.value.message_id, deliveryFromReceipt(r.value));
+        addArtifact(t, { type: 'file', receipt: r.value, at: r.value.sent_at_ms });
+      }
+      return recordFailure(t, 'File not sent', r);
+    },
+  };
 
   const pill = () =>
     nodePill({ ready: props.ready, error: props.error, overview: overview(), link: link(), nowMs: now() });
@@ -160,6 +308,7 @@ export function ControlCenter(props: Props) {
     if (t.kind === 'room') return rooms().find((r) => r.id.toLowerCase() === t.id)?.name ?? 'Room';
     return t.kind === 'ai' ? 'AI' : 'Start something';
   };
+  const nameOf = (id: string) => (id.toLowerCase() === ownId().toLowerCase() ? 'You' : peerName(peerById().get(id.toLowerCase()), id));
 
   return (
     <div class="cc" classList={{ 'no-context': !props.active }} data-mode={props.source.mode}>
@@ -187,7 +336,14 @@ export function ControlCenter(props: Props) {
                   <AiTrack onContext={() => setContextOpen(true)} />
                 </Match>
                 <Match when={t().kind === 'new'}>
-                  <NewTrack ownId={ownId()} onContext={() => setContextOpen(true)} />
+                  <NewTrack
+                    ownId={ownId()}
+                    source={props.source}
+                    spend={spend()}
+                    now={now()}
+                    approve={actions.approve}
+                    onContext={() => setContextOpen(true)}
+                  />
                 </Match>
                 <Match when={t().kind === 'peer' || t().kind === 'room'}>
                   <Conversation
@@ -196,10 +352,18 @@ export function ControlCenter(props: Props) {
                     peer={t().kind === 'peer' ? peerById().get((t() as { id: string }).id) : undefined}
                     members={t().kind === 'room' ? members[(t() as { id: string }).id] ?? null : null}
                     messages={threads.t[trackKey(t())] ?? []}
+                    artifacts={artifacts[trackKey(t())] ?? []}
                     fresh={threads.fresh}
+                    deliveries={deliveries}
+                    paid={paid}
                     ownId={ownId()}
-                    nameOf={(id) => (id.toLowerCase() === ownId().toLowerCase() ? 'You' : peerName(peerById().get(id.toLowerCase()), id))}
+                    nameOf={nameOf}
                     quote={quote()}
+                    roomQuote={roomQuote()}
+                    filePrice={filePrice()}
+                    spend={spend()}
+                    spendError={errors.spend}
+                    actions={actions}
                     now={now()}
                     error={errors.thread}
                     onContext={() => setContextOpen(true)}
@@ -225,6 +389,19 @@ export function ControlCenter(props: Props) {
       </Show>
     </div>
   );
+}
+
+/** Standard base64 of a file's bytes, for the host's `file_send`. */
+function readBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const url = String(reader.result ?? '');
+      resolve(url.slice(url.indexOf(',') + 1));
+    };
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
 }
 
 // ---- rail -----------------------------------------------------------------
@@ -336,27 +513,34 @@ function Conversation(props: {
   peer: Peer | undefined;
   members: string[] | null;
   messages: Message[];
+  artifacts: Artifact[];
   fresh: Record<string, true>;
+  deliveries: Deliveries;
+  paid: Record<string, number>;
   ownId: string;
   nameOf: (id: string) => string;
   quote: PriceQuote | null;
+  roomQuote: RoomQuote | null;
+  filePrice: number | null;
+  spend: SpendView | null;
+  spendError: string | undefined;
+  actions: Actions;
   now: number;
   error: string | undefined;
   onContext: () => void;
 }) {
   let stream: HTMLDivElement | undefined;
-  const [draft, setDraft] = createSignal('');
-  const others = () => (props.members ?? []).filter((m) => m.toLowerCase() !== props.ownId.toLowerCase());
   const cost = () =>
     costToSend(props.track, props.quote, {
       name: props.track.kind === 'peer' ? `${props.name}’s` : undefined,
-      members: others().length,
+      room: props.roomQuote,
       nowMs: props.now,
     });
+  const items = () => streamItems(props.messages, props.artifacts);
 
   createEffect(
     on(
-      () => props.messages.length,
+      () => props.messages.length + props.artifacts.length,
       () => queueMicrotask(() => stream?.scrollTo?.({ top: stream.scrollHeight })),
     ),
   );
@@ -378,42 +562,47 @@ function Conversation(props: {
       <TrackHead title={props.name} sub={sub()} onContext={props.onContext} />
       <div class="stream" ref={stream} data-stream>
         <Show when={props.track.kind === 'room'}>
-          <p class="day">Members added here are not notified yet. A room message pays each member separately.</p>
+          <p class="day">Members added here are not notified yet. A room message pays each member their own price, separately.</p>
         </Show>
         <For
-          each={props.messages}
+          each={items()}
           fallback={
             <div class="empty-track">
               <h2>Nothing here yet</h2>
               <p class="hint">
-                Your first message to {props.name} is a paid first contact: it is admitted when the payment settles.
+                {props.track.kind === 'room'
+                  ? 'A message here pays each member separately, and reaches each one when their payment settles.'
+                  : `Your first message to ${props.name} is a paid first contact: it is admitted when the payment settles.`}
               </p>
             </div>
           }
         >
-          {(m, i) => {
-            const out = isOutgoing(m, props.ownId);
-            const prev = () => props.messages[i() - 1];
-            const newDay = () => !prev() || day(prev()!.timestamp) !== day(m.timestamp);
+          {(item, i) => {
+            const prev = () => items()[i() - 1];
+            const newDay = () => !prev() || day(prev()!.at) !== day(item.at);
             return (
               <>
                 <Show when={newDay()}>
-                  <p class="day">{day(m.timestamp)}</p>
+                  <p class="day">{day(item.at)}</p>
                 </Show>
-                <article class={`msg ${out ? 'out' : 'in'}`} classList={{ fresh: !!props.fresh[m.id] }} data-message={m.id}>
-                  <Show when={!out && props.track.kind === 'room'}>
-                    <span class="who">{props.nameOf(m.sender)}</span>
-                  </Show>
-                  <div class="bubble">{m.plaintext ?? 'Encrypted content not available on this device'}</div>
-                  <div class="stamp">
-                    <Show when={m.payment_amount_msat}>
-                      <Bolt />
-                      <span class="sats">{sats(m.payment_amount_msat!)}</span>
-                      <span>{satUnit(m.payment_amount_msat!)} {out ? 'paid' : 'to you'}</span>
-                    </Show>
-                    <span>{clock(m.timestamp)}</span>
-                  </div>
-                </article>
+                <Switch>
+                  <Match when={item.type === 'message' && item.message}>
+                    {(m) => (
+                      <MessageView
+                        m={m()}
+                        out={isOutgoing(m(), props.ownId)}
+                        room={props.track.kind === 'room'}
+                        fresh={!!props.fresh[m().id]}
+                        delivery={props.deliveries[m().id]}
+                        paid={props.paid[m().id]}
+                        nameOf={props.nameOf}
+                      />
+                    )}
+                  </Match>
+                  <Match when={item.type === 'artifact' && item.artifact}>
+                    {(a) => <ArtifactView a={a()} delivery={a().type === 'file' ? props.deliveries[(a() as { receipt: { message_id: string } }).receipt.message_id] : undefined} />}
+                  </Match>
+                </Switch>
               </>
             );
           }}
@@ -423,39 +612,497 @@ function Conversation(props: {
         </Show>
       </div>
 
-      <form class="composer" data-composer onSubmit={(e) => e.preventDefault()}>
-        <textarea
-          rows={2}
-          placeholder={`Message ${props.name}`}
-          value={draft()}
-          onInput={(e) => setDraft(e.currentTarget.value)}
-          aria-label={`Message ${props.name}`}
-        />
-        <div class="composer-bar">
-          <div class="cost" data-cost>
-            <span class="label">Cost to send</span>
-            <Show when={cost()} fallback={<span class="sats">…</span>}>
-              {(c) => (
+      <Composer
+        track={props.track}
+        name={props.name}
+        cost={cost()}
+        roomQuote={props.roomQuote}
+        filePrice={props.filePrice}
+        firstContact={props.track.kind === 'peer' && props.messages.length === 0}
+        spend={props.spend}
+        spendError={props.spendError}
+        actions={props.actions}
+        nameOf={props.nameOf}
+        now={props.now}
+      />
+    </>
+  );
+}
+
+function MessageView(props: {
+  m: Message;
+  out: boolean;
+  room: boolean;
+  fresh: boolean;
+  delivery: Delivery | undefined;
+  paid: number | undefined;
+  nameOf: (id: string) => string;
+}) {
+  const amount = () => props.paid ?? props.m.payment_amount_msat;
+  return (
+    <article class={`msg ${props.out ? 'out' : 'in'}`} classList={{ fresh: props.fresh }} data-message={props.m.id}>
+      <Show when={!props.out && props.room}>
+        <span class="who">{props.nameOf(props.m.sender)}</span>
+      </Show>
+      <div class="bubble">{props.m.plaintext ?? 'Encrypted content not available on this device'}</div>
+      <div class="stamp">
+        <Show when={amount()}>
+          <Bolt />
+          <span class="sats">{sats(amount()!)}</span>
+          <span>{satUnit(amount()!)} {props.out ? 'paid' : 'to you'}</span>
+        </Show>
+        <span>{clock(props.m.timestamp)}</span>
+        <Show when={props.out && props.delivery}>
+          <DeliveryMark d={props.delivery!} />
+        </Show>
+      </div>
+    </article>
+  );
+}
+
+const DELIVERY_TEXT: Record<Delivery['status'], string> = {
+  sent: 'sent, waiting for their node',
+  queued: 'queued until they reconnect',
+  delivered: 'delivered',
+  rejected: 'rejected',
+};
+
+function DeliveryMark(props: { d: Delivery }) {
+  return (
+    <span class="delivery" data-delivery={props.d.status}>
+      {DELIVERY_TEXT[props.d.status]}
+      <Show when={props.d.reason}>: {props.d.reason}</Show>
+    </span>
+  );
+}
+
+function ArtifactView(props: { a: Artifact; delivery?: Delivery }) {
+  return (
+    <Switch>
+      <Match when={props.a.type === 'invoice' && props.a}>
+        {(a) => {
+          const inv = () => (a() as Extract<Artifact, { type: 'invoice' }>).invoice;
+          const qr = createMemo(() => {
+            try {
+              return qrSvg(inv().bolt11.toUpperCase());
+            } catch {
+              return null;
+            }
+          });
+          return (
+            <div class="artifact out" data-artifact="invoice">
+              <span class="kind">Invoice · you receive</span>
+              <span class="sats big">{sats(inv().amount_msat)} <span class="unit">{satUnit(inv().amount_msat)}</span></span>
+              <Show when={inv().note}>
+                <span class="hint">{inv().note}</span>
+              </Show>
+              <Show when={qr()}>
+                <svg class="qr" viewBox={`0 0 ${qr()!.extent} ${qr()!.extent}`} shape-rendering="crispEdges" role="img" aria-label="Invoice as a QR code">
+                  <rect width={qr()!.extent} height={qr()!.extent} fill="#ffffff" />
+                  <path d={qr()!.path} fill="#000000" />
+                </svg>
+              </Show>
+              <code class="address" data-bolt11>{inv().bolt11}</code>
+              <span class="hint">Expires at {clock(inv().expires_at_ms)}. Paying it sends sats to your node.</span>
+            </div>
+          );
+        }}
+      </Match>
+      <Match when={props.a.type === 'payment' && props.a}>
+        {(a) => {
+          const r = () => (a() as Extract<Artifact, { type: 'payment' }>).receipt;
+          return (
+            <div class="artifact out" data-artifact="payment" data-status={r().status}>
+              <span class="kind">Payment · {r().method === 'keysend' ? 'direct (keysend)' : 'invoice'}</span>
+              <span class="stamp">
+                <Bolt />
+                <span class="sats">{sats(r().amount_msat)}</span>
+                <span>{satUnit(r().amount_msat)} paid · {r().status} · {clock(r().paid_at_ms)}</span>
+              </span>
+            </div>
+          );
+        }}
+      </Match>
+      <Match when={props.a.type === 'file' && props.a}>
+        {(a) => {
+          const r = () => (a() as Extract<Artifact, { type: 'file' }>).receipt;
+          return (
+            <div class="artifact out" data-artifact="file">
+              <span class="kind">File</span>
+              <span class="file-name">{r().filename} <span class="hint">{kb(r().size_bytes)}</span></span>
+              <span class="stamp">
+                <Bolt />
+                <span class="sats">{sats(r().amount_msat)}</span>
+                <span>{satUnit(r().amount_msat)} paid · {clock(r().sent_at_ms)}</span>
+                <Show when={props.delivery}>
+                  <DeliveryMark d={props.delivery!} />
+                </Show>
+              </span>
+            </div>
+          );
+        }}
+      </Match>
+      <Match when={props.a.type === 'failed' && props.a}>
+        {(a) => {
+          const f = () => a() as Extract<Artifact, { type: 'failed' }>;
+          return (
+            <div class="artifact out failed" data-artifact="failed" data-code={f().error.code}>
+              <span class="kind">{f().action}</span>
+              <span>{f().error.message}</span>
+            </div>
+          );
+        }}
+      </Match>
+    </Switch>
+  );
+}
+
+const kb = (bytes: number) => (bytes < 1024 ? `${bytes} B` : `${(bytes / 1024).toFixed(bytes < 10_240 ? 1 : 0)} KB`);
+
+type Mode = 'message' | 'pay' | 'request' | 'file';
+
+function Composer(props: {
+  track: TrackRef;
+  name: string;
+  cost: ReturnType<typeof costToSend>;
+  roomQuote: RoomQuote | null;
+  filePrice: number | null;
+  firstContact: boolean;
+  spend: SpendView | null;
+  spendError: string | undefined;
+  actions: Actions;
+  nameOf: (id: string) => string;
+  now: number;
+}) {
+  const [mode, setMode] = createSignal<Mode>('message');
+  const [draft, setDraft] = createSignal('');
+  const [busy, setBusy] = createSignal(false);
+  const [note, setNote] = createSignal<string | null>(null);
+  // pay
+  const [payKind, setPayKind] = createSignal<'invoice' | 'keysend'>('invoice');
+  const [bolt11, setBolt11] = createSignal('');
+  const [invoiceMsat, setInvoiceMsat] = createSignal<number | null>(null);
+  const [pubkey, setPubkey] = createSignal('');
+  const [amount, setAmount] = createSignal('');
+  const [memo, setMemo] = createSignal('');
+  // file
+  const [file, setFile] = createSignal<File | null>(null);
+  let fileInput: HTMLInputElement | undefined;
+
+  const room = () => props.track.kind === 'room';
+  const modes = (): Mode[] => (room() ? ['message'] : ['message', 'pay', 'request', 'file']);
+  // A new track starts in message mode with a clean composer.
+  createEffect(
+    on(
+      () => trackKey(props.track),
+      () => {
+        setMode('message');
+        setNote(null);
+        setDraft('');
+      },
+      { defer: true },
+    ),
+  );
+
+  const line = () => spendLine(props.spend, props.now);
+  const spends = () => mode() !== 'request';
+  const blocked = (): string | null => {
+    if (room() && props.roomQuote && props.roomQuote.unreachable.length > 0) {
+      const names = props.roomQuote.unreachable.map(props.nameOf).join(', ');
+      return `Not every member is a connected peer (${names}). Your node would skip them without telling you, so this room cannot send yet.`;
+    }
+    return null;
+  };
+
+  // Read the invoice amount as it is pasted: the cost is shown before paying.
+  createEffect(
+    on(bolt11, (text) => {
+      setInvoiceMsat(null);
+      const value = text.trim();
+      if (!value) return;
+      void props.actions.amountOf(value).then((r) => {
+        if (bolt11().trim() !== value) return;
+        if (r.ok) {
+          setInvoiceMsat(r.value);
+          setNote(null);
+        } else setNote(r.error.message);
+      });
+    }),
+  );
+
+  const satsInput = (v: string) => {
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  };
+
+  /** What this mode costs, shown before the button is pressed. */
+  const shown = (): { msat: number | null; estimate: boolean; basis: string } => {
+    switch (mode()) {
+      case 'message': {
+        const c = props.cost;
+        if (!c) return { msat: null, estimate: false, basis: room() ? 'Reading each member’s price…' : 'Reading their price…' };
+        const basis = props.firstContact
+          ? `${c.basis}. First contact also pays their admission price once, at most ${sats(ADMISSION_MAX_MSAT)} sats`
+          : c.basis;
+        return { msat: c.msat, estimate: c.estimate || props.firstContact, basis };
+      }
+      case 'pay':
+        if (payKind() === 'invoice') {
+          return invoiceMsat() === null
+            ? { msat: null, estimate: false, basis: 'Paste an invoice to see what it asks for' }
+            : { msat: invoiceMsat(), estimate: false, basis: 'The amount the invoice asks for, plus any routing fee' };
+        }
+        return satsInput(amount()) === null
+          ? { msat: null, estimate: false, basis: 'Enter an amount' }
+          : { msat: Math.round(satsInput(amount())! * 1000), estimate: false, basis: 'Sent directly to that node, plus any routing fee' };
+      case 'request':
+        return { msat: 0, estimate: false, basis: 'Receiving costs you nothing. The payer’s node pays the fee' };
+      case 'file':
+        return props.filePrice === null
+          ? { msat: null, estimate: false, basis: 'Reading the file price…' }
+          : { msat: props.filePrice, estimate: false, basis: 'Your node’s price to send one file' };
+    }
+  };
+
+  const ready = (): boolean => {
+    if (blocked()) return false;
+    switch (mode()) {
+      case 'message':
+        return draft().trim().length > 0 && props.cost !== null;
+      case 'pay':
+        return payKind() === 'invoice' ? invoiceMsat() !== null : pubkey().trim().length > 0 && satsInput(amount()) !== null;
+      case 'request':
+        return satsInput(amount()) !== null;
+      case 'file':
+        return file() !== null && props.filePrice !== null;
+    }
+  };
+
+  const label = () => {
+    if (spends() && !line().open) {
+      if (props.spend?.state === 'pending') return 'Waiting for approval';
+      if (props.spend?.state === 'unavailable') return 'Spending unavailable';
+      return 'Approve spending';
+    }
+    const s = shown();
+    const price = s.msat === null ? '' : ` · ${s.estimate ? '≈ ' : ''}${sats(s.msat)} ${satUnit(s.msat)}`;
+    return { message: 'Send', pay: 'Pay', request: 'Create invoice', file: 'Send file' }[mode()] + (mode() === 'request' ? '' : price);
+  };
+
+  const submit = async () => {
+    if (busy()) return;
+    setNote(null);
+    if (spends() && !line().open) {
+      // The one tap: the draft stays where it is.
+      setBusy(true);
+      await props.actions.approve();
+      setBusy(false);
+      return;
+    }
+    if (!ready()) return;
+    setBusy(true);
+    const t = props.track;
+    let r: Awaited<ReturnType<Actions['send']>>;
+    switch (mode()) {
+      case 'message':
+        r = await props.actions.send(t, draft());
+        if (r.ok) setDraft('');
+        break;
+      case 'pay':
+        r =
+          payKind() === 'invoice'
+            ? await props.actions.pay(t, bolt11().trim(), invoiceMsat()!)
+            : await props.actions.keysend(t, pubkey().trim(), Math.round(satsInput(amount())! * 1000), memo());
+        if (r.ok) {
+          setBolt11('');
+          setAmount('');
+          setMemo('');
+        }
+        break;
+      case 'request':
+        r = await props.actions.invoice(t, satsInput(amount())!, memo());
+        if (r.ok) {
+          setAmount('');
+          setMemo('');
+        } else setNote(r.error.message);
+        break;
+      case 'file':
+        r = await props.actions.file(t, file()!);
+        if (r.ok) {
+          setFile(null);
+          if (fileInput) fileInput.value = '';
+        }
+        break;
+    }
+    setBusy(false);
+  };
+
+  const disabled = () =>
+    busy() ||
+    (spends() && !line().open
+      ? props.spend?.state === 'pending' || props.spend?.state === 'unavailable' || props.spend === null
+      : !ready());
+
+  return (
+    <form
+      class="composer"
+      data-composer
+      data-mode={mode()}
+      onSubmit={(e) => {
+        e.preventDefault();
+        void submit();
+      }}
+    >
+      <Show when={modes().length > 1}>
+        <div class="modes" role="tablist" aria-label="What to send">
+          <For each={modes()}>
+            {(m) => (
+              <button type="button" role="tab" data-composer-mode={m} aria-selected={mode() === m} onClick={() => { setMode(m); setNote(null); }}>
+                {{ message: 'Message', pay: 'Pay', request: 'Request', file: 'File' }[m]}
+              </button>
+            )}
+          </For>
+        </div>
+      </Show>
+
+      <Switch>
+        <Match when={mode() === 'message'}>
+          <textarea
+            rows={2}
+            placeholder={`Message ${props.name}`}
+            value={draft()}
+            onInput={(e) => setDraft(e.currentTarget.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                e.preventDefault();
+                void submit();
+              }
+            }}
+            aria-label={`Message ${props.name}`}
+          />
+        </Match>
+        <Match when={mode() === 'pay'}>
+          <div class="fields">
+            <div class="modes small" role="tablist" aria-label="How to pay">
+              <button type="button" role="tab" aria-selected={payKind() === 'invoice'} onClick={() => setPayKind('invoice')}>Invoice</button>
+              <button type="button" role="tab" aria-selected={payKind() === 'keysend'} onClick={() => setPayKind('keysend')}>Direct</button>
+            </div>
+            <Show
+              when={payKind() === 'invoice'}
+              fallback={
                 <>
-                  <span class="sats" data-cost-msat={c().msat}>
-                    {c().estimate ? '≈ ' : ''}
-                    {sats(c().msat)}
-                    <span class="unit">{satUnit(c().msat)}</span>
-                  </span>
-                  <span class="basis" title={c().basis}>{c().basis}</span>
+                  <input data-pay-pubkey placeholder="Their Lightning node pubkey (66 hex)" value={pubkey()} onInput={(e) => setPubkey(e.currentTarget.value)} aria-label="Lightning node pubkey" />
+                  <div class="row">
+                    <input data-pay-amount inputmode="numeric" placeholder="Sats" value={amount()} onInput={(e) => setAmount(e.currentTarget.value)} aria-label="Amount in sats" />
+                    <input placeholder="Note (optional)" value={memo()} onInput={(e) => setMemo(e.currentTarget.value)} aria-label="Note" />
+                  </div>
                 </>
-              )}
+              }
+            >
+              <textarea data-pay-invoice rows={2} placeholder={`Paste an invoice from ${props.name}`} value={bolt11()} onInput={(e) => setBolt11(e.currentTarget.value)} aria-label="Lightning invoice" />
             </Show>
           </div>
-          <button type="submit" class="primary" disabled data-send>
-            Send
-          </button>
+        </Match>
+        <Match when={mode() === 'request'}>
+          <div class="row fields">
+            <input data-request-amount inputmode="numeric" placeholder="Sats to receive" value={amount()} onInput={(e) => setAmount(e.currentTarget.value)} aria-label="Sats to receive" />
+            <input data-request-note placeholder="What it is for (optional)" value={memo()} onInput={(e) => setMemo(e.currentTarget.value)} aria-label="What it is for" />
+          </div>
+        </Match>
+        <Match when={mode() === 'file'}>
+          <div class="fields">
+            <input ref={fileInput} type="file" data-file-input onChange={(e) => setFile(e.currentTarget.files?.[0] ?? null)} aria-label="File to send" />
+            <span class="hint">Up to 1.4 MB. It goes to {props.name} only, end to end encrypted, and pays like a message.</span>
+          </div>
+        </Match>
+      </Switch>
+
+      <div class="composer-bar">
+        <div class="cost" data-cost>
+          <span class="label">{mode() === 'request' ? 'You receive' : 'Cost to send'}</span>
+          <Show when={shown().msat !== null} fallback={<span class="sats">…</span>}>
+            <span class="sats" data-cost-msat={shown().msat!}>
+              {shown().estimate ? '≈ ' : ''}
+              {mode() === 'request' ? sats(Math.round((satsInput(amount()) ?? 0) * 1000)) : sats(shown().msat!)}
+              <span class="unit">{mode() === 'request' ? 'sats' : satUnit(shown().msat!)}</span>
+            </span>
+          </Show>
+          <span class="basis" title={shown().basis}>{shown().basis}</span>
         </div>
-        <p class="send-next" data-send-next>
-          Sending is not switched on yet. It comes next, and will ask you to approve spending on your node first.
-        </p>
-      </form>
-    </>
+        <button type="submit" class="primary" disabled={disabled()} data-send>
+          {label()}
+        </button>
+      </div>
+
+      <Show when={blocked()}>
+        <p class="err-note" data-room-blocked>{blocked()}</p>
+      </Show>
+      <Show when={note()}>
+        <p class="err-note" data-composer-note>{note()}</p>
+      </Show>
+      <Show when={spends()}>
+        <SpendBar spend={props.spend} error={props.spendError} now={props.now} actions={props.actions} />
+      </Show>
+    </form>
+  );
+}
+
+/**
+ * The owner's spend window. One tap opens it for ten minutes; it can only
+ * narrow what the node allows, never widen it.
+ */
+function SpendBar(props: { spend: SpendView | null; error: string | undefined; now: number; actions: Actions }) {
+  const line = () => spendLine(props.spend, props.now);
+  const minutes = (ms: number) => Math.max(1, Math.ceil((ms - props.now) / 60_000));
+  return (
+    <div class="spend" data-spend={props.spend?.state ?? 'unknown'}>
+      <Switch>
+        <Match when={props.spend?.state === 'open' && line().open}>
+          <p class="spend-line">
+            <span class="dot ok" /> {line().text}.{' '}
+            {props.spend?.basis === 'app_lock'
+              ? 'This node version does not limit app tokens, so this window is the app’s own lock, kept in memory only.'
+              : 'Your node’s owner grant is in effect; this app uses it for ten minutes per approval.'}{' '}
+            <button type="button" class="link" data-spend-lock onClick={() => void props.actions.lock()}>Lock now</button>
+          </p>
+        </Match>
+        <Match when={props.spend?.state === 'pending' && props.spend.pending}>
+          {(p) => (
+            <div class="approval" data-approval="pending">
+              <p>
+                <strong>Confirm at your node.</strong> Your node asks its owner to approve this app spending. Run this where
+                your node runs and type the phrase it prints:
+              </p>
+              <code class="address" data-owner-action>{p().owner_action}</code>
+              <p class="hint">
+                This app cannot approve it for you. The request lapses in {minutes(p().expires_at_ms)} min. Your draft is kept.
+              </p>
+            </div>
+          )}
+        </Match>
+        <Match when={props.spend?.state === 'unavailable' && props.spend.pending}>
+          {(p) => (
+            <div class="approval" data-approval="unavailable">
+              <p>
+                <strong>This node cannot grant spending to the app.</strong> Receiving still works. Your node says:
+              </p>
+              <code class="address" data-owner-action>{p().owner_action}</code>
+            </div>
+          )}
+        </Match>
+        <Match when={true}>
+          <p class="spend-line">
+            <span class="dot" /> {line().text}.{' '}
+            {props.spend?.state === 'expired'
+              ? 'Approve again to keep sending.'
+              : 'Sending spends sats from your node. One approval covers the next ten minutes and is never saved.'}
+          </p>
+        </Match>
+      </Switch>
+      <Show when={props.error}>
+        <p class="err-note">{props.error}</p>
+      </Show>
+    </div>
   );
 }
 
@@ -476,7 +1123,14 @@ function AiTrack(props: { onContext: () => void }) {
   );
 }
 
-function NewTrack(props: { ownId: string; onContext: () => void }) {
+function NewTrack(props: {
+  ownId: string;
+  source: Source;
+  spend: SpendView | null;
+  now: number;
+  approve: () => Promise<void>;
+  onContext: () => void;
+}) {
   const qr = createMemo(() => {
     try {
       return props.ownId ? qrSvg(props.ownId) : null;
@@ -484,6 +1138,34 @@ function NewTrack(props: { ownId: string; onContext: () => void }) {
       return null;
     }
   });
+  const open = () => spendLine(props.spend, props.now).open;
+  const [invitee, setInvitee] = createSignal('');
+  const [addr, setAddr] = createSignal('');
+  const [hours, setHours] = createSignal(72);
+  const [made, setMade] = createSignal<{ link: string; until: number } | null>(null);
+  const [token, setToken] = createSignal('');
+  const [redeemed, setRedeemed] = createSignal<{ inviter: string; addr: string } | null>(null);
+  const [errs, setErrs] = createStore<{ create?: string; redeem?: string }>({});
+  const [busy, setBusy] = createSignal(false);
+
+  /** Invites change the node: outside the window the button is the approval. */
+  const run = async (which: 'create' | 'redeem', action: () => Promise<void>) => {
+    setErrs(which, undefined);
+    setBusy(true);
+    try {
+      if (!open()) await props.approve();
+      else await action();
+    } catch (e) {
+      const err = asActionError(e);
+      setErrs(which, err.message);
+      if (needsApproval(err)) await props.approve();
+    }
+    setBusy(false);
+  };
+  const button = (what: string) =>
+    open() ? what : props.spend?.state === 'pending' ? 'Waiting for approval' : 'Approve first';
+  const waiting = () => props.spend?.state === 'pending' || props.spend?.state === 'unavailable';
+
   return (
     <>
       <TrackHead title="Start something" onContext={props.onContext} />
@@ -501,13 +1183,86 @@ function NewTrack(props: { ownId: string; onContext: () => void }) {
             </svg>
           </Show>
           <code class="address">{props.ownId}</code>
-          <div class="row" style={{ 'justify-content': 'center', 'flex-wrap': 'wrap' }}>
-            <button class="quiet" disabled>Add a peer</button>
-            <button class="quiet" disabled>Create a room</button>
-            <button class="quiet" disabled>Create an invite</button>
-          </div>
-          <p class="send-next">These change your node, so they wait for owner approval, which comes next.</p>
         </div>
+
+        <div class="new-grid">
+          <form
+            class="panel"
+            data-invite-create
+            onSubmit={(e) => {
+              e.preventDefault();
+              void run('create', async () => {
+                const v = await props.source.inviteCreate(invitee(), addr(), hours());
+                setMade({ link: v.invite_link, until: v.expires_at_ms });
+              });
+            }}
+          >
+            <h2>Invite someone</h2>
+            <p class="hint">
+              An invite is bound to one person’s key and lets their node connect to yours. It is not a free pass: every
+              message still pays to be admitted.
+            </p>
+            <input data-invitee placeholder="Their node id (64 hex)" value={invitee()} onInput={(e) => setInvitee(e.currentTarget.value)} aria-label="Their node id" />
+            <input data-addr placeholder="Your node’s reachable address, host:port" value={addr()} onInput={(e) => setAddr(e.currentTarget.value)} aria-label="Your node's address" />
+            <label class="row">
+              <span class="hint">Valid for</span>
+              <select value={hours()} onChange={(e) => setHours(Number(e.currentTarget.value))} aria-label="Valid for">
+                <option value={24}>1 day</option>
+                <option value={72}>3 days</option>
+                <option value={168}>7 days</option>
+              </select>
+            </label>
+            <button type="submit" class="primary" disabled={busy() || (open() ? !invitee() || !addr() : waiting())}>
+              {button('Create invite')}
+            </button>
+            <Show when={made()}>
+              {(m) => (
+                <div class="artifact" data-invite-link>
+                  <span class="kind">Invite · until {day(m().until)}</span>
+                  <code class="address">{m().link}</code>
+                  <span class="hint">Send it to them yourself. The app sends nothing on your behalf.</span>
+                </div>
+              )}
+            </Show>
+            <Show when={errs.create}>
+              <p class="err-note">{errs.create}</p>
+            </Show>
+          </form>
+
+          <form
+            class="panel"
+            data-invite-redeem
+            onSubmit={(e) => {
+              e.preventDefault();
+              void run('redeem', async () => {
+                const v = await props.source.inviteRedeem(token());
+                setRedeemed({ inviter: v.inviter_pubkey, addr: v.addr });
+                setToken('');
+              });
+            }}
+          >
+            <h2>Accept an invite</h2>
+            <p class="hint">Paste a bitsov://invite link someone sent you. Your node connects to theirs.</p>
+            <textarea data-invite-token rows={3} placeholder="bitsov://invite/…" value={token()} onInput={(e) => setToken(e.currentTarget.value)} aria-label="Invite link" />
+            <button type="submit" class="primary" disabled={busy() || (open() ? !token().trim() : waiting())}>
+              {button('Accept invite')}
+            </button>
+            <Show when={redeemed()}>
+              {(r) => (
+                <p class="ok-note" data-redeemed>
+                  Accepted. Connecting to {shortId(r().inviter)} at {r().addr}. Messages between you still pay to be admitted.
+                </p>
+              )}
+            </Show>
+            <Show when={errs.redeem}>
+              <p class="err-note">{errs.redeem}</p>
+            </Show>
+          </form>
+        </div>
+        <p class="send-next">
+          Invites change your node, so they use the same owner approval as spending. Adding a peer by address and creating
+          rooms are not in the app yet.
+        </p>
       </div>
     </>
   );

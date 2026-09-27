@@ -7,6 +7,15 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import type { NodeStatus, PairingView } from '../onboarding/pairing';
 import type {
+  FileReceipt,
+  InvoiceAmount,
+  InvoiceView,
+  InviteView,
+  PaymentReceipt,
+  RedeemView,
+  RoomQuote,
+  SendReceipt,
+  SpendView,
   FundingAddress,
   FundState,
   LiveEvent,
@@ -39,6 +48,21 @@ export interface Source {
   wallet(): Promise<WalletOverview>;
   /** Subscribe to live events; resolves to an unsubscribe. */
   onLive(handler: (event: LiveEvent) => void): Promise<() => void>;
+  // actions: spending ones are refused by the host outside the owner's spend window
+  spendStatus(): Promise<SpendView>;
+  /** The owner's one tap: open the short spend window, or ask the node for spend. */
+  spendRequest(): Promise<SpendView>;
+  spendLock(): Promise<SpendView>;
+  send(recipient: string, isRoom: boolean, plaintext: string): Promise<SendReceipt>;
+  roomQuote(roomId: string): Promise<RoomQuote>;
+  invoiceCreate(amountMsat: number, note: string): Promise<InvoiceView>;
+  invoiceAmount(bolt11: string): Promise<InvoiceAmount>;
+  pay(bolt11: string, amountMsat: number): Promise<PaymentReceipt>;
+  keysend(destPubkey: string, amountMsat: number, memo: string | null): Promise<PaymentReceipt>;
+  inviteCreate(invitee: string, addr: string, hours: number): Promise<InviteView>;
+  inviteRedeem(invite: string): Promise<RedeemView>;
+  filePrice(): Promise<number>;
+  fileSend(recipient: string, filename: string, mimeType: string, dataB64: string): Promise<FileReceipt>;
 }
 
 export const LIVE_EVENT = 'node-live';
@@ -60,6 +84,21 @@ export const hostSource: Source = {
   priceQuote: (peer) => invoke<PriceQuote>('price_quote', { peer: peer ?? null }),
   wallet: () => invoke<WalletOverview>('payments_overview'),
   onLive: (handler) => listen<LiveEvent>(LIVE_EVENT, (e) => handler(e.payload)),
+  spendStatus: () => invoke<SpendView>('spend_status'),
+  spendRequest: () => invoke<SpendView>('spend_request'),
+  spendLock: () => invoke<SpendView>('spend_lock'),
+  send: (recipient, isRoom, plaintext) => invoke<SendReceipt>('message_send', { recipient, is_room: isRoom, plaintext }),
+  roomQuote: (roomId) => invoke<RoomQuote>('room_quote', { room_id: roomId }),
+  invoiceCreate: (amountMsat, note) => invoke<InvoiceView>('invoice_create', { amount_msat: amountMsat, note, expiry_secs: null }),
+  invoiceAmount: (bolt11) => invoke<InvoiceAmount>('invoice_amount', { bolt11 }),
+  pay: (bolt11, amountMsat) => invoke<PaymentReceipt>('payment_pay', { bolt11, amount_msat: amountMsat }),
+  keysend: (destPubkey, amountMsat, memo) =>
+    invoke<PaymentReceipt>('payment_keysend', { dest_pubkey: destPubkey, amount_msat: amountMsat, memo }),
+  inviteCreate: (invitee, addr, hours) => invoke<InviteView>('invite_create', { invitee, addr, hours }),
+  inviteRedeem: (invite) => invoke<RedeemView>('invite_redeem', { invite }),
+  filePrice: () => invoke<number>('file_price'),
+  fileSend: (recipient, filename, mimeType, dataB64) =>
+    invoke<FileReceipt>('file_send', { recipient, filename, mime_type: mimeType, data_b64: dataB64 }),
 };
 
 /** Running inside the Tauri host (vs. a plain browser tab on the Vite server). */

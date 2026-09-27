@@ -4,7 +4,18 @@
 
 import type { NodeStatus, PairingView } from '../onboarding/pairing';
 import type { Source } from './source';
-import type { FundState, LiveEvent, Message, Peer, PriceQuote, Room, WalletOverview } from './types';
+import type {
+  ActionError,
+  FundState,
+  LiveEvent,
+  Message,
+  Peer,
+  PriceQuote,
+  Room,
+  RoomQuote,
+  SpendView,
+  WalletOverview,
+} from './types';
 
 const hex = (c: string) => c.repeat(64);
 export const SAMPLE_OWN_ID = '3f9a' + '1'.repeat(56) + 'c0de';
@@ -12,13 +23,20 @@ export const SAMPLE_PEERS: Peer[] = [
   { node_id: hex('a'), addr: '34.90.12.8:9735', label: 'Maya', connected: true, fingerprint: 'aaaaaaaa' },
   { node_id: hex('b'), addr: '35.204.77.3:9735', label: 'Josh', connected: true, fingerprint: 'bbbbbbbb' },
   { node_id: hex('c'), addr: '34.141.2.19:9735', label: null, connected: false, fingerprint: 'cccccccc' },
-  { node_id: hex('d'), addr: '34.32.90.40:9735', label: 'Gamma VM', connected: false, fingerprint: 'dddddddd' },
+  // Connected, but its cached price table is stale: a send underpays and its node rejects it.
+  { node_id: hex('d'), addr: '34.32.90.40:9735', label: 'Gamma VM', connected: true, fingerprint: 'dddddddd' },
 ];
 export const SAMPLE_ROOM_ID = '0f8e2b7a-1c3d-4e5f-8a9b-0c1d2e3f4a5b';
+export const SAMPLE_OPEN_ROOM_ID = '7d2c9e10-4b6a-4f3e-9c21-5e8f0a1b2c3d';
 export const SAMPLE_ROOMS: Room[] = [
   { id: SAMPLE_ROOM_ID, name: 'Mexico build', created_by: SAMPLE_OWN_ID, created_at: '2026-09-20T09:00:00Z' },
+  { id: SAMPLE_OPEN_ROOM_ID, name: 'Open circle', created_by: SAMPLE_OWN_ID, created_at: '2026-09-25T18:00:00Z' },
 ];
-const ROOM_MEMBERS = [SAMPLE_OWN_ID, hex('a'), hex('b')];
+const ROOM_MEMBERS: Record<string, string[]> = {
+  [SAMPLE_ROOM_ID]: [SAMPLE_OWN_ID, hex('a'), hex('b')],
+  // hex('c') is not a connected peer, so this room cannot send.
+  [SAMPLE_OPEN_ROOM_ID]: [SAMPLE_OWN_ID, hex('a'), hex('c')],
+};
 
 const T0 = Date.UTC(2026, 8, 27, 8, 12);
 let seq = 0;
@@ -75,6 +93,27 @@ const WALLET: WalletOverview = {
 
 const SAMPLE_ADDRESS = 'tb1qsampledata0notarealaddress0donotsend';
 
+const OWN_PRICE_MSAT = 1000;
+const FILE_PRICE_MSAT = 3000;
+const WINDOW_MS = 10 * 60 * 1000;
+/** Status polls before the sample owner "types" the grant at their terminal. */
+const GRANT_AFTER_POLLS = 2;
+
+const refuse = (code: ActionError['code'], message: string) => Promise.reject<never>({ code, message } satisfies ActionError);
+
+/** The amount in a BOLT 11 prefix, mirroring the host's `bolt11_amount_msat` for sample invoices. */
+export function sampleInvoiceMsat(bolt11: string): number | null {
+  const m = /^(?:lightning:)?ln(?:bcrt|bc|tbs|tb|sb)(\d*)([munp]?)1/i.exec(bolt11.trim());
+  if (!m || !m[1]) return null;
+  const n = Number(m[1]);
+  const per = { '': 100_000_000_000, m: 100_000_000, u: 100_000, n: 100, p: 0.1 }[m[2].toLowerCase() as '' | 'm' | 'u' | 'n' | 'p'];
+  return Math.round(n * per);
+}
+
+/** A sample invoice: the right prefix and amount, and a body no wallet will accept. */
+const sampleBolt11 = (msat: number) =>
+  msat % 100 === 0 ? `lntbs${msat / 100}n1samplenotpayable0donotpay` : `lntbs${msat * 10}p1samplenotpayable0donotpay`;
+
 export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number } = {}): Source {
   const liveEvery = opts.liveEveryMs ?? 30_000;
   const firstLive = opts.firstLiveMs ?? 7_000;
@@ -90,6 +129,51 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number 
     bootstrap: null,
   };
   const ok = <T>(value: T) => Promise.resolve(structuredClone(value));
+
+  // The sample node is paired and owner-run: a tap asks, and the owner grants.
+  let spend: SpendView = { state: 'locked', basis: null, open_until_ms: null, pending: null, window_ms: WINDOW_MS };
+  let spendPolls = 0;
+  let live: ((event: LiveEvent) => void) | null = null;
+  let sent = 0;
+  const settleSpend = () => {
+    const now = Date.now();
+    if (spend.state === 'open' && (spend.open_until_ms ?? 0) <= now) {
+      spend = { ...spend, state: 'expired', basis: null, open_until_ms: null };
+    }
+  };
+  const openWindow = () => {
+    spend = { state: 'open', basis: 'node_grant', open_until_ms: Date.now() + WINDOW_MS, pending: null, window_ms: WINDOW_MS };
+  };
+  const gate = (): Promise<void> => {
+    settleSpend();
+    if (spend.state === 'open') return Promise.resolve();
+    return spend.state === 'expired'
+      ? refuse('spend_expired', 'Your spending approval has expired. Approve again to send.')
+      : refuse('spend_locked', 'Sending spends from your node. Approve spending first.');
+  };
+  const peerPrice = (id: string) => {
+    const t = PRICE_TABLES[id];
+    return t && !t.peer_stale && t.peer_msat !== null ? t.peer_msat : OWN_PRICE_MSAT;
+  };
+  const roomQuote = (id: string): RoomQuote => {
+    const members = (ROOM_MEMBERS[id] ?? [])
+      .filter((m) => m !== SAMPLE_OWN_ID)
+      .map((m) => ({
+        node_id: m,
+        msat: Math.max(peerPrice(m), 1000),
+        advertised: !!PRICE_TABLES[m] && !PRICE_TABLES[m].peer_stale,
+        connected: SAMPLE_PEERS.some((p) => p.node_id === m && p.connected),
+      }));
+    return {
+      room_id: id,
+      members,
+      total_msat: members.reduce((sum, m) => sum + m.msat, 0),
+      unreachable: members.filter((m) => !m.connected).map((m) => m.node_id),
+      estimate: members.some((m) => !m.advertised),
+    };
+  };
+  const later = (ms: number, event: LiveEvent) => setTimeout(() => live?.(event), ms);
+  const nextId = (prefix: string) => `${prefix}-${(sent++).toString(16).padStart(4, '0')}`;
 
   return {
     mode: 'sample',
@@ -126,12 +210,104 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number 
       }),
     peers: () => ok(SAMPLE_PEERS),
     rooms: () => ok(SAMPLE_ROOMS),
-    roomMembers: (id) => ok(id === SAMPLE_ROOM_ID ? ROOM_MEMBERS : []),
+    roomMembers: (id) => ok(ROOM_MEMBERS[id.toLowerCase()] ?? []),
     messages: (peer) => ok(THREADS[peer.toLowerCase()] ?? []),
     priceQuote: (peer) =>
       ok({ kind: 0, own_msat: 1000, ...(PRICE_TABLES[peer ?? ''] ?? { peer_msat: null, peer_age_secs: null, peer_stale: false }) }),
     wallet: () => ok(WALLET),
+    spendStatus: () => {
+      settleSpend();
+      if (spend.state === 'pending' && ++spendPolls >= GRANT_AFTER_POLLS) openWindow();
+      return ok(spend);
+    },
+    spendRequest: () => {
+      settleSpend();
+      if (spend.state !== 'open' && spend.state !== 'pending') {
+        spendPolls = 0;
+        spend = {
+          state: 'pending',
+          basis: null,
+          open_until_ms: null,
+          pending: {
+            op_id: '5a3f0c9e21d4b7a8e6f10c2d',
+            expires_at_ms: Date.now() + 15 * 60_000,
+            owner_action: 'konsensus grant --op 5a3f0c9e21d4b7a8e6f10c2d',
+            owner_can_grant: true,
+          },
+          window_ms: WINDOW_MS,
+        };
+      }
+      return ok(spend);
+    },
+    spendLock: () => {
+      spend = { state: 'locked', basis: null, open_until_ms: null, pending: null, window_ms: WINDOW_MS };
+      return ok(spend);
+    },
+    send: async (recipient, isRoom, plaintext) => {
+      await gate();
+      const to = recipient.toLowerCase();
+      let amount: number;
+      if (isRoom) {
+        const q = roomQuote(to);
+        if (q.unreachable.length > 0) {
+          return refuse('room_unreachable', `${q.unreachable.length} member is not a connected peer, so the node would skip them without telling you. Rooms send only when every member is connected.`);
+        }
+        amount = q.total_msat;
+      } else {
+        const peer = SAMPLE_PEERS.find((p) => p.node_id === to);
+        if (!peer?.connected) {
+          return refuse('node', '/messages/compose failed (400): Recipient is offline. Message will be queued and sent when they reconnect.');
+        }
+        amount = Math.max(peerPrice(to), 1000);
+      }
+      const id = nextId('sent');
+      const at = Date.now();
+      later(250, { type: 'message', room_id: isRoom ? to : null, message: { id, kind: 0, sender: SAMPLE_OWN_ID, recipient: to, timestamp: at, plaintext, payment_amount_msat: amount } });
+      // Gamma's table is stale: it now asks 2 sats, so the 1 sat paid is rejected by its node.
+      later(1200, to === hex('d')
+        ? { type: 'delivery', message_id: id, status: 'rejected', reason: 'insufficient payment: required 2000 msat, got 1000 msat' }
+        : { type: 'delivery', message_id: id, status: 'delivered', reason: null });
+      return { message_id: id, recipient: to, is_room: isRoom, delivered: true, amount_msat: amount, sent_at_ms: at };
+    },
+    roomQuote: (id) => ok(roomQuote(id.toLowerCase())),
+    invoiceCreate: (amountMsat, note) =>
+      amountMsat < 1000
+        ? refuse('invalid', 'the amount must be between 1 sat and 1 BTC')
+        : ok({ bolt11: sampleBolt11(amountMsat), amount_msat: amountMsat, note: note.trim() || null, expires_at_ms: Date.now() + 3600_000 }),
+    invoiceAmount: (bolt11) => {
+      const msat = sampleInvoiceMsat(bolt11);
+      if (msat === null) return refuse('invalid', 'This invoice names no amount. The app pays only invoices whose cost it can show first.');
+      return ok({ amount_msat: msat, network: bolt11.toLowerCase().startsWith('lnbc') ? 'mainnet' : 'sample' });
+    },
+    pay: async (bolt11, amountMsat) => {
+      await gate();
+      if (sampleInvoiceMsat(bolt11) !== amountMsat) {
+        return refuse('invalid', 'The invoice amount does not match the cost you confirmed. Nothing was paid.');
+      }
+      return { method: 'invoice', amount_msat: amountMsat, status: 'settled', paid_at_ms: Date.now() };
+    },
+    keysend: async (_dest, amountMsat) => {
+      await gate();
+      return { method: 'keysend', amount_msat: amountMsat, status: 'settled', paid_at_ms: Date.now() };
+    },
+    inviteCreate: async (invitee, _addr, hours) => {
+      await gate();
+      return { invite_id: nextId('invite'), invite_link: 'bitsov://invite/sample-not-a-real-invite', invitee: invitee.toLowerCase(), expires_at_ms: Date.now() + hours * 3600_000 };
+    },
+    inviteRedeem: async () => {
+      await gate();
+      return { inviter_pubkey: hex('b'), addr: '35.204.77.3:9735' };
+    },
+    filePrice: () => ok(FILE_PRICE_MSAT),
+    fileSend: async (recipient, filename, _mime, dataB64) => {
+      await gate();
+      const id = nextId('file');
+      later(1200, { type: 'delivery', message_id: id, status: 'delivered', reason: null });
+      const pad = (dataB64.match(/=+$/)?.[0].length ?? 0);
+      return { message_id: id, recipient: recipient.toLowerCase(), filename, size_bytes: (dataB64.length / 4) * 3 - pad, delivered: true, amount_msat: FILE_PRICE_MSAT, sent_at_ms: Date.now() };
+    },
     onLive: (handler) => {
+      live = handler;
       let i = 0;
       const emit = () => {
         const [from, text] = LIVE_LINES[i++ % LIVE_LINES.length];
@@ -149,6 +325,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number 
         interval = setInterval(emit, liveEvery);
       }, firstLive);
       return Promise.resolve(() => {
+        live = null;
         clearTimeout(first);
         if (interval) clearInterval(interval);
       });

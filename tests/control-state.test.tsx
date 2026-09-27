@@ -104,10 +104,26 @@ describe('cost to send', () => {
     expect(c.basis).toContain('stale');
   });
 
-  it('prices a room message per member, paid separately', () => {
-    const c = costToSend({ kind: 'room', id: ROOM }, quote(), { members: 3 })!;
+  it('prices a room message as the sum of each member’s own price', () => {
+    const room = {
+      room_id: ROOM,
+      members: [
+        { node_id: A, msat: 2000, advertised: true, connected: true },
+        { node_id: 'b'.repeat(64), msat: 1000, advertised: false, connected: true },
+      ],
+      total_msat: 3000,
+      unreachable: [],
+      estimate: true,
+    };
+    const c = costToSend({ kind: 'room', id: ROOM }, null, { room })!;
     expect(c.msat).toBe(3000);
-    expect(c.basis).toBe('Estimate: 3 members × 1 sat, each paid separately');
+    expect(c.basis).toBe('2 members, each paid their own price; 1 estimated from yours');
+    expect(c.estimate).toBe(true);
+    expect(costToSend({ kind: 'room', id: ROOM }, quote(), {})).toBeNull();
+  });
+
+  it('never quotes a message below the node’s one-sat floor', () => {
+    expect(costToSend({ kind: 'peer', id: A }, quote({ own_msat: 200 }))!.msat).toBe(1000);
   });
 
   it('has no cost for tracks that send nothing, or before a quote', () => {

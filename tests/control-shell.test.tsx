@@ -53,6 +53,18 @@ function stubHost() {
       channels: [{ channel_id: 'c1', peer_pubkey: '02' + 'cd'.repeat(32), capacity_msat: 700_000, local_balance_msat: 500_000, remote_balance_msat: 200_000, active: true }],
     }),
     fund_state: () => null,
+    spend_status: () => ({ state: 'locked', basis: null, open_until_ms: null, pending: null, window_ms: 600_000 }),
+    file_price: () => 3000,
+    room_quote: () => ({
+      room_id: ROOM,
+      members: [
+        { node_id: A, msat: 2000, advertised: true, connected: true },
+        { node_id: B, msat: 1000, advertised: false, connected: false },
+      ],
+      total_msat: 3000,
+      unreachable: [B],
+      estimate: true,
+    }),
     'plugin:event|listen': () => 1,
     'plugin:event|unlisten': () => null,
   };
@@ -105,7 +117,7 @@ describe('control center shell', () => {
     expect(new Set(calls.map((c) => c.cmd))).toEqual(new Set(['node_status', 'pairing_status']));
   });
 
-  it('opens the shell after the gate: tracks, live stream, cost before send, no send', async () => {
+  it('opens the shell after the gate: tracks, live stream, cost before send, nothing spent unasked', async () => {
     const { calls, emitLive } = stubHost();
     start();
     await vi.waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
@@ -119,8 +131,9 @@ describe('control center shell', () => {
     // The composer shows Maya's advertised price before anything can be sent.
     await vi.waitFor(() => expect(mount.querySelector('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('2000'));
     expect(mount.querySelector('[data-cost]')?.textContent).toContain('Maya’s price');
-    expect(mount.querySelector<HTMLButtonElement>('[data-send]')!.disabled).toBe(true);
-    expect(mount.querySelector('[data-send-next]')?.textContent).toContain('approve spending');
+    // Until the owner approves, the one action on screen is the approval itself.
+    await vi.waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Approve spending'));
+    expect(mount.querySelector('[data-spend="locked"]')?.textContent).toContain('never saved');
 
     // A live message for the open track lands in the stream; one for another peer counts unread.
     emitLive({ type: 'link', state: 'open', detail: null });
@@ -130,20 +143,21 @@ describe('control center shell', () => {
     await vi.waitFor(() => expect(mount.querySelector(`[data-track="peer:${B}"] .badge`)?.textContent).toBe('1'));
     expect(mount.querySelector('[data-stream]')?.textContent).not.toContain('from B');
 
-    // A room quotes per member, labelled as an estimate.
+    // A room costs each member's own price, summed; an unconnected member blocks the send.
     click(`[data-track="room:${ROOM}"]`);
-    await vi.waitFor(() => expect(mount.querySelector('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('2000'));
-    expect(mount.querySelector('[data-cost]')?.textContent).toContain('2 members');
+    await vi.waitFor(() => expect(mount.querySelector('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('3000'));
+    expect(mount.querySelector('[data-cost]')?.textContent).toContain('2 members, each paid their own price; 1 estimated from yours');
+    expect(mount.querySelector('[data-room-blocked]')?.textContent).toContain('Not every member is a connected peer');
 
     // Wallet: the one combined balance, never split into invented figures.
     click('[role=tab]:nth-child(2)');
     await vi.waitFor(() => expect(mount.querySelector('[data-balance]')?.textContent).toContain('52,500'));
     expect(mount.querySelector('[data-panel="wallet"]')?.textContent).toContain('one figure');
 
-    // Only read commands were used; nothing that spends or edits.
+    // Only reads and the spend-window status were used; nothing that spends or edits.
     const used = new Set(calls.map((c) => c.cmd));
     for (const cmd of used) {
-      expect(cmd).toMatch(/^(node_status|pairing_status|node_overview|peers_list|rooms_list|room_members|messages_list|price_quote|payments_overview|fund_state|plugin:event\|(un)?listen)$/);
+      expect(cmd).toMatch(/^(node_status|pairing_status|node_overview|peers_list|rooms_list|room_members|messages_list|price_quote|payments_overview|fund_state|spend_status|file_price|room_quote|plugin:event\|(un)?listen)$/);
     }
     expect(calls.find((c) => c.cmd === 'plugin:event|listen')?.args?.event).toBe('node-live');
 
@@ -161,7 +175,7 @@ describe('control center shell', () => {
     await vi.waitFor(() => expect(mount.querySelector('[data-sample]')).not.toBeNull());
     await vi.waitFor(() => expect(mount.querySelector('[data-stream]')?.textContent).toContain('Morning.'));
     expect(mount.querySelector('[data-mode="sample"]')).not.toBeNull();
-    expect(mount.querySelector<HTMLButtonElement>('[data-send]')!.disabled).toBe(true);
+    await vi.waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Approve spending'));
     click('[data-track="new"]');
     await vi.waitFor(() => expect(mount.querySelector('[data-new-track]')?.textContent).toContain('introduction, not admission'));
     click('[data-track="ai"]');
