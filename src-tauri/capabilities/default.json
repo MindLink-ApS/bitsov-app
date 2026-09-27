@@ -18,6 +18,13 @@
     "allow-payments-balance",
     "allow-identity-restore",
     "allow-pairing-status",
-    "allow-pairing-retry"
+    "allow-pairing-retry",
+    "allow-node-overview",
+    "allow-peers-list",
+    "allow-rooms-list",
+    "allow-room-members",
+    "allow-messages-list",
+    "allow-price-quote",
+    "allow-payments-overview"
   ]
 }

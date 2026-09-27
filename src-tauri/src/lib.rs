@@ -5,5 +5,6 @@
 
 #![forbid(unsafe_code)]
 
+pub mod control;
 pub mod jarvis;
 pub mod pairing;

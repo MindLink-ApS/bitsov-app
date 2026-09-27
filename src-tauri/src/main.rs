@@ -7,8 +7,10 @@
 //
 // Scope: app shell -> bundle/spawn node -> loopback auth -> identity
 // screen -> first-run funding (onboarding/start, funding address + QR, poll to
-// funding-seen, balance) and mnemonic restore. No channels, rooms, messaging,
-// pricing, mobile, calls, hosted, or AI.
+// funding-seen, balance) and mnemonic restore; then the control center's READ
+// side: peers, rooms + members, messages, pricing, balance + channels, node
+// status, and `/ws` live events bridged to the main window. No sending, paying,
+// channel opening, mobile, calls, hosted, or AI runtime.
 //
 // A dev-only `assistant` window can display text. It is not a model, it has no
 // network, and it cannot call privileged commands (capability ACL + the
@@ -35,6 +37,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use bitsov_app::control;
 use bitsov_app::jarvis::assistant_source::{Feed, MockReason, NodeAuth};
 use bitsov_app::jarvis::broker::BearerToken;
 use bitsov_app::pairing::{
@@ -46,7 +49,7 @@ use serde::{Deserialize, Serialize};
 use shared_child::unix::SharedChildExt;
 use shared_child::SharedChild;
 use tauri::menu::{Menu, MenuItem};
-use tauri::{AppHandle, Manager, RunEvent, State, WebviewWindow};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WebviewWindow};
 use tauri_plugin_shell::ShellExt;
 
 // macOS model launcher. The implementation is `cfg(target_os = "macos")`; the
@@ -1213,6 +1216,215 @@ async fn identity_restore(
     })
 }
 
+// ---- control center reads (read / receive scope only) -----------------------
+//
+// Each command is one or two loopback GETs through `call_api`, projected by
+// `bitsov_app::control` so no ciphertext, preimage, token or key reaches the
+// renderer. Nothing here sends, pays, admits a peer or edits a room: spending is
+// slice B, behind owner elevation, and a read+receive token cannot do it anyway.
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+async fn get_json<T: serde::de::DeserializeOwned>(state: &NodeState, path: &str) -> Result<T, String> {
+    let (status, body) = call_api(state, reqwest::Method::GET, path, None).await?;
+    // Error text names the route, never the query (which may carry a peer id).
+    let route = path.split('?').next().unwrap_or(path);
+    decode(route, status, &body)
+}
+
+async fn read_node_overview(state: &NodeState) -> Result<control::NodeOverview, String> {
+    let status: control::NodeStatusResponse = get_json(state, "/status").await?;
+    Ok(control::NodeOverview::from_status(status, now_ms()))
+}
+
+async fn read_room_members(state: &NodeState, room_id: &str) -> Result<Vec<String>, String> {
+    get_json(state, &control::room_members_path(room_id)?).await
+}
+
+async fn read_messages(
+    state: &NodeState,
+    peer: &str,
+    before: Option<u64>,
+    limit: Option<u32>,
+) -> Result<Vec<control::Message>, String> {
+    let page: Vec<control::Message> =
+        get_json(state, &control::messages_path(peer, before, limit)?).await?;
+    Ok(control::chronological(page))
+}
+
+async fn read_price_quote(state: &NodeState, peer: Option<&str>) -> Result<control::PriceQuote, String> {
+    let peer = peer.map(control::node_id).transpose()?;
+    let own: control::KindPrice = get_json(state, &control::price_path(control::KIND_CHAT)).await?;
+    let tables: Vec<control::PeerPrice> = match peer {
+        // A missing peer table is normal; it only means "not cached yet".
+        Some(_) => get_json(state, "/pricing/peers").await.unwrap_or_default(),
+        None => Vec::new(),
+    };
+    Ok(control::price_quote(own, &tables, peer.as_deref()))
+}
+
+async fn read_wallet(state: &NodeState) -> Result<control::WalletOverview, String> {
+    let balance: Balance = get_json(state, "/payments/balance").await?;
+    let channels: Vec<control::Channel> = get_json(state, "/payments/channels").await?;
+    Ok(control::wallet_overview(balance.balance_msat, channels))
+}
+
+/// `GET /status` — the Node panel and the rail's node pill.
+#[tauri::command(rename_all = "snake_case")]
+async fn node_overview(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+) -> Result<control::NodeOverview, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    read_node_overview(state.inner()).await
+}
+
+/// `GET /peers` — the private contact list (not an admission list).
+#[tauri::command(rename_all = "snake_case")]
+async fn peers_list(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+) -> Result<Vec<control::Peer>, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    get_json(state.inner(), "/peers").await
+}
+
+/// `GET /rooms`.
+#[tauri::command(rename_all = "snake_case")]
+async fn rooms_list(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+) -> Result<Vec<control::Room>, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    get_json(state.inner(), "/rooms").await
+}
+
+/// `GET /rooms/:id/members` — hex node ids. `room_id` must be a UUID.
+#[tauri::command(rename_all = "snake_case")]
+async fn room_members(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    room_id: String,
+) -> Result<Vec<String>, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    read_room_members(state.inner(), &room_id).await
+}
+
+/// `GET /messages?peer=…` — one track's history, oldest first. `peer` is a node
+/// id or a room UUID; `before` pages back from a unix-ms cursor.
+#[tauri::command(rename_all = "snake_case")]
+async fn messages_list(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    peer: String,
+    before: Option<u64>,
+    limit: Option<u32>,
+) -> Result<Vec<control::Message>, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    read_messages(state.inner(), &peer, before, limit).await
+}
+
+/// `GET /payments/price/0` + `GET /pricing/peers` — what one text message to
+/// `peer` costs. Without a cached peer table the renderer labels the figure as
+/// this node's own price, never as the peer's.
+#[tauri::command(rename_all = "snake_case")]
+async fn price_quote(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    peer: Option<String>,
+) -> Result<control::PriceQuote, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    read_price_quote(state.inner(), peer.as_deref()).await
+}
+
+/// `GET /payments/balance` + `GET /payments/channels` — the Wallet panel.
+#[tauri::command(rename_all = "snake_case")]
+async fn payments_overview(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+) -> Result<control::WalletOverview, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    read_wallet(state.inner()).await
+}
+
+/// Tauri event the main window listens on for `/ws` traffic.
+const LIVE_EVENT: &str = "node-live";
+
+/// Forward to the MAIN window only. The sealed assistant window never receives
+/// node traffic, which carries decrypted plaintext.
+fn emit_live<R: tauri::Runtime>(app: &AppHandle<R>, event: control::LiveEvent) {
+    let _ = app.emit_to(MAIN_WINDOW_LABEL, LIVE_EVENT, event);
+}
+
+/// Bridge the node's loopback `GET /ws` into the main window.
+///
+/// The HOST holds the socket and the token (presented as `?token=`, which the
+/// node accepts alongside the `bitsov.jwt.` subprotocol); the renderer only sees
+/// parsed [`control::LiveEvent`]s. Waits for the node to be ready, reconnects
+/// with backoff, and stops once the app is quitting.
+async fn live_bridge(app: AppHandle) {
+    let state = app.state::<NodeState>();
+    let mut attempt = 0u32;
+    loop {
+        if state.quitting.load(Ordering::SeqCst) {
+            return;
+        }
+        let ready = *state.ready.lock().unwrap();
+        if !ready {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            continue;
+        }
+        ensure_fresh_token(&state).await;
+        let token = state.token.lock().unwrap().clone();
+        let Some(token) = token else {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            continue;
+        };
+        let url = match control::ws_url(&state.api_base, &token) {
+            Ok(url) => url,
+            Err(detail) => {
+                emit_live(&app, control::LiveEvent::Link {
+                    state: control::LinkState::Closed,
+                    detail: Some(detail),
+                });
+                return;
+            }
+        };
+        emit_live(&app, control::LiveEvent::Link {
+            state: control::LinkState::Connecting,
+            detail: None,
+        });
+        let emit = |event| emit_live(&app, event);
+        let detail = match control::run_ws_session(&url, &emit).await {
+            Ok(()) => {
+                attempt = 0;
+                None
+            }
+            Err(detail) => {
+                attempt = attempt.saturating_add(1);
+                Some(detail)
+            }
+        };
+        emit_live(&app, control::LiveEvent::Link {
+            state: control::LinkState::Closed,
+            detail,
+        });
+        tokio::time::sleep(control::backoff(attempt)).await;
+    }
+}
+
 /// What a stop attempt actually did. Returned so the REAL adapter can be asserted
 /// against disposable subprocesses, not just an injectable policy (app #16 review).
 #[derive(Debug, PartialEq, Eq)]
@@ -1390,7 +1602,14 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             payments_balance,
             identity_restore,
             pairing_status,
-            pairing_retry
+            pairing_retry,
+            node_overview,
+            peers_list,
+            rooms_list,
+            room_members,
+            messages_list,
+            price_quote,
+            payments_overview
         ])
         .setup(|app| {
             if assistant_dev_enabled() || assistant_node_enabled() {
@@ -1398,6 +1617,7 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             }
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(bootstrap_node(handle));
+            tauri::async_runtime::spawn(live_bridge(app.handle().clone()));
             Ok(())
         })
 }
@@ -1583,6 +1803,190 @@ mod pairing_wiring_tests {
         assert_eq!(view.state, "paired");
         assert_eq!(view.bootstrap.as_deref(), Some("bootstrap"));
         assert_eq!(view.scopes, ["read", "receive", "identity"]);
+    }
+}
+
+#[cfg(test)]
+mod control_read_tests {
+    //! The control-center read commands against a loopback fake node on an
+    //! ephemeral port: which routes they hit, that the bearer rides along, how
+    //! bodies are projected, and that bad ids never reach the wire.
+    use super::*;
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+
+    const A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const ROOM: &str = "0f8e2b7a-1c3d-4e5f-8a9b-0c1d2e3f4a5b";
+    const TOKEN: &str = "test.read.receive";
+
+    struct FakeNode {
+        state: NodeState,
+        seen: Arc<Mutex<Vec<(String, Option<String>)>>>,
+    }
+
+    fn route(target: &str) -> (u16, String) {
+        let path = target.strip_prefix("/api/v1").unwrap_or(target);
+        let (route, _) = path.split_once('?').unwrap_or((path, ""));
+        let body = match route {
+            "/status" => serde_json::json!({
+                "status": "ok", "node_id": "11".repeat(32), "connected_peers": 2,
+                "connected_peer_ids": [A], "e2ee_sessions": 3, "pending_deliveries": 0,
+                "lightning_available": true, "lightning_payment_capable": true,
+                "uptime_secs": 60, "version": 2, "lightning_backend": "ldk",
+                "chain_backend": "esplora", "block_height": 860123,
+                "lightning_node_pubkey": "02cd"
+            }),
+            "/peers" => serde_json::json!([{
+                "node_id": A, "addr": "127.0.0.1:9735", "label": "Maya", "connected": true,
+                "auto_connect": true, "fingerprint": "aaaaaaaa", "safety_number": "1 2 3"
+            }]),
+            "/rooms" => serde_json::json!([{
+                "id": ROOM, "name": "Mexico", "created_by": A,
+                "created_at": "2026-09-27T10:00:00Z", "metadata": {}
+            }]),
+            r if r == format!("/rooms/{ROOM}/members") => serde_json::json!([A]),
+            "/messages" => serde_json::json!([
+                {"id": "02", "kind": 0, "sender": A, "recipient": "11", "timestamp": 20,
+                 "ciphertext": "ff", "payment_amount_msat": 1000, "payment_hash": "aa", "plaintext": "second"},
+                {"id": "01", "kind": 0, "sender": A, "recipient": "11", "timestamp": 10,
+                 "ciphertext": "ff", "payment_amount_msat": 1000, "payment_hash": "bb", "plaintext": "first"}
+            ]),
+            "/payments/price/0" => serde_json::json!({"kind": 0, "price_msat": 1000}),
+            "/pricing/peers" => return (404, r#"{"error":"route","code":404}"#.into()),
+            "/payments/balance" => serde_json::json!({"balance_msat": 52_500_000u64}),
+            "/payments/channels" => return (502, r#"{"error":"lightning backend unavailable","code":502}"#.into()),
+            _ => return (404, r#"{"error":"route","code":404}"#.into()),
+        };
+        (200, body.to_string())
+    }
+
+    fn fake_node() -> FakeNode {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert_ne!(port, 3141, "tests must never hold the node port");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let log = seen.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { continue };
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                if reader.read_line(&mut line).is_err() {
+                    continue;
+                }
+                let target = line.split_whitespace().nth(1).unwrap_or("").to_string();
+                let mut bearer = None;
+                loop {
+                    let mut header = String::new();
+                    if reader.read_line(&mut header).is_err() || header == "\r\n" || header.is_empty() {
+                        break;
+                    }
+                    if let Some(v) = header.strip_prefix("authorization: Bearer ") {
+                        bearer = Some(v.trim().to_string());
+                    }
+                }
+                log.lock().unwrap().push((target.clone(), bearer));
+                let (status, body) = route(&target);
+                let mut out = stream;
+                let _ = write!(
+                    out,
+                    "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        let state = NodeState::for_api(format!("http://127.0.0.1:{port}/api/v1"));
+        *state.token.lock().unwrap() = Some(TOKEN.into());
+        *state.auth.lock().unwrap() = AuthMode::Local;
+        FakeNode { state, seen }
+    }
+
+    impl FakeNode {
+        fn targets(&self) -> Vec<String> {
+            self.seen.lock().unwrap().iter().map(|(t, _)| t.clone()).collect()
+        }
+    }
+
+    #[tokio::test]
+    async fn every_read_carries_the_bearer_and_hits_only_get_routes() {
+        let node = fake_node();
+        let overview = read_node_overview(&node.state).await.unwrap();
+        assert_eq!(overview.connected_peers, 2);
+        assert_eq!(overview.block_height, Some(860_123));
+        assert_eq!(overview.version.as_deref(), Some("api v2"));
+        assert!(overview.read_at > 0);
+
+        let peers: Vec<control::Peer> = get_json(&node.state, "/peers").await.unwrap();
+        assert_eq!(peers[0].label.as_deref(), Some("Maya"));
+        let rooms: Vec<control::Room> = get_json(&node.state, "/rooms").await.unwrap();
+        assert_eq!(rooms[0].name, "Mexico");
+        assert_eq!(read_room_members(&node.state, ROOM).await.unwrap(), vec![A.to_string()]);
+
+        for (_, bearer) in node.seen.lock().unwrap().iter() {
+            assert_eq!(bearer.as_deref(), Some(TOKEN));
+        }
+    }
+
+    #[tokio::test]
+    async fn messages_come_back_oldest_first_for_the_asked_track() {
+        let node = fake_node();
+        let page = read_messages(&node.state, A, Some(99), None).await.unwrap();
+        let texts: Vec<_> = page.iter().map(|m| m.plaintext.clone().unwrap()).collect();
+        assert_eq!(texts, ["first", "second"]);
+        assert_eq!(node.targets(), [format!("/api/v1/messages?peer={A}&limit=50&before=99")]);
+        let json = serde_json::to_string(&page).unwrap();
+        assert!(!json.contains("ciphertext") && !json.contains("payment_hash"));
+    }
+
+    #[tokio::test]
+    async fn bad_ids_are_refused_before_any_request() {
+        let node = fake_node();
+        assert!(read_messages(&node.state, "../payments/pay", None, None).await.is_err());
+        assert!(read_room_members(&node.state, "x/../../identity").await.is_err());
+        assert!(read_price_quote(&node.state, Some("not-a-node")).await.is_err());
+        assert!(node.targets().is_empty(), "{:?}", node.targets());
+    }
+
+    #[tokio::test]
+    async fn price_quote_falls_back_to_own_price_when_no_peer_table_is_cached() {
+        let node = fake_node();
+        let quote = read_price_quote(&node.state, Some(A)).await.unwrap();
+        assert_eq!((quote.own_msat, quote.peer_msat), (1000, None));
+        assert_eq!(node.targets(), ["/api/v1/payments/price/0", "/api/v1/pricing/peers"]);
+
+        let node = fake_node();
+        read_price_quote(&node.state, None).await.unwrap();
+        assert_eq!(node.targets(), ["/api/v1/payments/price/0"], "no peer, no table read");
+    }
+
+    #[tokio::test]
+    async fn a_node_error_surfaces_the_route_and_the_node_text_only() {
+        let node = fake_node();
+        let err = read_wallet(&node.state).await.unwrap_err();
+        assert_eq!(err, "/payments/channels failed (502): lightning backend unavailable");
+        assert!(!err.contains(TOKEN));
+    }
+
+    /// The bridge is spawned by the normal builder only and emits to the main
+    /// window by label, never broadcast to every window.
+    #[test]
+    fn live_events_go_to_the_main_window_only() {
+        let source = include_str!("main.rs");
+        let production = source.split("#[cfg(test)]").next().unwrap();
+        let emitter = production
+            .split("fn emit_live")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("emit_live");
+        assert!(emitter.contains("emit_to(MAIN_WINDOW_LABEL"));
+        assert!(!production.contains(".emit(LIVE_EVENT"));
+        assert!(!production.contains("emit_all"));
+        let mock = production
+            .split("fn assistant_mock_builder")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("assistant_mock_builder");
+        assert!(!mock.contains("live_bridge"));
     }
 }
 
@@ -2063,8 +2467,19 @@ mod assistant_acl_tests {
                 "identity_restore",
                 "pairing_status",
                 "pairing_retry",
+                // Control center reads (main window only, ACL + reject_sealed_window).
+                "node_overview",
+                "peers_list",
+                "rooms_list",
+                "room_members",
+                "messages_list",
+                "price_quote",
+                "payments_overview",
             ]
         );
+        assert!(handler_commands(&source)
+            .iter()
+            .all(|name| !name.contains("assistant") && !name.contains("source")));
         let build_rs = fs::read_to_string(manifest_dir().join("build.rs")).expect("build.rs");
         assert!(!build_rs.to_lowercase().contains("assistant_source"));
         assert!(!build_rs.to_lowercase().contains("backend"));

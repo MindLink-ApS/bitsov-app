@@ -18,6 +18,13 @@ fn main() {
             "identity_restore",
             "pairing_status",
             "pairing_retry",
+            "node_overview",
+            "peers_list",
+            "rooms_list",
+            "room_members",
+            "messages_list",
+            "price_quote",
+            "payments_overview",
         ])
         .permissions_path_pattern("./permissions/manual/**/*");
 
