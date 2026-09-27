@@ -264,7 +264,7 @@ fn one_stale_route_leaves_the_other_tool_fresh() {
                     source_field: SourceField::BalanceMsat,
                 }
             ));
-            let wallet = serde_json::to_value(&value.wallet_balance).expect("json");
+            let wallet = serde_json::to_value(value.wallet_balance).expect("json");
             assert!(wallet.get("value").is_none(), "{wallet}");
             assert_eq!(wallet["reason"]["kind"], "stale");
             assert_json_omits_u64(&wallet, balance_msat());
@@ -863,11 +863,11 @@ fn assert_channel_sum(
     let channels = exec(read, channels_call());
     if let Some(reason) = fault {
         let report = ready_balance(&balance, question);
-        assert_amount_down(&field(report), reason, Unit::Msat, source, question);
+        assert_amount_down(field(report), reason, Unit::Msat, source, question);
         assert_down(&channels, reason, question);
     } else {
         let report = ready_balance(&balance, question);
-        assert_u64(&field(report), question, Unit::Msat, source, "msat");
+        assert_u64(field(report), question, Unit::Msat, source, "msat");
     }
 }
 
@@ -947,7 +947,7 @@ fn check_health_amount(
     fixture_unit: &str,
 ) {
     check_health(read, fault, question, |report| {
-        assert_u64(&field(report), question, unit, source, fixture_unit);
+        assert_u64(field(report), question, unit, source, fixture_unit);
     });
 }
 

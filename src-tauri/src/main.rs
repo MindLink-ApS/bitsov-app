@@ -2345,7 +2345,7 @@ mod pairing_wiring_tests {
             .await
             .expect("first client pairs");
 
-        let err = authenticate(&f.state, f.data_dir.path()).await.err().expect("refused");
+        let err = authenticate(&f.state, f.data_dir.path()).await.expect_err("refused");
         assert!(err.contains("409"), "{err}");
         let view = f.state.pairing_view.lock().unwrap().clone();
         assert_eq!(view.state, "failed");
@@ -3576,7 +3576,8 @@ mod assistant_acl_tests {
         rest[..end]
             .split('"')
             .enumerate()
-            .filter_map(|(index, part)| (index % 2 == 1).then(|| part.to_string()))
+            .filter(|(index, _)| index % 2 == 1)
+            .map(|(_, part)| part.to_string())
             .collect()
     }
 

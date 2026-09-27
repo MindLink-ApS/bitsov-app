@@ -213,14 +213,28 @@ describe('freshness summary and text', () => {
     expect(summarize(freshness, 0).state).toBe('stale');
   });
 
-  it('ignores routes with no freshness when others have one', () => {
+  it('does not hide an unknown route behind fresh routes', () => {
     const freshness = parsed(
       hostFreshness([
         { route: 'health', state: 'fresh', age_ms: 3_000, clock_skew: false },
         { route: 'channels', state: 'unknown', age_ms: null, clock_skew: false },
       ]),
     );
-    expect(summarize(freshness, 0)).toEqual({ state: 'fresh', ageMs: 3_000, clockSkew: false });
+    expect(summarize(freshness, 0)).toEqual({ state: 'unknown', ageMs: null, clockSkew: false });
+  });
+
+  it('preserves an explicit stale marker without inventing a data age', () => {
+    const freshness = parsed(hostFreshness([
+      { route: 'balance', state: 'stale', age_ms: null, clock_skew: false },
+      { route: 'health', state: 'fresh', age_ms: 1_000, clock_skew: false },
+      { route: 'channels', state: 'unknown', age_ms: null, clock_skew: false },
+    ]));
+    const summary = summarize(freshness, 0);
+    expect(summary).toEqual({ state: 'stale', ageMs: null, clockSkew: false });
+    expect(freshnessText(summary)).toBe('Stale: data age unknown. Reopen to refresh.');
+    expect(summarize(freshness, 0, 'balance').state).toBe('stale');
+    expect(summarize(freshness, 0, 'channels').state).toBe('unknown');
+    expect(summarize(freshness, 0, 'health').state).toBe('fresh');
   });
 
   it.each([
