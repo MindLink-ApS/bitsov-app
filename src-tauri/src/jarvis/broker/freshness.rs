@@ -17,7 +17,8 @@
 //!   [`FreshnessState::Stale`] whatever its age. Any other value is ignored.
 //!
 //! Precedence: `Stale: 1` > node as-of age > app-read age > unknown. rc7
-//! sends neither header, so rc7 reads keep the app-read age.
+//! sends neither header, so rc7 reads keep the app-read age. Either age is
+//! compared with the route's own bound, [`stale_after`].
 //!
 //! rc7 bodies on the pinned routes carry one wall-clock field, `timestamp` on
 //! each `/messages` entry (ms since epoch, the message's send time). It is not
@@ -36,9 +37,33 @@ use serde::Deserialize;
 use super::route::ReadRoute;
 use super::RawRead;
 
-/// A read this old is stale. The window reads once per open, so this is how
-/// long the rows may sit before the label asks for a reopen.
+/// Default bound: a read this old is stale. The window reads once per open,
+/// so this is how long the rows may sit before the label asks for a reopen.
+/// Health, messages and pricing use it.
 pub const STALE_AFTER: Duration = Duration::from_secs(60);
+
+/// The node's default on-chain wallet sync interval (LDK). With #78, a
+/// balance or channels as-of is the last sync, so it can be this old the
+/// moment it is read.
+pub const WALLET_SYNC_INTERVAL: Duration = Duration::from_secs(80);
+
+/// Bound for balance and channels: two wallet syncs plus 20 s for the read
+/// and the window, so one late sync does not flip the label.
+pub const WALLET_STALE_AFTER: Duration = Duration::from_secs(180);
+
+/// How old a route's read may be before it is stale. Applies to whichever
+/// age [`RouteFreshness::age`] uses: node as-of or app read.
+///
+/// | Route | Bound |
+/// |---|---|
+/// | balance, channels | [`WALLET_STALE_AFTER`] (180 s) |
+/// | health, messages, pricing | [`STALE_AFTER`] (60 s) |
+pub fn stale_after(route: ReadRoute) -> Duration {
+    match route {
+        ReadRoute::PaymentsBalance | ReadRoute::PaymentsChannels => WALLET_STALE_AFTER,
+        ReadRoute::Health | ReadRoute::Messages { .. } | ReadRoute::OwnPricing => STALE_AFTER,
+    }
+}
 
 /// How far a node timestamp may run ahead of the host before it is clamped.
 pub const MAX_NODE_SKEW: Duration = Duration::from_secs(120);
@@ -314,7 +339,7 @@ impl RouteFreshness {
         match self.age(now) {
             None => FreshnessState::Unknown,
             Some(_) if self.node_stale => FreshnessState::Stale,
-            Some(age) if age >= STALE_AFTER => FreshnessState::Stale,
+            Some(age) if age >= stale_after(self.route) => FreshnessState::Stale,
             Some(_) => FreshnessState::Fresh,
         }
     }
@@ -383,7 +408,7 @@ mod tests {
     }
 
     /// Every pinned route, read over a real loopback socket, is stamped by the
-    /// host and ages from fresh to stale at [`STALE_AFTER`].
+    /// host and ages from fresh to stale at its own [`stale_after`].
     #[test]
     fn every_live_read_is_stamped_and_ages_into_stale() {
         let server = TestServer::start(MockNode::canonical(), TOKEN);
@@ -399,14 +424,126 @@ mod tests {
             assert!(fetched.wall_ms.is_some());
             assert!(!fresh.clock_skew, "{route:?}");
 
+            let bound = stale_after(route);
             assert_eq!(fresh.age(fetched.at), Some(Duration::ZERO));
             assert_eq!(fresh.state(fetched.at), FreshnessState::Fresh);
-            let almost = fetched.at + STALE_AFTER - Duration::from_millis(1);
+            let almost = fetched.at + bound - Duration::from_millis(1);
             assert_eq!(fresh.state(almost), FreshnessState::Fresh, "{route:?}");
-            let stale = fetched.at + STALE_AFTER;
-            assert_eq!(fresh.age(stale), Some(STALE_AFTER));
+            let stale = fetched.at + bound;
+            assert_eq!(fresh.age(stale), Some(bound));
             assert_eq!(fresh.state(stale), FreshnessState::Stale, "{route:?}");
         }
+    }
+
+    /// Balance and channels allow for the node's 80 s default on-chain wallet
+    /// sync; everything else keeps the 60 s bound.
+    #[test]
+    fn each_route_has_its_documented_stale_bound() {
+        let expected = [
+            (ReadRoute::PaymentsBalance, 180),
+            (ReadRoute::PaymentsChannels, 180),
+            (ReadRoute::Health, 60),
+            (ReadRoute::Messages { limit: 50 }, 60),
+            (ReadRoute::OwnPricing, 60),
+        ];
+        for (route, secs) in expected {
+            assert_eq!(stale_after(route), Duration::from_secs(secs), "{route:?}");
+        }
+        assert_eq!(STALE_AFTER, Duration::from_secs(60));
+        assert_eq!(WALLET_STALE_AFTER, Duration::from_secs(180));
+        assert!(WALLET_STALE_AFTER >= 2 * WALLET_SYNC_INTERVAL);
+        assert_eq!(
+            super::super::route::sample_routes().len(),
+            expected.len(),
+            "a new route needs a stale bound"
+        );
+    }
+
+    /// The same bound applies to the app-read age (rc7, no headers) and to a
+    /// node as-of age, at the exact boundary, and `Stale: 1` still wins.
+    #[test]
+    fn per_route_bounds_apply_to_app_read_and_as_of_ages_at_the_boundary() {
+        let host = 1_800_000_000_000;
+        let ms = Duration::from_millis(1);
+        for route in super::super::route::sample_routes() {
+            let bound = stale_after(route);
+            let body = match route {
+                ReadRoute::Messages { .. } => "[]",
+                _ => "{}",
+            };
+
+            // rc7: no headers, app-read age only.
+            let fetched = at_wall(host);
+            let fresh = RouteFreshness::assess(route, &stamped(200, body, fetched));
+            assert_eq!(fresh.state(fetched.at + bound - ms), FreshnessState::Fresh);
+            assert_eq!(fresh.state(fetched.at + bound), FreshnessState::Stale);
+
+            // #78 as-of: the node's lag counts toward the same bound.
+            for lag in [Duration::ZERO, Duration::from_secs(45), bound - ms, bound] {
+                let raw = RawRead::new(200, body.as_bytes().to_vec())
+                    .marked(NodeMarks {
+                        as_of_ms: Some(host - lag.as_millis() as u64),
+                        stale: false,
+                    })
+                    .stamped(fetched);
+                let fresh = RouteFreshness::assess(route, &raw);
+                let turn = fetched.at + (bound - lag);
+                if lag < bound {
+                    assert_eq!(
+                        fresh.state(turn - ms),
+                        FreshnessState::Fresh,
+                        "{route:?} {lag:?}"
+                    );
+                }
+                assert_eq!(
+                    fresh.state(turn),
+                    FreshnessState::Stale,
+                    "{route:?} {lag:?}"
+                );
+            }
+
+            // `Stale: 1` wins over a fresh as-of on every route.
+            let raw = RawRead::new(200, body.as_bytes().to_vec())
+                .marked(NodeMarks {
+                    as_of_ms: Some(host),
+                    stale: true,
+                })
+                .stamped(fetched);
+            let fresh = RouteFreshness::assess(route, &raw);
+            assert_eq!(fresh.state(fetched.at), FreshnessState::Stale, "{route:?}");
+        }
+    }
+
+    /// A balance as-of one wallet sync old (80 s) is fresh; at 60 s it would
+    /// have read stale between every sync.
+    #[test]
+    fn a_balance_one_wallet_sync_behind_is_fresh() {
+        let host = 1_800_000_000_000;
+        let fetched = at_wall(host);
+        for route in [ReadRoute::PaymentsBalance, ReadRoute::PaymentsChannels] {
+            let raw = RawRead::new(200, b"{}".to_vec())
+                .marked(NodeMarks {
+                    as_of_ms: Some(host - WALLET_SYNC_INTERVAL.as_millis() as u64),
+                    stale: false,
+                })
+                .stamped(fetched);
+            let fresh = RouteFreshness::assess(route, &raw);
+            assert_eq!(fresh.state(fetched.at), FreshnessState::Fresh, "{route:?}");
+            assert_eq!(
+                fresh.state(fetched.at + Duration::from_secs(60)),
+                FreshnessState::Fresh,
+                "{route:?}"
+            );
+        }
+        // Pricing at the same lag is stale: its bound stays 60 s.
+        let raw = RawRead::new(200, b"{}".to_vec())
+            .marked(NodeMarks {
+                as_of_ms: Some(host - WALLET_SYNC_INTERVAL.as_millis() as u64),
+                stale: false,
+            })
+            .stamped(fetched);
+        let fresh = RouteFreshness::assess(ReadRoute::OwnPricing, &raw);
+        assert_eq!(fresh.state(fetched.at), FreshnessState::Stale);
     }
 
     #[test]
@@ -703,11 +840,12 @@ mod tests {
             );
             let fetched = fresh.fetched.expect("stamp");
             assert_eq!(fresh.age(fetched.at), Some(Duration::ZERO));
+            let bound = stale_after(route);
             assert_eq!(
-                fresh.state(fetched.at + STALE_AFTER - Duration::from_millis(1)),
+                fresh.state(fetched.at + bound - Duration::from_millis(1)),
                 FreshnessState::Fresh
             );
-            assert_eq!(fresh.state(fetched.at + STALE_AFTER), FreshnessState::Stale);
+            assert_eq!(fresh.state(fetched.at + bound), FreshnessState::Stale);
             assert!(lines.is_empty(), "{lines:?}");
         }
     }
@@ -728,8 +866,9 @@ mod tests {
                 fresh.age(fetched.at + Duration::from_secs(5)),
                 Some(Duration::from_millis(lag + 5_000))
             );
-            // Stale once the node's data, not the app read, is STALE_AFTER old.
-            let turn = fetched.at + STALE_AFTER - Duration::from_millis(lag);
+            // Stale once the node's data, not the app read, is past the
+            // route's bound.
+            let turn = fetched.at + stale_after(route) - Duration::from_millis(lag);
             assert_eq!(
                 fresh.state(turn - Duration::from_millis(1)),
                 FreshnessState::Fresh

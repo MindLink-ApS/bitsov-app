@@ -71,7 +71,7 @@ mod tests {
 
     use super::super::assistant_source::{Source, FRESHNESS_GLOBAL};
     use super::super::broker::test_server::{closed_loopback_port, TestServer, NODE_PORT};
-    use super::super::broker::{route_key, FreshnessState, STALE_AFTER};
+    use super::super::broker::{route_key, stale_after, FreshnessState};
     use super::super::broker::{BearerToken, LocalNodeRead};
     use super::super::sit_mock;
     use super::*;
@@ -227,7 +227,10 @@ mod tests {
             let fetched = fresh.fetched.expect("host stamp");
             assert!(before <= fetched.at && fetched.at <= after);
             assert_eq!(fresh.state(after), FreshnessState::Fresh);
-            assert_eq!(fresh.state(fetched.at + STALE_AFTER), FreshnessState::Stale);
+            assert_eq!(
+                fresh.state(fetched.at + stale_after(fresh.route)),
+                FreshnessState::Stale
+            );
             assert!(!fresh.clock_skew);
         }
         let script = feed.init_script_at(after);
