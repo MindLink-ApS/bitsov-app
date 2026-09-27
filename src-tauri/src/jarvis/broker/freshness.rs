@@ -10,9 +10,10 @@
 //! - `BitSov-Data-As-Of`: when the node's data was last known current. RFC
 //!   3339 (the node sends UTC `Z`, whole seconds; numeric offsets are
 //!   normalised to UTC), or plain ms-since-epoch digits. When present, the age
-//!   is the node's lag at fetch time (host wall clock minus as-of) plus the
-//!   monotonic time since. An as-of more than [`MAX_NODE_SKEW`] ahead of the
-//!   host is clamped to the fetch time and flagged, like the `/messages` check.
+//!   is the larger of the app-read age and the node's lag at fetch time (host
+//!   wall clock minus as-of) plus the monotonic time since. An as-of more than
+//!   [`AS_OF_TOLERANCE`] ahead of the host is dropped (app-read age); more
+//!   than [`MAX_NODE_SKEW`] ahead is also flagged, like the `/messages` check.
 //! - `BitSov-Data-Stale: 1`: the node says the data is stale. The route is
 //!   [`FreshnessState::Stale`] whatever its age. Any other value is ignored.
 //!
@@ -42,6 +43,10 @@ pub const STALE_AFTER: Duration = Duration::from_secs(60);
 
 /// How far a node timestamp may run ahead of the host before it is clamped.
 pub const MAX_NODE_SKEW: Duration = Duration::from_secs(120);
+
+/// How far a `BitSov-Data-As-Of` may run ahead of the host and still be used.
+/// Further ahead, the node would claim fresher data than the read itself.
+pub const AS_OF_TOLERANCE: Duration = Duration::from_secs(2);
 
 /// When the host finished reading a response.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -197,13 +202,13 @@ pub struct RouteFreshness {
     pub fetched: Option<Fetched>,
     /// Node-side time from [`node_time_field`], clamped to the fetch time.
     pub node_time_ms: Option<u64>,
-    /// `BitSov-Data-As-Of`, clamped to the fetch time like `node_time_ms`.
-    /// `None` without the header or without a host wall clock.
+    /// `BitSov-Data-As-Of`. `None` without the header, without a host wall
+    /// clock, or when it is more than [`AS_OF_TOLERANCE`] ahead of the host.
     pub as_of_ms: Option<u64>,
     /// The node sent `BitSov-Data-Stale: 1`.
     pub node_stale: bool,
     /// A node time or as-of ran more than [`MAX_NODE_SKEW`] ahead and was
-    /// clamped.
+    /// clamped or dropped.
     pub clock_skew: bool,
 }
 
@@ -265,6 +270,25 @@ fn clamp_to_host(node: Option<u64>, host: Option<u64>) -> (Option<u64>, bool) {
     }
 }
 
+/// `as_of` checked against the host wall clock at fetch time. More than
+/// [`AS_OF_TOLERANCE`] ahead is dropped, so the app-read age is used: the node
+/// must never claim fresher data than the read. More than [`MAX_NODE_SKEW`]
+/// ahead is also flagged. Without a host wall clock it cannot be placed.
+fn as_of_against_host(as_of: Option<u64>, host: Option<u64>) -> (Option<u64>, bool) {
+    match (as_of, host) {
+        (Some(as_of), Some(host)) => {
+            let ahead = as_of.saturating_sub(host);
+            let skew = ahead > MAX_NODE_SKEW.as_millis() as u64;
+            if ahead > AS_OF_TOLERANCE.as_millis() as u64 {
+                (None, skew)
+            } else {
+                (Some(as_of), false)
+            }
+        }
+        _ => (None, false),
+    }
+}
+
 impl RouteFreshness {
     pub fn assess(route: ReadRoute, raw: &RawRead) -> Self {
         let unknown = Self {
@@ -286,7 +310,7 @@ impl RouteFreshness {
             NodeTimeField::MessageTimestamp => newest_message_ms(&raw.body),
         };
         let (node_time_ms, message_skew) = clamp_to_host(node_time, fetched.wall_ms);
-        let (as_of_ms, as_of_skew) = clamp_to_host(raw.marks.as_of_ms, fetched.wall_ms);
+        let (as_of_ms, as_of_skew) = as_of_against_host(raw.marks.as_of_ms, fetched.wall_ms);
         Self {
             route,
             fetched: Some(fetched),
@@ -297,17 +321,22 @@ impl RouteFreshness {
         }
     }
 
-    /// Age at `now`. With a node as-of: the node's lag behind the host wall
-    /// clock at fetch time plus the monotonic time since. Without: the host
-    /// monotonic time since the fetch. Never negative.
+    /// Age at `now`: the app-read age (host monotonic time since the fetch),
+    /// or the node as-of age if that is older. The as-of age is the host wall
+    /// clock at fetch time minus the as-of, plus the monotonic time since.
+    /// Never negative, never below the app-read age.
     pub fn age(&self, now: Instant) -> Option<Duration> {
         let fetched = self.fetched?;
-        let since_fetch = now.saturating_duration_since(fetched.at);
-        let lag = match (self.as_of_ms, fetched.wall_ms) {
-            (Some(as_of), Some(host)) => Duration::from_millis(host.saturating_sub(as_of)),
+        let app_read = now.saturating_duration_since(fetched.at);
+        let node = match (self.as_of_ms, fetched.wall_ms) {
+            (Some(as_of), Some(host)) => {
+                let now_ms = u128::from(host) + app_read.as_millis();
+                let ms = now_ms.saturating_sub(u128::from(as_of));
+                Duration::from_millis(u64::try_from(ms).unwrap_or(u64::MAX))
+            }
             _ => Duration::ZERO,
         };
-        Some(since_fetch.saturating_add(lag))
+        Some(app_read.max(node))
     }
 
     pub fn state(&self, now: Instant) -> FreshnessState {
@@ -798,25 +827,102 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_future_as_of_beyond_the_skew_is_clamped_and_flagged() {
-        let ahead = rfc3339(host_secs() + MAX_NODE_SKEW.as_secs() + 600);
-        let (_, fresh, _) =
-            read_marked(MockNode::canonical(), &[(AS_OF, &ahead)], ReadRoute::Health);
-        let fetched = fresh.fetched.expect("stamp");
-        assert_eq!(fresh.as_of_ms, fetched.wall_ms);
-        assert!(fresh.clock_skew);
-        assert_eq!(fresh.age(fetched.at), Some(Duration::ZERO));
-        assert_eq!(fresh.state(fetched.at), FreshnessState::Fresh);
+    /// A health read at host wall `HOST` whose as-of is `ahead_ms` in the future.
+    fn as_of_ahead(ahead_ms: u64, stale: bool) -> RouteFreshness {
+        const HOST: u64 = 1_800_000_000_000;
+        let raw = RawRead::new(200, b"{}".to_vec())
+            .marked(NodeMarks {
+                as_of_ms: Some(HOST.saturating_add(ahead_ms)),
+                stale,
+            })
+            .stamped(at_wall(HOST));
+        RouteFreshness::assess(ReadRoute::Health, &raw)
+    }
 
-        // Within the skew: not flagged, and never a negative age.
-        let near = rfc3339(host_secs() + 30);
-        let (_, fresh, _) =
-            read_marked(MockNode::canonical(), &[(AS_OF, &near)], ReadRoute::Health);
+    #[test]
+    fn a_future_as_of_within_the_tolerance_is_kept_without_a_warning() {
+        for ahead in [1, 1_000, AS_OF_TOLERANCE.as_millis() as u64] {
+            let fresh = as_of_ahead(ahead, false);
+            let fetched = fresh.fetched.expect("stamp");
+            assert_eq!(
+                fresh.as_of_ms,
+                Some(fetched.wall_ms.unwrap() + ahead),
+                "{ahead}"
+            );
+            assert!(!fresh.clock_skew, "{ahead}");
+            assert_eq!(fresh.age(fetched.at), Some(Duration::ZERO), "{ahead}");
+        }
+    }
+
+    /// Shown age is max(node as-of age, app-read age): an as-of 1 s ahead is
+    /// 9 s old 10 s after the fetch, but the read itself is 10 s old.
+    #[test]
+    fn the_age_is_never_below_the_app_read_age() {
+        let fresh = as_of_ahead(1_000, false);
         let fetched = fresh.fetched.expect("stamp");
-        assert!(!fresh.clock_skew);
-        assert!(fresh.as_of_ms > fetched.wall_ms);
-        assert_eq!(fresh.age(fetched.at), Some(Duration::ZERO));
+        let later = fetched.at + Duration::from_secs(10);
+        assert_eq!(fresh.age(later), Some(Duration::from_secs(10)));
+        assert_eq!(fresh.state(fetched.at + STALE_AFTER), FreshnessState::Stale);
+    }
+
+    /// Past the 2 s tolerance the node would claim fresher data than the read:
+    /// the as-of is dropped and the app-read age is used. The warning only
+    /// comes past `MAX_NODE_SKEW`.
+    #[test]
+    fn a_future_as_of_past_the_tolerance_falls_back_to_the_app_read_age() {
+        let skew = MAX_NODE_SKEW.as_millis() as u64;
+        for (ahead, warn) in [
+            (AS_OF_TOLERANCE.as_millis() as u64 + 1, false),
+            (3_000, false),
+            (119_000, false),
+            (skew, false),
+            (skew + 1, true),
+            (200_000, true),
+            (u64::MAX, true),
+        ] {
+            let fresh = as_of_ahead(ahead, false);
+            let fetched = fresh.fetched.expect("stamp");
+            assert_eq!(fresh.as_of_ms, None, "{ahead}");
+            assert_eq!(fresh.clock_skew, warn, "{ahead}");
+            assert_eq!(fresh.age(fetched.at), Some(Duration::ZERO), "{ahead}");
+            let later = fetched.at + Duration::from_secs(5);
+            assert_eq!(fresh.age(later), Some(Duration::from_secs(5)), "{ahead}");
+            let almost = fetched.at + STALE_AFTER - Duration::from_millis(1);
+            assert_eq!(fresh.state(almost), FreshnessState::Fresh, "{ahead}");
+            assert_eq!(
+                fresh.state(fetched.at + STALE_AFTER),
+                FreshnessState::Stale,
+                "{ahead}"
+            );
+
+            // Stale: 1 still wins over the fallback.
+            let stale = as_of_ahead(ahead, true);
+            assert_eq!(stale.state(fetched.at), FreshnessState::Stale, "{ahead}");
+        }
+    }
+
+    #[test]
+    fn a_future_as_of_on_the_wire_never_claims_fresher_data() {
+        for (ahead_secs, warn) in [(1, false), (3, false), (119, false), (200, true)] {
+            let header = rfc3339(host_secs() + ahead_secs);
+            let (_, fresh, lines) = read_marked(
+                MockNode::canonical(),
+                &[(AS_OF, &header)],
+                ReadRoute::Health,
+            );
+            let fetched = fresh.fetched.expect("stamp");
+            assert_eq!(fresh.clock_skew, warn, "{ahead_secs}");
+            if ahead_secs > AS_OF_TOLERANCE.as_secs() {
+                assert_eq!(fresh.as_of_ms, None, "{ahead_secs}");
+            }
+            let later = fetched.at + Duration::from_secs(30);
+            assert_eq!(
+                fresh.age(later),
+                Some(Duration::from_secs(30)),
+                "{ahead_secs}"
+            );
+            assert!(lines.is_empty(), "{lines:?}");
+        }
     }
 
     #[test]

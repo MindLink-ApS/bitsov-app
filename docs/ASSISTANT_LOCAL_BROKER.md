@@ -165,15 +165,21 @@ reads them host-side in `LocalNodeRead` (`broker/local_read.rs`,
   header, has no effect.
 - **Errors.** Headers on a non-2xx response are dropped unread and not
   logged. The rows are `Unavailable` and the route is *unknown*, as before.
-- **Age with an as-of.** The node's lag at fetch time (host wall clock minus
-  as-of, floored at 0) plus the host monotonic time since the fetch. An
-  as-of more than `MAX_NODE_SKEW` (120 s) ahead of the host is clamped to
-  the fetch time and sets `clock_skew` (*Node clock is ahead of this
-  computer.*), the same as the `/messages` check. With no host wall clock
-  the as-of is not used.
-- **Precedence** per route: `Stale: 1` → *stale* > node as-of age >
-  app-read age > *unknown* (no host stamp or non-2xx). `STALE_AFTER` (60 s)
-  applies to whichever age is used.
+- **Age with an as-of.** The node must never claim fresher data than the
+  app can prove. The shown age is always max(node as-of age, app-read age):
+  the node as-of age is the host wall clock at fetch time minus the as-of,
+  plus the host monotonic time since the fetch; the app-read age is the
+  monotonic time since the fetch alone.
+- **Future as-of.** An as-of up to `AS_OF_TOLERANCE` (2 s) ahead of the
+  host at fetch time is used (the max rule keeps the age at or above the
+  app-read age). Further ahead, the as-of is dropped and the route falls
+  back to the app-read age. More than `MAX_NODE_SKEW` (120 s) ahead also
+  sets `clock_skew` (*Node clock is ahead of this computer.*), the same as
+  the `/messages` check. Between 2 s and 120 s ahead there is no warning,
+  only the fallback. With no host wall clock the as-of is not used.
+- **Precedence** per route: `Stale: 1` → *stale* > max(node as-of age,
+  app-read age) > app-read age > *unknown* (no host stamp or non-2xx).
+  `STALE_AFTER` (60 s) applies to whichever age is used.
 - **rc7.** An rc7 node sends neither header, so behaviour is unchanged:
   app-read age, or *Freshness unknown*.
 - **Window.** The shape of `__BITSOV_LIVE_FRESHNESS__` does not change.
