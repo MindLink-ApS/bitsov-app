@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 pub mod act;
+pub mod budget;
 pub mod ai;
 pub mod spend_journal;
 pub mod control;

@@ -201,6 +201,14 @@ impl SpendGate {
         Ok(())
     }
 
+    /// The owner's grant arrived for something other than this window (a budget
+    /// approval): the request is answered, and the window stays closed.
+    pub fn clear_pending(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.pending = None;
+        self.expired = false;
+    }
+
     /// The owner's request lapsed on the node.
     pub fn pending_expired(&mut self) {
         self.generation = self.generation.wrapping_add(1);
