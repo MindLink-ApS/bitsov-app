@@ -430,8 +430,9 @@ describe('page wiring', () => {
     expect(broker).toContain(
       'ReadRoute::PaymentsBalance | ReadRoute::PaymentsChannels => WALLET_STALE_AFTER,',
     );
-    expect(broker).toContain(
-      'ReadRoute::Health | ReadRoute::Messages { .. } | ReadRoute::OwnPricing => STALE_AFTER,',
+    // The AI track's peer routes share the 60 s bound; the sealed window reads none of them.
+    expect(broker).toMatch(
+      /ReadRoute::Health\s*\|\s*ReadRoute::Messages \{ \.\. \}\s*\|\s*ReadRoute::OwnPricing\s*\|\s*ReadRoute::Peers\s*\|\s*ReadRoute::PeerMessages \{ \.\. \} => STALE_AFTER,/,
     );
     expect(host).toContain('"stale_after_ms": stale_after(fresh.route)');
     for (const route of ['balance', 'channels', 'health', 'messages', 'pricing']) {

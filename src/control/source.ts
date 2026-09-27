@@ -7,6 +7,13 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import type { NodeStatus, PairingView } from '../onboarding/pairing';
 import type {
+  AiTopic,
+  Disclosure,
+  Preset,
+  ProviderKind,
+  ProviderView,
+  RemoteAnswer,
+  TopicRead,
   FileReceipt,
   InvoiceAmount,
   InvoiceView,
@@ -19,6 +26,7 @@ import type {
   FundingAddress,
   FundState,
   LiveEvent,
+  LinkState,
   Message,
   NodeOverview,
   Peer,
@@ -48,6 +56,11 @@ export interface Source {
   wallet(): Promise<WalletOverview>;
   /** Subscribe to live events; resolves to an unsubscribe. */
   onLive(handler: (event: LiveEvent) => void): Promise<() => void>;
+  /**
+   * Ask the host to re-send the current `/ws` link state as a `link` live event.
+   * Call it after `onLive` resolves: the socket may have opened before anyone listened.
+   */
+  liveLink(): Promise<LinkState | null>;
   // actions: spending ones are refused by the host outside the owner's spend window
   spendStatus(): Promise<SpendView>;
   /** The owner's one tap: open the short spend window, or ask the node for spend. */
@@ -64,6 +77,14 @@ export interface Source {
   inviteRedeem(invite: string): Promise<RedeemView>;
   filePrice(): Promise<number>;
   fileSend(recipient: string, filename: string, mimeType: string, dataB64: string, maxMsat: number): Promise<FileReceipt>;
+  // AI track: the host reads through its broker; a remote model gets only a body the owner saw
+  aiRead(topic: AiTopic, sinceMs: number | null): Promise<TopicRead>;
+  aiProviders(): Promise<ProviderView[]>;
+  /** Prepare, never send. */
+  aiDisclose(provider: ProviderKind, topic: AiTopic, sinceMs: number | null, preset: Preset, question: string): Promise<Disclosure>;
+  /** Send the prepared body, once. Takes the id only. */
+  aiSend(disclosureId: string): Promise<RemoteAnswer>;
+  aiCancel(disclosureId: string): Promise<boolean>;
 }
 
 export const LIVE_EVENT = 'node-live';
@@ -85,6 +106,7 @@ export const hostSource: Source = {
   priceQuote: (peer) => invoke<PriceQuote>('price_quote', { peer: peer ?? null }),
   wallet: () => invoke<WalletOverview>('payments_overview'),
   onLive: (handler) => listen<LiveEvent>(LIVE_EVENT, (e) => handler(e.payload)),
+  liveLink: () => invoke<LinkState | null>('live_link'),
   spendStatus: () => invoke<SpendView>('spend_status'),
   spendRequest: () => invoke<SpendView>('spend_request'),
   spendLock: () => invoke<SpendView>('spend_lock'),
@@ -101,6 +123,12 @@ export const hostSource: Source = {
   filePrice: () => invoke<number>('file_price'),
   fileSend: (recipient, filename, mimeType, dataB64, maxMsat) =>
     invoke<FileReceipt>('file_send', { recipient, filename, mime_type: mimeType, data_b64: dataB64, max_msat: maxMsat }),
+  aiRead: (topic, sinceMs) => invoke<TopicRead>('ai_read', { topic, since_ms: sinceMs }),
+  aiProviders: () => invoke<ProviderView[]>('ai_providers'),
+  aiDisclose: (provider, topic, sinceMs, preset, question) =>
+    invoke<Disclosure>('ai_disclose', { provider, topic, since_ms: sinceMs, preset, question }),
+  aiSend: (disclosureId) => invoke<RemoteAnswer>('ai_send', { disclosure_id: disclosureId }),
+  aiCancel: (disclosureId) => invoke<boolean>('ai_cancel', { disclosure_id: disclosureId }),
 };
 
 /** Running inside the Tauri host (vs. a plain browser tab on the Vite server). */

@@ -190,7 +190,7 @@ fn broker_constructs_only_when_the_allowlist_holds() {
 }
 
 #[test]
-fn allowlist_is_exactly_the_phase1_reads() {
+fn allowlist_is_exactly_the_phase1_reads_plus_the_contact_list() {
     let mut paths = ALLOWED_PATHS.to_vec();
     paths.sort_unstable();
     assert_eq!(
@@ -200,6 +200,7 @@ fn allowlist_is_exactly_the_phase1_reads() {
             "/api/v1/messages",
             "/api/v1/payments/balance",
             "/api/v1/payments/channels",
+            "/api/v1/peers",
             "/api/v1/pricing",
         ]
     );
@@ -207,7 +208,7 @@ fn allowlist_is_exactly_the_phase1_reads() {
 
 #[test]
 fn every_route_target_is_an_allowlisted_get() {
-    let mut seen = [false; 5];
+    let mut seen = [false; 7];
     for route in route::sample_routes() {
         let target = route.target();
         assert_eq!(target.method, "GET");
@@ -241,11 +242,27 @@ fn every_route_target_is_an_allowlisted_get() {
                 assert!(target.query.is_none());
                 4
             }
+            ReadRoute::Peers => {
+                assert_eq!(target.path, route::PEERS);
+                assert!(target.query.is_none());
+                assert!(target.peer.is_none());
+                5
+            }
+            ReadRoute::PeerMessages { peer, limit } => {
+                assert_eq!(target.path, route::MESSAGES);
+                assert_eq!(target.peer, Some(peer));
+                assert_eq!(target.query.map(|query| query.key), Some("limit"));
+                assert_eq!(target.query.map(|query| query.value), Some(limit));
+                6
+            }
         };
+        if !matches!(route, ReadRoute::PeerMessages { .. }) {
+            assert!(target.peer.is_none(), "{route:?}");
+        }
         assert!(!seen[slot]);
         seen[slot] = true;
     }
-    assert_eq!(seen, [true; 5]);
+    assert_eq!(seen, [true; 7]);
 }
 
 #[test]

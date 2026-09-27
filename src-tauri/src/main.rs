@@ -40,6 +40,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use bitsov_app::act::{self, ActionError};
+use bitsov_app::ai;
 use bitsov_app::control;
 use bitsov_app::spend_journal::{self, Journal, Target};
 use bitsov_app::jarvis::assistant_source::{Feed, MockReason, NodeAuth};
@@ -137,6 +138,8 @@ struct NodeState {
     last_remint: Mutex<Option<Instant>>,
     /// Set by the wait thread when the supervised node exits.
     sidecar_terminated: AtomicBool,
+    /// The `/ws` link as the bridge's socket last reported it (`live_link`).
+    live_link: control::LiveLink,
     http: reqwest::Client,
     /// `API_BASE` in the app; an ephemeral loopback port in tests.
     api_base: String,
@@ -180,6 +183,7 @@ impl NodeState {
             dev_sidecar: Mutex::new(None),
             last_remint: Mutex::new(None),
             sidecar_terminated: AtomicBool::new(false),
+            live_link: control::LiveLink::default(),
             // Bounded so a hung loopback /health or /auth/local cannot pin restoring().
             http: reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(2))
@@ -869,9 +873,8 @@ fn assistant_node_enabled() -> bool {
     )
 }
 
-/// F1's auth state as the assistant feed sees it. Only a paired token is
-/// handed over; the rc7 `/auth/local` token never is.
-#[cfg_attr(not(all(debug_assertions, feature = "sit-mock")), allow(dead_code))]
+/// F1's auth state as the assistant feed and the AI track see it. Only a
+/// paired token is handed over; the rc7 `/auth/local` token never is.
 fn node_auth(state: &NodeState) -> NodeAuth {
     match &*state.auth.lock().unwrap() {
         AuthMode::Unauthenticated => NodeAuth::NotPaired,
@@ -2018,13 +2021,147 @@ async fn file_send(
     do_file_send(state.inner(), &recipient, &filename, &mime_type, &data_b64, max_msat).await
 }
 
+// ---- AI track (main window) -------------------------------------------------
+// The app is the broker (`bitsov_app::ai`). Reads go through the closed read
+// broker with the paired token only; the rc7 `/auth/local` token is never used
+// for them. A remote model is off unless this computer's `ai-providers.json`
+// turns it on, and a send carries only a body the owner was just shown.
+
+/// Pending disclosures. Host memory only; dropped on quit.
+#[derive(Default)]
+struct AiState {
+    disclosures: ai::Disclosures,
+}
+
+/// `ai-providers.json` in the app config dir. The window cannot write it.
+fn ai_provider_set(app: &AppHandle<impl tauri::Runtime>) -> (Vec<ai::ProviderView>, Vec<ai::Remote>) {
+    let file = app
+        .path()
+        .app_config_dir()
+        .ok()
+        .and_then(|dir| ai::load_providers_file(&dir.join("ai-providers.json")));
+    ai::providers(file.as_ref())
+}
+
+/// Read one topic through the broker, off the async runtime.
+async fn ai_read_topic(state: &NodeState, topic: ai::Topic, since_ms: Option<u64>) -> Result<ai::TopicRead, String> {
+    ensure_fresh_token(state).await;
+    let auth = node_auth(state);
+    let base = state.api_base.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let audit = Arc::new(bitsov_app::jarvis::broker::StderrAudit);
+        ai::read_topic(auth, &base, audit, topic, since_ms)
+    })
+    .await
+    .map_err(|_| "The read did not finish.".to_string())
+}
+
+/// One topic from the node, as the broker projects it, with its freshness.
+#[tauri::command(rename_all = "snake_case")]
+async fn ai_read(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    topic: ai::Topic,
+    since_ms: Option<u64>,
+) -> Result<ai::TopicRead, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    ai_read_topic(state.inner(), topic, since_ms).await
+}
+
+/// Local first; remote ones say whether they are on and where they would send.
+#[tauri::command(rename_all = "snake_case")]
+fn ai_providers(window: WebviewWindow<impl tauri::Runtime>) -> Result<Vec<ai::ProviderView>, String> {
+    reject_sealed_window(&window)?;
+    Ok(ai_provider_set(window.app_handle()).0)
+}
+
+/// Prepare, never send: re-read the topic, narrow it, build the exact body,
+/// and hold it for one send.
+#[tauri::command(rename_all = "snake_case")]
+#[allow(clippy::too_many_arguments)]
+async fn ai_disclose(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    ai_state: State<'_, AiState>,
+    provider: ai::ProviderKind,
+    topic: ai::Topic,
+    since_ms: Option<u64>,
+    preset: ai::Preset,
+    question: String,
+) -> Result<ai::Disclosure, String> {
+    reject_sealed_window(&window)?;
+    let remote = ai_provider_set(window.app_handle())
+        .1
+        .into_iter()
+        .find(|remote| remote.kind == provider)
+        .ok_or("That model is off on this computer. Nothing was prepared.")?;
+    drop(window);
+    let question = ai::clean_question(&question).ok_or("Ask a question first.")?;
+    let read = ai_read_topic(state.inner(), topic, since_ms).await?;
+    let body = ai::request_body(&remote, &question, &read, preset)
+        .ok_or("Your node could not be read, so nothing was prepared.")?;
+    ai_state
+        .disclosures
+        .hold(&remote, preset, body, Instant::now())
+        .ok_or_else(|| "Could not prepare the request.".to_string())
+}
+
+/// The owner's tap: send the held body, once.
+#[tauri::command(rename_all = "snake_case")]
+async fn ai_send(
+    window: WebviewWindow<impl tauri::Runtime>,
+    ai_state: State<'_, AiState>,
+    disclosure_id: String,
+) -> Result<ai::RemoteAnswer, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    let (remote, body) = ai_state
+        .disclosures
+        .take(&disclosure_id, Instant::now())
+        .ok_or("That preview expired or was already used. Nothing was sent.")?;
+    let key = remote.key_env.as_deref().and_then(|name| std::env::var(name).ok());
+    ai::send(&remote, body, key).await
+}
+
+/// Drop a prepared request unsent.
+#[tauri::command(rename_all = "snake_case")]
+fn ai_cancel(
+    window: WebviewWindow<impl tauri::Runtime>,
+    ai_state: State<'_, AiState>,
+    disclosure_id: String,
+) -> Result<bool, String> {
+    reject_sealed_window(&window)?;
+    Ok(ai_state.disclosures.cancel(&disclosure_id))
+}
+
 /// Tauri event the main window listens on for `/ws` traffic.
 const LIVE_EVENT: &str = "node-live";
 
 /// Forward to the MAIN window only. The sealed assistant window never receives
-/// node traffic, which carries decrypted plaintext.
+/// node traffic, which carries decrypted plaintext. Link transitions are
+/// recorded on the way, so `live_link` can replay them to a late subscriber.
 fn emit_live<R: tauri::Runtime>(app: &AppHandle<R>, event: control::LiveEvent) {
-    let _ = app.emit_to(MAIN_WINDOW_LABEL, LIVE_EVENT, event);
+    app.state::<NodeState>().live_link.publish(event, |event| {
+        let _ = app.emit_to(MAIN_WINDOW_LABEL, LIVE_EVENT, event);
+    });
+}
+
+/// Re-send the current `/ws` link state on `node-live`, to the main window only.
+///
+/// The bridge reports `open` once, when the socket opens, which is usually before
+/// the shell has mounted and subscribed. The shell calls this right after it
+/// subscribes. The replay goes out on the same channel as live transitions, and
+/// under the same lock, so it can never land after a newer one.
+#[tauri::command(rename_all = "snake_case")]
+fn live_link(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+) -> Result<Option<control::LinkState>, String> {
+    reject_sealed_window(&window)?;
+    Ok(state.live_link.replay(|event| {
+        let _ = window.emit_to(MAIN_WINDOW_LABEL, LIVE_EVENT, event);
+    }))
 }
 
 /// Bridge the node's loopback `GET /ws` into the main window.
@@ -2253,6 +2390,7 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .manage(NodeState::default())
+        .manage(AiState::default())
         .invoke_handler(tauri::generate_handler![
             node_status,
             fund_state,
@@ -2263,6 +2401,7 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             pairing_status,
             pairing_retry,
             node_overview,
+            live_link,
             peers_list,
             rooms_list,
             room_members,
@@ -2282,7 +2421,12 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             invite_create,
             invite_redeem,
             file_price,
-            file_send
+            file_send,
+            ai_read,
+            ai_providers,
+            ai_disclose,
+            ai_send,
+            ai_cancel
         ])
         .setup(|app| {
             if assistant_dev_enabled() || assistant_node_enabled() {
@@ -2492,6 +2636,58 @@ mod pairing_wiring_tests {
         assert_eq!(view.state, "paired");
         assert_eq!(view.bootstrap.as_deref(), Some("bootstrap"));
         assert_eq!(view.scopes, ["read", "receive", "identity"]);
+    }
+}
+
+#[cfg(test)]
+mod ai_track_tests {
+    //! The AI track's host wiring: it reads only through the broker with the
+    //! paired token, and a send takes an id, never a body.
+
+    fn section() -> String {
+        let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs")).unwrap();
+        source
+            .split("// ---- AI track (main window)")
+            .nth(1)
+            .and_then(|rest| rest.split("/// Tauri event the main window listens on").next())
+            .expect("AI track section")
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn reads_use_the_broker_and_the_paired_token_only() {
+        let section = section();
+        assert!(section.contains("let auth = node_auth(state);"));
+        assert!(section.contains("ai::read_topic(auth, &base, audit, topic, since_ms)"));
+        for token in ["call_api", "get_json", "state.token", "auth/local", "gated_post", "reqwest::"] {
+            assert!(!section.contains(token), "AI track section uses {token}");
+        }
+    }
+
+    #[test]
+    fn a_send_takes_an_id_and_never_a_body() {
+        let section = section();
+        let send = section
+            .split("async fn ai_send(")
+            .nth(1)
+            .and_then(|rest| rest.split(") -> Result").next())
+            .expect("ai_send signature");
+        assert!(send.contains("disclosure_id: String"), "{send}");
+        for param in ["body", "payload", "endpoint", "question", "key"] {
+            assert!(!send.contains(param), "ai_send takes {param}");
+        }
+        // The endpoint comes from the host-only file, never from the window.
+        let disclose = section
+            .split("async fn ai_disclose(")
+            .nth(1)
+            .and_then(|rest| rest.split(") -> Result").next())
+            .expect("ai_disclose signature");
+        for param in ["endpoint", "model", "key", "body", "host"] {
+            assert!(!disclose.contains(&format!("{param}:")), "ai_disclose takes {param}");
+        }
     }
 }
 
@@ -3802,6 +3998,7 @@ mod assistant_acl_tests {
                 "pairing_retry",
                 // Control center reads (main window only, ACL + reject_sealed_window).
                 "node_overview",
+                "live_link",
                 "peers_list",
                 "rooms_list",
                 "room_members",
@@ -3823,6 +4020,12 @@ mod assistant_acl_tests {
                 "invite_redeem",
                 "file_price",
                 "file_send",
+                // AI track: main window only, reads through the broker.
+                "ai_read",
+                "ai_providers",
+                "ai_disclose",
+                "ai_send",
+                "ai_cancel",
             ]
         );
         assert!(handler_commands(&source)
@@ -4488,5 +4691,56 @@ mod assistant_acl_tests {
         for cmd in ["pairing_status", "pairing_retry"] {
             assert_acl_denied(invoke(&assistant, cmd, serde_json::json!({})), cmd);
         }
+    }
+
+    /// The field bug: the bridge's socket opened (and emitted `open`) before the
+    /// shell subscribed, so the pill said "reconnecting" on a live link. A
+    /// subscriber that arrives after the open asks `live_link` and gets the
+    /// socket's current state on `node-live`. The assistant window is denied.
+    #[test]
+    fn subscribe_after_open_replays_the_open_link() {
+        use std::sync::{Arc, Mutex};
+        use tauri::Listener;
+
+        let app = tauri::test::mock_builder()
+            .manage(super::NodeState::default())
+            .invoke_handler(tauri::generate_handler![super::live_link])
+            .build(tauri::generate_context!(test = true))
+            .expect("test app");
+        let main = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .expect("main window");
+        let assistant = tauri::WebviewWindowBuilder::new(&app, "assistant", Default::default())
+            .build()
+            .expect("assistant window");
+
+        // Before the bridge reports anything there is nothing to replay.
+        match invoke(&main, "live_link", serde_json::json!({})).expect("main live_link is granted") {
+            tauri::ipc::InvokeResponseBody::Json(body) => assert_eq!(body, "null"),
+            other => panic!("live_link body: {other:?}"),
+        }
+
+        // The socket opens while nobody is listening.
+        let handle = app.handle().clone();
+        for state in [super::control::LinkState::Connecting, super::control::LinkState::Open] {
+            super::emit_live(&handle, super::control::LiveEvent::Link { state, detail: None });
+        }
+
+        // Now the shell subscribes, then asks for the current state.
+        let heard = Arc::new(Mutex::new(Vec::<String>::new()));
+        let sink = heard.clone();
+        main.listen(super::LIVE_EVENT, move |event| sink.lock().unwrap().push(event.payload().to_string()));
+        match invoke(&main, "live_link", serde_json::json!({})).expect("main live_link is granted") {
+            tauri::ipc::InvokeResponseBody::Json(body) => assert_eq!(body, "\"open\""),
+            other => panic!("live_link body: {other:?}"),
+        }
+        assert_eq!(
+            *heard.lock().unwrap(),
+            [r#"{"type":"link","state":"open","detail":null}"#],
+            "the late subscriber hears the open link on node-live"
+        );
+
+        assert_acl_denied(invoke(&assistant, "live_link", serde_json::json!({})), "live_link");
+        assert_eq!(heard.lock().unwrap().len(), 1, "a denied call replays nothing");
     }
 }

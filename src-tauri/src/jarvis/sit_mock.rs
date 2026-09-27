@@ -57,11 +57,7 @@ impl NodeRead for MockRead {
 }
 
 fn request_path(route: ReadRoute) -> String {
-    let target = route.target();
-    match target.query {
-        Some(query) => format!("{}?{}={}", target.path, query.key, query.value),
-        None => target.path.to_string(),
-    }
+    route.target().uri()
 }
 
 fn exec(node: &impl NodeRead, call: ToolCall) -> ToolOutput {
