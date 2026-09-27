@@ -41,6 +41,7 @@ use std::time::{Duration, Instant};
 
 use bitsov_app::act::{self, ActionError};
 use bitsov_app::control;
+use bitsov_app::spend_journal::{self, Journal, Target};
 use bitsov_app::jarvis::assistant_source::{Feed, MockReason, NodeAuth};
 use bitsov_app::jarvis::broker::BearerToken;
 use bitsov_app::pairing::{
@@ -142,6 +143,7 @@ struct NodeState {
     stale_pairing: AtomicBool,
     /// The owner's spend window. Memory only: never persisted, gone on quit.
     spend: Mutex<act::SpendGate>,
+    spend_timeout: Duration,
 }
 
 impl Default for NodeState {
@@ -160,6 +162,7 @@ impl NodeState {
             printed_codes: PrintedCodes::default(),
             stale_pairing: AtomicBool::new(false),
             spend: Mutex::new(act::SpendGate::default()),
+            spend_timeout: Duration::from_secs(120),
             ready: Mutex::new(false),
             node_id: Mutex::new(None),
             error: Mutex::new(None),
@@ -173,6 +176,8 @@ impl NodeState {
             http: reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(2))
                 .timeout(Duration::from_secs(5))
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .expect("reqwest client"),
         }
@@ -1267,8 +1272,8 @@ async fn read_price_quote(state: &NodeState, peer: Option<&str>) -> Result<contr
     let peer = peer.map(control::node_id).transpose()?;
     let own: control::KindPrice = get_json(state, &control::price_path(control::KIND_CHAT)).await?;
     let tables: Vec<control::PeerPrice> = match peer {
-        // A missing peer table is normal; it only means "not cached yet".
-        Some(_) => get_json(state, "/pricing/peers").await.unwrap_or_default(),
+        // An empty table is normal; a failed read is not a usable quote.
+        Some(_) => get_json(state, "/pricing/peers").await?,
         None => Vec::new(),
     };
     Ok(control::price_quote(own, &tables, peer.as_deref()))
@@ -1377,37 +1382,130 @@ fn decode_act<T: serde::de::DeserializeOwned>(path: &str, body: &str) -> Result<
     serde_json::from_str(body).map_err(|e| ActionError::node(format!("{path} decode failed: {e}")))
 }
 
-/// What a 403 means on this route.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Needs {
-    /// `spend`: the token cannot spend, so the window is locked.
-    Spend,
-    /// `admin`: owner-only on scoped nodes. The spend window is unaffected.
-    Owner,
-}
-
-/// One gated POST. Refused before the request unless the window is open.
+/// An admin POST (invites or file upload), never a money request.
 async fn gated_post(
     state: &NodeState,
-    needs: Needs,
     path: &str,
     body: serde_json::Value,
 ) -> Result<String, ActionError> {
     state.spend.lock().unwrap().check(now_ms())?;
     let (status, text) = call_api(state, reqwest::Method::POST, path, Some(body)).await?;
     if act::is_scope_refusal(status.as_u16()) {
-        return Err(match needs {
-            Needs::Spend => state.spend.lock().unwrap().refused(),
-            Needs::Owner => ActionError::new(
+        return Err(ActionError::new(
                 "owner_only",
                 "Your node allows this only from the owner's own terminal, not from a paired app.",
-            ),
-        });
+            ));
     }
     if !status.is_success() {
         return Err(ActionError::node(api_error(path, status, &text)));
     }
     Ok(text)
+}
+
+fn approval_generation(state: &NodeState) -> Result<u64, ActionError> {
+    let mut gate = state.spend.lock().unwrap();
+    gate.check(now_ms())?;
+    Ok(gate.generation())
+}
+
+fn spend_journal(state: &NodeState) -> Result<Journal, ActionError> {
+    let config = state.config.lock().unwrap().clone()
+        .ok_or_else(|| spend_journal::unknown("The app data directory is not ready."))?;
+    let dir = config.parent().ok_or_else(|| spend_journal::unknown("Missing app data directory."))?;
+    Journal::open(&dir.join("app-spend"))
+}
+
+fn ceiling(price: u64, max_msat: u64) -> Result<(), ActionError> {
+    if max_msat == 0 || price > max_msat {
+        return Err(ActionError::new("price_changed", format!("The current price is {price} msat, above the confirmed ceiling of {max_msat} msat. Nothing was dispatched; refresh the quote.")));
+    }
+    Ok(())
+}
+
+fn no_pending_spend(state: &NodeState) -> Result<(), ActionError> {
+    if spend_journal(state)?.pending()?.is_some() {
+        return Err(spend_journal::unknown("Check the pending result before starting another action."));
+    }
+    Ok(())
+}
+
+/// No automatic HTTP retry on a money path. Journal before dispatch, and retain
+/// ambiguity on every transport/5xx/decode failure, even across app restarts.
+async fn money_post(state: &NodeState, generation: u64, path: &str, body: serde_json::Value, max_msat: u64) -> Result<String, ActionError> {
+    let journal = spend_journal(state)?;
+    if journal.pending()?.is_some() { return Err(spend_journal::unknown("Check the pending result before sending again.")); }
+    ensure_fresh_token(state).await;
+    let token = state.token.lock().unwrap().clone().ok_or_else(|| ActionError::new("not_ready", "Not authenticated."))?;
+    let node_id = state.node_id.lock().unwrap().clone().ok_or_else(|| ActionError::new("not_ready", "No node identity."))?;
+    state.spend.lock().unwrap().check_generation(generation, now_ms())?;
+    let mut pending = journal.begin(&node_id, path, &body, max_msat)?;
+    // Journal I/O can take time. Recheck immediately before issuing the request.
+    if let Err(e) = state.spend.lock().unwrap().check_generation(generation, now_ms()) {
+        journal.clear()?;
+        return Err(e);
+    }
+    let response = state.http.post(format!("{}{path}", state.api_base))
+        .bearer_auth(token).json(&body).timeout(state.spend_timeout).send().await
+        .map_err(|_| spend_journal::unknown("The node did not return a complete response."))?;
+    let status = response.status();
+    // These statuses are rejected by authentication before any handler runs.
+    if status == reqwest::StatusCode::FORBIDDEN || status == reqwest::StatusCode::UNAUTHORIZED {
+        journal.clear()?;
+        return Err(state.spend.lock().unwrap().refused());
+    }
+    let text = response.text().await.map_err(|_| spend_journal::unknown("The response was interrupted."))?;
+    if !status.is_success() {
+        return Err(spend_journal::unknown(api_error(path, status, &text)));
+    }
+    let value: serde_json::Value = serde_json::from_str(&text).map_err(spend_journal::unknown)?;
+    let (amount, complete) = if path == "/payments/pay" {
+        let receipt: act::PayReply = serde_json::from_value(value.clone()).map_err(spend_journal::unknown)?;
+        (receipt.amount_msat, !receipt.preimage.is_empty())
+    } else if path == "/payments/keysend" {
+        let receipt: act::KeysendReply = serde_json::from_value(value.clone()).map_err(spend_journal::unknown)?;
+        (receipt.amount_msat, matches!(receipt.status.to_ascii_lowercase().as_str(), "settled" | "failed"))
+    } else {
+        let receipt: act::SendReply = serde_json::from_value(value.clone()).map_err(spend_journal::unknown)?;
+        (receipt.amount_msat, true)
+    };
+    pending.target = value.get("payment_hash").and_then(|h| h.as_str())
+        .filter(|h| h.len() == 64 && h.bytes().all(|c| c.is_ascii_hexdigit()))
+        .map(|hash| Target::Payment { hash: hash.to_string() })
+        .or_else(|| Some(Target::Message {
+            id: control::node_id(value.get("message_id")?.as_str()?).ok()?,
+            peer: body.get("recipient")?.as_str()?.to_string(),
+        }));
+    pending.over_budget = amount > max_msat;
+    if pending.over_budget || !complete {
+        journal.save(&pending)?;
+        if pending.over_budget {
+            return Err(spend_journal::unknown(format!("The node reports {amount} msat, exceeding the confirmed {max_msat} msat. Funds may already have moved; do not retry.")));
+        }
+    } else {
+        journal.clear()?;
+    }
+    Ok(text)
+}
+
+async fn do_spend_reconcile(state: &NodeState) -> Result<String, ActionError> {
+    let journal = spend_journal(state)?;
+    let Some(pending) = journal.pending()? else { return Ok("No pending spend.".into()); };
+    if state.node_id.lock().unwrap().as_deref() != Some(pending.node_id.as_str()) {
+        return Err(spend_journal::unknown("The pending action belongs to another identity."));
+    }
+    let path = match &pending.target {
+        Some(Target::Payment { .. }) => "/payments?limit=100".to_string(),
+        Some(Target::Message { peer, .. }) => control::messages_path(peer, None, Some(200))?,
+        None => return Err(spend_journal::unknown("No node-issued receipt ID was returned. Automatic reconciliation is unavailable; inspect the owner node. The app will not retry.")),
+    };
+    let rows: Vec<serde_json::Value> = get_json(state, &path).await?;
+    match spend_journal::terminal(&pending, &rows) {
+        Some(status) => {
+            journal.clear()?;
+            Ok(format!("Previous action {status}. Nothing was dispatched again."))
+        }
+        None => Err(spend_journal::unknown("No matching terminal record. Missing history does not prove failure.")),
+    }
 }
 
 /// Advance the spend window. `ask` is the owner's tap: on rc7 it opens the
@@ -1439,7 +1537,11 @@ async fn spend_advance(state: &NodeState, ask: bool) -> Result<act::SpendView, A
             }
         }
         Mode::Paired { spend: false } => {
-            let pending = state.spend.lock().unwrap().pending().cloned();
+            let (generation, pending) = {
+                let mut gate = state.spend.lock().unwrap();
+                gate.view(now_ms());
+                (gate.generation(), gate.pending().cloned())
+            };
             if let Some(pending) = pending {
                 let path = act::elevation_status_path(&pending.op_id)?;
                 let (status, body) = call_api(state, reqwest::Method::GET, &path, None).await?;
@@ -1447,6 +1549,9 @@ async fn spend_advance(state: &NodeState, ask: bool) -> Result<act::SpendView, A
                     return Err(ActionError::node(api_error("/pair/elevation", status, &body)));
                 }
                 let reply: act::ElevationStatusReply = decode_act("/pair/elevation", &body)?;
+                if !state.spend.lock().unwrap().matches_poll(generation, &pending, now_ms()) {
+                    return Ok(state.spend.lock().unwrap().view(now_ms()));
+                }
                 match reply.status.as_str() {
                     "granted" => {
                         // The grant reaches a token only on re-issue.
@@ -1456,13 +1561,19 @@ async fn spend_advance(state: &NodeState, ask: bool) -> Result<act::SpendView, A
                             AuthMode::Paired(s) if s.scopes.iter().any(|x| x == "spend")
                         );
                         let mut gate = state.spend.lock().unwrap();
+                        if !gate.matches_poll(generation, &pending, now_ms()) {
+                            return Ok(gate.view(now_ms()));
+                        }
                         if has_spend {
                             gate.arm(now_ms(), act::SpendBasis::NodeGrant);
                         } else {
                             return Err(gate.refused());
                         }
                     }
-                    "expired" | "absent" => state.spend.lock().unwrap().pending_expired(),
+                    "expired" | "absent" => {
+                        let mut gate = state.spend.lock().unwrap();
+                        if gate.matches_poll(generation, &pending, now_ms()) { gate.pending_expired(); }
+                    },
                     _ => {}
                 }
             } else if ask {
@@ -1477,7 +1588,11 @@ async fn spend_advance(state: &NodeState, ask: bool) -> Result<act::SpendView, A
                     return Err(ActionError::node(api_error("/pair/elevation-request", status, &body)));
                 }
                 let reply: act::ElevationReply = decode_act("/pair/elevation-request", &body)?;
-                state.spend.lock().unwrap().set_pending(reply.into_elevation()?);
+                let pending = reply.into_elevation()?;
+                let mut gate = state.spend.lock().unwrap();
+                if gate.generation() == generation && pending.expires_at_ms > now_ms() {
+                    gate.set_pending(pending);
+                }
             }
         }
     }
@@ -1494,7 +1609,7 @@ async fn read_room_quote(state: &NodeState, room_id: &str) -> Result<act::RoomQu
     let members = read_room_members(state, &room).await?;
     let peers: Vec<control::Peer> = get_json(state, "/peers").await?;
     let own: control::KindPrice = get_json(state, &control::price_path(control::KIND_CHAT)).await?;
-    let tables: Vec<control::PeerPrice> = get_json(state, "/pricing/peers").await.unwrap_or_default();
+    let tables: Vec<control::PeerPrice> = get_json(state, "/pricing/peers").await?;
     Ok(act::room_quote(&room, &own_id, own.price_msat, &members, &peers, &tables))
 }
 
@@ -1503,14 +1618,23 @@ async fn do_message_send(
     recipient: &str,
     is_room: bool,
     plaintext: &str,
+    max_msat: u64,
 ) -> Result<act::SendReceipt, ActionError> {
-    state.spend.lock().unwrap().check(now_ms())?;
+    let generation = approval_generation(state)?;
+    no_pending_spend(state)?;
     let body = act::compose_body(recipient, is_room, plaintext)?;
-    if is_room {
-        act::room_sendable(&read_room_quote(state, recipient).await?)?;
-    }
+    let price = if is_room {
+        let quote = read_room_quote(state, recipient).await?;
+        act::room_sendable(&quote)?;
+        quote.total_msat
+    } else {
+        let quote = read_price_quote(state, Some(recipient)).await?;
+        if quote.peer_stale { quote.own_msat } else { quote.peer_msat.unwrap_or(quote.own_msat) }
+            .max(act::MIN_PAYMENT_MSAT)
+    };
+    ceiling(price, max_msat)?;
     let recipient = body["recipient"].as_str().unwrap_or_default().to_string();
-    let text = gated_post(state, Needs::Spend, "/messages/compose", body).await?;
+    let text = money_post(state, generation, "/messages/compose", body, max_msat).await?;
     let reply: act::SendReply = decode_act("/messages/compose", &text)?;
     Ok(act::SendReceipt {
         message_id: reply.message_id,
@@ -1544,10 +1668,12 @@ async fn do_invoice_create(
     })
 }
 
-async fn do_payment_pay(state: &NodeState, bolt11: &str, amount_msat: u64) -> Result<act::PaymentReceipt, ActionError> {
-    state.spend.lock().unwrap().check(now_ms())?;
+async fn do_payment_pay(state: &NodeState, bolt11: &str, amount_msat: u64, max_msat: u64) -> Result<act::PaymentReceipt, ActionError> {
+    let generation = approval_generation(state)?;
+    no_pending_spend(state)?;
     let body = act::pay_body(bolt11, amount_msat)?;
-    let text = gated_post(state, Needs::Spend, "/payments/pay", body).await?;
+    ceiling(amount_msat, max_msat)?;
+    let text = money_post(state, generation, "/payments/pay", body, max_msat).await?;
     Ok(decode_act::<act::PayReply>("/payments/pay", &text)?.receipt(now_ms()))
 }
 
@@ -1556,10 +1682,13 @@ async fn do_payment_keysend(
     dest_pubkey: &str,
     amount_msat: u64,
     memo: Option<&str>,
+    max_msat: u64,
 ) -> Result<act::PaymentReceipt, ActionError> {
-    state.spend.lock().unwrap().check(now_ms())?;
+    let generation = approval_generation(state)?;
+    no_pending_spend(state)?;
     let body = act::keysend_body(dest_pubkey, amount_msat, memo)?;
-    let text = gated_post(state, Needs::Spend, "/payments/keysend", body).await?;
+    ceiling(amount_msat, max_msat)?;
+    let text = money_post(state, generation, "/payments/keysend", body, max_msat).await?;
     Ok(decode_act::<act::KeysendReply>("/payments/keysend", &text)?.receipt(now_ms()))
 }
 
@@ -1569,7 +1698,7 @@ async fn do_invite_create(state: &NodeState, invitee: &str, addr: &str, hours: u
     let body = act::invite_body(invitee, addr, hours, now / 1000)?;
     let invitee = body["invitee_pubkey"].as_str().unwrap_or_default().to_string();
     let expires_at_ms = body["expiry_unix"].as_u64().unwrap_or(0) * 1000;
-    let text = gated_post(state, Needs::Owner, "/invites", body).await?;
+    let text = gated_post(state, "/invites", body).await?;
     let reply: act::InviteReply = decode_act("/invites", &text)?;
     Ok(act::InviteView {
         invite_id: reply.invite_id,
@@ -1582,7 +1711,7 @@ async fn do_invite_create(state: &NodeState, invitee: &str, addr: &str, hours: u
 async fn do_invite_redeem(state: &NodeState, invite: &str) -> Result<act::RedeemView, ActionError> {
     state.spend.lock().unwrap().check(now_ms())?;
     let token = act::invite_token(invite)?;
-    let text = gated_post(state, Needs::Owner, "/invites/accept", serde_json::json!({ "token": token })).await?;
+    let text = gated_post(state, "/invites/accept", serde_json::json!({ "token": token })).await?;
     decode_act("/invites/accept", &text)
 }
 
@@ -1592,15 +1721,22 @@ async fn do_file_send(
     filename: &str,
     mime_type: &str,
     data_b64: &str,
+    max_msat: u64,
 ) -> Result<act::FileReceipt, ActionError> {
-    state.spend.lock().unwrap().check(now_ms())?;
+    let generation = approval_generation(state)?;
+    no_pending_spend(state)?;
     let recipient = control::node_id(recipient).map_err(ActionError::invalid)?;
     let body = act::file_upload_body(filename, mime_type, data_b64)?;
     let filename = body["filename"].as_str().unwrap_or_default().to_string();
-    let text = gated_post(state, Needs::Owner, "/files", body).await?;
+    let quote: control::KindPrice = get_json(state, &control::price_path(act::KIND_FILE_REF)).await?;
+    ceiling(quote.price_msat.max(act::MIN_PAYMENT_MSAT), max_msat)?;
+    let text = gated_post(state, "/files", body).await?;
     let upload: act::UploadReply = decode_act("/files", &text)?;
     let path = act::file_send_path(&upload.file_id)?;
-    let text = gated_post(state, Needs::Spend, &path, serde_json::json!({ "recipient": recipient })).await?;
+    // Upload can take time; quote again immediately before the money request.
+    let quote: control::KindPrice = get_json(state, &control::price_path(act::KIND_FILE_REF)).await?;
+    ceiling(quote.price_msat.max(act::MIN_PAYMENT_MSAT), max_msat)?;
+    let text = money_post(state, generation, &path, serde_json::json!({ "recipient": recipient }), max_msat).await?;
     let reply: act::SendReply = decode_act("/files/send", &text)?;
     Ok(act::FileReceipt {
         message_id: reply.message_id,
@@ -1648,6 +1784,16 @@ async fn spend_lock(
     Ok(gate.view(now_ms()))
 }
 
+#[tauri::command(rename_all = "snake_case")]
+async fn spend_reconcile(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+) -> Result<String, ActionError> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    do_spend_reconcile(state.inner()).await
+}
+
 /// `POST /messages/compose` to a peer (paid first contact included) or a room.
 #[tauri::command(rename_all = "snake_case")]
 async fn message_send(
@@ -1656,10 +1802,11 @@ async fn message_send(
     recipient: String,
     is_room: bool,
     plaintext: String,
+    max_msat: u64,
 ) -> Result<act::SendReceipt, ActionError> {
     reject_sealed_window(&window)?;
     drop(window);
-    do_message_send(state.inner(), &recipient, is_room, &plaintext).await
+    do_message_send(state.inner(), &recipient, is_room, &plaintext, max_msat).await
 }
 
 /// What one message to a room costs: each member's own price, summed.
@@ -1705,10 +1852,11 @@ async fn payment_pay(
     state: State<'_, NodeState>,
     bolt11: String,
     amount_msat: u64,
+    max_msat: u64,
 ) -> Result<act::PaymentReceipt, ActionError> {
     reject_sealed_window(&window)?;
     drop(window);
-    do_payment_pay(state.inner(), &bolt11, amount_msat).await
+    do_payment_pay(state.inner(), &bolt11, amount_msat, max_msat).await
 }
 
 /// `POST /payments/keysend`.
@@ -1719,10 +1867,11 @@ async fn payment_keysend(
     dest_pubkey: String,
     amount_msat: u64,
     memo: Option<String>,
+    max_msat: u64,
 ) -> Result<act::PaymentReceipt, ActionError> {
     reject_sealed_window(&window)?;
     drop(window);
-    do_payment_keysend(state.inner(), &dest_pubkey, amount_msat, memo.as_deref()).await
+    do_payment_keysend(state.inner(), &dest_pubkey, amount_msat, memo.as_deref(), max_msat).await
 }
 
 /// `POST /invites`: an invite bound to one invitee's key.
@@ -1760,7 +1909,7 @@ async fn file_price(
     reject_sealed_window(&window)?;
     drop(window);
     let price: control::KindPrice = get_json(state.inner(), &control::price_path(act::KIND_FILE_REF)).await?;
-    Ok(price.price_msat)
+    Ok(price.price_msat.max(act::MIN_PAYMENT_MSAT))
 }
 
 /// `POST /files` then `POST /files/:id/send` to one peer.
@@ -1772,10 +1921,11 @@ async fn file_send(
     filename: String,
     mime_type: String,
     data_b64: String,
+    max_msat: u64,
 ) -> Result<act::FileReceipt, ActionError> {
     reject_sealed_window(&window)?;
     drop(window);
-    do_file_send(state.inner(), &recipient, &filename, &mime_type, &data_b64).await
+    do_file_send(state.inner(), &recipient, &filename, &mime_type, &data_b64, max_msat).await
 }
 
 /// Tauri event the main window listens on for `/ws` traffic.
@@ -2032,6 +2182,7 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             spend_status,
             spend_request,
             spend_lock,
+            spend_reconcile,
             message_send,
             room_quote,
             invoice_create,
@@ -2284,7 +2435,7 @@ mod control_read_tests {
                  "ciphertext": "ff", "payment_amount_msat": 1000, "payment_hash": "bb", "plaintext": "first"}
             ]),
             "/payments/price/0" => serde_json::json!({"kind": 0, "price_msat": 1000}),
-            "/pricing/peers" => return (404, r#"{"error":"route","code":404}"#.into()),
+            "/pricing/peers" => serde_json::json!([]),
             "/payments/balance" => serde_json::json!({"balance_msat": 52_500_000u64}),
             "/payments/channels" => return (502, r#"{"error":"lightning backend unavailable","code":502}"#.into()),
             _ => return (404, r#"{"error":"route","code":404}"#.into()),
@@ -2444,6 +2595,7 @@ mod control_act_tests {
     struct Fake {
         state: NodeState,
         seen: Seen,
+        _dir: tempfile::TempDir,
     }
 
     impl Fake {
@@ -2510,7 +2662,9 @@ mod control_act_tests {
         *state.token.lock().unwrap() = Some("tok.1".into());
         *state.node_id.lock().unwrap() = Some(OWN.into());
         *state.auth.lock().unwrap() = auth;
-        Fake { state, seen }
+        let dir = tempfile::tempdir().unwrap();
+        *state.config.lock().unwrap() = Some(dir.path().join("konsensus.toml"));
+        Fake { state, seen, _dir: dir }
     }
 
     /// A node that accepts every action, rc7-shaped.
@@ -2519,6 +2673,7 @@ mod control_act_tests {
             let (route, _) = path.split_once('?').unwrap_or((path, ""));
             let v = match route {
                 "/messages/compose" => serde_json::json!({"message_id": "m1", "delivered": true, "amount_msat": 2000}),
+                "/payments/price/200" => serde_json::json!({"kind": 200, "price_msat": 3000}),
                 "/payments/pay" => serde_json::json!({"payment_hash": "HASH", "amount_msat": 1000, "preimage": "PREIMAGE"}),
                 "/payments/keysend" => serde_json::json!({"payment_hash": "HASH", "amount_msat": 5000, "preimage": "PREIMAGE", "status": "Settled"}),
                 "/payments/invoice" => serde_json::json!({"bolt11": "lntb210n1sample", "payment_hash": "HASH"}),
@@ -2545,13 +2700,13 @@ mod control_act_tests {
         let node = fake(AuthMode::Local, happy());
         let s = &node.state;
         let codes = [
-            do_message_send(s, A, false, "gm").await.unwrap_err().code,
-            do_message_send(s, ROOM, true, "gm").await.unwrap_err().code,
-            do_payment_pay(s, "lntb10n1x", 1000).await.unwrap_err().code,
-            do_payment_keysend(s, &format!("02{}", "ab".repeat(32)), 5000, None).await.unwrap_err().code,
+            do_message_send(s, A, false, "gm", 2000).await.unwrap_err().code,
+            do_message_send(s, ROOM, true, "gm", 2000).await.unwrap_err().code,
+            do_payment_pay(s, "lntb10n1x", 1000, 1000).await.unwrap_err().code,
+            do_payment_keysend(s, &format!("02{}", "ab".repeat(32)), 5000, None, 5000).await.unwrap_err().code,
             do_invite_create(s, A, "203.0.113.5:9735", 24).await.unwrap_err().code,
             do_invite_redeem(s, "bitsov://invite/tok").await.unwrap_err().code,
-            do_file_send(s, A, "a.txt", "text/plain", "aGk=").await.unwrap_err().code,
+            do_file_send(s, A, "a.txt", "text/plain", "aGk=", 3000).await.unwrap_err().code,
         ];
         assert!(codes.iter().all(|c| *c == "spend_locked"), "{codes:?}");
         assert!(node.targets().is_empty(), "{:?}", node.targets());
@@ -2577,7 +2732,7 @@ mod control_act_tests {
         assert_eq!((view.state, view.basis), (act::SpendState::Open, Some(act::SpendBasis::AppLock)));
         assert!(node.targets().is_empty(), "rc7 has nothing to ask: the window is the app's own");
 
-        let receipt = do_message_send(&node.state, &A.to_uppercase(), false, "gm").await.unwrap();
+        let receipt = do_message_send(&node.state, &A.to_uppercase(), false, "gm", 2000).await.unwrap();
         assert_eq!((receipt.message_id.as_str(), receipt.amount_msat, receipt.delivered), ("m1", 2000, true));
         assert_eq!(receipt.recipient, A);
         assert_eq!(
@@ -2592,7 +2747,7 @@ mod control_act_tests {
     async fn an_expired_window_re_prompts_without_a_request() {
         let node = fake(AuthMode::Local, happy());
         node.state.spend.lock().unwrap().arm(now_ms() - act::SPEND_WINDOW_MS - 1, act::SpendBasis::AppLock);
-        let err = do_message_send(&node.state, A, false, "gm").await.unwrap_err();
+        let err = do_message_send(&node.state, A, false, "gm", 2000).await.unwrap_err();
         assert_eq!(err.code, "spend_expired");
         assert_eq!(spend_advance(&node.state, false).await.unwrap().state, act::SpendState::Expired);
         assert!(node.targets().is_empty());
@@ -2602,26 +2757,28 @@ mod control_act_tests {
 
     #[tokio::test]
     async fn a_node_refusal_locks_the_window_and_the_next_send_is_refused_locally() {
-        let routes: Routes = Arc::new(|_: &str, _: &str, _: &str| (403, "token lacks required scope: spend".into()));
+        let routes: Routes = Arc::new(|m: &str, p: &str, b: &str| {
+            if p == "/messages/compose" { (403, "token lacks required scope: spend".into()) } else { happy()(m,p,b) }
+        });
         let node = fake(AuthMode::Local, routes);
         spend_advance(&node.state, true).await.unwrap();
-        let err = do_message_send(&node.state, A, false, "gm").await.unwrap_err();
+        let err = do_message_send(&node.state, A, false, "gm", 2000).await.unwrap_err();
         assert_eq!(err.code, "spend_refused");
-        assert_eq!(node.targets().len(), 1);
-        assert_eq!(do_message_send(&node.state, A, false, "gm").await.unwrap_err().code, "spend_locked");
-        assert_eq!(node.targets().len(), 1, "no second request after a refusal");
+        assert_eq!(node.posts().len(), 1);
+        assert_eq!(do_message_send(&node.state, A, false, "gm", 2000).await.unwrap_err().code, "spend_locked");
+        assert_eq!(node.posts().len(), 1, "no second dispatch after a refusal");
     }
 
     #[tokio::test]
     async fn a_node_error_is_shown_as_the_node_wrote_it() {
-        let routes: Routes = Arc::new(|_: &str, _: &str, _: &str| {
-            (502, r#"{"error":"failed to pay recipient invoice: no route","code":502}"#.into())
+        let routes: Routes = Arc::new(|m: &str, p: &str, b: &str| {
+            if p == "/messages/compose" { (502, r#"{"error":"failed to pay recipient invoice: no route","code":502}"#.into()) } else { happy()(m,p,b) }
         });
         let node = fake(AuthMode::Local, routes);
         spend_advance(&node.state, true).await.unwrap();
-        let err = do_message_send(&node.state, A, false, "gm").await.unwrap_err();
-        assert_eq!(err.code, "node");
-        assert_eq!(err.message, "/messages/compose failed (502): failed to pay recipient invoice: no route");
+        let err = do_message_send(&node.state, A, false, "gm", 2000).await.unwrap_err();
+        assert_eq!(err.code, "spend_unknown");
+        assert!(err.message.contains("/messages/compose failed (502): failed to pay recipient invoice: no route"));
         assert_eq!(spend_advance(&node.state, false).await.unwrap().state, act::SpendState::Open, "a failed payment is not a refusal");
     }
 
@@ -2640,13 +2797,13 @@ mod control_act_tests {
         assert_eq!(quote.unreachable, vec![C.to_string()]);
 
         spend_advance(&node.state, true).await.unwrap();
-        let err = do_message_send(&node.state, ROOM, true, "gm").await.unwrap_err();
+        let err = do_message_send(&node.state, ROOM, true, "gm", 2000).await.unwrap_err();
         assert_eq!(err.code, "room_unreachable");
         assert!(node.posts().is_empty(), "{:?}", node.posts());
 
         let node = fake(AuthMode::Local, happy());
         spend_advance(&node.state, true).await.unwrap();
-        let receipt = do_message_send(&node.state, ROOM, true, "gm").await.unwrap();
+        let receipt = do_message_send(&node.state, ROOM, true, "gm", 3000).await.unwrap();
         assert!(receipt.is_room);
         assert_eq!(
             node.posts(),
@@ -2658,12 +2815,12 @@ mod control_act_tests {
     async fn pay_goes_out_only_for_the_amount_shown_and_the_receipt_drops_the_preimage() {
         let node = fake(AuthMode::Local, happy());
         spend_advance(&node.state, true).await.unwrap();
-        assert!(do_payment_pay(&node.state, "lntb10n1x", 2000).await.is_err());
-        assert!(do_payment_pay(&node.state, "lntb1x", 0).await.is_err(), "amountless");
+        assert!(do_payment_pay(&node.state, "lntb10n1x", 2000, 2000).await.is_err());
+        assert!(do_payment_pay(&node.state, "lntb1x", 0, 0).await.is_err(), "amountless");
         assert!(node.posts().is_empty());
-        let receipt = do_payment_pay(&node.state, "lntb10n1x", 1000).await.unwrap();
+        let receipt = do_payment_pay(&node.state, "lntb10n1x", 1000, 1000).await.unwrap();
         assert_eq!((receipt.method, receipt.status.as_str(), receipt.amount_msat), ("invoice", "settled", 1000));
-        let ks = do_payment_keysend(&node.state, &format!("03{}", "cd".repeat(32)), 5000, Some("thanks")).await.unwrap();
+        let ks = do_payment_keysend(&node.state, &format!("03{}", "cd".repeat(32)), 5000, Some("thanks"), 5000).await.unwrap();
         assert_eq!(ks.status, "settled");
         let out = serde_json::to_string(&(receipt, ks)).unwrap();
         assert!(!out.contains("PREIMAGE") && !out.contains("HASH"));
@@ -2674,7 +2831,7 @@ mod control_act_tests {
     async fn a_file_is_uploaded_then_sent_to_one_peer() {
         let node = fake(AuthMode::Local, happy());
         spend_advance(&node.state, true).await.unwrap();
-        let receipt = do_file_send(&node.state, A, "hi.txt", "text/plain", "aGk=").await.unwrap();
+        let receipt = do_file_send(&node.state, A, "hi.txt", "text/plain", "aGk=", 3000).await.unwrap();
         assert_eq!((receipt.filename.as_str(), receipt.size_bytes, receipt.amount_msat), ("hi.txt", 2, 3000));
         assert_eq!(
             node.posts(),
@@ -2752,14 +2909,14 @@ mod control_act_tests {
         let pending = view.pending.unwrap();
         assert_eq!(pending.owner_action, "konsensus grant --op ab12");
         assert_eq!(node.posts()[0], ("/pair/elevation-request".to_string(), serde_json::json!({"scopes": ["spend"]})));
-        assert_eq!(do_message_send(&node.state, A, false, "gm").await.unwrap_err().code, "spend_locked");
+        assert_eq!(do_message_send(&node.state, A, false, "gm", 2000).await.unwrap_err().code, "spend_locked");
 
         assert_eq!(spend_advance(&node.state, false).await.unwrap().state, act::SpendState::Pending);
         let view = spend_advance(&node.state, false).await.unwrap();
         assert_eq!((view.state, view.basis), (act::SpendState::Open, Some(act::SpendBasis::NodeGrant)));
         assert_eq!(node.state.token.lock().unwrap().as_deref(), Some("tok.spend"));
 
-        do_message_send(&node.state, A, false, "gm").await.unwrap();
+        do_message_send(&node.state, A, false, "gm", 2000).await.unwrap();
         let last = node.seen.lock().unwrap().last().cloned().unwrap();
         assert_eq!((last.1.as_str(), last.2.as_deref()), ("/api/v1/messages/compose", Some("tok.spend")));
 
@@ -2788,11 +2945,195 @@ mod control_act_tests {
         let view = spend_advance(&node.state, true).await.unwrap();
         assert_eq!(view.state, act::SpendState::Unavailable);
         assert!(view.pending.unwrap().owner_action.starts_with("unavailable"));
-        assert_eq!(do_message_send(&node.state, A, false, "gm").await.unwrap_err().code, "spend_locked");
+        assert_eq!(do_message_send(&node.state, A, false, "gm", 2000).await.unwrap_err().code, "spend_locked");
 
         *status.lock().unwrap() = "expired";
         assert_eq!(spend_advance(&node.state, false).await.unwrap().state, act::SpendState::Expired);
-        assert_eq!(do_message_send(&node.state, A, false, "gm").await.unwrap_err().code, "spend_expired");
+        assert_eq!(do_message_send(&node.state, A, false, "gm", 2000).await.unwrap_err().code, "spend_expired");
+    }
+
+    #[tokio::test]
+    async fn regression_lock_during_poll_discards_late_grant() {
+        let entered = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+        let (e, r) = (entered.clone(), release.clone());
+        let far = now_unix() + 900;
+        let routes: Routes = Arc::new(move |m, p, b| {
+            let v = match p {
+                "/pair/elevation-request" => serde_json::json!({"op_id":"ab12", "expires_at":far, "owner_action":"konsensus grant --op ab12"}),
+                "/pair/elevation/ab12" => {
+                    e.store(true, Ordering::SeqCst);
+                    while !r.load(Ordering::SeqCst) { std::thread::sleep(Duration::from_millis(1)); }
+                    serde_json::json!({"status":"granted"})
+                },
+                p if p.starts_with("/pair/challenge") => serde_json::json!({"challenge":"bitsov-pair-token-v1:00ff"}),
+                "/pair/token" => serde_json::json!({"token":"tok.spend", "expires_at":far, "scopes":["read","receive","spend"]}),
+                _ => return happy()(m,p,b),
+            };
+            (200, v.to_string())
+        });
+        let (node, _dir) = paired_fake(routes);
+        spend_advance(&node.state, true).await.unwrap();
+        let poll = spend_advance(&node.state, false);
+        let lock = async {
+            while !entered.load(Ordering::SeqCst) { tokio::time::sleep(Duration::from_millis(1)).await; }
+            node.state.spend.lock().unwrap().lock();
+            release.store(true, Ordering::SeqCst);
+        };
+        let (result, ()) = tokio::join!(poll, lock);
+        assert_eq!(result.unwrap().state, act::SpendState::Locked);
+        assert_eq!(do_message_send(&node.state, A, false, "gm", 2000).await.unwrap_err().code, "spend_locked");
+        assert!(!node.posts().iter().any(|(path, _)| path == "/messages/compose"));
+    }
+
+    #[tokio::test]
+    async fn regression_receipt_above_shown_quote_is_not_success() {
+        let routes: Routes = Arc::new(|m, p, b| {
+            if p == "/messages/compose" {
+                return (200, serde_json::json!({"message_id":"changed", "delivered":true, "amount_msat":999000}).to_string());
+            }
+            happy()(m, p, b)
+        });
+        let node = fake(AuthMode::Local, routes);
+        assert_eq!(read_price_quote(&node.state, Some(A)).await.unwrap().peer_msat, Some(2000));
+        spend_advance(&node.state, true).await.unwrap();
+        assert_eq!(do_message_send(&node.state, A, false, "gm", 2000).await.unwrap_err().code, "spend_unknown");
+    }
+
+    #[tokio::test]
+    async fn regression_ambiguous_failure_blocks_second_dispatch() {
+        let dispatches = Arc::new(AtomicUsize::new(0));
+        let d = dispatches.clone();
+        let routes: Routes = Arc::new(move |m, p, b| {
+            if p == "/messages/compose" {
+                d.fetch_add(1, Ordering::SeqCst);
+                return (502, r#"{"error":"settlement timeout"}"#.into());
+            }
+            happy()(m, p, b)
+        });
+        let node = fake(AuthMode::Local, routes);
+        spend_advance(&node.state, true).await.unwrap();
+        let first = do_message_send(&node.state, A, false, "gm", 2000).await.unwrap_err();
+        let second = do_message_send(&node.state, A, false, "gm", 2000).await.unwrap_err();
+        assert_eq!(dispatches.load(Ordering::SeqCst), 1);
+        assert_eq!((first.code, second.code), ("spend_unknown", "spend_unknown"));
+    }
+
+    #[tokio::test]
+    async fn regression_price_rise_refused_before_money_post() {
+        let raised = Arc::new(AtomicBool::new(false));
+        let r = raised.clone();
+        let routes: Routes = Arc::new(move |m,p,b| {
+            if p == "/pricing/peers" && r.load(Ordering::SeqCst) {
+                return (200, serde_json::json!([{"peer_id":A, "prices":{"communication":999000}, "stale":false}]).to_string());
+            }
+            happy()(m,p,b)
+        });
+        let node = fake(AuthMode::Local, routes);
+        assert_eq!(read_price_quote(&node.state, Some(A)).await.unwrap().peer_msat, Some(2000));
+        raised.store(true, Ordering::SeqCst);
+        spend_advance(&node.state, true).await.unwrap();
+        assert_eq!(do_message_send(&node.state, A, false, "gm", 2000).await.unwrap_err().code, "price_changed");
+        assert!(node.posts().is_empty());
+    }
+
+    #[tokio::test]
+    async fn regression_timeout_blocks_retry_and_survives_reopen() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let c = count.clone();
+        let routes: Routes = Arc::new(move |m,p,b| {
+            if p == "/messages/compose" {
+                c.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(120));
+            }
+            happy()(m,p,b)
+        });
+        let mut node = fake(AuthMode::Local, routes);
+        assert!(node.state.spend_timeout >= Duration::from_secs(90));
+        node.state.spend_timeout = Duration::from_millis(30);
+        spend_advance(&node.state, true).await.unwrap();
+        assert_eq!(do_message_send(&node.state, A, false, "gm", 2000).await.unwrap_err().code, "spend_unknown");
+        assert_eq!(do_message_send(&node.state, A, false, "gm", 2000).await.unwrap_err().code, "spend_unknown");
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+        let reopened = NodeState::for_api(node.state.api_base.clone());
+        *reopened.config.lock().unwrap() = node.state.config.lock().unwrap().clone();
+        assert!(spend_journal(&reopened).unwrap().pending().unwrap().is_some());
+        assert!(do_spend_reconcile(&node.state).await.is_err(), "no ID is not evidence of failure");
+    }
+
+    #[tokio::test]
+    async fn regression_money_timeout_overrides_short_read_timeout() {
+        let routes: Routes = Arc::new(|m,p,b| {
+            if p == "/payments/keysend" { std::thread::sleep(Duration::from_millis(100)); }
+            happy()(m,p,b)
+        });
+        let mut node = fake(AuthMode::Local, routes);
+        node.state.http = reqwest::Client::builder().timeout(Duration::from_millis(20)).build().unwrap();
+        spend_advance(&node.state, true).await.unwrap();
+        let receipt = do_payment_keysend(&node.state, &format!("03{}", "cd".repeat(32)), 5000, None, 5000).await.unwrap();
+        assert_eq!(receipt.status, "settled");
+    }
+
+    #[tokio::test]
+    async fn regression_pending_payment_reconciles_by_hash_without_resend() {
+        let settled = Arc::new(AtomicBool::new(false));
+        let s = settled.clone();
+        let hash = "ab".repeat(32);
+        let routes: Routes = Arc::new(move |m,p,b| {
+            if p == "/payments/keysend" {
+                return (200, serde_json::json!({"payment_hash":hash, "amount_msat":5000, "status":"InFlight"}).to_string());
+            }
+            if p == "/payments?limit=100" {
+                return (200, serde_json::json!([{"payment_hash":hash, "amount_msat":5000, "direction":"outgoing", "status":if s.load(Ordering::SeqCst) {"settled"} else {"pending"}}]).to_string());
+            }
+            happy()(m,p,b)
+        });
+        let node = fake(AuthMode::Local, routes);
+        spend_advance(&node.state, true).await.unwrap();
+        let pk = format!("03{}", "cd".repeat(32));
+        assert_eq!(do_payment_keysend(&node.state, &pk, 5000, None, 5000).await.unwrap().status, "inflight");
+        assert!(do_spend_reconcile(&node.state).await.is_err());
+        assert_eq!(do_payment_keysend(&node.state, &pk, 5000, None, 5000).await.unwrap_err().code, "spend_unknown");
+        settled.store(true, Ordering::SeqCst);
+        assert!(do_spend_reconcile(&node.state).await.unwrap().contains("settled"));
+        assert!(spend_journal(&node.state).unwrap().pending().unwrap().is_none());
+        assert_eq!(node.posts().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn regression_file_requotes_after_upload_before_spending() {
+        let uploaded = Arc::new(AtomicBool::new(false));
+        let u = uploaded.clone();
+        let routes: Routes = Arc::new(move |m,p,b| {
+            if p == "/files" { u.store(true, Ordering::SeqCst); }
+            if p == "/payments/price/200" && u.load(Ordering::SeqCst) {
+                return (200, serde_json::json!({"kind":200,"price_msat":999000}).to_string());
+            }
+            happy()(m,p,b)
+        });
+        let node = fake(AuthMode::Local, routes);
+        spend_advance(&node.state, true).await.unwrap();
+        assert_eq!(do_file_send(&node.state, A, "hi.txt", "text/plain", "aGk=", 3000).await.unwrap_err().code, "price_changed");
+        assert_eq!(node.posts().len(), 1);
+        assert_eq!(node.posts()[0].0, "/files");
+    }
+
+    #[tokio::test]
+    async fn regression_payment_ceiling_and_receipt_are_both_checked() {
+        let routes: Routes = Arc::new(|m,p,b| {
+            if p == "/payments/pay" {
+                return (200, serde_json::json!({"payment_hash":"ab".repeat(32),"amount_msat":999000,"preimage":"proof"}).to_string());
+            }
+            happy()(m,p,b)
+        });
+        let node = fake(AuthMode::Local, routes);
+        spend_advance(&node.state, true).await.unwrap();
+        assert_eq!(do_payment_pay(&node.state, "lntb10n1x", 1000, 999).await.unwrap_err().code, "price_changed");
+        assert!(node.posts().is_empty());
+        assert_eq!(do_payment_pay(&node.state, "lntb10n1x", 1000, 1000).await.unwrap_err().code, "spend_unknown");
+        assert_eq!(do_payment_pay(&node.state, "lntb10n1x", 1000, 1000).await.unwrap_err().code, "spend_unknown");
+        assert_eq!(node.posts().len(), 1);
+        assert!(spend_journal(&node.state).unwrap().pending().unwrap().unwrap().over_budget);
     }
 
     #[tokio::test]
@@ -3291,6 +3632,7 @@ mod assistant_acl_tests {
                 "spend_status",
                 "spend_request",
                 "spend_lock",
+                "spend_reconcile",
                 "message_send",
                 "room_quote",
                 "invoice_create",

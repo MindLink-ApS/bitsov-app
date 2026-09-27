@@ -101,7 +101,7 @@ export function costToSend(
 ): Cost | null {
   if (track.kind === 'peer') {
     if (!quote) return null;
-    if (quote.peer_msat !== null) {
+    if (quote.peer_msat !== null && !quote.peer_stale) {
       const age = quote.peer_age_secs ?? 0;
       const when = ago((opts.nowMs ?? Date.now()) - age * 1000, opts.nowMs ?? Date.now());
       return {
@@ -114,7 +114,7 @@ export function costToSend(
     }
     return {
       msat: Math.max(quote.own_msat, MIN_PAYMENT_MSAT),
-      basis: `Estimate from your own price; ${opts.name ?? 'this peer'} has not shared theirs yet`,
+      basis: quote.peer_stale ? 'Estimate from your own price; the peer table is stale' : `Estimate from your own price; ${opts.name ?? 'this peer'} has not shared theirs yet`,
       estimate: true,
     };
   }

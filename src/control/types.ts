@@ -115,7 +115,10 @@ export type RestoreOutcome = { node_id: string; restart_required: boolean; resta
 
 /** A refused or failed action, as the host rejects it. */
 export type ActionError = {
+  // Unknown includes transport loss after dispatch: it must never mean "not sent".
   code:
+    | 'spend_unknown'
+    | 'price_changed'
     | 'spend_locked'
     | 'spend_expired'
     | 'spend_refused'

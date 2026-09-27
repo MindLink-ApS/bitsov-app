@@ -28,6 +28,7 @@ fn main() {
             "spend_status",
             "spend_request",
             "spend_lock",
+            "spend_reconcile",
             "message_send",
             "room_quote",
             "invoice_create",

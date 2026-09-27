@@ -147,6 +147,7 @@ pub struct SpendView {
 /// The owner's short-lived spend window. Host memory only.
 #[derive(Default, Debug)]
 pub struct SpendGate {
+    generation: u64,
     open: Option<(u64, SpendBasis)>,
     pending: Option<Elevation>,
     expired: bool,
@@ -155,6 +156,7 @@ pub struct SpendGate {
 impl SpendGate {
     /// Open the window for [`SPEND_WINDOW_MS`] from `now_ms`.
     pub fn arm(&mut self, now_ms: u64, basis: SpendBasis) {
+        self.generation = self.generation.wrapping_add(1);
         self.open = Some((now_ms + SPEND_WINDOW_MS, basis));
         self.pending = None;
         self.expired = false;
@@ -162,12 +164,14 @@ impl SpendGate {
 
     /// The owner locked spending, or the app lost its authority.
     pub fn lock(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
         self.open = None;
         self.pending = None;
         self.expired = false;
     }
 
     pub fn set_pending(&mut self, elevation: Elevation) {
+        self.generation = self.generation.wrapping_add(1);
         self.open = None;
         self.expired = false;
         self.pending = Some(elevation);
@@ -177,8 +181,29 @@ impl SpendGate {
         self.pending.as_ref()
     }
 
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// A reply may change authority only while its exact request is still live.
+    pub fn matches_poll(&mut self, generation: u64, pending: &Elevation, now_ms: u64) -> bool {
+        self.settle(now_ms);
+        self.generation == generation
+            && self.pending.as_ref() == Some(pending)
+            && pending.expires_at_ms > now_ms
+    }
+
+    pub fn check_generation(&mut self, generation: u64, now_ms: u64) -> Result<(), ActionError> {
+        self.check(now_ms)?;
+        if self.generation != generation {
+            return Err(ActionError::new("spend_locked", "Approval changed while preparing this action. Confirm it again."));
+        }
+        Ok(())
+    }
+
     /// The owner's request lapsed on the node.
     pub fn pending_expired(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
         self.pending = None;
         self.expired = true;
     }
@@ -186,12 +211,14 @@ impl SpendGate {
     fn settle(&mut self, now_ms: u64) {
         if let Some((until, _)) = self.open {
             if until <= now_ms {
+                self.generation = self.generation.wrapping_add(1);
                 self.open = None;
                 self.expired = true;
             }
         }
         if let Some(p) = &self.pending {
             if p.expires_at_ms <= now_ms {
+                self.generation = self.generation.wrapping_add(1);
                 self.pending = None;
                 self.expired = true;
             }
@@ -743,6 +770,24 @@ mod tests {
     const C: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
     const OWN: &str = "1111111111111111111111111111111111111111111111111111111111111111";
     const ROOM: &str = "0f8e2b7a-1c3d-4e5f-8a9b-0c1d2e3f4a5b";
+
+    #[test]
+    fn poll_ticket_requires_same_operation_generation_and_unexpired_deadline() {
+        let mut gate = SpendGate::default();
+        let pending = Elevation { op_id:"ab12".into(), expires_at_ms:100, owner_action:"konsensus grant".into(), owner_can_grant:true };
+        gate.set_pending(pending.clone());
+        let generation = gate.generation();
+        assert!(gate.matches_poll(generation, &pending, 99));
+        assert!(!gate.matches_poll(generation, &pending, 100));
+        gate.set_pending(pending.clone());
+        assert!(!gate.matches_poll(generation, &pending, 1));
+        let generation = gate.generation();
+        let mut other = pending.clone();
+        other.op_id = "cd34".into();
+        assert!(!gate.matches_poll(generation, &other, 1));
+        gate.lock();
+        assert!(!gate.matches_poll(generation, &pending, 1));
+    }
 
     #[test]
     fn the_window_opens_on_approval_and_closes_after_ten_minutes() {

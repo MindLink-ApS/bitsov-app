@@ -243,7 +243,8 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number 
       spend = { state: 'locked', basis: null, open_until_ms: null, pending: null, window_ms: WINDOW_MS };
       return ok(spend);
     },
-    send: async (recipient, isRoom, plaintext) => {
+    spendReconcile: () => ok('No pending spend.'),
+    send: async (recipient, isRoom, plaintext, maxMsat) => {
       await gate();
       const to = recipient.toLowerCase();
       let amount: number;
@@ -260,6 +261,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number 
         }
         amount = Math.max(peerPrice(to), 1000);
       }
+      if (amount > maxMsat) return refuse('price_changed', 'Price above confirmed ceiling. Nothing dispatched.');
       const id = nextId('sent');
       const at = Date.now();
       later(250, { type: 'message', room_id: isRoom ? to : null, message: { id, kind: 0, sender: SAMPLE_OWN_ID, recipient: to, timestamp: at, plaintext, payment_amount_msat: amount } });
@@ -279,15 +281,17 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number 
       if (msat === null) return refuse('invalid', 'This invoice names no amount. The app pays only invoices whose cost it can show first.');
       return ok({ amount_msat: msat, network: bolt11.toLowerCase().startsWith('lnbc') ? 'mainnet' : 'sample' });
     },
-    pay: async (bolt11, amountMsat) => {
+    pay: async (bolt11, amountMsat, maxMsat) => {
       await gate();
+      if (amountMsat > maxMsat) return refuse('price_changed', 'Amount above confirmed ceiling.');
       if (sampleInvoiceMsat(bolt11) !== amountMsat) {
         return refuse('invalid', 'The invoice amount does not match the cost you confirmed. Nothing was paid.');
       }
       return { method: 'invoice', amount_msat: amountMsat, status: 'settled', paid_at_ms: Date.now() };
     },
-    keysend: async (_dest, amountMsat) => {
+    keysend: async (_dest, amountMsat, _memo, maxMsat) => {
       await gate();
+      if (amountMsat > maxMsat) return refuse('price_changed', 'Amount above confirmed ceiling.');
       return { method: 'keysend', amount_msat: amountMsat, status: 'settled', paid_at_ms: Date.now() };
     },
     inviteCreate: async (invitee, _addr, hours) => {
@@ -299,8 +303,9 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number 
       return { inviter_pubkey: hex('b'), addr: '35.204.77.3:9735' };
     },
     filePrice: () => ok(FILE_PRICE_MSAT),
-    fileSend: async (recipient, filename, _mime, dataB64) => {
+    fileSend: async (recipient, filename, _mime, dataB64, maxMsat) => {
       await gate();
+      if (FILE_PRICE_MSAT > maxMsat) return refuse('price_changed', 'Price above confirmed ceiling.');
       const id = nextId('file');
       later(1200, { type: 'delivery', message_id: id, status: 'delivered', reason: null });
       const pad = (dataB64.match(/=+$/)?.[0].length ?? 0);

@@ -53,16 +53,17 @@ export interface Source {
   /** The owner's one tap: open the short spend window, or ask the node for spend. */
   spendRequest(): Promise<SpendView>;
   spendLock(): Promise<SpendView>;
-  send(recipient: string, isRoom: boolean, plaintext: string): Promise<SendReceipt>;
+  spendReconcile(): Promise<string>;
+  send(recipient: string, isRoom: boolean, plaintext: string, maxMsat: number): Promise<SendReceipt>;
   roomQuote(roomId: string): Promise<RoomQuote>;
   invoiceCreate(amountMsat: number, note: string): Promise<InvoiceView>;
   invoiceAmount(bolt11: string): Promise<InvoiceAmount>;
-  pay(bolt11: string, amountMsat: number): Promise<PaymentReceipt>;
-  keysend(destPubkey: string, amountMsat: number, memo: string | null): Promise<PaymentReceipt>;
+  pay(bolt11: string, amountMsat: number, maxMsat: number): Promise<PaymentReceipt>;
+  keysend(destPubkey: string, amountMsat: number, memo: string | null, maxMsat: number): Promise<PaymentReceipt>;
   inviteCreate(invitee: string, addr: string, hours: number): Promise<InviteView>;
   inviteRedeem(invite: string): Promise<RedeemView>;
   filePrice(): Promise<number>;
-  fileSend(recipient: string, filename: string, mimeType: string, dataB64: string): Promise<FileReceipt>;
+  fileSend(recipient: string, filename: string, mimeType: string, dataB64: string, maxMsat: number): Promise<FileReceipt>;
 }
 
 export const LIVE_EVENT = 'node-live';
@@ -87,18 +88,19 @@ export const hostSource: Source = {
   spendStatus: () => invoke<SpendView>('spend_status'),
   spendRequest: () => invoke<SpendView>('spend_request'),
   spendLock: () => invoke<SpendView>('spend_lock'),
-  send: (recipient, isRoom, plaintext) => invoke<SendReceipt>('message_send', { recipient, is_room: isRoom, plaintext }),
+  spendReconcile: () => invoke<string>('spend_reconcile'),
+  send: (recipient, isRoom, plaintext, maxMsat) => invoke<SendReceipt>('message_send', { recipient, is_room: isRoom, plaintext, max_msat: maxMsat }),
   roomQuote: (roomId) => invoke<RoomQuote>('room_quote', { room_id: roomId }),
   invoiceCreate: (amountMsat, note) => invoke<InvoiceView>('invoice_create', { amount_msat: amountMsat, note, expiry_secs: null }),
   invoiceAmount: (bolt11) => invoke<InvoiceAmount>('invoice_amount', { bolt11 }),
-  pay: (bolt11, amountMsat) => invoke<PaymentReceipt>('payment_pay', { bolt11, amount_msat: amountMsat }),
-  keysend: (destPubkey, amountMsat, memo) =>
-    invoke<PaymentReceipt>('payment_keysend', { dest_pubkey: destPubkey, amount_msat: amountMsat, memo }),
+  pay: (bolt11, amountMsat, maxMsat) => invoke<PaymentReceipt>('payment_pay', { bolt11, amount_msat: amountMsat, max_msat: maxMsat }),
+  keysend: (destPubkey, amountMsat, memo, maxMsat) =>
+    invoke<PaymentReceipt>('payment_keysend', { dest_pubkey: destPubkey, amount_msat: amountMsat, memo, max_msat: maxMsat }),
   inviteCreate: (invitee, addr, hours) => invoke<InviteView>('invite_create', { invitee, addr, hours }),
   inviteRedeem: (invite) => invoke<RedeemView>('invite_redeem', { invite }),
   filePrice: () => invoke<number>('file_price'),
-  fileSend: (recipient, filename, mimeType, dataB64) =>
-    invoke<FileReceipt>('file_send', { recipient, filename, mime_type: mimeType, data_b64: dataB64 }),
+  fileSend: (recipient, filename, mimeType, dataB64, maxMsat) =>
+    invoke<FileReceipt>('file_send', { recipient, filename, mime_type: mimeType, data_b64: dataB64, max_msat: maxMsat }),
 };
 
 /** Running inside the Tauri host (vs. a plain browser tab on the Vite server). */

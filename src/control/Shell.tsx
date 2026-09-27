@@ -63,12 +63,13 @@ type Outcome<T> = { ok: true; value: T } | { ok: false; error: ActionError };
 export type Actions = {
   approve: () => Promise<void>;
   lock: () => Promise<void>;
-  send: (t: TrackRef, text: string) => Promise<Outcome<unknown>>;
+  reconcile: () => Promise<Outcome<string>>;
+  send: (t: TrackRef, text: string, maxMsat: number) => Promise<Outcome<unknown>>;
   invoice: (t: TrackRef, sats: number, note: string) => Promise<Outcome<unknown>>;
   amountOf: (bolt11: string) => Promise<Outcome<number>>;
   pay: (t: TrackRef, bolt11: string, msat: number) => Promise<Outcome<unknown>>;
   keysend: (t: TrackRef, pubkey: string, msat: number, memo: string) => Promise<Outcome<unknown>>;
-  file: (t: TrackRef, file: File) => Promise<Outcome<unknown>>;
+  file: (t: TrackRef, file: File, maxMsat: number) => Promise<Outcome<unknown>>;
 };
 
 let artifactSeq = 0;
@@ -199,11 +200,15 @@ export function ControlCenter(props: Props) {
       setRoomQuote(null);
       loadThread(t);
       if (t.kind === 'peer') {
-        void attempt('quote', () => props.source.priceQuote(t.id), setQuote);
+        void attempt('quote', () => props.source.priceQuote(t.id), (q) => {
+          if (track() && trackKey(track()!) === trackKey(t)) setQuote(q);
+        });
         if (filePrice() === null) void attempt('quote', () => props.source.filePrice(), setFilePrice);
       }
       if (t.kind === 'room') {
-        void attempt('quote', () => props.source.roomQuote(t.id), setRoomQuote);
+        void attempt('quote', () => props.source.roomQuote(t.id), (q) => {
+          if (track() && trackKey(track()!) === trackKey(t)) setRoomQuote(q);
+        });
         void attempt('members', () => props.source.roomMembers(t.id), (m) => setMembers(t.id, m));
       }
       setContextOpen(false);
@@ -235,7 +240,9 @@ export function ControlCenter(props: Props) {
   };
   /** A failed action that is not an approval question stays in the track as a record. */
   const recordFailure = (t: TrackRef, action: string, outcome: Outcome<unknown>) => {
-    if (!outcome.ok && !needsApproval(outcome.error)) addArtifact(t, { type: 'failed', action, error: outcome.error });
+    if (!outcome.ok && !needsApproval(outcome.error)) {
+      addArtifact(t, { type: 'failed', action: outcome.error.code === 'spend_unknown' ? 'Outcome unknown / pending' : action, error: outcome.error });
+    }
     return outcome;
   };
 
@@ -249,9 +256,18 @@ export function ControlCenter(props: Props) {
       const r = await act(() => props.source.spendLock());
       if (r.ok) setSpend(r.value);
     },
-    send: async (t, text) => {
+    reconcile: () => act(() => props.source.spendReconcile()),
+    send: async (t, text, maxMsat) => {
       if (t.kind !== 'peer' && t.kind !== 'room') return { ok: false, error: { code: 'invalid', message: 'nothing to send to' } };
-      const r = await act(() => props.source.send(t.id, t.kind === 'room', text));
+      const r = await act(() => props.source.send(t.id, t.kind === 'room', text, maxMsat));
+      if (!r.ok && r.error.code === 'price_changed') {
+        if (t.kind === 'peer') void attempt('quote', () => props.source.priceQuote(t.id), (q) => {
+          if (track() && trackKey(track()!) === trackKey(t)) setQuote(q);
+        });
+        else void attempt('quote', () => props.source.roomQuote(t.id), (q) => {
+          if (track() && trackKey(track()!) === trackKey(t)) setRoomQuote(q);
+        });
+      }
       if (r.ok) {
         const receipt = r.value;
         setPaid(receipt.message_id, receipt.amount_msat);
@@ -271,7 +287,7 @@ export function ControlCenter(props: Props) {
       return r.ok ? { ok: true, value: r.value.amount_msat } : r;
     },
     pay: async (t, bolt11, msat) => {
-      const r = await act(() => props.source.pay(bolt11, msat));
+      const r = await act(() => props.source.pay(bolt11, msat, msat));
       if (r.ok) {
         addArtifact(t, { type: 'payment', receipt: r.value, at: r.value.paid_at_ms });
         void loadWallet();
@@ -279,18 +295,19 @@ export function ControlCenter(props: Props) {
       return recordFailure(t, 'Payment not sent', r);
     },
     keysend: async (t, pubkey, msat, memo) => {
-      const r = await act(() => props.source.keysend(pubkey, msat, memo.trim() || null));
+      const r = await act(() => props.source.keysend(pubkey, msat, memo.trim() || null, msat));
       if (r.ok) {
         addArtifact(t, { type: 'payment', receipt: r.value, at: r.value.paid_at_ms });
         void loadWallet();
       }
       return recordFailure(t, 'Payment not sent', r);
     },
-    file: async (t, file) => {
+    file: async (t, file, maxMsat) => {
       if (t.kind !== 'peer') return { ok: false, error: { code: 'invalid', message: 'Files go to one peer at a time.' } };
       const data = await readBase64(file).catch(() => null);
       if (data === null) return { ok: false, error: { code: 'invalid', message: 'the file could not be read' } };
-      const r = await act(() => props.source.fileSend(t.id, file.name, file.type, data));
+      const r = await act(() => props.source.fileSend(t.id, file.name, file.type, data, maxMsat));
+      if (!r.ok && r.error.code === 'price_changed') void attempt('quote', () => props.source.filePrice(), setFilePrice);
       if (r.ok) {
         setPaid(r.value.message_id, r.value.amount_msat);
         if (!deliveries[r.value.message_id]) setDeliveries(r.value.message_id, deliveryFromReceipt(r.value));
@@ -905,7 +922,7 @@ function Composer(props: {
     let r: Awaited<ReturnType<Actions['send']>>;
     switch (mode()) {
       case 'message':
-        r = await props.actions.send(t, draft());
+        r = await props.actions.send(t, draft(), shown().msat!);
         if (r.ok) setDraft('');
         break;
       case 'pay':
@@ -927,7 +944,7 @@ function Composer(props: {
         } else setNote(r.error.message);
         break;
       case 'file':
-        r = await props.actions.file(t, file()!);
+        r = await props.actions.file(t, file()!, shown().msat!);
         if (r.ok) {
           setFile(null);
           if (fileInput) fileInput.value = '';
@@ -1053,6 +1070,15 @@ function Composer(props: {
  */
 function SpendBar(props: { spend: SpendView | null; error: string | undefined; now: number; actions: Actions }) {
   const line = () => spendLine(props.spend, props.now);
+  const [result, setResult] = createSignal<string | null>(null);
+  const [checking, setChecking] = createSignal(false);
+  const reconcile = async () => {
+    if (checking()) return;
+    setChecking(true);
+    const outcome = await props.actions.reconcile();
+    setResult(outcome.ok ? outcome.value : outcome.error.message);
+    setChecking(false);
+  };
   const minutes = (ms: number) => Math.max(1, Math.ceil((ms - props.now) / 60_000));
   return (
     <div class="spend" data-spend={props.spend?.state ?? 'unknown'}>
@@ -1099,6 +1125,10 @@ function SpendBar(props: { spend: SpendView | null; error: string | undefined; n
           </p>
         </Match>
       </Switch>
+      <button type="button" class="link" data-spend-reconcile disabled={checking()} onClick={() => void reconcile()}>
+        Check pending result
+      </button>
+      <Show when={result()}><p class="hint" data-reconciliation>{result()}</p></Show>
       <Show when={props.error}>
         <p class="err-note">{props.error}</p>
       </Show>

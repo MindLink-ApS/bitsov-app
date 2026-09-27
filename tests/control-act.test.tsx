@@ -137,7 +137,7 @@ describe('acting from the track', () => {
 
     submit();
     await vi.waitFor(() => expect(host.used('message_send')).toHaveLength(1));
-    expect(host.used('message_send')[0].args).toEqual({ recipient: A, is_room: false, plaintext: 'gm Maya' });
+    expect(host.used('message_send')[0].args).toEqual({ recipient: A, is_room: false, plaintext: 'gm Maya', max_msat: 2000 });
     await vi.waitFor(() => expect(text('[data-message="sent-1"] .stamp .sats')).toBe('2'));
     expect(text('[data-message="sent-1"] .stamp')).toContain('sats paid');
     expect(text('[data-message="sent-1"] [data-delivery]')).toBe('sent, waiting for their node');
@@ -202,6 +202,23 @@ describe('acting from the track', () => {
     expect(text('[data-cost-msat]')).toContain('≈');
   });
 
+  it('labels ambiguous sends unknown and reconciles without sending again', async () => {
+    const host = stubHost({
+      message_send: () => { throw { code: 'spend_unknown', message: 'Outcome unknown; do not retry.' }; },
+      spend_reconcile: () => 'Previous action settled. Nothing was dispatched again.',
+    });
+    host.spend.v = openView();
+    await openShell();
+    type('[data-composer] textarea', 'hi');
+    submit();
+    await vi.waitFor(() => expect(text('[data-artifact="failed"]')).toContain('Outcome unknown / pending'));
+    expect(text('[data-artifact="failed"]')).not.toContain('not sent');
+    $<HTMLButtonElement>('[data-spend-reconcile]')!.click();
+    await vi.waitFor(() => expect(text('[data-reconciliation]')).toContain('Previous action settled'));
+    expect(host.used('message_send')).toHaveLength(1);
+    expect(host.used('spend_reconcile')).toHaveLength(1);
+  });
+
   it('sends to a room at the summed member price', async () => {
     const host = stubHost();
     host.spend.v = openView();
@@ -212,7 +229,7 @@ describe('acting from the track', () => {
     type('[data-composer] textarea', 'room hello');
     await vi.waitFor(() => expect(text('[data-send]')).toBe('Send · 2 sats'));
     submit();
-    await vi.waitFor(() => expect(host.used('message_send')[0]?.args).toEqual({ recipient: ROOM, is_room: true, plaintext: 'room hello' }));
+    await vi.waitFor(() => expect(host.used('message_send')[0]?.args).toEqual({ recipient: ROOM, is_room: true, plaintext: 'room hello', max_msat: 2000 }));
   });
 
   it('pays an invoice only after showing what it asks for', async () => {
@@ -227,7 +244,7 @@ describe('acting from the track', () => {
     await vi.waitFor(() => expect(text('[data-send]')).toBe('Pay · 1 sat'));
     expect($('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('1000');
     submit();
-    await vi.waitFor(() => expect(host.used('payment_pay')[0]?.args).toEqual({ bolt11: 'lntb10n1abc', amount_msat: 1000 }));
+    await vi.waitFor(() => expect(host.used('payment_pay')[0]?.args).toEqual({ bolt11: 'lntb10n1abc', amount_msat: 1000, max_msat: 1000 }));
     await vi.waitFor(() => expect($('[data-artifact="payment"]')?.getAttribute('data-status')).toBe('settled'));
   });
 
@@ -256,7 +273,7 @@ describe('acting from the track', () => {
     input.dispatchEvent(new Event('change', { bubbles: true }));
     await vi.waitFor(() => expect(text('[data-send]')).toBe('Send file · 3 sats'));
     submit();
-    await vi.waitFor(() => expect(host.used('file_send')[0]?.args).toEqual({ recipient: A, filename: 'hi.txt', mime_type: 'text/plain', data_b64: 'aGk=' }));
+    await vi.waitFor(() => expect(host.used('file_send')[0]?.args).toEqual({ recipient: A, filename: 'hi.txt', mime_type: 'text/plain', data_b64: 'aGk=', max_msat: 3000 }));
     await vi.waitFor(() => expect(text('[data-artifact="file"]')).toContain('hi.txt'));
   });
 
@@ -296,7 +313,7 @@ describe('sample source actions', () => {
 
   it('refuses to spend until the sample owner grants, then opens a ten-minute window', async () => {
     const s = sampleSource({ firstLiveMs: 1e9 });
-    await expect(s.send(MAYA, false, 'x')).rejects.toMatchObject({ code: 'spend_locked' });
+    await expect(s.send(MAYA, false, 'x', 5000)).rejects.toMatchObject({ code: 'spend_locked' });
     expect((await s.spendRequest()).state).toBe('pending');
     expect((await s.spendStatus()).state).toBe('pending');
     const open = await s.spendStatus();
@@ -315,17 +332,17 @@ describe('sample source actions', () => {
       await s.spendStatus();
       await s.spendStatus();
 
-      const toMaya = await s.send(MAYA, false, 'gm');
+      const toMaya = await s.send(MAYA, false, 'gm', 5000);
       expect(toMaya.amount_msat).toBe(2000);
-      const toGamma = await s.send(GAMMA, false, 'gm');
+      const toGamma = await s.send(GAMMA, false, 'gm', 5000);
       expect(toGamma.amount_msat).toBe(1000);
       vi.advanceTimersByTime(1500);
       expect(events).toContainEqual({ type: 'delivery', message_id: toMaya.message_id, status: 'delivered', reason: null });
       expect(events).toContainEqual(expect.objectContaining({ type: 'delivery', message_id: toGamma.message_id, status: 'rejected' }));
 
-      await expect(s.send(OFFLINE, false, 'gm')).rejects.toMatchObject({ code: 'node', message: expect.stringContaining('offline') });
+      await expect(s.send(OFFLINE, false, 'gm', 5000)).rejects.toMatchObject({ code: 'node', message: expect.stringContaining('offline') });
       expect((await s.roomQuote(SAMPLE_ROOM_ID)).total_msat).toBe(3000);
-      await expect(s.send(SAMPLE_OPEN_ROOM_ID, true, 'gm')).rejects.toMatchObject({ code: 'room_unreachable' });
+      await expect(s.send(SAMPLE_OPEN_ROOM_ID, true, 'gm', 5000)).rejects.toMatchObject({ code: 'room_unreachable' });
     } finally {
       vi.useRealTimers();
     }
@@ -341,7 +358,7 @@ describe('sample source actions', () => {
     await s.spendRequest();
     await s.spendStatus();
     await s.spendStatus();
-    await expect(s.pay(inv.bolt11, 20_000)).rejects.toMatchObject({ code: 'invalid' });
-    expect((await s.pay(inv.bolt11, 21_000)).status).toBe('settled');
+    await expect(s.pay(inv.bolt11, 20_000, 20_000)).rejects.toMatchObject({ code: 'invalid' });
+    expect((await s.pay(inv.bolt11, 21_000, 21_000)).status).toBe('settled');
   });
 });

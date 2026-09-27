@@ -29,6 +29,7 @@
     "allow-spend-status",
     "allow-spend-request",
     "allow-spend-lock",
+    "allow-spend-reconcile",
     "allow-message-send",
     "allow-room-quote",
     "allow-invoice-create",
