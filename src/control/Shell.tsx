@@ -806,6 +806,9 @@ function Composer(props: {
   // file
   const [file, setFile] = createSignal<File | null>(null);
   let fileInput: HTMLInputElement | undefined;
+  // Inputs and navigation remain usable during a send. Only the submitted
+  // revision may be cleared by its completion (including track A -> B -> A).
+  let composerRevision = 0;
 
   const room = () => props.track.kind === 'room';
   const modes = (): Mode[] => (room() ? ['message'] : ['message', 'pay', 'request', 'file']);
@@ -814,6 +817,7 @@ function Composer(props: {
     on(
       () => trackKey(props.track),
       () => {
+        composerRevision++;
         setMode('message');
         setNote(null);
         setDraft('');
@@ -927,18 +931,20 @@ function Composer(props: {
     if (!ready()) return;
     setBusy(true);
     const t = props.track;
+    const submittedRevision = composerRevision;
+    const unchanged = () => composerRevision === submittedRevision;
     let r: Awaited<ReturnType<Actions['send']>>;
     switch (mode()) {
       case 'message':
         r = await props.actions.send(t, draft(), shown().msat!);
-        if (r.ok) setDraft('');
+        if (r.ok && unchanged()) setDraft('');
         break;
       case 'pay':
         r =
           payKind() === 'invoice'
             ? await props.actions.pay(t, bolt11().trim(), invoiceMsat()!)
             : await props.actions.keysend(t, pubkey().trim(), Math.round(satsInput(amount())! * 1000), memo());
-        if (r.ok) {
+        if (r.ok && unchanged()) {
           setBolt11('');
           setAmount('');
           setMemo('');
@@ -946,14 +952,14 @@ function Composer(props: {
         break;
       case 'request':
         r = await props.actions.invoice(t, satsInput(amount())!, memo());
-        if (r.ok) {
+        if (r.ok && unchanged()) {
           setAmount('');
           setMemo('');
-        } else setNote(r.error.message);
+        } else if (!r.ok && unchanged()) setNote(r.error.message);
         break;
       case 'file':
         r = await props.actions.file(t, file()!, shown().msat!);
-        if (r.ok) {
+        if (r.ok && unchanged()) {
           setFile(null);
           if (fileInput) fileInput.value = '';
         }
@@ -973,6 +979,7 @@ function Composer(props: {
       class="composer"
       data-composer
       data-mode={mode()}
+      onInput={() => { composerRevision++; }}
       onSubmit={(e) => {
         e.preventDefault();
         void submit();
@@ -982,7 +989,7 @@ function Composer(props: {
         <div class="modes" role="tablist" aria-label="What to send">
           <For each={modes()}>
             {(m) => (
-              <button type="button" role="tab" data-composer-mode={m} aria-selected={mode() === m} onClick={() => { setMode(m); setNote(null); }}>
+              <button type="button" role="tab" data-composer-mode={m} aria-selected={mode() === m} onClick={() => { composerRevision++; setMode(m); setNote(null); }}>
                 {{ message: 'Message', pay: 'Pay', request: 'Request', file: 'File' }[m]}
               </button>
             )}
@@ -1009,8 +1016,8 @@ function Composer(props: {
         <Match when={mode() === 'pay'}>
           <div class="fields">
             <div class="modes small" role="tablist" aria-label="How to pay">
-              <button type="button" role="tab" aria-selected={payKind() === 'invoice'} onClick={() => setPayKind('invoice')}>Invoice</button>
-              <button type="button" role="tab" aria-selected={payKind() === 'keysend'} onClick={() => setPayKind('keysend')}>Direct</button>
+              <button type="button" role="tab" aria-selected={payKind() === 'invoice'} onClick={() => { composerRevision++; setPayKind('invoice'); }}>Invoice</button>
+              <button type="button" role="tab" aria-selected={payKind() === 'keysend'} onClick={() => { composerRevision++; setPayKind('keysend'); }}>Direct</button>
             </div>
             <Show
               when={payKind() === 'invoice'}
@@ -1036,7 +1043,7 @@ function Composer(props: {
         </Match>
         <Match when={mode() === 'file'}>
           <div class="fields">
-            <input ref={fileInput} type="file" data-file-input onChange={(e) => setFile(e.currentTarget.files?.[0] ?? null)} aria-label="File to send" />
+            <input ref={fileInput} type="file" data-file-input onChange={(e) => { composerRevision++; setFile(e.currentTarget.files?.[0] ?? null); }} aria-label="File to send" />
             <span class="hint">Up to 1.4 MB. It goes to {props.name} only, end to end encrypted, and pays like a message.</span>
           </div>
         </Match>

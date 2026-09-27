@@ -2618,6 +2618,27 @@ mod control_act_tests {
     //! spend window is checked before any request, bodies are exact, a node
     //! refusal locks the window, and the owner-grant path on a paired node.
     #[tokio::test]
+    async fn rc7_and_malformed_capabilities_refuse_all_variable_sends() {
+        for status in [
+            serde_json::json!({"status":"ok","version":2,"node_id":OWN}),
+            serde_json::json!({"api_capabilities":null}),
+            serde_json::json!({"api_capabilities":"paid_send_caps_v1"}),
+            serde_json::json!({"api_capabilities":["paid_send_caps_v0"]}),
+        ] {
+            let routes: Routes = Arc::new(move |m,p,b| {
+                if p == "/status" { return (200, status.to_string()); }
+                happy()(m,p,b)
+            });
+            let node = fake(AuthMode::Local,routes);
+            spend_advance(&node.state,true).await.unwrap();
+            assert_eq!(do_message_send(&node.state,A,false,"hi",2000,None).await.unwrap_err().code,"price_cap_unavailable");
+            assert_eq!(do_message_send(&node.state,ROOM,true,"hi",3000,Some(std::collections::HashMap::from([(A.into(),2000),(C.into(),1000)]))).await.unwrap_err().code,"price_cap_unavailable");
+            assert_eq!(do_file_send(&node.state,A,"a.txt","text/plain","aGk=",3000).await.unwrap_err().code,"price_cap_unavailable");
+            assert!(node.posts().is_empty());
+        }
+    }
+
+    #[tokio::test]
     async fn caps_unavailable_refuses_message_and_file_before_post() {
         let routes: Routes = Arc::new(|m,p,b| {
             if p == "/status" { return (200, serde_json::json!({"api_capabilities":[]}).to_string()); }
@@ -2643,25 +2664,28 @@ mod control_act_tests {
     }
     #[tokio::test]
     async fn caps_room_unknown_cannot_be_cleared_by_one_message_or_retried() {
-        let routes: Routes = Arc::new(|m,p,b| {
-            if p == "/messages/compose" {
-                return (200,serde_json::json!({"message_id":"ab".repeat(32),"delivered":true,"amount_msat":2000,
-                    "member_outcomes":[{"recipient":A,"status":"settled","amount_msat":2000,"message_id":"ab".repeat(32)},
-                        {"recipient":C,"status":"unknown","amount_msat":0}]}).to_string());
-            }
-            happy()(m,p,b)
-        });
-        let node=fake(AuthMode::Local,routes);
-        spend_advance(&node.state,true).await.unwrap();
-        assert_eq!(do_message_send(&node.state,ROOM,true,"hi",3000, Some(std::collections::HashMap::from([(A.into(), 2000), (C.into(), 1000)]))).await.unwrap_err().code,"spend_unknown");
-        assert!(do_spend_reconcile(&node.state).await.is_err());
-        assert_eq!(do_message_send(&node.state,ROOM,true,"hi",3000, Some(std::collections::HashMap::from([(A.into(), 2000), (C.into(), 1000)]))).await.unwrap_err().code,"spend_unknown");
-        assert_eq!(node.posts().len(),1);
-        assert!(spend_journal(&node.state).unwrap().pending().unwrap().is_some());
-        let reopened=NodeState::for_api(node.state.api_base.clone());
-        *reopened.config.lock().unwrap()=node.state.config.lock().unwrap().clone();
-        assert!(spend_journal(&reopened).unwrap().pending().unwrap().is_some());
+        for member_status in ["unknown", "pending"] {
+            let routes: Routes = Arc::new(move |m,p,b| {
+                if p == "/messages/compose" {
+                    return (200,serde_json::json!({"message_id":"ab".repeat(32),"delivered":true,"amount_msat":3000,
+                        "member_outcomes":[{"recipient":A,"status":"settled","amount_msat":2000,"message_id":"ab".repeat(32)},
+                            {"recipient":C,"status":member_status,"amount_msat":1000}]}).to_string());
+                }
+                happy()(m,p,b)
+            });
+            let node=fake(AuthMode::Local,routes);
+            spend_advance(&node.state,true).await.unwrap();
+            assert_eq!(do_message_send(&node.state,ROOM,true,"hi",3000, Some(std::collections::HashMap::from([(A.into(), 2000), (C.into(), 1000)]))).await.unwrap_err().code,"spend_unknown");
+            assert!(do_spend_reconcile(&node.state).await.is_err());
+            assert_eq!(do_message_send(&node.state,ROOM,true,"hi",3000, Some(std::collections::HashMap::from([(A.into(), 2000), (C.into(), 1000)]))).await.unwrap_err().code,"spend_unknown");
+            assert_eq!(node.posts().len(),1);
+            assert!(spend_journal(&node.state).unwrap().pending().unwrap().is_some());
+            let reopened=NodeState::for_api(node.state.api_base.clone());
+            *reopened.config.lock().unwrap()=node.state.config.lock().unwrap().clone();
+            assert!(spend_journal(&reopened).unwrap().pending().unwrap().is_some());
+        }
     }
+
     use super::*;
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::TcpListener;

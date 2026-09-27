@@ -41,7 +41,9 @@ must be established at the node before this message can be sent.
 
 Room replies must contain one unique result per confirmed member, with bounded
 amounts and a consistent aggregate. Missing, foreign, duplicate, malformed,
-over-budget or `unknown` rows retain the durable ambiguity fence. A canonical
+over-budget, `unknown`, or `pending` rows retain the durable ambiguity fence.
+An unresolved member reserves its entire attempted principal in `amount_msat`;
+that amount counts against both member and total caps and is not a settled receipt. A canonical
 message ID proves only one member and can never reconcile the whole room.
 All `settled`/`refused` rows can release the fence, but refused members or settled
 payments without a stored message return `room_partial`, keep the draft and
@@ -122,3 +124,7 @@ Changing tracks clears selected files and payment fields alongside the text
 draft, so an empty file chooser cannot send the previous recipient's file.
 The New track renders the shared spending status, owner grant command, errors,
 lock and pending-result controls, including when no conversation exists yet.
+
+Late action completion only clears the composer revision that was submitted.
+Edits, replacement files, mode changes, and track navigation (including returning
+to the same peer) preserve the newer input while the original action finishes.

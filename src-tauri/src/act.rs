@@ -374,7 +374,7 @@ pub fn room_result(reply: &serde_json::Value, request: &serde_json::Value, max: 
                 if row["message_id"].as_str().is_none_or(str::is_empty) { refused = true; }
             },
             Some("refused") if amount == 0 => refused = true,
-            Some("unknown") => terminal = false,
+            Some("unknown" | "pending") => terminal = false,
             _ => return Err(unknown()),
         }
     }
@@ -814,6 +814,14 @@ mod tests {
         excess["member_outcomes"][0]["amount_msat"]=json!(1001);
         excess["amount_msat"]=json!(1001);
         assert!(room_result(&excess,&request,3000).is_err());
+    }
+
+    #[test]
+    fn pending_room_principal_is_bounded_but_not_terminal() {
+        let request = json!({"max_recipient_msat":{"a":1000}});
+        let reply = json!({"amount_msat":1000,"member_outcomes":[{"recipient":"a","status":"pending","amount_msat":1000,"message_id":null}]});
+        assert_eq!(room_result(&reply,&request,1000).unwrap(),(false,false));
+        assert!(room_result(&reply,&request,999).is_err());
     }
 
     #[test]
