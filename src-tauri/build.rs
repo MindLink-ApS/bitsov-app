@@ -16,6 +16,8 @@ fn main() {
             "funding_address",
             "payments_balance",
             "identity_restore",
+            "pairing_status",
+            "pairing_retry",
         ])
         .permissions_path_pattern("./permissions/manual/**/*");
 

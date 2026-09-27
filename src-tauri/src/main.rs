@@ -5,7 +5,7 @@
 // supervises it as a subprocess. It does NOT link the `konsensus-*` crates and does
 // NOT fork protocol logic. See docs/ARCHITECTURE_BOUNDARY.md and docs/API_READINESS.md.
 //
-// Scope: app shell -> bundle/spawn node -> loopback auth (/auth/local) -> identity
+// Scope: app shell -> bundle/spawn node -> loopback auth -> identity
 // screen -> first-run funding (onboarding/start, funding address + QR, poll to
 // funding-seen, balance) and mnemonic restore. No channels, rooms, messaging,
 // pricing, mobile, calls, hosted, or AI.
@@ -17,10 +17,16 @@
 // NodeState, no wallet commands, no bootstrap_node / konsensus. Release and
 // normal debug startup are unchanged.
 //
+// AUTH: the host pairs with the node (#77 ceremony, `bitsov_app::pairing`) and
+// falls back to `/auth/local` ONLY when `/pair/request` is 404 — the pinned rc7
+// sidecar. A pairing refusal is shown as an error, never downgraded.
+//
 // KEYS (charter invariant A.3): the node is the identity anchor. This host never
-// holds, derives, or displays key material. The loopback JWT lives in `NodeState`
-// and is attached to requests here — it is never returned to the renderer, and no
-// command response type carries a token, a mnemonic, or a private key.
+// holds, derives, or displays node key material. It holds one key of its own: the
+// pairing client key (0600 under the app data dir), which proves nothing beyond
+// read access to that dir. The loopback JWT lives in `NodeState` and is attached
+// to requests here — it is never returned to the renderer, and no command response
+// type carries a token, a mnemonic, or a private key.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -29,6 +35,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use bitsov_app::pairing::{
+    self, ClientKey, Established, PairError, PairedSession, PairingClient, PairingView,
+    PrintedCodes,
+};
 use serde::{Deserialize, Serialize};
 #[cfg(unix)]
 use shared_child::unix::SharedChildExt;
@@ -67,6 +77,29 @@ const SIDECAR_BIN: &str = "konsensus";
 /// backend alone so LDK can flush ChannelMonitor persistence.
 const NODE_SHUTDOWN_BUDGET: Duration = Duration::from_secs(30);
 
+/// App-owned pairing store under the app data dir: the client key and the
+/// pairing record. Separate from the node's own `<data_dir>/pairing`.
+const PAIRING_STORE_DIR: &str = "app-client";
+
+/// Name the node shows the owner for this client.
+const PAIRING_CLIENT_NAME: &str = "BitSov app";
+
+/// How the current token was obtained.
+enum AuthMode {
+    Unauthenticated,
+    /// rc7 node without pairing routes: `/auth/local`, unchanged.
+    Local,
+    /// #77 pairing. The session's token mirrors `NodeState::token`.
+    Paired(PairedSession),
+}
+
+struct PairingCtx {
+    client: PairingClient,
+    key: ClientKey,
+    store: PathBuf,
+    data_dir: PathBuf,
+}
+
 struct NodeState {
     ready: Mutex<bool>,
     node_id: Mutex<Option<String>>,
@@ -89,11 +122,33 @@ struct NodeState {
     /// Set by the wait thread when the supervised node exits.
     sidecar_terminated: AtomicBool,
     http: reqwest::Client,
+    /// `API_BASE` in the app; an ephemeral loopback port in tests.
+    api_base: String,
+    auth: Mutex<AuthMode>,
+    pairing: Mutex<Option<Arc<PairingCtx>>>,
+    pairing_view: Mutex<PairingView>,
+    /// Short codes the node printed to its stdout (the tripwire).
+    printed_codes: PrintedCodes,
+    /// The node answered 404 for this client's stored pairing (revoked or
+    /// forgotten). A user retry may then run a fresh ceremony.
+    stale_pairing: AtomicBool,
 }
 
 impl Default for NodeState {
     fn default() -> Self {
+        Self::for_api(API_BASE)
+    }
+}
+
+impl NodeState {
+    fn for_api(api_base: impl Into<String>) -> Self {
         Self {
+            api_base: api_base.into(),
+            auth: Mutex::new(AuthMode::Unauthenticated),
+            pairing: Mutex::new(None),
+            pairing_view: Mutex::new(PairingView::starting()),
+            printed_codes: PrintedCodes::default(),
+            stale_pairing: AtomicBool::new(false),
             ready: Mutex::new(false),
             node_id: Mutex::new(None),
             error: Mutex::new(None),
@@ -248,11 +303,14 @@ fn spawn_node(app: &AppHandle<impl tauri::Runtime>, config: &Path) -> Result<(),
     let child = state.spawn_child(&mut cmd)?;
 
     // Drain node output to the app log — never render node plaintext in the UI.
+    // The one exception is parsed, not rendered: the pairing short code the node
+    // prints to stdout, kept for the tripwire comparison.
     for (label, pipe) in [
         ("out", child.take_stdout().map(PipeKind::Out)),
         ("err", child.take_stderr().map(PipeKind::Err)),
     ] {
         if let Some(pipe) = pipe {
+            let codes = (label == "out").then(|| state.printed_codes.clone());
             std::thread::spawn(move || {
                 let reader: Box<dyn std::io::Read + Send> = match pipe {
                     PipeKind::Out(p) => Box::new(p),
@@ -260,6 +318,9 @@ fn spawn_node(app: &AppHandle<impl tauri::Runtime>, config: &Path) -> Result<(),
                 };
                 let reader = std::io::BufReader::new(reader);
                 for line in std::io::BufRead::lines(reader).map_while(Result::ok) {
+                    if let Some(codes) = &codes {
+                        codes.record_line(&line);
+                    }
                     eprintln!("[node/{label}] {line}");
                 }
             });
@@ -289,7 +350,7 @@ enum PipeKind {
 async fn health_ok(state: &NodeState) -> bool {
     state
         .http
-        .get(format!("{API_BASE}/health"))
+        .get(format!("{}/health", state.api_base))
         .send()
         .await
         .map(|r| r.status().is_success())
@@ -350,7 +411,7 @@ async fn adopt_matching_identity(
     if !health_ok(state).await {
         return Ok(false);
     }
-    mint_token(state).await?;
+    reauthenticate(state).await?;
     let live = fetch_node_id(state).await?;
     if live != expected_node_id {
         *state.token.lock().unwrap() = None;
@@ -423,7 +484,7 @@ async fn restart_node(
 }
 
 /// Ensure a node config exists (first run), then start + supervise the node,
-/// wait for /health, mint a loopback JWT via /auth/local, and read /identity.
+/// wait for /health, pair (or fall back to /auth/local on rc7), and read /identity.
 async fn bootstrap_node(app: AppHandle) {
     let state = app.state::<NodeState>();
     let data_dir: PathBuf = match app.path().app_data_dir() {
@@ -447,25 +508,163 @@ async fn bootstrap_node(app: AppHandle) {
     if let Err(e) = wait_for_health(&state).await {
         return set_error(&state, e);
     }
-    if let Err(e) = mint_token(&state).await {
-        return set_error(&state, e);
+    finish_auth(&state, &data_dir).await;
+}
+
+/// Pair, then read /identity. A pairing failure stays in the pairing view (the
+/// onboarding screen shows it with a retry); it is not a node-start error.
+async fn finish_auth(state: &NodeState, data_dir: &Path) {
+    if authenticate(state, data_dir).await.is_err() {
+        return;
     }
-    match fetch_node_id(&state).await {
+    // An identity-free #77 node has no /identity route; first-run create/restore
+    // waits on a genome tag (docs/ONBOARDING_PAIRING.md).
+    if state.pairing_view.lock().unwrap().bootstrap.is_some() {
+        return;
+    }
+    match fetch_node_id(state).await {
         Ok(node_id) => {
             *state.node_id.lock().unwrap() = Some(node_id);
             *state.ready.lock().unwrap() = true;
         }
-        Err(e) => set_error(&state, e),
+        Err(e) => set_error(state, e),
+    }
+}
+
+// ---- pairing ----------------------------------------------------------------
+
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Load (first run: create) the client key and the pairing client for `data_dir`.
+fn pairing_ctx(state: &NodeState, data_dir: &Path) -> Result<Arc<PairingCtx>, PairError> {
+    if let Some(ctx) = state.pairing.lock().unwrap().as_ref() {
+        return Ok(ctx.clone());
+    }
+    let store = data_dir.join(PAIRING_STORE_DIR);
+    let key = ClientKey::load_or_create(&store)?;
+    let client = PairingClient::new(state.http.clone(), state.api_base.clone())
+        .expect_challenge_dir(data_dir.join("pairing"));
+    let ctx = Arc::new(PairingCtx {
+        client,
+        key,
+        store,
+        data_dir: data_dir.to_path_buf(),
+    });
+    *state.pairing.lock().unwrap() = Some(ctx.clone());
+    Ok(ctx)
+}
+
+/// Pair with the node, reuse a stored pairing, or — only when `/pair/request`
+/// is 404 — mint via `/auth/local`. Records the outcome in the pairing view.
+async fn authenticate(state: &NodeState, data_dir: &Path) -> Result<(), String> {
+    *state.pairing_view.lock().unwrap() = PairingView::pending();
+    *state.auth.lock().unwrap() = AuthMode::Unauthenticated;
+    *state.token.lock().unwrap() = None;
+    let outcome = match pairing_ctx(state, data_dir) {
+        Ok(ctx) => {
+            pairing::establish(
+                &ctx.client,
+                &ctx.key,
+                &ctx.store,
+                PAIRING_CLIENT_NAME,
+                &state.printed_codes,
+            )
+            .await
+        }
+        Err(e) => Err(e),
+    };
+    let mut view = PairingView::from_outcome(&outcome);
+    match outcome {
+        Ok(Established::Paired { session, .. }) => {
+            *state.token.lock().unwrap() = Some(session.token.clone());
+            *state.auth.lock().unwrap() = AuthMode::Paired(session);
+            let ctx = state.pairing.lock().unwrap().clone();
+            if let Some(ctx) = ctx {
+                view.bootstrap = pairing::bootstrap_state(&ctx.client).await.ok().flatten();
+            }
+            *state.pairing_view.lock().unwrap() = view;
+            Ok(())
+        }
+        Ok(Established::LocalFallback { token }) => {
+            *state.token.lock().unwrap() = Some(token);
+            *state.auth.lock().unwrap() = AuthMode::Local;
+            *state.pairing_view.lock().unwrap() = view;
+            Ok(())
+        }
+        Err(e) => {
+            let unknown_client = matches!(
+                e,
+                PairError::Refused { step: "/pair/challenge" | "/pair/token", status: 404, .. }
+            );
+            state.stale_pairing.store(unknown_client, Ordering::SeqCst);
+            *state.pairing_view.lock().unwrap() = view;
+            Err(e.to_string())
+        }
+    }
+}
+
+/// Mint a fresh paired token and install it. No fallback on failure.
+async fn refresh_paired(state: &NodeState) -> Result<(), String> {
+    let session = match &*state.auth.lock().unwrap() {
+        AuthMode::Paired(session) => session.clone(),
+        _ => return Err("not paired".into()),
+    };
+    let ctx = state
+        .pairing
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| "pairing is not set up".to_string())?;
+    let mut session = session;
+    pairing::refresh(&mut session, &ctx.client, &ctx.key)
+        .await
+        .map_err(|e| e.to_string())?;
+    *state.token.lock().unwrap() = Some(session.token.clone());
+    *state.auth.lock().unwrap() = AuthMode::Paired(session);
+    Ok(())
+}
+
+/// Before a call: refresh a paired token that is inside the refresh margin.
+async fn ensure_fresh_token(state: &NodeState) {
+    let due = matches!(
+        &*state.auth.lock().unwrap(),
+        AuthMode::Paired(session) if session.needs_refresh(now_unix())
+    );
+    if due {
+        if let Err(e) = refresh_paired(state).await {
+            eprintln!("[pairing] token refresh failed: {e}");
+        }
+    }
+}
+
+/// Re-auth in the mode already established: paired stays paired, and only a
+/// node already found to lack pairing routes is re-minted via `/auth/local`.
+async fn reauthenticate(state: &NodeState) -> Result<(), String> {
+    let paired = match &*state.auth.lock().unwrap() {
+        AuthMode::Paired(_) => true,
+        AuthMode::Local => false,
+        AuthMode::Unauthenticated => return Err("the node is not authenticated yet".into()),
+    };
+    if paired {
+        refresh_paired(state).await
+    } else {
+        mint_token(state).await
     }
 }
 
 // ---- loopback control plane ----------------------------------------------
 
 /// POST /auth/local (loopback, no signature) -> JWT, stored in the host state.
+/// Reached only on a node without pairing routes (rc7); see `authenticate`.
 async fn mint_token(state: &NodeState) -> Result<(), String> {
     let token = state
         .http
-        .post(format!("{API_BASE}/auth/local"))
+        .post(format!("{}/auth/local", state.api_base))
         .send()
         .await
         .map_err(|e| format!("auth/local request failed: {e}"))?
@@ -480,7 +679,8 @@ async fn mint_token(state: &NodeState) -> Result<(), String> {
     Ok(())
 }
 
-/// Re-mint after a 401, no more often than `REMINT_COOLDOWN`.
+/// Re-auth after a 401, no more often than `REMINT_COOLDOWN`. A paired session
+/// refreshes through pairing; it is never re-minted via `/auth/local`.
 async fn remint_throttled(state: &NodeState) -> Result<(), String> {
     {
         let mut last = state.last_remint.lock().unwrap();
@@ -491,7 +691,7 @@ async fn remint_throttled(state: &NodeState) -> Result<(), String> {
         }
         *last = Some(Instant::now());
     }
-    mint_token(state).await
+    reauthenticate(state).await
 }
 
 /// One authenticated call to the loopback control plane.
@@ -505,6 +705,7 @@ async fn call_api(
     path: &str,
     body: Option<serde_json::Value>,
 ) -> Result<(reqwest::StatusCode, String), String> {
+    ensure_fresh_token(state).await;
     let mut refreshed = false;
     loop {
         let token = state
@@ -515,7 +716,7 @@ async fn call_api(
             .ok_or_else(|| "the node is not authenticated yet".to_string())?;
         let mut request = state
             .http
-            .request(method.clone(), format!("{API_BASE}{path}"))
+            .request(method.clone(), format!("{}{path}", state.api_base))
             .bearer_auth(token);
         if let Some(ref json) = body {
             request = request.json(json);
@@ -744,6 +945,43 @@ fn node_status(
         node_id: state.node_id.lock().unwrap().clone(),
         error: state.error.lock().unwrap().clone(),
     })
+}
+
+/// Pairing state for the onboarding screen. Carries no token and no key.
+#[tauri::command]
+fn pairing_status(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+) -> Result<PairingView, String> {
+    reject_sealed_window(&window)?;
+    Ok(state.pairing_view.lock().unwrap().clone())
+}
+
+/// Retry after a pairing failure. A no-op unless the last attempt failed. Only
+/// when the node said it no longer knows this client is the stored pairing
+/// dropped for a fresh ceremony — still gated by the challenge file and the
+/// node's own pairing window. Never falls back to `/auth/local` on a failure.
+#[tauri::command(rename_all = "snake_case")]
+async fn pairing_retry(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+) -> Result<PairingView, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    let ctx = state
+        .pairing
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| "pairing is not available yet: the node has not started".to_string())?;
+    if state.pairing_view.lock().unwrap().state != "failed" {
+        return Ok(state.pairing_view.lock().unwrap().clone());
+    }
+    if state.stale_pairing.swap(false, Ordering::SeqCst) {
+        pairing::forget_pairing(&ctx.store);
+    }
+    finish_auth(state.inner(), &ctx.data_dir).await;
+    Ok(state.pairing_view.lock().unwrap().clone())
 }
 
 /// `GET /onboarding/state`. `None` means the first-run funding flow has not been
@@ -1084,7 +1322,9 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             fund_start,
             funding_address,
             payments_balance,
-            identity_restore
+            identity_restore,
+            pairing_status,
+            pairing_retry
         ])
         .setup(|app| {
             if assistant_dev_enabled() {
@@ -1116,6 +1356,136 @@ fn assistant_mock_builder() -> tauri::Builder<tauri::Wry> {
             }
             Ok(())
         })
+}
+
+/// Loopback mock harness shared with `tests/pairing.rs` (ephemeral port, test keys).
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../tests/support/mod.rs"]
+mod test_support;
+
+#[cfg(test)]
+mod pairing_wiring_tests {
+    //! The host's auth wiring against mock-node's #77 shapes: which path mints
+    //! the token, and that a paired session never re-mints via `/auth/local`.
+    use super::test_support::{mock, Server};
+    use super::*;
+    use bitsov_app::pairing::{self, ClientKey, PrintedCodes};
+    use mock_node::pairing::{PairRoutes, PairingMock};
+
+    struct Fixture {
+        node: Arc<PairingMock>,
+        state: NodeState,
+        data_dir: tempfile::TempDir,
+        _server: Server,
+    }
+
+    fn fixture(routes: PairRoutes) -> Fixture {
+        let data_dir = tempfile::tempdir().unwrap();
+        let node = mock(data_dir.path(), routes, now_unix());
+        let codes = PrintedCodes::default();
+        let server = Server::start(node.clone(), codes.clone());
+        let mut state = NodeState::for_api(server.api_base());
+        state.printed_codes = codes;
+        Fixture {
+            node,
+            state,
+            data_dir,
+            _server: server,
+        }
+    }
+
+    #[tokio::test]
+    async fn authenticate_pairs_and_never_calls_auth_local() {
+        let f = fixture(PairRoutes::Live);
+        authenticate(&f.state, f.data_dir.path()).await.expect("paired");
+        let view = f.state.pairing_view.lock().unwrap().clone();
+        assert_eq!(view.state, "paired");
+        assert_eq!(view.scopes, ["read", "receive"]);
+        assert!(view.code_from_node);
+        assert!(matches!(*f.state.auth.lock().unwrap(), AuthMode::Paired(_)));
+        assert!(f.state.token.lock().unwrap().is_some());
+        assert_eq!(fetch_node_id(&f.state).await.unwrap(), mock_node::NODE_ID);
+        assert_eq!(f.node.calls("/api/v1/auth/local"), 0);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let key = f.data_dir.path().join(PAIRING_STORE_DIR).join(pairing::KEY_FILE);
+            let mode = std::fs::metadata(key).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+    }
+
+    #[tokio::test]
+    async fn authenticate_on_rc7_falls_back_to_auth_local() {
+        let f = fixture(PairRoutes::Absent);
+        authenticate(&f.state, f.data_dir.path()).await.expect("fallback");
+        assert_eq!(f.state.pairing_view.lock().unwrap().state, "fallback");
+        assert!(matches!(*f.state.auth.lock().unwrap(), AuthMode::Local));
+        assert_eq!(fetch_node_id(&f.state).await.unwrap(), mock_node::NODE_ID);
+        assert_eq!(f.node.calls("/api/v1/auth/local"), 1);
+    }
+
+    #[tokio::test]
+    async fn authenticate_refusal_leaves_no_token_and_no_fallback() {
+        let f = fixture(PairRoutes::Live);
+        let other = tempfile::tempdir().unwrap();
+        let client = pairing::PairingClient::new(reqwest::Client::new(), f.state.api_base.clone());
+        let key = ClientKey::load_or_create(other.path()).unwrap();
+        pairing::establish(&client, &key, other.path(), "other", &PrintedCodes::default())
+            .await
+            .expect("first client pairs");
+
+        let err = authenticate(&f.state, f.data_dir.path()).await.err().expect("refused");
+        assert!(err.contains("409"), "{err}");
+        let view = f.state.pairing_view.lock().unwrap().clone();
+        assert_eq!(view.state, "failed");
+        assert!(view.reason.unwrap().contains("closed"));
+        assert!(f.state.token.lock().unwrap().is_none());
+        assert!(matches!(*f.state.auth.lock().unwrap(), AuthMode::Unauthenticated));
+        assert_eq!(f.node.calls("/api/v1/auth/local"), 0);
+    }
+
+    #[tokio::test]
+    async fn call_api_refreshes_a_paired_token_before_it_expires() {
+        let f = fixture(PairRoutes::Live);
+        authenticate(&f.state, f.data_dir.path()).await.unwrap();
+        let before = f.state.token.lock().unwrap().clone();
+        // Age the session into the refresh margin, still before expiry.
+        if let AuthMode::Paired(session) = &mut *f.state.auth.lock().unwrap() {
+            session.expires_at = now_unix() + 30;
+        }
+        let (status, _) = call_api(&f.state, reqwest::Method::GET, "/identity", None)
+            .await
+            .unwrap();
+        assert_eq!(status, reqwest::StatusCode::OK);
+        assert_eq!(f.node.tokens_issued(), 2);
+        assert_ne!(*f.state.token.lock().unwrap(), before);
+        assert_eq!(f.node.calls("/api/v1/auth/local"), 0);
+    }
+
+    #[tokio::test]
+    async fn a_paired_401_is_never_reminted_via_auth_local() {
+        let f = fixture(PairRoutes::Live);
+        authenticate(&f.state, f.data_dir.path()).await.unwrap();
+        f.node.revoke_all();
+        let (status, _) = call_api(&f.state, reqwest::Method::GET, "/identity", None)
+            .await
+            .unwrap();
+        assert_eq!(status, reqwest::StatusCode::UNAUTHORIZED);
+        assert_eq!(f.node.calls("/api/v1/pair/challenge"), 2, "refresh went through pairing");
+        assert_eq!(f.node.calls("/api/v1/auth/local"), 0);
+    }
+
+    #[tokio::test]
+    async fn bootstrap_node_is_reported_and_not_marked_ready() {
+        let f = fixture(PairRoutes::Bootstrap);
+        authenticate(&f.state, f.data_dir.path()).await.unwrap();
+        let view = f.state.pairing_view.lock().unwrap().clone();
+        assert_eq!(view.state, "paired");
+        assert_eq!(view.bootstrap.as_deref(), Some("bootstrap"));
+        assert_eq!(view.scopes, ["read", "receive", "identity"]);
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -1764,6 +2134,8 @@ mod assistant_acl_tests {
             "funding_address",
             "payments_balance",
             "identity_restore",
+            "pairing_status",
+            "pairing_retry",
         ];
         for name in required {
             assert!(commands.iter().any(|command| command == name), "missing {name}");
@@ -1953,6 +2325,9 @@ mod assistant_acl_tests {
             "funding_address",
             "payments_balance",
             "identity_restore",
+            "pairing_status",
+            "pairing_retry",
+            "pairing::",
             "generate_context",
             "bootstrap",
         ];
@@ -1996,6 +2371,8 @@ mod assistant_acl_tests {
             "funding_address",
             "payments_balance",
             "identity_restore",
+            "pairing_status",
+            "pairing_retry",
         ] {
             assert!(app.contains(cmd), "app_builder lost {cmd}");
         }
@@ -2094,6 +2471,8 @@ mod assistant_acl_tests {
                 super::funding_address,
                 super::payments_balance,
                 super::identity_restore,
+                super::pairing_status,
+                super::pairing_retry,
             ])
             // `test = true` skips the macOS Info.plist embed. A second plain
             // generate_context!() defines `_EMBED_INFO_PLIST` again and cargo
@@ -2159,6 +2538,26 @@ mod assistant_acl_tests {
             "identity_restore",
         );
         for cmd in ["fund_state", "funding_address", "payments_balance"] {
+            assert_acl_denied(invoke(&assistant, cmd, serde_json::json!({})), cmd);
+        }
+
+        // Pairing: main reaches the handlers, the assistant is stopped by the ACL.
+        match invoke(&main, "pairing_status", serde_json::json!({}))
+            .expect("main pairing_status is granted")
+        {
+            tauri::ipc::InvokeResponseBody::Json(body) => {
+                assert!(body.contains("\"state\":\"starting\""), "pairing_status body: {body}");
+                assert!(!body.contains("token"), "pairing_status carries no token: {body}");
+            }
+            tauri::ipc::InvokeResponseBody::Raw(bytes) => {
+                panic!("pairing_status returned raw bytes ({} bytes)", bytes.len());
+            }
+        }
+        assert_handler_ran(
+            invoke(&main, "pairing_retry", serde_json::json!({})),
+            "the node has not started",
+        );
+        for cmd in ["pairing_status", "pairing_retry"] {
             assert_acl_denied(invoke(&assistant, cmd, serde_json::json!({})), cmd);
         }
     }

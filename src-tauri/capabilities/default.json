@@ -16,6 +16,8 @@
     "allow-fund-start",
     "allow-funding-address",
     "allow-payments-balance",
-    "allow-identity-restore"
+    "allow-identity-restore",
+    "allow-pairing-status",
+    "allow-pairing-retry"
   ]
 }
