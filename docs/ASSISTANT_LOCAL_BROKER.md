@@ -1,0 +1,143 @@
+# Assistant local broker (F2)
+
+The sealed assistant window can show the 50 fixture rows read from **your
+local node**, not only from the in-process mock. The host decides which, and
+the window says which it got. Stacked on F1 pairing
+(`docs/ONBOARDING_PAIRING.md`): the broker reads with F1's paired token.
+
+## Status: mock-verified only
+
+The app pins genome `v0.3.0-rc7` (`958e399`). That sidecar has no `/pair/*`
+routes, so F1 falls back to `/auth/local`. **The assistant does not read with
+that token.** With the bundled node the window therefore always shows mock
+rows labelled *rc7 fallback*. The live path is verified here against a
+test-only loopback server that serves mock-node's rc7 bodies. It has not run
+against a real node.
+
+## Live vs mock
+
+The host computes this when the window opens (menu → Assistant), on a
+background thread. One snapshot per open: each route is read at most once.
+
+| Host state | Window shows | Label |
+|---|---|---|
+| Paired (#77), token has `read` scope, `GET /health` answers, no read fails in transport, no 401 | **live** rows from the node | **Live** — read from your paired node |
+| No session: not started, pairing pending, pairing failed, or refused | mock rows | **Mock data** — Not paired with a node |
+| Paired, but the scopes lack `read` | mock rows | **Mock data** — Not paired with a node |
+| Paired, but the node answers 401 on any read | mock rows | **Mock data** — Not paired with a node |
+| Paired, but the node does not answer on loopback (connect refused, timeout, closed connection), `/health` is not a usable report, or the base URL is refused | mock rows | **Mock data** — Node unreachable |
+| rc7: `/pair/request` was 404, F1 used `/auth/local` | mock rows | **Mock data** — Node has no pairing routes (rc7 fallback) |
+| Assistant-only startup (`npm run tauri:assistant`, no node) | mock rows | **Mock data** — Not paired with a node |
+| The page finds no source global, a malformed one, or `live` without valid live rows | mock rows | **Mock data** — Source unknown |
+
+The live rows answer the same 50 questions with the same broker. The fixture's
+fault rows (q33–q50) ask the same keys as earlier rows, so a healthy node
+answers them. q20, q24, q25, q27 and q32 stay `Unavailable`: the broker has
+no allowlisted route that answers them. That is unchanged from the mock.
+
+Running it (not run in this change; no `tauri dev` here):
+
+```bash
+BITSOV_ASSISTANT=node npx tauri dev --features sit-mock
+```
+
+`BITSOV_ASSISTANT=1` is unchanged: the node-free, assistant-only mock path.
+`node` needs a debug build and `sit-mock` (the fixture answering lives there).
+Without `sit-mock` there is no live reader; the window stays mock.
+
+## Deny list
+
+`LocalNodeRead` (`src-tauri/src/jarvis/broker/local_read.rs`) is the only
+code that reads the node for the assistant. It is deny-by-default:
+
+- **Routes.** Only the pinned rc7 GET routes in `route.rs`:
+  `/api/v1/health`, `/api/v1/payments/balance`, `/api/v1/payments/channels`,
+  `/api/v1/messages?limit=N`, `/api/v1/pricing`. Exact byte match, no path
+  normalisation. The one query key is `limit`, on `/messages` only.
+- **Methods.** GET only. Every other method is refused before a socket opens.
+- **Refused and logged,** among others: every `POST`; `/pair/*`,
+  `/auth/local`; `/identity`, `/identity/restore`; `/payments/pay`,
+  `/invoice`, `/keysend`, `/send-onchain`, `/open-channel`,
+  `/close-channel`, `/funding-address`, `/payments`, `/payments/price/:kind`;
+  `/onboarding/*`; `/status`; `/peers`; `/messages/compose`; `../` paths.
+  Segments that name spend, restore, admin, seed or auth routes are refused
+  even inside an allowlisted-looking path (`route.rs` `FORBIDDEN_SEGMENTS`).
+- **Tools.** Only the five read tools parse (`Broker::execute`). Anything
+  else is `Rejected` and never reaches a reader.
+- **Network.** The base URL must be plain `http` to a loopback IP literal
+  (`127.0.0.0/8` or `::1`), an explicit non-zero port, path `/api/v1`.
+  Refused: host names (including `localhost`), non-loopback and unspecified
+  addresses, `https`/`ws`, credentials, other paths. The client is plain
+  `std::net`: no proxy environment, no redirects, no DNS, no cookies, one
+  request per connection, 2 s connect / 5 s I/O, 8 MiB response cap, and no
+  `Transfer-Encoding` decoding. No cloud model and no other outbound network.
+- **Auth.** The paired token only. The broker never calls `/auth/local` or
+  `/pair/*`; F1's rules for both are unchanged. The token is refreshed through
+  F1 (`ensure_fresh_token`) before the snapshot. A token with anything but
+  visible ASCII is refused, so it cannot split a header.
+- **Backend choice.** Host-side only. No command was added (`build.rs` and the
+  handler list are unchanged, asserted in `main.rs`). The window receives the
+  source as frozen, non-writable, non-configurable init-script globals
+  (`__BITSOV_ASSISTANT_SOURCE__`, `__BITSOV_LIVE_ROWS__`). It still has no
+  IPC grants and `connect-src 'none'`.
+
+Host log lines (stderr) carry a method, a path and a reason only:
+
+```text
+[assistant-broker] denied POST /api/v1/payments/pay: method not allowed
+[assistant-broker] denied GET /api/v1/identity: route not allowlisted
+[assistant-broker] GET /api/v1/payments/channels: http 502
+[assistant-broker] GET /api/v1/health: transport error
+[assistant-broker] refused base url: not http on a loopback IP with /api/v1
+```
+
+A refused path is cut at `?`, capped at 96 characters and made printable. No
+line or error carries a body, a token, a key or the refused base URL. Tests
+use a canary token and assert it appears in none of them.
+
+## Known limits
+
+- **Staleness.** rc7 has no stale marker on the wire. mock-node models stale
+  reads out of band; a real rc7 node serving a stale cache would answer 200
+  with its cached figure, and `LocalNodeRead` cannot tell. The test server
+  carries mock-node's stale flag as a `503` so the fixture's stale rows stay
+  `Unavailable`. A real signal needs a genome change.
+- **Snapshot, not live updates.** Rows are read when the window opens. Close
+  and reopen it to refresh.
+
+## Waits on HUMAN
+
+1. A genome tag that contains #77 pairing (BitSov-bitsov `56c0ee0` is in no
+   tag), then a pin bump from `v0.3.0-rc7` with
+   `scripts/fetch-node-sidecar.sh` and the CS-1/CS-2 smokes. Until then the
+   bundled node is always *rc7 fallback* and the window is always mock.
+2. A real-node run of the live path after that bump.
+3. If stale reads must be caught live: a stale marker in the genome API.
+
+## Tests
+
+- `jarvis::broker::local_read` — base-URL allow/deny table, `admit` table,
+  POST/write and unlisted routes refused and logged with nothing sent,
+  bounded log lines, paired bearer sent, error status vs transport fault,
+  unreachable port, strict response framing, token never in logs, errors or
+  `Debug`.
+- `jarvis::assistant_feed` — all 50 fixture questions over a real loopback
+  socket (ephemeral port, asserted `!= 3141`) answer identically to the
+  in-process mock; live values; one read per route; rc7, not paired, missing
+  `read` scope, refused token, unreachable node, a route dropping mid-read and
+  a non-loopback base all give mock with the right reason.
+- `jarvis::assistant_source` — script shape, reasons, frozen globals,
+  escaping.
+- `main.rs` — `node_auth` follows F1's mode (paired / rc7 / refused);
+  `BITSOV_ASSISTANT=node` gating; no new command and the node read stays
+  outside the sealed-window section.
+- `tests/assistant-source.test.tsx` — label for live and each mock reason,
+  unknown/malformed sources, live without rows, no rows at all.
+
+The existing Jarvis guards are unchanged and pass: `sit_mock.rs` and mock-node
+stay socket-free (the test server is `broker/test_server.rs`, `cfg(test)`).
+
+## Non-goals
+
+Model inference or J5 sandbox changes; spend; cloud; real-node end to end;
+pin bump; packaging.

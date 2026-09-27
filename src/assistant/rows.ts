@@ -10,8 +10,8 @@ export type SitRow = { id: string; answer: string };
  * Read the rows the host handed over. Anything that is not a list of
  * `[id, answer]` string pairs is refused and yields no rows.
  */
-export function readRows(scope: object = globalThis): SitRow[] {
-  const raw: unknown = (scope as Record<string, unknown>)[ROWS_GLOBAL];
+export function readRows(scope: object = globalThis, global: string = ROWS_GLOBAL): SitRow[] {
+  const raw: unknown = (scope as Record<string, unknown>)[global];
   if (!Array.isArray(raw) || raw.length > MAX_ROWS) return [];
   const rows: SitRow[] = [];
   for (const entry of raw) {

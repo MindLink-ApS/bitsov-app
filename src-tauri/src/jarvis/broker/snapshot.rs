@@ -1,0 +1,51 @@
+//! One read per route for a batch of tool calls.
+//!
+//! The assistant feed answers 50 questions from five routes. This wrapper
+//! reads each route once, so the rows are one consistent snapshot and a hung
+//! node costs one timeout per route, not one per question.
+
+use std::cell::RefCell;
+
+use super::route::ReadRoute;
+use super::{NodeRead, RawRead, ReadFault};
+
+pub struct Snapshot<'a, R: NodeRead> {
+    inner: &'a R,
+    reads: RefCell<Vec<(ReadRoute, Result<RawRead, ReadFault>)>>,
+}
+
+impl<'a, R: NodeRead> Snapshot<'a, R> {
+    pub fn new(inner: &'a R) -> Self {
+        Self {
+            inner,
+            reads: RefCell::new(Vec::new()),
+        }
+    }
+
+    /// A read failed before any response existed.
+    pub fn transport_failed(&self) -> bool {
+        self.reads
+            .borrow()
+            .iter()
+            .any(|(_, read)| matches!(read, Err(ReadFault::Transport)))
+    }
+
+    /// The node refused the token on some read.
+    pub fn unauthorized(&self) -> bool {
+        self.reads
+            .borrow()
+            .iter()
+            .any(|(_, read)| matches!(read, Ok(raw) if raw.status == 401))
+    }
+}
+
+impl<R: NodeRead> NodeRead for Snapshot<'_, R> {
+    fn read(&self, route: ReadRoute) -> Result<RawRead, ReadFault> {
+        if let Some((_, read)) = self.reads.borrow().iter().find(|(seen, _)| *seen == route) {
+            return read.clone();
+        }
+        let read = self.inner.read(route);
+        self.reads.borrow_mut().push((route, read.clone()));
+        read
+    }
+}

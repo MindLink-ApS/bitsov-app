@@ -67,4 +67,29 @@ body {
   color: var(--accent);
 }
 .sit-answer { overflow-wrap: anywhere; }
+.assistant-page {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+.assistant-page > .assistant-seal {
+  flex: 1;
+  min-height: 0;
+}
+.source-label {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  margin: 16px 16px 0;
+  padding: 8px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--accent);
+  font-size: 13px;
+}
+.source-mock {
+  border-style: dashed;
+  border-color: var(--ink);
+}
+.source-title { color: var(--accent); }
+.source-mock .source-title { color: var(--ink); }
 .sit-unavailable { opacity: 0.6; }

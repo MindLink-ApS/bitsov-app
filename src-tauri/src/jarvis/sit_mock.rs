@@ -10,6 +10,7 @@ use std::fmt;
 use mock_node::{AnswerKey, Fault, MockNode, Route, SENDER_A, SENDER_B};
 use serde::Deserialize;
 
+use super::assistant_source::js_literal;
 use super::broker::{
     Amount, BalanceInput, BalanceReport, Broker, ChainBackend, ChannelsInput, ChannelsReport,
     HealthInput, HealthReport, LightningBackend, Liveness, LocalPrices, LocalPricesInput,
@@ -63,7 +64,7 @@ fn request_path(route: ReadRoute) -> String {
     }
 }
 
-fn exec(node: &MockRead, call: ToolCall) -> ToolOutput {
+fn exec(node: &impl NodeRead, call: ToolCall) -> ToolOutput {
     Broker::new()
         .expect("allowlist")
         .dispatch(node, call)
@@ -154,14 +155,14 @@ fn load_fixture() -> Fixture {
     serde_json::from_str(FIXTURE_JSON).expect("fixture json")
 }
 
-fn node_for(question: &Question) -> MockRead {
+fn node_for(question: &Question) -> MockNode {
     let mut node = MockNode::canonical();
     if let Some(faults) = &question.faults {
         for fault in faults {
             node = node.fault(fault.route, fault.mode);
         }
     }
-    MockRead::new(node)
+    node
 }
 
 fn amount_u64(amount: &Amount<u64>) -> Option<u64> {
@@ -250,15 +251,14 @@ fn sender_count(report: &MessageMetadata, sender: &str) -> Option<u64> {
 }
 
 /// Answer one fixture question through the in-process mock broker.
-fn answer(question: &Question) -> String {
+fn answer(question: &Question, read: &impl NodeRead) -> String {
     if BROKER_GAPS.contains(&question.id.as_str()) {
         return UNAVAILABLE.to_string();
     }
 
-    let read = node_for(question);
     match question.key {
         AnswerKey::FirstChannelLocalMsat => {
-            let output = exec(&read, channels_call());
+            let output = exec(read, channels_call());
             ready_channels(&output)
                 .and_then(|report| report.channels.first())
                 .and_then(|channel| amount_u64(&channel.local_balance))
@@ -266,31 +266,31 @@ fn answer(question: &Question) -> String {
                 .unwrap_or_else(|| UNAVAILABLE.to_string())
         }
         AnswerKey::TotalBalanceMsat => {
-            let output = exec(&read, balance_call());
+            let output = exec(read, balance_call());
             ready_balance(&output)
                 .and_then(|report| amount_u64(&report.wallet_balance))
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| UNAVAILABLE.to_string())
         }
-        AnswerKey::ChannelLocalMsat => channel_sum(&read, |report| &report.channel_local_balance),
-        AnswerKey::ChannelRemoteMsat => channel_sum(&read, |report| &report.channel_remote_balance),
-        AnswerKey::ChannelCapacityMsat => channel_sum(&read, |report| &report.channel_capacity),
+        AnswerKey::ChannelLocalMsat => channel_sum(read, |report| &report.channel_local_balance),
+        AnswerKey::ChannelRemoteMsat => channel_sum(read, |report| &report.channel_remote_balance),
+        AnswerKey::ChannelCapacityMsat => channel_sum(read, |report| &report.channel_capacity),
         AnswerKey::ChannelCount => {
-            let output = exec(&read, channels_call());
+            let output = exec(read, channels_call());
             ready_channels(&output)
                 .and_then(|report| amount_u64(&report.count))
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| UNAVAILABLE.to_string())
         }
         AnswerKey::ChannelActiveCount => {
-            let output = exec(&read, channels_call());
+            let output = exec(read, channels_call());
             ready_channels(&output)
                 .and_then(|report| amount_u64(&report.active_count))
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| UNAVAILABLE.to_string())
         }
         AnswerKey::ChannelInactiveCount => {
-            let output = exec(&read, channels_call());
+            let output = exec(read, channels_call());
             match ready_channels(&output) {
                 Some(report) => {
                     let count = amount_u64(&report.count);
@@ -304,32 +304,32 @@ fn answer(question: &Question) -> String {
             }
         }
         AnswerKey::HealthStatus => {
-            let output = exec(&read, health_call());
+            let output = exec(read, health_call());
             match ready_health(&output) {
                 Some(report) if report.liveness == Liveness::Ok => "ok".to_string(),
                 Some(_) | None => UNAVAILABLE.to_string(),
             }
         }
-        AnswerKey::ConnectedPeers => health_amount(&read, |report| &report.connected_peers),
-        AnswerKey::E2eeSessions => health_amount(&read, |report| &report.e2ee_sessions),
-        AnswerKey::PendingDeliveries => health_amount(&read, |report| &report.pending_deliveries),
+        AnswerKey::ConnectedPeers => health_amount(read, |report| &report.connected_peers),
+        AnswerKey::E2eeSessions => health_amount(read, |report| &report.e2ee_sessions),
+        AnswerKey::PendingDeliveries => health_amount(read, |report| &report.pending_deliveries),
         AnswerKey::LightningAvailable => {
-            let output = exec(&read, health_call());
+            let output = exec(read, health_call());
             ready_health(&output)
                 .map(|report| report.lightning_available.to_string())
                 .unwrap_or_else(|| UNAVAILABLE.to_string())
         }
         AnswerKey::LightningPaymentCapable => {
-            let output = exec(&read, health_call());
+            let output = exec(read, health_call());
             ready_health(&output)
                 .map(|report| report.lightning_payment_capable.to_string())
                 .unwrap_or_else(|| UNAVAILABLE.to_string())
         }
-        AnswerKey::UptimeSecs => health_amount(&read, |report| &report.uptime),
-        AnswerKey::ProtocolVersion => health_amount(&read, |report| &report.version),
+        AnswerKey::UptimeSecs => health_amount(read, |report| &report.uptime),
+        AnswerKey::ProtocolVersion => health_amount(read, |report| &report.version),
         AnswerKey::BlockHeight => {
-            let health = exec(&read, health_call());
-            let prices = exec(&read, prices_call());
+            let health = exec(read, health_call());
+            let prices = exec(read, prices_call());
             if report_down(&health) || report_down(&prices) {
                 return UNAVAILABLE.to_string();
             }
@@ -339,7 +339,7 @@ fn answer(question: &Question) -> String {
                 .unwrap_or_else(|| UNAVAILABLE.to_string())
         }
         AnswerKey::LightningBackend => {
-            let output = exec(&read, health_call());
+            let output = exec(read, health_call());
             match ready_health(&output) {
                 Some(report) if report.lightning_backend == LightningBackend::Ldk => {
                     "ldk".to_string()
@@ -348,7 +348,7 @@ fn answer(question: &Question) -> String {
             }
         }
         AnswerKey::ChainBackend => {
-            let output = exec(&read, health_call());
+            let output = exec(read, health_call());
             match ready_health(&output) {
                 Some(report) if report.chain_backend == ChainBackend::Esplora => {
                     "esplora".to_string()
@@ -362,32 +362,32 @@ fn answer(question: &Question) -> String {
         | AnswerKey::PriceLongformMsat
         | AnswerKey::PeerCount => UNAVAILABLE.to_string(),
         AnswerKey::DistinctSenders => {
-            let output = exec(&read, messages_call());
+            let output = exec(read, messages_call());
             ready_messages(&output)
                 .map(|report| report.senders.len().to_string())
                 .unwrap_or_else(|| UNAVAILABLE.to_string())
         }
         AnswerKey::MessagesFromA => {
-            let output = exec(&read, messages_call());
+            let output = exec(read, messages_call());
             ready_messages(&output)
                 .and_then(|report| sender_count(report, SENDER_A))
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| UNAVAILABLE.to_string())
         }
         AnswerKey::MessagesFromB => {
-            let output = exec(&read, messages_call());
+            let output = exec(read, messages_call());
             ready_messages(&output)
                 .and_then(|report| sender_count(report, SENDER_B))
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| UNAVAILABLE.to_string())
         }
         AnswerKey::PriceChatMsat | AnswerKey::PriceCommunicationMsat => {
-            price_category(&read, PriceCategory::Communication)
+            price_category(read, PriceCategory::Communication)
         }
-        AnswerKey::PriceFileMsat => price_category(&read, PriceCategory::FilesMedia),
-        AnswerKey::PriceCalendarMsat => price_category(&read, PriceCategory::StructuredData),
+        AnswerKey::PriceFileMsat => price_category(read, PriceCategory::FilesMedia),
+        AnswerKey::PriceCalendarMsat => price_category(read, PriceCategory::StructuredData),
         AnswerKey::PricingMode => {
-            let output = exec(&read, prices_call());
+            let output = exec(read, prices_call());
             match ready_prices(&output) {
                 Some(report) if report.mode == PricingMode::Static => "static".to_string(),
                 Some(_) | None => UNAVAILABLE.to_string(),
@@ -396,7 +396,7 @@ fn answer(question: &Question) -> String {
     }
 }
 
-fn channel_sum(read: &MockRead, field: impl Fn(&BalanceReport) -> &Amount<u64>) -> String {
+fn channel_sum(read: &impl NodeRead, field: impl Fn(&BalanceReport) -> &Amount<u64>) -> String {
     let balance = exec(read, balance_call());
     let channels = exec(read, channels_call());
     if report_down(&channels) {
@@ -408,7 +408,7 @@ fn channel_sum(read: &MockRead, field: impl Fn(&BalanceReport) -> &Amount<u64>) 
         .unwrap_or_else(|| UNAVAILABLE.to_string())
 }
 
-fn health_amount(read: &MockRead, field: impl Fn(&HealthReport) -> &Amount<u64>) -> String {
+fn health_amount(read: &impl NodeRead, field: impl Fn(&HealthReport) -> &Amount<u64>) -> String {
     let output = exec(read, health_call());
     ready_health(&output)
         .and_then(|report| amount_u64(field(report)))
@@ -416,7 +416,7 @@ fn health_amount(read: &MockRead, field: impl Fn(&HealthReport) -> &Amount<u64>)
         .unwrap_or_else(|| UNAVAILABLE.to_string())
 }
 
-fn price_category(read: &MockRead, category: PriceCategory) -> String {
+fn price_category(read: &impl NodeRead, category: PriceCategory) -> String {
     let output = exec(read, prices_call());
     ready_prices(&output)
         .and_then(|report| category_price(report, category))
@@ -427,10 +427,29 @@ fn price_category(read: &MockRead, category: PriceCategory) -> String {
 /// Drive the mock broker over every fixture question. One `(id, answer)` pair
 /// per question, in fixture order. The answer is a value or `Unavailable`.
 pub fn rows() -> Vec<(String, String)> {
+    rows_via(|node| MockRead::new(node.clone()))
+}
+
+/// Like [`rows`], with the reader for each question built by `read_for` from
+/// that question's mock node (canonical plus the fixture's faults).
+pub fn rows_via<R: NodeRead>(mut read_for: impl FnMut(&MockNode) -> R) -> Vec<(String, String)> {
     load_fixture()
         .questions
         .iter()
-        .map(|question| (question.id.clone(), answer(question)))
+        .map(|question| {
+            let read = read_for(&node_for(question));
+            (question.id.clone(), answer(question, &read))
+        })
+        .collect()
+}
+
+/// Every fixture question against one reader (the local node). Fixture
+/// faults do not apply; the reader's own failures do.
+pub fn live_rows(read: &impl NodeRead) -> Vec<(String, String)> {
+    load_fixture()
+        .questions
+        .iter()
+        .map(|question| (question.id.clone(), answer(question, read)))
         .collect()
 }
 
@@ -459,14 +478,7 @@ pub fn assistant_init_script(rows: &[(String, String)]) -> String {
         .iter()
         .map(|(id, value)| [id.as_str(), value.as_str()])
         .collect();
-    // serde_json escapes quotes, backslashes and control characters. Escape `<`
-    // and the JS line separators too so the literal cannot close a script tag
-    // or break a statement.
-    let json = serde_json::to_string(&pairs)
-        .expect("rows json")
-        .replace('<', "\\u003c")
-        .replace('\u{2028}', "\\u2028")
-        .replace('\u{2029}', "\\u2029");
+    let json = js_literal(&serde_json::json!(pairs));
     format!(
         "Object.defineProperty(window, '{ASSISTANT_ROWS_GLOBAL}', \
          {{ value: Object.freeze({json}.map(Object.freeze)), \

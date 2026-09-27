@@ -1,16 +1,28 @@
 import { render } from 'solid-js/web';
 import { AssistantSurface } from './Assistant';
 import { SitRows } from './SitRows';
-import { NO_ROWS_TEXT, readRows } from './rows';
+import { SourceLabel } from './SourceLabel';
+import { NO_ROWS_TEXT } from './rows';
+import { readView } from './source';
 import './assistant.css';
 
-// Display surface only. This phase does not connect a model. Rows come from the
-// in-process mock broker via the window's initialization script.
+// Display surface only. This phase does not connect a model. The host hands
+// over the rows and their source (live node or mock) via the window's
+// initialization script; the page cannot choose or change either.
 const root = document.getElementById('root');
 if (root) {
-  const rows = readRows();
+  const view = readView();
   render(
-    () => (rows.length > 0 ? <SitRows rows={rows} /> : <AssistantSurface text={NO_ROWS_TEXT} />),
+    () => (
+      <div class="assistant-page">
+        <SourceLabel source={view.source} />
+        {view.rows.length > 0 ? (
+          <SitRows rows={view.rows} />
+        ) : (
+          <AssistantSurface text={NO_ROWS_TEXT} />
+        )}
+      </div>
+    ),
     root,
   );
 }
