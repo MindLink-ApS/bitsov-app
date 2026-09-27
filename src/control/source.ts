@@ -33,6 +33,9 @@ import type {
   NodeOverview,
   Peer,
   PriceQuote,
+  EnergyRead,
+  EnergySpan,
+  MembraneRead,
   RestoreOutcome,
   Room,
   WalletOverview,
@@ -56,6 +59,10 @@ export interface Source {
   messages(peer: string, before?: number): Promise<Message[]>;
   priceQuote(peer?: string): Promise<PriceQuote>;
   wallet(): Promise<WalletOverview>;
+  /** Node-wide energy (genome N1). Call only when the overview lists `energy_v1`. */
+  energy(span: EnergySpan): Promise<EnergyRead>;
+  /** The node's membrane ring, newest first (genome N2). Only with `membrane_v1`. */
+  membrane(limit?: number): Promise<MembraneRead>;
   /** Subscribe to live events; resolves to an unsubscribe. */
   onLive(handler: (event: LiveEvent) => void): Promise<() => void>;
   /**
@@ -119,6 +126,8 @@ export const hostSource: Source = {
   messages: (peer, before) => invoke<Message[]>('messages_list', { peer, before: before ?? null }),
   priceQuote: (peer) => invoke<PriceQuote>('price_quote', { peer: peer ?? null }),
   wallet: () => invoke<WalletOverview>('payments_overview'),
+  energy: (span) => invoke<EnergyRead>('energy_read', { span }),
+  membrane: (limit) => invoke<MembraneRead>('membrane_read', { limit: limit ?? null }),
   onLive: (handler) => listen<LiveEvent>(LIVE_EVENT, (e) => handler(e.payload)),
   liveLink: () => invoke<LinkState | null>('live_link'),
   spendStatus: () => invoke<SpendView>('spend_status'),

@@ -1,5 +1,13 @@
 # O1 node follow-ups: N1 energy read, N2 membrane events
 
+**Status:** built in genome PR #82 (`feat/n1-n2-energy-membrane`) and consumed
+by this app when `/status` advertises `energy_v1` / `membrane_v1`. See
+`docs/CONTROL_CENTER_ORGANISM.md` (O1 v2). The shipped shapes are in the
+genome's `docs/v2/API_ORGANISM_READS.md`. Where they differ from the sketch
+below, the shipped shapes are authoritative: windows are `1h|24h|7d`, the read is
+`?since=&limit=`, and refusals from `replay` onward name the verified sender.
+The host commands are not in the AI broker schema.
+
 For later, in the genome (`crates/konsensus-api`, `msg_handler.rs`). O1 v1 in the
 app works without them and says so on screen. These two turn that into O1 v2.
 Spec: `MindLink-Private/pm/projects/bitsov/O1-ORGANISM-VIEW-SPEC.md`.

@@ -26,6 +26,8 @@ fn main() {
             "messages_list",
             "price_quote",
             "payments_overview",
+            "energy_read",
+            "membrane_read",
             "spend_status",
             "spend_request",
             "spend_lock",

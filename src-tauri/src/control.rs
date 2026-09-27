@@ -122,6 +122,233 @@ pub struct NodeStatusResponse {
     pub chain_backend: Option<String>,
     #[serde(default)]
     pub block_height: Option<u64>,
+    /// What this node build can do (`energy_v1`, `membrane_v1`, …). Absent on rc7.
+    #[serde(default)]
+    pub api_capabilities: Vec<String>,
+}
+
+// ---- organism reads (O1 v2: genome N1 + N2) ----------------------------------
+//
+// Local reads of this node's own ledger, read scope. A counterparty is a node id
+// or room id this node already stores; each is re-validated here so nothing
+// unshaped reaches the renderer. Payment hashes, preimages, ciphertext and
+// signatures are not in these node shapes and are not accepted if they appear.
+
+/// Capabilities the renderer may act on. Anything else the node lists is dropped.
+pub const KNOWN_CAPABILITIES: &[&str] = &["energy_v1", "membrane_v1"];
+
+pub fn known_capabilities(listed: &[String]) -> Vec<String> {
+    KNOWN_CAPABILITIES
+        .iter()
+        .filter(|c| listed.iter().any(|l| l == *c))
+        .map(|c| (*c).to_string())
+        .collect()
+}
+
+/// A node id or a room UUID, lowercased; anything else is refused.
+fn counterparty_id(value: &str) -> Option<String> {
+    node_id(value).or_else(|_| room_id(value)).ok()
+}
+
+/// `?window=` for `GET /energy`.
+pub fn energy_path(window: &str) -> Result<String, String> {
+    match window {
+        "1h" | "24h" | "7d" => Ok(format!("/energy?window={window}")),
+        _ => Err("window must be 1h, 24h or 7d".into()),
+    }
+}
+
+/// `GET /membrane?limit=` (the node caps at its ring size).
+pub fn membrane_path(limit: Option<u32>) -> String {
+    format!("/membrane?limit={}", limit.unwrap_or(50).clamp(1, 500))
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+pub struct EnergyBucket {
+    pub start_ms: u64,
+    #[serde(default)]
+    pub in_msat: u64,
+    #[serde(default)]
+    pub out_msat: u64,
+}
+
+#[derive(Deserialize, Clone, Debug)]
+struct NodeCounterpartyEnergy {
+    counterparty: String,
+    #[serde(default)]
+    counterparty_kind: Option<String>,
+    #[serde(default)]
+    in_msat: u64,
+    #[serde(default)]
+    out_msat: u64,
+    #[serde(default)]
+    in_count: u64,
+    #[serde(default)]
+    out_count: u64,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Default)]
+pub struct EnergyTotals {
+    #[serde(default)]
+    pub in_msat: u64,
+    #[serde(default)]
+    pub out_msat: u64,
+    #[serde(default)]
+    pub in_count: u64,
+    #[serde(default)]
+    pub out_count: u64,
+}
+
+/// `GET /energy` as the node sends it.
+#[derive(Deserialize, Clone, Debug)]
+pub struct NodeEnergy {
+    window: String,
+    as_of_ms: u64,
+    #[serde(default)]
+    bucket_ms: u64,
+    #[serde(default)]
+    buckets: Vec<EnergyBucket>,
+    #[serde(default)]
+    counterparties: Vec<NodeCounterpartyEnergy>,
+    #[serde(default)]
+    totals: EnergyTotals,
+    #[serde(default)]
+    truncated: bool,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct CounterpartyEnergy {
+    /// `peer` or `room`, as the renderer keys tracks.
+    pub kind: &'static str,
+    pub id: String,
+    pub in_msat: u64,
+    pub out_msat: u64,
+    pub in_count: u64,
+    pub out_count: u64,
+}
+
+/// `energy_read`: the renderer's projection of `GET /energy`.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct EnergyRead {
+    pub window: String,
+    pub as_of_ms: u64,
+    pub bucket_ms: u64,
+    /// Oldest first; a bucket with nothing in it is absent (a gap, not a zero).
+    pub buckets: Vec<EnergyBucket>,
+    pub counterparties: Vec<CounterpartyEnergy>,
+    pub totals: EnergyTotals,
+    pub truncated: bool,
+}
+
+impl EnergyRead {
+    pub fn from_node(node: NodeEnergy) -> Self {
+        let counterparties = node
+            .counterparties
+            .into_iter()
+            .filter_map(|c| {
+                let id = counterparty_id(&c.counterparty)?;
+                let kind = if c.counterparty_kind.as_deref() == Some("room") || id.contains('-') { "room" } else { "peer" };
+                Some(CounterpartyEnergy { kind, id, in_msat: c.in_msat, out_msat: c.out_msat, in_count: c.in_count, out_count: c.out_count })
+            })
+            .collect();
+        let mut buckets = node.buckets;
+        buckets.sort_by_key(|b| b.start_ms);
+        Self {
+            window: node.window,
+            as_of_ms: node.as_of_ms,
+            bucket_ms: node.bucket_ms,
+            buckets,
+            counterparties,
+            totals: node.totals,
+            truncated: node.truncated,
+        }
+    }
+}
+
+/// One admission decision at the payment gate (`/ws` `membrane`, `GET /membrane`).
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+pub struct MembraneEvent {
+    pub seq: u64,
+    pub at: u64,
+    /// `inbound` or `outbound`.
+    pub direction: String,
+    /// `admitted` or `refused`.
+    pub verdict: String,
+    pub code: String,
+    #[serde(default)]
+    pub kind: Option<u16>,
+    /// Present only when the node verified the sender before deciding.
+    #[serde(default)]
+    pub counterparty: Option<String>,
+    #[serde(default)]
+    pub first_contact: bool,
+    #[serde(default)]
+    pub required_msat: Option<u64>,
+    #[serde(default)]
+    pub paid_msat: Option<u64>,
+    #[serde(default)]
+    pub cap_msat: Option<u64>,
+}
+
+impl MembraneEvent {
+    /// Keep an event only if its enums are known and its counterparty is id-shaped.
+    fn checked(mut self) -> Option<Self> {
+        let token = |s: &str| !s.is_empty() && s.len() <= 40 && s.bytes().all(|b| b.is_ascii_lowercase() || b == b'_');
+        if !matches!(self.direction.as_str(), "inbound" | "outbound")
+            || !matches!(self.verdict.as_str(), "admitted" | "refused")
+            || !token(&self.code)
+        {
+            return None;
+        }
+        self.counterparty = match self.counterparty.take() {
+            Some(c) => Some(counterparty_id(&c)?),
+            None => None,
+        };
+        Some(self)
+    }
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Default)]
+pub struct MembraneTotals {
+    #[serde(default)]
+    pub admitted: u64,
+    #[serde(default)]
+    pub first_contacts: u64,
+    #[serde(default)]
+    pub refused: u64,
+    #[serde(default)]
+    pub outbound_refused: u64,
+}
+
+#[derive(Deserialize, Clone, Debug)]
+pub struct NodeMembrane {
+    #[serde(default)]
+    capacity: u64,
+    #[serde(default)]
+    totals: MembraneTotals,
+    #[serde(default)]
+    events: Vec<MembraneEvent>,
+}
+
+/// `membrane_read`: the node's bounded ring, newest first.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct MembraneRead {
+    pub capacity: u64,
+    pub totals: MembraneTotals,
+    pub events: Vec<MembraneEvent>,
+    /// Unix ms when the host read it.
+    pub read_at: u64,
+}
+
+impl MembraneRead {
+    pub fn from_node(node: NodeMembrane, read_at: u64) -> Self {
+        Self {
+            capacity: node.capacity,
+            totals: node.totals,
+            events: node.events.into_iter().filter_map(MembraneEvent::checked).collect(),
+            read_at,
+        }
+    }
 }
 
 // ---- renderer shapes (serialize) -------------------------------------------
@@ -162,6 +389,8 @@ pub struct NodeOverview {
     pub uptime_secs: u64,
     pub lightning_backend: Option<String>,
     pub chain_backend: Option<String>,
+    /// Known capabilities only (see [`KNOWN_CAPABILITIES`]).
+    pub capabilities: Vec<String>,
     /// Unix ms when the host read it, for the freshness line.
     pub read_at: u64,
 }
@@ -180,6 +409,7 @@ impl NodeOverview {
             uptime_secs: status.uptime_secs,
             lightning_backend: status.lightning_backend,
             chain_backend: status.chain_backend,
+            capabilities: known_capabilities(&status.api_capabilities),
             read_at,
         }
     }
@@ -291,6 +521,9 @@ pub enum LiveEvent {
         state: LinkState,
         detail: Option<String>,
     },
+    Membrane {
+        event: MembraneEvent,
+    },
 }
 
 #[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -380,6 +613,9 @@ pub fn parse_ws_frame(text: &str) -> Option<LiveEvent> {
             }),
             "onboarding_progress" => Some(LiveEvent::Onboarding {
                 step: field("status")?,
+            }),
+            "membrane" => Some(LiveEvent::Membrane {
+                event: serde_json::from_value::<MembraneEvent>(value).ok()?.checked()?,
             }),
             _ => None,
         };
@@ -634,6 +870,62 @@ mod tests {
         assert_eq!(parse_ws_frame(r#"{"type":"operator_hosting_overdue","message_id":"x","status":"y"}"#), None);
         assert_eq!(parse_ws_frame("not json"), None);
         assert_eq!(parse_ws_frame(r#"{"id":"x"}"#), None);
+    }
+
+    #[test]
+    fn ws_membrane_frames_are_projected_and_checked() {
+        let a = "ab".repeat(32);
+        let frame = format!(
+            r#"{{"type":"membrane","seq":7,"at":1000,"direction":"inbound","verdict":"admitted","code":"settled","kind":0,"counterparty":"{}","first_contact":true,"paid_msat":20000,"payment_hash":"ff","preimage":"ee"}}"#,
+            a.to_uppercase()
+        );
+        let Some(LiveEvent::Membrane { event }) = parse_ws_frame(&frame) else { panic!("membrane frame dropped") };
+        assert_eq!(event.counterparty.as_deref(), Some(a.as_str()), "lowercased id");
+        assert!(event.first_contact);
+        let json = serde_json::to_string(&LiveEvent::Membrane { event }).unwrap();
+        assert!(!json.contains("payment_hash") && !json.contains("preimage"), "{json}");
+
+        // A counterparty that is not id-shaped, or an unknown verdict, drops the frame.
+        assert_eq!(parse_ws_frame(r#"{"type":"membrane","seq":1,"at":1,"direction":"inbound","verdict":"admitted","code":"settled","counterparty":"../x"}"#), None);
+        assert_eq!(parse_ws_frame(r#"{"type":"membrane","seq":1,"at":1,"direction":"inbound","verdict":"maybe","code":"settled"}"#), None);
+        assert_eq!(parse_ws_frame(r#"{"type":"membrane","seq":1,"at":1,"direction":"inbound","verdict":"refused","code":"<b>"}"#), None);
+        // A refusal without a verified sender stays anonymous.
+        let Some(LiveEvent::Membrane { event }) = parse_ws_frame(
+            r#"{"type":"membrane","seq":2,"at":2,"direction":"inbound","verdict":"refused","code":"unpaid","required_msat":20000,"paid_msat":0}"#,
+        ) else { panic!() };
+        assert_eq!((event.counterparty, event.required_msat), (None, Some(20000)));
+    }
+
+    #[test]
+    fn organism_reads_are_projected_and_capabilities_filtered() {
+        assert_eq!(energy_path("24h").unwrap(), "/energy?window=24h");
+        assert!(energy_path("30d").is_err());
+        assert!(energy_path("24h&x=1").is_err());
+        assert_eq!(membrane_path(None), "/membrane?limit=50");
+        assert_eq!(membrane_path(Some(9999)), "/membrane?limit=500");
+
+        let a = "cd".repeat(32);
+        let node: NodeEnergy = serde_json::from_str(&format!(
+            r#"{{"window":"24h","as_of_ms":5,"since_ms":0,"bucket_ms":3600000,
+               "buckets":[{{"start_ms":7200000,"in_msat":1,"out_msat":0}},{{"start_ms":0,"in_msat":2,"out_msat":3}}],
+               "counterparties":[{{"counterparty":"{a}","counterparty_kind":"node","in_msat":4,"out_msat":5,"in_count":1,"out_count":1}},
+                                  {{"counterparty":"0f8e2b7a-1c3d-4e5f-8a9b-0c1d2e3f4a5b","counterparty_kind":"room","in_msat":1,"out_msat":0,"in_count":1,"out_count":0}},
+                                  {{"counterparty":"not an id","in_msat":9}}],
+               "totals":{{"in_msat":5,"out_msat":5,"in_count":2,"out_count":1}},"truncated":false,"source":"x"}}"#
+        ))
+        .unwrap();
+        let read = EnergyRead::from_node(node);
+        assert_eq!(read.buckets.iter().map(|b| b.start_ms).collect::<Vec<_>>(), [0, 7_200_000], "oldest first");
+        assert_eq!(read.counterparties.len(), 2, "a non-id counterparty is dropped");
+        assert_eq!((read.counterparties[0].kind, read.counterparties[1].kind), ("peer", "room"));
+
+        let status: NodeStatusResponse = serde_json::from_str(
+            r#"{"status":"ok","node_id":"x","api_capabilities":["paid_send_caps_v1","membrane_v1","energy_v1","<script>"]}"#,
+        )
+        .unwrap();
+        assert_eq!(NodeOverview::from_status(status, 1).capabilities, ["energy_v1", "membrane_v1"]);
+        let rc7: NodeStatusResponse = serde_json::from_str(r#"{"status":"ok","node_id":"x"}"#).unwrap();
+        assert!(NodeOverview::from_status(rc7, 1).capabilities.is_empty(), "rc7 advertises nothing: v1 sources");
     }
 
     #[test]

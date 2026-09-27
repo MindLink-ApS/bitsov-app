@@ -1,12 +1,13 @@
-// The organism view (O1 v1): the node's physiology as pure functions over data
-// the app already holds. Nothing here is simulated. Every figure is a sum or a
-// count of real readings — loaded tracks, `/ws` events, host refusals, the B2
-// budget view, `/status` — and an organ with no source says so instead of
-// showing a zero. Node-wide energy (N1), inbound refusals (N2) and evidence
-// (N3) are not readable yet; see docs/O1_NODE_FOLLOWUPS.md and docs/CONTROL_CENTER_ORGANISM.md.
+// The organism view (O1): the node's physiology as pure functions over real
+// readings. Nothing here is simulated. Every figure is a sum or a count of
+// loaded tracks, `/ws` events, host refusals, the B2 budget view and `/status`,
+// and, when the node advertises them, its own energy read (N1, `energy_v1`) and
+// membrane events (N2, `membrane_v1`). An organ with no source says so instead
+// of showing a zero. Evidence (N3) is not readable yet; see
+// docs/O1_NODE_FOLLOWUPS.md and docs/CONTROL_CENTER_ORGANISM.md.
 
 import { isOutgoing, trackOf, trackKey, type Threads } from './state';
-import type { ActionError, BudgetView, LiveEvent, Message, NodeOverview } from './types';
+import type { ActionError, BudgetView, DoorCard, EnergyBucket, EnergyRead, LiveEvent, MembraneEvent, Message, NodeOverview } from './types';
 
 const HOUR_MS = 3_600_000;
 const DAY_MS = 24 * HOUR_MS;
@@ -24,7 +25,49 @@ export type Metabolism = {
   rows: EnergyRow[];
   /** Tracks whose history the app has read; the rest are not counted. */
   tracks_read: number;
+  /** `tracks`: summed here from what the app read (v1). `node`: the node's own ledger (N1). */
+  source: 'tracks' | 'node';
+  /** 24 hourly buckets from N1, oldest first; a missing hour is a gap. Null before N1. */
+  bars: { start_ms: number; bucket_ms: number; buckets: EnergyBucket[] } | null;
+  /** N1 hit its row limit: totals are a floor. */
+  truncated: boolean;
 };
+
+/** Node capabilities the organism view can use, from `/status`. */
+export function organismCaps(overview: NodeOverview | null): { energy: boolean; membrane: boolean } {
+  const caps = overview?.capabilities ?? [];
+  return { energy: caps.includes('energy_v1'), membrane: caps.includes('membrane_v1') };
+}
+
+const fromTotals = (t: EnergyRead['totals']): Energy => ({ in_msat: t.in_msat, out_msat: t.out_msat, acts_in: t.in_count, acts_out: t.out_count });
+
+/**
+ * Metabolism from the node's own ledger (N1): node-wide, every counterparty,
+ * not only the tracks this app opened. The 24 h read gives rows and bars; the
+ * 1 h read gives the hour.
+ */
+export function nodeMetabolism(hour: EnergyRead, day: EnergyRead): Metabolism {
+  const rows: EnergyRow[] = day.counterparties.map((c) => ({
+    key: `${c.kind}:${c.id}`,
+    kind: c.kind,
+    id: c.id,
+    last_at: 0,
+    in_msat: c.in_msat,
+    out_msat: c.out_msat,
+    acts_in: c.in_count,
+    acts_out: c.out_count,
+  }));
+  rows.sort((a, b) => b.in_msat + b.out_msat - (a.in_msat + a.out_msat) || a.key.localeCompare(b.key));
+  return {
+    hour: fromTotals(hour.totals),
+    day: fromTotals(day.totals),
+    rows,
+    tracks_read: 0,
+    source: 'node',
+    bars: { start_ms: day.as_of_ms - 24 * HOUR_MS, bucket_ms: day.bucket_ms, buckets: day.buckets },
+    truncated: hour.truncated || day.truncated,
+  };
+}
 
 const none = (): Energy => ({ in_msat: 0, out_msat: 0, acts_in: 0, acts_out: 0 });
 
@@ -72,7 +115,7 @@ export function metabolism(threads: Threads, ownId: string, nowMs: number, paid:
   const sorted = [...rows.values()].sort(
     (a, b) => b.in_msat + b.out_msat - (a.in_msat + a.out_msat) || b.last_at - a.last_at || a.key.localeCompare(b.key),
   );
-  return { hour, day, rows: sorted, tracks_read: tracksRead };
+  return { hour, day, rows: sorted, tracks_read: tracksRead, source: 'tracks', bars: null, truncated: false };
 }
 
 // ---- membrane -----------------------------------------------------------------
@@ -80,28 +123,40 @@ export function metabolism(threads: Threads, ownId: string, nowMs: number, paid:
 /** Why one of our sends did not cross: their door, their price, or our own setpoint. */
 export type OutboundKind = 'door' | 'price' | 'setpoint';
 
+/** A refusal is outbound (one of the above) or `inbound`: someone refused at our own door (N2). */
+export type RefusalKind = OutboundKind | 'inbound';
+
 export type MembraneEntry =
   | {
       seq: number;
       at: number;
       verdict: 'admitted';
-      message_id: string;
+      /** Set when the admission was seen as a `/ws` message (v1); the node's own event has none. */
+      message_id: string | null;
       /** Verified by the node before it was delivered: a settled payment admitted it. */
       sender: string;
       paid_msat: number | null;
       /** The sender is not in this node's contacts. Never added automatically. */
       first_contact: boolean;
       track: string | null;
+      /** The node's own event sequence (N2), for de-duplication. */
+      node_seq?: number;
     }
   | {
       seq: number;
       at: number;
       verdict: 'refused';
-      kind: OutboundKind;
-      /** The recipient's node reason or the host's code, shown as given. */
+      kind: RefusalKind;
+      /** The recipient's node reason, the host's code, or the node's gate code (N2). */
       code: string;
       detail: string;
       track: string | null;
+      /** Inbound only, and only when the node verified the sender before refusing. */
+      sender?: string | null;
+      /** Inbound: the price the gate stated, and what the envelope carried. */
+      required_msat?: number | null;
+      paid_msat?: number | null;
+      node_seq?: number;
     };
 
 /** In memory only, never persisted or exported; the oldest entries fall off. */
@@ -119,9 +174,11 @@ const keep = (log: MembraneEntry[], entry: MembraneEntry) => [entry, ...log].sli
 export function membraneLive(
   log: MembraneEntry[],
   event: LiveEvent,
-  ctx: { ownId: string; contacts: Set<string>; threads: Threads; nowMs: number },
+  ctx: { ownId: string; contacts: Set<string>; threads: Threads; nowMs: number; nodeMembrane?: boolean },
 ): MembraneEntry[] {
   if (event.type === 'message') {
+    // With N2 the node reports its own admissions; counting the message too would double them.
+    if (ctx.nodeMembrane) return log;
     if (isOutgoing(event.message, ctx.ownId)) return log;
     // `/ws` can repeat a message after a reconnect: one message, one admission.
     if (log.some((e) => e.verdict === 'admitted' && e.message_id === event.message.id)) return log;
@@ -152,6 +209,97 @@ export function membraneLive(
   return log;
 }
 
+/** Plain words for the node's gate codes (N2). Unknown codes are shown as given. */
+export const GATE_WORDS: Record<string, string> = {
+  settled: 'settled',
+  unpaid: 'unpaid',
+  insufficient_payment: 'paid too little',
+  not_settled: 'payment not settled',
+  settlement_mismatch: 'payment did not match',
+  settlement_unavailable: 'could not check payment',
+  proof_reused: 'payment already used',
+  replay: 'replay',
+  stale: 'stale',
+  bad_signature: 'bad signature',
+  invalid_envelope: 'malformed',
+  invite_only: 'invite only',
+  not_priceable: 'no price for this kind',
+  node_error: 'node could not decide',
+};
+
+export const gateWords = (code: string) => GATE_WORDS[code] ?? code.replace(/_/g, ' ');
+
+/**
+ * Fold one of the node's own membrane events (N2) in. Inbound decisions only:
+ * this app already records its own refused sends with their track, and the
+ * node's copy of those would count them twice. A refusal names a sender only
+ * when the node verified it; an admitted stranger is flagged, never added.
+ */
+export function membraneNode(log: MembraneEntry[], event: MembraneEvent, ctx: { contacts: Set<string> }): MembraneEntry[] {
+  if (event.direction !== 'inbound') return log;
+  if (log.some((e) => e.node_seq === event.seq)) return log;
+  const sender = event.counterparty?.toLowerCase() ?? null;
+  const track = sender ? `peer:${sender}` : null;
+  if (event.verdict === 'admitted' && sender) {
+    return keep(log, {
+      seq: ++membraneSeq,
+      at: event.at,
+      verdict: 'admitted',
+      message_id: null,
+      sender,
+      paid_msat: event.paid_msat,
+      first_contact: event.first_contact && !ctx.contacts.has(sender),
+      track,
+      node_seq: event.seq,
+    });
+  }
+  if (event.verdict !== 'refused') return log;
+  const need = event.required_msat !== null ? `needed ${event.required_msat} msat` : '';
+  return keep(log, {
+    seq: ++membraneSeq,
+    at: event.at,
+    verdict: 'refused',
+    kind: 'inbound',
+    code: event.code,
+    detail: [gateWords(event.code), need].filter(Boolean).join(' · '),
+    track,
+    sender,
+    required_msat: event.required_msat,
+    paid_msat: event.paid_msat,
+    node_seq: event.seq,
+  });
+}
+
+/** The node's ring, oldest first, folded into the log (N2 seed on open). */
+export function membraneSeed(log: MembraneEntry[], events: MembraneEvent[], ctx: { contacts: Set<string> }): MembraneEntry[] {
+  return [...events].sort((a, b) => a.seq - b.seq).reduce((acc, e) => membraneNode(acc, e, ctx), log);
+}
+
+/**
+ * What the stream shows at the door for one membrane entry, and in which track:
+ * a first contact admitted by payment, a verified sender refused at your door,
+ * or your send refused at their price. Other entries stay in the Body panel.
+ */
+export function doorCard(entry: MembraneEntry, doorMsat: number | null): { track: string; at: number; card: DoorCard } | null {
+  if (!entry.track) return null;
+  if (entry.verdict === 'admitted') {
+    if (!entry.first_contact) return null;
+    return { track: entry.track, at: entry.at, card: { side: 'in', verdict: 'admitted', sender: entry.sender, paid_msat: entry.paid_msat, door_msat: doorMsat } };
+  }
+  if (entry.kind === 'inbound') {
+    if (!entry.sender) return null;
+    return {
+      track: entry.track,
+      at: entry.at,
+      card: { side: 'in', verdict: 'refused', sender: entry.sender, code: entry.code, required_msat: entry.required_msat ?? null, paid_msat: entry.paid_msat ?? null },
+    };
+  }
+  if (entry.kind === 'price') {
+    return { track: entry.track, at: entry.at, card: { side: 'out', verdict: 'refused', code: entry.code, detail: entry.detail, cap_msat: null } };
+  }
+  return null;
+}
+
 function trackOfMessage(threads: Threads, id: string): string | null {
   for (const [key, messages] of Object.entries(threads)) {
     if (messages.some((m: Message) => m.id === id)) return key;
@@ -179,12 +327,14 @@ export type MembraneSummary = {
   admitted_msat: number;
   first_contacts: number;
   refused: number;
-  refused_by: Record<OutboundKind, number>;
+  refused_by: Record<RefusalKind, number>;
+  /** Inbound refusals by the node's gate code (N2), e.g. `{ unpaid: 2, replay: 1 }`. */
+  inbound_by: Record<string, number>;
   last_at: number | null;
 };
 
 export function membraneSummary(log: MembraneEntry[]): MembraneSummary {
-  const s: MembraneSummary = { admitted: 0, admitted_msat: 0, first_contacts: 0, refused: 0, refused_by: { door: 0, price: 0, setpoint: 0 }, last_at: null };
+  const s: MembraneSummary = { admitted: 0, admitted_msat: 0, first_contacts: 0, refused: 0, refused_by: { door: 0, price: 0, setpoint: 0, inbound: 0 }, inbound_by: {}, last_at: null };
   for (const e of log) {
     s.last_at = Math.max(s.last_at ?? 0, e.at);
     if (e.verdict === 'admitted') {
@@ -194,6 +344,7 @@ export function membraneSummary(log: MembraneEntry[]): MembraneSummary {
     } else {
       s.refused += 1;
       s.refused_by[e.kind] += 1;
+      if (e.kind === 'inbound') s.inbound_by[e.code] = (s.inbound_by[e.code] ?? 0) + 1;
     }
   }
   return s;

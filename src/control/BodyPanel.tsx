@@ -2,6 +2,7 @@ import { createEffect, createSignal, For, type JSX, Match, on, onCleanup, Show, 
 import { ago, clock, sats, satsWhole, satUnit, shortId } from './format';
 import {
   feedState,
+  gateWords,
   membraneSummary,
   type Energy,
   type EnergyRow,
@@ -9,7 +10,7 @@ import {
   type MembraneEntry,
   type Metabolism,
   type Nucleus,
-  type OutboundKind,
+  type RefusalKind,
   type Setpoint,
 } from './body';
 import { freshness } from './state';
@@ -44,7 +45,11 @@ export type OrganismProps = {
   metabolism: Metabolism;
   /** Last time a track was read or a `/ws` message arrived. */
   energyAt: number | null;
+  /** When the node's own energy read (N1) last answered; null before N1. */
+  energyReadAt: number | null;
   membrane: MembraneEntry[];
+  /** The node reports its own gate decisions (N2), inbound refusals included. */
+  nodeMembrane: boolean;
   /** This node's own price for a text message: what a stranger pays at the door. */
   door: { msat: number; read_at: number } | null;
   homeostasis: Homeostasis;
@@ -119,18 +124,31 @@ function MetabolismOrgan(props: OrganismProps & { fresh: { label: string; stale:
   const m = () => props.metabolism;
   const idle = (e: Energy) => e.acts_in + e.acts_out === 0;
   const hot = usePulse(() => m().day.acts_in + m().day.acts_out);
+  // N1: the node's own ledger, polled; its age is the read's, not the feed's.
+  const fresh = () => {
+    if (m().source !== 'node') return props.fresh;
+    const f = freshness(props.energyReadAt, props.now);
+    return { label: f.label, stale: f.stale || props.down };
+  };
   return (
     <Organ
       id="metabolism"
       title="Metabolism"
       hot={hot()}
       summary={<span class="sats">{plus(m().hour.in_msat)} / {minus(m().hour.out_msat)} · 1 h</span>}
-      fresh={props.fresh}
+      fresh={fresh()}
       sample={props.sample}
       source={
-        <>
-          Paid messages in {m().tracks_read} {m().tracks_read === 1 ? 'track' : 'tracks'} read here + live feed. Node-wide totals and hourly bars need N1.
-        </>
+        m().source === 'node' ? (
+          <>
+            Node-wide, from your node’s own record of paid messages (N1). Local only; no one else’s traffic.
+            <Show when={m().truncated}> More than the node reads at once: totals are a floor.</Show>
+          </>
+        ) : (
+          <>
+            Paid messages in {m().tracks_read} {m().tracks_read === 1 ? 'track' : 'tracks'} read here + live feed. Node-wide totals and hourly bars need N1.
+          </>
+        )
       }
     >
       <div class="energy" role="table" aria-label="Sats in and out">
@@ -145,11 +163,43 @@ function MetabolismOrgan(props: OrganismProps & { fresh: { label: string; stale:
         <span class="sats energy-fig" data-energy="out-24h">{minus(m().day.out_msat)}</span>
       </div>
       <p class="organ-unit">sats</p>
+      <Show when={m().bars}>{(b) => <Bars bars={b()} now={props.now} />}</Show>
       <Show when={idle(m().hour)}>
         <p class="organ-line" data-energy-idle>No energy crossed in the last hour.</p>
       </Show>
       <For each={m().rows.slice(0, 4)}>{(row) => <EnergyLine row={row} name={props.nameOfTrack(row.key)} />}</For>
     </Organ>
+  );
+}
+
+/**
+ * 24 hourly bars from N1, oldest left. An hour the node reported nothing for is
+ * a gap: drawn empty, never interpolated or zero-filled from a guess.
+ */
+function Bars(props: { bars: NonNullable<Metabolism['bars']>; now: number }) {
+  const slots = () => {
+    const size = props.bars.bucket_ms || 3_600_000;
+    const first = props.bars.start_ms - (props.bars.start_ms % size) + size;
+    const byStart = new Map(props.bars.buckets.map((b) => [b.start_ms, b]));
+    return Array.from({ length: 24 }, (_, i) => byStart.get(first + i * size) ?? null);
+  };
+  const max = () => Math.max(1, ...props.bars.buckets.map((b) => b.in_msat + b.out_msat));
+  const h = (msat: number) => `${Math.max(8, Math.round((msat / max()) * 100))}%`;
+  return (
+    <div class="bars" role="img" aria-label={`Sats per hour, last 24 hours; ${props.bars.buckets.length} of 24 hours had paid messages`} data-energy-bars>
+      <For each={slots()}>
+        {(b) =>
+          b ? (
+            <span class="hour-bar" title={`+${sats(b.in_msat)} / −${sats(b.out_msat)} sats`} data-bar>
+              <span class="bar-in" style={{ height: h(b.in_msat) }} classList={{ none: b.in_msat === 0 }} />
+              <span class="bar-out" style={{ height: h(b.out_msat) }} classList={{ none: b.out_msat === 0 }} />
+            </span>
+          ) : (
+            <span class="hour-bar gap" data-bar-gap />
+          )
+        }
+      </For>
+    </div>
   );
 }
 
@@ -166,17 +216,28 @@ function EnergyLine(props: { row: EnergyRow; name: string }) {
 
 // ---- membrane -----------------------------------------------------------------
 
-const KIND_TEXT: Record<OutboundKind, string> = { door: 'their door', price: 'price', setpoint: 'your setpoint' };
+const KIND_TEXT: Record<RefusalKind, string> = { door: 'their door', price: 'price', setpoint: 'your setpoint', inbound: 'at your door' };
 
 function MembraneOrgan(props: OrganismProps & { fresh: { label: string; stale: boolean } }) {
   const s = () => membraneSummary(props.membrane);
   // Rows that arrive after the panel opened pulse once; history on mount does not.
   const baseline = untrack(() => props.membrane[0]?.seq ?? 0);
-  const refusedBy = () =>
-    (Object.entries(s().refused_by) as [OutboundKind, number][])
-      .filter(([, n]) => n > 0)
+  const outboundBy = () =>
+    (Object.entries(s().refused_by) as [RefusalKind, number][])
+      .filter(([k, n]) => k !== 'inbound' && n > 0)
       .map(([k, n]) => `${KIND_TEXT[k]} ${n}`)
       .join(' · ');
+  const inboundBy = () =>
+    Object.entries(s().inbound_by)
+      .sort((a, b) => b[1] - a[1])
+      .map(([code, n]) => `${gateWords(code)} ${n}`)
+      .join(' · ');
+  const refusedNote = () => {
+    const parts = [];
+    if (props.nodeMembrane) parts.push(s().refused_by.inbound > 0 ? `at your door: ${inboundBy()}` : 'at your door: none');
+    if (outboundBy()) parts.push(`outbound: ${outboundBy()}`);
+    return parts.join(' · ') || 'outbound';
+  };
   return (
     <Organ
       id="membrane"
@@ -185,9 +246,15 @@ function MembraneOrgan(props: OrganismProps & { fresh: { label: string; stale: b
       fresh={props.fresh}
       sample={props.sample}
       source={
-        <>
-          Since {clock(props.openedAt)}: what your node admitted and your sends that did not cross. Memory only, never saved.
-        </>
+        props.nodeMembrane ? (
+          <>
+            Your node’s own gate decisions (N2), from its memory ring, plus your sends from this app. A refused sender is named only when the node verified its signature. Memory only, never saved.
+          </>
+        ) : (
+          <>
+            Since {clock(props.openedAt)}: what your node admitted and your sends that did not cross. Memory only, never saved.
+          </>
+        )
       }
     >
       <p class="organ-line door" data-door>
@@ -210,7 +277,7 @@ function MembraneOrgan(props: OrganismProps & { fresh: { label: string; stale: b
       <div class="organ-row" data-membrane-refused>
         <span class="who"><span class="dot err" /> refused</span>
         <span class="sats">{s().refused}</span>
-        <span class="organ-note">{s().refused > 0 ? `outbound: ${refusedBy()}` : 'outbound'}</span>
+        <span class="organ-note" data-membrane-refused-by>{refusedNote()}</span>
       </div>
       <Show
         when={props.membrane.length > 0}
@@ -218,7 +285,9 @@ function MembraneOrgan(props: OrganismProps & { fresh: { label: string; stale: b
       >
         <For each={props.membrane.slice(0, 3)}>{(e) => <MembraneLine e={e} hot={e.seq > baseline} nameOf={props.nameOf} nameOfTrack={props.nameOfTrack} />}</For>
       </Show>
-      <p class="organ-line muted" data-membrane-n2>Inbound refusals are not visible yet (node N2).</p>
+      <Show when={!props.nodeMembrane}>
+        <p class="organ-line muted" data-membrane-n2>Inbound refusals are not visible yet (node N2).</p>
+      </Show>
     </Organ>
   );
 }
@@ -245,10 +314,20 @@ function MembraneLine(props: { e: MembraneEntry; hot: boolean; nameOf: (id: stri
           {(e) => {
             const r = () => e() as Extract<MembraneEntry, { verdict: 'refused' }>;
             return (
-              <span title={r().detail}>
-                <span class="err-word">refused</span> {r().track ? props.nameOfTrack(r().track!) : 'send'} · {KIND_TEXT[r().kind]}
-                <span class="detail">{r().detail}</span>
-              </span>
+              <Show
+                when={r().kind === 'inbound'}
+                fallback={
+                  <span title={r().detail}>
+                    <span class="err-word">refused</span> {r().track ? props.nameOfTrack(r().track!) : 'send'} · {KIND_TEXT[r().kind]}
+                    <span class="detail">{r().detail}</span>
+                  </span>
+                }
+              >
+                <span title={r().detail} data-membrane-inbound={r().code}>
+                  <span class="err-word">refused</span> {r().sender ? props.nameOf(r().sender!) : 'unsigned'} · {gateWords(r().code)}
+                  <Show when={r().required_msat}> · needed <span class="sats">{sats(r().required_msat!)}</span> {satUnit(r().required_msat!)}</Show>
+                </span>
+              </Show>
             );
           }}
         </Match>

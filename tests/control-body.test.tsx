@@ -94,7 +94,7 @@ describe('membrane', () => {
       expect(outboundKind({ code, message: '' })).toBeNull();
     }
     const log = membraneRefused([], { code: 'ceiling_exhausted', message: 'daily total used' }, `peer:${A}`, NOW);
-    expect(membraneSummary(log).refused_by).toEqual({ door: 0, price: 0, setpoint: 1 });
+    expect(membraneSummary(log).refused_by).toEqual({ door: 0, price: 0, setpoint: 1, inbound: 0 });
   });
 
   it('keeps a bounded buffer, newest first', () => {

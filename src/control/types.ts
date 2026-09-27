@@ -76,7 +76,51 @@ export type NodeOverview = {
   uptime_secs: number;
   lightning_backend: string | null;
   chain_backend: string | null;
+  /** Known node capabilities (`energy_v1`, `membrane_v1`); absent or empty on rc7. */
+  capabilities?: string[];
   /** Unix ms when the host read it. */
+  read_at: number;
+};
+
+// ---- organism reads (genome N1 / N2) ------------------------------------------
+// Mirrors `bitsov_app::control` EnergyRead / MembraneRead. Local reads of the
+// node's own ledger: counterparty ids only, never a hash, preimage or payload.
+
+export type EnergySpan = '1h' | '24h' | '7d';
+
+/** One bucket; a bucket with nothing in it is absent (a gap, not a zero). */
+export type EnergyBucket = { start_ms: number; in_msat: number; out_msat: number };
+
+export type EnergyRead = {
+  window: EnergySpan;
+  as_of_ms: number;
+  bucket_ms: number;
+  buckets: EnergyBucket[];
+  counterparties: { kind: 'peer' | 'room'; id: string; in_msat: number; out_msat: number; in_count: number; out_count: number }[];
+  totals: { in_msat: number; out_msat: number; in_count: number; out_count: number };
+  truncated: boolean;
+};
+
+/** One admission decision at a payment gate, as the node reports it. */
+export type MembraneEvent = {
+  seq: number;
+  at: number;
+  direction: 'inbound' | 'outbound';
+  verdict: 'admitted' | 'refused';
+  code: string;
+  kind: number | null;
+  /** Only when the node verified the sender before deciding. */
+  counterparty: string | null;
+  first_contact: boolean;
+  required_msat: number | null;
+  paid_msat: number | null;
+  cap_msat: number | null;
+};
+
+export type MembraneRead = {
+  capacity: number;
+  totals: { admitted: number; first_contacts: number; refused: number; outbound_refused: number };
+  events: MembraneEvent[];
   read_at: number;
 };
 
@@ -87,7 +131,8 @@ export type LiveEvent =
   | { type: 'message'; message: Message; room_id: string | null }
   | { type: 'delivery'; message_id: string; status: string; reason: string | null }
   | { type: 'onboarding'; step: string }
-  | { type: 'link'; state: LinkState; detail: string | null };
+  | { type: 'link'; state: LinkState; detail: string | null }
+  | { type: 'membrane'; event: MembraneEvent };
 
 export type TrackRef =
   | { kind: 'peer'; id: string }
@@ -236,7 +281,17 @@ export type Artifact =
   | { id: string; at: number; type: 'invoice'; invoice: InvoiceView }
   | { id: string; at: number; type: 'payment'; receipt: PaymentReceipt }
   | { id: string; at: number; type: 'file'; receipt: FileReceipt }
-  | { id: string; at: number; type: 'failed'; action: string; error: ActionError };
+  | { id: string; at: number; type: 'failed'; action: string; error: ActionError }
+  | { id: string; at: number; type: 'door'; door: DoorCard };
+
+/**
+ * The membrane in the stream: a first contact admitted at your door, a verified
+ * sender refused there, or your own send refused at theirs.
+ */
+export type DoorCard =
+  | { side: 'in'; verdict: 'admitted'; sender: string; paid_msat: number | null; door_msat: number | null }
+  | { side: 'in'; verdict: 'refused'; sender: string; code: string; required_msat: number | null; paid_msat: number | null }
+  | { side: 'out'; verdict: 'refused'; code: string; detail: string; cap_msat: number | null };
 
 // ---- AI track (slice C) -----------------------------------------------------
 // Each mirrors `bitsov_app::ai` (src-tauri/src/ai.rs) or the read broker's

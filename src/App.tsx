@@ -27,7 +27,9 @@ const short = (id: string) => (id.length > 20 ? `${id.slice(0, 8)}…${id.slice(
 export default function App() {
   // Dev mode: sample data with no node (a plain browser tab, or `?sample`).
   const sample = sampleRequest(window.location.search, inHost(), import.meta.env.DEV);
-  const [source, setSource] = createSignal<Source>(sample ? sampleSource() : hostSource);
+  // `?sample&organism=v2` shows the organism view against a node with N1/N2.
+  const organism = new URLSearchParams(window.location.search).get('organism') === 'v2' ? 'v2' : 'v1';
+  const [source, setSource] = createSignal<Source>(sample ? sampleSource({ organism }) : hostSource);
   const [status, setStatus] = createSignal<NodeStatus>({ ready: false, node_id: null, error: null });
   // Gate G6: the funds UI stays behind an explicit local-trust disclosure.
   const [trustAck, setTrustAck] = createSignal(sample === 'shell');
@@ -63,7 +65,7 @@ export default function App() {
     }
   };
   const useSample = (start: SampleStart) => {
-    setSource(sampleSource());
+    setSource(sampleSource({ organism }));
     setTrustAck(start === 'shell');
     void poll();
   };

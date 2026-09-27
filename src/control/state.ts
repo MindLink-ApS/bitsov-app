@@ -226,13 +226,24 @@ export function sentMessage(receipt: SendReceipt, ownId: string, plaintext: stri
 
 export type StreamItem = { type: 'message'; at: number; message: Message } | { type: 'artifact'; at: number; artifact: Artifact };
 
+/** How far back a first-contact door card reaches for the message it admitted (sender clocks drift). */
+const DOOR_REACH_MS = 10 * 60_000;
+
 /** Messages and this track's artifacts, in time order. */
 export function streamItems(messages: Message[], artifacts: Artifact[]): StreamItem[] {
-  const items: StreamItem[] = [
-    ...messages.map((message) => ({ type: 'message' as const, at: message.timestamp, message })),
-    ...artifacts.map((artifact) => ({ type: 'artifact' as const, at: artifact.at, artifact })),
+  // A first contact's door card stands just before the stranger's first message
+  // near it, whichever clock (theirs on the message, the node's on the card) is earlier.
+  const sortAt = (a: Artifact) => {
+    if (a.type !== 'door' || a.door.side !== 'in' || a.door.verdict !== 'admitted') return a.at;
+    const sender = a.door.sender;
+    const theirs = messages.filter((m) => m.sender.toLowerCase() === sender && Math.abs(m.timestamp - a.at) <= DOOR_REACH_MS).map((m) => m.timestamp);
+    return Math.min(a.at, ...theirs) - 0.5;
+  };
+  const items: (StreamItem & { key: number })[] = [
+    ...messages.map((message) => ({ type: 'message' as const, at: message.timestamp, key: message.timestamp, message })),
+    ...artifacts.map((artifact) => ({ type: 'artifact' as const, at: artifact.at, key: sortAt(artifact), artifact })),
   ];
-  return items.sort((a, b) => a.at - b.at);
+  return items.sort((a, b) => a.key - b.key).map(({ key: _key, ...item }) => item as StreamItem);
 }
 
 /** The composer's spend line. */

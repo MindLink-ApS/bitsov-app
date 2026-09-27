@@ -1391,6 +1391,35 @@ async fn price_quote(
     read_price_quote(state.inner(), peer.as_deref()).await
 }
 
+/// `GET /energy?window=` (genome N1) — node-wide sats in/out per counterparty
+/// and per bucket. Only called when `/status` advertises `energy_v1`; an older
+/// node answers 404 and the renderer keeps its v1 sums.
+#[tauri::command(rename_all = "snake_case")]
+async fn energy_read(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    span: String,
+) -> Result<control::EnergyRead, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    let node: control::NodeEnergy = get_json(state.inner(), &control::energy_path(&span)?).await?;
+    Ok(control::EnergyRead::from_node(node))
+}
+
+/// `GET /membrane?limit=` (genome N2) — the node's bounded ring of admission
+/// decisions, newest first. Read scope; held in memory by the node only.
+#[tauri::command(rename_all = "snake_case")]
+async fn membrane_read(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    limit: Option<u32>,
+) -> Result<control::MembraneRead, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    let node: control::NodeMembrane = get_json(state.inner(), &control::membrane_path(limit)).await?;
+    Ok(control::MembraneRead::from_node(node, now_ms()))
+}
+
 /// `GET /payments/balance` + `GET /payments/channels` — the Wallet panel.
 #[tauri::command(rename_all = "snake_case")]
 async fn payments_overview(
@@ -2819,6 +2848,8 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             messages_list,
             price_quote,
             payments_overview,
+            energy_read,
+            membrane_read,
             spend_status,
             spend_request,
             spend_lock,
@@ -4809,6 +4840,9 @@ mod assistant_acl_tests {
                 "messages_list",
                 "price_quote",
                 "payments_overview",
+                // Organism reads (genome N1/N2), same guard.
+                "energy_read",
+                "membrane_read",
                 // Control center actions (slice B): same guard, plus the spend window.
                 "spend_status",
                 "spend_request",

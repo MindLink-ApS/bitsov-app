@@ -417,6 +417,30 @@ button.small:not(.primary) { font-size: var(--t-xs); padding: 4px 10px; backgrou
 .organ-actions { display: flex; gap: var(--s-2); margin-left: calc(-1 * var(--s-1)); }
 .organ.stale .sats, .organ.stale .energy-fig, .organ.stale .organ-line.door .sats { color: var(--muted); }
 .organ.stale .meter > span { background: var(--faint); }
+/* N1 bars: 24 hours, oldest left. A gap is an hour the node reported nothing for. */
+.bars { display: grid; grid-template-columns: repeat(24, minmax(0, 1fr)); gap: 2px; height: 28px; align-items: end; margin-top: var(--s-1); }
+.hour-bar { display: flex; flex-direction: column-reverse; justify-content: flex-start; height: 100%; gap: 1px; }
+.bar-in, .bar-out { display: block; width: 100%; max-height: 50%; border-radius: 1px; }
+.bar-in { background: var(--accent); }
+.bar-out { background: var(--line-strong); }
+.hour-bar .none { display: none; }
+.hour-bar.gap { height: 1px; border-bottom: 1px dotted var(--line-strong); }
+.organ.stale .bar-in { background: var(--faint); }
+
+/* The membrane in the stream: a door card, dashed like a threshold. */
+.door-card { align-self: stretch; margin: var(--s-2) 0; display: flex; flex-direction: column; gap: 2px; font-size: var(--t-sm); line-height: var(--lh-body); }
+.door-rule { display: flex; align-items: center; gap: var(--s-2); font-size: var(--t-xs); color: var(--faint); font-family: var(--font-mono); }
+.door-rule::before, .door-rule::after { content: ''; flex: 1; border-top: 1px solid var(--line); }
+.door-card > p:not(.door-rule) { border-left: 1px dashed var(--line-strong); border-right: 1px dashed var(--line-strong); padding: 0 var(--s-3); overflow-wrap: anywhere; }
+.door-card > p:nth-child(2) { padding-top: var(--s-2); }
+.door-card > p:last-child { padding-bottom: var(--s-2); border-bottom: 1px dashed var(--line-strong); }
+.door-head .sats { color: var(--accent); }
+.door-head .id { font-size: inherit; color: var(--ink); }
+.door-proof { font-family: var(--font-mono); font-size: var(--t-xs); color: var(--ok); }
+.door-note { font-size: var(--t-xs); color: var(--muted); }
+.door-card.refused .door-proof { color: var(--err); }
+.door-card.refused > p:not(.door-rule) { border-color: rgba(217, 96, 63, 0.45); }
+.track-link.knock .name { font-size: var(--t-sm); }
 @media (prefers-reduced-motion: reduce) {
   .organ-row.hot, .organ-log.hot { background: none; font-weight: 600; }
   .organ.hot .organ-name { color: var(--ink); text-decoration: underline; text-underline-offset: 3px; }

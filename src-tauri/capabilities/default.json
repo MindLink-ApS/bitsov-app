@@ -27,6 +27,8 @@
     "allow-messages-list",
     "allow-price-quote",
     "allow-payments-overview",
+    "allow-energy-read",
+    "allow-membrane-read",
     "allow-spend-status",
     "allow-spend-request",
     "allow-spend-lock",

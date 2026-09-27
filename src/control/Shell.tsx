@@ -5,7 +5,21 @@ import type { Proposal } from './ai';
 import { AiTrack, createAiSession } from './AiTrack';
 import { clock, day, sats, satsWhole, satUnit, shortId, uptime } from './format';
 import { Organism } from './BodyPanel';
-import { homeostasis, membraneLive, membraneRefused, metabolism, nucleus, type MembraneEntry } from './body';
+import {
+  doorCard,
+  gateWords,
+  homeostasis,
+  membraneLive,
+  membraneNode,
+  membraneRefused,
+  membraneSeed,
+  metabolism,
+  nodeMetabolism,
+  nucleus,
+  organismCaps,
+  outboundKind,
+  type MembraneEntry,
+} from './body';
 import type { Source } from './source';
 import {
   ADMISSION_MAX_MSAT,
@@ -39,6 +53,8 @@ import type {
   BudgetRow,
   BudgetView,
   Delivery,
+  DoorCard,
+  EnergyRead,
   LinkState,
   Message,
   NodeOverview,
@@ -53,7 +69,7 @@ import type {
 } from './types';
 
 /** How often each panel re-reads while the shell is open. Peers and balance have no live event. */
-const REFRESH_MS = { overview: 10_000, peers: 15_000, wallet: 20_000, rooms: 30_000, door: 30_000, clock: 5_000, spend: 3_000 } as const;
+const REFRESH_MS = { overview: 10_000, peers: 15_000, wallet: 20_000, rooms: 30_000, door: 30_000, energy: 30_000, clock: 5_000, spend: 3_000 } as const;
 
 type Props = {
   source: Source;
@@ -134,6 +150,9 @@ export function ControlCenter(props: Props) {
   const [energyAt, setEnergyAt] = createSignal<number | null>(null);
   const [budgetReadAt, setBudgetReadAt] = createSignal<number | null>(null);
   const [door, setDoor] = createSignal<{ msat: number; read_at: number } | null>(null);
+  // O1 v2: the node's own energy read (N1) and gate decisions (N2), when advertised.
+  const [nodeEnergy, setNodeEnergy] = createSignal<{ hour: EnergyRead; day: EnergyRead } | null>(null);
+  const [energyReadAt, setEnergyReadAt] = createSignal<number | null>(null);
   const aiSession = createAiSession();
   const [prefill, setPrefill] = createSignal<Prefill | null>(null);
   let prefillSeq = 0;
@@ -152,6 +171,15 @@ export function ControlCenter(props: Props) {
 
   const ownId = () => props.ownId ?? overview()?.node_id ?? '';
   const peerById = createMemo(() => new Map(peers().map((p) => [p.node_id.toLowerCase(), p])));
+  const caps = createMemo(() => organismCaps(overview()), undefined, { equals: (a, b) => a.energy === b.energy && a.membrane === b.membrane });
+  /** First contacts at the door this session (never added to peers), newest first. */
+  const knocks = createMemo(() => {
+    const seen = new Set<string>();
+    return membrane()
+      .filter((e): e is Extract<MembraneEntry, { verdict: 'admitted' }> => e.verdict === 'admitted' && e.first_contact && !peerById().has(e.sender))
+      .filter((e) => !seen.has(e.sender) && !!seen.add(e.sender))
+      .map((e) => e.sender);
+  });
   const openKey = () => (track() ? trackKey(track()!) : null);
 
   const attempt = async <T,>(area: string, run: () => Promise<T>, apply: (v: T) => void) => {
@@ -174,6 +202,48 @@ export function ControlCenter(props: Props) {
     });
   // Our own price with no peer: what a stranger pays at this node's door.
   const loadDoor = () => attempt('door', () => props.source.priceQuote(), (q) => setDoor({ msat: q.own_msat, read_at: Date.now() }));
+  // N1: node-wide energy, 1 h and 24 h. A failed read keeps the last one, with its age.
+  const loadEnergy = () =>
+    caps().energy
+      ? attempt('energy', () => Promise.all([props.source.energy('1h'), props.source.energy('24h')]), ([hour, day]) => {
+          setNodeEnergy({ hour, day });
+          setEnergyReadAt(Date.now());
+        })
+      : Promise.resolve();
+  let energySoon: ReturnType<typeof setTimeout> | undefined;
+  /** A live event moved energy: re-read shortly, once, however many arrive. */
+  const energyAfterEvent = () => {
+    if (!caps().energy || energySoon) return;
+    energySoon = setTimeout(() => {
+      energySoon = undefined;
+      void loadEnergy();
+    }, 1500);
+  };
+
+  /** Where a door card lives in the stream, and cards already placed (by membrane entry). */
+  const doorsPlaced = new Set<number>();
+  const placeDoor = (entry: MembraneEntry) => {
+    if (doorsPlaced.has(entry.seq)) return;
+    const d = doorCard(entry, door()?.msat ?? null);
+    if (!d) return;
+    doorsPlaced.add(entry.seq);
+    const artifact: Artifact = { id: `door-${entry.seq}`, at: d.at, type: 'door', door: d.card };
+    setArtifacts(d.track, (old) => [...(old ?? []), artifact]);
+  };
+  /** Fold into the membrane; entries it adds may also stand at the door in their track. */
+  const foldMembrane = (fold: (log: MembraneEntry[]) => MembraneEntry[]) => {
+    const before = membrane();
+    const after = fold(before);
+    if (after === before) return;
+    setMembrane(after);
+    const known = new Set(before.map((e) => e.seq));
+    after.filter((e) => !known.has(e.seq)).forEach(placeDoor);
+  };
+  const contactSet = () => new Set(peerById().keys());
+  // N2: seed from the node's ring once it is advertised; live events follow.
+  const loadMembrane = () =>
+    attempt('membrane', () => props.source.membrane(50), (read) => foldMembrane((log) => membraneSeed(log, read.events, { contacts: contactSet() })));
+
   const loadThread = (t: TrackRef) => {
     if (t.kind !== 'peer' && t.kind !== 'room') return;
     const key = trackKey(t);
@@ -222,6 +292,7 @@ export function ControlCenter(props: Props) {
           setInterval(() => void loadWallet(), REFRESH_MS.wallet),
           setInterval(() => void loadRooms(), REFRESH_MS.rooms),
           setInterval(() => void loadDoor(), REFRESH_MS.door),
+          setInterval(() => void loadEnergy(), REFRESH_MS.energy),
           // Cheap: the host asks the node only while an elevation request is pending,
           // and a budget grant lands there first.
           setInterval(() => void loadSpend().then(loadBudget), REFRESH_MS.spend),
@@ -232,14 +303,23 @@ export function ControlCenter(props: Props) {
               setLink(event.state);
               // Back after a gap: re-read the open track so nothing is missed.
               if (event.state === 'open' && track()) loadThread(track()!);
+              if (event.state === 'open' && caps().membrane) void loadMembrane();
+              return;
+            }
+            if (event.type === 'membrane') {
+              foldMembrane((log) => membraneNode(log, event.event, { contacts: contactSet() }));
+              if (event.event.verdict === 'admitted') energyAfterEvent();
               return;
             }
             if (event.type === 'message' || event.type === 'delivery') {
-              setMembrane((log) =>
-                membraneLive(log, event, { ownId: ownId(), contacts: new Set(peerById().keys()), threads: threads.t, nowMs: Date.now() }),
+              foldMembrane((log) =>
+                membraneLive(log, event, { ownId: ownId(), contacts: contactSet(), threads: threads.t, nowMs: Date.now(), nodeMembrane: caps().membrane }),
               );
             }
-            if (event.type === 'message') setEnergyAt(Date.now());
+            if (event.type === 'message') {
+              setEnergyAt(Date.now());
+              energyAfterEvent();
+            }
             if (event.type === 'delivery') {
               const next = applyDelivery(deliveries, event);
               if (next !== deliveries) setDeliveries(event.message_id, next[event.message_id]);
@@ -269,6 +349,10 @@ export function ControlCenter(props: Props) {
     }),
   );
 
+  // The node says what it can report (`/status`): start reading N1 / N2 when it does.
+  createEffect(on(() => props.active && caps().energy, (on) => void (on && loadEnergy()), { defer: false }));
+  createEffect(on(() => props.active && caps().membrane, (on) => void (on && loadMembrane()), { defer: false }));
+
   // Opening a track: clear its unread count, load history, quote its cost.
   createEffect(
     on(track, (t) => {
@@ -295,6 +379,7 @@ export function ControlCenter(props: Props) {
 
   onCleanup(() => {
     clearInterval(clockTimer);
+    clearTimeout(energySoon);
     stop();
   });
 
@@ -318,9 +403,10 @@ export function ControlCenter(props: Props) {
   };
   /** A failed action that is not an approval or budget question stays in the track as a record. */
   const recordFailure = (t: TrackRef, action: string, outcome: Outcome<unknown>) => {
-    // A send that did not cross (price, setpoint) is also a membrane reading.
-    if (!outcome.ok) setMembrane((log) => membraneRefused(log, outcome.error, trackKey(t), Date.now()));
-    if (!outcome.ok && !needsApproval(outcome.error) && !isBudgetStop(outcome.error)) {
+    // A send that did not cross (price, setpoint) is also a membrane reading. A
+    // price refusal stands at their door in the track instead of a failure row.
+    if (!outcome.ok) foldMembrane((log) => membraneRefused(log, outcome.error, trackKey(t), Date.now()));
+    if (!outcome.ok && !needsApproval(outcome.error) && !isBudgetStop(outcome.error) && outboundKind(outcome.error) !== 'price') {
       addArtifact(t, { type: 'failed', action: outcome.error.code === 'spend_unknown' ? 'Outcome unknown / pending' : action, error: outcome.error });
     }
     return outcome;
@@ -452,6 +538,8 @@ export function ControlCenter(props: Props) {
         sample={props.source.mode === 'sample'}
         peers={peers()}
         rooms={rooms()}
+        knocks={knocks()}
+        nameOf={nameOf}
         unread={threads.unread}
         openKey={openKey()}
         onOpen={setTrack}
@@ -539,9 +627,11 @@ export function ControlCenter(props: Props) {
                 openedAt={openedAt()}
                 link={link()}
                 down={!!props.error || (overview() !== null && freshness(overview()!.read_at, now()).stale)}
-                metabolism={metabolism(threads.t, ownId(), now(), paid)}
+                metabolism={nodeEnergy() ? nodeMetabolism(nodeEnergy()!.hour, nodeEnergy()!.day) : metabolism(threads.t, ownId(), now(), paid)}
                 energyAt={energyAt()}
+                energyReadAt={energyReadAt()}
                 membrane={membrane()}
+                nodeMembrane={caps().membrane}
                 door={door()}
                 homeostasis={homeostasis(budget())}
                 budgetReadAt={budgetReadAt()}
@@ -596,6 +686,9 @@ function Rail(props: {
   sample: boolean;
   peers: Peer[];
   rooms: Room[];
+  /** First contacts admitted by payment this session. Not contacts, and not added. */
+  knocks: string[];
+  nameOf: (id: string) => string;
   unread: Unread;
   openKey: string | null;
   onOpen: (t: TrackRef) => void;
@@ -651,6 +744,28 @@ function Rail(props: {
           </For>
         </Show>
       </div>
+
+      <Show when={props.active && props.knocks.length > 0}>
+        <div class="track-group" data-door-group>
+          <h2>At your door</h2>
+          <For each={props.knocks}>
+            {(id) => (
+              <button
+                class="track-link knock"
+                data-door-track={`peer:${id}`}
+                aria-current={props.openKey === `peer:${id}`}
+                title="Paid your door price. Not a contact."
+                onClick={() => props.onOpen({ kind: 'peer', id })}
+              >
+                <span class="name id">{shortId(id)}</span>
+                <Show when={(props.unread[`peer:${id}`] ?? 0) > 0} fallback={<span class="meta">paid</span>}>
+                  <span class="badge">{props.unread[`peer:${id}`]}</span>
+                </Show>
+              </button>
+            )}
+          </For>
+        </div>
+      </Show>
 
       <div class="track-group">
         <h2>AI</h2>
@@ -788,7 +903,7 @@ function Conversation(props: {
                     )}
                   </Match>
                   <Match when={item.type === 'artifact' && item.artifact}>
-                    {(a) => <ArtifactView a={a()} delivery={a().type === 'file' ? props.deliveries[(a() as { receipt: { message_id: string } }).receipt.message_id] : undefined} />}
+                    {(a) => <ArtifactView a={a()} nameOf={props.nameOf} delivery={a().type === 'file' ? props.deliveries[(a() as { receipt: { message_id: string } }).receipt.message_id] : undefined} />}
                   </Match>
                 </Switch>
               </>
@@ -868,7 +983,65 @@ function DeliveryMark(props: { d: Delivery }) {
   );
 }
 
-function ArtifactView(props: { a: Artifact; delivery?: Delivery }) {
+/**
+ * The membrane in the stream. A stranger who paid to reach you, a verified sender
+ * refused at your door, or your send refused at theirs. Stated as facts; no
+ * button that would admit, add or pay.
+ */
+function DoorView(props: { card: DoorCard; at: number; nameOf: (id: string) => string }) {
+  const c = props.card;
+  const amt = (msat: number) => (
+    <>
+      <span class="sats">{sats(msat)}</span> {satUnit(msat)}
+    </>
+  );
+  return (
+    <div class="door-card" data-door={`${c.side}-${c.verdict}`} classList={{ refused: c.verdict === 'refused' }} role="note">
+      <p class="door-rule">
+        <span>{clock(props.at)} · door</span>
+      </p>
+      <Switch>
+        <Match when={c.side === 'in' && c.verdict === 'admitted' && (c as Extract<DoorCard, { verdict: 'admitted' }>)}>
+          {(x) => (
+            <>
+              <p class="door-head">
+                <span class="id" title={x().sender}>{shortId(x().sender)}</span> paid <Show when={x().paid_msat !== null} fallback="your price">{amt(x().paid_msat!)}</Show> to reach you
+              </p>
+              <p class="door-proof">settled · recipient-bound · single-use</p>
+              <p class="door-note">Not a contact, and not added. Nothing is kept beyond this message.</p>
+            </>
+          )}
+        </Match>
+        <Match when={c.side === 'in' && c.verdict === 'refused' && (c as Extract<DoorCard, { side: 'in'; verdict: 'refused' }>)}>
+          {(x) => (
+            <>
+              <p class="door-head">
+                Refused at your door · {gateWords(x().code)}
+              </p>
+              <p class="door-proof">
+                <Show when={x().required_msat !== null}>needed {amt(x().required_msat!)}</Show>
+                <Show when={x().required_msat !== null && x().paid_msat !== null}> · </Show>
+                <Show when={x().paid_msat !== null}>paid {amt(x().paid_msat!)}</Show>
+              </p>
+              <p class="door-note">Signed by {props.nameOf(x().sender)}. Nothing was stored or delivered.</p>
+            </>
+          )}
+        </Match>
+        <Match when={c.side === 'out' && (c as Extract<DoorCard, { side: 'out' }>)}>
+          {(x) => (
+            <>
+              <p class="door-head">Not sent · their price is above your cap</p>
+              <p class="door-proof">{x().detail}</p>
+              <p class="door-note">Nothing was paid. Reopen the track to read their current price.</p>
+            </>
+          )}
+        </Match>
+      </Switch>
+    </div>
+  );
+}
+
+function ArtifactView(props: { a: Artifact; delivery?: Delivery; nameOf: (id: string) => string }) {
   return (
     <Switch>
       <Match when={props.a.type === 'invoice' && props.a}>
@@ -933,6 +1106,9 @@ function ArtifactView(props: { a: Artifact; delivery?: Delivery }) {
             </div>
           );
         }}
+      </Match>
+      <Match when={props.a.type === 'door' && props.a}>
+        {(a) => <DoorView card={(a() as Extract<Artifact, { type: 'door' }>).door} at={a().at} nameOf={props.nameOf} />}
       </Match>
       <Match when={props.a.type === 'failed' && props.a}>
         {(a) => {
