@@ -274,6 +274,15 @@ function MembraneOrgan(props: OrganismProps & { fresh: { label: string; stale: b
           {sats(s().admitted_msat)} sats settled<Show when={s().first_contacts > 0}> · {s().first_contacts} first contact</Show>
         </span>
       </div>
+      <Show when={s().readmitted > 0}>
+        <div class="organ-row" data-membrane-readmitted>
+          <span class="who"><span class="dot ok" /> admitted again</span>
+          <span class="sats">{s().readmitted}</span>
+          <span class="organ-note">
+            {sats(s().readmitted_msat)} sats paid after a reconnect, from their own quote
+          </span>
+        </div>
+      </Show>
       <div class="organ-row" data-membrane-refused>
         <span class="who"><span class="dot err" /> refused</span>
         <span class="sats">{s().refused}</span>
@@ -306,6 +315,18 @@ function MembraneLine(props: { e: MembraneEntry; hot: boolean; nameOf: (id: stri
                 <span class="ok-word">admitted</span> {a().first_contact ? shortId(a().sender) : props.nameOf(a().sender)}
                 <Show when={a().paid_msat}> · paid <span class="sats">{sats(a().paid_msat!)}</span> {satUnit(a().paid_msat!)}</Show>
                 <Show when={a().first_contact}> · first contact, not added</Show>
+              </span>
+            );
+          }}
+        </Match>
+        <Match when={props.e.verdict === 'readmitted' && props.e}>
+          {(e) => {
+            const a = () => e() as Extract<MembraneEntry, { verdict: 'readmitted' }>;
+            return (
+              <span data-membrane-readmission>
+                <span class="ok-word">paid again</span> {props.nameOf(a().counterparty)} · {gateWords('readmission')}
+                <Show when={a().paid_msat}> · <span class="sats">{sats(a().paid_msat!)}</span> {satUnit(a().paid_msat!)}</Show>
+                <Show when={a().cap_msat}> · within their budget of <span class="sats">{sats(a().cap_msat!)}</span> {satUnit(a().cap_msat!)}</Show>
               </span>
             );
           }}

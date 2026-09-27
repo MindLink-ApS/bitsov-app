@@ -157,6 +157,21 @@ export type MembraneEntry =
       required_msat?: number | null;
       paid_msat?: number | null;
       node_seq?: number;
+    }
+  | {
+      seq: number;
+      at: number;
+      /**
+       * Our node paid a contact's admission again after a reconnect (genome
+       * #85/#86: a connection starts unpaid). Money left, from their signed quote.
+       */
+      verdict: 'readmitted';
+      counterparty: string;
+      paid_msat: number | null;
+      /** The contact's budget cap it was paid under; null for the owner's key. */
+      cap_msat: number | null;
+      track: string;
+      node_seq: number;
     };
 
 /** In memory only, never persisted or exported; the oldest entries fall off. */
@@ -225,6 +240,13 @@ export const GATE_WORDS: Record<string, string> = {
   invite_only: 'invite only',
   not_priceable: 'no price for this kind',
   node_error: 'node could not decide',
+  // A reconnect starts every connection unpaid (genome #86): the peer asked
+  // for a paid invoice first and was told to pay its way in again.
+  admission_required: 'asked to pay admission again',
+  // The node's quote window: a second admission quote came too soon.
+  admission_rate_limited: 'asked again too soon',
+  // Outbound: we paid a contact's admission again after a reconnect.
+  readmission: 'admitted again after a reconnect',
 };
 
 export const gateWords = (code: string) => GATE_WORDS[code] ?? code.replace(/_/g, ' ');
@@ -236,8 +258,23 @@ export const gateWords = (code: string) => GATE_WORDS[code] ?? code.replace(/_/g
  * when the node verified it; an admitted stranger is flagged, never added.
  */
 export function membraneNode(log: MembraneEntry[], event: MembraneEvent, ctx: { contacts: Set<string> }): MembraneEntry[] {
-  if (event.direction !== 'inbound') return log;
   if (log.some((e) => e.node_seq === event.seq)) return log;
+  // The one outbound event this app does not see itself: the node paid a
+  // contact's admission again, inside the send, after a reconnect.
+  if (event.direction === 'outbound' && event.verdict === 'admitted' && event.code === 'readmission' && event.counterparty) {
+    const counterparty = event.counterparty.toLowerCase();
+    return keep(log, {
+      seq: ++membraneSeq,
+      at: event.at,
+      verdict: 'readmitted',
+      counterparty,
+      paid_msat: event.paid_msat,
+      cap_msat: event.cap_msat,
+      track: `peer:${counterparty}`,
+      node_seq: event.seq,
+    });
+  }
+  if (event.direction !== 'inbound') return log;
   const sender = event.counterparty?.toLowerCase() ?? null;
   const track = sender ? `peer:${sender}` : null;
   if (event.verdict === 'admitted' && sender) {
@@ -281,7 +318,7 @@ export function membraneSeed(log: MembraneEntry[], events: MembraneEvent[], ctx:
  * or your send refused at their price. Other entries stay in the Body panel.
  */
 export function doorCard(entry: MembraneEntry, doorMsat: number | null): { track: string; at: number; card: DoorCard } | null {
-  if (!entry.track) return null;
+  if (!entry.track || entry.verdict === 'readmitted') return null;
   if (entry.verdict === 'admitted') {
     if (!entry.first_contact) return null;
     return { track: entry.track, at: entry.at, card: { side: 'in', verdict: 'admitted', sender: entry.sender, paid_msat: entry.paid_msat, door_msat: doorMsat } };
@@ -330,14 +367,20 @@ export type MembraneSummary = {
   refused_by: Record<RefusalKind, number>;
   /** Inbound refusals by the node's gate code (N2), e.g. `{ unpaid: 2, replay: 1 }`. */
   inbound_by: Record<string, number>;
+  /** Admissions our node paid again after a reconnect, and what they cost. */
+  readmitted: number;
+  readmitted_msat: number;
   last_at: number | null;
 };
 
 export function membraneSummary(log: MembraneEntry[]): MembraneSummary {
-  const s: MembraneSummary = { admitted: 0, admitted_msat: 0, first_contacts: 0, refused: 0, refused_by: { door: 0, price: 0, setpoint: 0, inbound: 0 }, inbound_by: {}, last_at: null };
+  const s: MembraneSummary = { admitted: 0, admitted_msat: 0, first_contacts: 0, refused: 0, refused_by: { door: 0, price: 0, setpoint: 0, inbound: 0 }, inbound_by: {}, readmitted: 0, readmitted_msat: 0, last_at: null };
   for (const e of log) {
     s.last_at = Math.max(s.last_at ?? 0, e.at);
-    if (e.verdict === 'admitted') {
+    if (e.verdict === 'readmitted') {
+      s.readmitted += 1;
+      s.readmitted_msat += e.paid_msat ?? 0;
+    } else if (e.verdict === 'admitted') {
       s.admitted += 1;
       s.admitted_msat += e.paid_msat ?? 0;
       if (e.first_contact) s.first_contacts += 1;

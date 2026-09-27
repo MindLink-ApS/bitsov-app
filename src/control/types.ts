@@ -133,7 +133,7 @@ export type MembraneEvent = {
 
 export type MembraneRead = {
   capacity: number;
-  totals: { admitted: number; first_contacts: number; refused: number; outbound_refused: number };
+  totals: { admitted: number; first_contacts: number; refused: number; outbound_refused: number; readmissions?: number };
   events: MembraneEvent[];
   read_at: number;
 };

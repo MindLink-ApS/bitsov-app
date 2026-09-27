@@ -3,7 +3,7 @@ import { render } from 'solid-js/web';
 import { ControlCenter } from '../src/control/Shell';
 import { sampleSource, SAMPLE_OWN_ID, SAMPLE_PEERS, SAMPLE_STRANGER } from '../src/control/sample';
 import { hostSource } from '../src/control/source';
-import { doorCard, membraneLive, membraneNode, membraneRefused, membraneSeed, membraneSummary, nodeMetabolism, organismCaps, type MembraneEntry } from '../src/control/body';
+import { doorCard, gateWords, membraneLive, membraneNode, membraneRefused, membraneSeed, membraneSummary, nodeMetabolism, organismCaps, type MembraneEntry } from '../src/control/body';
 import { streamItems } from '../src/control/state';
 import type { Artifact, EnergyRead, LiveEvent, MembraneEvent, Message, NodeOverview } from '../src/control/types';
 
@@ -124,6 +124,29 @@ describe('membrane from the node (N2)', () => {
   });
 });
 
+describe('re-admission after a reconnect (genome #85/#86)', () => {
+  const ctx = { contacts: new Set([A]) };
+
+  it('words the new codes in plain language', () => {
+    expect(gateWords('admission_required')).toBe('asked to pay admission again');
+    expect(gateWords('admission_rate_limited')).toBe('asked again too soon');
+    expect(gateWords('readmission')).toBe('admitted again after a reconnect');
+  });
+
+  it('takes the node’s paid re-admission once, apart from admissions and refusals', () => {
+    const paid = ev({ seq: 7, verdict: 'admitted', code: 'readmission', direction: 'outbound', counterparty: A.toUpperCase(), paid_msat: 2000, cap_msat: 50_000 });
+    let log: MembraneEntry[] = [];
+    log = membraneNode(log, paid, ctx);
+    log = membraneNode(log, paid, ctx);
+    log = membraneNode(log, ev({ seq: 8, verdict: 'refused', code: 'admission_required', counterparty: STRANGER }), ctx);
+    expect(log).toHaveLength(2);
+    expect(log[1]).toMatchObject({ verdict: 'readmitted', counterparty: A, paid_msat: 2000, cap_msat: 50_000, track: `peer:${A}` });
+    expect(doorCard(log[1], 1000), 'a re-admission stays in the Body panel').toBeNull();
+    const s = membraneSummary(log);
+    expect(s).toMatchObject({ admitted: 0, readmitted: 1, readmitted_msat: 2000, refused: 1, inbound_by: { admission_required: 1 } });
+  });
+});
+
 describe('door cards', () => {
   it('stand for a first contact, a verified refusal, and a send refused at their price', () => {
     const [admitted] = membraneNode([], ev({ seq: 1, verdict: 'admitted', code: 'settled', counterparty: STRANGER, first_contact: true, paid_msat: 1000 }), { contacts: new Set() });
@@ -208,6 +231,17 @@ describe('Body panel and stream on an N1/N2 node', () => {
     // The card stands before the message it admitted.
     const stream = $('[data-stream]')!;
     expect(stream.textContent!.indexOf('to reach you')).toBeLessThan(stream.textContent!.indexOf('saw your talk'));
+  });
+
+  it('shows a paid re-admission and an admission-required refusal in plain words', async () => {
+    const { emit } = start();
+    await vi.waitFor(() => expect($('[data-membrane-refused-by]')).not.toBeNull());
+    emit({ type: 'membrane', event: ev({ seq: 901, at: Date.now(), verdict: 'refused', code: 'admission_required', counterparty: SAMPLE_PEERS[0].node_id }) });
+    emit({ type: 'membrane', event: ev({ seq: 902, at: Date.now(), verdict: 'admitted', code: 'readmission', direction: 'outbound', counterparty: SAMPLE_PEERS[0].node_id, paid_msat: 2000, cap_msat: 50_000 }) });
+    await vi.waitFor(() => expect($('[data-membrane-readmitted]')).not.toBeNull());
+    expect($('[data-membrane-readmitted]')!.textContent).toContain('admitted again');
+    expect($('[data-membrane-readmitted]')!.textContent).toContain('2 sats paid after a reconnect');
+    expect($('[data-membrane-refused-by]')!.textContent).toContain('asked to pay admission again 1');
   });
 
   it('puts a verified refusal at your door in that sender’s track, live', async () => {
