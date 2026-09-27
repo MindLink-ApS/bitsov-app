@@ -272,6 +272,43 @@ describe('invisible payments in the composer and the context panel', () => {
     expect(host.used('message_send')).toHaveLength(0);
   });
 
+  it('#49 review: a late introduction completion never leaves the current conversation or its draft', async () => {
+    let finish!: (value: ReturnType<typeof card>) => void;
+    const pending = new Promise<ReturnType<typeof card>>((resolve) => { finish = resolve; });
+    const host = stubHost(open([{ target: MAYA, room: false, limit_msat: 50_000, spent_msat: 0 }]), {
+      introduction_mine: () => card(OWN, 'public', 10_000),
+      introduction_read: () => card(STRANGER, 'local', 3000),
+      introduction_open: () => pending,
+      first_contact_quote: (args) => ({
+        recipient: args!.peer, admission_msat: 3000, message_msat: 3000, total_msat: 6000,
+        expires_at: Math.floor(Date.now() / 1000) + 60,
+      }),
+    });
+    await openShell();
+    $<HTMLButtonElement>('[data-track="new"]')!.click();
+    type('[data-intro-text]', INTRO);
+    $<HTMLButtonElement>('[data-intro-open] button[type="submit"]')!.click();
+    await vi.waitFor(() => expect($('[data-door-continue]')).not.toBeNull());
+    $<HTMLInputElement>('[data-door-allow-local]')!.click();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-door-continue]')!.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-door-continue]')!.click();
+    await vi.waitFor(() => expect(host.used('introduction_open')).toHaveLength(1));
+    $<HTMLButtonElement>(`[data-track="peer:${MAYA}"]`)!.click();
+    await vi.waitFor(() => expect($(`[data-track="peer:${MAYA}"]`)?.getAttribute('aria-current')).toBe('true'));
+    type('[data-composer] textarea', 'Keep this draft for Maya');
+    expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('Keep this draft for Maya');
+    finish(card(STRANGER, 'local', 3000));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('Keep this draft for Maya');
+    expect($(`[data-track="peer:${MAYA}"]`)?.getAttribute('aria-current')).toBe('true');
+    expect(host.used('message_send')).toHaveLength(0);
+    // It finished in the background: a notice, and the peer one tap away.
+    await vi.waitFor(() => expect($(`[data-intro-notice="${STRANGER}"]`)).not.toBeNull());
+    $<HTMLButtonElement>('[data-intro-notice] [data-intro-notice-open]')!.click();
+    await vi.waitFor(() => expect($(`[data-introduced="${STRANGER}"]`)).not.toBeNull());
+    expect($('[data-intro-notice]')).toBeNull();
+  });
+
   it('a card the host refuses never reaches Continue', async () => {
     const host = stubHost(open([]), {
       introduction_mine: () => { throw 'Your node cannot sign an introduction yet. Share your node id instead.'; },

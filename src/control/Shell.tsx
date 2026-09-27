@@ -136,6 +136,12 @@ export function ControlCenter(props: Props) {
   const [contextOpen, setContextOpen] = createSignal(false);
   /** K1: cards the owner continued from, by node id. Display only, never admission. */
   const [introduced, setIntroduced] = createStore<Record<string, Introduction>>({});
+  /** An introduction that finished while the owner was elsewhere: shown, never navigated to. */
+  const [introNotice, setIntroNotice] = createSignal<Introduction | null>(null);
+  const openIntroduced = (card: Introduction) => {
+    setIntroNotice(null);
+    setTrack({ kind: 'peer', id: card.node_id.toLowerCase() });
+  };
   const [tab, setTab] = createSignal<'node' | 'wallet' | 'budget'>('node');
   const aiSession = createAiSession();
   const [prefill, setPrefill] = createSignal<Prefill | null>(null);
@@ -446,6 +452,19 @@ export function ControlCenter(props: Props) {
 
       <Show when={props.active} fallback={<section class="track">{props.firstRun}</section>}>
         <section class="track" aria-label="Track">
+          <Show when={introNotice()}>
+            {(n) => (
+              <p class="ok-note intro-notice" data-intro-notice={n().node_id} role="status">
+                Connected to {shortId(n().node_id)} from their introduction. Nothing was paid.{' '}
+                <button type="button" class="link" data-intro-notice-open onClick={() => openIntroduced(n())}>
+                  Open conversation
+                </button>{' '}
+                <button type="button" class="link" onClick={() => setIntroNotice(null)}>
+                  Dismiss
+                </button>
+              </p>
+            )}
+          </Show>
           <Show when={track()} fallback={<div class="empty-track"><h2>No tracks yet</h2><p class="hint">Peers and rooms your node knows appear on the left.</p></div>}>
             {(t) => (
               <Switch>
@@ -470,9 +489,13 @@ export function ControlCenter(props: Props) {
                     spendError={errors.spend}
                     onContext={() => setContextOpen(true)}
                     onIntroduced={(card) => {
-                      const id = card.node_id.toLowerCase();
-                      setIntroduced(id, card);
-                      setTrack({ kind: 'peer', id });
+                      setIntroduced(card.node_id.toLowerCase(), card);
+                      // Continue can finish after the owner moved on. Only a
+                      // still-open Start view follows it; anywhere else the
+                      // current conversation and its draft stay, and a notice
+                      // offers the introduced peer instead (#49 review).
+                      if (untrack(track)?.kind === 'new') openIntroduced(card);
+                      else setIntroNotice(card);
                     }}
                   />
                 </Match>
