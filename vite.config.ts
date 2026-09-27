@@ -23,14 +23,21 @@ function assistantDevCsp(): Plugin {
 
 const root = dirname(fileURLToPath(import.meta.url));
 
-// `tauri build` sets TAURI_ENV_DEBUG=false for a release bundle. Omit the
-// assistant page then so it is not embedded. A plain `npm run build` (the CI
-// compile gate) leaves the variable unset and still builds the page.
-const includeAssistant = process.env.TAURI_ENV_DEBUG !== 'false';
+// Tauri CLI hooks always set TAURI_ENV_PLATFORM, and set TAURI_ENV_DEBUG=true
+// only for a debug build; a release `tauri build` leaves it unset (never
+// "false"). Under Tauri, include the assistant page only when debug, so a
+// release bundle does not embed it (scripts/check-mac-bundle.sh verifies). A
+// plain `npm run build` (the CI compile gate) runs outside Tauri and still
+// builds the page.
+export function assistantIncluded(env: Record<string, string | undefined>): boolean {
+  if (env.TAURI_ENV_PLATFORM === undefined) return true;
+  return env.TAURI_ENV_DEBUG === 'true';
+}
+
 const input: Record<string, string> = {
   main: resolve(root, 'index.html'),
 };
-if (includeAssistant) {
+if (assistantIncluded(process.env)) {
   input.assistant = resolve(root, 'assistant.html');
 }
 

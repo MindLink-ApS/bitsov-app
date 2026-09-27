@@ -22,6 +22,13 @@ jobs:
       - name: Test source gate with a downloaded sidecar present
         run: bash scripts/test-authority-source.sh
 
+      # Fake bundle trees only; no build, no network. The real bundle is checked
+      # by the Mac Package workflow.
+      - name: Mac bundle checker tests
+        run: |
+          shellcheck scripts/package-mac.sh scripts/check-mac-bundle.sh scripts/test-check-mac-bundle.sh
+          bash scripts/test-check-mac-bundle.sh
+
       # app #16. The source-guard layer needs no bundle and no macOS: it asserts the
       # run loop still handles BOTH RunEvent variants, that teardown never hunts a
       # port, and that SIGTERM precedes SIGKILL. The live-bundle layer skips here and
