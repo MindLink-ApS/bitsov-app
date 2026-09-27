@@ -25,6 +25,19 @@
     "allow-room-members",
     "allow-messages-list",
     "allow-price-quote",
-    "allow-payments-overview"
+    "allow-payments-overview",
+    "allow-spend-status",
+    "allow-spend-request",
+    "allow-spend-lock",
+    "allow-message-send",
+    "allow-room-quote",
+    "allow-invoice-create",
+    "allow-invoice-amount",
+    "allow-payment-pay",
+    "allow-payment-keysend",
+    "allow-invite-create",
+    "allow-invite-redeem",
+    "allow-file-price",
+    "allow-file-send"
   ]
 }

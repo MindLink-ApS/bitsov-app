@@ -25,6 +25,19 @@ fn main() {
             "messages_list",
             "price_quote",
             "payments_overview",
+            "spend_status",
+            "spend_request",
+            "spend_lock",
+            "message_send",
+            "room_quote",
+            "invoice_create",
+            "invoice_amount",
+            "payment_pay",
+            "payment_keysend",
+            "invite_create",
+            "invite_redeem",
+            "file_price",
+            "file_send",
         ])
         .permissions_path_pattern("./permissions/manual/**/*");
 
