@@ -6,6 +6,15 @@ import type { NodeStatus, PairingView } from '../onboarding/pairing';
 import type { Source } from './source';
 import type {
   ActionError,
+  AiFreshness,
+  AiTopic,
+  Amount,
+  Disclosure,
+  Preset,
+  ProviderView,
+  RemoteAnswer,
+  ToolOutput,
+  TopicRead,
   FundState,
   LiveEvent,
   Message,
@@ -99,6 +108,236 @@ const WINDOW_MS = 10 * 60 * 1000;
 /** Status polls before the sample owner "types" the grant at their terminal. */
 const GRANT_AFTER_POLLS = 2;
 
+// ---- AI track sample ----------------------------------------------------------
+// What the host's read broker would return for the sample node: the same
+// wallet, peers and threads as above, projected to the broker's shapes. The
+// remote model is a stand-in that answers from the preview body; nothing is
+// sent anywhere.
+
+const HOUR = 3_600_000;
+const avail = (value: number, unit: string, source_field: string): Amount => ({ state: 'available', value, unit, source_field });
+const msat = (value: number, field: string) => avail(value, 'msat', field);
+const count = (value: number, field: string) => avail(value, 'count', field);
+
+/** Paid messages with each contact, hours before now. Positive is sent. */
+const SAMPLE_PAYMENTS: [string, number, number][] = [
+  [hex('a'), 0.7, -2000],
+  [hex('a'), 1.2, 2000],
+  [hex('b'), 5, 1000],
+  [hex('b'), 6.5, -1000],
+  [hex('a'), 26, 2000],
+  [hex('a'), 30, -2000],
+  [hex('d'), 49, 1000],
+  [hex('a'), 74, 2000],
+  [hex('b'), 190, 1000],
+];
+
+function samplePayments(sinceMs: number | null): ToolOutput {
+  const now = Date.now();
+  const entries = SAMPLE_PAYMENTS.map(([peer, hours, signed]) => ({
+    at_ms: Math.round(now - hours * HOUR),
+    direction: signed > 0 ? ('sent' as const) : ('received' as const),
+    amount: msat(Math.abs(signed), 'payment_amount_msat'),
+    peer: { state: 'value' as const, value: peer },
+  })).filter((e) => sinceMs === null || e.at_ms >= sinceMs);
+  const total = (d: 'sent' | 'received') => entries.filter((e) => e.direction === d).reduce((n, e) => n + (e.amount.state === 'available' ? e.amount.value : 0), 0);
+  return {
+    tool: 'payments',
+    report: {
+      state: 'ready',
+      value: {
+        entries,
+        sent_total: msat(total('sent'), 'payment_amount_msat'),
+        received_total: msat(total('received'), 'payment_amount_msat'),
+        unlisted: count(0, 'messages'),
+        peers_read: count(SAMPLE_PEERS.length, 'node_id'),
+        peers_unread: count(0, 'node_id'),
+        partial_threads: count(0, 'messages'),
+      },
+    },
+  };
+}
+
+const channelSummaries = WALLET.channels.map((c) => ({
+  channel_id: { state: 'value' as const, value: c.channel_id },
+  capacity: msat(c.capacity_msat, 'capacity_msat'),
+  local_balance: msat(c.local_balance_msat, 'local_balance_msat'),
+  remote_balance: msat(c.remote_balance_msat, 'remote_balance_msat'),
+  active: c.active,
+  short_channel_id: null,
+}));
+const sum = (pick: (c: WalletOverview['channels'][number]) => number) => WALLET.channels.reduce((n, c) => n + pick(c), 0);
+
+function sampleOutputs(topic: AiTopic, sinceMs: number | null): ToolOutput[] {
+  switch (topic) {
+    case 'balance':
+      return [{
+        tool: 'balance',
+        report: { state: 'ready', value: {
+          label: 'ldk_onchain_plus_lightning',
+          wallet_balance: msat(WALLET.balance_msat, 'balance_msat'),
+          channel_local_balance: msat(sum((c) => c.local_balance_msat), 'local_balance_msat'),
+          channel_remote_balance: msat(sum((c) => c.remote_balance_msat), 'remote_balance_msat'),
+          channel_capacity: msat(sum((c) => c.capacity_msat), 'capacity_msat'),
+        } },
+      }];
+    case 'channels':
+      return [{
+        tool: 'channels',
+        report: { state: 'ready', value: {
+          count: count(WALLET.channels.length, 'channel_id'),
+          active_count: count(WALLET.channels.filter((c) => c.active).length, 'active'),
+          channels: channelSummaries,
+        } },
+      }];
+    case 'node':
+      return [{
+        tool: 'health',
+        report: { state: 'ready', value: {
+          liveness: 'ok',
+          connected_peers: count(SAMPLE_PEERS.filter((p) => p.connected).length, 'connected_peers'),
+          e2ee_sessions: count(3, 'e2ee_sessions'),
+          pending_deliveries: count(0, 'pending_deliveries'),
+          lightning_available: true,
+          lightning_payment_capable: true,
+          uptime: avail(3 * 86_400 + 4 * 3600, 'seconds', 'uptime_secs'),
+          version: avail(2, 'protocol_version', 'version'),
+          lightning_backend: 'ldk',
+          chain_backend: 'esplora',
+          block_height: avail(860_123, 'blocks', 'block_height'),
+        } },
+      }];
+    case 'inbox':
+      return [{
+        tool: 'message_counts',
+        report: { state: 'ready', value: {
+          returned_count: count(7, 'messages'),
+          senders: [
+            { sender: hex('a'), count: count(4, 'sender') },
+            { sender: hex('b'), count: count(3, 'sender') },
+          ],
+          withheld_senders: count(0, 'sender'),
+        } },
+      }];
+    case 'prices':
+      return [{
+        tool: 'local_prices',
+        report: { state: 'ready', value: {
+          mode: 'static',
+          prices: [
+            { category: 'communication', price: msat(OWN_PRICE_MSAT, 'prices') },
+            { category: 'files_media', price: msat(FILE_PRICE_MSAT, 'prices') },
+            { category: 'structured_data', price: msat(1000, 'prices') },
+            { category: 'collaboration', price: msat(2000, 'prices') },
+          ],
+          block_height: avail(860_123, 'blocks', 'block_height'),
+        } },
+      }];
+    case 'payments':
+      return [samplePayments(sinceMs)];
+  }
+}
+
+/** As the host would describe the reads. The price table is the stale one. */
+const SAMPLE_READS: Record<AiTopic, { routes: string[]; freshness: AiFreshness }> = {
+  balance: {
+    routes: ['GET /api/v1/payments/balance', 'GET /api/v1/payments/channels'],
+    freshness: { state: 'fresh', age_ms: 38_000, stale_after_ms: 180_000, node_as_of: true, node_stale: false, clock_skew: false },
+  },
+  channels: {
+    routes: ['GET /api/v1/payments/channels'],
+    freshness: { state: 'fresh', age_ms: 38_000, stale_after_ms: 180_000, node_as_of: true, node_stale: false, clock_skew: false },
+  },
+  node: {
+    routes: ['GET /api/v1/health'],
+    freshness: { state: 'fresh', age_ms: 900, stale_after_ms: 60_000, node_as_of: true, node_stale: false, clock_skew: false },
+  },
+  inbox: {
+    routes: ['GET /api/v1/messages?limit=50'],
+    freshness: { state: 'fresh', age_ms: 1_100, stale_after_ms: 60_000, node_as_of: false, node_stale: false, clock_skew: false },
+  },
+  prices: {
+    routes: ['GET /api/v1/pricing'],
+    freshness: { state: 'stale', age_ms: 95_000, stale_after_ms: 60_000, node_as_of: true, node_stale: true, clock_skew: false },
+  },
+  payments: {
+    routes: ['GET /api/v1/peers', `GET /api/v1/messages?peer=… (${SAMPLE_PEERS.length} contacts)`],
+    freshness: { state: 'fresh', age_ms: 1_400, stale_after_ms: 60_000, node_as_of: true, node_stale: false, clock_skew: false },
+  },
+};
+
+export function sampleRead(topic: AiTopic, sinceMs: number | null): TopicRead {
+  return { state: 'live', topic, outputs: sampleOutputs(topic, sinceMs), ...structuredClone(SAMPLE_READS[topic]) };
+}
+
+export const SAMPLE_PROVIDERS: ProviderView[] = [
+  { kind: 'local', label: 'On this computer', enabled: true, host: null, model: null, note: null },
+  { kind: 'shared', label: 'Shared open model (sample)', enabled: true, host: 'models.sample.invalid', model: 'open-8b-sample', note: null },
+  { kind: 'frontier', label: 'Frontier model', enabled: false, host: null, model: null, note: 'Off. Not set up on this computer.' },
+];
+
+const looksLikeId = (text: string) => text.length >= 16 && /^[0-9a-f]+$/i.test(text);
+const roundSats = (m: number) => {
+  const s = Math.round(m / 1000);
+  const digits = String(s).length;
+  if (digits <= 2) return s;
+  const step = 10 ** (digits - 2);
+  return Math.round(s / step) * step;
+};
+
+/**
+ * Sample-mode stand-in for the host's `narrow` (src-tauri/src/ai.rs), so the
+ * preview looks like the real one. The host's version is the one that counts.
+ */
+export function sampleNarrow(value: unknown, preset: Preset): unknown {
+  if (preset === 'exact') return value;
+  if (Array.isArray(value)) {
+    if (preset === 'counts' && value.some((v) => v && typeof v === 'object')) return { withheld_items: value.length };
+    return value.map((v) => sampleNarrow(v, preset));
+  }
+  if (value && typeof value === 'object') {
+    const map = value as Record<string, unknown>;
+    if ('unit' in map && 'source_field' in map) {
+      const withheld = { state: 'withheld', unit: map.unit, source_field: map.source_field };
+      if (map.state !== 'available') return map.state === 'rounded' && preset === 'counts' ? withheld : map;
+      if (map.unit === 'count') return map;
+      if (preset === 'counts') return withheld;
+      if (map.unit === 'msat') return { state: 'rounded', unit: 'msat', source_field: map.source_field, sats: roundSats(map.value as number) };
+      return map;
+    }
+    if (map.state === 'value' && 'value' in map) return { state: 'withheld' };
+    return Object.fromEntries(
+      Object.entries(map).map(([k, v]) => {
+        if (k === 'at_ms' && typeof v === 'number') return [k, preset === 'rounded' ? Math.floor(v / 86_400_000) * 86_400_000 : { state: 'withheld' }];
+        if (k === 'withheld_items') return [k, v];
+        return [k, sampleNarrow(v, preset)];
+      }),
+    );
+  }
+  if (typeof value === 'string' && looksLikeId(value)) return 'withheld';
+  if (typeof value === 'number' && preset === 'counts') return 'withheld';
+  return value;
+}
+
+/** Same shape and wording as the host's `SYSTEM_PROMPT`. */
+const SAMPLE_SYSTEM =
+  "You answer a person's question about their own BitSov node, using only the JSON they send. Amounts are millisatoshis unless a field says sats. \"withheld\" and \"rounded\" mean the person chose not to share the exact value: do not guess it. If the data does not answer the question, say so in one sentence. Do not ask for more data, keys or passwords. Do not tell them to send or pay anything; the app does that only when they ask it to. Answer in at most four short sentences.";
+
+function sampleRemoteText(topic: AiTopic, preset: Preset): string {
+  const shared = { counts: 'the counts you shared', rounded: 'the rounded figures you shared', exact: 'the figures you shared' }[preset];
+  const lead = `Sample reply: nothing left this computer. From ${shared}: `;
+  switch (topic) {
+    case 'payments':
+      return lead + (preset === 'counts'
+        ? '5 paid messages went out and 3 came in over the last 7 days. The amounts were withheld, so I cannot say what they cost.'
+        : 'you spent about 8 sats on 5 paid messages this week and took in about 5. That is a very light week.');
+    case 'balance':
+      return lead + (preset === 'counts' ? 'your balance was withheld, so I cannot say how much you hold.' : 'your node holds about 480,000 sats, most of it in Lightning channels.');
+    default:
+      return lead + 'the data answers only part of your question.';
+  }
+}
+
 const refuse = (code: ActionError['code'], message: string) => Promise.reject<never>({ code, message } satisfies ActionError);
 
 /** The amount in a BOLT 11 prefix, mirroring the host's `bolt11_amount_msat` for sample invoices. */
@@ -173,6 +412,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number 
     };
   };
   const later = (ms: number, event: LiveEvent) => setTimeout(() => live?.(event), ms);
+  const disclosures = new Map<string, { topic: AiTopic; preset: Preset }>();
   const nextId = (prefix: string) => `${prefix}-${(sent++).toString(16).padStart(4, '0')}`;
 
   return {
@@ -311,6 +551,41 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number 
       const pad = (dataB64.match(/=+$/)?.[0].length ?? 0);
       return { message_id: id, recipient: recipient.toLowerCase(), filename, size_bytes: (dataB64.length / 4) * 3 - pad, delivered: true, amount_msat: FILE_PRICE_MSAT, sent_at_ms: Date.now() };
     },
+    aiRead: async (topic, sinceMs) => {
+      await new Promise((r) => setTimeout(r, 350));
+      return sampleRead(topic, sinceMs);
+    },
+    aiProviders: () => ok(SAMPLE_PROVIDERS),
+    aiDisclose: async (provider, topic, sinceMs, preset, question) => {
+      const remote = SAMPLE_PROVIDERS.find((p) => p.kind === provider && p.enabled && p.host);
+      if (!remote) return refuse('invalid', 'That model is off on this computer. Nothing was prepared.');
+      const read = sampleRead(topic, sinceMs);
+      if (read.state !== 'live') return refuse('node', 'Your node could not be read, so nothing was prepared.');
+      const user = {
+        question: question.trim().slice(0, 500),
+        topic,
+        shared: preset,
+        freshness: { state: read.freshness.state, age_seconds: read.freshness.age_ms === null ? null : Math.floor(read.freshness.age_ms / 1000) },
+        data: read.outputs.map((o) => sampleNarrow(o, preset)),
+      };
+      const body = JSON.stringify(
+        { model: remote.model, temperature: 0, messages: [{ role: 'system', content: SAMPLE_SYSTEM }, { role: 'user', content: JSON.stringify(user, null, 2) }] },
+        null,
+        2,
+      );
+      const id = `sample${(sent++).toString(16).padStart(26, '0')}`;
+      disclosures.set(id, { topic, preset });
+      return { id, provider, label: remote.label, host: remote.host!, model: remote.model!, preset, body, bytes: new TextEncoder().encode(body).length, key_env: null, expires_in_ms: 300_000 } satisfies Disclosure;
+    },
+    aiSend: async (id) => {
+      const held = disclosures.get(id);
+      disclosures.delete(id);
+      if (!held) return refuse('invalid', 'That preview expired or was already used. Nothing was sent.');
+      await new Promise((r) => setTimeout(r, 600));
+      const remote = SAMPLE_PROVIDERS[1];
+      return { provider: remote.kind, label: remote.label, host: remote.host!, model: remote.model!, text: sampleRemoteText(held.topic, held.preset), sent_bytes: 0 } satisfies RemoteAnswer;
+    },
+    aiCancel: (id) => ok(disclosures.delete(id)),
     onLive: (handler) => {
       live = handler;
       let i = 0;

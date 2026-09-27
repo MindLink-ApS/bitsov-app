@@ -300,6 +300,54 @@ select { font: inherit; font-size: var(--t-sm); background: var(--sunk); color: 
 .funded h2 { color: var(--ok); }
 .evidence { font-size: var(--t-xs); color: var(--muted); font-family: var(--font-mono); overflow-wrap: anywhere; }
 
+/* AI track ---------------------------------------------------------------- */
+/* Answers sit on the left like a peer's; the node is speaking through the app.
+ * Where an answer came from is always printed under it. Orange stays for sats
+ * and the one action; a preview of what would leave is plain mono on ink. */
+.ai-providers { display: flex; gap: var(--s-2); padding: var(--s-3) var(--s-6) 0; flex-wrap: wrap; }
+.ai-provider { display: inline-flex; align-items: baseline; gap: var(--s-2); background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-chip); padding: 5px 12px; font-size: var(--t-sm); color: var(--muted); }
+.ai-provider .meta { font-family: var(--font-mono); font-size: var(--t-xs); color: var(--faint); }
+.ai-provider[aria-checked='true'] { border-color: var(--line-strong); background: var(--raised); color: var(--ink); }
+.ai-provider[aria-checked='true'] .meta { color: var(--ok); }
+.ai-provider:disabled { opacity: 0.55; cursor: not-allowed; }
+.ai-answer { align-self: flex-start; max-width: min(620px, 88%); display: flex; flex-direction: column; gap: var(--s-2); animation: arrive var(--d-mid) var(--ease); }
+.ai-answer > .bubble { border-bottom-left-radius: 4px; }
+.ai-thinking { display: inline-flex; align-items: center; gap: var(--s-2); color: var(--muted); }
+.spinner.small { width: 12px; height: 12px; border-width: 2px; }
+.ai-source { margin: 0; font-size: var(--t-xs); color: var(--faint); line-height: var(--lh-body); }
+.ai-source .id { font-size: var(--t-xs); overflow-wrap: anywhere; }
+.ai-from { color: var(--muted); }
+.ai-fresh.stale { color: var(--warn); }
+.ai-card { gap: var(--s-2); }
+.ai-card .card-head { justify-content: space-between; }
+.ai-card .facts { font-size: var(--t-sm); }
+.ai-card .facts dd { text-align: right; margin: 0; }
+.link.copy { font-size: var(--t-xs); padding: 0; }
+.ai-totals { gap: var(--s-5); font-size: var(--t-sm); }
+.ai-totals .label { color: var(--muted); }
+.ai-payments { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.ai-payments li { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto auto; gap: var(--s-2); align-items: baseline; padding: 6px 0; border-top: 1px solid var(--ember-line); font-size: var(--t-sm); }
+.ai-payments .dir { font-family: var(--font-mono); color: var(--muted); }
+.ai-payments li[data-direction='received'] .dir, .ai-payments li[data-direction='received'] .sats { color: var(--ok); }
+.ai-payments .who { font-family: var(--font-serif); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ai-payments .when { font-size: var(--t-xs); color: var(--faint); }
+.ai-card.proposal { align-self: flex-start; min-width: min(360px, 100%); }
+.ai-card.proposal .primary { align-self: flex-start; margin-top: var(--s-1); }
+.bubble.quote { background: var(--sunk); font-size: var(--t-sm); }
+.ai-card.disclosure { border-color: var(--line-strong); background: var(--surface); max-width: min(680px, 100%); }
+.ai-card.disclosure .kind { color: var(--ok); }
+.ai-card.disclosure[data-state='not-sent'] .kind { color: var(--muted); }
+.ai-card.disclosure p { margin: 0; font-size: var(--t-sm); line-height: var(--lh-body); }
+.modes button[aria-checked='true'] { background: var(--raised); color: var(--ink); }
+.ai-payload { margin: 0; max-height: 280px; overflow: auto; background: var(--sunk); border: 1px solid var(--line); border-radius: var(--r-control); padding: var(--s-3); font-family: var(--font-mono); font-size: var(--t-xs); line-height: 1.45; color: var(--ink); white-space: pre-wrap; overflow-wrap: anywhere; }
+.ai-composer .composer-bar textarea { flex: 1; min-height: 40px; }
+.ai-suggest { display: flex; gap: var(--s-2); flex-wrap: wrap; }
+.chip { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-chip); padding: 4px 10px; font-size: var(--t-xs); color: var(--muted); }
+.chip:hover:not(:disabled) { color: var(--ink); border-color: var(--line-strong); }
+.ai-sent summary { font-size: var(--t-xs); color: var(--muted); cursor: pointer; }
+.ai-sent .ai-payload { margin-top: var(--s-2); }
+.drafted { margin: 0; font-size: var(--t-xs); color: var(--accent); }
+
 /* narrow windows -------------------------------------------------------- */
 @media (max-width: 1080px) {
   .cc, .cc.no-context { grid-template-columns: var(--rail-w) minmax(0, 1fr); }
@@ -318,4 +366,9 @@ select { font: inherit; font-size: var(--t-sm); background: var(--sunk); color: 
   .msg { max-width: 92%; }
   .cost { flex-wrap: wrap; row-gap: 0; }
   .cost .basis { flex-basis: 100%; }
+  .ai-providers { padding-left: var(--s-4); padding-right: var(--s-4); flex-wrap: nowrap; overflow-x: auto; }
+  .ai-provider { flex: none; }
+  .ai-answer { max-width: 100%; }
+  .ai-suggest { flex-wrap: nowrap; overflow-x: auto; }
+  .chip { flex: none; }
 }

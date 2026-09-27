@@ -7,6 +7,13 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import type { NodeStatus, PairingView } from '../onboarding/pairing';
 import type {
+  AiTopic,
+  Disclosure,
+  Preset,
+  ProviderKind,
+  ProviderView,
+  RemoteAnswer,
+  TopicRead,
   FileReceipt,
   InvoiceAmount,
   InvoiceView,
@@ -64,6 +71,14 @@ export interface Source {
   inviteRedeem(invite: string): Promise<RedeemView>;
   filePrice(): Promise<number>;
   fileSend(recipient: string, filename: string, mimeType: string, dataB64: string, maxMsat: number): Promise<FileReceipt>;
+  // AI track: the host reads through its broker; a remote model gets only a body the owner saw
+  aiRead(topic: AiTopic, sinceMs: number | null): Promise<TopicRead>;
+  aiProviders(): Promise<ProviderView[]>;
+  /** Prepare, never send. */
+  aiDisclose(provider: ProviderKind, topic: AiTopic, sinceMs: number | null, preset: Preset, question: string): Promise<Disclosure>;
+  /** Send the prepared body, once. Takes the id only. */
+  aiSend(disclosureId: string): Promise<RemoteAnswer>;
+  aiCancel(disclosureId: string): Promise<boolean>;
 }
 
 export const LIVE_EVENT = 'node-live';
@@ -101,6 +116,12 @@ export const hostSource: Source = {
   filePrice: () => invoke<number>('file_price'),
   fileSend: (recipient, filename, mimeType, dataB64, maxMsat) =>
     invoke<FileReceipt>('file_send', { recipient, filename, mime_type: mimeType, data_b64: dataB64, max_msat: maxMsat }),
+  aiRead: (topic, sinceMs) => invoke<TopicRead>('ai_read', { topic, since_ms: sinceMs }),
+  aiProviders: () => invoke<ProviderView[]>('ai_providers'),
+  aiDisclose: (provider, topic, sinceMs, preset, question) =>
+    invoke<Disclosure>('ai_disclose', { provider, topic, since_ms: sinceMs, preset, question }),
+  aiSend: (disclosureId) => invoke<RemoteAnswer>('ai_send', { disclosure_id: disclosureId }),
+  aiCancel: (disclosureId) => invoke<boolean>('ai_cancel', { disclosure_id: disclosureId }),
 };
 
 /** Running inside the Tauri host (vs. a plain browser tab on the Vite server). */

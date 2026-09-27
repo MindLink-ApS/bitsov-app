@@ -179,6 +179,7 @@ describe('control center shell', () => {
     click('[data-track="new"]');
     await vi.waitFor(() => expect(mount.querySelector('[data-new-track]')?.textContent).toContain('introduction, not admission'));
     click('[data-track="ai"]');
-    await vi.waitFor(() => expect(mount.querySelector('[data-ai-track]')?.textContent).toContain('not built yet'));
+    await vi.waitFor(() => expect(mount.querySelector('[data-ai-track]')?.textContent).toContain('Ask about your own node'));
+    expect(mount.querySelector('[data-ai-policy]')?.textContent).toContain('Nothing leaves this computer');
   });
 });

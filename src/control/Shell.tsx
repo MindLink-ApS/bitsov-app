@@ -1,6 +1,8 @@
 import { createEffect, createMemo, createSignal, For, type JSX, Match, on, onCleanup, Show, Switch } from 'solid-js';
 import { createStore, produce } from 'solid-js/store';
 import { qrSvg } from '../qr';
+import type { Proposal } from './ai';
+import { AiTrack, createAiSession } from './AiTrack';
 import { clock, day, sats, satsWhole, satUnit, shortId, uptime } from './format';
 import type { Source } from './source';
 import {
@@ -56,6 +58,15 @@ type Props = {
   fund?: JSX.Element;
 };
 
+/** A draft the AI track prepared for one peer's composer. Applied once. */
+export type Prefill = {
+  seq: number;
+  key: string;
+  mode: 'message' | 'pay' | 'request';
+  text: string;
+  sats: number | null;
+};
+
 /** The result of one action: its value, or why it did not happen. */
 type Outcome<T> = { ok: true; value: T } | { ok: false; error: ActionError };
 
@@ -98,6 +109,21 @@ export function ControlCenter(props: Props) {
   const [errors, setErrors] = createStore<Record<string, string | undefined>>({});
   const [contextOpen, setContextOpen] = createSignal(false);
   const [tab, setTab] = createSignal<'node' | 'wallet'>('node');
+  const aiSession = createAiSession();
+  const [prefill, setPrefill] = createSignal<Prefill | null>(null);
+  let prefillSeq = 0;
+  /** The AI track's proposal: open that peer's composer with it filled in. Nothing is sent. */
+  const openDraft = (p: Proposal) => {
+    const key = trackKey({ kind: 'peer', id: p.peer });
+    setPrefill({
+      seq: ++prefillSeq,
+      key,
+      mode: p.kind,
+      text: p.kind === 'message' ? p.text : p.kind === 'request' ? p.note : '',
+      sats: p.kind === 'message' ? null : p.sats,
+    });
+    setTrack({ kind: 'peer', id: p.peer });
+  };
 
   const ownId = () => props.ownId ?? overview()?.node_id ?? '';
   const peerById = createMemo(() => new Map(peers().map((p) => [p.node_id.toLowerCase(), p])));
@@ -350,7 +376,15 @@ export function ControlCenter(props: Props) {
             {(t) => (
               <Switch>
                 <Match when={t().kind === 'ai'}>
-                  <AiTrack onContext={() => setContextOpen(true)} />
+                  <AiTrack
+                    source={props.source}
+                    session={aiSession}
+                    peers={peers()}
+                    now={now()}
+                    onPrefill={openDraft}
+                    onContext={() => setContextOpen(true)}
+                    head={(title, sub) => <TrackHead title={title} sub={sub} onContext={() => setContextOpen(true)} />}
+                  />
                 </Match>
                 <Match when={t().kind === 'new'}>
                   <NewTrack
@@ -384,6 +418,8 @@ export function ControlCenter(props: Props) {
                     actions={actions}
                     now={now()}
                     error={errors.thread}
+                    prefill={prefill()}
+                    onPrefillUsed={() => setPrefill(null)}
                     onContext={() => setContextOpen(true)}
                   />
                 </Match>
@@ -488,7 +524,7 @@ function Rail(props: {
 
       <div class="track-group">
         <h2>AI</h2>
-        <Show when={props.active}>{item({ kind: 'ai' }, 'Ask your node', <span class="meta">not yet</span>)}</Show>
+        <Show when={props.active}>{item({ kind: 'ai' }, 'Ask your node', <span class="meta">local</span>)}</Show>
       </div>
 
       <div class="rail-foot">
@@ -545,6 +581,8 @@ function Conversation(props: {
   actions: Actions;
   now: number;
   error: string | undefined;
+  prefill: Prefill | null;
+  onPrefillUsed: () => void;
   onContext: () => void;
 }) {
   let stream: HTMLDivElement | undefined;
@@ -642,6 +680,8 @@ function Conversation(props: {
         actions={props.actions}
         nameOf={props.nameOf}
         now={props.now}
+        prefill={props.prefill}
+        onPrefillUsed={props.onPrefillUsed}
       />
     </>
   );
@@ -791,8 +831,11 @@ function Composer(props: {
   actions: Actions;
   nameOf: (id: string) => string;
   now: number;
+  prefill?: Prefill | null;
+  onPrefillUsed?: () => void;
 }) {
   const [mode, setMode] = createSignal<Mode>('message');
+  const [drafted, setDrafted] = createSignal(false);
   const [draft, setDraft] = createSignal('');
   const [busy, setBusy] = createSignal(false);
   const [note, setNote] = createSignal<string | null>(null);
@@ -828,8 +871,34 @@ function Composer(props: {
         setPubkey('');
         setAmount('');
         setMemo('');
+        setDrafted(false);
       },
       { defer: true },
+    ),
+  );
+  // A draft from the AI track: fill this composer once. Sending is still the
+  // owner's press, with the cost shown and the spend approval unchanged.
+  createEffect(
+    on(
+      () => [props.prefill?.seq, trackKey(props.track)] as const,
+      () => {
+        const p = props.prefill;
+        if (!p || p.key !== trackKey(props.track) || room()) return;
+        setMode(p.mode);
+        setNote(null);
+        if (p.mode === 'message') setDraft(p.text);
+        if (p.mode === 'pay') {
+          setPayKind('keysend');
+          setAmount(p.sats === null ? '' : String(p.sats));
+          setMemo('');
+        }
+        if (p.mode === 'request') {
+          setAmount(p.sats === null ? '' : String(p.sats));
+          setMemo(p.text);
+        }
+        setDrafted(true);
+        props.onPrefillUsed?.();
+      },
     ),
   );
 
@@ -937,7 +1006,10 @@ function Composer(props: {
     switch (mode()) {
       case 'message':
         r = await props.actions.send(t, draft(), shown().msat!);
-        if (r.ok && unchanged()) setDraft('');
+        if (r.ok && unchanged()) {
+          setDraft('');
+          setDrafted(false);
+        }
         break;
       case 'pay':
         r =
@@ -1066,6 +1138,11 @@ function Composer(props: {
         </button>
       </div>
 
+      <Show when={drafted()}>
+        <p class="drafted" data-drafted>
+          Drafted in the AI track. Check it and the cost, then {mode() === 'request' ? 'create the invoice' : 'send it'} yourself.
+        </p>
+      </Show>
       <Show when={blocked()}>
         <p class="err-note" data-room-blocked>{blocked()}</p>
       </Show>
@@ -1148,23 +1225,6 @@ function SpendBar(props: { spend: SpendView | null; error: string | undefined; n
         <p class="err-note">{props.error}</p>
       </Show>
     </div>
-  );
-}
-
-function AiTrack(props: { onContext: () => void }) {
-  return (
-    <>
-      <TrackHead title="AI" sub={<span class="id">Not built yet</span>} onContext={props.onContext} />
-      <div class="stream">
-        <div class="empty-track" data-ai-track>
-          <h2>Ask about your own node</h2>
-          <p class="hint">
-            This track is not built yet. When it is, this app brokers every question: your node never talks to a
-            model directly, and you see exactly what would leave this machine before anything does.
-          </p>
-        </div>
-      </div>
-    </>
   );
 }
 
