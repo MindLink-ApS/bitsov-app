@@ -44,6 +44,10 @@ libc = "0.2"
 default = []
 # Mock-only SIT reader example. Pulls in `mock-node`; not part of the app binary.
 sit-mock = ["dep:mock-node"]
+# DEV ONLY (src/dev_node.rs, docs/DEV_NODE_FROM_MAIN.md): run an UNVERIFIED local
+# `konsensus` via BITSOV_DEV_SIDECAR instead of the signature-verified sidecar.
+# A compile error in release builds. Never add this to `default`.
+dev-node = []
 
 [dependencies.mock-node]
 path = "crates/mock-node"
