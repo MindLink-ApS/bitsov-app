@@ -21,6 +21,34 @@ const PEERS: Peer[] = [
   { node_id: 'c'.repeat(64), addr: null, label: null, connected: false, fingerprint: null },
 ];
 
+// Each body is literal: internal apostrophes/quotes must survive, while the
+// final instruction is never copied into the draft.
+const QUOTED_DRAFTS = [
+  ["Message Maya saying 'Those are the kids', not ours.'", "Those are the kids', not ours."],
+  ["Message Maya saying 'The kids', parents', and teachers' schedules are ready'", "The kids', parents', and teachers' schedules are ready"],
+  ["Message Maya saying 'Those are the kids', not ours.', don't append 'please'.", "Those are the kids', not ours."],
+  ["Message Maya 'The kids' toys', not 'tomorrow'.", "The kids' toys"],
+  ["Message Maya 'Thanks', use Chris' nickname.", 'Thanks'],
+  ["Message Maya 'Thanks' don't append 'please'", 'Thanks'],
+  [`Message Maya saying 'The kids', parents', and teachers' notes say "I'm ready".', don't append 'please'.`, `The kids', parents', and teachers' notes say "I'm ready".`],
+  [`Message Maya saying "The kids' notes say 'I'm ready', not 'late'.", do not append "please".`, "The kids' notes say 'I'm ready', not 'late'."],
+  [`Message Maya saying "The kids' notes say "I'm ready" today.", not "tomorrow".`, `The kids' notes say "I'm ready" today.`],
+  [`Message Maya saying 'The kids' notes say 'I'm ready' today.', not 'tomorrow'.`, "The kids' notes say 'I'm ready' today."],
+  ['Message Maya saying “The kids’ notes say “I’m ready” today.”, not “tomorrow”.', 'The kids’ notes say “I’m ready” today.'],
+  ["Message Maya saying 'The kids' notes say 'Thanks' today.', not 'tomorrow'.", "The kids' notes say 'Thanks' today."],
+  ["Message Maya saying 'He said 'The kids' ready' today.', not 'tomorrow'.", "He said 'The kids' ready' today."],
+  ['Message Maya saying "He said ("hello") today.", not "tomorrow".', 'He said ("hello") today.'],
+  ["Message Maya saying 'He said ['hello'] today.', not 'tomorrow'.", "He said ['hello'] today."],
+  ["Message Maya saying 'He said 'hello''", "He said 'hello'"],
+  ["Message Maya saying 'Tell 'em tomorrow', not 'tomorrow'.", "Tell 'em tomorrow"],
+  ["Message Maya saying 'See you in '26', not 'tomorrow'.", "See you in '26"],
+  ["Message Maya saying 'Those are the kids', not ours', don't append 'please'.", "Those are the kids', not ours"],
+  ["Message Maya saying 'The kids', parents', and teachers' schedules', not 'tomorrow'.", "The kids', parents', and teachers' schedules"],
+  ["Message Maya 'Thanks', don't mention the kids', parents', or teachers' names.", 'Thanks'],
+  ["Message Maya 'Thanks', use Chris', not Alex's, nickname.", 'Thanks'],
+  ["Message Maya 'Thanks', please use Chris', not Alex's, nickname.", 'Thanks'],
+] as const;
+
 const avail = (value: number, unit = 'msat', source_field = 'x') => ({ state: 'available' as const, value, unit, source_field });
 
 function paymentsRead(): Extract<TopicRead, { state: 'live' }> {
@@ -134,6 +162,19 @@ describe('what a question asks', () => {
     ["Message Maya 'See you at 6' please", 'See you at 6'],
     ['Message Maya saying "See you\nat 6", not "tomorrow".', 'See you\nat 6'],
   ])('excludes quoted trailing instructions from the draft in %s', (question, text) => {
+    expect(understand(question, PEERS, NOW)).toMatchObject({
+      kind: 'act', proposal: { kind: 'message', peer: A, text },
+    });
+  });
+
+  it('keeps a short draft bounded with many quoted trailing instructions', () => {
+    const question = "Message Maya 'Thanks', don't append " + "'please' ".repeat(4000);
+    expect(understand(question, PEERS, NOW)).toMatchObject({
+      kind: 'act', proposal: { kind: 'message', peer: A, text: 'Thanks' },
+    });
+  });
+
+  it.each(QUOTED_DRAFTS)('keeps apostrophes and nested quotes inside the outer body: %s', (question, text) => {
     expect(understand(question, PEERS, NOW)).toMatchObject({
       kind: 'act', proposal: { kind: 'message', peer: A, text },
     });
@@ -459,6 +500,17 @@ describe('the AI track', () => {
     await vi.waitFor(() => expect($('[data-drafted]')).not.toBeNull());
     expect($<HTMLTextAreaElement>('[data-composer] textarea')?.value).toBe("The kids' toys are ready");
     for (const cmd of ['message_send', 'payment_pay', 'payment_keysend', 'spend_request']) expect(host.used(cmd)).toHaveLength(0);
+  });
+
+  it.each(QUOTED_DRAFTS)('prefills the complete outer body without trailing instructions: %s', async (question, text) => {
+    const host = stubHost();
+    await openAi();
+    ask(question);
+    await vi.waitFor(() => expect($('[data-ai-prefill]')).not.toBeNull());
+    click('[data-ai-prefill]');
+    await vi.waitFor(() => expect($('[data-drafted]')).not.toBeNull());
+    for (const cmd of ['message_send', 'payment_pay', 'payment_keysend', 'spend_request']) expect(host.used(cmd)).toHaveLength(0);
+    expect($<HTMLTextAreaElement>('[data-composer] textarea')?.value).toBe(text);
   });
 
   it('answers locally from the broker read with source and freshness, and sends nothing', async () => {
