@@ -1601,10 +1601,7 @@ async fn spend_advance(state: &NodeState, ask: bool) -> Result<act::SpendView, A
 
 async fn read_room_quote(state: &NodeState, room_id: &str) -> Result<act::RoomQuote, String> {
     let room = control::room_id(room_id)?;
-    let own_id = match state.node_id.lock().unwrap().clone() {
-        Some(id) => id,
-        None => String::new(),
-    };
+    let own_id = state.node_id.lock().unwrap().clone().unwrap_or_default();
     let own_id = if own_id.is_empty() { fetch_node_id(state).await? } else { own_id };
     let members = read_room_members(state, &room).await?;
     let peers: Vec<control::Peer> = get_json(state, "/peers").await?;

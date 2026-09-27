@@ -18,7 +18,7 @@
 mod macos {
     use std::ffi::{CString, OsStr, OsString};
     use std::fs::{self, File};
-    use std::io::{self, Write};
+    use std::io;
     use std::os::fd::{AsRawFd, FromRawFd};
     use std::os::unix::ffi::OsStrExt;
     use std::path::{Component, Path, PathBuf};
@@ -403,18 +403,19 @@ mod macos {
 
         // Pass the profile as an argument (`-p`) so it never lands in a
         // directory the confined child can overwrite between write and open.
-        let mut owned = Vec::new();
-        owned.push(c_os(OsStr::new(SANDBOX_EXEC))?);
-        owned.push(c_os(OsStr::new("-p"))?);
-        owned.push(c_os(OsStr::new(&prepared.profile))?);
-        owned.push(c_os(prepared.program.as_os_str())?);
+        let mut owned = vec![
+            c_os(OsStr::new(SANDBOX_EXEC))?,
+            c_os(OsStr::new("-p"))?,
+            c_os(OsStr::new(&prepared.profile))?,
+            c_os(prepared.program.as_os_str())?,
+        ];
         for arg in &prepared.args {
             owned.push(c_os(arg)?);
         }
         let mut argv: Vec<*mut libc::c_char> = owned.iter().map(|s| s.as_ptr() as *mut _).collect();
         argv.push(std::ptr::null_mut());
 
-        let env_owned = vec![
+        let env_owned = [
             env_pair("PATH", OsStr::new("/usr/bin:/bin"))?,
             env_pair("HOME", prepared.home_dir.as_os_str())?,
             env_pair("TMPDIR", prepared.scratch_dir.as_os_str())?,
@@ -561,7 +562,7 @@ mod macos {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use std::io::Read;
+        use std::io::{Read, Write};
         use std::process::{Command, Stdio};
         use std::sync::OnceLock;
 
@@ -920,4 +921,5 @@ mod macos {
 }
 
 #[cfg(target_os = "macos")]
+#[allow(unused_imports)] // Public launcher API, not yet wired into the binary.
 pub use macos::{launch, LaunchError, LaunchRequest, ModelChild};

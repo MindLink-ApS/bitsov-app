@@ -370,7 +370,9 @@ struct MessageWire {
     sender: String,
     #[allow(dead_code)]
     id: String,
+    #[allow(dead_code)]
     kind: u16,
+    #[allow(dead_code)]
     recipient: String,
     #[allow(dead_code)]
     timestamp: u64,

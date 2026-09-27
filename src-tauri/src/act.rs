@@ -475,7 +475,7 @@ pub fn bolt11_amount_msat(invoice: &str) -> Result<Option<u64>, ActionError> {
         Some('m') => n.checked_mul(100_000_000),
         Some('u') => n.checked_mul(100_000),
         Some('n') => n.checked_mul(100),
-        Some('p') if n % 10 == 0 => Some(n / 10),
+        Some('p') if n.is_multiple_of(10) => Some(n / 10),
         _ => None,
     }
     .ok_or_else(bad)?;
@@ -692,7 +692,7 @@ pub struct RedeemView {
 /// Decoded length of standard base64, validating the alphabet.
 pub fn base64_decoded_len(data: &str) -> Option<usize> {
     let bytes = data.as_bytes();
-    if bytes.is_empty() || bytes.len() % 4 != 0 {
+    if bytes.is_empty() || !bytes.len().is_multiple_of(4) {
         return None;
     }
     let pad = bytes.iter().rev().take_while(|&&b| b == b'=').count();
