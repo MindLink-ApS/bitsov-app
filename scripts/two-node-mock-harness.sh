@@ -3,13 +3,13 @@
 # Prerequisites: macOS, git, Cargo, Python >=3.11 with cryptography installed.
 # Usage: scripts/two-node-mock-harness.sh /absolute/path/to/genome [--allow-known-gaps]
 # The genome checkout must be clean at the pinned SHA. Build uses Cargo --offline.
-# Exit 0: checks pass and no strict gap (or --allow-known-gaps was explicit).
-# Exit 2: checks pass, but stock cross-process mock settlement cannot prove strict E2E.
+# Exit 0: all strict mock E2E assertions pass. Real-Lightning limits stay explicit.
+# Remaining real-Lightning limitations are listed in summary.json; they do not mask failed checks.
 # Exit 1: failed prerequisite/assertion. Logs/HTTP transcripts stay in a new /tmp directory.
 # This does NOT launch Tauri, a wallet, Docker, LND, LDK or any cloud infrastructure.
 set -euo pipefail
 umask 077
-GENOME_SHA=f2f17695bc58c240178a172416e621451f0f5614
+GENOME_SHA=ba8385ac20dbfce716361429df5ec1a1e501af35
 APP_CONTRACT_SHA=587d078bc93fb869c0f801f7bd02d91ec99f227f
 if [[ $# -lt 1 || $# -gt 2 || ( $# -eq 2 && $2 != --allow-known-gaps ) ]]; then
   echo "Usage: $0 /absolute/path/to/genome [--allow-known-gaps]" >&2
@@ -65,7 +65,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 E = Path(sys.argv[1])
-ALLOW_GAPS = len(sys.argv) > 2 and sys.argv[2] == '--allow-known-gaps'
+# --allow-known-gaps is retained for old callers; no assertion is bypassed.
 BIN = '/tmp/bitsov-t1-target/debug/konsensus'
 ROOTS = {n: Path('/tmp/bitsov-t1-' + n) for n in ('a', 'b')}
 owned = []
@@ -84,6 +84,7 @@ keys = {}
 tokens = {}
 gaps = []
 closed_mesh_e2e = False
+strict_e2e = False
 
 def check(name, condition, detail=None):
     checks.append({'name': name, 'pass': bool(condition), 'detail': detail})
@@ -163,6 +164,8 @@ node_id = "{ids[other]}"
 addr = "127.0.0.1:{ports[other][1]}"
 auto_connect = {'true' if n == 'a' else 'false'}
 '''
+    shared = phase != 'backend-error-unknown'
+    ledger = f'ledger_path = "{ROOTS["a"]}/mock-ledger.sqlite"' if shared else ''
     text = f'''tier = "light"
 admission_mode = "{'price_open' if strict else 'whitelist'}"
 [identity]
@@ -172,7 +175,8 @@ passphrase = ""
 listen_addr = "127.0.0.1:{ports[n][1]}"
 tier = "T1"
 [lightning]
-backend = "mock"
+backend = "{'shared_mock' if shared else 'mock'}"
+{ledger}
 initial_balance_msat = {0 if empty else 1000000}
 [chain]
 backend = "mock"
@@ -182,7 +186,7 @@ chat_msat = 2000
 file_ref_msat = 3000
 control_msat = 1000
 [payment_gate]
-verify_lightning_settlement = {'true' if strict else 'false'}
+verify_lightning_settlement = {'true' if shared else 'false'}
 min_admission_cost_msat = 0
 [storage]
 backend = "sqlite"
@@ -201,7 +205,7 @@ enabled = false
 content_dir = "{root}/pages"
 {peer}'''
     parsed = tomllib.loads(text)
-    check(f'{n} config: only mock backends', parsed['lightning']['backend'] == 'mock' and parsed['chain']['backend'] == 'mock')
+    check(f'{n} config: only mock backends', parsed['lightning']['backend'] in ('mock', 'shared_mock') and parsed['chain']['backend'] == 'mock')
     check(f'{n} config: loopback listeners', all(parsed[x]['listen_addr'].startswith('127.0.0.1:') for x in ('api', 'network')))
     (root / 'konsensus.toml').write_text(text)
     # No private keys copied into evidence. This config's JWT secret is disposable.
@@ -402,7 +406,7 @@ try:
     pair('a')
     pair('b')
     compose = {'recipient': ids['b'], 'is_room': False, 'kind': 0,
-               'plaintext': 'T1 strict capped first contact', 'max_total_msat': 2000}
+               'plaintext': 'F1 strict capped first contact', 'max_total_msat': 3999}
     req('a', 'POST', '/messages/compose', compose, tokens['a'], expect=403)
     elevate('a')
     wait_for('a', '/peers/connected', lambda peers: ids['b'] in peers)
@@ -412,26 +416,24 @@ try:
     refusal = post('a', '/messages/compose', compose, expect=409)
     check('first contact cap refusal is explicit', refusal.get('code') == 'price_cap_exceeded', refusal)
     check('first contact refusal spends nothing', balance() == before)
-    # Cross-instance settlement diagnostic: deliberately separate from app sends.
-    inv = post('b', '/payments/invoice', {'amount_msat': 1000, 'description': 'T1 mock cross-process probe'})
-    paid = post('a', '/payments/pay', {'bolt11': inv['bolt11']})
-    check('payer returns same invoice hash', paid['payment_hash'] == inv['payment_hash'])
-    recipient = get('b', '/payments/' + inv['payment_hash'])
-    check('stock recipient mock remains pending', recipient['status'].lower() == 'pending', recipient)
-    check('strict recipient received no message', messages() == [])
-    gaps.append('Strict price_open admission/E2E blocked: separate mock ledgers do not propagate settlement; capped first contact refuses unquoted admission.')
-    stop()
-
-    phase = 'closed-mesh-mock'
-    for n in ROOTS:
-        config(n, False)
-    start('b')
-    start('a')
-    refresh('a')
-    refresh('b')
+    # The target prices admission and the message at 2,000 each. Rate limiting
+    # intentionally bounds unpaid quote requests, including after cap refusal.
+    time.sleep(11)
+    compose['max_total_msat'] = 4000
+    reply = post('a', '/messages/compose', compose)
+    check('strict first contact aggregate principal exact', reply['amount_msat'] == 4000 and before - balance() == 4000, reply)
+    assert_received(reply, compose['plaintext'])
+    payments = get('b', '/payments')
+    check('recipient records both incoming settlements', sum(p['amount_msat'] for p in payments if p['direction'].lower() == 'incoming' and p['status'].lower() == 'settled') >= 4000, payments)
+    strict_e2e = True
+    phase = 'strict-established'
+    compose['max_total_msat'] = 2000
     wait_for('a', '/sessions/' + ids['b'], lambda s: s['active'])
     wait_for('b', '/sessions/' + ids['a'], lambda s: s['active'])
-    get('a', '/pricing/peers/' + ids['b'])
+    quote_status, quote = req('a', 'GET', '/pricing/peers/' + ids['b'], token=tokens['a'])
+    check('cached peer quote or explicit unknown', quote_status in (200, 404), quote)
+    if quote_status == 404:
+        gaps.append('Peer price table is still unknown immediately after paid admission; F1 uses the signed target invoice quote for the first call.')
     get('b', '/pricing')
     before = balance()
     compose['plaintext'] = 'T1 peer compose exact plaintext'
@@ -463,9 +465,8 @@ try:
 
     payload = b'T1 throwaway file bytes\n'
     upload = {'filename': 't1.txt', 'mime_type': 'text/plain', 'data_b64': base64.b64encode(payload).decode()}
-    req('a', 'POST', '/files', upload, tokens['a'], expect=403)
-    gaps.append('App-shaped paired file upload is HTTP 403: /files upload needs admin, but owner elevation grants only spend. Owner fixture upload is needed to test file send.')
-    file = post('a', '/files', upload, owner=True)
+    file = post('a', '/files', upload)
+    req('a', 'DELETE', '/files/' + file['file_id'], token=tokens['a'], expect=403)
     before = balance()
     post('a', '/files/' + file['file_id'] + '/send', {'recipient': ids['b'], 'max_total_msat': 2999}, expect=409)
     check('file over-cap refusal has no debit', balance() == before)
@@ -511,8 +512,8 @@ try:
     check('recipient issued no fallback invoice', get('b', '/payments') == recipient_payments_before)
     gaps.append('Real HTTP reply loss and stock generic backend-error classification are covered; unknown HTLC settlement and the Tauri fence against these live nodes are not.')
     gaps.append('A+B room has two members but only one remote paid recipient; two-remote-member fan-out needs a third node.')
-    gaps.append('Closed-mesh phase disables settlement lookup on the mock only; it proves encrypted transport and API caps, not settled recipient-bound payment.')
-    exit_code = 0 if ALLOW_GAPS else 2
+    gaps.append('Shared mock uses signed regtest invoices and strict recipient settlement lookup, but does not simulate channel liquidity, routing fees, HTLC timing, or real LND/LDK dispatch. Only the final stock-mock error diagnostic disables settlement lookup.')
+    exit_code = 0
 finally:
     # A second interrupt must not interrupt teardown of detached node sessions.
     for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
@@ -531,14 +532,14 @@ finally:
         shutil.rmtree(root)
     cleanup = all(not os.path.lexists(root) for root in owned)
     summary = {'exit_code': exit_code, 'checks': checks, 'gaps': gaps,
-               'strict_price_open_e2e': False, 'cleanup_complete': cleanup,
+               'strict_price_open_e2e': strict_e2e, 'cleanup_complete': cleanup,
                'closed_mesh_e2e': closed_mesh_e2e, 'startup_recovery_logs': recovery,
                'app_contract': '587d078bc93fb869c0f801f7bd02d91ec99f227f',
-               'genome': 'f2f17695bc58c240178a172416e621451f0f5614'}
+               'genome': 'ba8385ac20dbfce716361429df5ec1a1e501af35'}
     (E / 'summary.json').write_text(json.dumps(summary, indent=2))
     print(f'Cleanup complete: {cleanup}; evidence: {E}', flush=True)
 if gaps:
-    print('STRICT E2E NOT PROVEN. See summary.json gaps. Exit 2 unless --allow-known-gaps.', flush=True)
+    print('See summary.json for real-Lightning and UI coverage limits.', flush=True)
 sys.exit(exit_code)
 PY
 exec sandbox-exec -f "$EVIDENCE/loopback.sb" python3 "$EVIDENCE/runner.py" "$EVIDENCE" "${2:-}"
