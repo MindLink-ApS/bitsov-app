@@ -1,41 +1,36 @@
 import { createMemo, createSignal, onCleanup, onMount, Show } from 'solid-js';
-import { invoke } from '@tauri-apps/api/core';
 import { qrSvg } from './qr';
 import { Onboarding } from './onboarding/Onboarding';
-import { INITIAL_PAIRING, type PairingView } from './onboarding/pairing';
+import { INITIAL_PAIRING, type NodeStatus, type PairingView } from './onboarding/pairing';
+import { ControlCenter } from './control/Shell';
+import { hostSource, inHost, sampleRequest, type SampleStart, type Source } from './control/source';
+import { sampleSource } from './control/sample';
+import type { FundingAddress, FundState } from './control/types';
 
-// First run: Start node → Pair this app → Create/restore identity → Fund. The Rust
-// host bundles + supervises the node binary, pairs with it (or, on a node without
-// pairing routes, mints via /auth/local), and exposes every node call as a Tauri
-// command. This renderer only reflects that state: it never talks to the
-// node directly, never touches a non-loopback host (Gate G2), and never holds a
-// credential — no mnemonic, private key, JWT or node token is read or displayed here.
-// The one secret it accepts is the recovery phrase, which is write-only: masked on
-// entry, passed straight to the host, and cleared the moment it is submitted.
-type Status = { ready: boolean; node_id: string | null; error: string | null };
-
-type FundState = {
-  current_step: string;
-  tier: string | null;
-  funding_address: string | null;
-  funding_amount_sats_required: number | null;
-  funding_amount_sats_received: number;
-  funding_evidence: string | null;
-  funded: boolean;
-};
-
-type FundingAddress = { address: string; network: string | null; note: string | null };
-type Balance = { balance_msat: number };
-type RestoreOutcome = { node_id: string; restart_required: boolean; restarted: boolean };
+// The control center. First run (Start node → Pair this app → Create/restore
+// identity → Fund) is the shell's first state, shown in the centre track until
+// the node is ready and the Gate G6 disclosure is accepted; then the rail,
+// tracks and the Node/Wallet panel open. The Rust host bundles + supervises the
+// node, pairs with it (or, on a node without pairing routes, mints via
+// /auth/local), and exposes every node call as a Tauri command. This renderer
+// only reflects that state: it never talks to the node directly, never touches a
+// non-loopback host (Gate G2), and never holds a credential — no mnemonic,
+// private key, JWT or node token is read or displayed here. The one secret it
+// accepts is the recovery phrase, which is write-only: masked on entry, passed
+// straight to the host, and cleared the moment it is submitted.
 
 const DEFAULT_FUNDING_SATS = 50_000;
 const sats = (value: number) => value.toLocaleString('en-US');
+// The Wallet panel shows the node balance; this block is deposit-only.
 const short = (id: string) => (id.length > 20 ? `${id.slice(0, 8)}…${id.slice(-8)}` : id);
 
 export default function App() {
-  const [status, setStatus] = createSignal<Status>({ ready: false, node_id: null, error: null });
+  // Dev mode: sample data with no node (a plain browser tab, or `?sample`).
+  const sample = sampleRequest(window.location.search, inHost(), import.meta.env.DEV);
+  const [source, setSource] = createSignal<Source>(sample ? sampleSource() : hostSource);
+  const [status, setStatus] = createSignal<NodeStatus>({ ready: false, node_id: null, error: null });
   // Gate G6: the funds UI stays behind an explicit local-trust disclosure.
-  const [trustAck, setTrustAck] = createSignal(false);
+  const [trustAck, setTrustAck] = createSignal(sample === 'shell');
   const [restoring, setRestoring] = createSignal(false);
   // Lifted so IdentityGate can stay mounted when ready is false (restart_node
   // clears ready). Restore retry/error must not be gated on ready: IdentityGate
@@ -49,12 +44,12 @@ export default function App() {
   let timer: number | undefined;
   const poll = async () => {
     try {
-      setStatus(await invoke<Status>('node_status'));
+      setStatus(await source().nodeStatus());
     } catch (e) {
       setStatus({ ready: false, node_id: null, error: String(e) });
     }
     try {
-      setPairing(await invoke<PairingView>('pairing_status'));
+      setPairing(await source().pairingStatus());
     } catch {
       /* keep the last known pairing state; node_status carries host errors */
     }
@@ -62,10 +57,15 @@ export default function App() {
   const retryPairing = async () => {
     setPairing({ ...INITIAL_PAIRING, state: 'pending' });
     try {
-      setPairing(await invoke<PairingView>('pairing_retry'));
+      setPairing(await source().pairingRetry());
     } catch (e) {
       setPairing({ ...INITIAL_PAIRING, state: 'failed', reason: String(e) });
     }
+  };
+  const useSample = (start: SampleStart) => {
+    setSource(sampleSource());
+    setTrustAck(start === 'shell');
+    void poll();
   };
 
   onMount(() => {
@@ -76,18 +76,17 @@ export default function App() {
     if (timer) window.clearInterval(timer);
   });
 
-  return (
-    <main class="shell">
-      <div class="mark">
-        Bit<span>Sov</span>
+  const firstRun = (
+    <div class="first-run" data-first-run>
+      <div class="intro">
+        <h1>Your node, your seat</h1>
+        <p class="hint">
+          BitSov runs your own node on this computer. Set it up once; then every conversation, peer and
+          payment lives here.
+        </p>
       </div>
 
-      <Onboarding
-        status={status}
-        pairing={pairing}
-        trustAck={trustAck}
-        onRetry={() => void retryPairing()}
-      />
+      <Onboarding status={status} pairing={pairing} trustAck={trustAck} onRetry={() => void retryPairing()} />
 
       <Show
         when={showIdentityGate()}
@@ -107,31 +106,51 @@ export default function App() {
               <div>Your node didn’t start.</div>
               <code>{status().error}</code>
               <p class="hint">
-                Check that the node binary is in <code>src-tauri/bin/</code> — see{' '}
-                <code>bin/README.md</code>.
+                Check that the node binary is in <code>src-tauri/bin/</code> — see <code>bin/README.md</code>.
               </p>
+              <Show when={import.meta.env.DEV && source().mode === 'node'}>
+                <button class="quiet" data-use-sample onClick={() => useSample('shell')}>
+                  Explore with sample data
+                </button>
+              </Show>
             </div>
           </Show>
         }
       >
-        <Show
-          when={trustAck()}
-          fallback={
-            <IdentityGate
-              nodeId={() => status().node_id}
-              onContinue={() => setTrustAck(true)}
-              onRestoring={setRestoring}
-              restoreError={restoreError}
-              setRestoreError={setRestoreError}
-            />
-          }
-        >
-          <Show when={status().ready}>
-            <Fund ready={() => status().ready} />
-          </Show>
+        <Show when={!trustAck()}>
+          <IdentityGate
+            source={source()}
+            nodeId={() => status().node_id}
+            onContinue={() => setTrustAck(true)}
+            onRestoring={setRestoring}
+            restoreError={restoreError}
+            setRestoreError={setRestoreError}
+          />
         </Show>
       </Show>
-    </main>
+    </div>
+  );
+
+  // The shell reads the node only once it is running AND the local-trust
+  // disclosure is accepted; before that it may call node_status and
+  // pairing_status, nothing else.
+  return (
+    <Show
+      when={trustAck()}
+      fallback={
+        <ControlCenter source={source()} active={false} ready={status().ready} error={status().error} ownId={status().node_id} firstRun={firstRun} />
+      }
+    >
+      <ControlCenter
+        source={source()}
+        active={status().ready}
+        ready={status().ready}
+        error={status().error}
+        ownId={status().node_id}
+        firstRun={firstRun}
+        fund={<Fund source={source()} ready={() => status().ready} />}
+      />
+    </Show>
   );
 }
 
@@ -141,6 +160,7 @@ export default function App() {
  * before there is money on this node, not after.
  */
 function IdentityGate(props: {
+  source: Source;
   nodeId: () => string | null;
   onContinue: () => void;
   onRestoring: (value: boolean) => void;
@@ -169,7 +189,7 @@ function IdentityGate(props: {
     props.onRestoring(true);
     props.setRestoreError(null);
     try {
-      const outcome = await invoke<RestoreOutcome>('identity_restore', { mnemonic: value });
+      const outcome = await props.source.identityRestore(value);
       setRestored(outcome.node_id);
       setShowRestore(false);
       props.setRestoreError(null);
@@ -192,8 +212,10 @@ function IdentityGate(props: {
         <div class="spinner" />
         <div>Restarting with your restored identity…</div>
       </Show>
-      <div class="dot" />
-      <div>Your node is running.</div>
+      <div class="running">
+        <div class="dot ok" />
+        <div>Your node is running.</div>
+      </div>
       <div class="node-id" title={props.nodeId() ?? ''}>
         {short(props.nodeId() ?? '')}
       </div>
@@ -276,10 +298,9 @@ function IdentityGate(props: {
  * address as text + QR, and poll `/onboarding/state` until the node reports it has
  * seen the funds.
  */
-function Fund(props: { ready: () => boolean }) {
+function Fund(props: { source: Source; ready: () => boolean }) {
   const [fund, setFund] = createSignal<FundState | null | undefined>(undefined);
   const [address, setAddress] = createSignal<FundingAddress | null>(null);
-  const [balance, setBalance] = createSignal<Balance | null>(null);
   const [amount, setAmount] = createSignal(String(DEFAULT_FUNDING_SATS));
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
@@ -287,25 +308,20 @@ function Fund(props: { ready: () => boolean }) {
   const refresh = async () => {
     if (!props.ready()) return;
     try {
-      const state = await invoke<FundState | null>('fund_state');
+      const state = await props.source.fundState();
       setFund(state);
       setError(null);
       // The onboarding record carries the address once started; fall back to the
       // payments endpoint if the node did not include one.
       if (state && !state.funding_address && !address()) {
         try {
-          setAddress(await invoke<FundingAddress>('funding_address'));
+          setAddress(await props.source.fundingAddress());
         } catch {
           /* the wallet backend may not expose one — the state address is primary */
         }
       }
     } catch (e) {
       setError(String(e));
-    }
-    try {
-      setBalance(await invoke<Balance>('payments_balance'));
-    } catch {
-      /* balance is informational; a transient failure must not blank the screen */
     }
   };
 
@@ -330,7 +346,7 @@ function Fund(props: { ready: () => boolean }) {
     setBusy(true);
     setError(null);
     try {
-      setFund(await invoke<FundState>('fund_start', { funding_amount_sats: value }));
+      setFund(await props.source.fundStart(value));
       await refresh();
     } catch (e) {
       setError(String(e));
@@ -389,11 +405,10 @@ function Fund(props: { ready: () => boolean }) {
             when={!fund()!.funded}
             fallback={
               <div class="panel funded">
-                <div class="dot" />
                 <h2>Funding seen</h2>
                 <p class="hint">
                   Your node observed {sats(received())} sats. Opening a Lightning channel and
-                  sending your first paid message come next (M1 / M2).
+                  sending your first paid message come next.
                 </p>
                 <Show when={fund()!.funding_evidence}>
                   <p class="evidence">Evidence: {fund()!.funding_evidence}</p>
@@ -444,12 +459,6 @@ function Fund(props: { ready: () => boolean }) {
         </Show>
       </Show>
 
-      <Show when={balance()}>
-        <div class="balance">
-          Node balance: <strong>{sats(Math.floor(balance()!.balance_msat / 1000))}</strong> sats
-          <span class="msat">({sats(balance()!.balance_msat)} msat)</span>
-        </div>
-      </Show>
 
       <Show when={error()}>
         <p class="err-note">{error()}</p>
