@@ -10,8 +10,9 @@
 //!   is loopback.
 //! - Every request passes [`admit`] immediately before it is written: GET
 //!   only, a path from [`super::ALLOWED_PATHS`] with no forbidden segment, and
-//!   the one `limit` query on `/messages`. Anything else is refused and logged
-//!   (method, sanitized path, reason) and never reaches the node.
+//!   on `/messages` only a `limit` query, optionally with one [`PeerKey`].
+//!   Anything else is refused and logged (method, sanitized path, reason) and
+//!   never reaches the node. A peer id is never logged.
 //! - Plain `std::net`: no proxy settings, no redirects, no DNS, no cookies.
 //!   A response with `Transfer-Encoding` is not decoded.
 //!
@@ -31,7 +32,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::freshness::parse_as_of;
-use super::route::{self, Query, ReadRoute};
+use super::route::{self, PeerKey, Query, ReadRoute};
 use super::{Fetched, NodeMarks, NodeRead, RawRead, ReadFault};
 
 const LOG_PREFIX: &str = "[assistant-broker]";
@@ -150,8 +151,14 @@ impl LocalNodeRead {
     }
 
     /// The one place a request is written. [`admit`] runs first.
-    fn send(&self, method: &str, path: &str, query: Option<Query>) -> Result<RawRead, Refused> {
-        if let Err(reason) = admit(method, path, query) {
+    fn send(
+        &self,
+        method: &str,
+        path: &str,
+        query: Option<Query>,
+        peer: Option<PeerKey>,
+    ) -> Result<RawRead, Refused> {
+        if let Err(reason) = admit(method, path, query, peer) {
             self.audit.record(&format!(
                 "{LOG_PREFIX} denied {} {}: {}",
                 printable(method, 8),
@@ -160,7 +167,7 @@ impl LocalNodeRead {
             ));
             return Err(Refused::Denied(reason));
         }
-        match self.exchange(path, query) {
+        match self.exchange(path, query, peer) {
             Some((raw, marks)) => {
                 if !(200..300).contains(&raw.status) {
                     self.audit.record(&format!(
@@ -189,14 +196,22 @@ impl LocalNodeRead {
     /// One `GET` over a fresh connection, with the node's freshness headers
     /// unapplied. `None` on any transport or framing problem; the cause is
     /// dropped so nothing from the wire is echoed.
-    fn exchange(&self, path: &str, query: Option<Query>) -> Option<(RawRead, MarksRead)> {
+    fn exchange(
+        &self,
+        path: &str,
+        query: Option<Query>,
+        peer: Option<PeerKey>,
+    ) -> Option<(RawRead, MarksRead)> {
         let mut stream = TcpStream::connect_timeout(&self.addr, CONNECT_TIMEOUT).ok()?;
         stream.set_read_timeout(Some(IO_TIMEOUT)).ok()?;
         stream.set_write_timeout(Some(IO_TIMEOUT)).ok()?;
-        let target = match query {
-            Some(query) => format!("{path}?{}={}", query.key, query.value),
-            None => path.to_string(),
-        };
+        let target = route::RequestTarget {
+            method: "GET",
+            path: static_path(path)?,
+            query,
+            peer,
+        }
+        .uri();
         let request = format!(
             "GET {target} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\n\
              Accept: application/json\r\nConnection: close\r\n\r\n",
@@ -223,26 +238,36 @@ enum Refused {
     Fault(ReadFault),
 }
 
-/// Deny-by-default gate: GET, an allowlisted path, and only `limit` on
-/// `/messages`. Exact byte matches; no normalisation.
-pub fn admit(method: &str, path: &str, query: Option<Query>) -> Result<(), DenyReason> {
+/// Deny-by-default gate: GET, an allowlisted path, and on `/messages` only a
+/// `limit`, optionally with one peer. Exact byte matches; no normalisation.
+pub fn admit(
+    method: &str,
+    path: &str,
+    query: Option<Query>,
+    peer: Option<PeerKey>,
+) -> Result<(), DenyReason> {
     if method != "GET" {
         return Err(DenyReason::Method);
     }
     if !route::path_allowed(path) || !route::segments_allowed(path) {
         return Err(DenyReason::Route);
     }
-    match query {
-        None => Ok(()),
-        Some(query) if path == route::MESSAGES && query.key == "limit" => Ok(()),
-        Some(_) => Err(DenyReason::Query),
+    match (query, peer) {
+        (None, None) => Ok(()),
+        (Some(query), _) if path == route::MESSAGES && query.key == "limit" => Ok(()),
+        _ => Err(DenyReason::Query),
     }
+}
+
+/// The allowlisted constant equal to `path`. `admit` has already matched it.
+fn static_path(path: &str) -> Option<&'static str> {
+    route::ALLOWED_PATHS.iter().copied().find(|allowed| *allowed == path)
 }
 
 impl NodeRead for LocalNodeRead {
     fn read(&self, route: ReadRoute) -> Result<RawRead, ReadFault> {
         let target = route.target();
-        match self.send(target.method, target.path, target.query) {
+        match self.send(target.method, target.path, target.query, target.peer) {
             Ok(raw) => Ok(raw),
             Err(Refused::Fault(fault)) => Err(fault),
             // Unreachable for a `ReadRoute`; refused all the same.
@@ -509,15 +534,18 @@ mod tests {
             key: "limit",
             value: 50,
         });
-        assert_eq!(admit("GET", "/api/v1/health", None), Ok(()));
-        assert_eq!(admit("GET", "/api/v1/payments/balance", None), Ok(()));
-        assert_eq!(admit("GET", "/api/v1/payments/channels", None), Ok(()));
-        assert_eq!(admit("GET", "/api/v1/messages", limit), Ok(()));
-        assert_eq!(admit("GET", "/api/v1/pricing", None), Ok(()));
+        assert_eq!(admit("GET", "/api/v1/health", None, None), Ok(()));
+        assert_eq!(admit("GET", "/api/v1/payments/balance", None, None), Ok(()));
+        assert_eq!(admit("GET", "/api/v1/payments/channels", None, None), Ok(()));
+        assert_eq!(admit("GET", "/api/v1/messages", limit, None), Ok(()));
+        assert_eq!(admit("GET", "/api/v1/pricing", None, None), Ok(()));
+        assert_eq!(admit("GET", "/api/v1/peers", None, None), Ok(()));
+        let peer = PeerKey::parse(&"ab".repeat(32));
+        assert_eq!(admit("GET", "/api/v1/messages", limit, peer), Ok(()));
 
         for method in ["POST", "PUT", "DELETE", "PATCH", "HEAD", "get", "GET "] {
             assert_eq!(
-                admit(method, "/api/v1/health", None),
+                admit(method, "/api/v1/health", None, None),
                 Err(DenyReason::Method),
                 "{method}"
             );
@@ -538,7 +566,7 @@ mod tests {
             "/api/v1/pair/request",
             "/api/v1/onboarding/start",
             "/api/v1/status",
-            "/api/v1/peers",
+            "/api/v1/peers/aa",
             "/api/v1/messages/compose",
             "/api/v1/health/../payments/pay",
             "/api/v1/health?x=1",
@@ -547,20 +575,29 @@ mod tests {
             "health",
             "",
         ] {
-            assert_eq!(admit("GET", path, None), Err(DenyReason::Route), "{path}");
+            assert_eq!(admit("GET", path, None, None), Err(DenyReason::Route), "{path}");
         }
         for key in ["peer", "before", "sent", "limit "] {
             assert_eq!(
-                admit("GET", "/api/v1/messages", Some(Query { key, value: 1 })),
+                admit("GET", "/api/v1/messages", Some(Query { key, value: 1 }), None),
                 Err(DenyReason::Query),
                 "{key}"
             );
         }
         // A query on a route that takes none.
         assert_eq!(
-            admit("GET", "/api/v1/health", limit),
+            admit("GET", "/api/v1/health", limit, None),
             Err(DenyReason::Query)
         );
+        // A peer rides only on a `/messages` page with a limit.
+        assert_eq!(
+            admit("GET", "/api/v1/messages", None, peer),
+            Err(DenyReason::Query)
+        );
+        for path in ["/api/v1/peers", "/api/v1/health", "/api/v1/payments/balance"] {
+            assert_eq!(admit("GET", path, limit, peer), Err(DenyReason::Query), "{path}");
+            assert_eq!(admit("GET", path, None, peer), Err(DenyReason::Query), "{path}");
+        }
     }
 
     #[test]
@@ -569,19 +606,19 @@ mod tests {
         let (read, audit) = reader(&server.api_base());
 
         assert_eq!(
-            read.send("POST", "/api/v1/payments/pay", None).map(|_| ()),
+            read.send("POST", "/api/v1/payments/pay", None, None).map(|_| ()),
             Err(Refused::Denied(DenyReason::Method))
         );
         assert_eq!(
-            read.send("POST", "/api/v1/auth/local", None).map(|_| ()),
+            read.send("POST", "/api/v1/auth/local", None, None).map(|_| ()),
             Err(Refused::Denied(DenyReason::Method))
         );
         assert_eq!(
-            read.send("GET", "/api/v1/identity", None).map(|_| ()),
+            read.send("GET", "/api/v1/identity", None, None).map(|_| ()),
             Err(Refused::Denied(DenyReason::Route))
         );
         assert_eq!(
-            read.send("GET", "/api/v1/payments/price/0?secret=abc", None)
+            read.send("GET", "/api/v1/payments/price/0?secret=abc", None, None)
                 .map(|_| ()),
             Err(Refused::Denied(DenyReason::Route))
         );
@@ -607,7 +644,7 @@ mod tests {
         let server = TestServer::start(MockNode::canonical(), TOKEN);
         let (read, audit) = reader(&server.api_base());
         let hostile = format!("/api/v1/x\r\nInjected: 1{}", "a".repeat(500));
-        assert!(read.send("GET", &hostile, None).is_err());
+        assert!(read.send("GET", &hostile, None, None).is_err());
         let line = &audit.lines()[0];
         assert!(!line.contains('\r') && !line.contains('\n'), "{line:?}");
         assert!(line.len() < 200, "{}", line.len());
@@ -710,7 +747,7 @@ mod tests {
             }
             text.push(format!(
                 "{:?}",
-                read.send("POST", "/api/v1/payments/pay", None)
+                read.send("POST", "/api/v1/payments/pay", None, None)
             ));
             text.push(format!("{read:?}"));
             text.extend(audit.lines());

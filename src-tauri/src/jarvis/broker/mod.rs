@@ -1,7 +1,7 @@
 //! Dispatcher over the closed Phase 1 read tools.
 //!
 //! The only node operation is [`NodeRead::read`] with a [`ReadRoute`]. Tool
-//! calls that are not one of the five read tools never reach it. The model
+//! calls that are not one of the six read tools never reach it. The model
 //! may be shown only [`Dispatch::output`]; the host log stays in this module.
 
 mod freshness;
@@ -24,14 +24,16 @@ pub use freshness::{
 };
 
 #[allow(unused_imports)]
-pub use route::{ReadRoute, RequestTarget, ALLOWED_PATHS};
+pub use route::{PeerKey, ReadRoute, RequestTarget, ALLOWED_PATHS};
 #[allow(unused_imports)]
 pub use schema::{
     Amount, BalanceInput, BalanceReport, CategoryFeeTarget, CategoryPrice, ChainBackend,
     ChannelSummary, ChannelsInput, ChannelsReport, CopiedId, HealthInput, HealthReport,
-    LightningBackend, Liveness, LocalPrices, LocalPricesInput, MessageCountsInput, MessageMetadata,
-    PriceCategory, PricingMode, Report, SenderCount, SourceField, TargetFee, ToolCall,
-    ToolOutput, TrustLevel, UnavailableReason, Unit, WalletBalanceLabel, MAX_MESSAGE_LIMIT,
+    Direction, LightningBackend, Liveness, LocalPrices, LocalPricesInput, MessageCountsInput,
+    MessageMetadata, PaymentEntry, PaymentsInput, PaymentsReport, PriceCategory, PricingMode,
+    Report, SenderCount, SourceField, TargetFee, ToolCall, ToolOutput, TrustLevel,
+    UnavailableReason, Unit, WalletBalanceLabel, MAX_MESSAGE_LIMIT, MAX_PAYMENT_ENTRIES,
+    MAX_PAYMENT_PEERS, PAYMENT_THREAD_LIMIT,
 };
 
 use std::fmt;
@@ -149,7 +151,7 @@ impl fmt::Display for AllowlistError {
     }
 }
 
-/// The tool call was not one of the five read tools, or its input was invalid.
+/// The tool call was not one of the six read tools, or its input was invalid.
 /// The node is not contacted. The value does not echo the request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rejected;
@@ -196,6 +198,9 @@ impl Broker {
             ToolCall::LocalPrices { input: _ } => ToolOutput::LocalPrices {
                 report: tools::prices(node, &mut log),
             },
+            ToolCall::Payments { input } => ToolOutput::Payments {
+                report: tools::payments(node, input.since_ms, &mut log),
+            },
         };
         Ok(Dispatch { output, log })
     }
@@ -214,5 +219,7 @@ pub fn default_limit() -> u32 {
 mod mock_read;
 #[cfg(test)]
 pub(crate) mod test_server;
+#[cfg(test)]
+mod payments_tests;
 #[cfg(test)]
 mod tests;

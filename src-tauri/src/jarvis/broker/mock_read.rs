@@ -55,11 +55,7 @@ impl NodeRead for MockRead {
 }
 
 fn request_path(route: ReadRoute) -> String {
-    let target = route.target();
-    match target.query {
-        Some(query) => format!("{}?{}={}", target.path, query.key, query.value),
-        None => target.path.to_string(),
-    }
+    route.target().uri()
 }
 
 fn exec(node: &MockRead, call: ToolCall) -> Dispatch {
@@ -807,6 +803,9 @@ fn unanswered(output: &ToolOutput) -> UnavailableReason {
         }
         | ToolOutput::LocalPrices {
             report: Report::Unavailable { reason },
+        }
+        | ToolOutput::Payments {
+            report: Report::Unavailable { reason },
         } => *reason,
         ToolOutput::Balance {
             report: Report::Ready { .. },
@@ -821,6 +820,9 @@ fn unanswered(output: &ToolOutput) -> UnavailableReason {
             report: Report::Ready { .. },
         }
         | ToolOutput::LocalPrices {
+            report: Report::Ready { .. },
+        }
+        | ToolOutput::Payments {
             report: Report::Ready { .. },
         } => UnavailableReason::Absent,
     }
@@ -1054,6 +1056,9 @@ fn report_reason(output: &ToolOutput) -> UnavailableReason {
             report: Report::Unavailable { reason },
         }
         | ToolOutput::LocalPrices {
+            report: Report::Unavailable { reason },
+        }
+        | ToolOutput::Payments {
             report: Report::Unavailable { reason },
         } => *reason,
         other => panic!("expected unavailable, got {other:?}"),

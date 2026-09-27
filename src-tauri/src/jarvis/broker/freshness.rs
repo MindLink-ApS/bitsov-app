@@ -58,11 +58,15 @@ pub const WALLET_STALE_AFTER: Duration = Duration::from_secs(180);
 /// | Route | Bound |
 /// |---|---|
 /// | balance, channels | [`WALLET_STALE_AFTER`] (180 s) |
-/// | health, messages, pricing | [`STALE_AFTER`] (60 s) |
+/// | health, messages, pricing, peers, peer threads | [`STALE_AFTER`] (60 s) |
 pub fn stale_after(route: ReadRoute) -> Duration {
     match route {
         ReadRoute::PaymentsBalance | ReadRoute::PaymentsChannels => WALLET_STALE_AFTER,
-        ReadRoute::Health | ReadRoute::Messages { .. } | ReadRoute::OwnPricing => STALE_AFTER,
+        ReadRoute::Health
+        | ReadRoute::Messages { .. }
+        | ReadRoute::OwnPricing
+        | ReadRoute::Peers
+        | ReadRoute::PeerMessages { .. } => STALE_AFTER,
     }
 }
 
@@ -237,7 +241,8 @@ pub struct RouteFreshness {
     pub clock_skew: bool,
 }
 
-/// Stable name for the window. One per [`ReadRoute`] variant.
+/// Stable name for the window. One per [`ReadRoute`] variant; every peer
+/// thread shares `threads`. The sealed window reads none of the last two.
 pub fn route_key(route: ReadRoute) -> &'static str {
     match route {
         ReadRoute::PaymentsBalance => "balance",
@@ -245,6 +250,8 @@ pub fn route_key(route: ReadRoute) -> &'static str {
         ReadRoute::Health => "health",
         ReadRoute::Messages { .. } => "messages",
         ReadRoute::OwnPricing => "pricing",
+        ReadRoute::Peers => "peers",
+        ReadRoute::PeerMessages { .. } => "threads",
     }
 }
 
@@ -257,13 +264,18 @@ pub fn route_key(route: ReadRoute) -> &'static str {
 /// | `/health` | `PublicHealthResponse` | none (`block_height`, `uptime_secs` are not times) |
 /// | `/messages` | `[MessageResponse]` | newest `timestamp`, skew check only |
 /// | `/pricing` | `OwnPricingResponse` | none (`block_height` is not a time) |
+/// | `/peers` | `[PeerResponse]` | none |
+/// | `/messages?peer=` | `[MessageResponse]` | newest `timestamp`, skew check only |
 pub fn node_time_field(route: ReadRoute) -> NodeTimeField {
     match route {
-        ReadRoute::Messages { .. } => NodeTimeField::MessageTimestamp,
+        ReadRoute::Messages { .. } | ReadRoute::PeerMessages { .. } => {
+            NodeTimeField::MessageTimestamp
+        }
         ReadRoute::PaymentsBalance
         | ReadRoute::PaymentsChannels
         | ReadRoute::Health
-        | ReadRoute::OwnPricing => NodeTimeField::None,
+        | ReadRoute::OwnPricing
+        | ReadRoute::Peers => NodeTimeField::None,
     }
 }
 
@@ -425,6 +437,15 @@ mod tests {
                 NodeTimeField::MessageTimestamp,
             ),
             (ReadRoute::OwnPricing, "pricing", NodeTimeField::None),
+            (ReadRoute::Peers, "peers", NodeTimeField::None),
+            (
+                ReadRoute::PeerMessages {
+                    peer: super::super::route::PeerKey::parse(&"aa".repeat(32)).expect("peer"),
+                    limit: 50,
+                },
+                "threads",
+                NodeTimeField::MessageTimestamp,
+            ),
         ];
         for (route, key, field) in expected {
             assert_eq!(route_key(route), key);
@@ -475,6 +496,14 @@ mod tests {
             (ReadRoute::Health, 60),
             (ReadRoute::Messages { limit: 50 }, 60),
             (ReadRoute::OwnPricing, 60),
+            (ReadRoute::Peers, 60),
+            (
+                ReadRoute::PeerMessages {
+                    peer: super::super::route::PeerKey::parse(&"aa".repeat(32)).expect("peer"),
+                    limit: 50,
+                },
+                60,
+            ),
         ];
         for (route, secs) in expected {
             assert_eq!(stale_after(route), Duration::from_secs(secs), "{route:?}");
@@ -497,7 +526,9 @@ mod tests {
         for route in super::super::route::sample_routes() {
             let bound = stale_after(route);
             let body = match route {
-                ReadRoute::Messages { .. } => "[]",
+                ReadRoute::Messages { .. } | ReadRoute::PeerMessages { .. } | ReadRoute::Peers => {
+                    "[]"
+                }
                 _ => "{}",
             };
 
