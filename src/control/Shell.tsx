@@ -259,8 +259,8 @@ export function ControlCenter(props: Props) {
     reconcile: () => act(() => props.source.spendReconcile()),
     send: async (t, text, maxMsat) => {
       if (t.kind !== 'peer' && t.kind !== 'room') return { ok: false, error: { code: 'invalid', message: 'nothing to send to' } };
-      const r = await act(() => props.source.send(t.id, t.kind === 'room', text, maxMsat));
-      if (!r.ok && r.error.code === 'price_changed') {
+      const r = await act(() => props.source.send(t.id, t.kind === 'room', text, maxMsat, t.kind === 'room' ? Object.fromEntries((roomQuote()?.members ?? []).map((m) => [m.node_id, m.msat])) : undefined));
+      if (!r.ok && ['price_changed', 'price_cap_exceeded'].includes(r.error.code)) {
         if (t.kind === 'peer') void attempt('quote', () => props.source.priceQuote(t.id), (q) => {
           if (track() && trackKey(track()!) === trackKey(t)) setQuote(q);
         });
@@ -275,7 +275,7 @@ export function ControlCenter(props: Props) {
         setThreads('t', trackKey(t), (old) => mergeMessages(old ?? [], [sentMessage(receipt, ownId(), text)]));
         setThreads('fresh', receipt.message_id, true);
       }
-      return recordFailure(t, 'Message not sent', r);
+      return recordFailure(t, !r.ok && r.error.code === 'room_partial' ? 'Room send incomplete' : 'Message not sent', r);
     },
     invoice: async (t, amount, note) => {
       const r = await act(() => props.source.invoiceCreate(Math.round(amount * 1000), note));
@@ -307,7 +307,7 @@ export function ControlCenter(props: Props) {
       const data = await readBase64(file).catch(() => null);
       if (data === null) return { ok: false, error: { code: 'invalid', message: 'the file could not be read' } };
       const r = await act(() => props.source.fileSend(t.id, file.name, file.type, data, maxMsat));
-      if (!r.ok && r.error.code === 'price_changed') void attempt('quote', () => props.source.filePrice(), setFilePrice);
+      if (!r.ok && ['price_changed', 'price_cap_exceeded'].includes(r.error.code)) void attempt('quote', () => props.source.filePrice(), setFilePrice);
       if (r.ok) {
         setPaid(r.value.message_id, r.value.amount_msat);
         if (!deliveries[r.value.message_id]) setDeliveries(r.value.message_id, deliveryFromReceipt(r.value));
@@ -358,7 +358,8 @@ export function ControlCenter(props: Props) {
                     source={props.source}
                     spend={spend()}
                     now={now()}
-                    approve={actions.approve}
+                    actions={actions}
+                    spendError={errors.spend}
                     onContext={() => setContextOpen(true)}
                   />
                 </Match>
@@ -816,6 +817,13 @@ function Composer(props: {
         setMode('message');
         setNote(null);
         setDraft('');
+        setFile(null);
+        if (fileInput) fileInput.value = '';
+        setBolt11('');
+        setInvoiceMsat(null);
+        setPubkey('');
+        setAmount('');
+        setMemo('');
       },
       { defer: true },
     ),
@@ -1158,7 +1166,8 @@ function NewTrack(props: {
   source: Source;
   spend: SpendView | null;
   now: number;
-  approve: () => Promise<void>;
+  actions: Actions;
+  spendError: string | undefined;
   onContext: () => void;
 }) {
   const qr = createMemo(() => {
@@ -1183,12 +1192,12 @@ function NewTrack(props: {
     setErrs(which, undefined);
     setBusy(true);
     try {
-      if (!open()) await props.approve();
+      if (!open()) await props.actions.approve();
       else await action();
     } catch (e) {
       const err = asActionError(e);
       setErrs(which, err.message);
-      if (needsApproval(err)) await props.approve();
+      if (needsApproval(err)) await props.actions.approve();
     }
     setBusy(false);
   };
@@ -1199,6 +1208,7 @@ function NewTrack(props: {
   return (
     <>
       <TrackHead title="Start something" onContext={props.onContext} />
+      <SpendBar spend={props.spend} error={props.spendError} now={props.now} actions={props.actions} />
       <div class="stream">
         <div class="empty-track" data-new-track>
           <h2>Share your node id</h2>

@@ -54,7 +54,7 @@ export interface Source {
   spendRequest(): Promise<SpendView>;
   spendLock(): Promise<SpendView>;
   spendReconcile(): Promise<string>;
-  send(recipient: string, isRoom: boolean, plaintext: string, maxMsat: number): Promise<SendReceipt>;
+  send(recipient: string, isRoom: boolean, plaintext: string, maxMsat: number, maxRecipientMsat?: Record<string, number>): Promise<SendReceipt>;
   roomQuote(roomId: string): Promise<RoomQuote>;
   invoiceCreate(amountMsat: number, note: string): Promise<InvoiceView>;
   invoiceAmount(bolt11: string): Promise<InvoiceAmount>;
@@ -89,7 +89,7 @@ export const hostSource: Source = {
   spendRequest: () => invoke<SpendView>('spend_request'),
   spendLock: () => invoke<SpendView>('spend_lock'),
   spendReconcile: () => invoke<string>('spend_reconcile'),
-  send: (recipient, isRoom, plaintext, maxMsat) => invoke<SendReceipt>('message_send', { recipient, is_room: isRoom, plaintext, max_msat: maxMsat }),
+  send: (recipient, isRoom, plaintext, maxMsat, maxRecipientMsat) => invoke<SendReceipt>('message_send', { recipient, is_room: isRoom, plaintext, max_msat: maxMsat, max_recipient_msat: maxRecipientMsat ?? null }),
   roomQuote: (roomId) => invoke<RoomQuote>('room_quote', { room_id: roomId }),
   invoiceCreate: (amountMsat, note) => invoke<InvoiceView>('invoice_create', { amount_msat: amountMsat, note, expiry_secs: null }),
   invoiceAmount: (bolt11) => invoke<InvoiceAmount>('invoice_amount', { bolt11 }),

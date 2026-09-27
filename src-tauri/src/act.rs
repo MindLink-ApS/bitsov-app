@@ -353,6 +353,35 @@ pub struct SendReceipt {
     pub sent_at_ms: u64,
 }
 
+/// Validate complete, unique per-member evidence against the confirmed room.
+/// Returns (all terminal, any incomplete message); malformed evidence remains ambiguous.
+pub fn room_result(reply: &serde_json::Value, request: &serde_json::Value, max: u64) -> Result<(bool, bool), ActionError> {
+    let unknown = || ActionError::new("spend_unknown", "Room outcome missing or inconsistent; do not retry.");
+    let caps = request["max_recipient_msat"].as_object().ok_or_else(unknown)?;
+    let rows = reply["member_outcomes"].as_array().ok_or_else(unknown)?;
+    if rows.len() != caps.len() || caps.is_empty() { return Err(unknown()); }
+    let mut seen = std::collections::HashSet::new();
+    let (mut total, mut terminal, mut refused) = (0u64, true, false);
+    for row in rows {
+        let peer = row["recipient"].as_str().ok_or_else(unknown)?;
+        let cap = caps.get(peer).and_then(|v| v.as_u64()).ok_or_else(unknown)?;
+        let amount = row["amount_msat"].as_u64().ok_or_else(unknown)?;
+        if !seen.insert(peer) || amount > cap { return Err(unknown()); }
+        total = total.checked_add(amount).ok_or_else(unknown)?;
+        match row["status"].as_str() {
+            Some("settled") => {
+                // A terminal payment is not proof that its message was stored.
+                if row["message_id"].as_str().is_none_or(str::is_empty) { refused = true; }
+            },
+            Some("refused") if amount == 0 => refused = true,
+            Some("unknown") => terminal = false,
+            _ => return Err(unknown()),
+        }
+    }
+    if total > max || reply["amount_msat"].as_u64() != Some(total) { return Err(unknown()); }
+    Ok((terminal, refused))
+}
+
 // ---- rooms --------------------------------------------------------------------
 
 /// One room member's share of a room message.
@@ -768,6 +797,32 @@ mod tests {
     const A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const C: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    #[test]
+    fn room_evidence_requires_exact_unique_members_and_bounded_amounts() {
+        let request=json!({"max_recipient_msat":{"a":1000,"b":2000}});
+        let good=json!({"amount_msat":1000,"member_outcomes":[{"recipient":"a","status":"settled","amount_msat":1000,"message_id":"m1"},{"recipient":"b","status":"refused","amount_msat":0}]});
+        assert_eq!(room_result(&good,&request,3000).unwrap(),(true,true));
+        let mut unknown=good.clone();
+        unknown["member_outcomes"][1]["status"]=json!("unknown");
+        assert_eq!(room_result(&unknown,&request,3000).unwrap(),(false,false));
+        for bad in [
+            json!({"amount_msat":0}),
+            json!({"amount_msat":1000,"member_outcomes":[good["member_outcomes"][0].clone()]}),
+            json!({"amount_msat":2000,"member_outcomes":[good["member_outcomes"][0].clone(),good["member_outcomes"][0].clone()]}),
+        ] { assert_eq!(room_result(&bad,&request,3000).unwrap_err().code,"spend_unknown"); }
+        let mut excess=good.clone();
+        excess["member_outcomes"][0]["amount_msat"]=json!(1001);
+        excess["amount_msat"]=json!(1001);
+        assert!(room_result(&excess,&request,3000).is_err());
+    }
+
+    #[test]
+    fn room_settled_without_stored_message_is_incomplete_not_success() {
+        let request=json!({"max_recipient_msat":{"peer":1000}});
+        let reply=json!({"amount_msat":1000,"member_outcomes":[{"recipient":"peer","status":"settled","amount_msat":1000,"message_id":null,"reason":"storage failed"}]});
+        assert_eq!(room_result(&reply,&request,1000).unwrap(),(true,true));
+    }
+
     const OWN: &str = "1111111111111111111111111111111111111111111111111111111111111111";
     const ROOM: &str = "0f8e2b7a-1c3d-4e5f-8a9b-0c1d2e3f4a5b";
 

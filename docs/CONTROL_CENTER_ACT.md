@@ -22,20 +22,31 @@ for the action routes; #76/#77 (`56c0ee0`) for pairing and elevation.
 
 ## Quote and ambiguity fences
 
-Every message, file, invoice payment and keysend command takes a required
-`max_msat` from the displayed principal quote. The pinned rc7 and inspected
-genome APIs have no max-price/fee or idempotency parameter (unknown request
-fields are refused). The host therefore re-quotes messages and files before
-dispatch, rejects an increased quote, and checks the returned amount. Invoice
-and keysend amounts are checked against the confirmed ceiling before dispatch.
-Files use the node's one-sat minimum too. Room quotes are refreshed as a whole.
+Every message and file send requires the node's authenticated `/status` to
+advertise `paid_send_caps_v1`; rooms also require `room_terminal_outcomes_v1`.
+A missing, malformed, or unreadable capability list fails closed with
+`price_cap_unavailable`, before a message POST or file upload. The bundled rc7
+node lacks these capabilities, so variable-price actions remain unavailable
+until the node is upgraded; opening the app's owner window cannot bypass this.
 
-This is **not an atomic node-enforced cap**: price can still change between the
-read and payment. A receipt over the ceiling is reported as unknown/needs
-inspection, never success or "nothing paid", and blocks subsequent spends.
-Admission and routing fees are not included in the message principal receipt;
-their existing disclosures still apply. A strict total-spend guarantee needs a
-node API change. This PR does not add one or claim to prevent that race.
+Message and file POSTs send the displayed ceiling as `max_total_msat`. Rooms
+also send `max_recipient_msat` from the displayed member quote, without replacing
+those ceilings with a later quote. The node refuses HTTP 409 with code
+`price_cap_exceeded` before invoice/payment dispatch if prices or membership no
+longer fit. The app can safely clear that refusal's pending journal and ask for
+a fresh quote. Invoice and keysend commands retain their explicit fixed-amount
+checks. Caps cover recipient principal; Lightning routing fees remain separate.
+Capped first contact refuses unquoted admission before any payment; admission
+must be established at the node before this message can be sent.
+
+Room replies must contain one unique result per confirmed member, with bounded
+amounts and a consistent aggregate. Missing, foreign, duplicate, malformed,
+over-budget or `unknown` rows retain the durable ambiguity fence. A canonical
+message ID proves only one member and can never reconcile the whole room.
+All `settled`/`refused` rows can release the fence, but refused members or settled
+payments without a stored message return `room_partial`, keep the draft and
+explicitly warn against resending the whole room. Lost/unknown room replies
+remain blocked because the node has no aggregate reconciliation endpoint.
 
 Money requests have a 120-second timeout and are never automatically replayed,
 including after 401. Before dispatch, a private `app-spend/spend-pending.json`
@@ -104,3 +115,10 @@ Channel open/close, on-chain send, adding a peer by address, creating rooms and 
 - **`vitest`**
   - `tests/control-act.test.tsx` covers the UI flows: approve, send, delivered, rejected, expired, failure record, first contact, room, pay, request, file, invite, unavailable.
   - It also covers the sample source, confirmed ceilings on IPC, and unknown outcomes without a misleading "not sent" label.
+
+## Review regression fixes
+
+Changing tracks clears selected files and payment fields alongside the text
+draft, so an empty file chooser cannot send the previous recipient's file.
+The New track renders the shared spending status, owner grant command, errors,
+lock and pending-result controls, including when no conversation exists yet.
