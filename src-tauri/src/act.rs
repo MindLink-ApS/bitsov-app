@@ -765,8 +765,16 @@ pub struct UploadReply {
     pub size_bytes: u64,
 }
 
+/// The send route for a file id the node returned: a stored file's UUID, or a
+/// volatile staged upload, `stage-<uuid>` (genome F1 file staging, #83).
+/// Anything else is refused before any request, so it can never reach a path.
 pub fn file_send_path(file_id: &str) -> Result<String, ActionError> {
-    Ok(format!("/files/{}/send", control::room_id(file_id).map_err(|_| ActionError::node("the node returned an unexpected file id"))?))
+    let unexpected = || ActionError::node("the node returned an unexpected file id");
+    let id = match file_id.trim().strip_prefix("stage-") {
+        Some(uuid) => format!("stage-{}", control::room_id(uuid).map_err(|_| unexpected())?),
+        None => control::room_id(file_id).map_err(|_| unexpected())?,
+    };
+    Ok(format!("/files/{id}/send"))
 }
 
 /// A sent file, as the stream shows it.
@@ -1043,5 +1051,10 @@ mod tests {
         assert!(file_upload_body("big.bin", "", &big).unwrap_err().message.contains("1.4 MB"));
         assert!(file_send_path("../x").is_err());
         assert_eq!(file_send_path(ROOM).unwrap(), format!("/files/{ROOM}/send"));
+        // F1 (#83) stages paired uploads in memory as `stage-<uuid>`.
+        assert_eq!(file_send_path(&format!("stage-{ROOM}")).unwrap(), format!("/files/stage-{ROOM}/send"));
+        assert!(file_send_path("stage-../x").is_err());
+        assert!(file_send_path("stage-").is_err());
+        assert!(file_send_path(&format!("stage-{ROOM}/../x")).is_err());
     }
 }
