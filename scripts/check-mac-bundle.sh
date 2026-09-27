@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2317  # check functions below are invoked indirectly via chk (older shellcheck flags them unreachable)
 # Static checks on an unsigned BitSov.app (docs/MAC_PACKAGE.md). Structure,
 # sidecar integrity, and the release exclusion of the sealed assistant page and
 # its 50-question fixture. Reads files only: it never opens or executes the
