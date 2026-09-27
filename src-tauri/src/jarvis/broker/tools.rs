@@ -370,8 +370,10 @@ struct MessageWire {
     sender: String,
     #[allow(dead_code)]
     id: String,
-    kind: u16,
-    recipient: String,
+    #[serde(rename = "kind")]
+    _kind: u16,
+    #[serde(rename = "recipient")]
+    _recipient: String,
     #[allow(dead_code)]
     timestamp: u64,
     #[allow(dead_code)]
