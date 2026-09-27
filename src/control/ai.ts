@@ -80,42 +80,111 @@ export function satsIn(text: string): number | null {
   return Number.isSafeInteger(n) && n > 0 ? n : null;
 }
 
+/** Find an outer quoted body, preserving nested spans and word apostrophes. */
+function quotedText(input: string): { index: number; text: string } | null {
+  const closing: Record<string, string> = { '"': '"', '“': '”', "'": "'" };
+  const boundary = /[\s.,!?;:)\]}"'”]/;
+  const isOpening = (i: number) => !!closing[input[i]] &&
+    (i === 0 || /[\s([{]/.test(input[i - 1])) && !!input[i + 1] && !/[\s.,!?;:)\]}]/.test(input[i + 1]);
+  const contraction = (i: number) => input[i] === "'" &&
+    /[\p{L}\p{N}]/u.test(input[i - 1] ?? '') && /[\p{L}\p{N}]/u.test(input[i + 1] ?? '');
+  const contentEnd = input.replace(/[\s.,!?;:]+$/, '').length;
+  const possessive = (i: number) => input[i] === "'" && /s/i.test(input[i - 1] ?? '') &&
+    i + 1 < contentEnd;
+  const spans = new Map<number, number[]>();
+  const endsOf = (start: number): number[] => {
+    const cached = spans.get(start);
+    if (cached) return cached;
+    const limit = Math.min(input.length - 1, start + 501);
+    const continuations = new Map<string, number[]>();
+    const scan = (from: number, delimiter: string): number[] => {
+      const key = `${from}:${delimiter}`;
+      const cached = continuations.get(key);
+      if (cached) return cached;
+      let ends: number[] = [];
+      for (let i = from; i <= limit; i++) {
+        if (contraction(i)) continue;
+        if (isOpening(i)) {
+          // Try each pairing: 'Thanks' can close a nested span, while kids'
+          // can be an apostrophe inside it. Do not consume the outer close.
+          const nested = scan(i + 1, closing[input[i]]).filter((end) => end > i + 1);
+          if (nested.length) {
+            ends = nested.flatMap((end) => scan(end + 1, delimiter));
+            // A leading elision/year is literal only when it cannot form a
+            // nested span with an outer close. A later 'tomorrow' remains a
+            // quoted instruction rather than becoming that missing close.
+            if (ends.length || !/^'(?:em\b|\d{2}\b)/i.test(input.slice(i))) break;
+          }
+        }
+        if (input[i] !== delimiter || (input[i + 1] && !boundary.test(input[i + 1]))) continue;
+        ends = [i];
+        if (possessive(i)) ends.push(...scan(i + 1, delimiter));
+        break;
+      }
+      const unique = [...new Set(ends)].sort((a, b) => a - b);
+      continuations.set(key, unique);
+      return unique;
+    };
+    const ends = scan(start + 1, closing[input[start]]).filter((end) => end > start + 1);
+    spans.set(start, ends);
+    return ends;
+  };
+  const suffixes = new Map<number, boolean>([[input.length, true]]);
+  let suffixStart = input.length;
+  const balancedSuffix = (from: number): boolean => {
+    // Work backwards so a long list of quoted instructions cannot recurse
+    // once per instruction. Every dependency is to the right of this index.
+    for (let i = suffixStart - 1; i >= from; i--) {
+      let balanced = suffixes.get(i + 1)!;
+      if (!contraction(i)) {
+        if (isOpening(i)) {
+          balanced = endsOf(i).some((end) => suffixes.get(end + 1));
+        } else if (input[i] === '"' || input[i] === '”' || input[i] === "'") {
+          // A trailing instruction can itself contain Chris' nickname.
+          balanced = possessive(i) && balanced;
+        }
+      }
+      suffixes.set(i, balanced);
+    }
+    suffixStart = Math.min(suffixStart, from);
+    return suffixes.get(from)!;
+  };
+  for (const match of input.matchAll(/(?:^|\s)(["“'])/g)) {
+    const start = match.index! + match[0].length - 1;
+    const ends = endsOf(start);
+    // Prefer a complete outer pairing. An early close that leaves an orphan
+    // closing quote would truncate a nested span or a possessive sentence.
+    const valid = ends.filter((end) => balancedSuffix(end + 1));
+    const candidates = valid.length ? valid : ends;
+    // If every candidate is s', the last punctuation boundary completes
+    // kids', parents', ... schedules', before a separate quoted instruction.
+    // A trailing Chris' nickname has whitespace, so it cannot displace it.
+    const punctuated = candidates.filter((end) => !/\s/.test(input[end + 1] ?? ''));
+    // When s' could be either possessive or closing, an explicit instruction
+    // starts the suffix. Apostrophes in that instruction must not extend the
+    // body ("'Thanks', use Chris', not Alex's, nickname"). Nested/unclosed
+    // body quotes have already been excluded by the balanced-suffix check.
+    const instruction = candidates.find((end) => /^(?:(?:please|don't|do not|use)\b|not\s+["“'])/i.test(
+      input.slice(end + 1).replace(/^[\s.,!?;:]+/, ''),
+    ));
+    const end = instruction ?? candidates.find((end) => !possessive(end)) ?? punctuated[punctuated.length - 1] ?? candidates[0];
+    if (end !== undefined) return { index: match.index!, text: input.slice(start + 1, end).trim() };
+  }
+  return null;
+}
+
 /** Quoted text, or what follows `saying` / `that says` / a colon. */
 function draftText(text: string): string {
   const said = /(?:\b(?:saying|that says|to say)\s+|:\s*)([\s\S]{1,500})$/i.exec(text);
-  // An opening quote needs whitespace or the start of the text; an apostrophe
-  // within "I'm" is never an opener. Match each opening/closing pair together.
-  // Stop at the first closing delimiter with a text boundary, so later quoted
-  // instructions stay outside the draft and in-word apostrophes stay inside.
-  const quotation = /(?:^|\s)(?:"([\s\S]{1,500}?)"|“([\s\S]{1,500}?)”|'([\s\S]{1,500}?)')(?=\s|[.,!?;:]|$)/;
-  const quotationIn = (input: string) => {
-    const match = quotation.exec(input);
-    if (!match || match[3] === undefined) return match;
-    const start = match.index + match[0].indexOf("'") + 1;
-    let end = start + match[3].length;
-    // A word-final apostrophe can look like a closing single quote. If the
-    // next quote only closes (kids' toys are ready'), keep the apostrophe.
-    // Punctuation/end or a fresh quoted span ('hello' not 'bye') closes here.
-    while (/\s/.test(input[end + 1] ?? '')) {
-      let next = input.indexOf("'", end + 1);
-      while (next !== -1 && !/\s/.test(input[next - 1]) && !/[\s.,!?;:]/.test(input[next + 1] ?? '') && next + 1 < input.length) {
-        next = input.indexOf("'", next + 1); // Skip in-word contractions.
-      }
-      if (next === -1 || next - start > 500 || /\s/.test(input[next - 1])) break;
-      end = next;
-    }
-    match[3] = input.slice(start, end);
-    return match;
-  };
-  const quoted = quotationIn(text);
+  const quoted = quotedText(text);
   // A marker inside a quoted body belongs to that body, while quotes after
   // an explicit marker belong to its complete suffix (including contractions).
-  if (quoted && (!said || quoted.index < said.index)) return (quoted[1] ?? quoted[2] ?? quoted[3]).trim();
+  if (quoted && (!said || quoted.index < said.index)) return quoted.text;
   const body = said?.[1].trim() ?? '';
   // If the suffix starts with a quoted body, trailing prompt punctuation or
   // instructions are outside it. Quotes embedded in an unquoted body stay put.
-  const wrapped = quotationIn(body);
-  return wrapped?.index === 0 ? (wrapped[1] ?? wrapped[2] ?? wrapped[3]).trim() : body;
+  const wrapped = quotedText(body);
+  return wrapped?.index === 0 ? wrapped.text : body;
 }
 
 const startOfDay = (ms: number) => {
