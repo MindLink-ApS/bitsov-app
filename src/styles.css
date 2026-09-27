@@ -205,6 +205,9 @@ select { font: inherit; font-size: var(--t-sm); background: var(--sunk); color: 
    scrolled stream below cannot read as running under it. */
 .track > .spend { flex: none; display: flex; flex-direction: column; gap: var(--s-1); padding: var(--s-2) var(--s-6); background: var(--surface); border-bottom: 1px solid var(--line); }
 .track > .spend .link { align-self: flex-start; }
+/* The door card's local-address OK: box and words together, left-aligned. */
+.door-allow { display: flex; align-items: center; justify-content: flex-start; gap: var(--s-2); font-size: var(--t-sm); cursor: pointer; }
+.door-allow input { width: auto; flex: none; margin: 0; }
 .track > .spend .spend-line { display: block; }
 .track > .spend .spend-line .dot { display: inline-block; vertical-align: middle; margin-right: var(--s-1); }
 .spend[data-spend='open'] .spend-line { color: var(--ink); }

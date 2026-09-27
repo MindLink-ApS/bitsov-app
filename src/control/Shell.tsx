@@ -1993,7 +1993,7 @@ function NewTrack(props: {
                     <span class="hint" data-door-local>
                       Local network address ({c().endpoint}). Continue only if you are on the same network as them.
                     </span>
-                    <label class="row door-allow" style={{ gap: 'var(--s-2)' }}>
+                    <label class="door-allow">
                       <input
                         type="checkbox"
                         data-door-allow-local
