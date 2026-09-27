@@ -3,7 +3,8 @@
 # Seatbelt is best-effort host-local defense; it does not enforce loopback-only.
 # Prerequisites: macOS, git, Cargo, lsof, Python >=3.11 with cryptography installed.
 # Usage: scripts/two-node-mock-harness.sh /absolute/path/to/genome [--allow-known-gaps]
-# The genome checkout must be clean; its actual SHA is recorded. Cargo is offline.
+# Use a clean genome main checkout with #83 merged (89c730e9 or later).
+# Its actual SHA is recorded. Cargo is offline.
 # Exit 2: identified missing mock/capped-first-contact/file-staging capabilities.
 # Exit 0: all strict mock E2E assertions pass. Real-Lightning limits stay explicit.
 # Remaining real-Lightning limitations are listed in summary.json; they do not mask failed checks.
@@ -61,7 +62,8 @@ finish() {
 }
 trap finish EXIT
 trap 'exit 1' HUP INT TERM
-# These named capabilities are the known plain-main gaps. Other failures stay 1.
+# These named capabilities are required from genome main; older checkouts may
+# lack them. Other failures stay 1.
 missing=()
 for feature in crates/konsensus-lightning/src/shared_mock.rs crates/konsensus-core/src/admission_quote.rs crates/konsensus-api/src/file_staging.rs; do
   [[ -f "$GENOME/$feature" ]] || missing+=("$feature")
@@ -491,18 +493,14 @@ try:
     get('b', '/pricing')
     before = balance()
     refusal = post('a', '/messages/compose', compose, expect=409)
-    check('paired first contact refuses unreserved admission', refusal.get('code') == 'budget_exceeded', refusal)
+    check('paired first contact cap refusal is explicit', refusal.get('code') == 'price_cap_exceeded', refusal)
     check('paired first contact refusal spends nothing', balance() == before)
-    gaps.append('Paired spend grants refuse unpriced first-contact admission; owner fixture establishes the strict capped session before paired established sends.')
-    refusal = post('a', '/messages/compose', compose, owner=True, expect=409)
-    check('owner first contact cap refusal is explicit', refusal.get('code') == 'price_cap_exceeded', refusal)
-    check('first contact refusal spends nothing', balance() == before)
     # The target prices admission and the message at 2,000 each. Rate limiting
     # intentionally bounds unpaid quote requests, including after cap refusal.
     time.sleep(11)
     compose['max_total_msat'] = 4000
-    reply = post('a', '/messages/compose', compose, owner=True)
-    check('owner strict first contact aggregate principal exact', reply['amount_msat'] == 4000 and before - balance() == 4000, reply)
+    reply = post('a', '/messages/compose', compose)
+    check('paired strict first contact aggregate principal exact', reply['amount_msat'] == 4000 and before - balance() == 4000, reply)
     assert_received(reply, compose['plaintext'])
     payments = get('b', '/payments')
     check('recipient records both incoming settlements', sum(p['amount_msat'] for p in payments if p['direction'].lower() == 'incoming' and p['status'].lower() == 'settled') >= 4000, payments)
