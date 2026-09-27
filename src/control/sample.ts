@@ -254,28 +254,28 @@ function sampleOutputs(topic: AiTopic, sinceMs: number | null): ToolOutput[] {
 /** As the host would describe the reads. The price table is the stale one. */
 const SAMPLE_READS: Record<AiTopic, { routes: string[]; freshness: AiFreshness }> = {
   balance: {
-    routes: ['GET /api/v1/payments/balance', 'GET /api/v1/payments/channels'],
-    freshness: { state: 'fresh', age_ms: 38_000, stale_after_ms: 180_000, node_as_of: true, node_stale: false, clock_skew: false },
+    routes: ['GET /api/v1/payments/balance', 'GET /api/v1/payments/channels', 'GET /api/v1/health'],
+    freshness: { state: 'fresh', age_ms: 38_000, fresh_for_ms: 60_000, node_as_of: true, node_stale: false, clock_skew: false },
   },
   channels: {
     routes: ['GET /api/v1/payments/channels'],
-    freshness: { state: 'fresh', age_ms: 38_000, stale_after_ms: 180_000, node_as_of: true, node_stale: false, clock_skew: false },
+    freshness: { state: 'fresh', age_ms: 38_000, fresh_for_ms: 142_000, node_as_of: true, node_stale: false, clock_skew: false },
   },
   node: {
     routes: ['GET /api/v1/health'],
-    freshness: { state: 'fresh', age_ms: 900, stale_after_ms: 60_000, node_as_of: true, node_stale: false, clock_skew: false },
+    freshness: { state: 'fresh', age_ms: 900, fresh_for_ms: 59_100, node_as_of: true, node_stale: false, clock_skew: false },
   },
   inbox: {
     routes: ['GET /api/v1/messages?limit=50'],
-    freshness: { state: 'fresh', age_ms: 1_100, stale_after_ms: 60_000, node_as_of: false, node_stale: false, clock_skew: false },
+    freshness: { state: 'fresh', age_ms: 1_100, fresh_for_ms: 58_900, node_as_of: false, node_stale: false, clock_skew: false },
   },
   prices: {
     routes: ['GET /api/v1/pricing'],
-    freshness: { state: 'stale', age_ms: 95_000, stale_after_ms: 60_000, node_as_of: true, node_stale: true, clock_skew: false },
+    freshness: { state: 'stale', age_ms: 95_000, fresh_for_ms: 0, node_as_of: true, node_stale: true, clock_skew: false },
   },
   payments: {
     routes: ['GET /api/v1/peers', `GET /api/v1/messages?peer=… (${SAMPLE_PEERS.length} contacts)`],
-    freshness: { state: 'fresh', age_ms: 1_400, stale_after_ms: 60_000, node_as_of: true, node_stale: false, clock_skew: false },
+    freshness: { state: 'fresh', age_ms: 1_400, fresh_for_ms: 58_600, node_as_of: true, node_stale: false, clock_skew: false },
   },
 };
 

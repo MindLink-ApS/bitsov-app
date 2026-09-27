@@ -326,7 +326,8 @@ export type ToolOutput =
 export type AiFreshness = {
   state: 'fresh' | 'stale' | 'unknown';
   age_ms: number | null;
-  stale_after_ms: number;
+  /** Time left until the first route expires; null when freshness is unknown. */
+  fresh_for_ms: number | null;
   node_as_of: boolean;
   node_stale: boolean;
   clock_skew: boolean;

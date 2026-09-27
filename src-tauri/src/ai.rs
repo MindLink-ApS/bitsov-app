@@ -99,9 +99,9 @@ pub struct Freshness {
     pub state: &'static str,
     /// The oldest read's age when the host answered. `None` when unknown.
     pub age_ms: Option<u64>,
-    /// The tightest bound among the routes read: past it, the window marks
-    /// the answer stale while it sits on screen.
-    pub stale_after_ms: u64,
+    /// Time left until the first route expires, independent of the oldest age.
+    /// `None` when unknown, zero when already stale.
+    pub fresh_for_ms: Option<u64>,
     /// Some age came from the node's `BitSov-Data-As-Of`, not only the read.
     pub node_as_of: bool,
     /// The node itself said `BitSov-Data-Stale: 1`.
@@ -114,11 +114,6 @@ pub struct Freshness {
 /// unknown; only when every route has a known, in-bound age is it fresh.
 pub fn summarize(routes: &[RouteFreshness], now: Instant) -> Freshness {
     let ages: Vec<Option<Duration>> = routes.iter().map(|route| route.age(now)).collect();
-    let stale_after_ms = routes
-        .iter()
-        .map(|route| crate::jarvis::broker::stale_after(route.route).as_millis() as u64)
-        .min()
-        .unwrap_or(crate::jarvis::broker::STALE_AFTER.as_millis() as u64);
     let stale = routes
         .iter()
         .any(|route| route.state(now) == FreshnessState::Stale);
@@ -131,12 +126,19 @@ pub fn summarize(routes: &[RouteFreshness], now: Instant) -> Freshness {
         FreshnessState::Fresh
     };
     let age = ages.iter().flatten().max().copied();
+    let fresh_for = match state {
+        FreshnessState::Unknown => None,
+        FreshnessState::Stale => Some(Duration::ZERO),
+        FreshnessState::Fresh => routes.iter().zip(&ages).filter_map(|(route, age)| {
+            age.map(|age| crate::jarvis::broker::stale_after(route.route).saturating_sub(age))
+        }).min(),
+    };
     Freshness {
         state: state.code(),
         age_ms: age
             .filter(|_| state != FreshnessState::Unknown)
             .map(|age| u64::try_from(age.as_millis()).unwrap_or(u64::MAX)),
-        stale_after_ms,
+        fresh_for_ms: fresh_for.map(|left| u64::try_from(left.as_millis()).unwrap_or(u64::MAX)),
         node_as_of: routes.iter().any(|route| route.as_of_ms.is_some()),
         node_stale: routes.iter().any(|route| route.node_stale),
         clock_skew: routes.iter().any(|route| route.clock_skew),

@@ -116,12 +116,14 @@ fn without_node_as_of_a_live_read_is_unknown_not_fresh() {
         };
         assert_eq!(freshness.state, "unknown", "{topic:?}");
         assert_eq!(freshness.age_ms, None, "{topic:?}");
+        assert_eq!(freshness.fresh_for_ms, None, "{topic:?}");
     }
     server.set_headers(&[("BitSov-Data-Stale", "1")]);
     let TopicRead::Live { freshness, .. } = read(&server, Topic::Node) else {
         panic!()
     };
     assert_eq!(freshness.state, "stale", "the node's own Stale: 1 wins without an as-of");
+    assert_eq!(freshness.fresh_for_ms, Some(0));
 }
 
 #[test]
@@ -187,6 +189,33 @@ fn explicit_node_stale_survives_every_topic_and_disclosure_preset() {
             }
         }
     }
+}
+
+#[test]
+fn mixed_route_freshness_keeps_the_earliest_actual_expiry() {
+    use crate::jarvis::broker::{Fetched, NodeMarks, RawRead};
+    let now = Instant::now();
+    let wall = 1_800_000_000_000;
+    let routes = [
+        (ReadRoute::PaymentsBalance, 70_000),
+        (ReadRoute::PaymentsChannels, 70_000),
+        (ReadRoute::Health, 0),
+    ].map(|(route, lag)| RouteFreshness::assess(route, &RawRead::new(200, b"{}".to_vec())
+        .marked(NodeMarks { as_of_ms: Some(wall - lag), stale: false })
+        .stamped(Fetched { at: now, wall_ms: Some(wall) })));
+    for (elapsed, state, remaining) in [(0, "fresh", 60_000), (59_999, "fresh", 1), (60_000, "stale", 0)] {
+        let summary = summarize(&routes, now + Duration::from_millis(elapsed));
+        assert_eq!(summary.state, state);
+        assert_eq!(summary.age_ms, Some(70_000 + elapsed));
+        assert_eq!(serde_json::to_value(summary).unwrap()["fresh_for_ms"], remaining);
+    }
+    // The wallet can expire first too; neither a hardcoded health bound nor
+    // oldest-age/minimum-bound pairing gives the correct remaining lifetime.
+    let old_wallet = RouteFreshness::assess(ReadRoute::PaymentsBalance, &RawRead::new(200, b"{}".to_vec())
+        .marked(NodeMarks { as_of_ms: Some(wall - 170_000), stale: false })
+        .stamped(Fetched { at: now, wall_ms: Some(wall) }));
+    let summary = summarize(&[old_wallet, routes[2]], now);
+    assert_eq!(serde_json::to_value(summary).unwrap()["fresh_for_ms"], 10_000);
 }
 
 #[test]
