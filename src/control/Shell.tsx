@@ -1,4 +1,4 @@
-import { createEffect, createMemo, createSignal, For, type JSX, Match, on, onCleanup, Show, Switch } from 'solid-js';
+import { createEffect, createMemo, createSignal, For, type JSX, Match, on, onCleanup, Show, Switch, untrack } from 'solid-js';
 import { createStore, produce } from 'solid-js/store';
 import { qrSvg } from '../qr';
 import type { Proposal } from './ai';
@@ -31,6 +31,7 @@ import {
   type Unread,
 } from './state';
 import type {
+  FirstContactQuote,
   ActionError,
   Artifact,
   BudgetPreset,
@@ -92,6 +93,8 @@ export type Actions = {
   pauseAll: () => Promise<void>;
   resume: () => Promise<void>;
   send: (t: TrackRef, text: string, maxMsat: number, firstContactMsat?: number) => Promise<Outcome<unknown>>;
+  /** The door card: a stranger's signed quote, or null when the node cannot give one. */
+  doorQuote: (peer: string) => Promise<FirstContactQuote | null>;
   invoice: (t: TrackRef, sats: number, note: string) => Promise<Outcome<unknown>>;
   amountOf: (bolt11: string) => Promise<Outcome<number>>;
   pay: (t: TrackRef, bolt11: string, msat: number) => Promise<Outcome<unknown>>;
@@ -342,6 +345,7 @@ export function ControlCenter(props: Props) {
       }
       void loadSpend();
     },
+    doorQuote: (peer) => props.source.firstContactQuote(peer).catch(() => null),
     send: async (t, text, maxMsat, firstContactMsat) => {
       if (t.kind !== 'peer' && t.kind !== 'room') return { ok: false, error: { code: 'invalid', message: 'nothing to send to' } };
       const r = await act(() => props.source.send(t.id, t.kind === 'room', text, maxMsat, t.kind === 'room' ? Object.fromEntries((roomQuote()?.members ?? []).map((m) => [m.node_id, m.msat])) : undefined, firstContactMsat));
@@ -1004,6 +1008,15 @@ function Composer(props: {
     return b.paused || b.waiting_for_owner || b.autopay.state === 'open' || !line().open;
   };
   const stand = () => budgetStand(budget(), target(), room(), shown().msat);
+  createEffect(() => {
+    if (room() || !props.firstContact || mode() !== 'message' || stand().kind !== 'first') return;
+    const peer = target();
+    if (untrack(door)?.peer === peer) return;
+    setDoor({ peer, quote: null });
+    void props.actions.doorQuote(peer).then((quote) => {
+      if (untrack(door)?.peer === peer) setDoor({ peer, quote });
+    });
+  });
   const presetChosen = () => {
     const b = budget();
     const id = presetPick() ?? b?.preset ?? 'careful';
@@ -1038,10 +1051,28 @@ function Composer(props: {
     return Number.isFinite(n) && n > 0 ? n : null;
   };
 
+  // The door card (genome first_contact_grant_v1): before a first paid message
+  // to a stranger, read the stranger's own signed quote once. Its total is the
+  // cap the owner confirms; the node pays that very invoice. Without it (older
+  // node, no budget yet) the composer keeps its labelled estimate.
+  const [door, setDoor] = createSignal<{ peer: string; quote: FirstContactQuote | null } | null>(null);
+  const doorQuote = (): FirstContactQuote | null => {
+    const d = door();
+    return d && !room() && d.peer === target() ? d.quote : null;
+  };
+
   /** What this mode costs, shown before the button is pressed. */
   const shown = (): { msat: number | null; estimate: boolean; basis: string } => {
     switch (mode()) {
       case 'message': {
+        const q = props.firstContact ? doorQuote() : null;
+        if (q) {
+          return {
+            msat: q.total_msat,
+            estimate: false,
+            basis: `${props.name}’s own quote: ${sats(q.admission_msat)} sats to open their door, then ${sats(q.message_msat)} for this message`,
+          };
+        }
         const c = props.cost;
         if (!c) return { msat: null, estimate: false, basis: room() ? 'Reading each member’s price…' : 'Reading their price…' };
         const basis = props.firstContact
@@ -1303,6 +1334,7 @@ function Composer(props: {
             room={room()}
             target={target()}
             priceMsat={shown().msat}
+            door={doorQuote()}
             preset={presetChosen()}
             onPreset={setPresetPick}
             firstPick={firstPick()}
@@ -1423,6 +1455,8 @@ function BudgetBar(props: {
   room: boolean;
   target: string;
   priceMsat: number | null;
+  /** A stranger's signed quote, on a first paid message. */
+  door: FirstContactQuote | null;
   preset: BudgetPreset | null;
   onPreset: (id: PresetId) => void;
   firstPick: number | null;
@@ -1431,7 +1465,7 @@ function BudgetBar(props: {
   now: number;
   actions: Actions;
 }) {
-  const worth = (msat: number) => messagesWorth(msat, props.priceMsat);
+  const worth = (msat: number) => messagesWorth(msat, props.door?.message_msat ?? props.priceMsat);
   const who = () => (props.room ? 'this room' : props.name);
   const firstOptions = (suggest: number, ceiling: number) =>
     [...new Set([suggest, suggest * 2, suggest * 5].map((v) => Math.min(v, ceiling)))].filter((v) => v >= (props.priceMsat ?? 0));
@@ -1490,6 +1524,15 @@ function BudgetBar(props: {
         <Match when={props.stand.kind === 'first' && (props.stand as Extract<BudgetStandT, { kind: 'first' }>)}>
           {(st) => (
             <div class="approval budget-first" data-first-contact>
+              <Show when={props.door}>
+                {(q) => (
+                  <p class="door-quote" data-door-quote={q().total_msat}>
+                    {who()}’s door: <strong>{sats(q().admission_msat)} sats</strong> once to reach them, then{' '}
+                    <strong>{sats(q().message_msat)} sats</strong> a message. This first message costs{' '}
+                    <strong>{sats(q().total_msat)} sats</strong> in all, their own signed price. Nothing is paid until you send.
+                  </p>
+                )}
+              </Show>
               <p>
                 <strong>First paid message to {who()}.</strong> Asked once. After it, messages to {who()} pay automatically, up to:
               </p>

@@ -25,6 +25,7 @@ fn main() {
             "room_members",
             "messages_list",
             "price_quote",
+            "first_contact_quote",
             "payments_overview",
             "spend_status",
             "spend_request",

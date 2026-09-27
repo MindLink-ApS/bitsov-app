@@ -45,6 +45,20 @@ export type PriceQuote = {
   peer_stale: boolean;
 };
 
+/**
+ * `first_contact_quote`: a stranger's own signed price before anything is
+ * paid (genome `first_contact_grant_v1`). Admission is paid once; the message
+ * price is for this first message; the total is the cap the owner confirms.
+ */
+export type FirstContactQuote = {
+  recipient: string;
+  admission_msat: number;
+  message_msat: number;
+  total_msat: number;
+  /** Unix seconds (≤ 60 s ahead). */
+  expires_at: number;
+};
+
 export type Channel = {
   channel_id: string;
   peer_pubkey: string;

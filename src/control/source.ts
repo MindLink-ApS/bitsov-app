@@ -7,6 +7,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import type { NodeStatus, PairingView } from '../onboarding/pairing';
 import type {
+  FirstContactQuote,
   AiTopic,
   Disclosure,
   Preset,
@@ -55,6 +56,8 @@ export interface Source {
   roomMembers(roomId: string): Promise<string[]>;
   messages(peer: string, before?: number): Promise<Message[]>;
   priceQuote(peer?: string): Promise<PriceQuote>;
+  /** The door card: a stranger's signed quote before a first contact. */
+  firstContactQuote(peer: string): Promise<FirstContactQuote>;
   wallet(): Promise<WalletOverview>;
   /** Subscribe to live events; resolves to an unsubscribe. */
   onLive(handler: (event: LiveEvent) => void): Promise<() => void>;
@@ -118,6 +121,7 @@ export const hostSource: Source = {
   roomMembers: (roomId) => invoke<string[]>('room_members', { room_id: roomId }),
   messages: (peer, before) => invoke<Message[]>('messages_list', { peer, before: before ?? null }),
   priceQuote: (peer) => invoke<PriceQuote>('price_quote', { peer: peer ?? null }),
+  firstContactQuote: (peer) => invoke<FirstContactQuote>('first_contact_quote', { peer }),
   wallet: () => invoke<WalletOverview>('payments_overview'),
   onLive: (handler) => listen<LiveEvent>(LIVE_EVENT, (e) => handler(e.payload)),
   liveLink: () => invoke<LinkState | null>('live_link'),

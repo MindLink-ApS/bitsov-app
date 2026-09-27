@@ -567,6 +567,9 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number 
     messages: (peer) => ok(THREADS[peer.toLowerCase()] ?? []),
     priceQuote: (peer) =>
       ok({ kind: 0, own_msat: 1000, ...(PRICE_TABLES[peer ?? ''] ?? { peer_msat: null, peer_age_secs: null, peer_stale: false }) }),
+    // Sample strangers open their door at 2 sats and ask 2 sats a message.
+    firstContactQuote: (peer) =>
+      ok({ recipient: peer, admission_msat: 2000, message_msat: 2000, total_msat: 4000, expires_at: Math.floor(Date.now() / 1000) + 60 }),
     wallet: () => ok(WALLET),
     spendStatus: () => {
       settleSpend();

@@ -25,6 +25,12 @@ use crate::act::ActionError;
 /// `/status` → `api_capabilities` entry for budget grants.
 pub const CAPABILITY: &str = "spend_budget_grant_v1";
 
+/// `/status` → `api_capabilities` entry for one-time first-contact grants:
+/// the stranger's signed quote before paying
+/// (`POST /messages/first-contact/quote`) and the owner's one-time OK for
+/// exactly that contact and amount (`POST /pair/first-contact-grant`).
+pub const FIRST_CONTACT_CAPABILITY: &str = "first_contact_grant_v1";
+
 /// The node's longest grant, and the default it proposes.
 pub const MAX_TTL_SECS: u64 = 24 * 3600;
 
@@ -191,6 +197,10 @@ impl Refusal {
             "unpriced" => ActionError::new(
                 "grant_unpriced",
                 "Your node can't pay this from a budget: its price isn't known before paying (an invoice without an amount, or a first contact). Nothing was sent.",
+            ),
+            "first_contact" => ActionError::new(
+                "grant_first_contact",
+                "Your node needs your OK for this first contact, and it did not get it. Nothing was sent. Confirm the first message again.",
             ),
             "ledger" => ActionError::new(
                 "grant_ledger",
