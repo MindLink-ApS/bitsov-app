@@ -276,8 +276,6 @@ function paymentsAnswer(report: Report<PaymentsReport>, label: string): Answer {
   const r = report.value;
   const sent = r.entries.filter((e) => e.direction === 'sent');
   const got = r.entries.filter((e) => e.direction === 'received');
-  const unlisted = value(r.unlisted) ?? 0;
-  const atLeast = unlisted > 0 ? 'at least ' : '';
   const contacts = (list: typeof sent) =>
     new Set(list.map((e) => (e.peer.state === 'value' ? e.peer.value : '?'))).size;
   const spent = value(r.sent_total);
@@ -287,11 +285,18 @@ function paymentsAnswer(report: Report<PaymentsReport>, label: string): Answer {
   let text =
     spent === null
       ? 'Your spending could not be added up.'
-      : sent.length === 0
-        ? `You sent no paid messages ${label}.`
-        : `${lead} you spent ${satsText(spent)} on ${atLeast}${n(sent.length, 'paid message', 'paid messages')} to ${n(contacts(sent), 'contact', 'contacts')}.`;
-  if (earned !== null && got.length > 0) {
-    text += ` You received ${satsText(earned)} from ${atLeast}${n(got.length, 'paid message', 'paid messages')}.`;
+      : spent === 0
+        ? `No spending was found in the paid-message history read ${label}.`
+        : `${lead} you spent ${satsText(spent)} on paid messages.`;
+  text += earned === null
+    ? ' Your received total could not be added up.'
+    : earned === 0
+      ? ` No income was found in the paid-message history read ${label}.`
+      : ` You received ${satsText(earned)} from paid messages ${label}.`;
+  // Totals cover all inspected entries; the broker caps the listed subset.
+  // Counts from that subset cannot establish whether any spending occurred.
+  if (r.entries.length) {
+    text += ` The listed entries include ${n(sent.length, 'sent message', 'sent messages')} to ${n(contacts(sent), 'contact', 'contacts')} and ${n(got.length, 'received message', 'received messages')}.`;
   }
   const caveats: string[] = [];
   const unread = value(r.peers_unread) ?? 0;

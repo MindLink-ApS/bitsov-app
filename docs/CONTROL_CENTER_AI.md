@@ -61,7 +61,7 @@ Nothing on rc7 lists payments, so "what did I spend" needs paid messages. The `p
 1. **`ai_disclose`.** The host re-reads the topic, narrows it by a preset, builds the exact OpenAI-compatible request body, and holds it under a random id. It lives in host memory only, for 5 minutes at most. The window shows it two ways:
    - **What you share:** the user message, decoded character for character.
    - **Exact bytes:** the body verbatim.
-2. **`ai_send(disclosure_id)`.** Takes only the id. The host sends the held bytes once and then forgets them. There is no redirect, no proxy and a 60 s timeout. Error text never quotes the response. The answer is rendered as plain text, labelled with the provider and host, and marked "Your node did not check this answer". What was sent stays folded under it.
+2. **`ai_send(disclosure_id)`.** Takes only the id. The host sends the held bytes once and then forgets them. There is no redirect, no proxy and a 60 s timeout. The host rejects responses over 256 KiB while reading, before accumulating an oversized body or parsing JSON; the same cap applies without a declared length. Error text never quotes the response. The answer is rendered as plain text, labelled with the provider and host, and marked "Your node did not check this answer". What was sent stays folded under it.
 
 No preset or send is ever approved ahead of time. Changing the preset drops the old preview and prepares a new one.
 
