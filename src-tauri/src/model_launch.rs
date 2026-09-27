@@ -97,8 +97,13 @@ mod macos {
         }
     }
 
-    /// The model process. Stdin and stdout are the broker pipe. Drop kills
-    /// the process group if it is still running.
+    /// The model process. Stdin and stdout are the broker pipe.
+    ///
+    /// The profile allows `process-fork`. Drop SIGKILLs the process group so
+    /// a worker cannot keep pipes or scratch after the leader exits. The
+    /// leader stays unreaped until that signal: once it has been reaped and
+    /// no member remains, its pgid can be reused, and `kill(-pgid)` would
+    /// hit an unrelated group.
     pub struct ModelChild {
         pid: libc::pid_t,
         stdin: File,
@@ -146,78 +151,127 @@ mod macos {
             if let Some(code) = self.exit {
                 return Ok(Some(code));
             }
-            loop {
-                let mut status = 0;
-                let pid = unsafe { libc::waitpid(self.pid, &mut status, libc::WNOHANG) };
-                if pid == 0 {
-                    return Ok(None);
-                }
-                if pid == self.pid {
-                    let code = decode(status);
-                    self.exit = Some(code);
-                    return Ok(Some(code));
-                }
-                let err = io::Error::last_os_error();
-                if err.raw_os_error() == Some(libc::EINTR) {
-                    continue;
-                }
-                return Err(LaunchError::Io(err));
-            }
+            self.observe(true)
         }
 
         fn wait_blocking(&mut self) -> Result<i32, LaunchError> {
             if let Some(code) = self.exit {
                 return Ok(code);
             }
+            match self.observe(false)? {
+                Some(code) => Ok(code),
+                None => Err(LaunchError::Io(io::Error::other(
+                    "waitid returned no status",
+                ))),
+            }
+        }
+
+        /// Exit status without reaping. `WNOWAIT` leaves the leader a zombie
+        /// so its pid, which is also the process group id, cannot be reused.
+        fn observe(&mut self, nonblocking: bool) -> Result<Option<i32>, LaunchError> {
+            if self.pid <= 0 {
+                return Err(LaunchError::Io(io::Error::other(
+                    "model process is not running",
+                )));
+            }
+            let mut flags = libc::WEXITED | libc::WNOWAIT;
+            if nonblocking {
+                flags |= libc::WNOHANG;
+            }
             loop {
-                let mut status = 0;
-                let pid = unsafe { libc::waitpid(self.pid, &mut status, 0) };
-                if pid == self.pid {
-                    let code = decode(status);
-                    self.exit = Some(code);
-                    return Ok(code);
+                // Darwin leaves siginfo untouched when WNOHANG finds no status.
+                // A zeroed si_signo is the portable "still running" check.
+                let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
+                let rc = unsafe {
+                    libc::waitid(
+                        libc::P_PID,
+                        self.pid as libc::id_t,
+                        info.as_mut_ptr(),
+                        flags,
+                    )
+                };
+                if rc == 0 {
+                    let info = unsafe { info.assume_init() };
+                    if info.si_signo == libc::SIGCHLD {
+                        let code = decode_siginfo(&info);
+                        self.exit = Some(code);
+                        return Ok(Some(code));
+                    }
+                    if info.si_signo == 0 {
+                        return if nonblocking {
+                            Ok(None)
+                        } else {
+                            Err(LaunchError::Io(io::Error::other(
+                                "waitid returned no status",
+                            )))
+                        };
+                    }
+                    return Err(LaunchError::Io(io::Error::other(format!(
+                        "unexpected si_signo from waitid: {}",
+                        info.si_signo
+                    ))));
                 }
                 let err = io::Error::last_os_error();
                 if err.raw_os_error() == Some(libc::EINTR) {
                     continue;
                 }
+                if err.raw_os_error() == Some(libc::ECHILD) {
+                    // Not our child. The pgid is not owned.
+                    self.pid = 0;
+                }
                 return Err(LaunchError::Io(err));
             }
         }
 
+        /// SIGKILL every member of the leader's process group.
+        ///
+        /// Spawn used `POSIX_SPAWN_SETPGROUP`, so the group id equals the
+        /// leader pid. Call only while that leader has not been reaped
+        /// (`pid > 0`). `reap_leader` clears it; signalling afterwards can
+        /// hit a reused pgid.
         fn kill_group(&self) {
-            let pgid = unsafe { libc::getpgid(self.pid) };
-            if pgid == self.pid {
+            if self.pid > 0 {
                 unsafe {
                     libc::kill(-self.pid, libc::SIGKILL);
                 }
             }
-            unsafe {
-                libc::kill(self.pid, libc::SIGKILL);
+        }
+
+        fn reap_leader(&mut self) {
+            if self.pid <= 0 {
+                return;
+            }
+            let leader = self.pid;
+            let mut status = 0;
+            loop {
+                let pid = unsafe { libc::waitpid(leader, &mut status, 0) };
+                if pid == leader {
+                    if self.exit.is_none() {
+                        self.exit = Some(decode(status));
+                    }
+                    self.pid = 0;
+                    return;
+                }
+                if pid < 0 {
+                    let err = io::Error::last_os_error();
+                    if err.raw_os_error() == Some(libc::EINTR) {
+                        continue;
+                    }
+                    self.pid = 0;
+                    return;
+                }
             }
         }
     }
 
     impl Drop for ModelChild {
         fn drop(&mut self) {
-            if self.exit.is_none() && self.pid > 0 {
-                self.kill_group();
-                let mut status = 0;
-                loop {
-                    let pid = unsafe { libc::waitpid(self.pid, &mut status, 0) };
-                    if pid == self.pid {
-                        self.exit = Some(decode(status));
-                        break;
-                    }
-                    if pid < 0 {
-                        let err = io::Error::last_os_error();
-                        if err.raw_os_error() == Some(libc::EINTR) {
-                            continue;
-                        }
-                        break;
-                    }
-                }
+            if self.pid <= 0 {
+                return;
             }
+            // Leader is live or an unreaped zombie, so this pgid is still ours.
+            self.kill_group();
+            self.reap_leader();
         }
     }
 
@@ -489,6 +543,16 @@ mod macos {
             libc::WEXITSTATUS(status)
         } else if libc::WIFSIGNALED(status) {
             128 + libc::WTERMSIG(status)
+        } else {
+            125
+        }
+    }
+
+    fn decode_siginfo(info: &libc::siginfo_t) -> i32 {
+        if info.si_code == libc::CLD_EXITED {
+            info.si_status
+        } else if info.si_code == libc::CLD_KILLED || info.si_code == libc::CLD_DUMPED {
+            128 + info.si_status
         } else {
             125
         }
@@ -789,6 +853,68 @@ mod macos {
             );
             assert_eq!(listed_fds(&line(&fix, true, &["fds"])), vec![0, 1, 2]);
             unsafe { libc::close(planted) };
+        }
+
+        fn pid_exists(pid: libc::pid_t) -> bool {
+            unsafe { libc::kill(pid, 0) == 0 }
+        }
+
+        /// Leader exit is cached while a forked worker is still alive. Drop
+        /// must SIGKILL that worker. The leader is not reaped until the
+        /// signal, so the pgid cannot have been reused.
+        fn assert_drop_reaps_lingering_worker(
+            action: &str,
+            expect_code: i32,
+            expect_out: Option<&str>,
+        ) {
+            let fix = fixture();
+            let worker_pid_path = fix.scratch.join("worker.pid");
+            let mut child = launch(&fix.request(&[action])).expect("launch");
+            let code = child.wait_timeout(Duration::from_secs(20)).expect("wait");
+            let out = slurp(child.stdout());
+            let err = slurp(child.stderr());
+            assert_eq!(code, expect_code, "stdout={out} stderr={err}");
+            if let Some(expected) = expect_out {
+                assert_eq!(out.trim(), expected);
+            }
+            let worker_pid: libc::pid_t = fs::read_to_string(&worker_pid_path)
+                .unwrap_or_else(|e| panic!("worker.pid missing ({e}); stdout={out} stderr={err}"))
+                .trim()
+                .parse()
+                .expect("worker pid");
+            assert!(
+                worker_pid > 1,
+                "worker pid {worker_pid} from {}",
+                worker_pid_path.display()
+            );
+            assert!(
+                pid_exists(worker_pid),
+                "forked worker {worker_pid} must still be alive after the leader exit is cached"
+            );
+
+            drop(child);
+
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while pid_exists(worker_pid) && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(20));
+            }
+            assert!(
+                !pid_exists(worker_pid),
+                "Drop must reap owned descendants in the process group; worker {worker_pid} survived"
+            );
+        }
+
+        #[test]
+        fn drop_reaps_forked_descendants_after_leader_exits() {
+            assert_drop_reaps_lingering_worker("fork-linger", 0, Some("forked"));
+        }
+
+        /// The leader dies by SIGKILL while a descendant is still in the group.
+        /// Drop must reap that descendant. The leader stays unreaped until the
+        /// group is signalled, so the pgid is still ours.
+        #[test]
+        fn drop_reaps_descendant_after_leader_signaled() {
+            assert_drop_reaps_lingering_worker("fork-signal", 128 + libc::SIGKILL, None);
         }
     }
 }
