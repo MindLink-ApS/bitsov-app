@@ -19,11 +19,10 @@ case "$BITSOV_DEV_SIDECAR" in /*) ;; *) die "BITSOV_DEV_SIDECAR must be absolute
 case "$BITSOV_DEV_DATA_DIR" in /*) ;; *) die "BITSOV_DEV_DATA_DIR must be absolute" ;; esac
 test -x "$BITSOV_DEV_SIDECAR" || die "not an executable: $BITSOV_DEV_SIDECAR"
 
-# The host refuses these too (src-tauri/src/dev_node.rs); failing here is just earlier.
+# Early textual check only. The host resolves filesystem aliases and checks all
+# protected roots again before creating the dev dir (src-tauri/src/dev_node.rs).
 case "$BITSOV_DEV_DATA_DIR" in
-  "$HOME"/.konsensus|"$HOME"/.konsensus/*) die "refusing ~/.konsensus" ;;
-  "$HOME/Library/Application Support/tech.mindlink.bitsov"|"$HOME/Library/Application Support/tech.mindlink.bitsov/"*)
-    die "refusing the product app data dir" ;;
+  "$HOME"|"$HOME"/*) die "refusing HOME and its descendants; choose a private dev dir outside HOME" ;;
 esac
 
 cat >&2 <<BANNER

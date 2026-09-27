@@ -13,9 +13,12 @@ Why it exists: the pinned rc7 sidecar has no pairing (#77), so the control cente
 
 - `BITSOV_DEV_SIDECAR=<abs path>` runs that `konsensus` instead of `bin/konsensus-<triple>`.
 - `BITSOV_DEV_DATA_DIR=<abs path>` is the node and app data dir. You must set both or neither.
-  The host refuses the product app data dir
-  (`~/Library/Application Support/tech.mindlink.bitsov`), anything under `~/.konsensus`,
-  and `$HOME` itself.
+  The host refuses the app data dirs (including the product dir
+  `~/Library/Application Support/tech.mindlink.bitsov`), `~/.konsensus`, and `$HOME`,
+  including every descendant. It resolves symlinks and `..` in filesystem order for
+  both the chosen path and protected paths, and rejects case aliases on macOS.
+  A new destination is checked through its existing ancestors and checked again
+  after creation. Missing HOME, dangling symlinks, and resolution errors are refused.
 - `npm run tauri:dev:mainnode` (`scripts/dev-node-from-main.sh`) prints a banner with the
   binary's sha256, then runs `tauri dev --features dev-node` with
   `src-tauri/tauri.dev-node.conf.json`. That file sets a separate identifier
@@ -55,13 +58,16 @@ npm ci
 After this PR merges, use `origin/main` instead. The AI track (#43) isn't needed for any
 step below. To try it too, add `git cherry-pick origin/main..origin/feat/control-center-ai`.
 
-**3. Start the app on a fresh node.** Pick a new, durable dir. Don't use `/tmp`, because
-macOS clears it on reboot and a funded node's keys live in this dir:
+**3. Start the app on a fresh node.** Create a private, durable directory outside
+your home. This macOS example uses `mktemp -d` (mode 0700) under `/Users/Shared`;
+record the printed path for subsequent starts. Don't use `/tmp`, because macOS
+clears it on reboot and a funded node's keys live in this dir:
 
 ```bash
 cd /tmp/bitsov-tonight
+export BITSOV_DEV_DATA_DIR="$(mktemp -d /Users/Shared/bitsov-dev-node.XXXXXX)"
+printf 'Keep this dev data path: %s\n' "$BITSOV_DEV_DATA_DIR"
 BITSOV_DEV_SIDECAR=/tmp/bitsov-node-main/target/aarch64-apple-darwin/release/konsensus \
-BITSOV_DEV_DATA_DIR="$HOME/BitSov-dev-node" \
 npm run tauri:dev:mainnode
 ```
 
@@ -81,7 +87,7 @@ The node re-checks its wallet every few seconds. The balance and "sats seen" upd
 their own.
 
 **6. Back up the recovery phrase before depositing.** The app never shows it. It is the
-plaintext file `$HOME/BitSov-dev-node/mnemonic.txt` (mode 0600). Copy it somewhere safe
+plaintext file `$BITSOV_DEV_DATA_DIR/mnemonic.txt` (mode 0600). Copy it somewhere safe
 offline. Losing that dir without the phrase loses the funds.
 
 **Quit** with Cmd-Q. The app stops the node (SIGTERM, then SIGKILL after 30 s). Starting
