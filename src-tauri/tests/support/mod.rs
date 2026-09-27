@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use bitsov_app::pairing::PrintedCodes;
 use mock_node::pairing::{PairCrypto, PairRoutes, PairingMock, PairingMockConfig};
+use mock_node::MockNode;
 
 /// The node's port. Tests must never bind it.
 const NODE_PORT: u16 = 3141;
@@ -97,6 +98,24 @@ pub fn mock_with(
     ))
 }
 
+/// The five rc7 read routes the assistant broker uses, as a node answers
+/// them: mock-node's canonical bodies, plus optional extra response headers
+/// (genome #78's `BitSov-Data-As-Of` / `-Stale`; rc7 sends none).
+#[derive(Clone)]
+pub struct Reads {
+    pub node: MockNode,
+    pub headers: Vec<(String, String)>,
+}
+
+/// Paths answered from [`Reads`] instead of the pairing mock.
+const READ_PATHS: &[&str] = &[
+    "/api/v1/payments/balance",
+    "/api/v1/payments/channels",
+    "/api/v1/health",
+    "/api/v1/messages",
+    "/api/v1/pricing",
+];
+
 /// A loopback HTTP/1.1 listener in front of a [`PairingMock`].
 ///
 /// New node stdout lines are forwarded to `codes` after each request, the way
@@ -108,6 +127,18 @@ pub struct Server {
 
 impl Server {
     pub fn start(node: Arc<PairingMock>, codes: PrintedCodes) -> Self {
+        Self::start_with_reads(node, codes, None)
+    }
+
+    /// Like [`Server::start`], and also answers the read routes from `reads`
+    /// for any token the pairing mock accepts (its `/identity` check), so a
+    /// paired token can be followed through to the assistant's reads.
+    #[allow(dead_code)]
+    pub fn start_with_reads(
+        node: Arc<PairingMock>,
+        codes: PrintedCodes,
+        reads: Option<Reads>,
+    ) -> Self {
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind ephemeral loopback port");
         let addr = listener.local_addr().expect("addr");
         assert_ne!(addr.port(), NODE_PORT, "tests must never hold the node port");
@@ -120,7 +151,7 @@ impl Server {
                     break;
                 }
                 let Ok(stream) = stream else { continue };
-                serve_one(&node, stream);
+                serve_one(&node, reads.as_ref(), stream);
                 let lines = node.stdout_lines();
                 for line in &lines[forwarded..] {
                     codes.record_line(line);
@@ -144,7 +175,7 @@ impl Drop for Server {
     }
 }
 
-fn serve_one(node: &PairingMock, stream: TcpStream) {
+fn serve_one(node: &PairingMock, reads: Option<&Reads>, stream: TcpStream) {
     let mut reader = BufReader::new(stream.try_clone().expect("clone"));
     let mut line = String::new();
     if reader.read_line(&mut line).is_err() || line.is_empty() {
@@ -170,7 +201,30 @@ fn serve_one(node: &PairingMock, stream: TcpStream) {
     }
     let mut body = vec![0u8; length];
     let _ = reader.read_exact(&mut body);
-    let (status, text) = node.handle(&method, &target, bearer.as_deref(), &body);
+    let path = target.split('?').next().unwrap_or("");
+    let mut extra = String::new();
+    let (status, text) = match reads {
+        Some(reads) if method == "GET" && READ_PATHS.contains(&path) => {
+            let (auth, _) = node.handle("GET", "/api/v1/identity", bearer.as_deref(), &[]);
+            if auth != 200 {
+                (
+                    401,
+                    r#"{"error":"invalid or expired token","code":401}"#.to_string(),
+                )
+            } else {
+                let exchange = reads.node.serve(&target);
+                if exchange.timed_out {
+                    return;
+                }
+                for (name, value) in &reads.headers {
+                    extra.push_str(&format!("{name}: {value}\r\n"));
+                }
+                let body = exchange.body.map(|v| v.to_string()).unwrap_or_default();
+                (exchange.status, body)
+            }
+        }
+        _ => node.handle(&method, &target, bearer.as_deref(), &body),
+    };
     let reason = match status {
         200 => "OK",
         400 => "Bad Request",
@@ -183,7 +237,7 @@ fn serve_one(node: &PairingMock, stream: TcpStream) {
     let mut out = stream;
     let _ = write!(
         out,
-        "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{text}",
+        "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\n{extra}connection: close\r\n\r\n{text}",
         text.len()
     );
 }

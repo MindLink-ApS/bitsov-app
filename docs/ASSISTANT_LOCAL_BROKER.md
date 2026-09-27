@@ -103,20 +103,48 @@ bump, no polling. The window still reads once per open.
 - **Host stamp.** `LocalNodeRead` stamps every response when its body has
   been read: a monotonic `Instant` (ages come from this) and the host wall
   clock. `Snapshot::freshness()` gives one entry per route that answered.
-- **States** (`broker/freshness.rs`): *fresh* (age under `STALE_AFTER`,
-  60 s); *stale* (age at or over it); *unknown* (no host stamp: a mock read,
-  or a non-2xx read whose rows are `Unavailable` anyway).
+- **States** (`broker/freshness.rs`): *fresh* (age under the route's
+  bound, `stale_after(route)`, see the table below); *stale* (age at or over
+  it); *unknown* (no host stamp: a mock read, or a non-2xx read whose rows
+  are `Unavailable` anyway).
 - **To the window.** A third frozen init-script global,
   `__BITSOV_LIVE_FRESHNESS__`, defined for a live feed only:
-  `{stale_after_ms, routes: [{route, state, age_ms, clock_skew}]}` with ages
-  taken when the script is written. The window validates the exact shape
-  (anything else is *freshness unknown*), then adds the time it has been open
-  from its own monotonic clock (`performance.now()`), so a label turns stale
-  in place. The tick only redraws text; it reads nothing and calls nothing.
+  `{routes: [{route, state, age_ms, clock_skew, stale_after_ms}]}` with ages
+  taken when the script is written and each route's own bound. The window
+  validates the exact shape (anything else, including the old top-level
+  `stale_after_ms`, is *freshness unknown*), then adds the time it has been
+  open from its own monotonic clock (`performance.now()`), so a label turns
+  stale in place, per route. The tick only redraws text; it reads nothing and
+  calls nothing.
 - **Label.** Live: *Updated 12 s ago.* / *Stale: updated 1 min ago. Reopen
-  to refresh.* / *Freshness unknown.* The oldest answering route sets the
-  age. Mock rows are *Mock data* with no freshness line, even if a
-  freshness global exists.
+  to refresh.* / *Freshness unknown.* The header shows the oldest answering
+  route's age and is stale if any route is past its own bound. An answer
+  (see *Assistant window* below) shows only its own route's age and state.
+  Mock rows are *Mock data* with no freshness line, even if a freshness
+  global exists.
+
+### Stale thresholds per route (F5 polish)
+
+| Route | Bound | Why |
+|---|---|---|
+| `/payments/balance` | 180 s (`WALLET_STALE_AFTER`) | With #78 the as-of is the last on-chain wallet sync, 80 s apart by default (`WALLET_SYNC_INTERVAL`). 180 s is two syncs plus 20 s for the read and the window, so one late sync does not flip the label. |
+| `/payments/channels` | 180 s (`WALLET_STALE_AFTER`) | Same wallet sync as balance. |
+| `/pricing` | 60 s (`STALE_AFTER`) | Chain-aware pricing; the node marks an expired cache with `Stale: 1`. |
+| `/health` | 60 s (`STALE_AFTER`) | Unchanged. No node sync interval to allow for; `block_height` moves every ~10 min, so 60 s is already generous. |
+| `/messages` | 60 s (`STALE_AFTER`) | Unchanged. New mail can land at any time. |
+
+The bound applies to whichever age is used, node as-of or app read, so rc7
+(no headers) gets the same per-route bounds on the app-read age. The window
+gets the bound from the host in `stale_after_ms`. It has no copy of the table.
+
+Precedence, per route:
+
+1. `BitSov-Data-Stale: 1` → *stale*, whatever the age.
+2. Node `BitSov-Data-As-Of` age (lag at fetch + time since) ≥ route bound →
+   *stale*, else *fresh*.
+3. No usable as-of (rc7, malformed, no host wall clock): app-read age ≥
+   route bound → *stale*, else *fresh*.
+4. No host stamp, or a non-2xx read → *unknown*.
 
 Node-side times on the pinned rc7 (`958e399`) routes:
 
@@ -172,18 +200,59 @@ reads them host-side in `LocalNodeRead` (`broker/local_read.rs`,
   computer.*), the same as the `/messages` check. With no host wall clock
   the as-of is not used.
 - **Precedence** per route: `Stale: 1` → *stale* > node as-of age >
-  app-read age > *unknown* (no host stamp or non-2xx). `STALE_AFTER` (60 s)
-  applies to whichever age is used.
+  app-read age > *unknown* (no host stamp or non-2xx). The route's own bound
+  (table above) applies to whichever age is used.
 - **rc7.** An rc7 node sends neither header, so behaviour is unchanged:
   app-read age, or *Freshness unknown*.
-- **Window.** The shape of `__BITSOV_LIVE_FRESHNESS__` does not change.
-  The node's marks reach the window only through `state` and `age_ms`. The
-  sealed window still cannot pick a backend or trigger a read, and there is
-  no new command.
+- **Window.** The node's marks reach the window only through `state` and
+  `age_ms` (the per-route `stale_after_ms` came later, with the thresholds
+  above). The sealed window still cannot pick a backend or trigger a read,
+  and there is no new command.
 
 Before #78 (and on rc7), the age is how long ago the *app* read the node,
 not how old the node's figures are. A node serving a cached balance
 answers 200 and reads as fresh.
+
+## Assistant window
+
+What a person sees in the sealed window (`src/assistant/`). Still a display
+surface: no model, no command, no network, and nothing the page does can
+choose the backend or cause a read.
+
+- **Header.** The source label (*Live* / *Mock data* + why) and, for live
+  rows, the ticking freshness line. The ticking line is not a live region,
+  so screen readers are not interrupted every second.
+- **Question box.** A labelled list of the fixture questions the host sent
+  rows for (plain-language text from `jarvis/fixtures/questions.json`), an
+  **Ask** button and a **Stop** button. Focus starts on the question.
+- **Answer area** (`role="status"`, `aria-live="polite"`, `aria-atomic`):
+  - *Empty:* "Pick a question, then press Enter or Ask. Press Escape to stop
+    or clear."
+  - *Loading:* "Looking up the answer…". Focus moves to **Stop**.
+  - *Answered:* the question, the value, and one source line, e.g. *Live,
+    from your paired node. Updated 12 s ago.* using that answer's route and
+    bound, or *Mock data, not your node. Not paired with a node.*
+  - *Unavailable:* "No answer for this question right now." plus why and
+    what to do, in plain words: the node did not send that part (route
+    failed), that part was out of date (route stale), the assistant cannot
+    read it yet (broker gap such as q32), or, on mock rows, that the sample
+    question has no answer on purpose and how to see your own.
+  - *Stopped:* "Stopped. Nothing was changed on your node. …"
+  - *Error:* "Something went wrong showing this answer. Nothing was changed
+    on your node. Try again, or close and reopen the assistant." No error
+    detail is shown.
+  - *No rows at all:* one message to close and reopen the assistant from the
+    BitSov app (with the developer command on a second line).
+- **Keyboard.** Enter on the question asks. Escape stops an answer in
+  progress, or clears the answer. After an answer, a stop or an error, focus
+  returns to the question. Every control has a visible `:focus-visible`
+  ring.
+- **Stop.** Aborts the pending answer and shows *Stopped* at once. It never
+  waits on the pending answer; a late answer is dropped. Answers come from
+  the rows handed over at open, so today they settle immediately; the
+  answer seam (`ask.ts`) is async so a slower source cannot block Stop.
+- **Layout.** Source and freshness text wrap instead of overlapping; the
+  answer's source line sits under the value.
 
 ## Known limits
 
@@ -193,13 +262,14 @@ answers 200 and reads as fresh.
   carries mock-node's stale flag as a `503` so the fixture's stale rows stay
   `Unavailable`. Genome #78's `BitSov-Data-Stale` / `-As-Of` headers are
   read (see above) but only take effect once the pin includes #78.
-- **Node age vs. the 60 s threshold.** With #78, balance/channels as-of is
-  the older LDK wallet sync (every 30 s / 80 s by default), so a label can
-  read *Stale* between syncs even when the node does not mark it stale. A
-  per-route threshold would be a follow-up.
+- **Wallet sync vs. the bound.** Balance and channels allow 180 s for the
+  80 s default on-chain wallet sync. A node configured with a much slower
+  sync will read *Stale* between syncs; the node's own `Stale: 1` (LDK sync
+  10 min or more old) is still the authority.
 - **Snapshot, not live updates.** Rows are read when the window opens. Close
   and reopen it to refresh. The freshness label counts up while it stays
-  open and says *Stale* after 60 s.
+  open and says *Stale* once a route passes its bound (60 s, or 180 s for
+  balance and channels).
 
 ## Waits on HUMAN
 
@@ -236,10 +306,32 @@ answers 200 and reads as fresh.
   without the value; future as-of clamped and flagged; `Data-Stale: 1`
   forces stale, other values do nothing; headers on error statuses ignored;
   no headers (rc7) keeps the app-read age on every route.
+- `jarvis::broker::freshness` (thresholds) — each route's bound; per route
+  at the boundary (bound − 1 ms fresh, bound stale) for the app-read age
+  and for as-of lags of 0, 45 s, bound − 1 ms and bound; `Stale: 1` wins on
+  every route; a balance/channels as-of one wallet sync old is fresh while
+  pricing at that lag is stale.
 - `tests/assistant-freshness.test.tsx` — strict parsing of the freshness
-  global, summary and text for fresh / stale / unknown / clock skew, the
-  label ticking into stale, no freshness for any mock reason, page wiring,
-  and the global name and threshold matching the Rust host.
+  global (per-route `stale_after_ms`; the old top-level shape is refused),
+  summary and text for fresh / stale / unknown / clock skew, each route
+  turning stale at its own bound, a single route's summary, the label
+  ticking into stale, no freshness for any mock reason, page wiring, and the
+  global name and thresholds matching the Rust host.
+- `tests/assistant-ask.test.tsx` — question list and routes; empty, loading,
+  answered, unavailable (each why), stopped and error states; answer
+  freshness per route; aria-live; initial focus, Enter, Escape, focus
+  return; Stop while the answer hangs (never resolves), abort signal, late
+  answer dropped; no command and no network.
+- Onboarding end to end (mock): `src-tauri/tests/onboarding_assistant.rs`
+  (`--features sit-mock`) pairs over an ephemeral loopback port against
+  mock-node's #77 `/pair/*`, then builds the assistant feed with the paired
+  token (first answer q01 live, five routes fresh with their bounds; #78
+  as-of 80 s old: balance/channels fresh, others stale; `Stale: 1`; rc7 stays
+  mock). `assistant_feed` `the_live_init_script_matches_the_window_golden`
+  pins `tests/fixtures/assistant-live-init.js`, which
+  `tests/onboarding-assistant-e2e.test.tsx` loads after running the main
+  window's first run → pending → paired on stubbed host commands, then asks
+  the first question and checks its freshness label.
 - `main.rs` — `node_auth` follows F1's mode (paired / rc7 / refused);
   `BITSOV_ASSISTANT=node` gating; no new command and the node read stays
   outside the sealed-window section.
