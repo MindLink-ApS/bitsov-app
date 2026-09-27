@@ -143,3 +143,8 @@ changes.
 - `tests/onboarding-pairing.test.tsx`, `tests/app-pairing.test.tsx`: the step
   model and panel for pending/paired/failed/fallback/bootstrap, and the shell's
   retry wiring.
+- First run to the assistant's first answer, on mock data:
+  `src-tauri/tests/onboarding_assistant.rs` (host: pair, then read with the
+  paired token) and `tests/onboarding-assistant-e2e.test.tsx` (window: steps
+  through pending → paired, then the first answer with its freshness label).
+  See `docs/ASSISTANT_LOCAL_BROKER.md` → Tests.

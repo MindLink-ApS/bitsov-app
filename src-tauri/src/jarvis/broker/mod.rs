@@ -18,8 +18,9 @@ pub use snapshot::Snapshot;
 
 #[allow(unused_imports)]
 pub use freshness::{
-    node_time_field, parse_as_of, route_key, Fetched, FreshnessState, NodeMarks, NodeTimeField,
-    RouteFreshness, MAX_NODE_SKEW, STALE_AFTER,
+    node_time_field, parse_as_of, route_key, stale_after, Fetched, FreshnessState, NodeMarks,
+    NodeTimeField, RouteFreshness, MAX_NODE_SKEW, STALE_AFTER, WALLET_STALE_AFTER,
+    WALLET_SYNC_INTERVAL,
 };
 
 #[allow(unused_imports)]

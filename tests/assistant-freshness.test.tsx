@@ -21,10 +21,28 @@ const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const MOCK_ROWS = [['q01', '500000']];
 const LIVE_ROWS = [['q01', '777']];
 
-/** The host's shape, as `assistant_source.rs` writes it. */
-/** Loosely typed so tests can hand over malformed entries. */
-function hostFreshness(routes: Record<string, unknown>[], staleAfterMs = 60_000) {
-  return { stale_after_ms: staleAfterMs, routes };
+/** Per-route bounds, as `broker/freshness.rs` `stale_after` sets them. */
+const BOUND: Record<string, number> = {
+  balance: 180_000,
+  channels: 180_000,
+  health: 60_000,
+  messages: 60_000,
+  pricing: 60_000,
+};
+
+/**
+ * The host's shape, as `assistant_source.rs` writes it. Each route gets its
+ * bound unless the entry sets one. Loosely typed so tests can hand over
+ * malformed entries.
+ */
+function hostFreshness(routes: Record<string, unknown>[]) {
+  return {
+    routes: routes.map((route) =>
+      'stale_after_ms' in route || typeof route.route !== 'string'
+        ? route
+        : { ...route, stale_after_ms: BOUND[route.route] ?? 60_000 },
+    ),
+  };
 }
 
 const ALL_FRESH = hostFreshness([
@@ -44,13 +62,12 @@ function parsed(value: unknown): Freshness {
 describe('freshness from the host global', () => {
   it('reads the exact host shape', () => {
     expect(parsed(ALL_FRESH)).toEqual({
-      staleAfterMs: 60_000,
       routes: [
-        { route: 'balance', state: 'fresh', ageMs: 12_000, clockSkew: false },
-        { route: 'channels', state: 'fresh', ageMs: 11_900, clockSkew: false },
-        { route: 'health', state: 'fresh', ageMs: 12_400, clockSkew: false },
-        { route: 'messages', state: 'fresh', ageMs: 11_000, clockSkew: false },
-        { route: 'pricing', state: 'fresh', ageMs: 10_000, clockSkew: false },
+        { route: 'balance', state: 'fresh', ageMs: 12_000, clockSkew: false, staleAfterMs: 180_000 },
+        { route: 'channels', state: 'fresh', ageMs: 11_900, clockSkew: false, staleAfterMs: 180_000 },
+        { route: 'health', state: 'fresh', ageMs: 12_400, clockSkew: false, staleAfterMs: 60_000 },
+        { route: 'messages', state: 'fresh', ageMs: 11_000, clockSkew: false, staleAfterMs: 60_000 },
+        { route: 'pricing', state: 'fresh', ageMs: 10_000, clockSkew: false, staleAfterMs: 60_000 },
       ],
     });
   });
@@ -60,9 +77,26 @@ describe('freshness from the host global', () => {
     ['a string', 'fresh'],
     ['an array', []],
     ['an extra key', { ...ALL_FRESH, extra: 1 }],
-    ['a zero threshold', hostFreshness([], 0)],
-    ['a fractional threshold', hostFreshness([], 1.5)],
-    ['routes not a list', { stale_after_ms: 60_000, routes: {} }],
+    ['the old top-level threshold', { stale_after_ms: 60_000, routes: [] }],
+    [
+      'a zero threshold',
+      hostFreshness([
+        { route: 'health', state: 'fresh', age_ms: 1, clock_skew: false, stale_after_ms: 0 },
+      ]),
+    ],
+    [
+      'a fractional threshold',
+      hostFreshness([
+        { route: 'health', state: 'fresh', age_ms: 1, clock_skew: false, stale_after_ms: 1.5 },
+      ]),
+    ],
+    [
+      'a missing threshold',
+      {
+        routes: [{ route: 'health', state: 'fresh', age_ms: 1, clock_skew: false }],
+      },
+    ],
+    ['routes not a list', { routes: {} }],
     [
       'an unknown route',
       hostFreshness([{ route: 'payments/pay', state: 'fresh', age_ms: 1, clock_skew: false }]),
@@ -121,6 +155,54 @@ describe('freshness summary and text', () => {
     expect(freshnessText(stale)).toBe('Stale: updated 1 min ago. Reopen to refresh.');
   });
 
+  it.each([
+    ['balance', 180_000],
+    ['channels', 180_000],
+    ['health', 60_000],
+    ['messages', 60_000],
+    ['pricing', 60_000],
+  ])('turns %s stale at its own bound (%i ms)', (route, bound) => {
+    const freshness = parsed(
+      hostFreshness([{ route, state: 'fresh', age_ms: 10_000, clock_skew: false }]),
+    );
+    expect(summarize(freshness, bound - 10_000 - 1).state).toBe('fresh');
+    expect(summarize(freshness, bound - 10_000).state).toBe('stale');
+  });
+
+  it('keeps a balance one wallet sync old fresh while pricing at that age is stale', () => {
+    const freshness = parsed(
+      hostFreshness([
+        { route: 'balance', state: 'fresh', age_ms: 80_000, clock_skew: false },
+        { route: 'pricing', state: 'fresh', age_ms: 5_000, clock_skew: false },
+      ]),
+    );
+    expect(summarize(freshness, 0, 'balance')).toEqual({
+      state: 'fresh',
+      ageMs: 80_000,
+      clockSkew: false,
+    });
+    expect(summarize(freshness, 0, 'pricing').state).toBe('fresh');
+    expect(summarize(freshness, 55_000, 'pricing').state).toBe('stale');
+    expect(summarize(freshness, 55_000, 'balance').state).toBe('fresh');
+    // The whole label is stale once any route is past its own bound.
+    expect(summarize(freshness, 55_000).state).toBe('stale');
+    expect(summarize(freshness, 0).state).toBe('fresh');
+  });
+
+  it('is unknown for one route the host did not report', () => {
+    const freshness = parsed(
+      hostFreshness([{ route: 'health', state: 'fresh', age_ms: 1_000, clock_skew: false }]),
+    );
+    expect(summarize(freshness, 0, 'channels').state).toBe('unknown');
+  });
+
+  it('keeps a host stale for one route whatever its age (Data-Stale: 1)', () => {
+    const freshness = parsed(
+      hostFreshness([{ route: 'balance', state: 'stale', age_ms: 1_000, clock_skew: false }]),
+    );
+    expect(summarize(freshness, 0, 'balance').state).toBe('stale');
+  });
+
   it('is stale when the host already said a route was stale', () => {
     const freshness = parsed(
       hostFreshness([
@@ -131,14 +213,28 @@ describe('freshness summary and text', () => {
     expect(summarize(freshness, 0).state).toBe('stale');
   });
 
-  it('ignores routes with no freshness when others have one', () => {
+  it('does not hide an unknown route behind fresh routes', () => {
     const freshness = parsed(
       hostFreshness([
         { route: 'health', state: 'fresh', age_ms: 3_000, clock_skew: false },
         { route: 'channels', state: 'unknown', age_ms: null, clock_skew: false },
       ]),
     );
-    expect(summarize(freshness, 0)).toEqual({ state: 'fresh', ageMs: 3_000, clockSkew: false });
+    expect(summarize(freshness, 0)).toEqual({ state: 'unknown', ageMs: null, clockSkew: false });
+  });
+
+  it('preserves an explicit stale marker without inventing a data age', () => {
+    const freshness = parsed(hostFreshness([
+      { route: 'balance', state: 'stale', age_ms: null, clock_skew: false },
+      { route: 'health', state: 'fresh', age_ms: 1_000, clock_skew: false },
+      { route: 'channels', state: 'unknown', age_ms: null, clock_skew: false },
+    ]));
+    const summary = summarize(freshness, 0);
+    expect(summary).toEqual({ state: 'stale', ageMs: null, clockSkew: false });
+    expect(freshnessText(summary)).toBe('Stale: data age unknown. Reopen to refresh.');
+    expect(summarize(freshness, 0, 'balance').state).toBe('stale');
+    expect(summarize(freshness, 0, 'channels').state).toBe('unknown');
+    expect(summarize(freshness, 0, 'health').state).toBe('fresh');
   });
 
   it.each([
@@ -328,6 +424,16 @@ describe('page wiring', () => {
       'utf8',
     );
     expect(broker).toContain('pub const STALE_AFTER: Duration = Duration::from_secs(60);');
+    expect(broker).toContain(
+      'pub const WALLET_STALE_AFTER: Duration = Duration::from_secs(180);',
+    );
+    expect(broker).toContain(
+      'ReadRoute::PaymentsBalance | ReadRoute::PaymentsChannels => WALLET_STALE_AFTER,',
+    );
+    expect(broker).toContain(
+      'ReadRoute::Health | ReadRoute::Messages { .. } | ReadRoute::OwnPricing => STALE_AFTER,',
+    );
+    expect(host).toContain('"stale_after_ms": stale_after(fresh.route)');
     for (const route of ['balance', 'channels', 'health', 'messages', 'pricing']) {
       expect(broker).toContain(`=> "${route}"`);
     }

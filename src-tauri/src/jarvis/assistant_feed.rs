@@ -71,7 +71,7 @@ mod tests {
 
     use super::super::assistant_source::{Source, FRESHNESS_GLOBAL};
     use super::super::broker::test_server::{closed_loopback_port, TestServer, NODE_PORT};
-    use super::super::broker::{route_key, FreshnessState, STALE_AFTER};
+    use super::super::broker::{route_key, stale_after, FreshnessState};
     use super::super::broker::{BearerToken, LocalNodeRead};
     use super::super::sit_mock;
     use super::*;
@@ -206,10 +206,67 @@ mod tests {
         assert_eq!(feed.live_rows(), want.as_slice());
     }
 
+    /// Golden init script for a paired, live window, loaded by the window's
+    /// onboarding e2e test (`tests/onboarding-assistant-e2e.test.tsx`), so
+    /// host and window agree on the exact globals. Fixed clocks: balance has
+    /// a #78 as-of one wallet sync (80 s) old; the rest are rc7 app reads;
+    /// ages are taken 12 s after the reads. `BITSOV_BLESS=1` rewrites it.
+    #[test]
+    fn the_live_init_script_matches_the_window_golden() {
+        use super::super::broker::{Fetched, NodeMarks, RawRead, ReadRoute, RouteFreshness};
+        use std::time::Duration;
+
+        let t0 = Instant::now();
+        let wall = 1_790_497_200_000; // 2026-09-27T08:20:00Z
+        let read = |route: ReadRoute, as_of_ms: Option<u64>| {
+            let body: &[u8] = match route {
+                ReadRoute::Messages { .. } => b"[]",
+                _ => b"{}",
+            };
+            let raw = RawRead::new(200, body.to_vec())
+                .marked(NodeMarks {
+                    as_of_ms,
+                    stale: false,
+                })
+                .stamped(Fetched {
+                    at: t0,
+                    wall_ms: Some(wall),
+                });
+            RouteFreshness::assess(route, &raw)
+        };
+        let freshness = vec![
+            read(ReadRoute::PaymentsBalance, Some(wall - 80_000)),
+            read(ReadRoute::PaymentsChannels, Some(wall)),
+            read(ReadRoute::Health, Some(wall)),
+            read(ReadRoute::Messages { limit: 50 }, Some(wall)),
+            read(ReadRoute::OwnPricing, Some(wall)),
+        ];
+        let feed = Feed::live(sit_mock::rows()).with_freshness(freshness);
+        let script = feed.init_script_at(t0 + Duration::from_secs(12));
+
+        let golden = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../tests/fixtures/assistant-live-init.js");
+        if std::env::var_os("BITSOV_BLESS").is_some() {
+            std::fs::write(&golden, format!("{script}\n")).expect("write golden");
+        }
+        let want = std::fs::read_to_string(&golden).expect("golden init script");
+        assert_eq!(
+            want.trim_end(),
+            script,
+            "BITSOV_BLESS=1 cargo test to update"
+        );
+    }
+
     #[test]
     fn a_live_feed_stamps_every_route_it_read() {
         let before = Instant::now();
         let server = TestServer::start(MockNode::canonical(), TOKEN);
+        let as_of = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+            .to_string();
+        server.set_headers(&[("BitSov-Data-As-Of", &as_of)]);
         let (feed, _) = build_logged(paired(&["read"]), &server.api_base());
         let after = Instant::now();
         assert_eq!(feed.source(), Source::Live);
@@ -227,7 +284,10 @@ mod tests {
             let fetched = fresh.fetched.expect("host stamp");
             assert!(before <= fetched.at && fetched.at <= after);
             assert_eq!(fresh.state(after), FreshnessState::Fresh);
-            assert_eq!(fresh.state(fetched.at + STALE_AFTER), FreshnessState::Stale);
+            assert_eq!(
+                fresh.state(fetched.at + stale_after(fresh.route)),
+                FreshnessState::Stale
+            );
             assert!(!fresh.clock_skew);
         }
         let script = feed.init_script_at(after);
@@ -238,6 +298,12 @@ mod tests {
     fn a_live_feed_with_a_failed_route_marks_only_that_route_unknown() {
         let node = MockNode::canonical().fault(Route::PaymentsChannels, Fault::Error);
         let server = TestServer::start(node, TOKEN);
+        let as_of = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+            .to_string();
+        server.set_headers(&[("BitSov-Data-As-Of", &as_of)]);
         let (feed, _) = build_logged(paired(&["read"]), &server.api_base());
         assert_eq!(feed.source(), Source::Live);
         let now = Instant::now();
