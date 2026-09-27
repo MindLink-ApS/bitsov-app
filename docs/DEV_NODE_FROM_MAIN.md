@@ -98,9 +98,11 @@ again with the same two variables reuses the node and the stored pairing.
 - **Sends:** the app refuses variable-price sends unless the node advertises
   `paid_send_caps_v1` (and `room_terminal_outcomes_v1` for rooms). Genome `main` has both
   since #80 (`f2f1769`), so a step 1 build from `main` can send.
-- **Spend:** a paired app gets `read + receive` only. Spending needs the node started by
-  you with `--owner-control` and a grant through the owner CLI (genome
-  `docs/security/pairing.md`). This path does neither.
+- **Spend:** a paired app gets `read + receive` only. This path starts the node with
+  `--owner-control`, so the node prints the owner's grant code on the terminal that ran
+  `npm run tauri:dev:mainnode`. Approve a budget in the app, then run the
+  `konsensus grant --op …` it shows (with `--config $BITSOV_DEV_DATA_DIR/konsensus.toml`)
+  and type that code (genome `docs/SPEND_BUDGET_GRANTS.md`).
 - **Live feed pill:** the first smoke run showed "Node up, live feed reconnecting" on an open
   `/ws`. The fix is on #43 (the host replays the socket's link state when the shell
   subscribes). Without #43 the pill can lag; the feed itself works.
