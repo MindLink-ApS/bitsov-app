@@ -56,14 +56,15 @@ const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 /** The one peer a question names, by label (whole word) or an id prefix of 8+ hex. */
 export function peerIn(text: string, peers: Peer[]): Peer | null {
   const lower = text.toLowerCase();
-  const byLabel = peers.filter((p) => {
-    const label = p.label?.trim().toLowerCase();
-    return !!label && new RegExp(`(^|[^\\p{L}\\p{N}])${escape(label)}($|[^\\p{L}\\p{N}])`, 'u').test(lower);
-  });
-  if (byLabel.length === 1) return byLabel[0];
   const hex = lower.match(/\b[0-9a-f]{8,64}\b/g) ?? [];
-  const byId = peers.filter((p) => hex.some((h) => p.node_id.toLowerCase().startsWith(h)));
-  return byId.length === 1 ? byId[0] : null;
+  const matches = peers.filter((p) => {
+    const label = p.label?.trim().toLowerCase();
+    const byLabel = !!label && new RegExp(`(^|[^\\p{L}\\p{N}])${escape(label)}($|[^\\p{L}\\p{N}])`, 'u').test(lower);
+    return byLabel || hex.some((h) => p.node_id.toLowerCase().startsWith(h));
+  });
+  // Both naming forms must agree on one distinct contact. A label must not
+  // override another contact's id (or an ambiguous prefix).
+  return new Set(matches.map((p) => p.node_id.toLowerCase())).size === 1 ? matches[0] : null;
 }
 
 /** The first whole number of sats in the text: `2-sat`, `500 sats`, `1,000 sat`. */
@@ -81,10 +82,19 @@ export function satsIn(text: string): number | null {
 
 /** Quoted text, or what follows `saying` / `that says` / a colon. */
 function draftText(text: string): string {
-  const quoted = /["“']([^"”']{1,500})["”']/.exec(text);
-  if (quoted) return quoted[1].trim();
-  const said = /\b(?:saying|that says|to say)\s+(.{1,500})$/i.exec(text) ?? /:\s*(.{1,500})$/.exec(text);
-  return said ? said[1].trim() : '';
+  const said = /(?:\b(?:saying|that says|to say)\s+|:\s*)([\s\S]{1,500})$/i.exec(text);
+  // An opening quote needs whitespace or the start of the text; an apostrophe
+  // within "I'm" is never an opener. Match each opening/closing pair together.
+  const quotation = /(?:^|\s)(?:"([\s\S]{1,500})"|“([\s\S]{1,500})”|'([\s\S]{1,500})')(?=\s|[.,!?;:]|$)/;
+  const quoted = quotation.exec(text);
+  // A marker inside a quoted body belongs to that body, while quotes after
+  // an explicit marker belong to its complete suffix (including contractions).
+  if (quoted && (!said || quoted.index < said.index)) return (quoted[1] ?? quoted[2] ?? quoted[3]).trim();
+  const body = said?.[1].trim() ?? '';
+  // If the suffix starts with a quoted body, trailing prompt punctuation or
+  // instructions are outside it. Quotes embedded in an unquoted body stay put.
+  const wrapped = quotation.exec(body);
+  return wrapped?.index === 0 ? (wrapped[1] ?? wrapped[2] ?? wrapped[3]).trim() : body;
 }
 
 const startOfDay = (ms: number) => {

@@ -98,6 +98,50 @@ describe('what a question asks', () => {
     expect(satsIn('1,000 sats')).toBe(1000);
     expect(satsIn('no amount')).toBeNull();
   });
+
+  it.each([
+    [`Message Maya saying "I'm late and I'll call soon"`, "I'm late and I'll call soon"],
+    ["Message Maya saying I'm late and I'll call soon", "I'm late and I'll call soon"],
+    ["Message Maya saying 'I'm late and I'll call soon'", "I'm late and I'll call soon"],
+    ['Message Maya saying “I’m late and I’ll call soon”', 'I’m late and I’ll call soon'],
+    [`Message Maya: I'm late and I'll call soon`, "I'm late and I'll call soon"],
+    [`Message Maya "I'm late and I'll call soon"`, "I'm late and I'll call soon"],
+    ["Message Maya 'I'm late and I'll call soon'", "I'm late and I'll call soon"],
+    ['Message Maya saying "See you at 6".', 'See you at 6'],
+    ['Message Maya saying "See you at 6", please.', 'See you at 6'],
+    [`Message Maya saying "I'm late and I'll call soon", please.`, "I'm late and I'll call soon"],
+    ['Message Maya “Keep saying hello: it helps”', 'Keep saying hello: it helps'],
+    [`Message Maya saying Don't forget 'lunch' today`, "Don't forget 'lunch' today"],
+    ['Message Maya saying He said "hello" and left', 'He said "hello" and left'],
+    [`Message Maya saying "I'm late'`, `"I'm late'`],
+  ])('preserves the complete draft body in %s', (question, text) => {
+    expect(understand(question, PEERS, NOW)).toMatchObject({
+      kind: 'act', proposal: { kind: 'message', peer: A, text },
+    });
+  });
+
+  it.each([
+    'Pay Maya and bbbbbbbb 500 sats',
+    'Pay aaaaaaaa and Josh 500 sats',
+    'Pay Maya and Josh 500 sats',
+    'Pay Maya and Josh bbbbbbbb 500 sats',
+    'Pay aaaaaaaa and bbbbbbbb 500 sats',
+  ])('refuses multiple distinct recipients in %s', (question) => {
+    expect(peerIn(question, PEERS)).toBeNull();
+    expect(understand(question, PEERS, NOW)).toEqual({ kind: 'no-peer', what: 'pay' });
+  });
+
+  it('counts a contact named by both label and id only once', () => {
+    expect(understand('Pay Maya AAAAAAAA 500 sats', PEERS, NOW)).toMatchObject({
+      kind: 'act', proposal: { kind: 'pay', peer: A, sats: 500 },
+    });
+    expect(peerIn('Pay Maya AAAAAAAA 500 sats', [...PEERS, { ...PEERS[0], node_id: A.toUpperCase() }])?.node_id.toLowerCase()).toBe(A);
+  });
+
+  it('refuses a label match when the same id prefix also matches another contact', () => {
+    const peers = [...PEERS, { ...PEERS[2], node_id: 'a'.repeat(8) + 'c'.repeat(56) }];
+    expect(peerIn('Pay Maya aaaaaaaa 500 sats', peers)).toBeNull();
+  });
 });
 
 describe('composing an answer', () => {
@@ -349,6 +393,29 @@ describe('the AI track', () => {
     click('[data-track="ai"]');
     await vi.waitFor(() => expect($('[data-provider="shared"]')).not.toBeNull());
   }
+
+  it.each([
+    `Message Maya saying "I'm late and I'll call soon"`,
+    "Message Maya saying I'm late and I'll call soon",
+  ])('prefills the complete message with contractions: %s', async (question) => {
+    const host = stubHost();
+    await openAi();
+    ask(question);
+    await vi.waitFor(() => expect($('[data-ai-prefill]')).not.toBeNull());
+    click('[data-ai-prefill]');
+    await vi.waitFor(() => expect($('[data-drafted]')).not.toBeNull());
+    expect($<HTMLTextAreaElement>('[data-composer] textarea')?.value).toBe("I'm late and I'll call soon");
+    for (const cmd of ['message_send', 'payment_keysend', 'spend_request']) expect(host.used(cmd)).toHaveLength(0);
+  });
+
+  it('offers no payment prefill for mixed label and id recipients', async () => {
+    const host = stubHost();
+    await openAi();
+    ask('Pay Maya and bbbbbbbb 500 sats');
+    await vi.waitFor(() => expect($('[data-ai-answer="answered"]')).not.toBeNull());
+    expect($('[data-ai-prefill]')).toBeNull();
+    for (const cmd of ['payment_pay', 'payment_keysend', 'spend_request']) expect(host.used(cmd)).toHaveLength(0);
+  });
 
   it('answers locally from the broker read with source and freshness, and sends nothing', async () => {
     const host = stubHost();
