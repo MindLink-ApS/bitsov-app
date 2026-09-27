@@ -1438,12 +1438,21 @@ async fn node_offers(state: &NodeState, capability: &str) -> bool {
 /// `max_msat` (admission plus the first message), inside the node's budget
 /// grant. The compose that follows consumes it. Only a paired client on a G1
 /// node that offers it needs one; anywhere else this is a no-op.
-async fn confirm_first_contact(state: &NodeState, recipient: &str, max_msat: u64) -> Result<(), ActionError> {
+///
+/// `contact_budget_msat` is the budget the owner chose on the door card. The
+/// node caps this contact at it inside the budget grant, which makes the
+/// contact budgeted there: after a reconnect, its admission is paid again from
+/// the budget without asking (CoS decision, 2026-09-27).
+async fn confirm_first_contact(state: &NodeState, recipient: &str, max_msat: u64, contact_budget_msat: u64) -> Result<(), ActionError> {
     if state.node_grant.lock().unwrap().is_none() || !node_offers(state, grant::FIRST_CONTACT_CAPABILITY).await {
         return Ok(());
     }
     let path = "/pair/first-contact-grant";
-    let body = serde_json::json!({ "recipient": recipient, "max_total_msat": max_msat });
+    let body = serde_json::json!({
+        "recipient": recipient,
+        "max_total_msat": max_msat,
+        "contact_budget_msat": contact_budget_msat,
+    });
     let (status, text) = call_api(state, reqwest::Method::POST, path, Some(body)).await.map_err(ActionError::node)?;
     if status.is_success() {
         return Ok(());
@@ -1705,6 +1714,9 @@ async fn money_post(state: &NodeState, auth: Auth, path: &str, body: serde_json:
     let value: serde_json::Value = serde_json::from_str(&text).map_err(spend_journal::unknown)?;
     let is_room = body["is_room"].as_bool() == Some(true);
     let mut room_refused = false;
+    // Admission paid again after a reconnect: outside the message's confirmed
+    // cap (the node's grant bounds it), but it counts against the contact.
+    let mut readmission = 0;
     let (amount, complete) = if path == "/payments/pay" {
         let receipt: act::PayReply = serde_json::from_value(value.clone()).map_err(spend_journal::unknown)?;
         (receipt.amount_msat, !receipt.preimage.is_empty())
@@ -1718,6 +1730,7 @@ async fn money_post(state: &NodeState, auth: Auth, path: &str, body: serde_json:
             room_refused = summary.1;
             summary.0
         } else { true };
+        readmission = receipt.readmission_msat.unwrap_or(0);
         (receipt.amount_msat, complete)
     };
     pending.target = value.get("payment_hash").and_then(|h| h.as_str())
@@ -1732,7 +1745,7 @@ async fn money_post(state: &NodeState, auth: Auth, path: &str, body: serde_json:
     if is_room { pending.target = None; }
     pending.over_budget = amount > max_msat;
     // An unresolved room keeps its whole ceiling reserved; otherwise count what was paid.
-    if let (Some(id), true) = (&charged, complete) { close_charge(state, id, Some(amount)); }
+    if let (Some(id), true) = (&charged, complete) { close_charge(state, id, Some(amount.saturating_add(readmission))); }
     if pending.over_budget || !complete {
         journal.save(&pending)?;
         if pending.over_budget {
@@ -2072,12 +2085,23 @@ async fn do_message_send_with(
     ceiling(price, max_msat)?;
     let recipient = body["recipient"].as_str().unwrap_or_default().to_string();
     // A confirmed first paid message to a contact: the node backs that one OK
-    // with a single-use grant for exactly this contact and this cap.
-    if !is_room && plan.confirm.is_some() {
-        confirm_first_contact(state, &recipient, max_msat).await?;
+    // with a single-use grant for exactly this contact and this cap. The same
+    // OK re-admits a known contact the node's grant does not budget yet.
+    let node_ok = if is_room { None } else { plan.confirm.or(first_contact_msat) };
+    if let Some(contact_budget) = node_ok {
+        confirm_first_contact(state, &recipient, max_msat, contact_budget).await?;
     }
     let charge = Charge { target, room: is_room, confirm: plan.confirm };
-    let text = money_post(state, auth, "/messages/compose", body, max_msat, Some(charge)).await?;
+    let sent = money_post(state, auth, "/messages/compose", body, max_msat, Some(charge)).await;
+    let text = match sent {
+        // After a reconnect the contact asks for admission again. The node pays
+        // it from the budget only for a contact its grant budgets; this one it
+        // does not, so the owner confirms once, on the door card.
+        Err(e) if e.code == "grant_first_contact" && node_ok.is_none() => {
+            return Err(readmission_needs_ok());
+        }
+        other => other?,
+    };
     let reply: act::SendReply = decode_act("/messages/compose", &text)?;
     Ok(act::SendReceipt {
         message_id: reply.message_id,
@@ -2087,6 +2111,13 @@ async fn do_message_send_with(
         amount_msat: reply.amount_msat,
         sent_at_ms: now_ms(),
     })
+}
+
+fn readmission_needs_ok() -> ActionError {
+    ActionError::new(
+        "grant_readmission",
+        "This contact reconnected and asks to be admitted again. Your node's budget does not cover them yet, so it needs your OK once. Nothing was sent.",
+    )
 }
 
 async fn do_invoice_create(
@@ -4098,9 +4129,45 @@ mod control_act_tests {
         g1_approved(&node, 500_000).await;
         do_message_send_with(&node.state, C, false, "hello stranger", 5000, None, Some(50_000)).await.unwrap();
         let (body, next) = first_contact_then_compose(&node).expect("the owner's OK reached the node");
-        assert_eq!(body, serde_json::json!({"recipient": C, "max_total_msat": 5000}));
+        assert_eq!(body, serde_json::json!({"recipient": C, "max_total_msat": 5000, "contact_budget_msat": 50_000}),
+            "the budget chosen on the door card makes the contact budgeted at the node");
         assert_eq!(next, "/messages/compose", "the grant is asked for right before the send it covers");
         assert_eq!(node.posts().last().unwrap().1["max_total_msat"], 5000);
+    }
+
+    #[tokio::test]
+    async fn g1_a_budgeted_contacts_readmission_is_paid_without_a_prompt_and_counted() {
+        let (node, _dir, g1) = g1_node(&["read", "receive"]);
+        with_book(&node.state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
+        g1_approved(&node, 500_000).await;
+        // After a reconnect the node paid A's admission again from the budget.
+        *g1.compose.lock().unwrap() = Some((200, serde_json::json!({
+            "message_id": "m1", "delivered": true, "amount_msat": 2000, "readmission_msat": 2000})));
+        do_message_send(&node.state, A, false, "gm", 2000, None).await.unwrap();
+        assert!(first_contact_then_compose(&node).is_none(), "no prompt, no one-time OK");
+        let spent = with_book(&node.state, false, |b| Ok(b.spent(A, false, now_ms()))).unwrap();
+        assert_eq!(spent, 4000, "the re-admission counts against the contact");
+    }
+
+    #[tokio::test]
+    async fn g1_a_known_contact_the_grant_does_not_budget_asks_for_the_ok_once() {
+        let (node, _dir, g1) = g1_node(&["read", "receive"]);
+        *g1.first_contact.lock().unwrap() =
+            Some((200, serde_json::json!({"recipient": A, "max_total_msat": 4000, "expires_at": now_unix() + 120})));
+        g1_approved(&node, 500_000).await;
+        with_book(&node.state, true, |b| b.set_limit(A, false, 30_000)).unwrap();
+        *g1.compose.lock().unwrap() = Some((409, serde_json::json!({
+            "error": "this contact has no budget in your grant", "code": "budget_exceeded", "reason": "first_contact"})));
+        let e = do_message_send(&node.state, A, false, "gm", 2000, None).await.unwrap_err();
+        assert_eq!(e.code, "grant_readmission", "{}", e.message);
+        assert_eq!(with_book(&node.state, false, |b| Ok(b.spent(A, false, now_ms()))).unwrap(), 0, "nothing charged");
+
+        // The door card's one OK: backed at the node, with the contact's budget.
+        *g1.compose.lock().unwrap() = None;
+        do_message_send_with(&node.state, A, false, "gm", 4000, None, Some(30_000)).await.unwrap();
+        let (body, next) = first_contact_then_compose(&node).expect("the owner's OK reached the node");
+        assert_eq!(body, serde_json::json!({"recipient": A, "max_total_msat": 4000, "contact_budget_msat": 30_000}));
+        assert_eq!(next, "/messages/compose");
     }
 
     #[tokio::test]

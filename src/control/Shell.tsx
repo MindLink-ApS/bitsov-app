@@ -1008,9 +1008,14 @@ function Composer(props: {
     if (mode() !== 'message' || !b) return false;
     return b.paused || b.waiting_for_owner || b.autopay.state === 'open' || !line().open;
   };
-  const stand = () => budgetStand(budget(), target(), room(), shown().msat);
+  // A known contact the node would not re-admit from the budget after a
+  // reconnect (its grant does not budget them yet): the door card, once more.
+  const [readmitFor, setReadmitFor] = createSignal<string | null>(null);
+  const readmit = () => !room() && readmitFor() === target();
+  const doorWanted = () => props.firstContact || readmit();
+  const stand = () => budgetStand(budget(), target(), room(), shown().msat, readmit());
   createEffect(() => {
-    if (room() || !props.firstContact || mode() !== 'message' || stand().kind !== 'first') return;
+    if (room() || !doorWanted() || mode() !== 'message' || stand().kind !== 'first') return;
     const peer = target();
     if (untrack(door)?.peer === peer) return;
     setDoor({ peer, quote: null });
@@ -1066,7 +1071,7 @@ function Composer(props: {
   const shown = (): { msat: number | null; estimate: boolean; basis: string } => {
     switch (mode()) {
       case 'message': {
-        const q = props.firstContact ? doorQuote() : null;
+        const q = doorWanted() ? doorQuote() : null;
         if (q) {
           return {
             msat: q.total_msat,
@@ -1154,6 +1159,11 @@ function Composer(props: {
       setBusy(true);
       const submittedRevision = composerRevision;
       const r = await props.actions.send(props.track, draft(), shown().msat!, st.kind === 'first' ? firstPick() ?? st.suggest : undefined);
+      if (r.ok) setReadmitFor(null);
+      else if (r.error.code === 'grant_readmission') {
+        setDoor(null);
+        setReadmitFor(target());
+      }
       if (r.ok && composerRevision === submittedRevision) {
         setDraft('');
         setDrafted(false);
@@ -1525,7 +1535,16 @@ function BudgetBar(props: {
         <Match when={props.stand.kind === 'first' && (props.stand as Extract<BudgetStandT, { kind: 'first' }>)}>
           {(st) => (
             <div class="approval budget-first" data-first-contact>
-              <Show when={props.door}>
+              <Show when={st().again ? props.door : null}>
+                {(q) => (
+                  <p class="door-quote" data-door-quote={q().total_msat} data-readmit>
+                    {who()} reconnected and asks to be admitted again: <strong>{sats(q().admission_msat)} sats</strong>, then{' '}
+                    <strong>{sats(q().message_msat)} sats</strong> for this message, <strong>{sats(q().total_msat)} sats</strong> in
+                    all, their own signed price. Nothing is paid until you send.
+                  </p>
+                )}
+              </Show>
+              <Show when={st().again ? null : props.door}>
                 {(q) => (
                   <p class="door-quote" data-door-quote={q().total_msat}>
                     {who()}’s door: <strong>{sats(q().admission_msat)} sats</strong> once to reach them, then{' '}
@@ -1534,9 +1553,19 @@ function BudgetBar(props: {
                   </p>
                 )}
               </Show>
-              <p>
-                <strong>First paid message to {who()}.</strong> Asked once. After it, messages to {who()} pay automatically, up to:
-              </p>
+              <Show
+                when={st().again}
+                fallback={
+                  <p>
+                    <strong>First paid message to {who()}.</strong> Asked once. After it, messages to {who()} pay automatically, up to:
+                  </p>
+                }
+              >
+                <p>
+                  <strong>Admit {who()} again.</strong> Asked once. After it, your node pays a reconnect to {who()} from their
+                  budget without asking, up to:
+                </p>
+              </Show>
               <div class="presets" role="radiogroup" aria-label={`Daily budget for ${who()}`}>
                 <For each={firstOptions(st().suggest, st().ceiling)}>
                   {(msat) => (
@@ -1730,7 +1759,8 @@ function BudgetPanel(props: {
               A budget can go up to the daily total you approved; raising the total is a new approval. Budgets and this tally are
               saved on this device. Your approval is not: after a restart, approve once more. 0 forgets a contact, so they are asked
               again. Inside the budget you approved at your node, paying and sending a file take one click to approve, with no
-              step at your node: your node holds every such payment to that budget.
+              step at your node: your node holds every such payment to that budget. When a contact with a budget reconnects and
+              asks to be admitted again, your node pays that from their budget without asking; anyone else asks you once.
             </p>
           </>
         )}

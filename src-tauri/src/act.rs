@@ -351,6 +351,9 @@ pub struct SendReply {
     pub message_id: String,
     pub delivered: bool,
     pub amount_msat: u64,
+    /// Admission paid again during this send after a reconnect (genome #85).
+    #[serde(default)]
+    pub readmission_msat: Option<u64>,
 }
 
 /// What a send shows in the stream, straight after it returns.

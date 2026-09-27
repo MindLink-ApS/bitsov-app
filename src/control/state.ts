@@ -161,12 +161,17 @@ export type BudgetStand =
   | { kind: 'paused' }
   | { kind: 'waiting' }
   | { kind: 'off' }
-  | { kind: 'first'; suggest: number; ceiling: number }
+  | { kind: 'first'; suggest: number; ceiling: number; again?: boolean }
   | { kind: 'contact_used'; limit: number; spent: number; raiseTo: number | null }
   | { kind: 'total_used'; ceiling: number; spent: number; raiseTo: number | null }
   | { kind: 'ok'; limit: number; spent: number; ceiling: number; totalSpent: number };
 
-export function budgetStand(view: BudgetView | null, target: string, room: boolean, costMsat: number | null): BudgetStand {
+/**
+ * `readmit`: the node asked the owner's OK to admit this known contact again
+ * after a reconnect (its grant does not budget them yet). The door card comes
+ * back once, with their budget as it stands.
+ */
+export function budgetStand(view: BudgetView | null, target: string, room: boolean, costMsat: number | null, readmit = false): BudgetStand {
   if (!view) return { kind: 'unknown' };
   if (view.paused) return { kind: 'paused' };
   if (view.waiting_for_owner) return { kind: 'waiting' };
@@ -179,6 +184,7 @@ export function budgetStand(view: BudgetView | null, target: string, room: boole
     const suggest = Math.min(Math.max(room ? preset?.room_msat ?? 0 : preset?.contact_msat ?? 0, cost), ceiling);
     return { kind: 'first', suggest, ceiling };
   }
+  if (readmit && !room) return { kind: 'first', suggest: Math.min(row.limit_msat, ceiling), ceiling, again: true };
   if (row.spent_msat + cost > row.limit_msat) {
     const want = Math.max(row.limit_msat * 2, row.spent_msat + cost);
     return { kind: 'contact_used', limit: row.limit_msat, spent: row.spent_msat, raiseTo: want <= ceiling ? want : ceiling > row.limit_msat ? ceiling : null };
