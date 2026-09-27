@@ -4,9 +4,11 @@
 //! its initialization script and has no command, IPC grant or network path to
 //! change them. There is no window-callable way to pick the backend.
 
+use std::time::Instant;
+
 use serde_json::{json, Value};
 
-use super::broker::BearerToken;
+use super::broker::{route_key, BearerToken, RouteFreshness, STALE_AFTER};
 
 /// The host's auth state, as F1 (`crate::pairing`) established it.
 #[derive(Debug)]
@@ -30,6 +32,11 @@ pub const SOURCE_GLOBAL: &str = "__BITSOV_ASSISTANT_SOURCE__";
 /// Global holding live `[[id, answer], ...]`. Defined only for a live feed.
 /// Must match `src/assistant/source.ts`.
 pub const LIVE_ROWS_GLOBAL: &str = "__BITSOV_LIVE_ROWS__";
+
+/// Global holding `{stale_after_ms, routes: [{route, state, age_ms,
+/// clock_skew}]}`. Defined only for a live feed. Must match
+/// `src/assistant/source.ts`.
+pub const FRESHNESS_GLOBAL: &str = "__BITSOV_LIVE_FRESHNESS__";
 
 /// Why the window shows mock rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,11 +66,13 @@ pub enum Source {
     Mock(MockReason),
 }
 
-/// The host's decision plus, when live, the rows read from the node.
+/// The host's decision plus, when live, the rows read from the node and how
+/// old each route's read is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Feed {
     source: Source,
     live_rows: Vec<(String, String)>,
+    freshness: Vec<RouteFreshness>,
 }
 
 impl Feed {
@@ -71,6 +80,7 @@ impl Feed {
         Self {
             source: Source::Mock(reason),
             live_rows: Vec::new(),
+            freshness: Vec::new(),
         }
     }
 
@@ -78,7 +88,21 @@ impl Feed {
         Self {
             source: Source::Live,
             live_rows: rows,
+            freshness: Vec::new(),
         }
+    }
+
+    /// Per-route freshness for a live feed. Mock rows make no freshness claim,
+    /// so a mock feed drops it.
+    pub fn with_freshness(mut self, freshness: Vec<RouteFreshness>) -> Self {
+        if self.source == Source::Live {
+            self.freshness = freshness;
+        }
+        self
+    }
+
+    pub fn freshness(&self) -> &[RouteFreshness] {
+        &self.freshness
     }
 
     pub fn source(&self) -> Source {
@@ -90,9 +114,14 @@ impl Feed {
     }
 
     /// Initialization script: defines [`SOURCE_GLOBAL`], and
-    /// [`LIVE_ROWS_GLOBAL`] for a live feed. Both are frozen, not writable and
-    /// not configurable.
+    /// [`LIVE_ROWS_GLOBAL`] and [`FRESHNESS_GLOBAL`] for a live feed. All are
+    /// frozen, not writable and not configurable. Ages are taken now.
     pub fn init_script(&self) -> String {
+        self.init_script_at(Instant::now())
+    }
+
+    /// [`Feed::init_script`] with ages measured at `now`.
+    pub fn init_script_at(&self, now: Instant) -> String {
         let source = match self.source {
             Source::Live => json!({ "kind": "live" }),
             Source::Mock(reason) => json!({ "kind": "mock", "reason": reason.code() }),
@@ -109,9 +138,28 @@ impl Feed {
                 .map(|(id, value)| [id.as_str(), value.as_str()])
                 .collect();
             script.push_str(&define(LIVE_ROWS_GLOBAL, &json!(rows)));
+            script.push_str(&define(FRESHNESS_GLOBAL, &self.freshness_json(now)));
         }
         script.push_str("})();");
         script
+    }
+}
+
+impl Feed {
+    fn freshness_json(&self, now: Instant) -> Value {
+        let routes: Vec<Value> = self
+            .freshness
+            .iter()
+            .map(|fresh| {
+                json!({
+                    "route": route_key(fresh.route),
+                    "state": fresh.state(now).code(),
+                    "age_ms": fresh.age(now).map(|age| age.as_millis() as u64),
+                    "clock_skew": fresh.clock_skew,
+                })
+            })
+            .collect();
+        json!({ "stale_after_ms": STALE_AFTER.as_millis() as u64, "routes": routes })
     }
 }
 
@@ -137,6 +185,9 @@ pub fn js_literal(value: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use super::super::broker::{Fetched, RawRead, ReadRoute, STALE_AFTER};
     use super::*;
 
     /// Pull `value: <json>` for `global` back out of a script.
@@ -167,7 +218,67 @@ mod tests {
                 "{script}"
             );
             assert!(!script.contains(LIVE_ROWS_GLOBAL), "{script}");
+            assert!(!script.contains(FRESHNESS_GLOBAL), "{script}");
         }
+    }
+
+    fn stamped_at(route: ReadRoute, at: Instant, body: &str) -> RouteFreshness {
+        let raw = RawRead::new(200, body.as_bytes().to_vec()).stamped(Fetched {
+            at,
+            wall_ms: Some(1_800_000_000_000),
+        });
+        RouteFreshness::assess(route, &raw)
+    }
+
+    #[test]
+    fn live_feed_carries_each_route_age_at_script_time() {
+        let t0 = Instant::now();
+        let freshness = vec![
+            stamped_at(ReadRoute::PaymentsBalance, t0, "{}"),
+            stamped_at(
+                ReadRoute::Messages { limit: 1 },
+                t0 + Duration::from_secs(2),
+                r#"[{"timestamp":9999999999999}]"#,
+            ),
+            RouteFreshness::assess(ReadRoute::Health, &RawRead::new(200, b"{}".to_vec())),
+        ];
+        let feed = Feed::live(vec![("q01".into(), "1".into())]).with_freshness(freshness);
+
+        let script = feed.init_script_at(t0 + Duration::from_secs(12));
+        assert_eq!(
+            defined(&script, FRESHNESS_GLOBAL),
+            Some(json!({
+                "stale_after_ms": 60_000,
+                "routes": [
+                    {"route": "balance", "state": "fresh", "age_ms": 12_000, "clock_skew": false},
+                    {"route": "messages", "state": "fresh", "age_ms": 10_000, "clock_skew": true},
+                    {"route": "health", "state": "unknown", "age_ms": null, "clock_skew": false},
+                ],
+            }))
+        );
+
+        let later = feed.init_script_at(t0 + STALE_AFTER);
+        let routes = defined(&later, FRESHNESS_GLOBAL).unwrap()["routes"].clone();
+        assert_eq!(routes[0]["state"], "stale");
+        assert_eq!(routes[0]["age_ms"], 60_000);
+        assert_eq!(routes[1]["state"], "fresh");
+    }
+
+    #[test]
+    fn a_live_feed_without_reads_has_no_routes() {
+        let script = Feed::live(vec![("q01".into(), "1".into())]).init_script();
+        assert_eq!(
+            defined(&script, FRESHNESS_GLOBAL),
+            Some(json!({ "stale_after_ms": 60_000, "routes": [] }))
+        );
+    }
+
+    #[test]
+    fn mock_ignores_freshness_even_if_handed_some() {
+        let stamped = stamped_at(ReadRoute::Health, Instant::now(), "{}");
+        let feed = Feed::mock(MockReason::NodeUnreachable).with_freshness(vec![stamped]);
+        assert!(feed.freshness().is_empty());
+        assert!(!feed.init_script().contains(FRESHNESS_GLOBAL));
     }
 
     #[test]
@@ -194,10 +305,10 @@ mod tests {
             script
                 .matches(", writable: false, configurable: false });")
                 .count(),
-            2,
+            3,
             "{script}"
         );
-        assert_eq!(script.matches("value: deepFreeze(").count(), 2, "{script}");
+        assert_eq!(script.matches("value: deepFreeze(").count(), 3, "{script}");
         assert!(script.contains("Object.freeze"), "{script}");
     }
 

@@ -6,6 +6,7 @@
 
 use std::cell::RefCell;
 
+use super::freshness::{route_key, RouteFreshness};
 use super::route::ReadRoute;
 use super::{NodeRead, RawRead, ReadFault};
 
@@ -28,6 +29,23 @@ impl<'a, R: NodeRead> Snapshot<'a, R> {
             .borrow()
             .iter()
             .any(|(_, read)| matches!(read, Err(ReadFault::Transport)))
+    }
+
+    /// Freshness of each route that returned a response, by route name.
+    /// A read that failed in transport has none.
+    pub fn freshness(&self) -> Vec<RouteFreshness> {
+        let mut out: Vec<RouteFreshness> = self
+            .reads
+            .borrow()
+            .iter()
+            .filter_map(|(route, read)| {
+                read.as_ref()
+                    .ok()
+                    .map(|raw| RouteFreshness::assess(*route, raw))
+            })
+            .collect();
+        out.sort_by_key(|fresh| route_key(fresh.route));
+        out
     }
 
     /// The node refused the token on some read.

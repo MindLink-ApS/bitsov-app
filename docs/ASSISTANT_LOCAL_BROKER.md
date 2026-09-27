@@ -95,6 +95,52 @@ A refused path is cut at `?`, capped at 96 characters and made printable. No
 line or error carries a body, a token, a key or the refused base URL. Tests
 use a canary token and assert it appears in none of them.
 
+## Freshness (F4)
+
+Live rows say how old the read is. App-side only: no genome change, no pin
+bump, no polling. The window still reads once per open.
+
+- **Host stamp.** `LocalNodeRead` stamps every response when its body has
+  been read: a monotonic `Instant` (ages come from this) and the host wall
+  clock. `Snapshot::freshness()` gives one entry per route that answered.
+- **States** (`broker/freshness.rs`): *fresh* (age under `STALE_AFTER`,
+  60 s); *stale* (age at or over it); *unknown* (no host stamp: a mock read,
+  or a non-2xx read whose rows are `Unavailable` anyway).
+- **To the window.** A third frozen init-script global,
+  `__BITSOV_LIVE_FRESHNESS__`, defined for a live feed only:
+  `{stale_after_ms, routes: [{route, state, age_ms, clock_skew}]}` with ages
+  taken when the script is written. The window validates the exact shape
+  (anything else is *freshness unknown*), then adds the time it has been open
+  from its own monotonic clock (`performance.now()`), so a label turns stale
+  in place. The tick only redraws text; it reads nothing and calls nothing.
+- **Label.** Live: *Updated 12 s ago.* / *Stale: updated 1 min ago. Reopen
+  to refresh.* / *Freshness unknown.* The oldest answering route sets the
+  age. Mock rows are *Mock data* with no freshness line, even if a
+  freshness global exists.
+
+Node-side times on the pinned rc7 (`958e399`) routes:
+
+| Route | rc7 body | Time field | Used for |
+|---|---|---|---|
+| `/payments/balance` | `BalanceResponse` | none | host stamp only |
+| `/payments/channels` | `[ChannelResponse]` | none | host stamp only |
+| `/health` | `PublicHealthResponse` | none; `block_height` and `uptime_secs` are not times | host stamp only |
+| `/messages` | `[MessageResponse]` | `timestamp` (ms since epoch), per message | skew check only |
+| `/pricing` | `OwnPricingResponse` | none; `block_height` is not a time | host stamp only |
+
+The newest `/messages` `timestamp` is a send time, not an "as of": an idle
+mailbox is old and current. It never makes a read fresh or stale. If it is
+more than `MAX_NODE_SKEW` (120 s) ahead of the host's clock at fetch time, it
+is clamped to the fetch time and the label adds *Node clock is ahead of this
+computer.* Without a host wall clock it is not checked. The HTTP `Date`
+header is not read: it is not part of the pinned API and would only restate
+the fetch time.
+
+**Limit.** The age is how long ago the *app* read the node, not how old the
+node's figures are. A node serving a cached balance answers 200 and reads as
+fresh. Catching that needs an as-of marker from the node:
+`.claude/tickets/G-STALENESS-MARKER.md` (spec only, not in this repo).
+
 ## Known limits
 
 - **Staleness.** rc7 has no stale marker on the wire. mock-node models stale
@@ -103,7 +149,8 @@ use a canary token and assert it appears in none of them.
   carries mock-node's stale flag as a `503` so the fixture's stale rows stay
   `Unavailable`. A real signal needs a genome change.
 - **Snapshot, not live updates.** Rows are read when the window opens. Close
-  and reopen it to refresh.
+  and reopen it to refresh. The freshness label counts up while it stays
+  open and says *Stale* after 60 s.
 
 ## Waits on HUMAN
 
@@ -127,7 +174,16 @@ use a canary token and assert it appears in none of them.
   `read` scope, refused token, unreachable node, a route dropping mid-read and
   a non-loopback base all give mock with the right reason.
 - `jarvis::assistant_source` — script shape, reasons, frozen globals,
-  escaping.
+  escaping, per-route ages at script time, no freshness on mock.
+- `jarvis::broker::freshness` — every pinned route over a loopback socket is
+  host-stamped and ages from fresh to stale at the threshold; only
+  `/messages` yields a node time; future node time clamped and flagged;
+  malformed or missing timestamps; unstamped (mock) and non-2xx reads are
+  unknown; no host wall clock means no skew check.
+- `tests/assistant-freshness.test.tsx` — strict parsing of the freshness
+  global, summary and text for fresh / stale / unknown / clock skew, the
+  label ticking into stale, no freshness for any mock reason, page wiring,
+  and the global name and threshold matching the Rust host.
 - `main.rs` — `node_auth` follows F1's mode (paired / rc7 / refused);
   `BITSOV_ASSISTANT=node` gating; no new command and the node read stays
   outside the sealed-window section.

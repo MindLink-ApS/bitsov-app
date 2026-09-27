@@ -41,7 +41,7 @@ pub fn build(auth: NodeAuth, base_url: &str, audit: Arc<dyn AuditSink>) -> Feed 
         return Feed::mock(MockReason::NotPaired);
     }
     match rows {
-        Some(rows) => Feed::live(rows),
+        Some(rows) => Feed::live(rows).with_freshness(snapshot.freshness()),
         None => Feed::mock(MockReason::NodeUnreachable),
     }
 }
@@ -65,11 +65,13 @@ fn healthy(node: &impl NodeRead) -> bool {
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
+    use std::time::Instant;
 
     use mock_node::{Fault, MockNode, Route};
 
-    use super::super::assistant_source::Source;
+    use super::super::assistant_source::{Source, FRESHNESS_GLOBAL};
     use super::super::broker::test_server::{closed_loopback_port, TestServer, NODE_PORT};
+    use super::super::broker::{route_key, FreshnessState, STALE_AFTER};
     use super::super::broker::{BearerToken, LocalNodeRead};
     use super::super::sit_mock;
     use super::*;
@@ -202,6 +204,75 @@ mod tests {
         .map(|(id, value)| (id.to_string(), value.to_string()))
         .collect();
         assert_eq!(feed.live_rows(), want.as_slice());
+    }
+
+    #[test]
+    fn a_live_feed_stamps_every_route_it_read() {
+        let before = Instant::now();
+        let server = TestServer::start(MockNode::canonical(), TOKEN);
+        let (feed, _) = build_logged(paired(&["read"]), &server.api_base());
+        let after = Instant::now();
+        assert_eq!(feed.source(), Source::Live);
+
+        let keys: Vec<&str> = feed
+            .freshness()
+            .iter()
+            .map(|f| route_key(f.route))
+            .collect();
+        assert_eq!(
+            keys,
+            ["balance", "channels", "health", "messages", "pricing"]
+        );
+        for fresh in feed.freshness() {
+            let fetched = fresh.fetched.expect("host stamp");
+            assert!(before <= fetched.at && fetched.at <= after);
+            assert_eq!(fresh.state(after), FreshnessState::Fresh);
+            assert_eq!(fresh.state(fetched.at + STALE_AFTER), FreshnessState::Stale);
+            assert!(!fresh.clock_skew);
+        }
+        let script = feed.init_script_at(after);
+        assert_eq!(script.matches(r#""state":"fresh""#).count(), 5, "{script}");
+    }
+
+    #[test]
+    fn a_live_feed_with_a_failed_route_marks_only_that_route_unknown() {
+        let node = MockNode::canonical().fault(Route::PaymentsChannels, Fault::Error);
+        let server = TestServer::start(node, TOKEN);
+        let (feed, _) = build_logged(paired(&["read"]), &server.api_base());
+        assert_eq!(feed.source(), Source::Live);
+        let now = Instant::now();
+        let states: Vec<(&str, FreshnessState)> = feed
+            .freshness()
+            .iter()
+            .map(|f| (route_key(f.route), f.state(now)))
+            .collect();
+        assert_eq!(
+            states,
+            [
+                ("balance", FreshnessState::Fresh),
+                ("channels", FreshnessState::Unknown),
+                ("health", FreshnessState::Fresh),
+                ("messages", FreshnessState::Fresh),
+                ("pricing", FreshnessState::Fresh),
+            ]
+        );
+    }
+
+    #[test]
+    fn every_mock_feed_has_no_freshness() {
+        let server = TestServer::start(MockNode::canonical(), "a-different-token");
+        let port = closed_loopback_port();
+        for (auth, base) in [
+            (NodeAuth::NotPaired, server.api_base()),
+            (NodeAuth::Rc7Fallback, server.api_base()),
+            (paired(&["read"]), server.api_base()),
+            (paired(&["read"]), format!("http://127.0.0.1:{port}/api/v1")),
+        ] {
+            let (feed, _) = build_logged(auth, &base);
+            assert!(matches!(feed.source(), Source::Mock(_)));
+            assert!(feed.freshness().is_empty());
+            assert!(!feed.init_script().contains(FRESHNESS_GLOBAL));
+        }
     }
 
     #[test]
