@@ -4,6 +4,7 @@
 //! calls that are not one of the five read tools never reach it. The model
 //! may be shown only [`Dispatch::output`]; the host log stays in this module.
 
+mod freshness;
 mod local_read;
 mod route;
 mod schema;
@@ -14,6 +15,12 @@ pub use local_read::{
     admit, AuditSink, BaseUrlRejected, BearerToken, DenyReason, LocalNodeRead, StderrAudit,
 };
 pub use snapshot::Snapshot;
+
+#[allow(unused_imports)]
+pub use freshness::{
+    node_time_field, route_key, Fetched, FreshnessState, NodeTimeField, RouteFreshness,
+    MAX_NODE_SKEW, STALE_AFTER,
+};
 
 #[allow(unused_imports)]
 pub use route::{ReadRoute, RequestTarget, ALLOWED_PATHS};
@@ -35,11 +42,25 @@ use schema::default_message_limit;
 pub struct RawRead {
     status: u16,
     body: Vec<u8>,
+    /// Host stamp from a real read. `None` for the in-process mock.
+    fetched: Option<Fetched>,
 }
 
 impl RawRead {
     pub fn new(status: u16, body: Vec<u8>) -> Self {
-        Self { status, body }
+        Self {
+            status,
+            body,
+            fetched: None,
+        }
+    }
+
+    /// The same read, stamped with when the host finished reading it.
+    pub fn stamped(self, fetched: Fetched) -> Self {
+        Self {
+            fetched: Some(fetched),
+            ..self
+        }
     }
 }
 
@@ -49,6 +70,7 @@ impl fmt::Debug for RawRead {
             .debug_struct("RawRead")
             .field("status", &self.status)
             .field("body_len", &self.body.len())
+            .field("fetched", &self.fetched.is_some())
             .finish()
     }
 }

@@ -25,7 +25,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::route::{self, Query, ReadRoute};
-use super::{NodeRead, RawRead, ReadFault};
+use super::{Fetched, NodeRead, RawRead, ReadFault};
 
 const LOG_PREFIX: &str = "[assistant-broker]";
 /// Same bounds as the host's loopback reqwest client.
@@ -177,7 +177,8 @@ impl LocalNodeRead {
         if response.len() > MAX_RESPONSE_BYTES {
             return None;
         }
-        parse_response(&response)
+        let fetched = Fetched::now();
+        parse_response(&response).map(|raw| raw.stamped(fetched))
     }
 }
 

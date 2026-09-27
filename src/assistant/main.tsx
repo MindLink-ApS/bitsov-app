@@ -15,7 +15,7 @@ if (root) {
   render(
     () => (
       <div class="assistant-page">
-        <SourceLabel source={view.source} />
+        <SourceLabel source={view.source} freshness={view.freshness} />
         {view.rows.length > 0 ? (
           <SitRows rows={view.rows} />
         ) : (

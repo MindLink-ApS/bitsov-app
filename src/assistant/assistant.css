@@ -79,6 +79,7 @@ body {
 .source-label {
   display: flex;
   gap: 8px;
+  flex-wrap: wrap;
   align-items: baseline;
   margin: 16px 16px 0;
   padding: 8px 12px;
@@ -92,4 +93,7 @@ body {
 }
 .source-title { color: var(--accent); }
 .source-mock .source-title { color: var(--ink); }
+.source-freshness { margin-left: auto; opacity: 0.8; }
+.source-stale { border-style: dashed; }
+.source-stale .source-freshness { opacity: 1; font-weight: 600; }
 .sit-unavailable { opacity: 0.6; }
