@@ -193,6 +193,31 @@ describe('invisible payments in the composer and the context panel', () => {
     await vi.waitFor(() => expect(text('[data-send]')).toBe('Send · 2 sats'));
   });
 
+  it('shows a stranger’s own signed quote on the door card and confirms exactly that total', async () => {
+    const host = stubHost(open([{ target: MAYA, room: false, limit_msat: 50_000, spent_msat: 0 }]), {
+      first_contact_quote: (args) => ({
+        recipient: args!.peer, admission_msat: 3000, message_msat: 2000, total_msat: 5000,
+        expires_at: Math.floor(Date.now() / 1000) + 60,
+      }),
+    });
+    await openShell();
+    $<HTMLButtonElement>(`[data-track="peer:${NEW}"]`)!.click();
+    await vi.waitFor(() => expect($('[data-door-quote]')?.getAttribute('data-door-quote')).toBe('5000'));
+    expect(text('[data-door-quote]')).toContain('3 sats once to reach them');
+    expect(text('[data-door-quote]')).toContain('2 sats a message');
+    expect(text('[data-cost]')).toContain('Nadia’s own quote');
+    // The budget choices count messages at the stranger's message price.
+    expect(text('[data-first-budget="50000"]')).toBe('50 sats a day · 25 messages');
+    type('[data-composer] textarea', 'hello Nadia');
+    await vi.waitFor(() => expect(text('[data-send]')).toBe('Send first message · 5 sats'));
+    submit();
+    await vi.waitFor(() => expect(host.used('message_send')).toHaveLength(1));
+    // The confirmed cap is the quoted total: admission + this message.
+    expect(host.used('message_send')[0].args).toMatchObject({ recipient: NEW, max_msat: 5000, first_contact_msat: 50_000 });
+    expect(host.used('first_contact_quote')).toHaveLength(1);
+    expect(host.used('first_contact_quote')[0].args).toEqual({ peer: NEW });
+  });
+
   it('explains an exhausted budget and raises it in one tap, within the daily total', async () => {
     const host = stubHost(open([{ target: MAYA, room: false, limit_msat: 3000, spent_msat: 2000 }]));
     await openShell();

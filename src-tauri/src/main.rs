@@ -1420,6 +1420,70 @@ async fn membrane_read(
     Ok(control::MembraneRead::from_node(node, now_ms()))
 }
 
+/// `POST /messages/first-contact/quote` — the door card: a stranger's own
+/// signed price (admission once, then this message) before anything is paid.
+/// Pays and reserves nothing. Only on a node that advertises
+/// `first_contact_grant_v1`; the node also needs a live budget grant.
+#[tauri::command(rename_all = "snake_case")]
+async fn first_contact_quote(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    peer: String,
+) -> Result<control::FirstContactQuote, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    read_first_contact_quote(state.inner(), &peer).await
+}
+
+async fn read_first_contact_quote(state: &NodeState, peer: &str) -> Result<control::FirstContactQuote, String> {
+    let peer = control::node_id(peer)?;
+    if !node_offers(state, grant::FIRST_CONTACT_CAPABILITY).await {
+        return Err("This node cannot quote a first contact before paying.".into());
+    }
+    let path = "/messages/first-contact/quote";
+    let (status, text) = call_api(state, reqwest::Method::POST, path, Some(serde_json::json!({ "recipient": peer }))).await?;
+    if !status.is_success() {
+        return Err(api_error(path, status, &text));
+    }
+    let quote: control::FirstContactQuote = serde_json::from_str(&text).map_err(|e| format!("{path} decode failed: {e}"))?;
+    if quote.recipient != peer || quote.total_msat != quote.admission_msat.saturating_add(quote.message_msat) {
+        return Err(format!("{path}: the quote does not match this contact"));
+    }
+    Ok(quote)
+}
+
+/// Does `/status` list `capability`? Unreadable counts as no.
+async fn node_offers(state: &NodeState, capability: &str) -> bool {
+    match get_json::<serde_json::Value>(state, "/status").await {
+        Ok(status) => status["api_capabilities"]
+            .as_array()
+            .is_some_and(|caps| caps.iter().any(|v| v.as_str() == Some(capability))),
+        Err(_) => false,
+    }
+}
+
+/// The owner's one-time OK for a first contact, backed at the node: a
+/// single-use first-contact grant for exactly this contact and at most
+/// `max_msat` (admission plus the first message), inside the node's budget
+/// grant. The compose that follows consumes it. Only a paired client on a G1
+/// node that offers it needs one; anywhere else this is a no-op.
+async fn confirm_first_contact(state: &NodeState, recipient: &str, max_msat: u64) -> Result<(), ActionError> {
+    if state.node_grant.lock().unwrap().is_none() || !node_offers(state, grant::FIRST_CONTACT_CAPABILITY).await {
+        return Ok(());
+    }
+    let path = "/pair/first-contact-grant";
+    let body = serde_json::json!({ "recipient": recipient, "max_total_msat": max_msat });
+    let (status, text) = call_api(state, reqwest::Method::POST, path, Some(body)).await.map_err(ActionError::node)?;
+    if status.is_success() {
+        return Ok(());
+    }
+    if let Some(refusal) = grant::refusal(status.as_u16(), &text) {
+        let known = state.node_grant.lock().unwrap().clone();
+        return Err(refusal.error(known.as_ref()));
+    }
+    Err(ActionError::node(api_error(path, status, &text)))
+}
+
 /// `GET /payments/balance` + `GET /payments/channels` — the Wallet panel.
 #[tauri::command(rename_all = "snake_case")]
 async fn payments_overview(
@@ -2036,6 +2100,11 @@ async fn do_message_send_with(
     };
     ceiling(price, max_msat)?;
     let recipient = body["recipient"].as_str().unwrap_or_default().to_string();
+    // A confirmed first paid message to a contact: the node backs that one OK
+    // with a single-use grant for exactly this contact and this cap.
+    if !is_room && plan.confirm.is_some() {
+        confirm_first_contact(state, &recipient, max_msat).await?;
+    }
     let charge = Charge { target, room: is_room, confirm: plan.confirm };
     let text = money_post(state, auth, "/messages/compose", body, max_msat, Some(charge)).await?;
     let reply: act::SendReply = decode_act("/messages/compose", &text)?;
@@ -2847,6 +2916,7 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             room_members,
             messages_list,
             price_quote,
+            first_contact_quote,
             payments_overview,
             energy_read,
             membrane_read,
@@ -3954,6 +4024,9 @@ mod control_act_tests {
         grant: Arc<Mutex<serde_json::Value>>,
         compose: Arc<Mutex<Option<(u16, serde_json::Value)>>>,
         grant_status: Arc<Mutex<u16>>,
+        /// When set, the node advertises `first_contact_grant_v1` and answers
+        /// `POST /pair/first-contact-grant` with this.
+        first_contact: Arc<Mutex<Option<(u16, serde_json::Value)>>>,
     }
 
     fn g1_grant(expires_in_secs: i64, budget_msat: u64, remaining_msat: u64) -> serde_json::Value {
@@ -3968,13 +4041,21 @@ mod control_act_tests {
             grant: Arc::new(Mutex::new(g1_grant(3600, 400_000, 400_000))),
             compose: Arc::new(Mutex::new(None)),
             grant_status: Arc::new(Mutex::new(200)),
+            first_contact: Arc::new(Mutex::new(None)),
         };
         let (grant, compose, grant_status) = (g1.grant.clone(), g1.compose.clone(), g1.grant_status.clone());
+        let first_contact = g1.first_contact.clone();
         let polls = Arc::new(AtomicUsize::new(0));
         let far = now_unix() + 900;
         let routes: Routes = Arc::new(move |m: &str, path: &str, b: &str| {
             let v = match path {
+                "/status" if first_contact.lock().unwrap().is_some() => serde_json::json!({"api_capabilities": [
+                    "paid_send_caps_v1", "room_terminal_outcomes_v1", "spend_budget_grant_v1", "first_contact_grant_v1"]}),
                 "/status" => serde_json::json!({"api_capabilities": ["paid_send_caps_v1", "room_terminal_outcomes_v1", "spend_budget_grant_v1"]}),
+                "/pair/first-contact-grant" if first_contact.lock().unwrap().is_some() => {
+                    let (status, body) = first_contact.lock().unwrap().clone().unwrap();
+                    return (status, body.to_string());
+                }
                 "/pair/grant" => {
                     let status = *grant_status.lock().unwrap();
                     return (status, serde_json::json!({"grant": *grant.lock().unwrap()}).to_string());
@@ -4031,6 +4112,63 @@ mod control_act_tests {
         let t = node.targets();
         let compose = t.iter().position(|x| x == "POST /messages/compose").unwrap();
         assert_eq!(t[compose - 1], "GET /pair/grant");
+    }
+
+    /// Where the first-contact grant sits among the POSTs, if anywhere.
+    fn first_contact_then_compose(node: &Fake) -> Option<(serde_json::Value, String)> {
+        let posts = node.posts();
+        let i = posts.iter().position(|(path, _)| path == "/pair/first-contact-grant")?;
+        Some((posts[i].1.clone(), posts.get(i + 1).map(|(p, _)| p.clone()).unwrap_or_default()))
+    }
+
+    #[tokio::test]
+    async fn g1_a_first_contact_is_confirmed_at_the_node_for_exactly_this_contact_and_cap() {
+        let (node, _dir, g1) = g1_node(&["read", "receive"]);
+        *g1.first_contact.lock().unwrap() =
+            Some((200, serde_json::json!({"recipient": C, "max_total_msat": 5000, "expires_at": now_unix() + 120})));
+        g1_approved(&node, 500_000).await;
+        do_message_send_with(&node.state, C, false, "hello stranger", 5000, None, Some(50_000)).await.unwrap();
+        let (body, next) = first_contact_then_compose(&node).expect("the owner's OK reached the node");
+        assert_eq!(body, serde_json::json!({"recipient": C, "max_total_msat": 5000}));
+        assert_eq!(next, "/messages/compose", "the grant is asked for right before the send it covers");
+        assert_eq!(node.posts().last().unwrap().1["max_total_msat"], 5000);
+    }
+
+    #[tokio::test]
+    async fn g1_a_first_contact_the_node_will_not_back_sends_nothing() {
+        let (node, _dir, g1) = g1_node(&["read", "receive"]);
+        *g1.first_contact.lock().unwrap() = Some((409, serde_json::json!({
+            "code": "budget_exceeded", "reason": "first_contact", "remaining_msat": null, "error": "no"})));
+        g1_approved(&node, 500_000).await;
+        let err = do_message_send_with(&node.state, C, false, "hello stranger", 5000, None, Some(50_000)).await.unwrap_err();
+        assert_eq!(err.code, "grant_first_contact");
+        assert!(!node.posts().iter().any(|(p, _)| p == "/messages/compose"), "refused before any paid request");
+        assert!(with_book(&node.state, false, |b| Ok(b.limit(C, false))).unwrap().is_none(), "no budget recorded for them");
+    }
+
+    #[tokio::test]
+    async fn g1_known_contacts_and_older_nodes_need_no_first_contact_grant() {
+        // A node without first_contact_grant_v1: the send is unchanged.
+        let (node, _dir, _g1) = g1_node(&["read", "receive"]);
+        g1_approved(&node, 500_000).await;
+        do_message_send_with(&node.state, C, false, "hello", 2000, None, Some(50_000)).await.unwrap();
+        assert!(first_contact_then_compose(&node).is_none());
+        // A contact already in the book is not a first contact.
+        let (node, _dir, g1) = g1_node(&["read", "receive"]);
+        *g1.first_contact.lock().unwrap() = Some((200, serde_json::json!({})));
+        with_book(&node.state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
+        g1_approved(&node, 500_000).await;
+        do_message_send_with(&node.state, A, false, "gm", 2000, None, None).await.unwrap();
+        assert!(first_contact_then_compose(&node).is_none());
+    }
+
+    #[tokio::test]
+    async fn first_contact_quote_reads_the_stranger_quote_only_where_offered() {
+        let (node, _dir, g1) = g1_node(&["read", "receive"]);
+        assert!(read_first_contact_quote(&node.state, C).await.is_err(), "no capability: no quote request");
+        assert!(!node.posts().iter().any(|(p, _)| p == "/messages/first-contact/quote"));
+        *g1.first_contact.lock().unwrap() = Some((200, serde_json::json!({})));
+        assert!(read_first_contact_quote(&node.state, "not-a-node").await.is_err());
     }
 
     #[tokio::test]
@@ -4839,6 +4977,7 @@ mod assistant_acl_tests {
                 "room_members",
                 "messages_list",
                 "price_quote",
+                "first_contact_quote",
                 "payments_overview",
                 // Organism reads (genome N1/N2), same guard.
                 "energy_read",

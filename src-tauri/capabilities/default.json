@@ -26,6 +26,7 @@
     "allow-room-members",
     "allow-messages-list",
     "allow-price-quote",
+    "allow-first-contact-quote",
     "allow-payments-overview",
     "allow-energy-read",
     "allow-membrane-read",

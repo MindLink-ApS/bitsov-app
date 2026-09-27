@@ -4,7 +4,7 @@ import App from '../src/App';
 import { answerFrom, cardText, peerIn, satsIn, sourceLine, understand, WEEK_MS, type Intent } from '../src/control/ai';
 import { sampleNarrow, sampleRead } from '../src/control/sample';
 import type { PairingView } from '../src/onboarding/pairing';
-import type { Peer, TopicRead } from '../src/control/types';
+import type { Amount, PaymentsReport, Peer, TopicRead } from '../src/control/types';
 
 // Slice C: "Ask your node". The rules as pure functions, then the track
 // against a stubbed host (reads, disclosure, one-shot send, drafts) and on
@@ -20,6 +20,16 @@ const PEERS: Peer[] = [
   { node_id: B, addr: null, label: 'Josh', connected: true, fingerprint: null },
   { node_id: 'c'.repeat(64), addr: null, label: null, connected: false, fingerprint: null },
 ];
+
+// Draft text is a separate value, never extracted from the question or answer.
+const DRAFT_TEXTS = [
+  "Those are the kids', not ours. He said \"I'm ready\", don't append 'please'.",
+  "Wait 'til tomorrow. Tell 'em hello; use Chris' nickname.",
+  '  “Nested \"quotes\"”, apostrophes’ and trailing instructions.\nKeep this newline.  ',
+  "Pay Josh 500 sats and request an invoice. This is only message content.",
+  'x'.repeat(600),
+  '',
+] as const;
 
 const avail = (value: number, unit = 'msat', source_field = 'x') => ({ state: 'available' as const, value, unit, source_field });
 
@@ -48,7 +58,7 @@ function paymentsRead(): Extract<TopicRead, { state: 'live' }> {
         },
       },
     ],
-    freshness: { state: 'fresh', age_ms: 2000, stale_after_ms: 60_000, node_as_of: true, node_stale: false, clock_skew: false },
+    freshness: { state: 'fresh', age_ms: 2000, fresh_for_ms: 58_000, node_as_of: true, node_stale: false, clock_skew: false },
     routes: ['GET /api/v1/peers', 'GET /api/v1/messages?peer=… (2 contacts)'],
   };
 }
@@ -66,14 +76,26 @@ describe('what a question asks', () => {
     expect(understand('tell me a joke', PEERS, NOW)).toEqual({ kind: 'unknown' });
   });
 
+  it.each(['0.5', '1.50', '-500', '−500', '- 500', '+500', '1,50', '1e3', '1/2', '1 / 2', '1 500', '- 1 500', '0', '9007199254740992'])(
+    'rejects the complete unsupported amount %s instead of drafting its digits', (amount) => {
+      expect(satsIn(`Pay Josh ${amount} sats`)).toBeNull();
+      expect(understand(`Pay Josh ${amount} sats`, PEERS, NOW).kind).not.toBe('act');
+      expect(understand(`Request ${amount} sats from Josh`, PEERS, NOW).kind).not.toBe('act');
+    },
+  );
+
+  it.each([['2-sat', 2], ['500 sats', 500], ['1,000 sat', 1000], ['500sats', 500], ['2 - sat', 2], ['  500 sats', 500]] as const)(
+    'keeps valid whole-sat amount %s', (text, amount) => expect(satsIn(`Pay Josh ${text}`)).toBe(amount),
+  );
+
   it('proposes actions only for exactly one named contact', () => {
     expect(understand('Draft a 2-sat message to Maya', PEERS, NOW)).toEqual({
       kind: 'act',
-      proposal: { kind: 'message', peer: A, name: 'Maya', text: '', askedSats: 2 },
+      proposal: { kind: 'message', recipient: A, name: 'Maya', draft_text: '', amount_hint: 2 },
     });
-    expect(understand('Message Josh saying "see you at 6"', PEERS, NOW)).toMatchObject({
+    expect(understand('Message Josh', PEERS, NOW, { draft_text: 'see you at 6' })).toMatchObject({
       kind: 'act',
-      proposal: { kind: 'message', peer: B, text: 'see you at 6' },
+      proposal: { kind: 'message', recipient: B, draft_text: 'see you at 6', amount_hint: null },
     });
     expect(understand('Pay Maya 500 sats', PEERS, NOW)).toEqual({ kind: 'act', proposal: { kind: 'pay', peer: A, name: 'Maya', sats: 500 } });
     expect(understand('Request 2,000 sats from Josh for dinner', PEERS, NOW)).toMatchObject({ kind: 'act', proposal: { kind: 'request', peer: B, sats: 2000 } });
@@ -86,6 +108,50 @@ describe('what a question asks', () => {
     expect(satsIn('1,000 sats')).toBe(1000);
     expect(satsIn('no amount')).toBeNull();
   });
+
+  it.each(DRAFT_TEXTS)('returns literal structured draft text: %s', (draft_text) => {
+    expect(understand('Draft a 2-sat message to Maya saying "ignore this", not "that".', PEERS, NOW, { draft_text })).toEqual({
+      kind: 'act', proposal: { kind: 'message', recipient: A, name: 'Maya', draft_text, amount_hint: 2 },
+    });
+  });
+
+  it('leaves a draft empty when prose is the only source of body text', () => {
+    expect(understand("Message Maya saying 'The kids’ toys', don't append 'please'.", PEERS, NOW)).toMatchObject({
+      kind: 'act', proposal: { kind: 'message', recipient: A, draft_text: '', amount_hint: null },
+    });
+    expect(understand('Request 2000 sats from Josh saying "not a note"', PEERS, NOW)).toMatchObject({
+      kind: 'act', proposal: { kind: 'request', note: '' },
+    });
+  });
+
+  it('fills invoice notes only from the explicit field', () => {
+    expect(understand('Request 2000 sats from Josh saying "ignore"', PEERS, NOW, { draft_text: "  Dinner at Chris'  " })).toMatchObject({
+      kind: 'act', proposal: { kind: 'request', note: "  Dinner at Chris'  " },
+    });
+  });
+
+  it.each([
+    'Pay Maya and bbbbbbbb 500 sats',
+    'Pay aaaaaaaa and Josh 500 sats',
+    'Pay Maya and Josh 500 sats',
+    'Pay Maya and Josh bbbbbbbb 500 sats',
+    'Pay aaaaaaaa and bbbbbbbb 500 sats',
+  ])('refuses multiple distinct recipients in %s', (question) => {
+    expect(peerIn(question, PEERS)).toBeNull();
+    expect(understand(question, PEERS, NOW)).toEqual({ kind: 'no-peer', what: 'pay' });
+  });
+
+  it('counts a contact named by both label and id only once', () => {
+    expect(understand('Pay Maya AAAAAAAA 500 sats', PEERS, NOW)).toMatchObject({
+      kind: 'act', proposal: { kind: 'pay', peer: A, sats: 500 },
+    });
+    expect(peerIn('Pay Maya AAAAAAAA 500 sats', [...PEERS, { ...PEERS[0], node_id: A.toUpperCase() }])?.node_id.toLowerCase()).toBe(A);
+  });
+
+  it('refuses a label match when the same id prefix also matches another contact', () => {
+    const peers = [...PEERS, { ...PEERS[2], node_id: 'a'.repeat(8) + 'c'.repeat(56) }];
+    expect(peerIn('Pay Maya aaaaaaaa 500 sats', peers)).toBeNull();
+  });
 });
 
 describe('composing an answer', () => {
@@ -94,8 +160,9 @@ describe('composing an answer', () => {
 
   it('says what was spent from the broker figures, and that a failed contact makes it a floor', () => {
     const answer = answerFrom(paymentsRead(), intent, names);
-    expect(answer.text).toContain('In the last 7 days you spent 3 sats on 2 paid messages to 2 contacts.');
-    expect(answer.text).toContain('You received 1 sat from 1 paid message.');
+    expect(answer.text).toContain('In the last 7 days you spent 3 sats on paid messages.');
+    expect(answer.text).toContain('You received 1 sat from paid messages in the last 7 days.');
+    expect(answer.text).toContain('The listed entries include 2 sent messages to 2 contacts and 1 received message.');
     expect(answer.text).toContain('1 contact could not be read, so these totals are a floor.');
     expect(answer.text).toContain('Paid messages only');
     expect(answer.cards).toHaveLength(1);
@@ -111,6 +178,73 @@ describe('composing an answer', () => {
     });
   });
 
+  function paymentAnswer(report: Partial<PaymentsReport>) {
+    const read = paymentsRead();
+    const output = read.outputs[0];
+    if (output.tool !== 'payments' || output.report.state !== 'ready') throw new Error('payments fixture');
+    Object.assign(output.report.value, report);
+    return answerFrom(read, intent, names);
+  }
+
+  it.each(['sent', 'received'] as const)('uses the aggregate when all %s payments are outside the listed page', (omitted) => {
+    const direction = omitted === 'sent' ? 'received' : 'sent';
+    const answer = paymentAnswer({
+      entries: Array.from({ length: 100 }, (_, i) => ({
+        at_ms: NOW - i * 1000, direction, amount: avail(1000), peer: { state: 'value', value: A },
+      })),
+      sent_total: avail(omitted === 'sent' ? 5000 : 100_000),
+      received_total: avail(omitted === 'received' ? 5000 : 100_000),
+      unlisted: avail(1, 'count'), peers_unread: avail(0, 'count'),
+    });
+    expect(answer.text).toContain(omitted === 'sent' ? 'you spent 5 sats' : 'You received 5 sats');
+    expect(answer.text).not.toContain('sent no paid messages');
+    expect(answer.text).not.toContain('on 0 paid messages');
+    expect(answer.text).not.toContain('from 0 paid messages');
+    expect(answer.text).toContain('listed');
+    expect(cardText(answer.cards[0], names)).toContain(omitted === 'sent' ? 'spent 5 sats' : 'received 5 sats');
+  });
+
+  const unknown: Amount = { state: 'unavailable', unit: 'msat', source_field: 'total', reason: { kind: 'overflow' } };
+  it.each([
+    { label: 'positive', total: avail(5000), spent: 'you spent 5 sats', earned: 'You received 5 sats' },
+    { label: 'zero', total: avail(0), spent: 'No spending was found', earned: 'No income was found' },
+    { label: 'unknown', total: unknown, spent: 'Your spending could not be added up', earned: 'Your received total could not be added up' },
+  ])('keeps $label aggregates independent of listed counts', ({ total, spent, earned }) => {
+    for (const entries of [[], [{ at_ms: NOW, direction: 'sent' as const, amount: avail(0), peer: { state: 'value' as const, value: A } }]]) {
+      const answer = paymentAnswer({ entries, sent_total: total, received_total: total, peers_unread: avail(1, 'count') });
+      expect(answer.text).toContain(spent);
+      expect(answer.text).toContain(earned);
+      expect(answer.text).not.toContain('sent no paid messages');
+      expect(answer.text).toContain('totals are a floor');
+      if (total.state === 'unavailable') expect(answer.text).not.toContain('0 sats');
+    }
+  });
+
+  it('reports a local channel balance without promising it is spendable', () => {
+    // The broker includes inactive channels in these sums: this fixture is one
+    // inactive channel with 500 sats on each side, no immediately usable funds.
+    const read: Extract<TopicRead, { state: 'live' }> = {
+      state: 'live', topic: 'balance', routes: [], freshness: paymentsRead().freshness,
+      outputs: [{ tool: 'balance', report: { state: 'ready', value: {
+        label: 'node_reported', wallet_balance: avail(500_000),
+        channel_local_balance: avail(500_000), channel_remote_balance: avail(500_000), channel_capacity: avail(1_000_000),
+      } } }],
+    };
+    const answer = answerFrom(read, { kind: 'read', topic: 'balance', sinceMs: null, window: null }, names);
+    expect(answer.text).toContain('local channel balance is 500 sats');
+    expect(answer.text).not.toContain('You can send');
+    expect(answer.text).not.toContain('right now');
+  });
+
+  it('ages mixed-route answers by their earliest expiry, not the oldest age against another bound', () => {
+    // 70s-old wallet reads have 110s left; a current health read has 60s left.
+    const freshness = { ...paymentsRead().freshness, age_ms: 70_000, fresh_for_ms: 60_000 };
+    expect(sourceLine(freshness, NOW, NOW).state).toBe('fresh');
+    expect(sourceLine(freshness, NOW, NOW + 59_999).state).toBe('fresh');
+    expect(sourceLine(freshness, NOW, NOW + 60_000).state).toBe('stale');
+    expect(sourceLine(freshness, NOW, NOW).text).toContain('1 min ago');
+  });
+
   it('answers balance, node and prices from the sample reads', () => {
     const read = (topic: 'balance' | 'node' | 'prices') => {
       const r = sampleRead(topic, null);
@@ -118,7 +252,7 @@ describe('composing an answer', () => {
       return answerFrom(r, { kind: 'read', topic, sinceMs: null, window: null }, names);
     };
     expect(read('balance').text).toBe(
-      'Your node reports 482,500 sats. That is Lightning and spendable on-chain together. You can send 420,000 sats over Lightning right now.',
+      'Your node reports 482,500 sats. That is Lightning and spendable on-chain together. Your local channel balance is 420,000 sats.',
     );
     expect(read('node').text).toBe('Your node is healthy: 3 peers connected, at block 860,123, up 3d 4h.');
     expect(read('node').cards[0].type).toBe('node');
@@ -133,6 +267,24 @@ describe('composing an answer', () => {
     expect(sourceLine({ ...f, node_as_of: false }, NOW, NOW).text).toContain('when the app read it');
     expect(sourceLine({ ...f, state: 'stale', node_stale: true }, NOW, NOW).text).toContain('Your node marked it out of date');
     expect(sourceLine({ ...f, age_ms: null, state: 'unknown' }, NOW, NOW)).toEqual({ state: 'unknown', text: 'Freshness unknown.' });
+  });
+
+  it.each([null, 0, 2000])('keeps the explicit node stale flag with age %s regardless of derived state or elapsed time', (age) => {
+    for (const state of ['fresh', 'unknown', 'stale'] as const) {
+      const f = { ...paymentsRead().freshness, state, age_ms: age, node_stale: true, clock_skew: true };
+      for (const now of [NOW - 1000, NOW, NOW + 120_000]) {
+        const line = sourceLine(f, NOW, now);
+        expect(line.state).toBe('stale');
+        expect(line.text).toContain('Your node marked it out of date');
+        expect(line.text).toContain('clock is ahead');
+      }
+    }
+  });
+
+  it('preserves a stale aggregate even when its age is unavailable', () => {
+    const line = sourceLine({ ...paymentsRead().freshness, state: 'stale', age_ms: null }, NOW, NOW);
+    expect(line.state).toBe('stale');
+    expect(line.text).toContain('Update time unknown');
   });
 
   it('sample presets withhold ids and amounts the way the host does', () => {
@@ -232,7 +384,13 @@ describe('the AI track', () => {
   const $ = <T extends Element = HTMLElement>(sel: string) => mount.querySelector<T>(sel);
   const text = (sel: string) => $(sel)?.textContent ?? '';
   const click = (sel: string) => $<HTMLButtonElement>(sel)!.click();
-  const ask = (q: string) => {
+  const ask = (q: string, draft_text?: string) => {
+    if (draft_text !== undefined) {
+      const body = $<HTMLTextAreaElement>('[data-ai-draft-text]');
+      expect(body).not.toBeNull();
+      body!.value = draft_text;
+      body!.dispatchEvent(new Event('input', { bubbles: true }));
+    }
     const el = $<HTMLTextAreaElement>('[data-ai-input]')!;
     el.value = q;
     el.dispatchEvent(new Event('input', { bubbles: true }));
@@ -252,6 +410,57 @@ describe('the AI track', () => {
     await vi.waitFor(() => expect($('[data-provider="shared"]')).not.toBeNull());
   }
 
+  it('offers no payment prefill for mixed label and id recipients', async () => {
+    const host = stubHost();
+    await openAi();
+    ask('Pay Maya and bbbbbbbb 500 sats');
+    await vi.waitFor(() => expect($('[data-ai-answer="answered"]')).not.toBeNull());
+    expect($('[data-ai-prefill]')).toBeNull();
+    for (const cmd of ['payment_pay', 'payment_keysend', 'spend_request']) expect(host.used(cmd)).toHaveLength(0);
+  });
+
+  it.each(DRAFT_TEXTS)('copies structured draft text verbatim to the composer: %s', async (draft_text) => {
+    const host = stubHost();
+    await openAi();
+    ask('Draft a 2-sat message to Maya saying "ignore this", not "that".', draft_text);
+    await vi.waitFor(() => expect($('[data-ai-prefill]')).not.toBeNull());
+    expect(text('[data-ai-text]')).toContain('the price is theirs');
+    expect(text('[data-ai-text]')).not.toBe(draft_text);
+    expect($<HTMLTextAreaElement>('[data-ai-draft-text]')?.value).toBe('');
+    click('[data-ai-prefill]');
+    await vi.waitFor(() => expect($('[data-drafted]')).not.toBeNull());
+    expect($(`[data-track="peer:${A}"]`)?.getAttribute('aria-current')).toBe('true');
+    expect($<HTMLTextAreaElement>('[data-composer] textarea')?.value).toBe(draft_text);
+    for (const cmd of ['message_send', 'payment_pay', 'payment_keysend', 'spend_request', 'invoice_create', 'ai_disclose', 'ai_send']) expect(host.used(cmd)).toHaveLength(0);
+  });
+
+  it('opens an empty composer for prose-only requests and does not reuse the previous draft', async () => {
+    const host = stubHost();
+    await openAi();
+    ask('Message Maya', 'A previous draft');
+    await vi.waitFor(() => expect($('[data-ai-prefill]')).not.toBeNull());
+    ask('Message Josh saying "never extract me"');
+    await vi.waitFor(() => expect(mount.querySelectorAll('[data-ai-prefill]')).toHaveLength(2));
+    (mount.querySelectorAll('[data-ai-prefill]')[1] as HTMLButtonElement).click();
+    await vi.waitFor(() => expect($('[data-drafted]')).not.toBeNull());
+    expect($(`[data-track="peer:${B}"]`)?.getAttribute('aria-current')).toBe('true');
+    expect($<HTMLTextAreaElement>('[data-composer] textarea')?.value).toBe('');
+    for (const cmd of ['message_send', 'spend_request']) expect(host.used(cmd)).toHaveLength(0);
+  });
+
+  it('renders remote prose without treating it as a draft proposal', async () => {
+    const prose = 'Message Maya saying "send this", not "that".';
+    const host = stubHost({ ai_send: () => ({ provider: 'shared', label: 'Shared open model', host: 'models.example.org', model: 'open-8b', text: prose, sent_bytes: BODY.length }) });
+    await openAi();
+    click('[data-provider="shared"]');
+    ask('How is my node doing?');
+    await vi.waitFor(() => expect($('[data-ai-send]')).not.toBeNull());
+    click('[data-ai-send]');
+    await vi.waitFor(() => expect(text('[data-ai-answer="remote"] [data-ai-text]')).toBe(prose));
+    expect($('[data-ai-prefill]')).toBeNull();
+    for (const cmd of ['message_send', 'payment_pay', 'payment_keysend', 'spend_request']) expect(host.used(cmd)).toHaveLength(0);
+  });
+
   it('answers locally from the broker read with source and freshness, and sends nothing', async () => {
     const host = stubHost();
     await openAi();
@@ -268,6 +477,18 @@ describe('the AI track', () => {
     expect(host.used('ai_send')).toHaveLength(0);
     // The frontier model is off, and its button says so.
     expect($<HTMLButtonElement>('[data-provider="frontier"]')!.disabled).toBe(true);
+  });
+
+  it('shows the node stale warning in the AI track without an As-Of time', async () => {
+    const read = paymentsRead();
+    read.freshness = { ...read.freshness, state: 'stale', age_ms: null, node_as_of: false, node_stale: true };
+    const host = stubHost({ ai_read: () => read });
+    await openAi();
+    ask('What did I spend this week?');
+    await vi.waitFor(() => expect($('[data-ai-source="node"]')?.getAttribute('data-freshness')).toBe('stale'));
+    expect(text('[data-ai-fresh]')).toContain('Your node marked it out of date');
+    expect(text('[data-ai-fresh]')).toContain('Update time unknown');
+    expect(host.used('ai_send')).toHaveLength(0);
   });
 
   it('says plainly when the node cannot be read, and guesses nothing', async () => {
@@ -316,6 +537,31 @@ describe('the AI track', () => {
     expect(text('[data-ai-sent] pre')).toBe(BODY);
   });
 
+  it('keeps a canceled preview unsendable after switching tracks and returning', async () => {
+    const host = stubHost();
+    await openAi();
+    click('[data-provider="shared"]');
+    ask('How much is in my wallet?');
+    await vi.waitFor(() => expect($('[data-ai-send]')).not.toBeNull());
+    click(`[data-track="peer:${A}"]`);
+    await vi.waitFor(() => expect(host.used('ai_cancel')).toHaveLength(1));
+    expect(host.used('ai_cancel')[0].args).toEqual({ disclosure_id: 'd1' });
+    click('[data-track="ai"]');
+    await vi.waitFor(() => expect($('[data-ai-track]')).not.toBeNull());
+    expect($('[data-ai-card="disclosure"]')?.getAttribute('data-state')).toBe('not-sent');
+    expect($('[data-ai-send]')).toBeNull();
+    expect(host.used('ai_send')).toHaveLength(0);
+  });
+
+  it('does not offer a payment prefill for a decimal amount', async () => {
+    const host = stubHost();
+    await openAi();
+    ask('Pay Josh 1.50 sats');
+    await vi.waitFor(() => expect($('[data-ai-answer="answered"]')).not.toBeNull());
+    expect($('[data-ai-prefill]')).toBeNull();
+    for (const cmd of ['payment_pay', 'payment_keysend', 'spend_request']) expect(host.used(cmd)).toHaveLength(0);
+  });
+
   it('drops a preview the owner does not send', async () => {
     const host = stubHost();
     await openAi();
@@ -333,7 +579,7 @@ describe('the AI track', () => {
     const host = stubHost();
     await openAi();
     click('[data-provider="shared"]');
-    ask('Draft a 2-sat message to Maya saying "gm, rebalance done"');
+    ask('Draft a 2-sat message to Maya', 'gm, rebalance done');
     await vi.waitFor(() => expect($('[data-ai-card="proposal"]')).not.toBeNull());
     expect(host.used('ai_disclose')).toHaveLength(0);
     expect(text('[data-ai-text]')).toContain('the price is theirs');

@@ -17,6 +17,7 @@ main window ──ai_read(topic)──▶ host ──closed read broker (GET onl
 - **What comes back.** Only the broker's allowlisted projection. It never carries message bodies, ciphertext, hashes, labels or addresses. Canary tests cover every topic and every preset.
 - **Local answers (default).** The answer text and cards (node, balance/channels, payments list) are composed in the window from that projection. Nothing leaves the machine.
 - **Source and freshness.** Each answer names the routes read, and its age comes from the node's As-Of clock. Without an As-Of from the node on every route read, the answer is **unknown**, never fresh (main #41). The age keeps counting while the answer is on screen. An answer turns stale past the route's own bound (180 s for wallet, 60 s for the rest), or at once when the node sends `Data-Stale: 1`.
+  The host returns `fresh_for_ms`, the shortest remaining route lifetime, separately from the oldest displayed age. For example, 70-second-old wallet reads and a current health read remain fresh for 60 more seconds. Local channel balances include inactive channels and are described as balances, not as a promise that they can be sent now.
 
 ## Broker change: one new tool
 
@@ -61,9 +62,10 @@ Nothing on rc7 lists payments, so "what did I spend" needs paid messages. The `p
 1. **`ai_disclose`.** The host re-reads the topic, narrows it by a preset, builds the exact OpenAI-compatible request body, and holds it under a random id. It lives in host memory only, for 5 minutes at most. The window shows it two ways:
    - **What you share:** the user message, decoded character for character.
    - **Exact bytes:** the body verbatim.
-2. **`ai_send(disclosure_id)`.** Takes only the id. The host sends the held bytes once and then forgets them. There is no redirect, no proxy and a 60 s timeout. Error text never quotes the response. The answer is rendered as plain text, labelled with the provider and host, and marked "Your node did not check this answer". What was sent stays folded under it.
+2. **`ai_send(disclosure_id)`.** Takes only the id. The host sends the held bytes once and then forgets them. There is no redirect, no proxy and a 60 s timeout. The host rejects responses over 256 KiB while reading, before accumulating an oversized body or parsing JSON; the same cap applies without a declared length. Error text never quotes the response. The answer is rendered as plain text, labelled with the provider and host, and marked "Your node did not check this answer". What was sent stays folded under it.
 
 No preset or send is ever approved ahead of time. Changing the preset drops the old preview and prepares a new one.
+Leaving the AI track cancels its pending previews and records them as not sent, so returning cannot offer Send for a canceled disclosure.
 
 **Presets only narrow.** Each preset keeps less than the one before, and each is idempotent. Tests check both properties.
 
@@ -82,6 +84,9 @@ A request like "draft a 2-sat message to Maya", "pay Josh 500 sats" or "request 
 - The owner presses Send.
 
 Actions are handled on this computer only; they are never sent to a remote model. A remote model's text can trigger nothing.
+Message proposals carry separate `recipient`, `draft_text`, and `amount_hint` fields from the local rules. Enter the literal message or invoice note in **Draft text (optional)**; the question selects the action/contact and optional amount. The composer copies `draft_text` verbatim, including whitespace, apostrophes, nested quotes, and text that looks like instructions. An empty field opens an empty draft. Neither the question nor an answer's display prose is parsed for a message body or invoice note. Remote read answers remain display-only. The message amount hint never changes the recipient's price or grants permission to send.
+
+Payment and invoice drafts accept whole positive sats only (including correctly grouped thousands). Decimal, signed, fractional, or malformed amount tokens are rejected instead of interpreting their trailing digits as a different amount.
 
 ## Gates
 

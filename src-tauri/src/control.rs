@@ -365,6 +365,20 @@ pub struct PriceQuote {
     pub peer_stale: bool,
 }
 
+/// `first_contact_quote`: a stranger's own signed price before anything is
+/// paid (genome `first_contact_grant_v1`). The admission is paid once; the
+/// message price is for this first message; `total_msat` is the cap to confirm.
+#[derive(Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+pub struct FirstContactQuote {
+    pub recipient: String,
+    pub admission_msat: u64,
+    pub message_msat: u64,
+    pub total_msat: u64,
+    /// Unix seconds. After it the node asks the stranger again when sending,
+    /// still capped at the confirmed total.
+    pub expires_at: u64,
+}
+
 /// `payments_overview`.
 #[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct WalletOverview {

@@ -352,28 +352,28 @@ function sampleOutputs(topic: AiTopic, sinceMs: number | null): ToolOutput[] {
 /** As the host would describe the reads. The price table is the stale one. */
 const SAMPLE_READS: Record<AiTopic, { routes: string[]; freshness: AiFreshness }> = {
   balance: {
-    routes: ['GET /api/v1/payments/balance', 'GET /api/v1/payments/channels'],
-    freshness: { state: 'fresh', age_ms: 38_000, stale_after_ms: 180_000, node_as_of: true, node_stale: false, clock_skew: false },
+    routes: ['GET /api/v1/payments/balance', 'GET /api/v1/payments/channels', 'GET /api/v1/health'],
+    freshness: { state: 'fresh', age_ms: 38_000, fresh_for_ms: 60_000, node_as_of: true, node_stale: false, clock_skew: false },
   },
   channels: {
     routes: ['GET /api/v1/payments/channels'],
-    freshness: { state: 'fresh', age_ms: 38_000, stale_after_ms: 180_000, node_as_of: true, node_stale: false, clock_skew: false },
+    freshness: { state: 'fresh', age_ms: 38_000, fresh_for_ms: 142_000, node_as_of: true, node_stale: false, clock_skew: false },
   },
   node: {
     routes: ['GET /api/v1/health'],
-    freshness: { state: 'fresh', age_ms: 900, stale_after_ms: 60_000, node_as_of: true, node_stale: false, clock_skew: false },
+    freshness: { state: 'fresh', age_ms: 900, fresh_for_ms: 59_100, node_as_of: true, node_stale: false, clock_skew: false },
   },
   inbox: {
     routes: ['GET /api/v1/messages?limit=50'],
-    freshness: { state: 'fresh', age_ms: 1_100, stale_after_ms: 60_000, node_as_of: false, node_stale: false, clock_skew: false },
+    freshness: { state: 'fresh', age_ms: 1_100, fresh_for_ms: 58_900, node_as_of: false, node_stale: false, clock_skew: false },
   },
   prices: {
     routes: ['GET /api/v1/pricing'],
-    freshness: { state: 'stale', age_ms: 95_000, stale_after_ms: 60_000, node_as_of: true, node_stale: true, clock_skew: false },
+    freshness: { state: 'stale', age_ms: 95_000, fresh_for_ms: 0, node_as_of: true, node_stale: true, clock_skew: false },
   },
   payments: {
     routes: ['GET /api/v1/peers', `GET /api/v1/messages?peer=… (${SAMPLE_PEERS.length} contacts)`],
-    freshness: { state: 'fresh', age_ms: 1_400, stale_after_ms: 60_000, node_as_of: true, node_stale: false, clock_skew: false },
+    freshness: { state: 'fresh', age_ms: 1_400, fresh_for_ms: 58_600, node_as_of: true, node_stale: false, clock_skew: false },
   },
 };
 
@@ -693,6 +693,9 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
         ...(PRICE_TABLES[peer ?? ''] ?? { peer_msat: null, peer_age_secs: null, peer_stale: false }),
         ...(peer && raised[peer] !== undefined ? { peer_msat: raised[peer], peer_age_secs: 1, peer_stale: false } : {}),
       }),
+    // Sample strangers open their door at 2 sats and ask 2 sats a message.
+    firstContactQuote: (peer) =>
+      ok({ recipient: peer, admission_msat: 2000, message_msat: 2000, total_msat: 4000, expires_at: Math.floor(Date.now() / 1000) + 60 }),
     wallet: () => ok(WALLET),
     spendStatus: () => {
       settleSpend();
@@ -853,7 +856,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
         question: question.trim().slice(0, 500),
         topic,
         shared: preset,
-        freshness: { state: read.freshness.state, age_seconds: read.freshness.age_ms === null ? null : Math.floor(read.freshness.age_ms / 1000) },
+        freshness: { state: read.freshness.state, age_seconds: read.freshness.age_ms === null ? null : Math.floor(read.freshness.age_ms / 1000), node_stale: read.freshness.node_stale },
         data: read.outputs.map((o) => sampleNarrow(o, preset)),
       };
       const body = JSON.stringify(

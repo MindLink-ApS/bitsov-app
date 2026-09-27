@@ -116,12 +116,14 @@ fn without_node_as_of_a_live_read_is_unknown_not_fresh() {
         };
         assert_eq!(freshness.state, "unknown", "{topic:?}");
         assert_eq!(freshness.age_ms, None, "{topic:?}");
+        assert_eq!(freshness.fresh_for_ms, None, "{topic:?}");
     }
     server.set_headers(&[("BitSov-Data-Stale", "1")]);
     let TopicRead::Live { freshness, .. } = read(&server, Topic::Node) else {
         panic!()
     };
     assert_eq!(freshness.state, "stale", "the node's own Stale: 1 wins without an as-of");
+    assert_eq!(freshness.fresh_for_ms, Some(0));
 }
 
 #[test]
@@ -157,6 +159,63 @@ fn node_as_of_headers_feed_freshness_and_stale_wins() {
     };
     assert_eq!(freshness.state, "stale");
     assert!(freshness.node_stale);
+}
+
+#[test]
+fn explicit_node_stale_survives_every_topic_and_disclosure_preset() {
+    let server = TestServer::start(MockNode::canonical(), TOKEN);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
+    let recent = (now - 1_000).to_string();
+    let future = (now + 86_400_000).to_string();
+    let shared = remote("https://a.org/v1");
+    for as_of in [None, Some("invalid"), Some(future.as_str()), Some(recent.as_str())] {
+        let mut headers = vec![("BitSov-Data-Stale", "1")];
+        if let Some(as_of) = as_of {
+            headers.push(("BitSov-Data-As-Of", as_of));
+        }
+        server.set_headers(&headers);
+        for topic in TOPICS {
+            let got = read(&server, topic);
+            let wire = serde_json::to_value(&got).unwrap();
+            assert_eq!(wire["freshness"]["state"], "stale", "{topic:?} {as_of:?}");
+            assert_eq!(wire["freshness"]["node_stale"], true);
+            for preset in [Preset::Counts, Preset::Rounded, Preset::Exact] {
+                let body = request_body(&shared, "How current is this?", &got, preset).unwrap();
+                let body: Value = serde_json::from_str(&body).unwrap();
+                let user: Value = serde_json::from_str(body["messages"][1]["content"].as_str().unwrap()).unwrap();
+                assert_eq!(user["freshness"]["state"], "stale");
+                assert_eq!(user["freshness"]["node_stale"], true);
+            }
+        }
+    }
+}
+
+#[test]
+fn mixed_route_freshness_keeps_the_earliest_actual_expiry() {
+    use crate::jarvis::broker::{Fetched, NodeMarks, RawRead};
+    let now = Instant::now();
+    let wall = 1_800_000_000_000;
+    let routes = [
+        (ReadRoute::PaymentsBalance, 70_000),
+        (ReadRoute::PaymentsChannels, 70_000),
+        (ReadRoute::Health, 0),
+    ].map(|(route, lag)| RouteFreshness::assess(route, &RawRead::new(200, b"{}".to_vec())
+        .marked(NodeMarks { as_of_ms: Some(wall - lag), stale: false })
+        .stamped(Fetched { at: now, wall_ms: Some(wall) })));
+    for (elapsed, state, remaining) in [(0, "fresh", 60_000), (59_999, "fresh", 1), (60_000, "stale", 0)] {
+        let summary = summarize(&routes, now + Duration::from_millis(elapsed));
+        assert_eq!(summary.state, state);
+        assert_eq!(summary.age_ms, Some(70_000 + elapsed));
+        assert_eq!(serde_json::to_value(summary).unwrap()["fresh_for_ms"], remaining);
+    }
+    // The wallet can expire first too; neither a hardcoded health bound nor
+    // oldest-age/minimum-bound pairing gives the correct remaining lifetime.
+    let old_wallet = RouteFreshness::assess(ReadRoute::PaymentsBalance, &RawRead::new(200, b"{}".to_vec())
+        .marked(NodeMarks { as_of_ms: Some(wall - 170_000), stale: false })
+        .stamped(Fetched { at: now, wall_ms: Some(wall) }));
+    let summary = summarize(&[old_wallet, routes[2]], now);
+    assert_eq!(serde_json::to_value(summary).unwrap()["fresh_for_ms"], 10_000);
 }
 
 #[test]
@@ -544,6 +603,76 @@ fn a_refusal_or_redirect_is_an_error_that_quotes_nothing() {
     let (endpoint, _seen) = one_shot("302 Found", "");
     let err = block_on(send(&remote(&endpoint), "{}".into(), None)).unwrap_err();
     assert!(err.contains("http 302"), "{err}");
+}
+
+/// Keep the response unfinished until the caller releases it. A size rejection
+/// must arrive without waiting for EOF or the provider's final chunk.
+fn unfinished_response(headers: &str, body: Vec<u8>) -> (String, mpsc::Sender<()>, std::thread::JoinHandle<()>) {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let endpoint = format!("http://{}/v1/chat/completions", listener.local_addr().unwrap());
+    let headers = headers.to_string();
+    let (release, wait) = mpsc::channel();
+    let thread = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        stream.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut request = Vec::new();
+        let mut chunk = [0; 4096];
+        while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+            let n = stream.read(&mut chunk).unwrap();
+            assert_ne!(n, 0);
+            request.extend_from_slice(&chunk[..n]);
+        }
+        stream.write_all(format!("HTTP/1.1 200 OK\r\n{headers}\r\n\r\n").as_bytes()).unwrap();
+        // An early header-based refusal is allowed to close before body writes.
+        let _ = stream.write_all(&body);
+        let _ = wait.recv_timeout(Duration::from_secs(5));
+    });
+    (endpoint, release, thread)
+}
+
+#[test]
+fn remote_response_rejects_oversized_content_length_before_waiting_for_body() {
+    let (endpoint, release, thread) = unfinished_response(
+        &format!("Content-Length: {}", MAX_REMOTE_BYTES + 1), Vec::new(),
+    );
+    let result = block_on(async {
+        tokio::time::timeout(Duration::from_secs(3), send(&remote(&endpoint), "{}".into(), None)).await
+    });
+    let _ = release.send(());
+    thread.join().unwrap();
+    let error = result.expect("must reject the headers without waiting for body/EOF").unwrap_err();
+    assert!(error.contains("answer was too large"), "{error}");
+}
+
+#[test]
+fn remote_response_caps_chunked_bytes_before_eof_or_json_parsing() {
+    let mut body = Vec::new();
+    // Each chunk fits the cap; only their cumulative length exceeds it.
+    for size in [MAX_REMOTE_BYTES / 2, MAX_REMOTE_BYTES / 2, 1] {
+        body.extend_from_slice(format!("{size:x}\r\n").as_bytes());
+        body.extend(std::iter::repeat_n(b'x', size));
+        body.extend_from_slice(b"\r\n");
+    }
+    let (endpoint, release, thread) = unfinished_response("Transfer-Encoding: chunked", body);
+    let result = block_on(async {
+        tokio::time::timeout(Duration::from_secs(3), send(&remote(&endpoint), "{}".into(), None)).await
+    });
+    let _ = release.send(());
+    thread.join().unwrap();
+    let error = result.expect("must reject while the response is still unfinished").unwrap_err();
+    assert!(error.contains("answer was too large"), "{error}");
+}
+
+#[test]
+fn remote_response_accepts_valid_json_up_to_the_byte_limit() {
+    for size in [MAX_REMOTE_BYTES - 1, MAX_REMOTE_BYTES] {
+        let mut body = json!({"choices": [{"message": {"content": "Within the limit."}}]}).to_string();
+        body.extend(std::iter::repeat_n(' ', size - body.len()));
+        let (endpoint, _seen) = one_shot("200 OK", &body);
+        let answer = block_on(send(&remote(&endpoint), "{}".into(), None)).unwrap();
+        assert_eq!(answer.text, "Within the limit.");
+    }
 }
 
 #[test]

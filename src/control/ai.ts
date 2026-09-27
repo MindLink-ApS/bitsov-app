@@ -31,9 +31,19 @@ export const WEEK_MS = 7 * DAY_MS;
 
 // ---- what a question asks -----------------------------------------------------
 
+/** Literal content supplied separately from a question or provider's display prose. */
+export type DraftInput = { draft_text: string };
+
+/** A rules/provider result. No consumer may recover these fields from prose. */
+export type MessageProposal = {
+  recipient: string;
+  draft_text: string;
+  amount_hint: number | null;
+};
+
 /** An action the track may propose. It only prefills a composer; the owner sends. */
 export type Proposal =
-  | { kind: 'message'; peer: string; name: string; text: string; askedSats: number | null }
+  | ({ kind: 'message'; name: string } & MessageProposal)
   | { kind: 'pay'; peer: string; name: string; sats: number }
   | { kind: 'request'; peer: string; name: string; sats: number; note: string };
 
@@ -56,30 +66,28 @@ const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 /** The one peer a question names, by label (whole word) or an id prefix of 8+ hex. */
 export function peerIn(text: string, peers: Peer[]): Peer | null {
   const lower = text.toLowerCase();
-  const byLabel = peers.filter((p) => {
-    const label = p.label?.trim().toLowerCase();
-    return !!label && new RegExp(`(^|[^\\p{L}\\p{N}])${escape(label)}($|[^\\p{L}\\p{N}])`, 'u').test(lower);
-  });
-  if (byLabel.length === 1) return byLabel[0];
   const hex = lower.match(/\b[0-9a-f]{8,64}\b/g) ?? [];
-  const byId = peers.filter((p) => hex.some((h) => p.node_id.toLowerCase().startsWith(h)));
-  return byId.length === 1 ? byId[0] : null;
+  const matches = peers.filter((p) => {
+    const label = p.label?.trim().toLowerCase();
+    const byLabel = !!label && new RegExp(`(^|[^\\p{L}\\p{N}])${escape(label)}($|[^\\p{L}\\p{N}])`, 'u').test(lower);
+    return byLabel || hex.some((h) => p.node_id.toLowerCase().startsWith(h));
+  });
+  // Both naming forms must agree on one distinct contact. A label must not
+  // override another contact's id (or an ambiguous prefix).
+  return new Set(matches.map((p) => p.node_id.toLowerCase())).size === 1 ? matches[0] : null;
 }
 
 /** The first whole number of sats in the text: `2-sat`, `500 sats`, `1,000 sat`. */
 export function satsIn(text: string): number | null {
-  const m = /(\d[\d,]*)\s*-?\s*(?:sats?|satoshis?)\b/i.exec(text);
-  if (!m) return null;
+  // Capture the complete token, including a sign or decimal/fraction, so a
+  // rejected amount cannot be reinterpreted as its trailing positive digits.
+  const m = /(?:^|\s)((?:[+−-]\s*)?\S+?)\s*-?\s*(?:sats?|satoshis?)\b/i.exec(text);
+  if (!m || !/^(?:[1-9]\d*|[1-9]\d{0,2}(?:,\d{3})+)$/.test(m[1])) return null;
+  // A space may split a fraction or a grouped amount, not just words. Refuse
+  // its trailing token too ("1 / 2 sats", "1 500 sats").
+  if (/(?:^|\s)[\d.,/+−-]+$/.test(text.slice(0, m.index).trimEnd())) return null;
   const n = Number(m[1].replace(/,/g, ''));
   return Number.isSafeInteger(n) && n > 0 ? n : null;
-}
-
-/** Quoted text, or what follows `saying` / `that says` / a colon. */
-function draftText(text: string): string {
-  const quoted = /["“']([^"”']{1,500})["”']/.exec(text);
-  if (quoted) return quoted[1].trim();
-  const said = /\b(?:saying|that says|to say)\s+(.{1,500})$/i.exec(text) ?? /:\s*(.{1,500})$/.exec(text);
-  return said ? said[1].trim() : '';
 }
 
 const startOfDay = (ms: number) => {
@@ -107,7 +115,7 @@ const TOPICS: [AiTopic, RegExp][] = [
 ];
 
 /** What a question asks for. Actions need exactly one named peer. */
-export function understand(text: string, peers: Peer[], nowMs: number): Intent {
+export function understand(text: string, peers: Peer[], nowMs: number, draft?: DraftInput): Intent {
   const t = text.toLowerCase();
   const amount = satsIn(text);
   const wantsMessage = /\b(draft|write|compose|message|text|tell|reply|ask)\b/.test(t) && !/\bmessages? (did i get|from)\b/.test(t);
@@ -129,9 +137,9 @@ export function understand(text: string, peers: Peer[], nowMs: number): Intent {
     const name = peer.label?.trim() || shortId(peer.node_id);
     if (what === 'pay') return { kind: 'act', proposal: { kind: 'pay', peer: id, name, sats: amount! } };
     if (what === 'request') {
-      return { kind: 'act', proposal: { kind: 'request', peer: id, name, sats: amount!, note: draftText(text) } };
+      return { kind: 'act', proposal: { kind: 'request', peer: id, name, sats: amount!, note: draft?.draft_text ?? '' } };
     }
-    return { kind: 'act', proposal: { kind: 'message', peer: id, name, text: draftText(text), askedSats: amount } };
+    return { kind: 'act', proposal: { kind: 'message', recipient: id, name, draft_text: draft?.draft_text ?? '', amount_hint: amount } };
   }
   for (const [topic, pattern] of TOPICS) {
     if (!pattern.test(t)) continue;
@@ -183,7 +191,7 @@ function balanceAnswer(report: Report<BalanceReport>): Answer {
     node_reported: 'That is the figure your node reports; it does not say which balances it includes.',
   }[b.label];
   const out = value(b.channel_local_balance);
-  const send = out === null ? '' : ` You can send ${satsText(out)} over Lightning right now.`;
+  const send = out === null ? '' : ` Your local channel balance is ${satsText(out)}.`;
   return { text: `Your node reports ${satsText(total)}. ${what}${send}`, cards: [{ type: 'balance', balance: b, channels: null }] };
 }
 
@@ -276,8 +284,6 @@ function paymentsAnswer(report: Report<PaymentsReport>, label: string): Answer {
   const r = report.value;
   const sent = r.entries.filter((e) => e.direction === 'sent');
   const got = r.entries.filter((e) => e.direction === 'received');
-  const unlisted = value(r.unlisted) ?? 0;
-  const atLeast = unlisted > 0 ? 'at least ' : '';
   const contacts = (list: typeof sent) =>
     new Set(list.map((e) => (e.peer.state === 'value' ? e.peer.value : '?'))).size;
   const spent = value(r.sent_total);
@@ -287,11 +293,18 @@ function paymentsAnswer(report: Report<PaymentsReport>, label: string): Answer {
   let text =
     spent === null
       ? 'Your spending could not be added up.'
-      : sent.length === 0
-        ? `You sent no paid messages ${label}.`
-        : `${lead} you spent ${satsText(spent)} on ${atLeast}${n(sent.length, 'paid message', 'paid messages')} to ${n(contacts(sent), 'contact', 'contacts')}.`;
-  if (earned !== null && got.length > 0) {
-    text += ` You received ${satsText(earned)} from ${atLeast}${n(got.length, 'paid message', 'paid messages')}.`;
+      : spent === 0
+        ? `No spending was found in the paid-message history read ${label}.`
+        : `${lead} you spent ${satsText(spent)} on paid messages.`;
+  text += earned === null
+    ? ' Your received total could not be added up.'
+    : earned === 0
+      ? ` No income was found in the paid-message history read ${label}.`
+      : ` You received ${satsText(earned)} from paid messages ${label}.`;
+  // Totals cover all inspected entries; the broker caps the listed subset.
+  // Counts from that subset cannot establish whether any spending occurred.
+  if (r.entries.length) {
+    text += ` The listed entries include ${n(sent.length, 'sent message', 'sent messages')} to ${n(contacts(sent), 'contact', 'contacts')} and ${n(got.length, 'received message', 'received messages')}.`;
   }
   const caveats: string[] = [];
   const unread = value(r.peers_unread) ?? 0;
@@ -358,8 +371,8 @@ export function proposalText(p: Proposal): string {
   switch (p.kind) {
     case 'message':
       return (
-        `I opened a draft in ${p.name}’s composer. ${p.name} sets the price of a message, and the composer shows it before you send.` +
-        (p.askedSats !== null ? ` You asked for a ${p.askedSats}-sat message: the price is theirs, not a choice here.` : '') +
+        `I prepared a draft for ${p.name}’s composer. ${p.name} sets the price of a message, and the composer shows it before you send.` +
+        (p.amount_hint !== null ? ` You asked for a ${p.amount_hint}-sat message: the price is theirs, not a choice here.` : '') +
         ' Nothing is sent until you press Send and approve the spend.'
       );
     case 'pay':
@@ -375,19 +388,25 @@ export type SourceLine = { state: AiFreshness['state']; text: string };
 
 /**
  * Freshness at `nowMs` of an answer received at `receivedAt`: the host's age
- * plus the time on screen. Stale past the route's own bound, or when the node
- * said so. Unknown stays unknown.
+ * plus the time on screen. The remaining lifetime tracks the first route to
+ * expire independently of that oldest age. Unknown stays unknown.
  */
 export function sourceLine(f: AiFreshness, receivedAt: number, nowMs: number): SourceLine {
-  if (f.age_ms === null) {
-    return { state: 'unknown', text: 'Freshness unknown.' + (f.clock_skew ? ' Your node’s clock is ahead of this computer.' : '') };
+  const stale = f.node_stale || f.state === 'stale';
+  const why = f.node_stale ? ' Your node marked it out of date.' : '';
+  const skew = f.clock_skew ? ' Your node’s clock is ahead of this computer.' : '';
+  if (f.age_ms === null || f.fresh_for_ms === null) {
+    // An absent/unusable As-Of makes the age unknown, not the node's explicit
+    // stale signal. Preserve that signal even if a derived state disagrees.
+    return stale
+      ? { state: 'stale', text: `Stale. Update time unknown.${why} Ask again to re-read.${skew}` }
+      : { state: 'unknown', text: `Freshness unknown.${skew}` };
   }
-  const age = f.age_ms + Math.max(0, nowMs - receivedAt);
+  const elapsed = Math.max(0, nowMs - receivedAt);
+  const age = f.age_ms + elapsed;
   const when = ago(nowMs - age, nowMs);
   const basis = f.node_as_of ? 'by your node’s clock' : 'when the app read it';
-  const skew = f.clock_skew ? ' Your node’s clock is ahead of this computer.' : '';
-  if (f.state === 'stale' || age >= f.stale_after_ms) {
-    const why = f.node_stale ? ' Your node marked it out of date.' : '';
+  if (stale || elapsed >= f.fresh_for_ms) {
     return { state: 'stale', text: `Stale: updated ${when} (${basis}).${why} Ask again to re-read.${skew}` };
   }
   return { state: 'fresh', text: `Updated ${when} (${basis}).${skew}` };
