@@ -50,8 +50,14 @@ export type OrganismProps = {
   membrane: MembraneEntry[];
   /** The node reports its own gate decisions (N2), inbound refusals included. */
   nodeMembrane: boolean;
+  /** When the node's membrane ring was last read successfully; null before. */
+  membraneReadAt?: number | null;
+  /** Why the last membrane read failed, if it did. */
+  membraneError?: string;
   /** This node's own price for a text message: what a stranger pays at the door. */
   door: { msat: number; read_at: number } | null;
+  /** Why the last door price read failed, if it did. */
+  doorError?: string;
   homeostasis: Homeostasis;
   budgetReadAt: number | null;
   nucleus: Nucleus;
@@ -232,9 +238,25 @@ function MembraneOrgan(props: OrganismProps & { fresh: { label: string; stale: b
       .sort((a, b) => b[1] - a[1])
       .map(([code, n]) => `${gateWords(code)} ${n}`)
       .join(' · ');
+  // The live feed says only that events can arrive. Without one successful
+  // read of the node's ring, the organ does not know what already happened,
+  // so it never claims Live or "none" (merge-gate finding 6).
+  const ringRead = () => !props.nodeMembrane || (props.membraneReadAt ?? null) !== null;
+  const fresh = () => {
+    if (props.nodeMembrane && props.membraneError) return { label: 'Reading unavailable', stale: true };
+    if (!ringRead()) return { label: 'Not read yet', stale: true };
+    return props.fresh;
+  };
+  const doorFresh = () => {
+    if (!props.door) return null;
+    const f = freshness(props.door.read_at, props.now);
+    return props.doorError ? { label: `could not re-read · last ${ago(props.door.read_at, props.now)}`, stale: true } : f;
+  };
   const refusedNote = () => {
     const parts = [];
-    if (props.nodeMembrane) parts.push(s().refused_by.inbound > 0 ? `at your door: ${inboundBy()}` : 'at your door: none');
+    if (props.nodeMembrane) {
+      parts.push(!ringRead() ? 'at your door: not read yet' : s().refused_by.inbound > 0 ? `at your door: ${inboundBy()}` : 'at your door: none');
+    }
     if (outboundBy()) parts.push(`outbound: ${outboundBy()}`);
     return parts.join(' · ') || 'outbound';
   };
@@ -243,7 +265,7 @@ function MembraneOrgan(props: OrganismProps & { fresh: { label: string; stale: b
       id="membrane"
       title="Membrane"
       summary={<span>{s().admitted} in · {s().refused} refused</span>}
-      fresh={props.fresh}
+      fresh={fresh()}
       sample={props.sample}
       source={
         props.nodeMembrane ? (
@@ -258,11 +280,14 @@ function MembraneOrgan(props: OrganismProps & { fresh: { label: string; stale: b
       }
     >
       <p class="organ-line door" data-door>
-        <Show when={props.door} fallback="Door price not read yet.">
+        <Show when={props.door} fallback={props.doorError ? <span data-door-fresh="stale">Door price could not be read.</span> : 'Door price not read yet.'}>
           {(d) => (
             <>
               Door open at <span class="sats">{sats(d().msat)}</span> {satUnit(d().msat)} a message
               <span class="organ-note"> · your price</span>
+              <span class="organ-note" classList={{ stale: doorFresh()!.stale }} data-door-fresh={doorFresh()!.stale ? 'stale' : 'fresh'}>
+                {' '}· {doorFresh()!.label}
+              </span>
             </>
           )}
         </Show>

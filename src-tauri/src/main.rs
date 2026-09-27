@@ -1611,6 +1611,13 @@ fn with_book<T>(state: &NodeState, write: bool, edit: impl FnOnce(&mut Book) -> 
     Ok(out)
 }
 
+fn refuse_if_paused(state: &NodeState) -> Result<(), ActionError> {
+    if budget_paused(state)? {
+        return Err(ActionError::new("budget_paused", "Payments are paused. Resume them to send."));
+    }
+    Ok(())
+}
+
 /// Pause-all, where a book exists. Before sign-in there is nothing to pause.
 fn budget_paused(state: &NodeState) -> Result<bool, ActionError> {
     if budget_dir(state).is_err() { return Ok(false); }
@@ -1690,6 +1697,8 @@ async fn money_post(state: &NodeState, auth: Auth, path: &str, body: serde_json:
     ensure_fresh_token(state).await;
     let token = state.token.lock().unwrap().clone().ok_or_else(|| ActionError::new("not_ready", "Not authenticated."))?;
     let node_id = state.node_id.lock().unwrap().clone().ok_or_else(|| ActionError::new("not_ready", "No node identity."))?;
+    // Pause all binds every money request, whatever window or approval is open.
+    refuse_if_paused(state)?;
     check_auth(state, auth)?;
     check_node_grant(state, path, &body, max_msat).await?;
     let mut pending = journal.begin(&node_id, path, &body, max_msat)?;
@@ -1705,7 +1714,7 @@ async fn money_post(state: &NodeState, auth: Auth, path: &str, body: serde_json:
     };
     let release = |state: &NodeState| if let Some(id) = &charged { close_charge(state, id, None) };
     // Journal I/O can take time. Recheck immediately before issuing the request.
-    if let Err(e) = check_auth(state, auth) {
+    if let Err(e) = refuse_if_paused(state).and_then(|()| check_auth(state, auth)) {
         release(state);
         journal.clear()?;
         return Err(e);
@@ -1847,17 +1856,51 @@ async fn grant_for_open(state: &NodeState) -> Result<Option<NodeGrant>, ActionEr
 }
 
 /// Open what was asked, bounded by the node grant when there is one: never past
-/// its expiry, and a budget approval never above its total.
-fn open_want(state: &NodeState, want: Want, basis: act::SpendBasis, node: Option<&NodeGrant>) {
+/// its expiry, and a budget approval never above its total. The caller holds
+/// both approval locks and has checked the fence.
+fn arm_want(spend: &mut act::SpendGate, autopay: &mut budget::Autopay, want: Want, basis: act::SpendBasis, node: Option<&NodeGrant>) {
     let until = node.map_or(u64::MAX, NodeGrant::expires_at_ms);
     match want {
-        Want::Window => state.spend.lock().unwrap().arm_until(now_ms(), until, basis),
+        Want::Window => spend.arm_until(now_ms(), until, basis),
         Want::Budget(ceiling) => {
             let ceiling = node.map_or(ceiling, |g| ceiling.min(g.budget_msat));
-            state.autopay.lock().unwrap().arm_until(now_ms(), until, ceiling, basis)
+            autopay.arm_until(now_ms(), until, ceiling, basis)
         }
     }
+}
+
+/// The owner's cancellation fence: the window's and the budget approval's
+/// generations. Lock, Pause all, expiry and a dropped grant each bump one.
+fn approval_fence(state: &NodeState) -> (u64, u64) {
+    let spend = state.spend.lock().unwrap().generation();
+    let autopay = state.autopay.lock().unwrap().generation();
+    (spend, autopay)
+}
+
+fn fence_broken() -> ActionError {
+    ActionError::new(
+        "budget_needed",
+        "Spending was paused or locked while your approval was being opened. Nothing was opened; approve it again.",
+    )
+}
+
+/// Open `want` only if payments are not paused and neither approval changed
+/// since `fence` was taken, checked and opened under both locks at once. An
+/// answer that arrives after the owner paused or locked opens nothing.
+fn open_fenced(state: &NodeState, fence: (u64, u64), want: Want, basis: act::SpendBasis, node: Option<&NodeGrant>) -> Result<(), ActionError> {
+    // Pause writes the book after bumping both generations, so a pause that
+    // lands after this read is caught by the generation check below.
+    if budget_paused(state)? {
+        return Err(ActionError::new("budget_paused", "Payments are paused. Resume them first."));
+    }
+    let mut spend = state.spend.lock().unwrap();
+    let mut autopay = state.autopay.lock().unwrap();
+    if (spend.generation(), autopay.generation()) != fence {
+        return Err(fence_broken());
+    }
+    arm_want(&mut spend, &mut autopay, want, basis, node);
     *state.node_grant.lock().unwrap() = node.cloned();
+    Ok(())
 }
 
 /// The node grant is gone: close everything that was opened under it.
@@ -1915,6 +1958,9 @@ async fn spend_advance_for(state: &NodeState, want: Option<Want>) -> Result<act:
     if want.is_some() && budget_paused(state)? {
         return Err(ActionError::new("budget_paused", "Payments are paused. Resume them first."));
     }
+    // Taken before any await: whatever the node answers later opens nothing
+    // if the owner paused or locked in the meantime.
+    let fence = approval_fence(state);
     enum Mode {
         Local,
         Paired { spend: bool },
@@ -1944,10 +1990,10 @@ async fn spend_advance_for(state: &NodeState, want: Option<Want>) -> Result<act:
     };
     match mode {
         Mode::Local => {
-            if let Some(want) = want { open_want(state, want, act::SpendBasis::AppLock, None); }
+            if let Some(want) = want { open_fenced(state, fence, want, act::SpendBasis::AppLock, None)?; }
         }
         Mode::Paired { spend: true } => {
-            if let Some(want) = want { open_want(state, want, act::SpendBasis::NodeGrant, held.as_ref()); }
+            if let Some(want) = want { open_fenced(state, fence, want, act::SpendBasis::NodeGrant, held.as_ref())?; }
         }
         Mode::Paired { spend: false } => {
             let (generation, pending) = {
@@ -1955,6 +2001,7 @@ async fn spend_advance_for(state: &NodeState, want: Option<Want>) -> Result<act:
                 gate.view(now_ms());
                 (gate.generation(), gate.pending().cloned())
             };
+            let budget_generation = state.autopay.lock().unwrap().generation();
             if let Some(want) = want {
                 let mut wants = state.wants.lock().unwrap();
                 // A new request carries only this ask; a pending one gathers them.
@@ -2002,13 +2049,22 @@ async fn spend_advance_for(state: &NodeState, want: Option<Want>) -> Result<act:
                             }
                             Some(Ok(node)) => node,
                         };
+                        // Pause all or a budget lock during the poll: the grant
+                        // opens nothing (the window's own generation is checked
+                        // above; pause writes the book after bumping both).
+                        let mut autopay = state.autopay.lock().unwrap();
+                        if autopay.generation() != budget_generation || budget_paused(state)? {
+                            gate.lock();
+                            autopay.lock();
+                            return Err(fence_broken());
+                        }
                         // Open only what the owner asked for with this request.
                         if !wants.window { gate.clear_pending(); }
-                        drop(gate);
-                        if wants.window { open_want(state, Want::Window, act::SpendBasis::NodeGrant, node.as_ref()); }
+                        if wants.window { arm_want(&mut gate, &mut autopay, Want::Window, act::SpendBasis::NodeGrant, node.as_ref()); }
                         if let Some(ceiling) = wants.budget {
-                            open_want(state, Want::Budget(ceiling), act::SpendBasis::NodeGrant, node.as_ref());
+                            arm_want(&mut gate, &mut autopay, Want::Budget(ceiling), act::SpendBasis::NodeGrant, node.as_ref());
                         }
+                        *state.node_grant.lock().unwrap() = node.clone();
                     }
                     "expired" | "absent" => {
                         let mut gate = state.spend.lock().unwrap();
@@ -4202,6 +4258,40 @@ mod control_act_tests {
     }
 
     #[tokio::test]
+    async fn review_regression_first_contact_forwards_chosen_contact_budget() {
+        let (node, _dir, g1) = g1_node(&["read", "receive"]);
+        *g1.first_contact.lock().unwrap() = Some((200, serde_json::json!({
+            "recipient": C, "max_total_msat": 5000, "expires_at": now_unix() + 120,
+        })));
+        g1_approved(&node, 500_000).await;
+        do_message_send_with(&node.state, C, false, "hello stranger", 5000, None, Some(50_000))
+            .await.unwrap();
+        let (body, _) = first_contact_then_compose(&node).expect("first-contact confirmation sent");
+        assert_eq!(body["contact_budget_msat"], serde_json::json!(50_000),
+            "the node needs the chosen contact budget to authorize later budgeted re-admission");
+    }
+
+    #[tokio::test]
+    async fn review_regression_readmission_is_counted_and_survives_restart() {
+        let (node, _dir, g1) = g1_node(&["read", "receive"]);
+        with_book(&node.state, true, |book| book.set_limit(A, false, 50_000)).unwrap();
+        g1.grant.lock().unwrap()["per_recipient_msat"] = serde_json::json!({A: 50_000});
+        *g1.compose.lock().unwrap() = Some((200, serde_json::json!({
+            "message_id": "ab".repeat(32), "delivered": true,
+            "amount_msat": 2000, "readmission_msat": 20_000,
+        })));
+        g1_approved(&node, 500_000).await;
+        do_message_send(&node.state, A, false, "after reconnect", 2000, None).await.unwrap();
+        let live = budget_now(&node.state);
+        let restored = budget_now(&reopen(&node));
+        assert_eq!(
+            (live.spent_msat, live.rows[0].spent_msat, restored.spent_msat, restored.rows[0].spent_msat),
+            (22_000, 22_000, 22_000, 22_000),
+            "both the message and separately reported re-admission must count against the contact and daily total",
+        );
+    }
+
+    #[tokio::test]
     async fn g1_a_first_contact_the_node_will_not_back_sends_nothing() {
         let (node, _dir, g1) = g1_node(&["read", "receive"]);
         *g1.first_contact.lock().unwrap() = Some((409, serde_json::json!({
@@ -4365,6 +4455,91 @@ mod control_act_tests {
         *status.lock().unwrap() = "expired";
         assert_eq!(spend_advance(&node.state, false).await.unwrap().state, act::SpendState::Expired);
         assert_eq!(do_message_send(&node.state, A, false, "gm", 2000, None).await.unwrap_err().code, "spend_expired");
+    }
+
+    #[tokio::test]
+    async fn review_regression_pause_during_held_grant_read_blocks_payment() {
+        let entered = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+        let (e, r) = (entered.clone(), release.clone());
+        let routes: Routes = Arc::new(move |m, p, b| {
+            let value = match p {
+                "/status" => serde_json::json!({"api_capabilities": ["spend_budget_grant_v1"]}),
+                "/pair/grant" => {
+                    e.store(true, Ordering::SeqCst);
+                    while !r.load(Ordering::SeqCst) {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    serde_json::json!({"grant": g1_grant(3600, 400_000, 400_000)})
+                }
+                _ => return happy()(m, p, b),
+            };
+            (200, value.to_string())
+        });
+        let (node, _dir) = paired_fake(routes);
+        if let AuthMode::Paired(session) = &mut *node.state.auth.lock().unwrap() {
+            session.scopes.push("spend".into());
+        }
+        let ask = spend_advance(&node.state, true);
+        let pause = async {
+            while !entered.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            let paused = do_budget_pause(&node.state).unwrap();
+            assert!(paused.paused);
+            release.store(true, Ordering::SeqCst);
+        };
+        let (opened, ()) = tokio::join!(ask, pause);
+        let payment = do_payment_pay(&node.state, "lntb10n1x", 1000, 1000).await;
+        let posts = node.posts();
+        assert!(budget_now(&node.state).paused);
+        assert!(payment.is_err() && !posts.iter().any(|(path, _)| path == "/payments/pay"),
+            "Pause all must fence the pending approval: opened={opened:?}, payment={payment:?}, posts={posts:?}");
+    }
+
+    /// Finding 1, the elevation path: the owner's budget request is granted,
+    /// but Pause all lands while the app reads the node grant. Nothing opens.
+    #[tokio::test]
+    async fn pr47_pause_during_granted_poll_opens_nothing() {
+        let entered = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+        let (e, r) = (entered.clone(), release.clone());
+        let far = now_unix() + 900;
+        let routes: Routes = Arc::new(move |m, p, b| {
+            let v = match p {
+                "/status" => serde_json::json!({"api_capabilities": ["paid_send_caps_v1", "spend_budget_grant_v1"]}),
+                "/pair/elevation-request" => serde_json::json!({"op_id":"ab12", "expires_at":far, "owner_action":"konsensus grant --op ab12"}),
+                "/pair/elevation/ab12" => serde_json::json!({"status":"granted"}),
+                "/pair/grant" => {
+                    e.store(true, Ordering::SeqCst);
+                    while !r.load(Ordering::SeqCst) { std::thread::sleep(Duration::from_millis(1)); }
+                    serde_json::json!({"grant": g1_grant(3600, 400_000, 400_000)})
+                }
+                p if p.starts_with("/pair/challenge") => serde_json::json!({"challenge":"bitsov-pair-token-v1:00ff"}),
+                "/pair/token" => serde_json::json!({"token":"tok.spend", "expires_at":far, "scopes":["read","receive","spend"]}),
+                _ => return happy()(m,p,b),
+            };
+            (200, v.to_string())
+        });
+        let (node, _dir) = paired_fake(routes);
+        with_book(&node.state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
+        spend_advance_for(&node.state, Some(Want::Budget(400_000))).await.unwrap();
+        let poll = spend_advance(&node.state, false);
+        let pause = async {
+            while !entered.load(Ordering::SeqCst) { tokio::time::sleep(Duration::from_millis(1)).await; }
+            assert!(do_budget_pause(&node.state).unwrap().paused);
+            release.store(true, Ordering::SeqCst);
+        };
+        let (_polled, ()) = tokio::join!(poll, pause);
+        assert_eq!(state_autopay(&node.state), budget::AutopayState::Off, "the late grant opened the budget");
+        assert_eq!(node.state.spend.lock().unwrap().view(now_ms()).state, act::SpendState::Locked);
+        assert_eq!(do_message_send(&node.state, A, false, "gm", 2000, None).await.unwrap_err().code, "budget_paused");
+        assert!(do_payment_pay(&node.state, "lntb10n1x", 1000, 1000).await.is_err());
+        assert!(!node.posts().iter().any(|(path, _)| path == "/messages/compose" || path == "/payments/pay"));
+    }
+
+    fn state_autopay(state: &NodeState) -> budget::AutopayState {
+        state.autopay.lock().unwrap().view(now_ms()).state
     }
 
     #[tokio::test]

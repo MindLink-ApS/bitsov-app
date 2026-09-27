@@ -258,7 +258,10 @@ export const gateWords = (code: string) => GATE_WORDS[code] ?? code.replace(/_/g
  * when the node verified it; an admitted stranger is flagged, never added.
  */
 export function membraneNode(log: MembraneEntry[], event: MembraneEvent, ctx: { contacts: Set<string> }): MembraneEntry[] {
-  if (log.some((e) => e.node_seq === event.seq)) return log;
+  // `seq` restarts at 1 with every node run and carries no run id, so it
+  // alone does not identify an event: a restarted node's seq 1 is new. The
+  // node's own timestamp tells two runs' events apart.
+  if (log.some((e) => e.node_seq === event.seq && e.at === event.at)) return log;
   // The one outbound event this app does not see itself: the node paid a
   // contact's admission again, inside the send, after a reconnect.
   if (event.direction === 'outbound' && event.verdict === 'admitted' && event.code === 'readmission' && event.counterparty) {

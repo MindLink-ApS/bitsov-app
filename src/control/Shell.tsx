@@ -150,6 +150,8 @@ export function ControlCenter(props: Props) {
   // Organism view (O1): readings the organs are drawn from, each with its age.
   const [openedAt, setOpenedAt] = createSignal(Date.now());
   const [membrane, setMembrane] = createSignal<MembraneEntry[]>([]);
+  /** When the node's membrane ring (N2) was last read successfully. */
+  const [membraneReadAt, setMembraneReadAt] = createSignal<number | null>(null);
   const [energyAt, setEnergyAt] = createSignal<number | null>(null);
   const [budgetReadAt, setBudgetReadAt] = createSignal<number | null>(null);
   const [door, setDoor] = createSignal<{ msat: number; read_at: number } | null>(null);
@@ -246,7 +248,10 @@ export function ControlCenter(props: Props) {
   const contactSet = () => new Set(peerById().keys());
   // N2: seed from the node's ring once it is advertised; live events follow.
   const loadMembrane = () =>
-    attempt('membrane', () => props.source.membrane(50), (read) => foldMembrane((log) => membraneSeed(log, read.events, { contacts: contactSet() })));
+    attempt('membrane', () => props.source.membrane(50), (read) => {
+      foldMembrane((log) => membraneSeed(log, read.events, { contacts: contactSet() }));
+      setMembraneReadAt(Date.now());
+    });
 
   const loadThread = (t: TrackRef) => {
     if (t.kind !== 'peer' && t.kind !== 'room') return;
@@ -637,7 +642,10 @@ export function ControlCenter(props: Props) {
                 energyReadAt={energyReadAt()}
                 membrane={membrane()}
                 nodeMembrane={caps().membrane}
+                membraneReadAt={membraneReadAt()}
+                membraneError={errors.membrane}
                 door={door()}
+                doorError={errors.door}
                 homeostasis={homeostasis(budget())}
                 budgetReadAt={budgetReadAt()}
                 nucleus={nucleus(props.ownId, overview())}
@@ -926,7 +934,9 @@ function Conversation(props: {
         cost={cost()}
         roomQuote={props.roomQuote}
         filePrice={props.filePrice}
-        firstContact={props.track.kind === 'peer' && props.messages.length === 0}
+        // Admission is per direction: messages they sent us do not open their
+        // door for ours. A first contact is our first outgoing message.
+        firstContact={props.track.kind === 'peer' && !props.messages.some((m) => isOutgoing(m, props.ownId))}
         spend={props.spend}
         spendError={props.spendError}
         budget={props.budget}
@@ -1240,7 +1250,18 @@ function Composer(props: {
   // reconnect (its grant does not budget them yet): the door card, once more.
   const [readmitFor, setReadmitFor] = createSignal<string | null>(null);
   const readmit = () => !room() && readmitFor() === target();
-  const doorWanted = () => props.firstContact || readmit();
+  // Is this send a first contact? While the budget decides, exactly when it
+  // has no line for this peer, whatever the thread holds: inbound history
+  // does not open their door for us (merge-gate finding 7). Otherwise, when
+  // we have never sent to them. (A cost-free stand: `shown` depends on this.)
+  const doorWanted = () => {
+    if (room()) return false;
+    if (readmit()) return true;
+    const kind = budgetStand(budget(), target(), false, null).kind;
+    if (kind === 'first') return true;
+    if (kind === 'ok' || kind === 'contact_used' || kind === 'total_used') return false;
+    return props.firstContact;
+  };
   const stand = () => budgetStand(budget(), target(), room(), shown().msat, readmit());
   createEffect(() => {
     if (room() || !doorWanted() || mode() !== 'message' || stand().kind !== 'first') return;
@@ -1309,10 +1330,10 @@ function Composer(props: {
         }
         const c = props.cost;
         if (!c) return { msat: null, estimate: false, basis: room() ? 'Reading each member’s price…' : 'Reading their price…' };
-        const basis = props.firstContact
+        const basis = doorWanted()
           ? `${c.basis}. First contact also pays their admission price once, at most ${sats(ADMISSION_MAX_MSAT)} sats`
           : c.basis;
-        return { msat: c.msat, estimate: c.estimate || props.firstContact, basis };
+        return { msat: c.msat, estimate: c.estimate || doorWanted(), basis };
       }
       case 'pay':
         if (payKind() === 'invoice') {
@@ -1388,7 +1409,10 @@ function Composer(props: {
       const submittedRevision = composerRevision;
       const r = await props.actions.send(props.track, draft(), shown().msat!, st.kind === 'first' ? firstPick() ?? st.suggest : undefined);
       if (r.ok) setReadmitFor(null);
-      else if (r.error.code === 'grant_readmission') {
+      else if (['price_changed', 'price_cap_exceeded'].includes(r.error.code) && doorWanted()) {
+        // The stranger's price moved: ask for their signed quote again.
+        setDoor(null);
+      } else if (r.error.code === 'grant_readmission') {
         setDoor(null);
         setReadmitFor(target());
       }
