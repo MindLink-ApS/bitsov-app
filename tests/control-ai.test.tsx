@@ -48,7 +48,7 @@ function paymentsRead(): Extract<TopicRead, { state: 'live' }> {
         },
       },
     ],
-    freshness: { state: 'fresh', age_ms: 2000, stale_after_ms: 60_000, node_as_of: true, node_stale: false, clock_skew: false },
+    freshness: { state: 'fresh', age_ms: 2000, fresh_for_ms: 58_000, node_as_of: true, node_stale: false, clock_skew: false },
     routes: ['GET /api/v1/peers', 'GET /api/v1/messages?peer=… (2 contacts)'],
   };
 }
@@ -65,6 +65,18 @@ describe('what a question asks', () => {
     expect(understand('who messaged me?', PEERS, NOW)).toMatchObject({ topic: 'inbox' });
     expect(understand('tell me a joke', PEERS, NOW)).toEqual({ kind: 'unknown' });
   });
+
+  it.each(['0.5', '1.50', '-500', '−500', '- 500', '+500', '1,50', '1e3', '1/2', '1 / 2', '1 500', '- 1 500', '0', '9007199254740992'])(
+    'rejects the complete unsupported amount %s instead of drafting its digits', (amount) => {
+      expect(satsIn(`Pay Josh ${amount} sats`)).toBeNull();
+      expect(understand(`Pay Josh ${amount} sats`, PEERS, NOW).kind).not.toBe('act');
+      expect(understand(`Request ${amount} sats from Josh`, PEERS, NOW).kind).not.toBe('act');
+    },
+  );
+
+  it.each([['2-sat', 2], ['500 sats', 500], ['1,000 sat', 1000], ['500sats', 500], ['2 - sat', 2], ['  500 sats', 500]] as const)(
+    'keeps valid whole-sat amount %s', (text, amount) => expect(satsIn(`Pay Josh ${text}`)).toBe(amount),
+  );
 
   it('proposes actions only for exactly one named contact', () => {
     expect(understand('Draft a 2-sat message to Maya', PEERS, NOW)).toEqual({
@@ -154,6 +166,31 @@ describe('composing an answer', () => {
     }
   });
 
+  it('reports a local channel balance without promising it is spendable', () => {
+    // The broker includes inactive channels in these sums: this fixture is one
+    // inactive channel with 500 sats on each side, no immediately usable funds.
+    const read: Extract<TopicRead, { state: 'live' }> = {
+      state: 'live', topic: 'balance', routes: [], freshness: paymentsRead().freshness,
+      outputs: [{ tool: 'balance', report: { state: 'ready', value: {
+        label: 'node_reported', wallet_balance: avail(500_000),
+        channel_local_balance: avail(500_000), channel_remote_balance: avail(500_000), channel_capacity: avail(1_000_000),
+      } } }],
+    };
+    const answer = answerFrom(read, { kind: 'read', topic: 'balance', sinceMs: null, window: null }, names);
+    expect(answer.text).toContain('local channel balance is 500 sats');
+    expect(answer.text).not.toContain('You can send');
+    expect(answer.text).not.toContain('right now');
+  });
+
+  it('ages mixed-route answers by their earliest expiry, not the oldest age against another bound', () => {
+    // 70s-old wallet reads have 110s left; a current health read has 60s left.
+    const freshness = { ...paymentsRead().freshness, age_ms: 70_000, fresh_for_ms: 60_000 };
+    expect(sourceLine(freshness, NOW, NOW).state).toBe('fresh');
+    expect(sourceLine(freshness, NOW, NOW + 59_999).state).toBe('fresh');
+    expect(sourceLine(freshness, NOW, NOW + 60_000).state).toBe('stale');
+    expect(sourceLine(freshness, NOW, NOW).text).toContain('1 min ago');
+  });
+
   it('answers balance, node and prices from the sample reads', () => {
     const read = (topic: 'balance' | 'node' | 'prices') => {
       const r = sampleRead(topic, null);
@@ -161,7 +198,7 @@ describe('composing an answer', () => {
       return answerFrom(r, { kind: 'read', topic, sinceMs: null, window: null }, names);
     };
     expect(read('balance').text).toBe(
-      'Your node reports 482,500 sats. That is Lightning and spendable on-chain together. You can send 420,000 sats over Lightning right now.',
+      'Your node reports 482,500 sats. That is Lightning and spendable on-chain together. Your local channel balance is 420,000 sats.',
     );
     expect(read('node').text).toBe('Your node is healthy: 3 peers connected, at block 860,123, up 3d 4h.');
     expect(read('node').cards[0].type).toBe('node');
@@ -387,6 +424,31 @@ describe('the AI track', () => {
     expect(text('[data-ai-source="remote"]')).toContain('Your node did not check this answer');
     // The record of what left stays under the answer.
     expect(text('[data-ai-sent] pre')).toBe(BODY);
+  });
+
+  it('keeps a canceled preview unsendable after switching tracks and returning', async () => {
+    const host = stubHost();
+    await openAi();
+    click('[data-provider="shared"]');
+    ask('How much is in my wallet?');
+    await vi.waitFor(() => expect($('[data-ai-send]')).not.toBeNull());
+    click(`[data-track="peer:${A}"]`);
+    await vi.waitFor(() => expect(host.used('ai_cancel')).toHaveLength(1));
+    expect(host.used('ai_cancel')[0].args).toEqual({ disclosure_id: 'd1' });
+    click('[data-track="ai"]');
+    await vi.waitFor(() => expect($('[data-ai-track]')).not.toBeNull());
+    expect($('[data-ai-card="disclosure"]')?.getAttribute('data-state')).toBe('not-sent');
+    expect($('[data-ai-send]')).toBeNull();
+    expect(host.used('ai_send')).toHaveLength(0);
+  });
+
+  it('does not offer a payment prefill for a decimal amount', async () => {
+    const host = stubHost();
+    await openAi();
+    ask('Pay Josh 1.50 sats');
+    await vi.waitFor(() => expect($('[data-ai-answer="answered"]')).not.toBeNull());
+    expect($('[data-ai-prefill]')).toBeNull();
+    for (const cmd of ['payment_pay', 'payment_keysend', 'spend_request']) expect(host.used(cmd)).toHaveLength(0);
   });
 
   it('drops a preview the owner does not send', async () => {

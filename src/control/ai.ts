@@ -68,8 +68,13 @@ export function peerIn(text: string, peers: Peer[]): Peer | null {
 
 /** The first whole number of sats in the text: `2-sat`, `500 sats`, `1,000 sat`. */
 export function satsIn(text: string): number | null {
-  const m = /(\d[\d,]*)\s*-?\s*(?:sats?|satoshis?)\b/i.exec(text);
-  if (!m) return null;
+  // Capture the complete token, including a sign or decimal/fraction, so a
+  // rejected amount cannot be reinterpreted as its trailing positive digits.
+  const m = /(?:^|\s)((?:[+−-]\s*)?\S+?)\s*-?\s*(?:sats?|satoshis?)\b/i.exec(text);
+  if (!m || !/^(?:[1-9]\d*|[1-9]\d{0,2}(?:,\d{3})+)$/.test(m[1])) return null;
+  // A space may split a fraction or a grouped amount, not just words. Refuse
+  // its trailing token too ("1 / 2 sats", "1 500 sats").
+  if (/(?:^|\s)[\d.,/+−-]+$/.test(text.slice(0, m.index).trimEnd())) return null;
   const n = Number(m[1].replace(/,/g, ''));
   return Number.isSafeInteger(n) && n > 0 ? n : null;
 }
@@ -183,7 +188,7 @@ function balanceAnswer(report: Report<BalanceReport>): Answer {
     node_reported: 'That is the figure your node reports; it does not say which balances it includes.',
   }[b.label];
   const out = value(b.channel_local_balance);
-  const send = out === null ? '' : ` You can send ${satsText(out)} over Lightning right now.`;
+  const send = out === null ? '' : ` Your local channel balance is ${satsText(out)}.`;
   return { text: `Your node reports ${satsText(total)}. ${what}${send}`, cards: [{ type: 'balance', balance: b, channels: null }] };
 }
 
@@ -380,24 +385,25 @@ export type SourceLine = { state: AiFreshness['state']; text: string };
 
 /**
  * Freshness at `nowMs` of an answer received at `receivedAt`: the host's age
- * plus the time on screen. Stale past the route's own bound, or when the node
- * said so. Unknown stays unknown.
+ * plus the time on screen. The remaining lifetime tracks the first route to
+ * expire independently of that oldest age. Unknown stays unknown.
  */
 export function sourceLine(f: AiFreshness, receivedAt: number, nowMs: number): SourceLine {
   const stale = f.node_stale || f.state === 'stale';
   const why = f.node_stale ? ' Your node marked it out of date.' : '';
   const skew = f.clock_skew ? ' Your node’s clock is ahead of this computer.' : '';
-  if (f.age_ms === null) {
+  if (f.age_ms === null || f.fresh_for_ms === null) {
     // An absent/unusable As-Of makes the age unknown, not the node's explicit
     // stale signal. Preserve that signal even if a derived state disagrees.
     return stale
       ? { state: 'stale', text: `Stale. Update time unknown.${why} Ask again to re-read.${skew}` }
       : { state: 'unknown', text: `Freshness unknown.${skew}` };
   }
-  const age = f.age_ms + Math.max(0, nowMs - receivedAt);
+  const elapsed = Math.max(0, nowMs - receivedAt);
+  const age = f.age_ms + elapsed;
   const when = ago(nowMs - age, nowMs);
   const basis = f.node_as_of ? 'by your node’s clock' : 'when the app read it';
-  if (stale || age >= f.stale_after_ms) {
+  if (stale || elapsed >= f.fresh_for_ms) {
     return { state: 'stale', text: `Stale: updated ${when} (${basis}).${why} Ask again to re-read.${skew}` };
   }
   return { state: 'fresh', text: `Updated ${when} (${basis}).${skew}` };

@@ -106,7 +106,13 @@ export function AiTrack(props: {
 
   // A preview left on screen is dropped host-side when the track closes.
   onCleanup(() => {
-    for (const t of session.turns) if (t.state === 'preview' && t.disclosure) void props.source.aiCancel(t.disclosure.id).catch(() => {});
+    for (const t of session.turns) {
+      if (t.state !== 'preview' || !t.disclosure) continue;
+      void props.source.aiCancel(t.disclosure.id).catch(() => {});
+      // The shell keeps this session when switching tracks. Its restored view
+      // must not offer Send for a disclosure that was just canceled.
+      update(t.id, { state: 'not-sent' });
+    }
   });
 
   const disclose = async (id: number, preset: Preset) => {
@@ -582,7 +588,7 @@ function DisclosureCard(props: {
       </div>
       <Show
         when={props.state !== 'not-sent'}
-        fallback={<p class="hint">You chose not to send this. Nothing left this computer.</p>}
+        fallback={<p class="hint">This preview was canceled. Nothing left this computer.</p>}
       >
         <p>
           This is exactly what would go to <strong>{props.d.label}</strong> ({props.d.model}) at{' '}
