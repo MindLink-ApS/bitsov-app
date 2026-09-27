@@ -19,6 +19,7 @@ fn main() {
             "pairing_status",
             "pairing_retry",
             "node_overview",
+            "live_link",
             "peers_list",
             "rooms_list",
             "room_members",

@@ -212,7 +212,16 @@ export function ControlCenter(props: Props) {
               }),
             );
           })
-          .then((off) => (mine === generation ? (unlisten = off) : off()))
+          .then((off) => {
+            if (mine !== generation) {
+              off();
+              return null;
+            }
+            unlisten = off;
+            // The link state comes from the host's socket, replayed on the channel
+            // just subscribed: the bridge usually opened before this shell mounted.
+            return props.source.liveLink();
+          })
           .catch((e) => setErrors('live', String(e)));
     }),
   );

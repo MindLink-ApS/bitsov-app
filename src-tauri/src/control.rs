@@ -301,6 +301,41 @@ pub enum LinkState {
     Closed,
 }
 
+/// The `/ws` link as the socket last reported it.
+///
+/// Every live event the host forwards passes through [`LiveLink::publish`], so
+/// the recorded state is whatever the socket session last said, never what a
+/// renderer happened to hear. A renderer that subscribes late (the shell mounts
+/// after the bridge has already opened) asks for [`LiveLink::replay`]; both run
+/// under one lock, so a replay can never overtake a newer transition.
+#[derive(Default)]
+pub struct LiveLink {
+    current: std::sync::Mutex<Option<LiveEvent>>,
+}
+
+impl LiveLink {
+    /// Forward `event`, recording it first when it is a link transition.
+    pub fn publish(&self, event: LiveEvent, emit: impl FnOnce(LiveEvent)) {
+        let mut current = self.current.lock().unwrap();
+        if matches!(event, LiveEvent::Link { .. }) {
+            *current = Some(event.clone());
+        }
+        emit(event);
+    }
+
+    /// Re-send the current link state, if the bridge has reported one.
+    pub fn replay(&self, emit: impl FnOnce(LiveEvent)) -> Option<LinkState> {
+        let current = self.current.lock().unwrap();
+        let event = current.clone()?;
+        let state = match &event {
+            LiveEvent::Link { state, .. } => *state,
+            _ => unreachable!("only link events are recorded"),
+        };
+        emit(event);
+        Some(state)
+    }
+}
+
 /// `Recipient` is externally tagged in the envelope: `{"Node":hex}`,
 /// `{"Room":uuid}`, or `"Broadcast"`.
 #[derive(Deserialize)]
@@ -435,6 +470,33 @@ mod tests {
 
     const A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const ROOM: &str = "0f8e2b7a-1c3d-4e5f-8a9b-0c1d2e3f4a5b";
+
+    fn link(state: LinkState, detail: Option<&str>) -> LiveEvent {
+        LiveEvent::Link { state, detail: detail.map(str::to_string) }
+    }
+
+    #[test]
+    fn live_link_replays_the_state_the_socket_last_reported() {
+        let live = LiveLink::default();
+        let mut sent = Vec::new();
+        assert_eq!(live.replay(|e| sent.push(e)), None, "nothing to replay before the bridge runs");
+        assert!(sent.is_empty());
+
+        live.publish(link(LinkState::Connecting, None), |e| sent.push(e));
+        live.publish(link(LinkState::Open, None), |e| sent.push(e));
+        // Traffic after the open does not change the link state.
+        live.publish(LiveEvent::Onboarding { step: "funding-seen".into() }, |e| sent.push(e));
+        assert_eq!(sent.len(), 3);
+
+        let mut replayed = Vec::new();
+        assert_eq!(live.replay(|e| replayed.push(e)), Some(LinkState::Open));
+        assert_eq!(replayed, [link(LinkState::Open, None)]);
+
+        live.publish(link(LinkState::Closed, Some("the live-event socket dropped")), |_| {});
+        let mut replayed = Vec::new();
+        assert_eq!(live.replay(|e| replayed.push(e)), Some(LinkState::Closed));
+        assert_eq!(replayed, [link(LinkState::Closed, Some("the live-event socket dropped"))]);
+    }
 
     #[test]
     fn peer_and_room_ids_are_validated_before_they_reach_a_path() {

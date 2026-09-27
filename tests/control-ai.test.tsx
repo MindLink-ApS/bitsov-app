@@ -191,6 +191,7 @@ function stubHost(overrides: Record<string, Reply> = {}) {
     }),
     ai_cancel: () => true,
     ai_send: () => ({ provider: 'shared', label: 'Shared open model', host: 'models.example.org', model: 'open-8b', text: '<img src=x onerror=alert(1)> You spent 3 sats.', sent_bytes: BODY.length }),
+    live_link: () => null,
     'plugin:event|listen': () => 1,
     'plugin:event|unlisten': () => null,
     ...overrides,

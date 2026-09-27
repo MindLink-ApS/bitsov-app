@@ -131,6 +131,8 @@ struct NodeState {
     last_remint: Mutex<Option<Instant>>,
     /// Set by the wait thread when the supervised node exits.
     sidecar_terminated: AtomicBool,
+    /// The `/ws` link as the bridge's socket last reported it (`live_link`).
+    live_link: control::LiveLink,
     http: reqwest::Client,
     /// `API_BASE` in the app; an ephemeral loopback port in tests.
     api_base: String,
@@ -173,6 +175,7 @@ impl NodeState {
             config: Mutex::new(None),
             last_remint: Mutex::new(None),
             sidecar_terminated: AtomicBool::new(false),
+            live_link: control::LiveLink::default(),
             // Bounded so a hung loopback /health or /auth/local cannot pin restoring().
             http: reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(2))
@@ -2085,9 +2088,29 @@ fn ai_cancel(
 const LIVE_EVENT: &str = "node-live";
 
 /// Forward to the MAIN window only. The sealed assistant window never receives
-/// node traffic, which carries decrypted plaintext.
+/// node traffic, which carries decrypted plaintext. Link transitions are
+/// recorded on the way, so `live_link` can replay them to a late subscriber.
 fn emit_live<R: tauri::Runtime>(app: &AppHandle<R>, event: control::LiveEvent) {
-    let _ = app.emit_to(MAIN_WINDOW_LABEL, LIVE_EVENT, event);
+    app.state::<NodeState>().live_link.publish(event, |event| {
+        let _ = app.emit_to(MAIN_WINDOW_LABEL, LIVE_EVENT, event);
+    });
+}
+
+/// Re-send the current `/ws` link state on `node-live`, to the main window only.
+///
+/// The bridge reports `open` once, when the socket opens, which is usually before
+/// the shell has mounted and subscribed. The shell calls this right after it
+/// subscribes. The replay goes out on the same channel as live transitions, and
+/// under the same lock, so it can never land after a newer one.
+#[tauri::command(rename_all = "snake_case")]
+fn live_link(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+) -> Result<Option<control::LinkState>, String> {
+    reject_sealed_window(&window)?;
+    Ok(state.live_link.replay(|event| {
+        let _ = window.emit_to(MAIN_WINDOW_LABEL, LIVE_EVENT, event);
+    }))
 }
 
 /// Bridge the node's loopback `GET /ws` into the main window.
@@ -2327,6 +2350,7 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             pairing_status,
             pairing_retry,
             node_overview,
+            live_link,
             peers_list,
             rooms_list,
             room_members,
@@ -3907,6 +3931,7 @@ mod assistant_acl_tests {
                 "pairing_retry",
                 // Control center reads (main window only, ACL + reject_sealed_window).
                 "node_overview",
+                "live_link",
                 "peers_list",
                 "rooms_list",
                 "room_members",
@@ -4599,5 +4624,56 @@ mod assistant_acl_tests {
         for cmd in ["pairing_status", "pairing_retry"] {
             assert_acl_denied(invoke(&assistant, cmd, serde_json::json!({})), cmd);
         }
+    }
+
+    /// The field bug: the bridge's socket opened (and emitted `open`) before the
+    /// shell subscribed, so the pill said "reconnecting" on a live link. A
+    /// subscriber that arrives after the open asks `live_link` and gets the
+    /// socket's current state on `node-live`. The assistant window is denied.
+    #[test]
+    fn subscribe_after_open_replays_the_open_link() {
+        use std::sync::{Arc, Mutex};
+        use tauri::Listener;
+
+        let app = tauri::test::mock_builder()
+            .manage(super::NodeState::default())
+            .invoke_handler(tauri::generate_handler![super::live_link])
+            .build(tauri::generate_context!(test = true))
+            .expect("test app");
+        let main = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .expect("main window");
+        let assistant = tauri::WebviewWindowBuilder::new(&app, "assistant", Default::default())
+            .build()
+            .expect("assistant window");
+
+        // Before the bridge reports anything there is nothing to replay.
+        match invoke(&main, "live_link", serde_json::json!({})).expect("main live_link is granted") {
+            tauri::ipc::InvokeResponseBody::Json(body) => assert_eq!(body, "null"),
+            other => panic!("live_link body: {other:?}"),
+        }
+
+        // The socket opens while nobody is listening.
+        let handle = app.handle().clone();
+        for state in [super::control::LinkState::Connecting, super::control::LinkState::Open] {
+            super::emit_live(&handle, super::control::LiveEvent::Link { state, detail: None });
+        }
+
+        // Now the shell subscribes, then asks for the current state.
+        let heard = Arc::new(Mutex::new(Vec::<String>::new()));
+        let sink = heard.clone();
+        main.listen(super::LIVE_EVENT, move |event| sink.lock().unwrap().push(event.payload().to_string()));
+        match invoke(&main, "live_link", serde_json::json!({})).expect("main live_link is granted") {
+            tauri::ipc::InvokeResponseBody::Json(body) => assert_eq!(body, "\"open\""),
+            other => panic!("live_link body: {other:?}"),
+        }
+        assert_eq!(
+            *heard.lock().unwrap(),
+            [r#"{"type":"link","state":"open","detail":null}"#],
+            "the late subscriber hears the open link on node-live"
+        );
+
+        assert_acl_denied(invoke(&assistant, "live_link", serde_json::json!({})), "live_link");
+        assert_eq!(heard.lock().unwrap().len(), 1, "a denied call replays nothing");
     }
 }

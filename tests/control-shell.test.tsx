@@ -25,6 +25,9 @@ type Call = { cmd: string; args: Record<string, unknown> | undefined };
 function stubHost() {
   const calls: Call[] = [];
   const callbacks = new Map<number, (e: unknown) => void>();
+  // The host's socket state (`live_link`). Opening it here emits nothing, like a
+  // bridge that connected before the shell subscribed.
+  const host = { link: null as 'connecting' | 'open' | 'closed' | null };
   const REPLIES: Record<string, (args?: Record<string, unknown>) => unknown> = {
     node_status: () => ({ ready: true, node_id: OWN, error: null }),
     pairing_status: () => paired,
@@ -65,6 +68,10 @@ function stubHost() {
       unreachable: [B],
       estimate: true,
     }),
+    live_link: () => {
+      if (host.link) emitLive({ type: 'link', state: host.link, detail: null });
+      return host.link;
+    },
     'plugin:event|listen': () => 1,
     'plugin:event|unlisten': () => null,
   };
@@ -86,7 +93,7 @@ function stubHost() {
     const handler = callbacks.get(listen!.args!.handler as number)!;
     handler({ event: 'node-live', id: 1, payload });
   };
-  return { calls, emitLive };
+  return { calls, emitLive, host };
 }
 
 describe('control center shell', () => {
@@ -157,7 +164,7 @@ describe('control center shell', () => {
     // Only reads and the spend-window status were used; nothing that spends or edits.
     const used = new Set(calls.map((c) => c.cmd));
     for (const cmd of used) {
-      expect(cmd).toMatch(/^(node_status|pairing_status|node_overview|peers_list|rooms_list|room_members|messages_list|price_quote|payments_overview|fund_state|spend_status|file_price|room_quote|plugin:event\|(un)?listen)$/);
+      expect(cmd).toMatch(/^(node_status|pairing_status|node_overview|peers_list|rooms_list|room_members|messages_list|price_quote|payments_overview|fund_state|spend_status|file_price|room_quote|live_link|plugin:event\|(un)?listen)$/);
     }
     expect(calls.find((c) => c.cmd === 'plugin:event|listen')?.args?.event).toBe('node-live');
 
@@ -169,6 +176,25 @@ describe('control center shell', () => {
     expect(calls.filter((c) => c.cmd === 'plugin:event|listen')).toHaveLength(1);
     expect(calls.filter((c) => c.cmd === 'plugin:event|unlisten')).toHaveLength(0);
   }, 10_000);
+
+  it('shows the link as live when the socket opened before the shell subscribed', async () => {
+    const { calls, host } = stubHost();
+    host.link = 'open';
+    start();
+    await vi.waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
+    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
+
+    // No link event is pushed by the test: the state comes only from the replay
+    // the shell asks for after subscribing.
+    await vi.waitFor(() => expect(mount.querySelector('.node-pill .what')?.textContent).toBe('Node live'));
+    expect(mount.querySelector('[data-pill]')?.getAttribute('data-pill')).toBe('ok');
+    const listenAt = calls.findIndex((c) => c.cmd === 'plugin:event|listen');
+    const replayAt = calls.findIndex((c) => c.cmd === 'live_link');
+    expect(listenAt).toBeGreaterThanOrEqual(0);
+    expect(replayAt).toBeGreaterThan(listenAt);
+    click('[role=tab]:nth-child(1)');
+    await vi.waitFor(() => expect(mount.querySelector('[data-link]')?.getAttribute('data-link')).toBe('open'));
+  });
 
   it('runs on sample data with no host at all', async () => {
     start();

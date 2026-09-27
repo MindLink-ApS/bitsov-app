@@ -26,6 +26,7 @@ import type {
   FundingAddress,
   FundState,
   LiveEvent,
+  LinkState,
   Message,
   NodeOverview,
   Peer,
@@ -55,6 +56,11 @@ export interface Source {
   wallet(): Promise<WalletOverview>;
   /** Subscribe to live events; resolves to an unsubscribe. */
   onLive(handler: (event: LiveEvent) => void): Promise<() => void>;
+  /**
+   * Ask the host to re-send the current `/ws` link state as a `link` live event.
+   * Call it after `onLive` resolves: the socket may have opened before anyone listened.
+   */
+  liveLink(): Promise<LinkState | null>;
   // actions: spending ones are refused by the host outside the owner's spend window
   spendStatus(): Promise<SpendView>;
   /** The owner's one tap: open the short spend window, or ask the node for spend. */
@@ -100,6 +106,7 @@ export const hostSource: Source = {
   priceQuote: (peer) => invoke<PriceQuote>('price_quote', { peer: peer ?? null }),
   wallet: () => invoke<WalletOverview>('payments_overview'),
   onLive: (handler) => listen<LiveEvent>(LIVE_EVENT, (e) => handler(e.payload)),
+  liveLink: () => invoke<LinkState | null>('live_link'),
   spendStatus: () => invoke<SpendView>('spend_status'),
   spendRequest: () => invoke<SpendView>('spend_request'),
   spendLock: () => invoke<SpendView>('spend_lock'),

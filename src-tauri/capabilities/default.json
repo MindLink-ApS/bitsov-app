@@ -20,6 +20,7 @@
     "allow-pairing-status",
     "allow-pairing-retry",
     "allow-node-overview",
+    "allow-live-link",
     "allow-peers-list",
     "allow-rooms-list",
     "allow-room-members",

@@ -586,6 +586,10 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number 
       return { provider: remote.kind, label: remote.label, host: remote.host!, model: remote.model!, text: sampleRemoteText(held.topic, held.preset), sent_bytes: 0 } satisfies RemoteAnswer;
     },
     aiCancel: (id) => ok(disclosures.delete(id)),
+    liveLink: () => {
+      live?.({ type: 'link', state: 'open', detail: null });
+      return ok(live ? ('open' as const) : null);
+    },
     onLive: (handler) => {
       live = handler;
       let i = 0;
