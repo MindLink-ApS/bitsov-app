@@ -124,6 +124,8 @@ export type ActionError = {
     | 'spend_refused'
     | 'owner_only'
     | 'budget_paused' | 'budget_exhausted' | 'ceiling_exhausted' | 'first_contact' | 'budget_needed' | 'budget_unreadable'
+    // G1 node grants: refused before any payment (see src-tauri/src/grant.rs).
+    | 'grant_ended' | 'grant_exhausted' | 'grant_per_call' | 'grant_recipient' | 'grant_unpriced' | 'grant_ledger' | 'grant_refused' | 'grant_unknown'
     | 'room_unreachable'
     | 'not_ready'
     | 'invalid'
@@ -178,7 +180,12 @@ export type BudgetView = {
   presets: BudgetPreset[];
   window_ms: number;
   max_daily_msat: number;
+  /** The live G1 node grant (`GET /pair/grant`) bounding this session's approvals. */
+  node_grant: NodeGrantSummary | null;
 };
+
+/** What the node reports about its budget grant. Numbers only. */
+export type NodeGrantSummary = { expires_at_ms: number; budget_msat: number; remaining_msat: number; per_call_max_msat: number };
 
 /** `message_send`. */
 export type SendReceipt = {

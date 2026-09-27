@@ -481,6 +481,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number 
       presets: SAMPLE_PRESETS,
       window_ms: DAY_MS,
       max_daily_msat: MAX_DAILY_MSAT,
+      node_grant: null,
     };
   };
   const requestElevation = () => {

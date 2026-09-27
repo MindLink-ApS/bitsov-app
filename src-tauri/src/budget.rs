@@ -29,6 +29,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::act::{ActionError, SpendBasis};
+use crate::grant::GrantSummary;
 
 pub const DAY_MS: u64 = 24 * 60 * 60 * 1000;
 
@@ -230,8 +231,13 @@ pub struct Autopay {
 
 impl Autopay {
     pub fn arm(&mut self, now_ms: u64, ceiling_msat: u64, basis: SpendBasis) {
+        self.arm_until(now_ms, u64::MAX, ceiling_msat, basis);
+    }
+
+    /// Open the approval, but never past `until_ms` (a G1 node grant's expiry).
+    pub fn arm_until(&mut self, now_ms: u64, until_ms: u64, ceiling_msat: u64, basis: SpendBasis) {
         self.generation = self.generation.wrapping_add(1);
-        self.open = Some((now_ms + BUDGET_WINDOW_MS, ceiling_msat, basis));
+        self.open = Some(((now_ms + BUDGET_WINDOW_MS).min(until_ms), ceiling_msat, basis));
         self.expired = false;
     }
 
@@ -469,6 +475,8 @@ pub struct BudgetView {
     pub presets: Vec<Preset>,
     pub window_ms: u64,
     pub max_daily_msat: u64,
+    /// The live G1 node grant this run's approvals are bounded by, if any.
+    pub node_grant: Option<GrantSummary>,
 }
 
 pub fn view(book: &Book, autopay: AutopayView, waiting_for_owner: bool, now_ms: u64) -> BudgetView {
@@ -496,6 +504,7 @@ pub fn view(book: &Book, autopay: AutopayView, waiting_for_owner: bool, now_ms: 
         presets: PRESETS.to_vec(),
         window_ms: BUDGET_WINDOW_MS,
         max_daily_msat: MAX_DAILY_MSAT,
+        node_grant: None,
     }
 }
 

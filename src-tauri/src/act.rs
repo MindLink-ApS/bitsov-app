@@ -156,8 +156,13 @@ pub struct SpendGate {
 impl SpendGate {
     /// Open the window for [`SPEND_WINDOW_MS`] from `now_ms`.
     pub fn arm(&mut self, now_ms: u64, basis: SpendBasis) {
+        self.arm_until(now_ms, u64::MAX, basis);
+    }
+
+    /// Open the window, but never past `until_ms` (a G1 node grant's expiry).
+    pub fn arm_until(&mut self, now_ms: u64, until_ms: u64, basis: SpendBasis) {
         self.generation = self.generation.wrapping_add(1);
-        self.open = Some((now_ms + SPEND_WINDOW_MS, basis));
+        self.open = Some(((now_ms + SPEND_WINDOW_MS).min(until_ms), basis));
         self.pending = None;
         self.expired = false;
     }

@@ -288,7 +288,7 @@ export function ControlCenter(props: Props) {
       return { ok: true, value: await run() };
     } catch (e) {
       const error = asActionError(e);
-      if (needsApproval(error) || error.code === 'spend_refused') void loadSpend();
+      if (needsApproval(error) || error.code === 'spend_refused' || error.code === 'grant_ended') void loadSpend();
       return { ok: false, error };
     }
   };
@@ -1402,6 +1402,12 @@ function Reconcile(props: { actions: Actions }) {
 const hoursLeft = (untilMs: number | null, nowMs: number, windowMs = 86_400_000) =>
   Math.min(Math.round(windowMs / 3_600_000), Math.max(1, Math.ceil(((untilMs ?? nowMs) - nowMs) / 3_600_000)));
 
+/** A node grant's remaining life: minutes under an hour, else whole hours. */
+const timeLeft = (untilMs: number, nowMs: number) => {
+  const min = Math.max(1, Math.ceil((untilMs - nowMs) / 60_000));
+  return min < 60 ? `${min} min` : `${Math.ceil(min / 60)} h`;
+};
+
 const PRESET_NAME: Record<PresetId, string> = { careful: 'Careful', everyday: 'Everyday', generous: 'Generous' };
 
 /**
@@ -1616,6 +1622,13 @@ function BudgetPanel(props: {
               <span class="meter" aria-hidden="true"><span style={{ width: pct(b().spent_msat, b().ceiling_msat) }} /></span>
               <Show when={b().unsettled_msat > 0}>
                 <span class="hint" data-unsettled>Includes {sats(b().unsettled_msat)} sats whose outcome is not known yet, counted at their price cap.</span>
+              </Show>
+              <Show when={b().node_grant}>
+                {(g) => (
+                  <span class="hint" data-node-grant>
+                    Your node allows {sats(g().remaining_msat)} of {sats(g().budget_msat)} sats more, at most {sats(g().per_call_max_msat)} per payment, for {timeLeft(g().expires_at_ms, props.now)}.
+                  </span>
+                )}
               </Show>
             </div>
             <p class="spend-line" classList={{ paused: b().paused }} data-autopay={b().paused ? 'paused' : b().autopay.state}>

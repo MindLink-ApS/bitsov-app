@@ -41,6 +41,7 @@ use std::time::{Duration, Instant};
 
 use bitsov_app::act::{self, ActionError};
 use bitsov_app::budget::{self, Book};
+use bitsov_app::grant::{self, NodeGrant};
 use bitsov_app::ai;
 use bitsov_app::control;
 use bitsov_app::spend_journal::{self, Journal, Target};
@@ -152,6 +153,10 @@ struct NodeState {
     autopay: Mutex<budget::Autopay>,
     /// What the owner's pending elevation request should open once granted.
     wants: Mutex<Wants>,
+    /// The G1 node grant (`GET /pair/grant`) this run's approvals were opened
+    /// under, as last read. `Some` means every paid request re-reads it first.
+    /// Memory only, like `spend`.
+    node_grant: Mutex<Option<NodeGrant>>,
     /// Serializes this process's budget-file read-modify-write.
     budget_io: Mutex<()>,
 }
@@ -188,6 +193,7 @@ impl NodeState {
             spend_timeout: Duration::from_secs(120),
             autopay: Mutex::new(budget::Autopay::default()),
             wants: Mutex::new(Wants::default()),
+            node_grant: Mutex::new(None),
             budget_io: Mutex::new(()),
             ready: Mutex::new(false),
             node_id: Mutex::new(None),
@@ -1583,6 +1589,7 @@ async fn money_post(state: &NodeState, auth: Auth, path: &str, body: serde_json:
     let token = state.token.lock().unwrap().clone().ok_or_else(|| ActionError::new("not_ready", "Not authenticated."))?;
     let node_id = state.node_id.lock().unwrap().clone().ok_or_else(|| ActionError::new("not_ready", "No node identity."))?;
     check_auth(state, auth)?;
+    check_node_grant(state, path, &body, max_msat).await?;
     let mut pending = journal.begin(&node_id, path, &body, max_msat)?;
     let charged = match &charge {
         Some(c) => match reserve(state, auth, c, &pending.request_hash, max_msat) {
@@ -1610,9 +1617,18 @@ async fn money_post(state: &NodeState, auth: Auth, path: &str, body: serde_json:
         release(state);
         journal.clear()?;
         state.autopay.lock().unwrap().lock();
+        *state.node_grant.lock().unwrap() = None;
         return Err(state.spend.lock().unwrap().refused());
     }
     let text = response.text().await.map_err(|_| spend_journal::unknown("The response was interrupted."))?;
+    // G1: the node refused under its grant before reserving or paying anything.
+    if let Some(refusal) = grant::refusal(status.as_u16(), &text) {
+        release(state);
+        journal.clear()?;
+        let known = state.node_grant.lock().unwrap().clone();
+        if refusal.ends_grant() { drop_grant(state); }
+        return Err(refusal.error(known.as_ref()));
+    }
     if status == reqwest::StatusCode::CONFLICT && body.get("max_total_msat").is_some()
         && serde_json::from_str::<serde_json::Value>(&text).ok().is_some_and(|v| v["code"] == "price_cap_exceeded") {
         release(state);
@@ -1691,6 +1707,94 @@ async fn do_spend_reconcile(state: &NodeState) -> Result<String, ActionError> {
     }
 }
 
+// ---- G1 node grants -------------------------------------------------------------
+//
+// See `grant.rs`. Without `spend_budget_grant_v1` the node keeps the pre-G1
+// behaviour. With it, `GET /pair/grant` bounds every approval this app opens.
+
+/// Does the node advertise budget grants? An unreadable `/status` is an error.
+async fn node_has_g1(state: &NodeState) -> Result<bool, ActionError> {
+    let status: serde_json::Value = get_json(state, "/status").await.map_err(|_| grant::unreadable())?;
+    let caps = status["api_capabilities"].as_array().ok_or_else(grant::unreadable)?;
+    Ok(caps.iter().any(|v| v.as_str() == Some(grant::CAPABILITY)))
+}
+
+async fn read_grant(state: &NodeState) -> Result<Option<NodeGrant>, ActionError> {
+    let (status, body) = call_api(state, reqwest::Method::GET, "/pair/grant", None).await.map_err(|_| grant::unreadable())?;
+    if !status.is_success() {
+        return Err(grant::unreadable());
+    }
+    grant::parse(&body)
+}
+
+/// Before opening anything on a paired node: `Ok(None)` on a pre-G1 node, the
+/// live grant on a G1 node, or an error that opens nothing (`grant_ended` when
+/// the node holds no live grant, `grant_unknown` when it could not be read).
+async fn grant_for_open(state: &NodeState) -> Result<Option<NodeGrant>, ActionError> {
+    if !node_has_g1(state).await? {
+        return Ok(None);
+    }
+    match read_grant(state).await? {
+        Some(g) if g.live(now_ms()) => Ok(Some(g)),
+        _ => Err(grant::ended()),
+    }
+}
+
+/// Open what was asked, bounded by the node grant when there is one: never past
+/// its expiry, and a budget approval never above its total.
+fn open_want(state: &NodeState, want: Want, basis: act::SpendBasis, node: Option<&NodeGrant>) {
+    let until = node.map_or(u64::MAX, NodeGrant::expires_at_ms);
+    match want {
+        Want::Window => state.spend.lock().unwrap().arm_until(now_ms(), until, basis),
+        Want::Budget(ceiling) => {
+            let ceiling = node.map_or(ceiling, |g| ceiling.min(g.budget_msat));
+            state.autopay.lock().unwrap().arm_until(now_ms(), until, ceiling, basis)
+        }
+    }
+    *state.node_grant.lock().unwrap() = node.cloned();
+}
+
+/// The node grant is gone: close everything that was opened under it.
+fn drop_grant(state: &NodeState) {
+    state.autopay.lock().unwrap().lock();
+    state.spend.lock().unwrap().lock();
+    *state.wants.lock().unwrap() = Wants::default();
+    *state.node_grant.lock().unwrap() = None;
+}
+
+/// Re-read the node grant immediately before a paid request, and refuse what
+/// it would refuse. Only when this run opened its approvals under one.
+async fn check_node_grant(state: &NodeState, path: &str, body: &serde_json::Value, max_msat: u64) -> Result<(), ActionError> {
+    if state.node_grant.lock().unwrap().is_none() {
+        return Ok(());
+    }
+    let now = now_ms();
+    let Some(g) = read_grant(state).await?.filter(|g| g.live(now)) else {
+        drop_grant(state);
+        return Err(grant::ended());
+    };
+    // The node keys a peer message or file by node id and a keysend by
+    // `dest_pubkey`; rooms and invoices are checked member by member there.
+    let recipient = match path {
+        "/payments/keysend" => body["dest_pubkey"].as_str(),
+        "/payments/pay" => None,
+        _ if body["is_room"].as_bool() == Some(true) => None,
+        _ => body["recipient"].as_str(),
+    };
+    let checked = g.check(max_msat, recipient, now);
+    *state.node_grant.lock().unwrap() = Some(g);
+    checked
+}
+
+/// The G1 `budget` proposal for an elevation request. Only a suggestion.
+fn budget_proposal(state: &NodeState, want: Want) -> Option<serde_json::Value> {
+    let book = with_book(state, false, |b| Ok(b.clone())).ok()?;
+    Some(match want {
+        Want::Budget(ceiling) => grant::proposal(ceiling, grant::MAX_TTL_SECS, &book.contacts),
+        Want::Window => grant::proposal(book.ceiling_msat, act::SPEND_WINDOW_MS / 1000, &Default::default()),
+    })
+}
+
 /// Advance the spend window. `ask` is the owner's tap: on rc7 it opens the
 /// app's own window; on a paired node it opens a window over an existing grant
 /// or asks the node for one. Without `ask`, only polls a pending request.
@@ -1705,10 +1809,6 @@ async fn spend_advance_for(state: &NodeState, want: Option<Want>) -> Result<act:
     if want.is_some() && budget_paused(state)? {
         return Err(ActionError::new("budget_paused", "Payments are paused. Resume them first."));
     }
-    let open = |state: &NodeState, want: Want, basis: act::SpendBasis| match want {
-        Want::Window => state.spend.lock().unwrap().arm(now_ms(), basis),
-        Want::Budget(ceiling) => state.autopay.lock().unwrap().arm(now_ms(), ceiling, basis),
-    };
     enum Mode {
         Local,
         Paired { spend: bool },
@@ -1722,12 +1822,26 @@ async fn spend_advance_for(state: &NodeState, want: Option<Want>) -> Result<act:
             spend: session.scopes.iter().any(|s| s == "spend"),
         },
     };
+    // A token that already claims `spend` opens only over a live G1 grant; with
+    // none left on the node, ask again as if it had no `spend`.
+    let mut held: Option<NodeGrant> = None;
+    let mode = match (mode, want) {
+        (Mode::Paired { spend: true }, Some(_)) => match grant_for_open(state).await {
+            Ok(g) => {
+                held = g;
+                Mode::Paired { spend: true }
+            }
+            Err(e) if e.code == "grant_ended" => Mode::Paired { spend: false },
+            Err(e) => return Err(e),
+        },
+        (mode, _) => mode,
+    };
     match mode {
         Mode::Local => {
-            if let Some(want) = want { open(state, want, act::SpendBasis::AppLock); }
+            if let Some(want) = want { open_want(state, want, act::SpendBasis::AppLock, None); }
         }
         Mode::Paired { spend: true } => {
-            if let Some(want) = want { open(state, want, act::SpendBasis::NodeGrant); }
+            if let Some(want) = want { open_want(state, want, act::SpendBasis::NodeGrant, held.as_ref()); }
         }
         Mode::Paired { spend: false } => {
             let (generation, pending) = {
@@ -1762,20 +1876,32 @@ async fn spend_advance_for(state: &NodeState, want: Option<Want>) -> Result<act:
                             &*state.auth.lock().unwrap(),
                             AuthMode::Paired(s) if s.scopes.iter().any(|x| x == "spend")
                         );
+                        // On a G1 node the grant's own terms bound what opens.
+                        let node = if has_spend { Some(grant_for_open(state).await) } else { None };
                         let mut gate = state.spend.lock().unwrap();
                         if !gate.matches_poll(generation, &pending, now_ms()) {
                             return Ok(gate.view(now_ms()));
                         }
                         let wants = std::mem::take(&mut *state.wants.lock().unwrap());
-                        if !has_spend {
-                            state.autopay.lock().unwrap().lock();
-                            return Err(gate.refused());
-                        }
+                        let node = match node {
+                            None => {
+                                state.autopay.lock().unwrap().lock();
+                                return Err(gate.refused());
+                            }
+                            Some(Err(e)) => {
+                                gate.lock();
+                                drop(gate);
+                                drop_grant(state);
+                                return Err(e);
+                            }
+                            Some(Ok(node)) => node,
+                        };
                         // Open only what the owner asked for with this request.
-                        if wants.window { gate.arm(now_ms(), act::SpendBasis::NodeGrant); } else { gate.clear_pending(); }
+                        if !wants.window { gate.clear_pending(); }
                         drop(gate);
+                        if wants.window { open_want(state, Want::Window, act::SpendBasis::NodeGrant, node.as_ref()); }
                         if let Some(ceiling) = wants.budget {
-                            state.autopay.lock().unwrap().arm(now_ms(), ceiling, act::SpendBasis::NodeGrant);
+                            open_want(state, Want::Budget(ceiling), act::SpendBasis::NodeGrant, node.as_ref());
                         }
                     }
                     "expired" | "absent" => {
@@ -1787,14 +1913,16 @@ async fn spend_advance_for(state: &NodeState, want: Option<Want>) -> Result<act:
                     },
                     _ => {}
                 }
-            } else if want.is_some() {
-                let (status, body) = call_api(
-                    state,
-                    reqwest::Method::POST,
-                    "/pair/elevation-request",
-                    Some(serde_json::json!({ "scopes": ["spend"] })),
-                )
-                .await?;
+            } else if let Some(want) = want {
+                let mut ask = serde_json::json!({ "scopes": ["spend"] });
+                // A G1 node shows the owner a budget to approve; the owner's
+                // flags override it. Older nodes get the pre-G1 body.
+                if node_has_g1(state).await.unwrap_or(false) {
+                    if let Some(budget) = budget_proposal(state, want) {
+                        ask["budget"] = budget;
+                    }
+                }
+                let (status, body) = call_api(state, reqwest::Method::POST, "/pair/elevation-request", Some(ask)).await?;
                 if !status.is_success() {
                     return Err(ActionError::node(api_error("/pair/elevation-request", status, &body)));
                 }
@@ -2065,7 +2193,8 @@ fn budget_view(state: &NodeState) -> Result<budget::BudgetView, ActionError> {
     let now = now_ms();
     let autopay = state.autopay.lock().unwrap().view(now);
     let waiting = state.wants.lock().unwrap().budget.is_some() && state.spend.lock().unwrap().view(now).pending.is_some();
-    with_book(state, false, |book| Ok(budget::view(book, autopay, waiting, now)))
+    let node_grant = state.node_grant.lock().unwrap().as_ref().filter(|g| g.live(now)).map(grant::GrantSummary::from);
+    with_book(state, false, |book| Ok(budget::BudgetView { node_grant, ..budget::view(book, autopay, waiting, now) }))
 }
 
 fn budget_target(target: &str, room: bool) -> Result<String, ActionError> {
@@ -3783,6 +3912,199 @@ mod control_act_tests {
         let last = node.seen.lock().unwrap().last().cloned().unwrap();
         assert_eq!((last.1.as_str(), last.2.as_deref()), ("/api/v1/messages/compose", Some("tok.spend")));
         assert_eq!(do_payment_pay(s, "lntb10n1x", 1000, 1000).await.unwrap_err().code, "spend_locked");
+    }
+
+    // ---- G1: budget-scoped node grants -----------------------------------------
+
+    /// A G1 node: advertises `spend_budget_grant_v1`, grants on the second poll,
+    /// and answers `GET /pair/grant` with whatever `grant` holds. `compose`
+    /// overrides the message reply.
+    struct G1 {
+        grant: Arc<Mutex<serde_json::Value>>,
+        compose: Arc<Mutex<Option<(u16, serde_json::Value)>>>,
+        grant_status: Arc<Mutex<u16>>,
+    }
+
+    fn g1_grant(expires_in_secs: i64, budget_msat: u64, remaining_msat: u64) -> serde_json::Value {
+        let now = now_unix();
+        serde_json::json!({"op_id": "ab12", "client_id": "c1", "granted_at": now, "expires_at": now + expires_in_secs,
+            "budget_msat": budget_msat, "used_msat": budget_msat - remaining_msat, "remaining_msat": remaining_msat,
+            "per_call_max_msat": budget_msat, "per_recipient_msat": {}, "used_by_recipient": {}})
+    }
+
+    fn g1_node(scopes: &[&str]) -> (Fake, tempfile::TempDir, G1) {
+        let g1 = G1 {
+            grant: Arc::new(Mutex::new(g1_grant(3600, 400_000, 400_000))),
+            compose: Arc::new(Mutex::new(None)),
+            grant_status: Arc::new(Mutex::new(200)),
+        };
+        let (grant, compose, grant_status) = (g1.grant.clone(), g1.compose.clone(), g1.grant_status.clone());
+        let polls = Arc::new(AtomicUsize::new(0));
+        let far = now_unix() + 900;
+        let routes: Routes = Arc::new(move |m: &str, path: &str, b: &str| {
+            let v = match path {
+                "/status" => serde_json::json!({"api_capabilities": ["paid_send_caps_v1", "room_terminal_outcomes_v1", "spend_budget_grant_v1"]}),
+                "/pair/grant" => {
+                    let status = *grant_status.lock().unwrap();
+                    return (status, serde_json::json!({"grant": *grant.lock().unwrap()}).to_string());
+                }
+                "/pair/elevation-request" => serde_json::json!({"op_id": "ab12", "expires_at": far, "owner_action": "konsensus grant --op ab12"}),
+                "/pair/elevation/ab12" => {
+                    let n = polls.fetch_add(1, Ordering::SeqCst);
+                    serde_json::json!({"op_id": "ab12", "status": if n == 0 { "pending" } else { "granted" }})
+                }
+                r if r.starts_with("/pair/challenge") => serde_json::json!({"challenge": "bitsov-pair-token-v1:00ff"}),
+                "/pair/token" => serde_json::json!({"token": "tok.spend", "expires_at": far, "scopes": ["read", "receive", "spend"]}),
+                "/messages/compose" if compose.lock().unwrap().is_some() => {
+                    let (status, body) = compose.lock().unwrap().clone().unwrap();
+                    return (status, body.to_string());
+                }
+                _ => return happy()(m, path, b),
+            };
+            (200, v.to_string())
+        });
+        let (node, dir) = paired_fake(routes);
+        if let AuthMode::Paired(session) = &mut *node.state.auth.lock().unwrap() {
+            session.scopes = scopes.iter().map(|s| s.to_string()).collect();
+        }
+        (node, dir, g1)
+    }
+
+    /// Ask for a budget and let the owner grant it at the node.
+    async fn g1_approved(node: &Fake, ceiling: u64) -> budget::BudgetView {
+        do_budget_approve(&node.state, ceiling, budget::PresetId::Careful).await.unwrap();
+        spend_advance(&node.state, false).await.unwrap();
+        spend_advance(&node.state, false).await.unwrap();
+        budget_now(&node.state)
+    }
+
+    #[tokio::test]
+    async fn g1_the_ask_carries_a_budget_and_the_node_grant_bounds_the_approval() {
+        let (node, _dir, g1) = g1_node(&["read", "receive"]);
+        with_book(&node.state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
+        // The owner granted 400 sats for one hour, less than the 500 asked for.
+        let v = g1_approved(&node, 500_000).await;
+        assert_eq!(node.posts()[0], ("/pair/elevation-request".to_string(), serde_json::json!({
+            "scopes": ["spend"],
+            "budget": {"budget_msat": 500_000, "ttl_secs": 86_400, "per_recipient_msat": {A: 50_000}},
+        })));
+        assert_eq!((v.autopay.state, v.autopay.ceiling_msat), (budget::AutopayState::Open, Some(400_000)), "the ceiling is the node's");
+        let expires = g1.grant.lock().unwrap()["expires_at"].as_u64().unwrap() * 1000;
+        assert_eq!(v.autopay.open_until_ms, Some(expires), "the approval ends with the node grant, not in 24 h");
+        let node_view = v.node_grant.unwrap();
+        assert_eq!((node_view.budget_msat, node_view.remaining_msat, node_view.expires_at_ms), (400_000, 400_000, expires));
+        assert_eq!(spend_advance(&node.state, false).await.unwrap().state, act::SpendState::Locked, "a budget ask opens no window");
+
+        do_message_send(&node.state, A, false, "gm", 2000, None).await.unwrap();
+        // The grant was read again right before the paid request.
+        let t = node.targets();
+        let compose = t.iter().position(|x| x == "POST /messages/compose").unwrap();
+        assert_eq!(t[compose - 1], "GET /pair/grant");
+    }
+
+    #[tokio::test]
+    async fn g1_a_window_never_outlives_the_node_grant() {
+        let (node, _dir, g1) = g1_node(&["read", "receive"]);
+        *g1.grant.lock().unwrap() = g1_grant(120, 400_000, 400_000);
+        spend_advance(&node.state, true).await.unwrap();
+        assert_eq!(node.posts()[0].1["budget"], serde_json::json!({"budget_msat": 500_000, "ttl_secs": 600}));
+        spend_advance(&node.state, false).await.unwrap();
+        let view = spend_advance(&node.state, false).await.unwrap();
+        let expires = g1.grant.lock().unwrap()["expires_at"].as_u64().unwrap() * 1000;
+        assert_eq!((view.state, view.open_until_ms), (act::SpendState::Open, Some(expires)));
+    }
+
+    #[tokio::test]
+    async fn g1_what_the_grant_would_refuse_is_refused_before_any_payment() {
+        let (node, _dir, g1) = g1_node(&["read", "receive"]);
+        g1_approved(&node, 500_000).await;
+        with_book(&node.state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
+        // Another client of this pairing spent most of the node budget.
+        *g1.grant.lock().unwrap() = g1_grant(3600, 400_000, 1_500);
+        let err = do_message_send(&node.state, A, false, "gm", 2000, None).await.unwrap_err();
+        assert_eq!(err.code, "grant_exhausted");
+        assert!(err.message.contains("1.500 sats left"), "{}", err.message);
+        let mut per_call = g1_grant(3600, 400_000, 400_000);
+        per_call["per_call_max_msat"] = 1000.into();
+        *g1.grant.lock().unwrap() = per_call;
+        assert_eq!(do_message_send(&node.state, A, false, "gm", 2000, None).await.unwrap_err().code, "grant_per_call");
+        let mut recipient = g1_grant(3600, 400_000, 400_000);
+        recipient["per_recipient_msat"] = serde_json::json!({A: 3000});
+        recipient["used_by_recipient"] = serde_json::json!({A: 2000});
+        *g1.grant.lock().unwrap() = recipient;
+        assert_eq!(do_message_send(&node.state, A, false, "gm", 2000, None).await.unwrap_err().code, "grant_recipient");
+        assert_eq!(composes(&node), 0);
+        let v = budget_now(&node.state);
+        assert_eq!((v.spent_msat, v.autopay.state), (0, budget::AutopayState::Open), "nothing reserved; the approval stands");
+        assert!(spend_journal(&node.state).unwrap().pending().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn g1_a_revoked_or_expired_grant_closes_everything_before_any_payment() {
+        for gone in [serde_json::Value::Null, g1_grant(-1, 400_000, 400_000)] {
+            let (node, _dir, g1) = g1_node(&["read", "receive"]);
+            g1_approved(&node, 500_000).await;
+            *g1.grant.lock().unwrap() = gone;
+            assert_eq!(do_message_send_with(&node.state, A, false, "gm", 2000, None, Some(50_000)).await.unwrap_err().code, "grant_ended");
+            assert_eq!(composes(&node), 0);
+            let v = budget_now(&node.state);
+            assert_eq!((v.autopay.state, v.node_grant), (budget::AutopayState::Off, None));
+            assert_eq!(spend_advance(&node.state, false).await.unwrap().state, act::SpendState::Locked);
+        }
+    }
+
+    #[tokio::test]
+    async fn g1_budget_exceeded_releases_the_reservation_per_reason() {
+        for (reason, code, closes) in [
+            ("total", "grant_exhausted", false),
+            ("per_call", "grant_per_call", false),
+            ("recipient", "grant_recipient", false),
+            ("unpriced", "grant_unpriced", false),
+            ("ledger", "grant_ledger", false),
+            ("no_grant", "grant_ended", true),
+        ] {
+            let (node, _dir, g1) = g1_node(&["read", "receive"]);
+            g1_approved(&node, 500_000).await;
+            *g1.compose.lock().unwrap() = Some((409, serde_json::json!({"code": "budget_exceeded", "reason": reason, "remaining_msat": 500, "error": "no"})));
+            let err = do_message_send_with(&node.state, A, false, "gm", 2000, None, Some(50_000)).await.unwrap_err();
+            assert_eq!(err.code, code, "{reason}");
+            assert_eq!(composes(&node), 1, "{reason}");
+            let v = budget_now(&node.state);
+            assert_eq!(v.spent_msat, 0, "{reason}: the node reserved nothing, so neither does the app");
+            assert!(spend_journal(&node.state).unwrap().pending().unwrap().is_none(), "{reason}: not an unknown outcome");
+            assert_eq!(v.autopay.state == budget::AutopayState::Off, closes, "{reason}");
+        }
+    }
+
+    #[tokio::test]
+    async fn g1_an_unreadable_grant_opens_nothing() {
+        let (node, _dir, g1) = g1_node(&["read", "receive"]);
+        *g1.grant_status.lock().unwrap() = 500;
+        do_budget_approve(&node.state, 500_000, budget::PresetId::Careful).await.unwrap();
+        spend_advance(&node.state, false).await.unwrap();
+        assert_eq!(spend_advance(&node.state, false).await.unwrap_err().code, "grant_unknown");
+        assert_eq!(budget_now(&node.state).autopay.state, budget::AutopayState::Off);
+        assert_eq!(spend_advance(&node.state, false).await.unwrap().state, act::SpendState::Locked);
+
+        // And a spend-scoped token on a node whose grant cannot be read opens nothing either.
+        let (node, _dir, g1) = g1_node(&["read", "receive", "spend"]);
+        *g1.grant.lock().unwrap() = serde_json::json!("garbage");
+        assert_eq!(spend_advance(&node.state, true).await.unwrap_err().code, "grant_unknown");
+        assert_eq!(spend_advance(&node.state, false).await.unwrap().state, act::SpendState::Locked);
+    }
+
+    #[tokio::test]
+    async fn g1_a_spend_token_without_a_live_grant_asks_again() {
+        let (node, _dir, g1) = g1_node(&["read", "receive", "spend"]);
+        *g1.grant.lock().unwrap() = serde_json::Value::Null;
+        let view = spend_advance(&node.state, true).await.unwrap();
+        assert_eq!(view.state, act::SpendState::Pending, "a pre-G1 30-day grant is not honoured");
+        assert_eq!(node.posts()[0].0, "/pair/elevation-request");
+        // With a live grant it opens at once, bounded by it.
+        let (node, _dir, _g1) = g1_node(&["read", "receive", "spend"]);
+        let view = spend_advance(&node.state, true).await.unwrap();
+        assert_eq!((view.state, view.basis), (act::SpendState::Open, Some(act::SpendBasis::NodeGrant)));
+        assert!(node.posts().is_empty());
     }
 
     #[tokio::test]

@@ -150,7 +150,10 @@ export const needsApproval = (e: ActionError) =>
 
 /** The host stopped a message on a budget rule: explain in the composer, not as a failed send. */
 export const isBudgetStop = (e: ActionError) =>
-  ['budget_paused', 'budget_exhausted', 'ceiling_exhausted', 'first_contact', 'budget_needed'].includes(e.code);
+  ['budget_paused', 'budget_exhausted', 'ceiling_exhausted', 'first_contact', 'budget_needed'].includes(e.code) || isGrantStop(e);
+
+/** A G1 node refused under its spend grant before any payment. Nothing was sent. */
+export const isGrantStop = (e: ActionError) => e.code.startsWith('grant_');
 
 /** Where one track stands against its budget and the daily total, before sending. */
 export type BudgetStand =

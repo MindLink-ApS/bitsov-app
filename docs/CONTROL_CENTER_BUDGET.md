@@ -1,8 +1,8 @@
 # Control center: invisible payments (B2)
 
-Code: `src-tauri/src/budget.rs` (rules, book, approval), the budget commands and
-`money_post` reservation in `src-tauri/src/main.rs`, and `BudgetBar` /
-`BudgetPanel` in `src/control/Shell.tsx`. Builds on slice B
+Code: `src-tauri/src/budget.rs` (rules, book, approval), `src-tauri/src/grant.rs`
+(G1 node grants), the budget commands and `money_post` reservation in
+`src-tauri/src/main.rs`, and `BudgetBar` / `BudgetPanel` in `src/control/Shell.tsx`. Builds on slice B
 ([CONTROL_CENTER_ACT.md](CONTROL_CENTER_ACT.md)).
 
 Why: paid messaging fails when every message is a prompt (Szabo's mental
@@ -32,19 +32,21 @@ it inside a budget the owner sets once.
 |---|---|---|
 | Budget numbers (daily total, per contact, per room, preset, paused) | `app-spend/budget-<node16>.json`, 0600, write-then-rename, unknown fields refused | yes |
 | Rolling 24 h ledger (reservations and payments by message sends) | same file | yes |
-| The owner's budget approval | `NodeState::autopay`, host memory, 24 h | **no** |
-| Node spend grant (paired #77 nodes) | the node, 30 days (`SPEND_GRANT_TTL_SECS`) | node-side only |
+| The owner's budget approval | `NodeState::autopay`, host memory, 24 h or the node grant's expiry, whichever is first | **no** |
+| Last read of the G1 node grant | `NodeState::node_grant`, host memory | **no** |
+| Node spend grant, G1 node (`spend_budget_grant_v1`) | the node: budget, tally, absolute expiry ≤ 24 h | node-side only |
+| Node spend grant, pre-G1 #77 node | the node, 30 days (`SPEND_GRANT_TTL_SECS`) | node-side only |
 
 - **One approval, via the existing elevation route.** On rc7 the approval is
   the app's own lock (the node scopes nothing). On a paired node without
   `spend`, it goes through `POST /pair/elevation-request` like slice B; the
   owner types `konsensus grant --op …` once. A grant opens only what was asked:
   a budget ask arms the budget approval, never the ten-minute window.
-- **Node gap, stated plainly.** The node has no TTL parameter on elevation; its
-  grant lasts 30 days until the owner revokes it. The app uses it only inside
-  a 24-hour in-memory approval and never writes it down. Replacing the
-  per-session `konsensus grant` step fully needs a node-side budget-scoped
-  grant; that is a node ticket, not this slice.
+- **G1 nodes: the node grant is the source of truth.** See the next section.
+- **Pre-G1 nodes, stated plainly.** Without `spend_budget_grant_v1` the node
+  has no TTL or budget on elevation; its grant lasts 30 days until the owner
+  revokes it. The app uses it only inside a 24-hour in-memory approval and
+  never writes it down.
 - **Budgets are limits, approvals are authority.** A contact's budget holds
   even inside a ten-minute window. Only the budget route is automatic.
 - **Narrow only.** A contact or room budget can be set up to the approved daily
@@ -53,6 +55,49 @@ it inside a budget the owner sets once.
 - **Rolling 24 hours**, not a calendar day: no midnight reset that doubles the
   budget, no time zone to trust. Entries dated in the future (clock moved back)
   still count.
+
+## Budget-scoped node grants (genome G1)
+
+The node advertises `spend_budget_grant_v1` in `/status` → `api_capabilities`
+(genome `docs/SPEND_BUDGET_GRANTS.md`). A paired token's `spend` then comes
+only from a grant with an absolute expiry (at most 24 h), a total, a per-call
+maximum and optional per-recipient budgets, debited by the node before any
+invoice or payment.
+
+- **The ask carries a budget.** On a G1 node, `POST /pair/elevation-request`
+  sends `{"scopes":["spend"],"budget":{…}}`. A budget ask proposes the daily
+  total, `ttl_secs` 86400 and each contact's budget as `per_recipient_msat`
+  (sent only when every entry is well formed, at most 256). A ten-minute
+  window ask proposes the book's daily total for 600 s. It is only a proposal:
+  `konsensus grant --op … [--budget …] [--for …]` overrides it field by field.
+  Older nodes get the pre-G1 body.
+- **`GET /pair/grant` is read, not assumed.** When the owner's grant lands
+  (and when a token already claiming `spend` opens anything), the app reads the
+  grant. The budget approval and the window then end at the grant's
+  `expires_at`, and the approval's ceiling is `min(asked, budget_msat)`. The
+  book's own numbers still apply on top: narrowest wins.
+- **Re-read before every paid request.** While approvals rest on a G1 grant,
+  `money_post` reads `GET /pair/grant` again before journaling anything and
+  refuses what the node would refuse: `per_call_max_msat`, `remaining_msat`
+  and, for a peer message, file or keysend, that recipient's budget. No
+  request is made.
+- **`409 budget_exceeded`, per reason.** The node reserved and paid nothing,
+  so the app releases its reservation and clears the journal (not an unknown
+  outcome). `no_grant` → `grant_ended` and every approval closes (window,
+  budget approval, pending wants). `per_call` → `grant_per_call`, `total` →
+  `grant_exhausted`, `recipient` → `grant_recipient`, `unpriced` →
+  `grant_unpriced` (amountless invoice or first-contact admission), `ledger` →
+  `grant_ledger`, anything else → `grant_refused`. The renderer shows all of
+  them as composer notes, not failed sends; `grant_ended` also re-reads the
+  spend state.
+- **Fail closed.** A grant that is null or expired when read closes
+  everything (`grant_ended`). A `/status` or `/pair/grant` the app cannot read
+  or parse at the moment authority would open opens nothing (`grant_unknown`);
+  a reply without the `grant` key counts as unreadable, not "no grant". A
+  token that still claims `spend` from a pre-G1 30-day grant is not trusted on
+  a G1 node: with no live grant the app asks again.
+- **The Budget panel** shows what the node grant still allows: "Your node
+  allows X of Y sats more, at most Z per payment, for N min".
 
 ## One message, in order
 
@@ -75,8 +120,8 @@ A 401/403 on a money route ends the budget approval as well as the window.
 ## Not in this slice
 
 Files, invoices and direct (keysend) payments keep the ten-minute window and
-are not counted in budgets. Free starter credits, earning back from recipients,
-and a node-side budget-scoped grant are follow-ups.
+are not counted in the app's budgets (a G1 node still debits them against its
+grant). Free starter credits and earning back from recipients are follow-ups.
 
 ## Tests
 
@@ -94,11 +139,20 @@ and a node-side budget-scoped grant are follow-ups.
     plaintext or grant on disk); pause stops everything across a restart;
     unknown outcome keeps the cap reserved, cap refusal releases it; a 403 ends
     the approval; a paired budget grant opens autopay, not the window.
-- `vitest`: `tests/control-budget.test.tsx` (11) — approve once then send twice
+  - `grant::tests` (4) and `control_act_tests` G1 (7) against a fake G1 node:
+    the ask carries the budget and per-contact proposal, and the approval takes
+    the node's ceiling and expiry; a window never outlives the grant;
+    per-call, total and recipient refused before any request; a revoked or
+    expired grant closes everything; each `budget_exceeded` reason releases the
+    reservation and clears the journal; an unreadable grant opens nothing; a
+    `spend` token without a live grant asks again.
+- `vitest`: `tests/control-budget.test.tsx` (13) — approve once then send twice
   with no prompt, first contact asks once with the budget in the recipient's
   price, exhausted explains and raises, a used-up total is a new approval, tally
   and pause-all in the context panel, lower a budget from the panel, host budget
-  refusals are composer notes (not failed sends), pay still uses the window,
+  refusals are composer notes (not failed sends), G1 grant refusals are too and
+  `grant_ended` re-reads the spend state, the node grant line in the Budget
+  panel, pay still uses the window,
   `budgetStand` rules, and the sample source's budget semantics.
 
 Screens (`docs/control-center/`, sample data): `40-budget-approve`,

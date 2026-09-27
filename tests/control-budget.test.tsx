@@ -32,6 +32,7 @@ function budgetView(extra: Partial<BudgetView> = {}): BudgetView {
     presets: SAMPLE_PRESETS,
     window_ms: DAY,
     max_daily_msat: 100_000_000,
+    node_grant: null,
     ...extra,
   };
 }
@@ -260,6 +261,41 @@ describe('invisible payments in the composer and the context panel', () => {
     await vi.waitFor(() => expect(text('[data-composer-note]')).toContain('used 50 of 50 sats'));
     expect($('[data-artifact="failed"]')).toBeNull();
     expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('race');
+  });
+
+  it('a node grant refusal (G1) is a composer note, and an ended grant re-reads the approval', async () => {
+    for (const [code, message] of [
+      ['grant_exhausted', 'Your node’s spend budget has 1 sats left, less than this costs. Nothing was sent.'],
+      ['grant_ended', 'Your node’s spend budget has ended (expired or revoked). Nothing was sent.'],
+    ]) {
+      const host = stubHost(open([{ target: MAYA, room: false, limit_msat: 50_000, spent_msat: 0 }]), {
+        message_send: () => Promise.reject({ code, message }),
+      });
+      await openShell();
+      type('[data-composer] textarea', 'race');
+      await vi.waitFor(() => expect(text('[data-send]')).toBe('Send · 2 sats'));
+      const spendReads = host.used('spend_status').length;
+      submit();
+      await vi.waitFor(() => expect(text('[data-composer-note]')).toContain('Nothing was sent'));
+      expect($('[data-artifact="failed"]')).toBeNull();
+      expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('race');
+      if (code === 'grant_ended') await vi.waitFor(() => expect(host.used('spend_status').length).toBeGreaterThan(spendReads));
+      dispose?.();
+      dispose = undefined;
+      mount.remove();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('shows what the node grant still allows in the budget panel', async () => {
+    const until = Date.now() + 30 * 60_000;
+    stubHost(open([{ target: MAYA, room: false, limit_msat: 50_000, spent_msat: 0 }], {
+      node_grant: { expires_at_ms: until, budget_msat: 400_000, remaining_msat: 396_000, per_call_max_msat: 50_000 },
+    }));
+    await openShell();
+    $<HTMLButtonElement>('[data-tab="budget"]')!.click();
+    await vi.waitFor(() => expect($('[data-node-grant]')).not.toBeNull());
+    expect(text('[data-node-grant]')).toBe('Your node allows 396 of 400 sats more, at most 50 per payment, for 30 min.');
   });
 
   it('files and payments still use the ten-minute window', async () => {
