@@ -2,14 +2,17 @@
 # T1: two real node processes, fake Lightning, loopback-only macOS sandbox.
 # Prerequisites: macOS, git, Cargo, Python >=3.11 with cryptography installed.
 # Usage: scripts/two-node-mock-harness.sh /absolute/path/to/genome [--allow-known-gaps]
-# The genome checkout must be clean at the pinned SHA. Build uses Cargo --offline.
+# The genome checkout must be clean; its actual SHA is recorded. Cargo is offline.
+# Exit 2: identified missing mock/capped-first-contact/file-staging capabilities.
 # Exit 0: all strict mock E2E assertions pass. Real-Lightning limits stay explicit.
 # Remaining real-Lightning limitations are listed in summary.json; they do not mask failed checks.
 # Exit 1: failed prerequisite/assertion. Logs/HTTP transcripts stay in a new /tmp directory.
 # This does NOT launch Tauri, a wallet, Docker, LND, LDK or any cloud infrastructure.
 set -euo pipefail
 umask 077
-GENOME_SHA=ba8385ac20dbfce716361429df5ec1a1e501af35
+export PYTHONDONTWRITEBYTECODE=1
+# Normalize prerequisite/tool failures too (git=128, cargo=101, command-not-found=127).
+trap 'rc=$?; if [[ $rc -eq 0 ]]; then exit 0; else exit 1; fi' EXIT
 APP_CONTRACT_SHA=587d078bc93fb869c0f801f7bd02d91ec99f227f
 if [[ $# -lt 1 || $# -gt 2 || ( $# -eq 2 && $2 != --allow-known-gaps ) ]]; then
   echo "Usage: $0 /absolute/path/to/genome [--allow-known-gaps]" >&2
@@ -17,7 +20,9 @@ if [[ $# -lt 1 || $# -gt 2 || ( $# -eq 2 && $2 != --allow-known-gaps ) ]]; then
 fi
 [[ $(uname -s) == Darwin ]] || { echo 'Use a macOS machine/CI runner: sandbox-exec is required.' >&2; exit 1; }
 GENOME=$(cd "$1" && pwd -P)
-[[ $(git -C "$GENOME" rev-parse HEAD) == "$GENOME_SHA" ]] || { echo 'Wrong genome revision.' >&2; exit 1; }
+GENOME_SHA=$(git -C "$GENOME" rev-parse HEAD)
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd -P)
+APP_SHA=$(git -C "$SCRIPT_DIR" rev-parse HEAD)
 [[ -z $(git -C "$GENOME" status --porcelain --untracked-files=normal) ]] || { echo 'Genome checkout must be clean.' >&2; exit 1; }
 python3 -c 'import tomllib; from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey'
 command -v cargo >/dev/null
@@ -26,10 +31,49 @@ EVIDENCE=$(mktemp -d /tmp/bitsov-t1-evidence.XXXXXX)
 echo "Evidence: $EVIDENCE"
 printf '%s\n' "$GENOME_SHA" > "$EVIDENCE/genome-sha.txt"
 printf '%s\n' "$APP_CONTRACT_SHA" > "$EVIDENCE/app-contract-sha.txt"
-# Use a dedicated cache; never execute a caller-supplied node binary.
-CARGO_TARGET_DIR=/tmp/bitsov-t1-target cargo build --locked --offline \
-  --manifest-path "$GENOME/Cargo.toml" -p konsensus-node --bin konsensus \
-  > "$EVIDENCE/build.log" 2>&1
+# Every run owns a fresh private runtime/build root; existing caches are never used.
+WORK=$(mktemp -d /tmp/bitsov-t1-run.XXXXXX)
+printf '%s\n' "$WORK" > "$EVIDENCE/runtime-root.txt"
+known_gaps=0
+runner_pid=''
+finish() {
+  rc=$?
+  trap - EXIT HUP INT TERM
+  if [[ $rc -ne 0 && ! ( $rc -eq 2 && $known_gaps -eq 1 ) ]]; then rc=1; fi
+  if [[ -n "$runner_pid" ]] && kill -0 "$runner_pid" 2>/dev/null; then
+    kill -TERM "$runner_pid" 2>/dev/null || true
+    wait "$runner_pid" || rc=1
+  fi
+  if ! python3 "$SCRIPT_DIR/two_node_evidence.py" --scan "$EVIDENCE"; then
+    echo 'FAIL: secret pattern or unsafe artifact found in evidence (artifact removed).' >&2
+    rc=1
+  fi
+  if [[ -L "$WORK" ]]; then
+    echo 'FAIL: refusing cleanup of replaced runtime symlink.' >&2
+    rc=1
+  else
+    rm -rf -- "$WORK" || rc=1
+  fi
+  exit "$rc"
+}
+trap finish EXIT
+trap 'exit 1' HUP INT TERM
+# These named capabilities are the known plain-main gaps. Other failures stay 1.
+missing=()
+for feature in crates/konsensus-lightning/src/shared_mock.rs crates/konsensus-core/src/admission_quote.rs crates/konsensus-api/src/file_staging.rs; do
+  [[ -f "$GENOME/$feature" ]] || missing+=("$feature")
+done
+if [[ ${#missing[@]} -gt 0 ]]; then
+  echo "Known genome gaps at $GENOME_SHA: ${missing[*]}; requires shared mock settlement, capped first contact and paired file staging." >&2
+  printf '%s\n' "${missing[@]}" > "$EVIDENCE/known-gaps.txt"
+  known_gaps=1
+  exit 2
+fi
+mkdir -m 700 "$WORK/target"
+# Capture and redact compiler output before it can enter the evidence directory.
+CARGO_TARGET_DIR="$WORK/target" cargo build --locked --offline \
+  --manifest-path "$GENOME/Cargo.toml" -p konsensus-node --bin konsensus 2>&1 |
+  python3 "$SCRIPT_DIR/two_node_evidence.py" --build-log "$EVIDENCE/build.log"
 cat > "$EVIDENCE/loopback.sb" <<'SANDBOX'
 (version 1)
 (allow default)
@@ -41,7 +85,7 @@ cat > "$EVIDENCE/loopback.sb" <<'SANDBOX'
 SANDBOX
 # The entire runtime (including children and HTTP probes) inherits this policy.
 # No DNS or non-loopback socket is permitted, even for node background jobs.
-cat > "$EVIDENCE/runner.py" <<'PY'
+cat > "$WORK/runner.py" <<'PY'
 import base64
 import errno
 import hashlib
@@ -61,16 +105,22 @@ import sys
 import threading
 import time
 import tomllib
+from two_node_evidence import Evidence, ConsoleCapture
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 E = Path(sys.argv[1])
 # --allow-known-gaps is retained for old callers; no assertion is bypassed.
-BIN = '/tmp/bitsov-t1-target/debug/konsensus'
-ROOTS = {n: Path('/tmp/bitsov-t1-' + n) for n in ('a', 'b')}
+WORK = Path(sys.argv[2])
+GENOME_SHA = sys.argv[3]
+APP_SHA = sys.argv[4]
+BIN = str(WORK / 'target/debug/konsensus')
+ROOTS = {n: WORK / n for n in ('a', 'b')}
+evidence = Evidence(E)
+grants = {}
+capture_errors = []
 owned = []
 nodes = {}
-logs = []
 readers = []
 checks = []
 seq = 0
@@ -87,6 +137,7 @@ closed_mesh_e2e = False
 strict_e2e = False
 
 def check(name, condition, detail=None):
+    detail = evidence.clean(detail)
     checks.append({'name': name, 'pass': bool(condition), 'detail': detail})
     print(('PASS ' if condition else 'FAIL ') + name, flush=True)
     if not condition:
@@ -95,8 +146,8 @@ def check(name, condition, detail=None):
 def run(*args, input=None):
     result = subprocess.run(args, input=input, text=True, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, timeout=60, check=True)
-    with (E / 'commands.log').open('a') as f:
-        f.write(json.dumps({'argv': args, 'output': result.stdout}) + '\n')
+    # init/node-id output is not needed as evidence; never persist CLI secrets.
+    evidence.write('commands.log', {'command': args[1], 'exit': result.returncode}, append=True)
     return result.stdout
 
 def req(n, method, path, body=None, token=None, expect=None, drop=False):
@@ -129,8 +180,8 @@ def req(n, method, path, body=None, token=None, expect=None, drop=False):
         raise
     finally:
         conn.close()
-        with (E / 'http.jsonl').open('a') as f:
-            f.write(json.dumps(record) + '\n')
+        record = evidence.clean(record)
+        evidence.write('http.jsonl', record, append=True)
     if expect is not None:
         check(f'{method} {n}{path}: HTTP {expect}', response.status == expect, record)
     return response.status, value
@@ -209,11 +260,12 @@ content_dir = "{root}/pages"
     check(f'{n} config: loopback listeners', all(parsed[x]['listen_addr'].startswith('127.0.0.1:') for x in ('api', 'network')))
     (root / 'konsensus.toml').write_text(text)
     # No private keys copied into evidence. This config's JWT secret is disposable.
-    (E / f'{phase}-{n}.toml').write_text(text)
+    evidence.remember(secrets[n])
+    evidence.write(f'{phase}-{n}.toml', text)
 
 def start(n):
-    logfile = (E / f'{phase}-{n}.log').open('wb')
-    logs.append(logfile)
+    logname = f'{phase}-{n}.log'
+    console = ConsoleCapture(evidence, logname, grants)
     master, slave = pty.openpty()
     def capture():
         try:
@@ -221,11 +273,14 @@ def start(n):
                 data = os.read(master, 65536)
                 if not data:
                     break
-                logfile.write(data)
-                logfile.flush()
-        except OSError:
-            pass  # PTY reports EIO when the child closes its terminal.
+                console.feed(data)
+        except OSError as error:
+            if error.errno != errno.EIO:
+                capture_errors.append(type(error).__name__)
+        except Exception as error:
+            capture_errors.append(type(error).__name__)
         finally:
+            console.finish()
             os.close(master)
     # Owner grant deliberately writes to /dev/tty, not redirected stdout.
     # Give each disposable node its own controlling terminal and capture it.
@@ -243,7 +298,7 @@ def start(n):
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
         if nodes[n].poll() is not None:
-            raise RuntimeError(f'{n} exited; see {logfile.name}')
+            raise RuntimeError(f'{n} exited; see {logname}')
         try:
             if req(n, 'GET', '/health')[0] == 200:
                 return
@@ -262,8 +317,7 @@ def stop():
         except subprocess.TimeoutExpired:
             os.killpg(process.pid, signal.SIGKILL)
             process.wait(timeout=5)
-        with (E / 'processes.jsonl').open('a') as f:
-            f.write(json.dumps({'phase': phase, 'node': n, 'pid': process.pid, 'exit': process.returncode}) + '\n')
+        evidence.write('processes.jsonl', {'phase': phase, 'node': n, 'pid': process.pid, 'exit': process.returncode}, append=True)
     nodes.clear()
     for reader in readers:
         reader.join(timeout=3)
@@ -292,17 +346,16 @@ def pair(n):
 
 def elevate(n):
     op = post(n, '/pair/elevation-request', {'scopes': ['spend']})['op_id']
-    logfile = E / f'{phase}-{n}.log'
     deadline = time.monotonic() + 3
     phrase = None
     while time.monotonic() < deadline:
-        match = re.search(r'GRANT spend TO ' + re.escape(op) + r' CODE [0-9a-f]{64}', logfile.read_text())
-        if match:
-            phrase = match.group(0)
+        phrase = grants.pop(op, None)
+        if phrase:
             break
         time.sleep(.05)
     check('owner console provides operation-bound grant', phrase is not None)
-    run(BIN, 'grant', '--config', str(ROOTS[n] / 'konsensus.toml'), '--op', op, input=phrase + '\n')
+    run(BIN, 'grant', '--config', str(ROOTS[n] / 'konsensus.toml'), '--op', op,
+        '--budget', '100', '--for', '1h', '--per-call', '10', '--yes', input=phrase + '\n')
     get(n, '/pair/elevation/' + op)
     check('fresh paired token has spend', 'spend' in refresh(n)['scopes'])
 
@@ -323,7 +376,7 @@ def messages(n='b'):
 
 def assert_received(reply, text, room=None):
     path = '/messages?limit=100' + ('&peer=' + room if room else '')
-    rows = wait_for('b', path, lambda rows: any(r['id'] == reply['message_id'] for r in rows))
+    rows = wait_for('b', path, lambda rows: any(r['id'] == reply['message_id'] and r.get('plaintext') is not None for r in rows))
     row = next(r for r in rows if r['id'] == reply['message_id'])
     check('receiver decrypted exact plaintext', row.get('plaintext') == text, row)
     check('wire payload is encrypted', row['ciphertext'] != text.encode().hex())
@@ -359,7 +412,7 @@ def lost_response(body):
         finally:
             client.close()
             worker.join(timeout=45)
-            (E / 'lost-response-client.json').write_text(json.dumps(record, indent=2))
+            evidence.write('lost-response-client.json', record)
         check('caller lost reply after exactly one upstream dispatch', len(observed) == 1 and not failures and not worker.is_alive(), failures)
     return observed[0]  # Observer evidence only; the caller received no receipt.
 
@@ -390,12 +443,15 @@ try:
         root.mkdir(mode=0o700)
         owned.append(root)
         run(BIN, 'init', '--dir', str(root), '--non-interactive', '--tier', 'light')
+        evidence.remember((root / 'mnemonic.txt').read_text().strip())
         ids[n] = run(BIN, 'node-id', '--config', str(root / 'konsensus.toml')).strip().splitlines()[-1]
         check('fresh node identity syntax', re.fullmatch('[0-9a-f]{64}', ids[n]) is not None)
         secrets[n] = os.urandom(32).hex()
+        evidence.remember(secrets[n])
         admin[n] = jwt(n)
+        evidence.remember(admin[n])
     check('independent identities', ids['a'] != ids['b'])
-    (E / 'runtime.json').write_text(json.dumps({'ports': ports, 'node_ids': ids}, indent=2))
+    evidence.write('runtime.json', {'ports': ports, 'node_ids': ids})
     phase = 'strict-price-open'
     for n in ROOTS:
         config(n, True)
@@ -414,14 +470,18 @@ try:
     get('b', '/pricing')
     before = balance()
     refusal = post('a', '/messages/compose', compose, expect=409)
-    check('first contact cap refusal is explicit', refusal.get('code') == 'price_cap_exceeded', refusal)
+    check('paired first contact refuses unreserved admission', refusal.get('code') == 'budget_exceeded', refusal)
+    check('paired first contact refusal spends nothing', balance() == before)
+    gaps.append('Paired spend grants refuse unpriced first-contact admission; owner fixture establishes the strict capped session before paired established sends.')
+    refusal = post('a', '/messages/compose', compose, owner=True, expect=409)
+    check('owner first contact cap refusal is explicit', refusal.get('code') == 'price_cap_exceeded', refusal)
     check('first contact refusal spends nothing', balance() == before)
     # The target prices admission and the message at 2,000 each. Rate limiting
     # intentionally bounds unpaid quote requests, including after cap refusal.
     time.sleep(11)
     compose['max_total_msat'] = 4000
-    reply = post('a', '/messages/compose', compose)
-    check('strict first contact aggregate principal exact', reply['amount_msat'] == 4000 and before - balance() == 4000, reply)
+    reply = post('a', '/messages/compose', compose, owner=True)
+    check('owner strict first contact aggregate principal exact', reply['amount_msat'] == 4000 and before - balance() == 4000, reply)
     assert_received(reply, compose['plaintext'])
     payments = get('b', '/payments')
     check('recipient records both incoming settlements', sum(p['amount_msat'] for p in payments if p['direction'].lower() == 'incoming' and p['status'].lower() == 'settled') >= 4000, payments)
@@ -514,13 +574,16 @@ try:
     gaps.append('A+B room has two members but only one remote paid recipient; two-remote-member fan-out needs a third node.')
     gaps.append('Shared mock uses signed regtest invoices and strict recipient settlement lookup, but does not simulate channel liquidity, routing fees, HTLC timing, or real LND/LDK dispatch. Only the final stock-mock error diagnostic disables settlement lookup.')
     exit_code = 0
+except BaseException as error:
+    # Exception objects can contain raw HTTP/CLI credentials: redact diagnostics.
+    evidence.write('failure.json', {'type': type(error).__name__, 'error': str(error)})
+    print('FAIL: ' + type(error).__name__ + '; see sanitized failure.json', flush=True)
+    exit_code = 1
 finally:
     # A second interrupt must not interrupt teardown of detached node sessions.
     for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(sig, signal.SIG_IGN)
     stop()
-    for logfile in logs:
-        logfile.close()
     recovery = [p.name for p in E.glob('*-*.log')
                 if 'decryption failed, removing stale session' in p.read_text()]
     if recovery:
@@ -535,11 +598,25 @@ finally:
                'strict_price_open_e2e': strict_e2e, 'cleanup_complete': cleanup,
                'closed_mesh_e2e': closed_mesh_e2e, 'startup_recovery_logs': recovery,
                'app_contract': '587d078bc93fb869c0f801f7bd02d91ec99f227f',
-               'genome': 'ba8385ac20dbfce716361429df5ec1a1e501af35'}
-    (E / 'summary.json').write_text(json.dumps(summary, indent=2))
+               'app': APP_SHA, 'genome': GENOME_SHA}
+    if capture_errors:
+        exit_code = 1
+    summary['capture_errors'] = capture_errors
+    summary['exit_code'] = exit_code
+    evidence.write('summary.json', summary)
+    scan_passed = evidence.scan()
+    if not scan_passed:
+        exit_code = 1
+        print('FAIL: secret pattern in evidence; unsafe artifact removed.', flush=True)
+    summary['evidence_scan_passed'] = scan_passed
+    summary['exit_code'] = exit_code
+    evidence.write('summary.json', summary)
     print(f'Cleanup complete: {cleanup}; evidence: {E}', flush=True)
 if gaps:
     print('See summary.json for real-Lightning and UI coverage limits.', flush=True)
 sys.exit(exit_code)
 PY
-exec sandbox-exec -f "$EVIDENCE/loopback.sb" python3 "$EVIDENCE/runner.py" "$EVIDENCE" "${2:-}"
+PYTHONPATH="$SCRIPT_DIR" sandbox-exec -f "$EVIDENCE/loopback.sb" python3 "$WORK/runner.py" "$EVIDENCE" "$WORK" "$GENOME_SHA" "$APP_SHA" &
+runner_pid=$!
+wait "$runner_pid"
+runner_pid=''
