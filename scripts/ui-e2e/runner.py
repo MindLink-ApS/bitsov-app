@@ -163,11 +163,14 @@ def jwt(n):
     return (unsigned + b'.' + sig).decode()
 
 
-def api(n, method, path, body=None, expect=None):
+def api(n, method, path, body=None, expect=None, token=None, anonymous=False):
     conn = http.client.HTTPConnection('127.0.0.1', ports[n][0], timeout=40)
     raw = None if body is None else json.dumps(body)
+    headers = {'Content-Type': 'application/json'}
+    if not anonymous:
+        headers['Authorization'] = 'Bearer ' + (token or jwt(n))
     try:
-        conn.request(method, '/api/v1' + path, raw, {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + jwt(n)})
+        conn.request(method, '/api/v1' + path, raw, headers)
         r = conn.getresponse()
         data = r.read().decode()
     finally:
@@ -185,6 +188,49 @@ def api(n, method, path, body=None, expect=None):
 
 def get(n, path):
     return api(n, 'GET', path, expect=200)[1]
+
+
+readers = {}  # node -> (key, client_id, token)
+
+
+def pair_reader(n):
+    """A read-only paired client on node n, for evidence reads that genome #82
+    restricts to a local paired read (/energy, /membrane). The same pairing
+    ceremony as PR #46; the app never sees or uses this client."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    key = Ed25519PrivateKey.generate()
+    pub = key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw).hex()
+    reply = api(n, 'POST', '/pair/request', {'client_name': 'UI-E2E evidence reader', 'client_pubkey': pub},
+                expect=200, anonymous=True)[1]
+    challenge = Path(reply['challenge_path']).read_bytes()
+    proof = reply['pair_id'].encode() + pub.encode() + challenge
+    reply = api(n, 'POST', '/pair/confirm', {'pair_id': reply['pair_id'], 'signature': key.sign(proof).hex()},
+                expect=200, anonymous=True)[1]
+    readers[n] = (key, reply['client_id'], None)
+    return refresh_reader(n)
+
+
+def refresh_reader(n):
+    key, client, _ = readers[n]
+    challenge = api(n, 'GET', '/pair/challenge?client_id=' + client, expect=200, anonymous=True)[1]['challenge']
+    token = api(n, 'POST', '/pair/token', {'client_id': client, 'challenge': challenge,
+                                           'signature': key.sign(challenge.encode()).hex()},
+                expect=200, anonymous=True)[1]['token']
+    readers[n] = (key, client, token)
+    return token
+
+
+def read(n, path):
+    """GET with node n's paired evidence reader (re-issuing its token once)."""
+    if n not in readers:
+        pair_reader(n)
+    status, value = api(n, 'GET', path, token=readers[n][2])
+    if status == 401:
+        status, value = api(n, 'GET', path, token=refresh_reader(n))
+    if status != 200:
+        raise RuntimeError(f'GET {n}{path} (paired reader): HTTP {status} {str(value)[:200]}')
+    return value
 
 
 def wait_until(fn, seconds=30, every=0.5):
@@ -376,6 +422,10 @@ try:
     config('a')
     (E / 'runtime.json').write_text(json.dumps({'ports': ports, 'node_ids': ids}, indent=2))
     start_b()
+    try:
+        pair_reader('b')
+    except Exception as error:  # evidence only; the steps say what they could not read
+        log('note: no paired evidence reader on node B:', error)
 
     # Node A is started by the app (the #44 dev path, which starts it with
     # --owner-control). The wrapper only adds the loopback sandbox.

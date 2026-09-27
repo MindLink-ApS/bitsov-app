@@ -47,7 +47,9 @@ function find({ selector, text, exact, within, nth, role }) {
     // Prefer the innermost match so a click lands on the control, not a wrapper.
     els = els.filter((el) => !els.some((other) => other !== el && el.contains(other)));
   }
-  return els[nth ?? 0] ?? null;
+  // A negative nth counts from the end (-1: the latest match).
+  const i = nth ?? 0;
+  return (i < 0 ? els[els.length + i] : els[i]) ?? null;
 }
 
 async function waitFor(q, timeoutMs = 15000) {

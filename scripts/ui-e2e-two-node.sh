@@ -61,7 +61,7 @@ cat > "$EVIDENCE/loopback.sb" <<'SANDBOX'
 SANDBOX
 
 status=0
-python3 "$APP/scripts/ui-e2e/runner.py" "$EVIDENCE" "$APP" "$BIN" || status=$?
+PYTHONDONTWRITEBYTECODE=1 python3 "$APP/scripts/ui-e2e/runner.py" "$EVIDENCE" "$APP" "$BIN" || status=$?
 
 # Screenshots + walk-through video from the snapshots (best effort).
 if [[ -z ${PLAYWRIGHT_MODULE:-} ]]; then

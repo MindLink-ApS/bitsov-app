@@ -68,6 +68,10 @@ def run(r):
         printed = re.findall(r'bitsov pairing code for "[^"]+": (\S+)', r.logs['app'].read_text(errors='replace'))
         s.check('access is read + receive', 'read + receive' in r.text('[data-pairing="paired"]'))
         s.check('short code matches what node A printed', printed and printed[-1] in code, {'ui': code, 'node': printed})
+        try:  # evidence only: genome #82 serves /energy and /membrane to a local paired read
+            r.pair_reader('a')
+        except Exception as error:
+            s.note(f'no paired evidence reader on node A: {error}')
         r.ui('wait', text='I understand — continue to funding', role='button', timeoutMs=60000)
         s.check('identity gate shows the running node id', a[:8] in r.text() or a[-8:] in r.text(), r.text()[:300])
         s.check('local-trust notice before deposit', r.ui_try('exists', selector='[data-gate="g6-local-trust"]'))
@@ -126,50 +130,52 @@ def run(r):
     # ---------------------------------------------------------------- step 3
     with r.Step(3, 'First contact to node B (stranger, price_open): door card, send under cap, admitted, B receives') as s:
         r.ui('click', selector=track(b))
-        cost = r.ui_try('wait', selector='[data-cost]', timeoutMs=20000) and r.text('[data-cost]')
-        s.snap('first-contact-composer')
-        b_price = r.get('b', '/pricing')
-        s.note(f"B's own price table: {b_price}")
-        if not s.check("composer shows B's price (not an estimate from A's own)", cost and '’s price' in cost and 'Estimate' not in cost, cost):
-            r.bug("The door never shows the stranger's own price",
-                  f"Composer: {cost!r}. B (price_open) drops A's PriceTable and sends none of its own to an unprivileged "
-                  "peer (P2), and after admission A still has no cached quote for B, so the app caps every send at A's own "
-                  "price. A peer whose price is above yours can never be paid from the app (over-cap every time).",
-                  'genome pricing exchange (P2) + app price_quote')
-        first = r.ui_try('wait', selector='[data-first-contact]', timeoutMs=10000)
+        first = r.ui_try('wait', selector='[data-first-contact]', timeoutMs=20000)
         s.check('first paid message asks once', first, r.text('[data-composer]') if not first else None)
-        if first:
-            r.ui('click', selector='[data-first-budget]')
-        text = f'UI-E2E first contact {int(time.time())}'
+        # The door card: B's own signed quote, read before anything is paid.
+        door = r.ui_try('wait', selector='[data-door-quote]', timeoutMs=30000)
+        quoted = r.ui('attrs', selector='[data-door-quote]', names=['data-door-quote']) if door else []
+        total = int(quoted[0]['data-door-quote']) if quoted else None
+        cost = r.ui_try('text', within={'selector': '[data-cost]'}) or ''
+        s.snap('first-contact-door')
+        b_price = r.get('b', '/pricing')['prices']['communication']
+        s.note(f"door card: {quoted[0]['text'] if quoted else None!r}; B's own chat price {b_price} msat")
+        s.check("door card shows B's own signed quote before paying", total is not None and total >= b_price, quoted)
+        if not s.check("composer shows B's quote, not an estimate from A's own price", 'own quote' in cost and 'Estimate' not in cost, cost):
+            r.bug("The door never shows the stranger's own price",
+                  f"Composer: {cost!r}. No stranger quote reached the app before paying.",
+                  'genome first-contact quote / app door card')
+        balance_before = r.get('a', '/payments/balance')['balance_msat']
         before_b = r.get('b', '/payments')
+        r.ui('click', selector='[data-first-budget]')  # the owner's one confirmation, with B's budget
+        text = f'UI-E2E first contact {int(time.time())}'
         send_message(text)
-        time.sleep(1)
-        delivered = r.ui_try('wait', selector='article.msg.out [data-delivery="delivered"]', timeoutMs=45000)
+        delivered = r.ui_try('wait', selector='article.msg.out [data-delivery="delivered"]', timeoutMs=60000)
         note = r.ui_try('text', within={'selector': '[data-composer-note]'})
         s.snap('first-contact-result')
         received = b_has(text, seconds=5 if note else 30)
-        s.check('B received the first-contact message', received, note or r.text()[:500])
-        if not received:
-            r.bug('First contact under a G1 budget grant is refused (grant_unpriced)',
-                f'App note: {note!r}. With F1 (#83) and G1 (#81) merged, a paired client with a budget grant '
-                'is still refused for first-contact admission: the F1×G1 aggregate-debit integration in '
-                'F1-CAPPED-FIRST-CONTACT.md ("Until this integration is made, retain G1\'s fail-closed first-contact refusal") '
-                'is not implemented on either PR. Tonight, the app cannot open a conversation with a price_open stranger.',
-                'genome #81 / #83')
-            # Keep going: the owner opens the door once with node A's owner key,
-            # capped at B's quoted admission + message (4,000 msat), as PR #46 does.
-            reply = r.api('a', 'POST', '/messages/compose', {'recipient': b, 'is_room': False, 'kind': 0,
-                                                             'plaintext': text + ' (owner key)', 'max_total_msat': 4000})
-            s.note(f'WORKAROUND (not the UI): owner-key first contact → HTTP {reply[0]} {str(reply[1])[:200]}')
-            ok = reply[0] == 200 and b_has(text + ' (owner key)')
-            s.check('owner-key first contact admitted by settlement and received by B', ok, reply)
+        s.check('sent from the app with one owner OK (no CLI, no owner key)', received, note or r.text()[:500])
+        s.check('B received the first-contact message', received, note)
+        paid = balance_before - r.get('a', '/payments/balance')['balance_msat']
+        s.check('A paid at most the confirmed cap (admission + message)', total is not None and 0 < paid <= total,
+                {'paid_msat': paid, 'cap_msat': total})
         paid_in = [p for p in r.get('b', '/payments') if p not in before_b and str(p.get('direction', '')).lower() == 'incoming'
                    and str(p.get('status', '')).lower() == 'settled']
-        s.check('B recorded settled incoming payments (admission + message)', sum(p['amount_msat'] for p in paid_in) >= 4000, paid_in)
-        membrane_b = r.get('b', '/membrane?limit=50')
+        s.check('B recorded settled incoming payments (admission + message)', total is not None and sum(p['amount_msat'] for p in paid_in) == paid,
+                paid_in)
+        membrane_b = r.read('b', '/membrane?limit=50')
         admitted = [e for e in (membrane_b.get('events', membrane_b) if isinstance(membrane_b, dict) else membrane_b)
                     if e.get('verdict') == 'admitted']
         s.check("B's membrane (N2) logged the admission by settlement", admitted, membrane_b)
+        status = r.run('sandbox-exec', '-f', str(r.SANDBOX), r.BIN, 'pair-status', '--config', str(r.ROOTS['a'] / 'konsensus.toml'))
+        s.note('node grant after first contact: ' + ' '.join(l for l in status.splitlines() if 'SPEND GRANT' in l)[:200])
+        if not received:
+            r.bug('First contact from the app did not complete', f'App note: {note!r}', 'genome #85 / app #45')
+            # Keep the run going for steps 4–7: the owner's key opens the door
+            # once, capped (as PR #46 does). Labelled; this is not the UI path.
+            reply = r.api('a', 'POST', '/messages/compose', {'recipient': b, 'is_room': False, 'kind': 0,
+                                                             'plaintext': text + ' (owner key)', 'max_total_msat': 4000})
+            s.note(f'WORKAROUND (not the UI): owner-key first contact → HTTP {reply[0]} {str(reply[1])[:200]}')
         r.wait_until(lambda: r.get('a', f'/sessions/{b}').get('active'), 40)
 
     # ---------------------------------------------------------------- step 4
@@ -197,8 +203,10 @@ def run(r):
         live = r.wait_until(lambda: (r.ui_try('text', within={'selector': '[data-energy="out-24h"]'}) or '') != (energy_before or ''), 20)
         energy_after = r.ui_try('text', within={'selector': '[data-energy="out-24h"]'})
         s.check('Body metabolism (N1) out/24h moved without a reload', live, {'before': energy_before, 'after': energy_after})
-        n1 = r.get('a', '/energy?window=24h')
-        s.note(f'node A /energy?window=24h: {str(n1)[:300]}')
+        try:  # evidence only; node A's pairing is closed once the app paired
+            s.note(f"node A /energy?window=24h: {str(r.read('a', '/energy?window=24h'))[:300]}")
+        except Exception as error:
+            s.note(f'node A /energy not read by the runner ({error}); the Body tab above is the check')
         s.check('Body metabolism reads N1 (node-wide source line)', 'N1' in (r.text('[data-organ="metabolism"]') or ''),
                 r.text('[data-organ="metabolism"]')[:300])
         membrane = r.text('[data-organ="membrane"]')
@@ -286,7 +294,7 @@ def run(r):
         msg = f'UI-E2E after a pause {int(time.time())}'
         send_message(msg)
         ok = b_has(msg, seconds=45)
-        failed = r.ui_try('text', within={'selector': '[data-artifact="failed"]'})
+        failed = r.ui_try('text', within={'selector': '[data-artifact="failed"]', 'nth': -1})
         s.snap('after-idle')
         s.check('after 50 s idle: the next message still reaches B', ok, failed or r.text('[data-composer]')[:300])
         if not ok:
@@ -348,7 +356,7 @@ def run(r):
         card = r.ui_try('wait', selector='[data-door="out-refused"], [data-composer-note], [data-artifact="failed"]', timeoutMs=60000)
         time.sleep(1)
         s.snap('over-cap')
-        what = {k: r.ui_try('text', within={'selector': k}) for k in ('[data-door="out-refused"]', '[data-composer-note]', '[data-artifact="failed"]')}
+        what = {k: r.ui_try('text', within={'selector': k, 'nth': -1}) for k in ('[data-door="out-refused"]', '[data-composer-note]', '[data-artifact="failed"]')}
         s.check('over-cap: door card "Not sent · their price is above your cap"',
                 what['[data-door="out-refused"]'] and 'above your cap' in what['[data-door="out-refused"]'], what)
         s.check('over-cap: nothing paid', r.get('a', '/payments/balance') == balance)
