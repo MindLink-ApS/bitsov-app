@@ -45,11 +45,12 @@ class Evidence:
         if isinstance(value, dict):
             result = {}
             for key, item in value.items():
+                safe_key = self.text(str(key))
                 if SECRET_KEY.search(str(key)):
                     if isinstance(item, str): self.remember(item)
-                    result[key] = REDACTED
+                    result[safe_key] = REDACTED
                 else:
-                    result[key] = self.clean(item)
+                    result[safe_key] = self.clean(item)
             return result
         if isinstance(value, (tuple, list)):
             # HTTP header pairs need the same treatment as object fields.

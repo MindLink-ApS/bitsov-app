@@ -165,6 +165,17 @@ class HarnessEvidenceTests(unittest.TestCase):
             self.assertNotIn('PRIVATE KEY', after)
             self.assertIn('normal log', after)
 
+    def test_secret_object_keys_are_redacted_and_scanned(self):
+        import two_node_evidence as module
+        with tempfile.TemporaryDirectory() as temp:
+            evidence = module.Evidence(Path(temp))
+            jwt = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhYmMifQ.abcdefghijk'
+            evidence.write('keys.json', {jwt: 'value'})
+            self.assertNotIn(jwt, (Path(temp)/'keys.json').read_text())
+            self.assertTrue(evidence.scan())
+            (Path(temp)/'injected.json').write_text(json.dumps({jwt: 'value'}))
+            self.assertFalse(evidence.scan())
+
     def test_evidence_remains_valid_json_with_nested_token_bodies(self):
         import two_node_evidence as module
         with tempfile.TemporaryDirectory() as temp:
