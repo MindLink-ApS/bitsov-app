@@ -7,18 +7,21 @@
 use std::io::{self, Write};
 use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::os::unix::net::UnixListener;
-use std::path::PathBuf;
-use std::time::Duration;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 extern "C" {
     fn fcntl(fd: i32, cmd: i32, ...) -> i32;
     fn fork() -> i32;
     fn getpid() -> i32;
     fn close(fd: i32) -> i32;
+    fn kill(pid: i32, sig: i32) -> i32;
 }
 
 /// `F_GETFD` on macOS.
 const F_GETFD: i32 = 1;
+/// `SIGKILL`. Same value `libc::SIGKILL` has on macOS.
+const SIGKILL: i32 = 9;
 
 fn libc_close(fd: i32) {
     unsafe {
@@ -42,6 +45,7 @@ fn main() {
         "unix" => unix_bind(&extra),
         "fds" => fds(),
         "fork-linger" => fork_linger(),
+        "fork-signal" => fork_signal(),
         _ => "unknown".to_string(),
     };
     report(&result);
@@ -123,36 +127,73 @@ fn fds() -> String {
     format!("fds {}", open.join(","))
 }
 
-/// Fork a worker that stays alive after this leader exits.
-///
-/// Writes `$TMPDIR/worker.pid` so the launch test can assert Drop reaps the
-/// process group even when the leader exit status is already cached. The
-/// worker closes the broker fds so the parent's pipes can EOF when the
-/// leader exits.
+/// Fork a worker that stays alive after this leader exits normally.
 fn fork_linger() -> String {
+    fork_worker(|| {})
+}
+
+/// Fork a worker, then kill this leader with SIGKILL.
+///
+/// The worker must still be reaped when the launcher drops the child. The
+/// leader does not return, so stdout may stay empty.
+fn fork_signal() -> String {
+    fork_worker(|| unsafe {
+        let _ = kill(getpid(), SIGKILL);
+    })
+}
+
+/// Fork a worker that stays alive, then run `finish` in the leader.
+///
+/// The worker writes `$TMPDIR/worker.pid` and closes the broker fds so the
+/// parent's pipes can EOF when the leader exits. `finish` runs only after
+/// that pid file is durable, and may exit the leader by signal.
+fn fork_worker(finish: impl FnOnce()) -> String {
     match unsafe { fork() } {
-        -1 => format!("other {}", io::Error::last_os_error().raw_os_error().unwrap_or(0)),
+        -1 => format!(
+            "other {}",
+            io::Error::last_os_error().raw_os_error().unwrap_or(0)
+        ),
         0 => {
             // Detach from the broker pipes; otherwise Drop/wait tests hang on
             // stdout EOF while this worker still holds the write end.
             for fd in 0..=2 {
-                unsafe {
-                    libc_close(fd);
-                }
+                libc_close(fd);
             }
             let pid = unsafe { getpid() };
-            let path = PathBuf::from(std::env::var_os("TMPDIR").unwrap_or_default()).join("worker.pid");
+            let path = worker_pid_path();
             let _ = std::fs::write(&path, format!("{pid}\n"));
             loop {
                 std::thread::sleep(Duration::from_secs(3600));
             }
         }
         _ => {
-            // Give the worker time to record its pid before the leader exits.
-            std::thread::sleep(Duration::from_millis(100));
+            wait_for_worker_pid();
+            finish();
             "forked".to_string()
         }
     }
+}
+
+fn worker_pid_path() -> PathBuf {
+    PathBuf::from(std::env::var_os("TMPDIR").unwrap_or_default()).join("worker.pid")
+}
+
+fn wait_for_worker_pid() {
+    let path = worker_pid_path();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        if worker_pid_ready(&path) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn worker_pid_ready(path: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    text.ends_with('\n') && text.trim().parse::<i32>().unwrap_or(0) > 1
 }
 
 fn class(err: io::Error) -> String {
