@@ -61,6 +61,10 @@ use tauri_plugin_shell::ShellExt;
 #[allow(dead_code)]
 mod model_launch;
 
+// DEV ONLY: run a locally built genome-`main` node instead of the verified sidecar.
+// Compiled out of release builds (compile error with the feature). See the module.
+mod dev_node;
+
 /// Node API bind — konsensus ApiConfig `default_api_addr()` = 127.0.0.1:3141.
 /// Loopback ONLY (Gate G2): never point this at a non-loopback host until a
 /// confidential remote transport + delegated auth exist.
@@ -126,6 +130,9 @@ struct NodeState {
     /// The supervised node's `konsensus.toml`. Captured at bootstrap so a restore can
     /// restart the SAME data dir without re-running `init`.
     config: Mutex<Option<PathBuf>>,
+    /// DEV ONLY (`dev_node`): an unverified node binary to run instead of the bundled
+    /// sidecar. Always `None` in release builds.
+    dev_sidecar: Mutex<Option<PathBuf>>,
     /// Last throttled re-mint attempt, for `REMINT_COOLDOWN`.
     last_remint: Mutex<Option<Instant>>,
     /// Set by the wait thread when the supervised node exits.
@@ -170,6 +177,7 @@ impl NodeState {
             quitting: AtomicBool::new(false),
             token: Mutex::new(None),
             config: Mutex::new(None),
+            dev_sidecar: Mutex::new(None),
             last_remint: Mutex::new(None),
             sidecar_terminated: AtomicBool::new(false),
             // Bounded so a hung loopback /health or /auth/local cannot pin restoring().
@@ -249,12 +257,19 @@ fn set_error(state: &NodeState, msg: impl Into<String>) {
 // ---- node supervision -----------------------------------------------------
 
 /// First run only: `konsensus init` generates identity + config (tier full = fund-your-node).
-async fn init_node(app: &AppHandle, data_dir: &Path) -> Result<(), String> {
-    let cmd = app
-        .shell()
-        .sidecar("konsensus")
-        .map_err(|e| format!("cannot resolve node sidecar: {e}"))?
-        .args([
+async fn init_node(
+    app: &AppHandle,
+    data_dir: &Path,
+    dev_sidecar: Option<&Path>,
+) -> Result<(), String> {
+    let cmd = match dev_sidecar {
+        Some(program) => app.shell().command(program),
+        None => app
+            .shell()
+            .sidecar("konsensus")
+            .map_err(|e| format!("cannot resolve node sidecar: {e}"))?,
+    };
+    let cmd = cmd.args([
             "init",
             "--dir",
             &data_dir.to_string_lossy(),
@@ -308,13 +323,17 @@ fn sidecar_path(name: &str) -> Result<PathBuf, String> {
 /// Everything the plugin gave us is preserved explicitly: stdout/stderr are drained to
 /// the app log, and a wait thread records termination for the health fail-fast.
 fn spawn_node(app: &AppHandle<impl tauri::Runtime>, config: &Path) -> Result<(), String> {
-    let program = sidecar_path(SIDECAR_BIN)?;
+    let state = app.state::<NodeState>();
+    let dev_sidecar = state.dev_sidecar.lock().unwrap().clone();
+    let program = match dev_sidecar {
+        Some(program) => program,
+        None => sidecar_path(SIDECAR_BIN)?,
+    };
     let mut cmd = std::process::Command::new(&program);
     cmd.args(["start", "--config", &config.to_string_lossy()])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
-    let state = app.state::<NodeState>();
     state.sidecar_terminated.store(false, Ordering::SeqCst);
     let child = state.spawn_child(&mut cmd)?;
 
@@ -503,15 +522,32 @@ async fn restart_node(
 /// wait for /health, pair (or fall back to /auth/local on rc7), and read /identity.
 async fn bootstrap_node(app: AppHandle) {
     let state = app.state::<NodeState>();
-    let data_dir: PathBuf = match app.path().app_data_dir() {
+    let app_data_dir: PathBuf = match app.path().app_data_dir() {
         Ok(d) => d,
         Err(e) => return set_error(&state, format!("no app data dir: {e}")),
     };
+    // Release builds: always `Ok(None)` (see `dev_node`).
+    let (data_dir, dev_sidecar) = match dev_node::resolve(&app_data_dir) {
+        Ok(None) => (app_data_dir, None),
+        Ok(Some(dev)) => {
+            eprintln!(
+                "[dev-node] UNVERIFIED node binary {} on data dir {} (dev only, sidecar verification bypassed)",
+                dev.sidecar.display(),
+                dev.data_dir.display()
+            );
+            if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+                let _ = window.set_title(dev_node::WINDOW_TITLE);
+            }
+            (dev.data_dir, Some(dev.sidecar))
+        }
+        Err(e) => return set_error(&state, format!("dev node: {e}")),
+    };
+    *state.dev_sidecar.lock().unwrap() = dev_sidecar.clone();
     let _ = std::fs::create_dir_all(&data_dir);
     let config = data_dir.join("konsensus.toml");
 
     if !config.exists() {
-        if let Err(e) = init_node(&app, &data_dir).await {
+        if let Err(e) = init_node(&app, &data_dir, dev_sidecar.as_deref()).await {
             return set_error(&state, e);
         }
     }
