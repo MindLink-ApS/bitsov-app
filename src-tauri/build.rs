@@ -39,6 +39,11 @@ fn main() {
             "invite_redeem",
             "file_price",
             "file_send",
+            "ai_read",
+            "ai_providers",
+            "ai_disclose",
+            "ai_send",
+            "ai_cancel",
         ])
         .permissions_path_pattern("./permissions/manual/**/*");
 

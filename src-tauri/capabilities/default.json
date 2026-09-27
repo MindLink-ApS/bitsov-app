@@ -39,6 +39,11 @@
     "allow-invite-create",
     "allow-invite-redeem",
     "allow-file-price",
-    "allow-file-send"
+    "allow-file-send",
+    "allow-ai-read",
+    "allow-ai-providers",
+    "allow-ai-disclose",
+    "allow-ai-send",
+    "allow-ai-cancel"
   ]
 }
