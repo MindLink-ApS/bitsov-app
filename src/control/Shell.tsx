@@ -2005,7 +2005,7 @@ function NewTrack(props: {
                       <button type="button" class="primary" data-door-continue disabled={opening()} onClick={continueCard}>
                         {opening() ? 'Connecting…' : 'Continue'}
                       </button>
-                      <button type="button" onClick={() => setCard(null)} disabled={opening()}>
+                      <button type="button" class="quiet" onClick={() => setCard(null)} disabled={opening()}>
                         Cancel
                       </button>
                     </span>
