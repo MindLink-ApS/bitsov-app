@@ -255,9 +255,15 @@ describe('invisible payments in the composer and the context panel', () => {
     for (const cmd of ['introduction_open', 'first_contact_quote', 'message_send']) expect(host.used(cmd)).toHaveLength(0);
     expect(text('[data-door-card]') + text('[data-intro-mine]')).not.toMatch(/free|trusted|unlocked/i);
 
+    // A local address needs the owner's own OK; the card cannot grant it.
+    expect($<HTMLButtonElement>('[data-door-continue]')!.disabled).toBe(true);
+    $<HTMLButtonElement>('[data-door-continue]')!.click();
+    expect(host.used('introduction_open')).toHaveLength(0);
+    $<HTMLInputElement>('[data-door-allow-local]')!.click();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-door-continue]')!.disabled).toBe(false));
     $<HTMLButtonElement>('[data-door-continue]')!.click();
     await vi.waitFor(() => expect(host.used('introduction_open')).toHaveLength(1));
-    expect(host.used('introduction_open')[0].args).toEqual({ text: INTRO });
+    expect(host.used('introduction_open')[0].args).toEqual({ text: INTRO, allow_local: true });
     // The conversation opens with the card beside the stranger's own fresh quote.
     await vi.waitFor(() => expect($(`[data-introduced="${STRANGER}"]`)).not.toBeNull());
     expect(text('[data-introduced]')).toContain('first contact 3 sats, each message 3 sats');

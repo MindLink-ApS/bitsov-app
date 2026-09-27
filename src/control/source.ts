@@ -64,7 +64,7 @@ export interface Source {
   /** K1: verify a scanned or pasted introduction. Local only: nothing is sent. */
   introductionRead(text: string): Promise<Introduction>;
   /** K1 Continue: the node dials the introduced node, unprivileged. Pays nothing. */
-  introductionOpen(text: string): Promise<Introduction>;
+  introductionOpen(text: string, allowLocal: boolean): Promise<Introduction>;
   wallet(): Promise<WalletOverview>;
   /** Subscribe to live events; resolves to an unsubscribe. */
   onLive(handler: (event: LiveEvent) => void): Promise<() => void>;
@@ -131,7 +131,7 @@ export const hostSource: Source = {
   firstContactQuote: (peer) => invoke<FirstContactQuote>('first_contact_quote', { peer }),
   introductionMine: () => invoke<Introduction>('introduction_mine'),
   introductionRead: (text) => invoke<Introduction>('introduction_read', { text }),
-  introductionOpen: (text) => invoke<Introduction>('introduction_open', { text }),
+  introductionOpen: (text, allowLocal) => invoke<Introduction>('introduction_open', { text, allow_local: allowLocal }),
   wallet: () => invoke<WalletOverview>('payments_overview'),
   onLive: (handler) => listen<LiveEvent>(LIVE_EVENT, (e) => handler(e.payload)),
   liveLink: () => invoke<LinkState | null>('live_link'),

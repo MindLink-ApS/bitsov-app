@@ -1833,12 +1833,15 @@ function NewTrack(props: {
   const [card, setCard] = createSignal<Introduction | null>(null);
   const [cardErr, setCardErr] = createSignal<string | null>(null);
   const [opening, setOpening] = createSignal(false);
+  /** The owner's explicit OK for a local-network address, per card. */
+  const [allowLocal, setAllowLocal] = createSignal(false);
   const cardLive = () => {
     const c = card();
     return c && c.expires_at > nowSecs() ? c : null;
   };
   const readCard = () => {
     setCard(null);
+    setAllowLocal(false);
     setCardErr(null);
     const text = pasted();
     props.source.introductionRead(text).then(
@@ -1848,10 +1851,10 @@ function NewTrack(props: {
   };
   const continueCard = () => {
     const c = cardLive();
-    if (!c || opening()) return;
+    if (!c || opening() || (c.reach === 'local' && !allowLocal())) return;
     setOpening(true);
     setCardErr(null);
-    props.source.introductionOpen(c.link).then(
+    props.source.introductionOpen(c.link, c.reach === 'local' && allowLocal()).then(
       (opened) => {
         setOpening(false);
         setCard(null);
@@ -1990,6 +1993,16 @@ function NewTrack(props: {
                     <span class="hint" data-door-local>
                       Local network address ({c().endpoint}). Continue only if you are on the same network as them.
                     </span>
+                    <label class="row door-allow" style={{ gap: 'var(--s-2)' }}>
+                      <input
+                        type="checkbox"
+                        data-door-allow-local
+                        checked={allowLocal()}
+                        onChange={(e) => setAllowLocal(e.currentTarget.checked)}
+                        disabled={opening()}
+                      />
+                      <span>Allow this local address</span>
+                    </label>
                   </Show>
                   <details>
                     <summary>Details</summary>
@@ -2002,7 +2015,13 @@ function NewTrack(props: {
                   >
                     <span class="hint">Continuing connects your node to theirs. It pays nothing and adds no contact.</span>
                     <span class="row" style={{ gap: 'var(--s-2)' }}>
-                      <button type="button" class="primary" data-door-continue disabled={opening()} onClick={continueCard}>
+                      <button
+                        type="button"
+                        class="primary"
+                        data-door-continue
+                        disabled={opening() || (c().reach === 'local' && !allowLocal())}
+                        onClick={continueCard}
+                      >
                         {opening() ? 'Connecting…' : 'Continue'}
                       </button>
                       <button type="button" class="quiet" onClick={() => setCard(null)} disabled={opening()}>

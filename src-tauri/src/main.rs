@@ -1492,25 +1492,34 @@ async fn introduction_read(
 /// /introduction/open` so the node checks it against its own network, pins
 /// the endpoint and dials the introduced node unprivileged. Pays nothing,
 /// asks no quote and stores no contact.
+///
+/// `allow_local` is the owner's explicit OK for a local-network address,
+/// given on the door card. A card's own signed `reach = local` never grants
+/// it (genome #89 `020b05e`), and it is never sent for a public card.
 #[tauri::command(rename_all = "snake_case")]
 async fn introduction_open(
     window: WebviewWindow<impl tauri::Runtime>,
     state: State<'_, NodeState>,
     text: String,
+    allow_local: bool,
 ) -> Result<bitsov_app::introduction::DoorCard, String> {
     reject_sealed_window(&window)?;
     drop(window);
-    open_introduction(state.inner(), &text).await
+    open_introduction(state.inner(), &text, allow_local).await
 }
 
-async fn open_introduction(state: &NodeState, text: &str) -> Result<bitsov_app::introduction::DoorCard, String> {
+async fn open_introduction(state: &NodeState, text: &str, allow_local: bool) -> Result<bitsov_app::introduction::DoorCard, String> {
     use bitsov_app::introduction as intro;
     let door = intro::read(text, now_unix().max(0) as u64)?.door()?;
+    let local = door.reach == intro::Reach::Local;
+    if local && !allow_local {
+        return Err(format!("This introduction points to a local network address ({}). Allow it on the card first. Nothing was sent.", door.endpoint));
+    }
     if !node_offers(state, intro::CAPABILITY).await {
         return Err("Your node cannot open introductions yet.".into());
     }
     let path = "/introduction/open";
-    let (code, body) = call_api(state, reqwest::Method::POST, path, Some(serde_json::json!({ "card": door.link }))).await?;
+    let (code, body) = call_api(state, reqwest::Method::POST, path, Some(serde_json::json!({ "card": door.link, "allow_local": local && allow_local }))).await?;
     if code == reqwest::StatusCode::CONFLICT && body.contains("introduction_closed_mesh") {
         return Err("Your node only connects to peers you added yourself, and an introduction does not add one. Nothing was sent.".into());
     }
@@ -4344,10 +4353,10 @@ mod control_act_tests {
         let card = intro_card("127.0.0.1:9735", now_unix() as u64);
         let link = card.to_link().unwrap();
         let node = fake(AuthMode::Local, intro_routes((200, serde_json::json!({"node_id": card.node_id, "dialed": "127.0.0.1:9735", "connected": true}))));
-        let door = open_introduction(&node.state, &format!("  {link}\n")).await.unwrap();
+        let door = open_introduction(&node.state, &format!("  {link}\n"), true).await.unwrap();
         assert_eq!((door.node_id.as_str(), door.admission_msat, door.message_msat), (card.node_id.as_str(), 100_000, 10_000));
         // One POST, the canonical link, and nothing else: no quote, no grant, no compose, no peer add.
-        assert_eq!(node.posts(), vec![("/introduction/open".to_string(), serde_json::json!({"card": link}))]);
+        assert_eq!(node.posts(), vec![("/introduction/open".to_string(), serde_json::json!({"card": link, "allow_local": true}))]);
         assert!(node.targets().iter().all(|t| t == "GET /status" || t == "POST /introduction/open"), "{:?}", node.targets());
     }
 
@@ -4360,7 +4369,7 @@ mod control_act_tests {
         let tampered = serde_json::to_string(&tampered).unwrap();
         let expired = intro_card("127.0.0.1:9735", now - 601).to_link().unwrap();
         for bad in [tampered.as_str(), expired.as_str(), "bitsov://introduce#garbage", "https://x.example/#AQ", ""] {
-            assert!(open_introduction(&node.state, bad).await.is_err(), "{bad}");
+            assert!(open_introduction(&node.state, bad, true).await.is_err(), "{bad}");
         }
         assert!(node.targets().is_empty(), "nothing reached the node: {:?}", node.targets());
     }
@@ -4370,11 +4379,11 @@ mod control_act_tests {
         let card = intro_card("127.0.0.1:9735", now_unix() as u64);
         let link = card.to_link().unwrap();
         let node = fake(AuthMode::Local, intro_routes((409, serde_json::json!({"error": "introduction_closed_mesh: this node dials only peers its owner added", "code": 409}))));
-        assert!(open_introduction(&node.state, &link).await.unwrap_err().contains("does not add one"));
+        assert!(open_introduction(&node.state, &link, true).await.unwrap_err().contains("does not add one"));
         let node = fake(AuthMode::Local, intro_routes((200, serde_json::json!({"node_id": OWN, "connected": true}))));
-        assert!(open_introduction(&node.state, &link).await.unwrap_err().contains("someone else"));
+        assert!(open_introduction(&node.state, &link, true).await.unwrap_err().contains("someone else"));
         let node = fake(AuthMode::Local, happy());
-        assert!(open_introduction(&node.state, &link).await.unwrap_err().contains("cannot open"));
+        assert!(open_introduction(&node.state, &link, true).await.unwrap_err().contains("cannot open"));
         assert!(node.posts().is_empty(), "no capability: no dial");
     }
 
@@ -4385,7 +4394,7 @@ mod control_act_tests {
         let local = intro_card("127.0.0.1:9735", now_unix() as u64);
         for dialed in [serde_json::json!("169.254.169.254:80"), serde_json::json!("[fe80::1]:9735"), serde_json::json!("not an address"), serde_json::Value::Null] {
             let node = fake(AuthMode::Local, intro_routes((200, serde_json::json!({"node_id": local.node_id, "dialed": dialed, "connected": true}))));
-            assert!(open_introduction(&node.state, &local.to_link().unwrap()).await.unwrap_err().contains("does not allow"), "{dialed}");
+            assert!(open_introduction(&node.state, &local.to_link().unwrap(), true).await.unwrap_err().contains("does not allow"), "{dialed}");
         }
         let mut public = intro_card("node.example.org:9735", now_unix() as u64);
         public.reach = bitsov_app::introduction::Reach::Public;
@@ -4395,9 +4404,33 @@ mod control_act_tests {
             public.sig = hex::encode(key.sign(&public.signing_digest().unwrap()).to_bytes());
         }
         let node = fake(AuthMode::Local, intro_routes((200, serde_json::json!({"node_id": public.node_id, "dialed": "10.0.0.7:9735", "connected": true}))));
-        assert!(open_introduction(&node.state, &public.to_link().unwrap()).await.unwrap_err().contains("does not allow"));
+        assert!(open_introduction(&node.state, &public.to_link().unwrap(), false).await.unwrap_err().contains("does not allow"));
         let node = fake(AuthMode::Local, intro_routes((200, serde_json::json!({"node_id": public.node_id, "dialed": "203.0.114.9:9735", "connected": true}))));
-        assert!(open_introduction(&node.state, &public.to_link().unwrap()).await.is_ok());
+        assert!(open_introduction(&node.state, &public.to_link().unwrap(), false).await.is_ok());
+    }
+
+    /// Genome #89 `020b05e`: a local card needs the owner's explicit OK. The
+    /// app refuses without it before any request, and never sends the OK for
+    /// a public card, even when asked to.
+    #[tokio::test]
+    async fn introduction_open_sends_local_consent_only_when_given_for_a_local_card() {
+        let local = intro_card("127.0.0.1:9735", now_unix() as u64);
+        let node = fake(AuthMode::Local, intro_routes((200, serde_json::json!({"node_id": local.node_id, "dialed": "127.0.0.1:9735", "connected": true}))));
+        assert!(open_introduction(&node.state, &local.to_link().unwrap(), false).await.unwrap_err().contains("Allow it on the card"));
+        assert!(node.targets().is_empty(), "no consent: nothing reached the node");
+        open_introduction(&node.state, &local.to_link().unwrap(), true).await.unwrap();
+        assert_eq!(node.posts().last().unwrap().1["allow_local"], true);
+
+        let mut public = intro_card("node.example.org:9735", now_unix() as u64);
+        public.reach = bitsov_app::introduction::Reach::Public;
+        {
+            use ed25519_dalek::Signer;
+            let key = ed25519_dalek::SigningKey::from_bytes(&[0x42; 32]);
+            public.sig = hex::encode(key.sign(&public.signing_digest().unwrap()).to_bytes());
+        }
+        let node = fake(AuthMode::Local, intro_routes((200, serde_json::json!({"node_id": public.node_id, "dialed": "203.0.114.9:9735", "connected": true}))));
+        open_introduction(&node.state, &public.to_link().unwrap(), true).await.unwrap();
+        assert_eq!(node.posts().last().unwrap().1["allow_local"], false, "a public card never carries local consent");
     }
 
     #[tokio::test]
@@ -4410,7 +4443,7 @@ mod control_act_tests {
         forged.node_id = hex::encode(identity);
         forged.sig = hex::encode(sig);
         let node = fake(AuthMode::Local, intro_routes((200, serde_json::json!({"node_id": forged.node_id, "dialed": "127.0.0.1:9735", "connected": true}))));
-        assert!(open_introduction(&node.state, &forged.to_link().unwrap()).await.unwrap_err().contains("weak"));
+        assert!(open_introduction(&node.state, &forged.to_link().unwrap(), true).await.unwrap_err().contains("weak"));
         assert!(node.targets().is_empty(), "nothing reached the node: {:?}", node.targets());
     }
 

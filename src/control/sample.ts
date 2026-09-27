@@ -595,7 +595,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number 
       text.trim() === SAMPLE_INTRO_LINK
         ? ok(sampleIntroduction(SAMPLE_STRANGER_ID, '192.168.1.20:9735', 'local', 2000))
         : Promise.reject('That is not an introduction.'),
-    introductionOpen: (text) =>
+    introductionOpen: (text, _allowLocal) =>
       text.trim() === SAMPLE_INTRO_LINK
         ? ok(sampleIntroduction(SAMPLE_STRANGER_ID, '192.168.1.20:9735', 'local', 2000))
         : Promise.reject('That is not an introduction.'),
