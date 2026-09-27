@@ -19,7 +19,12 @@ tauri-plugin-shell = "2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["time", "rt", "macros"] }
+tokio = { version = "1", features = ["time", "rt", "macros", "net", "sync"] }
+# Control center live events: the HOST reads the node's loopback `/ws` and forwards
+# parsed events to the main window. Plain `ws://127.0.0.1` only — no TLS feature,
+# and the renderer never opens a socket or sees the token (Gate G2).
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "handshake"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 # Pairing client (#77 ceremony, src/pairing): the app-held Ed25519 client key, the
 # node's BLAKE3 short-code derivation for the tripwire, and a CSPRNG for the seed.
 ed25519-dalek = "2"

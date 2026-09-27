@@ -19,8 +19,6 @@ mod macos {
     use std::ffi::{CString, OsStr, OsString};
     use std::fs::{self, File};
     use std::io;
-    #[cfg(test)]
-    use std::io::Write;
     use std::os::fd::{AsRawFd, FromRawFd};
     use std::os::unix::ffi::OsStrExt;
     use std::path::{Component, Path, PathBuf};
@@ -564,7 +562,7 @@ mod macos {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use std::io::Read;
+        use std::io::{Read, Write};
         use std::process::{Command, Stdio};
         use std::sync::OnceLock;
 
@@ -923,6 +921,5 @@ mod macos {
 }
 
 #[cfg(target_os = "macos")]
-// Public launch adapter is staged for the model integration, not wired into main yet.
-#[allow(unused_imports)]
+#[allow(unused_imports)] // Public launcher API, not yet wired into the binary.
 pub use macos::{launch, LaunchError, LaunchRequest, ModelChild};

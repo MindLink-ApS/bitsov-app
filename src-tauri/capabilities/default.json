@@ -18,6 +18,27 @@
     "allow-payments-balance",
     "allow-identity-restore",
     "allow-pairing-status",
-    "allow-pairing-retry"
+    "allow-pairing-retry",
+    "allow-node-overview",
+    "allow-peers-list",
+    "allow-rooms-list",
+    "allow-room-members",
+    "allow-messages-list",
+    "allow-price-quote",
+    "allow-payments-overview",
+    "allow-spend-status",
+    "allow-spend-request",
+    "allow-spend-lock",
+    "allow-spend-reconcile",
+    "allow-message-send",
+    "allow-room-quote",
+    "allow-invoice-create",
+    "allow-invoice-amount",
+    "allow-payment-pay",
+    "allow-payment-keysend",
+    "allow-invite-create",
+    "allow-invite-redeem",
+    "allow-file-price",
+    "allow-file-send"
   ]
 }

@@ -5,5 +5,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod act;
+pub mod spend_journal;
+pub mod control;
 pub mod jarvis;
 pub mod pairing;

@@ -112,7 +112,7 @@ disclosure stays as written.
 
 ## Non-goals (this change)
 
-Pin bump or sidecar fetch; spend elevation or `control.sock`; OS keychain or
+Pin bump or sidecar fetch; granting spend or touching `control.sock` (the app only *asks*: see `docs/CONTROL_CENTER_ACT.md`); OS keychain or
 Touch ID; identity create/restore over HTTP; packaging; assistant broker
 changes.
 
