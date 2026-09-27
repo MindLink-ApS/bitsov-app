@@ -29,6 +29,7 @@ export function rowsText(rows: SitRow[]): string {
   return rows.map((row) => `${row.id} ${row.answer}\n`).join('');
 }
 
-/** Shown instead of a blank window when no rows were compiled in. */
+/** Shown instead of a blank window when the host handed over no rows. */
 export const NO_ROWS_TEXT =
-  'No mock rows. Start the app with: npm run tauri:assistant';
+  'Nothing to show yet. Close this window and open the assistant again from the BitSov app.\n\n' +
+  'Developers: start the app with npm run tauri:assistant';

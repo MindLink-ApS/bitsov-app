@@ -175,6 +175,11 @@ const REASON_TEXT: Record<MockReason, string> = {
   unknown: 'Source unknown.',
 };
 
+/** Why the rows are mock, in one plain sentence. */
+export function mockReasonText(reason: MockReason): string {
+  return REASON_TEXT[reason];
+}
+
 /** Headline and detail for the label above the rows. */
 export function sourceText(source: Source): { title: string; detail: string } {
   if (source.kind === 'live') {

@@ -206,6 +206,57 @@ mod tests {
         assert_eq!(feed.live_rows(), want.as_slice());
     }
 
+    /// Golden init script for a paired, live window, loaded by the window's
+    /// onboarding e2e test (`tests/onboarding-assistant-e2e.test.tsx`), so
+    /// host and window agree on the exact globals. Fixed clocks: balance has
+    /// a #78 as-of one wallet sync (80 s) old; the rest are rc7 app reads;
+    /// ages are taken 12 s after the reads. `BITSOV_BLESS=1` rewrites it.
+    #[test]
+    fn the_live_init_script_matches_the_window_golden() {
+        use super::super::broker::{Fetched, NodeMarks, RawRead, ReadRoute, RouteFreshness};
+        use std::time::Duration;
+
+        let t0 = Instant::now();
+        let wall = 1_790_497_200_000; // 2026-09-27T08:20:00Z
+        let read = |route: ReadRoute, as_of_ms: Option<u64>| {
+            let body: &[u8] = match route {
+                ReadRoute::Messages { .. } => b"[]",
+                _ => b"{}",
+            };
+            let raw = RawRead::new(200, body.to_vec())
+                .marked(NodeMarks {
+                    as_of_ms,
+                    stale: false,
+                })
+                .stamped(Fetched {
+                    at: t0,
+                    wall_ms: Some(wall),
+                });
+            RouteFreshness::assess(route, &raw)
+        };
+        let freshness = vec![
+            read(ReadRoute::PaymentsBalance, Some(wall - 80_000)),
+            read(ReadRoute::PaymentsChannels, None),
+            read(ReadRoute::Health, None),
+            read(ReadRoute::Messages { limit: 50 }, None),
+            read(ReadRoute::OwnPricing, None),
+        ];
+        let feed = Feed::live(sit_mock::rows()).with_freshness(freshness);
+        let script = feed.init_script_at(t0 + Duration::from_secs(12));
+
+        let golden = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../tests/fixtures/assistant-live-init.js");
+        if std::env::var_os("BITSOV_BLESS").is_some() {
+            std::fs::write(&golden, format!("{script}\n")).expect("write golden");
+        }
+        let want = std::fs::read_to_string(&golden).expect("golden init script");
+        assert_eq!(
+            want.trim_end(),
+            script,
+            "BITSOV_BLESS=1 cargo test to update"
+        );
+    }
+
     #[test]
     fn a_live_feed_stamps_every_route_it_read() {
         let before = Instant::now();
