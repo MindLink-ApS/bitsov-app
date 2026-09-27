@@ -19,6 +19,7 @@ fn main() {
             "pairing_status",
             "pairing_retry",
             "node_overview",
+            "live_link",
             "peers_list",
             "rooms_list",
             "room_members",
@@ -39,6 +40,11 @@ fn main() {
             "invite_redeem",
             "file_price",
             "file_send",
+            "ai_read",
+            "ai_providers",
+            "ai_disclose",
+            "ai_send",
+            "ai_cancel",
         ])
         .permissions_path_pattern("./permissions/manual/**/*");
 

@@ -11,12 +11,13 @@ use std::collections::BTreeMap;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 
-use super::route::ReadRoute;
+use super::route::{PeerKey, ReadRoute};
 use super::schema::{
     Amount, BalanceReport, CategoryFeeTarget, CategoryPrice, ChainBackend, ChannelSummary,
-    ChannelsReport, CopiedId, HealthReport, LightningBackend, Liveness, LocalPrices,
-    MessageMetadata, PriceCategory, PricingMode, Report, SenderCount, SourceField, TargetFee,
-    TrustLevel, UnavailableReason, Unit, WalletBalanceLabel,
+    ChannelsReport, CopiedId, Direction, HealthReport, LightningBackend, Liveness, LocalPrices,
+    MessageMetadata, PaymentEntry, PaymentsReport, PriceCategory, PricingMode, Report,
+    SenderCount, SourceField, TargetFee, TrustLevel, UnavailableReason, Unit, WalletBalanceLabel,
+    MAX_PAYMENT_ENTRIES, MAX_PAYMENT_PEERS, PAYMENT_THREAD_LIMIT,
 };
 use super::{LogOutcome, NodeRead, RawRead, ReadFault, ReadLog};
 
@@ -673,4 +674,120 @@ fn price_category(name: &str) -> Option<PriceCategory> {
         "unknown" => PriceCategory::Unknown,
         _ => return None,
     })
+}
+
+/// `PeerResponse` at 958e399: only the id is decoded. Label, address and
+/// fingerprint are never read into memory the tool keeps.
+#[derive(Deserialize)]
+struct PeerIdWire {
+    node_id: String,
+}
+
+/// `MessageResponse` in a peer thread: only who, when and how much. Body,
+/// ciphertext, hash, kind and references are not decoded.
+#[derive(Deserialize)]
+struct ThreadWire {
+    sender: String,
+    recipient: String,
+    timestamp: u64,
+    #[serde(default)]
+    payment_amount_msat: Option<u64>,
+}
+
+/// Paid messages with each contact, both directions, newest first.
+///
+/// Reads `/peers`, then each valid peer's thread (at most
+/// [`MAX_PAYMENT_PEERS`], one page of [`PAYMENT_THREAD_LIMIT`] each). A thread
+/// that fails is counted in `peers_unread` and the rest still report, so a
+/// total is a floor, never a guess. Unpaid messages are skipped.
+pub(super) fn payments(
+    node: &impl NodeRead,
+    since_ms: Option<u64>,
+    log: &mut Vec<ReadLog>,
+) -> Report<PaymentsReport> {
+    let listed = match fetch::<Vec<PeerIdWire>>(node, ReadRoute::Peers, log) {
+        Ok(listed) => listed,
+        Err(reason) => return Report::Unavailable { reason },
+    };
+    let mut keys: Vec<PeerKey> = Vec::new();
+    let mut unread = 0u64;
+    for peer in &listed {
+        match PeerKey::parse(&peer.node_id) {
+            Some(key) if !keys.contains(&key) => keys.push(key),
+            Some(_) => {}
+            None => unread += 1,
+        }
+    }
+    if keys.len() > MAX_PAYMENT_PEERS {
+        unread += (keys.len() - MAX_PAYMENT_PEERS) as u64;
+        keys.truncate(MAX_PAYMENT_PEERS);
+    }
+
+    let mut entries: Vec<PaymentEntry> = Vec::new();
+    let mut read = 0u64;
+    let mut partial = 0u64;
+    let mut sent: Option<u64> = Some(0);
+    let mut received: Option<u64> = Some(0);
+    for key in keys {
+        let route = ReadRoute::PeerMessages {
+            peer: key,
+            limit: PAYMENT_THREAD_LIMIT,
+        };
+        let Ok(thread) = fetch::<Vec<ThreadWire>>(node, route, log) else {
+            unread += 1;
+            continue;
+        };
+        read += 1;
+        if thread.len() >= PAYMENT_THREAD_LIMIT as usize {
+            partial += 1;
+        }
+        let hex = key.hex();
+        for message in thread {
+            let amount = message.payment_amount_msat.unwrap_or(0);
+            if amount == 0 || since_ms.is_some_and(|since| message.timestamp < since) {
+                continue;
+            }
+            let direction = if message.sender.eq_ignore_ascii_case(&hex) {
+                Direction::Received
+            } else if message.recipient.eq_ignore_ascii_case(&hex) {
+                Direction::Sent
+            } else {
+                continue;
+            };
+            let total = match direction {
+                Direction::Sent => &mut sent,
+                Direction::Received => &mut received,
+            };
+            *total = total.and_then(|sum| sum.checked_add(amount));
+            entries.push(PaymentEntry {
+                at_ms: message.timestamp,
+                direction,
+                amount: available(amount, Unit::Msat, SourceField::PaymentAmountMsat),
+                peer: CopiedId::Value { value: hex.clone() },
+            });
+        }
+    }
+    entries.sort_by(|a, b| b.at_ms.cmp(&a.at_ms));
+    let unlisted = entries.len().saturating_sub(MAX_PAYMENT_ENTRIES) as u64;
+    entries.truncate(MAX_PAYMENT_ENTRIES);
+    let total = |sum: Option<u64>| match sum {
+        Some(sum) => available(sum, Unit::Msat, SourceField::PaymentAmountMsat),
+        None => unavailable(
+            Unit::Msat,
+            SourceField::PaymentAmountMsat,
+            UnavailableReason::Overflow,
+        ),
+    };
+    let count = |value: u64, field: SourceField| available(value, Unit::Count, field);
+    Report::Ready {
+        value: PaymentsReport {
+            entries,
+            sent_total: total(sent),
+            received_total: total(received),
+            unlisted: count(unlisted, SourceField::Messages),
+            peers_read: count(read, SourceField::NodeId),
+            peers_unread: count(unread, SourceField::NodeId),
+            partial_threads: count(partial, SourceField::Messages),
+        },
+    }
 }

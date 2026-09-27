@@ -80,6 +80,12 @@ pub enum SourceField {
     FeeRatesByTarget,
     #[serde(rename = "category_fee_targets")]
     CategoryFeeTargets,
+    #[serde(rename = "payment_amount_msat")]
+    PaymentAmountMsat,
+    #[serde(rename = "timestamp")]
+    Timestamp,
+    #[serde(rename = "node_id")]
+    NodeId,
 }
 
 /// Why a figure or report has no number.
@@ -352,6 +358,61 @@ pub struct LocalPrices {
     pub withheld_category_targets: Amount<u64>,
 }
 
+/// Peers read by the payments tool. More peers are counted, not read.
+pub const MAX_PAYMENT_PEERS: usize = 32;
+/// Thread page per peer (the host's own history page ceiling).
+pub const PAYMENT_THREAD_LIMIT: u32 = 200;
+/// Entries kept, newest first. Older ones are counted, not listed.
+pub const MAX_PAYMENT_ENTRIES: usize = 100;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PaymentsInput {
+    /// Keep only entries at or after this time (ms since epoch). The node is
+    /// asked for the same pages either way; the filter is local.
+    #[serde(default)]
+    pub since_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Direction {
+    /// This node paid the peer (a message it sent).
+    Sent,
+    /// The peer paid this node (a message it received).
+    Received,
+}
+
+/// One paid message. No id, body, hash, kind or label: time, side, amount and
+/// the counterparty's checked node id only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PaymentEntry {
+    pub at_ms: u64,
+    pub direction: Direction,
+    pub amount: Amount<u64>,
+    pub peer: CopiedId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PaymentsReport {
+    /// Newest first, at most [`MAX_PAYMENT_ENTRIES`].
+    pub entries: Vec<PaymentEntry>,
+    /// Sum of `sent` amounts over every matching entry, listed or not.
+    pub sent_total: Amount<u64>,
+    pub received_total: Amount<u64>,
+    /// Matching entries not listed (past the cap).
+    pub unlisted: Amount<u64>,
+    /// Peers whose thread was read.
+    pub peers_read: Amount<u64>,
+    /// Peers whose thread could not be read, had an invalid id, or were past
+    /// [`MAX_PAYMENT_PEERS`]. Their payments are missing from the totals.
+    pub peers_unread: Amount<u64>,
+    /// Threads that filled a whole page: older payments there are not counted.
+    pub partial_threads: Amount<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "tool", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ToolCall {
@@ -375,6 +436,10 @@ pub enum ToolCall {
         #[serde(default)]
         input: LocalPricesInput,
     },
+    Payments {
+        #[serde(default)]
+        input: PaymentsInput,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -385,4 +450,5 @@ pub enum ToolOutput {
     Health { report: Report<HealthReport> },
     MessageCounts { report: Report<MessageMetadata> },
     LocalPrices { report: Report<LocalPrices> },
+    Payments { report: Report<PaymentsReport> },
 }
