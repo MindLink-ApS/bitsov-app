@@ -135,6 +135,24 @@ describe('composing an answer', () => {
     expect(sourceLine({ ...f, age_ms: null, state: 'unknown' }, NOW, NOW)).toEqual({ state: 'unknown', text: 'Freshness unknown.' });
   });
 
+  it.each([null, 0, 2000])('keeps the explicit node stale flag with age %s regardless of derived state or elapsed time', (age) => {
+    for (const state of ['fresh', 'unknown', 'stale'] as const) {
+      const f = { ...paymentsRead().freshness, state, age_ms: age, node_stale: true, clock_skew: true };
+      for (const now of [NOW - 1000, NOW, NOW + 120_000]) {
+        const line = sourceLine(f, NOW, now);
+        expect(line.state).toBe('stale');
+        expect(line.text).toContain('Your node marked it out of date');
+        expect(line.text).toContain('clock is ahead');
+      }
+    }
+  });
+
+  it('preserves a stale aggregate even when its age is unavailable', () => {
+    const line = sourceLine({ ...paymentsRead().freshness, state: 'stale', age_ms: null }, NOW, NOW);
+    expect(line.state).toBe('stale');
+    expect(line.text).toContain('Update time unknown');
+  });
+
   it('sample presets withhold ids and amounts the way the host does', () => {
     const out = sampleRead('payments', null);
     if (out.state !== 'live') throw new Error();
@@ -268,6 +286,18 @@ describe('the AI track', () => {
     expect(host.used('ai_send')).toHaveLength(0);
     // The frontier model is off, and its button says so.
     expect($<HTMLButtonElement>('[data-provider="frontier"]')!.disabled).toBe(true);
+  });
+
+  it('shows the node stale warning in the AI track without an As-Of time', async () => {
+    const read = paymentsRead();
+    read.freshness = { ...read.freshness, state: 'stale', age_ms: null, node_as_of: false, node_stale: true };
+    const host = stubHost({ ai_read: () => read });
+    await openAi();
+    ask('What did I spend this week?');
+    await vi.waitFor(() => expect($('[data-ai-source="node"]')?.getAttribute('data-freshness')).toBe('stale'));
+    expect(text('[data-ai-fresh]')).toContain('Your node marked it out of date');
+    expect(text('[data-ai-fresh]')).toContain('Update time unknown');
+    expect(host.used('ai_send')).toHaveLength(0);
   });
 
   it('says plainly when the node cannot be read, and guesses nothing', async () => {

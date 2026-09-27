@@ -588,6 +588,7 @@ pub fn request_body(
         "freshness": {
             "state": freshness.state,
             "age_seconds": freshness.age_ms.map(|ms| ms / 1000),
+            "node_stale": freshness.node_stale,
         },
         "data": data,
     });

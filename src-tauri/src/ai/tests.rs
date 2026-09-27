@@ -160,6 +160,36 @@ fn node_as_of_headers_feed_freshness_and_stale_wins() {
 }
 
 #[test]
+fn explicit_node_stale_survives_every_topic_and_disclosure_preset() {
+    let server = TestServer::start(MockNode::canonical(), TOKEN);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
+    let recent = (now - 1_000).to_string();
+    let future = (now + 86_400_000).to_string();
+    let shared = remote("https://a.org/v1");
+    for as_of in [None, Some("invalid"), Some(future.as_str()), Some(recent.as_str())] {
+        let mut headers = vec![("BitSov-Data-Stale", "1")];
+        if let Some(as_of) = as_of {
+            headers.push(("BitSov-Data-As-Of", as_of));
+        }
+        server.set_headers(&headers);
+        for topic in TOPICS {
+            let got = read(&server, topic);
+            let wire = serde_json::to_value(&got).unwrap();
+            assert_eq!(wire["freshness"]["state"], "stale", "{topic:?} {as_of:?}");
+            assert_eq!(wire["freshness"]["node_stale"], true);
+            for preset in [Preset::Counts, Preset::Rounded, Preset::Exact] {
+                let body = request_body(&shared, "How current is this?", &got, preset).unwrap();
+                let body: Value = serde_json::from_str(&body).unwrap();
+                let user: Value = serde_json::from_str(body["messages"][1]["content"].as_str().unwrap()).unwrap();
+                assert_eq!(user["freshness"]["state"], "stale");
+                assert_eq!(user["freshness"]["node_stale"], true);
+            }
+        }
+    }
+}
+
+#[test]
 fn without_a_paired_read_token_nothing_is_read() {
     let server = TestServer::start(MockNode::canonical(), TOKEN);
     let base = server.api_base();

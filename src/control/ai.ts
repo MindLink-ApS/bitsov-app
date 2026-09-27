@@ -379,15 +379,20 @@ export type SourceLine = { state: AiFreshness['state']; text: string };
  * said so. Unknown stays unknown.
  */
 export function sourceLine(f: AiFreshness, receivedAt: number, nowMs: number): SourceLine {
+  const stale = f.node_stale || f.state === 'stale';
+  const why = f.node_stale ? ' Your node marked it out of date.' : '';
+  const skew = f.clock_skew ? ' Your node’s clock is ahead of this computer.' : '';
   if (f.age_ms === null) {
-    return { state: 'unknown', text: 'Freshness unknown.' + (f.clock_skew ? ' Your node’s clock is ahead of this computer.' : '') };
+    // An absent/unusable As-Of makes the age unknown, not the node's explicit
+    // stale signal. Preserve that signal even if a derived state disagrees.
+    return stale
+      ? { state: 'stale', text: `Stale. Update time unknown.${why} Ask again to re-read.${skew}` }
+      : { state: 'unknown', text: `Freshness unknown.${skew}` };
   }
   const age = f.age_ms + Math.max(0, nowMs - receivedAt);
   const when = ago(nowMs - age, nowMs);
   const basis = f.node_as_of ? 'by your node’s clock' : 'when the app read it';
-  const skew = f.clock_skew ? ' Your node’s clock is ahead of this computer.' : '';
-  if (f.state === 'stale' || age >= f.stale_after_ms) {
-    const why = f.node_stale ? ' Your node marked it out of date.' : '';
+  if (stale || age >= f.stale_after_ms) {
     return { state: 'stale', text: `Stale: updated ${when} (${basis}).${why} Ask again to re-read.${skew}` };
   }
   return { state: 'fresh', text: `Updated ${when} (${basis}).${skew}` };
