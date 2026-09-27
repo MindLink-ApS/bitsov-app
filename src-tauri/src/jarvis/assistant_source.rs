@@ -187,7 +187,7 @@ pub fn js_literal(value: &Value) -> String {
 mod tests {
     use std::time::Duration;
 
-    use super::super::broker::{Fetched, RawRead, ReadRoute, STALE_AFTER};
+    use super::super::broker::{Fetched, NodeMarks, RawRead, ReadRoute, STALE_AFTER};
     use super::*;
 
     /// Pull `value: <json>` for `global` back out of a script.
@@ -262,6 +262,62 @@ mod tests {
         assert_eq!(routes[0]["state"], "stale");
         assert_eq!(routes[0]["age_ms"], 60_000);
         assert_eq!(routes[1]["state"], "fresh");
+    }
+
+    /// Node marks reach the window only as `state` and `age_ms`: same keys.
+    #[test]
+    fn node_as_of_and_stale_reach_the_window_as_age_and_state() {
+        let t0 = Instant::now();
+        let wall = 1_800_000_000_000;
+        let marked = |route, marks| {
+            let raw = RawRead::new(200, b"{}".to_vec())
+                .marked(marks)
+                .stamped(Fetched {
+                    at: t0,
+                    wall_ms: Some(wall),
+                });
+            RouteFreshness::assess(route, &raw)
+        };
+        let freshness = vec![
+            marked(
+                ReadRoute::PaymentsBalance,
+                NodeMarks {
+                    as_of_ms: Some(wall - 50_000),
+                    stale: false,
+                },
+            ),
+            marked(
+                ReadRoute::OwnPricing,
+                NodeMarks {
+                    as_of_ms: None,
+                    stale: true,
+                },
+            ),
+            marked(
+                ReadRoute::Health,
+                NodeMarks {
+                    as_of_ms: Some(wall + 3_600_000),
+                    stale: false,
+                },
+            ),
+        ];
+        let feed = Feed::live(vec![("q01".into(), "1".into())]).with_freshness(freshness);
+        let script = feed.init_script_at(t0 + Duration::from_secs(2));
+        assert_eq!(
+            defined(&script, FRESHNESS_GLOBAL),
+            Some(json!({
+                "stale_after_ms": 60_000,
+                "routes": [
+                    {"route": "balance", "state": "fresh", "age_ms": 52_000, "clock_skew": false},
+                    {"route": "pricing", "state": "stale", "age_ms": 2_000, "clock_skew": false},
+                    {"route": "health", "state": "fresh", "age_ms": 2_000, "clock_skew": true},
+                ],
+            }))
+        );
+        let later = feed.init_script_at(t0 + Duration::from_secs(10));
+        let routes = defined(&later, FRESHNESS_GLOBAL).unwrap()["routes"].clone();
+        assert_eq!(routes[0]["state"], "stale");
+        assert_eq!(routes[0]["age_ms"], 60_000);
     }
 
     #[test]
