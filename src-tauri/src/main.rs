@@ -2131,8 +2131,7 @@ async fn budget_status(
 ) -> Result<budget::BudgetView, ActionError> {
     reject_sealed_window(&window)?;
     drop(window);
-    // Polls a pending elevation too, so a budget grant lands without another tap.
-    spend_advance(state.inner(), false).await?;
+    // `spend_status` polls a pending elevation; a budget grant lands there.
     budget_view(state.inner())
 }
 

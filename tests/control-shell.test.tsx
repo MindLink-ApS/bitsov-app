@@ -164,7 +164,7 @@ describe('control center shell', () => {
     // Only reads and the spend-window status were used; nothing that spends or edits.
     const used = new Set(calls.map((c) => c.cmd));
     for (const cmd of used) {
-      expect(cmd).toMatch(/^(node_status|pairing_status|node_overview|peers_list|rooms_list|room_members|messages_list|price_quote|payments_overview|fund_state|spend_status|file_price|room_quote|live_link|plugin:event\|(un)?listen)$/);
+      expect(cmd).toMatch(/^(node_status|pairing_status|node_overview|peers_list|rooms_list|room_members|messages_list|price_quote|payments_overview|fund_state|spend_status|budget_status|file_price|room_quote|live_link|plugin:event\|(un)?listen)$/);
     }
     expect(calls.find((c) => c.cmd === 'plugin:event|listen')?.args?.event).toBe('node-live');
 
@@ -201,7 +201,7 @@ describe('control center shell', () => {
     await vi.waitFor(() => expect(mount.querySelector('[data-sample]')).not.toBeNull());
     await vi.waitFor(() => expect(mount.querySelector('[data-stream]')?.textContent).toContain('Morning.'));
     expect(mount.querySelector('[data-mode="sample"]')).not.toBeNull();
-    await vi.waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Approve spending'));
+    await vi.waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Approve daily budget'));
     click('[data-track="new"]');
     await vi.waitFor(() => expect(mount.querySelector('[data-new-track]')?.textContent).toContain('introduction, not admission'));
     click('[data-track="ai"]');

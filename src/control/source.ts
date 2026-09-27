@@ -23,6 +23,8 @@ import type {
   RoomQuote,
   SendReceipt,
   SpendView,
+  BudgetView,
+  PresetId,
   FundingAddress,
   FundState,
   LiveEvent,
@@ -67,7 +69,19 @@ export interface Source {
   spendRequest(): Promise<SpendView>;
   spendLock(): Promise<SpendView>;
   spendReconcile(): Promise<string>;
-  send(recipient: string, isRoom: boolean, plaintext: string, maxMsat: number, maxRecipientMsat?: Record<string, number>): Promise<SendReceipt>;
+  /**
+   * A message pays inside the owner's budget with no prompt. `firstContactMsat`
+   * is the owner's one-time OK for someone not yet budgeted, with their budget.
+   */
+  send(recipient: string, isRoom: boolean, plaintext: string, maxMsat: number, maxRecipientMsat?: Record<string, number>, firstContactMsat?: number): Promise<SendReceipt>;
+  // budgets (B2): numbers the host keeps; the approval itself stays in host memory
+  budgetStatus(): Promise<BudgetView>;
+  /** The owner's one approval for a daily total. Lowering an open one needs no new approval. */
+  budgetApprove(ceilingMsat: number, preset: PresetId): Promise<BudgetView>;
+  /** Set or lower a budget within the daily total; 0 forgets the contact. */
+  budgetSet(target: string, room: boolean, limitMsat: number): Promise<BudgetView>;
+  budgetPause(): Promise<BudgetView>;
+  budgetResume(): Promise<BudgetView>;
   roomQuote(roomId: string): Promise<RoomQuote>;
   invoiceCreate(amountMsat: number, note: string): Promise<InvoiceView>;
   invoiceAmount(bolt11: string): Promise<InvoiceAmount>;
@@ -111,7 +125,13 @@ export const hostSource: Source = {
   spendRequest: () => invoke<SpendView>('spend_request'),
   spendLock: () => invoke<SpendView>('spend_lock'),
   spendReconcile: () => invoke<string>('spend_reconcile'),
-  send: (recipient, isRoom, plaintext, maxMsat, maxRecipientMsat) => invoke<SendReceipt>('message_send', { recipient, is_room: isRoom, plaintext, max_msat: maxMsat, max_recipient_msat: maxRecipientMsat ?? null }),
+  send: (recipient, isRoom, plaintext, maxMsat, maxRecipientMsat, firstContactMsat) =>
+    invoke<SendReceipt>('message_send', { recipient, is_room: isRoom, plaintext, max_msat: maxMsat, max_recipient_msat: maxRecipientMsat ?? null, first_contact_msat: firstContactMsat ?? null }),
+  budgetStatus: () => invoke<BudgetView>('budget_status'),
+  budgetApprove: (ceilingMsat, preset) => invoke<BudgetView>('budget_approve', { ceiling_msat: ceilingMsat, preset }),
+  budgetSet: (target, room, limitMsat) => invoke<BudgetView>('budget_set', { target, room, limit_msat: limitMsat }),
+  budgetPause: () => invoke<BudgetView>('budget_pause'),
+  budgetResume: () => invoke<BudgetView>('budget_resume'),
   roomQuote: (roomId) => invoke<RoomQuote>('room_quote', { room_id: roomId }),
   invoiceCreate: (amountMsat, note) => invoke<InvoiceView>('invoice_create', { amount_msat: amountMsat, note, expiry_secs: null }),
   invoiceAmount: (bolt11) => invoke<InvoiceAmount>('invoice_amount', { bolt11 }),

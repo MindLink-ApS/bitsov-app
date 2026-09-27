@@ -7,6 +7,9 @@ import type { Source } from './source';
 import type {
   ActionError,
   AiFreshness,
+  BudgetPreset,
+  BudgetRow,
+  BudgetView,
   AiTopic,
   Amount,
   Disclosure,
@@ -107,6 +110,16 @@ const FILE_PRICE_MSAT = 3000;
 const WINDOW_MS = 10 * 60 * 1000;
 /** Status polls before the sample owner "types" the grant at their terminal. */
 const GRANT_AFTER_POLLS = 2;
+
+// B2 budgets, as the host keeps them: numbers and a rolling 24-hour ledger.
+// The approval is memory only, so the sample starts with it off, like a restart.
+const DAY_MS = 24 * 60 * 60 * 1000;
+export const SAMPLE_PRESETS: BudgetPreset[] = [
+  { id: 'careful', contact_msat: 50_000, room_msat: 100_000, ceiling_msat: 500_000 },
+  { id: 'everyday', contact_msat: 200_000, room_msat: 500_000, ceiling_msat: 2_000_000 },
+  { id: 'generous', contact_msat: 1_000_000, room_msat: 2_500_000, ceiling_msat: 10_000_000 },
+];
+const MAX_DAILY_MSAT = 100_000_000;
 
 // ---- AI track sample ----------------------------------------------------------
 // What the host's read broker would return for the sample node: the same
@@ -412,6 +425,105 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number 
     };
   };
   const later = (ms: number, event: LiveEvent) => setTimeout(() => live?.(event), ms);
+
+  // ---- budgets ----
+  type Entry = { at: number; target: string; room: boolean; msat: number };
+  const book = {
+    preset: 'careful' as BudgetView['preset'],
+    ceiling: 500_000,
+    limits: new Map<string, number>([[`peer:${hex('a')}`, 50_000], [`peer:${hex('b')}`, 50_000], [`room:${SAMPLE_ROOM_ID}`, 100_000]]),
+    paused: false,
+    // Earlier today: what the sample threads show as paid.
+    ledger: [
+      { at: T0 + 3 * 60_000, target: hex('a'), room: false, msat: 2000 },
+      { at: T0 + 9 * 60_000, target: hex('a'), room: false, msat: 2000 },
+      { at: T0 + 22 * 60_000, target: hex('b'), room: false, msat: 1000 },
+      { at: T0 + 41 * 60_000, target: SAMPLE_ROOM_ID, room: true, msat: 3000 },
+    ].map((e) => ({ ...e, at: Date.now() - (T0 + 60 * 60_000 - e.at) })) as Entry[],
+  };
+  let autopay: { until: number; ceiling: number } | null = null;
+  let autopayExpired = false;
+  const wants = { window: false, budget: null as number | null };
+  const key = (target: string, room: boolean) => `${room ? 'room' : 'peer'}:${target}`;
+  const live24 = (e: Entry) => e.at + DAY_MS > Date.now();
+  const spentOn = (target: string, room: boolean) => book.ledger.filter((e) => live24(e) && e.target === target && e.room === room).reduce((n, e) => n + e.msat, 0);
+  const spentAll = () => book.ledger.filter(live24).reduce((n, e) => n + e.msat, 0);
+  const settleAutopay = () => {
+    if (autopay && autopay.until <= Date.now()) {
+      autopay = null;
+      autopayExpired = true;
+    }
+  };
+  const budgetView = (): BudgetView => {
+    settleAutopay();
+    const rows: BudgetRow[] = [...book.limits].map(([k, limit]) => {
+      const [kind, target] = k.split(':') as ['peer' | 'room', string];
+      return { target, room: kind === 'room', limit_msat: limit, spent_msat: spentOn(target, kind === 'room') };
+    });
+    for (const e of book.ledger.filter(live24)) {
+      if (!rows.some((r) => r.target === e.target && r.room === e.room)) rows.push({ target: e.target, room: e.room, limit_msat: null, spent_msat: spentOn(e.target, e.room) });
+    }
+    rows.sort((a, b) => b.spent_msat - a.spent_msat || a.target.localeCompare(b.target));
+    return {
+      paused: book.paused,
+      autopay: {
+        state: autopay ? 'open' : autopayExpired ? 'expired' : 'off',
+        open_until_ms: autopay?.until ?? null,
+        ceiling_msat: autopay?.ceiling ?? null,
+        basis: autopay ? 'node_grant' : null,
+      },
+      waiting_for_owner: wants.budget !== null && spend.state === 'pending',
+      preset: book.preset,
+      ceiling_msat: book.ceiling,
+      spent_msat: spentAll(),
+      unsettled_msat: 0,
+      rows,
+      presets: SAMPLE_PRESETS,
+      window_ms: DAY_MS,
+      max_daily_msat: MAX_DAILY_MSAT,
+    };
+  };
+  const requestElevation = () => {
+    spendPolls = 0;
+    spend = {
+      state: 'pending',
+      basis: null,
+      open_until_ms: null,
+      pending: {
+        op_id: '5a3f0c9e21d4b7a8e6f10c2d',
+        expires_at_ms: Date.now() + 15 * 60_000,
+        owner_action: 'konsensus grant --op 5a3f0c9e21d4b7a8e6f10c2d',
+        owner_can_grant: true,
+      },
+      window_ms: WINDOW_MS,
+    };
+  };
+  /** The host's `budget::plan`: pause, the contact's budget, first contact, the daily total, then the window. */
+  const planSend = (target: string, room: boolean, max: number, first: number | undefined): Promise<number | null> => {
+    settleAutopay();
+    settleSpend();
+    const sats = (msat: number) => String(msat / 1000);
+    if (book.paused) return refuse('budget_paused', 'Payments are paused. Resume them to send.');
+    const who = room ? 'this room' : 'this contact';
+    const limit = book.limits.get(key(target, room));
+    if (limit !== undefined && spentOn(target, room) + max > limit) {
+      return refuse('budget_exhausted', `You have used ${sats(spentOn(target, room))} of ${sats(limit)} sats for ${who} in the last 24 hours, and this costs ${sats(max)}. Raise the budget to send.`);
+    }
+    if (autopay) {
+      let confirm: number | null = null;
+      if (limit === undefined) {
+        if (first === undefined) return refuse('first_contact', `Your first paid message to ${who} needs your OK once. Nothing was sent.`);
+        confirm = Math.min(first, book.ceiling);
+        if (confirm < max) return refuse('invalid', `A budget of ${sats(confirm)} sats does not cover this message.`);
+      }
+      const ceiling = Math.min(autopay.ceiling, book.ceiling);
+      if (spentAll() + max > ceiling) {
+        return refuse('ceiling_exhausted', `You have used ${sats(spentAll())} of your ${sats(ceiling)} sats daily total, and this costs ${sats(max)}. Raise the daily total to send.`);
+      }
+      return Promise.resolve(confirm);
+    }
+    return gate().then(() => (limit === undefined && first !== undefined && first >= max && first <= book.ceiling ? first : null));
+  };
   const disclosures = new Map<string, { topic: AiTopic; preset: Preset }>();
   const nextId = (prefix: string) => `${prefix}-${(sent++).toString(16).padStart(4, '0')}`;
 
@@ -457,36 +569,79 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number 
     wallet: () => ok(WALLET),
     spendStatus: () => {
       settleSpend();
-      if (spend.state === 'pending' && ++spendPolls >= GRANT_AFTER_POLLS) openWindow();
+      if (spend.state === 'pending' && ++spendPolls >= GRANT_AFTER_POLLS) {
+        // The owner's grant opens only what was asked for.
+        if (wants.window) openWindow();
+        else spend = { state: 'locked', basis: null, open_until_ms: null, pending: null, window_ms: WINDOW_MS };
+        if (wants.budget !== null) {
+          autopay = { until: Date.now() + DAY_MS, ceiling: wants.budget };
+          autopayExpired = false;
+        }
+        wants.window = false;
+        wants.budget = null;
+      }
       return ok(spend);
     },
     spendRequest: () => {
       settleSpend();
+      if (book.paused) return refuse('budget_paused', 'Payments are paused. Resume them first.');
       if (spend.state !== 'open' && spend.state !== 'pending') {
-        spendPolls = 0;
-        spend = {
-          state: 'pending',
-          basis: null,
-          open_until_ms: null,
-          pending: {
-            op_id: '5a3f0c9e21d4b7a8e6f10c2d',
-            expires_at_ms: Date.now() + 15 * 60_000,
-            owner_action: 'konsensus grant --op 5a3f0c9e21d4b7a8e6f10c2d',
-            owner_can_grant: true,
-          },
-          window_ms: WINDOW_MS,
-        };
+        wants.budget = null;
+        requestElevation();
       }
+      wants.window = true;
       return ok(spend);
     },
     spendLock: () => {
       spend = { state: 'locked', basis: null, open_until_ms: null, pending: null, window_ms: WINDOW_MS };
+      wants.window = false;
+      wants.budget = null;
       return ok(spend);
     },
+    budgetStatus: () => ok(budgetView()),
+    budgetApprove: (ceilingMsat, preset) => {
+      if (book.paused) return refuse('budget_paused', 'Payments are paused. Resume them first.');
+      if (ceilingMsat < 1000 || ceilingMsat > MAX_DAILY_MSAT) return refuse('invalid', 'A daily total is between 1 and 100,000 sats.');
+      book.preset = preset;
+      book.ceiling = ceilingMsat;
+      for (const [k, v] of book.limits) book.limits.set(k, Math.min(v, ceilingMsat));
+      settleAutopay();
+      if (autopay && ceilingMsat <= autopay.ceiling) autopay.ceiling = ceilingMsat;
+      else {
+        if (spend.state !== 'pending') {
+          wants.window = false;
+          requestElevation();
+        }
+        wants.budget = ceilingMsat;
+      }
+      return ok(budgetView());
+    },
+    budgetSet: (target, room, limitMsat) => {
+      const k = key(target.toLowerCase(), room);
+      if (limitMsat === 0) book.limits.delete(k);
+      else if (limitMsat > book.ceiling) return refuse('invalid', `That is above your approved daily total of ${book.ceiling / 1000} sats. Raise the total first.`);
+      else book.limits.set(k, limitMsat);
+      return ok(budgetView());
+    },
+    budgetPause: () => {
+      autopay = null;
+      book.paused = true;
+      spend = { state: 'locked', basis: null, open_until_ms: null, pending: null, window_ms: WINDOW_MS };
+      wants.window = false;
+      wants.budget = null;
+      return ok(budgetView());
+    },
+    budgetResume: () => {
+      book.paused = false;
+      // Resume is the owner's tap for the total already on the book.
+      if (spend.state !== 'pending') requestElevation();
+      wants.budget = book.ceiling;
+      return ok(budgetView());
+    },
     spendReconcile: () => ok('No pending spend.'),
-    send: async (recipient, isRoom, plaintext, maxMsat) => {
-      await gate();
+    send: async (recipient, isRoom, plaintext, maxMsat, _caps, firstContactMsat) => {
       const to = recipient.toLowerCase();
+      const confirm = await planSend(to, isRoom, maxMsat, firstContactMsat);
       let amount: number;
       if (isRoom) {
         const q = roomQuote(to);
@@ -502,6 +657,8 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number 
         amount = Math.max(peerPrice(to), 1000);
       }
       if (amount > maxMsat) return refuse('price_changed', 'Price above confirmed ceiling. Nothing dispatched.');
+      if (confirm !== null) book.limits.set(key(to, isRoom), confirm);
+      book.ledger.push({ at: Date.now(), target: to, room: isRoom, msat: amount });
       const id = nextId('sent');
       const at = Date.now();
       later(250, { type: 'message', room_id: isRoom ? to : null, message: { id, kind: 0, sender: SAMPLE_OWN_ID, recipient: to, timestamp: at, plaintext, payment_amount_msat: amount } });

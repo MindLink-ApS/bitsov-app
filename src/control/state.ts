@@ -6,6 +6,7 @@
 import { ago, sats, satUnit, shortId } from './format';
 import type {
   ActionError,
+  BudgetView,
   Artifact,
   Delivery,
   LinkState,
@@ -146,6 +147,52 @@ export function asActionError(e: unknown): ActionError {
 /** Errors that mean "the owner must approve (again)", not "the send failed". */
 export const needsApproval = (e: ActionError) =>
   e.code === 'spend_locked' || e.code === 'spend_expired';
+
+/** The host stopped a message on a budget rule: explain in the composer, not as a failed send. */
+export const isBudgetStop = (e: ActionError) =>
+  ['budget_paused', 'budget_exhausted', 'ceiling_exhausted', 'first_contact', 'budget_needed'].includes(e.code);
+
+/** Where one track stands against its budget and the daily total, before sending. */
+export type BudgetStand =
+  | { kind: 'unknown' }
+  | { kind: 'paused' }
+  | { kind: 'waiting' }
+  | { kind: 'off' }
+  | { kind: 'first'; suggest: number; ceiling: number }
+  | { kind: 'contact_used'; limit: number; spent: number; raiseTo: number | null }
+  | { kind: 'total_used'; ceiling: number; spent: number; raiseTo: number | null }
+  | { kind: 'ok'; limit: number; spent: number; ceiling: number; totalSpent: number };
+
+export function budgetStand(view: BudgetView | null, target: string, room: boolean, costMsat: number | null): BudgetStand {
+  if (!view) return { kind: 'unknown' };
+  if (view.paused) return { kind: 'paused' };
+  if (view.waiting_for_owner) return { kind: 'waiting' };
+  if (view.autopay.state !== 'open') return { kind: 'off' };
+  const cost = costMsat ?? 0;
+  const ceiling = Math.min(view.autopay.ceiling_msat ?? 0, view.ceiling_msat);
+  const row = view.rows.find((r) => r.target === target.toLowerCase() && r.room === room);
+  const preset = view.presets.find((p) => p.id === view.preset) ?? view.presets[0];
+  if (!row || row.limit_msat === null) {
+    const suggest = Math.min(Math.max(room ? preset?.room_msat ?? 0 : preset?.contact_msat ?? 0, cost), ceiling);
+    return { kind: 'first', suggest, ceiling };
+  }
+  if (row.spent_msat + cost > row.limit_msat) {
+    const want = Math.max(row.limit_msat * 2, row.spent_msat + cost);
+    return { kind: 'contact_used', limit: row.limit_msat, spent: row.spent_msat, raiseTo: want <= ceiling ? want : ceiling > row.limit_msat ? ceiling : null };
+  }
+  if (view.spent_msat + cost > ceiling) {
+    const want = Math.min(Math.max(ceiling * 2, view.spent_msat + cost), view.max_daily_msat);
+    return { kind: 'total_used', ceiling, spent: view.spent_msat, raiseTo: want > ceiling ? want : null };
+  }
+  return { kind: 'ok', limit: row.limit_msat, spent: row.spent_msat, ceiling, totalSpent: view.spent_msat };
+}
+
+/** A budget in the recipient's own price as the unit: "about 25 messages". */
+export function messagesWorth(budgetMsat: number, priceMsat: number | null): string | null {
+  if (!priceMsat || priceMsat <= 0) return null;
+  const n = Math.floor(budgetMsat / priceMsat);
+  return `${n} message${n === 1 ? '' : 's'}`;
+}
 
 export type Deliveries = Record<string, Delivery>;
 

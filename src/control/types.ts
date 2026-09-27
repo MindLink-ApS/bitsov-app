@@ -123,6 +123,7 @@ export type ActionError = {
     | 'spend_expired'
     | 'spend_refused'
     | 'owner_only'
+    | 'budget_paused' | 'budget_exhausted' | 'ceiling_exhausted' | 'first_contact' | 'budget_needed' | 'budget_unreadable'
     | 'room_unreachable'
     | 'not_ready'
     | 'invalid'
@@ -150,6 +151,33 @@ export type SpendView = {
   open_until_ms: number | null;
   pending: Elevation | null;
   window_ms: number;
+};
+
+// ---- budgets (B2) -------------------------------------------------------------
+// Mirrors `bitsov_app::budget` (src-tauri/src/budget.rs). Numbers only: the
+// owner's approval lives in host memory and never appears here as a grant.
+
+export type PresetId = 'careful' | 'everyday' | 'generous';
+export type BudgetPreset = { id: PresetId; contact_msat: number; room_msat: number; ceiling_msat: number };
+export type AutopayState = 'off' | 'open' | 'expired';
+export type BudgetRow = { target: string; room: boolean; limit_msat: number | null; spent_msat: number };
+
+/** `budget_status` and every budget command. Spends are a rolling 24 hours. */
+export type BudgetView = {
+  paused: boolean;
+  autopay: { state: AutopayState; open_until_ms: number | null; ceiling_msat: number | null; basis: SpendBasis | null };
+  /** A budget approval is waiting for the owner at the node. */
+  waiting_for_owner: boolean;
+  preset: PresetId;
+  /** The daily total last approved. */
+  ceiling_msat: number;
+  spent_msat: number;
+  /** Reserved at the price cap because the outcome is not known yet; included in `spent_msat`. */
+  unsettled_msat: number;
+  rows: BudgetRow[];
+  presets: BudgetPreset[];
+  window_ms: number;
+  max_daily_msat: number;
 };
 
 /** `message_send`. */

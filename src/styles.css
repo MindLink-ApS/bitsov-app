@@ -349,6 +349,31 @@ select { font: inherit; font-size: var(--t-sm); background: var(--sunk); color: 
 .drafted { margin: 0; font-size: var(--t-xs); color: var(--accent); }
 
 /* narrow windows -------------------------------------------------------- */
+/* invisible payments (B2): the budget bar in the composer and the running tally */
+.budget .presets { display: flex; flex-wrap: wrap; gap: var(--s-2); }
+.budget .chip[aria-checked='true'] { color: var(--accent-ink); background: var(--accent); border-color: var(--accent); }
+.budget .approval .primary { align-self: flex-start; }
+.budget[data-budget='ok'] .spend-line { color: var(--ink); }
+.budget-used strong { color: var(--warn); }
+.primary.small { font-size: var(--t-sm); padding: 6px 12px; }
+button.small:not(.primary) { font-size: var(--t-xs); padding: 4px 10px; background: var(--raised); border: 1px solid var(--line-strong); }
+.tally { display: flex; flex-direction: column; gap: var(--s-1); }
+.tally .label { font-size: var(--t-sm); color: var(--muted); }
+.tally .sats.big { font-size: var(--t-2xl); font-weight: 600; letter-spacing: -0.02em; }
+.tally .sats.big .unit { font-size: var(--t-md); }
+.meter { display: block; height: 4px; border-radius: var(--r-chip); background: var(--sunk); overflow: hidden; }
+.meter > span { display: block; height: 100%; background: var(--accent); border-radius: inherit; transition: width var(--d-mid) var(--ease); }
+.pause-all { align-self: stretch; background: var(--raised); border: 1px solid var(--line-strong); padding: 8px 12px; font-size: var(--t-sm); font-weight: 600; }
+.pause-all:hover { border-color: var(--warn); color: var(--warn); }
+.spend-line.paused { color: var(--warn); }
+.spend-line .line-text { flex: 1 1 0; min-width: 0; }
+.spend-line .line-text .link { font-size: var(--t-xs); padding: 0; }
+.budget-row { display: flex; flex-direction: column; gap: var(--s-1); padding: var(--s-2) 0; border-top: 1px solid var(--line); font-size: var(--t-sm); }
+.budget-row .who { font-family: var(--font-serif); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.budget-row .link { align-self: flex-start; padding: 0; font-size: var(--t-xs); }
+.budget-row form { gap: var(--s-2); }
+.budget-row input { width: 96px; }
+
 @media (max-width: 1080px) {
   .cc, .cc.no-context { grid-template-columns: var(--rail-w) minmax(0, 1fr); }
   .context { position: fixed; inset: 0 0 0 auto; width: min(var(--context-w), 92vw); z-index: 10; transform: translateX(100%); transition: transform var(--d-mid) var(--ease); box-shadow: -12px 0 32px rgba(0, 0, 0, 0.5); }
