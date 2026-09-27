@@ -153,6 +153,12 @@ package that includes the sealed window changes them together:
 | Capability set | `src-tauri/build.rs` | `PROFILE=release` compiles `capabilities/default.json` only. `capabilities/assistant.json` is the empty grant for window label `assistant`. |
 | Window open | `assistant_dev_enabled` | True only for a debug build with `BITSOV_ASSISTANT=1`. Release builds skip `install_assistant_menu`. The sit-mock builder is `debug_assertions` plus feature `sit-mock`. |
 
+> **Superseded (F6, [MAC_PACKAGE.md](MAC_PACKAGE.md)).** The unsigned package
+> does not ship the page. The release excludes `assistant.html` and the fixture,
+> and `scripts/check-mac-bundle.sh` enforces that. The Vite row above was also
+> wrong about the CLI: release builds leave `TAURI_ENV_DEBUG` unset, never
+> `false`. F6 fixes the gate.
+
 `v2` includes the page in the frontend dist that `tauri-build` embeds, compiles
 `capabilities/assistant.json` into that same release binary, and opens the
 window only through the existing label check. Privileged commands already

@@ -1,0 +1,73 @@
+name: Mac Package
+
+# Unsigned Apple Silicon BitSov.app (+ .dmg) as a short-lived CI artifact
+# (docs/MAC_PACKAGE.md). No secrets, no signing, no notarization, no release.
+# The built app is never opened or executed here.
+#
+# NOT a merge gate: keep this job OUT of the required status checks. Like the
+# Build workflow's `sidecar` job it depends on network and on the genome's
+# published rc7 release, not only on this repo's source.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  mac-package:
+    name: Mac package (unsigned .app artifact) — not a merge gate
+    runs-on: macos-14
+    timeout-minutes: 45
+    env:
+      # scripts/fetch-node-sidecar.sh reads the pinned public release with gh.
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Unit test — bundle checker (no network)
+        run: bash scripts/test-check-mac-bundle.sh
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            src-tauri/target/
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-release-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-cargo-release-
+
+      - name: GnuPG for the sidecar signature check
+        run: command -v gpg || brew install gnupg
+
+      # Removes any stale sidecar, fetches + verifies rc7 (fail-closed, throwaway
+      # keyring), builds with --no-sign, then runs scripts/check-mac-bundle.sh.
+      - name: Package (unsigned) and check
+        run: bash scripts/package-mac.sh --dmg
+
+      - name: Zip the .app
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/out"
+          ditto -c -k --keepParent src-tauri/target/release/bundle/macos/BitSov.app \
+            "$RUNNER_TEMP/out/BitSov-unsigned-macos-arm64.app.zip"
+          cp src-tauri/target/release/bundle/dmg/*.dmg "$RUNNER_TEMP/out/"
+          ls -l "$RUNNER_TEMP/out"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bitsov-unsigned-macos-arm64-${{ github.sha }}
+          path: ${{ runner.temp }}/out/
+          if-no-files-found: error
+          retention-days: 7

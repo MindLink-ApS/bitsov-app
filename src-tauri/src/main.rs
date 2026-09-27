@@ -2319,7 +2319,9 @@ mod assistant_acl_tests {
         );
         let vite = fs::read_to_string(manifest_dir().join("../vite.config.ts")).expect("vite");
         assert!(
-            vite.contains("TAURI_ENV_DEBUG") && vite.contains("assistant.html"),
+            vite.contains("TAURI_ENV_PLATFORM")
+                && vite.contains("TAURI_ENV_DEBUG === 'true'")
+                && vite.contains("assistant.html"),
             "release frontend builds must be able to omit assistant.html"
         );
 
