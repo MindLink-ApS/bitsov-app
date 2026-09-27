@@ -1,10 +1,13 @@
 import { createMemo, createSignal, onCleanup, onMount, Show } from 'solid-js';
 import { invoke } from '@tauri-apps/api/core';
 import { qrSvg } from './qr';
+import { Onboarding } from './onboarding/Onboarding';
+import { INITIAL_PAIRING, type PairingView } from './onboarding/pairing';
 
-// CS-1 identity screen + CS-2 first-run funding. The Rust host bundles + supervises
-// the node binary, mints a loopback JWT via /auth/local, and exposes every node call
-// as a Tauri command. This renderer only reflects that state: it never talks to the
+// First run: Start node → Pair this app → Create/restore identity → Fund. The Rust
+// host bundles + supervises the node binary, pairs with it (or, on a node without
+// pairing routes, mints via /auth/local), and exposes every node call as a Tauri
+// command. This renderer only reflects that state: it never talks to the
 // node directly, never touches a non-loopback host (Gate G2), and never holds a
 // credential — no mnemonic, private key, JWT or node token is read or displayed here.
 // The one secret it accepts is the recovery phrase, which is write-only: masked on
@@ -39,6 +42,9 @@ export default function App() {
   // must still show restore errors if ready is false.
   const [restoreError, setRestoreError] = createSignal<string | null>(null);
   const showIdentityGate = () => status().ready || restoring() || restoreError() !== null;
+  const [pairing, setPairing] = createSignal<PairingView>(INITIAL_PAIRING);
+  // Once pairing has an outcome, the start spinner no longer describes the state.
+  const starting = () => pairing().state === 'starting' || pairing().state === 'pending';
 
   let timer: number | undefined;
   const poll = async () => {
@@ -46,6 +52,19 @@ export default function App() {
       setStatus(await invoke<Status>('node_status'));
     } catch (e) {
       setStatus({ ready: false, node_id: null, error: String(e) });
+    }
+    try {
+      setPairing(await invoke<PairingView>('pairing_status'));
+    } catch {
+      /* keep the last known pairing state; node_status carries host errors */
+    }
+  };
+  const retryPairing = async () => {
+    setPairing({ ...INITIAL_PAIRING, state: 'pending' });
+    try {
+      setPairing(await invoke<PairingView>('pairing_retry'));
+    } catch (e) {
+      setPairing({ ...INITIAL_PAIRING, state: 'failed', reason: String(e) });
     }
   };
 
@@ -63,16 +82,25 @@ export default function App() {
         Bit<span>Sov</span>
       </div>
 
+      <Onboarding
+        status={status}
+        pairing={pairing}
+        trustAck={trustAck}
+        onRetry={() => void retryPairing()}
+      />
+
       <Show
         when={showIdentityGate()}
         fallback={
           <Show
             when={status().error}
             fallback={
-              <div class="state">
-                <div class="spinner" />
-                Starting your node…
-              </div>
+              <Show when={starting()}>
+                <div class="state">
+                  <div class="spinner" />
+                  Starting your node…
+                </div>
+              </Show>
             }
           >
             <div class="state error">

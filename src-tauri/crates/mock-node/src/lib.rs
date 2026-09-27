@@ -9,6 +9,7 @@
 mod answer;
 mod canary;
 mod ids;
+pub mod pairing;
 mod serve;
 
 pub use answer::{Answer, AnswerKey};
