@@ -275,6 +275,39 @@ describe('invisible payments in the composer and the context panel', () => {
     await vi.waitFor(() => expect(host.used('budget_set')[0]?.args).toEqual({ target: MAYA, room: false, limit_msat: 10_000 }));
   });
 
+  it('a known contact the node will not re-admit from the budget brings the door card back once', async () => {
+    let sends = 0;
+    const host = stubHost(open([{ target: MAYA, room: false, limit_msat: 50_000, spent_msat: 0 }]), {
+      first_contact_quote: (args) => ({
+        recipient: args!.peer, admission_msat: 2000, message_msat: 2000, total_msat: 4000,
+        expires_at: Math.floor(Date.now() / 1000) + 60,
+      }),
+      message_send: (args) => {
+        sends += 1;
+        if (sends === 1) {
+          throw { code: 'grant_readmission', message: 'This contact reconnected and asks to be admitted again. Your node’s budget does not cover them yet, so it needs your OK once. Nothing was sent.' };
+        }
+        return { message_id: 'sent-2', recipient: args!.recipient, is_room: false, delivered: true, amount_msat: 2000, sent_at_ms: Date.now() };
+      },
+    });
+    await openShell();
+    type('[data-composer] textarea', 'back again');
+    await vi.waitFor(() => expect(text('[data-send]')).toBe('Send · 2 sats'));
+    submit();
+    await vi.waitFor(() => expect(text('[data-composer-note]')).toContain('admitted again'));
+    // Maya's own quote, on the door card, with her budget as it stands.
+    await vi.waitFor(() => expect($('[data-readmit]')?.getAttribute('data-door-quote')).toBe('4000'));
+    expect(text('[data-readmit]')).toContain('reconnected and asks to be admitted again');
+    expect(text('[data-first-contact]')).toContain('Admit Maya again');
+    expect($('[data-first-budget="50000"]')?.getAttribute('aria-checked')).toBe('true');
+    expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('back again');
+    submit();
+    await vi.waitFor(() => expect(host.used('message_send')).toHaveLength(2));
+    expect(host.used('message_send')[1].args).toMatchObject({ recipient: MAYA, max_msat: 4000, first_contact_msat: 50_000 });
+    // Once admitted, the card goes: the next reconnect is paid from her budget.
+    await vi.waitFor(() => expect($('[data-first-contact]')).toBeNull());
+  });
+
   it('a budget refusal from the host is explained in the composer, not recorded as a failed send', async () => {
     stubHost(open([{ target: MAYA, room: false, limit_msat: 50_000, spent_msat: 0 }]), {
       message_send: () => Promise.reject({ code: 'budget_exhausted', message: 'You have used 50 of 50 sats for this contact in the last 24 hours.' }),
@@ -343,6 +376,10 @@ describe('budget rules', () => {
     expect(budgetStand(view, MAYA, false, 1000)).toMatchObject({ kind: 'ok', spent: 4000, limit: 5000 });
     expect(budgetStand(view, MAYA, false, 2000)).toEqual({ kind: 'contact_used', limit: 5000, spent: 4000, raiseTo: 10_000 });
     expect(budgetStand(view, NEW, false, 2000)).toEqual({ kind: 'first', suggest: 50_000, ceiling: 500_000 });
+    // The node asked the owner's OK to admit a known contact again: the door
+    // card, with their budget as it stands.
+    expect(budgetStand(view, MAYA, false, 1000, true)).toEqual({ kind: 'first', suggest: 5000, ceiling: 500_000, again: true });
+    expect(budgetStand(view, ROOM, true, 2000, true)).toEqual({ kind: 'first', suggest: 100_000, ceiling: 500_000 });
     expect(budgetStand(view, ROOM, true, 2000)).toEqual({ kind: 'first', suggest: 100_000, ceiling: 500_000 });
     const full = open([{ target: MAYA, room: false, limit_msat: 500_000, spent_msat: 499_000 }], { spent_msat: 499_000 });
     expect(budgetStand(full, MAYA, false, 2000)).toEqual({ kind: 'contact_used', limit: 500_000, spent: 499_000, raiseTo: null });

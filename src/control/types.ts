@@ -184,7 +184,7 @@ export type ActionError = {
     | 'owner_only'
     | 'budget_paused' | 'budget_exhausted' | 'ceiling_exhausted' | 'first_contact' | 'budget_needed' | 'budget_unreadable'
     // G1 node grants: refused before any payment (see src-tauri/src/grant.rs).
-    | 'grant_ended' | 'grant_exhausted' | 'grant_per_call' | 'grant_recipient' | 'grant_unpriced' | 'grant_ledger' | 'grant_refused' | 'grant_unknown'
+    | 'grant_ended' | 'grant_exhausted' | 'grant_per_call' | 'grant_recipient' | 'grant_unpriced' | 'grant_ledger' | 'grant_refused' | 'grant_unknown' | 'grant_first_contact' | 'grant_readmission'
     | 'room_unreachable'
     | 'not_ready'
     | 'invalid'
