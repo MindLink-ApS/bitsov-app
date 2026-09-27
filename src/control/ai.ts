@@ -31,9 +31,19 @@ export const WEEK_MS = 7 * DAY_MS;
 
 // ---- what a question asks -----------------------------------------------------
 
+/** Literal content supplied separately from a question or provider's display prose. */
+export type DraftInput = { draft_text: string };
+
+/** A rules/provider result. No consumer may recover these fields from prose. */
+export type MessageProposal = {
+  recipient: string;
+  draft_text: string;
+  amount_hint: number | null;
+};
+
 /** An action the track may propose. It only prefills a composer; the owner sends. */
 export type Proposal =
-  | { kind: 'message'; peer: string; name: string; text: string; askedSats: number | null }
+  | ({ kind: 'message'; name: string } & MessageProposal)
   | { kind: 'pay'; peer: string; name: string; sats: number }
   | { kind: 'request'; peer: string; name: string; sats: number; note: string };
 
@@ -80,113 +90,6 @@ export function satsIn(text: string): number | null {
   return Number.isSafeInteger(n) && n > 0 ? n : null;
 }
 
-/** Find an outer quoted body, preserving nested spans and word apostrophes. */
-function quotedText(input: string): { index: number; text: string } | null {
-  const closing: Record<string, string> = { '"': '"', '“': '”', "'": "'" };
-  const boundary = /[\s.,!?;:)\]}"'”]/;
-  const isOpening = (i: number) => !!closing[input[i]] &&
-    (i === 0 || /[\s([{]/.test(input[i - 1])) && !!input[i + 1] && !/[\s.,!?;:)\]}]/.test(input[i + 1]);
-  const contraction = (i: number) => input[i] === "'" &&
-    /[\p{L}\p{N}]/u.test(input[i - 1] ?? '') && /[\p{L}\p{N}]/u.test(input[i + 1] ?? '');
-  const contentEnd = input.replace(/[\s.,!?;:]+$/, '').length;
-  const possessive = (i: number) => input[i] === "'" && /s/i.test(input[i - 1] ?? '') &&
-    i + 1 < contentEnd;
-  const spans = new Map<number, number[]>();
-  const endsOf = (start: number): number[] => {
-    const cached = spans.get(start);
-    if (cached) return cached;
-    const limit = Math.min(input.length - 1, start + 501);
-    const continuations = new Map<string, number[]>();
-    const scan = (from: number, delimiter: string): number[] => {
-      const key = `${from}:${delimiter}`;
-      const cached = continuations.get(key);
-      if (cached) return cached;
-      let ends: number[] = [];
-      for (let i = from; i <= limit; i++) {
-        if (contraction(i)) continue;
-        if (isOpening(i)) {
-          // Try each pairing: 'Thanks' can close a nested span, while kids'
-          // can be an apostrophe inside it. Do not consume the outer close.
-          const nested = scan(i + 1, closing[input[i]]).filter((end) => end > i + 1);
-          if (nested.length) {
-            ends = nested.flatMap((end) => scan(end + 1, delimiter));
-            // A leading elision/year is literal only when it cannot form a
-            // nested span with an outer close. A later 'tomorrow' remains a
-            // quoted instruction rather than becoming that missing close.
-            if (ends.length || !/^'(?:em\b|\d{2}\b)/i.test(input.slice(i))) break;
-          }
-        }
-        if (input[i] !== delimiter || (input[i + 1] && !boundary.test(input[i + 1]))) continue;
-        ends = [i];
-        if (possessive(i)) ends.push(...scan(i + 1, delimiter));
-        break;
-      }
-      const unique = [...new Set(ends)].sort((a, b) => a - b);
-      continuations.set(key, unique);
-      return unique;
-    };
-    const ends = scan(start + 1, closing[input[start]]).filter((end) => end > start + 1);
-    spans.set(start, ends);
-    return ends;
-  };
-  const suffixes = new Map<number, boolean>([[input.length, true]]);
-  let suffixStart = input.length;
-  const balancedSuffix = (from: number): boolean => {
-    // Work backwards so a long list of quoted instructions cannot recurse
-    // once per instruction. Every dependency is to the right of this index.
-    for (let i = suffixStart - 1; i >= from; i--) {
-      let balanced = suffixes.get(i + 1)!;
-      if (!contraction(i)) {
-        if (isOpening(i)) {
-          balanced = endsOf(i).some((end) => suffixes.get(end + 1));
-        } else if (input[i] === '"' || input[i] === '”' || input[i] === "'") {
-          // A trailing instruction can itself contain Chris' nickname.
-          balanced = possessive(i) && balanced;
-        }
-      }
-      suffixes.set(i, balanced);
-    }
-    suffixStart = Math.min(suffixStart, from);
-    return suffixes.get(from)!;
-  };
-  for (const match of input.matchAll(/(?:^|\s)(["“'])/g)) {
-    const start = match.index! + match[0].length - 1;
-    const ends = endsOf(start);
-    // Prefer a complete outer pairing. An early close that leaves an orphan
-    // closing quote would truncate a nested span or a possessive sentence.
-    const valid = ends.filter((end) => balancedSuffix(end + 1));
-    const candidates = valid.length ? valid : ends;
-    // If every candidate is s', the last punctuation boundary completes
-    // kids', parents', ... schedules', before a separate quoted instruction.
-    // A trailing Chris' nickname has whitespace, so it cannot displace it.
-    const punctuated = candidates.filter((end) => !/\s/.test(input[end + 1] ?? ''));
-    // When s' could be either possessive or closing, an explicit instruction
-    // starts the suffix. Apostrophes in that instruction must not extend the
-    // body ("'Thanks', use Chris', not Alex's, nickname"). Nested/unclosed
-    // body quotes have already been excluded by the balanced-suffix check.
-    const instruction = candidates.find((end) => /^(?:(?:please|don't|do not|use)\b|not\s+["“'])/i.test(
-      input.slice(end + 1).replace(/^[\s.,!?;:]+/, ''),
-    ));
-    const end = instruction ?? candidates.find((end) => !possessive(end)) ?? punctuated[punctuated.length - 1] ?? candidates[0];
-    if (end !== undefined) return { index: match.index!, text: input.slice(start + 1, end).trim() };
-  }
-  return null;
-}
-
-/** Quoted text, or what follows `saying` / `that says` / a colon. */
-function draftText(text: string): string {
-  const said = /(?:\b(?:saying|that says|to say)\s+|:\s*)([\s\S]{1,500})$/i.exec(text);
-  const quoted = quotedText(text);
-  // A marker inside a quoted body belongs to that body, while quotes after
-  // an explicit marker belong to its complete suffix (including contractions).
-  if (quoted && (!said || quoted.index < said.index)) return quoted.text;
-  const body = said?.[1].trim() ?? '';
-  // If the suffix starts with a quoted body, trailing prompt punctuation or
-  // instructions are outside it. Quotes embedded in an unquoted body stay put.
-  const wrapped = quotedText(body);
-  return wrapped?.index === 0 ? wrapped.text : body;
-}
-
 const startOfDay = (ms: number) => {
   const d = new Date(ms);
   d.setHours(0, 0, 0, 0);
@@ -212,7 +115,7 @@ const TOPICS: [AiTopic, RegExp][] = [
 ];
 
 /** What a question asks for. Actions need exactly one named peer. */
-export function understand(text: string, peers: Peer[], nowMs: number): Intent {
+export function understand(text: string, peers: Peer[], nowMs: number, draft?: DraftInput): Intent {
   const t = text.toLowerCase();
   const amount = satsIn(text);
   const wantsMessage = /\b(draft|write|compose|message|text|tell|reply|ask)\b/.test(t) && !/\bmessages? (did i get|from)\b/.test(t);
@@ -234,9 +137,9 @@ export function understand(text: string, peers: Peer[], nowMs: number): Intent {
     const name = peer.label?.trim() || shortId(peer.node_id);
     if (what === 'pay') return { kind: 'act', proposal: { kind: 'pay', peer: id, name, sats: amount! } };
     if (what === 'request') {
-      return { kind: 'act', proposal: { kind: 'request', peer: id, name, sats: amount!, note: draftText(text) } };
+      return { kind: 'act', proposal: { kind: 'request', peer: id, name, sats: amount!, note: draft?.draft_text ?? '' } };
     }
-    return { kind: 'act', proposal: { kind: 'message', peer: id, name, text: draftText(text), askedSats: amount } };
+    return { kind: 'act', proposal: { kind: 'message', recipient: id, name, draft_text: draft?.draft_text ?? '', amount_hint: amount } };
   }
   for (const [topic, pattern] of TOPICS) {
     if (!pattern.test(t)) continue;
@@ -468,8 +371,8 @@ export function proposalText(p: Proposal): string {
   switch (p.kind) {
     case 'message':
       return (
-        `I opened a draft in ${p.name}’s composer. ${p.name} sets the price of a message, and the composer shows it before you send.` +
-        (p.askedSats !== null ? ` You asked for a ${p.askedSats}-sat message: the price is theirs, not a choice here.` : '') +
+        `I prepared a draft for ${p.name}’s composer. ${p.name} sets the price of a message, and the composer shows it before you send.` +
+        (p.amount_hint !== null ? ` You asked for a ${p.amount_hint}-sat message: the price is theirs, not a choice here.` : '') +
         ' Nothing is sent until you press Send and approve the spend.'
       );
     case 'pay':

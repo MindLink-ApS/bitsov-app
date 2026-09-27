@@ -84,6 +84,8 @@ A request like "draft a 2-sat message to Maya", "pay Josh 500 sats" or "request 
 - The owner presses Send.
 
 Actions are handled on this computer only; they are never sent to a remote model. A remote model's text can trigger nothing.
+Message proposals carry separate `recipient`, `draft_text`, and `amount_hint` fields from the local rules. Enter the literal message or invoice note in **Draft text (optional)**; the question selects the action/contact and optional amount. The composer copies `draft_text` verbatim, including whitespace, apostrophes, nested quotes, and text that looks like instructions. An empty field opens an empty draft. Neither the question nor an answer's display prose is parsed for a message body or invoice note. Remote read answers remain display-only. The message amount hint never changes the recipient's price or grants permission to send.
+
 Payment and invoice drafts accept whole positive sats only (including correctly grouped thousands). Decimal, signed, fractional, or malformed amount tokens are rejected instead of interpreting their trailing digits as a different amount.
 
 ## Gates
