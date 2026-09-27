@@ -1729,7 +1729,8 @@ function BudgetPanel(props: {
             <p class="hint">
               A budget can go up to the daily total you approved; raising the total is a new approval. Budgets and this tally are
               saved on this device. Your approval is not: after a restart, approve once more. 0 forgets a contact, so they are asked
-              again. Files, invoices and direct payments still ask each time.
+              again. Inside the budget you approved at your node, paying and sending a file take one click to approve, with no
+              step at your node: your node holds every such payment to that budget.
             </p>
           </>
         )}
