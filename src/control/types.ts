@@ -59,6 +59,29 @@ export type FirstContactQuote = {
   expires_at: number;
 };
 
+/**
+ * K1 slice 1: an introduction (door card), read and verified by the host:
+ * a node key, where to reach it and its current prices, signed by that key,
+ * valid ten minutes. Never admission. The prices are the card's signed
+ * snapshot for display; before anything is paid the composer asks the node's
+ * own fresh quote and the owner confirms that total.
+ */
+export type Introduction = {
+  node_id: string;
+  network: string;
+  /** BitSov peer endpoint, host:port. */
+  endpoint: string;
+  /** `local`: a private-network address the reader must choose to allow. */
+  reach: 'public' | 'local';
+  admission_msat: number;
+  message_msat: number;
+  /** Unix seconds. */
+  issued_at: number;
+  expires_at: number;
+  /** `bitsov://introduce#…` */
+  link: string;
+};
+
 export type Channel = {
   channel_id: string;
   peer_pubkey: string;

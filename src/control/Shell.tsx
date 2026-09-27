@@ -32,6 +32,7 @@ import {
 } from './state';
 import type {
   FirstContactQuote,
+  Introduction,
   ActionError,
   Artifact,
   BudgetPreset,
@@ -128,6 +129,8 @@ export function ControlCenter(props: Props) {
   const [artifacts, setArtifacts] = createStore<Record<string, Artifact[]>>({});
   const [errors, setErrors] = createStore<Record<string, string | undefined>>({});
   const [contextOpen, setContextOpen] = createSignal(false);
+  /** K1: cards the owner continued from, by node id. Display only, never admission. */
+  const [introduced, setIntroduced] = createStore<Record<string, Introduction>>({});
   const [tab, setTab] = createSignal<'node' | 'wallet' | 'budget'>('node');
   const aiSession = createAiSession();
   const [prefill, setPrefill] = createSignal<Prefill | null>(null);
@@ -461,6 +464,11 @@ export function ControlCenter(props: Props) {
                     actions={actions}
                     spendError={errors.spend}
                     onContext={() => setContextOpen(true)}
+                    onIntroduced={(card) => {
+                      const id = card.node_id.toLowerCase();
+                      setIntroduced(id, card);
+                      setTrack({ kind: 'peer', id });
+                    }}
                   />
                 </Match>
                 <Match when={t().kind === 'peer' || t().kind === 'room'}>
@@ -468,6 +476,7 @@ export function ControlCenter(props: Props) {
                     track={t()}
                     name={trackName(t())}
                     peer={t().kind === 'peer' ? peerById().get((t() as { id: string }).id) : undefined}
+                    introduced={t().kind === 'peer' ? introduced[(t() as { id: string }).id] : undefined}
                     members={t().kind === 'room' ? members[(t() as { id: string }).id] ?? null : null}
                     messages={threads.t[trackKey(t())] ?? []}
                     artifacts={artifacts[trackKey(t())] ?? []}
@@ -648,6 +657,8 @@ function Conversation(props: {
   track: TrackRef;
   name: string;
   peer: Peer | undefined;
+  /** K1: the verified card this conversation was opened from, if any. */
+  introduced?: Introduction;
   members: string[] | null;
   messages: Message[];
   artifacts: Artifact[];
@@ -702,6 +713,15 @@ function Conversation(props: {
     <>
       <TrackHead title={props.name} sub={sub()} onContext={props.onContext} />
       <div class="stream" ref={stream} data-stream>
+        <Show when={props.introduced}>
+          {(c) => (
+            <p class="day" data-introduced={c().node_id}>
+              Opened from {props.name}’s signed introduction. Their card said: first contact {sats(c().admission_msat)} sats, each
+              message {sats(c().message_msat)} sats. You confirm their node’s own quote before anything is paid, and every
+              message pays.
+            </p>
+          )}
+        </Show>
         <Show when={props.track.kind === 'room'}>
           <p class="day">Members added here are not notified yet. A room message pays each member their own price, separately.</p>
         </Show>
@@ -1777,14 +1797,73 @@ function NewTrack(props: {
   actions: Actions;
   spendError: string | undefined;
   onContext: () => void;
+  /** K1 Continue succeeded: the node dialed this card's node. Open its conversation. */
+  onIntroduced: (card: Introduction) => void;
 }) {
+  // K1: your own signed introduction. Without one (older node, no dialable
+  // endpoint) the plain node id is shown as before.
+  const [mine, setMine] = createSignal<Introduction | null>(null);
+  const [mineErr, setMineErr] = createSignal<string | null>(null);
+  const loadMine = () => {
+    setMineErr(null);
+    props.source.introductionMine().then(setMine, (e) => {
+      setMine(null);
+      setMineErr(asActionError(e).message);
+    });
+  };
+  loadMine();
+  const nowSecs = () => Math.floor(props.now / 1000);
+  const mineLive = () => {
+    const m = mine();
+    return m && m.expires_at > nowSecs() ? m : null;
+  };
   const qr = createMemo(() => {
+    const text = mineLive()?.link ?? props.ownId;
     try {
-      return props.ownId ? qrSvg(props.ownId) : null;
+      return text ? qrSvg(text) : null;
     } catch {
       return null;
     }
   });
+  const minutesLeft = (until: number) => Math.max(1, Math.ceil((until - nowSecs()) / 60));
+
+  // K1: a scanned or pasted introduction. Reading it is local; Continue asks
+  // the node to dial, and the conversation's door card does the rest.
+  const [pasted, setPasted] = createSignal('');
+  const [card, setCard] = createSignal<Introduction | null>(null);
+  const [cardErr, setCardErr] = createSignal<string | null>(null);
+  const [opening, setOpening] = createSignal(false);
+  const cardLive = () => {
+    const c = card();
+    return c && c.expires_at > nowSecs() ? c : null;
+  };
+  const readCard = () => {
+    setCard(null);
+    setCardErr(null);
+    const text = pasted();
+    props.source.introductionRead(text).then(
+      (c) => pasted() === text && setCard(c),
+      (e) => setCardErr(asActionError(e).message),
+    );
+  };
+  const continueCard = () => {
+    const c = cardLive();
+    if (!c || opening()) return;
+    setOpening(true);
+    setCardErr(null);
+    props.source.introductionOpen(c.link).then(
+      (opened) => {
+        setOpening(false);
+        setCard(null);
+        setPasted('');
+        props.onIntroduced(opened);
+      },
+      (e) => {
+        setOpening(false);
+        setCardErr(asActionError(e).message);
+      },
+    );
+  };
   const open = () => spendLine(props.spend, props.now).open;
   const [invitee, setInvitee] = createSignal('');
   const [addr, setAddr] = createSignal('');
@@ -1818,22 +1897,127 @@ function NewTrack(props: {
       <TrackHead title="Start something" onContext={props.onContext} />
       <SpendBar spend={props.spend} error={props.spendError} now={props.now} actions={props.actions} />
       <div class="stream">
-        <div class="empty-track" data-new-track>
-          <h2>Share your node id</h2>
-          <p class="hint">
-            Anyone who knows it can offer to pay you to talk. Knowing an id is an introduction, not admission: each
-            message is admitted only when its payment settles.
-          </p>
-          <Show when={qr()}>
-            <svg class="qr" viewBox={`0 0 ${qr()!.extent} ${qr()!.extent}`} shape-rendering="crispEdges" role="img" aria-label="Your node id as a QR code">
-              <rect width={qr()!.extent} height={qr()!.extent} fill="#ffffff" />
-              <path d={qr()!.path} fill="#000000" />
-            </svg>
-          </Show>
-          <code class="address">{props.ownId}</code>
-        </div>
+        <Show
+          when={mineLive()}
+          fallback={
+            <div class="empty-track" data-new-track>
+              <h2>Share your node id</h2>
+              <p class="hint">
+                Anyone who knows it can offer to pay you to talk. Knowing an id is an introduction, not admission: each
+                message is admitted only when its payment settles.
+              </p>
+              <Show when={qr()}>
+                <svg class="qr" viewBox={`0 0 ${qr()!.extent} ${qr()!.extent}`} shape-rendering="crispEdges" role="img" aria-label="Your node id as a QR code">
+                  <rect width={qr()!.extent} height={qr()!.extent} fill="#ffffff" />
+                  <path d={qr()!.path} fill="#000000" />
+                </svg>
+              </Show>
+              <code class="address">{props.ownId}</code>
+              <Show when={mine()}>
+                <p class="hint" data-intro-expired>
+                  Your introduction expired. <button type="button" class="link" onClick={loadMine}>Make a new one</button>
+                </p>
+              </Show>
+              <Show when={mineErr()}>
+                <p class="hint" data-intro-unavailable>{mineErr()}</p>
+              </Show>
+            </div>
+          }
+        >
+          {(m) => (
+            <div class="empty-track" data-new-track data-intro-mine>
+              <h2>Your introduction</h2>
+              <p class="hint">
+                Let someone scan this, or send them the link. It shows your node key, where to reach it and your current
+                prices, signed by your node. It is not admission: whoever uses it pays your price for every message.
+              </p>
+              <Show when={qr()}>
+                <svg class="qr" viewBox={`0 0 ${qr()!.extent} ${qr()!.extent}`} shape-rendering="crispEdges" role="img" aria-label="Your introduction as a QR code">
+                  <rect width={qr()!.extent} height={qr()!.extent} fill="#ffffff" />
+                  <path d={qr()!.path} fill="#000000" />
+                </svg>
+              </Show>
+              <p data-intro-prices>
+                First contact: <strong>{sats(m().admission_msat)} sats</strong>. Each message: <strong>{sats(m().message_msat)} sats</strong>.
+              </p>
+              <p class="hint">
+                Valid for about {minutesLeft(m().expires_at)} min. <button type="button" class="link" onClick={loadMine}>New card</button>
+              </p>
+              <code class="address" data-intro-link>{m().link}</code>
+            </div>
+          )}
+        </Show>
 
         <div class="new-grid">
+          <form
+            class="panel"
+            data-intro-open
+            onSubmit={(e) => {
+              e.preventDefault();
+              readCard();
+            }}
+          >
+            <h2>Open an introduction</h2>
+            <p class="hint">Paste a bitsov://introduce link someone showed or sent you. Reading it sends nothing.</p>
+            <textarea
+              data-intro-text
+              rows={3}
+              placeholder="bitsov://introduce#…"
+              value={pasted()}
+              onInput={(e) => {
+                setPasted(e.currentTarget.value);
+                setCard(null);
+                setCardErr(null);
+              }}
+              aria-label="Introduction link"
+            />
+            <button type="submit" class="primary" disabled={!pasted().trim() || opening()}>
+              Read card
+            </button>
+            <Show when={card()}>
+              {(c) => (
+                <div class="artifact" data-door-card={c().node_id}>
+                  <span class="kind">Door card · {shortId(c().node_id)}</span>
+                  <span>Signed by the key it names.</span>
+                  <p data-door-prices>
+                    First contact: <strong>{sats(c().admission_msat)} sats</strong>. Each message: <strong>{sats(c().message_msat)} sats</strong>.
+                  </p>
+                  <span class="hint">
+                    Prices from their signed card. Before anything is paid, your node asks theirs for a fresh quote and you
+                    confirm the total.
+                  </span>
+                  <Show when={c().reach === 'local'}>
+                    <span class="hint" data-door-local>
+                      Local network address ({c().endpoint}). Continue only if you are on the same network as them.
+                    </span>
+                  </Show>
+                  <details>
+                    <summary>Details</summary>
+                    <code class="address">{c().node_id}</code>
+                    <span class="hint">Address {c().endpoint} · {c().network}</span>
+                  </details>
+                  <Show
+                    when={cardLive()}
+                    fallback={<span class="err-note" data-door-expired>This card has expired. Ask them for a fresh one.</span>}
+                  >
+                    <span class="hint">Continuing connects your node to theirs. It pays nothing and adds no contact.</span>
+                    <span class="row" style={{ gap: 'var(--s-2)' }}>
+                      <button type="button" class="primary" data-door-continue disabled={opening()} onClick={continueCard}>
+                        {opening() ? 'Connecting…' : 'Continue'}
+                      </button>
+                      <button type="button" onClick={() => setCard(null)} disabled={opening()}>
+                        Cancel
+                      </button>
+                    </span>
+                  </Show>
+                </div>
+              )}
+            </Show>
+            <Show when={cardErr()}>
+              <p class="err-note" data-door-error>{cardErr()}</p>
+            </Show>
+          </form>
+
           <form
             class="panel"
             data-invite-create

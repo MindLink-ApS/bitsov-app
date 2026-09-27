@@ -1,0 +1,425 @@
+//! K1 introductions (slice 1), host side: read and verify a scanned or pasted
+//! door card before the renderer shows it.
+//!
+//! Format owner: genome `konsensus_core::introduction` (`introduction_v1`).
+//! This is an independent reader of the same bytes, pinned to the genome's
+//! test vector. Gate G1 keeps konsensus crates out of the app, so the format
+//! is re-implemented rather than linked.
+//!
+//! **An introduction is never admission.** Reading one is local: no request,
+//! no payment, no stored contact. The app never dials the card's endpoint
+//! itself. On Continue, the node verifies the card again, pins its DNS and
+//! dials it unprivileged. Every act after that is paid as for any stranger.
+
+use base64_url as b64;
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use serde::{Deserialize, Serialize};
+
+/// `/status` capability of a node that signs and opens introductions.
+pub const CAPABILITY: &str = "introduction_v1";
+const DOMAIN_V1: &[u8] = b"bitsov-introduction/v1\0";
+const VERSION: u8 = 1;
+pub const LINK_PREFIX: &str = "bitsov://introduce#";
+const LIFETIME_SECS: u64 = 600;
+const MAX_SKEW_SECS: u64 = 60;
+/// K1: a card is at most 2 KiB however it arrives.
+pub const MAX_ENCODED_LEN: usize = 2048;
+const MAX_ENDPOINT_LEN: usize = 255;
+const NETWORKS: [&str; 4] = ["bitcoin", "testnet", "signet", "regtest"];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Reach {
+    Public,
+    Local,
+}
+
+/// The signed card, as the node's JSON names it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Card {
+    pub v: u8,
+    pub network: String,
+    pub node_id: String,
+    pub endpoint: String,
+    pub reach: Reach,
+    pub admission_msat: u64,
+    pub message_msat: u64,
+    pub price_epoch: u64,
+    pub issued_at: u64,
+    pub expires_at: u64,
+    pub intro_id: String,
+    pub sig: String,
+}
+
+/// What the renderer may show: a verified card, never the raw input.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DoorCard {
+    pub node_id: String,
+    pub network: String,
+    pub endpoint: String,
+    pub reach: Reach,
+    pub admission_msat: u64,
+    pub message_msat: u64,
+    pub issued_at: u64,
+    pub expires_at: u64,
+    /// The canonical link, for the QR and for Continue.
+    pub link: String,
+}
+
+fn decode_fixed<const N: usize>(s: &str) -> Option<[u8; N]> {
+    if s.len() != N * 2 || s.bytes().any(|b| b.is_ascii_uppercase()) {
+        return None;
+    }
+    hex::decode(s).ok()?.try_into().ok()
+}
+
+impl Card {
+    fn canonical_bytes(&self) -> Result<Vec<u8>, String> {
+        let key = decode_fixed::<32>(&self.node_id).ok_or("the card's node key is malformed")?;
+        let id = decode_fixed::<16>(&self.intro_id).ok_or("the card's id is malformed")?;
+        if self.network.len() > 255 || self.endpoint.len() > MAX_ENDPOINT_LEN {
+            return Err("the card's endpoint is too long".into());
+        }
+        let mut out = Vec::with_capacity(DOMAIN_V1.len() + 128 + self.endpoint.len());
+        out.extend_from_slice(DOMAIN_V1);
+        out.push(self.v);
+        out.push(self.network.len() as u8);
+        out.extend_from_slice(self.network.as_bytes());
+        out.extend_from_slice(&key);
+        out.push(self.endpoint.len() as u8);
+        out.extend_from_slice(self.endpoint.as_bytes());
+        out.push(match self.reach {
+            Reach::Public => 0,
+            Reach::Local => 1,
+        });
+        for n in [self.admission_msat, self.message_msat, self.price_epoch, self.issued_at, self.expires_at] {
+            out.extend_from_slice(&n.to_be_bytes());
+        }
+        out.extend_from_slice(&id);
+        Ok(out)
+    }
+
+    /// Everything but the reader's network: version, known network,
+    /// endpoint shape and reach, lifetime, expiry and the node-key signature.
+    pub fn verify(&self, now_unix: u64) -> Result<(), String> {
+        if self.v != VERSION {
+            return Err(format!("This introduction uses version {}, which this app cannot read.", self.v));
+        }
+        if !NETWORKS.contains(&self.network.as_str()) {
+            return Err("This introduction names an unknown Bitcoin network.".into());
+        }
+        let literal = reach_of(&self.endpoint)?;
+        if self.reach == Reach::Public && literal == Reach::Local {
+            return Err("This introduction calls a private address public.".into());
+        }
+        if self.expires_at <= self.issued_at || self.expires_at - self.issued_at > LIFETIME_SECS {
+            return Err("This introduction claims to live longer than ten minutes.".into());
+        }
+        if self.issued_at > now_unix.saturating_add(MAX_SKEW_SECS) {
+            return Err("This introduction is dated in the future. Check your clock.".into());
+        }
+        if self.expires_at <= now_unix {
+            return Err("This introduction has expired. Ask for a fresh one.".into());
+        }
+        let key = decode_fixed::<32>(&self.node_id).ok_or("the card's node key is malformed")?;
+        let key = VerifyingKey::from_bytes(&key).map_err(|_| "the card's node key is not a valid key".to_string())?;
+        let sig = decode_fixed::<64>(&self.sig).ok_or("the card's signature is malformed")?;
+        key.verify(blake3::hash(&self.canonical_bytes()?).as_bytes(), &Signature::from_bytes(&sig))
+            .map_err(|_| "The signature does not match this node's key. Do not use this introduction.".to_string())
+    }
+
+    /// The 32-byte digest the node key signs. Public so tests and fixtures
+    /// can sign cards; the app itself never holds a node key.
+    pub fn signing_digest(&self) -> Result<[u8; 32], String> {
+        Ok(*blake3::hash(&self.canonical_bytes()?).as_bytes())
+    }
+
+    pub fn to_link(&self) -> Result<String, String> {
+        let mut bytes = self.canonical_bytes()?;
+        bytes.drain(..DOMAIN_V1.len());
+        bytes.extend_from_slice(&decode_fixed::<64>(&self.sig).ok_or("the card's signature is malformed")?);
+        Ok(format!("{LINK_PREFIX}{}", b64::encode(&bytes)))
+    }
+
+    fn from_link_bytes(b: &[u8]) -> Result<Self, String> {
+        let mut at = 0usize;
+        let mut take = |n: usize| -> Result<&[u8], String> {
+            let s = b.get(at..at + n).ok_or("This introduction is cut short.")?;
+            at += n;
+            Ok(s)
+        };
+        let text = |s: &[u8]| String::from_utf8(s.to_vec()).map_err(|_| "This introduction is not readable.".to_string());
+        let num = |s: &[u8]| u64::from_be_bytes(s.try_into().expect("8 bytes"));
+        let v = take(1)?[0];
+        let n = take(1)?[0] as usize;
+        let network = text(take(n)?)?;
+        let node_id = hex::encode(take(32)?);
+        let n = take(1)?[0] as usize;
+        let endpoint = text(take(n)?)?;
+        let reach = match take(1)?[0] {
+            0 => Reach::Public,
+            1 => Reach::Local,
+            _ => return Err("This introduction is not readable.".into()),
+        };
+        let admission_msat = num(take(8)?);
+        let message_msat = num(take(8)?);
+        let price_epoch = num(take(8)?);
+        let issued_at = num(take(8)?);
+        let expires_at = num(take(8)?);
+        let intro_id = hex::encode(take(16)?);
+        let sig = hex::encode(take(64)?);
+        if at != b.len() {
+            return Err("This introduction has extra data.".into());
+        }
+        Ok(Self { v, network, node_id, endpoint, reach, admission_msat, message_msat, price_epoch, issued_at, expires_at, intro_id, sig })
+    }
+
+    pub fn door(&self) -> Result<DoorCard, String> {
+        Ok(DoorCard {
+            node_id: self.node_id.clone(),
+            network: self.network.clone(),
+            endpoint: self.endpoint.clone(),
+            reach: self.reach,
+            admission_msat: self.admission_msat,
+            message_msat: self.message_msat,
+            issued_at: self.issued_at,
+            expires_at: self.expires_at,
+            link: self.to_link()?,
+        })
+    }
+}
+
+/// A scanned link, its bare fragment, or pasted JSON. Bounded before any
+/// decoding. Does not verify.
+pub fn parse(text: &str) -> Result<Card, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("Paste an introduction first.".into());
+    }
+    if text.len() > MAX_ENCODED_LEN {
+        return Err("That is too long to be an introduction (2 KiB at most).".into());
+    }
+    if text.starts_with('{') {
+        return serde_json::from_str(text).map_err(|_| "That is not an introduction.".to_string());
+    }
+    let payload = match text.split_once('#') {
+        Some((prefix, frag)) if format!("{prefix}#") == LINK_PREFIX => frag,
+        Some(_) => return Err("That is not a bitsov://introduce link.".into()),
+        None => text,
+    };
+    let bytes = b64::decode(payload).ok_or("That is not an introduction.")?;
+    Card::from_link_bytes(&bytes)
+}
+
+/// Parse and verify in one step.
+pub fn read(text: &str, now_unix: u64) -> Result<Card, String> {
+    let card = parse(text)?;
+    card.verify(now_unix)?;
+    Ok(card)
+}
+
+/// `host:port` with no scheme, credentials, path or query; the host is an
+/// IPv4 literal, a bracketed IPv6 literal or a DNS name.
+fn split_endpoint(endpoint: &str) -> Result<(String, u16), String> {
+    let bad = || format!("“{endpoint}” is not a node address (host:port).");
+    if endpoint.is_empty() || endpoint.len() > MAX_ENDPOINT_LEN || endpoint.contains(|c: char| c.is_whitespace() || "/@?#\\".contains(c)) {
+        return Err(bad());
+    }
+    let (host, port) = endpoint.rsplit_once(':').ok_or_else(bad)?;
+    let port: u16 = port.parse().map_err(|_| bad())?;
+    if port == 0 {
+        return Err(bad());
+    }
+    if let Some(v6) = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
+        v6.parse::<std::net::Ipv6Addr>().map_err(|_| bad())?;
+        return Ok((v6.to_string(), port));
+    }
+    if host.parse::<std::net::Ipv4Addr>().is_err() {
+        let dns = host.len() <= 253
+            && host.split('.').all(|l| {
+                !l.is_empty() && l.len() <= 63 && !l.starts_with('-') && !l.ends_with('-') && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            });
+        if !dns {
+            return Err(bad());
+        }
+    }
+    Ok((host.to_ascii_lowercase(), port))
+}
+
+/// Same classification as the genome: never-dialable ranges (link-local and
+/// cloud metadata included) are refused; loopback/private/CGNAT/ULA literals
+/// are local; everything else, DNS names included, is public.
+fn reach_of(endpoint: &str) -> Result<Reach, String> {
+    use std::net::IpAddr;
+    let (host, _) = split_endpoint(endpoint)?;
+    if host == "localhost" || host.ends_with(".localhost") || host.ends_with(".local") {
+        return Ok(Reach::Local);
+    }
+    let Ok(ip) = host.parse::<IpAddr>() else { return Ok(Reach::Public) };
+    let never = || Err(format!("{ip} is never a node address."));
+    let ip = match ip {
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(ip),
+        v4 => v4,
+    };
+    match ip {
+        IpAddr::V4(v4) => {
+            let [a, b, c, _] = v4.octets();
+            if v4.is_unspecified() || v4.is_multicast() || v4.is_broadcast() || v4.is_link_local() || v4.is_documentation()
+                || a == 0 || a >= 240 || (a == 192 && b == 0 && c == 0) || (a == 198 && (b == 18 || b == 19))
+            {
+                never()
+            } else if v4.is_loopback() || v4.is_private() || (a == 100 && (64..128).contains(&b)) {
+                Ok(Reach::Local)
+            } else {
+                Ok(Reach::Public)
+            }
+        }
+        IpAddr::V6(v6) => {
+            let s = v6.segments();
+            if v6.is_unspecified() || v6.is_multicast() || (s[0] & 0xffc0) == 0xfe80 || (s[0] == 0x2001 && s[1] == 0x0db8) {
+                never()
+            } else if v6.is_loopback() || (s[0] & 0xfe00) == 0xfc00 {
+                Ok(Reach::Local)
+            } else {
+                Ok(Reach::Public)
+            }
+        }
+    }
+}
+
+/// base64url without padding. Small and in-tree, as for the QR encoder.
+mod base64_url {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+    pub fn encode(bytes: &[u8]) -> String {
+        let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+        for chunk in bytes.chunks(3) {
+            let n = chunk.iter().enumerate().fold(0u32, |acc, (i, b)| acc | (u32::from(*b) << (16 - 8 * i)));
+            for i in 0..=chunk.len() {
+                out.push(ALPHABET[((n >> (18 - 6 * i)) & 63) as usize] as char);
+            }
+        }
+        out
+    }
+
+    pub fn decode(text: &str) -> Option<Vec<u8>> {
+        if text.len() % 4 == 1 {
+            return None;
+        }
+        let mut out = Vec::with_capacity(text.len() * 3 / 4);
+        for chunk in text.as_bytes().chunks(4) {
+            let mut n = 0u32;
+            for (i, c) in chunk.iter().enumerate() {
+                let v = ALPHABET.iter().position(|a| a == c)? as u32;
+                n |= v << (18 - 6 * i);
+            }
+            let bytes = n.to_be_bytes();
+            let len = chunk.len() - 1;
+            // Non-canonical trailing bits would give two encodings of one card.
+            if len < 3 && (n & (0xff_ffff >> (8 * len))) != 0 {
+                return None;
+            }
+            out.extend_from_slice(&bytes[1..1 + len]);
+        }
+        Some(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The genome's fixed vector (`konsensus_core::introduction` tests):
+    /// Ed25519 key `[7; 32]`, regtest, `node.example.org:9000`, 100 000 /
+    /// 10 000 msat, epoch 440, issued 1 790 000 000, id `[0xab; 16]`.
+    const VECTOR_LINK: &str = "bitsov://introduce#AQdyZWd0ZXN06kpsY-KcUgq-9VB7Ey7F-ZVHdq6-vnuSQh7qaRRG0iwVbm9kZS5leGFtcGxlLm9yZzo5MDAwAAAAAAAAAYagAAAAAAAAJxAAAAAAAAABuAAAAABqsTuAAAAAAGqxPdirq6urq6urq6urq6urq6ur3BK7GVreWdgZElEoTou2cd8Nk2q0QYa7Jmb-SZsV3kdG52gStclWtLnYqDxfBSO0RMBFywM4DdLClJDK9TGmAA";
+    const NOW: u64 = 1_790_000_000;
+
+    fn vector() -> Card {
+        parse(VECTOR_LINK).unwrap()
+    }
+
+    #[test]
+    fn reads_the_genome_vector() {
+        let c = vector();
+        assert_eq!(c.node_id, "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c");
+        assert_eq!(c.sig, "dc12bb195ade59d8191251284e8bb671df0d936ab44186bb2666fe499b15de4746e76812b5c956b4b9d8a83c5f0523b444c045cb03380dd2c29490caf531a600");
+        assert_eq!((c.network.as_str(), c.endpoint.as_str(), c.reach), ("regtest", "node.example.org:9000", Reach::Public));
+        assert_eq!((c.admission_msat, c.message_msat, c.price_epoch), (100_000, 10_000, 440));
+        assert_eq!((c.issued_at, c.expires_at, c.intro_id.as_str()), (NOW, NOW + 600, "abababababababababababababababab"));
+        assert!(c.verify(NOW).is_ok());
+        assert_eq!(c.to_link().unwrap(), VECTOR_LINK, "the link round-trips byte for byte");
+        // The node's JSON form of the same card verifies too.
+        let json = serde_json::to_string(&c).unwrap();
+        assert_eq!(read(&json, NOW).unwrap(), c);
+        assert_eq!(read(VECTOR_LINK.strip_prefix(LINK_PREFIX).unwrap(), NOW).unwrap(), c);
+    }
+
+    #[test]
+    fn every_field_is_signed() {
+        let c = vector();
+        let tamper: Vec<fn(&mut Card)> = vec![
+            |c| c.network = "signet".into(),
+            |c| c.endpoint = "evil.example.org:9000".into(),
+            |c| c.reach = Reach::Local,
+            |c| c.admission_msat = 1,
+            |c| c.message_msat = 1,
+            |c| c.price_epoch = 441,
+            |c| c.issued_at -= 1,
+            |c| c.expires_at -= 1,
+            |c| c.intro_id = "ac".repeat(16),
+            |c| c.node_id = "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22d".into(),
+            |c| c.sig = "00".repeat(64),
+        ];
+        for (i, t) in tamper.iter().enumerate() {
+            let mut bad = c.clone();
+            t(&mut bad);
+            assert!(bad.verify(NOW).is_err(), "tamper {i} verified");
+        }
+    }
+
+    #[test]
+    fn expiry_version_and_lifetime() {
+        let c = vector();
+        assert!(c.verify(NOW + 599).is_ok());
+        assert!(c.verify(NOW + 600).unwrap_err().contains("expired"));
+        assert!(c.verify(NOW - 61).unwrap_err().contains("future"));
+        let mut v2 = c.clone();
+        v2.v = 2;
+        assert!(v2.verify(NOW).unwrap_err().contains("version 2"));
+    }
+
+    #[test]
+    fn parse_is_bounded_and_strict() {
+        assert!(parse(&"A".repeat(MAX_ENCODED_LEN + 1)).unwrap_err().contains("2 KiB"));
+        assert!(parse("").is_err());
+        assert!(parse("https://evil.example/#AQdy").is_err());
+        assert!(parse(&VECTOR_LINK[..VECTOR_LINK.len() - 4]).is_err(), "truncated");
+        assert!(parse(&format!("{VECTOR_LINK}AA")).is_err(), "trailing bytes");
+        let mut json = serde_json::to_value(vector()).unwrap();
+        json["grant"] = "admin".into();
+        assert!(parse(&json.to_string()).is_err(), "unknown fields refused");
+    }
+
+    #[test]
+    fn endpoint_policy_matches_the_genome() {
+        for bad in ["http://a.example:1", "u@a.example:1", "a.example", "a.example:0", "a.example:1/x", "0.0.0.0:1", "169.254.169.254:80", "[fe80::1]:1", "224.0.0.1:1", ""] {
+            assert!(reach_of(bad).is_err(), "{bad}");
+        }
+        for (ok, r) in [("a.example:1", Reach::Public), ("8.8.8.8:1", Reach::Public), ("127.0.0.1:1", Reach::Local), ("10.0.0.2:1", Reach::Local), ("[fd00::1]:1", Reach::Local), ("localhost:1", Reach::Local)] {
+            assert_eq!(reach_of(ok).unwrap(), r, "{ok}");
+        }
+    }
+
+    #[test]
+    fn base64url_round_trips_and_rejects_noncanonical() {
+        for n in 0..40usize {
+            let bytes: Vec<u8> = (0..n as u8).map(|b| b.wrapping_mul(37)).collect();
+            assert_eq!(base64_url::decode(&base64_url::encode(&bytes)).unwrap(), bytes);
+        }
+        assert!(base64_url::decode("AB").is_none(), "non-zero trailing bits");
+        assert!(base64_url::decode("A").is_none());
+        assert!(base64_url::decode("A+==").is_none());
+    }
+}

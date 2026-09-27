@@ -1423,6 +1423,107 @@ async fn read_first_contact_quote(state: &NodeState, peer: &str) -> Result<contr
     Ok(quote)
 }
 
+// ---- K1 introductions (slice 1) -----------------------------------------------
+//
+// An introduction is never admission. `introduction_read` is local only. The
+// app never dials a card's endpoint: `introduction_open` asks the node, which
+// verifies the card again, pins its DNS and dials unprivileged (no whitelist,
+// nothing stored). The composer's door card then asks the stranger's own
+// stateless quote and the owner's one-time OK, exactly as for any stranger.
+
+/// `GET /introduction` — this node's signed door card for the QR: key,
+/// reachable peer endpoint and current prices, valid ten minutes. Checked
+/// here to be signed by this node's own key before it is shown.
+#[tauri::command(rename_all = "snake_case")]
+async fn introduction_mine(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+) -> Result<bitsov_app::introduction::DoorCard, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    read_own_introduction(state.inner()).await
+}
+
+async fn read_own_introduction(state: &NodeState) -> Result<bitsov_app::introduction::DoorCard, String> {
+    use bitsov_app::introduction as intro;
+    let status: serde_json::Value = get_json(state, "/status").await?;
+    let offers = status["api_capabilities"]
+        .as_array()
+        .is_some_and(|caps| caps.iter().any(|v| v.as_str() == Some(intro::CAPABILITY)));
+    if !offers {
+        return Err("Your node cannot sign an introduction yet. Share your node id instead.".into());
+    }
+    let path = "/introduction";
+    let (code, text) = call_api(state, reqwest::Method::GET, path, None).await?;
+    if !code.is_success() {
+        return Err(api_error(path, code, &text));
+    }
+    #[derive(Deserialize)]
+    struct Mine {
+        card: intro::Card,
+        link: String,
+    }
+    let mine: Mine = serde_json::from_str(&text).map_err(|e| format!("{path} decode failed: {e}"))?;
+    mine.card.verify(now_unix().max(0) as u64)?;
+    if Some(mine.card.node_id.as_str()) != status["node_id"].as_str() {
+        return Err(format!("{path}: the card is not signed by this node's key"));
+    }
+    let door = mine.card.door()?;
+    if door.link != mine.link {
+        return Err(format!("{path}: the link does not match the card"));
+    }
+    Ok(door)
+}
+
+/// Read a scanned, opened or pasted introduction: bounded parse, version,
+/// network name, endpoint shape, expiry and node-key signature. Local only:
+/// no request is made and nothing is stored.
+#[tauri::command(rename_all = "snake_case")]
+async fn introduction_read(
+    window: WebviewWindow<impl tauri::Runtime>,
+    text: String,
+) -> Result<bitsov_app::introduction::DoorCard, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    bitsov_app::introduction::read(&text, now_unix().max(0) as u64)?.door()
+}
+
+/// Continue from a door card: re-verify it here, then `POST
+/// /introduction/open` so the node checks it against its own network, pins
+/// the endpoint and dials the introduced node unprivileged. Pays nothing,
+/// asks no quote and stores no contact.
+#[tauri::command(rename_all = "snake_case")]
+async fn introduction_open(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    text: String,
+) -> Result<bitsov_app::introduction::DoorCard, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    open_introduction(state.inner(), &text).await
+}
+
+async fn open_introduction(state: &NodeState, text: &str) -> Result<bitsov_app::introduction::DoorCard, String> {
+    use bitsov_app::introduction as intro;
+    let door = intro::read(text, now_unix().max(0) as u64)?.door()?;
+    if !node_offers(state, intro::CAPABILITY).await {
+        return Err("Your node cannot open introductions yet.".into());
+    }
+    let path = "/introduction/open";
+    let (code, body) = call_api(state, reqwest::Method::POST, path, Some(serde_json::json!({ "card": door.link }))).await?;
+    if code == reqwest::StatusCode::CONFLICT && body.contains("introduction_closed_mesh") {
+        return Err("Your node only connects to peers you added yourself, and an introduction does not add one. Nothing was sent.".into());
+    }
+    if !code.is_success() {
+        return Err(api_error(path, code, &body));
+    }
+    let opened: serde_json::Value = serde_json::from_str(&body).map_err(|e| format!("{path} decode failed: {e}"))?;
+    if opened["node_id"].as_str() != Some(door.node_id.as_str()) || opened["connected"] != serde_json::Value::Bool(true) {
+        return Err(format!("{path}: the node connected to someone else"));
+    }
+    Ok(door)
+}
+
 /// Does `/status` list `capability`? Unreadable counts as no.
 async fn node_offers(state: &NodeState, capability: &str) -> bool {
     match get_json::<serde_json::Value>(state, "/status").await {
@@ -2919,6 +3020,9 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             messages_list,
             price_quote,
             first_contact_quote,
+            introduction_mine,
+            introduction_read,
+            introduction_open,
             payments_overview,
             spend_status,
             spend_request,
@@ -4198,6 +4302,97 @@ mod control_act_tests {
         assert!(first_contact_then_compose(&node).is_none());
     }
 
+    /// A fresh card for key `[0x42; 32]`, signed now.
+    fn intro_card(endpoint: &str, issued_at: u64) -> bitsov_app::introduction::Card {
+        use ed25519_dalek::Signer;
+        let key = ed25519_dalek::SigningKey::from_bytes(&[0x42; 32]);
+        let mut card = bitsov_app::introduction::Card {
+            v: 1,
+            network: "regtest".into(),
+            node_id: hex::encode(key.verifying_key().to_bytes()),
+            endpoint: endpoint.into(),
+            reach: bitsov_app::introduction::Reach::Local,
+            admission_msat: 100_000,
+            message_msat: 10_000,
+            price_epoch: 0,
+            issued_at,
+            expires_at: issued_at + 600,
+            intro_id: "ab".repeat(16),
+            sig: String::new(),
+        };
+        card.sig = hex::encode(key.sign(&card.signing_digest().unwrap()).to_bytes());
+        card
+    }
+
+    fn intro_routes(open: (u16, serde_json::Value)) -> Routes {
+        Arc::new(move |m, p, b| match p {
+            "/status" => (200, serde_json::json!({"node_id": OWN, "api_capabilities": ["paid_send_caps_v1", "introduction_v1"]}).to_string()),
+            "/introduction/open" => (open.0, open.1.to_string()),
+            _ => happy()(m, p, b),
+        })
+    }
+
+    #[tokio::test]
+    async fn introduction_open_verifies_locally_then_only_asks_the_node_to_dial() {
+        let card = intro_card("127.0.0.1:9735", now_unix() as u64);
+        let link = card.to_link().unwrap();
+        let node = fake(AuthMode::Local, intro_routes((200, serde_json::json!({"node_id": card.node_id, "dialed": "127.0.0.1:9735", "connected": true}))));
+        let door = open_introduction(&node.state, &format!("  {link}\n")).await.unwrap();
+        assert_eq!((door.node_id.as_str(), door.admission_msat, door.message_msat), (card.node_id.as_str(), 100_000, 10_000));
+        // One POST, the canonical link, and nothing else: no quote, no grant, no compose, no peer add.
+        assert_eq!(node.posts(), vec![("/introduction/open".to_string(), serde_json::json!({"card": link}))]);
+        assert!(node.targets().iter().all(|t| t == "GET /status" || t == "POST /introduction/open"), "{:?}", node.targets());
+    }
+
+    #[tokio::test]
+    async fn introduction_open_refuses_bad_cards_before_any_request() {
+        let now = now_unix() as u64;
+        let node = fake(AuthMode::Local, intro_routes((200, serde_json::json!({}))));
+        let mut tampered = intro_card("127.0.0.1:9735", now);
+        tampered.admission_msat = 1;
+        let tampered = serde_json::to_string(&tampered).unwrap();
+        let expired = intro_card("127.0.0.1:9735", now - 601).to_link().unwrap();
+        for bad in [tampered.as_str(), expired.as_str(), "bitsov://introduce#garbage", "https://x.example/#AQ", ""] {
+            assert!(open_introduction(&node.state, bad).await.is_err(), "{bad}");
+        }
+        assert!(node.targets().is_empty(), "nothing reached the node: {:?}", node.targets());
+    }
+
+    #[tokio::test]
+    async fn introduction_open_reports_closed_mesh_and_wrong_peer() {
+        let card = intro_card("127.0.0.1:9735", now_unix() as u64);
+        let link = card.to_link().unwrap();
+        let node = fake(AuthMode::Local, intro_routes((409, serde_json::json!({"error": "introduction_closed_mesh: this node dials only peers its owner added", "code": 409}))));
+        assert!(open_introduction(&node.state, &link).await.unwrap_err().contains("does not add one"));
+        let node = fake(AuthMode::Local, intro_routes((200, serde_json::json!({"node_id": OWN, "connected": true}))));
+        assert!(open_introduction(&node.state, &link).await.unwrap_err().contains("someone else"));
+        let node = fake(AuthMode::Local, happy());
+        assert!(open_introduction(&node.state, &link).await.unwrap_err().contains("cannot open"));
+        assert!(node.posts().is_empty(), "no capability: no dial");
+    }
+
+    #[tokio::test]
+    async fn own_introduction_must_be_signed_by_this_node() {
+        let card = intro_card("127.0.0.1:9735", now_unix() as u64);
+        let link = card.to_link().unwrap();
+        let mine = |node_id: String, link: String| -> Routes {
+            let card = card.clone();
+            Arc::new(move |m, p, b| match p {
+                "/status" => (200, serde_json::json!({"node_id": node_id, "api_capabilities": ["introduction_v1"]}).to_string()),
+                "/introduction" => (200, serde_json::json!({"card": card, "link": link}).to_string()),
+                _ => happy()(m, p, b),
+            })
+        };
+        let node = fake(AuthMode::Local, mine(card.node_id.clone(), link.clone()));
+        assert_eq!(read_own_introduction(&node.state).await.unwrap().link, link);
+        let node = fake(AuthMode::Local, mine(OWN.into(), link.clone()));
+        assert!(read_own_introduction(&node.state).await.unwrap_err().contains("not signed by this node"));
+        let node = fake(AuthMode::Local, mine(card.node_id.clone(), format!("{link}A")));
+        assert!(read_own_introduction(&node.state).await.unwrap_err().contains("does not match"));
+        let node = fake(AuthMode::Local, happy());
+        assert!(read_own_introduction(&node.state).await.unwrap_err().contains("cannot sign"));
+    }
+
     #[tokio::test]
     async fn first_contact_quote_reads_the_stranger_quote_only_where_offered() {
         let (node, _dir, g1) = g1_node(&["read", "receive"]);
@@ -5014,6 +5209,9 @@ mod assistant_acl_tests {
                 "messages_list",
                 "price_quote",
                 "first_contact_quote",
+                "introduction_mine",
+                "introduction_read",
+                "introduction_open",
                 "payments_overview",
                 // Control center actions (slice B): same guard, plus the spend window.
                 "spend_status",

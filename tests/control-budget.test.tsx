@@ -218,6 +218,85 @@ describe('invisible payments in the composer and the context panel', () => {
     expect(host.used('first_contact_quote')[0].args).toEqual({ peer: NEW });
   });
 
+  // K1 slice 1: an introduction is a signed door card, never admission.
+  const STRANGER = 'd'.repeat(64);
+  const INTRO = 'bitsov://introduce#AQdyZWd0ZXN0' + 'Q'.repeat(240);
+  const card = (node_id: string, reach: 'public' | 'local', msat: number) => ({
+    node_id, network: 'regtest', endpoint: reach === 'local' ? '192.168.1.20:9735' : 'node.example.org:9735', reach,
+    admission_msat: msat, message_msat: msat, issued_at: Math.floor(Date.now() / 1000), expires_at: Math.floor(Date.now() / 1000) + 600,
+    link: node_id === OWN ? INTRO.replace('Q', 'M') : INTRO,
+  });
+
+  it('shows your signed introduction, and a pasted one opens a door card that Continue hands to the first-contact door', async () => {
+    const host = stubHost(open([{ target: MAYA, room: false, limit_msat: 50_000, spent_msat: 0 }]), {
+      introduction_mine: () => card(OWN, 'public', 10_000),
+      introduction_read: () => card(STRANGER, 'local', 3000),
+      introduction_open: () => card(STRANGER, 'local', 3000),
+      first_contact_quote: (args) => ({
+        recipient: args!.peer, admission_msat: 3000, message_msat: 3000, total_msat: 6000,
+        expires_at: Math.floor(Date.now() / 1000) + 60,
+      }),
+    });
+    await openShell();
+    $<HTMLButtonElement>('[data-track="new"]')!.click();
+    await vi.waitFor(() => expect($('[data-intro-mine]')).not.toBeNull());
+    expect(text('[data-intro-prices]')).toBe('First contact: 10 sats. Each message: 10 sats.');
+    expect($('[data-intro-mine] svg.qr')?.getAttribute('aria-label')).toBe('Your introduction as a QR code');
+    expect(text('[data-intro-link]')).toBe(INTRO.replace('Q', 'M'));
+    expect(text('[data-intro-mine]')).toContain('It is not admission');
+
+    type('[data-intro-text]', INTRO);
+    $<HTMLButtonElement>('[data-intro-open] button[type="submit"]')!.click();
+    await vi.waitFor(() => expect($(`[data-door-card="${STRANGER}"]`)).not.toBeNull());
+    expect(text('[data-door-prices]')).toBe('First contact: 3 sats. Each message: 3 sats.');
+    expect(text('[data-door-local]')).toContain('192.168.1.20:9735');
+    expect(host.used('introduction_read')[0].args).toEqual({ text: INTRO });
+    // Reading is local: nothing dialed, quoted, granted or sent.
+    for (const cmd of ['introduction_open', 'first_contact_quote', 'message_send']) expect(host.used(cmd)).toHaveLength(0);
+    expect(text('[data-door-card]') + text('[data-intro-mine]')).not.toMatch(/free|trusted|unlocked/i);
+
+    $<HTMLButtonElement>('[data-door-continue]')!.click();
+    await vi.waitFor(() => expect(host.used('introduction_open')).toHaveLength(1));
+    expect(host.used('introduction_open')[0].args).toEqual({ text: INTRO });
+    // The conversation opens with the card beside the stranger's own fresh quote.
+    await vi.waitFor(() => expect($(`[data-introduced="${STRANGER}"]`)).not.toBeNull());
+    expect(text('[data-introduced]')).toContain('first contact 3 sats, each message 3 sats');
+    await vi.waitFor(() => expect($('[data-door-quote]')?.getAttribute('data-door-quote')).toBe('6000'));
+    expect(host.used('first_contact_quote')[0].args).toEqual({ peer: STRANGER });
+    expect(host.used('message_send')).toHaveLength(0);
+  });
+
+  it('a card the host refuses never reaches Continue', async () => {
+    const host = stubHost(open([]), {
+      introduction_mine: () => { throw 'Your node cannot sign an introduction yet. Share your node id instead.'; },
+      introduction_read: () => { throw 'The signature does not match this node’s key. Do not use this introduction.'; },
+    });
+    await openShell();
+    $<HTMLButtonElement>('[data-track="new"]')!.click();
+    // Without a card the node id is still shareable.
+    await vi.waitFor(() => expect(text('[data-intro-unavailable]')).toContain('cannot sign an introduction'));
+    expect(text('[data-new-track] code.address')).toBe(OWN);
+    type('[data-intro-text]', 'bitsov://introduce#tampered');
+    $<HTMLButtonElement>('[data-intro-open] button[type="submit"]')!.click();
+    await vi.waitFor(() => expect(text('[data-door-error]')).toContain('signature does not match'));
+    expect($('[data-door-card]')).toBeNull();
+    expect(host.used('introduction_open')).toHaveLength(0);
+  });
+
+  it('an expired card cannot continue', async () => {
+    const host = stubHost(open([]), {
+      introduction_mine: () => card(OWN, 'public', 10_000),
+      introduction_read: () => ({ ...card(STRANGER, 'public', 3000), expires_at: Math.floor(Date.now() / 1000) - 1 }),
+    });
+    await openShell();
+    $<HTMLButtonElement>('[data-track="new"]')!.click();
+    type('[data-intro-text]', INTRO);
+    $<HTMLButtonElement>('[data-intro-open] button[type="submit"]')!.click();
+    await vi.waitFor(() => expect($('[data-door-expired]')).not.toBeNull());
+    expect($('[data-door-continue]')).toBeNull();
+    expect(host.used('introduction_open')).toHaveLength(0);
+  });
+
   it('explains an exhausted budget and raises it in one tap, within the daily total', async () => {
     const host = stubHost(open([{ target: MAYA, room: false, limit_msat: 3000, spent_msat: 2000 }]));
     await openShell();
