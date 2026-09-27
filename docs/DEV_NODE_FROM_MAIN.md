@@ -42,16 +42,18 @@ cargo build --release --locked --target aarch64-apple-darwin -p konsensus-node -
 shasum -a 256 target/aarch64-apple-darwin/release/konsensus
 ```
 
-**2. Get the control center with this dev path.** Until this PR, #42 and #43 land, combine
-them locally. Nothing is pushed:
+**2. Get the app with this dev path.** The control center (#42) is on app `main`, so this
+branch alone is enough. Nothing is cherry-picked and nothing is pushed:
 
 ```bash
 cd ~/Desktop/bitsov-app && git fetch origin
-git worktree add --detach /tmp/bitsov-tonight origin/feat/control-center-ai
+git worktree add --detach /tmp/bitsov-tonight origin/feat/dev-node-from-main
 cd /tmp/bitsov-tonight
-git cherry-pick origin/main..origin/feat/dev-node-from-main
 npm ci
 ```
+
+After this PR merges, use `origin/main` instead. The AI track (#43) isn't needed for any
+step below. To try it too, add `git cherry-pick origin/main..origin/feat/control-center-ai`.
 
 **3. Start the app on a fresh node.** Pick a new, durable dir. Don't use `/tmp`, because
 macOS clears it on reboot and a funded node's keys live in this dir:
@@ -87,15 +89,15 @@ again with the same two variables reuses the node and the stored pairing.
 
 ## Limits
 
-- **Sends:** app #42 refuses variable-price sends unless the node advertises the price-cap
-  capability from genome #80 (in review). A `main` build doesn't have it. For sends, build
-  from the #80 head (`2f43cfc`) in step 1. Funding and every read work on `main`.
+- **Sends:** the app refuses variable-price sends unless the node advertises
+  `paid_send_caps_v1` (and `room_terminal_outcomes_v1` for rooms). Genome `main` has both
+  since #80 (`f2f1769`), so a step 1 build from `main` can send.
 - **Spend:** a paired app gets `read + receive` only. Spending needs the node started by
   you with `--owner-control` and a grant through the owner CLI (genome
   `docs/security/pairing.md`). This path does neither.
 - **Live feed pill:** the first smoke run showed "Node up, live feed reconnecting" on an open
-  `/ws`. Fixed on #43 (`d4e6048`): the host replays the socket's link state when the shell
-  subscribes.
+  `/ws`. The fix is on #43 (the host replays the socket's link state when the shell
+  subscribes). Without #43 the pill can lag; the feed itself works.
 
 ## Smoke run (2026-09-27, this Mac)
 
