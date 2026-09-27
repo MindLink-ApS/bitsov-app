@@ -120,7 +120,8 @@ fn build(auth: NodeAuth, node: &Node) -> (Feed, Vec<String>) {
 
 #[test]
 fn first_run_pairs_then_the_first_answer_is_live_with_a_freshness_label() {
-    let node = node(PairRoutes::Live, &[]);
+    let as_of = now_secs().to_string() + "000";
+    let node = node(PairRoutes::Live, &[("BitSov-Data-As-Of", as_of)]);
     let app_dir = tempfile::tempdir().unwrap();
 
     // First run, before pairing: the window shows mock rows and says why.
@@ -153,8 +154,7 @@ fn first_run_pairs_then_the_first_answer_is_live_with_a_freshness_label() {
     assert_eq!(rows[0], json!(["q01", "500000"]));
     assert_eq!(rows.as_array().unwrap().len(), 50);
 
-    // It carries a freshness label: every route answered, fresh, each with
-    // its own bound.
+    // Every route supplied current node evidence, each with its own bound.
     let freshness = defined(&script, FRESHNESS_GLOBAL).expect("freshness");
     let routes = freshness["routes"].as_array().unwrap();
     let got: Vec<(&str, &str, u64)> = routes
@@ -182,6 +182,22 @@ fn first_run_pairs_then_the_first_answer_is_live_with_a_freshness_label() {
         assert_eq!(route["clock_skew"], false);
     }
     assert!(lines.is_empty(), "{lines:?}");
+}
+
+#[test]
+fn a_paired_live_answer_without_node_as_of_has_unknown_freshness() {
+    let node = node(PairRoutes::Live, &[]);
+    let app_dir = tempfile::tempdir().unwrap();
+    let auth = pair(&node, app_dir.path());
+    let (feed, lines) = build(auth, &node);
+    assert_eq!(feed.source(), Source::Live, "{lines:?}");
+    let freshness = defined(&feed.init_script(), FRESHNESS_GLOBAL).unwrap();
+    let routes = freshness["routes"].as_array().unwrap();
+    assert_eq!(routes.len(), 5);
+    for route in routes {
+        assert_eq!(route["state"], "unknown", "{route}");
+        assert_eq!(route["age_ms"], Value::Null, "{route}");
+    }
 }
 
 /// With #78 headers, a balance one wallet sync (80 s) old is still fresh; the

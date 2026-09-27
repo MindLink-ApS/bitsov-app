@@ -236,10 +236,10 @@ mod tests {
         };
         let freshness = vec![
             read(ReadRoute::PaymentsBalance, Some(wall - 80_000)),
-            read(ReadRoute::PaymentsChannels, None),
-            read(ReadRoute::Health, None),
-            read(ReadRoute::Messages { limit: 50 }, None),
-            read(ReadRoute::OwnPricing, None),
+            read(ReadRoute::PaymentsChannels, Some(wall)),
+            read(ReadRoute::Health, Some(wall)),
+            read(ReadRoute::Messages { limit: 50 }, Some(wall)),
+            read(ReadRoute::OwnPricing, Some(wall)),
         ];
         let feed = Feed::live(sit_mock::rows()).with_freshness(freshness);
         let script = feed.init_script_at(t0 + Duration::from_secs(12));
@@ -261,6 +261,12 @@ mod tests {
     fn a_live_feed_stamps_every_route_it_read() {
         let before = Instant::now();
         let server = TestServer::start(MockNode::canonical(), TOKEN);
+        let as_of = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+            .to_string();
+        server.set_headers(&[("BitSov-Data-As-Of", &as_of)]);
         let (feed, _) = build_logged(paired(&["read"]), &server.api_base());
         let after = Instant::now();
         assert_eq!(feed.source(), Source::Live);
@@ -292,6 +298,12 @@ mod tests {
     fn a_live_feed_with_a_failed_route_marks_only_that_route_unknown() {
         let node = MockNode::canonical().fault(Route::PaymentsChannels, Fault::Error);
         let server = TestServer::start(node, TOKEN);
+        let as_of = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+            .to_string();
+        server.set_headers(&[("BitSov-Data-As-Of", &as_of)]);
         let (feed, _) = build_logged(paired(&["read"]), &server.api_base());
         assert_eq!(feed.source(), Source::Live);
         let now = Instant::now();
