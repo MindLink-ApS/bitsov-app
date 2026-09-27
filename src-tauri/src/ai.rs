@@ -731,7 +731,7 @@ pub async fn send(remote: &Remote, body: String, key: Option<String>) -> Result<
     if let Some(key) = key {
         request = request.bearer_auth(key);
     }
-    let response = request
+    let mut response = request
         .send()
         .await
         .map_err(|_| format!("{} did not answer.", remote.label))?;
@@ -739,12 +739,21 @@ pub async fn send(remote: &Remote, body: String, key: Option<String>) -> Result<
     if !status.is_success() {
         return Err(format!("{} refused the request (http {}).", remote.label, status.as_u16()));
     }
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|_| format!("{} did not finish answering.", remote.label))?;
-    if bytes.len() > MAX_REMOTE_BYTES {
+    if response.content_length().is_some_and(|length| length > MAX_REMOTE_BYTES as u64) {
         return Err(format!("{}'s answer was too large to show.", remote.label));
+    }
+    // Bound accumulation before appending, including chunked/unknown-length
+    // responses. Parse only once the complete, bounded body has arrived.
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| format!("{} did not finish answering.", remote.label))?
+    {
+        if chunk.len() > MAX_REMOTE_BYTES.saturating_sub(bytes.len()) {
+            return Err(format!("{}'s answer was too large to show.", remote.label));
+        }
+        bytes.extend_from_slice(&chunk);
     }
     let text = answer_text(&bytes).ok_or_else(|| format!("{}'s answer had no text.", remote.label))?;
     Ok(RemoteAnswer {

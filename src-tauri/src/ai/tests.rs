@@ -576,6 +576,76 @@ fn a_refusal_or_redirect_is_an_error_that_quotes_nothing() {
     assert!(err.contains("http 302"), "{err}");
 }
 
+/// Keep the response unfinished until the caller releases it. A size rejection
+/// must arrive without waiting for EOF or the provider's final chunk.
+fn unfinished_response(headers: &str, body: Vec<u8>) -> (String, mpsc::Sender<()>, std::thread::JoinHandle<()>) {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let endpoint = format!("http://{}/v1/chat/completions", listener.local_addr().unwrap());
+    let headers = headers.to_string();
+    let (release, wait) = mpsc::channel();
+    let thread = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        stream.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut request = Vec::new();
+        let mut chunk = [0; 4096];
+        while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+            let n = stream.read(&mut chunk).unwrap();
+            assert_ne!(n, 0);
+            request.extend_from_slice(&chunk[..n]);
+        }
+        stream.write_all(format!("HTTP/1.1 200 OK\r\n{headers}\r\n\r\n").as_bytes()).unwrap();
+        // An early header-based refusal is allowed to close before body writes.
+        let _ = stream.write_all(&body);
+        let _ = wait.recv_timeout(Duration::from_secs(5));
+    });
+    (endpoint, release, thread)
+}
+
+#[test]
+fn remote_response_rejects_oversized_content_length_before_waiting_for_body() {
+    let (endpoint, release, thread) = unfinished_response(
+        &format!("Content-Length: {}", MAX_REMOTE_BYTES + 1), Vec::new(),
+    );
+    let result = block_on(async {
+        tokio::time::timeout(Duration::from_secs(3), send(&remote(&endpoint), "{}".into(), None)).await
+    });
+    let _ = release.send(());
+    thread.join().unwrap();
+    let error = result.expect("must reject the headers without waiting for body/EOF").unwrap_err();
+    assert!(error.contains("answer was too large"), "{error}");
+}
+
+#[test]
+fn remote_response_caps_chunked_bytes_before_eof_or_json_parsing() {
+    let mut body = Vec::new();
+    // Each chunk fits the cap; only their cumulative length exceeds it.
+    for size in [MAX_REMOTE_BYTES / 2, MAX_REMOTE_BYTES / 2, 1] {
+        body.extend_from_slice(format!("{size:x}\r\n").as_bytes());
+        body.extend(std::iter::repeat_n(b'x', size));
+        body.extend_from_slice(b"\r\n");
+    }
+    let (endpoint, release, thread) = unfinished_response("Transfer-Encoding: chunked", body);
+    let result = block_on(async {
+        tokio::time::timeout(Duration::from_secs(3), send(&remote(&endpoint), "{}".into(), None)).await
+    });
+    let _ = release.send(());
+    thread.join().unwrap();
+    let error = result.expect("must reject while the response is still unfinished").unwrap_err();
+    assert!(error.contains("answer was too large"), "{error}");
+}
+
+#[test]
+fn remote_response_accepts_valid_json_up_to_the_byte_limit() {
+    for size in [MAX_REMOTE_BYTES - 1, MAX_REMOTE_BYTES] {
+        let mut body = json!({"choices": [{"message": {"content": "Within the limit."}}]}).to_string();
+        body.extend(std::iter::repeat_n(' ', size - body.len()));
+        let (endpoint, _seen) = one_shot("200 OK", &body);
+        let answer = block_on(send(&remote(&endpoint), "{}".into(), None)).unwrap();
+        assert_eq!(answer.text, "Within the limit.");
+    }
+}
+
 #[test]
 fn answer_text_takes_the_first_choice_and_caps_it() {
     let long = "a".repeat(MAX_ANSWER_CHARS + 50);

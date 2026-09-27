@@ -4,7 +4,7 @@ import App from '../src/App';
 import { answerFrom, cardText, peerIn, satsIn, sourceLine, understand, WEEK_MS, type Intent } from '../src/control/ai';
 import { sampleNarrow, sampleRead } from '../src/control/sample';
 import type { PairingView } from '../src/onboarding/pairing';
-import type { Peer, TopicRead } from '../src/control/types';
+import type { Amount, PaymentsReport, Peer, TopicRead } from '../src/control/types';
 
 // Slice C: "Ask your node". The rules as pure functions, then the track
 // against a stubbed host (reads, disclosure, one-shot send, drafts) and on
@@ -94,8 +94,9 @@ describe('composing an answer', () => {
 
   it('says what was spent from the broker figures, and that a failed contact makes it a floor', () => {
     const answer = answerFrom(paymentsRead(), intent, names);
-    expect(answer.text).toContain('In the last 7 days you spent 3 sats on 2 paid messages to 2 contacts.');
-    expect(answer.text).toContain('You received 1 sat from 1 paid message.');
+    expect(answer.text).toContain('In the last 7 days you spent 3 sats on paid messages.');
+    expect(answer.text).toContain('You received 1 sat from paid messages in the last 7 days.');
+    expect(answer.text).toContain('The listed entries include 2 sent messages to 2 contacts and 1 received message.');
     expect(answer.text).toContain('1 contact could not be read, so these totals are a floor.');
     expect(answer.text).toContain('Paid messages only');
     expect(answer.cards).toHaveLength(1);
@@ -109,6 +110,48 @@ describe('composing an answer', () => {
       text: 'Your node did not return your payment history: it did not answer in time. Nothing was guessed.',
       cards: [],
     });
+  });
+
+  function paymentAnswer(report: Partial<PaymentsReport>) {
+    const read = paymentsRead();
+    const output = read.outputs[0];
+    if (output.tool !== 'payments' || output.report.state !== 'ready') throw new Error('payments fixture');
+    Object.assign(output.report.value, report);
+    return answerFrom(read, intent, names);
+  }
+
+  it.each(['sent', 'received'] as const)('uses the aggregate when all %s payments are outside the listed page', (omitted) => {
+    const direction = omitted === 'sent' ? 'received' : 'sent';
+    const answer = paymentAnswer({
+      entries: Array.from({ length: 100 }, (_, i) => ({
+        at_ms: NOW - i * 1000, direction, amount: avail(1000), peer: { state: 'value', value: A },
+      })),
+      sent_total: avail(omitted === 'sent' ? 5000 : 100_000),
+      received_total: avail(omitted === 'received' ? 5000 : 100_000),
+      unlisted: avail(1, 'count'), peers_unread: avail(0, 'count'),
+    });
+    expect(answer.text).toContain(omitted === 'sent' ? 'you spent 5 sats' : 'You received 5 sats');
+    expect(answer.text).not.toContain('sent no paid messages');
+    expect(answer.text).not.toContain('on 0 paid messages');
+    expect(answer.text).not.toContain('from 0 paid messages');
+    expect(answer.text).toContain('listed');
+    expect(cardText(answer.cards[0], names)).toContain(omitted === 'sent' ? 'spent 5 sats' : 'received 5 sats');
+  });
+
+  const unknown: Amount = { state: 'unavailable', unit: 'msat', source_field: 'total', reason: { kind: 'overflow' } };
+  it.each([
+    { label: 'positive', total: avail(5000), spent: 'you spent 5 sats', earned: 'You received 5 sats' },
+    { label: 'zero', total: avail(0), spent: 'No spending was found', earned: 'No income was found' },
+    { label: 'unknown', total: unknown, spent: 'Your spending could not be added up', earned: 'Your received total could not be added up' },
+  ])('keeps $label aggregates independent of listed counts', ({ total, spent, earned }) => {
+    for (const entries of [[], [{ at_ms: NOW, direction: 'sent' as const, amount: avail(0), peer: { state: 'value' as const, value: A } }]]) {
+      const answer = paymentAnswer({ entries, sent_total: total, received_total: total, peers_unread: avail(1, 'count') });
+      expect(answer.text).toContain(spent);
+      expect(answer.text).toContain(earned);
+      expect(answer.text).not.toContain('sent no paid messages');
+      expect(answer.text).toContain('totals are a floor');
+      if (total.state === 'unavailable') expect(answer.text).not.toContain('0 sats');
+    }
   });
 
   it('answers balance, node and prices from the sample reads', () => {
