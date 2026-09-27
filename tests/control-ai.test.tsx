@@ -121,6 +121,25 @@ describe('what a question asks', () => {
   });
 
   it.each([
+    ['Message Maya saying "See you at 6", do not append "please".', 'See you at 6'],
+    ['Message Maya "See you at 6", not "See you at 7".', 'See you at 6'],
+    ['Message Maya saying “See you at 6”, not “See you at 7”.', 'See you at 6'],
+    ["Message Maya 'See you soon', use Chris' nickname.", 'See you soon'],
+    ["Message Maya saying 'I'm late and I'll call soon', not 'tomorrow'.", "I'm late and I'll call soon"],
+    ["Message Maya saying 'The kids' toys are ready', not 'tomorrow'.", "The kids' toys are ready"],
+    ["Message Maya 'Meet Chris' friend tomorrow'", "Meet Chris' friend tomorrow"],
+    ["Message Maya 'The kids' toys aren't ready', not 'tomorrow'.", "The kids' toys aren't ready"],
+    ["Message Maya 'See you at 6' not 'See you at 7'", 'See you at 6'],
+    ["Message Maya 'See you at 6' don't append 'please'", 'See you at 6'],
+    ["Message Maya 'See you at 6' please", 'See you at 6'],
+    ['Message Maya saying "See you\nat 6", not "tomorrow".', 'See you\nat 6'],
+  ])('excludes quoted trailing instructions from the draft in %s', (question, text) => {
+    expect(understand(question, PEERS, NOW)).toMatchObject({
+      kind: 'act', proposal: { kind: 'message', peer: A, text },
+    });
+  });
+
+  it.each([
     'Pay Maya and bbbbbbbb 500 sats',
     'Pay aaaaaaaa and Josh 500 sats',
     'Pay Maya and Josh 500 sats',
@@ -415,6 +434,31 @@ describe('the AI track', () => {
     await vi.waitFor(() => expect($('[data-ai-answer="answered"]')).not.toBeNull());
     expect($('[data-ai-prefill]')).toBeNull();
     for (const cmd of ['payment_pay', 'payment_keysend', 'spend_request']) expect(host.used(cmd)).toHaveLength(0);
+  });
+
+  it.each([
+    'Message Maya saying "See you at 6", do not append "please".',
+    'Message Maya "See you at 6", not "See you at 7".',
+  ])('excludes quoted trailing instructions from the composer: %s', async (question) => {
+    const host = stubHost();
+    await openAi();
+    ask(question);
+    await vi.waitFor(() => expect($('[data-ai-prefill]')).not.toBeNull());
+    click('[data-ai-prefill]');
+    await vi.waitFor(() => expect($('[data-drafted]')).not.toBeNull());
+    expect($<HTMLTextAreaElement>('[data-composer] textarea')?.value).toBe('See you at 6');
+    for (const cmd of ['message_send', 'payment_pay', 'payment_keysend', 'spend_request']) expect(host.used(cmd)).toHaveLength(0);
+  });
+
+  it('preserves a possessive apostrophe inside a single-quoted composer draft', async () => {
+    const host = stubHost();
+    await openAi();
+    ask("Message Maya saying 'The kids' toys are ready'");
+    await vi.waitFor(() => expect($('[data-ai-prefill]')).not.toBeNull());
+    click('[data-ai-prefill]');
+    await vi.waitFor(() => expect($('[data-drafted]')).not.toBeNull());
+    expect($<HTMLTextAreaElement>('[data-composer] textarea')?.value).toBe("The kids' toys are ready");
+    for (const cmd of ['message_send', 'payment_pay', 'payment_keysend', 'spend_request']) expect(host.used(cmd)).toHaveLength(0);
   });
 
   it('answers locally from the broker read with source and freshness, and sends nothing', async () => {
