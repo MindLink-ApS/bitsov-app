@@ -136,10 +136,60 @@ computer.* Without a host wall clock it is not checked. The HTTP `Date`
 header is not read: it is not part of the pinned API and would only restate
 the fetch time.
 
-**Limit.** The age is how long ago the *app* read the node, not how old the
-node's figures are. A node serving a cached balance answers 200 and reads as
-fresh. Catching that needs an as-of marker from the node:
-`.claude/tickets/G-STALENESS-MARKER.md` (spec only, not in this repo).
+### Node data time: `BitSov-Data-As-Of` / `BitSov-Data-Stale` (F5)
+
+Genome PR BitSov-bitsov#78 (draft, **not** in the pinned `v0.3.0-rc7`) adds
+two headers on `200` responses from the five pinned read routes. The app
+reads them host-side in `LocalNodeRead` (`broker/local_read.rs`,
+`broker/freshness.rs`). This code does nothing until a genome pin includes
+#78. No pin bump happens here.
+
+- **`BitSov-Data-As-Of`.** When the node's data was last known current.
+  The node sends RFC 3339 UTC with whole seconds, e.g.
+  `2026-09-27T08:20:00Z`, never later than its own clock. The app accepts:
+  - RFC 3339 with `Z`/`z` or a numeric `+hh:mm`/`-hh:mm` offset,
+    normalised to UTC;
+  - an optional fraction, truncated to ms;
+  - plain ms-since-epoch digits, the form the original G-STALENESS-MARKER
+    spec proposed.
+
+  The app ignores the header (treats it as absent) when it is malformed,
+  before 1970, a leap second, or repeated. It logs only the route and
+  reason (`... GET /api/v1/payments/balance: ignored BitSov-Data-As-Of:
+  malformed`), never the value. The node leaves the header off `/health`
+  when `block_height` is null, and off balance/channels when LDK has never
+  synced.
+- **`BitSov-Data-Stale: 1`.** The node says the data is past its own bound:
+  an LDK sync 10 min or more old, or an expired chain-aware pricing cache.
+  The value must be exactly `1` after trimming; any other value, or no
+  header, has no effect.
+- **Errors.** Headers on a non-2xx response are dropped unread and not
+  logged. The rows are `Unavailable` and the route is *unknown*, as before.
+- **Age with an as-of.** The node must never claim fresher data than the
+  app can prove. The shown age is always max(node as-of age, app-read age):
+  the node as-of age is the host wall clock at fetch time minus the as-of,
+  plus the host monotonic time since the fetch; the app-read age is the
+  monotonic time since the fetch alone.
+- **Future as-of.** An as-of up to `AS_OF_TOLERANCE` (2 s) ahead of the
+  host at fetch time is used (the max rule keeps the age at or above the
+  app-read age). Further ahead, the as-of is dropped and the route falls
+  back to the app-read age. More than `MAX_NODE_SKEW` (120 s) ahead also
+  sets `clock_skew` (*Node clock is ahead of this computer.*), the same as
+  the `/messages` check. Between 2 s and 120 s ahead there is no warning,
+  only the fallback. With no host wall clock the as-of is not used.
+- **Precedence** per route: `Stale: 1` → *stale* > max(node as-of age,
+  app-read age) > app-read age > *unknown* (no host stamp or non-2xx).
+  `STALE_AFTER` (60 s) applies to whichever age is used.
+- **rc7.** An rc7 node sends neither header, so behaviour is unchanged:
+  app-read age, or *Freshness unknown*.
+- **Window.** The shape of `__BITSOV_LIVE_FRESHNESS__` does not change.
+  The node's marks reach the window only through `state` and `age_ms`. The
+  sealed window still cannot pick a backend or trigger a read, and there is
+  no new command.
+
+Before #78 (and on rc7), the age is how long ago the *app* read the node,
+not how old the node's figures are. A node serving a cached balance
+answers 200 and reads as fresh.
 
 ## Known limits
 
@@ -147,7 +197,12 @@ fresh. Catching that needs an as-of marker from the node:
   reads out of band; a real rc7 node serving a stale cache would answer 200
   with its cached figure, and `LocalNodeRead` cannot tell. The test server
   carries mock-node's stale flag as a `503` so the fixture's stale rows stay
-  `Unavailable`. A real signal needs a genome change.
+  `Unavailable`. Genome #78's `BitSov-Data-Stale` / `-As-Of` headers are
+  read (see above) but only take effect once the pin includes #78.
+- **Node age vs. the 60 s threshold.** With #78, balance/channels as-of is
+  the older LDK wallet sync (every 30 s / 80 s by default), so a label can
+  read *Stale* between syncs even when the node does not mark it stale. A
+  per-route threshold would be a follow-up.
 - **Snapshot, not live updates.** Rows are read when the window opens. Close
   and reopen it to refresh. The freshness label counts up while it stays
   open and says *Stale* after 60 s.
@@ -159,7 +214,8 @@ fresh. Catching that needs an as-of marker from the node:
    `scripts/fetch-node-sidecar.sh` and the CS-1/CS-2 smokes. Until then the
    bundled node is always *rc7 fallback* and the window is always mock.
 2. A real-node run of the live path after that bump.
-3. If stale reads must be caught live: a stale marker in the genome API.
+3. Merge and tag BitSov-bitsov#78 (freshness headers), then a pin bump,
+   before the F5 as-of / stale handling is live.
 
 ## Tests
 
@@ -174,12 +230,18 @@ fresh. Catching that needs an as-of marker from the node:
   `read` scope, refused token, unreachable node, a route dropping mid-read and
   a non-loopback base all give mock with the right reason.
 - `jarvis::assistant_source` — script shape, reasons, frozen globals,
-  escaping, per-route ages at script time, no freshness on mock.
+  escaping, per-route ages at script time, no freshness on mock; node
+  as-of / stale reach the window only as `state` and `age_ms`.
 - `jarvis::broker::freshness` — every pinned route over a loopback socket is
   host-stamped and ages from fresh to stale at the threshold; only
   `/messages` yields a node time; future node time clamped and flagged;
   malformed or missing timestamps; unstamped (mock) and non-2xx reads are
-  unknown; no host wall clock means no skew check.
+  unknown; no host wall clock means no skew check. F5, over a loopback
+  socket: `BitSov-Data-As-Of` in RFC 3339 `Z`, numeric offsets, lower/upper
+  case names and ms digits; malformed and repeated values ignored and logged
+  without the value; future as-of clamped and flagged; `Data-Stale: 1`
+  forces stale, other values do nothing; headers on error statuses ignored;
+  no headers (rc7) keeps the app-read age on every route.
 - `tests/assistant-freshness.test.tsx` — strict parsing of the freshness
   global, summary and text for fresh / stale / unknown / clock skew, the
   label ticking into stale, no freshness for any mock reason, page wiring,

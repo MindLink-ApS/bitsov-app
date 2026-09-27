@@ -12,6 +12,11 @@
 //!   cannot tell the app a body is stale. The test server carries mock-node's
 //!   out-of-band flag as an error status so the fixture's stale rows still
 //!   come back `Unavailable` (see docs/ASSISTANT_LOCAL_BROKER.md).
+//!
+//! [`TestServer::set_headers`] adds response headers to every answer,
+//! error statuses included, to stand in for genome #78's
+//! `BitSov-Data-As-Of` / `BitSov-Data-Stale`. rc7 sends neither; the default
+//! is none.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -36,6 +41,7 @@ struct Shared {
     node: Mutex<MockNode>,
     token: String,
     seen: Mutex<Vec<Seen>>,
+    headers: Mutex<Vec<(String, String)>>,
 }
 
 pub struct TestServer {
@@ -58,6 +64,7 @@ impl TestServer {
             node: Mutex::new(node),
             token: token.to_string(),
             seen: Mutex::new(Vec::new()),
+            headers: Mutex::new(Vec::new()),
         });
         let stop = Arc::new(AtomicBool::new(false));
         let (flag, state) = (stop.clone(), shared.clone());
@@ -85,6 +92,15 @@ impl TestServer {
     /// Swap the node (and its faults) between questions.
     pub fn set_node(&self, node: MockNode) {
         *self.shared.node.lock().unwrap() = node;
+    }
+
+    /// Extra `name: value` lines on every response from now on. Values are
+    /// written as given, so tests can send malformed ones.
+    pub fn set_headers(&self, headers: &[(&str, &str)]) {
+        *self.shared.headers.lock().unwrap() = headers
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect();
     }
 
     pub fn seen(&self) -> Vec<Seen> {
@@ -156,10 +172,17 @@ fn serve_one(shared: &Shared, stream: TcpStream) {
             (exchange.status, body)
         }
     };
+    let extra: String = shared
+        .headers
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(name, value)| format!("{name}: {value}\r\n"))
+        .collect();
     let mut out = stream;
     let _ = write!(
         out,
-        "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+        "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\n{extra}connection: close\r\n\r\n{body}",
         body.len()
     );
 }

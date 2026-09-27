@@ -18,8 +18,8 @@ pub use snapshot::Snapshot;
 
 #[allow(unused_imports)]
 pub use freshness::{
-    node_time_field, route_key, Fetched, FreshnessState, NodeTimeField, RouteFreshness,
-    MAX_NODE_SKEW, STALE_AFTER,
+    node_time_field, parse_as_of, route_key, Fetched, FreshnessState, NodeMarks, NodeTimeField,
+    RouteFreshness, MAX_NODE_SKEW, STALE_AFTER,
 };
 
 #[allow(unused_imports)]
@@ -44,6 +44,9 @@ pub struct RawRead {
     body: Vec<u8>,
     /// Host stamp from a real read. `None` for the in-process mock.
     fetched: Option<Fetched>,
+    /// Node freshness headers on a 2xx. Default (none) for rc7, errors and
+    /// the in-process mock.
+    marks: NodeMarks,
 }
 
 impl RawRead {
@@ -52,7 +55,13 @@ impl RawRead {
             status,
             body,
             fetched: None,
+            marks: NodeMarks::default(),
         }
+    }
+
+    /// The same read, carrying what the node's headers said.
+    pub fn marked(self, marks: NodeMarks) -> Self {
+        Self { marks, ..self }
     }
 
     /// The same read, stamped with when the host finished reading it.

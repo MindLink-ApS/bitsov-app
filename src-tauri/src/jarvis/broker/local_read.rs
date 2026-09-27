@@ -15,8 +15,14 @@
 //! - Plain `std::net`: no proxy settings, no redirects, no DNS, no cookies.
 //!   A response with `Transfer-Encoding` is not decoded.
 //!
-//! Log lines and errors carry no body, no token and no key. rc7 has no stale
-//! marker on the wire, so this reader never returns [`ReadFault::Stale`].
+//! On a 2xx, `BitSov-Data-As-Of` and `BitSov-Data-Stale` (genome #78) are
+//! parsed into [`NodeMarks`] for [`super::RouteFreshness`]. A malformed or
+//! repeated as-of is dropped and logged with the path and reason, never the
+//! value. Headers on any other status are dropped unread. rc7 sends neither.
+//!
+//! Log lines and errors carry no body, no token and no key. A node-stale body
+//! is still returned as a body (the label says *Stale*), so this reader never
+//! returns [`ReadFault::Stale`].
 
 use std::fmt;
 use std::io::{Read, Write};
@@ -24,8 +30,9 @@ use std::net::{IpAddr, Ipv6Addr, SocketAddr, TcpStream};
 use std::sync::Arc;
 use std::time::Duration;
 
+use super::freshness::parse_as_of;
 use super::route::{self, Query, ReadRoute};
-use super::{Fetched, NodeRead, RawRead, ReadFault};
+use super::{Fetched, NodeMarks, NodeRead, RawRead, ReadFault};
 
 const LOG_PREFIX: &str = "[assistant-broker]";
 /// Same bounds as the host's loopback reqwest client.
@@ -35,6 +42,25 @@ const IO_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 /// Longest refused path echoed into the host log.
 const MAX_LOGGED_PATH: usize = 96;
+/// Genome #78 freshness headers. Matched case-insensitively.
+const AS_OF_HEADER: &str = "BitSov-Data-As-Of";
+const STALE_HEADER: &str = "BitSov-Data-Stale";
+
+/// Why a `BitSov-Data-As-Of` header was dropped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AsOfIgnored {
+    Malformed,
+    Repeated,
+}
+
+impl AsOfIgnored {
+    fn text(self) -> &'static str {
+        match self {
+            Self::Malformed => "malformed",
+            Self::Repeated => "repeated",
+        }
+    }
+}
 
 /// Why a request was refused before any byte left the host.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,14 +161,22 @@ impl LocalNodeRead {
             return Err(Refused::Denied(reason));
         }
         match self.exchange(path, query) {
-            Some(raw) => {
+            Some((raw, marks)) => {
                 if !(200..300).contains(&raw.status) {
                     self.audit.record(&format!(
                         "{LOG_PREFIX} {method} {path}: http {}",
                         raw.status
                     ));
+                    return Ok(raw);
                 }
-                Ok(raw)
+                let marks = marks.unwrap_or_else(|ignored| {
+                    self.audit.record(&format!(
+                        "{LOG_PREFIX} {method} {path}: ignored {AS_OF_HEADER}: {}",
+                        ignored.reason.text()
+                    ));
+                    ignored.kept
+                });
+                Ok(raw.marked(marks))
             }
             None => {
                 self.audit
@@ -152,9 +186,10 @@ impl LocalNodeRead {
         }
     }
 
-    /// One `GET` over a fresh connection. `None` on any transport or framing
-    /// problem; the cause is dropped so nothing from the wire is echoed.
-    fn exchange(&self, path: &str, query: Option<Query>) -> Option<RawRead> {
+    /// One `GET` over a fresh connection, with the node's freshness headers
+    /// unapplied. `None` on any transport or framing problem; the cause is
+    /// dropped so nothing from the wire is echoed.
+    fn exchange(&self, path: &str, query: Option<Query>) -> Option<(RawRead, MarksRead)> {
         let mut stream = TcpStream::connect_timeout(&self.addr, CONNECT_TIMEOUT).ok()?;
         stream.set_read_timeout(Some(IO_TIMEOUT)).ok()?;
         stream.set_write_timeout(Some(IO_TIMEOUT)).ok()?;
@@ -178,7 +213,7 @@ impl LocalNodeRead {
             return None;
         }
         let fetched = Fetched::now();
-        parse_response(&response).map(|raw| raw.stamped(fetched))
+        parse_marked_response(&response).map(|(raw, marks)| (raw.stamped(fetched), marks))
     }
 }
 
@@ -238,9 +273,25 @@ fn loopback_addr(base_url: &str) -> Option<SocketAddr> {
     (host.is_loopback() && port != 0).then_some(SocketAddr::new(host, port))
 }
 
+/// The freshness headers kept from a dropped as-of, and why it was dropped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Ignored {
+    kept: NodeMarks,
+    reason: AsOfIgnored,
+}
+
+type MarksRead = Result<NodeMarks, Ignored>;
+
 /// Status line, headers, then a `Content-Length` body (or the rest of the
 /// stream on `Connection: close`). `Transfer-Encoding` is refused.
+#[cfg(test)]
 fn parse_response(response: &[u8]) -> Option<RawRead> {
+    parse_marked_response(response).map(|(raw, _)| raw)
+}
+
+/// [`parse_response`] plus the freshness headers, which the caller applies
+/// only to a 2xx.
+fn parse_marked_response(response: &[u8]) -> Option<(RawRead, MarksRead)> {
     let split = response.windows(4).position(|w| w == b"\r\n\r\n")?;
     let head = std::str::from_utf8(&response[..split]).ok()?;
     let body = &response[split + 4..];
@@ -255,6 +306,8 @@ fn parse_response(response: &[u8]) -> Option<RawRead> {
     }
     let status: u16 = status_text.parse().ok()?;
     let mut length = None;
+    let mut as_of = Vec::new();
+    let mut stale = false;
     for line in lines {
         let (name, value) = line.split_once(':')?;
         if name.eq_ignore_ascii_case("transfer-encoding") {
@@ -263,12 +316,39 @@ fn parse_response(response: &[u8]) -> Option<RawRead> {
         if name.eq_ignore_ascii_case("content-length") {
             length = Some(value.trim().parse::<usize>().ok()?);
         }
+        if name.eq_ignore_ascii_case(AS_OF_HEADER) {
+            as_of.push(value.trim());
+        }
+        if name.eq_ignore_ascii_case(STALE_HEADER) && value.trim() == "1" {
+            stale = true;
+        }
     }
     let body = match length {
         Some(length) => body.get(..length)?,
         None => body,
     };
-    Some(RawRead::new(status, body.to_vec()))
+    let kept = NodeMarks {
+        as_of_ms: None,
+        stale,
+    };
+    let marks = match as_of.as_slice() {
+        [] => Ok(kept),
+        [one] => match parse_as_of(one) {
+            Some(ms) => Ok(NodeMarks {
+                as_of_ms: Some(ms),
+                stale,
+            }),
+            None => Err(Ignored {
+                kept,
+                reason: AsOfIgnored::Malformed,
+            }),
+        },
+        _ => Err(Ignored {
+            kept,
+            reason: AsOfIgnored::Repeated,
+        }),
+    };
+    Some((RawRead::new(status, body.to_vec()), marks))
 }
 
 /// Bounded, single-line form of a caller-supplied string for the host log.
