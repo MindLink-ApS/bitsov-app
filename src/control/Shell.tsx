@@ -32,7 +32,12 @@ import {
 } from './state';
 import type {
   FirstContactQuote,
+  FundingAsk,
+  FundingStatus,
   Introduction,
+  SponsorApproved,
+  SponsorCandidate,
+  SponsorStatus,
   ActionError,
   Artifact,
   BudgetPreset,
@@ -1818,7 +1823,7 @@ function NewTrack(props: {
     return m && m.expires_at > nowSecs() ? m : null;
   };
   const qr = createMemo(() => {
-    const text = mineLive()?.link ?? props.ownId;
+    const text = mineLive()?.offer_link ?? mineLive()?.link ?? props.ownId;
     try {
       return text ? qrSvg(text) : null;
     } catch {
@@ -1842,6 +1847,9 @@ function NewTrack(props: {
   const readCard = () => {
     setCard(null);
     setAllowLocal(false);
+    setAsk(null);
+    setArrived(null);
+    setAskErr(null);
     setCardErr(null);
     const text = pasted();
     props.source.introductionRead(text).then(
@@ -1849,6 +1857,97 @@ function NewTrack(props: {
       (e) => setCardErr(asActionError(e).message),
     );
   };
+  // K1 slice 2, sponsor side: starter bitcoin in your introduction, and the
+  // review of a newcomer's request. Owner actions: the spend window must be
+  // open (the button is the approval otherwise). The node holds the caps.
+  const [sponsor, setSponsor] = createSignal<SponsorStatus | null>(null);
+  props.source.sponsorStatus().then(setSponsor, () => setSponsor(null));
+  const [kitErr, setKitErr] = createSignal<string | null>(null);
+  const ownerStep = async (step: () => Promise<void>, fail: (m: string) => void) => {
+    fail('');
+    if (!open()) {
+      await props.actions.approve();
+      return;
+    }
+    try {
+      await step();
+    } catch (e) {
+      const err = asActionError(e);
+      fail(err.message);
+      if (needsApproval(err)) await props.actions.approve();
+    }
+  };
+  const includeStarter = () =>
+    ownerStep(async () => {
+      setMine(await props.source.sponsorOffer());
+    }, setKitErr);
+  const [request, setRequest] = createSignal('');
+  const [cand, setCand] = createSignal<SponsorCandidate | null>(null);
+  const [theirCode, setTheirCode] = createSignal('');
+  const [gift, setGift] = createSignal<SponsorApproved | null>(null);
+  const [candErr, setCandErr] = createSignal<string | null>(null);
+  const [giving, setGiving] = createSignal(false);
+  const reviewRequest = () =>
+    ownerStep(async () => {
+      setCand(null);
+      setGift(null);
+      setCand(await props.source.sponsorCandidate(request()));
+    }, setCandErr);
+  const sendGift = async () => {
+    const c = cand();
+    if (!c || giving() || theirCode().length !== 6) return;
+    setGiving(true);
+    await ownerStep(async () => {
+      setGift(await props.source.sponsorApprove(c.intro_id, theirCode()));
+      setRequest('');
+    }, setCandErr);
+    setGiving(false);
+  };
+  const cancelKit = async () => {
+    const c = cand();
+    setCand(null);
+    setTheirCode('');
+    if (c) await props.source.sponsorCancel(c.intro_id).catch(() => undefined);
+  };
+
+  // K1 slice 2, newcomer side: ask for the offered starter bitcoin. Nothing
+  // is sent: the request is shown to the inviter in person.
+  const [ask, setAsk] = createSignal<FundingAsk | null>(null);
+  const [arrived, setArrived] = createSignal<FundingStatus | null>(null);
+  const [askErr, setAskErr] = createSignal<string | null>(null);
+  const askQr = createMemo(() => {
+    const a = ask();
+    try {
+      return a ? qrSvg(a.request) : null;
+    } catch {
+      return null;
+    }
+  });
+  let poll: ReturnType<typeof setInterval> | undefined;
+  onCleanup(() => poll && clearInterval(poll));
+  const requestStarter = () => {
+    const c = card();
+    if (!c?.offer_link) return;
+    setAskErr(null);
+    props.source.sponsorRequest(c.offer_link).then(
+      (a) => {
+        setAsk(a);
+        setArrived(null);
+        if (poll) clearInterval(poll);
+        const check = () =>
+          props.source.sponsorRequestStatus(a.payment_hash).then((st) => {
+            if (st.state === 'received') {
+              setArrived(st);
+              if (poll) clearInterval(poll);
+            }
+          }, () => undefined);
+        poll = setInterval(check, 3000);
+        void check();
+      },
+      (e) => setAskErr(asActionError(e).message),
+    );
+  };
+
   const continueCard = () => {
     const c = cardLive();
     if (!c || opening() || (c.reach === 'local' && !allowLocal())) return;
@@ -1946,12 +2045,110 @@ function NewTrack(props: {
               <p class="hint">
                 Valid for about {minutesLeft(m().expires_at)} min. <button type="button" class="link" onClick={loadMine}>New card</button>
               </p>
-              <code class="address" data-intro-link>{m().link}</code>
+              <Show
+                when={m().starter}
+                fallback={
+                  <Show when={sponsor()?.enabled}>
+                    <button type="button" class="quiet" data-starter-include onClick={() => void includeStarter()}>
+                      {open() ? `Include starter bitcoin · ${sats(sponsor()!.gift_msat)} sats` : 'Include starter bitcoin · approve first'}
+                    </button>
+                    <p class="hint" data-starter-purse>
+                      You fund it from your own node, only after you approve their request. {sats(sponsor()!.purse_used_msat)} of{' '}
+                      {sats(sponsor()!.purse_msat)} sats used in the last 24 hours.
+                    </p>
+                  </Show>
+                }
+              >
+                {(st) => (
+                  <p data-starter-offered>
+                    Starter bitcoin: up to <strong>{sats(st().gift_msat)} sats</strong>, after you approve their request. It is theirs
+                    once it arrives; every message still pays.
+                  </p>
+                )}
+              </Show>
+              <Show when={kitErr()}>
+                <p class="err-note" data-starter-error>{kitErr()}</p>
+              </Show>
+              <code class="address" data-intro-link>{m().offer_link ?? m().link}</code>
             </div>
           )}
         </Show>
 
         <div class="new-grid">
+          <Show when={sponsor()?.enabled}>
+            <form
+              class="panel"
+              data-starter-review
+              onSubmit={(e) => {
+                e.preventDefault();
+                void reviewRequest();
+              }}
+            >
+              <h2>Starter bitcoin request</h2>
+              <p class="hint">Paste the request shown on their screen after they scanned your introduction.</p>
+              <textarea
+                data-starter-request-text
+                rows={3}
+                placeholder="bitsov://sponsor-request#…"
+                value={request()}
+                onInput={(e) => setRequest(e.currentTarget.value)}
+                aria-label="Starter bitcoin request"
+              />
+              <button type="submit" class="primary" disabled={!request().trim() || giving()}>
+                {open() ? 'Review request' : 'Approve first'}
+              </button>
+              <Show when={cand()}>
+                {(c) => (
+                  <div class="artifact" data-starter-candidate={c().newcomer}>
+                    <span class="kind">Starter bitcoin · {shortId(c().newcomer)}</span>
+                    <p>
+                      Lightning gift: <strong>{sats(c().gift_msat)} sats</strong>. Network fee: at most {sats(c().fee_max_msat)} sats.
+                    </p>
+                    <span class="hint">
+                      They own it once it arrives and can keep or withdraw it. It is not a pass: their messages still pay.
+                    </span>
+                    <label class="door-allow">
+                      <span>Code on their screen</span>
+                      <input
+                        data-starter-their-code
+                        inputmode="numeric"
+                        maxLength={6}
+                        value={theirCode()}
+                        onInput={(e) => setTheirCode(e.currentTarget.value.replace(/\D/g, '').slice(0, 6))}
+                        aria-label="Code on their screen"
+                      />
+                    </label>
+                    <span class="row" style={{ gap: 'var(--s-2)' }}>
+                      <button
+                        type="button"
+                        class="primary"
+                        data-starter-approve
+                        disabled={giving() || theirCode().length !== 6 || !!gift()}
+                        onClick={() => void sendGift()}
+                      >
+                        {giving() ? 'Sending…' : `Sponsor up to ${sats(c().gift_msat + c().fee_max_msat)} sats`}
+                      </button>
+                      <button type="button" class="quiet" onClick={() => void cancelKit()} disabled={giving() || !!gift()}>
+                        Cancel
+                      </button>
+                    </span>
+                  </div>
+                )}
+              </Show>
+              <Show when={gift()}>
+                {(g) => (
+                  <p class={g().state === 'funded' ? 'ok-note' : 'err-note'} data-starter-gift={g().state}>
+                    {g().state === 'funded'
+                      ? `Sent ${sats(g().paid_msat)} sats. It is theirs now.`
+                      : 'Payment pending — do not send again. Your node keeps it reserved until the outcome is known.'}
+                  </p>
+                )}
+              </Show>
+              <Show when={candErr()}>
+                <p class="err-note" data-starter-review-error>{candErr()}</p>
+              </Show>
+            </form>
+          </Show>
           <form
             class="panel"
             data-intro-open
@@ -1985,6 +2182,53 @@ function NewTrack(props: {
                   <p data-door-prices>
                     First contact: <strong>{sats(c().admission_msat)} sats</strong>. Each message: <strong>{sats(c().message_msat)} sats</strong>.
                   </p>
+                  <Show when={c().starter}>
+                    {(st) => (
+                      <div class="door-starter" data-door-starter>
+                        <p>
+                          Starter bitcoin available after they approve: <strong>{sats(st().gift_msat)} sats</strong>.
+                        </p>
+                        <Show
+                          when={ask()}
+                          fallback={
+                            <>
+                              <span class="hint">
+                                Requesting makes one invoice to your own node for exactly this amount and shows it as a QR for
+                                them. Nothing is sent. It is a gift, not a pass: your messages still pay.
+                              </span>
+                              <button type="button" class="quiet" data-door-request-starter onClick={requestStarter}>
+                                Request starter bitcoin
+                              </button>
+                            </>
+                          }
+                        >
+                          {(a) => (
+                            <>
+                              <Show when={askQr()}>
+                                <svg class="qr" viewBox={`0 0 ${askQr()!.extent} ${askQr()!.extent}`} shape-rendering="crispEdges" role="img" aria-label="Your starter-bitcoin request as a QR code">
+                                  <rect width={askQr()!.extent} height={askQr()!.extent} fill="#ffffff" />
+                                  <path d={askQr()!.path} fill="#000000" />
+                                </svg>
+                              </Show>
+                              <p data-starter-code>
+                                Show this to them. Code: <strong>{a().code.slice(0, 3)} {a().code.slice(3)}</strong>. They type it
+                                before approving.
+                              </p>
+                              <p class="hint" data-starter-status={arrived() ? 'received' : 'waiting'}>
+                                {arrived()
+                                  ? `Received ${sats(arrived()!.amount_msat)} sats in your own node.`
+                                  : 'Waiting for starter bitcoin…'}
+                              </p>
+                              <code class="address" data-starter-request>{a().request}</code>
+                            </>
+                          )}
+                        </Show>
+                        <Show when={askErr()}>
+                          <span class="err-note" data-starter-ask-error>{askErr()}</span>
+                        </Show>
+                      </div>
+                    )}
+                  </Show>
                   <span class="hint">
                     Prices from their signed card. Before anything is paid, your node asks theirs for a fresh quote and you
                     confirm the total.

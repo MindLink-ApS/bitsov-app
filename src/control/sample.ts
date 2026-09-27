@@ -5,6 +5,7 @@
 import type { NodeStatus, PairingView } from '../onboarding/pairing';
 import type { Source } from './source';
 import type {
+  FundingAsk,
   Introduction,
   ActionError,
   AiFreshness,
@@ -599,6 +600,26 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number 
       text.trim() === SAMPLE_INTRO_LINK
         ? ok(sampleIntroduction(SAMPLE_STRANGER_ID, '192.168.1.20:9735', 'local', 2000))
         : Promise.reject('That is not an introduction.'),
+    // K1 slice 2: a sample kit. Nothing here is signed or paid.
+    sponsorStatus: () => ok({ enabled: true, gift_msat: 20_000_000, fee_msat: 100_000, purse_msat: 100_000_000, purse_used_msat: 0, kits_per_day: 2, kits_today: 0 }),
+    sponsorOffer: () => {
+      const card = sampleIntroduction(SAMPLE_OWN_ID, 'node.example.org:9735', 'public', 10_000);
+      return ok({ ...card, starter: { gift_msat: 20_000_000, expires_at: card.expires_at }, offer_link: `${card.link}.SAMPLEOFFER` });
+    },
+    sponsorCandidate: (request) =>
+      request.trim().startsWith('bitsov://sponsor-request#')
+        ? ok({ intro_id: 'ab'.repeat(16), newcomer: SAMPLE_STRANGER_ID, gift_msat: 20_000_000, fee_max_msat: 100_000, code: '482913', expires_at: Math.floor(Date.now() / 1000) + 540 })
+        : Promise.reject('That is not a starter-bitcoin request (bitsov://sponsor-request#…).'),
+    sponsorApprove: (introId, code) =>
+      code === '482913'
+        ? ok({ intro_id: introId, state: 'funded' as const, paid_msat: 20_000_000, fee_paid_msat: 0, payment_hash: 'cd'.repeat(32) })
+        : Promise.reject({ code: 'sponsor_code_mismatch', message: 'The code does not match this request. Nothing was paid.' }),
+    sponsorCancel: () => ok(undefined),
+    sponsorRequest: (text) =>
+      text.includes('SAMPLEOFFER')
+        ? ok<FundingAsk>({ request: 'bitsov://sponsor-request#SAMPLE', code: '482913', sponsor: SAMPLE_STRANGER_ID, amount_msat: 20_000_000, payment_hash: 'ef'.repeat(32), expires_at: Math.floor(Date.now() / 1000) + 540 })
+        : Promise.reject('This introduction offers no starter bitcoin.'),
+    sponsorRequestStatus: (hash) => ok({ payment_hash: hash, state: 'received' as const, amount_msat: 20_000_000 }),
     wallet: () => ok(WALLET),
     spendStatus: () => {
       settleSpend();

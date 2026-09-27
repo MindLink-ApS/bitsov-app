@@ -65,6 +65,12 @@ pub struct DoorCard {
     pub expires_at: u64,
     /// The canonical link, for the QR and for Continue.
     pub link: String,
+    /// K1 slice 2: the verified starter-bitcoin offer riding with this card.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub starter: Option<crate::sponsor::Starter>,
+    /// The card with its offer (`<card>.<offer>`), for a funding request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offer_link: Option<String>,
 }
 
 /// The card's node key, refused unless it is a canonically encoded point of
@@ -80,6 +86,14 @@ fn node_key(hex_key: &str) -> Result<VerifyingKey, String> {
         return Err("The card's node key is not canonically encoded. Do not use this introduction.".into());
     }
     Ok(key)
+}
+
+/// Strict Ed25519 over a digest by a raw key: full order, canonical, no
+/// small-order R or non-canonical S. Shared with the sponsor offer.
+pub(crate) fn verify_strict_raw(key: &[u8; 32], digest: &[u8; 32], sig: &[u8; 64]) -> Result<(), String> {
+    node_key(&hex::encode(key))?
+        .verify_strict(digest, &Signature::from_bytes(sig))
+        .map_err(|_| "The signature does not match. Do not use this.".to_string())
 }
 
 fn decode_fixed<const N: usize>(s: &str) -> Option<[u8; N]> {
@@ -202,6 +216,8 @@ impl Card {
             issued_at: self.issued_at,
             expires_at: self.expires_at,
             link: self.to_link()?,
+            starter: None,
+            offer_link: None,
         })
     }
 }
@@ -342,7 +358,7 @@ pub fn dial_allowed(reach: Reach, ip: std::net::IpAddr) -> bool {
 }
 
 /// base64url without padding. Small and in-tree, as for the QR encoder.
-mod base64_url {
+pub(crate) mod base64_url {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
     pub fn encode(bytes: &[u8]) -> String {

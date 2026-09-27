@@ -8,7 +8,12 @@ import { listen } from '@tauri-apps/api/event';
 import type { NodeStatus, PairingView } from '../onboarding/pairing';
 import type {
   FirstContactQuote,
+  FundingAsk,
+  FundingStatus,
   Introduction,
+  SponsorApproved,
+  SponsorCandidate,
+  SponsorStatus,
   AiTopic,
   Disclosure,
   Preset,
@@ -65,6 +70,18 @@ export interface Source {
   introductionRead(text: string): Promise<Introduction>;
   /** K1 Continue: the node dials the introduced node, unprivileged. Pays nothing. */
   introductionOpen(text: string, allowLocal: boolean): Promise<Introduction>;
+  /** K1 slice 2 (sponsor): whether the owner turned starter bitcoin on. */
+  sponsorStatus(): Promise<SponsorStatus>;
+  /** A fresh introduction with starter bitcoin (spend window). */
+  sponsorOffer(): Promise<Introduction>;
+  /** Review a newcomer's request. Pays nothing. */
+  sponsorCandidate(request: string): Promise<SponsorCandidate>;
+  /** The owner's approval, with the six digits from their screen. */
+  sponsorApprove(introId: string, code: string): Promise<SponsorApproved>;
+  sponsorCancel(introId: string): Promise<void>;
+  /** K1 slice 2 (newcomer): ask for the offered gift. Nothing is sent. */
+  sponsorRequest(text: string): Promise<FundingAsk>;
+  sponsorRequestStatus(paymentHash: string): Promise<FundingStatus>;
   wallet(): Promise<WalletOverview>;
   /** Subscribe to live events; resolves to an unsubscribe. */
   onLive(handler: (event: LiveEvent) => void): Promise<() => void>;
@@ -132,6 +149,13 @@ export const hostSource: Source = {
   introductionMine: () => invoke<Introduction>('introduction_mine'),
   introductionRead: (text) => invoke<Introduction>('introduction_read', { text }),
   introductionOpen: (text, allowLocal) => invoke<Introduction>('introduction_open', { text, allow_local: allowLocal }),
+  sponsorStatus: () => invoke<SponsorStatus>('sponsor_status'),
+  sponsorOffer: () => invoke<Introduction>('sponsor_offer'),
+  sponsorCandidate: (request) => invoke<SponsorCandidate>('sponsor_candidate', { request }),
+  sponsorApprove: (introId, code) => invoke<SponsorApproved>('sponsor_approve', { intro_id: introId, code }),
+  sponsorCancel: (introId) => invoke<void>('sponsor_cancel', { intro_id: introId }),
+  sponsorRequest: (text) => invoke<FundingAsk>('sponsor_request', { text }),
+  sponsorRequestStatus: (paymentHash) => invoke<FundingStatus>('sponsor_request_status', { payment_hash: paymentHash }),
   wallet: () => invoke<WalletOverview>('payments_overview'),
   onLive: (handler) => listen<LiveEvent>(LIVE_EVENT, (e) => handler(e.payload)),
   liveLink: () => invoke<LinkState | null>('live_link'),

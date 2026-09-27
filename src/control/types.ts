@@ -80,7 +80,59 @@ export type Introduction = {
   expires_at: number;
   /** `bitsov://introduce#…` */
   link: string;
+  /** K1 slice 2: a verified starter-bitcoin offer riding with the card. */
+  starter?: Starter;
+  /** The card with its offer, for the QR and a funding request. */
+  offer_link?: string;
 };
+
+/**
+ * K1 slice 2: starter bitcoin. The inviter's node pays a small, capped gift
+ * into the newcomer's own node. It is the newcomer's balance, never
+ * admission: every message still pays.
+ */
+export type Starter = { gift_msat: number; expires_at: number };
+
+export type SponsorStatus = {
+  enabled: boolean;
+  gift_msat: number;
+  fee_msat: number;
+  purse_msat: number;
+  purse_used_msat: number;
+  kits_per_day: number;
+  kits_today: number;
+};
+
+/** A newcomer's request, frozen by the sponsor's node for review. */
+export type SponsorCandidate = {
+  intro_id: string;
+  newcomer: string;
+  gift_msat: number;
+  fee_max_msat: number;
+  code: string;
+  expires_at: number;
+};
+
+export type SponsorApproved = {
+  intro_id: string;
+  /** `funded`, or `unknown` (pending: never send again). */
+  state: 'funded' | 'unknown';
+  paid_msat: number;
+  fee_paid_msat: number;
+  payment_hash: string;
+};
+
+/** What the newcomer shows the sponsor, in person. */
+export type FundingAsk = {
+  request: string;
+  code: string;
+  sponsor: string;
+  amount_msat: number;
+  payment_hash: string;
+  expires_at: number;
+};
+
+export type FundingStatus = { payment_hash: string; state: 'waiting' | 'received'; amount_msat: number };
 
 export type Channel = {
   channel_id: string;

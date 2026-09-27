@@ -1485,7 +1485,9 @@ async fn introduction_read(
 ) -> Result<bitsov_app::introduction::DoorCard, String> {
     reject_sealed_window(&window)?;
     drop(window);
-    bitsov_app::introduction::read(&text, now_unix().max(0) as u64)?.door()
+    // K1 slice 2: an offer of starter bitcoin may ride with the card.
+    let (card, offer) = bitsov_app::sponsor::read(&text, now_unix().max(0) as u64)?;
+    bitsov_app::sponsor::door(&card, offer.as_ref())
 }
 
 /// Continue from a door card: re-verify it here, then `POST
@@ -1510,7 +1512,9 @@ async fn introduction_open(
 
 async fn open_introduction(state: &NodeState, text: &str, allow_local: bool) -> Result<bitsov_app::introduction::DoorCard, String> {
     use bitsov_app::introduction as intro;
-    let door = intro::read(text, now_unix().max(0) as u64)?.door()?;
+    // Opening uses the card alone; an attached offer is ignored here.
+    let (card, _offer) = bitsov_app::sponsor::read(text, now_unix().max(0) as u64)?;
+    let door = card.door()?;
     let local = door.reach == intro::Reach::Local;
     if local && !allow_local {
         return Err(format!("This introduction points to a local network address ({}). Allow it on the card first. Nothing was sent.", door.endpoint));
@@ -1538,6 +1542,202 @@ async fn open_introduction(state: &NodeState, text: &str, allow_local: bool) -> 
         Some(addr) if intro::dial_allowed(door.reach, addr.ip()) => Ok(door),
         _ => Err(format!("{path}: the node dialed an address this introduction does not allow")),
     }
+}
+
+// ---- K1 slice 2: sponsor kit ------------------------------------------------------
+//
+// The inviter's node pays a small, capped gift into the newcomer's own node.
+// Offer, candidate review and approval are owner actions: the ten-minute
+// spend window must be open (as for invites), and Pause all stops a gift. The
+// node enforces the caps, the single candidate and the persisted reservation;
+// the app only shows and forwards. The newcomer's side creates the means to
+// be paid (receive) and reads its status. Nothing here is admission.
+
+fn sponsor_error(e: ActionError) -> ActionError {
+    // Surface the node's own reason code (sponsor_purse_exhausted, …).
+    for code in [
+        "sponsor_disabled", "sponsor_kit_open", "sponsor_daily_limit", "sponsor_purse_exhausted",
+        "sponsor_candidate_exists", "sponsor_kit_closed", "sponsor_kit_expired", "sponsor_code_mismatch",
+        "sponsor_kit_not_ready", "sponsor_invalid", "sponsor_kit_unknown",
+    ] {
+        if e.message.contains(code) {
+            return ActionError::new(code, e.message);
+        }
+    }
+    e
+}
+
+async fn sponsor_node(state: &NodeState) -> Result<(), ActionError> {
+    if node_offers(state, bitsov_app::sponsor::CAPABILITY).await {
+        Ok(())
+    } else {
+        Err(ActionError::new("sponsor_unavailable", "Your node cannot run starter-bitcoin kits yet."))
+    }
+}
+
+async fn read_sponsor_status(state: &NodeState) -> Result<bitsov_app::sponsor::SponsorStatus, String> {
+    if !node_offers(state, bitsov_app::sponsor::CAPABILITY).await {
+        return Err("Your node cannot run starter-bitcoin kits yet.".into());
+    }
+    get_json(state, "/sponsor").await
+}
+
+/// `GET /sponsor` — whether the owner turned sponsoring on, and the purse.
+#[tauri::command(rename_all = "snake_case")]
+async fn sponsor_status(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+) -> Result<bitsov_app::sponsor::SponsorStatus, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    read_sponsor_status(state.inner()).await
+}
+
+async fn do_sponsor_offer(state: &NodeState) -> Result<bitsov_app::introduction::DoorCard, ActionError> {
+    sponsor_node(state).await?;
+    let text = gated_post(state, "/sponsor/offer", serde_json::json!({})).await.map_err(sponsor_error)?;
+    let reply: serde_json::Value = decode_act("/sponsor/offer", &text)?;
+    let link = reply["link"].as_str().ok_or_else(|| ActionError::node("/sponsor/offer: no link"))?;
+    // Our own card and offer must read back as exactly what we show.
+    let (card, offer) = bitsov_app::sponsor::read(link, now_unix().max(0) as u64).map_err(ActionError::node)?;
+    let own = get_json::<serde_json::Value>(state, "/status").await.map_err(ActionError::node)?;
+    if Some(card.node_id.as_str()) != own["node_id"].as_str() || offer.is_none() {
+        return Err(ActionError::node("/sponsor/offer: the card is not this node's own offer"));
+    }
+    bitsov_app::sponsor::door(&card, offer.as_ref()).map_err(ActionError::node)
+}
+
+/// `POST /sponsor/offer` — this node's introduction with starter bitcoin.
+#[tauri::command(rename_all = "snake_case")]
+async fn sponsor_offer(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+) -> Result<bitsov_app::introduction::DoorCard, ActionError> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    do_sponsor_offer(state.inner()).await
+}
+
+async fn do_sponsor_candidate(state: &NodeState, request: &str) -> Result<bitsov_app::sponsor::Candidate, ActionError> {
+    sponsor_node(state).await?;
+    let request = request.trim();
+    if request.len() > bitsov_app::introduction::MAX_ENCODED_LEN || !request.starts_with(bitsov_app::sponsor::REQUEST_LINK_PREFIX) {
+        return Err(ActionError::invalid("That is not a starter-bitcoin request (bitsov://sponsor-request#…)."));
+    }
+    let text = gated_post(state, "/sponsor/candidate", serde_json::json!({ "request": request })).await.map_err(sponsor_error)?;
+    let candidate: bitsov_app::sponsor::Candidate = decode_act("/sponsor/candidate", &text)?;
+    candidate.check().map_err(ActionError::node)?;
+    Ok(candidate)
+}
+
+/// `POST /sponsor/candidate` — review a newcomer's request. Pays nothing.
+#[tauri::command(rename_all = "snake_case")]
+async fn sponsor_candidate(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    request: String,
+) -> Result<bitsov_app::sponsor::Candidate, ActionError> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    do_sponsor_candidate(state.inner(), &request).await
+}
+
+async fn do_sponsor_approve(state: &NodeState, intro_id: &str, code: &str) -> Result<bitsov_app::sponsor::Approved, ActionError> {
+    if budget_paused(state)? {
+        return Err(ActionError::new("budget_paused", "Payments are paused. Resume them to send the gift."));
+    }
+    if intro_id.len() != 32 || !intro_id.bytes().all(|b| b.is_ascii_hexdigit()) || code.len() != 6 || !code.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(ActionError::invalid("Enter the six digits shown on their screen."));
+    }
+    sponsor_node(state).await?;
+    let text = gated_post(state, "/sponsor/approve", serde_json::json!({ "intro_id": intro_id, "code": code }))
+        .await
+        .map_err(sponsor_error)?;
+    let approved: bitsov_app::sponsor::Approved = decode_act("/sponsor/approve", &text)?;
+    if approved.intro_id != intro_id || !matches!(approved.state.as_str(), "funded" | "unknown") {
+        return Err(ActionError::node("/sponsor/approve: unexpected answer"));
+    }
+    Ok(approved)
+}
+
+/// `POST /sponsor/approve` — the owner's approval of exactly this candidate,
+/// with the code compared in person. The node reserves, persists, then pays.
+#[tauri::command(rename_all = "snake_case")]
+async fn sponsor_approve(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    intro_id: String,
+    code: String,
+) -> Result<bitsov_app::sponsor::Approved, ActionError> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    do_sponsor_approve(state.inner(), &intro_id, &code).await
+}
+
+/// `POST /sponsor/kits/:id/cancel` — withdraw an offer before any payment.
+#[tauri::command(rename_all = "snake_case")]
+async fn sponsor_cancel(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    intro_id: String,
+) -> Result<(), ActionError> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    if intro_id.len() != 32 || !intro_id.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(ActionError::invalid("Unknown kit."));
+    }
+    gated_post(state.inner(), &format!("/sponsor/kits/{intro_id}/cancel"), serde_json::json!({})).await.map_err(sponsor_error)?;
+    Ok(())
+}
+
+async fn do_sponsor_request(state: &NodeState, text: &str) -> Result<bitsov_app::sponsor::FundingAsk, ActionError> {
+    let (card, offer) = bitsov_app::sponsor::read(text, now_unix().max(0) as u64).map_err(ActionError::invalid)?;
+    let offer = offer.ok_or_else(|| ActionError::invalid("This introduction offers no starter bitcoin."))?;
+    sponsor_node(state).await?;
+    let door = bitsov_app::sponsor::door(&card, Some(&offer)).map_err(ActionError::node)?;
+    let link = door.offer_link.unwrap_or_default();
+    let path = "/sponsor/request";
+    let (status, body) = call_api(state, reqwest::Method::POST, path, Some(serde_json::json!({ "link": link }))).await.map_err(ActionError::node)?;
+    if !status.is_success() {
+        return Err(sponsor_error(ActionError::node(api_error(path, status, &body))));
+    }
+    let ask: bitsov_app::sponsor::FundingAsk = decode_act(path, &body)?;
+    // What we show must be what we asked for: this sponsor, this gift.
+    if ask.sponsor != card.node_id || ask.amount_msat != offer.gift_msat || ask.code.len() != 6
+        || !ask.request.starts_with(bitsov_app::sponsor::REQUEST_LINK_PREFIX)
+    {
+        return Err(ActionError::node("/sponsor/request: the answer does not match this offer"));
+    }
+    Ok(ask)
+}
+
+/// `POST /sponsor/request` — ask for the offered starter bitcoin into one
+/// invoice to this node's own wallet (funding-only at the node). Shown to the
+/// inviter in person; nothing is sent anywhere.
+#[tauri::command(rename_all = "snake_case")]
+async fn sponsor_request(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    text: String,
+) -> Result<bitsov_app::sponsor::FundingAsk, ActionError> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    do_sponsor_request(state.inner(), &text).await
+}
+
+/// `GET /sponsor/request/:hash` — has the starter bitcoin arrived?
+#[tauri::command(rename_all = "snake_case")]
+async fn sponsor_request_status(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    payment_hash: String,
+) -> Result<bitsov_app::sponsor::FundingStatus, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    if payment_hash.len() != 64 || !payment_hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("Unknown request.".into());
+    }
+    get_json(state.inner(), &format!("/sponsor/request/{payment_hash}")).await
 }
 
 /// Does `/status` list `capability`? Unreadable counts as no.
@@ -3039,6 +3239,13 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             introduction_mine,
             introduction_read,
             introduction_open,
+            sponsor_status,
+            sponsor_offer,
+            sponsor_candidate,
+            sponsor_approve,
+            sponsor_cancel,
+            sponsor_request,
+            sponsor_request_status,
             payments_overview,
             spend_status,
             spend_request,
@@ -4447,6 +4654,106 @@ mod control_act_tests {
         assert!(node.targets().is_empty(), "nothing reached the node: {:?}", node.targets());
     }
 
+    /// A card for key `[0x42; 32]` with its signed starter-bitcoin offer.
+    fn offered(gift_msat: u64) -> (bitsov_app::introduction::Card, String) {
+        use ed25519_dalek::Signer;
+        let card = intro_card("127.0.0.1:9735", now_unix() as u64);
+        let key = ed25519_dalek::SigningKey::from_bytes(&[0x42; 32]);
+        let mut offer = bitsov_app::sponsor::Offer {
+            network: "regtest".into(),
+            intro_id: hex::decode(&card.intro_id).unwrap().try_into().unwrap(),
+            sponsor: key.verifying_key().to_bytes(),
+            gift_msat,
+            expires_at: card.expires_at,
+            sig: [0; 64],
+        };
+        offer.sig = key.sign(&offer.signing_digest()).to_bytes();
+        let link = format!("{}.{}", card.to_link().unwrap(), offer.encode());
+        (card, link)
+    }
+
+    fn sponsor_routes(extra: Routes) -> Routes {
+        Arc::new(move |m, p, b| match p {
+            "/status" => (200, serde_json::json!({"node_id": OWN, "api_capabilities": ["paid_send_caps_v1", "introduction_v1", "sponsor_kit_v1"]}).to_string()),
+            _ => extra(m, p, b),
+        })
+    }
+
+    #[tokio::test]
+    async fn a_card_with_starter_bitcoin_reads_as_a_door_with_the_gift() {
+        let (card, link) = offered(20_000_000);
+        let (read, offer) = bitsov_app::sponsor::read(&link, now_unix() as u64).unwrap();
+        let door = bitsov_app::sponsor::door(&read, offer.as_ref()).unwrap();
+        assert_eq!(door.node_id, card.node_id);
+        assert_eq!(door.starter.as_ref().map(|s| s.gift_msat), Some(20_000_000));
+        assert_eq!(door.offer_link.as_deref(), Some(link.as_str()));
+        // Opening the card with its offer attached dials the card only.
+        let node = fake(AuthMode::Local, intro_routes((200, serde_json::json!({"node_id": card.node_id, "dialed": "127.0.0.1:9735", "connected": true}))));
+        open_introduction(&node.state, &link, true).await.unwrap();
+        assert_eq!(node.posts().last().unwrap().1["card"], card.to_link().unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_funding_request_forwards_the_offer_and_checks_the_answer() {
+        let (card, link) = offered(20_000_000);
+        let answer = |sponsor: &str, amount: u64| serde_json::json!({
+            "request": "bitsov://sponsor-request#AQ", "code": "123456", "sponsor": sponsor,
+            "amount_msat": amount, "payment_hash": "ab".repeat(32), "expires_at": now_unix() + 300 });
+        let good = answer(&card.node_id, 20_000_000);
+        let node = fake(AuthMode::Local, sponsor_routes(Arc::new(move |m, p, b| match p {
+            "/sponsor/request" => (200, good.to_string()),
+            _ => happy()(m, p, b),
+        })));
+        let ask = do_sponsor_request(&node.state, &link).await.unwrap();
+        assert_eq!(ask.code, "123456");
+        assert_eq!(node.posts(), vec![("/sponsor/request".to_string(), serde_json::json!({"link": link}))]);
+        // A node answering for another sponsor or amount is refused.
+        for bad in [answer(OWN, 20_000_000), answer(&card.node_id, 19_999_999)] {
+            let node = fake(AuthMode::Local, sponsor_routes(Arc::new(move |m, p, b| match p {
+                "/sponsor/request" => (200, bad.to_string()),
+                _ => happy()(m, p, b),
+            })));
+            assert!(do_sponsor_request(&node.state, &link).await.unwrap_err().message.contains("does not match"));
+        }
+        // No offer on the card: refused before any request.
+        let node = fake(AuthMode::Local, sponsor_routes(happy()));
+        assert!(do_sponsor_request(&node.state, &card.to_link().unwrap()).await.is_err());
+        assert!(node.targets().is_empty());
+    }
+
+    #[tokio::test]
+    async fn approving_a_gift_needs_the_window_no_pause_and_six_digits() {
+        let approved = serde_json::json!({"intro_id": "ab".repeat(16), "state": "funded", "paid_msat": 20_000_000, "fee_paid_msat": 0, "payment_hash": "cd".repeat(32)});
+        let routes = sponsor_routes(Arc::new(move |m, p, b| match p {
+            "/sponsor/approve" => (200, approved.to_string()),
+            _ => happy()(m, p, b),
+        }));
+        let node = fake(AuthMode::Local, routes);
+        let id = "ab".repeat(16);
+        // Window closed: nothing reaches the node.
+        assert_eq!(do_sponsor_approve(&node.state, &id, "123456").await.unwrap_err().code, "spend_locked");
+        spend_advance(&node.state, true).await.unwrap();
+        assert_eq!(do_sponsor_approve(&node.state, &id, "12345").await.unwrap_err().code, "invalid");
+        assert!(!node.posts().iter().any(|(p, _)| p == "/sponsor/approve"));
+        let done = do_sponsor_approve(&node.state, &id, "123456").await.unwrap();
+        assert_eq!(done.state, "funded");
+        assert_eq!(node.posts().last().unwrap(), &("/sponsor/approve".to_string(), serde_json::json!({"intro_id": id, "code": "123456"})));
+        // Pause all stops a gift.
+        with_book(&node.state, true, |b| { b.paused = true; Ok(()) }).unwrap();
+        assert_eq!(do_sponsor_approve(&node.state, &id, "123456").await.unwrap_err().code, "budget_paused");
+    }
+
+    #[tokio::test]
+    async fn the_nodes_refusal_reason_reaches_the_owner() {
+        let routes = sponsor_routes(Arc::new(|m, p, b| match p {
+            "/sponsor/offer" => (409, serde_json::json!({"error": "sponsor_purse_exhausted: 100 of 100 sats used in the last 24 hours", "code": 409}).to_string()),
+            _ => happy()(m, p, b),
+        }));
+        let node = fake(AuthMode::Local, routes);
+        spend_advance(&node.state, true).await.unwrap();
+        assert_eq!(do_sponsor_offer(&node.state).await.unwrap_err().code, "sponsor_purse_exhausted");
+    }
+
     #[tokio::test]
     async fn own_introduction_must_be_signed_by_this_node() {
         let card = intro_card("127.0.0.1:9735", now_unix() as u64);
@@ -5288,6 +5595,13 @@ mod assistant_acl_tests {
                 "introduction_mine",
                 "introduction_read",
                 "introduction_open",
+                "sponsor_status",
+                "sponsor_offer",
+                "sponsor_candidate",
+                "sponsor_approve",
+                "sponsor_cancel",
+                "sponsor_request",
+                "sponsor_request_status",
                 "payments_overview",
                 // Control center actions (slice B): same guard, plus the spend window.
                 "spend_status",

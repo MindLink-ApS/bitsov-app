@@ -289,6 +289,113 @@ describe('invisible payments in the composer and the context panel', () => {
     expect(host.used('introduction_open')).toHaveLength(0);
   });
 
+  // K1 slice 2: starter bitcoin. The node holds every cap; these check what
+  // the owner and the newcomer see, and that nothing moves without the code.
+  const openSpend = { state: 'open' as const, basis: 'node_grant' as const, open_until_ms: Date.now() + 600_000, pending: null, window_ms: 600_000 };
+  const sponsorOn = () => ({ enabled: true, gift_msat: 20_000_000, fee_msat: 100_000, purse_msat: 100_000_000, purse_used_msat: 0, kits_per_day: 2, kits_today: 0 });
+  const OFFER_LINK = `${INTRO}.OFFER`;
+  const candidate = { intro_id: 'ab'.repeat(16), newcomer: STRANGER, gift_msat: 20_000_000, fee_max_msat: 100_000, code: '482913', expires_at: Math.floor(Date.now() / 1000) + 500 };
+
+  it('the sponsor includes starter bitcoin, reviews the request and pays only with the code from their screen', async () => {
+    const host = stubHost(open([]), {
+      spend_status: () => openSpend,
+      introduction_mine: () => card(OWN, 'public', 10_000),
+      sponsor_status: sponsorOn,
+      sponsor_offer: () => ({ ...card(OWN, 'public', 10_000), starter: { gift_msat: 20_000_000, expires_at: Math.floor(Date.now() / 1000) + 600 }, offer_link: OFFER_LINK }),
+      sponsor_candidate: () => candidate,
+      sponsor_approve: (args) => ({ intro_id: args!.intro_id, state: 'funded', paid_msat: 20_000_000, fee_paid_msat: 0, payment_hash: 'cd'.repeat(32) }),
+    });
+    await openShell();
+    $<HTMLButtonElement>('[data-track="new"]')!.click();
+    await vi.waitFor(() => expect($('[data-starter-include]')).not.toBeNull());
+    expect(text('[data-starter-purse]')).toContain('0 of 100,000 sats');
+    $<HTMLButtonElement>('[data-starter-include]')!.click();
+    await vi.waitFor(() => expect($('[data-starter-offered]')).not.toBeNull());
+    expect(text('[data-starter-offered]')).toContain('up to 20,000 sats');
+    expect(text('[data-intro-link]')).toBe(OFFER_LINK);
+    expect(host.used('sponsor_approve')).toHaveLength(0);
+
+    type('[data-starter-request-text]', 'bitsov://sponsor-request#REQ');
+    $<HTMLButtonElement>('[data-starter-review] button[type="submit"]')!.click();
+    await vi.waitFor(() => expect($(`[data-starter-candidate="${STRANGER}"]`)).not.toBeNull());
+    expect(host.used('sponsor_candidate')[0].args).toEqual({ request: 'bitsov://sponsor-request#REQ' });
+    expect(text('[data-starter-candidate]')).toContain('Lightning gift: 20,000 sats. Network fee: at most 100 sats.');
+    // The code is typed from their screen, not taken from ours.
+    expect(text('[data-starter-candidate]')).not.toContain('482913');
+    expect($<HTMLButtonElement>('[data-starter-approve]')!.disabled).toBe(true);
+    type('[data-starter-their-code]', '48-29 13');
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-starter-approve]')!.disabled).toBe(false));
+    expect(text('[data-starter-approve]')).toBe('Sponsor up to 20,100 sats');
+    $<HTMLButtonElement>('[data-starter-approve]')!.click();
+    await vi.waitFor(() => expect($('[data-starter-gift="funded"]')).not.toBeNull());
+    expect(host.used('sponsor_approve')[0].args).toEqual({ intro_id: 'ab'.repeat(16), code: '482913' });
+    expect(text('[data-starter-gift]')).toContain('It is theirs now');
+    expect(host.used('message_send')).toHaveLength(0);
+  });
+
+  it('with the spend window closed, including starter bitcoin asks for approval first', async () => {
+    const host = stubHost(open([]), {
+      introduction_mine: () => card(OWN, 'public', 10_000),
+      sponsor_status: sponsorOn,
+      spend_request: () => ({ state: 'pending', basis: null, open_until_ms: null, pending: { op_id: 'ab12', expires_at_ms: Date.now() + 600_000, owner_action: 'konsensus grant --op ab12' }, window_ms: 600_000 }),
+    });
+    await openShell();
+    $<HTMLButtonElement>('[data-track="new"]')!.click();
+    await vi.waitFor(() => expect($('[data-starter-include]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-starter-include]')!.click();
+    await vi.waitFor(() => expect(host.used('spend_request')).toHaveLength(1));
+    expect(host.used('sponsor_offer')).toHaveLength(0);
+  });
+
+  it('an unknown outcome says pending, never send again', async () => {
+    stubHost(open([]), {
+      spend_status: () => openSpend,
+      introduction_mine: () => card(OWN, 'public', 10_000),
+      sponsor_status: sponsorOn,
+      sponsor_candidate: () => candidate,
+      sponsor_approve: (args) => ({ intro_id: args!.intro_id, state: 'unknown', paid_msat: 0, fee_paid_msat: 0, payment_hash: 'cd'.repeat(32) }),
+    });
+    await openShell();
+    $<HTMLButtonElement>('[data-track="new"]')!.click();
+    await vi.waitFor(() => expect($('[data-starter-review]')).not.toBeNull());
+    type('[data-starter-request-text]', 'bitsov://sponsor-request#REQ');
+    $<HTMLButtonElement>('[data-starter-review] button[type="submit"]')!.click();
+    await vi.waitFor(() => expect($('[data-starter-their-code]')).not.toBeNull());
+    type('[data-starter-their-code]', '482913');
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-starter-approve]')!.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-starter-approve]')!.click();
+    await vi.waitFor(() => expect(text('[data-starter-gift="unknown"]')).toContain('do not send again'));
+    expect($<HTMLButtonElement>('[data-starter-approve]')!.disabled).toBe(true);
+  });
+
+  it('the newcomer requests the starter bitcoin and sees it arrive; nothing else is paid', async () => {
+    const host = stubHost(open([]), {
+      introduction_mine: () => card(OWN, 'public', 10_000),
+      introduction_read: () => ({ ...card(STRANGER, 'public', 3000), starter: { gift_msat: 20_000_000, expires_at: Math.floor(Date.now() / 1000) + 600 }, offer_link: OFFER_LINK }),
+      sponsor_status: () => { throw 'Your node cannot run starter-bitcoin kits yet.'; },
+      sponsor_request: () => ({ request: 'bitsov://sponsor-request#' + 'R'.repeat(200), code: '482913', sponsor: STRANGER, amount_msat: 20_000_000, payment_hash: 'ef'.repeat(32), expires_at: Math.floor(Date.now() / 1000) + 500 }),
+      sponsor_request_status: (args) => ({ payment_hash: args!.payment_hash, state: 'received', amount_msat: 20_000_000 }),
+    });
+    await openShell();
+    $<HTMLButtonElement>('[data-track="new"]')!.click();
+    type('[data-intro-text]', OFFER_LINK);
+    $<HTMLButtonElement>('[data-intro-open] button[type="submit"]')!.click();
+    await vi.waitFor(() => expect($('[data-door-starter]')).not.toBeNull());
+    expect(text('[data-door-starter]')).toContain('Starter bitcoin available after they approve: 20,000 sats');
+    expect(text('[data-door-starter]')).toContain('not a pass');
+    expect(host.used('sponsor_request')).toHaveLength(0);
+    // Not a sponsor: no review panel on this node.
+    expect($('[data-starter-review]')).toBeNull();
+    $<HTMLButtonElement>('[data-door-request-starter]')!.click();
+    await vi.waitFor(() => expect($('[data-starter-code]')).not.toBeNull());
+    expect(host.used('sponsor_request')[0].args).toEqual({ text: OFFER_LINK });
+    expect(text('[data-starter-code]')).toContain('482 913');
+    expect($('[data-door-starter] svg.qr')?.getAttribute('aria-label')).toBe('Your starter-bitcoin request as a QR code');
+    await vi.waitFor(() => expect(text('[data-starter-status="received"]')).toContain('Received 20,000 sats in your own node'));
+    expect(host.used('sponsor_request_status')[0].args).toEqual({ payment_hash: 'ef'.repeat(32) });
+    for (const cmd of ['message_send', 'introduction_open', 'sponsor_approve']) expect(host.used(cmd)).toHaveLength(0);
+  });
+
   it('an expired card cannot continue', async () => {
     const host = stubHost(open([]), {
       introduction_mine: () => card(OWN, 'public', 10_000),
