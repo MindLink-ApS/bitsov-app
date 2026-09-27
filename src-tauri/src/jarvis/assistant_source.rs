@@ -227,10 +227,15 @@ mod tests {
     }
 
     fn stamped_at(route: ReadRoute, at: Instant, body: &str) -> RouteFreshness {
-        let raw = RawRead::new(200, body.as_bytes().to_vec()).stamped(Fetched {
-            at,
-            wall_ms: Some(1_800_000_000_000),
-        });
+        let raw = RawRead::new(200, body.as_bytes().to_vec())
+            .marked(NodeMarks {
+                as_of_ms: Some(1_800_000_000_000),
+                stale: false,
+            })
+            .stamped(Fetched {
+                at,
+                wall_ms: Some(1_800_000_000_000),
+            });
         RouteFreshness::assess(route, &raw)
     }
 
@@ -318,8 +323,8 @@ mod tests {
             Some(json!({
                 "routes": [
                     {"route": "balance", "state": "fresh", "age_ms": 52_000, "clock_skew": false, "stale_after_ms": 180_000},
-                    {"route": "pricing", "state": "stale", "age_ms": 2_000, "clock_skew": false, "stale_after_ms": 60_000},
-                    {"route": "health", "state": "fresh", "age_ms": 2_000, "clock_skew": true, "stale_after_ms": 60_000},
+                    {"route": "pricing", "state": "stale", "age_ms": null, "clock_skew": false, "stale_after_ms": 60_000},
+                    {"route": "health", "state": "unknown", "age_ms": null, "clock_skew": true, "stale_after_ms": 60_000},
                 ],
             }))
         );

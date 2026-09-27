@@ -97,7 +97,8 @@ use a canary token and assert it appears in none of them.
 
 ## Freshness (F4)
 
-Live rows say how old the read is. App-side only: no genome change, no pin
+Live rows report node data age only with usable As-Of evidence. A recent
+app read alone proves no data freshness. No pin
 bump, no polling. The window still reads once per open.
 
 - **Host stamp.** `LocalNodeRead` stamps every response when its body has
@@ -105,8 +106,8 @@ bump, no polling. The window still reads once per open.
   clock. `Snapshot::freshness()` gives one entry per route that answered.
 - **States** (`broker/freshness.rs`): *fresh* (age under the route's
   bound, `stale_after(route)`, see the table below); *stale* (age at or over
-  it); *unknown* (no host stamp: a mock read, or a non-2xx read whose rows
-  are `Unavailable` anyway).
+  it, or an explicit node stale marker); *unknown* (no usable As-Of or
+  host wall clock, no host stamp, or a non-2xx read).
 - **To the window.** A third frozen init-script global,
   `__BITSOV_LIVE_FRESHNESS__`, defined for a live feed only:
   `{routes: [{route, state, age_ms, clock_skew, stale_after_ms}]}` with ages
@@ -118,7 +119,9 @@ bump, no polling. The window still reads once per open.
   calls nothing.
 - **Label.** Live: *Updated 12 s ago.* / *Stale: updated 1 min ago. Reopen
   to refresh.* / *Freshness unknown.* The header shows the oldest answering
-  route's age and is stale if any route is past its own bound. An answer
+  route's age and is stale if any route is past its own bound. Without a
+  stale route, any unknown route makes the overall label unknown. A stale
+  marker without an age reads *Stale: data age unknown. Reopen to refresh.* An answer
   (see *Assistant window* below) shows only its own route's age and state.
   Mock rows are *Mock data* with no freshness line, even if a freshness
   global exists.
@@ -133,8 +136,8 @@ bump, no polling. The window still reads once per open.
 | `/health` | 60 s (`STALE_AFTER`) | Unchanged. No node sync interval to allow for; `block_height` moves every ~10 min, so 60 s is already generous. |
 | `/messages` | 60 s (`STALE_AFTER`) | Unchanged. New mail can land at any time. |
 
-The bound applies to whichever age is used, node as-of or app read, so rc7
-(no headers) gets the same per-route bounds on the app-read age. The window
+The bound applies only with usable As-Of evidence. rc7 (no headers)
+remains *Freshness unknown*. The window
 gets the bound from the host in `stale_after_ms`. It has no copy of the table.
 
 Precedence, per route:
@@ -142,18 +145,18 @@ Precedence, per route:
 1. `BitSov-Data-Stale: 1` → *stale*, whatever the age.
 2. max(node as-of age, app-read age) ≥ route bound → *stale*, else *fresh*.
 3. No usable as-of (rc7, malformed, more than 2 s in the future, no host
-   wall clock): app-read age ≥ route bound → *stale*, else *fresh*.
+   wall clock): *unknown*, regardless of time since the app read.
 4. No host stamp, or a non-2xx read → *unknown*.
 
 Node-side times on the pinned rc7 (`958e399`) routes:
 
 | Route | rc7 body | Time field | Used for |
 |---|---|---|---|
-| `/payments/balance` | `BalanceResponse` | none | host stamp only |
-| `/payments/channels` | `[ChannelResponse]` | none | host stamp only |
-| `/health` | `PublicHealthResponse` | none; `block_height` and `uptime_secs` are not times | host stamp only |
+| `/payments/balance` | `BalanceResponse` | none | freshness unknown |
+| `/payments/channels` | `[ChannelResponse]` | none | freshness unknown |
+| `/health` | `PublicHealthResponse` | none; `block_height` and `uptime_secs` are not times | freshness unknown |
 | `/messages` | `[MessageResponse]` | `timestamp` (ms since epoch), per message | skew check only |
-| `/pricing` | `OwnPricingResponse` | none; `block_height` is not a time | host stamp only |
+| `/pricing` | `OwnPricingResponse` | none; `block_height` is not a time | freshness unknown |
 
 The newest `/messages` `timestamp` is a send time, not an "as of": an idle
 mailbox is old and current. It never makes a read fresh or stale. If it is
@@ -165,11 +168,11 @@ the fetch time.
 
 ### Node data time: `BitSov-Data-As-Of` / `BitSov-Data-Stale` (F5)
 
-Genome PR BitSov-bitsov#78 (draft, **not** in the pinned `v0.3.0-rc7`) adds
+Genome PR BitSov-bitsov#78 (merged, **not** in the pinned `v0.3.0-rc7`) adds
 two headers on `200` responses from the five pinned read routes. The app
 reads them host-side in `LocalNodeRead` (`broker/local_read.rs`,
-`broker/freshness.rs`). This code does nothing until a genome pin includes
-#78. No pin bump happens here.
+`broker/freshness.rs`). Until a genome pin includes #78, missing headers
+mean unknown data freshness. No pin bump happens here.
 
 - **`BitSov-Data-As-Of`.** When the node's data was last known current.
   The node sends RFC 3339 UTC with whole seconds, e.g.
@@ -200,23 +203,23 @@ reads them host-side in `LocalNodeRead` (`broker/local_read.rs`,
 - **Future as-of.** An as-of up to `AS_OF_TOLERANCE` (2 s) ahead of the
   host at fetch time is used (the max rule keeps the age at or above the
   app-read age). Further ahead, the as-of is dropped and the route falls
-  back to the app-read age. More than `MAX_NODE_SKEW` (120 s) ahead also
+  back to *Freshness unknown*. More than `MAX_NODE_SKEW` (120 s) ahead also
   sets `clock_skew` (*Node clock is ahead of this computer.*), the same as
   the `/messages` check. Between 2 s and 120 s ahead there is no warning,
-  only the fallback. With no host wall clock the as-of is not used.
+  only unknown freshness. With no host wall clock the as-of is not used.
 - **Precedence** per route: `Stale: 1` → *stale* > max(node as-of age,
-  app-read age) > app-read age > *unknown* (no host stamp or non-2xx).
-  The route's own bound (table above) applies to whichever age is used.
-- **rc7.** An rc7 node sends neither header, so behaviour is unchanged:
-  app-read age, or *Freshness unknown*.
+  app-read age) with usable As-Of evidence > *unknown*. Non-2xx and
+  unstamped reads always remain unknown. The route's own bound applies
+  only to known data ages; a stale marker may have `age_ms: null`.
+- **rc7.** An rc7 node sends neither header, so its data freshness is unknown.
 - **Window.** The node's marks reach the window only through `state` and
   `age_ms` (the per-route `stale_after_ms` came later, with the thresholds
   above). The sealed window still cannot pick a backend or trigger a read,
   and there is no new command.
 
-Before #78 (and on rc7), the age is how long ago the *app* read the node,
-not how old the node's figures are. A node serving a cached balance
-answers 200 and reads as fresh.
+Before #78 (and on rc7), the app cannot establish the age of the node's
+figures. A cached balance answering 200 must not be labelled fresh solely
+because the request succeeded.
 
 ## Assistant window
 

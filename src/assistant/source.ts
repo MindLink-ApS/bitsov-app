@@ -69,8 +69,10 @@ function readRoute(raw: unknown, seen: Set<string>): RouteFreshness | null {
   if (typeof state !== 'string' || !STATES.includes(state)) return null;
   if (typeof clockSkew !== 'boolean') return null;
   if (!isAge(staleAfterMs) || staleAfterMs === 0) return null;
-  // A known state carries an age; unknown carries none.
-  if (state === 'unknown' ? ageMs !== null : !isAge(ageMs)) return null;
+  // The node can explicitly mark stale without knowing a data timestamp.
+  if (state === 'unknown' && ageMs !== null) return null;
+  if (state === 'fresh' && !isAge(ageMs)) return null;
+  if (state === 'stale' && ageMs !== null && !isAge(ageMs)) return null;
   seen.add(route);
   return {
     route: route as RouteKey,
@@ -123,8 +125,8 @@ export type FreshnessSummary = { state: FreshnessState; ageMs: number | null; cl
  * One state for the label: the oldest route read, aged by how long the window
  * has been open (`openMs`, from a monotonic clock). Each route is stale past
  * its own bound; the label is stale if any is. With `only`, just that route.
- * Routes without an age (their rows are `Unavailable`) do not count. Nothing
- * with an age is unknown.
+ * Unknown routes cannot be hidden by fresh routes. Explicit stale markers
+ * take precedence even when the node supplies no data timestamp.
  */
 export function summarize(
   freshness: Freshness | null,
@@ -132,21 +134,26 @@ export function summarize(
   only?: RouteKey,
 ): FreshnessSummary {
   const open = Math.max(0, openMs);
-  const known =
-    freshness?.routes.filter(
-      (route) => route.ageMs !== null && (only === undefined || route.route === only),
-    ) ?? [];
-  if (known.length === 0) {
+  const routes = freshness?.routes.filter((route) => only === undefined || route.route === only) ?? [];
+  if (routes.length === 0) {
     return { state: 'unknown', ageMs: null, clockSkew: false };
   }
-  const ageMs = Math.max(...known.map((route) => route.ageMs as number)) + open;
-  const stale = known.some(
-    (route) => route.state === 'stale' || (route.ageMs as number) + open >= route.staleAfterMs,
+  const known = routes.filter((route) => route.ageMs !== null);
+  const clockSkew = routes.some((route) => route.clockSkew);
+  const stale = routes.some(
+    (route) => route.state === 'stale' || (route.ageMs !== null && route.ageMs + open >= route.staleAfterMs),
   );
+  if (!stale && routes.some((route) => route.state === 'unknown')) {
+    return { state: 'unknown', ageMs: null, clockSkew };
+  }
+  const missingStaleAge = routes.some((route) => route.state === 'stale' && route.ageMs === null);
+  const ageMs = missingStaleAge || known.length === 0
+    ? null
+    : Math.max(...known.map((route) => route.ageMs as number)) + open;
   return {
     state: stale ? 'stale' : 'fresh',
     ageMs,
-    clockSkew: known.some((route) => route.clockSkew),
+    clockSkew,
   };
 }
 
@@ -159,12 +166,15 @@ function ageText(ageMs: number): string {
 
 /** Freshness line for the label. Closed set of strings plus a number. */
 export function freshnessText(summary: FreshnessSummary): string {
-  if (summary.state === 'unknown' || summary.ageMs === null) return 'Freshness unknown.';
-  const age = ageText(summary.ageMs);
-  const text =
-    summary.state === 'stale'
+  let text = 'Freshness unknown.';
+  if (summary.state === 'stale' && summary.ageMs === null) {
+    text = 'Stale: data age unknown. Reopen to refresh.';
+  } else if (summary.state !== 'unknown' && summary.ageMs !== null) {
+    const age = ageText(summary.ageMs);
+    text = summary.state === 'stale'
       ? `Stale: updated ${age} ago. Reopen to refresh.`
       : `Updated ${age} ago.`;
+  }
   return summary.clockSkew ? `${text} Node clock is ahead of this computer.` : text;
 }
 

@@ -12,14 +12,14 @@
 //!   normalised to UTC), or plain ms-since-epoch digits. When present, the age
 //!   is the larger of the app-read age and the node's lag at fetch time (host
 //!   wall clock minus as-of) plus the monotonic time since. An as-of more than
-//!   [`AS_OF_TOLERANCE`] ahead of the host is dropped (app-read age); more
+//!   [`AS_OF_TOLERANCE`] ahead of the host is dropped (unknown age); more
 //!   than [`MAX_NODE_SKEW`] ahead is also flagged, like the `/messages` check.
 //! - `BitSov-Data-Stale: 1`: the node says the data is stale. The route is
 //!   [`FreshnessState::Stale`] whatever its age. Any other value is ignored.
 //!
-//! Precedence: `Stale: 1` > node as-of age > app-read age > unknown. rc7
-//! sends neither header, so rc7 reads keep the app-read age. Either age is
-//! compared with the route's own bound, [`stale_after`].
+//! Precedence: `Stale: 1` > usable node as-of age > unknown. rc7 sends
+//! neither header, so its data freshness is unknown even after a new read.
+//! A known age is compared with the route's own bound, [`stale_after`].
 //!
 //! rc7 bodies on the pinned routes carry one wall-clock field, `timestamp` on
 //! each `/messages` entry (ms since epoch, the message's send time). It is not
@@ -52,8 +52,8 @@ pub const WALLET_SYNC_INTERVAL: Duration = Duration::from_secs(80);
 /// and the window, so one late sync does not flip the label.
 pub const WALLET_STALE_AFTER: Duration = Duration::from_secs(180);
 
-/// How old a route's read may be before it is stale. Applies to whichever
-/// age [`RouteFreshness::age`] uses: node as-of or app read.
+/// How old a route's data may be before it is stale. Requires node as-of
+/// evidence; elapsed time since the app read advances that known age.
 ///
 /// | Route | Bound |
 /// |---|---|
@@ -296,7 +296,7 @@ fn clamp_to_host(node: Option<u64>, host: Option<u64>) -> (Option<u64>, bool) {
 }
 
 /// `as_of` checked against the host wall clock at fetch time. More than
-/// [`AS_OF_TOLERANCE`] ahead is dropped, so the app-read age is used: the node
+/// [`AS_OF_TOLERANCE`] ahead is dropped, so the data age is unknown: the node
 /// must never claim fresher data than the read. More than [`MAX_NODE_SKEW`]
 /// ahead is also flagged. Without a host wall clock it cannot be placed.
 fn as_of_against_host(as_of: Option<u64>, host: Option<u64>) -> (Option<u64>, bool) {
@@ -346,10 +346,9 @@ impl RouteFreshness {
         }
     }
 
-    /// Age at `now`: the app-read age (host monotonic time since the fetch),
-    /// or the node as-of age if that is older. The as-of age is the host wall
-    /// clock at fetch time minus the as-of, plus the monotonic time since.
-    /// Never negative, never below the app-read age.
+    /// Data age requires a usable As-Of and host wall clock. A recent fetch
+    /// alone is not evidence that the node's data is current. With evidence,
+    /// the age is never negative or below the monotonic time since the read.
     pub fn age(&self, now: Instant) -> Option<Duration> {
         let fetched = self.fetched?;
         let app_read = now.saturating_duration_since(fetched.at);
@@ -359,15 +358,17 @@ impl RouteFreshness {
                 let ms = now_ms.saturating_sub(u128::from(as_of));
                 Duration::from_millis(u64::try_from(ms).unwrap_or(u64::MAX))
             }
-            _ => Duration::ZERO,
+            _ => return None,
         };
         Some(app_read.max(node))
     }
 
     pub fn state(&self, now: Instant) -> FreshnessState {
+        if self.node_stale {
+            return FreshnessState::Stale;
+        }
         match self.age(now) {
             None => FreshnessState::Unknown,
-            Some(_) if self.node_stale => FreshnessState::Stale,
             Some(age) if age >= stale_after(self.route) => FreshnessState::Stale,
             Some(_) => FreshnessState::Fresh,
         }
@@ -437,9 +438,9 @@ mod tests {
     }
 
     /// Every pinned route, read over a real loopback socket, is stamped by the
-    /// host and ages from fresh to stale at its own [`stale_after`].
+    /// host, but without As-Of it never claims data freshness.
     #[test]
-    fn every_live_read_is_stamped_and_ages_into_stale() {
+    fn every_live_read_is_stamped_but_unmarked_data_stays_unknown() {
         let server = TestServer::start(MockNode::canonical(), TOKEN);
         assert_ne!(server.port(), NODE_PORT);
         let read = live_reader(&server);
@@ -454,13 +455,13 @@ mod tests {
             assert!(!fresh.clock_skew, "{route:?}");
 
             let bound = stale_after(route);
-            assert_eq!(fresh.age(fetched.at), Some(Duration::ZERO));
-            assert_eq!(fresh.state(fetched.at), FreshnessState::Fresh);
+            assert_eq!(fresh.age(fetched.at), None);
+            assert_eq!(fresh.state(fetched.at), FreshnessState::Unknown);
             let almost = fetched.at + bound - Duration::from_millis(1);
-            assert_eq!(fresh.state(almost), FreshnessState::Fresh, "{route:?}");
+            assert_eq!(fresh.state(almost), FreshnessState::Unknown, "{route:?}");
             let stale = fetched.at + bound;
-            assert_eq!(fresh.age(stale), Some(bound));
-            assert_eq!(fresh.state(stale), FreshnessState::Stale, "{route:?}");
+            assert_eq!(fresh.age(stale), None);
+            assert_eq!(fresh.state(stale), FreshnessState::Unknown, "{route:?}");
         }
     }
 
@@ -488,10 +489,9 @@ mod tests {
         );
     }
 
-    /// The same bound applies to the app-read age (rc7, no headers) and to a
-    /// node as-of age, at the exact boundary, and `Stale: 1` still wins.
+    /// Bounds need node As-Of evidence; `Stale: 1` still wins.
     #[test]
-    fn per_route_bounds_apply_to_app_read_and_as_of_ages_at_the_boundary() {
+    fn per_route_bounds_need_as_of_evidence_at_the_boundary() {
         let host = 1_800_000_000_000;
         let ms = Duration::from_millis(1);
         for route in super::super::route::sample_routes() {
@@ -501,11 +501,14 @@ mod tests {
                 _ => "{}",
             };
 
-            // rc7: no headers, app-read age only.
+            // rc7: no headers, unknown regardless of elapsed time.
             let fetched = at_wall(host);
             let fresh = RouteFreshness::assess(route, &stamped(200, body, fetched));
-            assert_eq!(fresh.state(fetched.at + bound - ms), FreshnessState::Fresh);
-            assert_eq!(fresh.state(fetched.at + bound), FreshnessState::Stale);
+            assert_eq!(
+                fresh.state(fetched.at + bound - ms),
+                FreshnessState::Unknown
+            );
+            assert_eq!(fresh.state(fetched.at + bound), FreshnessState::Unknown);
 
             // #78 as-of: the node's lag counts toward the same bound.
             for lag in [Duration::ZERO, Duration::from_secs(45), bound - ms, bound] {
@@ -609,9 +612,9 @@ mod tests {
         let far = format!(r#"[{{"timestamp":{}}}]"#, u64::MAX);
         let fresh = RouteFreshness::assess(route, &stamped(200, &far, at_wall(host)));
         assert_eq!((fresh.node_time_ms, fresh.clock_skew), (Some(host), true));
-        // The flag does not change the host's age or state.
+        // Message timestamps are not As-Of evidence.
         let fetched = fresh.fetched.expect("stamp");
-        assert_eq!(fresh.state(fetched.at), FreshnessState::Fresh);
+        assert_eq!(fresh.state(fetched.at), FreshnessState::Unknown);
     }
 
     #[test]
@@ -624,7 +627,7 @@ mod tests {
         let raw = stamped(200, r#"[{"timestamp":5}]"#, fetched);
         let fresh = RouteFreshness::assess(route, &raw);
         assert_eq!((fresh.node_time_ms, fresh.clock_skew), (None, false));
-        assert_eq!(fresh.state(fetched.at), FreshnessState::Fresh);
+        assert_eq!(fresh.state(fetched.at), FreshnessState::Unknown);
     }
 
     #[test]
@@ -686,7 +689,11 @@ mod tests {
             at: Instant::now() + Duration::from_secs(5),
             wall_ms: Some(1),
         };
-        let fresh = RouteFreshness::assess(ReadRoute::Health, &stamped(200, "{}", fetched));
+        let raw = stamped(200, "{}", fetched).marked(NodeMarks {
+            as_of_ms: Some(1),
+            stale: false,
+        });
+        let fresh = RouteFreshness::assess(ReadRoute::Health, &raw);
         assert_eq!(fresh.age(Instant::now()), Some(Duration::ZERO));
         assert_eq!(fresh.state(Instant::now()), FreshnessState::Fresh);
     }
@@ -856,9 +863,36 @@ mod tests {
         }
     }
 
-    /// rc7 sends neither header: every route keeps the app-read age.
+    /// A successful response is not evidence that its data is current.
     #[test]
-    fn without_headers_every_route_keeps_the_app_read_age() {
+    fn unusable_as_of_never_claims_freshness() {
+        let future = rfc3339(host_secs() + 3600);
+        for headers in [
+            vec![],
+            vec![(AS_OF, "malformed")],
+            vec![(AS_OF, future.as_str())],
+            vec![
+                (AS_OF, "2026-09-27T08:20:00Z"),
+                (AS_OF, "2026-09-27T08:21:00Z"),
+            ],
+        ] {
+            for route in super::super::route::sample_routes() {
+                let (_, fresh, _) = read_marked(MockNode::canonical(), &headers, route);
+                let fetched = fresh.fetched.unwrap();
+                assert_eq!(fresh.age(fetched.at), None, "{headers:?} {route:?}");
+                for at in [fetched.at, fetched.at + Duration::from_secs(3600)] {
+                    assert_eq!(
+                        fresh.state(at),
+                        FreshnessState::Unknown,
+                        "{headers:?} {route:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn without_headers_every_route_keeps_freshness_unknown() {
         for route in super::super::route::sample_routes() {
             let (status, fresh, lines) = read_marked(MockNode::canonical(), &[], route);
             assert_eq!(status, 200);
@@ -868,13 +902,13 @@ mod tests {
                 "{route:?}"
             );
             let fetched = fresh.fetched.expect("stamp");
-            assert_eq!(fresh.age(fetched.at), Some(Duration::ZERO));
+            assert_eq!(fresh.age(fetched.at), None);
             let bound = stale_after(route);
             assert_eq!(
                 fresh.state(fetched.at + bound - Duration::from_millis(1)),
-                FreshnessState::Fresh
+                FreshnessState::Unknown
             );
-            assert_eq!(fresh.state(fetched.at + bound), FreshnessState::Stale);
+            assert_eq!(fresh.state(fetched.at + bound), FreshnessState::Unknown);
             assert!(lines.is_empty(), "{lines:?}");
         }
     }
@@ -954,8 +988,8 @@ mod tests {
             assert_eq!(status, 200);
             assert_eq!(fresh.as_of_ms, None, "{headers:?}");
             let fetched = fresh.fetched.expect("stamp");
-            assert_eq!(fresh.age(fetched.at), Some(Duration::ZERO));
-            assert_eq!(fresh.state(fetched.at), FreshnessState::Fresh);
+            assert_eq!(fresh.age(fetched.at), None);
+            assert_eq!(fresh.state(fetched.at), FreshnessState::Unknown);
             assert_eq!(
                 lines,
                 [format!(
@@ -1005,10 +1039,10 @@ mod tests {
     }
 
     /// Past the 2 s tolerance the node would claim fresher data than the read:
-    /// the as-of is dropped and the app-read age is used. The warning only
+    /// the as-of is dropped and the data age is unknown. The warning only
     /// comes past `MAX_NODE_SKEW`.
     #[test]
-    fn a_future_as_of_past_the_tolerance_falls_back_to_the_app_read_age() {
+    fn a_future_as_of_past_the_tolerance_leaves_freshness_unknown() {
         let skew = MAX_NODE_SKEW.as_millis() as u64;
         for (ahead, warn) in [
             (AS_OF_TOLERANCE.as_millis() as u64 + 1, false),
@@ -1023,18 +1057,18 @@ mod tests {
             let fetched = fresh.fetched.expect("stamp");
             assert_eq!(fresh.as_of_ms, None, "{ahead}");
             assert_eq!(fresh.clock_skew, warn, "{ahead}");
-            assert_eq!(fresh.age(fetched.at), Some(Duration::ZERO), "{ahead}");
+            assert_eq!(fresh.age(fetched.at), None, "{ahead}");
             let later = fetched.at + Duration::from_secs(5);
-            assert_eq!(fresh.age(later), Some(Duration::from_secs(5)), "{ahead}");
+            assert_eq!(fresh.age(later), None, "{ahead}");
             let almost = fetched.at + STALE_AFTER - Duration::from_millis(1);
-            assert_eq!(fresh.state(almost), FreshnessState::Fresh, "{ahead}");
+            assert_eq!(fresh.state(almost), FreshnessState::Unknown, "{ahead}");
             assert_eq!(
                 fresh.state(fetched.at + STALE_AFTER),
-                FreshnessState::Stale,
+                FreshnessState::Unknown,
                 "{ahead}"
             );
 
-            // Stale: 1 still wins over the fallback.
+            // Stale: 1 still wins without a usable timestamp.
             let stale = as_of_ahead(ahead, true);
             assert_eq!(stale.state(fetched.at), FreshnessState::Stale, "{ahead}");
         }
@@ -1057,7 +1091,7 @@ mod tests {
             let later = fetched.at + Duration::from_secs(30);
             assert_eq!(
                 fresh.age(later),
-                Some(Duration::from_secs(30)),
+                (ahead_secs <= AS_OF_TOLERANCE.as_secs()).then_some(Duration::from_secs(30)),
                 "{ahead_secs}"
             );
             assert!(lines.is_empty(), "{lines:?}");
@@ -1077,7 +1111,11 @@ mod tests {
                 read_marked(MockNode::canonical(), &headers, ReadRoute::PaymentsBalance);
             assert!(fresh.node_stale, "{headers:?}");
             let fetched = fresh.fetched.expect("stamp");
-            assert!(fresh.age(fetched.at).expect("age") < Duration::from_secs(5));
+            if fresh.as_of_ms.is_some() {
+                assert!(fresh.age(fetched.at).expect("age") < Duration::from_secs(5));
+            } else {
+                assert_eq!(fresh.age(fetched.at), None);
+            }
             assert_eq!(
                 fresh.state(fetched.at),
                 FreshnessState::Stale,
@@ -1096,7 +1134,11 @@ mod tests {
             );
             assert!(!fresh.node_stale, "{value:?}");
             let fetched = fresh.fetched.expect("stamp");
-            assert_eq!(fresh.state(fetched.at), FreshnessState::Fresh, "{value:?}");
+            assert_eq!(
+                fresh.state(fetched.at),
+                FreshnessState::Unknown,
+                "{value:?}"
+            );
             assert!(lines.is_empty(), "{lines:?}");
         }
     }
@@ -1143,7 +1185,7 @@ mod tests {
             .stamped(fetched);
         let fresh = RouteFreshness::assess(ReadRoute::Health, &raw);
         assert_eq!(fresh.as_of_ms, None);
-        assert_eq!(fresh.age(fetched.at), Some(Duration::ZERO));
+        assert_eq!(fresh.age(fetched.at), None);
         assert_eq!(fresh.state(fetched.at), FreshnessState::Stale);
     }
 

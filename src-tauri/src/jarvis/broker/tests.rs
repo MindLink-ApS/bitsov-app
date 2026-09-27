@@ -612,7 +612,7 @@ fn channel_sum_overflow_is_unavailable() {
         value.channel_remote_balance,
         Amount::Available { value: 2, .. }
     ));
-    let local = serde_json::to_value(&value.channel_local_balance).expect("json");
+    let local = serde_json::to_value(value.channel_local_balance).expect("json");
     assert!(local.get("value").is_none(), "{local}");
 }
 
@@ -955,7 +955,7 @@ fn stale_chain_anchor_is_unavailable_not_zero() {
         value.prices[0].price,
         Amount::Available { value: 9, .. }
     ));
-    let height = serde_json::to_value(&value.block_height).expect("json");
+    let height = serde_json::to_value(value.block_height).expect("json");
     assert!(height.get("value").is_none(), "{height}");
 }
 
@@ -1218,7 +1218,7 @@ fn only_dispatch_output_reaches_the_model() {
     let node = Fake::new()
         .json(route::PAYMENTS_BALANCE, r#"{"balance_msat":2500}"#)
         .json(route::PAYMENTS_CHANNELS, channels_body())
-        .json(route::HEALTH, &health_body("ldk"));
+        .json(route::HEALTH, health_body("ldk"));
     let done = dispatch(
         &node,
         ToolCall::Balance {
@@ -1256,14 +1256,10 @@ fn assert_no_json_number(value: &Value, forbidden: u64) {
 fn assert_reasons_carry_no_payload(value: &Value) {
     match value {
         Value::Object(map) => {
-            if let Some(kind) = map.get("kind").and_then(Value::as_str) {
-                match kind {
-                    "timeout" | "upstream_error" | "malformed" | "absent" | "stale"
-                    | "overflow" => {
-                        assert_eq!(map.len(), 1, "reason carries a payload: {map:?}");
-                    }
-                    _ => {}
-                }
+            if let Some("timeout" | "upstream_error" | "malformed" | "absent" | "stale" | "overflow") =
+                map.get("kind").and_then(Value::as_str)
+            {
+                assert_eq!(map.len(), 1, "reason carries a payload: {map:?}");
             }
             for child in map.values() {
                 assert_reasons_carry_no_payload(child);

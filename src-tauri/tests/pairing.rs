@@ -172,8 +172,7 @@ async fn revoked_stored_pairing_is_a_failure_not_a_fallback() {
     node.revoke_all();
     let err = pairing::establish(&client, &key, app_dir.path(), NAME, &codes)
         .await
-        .err()
-        .expect("revoked pairing is refused");
+        .expect_err("revoked pairing is refused");
     assert!(matches!(err, PairError::Refused { status: 404, .. }), "{err}");
     assert_eq!(node.calls("/api/v1/auth/local"), 0);
 }
@@ -190,8 +189,7 @@ async fn unreachable_node_is_a_failure_not_a_fallback() {
     let client = PairingClient::new(reqwest::Client::new(), format!("http://127.0.0.1:{port}/api/v1"));
     let err = pairing::establish(&client, &key, app_dir.path(), NAME, &PrintedCodes::default())
         .await
-        .err()
-        .expect("no node");
+        .expect_err("no node");
     assert!(matches!(err, PairError::Transport { .. }), "{err}");
 }
 
@@ -205,8 +203,7 @@ async fn short_code_mismatch_trips_and_does_not_pair() {
     let key = ClientKey::load_or_create(app_dir.path()).unwrap();
     let err = pairing::establish(&client(&server, node_dir.path()), &key, app_dir.path(), NAME, &codes)
         .await
-        .err()
-        .expect("tripwire");
+        .expect_err("tripwire");
     assert!(matches!(err, PairError::Tripwire { .. }), "{err}");
     assert_eq!(node.calls("/api/v1/pair/confirm"), 0, "nothing is signed after the tripwire");
     assert_eq!(node.calls("/api/v1/auth/local"), 0);
@@ -223,8 +220,7 @@ async fn challenge_path_outside_the_node_data_dir_is_refused() {
     let key = ClientKey::load_or_create(app_dir.path()).unwrap();
     let err = pairing::establish(&client(&server, elsewhere.path()), &key, app_dir.path(), NAME, &codes)
         .await
-        .err()
-        .expect("unexpected challenge location");
+        .expect_err("unexpected challenge location");
     assert!(matches!(err, PairError::Local(_)), "{err}");
     assert_eq!(node.calls("/api/v1/pair/confirm"), 0);
 }
@@ -293,7 +289,7 @@ fn client_key_file_readable_by_others_is_refused() {
     ClientKey::load_or_create(dir.path()).unwrap();
     let path = dir.path().join(pairing::KEY_FILE);
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-    let err = ClientKey::load_or_create(dir.path()).err().expect("refused");
+    let err = ClientKey::load_or_create(dir.path()).expect_err("refused");
     assert!(err.to_string().contains("0600"), "{err}");
 }
 
