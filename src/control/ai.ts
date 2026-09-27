@@ -85,15 +85,36 @@ function draftText(text: string): string {
   const said = /(?:\b(?:saying|that says|to say)\s+|:\s*)([\s\S]{1,500})$/i.exec(text);
   // An opening quote needs whitespace or the start of the text; an apostrophe
   // within "I'm" is never an opener. Match each opening/closing pair together.
-  const quotation = /(?:^|\s)(?:"([\s\S]{1,500})"|“([\s\S]{1,500})”|'([\s\S]{1,500})')(?=\s|[.,!?;:]|$)/;
-  const quoted = quotation.exec(text);
+  // Stop at the first closing delimiter with a text boundary, so later quoted
+  // instructions stay outside the draft and in-word apostrophes stay inside.
+  const quotation = /(?:^|\s)(?:"([\s\S]{1,500}?)"|“([\s\S]{1,500}?)”|'([\s\S]{1,500}?)')(?=\s|[.,!?;:]|$)/;
+  const quotationIn = (input: string) => {
+    const match = quotation.exec(input);
+    if (!match || match[3] === undefined) return match;
+    const start = match.index + match[0].indexOf("'") + 1;
+    let end = start + match[3].length;
+    // A word-final apostrophe can look like a closing single quote. If the
+    // next quote only closes (kids' toys are ready'), keep the apostrophe.
+    // Punctuation/end or a fresh quoted span ('hello' not 'bye') closes here.
+    while (/\s/.test(input[end + 1] ?? '')) {
+      let next = input.indexOf("'", end + 1);
+      while (next !== -1 && !/\s/.test(input[next - 1]) && !/[\s.,!?;:]/.test(input[next + 1] ?? '') && next + 1 < input.length) {
+        next = input.indexOf("'", next + 1); // Skip in-word contractions.
+      }
+      if (next === -1 || next - start > 500 || /\s/.test(input[next - 1])) break;
+      end = next;
+    }
+    match[3] = input.slice(start, end);
+    return match;
+  };
+  const quoted = quotationIn(text);
   // A marker inside a quoted body belongs to that body, while quotes after
   // an explicit marker belong to its complete suffix (including contractions).
   if (quoted && (!said || quoted.index < said.index)) return (quoted[1] ?? quoted[2] ?? quoted[3]).trim();
   const body = said?.[1].trim() ?? '';
   // If the suffix starts with a quoted body, trailing prompt punctuation or
   // instructions are outside it. Quotes embedded in an unquoted body stay put.
-  const wrapped = quotation.exec(body);
+  const wrapped = quotationIn(body);
   return wrapped?.index === 0 ? (wrapped[1] ?? wrapped[2] ?? wrapped[3]).trim() : body;
 }
 
