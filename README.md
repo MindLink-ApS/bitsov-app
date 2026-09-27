@@ -38,6 +38,17 @@ npm run smoke:cs1
 npm run tauri dev
 ```
 
+### Control center without a node (dev sample mode)
+
+```bash
+npm run dev            # open http://localhost:1420 in a browser: sample data, no host, no node
+npm run tauri dev      # real host; add ?sample or ?sample=first-run to the URL in a debug build
+```
+
+With no Tauri host the shell runs on built-in sample data (`src/control/sample.ts`) and
+says so in the rail. A release build inside the host never uses sample data. When the node
+fails to start in a debug build, the error screen offers "Explore with sample data".
+
 `npm run smoke:cs1` is the local Linux pass/fail smoke: it starts the signed
 node sidecar on loopback, posts to `/auth/local`, reads `/identity`, and prints
 `SMOKE: PASS node_id=<node_id>` when the identity path is working.
