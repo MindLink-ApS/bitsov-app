@@ -723,7 +723,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number 
         question: question.trim().slice(0, 500),
         topic,
         shared: preset,
-        freshness: { state: read.freshness.state, age_seconds: read.freshness.age_ms === null ? null : Math.floor(read.freshness.age_ms / 1000) },
+        freshness: { state: read.freshness.state, age_seconds: read.freshness.age_ms === null ? null : Math.floor(read.freshness.age_ms / 1000), node_stale: read.freshness.node_stale },
         data: read.outputs.map((o) => sampleNarrow(o, preset)),
       };
       const body = JSON.stringify(
