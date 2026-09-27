@@ -1521,7 +1521,14 @@ async fn open_introduction(state: &NodeState, text: &str) -> Result<bitsov_app::
     if opened["node_id"].as_str() != Some(door.node_id.as_str()) || opened["connected"] != serde_json::Value::Bool(true) {
         return Err(format!("{path}: the node connected to someone else"));
     }
-    Ok(door)
+    // The node pins DNS and applies the reach rules; check what it reports
+    // having dialed against the same rules, so a node that skipped them is
+    // caught here rather than trusted.
+    let dialed = opened["dialed"].as_str().and_then(|d| d.parse::<std::net::SocketAddr>().ok());
+    match dialed {
+        Some(addr) if intro::dial_allowed(door.reach, addr.ip()) => Ok(door),
+        _ => Err(format!("{path}: the node dialed an address this introduction does not allow")),
+    }
 }
 
 /// Does `/status` list `capability`? Unreadable counts as no.
@@ -4369,6 +4376,42 @@ mod control_act_tests {
         let node = fake(AuthMode::Local, happy());
         assert!(open_introduction(&node.state, &link).await.unwrap_err().contains("cannot open"));
         assert!(node.posts().is_empty(), "no capability: no dial");
+    }
+
+    #[tokio::test]
+    async fn introduction_open_refuses_a_dial_outside_the_cards_reach() {
+        // A local card: the node must still never report a link-local,
+        // metadata or missing address, and a public card never a private one.
+        let local = intro_card("127.0.0.1:9735", now_unix() as u64);
+        for dialed in [serde_json::json!("169.254.169.254:80"), serde_json::json!("[fe80::1]:9735"), serde_json::json!("not an address"), serde_json::Value::Null] {
+            let node = fake(AuthMode::Local, intro_routes((200, serde_json::json!({"node_id": local.node_id, "dialed": dialed, "connected": true}))));
+            assert!(open_introduction(&node.state, &local.to_link().unwrap()).await.unwrap_err().contains("does not allow"), "{dialed}");
+        }
+        let mut public = intro_card("node.example.org:9735", now_unix() as u64);
+        public.reach = bitsov_app::introduction::Reach::Public;
+        {
+            use ed25519_dalek::Signer;
+            let key = ed25519_dalek::SigningKey::from_bytes(&[0x42; 32]);
+            public.sig = hex::encode(key.sign(&public.signing_digest().unwrap()).to_bytes());
+        }
+        let node = fake(AuthMode::Local, intro_routes((200, serde_json::json!({"node_id": public.node_id, "dialed": "10.0.0.7:9735", "connected": true}))));
+        assert!(open_introduction(&node.state, &public.to_link().unwrap()).await.unwrap_err().contains("does not allow"));
+        let node = fake(AuthMode::Local, intro_routes((200, serde_json::json!({"node_id": public.node_id, "dialed": "203.0.114.9:9735", "connected": true}))));
+        assert!(open_introduction(&node.state, &public.to_link().unwrap()).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn introduction_open_refuses_a_weak_key_forgery_before_any_request() {
+        let mut forged = intro_card("127.0.0.1:9735", now_unix() as u64);
+        let mut identity = [0u8; 32];
+        identity[0] = 1;
+        let mut sig = [0u8; 64];
+        sig[0] = 1;
+        forged.node_id = hex::encode(identity);
+        forged.sig = hex::encode(sig);
+        let node = fake(AuthMode::Local, intro_routes((200, serde_json::json!({"node_id": forged.node_id, "dialed": "127.0.0.1:9735", "connected": true}))));
+        assert!(open_introduction(&node.state, &forged.to_link().unwrap()).await.unwrap_err().contains("weak"));
+        assert!(node.targets().is_empty(), "nothing reached the node: {:?}", node.targets());
     }
 
     #[tokio::test]

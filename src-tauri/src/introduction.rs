@@ -12,7 +12,7 @@
 //! dials it unprivileged. Every act after that is paid as for any stranger.
 
 use base64_url as b64;
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
 /// `/status` capability of a node that signs and opens introductions.
@@ -65,6 +65,21 @@ pub struct DoorCard {
     pub expires_at: u64,
     /// The canonical link, for the QR and for Continue.
     pub link: String,
+}
+
+/// The card's node key, refused unless it is a canonically encoded point of
+/// full order. A small-order (weak) key validates forged signatures under a
+/// lax check, and a non-canonical encoding gives one node two ids.
+fn node_key(hex_key: &str) -> Result<VerifyingKey, String> {
+    let bytes = decode_fixed::<32>(hex_key).ok_or("the card's node key is malformed")?;
+    let key = VerifyingKey::from_bytes(&bytes).map_err(|_| "the card's node key is not a valid key".to_string())?;
+    if key.is_weak() {
+        return Err("The card's node key is a weak (small-order) key. Do not use this introduction.".into());
+    }
+    if key.to_edwards().compress().to_bytes() != bytes {
+        return Err("The card's node key is not canonically encoded. Do not use this introduction.".into());
+    }
+    Ok(key)
 }
 
 fn decode_fixed<const N: usize>(s: &str) -> Option<[u8; N]> {
@@ -122,10 +137,11 @@ impl Card {
         if self.expires_at <= now_unix {
             return Err("This introduction has expired. Ask for a fresh one.".into());
         }
-        let key = decode_fixed::<32>(&self.node_id).ok_or("the card's node key is malformed")?;
-        let key = VerifyingKey::from_bytes(&key).map_err(|_| "the card's node key is not a valid key".to_string())?;
+        let key = node_key(&self.node_id)?;
         let sig = decode_fixed::<64>(&self.sig).ok_or("the card's signature is malformed")?;
-        key.verify(blake3::hash(&self.canonical_bytes()?).as_bytes(), &Signature::from_bytes(&sig))
+        // Strict: no small-order R, non-canonical S or cofactored equation
+        // (the genome's #89 check), so a weak key cannot "sign" anything.
+        key.verify_strict(blake3::hash(&self.canonical_bytes()?).as_bytes(), &Signature::from_bytes(&sig))
             .map_err(|_| "The signature does not match this node's key. Do not use this introduction.".to_string())
     }
 
@@ -193,12 +209,13 @@ impl Card {
 /// A scanned link, its bare fragment, or pasted JSON. Bounded before any
 /// decoding. Does not verify.
 pub fn parse(text: &str) -> Result<Card, String> {
+    // Bound the raw input, surrounding whitespace included, before any work.
+    if text.len() > MAX_ENCODED_LEN {
+        return Err("That is too long to be an introduction (2 KiB at most).".into());
+    }
     let text = text.trim();
     if text.is_empty() {
         return Err("Paste an introduction first.".into());
-    }
-    if text.len() > MAX_ENCODED_LEN {
-        return Err("That is too long to be an introduction (2 KiB at most).".into());
     }
     if text.starts_with('{') {
         return serde_json::from_str(text).map_err(|_| "That is not an introduction.".to_string());
@@ -227,6 +244,10 @@ fn split_endpoint(endpoint: &str) -> Result<(String, u16), String> {
         return Err(bad());
     }
     let (host, port) = endpoint.rsplit_once(':').ok_or_else(bad)?;
+    // Digits only: `u16::from_str` would also take "+9000".
+    if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(bad());
+    }
     let port: u16 = port.parse().map_err(|_| bad())?;
     if port == 0 {
         return Err(bad());
@@ -243,6 +264,16 @@ fn split_endpoint(endpoint: &str) -> Result<(String, u16), String> {
         if !dns {
             return Err(bad());
         }
+        // A name whose last label is numeric ("127.1", "2130706433",
+        // "0x7f.1") is an IPv4 address in disguise to many resolvers, and a
+        // single-label name resolves through search domains to who knows
+        // where. Either would pass as "public" here, so refuse both.
+        let last = host.rsplit('.').next().unwrap_or(host);
+        let numeric = last.bytes().all(|b| b.is_ascii_digit())
+            || (last.len() > 2 && last[..2].eq_ignore_ascii_case("0x") && last[2..].bytes().all(|b| b.is_ascii_hexdigit()));
+        if numeric || (!host.contains('.') && !host.eq_ignore_ascii_case("localhost")) {
+            return Err(bad());
+        }
     }
     Ok((host.to_ascii_lowercase(), port))
 }
@@ -257,7 +288,14 @@ fn reach_of(endpoint: &str) -> Result<Reach, String> {
         return Ok(Reach::Local);
     }
     let Ok(ip) = host.parse::<IpAddr>() else { return Ok(Reach::Public) };
-    let never = || Err(format!("{ip} is never a node address."));
+    ip_reach(ip).ok_or_else(|| format!("{ip} is never a node address."))
+}
+
+/// Classify an address as the genome does (`konsensus_core::introduction::
+/// ip_reach`): `None` for never-dialable ranges, else public or local.
+pub fn ip_reach(ip: std::net::IpAddr) -> Option<Reach> {
+    use std::net::IpAddr;
+    let never = || None;
     let ip = match ip {
         IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(ip),
         v4 => v4,
@@ -270,9 +308,9 @@ fn reach_of(endpoint: &str) -> Result<Reach, String> {
             {
                 never()
             } else if v4.is_loopback() || v4.is_private() || (a == 100 && (64..128).contains(&b)) {
-                Ok(Reach::Local)
+                Some(Reach::Local)
             } else {
-                Ok(Reach::Public)
+                Some(Reach::Public)
             }
         }
         IpAddr::V6(v6) => {
@@ -280,11 +318,26 @@ fn reach_of(endpoint: &str) -> Result<Reach, String> {
             if v6.is_unspecified() || v6.is_multicast() || (s[0] & 0xffc0) == 0xfe80 || (s[0] == 0x2001 && s[1] == 0x0db8) {
                 never()
             } else if v6.is_loopback() || (s[0] & 0xfe00) == 0xfc00 {
-                Ok(Reach::Local)
+                Some(Reach::Local)
+            } else if (s[0] & 0xe000) != 0x2000 || s[0] == 0x2002 || (s[0] == 0x2001 && s[1] <= 0x01ff) || s[0] == 0x3fff {
+                // Outside global unicast, 6to4, Teredo/benchmarking and
+                // documentation: fail closed so an embedded IPv4 (NAT64,
+                // IPv4-compatible, 6to4) cannot slip past the local rules.
+                never()
             } else {
-                Ok(Reach::Public)
+                Some(Reach::Public)
             }
         }
+    }
+}
+
+/// May a card with `reach` lead to a connection to `ip`? Public cards only
+/// reach public addresses; nothing reaches the never-dialable ranges.
+pub fn dial_allowed(reach: Reach, ip: std::net::IpAddr) -> bool {
+    match (reach, ip_reach(ip)) {
+        (_, None) => false,
+        (Reach::Public, Some(r)) => r == Reach::Public,
+        (Reach::Local, Some(_)) => true,
     }
 }
 
@@ -410,6 +463,117 @@ mod tests {
         for (ok, r) in [("a.example:1", Reach::Public), ("8.8.8.8:1", Reach::Public), ("127.0.0.1:1", Reach::Local), ("10.0.0.2:1", Reach::Local), ("[fd00::1]:1", Reach::Local), ("localhost:1", Reach::Local)] {
             assert_eq!(reach_of(ok).unwrap(), r, "{ok}");
         }
+    }
+
+    /// A card "signed" by the identity point: R = identity, S = 0. The group
+    /// equation [S]B = R + [k]A holds for every message, so a lax verifier
+    /// accepts it. Strict verification must not.
+    fn forged_by_identity_key(endpoint: &str, admission_msat: u64) -> Card {
+        let mut identity = [0u8; 32];
+        identity[0] = 1;
+        let mut sig = [0u8; 64];
+        sig[0] = 1;
+        Card {
+            node_id: hex::encode(identity),
+            endpoint: endpoint.into(),
+            admission_msat,
+            sig: hex::encode(sig),
+            ..vector()
+        }
+    }
+
+    #[test]
+    fn weak_key_forgery_is_rejected_where_a_lax_check_accepts_it() {
+        use ed25519_dalek::Verifier;
+        for (endpoint, price) in [("node.example.org:9000", 100_000), ("evil.example.org:9001", 1)] {
+            let forged = forged_by_identity_key(endpoint, price);
+            // The forgery is real: the lax (cofactorless, weak-key) check passes it.
+            let key = VerifyingKey::from_bytes(&decode_fixed::<32>(&forged.node_id).unwrap()).unwrap();
+            let digest = forged.signing_digest().unwrap();
+            assert!(key.verify(&digest, &Signature::from_bytes(&decode_fixed::<64>(&forged.sig).unwrap())).is_ok());
+            // The app refuses it, from JSON and through the link.
+            assert!(forged.verify(NOW).unwrap_err().contains("weak"), "{endpoint}");
+            let link = forged.to_link().unwrap();
+            assert!(read(&link, NOW).unwrap_err().contains("weak"));
+        }
+    }
+
+    #[test]
+    fn every_small_order_key_is_refused() {
+        // The eight small-order points (orders 1, 2, 4 and 8) plus a
+        // non-canonical encoding of the identity (y = p + 1).
+        for key in [
+            "0100000000000000000000000000000000000000000000000000000000000000",
+            "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "0000000000000000000000000000000000000000000000000000000000000080",
+            "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+            "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
+            "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+            "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85",
+            "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+        ] {
+            let card = Card { node_id: key.into(), ..vector() };
+            assert!(card.verify(NOW).is_err(), "{key} accepted");
+        }
+    }
+
+    #[test]
+    fn noncanonical_signatures_are_rejected() {
+        let c = vector();
+        // S + L: the same group element, but a non-canonical scalar.
+        let order = hex::decode("edd3f55c1a631258d69cf7a2def9de1400000000000000000000000000000010").unwrap();
+        let mut sig = decode_fixed::<64>(&c.sig).unwrap();
+        let mut carry = 0u16;
+        for (s, l) in sig[32..].iter_mut().zip(order) {
+            let sum = u16::from(*s) + u16::from(l) + carry;
+            *s = sum as u8;
+            carry = sum >> 8;
+        }
+        assert!(Card { sig: hex::encode(sig), ..c.clone() }.verify(NOW).is_err(), "S + L accepted");
+        // R replaced by a non-canonical encoding of the identity (y = p + 1).
+        let mut sig = decode_fixed::<64>(&c.sig).unwrap();
+        sig[..32].fill(0xff);
+        sig[0] = 0xee;
+        sig[31] = 0x7f;
+        assert!(Card { sig: hex::encode(sig), ..c.clone() }.verify(NOW).is_err(), "non-canonical R accepted");
+        assert!(c.verify(NOW).is_ok(), "the genuine vector still verifies strictly");
+    }
+
+    #[test]
+    fn tampered_links_are_rejected() {
+        let frag = VECTOR_LINK.strip_prefix(LINK_PREFIX).unwrap().as_bytes().to_vec();
+        // Flip each byte of the payload (keeping it valid base64url): every
+        // variant either fails to parse or fails the signature.
+        for i in 0..frag.len() {
+            let mut t = frag.clone();
+            t[i] = if t[i] == b'A' { b'B' } else { b'A' };
+            let text = format!("{LINK_PREFIX}{}", String::from_utf8(t).unwrap());
+            assert!(read(&text, NOW).is_err(), "byte {i} flipped still verified");
+        }
+        let padded = format!("{}{VECTOR_LINK}", " ".repeat(MAX_ENCODED_LEN));
+        assert!(parse(&padded).unwrap_err().contains("2 KiB"), "whitespace counts toward the bound");
+    }
+
+    #[test]
+    fn endpoint_input_validation() {
+        for bad in [
+            "a.example:+9000", "a.example:-1", "a.example:65536", "a.example:", "a.example:9000 ",
+            "127.1:9000", "2130706433:9000", "0x7f.1:9000", "a.0x7f:9000", "10.0.0.010:9000",
+            "node:9000", "a.example.:9000", "nöde.example:9000", "a\u{0}b.example:9000", "[::1%lo0]:9000",
+        ] {
+            assert!(reach_of(bad).is_err(), "{bad} accepted");
+        }
+        assert!(reach_of("a.example:65535").is_ok());
+        assert!(reach_of("localhost:9000").is_ok());
+        for ip in ["::127.0.0.1", "64:ff9b::a9fe:a9fe", "64:ff9b::7f00:1", "2002:7f00:1::1", "2001::1", "3fff::1", "fec0::1"] {
+            let ip: std::net::IpAddr = ip.parse().unwrap();
+            assert!(!dial_allowed(Reach::Public, ip) && !dial_allowed(Reach::Local, ip), "{ip}");
+        }
+        assert!(dial_allowed(Reach::Public, "2606:4700::1".parse().unwrap()));
+        assert!(dial_allowed(Reach::Local, "192.168.1.2".parse().unwrap()));
+        assert!(!dial_allowed(Reach::Public, "192.168.1.2".parse().unwrap()));
+        assert!(!dial_allowed(Reach::Local, "169.254.169.254".parse().unwrap()));
     }
 
     #[test]
