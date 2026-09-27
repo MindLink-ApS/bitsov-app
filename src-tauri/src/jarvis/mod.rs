@@ -6,6 +6,7 @@
 //! `posix_spawn` is unsafe, and this module forbids unsafe code.
 #![forbid(unsafe_code)]
 
+pub mod assistant_source;
 pub mod broker;
 pub mod sandbox;
 
@@ -14,3 +15,8 @@ pub mod sandbox;
 /// app binary does not link `mock-node`.
 #[cfg(any(test, feature = "sit-mock"))]
 pub mod sit_mock;
+
+/// Host-side live-or-mock choice for the assistant window's rows. Needs the
+/// fixture answering in `sit_mock`, so it has the same gate.
+#[cfg(any(test, feature = "sit-mock"))]
+pub mod assistant_feed;

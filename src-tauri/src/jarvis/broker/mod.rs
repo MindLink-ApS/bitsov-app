@@ -4,9 +4,16 @@
 //! calls that are not one of the five read tools never reach it. The model
 //! may be shown only [`Dispatch::output`]; the host log stays in this module.
 
+mod local_read;
 mod route;
 mod schema;
+mod snapshot;
 mod tools;
+
+pub use local_read::{
+    admit, AuditSink, BaseUrlRejected, BearerToken, DenyReason, LocalNodeRead, StderrAudit,
+};
+pub use snapshot::Snapshot;
 
 #[allow(unused_imports)]
 pub use route::{ReadRoute, RequestTarget, ALLOWED_PATHS};
@@ -24,6 +31,7 @@ use std::fmt;
 use schema::default_message_limit;
 
 /// Node body as read by the broker. `Debug` redacts the bytes.
+#[derive(Clone)]
 pub struct RawRead {
     status: u16,
     body: Vec<u8>,
@@ -172,5 +180,7 @@ pub fn default_limit() -> u32 {
 
 #[cfg(test)]
 mod mock_read;
+#[cfg(test)]
+pub(crate) mod test_server;
 #[cfg(test)]
 mod tests;

@@ -35,6 +35,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use bitsov_app::jarvis::assistant_source::{Feed, MockReason, NodeAuth};
+use bitsov_app::jarvis::broker::BearerToken;
 use bitsov_app::pairing::{
     self, ClientKey, Established, PairError, PairedSession, PairingClient, PairingView,
     PrintedCodes,
@@ -778,6 +780,63 @@ async fn fetch_node_id(state: &NodeState) -> Result<String, String> {
         .ok_or_else(|| "identity returned no node_id".to_string())
 }
 
+// ---- assistant source (host-side) ------------------------------------------
+//
+// The host alone decides whether the sealed window shows rows read from the
+// local node or mock rows. No command selects it, and the window gets the
+// result only as frozen init-script globals.
+
+/// `BITSOV_ASSISTANT=node` (debug + `sit-mock`): the full app — node, pairing,
+/// wallet — plus the Assistant menu, so the window can show live rows.
+/// `BITSOV_ASSISTANT=1` stays the node-free assistant-only path.
+const ASSISTANT_NODE_MODE: &str = "node";
+
+fn assistant_node_enabled_from(debug_build: bool, sit_mock: bool, flag: Option<&str>) -> bool {
+    debug_build && sit_mock && flag == Some(ASSISTANT_NODE_MODE)
+}
+
+fn assistant_node_enabled() -> bool {
+    let flag = std::env::var(ASSISTANT_DEV_FLAG).ok();
+    assistant_node_enabled_from(
+        cfg!(debug_assertions),
+        cfg!(feature = "sit-mock"),
+        flag.as_deref(),
+    )
+}
+
+/// F1's auth state as the assistant feed sees it. Only a paired token is
+/// handed over; the rc7 `/auth/local` token never is.
+#[cfg_attr(not(all(debug_assertions, feature = "sit-mock")), allow(dead_code))]
+fn node_auth(state: &NodeState) -> NodeAuth {
+    match &*state.auth.lock().unwrap() {
+        AuthMode::Unauthenticated => NodeAuth::NotPaired,
+        AuthMode::Local => NodeAuth::Rc7Fallback,
+        AuthMode::Paired(session) => match BearerToken::new(session.token.clone()) {
+            Some(token) => NodeAuth::Paired {
+                token,
+                scopes: session.scopes.clone(),
+            },
+            None => NodeAuth::NotPaired,
+        },
+    }
+}
+
+/// The sealed window's source, as an init script. Reads host state only. It
+/// may read the node over loopback, so callers keep it off the UI thread.
+/// Builds without `sit-mock` have no fixture reader and are always mock.
+fn assistant_source_script(app: &AppHandle) -> String {
+    #[cfg(all(debug_assertions, feature = "sit-mock"))]
+    if let Some(state) = app.try_state::<NodeState>() {
+        use bitsov_app::jarvis::assistant_feed;
+        tauri::async_runtime::block_on(ensure_fresh_token(&state));
+        let audit = Arc::new(bitsov_app::jarvis::broker::StderrAudit);
+        let feed = assistant_feed::build(node_auth(&state), &state.api_base, audit);
+        return feed.init_script();
+    }
+    let _ = app;
+    Feed::mock(MockReason::NotPaired).init_script()
+}
+
 // ---- sealed assistant window ----------------------------------------------
 
 /// Label of the display-only window. Privileged commands refuse this label.
@@ -877,9 +936,10 @@ fn assistant_rows_script() -> String {
 }
 
 /// Create the sealed assistant window. Called from the menu in a normal debug
-/// build, and at startup on the sit-mock assistant-only path.
-fn open_assistant_window(app: &AppHandle) -> Result<(), String> {
-    if !assistant_dev_enabled() {
+/// build, and at startup on the sit-mock assistant-only path. `source_script`
+/// comes from the host (`assistant_source_script` or a fixed mock feed).
+fn open_assistant_window(app: &AppHandle, source_script: String) -> Result<(), String> {
+    if !assistant_dev_enabled() && !assistant_node_enabled() {
         return Err("the assistant window is unavailable".into());
     }
     if let Some(existing) = app.get_webview_window(ASSISTANT_WINDOW_LABEL) {
@@ -898,6 +958,7 @@ fn open_assistant_window(app: &AppHandle) -> Result<(), String> {
     .resizable(true)
     .incognito(true)
     .initialization_script(assistant_rows_script())
+    .initialization_script(source_script)
     .on_navigation(|url| {
         assistant_document_allowed(
             cfg!(debug_assertions),
@@ -924,7 +985,12 @@ fn install_assistant_menu(app: &tauri::App) -> tauri::Result<()> {
     }
     app.on_menu_event(|app, event| {
         if event.id() == "open-assistant" {
-            let _ = open_assistant_window(app);
+            // The source may read the node over loopback: off the UI thread.
+            let app = app.clone();
+            std::thread::spawn(move || {
+                let source = assistant_source_script(&app);
+                let _ = open_assistant_window(&app, source);
+            });
         }
     });
     Ok(())
@@ -1327,7 +1393,7 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             pairing_retry
         ])
         .setup(|app| {
-            if assistant_dev_enabled() {
+            if assistant_dev_enabled() || assistant_node_enabled() {
                 install_assistant_menu(app)?;
             }
             let handle = app.handle().clone();
@@ -1348,9 +1414,10 @@ fn assistant_mock_builder() -> tauri::Builder<tauri::Wry> {
         .setup(|app| {
             // Open the sealed window first so closing the config main window
             // does not leave the process with zero windows.
-            open_assistant_window(app.handle()).map_err(|e| -> Box<dyn std::error::Error> {
-                e.into()
-            })?;
+            let source = Feed::mock(MockReason::NotPaired).init_script();
+            open_assistant_window(app.handle(), source).map_err(
+                |e| -> Box<dyn std::error::Error> { e.into() },
+            )?;
             if let Some(main) = app.get_webview_window(MAIN_WINDOW_LABEL) {
                 let _ = main.close();
             }
@@ -1475,6 +1542,37 @@ mod pairing_wiring_tests {
         assert_eq!(status, reqwest::StatusCode::UNAUTHORIZED);
         assert_eq!(f.node.calls("/api/v1/pair/challenge"), 2, "refresh went through pairing");
         assert_eq!(f.node.calls("/api/v1/auth/local"), 0);
+    }
+
+    /// The assistant reads only with a paired token; rc7's `/auth/local`
+    /// token and a failed pairing both leave it on mock rows.
+    #[tokio::test]
+    async fn assistant_auth_follows_the_established_mode() {
+        use bitsov_app::jarvis::assistant_source::NodeAuth;
+
+        let f = fixture(PairRoutes::Live);
+        assert!(matches!(node_auth(&f.state), NodeAuth::NotPaired));
+        authenticate(&f.state, f.data_dir.path()).await.expect("paired");
+        match node_auth(&f.state) {
+            NodeAuth::Paired { scopes, .. } => assert_eq!(scopes, ["read", "receive"]),
+            other => panic!("expected paired, got {other:?}"),
+        }
+
+        let rc7 = fixture(PairRoutes::Absent);
+        authenticate(&rc7.state, rc7.data_dir.path()).await.expect("fallback");
+        assert!(matches!(node_auth(&rc7.state), NodeAuth::Rc7Fallback));
+        assert_eq!(rc7.node.calls("/api/v1/auth/local"), 1, "only F1's fallback mints");
+
+        let refused = fixture(PairRoutes::Live);
+        let other = tempfile::tempdir().unwrap();
+        let client =
+            pairing::PairingClient::new(reqwest::Client::new(), refused.state.api_base.clone());
+        let key = ClientKey::load_or_create(other.path()).unwrap();
+        pairing::establish(&client, &key, other.path(), "other", &PrintedCodes::default())
+            .await
+            .expect("first client pairs");
+        assert!(authenticate(&refused.state, refused.data_dir.path()).await.is_err());
+        assert!(matches!(node_auth(&refused.state), NodeAuth::NotPaired));
     }
 
     #[tokio::test]
@@ -1747,8 +1845,9 @@ mod stop_adapter_tests {
 #[cfg(test)]
 mod assistant_acl_tests {
     use super::{
-        assistant_dev_enabled_from, assistant_document_allowed, window_may_run_privileged_command,
-        ASSISTANT_DEV_HOST, ASSISTANT_DEV_PORT, ASSISTANT_DEV_SCHEME,
+        assistant_dev_enabled_from, assistant_document_allowed, assistant_node_enabled_from,
+        window_may_run_privileged_command, ASSISTANT_DEV_HOST, ASSISTANT_DEV_PORT,
+        ASSISTANT_DEV_SCHEME,
     };
     use std::collections::BTreeSet;
     use std::fs;
@@ -1930,6 +2029,70 @@ mod assistant_acl_tests {
         assert!(!assistant_dev_enabled_from(true, Some("0")));
         assert!(!assistant_dev_enabled_from(true, Some("true")));
         assert!(assistant_dev_enabled_from(true, Some("1")));
+    }
+
+    /// `BITSOV_ASSISTANT=node` runs the full app with the Assistant menu, so
+    /// the window can show live rows. It needs debug + sit-mock, and it never
+    /// selects the node-free assistant-only path.
+    #[test]
+    fn node_mode_needs_debug_sit_mock_and_the_exact_flag() {
+        assert!(assistant_node_enabled_from(true, true, Some("node")));
+        assert!(!assistant_node_enabled_from(false, true, Some("node")));
+        assert!(!assistant_node_enabled_from(true, false, Some("node")));
+        assert!(!assistant_node_enabled_from(true, true, Some("1")));
+        assert!(!assistant_node_enabled_from(true, true, Some("NODE")));
+        assert!(!assistant_node_enabled_from(true, true, None));
+        assert!(!assistant_dev_enabled_from(true, Some("node")));
+    }
+
+    /// The backend is chosen host-side. No command is added for the
+    /// assistant, the choice takes host state only, and the window receives
+    /// it as a frozen init-script global. The node read is outside the sealed
+    /// section.
+    #[test]
+    fn the_sealed_window_has_no_way_to_choose_its_source() {
+        let source = production_source();
+        assert_eq!(
+            handler_commands(&source),
+            [
+                "node_status",
+                "fund_state",
+                "fund_start",
+                "funding_address",
+                "payments_balance",
+                "identity_restore",
+                "pairing_status",
+                "pairing_retry",
+            ]
+        );
+        let build_rs = fs::read_to_string(manifest_dir().join("build.rs")).expect("build.rs");
+        assert!(!build_rs.to_lowercase().contains("assistant_source"));
+        assert!(!build_rs.to_lowercase().contains("backend"));
+
+        let chooser = function_source(&source, "assistant_source_script");
+        assert!(chooser.contains("app: &AppHandle"), "{chooser}");
+        assert!(!chooser.contains("WebviewWindow"), "{chooser}");
+        assert!(!chooser.contains("#[tauri::command]"));
+        assert!(chooser.contains("assistant_feed::build(node_auth(&state), &state.api_base"));
+
+        let opener = function_source(&source, "open_assistant_window");
+        assert!(opener.contains(".initialization_script(assistant_rows_script())"));
+        assert!(opener.contains(".initialization_script(source_script)"));
+
+        let sealed = source
+            .split("// ---- sealed assistant window")
+            .nth(1)
+            .and_then(|rest| rest.split("// ---- commands").next())
+            .expect("sealed section");
+        for token in ["assistant_feed::build", "LocalNodeRead", "api_base", "NodeState"] {
+            assert!(!sealed.contains(token), "sealed section uses {token}");
+        }
+        let menu = function_source(&source, "install_assistant_menu");
+        assert!(menu.contains("std::thread::spawn"), "node reads stay off the UI thread");
+        assert!(menu.contains("assistant_source_script(&app)"));
+
+        let mock = function_source(&source, "assistant_mock_builder");
+        assert!(mock.contains("Feed::mock(MockReason::NotPaired).init_script()"));
     }
 
     fn dev_url_parts() -> (String, String, u16) {
