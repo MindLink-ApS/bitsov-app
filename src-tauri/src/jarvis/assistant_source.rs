@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use serde_json::{json, Value};
 
-use super::broker::{route_key, BearerToken, RouteFreshness, STALE_AFTER};
+use super::broker::{route_key, stale_after, BearerToken, RouteFreshness};
 
 /// The host's auth state, as F1 (`crate::pairing`) established it.
 #[derive(Debug)]
@@ -33,8 +33,9 @@ pub const SOURCE_GLOBAL: &str = "__BITSOV_ASSISTANT_SOURCE__";
 /// Must match `src/assistant/source.ts`.
 pub const LIVE_ROWS_GLOBAL: &str = "__BITSOV_LIVE_ROWS__";
 
-/// Global holding `{stale_after_ms, routes: [{route, state, age_ms,
-/// clock_skew}]}`. Defined only for a live feed. Must match
+/// Global holding `{routes: [{route, state, age_ms, clock_skew,
+/// stale_after_ms}]}`. `stale_after_ms` is the route's own bound
+/// ([`stale_after`]). Defined only for a live feed. Must match
 /// `src/assistant/source.ts`.
 pub const FRESHNESS_GLOBAL: &str = "__BITSOV_LIVE_FRESHNESS__";
 
@@ -156,10 +157,11 @@ impl Feed {
                     "state": fresh.state(now).code(),
                     "age_ms": fresh.age(now).map(|age| age.as_millis() as u64),
                     "clock_skew": fresh.clock_skew,
+                    "stale_after_ms": stale_after(fresh.route).as_millis() as u64,
                 })
             })
             .collect();
-        json!({ "stale_after_ms": STALE_AFTER.as_millis() as u64, "routes": routes })
+        json!({ "routes": routes })
     }
 }
 
@@ -187,7 +189,9 @@ pub fn js_literal(value: &Value) -> String {
 mod tests {
     use std::time::Duration;
 
-    use super::super::broker::{Fetched, NodeMarks, RawRead, ReadRoute, STALE_AFTER};
+    use super::super::broker::{
+        Fetched, NodeMarks, RawRead, ReadRoute, STALE_AFTER, WALLET_STALE_AFTER,
+    };
     use super::*;
 
     /// Pull `value: <json>` for `global` back out of a script.
@@ -248,20 +252,26 @@ mod tests {
         assert_eq!(
             defined(&script, FRESHNESS_GLOBAL),
             Some(json!({
-                "stale_after_ms": 60_000,
                 "routes": [
-                    {"route": "balance", "state": "fresh", "age_ms": 12_000, "clock_skew": false},
-                    {"route": "messages", "state": "fresh", "age_ms": 10_000, "clock_skew": true},
-                    {"route": "health", "state": "unknown", "age_ms": null, "clock_skew": false},
+                    {"route": "balance", "state": "fresh", "age_ms": 12_000, "clock_skew": false, "stale_after_ms": 180_000},
+                    {"route": "messages", "state": "fresh", "age_ms": 10_000, "clock_skew": true, "stale_after_ms": 60_000},
+                    {"route": "health", "state": "unknown", "age_ms": null, "clock_skew": false, "stale_after_ms": 60_000},
                 ],
             }))
         );
 
-        let later = feed.init_script_at(t0 + STALE_AFTER);
+        // Messages turns stale at 60 s; balance allows for a wallet sync.
+        let later = feed.init_script_at(t0 + STALE_AFTER + Duration::from_secs(2));
+        let routes = defined(&later, FRESHNESS_GLOBAL).unwrap()["routes"].clone();
+        assert_eq!(routes[0]["state"], "fresh");
+        assert_eq!(routes[0]["age_ms"], 62_000);
+        assert_eq!(routes[1]["state"], "stale");
+        assert_eq!(routes[1]["age_ms"], 60_000);
+
+        let later = feed.init_script_at(t0 + WALLET_STALE_AFTER);
         let routes = defined(&later, FRESHNESS_GLOBAL).unwrap()["routes"].clone();
         assert_eq!(routes[0]["state"], "stale");
-        assert_eq!(routes[0]["age_ms"], 60_000);
-        assert_eq!(routes[1]["state"], "fresh");
+        assert_eq!(routes[0]["age_ms"], 180_000);
     }
 
     /// Node marks reach the window only as `state` and `age_ms`: same keys.
@@ -306,18 +316,25 @@ mod tests {
         assert_eq!(
             defined(&script, FRESHNESS_GLOBAL),
             Some(json!({
-                "stale_after_ms": 60_000,
                 "routes": [
-                    {"route": "balance", "state": "fresh", "age_ms": 52_000, "clock_skew": false},
-                    {"route": "pricing", "state": "stale", "age_ms": 2_000, "clock_skew": false},
-                    {"route": "health", "state": "fresh", "age_ms": 2_000, "clock_skew": true},
+                    {"route": "balance", "state": "fresh", "age_ms": 52_000, "clock_skew": false, "stale_after_ms": 180_000},
+                    {"route": "pricing", "state": "stale", "age_ms": 2_000, "clock_skew": false, "stale_after_ms": 60_000},
+                    {"route": "health", "state": "fresh", "age_ms": 2_000, "clock_skew": true, "stale_after_ms": 60_000},
                 ],
             }))
         );
+        // Balance as-of 50 s behind: stale when the node's data is 180 s old.
         let later = feed.init_script_at(t0 + Duration::from_secs(10));
         let routes = defined(&later, FRESHNESS_GLOBAL).unwrap()["routes"].clone();
-        assert_eq!(routes[0]["state"], "stale");
+        assert_eq!(routes[0]["state"], "fresh");
         assert_eq!(routes[0]["age_ms"], 60_000);
+        let later = feed.init_script_at(t0 + Duration::from_secs(130) - Duration::from_millis(1));
+        let routes = defined(&later, FRESHNESS_GLOBAL).unwrap()["routes"].clone();
+        assert_eq!(routes[0]["state"], "fresh");
+        let later = feed.init_script_at(t0 + Duration::from_secs(130));
+        let routes = defined(&later, FRESHNESS_GLOBAL).unwrap()["routes"].clone();
+        assert_eq!(routes[0]["state"], "stale");
+        assert_eq!(routes[0]["age_ms"], 180_000);
     }
 
     #[test]
@@ -325,7 +342,7 @@ mod tests {
         let script = Feed::live(vec![("q01".into(), "1".into())]).init_script();
         assert_eq!(
             defined(&script, FRESHNESS_GLOBAL),
-            Some(json!({ "stale_after_ms": 60_000, "routes": [] }))
+            Some(json!({ "routes": [] }))
         );
     }
 

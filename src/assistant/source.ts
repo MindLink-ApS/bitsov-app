@@ -41,9 +41,11 @@ export type RouteFreshness = {
   state: FreshnessState;
   ageMs: number | null;
   clockSkew: boolean;
+  /** The route's own bound (host `stale_after`): 180 s balance/channels, else 60 s. */
+  staleAfterMs: number;
 };
 /** Per-route ages the host measured when it wrote the init script. */
-export type Freshness = { staleAfterMs: number; routes: RouteFreshness[] };
+export type Freshness = { routes: RouteFreshness[] };
 
 const ROUTE_KEYS: readonly string[] = ['balance', 'channels', 'health', 'messages', 'pricing'];
 const STATES: readonly string[] = ['fresh', 'stale', 'unknown'];
@@ -54,11 +56,19 @@ function isAge(value: unknown): value is number {
 
 function readRoute(raw: unknown, seen: Set<string>): RouteFreshness | null {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null;
-  if (Object.keys(raw).sort().join(',') !== 'age_ms,clock_skew,route,state') return null;
-  const { route, state, age_ms: ageMs, clock_skew: clockSkew } = raw as Record<string, unknown>;
+  const keys = Object.keys(raw).sort().join(',');
+  if (keys !== 'age_ms,clock_skew,route,stale_after_ms,state') return null;
+  const {
+    route,
+    state,
+    age_ms: ageMs,
+    clock_skew: clockSkew,
+    stale_after_ms: staleAfterMs,
+  } = raw as Record<string, unknown>;
   if (typeof route !== 'string' || !ROUTE_KEYS.includes(route) || seen.has(route)) return null;
   if (typeof state !== 'string' || !STATES.includes(state)) return null;
   if (typeof clockSkew !== 'boolean') return null;
+  if (!isAge(staleAfterMs) || staleAfterMs === 0) return null;
   // A known state carries an age; unknown carries none.
   if (state === 'unknown' ? ageMs !== null : !isAge(ageMs)) return null;
   seen.add(route);
@@ -67,6 +77,7 @@ function readRoute(raw: unknown, seen: Set<string>): RouteFreshness | null {
     state: state as FreshnessState,
     ageMs: ageMs as number | null,
     clockSkew,
+    staleAfterMs,
   };
 }
 
@@ -77,9 +88,8 @@ function readRoute(raw: unknown, seen: Set<string>): RouteFreshness | null {
 export function readFreshness(scope: object = globalThis): Freshness | null {
   const raw: unknown = (scope as Record<string, unknown>)[FRESHNESS_GLOBAL];
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null;
-  if (Object.keys(raw).sort().join(',') !== 'routes,stale_after_ms') return null;
+  if (Object.keys(raw).sort().join(',') !== 'routes') return null;
   const value = raw as Record<string, unknown>;
-  if (!isAge(value.stale_after_ms) || value.stale_after_ms === 0) return null;
   if (!Array.isArray(value.routes) || value.routes.length > ROUTE_KEYS.length) return null;
   const seen = new Set<string>();
   const routes: RouteFreshness[] = [];
@@ -88,7 +98,7 @@ export function readFreshness(scope: object = globalThis): Freshness | null {
     if (!route) return null;
     routes.push(route);
   }
-  return { staleAfterMs: value.stale_after_ms, routes };
+  return { routes };
 }
 
 export type View = { source: Source; rows: SitRow[]; freshness: Freshness | null };
@@ -111,17 +121,28 @@ export type FreshnessSummary = { state: FreshnessState; ageMs: number | null; cl
 
 /**
  * One state for the label: the oldest route read, aged by how long the window
- * has been open (`openMs`, from a monotonic clock). Routes without an age
- * (their rows are `Unavailable`) do not count. Nothing with an age is unknown.
+ * has been open (`openMs`, from a monotonic clock). Each route is stale past
+ * its own bound; the label is stale if any is. With `only`, just that route.
+ * Routes without an age (their rows are `Unavailable`) do not count. Nothing
+ * with an age is unknown.
  */
-export function summarize(freshness: Freshness | null, openMs: number): FreshnessSummary {
-  const known = freshness?.routes.filter((route) => route.ageMs !== null) ?? [];
-  if (!freshness || known.length === 0) {
+export function summarize(
+  freshness: Freshness | null,
+  openMs: number,
+  only?: RouteKey,
+): FreshnessSummary {
+  const open = Math.max(0, openMs);
+  const known =
+    freshness?.routes.filter(
+      (route) => route.ageMs !== null && (only === undefined || route.route === only),
+    ) ?? [];
+  if (known.length === 0) {
     return { state: 'unknown', ageMs: null, clockSkew: false };
   }
-  const ageMs = Math.max(...known.map((route) => route.ageMs as number)) + Math.max(0, openMs);
-  const stale =
-    ageMs >= freshness.staleAfterMs || known.some((route) => route.state === 'stale');
+  const ageMs = Math.max(...known.map((route) => route.ageMs as number)) + open;
+  const stale = known.some(
+    (route) => route.state === 'stale' || (route.ageMs as number) + open >= route.staleAfterMs,
+  );
   return {
     state: stale ? 'stale' : 'fresh',
     ageMs,
@@ -153,6 +174,11 @@ const REASON_TEXT: Record<MockReason, string> = {
   rc7_fallback: 'Node has no pairing routes (rc7 fallback).',
   unknown: 'Source unknown.',
 };
+
+/** Why the rows are mock, in one plain sentence. */
+export function mockReasonText(reason: MockReason): string {
+  return REASON_TEXT[reason];
+}
 
 /** Headline and detail for the label above the rows. */
 export function sourceText(source: Source): { title: string; detail: string } {
