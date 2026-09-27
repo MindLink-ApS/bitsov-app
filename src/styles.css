@@ -341,6 +341,7 @@ select { font: inherit; font-size: var(--t-sm); background: var(--sunk); color: 
 .modes button[aria-checked='true'] { background: var(--raised); color: var(--ink); }
 .ai-payload { margin: 0; max-height: 280px; overflow: auto; background: var(--sunk); border: 1px solid var(--line); border-radius: var(--r-control); padding: var(--s-3); font-family: var(--font-mono); font-size: var(--t-xs); line-height: 1.45; color: var(--ink); white-space: pre-wrap; overflow-wrap: anywhere; }
 .ai-composer .composer-bar textarea { flex: 1; min-height: 40px; }
+.ai-draft-field { display: flex; flex-direction: column; gap: var(--s-2); font-size: var(--t-sm); }
 .ai-suggest { display: flex; gap: var(--s-2); flex-wrap: wrap; }
 .chip { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-chip); padding: 4px 10px; font-size: var(--t-xs); color: var(--muted); }
 .chip:hover:not(:disabled) { color: var(--ink); border-color: var(--line-strong); }

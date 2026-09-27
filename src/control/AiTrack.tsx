@@ -86,6 +86,7 @@ export function AiTrack(props: {
 }) {
   const [session, setSession] = props.session;
   const [draft, setDraft] = createSignal('');
+  const [draftText, setDraftText] = createSignal('');
   let stream: HTMLDivElement | undefined;
 
   if (session.providers === null) {
@@ -135,12 +136,13 @@ export function AiTrack(props: {
     setDraft('');
     const id = turnSeq++;
     const now = Date.now();
-    const intent: Intent = understand(question, props.peers, now);
+    const intent: Intent = understand(question, props.peers, now, { draft_text: draftText() });
     const base: Turn = { id, at: now, question, provider: session.provider, state: 'reading' };
     setSession('turns', (list) => [...list, base]);
     scroll();
 
     if (intent.kind === 'act') {
+      setDraftText('');
       update(id, { state: 'answered', provider: 'local', proposal: intent.proposal, answer: { text: proposalText(intent.proposal), cards: [] } });
       return scroll();
     }
@@ -287,6 +289,18 @@ export function AiTrack(props: {
             {remote() ? 'Preview' : 'Ask'}
           </button>
         </div>
+        <label class="ai-draft-field">
+          <span>Draft text (optional)</span>
+          <textarea
+            rows={2}
+            placeholder="Message or invoice note — copied exactly into the draft"
+            value={draftText()}
+            onInput={(e) => setDraftText(e.currentTarget.value)}
+            disabled={busy()}
+            data-ai-draft-text
+          />
+          <span class="hint">For messages and invoice notes. Leave blank to write in the composer.</span>
+        </label>
         <p class="send-next" data-ai-policy>
           {remote()
             ? `Each question shows the exact request for ${provider()?.label ?? 'the remote model'} first. Nothing is approved ahead of time.`
@@ -543,7 +557,7 @@ function ProposalCard(props: { p: Proposal; onPrefill: (p: Proposal) => void }) 
     <div class="artifact ai-card proposal" data-ai-card="proposal" data-proposal={props.p.kind}>
       <span class="kind">Draft · you send it</span>
       <strong>{title()}</strong>
-      <Show when={props.p.kind === 'message' && (props.p as Extract<Proposal, { kind: 'message' }>).text}>
+      <Show when={props.p.kind === 'message' && (props.p as Extract<Proposal, { kind: 'message' }>).draft_text}>
         {(text) => <div class="bubble quote">{text()}</div>}
       </Show>
       <Show when={props.p.kind !== 'message'}>

@@ -31,9 +31,19 @@ export const WEEK_MS = 7 * DAY_MS;
 
 // ---- what a question asks -----------------------------------------------------
 
+/** Literal content supplied separately from a question or provider's display prose. */
+export type DraftInput = { draft_text: string };
+
+/** A rules/provider result. No consumer may recover these fields from prose. */
+export type MessageProposal = {
+  recipient: string;
+  draft_text: string;
+  amount_hint: number | null;
+};
+
 /** An action the track may propose. It only prefills a composer; the owner sends. */
 export type Proposal =
-  | { kind: 'message'; peer: string; name: string; text: string; askedSats: number | null }
+  | ({ kind: 'message'; name: string } & MessageProposal)
   | { kind: 'pay'; peer: string; name: string; sats: number }
   | { kind: 'request'; peer: string; name: string; sats: number; note: string };
 
@@ -80,44 +90,6 @@ export function satsIn(text: string): number | null {
   return Number.isSafeInteger(n) && n > 0 ? n : null;
 }
 
-/** Quoted text, or what follows `saying` / `that says` / a colon. */
-function draftText(text: string): string {
-  const said = /(?:\b(?:saying|that says|to say)\s+|:\s*)([\s\S]{1,500})$/i.exec(text);
-  // An opening quote needs whitespace or the start of the text; an apostrophe
-  // within "I'm" is never an opener. Match each opening/closing pair together.
-  // Stop at the first closing delimiter with a text boundary, so later quoted
-  // instructions stay outside the draft and in-word apostrophes stay inside.
-  const quotation = /(?:^|\s)(?:"([\s\S]{1,500}?)"|“([\s\S]{1,500}?)”|'([\s\S]{1,500}?)')(?=\s|[.,!?;:]|$)/;
-  const quotationIn = (input: string) => {
-    const match = quotation.exec(input);
-    if (!match || match[3] === undefined) return match;
-    const start = match.index + match[0].indexOf("'") + 1;
-    let end = start + match[3].length;
-    // A word-final apostrophe can look like a closing single quote. If the
-    // next quote only closes (kids' toys are ready'), keep the apostrophe.
-    // Punctuation/end or a fresh quoted span ('hello' not 'bye') closes here.
-    while (/\s/.test(input[end + 1] ?? '')) {
-      let next = input.indexOf("'", end + 1);
-      while (next !== -1 && !/\s/.test(input[next - 1]) && !/[\s.,!?;:]/.test(input[next + 1] ?? '') && next + 1 < input.length) {
-        next = input.indexOf("'", next + 1); // Skip in-word contractions.
-      }
-      if (next === -1 || next - start > 500 || /\s/.test(input[next - 1])) break;
-      end = next;
-    }
-    match[3] = input.slice(start, end);
-    return match;
-  };
-  const quoted = quotationIn(text);
-  // A marker inside a quoted body belongs to that body, while quotes after
-  // an explicit marker belong to its complete suffix (including contractions).
-  if (quoted && (!said || quoted.index < said.index)) return (quoted[1] ?? quoted[2] ?? quoted[3]).trim();
-  const body = said?.[1].trim() ?? '';
-  // If the suffix starts with a quoted body, trailing prompt punctuation or
-  // instructions are outside it. Quotes embedded in an unquoted body stay put.
-  const wrapped = quotationIn(body);
-  return wrapped?.index === 0 ? (wrapped[1] ?? wrapped[2] ?? wrapped[3]).trim() : body;
-}
-
 const startOfDay = (ms: number) => {
   const d = new Date(ms);
   d.setHours(0, 0, 0, 0);
@@ -143,7 +115,7 @@ const TOPICS: [AiTopic, RegExp][] = [
 ];
 
 /** What a question asks for. Actions need exactly one named peer. */
-export function understand(text: string, peers: Peer[], nowMs: number): Intent {
+export function understand(text: string, peers: Peer[], nowMs: number, draft?: DraftInput): Intent {
   const t = text.toLowerCase();
   const amount = satsIn(text);
   const wantsMessage = /\b(draft|write|compose|message|text|tell|reply|ask)\b/.test(t) && !/\bmessages? (did i get|from)\b/.test(t);
@@ -165,9 +137,9 @@ export function understand(text: string, peers: Peer[], nowMs: number): Intent {
     const name = peer.label?.trim() || shortId(peer.node_id);
     if (what === 'pay') return { kind: 'act', proposal: { kind: 'pay', peer: id, name, sats: amount! } };
     if (what === 'request') {
-      return { kind: 'act', proposal: { kind: 'request', peer: id, name, sats: amount!, note: draftText(text) } };
+      return { kind: 'act', proposal: { kind: 'request', peer: id, name, sats: amount!, note: draft?.draft_text ?? '' } };
     }
-    return { kind: 'act', proposal: { kind: 'message', peer: id, name, text: draftText(text), askedSats: amount } };
+    return { kind: 'act', proposal: { kind: 'message', recipient: id, name, draft_text: draft?.draft_text ?? '', amount_hint: amount } };
   }
   for (const [topic, pattern] of TOPICS) {
     if (!pattern.test(t)) continue;
@@ -399,8 +371,8 @@ export function proposalText(p: Proposal): string {
   switch (p.kind) {
     case 'message':
       return (
-        `I opened a draft in ${p.name}’s composer. ${p.name} sets the price of a message, and the composer shows it before you send.` +
-        (p.askedSats !== null ? ` You asked for a ${p.askedSats}-sat message: the price is theirs, not a choice here.` : '') +
+        `I prepared a draft for ${p.name}’s composer. ${p.name} sets the price of a message, and the composer shows it before you send.` +
+        (p.amount_hint !== null ? ` You asked for a ${p.amount_hint}-sat message: the price is theirs, not a choice here.` : '') +
         ' Nothing is sent until you press Send and approve the spend.'
       );
     case 'pay':

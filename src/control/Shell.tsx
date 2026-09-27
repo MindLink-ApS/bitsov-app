@@ -134,15 +134,16 @@ export function ControlCenter(props: Props) {
   let prefillSeq = 0;
   /** The AI track's proposal: open that peer's composer with it filled in. Nothing is sent. */
   const openDraft = (p: Proposal) => {
-    const key = trackKey({ kind: 'peer', id: p.peer });
+    const recipient = p.kind === 'message' ? p.recipient : p.peer;
+    const key = trackKey({ kind: 'peer', id: recipient });
     setPrefill({
       seq: ++prefillSeq,
       key,
       mode: p.kind,
-      text: p.kind === 'message' ? p.text : p.kind === 'request' ? p.note : '',
+      text: p.kind === 'message' ? p.draft_text : p.kind === 'request' ? p.note : '',
       sats: p.kind === 'message' ? null : p.sats,
     });
-    setTrack({ kind: 'peer', id: p.peer });
+    setTrack({ kind: 'peer', id: recipient });
   };
 
   const ownId = () => props.ownId ?? overview()?.node_id ?? '';
