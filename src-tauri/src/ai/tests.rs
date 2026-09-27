@@ -74,6 +74,12 @@ fn leaves(value: &Value, out: &mut Vec<Value>) {
 #[test]
 fn every_topic_reads_live_through_the_broker_with_freshness() {
     let server = TestServer::start(MockNode::canonical(), TOKEN);
+    let as_of = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+        .to_string();
+    server.set_headers(&[("BitSov-Data-As-Of", &as_of)]);
     for topic in TOPICS {
         let TopicRead::Live {
             topic: got,
@@ -99,6 +105,23 @@ fn every_topic_reads_live_through_the_broker_with_freshness() {
         assert_eq!(request.method, "GET");
         assert_eq!(request.bearer.as_deref(), Some(TOKEN));
     }
+}
+
+#[test]
+fn without_node_as_of_a_live_read_is_unknown_not_fresh() {
+    let server = TestServer::start(MockNode::canonical(), TOKEN);
+    for topic in TOPICS {
+        let TopicRead::Live { freshness, .. } = read(&server, topic) else {
+            panic!("{topic:?} not live")
+        };
+        assert_eq!(freshness.state, "unknown", "{topic:?}");
+        assert_eq!(freshness.age_ms, None, "{topic:?}");
+    }
+    server.set_headers(&[("BitSov-Data-Stale", "1")]);
+    let TopicRead::Live { freshness, .. } = read(&server, Topic::Node) else {
+        panic!()
+    };
+    assert_eq!(freshness.state, "stale", "the node's own Stale: 1 wins without an as-of");
 }
 
 #[test]

@@ -109,40 +109,36 @@ pub struct Freshness {
     pub clock_skew: bool,
 }
 
+/// Worst case wins: any stale route (by age, or the node's own `Stale: 1`) is
+/// stale; otherwise any route without node as-of evidence leaves the answer
+/// unknown; only when every route has a known, in-bound age is it fresh.
 pub fn summarize(routes: &[RouteFreshness], now: Instant) -> Freshness {
-    let known: Vec<(&RouteFreshness, Duration)> = routes
-        .iter()
-        .filter_map(|route| route.age(now).map(|age| (route, age)))
-        .collect();
+    let ages: Vec<Option<Duration>> = routes.iter().map(|route| route.age(now)).collect();
     let stale_after_ms = routes
         .iter()
         .map(|route| crate::jarvis::broker::stale_after(route.route).as_millis() as u64)
         .min()
         .unwrap_or(crate::jarvis::broker::STALE_AFTER.as_millis() as u64);
-    if known.is_empty() {
-        return Freshness {
-            state: FreshnessState::Unknown.code(),
-            age_ms: None,
-            stale_after_ms,
-            node_as_of: false,
-            node_stale: false,
-            clock_skew: routes.iter().any(|route| route.clock_skew),
-        };
-    }
-    let stale = known
+    let stale = routes
         .iter()
-        .any(|(route, _)| route.state(now) == FreshnessState::Stale);
-    let age = known.iter().map(|(_, age)| *age).max().unwrap_or_default();
+        .any(|route| route.state(now) == FreshnessState::Stale);
+    let unknown = routes.is_empty() || ages.iter().any(Option::is_none);
+    let state = if stale {
+        FreshnessState::Stale
+    } else if unknown {
+        FreshnessState::Unknown
+    } else {
+        FreshnessState::Fresh
+    };
+    let age = ages.iter().flatten().max().copied();
     Freshness {
-        state: if stale {
-            FreshnessState::Stale.code()
-        } else {
-            FreshnessState::Fresh.code()
-        },
-        age_ms: Some(u64::try_from(age.as_millis()).unwrap_or(u64::MAX)),
+        state: state.code(),
+        age_ms: age
+            .filter(|_| state != FreshnessState::Unknown)
+            .map(|age| u64::try_from(age.as_millis()).unwrap_or(u64::MAX)),
         stale_after_ms,
-        node_as_of: known.iter().any(|(route, _)| route.as_of_ms.is_some()),
-        node_stale: known.iter().any(|(route, _)| route.node_stale),
+        node_as_of: routes.iter().any(|route| route.as_of_ms.is_some()),
+        node_stale: routes.iter().any(|route| route.node_stale),
         clock_skew: routes.iter().any(|route| route.clock_skew),
     }
 }
