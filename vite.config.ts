@@ -21,6 +21,81 @@ function assistantDevCsp(): Plugin {
   };
 }
 
+// UI-E2E (scripts/ui-e2e-two-node.sh) only: inject tests/e2e/driver.js into
+// the main page and relay one command at a time between it and the runner.
+// Dev server only (`apply: 'serve'`) and only with BITSOV_UI_E2E=1, so neither
+// `vite build` nor a normal `tauri dev` ever carries it.
+export function uiE2eEnabled(command: string, env: Record<string, string | undefined>): boolean {
+  return command === 'serve' && env.BITSOV_UI_E2E === '1';
+}
+
+function uiE2eDriver(): Plugin {
+  type Waiter = (body: string) => void;
+  const queue: { id: number; body: string }[] = [];
+  const pollers: Waiter[] = [];
+  const results = new Map<number, Waiter>();
+  let next = 1;
+  const read = (req: NodeJS.ReadableStream) =>
+    new Promise<string>((ok) => {
+      let data = '';
+      req.on('data', (c) => (data += c));
+      req.on('end', () => ok(data));
+    });
+  return {
+    name: 'ui-e2e-driver',
+    apply: (_config, { command }) => uiE2eEnabled(command, process.env),
+    transformIndexHtml(html, ctx) {
+      if (!(ctx.filename ?? '').endsWith('index.html')) return html;
+      return html.replace('</body>', '    <script type="module" src="/tests/e2e/driver.js"></script>\n  </body>');
+    },
+    configureServer(server) {
+      server.middlewares.use('/__e2e', async (req, res) => {
+        const url = new URL(req.url ?? '/', 'http://localhost');
+        const reply = (status: number, body = '') => {
+          res.statusCode = status;
+          res.setHeader('content-type', 'application/json');
+          res.end(body);
+        };
+        if (req.method !== 'POST') return reply(405);
+        if (url.pathname === '/cmd') {
+          // Driver long-poll: hand over the next command, or 204 after 20 s.
+          const item = queue.shift();
+          if (item) return reply(200, item.body);
+          const waiter: Waiter = (body) => reply(200, body);
+          pollers.push(waiter);
+          setTimeout(() => {
+            const i = pollers.indexOf(waiter);
+            if (i >= 0) { pollers.splice(i, 1); reply(204); }
+          }, 20000);
+          return;
+        }
+        if (url.pathname === '/result') {
+          const body = await read(req);
+          const id = JSON.parse(body).id as number;
+          results.get(id)?.(body);
+          results.delete(id);
+          return reply(204);
+        }
+        if (url.pathname === '/run') {
+          // Runner: one command in, the driver's result out (or 504).
+          const cmd = JSON.parse(await read(req));
+          const id = next++;
+          const body = JSON.stringify({ ...cmd, id });
+          const timeout = setTimeout(() => {
+            results.delete(id);
+            reply(504, JSON.stringify({ ok: false, error: 'driver did not answer' }));
+          }, (cmd.args?.timeoutMs ?? 15000) + 10000);
+          results.set(id, (out) => { clearTimeout(timeout); reply(200, out); });
+          const poller = pollers.shift();
+          if (poller) poller(body); else queue.push({ id, body });
+          return;
+        }
+        reply(404);
+      });
+    },
+  };
+}
+
 const root = dirname(fileURLToPath(import.meta.url));
 
 // Tauri CLI hooks always set TAURI_ENV_PLATFORM, and set TAURI_ENV_DEBUG=true
@@ -44,7 +119,7 @@ if (assistantIncluded(process.env)) {
 // Tauri desktop dev server. Fixed port so tauri.conf.json devUrl matches.
 // The assistant entry is not the window Tauri shows at startup.
 export default defineConfig({
-  plugins: [solid(), assistantDevCsp()],
+  plugins: [solid(), assistantDevCsp(), uiE2eDriver()],
   clearScreen: false,
   server: { port: 1420, strictPort: true },
   build: {
