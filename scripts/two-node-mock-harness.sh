@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# T1: two real node processes, fake Lightning, loopback-only macOS sandbox.
-# Prerequisites: macOS, git, Cargo, Python >=3.11 with cryptography installed.
+# T1: two mock-backed nodes bound to 127.0.0.1, with a sampled lsof socket guard.
+# Seatbelt is best-effort host-local defense; it does not enforce loopback-only.
+# Prerequisites: macOS, git, Cargo, lsof, Python >=3.11 with cryptography installed.
 # Usage: scripts/two-node-mock-harness.sh /absolute/path/to/genome [--allow-known-gaps]
 # The genome checkout must be clean; its actual SHA is recorded. Cargo is offline.
 # Exit 2: identified missing mock/capped-first-contact/file-staging capabilities.
@@ -27,11 +28,13 @@ APP_SHA=$(git -C "$SCRIPT_DIR" rev-parse HEAD)
 python3 -c 'import tomllib; from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey'
 command -v cargo >/dev/null
 command -v sandbox-exec >/dev/null
+[[ -x /usr/sbin/lsof ]] || { echo 'Native lsof is required.' >&2; exit 1; }
 EVIDENCE=$(mktemp -d /tmp/bitsov-t1-evidence.XXXXXX)
 echo "Evidence: $EVIDENCE"
 printf '%s\n' "$GENOME_SHA" > "$EVIDENCE/genome-sha.txt"
 printf '%s\n' "$APP_CONTRACT_SHA" > "$EVIDENCE/app-contract-sha.txt"
-# Every run owns a fresh private runtime/build root; existing caches are never used.
+# Runtime state stays private; Cargo uses the shared genome cache to save disk.
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/bitsov-shared-target}"
 WORK=$(mktemp -d /tmp/bitsov-t1-run.XXXXXX)
 printf '%s\n' "$WORK" > "$EVIDENCE/runtime-root.txt"
 known_gaps=0
@@ -69,12 +72,15 @@ if [[ ${#missing[@]} -gt 0 ]]; then
   known_gaps=1
   exit 2
 fi
-mkdir -m 700 "$WORK/target"
+# Dependencies share the Cargo cache, but rustc links directly into this private
+# run root. Copying debug/konsensus after cargo exits races other worktree builds.
 # Capture and redact compiler output before it can enter the evidence directory.
-CARGO_TARGET_DIR="$WORK/target" cargo build --locked --offline \
-  --manifest-path "$GENOME/Cargo.toml" -p konsensus-node --bin konsensus 2>&1 |
+cargo rustc --locked --offline \
+  --manifest-path "$GENOME/Cargo.toml" -p konsensus-node --bin konsensus \
+  -- --emit="link=$WORK/konsensus" 2>&1 |
   python3 "$SCRIPT_DIR/two_node_evidence.py" --build-log "$EVIDENCE/build.log"
-cat > "$EVIDENCE/loopback.sb" <<'SANDBOX'
+[[ -x "$WORK/konsensus" ]] || { echo 'Missing private run executable.' >&2; exit 1; }
+cat > "$EVIDENCE/host-local.sb" <<'SANDBOX'
 (version 1)
 (allow default)
 (deny network*)
@@ -84,7 +90,8 @@ cat > "$EVIDENCE/loopback.sb" <<'SANDBOX'
 (allow network* (local unix-socket) (remote unix-socket))
 SANDBOX
 # The entire runtime (including children and HTTP probes) inherits this policy.
-# No DNS or non-loopback socket is permitted, even for node background jobs.
+# Seatbelt's localhost includes this Mac's LAN addresses. Listener configuration
+# and lsof observations provide the stated loopback checks, not this OS policy.
 cat > "$WORK/runner.py" <<'PY'
 import base64
 import errno
@@ -106,6 +113,7 @@ import threading
 import time
 import tomllib
 from two_node_evidence import Evidence, ConsoleCapture
+from two_node_network import NodeSocketGuard
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -114,9 +122,10 @@ E = Path(sys.argv[1])
 WORK = Path(sys.argv[2])
 GENOME_SHA = sys.argv[3]
 APP_SHA = sys.argv[4]
-BIN = str(WORK / 'target/debug/konsensus')
+BIN = str(WORK / 'konsensus')
 ROOTS = {n: WORK / n for n in ('a', 'b')}
 evidence = Evidence(E)
+network_guard = NodeSocketGuard(evidence)
 grants = {}
 capture_errors = []
 owned = []
@@ -137,6 +146,7 @@ closed_mesh_e2e = False
 strict_e2e = False
 
 def check(name, condition, detail=None):
+    network_guard.require_clean()
     detail = evidence.clean(detail)
     checks.append({'name': name, 'pass': bool(condition), 'detail': detail})
     print(('PASS ' if condition else 'FAIL ') + name, flush=True)
@@ -151,6 +161,7 @@ def run(*args, input=None):
     return result.stdout
 
 def req(n, method, path, body=None, token=None, expect=None, drop=False):
+    network_guard.require_clean()
     global seq
     seq += 1
     raw = None if body is None else json.dumps(body, separators=(',', ':'))
@@ -295,12 +306,15 @@ def start(n):
     reader = threading.Thread(target=capture, daemon=True)
     reader.start()
     readers.append(reader)
+    network_guard.add(n, nodes[n])
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
         if nodes[n].poll() is not None:
             raise RuntimeError(f'{n} exited; see {logname}')
         try:
             if req(n, 'GET', '/health')[0] == 200:
+                network_guard.sample('ready')
+                network_guard.require_clean()
                 return
         except OSError:
             pass
@@ -308,6 +322,12 @@ def start(n):
     raise TimeoutError(f'{n} did not start')
 
 def stop():
+    # Observe while PIDs still own their sockets, including the final shutdown.
+    # Violations stay latched but must never prevent process/data cleanup.
+    try:
+        network_guard.sample('before-stop')
+    except Exception as error:
+        network_guard.fail('monitor', None, 'final inspection failed', str(error))
     for process in nodes.values():
         if process.poll() is None:
             process.send_signal(signal.SIGINT)
@@ -318,6 +338,7 @@ def stop():
             os.killpg(process.pid, signal.SIGKILL)
             process.wait(timeout=5)
         evidence.write('processes.jsonl', {'phase': phase, 'node': n, 'pid': process.pid, 'exit': process.returncode}, append=True)
+        network_guard.remove(n)
     nodes.clear()
     for reader in readers:
         reader.join(timeout=3)
@@ -429,7 +450,7 @@ try:
     with socket.socket() as s:
         s.settimeout(.2)
         denied = s.connect_ex(('192.0.2.1', 443))
-    check('OS denies non-loopback egress', denied in (errno.EPERM, errno.EACCES), denied)
+    check('Seatbelt denies documentation-address egress (best effort)', denied in (errno.EPERM, errno.EACCES), denied)
     # Never delete/adopt pre-existing dirs, including symlinks. mkdir is atomic.
     for root in ROOTS.values():
         check('data directory absent: ' + str(root), not os.path.lexists(root))
@@ -584,6 +605,7 @@ finally:
     for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(sig, signal.SIG_IGN)
     stop()
+    network_guard.close()
     recovery = [p.name for p in E.glob('*-*.log')
                 if 'decryption failed, removing stale session' in p.read_text()]
     if recovery:
@@ -599,7 +621,8 @@ finally:
                'closed_mesh_e2e': closed_mesh_e2e, 'startup_recovery_logs': recovery,
                'app_contract': '587d078bc93fb869c0f801f7bd02d91ec99f227f',
                'app': APP_SHA, 'genome': GENOME_SHA}
-    if capture_errors:
+    summary['network_observation'] = network_guard.report()
+    if capture_errors or summary['network_observation']['failures']:
         exit_code = 1
     summary['capture_errors'] = capture_errors
     summary['exit_code'] = exit_code
@@ -616,7 +639,7 @@ if gaps:
     print('See summary.json for real-Lightning and UI coverage limits.', flush=True)
 sys.exit(exit_code)
 PY
-PYTHONPATH="$SCRIPT_DIR" sandbox-exec -f "$EVIDENCE/loopback.sb" python3 "$WORK/runner.py" "$EVIDENCE" "$WORK" "$GENOME_SHA" "$APP_SHA" &
+PYTHONPATH="$SCRIPT_DIR" sandbox-exec -f "$EVIDENCE/host-local.sb" python3 "$WORK/runner.py" "$EVIDENCE" "$WORK" "$GENOME_SHA" "$APP_SHA" &
 runner_pid=$!
 wait "$runner_pid"
 runner_pid=''
