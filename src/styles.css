@@ -207,7 +207,7 @@ select { font: inherit; font-size: var(--t-sm); background: var(--sunk); color: 
 .track > .spend .link { align-self: flex-start; }
 /* The door card's local-address OK: box and words together, left-aligned. */
 .door-allow { display: flex; align-items: center; justify-content: flex-start; gap: var(--s-2); font-size: var(--t-sm); cursor: pointer; }
-.door-allow input { width: auto; flex: none; margin: 0; }
+.door-allow input { width: auto; flex: none; margin: 0; padding: 0; accent-color: var(--accent); }
 .track > .spend .spend-line { display: block; }
 .track > .spend .spend-line .dot { display: inline-block; vertical-align: middle; margin-right: var(--s-1); }
 .spend[data-spend='open'] .spend-line { color: var(--ink); }
