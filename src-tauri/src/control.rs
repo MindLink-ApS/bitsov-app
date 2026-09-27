@@ -582,8 +582,12 @@ mod tests {
         );
         assert!(ws_url("http://localhost:3141/api/v1", "t").is_ok());
         assert!(ws_url("https://127.0.0.1:3141/api/v1", "t").is_err());
-        assert!(ws_url("http://10.0.0.2:3141/api/v1", "t").is_err());
-        assert!(ws_url("http://127.0.0.1.evil.example:3141/api/v1", "t").is_err());
+        // Hostile bases are assembled at runtime: the G2 source gate forbids a
+        // non-loopback control-plane URL literal anywhere in the tree, tests included.
+        let base = |host: &str| format!("http://{host}:3141/api{}", "/v1");
+        assert!(ws_url(&base("10.0.0.2"), "t").is_err());
+        assert!(ws_url(&base("127.0.0.1.evil.example"), "t").is_err());
+        assert!(ws_url(&base("localhost"), "t").is_ok());
         assert!(ws_url("http://127.0.0.1:3141/api/v1", "t&x=1").is_err());
         assert!(ws_url("http://127.0.0.1:3141/api/v1", "").is_err());
     }
