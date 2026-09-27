@@ -4,6 +4,8 @@ import { qrSvg } from '../qr';
 import type { Proposal } from './ai';
 import { AiTrack, createAiSession } from './AiTrack';
 import { clock, day, sats, satsWhole, satUnit, shortId, uptime } from './format';
+import { Organism } from './BodyPanel';
+import { homeostasis, membraneLive, membraneRefused, metabolism, nucleus, type MembraneEntry } from './body';
 import type { Source } from './source';
 import {
   ADMISSION_MAX_MSAT,
@@ -51,7 +53,7 @@ import type {
 } from './types';
 
 /** How often each panel re-reads while the shell is open. Peers and balance have no live event. */
-const REFRESH_MS = { overview: 10_000, peers: 15_000, wallet: 20_000, rooms: 30_000, clock: 5_000, spend: 3_000 } as const;
+const REFRESH_MS = { overview: 10_000, peers: 15_000, wallet: 20_000, rooms: 30_000, door: 30_000, clock: 5_000, spend: 3_000 } as const;
 
 type Props = {
   source: Source;
@@ -125,7 +127,13 @@ export function ControlCenter(props: Props) {
   const [artifacts, setArtifacts] = createStore<Record<string, Artifact[]>>({});
   const [errors, setErrors] = createStore<Record<string, string | undefined>>({});
   const [contextOpen, setContextOpen] = createSignal(false);
-  const [tab, setTab] = createSignal<'node' | 'wallet' | 'budget'>('node');
+  const [tab, setTab] = createSignal<'body' | 'node' | 'wallet' | 'budget'>('body');
+  // Organism view (O1): readings the organs are drawn from, each with its age.
+  const [openedAt, setOpenedAt] = createSignal(Date.now());
+  const [membrane, setMembrane] = createSignal<MembraneEntry[]>([]);
+  const [energyAt, setEnergyAt] = createSignal<number | null>(null);
+  const [budgetReadAt, setBudgetReadAt] = createSignal<number | null>(null);
+  const [door, setDoor] = createSignal<{ msat: number; read_at: number } | null>(null);
   const aiSession = createAiSession();
   const [prefill, setPrefill] = createSignal<Prefill | null>(null);
   let prefillSeq = 0;
@@ -159,13 +167,20 @@ export function ControlCenter(props: Props) {
   const loadRooms = () => attempt('rooms', () => props.source.rooms(), setRooms);
   const loadWallet = () => attempt('wallet', () => props.source.wallet(), setWallet);
   const loadSpend = () => attempt('spend', () => props.source.spendStatus(), setSpend);
-  const loadBudget = () => attempt('budget', () => props.source.budgetStatus(), setBudget);
+  const loadBudget = () =>
+    attempt('budget', () => props.source.budgetStatus(), (b) => {
+      setBudget(b);
+      setBudgetReadAt(Date.now());
+    });
+  // Our own price with no peer: what a stranger pays at this node's door.
+  const loadDoor = () => attempt('door', () => props.source.priceQuote(), (q) => setDoor({ msat: q.own_msat, read_at: Date.now() }));
   const loadThread = (t: TrackRef) => {
     if (t.kind !== 'peer' && t.kind !== 'room') return;
     const key = trackKey(t);
-    void attempt('thread', () => props.source.messages(t.id), (page) =>
-      setThreads('t', key, (old) => mergeMessages(old ?? [], page)),
-    );
+    void attempt('thread', () => props.source.messages(t.id), (page) => {
+      setThreads('t', key, (old) => mergeMessages(old ?? [], page));
+      setEnergyAt(Date.now());
+    });
   };
 
   const clockTimer = setInterval(() => setNow(Date.now()), REFRESH_MS.clock);
@@ -189,7 +204,9 @@ export function ControlCenter(props: Props) {
         stop();
         if (!active) return;
         const mine = generation;
+        setOpenedAt(Date.now());
         void loadOverview();
+        void loadDoor();
         void loadPeers().then(() => {
           if (!track()) {
             const first = peers().find((p) => p.connected) ?? peers()[0];
@@ -204,6 +221,7 @@ export function ControlCenter(props: Props) {
           setInterval(() => void loadPeers(), REFRESH_MS.peers),
           setInterval(() => void loadWallet(), REFRESH_MS.wallet),
           setInterval(() => void loadRooms(), REFRESH_MS.rooms),
+          setInterval(() => void loadDoor(), REFRESH_MS.door),
           // Cheap: the host asks the node only while an elevation request is pending,
           // and a budget grant lands there first.
           setInterval(() => void loadSpend().then(loadBudget), REFRESH_MS.spend),
@@ -216,6 +234,12 @@ export function ControlCenter(props: Props) {
               if (event.state === 'open' && track()) loadThread(track()!);
               return;
             }
+            if (event.type === 'message' || event.type === 'delivery') {
+              setMembrane((log) =>
+                membraneLive(log, event, { ownId: ownId(), contacts: new Set(peerById().keys()), threads: threads.t, nowMs: Date.now() }),
+              );
+            }
+            if (event.type === 'message') setEnergyAt(Date.now());
             if (event.type === 'delivery') {
               const next = applyDelivery(deliveries, event);
               if (next !== deliveries) setDeliveries(event.message_id, next[event.message_id]);
@@ -294,6 +318,8 @@ export function ControlCenter(props: Props) {
   };
   /** A failed action that is not an approval or budget question stays in the track as a record. */
   const recordFailure = (t: TrackRef, action: string, outcome: Outcome<unknown>) => {
+    // A send that did not cross (price, setpoint) is also a membrane reading.
+    if (!outcome.ok) setMembrane((log) => membraneRefused(log, outcome.error, trackKey(t), Date.now()));
     if (!outcome.ok && !needsApproval(outcome.error) && !isBudgetStop(outcome.error)) {
       addArtifact(t, { type: 'failed', action: outcome.error.code === 'spend_unknown' ? 'Outcome unknown / pending' : action, error: outcome.error });
     }
@@ -413,6 +439,10 @@ export function ControlCenter(props: Props) {
     return t.kind === 'ai' ? 'AI' : 'Start something';
   };
   const nameOf = (id: string) => (id.toLowerCase() === ownId().toLowerCase() ? 'You' : peerName(peerById().get(id.toLowerCase()), id));
+  const trackKeyName = (key: string) => {
+    const [kind, id] = key.split(':');
+    return kind === 'room' ? rooms().find((r) => r.id.toLowerCase() === id)?.name ?? 'Room' : nameOf(id ?? key);
+  };
 
   return (
     <div class="cc" classList={{ 'no-context': !props.active }} data-mode={props.source.mode}>
@@ -426,7 +456,7 @@ export function ControlCenter(props: Props) {
         openKey={openKey()}
         onOpen={setTrack}
         onPill={() => {
-          setTab('node');
+          setTab('body');
           setContextOpen(true);
         }}
       />
@@ -491,16 +521,38 @@ export function ControlCenter(props: Props) {
           </Show>
         </section>
 
-        <aside class="context" classList={{ open: contextOpen() }} aria-label="Node and wallet">
+        <aside class="context" classList={{ open: contextOpen() }} aria-label="Body, node and wallet">
           <div class="row">
             <div class="tabs" role="tablist" style={{ flex: 1 }}>
-              <button role="tab" aria-selected={tab() === 'node'} onClick={() => setTab('node')}>Node</button>
-              <button role="tab" aria-selected={tab() === 'wallet'} onClick={() => setTab('wallet')}>Wallet</button>
+              <button role="tab" aria-selected={tab() === 'body'} data-tab="body" onClick={() => setTab('body')}>Body</button>
+              <button role="tab" aria-selected={tab() === 'node'} data-tab="node" onClick={() => setTab('node')}>Node</button>
+              <button role="tab" aria-selected={tab() === 'wallet'} data-tab="wallet" onClick={() => setTab('wallet')}>Wallet</button>
               <button role="tab" aria-selected={tab() === 'budget'} data-tab="budget" onClick={() => setTab('budget')}>Budget</button>
             </div>
             <button class="quiet context-toggle" onClick={() => setContextOpen(false)} aria-label="Close panel">Close</button>
           </div>
           <Switch>
+            <Match when={tab() === 'body'}>
+              <Organism
+                sample={props.source.mode === 'sample'}
+                now={now()}
+                openedAt={openedAt()}
+                link={link()}
+                down={!!props.error || (overview() !== null && freshness(overview()!.read_at, now()).stale)}
+                metabolism={metabolism(threads.t, ownId(), now(), paid)}
+                energyAt={energyAt()}
+                membrane={membrane()}
+                door={door()}
+                homeostasis={homeostasis(budget())}
+                budgetReadAt={budgetReadAt()}
+                nucleus={nucleus(props.ownId, overview())}
+                nameOfTrack={trackKeyName}
+                nameOf={nameOf}
+                onSetpoints={() => setTab('budget')}
+                onPauseAll={() => void actions.pauseAll()}
+                onResume={() => void actions.resume()}
+              />
+            </Match>
             <Match when={tab() === 'node'}>
               <NodePanel overview={overview()} link={link()} peers={peers()} now={now()} error={errors.overview ?? errors.peers} />
             </Match>
@@ -626,7 +678,7 @@ function TrackHead(props: { title: string; sub?: JSX.Element; onContext: () => v
     <header class="track-head">
       <h1>{props.title}</h1>
       <div class="sub">{props.sub}</div>
-      <button class="quiet context-toggle" onClick={() => props.onContext()}>Node and wallet</button>
+      <button class="quiet context-toggle" onClick={() => props.onContext()}>Body</button>
     </header>
   );
 }

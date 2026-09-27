@@ -82,6 +82,8 @@ const THREADS: Record<string, Message[]> = {
 
 const LIVE_LINES: [string, string][] = [
   [hex('a'), 'Block 860,124 just landed. Fees are calm.'],
+  // Not a contact: a stranger who paid the door price. Admitted, never added to peers.
+  [hex('e'), 'Hi, saw your talk in Mexico. Paid your door to say thanks.'],
   [hex('b'), 'Heading out, my node stays up.'],
   [hex('a'), 'Did the channel rebalance go through on your side?'],
 ];

@@ -157,7 +157,7 @@ describe('control center shell', () => {
     expect(mount.querySelector('[data-room-blocked]')?.textContent).toContain('Not every member is a connected peer');
 
     // Wallet: the one combined balance, never split into invented figures.
-    click('[role=tab]:nth-child(2)');
+    click('[data-tab="wallet"]');
     await vi.waitFor(() => expect(mount.querySelector('[data-balance]')?.textContent).toContain('52,500'));
     expect(mount.querySelector('[data-panel="wallet"]')?.textContent).toContain('one figure');
 
@@ -192,7 +192,7 @@ describe('control center shell', () => {
     const replayAt = calls.findIndex((c) => c.cmd === 'live_link');
     expect(listenAt).toBeGreaterThanOrEqual(0);
     expect(replayAt).toBeGreaterThan(listenAt);
-    click('[role=tab]:nth-child(1)');
+    click('[data-tab="node"]');
     await vi.waitFor(() => expect(mount.querySelector('[data-link]')?.getAttribute('data-link')).toBe('open'));
   });
 
