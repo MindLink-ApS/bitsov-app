@@ -5,10 +5,11 @@
 #
 # The genome checkout is what you want to test (for example main with open PRs
 # merged in a /tmp worktree). This script builds `konsensus` from it into
-# /tmp/uie2e-target, then runs scripts/ui-e2e/runner.py, which:
-#   - creates /tmp/uie2e-node-a and /tmp/uie2e-node-b (refuses if they exist),
+# the caller's CARGO_TARGET_DIR cache, then runs scripts/ui-e2e/runner.py, which:
+#   - creates node-a/node-b inside a private /tmp/uie2e-run.* directory
+#     (refuses if either exists),
 #     each with a fresh identity, mock chain and a shared mock Lightning ledger;
-#   - starts node B (price_open stranger) under a loopback-only sandbox;
+#   - starts node B (price_open stranger) with loopback binds and lsof observations;
 #   - starts THIS app through the #44 dev-node path (scripts/dev-node-from-main.sh)
 #     on node A's dir, with --owner-control so the owner can grant from A's terminal;
 #   - drives the real window with tests/e2e/driver.js (injected by the dev server
@@ -34,22 +35,53 @@ umask 077
 GENOME=$(cd "$1" && pwd -P)
 APP=$(cd "$(dirname "$0")/.." && pwd -P)
 command -v cargo >/dev/null && command -v sandbox-exec >/dev/null && command -v npx >/dev/null
+[[ -x /usr/sbin/lsof ]] || { echo "Native lsof required." >&2; exit 1; }
 python3 -c 'import tomllib' 2>/dev/null || { echo 'Python 3.11+ required.' >&2; exit 1; }
 
 EVIDENCE=$(mktemp -d /tmp/uie2e-evidence.XXXXXX)
 echo "Evidence: $EVIDENCE"
-git -C "$GENOME" rev-parse HEAD > "$EVIDENCE/genome-head.txt"
-git -C "$GENOME" log --oneline -12 > "$EVIDENCE/genome-log.txt"
-git -C "$APP" rev-parse HEAD > "$EVIDENCE/app-head.txt"
-git -C "$APP" log --oneline -12 > "$EVIDENCE/app-log.txt"
 
-# Dedicated target dir; never run a caller-supplied binary.
-CARGO_TARGET_DIR=/tmp/uie2e-target cargo build --locked --offline \
+# Cache dependencies, but link into a private runtime directory. Another build
+# must never replace the executable this invocation launches.
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/bitsov-target-l1}"
+WORK=''
+runner_pid=''
+finish() {
+  rc=$?
+  trap - EXIT HUP INT TERM
+  if [[ -n "$runner_pid" ]] && kill -0 "$runner_pid" 2>/dev/null; then
+    kill -TERM "$runner_pid" 2>/dev/null || true
+    wait "$runner_pid" || rc=1
+  fi
+  if ! python3 "$APP/scripts/ui-e2e/scan.py" "$EVIDENCE"; then
+    echo 'FAIL: unsafe evidence removed by final secret scan.' >&2
+    rc=1
+  fi
+  if [[ -L "$WORK" ]]; then
+    echo 'FAIL: refusing cleanup of replaced runtime symlink.' >&2
+    rc=1
+  elif [[ -n "$WORK" ]]; then
+    rm -rf -- "$WORK" || rc=1
+  fi
+  exit "$rc"
+}
+trap finish EXIT
+trap 'exit 1' HUP INT TERM
+WORK=$(mktemp -d /tmp/uie2e-run.XXXXXX)
+git -C "$GENOME" rev-parse HEAD > "$EVIDENCE/genome-head.txt"
+git -C "$APP" rev-parse HEAD > "$EVIDENCE/app-head.txt"
+git -C "$GENOME" log --oneline -12 | python3 "$APP/scripts/two_node_evidence.py" --build-log "$EVIDENCE/genome-log.txt"
+git -C "$APP" log --oneline -12 | python3 "$APP/scripts/two_node_evidence.py" --build-log "$EVIDENCE/app-log.txt"
+cargo rustc --locked --offline \
   --manifest-path "$GENOME/Cargo.toml" -p konsensus-node --bin konsensus \
-  > "$EVIDENCE/node-build.log" 2>&1
-BIN=/tmp/uie2e-target/debug/konsensus
+  -- --emit="link=$WORK/konsensus" 2>&1 |
+  python3 "$APP/scripts/two_node_evidence.py" --build-log "$EVIDENCE/node-build.log"
+BIN="$WORK/konsensus"
+[[ -x "$BIN" ]] || { echo 'Missing private executable.' >&2; exit 1; }
 shasum -a 256 "$BIN" > "$EVIDENCE/node-sha256.txt"
 
+# Seatbelt localhost includes this Mac's LAN addresses. The runner checks actual
+# node sockets with lsof; snapshots detect observed violations, not every packet.
 cat > "$EVIDENCE/loopback.sb" <<'SANDBOX'
 (version 1)
 (allow default)
@@ -61,7 +93,12 @@ cat > "$EVIDENCE/loopback.sb" <<'SANDBOX'
 SANDBOX
 
 status=0
-PYTHONDONTWRITEBYTECODE=1 python3 "$APP/scripts/ui-e2e/runner.py" "$EVIDENCE" "$APP" "$BIN" || status=$?
+PYTHONDONTWRITEBYTECODE=1 python3 "$APP/scripts/ui-e2e/runner.py" "$EVIDENCE" "$APP" "$BIN" &
+runner_pid=$!
+wait "$runner_pid" || status=$?
+runner_pid=''
+# Render only evidence that has already passed the credential scan.
+python3 "$APP/scripts/two_node_evidence.py" --scan "$EVIDENCE" || exit 1
 
 # Screenshots + walk-through video from the snapshots (best effort).
 if [[ -z ${PLAYWRIGHT_MODULE:-} ]]; then

@@ -9,7 +9,7 @@ import App from '../src/App';
 const OWN = '1'.repeat(64);
 const REASON = 'Funding address not available — this endpoint requires an embedded LDK backend.';
 
-function stubHost() {
+function stubHost(address?: string) {
   const replies: Record<string, () => unknown> = {
     node_status: () => ({ ready: true, node_id: OWN, error: null }),
     pairing_status: () => ({
@@ -35,6 +35,7 @@ function stubHost() {
   vi.stubGlobal('__TAURI_INTERNALS__', {
     transformCallback: () => 1,
     invoke: (cmd: string) => {
+      if (cmd === 'funding_address' && address) return Promise.resolve({ address });
       if (cmd === 'funding_address') return Promise.reject(`/payments/funding-address: HTTP 400: ${REASON}`);
       const reply = replies[cmd];
       return reply ? Promise.resolve(reply()) : Promise.reject(new Error(`unexpected ${cmd}`));
@@ -68,4 +69,23 @@ describe('deposit panel without a deposit address', () => {
     await vi.waitFor(() => expect(mount.querySelector('[data-deposit-error]')?.textContent).toContain('embedded LDK'));
     expect(mount.textContent).not.toContain('Waiting for the node to produce a deposit address');
   });
+
+  it('renders the address and a QR when the funding fixture supplies one', async () => {
+    const address = 'bcrt1qfixture000000000000000000000000000000000';
+    stubHost(address);
+    mount = document.createElement('div');
+    document.body.appendChild(mount);
+    dispose = render(() => <App />, mount);
+    await vi.waitFor(() =>
+      expect([...mount.querySelectorAll('button')].some((b) => b.textContent?.includes('I understand'))).toBe(true),
+    );
+    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
+    const walletTab = () => [...mount.querySelectorAll<HTMLElement>('[role="tab"]')].find((t) => t.textContent === 'Wallet');
+    await vi.waitFor(() => expect(walletTab()).toBeDefined());
+    walletTab()!.click();
+    await vi.waitFor(() => expect(mount.querySelector('code.address')?.textContent).toBe(address));
+    expect(mount.querySelector('svg.qr[aria-label="Deposit address as a QR code"]')).not.toBeNull();
+    expect(mount.querySelector('[data-deposit-error]')).toBeNull();
+  });
+
 });
