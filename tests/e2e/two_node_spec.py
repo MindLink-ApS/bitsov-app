@@ -306,7 +306,18 @@ def run(r):
         opened = r.ui_try('click', selector=f'[data-track="room:{room}"]', timeoutMs=30000)
         s.check('room appears in the rail without a restart', opened)
         if opened:
-            s.check('room includes the fee for each paid member', int(r.ui('attrs', selector='[data-cost-msat]', names=['data-cost-msat'])[0]['data-cost-msat']) == 7000 and 'up to 5 sats network fee' in r.text('[data-composer]'))
+            # The node's demand price can change during the preceding sends.
+            # Derive this one-member quote from live pricing, not a fixed 2 sats.
+            principal = r.get('a', '/payments/price/0')['price_msat']
+            for table in r.get('a', '/pricing/peers'):
+                if table.get('peer_id') == b and not table.get('stale', True):
+                    principal = table.get('prices', {}).get('communication', principal)
+            principal = max(1000, principal)
+            fee = min(max(5000, principal // 100), 10000)
+            shown = int(r.ui('attrs', selector='[data-cost-msat]', names=['data-cost-msat'])[0]['data-cost-msat'])
+            s.check('room includes the fee for each paid member', shown == principal + fee and
+                    f'up to {fee // 1000} sats network fee' in r.text('[data-composer]'),
+                    {'principal_msat': principal, 'max_routing_fee_msat': fee, 'shown_msat': shown})
             s.snap('room-open')
             msg = f'UI-E2E room A+B {int(time.time())}'
             send_message(msg)
