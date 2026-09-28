@@ -613,7 +613,7 @@ describe('invisible payments in the composer and the context panel', () => {
     expect(host.used('sponsor_approve')).toHaveLength(0);
   });
 
-  it.each(['paying', 'unknown'])('review #50 probe: blocks cancellation and retains tracking while %s', async (state) => {
+  it.each(['paying', 'unknown'])('review #50 adapted regression: disabled cancel preserves unresolved tracking while %s', async (state) => {
     let funded = false;
     const host = stubHost(open([]), {
       spend_status: () => openSpend,
@@ -633,14 +633,25 @@ describe('invisible payments in the composer and the context panel', () => {
     type('[data-starter-their-code]', '482913');
     $<HTMLButtonElement>('[data-starter-approve]')!.click();
     await vi.waitFor(() => expect(text(`[data-starter-gift="${state}"]`)).toContain('do not send again'));
-    $<HTMLButtonElement>('[data-starter-cancel]')!.click();
-    expect.soft($<HTMLButtonElement>('[data-starter-cancel]')!.disabled).toBe(true);
-    expect.soft(host.used('sponsor_cancel')).toHaveLength(0);
-    expect.soft($(`[data-starter-gift="${state}"]`)).not.toBeNull();
-    expect.soft($<HTMLTextAreaElement>('[data-starter-request-text]')!.disabled).toBe(true);
-    expect.soft($('[data-starter-candidate]')).not.toBeNull();
+    const cancelButton = $<HTMLButtonElement>('[data-starter-cancel]')!;
+    expect(cancelButton.disabled).toBe(true);
+    // An unresolved payment cannot be cancelled, so clicking must not request a
+    // withdrawal or depend on a sponsor_kit_dispatched refusal from the host.
+    cancelButton.click();
+    expect(host.used('sponsor_cancel')).toHaveLength(0);
+    expect(text('[data-starter-review-error]')).toBe('');
+    expect(text(`[data-starter-gift="${state}"]`)).toContain('do not send again');
+    expect($('[data-starter-candidate]')?.getAttribute('data-starter-candidate')).toBe(candidate.newcomer);
+    expect($<HTMLTextAreaElement>('[data-starter-request-text]')!.disabled).toBe(true);
+    expect($<HTMLTextAreaElement>('[data-starter-request-text]')!.value).toBe('bitsov://sponsor-request#REQ');
+    expect($<HTMLButtonElement>('[data-starter-review] button[type="submit"]')!.disabled).toBe(true);
+    expect($<HTMLInputElement>('[data-starter-their-code]')!.disabled).toBe(true);
+    expect($<HTMLInputElement>('[data-starter-their-code]')!.value).toBe('482913');
+    expect($<HTMLButtonElement>('[data-starter-approve]')!.disabled).toBe(true);
     funded = true;
     await vi.waitFor(() => expect($('[data-starter-gift="funded"]')).not.toBeNull(), { timeout: 4500 });
+    expect(text('[data-starter-gift="funded"]')).toContain('It is theirs now');
+    expect(host.used('sponsor_cancel')).toHaveLength(0);
     expect(host.used('sponsor_approve')).toHaveLength(0);
   });
 
