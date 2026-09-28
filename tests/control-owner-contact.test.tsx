@@ -26,7 +26,7 @@ async function start(beforeSend?: (source: ReturnType<typeof sampleSource>, appr
   const approval: OwnerContactApproval = {
     id: 'request-one', ready: false, expires_at_ms: Date.now() + 60000,
     request: { client_id: 'c1', grant_op_id: 'ab12', recipient: A, max_total_msat: 4000, contact_budget_msat: 50000 },
-    owner_command: 'owner command with recipient and cap',
+    owner_command: `konsensus approve first-contact --client 'c1' --op 'ab12' --to '${A}' --max-msat '4000' --contact-budget-msat '50000'`,
   };
   source.firstContactRequest = vi.fn(async () => approval);
   source.firstContactStatus = vi.fn(async () => approval);

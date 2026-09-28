@@ -1735,7 +1735,7 @@ fn do_sponsor_owner_approval(state: &NodeState, candidate: &bitsov_app::sponsor:
     if budget_paused(state)? {
         return Err(ActionError::new("budget_paused", "Payments are paused. Resume them to prepare the gift."));
     }
-    bitsov_app::sponsor::owner_approval(&state.api_base, candidate, code, now_unix().max(0) as u64)
+    bitsov_app::sponsor::owner_approval(candidate, code, now_unix().max(0) as u64)
         .map_err(ActionError::invalid)
 }
 
@@ -1870,7 +1870,7 @@ async fn do_first_contact_request(state: &NodeState, recipient: &str, max_msat: 
     }
     check_auth(state, auth)?;
     if approval_fence(state) != fence { return Err(fence_broken()); }
-    let pending = owner_contact::Pending::new(&state.api_base, owner_contact::Request {
+    let pending = owner_contact::Pending::new(owner_contact::Request {
         client_id: grant.client_id.clone(), grant_op_id: grant.op_id.clone(),
         recipient, max_total_msat: max_msat, contact_budget_msat,
     }, fence, now_ms(), &grant)?;
@@ -3812,9 +3812,11 @@ mod control_read_tests {
     const ROOM: &str = "0f8e2b7a-1c3d-4e5f-8a9b-0c1d2e3f4a5b";
     const TOKEN: &str = "test.read.receive";
 
+    type ReadRequests = Arc<Mutex<Vec<(String, Option<String>)>>>;
+
     struct FakeNode {
         state: NodeState,
-        seen: Arc<Mutex<Vec<(String, Option<String>)>>>,
+        seen: ReadRequests,
     }
 
     fn route(target: &str) -> (u16, String) {
@@ -5013,7 +5015,8 @@ mod control_act_tests {
         g1_approved(&node, 500_000).await;
         let view = owner_approves_contact(&node, C, 5000, 50_000).await;
         assert_eq!(view.request.contact_budget_msat, 50_000);
-        assert!(view.owner_command.contains("BITSOV_OWNER_TOKEN"));
+        assert!(view.owner_command.contains("konsensus approve"));
+        assert!(!view.owner_command.contains("BITSOV_OWNER_TOKEN"));
         assert!(!view.owner_command.contains("tok.spend"));
         do_message_send_with(&node.state, C, false, "hello stranger", 5000, None, Some(50_000))
             .await.unwrap();
@@ -5280,7 +5283,8 @@ mod control_act_tests {
         let (node, _dir) = paired_fake(sponsor_routes(happy()));
         let c = gift_candidate();
         let view = do_sponsor_owner_approval(&node.state, &c, "123456").unwrap();
-        assert!(view.owner_command.contains("BITSOV_OWNER_TOKEN"));
+        assert!(view.owner_command.contains("konsensus approve"));
+        assert!(!view.owner_command.contains("BITSOV_OWNER_TOKEN"));
         assert!(!view.owner_command.contains("tok.1"));
         assert!(node.targets().is_empty(), "preparing the command makes no request, even with the spend window closed");
         // An open delegated spend window still grants no per-gift authority.
@@ -5294,7 +5298,8 @@ mod control_act_tests {
 
     #[tokio::test]
     async fn gift_owner_command_carries_exact_frozen_tuple_then_reads_funded_status() {
-        let c = gift_candidate();
+        let mut c = gift_candidate();
+        c.code = "012345".into();
         let frozen = serde_json::to_value(&c).unwrap();
         let routes = sponsor_routes(Arc::new(move |m, p, b| match p {
             "/sponsor" => (200, serde_json::json!({"enabled": true, "gift_msat": 20_000_000,
@@ -5305,24 +5310,22 @@ mod control_act_tests {
             _ => happy()(m, p, b),
         }));
         let (node, _dir) = paired_fake(routes);
-        let view = do_sponsor_owner_approval(&node.state, &c, "123456").unwrap();
-        let body = view.owner_command.split("--data '").nth(1).unwrap().split('\'').next().unwrap();
-        let request: serde_json::Value = serde_json::from_str(body).unwrap();
-        assert_eq!(request, serde_json::json!({"intro_id": "ab".repeat(16), "newcomer": A,
-            "payment_hash": "cd".repeat(32), "gift_msat": 20_000_000, "fee_max_msat": 100_000, "code": "123456"}));
-        assert!(view.owner_command.contains(&format!("'{}/sponsor/approve'", node.state.api_base)));
+        let view = do_sponsor_owner_approval(&node.state, &c, "012345").unwrap();
+        assert_eq!(view.owner_command, format!(
+            "konsensus approve gift --intro '{}' --newcomer '{}' --hash '{}' --gift-msat '20000000' --fee-max-msat '100000' --code '012345'",
+            "ab".repeat(16), A, "cd".repeat(32)));
         let status = read_sponsor_status(&node.state).await.unwrap();
         assert_eq!(status.kits[0]["state"], "funded");
         assert!(node.posts().is_empty());
         assert!(do_sponsor_owner_approval(&node.state, &c, "654321").is_err());
         let mut expired = c.clone();
         expired.expires_at = 0;
-        assert!(do_sponsor_owner_approval(&node.state, &expired, "123456").is_err());
+        assert!(do_sponsor_owner_approval(&node.state, &expired, "012345").is_err());
         let mut malformed = c.clone();
         malformed.payment_hash = "not a hash".into();
-        assert!(do_sponsor_owner_approval(&node.state, &malformed, "123456").is_err());
+        assert!(do_sponsor_owner_approval(&node.state, &malformed, "012345").is_err());
         with_book(&node.state, true, |b| { b.paused = true; Ok(()) }).unwrap();
-        assert_eq!(do_sponsor_owner_approval(&node.state, &c, "123456").unwrap_err().code, "budget_paused");
+        assert_eq!(do_sponsor_owner_approval(&node.state, &c, "012345").unwrap_err().code, "budget_paused");
     }
 
     #[tokio::test]

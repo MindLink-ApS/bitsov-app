@@ -50,18 +50,19 @@ class UiHarnessTests(unittest.TestCase):
         self.assertGreaterEqual(a['pricing']['chat_msat'], 2 * b['pricing']['chat_msat'])
 
 
-    def test_contact_owner_fixture_keeps_credential_outside_app_and_evidence(self):
-        token = 'synthetic-independent-owner-secret'
-        command = 'public owner command reading BITSOV_OWNER_TOKEN'
-        result = types.SimpleNamespace(returncode=0, stdout=token, stderr='')
-        with patch.object(self.r, 'jwt', return_value=token), patch.object(subprocess, 'run', return_value=result) as run:
+    def test_contact_owner_fixture_runs_cli_at_node_without_an_owner_token(self):
+        command = "konsensus approve first-contact --client 'c1'"
+        result = types.SimpleNamespace(returncode=0, stdout='approved', stderr='')
+        with patch.object(self.r, 'jwt', side_effect=AssertionError('no owner token needed')), patch.object(subprocess, 'run', return_value=result) as run:
             self.r.owner_first_contact(command)
         args, kwargs = run.call_args
         self.assertEqual(args[0][-3:], ['/bin/sh', '-c', command])
-        self.assertNotIn(token, str(args))
-        self.assertEqual(kwargs['env']['BITSOV_OWNER_TOKEN'], token)
-        self.assertNotIn(token, (self.root / 'owner-first-contact-fixture.json').read_text())
-        self.assertNotEqual(os.environ.get('BITSOV_OWNER_TOKEN'), token)
+        self.assertEqual(kwargs['cwd'], self.r.ROOTS['a'])
+        self.assertEqual(kwargs['env']['PATH'].split(os.pathsep)[0], str(Path(self.r.BIN).parent))
+        self.assertNotIn('BITSOV_OWNER_TOKEN', kwargs['env'])
+        recorded = json.loads((self.root / 'owner-first-contact-fixture.json').read_text())
+        self.assertEqual(recorded['command'], command)
+        self.assertEqual(recorded['exit_code'], 0)
 
     def test_pair_token_response_is_returned_but_never_persisted(self):
         token = 'synthetic-opaque-paired-token'

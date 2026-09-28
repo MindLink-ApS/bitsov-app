@@ -148,7 +148,7 @@ def run(r):
                 and request['contact_budget_msat'] >= total and request['client_id'] and request['grant_op_id'], request)
         s.snap('contact-owner-pending')
         command = r.ui('attrs', selector='[data-contact-owner-command]', names=['data-command'])[0]['data-command']
-        s.note('FIXTURE: node A operator executes the displayed owner command with independent owner authority; the app receives only the public receipt.')
+        s.note('FIXTURE: node A operator executes the displayed owner CLI through its local control socket; the app receives only the public receipt.')
         r.owner_first_contact(command)
         r.ui_try('wait', selector='article.msg.out [data-delivery="delivered"], [data-artifact="failed"]', timeoutMs=60000)
         note = r.ui_try('text', within={'selector': '[data-composer-note]'})

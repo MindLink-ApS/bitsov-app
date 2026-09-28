@@ -1026,14 +1026,15 @@ mod tests {
         let (uri, proto) = seen.lock().unwrap().clone().unwrap();
         assert_eq!(uri, "/api/v1/ws?token=tok");
         assert_eq!(proto, "bitsov.v1");
-        let events = events.lock().unwrap();
-        assert_eq!(events.len(), 3, "{events:?}");
-        assert!(matches!(events[0], LiveEvent::Link { state: LinkState::Open, .. }));
-        assert!(matches!(&events[1], LiveEvent::Message { message, .. } if message.plaintext.as_deref() == Some("gm")));
-        assert!(matches!(&events[2], LiveEvent::Delivery { status, .. } if status == "delivered"));
+        {
+            let events = events.lock().unwrap();
+            assert_eq!(events.len(), 3, "{events:?}");
+            assert!(matches!(events[0], LiveEvent::Link { state: LinkState::Open, .. }));
+            assert!(matches!(&events[1], LiveEvent::Message { message, .. } if message.plaintext.as_deref() == Some("gm")));
+            assert!(matches!(&events[2], LiveEvent::Delivery { status, .. } if status == "delivered"));
+        }
 
         // Nothing listening: the error names no URL, so the token cannot leak into it.
-        drop(events);
         let dead = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let dead_port = dead.local_addr().unwrap().port();
         drop(dead);

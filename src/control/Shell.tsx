@@ -1710,7 +1710,7 @@ function Composer(props: {
       </Show>
       <Show when={ownerWait()}>
         {(pending) => <div class="approval" data-contact-approval="pending" data-contact-request={JSON.stringify(pending().approval.request)}>
-          <p><strong>Approve this contact at your node.</strong> Run this command once in the node terminal, with your independent owner credential in BITSOV_OWNER_TOKEN. The app never receives that credential.</p>
+          <p><strong>Approve this contact at your node.</strong> Run this command once in the owner’s terminal from the node’s data directory, with owner control enabled. The app never receives an owner credential.</p>
           <p>The command approves this contact’s budget and first-message cap. This draft sends after approval. Editing it or pressing Cancel stops the wait.</p>
           <textarea readonly aria-label="Owner approval command" data-contact-owner-command data-command={pending().approval.owner_command} value={pending().approval.owner_command} />
           <button type="button" class="link" onClick={async () => { try { await navigator.clipboard.writeText(pending().approval.owner_command); } catch { setNote('Select and copy the command above.'); } }}>Copy command</button>
@@ -2626,7 +2626,7 @@ function NewTrack(props: {
               </Show>
               <Show when={ownerRequired()}>
                 <div class="approval" data-starter-owner-approval="pending">
-                  <p><strong>Approve this gift at your node.</strong> Run this command once in the node terminal, with your independent owner credential in BITSOV_OWNER_TOKEN. The app never receives that credential.</p>
+                  <p><strong>Approve this gift at your node.</strong> Run this command once in the owner’s terminal from the node’s data directory, with owner control enabled. The app never receives an owner credential.</p>
                   <Show when={ownerWait()} fallback={<p>Review the request and compare the code to prepare the owner command.</p>}>
                     {(pending) => <>
                       <textarea readonly aria-label="Owner approval command" data-starter-owner-command value={pending().owner_command} />
