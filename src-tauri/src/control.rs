@@ -320,6 +320,9 @@ pub struct MembraneTotals {
     pub outbound_refused: u64,
 }
 
+mod refusals;
+use refusals::{NodePrePaymentRefusals, PrePaymentRefusals};
+
 #[derive(Deserialize, Clone, Debug)]
 pub struct NodeMembrane {
     #[serde(default)]
@@ -328,6 +331,8 @@ pub struct NodeMembrane {
     totals: MembraneTotals,
     #[serde(default)]
     events: Vec<MembraneEvent>,
+    #[serde(default)]
+    pre_payment_refusals: Option<NodePrePaymentRefusals>,
 }
 
 /// `membrane_read`: the node's bounded ring, newest first.
@@ -336,6 +341,8 @@ pub struct MembraneRead {
     pub capacity: u64,
     pub totals: MembraneTotals,
     pub events: Vec<MembraneEvent>,
+    /// None means an older node or an unavailable aggregate, never zero.
+    pub pre_payment_refusals: Option<PrePaymentRefusals>,
     /// Unix ms when the host read it.
     pub read_at: u64,
 }
@@ -346,6 +353,7 @@ impl MembraneRead {
             capacity: node.capacity,
             totals: node.totals,
             events: node.events.into_iter().filter_map(MembraneEvent::checked).collect(),
+            pre_payment_refusals: node.pre_payment_refusals.and_then(|counts| counts.project(read_at)),
             read_at,
         }
     }
@@ -1032,5 +1040,83 @@ mod tests {
         let url = ws_url(&format!("http://127.0.0.1:{dead_port}/api/v1"), "SECRET").unwrap();
         let err = run_ws_session(&url, &|_| {}).await.unwrap_err();
         assert!(!err.contains("SECRET") && !err.contains("ws://"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod pre_payment_refusal_tests {
+    use super::*;
+    use serde_json::{json, Value};
+    const HOUR: u64 = 3_600_000;
+    const NOW: u64 = 100 * HOUR + 123_000;
+
+    fn project(field: Option<Value>) -> Value {
+        let mut wire = json!({"capacity":500,"totals":{"refused":9},"events":[]});
+        if let Some(field) = field { wire["pre_payment_refusals"] = field; }
+        let node = serde_json::from_value(wire).unwrap();
+        serde_json::to_value(MembraneRead::from_node(node, NOW)).unwrap()
+    }
+    fn counts(buckets: Value) -> Value {
+        json!({"bucket_ms":HOUR,"capacity":24,"buckets":buckets})
+    }
+
+    #[test]
+    fn refusal_counts_present_sum_only_the_reported_hours_and_known_reasons() {
+        let read = project(Some(counts(json!([
+            {"start_ms":76*HOUR,"counts":{"session_before_payment":100}},
+            {"start_ms":77*HOUR,"counts":{"session_before_payment":3}},
+            {"start_ms":99*HOUR,"counts":{"session_before_payment":5}},
+            {"start_ms":100*HOUR,"counts":{"session_before_payment":2,"admission_required":1,"arbitrary_sender":42}}
+        ]))));
+        let rows = read["pre_payment_refusals"]["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 8);
+        assert_eq!(rows[0], json!({"reason":"session_before_payment","hour":{"count":"2","at_least":false},"day":{"count":"10","at_least":false}}));
+        assert_eq!(rows[7]["day"]["count"], "1");
+        assert_eq!(rows[1]["hour"]["count"], "0");
+        assert!(!read.to_string().contains("arbitrary_sender"));
+        assert_eq!(read["totals"]["refused"], 9);
+        assert_eq!(read["read_at"], NOW);
+    }
+
+    #[test]
+    fn refusal_counts_absent_are_unavailable_but_present_empty_means_zero() {
+        assert!(project(None)["pre_payment_refusals"].is_null());
+        let read = project(Some(counts(json!([]))));
+        let rows = read["pre_payment_refusals"]["rows"].as_array().unwrap();
+        assert!(rows.iter().all(|r| r["hour"]["count"] == "0" && r["day"]["count"] == "0"));
+    }
+
+    #[test]
+    fn refusal_counts_saturated_are_exact_lower_bounds_and_sum_without_overflow() {
+        let read = project(Some(counts(json!([
+            {"start_ms":99*HOUR,"counts":{"session_before_payment":u64::MAX,"price_before_payment":9007199254740993_u64}},
+            {"start_ms":100*HOUR,"counts":{"session_before_payment":u64::MAX,"price_before_payment":1}}
+        ]))));
+        let rows = &read["pre_payment_refusals"]["rows"];
+        assert_eq!(rows[0]["hour"], json!({"count":"18446744073709551615","at_least":true}));
+        assert_eq!(rows[0]["day"], json!({"count":"36893488147419103230","at_least":true}));
+        assert_eq!(rows[2]["day"], json!({"count":"9007199254740994","at_least":false}));
+    }
+
+    #[test]
+    fn refusal_counts_rollback_keeps_the_nodes_most_recent_hour() {
+        let read = project(Some(counts(json!([
+            {"start_ms":101*HOUR,"counts":{"admission_required":4}}
+        ]))));
+        assert_eq!(read["pre_payment_refusals"]["hour_start_ms"], 101*HOUR);
+        assert_eq!(read["pre_payment_refusals"]["rows"][7]["hour"]["count"], "4");
+    }
+
+    #[test]
+    fn refusal_counts_invalid_bucket_shape_is_unavailable() {
+        for field in [
+            json!({"bucket_ms":1,"capacity":24,"buckets":[]}),
+            json!({"bucket_ms":HOUR,"capacity":25,"buckets":[]}),
+            counts(json!([{"start_ms":NOW,"counts":{}}])),
+            counts(json!([{"start_ms":100*HOUR,"counts":{}},{"start_ms":100*HOUR,"counts":{}}])),
+            counts(json!(vec![json!({"start_ms":0,"counts":{}});25])),
+        ] {
+            assert!(project(Some(field))["pre_payment_refusals"].is_null());
+        }
     }
 }

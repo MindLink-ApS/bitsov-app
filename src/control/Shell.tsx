@@ -47,6 +47,7 @@ import {
   type Unread,
 } from './state';
 import type {
+  PrePaymentRefusals,
   OwnerContactApproval,
   FirstContactQuote,
   FundingAsk,
@@ -78,7 +79,7 @@ import type {
 } from './types';
 
 /** How often each panel re-reads while the shell is open. Peers and balance have no live event. */
-const REFRESH_MS = { overview: 10_000, peers: 15_000, wallet: 20_000, rooms: 30_000, door: 30_000, energy: 30_000, clock: 5_000, spend: 3_000 } as const;
+const REFRESH_MS = { overview: 10_000, peers: 15_000, wallet: 20_000, rooms: 30_000, door: 30_000, energy: 30_000, membrane: 30_000, clock: 5_000, spend: 3_000 } as const;
 
 type Props = {
   source: Source;
@@ -169,7 +170,8 @@ export function ControlCenter(props: Props) {
   // Organism view (O1): readings the organs are drawn from, each with its age.
   const [openedAt, setOpenedAt] = createSignal(Date.now());
   const [membrane, setMembrane] = createSignal<MembraneEntry[]>([]);
-  /** When the node's membrane ring (N2) was last read successfully. */
+  const [prePaymentRefusals, setPrePaymentRefusals] = createSignal<PrePaymentRefusals | null>(null);
+  /** When the node's membrane ring and aggregates were last read successfully. */
   const [membraneReadAt, setMembraneReadAt] = createSignal<number | null>(null);
   const [energyAt, setEnergyAt] = createSignal<number | null>(null);
   const [budgetReadAt, setBudgetReadAt] = createSignal<number | null>(null);
@@ -265,12 +267,13 @@ export function ControlCenter(props: Props) {
     after.filter((e) => !known.has(e.seq)).forEach(placeDoor);
   };
   const contactSet = () => new Set(peerById().keys());
-  // N2: seed from the node's ring once it is advertised; live events follow.
+  // N2 events have a live feed; pre-payment aggregates require periodic reads.
   const loadMembrane = () =>
-    attempt('membrane', () => props.source.membrane(50), (read) => {
+    caps().membrane ? attempt('membrane', () => props.source.membrane(50), (read) => {
       foldMembrane((log) => membraneSeed(log, read.events, { contacts: contactSet() }));
-      setMembraneReadAt(Date.now());
-    });
+      setPrePaymentRefusals(read.pre_payment_refusals ?? null);
+      setMembraneReadAt(read.read_at);
+    }) : Promise.resolve();
 
   const loadThread = (t: TrackRef) => {
     if (t.kind !== 'peer' && t.kind !== 'room') return;
@@ -321,6 +324,7 @@ export function ControlCenter(props: Props) {
           setInterval(() => void loadRooms(), REFRESH_MS.rooms),
           setInterval(() => void loadDoor(), REFRESH_MS.door),
           setInterval(() => void loadEnergy(), REFRESH_MS.energy),
+          setInterval(() => void loadMembrane(), REFRESH_MS.membrane),
           // Cheap: the host asks the node only while an elevation request is pending,
           // and a budget grant lands there first.
           setInterval(() => void loadSpend().then(loadBudget), REFRESH_MS.spend),
@@ -686,6 +690,7 @@ export function ControlCenter(props: Props) {
                 membrane={membrane()}
                 nodeMembrane={caps().membrane}
                 membraneReadAt={membraneReadAt()}
+                prePaymentRefusals={caps().membrane ? prePaymentRefusals() : null}
                 membraneError={errors.membrane}
                 door={door()}
                 doorError={errors.door}
