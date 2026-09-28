@@ -1,3 +1,4 @@
+import { allIn, routingFee } from './format';
 // Dev-mode sample data: the whole shell clickable with no node running. Nothing
 // here reaches a network or the host. The sample deposit address is not valid
 // bech32 on purpose, so it cannot receive funds by mistake.
@@ -537,12 +538,14 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
       .filter((m) => m !== SAMPLE_OWN_ID)
       .map((m) => ({
         node_id: m,
-        msat: Math.max(peerPrice(m), 1000),
+        msat: allIn(Math.max(peerPrice(m), 1000)),
+        max_routing_fee_msat: routingFee(Math.max(peerPrice(m), 1000)),
         advertised: !!PRICE_TABLES[m] && !PRICE_TABLES[m].peer_stale,
         connected: SAMPLE_PEERS.some((p) => p.node_id === m && p.connected),
       }));
     return {
       room_id: id,
+      max_routing_fee_msat: members.reduce((sum, m) => sum + m.max_routing_fee_msat, 0),
       members,
       total_msat: members.reduce((sum, m) => sum + m.msat, 0),
       unreachable: members.filter((m) => !m.connected).map((m) => m.node_id),
@@ -637,7 +640,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
     }
     const ceiling = Math.min(!manual && autopay ? autopay.ceiling : book.ceiling, book.ceiling);
     if (spentAll() + max > ceiling) {
-      return refuse('ceiling_exhausted', `You have used ${sats(spentAll())} of your ${sats(ceiling)} sats app payment principal limit (rolling 24 hours), and this costs ${sats(max)}. Raise the limit to send.`);
+      return refuse('ceiling_exhausted', `You have used ${sats(spentAll())} of your ${sats(ceiling)} sats app all-in payment limit (rolling 24 hours), and this costs ${sats(max)}. Raise the limit to send.`);
     }
     if (autopay && !manual) {
       let confirm: number | null = null;
@@ -709,13 +712,14 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
     priceQuote: (peer) =>
       ok({
         kind: 0,
+        max_routing_fee_msat: routingFee(Math.max(peerPrice(peer ?? ""), 1000)),
         own_msat: 1000,
         ...(PRICE_TABLES[peer ?? ''] ?? { peer_msat: null, peer_age_secs: null, peer_stale: false }),
         ...(peer && raised[peer] !== undefined ? { peer_msat: raised[peer], peer_age_secs: 1, peer_stale: false } : {}),
       }),
     // Sample strangers open their door at 2 sats and ask 2 sats a message.
     firstContactQuote: (peer) =>
-      ok({ recipient: peer, admission_msat: 2000, message_msat: 2000, total_msat: 4000, expires_at: Math.floor(Date.now() / 1000) + 60 }),
+      ok({ recipient: peer, admission_msat: 2000, message_msat: 2000, max_routing_fee_msat: 10000, total_msat: 14000, expires_at: Math.floor(Date.now() / 1000) + 60 }),
     // K1: sample cards are not signed; the host verifies real ones.
     introductionMine: () => ok(sampleIntroduction(SAMPLE_OWN_ID, 'node.example.org:9735', 'public', 10_000)),
     introductionRead: (text) =>
@@ -827,26 +831,29 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
       const to = recipient.toLowerCase();
       const confirm = await planSend(to, isRoom, maxMsat, firstContactMsat);
       let amount: number;
+      let fee: number;
       if (isRoom) {
         const q = roomQuote(to);
         if (q.unreachable.length > 0) {
           return refuse('room_unreachable', `${q.unreachable.length} member is not a connected peer, so the node would skip them without telling you. Rooms send only when every member is connected.`);
         }
-        amount = q.total_msat;
+        fee = q.max_routing_fee_msat ?? 0;
+        amount = q.total_msat - fee;
       } else {
         const peer = SAMPLE_PEERS.find((p) => p.node_id === to);
         if (!peer?.connected) {
           return refuse('node', '/messages/compose failed (400): Recipient is offline. Message will be queued and sent when they reconnect.');
         }
         amount = Math.max(peerPrice(to), 1000);
+        fee = routingFee(amount);
       }
       if (v2 && !isRoom && to === hex('a') && raised[to] === undefined) {
         raised[to] = 3000;
         return refuse('price_changed', `Maya's price rose to 3 sats, above your ${maxMsat / 1000} sat cap. Nothing was dispatched; refresh the quote.`);
       }
-      if (amount > maxMsat) return refuse('price_changed', 'Price above confirmed ceiling. Nothing dispatched.');
+      if (amount + fee > maxMsat) return refuse('price_changed', 'Price above confirmed ceiling. Nothing dispatched.');
       if (confirm !== null) book.limits.set(key(to, isRoom), confirm);
-      book.ledger.push({ at: Date.now(), target: to, room: isRoom, msat: amount });
+      book.ledger.push({ at: Date.now(), target: to, room: isRoom, msat: amount + fee });
       const id = nextId('sent');
       const at = Date.now();
       later(250, { type: 'message', room_id: isRoom ? to : null, message: { id, kind: 0, sender: SAMPLE_OWN_ID, recipient: to, timestamp: at, plaintext, payment_amount_msat: amount } });
@@ -854,7 +861,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
       later(1200, to === hex('d')
         ? { type: 'delivery', message_id: id, status: 'rejected', reason: 'insufficient payment: required 2000 msat, got 1000 msat' }
         : { type: 'delivery', message_id: id, status: 'delivered', reason: null });
-      return { message_id: id, recipient: to, is_room: isRoom, delivered: true, amount_msat: amount, sent_at_ms: at };
+      return { message_id: id, recipient: to, is_room: isRoom, delivered: true, amount_msat: amount, total_msat: amount + fee, max_routing_fee_msat: fee, sent_at_ms: at };
     },
     roomQuote: (id) => ok(roomQuote(id.toLowerCase())),
     invoiceCreate: (amountMsat, note) =>
@@ -868,20 +875,20 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
     },
     pay: async (bolt11, amountMsat, maxMsat) => {
       await gate();
-      if (amountMsat > maxMsat) return refuse('price_changed', 'Amount above confirmed ceiling.');
+      if (allIn(amountMsat) > maxMsat) return refuse('price_changed', 'Amount above confirmed ceiling.');
       if (sampleInvoiceMsat(bolt11) !== amountMsat) {
         return refuse('invalid', 'The invoice amount does not match the cost you confirmed. Nothing was paid.');
       }
       await planSend('app:invoice-payments', false, maxMsat, undefined, true);
-      book.ledger.push({ at: Date.now(), target: 'app:invoice-payments', room: false, msat: amountMsat });
-      return { method: 'invoice', amount_msat: amountMsat, status: 'settled', paid_at_ms: Date.now() };
+      book.ledger.push({ at: Date.now(), target: 'app:invoice-payments', room: false, msat: allIn(amountMsat) });
+      return { method: 'invoice', amount_msat: amountMsat, max_routing_fee_msat: routingFee(amountMsat), status: 'settled', paid_at_ms: Date.now() };
     },
     keysend: async (_dest, amountMsat, _memo, maxMsat) => {
       await gate();
-      if (amountMsat > maxMsat) return refuse('price_changed', 'Amount above confirmed ceiling.');
+      if (allIn(amountMsat) > maxMsat) return refuse('price_changed', 'Amount above confirmed ceiling.');
       await planSend('app:keysend-payments', false, maxMsat, undefined, true);
-      book.ledger.push({ at: Date.now(), target: 'app:keysend-payments', room: false, msat: amountMsat });
-      return { method: 'keysend', amount_msat: amountMsat, status: 'settled', paid_at_ms: Date.now() };
+      book.ledger.push({ at: Date.now(), target: 'app:keysend-payments', room: false, msat: allIn(amountMsat) });
+      return { method: 'keysend', amount_msat: amountMsat, max_routing_fee_msat: routingFee(amountMsat), status: 'settled', paid_at_ms: Date.now() };
     },
     inviteCreate: async (invitee, _addr, hours) => {
       await gate();
@@ -891,17 +898,17 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
       await gate();
       return { inviter_pubkey: hex('b'), addr: '35.204.77.3:9735' };
     },
-    filePrice: () => ok(FILE_PRICE_MSAT),
+    filePrice: () => ok({ principal_msat: FILE_PRICE_MSAT, max_routing_fee_msat: 5000, total_msat: FILE_PRICE_MSAT + 5000 }),
     fileSend: async (recipient, filename, _mime, dataB64, maxMsat) => {
       await gate();
-      if (FILE_PRICE_MSAT > maxMsat) return refuse('price_changed', 'Price above confirmed ceiling.');
+      if (allIn(FILE_PRICE_MSAT) > maxMsat) return refuse('price_changed', 'Price above confirmed ceiling.');
       const target = recipient.toLowerCase();
       await planSend(target, false, maxMsat, undefined, true);
-      book.ledger.push({ at: Date.now(), target, room: false, msat: FILE_PRICE_MSAT });
+      book.ledger.push({ at: Date.now(), target, room: false, msat: allIn(FILE_PRICE_MSAT) });
       const id = nextId('file');
       later(1200, { type: 'delivery', message_id: id, status: 'delivered', reason: null });
       const pad = (dataB64.match(/=+$/)?.[0].length ?? 0);
-      return { message_id: id, recipient: recipient.toLowerCase(), filename, size_bytes: (dataB64.length / 4) * 3 - pad, delivered: true, amount_msat: FILE_PRICE_MSAT, sent_at_ms: Date.now() };
+      return { message_id: id, recipient: recipient.toLowerCase(), filename, size_bytes: (dataB64.length / 4) * 3 - pad, delivered: true, amount_msat: FILE_PRICE_MSAT, total_msat: allIn(FILE_PRICE_MSAT), max_routing_fee_msat: routingFee(FILE_PRICE_MSAT), sent_at_ms: Date.now() };
     },
     aiRead: async (topic, sinceMs) => {
       await new Promise((r) => setTimeout(r, 350));

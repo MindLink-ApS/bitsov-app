@@ -57,7 +57,7 @@ function stubHost() {
     }),
     fund_state: () => null,
     spend_status: () => ({ state: 'locked', basis: null, open_until_ms: null, pending: null, window_ms: 600_000 }),
-    file_price: () => 3000,
+    file_price: () => ({ principal_msat: 3000, max_routing_fee_msat: 5000, total_msat: 8000 }),
     room_quote: () => ({
       room_id: ROOM,
       members: [
@@ -201,7 +201,7 @@ describe('control center shell', () => {
     await vi.waitFor(() => expect(mount.querySelector('[data-sample]')).not.toBeNull());
     await vi.waitFor(() => expect(mount.querySelector('[data-stream]')?.textContent).toContain('Morning.'));
     expect(mount.querySelector('[data-mode="sample"]')).not.toBeNull();
-    await vi.waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Approve app principal limit'));
+    await vi.waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Approve app all-in limit'));
     click('[data-track="new"]');
     await vi.waitFor(() => expect(mount.querySelector('[data-new-track]')?.textContent).toContain('introduction, not admission'));
     click('[data-track="ai"]');

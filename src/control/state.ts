@@ -1,3 +1,4 @@
+import { feeCeiling } from './format';
 // Control-center state as pure functions over plain data, so the rules are
 // testable without a window: which track a live message belongs to, how history
 // and live traffic merge, what a send would cost and on what basis, and how
@@ -106,16 +107,16 @@ export function costToSend(
       const age = quote.peer_age_secs ?? 0;
       const when = ago((opts.nowMs ?? Date.now()) - age * 1000, opts.nowMs ?? Date.now());
       return {
-        msat: Math.max(quote.peer_msat, MIN_PAYMENT_MSAT),
+        msat: Math.max(quote.peer_msat, MIN_PAYMENT_MSAT) + (quote.max_routing_fee_msat ?? 0),
         basis: quote.peer_stale
-          ? `${opts.name ?? 'Their'} price, from a stale table (${when})`
-          : `${opts.name ?? 'Their'} price, updated ${when}`,
+          ? `${opts.name ?? 'Their'} price, from a stale table (${when}); ${feeCeiling(quote.max_routing_fee_msat ?? 0)}`
+          : `${opts.name ?? 'Their'} price, updated ${when}; ${feeCeiling(quote.max_routing_fee_msat ?? 0)}`,
         estimate: quote.peer_stale,
       };
     }
     return {
-      msat: Math.max(quote.own_msat, MIN_PAYMENT_MSAT),
-      basis: quote.peer_stale ? 'Estimate from your own price; the peer table is stale' : `Estimate from your own price; ${opts.name ?? 'this peer'} has not shared theirs yet`,
+      msat: Math.max(quote.own_msat, MIN_PAYMENT_MSAT) + (quote.max_routing_fee_msat ?? 0),
+      basis: (quote.peer_stale ? 'Estimate from your own price; the peer table is stale' : `Estimate from your own price; ${opts.name ?? 'this peer'} has not shared theirs yet`) + `; ${feeCeiling(quote.max_routing_fee_msat ?? 0)}`,
       estimate: true,
     };
   }
@@ -128,7 +129,7 @@ export function costToSend(
       msat: room.total_msat,
       basis:
         `${n} ${n === 1 ? 'member' : 'members'}, each paid their own price` +
-        (own > 0 ? `; ${own} estimated from yours` : ''),
+        (own > 0 ? `; ${own} estimated from yours` : '') + `; ${feeCeiling(room.max_routing_fee_msat ?? 0)} across all members`,
       estimate: room.estimate,
     };
   }
