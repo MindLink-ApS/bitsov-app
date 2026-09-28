@@ -280,11 +280,36 @@ export type ActionError = {
     // G1 node grants: refused before any payment (see src-tauri/src/grant.rs).
     | 'grant_ended' | 'grant_exhausted' | 'grant_per_call' | 'grant_recipient' | 'grant_unpriced' | 'grant_ledger' | 'grant_refused' | 'grant_unknown' | 'grant_first_contact' | 'grant_readmission'
     | 'room_unreachable'
+    // Paid, not delivered (node 502 `payment_settled_send_incomplete`), and its retry.
+    | 'payment_settled_undelivered' | 'retry_unavailable' | 'retry_needs_admission' | 'undelivered_pending'
     | 'not_ready'
     | 'invalid'
     | 'node';
   message: string;
+  /** `payment_settled_undelivered` only. */
+  undelivered?: Undelivered;
+  /** `retry_needs_admission` only: the price to approve, when the node could tell. */
+  admission?: AdmissionPrice;
+  /**
+   * `payment_settled_undelivered` / `undelivered_pending`: the host's durable
+   * record. Stop retrying names it, so a stale card never releases another message.
+   */
+  pending_id?: string;
 };
+
+/**
+ * Retry delivery paid nothing new, and delivering a paid, undelivered message
+ * still needs a payment: the message's price, and admission again if the
+ * contact reconnected. `total_msat` is the cap the owner approves. `quoted`:
+ * the contact's own signed quote; otherwise an estimate from the admission paid before.
+ */
+export type AdmissionPrice = { admission_msat: number; message_msat: number; max_routing_fee_msat?: number; total_msat: number; quoted: boolean };
+
+/**
+ * The node settled payment but the message did not go. `retry`: the node said a
+ * retry re-sends its paid proof rather than paying again.
+ */
+export type Undelivered = { paid_msat: number; retry: boolean };
 
 /** Public owner handoff only; no owner credential is exposed to the app. */
 export type OwnerContactApproval = {
@@ -405,6 +430,13 @@ export type Artifact =
   | { id: string; at: number; type: 'payment'; receipt: PaymentReceipt }
   | { id: string; at: number; type: 'file'; receipt: FileReceipt }
   | { id: string; at: number; type: 'failed'; action: string; error: ActionError }
+  /**
+   * Paid, not delivered. `text` is the owner's own draft, kept in memory for
+   * Retry delivery only. `admission`: Retry delivery paid nothing new and a
+   * payment is still due; this is the price to approve. `pendingId`: the host
+   * record this card is about.
+   */
+  | { id: string; at: number; type: 'undelivered'; ownerApproval?: OwnerContactApproval | null; text: string; paid: Undelivered; note: string | null; admission: AdmissionPrice | null; pendingId: string | null }
   | { id: string; at: number; type: 'door'; door: DoorCard };
 
 /**

@@ -111,6 +111,39 @@ pub fn payment_quote(principal_msat: u64) -> Result<PaymentQuote, ActionError> {
 pub struct ActionError {
     pub code: &'static str,
     pub message: String,
+    /// `payment_settled_undelivered` only: what was paid, and whether a retry is offered.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub undelivered: Option<UndeliveredView>,
+    /// `retry_needs_admission` only: the price the owner approves before a
+    /// retry that may pay admission again.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub admission: Option<AdmissionView>,
+    /// `payment_settled_undelivered` / `undelivered_pending`: the durable
+    /// record's id. Stop retrying names it, so it never releases another one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_id: Option<String>,
+}
+
+/// Paid, not delivered, as the conversation shows it.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UndeliveredView {
+    /// Everything the node reported settled for this message, retries included.
+    pub paid_msat: u64,
+    /// The node said a retry re-sends its paid proof rather than paying again.
+    pub retry: bool,
+}
+
+/// Admission may be due again (the node reconnected): its price and the
+/// message's, for the owner's approval. Nothing has been paid for it.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AdmissionView {
+    pub admission_msat: u64,
+    pub message_msat: u64,
+    pub max_routing_fee_msat: u64,
+    /// The cap the owner approves: admission, message and maximum routing fees.
+    pub total_msat: u64,
+    /// The contact's own signed quote; false: an estimate from what was paid before.
+    pub quoted: bool,
 }
 
 impl ActionError {
@@ -118,6 +151,38 @@ impl ActionError {
         Self {
             code,
             message: message.into(),
+            undelivered: None,
+            admission: None,
+            pending_id: None,
+        }
+    }
+    /// Name the durable record this error is about.
+    pub fn for_pending(self, id: &str) -> Self {
+        Self { pending_id: Some(id.to_string()), ..self }
+    }
+    /// The node settled payment but the message did not go. Never "not sent".
+    pub fn undelivered(paid_msat: u64, retry: bool) -> Self {
+        let next = if retry {
+            "Do not send it again. Retry delivery pays nothing new: your node re-sends the proof it already paid for. If anything is still due (this message's price, or admission again after a reconnect), it stops before paying and asks you first, with the price."
+        } else {
+            "Do not send it again: that could pay twice. Check the pending result first."
+        };
+        Self {
+            undelivered: Some(UndeliveredView { paid_msat, retry }),
+            ..Self::new("payment_settled_undelivered", format!("Payment settled ({paid_msat} msat paid), message not yet delivered. {next}"))
+        }
+    }
+    /// Retry delivery paid nothing new; a payment is still due (the message,
+    /// and admission again if the contact reconnected). The owner approves it.
+    pub fn needs_admission(view: Option<AdmissionView>) -> Self {
+        let price = match view {
+            Some(v) if v.quoted => format!(" Their price: {} msat to be admitted again, then {} msat for this message, plus up to {} msat in network fees ({} msat in all). If your node is still admitted, it pays only the message and its network fee.", v.admission_msat, v.message_msat, v.max_routing_fee_msat, v.total_msat),
+            Some(v) => format!(" About {} msat to be admitted again (what it cost before), then {} msat for this message: up to {} msat.", v.admission_msat, v.message_msat, v.total_msat),
+            None => " Your node could not tell the price.".into(),
+        };
+        Self {
+            admission: view,
+            ..Self::new("retry_needs_admission", format!("Retry delivery paid nothing new. Delivering the message needs a new payment: its price, and admission again if the contact reconnected. Nothing was paid.{price} Approve it to continue, or stop retrying."))
         }
     }
     pub fn invalid(message: impl Into<String>) -> Self {
@@ -401,6 +466,43 @@ pub struct SendReply {
     /// Admission paid again during this send after a reconnect (genome #85).
     #[serde(default)]
     pub readmission_msat: Option<u64>,
+}
+
+/// `502 payment_settled_send_incomplete` from compose: the node paid, the
+/// message did not go. The prior/current admission amounts are read from the
+/// node's reason when it gives them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SettledIncomplete {
+    pub amount_msat: u64,
+    pub prior_admission_msat: Option<u64>,
+    pub current_call_msat: Option<u64>,
+    /// The node itself says a retry re-sends the held proof and pays no second
+    /// admission (genome #100: same connection only; a new one pays again).
+    pub retry_safe: bool,
+}
+
+/// The node's own statements that a retry pays no second admission. Anything
+/// else (a message paid, then not stored) must not be sent again.
+const RETRY_SAFE: [&str; 2] = ["will not pay admission again", "re-send the paid proof, not pay again"];
+
+pub fn settled_incomplete(status: u16, body: &str) -> Option<SettledIncomplete> {
+    if status != 502 { return None; }
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    if v["code"] != "payment_settled_send_incomplete" { return None; }
+    let amount_msat = v["amount_msat"].as_u64()?;
+    let reason = v["error"].as_str().unwrap_or_default();
+    let prior_admission_msat = msat_after(reason, "prior admission: ");
+    let current_call_msat = msat_after(reason, "current call: ");
+    let lower = reason.to_ascii_lowercase();
+    let retry_safe = prior_admission_msat.is_some() && current_call_msat == Some(amount_msat)
+        && RETRY_SAFE.iter().any(|s| lower.contains(s));
+    Some(SettledIncomplete { amount_msat, prior_admission_msat, current_call_msat, retry_safe })
+}
+
+fn msat_after(reason: &str, key: &str) -> Option<u64> {
+    let rest = &reason[reason.find(key)? + key.len()..];
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    rest[digits..].starts_with(" msat").then(|| rest[..digits].parse().ok()).flatten()
 }
 
 impl SendReply {
@@ -1165,5 +1267,72 @@ mod tests {
         assert!(file_send_path("stage-../x").is_err());
         assert!(file_send_path("stage-").is_err());
         assert!(file_send_path(&format!("stage-{ROOM}/../x")).is_err());
+    }
+
+    /// The node's BUG-PSI reply, as genome #100's compose writes it.
+    fn psi(amount: u64, prior: u64, current: u64, tail: &str) -> String {
+        serde_json::json!({
+            "error": format!("payment settled but send did not complete (prior admission: {prior} msat; current call: {current} msat): {tail}"),
+            "code": "payment_settled_send_incomplete",
+            "amount_msat": amount,
+        }).to_string()
+    }
+    const SESSION_TIMEOUT: &str = "internal error: first-contact admission payment for 02ab settled and a signed proof is held, but the E2EE session did not establish within 25s (the proof envelope may still need re-delivery) — retry the message shortly; the retry is guarded by admission idempotence and will NOT pay admission again";
+
+    #[test]
+    fn settled_incomplete_reads_amount_and_admission_fields() {
+        let got = settled_incomplete(502, &psi(2000, 0, 2000, SESSION_TIMEOUT)).unwrap();
+        assert_eq!(got, SettledIncomplete { amount_msat: 2000, prior_admission_msat: Some(0), current_call_msat: Some(2000), retry_safe: true });
+        // A retry on the same connection: the prior admission is not a new debit.
+        let again = settled_incomplete(502, &psi(0, 2000, 0, SESSION_TIMEOUT)).unwrap();
+        assert_eq!((again.amount_msat, again.prior_admission_msat, again.retry_safe), (0, Some(2000), true));
+        let envelope = "internal error: admission payment settled but delivering the admission envelope failed (a retry will re-send the paid proof, not pay again): closed";
+        assert!(settled_incomplete(502, &psi(2000, 0, 2000, envelope)).unwrap().retry_safe);
+    }
+
+    #[test]
+    fn settled_incomplete_offers_no_retry_unless_the_node_says_so() {
+        // A message paid, then not stored: sending again would pay again.
+        let stored = serde_json::json!({"error":"file payment settled but storing message failed: disk","code":"payment_settled_send_incomplete","amount_msat":3000}).to_string();
+        assert_eq!(settled_incomplete(502, &stored).unwrap(), SettledIncomplete { amount_msat: 3000, prior_admission_msat: None, current_call_msat: None, retry_safe: false });
+        assert!(!settled_incomplete(502, &psi(4000, 0, 4000, "bad request: no route")).unwrap().retry_safe);
+        // The reported total must be the current call the reason names.
+        assert!(!settled_incomplete(502, &psi(4000, 0, 2000, SESSION_TIMEOUT)).unwrap().retry_safe);
+        // Not this error: the caller keeps its generic outcome-unknown path.
+        assert!(settled_incomplete(500, &psi(2000, 0, 2000, SESSION_TIMEOUT)).is_none());
+        assert!(settled_incomplete(502, r#"{"error":"no route","code":502}"#).is_none());
+        assert!(settled_incomplete(502, r#"{"code":"payment_settled_send_incomplete"}"#).is_none(), "no amount, no mapping");
+        assert!(settled_incomplete(502, "bad gateway").is_none());
+    }
+
+    #[test]
+    fn undelivered_copy_never_says_not_sent() {
+        let retry = ActionError::undelivered(2000, true);
+        assert_eq!(retry.code, "payment_settled_undelivered");
+        assert_eq!(retry.undelivered, Some(UndeliveredView { paid_msat: 2000, retry: true }));
+        assert!(retry.message.starts_with("Payment settled (2000 msat paid), message not yet delivered. Do not send it again."), "{}", retry.message);
+        assert!(retry.message.contains("Retry delivery pays nothing new") && retry.message.contains("asks you first"), "{}", retry.message);
+        assert!(!retry.message.contains("no second admission"), "never promise what the node does not enforce");
+        let stop = ActionError::undelivered(3000, false);
+        assert!(stop.message.contains("Do not send it again") && !stop.message.contains("Retry"), "{}", stop.message);
+        let wire = serde_json::to_value(&stop).unwrap();
+        assert_eq!(wire["undelivered"], serde_json::json!({"paid_msat": 3000, "retry": false}));
+        assert!(serde_json::to_value(ActionError::node("x")).unwrap().get("undelivered").is_none());
+        assert!(serde_json::to_value(ActionError::node("x")).unwrap().get("admission").is_none());
+        assert!(serde_json::to_value(ActionError::node("x")).unwrap().get("pending_id").is_none());
+        assert_eq!(serde_json::to_value(retry.for_pending("r1")).unwrap()["pending_id"], "r1");
+    }
+
+    #[test]
+    fn needs_admission_shows_the_price_or_says_it_is_unknown() {
+        let v = AdmissionView { admission_msat: 2000, message_msat: 1000, max_routing_fee_msat: 0, total_msat: 3000, quoted: true };
+        let e = ActionError::needs_admission(Some(v));
+        assert_eq!((e.code, e.admission), ("retry_needs_admission", Some(v)));
+        assert!(e.message.contains("Nothing was paid") && e.message.contains("3000 msat in all"), "{}", e.message);
+        let estimate = ActionError::needs_admission(Some(AdmissionView { quoted: false, ..v }));
+        assert!(estimate.message.contains("up to 3000 msat"), "{}", estimate.message);
+        let unknown = ActionError::needs_admission(None);
+        assert!(unknown.admission.is_none() && unknown.message.contains("could not tell the price"));
+        assert_eq!(serde_json::to_value(&e).unwrap()["admission"], serde_json::json!({"admission_msat": 2000, "message_msat": 1000, "max_routing_fee_msat": 0, "total_msat": 3000, "quoted": true}));
     }
 }

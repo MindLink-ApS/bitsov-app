@@ -27,6 +27,8 @@ import {
   applyDelivery,
   applyLive,
   asActionError,
+  admissionCopy,
+  undeliveredCopy,
   budgetStand,
   costToSend,
   deliveryFromReceipt,
@@ -59,6 +61,7 @@ import type {
   SponsorCandidate,
   SponsorStatus,
   ActionError,
+  SendReceipt,
   Artifact,
   BudgetPreset,
   BudgetRow,
@@ -116,12 +119,20 @@ export type Actions = {
   approve: () => Promise<void>;
   lock: () => Promise<void>;
   reconcile: () => Promise<Outcome<string>>;
+  pendingRevision: () => number;
   /** The owner's one approval for a daily total (B2). */
   approveBudget: (ceilingMsat: number, preset: PresetId) => Promise<void>;
   setBudget: (target: string, room: boolean, limitMsat: number) => Promise<Outcome<unknown>>;
   pauseAll: () => Promise<void>;
   resume: () => Promise<void>;
   send: (t: TrackRef, text: string, maxMsat: number, firstContactMsat?: number) => Promise<Outcome<unknown>>;
+  /**
+   * Retry a paid, undelivered message through its own journal record. With
+   * `approvedMsat`, the owner approved that price because admission may be due again.
+   */
+  retryDelivery: (t: TrackRef, artifactId: string, approvedMsat?: number) => Promise<Outcome<unknown>>;
+  /** Stop retrying a paid, undelivered message. Dispatches nothing. */
+  stopRetrying: (t: TrackRef | null, pendingId: string | null) => Promise<Outcome<string>>;
   /** The door card: a stranger's signed quote, or null when the node cannot give one. */
   doorQuote: (peer: string) => Promise<FirstContactQuote | null>;
   ownerRequest: (peer: string, cap: number, budget: number) => Promise<Outcome<OwnerContactApproval | null>>;
@@ -158,6 +169,7 @@ export function ControlCenter(props: Props) {
   /** What each send actually paid, by message id: a room echo carries one member's share only. */
   const [paid, setPaid] = createStore<Record<string, number>>({});
   const [allowances, setAllowances] = createStore<Record<string, { total_msat: number; max_routing_fee_msat: number }>>({});
+  const [pendingRevision, setPendingRevision] = createSignal(0);
   const [artifacts, setArtifacts] = createStore<Record<string, Artifact[]>>({});
   const [errors, setErrors] = createStore<Record<string, string | undefined>>({});
   const [contextOpen, setContextOpen] = createSignal(false);
@@ -436,6 +448,14 @@ export function ControlCenter(props: Props) {
       return { ok: false, error };
     }
   };
+  /** A message the node took: show it in the thread with what it paid. */
+  const sentOne = (t: TrackRef, receipt: SendReceipt, text: string) => {
+    setPaid(receipt.message_id, receipt.amount_msat);
+    setAllowances(receipt.message_id, { total_msat: receipt.total_msat ?? receipt.amount_msat + (receipt.max_routing_fee_msat ?? 0), max_routing_fee_msat: receipt.max_routing_fee_msat ?? 0 });
+    if (!deliveries[receipt.message_id]) setDeliveries(receipt.message_id, deliveryFromReceipt(receipt));
+    setThreads('t', trackKey(t), (old) => mergeMessages(old ?? [], [sentMessage(receipt, ownId(), text)]));
+    setThreads('fresh', receipt.message_id, true);
+  };
   /** A failed action that is not an approval or budget question stays in the track as a record. */
   const recordFailure = (t: TrackRef, action: string, outcome: Outcome<unknown>) => {
     // A send that did not cross (price, setpoint) is also a membrane reading. A
@@ -457,6 +477,7 @@ export function ControlCenter(props: Props) {
       const r = await act(() => props.source.spendLock());
       if (r.ok) setSpend(r.value);
     },
+    pendingRevision,
     reconcile: () => act(() => props.source.spendReconcile()),
     approveBudget: async (ceilingMsat, preset) => {
       const r = await act(() => props.source.budgetApprove(ceilingMsat, preset));
@@ -497,7 +518,12 @@ export function ControlCenter(props: Props) {
       if (t.kind !== 'peer' && t.kind !== 'room') return { ok: false, error: { code: 'invalid', message: 'nothing to send to' } };
       const r = await act(() => props.source.send(t.id, t.kind === 'room', text, maxMsat, t.kind === 'room' ? Object.fromEntries((roomQuote()?.members ?? []).map((m) => [m.node_id, m.msat])) : undefined, firstContactMsat));
       // The tally moved, or a budget rule stopped the send: either way, re-read it.
-      if (r.ok || isBudgetStop(r.error) || r.error.code === 'spend_unknown') void loadBudget();
+      if (r.ok || isBudgetStop(r.error) || r.error.code === 'spend_unknown' || r.error.code === 'payment_settled_undelivered') void loadBudget();
+      if (!r.ok && r.error.code === 'payment_settled_undelivered' && r.error.undelivered) {
+        // Paid, not delivered: the draft moves here, with the only safe way to resend it.
+        addArtifact(t, { type: 'undelivered', text, paid: r.error.undelivered, note: null, admission: null, pendingId: r.error.pending_id ?? null });
+        return r;
+      }
       if (!r.ok && ['price_changed', 'price_cap_exceeded'].includes(r.error.code)) {
         if (t.kind === 'peer') void attempt('quote', () => props.source.priceQuote(t.id), (q) => {
           if (track() && trackKey(track()!) === trackKey(t)) setQuote(q);
@@ -506,15 +532,89 @@ export function ControlCenter(props: Props) {
           if (track() && trackKey(track()!) === trackKey(t)) setRoomQuote(q);
         });
       }
-      if (r.ok) {
-        const receipt = r.value;
-        setPaid(receipt.message_id, receipt.amount_msat);
-        setAllowances(receipt.message_id, { total_msat: receipt.total_msat ?? receipt.amount_msat + (receipt.max_routing_fee_msat ?? 0), max_routing_fee_msat: receipt.max_routing_fee_msat ?? 0 });
-        if (!deliveries[receipt.message_id]) setDeliveries(receipt.message_id, deliveryFromReceipt(receipt));
-        setThreads('t', trackKey(t), (old) => mergeMessages(old ?? [], [sentMessage(receipt, ownId(), text)]));
-        setThreads('fresh', receipt.message_id, true);
-      }
+      if (r.ok) sentOne(t, r.value, text);
       return recordFailure(t, !r.ok && r.error.code === 'room_partial' ? 'Room send incomplete' : 'Message not sent', r);
+    },
+    retryDelivery: async (t, artifactId, approvedMsat) => {
+      const key = trackKey(t);
+      const a = (artifacts[key] ?? []).find((x) => x.id === artifactId);
+      if (t.kind !== 'peer' || a?.type !== 'undelivered' || !a.paid.retry) {
+        return { ok: false, error: { code: 'retry_unavailable', message: 'Nothing to retry.' } };
+      }
+      // Only the price the card shows can be approved.
+      if (approvedMsat !== undefined && approvedMsat !== a.admission?.total_msat) {
+        return { ok: false, error: { code: 'retry_unavailable', message: 'Nothing to approve.' } };
+      }
+      const text = a.text;
+      const update = (next: Partial<Extract<Artifact, { type: 'undelivered' }>> | null) =>
+        setArtifacts(key, (old) => (old ?? []).flatMap((x) => (x.id !== artifactId ? [x] : next ? [{ ...x, ...next } as Artifact] : [])));
+      const current = () => (artifacts[key] ?? []).some((x) => x.id === artifactId && x.type === 'undelivered' && x.pendingId === a.pendingId);
+      const waiting: Outcome<unknown> = { ok: false, error: { code: 'owner_only', message: 'Approve this retry at your node, then check approval.' } };
+      if (approvedMsat !== undefined) {
+        if (a.ownerApproval) {
+          const ready = await act(() => props.source.firstContactStatus(a.ownerApproval!.id));
+          if (!current()) return waiting;
+          if (!ready.ok) {
+            void props.source.firstContactCancel(a.ownerApproval.id).catch(() => {});
+            update({ ownerApproval: null, note: ready.error.message });
+            return ready;
+          }
+          if (!ready.value.ready) return waiting;
+        } else {
+          const request = await act(() => props.source.firstContactRequest(t.id, approvedMsat));
+          if (!current()) {
+            if (request.ok && request.value) void props.source.firstContactCancel(request.value.id).catch(() => {});
+            return waiting;
+          }
+          if (!request.ok) { update({ note: request.error.message }); return request; }
+          if (request.value) {
+            update({ ownerApproval: request.value, note: waiting.error.message });
+            return waiting;
+          }
+        }
+      }
+      update({ ownerApproval: null });
+      const r = await act(() => props.source.retry(t.id, text, approvedMsat));
+      void loadBudget();
+      if (r.ok) {
+        setPendingRevision((v) => v + 1);
+        update(null);
+        sentOne(t, r.value, text);
+      } else if (r.error.code === 'payment_settled_undelivered' && r.error.undelivered) {
+        const paid = r.error.undelivered;
+        update({ paid, admission: null, pendingId: r.error.pending_id ?? a.pendingId, note: `Still not delivered. Paid for this message so far: ${sats(paid.paid_msat)} ${satUnit(paid.paid_msat)}.` });
+      } else if (r.error.code === 'retry_needs_admission') {
+        // Stopped before paying: the price to approve, when the node could tell.
+        update({ admission: r.error.admission ?? null, note: r.error.message });
+      } else {
+        // A refusal before dispatch (approval, price) keeps the retry; anything else ends it.
+        // A refused approved price is spent: Retry delivery asks for the current one.
+        const ends = ['retry_unavailable', 'spend_unknown'].includes(r.error.code);
+        update({ paid: { ...a.paid, retry: !ends }, note: r.error.message, admission: r.error.code === 'price_cap_exceeded' ? null : a.admission });
+      }
+      return r;
+    },
+    stopRetrying: async (t, pendingId) => {
+      // Only the record this card (or the pending check) showed: never another one.
+      if (!pendingId) return { ok: false, error: { code: 'retry_unavailable', message: 'Check the pending result first.' } };
+      const r = await act(() => props.source.dismissUndelivered(pendingId));
+      void loadBudget();
+      if (r.ok) {
+        setPendingRevision((v) => v + 1);
+        // Every card for that record ends, wherever it was stopped from.
+        for (const key of Object.keys(artifacts)) {
+          for (const a of artifacts[key] ?? []) {
+            if (a.type === 'undelivered' && a.pendingId === pendingId && a.ownerApproval) {
+              void props.source.firstContactCancel(a.ownerApproval.id).catch(() => {});
+            }
+          }
+          if ((artifacts[key] ?? []).some((x) => x.type === 'undelivered' && x.pendingId === pendingId)) {
+            setArtifacts(key, (old) => (old ?? []).filter((x) => !(x.type === 'undelivered' && x.pendingId === pendingId)));
+          }
+        }
+        if (t) addArtifact(t, { type: 'failed', action: 'Stopped retrying', error: { code: 'undelivered_pending', message: r.value } });
+      }
+      return r;
     },
     invoice: async (t, amount, note) => {
       const r = await act(() => props.source.invoiceCreate(Math.round(amount * 1000), note));
@@ -986,7 +1086,7 @@ function Conversation(props: {
                     )}
                   </Match>
                   <Match when={item.type === 'artifact' && item.artifact}>
-                    {(a) => <ArtifactView a={a()} nameOf={props.nameOf} delivery={a().type === 'file' ? props.deliveries[(a() as { receipt: { message_id: string } }).receipt.message_id] : undefined} />}
+                    {(a) => <ArtifactView a={a()} nameOf={props.nameOf} delivery={a().type === 'file' ? props.deliveries[(a() as { receipt: { message_id: string } }).receipt.message_id] : undefined} onRetry={(id, approved) => props.actions.retryDelivery(props.track, id, approved)} onStop={(pendingId) => props.actions.stopRetrying(props.track, pendingId)} />}
                   </Match>
                 </Switch>
               </>
@@ -1127,7 +1227,7 @@ function DoorView(props: { card: DoorCard; at: number; nameOf: (id: string) => s
   );
 }
 
-function ArtifactView(props: { a: Artifact; delivery?: Delivery; nameOf: (id: string) => string }) {
+function ArtifactView(props: { a: Artifact; delivery?: Delivery; nameOf: (id: string) => string; onRetry?: (id: string, approvedMsat?: number) => Promise<unknown>; onStop?: (pendingId: string | null) => Promise<unknown> }) {
   return (
     <Switch>
       <Match when={props.a.type === 'invoice' && props.a}>
@@ -1207,9 +1307,71 @@ function ArtifactView(props: { a: Artifact; delivery?: Delivery; nameOf: (id: st
           );
         }}
       </Match>
+      <Match when={props.a.type === 'undelivered' && props.a}>
+        {(a) => <UndeliveredView a={a() as Extract<Artifact, { type: 'undelivered' }>} onRetry={props.onRetry} onStop={props.onStop} />}
+      </Match>
     </Switch>
   );
 }
+
+/**
+ * Paid, not delivered: the amount, what not to do, and the one safe retry.
+ * When admission may be due again, the retry waits for the owner to approve
+ * the shown price; stopping retries releases the message without paying more.
+ */
+function UndeliveredView(props: {
+  a: Extract<Artifact, { type: 'undelivered' }>;
+  onRetry?: (id: string, approvedMsat?: number) => Promise<unknown>;
+  onStop?: (pendingId: string | null) => Promise<unknown>;
+}) {
+  const [busy, setBusy] = createSignal(false);
+  const copy = () => undeliveredCopy(props.a.paid);
+  const run = async (f: () => Promise<unknown>) => {
+    if (busy()) return;
+    setBusy(true);
+    await f();
+    setBusy(false);
+  };
+  return (
+    <div class="artifact out failed" data-artifact="undelivered" data-paid-msat={props.a.paid.paid_msat}>
+      <span class="kind">{copy().title}</span>
+      <span>{copy().body}</span>
+      <Show when={props.a.paid.retry && props.onRetry}>
+        <Show
+          when={props.a.admission}
+          fallback={
+            <button type="button" class="link" data-retry-delivery disabled={busy()} onClick={() => void run(() => props.onRetry!(props.a.id))}>
+              {busy() ? 'Retrying delivery…' : 'Retry delivery'}
+            </button>
+          }
+        >
+          {(adm) => (
+            <>
+              <p class="hint" data-admission-price={adm().total_msat}>{admissionCopy(adm()).body}</p>
+              <button type="button" class="link" data-retry-approve disabled={busy()} onClick={() => void run(() => props.onRetry!(props.a.id, adm().total_msat))}>
+                {busy() ? 'Checking…' : props.a.ownerApproval ? 'Check node approval and retry' : admissionCopy(adm()).action}
+              </button>
+            </>
+          )}
+        </Show>
+      </Show>
+      <Show when={props.onStop}>
+        <button type="button" class="link" data-stop-retrying disabled={busy()} onClick={() => void run(() => props.onStop!(props.a.pendingId))}>
+          Stop retrying
+        </button>
+      </Show>
+      <Show when={props.a.ownerApproval}>
+        {(approval) => <div data-retry-owner><p>Approve this retry at your node, then check approval.</p><code class="address">{approval().owner_command}</code></div>}
+      </Show>
+      <Show when={props.a.note}>
+        <p class="hint" data-retry-note>{props.a.note}</p>
+      </Show>
+    </div>
+  );
+}
+
+/** The draft was paid for: it now lives on the undelivered card, not in the composer. */
+const paidUndelivered = (r: Outcome<unknown>) => !r.ok && r.error.code === 'payment_settled_undelivered';
 
 const kb = (bytes: number) => (bytes < 1024 ? `${bytes} B` : `${(bytes / 1024).toFixed(bytes < 10_240 ? 1 : 0)} KB`);
 
@@ -1532,7 +1694,7 @@ function Composer(props: {
         if (target() === submittedPeer) setDoor(null);
         setReadmitFor(submittedPeer);
       }
-      if (r.ok && composerRevision === submittedRevision) {
+      if ((r.ok || paidUndelivered(r)) && composerRevision === submittedRevision) {
         setDraft('');
         setDrafted(false);
       } else if (!r.ok && unchanged && (isBudgetStop(r.error) || r.error.code === 'owner_only')) setNote(r.error.message);
@@ -1575,7 +1737,7 @@ function Composer(props: {
     switch (mode()) {
       case 'message':
         r = await props.actions.send(t, draft(), shown().msat!);
-        if (r.ok && unchanged()) {
+        if ((r.ok || paidUndelivered(r)) && unchanged()) {
           setDraft('');
           setDrafted(false);
         } else if (!r.ok && unchanged() && isBudgetStop(r.error)) setNote(r.error.message);
@@ -1828,11 +1990,29 @@ function SpendBar(props: { spend: SpendView | null; error: string | undefined; n
 function Reconcile(props: { actions: Actions }) {
   const [result, setResult] = createSignal<string | null>(null);
   const [checking, setChecking] = createSignal(false);
+  // Paid, not delivered: the owner may stop retrying (it dispatches nothing).
+  // The record the check showed: Stop retrying names it, never whatever is pending later.
+  const [undelivered, setUndelivered] = createSignal<string | null>(null);
+  createEffect(on(props.actions.pendingRevision, () => {
+    setUndelivered(null);
+    setResult(null);
+  }, { defer: true }));
   const reconcile = async () => {
     if (checking()) return;
     setChecking(true);
+    const revision = props.actions.pendingRevision();
     const outcome = await props.actions.reconcile();
+    if (revision !== props.actions.pendingRevision()) { setChecking(false); return; }
     setResult(outcome.ok ? outcome.value : outcome.error.message);
+    setUndelivered(!outcome.ok && outcome.error.code === 'undelivered_pending' ? outcome.error.pending_id ?? null : null);
+    setChecking(false);
+  };
+  const stop = async () => {
+    if (checking()) return;
+    setChecking(true);
+    const outcome = await props.actions.stopRetrying(null, undelivered());
+    setResult(outcome.ok ? outcome.value : outcome.error.message);
+    setUndelivered(null);
     setChecking(false);
   };
   return (
@@ -1840,6 +2020,11 @@ function Reconcile(props: { actions: Actions }) {
       <button type="button" class="link" data-spend-reconcile disabled={checking()} onClick={() => void reconcile()}>
         Check pending result
       </button>
+      <Show when={undelivered()}>
+        <button type="button" class="link" data-stop-retrying disabled={checking()} onClick={() => void stop()}>
+          Stop retrying
+        </button>
+      </Show>
       <Show when={result()}><p class="hint" data-reconciliation>{result()}</p></Show>
     </>
   );

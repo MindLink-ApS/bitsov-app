@@ -7,6 +7,8 @@ import { feeCeiling } from './format';
 import { ago, sats, satUnit, shortId } from './format';
 import type {
   ActionError,
+  AdmissionPrice,
+  Undelivered,
   BudgetView,
   Artifact,
   Delivery,
@@ -139,10 +141,45 @@ export function costToSend(
 /** Any rejection from the host, as an action error. */
 export function asActionError(e: unknown): ActionError {
   if (e && typeof e === 'object' && 'code' in e && 'message' in e) {
-    const { code, message } = e as ActionError;
-    return { code, message: String(message) };
+    const { code, message, undelivered, admission, pending_id } = e as ActionError;
+    const out: ActionError = { code, message: String(message) };
+    if (typeof pending_id === 'string' && pending_id) out.pending_id = pending_id;
+    if (undelivered && msat(undelivered.paid_msat)) out.undelivered = { paid_msat: undelivered.paid_msat, retry: undelivered.retry === true };
+    if (admission && msat(admission.admission_msat) && msat(admission.message_msat) && msat(admission.total_msat)
+      && msat(admission.max_routing_fee_msat ?? 0)
+      && admission.total_msat === admission.admission_msat + admission.message_msat + (admission.max_routing_fee_msat ?? 0)) {
+      out.admission = { admission_msat: admission.admission_msat, message_msat: admission.message_msat, max_routing_fee_msat: admission.max_routing_fee_msat ?? 0, total_msat: admission.total_msat, quoted: admission.quoted === true };
+    }
+    return out;
   }
   return { code: 'node', message: typeof e === 'string' ? e : String((e as Error)?.message ?? e) };
+}
+
+const msat = (n: unknown): n is number => Number.isSafeInteger(n) && (n as number) >= 0;
+
+/**
+ * Paid, not delivered (node 502 `payment_settled_send_incomplete`). Never "not
+ * sent", never "send again": a second send could pay twice.
+ */
+export function undeliveredCopy(u: Undelivered): { title: string; body: string } {
+  const paid = `${sats(u.paid_msat)} ${satUnit(u.paid_msat)}`;
+  return {
+    title: `Paid ${paid} · not delivered yet`,
+    body: u.retry
+      ? 'Payment settled, message not yet delivered. Do not send it again. Retry delivery pays nothing new: your node re-sends the proof it already paid for. If anything is still due (this message’s price, or admission again after a reconnect), it stops before paying and asks you first, with the price.'
+      : 'Payment settled, message not yet delivered. Do not send it again: that could pay twice. Check the pending result before sending anything else.',
+  };
+}
+
+/** The approval a paid, undelivered message needs once Retry delivery paid nothing new. Nothing is paid until the owner approves. */
+export function admissionCopy(a: AdmissionPrice): { body: string; action: string } {
+  const s = (m: number) => `${sats(m)} ${satUnit(m)}`;
+  return {
+    body: a.quoted
+      ? `Delivering it needs a new payment. Their price: ${s(a.admission_msat)} to be admitted again, then ${s(a.message_msat)} for this message. Plus up to ${s(a.max_routing_fee_msat ?? 0)} in network fees (${s(a.total_msat)} in all). If your node is still admitted, it pays only the message and its network fee.`
+      : `Delivering it needs a new payment: this message’s ${s(a.message_msat)}, and about ${s(a.admission_msat)} (what admission cost before) if the contact asks for it again. Plus up to ${s(a.max_routing_fee_msat ?? 0)} in network fees (${s(a.total_msat)} in all). Your node refuses before paying if the real price is higher.`,
+    action: `Approve up to ${s(a.total_msat)} and retry`,
+  };
 }
 
 /** Errors that mean "the owner must approve (again)", not "the send failed". */

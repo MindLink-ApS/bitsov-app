@@ -176,20 +176,22 @@ impl Book {
     /// never shorter. Unsettled reservations keep their own lines, since a
     /// later settle or release finds them by id.
     pub fn prune(&mut self, now_ms: u64) {
-        self.prune_retaining(now_ms, None);
+        self.prune_retaining(now_ms, &[]);
     }
 
-    /// Keep the journal's exact entry until its accounting is durably cleared,
-    /// including across a crash after settlement and before journal removal.
-    pub fn prune_retaining(&mut self, now_ms: u64, keep_id: Option<&str>) {
-        self.ledger.retain(|e| in_window(e, now_ms) || Some(e.id.as_str()) == keep_id);
+    /// Keep the journal's exact entries (the original attempt's and a retry's)
+    /// until its accounting is durably cleared, including across a crash after
+    /// settlement and before journal removal.
+    pub fn prune_retaining(&mut self, now_ms: u64, keep: &[&str]) {
+        let kept = |e: &Entry| keep.contains(&e.id.as_str());
+        self.ledger.retain(|e| in_window(e, now_ms) || kept(e));
         if self.ledger.len() <= LEDGER_MAX {
             return;
         }
         let mut merged: BTreeMap<(String, bool), Entry> = BTreeMap::new();
         let mut open = Vec::new();
         for e in self.ledger.drain(..) {
-            if !e.settled || Some(e.id.as_str()) == keep_id {
+            if !e.settled || kept(&e) {
                 open.push(e);
                 continue;
             }
@@ -237,7 +239,8 @@ impl Book {
     }
 
     pub fn reserve(&mut self, id: &str, target: &str, room: bool, msat: u64, now_ms: u64) {
-        self.prune(now_ms);
+        // The journal-aware writer prunes after the edit, retaining current
+        // and rollback accounting. Pruning here would erase rows it still needs.
         self.ledger.push(Entry { id: id.to_string(), at_ms: now_ms, target: target.to_string(), room, msat, settled: false });
     }
 
