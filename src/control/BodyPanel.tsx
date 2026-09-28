@@ -422,7 +422,7 @@ function SetpointsOrgan(props: OrganismProps) {
       summary={<span class="sats">{summary()}</span>}
       fresh={fresh()}
       sample={props.sample}
-      source="Your daily budgets, inside the node’s grant when it reports one."
+      source="App payment principal limits over a rolling 24 hours. Any finite node grant applies separately. See Budget for exclusions."
     >
       <Switch>
         <Match when={h().state === 'unknown'}>
@@ -432,17 +432,17 @@ function SetpointsOrgan(props: OrganismProps) {
           {(x) => (
             <>
               <p class="organ-line" data-setpoint-none>
-                <Show when={x().expired}>Your daily approval ended. </Show>No setpoint. Paid sends ask each time.
+                <Show when={x().expired}>Your daily approval ended. </Show>Automatic payment is off. Manual messages and files still count against the saved app limit.
               </p>
               <Show when={x().rows.length > 0}>
-                <p class="organ-note">{x().rows.length} saved {x().rows.length === 1 ? 'budget' : 'budgets'} take effect once you approve a daily total.</p>
+                <p class="organ-note">{x().rows.length} saved {x().rows.length === 1 ? 'budget' : 'budgets'} still limit manual messages and files; approve automatic messages from a conversation.</p>
               </Show>
             </>
           )}
         </Match>
         <Match when={h().state === 'paused'}>
           <p class="organ-line" data-setpoint-paused>
-            Paused. Nothing leaves your node until you resume.{' '}
+            Paused. New app payments are blocked; in-flight payments, owner commands and background workers can still spend.{' '}
             <button type="button" class="link" onClick={() => props.onResume()}>Resume</button>
           </p>
         </Match>
@@ -452,11 +452,11 @@ function SetpointsOrgan(props: OrganismProps) {
         <Match when={h().state === 'holding' && (h() as Extract<Homeostasis, { state: 'holding' }>)}>
           {(x) => (
             <>
-              <SetpointBar label={`daily · ${hoursLeft(x().until_ms, props.now)} h`} spent={x().spent_msat} limit={x().ceiling_msat} note={`${hoursLeft(x().until_ms, props.now)} h left`} data="ceiling" />
+              <SetpointBar label="app principal · 24 h" spent={x().spent_msat} limit={x().ceiling_msat} note={`${hoursLeft(x().until_ms, props.now)} h left`} data="ceiling" />
               <Show when={x().grant}>
                 {(g) => (
                   <p class="organ-line" data-setpoint-grant>
-                    Node grant: <span class="sats">{sats(g().remaining_msat)}</span> of {sats(g().budget_msat)} sats left, {hoursLeft(g().expires_at_ms, props.now)} h
+                    Finite node grant: <span class="sats">{sats(g().remaining_msat)}</span> of {sats(g().budget_msat)} sats left, {hoursLeft(g().expires_at_ms, props.now)} h
                   </p>
                 )}
               </Show>
@@ -481,7 +481,7 @@ function SetpointsOrgan(props: OrganismProps) {
         <p class="organ-actions">
           <button type="button" class="link" data-setpoint-lower onClick={() => props.onSetpoints()}>Lower a setpoint</button>
           <Show when={h().state === 'holding'}>
-            <button type="button" class="link" data-setpoint-pause onClick={() => props.onPauseAll()}>Pause all</button>
+            <button type="button" class="link" data-setpoint-pause onClick={() => props.onPauseAll()}>Pause app payments</button>
           </Show>
         </p>
       </Show>

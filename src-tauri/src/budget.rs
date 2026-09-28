@@ -1,10 +1,12 @@
 //! Invisible payments (B2): per-contact and per-room budgets, and the owner's
 //! one approval that lets messages pay inside them without a prompt.
+//! Manual-window messages, files, invoice payments and keysend share the same
+//! daily principal book. Fees and independent owner/node actions are outside.
 //!
 //! # What is stored, and what is not
 //!
 //! - **Stored** (`app-spend/budget-<node>.json`, 0600): budget *numbers* and a
-//!   rolling 24-hour ledger of what message sends reserved and paid. Nothing in
+//!   rolling 24-hour ledger of what app sends reserved and paid. Nothing in
 //!   the file can spend: no token, no scope, no grant, no approval state.
 //! - **Not stored**: the owner's approval. [`Autopay`] lives in host memory for
 //!   at most [`BUDGET_WINDOW_MS`] and ends when the app quits. After a restart
@@ -30,6 +32,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::act::{ActionError, SpendBasis};
 use crate::grant::GrantSummary;
+
+// Separate tally rows: Lightning destinations are not BitSov contact node IDs.
+pub const INVOICE_PAYMENTS: &str = "app:invoice-payments";
+pub const KEYSEND_PAYMENTS: &str = "app:keysend-payments";
 
 pub const DAY_MS: u64 = 24 * 60 * 60 * 1000;
 
@@ -81,7 +87,7 @@ pub fn preset(id: PresetId) -> Preset {
 
 // ---- the book (persisted numbers) ---------------------------------------------
 
-/// One reservation or payment by a message send.
+/// One reservation or payment by an app-initiated paid send.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Entry {
@@ -113,8 +119,9 @@ pub struct Book {
 }
 
 fn in_window(entry: &Entry, now_ms: u64) -> bool {
-    // An entry from a clock that has since moved back still counts.
-    entry.at_ms.saturating_add(DAY_MS) > now_ms
+    // Unknown liabilities never age out. An entry from a clock that has
+    // since moved back still counts too.
+    !entry.settled || entry.at_ms.saturating_add(DAY_MS) > now_ms
 }
 
 impl Book {
@@ -156,21 +163,27 @@ impl Book {
             .sum()
     }
 
-    /// Forget only what has left the 24-hour window. Every live charge stays
+    /// Forget only settled charges that have left the 24-hour window. Every live charge stays
     /// counted: past [`LEDGER_MAX`], settled entries of one contact or room
     /// merge into a single entry holding their sum at the newest time. That
     /// can keep sats counted a little longer than 24 hours (under-spending),
     /// never shorter. Unsettled reservations keep their own lines, since a
     /// later settle or release finds them by id.
     pub fn prune(&mut self, now_ms: u64) {
-        self.ledger.retain(|e| in_window(e, now_ms));
+        self.prune_retaining(now_ms, None);
+    }
+
+    /// Keep the journal's exact entry until its accounting is durably cleared,
+    /// including across a crash after settlement and before journal removal.
+    pub fn prune_retaining(&mut self, now_ms: u64, keep_id: Option<&str>) {
+        self.ledger.retain(|e| in_window(e, now_ms) || Some(e.id.as_str()) == keep_id);
         if self.ledger.len() <= LEDGER_MAX {
             return;
         }
         let mut merged: BTreeMap<(String, bool), Entry> = BTreeMap::new();
         let mut open = Vec::new();
         for e in self.ledger.drain(..) {
-            if !e.settled {
+            if !e.settled || Some(e.id.as_str()) == keep_id {
                 open.push(e);
                 continue;
             }
@@ -223,8 +236,13 @@ impl Book {
     }
 
     /// The node reported what was paid. Over the reservation is recorded as is.
-    pub fn settle(&mut self, id: &str, msat: u64) {
+    pub fn settle(&mut self, id: &str, msat: u64, now_ms: u64) {
         if let Some(e) = self.ledger.iter_mut().rev().find(|e| e.id == id) {
+            // A delayed terminal result may have paid recently. Conservatively
+            // count an aged liability for a new rolling day when resolving it.
+            if !e.settled && e.at_ms.saturating_add(DAY_MS) <= now_ms {
+                e.at_ms = now_ms;
+            }
             e.msat = msat;
             e.settled = true;
         }
@@ -372,8 +390,9 @@ fn sats(msat: u64) -> String {
 
 /// Decide, before any request, whether this message may be paid and by what.
 ///
-/// Budgets are limits and approvals are authority: a contact's budget holds
-/// even inside a ten-minute window, and only the budget route is automatic.
+/// Budgets are limits and approvals are authority: contact budgets
+/// and the global daily ceiling hold even inside a ten-minute window.
+/// Only the budget route is automatic; files still require manual authority.
 pub fn plan(book: &Book, ask: Ask<'_>) -> Result<Plan, ActionError> {
     if book.paused {
         return Err(ActionError::new("budget_paused", "Payments are paused. Resume them to send."));
@@ -381,7 +400,7 @@ pub fn plan(book: &Book, ask: Ask<'_>) -> Result<Plan, ActionError> {
     if book.full() {
         return Err(ActionError::new(
             "budget_ledger_full",
-            "Too many unresolved sends in the last 24 hours to track another one. Check the pending results first.",
+            "Too many unresolved sends to track another one. Check the pending results first.",
         ));
     }
     let who = if ask.room { "this room" } else { "this contact" };
@@ -398,7 +417,18 @@ pub fn plan(book: &Book, ask: Ask<'_>) -> Result<Plan, ActionError> {
             ));
         }
     }
-    if let Some(approved) = ask.autopay {
+    let ceiling = ask.autopay.unwrap_or(book.ceiling_msat).min(book.ceiling_msat);
+    let spent = book.spent_total(ask.now_ms);
+    if spent.saturating_add(ask.max_msat) > ceiling {
+        return Err(ActionError::new(
+            "ceiling_exhausted",
+            format!(
+                "You have used {} of your {} sats app payment principal limit (rolling 24 hours), and this costs {}. Raise the limit to send.",
+                sats(spent), sats(ceiling), sats(ask.max_msat)
+            ),
+        ));
+    }
+    if ask.autopay.is_some() {
         let confirm = match (known, ask.first_contact_msat) {
             (Some(_), _) => None,
             (None, None) => {
@@ -418,17 +448,6 @@ pub fn plan(book: &Book, ask: Ask<'_>) -> Result<Plan, ActionError> {
                 Some(msat)
             }
         };
-        let ceiling = approved.min(book.ceiling_msat);
-        let spent = book.spent_total(ask.now_ms);
-        if spent.saturating_add(ask.max_msat) > ceiling {
-            return Err(ActionError::new(
-                "ceiling_exhausted",
-                format!(
-                    "You have used {} of your {} sats daily total, and this costs {}. Raise the daily total to send.",
-                    sats(spent), sats(ceiling), sats(ask.max_msat)
-                ),
-            ));
-        }
         return Ok(Plan { route: Route::Budget, confirm });
     }
     ask.window?;
@@ -597,7 +616,7 @@ mod tests {
     fn exhaustion_is_refused_with_the_numbers() {
         let mut b = book_with_maya(5000);
         b.reserve("r1", MAYA, false, 2000, T - 1000);
-        b.settle("r1", 2000);
+        b.settle("r1", 2000, T);
         b.reserve("r2", MAYA, false, 2000, T - 500);
         assert!(plan(&b, ask(MAYA, 1000, Some(500_000))).is_ok());
         let e = plan(&b, ask(MAYA, 2000, Some(500_000))).unwrap_err();
@@ -668,7 +687,7 @@ mod tests {
         let mut b = book_with_maya(50_000);
         b.reserve("r1", MAYA, false, 2000, T);
         b.reserve("r2", MAYA, false, 2000, T);
-        b.settle("r1", 1500);
+        b.settle("r1", 1500, T);
         b.release("r2");
         assert_eq!(b.spent(MAYA, false, T), 1500);
         let v = view(&b, Autopay::default().view(T), false, T);
@@ -680,7 +699,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut b = book_with_maya(50_000);
         b.reserve("r1", MAYA, false, 2000, T);
-        b.settle("r1", 2000);
+        b.settle("r1", 2000, T);
         b.reserve("r2", MAYA, false, 3000, T);
         save(dir.path(), &b).unwrap();
 

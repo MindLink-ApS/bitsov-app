@@ -51,6 +51,11 @@ def run(r):
                    f'(the live owner grant was reused): {r.ui_try("text", within={"selector": "[data-composer]"})!r}'[:400])
         s.check(f'{what}: spending window open', r.wait_until(lambda: ready in r.text('[data-send]'), 20), r.text('[data-send]'))
 
+    def app_tally():
+        r.ui('click', selector='[data-tab="budget"]')
+        r.ui('wait', selector='[data-tally-total]')
+        return float(r.text('[data-tally-total]').split('/')[0].strip().replace(',', ''))
+
     def out_count():
         return len(r.ui('attrs', selector='article.msg.out', names=['data-message']))
 
@@ -198,6 +203,7 @@ def run(r):
         bolt = r.ui_try('wait', selector='[data-artifact="invoice"] code[data-bolt11]', timeoutMs=20000)
         s.snap('request-invoice')
         s.check('request: invoice + QR created on node A', bolt and r.ui_try('exists', selector='svg.qr[aria-label="Invoice as a QR code"]'))
+        before_pay = app_tally()
         # Pay: B's owner hands A an invoice (made on B for this test).
         inv = r.api('b', 'POST', '/payments/invoice', {'amount_msat': 3000, 'description': 'UI-E2E pay'}, expect=200)[1]
         bolt11 = inv.get('bolt11') or inv.get('payment_request') or inv.get('invoice')
@@ -216,6 +222,11 @@ def run(r):
         settled_b = r.wait_until(lambda: any(p.get('payment_hash') == inv.get('payment_hash') and str(p.get('status')).lower() == 'settled'
                                              for p in r.get('b', '/payments')), 20)
         s.check('pay: B\'s invoice settled', settled_b, status)
+        s.check('payment scope and fee warning are visible', 'Routing fees are outside' in r.text('[data-budget-payment]'))
+        s.check('app invoice payment counts 3 sats in the shared daily book', r.wait_until(lambda: app_tally() == before_pay + 3, 15))
+        s.check('budget scope lists exclusions and finite G1 grant', 'does not refill daily' in r.text('[data-budget-scope]'))
+        s.snap('budget-scope-copy')
+        before_file = app_tally()
         # File send.
         r.ui('click', selector='[data-composer-mode="file"]')
         payload = b'UI-E2E throwaway file bytes\n'
@@ -234,6 +245,24 @@ def run(r):
             data = r.get('b', '/files/' + got[0]['id'])
             same = base64.b64decode(data['data_b64']) == payload
         s.check('file: B received identical bytes', filed and same, r.text('[data-artifact="file"]') if filed else r.text()[:400])
+        s.check('file counts 3 sats against the shared daily book', r.wait_until(lambda: app_tally() == before_file + 3, 15))
+        row = f'[data-budget-row="{b}"]'
+        original_limit = r.text(row + ' [data-row-tally]').split('/')[1].split('sats')[0].strip()
+        r.ui('click', selector=row + ' [data-budget-edit]')
+        r.ui('fill', selector=row + ' [data-budget-input]', value='1')
+        r.ui('click', selector=row + ' [data-budget-save]')
+        r.ui('wait', selector=row + ' [data-budget-edit]')
+        r.ui('attach', selector='input[data-file-input]', filename='budget-refused.txt', mime='text/plain',
+             data_b64=base64.b64encode(payload).decode())
+        r.ui('click', selector='[data-send]')
+        refused = r.ui_try('wait', selector='[data-composer-note]', text='Raise the budget', timeoutMs=10000)
+        s.check('file refused by app contact budget', refused, r.ui_try('text', within={'selector': '[data-composer-note]'}))
+        s.check('refused file never reached B', not any(f.get('filename') == 'budget-refused.txt' for f in r.get('b', '/files')))
+        s.check('refusal leaves shared tally unchanged', app_tally() == before_file + 3)
+        s.snap('file-budget-refused')
+        r.ui('click', selector=row + ' [data-budget-edit]')
+        r.ui('fill', selector=row + ' [data-budget-input]', value=original_limit)
+        r.ui('click', selector=row + ' [data-budget-save]')
         # Room: the app has no screen to create rooms or add members, so the
         # owner creates it on node A (admin), then uses it from the app.
         room = r.api('a', 'POST', '/rooms', {'name': 'UI-E2E A+B'}, expect=200)[1]['id']

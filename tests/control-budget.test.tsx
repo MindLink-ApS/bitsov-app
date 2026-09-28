@@ -145,11 +145,26 @@ describe('invisible payments in the composer and the context panel', () => {
     await vi.waitFor(() => expect($('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('2000'));
   }
 
+  it('shows the daily scope and exclusions together, and warns at direct spending', async () => {
+    stubHost(open([{ target: MAYA, room: false, limit_msat: 50_000, spent_msat: 0 }]));
+    await openShell();
+    $<HTMLButtonElement>('[data-tab="budget"]')!.click();
+    await vi.waitFor(() => expect($('[data-budget-scope]')).not.toBeNull());
+    expect(text('[data-budget-scope]').replace(/\s+/g, ' ').trim()).toMatchInlineSnapshot(`"App payment principal · rolling 24 hours Covers automatic and manual-window messages, room sends, files, app invoice payments and keysend, and reported admission principal. Not covered: routing fees, channel opening/closing, on-chain transfers and fees, owner-direct CLI/API commands, or background workers. G1 is a separate finite node grant; it does not refill daily. This is not a wallet-wide spending limit."`);
+    $<HTMLButtonElement>('[data-composer-mode="pay"]')!.click();
+    expect(text('[data-budget-payment]')).toContain('count against the app daily principal limit');
+    $<HTMLButtonElement>('[data-composer-mode="file"]')!.click();
+    expect(text('[data-budget-file]')).toContain('count against');
+    $<HTMLButtonElement>('[data-tab="wallet"]')!.click();
+    expect(text('[data-budget-wallet-warning]')).toContain('Channel and on-chain actions');
+    expect(text('[data-budget-wallet-warning]')).toContain('outside');
+  });
+
   it('approves a daily total once, then messages go with no prompt and the price still shown', async () => {
     const host = stubHost(budgetView({ rows: [{ target: MAYA, room: false, limit_msat: 50_000, spent_msat: 0 }] }));
     await openShell();
     type('[data-composer] textarea', 'gm Maya');
-    await vi.waitFor(() => expect(text('[data-send]')).toBe('Approve daily budget'));
+    await vi.waitFor(() => expect(text('[data-send]')).toBe('Approve app principal limit'));
     expect(text('[data-budget-setup]')).toContain('Someone new always asks first');
 
     // The owner picks a preset; the tap is the approval. Nothing is sent by it.
@@ -859,7 +874,7 @@ describe('invisible payments in the composer and the context panel', () => {
     await vi.waitFor(() => expect(text('[data-autopay]')).toContain('Paused'));
     type('[data-composer] textarea', 'while paused');
     await vi.waitFor(() => expect(text('[data-send]')).toBe('Resume payments'));
-    expect(text('[data-budget-paused]')).toContain('Nothing leaves your node');
+    expect(text('[data-budget-paused]')).toContain('New app payments are blocked');
     submit();
     await vi.waitFor(() => expect(host.used('budget_resume')).toHaveLength(1));
     expect(host.used('message_send')).toHaveLength(0);
@@ -955,7 +970,33 @@ describe('invisible payments in the composer and the context panel', () => {
     await openShell();
     $<HTMLButtonElement>('[data-tab="budget"]')!.click();
     await vi.waitFor(() => expect($('[data-node-grant]')).not.toBeNull());
-    expect(text('[data-node-grant]')).toBe('Your node allows 396 of 400 sats more, at most 50 per payment, for 30 min.');
+    expect(text('[data-node-grant]')).toBe('Your finite node grant allows 396 of 400 sats more, at most 50 per payment, for 30 min.');
+  });
+
+  it('labels invoice/keysend tally rows without offering contact-budget edits', async () => {
+    stubHost(open([
+      { target: 'app:invoice-payments', room: false, limit_msat: null, spent_msat: 1000 },
+      { target: 'app:keysend-payments', room: false, limit_msat: null, spent_msat: 2000 },
+    ], { spent_msat: 3000 }));
+    await openShell();
+    $<HTMLButtonElement>('[data-tab="budget"]')!.click();
+    expect(text('[data-budget-row="app:invoice-payments"]')).toContain('Invoice payments');
+    expect(text('[data-budget-row="app:keysend-payments"]')).toContain('Keysend payments');
+    expect($('[data-panel="budget"] [data-budget-edit]')).toBeNull();
+  });
+
+  it('explains a manual message refusal while automatic approval is off', async () => {
+    const host = stubHost(budgetView(), {
+      message_send: () => Promise.reject({ code: 'ceiling_exhausted', message: 'Your app daily limit is used up. Nothing was sent.' }),
+    });
+    host.state.spend = { state: 'open', basis: 'app_lock', open_until_ms: Date.now() + 600_000, pending: null, window_ms: 600_000 };
+    await openShell();
+    type('[data-composer] textarea', 'keep this manual draft');
+    submit();
+    await vi.waitFor(() => expect(text('[data-composer-note]')).toContain('Your app daily limit is used up.'));
+    expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('keep this manual draft');
+    expect($('[data-artifact="failed"]')).toBeNull();
+    expect(host.used('message_send')).toHaveLength(1);
   });
 
   it('files and payments still use the ten-minute window', async () => {
@@ -1010,6 +1051,37 @@ describe('sample source budgets', () => {
     const v = await s.budgetStatus();
     expect(v.rows.find((r) => r.target === gamma)?.limit_msat).toBe(20_000);
     await expect(s.pay('lntbs10n1samplenotpayable0donotpay', 1000, 1000)).rejects.toMatchObject({ code: 'spend_locked' });
+  });
+
+  it('sample files and manual messages share the daily tally and refusal', async () => {
+    const s = sampleSource({ firstLiveMs: 1e9 });
+    await s.budgetApprove(11000, 'careful');
+    // Cancel the pending automatic approval, then open only the manual window.
+    await s.spendLock();
+    await s.spendRequest();
+    await s.spendStatus();
+    await s.spendStatus();
+    expect((await s.budgetStatus()).autopay.state).toBe('off');
+    await s.budgetSet(maya, false, 0);
+    // Fixture starts with 8 sats. A 3-sat file fills the shared 11-sat limit.
+    await s.fileSend(maya, 'a.txt', 'text/plain', 'aGk=', 3000);
+    expect((await s.budgetStatus()).spent_msat).toBe(11000);
+    await expect(s.send(maya, false, 'hi', 2000)).rejects.toMatchObject({ code: 'ceiling_exhausted' });
+    await expect(s.fileSend(maya, 'b.txt', 'text/plain', 'aGk=', 3000)).rejects.toMatchObject({ code: 'ceiling_exhausted' });
+  });
+
+  it('sample invoice and keysend count and refuse against the same app limit', async () => {
+    const s = sampleSource({ firstLiveMs: 1e9 });
+    await s.budgetApprove(10000, 'careful');
+    await s.spendLock();
+    await s.spendRequest();
+    await s.spendStatus();
+    await s.spendStatus();
+    await s.pay('lntbs10n1samplenotpayable0donotpay', 1000, 1000);
+    await s.keysend('02' + 'ab'.repeat(32), 1000, null, 1000);
+    expect((await s.budgetStatus()).spent_msat).toBe(10000);
+    await expect(s.pay('lntbs10n1samplenotpayable0donotpay', 1000, 1000)).rejects.toMatchObject({ code: 'ceiling_exhausted' });
+    await expect(s.keysend('02' + 'ab'.repeat(32), 1000, null, 1000)).rejects.toMatchObject({ code: 'ceiling_exhausted' });
   });
 
   it('refuses over budget, and pause stops everything until resumed', async () => {

@@ -194,7 +194,7 @@ describe('Body panel', () => {
     expect($('[data-immune]')?.textContent).toBe('Evidence keeping: not built.');
     expect($('[data-nucleus-backup]')?.textContent).toContain('not verified');
     // The sample's daily approval starts off, like after a restart.
-    await vi.waitFor(() => expect($('[data-setpoint-none]')?.textContent).toContain('No setpoint. Paid sends ask each time.'));
+    await vi.waitFor(() => expect($('[data-setpoint-none]')?.textContent).toContain('Automatic payment is off. Manual messages and files still count against the saved app limit.'));
     // No hourly bars before the node can report them (N1).
     expect($('[data-organ="metabolism"]')?.textContent).toContain('N1');
     expect(mount.querySelector('[data-organ="metabolism"] .bars')).toBeNull();
