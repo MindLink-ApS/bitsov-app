@@ -358,6 +358,92 @@ describe('invisible payments in the composer and the context panel', () => {
     },
   );
 
+  it('a stale card read cannot inherit consent after the input changes back', async () => {
+    let finishA!: (value: ReturnType<typeof card>) => void;
+    const pendingA = new Promise<ReturnType<typeof card>>(resolve => { finishA = resolve; });
+    const a = { ...card(STRANGER, 'local', 3000), endpoint: '192.168.1.21:9735', link: INTRO };
+    const b = { ...card(NEW, 'local', 3000), endpoint: '192.168.1.22:9735', link: INTRO + 'B' };
+    const host = stubHost(open([]), {
+      introduction_mine: () => card(OWN, 'public', 10000),
+      introduction_read: args => args!.text === a.link ? pendingA : b,
+    });
+    await openShell();
+    $<HTMLButtonElement>('[data-track="new"]')!.click();
+    type('[data-intro-text]', a.link);
+    $<HTMLButtonElement>('[data-intro-open] button[type="submit"]')!.click();
+    type('[data-intro-text]', b.link);
+    $<HTMLButtonElement>('[data-intro-open] button[type="submit"]')!.click();
+    await vi.waitFor(() => expect($(`[data-door-card="${NEW}"]`)).not.toBeNull());
+    $<HTMLInputElement>('[data-door-allow-local]')!.click();
+    expect($<HTMLInputElement>('[data-door-allow-local]')!.checked).toBe(true);
+    type('[data-intro-text]', a.link);
+    finishA(a);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect($('[data-door-card]')).toBeNull();
+    expect(host.used('introduction_open')).toHaveLength(0);
+  });
+
+  it.each(['success', 'failure'])('a stale read %s revokes consent without replacing the current card', async outcome => {
+    let resolveA!: (value: ReturnType<typeof card>) => void;
+    let rejectA!: (error: Error) => void;
+    const pendingA = new Promise<ReturnType<typeof card>>((resolve, reject) => { resolveA = resolve; rejectA = reject; });
+    const a = card(STRANGER, 'local', 3000);
+    const b = { ...card(NEW, 'local', 3000), endpoint: '192.168.1.22:9735', link: INTRO + 'B' };
+    stubHost(open([]), {
+      introduction_mine: () => card(OWN, 'public', 10000),
+      introduction_read: args => args!.text === INTRO ? pendingA : b,
+    });
+    await openShell();
+    $<HTMLButtonElement>('[data-track="new"]')!.click();
+    type('[data-intro-text]', INTRO);
+    $<HTMLButtonElement>('[data-intro-open] button[type="submit"]')!.click();
+    type('[data-intro-text]', b.link);
+    $<HTMLButtonElement>('[data-intro-open] button[type="submit"]')!.click();
+    await vi.waitFor(() => expect($(`[data-door-card="${NEW}"]`)).not.toBeNull());
+    $<HTMLInputElement>('[data-door-allow-local]')!.click();
+    expect($<HTMLButtonElement>('[data-door-continue]')!.disabled).toBe(false);
+    if (outcome === 'success') resolveA(a);
+    else rejectA(new Error('Old card error'));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect($(`[data-door-card="${NEW}"]`)).not.toBeNull();
+    expect($<HTMLInputElement>('[data-door-allow-local]')!.checked).toBe(false);
+    expect($<HTMLButtonElement>('[data-door-continue]')!.disabled).toBe(true);
+    expect(text('[data-door-error]')).not.toContain('Old card error');
+  });
+
+  it.each(['node id', 'endpoint', 'signature'])('changing the card %s needs fresh local consent', async changed => {
+    const original = card(STRANGER, 'local', 3000);
+    // The canonical host-verified link includes the entire card and signature.
+    const replacement = {
+      ...original,
+      node_id: changed === 'node id' ? NEW : original.node_id,
+      endpoint: changed === 'endpoint' ? '192.168.1.99:9735' : original.endpoint,
+      link: INTRO + '-new-signature',
+    };
+    let next = original;
+    const host = stubHost(open([]), {
+      introduction_mine: () => card(OWN, 'public', 10000),
+      introduction_read: () => next,
+      introduction_open: () => replacement,
+    });
+    await openShell();
+    $<HTMLButtonElement>('[data-track="new"]')!.click();
+    type('[data-intro-text]', INTRO);
+    $<HTMLButtonElement>('[data-intro-open] button[type="submit"]')!.click();
+    await vi.waitFor(() => expect($('[data-door-card]')).not.toBeNull());
+    $<HTMLInputElement>('[data-door-allow-local]')!.click();
+    expect($<HTMLButtonElement>('[data-door-continue]')!.disabled).toBe(false);
+    next = replacement;
+    $<HTMLButtonElement>('[data-intro-open] button[type="submit"]')!.click();
+    await vi.waitFor(() => expect($('[data-door-card]')).not.toBeNull());
+    expect($<HTMLInputElement>('[data-door-allow-local]')!.checked).toBe(false);
+    $<HTMLButtonElement>('[data-door-continue]')!.click();
+    expect(host.used('introduction_open')).toHaveLength(0);
+    $<HTMLInputElement>('[data-door-allow-local]')!.click();
+    $<HTMLButtonElement>('[data-door-continue]')!.click();
+    await vi.waitFor(() => expect(host.used('introduction_open')[0]?.args).toEqual({ text: replacement.link, allow_local: true }));
+  });
+
   it('a card the host refuses never reaches Continue', async () => {
     const host = stubHost(open([]), {
       introduction_mine: () => { throw 'Your node cannot sign an introduction yet. Share your node id instead.'; },
