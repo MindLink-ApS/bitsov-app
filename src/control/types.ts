@@ -159,7 +159,17 @@ export type WalletOverview = {
 };
 
 /** `node_overview` — `GET /status`, projected. */
+export type NodeReadiness = {
+  money_ready: boolean;
+  state: string;
+  retry_attempt: number;
+  retry_after_secs: number | null;
+  events: { sequence: number; timestamp: number; state: string; money_ready: boolean }[];
+};
+
 export type NodeOverview = {
+  money_ready?: boolean | null;
+  readiness?: NodeReadiness | null;
   node_id: string;
   status: string;
   version: string | null;
@@ -282,7 +292,7 @@ export type ActionError = {
     | 'room_unreachable'
     // Paid, not delivered (node 502 `payment_settled_send_incomplete`), and its retry.
     | 'payment_settled_undelivered' | 'retry_unavailable' | 'retry_needs_admission' | 'undelivered_pending'
-    | 'not_ready'
+    | 'not_ready' | 'app_not_ready'
     | 'invalid'
     | 'node';
   message: string;

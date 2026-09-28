@@ -146,6 +146,15 @@ pub struct AdmissionView {
     pub quoted: bool,
 }
 
+pub const MONEY_NOT_READY: &str = "Money is not ready yet. Your node will retry automatically.";
+
+/// Only this explicit pre-dispatch refusal may release a pending spend.
+/// A generic 503 (or a broken response) still has an unknown outcome.
+pub fn readiness_refusal(status: u16, body: &str) -> bool {
+    status == 503 && serde_json::from_str::<serde_json::Value>(body).ok()
+        .is_some_and(|v| v["code"] == "not_ready" && v["money_ready"] == false)
+}
+
 impl ActionError {
     pub fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self {
@@ -189,7 +198,9 @@ impl ActionError {
         Self::new("invalid", message)
     }
     pub fn node(message: impl Into<String>) -> Self {
-        Self::new("node", message)
+        let message = message.into();
+        if message == MONEY_NOT_READY { Self::new("not_ready", message) }
+        else { Self::new("node", message) }
     }
 }
 

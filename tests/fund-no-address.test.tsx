@@ -9,7 +9,7 @@ import App from '../src/App';
 const OWN = '1'.repeat(64);
 const REASON = 'Funding address not available — this endpoint requires an embedded LDK backend.';
 
-function stubHost(address?: string) {
+function stubHost(address?: string, money?: { ready: boolean; starts: number }) {
   const replies: Record<string, () => unknown> = {
     node_status: () => ({ ready: true, node_id: OWN, error: null }),
     pairing_status: () => ({
@@ -17,6 +17,7 @@ function stubHost(address?: string) {
       code_from_node: true, reason: null, bootstrap: null,
     }),
     node_overview: () => ({
+      money_ready: money?.ready,
       node_id: OWN, status: 'ok', version: 'api v2', connected_peers: 0, e2ee_sessions: 0,
       pending_deliveries: 0, lightning_available: true, block_height: 1, uptime_secs: 1,
       lightning_backend: 'mock', chain_backend: 'mock', read_at: Date.now(),
@@ -24,7 +25,8 @@ function stubHost(address?: string) {
     peers_list: () => [],
     rooms_list: () => [],
     payments_overview: () => ({ balance_msat: 0, lightning_outbound_msat: 0, channels: [] }),
-    fund_state: () => ({
+    fund_start: () => { if (money) money.starts++; return null; },
+    fund_state: () => money ? null : ({
       current_step: 'awaiting_funding', tier: 'full', funding_address: null,
       funding_amount_sats_required: 0, funding_amount_sats_received: 0, funding_evidence: null, funded: false,
     }),
@@ -52,6 +54,28 @@ describe('deposit panel without a deposit address', () => {
     dispose?.();
     mount?.remove();
     vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it('blocks funding while money is unavailable and restores it on the status poll', async () => {
+    vi.useFakeTimers();
+    const money = { ready: false, starts: 0 };
+    stubHost(undefined, money);
+    mount = document.createElement('div'); document.body.appendChild(mount);
+    dispose = render(() => <App />, mount);
+    await vi.waitFor(() => expect([...mount.querySelectorAll('button')].some((b) => b.textContent?.includes('I understand'))).toBe(true));
+    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
+    await vi.waitFor(() => expect(mount.querySelector('[data-tab="wallet"]')).not.toBeNull());
+    (mount.querySelector('[data-tab="wallet"]') as HTMLButtonElement).click();
+    const button = () => [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent === 'Get a deposit address');
+    await vi.waitFor(() => expect(button()).toBeDefined());
+    expect(button()!.disabled).toBe(true);
+    button()!.closest('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    expect(money.starts).toBe(0);
+    money.ready = true;
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(button()!.disabled).toBe(false);
+    expect(money.starts).toBe(0);
   });
 
   it("shows the node's reason instead of waiting forever", async () => {

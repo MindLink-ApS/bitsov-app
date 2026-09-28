@@ -6,7 +6,7 @@ import type { OwnerContactApproval, BudgetView } from '../src/control/types';
 
 let dispose: (() => void) | undefined;
 let mount: HTMLElement;
-afterEach(() => { dispose?.(); mount?.remove(); });
+afterEach(() => { dispose?.(); mount?.remove(); vi.useRealTimers(); });
 const A = 'a'.repeat(64), B = 'b'.repeat(64);
 const element = <T extends HTMLElement = HTMLElement>(s: string) => mount.querySelector<T>(s)!;
 const type = (text: string) => {
@@ -91,4 +91,57 @@ it('discards a late owner request after the contact budget changes', async () =>
   await vi.waitFor(() => expect(source.firstContactCancel).toHaveBeenCalledWith(approval.id));
   expect(element('[data-contact-approval]')).toBeNull();
   expect(source.send).not.toHaveBeenCalled();
+});
+
+it.each(['request', 'approval'] as const)('offline cancels an undispatched %s even if it completes after recovery', async (stage) => {
+  vi.useFakeTimers();
+  let ready = true;
+  let finish!: (value: OwnerContactApproval) => void;
+  const { source, approval } = await start((source) => {
+    const overview = source.nodeOverview;
+    source.nodeOverview = async () => ({ ...await overview(), money_ready: ready });
+    const deferred = vi.fn(() => new Promise<OwnerContactApproval>(resolve => { finish = resolve; }));
+    if (stage === 'request') source.firstContactRequest = deferred;
+    else source.firstContactStatus = deferred;
+  });
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(finish).toBeDefined();
+  ready = false;
+  await vi.advanceTimersByTimeAsync(10000);
+  expect(element('[data-money-notice]')).not.toBeNull();
+  ready = true;
+  await vi.advanceTimersByTimeAsync(10000);
+  finish({ ...approval, ready: true });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(source.firstContactCancel).toHaveBeenCalledWith(approval.id);
+  expect(source.send).not.toHaveBeenCalled();
+  expect(element('[data-contact-approval]')).toBeNull();
+  expect(element<HTMLTextAreaElement>('[data-composer] textarea').value).toBe('hello with an owner approval');
+});
+
+it('clears an approved successful first-contact send completed while offline', async () => {
+  vi.useFakeTimers();
+  let ready = true;
+  let finish!: () => void;
+  const { source } = await start((source, approval) => {
+    const overview = source.nodeOverview;
+    source.nodeOverview = async () => ({ ...await overview(), money_ready: ready });
+    source.firstContactStatus = vi.fn(async () => ({ ...approval, ready: true }));
+    source.send = vi.fn(async recipient => {
+      await new Promise<void>(resolve => { finish = resolve; });
+      return { message_id: 'late-approved', recipient, is_room: false, delivered: true, amount_msat: 14000, sent_at_ms: Date.now() };
+    });
+  });
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(source.send).toHaveBeenCalledTimes(1);
+  ready = false;
+  await vi.advanceTimersByTimeAsync(10000);
+  expect(element('[data-money-notice]')).not.toBeNull();
+  finish();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(element<HTMLTextAreaElement>('[data-composer] textarea').value).toBe('');
+  ready = true;
+  await vi.advanceTimersByTimeAsync(10000);
+  expect(element<HTMLButtonElement>('[data-send]').disabled).toBe(true);
+  expect(source.send).toHaveBeenCalledTimes(1);
 });

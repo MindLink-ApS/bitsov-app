@@ -65,3 +65,28 @@ curl -s -H "Authorization: Bearer $JWT" http://127.0.0.1:$PORT/api/v1/health
 API-consumer path (bundle node → `/auth/local` → drive over loopback) is real today. **Do not**
 build against calls, mobile, pairing, hosted, relay, or AI endpoints — they are gated (see the
 goal file §6/§7 and `CODEX_APP_AUTHORITY.md` §B/§G).
+
+## Offline money readiness (genome PR #107)
+
+App readiness support targets `feat/boot-offline` at
+`b984d514e9c25b8925f4daaf65db1b2baf18f3bb` without changing the bundled release.
+The authenticated `GET /status` adds optional top-level `money_ready` and
+`readiness`: `{ money_ready, state, retry_attempt, retry_after_secs, events }`.
+Events contain `{ sequence, timestamp, state, money_ready }`; timestamps are
+Unix **seconds**. States include `offline`, `retrying`, `synchronizing`, `ready`,
+`failed`, and `stopped`. A retry delay is a node-reported interval, not an app
+countdown. Missing fields keep the legacy behavior.
+
+The app keeps local reads available, displays status age and transition age,
+and gates money preparation and dispatch while `money_ready` is false. The
+existing ten-second status poll restores controls and refreshes active pricing;
+it never retries a send or payment. Channel controls are not exposed by this
+app; the shared notice includes channel actions and the wallet avoids claiming
+its outbound balance is ready to send.
+
+The exact pre-dispatch refusal is HTTP **503** with
+`{ "code": "not_ready", "money_ready": false, "error": "…" }`. Only this
+contract releases the app's spending reservation and pending journal. Generic
+503s and interrupted responses remain unknown outcomes. Host-local identity,
+authentication, and data-directory failures use `app_not_ready`, preserving
+their own explanations instead of promising a chain retry.

@@ -864,6 +864,7 @@ async fn call_api(
 
 /// The node reports failures as `{"error": "..."}`; surface that, bounded.
 fn api_error(path: &str, status: reqwest::StatusCode, body: &str) -> String {
+    if act::readiness_refusal(status.as_u16(), body) { return act::MONEY_NOT_READY.into(); }
     let detail = serde_json::from_str::<serde_json::Value>(body)
         .ok()
         .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_owned))
@@ -2078,9 +2079,9 @@ struct Charge {
 
 fn budget_dir(state: &NodeState) -> Result<(PathBuf, String), ActionError> {
     let config = state.config.lock().unwrap().clone()
-        .ok_or_else(|| ActionError::new("not_ready", "The app data directory is not ready."))?;
-    let dir = config.parent().ok_or_else(|| ActionError::new("not_ready", "Missing app data directory."))?.join("app-spend");
-    let node_id = state.node_id.lock().unwrap().clone().ok_or_else(|| ActionError::new("not_ready", "No node identity."))?;
+        .ok_or_else(|| ActionError::new("app_not_ready", "The app data directory is not ready."))?;
+    let dir = config.parent().ok_or_else(|| ActionError::new("app_not_ready", "Missing app data directory."))?.join("app-spend");
+    let node_id = state.node_id.lock().unwrap().clone().ok_or_else(|| ActionError::new("app_not_ready", "No node identity."))?;
     Ok((dir, node_id))
 }
 
@@ -2220,8 +2221,8 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, body: serde_
     let journal = spend_journal(state)?;
     let prior = journal.pending()?;
     ensure_fresh_token(state).await;
-    let token = state.token.lock().unwrap().clone().ok_or_else(|| ActionError::new("not_ready", "Not authenticated."))?;
-    let node_id = state.node_id.lock().unwrap().clone().ok_or_else(|| ActionError::new("not_ready", "No node identity."))?;
+    let token = state.token.lock().unwrap().clone().ok_or_else(|| ActionError::new("app_not_ready", "Not authenticated."))?;
+    let node_id = state.node_id.lock().unwrap().clone().ok_or_else(|| ActionError::new("app_not_ready", "No node identity."))?;
     match (&prior, retry) {
         (None, None) => {}
         (Some(p), Some(u)) if u.retry && !u.in_flight && !p.over_budget && p.node_id == node_id && p.undelivered.as_ref() == Some(u) => {}
@@ -2325,6 +2326,11 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, body: serde_
         return Err(state.spend.lock().unwrap().refused());
     }
     let text = response.text().await.map_err(|_| spend_journal::unknown("The response was interrupted."))?;
+    if act::readiness_refusal(status.as_u16(), &text) {
+        release(state)?;
+        abandon(&journal)?;
+        return Err(ActionError::new("not_ready", act::MONEY_NOT_READY));
+    }
     // G1: the node refused under its grant before reserving or paying anything.
     if let Some(refusal) = grant::refusal(status.as_u16(), &text) {
         release(state)?;
@@ -2680,7 +2686,7 @@ async fn spend_advance_for(state: &NodeState, want: Option<Want>) -> Result<act:
     }
     let mode = match &*state.auth.lock().unwrap() {
         AuthMode::Unauthenticated => {
-            return Err(ActionError::new("not_ready", "Your node is not signed in yet."))
+            return Err(ActionError::new("app_not_ready", "Your node is not signed in yet."))
         }
         AuthMode::Local => Mode::Local,
         AuthMode::Paired(session) => Mode::Paired {
@@ -4438,6 +4444,68 @@ mod control_act_tests {
         assert_eq!(do_file_send(&node.state,A,"a.txt","text/plain","aGk=",8000).await.unwrap_err().code,"price_cap_unavailable");
         assert!(node.posts().is_empty());
     }
+    #[tokio::test]
+    async fn readiness_refusal_clears_journal_and_allows_later_manual_send() {
+        let ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let route_ready = ready.clone();
+        let routes: Routes = Arc::new(move |m,p,b| {
+            if p == "/messages/compose" && !route_ready.load(std::sync::atomic::Ordering::SeqCst) {
+                return (503, serde_json::json!({"code":"not_ready","money_ready":false,"error":"offline"}).to_string());
+            }
+            happy()(m,p,b)
+        });
+        let node = fake(AuthMode::Local, routes);
+        spend_advance(&node.state, true).await.unwrap();
+        for _ in 0..2 {
+            assert_eq!(do_message_send(&node.state,A,false,"hi",7000,None).await.unwrap_err().code, "not_ready");
+            assert!(spend_journal(&node.state).unwrap().pending().unwrap().is_none());
+        }
+        assert_eq!(node.posts().len(), 2);
+        ready.store(true, std::sync::atomic::Ordering::SeqCst);
+        do_message_send(&node.state,A,false,"hi",7000,None).await.unwrap();
+        assert_eq!(node.posts().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn readiness_refusal_preserves_paid_retry_record_and_accounting_until_manual_recovery() {
+        for approved in [None, Some(4000)] {
+            let refusal = (503, serde_json::json!({"code":"not_ready","money_ready":false,"error":"offline"}).to_string());
+            let node = fake(AuthMode::Local, compose_script(vec![
+                psi_502(2000, 0, 2000, PSI_TIMEOUT), refusal.clone(), refusal, delivered("recovered", 0),
+            ]));
+            let record = psi_first(&node).await;
+            let accounted = book(&node);
+            for _ in 0..2 {
+                assert_eq!(do_message_retry(&node.state, A, "gm", approved).await.unwrap_err().code, "not_ready");
+                assert_eq!(serde_json::to_value(pending(&node).expect("paid retry survives refusal")).unwrap(),
+                    serde_json::to_value(&record).unwrap(), "restore the entire durable record");
+                assert_eq!(book(&node), accounted, "release only the retry reservation");
+            }
+            assert_eq!(do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap_err().code, "spend_unknown");
+            assert_eq!(compose_bodies(&node).len(), 3, "no automatic replay or new send");
+            let restarted = reopen(&node);
+            assert_eq!(do_spend_reconcile(&restarted).await.unwrap_err().code, "undelivered_pending");
+            assert_eq!(do_message_retry(&node.state, A, "gm", approved).await.unwrap().message_id, "recovered");
+            assert!(pending(&node).is_none());
+            let bodies = compose_bodies(&node);
+            assert_eq!(bodies.len(), 4);
+            for body in &bodies[1..] { assert_eq!(body["max_total_msat"], approved.unwrap_or(0)); }
+            assert_eq!(book(&node), [(record.request_hash.clone(), 14000, true),
+                (format!("{}-retry-1", record.request_hash), 0, true)]);
+        }
+    }
+
+    #[test]
+    fn readiness_mapping_requires_the_explicit_predispatch_contract() {
+        let refusal = r#"{"code":"not_ready","money_ready":false}"#;
+        assert!(act::readiness_refusal(503, refusal));
+        assert_eq!(ActionError::node(api_error("/sponsor/request", reqwest::StatusCode::SERVICE_UNAVAILABLE, refusal)).code, "not_ready");
+        for (status, body) in [(500, refusal), (503, "unavailable"), (503, r#"{"code":"not_ready"}"#),
+            (503, r#"{"code":"not_ready","money_ready":true}"#), (503, r#"{"code":"unknown","money_ready":false}"#)] {
+            assert!(!act::readiness_refusal(status, body));
+        }
+    }
+
     #[tokio::test]
     async fn caps_transmit_confirmed_ceiling_and_safe_refusal_clears_journal() {
         let routes: Routes = Arc::new(|m,p,b| {
@@ -7464,7 +7532,7 @@ mod control_act_tests {
     #[tokio::test]
     async fn an_unauthenticated_node_cannot_be_approved() {
         let node = fake(AuthMode::Unauthenticated, happy());
-        assert_eq!(spend_advance(&node.state, true).await.unwrap_err().code, "not_ready");
+        assert_eq!(spend_advance(&node.state, true).await.unwrap_err().code, "app_not_ready");
     }
 }
 

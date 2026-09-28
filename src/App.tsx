@@ -1,3 +1,4 @@
+import { isMoneyNotReady } from './control/readiness';
 import { createMemo, createSignal, onCleanup, onMount, Show } from 'solid-js';
 import { qrSvg } from './qr';
 import { Onboarding } from './onboarding/Onboarding';
@@ -150,7 +151,7 @@ export default function App() {
         error={status().error}
         ownId={status().node_id}
         firstRun={firstRun}
-        fund={<Fund source={source()} ready={() => status().ready} />}
+        fund={(guarded, blocked) => <Fund source={guarded} moneyBlocked={blocked} ready={() => status().ready} />}
       />
     </Show>
   );
@@ -300,7 +301,7 @@ function IdentityGate(props: {
  * address as text + QR, and poll `/onboarding/state` until the node reports it has
  * seen the funds.
  */
-function Fund(props: { source: Source; ready: () => boolean }) {
+function Fund(props: { source: Source; ready: () => boolean; moneyBlocked?: () => boolean }) {
   const [fund, setFund] = createSignal<FundState | null | undefined>(undefined);
   const [address, setAddress] = createSignal<FundingAddress | null>(null);
   // Why the payments endpoint gave no address, so the owner is not left waiting.
@@ -317,14 +318,14 @@ function Fund(props: { source: Source; ready: () => boolean }) {
       setError(null);
       // The onboarding record carries the address once started; fall back to the
       // payments endpoint if the node did not include one.
-      if (state && !state.funding_address && !address()) {
+      if (state && !state.funding_address && !address() && !props.moneyBlocked?.()) {
         try {
           setAddress(await props.source.fundingAddress());
           setAddressError(null);
         } catch (e) {
           // The wallet backend may not expose one (only embedded LDK does); the
           // state address is primary, but say so instead of waiting forever.
-          setAddressError(String(e));
+          setAddressError(isMoneyNotReady(e) ? null : String(e));
         }
       }
     } catch (e) {
@@ -345,6 +346,7 @@ function Fund(props: { source: Source; ready: () => boolean }) {
 
   const start = async (event: Event) => {
     event.preventDefault();
+    if (props.moneyBlocked?.()) return;
     const value = Number(amount());
     if (!Number.isInteger(value) || value < 1 || value > 4_294_967_295) {
       setError('Enter a whole number of sats.');
@@ -356,7 +358,7 @@ function Fund(props: { source: Source; ready: () => boolean }) {
       setFund(await props.source.fundStart(value));
       await refresh();
     } catch (e) {
-      setError(String(e));
+      setError(isMoneyNotReady(e) ? null : String(e));
     } finally {
       setBusy(false);
     }
@@ -402,7 +404,7 @@ function Fund(props: { source: Source; ready: () => boolean }) {
                 />
                 <span class="unit">sats</span>
               </div>
-              <button type="submit" class="primary" disabled={busy()}>
+              <button type="submit" class="primary" disabled={busy() || props.moneyBlocked?.()}>
                 {busy() ? 'Starting…' : 'Get a deposit address'}
               </button>
             </form>

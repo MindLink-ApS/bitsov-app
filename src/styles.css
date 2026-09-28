@@ -496,3 +496,6 @@ button.small:not(.primary) { font-size: var(--t-xs); padding: 4px 10px; backgrou
 .refusal-counts th, .refusal-counts td { padding: 5px 3px; text-align: right; vertical-align: top; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
 .refusal-counts th:first-child { width: 40%; text-align: left; font-weight: 400; }
 .refusal-counts thead th { font-weight: 500; }
+
+.money-notice { margin: 0; padding: var(--s-3) var(--s-6); background: var(--surface); border-bottom: 1px solid var(--line); }
+.node-pill[data-pill="warn"] .what { white-space: normal; }
