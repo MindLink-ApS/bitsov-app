@@ -18,6 +18,20 @@ pub struct Pending {
     /// Reported aggregate paid amount awaiting durable local accounting.
     #[serde(default)]
     pub accounting_msat: Option<u64>,
+    /// Paid, not delivered (502 `payment_settled_send_incomplete`). The only
+    /// record a delivery retry may replace; nothing else passes the fence.
+    #[serde(default)]
+    pub undelivered: Option<Undelivered>,
+}
+
+/// A settled payment whose message did not go. No plaintext is kept.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Undelivered {
+    pub peer: String,
+    /// Settled for this message so far, across retries.
+    pub paid_msat: u64,
+    /// The node said a retry on this connection pays no second admission.
+    pub retry: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,7 +85,7 @@ impl Journal {
         let pending = Pending {
             node_id: node_id.to_string(),
             request_hash: blake3::hash(format!("{path}\n{body}").as_bytes()).to_hex().to_string(),
-            max_msat, target: None, over_budget: false, accounting_msat: None,
+            max_msat, target: None, over_budget: false, accounting_msat: None, undelivered: None,
         };
         self.save(&pending)?;
         Ok(pending)
@@ -158,7 +172,7 @@ mod tests {
     #[test]
     fn reconciliation_needs_exact_terminal_outgoing_evidence() {
         let p = Pending { node_id:"node".into(), request_hash:"hash".into(), max_msat:2000,
-            target:Some(Target::Payment { hash:"abc".into() }), over_budget:false, accounting_msat: None };
+            target:Some(Target::Payment { hash:"abc".into() }), over_budget:false, accounting_msat: None, undelivered: None };
         assert_eq!(terminal(&p, &[]), None);
         assert_eq!(terminal(&p, &[json!({"payment_hash":"other", "amount_msat":2000, "direction":"outgoing", "status":"settled"})]), None);
         for status in ["pending", "inflight", "expired", "unknown"] {
@@ -174,7 +188,7 @@ mod tests {
     #[test]
     fn message_reconciliation_rejects_other_sender_and_recipient() {
         let p = Pending { node_id:"node".into(), request_hash:"hash".into(), max_msat:2000,
-            target:Some(Target::Message { id:"abc".into(), peer:"peer".into() }), over_budget:false, accounting_msat: None };
+            target:Some(Target::Message { id:"abc".into(), peer:"peer".into() }), over_budget:false, accounting_msat: None, undelivered: None };
         let mut row = json!({"id":"abc", "sender":"other", "recipient":"peer", "payment_amount_msat":2000});
         assert_eq!(terminal(&p, &[row.clone()]), None);
         row["sender"] = json!("node");

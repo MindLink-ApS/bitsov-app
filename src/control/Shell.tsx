@@ -26,6 +26,7 @@ import {
   applyDelivery,
   applyLive,
   asActionError,
+  undeliveredCopy,
   budgetStand,
   costToSend,
   deliveryFromReceipt,
@@ -58,6 +59,7 @@ import type {
   SponsorCandidate,
   SponsorStatus,
   ActionError,
+  SendReceipt,
   Artifact,
   BudgetPreset,
   BudgetRow,
@@ -120,6 +122,8 @@ export type Actions = {
   pauseAll: () => Promise<void>;
   resume: () => Promise<void>;
   send: (t: TrackRef, text: string, maxMsat: number, firstContactMsat?: number) => Promise<Outcome<unknown>>;
+  /** Re-send a paid, undelivered message, only where the node said it pays no second admission. */
+  retryDelivery: (t: TrackRef, artifactId: string) => Promise<Outcome<unknown>>;
   /** The door card: a stranger's signed quote, or null when the node cannot give one. */
   doorQuote: (peer: string) => Promise<FirstContactQuote | null>;
   ownerRequest: (peer: string, cap: number, budget: number) => Promise<Outcome<OwnerContactApproval | null>>;
@@ -433,6 +437,13 @@ export function ControlCenter(props: Props) {
       return { ok: false, error };
     }
   };
+  /** A message the node took: show it in the thread with what it paid. */
+  const sentOne = (t: TrackRef, receipt: SendReceipt, text: string) => {
+    setPaid(receipt.message_id, receipt.amount_msat);
+    if (!deliveries[receipt.message_id]) setDeliveries(receipt.message_id, deliveryFromReceipt(receipt));
+    setThreads('t', trackKey(t), (old) => mergeMessages(old ?? [], [sentMessage(receipt, ownId(), text)]));
+    setThreads('fresh', receipt.message_id, true);
+  };
   /** A failed action that is not an approval or budget question stays in the track as a record. */
   const recordFailure = (t: TrackRef, action: string, outcome: Outcome<unknown>) => {
     // A send that did not cross (price, setpoint) is also a membrane reading. A
@@ -494,7 +505,12 @@ export function ControlCenter(props: Props) {
       if (t.kind !== 'peer' && t.kind !== 'room') return { ok: false, error: { code: 'invalid', message: 'nothing to send to' } };
       const r = await act(() => props.source.send(t.id, t.kind === 'room', text, maxMsat, t.kind === 'room' ? Object.fromEntries((roomQuote()?.members ?? []).map((m) => [m.node_id, m.msat])) : undefined, firstContactMsat));
       // The tally moved, or a budget rule stopped the send: either way, re-read it.
-      if (r.ok || isBudgetStop(r.error) || r.error.code === 'spend_unknown') void loadBudget();
+      if (r.ok || isBudgetStop(r.error) || r.error.code === 'spend_unknown' || r.error.code === 'payment_settled_undelivered') void loadBudget();
+      if (!r.ok && r.error.code === 'payment_settled_undelivered' && r.error.undelivered) {
+        // Paid, not delivered: the draft moves here, with the only safe way to resend it.
+        addArtifact(t, { type: 'undelivered', text, paid: r.error.undelivered, note: null });
+        return r;
+      }
       if (!r.ok && ['price_changed', 'price_cap_exceeded'].includes(r.error.code)) {
         if (t.kind === 'peer') void attempt('quote', () => props.source.priceQuote(t.id), (q) => {
           if (track() && trackKey(track()!) === trackKey(t)) setQuote(q);
@@ -503,14 +519,31 @@ export function ControlCenter(props: Props) {
           if (track() && trackKey(track()!) === trackKey(t)) setRoomQuote(q);
         });
       }
-      if (r.ok) {
-        const receipt = r.value;
-        setPaid(receipt.message_id, receipt.amount_msat);
-        if (!deliveries[receipt.message_id]) setDeliveries(receipt.message_id, deliveryFromReceipt(receipt));
-        setThreads('t', trackKey(t), (old) => mergeMessages(old ?? [], [sentMessage(receipt, ownId(), text)]));
-        setThreads('fresh', receipt.message_id, true);
-      }
+      if (r.ok) sentOne(t, r.value, text);
       return recordFailure(t, !r.ok && r.error.code === 'room_partial' ? 'Room send incomplete' : 'Message not sent', r);
+    },
+    retryDelivery: async (t, artifactId) => {
+      const key = trackKey(t);
+      const a = (artifacts[key] ?? []).find((x) => x.id === artifactId);
+      if (t.kind !== 'peer' || a?.type !== 'undelivered' || !a.paid.retry) {
+        return { ok: false, error: { code: 'retry_unavailable', message: 'Nothing to retry.' } };
+      }
+      const text = a.text;
+      const r = await act(() => props.source.retry(t.id, text));
+      void loadBudget();
+      const update = (next: Partial<Extract<Artifact, { type: 'undelivered' }>> | null) =>
+        setArtifacts(key, (old) => (old ?? []).flatMap((x) => (x.id !== artifactId ? [x] : next ? [{ ...x, ...next } as Artifact] : [])));
+      if (r.ok) {
+        update(null);
+        sentOne(t, r.value, text);
+      } else if (r.error.code === 'payment_settled_undelivered' && r.error.undelivered) {
+        update({ paid: r.error.undelivered, note: 'Still not delivered. Nothing was paid twice.' });
+      } else {
+        // A refusal before dispatch (approval, price) keeps the retry; anything else ends it.
+        const ends = ['retry_needs_admission', 'retry_unavailable', 'spend_unknown'].includes(r.error.code);
+        update({ paid: { ...a.paid, retry: !ends }, note: r.error.message });
+      }
+      return r;
     },
     invoice: async (t, amount, note) => {
       const r = await act(() => props.source.invoiceCreate(Math.round(amount * 1000), note));
@@ -975,7 +1008,7 @@ function Conversation(props: {
                     )}
                   </Match>
                   <Match when={item.type === 'artifact' && item.artifact}>
-                    {(a) => <ArtifactView a={a()} nameOf={props.nameOf} delivery={a().type === 'file' ? props.deliveries[(a() as { receipt: { message_id: string } }).receipt.message_id] : undefined} />}
+                    {(a) => <ArtifactView a={a()} nameOf={props.nameOf} delivery={a().type === 'file' ? props.deliveries[(a() as { receipt: { message_id: string } }).receipt.message_id] : undefined} onRetry={(id) => props.actions.retryDelivery(props.track, id)} />}
                   </Match>
                 </Switch>
               </>
@@ -1115,7 +1148,7 @@ function DoorView(props: { card: DoorCard; at: number; nameOf: (id: string) => s
   );
 }
 
-function ArtifactView(props: { a: Artifact; delivery?: Delivery; nameOf: (id: string) => string }) {
+function ArtifactView(props: { a: Artifact; delivery?: Delivery; nameOf: (id: string) => string; onRetry?: (id: string) => Promise<unknown> }) {
   return (
     <Switch>
       <Match when={props.a.type === 'invoice' && props.a}>
@@ -1195,9 +1228,41 @@ function ArtifactView(props: { a: Artifact; delivery?: Delivery; nameOf: (id: st
           );
         }}
       </Match>
+      <Match when={props.a.type === 'undelivered' && props.a}>
+        {(a) => <UndeliveredView a={a() as Extract<Artifact, { type: 'undelivered' }>} onRetry={props.onRetry} />}
+      </Match>
     </Switch>
   );
 }
+
+/** Paid, not delivered: the amount, what not to do, and the one safe retry. */
+function UndeliveredView(props: { a: Extract<Artifact, { type: 'undelivered' }>; onRetry?: (id: string) => Promise<unknown> }) {
+  const [busy, setBusy] = createSignal(false);
+  const copy = () => undeliveredCopy(props.a.paid);
+  const retry = async () => {
+    if (busy() || !props.onRetry) return;
+    setBusy(true);
+    await props.onRetry(props.a.id);
+    setBusy(false);
+  };
+  return (
+    <div class="artifact out failed" data-artifact="undelivered" data-paid-msat={props.a.paid.paid_msat}>
+      <span class="kind">{copy().title}</span>
+      <span>{copy().body}</span>
+      <Show when={props.a.paid.retry && props.onRetry}>
+        <button type="button" class="link" data-retry-delivery disabled={busy()} onClick={() => void retry()}>
+          {busy() ? 'Retrying delivery…' : 'Retry delivery'}
+        </button>
+      </Show>
+      <Show when={props.a.note}>
+        <p class="hint" data-retry-note>{props.a.note}</p>
+      </Show>
+    </div>
+  );
+}
+
+/** The draft was paid for: it now lives on the undelivered card, not in the composer. */
+const paidUndelivered = (r: Outcome<unknown>) => !r.ok && r.error.code === 'payment_settled_undelivered';
 
 const kb = (bytes: number) => (bytes < 1024 ? `${bytes} B` : `${(bytes / 1024).toFixed(bytes < 10_240 ? 1 : 0)} KB`);
 
@@ -1520,7 +1585,7 @@ function Composer(props: {
         if (target() === submittedPeer) setDoor(null);
         setReadmitFor(submittedPeer);
       }
-      if (r.ok && composerRevision === submittedRevision) {
+      if ((r.ok || paidUndelivered(r)) && composerRevision === submittedRevision) {
         setDraft('');
         setDrafted(false);
       } else if (!r.ok && unchanged && (isBudgetStop(r.error) || r.error.code === 'owner_only')) setNote(r.error.message);
@@ -1563,7 +1628,7 @@ function Composer(props: {
     switch (mode()) {
       case 'message':
         r = await props.actions.send(t, draft(), shown().msat!);
-        if (r.ok && unchanged()) {
+        if ((r.ok || paidUndelivered(r)) && unchanged()) {
           setDraft('');
           setDrafted(false);
         }

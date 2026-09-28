@@ -114,6 +114,11 @@ export interface Source {
    * is the owner's one-time OK for someone not yet budgeted, with their budget.
    */
   send(recipient: string, isRoom: boolean, plaintext: string, maxMsat: number, maxRecipientMsat?: Record<string, number>, firstContactMsat?: number): Promise<SendReceipt>;
+  /**
+   * Re-send a paid, undelivered message through the same compose path. The host
+   * refuses unless the node said a retry pays no second admission.
+   */
+  retry(recipient: string, plaintext: string): Promise<SendReceipt>;
   // budgets (B2): numbers the host keeps; the approval itself stays in host memory
   budgetStatus(): Promise<BudgetView>;
   /** The owner's one approval for a daily total. Lowering an open one needs no new approval. */
@@ -184,6 +189,7 @@ export const hostSource: Source = {
   spendReconcile: () => invoke<string>('spend_reconcile'),
   send: (recipient, isRoom, plaintext, maxMsat, maxRecipientMsat, firstContactMsat) =>
     invoke<SendReceipt>('message_send', { recipient, is_room: isRoom, plaintext, max_msat: maxMsat, max_recipient_msat: maxRecipientMsat ?? null, first_contact_msat: firstContactMsat ?? null }),
+  retry: (recipient, plaintext) => invoke<SendReceipt>('message_retry', { recipient, plaintext }),
   budgetStatus: () => invoke<BudgetView>('budget_status'),
   budgetApprove: (ceilingMsat, preset) => invoke<BudgetView>('budget_approve', { ceiling_msat: ceilingMsat, preset }),
   budgetSet: (target, room, limitMsat) => invoke<BudgetView>('budget_set', { target, room, limit_msat: limitMsat }),

@@ -278,11 +278,21 @@ export type ActionError = {
     // G1 node grants: refused before any payment (see src-tauri/src/grant.rs).
     | 'grant_ended' | 'grant_exhausted' | 'grant_per_call' | 'grant_recipient' | 'grant_unpriced' | 'grant_ledger' | 'grant_refused' | 'grant_unknown' | 'grant_first_contact' | 'grant_readmission'
     | 'room_unreachable'
+    // Paid, not delivered (node 502 `payment_settled_send_incomplete`), and its retry.
+    | 'payment_settled_undelivered' | 'retry_unavailable' | 'retry_needs_admission'
     | 'not_ready'
     | 'invalid'
     | 'node';
   message: string;
+  /** `payment_settled_undelivered` only. */
+  undelivered?: Undelivered;
 };
+
+/**
+ * The node settled payment but the message did not go. `retry`: the node said a
+ * retry on this connection re-sends its paid proof and pays no second admission.
+ */
+export type Undelivered = { paid_msat: number; retry: boolean };
 
 /** Public owner handoff only; no owner credential is exposed to the app. */
 export type OwnerContactApproval = {
@@ -397,6 +407,8 @@ export type Artifact =
   | { id: string; at: number; type: 'payment'; receipt: PaymentReceipt }
   | { id: string; at: number; type: 'file'; receipt: FileReceipt }
   | { id: string; at: number; type: 'failed'; action: string; error: ActionError }
+  /** Paid, not delivered. `text` is the owner's own draft, kept in memory for Retry delivery only. */
+  | { id: string; at: number; type: 'undelivered'; text: string; paid: Undelivered; note: string | null }
   | { id: string; at: number; type: 'door'; door: DoorCard };
 
 /**

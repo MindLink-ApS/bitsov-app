@@ -6,6 +6,7 @@
 import { ago, sats, satUnit, shortId } from './format';
 import type {
   ActionError,
+  Undelivered,
   BudgetView,
   Artifact,
   Delivery,
@@ -138,10 +139,27 @@ export function costToSend(
 /** Any rejection from the host, as an action error. */
 export function asActionError(e: unknown): ActionError {
   if (e && typeof e === 'object' && 'code' in e && 'message' in e) {
-    const { code, message } = e as ActionError;
-    return { code, message: String(message) };
+    const { code, message, undelivered } = e as ActionError;
+    const paid = undelivered && Number.isSafeInteger(undelivered.paid_msat) && undelivered.paid_msat >= 0
+      ? { paid_msat: undelivered.paid_msat, retry: undelivered.retry === true }
+      : undefined;
+    return paid ? { code, message: String(message), undelivered: paid } : { code, message: String(message) };
   }
   return { code: 'node', message: typeof e === 'string' ? e : String((e as Error)?.message ?? e) };
+}
+
+/**
+ * Paid, not delivered (node 502 `payment_settled_send_incomplete`). Never "not
+ * sent", never "send again": a second send could pay twice.
+ */
+export function undeliveredCopy(u: Undelivered): { title: string; body: string } {
+  const paid = `${sats(u.paid_msat)} ${satUnit(u.paid_msat)}`;
+  return {
+    title: `Paid ${paid} · not delivered yet`,
+    body: u.retry
+      ? 'Payment settled, message not yet delivered. Do not send it again. On this connection your node re-sends the proof it already paid for: no second admission payment within the admission window. Retry delivery pays only this message’s price, and your node refuses before paying if admission would be due again.'
+      : 'Payment settled, message not yet delivered. Do not send it again: that could pay twice. Check the pending result before sending anything else.',
+  };
 }
 
 /** Errors that mean "the owner must approve (again)", not "the send failed". */
