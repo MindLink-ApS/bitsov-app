@@ -329,12 +329,13 @@ fn sidecar_path(name: &str) -> Result<PathBuf, String> {
 fn spawn_node(app: &AppHandle<impl tauri::Runtime>, config: &Path) -> Result<(), String> {
     let state = app.state::<NodeState>();
     let dev_sidecar = state.dev_sidecar.lock().unwrap().clone();
+    let dev = dev_sidecar.is_some();
     let program = match dev_sidecar {
         Some(program) => program,
         None => sidecar_path(SIDECAR_BIN)?,
     };
     let mut cmd = std::process::Command::new(&program);
-    cmd.args(["start", "--config", &config.to_string_lossy()])
+    cmd.args(node_start_args(config, dev))
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
@@ -379,6 +380,20 @@ fn spawn_node(app: &AppHandle<impl tauri::Runtime>, config: &Path) -> Result<(),
             .store(true, Ordering::SeqCst);
     });
     Ok(())
+}
+
+/// `konsensus start` arguments. The dev-node path (a node the developer built
+/// and runs as its owner, `dev_node`) adds `--owner-control`, so the owner can
+/// grant a spend budget with `konsensus grant --op …` from the terminal that
+/// started the app. Without it the node answers every elevation request with
+/// "unavailable in this deployment" and the dev path can never spend. The
+/// bundled sidecar (every release build) never gets the flag.
+fn node_start_args(config: &Path, dev_node: bool) -> Vec<std::ffi::OsString> {
+    let mut args: Vec<std::ffi::OsString> = vec!["start".into(), "--config".into(), config.into()];
+    if dev_node {
+        args.push("--owner-control".into());
+    }
+    args
 }
 
 enum PipeKind {
@@ -2452,6 +2467,22 @@ fn assistant_mock_builder() -> tauri::Builder<tauri::Wry> {
 #[allow(dead_code)]
 #[path = "../tests/support/mod.rs"]
 mod test_support;
+
+#[cfg(test)]
+mod node_start_args_tests {
+    use super::node_start_args;
+    use std::path::Path;
+
+    #[test]
+    fn only_the_dev_node_path_starts_with_owner_control() {
+        let config = Path::new("/tmp/dev/konsensus.toml");
+        assert_eq!(node_start_args(config, false), ["start", "--config", "/tmp/dev/konsensus.toml"]);
+        assert_eq!(
+            node_start_args(config, true),
+            ["start", "--config", "/tmp/dev/konsensus.toml", "--owner-control"]
+        );
+    }
+}
 
 #[cfg(test)]
 mod pairing_wiring_tests {
