@@ -156,8 +156,13 @@ pub struct SpendGate {
 impl SpendGate {
     /// Open the window for [`SPEND_WINDOW_MS`] from `now_ms`.
     pub fn arm(&mut self, now_ms: u64, basis: SpendBasis) {
+        self.arm_until(now_ms, u64::MAX, basis);
+    }
+
+    /// Open the window, but never past `until_ms` (a G1 node grant's expiry).
+    pub fn arm_until(&mut self, now_ms: u64, until_ms: u64, basis: SpendBasis) {
         self.generation = self.generation.wrapping_add(1);
-        self.open = Some((now_ms + SPEND_WINDOW_MS, basis));
+        self.open = Some(((now_ms + SPEND_WINDOW_MS).min(until_ms), basis));
         self.pending = None;
         self.expired = false;
     }
@@ -199,6 +204,14 @@ impl SpendGate {
             return Err(ActionError::new("spend_locked", "Approval changed while preparing this action. Confirm it again."));
         }
         Ok(())
+    }
+
+    /// The owner's grant arrived for something other than this window (a budget
+    /// approval): the request is answered, and the window stays closed.
+    pub fn clear_pending(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.pending = None;
+        self.expired = false;
     }
 
     /// The owner's request lapsed on the node.
@@ -338,6 +351,9 @@ pub struct SendReply {
     pub message_id: String,
     pub delivered: bool,
     pub amount_msat: u64,
+    /// Admission paid again during this send after a reconnect (genome #85).
+    #[serde(default)]
+    pub readmission_msat: Option<u64>,
 }
 
 /// What a send shows in the stream, straight after it returns.

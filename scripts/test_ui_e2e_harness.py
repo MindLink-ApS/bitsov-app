@@ -50,6 +50,19 @@ class UiHarnessTests(unittest.TestCase):
         self.assertGreaterEqual(a['pricing']['chat_msat'], 2 * b['pricing']['chat_msat'])
 
 
+    def test_contact_owner_fixture_keeps_credential_outside_app_and_evidence(self):
+        token = 'synthetic-independent-owner-secret'
+        command = 'public owner command reading BITSOV_OWNER_TOKEN'
+        result = types.SimpleNamespace(returncode=0, stdout=token, stderr='')
+        with patch.object(self.r, 'jwt', return_value=token), patch.object(subprocess, 'run', return_value=result) as run:
+            self.r.owner_first_contact(command)
+        args, kwargs = run.call_args
+        self.assertEqual(args[0][-3:], ['/bin/sh', '-c', command])
+        self.assertNotIn(token, str(args))
+        self.assertEqual(kwargs['env']['BITSOV_OWNER_TOKEN'], token)
+        self.assertNotIn(token, (self.root / 'owner-first-contact-fixture.json').read_text())
+        self.assertNotEqual(os.environ.get('BITSOV_OWNER_TOKEN'), token)
+
     def test_pair_token_response_is_returned_but_never_persisted(self):
         token = 'synthetic-opaque-paired-token'
         class Connection:

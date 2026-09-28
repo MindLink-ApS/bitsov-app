@@ -350,6 +350,103 @@ select { font: inherit; font-size: var(--t-sm); background: var(--sunk); color: 
 .drafted { margin: 0; font-size: var(--t-xs); color: var(--accent); }
 
 /* narrow windows -------------------------------------------------------- */
+/* invisible payments (B2): the budget bar in the composer and the running tally */
+.budget .presets { display: flex; flex-wrap: wrap; gap: var(--s-2); }
+.budget .chip[aria-checked='true'] { color: var(--accent-ink); background: var(--accent); border-color: var(--accent); }
+.budget .approval .primary { align-self: flex-start; }
+.budget[data-budget='ok'] .spend-line { color: var(--ink); }
+.budget-used strong { color: var(--warn); }
+.primary.small { font-size: var(--t-sm); padding: 6px 12px; }
+button.small:not(.primary) { font-size: var(--t-xs); padding: 4px 10px; background: var(--raised); border: 1px solid var(--line-strong); }
+.tally { display: flex; flex-direction: column; gap: var(--s-1); }
+.tally .label { font-size: var(--t-sm); color: var(--muted); }
+.tally .sats.big { font-size: var(--t-2xl); font-weight: 600; letter-spacing: -0.02em; }
+.tally .sats.big .unit { font-size: var(--t-md); }
+.meter { display: block; height: 4px; border-radius: var(--r-chip); background: var(--sunk); overflow: hidden; }
+.meter > span { display: block; height: 100%; background: var(--accent); border-radius: inherit; transition: width var(--d-mid) var(--ease); }
+.pause-all { align-self: stretch; background: var(--raised); border: 1px solid var(--line-strong); padding: 8px 12px; font-size: var(--t-sm); font-weight: 600; }
+.pause-all:hover { border-color: var(--warn); color: var(--warn); }
+.spend-line.paused { color: var(--warn); }
+.spend-line .line-text { flex: 1 1 0; min-width: 0; }
+.spend-line .line-text .link { font-size: var(--t-xs); padding: 0; }
+.budget-row { display: flex; flex-direction: column; gap: var(--s-1); padding: var(--s-2) 0; border-top: 1px solid var(--line); font-size: var(--t-sm); }
+.budget-row .who { font-family: var(--font-serif); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.budget-row .link { align-self: flex-start; padding: 0; font-size: var(--t-xs); }
+.budget-row form { gap: var(--s-2); }
+.budget-row input { width: 96px; }
+
+/* organism view (O1): the context panel as the node's physiology. Every mark
+ * is a reading; motion answers one real event (a 400 ms pulse) and nothing
+ * moves while nothing happens. */
+.organism { display: flex; flex-direction: column; gap: var(--s-2); }
+.organ { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-panel); padding: var(--s-3) var(--s-4); }
+.organ-head { display: flex; align-items: baseline; gap: var(--s-2); width: 100%; background: none; border: none; padding: 0; color: var(--ink); text-align: left; cursor: default; }
+.organ-name { font-family: var(--font-sans); font-size: var(--t-xs); font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; transition: color var(--d-slow) var(--ease); }
+.organ.hot .organ-name { color: var(--accent); transition: none; }
+.organ-summary, .organ-chev { display: none; }
+.organ-fresh { margin-left: auto; font-size: var(--t-xs); color: var(--faint); white-space: nowrap; }
+.organ-fresh.stale { color: var(--muted); }
+.sample-tag { font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); border: 1px solid var(--line-strong); border-radius: 4px; padding: 0 4px; }
+.organ-body { display: flex; flex-direction: column; gap: 6px; margin-top: var(--s-2); font-size: var(--t-sm); }
+.organ-src { font-size: var(--t-xs); color: var(--faint); line-height: var(--lh-body); margin-top: var(--s-1); }
+.organ-line { font-size: var(--t-sm); line-height: var(--lh-body); overflow-wrap: anywhere; }
+.organ-line.muted, .organ-note, .organ-unit { color: var(--muted); font-size: var(--t-xs); }
+.organ-unit { text-align: right; margin-top: -4px; }
+.organ-line .sats, .organ-row .sats { font-variant-numeric: tabular-nums; }
+.organ-line.door .sats { color: var(--accent); }
+.warn-line { color: var(--warn); }
+.ok-word { color: var(--ok); }
+.err-word { color: var(--err); }
+.energy { display: grid; grid-template-columns: auto 1fr 1fr; gap: 2px var(--s-3); align-items: baseline; }
+.energy .col { font-size: var(--t-xs); color: var(--muted); text-align: right; }
+.energy .dir { font-size: var(--t-xs); color: var(--muted); }
+.energy-fig { text-align: right; color: var(--accent); font-size: var(--t-md); }
+.organ-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0 var(--s-2); align-items: baseline; padding: 2px var(--s-1); margin: 0 calc(-1 * var(--s-1)); border-radius: 4px; transition: background-color var(--d-slow) var(--ease), font-weight var(--d-slow); }
+.organ-row .who { font-family: var(--font-serif); display: inline-flex; align-items: center; gap: var(--s-2); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.organ-row .sats { text-align: right; }
+.organ-row:not(.setpoint) { grid-template-columns: auto minmax(0, 1fr) auto; }
+.organ-row:not(.setpoint) .organ-note { grid-row: 1; grid-column: 2; text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.organ-row:not(.setpoint) .sats { grid-row: 1; grid-column: 3; min-width: 3.5em; }
+.organ-row:not(.setpoint) .who { max-width: 9em; }
+.organ-row.setpoint { grid-template-columns: minmax(0, 7em) minmax(0, 1fr) auto; gap: 0 var(--s-2); }
+.organ-row.setpoint .meter { align-self: center; }
+.organ-row.setpoint .organ-note { display: none; }
+.organ-log { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: var(--s-2); font-size: var(--t-xs); line-height: var(--lh-body); padding: 2px var(--s-1); margin: 0 calc(-1 * var(--s-1)); border-radius: 4px; overflow-wrap: anywhere; transition: background-color var(--d-slow) var(--ease); }
+.organ-log .detail { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+.organ-log .at { font-family: var(--font-mono); color: var(--faint); }
+.organ-row.hot, .organ-log.hot { background: var(--ember); transition: none; }
+.organ-actions { display: flex; gap: var(--s-2); margin-left: calc(-1 * var(--s-1)); }
+.organ.stale .sats, .organ.stale .energy-fig, .organ.stale .organ-line.door .sats { color: var(--muted); }
+.organ.stale .meter > span { background: var(--faint); }
+/* N1 bars: 24 hours, oldest left. A gap is an hour the node reported nothing for. */
+.bars { display: grid; grid-template-columns: repeat(24, minmax(0, 1fr)); gap: 2px; height: 28px; align-items: end; margin-top: var(--s-1); }
+.hour-bar { display: flex; flex-direction: column-reverse; justify-content: flex-start; height: 100%; gap: 1px; }
+.bar-in, .bar-out { display: block; width: 100%; max-height: 50%; border-radius: 1px; }
+.bar-in { background: var(--accent); }
+.bar-out { background: var(--line-strong); }
+.hour-bar .none { display: none; }
+.hour-bar.gap { height: 1px; border-bottom: 1px dotted var(--line-strong); }
+.organ.stale .bar-in { background: var(--faint); }
+
+/* The membrane in the stream: a door card, dashed like a threshold. */
+.door-card { align-self: stretch; margin: var(--s-2) 0; display: flex; flex-direction: column; gap: 2px; font-size: var(--t-sm); line-height: var(--lh-body); }
+.door-rule { display: flex; align-items: center; gap: var(--s-2); font-size: var(--t-xs); color: var(--faint); font-family: var(--font-mono); }
+.door-rule::before, .door-rule::after { content: ''; flex: 1; border-top: 1px solid var(--line); }
+.door-card > p:not(.door-rule) { border-left: 1px dashed var(--line-strong); border-right: 1px dashed var(--line-strong); padding: 0 var(--s-3); overflow-wrap: anywhere; }
+.door-card > p:nth-child(2) { padding-top: var(--s-2); }
+.door-card > p:last-child { padding-bottom: var(--s-2); border-bottom: 1px dashed var(--line-strong); }
+.door-head .sats { color: var(--accent); }
+.door-head .id { font-size: inherit; color: var(--ink); }
+.door-proof { font-family: var(--font-mono); font-size: var(--t-xs); color: var(--ok); }
+.door-note { font-size: var(--t-xs); color: var(--muted); }
+.door-card.refused .door-proof { color: var(--err); }
+.door-card.refused > p:not(.door-rule) { border-color: rgba(217, 96, 63, 0.45); }
+.track-link.knock .name { font-size: var(--t-sm); }
+@media (prefers-reduced-motion: reduce) {
+  .organ-row.hot, .organ-log.hot { background: none; font-weight: 600; }
+  .organ.hot .organ-name { color: var(--ink); text-decoration: underline; text-underline-offset: 3px; }
+}
+
 @media (max-width: 1080px) {
   .cc, .cc.no-context { grid-template-columns: var(--rail-w) minmax(0, 1fr); }
   .context { position: fixed; inset: 0 0 0 auto; width: min(var(--context-w), 92vw); z-index: 10; transform: translateX(100%); transition: transform var(--d-mid) var(--ease); box-shadow: -12px 0 32px rgba(0, 0, 0, 0.5); }
@@ -372,4 +469,13 @@ select { font: inherit; font-size: var(--t-sm); background: var(--sunk); color: 
   .ai-answer { max-width: 100%; }
   .ai-suggest { flex-wrap: nowrap; overflow-x: auto; }
   .chip { flex: none; }
+  /* Body tab: one line per organ; a tap opens it. */
+  .organ-head { cursor: pointer; align-items: center; }
+  .organ-summary { display: inline; margin-left: auto; font-size: var(--t-sm); color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  .organ-fresh { display: none; margin-left: 0; }
+  .organ.expanded .organ-fresh { display: inline; margin-left: auto; }
+  .organ.expanded .organ-summary { display: none; }
+  .organ-chev { display: inline; color: var(--muted); transition: transform var(--d-fast) var(--ease); }
+  .organ.expanded .organ-chev { transform: rotate(90deg); }
+  .organ:not(.expanded) .organ-body { display: none; }
 }

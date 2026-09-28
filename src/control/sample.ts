@@ -7,9 +7,16 @@ import type { Source } from './source';
 import type {
   ActionError,
   AiFreshness,
+  BudgetPreset,
+  BudgetRow,
+  BudgetView,
   AiTopic,
   Amount,
   Disclosure,
+  EnergyRead,
+  EnergySpan,
+  MembraneEvent,
+  MembraneRead,
   Preset,
   ProviderView,
   RemoteAnswer,
@@ -79,9 +86,103 @@ const THREADS: Record<string, Message[]> = {
 
 const LIVE_LINES: [string, string][] = [
   [hex('a'), 'Block 860,124 just landed. Fees are calm.'],
+  // Not a contact: a stranger who paid the door price. Admitted, never added to peers.
+  [hex('e'), 'Hi, saw your talk in Mexico. Paid your door to say thanks.'],
   [hex('b'), 'Heading out, my node stays up.'],
   [hex('a'), 'Did the channel rebalance go through on your side?'],
 ];
+
+// ---- organism v2 sample (genome N1 / N2), only with `?sample&organism=v2` -----
+// A node-wide ledger relative to now: it includes a contact whose track was never
+// opened (Dana) and the stranger who paid the door, which the v1 sums cannot see.
+
+export const SAMPLE_STRANGER = hex('e');
+const STRANGER_LINE = msg(SAMPLE_STRANGER, SAMPLE_OWN_ID, 0, 'Hi, saw your talk in Mexico. Paid your door to say thanks.', 1000);
+/** Sent (by their clock) a few seconds before the node admitted it, 44 min ago. */
+const strangerThread = (): Message[] => [{ ...STRANGER_LINE, timestamp: Date.now() - 44 * 60_000 - 3_000 }];
+
+/** [minutes ago, counterparty, kind, in msat, out msat]. Hours with nothing stay gaps. */
+const LEDGER: [number, string, 'peer' | 'room', number, number][] = [
+  [4, hex('a'), 'peer', 2000, 0],
+  [12, SAMPLE_STRANGER, 'peer', 1000, 0],
+  [25, hex('a'), 'peer', 0, 2000],
+  [48, hex('b'), 'peer', 1000, 1000],
+  [95, SAMPLE_ROOM_ID, 'room', 3000, 3000],
+  [130, hex('a'), 'peer', 4000, 2000],
+  [190, hex('d'), 'peer', 6000, 0],
+  [260, hex('b'), 'peer', 0, 1000],
+  [420, hex('a'), 'peer', 8000, 4000],
+  [480, hex('d'), 'peer', 2000, 1000],
+  [610, SAMPLE_ROOM_ID, 'room', 2000, 2000],
+  [790, hex('a'), 'peer', 2000, 0],
+  [1020, hex('b'), 'peer', 3000, 2000],
+  [1110, hex('d'), 'peer', 1000, 0],
+  [1300, hex('a'), 'peer', 6000, 2000],
+];
+
+function sampleEnergy(span: EnergySpan, now: number): EnergyRead {
+  const spanMs = span === '1h' ? 3_600_000 : span === '24h' ? DAY_MS : 7 * DAY_MS;
+  const bucketMs = span === '1h' ? 300_000 : span === '24h' ? 3_600_000 : DAY_MS;
+  const buckets = new Map<number, { start_ms: number; in_msat: number; out_msat: number }>();
+  const parties = new Map<string, EnergyRead['counterparties'][number]>();
+  const totals = { in_msat: 0, out_msat: 0, in_count: 0, out_count: 0 };
+  for (const [minAgo, id, kind, inMsat, outMsat] of LEDGER) {
+    const at = now - minAgo * 60_000;
+    if (now - at > spanMs) continue;
+    const start = at - (at % bucketMs);
+    const b = buckets.get(start) ?? { start_ms: start, in_msat: 0, out_msat: 0 };
+    const c = parties.get(id) ?? { kind, id, in_msat: 0, out_msat: 0, in_count: 0, out_count: 0 };
+    b.in_msat += inMsat;
+    b.out_msat += outMsat;
+    c.in_msat += inMsat;
+    c.out_msat += outMsat;
+    c.in_count += inMsat > 0 ? 1 : 0;
+    c.out_count += outMsat > 0 ? 1 : 0;
+    totals.in_msat += inMsat;
+    totals.out_msat += outMsat;
+    totals.in_count += inMsat > 0 ? 1 : 0;
+    totals.out_count += outMsat > 0 ? 1 : 0;
+    buckets.set(start, b);
+    parties.set(id, c);
+  }
+  return {
+    window: span,
+    as_of_ms: now,
+    bucket_ms: bucketMs,
+    buckets: [...buckets.values()].sort((a, b) => a.start_ms - b.start_ms),
+    counterparties: [...parties.values()].sort((a, b) => b.in_msat + b.out_msat - (a.in_msat + a.out_msat)),
+    totals,
+    truncated: false,
+  };
+}
+
+let membraneSeqSample = 0;
+const knock = (minAgo: number, e: Partial<MembraneEvent> & Pick<MembraneEvent, 'verdict' | 'code'>): MembraneEvent => ({
+  seq: ++membraneSeqSample,
+  at: Date.now() - minAgo * 60_000,
+  direction: 'inbound',
+  kind: 0,
+  counterparty: null,
+  first_contact: false,
+  required_msat: null,
+  paid_msat: null,
+  cap_msat: null,
+  ...e,
+});
+
+/** The node's ring as a sample: a stranger admitted by payment, and refusals at the door. */
+function sampleKnocks(): MembraneEvent[] {
+  membraneSeqSample = 0;
+  return [
+    knock(52, { verdict: 'refused', code: 'stale' }),
+    knock(46, { verdict: 'refused', code: 'unpaid', counterparty: hex('f'), required_msat: 1000, paid_msat: 0 }),
+    knock(44, { verdict: 'admitted', code: 'settled', counterparty: SAMPLE_STRANGER, first_contact: true, paid_msat: 1000 }),
+    knock(31, { verdict: 'refused', code: 'bad_signature', paid_msat: 1000 }),
+    knock(18, { verdict: 'refused', code: 'unpaid', counterparty: hex('f'), required_msat: 1000, paid_msat: 0 }),
+    knock(9, { verdict: 'refused', code: 'proof_reused', counterparty: hex('b'), required_msat: null, paid_msat: 1000 }),
+    knock(4, { verdict: 'admitted', code: 'settled', counterparty: hex('a'), paid_msat: 2000 }),
+  ].reverse();
+}
 
 const PRICE_TABLES: Record<string, Pick<PriceQuote, 'peer_msat' | 'peer_age_secs' | 'peer_stale'>> = {
   [hex('a')]: { peer_msat: 2000, peer_age_secs: 240, peer_stale: false },
@@ -107,6 +208,16 @@ const FILE_PRICE_MSAT = 3000;
 const WINDOW_MS = 10 * 60 * 1000;
 /** Status polls before the sample owner "types" the grant at their terminal. */
 const GRANT_AFTER_POLLS = 2;
+
+// B2 budgets, as the host keeps them: numbers and a rolling 24-hour ledger.
+// The approval is memory only, so the sample starts with it off, like a restart.
+const DAY_MS = 24 * 60 * 60 * 1000;
+export const SAMPLE_PRESETS: BudgetPreset[] = [
+  { id: 'careful', contact_msat: 50_000, room_msat: 100_000, ceiling_msat: 500_000 },
+  { id: 'everyday', contact_msat: 200_000, room_msat: 500_000, ceiling_msat: 2_000_000 },
+  { id: 'generous', contact_msat: 1_000_000, room_msat: 2_500_000, ceiling_msat: 10_000_000 },
+];
+const MAX_DAILY_MSAT = 100_000_000;
 
 // ---- AI track sample ----------------------------------------------------------
 // What the host's read broker would return for the sample node: the same
@@ -353,7 +464,13 @@ export function sampleInvoiceMsat(bolt11: string): number | null {
 const sampleBolt11 = (msat: number) =>
   msat % 100 === 0 ? `lntbs${msat / 100}n1samplenotpayable0donotpay` : `lntbs${msat * 10}p1samplenotpayable0donotpay`;
 
-export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number } = {}): Source {
+export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number; organism?: 'v1' | 'v2' } = {}): Source {
+  // v1 (default) is today's rc7 node: no energy read, no membrane events.
+  const v2 = opts.organism === 'v2';
+  let knocks = v2 ? sampleKnocks() : [];
+  // v2 sample: Maya raises her price just before your first send to her, so the
+  // send is refused at her door before any payment (a door card in her track).
+  const raised: Record<string, number> = {};
   const liveEvery = opts.liveEveryMs ?? 30_000;
   const firstLive = opts.firstLiveMs ?? 7_000;
   let fund: FundState | null = null;
@@ -391,6 +508,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number 
       : refuse('spend_locked', 'Sending spends from your node. Approve spending first.');
   };
   const peerPrice = (id: string) => {
+    if (raised[id] !== undefined) return raised[id];
     const t = PRICE_TABLES[id];
     return t && !t.peer_stale && t.peer_msat !== null ? t.peer_msat : OWN_PRICE_MSAT;
   };
@@ -412,6 +530,106 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number 
     };
   };
   const later = (ms: number, event: LiveEvent) => setTimeout(() => live?.(event), ms);
+
+  // ---- budgets ----
+  type Entry = { at: number; target: string; room: boolean; msat: number };
+  const book = {
+    preset: 'careful' as BudgetView['preset'],
+    ceiling: 500_000,
+    limits: new Map<string, number>([[`peer:${hex('a')}`, 50_000], [`peer:${hex('b')}`, 50_000], [`room:${SAMPLE_ROOM_ID}`, 100_000]]),
+    paused: false,
+    // Earlier today: what the sample threads show as paid.
+    ledger: [
+      { at: T0 + 3 * 60_000, target: hex('a'), room: false, msat: 2000 },
+      { at: T0 + 9 * 60_000, target: hex('a'), room: false, msat: 2000 },
+      { at: T0 + 22 * 60_000, target: hex('b'), room: false, msat: 1000 },
+      { at: T0 + 41 * 60_000, target: SAMPLE_ROOM_ID, room: true, msat: 3000 },
+    ].map((e) => ({ ...e, at: Date.now() - (T0 + 60 * 60_000 - e.at) })) as Entry[],
+  };
+  let autopay: { until: number; ceiling: number } | null = null;
+  let autopayExpired = false;
+  const wants = { window: false, budget: null as number | null };
+  const key = (target: string, room: boolean) => `${room ? 'room' : 'peer'}:${target}`;
+  const live24 = (e: Entry) => e.at + DAY_MS > Date.now();
+  const spentOn = (target: string, room: boolean) => book.ledger.filter((e) => live24(e) && e.target === target && e.room === room).reduce((n, e) => n + e.msat, 0);
+  const spentAll = () => book.ledger.filter(live24).reduce((n, e) => n + e.msat, 0);
+  const settleAutopay = () => {
+    if (autopay && autopay.until <= Date.now()) {
+      autopay = null;
+      autopayExpired = true;
+    }
+  };
+  const budgetView = (): BudgetView => {
+    settleAutopay();
+    const rows: BudgetRow[] = [...book.limits].map(([k, limit]) => {
+      const [kind, target] = k.split(':') as ['peer' | 'room', string];
+      return { target, room: kind === 'room', limit_msat: limit, spent_msat: spentOn(target, kind === 'room') };
+    });
+    for (const e of book.ledger.filter(live24)) {
+      if (!rows.some((r) => r.target === e.target && r.room === e.room)) rows.push({ target: e.target, room: e.room, limit_msat: null, spent_msat: spentOn(e.target, e.room) });
+    }
+    rows.sort((a, b) => b.spent_msat - a.spent_msat || a.target.localeCompare(b.target));
+    return {
+      paused: book.paused,
+      autopay: {
+        state: autopay ? 'open' : autopayExpired ? 'expired' : 'off',
+        open_until_ms: autopay?.until ?? null,
+        ceiling_msat: autopay?.ceiling ?? null,
+        basis: autopay ? 'node_grant' : null,
+      },
+      waiting_for_owner: wants.budget !== null && spend.state === 'pending',
+      preset: book.preset,
+      ceiling_msat: book.ceiling,
+      spent_msat: spentAll(),
+      unsettled_msat: 0,
+      rows,
+      presets: SAMPLE_PRESETS,
+      window_ms: DAY_MS,
+      max_daily_msat: MAX_DAILY_MSAT,
+      node_grant: null,
+    };
+  };
+  const requestElevation = () => {
+    spendPolls = 0;
+    spend = {
+      state: 'pending',
+      basis: null,
+      open_until_ms: null,
+      pending: {
+        op_id: '5a3f0c9e21d4b7a8e6f10c2d',
+        expires_at_ms: Date.now() + 15 * 60_000,
+        owner_action: 'konsensus grant --op 5a3f0c9e21d4b7a8e6f10c2d',
+        owner_can_grant: true,
+      },
+      window_ms: WINDOW_MS,
+    };
+  };
+  /** The host's `budget::plan`: pause, the contact's budget, first contact, the daily total, then the window. */
+  const planSend = (target: string, room: boolean, max: number, first: number | undefined): Promise<number | null> => {
+    settleAutopay();
+    settleSpend();
+    const sats = (msat: number) => String(msat / 1000);
+    if (book.paused) return refuse('budget_paused', 'Payments are paused. Resume them to send.');
+    const who = room ? 'this room' : 'this contact';
+    const limit = book.limits.get(key(target, room));
+    if (limit !== undefined && spentOn(target, room) + max > limit) {
+      return refuse('budget_exhausted', `You have used ${sats(spentOn(target, room))} of ${sats(limit)} sats for ${who} in the last 24 hours, and this costs ${sats(max)}. Raise the budget to send.`);
+    }
+    if (autopay) {
+      let confirm: number | null = null;
+      if (limit === undefined) {
+        if (first === undefined) return refuse('first_contact', `Your first paid message to ${who} needs your OK once. Nothing was sent.`);
+        confirm = Math.min(first, book.ceiling);
+        if (confirm < max) return refuse('invalid', `A budget of ${sats(confirm)} sats does not cover this message.`);
+      }
+      const ceiling = Math.min(autopay.ceiling, book.ceiling);
+      if (spentAll() + max > ceiling) {
+        return refuse('ceiling_exhausted', `You have used ${sats(spentAll())} of your ${sats(ceiling)} sats daily total, and this costs ${sats(max)}. Raise the daily total to send.`);
+      }
+      return Promise.resolve(confirm);
+    }
+    return gate().then(() => (limit === undefined && first !== undefined && first >= max && first <= book.ceiling ? first : null));
+  };
   const disclosures = new Map<string, { topic: AiTopic; preset: Preset }>();
   const nextId = (prefix: string) => `${prefix}-${(sent++).toString(16).padStart(4, '0')}`;
 
@@ -446,47 +664,117 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number 
         uptime_secs: 3 * 86_400 + 4 * 3600,
         lightning_backend: 'ldk',
         chain_backend: 'esplora',
+        capabilities: v2 ? ['energy_v1', 'membrane_v1'] : [],
         read_at: Date.now(),
       }),
+    energy: (span) => (v2 ? ok(sampleEnergy(span, Date.now())) : Promise.reject('not found: this node has no energy read (N1)')),
+    membrane: (limit) =>
+      v2
+        ? ok({
+            capacity: 500,
+            totals: {
+              admitted: knocks.filter((k) => k.verdict === 'admitted').length,
+              first_contacts: knocks.filter((k) => k.first_contact).length,
+              refused: knocks.filter((k) => k.verdict === 'refused').length,
+              outbound_refused: 0,
+            },
+            events: knocks.slice(0, limit ?? 50),
+            read_at: Date.now(),
+          } satisfies MembraneRead)
+        : Promise.reject('not found: this node has no membrane read (N2)'),
     peers: () => ok(SAMPLE_PEERS),
     rooms: () => ok(SAMPLE_ROOMS),
     roomMembers: (id) => ok(ROOM_MEMBERS[id.toLowerCase()] ?? []),
-    messages: (peer) => ok(THREADS[peer.toLowerCase()] ?? []),
+    messages: (peer) => ok(THREADS[peer.toLowerCase()] ?? (v2 && peer.toLowerCase() === SAMPLE_STRANGER ? strangerThread() : [])),
     priceQuote: (peer) =>
-      ok({ kind: 0, own_msat: 1000, ...(PRICE_TABLES[peer ?? ''] ?? { peer_msat: null, peer_age_secs: null, peer_stale: false }) }),
+      ok({
+        kind: 0,
+        own_msat: 1000,
+        ...(PRICE_TABLES[peer ?? ''] ?? { peer_msat: null, peer_age_secs: null, peer_stale: false }),
+        ...(peer && raised[peer] !== undefined ? { peer_msat: raised[peer], peer_age_secs: 1, peer_stale: false } : {}),
+      }),
+    // Sample strangers open their door at 2 sats and ask 2 sats a message.
+    firstContactQuote: (peer) =>
+      ok({ recipient: peer, admission_msat: 2000, message_msat: 2000, total_msat: 4000, expires_at: Math.floor(Date.now() / 1000) + 60 }),
+    firstContactRequest: async () => null,
+    firstContactStatus: async () => { throw new Error('Sample data has no independent owner request.'); },
+    firstContactCancel: async () => {},
     wallet: () => ok(WALLET),
     spendStatus: () => {
       settleSpend();
-      if (spend.state === 'pending' && ++spendPolls >= GRANT_AFTER_POLLS) openWindow();
+      if (spend.state === 'pending' && ++spendPolls >= GRANT_AFTER_POLLS) {
+        // The owner's grant opens only what was asked for.
+        if (wants.window) openWindow();
+        else spend = { state: 'locked', basis: null, open_until_ms: null, pending: null, window_ms: WINDOW_MS };
+        if (wants.budget !== null) {
+          autopay = { until: Date.now() + DAY_MS, ceiling: wants.budget };
+          autopayExpired = false;
+        }
+        wants.window = false;
+        wants.budget = null;
+      }
       return ok(spend);
     },
     spendRequest: () => {
       settleSpend();
+      if (book.paused) return refuse('budget_paused', 'Payments are paused. Resume them first.');
       if (spend.state !== 'open' && spend.state !== 'pending') {
-        spendPolls = 0;
-        spend = {
-          state: 'pending',
-          basis: null,
-          open_until_ms: null,
-          pending: {
-            op_id: '5a3f0c9e21d4b7a8e6f10c2d',
-            expires_at_ms: Date.now() + 15 * 60_000,
-            owner_action: 'konsensus grant --op 5a3f0c9e21d4b7a8e6f10c2d',
-            owner_can_grant: true,
-          },
-          window_ms: WINDOW_MS,
-        };
+        wants.budget = null;
+        requestElevation();
       }
+      wants.window = true;
       return ok(spend);
     },
     spendLock: () => {
       spend = { state: 'locked', basis: null, open_until_ms: null, pending: null, window_ms: WINDOW_MS };
+      wants.window = false;
+      wants.budget = null;
       return ok(spend);
     },
+    budgetStatus: () => ok(budgetView()),
+    budgetApprove: (ceilingMsat, preset) => {
+      if (book.paused) return refuse('budget_paused', 'Payments are paused. Resume them first.');
+      if (ceilingMsat < 1000 || ceilingMsat > MAX_DAILY_MSAT) return refuse('invalid', 'A daily total is between 1 and 100,000 sats.');
+      book.preset = preset;
+      book.ceiling = ceilingMsat;
+      for (const [k, v] of book.limits) book.limits.set(k, Math.min(v, ceilingMsat));
+      settleAutopay();
+      if (autopay && ceilingMsat <= autopay.ceiling) autopay.ceiling = ceilingMsat;
+      else {
+        if (spend.state !== 'pending') {
+          wants.window = false;
+          requestElevation();
+        }
+        wants.budget = ceilingMsat;
+      }
+      return ok(budgetView());
+    },
+    budgetSet: (target, room, limitMsat) => {
+      const k = key(target.toLowerCase(), room);
+      if (limitMsat === 0) book.limits.delete(k);
+      else if (limitMsat > book.ceiling) return refuse('invalid', `That is above your approved daily total of ${book.ceiling / 1000} sats. Raise the total first.`);
+      else book.limits.set(k, limitMsat);
+      return ok(budgetView());
+    },
+    budgetPause: () => {
+      autopay = null;
+      book.paused = true;
+      spend = { state: 'locked', basis: null, open_until_ms: null, pending: null, window_ms: WINDOW_MS };
+      wants.window = false;
+      wants.budget = null;
+      return ok(budgetView());
+    },
+    budgetResume: () => {
+      book.paused = false;
+      // Resume is the owner's tap for the total already on the book.
+      if (spend.state !== 'pending') requestElevation();
+      wants.budget = book.ceiling;
+      return ok(budgetView());
+    },
     spendReconcile: () => ok('No pending spend.'),
-    send: async (recipient, isRoom, plaintext, maxMsat) => {
-      await gate();
+    send: async (recipient, isRoom, plaintext, maxMsat, _caps, firstContactMsat) => {
       const to = recipient.toLowerCase();
+      const confirm = await planSend(to, isRoom, maxMsat, firstContactMsat);
       let amount: number;
       if (isRoom) {
         const q = roomQuote(to);
@@ -501,7 +789,13 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number 
         }
         amount = Math.max(peerPrice(to), 1000);
       }
+      if (v2 && !isRoom && to === hex('a') && raised[to] === undefined) {
+        raised[to] = 3000;
+        return refuse('price_changed', `Maya's price rose to 3 sats, above your ${maxMsat / 1000} sat cap. Nothing was dispatched; refresh the quote.`);
+      }
       if (amount > maxMsat) return refuse('price_changed', 'Price above confirmed ceiling. Nothing dispatched.');
+      if (confirm !== null) book.limits.set(key(to, isRoom), confirm);
+      book.ledger.push({ at: Date.now(), target: to, room: isRoom, msat: amount });
       const id = nextId('sent');
       const at = Date.now();
       later(250, { type: 'message', room_id: isRoom ? to : null, message: { id, kind: 0, sender: SAMPLE_OWN_ID, recipient: to, timestamp: at, plaintext, payment_amount_msat: amount } });
@@ -595,6 +889,24 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number 
       let i = 0;
       const emit = () => {
         const [from, text] = LIVE_LINES[i++ % LIVE_LINES.length];
+        if (v2) {
+          // The node reports its gate decision first, then delivers the message.
+          const admitted: MembraneEvent = {
+            seq: knocks.length + i + 1000,
+            at: Date.now(),
+            direction: 'inbound',
+            verdict: 'admitted',
+            code: 'settled',
+            kind: 0,
+            counterparty: from,
+            first_contact: !SAMPLE_PEERS.some((p) => p.node_id === from),
+            required_msat: null,
+            paid_msat: from === hex('a') ? 2000 : 1000,
+            cap_msat: null,
+          };
+          knocks = [admitted, ...knocks].slice(0, 500);
+          handler({ type: 'membrane', event: admitted });
+        }
         const event: LiveEvent = {
           type: 'message',
           message: { ...msg(from, SAMPLE_OWN_ID, 0, text, from === hex('a') ? 2000 : 1000), timestamp: Date.now() },

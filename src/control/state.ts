@@ -6,6 +6,7 @@
 import { ago, sats, satUnit, shortId } from './format';
 import type {
   ActionError,
+  BudgetView,
   Artifact,
   Delivery,
   LinkState,
@@ -147,6 +148,61 @@ export function asActionError(e: unknown): ActionError {
 export const needsApproval = (e: ActionError) =>
   e.code === 'spend_locked' || e.code === 'spend_expired';
 
+/** The host stopped a message on a budget rule: explain in the composer, not as a failed send. */
+export const isBudgetStop = (e: ActionError) =>
+  ['budget_paused', 'budget_exhausted', 'ceiling_exhausted', 'first_contact', 'budget_needed'].includes(e.code) || isGrantStop(e);
+
+/** A G1 node refused under its spend grant before any payment. Nothing was sent. */
+export const isGrantStop = (e: ActionError) => e.code.startsWith('grant_');
+
+/** Where one track stands against its budget and the daily total, before sending. */
+export type BudgetStand =
+  | { kind: 'unknown' }
+  | { kind: 'paused' }
+  | { kind: 'waiting' }
+  | { kind: 'off' }
+  | { kind: 'first'; suggest: number; ceiling: number; again?: boolean }
+  | { kind: 'contact_used'; limit: number; spent: number; raiseTo: number | null }
+  | { kind: 'total_used'; ceiling: number; spent: number; raiseTo: number | null }
+  | { kind: 'ok'; limit: number; spent: number; ceiling: number; totalSpent: number };
+
+/**
+ * `readmit`: the node asked the owner's OK to admit this known contact again
+ * after a reconnect (its grant does not budget them yet). The door card comes
+ * back once, with their budget as it stands.
+ */
+export function budgetStand(view: BudgetView | null, target: string, room: boolean, costMsat: number | null, readmit = false): BudgetStand {
+  if (!view) return { kind: 'unknown' };
+  if (view.paused) return { kind: 'paused' };
+  if (view.waiting_for_owner) return { kind: 'waiting' };
+  if (view.autopay.state !== 'open') return { kind: 'off' };
+  const cost = costMsat ?? 0;
+  const ceiling = Math.min(view.autopay.ceiling_msat ?? 0, view.ceiling_msat);
+  const row = view.rows.find((r) => r.target === target.toLowerCase() && r.room === room);
+  const preset = view.presets.find((p) => p.id === view.preset) ?? view.presets[0];
+  if (!row || row.limit_msat === null) {
+    const suggest = Math.min(Math.max(room ? preset?.room_msat ?? 0 : preset?.contact_msat ?? 0, cost), ceiling);
+    return { kind: 'first', suggest, ceiling };
+  }
+  if (readmit && !room) return { kind: 'first', suggest: Math.min(row.limit_msat, ceiling), ceiling, again: true };
+  if (row.spent_msat + cost > row.limit_msat) {
+    const want = Math.max(row.limit_msat * 2, row.spent_msat + cost);
+    return { kind: 'contact_used', limit: row.limit_msat, spent: row.spent_msat, raiseTo: want <= ceiling ? want : ceiling > row.limit_msat ? ceiling : null };
+  }
+  if (view.spent_msat + cost > ceiling) {
+    const want = Math.min(Math.max(ceiling * 2, view.spent_msat + cost), view.max_daily_msat);
+    return { kind: 'total_used', ceiling, spent: view.spent_msat, raiseTo: want > ceiling ? want : null };
+  }
+  return { kind: 'ok', limit: row.limit_msat, spent: row.spent_msat, ceiling, totalSpent: view.spent_msat };
+}
+
+/** A budget in the recipient's own price as the unit: "about 25 messages". */
+export function messagesWorth(budgetMsat: number, priceMsat: number | null): string | null {
+  if (!priceMsat || priceMsat <= 0) return null;
+  const n = Math.floor(budgetMsat / priceMsat);
+  return `${n} message${n === 1 ? '' : 's'}`;
+}
+
 export type Deliveries = Record<string, Delivery>;
 
 /** A send's first status, from the node's reply. */
@@ -176,13 +232,24 @@ export function sentMessage(receipt: SendReceipt, ownId: string, plaintext: stri
 
 export type StreamItem = { type: 'message'; at: number; message: Message } | { type: 'artifact'; at: number; artifact: Artifact };
 
+/** How far back a first-contact door card reaches for the message it admitted (sender clocks drift). */
+const DOOR_REACH_MS = 10 * 60_000;
+
 /** Messages and this track's artifacts, in time order. */
 export function streamItems(messages: Message[], artifacts: Artifact[]): StreamItem[] {
-  const items: StreamItem[] = [
-    ...messages.map((message) => ({ type: 'message' as const, at: message.timestamp, message })),
-    ...artifacts.map((artifact) => ({ type: 'artifact' as const, at: artifact.at, artifact })),
+  // A first contact's door card stands just before the stranger's first message
+  // near it, whichever clock (theirs on the message, the node's on the card) is earlier.
+  const sortAt = (a: Artifact) => {
+    if (a.type !== 'door' || a.door.side !== 'in' || a.door.verdict !== 'admitted') return a.at;
+    const sender = a.door.sender;
+    const theirs = messages.filter((m) => m.sender.toLowerCase() === sender && Math.abs(m.timestamp - a.at) <= DOOR_REACH_MS).map((m) => m.timestamp);
+    return Math.min(a.at, ...theirs) - 0.5;
+  };
+  const items: (StreamItem & { key: number })[] = [
+    ...messages.map((message) => ({ type: 'message' as const, at: message.timestamp, key: message.timestamp, message })),
+    ...artifacts.map((artifact) => ({ type: 'artifact' as const, at: artifact.at, key: sortAt(artifact), artifact })),
   ];
-  return items.sort((a, b) => a.at - b.at);
+  return items.sort((a, b) => a.key - b.key).map(({ key: _key, ...item }) => item as StreamItem);
 }
 
 /** The composer's spend line. */

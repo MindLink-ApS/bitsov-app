@@ -7,6 +7,8 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import type { NodeStatus, PairingView } from '../onboarding/pairing';
 import type {
+  OwnerContactApproval,
+  FirstContactQuote,
   AiTopic,
   Disclosure,
   Preset,
@@ -23,6 +25,8 @@ import type {
   RoomQuote,
   SendReceipt,
   SpendView,
+  BudgetView,
+  PresetId,
   FundingAddress,
   FundState,
   LiveEvent,
@@ -31,6 +35,9 @@ import type {
   NodeOverview,
   Peer,
   PriceQuote,
+  EnergyRead,
+  EnergySpan,
+  MembraneRead,
   RestoreOutcome,
   Room,
   WalletOverview,
@@ -53,7 +60,16 @@ export interface Source {
   roomMembers(roomId: string): Promise<string[]>;
   messages(peer: string, before?: number): Promise<Message[]>;
   priceQuote(peer?: string): Promise<PriceQuote>;
+  /** The door card: a stranger's signed quote before a first contact. */
+  firstContactQuote(peer: string): Promise<FirstContactQuote>;
+  firstContactRequest(peer: string, maxMsat: number, budgetMsat: number): Promise<OwnerContactApproval | null>;
+  firstContactStatus(id: string): Promise<OwnerContactApproval>;
+  firstContactCancel(id: string): Promise<void>;
   wallet(): Promise<WalletOverview>;
+  /** Node-wide energy (genome N1). Call only when the overview lists `energy_v1`. */
+  energy(span: EnergySpan): Promise<EnergyRead>;
+  /** The node's membrane ring, newest first (genome N2). Only with `membrane_v1`. */
+  membrane(limit?: number): Promise<MembraneRead>;
   /** Subscribe to live events; resolves to an unsubscribe. */
   onLive(handler: (event: LiveEvent) => void): Promise<() => void>;
   /**
@@ -67,7 +83,19 @@ export interface Source {
   spendRequest(): Promise<SpendView>;
   spendLock(): Promise<SpendView>;
   spendReconcile(): Promise<string>;
-  send(recipient: string, isRoom: boolean, plaintext: string, maxMsat: number, maxRecipientMsat?: Record<string, number>): Promise<SendReceipt>;
+  /**
+   * A message pays inside the owner's budget with no prompt. `firstContactMsat`
+   * is the owner's one-time OK for someone not yet budgeted, with their budget.
+   */
+  send(recipient: string, isRoom: boolean, plaintext: string, maxMsat: number, maxRecipientMsat?: Record<string, number>, firstContactMsat?: number): Promise<SendReceipt>;
+  // budgets (B2): numbers the host keeps; the approval itself stays in host memory
+  budgetStatus(): Promise<BudgetView>;
+  /** The owner's one approval for a daily total. Lowering an open one needs no new approval. */
+  budgetApprove(ceilingMsat: number, preset: PresetId): Promise<BudgetView>;
+  /** Set or lower a budget within the daily total; 0 forgets the contact. */
+  budgetSet(target: string, room: boolean, limitMsat: number): Promise<BudgetView>;
+  budgetPause(): Promise<BudgetView>;
+  budgetResume(): Promise<BudgetView>;
   roomQuote(roomId: string): Promise<RoomQuote>;
   invoiceCreate(amountMsat: number, note: string): Promise<InvoiceView>;
   invoiceAmount(bolt11: string): Promise<InvoiceAmount>;
@@ -104,14 +132,26 @@ export const hostSource: Source = {
   roomMembers: (roomId) => invoke<string[]>('room_members', { room_id: roomId }),
   messages: (peer, before) => invoke<Message[]>('messages_list', { peer, before: before ?? null }),
   priceQuote: (peer) => invoke<PriceQuote>('price_quote', { peer: peer ?? null }),
+  firstContactQuote: (peer) => invoke<FirstContactQuote>('first_contact_quote', { peer }),
+  firstContactRequest: (recipient, maxMsat, budgetMsat) => invoke<OwnerContactApproval | null>('first_contact_request', { recipient, max_msat: maxMsat, contact_budget_msat: budgetMsat }),
+  firstContactStatus: (id) => invoke<OwnerContactApproval>('first_contact_status', { id }),
+  firstContactCancel: (id) => invoke<void>('first_contact_cancel', { id }),
   wallet: () => invoke<WalletOverview>('payments_overview'),
+  energy: (span) => invoke<EnergyRead>('energy_read', { span }),
+  membrane: (limit) => invoke<MembraneRead>('membrane_read', { limit: limit ?? null }),
   onLive: (handler) => listen<LiveEvent>(LIVE_EVENT, (e) => handler(e.payload)),
   liveLink: () => invoke<LinkState | null>('live_link'),
   spendStatus: () => invoke<SpendView>('spend_status'),
   spendRequest: () => invoke<SpendView>('spend_request'),
   spendLock: () => invoke<SpendView>('spend_lock'),
   spendReconcile: () => invoke<string>('spend_reconcile'),
-  send: (recipient, isRoom, plaintext, maxMsat, maxRecipientMsat) => invoke<SendReceipt>('message_send', { recipient, is_room: isRoom, plaintext, max_msat: maxMsat, max_recipient_msat: maxRecipientMsat ?? null }),
+  send: (recipient, isRoom, plaintext, maxMsat, maxRecipientMsat, firstContactMsat) =>
+    invoke<SendReceipt>('message_send', { recipient, is_room: isRoom, plaintext, max_msat: maxMsat, max_recipient_msat: maxRecipientMsat ?? null, first_contact_msat: firstContactMsat ?? null }),
+  budgetStatus: () => invoke<BudgetView>('budget_status'),
+  budgetApprove: (ceilingMsat, preset) => invoke<BudgetView>('budget_approve', { ceiling_msat: ceilingMsat, preset }),
+  budgetSet: (target, room, limitMsat) => invoke<BudgetView>('budget_set', { target, room, limit_msat: limitMsat }),
+  budgetPause: () => invoke<BudgetView>('budget_pause'),
+  budgetResume: () => invoke<BudgetView>('budget_resume'),
   roomQuote: (roomId) => invoke<RoomQuote>('room_quote', { room_id: roomId }),
   invoiceCreate: (amountMsat, note) => invoke<InvoiceView>('invoice_create', { amount_msat: amountMsat, note, expiry_secs: null }),
   invoiceAmount: (bolt11) => invoke<InvoiceAmount>('invoice_amount', { bolt11 }),

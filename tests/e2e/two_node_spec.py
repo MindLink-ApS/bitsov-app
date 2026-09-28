@@ -4,12 +4,13 @@ Run by scripts/ui-e2e-two-node.sh (see scripts/ui-e2e/runner.py for the
 plumbing: `r.ui(...)` drives the real window through tests/e2e/driver.js,
 `r.api(...)` reads a node with an operator fixture token for evidence only).
 
-Budget presets, Body organs and door cards are not present on app main and are
-not claimed as covered by this scenario.
+The scenario follows the daily message approval and first-contact quote, while
+pay/file retain their ten-minute window. Body gets a tab/organ smoke check;
+budget preset editing and full organ semantics remain in the component tests.
 
 Every UI action is a click or keystroke the owner could make. Node-side calls
 are limited to (1) evidence reads, (2) what the owner types at node A's
-terminal (`konsensus grant`), and (3) owner setup the app has no screen for
+terminal (`konsensus grant` and the displayed first-contact HTTP command), and (3) owner setup the app has no screen for
 (creating a room), each labelled where it happens.
 """
 import base64
@@ -43,7 +44,7 @@ def run(r):
         if r.ui_try('exists', selector='[data-owner-action]'):
             cmd, op = owner_op()
             s.snap(f'{what}-waiting')
-            out = r.owner_grant(op, '--budget', '2000', '--for', '10m')
+            out = r.owner_grant(op, '--budget', '100', '--for', '10m')
             s.note(f'{what}: owner granted the 10-minute window at node A: ' + ' '.join(out.split())[-160:])
         else:
             s.note(f'{what}: "Approve spending" opened the 10-minute window with no owner step at the node '
@@ -73,6 +74,14 @@ def run(r):
         s.check('local-trust notice before deposit', r.ui_try('exists', selector='[data-gate="g6-local-trust"]'))
         s.snap('identity-gate')
         r.ui('click', text='I understand — continue to funding', role='button')
+        r.ui('click', selector='[data-tab="body"]', timeoutMs=20000)
+        s.need('Body tab opens the organism panel', r.ui_try('wait', selector='[data-panel="body"]'))
+        organs = r.ui('attrs', selector='[data-panel="body"] [data-organ]', names=['data-organ'])
+        s.check('Body shows all five organs', {o['data-organ'] for o in organs} ==
+                {'metabolism', 'membrane', 'setpoints', 'immune', 'nucleus'}, organs)
+        identity = r.ui('attrs', selector='[data-nucleus-id]', names=['title'])
+        s.check('Body identifies the running node', identity and identity[0]['title'] == a, identity)
+        s.snap('body')
         r.ui('click', text='Wallet', role='tab', exact=True, timeoutMs=20000)
         if r.ui_try('exists', text='Get a deposit address', role='button'):
             r.ui('click', text='Get a deposit address', role='button')
@@ -98,7 +107,7 @@ def run(r):
             s.check('funding QR shown for node A\'s address', qr and addr and mock_addr.get('address') in addr, {'ui': addr, 'node': mock_addr})
 
     # ---------------------------------------------------------------- step 2
-    with r.Step(2, 'Owner opens the spending window through node A’s CLI') as s:
+    with r.Step(2, 'Owner approves the message budget through node A’s CLI') as s:
         s.need('node A connected to node B (loopback)', r.wait_until(lambda: b in r.get('a', '/peers/connected'), 60))
         r.ui('click', selector=track(b), timeoutMs=30000)
         r.ui('click', selector='[data-send]')
@@ -106,9 +115,11 @@ def run(r):
         s.snap('approval-waiting')
         s.need('app shows the owner command to type at the node', op, cmd)
         s.check('send is held while waiting', r.ui_try('exists', selector='[data-approval="pending"]'))
-        out = r.owner_grant(op, '--budget', '2000', '--for', '10m')
+        # Room sends conservatively reserve the remaining node allowance.
+        # Keep the fixture's overall grant within the default 100-sat room budget.
+        out = r.owner_grant(op, '--budget', '100', '--for', '10m')
         s.note('owner CLI: ' + ' '.join(out.split())[-300:])
-        s.need('owner approval opens the spending window', r.ui_try('wait', selector='[data-spend="open"]', timeoutMs=20000))
+        s.need('owner approval enables first-contact confirmation', r.ui_try('wait', selector='[data-budget="first"]', timeoutMs=20000))
         status = r.run('sandbox-exec', '-f', str(r.SANDBOX), r.BIN, 'pair-status', '--config', str(r.ROOTS['a'] / 'konsensus.toml'))
         s.check('node lists the live spend grant', 'SPEND GRANT' in status, status[-300:])
         s.snap('approval-open')
@@ -116,20 +127,34 @@ def run(r):
     # ---------------------------------------------------------------- step 3
     with r.Step(3, 'First contact to price_open B: capped send, admission and recipient settlement') as s:
         r.ui('click', selector=track(b))
+        r.ui('wait', selector='[data-door-quote]', timeoutMs=20000)
         quote = r.ui('attrs', selector='[data-cost-msat]', names=['data-cost-msat'])
         s.need('composer shows a positive message ceiling', quote and int(quote[0]['data-cost-msat']) > 0, quote)
-        s.check('composer discloses first-contact admission ceiling', 'at most 100 sats' in r.text('[data-composer]'))
+        door = r.ui('attrs', selector='[data-door-quote]', names=['data-door-quote'])
+        s.check('composer cap matches the confirmed admission + message quote',
+                door and int(door[0]['data-door-quote']) == int(quote[0]['data-cost-msat']) == 4000, door)
         total = int(quote[0]['data-cost-msat'])
         s.snap('first-contact-cost')
         balance_before = r.get('a', '/payments/balance')['balance_msat']
         before_b = r.get('b', '/payments')
         text = f'UI-E2E first contact {int(time.time())}'
         send_message(text)
+        s.need('contact waits for independent owner approval', r.ui_try('wait', selector='[data-contact-approval="pending"]', timeoutMs=20000))
+        pending = r.ui('attrs', selector='[data-contact-approval]', names=['data-contact-request'])
+        import json
+        request = json.loads(pending[0]['data-contact-request'])
+        s.check('owner request binds this contact, quote, budget and paired grant',
+                request['recipient'] == b and request['max_total_msat'] == total
+                and request['contact_budget_msat'] >= total and request['client_id'] and request['grant_op_id'], request)
+        s.snap('contact-owner-pending')
+        command = r.ui('attrs', selector='[data-contact-owner-command]', names=['data-command'])[0]['data-command']
+        s.note('FIXTURE: node A operator executes the displayed owner command with independent owner authority; the app receives only the public receipt.')
+        r.owner_first_contact(command)
         r.ui_try('wait', selector='article.msg.out [data-delivery="delivered"], [data-artifact="failed"]', timeoutMs=60000)
         note = r.ui_try('text', within={'selector': '[data-composer-note]'})
         s.snap('first-contact-result')
         received = b_has(text, seconds=5 if note else 30)
-        s.check('sent from the app with one owner OK (no CLI, no owner key)', received, note or r.text()[:500])
+        s.check('sent after one contact owner approval; no owner credential enters the app', received, note or r.text()[:500])
         s.check('B received the first-contact message', received, note)
         paid = balance_before - r.get('a', '/payments/balance')['balance_msat']
         s.check('A paid at most the confirmed cap (admission + message)', total is not None and 0 < paid <= total,
@@ -252,15 +277,17 @@ def run(r):
     # ---------------------------------------------------------------- step 6
     with r.Step(6, 'Spending lock and a price rise above the displayed ceiling refuse payment') as s:
         r.ui('click', selector=track(b))
-        r.ui('click', selector='[data-composer-mode="message"]')
+        # Pay/file still use the ten-minute window; messages use the daily budget.
+        r.ui('click', selector='[data-composer-mode="pay"]')
         r.ui('click', selector='[data-spend-lock]')
         s.need('lock closes the spending window', r.ui_try('wait', selector='[data-spend="locked"]'))
         s.check('locked send offers approval', 'Approve' in r.text('[data-send]'))
         r.ui('click', selector='[data-send]')
         if r.ui_try('exists', selector='[data-owner-action]'):
             _, op = owner_op()
-            r.owner_grant(op, '--budget', '2000', '--for', '10m')
+            r.owner_grant(op, '--budget', '100', '--for', '10m')
         s.need('approval window reopened', r.ui_try('wait', selector='[data-spend="open"]', timeoutMs=20000))
+        r.ui('click', selector='[data-composer-mode="message"]')
         shown = r.ui('attrs', selector='[data-cost-msat]', names=['data-cost-msat'])
         s.note(f'composer price before B raises it: {shown}')
         r.restart_b(5000)
@@ -269,9 +296,9 @@ def run(r):
         balance = r.get('a', '/payments/balance')
         msg = f'UI-E2E over cap {int(time.time())}'
         send_message(msg)
-        failed = r.ui_try('wait', selector='[data-artifact="failed"][data-code="price_changed"]', timeoutMs=60000)
+        failed = r.ui_try('wait', selector='[data-door="out-refused"]', timeoutMs=60000)
         s.snap('over-cap')
-        s.check('price rise produces a visible price_changed refusal', failed, r.text('[data-stream]')[-600:])
+        s.check('price rise produces a visible cap refusal', failed and 'their price is above your cap' in r.text('[data-door="out-refused"]'), r.text('[data-stream]')[-600:])
         s.check('over-cap: nothing paid', r.get('a', '/payments/balance') == balance)
         s.check('over-cap: B did not receive it', not b_has(msg, seconds=3))
 
@@ -299,4 +326,3 @@ def run(r):
         s.note(f'answer: {body[:300]!r}; node A outgoing to B today: {spent_msat} msat over {len(msgs)} rows')
         s.check('answer total matches node A\'s own records (sats)', m and int(m.group(1).replace(',', '')) == spent_msat // 1000,
                 {'answer': m.group(1) if m else None, 'node_msat': spent_msat})
-

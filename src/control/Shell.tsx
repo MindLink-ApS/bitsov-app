@@ -1,20 +1,39 @@
-import { createEffect, createMemo, createSignal, For, type JSX, Match, on, onCleanup, Show, Switch } from 'solid-js';
+import { createEffect, createMemo, createSignal, For, type JSX, Match, on, onCleanup, Show, Switch, untrack } from 'solid-js';
 import { createStore, produce } from 'solid-js/store';
 import { qrSvg } from '../qr';
 import type { Proposal } from './ai';
 import { AiTrack, createAiSession } from './AiTrack';
 import { clock, day, sats, satsWhole, satUnit, shortId, uptime } from './format';
+import { Organism } from './BodyPanel';
+import {
+  doorCard,
+  gateWords,
+  homeostasis,
+  membraneLive,
+  membraneNode,
+  membraneRefused,
+  membraneSeed,
+  metabolism,
+  nodeMetabolism,
+  nucleus,
+  organismCaps,
+  outboundKind,
+  type MembraneEntry,
+} from './body';
 import type { Source } from './source';
 import {
   ADMISSION_MAX_MSAT,
   applyDelivery,
   applyLive,
   asActionError,
+  budgetStand,
   costToSend,
   deliveryFromReceipt,
   freshness,
+  isBudgetStop,
   isOutgoing,
   mergeMessages,
+  messagesWorth,
   needsApproval,
   nodePill,
   peerName,
@@ -22,18 +41,27 @@ import {
   spendLine,
   streamItems,
   trackKey,
+  type BudgetStand as BudgetStandT,
   type Deliveries,
   type Threads,
   type Unread,
 } from './state';
 import type {
+  OwnerContactApproval,
+  FirstContactQuote,
   ActionError,
   Artifact,
+  BudgetPreset,
+  BudgetRow,
+  BudgetView,
   Delivery,
+  DoorCard,
+  EnergyRead,
   LinkState,
   Message,
   NodeOverview,
   Peer,
+  PresetId,
   PriceQuote,
   Room,
   RoomQuote,
@@ -43,7 +71,7 @@ import type {
 } from './types';
 
 /** How often each panel re-reads while the shell is open. Peers and balance have no live event. */
-const REFRESH_MS = { overview: 10_000, peers: 15_000, wallet: 20_000, rooms: 30_000, clock: 5_000, spend: 3_000 } as const;
+const REFRESH_MS = { overview: 10_000, peers: 15_000, wallet: 20_000, rooms: 30_000, door: 30_000, energy: 30_000, clock: 5_000, spend: 3_000 } as const;
 
 type Props = {
   source: Source;
@@ -70,12 +98,25 @@ export type Prefill = {
 /** The result of one action: its value, or why it did not happen. */
 type Outcome<T> = { ok: true; value: T } | { ok: false; error: ActionError };
 
-/** What the conversation can do. Every spending call is refused by the host outside the spend window. */
+/**
+ * What the conversation can do. Messages pay inside the owner's budget; every
+ * other spending call is refused by the host outside the ten-minute window.
+ */
 export type Actions = {
   approve: () => Promise<void>;
   lock: () => Promise<void>;
   reconcile: () => Promise<Outcome<string>>;
-  send: (t: TrackRef, text: string, maxMsat: number) => Promise<Outcome<unknown>>;
+  /** The owner's one approval for a daily total (B2). */
+  approveBudget: (ceilingMsat: number, preset: PresetId) => Promise<void>;
+  setBudget: (target: string, room: boolean, limitMsat: number) => Promise<Outcome<unknown>>;
+  pauseAll: () => Promise<void>;
+  resume: () => Promise<void>;
+  send: (t: TrackRef, text: string, maxMsat: number, firstContactMsat?: number) => Promise<Outcome<unknown>>;
+  /** The door card: a stranger's signed quote, or null when the node cannot give one. */
+  doorQuote: (peer: string) => Promise<FirstContactQuote | null>;
+  ownerRequest: (peer: string, cap: number, budget: number) => Promise<Outcome<OwnerContactApproval | null>>;
+  ownerStatus: (id: string) => Promise<Outcome<OwnerContactApproval>>;
+  ownerCancel: (id: string) => Promise<void>;
   invoice: (t: TrackRef, sats: number, note: string) => Promise<Outcome<unknown>>;
   amountOf: (bolt11: string) => Promise<Outcome<number>>;
   pay: (t: TrackRef, bolt11: string, msat: number) => Promise<Outcome<unknown>>;
@@ -102,13 +143,25 @@ export function ControlCenter(props: Props) {
   const [roomQuote, setRoomQuote] = createSignal<RoomQuote | null>(null);
   const [filePrice, setFilePrice] = createSignal<number | null>(null);
   const [spend, setSpend] = createSignal<SpendView | null>(null);
+  const [budget, setBudget] = createSignal<BudgetView | null>(null);
   const [deliveries, setDeliveries] = createStore<Deliveries>({});
   /** What each send actually paid, by message id: a room echo carries one member's share only. */
   const [paid, setPaid] = createStore<Record<string, number>>({});
   const [artifacts, setArtifacts] = createStore<Record<string, Artifact[]>>({});
   const [errors, setErrors] = createStore<Record<string, string | undefined>>({});
   const [contextOpen, setContextOpen] = createSignal(false);
-  const [tab, setTab] = createSignal<'node' | 'wallet'>('node');
+  const [tab, setTab] = createSignal<'body' | 'node' | 'wallet' | 'budget'>('body');
+  // Organism view (O1): readings the organs are drawn from, each with its age.
+  const [openedAt, setOpenedAt] = createSignal(Date.now());
+  const [membrane, setMembrane] = createSignal<MembraneEntry[]>([]);
+  /** When the node's membrane ring (N2) was last read successfully. */
+  const [membraneReadAt, setMembraneReadAt] = createSignal<number | null>(null);
+  const [energyAt, setEnergyAt] = createSignal<number | null>(null);
+  const [budgetReadAt, setBudgetReadAt] = createSignal<number | null>(null);
+  const [door, setDoor] = createSignal<{ msat: number; read_at: number } | null>(null);
+  // O1 v2: the node's own energy read (N1) and gate decisions (N2), when advertised.
+  const [nodeEnergy, setNodeEnergy] = createSignal<{ hour: EnergyRead; day: EnergyRead } | null>(null);
+  const [energyReadAt, setEnergyReadAt] = createSignal<number | null>(null);
   const aiSession = createAiSession();
   const [prefill, setPrefill] = createSignal<Prefill | null>(null);
   let prefillSeq = 0;
@@ -128,6 +181,15 @@ export function ControlCenter(props: Props) {
 
   const ownId = () => props.ownId ?? overview()?.node_id ?? '';
   const peerById = createMemo(() => new Map(peers().map((p) => [p.node_id.toLowerCase(), p])));
+  const caps = createMemo(() => organismCaps(overview()), undefined, { equals: (a, b) => a.energy === b.energy && a.membrane === b.membrane });
+  /** First contacts at the door this session (never added to peers), newest first. */
+  const knocks = createMemo(() => {
+    const seen = new Set<string>();
+    return membrane()
+      .filter((e): e is Extract<MembraneEntry, { verdict: 'admitted' }> => e.verdict === 'admitted' && e.first_contact && !peerById().has(e.sender))
+      .filter((e) => !seen.has(e.sender) && !!seen.add(e.sender))
+      .map((e) => e.sender);
+  });
   const openKey = () => (track() ? trackKey(track()!) : null);
 
   const attempt = async <T,>(area: string, run: () => Promise<T>, apply: (v: T) => void) => {
@@ -143,12 +205,65 @@ export function ControlCenter(props: Props) {
   const loadRooms = () => attempt('rooms', () => props.source.rooms(), setRooms);
   const loadWallet = () => attempt('wallet', () => props.source.wallet(), setWallet);
   const loadSpend = () => attempt('spend', () => props.source.spendStatus(), setSpend);
+  const loadBudget = () =>
+    attempt('budget', () => props.source.budgetStatus(), (b) => {
+      setBudget(b);
+      setBudgetReadAt(Date.now());
+    });
+  // Our own price with no peer: what a stranger pays at this node's door.
+  const loadDoor = () => attempt('door', () => props.source.priceQuote(), (q) => setDoor({ msat: q.own_msat, read_at: Date.now() }));
+  // N1: node-wide energy, 1 h and 24 h. A failed read keeps the last one, with its age.
+  const loadEnergy = () =>
+    caps().energy
+      ? attempt('energy', () => Promise.all([props.source.energy('1h'), props.source.energy('24h')]), ([hour, day]) => {
+          setNodeEnergy({ hour, day });
+          setEnergyReadAt(Date.now());
+        })
+      : Promise.resolve();
+  let energySoon: ReturnType<typeof setTimeout> | undefined;
+  /** A live event moved energy: re-read shortly, once, however many arrive. */
+  const energyAfterEvent = () => {
+    if (!caps().energy || energySoon) return;
+    energySoon = setTimeout(() => {
+      energySoon = undefined;
+      void loadEnergy();
+    }, 1500);
+  };
+
+  /** Where a door card lives in the stream, and cards already placed (by membrane entry). */
+  const doorsPlaced = new Set<number>();
+  const placeDoor = (entry: MembraneEntry) => {
+    if (doorsPlaced.has(entry.seq)) return;
+    const d = doorCard(entry, door()?.msat ?? null);
+    if (!d) return;
+    doorsPlaced.add(entry.seq);
+    const artifact: Artifact = { id: `door-${entry.seq}`, at: d.at, type: 'door', door: d.card };
+    setArtifacts(d.track, (old) => [...(old ?? []), artifact]);
+  };
+  /** Fold into the membrane; entries it adds may also stand at the door in their track. */
+  const foldMembrane = (fold: (log: MembraneEntry[]) => MembraneEntry[]) => {
+    const before = membrane();
+    const after = fold(before);
+    if (after === before) return;
+    setMembrane(after);
+    const known = new Set(before.map((e) => e.seq));
+    after.filter((e) => !known.has(e.seq)).forEach(placeDoor);
+  };
+  const contactSet = () => new Set(peerById().keys());
+  // N2: seed from the node's ring once it is advertised; live events follow.
+  const loadMembrane = () =>
+    attempt('membrane', () => props.source.membrane(50), (read) => {
+      foldMembrane((log) => membraneSeed(log, read.events, { contacts: contactSet() }));
+      setMembraneReadAt(Date.now());
+    });
+
   const loadThread = (t: TrackRef) => {
     if (t.kind !== 'peer' && t.kind !== 'room') return;
     const key = trackKey(t);
-    void attempt('thread', () => props.source.messages(t.id), (page) =>
-      setThreads('t', key, (old) => mergeMessages(old ?? [], page)),
-    );
+    void attempt('thread', () => props.source.messages(t.id), (page) => {
+      setThreads('t', key, (old) => mergeMessages(old ?? [], page));
+      setEnergyAt(Date.now());
+    });
   };
 
   const clockTimer = setInterval(() => setNow(Date.now()), REFRESH_MS.clock);
@@ -172,7 +287,9 @@ export function ControlCenter(props: Props) {
         stop();
         if (!active) return;
         const mine = generation;
+        setOpenedAt(Date.now());
         void loadOverview();
+        void loadDoor();
         void loadPeers().then(() => {
           if (!track()) {
             const first = peers().find((p) => p.connected) ?? peers()[0];
@@ -181,14 +298,17 @@ export function ControlCenter(props: Props) {
         });
         void loadRooms();
         void loadWallet();
-        void loadSpend();
+        void loadSpend().then(loadBudget);
         timers.push(
           setInterval(() => void loadOverview(), REFRESH_MS.overview),
           setInterval(() => void loadPeers(), REFRESH_MS.peers),
           setInterval(() => void loadWallet(), REFRESH_MS.wallet),
           setInterval(() => void loadRooms(), REFRESH_MS.rooms),
-          // Cheap: the host asks the node only while an elevation request is pending.
-          setInterval(() => void loadSpend(), REFRESH_MS.spend),
+          setInterval(() => void loadDoor(), REFRESH_MS.door),
+          setInterval(() => void loadEnergy(), REFRESH_MS.energy),
+          // Cheap: the host asks the node only while an elevation request is pending,
+          // and a budget grant lands there first.
+          setInterval(() => void loadSpend().then(loadBudget), REFRESH_MS.spend),
         );
         props.source
           .onLive((event) => {
@@ -196,7 +316,22 @@ export function ControlCenter(props: Props) {
               setLink(event.state);
               // Back after a gap: re-read the open track so nothing is missed.
               if (event.state === 'open' && track()) loadThread(track()!);
+              if (event.state === 'open' && caps().membrane) void loadMembrane();
               return;
+            }
+            if (event.type === 'membrane') {
+              foldMembrane((log) => membraneNode(log, event.event, { contacts: contactSet() }));
+              if (event.event.verdict === 'admitted') energyAfterEvent();
+              return;
+            }
+            if (event.type === 'message' || event.type === 'delivery') {
+              foldMembrane((log) =>
+                membraneLive(log, event, { ownId: ownId(), contacts: contactSet(), threads: threads.t, nowMs: Date.now(), nodeMembrane: caps().membrane }),
+              );
+            }
+            if (event.type === 'message') {
+              setEnergyAt(Date.now());
+              energyAfterEvent();
             }
             if (event.type === 'delivery') {
               const next = applyDelivery(deliveries, event);
@@ -227,6 +362,10 @@ export function ControlCenter(props: Props) {
     }),
   );
 
+  // The node says what it can report (`/status`): start reading N1 / N2 when it does.
+  createEffect(on(() => props.active && caps().energy, (on) => void (on && loadEnergy()), { defer: false }));
+  createEffect(on(() => props.active && caps().membrane, (on) => void (on && loadMembrane()), { defer: false }));
+
   // Opening a track: clear its unread count, load history, quote its cost.
   createEffect(
     on(track, (t) => {
@@ -253,6 +392,7 @@ export function ControlCenter(props: Props) {
 
   onCleanup(() => {
     clearInterval(clockTimer);
+    clearTimeout(energySoon);
     stop();
   });
 
@@ -270,13 +410,16 @@ export function ControlCenter(props: Props) {
       return { ok: true, value: await run() };
     } catch (e) {
       const error = asActionError(e);
-      if (needsApproval(error) || error.code === 'spend_refused') void loadSpend();
+      if (needsApproval(error) || error.code === 'spend_refused' || error.code === 'grant_ended') void loadSpend();
       return { ok: false, error };
     }
   };
-  /** A failed action that is not an approval question stays in the track as a record. */
+  /** A failed action that is not an approval or budget question stays in the track as a record. */
   const recordFailure = (t: TrackRef, action: string, outcome: Outcome<unknown>) => {
-    if (!outcome.ok && !needsApproval(outcome.error)) {
+    // A send that did not cross (price, setpoint) is also a membrane reading. A
+    // price refusal stands at their door in the track instead of a failure row.
+    if (!outcome.ok) foldMembrane((log) => membraneRefused(log, outcome.error, trackKey(t), Date.now()));
+    if (!outcome.ok && !needsApproval(outcome.error) && !isBudgetStop(outcome.error) && outboundKind(outcome.error) !== 'price') {
       addArtifact(t, { type: 'failed', action: outcome.error.code === 'spend_unknown' ? 'Outcome unknown / pending' : action, error: outcome.error });
     }
     return outcome;
@@ -293,9 +436,46 @@ export function ControlCenter(props: Props) {
       if (r.ok) setSpend(r.value);
     },
     reconcile: () => act(() => props.source.spendReconcile()),
-    send: async (t, text, maxMsat) => {
+    approveBudget: async (ceilingMsat, preset) => {
+      const r = await act(() => props.source.budgetApprove(ceilingMsat, preset));
+      if (r.ok) {
+        setBudget(r.value);
+        setErrors('budget', undefined);
+      } else setErrors('budget', r.error.message);
+      // A paired node asks its owner: the pending request shows from the spend view.
+      void loadSpend();
+    },
+    setBudget: async (target, room, limitMsat) => {
+      const r = await act(() => props.source.budgetSet(target, room, limitMsat));
+      if (r.ok) setBudget(r.value);
+      return r;
+    },
+    pauseAll: async () => {
+      const r = await act(() => props.source.budgetPause());
+      if (r.ok) setBudget(r.value);
+      else setErrors('budget', r.error.message);
+      void loadSpend();
+    },
+    resume: async () => {
+      const r = await act(() => props.source.budgetResume());
+      if (r.ok) {
+        setBudget(r.value);
+        setErrors('budget', undefined);
+      } else {
+        setErrors('budget', r.error.message);
+        void loadBudget();
+      }
+      void loadSpend();
+    },
+    doorQuote: (peer) => props.source.firstContactQuote(peer).catch(() => null),
+    ownerRequest: (peer, cap, budget) => act(() => props.source.firstContactRequest(peer, cap, budget)),
+    ownerStatus: (id) => act(() => props.source.firstContactStatus(id)),
+    ownerCancel: (id) => props.source.firstContactCancel(id).catch(() => {}),
+    send: async (t, text, maxMsat, firstContactMsat) => {
       if (t.kind !== 'peer' && t.kind !== 'room') return { ok: false, error: { code: 'invalid', message: 'nothing to send to' } };
-      const r = await act(() => props.source.send(t.id, t.kind === 'room', text, maxMsat, t.kind === 'room' ? Object.fromEntries((roomQuote()?.members ?? []).map((m) => [m.node_id, m.msat])) : undefined));
+      const r = await act(() => props.source.send(t.id, t.kind === 'room', text, maxMsat, t.kind === 'room' ? Object.fromEntries((roomQuote()?.members ?? []).map((m) => [m.node_id, m.msat])) : undefined, firstContactMsat));
+      // The tally moved, or a budget rule stopped the send: either way, re-read it.
+      if (r.ok || isBudgetStop(r.error) || r.error.code === 'spend_unknown') void loadBudget();
       if (!r.ok && ['price_changed', 'price_cap_exceeded'].includes(r.error.code)) {
         if (t.kind === 'peer') void attempt('quote', () => props.source.priceQuote(t.id), (q) => {
           if (track() && trackKey(track()!) === trackKey(t)) setQuote(q);
@@ -362,6 +542,10 @@ export function ControlCenter(props: Props) {
     return t.kind === 'ai' ? 'AI' : 'Start something';
   };
   const nameOf = (id: string) => (id.toLowerCase() === ownId().toLowerCase() ? 'You' : peerName(peerById().get(id.toLowerCase()), id));
+  const trackKeyName = (key: string) => {
+    const [kind, id] = key.split(':');
+    return kind === 'room' ? rooms().find((r) => r.id.toLowerCase() === id)?.name ?? 'Room' : nameOf(id ?? key);
+  };
 
   return (
     <div class="cc" classList={{ 'no-context': !props.active }} data-mode={props.source.mode}>
@@ -371,11 +555,13 @@ export function ControlCenter(props: Props) {
         sample={props.source.mode === 'sample'}
         peers={peers()}
         rooms={rooms()}
+        knocks={knocks()}
+        nameOf={nameOf}
         unread={threads.unread}
         openKey={openKey()}
         onOpen={setTrack}
         onPill={() => {
-          setTab('node');
+          setTab('body');
           setContextOpen(true);
         }}
       />
@@ -425,6 +611,8 @@ export function ControlCenter(props: Props) {
                     filePrice={filePrice()}
                     spend={spend()}
                     spendError={errors.spend}
+                    budget={budget()}
+                    budgetError={errors.budget}
                     actions={actions}
                     now={now()}
                     error={errors.thread}
@@ -438,17 +626,59 @@ export function ControlCenter(props: Props) {
           </Show>
         </section>
 
-        <aside class="context" classList={{ open: contextOpen() }} aria-label="Node and wallet">
+        <aside class="context" classList={{ open: contextOpen() }} aria-label="Body, node and wallet">
           <div class="row">
             <div class="tabs" role="tablist" style={{ flex: 1 }}>
-              <button role="tab" aria-selected={tab() === 'node'} onClick={() => setTab('node')}>Node</button>
-              <button role="tab" aria-selected={tab() === 'wallet'} onClick={() => setTab('wallet')}>Wallet</button>
+              <button role="tab" aria-selected={tab() === 'body'} data-tab="body" onClick={() => setTab('body')}>Body</button>
+              <button role="tab" aria-selected={tab() === 'node'} data-tab="node" onClick={() => setTab('node')}>Node</button>
+              <button role="tab" aria-selected={tab() === 'wallet'} data-tab="wallet" onClick={() => setTab('wallet')}>Wallet</button>
+              <button role="tab" aria-selected={tab() === 'budget'} data-tab="budget" onClick={() => setTab('budget')}>Budget</button>
             </div>
             <button class="quiet context-toggle" onClick={() => setContextOpen(false)} aria-label="Close panel">Close</button>
           </div>
-          <Show when={tab() === 'node'} fallback={<WalletPanel wallet={wallet()} error={errors.wallet} fund={props.fund} />}>
-            <NodePanel overview={overview()} link={link()} peers={peers()} now={now()} error={errors.overview ?? errors.peers} />
-          </Show>
+          <Switch>
+            <Match when={tab() === 'body'}>
+              <Organism
+                sample={props.source.mode === 'sample'}
+                now={now()}
+                openedAt={openedAt()}
+                link={link()}
+                down={!!props.error || (overview() !== null && freshness(overview()!.read_at, now()).stale)}
+                metabolism={nodeEnergy() ? nodeMetabolism(nodeEnergy()!.hour, nodeEnergy()!.day) : metabolism(threads.t, ownId(), now(), paid)}
+                energyAt={energyAt()}
+                energyReadAt={energyReadAt()}
+                membrane={membrane()}
+                nodeMembrane={caps().membrane}
+                membraneReadAt={membraneReadAt()}
+                membraneError={errors.membrane}
+                door={door()}
+                doorError={errors.door}
+                homeostasis={homeostasis(budget())}
+                budgetReadAt={budgetReadAt()}
+                nucleus={nucleus(props.ownId, overview())}
+                nameOfTrack={trackKeyName}
+                nameOf={nameOf}
+                onSetpoints={() => setTab('budget')}
+                onPauseAll={() => void actions.pauseAll()}
+                onResume={() => void actions.resume()}
+              />
+            </Match>
+            <Match when={tab() === 'node'}>
+              <NodePanel overview={overview()} link={link()} peers={peers()} now={now()} error={errors.overview ?? errors.peers} />
+            </Match>
+            <Match when={tab() === 'wallet'}>
+              <WalletPanel wallet={wallet()} error={errors.wallet} fund={props.fund} />
+            </Match>
+            <Match when={tab() === 'budget'}>
+              <BudgetPanel
+                budget={budget()}
+                error={errors.budget}
+                now={now()}
+                nameOf={(id, room) => (room ? rooms().find((r) => r.id.toLowerCase() === id)?.name ?? 'Room' : nameOf(id))}
+                actions={actions}
+              />
+            </Match>
+          </Switch>
         </aside>
       </Show>
     </div>
@@ -476,6 +706,9 @@ function Rail(props: {
   sample: boolean;
   peers: Peer[];
   rooms: Room[];
+  /** First contacts admitted by payment this session. Not contacts, and not added. */
+  knocks: string[];
+  nameOf: (id: string) => string;
   unread: Unread;
   openKey: string | null;
   onOpen: (t: TrackRef) => void;
@@ -532,6 +765,28 @@ function Rail(props: {
         </Show>
       </div>
 
+      <Show when={props.active && props.knocks.length > 0}>
+        <div class="track-group" data-door-group>
+          <h2>At your door</h2>
+          <For each={props.knocks}>
+            {(id) => (
+              <button
+                class="track-link knock"
+                data-door-track={`peer:${id}`}
+                aria-current={props.openKey === `peer:${id}`}
+                title="Paid your door price. Not a contact."
+                onClick={() => props.onOpen({ kind: 'peer', id })}
+              >
+                <span class="name id">{shortId(id)}</span>
+                <Show when={(props.unread[`peer:${id}`] ?? 0) > 0} fallback={<span class="meta">paid</span>}>
+                  <span class="badge">{props.unread[`peer:${id}`]}</span>
+                </Show>
+              </button>
+            )}
+          </For>
+        </div>
+      </Show>
+
       <div class="track-group">
         <h2>AI</h2>
         <Show when={props.active}>{item({ kind: 'ai' }, 'Ask your node', <span class="meta">local</span>)}</Show>
@@ -558,7 +813,7 @@ function TrackHead(props: { title: string; sub?: JSX.Element; onContext: () => v
     <header class="track-head">
       <h1>{props.title}</h1>
       <div class="sub">{props.sub}</div>
-      <button class="quiet context-toggle" onClick={() => props.onContext()}>Node and wallet</button>
+      <button class="quiet context-toggle" onClick={() => props.onContext()}>Body</button>
     </header>
   );
 }
@@ -588,6 +843,8 @@ function Conversation(props: {
   filePrice: number | null;
   spend: SpendView | null;
   spendError: string | undefined;
+  budget: BudgetView | null;
+  budgetError: string | undefined;
   actions: Actions;
   now: number;
   error: string | undefined;
@@ -666,7 +923,7 @@ function Conversation(props: {
                     )}
                   </Match>
                   <Match when={item.type === 'artifact' && item.artifact}>
-                    {(a) => <ArtifactView a={a()} delivery={a().type === 'file' ? props.deliveries[(a() as { receipt: { message_id: string } }).receipt.message_id] : undefined} />}
+                    {(a) => <ArtifactView a={a()} nameOf={props.nameOf} delivery={a().type === 'file' ? props.deliveries[(a() as { receipt: { message_id: string } }).receipt.message_id] : undefined} />}
                   </Match>
                 </Switch>
               </>
@@ -684,9 +941,13 @@ function Conversation(props: {
         cost={cost()}
         roomQuote={props.roomQuote}
         filePrice={props.filePrice}
-        firstContact={props.track.kind === 'peer' && props.messages.length === 0}
+        // Admission is per direction: messages they sent us do not open their
+        // door for ours. A first contact is our first outgoing message.
+        firstContact={props.track.kind === 'peer' && !props.messages.some((m) => isOutgoing(m, props.ownId))}
         spend={props.spend}
         spendError={props.spendError}
+        budget={props.budget}
+        budgetError={props.budgetError}
         actions={props.actions}
         nameOf={props.nameOf}
         now={props.now}
@@ -744,7 +1005,65 @@ function DeliveryMark(props: { d: Delivery }) {
   );
 }
 
-function ArtifactView(props: { a: Artifact; delivery?: Delivery }) {
+/**
+ * The membrane in the stream. A stranger who paid to reach you, a verified sender
+ * refused at your door, or your send refused at theirs. Stated as facts; no
+ * button that would admit, add or pay.
+ */
+function DoorView(props: { card: DoorCard; at: number; nameOf: (id: string) => string }) {
+  const c = props.card;
+  const amt = (msat: number) => (
+    <>
+      <span class="sats">{sats(msat)}</span> {satUnit(msat)}
+    </>
+  );
+  return (
+    <div class="door-card" data-door={`${c.side}-${c.verdict}`} classList={{ refused: c.verdict === 'refused' }} role="note">
+      <p class="door-rule">
+        <span>{clock(props.at)} · door</span>
+      </p>
+      <Switch>
+        <Match when={c.side === 'in' && c.verdict === 'admitted' && (c as Extract<DoorCard, { verdict: 'admitted' }>)}>
+          {(x) => (
+            <>
+              <p class="door-head">
+                <span class="id" title={x().sender}>{shortId(x().sender)}</span> paid <Show when={x().paid_msat !== null} fallback="your price">{amt(x().paid_msat!)}</Show> to reach you
+              </p>
+              <p class="door-proof">settled · recipient-bound · single-use</p>
+              <p class="door-note">Not a contact, and not added. Nothing is kept beyond this message.</p>
+            </>
+          )}
+        </Match>
+        <Match when={c.side === 'in' && c.verdict === 'refused' && (c as Extract<DoorCard, { side: 'in'; verdict: 'refused' }>)}>
+          {(x) => (
+            <>
+              <p class="door-head">
+                Refused at your door · {gateWords(x().code)}
+              </p>
+              <p class="door-proof">
+                <Show when={x().required_msat !== null}>needed {amt(x().required_msat!)}</Show>
+                <Show when={x().required_msat !== null && x().paid_msat !== null}> · </Show>
+                <Show when={x().paid_msat !== null}>paid {amt(x().paid_msat!)}</Show>
+              </p>
+              <p class="door-note">Signed by {props.nameOf(x().sender)}. Nothing was stored or delivered.</p>
+            </>
+          )}
+        </Match>
+        <Match when={c.side === 'out' && (c as Extract<DoorCard, { side: 'out' }>)}>
+          {(x) => (
+            <>
+              <p class="door-head">Not sent · their price is above your cap</p>
+              <p class="door-proof">{x().detail}</p>
+              <p class="door-note">Nothing was paid. Reopen the track to read their current price.</p>
+            </>
+          )}
+        </Match>
+      </Switch>
+    </div>
+  );
+}
+
+function ArtifactView(props: { a: Artifact; delivery?: Delivery; nameOf: (id: string) => string }) {
   return (
     <Switch>
       <Match when={props.a.type === 'invoice' && props.a}>
@@ -810,6 +1129,9 @@ function ArtifactView(props: { a: Artifact; delivery?: Delivery }) {
           );
         }}
       </Match>
+      <Match when={props.a.type === 'door' && props.a}>
+        {(a) => <DoorView card={(a() as Extract<Artifact, { type: 'door' }>).door} at={a().at} nameOf={props.nameOf} />}
+      </Match>
       <Match when={props.a.type === 'failed' && props.a}>
         {(a) => {
           const f = () => a() as Extract<Artifact, { type: 'failed' }>;
@@ -838,6 +1160,8 @@ function Composer(props: {
   firstContact: boolean;
   spend: SpendView | null;
   spendError: string | undefined;
+  budget?: BudgetView | null;
+  budgetError?: string;
   actions: Actions;
   nameOf: (id: string) => string;
   now: number;
@@ -845,6 +1169,9 @@ function Composer(props: {
   onPrefillUsed?: () => void;
 }) {
   const [mode, setMode] = createSignal<Mode>('message');
+  // B2: the owner's pick of starting preset, and of a first contact's budget.
+  const [presetPick, setPresetPick] = createSignal<PresetId | null>(null);
+  const [firstPick, setFirstPick] = createSignal<number | null>(null);
   const [drafted, setDrafted] = createSignal(false);
   const [draft, setDraft] = createSignal('');
   const [busy, setBusy] = createSignal(false);
@@ -862,6 +1189,40 @@ function Composer(props: {
   // Inputs and navigation remain usable during a send. Only the submitted
   // revision may be cleared by its completion (including track A -> B -> A).
   let composerRevision = 0;
+  const [ownerWait, setOwnerWait] = createSignal<{ approval: OwnerContactApproval; revision: number; send: () => Promise<void> } | null>(null);
+  const cancelOwner = () => {
+    const pending = untrack(ownerWait);
+    setOwnerWait(null);
+    if (pending) void props.actions.ownerCancel(pending.approval.id);
+  };
+  onCleanup(cancelOwner);
+  createEffect(() => {
+    const pending = ownerWait();
+    if (!pending) return;
+    let polling = false;
+    const poll = async () => {
+      if (polling) return;
+      polling = true;
+      const result = await props.actions.ownerStatus(pending.approval.id);
+      polling = false;
+      if (ownerWait() !== pending) return;
+      if (composerRevision !== pending.revision) { cancelOwner(); return; }
+      if (!result.ok) {
+        cancelOwner();
+        setNote(result.error.message);
+      } else if (result.value.ready) {
+        setOwnerWait(null);
+        setBusy(true);
+        try { await pending.send(); } finally { setBusy(false); }
+      }
+    };
+    const timer = setInterval(() => void poll(), 1000);
+    onCleanup(() => clearInterval(timer));
+  });
+  // Budget refreshes replace the object every three seconds. Only an actual
+  // authority/mode change invalidates a pending owner request.
+  const ownerContext = createMemo(() => `${mode()}:${firstPick()}:${props.budget?.paused ?? false}`);
+  createEffect(on(ownerContext, () => { composerRevision++; cancelOwner(); }, { defer: true }));
 
   const room = () => props.track.kind === 'room';
   const modes = (): Mode[] => (room() ? ['message'] : ['message', 'pay', 'request', 'file']);
@@ -870,6 +1231,7 @@ function Composer(props: {
     on(
       () => trackKey(props.track),
       () => {
+        cancelOwner();
         composerRevision++;
         setMode('message');
         setNote(null);
@@ -882,6 +1244,7 @@ function Composer(props: {
         setAmount('');
         setMemo('');
         setDrafted(false);
+        setFirstPick(null);
       },
       { defer: true },
     ),
@@ -894,6 +1257,8 @@ function Composer(props: {
       () => {
         const p = props.prefill;
         if (!p || p.key !== trackKey(props.track) || room()) return;
+        cancelOwner();
+        composerRevision++;
         setMode(p.mode);
         setNote(null);
         if (p.mode === 'message') setDraft(p.text);
@@ -914,6 +1279,48 @@ function Composer(props: {
 
   const line = () => spendLine(props.spend, props.now);
   const spends = () => mode() !== 'request';
+  const target = () => (props.track as { id: string }).id;
+  const budget = () => props.budget ?? null;
+  /**
+   * Messages go through the budget unless the owner opened the ten-minute
+   * window by hand with no budget approval, or the host has no budget to show.
+   */
+  const viaBudget = () => {
+    const b = budget();
+    if (mode() !== 'message' || !b) return false;
+    return b.paused || b.waiting_for_owner || b.autopay.state === 'open' || !line().open;
+  };
+  // A known contact the node would not re-admit from the budget after a
+  // reconnect (its grant does not budget them yet): the door card, once more.
+  const [readmitFor, setReadmitFor] = createSignal<string | null>(null);
+  const readmit = () => !room() && readmitFor() === target();
+  // Is this send a first contact? While the budget decides, exactly when it
+  // has no line for this peer, whatever the thread holds: inbound history
+  // does not open their door for us (merge-gate finding 7). Otherwise, when
+  // we have never sent to them. (A cost-free stand: `shown` depends on this.)
+  const doorWanted = () => {
+    if (room()) return false;
+    if (readmit()) return true;
+    const kind = budgetStand(budget(), target(), false, null).kind;
+    if (kind === 'first') return true;
+    if (kind === 'ok' || kind === 'contact_used' || kind === 'total_used') return false;
+    return props.firstContact;
+  };
+  const stand = () => budgetStand(budget(), target(), room(), shown().msat, readmit());
+  createEffect(() => {
+    if (room() || !doorWanted() || mode() !== 'message' || stand().kind !== 'first') return;
+    const peer = target();
+    if (untrack(door)?.peer === peer) return;
+    setDoor({ peer, quote: null });
+    void props.actions.doorQuote(peer).then((quote) => {
+      if (untrack(door)?.peer === peer) setDoor({ peer, quote });
+    });
+  });
+  const presetChosen = () => {
+    const b = budget();
+    const id = presetPick() ?? b?.preset ?? 'careful';
+    return b?.presets.find((p) => p.id === id) ?? b?.presets[0] ?? null;
+  };
   const blocked = (): string | null => {
     if (room() && props.roomQuote && props.roomQuote.unreachable.length > 0) {
       const names = props.roomQuote.unreachable.map(props.nameOf).join(', ');
@@ -943,16 +1350,34 @@ function Composer(props: {
     return Number.isFinite(n) && n > 0 ? n : null;
   };
 
+  // The door card (genome first_contact_grant_v1): before a first paid message
+  // to a stranger, read the stranger's own signed quote once. Its total is the
+  // cap the owner confirms; the node pays that very invoice. Without it (older
+  // node, no budget yet) the composer keeps its labelled estimate.
+  const [door, setDoor] = createSignal<{ peer: string; quote: FirstContactQuote | null } | null>(null);
+  const doorQuote = (): FirstContactQuote | null => {
+    const d = door();
+    return d && !room() && d.peer === target() ? d.quote : null;
+  };
+
   /** What this mode costs, shown before the button is pressed. */
   const shown = (): { msat: number | null; estimate: boolean; basis: string } => {
     switch (mode()) {
       case 'message': {
+        const q = doorWanted() ? doorQuote() : null;
+        if (q) {
+          return {
+            msat: q.total_msat,
+            estimate: false,
+            basis: `${props.name}’s own quote: ${sats(q.admission_msat)} sats to open their door, then ${sats(q.message_msat)} for this message`,
+          };
+        }
         const c = props.cost;
         if (!c) return { msat: null, estimate: false, basis: room() ? 'Reading each member’s price…' : 'Reading their price…' };
-        const basis = props.firstContact
+        const basis = doorWanted()
           ? `${c.basis}. First contact also pays their admission price once, at most ${sats(ADMISSION_MAX_MSAT)} sats`
           : c.basis;
-        return { msat: c.msat, estimate: c.estimate || props.firstContact, basis };
+        return { msat: c.msat, estimate: c.estimate || doorWanted(), basis };
       }
       case 'pay':
         if (payKind() === 'invoice') {
@@ -987,6 +1412,20 @@ function Composer(props: {
   };
 
   const label = () => {
+    if (ownerWait()) return 'Waiting for contact approval';
+    if (viaBudget()) {
+      const s = shown();
+      const price = s.msat === null ? '' : ` · ${s.estimate ? '≈ ' : ''}${sats(s.msat)} ${satUnit(s.msat)}`;
+      switch (stand().kind) {
+        case 'paused': return 'Resume payments';
+        case 'waiting': return 'Waiting for approval';
+        case 'off': return 'Approve daily budget';
+        case 'first': return `Send first message${price}`;
+        case 'contact_used':
+        case 'total_used': return 'Budget used up';
+        default: return `Send${price}`;
+      }
+    }
     if (spends() && !line().open) {
       if (props.spend?.state === 'pending') return 'Waiting for approval';
       if (props.spend?.state === 'unavailable') return 'Spending unavailable';
@@ -998,8 +1437,64 @@ function Composer(props: {
   };
 
   const submit = async () => {
-    if (busy()) return;
+    if (busy() || ownerWait()) return;
     setNote(null);
+    if (viaBudget()) {
+      const st = stand();
+      if (st.kind === 'paused' || st.kind === 'off') {
+        // The one approval (or resume). The draft stays where it is.
+        setBusy(true);
+        if (st.kind === 'paused') await props.actions.resume();
+        else if (presetChosen()) await props.actions.approveBudget(presetChosen()!.ceiling_msat, presetChosen()!.id);
+        setBusy(false);
+        return;
+      }
+      if ((st.kind !== 'first' && st.kind !== 'ok') || !ready()) return;
+      setBusy(true);
+      const submittedRevision = composerRevision;
+      const submittedPeer = target();
+      const submittedTrack = props.track;
+      const submittedText = draft();
+      const cap = shown().msat!;
+      const first = st.kind === 'first' ? firstPick() ?? st.suggest : undefined;
+      const dispatch = async () => {
+      const r = await props.actions.send(submittedTrack, submittedText, cap, first);
+      const unchanged = composerRevision === submittedRevision;
+      if (r.ok && readmitFor() === submittedPeer) setReadmitFor(null);
+      else if (!r.ok && unchanged && ['price_changed', 'price_cap_exceeded'].includes(r.error.code) && doorWanted()) {
+        // The stranger's price moved: ask for their signed quote again.
+        setDoor(null);
+      } else if (!r.ok && r.error.code === 'grant_readmission') {
+        if (target() === submittedPeer) setDoor(null);
+        setReadmitFor(submittedPeer);
+      }
+      if (r.ok && composerRevision === submittedRevision) {
+        setDraft('');
+        setDrafted(false);
+      } else if (!r.ok && unchanged && (isBudgetStop(r.error) || r.error.code === 'owner_only')) setNote(r.error.message);
+      };
+      if (first !== undefined && !room()) {
+        const request = await props.actions.ownerRequest(submittedPeer, cap, first);
+        if (composerRevision !== submittedRevision) {
+          if (request.ok && request.value) void props.actions.ownerCancel(request.value.id);
+          setBusy(false);
+          return;
+        }
+        if (!request.ok) {
+          setNote(request.error.message);
+          setBusy(false);
+          return;
+        }
+        if (request.value) {
+          setOwnerWait({ approval: request.value, revision: submittedRevision, send: dispatch });
+          setBusy(false);
+          return;
+        }
+      }
+      await dispatch();
+      setBusy(false);
+      return;
+    }
     if (spends() && !line().open) {
       // The one tap: the draft stays where it is.
       setBusy(true);
@@ -1051,8 +1546,10 @@ function Composer(props: {
   };
 
   const disabled = () =>
-    busy() ||
-    (spends() && !line().open
+    busy() || !!ownerWait() ||
+    (viaBudget()
+      ? ['waiting', 'contact_used', 'total_used', 'unknown'].includes(stand().kind) || ((stand().kind === 'first' || stand().kind === 'ok') && !ready())
+      : spends() && !line().open
       ? props.spend?.state === 'pending' || props.spend?.state === 'unavailable' || props.spend === null
       : !ready());
 
@@ -1061,7 +1558,7 @@ function Composer(props: {
       class="composer"
       data-composer
       data-mode={mode()}
-      onInput={() => { composerRevision++; }}
+      onInput={() => { cancelOwner(); composerRevision++; }}
       onSubmit={(e) => {
         e.preventDefault();
         void submit();
@@ -1159,8 +1656,39 @@ function Composer(props: {
       <Show when={note()}>
         <p class="err-note" data-composer-note>{note()}</p>
       </Show>
+      <Show when={ownerWait()}>
+        {(pending) => <div class="approval" data-contact-approval="pending" data-contact-request={JSON.stringify(pending().approval.request)}>
+          <p><strong>Approve this contact at your node.</strong> Run this command once in the node terminal, with your independent owner credential in BITSOV_OWNER_TOKEN. The app never receives that credential.</p>
+          <p>The command approves this contact’s budget and first-message cap. This draft sends after approval. Editing it or pressing Cancel stops the wait.</p>
+          <textarea readonly aria-label="Owner approval command" data-contact-owner-command data-command={pending().approval.owner_command} value={pending().approval.owner_command} />
+          <button type="button" class="link" onClick={async () => { try { await navigator.clipboard.writeText(pending().approval.owner_command); } catch { setNote('Select and copy the command above.'); } }}>Copy command</button>
+          <button type="button" class="link" data-contact-cancel onClick={cancelOwner}>Cancel</button>
+          <p class="hint">Cancel does not revoke an approval already issued at the node; it expires within two minutes.</p>
+        </div>}
+      </Show>
       <Show when={spends()}>
-        <SpendBar spend={props.spend} error={props.spendError} now={props.now} actions={props.actions} />
+        <Show
+          when={viaBudget()}
+          fallback={<SpendBar spend={props.spend} error={props.spendError} now={props.now} actions={props.actions} />}
+        >
+          <BudgetBar
+            stand={stand()}
+            budget={budget()!}
+            spend={props.spend}
+            name={props.name}
+            room={room()}
+            target={target()}
+            priceMsat={shown().msat}
+            door={doorQuote()}
+            preset={presetChosen()}
+            onPreset={setPresetPick}
+            firstPick={firstPick()}
+            onFirstPick={setFirstPick}
+            error={props.budgetError}
+            now={props.now}
+            actions={props.actions}
+          />
+        </Show>
       </Show>
     </form>
   );
@@ -1172,15 +1700,6 @@ function Composer(props: {
  */
 function SpendBar(props: { spend: SpendView | null; error: string | undefined; now: number; actions: Actions }) {
   const line = () => spendLine(props.spend, props.now);
-  const [result, setResult] = createSignal<string | null>(null);
-  const [checking, setChecking] = createSignal(false);
-  const reconcile = async () => {
-    if (checking()) return;
-    setChecking(true);
-    const outcome = await props.actions.reconcile();
-    setResult(outcome.ok ? outcome.value : outcome.error.message);
-    setChecking(false);
-  };
   const minutes = (ms: number) => Math.max(1, Math.ceil((ms - props.now) / 60_000));
   return (
     <div class="spend" data-spend={props.spend?.state ?? 'unknown'}>
@@ -1227,12 +1746,358 @@ function SpendBar(props: { spend: SpendView | null; error: string | undefined; n
           </p>
         </Match>
       </Switch>
+      <Reconcile actions={props.actions} />
+      <Show when={props.error}>
+        <p class="err-note">{props.error}</p>
+      </Show>
+    </div>
+  );
+}
+
+/** Read-only: match an unknown outcome to the node's own records. Never re-sends. */
+function Reconcile(props: { actions: Actions }) {
+  const [result, setResult] = createSignal<string | null>(null);
+  const [checking, setChecking] = createSignal(false);
+  const reconcile = async () => {
+    if (checking()) return;
+    setChecking(true);
+    const outcome = await props.actions.reconcile();
+    setResult(outcome.ok ? outcome.value : outcome.error.message);
+    setChecking(false);
+  };
+  return (
+    <>
       <button type="button" class="link" data-spend-reconcile disabled={checking()} onClick={() => void reconcile()}>
         Check pending result
       </button>
       <Show when={result()}><p class="hint" data-reconciliation>{result()}</p></Show>
+    </>
+  );
+}
+
+/** Whole hours left, never more than the approval window (the shell clock ticks every few seconds). */
+const hoursLeft = (untilMs: number | null, nowMs: number, windowMs = 86_400_000) =>
+  Math.min(Math.round(windowMs / 3_600_000), Math.max(1, Math.ceil(((untilMs ?? nowMs) - nowMs) / 3_600_000)));
+
+/** A node grant's remaining life: minutes under an hour, else whole hours. */
+const timeLeft = (untilMs: number, nowMs: number) => {
+  const min = Math.max(1, Math.ceil((untilMs - nowMs) / 60_000));
+  return min < 60 ? `${min} min` : `${Math.ceil(min / 60)} h`;
+};
+
+const PRESET_NAME: Record<PresetId, string> = { careful: 'Careful', everyday: 'Everyday', generous: 'Generous' };
+
+/**
+ * Invisible payments (B2). Inside the owner's budget a message just goes: no
+ * prompt, the price still shown, and the node still enforces each message's cap.
+ * The bar says where the budget stands and is the only place that asks.
+ */
+function BudgetBar(props: {
+  stand: BudgetStandT;
+  budget: BudgetView;
+  spend: SpendView | null;
+  name: string;
+  room: boolean;
+  target: string;
+  priceMsat: number | null;
+  /** A stranger's signed quote, on a first paid message. */
+  door: FirstContactQuote | null;
+  preset: BudgetPreset | null;
+  onPreset: (id: PresetId) => void;
+  firstPick: number | null;
+  onFirstPick: (msat: number) => void;
+  error: string | undefined;
+  now: number;
+  actions: Actions;
+}) {
+  const worth = (msat: number) => messagesWorth(msat, props.door?.message_msat ?? props.priceMsat);
+  const who = () => (props.room ? 'this room' : props.name);
+  const firstOptions = (suggest: number, ceiling: number) =>
+    [...new Set([suggest, suggest * 2, suggest * 5].map((v) => Math.min(v, ceiling)))].filter((v) => v >= (props.priceMsat ?? 0));
+  return (
+    <div class="spend budget" data-budget={props.stand.kind}>
+      <Switch>
+        <Match when={props.stand.kind === 'paused'}>
+          <p class="spend-line" data-budget-paused>
+            <span class="dot warn" /> <span class="line-text">Payments are paused. Nothing leaves your node until you resume.</span>
+          </p>
+        </Match>
+        <Match when={props.stand.kind === 'waiting'}>
+          <div class="approval" data-approval="pending">
+            <p>
+              <strong>Confirm at your node.</strong> One approval lets messages pay for the next 24 hours, up to your daily total.
+              Run this where your node runs and type the phrase it prints:
+            </p>
+            <Show when={props.spend?.pending}>
+              {(p) => <code class="address" data-owner-action>{p().owner_action}</code>}
+            </Show>
+            <p class="hint">This app cannot approve it for you. Your draft is kept.</p>
+          </div>
+        </Match>
+        <Match when={props.stand.kind === 'off'}>
+          <div class="approval budget-setup" data-budget-setup>
+            <p>
+              <strong>{props.budget.autopay.state === 'expired' ? 'Your daily approval ended.' : 'Let messages pay as you chat.'}</strong>{' '}
+              Approve a daily total once. Inside it, each message pays its recipient’s own price with no prompt. Someone new always asks first.
+            </p>
+            <div class="presets" role="radiogroup" aria-label="Daily total">
+              <For each={props.budget.presets}>
+                {(p) => (
+                  <button
+                    type="button"
+                    class="chip"
+                    role="radio"
+                    aria-checked={props.preset?.id === p.id}
+                    data-preset={p.id}
+                    onClick={() => props.onPreset(p.id)}
+                  >
+                    {PRESET_NAME[p.id]} · {sats(p.ceiling_msat)} sats a day
+                  </button>
+                )}
+              </For>
+            </div>
+            <Show when={props.preset}>
+              {(p) => (
+                <p class="hint">
+                  Up to {sats(p().contact_msat)} sats a day per contact and {sats(p().room_msat)} per room, which you can lower any time.
+                  Each message still carries its own price cap. The approval lasts 24 hours and is never saved; the budgets and the tally are.
+                </p>
+              )}
+            </Show>
+          </div>
+        </Match>
+        <Match when={props.stand.kind === 'first' && (props.stand as Extract<BudgetStandT, { kind: 'first' }>)}>
+          {(st) => (
+            <div class="approval budget-first" data-first-contact>
+              <Show when={st().again ? props.door : null}>
+                {(q) => (
+                  <p class="door-quote" data-door-quote={q().total_msat} data-readmit>
+                    {who()} reconnected and asks to be admitted again: <strong>{sats(q().admission_msat)} sats</strong>, then{' '}
+                    <strong>{sats(q().message_msat)} sats</strong> for this message, <strong>{sats(q().total_msat)} sats</strong> in
+                    all, their own signed price. Nothing is paid until you send.
+                  </p>
+                )}
+              </Show>
+              <Show when={st().again ? null : props.door}>
+                {(q) => (
+                  <p class="door-quote" data-door-quote={q().total_msat}>
+                    {who()}’s door: <strong>{sats(q().admission_msat)} sats</strong> once to reach them, then{' '}
+                    <strong>{sats(q().message_msat)} sats</strong> a message. This first message costs{' '}
+                    <strong>{sats(q().total_msat)} sats</strong> in all, their own signed price. Nothing is paid until you send.
+                  </p>
+                )}
+              </Show>
+              <Show
+                when={st().again}
+                fallback={
+                  <p>
+                    <strong>First paid message to {who()}.</strong> Asked once. After it, messages to {who()} pay automatically, up to:
+                  </p>
+                }
+              >
+                <p>
+                  <strong>Admit {who()} again.</strong> Asked once. After it, your node pays a reconnect to {who()} from their
+                  budget without asking, up to:
+                </p>
+              </Show>
+              <div class="presets" role="radiogroup" aria-label={`Daily budget for ${who()}`}>
+                <For each={firstOptions(st().suggest, st().ceiling)}>
+                  {(msat) => (
+                    <button
+                      type="button"
+                      class="chip"
+                      role="radio"
+                      aria-checked={(props.firstPick ?? st().suggest) === msat}
+                      data-first-budget={msat}
+                      onClick={() => props.onFirstPick(msat)}
+                    >
+                      {sats(msat)} sats a day<Show when={worth(msat)}> · {worth(msat)}</Show>
+                    </button>
+                  )}
+                </For>
+              </div>
+            </div>
+          )}
+        </Match>
+        <Match when={props.stand.kind === 'contact_used' && (props.stand as Extract<BudgetStandT, { kind: 'contact_used' }>)}>
+          {(st) => (
+            <div class="approval budget-used" data-budget-used="contact">
+              <p>
+                <strong>Budget for {who()} used up.</strong> {sats(st().spent)} of {sats(st().limit)} sats in the last 24 hours, and this
+                message costs {props.priceMsat === null ? '…' : sats(props.priceMsat)}. It frees up as older payments pass 24 hours.
+              </p>
+              <Show
+                when={st().raiseTo}
+                fallback={
+                  <p class="hint">
+                    This budget already equals your daily total.{' '}
+                    <button type="button" class="link" data-budget-raise-total onClick={() => void props.actions.approveBudget(Math.min(props.budget.ceiling_msat * 2, props.budget.max_daily_msat), props.budget.preset)}>
+                      Raise the daily total to {sats(Math.min(props.budget.ceiling_msat * 2, props.budget.max_daily_msat))} sats
+                    </button>
+                  </p>
+                }
+              >
+                {(to) => (
+                  <button type="button" class="primary small" data-budget-raise onClick={() => void props.actions.setBudget(props.target, props.room, to())}>
+                    Raise to {sats(to())} sats a day
+                  </button>
+                )}
+              </Show>
+            </div>
+          )}
+        </Match>
+        <Match when={props.stand.kind === 'total_used' && (props.stand as Extract<BudgetStandT, { kind: 'total_used' }>)}>
+          {(st) => (
+            <div class="approval budget-used" data-budget-used="total">
+              <p>
+                <strong>Your daily total is used up.</strong> {sats(st().spent)} of {sats(st().ceiling)} sats in the last 24 hours. Raising
+                it is a new approval.
+              </p>
+              <Show when={st().raiseTo}>
+                {(to) => (
+                  <button type="button" class="primary small" data-budget-raise-total onClick={() => void props.actions.approveBudget(to(), props.budget.preset)}>
+                    Approve {sats(to())} sats a day
+                  </button>
+                )}
+              </Show>
+            </div>
+          )}
+        </Match>
+        <Match when={props.stand.kind === 'ok' && (props.stand as Extract<BudgetStandT, { kind: 'ok' }>)}>
+          {(st) => (
+            <p class="spend-line" data-budget-line>
+              <span class="dot ok" />
+              <span class="line-text">
+                Pays automatically · {sats(st().spent)} of {sats(st().limit)} sats to {who()} in 24 h · approval ends in{' '}
+                {hoursLeft(props.budget.autopay.open_until_ms, props.now, props.budget.window_ms)} h ·{' '}
+                <button type="button" class="link" data-pause-all onClick={() => void props.actions.pauseAll()}>Pause all</button>
+              </span>
+            </p>
+          )}
+        </Match>
+      </Switch>
+      <Reconcile actions={props.actions} />
       <Show when={props.error}>
-        <p class="err-note">{props.error}</p>
+        <p class="err-note" data-budget-error>{props.error}</p>
+      </Show>
+    </div>
+  );
+}
+
+/**
+ * The running tally (context panel): what left in the last 24 hours against the
+ * daily total, per contact and room, and the one-tap pause for everything.
+ */
+function BudgetPanel(props: {
+  budget: BudgetView | null;
+  error: string | undefined;
+  now: number;
+  nameOf: (id: string, room: boolean) => string;
+  actions: Actions;
+}) {
+  const [editing, setEditing] = createSignal<string | null>(null);
+  const [value, setValue] = createSignal('');
+  const [note, setNote] = createSignal<string | null>(null);
+  const pct = (spent: number, of: number) => `${Math.min(100, of > 0 ? (spent / of) * 100 : 0).toFixed(1)}%`;
+  const save = async (row: BudgetRow) => {
+    const n = Number(value());
+    if (!Number.isFinite(n) || n < 0) return setNote('Enter a number of sats, or 0 to forget.');
+    const r = await props.actions.setBudget(row.target, row.room, Math.round(n * 1000));
+    if (r.ok) {
+      setEditing(null);
+      setNote(null);
+    } else setNote(r.error.message);
+  };
+  const status = (b: BudgetView) => {
+    if (b.paused) return 'Paused. Nothing is paid until you resume.';
+    if (b.waiting_for_owner) return 'Waiting for your approval at the node.';
+    if (b.autopay.state === 'open') return `Paying automatically. The approval ends in ${hoursLeft(b.autopay.open_until_ms, props.now, b.window_ms)} h.`;
+    if (b.autopay.state === 'expired') return 'The daily approval ended. Approve again from any conversation.';
+    return 'Not approved in this session. Approve a daily total from any conversation.';
+  };
+  return (
+    <div class="panel" data-panel="budget">
+      <h2>Budget</h2>
+      <Show when={props.budget} fallback={<Show when={!props.error} fallback={<p class="err-note">{props.error}</p>}><div class="spinner" /></Show>}>
+        {(b) => (
+          <>
+            <div class="tally" data-tally>
+              <span class="label">Spent in the last 24 hours</span>
+              <span class="sats big" data-tally-total>
+                {sats(b().spent_msat)} <span class="unit">/ {sats(b().ceiling_msat)} sats</span>
+              </span>
+              <span class="meter" aria-hidden="true"><span style={{ width: pct(b().spent_msat, b().ceiling_msat) }} /></span>
+              <Show when={b().unsettled_msat > 0}>
+                <span class="hint" data-unsettled>Includes {sats(b().unsettled_msat)} sats whose outcome is not known yet, counted at their price cap.</span>
+              </Show>
+              <Show when={b().node_grant}>
+                {(g) => (
+                  <span class="hint" data-node-grant>
+                    Your node allows {sats(g().remaining_msat)} of {sats(g().budget_msat)} sats more, at most {sats(g().per_call_max_msat)} per payment, for {timeLeft(g().expires_at_ms, props.now)}.
+                  </span>
+                )}
+              </Show>
+            </div>
+            <p class="spend-line" classList={{ paused: b().paused }} data-autopay={b().paused ? 'paused' : b().autopay.state}>
+              <span class={`dot ${b().paused ? 'warn' : b().autopay.state === 'open' ? 'ok' : ''}`} /> <span class="line-text">{status(b())}</span>
+            </p>
+            <Show
+              when={b().paused}
+              fallback={
+                <button type="button" class="pause-all" data-pause-all onClick={() => void props.actions.pauseAll()}>
+                  Pause all payments
+                </button>
+              }
+            >
+              <button type="button" class="primary" data-resume onClick={() => void props.actions.resume()}>
+                Resume payments
+              </button>
+            </Show>
+            <h3>By contact and room</h3>
+            <For each={b().rows} fallback={<p class="hint">No one has a budget yet. Your first paid message to someone sets theirs.</p>}>
+              {(row) => {
+                const key = () => `${row.room ? 'room' : 'peer'}:${row.target}`;
+                return (
+                  <div class="budget-row" data-budget-row={row.target}>
+                    <div class="row" style={{ 'justify-content': 'space-between', gap: 'var(--s-2)' }}>
+                      <span class="who">{props.nameOf(row.target, row.room)}</span>
+                      <span class="sats" data-row-tally>
+                        {sats(row.spent_msat)}
+                        <span class="unit">{row.limit_msat === null ? 'sats, approved by hand' : `/ ${sats(row.limit_msat)} sats`}</span>
+                      </span>
+                    </div>
+                    <Show when={row.limit_msat !== null}>
+                      <span class="meter" aria-hidden="true"><span style={{ width: pct(row.spent_msat, row.limit_msat!) }} /></span>
+                    </Show>
+                    <Show
+                      when={editing() === key()}
+                      fallback={
+                        <button type="button" class="link" data-budget-edit onClick={() => { setEditing(key()); setValue(String((row.limit_msat ?? 0) / 1000)); setNote(null); }}>
+                          {row.limit_msat === null ? 'Set a budget' : 'Change'}
+                        </button>
+                      }
+                    >
+                      <form class="row" onSubmit={(e) => { e.preventDefault(); void save(row); }}>
+                        <input inputmode="numeric" value={value()} onInput={(e) => setValue(e.currentTarget.value)} aria-label={`Sats a day for ${props.nameOf(row.target, row.room)}`} data-budget-input />
+                        <button type="submit" class="small" data-budget-save>Save</button>
+                        <button type="button" class="link" onClick={() => setEditing(null)}>Cancel</button>
+                      </form>
+                    </Show>
+                  </div>
+                );
+              }}
+            </For>
+            <Show when={note()}><p class="err-note">{note()}</p></Show>
+            <Show when={props.error}><p class="err-note">{props.error}</p></Show>
+            <p class="hint">
+              A budget can go up to the daily total you approved; raising the total is a new approval. Budgets and this tally are
+              saved on this device. Your approval is not: after a restart, approve once more. 0 forgets a contact, so they are asked
+              again. Inside the budget you approved at your node, paying and sending a file take one click to approve, with no
+              step at your node: your node holds every such payment to that budget. When a contact with a budget reconnects and
+              asks to be admitted again, your node pays that from their budget without asking; anyone else asks you once.
+            </p>
+          </>
+        )}
       </Show>
     </div>
   );

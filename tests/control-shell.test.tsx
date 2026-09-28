@@ -157,14 +157,14 @@ describe('control center shell', () => {
     expect(mount.querySelector('[data-room-blocked]')?.textContent).toContain('Not every member is a connected peer');
 
     // Wallet: the one combined balance, never split into invented figures.
-    click('[role=tab]:nth-child(2)');
+    click('[data-tab="wallet"]');
     await vi.waitFor(() => expect(mount.querySelector('[data-balance]')?.textContent).toContain('52,500'));
     expect(mount.querySelector('[data-panel="wallet"]')?.textContent).toContain('one figure');
 
     // Only reads and the spend-window status were used; nothing that spends or edits.
     const used = new Set(calls.map((c) => c.cmd));
     for (const cmd of used) {
-      expect(cmd).toMatch(/^(node_status|pairing_status|node_overview|peers_list|rooms_list|room_members|messages_list|price_quote|payments_overview|fund_state|spend_status|file_price|room_quote|live_link|plugin:event\|(un)?listen)$/);
+      expect(cmd).toMatch(/^(node_status|pairing_status|node_overview|peers_list|rooms_list|room_members|messages_list|price_quote|payments_overview|fund_state|spend_status|budget_status|file_price|room_quote|live_link|plugin:event\|(un)?listen)$/);
     }
     expect(calls.find((c) => c.cmd === 'plugin:event|listen')?.args?.event).toBe('node-live');
 
@@ -192,7 +192,7 @@ describe('control center shell', () => {
     const replayAt = calls.findIndex((c) => c.cmd === 'live_link');
     expect(listenAt).toBeGreaterThanOrEqual(0);
     expect(replayAt).toBeGreaterThan(listenAt);
-    click('[role=tab]:nth-child(1)');
+    click('[data-tab="node"]');
     await vi.waitFor(() => expect(mount.querySelector('[data-link]')?.getAttribute('data-link')).toBe('open'));
   });
 
@@ -201,7 +201,7 @@ describe('control center shell', () => {
     await vi.waitFor(() => expect(mount.querySelector('[data-sample]')).not.toBeNull());
     await vi.waitFor(() => expect(mount.querySelector('[data-stream]')?.textContent).toContain('Morning.'));
     expect(mount.querySelector('[data-mode="sample"]')).not.toBeNull();
-    await vi.waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Approve spending'));
+    await vi.waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Approve daily budget'));
     click('[data-track="new"]');
     await vi.waitFor(() => expect(mount.querySelector('[data-new-track]')?.textContent).toContain('introduction, not admission'));
     click('[data-track="ai"]');

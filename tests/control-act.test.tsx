@@ -138,7 +138,7 @@ describe('acting from the track', () => {
 
     submit();
     await vi.waitFor(() => expect(host.used('message_send')).toHaveLength(1));
-    expect(host.used('message_send')[0].args).toEqual({ recipient: A, is_room: false, plaintext: 'gm Maya', max_msat: 2000, max_recipient_msat: null });
+    expect(host.used('message_send')[0].args).toEqual({ recipient: A, is_room: false, plaintext: 'gm Maya', max_msat: 2000, max_recipient_msat: null, first_contact_msat: null });
     await vi.waitFor(() => expect(text('[data-message="sent-1"] .stamp .sats')).toBe('2'));
     expect(text('[data-message="sent-1"] .stamp')).toContain('sats paid');
     expect(text('[data-message="sent-1"] [data-delivery]')).toBe('sent, waiting for their node');
@@ -230,7 +230,7 @@ describe('acting from the track', () => {
     type('[data-composer] textarea', 'room hello');
     await vi.waitFor(() => expect(text('[data-send]')).toBe('Send · 2 sats'));
     submit();
-    await vi.waitFor(() => expect(host.used('message_send')[0]?.args).toEqual({ recipient: ROOM, is_room: true, plaintext: 'room hello', max_msat: 2000, max_recipient_msat: { [A]: 2000 } }));
+    await vi.waitFor(() => expect(host.used('message_send')[0]?.args).toEqual({ recipient: ROOM, is_room: true, plaintext: 'room hello', max_msat: 2000, max_recipient_msat: { [A]: 2000 }, first_contact_msat: null }));
   });
 
   it('pays an invoice only after showing what it asks for', async () => {
