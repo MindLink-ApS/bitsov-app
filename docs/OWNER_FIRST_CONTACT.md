@@ -19,6 +19,11 @@ credential on the node side, sends its header through curl's standard input,
 and writes only the public response to the app's private temporary receipt
 file. It disables shell tracing, follows no redirects, uses restrictive file
 permissions and publishes the receipt by rename after a successful response.
+On Unix, the receipt directory is created with mode `0700` regardless of a
+permissive umask. The command keeps `umask 077` and opens `receipt.part` with
+shell noclobber before curl runs; an existing file or symlink causes refusal
+without writing a response or touching the symlink target. Cancel and request
+approval again if a partial file already exists.
 The credential never enters the app, renderer, command text or receipt.
 
 The app polls the public receipt and the paired client's budget grant once per
