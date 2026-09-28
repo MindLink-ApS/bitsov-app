@@ -54,6 +54,8 @@
     "allow-budget-pause",
     "allow-budget-resume",
     "allow-message-send",
+    "allow-message-retry",
+    "allow-spend-dismiss-undelivered",
     "allow-room-quote",
     "allow-invoice-create",
     "allow-invoice-amount",

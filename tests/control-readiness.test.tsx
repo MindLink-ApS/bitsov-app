@@ -110,7 +110,7 @@ describe('node money readiness', () => {
 });
 
 describe('shared money guard', () => {
-  it.each(['send', 'pay', 'keysend', 'fileSend', 'invoiceCreate', 'firstContactQuote', 'firstContactRequest', 'sponsorOffer', 'sponsorCandidate', 'sponsorOwnerApproval', 'sponsorRequest', 'inviteCreate', 'inviteRedeem', 'fundStart', 'fundingAddress'] as const)('stops %s before reaching the host and permits it after recovery', async (method) => {
+  it.each(['retry', 'send', 'pay', 'keysend', 'fileSend', 'invoiceCreate', 'firstContactQuote', 'firstContactRequest', 'sponsorOffer', 'sponsorCandidate', 'sponsorOwnerApproval', 'sponsorRequest', 'inviteCreate', 'inviteRedeem', 'fundStart', 'fundingAddress'] as const)('stops %s before reaching the host and permits it after recovery', async (method) => {
     const source = sampleSource();
     const call = vi.fn().mockResolvedValue('host reply');
     Object.assign(source, { [method]: call });
@@ -139,5 +139,101 @@ describe('shared money guard', () => {
     await expect(guarded.pay('invoice', 1000, 6000)).rejects.toMatchObject({ code: 'not_ready', message: 'Money is not ready yet. Your node will retry automatically.' });
     expect(refused).toHaveBeenCalledTimes(1);
     expect(source.pay).toHaveBeenCalledTimes(1);
+  });
+});
+
+// #53 retries retain the paid card through #56 readiness transitions.
+describe('paid delivery retry readiness', () => {
+  const button = (selector: string) => mount.querySelector<HTMLButtonElement>(selector)!;
+  const admission = { admission_msat: 2000, message_msat: 2000, max_routing_fee_msat: 10000, total_msat: 14000, quoted: true };
+  const approval = { id: 'retry-approval', owner_command: 'approve at node', ready: false, expires_at_ms: Date.now() + 600_000,
+    request: { client_id: 'c1', grant_op_id: 'ab12', recipient: SAMPLE_PEERS[0].node_id, max_total_msat: 14000, contact_budget_msat: 14000 } };
+  async function paidCard() {
+    vi.useFakeTimers();
+    const result = await start(true, (source) => {
+      source.spendStatus = async () => ({ state: 'open', basis: 'node_grant', open_until_ms: Date.now() + 600_000, pending: null, window_ms: 600_000 });
+      source.send = vi.fn().mockRejectedValue({ code: 'payment_settled_undelivered', message: 'Paid, not delivered',
+        undelivered: { paid_msat: 2000, retry: true }, pending_id: 'paid-record' });
+    });
+    const draft = mount.querySelector<HTMLTextAreaElement>('[data-composer] textarea')!;
+    draft.value = 'paid message'; draft.dispatchEvent(new Event('input', { bubbles: true }));
+    button('[data-send]').click();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mount.querySelector('[data-artifact="undelivered"]')).not.toBeNull();
+    return result;
+  }
+  async function priceCard() {
+    const result = await paidCard();
+    result.source.retry = vi.fn().mockRejectedValue({ code: 'retry_needs_admission', message: 'Approval needed', admission });
+    button('[data-retry-delivery]').click();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(button('[data-retry-approve]')).not.toBeNull();
+    return result;
+  }
+
+  it.each([false, true])('blocks offline retry controls, keeps stop available, and requires a manual recovery action (approval=%s)', async (priced) => {
+    const { source, status } = await (priced ? priceCard() : paidCard());
+    const retry = source.retry = vi.fn().mockResolvedValue({ message_id: 'recovered', recipient: SAMPLE_PEERS[0].node_id, is_room: false, delivered: true, amount_msat: 0, sent_at_ms: Date.now() });
+    source.firstContactRequest = vi.fn().mockResolvedValue(null);
+    status.money_ready = false;
+    await vi.advanceTimersByTimeAsync(10_000);
+    const selector = priced ? '[data-retry-approve]' : '[data-retry-delivery]';
+    expect(button(selector).disabled).toBe(true);
+    expect(button('[data-stop-retrying]').disabled).toBe(false);
+    button(selector).click();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(retry).not.toHaveBeenCalled();
+    expect(source.firstContactRequest).not.toHaveBeenCalled();
+    status.money_ready = true;
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(button(selector).disabled).toBe(false);
+    expect(retry).not.toHaveBeenCalled();
+    button(selector).click();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(retry).toHaveBeenCalledTimes(1);
+    expect(mount.querySelector('[data-artifact="undelivered"]')).toBeNull();
+  });
+
+  it.each(['retry', 'firstContactRequest'] as const)('shows the shared notice on a racing %s refusal and retains the paid card', async (method) => {
+    const { source } = await (method === 'retry' ? paidCard() : priceCard());
+    source[method] = vi.fn().mockRejectedValue({ code: 'not_ready', message: 'offline' });
+    button(method === 'retry' ? '[data-retry-delivery]' : '[data-retry-approve]').click();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mount.querySelectorAll('[data-money-notice]')).toHaveLength(1);
+    expect(mount.querySelector('[data-artifact="undelivered"]')?.getAttribute('data-paid-msat')).toBe('2000');
+    expect(mount.querySelector('[data-retry-note]')).toBeNull();
+    expect(button('[data-stop-retrying]').disabled).toBe(false);
+  });
+
+  it.each(['pending', 'request', 'status'] as const)('cancels %s retry approval across offline/recovery without replay', async (phase) => {
+    const { source, status } = await priceCard();
+    let complete!: (value: typeof approval) => void;
+    source.firstContactCancel = vi.fn().mockResolvedValue(undefined);
+    source.firstContactRequest = vi.fn().mockImplementation(() => phase === 'request'
+      ? new Promise<typeof approval>((resolve) => { complete = resolve; }) : Promise.resolve(approval));
+    source.firstContactStatus = vi.fn().mockImplementation(() => new Promise<typeof approval>((resolve) => { complete = resolve; }));
+    button('[data-retry-approve]').click();
+    await vi.advanceTimersByTimeAsync(0);
+    if (phase === 'status') {
+      button('[data-retry-approve]').click();
+      await vi.advanceTimersByTimeAsync(0);
+    }
+    status.money_ready = false;
+    await vi.advanceTimersByTimeAsync(10_000);
+    status.money_ready = true;
+    await vi.advanceTimersByTimeAsync(10_000);
+    if (phase !== 'pending') complete({ ...approval, ready: true });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(source.firstContactCancel).toHaveBeenCalledWith('retry-approval');
+    expect(mount.querySelector('[data-retry-owner]')).toBeNull();
+    expect(mount.querySelector('[data-artifact="undelivered"]')).not.toBeNull();
+    expect(source.retry).toHaveBeenCalledTimes(1); // Only the earlier zero-cap probe.
+    source.firstContactRequest = vi.fn().mockResolvedValue(null);
+    source.retry = vi.fn().mockResolvedValue({ message_id: 'manual', recipient: SAMPLE_PEERS[0].node_id, is_room: false, delivered: true, amount_msat: 4000, sent_at_ms: Date.now() });
+    button('[data-retry-approve]').click();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(source.firstContactRequest).toHaveBeenCalledTimes(1);
+    expect(source.retry).toHaveBeenCalledWith(SAMPLE_PEERS[0].node_id, 'paid message', 14000);
+    expect(mount.querySelector('[data-artifact="undelivered"]')).toBeNull();
   });
 });

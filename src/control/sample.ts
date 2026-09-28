@@ -827,6 +827,9 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
       return ok(budgetView());
     },
     spendReconcile: () => ok('No pending spend.'),
+    // The sample never leaves a payment settled but undelivered.
+    retry: () => refuse('retry_unavailable', 'Nothing to retry.'),
+    dismissUndelivered: () => refuse('retry_unavailable', 'Nothing is waiting for delivery.'),
     send: async (recipient, isRoom, plaintext, maxMsat, _caps, firstContactMsat) => {
       const to = recipient.toLowerCase();
       const confirm = await planSend(to, isRoom, maxMsat, firstContactMsat);

@@ -6,7 +6,7 @@ export const MONEY_NOT_READY = 'Money is not ready yet. Your node will retry aut
 
 /** Every app operation that can prepare or dispatch money. Reads and cancellation stay usable. */
 const moneyMethods = new Set<keyof Source>([
-  'send', 'pay', 'keysend', 'fileSend', 'invoiceCreate', 'firstContactQuote', 'firstContactRequest',
+  'retry', 'send', 'pay', 'keysend', 'fileSend', 'invoiceCreate', 'firstContactQuote', 'firstContactRequest',
   'sponsorOffer', 'sponsorCandidate', 'sponsorOwnerApproval', 'sponsorRequest',
   'inviteCreate', 'inviteRedeem', 'fundStart', 'fundingAddress',
 ]);

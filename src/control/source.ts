@@ -89,7 +89,7 @@ export interface Source {
   /** K1 slice 2 (newcomer): ask for the offered gift. Nothing is sent. */
   sponsorRequest(text: string): Promise<FundingAsk>;
   sponsorRequestStatus(paymentHash: string): Promise<FundingStatus>;
-  firstContactRequest(peer: string, maxMsat: number, budgetMsat: number): Promise<OwnerContactApproval | null>;
+  firstContactRequest(peer: string, maxMsat: number, budgetMsat?: number): Promise<OwnerContactApproval | null>;
   firstContactStatus(id: string): Promise<OwnerContactApproval>;
   firstContactCancel(id: string): Promise<void>;
   wallet(): Promise<WalletOverview>;
@@ -115,6 +115,15 @@ export interface Source {
    * is the owner's one-time OK for someone not yet budgeted, with their budget.
    */
   send(recipient: string, isRoom: boolean, plaintext: string, maxMsat: number, maxRecipientMsat?: Record<string, number>, firstContactMsat?: number): Promise<SendReceipt>;
+  /**
+   * Retry a paid, undelivered message through its own journal record. Without
+   * `approvedMsat` it pays nothing new (the node is capped at zero; the host
+   * answers `retry_needs_admission` with the price still due); with it, the
+   * owner approved that all-in price and the node pays at most that.
+   */
+  retry(recipient: string, plaintext: string, approvedMsat?: number): Promise<SendReceipt>;
+  /** Stop retrying the paid, undelivered message `pendingId` names. Dispatches nothing. */
+  dismissUndelivered(pendingId: string): Promise<string>;
   // budgets (B2): numbers the host keeps; the approval itself stays in host memory
   budgetStatus(): Promise<BudgetView>;
   /** The owner's one approval for a daily total. Lowering an open one needs no new approval. */
@@ -171,7 +180,7 @@ export const hostSource: Source = {
   sponsorCancel: (introId) => invoke<void>('sponsor_cancel', { intro_id: introId }),
   sponsorRequest: (text) => invoke<FundingAsk>('sponsor_request', { text }),
   sponsorRequestStatus: (paymentHash) => invoke<FundingStatus>('sponsor_request_status', { payment_hash: paymentHash }),
-  firstContactRequest: (recipient, maxMsat, budgetMsat) => invoke<OwnerContactApproval | null>('first_contact_request', { recipient, max_msat: maxMsat, contact_budget_msat: budgetMsat }),
+  firstContactRequest: (recipient, maxMsat, budgetMsat) => invoke<OwnerContactApproval | null>('first_contact_request', { recipient, max_msat: maxMsat, contact_budget_msat: budgetMsat ?? null }),
   firstContactStatus: (id) => invoke<OwnerContactApproval>('first_contact_status', { id }),
   firstContactCancel: (id) => invoke<void>('first_contact_cancel', { id }),
   wallet: () => invoke<WalletOverview>('payments_overview'),
@@ -185,6 +194,8 @@ export const hostSource: Source = {
   spendReconcile: () => invoke<string>('spend_reconcile'),
   send: (recipient, isRoom, plaintext, maxMsat, maxRecipientMsat, firstContactMsat) =>
     invoke<SendReceipt>('message_send', { recipient, is_room: isRoom, plaintext, max_msat: maxMsat, max_recipient_msat: maxRecipientMsat ?? null, first_contact_msat: firstContactMsat ?? null }),
+  retry: (recipient, plaintext, approvedMsat) => invoke<SendReceipt>('message_retry', { recipient, plaintext, approved_msat: approvedMsat ?? null }),
+  dismissUndelivered: (pendingId) => invoke<string>('spend_dismiss_undelivered', { pending_id: pendingId }),
   budgetStatus: () => invoke<BudgetView>('budget_status'),
   budgetApprove: (ceilingMsat, preset) => invoke<BudgetView>('budget_approve', { ceiling_msat: ceilingMsat, preset }),
   budgetSet: (target, room, limitMsat) => invoke<BudgetView>('budget_set', { target, room, limit_msat: limitMsat }),

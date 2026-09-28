@@ -53,6 +53,8 @@ fn main() {
             "budget_pause",
             "budget_resume",
             "message_send",
+            "message_retry",
+            "spend_dismiss_undelivered",
             "room_quote",
             "invoice_create",
             "invoice_amount",
