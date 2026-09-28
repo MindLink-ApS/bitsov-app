@@ -198,6 +198,7 @@ describe('invisible payments in the composer and the context panel', () => {
     $<HTMLButtonElement>(`[data-track="peer:${NEW}"]`)!.click();
     await vi.waitFor(() => expect($('[data-door-quote]')?.getAttribute('data-door-quote')).toBe('17500'));
     expect(text('[data-door-quote]')).toContain('up to 13.5 sats network fee');
+    expect(text('[data-first-budget="50000"]')).toBe('50 sats a day · 2 messages');
     type('[data-composer] textarea', 'hello including fees');
     submit();
     await vi.waitFor(() => expect(host.used('message_send')).toHaveLength(1));
@@ -238,8 +239,8 @@ describe('invisible payments in the composer and the context panel', () => {
     expect(text('[data-door-quote]')).toContain('3 sats once to reach them');
     expect(text('[data-door-quote]')).toContain('2 sats a message');
     expect(text('[data-cost]')).toContain('Nadia’s own quote');
-    // The budget choices count messages at the stranger's message price.
-    expect(text('[data-first-budget="50000"]')).toBe('50 sats a day · 25 messages');
+    // Budget counts conservatively use the displayed all-in quote.
+    expect(text('[data-first-budget="50000"]')).toBe('50 sats a day · 10 messages');
     type('[data-composer] textarea', 'hello Nadia');
     await vi.waitFor(() => expect(text('[data-send]')).toBe('Send first message · 5 sats'));
     submit();

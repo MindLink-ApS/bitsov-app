@@ -1880,7 +1880,7 @@ function BudgetBar(props: {
   now: number;
   actions: Actions;
 }) {
-  const worth = (msat: number) => messagesWorth(msat, props.door?.message_msat ?? props.priceMsat);
+  const worth = (msat: number) => messagesWorth(msat, props.priceMsat);
   const who = () => (props.room ? 'this room' : props.name);
   const firstOptions = (suggest: number, ceiling: number) =>
     [...new Set([suggest, suggest * 2, suggest * 5].map((v) => Math.min(v, ceiling)))].filter((v) => v >= (props.priceMsat ?? 0));

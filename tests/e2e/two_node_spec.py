@@ -120,8 +120,7 @@ def run(r):
         s.snap('approval-waiting')
         s.need('app shows the owner command to type at the node', op, cmd)
         s.check('send is held while waiting', r.ui_try('exists', selector='[data-approval="pending"]'))
-        # Room sends conservatively reserve the remaining node allowance.
-        # Keep the fixture's overall grant within the default 100-sat room budget.
+        # A finite node grant covers this complete mock evening.
         out = r.owner_grant(op, '--budget', '100', '--for', '10m')
         s.note('owner CLI: ' + ' '.join(out.split())[-300:])
         s.need('owner approval enables first-contact confirmation', r.ui_try('wait', selector='[data-budget="first"]', timeoutMs=20000))
@@ -140,6 +139,8 @@ def run(r):
                 door and int(door[0]['data-door-quote']) == int(quote[0]['data-cost-msat']) == 14000, door)
         s.check('first contact shows the aggregate network fee ceiling', 'up to 10 sats network fee' in r.text('[data-door-quote]'))
         total = int(quote[0]['data-cost-msat'])
+        # Leave room for the entire evening including routing allowances.
+        r.ui('click', selector='[data-first-budget="100000"]')
         s.snap('first-contact-cost')
         balance_before = r.get('a', '/payments/balance')['balance_msat']
         before_b = r.get('b', '/payments')
@@ -151,7 +152,7 @@ def run(r):
         request = json.loads(pending[0]['data-contact-request'])
         s.check('owner request binds this contact, quote, budget and paired grant',
                 request['recipient'] == b and request['max_total_msat'] == total
-                and request['contact_budget_msat'] >= total and request['client_id'] and request['grant_op_id'], request)
+                and request['contact_budget_msat'] == 100000 and request['client_id'] and request['grant_op_id'], request)
         s.snap('contact-owner-pending')
         command = r.ui('attrs', selector='[data-contact-owner-command]', names=['data-command'])[0]['data-command']
         s.note('FIXTURE: node A operator executes the displayed owner CLI through its local control socket; the app receives only the public receipt.')
