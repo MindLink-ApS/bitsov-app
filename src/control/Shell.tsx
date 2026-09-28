@@ -488,13 +488,11 @@ export function ControlCenter(props: Props) {
                     actions={actions}
                     spendError={errors.spend}
                     onContext={() => setContextOpen(true)}
-                    onIntroduced={(card) => {
+                    onIntroduced={(card, follow) => {
                       setIntroduced(card.node_id.toLowerCase(), card);
-                      // Continue can finish after the owner moved on. Only a
-                      // still-open Start view follows it; anywhere else the
-                      // current conversation and its draft stay, and a notice
-                      // offers the introduced peer instead (#49 review).
-                      if (untrack(track)?.kind === 'new') openIntroduced(card);
+                      // The originating form decides whether its instance and
+                      // state still match the Continue that started this work.
+                      if (follow && untrack(track)?.kind === 'new') openIntroduced(card);
                       else setIntroNotice(card);
                     }}
                   />
@@ -1825,9 +1823,13 @@ function NewTrack(props: {
   actions: Actions;
   spendError: string | undefined;
   onContext: () => void;
-  /** K1 Continue succeeded: the node dialed this card's node. Open its conversation. */
-  onIntroduced: (card: Introduction) => void;
+  /** Continue succeeded; follow only while the originating form is unchanged. */
+  onIntroduced: (card: Introduction, follow: boolean) => void;
 }) {
+  let active = true;
+  let formRevision = 0;
+  onCleanup(() => { active = false; });
+  const editForm = () => { formRevision += 1; };
   // K1: your own signed introduction. Without one (older node, no dialable
   // endpoint) the plain node id is shown as before.
   const [mine, setMine] = createSignal<Introduction | null>(null);
@@ -1974,18 +1976,23 @@ function NewTrack(props: {
   const continueCard = () => {
     const c = cardLive();
     if (!c || opening() || (c.reach === 'local' && !allowLocal())) return;
+    const startedRevision = formRevision;
+    const unchanged = () => active && formRevision === startedRevision;
     setOpening(true);
     setCardErr(null);
     props.source.introductionOpen(c.link, c.reach === 'local' && allowLocal()).then(
       (opened) => {
-        setOpening(false);
-        setCard(null);
-        setPasted('');
-        props.onIntroduced(opened);
+        const follow = unchanged();
+        if (active) setOpening(false);
+        if (follow) {
+          setCard(null);
+          setPasted('');
+        }
+        props.onIntroduced(opened, follow);
       },
       (e) => {
-        setOpening(false);
-        setCardErr(asActionError(e).message);
+        if (active) setOpening(false);
+        if (unchanged()) setCardErr(asActionError(e).message);
       },
     );
   };
@@ -2097,7 +2104,7 @@ function NewTrack(props: {
           )}
         </Show>
 
-        <div class="new-grid">
+        <div class="new-grid" onInput={editForm} onChange={editForm} onSubmit={editForm}>
           <Show when={sponsor()?.enabled}>
             <form
               class="panel"
