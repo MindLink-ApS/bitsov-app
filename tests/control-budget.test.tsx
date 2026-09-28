@@ -309,6 +309,55 @@ describe('invisible payments in the composer and the context panel', () => {
     expect($('[data-intro-notice]')).toBeNull();
   });
 
+  it.each(['reopened Start', 'reopened untouched Start', 'edited introduction', 'edited invite', 'edited then restored input'])(
+    'a late introduction preserves the %s form instead of navigating', async (scenario) => {
+      let finish!: (value: ReturnType<typeof card>) => void;
+      const pending = new Promise<ReturnType<typeof card>>((resolve) => { finish = resolve; });
+      const host = stubHost(open([]), {
+        introduction_mine: () => card(OWN, 'public', 10_000),
+        introduction_read: () => card(STRANGER, 'public', 3000),
+        introduction_open: () => pending,
+      });
+      await openShell();
+      $<HTMLButtonElement>('[data-track="new"]')!.click();
+      type('[data-intro-text]', INTRO);
+      $<HTMLButtonElement>('[data-intro-open] button[type="submit"]')!.click();
+      await vi.waitFor(() => expect($('[data-door-continue]')).not.toBeNull());
+      $<HTMLButtonElement>('[data-door-continue]')!.click();
+      await vi.waitFor(() => expect(host.used('introduction_open')).toHaveLength(1));
+
+      if (scenario.startsWith('reopened')) {
+        $<HTMLButtonElement>(`[data-track="peer:${MAYA}"]`)!.click();
+        $<HTMLButtonElement>('[data-track="new"]')!.click();
+      }
+      if (scenario === 'edited introduction') {
+        type('[data-intro-text]', 'bitsov://introduce#another-card');
+      } else if (scenario === 'edited then restored input') {
+        type('[data-intro-text]', 'another card');
+        type('[data-intro-text]', INTRO);
+      } else if (scenario !== 'reopened untouched Start') {
+        type('[data-invitee]', NEW);
+        type('[data-addr]', 'my.example.org:9735');
+      }
+
+      finish(card(STRANGER, 'public', 3000));
+      await vi.waitFor(() => expect($('[data-intro-notice]') || $('[data-introduced]')).not.toBeNull());
+      expect($('[data-track="new"]')?.getAttribute('aria-current')).toBe('true');
+      if (scenario === 'edited introduction' || scenario === 'edited then restored input') {
+        expect($<HTMLTextAreaElement>('[data-intro-text]')!.value).toBe(
+          scenario === 'edited introduction' ? 'bitsov://introduce#another-card' : INTRO,
+        );
+      } else {
+        expect($<HTMLInputElement>('[data-invitee]')!.value).toBe(scenario === 'reopened untouched Start' ? '' : NEW);
+        expect($<HTMLInputElement>('[data-addr]')!.value).toBe(scenario === 'reopened untouched Start' ? '' : 'my.example.org:9735');
+      }
+      expect($(`[data-intro-notice="${STRANGER}"]`)).not.toBeNull();
+      expect(host.used('message_send')).toHaveLength(0);
+      $<HTMLButtonElement>('[data-intro-notice-open]')!.click();
+      await vi.waitFor(() => expect($(`[data-introduced="${STRANGER}"]`)).not.toBeNull());
+    },
+  );
+
   it('a card the host refuses never reaches Continue', async () => {
     const host = stubHost(open([]), {
       introduction_mine: () => { throw 'Your node cannot sign an introduction yet. Share your node id instead.'; },
