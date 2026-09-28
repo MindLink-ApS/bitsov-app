@@ -1512,6 +1512,338 @@ async fn read_first_contact_quote(state: &NodeState, peer: &str) -> Result<contr
     Ok(quote)
 }
 
+// ---- K1 introductions (slice 1) -----------------------------------------------
+//
+// An introduction is never admission. `introduction_read` is local only. The
+// app never dials a card's endpoint: `introduction_open` asks the node, which
+// verifies the card again, pins its DNS and dials unprivileged (no whitelist,
+// nothing stored). The composer's door card then asks the stranger's own
+// stateless quote and the owner's one-time OK, exactly as for any stranger.
+
+/// `GET /introduction` — this node's signed door card for the QR: key,
+/// reachable peer endpoint and current prices, valid ten minutes. Checked
+/// here to be signed by this node's own key before it is shown.
+#[tauri::command(rename_all = "snake_case")]
+async fn introduction_mine(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+) -> Result<bitsov_app::introduction::DoorCard, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    read_own_introduction(state.inner()).await
+}
+
+async fn read_own_introduction(state: &NodeState) -> Result<bitsov_app::introduction::DoorCard, String> {
+    use bitsov_app::introduction as intro;
+    let status: serde_json::Value = get_json(state, "/status").await?;
+    let offers = status["api_capabilities"]
+        .as_array()
+        .is_some_and(|caps| caps.iter().any(|v| v.as_str() == Some(intro::CAPABILITY)));
+    if !offers {
+        return Err("Your node cannot sign an introduction yet. Share your node id instead.".into());
+    }
+    let path = "/introduction";
+    let (code, text) = call_api(state, reqwest::Method::GET, path, None).await?;
+    if !code.is_success() {
+        return Err(api_error(path, code, &text));
+    }
+    #[derive(Deserialize)]
+    struct Mine {
+        card: intro::Card,
+        link: String,
+    }
+    let mine: Mine = serde_json::from_str(&text).map_err(|e| format!("{path} decode failed: {e}"))?;
+    mine.card.verify(now_unix().max(0) as u64)?;
+    if Some(mine.card.node_id.as_str()) != status["node_id"].as_str() {
+        return Err(format!("{path}: the card is not signed by this node's key"));
+    }
+    let door = mine.card.door()?;
+    if door.link != mine.link {
+        return Err(format!("{path}: the link does not match the card"));
+    }
+    Ok(door)
+}
+
+/// Read a scanned, opened or pasted introduction: bounded parse, version,
+/// network name, endpoint shape, expiry and node-key signature. Local only:
+/// no request is made and nothing is stored.
+#[tauri::command(rename_all = "snake_case")]
+async fn introduction_read(
+    window: WebviewWindow<impl tauri::Runtime>,
+    text: String,
+) -> Result<bitsov_app::introduction::DoorCard, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    // K1 slice 2: an offer of starter bitcoin may ride with the card.
+    let (card, offer) = bitsov_app::sponsor::read(&text, now_unix().max(0) as u64)?;
+    bitsov_app::sponsor::door(&card, offer.as_ref())
+}
+
+/// Continue from a door card: re-verify it here, then `POST
+/// /introduction/open` so the node checks it against its own network, pins
+/// the endpoint and dials the introduced node unprivileged. Pays nothing,
+/// asks no quote and stores no contact.
+///
+/// `allow_local` is the owner's explicit OK for a local-network address,
+/// given on the door card. A card's own signed `reach = local` never grants
+/// it (genome #89 `020b05e`), and it is never sent for a public card.
+#[tauri::command(rename_all = "snake_case")]
+async fn introduction_open(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    text: String,
+    allow_local: bool,
+) -> Result<bitsov_app::introduction::DoorCard, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    open_introduction(state.inner(), &text, allow_local).await
+}
+
+async fn open_introduction(state: &NodeState, text: &str, allow_local: bool) -> Result<bitsov_app::introduction::DoorCard, String> {
+    use bitsov_app::introduction as intro;
+    // Opening uses the card alone; an attached offer is ignored here.
+    let (card, _offer) = bitsov_app::sponsor::read(text, now_unix().max(0) as u64)?;
+    let door = card.door()?;
+    let local = door.reach == intro::Reach::Local;
+    if local && !allow_local {
+        return Err(format!("This introduction points to a local network address ({}). Allow it on the card first. Nothing was sent.", door.endpoint));
+    }
+    if !node_offers(state, intro::CAPABILITY).await {
+        return Err("Your node cannot open introductions yet.".into());
+    }
+    let path = "/introduction/open";
+    let (code, body) = call_api(state, reqwest::Method::POST, path, Some(serde_json::json!({ "card": door.link, "allow_local": local && allow_local }))).await?;
+    if code == reqwest::StatusCode::CONFLICT && body.contains("introduction_closed_mesh") {
+        return Err("Your node only connects to peers you added yourself, and an introduction does not add one. Nothing was sent.".into());
+    }
+    if !code.is_success() {
+        return Err(api_error(path, code, &body));
+    }
+    let opened: serde_json::Value = serde_json::from_str(&body).map_err(|e| format!("{path} decode failed: {e}"))?;
+    if opened["node_id"].as_str() != Some(door.node_id.as_str()) || opened["connected"] != serde_json::Value::Bool(true) {
+        return Err(format!("{path}: the node connected to someone else"));
+    }
+    // The node pins DNS and applies the reach rules; check what it reports
+    // having dialed against the same rules, so a node that skipped them is
+    // caught here rather than trusted.
+    let dialed = opened["dialed"].as_str().and_then(|d| d.parse::<std::net::SocketAddr>().ok());
+    match dialed {
+        Some(addr) if intro::dial_allowed(door.reach, addr.ip()) => Ok(door),
+        _ => Err(format!("{path}: the node dialed an address this introduction does not allow")),
+    }
+}
+
+// ---- K1 slice 2: sponsor kit ------------------------------------------------------
+//
+// The inviter's node pays a small, capped gift into the newcomer's own node.
+// Offer, candidate review and approval are owner actions: the ten-minute
+// spend window must be open (as for invites), and Pause all stops a gift. The
+// node enforces the caps, the single candidate and the persisted reservation;
+// the app only shows and forwards. The newcomer's side creates the means to
+// be paid (receive) and reads its status. Nothing here is admission.
+
+fn sponsor_error(e: ActionError) -> ActionError {
+    // Surface the node's own reason code (sponsor_purse_exhausted, …).
+    for code in [
+        "sponsor_disabled", "sponsor_kit_open", "sponsor_daily_limit", "sponsor_purse_exhausted",
+        "sponsor_candidate_exists", "sponsor_kit_closed", "sponsor_kit_expired", "sponsor_code_mismatch",
+        "sponsor_kit_not_ready", "sponsor_invalid", "sponsor_kit_unknown", "sponsor_owner_approval_required",
+    ] {
+        if e.message.contains(code) {
+            return ActionError::new(code, e.message);
+        }
+    }
+    e
+}
+
+async fn sponsor_node(state: &NodeState) -> Result<(), ActionError> {
+    if node_offers(state, bitsov_app::sponsor::CAPABILITY).await {
+        Ok(())
+    } else {
+        Err(ActionError::new("sponsor_unavailable", "Your node cannot run starter-bitcoin kits yet."))
+    }
+}
+
+async fn read_sponsor_status(state: &NodeState) -> Result<bitsov_app::sponsor::SponsorStatus, String> {
+    if !node_offers(state, bitsov_app::sponsor::CAPABILITY).await {
+        return Err("Your node cannot run starter-bitcoin kits yet.".into());
+    }
+    get_json(state, "/sponsor").await
+}
+
+/// `GET /sponsor` — whether the owner turned sponsoring on, and the purse.
+#[tauri::command(rename_all = "snake_case")]
+async fn sponsor_status(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+) -> Result<bitsov_app::sponsor::SponsorStatus, ActionError> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    read_sponsor_status(state.inner()).await.map_err(|e| sponsor_error(ActionError::node(e)))
+}
+
+async fn do_sponsor_offer(state: &NodeState) -> Result<bitsov_app::introduction::DoorCard, ActionError> {
+    sponsor_node(state).await?;
+    let text = gated_post(state, "/sponsor/offer", serde_json::json!({})).await.map_err(sponsor_error)?;
+    let reply: serde_json::Value = decode_act("/sponsor/offer", &text)?;
+    let link = reply["link"].as_str().ok_or_else(|| ActionError::node("/sponsor/offer: no link"))?;
+    // Our own card and offer must read back as exactly what we show.
+    let (card, offer) = bitsov_app::sponsor::read(link, now_unix().max(0) as u64).map_err(ActionError::node)?;
+    let own = get_json::<serde_json::Value>(state, "/status").await.map_err(ActionError::node)?;
+    if Some(card.node_id.as_str()) != own["node_id"].as_str() || offer.is_none() {
+        return Err(ActionError::node("/sponsor/offer: the card is not this node's own offer"));
+    }
+    bitsov_app::sponsor::door(&card, offer.as_ref()).map_err(ActionError::node)
+}
+
+/// `POST /sponsor/offer` — this node's introduction with starter bitcoin.
+#[tauri::command(rename_all = "snake_case")]
+async fn sponsor_offer(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+) -> Result<bitsov_app::introduction::DoorCard, ActionError> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    do_sponsor_offer(state.inner()).await
+}
+
+async fn do_sponsor_candidate(state: &NodeState, request: &str) -> Result<bitsov_app::sponsor::Candidate, ActionError> {
+    sponsor_node(state).await?;
+    let request = request.trim();
+    if request.len() > bitsov_app::introduction::MAX_ENCODED_LEN || !request.starts_with(bitsov_app::sponsor::REQUEST_LINK_PREFIX) {
+        return Err(ActionError::invalid("That is not a starter-bitcoin request (bitsov://sponsor-request#…)."));
+    }
+    let text = gated_post(state, "/sponsor/candidate", serde_json::json!({ "request": request })).await.map_err(sponsor_error)?;
+    let candidate: bitsov_app::sponsor::Candidate = decode_act("/sponsor/candidate", &text)?;
+    candidate.check().map_err(ActionError::node)?;
+    Ok(candidate)
+}
+
+/// `POST /sponsor/candidate` — review a newcomer's request. Pays nothing.
+#[tauri::command(rename_all = "snake_case")]
+async fn sponsor_candidate(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    request: String,
+) -> Result<bitsov_app::sponsor::Candidate, ActionError> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    do_sponsor_candidate(state.inner(), &request).await
+}
+
+fn do_sponsor_owner_approval(state: &NodeState, candidate: &bitsov_app::sponsor::Candidate, code: &str) -> Result<bitsov_app::sponsor::OwnerApproval, ActionError> {
+    if budget_paused(state)? {
+        return Err(ActionError::new("budget_paused", "Payments are paused. Resume them to prepare the gift."));
+    }
+    bitsov_app::sponsor::owner_approval(&state.api_base, candidate, code, now_unix().max(0) as u64)
+        .map_err(ActionError::invalid)
+}
+
+/// Prepare only. The app never calls the independent owner's approve route.
+#[tauri::command(rename_all = "snake_case")]
+async fn sponsor_owner_approval(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    candidate: bitsov_app::sponsor::Candidate,
+    code: String,
+) -> Result<bitsov_app::sponsor::OwnerApproval, ActionError> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    do_sponsor_owner_approval(state.inner(), &candidate, &code)
+}
+
+/// Read-authorized outcome lookup only. Never approves or dispatches a gift.
+async fn do_sponsor_reconcile(state: &NodeState, intro_id: &str) -> Result<(), ActionError> {
+    if intro_id.len() != 32 || !intro_id.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(ActionError::invalid("Unknown kit."));
+    }
+    let path = format!("/sponsor/kits/{intro_id}/reconcile");
+    let (status, body) = call_api(state, reqwest::Method::POST, &path, Some(serde_json::json!({}))).await?;
+    if !status.is_success() {
+        return Err(sponsor_error(ActionError::node(api_error(&path, status, &body))));
+    }
+    // The renderer rereads status and validates the entire frozen tuple.
+    // Do not expose the reconciliation response's invoice to the renderer.
+    Ok(())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn sponsor_reconcile(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    intro_id: String,
+) -> Result<(), ActionError> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    do_sponsor_reconcile(state.inner(), &intro_id).await
+}
+
+/// `POST /sponsor/kits/:id/cancel` — withdraw an offer before any payment.
+#[tauri::command(rename_all = "snake_case")]
+async fn sponsor_cancel(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    intro_id: String,
+) -> Result<(), ActionError> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    if intro_id.len() != 32 || !intro_id.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(ActionError::invalid("Unknown kit."));
+    }
+    gated_post(state.inner(), &format!("/sponsor/kits/{intro_id}/cancel"), serde_json::json!({})).await.map_err(sponsor_error)?;
+    Ok(())
+}
+
+async fn do_sponsor_request(state: &NodeState, text: &str) -> Result<bitsov_app::sponsor::FundingAsk, ActionError> {
+    let (card, offer) = bitsov_app::sponsor::read(text, now_unix().max(0) as u64).map_err(ActionError::invalid)?;
+    let offer = offer.ok_or_else(|| ActionError::invalid("This introduction offers no starter bitcoin."))?;
+    sponsor_node(state).await?;
+    let door = bitsov_app::sponsor::door(&card, Some(&offer)).map_err(ActionError::node)?;
+    let link = door.offer_link.unwrap_or_default();
+    let path = "/sponsor/request";
+    let (status, body) = call_api(state, reqwest::Method::POST, path, Some(serde_json::json!({ "link": link }))).await.map_err(ActionError::node)?;
+    if !status.is_success() {
+        return Err(sponsor_error(ActionError::node(api_error(path, status, &body))));
+    }
+    let ask: bitsov_app::sponsor::FundingAsk = decode_act(path, &body)?;
+    // What we show must be what we asked for: this sponsor, this gift.
+    if ask.sponsor != card.node_id || ask.amount_msat != offer.gift_msat || ask.code.len() != 6
+        || !ask.request.starts_with(bitsov_app::sponsor::REQUEST_LINK_PREFIX)
+    {
+        return Err(ActionError::node("/sponsor/request: the answer does not match this offer"));
+    }
+    Ok(ask)
+}
+
+/// `POST /sponsor/request` — ask for the offered starter bitcoin into one
+/// invoice to this node's own wallet (funding-only at the node). Shown to the
+/// inviter in person; nothing is sent anywhere.
+#[tauri::command(rename_all = "snake_case")]
+async fn sponsor_request(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    text: String,
+) -> Result<bitsov_app::sponsor::FundingAsk, ActionError> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    do_sponsor_request(state.inner(), &text).await
+}
+
+/// `GET /sponsor/request/:hash` — has the starter bitcoin arrived?
+#[tauri::command(rename_all = "snake_case")]
+async fn sponsor_request_status(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    payment_hash: String,
+) -> Result<bitsov_app::sponsor::FundingStatus, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    if payment_hash.len() != 64 || !payment_hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("Unknown request.".into());
+    }
+    get_json(state.inner(), &format!("/sponsor/request/{payment_hash}")).await
+}
+
 /// Does `/status` list `capability`? Unreadable counts as no.
 async fn node_offers(state: &NodeState, capability: &str) -> bool {
     match get_json::<serde_json::Value>(state, "/status").await {
@@ -3162,6 +3494,17 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             messages_list,
             price_quote,
             first_contact_quote,
+            introduction_mine,
+            introduction_read,
+            introduction_open,
+            sponsor_status,
+            sponsor_offer,
+            sponsor_candidate,
+            sponsor_owner_approval,
+            sponsor_reconcile,
+            sponsor_cancel,
+            sponsor_request,
+            sponsor_request_status,
             first_contact_request,
             first_contact_status,
             first_contact_cancel,
@@ -4729,6 +5072,311 @@ mod control_act_tests {
         assert!(first_contact_then_compose(&node).is_none());
     }
 
+    /// A fresh card for key `[0x42; 32]`, signed now.
+    fn intro_card(endpoint: &str, issued_at: u64) -> bitsov_app::introduction::Card {
+        use ed25519_dalek::Signer;
+        let key = ed25519_dalek::SigningKey::from_bytes(&[0x42; 32]);
+        let mut card = bitsov_app::introduction::Card {
+            v: 1,
+            network: "regtest".into(),
+            node_id: hex::encode(key.verifying_key().to_bytes()),
+            endpoint: endpoint.into(),
+            reach: bitsov_app::introduction::Reach::Local,
+            admission_msat: 100_000,
+            message_msat: 10_000,
+            price_epoch: 0,
+            issued_at,
+            expires_at: issued_at + 600,
+            intro_id: "ab".repeat(16),
+            sig: String::new(),
+        };
+        card.sig = hex::encode(key.sign(&card.signing_digest().unwrap()).to_bytes());
+        card
+    }
+
+    fn intro_routes(open: (u16, serde_json::Value)) -> Routes {
+        Arc::new(move |m, p, b| match p {
+            "/status" => (200, serde_json::json!({"node_id": OWN, "api_capabilities": ["paid_send_caps_v1", "introduction_v1"]}).to_string()),
+            "/introduction/open" => (open.0, open.1.to_string()),
+            _ => happy()(m, p, b),
+        })
+    }
+
+    #[tokio::test]
+    async fn introduction_open_verifies_locally_then_only_asks_the_node_to_dial() {
+        let card = intro_card("127.0.0.1:9735", now_unix() as u64);
+        let link = card.to_link().unwrap();
+        let node = fake(AuthMode::Local, intro_routes((200, serde_json::json!({"node_id": card.node_id, "dialed": "127.0.0.1:9735", "connected": true}))));
+        let door = open_introduction(&node.state, &format!("  {link}\n"), true).await.unwrap();
+        assert_eq!((door.node_id.as_str(), door.admission_msat, door.message_msat), (card.node_id.as_str(), 100_000, 10_000));
+        // One POST, the canonical link, and nothing else: no quote, no grant, no compose, no peer add.
+        assert_eq!(node.posts(), vec![("/introduction/open".to_string(), serde_json::json!({"card": link, "allow_local": true}))]);
+        assert!(node.targets().iter().all(|t| t == "GET /status" || t == "POST /introduction/open"), "{:?}", node.targets());
+    }
+
+    #[tokio::test]
+    async fn introduction_open_refuses_bad_cards_before_any_request() {
+        let now = now_unix() as u64;
+        let node = fake(AuthMode::Local, intro_routes((200, serde_json::json!({}))));
+        let mut tampered = intro_card("127.0.0.1:9735", now);
+        tampered.admission_msat = 1;
+        let tampered = serde_json::to_string(&tampered).unwrap();
+        let expired = intro_card("127.0.0.1:9735", now - 601).to_link().unwrap();
+        for bad in [tampered.as_str(), expired.as_str(), "bitsov://introduce#garbage", "https://x.example/#AQ", ""] {
+            assert!(open_introduction(&node.state, bad, true).await.is_err(), "{bad}");
+        }
+        assert!(node.targets().is_empty(), "nothing reached the node: {:?}", node.targets());
+    }
+
+    #[tokio::test]
+    async fn introduction_open_reports_closed_mesh_and_wrong_peer() {
+        let card = intro_card("127.0.0.1:9735", now_unix() as u64);
+        let link = card.to_link().unwrap();
+        let node = fake(AuthMode::Local, intro_routes((409, serde_json::json!({"error": "introduction_closed_mesh: this node dials only peers its owner added", "code": 409}))));
+        assert!(open_introduction(&node.state, &link, true).await.unwrap_err().contains("does not add one"));
+        let node = fake(AuthMode::Local, intro_routes((200, serde_json::json!({"node_id": OWN, "connected": true}))));
+        assert!(open_introduction(&node.state, &link, true).await.unwrap_err().contains("someone else"));
+        let node = fake(AuthMode::Local, happy());
+        assert!(open_introduction(&node.state, &link, true).await.unwrap_err().contains("cannot open"));
+        assert!(node.posts().is_empty(), "no capability: no dial");
+    }
+
+    #[tokio::test]
+    async fn introduction_open_refuses_a_dial_outside_the_cards_reach() {
+        // A local card: the node must still never report a link-local,
+        // metadata or missing address, and a public card never a private one.
+        let local = intro_card("127.0.0.1:9735", now_unix() as u64);
+        for dialed in [serde_json::json!("169.254.169.254:80"), serde_json::json!("[fe80::1]:9735"), serde_json::json!("not an address"), serde_json::Value::Null] {
+            let node = fake(AuthMode::Local, intro_routes((200, serde_json::json!({"node_id": local.node_id, "dialed": dialed, "connected": true}))));
+            assert!(open_introduction(&node.state, &local.to_link().unwrap(), true).await.unwrap_err().contains("does not allow"), "{dialed}");
+        }
+        let mut public = intro_card("node.example.org:9735", now_unix() as u64);
+        public.reach = bitsov_app::introduction::Reach::Public;
+        {
+            use ed25519_dalek::Signer;
+            let key = ed25519_dalek::SigningKey::from_bytes(&[0x42; 32]);
+            public.sig = hex::encode(key.sign(&public.signing_digest().unwrap()).to_bytes());
+        }
+        let node = fake(AuthMode::Local, intro_routes((200, serde_json::json!({"node_id": public.node_id, "dialed": "10.0.0.7:9735", "connected": true}))));
+        assert!(open_introduction(&node.state, &public.to_link().unwrap(), false).await.unwrap_err().contains("does not allow"));
+        let node = fake(AuthMode::Local, intro_routes((200, serde_json::json!({"node_id": public.node_id, "dialed": "203.0.114.9:9735", "connected": true}))));
+        assert!(open_introduction(&node.state, &public.to_link().unwrap(), false).await.is_ok());
+    }
+
+    /// Genome #89 `020b05e`: a local card needs the owner's explicit OK. The
+    /// app refuses without it before any request, and never sends the OK for
+    /// a public card, even when asked to.
+    #[tokio::test]
+    async fn introduction_open_sends_local_consent_only_when_given_for_a_local_card() {
+        let local = intro_card("127.0.0.1:9735", now_unix() as u64);
+        let node = fake(AuthMode::Local, intro_routes((200, serde_json::json!({"node_id": local.node_id, "dialed": "127.0.0.1:9735", "connected": true}))));
+        assert!(open_introduction(&node.state, &local.to_link().unwrap(), false).await.unwrap_err().contains("Allow it on the card"));
+        assert!(node.targets().is_empty(), "no consent: nothing reached the node");
+        open_introduction(&node.state, &local.to_link().unwrap(), true).await.unwrap();
+        assert_eq!(node.posts().last().unwrap().1["allow_local"], true);
+
+        let mut public = intro_card("node.example.org:9735", now_unix() as u64);
+        public.reach = bitsov_app::introduction::Reach::Public;
+        {
+            use ed25519_dalek::Signer;
+            let key = ed25519_dalek::SigningKey::from_bytes(&[0x42; 32]);
+            public.sig = hex::encode(key.sign(&public.signing_digest().unwrap()).to_bytes());
+        }
+        let node = fake(AuthMode::Local, intro_routes((200, serde_json::json!({"node_id": public.node_id, "dialed": "203.0.114.9:9735", "connected": true}))));
+        open_introduction(&node.state, &public.to_link().unwrap(), true).await.unwrap();
+        assert_eq!(node.posts().last().unwrap().1["allow_local"], false, "a public card never carries local consent");
+    }
+
+    #[tokio::test]
+    async fn introduction_open_refuses_a_weak_key_forgery_before_any_request() {
+        let mut forged = intro_card("127.0.0.1:9735", now_unix() as u64);
+        let mut identity = [0u8; 32];
+        identity[0] = 1;
+        let mut sig = [0u8; 64];
+        sig[0] = 1;
+        forged.node_id = hex::encode(identity);
+        forged.sig = hex::encode(sig);
+        let node = fake(AuthMode::Local, intro_routes((200, serde_json::json!({"node_id": forged.node_id, "dialed": "127.0.0.1:9735", "connected": true}))));
+        assert!(open_introduction(&node.state, &forged.to_link().unwrap(), true).await.unwrap_err().contains("weak"));
+        assert!(node.targets().is_empty(), "nothing reached the node: {:?}", node.targets());
+    }
+
+    /// A card for key `[0x42; 32]` with its signed starter-bitcoin offer.
+    fn offered(gift_msat: u64) -> (bitsov_app::introduction::Card, String) {
+        use ed25519_dalek::Signer;
+        let card = intro_card("127.0.0.1:9735", now_unix() as u64);
+        let key = ed25519_dalek::SigningKey::from_bytes(&[0x42; 32]);
+        let mut offer = bitsov_app::sponsor::Offer {
+            network: "regtest".into(),
+            intro_id: hex::decode(&card.intro_id).unwrap().try_into().unwrap(),
+            sponsor: key.verifying_key().to_bytes(),
+            gift_msat,
+            expires_at: card.expires_at,
+            sig: [0; 64],
+        };
+        offer.sig = key.sign(&offer.signing_digest()).to_bytes();
+        let link = format!("{}.{}", card.to_link().unwrap(), offer.encode());
+        (card, link)
+    }
+
+    fn sponsor_routes(extra: Routes) -> Routes {
+        Arc::new(move |m, p, b| match p {
+            "/status" => (200, serde_json::json!({"node_id": OWN, "api_capabilities": ["paid_send_caps_v1", "introduction_v1", "sponsor_kit_v1"]}).to_string()),
+            _ => extra(m, p, b),
+        })
+    }
+
+    #[tokio::test]
+    async fn a_card_with_starter_bitcoin_reads_as_a_door_with_the_gift() {
+        let (card, link) = offered(20_000_000);
+        let (read, offer) = bitsov_app::sponsor::read(&link, now_unix() as u64).unwrap();
+        let door = bitsov_app::sponsor::door(&read, offer.as_ref()).unwrap();
+        assert_eq!(door.node_id, card.node_id);
+        assert_eq!(door.starter.as_ref().map(|s| s.gift_msat), Some(20_000_000));
+        assert_eq!(door.offer_link.as_deref(), Some(link.as_str()));
+        // Opening the card with its offer attached dials the card only.
+        let node = fake(AuthMode::Local, intro_routes((200, serde_json::json!({"node_id": card.node_id, "dialed": "127.0.0.1:9735", "connected": true}))));
+        open_introduction(&node.state, &link, true).await.unwrap();
+        assert_eq!(node.posts().last().unwrap().1["card"], card.to_link().unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_funding_request_forwards_the_offer_and_checks_the_answer() {
+        let (card, link) = offered(20_000_000);
+        let answer = |sponsor: &str, amount: u64| serde_json::json!({
+            "request": "bitsov://sponsor-request#AQ", "code": "123456", "sponsor": sponsor,
+            "amount_msat": amount, "payment_hash": "ab".repeat(32), "expires_at": now_unix() + 300 });
+        let good = answer(&card.node_id, 20_000_000);
+        let node = fake(AuthMode::Local, sponsor_routes(Arc::new(move |m, p, b| match p {
+            "/sponsor/request" => (200, good.to_string()),
+            _ => happy()(m, p, b),
+        })));
+        let ask = do_sponsor_request(&node.state, &link).await.unwrap();
+        assert_eq!(ask.code, "123456");
+        assert_eq!(node.posts(), vec![("/sponsor/request".to_string(), serde_json::json!({"link": link}))]);
+        // A node answering for another sponsor or amount is refused.
+        for bad in [answer(OWN, 20_000_000), answer(&card.node_id, 19_999_999)] {
+            let node = fake(AuthMode::Local, sponsor_routes(Arc::new(move |m, p, b| match p {
+                "/sponsor/request" => (200, bad.to_string()),
+                _ => happy()(m, p, b),
+            })));
+            assert!(do_sponsor_request(&node.state, &link).await.unwrap_err().message.contains("does not match"));
+        }
+        // No offer on the card: refused before any request.
+        let node = fake(AuthMode::Local, sponsor_routes(happy()));
+        assert!(do_sponsor_request(&node.state, &card.to_link().unwrap()).await.is_err());
+        assert!(node.targets().is_empty());
+    }
+
+    fn gift_candidate() -> bitsov_app::sponsor::Candidate {
+        serde_json::from_value(serde_json::json!({
+            "intro_id": "ab".repeat(16), "newcomer": A, "payment_hash": "cd".repeat(32),
+            "gift_msat": 20_000_000, "fee_max_msat": 100_000, "code": "123456", "expires_at": now_unix() + 500,
+        })).unwrap()
+    }
+
+    #[tokio::test]
+    async fn paired_gift_approval_never_posts_to_the_owner_route() {
+        let (node, _dir) = paired_fake(sponsor_routes(happy()));
+        let c = gift_candidate();
+        let view = do_sponsor_owner_approval(&node.state, &c, "123456").unwrap();
+        assert!(view.owner_command.contains("BITSOV_OWNER_TOKEN"));
+        assert!(!view.owner_command.contains("tok.1"));
+        assert!(node.targets().is_empty(), "preparing the command makes no request, even with the spend window closed");
+        // An open delegated spend window still grants no per-gift authority.
+        node.state.spend.lock().unwrap().arm(now_ms(), act::SpendBasis::NodeGrant);
+        if let AuthMode::Paired(session) = &mut *node.state.auth.lock().unwrap() {
+            session.scopes.push("spend".into());
+        }
+        do_sponsor_owner_approval(&node.state, &c, "123456").unwrap();
+        assert!(node.targets().is_empty());
+    }
+
+    #[tokio::test]
+    async fn gift_owner_command_carries_exact_frozen_tuple_then_reads_funded_status() {
+        let c = gift_candidate();
+        let frozen = serde_json::to_value(&c).unwrap();
+        let routes = sponsor_routes(Arc::new(move |m, p, b| match p {
+            "/sponsor" => (200, serde_json::json!({"enabled": true, "gift_msat": 20_000_000,
+                "fee_msat": 100_000, "purse_msat": 100_000_000, "purse_used_msat": 20_000_000,
+                "kits_per_day": 2, "kits_today": 1, "kits": [{"intro_id": "ab".repeat(16),
+                "state": "funded", "candidate": frozen, "paid_msat": 20_000_000, "fee_paid_msat": 0}]}).to_string()),
+            "/sponsor/approve" => panic!("the app must never approve"),
+            _ => happy()(m, p, b),
+        }));
+        let (node, _dir) = paired_fake(routes);
+        let view = do_sponsor_owner_approval(&node.state, &c, "123456").unwrap();
+        let body = view.owner_command.split("--data '").nth(1).unwrap().split('\'').next().unwrap();
+        let request: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(request, serde_json::json!({"intro_id": "ab".repeat(16), "newcomer": A,
+            "payment_hash": "cd".repeat(32), "gift_msat": 20_000_000, "fee_max_msat": 100_000, "code": "123456"}));
+        assert!(view.owner_command.contains(&format!("'{}/sponsor/approve'", node.state.api_base)));
+        let status = read_sponsor_status(&node.state).await.unwrap();
+        assert_eq!(status.kits[0]["state"], "funded");
+        assert!(node.posts().is_empty());
+        assert!(do_sponsor_owner_approval(&node.state, &c, "654321").is_err());
+        let mut expired = c.clone();
+        expired.expires_at = 0;
+        assert!(do_sponsor_owner_approval(&node.state, &expired, "123456").is_err());
+        let mut malformed = c.clone();
+        malformed.payment_hash = "not a hash".into();
+        assert!(do_sponsor_owner_approval(&node.state, &malformed, "123456").is_err());
+        with_book(&node.state, true, |b| { b.paused = true; Ok(()) }).unwrap();
+        assert_eq!(do_sponsor_owner_approval(&node.state, &c, "123456").unwrap_err().code, "budget_paused");
+    }
+
+    #[tokio::test]
+    async fn sponsor_reconcile_uses_read_authority_without_approval_or_a_spend_window() {
+        let (node, _dir) = paired_fake(sponsor_routes(Arc::new(|m, p, b| {
+            if p.ends_with("/reconcile") { (200, "{}".into()) } else { happy()(m, p, b) }
+        })));
+        with_book(&node.state, true, |b| { b.paused = true; Ok(()) }).unwrap();
+        assert!(do_sponsor_reconcile(&node.state, "../approve").await.is_err());
+        do_sponsor_reconcile(&node.state, &"ab".repeat(16)).await.unwrap();
+        assert_eq!(node.posts(), vec![(format!("/sponsor/kits/{}/reconcile", "ab".repeat(16)), serde_json::json!({}))]);
+        assert_eq!(node.seen.lock().unwrap()[0].2.as_deref(), Some("tok.1"));
+    }
+
+    #[test]
+    fn sponsor_owner_conflict_has_a_dedicated_reason() {
+        let err = sponsor_error(ActionError::node(api_error("/sponsor/approve", reqwest::StatusCode::CONFLICT,
+            r#"{"error":"sponsor_owner_approval_required","code":409}"#)));
+        assert_eq!(err.code, "sponsor_owner_approval_required");
+    }
+
+    #[tokio::test]
+    async fn the_nodes_refusal_reason_reaches_the_owner() {
+        let routes = sponsor_routes(Arc::new(|m, p, b| match p {
+            "/sponsor/offer" => (409, serde_json::json!({"error": "sponsor_purse_exhausted: 100 of 100 sats used in the last 24 hours", "code": 409}).to_string()),
+            _ => happy()(m, p, b),
+        }));
+        let node = fake(AuthMode::Local, routes);
+        spend_advance(&node.state, true).await.unwrap();
+        assert_eq!(do_sponsor_offer(&node.state).await.unwrap_err().code, "sponsor_purse_exhausted");
+    }
+
+    #[tokio::test]
+    async fn own_introduction_must_be_signed_by_this_node() {
+        let card = intro_card("127.0.0.1:9735", now_unix() as u64);
+        let link = card.to_link().unwrap();
+        let mine = |node_id: String, link: String| -> Routes {
+            let card = card.clone();
+            Arc::new(move |m, p, b| match p {
+                "/status" => (200, serde_json::json!({"node_id": node_id, "api_capabilities": ["introduction_v1"]}).to_string()),
+                "/introduction" => (200, serde_json::json!({"card": card, "link": link}).to_string()),
+                _ => happy()(m, p, b),
+            })
+        };
+        let node = fake(AuthMode::Local, mine(card.node_id.clone(), link.clone()));
+        assert_eq!(read_own_introduction(&node.state).await.unwrap().link, link);
+        let node = fake(AuthMode::Local, mine(OWN.into(), link.clone()));
+        assert!(read_own_introduction(&node.state).await.unwrap_err().contains("not signed by this node"));
+        let node = fake(AuthMode::Local, mine(card.node_id.clone(), format!("{link}A")));
+        assert!(read_own_introduction(&node.state).await.unwrap_err().contains("does not match"));
+        let node = fake(AuthMode::Local, happy());
+        assert!(read_own_introduction(&node.state).await.unwrap_err().contains("cannot sign"));
+    }
+
     #[tokio::test]
     async fn first_contact_quote_reads_the_stranger_quote_only_where_offered() {
         let (node, _dir, g1) = g1_node(&["read", "receive"]);
@@ -5630,6 +6278,17 @@ mod assistant_acl_tests {
                 "messages_list",
                 "price_quote",
                 "first_contact_quote",
+                "introduction_mine",
+                "introduction_read",
+                "introduction_open",
+                "sponsor_status",
+                "sponsor_offer",
+                "sponsor_candidate",
+                "sponsor_owner_approval",
+                "sponsor_reconcile",
+                "sponsor_cancel",
+                "sponsor_request",
+                "sponsor_request_status",
                 "first_contact_request",
                 "first_contact_status",
                 "first_contact_cancel",

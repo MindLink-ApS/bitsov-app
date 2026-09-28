@@ -49,6 +49,13 @@ import {
 import type {
   OwnerContactApproval,
   FirstContactQuote,
+  FundingAsk,
+  FundingStatus,
+  Introduction,
+  SponsorKit,
+  SponsorOwnerApproval,
+  SponsorCandidate,
+  SponsorStatus,
   ActionError,
   Artifact,
   BudgetPreset,
@@ -150,6 +157,14 @@ export function ControlCenter(props: Props) {
   const [artifacts, setArtifacts] = createStore<Record<string, Artifact[]>>({});
   const [errors, setErrors] = createStore<Record<string, string | undefined>>({});
   const [contextOpen, setContextOpen] = createSignal(false);
+  /** K1: cards the owner continued from, by node id. Display only, never admission. */
+  const [introduced, setIntroduced] = createStore<Record<string, Introduction>>({});
+  /** An introduction that finished while the owner was elsewhere: shown, never navigated to. */
+  const [introNotice, setIntroNotice] = createSignal<Introduction | null>(null);
+  const openIntroduced = (card: Introduction) => {
+    setIntroNotice(null);
+    setTrack({ kind: 'peer', id: card.node_id.toLowerCase() });
+  };
   const [tab, setTab] = createSignal<'body' | 'node' | 'wallet' | 'budget'>('body');
   // Organism view (O1): readings the organs are drawn from, each with its age.
   const [openedAt, setOpenedAt] = createSignal(Date.now());
@@ -568,6 +583,19 @@ export function ControlCenter(props: Props) {
 
       <Show when={props.active} fallback={<section class="track">{props.firstRun}</section>}>
         <section class="track" aria-label="Track">
+          <Show when={introNotice()}>
+            {(n) => (
+              <p class="ok-note intro-notice" data-intro-notice={n().node_id} role="status">
+                Connected to {shortId(n().node_id)} from their introduction. Nothing was paid.{' '}
+                <button type="button" class="link" data-intro-notice-open onClick={() => openIntroduced(n())}>
+                  Open conversation
+                </button>{' '}
+                <button type="button" class="link" onClick={() => setIntroNotice(null)}>
+                  Dismiss
+                </button>
+              </p>
+            )}
+          </Show>
           <Show when={track()} fallback={<div class="empty-track"><h2>No tracks yet</h2><p class="hint">Peers and rooms your node knows appear on the left.</p></div>}>
             {(t) => (
               <Switch>
@@ -591,6 +619,13 @@ export function ControlCenter(props: Props) {
                     actions={actions}
                     spendError={errors.spend}
                     onContext={() => setContextOpen(true)}
+                    onIntroduced={(card, follow) => {
+                      setIntroduced(card.node_id.toLowerCase(), card);
+                      // The originating form decides whether its instance and
+                      // state still match the Continue that started this work.
+                      if (follow && untrack(track)?.kind === 'new') openIntroduced(card);
+                      else setIntroNotice(card);
+                    }}
                   />
                 </Match>
                 <Match when={t().kind === 'peer' || t().kind === 'room'}>
@@ -598,6 +633,7 @@ export function ControlCenter(props: Props) {
                     track={t()}
                     name={trackName(t())}
                     peer={t().kind === 'peer' ? peerById().get((t() as { id: string }).id) : undefined}
+                    introduced={t().kind === 'peer' ? introduced[(t() as { id: string }).id] : undefined}
                     members={t().kind === 'room' ? members[(t() as { id: string }).id] ?? null : null}
                     messages={threads.t[trackKey(t())] ?? []}
                     artifacts={artifacts[trackKey(t())] ?? []}
@@ -830,6 +866,8 @@ function Conversation(props: {
   track: TrackRef;
   name: string;
   peer: Peer | undefined;
+  /** K1: the verified card this conversation was opened from, if any. */
+  introduced?: Introduction;
   members: string[] | null;
   messages: Message[];
   artifacts: Artifact[];
@@ -884,6 +922,15 @@ function Conversation(props: {
     <>
       <TrackHead title={props.name} sub={sub()} onContext={props.onContext} />
       <div class="stream" ref={stream} data-stream>
+        <Show when={props.introduced}>
+          {(c) => (
+            <p class="day" data-introduced={c().node_id}>
+              Opened from {props.name}’s signed introduction. Their card said: first contact {sats(c().admission_msat)} sats, each
+              message {sats(c().message_msat)} sats. You confirm their node’s own quote before anything is paid, and every
+              message pays.
+            </p>
+          )}
+        </Show>
         <Show when={props.track.kind === 'room'}>
           <p class="day">Members added here are not notified yet. A room message pays each member their own price, separately.</p>
         </Show>
@@ -2111,14 +2158,291 @@ function NewTrack(props: {
   actions: Actions;
   spendError: string | undefined;
   onContext: () => void;
+  /** Continue succeeded; follow only while the originating form is unchanged. */
+  onIntroduced: (card: Introduction, follow: boolean) => void;
 }) {
+  let active = true;
+  let formRevision = 0;
+  onCleanup(() => { active = false; });
+  const editForm = () => { formRevision += 1; };
+  // K1: your own signed introduction. Without one (older node, no dialable
+  // endpoint) the plain node id is shown as before.
+  const [mine, setMine] = createSignal<Introduction | null>(null);
+  const [mineErr, setMineErr] = createSignal<string | null>(null);
+  const loadMine = () => {
+    setMineErr(null);
+    props.source.introductionMine().then(setMine, (e) => {
+      setMine(null);
+      setMineErr(asActionError(e).message);
+    });
+  };
+  loadMine();
+  const nowSecs = () => Math.floor(props.now / 1000);
+  const mineLive = () => {
+    const m = mine();
+    return m && m.expires_at > nowSecs() ? m : null;
+  };
   const qr = createMemo(() => {
+    const text = mineLive()?.offer_link ?? mineLive()?.link ?? props.ownId;
     try {
-      return props.ownId ? qrSvg(props.ownId) : null;
+      return text ? qrSvg(text) : null;
     } catch {
       return null;
     }
   });
+  const minutesLeft = (until: number) => Math.max(1, Math.ceil((until - nowSecs()) / 60));
+
+  // K1: a scanned or pasted introduction. Reading it is local; Continue asks
+  // the node to dial, and the conversation's door card does the rest.
+  const [pasted, setPasted] = createSignal('');
+  const [card, setCard] = createSignal<Introduction | null>(null);
+  const [cardErr, setCardErr] = createSignal<string | null>(null);
+  const [opening, setOpening] = createSignal(false);
+  // The canonical link includes the signed payload and signature. Keep the
+  // displayed key/address with it so consent can never migrate to another card.
+  const [localConsent, setLocalConsent] = createSignal<Pick<Introduction, 'node_id' | 'endpoint' | 'link'> | null>(null);
+  const allowLocal = (c: Introduction) => {
+    const consent = localConsent();
+    return consent !== null && consent.node_id === c.node_id && consent.endpoint === c.endpoint && consent.link === c.link;
+  };
+  let readRevision = 0;
+  const cardLive = () => {
+    const c = card();
+    return c && c.expires_at > nowSecs() ? c : null;
+  };
+  const readCard = () => {
+    const revision = ++readRevision;
+    setCard(null);
+    setLocalConsent(null);
+    setAsk(null);
+    setArrived(null);
+    setAskErr(null);
+    setCardErr(null);
+    const text = pasted();
+    props.source.introductionRead(text).then(
+      (c) => {
+        if (!active) return;
+        // Even a stale completion invalidates consent, but it must not replace
+        // the current card (including an input edited away and then restored).
+        setLocalConsent(null);
+        if (revision === readRevision) setCard(c);
+      },
+      (e) => {
+        if (!active) return;
+        setLocalConsent(null);
+        if (revision === readRevision) setCardErr(asActionError(e).message);
+      },
+    );
+  };
+  // K1 slice 2, sponsor side: starter bitcoin in your introduction, and the
+  // review of a newcomer's request. Offer/review use the spend window; each
+  // gift needs an independent owner command at the node.
+  const [sponsor, setSponsor] = createSignal<SponsorStatus | null>(null);
+  props.source.sponsorStatus().then(setSponsor, () => setSponsor(null));
+  const [kitErr, setKitErr] = createSignal<string | null>(null);
+  const [ownerRequired, setOwnerRequired] = createSignal(false);
+  const ownerStep = async (step: () => Promise<void>, fail: (m: string) => void) => {
+    fail('');
+    if (!open()) {
+      await props.actions.approve();
+      return;
+    }
+    try {
+      await step();
+    } catch (e) {
+      const err = asActionError(e);
+      if (err.code === 'sponsor_owner_approval_required') setOwnerRequired(true);
+      else {
+        fail(err.message);
+        if (needsApproval(err)) await props.actions.approve();
+      }
+    }
+  };
+  const includeStarter = () =>
+    ownerStep(async () => {
+      setMine(await props.source.sponsorOffer());
+    }, setKitErr);
+  const [request, setRequest] = createSignal('');
+  const [cand, setCand] = createSignal<SponsorCandidate | null>(null);
+  const [theirCode, setTheirCode] = createSignal('');
+  const [gift, setGift] = createSignal<SponsorKit | null>(null);
+  const [ownerWait, setOwnerWait] = createSignal<SponsorOwnerApproval | null>(null);
+  const [candErr, setCandErr] = createSignal<string | null>(null);
+  const [giving, setGiving] = createSignal(false);
+  const [cancelling, setCancelling] = createSignal(false);
+  const [cancelUnconfirmed, setCancelUnconfirmed] = createSignal(false);
+  const giftPending = () => gift()?.state === 'paying' || gift()?.state === 'unknown';
+  const requestLocked = () => giving() || !!ownerWait() || !!gift() || cancelUnconfirmed();
+  let giftRevision = 0;
+  let giftPoll: ReturnType<typeof setTimeout> | undefined;
+  const stopGiftWait = () => {
+    giftRevision += 1;
+    clearTimeout(giftPoll);
+    setOwnerWait(null);
+    setOwnerRequired(false);
+    setGiving(false);
+  };
+  onCleanup(() => { giftRevision += 1; clearTimeout(giftPoll); });
+  const reviewRequest = () => {
+    if (requestLocked()) return;
+    stopGiftWait();
+    const revision = giftRevision;
+    setCand(null);
+    setGift(null);
+    setTheirCode('');
+    return ownerStep(async () => {
+      const c = await props.source.sponsorCandidate(request());
+      if (active && revision === giftRevision) setCand(c);
+    }, (message) => { if (active && revision === giftRevision) setCandErr(message); });
+  };
+  const pollGift = (c: SponsorCandidate, revision: number) => {
+    const current = () => active && revision === giftRevision;
+    const check = async () => {
+      try {
+        const status = await props.source.sponsorStatus();
+        if (!current()) return;
+        setSponsor(status);
+        const kit = status.kits?.find((k) => k.intro_id === c.intro_id);
+        if (kit) {
+          if (kit.candidate?.newcomer !== c.newcomer || kit.candidate?.payment_hash !== c.payment_hash ||
+              kit.candidate?.code !== c.code || kit.gift_msat !== c.gift_msat || kit.fee_msat !== c.fee_max_msat) {
+            stopGiftWait();
+            setCandErr('The node status differs from the reviewed gift. Review the request again.');
+            return;
+          }
+          if (kit.state !== 'candidate' && kit.state !== 'offered') {
+            setGift(kit);
+            setOwnerWait(null);
+            setOwnerRequired(false);
+            if (kit.state !== 'paying' && kit.state !== 'unknown') return;
+            await props.source.sponsorReconcile(c.intro_id);
+            if (!current()) return;
+          }
+        }
+      } catch (e) {
+        if (!current()) return;
+        const err = asActionError(e);
+        if (err.code === 'sponsor_owner_approval_required') setOwnerRequired(true);
+        else setCandErr(err.message);
+      }
+      if (current()) giftPoll = setTimeout(() => void check(), 3000);
+    };
+    void check();
+  };
+  const prepareGift = async () => {
+    const c = cand();
+    if (!c || requestLocked() || theirCode().length !== 6) return;
+    const revision = ++giftRevision;
+    const current = () => active && revision === giftRevision;
+    setGiving(true);
+    setCandErr(null);
+    try {
+      const approval = await props.source.sponsorOwnerApproval(c, theirCode());
+      if (!current()) return;
+      setOwnerWait(approval);
+      setOwnerRequired(true);
+      pollGift(c, revision);
+    } catch (e) {
+      if (!current()) return;
+      const err = asActionError(e);
+      if (err.code === 'sponsor_owner_approval_required') setOwnerRequired(true);
+      else setCandErr(err.message);
+    } finally {
+      if (current()) setGiving(false);
+    }
+  };
+  const cancelKit = async () => {
+    const c = cand();
+    if (!c || giving() || cancelling() || giftPending()) return;
+    // Polling may invalidate its revision on a tuple mismatch while the
+    // node still owes this candidate a cancellation response.
+    const current = () => active && cand() === c;
+    setCancelling(true);
+    setCancelUnconfirmed(true);
+    setCandErr(null);
+    try {
+      await props.source.sponsorCancel(c.intro_id);
+      if (!current()) return;
+      // Only the node's successful withdrawal releases the reviewed request.
+      stopGiftWait();
+      setCand(null);
+      setGift(null);
+      setTheirCode('');
+      setCancelUnconfirmed(false);
+    } catch (e) {
+      if (!current()) return;
+      setCandErr(asActionError(e).message);
+      // A refusal or lost response may race with dispatch. Keep all visible
+      // state and restart reads, including cancellation before owner-wait began.
+      clearTimeout(giftPoll);
+      pollGift(c, ++giftRevision);
+    } finally {
+      if (active) setCancelling(false);
+    }
+  };
+
+  // K1 slice 2, newcomer side: ask for the offered starter bitcoin. Nothing
+  // is sent: the request is shown to the inviter in person.
+  const [ask, setAsk] = createSignal<FundingAsk | null>(null);
+  const [arrived, setArrived] = createSignal<FundingStatus | null>(null);
+  const [askErr, setAskErr] = createSignal<string | null>(null);
+  const askQr = createMemo(() => {
+    const a = ask();
+    try {
+      return a ? qrSvg(a.request) : null;
+    } catch {
+      return null;
+    }
+  });
+  let poll: ReturnType<typeof setInterval> | undefined;
+  onCleanup(() => poll && clearInterval(poll));
+  const requestStarter = () => {
+    const c = card();
+    if (!c?.offer_link) return;
+    setAskErr(null);
+    props.source.sponsorRequest(c.offer_link).then(
+      (a) => {
+        setAsk(a);
+        setArrived(null);
+        if (poll) clearInterval(poll);
+        const check = () =>
+          props.source.sponsorRequestStatus(a.payment_hash).then((st) => {
+            if (st.state === 'received') {
+              setArrived(st);
+              if (poll) clearInterval(poll);
+            }
+          }, () => undefined);
+        poll = setInterval(check, 3000);
+        void check();
+      },
+      (e) => setAskErr(asActionError(e).message),
+    );
+  };
+
+  const continueCard = () => {
+    const c = cardLive();
+    if (!c || opening() || (c.reach === 'local' && !allowLocal(c))) return;
+    const startedRevision = formRevision;
+    const unchanged = () => active && formRevision === startedRevision;
+    setOpening(true);
+    setCardErr(null);
+    props.source.introductionOpen(c.link, c.reach === 'local' && allowLocal(c)).then(
+      (opened) => {
+        const follow = unchanged();
+        if (active) setOpening(false);
+        if (follow) {
+          setLocalConsent(null);
+          setCard(null);
+          setPasted('');
+        }
+        props.onIntroduced(opened, follow);
+      },
+      (e) => {
+        if (active) setOpening(false);
+        if (unchanged()) setCardErr(asActionError(e).message);
+      },
+    );
+  };
   const open = () => spendLine(props.spend, props.now).open;
   const [invitee, setInvitee] = createSignal('');
   const [addr, setAddr] = createSignal('');
@@ -2152,22 +2476,313 @@ function NewTrack(props: {
       <TrackHead title="Start something" onContext={props.onContext} />
       <SpendBar spend={props.spend} error={props.spendError} now={props.now} actions={props.actions} />
       <div class="stream">
-        <div class="empty-track" data-new-track>
-          <h2>Share your node id</h2>
-          <p class="hint">
-            Anyone who knows it can offer to pay you to talk. Knowing an id is an introduction, not admission: each
-            message is admitted only when its payment settles.
-          </p>
-          <Show when={qr()}>
-            <svg class="qr" viewBox={`0 0 ${qr()!.extent} ${qr()!.extent}`} shape-rendering="crispEdges" role="img" aria-label="Your node id as a QR code">
-              <rect width={qr()!.extent} height={qr()!.extent} fill="#ffffff" />
-              <path d={qr()!.path} fill="#000000" />
-            </svg>
-          </Show>
-          <code class="address">{props.ownId}</code>
-        </div>
+        <Show
+          when={mineLive()}
+          fallback={
+            <div class="empty-track" data-new-track>
+              <h2>Share your node id</h2>
+              <p class="hint">
+                Anyone who knows it can offer to pay you to talk. Knowing an id is an introduction, not admission: each
+                message is admitted only when its payment settles.
+              </p>
+              <Show when={qr()}>
+                <svg class="qr" viewBox={`0 0 ${qr()!.extent} ${qr()!.extent}`} shape-rendering="crispEdges" role="img" aria-label="Your node id as a QR code">
+                  <rect width={qr()!.extent} height={qr()!.extent} fill="#ffffff" />
+                  <path d={qr()!.path} fill="#000000" />
+                </svg>
+              </Show>
+              <code class="address">{props.ownId}</code>
+              <Show when={mine()}>
+                <p class="hint" data-intro-expired>
+                  Your introduction expired. <button type="button" class="link" onClick={loadMine}>Make a new one</button>
+                </p>
+              </Show>
+              <Show when={mineErr()}>
+                <p class="hint" data-intro-unavailable>{mineErr()}</p>
+              </Show>
+            </div>
+          }
+        >
+          {(m) => (
+            <div class="empty-track" data-new-track data-intro-mine>
+              <h2>Your introduction</h2>
+              <p class="hint">
+                Let someone scan this, or send them the link. It shows your node key, where to reach it and your current
+                prices, signed by your node. It is not admission: whoever uses it pays your price for every message.
+              </p>
+              <Show when={qr()}>
+                <svg class="qr" viewBox={`0 0 ${qr()!.extent} ${qr()!.extent}`} shape-rendering="crispEdges" role="img" aria-label="Your introduction as a QR code">
+                  <rect width={qr()!.extent} height={qr()!.extent} fill="#ffffff" />
+                  <path d={qr()!.path} fill="#000000" />
+                </svg>
+              </Show>
+              <p data-intro-prices>
+                First contact: <strong>{sats(m().admission_msat)} sats</strong>. Each message: <strong>{sats(m().message_msat)} sats</strong>.
+              </p>
+              <p class="hint">
+                Valid for about {minutesLeft(m().expires_at)} min. <button type="button" class="link" onClick={loadMine}>New card</button>
+              </p>
+              <Show
+                when={m().starter}
+                fallback={
+                  <Show when={sponsor()?.enabled}>
+                    <button type="button" class="quiet" data-starter-include onClick={() => void includeStarter()}>
+                      {open() ? `Include starter bitcoin · ${sats(sponsor()!.gift_msat)} sats` : 'Include starter bitcoin · approve first'}
+                    </button>
+                    <p class="hint" data-starter-purse>
+                      You fund it from your own node, only after you approve their request. {sats(sponsor()!.purse_used_msat)} of{' '}
+                      {sats(sponsor()!.purse_msat)} sats used in the last 24 hours.
+                    </p>
+                  </Show>
+                }
+              >
+                {(st) => (
+                  <p data-starter-offered>
+                    Starter bitcoin: up to <strong>{sats(st().gift_msat)} sats</strong>, after you approve their request. It is theirs
+                    once it arrives; every message still pays.
+                  </p>
+                )}
+              </Show>
+              <Show when={kitErr()}>
+                <p class="err-note" data-starter-error>{kitErr()}</p>
+              </Show>
+              <code class="address" data-intro-link>{m().offer_link ?? m().link}</code>
+            </div>
+          )}
+        </Show>
 
-        <div class="new-grid">
+        <div class="new-grid" onInput={editForm} onChange={editForm} onSubmit={editForm}>
+          <Show when={sponsor()?.enabled}>
+            <form
+              class="panel"
+              data-starter-review
+              onSubmit={(e) => {
+                e.preventDefault();
+                void reviewRequest();
+              }}
+            >
+              <h2>Starter bitcoin request</h2>
+              <p class="hint">Paste the request shown on their screen after they scanned your introduction.</p>
+              <textarea
+                data-starter-request-text
+                rows={3}
+                placeholder="bitsov://sponsor-request#…"
+                value={request()}
+                disabled={requestLocked()}
+                onInput={(e) => {
+                  stopGiftWait();
+                  setCand(null);
+                  setTheirCode('');
+                  setRequest(e.currentTarget.value);
+                }}
+                aria-label="Starter bitcoin request"
+              />
+              <button type="submit" class="primary" disabled={!request().trim() || requestLocked()}>
+                {open() ? 'Review request' : 'Approve first'}
+              </button>
+              <Show when={cand()}>
+                {(c) => (
+                  <div class="artifact" data-starter-candidate={c().newcomer}>
+                    <span class="kind">Starter bitcoin · {shortId(c().newcomer)}</span>
+                    <p>
+                      Lightning gift: <strong>{sats(c().gift_msat)} sats</strong>. Network fee: at most {sats(c().fee_max_msat)} sats.
+                    </p>
+                    <span class="hint">
+                      They own it once it arrives and can keep or withdraw it. It is not a pass: their messages still pay.
+                    </span>
+                    <label class="door-allow">
+                      <span>Code on their screen</span>
+                      <input
+                        data-starter-their-code
+                        disabled={requestLocked()}
+                        inputmode="numeric"
+                        maxLength={6}
+                        value={theirCode()}
+                        onInput={(e) => setTheirCode(e.currentTarget.value.replace(/\D/g, '').slice(0, 6))}
+                        aria-label="Code on their screen"
+                      />
+                    </label>
+                    <span class="row" style={{ gap: 'var(--s-2)' }}>
+                      <button
+                        type="button"
+                        class="primary"
+                        data-starter-approve
+                        disabled={requestLocked() || theirCode().length !== 6}
+                        onClick={() => void prepareGift()}
+                      >
+                        {giving() ? 'Preparing…' : `Sponsor up to ${sats(c().gift_msat + c().fee_max_msat)} sats`}
+                      </button>
+                      <button type="button" class="quiet" data-starter-cancel disabled={giving() || cancelling() || giftPending()} onClick={() => void cancelKit()}>
+                        Cancel
+                      </button>
+                    </span>
+                  </div>
+                )}
+              </Show>
+              <Show when={ownerRequired()}>
+                <div class="approval" data-starter-owner-approval="pending">
+                  <p><strong>Approve this gift at your node.</strong> Run this command once in the node terminal, with your independent owner credential in BITSOV_OWNER_TOKEN. The app never receives that credential.</p>
+                  <Show when={ownerWait()} fallback={<p>Review the request and compare the code to prepare the owner command.</p>}>
+                    {(pending) => <>
+                      <textarea readonly aria-label="Owner approval command" data-starter-owner-command value={pending().owner_command} />
+                      <button type="button" class="link" onClick={() => void navigator.clipboard.writeText(pending().owner_command).catch(() => setCandErr('Select and copy the command above.'))}>Copy command</button>
+                      <p class="hint">Waiting for the node to report this gift funded. Cancel asks the node to withdraw the kit before dispatch; tracking continues until withdrawal is confirmed, and it cannot undo a payment already sent.</p>
+                    </>}
+                  </Show>
+                </div>
+              </Show>
+              <Show when={gift()}>
+                {(g) => (
+                  <p class={g().state === 'funded' ? 'ok-note' : 'err-note'} data-starter-gift={g().state}>
+                    {g().state === 'funded'
+                      ? `Sent ${sats(g().paid_msat)} sats. It is theirs now.`
+                      : g().state === 'paying' || g().state === 'unknown'
+                        ? 'Payment pending — do not send again. Your node keeps it reserved until the outcome is known.'
+                        : `Gift ${g().state}. This kit is closed.`}
+                  </p>
+                )}
+              </Show>
+              <Show when={candErr()}>
+                <p class="err-note" data-starter-review-error>{candErr()}</p>
+              </Show>
+            </form>
+          </Show>
+          <form
+            class="panel"
+            data-intro-open
+            onSubmit={(e) => {
+              e.preventDefault();
+              readCard();
+            }}
+          >
+            <h2>Open an introduction</h2>
+            <p class="hint">Paste a bitsov://introduce link someone showed or sent you. Reading it sends nothing.</p>
+            <textarea
+              data-intro-text
+              rows={3}
+              placeholder="bitsov://introduce#…"
+              value={pasted()}
+              onInput={(e) => {
+                readRevision += 1;
+                setLocalConsent(null);
+                setPasted(e.currentTarget.value);
+                setCard(null);
+                setCardErr(null);
+              }}
+              aria-label="Introduction link"
+            />
+            <button type="submit" class="primary" disabled={!pasted().trim() || opening()}>
+              Read card
+            </button>
+            <Show when={card()}>
+              {(c) => (
+                <div class="artifact" data-door-card={c().node_id}>
+                  <span class="kind">Door card · {shortId(c().node_id)}</span>
+                  <span>Signed by the key it names.</span>
+                  <p data-door-prices>
+                    First contact: <strong>{sats(c().admission_msat)} sats</strong>. Each message: <strong>{sats(c().message_msat)} sats</strong>.
+                  </p>
+                  <Show when={c().starter}>
+                    {(st) => (
+                      <div class="door-starter" data-door-starter>
+                        <p>
+                          Starter bitcoin available after they approve: <strong>{sats(st().gift_msat)} sats</strong>.
+                        </p>
+                        <Show
+                          when={ask()}
+                          fallback={
+                            <>
+                              <span class="hint">
+                                Requesting makes one invoice to your own node for exactly this amount and shows it as a QR for
+                                them. Nothing is sent. It is a gift, not a pass: your messages still pay.
+                              </span>
+                              <button type="button" class="quiet" data-door-request-starter onClick={requestStarter}>
+                                Request starter bitcoin
+                              </button>
+                            </>
+                          }
+                        >
+                          {(a) => (
+                            <>
+                              <Show when={askQr()}>
+                                <svg class="qr" viewBox={`0 0 ${askQr()!.extent} ${askQr()!.extent}`} shape-rendering="crispEdges" role="img" aria-label="Your starter-bitcoin request as a QR code">
+                                  <rect width={askQr()!.extent} height={askQr()!.extent} fill="#ffffff" />
+                                  <path d={askQr()!.path} fill="#000000" />
+                                </svg>
+                              </Show>
+                              <p data-starter-code>
+                                Show this to them. Code: <strong>{a().code.slice(0, 3)} {a().code.slice(3)}</strong>. They type it
+                                before approving.
+                              </p>
+                              <p class="hint" data-starter-status={arrived() ? 'received' : 'waiting'}>
+                                {arrived()
+                                  ? `Received ${sats(arrived()!.amount_msat)} sats in your own node.`
+                                  : 'Waiting for starter bitcoin…'}
+                              </p>
+                              <code class="address" data-starter-request>{a().request}</code>
+                            </>
+                          )}
+                        </Show>
+                        <Show when={askErr()}>
+                          <span class="err-note" data-starter-ask-error>{askErr()}</span>
+                        </Show>
+                      </div>
+                    )}
+                  </Show>
+                  <span class="hint">
+                    Prices from their signed card. Before anything is paid, your node asks theirs for a fresh quote and you
+                    confirm the total.
+                  </span>
+                  <Show when={c().reach === 'local'}>
+                    <span class="hint" data-door-local>
+                      Local network address ({c().endpoint}). Continue only if you are on the same network as them.
+                    </span>
+                    <label class="door-allow">
+                      <input
+                        type="checkbox"
+                        data-door-allow-local
+                        checked={allowLocal(c())}
+                        onChange={(e) => setLocalConsent(e.currentTarget.checked
+                          ? { node_id: c().node_id, endpoint: c().endpoint, link: c().link }
+                          : null)}
+                        disabled={opening()}
+                      />
+                      <span>Allow this local address</span>
+                    </label>
+                  </Show>
+                  <details>
+                    <summary>Details</summary>
+                    <code class="address">{c().node_id}</code>
+                    <span class="hint">Address {c().endpoint} · {c().network}</span>
+                  </details>
+                  <Show
+                    when={cardLive()}
+                    fallback={<span class="err-note" data-door-expired>This card has expired. Ask them for a fresh one.</span>}
+                  >
+                    <span class="hint">Continuing connects your node to theirs. It pays nothing and adds no contact.</span>
+                    <span class="row" style={{ gap: 'var(--s-2)' }}>
+                      <button
+                        type="button"
+                        class="primary"
+                        data-door-continue
+                        disabled={opening() || (c().reach === 'local' && !allowLocal(c()))}
+                        onClick={continueCard}
+                      >
+                        {opening() ? 'Connecting…' : 'Continue'}
+                      </button>
+                      <button type="button" class="quiet" onClick={() => { readRevision += 1; setLocalConsent(null); setCard(null); }} disabled={opening()}>
+                        Cancel
+                      </button>
+                    </span>
+                  </Show>
+                </div>
+              )}
+            </Show>
+            <Show when={cardErr()}>
+              <p class="err-note" data-door-error>{cardErr()}</p>
+            </Show>
+          </form>
+
           <form
             class="panel"
             data-invite-create

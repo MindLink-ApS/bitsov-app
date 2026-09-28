@@ -1,4 +1,4 @@
-// Minimal QR encoder — byte mode, error-correction level M, versions 1–20.
+// Minimal QR encoder — byte mode, error-correction level M, versions 1–30.
 //
 // Vendored on purpose. The funding address is the money-critical pixel on the
 // screen, so the code that draws it stays auditable in-tree rather than being a
@@ -6,9 +6,10 @@
 // address is ALWAYS rendered as selectable text beside the QR: the text is
 // authoritative, the QR is a convenience.
 //
-// Versions 1–20 at level M carry up to 666 bytes: any on-chain address, and a
+// Versions 1–30 at level M carry up to 1,370 bytes: any on-chain address, a
 // BOLT11 invoice with a memo (usually 250–600 characters; version 10's 213 bytes
-// silently dropped the invoice QR). Encoding is per ISO/IEC 18004 (Reed–Solomon over GF(256), the eight
+// silently dropped the invoice QR), and a K1 starter-bitcoin request, which
+// wraps a whole invoice (~750 bytes; version 20's 666 dropped it). Encoding is per ISO/IEC 18004 (Reed–Solomon over GF(256), the eight
 // standard masks, standard penalty scoring).
 
 /** [ec codewords per block, group-1 blocks, g1 data cw, group-2 blocks, g2 data cw] — level M. */
@@ -33,6 +34,17 @@ const EC_M: ReadonlyArray<readonly [number, number, number, number, number]> = [
   [26, 9, 43, 4, 44],
   [26, 3, 44, 11, 45],
   [26, 3, 41, 13, 42],
+  // 21–30: a K1 starter-bitcoin request carries a whole BOLT11 invoice (~750+ bytes).
+  [26, 17, 42, 0, 0],
+  [28, 17, 46, 0, 0],
+  [28, 4, 47, 14, 48],
+  [28, 6, 45, 14, 46],
+  [28, 8, 47, 13, 48],
+  [28, 19, 46, 4, 47],
+  [28, 22, 45, 3, 46],
+  [28, 3, 45, 23, 46],
+  [28, 21, 45, 7, 46],
+  [28, 19, 47, 10, 48],
 ];
 
 /** Alignment-pattern centre coordinates per version (1-indexed by version - 1). */
@@ -57,6 +69,16 @@ const ALIGN: ReadonlyArray<readonly number[]> = [
   [6, 30, 56, 82],
   [6, 30, 58, 86],
   [6, 34, 62, 90],
+  [6, 28, 50, 72, 94],
+  [6, 26, 50, 74, 98],
+  [6, 30, 54, 78, 102],
+  [6, 28, 54, 80, 106],
+  [6, 32, 58, 84, 110],
+  [6, 30, 58, 86, 114],
+  [6, 34, 62, 90, 118],
+  [6, 26, 50, 74, 98, 122],
+  [6, 30, 54, 78, 102, 126],
+  [6, 26, 52, 78, 104, 130],
 ];
 
 // ---- GF(256) arithmetic (primitive polynomial 0x11D) ----------------------
@@ -99,7 +121,7 @@ function ecCodewords(data: Uint8Array, ecLen: number): Uint8Array {
   return rem;
 }
 
-/** Smallest version (1–20) whose level-M byte-mode capacity holds `byteLen`. */
+/** Smallest version (1–30) whose level-M byte-mode capacity holds `byteLen`. */
 function pickVersion(byteLen: number): number {
   for (let version = 1; version <= EC_M.length; version++) {
     const [, g1, g1d, g2, g2d] = EC_M[version - 1];
@@ -121,7 +143,7 @@ function encodeCodewords(bytes: Uint8Array, version: number): Uint8Array {
     for (let i = len - 1; i >= 0; i--) bits.push((value >>> i) & 1);
   };
   put(0b0100, 4); // byte mode
-  put(bytes.length, version >= 10 ? 16 : 8); // byte-mode count: 16 bits for versions 10–26
+  put(bytes.length, version >= 10 ? 16 : 8); // byte-mode count: 16 bits from version 10 on
   for (const b of bytes) put(b, 8);
   put(0, Math.min(4, capacityBits - bits.length)); // terminator
   while (bits.length % 8 !== 0) bits.push(0);
@@ -369,7 +391,7 @@ function drawVersion(grid: Grid, version: number): void {
 
 /**
  * Encode `text` (UTF-8, byte mode, level M) into a square matrix of modules.
- * `true` = dark. Throws if the value does not fit in versions 1–20.
+ * `true` = dark. Throws if the value does not fit in versions 1–30.
  */
 export function qrMatrix(text: string): boolean[][] {
   const bytes = new TextEncoder().encode(text);

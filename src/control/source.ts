@@ -9,6 +9,12 @@ import type { NodeStatus, PairingView } from '../onboarding/pairing';
 import type {
   OwnerContactApproval,
   FirstContactQuote,
+  FundingAsk,
+  FundingStatus,
+  Introduction,
+  SponsorOwnerApproval,
+  SponsorCandidate,
+  SponsorStatus,
   AiTopic,
   Disclosure,
   Preset,
@@ -62,6 +68,26 @@ export interface Source {
   priceQuote(peer?: string): Promise<PriceQuote>;
   /** The door card: a stranger's signed quote before a first contact. */
   firstContactQuote(peer: string): Promise<FirstContactQuote>;
+  /** K1: this node's signed introduction for the QR (read). */
+  introductionMine(): Promise<Introduction>;
+  /** K1: verify a scanned or pasted introduction. Local only: nothing is sent. */
+  introductionRead(text: string): Promise<Introduction>;
+  /** K1 Continue: the node dials the introduced node, unprivileged. Pays nothing. */
+  introductionOpen(text: string, allowLocal: boolean): Promise<Introduction>;
+  /** K1 slice 2 (sponsor): whether the owner turned starter bitcoin on. */
+  sponsorStatus(): Promise<SponsorStatus>;
+  /** A fresh introduction with starter bitcoin (spend window). */
+  sponsorOffer(): Promise<Introduction>;
+  /** Review a newcomer's request. Pays nothing. */
+  sponsorCandidate(request: string): Promise<SponsorCandidate>;
+  /** Prepare the independent owner command; never sends an approval. */
+  sponsorOwnerApproval(candidate: SponsorCandidate, code: string): Promise<SponsorOwnerApproval>;
+  /** Recheck an unresolved payment; this cannot dispatch. */
+  sponsorReconcile(introId: string): Promise<void>;
+  sponsorCancel(introId: string): Promise<void>;
+  /** K1 slice 2 (newcomer): ask for the offered gift. Nothing is sent. */
+  sponsorRequest(text: string): Promise<FundingAsk>;
+  sponsorRequestStatus(paymentHash: string): Promise<FundingStatus>;
   firstContactRequest(peer: string, maxMsat: number, budgetMsat: number): Promise<OwnerContactApproval | null>;
   firstContactStatus(id: string): Promise<OwnerContactApproval>;
   firstContactCancel(id: string): Promise<void>;
@@ -133,6 +159,17 @@ export const hostSource: Source = {
   messages: (peer, before) => invoke<Message[]>('messages_list', { peer, before: before ?? null }),
   priceQuote: (peer) => invoke<PriceQuote>('price_quote', { peer: peer ?? null }),
   firstContactQuote: (peer) => invoke<FirstContactQuote>('first_contact_quote', { peer }),
+  introductionMine: () => invoke<Introduction>('introduction_mine'),
+  introductionRead: (text) => invoke<Introduction>('introduction_read', { text }),
+  introductionOpen: (text, allowLocal) => invoke<Introduction>('introduction_open', { text, allow_local: allowLocal }),
+  sponsorStatus: () => invoke<SponsorStatus>('sponsor_status'),
+  sponsorOffer: () => invoke<Introduction>('sponsor_offer'),
+  sponsorCandidate: (request) => invoke<SponsorCandidate>('sponsor_candidate', { request }),
+  sponsorOwnerApproval: (candidate, code) => invoke<SponsorOwnerApproval>('sponsor_owner_approval', { candidate, code }),
+  sponsorReconcile: (introId) => invoke<void>('sponsor_reconcile', { intro_id: introId }),
+  sponsorCancel: (introId) => invoke<void>('sponsor_cancel', { intro_id: introId }),
+  sponsorRequest: (text) => invoke<FundingAsk>('sponsor_request', { text }),
+  sponsorRequestStatus: (paymentHash) => invoke<FundingStatus>('sponsor_request_status', { payment_hash: paymentHash }),
   firstContactRequest: (recipient, maxMsat, budgetMsat) => invoke<OwnerContactApproval | null>('first_contact_request', { recipient, max_msat: maxMsat, contact_budget_msat: budgetMsat }),
   firstContactStatus: (id) => invoke<OwnerContactApproval>('first_contact_status', { id }),
   firstContactCancel: (id) => invoke<void>('first_contact_cancel', { id }),

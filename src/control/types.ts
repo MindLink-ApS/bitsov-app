@@ -59,6 +59,85 @@ export type FirstContactQuote = {
   expires_at: number;
 };
 
+/**
+ * K1 slice 1: an introduction (door card), read and verified by the host:
+ * a node key, where to reach it and its current prices, signed by that key,
+ * valid ten minutes. Never admission. The prices are the card's signed
+ * snapshot for display; before anything is paid the composer asks the node's
+ * own fresh quote and the owner confirms that total.
+ */
+export type Introduction = {
+  node_id: string;
+  network: string;
+  /** BitSov peer endpoint, host:port. */
+  endpoint: string;
+  /** `local`: a private-network address the reader must choose to allow. */
+  reach: 'public' | 'local';
+  admission_msat: number;
+  message_msat: number;
+  /** Unix seconds. */
+  issued_at: number;
+  expires_at: number;
+  /** `bitsov://introduce#…` */
+  link: string;
+  /** K1 slice 2: a verified starter-bitcoin offer riding with the card. */
+  starter?: Starter;
+  /** The card with its offer, for the QR and a funding request. */
+  offer_link?: string;
+};
+
+/**
+ * K1 slice 2: starter bitcoin. The inviter's node pays a small, capped gift
+ * into the newcomer's own node. It is the newcomer's balance, never
+ * admission: every message still pays.
+ */
+export type Starter = { gift_msat: number; expires_at: number };
+
+export type SponsorStatus = {
+  enabled: boolean;
+  gift_msat: number;
+  fee_msat: number;
+  purse_msat: number;
+  purse_used_msat: number;
+  kits_per_day: number;
+  kits_today: number;
+  kits?: SponsorKit[];
+};
+
+/** A newcomer's request, frozen by the sponsor's node for review. */
+export type SponsorCandidate = {
+  intro_id: string;
+  payment_hash: string;
+  newcomer: string;
+  gift_msat: number;
+  fee_max_msat: number;
+  code: string;
+  expires_at: number;
+};
+
+export type SponsorOwnerApproval = { owner_command: string };
+export type SponsorKit = {
+  intro_id: string;
+  gift_msat: number;
+  fee_msat: number;
+  candidate: { newcomer: string; payment_hash: string; code: string } | null;
+  state: 'offered' | 'candidate' | 'paying' | 'funded' | 'unknown' | 'failed' | 'cancelled' | 'expired';
+  paid_msat: number;
+  fee_paid_msat: number;
+};
+
+/** What the newcomer shows the sponsor, in person. */
+export type FundingAsk = {
+  request: string;
+  code: string;
+  sponsor: string;
+  amount_msat: number;
+  payment_hash: string;
+  expires_at: number;
+};
+
+export type FundingStatus = { payment_hash: string; state: 'waiting' | 'received'; amount_msat: number };
+
 export type Channel = {
   channel_id: string;
   peer_pubkey: string;
@@ -182,6 +261,7 @@ export type ActionError = {
     | 'spend_expired'
     | 'spend_refused'
     | 'owner_only'
+    | 'sponsor_owner_approval_required'
     | 'budget_paused' | 'budget_exhausted' | 'ceiling_exhausted' | 'first_contact' | 'budget_needed' | 'budget_unreadable'
     // G1 node grants: refused before any payment (see src-tauri/src/grant.rs).
     | 'grant_ended' | 'grant_exhausted' | 'grant_per_call' | 'grant_recipient' | 'grant_unpriced' | 'grant_ledger' | 'grant_refused' | 'grant_unknown' | 'grant_first_contact' | 'grant_readmission'

@@ -5,6 +5,8 @@
 import type { NodeStatus, PairingView } from '../onboarding/pairing';
 import type { Source } from './source';
 import type {
+  FundingAsk,
+  Introduction,
   ActionError,
   AiFreshness,
   BudgetPreset,
@@ -35,6 +37,24 @@ import type {
 
 const hex = (c: string) => c.repeat(64);
 export const SAMPLE_OWN_ID = '3f9a' + '1'.repeat(56) + 'c0de';
+/** A sample stranger, reachable only through the sample introduction link. */
+export const SAMPLE_STRANGER_ID = '5e1f' + '7'.repeat(56) + 'a11e';
+export const SAMPLE_INTRO_LINK = 'bitsov://introduce#SAMPLE';
+
+function sampleIntroduction(nodeId: string, endpoint: string, reach: Introduction['reach'], msat: number): Introduction {
+  const now = Math.floor(Date.now() / 1000);
+  return {
+    node_id: nodeId,
+    network: 'regtest',
+    endpoint,
+    reach,
+    admission_msat: msat,
+    message_msat: msat,
+    issued_at: now,
+    expires_at: now + 600,
+    link: nodeId === SAMPLE_OWN_ID ? 'bitsov://introduce#AQdyZWd0ZXN0' + 'A'.repeat(240) : SAMPLE_INTRO_LINK,
+  };
+}
 export const SAMPLE_PEERS: Peer[] = [
   { node_id: hex('a'), addr: '34.90.12.8:9735', label: 'Maya', connected: true, fingerprint: 'aaaaaaaa' },
   { node_id: hex('b'), addr: '35.204.77.3:9735', label: 'Josh', connected: true, fingerprint: 'bbbbbbbb' },
@@ -696,6 +716,37 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
     // Sample strangers open their door at 2 sats and ask 2 sats a message.
     firstContactQuote: (peer) =>
       ok({ recipient: peer, admission_msat: 2000, message_msat: 2000, total_msat: 4000, expires_at: Math.floor(Date.now() / 1000) + 60 }),
+    // K1: sample cards are not signed; the host verifies real ones.
+    introductionMine: () => ok(sampleIntroduction(SAMPLE_OWN_ID, 'node.example.org:9735', 'public', 10_000)),
+    introductionRead: (text) =>
+      text.trim() === SAMPLE_INTRO_LINK
+        ? ok(sampleIntroduction(SAMPLE_STRANGER_ID, '192.168.1.20:9735', 'local', 2000))
+        : Promise.reject('That is not an introduction.'),
+    introductionOpen: (text, _allowLocal) =>
+      text.trim() === SAMPLE_INTRO_LINK
+        ? ok(sampleIntroduction(SAMPLE_STRANGER_ID, '192.168.1.20:9735', 'local', 2000))
+        : Promise.reject('That is not an introduction.'),
+    // K1 slice 2: a sample kit. Nothing here is signed or paid.
+    sponsorStatus: () => ok({ enabled: true, gift_msat: 20_000_000, fee_msat: 100_000, purse_msat: 100_000_000, purse_used_msat: 0, kits_per_day: 2, kits_today: 0 }),
+    sponsorOffer: () => {
+      const card = sampleIntroduction(SAMPLE_OWN_ID, 'node.example.org:9735', 'public', 10_000);
+      return ok({ ...card, starter: { gift_msat: 20_000_000, expires_at: card.expires_at }, offer_link: `${card.link}.SAMPLEOFFER` });
+    },
+    sponsorCandidate: (request) =>
+      request.trim().startsWith('bitsov://sponsor-request#')
+        ? ok({ intro_id: 'ab'.repeat(16), newcomer: SAMPLE_STRANGER_ID, payment_hash: 'cd'.repeat(32), gift_msat: 20_000_000, fee_max_msat: 100_000, code: '482913', expires_at: Math.floor(Date.now() / 1000) + 540 })
+        : Promise.reject('That is not a starter-bitcoin request (bitsov://sponsor-request#…).'),
+    sponsorOwnerApproval: (_candidate, code) =>
+      code === '482913'
+        ? ok({ owner_command: '# Sample only: no real gift request or owner command.' })
+        : Promise.reject({ code: 'sponsor_code_mismatch', message: 'The code does not match this request. Nothing was paid.' }),
+    sponsorReconcile: () => ok(undefined),
+    sponsorCancel: () => ok(undefined),
+    sponsorRequest: (text) =>
+      text.includes('SAMPLEOFFER')
+        ? ok<FundingAsk>({ request: 'bitsov://sponsor-request#SAMPLE', code: '482913', sponsor: SAMPLE_STRANGER_ID, amount_msat: 20_000_000, payment_hash: 'ef'.repeat(32), expires_at: Math.floor(Date.now() / 1000) + 540 })
+        : Promise.reject('This introduction offers no starter bitcoin.'),
+    sponsorRequestStatus: (hash) => ok({ payment_hash: hash, state: 'received' as const, amount_msat: 20_000_000 }),
     firstContactRequest: async () => null,
     firstContactStatus: async () => { throw new Error('Sample data has no independent owner request.'); },
     firstContactCancel: async () => {},
