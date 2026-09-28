@@ -99,9 +99,31 @@ pub struct Channel {
     pub active: bool,
 }
 
+/// Offline-readiness v1, genome PR #107. Timestamps are Unix seconds.
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+pub struct ReadinessEvent {
+    pub sequence: u64,
+    pub timestamp: u64,
+    pub state: String,
+    pub money_ready: bool,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+pub struct LightningReadiness {
+    pub money_ready: bool,
+    pub state: String,
+    pub retry_attempt: u64,
+    pub retry_after_secs: Option<u64>,
+    pub events: Vec<ReadinessEvent>,
+}
+
 /// `GET /status` — `HealthResponse`. The subset the Node panel shows.
 #[derive(Deserialize, Clone, Debug)]
 pub struct NodeStatusResponse {
+    #[serde(default)]
+    pub money_ready: Option<bool>,
+    #[serde(default)]
+    pub readiness: Option<LightningReadiness>,
     pub status: String,
     pub node_id: String,
     #[serde(default)]
@@ -403,6 +425,10 @@ pub struct WalletOverview {
 /// `node_overview`.
 #[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct NodeOverview {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub money_ready: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readiness: Option<LightningReadiness>,
     pub node_id: String,
     pub status: String,
     pub version: Option<String>,
@@ -423,6 +449,8 @@ pub struct NodeOverview {
 impl NodeOverview {
     pub fn from_status(status: NodeStatusResponse, read_at: u64) -> Self {
         Self {
+            money_ready: status.money_ready,
+            readiness: status.readiness,
             node_id: status.node_id,
             status: status.status,
             version: status.version.map(|v| format!("api v{v}")),
@@ -736,6 +764,25 @@ mod tests {
 
     fn link(state: LinkState, detail: Option<&str>) -> LiveEvent {
         LiveEvent::Link { state, detail: detail.map(str::to_string) }
+    }
+
+    #[test]
+    fn readiness_status_preserves_false_true_and_absent() {
+        for ready in [Some(false), Some(true), None] {
+            let mut wire = serde_json::json!({"status":"ok", "node_id":"x"});
+            if let Some(ready) = ready {
+                wire["money_ready"] = ready.into();
+                wire["readiness"] = serde_json::json!({"money_ready":ready,"state":"offline",
+                    "retry_attempt":3,"retry_after_secs":10,
+                    "events":[{"sequence":1,"timestamp":1725000000,"state":"offline","money_ready":false}]});
+            }
+            let projected = serde_json::to_value(NodeOverview::from_status(serde_json::from_value(wire).unwrap(), 123)).unwrap();
+            assert_eq!(projected.get("money_ready").and_then(|v| v.as_bool()), ready);
+            if ready.is_some() {
+                assert_eq!(projected["readiness"]["retry_attempt"], 3);
+                assert_eq!(projected["readiness"]["events"][0]["timestamp"], 1725000000u64);
+            }
+        }
     }
 
     #[test]

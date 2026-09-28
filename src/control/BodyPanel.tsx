@@ -36,6 +36,7 @@ function usePulse(value: () => unknown, startHot = false) {
 }
 
 export type OrganismProps = {
+  readiness?: string | null;
   sample: boolean;
   now: number;
   /** When this shell started reading: the membrane has seen nothing before it. */
@@ -80,6 +81,7 @@ export function Organism(props: OrganismProps) {
   const liveFresh = () => ({ label: feed().label, stale: feed().stale || props.down });
   return (
     <div class="organism" data-panel="body" classList={{ down: props.down }}>
+      <Show when={props.readiness}><p class="hint" data-readiness>{props.readiness}</p></Show>
       <MetabolismOrgan {...props} fresh={liveFresh()} />
       <MembraneOrgan {...props} fresh={liveFresh()} />
       <SetpointsOrgan {...props} />

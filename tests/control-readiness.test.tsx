@@ -1,0 +1,142 @@
+import { readinessSource } from '../src/control/readiness';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { render } from 'solid-js/web';
+import { ControlCenter } from '../src/control/Shell';
+import { sampleSource, SAMPLE_OWN_ID, SAMPLE_OPEN_ROOM_ID, SAMPLE_PEERS } from '../src/control/sample';
+import { asActionError, nodePill } from '../src/control/state';
+
+let dispose: (() => void) | undefined;
+let mount: HTMLElement;
+afterEach(() => { dispose?.(); mount?.remove(); vi.useRealTimers(); });
+
+async function start(ready: boolean | undefined, setup?: (s: ReturnType<typeof sampleSource>) => void) {
+  const source = sampleSource({ firstLiveMs: 1e9 });
+  setup?.(source);
+  const base = await source.nodeOverview();
+  const status = { ...base, money_ready: ready, readiness: ready === undefined ? undefined : {
+    money_ready: ready, state: ready ? 'ready' : 'offline', retry_attempt: 3, retry_after_secs: 10,
+    events: [{ sequence: 1, timestamp: Math.floor(Date.now() / 1000) - 120, state: 'offline', money_ready: false }],
+  } };
+  source.nodeOverview = async () => ({ ...status, read_at: Date.now() });
+  mount = document.createElement('div'); document.body.appendChild(mount);
+  dispose = render(() => <ControlCenter source={source} active ready error={null} ownId={SAMPLE_OWN_ID} firstRun={<span />} />, mount);
+  await vi.waitFor(() => expect(mount.querySelector('[data-send]')).not.toBeNull());
+  return { source, status };
+}
+
+describe('node money readiness', () => {
+  it.each([true, undefined])('preserves enabled actions with ready=%s', async (ready) => {
+    await start(ready);
+    expect((mount.querySelector('[data-send]') as HTMLButtonElement).disabled).toBe(false);
+    expect(mount.querySelector('[data-money-notice]')).toBeNull();
+  });
+
+  it('shows local health, retry and age, blocks every composer mode, then recovers without replay', async () => {
+    vi.useFakeTimers();
+    const { source, status } = await start(false);
+    expect(mount.querySelector('.node-pill')?.textContent).toContain('Money not ready yet');
+    expect(mount.querySelector('[data-panel="body"]')?.textContent).toContain('Local OK');
+    expect(mount.querySelector('[data-readiness]')?.textContent).toContain('Retrying');
+    expect(mount.querySelector('[data-readiness]')?.textContent).toContain('2 min');
+    const send = vi.spyOn(source, 'send');
+    for (const mode of ['message', 'pay', 'request', 'file']) {
+      (mount.querySelector(`[data-composer-mode="${mode}"]`) as HTMLButtonElement).click();
+      expect((mount.querySelector('[data-send]') as HTMLButtonElement).disabled).toBe(true);
+    }
+    expect(mount.querySelectorAll('[data-money-notice]')).toHaveLength(1);
+    vi.useFakeTimers();
+    status.money_ready = true;
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(mount.querySelector('[data-money-notice]')).toBeNull();
+    (mount.querySelector('[data-composer-mode="message"]') as HTMLButtonElement).click();
+    expect((mount.querySelector('[data-send]') as HTMLButtonElement).disabled).toBe(false);
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it('refreshes failed room and file quotes on recovery without navigation', async () => {
+    vi.useFakeTimers();
+    let ready = false;
+    const { status } = await start(false, (source) => {
+      const roomQuote = source.roomQuote;
+      source.roomQuote = (id) => ready ? roomQuote(id) : Promise.reject('offline');
+      source.filePrice = () => ready ? Promise.resolve({ principal_msat: 3000, max_routing_fee_msat: 5000, total_msat: 8000 }) : Promise.reject('offline');
+    });
+    (mount.querySelector(`[data-track="room:${SAMPLE_OPEN_ROOM_ID}"]`) as HTMLButtonElement).click();
+    await vi.advanceTimersByTimeAsync(0);
+    ready = true; status.money_ready = true;
+    await vi.advanceTimersByTimeAsync(10_000);
+    const cost = mount.querySelector('[data-cost-msat]');
+    expect(cost).not.toBeNull();
+    expect(Number(cost!.getAttribute('data-cost-msat'))).toBeGreaterThan(0);
+    (mount.querySelector(`[data-track="peer:${SAMPLE_PEERS[0].node_id}"]`) as HTMLButtonElement).click();
+    (mount.querySelector('[data-composer-mode="file"]') as HTMLButtonElement).click();
+    expect(mount.querySelector('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('8000');
+    expect(mount.querySelector('[data-money-notice]')).toBeNull();
+  });
+
+  it('keeps local app prerequisite errors distinct from chain readiness', () => {
+    expect(asActionError({ code: 'app_not_ready', message: 'No node identity.' })).toEqual({ code: 'app_not_ready', message: 'No node identity.' });
+  });
+
+  it('shows a racing refusal once, preserves inputs, and recovers without replay', async () => {
+    vi.useFakeTimers();
+    const { source } = await start(true, (source) => {
+      source.invoiceCreate = vi.fn().mockRejectedValue({ code: 'not_ready', message: 'backend offline' });
+    });
+    (mount.querySelector('[data-composer-mode="request"]') as HTMLButtonElement).click();
+    const amount = mount.querySelector('[data-request-amount]') as HTMLInputElement;
+    amount.value = '10'; amount.dispatchEvent(new Event('input', { bubbles: true }));
+    (mount.querySelector('[data-send]') as HTMLButtonElement).click();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mount.querySelectorAll('[data-money-notice]')).toHaveLength(1);
+    expect(mount.querySelector('[data-composer-note]')).toBeNull();
+    expect(amount.value).toBe('10');
+    expect((mount.querySelector('[data-send]') as HTMLButtonElement).disabled).toBe(true);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(mount.querySelector('[data-money-notice]')).toBeNull();
+    expect((mount.querySelector('[data-send]') as HTMLButtonElement).disabled).toBe(false);
+    expect(amount.value).toBe('10');
+    expect(source.invoiceCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it('maps the node refusal to the common calm message', () => {
+    expect(asActionError({ code: 'not_ready', message: 'backend unavailable' }).message).toBe('Money is not ready yet. Your node will retry automatically.');
+  });
+
+  it('does not mistake an older node without the field for unavailable money', async () => {
+    const source = sampleSource();
+    expect(nodePill({ ready: true, error: null, overview: await source.nodeOverview(), link: 'open', nowMs: Date.now() }).text).toBe('Node live');
+  });
+});
+
+describe('shared money guard', () => {
+  it.each(['send', 'pay', 'keysend', 'fileSend', 'invoiceCreate', 'firstContactQuote', 'firstContactRequest', 'sponsorOffer', 'sponsorCandidate', 'sponsorOwnerApproval', 'sponsorRequest', 'inviteCreate', 'inviteRedeem', 'fundStart'] as const)('stops %s before reaching the host and permits it after recovery', async (method) => {
+    const source = sampleSource();
+    const call = vi.fn().mockResolvedValue('host reply');
+    Object.assign(source, { [method]: call });
+    let blocked = true;
+    const guarded = readinessSource(() => source, () => blocked, () => {});
+    await expect(Reflect.apply(guarded[method], guarded, [])).rejects.toMatchObject({ code: 'not_ready' });
+    expect(call).not.toHaveBeenCalled();
+    blocked = false;
+    await expect(Reflect.apply(guarded[method], guarded, [])).resolves.toBe('host reply');
+    expect(call).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps local reads and cancellation usable while money is unavailable', async () => {
+    const source = sampleSource();
+    const guarded = readinessSource(() => source, () => true, () => {});
+    expect(await guarded.peers()).not.toHaveLength(0);
+    await expect(guarded.firstContactCancel('op')).resolves.toBeUndefined();
+  });
+
+  it('turns a racing node refusal into one shared state and never replays the call', async () => {
+    const source = sampleSource();
+    const refused = vi.fn();
+    source.pay = vi.fn().mockRejectedValue({ code: 'not_ready', message: 'offline' });
+    const guarded = readinessSource(() => source, () => false, refused);
+    await expect(guarded.pay('invoice', 1000, 6000)).rejects.toMatchObject({ code: 'not_ready', message: 'Money is not ready yet. Your node will retry automatically.' });
+    expect(refused).toHaveBeenCalledTimes(1);
+    expect(source.pay).toHaveBeenCalledTimes(1);
+  });
+});

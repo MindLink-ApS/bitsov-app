@@ -1,3 +1,4 @@
+import { MONEY_NOT_READY, readinessLine } from './readiness';
 import { feeCeiling } from './format';
 // Control-center state as pure functions over plain data, so the rules are
 // testable without a window: which track a live message belongs to, how history
@@ -138,9 +139,10 @@ export function costToSend(
 
 /** Any rejection from the host, as an action error. */
 export function asActionError(e: unknown): ActionError {
+  if (e === MONEY_NOT_READY) return { code: 'not_ready', message: MONEY_NOT_READY };
   if (e && typeof e === 'object' && 'code' in e && 'message' in e) {
     const { code, message } = e as ActionError;
-    return { code, message: String(message) };
+    return { code, message: code === 'not_ready' ? MONEY_NOT_READY : String(message) };
   }
   return { code: 'node', message: typeof e === 'string' ? e : String((e as Error)?.message ?? e) };
 }
@@ -296,6 +298,8 @@ export function nodePill(input: {
   if (freshness(input.overview.read_at, input.nowMs).stale) {
     return { tone: 'warn', text: 'Node not answering', live: false };
   }
+  if (input.overview.money_ready === false) return { tone: 'warn', text: readinessLine(input.overview, input.nowMs)!, live: input.link === 'open' };
+  if (input.overview.money_ready === true && input.link === 'open') return { tone: 'ok', text: 'Local OK · Money ready', live: true };
   if (input.link === 'open') return { tone: 'ok', text: 'Node live', live: true };
   return { tone: 'warn', text: 'Node up, live feed reconnecting', live: false };
 }
