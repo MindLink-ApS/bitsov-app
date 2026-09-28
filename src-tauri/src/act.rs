@@ -66,9 +66,13 @@ pub const ROOM_MAX_MEMBERS: usize = 256;
 pub struct ActionError {
     pub code: &'static str,
     pub message: String,
-    /// `payment_settled_undelivered` only: what was paid, and whether a retry is free.
+    /// `payment_settled_undelivered` only: what was paid, and whether a retry is offered.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub undelivered: Option<UndeliveredView>,
+    /// `retry_needs_admission` only: the price the owner approves before a
+    /// retry that may pay admission again.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub admission: Option<AdmissionView>,
 }
 
 /// Paid, not delivered, as the conversation shows it.
@@ -76,8 +80,20 @@ pub struct ActionError {
 pub struct UndeliveredView {
     /// Everything the node reported settled for this message, retries included.
     pub paid_msat: u64,
-    /// The node said a retry on this connection re-sends its proof and pays no second admission.
+    /// The node said a retry re-sends its paid proof rather than paying again.
     pub retry: bool,
+}
+
+/// Admission may be due again (the node reconnected): its price and the
+/// message's, for the owner's approval. Nothing has been paid for it.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AdmissionView {
+    pub admission_msat: u64,
+    pub message_msat: u64,
+    /// The cap the owner approves: admission plus the message.
+    pub total_msat: u64,
+    /// The contact's own signed quote; false: an estimate from what was paid before.
+    pub quoted: bool,
 }
 
 impl ActionError {
@@ -86,18 +102,31 @@ impl ActionError {
             code,
             message: message.into(),
             undelivered: None,
+            admission: None,
         }
     }
     /// The node settled payment but the message did not go. Never "not sent".
     pub fn undelivered(paid_msat: u64, retry: bool) -> Self {
         let next = if retry {
-            "Do not send it again. Your node holds the paid admission proof: Retry delivery re-sends it on this connection and pays no second admission."
+            "Do not send it again. Retry delivery reuses this same payment: your node re-sends the admission proof it paid for and pays only this message's price. If admission is due again, it asks you first, with the price."
         } else {
             "Do not send it again: that could pay twice. Check the pending result first."
         };
         Self {
             undelivered: Some(UndeliveredView { paid_msat, retry }),
             ..Self::new("payment_settled_undelivered", format!("Payment settled ({paid_msat} msat paid), message not yet delivered. {next}"))
+        }
+    }
+    /// A delivery retry stopped before paying: admission may be due again.
+    pub fn needs_admission(view: Option<AdmissionView>) -> Self {
+        let price = match view {
+            Some(v) if v.quoted => format!(" Their price: {} msat to be admitted again, then {} msat for this message ({} msat in all).", v.admission_msat, v.message_msat, v.total_msat),
+            Some(v) => format!(" About {} msat to be admitted again (what it cost before), then {} msat for this message: up to {} msat.", v.admission_msat, v.message_msat, v.total_msat),
+            None => " Your node could not tell the price.".into(),
+        };
+        Self {
+            admission: view,
+            ..Self::new("retry_needs_admission", format!("Your node may have to pay this contact's admission again before the message can go (a reconnect starts every connection unpaid). Nothing was paid.{price} Approve it to retry, or stop retrying."))
         }
     }
     pub fn invalid(message: impl Into<String>) -> Self {
@@ -1178,11 +1207,26 @@ mod tests {
         assert_eq!(retry.code, "payment_settled_undelivered");
         assert_eq!(retry.undelivered, Some(UndeliveredView { paid_msat: 2000, retry: true }));
         assert!(retry.message.starts_with("Payment settled (2000 msat paid), message not yet delivered. Do not send it again."), "{}", retry.message);
-        assert!(retry.message.contains("pays no second admission"));
+        assert!(retry.message.contains("pays only this message's price") && retry.message.contains("asks you first"), "{}", retry.message);
+        assert!(!retry.message.contains("no second admission"), "never promise what the node does not enforce");
         let stop = ActionError::undelivered(3000, false);
         assert!(stop.message.contains("Do not send it again") && !stop.message.contains("Retry"), "{}", stop.message);
         let wire = serde_json::to_value(&stop).unwrap();
         assert_eq!(wire["undelivered"], serde_json::json!({"paid_msat": 3000, "retry": false}));
         assert!(serde_json::to_value(ActionError::node("x")).unwrap().get("undelivered").is_none());
+        assert!(serde_json::to_value(ActionError::node("x")).unwrap().get("admission").is_none());
+    }
+
+    #[test]
+    fn needs_admission_shows_the_price_or_says_it_is_unknown() {
+        let v = AdmissionView { admission_msat: 2000, message_msat: 1000, total_msat: 3000, quoted: true };
+        let e = ActionError::needs_admission(Some(v));
+        assert_eq!((e.code, e.admission), ("retry_needs_admission", Some(v)));
+        assert!(e.message.contains("Nothing was paid") && e.message.contains("3000 msat in all"), "{}", e.message);
+        let estimate = ActionError::needs_admission(Some(AdmissionView { quoted: false, ..v }));
+        assert!(estimate.message.contains("up to 3000 msat"), "{}", estimate.message);
+        let unknown = ActionError::needs_admission(None);
+        assert!(unknown.admission.is_none() && unknown.message.contains("could not tell the price"));
+        assert_eq!(serde_json::to_value(&e).unwrap()["admission"], serde_json::json!({"admission_msat": 2000, "message_msat": 1000, "total_msat": 3000, "quoted": true}));
     }
 }

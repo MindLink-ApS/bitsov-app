@@ -26,6 +26,7 @@ import {
   applyDelivery,
   applyLive,
   asActionError,
+  admissionCopy,
   undeliveredCopy,
   budgetStand,
   costToSend,
@@ -122,8 +123,13 @@ export type Actions = {
   pauseAll: () => Promise<void>;
   resume: () => Promise<void>;
   send: (t: TrackRef, text: string, maxMsat: number, firstContactMsat?: number) => Promise<Outcome<unknown>>;
-  /** Re-send a paid, undelivered message, only where the node said it pays no second admission. */
-  retryDelivery: (t: TrackRef, artifactId: string) => Promise<Outcome<unknown>>;
+  /**
+   * Retry a paid, undelivered message through its own journal record. With
+   * `approvedMsat`, the owner approved that price because admission may be due again.
+   */
+  retryDelivery: (t: TrackRef, artifactId: string, approvedMsat?: number) => Promise<Outcome<unknown>>;
+  /** Stop retrying a paid, undelivered message. Dispatches nothing. */
+  stopRetrying: (t: TrackRef | null, artifactId: string | null) => Promise<Outcome<string>>;
   /** The door card: a stranger's signed quote, or null when the node cannot give one. */
   doorQuote: (peer: string) => Promise<FirstContactQuote | null>;
   ownerRequest: (peer: string, cap: number, budget: number) => Promise<Outcome<OwnerContactApproval | null>>;
@@ -508,7 +514,7 @@ export function ControlCenter(props: Props) {
       if (r.ok || isBudgetStop(r.error) || r.error.code === 'spend_unknown' || r.error.code === 'payment_settled_undelivered') void loadBudget();
       if (!r.ok && r.error.code === 'payment_settled_undelivered' && r.error.undelivered) {
         // Paid, not delivered: the draft moves here, with the only safe way to resend it.
-        addArtifact(t, { type: 'undelivered', text, paid: r.error.undelivered, note: null });
+        addArtifact(t, { type: 'undelivered', text, paid: r.error.undelivered, note: null, admission: null });
         return r;
       }
       if (!r.ok && ['price_changed', 'price_cap_exceeded'].includes(r.error.code)) {
@@ -522,14 +528,18 @@ export function ControlCenter(props: Props) {
       if (r.ok) sentOne(t, r.value, text);
       return recordFailure(t, !r.ok && r.error.code === 'room_partial' ? 'Room send incomplete' : 'Message not sent', r);
     },
-    retryDelivery: async (t, artifactId) => {
+    retryDelivery: async (t, artifactId, approvedMsat) => {
       const key = trackKey(t);
       const a = (artifacts[key] ?? []).find((x) => x.id === artifactId);
       if (t.kind !== 'peer' || a?.type !== 'undelivered' || !a.paid.retry) {
         return { ok: false, error: { code: 'retry_unavailable', message: 'Nothing to retry.' } };
       }
+      // Only the price the card shows can be approved.
+      if (approvedMsat !== undefined && approvedMsat !== a.admission?.total_msat) {
+        return { ok: false, error: { code: 'retry_unavailable', message: 'Nothing to approve.' } };
+      }
       const text = a.text;
-      const r = await act(() => props.source.retry(t.id, text));
+      const r = await act(() => props.source.retry(t.id, text, approvedMsat));
       void loadBudget();
       const update = (next: Partial<Extract<Artifact, { type: 'undelivered' }>> | null) =>
         setArtifacts(key, (old) => (old ?? []).flatMap((x) => (x.id !== artifactId ? [x] : next ? [{ ...x, ...next } as Artifact] : [])));
@@ -537,11 +547,24 @@ export function ControlCenter(props: Props) {
         update(null);
         sentOne(t, r.value, text);
       } else if (r.error.code === 'payment_settled_undelivered' && r.error.undelivered) {
-        update({ paid: r.error.undelivered, note: 'Still not delivered. Nothing was paid twice.' });
+        const paid = r.error.undelivered;
+        update({ paid, admission: null, note: `Still not delivered. Paid for this message so far: ${sats(paid.paid_msat)} ${satUnit(paid.paid_msat)}.` });
+      } else if (r.error.code === 'retry_needs_admission') {
+        // Stopped before paying: the price to approve, when the node could tell.
+        update({ admission: r.error.admission ?? null, note: r.error.message });
       } else {
         // A refusal before dispatch (approval, price) keeps the retry; anything else ends it.
-        const ends = ['retry_needs_admission', 'retry_unavailable', 'spend_unknown'].includes(r.error.code);
+        const ends = ['retry_unavailable', 'spend_unknown'].includes(r.error.code);
         update({ paid: { ...a.paid, retry: !ends }, note: r.error.message });
+      }
+      return r;
+    },
+    stopRetrying: async (t, artifactId) => {
+      const r = await act(() => props.source.dismissUndelivered());
+      void loadBudget();
+      if (r.ok && t && artifactId) {
+        setArtifacts(trackKey(t), (old) => (old ?? []).filter((x) => x.id !== artifactId));
+        addArtifact(t, { type: 'failed', action: 'Stopped retrying', error: { code: 'undelivered_pending', message: r.value } });
       }
       return r;
     },
@@ -1008,7 +1031,7 @@ function Conversation(props: {
                     )}
                   </Match>
                   <Match when={item.type === 'artifact' && item.artifact}>
-                    {(a) => <ArtifactView a={a()} nameOf={props.nameOf} delivery={a().type === 'file' ? props.deliveries[(a() as { receipt: { message_id: string } }).receipt.message_id] : undefined} onRetry={(id) => props.actions.retryDelivery(props.track, id)} />}
+                    {(a) => <ArtifactView a={a()} nameOf={props.nameOf} delivery={a().type === 'file' ? props.deliveries[(a() as { receipt: { message_id: string } }).receipt.message_id] : undefined} onRetry={(id, approved) => props.actions.retryDelivery(props.track, id, approved)} onStop={(id) => props.actions.stopRetrying(props.track, id)} />}
                   </Match>
                 </Switch>
               </>
@@ -1148,7 +1171,7 @@ function DoorView(props: { card: DoorCard; at: number; nameOf: (id: string) => s
   );
 }
 
-function ArtifactView(props: { a: Artifact; delivery?: Delivery; nameOf: (id: string) => string; onRetry?: (id: string) => Promise<unknown> }) {
+function ArtifactView(props: { a: Artifact; delivery?: Delivery; nameOf: (id: string) => string; onRetry?: (id: string, approvedMsat?: number) => Promise<unknown>; onStop?: (id: string) => Promise<unknown> }) {
   return (
     <Switch>
       <Match when={props.a.type === 'invoice' && props.a}>
@@ -1229,20 +1252,28 @@ function ArtifactView(props: { a: Artifact; delivery?: Delivery; nameOf: (id: st
         }}
       </Match>
       <Match when={props.a.type === 'undelivered' && props.a}>
-        {(a) => <UndeliveredView a={a() as Extract<Artifact, { type: 'undelivered' }>} onRetry={props.onRetry} />}
+        {(a) => <UndeliveredView a={a() as Extract<Artifact, { type: 'undelivered' }>} onRetry={props.onRetry} onStop={props.onStop} />}
       </Match>
     </Switch>
   );
 }
 
-/** Paid, not delivered: the amount, what not to do, and the one safe retry. */
-function UndeliveredView(props: { a: Extract<Artifact, { type: 'undelivered' }>; onRetry?: (id: string) => Promise<unknown> }) {
+/**
+ * Paid, not delivered: the amount, what not to do, and the one safe retry.
+ * When admission may be due again, the retry waits for the owner to approve
+ * the shown price; stopping retries releases the message without paying more.
+ */
+function UndeliveredView(props: {
+  a: Extract<Artifact, { type: 'undelivered' }>;
+  onRetry?: (id: string, approvedMsat?: number) => Promise<unknown>;
+  onStop?: (id: string) => Promise<unknown>;
+}) {
   const [busy, setBusy] = createSignal(false);
   const copy = () => undeliveredCopy(props.a.paid);
-  const retry = async () => {
-    if (busy() || !props.onRetry) return;
+  const run = async (f: () => Promise<unknown>) => {
+    if (busy()) return;
     setBusy(true);
-    await props.onRetry(props.a.id);
+    await f();
     setBusy(false);
   };
   return (
@@ -1250,8 +1281,27 @@ function UndeliveredView(props: { a: Extract<Artifact, { type: 'undelivered' }>;
       <span class="kind">{copy().title}</span>
       <span>{copy().body}</span>
       <Show when={props.a.paid.retry && props.onRetry}>
-        <button type="button" class="link" data-retry-delivery disabled={busy()} onClick={() => void retry()}>
-          {busy() ? 'Retrying delivery…' : 'Retry delivery'}
+        <Show
+          when={props.a.admission}
+          fallback={
+            <button type="button" class="link" data-retry-delivery disabled={busy()} onClick={() => void run(() => props.onRetry!(props.a.id))}>
+              {busy() ? 'Retrying delivery…' : 'Retry delivery'}
+            </button>
+          }
+        >
+          {(adm) => (
+            <>
+              <p class="hint" data-admission-price={adm().total_msat}>{admissionCopy(adm()).body}</p>
+              <button type="button" class="link" data-retry-approve disabled={busy()} onClick={() => void run(() => props.onRetry!(props.a.id, adm().total_msat))}>
+                {busy() ? 'Retrying delivery…' : admissionCopy(adm()).action}
+              </button>
+            </>
+          )}
+        </Show>
+      </Show>
+      <Show when={props.onStop}>
+        <button type="button" class="link" data-stop-retrying disabled={busy()} onClick={() => void run(() => props.onStop!(props.a.id))}>
+          Stop retrying
         </button>
       </Show>
       <Show when={props.a.note}>
@@ -1875,11 +1925,22 @@ function SpendBar(props: { spend: SpendView | null; error: string | undefined; n
 function Reconcile(props: { actions: Actions }) {
   const [result, setResult] = createSignal<string | null>(null);
   const [checking, setChecking] = createSignal(false);
+  // Paid, not delivered: the owner may stop retrying (it dispatches nothing).
+  const [undelivered, setUndelivered] = createSignal(false);
   const reconcile = async () => {
     if (checking()) return;
     setChecking(true);
     const outcome = await props.actions.reconcile();
     setResult(outcome.ok ? outcome.value : outcome.error.message);
+    setUndelivered(!outcome.ok && outcome.error.code === 'undelivered_pending');
+    setChecking(false);
+  };
+  const stop = async () => {
+    if (checking()) return;
+    setChecking(true);
+    const outcome = await props.actions.stopRetrying(null, null);
+    setResult(outcome.ok ? outcome.value : outcome.error.message);
+    setUndelivered(false);
     setChecking(false);
   };
   return (
@@ -1887,6 +1948,11 @@ function Reconcile(props: { actions: Actions }) {
       <button type="button" class="link" data-spend-reconcile disabled={checking()} onClick={() => void reconcile()}>
         Check pending result
       </button>
+      <Show when={undelivered()}>
+        <button type="button" class="link" data-stop-retrying disabled={checking()} onClick={() => void stop()}>
+          Stop retrying
+        </button>
+      </Show>
       <Show when={result()}><p class="hint" data-reconciliation>{result()}</p></Show>
     </>
   );

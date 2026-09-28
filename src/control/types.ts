@@ -279,18 +279,28 @@ export type ActionError = {
     | 'grant_ended' | 'grant_exhausted' | 'grant_per_call' | 'grant_recipient' | 'grant_unpriced' | 'grant_ledger' | 'grant_refused' | 'grant_unknown' | 'grant_first_contact' | 'grant_readmission'
     | 'room_unreachable'
     // Paid, not delivered (node 502 `payment_settled_send_incomplete`), and its retry.
-    | 'payment_settled_undelivered' | 'retry_unavailable' | 'retry_needs_admission'
+    | 'payment_settled_undelivered' | 'retry_unavailable' | 'retry_needs_admission' | 'undelivered_pending'
     | 'not_ready'
     | 'invalid'
     | 'node';
   message: string;
   /** `payment_settled_undelivered` only. */
   undelivered?: Undelivered;
+  /** `retry_needs_admission` only: the price to approve, when the node could tell. */
+  admission?: AdmissionPrice;
 };
 
 /**
+ * Admission may be due again before a paid, undelivered message can go (a
+ * reconnect starts every connection unpaid). Nothing has been paid for it;
+ * `total_msat` is the cap the owner approves. `quoted`: the contact's own
+ * signed quote; otherwise an estimate from the admission paid before.
+ */
+export type AdmissionPrice = { admission_msat: number; message_msat: number; total_msat: number; quoted: boolean };
+
+/**
  * The node settled payment but the message did not go. `retry`: the node said a
- * retry on this connection re-sends its paid proof and pays no second admission.
+ * retry re-sends its paid proof rather than paying again.
  */
 export type Undelivered = { paid_msat: number; retry: boolean };
 
@@ -407,8 +417,12 @@ export type Artifact =
   | { id: string; at: number; type: 'payment'; receipt: PaymentReceipt }
   | { id: string; at: number; type: 'file'; receipt: FileReceipt }
   | { id: string; at: number; type: 'failed'; action: string; error: ActionError }
-  /** Paid, not delivered. `text` is the owner's own draft, kept in memory for Retry delivery only. */
-  | { id: string; at: number; type: 'undelivered'; text: string; paid: Undelivered; note: string | null }
+  /**
+   * Paid, not delivered. `text` is the owner's own draft, kept in memory for
+   * Retry delivery only. `admission`: a retry stopped before paying because
+   * admission may be due again; this is the price to approve.
+   */
+  | { id: string; at: number; type: 'undelivered'; text: string; paid: Undelivered; note: string | null; admission: AdmissionPrice | null }
   | { id: string; at: number; type: 'door'; door: DoorCard };
 
 /**

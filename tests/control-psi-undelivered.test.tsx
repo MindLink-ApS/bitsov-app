@@ -2,13 +2,15 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'solid-js/web';
 import App from '../src/App';
 import type { PairingView } from '../src/onboarding/pairing';
-import { asActionError, undeliveredCopy } from '../src/control/state';
+import { admissionCopy, asActionError, undeliveredCopy } from '../src/control/state';
 import type { LiveEvent, SpendView } from '../src/control/types';
 
 // APP-PSI-MSG: the node settled payment but the message did not go (502
 // `payment_settled_send_incomplete`, genome #100). Paid, not delivered: show the
 // amount, never invite a second send, and offer Retry delivery only when the
-// node said a retry pays no second admission.
+// node said a retry re-sends its paid proof. Genome #100: a retry on the same
+// connection pays only the message; when admission is due again the host
+// stops before paying and the owner approves the shown price, or stops retrying.
 
 const OWN = '1'.repeat(64);
 const A = 'a'.repeat(64);
@@ -102,12 +104,30 @@ describe('paid, not delivered: mapping and copy', () => {
     expect(asActionError({ code: 'node', message: 'm' })).toEqual({ code: 'node', message: 'm' });
   });
 
+  it('keeps an admission price only when it adds up', () => {
+    const admission = { admission_msat: 2000, message_msat: 2000, total_msat: 4000, quoted: true };
+    expect(asActionError({ code: 'retry_needs_admission', message: 'm', admission }).admission).toEqual(admission);
+    expect(asActionError({ code: 'retry_needs_admission', message: 'm', admission: { ...admission, total_msat: 3000 } }).admission).toBeUndefined();
+    expect(asActionError({ code: 'retry_needs_admission', message: 'm', admission: { ...admission, quoted: 'yes' } }).admission?.quoted).toBe(false);
+  });
+
+  it('shows the admission price to approve, and never promises what the node does not enforce', () => {
+    const quoted = admissionCopy({ admission_msat: 1500, message_msat: 2000, total_msat: 3500, quoted: true });
+    expect(quoted.body).toContain('their price is 1.5 sats to be admitted, then 2 sats for this message');
+    expect(quoted.action).toBe('Approve up to 3.5 sats and retry');
+    const estimate = admissionCopy({ admission_msat: 2000, message_msat: 2000, total_msat: 4000, quoted: false });
+    expect(estimate.body).toContain('about 2 sats (what it cost before)');
+    expect(estimate.body).toContain('refuses before paying if the real price is higher');
+  });
+
   it('says paid, not delivered, and never to send again', () => {
     const retry = undeliveredCopy({ paid_msat: 2000, retry: true });
     expect(retry.title).toBe('Paid 2 sats · not delivered yet');
     expect(retry.body).toContain('Payment settled, message not yet delivered. Do not send it again.');
-    expect(retry.body).toContain('no second admission payment within the admission window');
-    expect(retry.body).toContain('Retry delivery pays only this message’s price');
+    expect(retry.body).toContain('Retry delivery reuses this same payment');
+    expect(retry.body).toContain('pays only this message’s price');
+    expect(retry.body).toContain('asks you first, with the price');
+    expect(retry.body).not.toContain('no second admission');
     const stop = undeliveredCopy({ paid_msat: 1500, retry: false });
     expect(stop.title).toBe('Paid 1.5 sats · not delivered yet');
     expect(stop.body).toContain('Do not send it again: that could pay twice.');
@@ -171,7 +191,7 @@ describe('paid, not delivered: in the conversation', () => {
 
     $<HTMLButtonElement>('[data-retry-delivery]')!.click();
     await vi.waitFor(() => expect($('[data-artifact="undelivered"]')).toBeNull());
-    expect(host.used('message_retry').map((c) => c.args)).toEqual([{ recipient: A, plaintext: 'hello Maya' }]);
+    expect(host.used('message_retry').map((c) => c.args)).toEqual([{ recipient: A, plaintext: 'hello Maya', approved_msat: null }]);
     expect(host.used('message_send')).toHaveLength(1);
     await vi.waitFor(() => expect(mount.textContent).toContain('hello Maya'));
   });
@@ -185,18 +205,44 @@ describe('paid, not delivered: in the conversation', () => {
     expect(host.used('message_retry')).toHaveLength(0);
   });
 
-  it('ends the retry when the node would have to pay admission again', async () => {
+  it('asks for approval with the price when admission may be due again, then retries once at that cap', async () => {
+    const admission = { admission_msat: 2000, message_msat: 2000, total_msat: 4000, quoted: true };
     const host = stubHost({
       message_send: () => { throw UNDELIVERED(2000, true); },
-      message_retry: () => { throw { code: 'retry_needs_admission', message: 'Your node reconnected to this contact and would have to pay admission again. It refused before paying anything.' }; },
+      message_retry: (args) => {
+        if (args!.approved_msat === null) throw { code: 'retry_needs_admission', message: 'Your node may have to pay this contact’s admission again before the message can go. Nothing was paid.', admission };
+        return { message_id: 'sent-3', recipient: args!.recipient, is_room: false, delivered: true, amount_msat: 4000, sent_at_ms: Date.now() };
+      },
     });
     await sendUndelivered(host);
     $<HTMLButtonElement>('[data-retry-delivery]')!.click();
-    await vi.waitFor(() => expect(text('[data-retry-note]')).toContain('refused before paying anything'));
+    await vi.waitFor(() => expect($('[data-retry-approve]')).not.toBeNull());
+    // Nothing paid yet: the price is shown, and the free retry is gone.
+    expect(text('[data-retry-note]')).toContain('Nothing was paid');
+    expect($('[data-admission-price]')!.getAttribute('data-admission-price')).toBe('4000');
+    expect(text('[data-admission-price]')).toContain('their price is 2 sats to be admitted, then 2 sats for this message');
     expect($('[data-retry-delivery]')).toBeNull();
-    expect(text('[data-artifact="undelivered"]')).toContain('Paid 2 sats');
-    expect(host.used('message_retry')).toHaveLength(1);
+    expect(text('[data-retry-approve]')).toBe('Approve up to 4 sats and retry');
+
+    $<HTMLButtonElement>('[data-retry-approve]')!.click();
+    await vi.waitFor(() => expect($('[data-artifact="undelivered"]')).toBeNull());
+    expect(host.used('message_retry').map((c) => c.args!.approved_msat)).toEqual([null, 4000]);
     expect(host.used('message_send')).toHaveLength(1);
+    await vi.waitFor(() => expect(mount.textContent).toContain('hello Maya'));
+  });
+
+  it('stops retrying on the owner’s word, without dispatching anything', async () => {
+    const host = stubHost({
+      message_send: () => { throw UNDELIVERED(2000, true); },
+      spend_dismiss_undelivered: () => 'Stopped retrying. 2000 msat was paid and the message was not delivered; nothing more will be paid for it.',
+    });
+    await sendUndelivered(host);
+    $<HTMLButtonElement>('[data-stop-retrying]')!.click();
+    await vi.waitFor(() => expect($('[data-artifact="undelivered"]')).toBeNull());
+    expect(host.used('spend_dismiss_undelivered')).toHaveLength(1);
+    expect(host.used('message_retry')).toHaveLength(0);
+    expect(host.used('message_send')).toHaveLength(1);
+    await vi.waitFor(() => expect(mount.textContent).toContain('nothing more will be paid for it'));
   });
 
   it('keeps one card and one retry when delivery is still incomplete', async () => {
@@ -206,7 +252,7 @@ describe('paid, not delivered: in the conversation', () => {
     });
     await sendUndelivered(host);
     $<HTMLButtonElement>('[data-retry-delivery]')!.click();
-    await vi.waitFor(() => expect(text('[data-retry-note]')).toContain('Nothing was paid twice'));
+    await vi.waitFor(() => expect(text('[data-retry-note]')).toContain('Still not delivered. Paid for this message so far: 2 sats.'));
     expect(mount.querySelectorAll('[data-artifact="undelivered"]')).toHaveLength(1);
     expect(text('[data-artifact="undelivered"]')).toContain('Paid 2 sats');
     expect($('[data-retry-delivery]')).not.toBeNull();

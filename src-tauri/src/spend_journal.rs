@@ -18,20 +18,57 @@ pub struct Pending {
     /// Reported aggregate paid amount awaiting durable local accounting.
     #[serde(default)]
     pub accounting_msat: Option<u64>,
-    /// Paid, not delivered (502 `payment_settled_send_incomplete`). The only
-    /// record a delivery retry may replace; nothing else passes the fence.
+    /// Paid, not delivered (502 `payment_settled_send_incomplete`). A delivery
+    /// retry updates this same record in place; nothing else passes the fence,
+    /// and reconciliation never removes it (see [`Undelivered`]).
     #[serde(default)]
     pub undelivered: Option<Undelivered>,
+    /// Budget-book reservation `accounting_msat` settles. `None`: `request_hash`.
+    #[serde(default)]
+    pub charge_id: Option<String>,
+}
+
+impl Pending {
+    /// The book entry this record's accounting belongs to.
+    pub fn charge_id(&self) -> &str {
+        self.charge_id.as_deref().unwrap_or(&self.request_hash)
+    }
 }
 
 /// A settled payment whose message did not go. No plaintext is kept.
+///
+/// It stays until the message is delivered by a retry of this same operation
+/// or the owner stops retrying it. Accounting it never removes it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Undelivered {
     pub peer: String,
     /// Settled for this message so far, across retries.
     pub paid_msat: u64,
-    /// The node said a retry on this connection pays no second admission.
+    /// The node said a retry re-sends its paid proof rather than paying again.
     pub retry: bool,
+    /// The operation: [`operation`] of the compose body. Only a retry of this
+    /// very message to this very contact may reuse the record.
+    #[serde(default)]
+    pub op: String,
+    /// The admission the first attempt settled, msat.
+    #[serde(default)]
+    pub admission_msat: u64,
+    /// A retry was dispatched and its outcome is not known yet.
+    #[serde(default)]
+    pub in_flight: bool,
+    /// Retries dispatched so far; each has its own book reservation.
+    #[serde(default)]
+    pub attempts: u32,
+}
+
+/// The identity of a compose, without its caps: recipient, kind and a hash of
+/// the plaintext. The plaintext itself is never saved.
+pub fn operation(body: &serde_json::Value) -> String {
+    let op = serde_json::json!({
+        "recipient": body["recipient"], "is_room": body["is_room"],
+        "kind": body["kind"], "plaintext": body["plaintext"],
+    });
+    blake3::hash(op.to_string().as_bytes()).to_hex().to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,7 +122,7 @@ impl Journal {
         let pending = Pending {
             node_id: node_id.to_string(),
             request_hash: blake3::hash(format!("{path}\n{body}").as_bytes()).to_hex().to_string(),
-            max_msat, target: None, over_budget: false, accounting_msat: None, undelivered: None,
+            max_msat, target: None, over_budget: false, accounting_msat: None, undelivered: None, charge_id: None,
         };
         self.save(&pending)?;
         Ok(pending)
@@ -172,7 +209,7 @@ mod tests {
     #[test]
     fn reconciliation_needs_exact_terminal_outgoing_evidence() {
         let p = Pending { node_id:"node".into(), request_hash:"hash".into(), max_msat:2000,
-            target:Some(Target::Payment { hash:"abc".into() }), over_budget:false, accounting_msat: None, undelivered: None };
+            target:Some(Target::Payment { hash:"abc".into() }), over_budget:false, accounting_msat: None, undelivered: None, charge_id: None };
         assert_eq!(terminal(&p, &[]), None);
         assert_eq!(terminal(&p, &[json!({"payment_hash":"other", "amount_msat":2000, "direction":"outgoing", "status":"settled"})]), None);
         for status in ["pending", "inflight", "expired", "unknown"] {
@@ -188,7 +225,7 @@ mod tests {
     #[test]
     fn message_reconciliation_rejects_other_sender_and_recipient() {
         let p = Pending { node_id:"node".into(), request_hash:"hash".into(), max_msat:2000,
-            target:Some(Target::Message { id:"abc".into(), peer:"peer".into() }), over_budget:false, accounting_msat: None, undelivered: None };
+            target:Some(Target::Message { id:"abc".into(), peer:"peer".into() }), over_budget:false, accounting_msat: None, undelivered: None, charge_id: None };
         let mut row = json!({"id":"abc", "sender":"other", "recipient":"peer", "payment_amount_msat":2000});
         assert_eq!(terminal(&p, &[row.clone()]), None);
         row["sender"] = json!("node");

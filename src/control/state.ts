@@ -6,6 +6,7 @@
 import { ago, sats, satUnit, shortId } from './format';
 import type {
   ActionError,
+  AdmissionPrice,
   Undelivered,
   BudgetView,
   Artifact,
@@ -139,14 +140,19 @@ export function costToSend(
 /** Any rejection from the host, as an action error. */
 export function asActionError(e: unknown): ActionError {
   if (e && typeof e === 'object' && 'code' in e && 'message' in e) {
-    const { code, message, undelivered } = e as ActionError;
-    const paid = undelivered && Number.isSafeInteger(undelivered.paid_msat) && undelivered.paid_msat >= 0
-      ? { paid_msat: undelivered.paid_msat, retry: undelivered.retry === true }
-      : undefined;
-    return paid ? { code, message: String(message), undelivered: paid } : { code, message: String(message) };
+    const { code, message, undelivered, admission } = e as ActionError;
+    const out: ActionError = { code, message: String(message) };
+    if (undelivered && msat(undelivered.paid_msat)) out.undelivered = { paid_msat: undelivered.paid_msat, retry: undelivered.retry === true };
+    if (admission && msat(admission.admission_msat) && msat(admission.message_msat) && msat(admission.total_msat)
+      && admission.total_msat === admission.admission_msat + admission.message_msat) {
+      out.admission = { admission_msat: admission.admission_msat, message_msat: admission.message_msat, total_msat: admission.total_msat, quoted: admission.quoted === true };
+    }
+    return out;
   }
   return { code: 'node', message: typeof e === 'string' ? e : String((e as Error)?.message ?? e) };
 }
+
+const msat = (n: unknown): n is number => Number.isSafeInteger(n) && (n as number) >= 0;
 
 /**
  * Paid, not delivered (node 502 `payment_settled_send_incomplete`). Never "not
@@ -157,8 +163,19 @@ export function undeliveredCopy(u: Undelivered): { title: string; body: string }
   return {
     title: `Paid ${paid} · not delivered yet`,
     body: u.retry
-      ? 'Payment settled, message not yet delivered. Do not send it again. On this connection your node re-sends the proof it already paid for: no second admission payment within the admission window. Retry delivery pays only this message’s price, and your node refuses before paying if admission would be due again.'
+      ? 'Payment settled, message not yet delivered. Do not send it again. Retry delivery reuses this same payment: your node re-sends the admission proof it paid for and pays only this message’s price. If your node reconnected and admission is due again, it stops before paying and asks you first, with the price.'
       : 'Payment settled, message not yet delivered. Do not send it again: that could pay twice. Check the pending result before sending anything else.',
+  };
+}
+
+/** The approval a retry needs when admission may be due again. Nothing is paid until the owner approves. */
+export function admissionCopy(a: AdmissionPrice): { body: string; action: string } {
+  const s = (m: number) => `${sats(m)} ${satUnit(m)}`;
+  return {
+    body: a.quoted
+      ? `Admission may be due again: their price is ${s(a.admission_msat)} to be admitted, then ${s(a.message_msat)} for this message. If your node is still admitted, it pays only the message.`
+      : `Admission may be due again: about ${s(a.admission_msat)} (what it cost before), then ${s(a.message_msat)} for this message. Your node refuses before paying if the real price is higher.`,
+    action: `Approve up to ${s(a.total_msat)} and retry`,
   };
 }
 

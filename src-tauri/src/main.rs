@@ -2147,9 +2147,11 @@ async fn money_post(state: &NodeState, auth: Auth, path: &str, body: serde_json:
     money_post_with(state, auth, path, body, max_msat, charge, None).await
 }
 
-/// `retry` names the paid, undelivered record a delivery retry replaces. It
-/// passes the fence only if the journal holds exactly that record; any
-/// refusal before dispatch puts it back.
+/// `retry` names the paid, undelivered record a delivery retry reuses. It
+/// passes the fence only if the journal holds exactly that record, not in
+/// flight. The retry never removes it: the same record is rewritten in place
+/// (atomically) as in flight before dispatch, and any refusal before dispatch
+/// writes the prior record back. A crash at any point leaves a record.
 async fn money_post_with(state: &NodeState, auth: Auth, path: &str, body: serde_json::Value, max_msat: u64, charge: Option<Charge>, retry: Option<&spend_journal::Undelivered>) -> Result<String, ActionError> {
     let journal = spend_journal(state)?;
     let prior = journal.pending()?;
@@ -2158,7 +2160,7 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, body: serde_
     let node_id = state.node_id.lock().unwrap().clone().ok_or_else(|| ActionError::new("not_ready", "No node identity."))?;
     match (&prior, retry) {
         (None, None) => {}
-        (Some(p), Some(u)) if u.retry && !p.over_budget && p.node_id == node_id && p.undelivered.as_ref() == Some(u) => {}
+        (Some(p), Some(u)) if u.retry && !u.in_flight && !p.over_budget && p.node_id == node_id && p.undelivered.as_ref() == Some(u) => {}
         _ => return Err(spend_journal::unknown("Check the pending result before sending again.")),
     }
     // Nothing was paid: forget this attempt, keeping a replaced record retryable.
@@ -2190,21 +2192,29 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, body: serde_
         }
         _ => max_msat,
     };
-    if let Some(p) = &prior {
-        // Settled when the 502 came back; again here in case that write failed.
-        if p.accounting_msat.is_some() && charge.is_some() { close_charge(state, &p.request_hash, p.accounting_msat)?; }
-        journal.clear()?;
-    }
-    let mut pending = match journal.begin(&node_id, path, &body, max_msat) {
-        Ok(p) => p,
-        Err(e) => {
-            if prior.is_some() { abandon(&journal)?; }
-            return Err(e);
+    let op = spend_journal::operation(&body);
+    let mut pending = match &prior {
+        Some(p) => {
+            // Settled when the 502 came back; again here in case that write failed.
+            if let (Some(paid), true) = (p.accounting_msat, charge.is_some()) { close_charge(state, p.charge_id(), Some(paid))?; }
+            // The same operation, the same record: rewritten in place, never
+            // removed before this attempt exists.
+            let mut next = p.clone();
+            let u = next.undelivered.as_mut().expect("checked above");
+            u.in_flight = true;
+            u.attempts += 1;
+            next.charge_id = Some(format!("{}-retry-{}", p.request_hash, u.attempts));
+            next.accounting_msat = None;
+            next.max_msat = max_msat;
+            next.target = None;
+            journal.save(&next)?;
+            next
         }
+        None => journal.begin(&node_id, path, &body, max_msat)?,
     };
     let charged = match &charge {
-        Some(c) => match reserve(state, auth, c, &pending.request_hash, reserve_msat) {
-            Ok(()) => Some(pending.request_hash.clone()),
+        Some(c) => match reserve(state, auth, c, pending.charge_id(), reserve_msat) {
+            Ok(()) => Some(pending.charge_id().to_string()),
             Err(e) => {
                 abandon(&journal)?;
                 return Err(e);
@@ -2261,6 +2271,10 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, body: serde_
             peer: body["recipient"].as_str().unwrap_or_default().to_string(),
             paid_msat: paid,
             retry: incomplete.retry_safe && !pending.over_budget,
+            op,
+            admission_msat: retry.map_or(incomplete.amount_msat, |u| u.admission_msat),
+            in_flight: false,
+            attempts: retry.map_or(0, |u| u.attempts + 1),
         });
         journal.save(&pending)?;
         if pending.over_budget {
@@ -2336,11 +2350,29 @@ async fn do_spend_reconcile(state: &NodeState) -> Result<String, ActionError> {
     if state.node_id.lock().unwrap().as_deref() != Some(pending.node_id.as_str()) {
         return Err(spend_journal::unknown("The pending action belongs to another identity."));
     }
+    if let Some(undelivered) = &pending.undelivered {
+        // Paid, not delivered. Accounting it resolves the money, not the
+        // message: the record stays until a retry delivers it or the owner
+        // stops retrying (`spend_dismiss_undelivered`).
+        if pending.over_budget {
+            return Err(spend_journal::unknown("The node exceeded its spending bound; inspect the owner node."));
+        }
+        if undelivered.in_flight {
+            return Err(spend_journal::unknown("A delivery retry was sent and its result is unknown. Missing history does not prove failure; inspect the owner node. The app will not retry."));
+        }
+        if let Some(paid) = pending.accounting_msat {
+            close_charge(state, pending.charge_id(), Some(paid))?;
+        }
+        return Err(ActionError::new("undelivered_pending", format!(
+            "Accounted: {} msat paid, and the message is still not delivered. Nothing was dispatched again. Retry delivery from its card, or stop retrying it.",
+            undelivered.paid_msat
+        )));
+    }
     if let Some(paid) = pending.accounting_msat {
         if pending.over_budget {
             return Err(spend_journal::unknown("The node exceeded its spending bound; inspect the owner node."));
         }
-        close_charge(state, &pending.request_hash, Some(paid))?;
+        close_charge(state, pending.charge_id(), Some(paid))?;
         journal.clear()?;
         return Ok("Previous action accounted for. Nothing was dispatched again.".into());
     }
@@ -2357,6 +2389,26 @@ async fn do_spend_reconcile(state: &NodeState) -> Result<String, ActionError> {
         }
         None => Err(spend_journal::unknown("No matching terminal record. Missing history does not prove failure.")),
     }
+}
+
+/// The owner stops retrying a paid, undelivered message. Only a record whose
+/// money is fully known (no retry in flight, within its bound) is released,
+/// after its accounting is written. Nothing is dispatched.
+fn do_spend_dismiss_undelivered(state: &NodeState) -> Result<String, ActionError> {
+    let journal = spend_journal(state)?;
+    let pending = journal.pending()?.ok_or_else(|| ActionError::new("retry_unavailable", "Nothing is waiting for delivery."))?;
+    if state.node_id.lock().unwrap().as_deref() != Some(pending.node_id.as_str()) {
+        return Err(spend_journal::unknown("The pending action belongs to another identity."));
+    }
+    let undelivered = match &pending.undelivered {
+        Some(u) if !u.in_flight && !pending.over_budget => u.clone(),
+        _ => return Err(spend_journal::unknown("This pending result is not a known paid, undelivered message. Check the pending result.")),
+    };
+    if let Some(paid) = pending.accounting_msat {
+        close_charge(state, pending.charge_id(), Some(paid))?;
+    }
+    journal.clear()?;
+    Ok(format!("Stopped retrying. {} msat was paid and the message was not delivered; nothing more will be paid for it.", undelivered.paid_msat))
 }
 
 // ---- G1 node grants -------------------------------------------------------------
@@ -2742,36 +2794,57 @@ fn readmission_needs_ok() -> ActionError {
     )
 }
 
-/// Retry delivery of a paid, undelivered message through the same compose
-/// path, only where the node said a retry pays no second admission. Genome
-/// #100: on the same connection the node re-sends the proof it holds. The cap
-/// covers the message alone, so on a new connection, where admission would be
-/// paid again, the node refuses before paying anything.
-async fn do_message_retry(state: &NodeState, recipient: &str, plaintext: &str) -> Result<act::SendReceipt, ActionError> {
+/// Retry delivery of a paid, undelivered message: the same operation (this
+/// message, this contact), through the journal record it left, never a fresh
+/// unjournaled compose.
+///
+/// Genome #100: on the connection that holds the paid proof, or with a proof
+/// that never went out, the node re-sends that proof and pays no admission;
+/// a proof consumed on an earlier connection needs a new admission. The app
+/// cannot see which, so:
+/// - `approved_msat: None` (Retry delivery): capped at the contact's current
+///   message price. An unmetered capped node refuses before paying when
+///   admission is due; a node budget grant that covers this contact could pay
+///   admission on its own, so that is never retried silently. Either way the
+///   owner gets `retry_needs_admission` with the price.
+/// - `approved_msat: Some(total)`: the owner approved that price (admission
+///   plus message) under the normal approval, as for any send.
+async fn do_message_retry(state: &NodeState, recipient: &str, plaintext: &str, approved_msat: Option<u64>) -> Result<act::SendReceipt, ActionError> {
     let target = control::node_id(recipient).map_err(ActionError::invalid)?;
-    let unavailable = || ActionError::new("retry_unavailable", "Your node did not say a retry is free of a second admission. Check the pending result; do not send the message again.");
+    let mut body = act::compose_body(recipient, false, plaintext)?;
+    let op = spend_journal::operation(&body);
+    let unavailable = || ActionError::new("retry_unavailable", "There is no paid, undelivered message to retry for this contact. Check the pending result; do not send the message again.");
     let undelivered = spend_journal(state)?.pending()?
+        .filter(|p| !p.over_budget)
         .and_then(|p| p.undelivered)
-        .filter(|u| u.retry && u.peer == target)
+        .filter(|u| u.retry && !u.in_flight && u.peer == target && u.op == op)
         .ok_or_else(unavailable)?;
     let readmission_possible = require_price_caps(state, false).await?;
-    // The contact's own message price, never this node's: a cap at or above
-    // admission plus message could buy admission again.
-    let quote = read_price_quote(state, Some(recipient)).await?;
-    let cap = match quote.peer_msat {
-        Some(price) if !quote.peer_stale => price.max(act::MIN_PAYMENT_MSAT),
-        _ => return Err(ActionError::new("price_changed", "Your node does not have this contact's current message price yet. Nothing was sent; try again in a moment.")),
+    let cap = match approved_msat {
+        Some(total) => total,
+        None => {
+            let budgeted = state.node_grant.lock().unwrap().as_ref().is_some_and(|g| g.recipient_left(&target).is_some());
+            if readmission_possible && budgeted {
+                return Err(needs_admission(state, &target, &undelivered, None).await);
+            }
+            let quote = read_price_quote(state, Some(recipient)).await?;
+            match quote.peer_msat {
+                Some(price) if !quote.peer_stale => price.max(act::MIN_PAYMENT_MSAT),
+                _ => return Err(ActionError::new("price_changed", "Your node does not have this contact's current message price yet. Nothing was sent; try again in a moment.")),
+            }
+        }
     };
     let (auth, plan) = plan_message(state, &target, false, cap, None)?;
+    // A contact not yet in the book needs a first-contact budget: the composer's door card.
     if plan.confirm.is_some() { return Err(unavailable()); }
-    let mut body = act::compose_body(recipient, false, plaintext)?;
     body["max_total_msat"] = serde_json::json!(cap);
-    let charge = Charge { target, room: false, confirm: None, readmission_possible, confirmed: false };
+    let charge = Charge { target: target.clone(), room: false, confirm: None, readmission_possible, confirmed: false };
     let text = match money_post_with(state, auth, "/messages/compose", body, cap, Some(charge), Some(&undelivered)).await {
-        Err(e) if e.code == "price_cap_exceeded" || e.code == "grant_first_contact" => return Err(ActionError::new(
-            "retry_needs_admission",
-            "Your node reconnected to this contact and would have to pay admission again. It refused before paying anything. Check the pending result before sending again.",
-        )),
+        // Refused before paying anything: admission is (or may be) due again.
+        Err(e) if matches!(e.code, "price_cap_exceeded" | "grant_first_contact" | "grant_readmission") => {
+            let message_msat = approved_msat.map(|total| total.saturating_sub(undelivered.admission_msat)).unwrap_or(cap);
+            return Err(needs_admission(state, &target, &undelivered, Some(message_msat)).await);
+        }
         other => other?,
     };
     let reply: act::SendReply = decode_act("/messages/compose", &text)?;
@@ -2783,6 +2856,30 @@ async fn do_message_retry(state: &NodeState, recipient: &str, plaintext: &str) -
         amount_msat: reply.amount_msat,
         sent_at_ms: now_ms(),
     })
+}
+
+/// `retry_needs_admission`, with the contact's own signed quote when the node
+/// can give one (it pays and reserves nothing), else an estimate from the
+/// admission paid before and the message price.
+async fn needs_admission(state: &NodeState, target: &str, undelivered: &spend_journal::Undelivered, message_msat: Option<u64>) -> ActionError {
+    if let Ok(q) = read_first_contact_quote(state, target).await {
+        return ActionError::needs_admission(Some(act::AdmissionView {
+            admission_msat: q.admission_msat, message_msat: q.message_msat, total_msat: q.total_msat, quoted: true,
+        }));
+    }
+    let message_msat = match message_msat {
+        Some(m) => Some(m),
+        None => read_price_quote(state, Some(target)).await.ok()
+            .and_then(|q| q.peer_msat.filter(|_| !q.peer_stale))
+            .map(|p| p.max(act::MIN_PAYMENT_MSAT)),
+    };
+    let view = message_msat.and_then(|m| Some(act::AdmissionView {
+        admission_msat: undelivered.admission_msat,
+        message_msat: m,
+        total_msat: undelivered.admission_msat.checked_add(m)?,
+        quoted: false,
+    })).filter(|v| v.admission_msat > 0);
+    ActionError::needs_admission(view)
 }
 
 async fn do_invoice_create(
@@ -2954,17 +3051,30 @@ async fn message_send(
     do_message_send_with(state.inner(), &recipient, is_room, &plaintext, max_msat, max_recipient_msat, first_contact_msat).await
 }
 
-/// Retry a paid, undelivered message through `POST /messages/compose`. Never a second admission.
+/// Retry a paid, undelivered message through its own journal record. Without
+/// `approved_msat` it never pays admission; with it, at most that approved price.
 #[tauri::command(rename_all = "snake_case")]
 async fn message_retry(
     window: WebviewWindow<impl tauri::Runtime>,
     state: State<'_, NodeState>,
     recipient: String,
     plaintext: String,
+    approved_msat: Option<u64>,
 ) -> Result<act::SendReceipt, ActionError> {
     reject_sealed_window(&window)?;
     drop(window);
-    do_message_retry(state.inner(), &recipient, &plaintext).await
+    do_message_retry(state.inner(), &recipient, &plaintext, approved_msat).await
+}
+
+/// The owner stops retrying a paid, undelivered message. Dispatches nothing.
+#[tauri::command(rename_all = "snake_case")]
+async fn spend_dismiss_undelivered(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+) -> Result<String, ActionError> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    do_spend_dismiss_undelivered(state.inner())
 }
 
 fn budget_view(state: &NodeState) -> Result<budget::BudgetView, ActionError> {
@@ -3625,6 +3735,7 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             budget_resume,
             message_send,
             message_retry,
+            spend_dismiss_undelivered,
             room_quote,
             invoice_create,
             invoice_amount,
@@ -4276,6 +4387,7 @@ mod control_act_tests {
                     {"node_id": A, "connected": true}, {"node_id": C, "connected": true}
                 ]),
                 "/payments/price/0" => serde_json::json!({"kind": 0, "price_msat": 1000}),
+                "/messages/first-contact/quote" => serde_json::json!({"recipient": A, "admission_msat": 1500, "message_msat": 2000, "total_msat": 3500, "expires_at": 0}),
                 "/pricing/peers" => serde_json::json!([
                     {"peer_id": A, "prices": {"communication": 2000}, "age_secs": 5, "stale": false}
                 ]),
@@ -4382,20 +4494,56 @@ mod control_act_tests {
     }
     const PSI_TIMEOUT: &str = "internal error: first-contact admission payment settled and a signed proof is held, but the E2EE session did not establish within 25s — retry the message shortly; the retry is guarded by admission idempotence and will NOT pay admission again";
 
+    /// The spend journal's record as the node sees it at each compose, so a
+    /// test can prove the record was never absent while a retry was sent.
+    type AtCompose = Arc<Mutex<Vec<Option<serde_json::Value>>>>;
+
     /// Compose answers from `replies` in order; everything else is `happy()`.
     fn compose_script(replies: Vec<(u16, String)>) -> Routes {
+        compose_watch(replies).0
+    }
+
+    fn compose_watch(replies: Vec<(u16, String)>) -> (Routes, Arc<Mutex<Option<PathBuf>>>, AtCompose) {
         let next = Arc::new(Mutex::new(replies.into_iter()));
-        Arc::new(move |m: &str, p: &str, b: &str| {
-            if p == "/messages/compose" { next.lock().unwrap().next().expect("no further compose expected") } else { happy()(m, p, b) }
-        })
+        let journal: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
+        let seen: AtCompose = Arc::new(Mutex::new(Vec::new()));
+        let (j, s) = (journal.clone(), seen.clone());
+        let routes: Routes = Arc::new(move |m: &str, p: &str, b: &str| {
+            if p != "/messages/compose" { return happy()(m, p, b); }
+            if let Some(path) = j.lock().unwrap().clone() {
+                s.lock().unwrap().push(std::fs::read(path).ok().map(|bytes| serde_json::from_slice(&bytes).unwrap()));
+            }
+            next.lock().unwrap().next().expect("no further compose expected")
+        });
+        (routes, journal, seen)
+    }
+
+    fn journal_file(node: &Fake) -> PathBuf {
+        node._dir.path().join("app-spend").join("spend-pending.json")
     }
 
     fn compose_bodies(node: &Fake) -> Vec<serde_json::Value> {
         node.posts().into_iter().filter(|(p, _)| p == "/messages/compose").map(|(_, b)| b).collect()
     }
 
-    fn delivered(id: &str) -> (u16, String) {
-        (200, serde_json::json!({"message_id": id, "delivered": true, "amount_msat": 2000}).to_string())
+    fn delivered(id: &str, amount: u64) -> (u16, String) {
+        (200, serde_json::json!({"message_id": id, "delivered": true, "amount_msat": amount}).to_string())
+    }
+
+    fn pending(node: &Fake) -> Option<spend_journal::Pending> {
+        spend_journal(&node.state).unwrap().pending().unwrap()
+    }
+
+    fn book(node: &Fake) -> Vec<(String, u64, bool)> {
+        with_book(&node.state, false, |b| Ok(b.ledger.iter().map(|e| (e.id.clone(), e.msat, e.settled)).collect())).unwrap()
+    }
+
+    /// A first send whose admission settled and whose message did not go.
+    async fn psi_first(node: &Fake) -> spend_journal::Pending {
+        spend_advance(&node.state, true).await.unwrap();
+        let err = do_message_send(&node.state, A, false, "gm", 4000, None).await.unwrap_err();
+        assert_eq!(err.code, "payment_settled_undelivered", "{}", err.message);
+        pending(node).expect("the fence stays")
     }
 
     #[tokio::test]
@@ -4406,69 +4554,174 @@ mod control_act_tests {
         assert_eq!(err.code, "payment_settled_undelivered");
         assert_eq!(err.undelivered, Some(act::UndeliveredView { paid_msat: 2000, retry: true }));
         assert!(err.message.contains("Do not send it again"), "{}", err.message);
-        let pending = spend_journal(&node.state).unwrap().pending().unwrap().expect("the fence stays");
-        assert_eq!(pending.undelivered, Some(spend_journal::Undelivered { peer: A.into(), paid_msat: 2000, retry: true }));
-        assert_eq!(pending.accounting_msat, Some(2000));
-        let entry = with_book(&node.state, false, |b| Ok(b.ledger.clone())).unwrap();
-        assert_eq!((entry.len(), entry[0].msat, entry[0].settled), (1, 2000, true), "the book counts what was paid");
+        let record = pending(&node).expect("the fence stays");
+        let u = record.undelivered.clone().unwrap();
+        assert_eq!((u.peer.as_str(), u.paid_msat, u.retry, u.admission_msat, u.in_flight, u.attempts), (A, 2000, true, 2000, false, 0));
+        assert_eq!(u.op, spend_journal::operation(&act::compose_body(A, false, "gm").unwrap()), "bound to this message and contact");
+        assert_eq!(record.accounting_msat, Some(2000));
+        assert_eq!(book(&node), [(record.request_hash.clone(), 2000, true)], "the book counts what was paid");
         // No automatic new payment: an ordinary send is still fenced.
         assert_eq!(do_message_send(&node.state, A, false, "gm", 4000, None).await.unwrap_err().code, "spend_unknown");
         assert_eq!(compose_bodies(&node).len(), 1);
-        // The existing check accounts for it without dispatching anything.
-        assert!(do_spend_reconcile(&node.state).await.unwrap().contains("Nothing was dispatched again"));
-        assert_eq!(compose_bodies(&node).len(), 1);
-        assert_eq!(with_book(&node.state, false, |b| Ok(b.ledger.clone())).unwrap()[0].msat, 2000, "settled once, not twice");
     }
 
+    /// Codex review of 2d683b5 (P1): accounting must not erase the undelivered
+    /// record. Reconciliation settles the book and keeps the record, the retry
+    /// and the fence; only the owner stopping retries releases it.
     #[tokio::test]
-    async fn psi_retry_resends_with_a_message_only_cap_once() {
-        let node = fake(AuthMode::Local, compose_script(vec![psi_502(2000, 0, 2000, PSI_TIMEOUT), delivered("m2")]));
-        spend_advance(&node.state, true).await.unwrap();
-        do_message_send(&node.state, A, false, "gm", 4000, None).await.unwrap_err();
-        let receipt = do_message_retry(&node.state, &A.to_uppercase(), "gm").await.unwrap();
+    async fn psi_reconciliation_accounts_but_never_erases_the_undelivered_record() {
+        let node = fake(AuthMode::Local, compose_script(vec![psi_502(2000, 0, 2000, PSI_TIMEOUT), delivered("m9", 2000)]));
+        let record = psi_first(&node).await;
+        for _ in 0..2 {
+            let err = do_spend_reconcile(&node.state).await.unwrap_err();
+            assert_eq!(err.code, "undelivered_pending", "{}", err.message);
+            assert!(err.message.contains("Nothing was dispatched again") && err.message.contains("still not delivered"), "{}", err.message);
+        }
+        assert_eq!(pending(&node).unwrap().undelivered, record.undelivered, "the record survives reconciliation");
+        assert_eq!(book(&node), [(record.request_hash.clone(), 2000, true)], "settled once, not twice");
+        // Still fenced; the retry is still there.
+        assert_eq!(do_message_send(&node.state, A, false, "gm", 4000, None).await.unwrap_err().code, "spend_unknown");
+        assert_eq!(compose_bodies(&node).len(), 1);
+
+        // The owner stops retrying: released, accounted, nothing dispatched.
+        let done = do_spend_dismiss_undelivered(&node.state).unwrap();
+        assert!(done.contains("2000 msat was paid") && done.contains("nothing more will be paid"), "{done}");
+        assert!(pending(&node).is_none());
+        assert_eq!(do_message_retry(&node.state, A, "gm", None).await.unwrap_err().code, "retry_unavailable");
+        assert_eq!(compose_bodies(&node).len(), 1);
+        assert_eq!(do_spend_dismiss_undelivered(&node.state).unwrap_err().code, "retry_unavailable");
+        // Sending anew is a normal, approved send.
+        assert_eq!(do_message_send(&node.state, A, false, "gm", 4000, None).await.unwrap().message_id, "m9");
+    }
+
+    /// Genome #100, same connection (or a proof that never went out): the
+    /// retry reuses the journal record in place, is capped at the message
+    /// price, and the node re-sends its paid proof: admission once, message once.
+    #[tokio::test]
+    async fn psi_retry_reuses_the_record_in_place_and_pays_the_message_once() {
+        let (routes, watch, at_compose) = compose_watch(vec![psi_502(2000, 0, 2000, PSI_TIMEOUT), delivered("m2", 2000)]);
+        let node = fake(AuthMode::Local, routes);
+        let record = psi_first(&node).await;
+        *watch.lock().unwrap() = Some(journal_file(&node));
+
+        let receipt = do_message_retry(&node.state, &A.to_uppercase(), "gm", None).await.unwrap();
         assert_eq!((receipt.message_id.as_str(), receipt.recipient.as_str(), receipt.amount_msat), ("m2", A, 2000));
         let bodies = compose_bodies(&node);
         assert_eq!(bodies.len(), 2);
         // The contact's message price only: admission plus message can never fit.
         assert_eq!(bodies[1], serde_json::json!({"recipient": A, "is_room": false, "kind": 0, "plaintext": "gm", "max_total_msat": 2000}));
-        assert!(bodies[1]["max_total_msat"].as_u64() < bodies[0]["max_total_msat"].as_u64());
-        assert!(spend_journal(&node.state).unwrap().pending().unwrap().is_none(), "delivered: the fence lifts");
-        let book = with_book(&node.state, false, |b| Ok(b.ledger.clone())).unwrap();
-        assert_eq!(book.iter().map(|e| (e.msat, e.settled)).collect::<Vec<_>>(), [(2000, true), (2000, true)], "admission once, message once");
+        // While the retry was on the wire the SAME record was there, in flight:
+        // never removed and re-created (Codex review of 2d683b5, P2).
+        let during = at_compose.lock().unwrap()[0].clone().expect("the record existed during the retry");
+        assert_eq!(during["request_hash"], serde_json::json!(record.request_hash));
+        assert_eq!((during["undelivered"]["in_flight"].clone(), during["undelivered"]["attempts"].clone()), (serde_json::json!(true), serde_json::json!(1)));
+        assert_eq!(during["charge_id"], serde_json::json!(format!("{}-retry-1", record.request_hash)));
+
+        assert!(pending(&node).is_none(), "delivered: the fence lifts");
+        assert_eq!(book(&node), [(record.request_hash.clone(), 2000, true), (format!("{}-retry-1", record.request_hash), 2000, true)], "admission once, message once");
         // Nothing left to retry: no third compose.
-        assert_eq!(do_message_retry(&node.state, A, "gm").await.unwrap_err().code, "retry_unavailable");
+        assert_eq!(do_message_retry(&node.state, A, "gm", None).await.unwrap_err().code, "retry_unavailable");
         assert_eq!(compose_bodies(&node).len(), 2);
     }
 
+    /// Genome #100, a proof consumed on an earlier connection: the node needs a
+    /// new admission. The message-only cap makes it refuse before paying; the
+    /// owner sees the price and approves it; the approved retry pays admission
+    /// once plus the message, through the same record. Never a silent second admission.
     #[tokio::test]
-    async fn psi_retry_on_a_new_connection_is_refused_before_any_payment() {
-        // After a flap the node would pay admission again; the message-only cap refuses it.
-        let cap_refusal = (409, serde_json::json!({"error": "requires admission again on a new connection", "code": "price_cap_exceeded"}).to_string());
-        let node = fake(AuthMode::Local, compose_script(vec![psi_502(2000, 0, 2000, PSI_TIMEOUT), cap_refusal]));
-        spend_advance(&node.state, true).await.unwrap();
-        do_message_send(&node.state, A, false, "gm", 4000, None).await.unwrap_err();
-        let err = do_message_retry(&node.state, A, "gm").await.unwrap_err();
-        assert_eq!(err.code, "retry_needs_admission");
-        assert!(err.message.contains("refused before paying anything"), "{}", err.message);
-        // The paid, undelivered record is back, still fenced; the book gained nothing.
-        let pending = spend_journal(&node.state).unwrap().pending().unwrap().unwrap();
-        assert_eq!(pending.undelivered.map(|u| u.paid_msat), Some(2000));
-        assert_eq!(with_book(&node.state, false, |b| Ok(b.ledger.clone())).unwrap().len(), 1);
+    async fn psi_admission_due_again_is_shown_with_its_price_and_paid_once_on_approval() {
+        let cap_refusal = (409, serde_json::json!({"error": "first-contact total exceeds cap", "code": "price_cap_exceeded"}).to_string());
+        let (routes, watch, at_compose) = compose_watch(vec![psi_502(2000, 0, 2000, PSI_TIMEOUT), cap_refusal, delivered("m3", 4000)]);
+        let node = fake(AuthMode::Local, routes);
+        let record = psi_first(&node).await;
+        *watch.lock().unwrap() = Some(journal_file(&node));
+
+        let err = do_message_retry(&node.state, A, "gm", None).await.unwrap_err();
+        assert_eq!(err.code, "retry_needs_admission", "{}", err.message);
+        // No signed quote on this node: an estimate from the admission paid before.
+        assert_eq!(err.admission, Some(act::AdmissionView { admission_msat: 2000, message_msat: 2000, total_msat: 4000, quoted: false }));
+        assert!(err.message.contains("Nothing was paid") && err.message.contains("up to 4000 msat"), "{}", err.message);
+        // Refused before paying: the prior record is back exactly, the book gained nothing.
+        assert_eq!(pending(&node).unwrap().undelivered, record.undelivered);
+        assert_eq!(pending(&node).unwrap().charge_id, None);
+        assert_eq!(book(&node).len(), 1);
         assert_eq!(do_message_send(&node.state, A, false, "gm", 4000, None).await.unwrap_err().code, "spend_unknown");
-        assert_eq!(compose_bodies(&node).len(), 2);
+
+        // The owner approves the shown price under the normal approval.
+        let receipt = do_message_retry(&node.state, A, "gm", Some(4000)).await.unwrap();
+        assert_eq!((receipt.message_id.as_str(), receipt.amount_msat), ("m3", 4000));
+        let bodies = compose_bodies(&node);
+        assert_eq!(bodies.len(), 3);
+        assert_eq!(bodies[2]["max_total_msat"], 4000, "capped at exactly what the owner approved");
+        assert_eq!(at_compose.lock().unwrap().len(), 2, "each retry went out with the record in place");
+        assert!(at_compose.lock().unwrap().iter().all(|r| r.as_ref().is_some_and(|r| r["undelivered"]["in_flight"] == true)));
+        assert!(pending(&node).is_none());
+        let paid: Vec<u64> = book(&node).into_iter().map(|(_, msat, _)| msat).collect();
+        assert_eq!(paid, [2000, 4000], "the first admission, then one approved admission plus the message");
+        assert_eq!(do_message_retry(&node.state, A, "gm", Some(4000)).await.unwrap_err().code, "retry_unavailable", "no third payment");
+        assert_eq!(compose_bodies(&node).len(), 3);
+    }
+
+    /// With a node budget grant that covers this contact the node could pay
+    /// admission again on its own, whatever the message cap: the app never
+    /// retries silently there. It shows the contact's own signed quote first.
+    #[tokio::test]
+    async fn psi_a_budget_grant_that_could_readmit_is_never_retried_silently() {
+        let (node, _dir, g1) = g1_node(&["read", "receive", "spend"]);
+        *g1.first_contact.lock().unwrap() = Some((200, serde_json::json!({})));
+        let body = act::compose_body(A, false, "gm").unwrap();
+        let journal = spend_journal(&node.state).unwrap();
+        let mut record = journal.begin(OWN, "/messages/compose", &body, 4000).unwrap();
+        record.accounting_msat = Some(2000);
+        record.undelivered = Some(spend_journal::Undelivered {
+            peer: A.into(), paid_msat: 2000, retry: true, op: spend_journal::operation(&body),
+            admission_msat: 2000, in_flight: false, attempts: 0,
+        });
+        journal.save(&record).unwrap();
+        drop(journal);
+        let mut grant = g1_grant(3600, 400_000, 400_000);
+        grant["per_recipient_msat"] = serde_json::json!({A: 100_000});
+        *node.state.node_grant.lock().unwrap() = grant::parse(&serde_json::json!({"grant": grant}).to_string()).unwrap();
+
+        let err = do_message_retry(&node.state, A, "gm", None).await.unwrap_err();
+        assert_eq!(err.code, "retry_needs_admission", "{}", err.message);
+        assert_eq!(err.admission, Some(act::AdmissionView { admission_msat: 1500, message_msat: 2000, total_msat: 3500, quoted: true }));
+        assert!(err.message.contains("3500 msat in all"), "{}", err.message);
+        assert!(compose_bodies(&node).is_empty(), "nothing dispatched");
+        assert_eq!(pending(&node).unwrap().undelivered, record.undelivered);
     }
 
     #[tokio::test]
     async fn psi_a_second_incomplete_retry_reports_the_running_total() {
         // Same connection: the prior admission is not a new debit (amount 0).
-        let node = fake(AuthMode::Local, compose_script(vec![psi_502(2000, 0, 2000, PSI_TIMEOUT), psi_502(0, 2000, 0, PSI_TIMEOUT), delivered("m3")]));
-        spend_advance(&node.state, true).await.unwrap();
-        do_message_send(&node.state, A, false, "gm", 4000, None).await.unwrap_err();
-        let again = do_message_retry(&node.state, A, "gm").await.unwrap_err();
+        let node = fake(AuthMode::Local, compose_script(vec![psi_502(2000, 0, 2000, PSI_TIMEOUT), psi_502(0, 2000, 0, PSI_TIMEOUT), delivered("m3", 2000)]));
+        let record = psi_first(&node).await;
+        let again = do_message_retry(&node.state, A, "gm", None).await.unwrap_err();
         assert_eq!(again.undelivered, Some(act::UndeliveredView { paid_msat: 2000, retry: true }));
-        assert_eq!(do_message_retry(&node.state, A, "gm").await.unwrap().message_id, "m3");
-        let paid: u64 = with_book(&node.state, false, |b| Ok(b.ledger.iter().map(|e| e.msat).sum())).unwrap();
-        assert_eq!(paid, 4000, "one admission and one message in the book");
+        let u = pending(&node).unwrap().undelivered.unwrap();
+        assert_eq!((u.in_flight, u.attempts, u.admission_msat), (false, 1, 2000), "the same record, one retry on");
+        assert_eq!(do_message_retry(&node.state, A, "gm", None).await.unwrap().message_id, "m3");
+        assert_eq!(book(&node), [
+            (record.request_hash.clone(), 2000, true),
+            (format!("{}-retry-1", record.request_hash), 0, true),
+            (format!("{}-retry-2", record.request_hash), 2000, true),
+        ], "one admission and one message in the book");
+    }
+
+    /// A retry whose outcome is unknown leaves its record in flight: fenced,
+    /// not retryable, not dismissable, and reconciliation does not guess.
+    #[tokio::test]
+    async fn psi_a_retry_with_an_unknown_outcome_stays_fenced() {
+        let node = fake(AuthMode::Local, compose_script(vec![psi_502(2000, 0, 2000, PSI_TIMEOUT), (500, r#"{"error":"boom","code":500}"#.into())]));
+        psi_first(&node).await;
+        assert_eq!(do_message_retry(&node.state, A, "gm", None).await.unwrap_err().code, "spend_unknown");
+        let u = pending(&node).expect("the record stays").undelivered.unwrap();
+        assert!(u.in_flight);
+        assert_eq!(do_message_retry(&node.state, A, "gm", None).await.unwrap_err().code, "retry_unavailable");
+        assert_eq!(do_spend_reconcile(&node.state).await.unwrap_err().code, "spend_unknown");
+        assert_eq!(do_spend_dismiss_undelivered(&node.state).unwrap_err().code, "spend_unknown");
+        assert_eq!(do_message_send(&node.state, A, false, "gm", 4000, None).await.unwrap_err().code, "spend_unknown");
+        assert_eq!(compose_bodies(&node).len(), 2);
     }
 
     #[tokio::test]
@@ -4479,26 +4732,27 @@ mod control_act_tests {
         let err = do_message_send(&node.state, A, false, "gm", 4000, None).await.unwrap_err();
         assert_eq!(err.undelivered, Some(act::UndeliveredView { paid_msat: 4000, retry: false }));
         assert!(!err.message.contains("Retry"), "{}", err.message);
-        assert_eq!(do_message_retry(&node.state, A, "gm").await.unwrap_err().code, "retry_unavailable");
+        assert_eq!(do_message_retry(&node.state, A, "gm", None).await.unwrap_err().code, "retry_unavailable");
+        assert_eq!(do_message_retry(&node.state, A, "gm", Some(8000)).await.unwrap_err().code, "retry_unavailable");
         assert_eq!(compose_bodies(&node).len(), 1, "no second dispatch");
 
-        // A retry is bound to the contact that was paid.
+        // A retry is bound to the contact that was paid, and to this very message.
         let node = fake(AuthMode::Local, compose_script(vec![psi_502(2000, 0, 2000, PSI_TIMEOUT)]));
-        spend_advance(&node.state, true).await.unwrap();
-        do_message_send(&node.state, A, false, "gm", 4000, None).await.unwrap_err();
-        assert_eq!(do_message_retry(&node.state, C, "gm").await.unwrap_err().code, "retry_unavailable");
+        psi_first(&node).await;
+        assert_eq!(do_message_retry(&node.state, C, "gm", None).await.unwrap_err().code, "retry_unavailable");
+        assert_eq!(do_message_retry(&node.state, A, "another message", None).await.unwrap_err().code, "retry_unavailable");
         assert_eq!(compose_bodies(&node).len(), 1);
     }
 
     #[tokio::test]
     async fn psi_a_retry_needs_the_owner_approval_like_any_send() {
         let node = fake(AuthMode::Local, compose_script(vec![psi_502(2000, 0, 2000, PSI_TIMEOUT)]));
-        spend_advance(&node.state, true).await.unwrap();
-        do_message_send(&node.state, A, false, "gm", 4000, None).await.unwrap_err();
+        let record = psi_first(&node).await;
         node.state.spend.lock().unwrap().arm(now_ms() - act::SPEND_WINDOW_MS - 1, act::SpendBasis::AppLock);
-        assert_eq!(do_message_retry(&node.state, A, "gm").await.unwrap_err().code, "spend_expired");
+        assert_eq!(do_message_retry(&node.state, A, "gm", None).await.unwrap_err().code, "spend_expired");
+        assert_eq!(do_message_retry(&node.state, A, "gm", Some(4000)).await.unwrap_err().code, "spend_expired");
         assert_eq!(compose_bodies(&node).len(), 1);
-        assert!(spend_journal(&node.state).unwrap().pending().unwrap().unwrap().undelivered.is_some(), "still retryable");
+        assert_eq!(pending(&node).unwrap().undelivered, record.undelivered, "untouched: still retryable");
     }
 
     #[tokio::test]
@@ -6544,6 +6798,7 @@ mod assistant_acl_tests {
                 "budget_resume",
                 "message_send",
                 "message_retry",
+                "spend_dismiss_undelivered",
                 "room_quote",
                 "invoice_create",
                 "invoice_amount",
