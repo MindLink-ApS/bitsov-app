@@ -1858,34 +1858,52 @@ function NewTrack(props: {
   const [card, setCard] = createSignal<Introduction | null>(null);
   const [cardErr, setCardErr] = createSignal<string | null>(null);
   const [opening, setOpening] = createSignal(false);
-  /** The owner's explicit OK for a local-network address, per card. */
-  const [allowLocal, setAllowLocal] = createSignal(false);
+  // The canonical link includes the signed payload and signature. Keep the
+  // displayed key/address with it so consent can never migrate to another card.
+  const [localConsent, setLocalConsent] = createSignal<Pick<Introduction, 'node_id' | 'endpoint' | 'link'> | null>(null);
+  const allowLocal = (c: Introduction) => {
+    const consent = localConsent();
+    return consent !== null && consent.node_id === c.node_id && consent.endpoint === c.endpoint && consent.link === c.link;
+  };
+  let readRevision = 0;
   const cardLive = () => {
     const c = card();
     return c && c.expires_at > nowSecs() ? c : null;
   };
   const readCard = () => {
+    const revision = ++readRevision;
     setCard(null);
-    setAllowLocal(false);
+    setLocalConsent(null);
     setCardErr(null);
     const text = pasted();
     props.source.introductionRead(text).then(
-      (c) => pasted() === text && setCard(c),
-      (e) => setCardErr(asActionError(e).message),
+      (c) => {
+        if (!active) return;
+        // Even a stale completion invalidates consent, but it must not replace
+        // the current card (including an input edited away and then restored).
+        setLocalConsent(null);
+        if (revision === readRevision) setCard(c);
+      },
+      (e) => {
+        if (!active) return;
+        setLocalConsent(null);
+        if (revision === readRevision) setCardErr(asActionError(e).message);
+      },
     );
   };
   const continueCard = () => {
     const c = cardLive();
-    if (!c || opening() || (c.reach === 'local' && !allowLocal())) return;
+    if (!c || opening() || (c.reach === 'local' && !allowLocal(c))) return;
     const startedRevision = formRevision;
     const unchanged = () => active && formRevision === startedRevision;
     setOpening(true);
     setCardErr(null);
-    props.source.introductionOpen(c.link, c.reach === 'local' && allowLocal()).then(
+    props.source.introductionOpen(c.link, c.reach === 'local' && allowLocal(c)).then(
       (opened) => {
         const follow = unchanged();
         if (active) setOpening(false);
         if (follow) {
+          setLocalConsent(null);
           setCard(null);
           setPasted('');
         }
@@ -1998,6 +2016,8 @@ function NewTrack(props: {
               placeholder="bitsov://introduce#…"
               value={pasted()}
               onInput={(e) => {
+                readRevision += 1;
+                setLocalConsent(null);
                 setPasted(e.currentTarget.value);
                 setCard(null);
                 setCardErr(null);
@@ -2027,8 +2047,10 @@ function NewTrack(props: {
                       <input
                         type="checkbox"
                         data-door-allow-local
-                        checked={allowLocal()}
-                        onChange={(e) => setAllowLocal(e.currentTarget.checked)}
+                        checked={allowLocal(c())}
+                        onChange={(e) => setLocalConsent(e.currentTarget.checked
+                          ? { node_id: c().node_id, endpoint: c().endpoint, link: c().link }
+                          : null)}
                         disabled={opening()}
                       />
                       <span>Allow this local address</span>
@@ -2049,12 +2071,12 @@ function NewTrack(props: {
                         type="button"
                         class="primary"
                         data-door-continue
-                        disabled={opening() || (c().reach === 'local' && !allowLocal())}
+                        disabled={opening() || (c().reach === 'local' && !allowLocal(c()))}
                         onClick={continueCard}
                       >
                         {opening() ? 'Connecting…' : 'Continue'}
                       </button>
-                      <button type="button" class="quiet" onClick={() => setCard(null)} disabled={opening()}>
+                      <button type="button" class="quiet" onClick={() => { readRevision += 1; setLocalConsent(null); setCard(null); }} disabled={opening()}>
                         Cancel
                       </button>
                     </span>
