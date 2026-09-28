@@ -2736,6 +2736,11 @@ async fn do_message_send_with(
     let price = if is_room {
         let quote = read_room_quote(state, recipient).await?;
         act::room_sendable(&quote)?;
+        // Compose accepts one caller fee limit for the entire fan-out. Bound it
+        // by every displayed member allowance; the node takes min(policy, caller)
+        // per payment. Keep the confirmed total and recipient caps unchanged.
+        let caller_fee = quote.members.iter().map(|m| m.max_routing_fee_msat).min().unwrap_or(0);
+        body["max_routing_fee_msat"] = serde_json::json!(caller_fee);
         quote.total_msat
     } else if node_ok.is_some() {
         // The owner confirms the fresh node quote, including its configured
@@ -2752,11 +2757,9 @@ async fn do_message_send_with(
     // A confirmed first paid message to a contact: the node backs that one OK
     // with a single-use grant for exactly this contact and this cap. The same
     // OK re-admits a known contact the node's grant does not budget yet.
-    if node_ok.is_none() {
-        body["max_routing_fee_msat"] = serde_json::json!(if is_room { 10_000 } else {
-            let quote = read_price_quote(state, Some(&recipient)).await?;
-            quote.max_routing_fee_msat
-        });
+    if node_ok.is_none() && !is_room {
+        let quote = read_price_quote(state, Some(&recipient)).await?;
+        body["max_routing_fee_msat"] = serde_json::json!(quote.max_routing_fee_msat);
     }
     if let Some(contact_budget) = node_ok {
         confirm_first_contact(state, &recipient, max_msat, contact_budget).await?;
@@ -4404,8 +4407,99 @@ mod control_act_tests {
         assert!(receipt.is_room);
         assert_eq!(
             node.posts(),
-            [("/messages/compose".to_string(), serde_json::json!({"recipient": ROOM, "is_room": true, "kind": 0, "plaintext": "gm", "max_total_msat":13000, "max_routing_fee_msat":10000, "max_recipient_msat":{A:7000,C:6000}}))]
+            [("/messages/compose".to_string(), serde_json::json!({"recipient": ROOM, "is_room": true, "kind": 0, "plaintext": "gm", "max_total_msat":13000, "max_routing_fee_msat":5000, "max_recipient_msat":{A:7000,C:6000}}))]
         );
+    }
+
+    // Exercise the real quote -> request -> journal path against the genome
+    // policy/caller minimum and its all-in room cap checks (genome dac01c8).
+    async fn room_fee_policy_case(minimum: u64, second_price: u64, second_cap: u64) {
+        let routes: Routes = Arc::new(move |m, p, b| {
+            if p == "/pricing/peers" {
+                return (200, serde_json::json!([
+                    {"peer_id": A, "prices": {"communication": 2000}, "age_secs": 5, "stale": false},
+                    {"peer_id": C, "prices": {"communication": second_price}, "age_secs": 5, "stale": false}
+                ]).to_string());
+            }
+            if p == "/messages/compose" {
+                let request: serde_json::Value = serde_json::from_str(b).unwrap();
+                let caller = request["max_routing_fee_msat"].as_u64().unwrap();
+                let mut fee_total = 0;
+                for (peer, principal) in [(A, 2000u64), (C, second_price)] {
+                    let fee = (principal / 100).max(minimum).min(10_000).min(caller);
+                    fee_total += fee;
+                    if principal + fee > request["max_recipient_msat"][peer].as_u64().unwrap() {
+                        return (409, serde_json::json!({"error":"member all-in price exceeds cap", "code":"price_cap_exceeded"}).to_string());
+                    }
+                }
+                return (200, serde_json::json!({"message_id":"m1", "delivered":true,
+                    "amount_msat":2000 + second_price, "max_routing_fee_msat":fee_total,
+                    "member_outcomes":[
+                        {"recipient":A,"status":"settled","amount_msat":2000,"message_id":"m1"},
+                        {"recipient":C,"status":"settled","amount_msat":second_price,"message_id":"m2"}
+                    ]}).to_string());
+            }
+            happy()(m, p, b)
+        });
+        let node = fake(AuthMode::Local, routes);
+        let quote = read_room_quote(&node.state, ROOM).await.unwrap();
+        assert_eq!(quote.members[0].msat, 7000);
+        assert_eq!(quote.members[0].max_routing_fee_msat, 5000);
+        assert_eq!(quote.members[1].msat, second_cap);
+        assert_eq!(quote.total_msat, 7000 + second_cap);
+        with_book(&node.state, true, |b| { b.set_ceiling(2_000_000); Ok(()) }).unwrap();
+        spend_advance(&node.state, true).await.unwrap();
+        let caps = quote.members.iter().map(|m| (m.node_id.clone(), m.msat)).collect();
+        let receipt = do_message_send(&node.state, ROOM, true, "gm", quote.total_msat, Some(caps)).await.unwrap();
+        assert_eq!(receipt.total_msat, 2000 + second_price + 10_000);
+        assert!(spend_journal(&node.state).unwrap().pending().unwrap().is_none());
+        let posts = node.posts();
+        assert_eq!(posts.len(), 1);
+        assert_eq!(posts[0].1["max_routing_fee_msat"], 5000);
+        assert_eq!(posts[0].1["max_total_msat"], 7000 + second_cap);
+        assert_eq!(posts[0].1["max_recipient_msat"], serde_json::json!({A:7000,C:second_cap}));
+    }
+
+    #[tokio::test]
+    async fn room_fee_default_policy_control() {
+        room_fee_policy_case(5000, 2000, 7000).await;
+    }
+
+    #[tokio::test]
+    async fn room_fee_higher_node_floor_respects_displayed_allowance() {
+        room_fee_policy_case(7500, 2000, 7000).await;
+    }
+
+    #[tokio::test]
+    async fn room_fee_mixed_prices_bound_shared_limit_to_smallest_allowance() {
+        room_fee_policy_case(7500, 750_000, 757_500).await;
+    }
+
+    #[tokio::test]
+    async fn room_fee_higher_all_in_quote_requires_another_approval() {
+        let raised = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let changing = raised.clone();
+        let routes: Routes = Arc::new(move |m, p, b| {
+            if p == "/pricing/peers" && changing.load(Ordering::SeqCst) {
+                return (200, serde_json::json!([
+                    {"peer_id": A, "prices": {"communication": 4500}, "age_secs": 5, "stale": false}
+                ]).to_string());
+            }
+            happy()(m, p, b)
+        });
+        let node = fake(AuthMode::Local, routes);
+        let quote = read_room_quote(&node.state, ROOM).await.unwrap();
+        assert_eq!(quote.total_msat, 13000);
+        spend_advance(&node.state, true).await.unwrap();
+        raised.store(true, Ordering::SeqCst);
+        let caps = quote.members.iter().map(|m| (m.node_id.clone(), m.msat)).collect();
+        let err = do_message_send(&node.state, ROOM, true, "gm", quote.total_msat, Some(caps)).await.unwrap_err();
+        assert_eq!(err.code, "price_changed");
+        assert!(node.posts().is_empty());
+        assert!(spend_journal(&node.state).unwrap().pending().unwrap().is_none());
+        let refreshed = read_room_quote(&node.state, ROOM).await.unwrap();
+        assert_eq!(refreshed.total_msat, 15500);
+        assert_eq!(refreshed.members[0].msat, 9500);
     }
 
     #[tokio::test]

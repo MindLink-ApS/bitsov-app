@@ -909,6 +909,39 @@ describe('invisible payments in the composer and the context panel', () => {
     await vi.waitFor(() => expect(host.used('budget_set')[0]?.args).toEqual({ target: MAYA, room: false, limit_msat: 10_000 }));
   });
 
+  it('refreshes a higher room fee quote and waits for another tap at the displayed all-in price', async () => {
+    let fee = 5000;
+    let sends = 0;
+    const host = stubHost(open([{ target: ROOM, room: true, limit_msat: 50_000, spent_msat: 0 }]), {
+      room_quote: () => ({ room_id: ROOM, members: [{ node_id: MAYA, msat: 2000 + fee,
+        max_routing_fee_msat: fee, advertised: true, connected: true }],
+        total_msat: 2000 + fee, max_routing_fee_msat: fee, unreachable: [], estimate: false }),
+      message_send: (args) => {
+        sends += 1;
+        if (sends === 1) {
+          fee = 7500;
+          throw { code: 'price_cap_exceeded', message: 'The all-in price changed. Review the new quote.' };
+        }
+        return { message_id: 'room-sent', recipient: ROOM, is_room: true, delivered: true,
+          amount_msat: 2000, max_routing_fee_msat: 7500, total_msat: 9500, sent_at_ms: Date.now() };
+      },
+    });
+    await openShell();
+    $<HTMLButtonElement>(`[data-track="room:${ROOM}"]`)!.click();
+    await vi.waitFor(() => expect($('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('7000'));
+    type('[data-composer] textarea', 'room draft');
+    submit();
+    await vi.waitFor(() => expect($('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('9500'));
+    expect(text('[data-cost]')).toContain('7.5');
+    expect(host.used('message_send')).toHaveLength(1);
+    expect(host.used('message_send')[0].args).toMatchObject({ max_msat: 7000, max_recipient_msat: { [MAYA]: 7000 } });
+    expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('room draft');
+    expect(text('[data-send]')).toContain('9.5 sats');
+    submit();
+    await vi.waitFor(() => expect(host.used('message_send')).toHaveLength(2));
+    expect(host.used('message_send')[1].args).toMatchObject({ max_msat: 9500, max_recipient_msat: { [MAYA]: 9500 } });
+  });
+
   it('a known contact the node will not re-admit from the budget brings the door card back once', async () => {
     let sends = 0;
     const host = stubHost(open([{ target: MAYA, room: false, limit_msat: 50_000, spent_msat: 0 }]), {
