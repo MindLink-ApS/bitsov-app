@@ -224,6 +224,38 @@ def run(r):
         s.check('pay: B\'s invoice settled', settled_b, status)
         s.check('payment scope and fee warning are visible', 'Routing fees are outside' in r.text('[data-budget-payment]'))
         s.check('app invoice payment counts 3 sats in the shared daily book', r.wait_until(lambda: app_tally() == before_pay + 3, 15))
+        # Independent reviewer probe: replay the already-settled invoice through
+        # the real composer. Log amounts only, never invoice/token material.
+        replay_tally_before = app_tally()
+        replay_balance_before = {node: r.get(node, '/payments/balance')['balance_msat'] for node in ('a', 'b')}
+        replay_history_before = [payment for payment in r.get('a', '/payments') if payment.get('payment_hash') == inv.get('payment_hash')]
+        replay_receipts_before = len(r.ui('attrs', selector='[data-artifact="payment"]', names=['data-status']))
+        r.ui('click', selector='[data-composer-mode="pay"]')
+        r.ui_try('click', text='Invoice', role='tab')
+        r.ui('fill', selector='textarea[data-pay-invoice]', value=bolt11)
+        r.ui('wait', text='Pay', selector='[data-send]', timeoutMs=20000)
+        r.ui('click', selector='[data-send]', timeoutMs=20000)
+        replay_completed = r.wait_until(lambda: len(r.ui('attrs', selector='[data-artifact="payment"]', names=['data-status'])) > replay_receipts_before, 20)
+        # Let the asynchronous budget refresh triggered by the action finish.
+        r.wait_until(lambda: app_tally() != replay_tally_before, 5)
+        replay_tally_after = app_tally()
+        replay_balance_after = {node: r.get(node, '/payments/balance')['balance_msat'] for node in ('a', 'b')}
+        replay_history_after = [payment for payment in r.get('a', '/payments') if payment.get('payment_hash') == inv.get('payment_hash')]
+        replay_same_payment = len(replay_history_before) == len(replay_history_after) == 1 and replay_history_after[0].get('payment_hash') == replay_history_before[0].get('payment_hash')
+        replay_receipts_after = len(r.ui('attrs', selector='[data-artifact="payment"]', names=['data-status']))
+        replay_values = {
+            'completed': bool(replay_completed),
+            'receipt_count_before': replay_receipts_before,
+            'receipt_count_after': replay_receipts_after,
+            'same_single_payment_history_hash': replay_same_payment,
+            'wallet_msat_before': replay_balance_before,
+            'wallet_msat_after': replay_balance_after,
+            'app_tally_sats_before': replay_tally_before,
+            'app_tally_sats_after': replay_tally_after,
+        }
+        s.check('reviewer: replayed invoice returns without another wallet transfer', replay_completed and replay_same_payment and replay_balance_after == replay_balance_before, replay_values)
+        s.check('reviewer: replayed settled invoice must not double-count principal', replay_completed and replay_same_payment and replay_balance_after == replay_balance_before and replay_tally_after == replay_tally_before, replay_values)
+        s.snap('reviewer-duplicate-invoice-accounting')
         s.check('budget scope lists exclusions and finite G1 grant', 'does not refill daily' in r.text('[data-budget-scope]'))
         s.snap('budget-scope-copy')
         before_file = app_tally()

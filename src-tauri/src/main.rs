@@ -2139,14 +2139,23 @@ fn reserve(state: &NodeState, auth: Auth, charge: &Charge, id: &str, max_msat: u
 }
 
 /// Settle or release durably; callers must retain the journal on I/O failure.
-fn close_charge(state: &NodeState, id: &str, paid: Option<u64>) -> Result<(), ActionError> {
+fn close_charge(state: &NodeState, id: &str, paid: Option<u64>, target: Option<&Target>) -> Result<(), ActionError> {
     with_book(state, true, |book| {
         match paid {
             Some(msat) => {
-                if !book.ledger.iter().any(|entry| entry.id == id) {
-                    return Err(spend_journal::unknown("The saved payment has no matching budget reservation. Inspect the local budget book."));
+                let entry = book.ledger.iter().rev().find(|entry| entry.id == id)
+                    .ok_or_else(|| spend_journal::unknown("The saved payment has no matching budget reservation. Inspect the local budget book."))?;
+                if msat > 0 && matches!(entry.target.as_str(), budget::INVOICE_PAYMENTS | budget::KEYSEND_PAYMENTS) {
+                    let Some(Target::Payment { hash }) = target else {
+                        return Err(spend_journal::unknown("The payment has no canonical identity. The reservation stays held."));
+                    };
+                    if hash.len() != 64 || !hash.bytes().all(|c| c.is_ascii_hexdigit()) {
+                        return Err(spend_journal::unknown("The payment identity is invalid. The reservation stays held."));
+                    }
+                    book.settle_payment(id, hash, msat, now_ms());
+                } else {
+                    book.settle(id, msat, now_ms());
                 }
-                book.settle(id, msat, now_ms());
             }
             None => book.release(id),
         }
@@ -2202,7 +2211,7 @@ async fn money_post(state: &NodeState, auth: Auth, path: &str, body: serde_json:
         journal.save(&pending)?;
     }
     let release = |state: &NodeState| match &charged {
-        Some(id) => close_charge(state, id, None),
+        Some(id) => close_charge(state, id, None, None),
         None => Ok(()),
     };
     // Journal I/O can take time. Recheck immediately before issuing the request.
@@ -2285,7 +2294,7 @@ async fn money_post(state: &NodeState, auth: Auth, path: &str, body: serde_json:
     if let (Some(id), true) = (&charged, complete) {
         pending.accounting_msat = Some(paid);
         journal.save(&pending)?;
-        close_charge(state, id, Some(paid))?;
+        close_charge(state, id, Some(paid), pending.target.as_ref())?;
     }
     if pending.over_budget || !complete {
         journal.save(&pending)?;
@@ -2314,7 +2323,7 @@ async fn do_spend_reconcile(state: &NodeState) -> Result<String, ActionError> {
         if pending.over_budget {
             return Err(spend_journal::unknown("The node exceeded its spending bound; inspect the owner node."));
         }
-        close_charge(state, &pending.request_hash, Some(paid))?;
+        close_charge(state, &pending.request_hash, Some(paid), pending.target.as_ref())?;
         journal.clear()?;
         return Ok("Previous action accounted for. Nothing was dispatched again.".into());
     }
@@ -2337,7 +2346,7 @@ async fn do_spend_reconcile(state: &NodeState) -> Result<String, ActionError> {
                 };
                 pending.accounting_msat = Some(paid);
                 journal.save(&pending)?;
-                close_charge(state, &pending.request_hash, Some(paid))?;
+                close_charge(state, &pending.request_hash, Some(paid), pending.target.as_ref())?;
             }
             journal.clear()?;
             Ok(format!("Previous action {status}. Nothing was dispatched again."))
@@ -4199,8 +4208,8 @@ mod control_act_tests {
                     "member_outcomes":[{"recipient":A,"status":"settled","amount_msat":2000,"message_id":"m1"},{"recipient":C,"status":"settled","amount_msat":1000,"message_id":"m2"}]}),
                 "/messages/compose" => serde_json::json!({"message_id": "m1", "delivered": true, "amount_msat": 2000}),
                 "/payments/price/200" => serde_json::json!({"kind": 200, "price_msat": 3000}),
-                "/payments/pay" => serde_json::json!({"payment_hash": "HASH", "amount_msat": 1000, "preimage": "PREIMAGE"}),
-                "/payments/keysend" => serde_json::json!({"payment_hash": "HASH", "amount_msat": 5000, "preimage": "PREIMAGE", "status": "Settled"}),
+                "/payments/pay" => serde_json::json!({"payment_hash": "ab".repeat(32), "amount_msat": 1000, "preimage": "PREIMAGE"}),
+                "/payments/keysend" => serde_json::json!({"payment_hash": "cd".repeat(32), "amount_msat": 5000, "preimage": "PREIMAGE", "status": "Settled"}),
                 "/payments/invoice" => serde_json::json!({"bolt11": "lntb210n1sample", "payment_hash": "HASH"}),
                 "/invites" => serde_json::json!({"invite_id": "i1", "invite_token_b64": "tok", "invite_link": "bitsov://invite/tok"}),
                 "/invites/accept" => serde_json::json!({"inviter_pubkey": A, "channel_size_hint": null, "addr": "203.0.113.5:9735"}),
@@ -4349,7 +4358,7 @@ mod control_act_tests {
         let ks = do_payment_keysend(&node.state, &format!("03{}", "cd".repeat(32)), 5000, Some("thanks"), 5000).await.unwrap();
         assert_eq!(ks.status, "settled");
         let out = serde_json::to_string(&(receipt, ks)).unwrap();
-        assert!(!out.contains("PREIMAGE") && !out.contains("HASH"));
+        assert!(!out.contains("PREIMAGE") && !out.contains(&"ab".repeat(32)) && !out.contains(&"cd".repeat(32)));
         assert_eq!(node.posts()[0], ("/payments/pay".to_string(), serde_json::json!({"bolt11": "lntb10n1x"})));
     }
 
@@ -4595,6 +4604,135 @@ mod control_act_tests {
             assert_eq!(send().await.unwrap_err().code, "ceiling_exhausted", "{action}");
             assert_eq!(node.targets().len(), requests, "{action} refused before any request");
         }
+    }
+
+    #[tokio::test]
+    async fn budget_scope_invoice_replay_counts_once_across_restart() {
+        let routes: Routes = Arc::new(|m, p, b| {
+            if p == "/payments/pay" {
+                return (200, serde_json::json!({"payment_hash": "ab".repeat(32), "amount_msat": 1000, "preimage": "PREIMAGE"}).to_string());
+            }
+            happy()(m, p, b)
+        });
+        let node = fake(AuthMode::Local, routes);
+        spend_advance(&node.state, true).await.unwrap();
+        do_payment_pay(&node.state, "lntb10n1x", 1000, 2000).await.unwrap();
+        do_payment_pay(&node.state, "lntb10n1x", 1000, 2000).await.unwrap();
+        assert_eq!(budget_now(&node.state).spent_msat, 1000, "replaying a settled invoice is not another transfer");
+        let after = reopen(&node);
+        spend_advance(&after, true).await.unwrap();
+        // Uppercase BOLT11 changes the request hash, not the payment identity.
+        do_payment_pay(&after, "LNTB10N1X", 1000, 3000).await.unwrap();
+        assert_eq!(budget_now(&after).spent_msat, 1000);
+        assert_eq!(budget_now(&after).unsettled_msat, 0);
+        assert_eq!(node.posts().iter().filter(|(p, _)| p == "/payments/pay").count(), 3);
+    }
+
+    #[tokio::test]
+    async fn budget_scope_invoice_replay_reconciliation_survives_book_write_crash() {
+        let pending_reply = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reply = pending_reply.clone();
+        let routes: Routes = Arc::new(move |m, p, b| {
+            let value = match p {
+                "/payments/pay" => serde_json::json!({"payment_hash": "ab".repeat(32), "amount_msat": 1000,
+                    "preimage": if reply.load(std::sync::atomic::Ordering::SeqCst) { "" } else { "PREIMAGE" }}),
+                "/payments?limit=100" => serde_json::json!([
+                    {"payment_hash": "ab".repeat(32), "amount_msat": 1000, "direction": "outgoing", "status": "settled"}
+                ]),
+                _ => return happy()(m, p, b),
+            };
+            (200, value.to_string())
+        });
+        let node = fake(AuthMode::Local, routes);
+        spend_advance(&node.state, true).await.unwrap();
+        do_payment_pay(&node.state, "lntb10n1x", 1000, 2000).await.unwrap();
+        pending_reply.store(true, std::sync::atomic::Ordering::SeqCst);
+        do_payment_pay(&node.state, "lntb10n1x", 1000, 2000).await.unwrap();
+        assert_eq!(budget_now(&node.state).spent_msat, 3000, "unknown replay keeps its full reservation");
+        assert_eq!(budget_now(&node.state).unsettled_msat, 2000);
+        let after = reopen(&node);
+        let mut pending = spend_journal(&after).unwrap().pending().unwrap().unwrap();
+        do_spend_reconcile(&after).await.unwrap();
+        assert_eq!(budget_now(&after).spent_msat, 1000);
+        assert_eq!(budget_now(&after).unsettled_msat, 0);
+        // Recreate the journal left by a crash after book save but before clear.
+        pending.accounting_msat = Some(1000);
+        spend_journal(&after).unwrap().save(&pending).unwrap();
+        do_spend_reconcile(&reopen(&node)).await.unwrap();
+        assert_eq!(budget_now(&after).spent_msat, 1000, "reconciliation must not alter the original charge");
+        assert!(spend_journal(&after).unwrap().pending().unwrap().is_none());
+        assert_eq!(node.posts().iter().filter(|(p, _)| p == "/payments/pay").count(), 2);
+    }
+
+    #[tokio::test]
+    async fn budget_scope_keysend_deduplicates_hash_not_identical_request_body() {
+        let sequence = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let routes: Routes = Arc::new(move |m, p, b| {
+            if p == "/payments/keysend" {
+                let call = sequence.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let hash = if call == 0 { "ab" } else { "cd" };
+                return (200, serde_json::json!({"payment_hash": hash.repeat(32), "amount_msat": 5000, "status": "Settled"}).to_string());
+            }
+            happy()(m, p, b)
+        });
+        let node = fake(AuthMode::Local, routes);
+        spend_advance(&node.state, true).await.unwrap();
+        for expected in [5000, 10000, 10000] {
+            do_payment_keysend(&node.state, &format!("02{}", "ab".repeat(32)), 5000, None, 5000).await.unwrap();
+            assert_eq!(budget_now(&node.state).spent_msat, expected);
+        }
+        // Identical message bodies are independent sends, too.
+        for _ in 0..2 { do_message_send(&node.state, A, false, "same", 2000, None).await.unwrap(); }
+        assert_eq!(budget_now(&node.state).spent_msat, 14000);
+    }
+
+    #[tokio::test]
+    async fn budget_scope_payment_identity_survives_compaction_and_pruning() {
+        let routes: Routes = Arc::new(|m, p, b| {
+            if p == "/payments/pay" {
+                return (200, serde_json::json!({"payment_hash": "ab".repeat(32), "amount_msat": 1000, "preimage": "PREIMAGE"}).to_string());
+            }
+            happy()(m, p, b)
+        });
+        let node = fake(AuthMode::Local, routes);
+        spend_advance(&node.state, true).await.unwrap();
+        do_payment_pay(&node.state, "lntb10n1x", 1000, 2000).await.unwrap();
+        with_book(&node.state, true, |b| {
+            b.ledger.extend((0..budget::LEDGER_MAX).map(|i| budget::Entry {
+                id: format!("other-{i}"), at_ms: now_ms(), target: A.into(), room: false, msat: 1, settled: true,
+            }));
+            b.prune(now_ms());
+            assert_eq!(b.ledger.len(), 2, "settled rows compacted by target");
+            Ok(())
+        }).unwrap();
+        do_payment_pay(&node.state, "lntb10n1x", 1000, 2000).await.unwrap();
+        assert_eq!(budget_now(&node.state).spent_msat, 21000);
+        with_book(&node.state, true, |b| {
+            for entry in &mut b.ledger { entry.at_ms = now_ms() - budget::DAY_MS - 1; }
+            b.prune(now_ms());
+            assert!(b.ledger.is_empty());
+            Ok(())
+        }).unwrap();
+        let after = reopen(&node);
+        spend_advance(&after, true).await.unwrap();
+        do_payment_pay(&after, "lntb10n1x", 1000, 2000).await.unwrap();
+        assert_eq!(budget_now(&after).spent_msat, 0, "old settled payment must not re-enter the rolling window");
+    }
+
+    #[tokio::test]
+    async fn budget_scope_invalid_payment_identity_retains_reservation() {
+        let routes: Routes = Arc::new(|m, p, b| {
+            if p == "/payments/pay" {
+                return (200, serde_json::json!({"payment_hash": "invalid", "amount_msat": 1000, "preimage": "PREIMAGE"}).to_string());
+            }
+            happy()(m, p, b)
+        });
+        let node = fake(AuthMode::Local, routes);
+        spend_advance(&node.state, true).await.unwrap();
+        assert_eq!(do_payment_pay(&node.state, "lntb10n1x", 1000, 2000).await.unwrap_err().code, "spend_unknown");
+        assert_eq!(budget_now(&node.state).unsettled_msat, 2000);
+        assert!(do_spend_reconcile(&reopen(&node)).await.is_err());
+        assert_eq!(node.posts().len(), 1, "invalid identity never permits redispatch");
     }
 
     #[tokio::test]

@@ -6,6 +6,8 @@ Every covered send must fit the same saved daily book and any applicable contact
 
 Uncertain outcomes retain their reservation and the pending-payment fence, including beyond 24 hours. A direct payment can be reconciled only from an exact outgoing payment hash and terminal status, without resending. Confirmed failed principal is zero; fees remain outside B2. Accounting is saved before settling the reservation and clearing the journal.
 
+Successful direct payments are accounted once by their canonical payment hash. The book saves each hash and its principal atomically with settlement, retaining the identity across restart, ledger compaction and expiry of the rolling window. Replayed receipts settle only the new reservation at zero; an unresolved replay keeps its reservation until terminal evidence arrives. Separate keysend attempts and messages still count independently. Books written before payment identities were recorded retain their existing charges, but those missing historical hashes cannot be reconstructed for replay detection.
+
 The book and tally survive restart. Manual sends cannot bypass the saved ceiling even when automatic approval is off. Invoice and keysend totals have separate rows because Lightning destinations are not BitSov contact IDs; they do not create contact budgets. Existing books need no migration. Older direct-payment journals remain readable, but past files/payments that were not recorded cannot be reconstructed. “Daily” means rolling 24 hours, not a midnight reset.
 
 | Action | App daily book | Owner control / warning |

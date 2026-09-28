@@ -6,7 +6,8 @@
 //! # What is stored, and what is not
 //!
 //! - **Stored** (`app-spend/budget-<node>.json`, 0600): budget *numbers* and a
-//!   rolling 24-hour ledger of what app sends reserved and paid. Nothing in
+//!   rolling 24-hour ledger of what app sends reserved and paid, plus accounted
+//!   direct-payment hashes and principal (retained for replay detection). Nothing in
 //!   the file can spend: no token, no scope, no grant, no approval state.
 //! - **Not stored**: the owner's approval. [`Autopay`] lives in host memory for
 //!   at most [`BUDGET_WINDOW_MS`] and ends when the app quits. After a restart
@@ -116,6 +117,10 @@ pub struct Book {
     /// Pause-all. Sticky across restarts until the owner resumes.
     pub paused: bool,
     pub ledger: Vec<Entry>,
+    /// Canonical direct-payment hashes and their original principal. Kept after
+    /// ledger expiry/compaction: replaying an old receipt is never a new spend.
+    #[serde(default)]
+    pub accounted_payments: BTreeMap<String, u64>,
 }
 
 fn in_window(entry: &Entry, now_ms: u64) -> bool {
@@ -136,6 +141,7 @@ impl Book {
             rooms: BTreeMap::new(),
             paused: false,
             ledger: Vec::new(),
+            accounted_payments: BTreeMap::new(),
         }
     }
 
@@ -246,6 +252,31 @@ impl Book {
             e.msat = msat;
             e.settled = true;
         }
+    }
+
+    /// Account a canonical direct payment once. Persist this book as one atomic
+    /// snapshot so its identity and principal cannot be committed separately.
+    pub fn settle_payment(&mut self, id: &str, hash: &str, msat: u64, now_ms: u64) {
+        let Some(entry) = self.ledger.iter().rev().find(|e| e.id == id) else { return; };
+        let hash = hash.to_ascii_lowercase();
+        if entry.settled {
+            // Crash after book save but before journal clear: leave this row
+            // unchanged. Also retain the identity of a legacy journalled charge.
+            if entry.msat > 0 {
+                self.accounted_payments.entry(hash).or_insert(entry.msat);
+            }
+            return;
+        }
+        let paid = if let std::collections::btree_map::Entry::Vacant(entry) = self.accounted_payments.entry(hash) {
+            entry.insert(msat);
+            msat
+        } else {
+            0
+        };
+        // Keep a settled zero row for a replay, rather than removing it. The
+        // identical request hash can also name the original charge; recovery
+        // must keep finding this attempt until its journal is cleared.
+        self.settle(id, paid, now_ms);
     }
 
     /// Refused before any payment (auth or price cap): nothing was spent.
@@ -719,6 +750,22 @@ mod tests {
             let mode = std::fs::metadata(book_path(dir.path(), ME)).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o600);
         }
+    }
+
+    #[test]
+    fn legacy_book_without_payment_identities_keeps_existing_charges() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut book = book_with_maya(50_000);
+        book.reserve("settled", MAYA, false, 2000, T);
+        book.settle("settled", 1500, T);
+        book.reserve("pending", MAYA, false, 3000, T);
+        let mut legacy = serde_json::to_value(&book).unwrap();
+        legacy.as_object_mut().unwrap().remove("accounted_payments");
+        std::fs::write(book_path(dir.path(), ME), legacy.to_string()).unwrap();
+        let loaded = load(dir.path(), ME).unwrap();
+        assert_eq!(loaded.spent_total(T), 4500);
+        assert!(loaded.accounted_payments.is_empty());
+        assert_eq!(loaded.ledger, book.ledger);
     }
 
     #[test]
