@@ -101,11 +101,13 @@ export type SponsorStatus = {
   purse_used_msat: number;
   kits_per_day: number;
   kits_today: number;
+  kits?: SponsorKit[];
 };
 
 /** A newcomer's request, frozen by the sponsor's node for review. */
 export type SponsorCandidate = {
   intro_id: string;
+  payment_hash: string;
   newcomer: string;
   gift_msat: number;
   fee_max_msat: number;
@@ -113,13 +115,15 @@ export type SponsorCandidate = {
   expires_at: number;
 };
 
-export type SponsorApproved = {
+export type SponsorOwnerApproval = { owner_command: string };
+export type SponsorKit = {
   intro_id: string;
-  /** `funded`, or `unknown` (pending: never send again). */
-  state: 'funded' | 'unknown';
+  gift_msat: number;
+  fee_msat: number;
+  candidate: { newcomer: string; payment_hash: string; code: string } | null;
+  state: 'offered' | 'candidate' | 'paying' | 'funded' | 'unknown' | 'failed' | 'cancelled' | 'expired';
   paid_msat: number;
   fee_paid_msat: number;
-  payment_hash: string;
 };
 
 /** What the newcomer shows the sponsor, in person. */
@@ -212,6 +216,7 @@ export type ActionError = {
     | 'spend_expired'
     | 'spend_refused'
     | 'owner_only'
+    | 'sponsor_owner_approval_required'
     | 'budget_paused' | 'budget_exhausted' | 'ceiling_exhausted' | 'first_contact' | 'budget_needed' | 'budget_unreadable'
     // G1 node grants: refused before any payment (see src-tauri/src/grant.rs).
     | 'grant_ended' | 'grant_exhausted' | 'grant_per_call' | 'grant_recipient' | 'grant_unpriced' | 'grant_ledger' | 'grant_refused' | 'grant_unknown' | 'grant_first_contact' | 'grant_readmission'

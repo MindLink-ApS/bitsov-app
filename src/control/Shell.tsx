@@ -35,7 +35,8 @@ import type {
   FundingAsk,
   FundingStatus,
   Introduction,
-  SponsorApproved,
+  SponsorKit,
+  SponsorOwnerApproval,
   SponsorCandidate,
   SponsorStatus,
   ActionError,
@@ -1900,11 +1901,12 @@ function NewTrack(props: {
     );
   };
   // K1 slice 2, sponsor side: starter bitcoin in your introduction, and the
-  // review of a newcomer's request. Owner actions: the spend window must be
-  // open (the button is the approval otherwise). The node holds the caps.
+  // review of a newcomer's request. Offer/review use the spend window; each
+  // gift needs an independent owner command at the node.
   const [sponsor, setSponsor] = createSignal<SponsorStatus | null>(null);
   props.source.sponsorStatus().then(setSponsor, () => setSponsor(null));
   const [kitErr, setKitErr] = createSignal<string | null>(null);
+  const [ownerRequired, setOwnerRequired] = createSignal(false);
   const ownerStep = async (step: () => Promise<void>, fail: (m: string) => void) => {
     fail('');
     if (!open()) {
@@ -1915,8 +1917,11 @@ function NewTrack(props: {
       await step();
     } catch (e) {
       const err = asActionError(e);
-      fail(err.message);
-      if (needsApproval(err)) await props.actions.approve();
+      if (err.code === 'sponsor_owner_approval_required') setOwnerRequired(true);
+      else {
+        fail(err.message);
+        if (needsApproval(err)) await props.actions.approve();
+      }
     }
   };
   const includeStarter = () =>
@@ -1926,30 +1931,95 @@ function NewTrack(props: {
   const [request, setRequest] = createSignal('');
   const [cand, setCand] = createSignal<SponsorCandidate | null>(null);
   const [theirCode, setTheirCode] = createSignal('');
-  const [gift, setGift] = createSignal<SponsorApproved | null>(null);
+  const [gift, setGift] = createSignal<SponsorKit | null>(null);
+  const [ownerWait, setOwnerWait] = createSignal<SponsorOwnerApproval | null>(null);
   const [candErr, setCandErr] = createSignal<string | null>(null);
   const [giving, setGiving] = createSignal(false);
-  const reviewRequest = () =>
-    ownerStep(async () => {
-      setCand(null);
-      setGift(null);
-      setCand(await props.source.sponsorCandidate(request()));
-    }, setCandErr);
-  const sendGift = async () => {
-    const c = cand();
-    if (!c || giving() || theirCode().length !== 6) return;
-    setGiving(true);
-    await ownerStep(async () => {
-      setGift(await props.source.sponsorApprove(c.intro_id, theirCode()));
-      setRequest('');
-    }, setCandErr);
+  let giftRevision = 0;
+  let giftPoll: ReturnType<typeof setTimeout> | undefined;
+  const stopGiftWait = () => {
+    giftRevision += 1;
+    clearTimeout(giftPoll);
+    setOwnerWait(null);
+    setOwnerRequired(false);
     setGiving(false);
+  };
+  onCleanup(() => { giftRevision += 1; clearTimeout(giftPoll); });
+  const reviewRequest = () => {
+    stopGiftWait();
+    const revision = giftRevision;
+    setCand(null);
+    setGift(null);
+    setTheirCode('');
+    return ownerStep(async () => {
+      const c = await props.source.sponsorCandidate(request());
+      if (active && revision === giftRevision) setCand(c);
+    }, (message) => { if (active && revision === giftRevision) setCandErr(message); });
+  };
+  const prepareGift = async () => {
+    const c = cand();
+    if (!c || giving() || ownerWait() || gift() || theirCode().length !== 6) return;
+    const revision = ++giftRevision;
+    const current = () => active && revision === giftRevision;
+    setGiving(true);
+    setCandErr(null);
+    try {
+      const approval = await props.source.sponsorOwnerApproval(c, theirCode());
+      if (!current()) return;
+      setOwnerWait(approval);
+      setOwnerRequired(true);
+      const check = async () => {
+        try {
+          const status = await props.source.sponsorStatus();
+          if (!current()) return;
+          setSponsor(status);
+          const kit = status.kits?.find((k) => k.intro_id === c.intro_id);
+          if (kit) {
+            if (kit.candidate?.newcomer !== c.newcomer || kit.candidate?.payment_hash !== c.payment_hash ||
+                kit.candidate?.code !== c.code || kit.gift_msat !== c.gift_msat || kit.fee_msat !== c.fee_max_msat) {
+              stopGiftWait();
+              setCandErr('The node status differs from the reviewed gift. Review the request again.');
+              return;
+            }
+            if (kit.state !== 'candidate' && kit.state !== 'offered') {
+              setGift(kit);
+              setOwnerWait(null);
+              setOwnerRequired(false);
+              if (kit.state !== 'paying' && kit.state !== 'unknown') return;
+              await props.source.sponsorReconcile(c.intro_id);
+              if (!current()) return;
+            }
+          }
+        } catch (e) {
+          if (!current()) return;
+          const err = asActionError(e);
+          if (err.code === 'sponsor_owner_approval_required') setOwnerRequired(true);
+          else setCandErr(err.message);
+        }
+        if (current()) giftPoll = setTimeout(() => void check(), 3000);
+      };
+      void check();
+    } catch (e) {
+      if (!current()) return;
+      const err = asActionError(e);
+      if (err.code === 'sponsor_owner_approval_required') setOwnerRequired(true);
+      else setCandErr(err.message);
+    } finally {
+      if (current()) setGiving(false);
+    }
   };
   const cancelKit = async () => {
     const c = cand();
+    stopGiftWait();
     setCand(null);
+    setGift(null);
     setTheirCode('');
-    if (c) await props.source.sponsorCancel(c.intro_id).catch(() => undefined);
+    setCandErr(null);
+    const revision = giftRevision;
+    if (c) {
+      try { await props.source.sponsorCancel(c.intro_id); }
+      catch (e) { if (active && revision === giftRevision) setCandErr(asActionError(e).message); }
+    }
   };
 
   // K1 slice 2, newcomer side: ask for the offered starter bitcoin. Nothing
@@ -2139,10 +2209,16 @@ function NewTrack(props: {
                 rows={3}
                 placeholder="bitsov://sponsor-request#…"
                 value={request()}
-                onInput={(e) => setRequest(e.currentTarget.value)}
+                disabled={!!ownerWait() || !!gift() || giving()}
+                onInput={(e) => {
+                  stopGiftWait();
+                  setCand(null);
+                  setTheirCode('');
+                  setRequest(e.currentTarget.value);
+                }}
                 aria-label="Starter bitcoin request"
               />
-              <button type="submit" class="primary" disabled={!request().trim() || giving()}>
+              <button type="submit" class="primary" disabled={!request().trim() || giving() || !!ownerWait() || !!gift()}>
                 {open() ? 'Review request' : 'Approve first'}
               </button>
               <Show when={cand()}>
@@ -2159,6 +2235,7 @@ function NewTrack(props: {
                       <span>Code on their screen</span>
                       <input
                         data-starter-their-code
+                        disabled={giving() || !!ownerWait() || !!gift()}
                         inputmode="numeric"
                         maxLength={6}
                         value={theirCode()}
@@ -2171,24 +2248,38 @@ function NewTrack(props: {
                         type="button"
                         class="primary"
                         data-starter-approve
-                        disabled={giving() || theirCode().length !== 6 || !!gift()}
-                        onClick={() => void sendGift()}
+                        disabled={giving() || !!ownerWait() || theirCode().length !== 6 || !!gift()}
+                        onClick={() => void prepareGift()}
                       >
-                        {giving() ? 'Sending…' : `Sponsor up to ${sats(c().gift_msat + c().fee_max_msat)} sats`}
+                        {giving() ? 'Preparing…' : `Sponsor up to ${sats(c().gift_msat + c().fee_max_msat)} sats`}
                       </button>
-                      <button type="button" class="quiet" onClick={() => void cancelKit()} disabled={giving() || !!gift()}>
+                      <button type="button" class="quiet" data-starter-cancel onClick={() => void cancelKit()}>
                         Cancel
                       </button>
                     </span>
                   </div>
                 )}
               </Show>
+              <Show when={ownerRequired()}>
+                <div class="approval" data-starter-owner-approval="pending">
+                  <p><strong>Approve this gift at your node.</strong> Run this command once in the node terminal, with your independent owner credential in BITSOV_OWNER_TOKEN. The app never receives that credential.</p>
+                  <Show when={ownerWait()} fallback={<p>Review the request and compare the code to prepare the owner command.</p>}>
+                    {(pending) => <>
+                      <textarea readonly aria-label="Owner approval command" data-starter-owner-command value={pending().owner_command} />
+                      <button type="button" class="link" onClick={() => void navigator.clipboard.writeText(pending().owner_command).catch(() => setCandErr('Select and copy the command above.'))}>Copy command</button>
+                      <p class="hint">Waiting for the node to report this gift funded. Cancel stops the wait and asks the node to withdraw the kit before dispatch; it cannot undo a payment already sent.</p>
+                    </>}
+                  </Show>
+                </div>
+              </Show>
               <Show when={gift()}>
                 {(g) => (
                   <p class={g().state === 'funded' ? 'ok-note' : 'err-note'} data-starter-gift={g().state}>
                     {g().state === 'funded'
                       ? `Sent ${sats(g().paid_msat)} sats. It is theirs now.`
-                      : 'Payment pending — do not send again. Your node keeps it reserved until the outcome is known.'}
+                      : g().state === 'paying' || g().state === 'unknown'
+                        ? 'Payment pending — do not send again. Your node keeps it reserved until the outcome is known.'
+                        : `Gift ${g().state}. This kit is closed.`}
                   </p>
                 )}
               </Show>

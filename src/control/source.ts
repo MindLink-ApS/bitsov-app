@@ -11,7 +11,7 @@ import type {
   FundingAsk,
   FundingStatus,
   Introduction,
-  SponsorApproved,
+  SponsorOwnerApproval,
   SponsorCandidate,
   SponsorStatus,
   AiTopic,
@@ -76,8 +76,10 @@ export interface Source {
   sponsorOffer(): Promise<Introduction>;
   /** Review a newcomer's request. Pays nothing. */
   sponsorCandidate(request: string): Promise<SponsorCandidate>;
-  /** The owner's approval, with the six digits from their screen. */
-  sponsorApprove(introId: string, code: string): Promise<SponsorApproved>;
+  /** Prepare the independent owner command; never sends an approval. */
+  sponsorOwnerApproval(candidate: SponsorCandidate, code: string): Promise<SponsorOwnerApproval>;
+  /** Recheck an unresolved payment; this cannot dispatch. */
+  sponsorReconcile(introId: string): Promise<void>;
   sponsorCancel(introId: string): Promise<void>;
   /** K1 slice 2 (newcomer): ask for the offered gift. Nothing is sent. */
   sponsorRequest(text: string): Promise<FundingAsk>;
@@ -152,7 +154,8 @@ export const hostSource: Source = {
   sponsorStatus: () => invoke<SponsorStatus>('sponsor_status'),
   sponsorOffer: () => invoke<Introduction>('sponsor_offer'),
   sponsorCandidate: (request) => invoke<SponsorCandidate>('sponsor_candidate', { request }),
-  sponsorApprove: (introId, code) => invoke<SponsorApproved>('sponsor_approve', { intro_id: introId, code }),
+  sponsorOwnerApproval: (candidate, code) => invoke<SponsorOwnerApproval>('sponsor_owner_approval', { candidate, code }),
+  sponsorReconcile: (introId) => invoke<void>('sponsor_reconcile', { intro_id: introId }),
   sponsorCancel: (introId) => invoke<void>('sponsor_cancel', { intro_id: introId }),
   sponsorRequest: (text) => invoke<FundingAsk>('sponsor_request', { text }),
   sponsorRequestStatus: (paymentHash) => invoke<FundingStatus>('sponsor_request_status', { payment_hash: paymentHash }),

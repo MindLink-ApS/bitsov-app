@@ -608,12 +608,13 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number 
     },
     sponsorCandidate: (request) =>
       request.trim().startsWith('bitsov://sponsor-request#')
-        ? ok({ intro_id: 'ab'.repeat(16), newcomer: SAMPLE_STRANGER_ID, gift_msat: 20_000_000, fee_max_msat: 100_000, code: '482913', expires_at: Math.floor(Date.now() / 1000) + 540 })
+        ? ok({ intro_id: 'ab'.repeat(16), newcomer: SAMPLE_STRANGER_ID, payment_hash: 'cd'.repeat(32), gift_msat: 20_000_000, fee_max_msat: 100_000, code: '482913', expires_at: Math.floor(Date.now() / 1000) + 540 })
         : Promise.reject('That is not a starter-bitcoin request (bitsov://sponsor-request#…).'),
-    sponsorApprove: (introId, code) =>
+    sponsorOwnerApproval: (_candidate, code) =>
       code === '482913'
-        ? ok({ intro_id: introId, state: 'funded' as const, paid_msat: 20_000_000, fee_paid_msat: 0, payment_hash: 'cd'.repeat(32) })
+        ? ok({ owner_command: '# Sample only: no real gift request or owner command.' })
         : Promise.reject({ code: 'sponsor_code_mismatch', message: 'The code does not match this request. Nothing was paid.' }),
+    sponsorReconcile: () => ok(undefined),
     sponsorCancel: () => ok(undefined),
     sponsorRequest: (text) =>
       text.includes('SAMPLEOFFER')

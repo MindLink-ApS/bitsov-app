@@ -466,13 +466,15 @@ describe('invisible payments in the composer and the context panel', () => {
   const openSpend = { state: 'open' as const, basis: 'node_grant' as const, open_until_ms: Date.now() + 600_000, pending: null, window_ms: 600_000 };
   const sponsorOn = () => ({ enabled: true, gift_msat: 20_000_000, fee_msat: 100_000, purse_msat: 100_000_000, purse_used_msat: 0, kits_per_day: 2, kits_today: 0 });
   const OFFER_LINK = `${INTRO}.OFFER`;
-  const candidate = { intro_id: 'ab'.repeat(16), newcomer: STRANGER, gift_msat: 20_000_000, fee_max_msat: 100_000, code: '482913', expires_at: Math.floor(Date.now() / 1000) + 500 };
+  const candidate = { intro_id: 'ab'.repeat(16), newcomer: STRANGER, payment_hash: 'cd'.repeat(32), gift_msat: 20_000_000, fee_max_msat: 100_000, code: '482913', expires_at: Math.floor(Date.now() / 1000) + 500 };
 
-  it('the sponsor includes starter bitcoin, reviews the request and pays only with the code from their screen', async () => {
+  it('the sponsor prepares an owner command with the frozen tuple and waits for funding without approving', async () => {
+    let funded = false;
     const host = stubHost(open([]), {
       spend_status: () => openSpend,
       introduction_mine: () => card(OWN, 'public', 10_000),
-      sponsor_status: sponsorOn,
+      sponsor_status: () => ({ ...sponsorOn(), kits: funded ? [kit('funded')] : [] }),
+      sponsor_owner_approval: () => ({ owner_command: 'owner command for the frozen gift' }),
       sponsor_offer: () => ({ ...card(OWN, 'public', 10_000), starter: { gift_msat: 20_000_000, expires_at: Math.floor(Date.now() / 1000) + 600 }, offer_link: OFFER_LINK }),
       sponsor_candidate: () => candidate,
       sponsor_approve: (args) => ({ intro_id: args!.intro_id, state: 'funded', paid_msat: 20_000_000, fee_paid_msat: 0, payment_hash: 'cd'.repeat(32) }),
@@ -499,8 +501,14 @@ describe('invisible payments in the composer and the context panel', () => {
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-starter-approve]')!.disabled).toBe(false));
     expect(text('[data-starter-approve]')).toBe('Sponsor up to 20,100 sats');
     $<HTMLButtonElement>('[data-starter-approve]')!.click();
-    await vi.waitFor(() => expect($('[data-starter-gift="funded"]')).not.toBeNull());
-    expect(host.used('sponsor_approve')[0].args).toEqual({ intro_id: 'ab'.repeat(16), code: '482913' });
+    await vi.waitFor(() => expect($('[data-starter-owner-command]')).not.toBeNull());
+    expect($<HTMLTextAreaElement>('[data-starter-owner-command]')!.value).toBe('owner command for the frozen gift');
+    expect(host.used('sponsor_owner_approval')[0].args).toEqual({ candidate, code: '482913' });
+    expect(host.used('sponsor_approve')).toHaveLength(0);
+    expect($('[data-starter-gift="funded"]')).toBeNull();
+    funded = true;
+    await vi.waitFor(() => expect($('[data-starter-gift="funded"]')).not.toBeNull(), { timeout: 4500 });
+    expect($('[data-starter-owner-command]')).toBeNull();
     expect(text('[data-starter-gift]')).toContain('It is theirs now');
     expect(host.used('message_send')).toHaveLength(0);
   });
@@ -519,13 +527,18 @@ describe('invisible payments in the composer and the context panel', () => {
     expect(host.used('sponsor_offer')).toHaveLength(0);
   });
 
-  it('an unknown outcome says pending, never send again', async () => {
-    stubHost(open([]), {
+  const kit = (state: string) => ({ intro_id: candidate.intro_id, gift_msat: candidate.gift_msat, fee_msat: candidate.fee_max_msat,
+    candidate: { newcomer: candidate.newcomer, payment_hash: candidate.payment_hash, code: candidate.code }, state, paid_msat: state === 'funded' ? candidate.gift_msat : 0, fee_paid_msat: 0 });
+
+  it('an unknown outcome stays pending until read-authorized reconciliation reports funded', async () => {
+    let reconciled = false;
+    const host = stubHost(open([]), {
       spend_status: () => openSpend,
       introduction_mine: () => card(OWN, 'public', 10_000),
-      sponsor_status: sponsorOn,
       sponsor_candidate: () => candidate,
-      sponsor_approve: (args) => ({ intro_id: args!.intro_id, state: 'unknown', paid_msat: 0, fee_paid_msat: 0, payment_hash: 'cd'.repeat(32) }),
+      sponsor_owner_approval: () => ({ owner_command: 'owner command' }),
+      sponsor_status: () => ({ ...sponsorOn(), kits: [kit(reconciled ? 'funded' : 'unknown')] }),
+      sponsor_reconcile: () => { reconciled = true; },
     });
     await openShell();
     $<HTMLButtonElement>('[data-track="new"]')!.click();
@@ -538,6 +551,99 @@ describe('invisible payments in the composer and the context panel', () => {
     $<HTMLButtonElement>('[data-starter-approve]')!.click();
     await vi.waitFor(() => expect(text('[data-starter-gift="unknown"]')).toContain('do not send again'));
     expect($<HTMLButtonElement>('[data-starter-approve]')!.disabled).toBe(true);
+    await vi.waitFor(() => expect($('[data-starter-gift="funded"]')).not.toBeNull(), { timeout: 4500 });
+    expect(host.used('sponsor_reconcile')[0].args).toEqual({ intro_id: candidate.intro_id });
+    expect(host.used('sponsor_approve')).toHaveLength(0);
+  });
+
+
+  it('409 owner approval required renders the owner step without requesting a spend window', async () => {
+    const host = stubHost(open([]), {
+      spend_status: () => openSpend,
+      introduction_mine: () => card(OWN, 'public', 10_000),
+      sponsor_status: sponsorOn,
+      sponsor_candidate: () => { throw { code: 'sponsor_owner_approval_required', message: 'sponsor_owner_approval_required' }; },
+    });
+    await openShell();
+    $<HTMLButtonElement>('[data-track="new"]')!.click();
+    await vi.waitFor(() => expect($('[data-starter-review]')).not.toBeNull());
+    type('[data-starter-request-text]', 'bitsov://sponsor-request#REQ');
+    $<HTMLButtonElement>('[data-starter-review] button[type="submit"]')!.click();
+    await vi.waitFor(() => expect(text('[data-starter-owner-approval]')).toContain('Approve this gift at your node'));
+    expect(host.used('sponsor_approve')).toHaveLength(0);
+    expect(host.used('spend_request')).toHaveLength(0);
+  });
+
+  it('cancel stops an owner wait and ignores a late funded response', async () => {
+    let resolveStatus!: (value: unknown) => void;
+    let waiting = false;
+    const host = stubHost(open([]), {
+      spend_status: () => openSpend,
+      introduction_mine: () => card(OWN, 'public', 10_000),
+      sponsor_status: () => waiting ? new Promise((resolve) => { resolveStatus = resolve; }) : sponsorOn(),
+      sponsor_candidate: () => candidate,
+      sponsor_owner_approval: () => { waiting = true; return { owner_command: 'owner command' }; },
+      sponsor_cancel: () => undefined,
+    });
+    await openShell();
+    $<HTMLButtonElement>('[data-track="new"]')!.click();
+    await vi.waitFor(() => expect($('[data-starter-review]')).not.toBeNull());
+    type('[data-starter-request-text]', 'bitsov://sponsor-request#REQ');
+    $<HTMLButtonElement>('[data-starter-review] button[type="submit"]')!.click();
+    await vi.waitFor(() => expect($('[data-starter-their-code]')).not.toBeNull());
+    type('[data-starter-their-code]', '482913');
+    $<HTMLButtonElement>('[data-starter-approve]')!.click();
+    await vi.waitFor(() => expect(resolveStatus).toBeTypeOf('function'));
+    $<HTMLButtonElement>('[data-starter-cancel]')!.click();
+    await vi.waitFor(() => expect(host.used('sponsor_cancel')).toHaveLength(1));
+    resolveStatus({ ...sponsorOn(), kits: [kit('funded')] });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect($('[data-starter-owner-command]')).toBeNull();
+    expect($('[data-starter-gift]')).toBeNull();
+    expect(host.used('sponsor_approve')).toHaveLength(0);
+  });
+
+  it.each(['failed', 'cancelled', 'expired'])('shows the terminal %s kit outcome without offering another payment', async (state) => {
+    const host = stubHost(open([]), {
+      spend_status: () => openSpend,
+      introduction_mine: () => card(OWN, 'public', 10_000),
+      sponsor_status: () => ({ ...sponsorOn(), kits: [kit(state)] }),
+      sponsor_candidate: () => candidate,
+      sponsor_owner_approval: () => ({ owner_command: 'owner command' }),
+    });
+    await openShell();
+    $<HTMLButtonElement>('[data-track="new"]')!.click();
+    await vi.waitFor(() => expect($('[data-starter-review]')).not.toBeNull());
+    type('[data-starter-request-text]', 'bitsov://sponsor-request#REQ');
+    $<HTMLButtonElement>('[data-starter-review] button[type="submit"]')!.click();
+    await vi.waitFor(() => expect($('[data-starter-their-code]')).not.toBeNull());
+    type('[data-starter-their-code]', '482913');
+    $<HTMLButtonElement>('[data-starter-approve]')!.click();
+    await vi.waitFor(() => expect(text(`[data-starter-gift="${state}"]`)).toContain('This kit is closed'));
+    expect($('[data-starter-owner-command]')).toBeNull();
+    expect($<HTMLButtonElement>('[data-starter-approve]')!.disabled).toBe(true);
+    expect(host.used('sponsor_approve')).toHaveLength(0);
+  });
+
+  it('refuses a funded status for a different frozen payment hash', async () => {
+    stubHost(open([]), {
+      spend_status: () => openSpend,
+      introduction_mine: () => card(OWN, 'public', 10_000),
+      sponsor_status: () => ({ ...sponsorOn(), kits: [{ ...kit('funded'), candidate: { ...kit('funded').candidate, payment_hash: 'ef'.repeat(32) } }] }),
+      sponsor_candidate: () => candidate,
+      sponsor_owner_approval: () => ({ owner_command: 'owner command' }),
+    });
+    await openShell();
+    $<HTMLButtonElement>('[data-track="new"]')!.click();
+    await vi.waitFor(() => expect($('[data-starter-review]')).not.toBeNull());
+    type('[data-starter-request-text]', 'bitsov://sponsor-request#REQ');
+    $<HTMLButtonElement>('[data-starter-review] button[type="submit"]')!.click();
+    await vi.waitFor(() => expect($('[data-starter-their-code]')).not.toBeNull());
+    type('[data-starter-their-code]', '482913');
+    $<HTMLButtonElement>('[data-starter-approve]')!.click();
+    await vi.waitFor(() => expect(text('[data-starter-review-error]')).toContain('differs from the reviewed gift'));
+    expect($('[data-starter-gift]')).toBeNull();
+    expect($('[data-starter-owner-command]')).toBeNull();
   });
 
   it('the newcomer requests the starter bitcoin and sees it arrive; nothing else is paid', async () => {

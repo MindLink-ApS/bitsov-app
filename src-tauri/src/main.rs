@@ -1558,7 +1558,7 @@ fn sponsor_error(e: ActionError) -> ActionError {
     for code in [
         "sponsor_disabled", "sponsor_kit_open", "sponsor_daily_limit", "sponsor_purse_exhausted",
         "sponsor_candidate_exists", "sponsor_kit_closed", "sponsor_kit_expired", "sponsor_code_mismatch",
-        "sponsor_kit_not_ready", "sponsor_invalid", "sponsor_kit_unknown",
+        "sponsor_kit_not_ready", "sponsor_invalid", "sponsor_kit_unknown", "sponsor_owner_approval_required",
     ] {
         if e.message.contains(code) {
             return ActionError::new(code, e.message);
@@ -1587,10 +1587,10 @@ async fn read_sponsor_status(state: &NodeState) -> Result<bitsov_app::sponsor::S
 async fn sponsor_status(
     window: WebviewWindow<impl tauri::Runtime>,
     state: State<'_, NodeState>,
-) -> Result<bitsov_app::sponsor::SponsorStatus, String> {
+) -> Result<bitsov_app::sponsor::SponsorStatus, ActionError> {
     reject_sealed_window(&window)?;
     drop(window);
-    read_sponsor_status(state.inner()).await
+    read_sponsor_status(state.inner()).await.map_err(|e| sponsor_error(ActionError::node(e)))
 }
 
 async fn do_sponsor_offer(state: &NodeState) -> Result<bitsov_app::introduction::DoorCard, ActionError> {
@@ -1642,36 +1642,51 @@ async fn sponsor_candidate(
     do_sponsor_candidate(state.inner(), &request).await
 }
 
-async fn do_sponsor_approve(state: &NodeState, intro_id: &str, code: &str) -> Result<bitsov_app::sponsor::Approved, ActionError> {
+fn do_sponsor_owner_approval(state: &NodeState, candidate: &bitsov_app::sponsor::Candidate, code: &str) -> Result<bitsov_app::sponsor::OwnerApproval, ActionError> {
     if budget_paused(state)? {
-        return Err(ActionError::new("budget_paused", "Payments are paused. Resume them to send the gift."));
+        return Err(ActionError::new("budget_paused", "Payments are paused. Resume them to prepare the gift."));
     }
-    if intro_id.len() != 32 || !intro_id.bytes().all(|b| b.is_ascii_hexdigit()) || code.len() != 6 || !code.bytes().all(|b| b.is_ascii_digit()) {
-        return Err(ActionError::invalid("Enter the six digits shown on their screen."));
-    }
-    sponsor_node(state).await?;
-    let text = gated_post(state, "/sponsor/approve", serde_json::json!({ "intro_id": intro_id, "code": code }))
-        .await
-        .map_err(sponsor_error)?;
-    let approved: bitsov_app::sponsor::Approved = decode_act("/sponsor/approve", &text)?;
-    if approved.intro_id != intro_id || !matches!(approved.state.as_str(), "funded" | "unknown") {
-        return Err(ActionError::node("/sponsor/approve: unexpected answer"));
-    }
-    Ok(approved)
+    bitsov_app::sponsor::owner_approval(&state.api_base, candidate, code, now_unix().max(0) as u64)
+        .map_err(ActionError::invalid)
 }
 
-/// `POST /sponsor/approve` — the owner's approval of exactly this candidate,
-/// with the code compared in person. The node reserves, persists, then pays.
+/// Prepare only. The app never calls the independent owner's approve route.
 #[tauri::command(rename_all = "snake_case")]
-async fn sponsor_approve(
+async fn sponsor_owner_approval(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    candidate: bitsov_app::sponsor::Candidate,
+    code: String,
+) -> Result<bitsov_app::sponsor::OwnerApproval, ActionError> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    do_sponsor_owner_approval(state.inner(), &candidate, &code)
+}
+
+/// Read-authorized outcome lookup only. Never approves or dispatches a gift.
+async fn do_sponsor_reconcile(state: &NodeState, intro_id: &str) -> Result<(), ActionError> {
+    if intro_id.len() != 32 || !intro_id.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(ActionError::invalid("Unknown kit."));
+    }
+    let path = format!("/sponsor/kits/{intro_id}/reconcile");
+    let (status, body) = call_api(state, reqwest::Method::POST, &path, Some(serde_json::json!({}))).await?;
+    if !status.is_success() {
+        return Err(sponsor_error(ActionError::node(api_error(&path, status, &body))));
+    }
+    // The renderer rereads status and validates the entire frozen tuple.
+    // Do not expose the reconciliation response's invoice to the renderer.
+    Ok(())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn sponsor_reconcile(
     window: WebviewWindow<impl tauri::Runtime>,
     state: State<'_, NodeState>,
     intro_id: String,
-    code: String,
-) -> Result<bitsov_app::sponsor::Approved, ActionError> {
+) -> Result<(), ActionError> {
     reject_sealed_window(&window)?;
     drop(window);
-    do_sponsor_approve(state.inner(), &intro_id, &code).await
+    do_sponsor_reconcile(state.inner(), &intro_id).await
 }
 
 /// `POST /sponsor/kits/:id/cancel` — withdraw an offer before any payment.
@@ -3242,7 +3257,8 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             sponsor_status,
             sponsor_offer,
             sponsor_candidate,
-            sponsor_approve,
+            sponsor_owner_approval,
+            sponsor_reconcile,
             sponsor_cancel,
             sponsor_request,
             sponsor_request_status,
@@ -4721,26 +4737,80 @@ mod control_act_tests {
         assert!(node.targets().is_empty());
     }
 
+    fn gift_candidate() -> bitsov_app::sponsor::Candidate {
+        serde_json::from_value(serde_json::json!({
+            "intro_id": "ab".repeat(16), "newcomer": A, "payment_hash": "cd".repeat(32),
+            "gift_msat": 20_000_000, "fee_max_msat": 100_000, "code": "123456", "expires_at": now_unix() + 500,
+        })).unwrap()
+    }
+
     #[tokio::test]
-    async fn approving_a_gift_needs_the_window_no_pause_and_six_digits() {
-        let approved = serde_json::json!({"intro_id": "ab".repeat(16), "state": "funded", "paid_msat": 20_000_000, "fee_paid_msat": 0, "payment_hash": "cd".repeat(32)});
+    async fn paired_gift_approval_never_posts_to_the_owner_route() {
+        let (node, _dir) = paired_fake(sponsor_routes(happy()));
+        let c = gift_candidate();
+        let view = do_sponsor_owner_approval(&node.state, &c, "123456").unwrap();
+        assert!(view.owner_command.contains("BITSOV_OWNER_TOKEN"));
+        assert!(!view.owner_command.contains("tok.1"));
+        assert!(node.targets().is_empty(), "preparing the command makes no request, even with the spend window closed");
+        // An open delegated spend window still grants no per-gift authority.
+        node.state.spend.lock().unwrap().arm(now_ms(), act::SpendBasis::NodeGrant);
+        if let AuthMode::Paired(session) = &mut *node.state.auth.lock().unwrap() {
+            session.scopes.push("spend".into());
+        }
+        do_sponsor_owner_approval(&node.state, &c, "123456").unwrap();
+        assert!(node.targets().is_empty());
+    }
+
+    #[tokio::test]
+    async fn gift_owner_command_carries_exact_frozen_tuple_then_reads_funded_status() {
+        let c = gift_candidate();
+        let frozen = serde_json::to_value(&c).unwrap();
         let routes = sponsor_routes(Arc::new(move |m, p, b| match p {
-            "/sponsor/approve" => (200, approved.to_string()),
+            "/sponsor" => (200, serde_json::json!({"enabled": true, "gift_msat": 20_000_000,
+                "fee_msat": 100_000, "purse_msat": 100_000_000, "purse_used_msat": 20_000_000,
+                "kits_per_day": 2, "kits_today": 1, "kits": [{"intro_id": "ab".repeat(16),
+                "state": "funded", "candidate": frozen, "paid_msat": 20_000_000, "fee_paid_msat": 0}]}).to_string()),
+            "/sponsor/approve" => panic!("the app must never approve"),
             _ => happy()(m, p, b),
         }));
-        let node = fake(AuthMode::Local, routes);
-        let id = "ab".repeat(16);
-        // Window closed: nothing reaches the node.
-        assert_eq!(do_sponsor_approve(&node.state, &id, "123456").await.unwrap_err().code, "spend_locked");
-        spend_advance(&node.state, true).await.unwrap();
-        assert_eq!(do_sponsor_approve(&node.state, &id, "12345").await.unwrap_err().code, "invalid");
-        assert!(!node.posts().iter().any(|(p, _)| p == "/sponsor/approve"));
-        let done = do_sponsor_approve(&node.state, &id, "123456").await.unwrap();
-        assert_eq!(done.state, "funded");
-        assert_eq!(node.posts().last().unwrap(), &("/sponsor/approve".to_string(), serde_json::json!({"intro_id": id, "code": "123456"})));
-        // Pause all stops a gift.
+        let (node, _dir) = paired_fake(routes);
+        let view = do_sponsor_owner_approval(&node.state, &c, "123456").unwrap();
+        let body = view.owner_command.split("--data '").nth(1).unwrap().split('\'').next().unwrap();
+        let request: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(request, serde_json::json!({"intro_id": "ab".repeat(16), "newcomer": A,
+            "payment_hash": "cd".repeat(32), "gift_msat": 20_000_000, "fee_max_msat": 100_000, "code": "123456"}));
+        assert!(view.owner_command.contains(&format!("'{}/sponsor/approve'", node.state.api_base)));
+        let status = read_sponsor_status(&node.state).await.unwrap();
+        assert_eq!(status.kits[0]["state"], "funded");
+        assert!(node.posts().is_empty());
+        assert!(do_sponsor_owner_approval(&node.state, &c, "654321").is_err());
+        let mut expired = c.clone();
+        expired.expires_at = 0;
+        assert!(do_sponsor_owner_approval(&node.state, &expired, "123456").is_err());
+        let mut malformed = c.clone();
+        malformed.payment_hash = "not a hash".into();
+        assert!(do_sponsor_owner_approval(&node.state, &malformed, "123456").is_err());
         with_book(&node.state, true, |b| { b.paused = true; Ok(()) }).unwrap();
-        assert_eq!(do_sponsor_approve(&node.state, &id, "123456").await.unwrap_err().code, "budget_paused");
+        assert_eq!(do_sponsor_owner_approval(&node.state, &c, "123456").unwrap_err().code, "budget_paused");
+    }
+
+    #[tokio::test]
+    async fn sponsor_reconcile_uses_read_authority_without_approval_or_a_spend_window() {
+        let (node, _dir) = paired_fake(sponsor_routes(Arc::new(|m, p, b| {
+            if p.ends_with("/reconcile") { (200, "{}".into()) } else { happy()(m, p, b) }
+        })));
+        with_book(&node.state, true, |b| { b.paused = true; Ok(()) }).unwrap();
+        assert!(do_sponsor_reconcile(&node.state, "../approve").await.is_err());
+        do_sponsor_reconcile(&node.state, &"ab".repeat(16)).await.unwrap();
+        assert_eq!(node.posts(), vec![(format!("/sponsor/kits/{}/reconcile", "ab".repeat(16)), serde_json::json!({}))]);
+        assert_eq!(node.seen.lock().unwrap()[0].2.as_deref(), Some("tok.1"));
+    }
+
+    #[test]
+    fn sponsor_owner_conflict_has_a_dedicated_reason() {
+        let err = sponsor_error(ActionError::node(api_error("/sponsor/approve", reqwest::StatusCode::CONFLICT,
+            r#"{"error":"sponsor_owner_approval_required","code":409}"#)));
+        assert_eq!(err.code, "sponsor_owner_approval_required");
     }
 
     #[tokio::test]
@@ -5598,7 +5668,8 @@ mod assistant_acl_tests {
                 "sponsor_status",
                 "sponsor_offer",
                 "sponsor_candidate",
-                "sponsor_approve",
+                "sponsor_owner_approval",
+                "sponsor_reconcile",
                 "sponsor_cancel",
                 "sponsor_request",
                 "sponsor_request_status",

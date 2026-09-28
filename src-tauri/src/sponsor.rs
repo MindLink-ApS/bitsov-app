@@ -174,6 +174,7 @@ pub struct SponsorStatus {
 pub struct Candidate {
     pub intro_id: String,
     pub newcomer: String,
+    pub payment_hash: String,
     pub gift_msat: u64,
     pub fee_max_msat: u64,
     pub code: String,
@@ -184,7 +185,7 @@ impl Candidate {
     /// Refuse a node answer that could not be what the owner reviews.
     pub fn check(&self) -> Result<(), String> {
         let hex_len = |s: &str, n: usize| s.len() == n && s.bytes().all(|b| b.is_ascii_hexdigit());
-        if !hex_len(&self.intro_id, 32) || !hex_len(&self.newcomer, 64) || self.code.len() != 6
+        if !hex_len(&self.intro_id, 32) || !hex_len(&self.newcomer, 64) || !hex_len(&self.payment_hash, 64) || self.code.len() != 6
             || !self.code.bytes().all(|b| b.is_ascii_digit())
             || self.gift_msat == 0 || self.gift_msat.saturating_add(self.fee_max_msat) > MAX_KIT_MSAT
         {
@@ -194,15 +195,34 @@ impl Candidate {
     }
 }
 
-/// `POST /sponsor/approve`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Approved {
-    pub intro_id: String,
-    /// `funded` or `unknown`.
-    pub state: String,
-    pub paid_msat: u64,
-    pub fee_paid_msat: u64,
-    pub payment_hash: String,
+/// A command for the independent owner to run in the node terminal.
+/// No credential is read, stored or sent by the app.
+#[derive(Debug, Clone, Serialize)]
+pub struct OwnerApproval {
+    pub owner_command: String,
+}
+
+pub fn owner_approval(base: &str, candidate: &Candidate, code: &str, now: u64) -> Result<OwnerApproval, String> {
+    candidate.check()?;
+    if candidate.expires_at <= now {
+        return Err("This gift request expired. Make a new offer.".into());
+    }
+    if code != candidate.code {
+        return Err("The code does not match this request. Nothing was paid.".into());
+    }
+    let request = serde_json::json!({
+        "intro_id": candidate.intro_id, "newcomer": candidate.newcomer,
+        "payment_hash": candidate.payment_hash, "gift_msat": candidate.gift_msat,
+        "fee_max_msat": candidate.fee_max_msat, "code": code,
+    });
+    let quote = |s: &str| format!("'{}'", s.replace('\'', "'\"'\"'"));
+    let body = quote(&request.to_string());
+    let url = quote(&format!("{base}/sponsor/approve"));
+    // Same owner command card contract as first contact: the owner supplies
+    // the credential in their terminal; stdin keeps it out of curl's argv.
+    Ok(OwnerApproval { owner_command: format!(
+        "(set +x; printf 'Authorization: Bearer %s\\n' \"${{BITSOV_OWNER_TOKEN:?Set an independent node owner credential in this terminal}}\" | curl --fail --silent --show-error --max-time 20 --proto '=http' --header @- --header 'Content-Type: application/json' --data {body} {url})"
+    ) })
 }
 
 /// `POST /sponsor/request`: what the newcomer shows the sponsor.
