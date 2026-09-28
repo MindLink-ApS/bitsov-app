@@ -213,8 +213,8 @@ export type MembraneEvent = {
 /** Host sums of genome #96's 24 UTC-hour buckets. Decimal strings avoid JS rounding. */
 export type RefusalCount = { count: string; at_least: boolean };
 export type PrePaymentRefusals = {
-  hour_start_ms: number;
-  rows: { reason: PrePaymentReason; hour: RefusalCount; day: RefusalCount }[];
+  hour_start_ms: number | null;
+  rows: { reason: PrePaymentReason; hour: RefusalCount | null; day: RefusalCount }[];
 };
 export type PrePaymentReason =
   | 'session_before_payment' | 'delivery_before_payment' | 'price_before_payment'

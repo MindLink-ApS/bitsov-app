@@ -48,14 +48,18 @@ export function RefusalCounts(props: {
             <tbody><For each={counts().rows}>{(row) =>
               <tr data-refusal-reason={row.reason}>
                 <th scope="row">{REASON_WORDS[row.reason]}</th>
-                <td data-refusals-hour>{countWords(row.hour)}</td>
+                <td data-refusals-hour>{row.hour === null ? 'Unavailable' : countWords(row.hour)}</td>
                 <td data-refusals-day>{countWords(row.day)}</td>
               </tr>
             }</For></tbody>
           </table>
           <p class="organ-note">
             UTC hours: last 1 h is the current hour so far; last 24 h includes the preceding 23 hours.
-            {' '}This reading’s hour starts {new Date(counts().hour_start_ms).toISOString().slice(0, 16).replace('T', ' ')} UTC.
+            {' '}<Show when={counts().hour_start_ms !== null} fallback={
+              <>Current hour unavailable — your node does not report its effective hour. Last 24 h totals use its retained buckets.</>
+            }>
+              This reading’s hour starts {counts().hour_start_ms === null ? '' : new Date(counts().hour_start_ms!).toISOString().slice(0, 16).replace('T', ' ')} UTC.
+            </Show>
           </p>
         </>}
       </Show>

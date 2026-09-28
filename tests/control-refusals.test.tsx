@@ -2,6 +2,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { createSignal } from 'solid-js';
 import { render } from 'solid-js/web';
 import { ControlCenter } from '../src/control/Shell';
+import type { PrePaymentRefusals } from '../src/control/types';
 import { sampleSource, SAMPLE_OWN_ID } from '../src/control/sample';
 
 const NOW = Date.UTC(2026, 8, 28, 14, 30);
@@ -21,7 +22,7 @@ let mount: HTMLElement;
 afterEach(() => { dispose?.(); dispose = undefined; mount?.remove(); vi.useRealTimers(); });
 const select = (s: string) => mount.querySelector<HTMLElement>(s);
 
-type RefusalSnapshot = ReturnType<typeof snapshot> | null | undefined;
+type RefusalSnapshot = PrePaymentRefusals | null | undefined;
 
 async function start(field: RefusalSnapshot = snapshot(), readAt = NOW - 20_000, organism: 'v1' | 'v2' = 'v2') {
   vi.useFakeTimers();
@@ -116,4 +117,20 @@ it('keeps failed refresh counts visibly stale without advancing their window or 
   expect(select('[data-refusals-fresh]')!.textContent).toContain('could not re-read');
   expect(select('[data-refusals-fresh]')!.dataset.refusalsFresh).toBe('stale');
   expect(select('[data-refusal-reason="session_before_payment"] [data-refusals-hour]')!.textContent).toBe('1');
+});
+
+it('shows an unavailable hour but retains 24h totals for an older node without an anchor', async () => {
+  const field = {
+    hour_start_ms: null,
+    rows: reasons.map(reason => ({ reason, hour: null, day: { count: '1', at_least: false } })),
+  };
+  await start(field);
+  for (const reason of reasons) {
+    const row = select(`[data-refusal-reason="${reason}"]`)!;
+    expect(row.querySelector('[data-refusals-hour]')!.textContent).toBe('Unavailable');
+    expect(row.querySelector('[data-refusals-day]')!.textContent).toBe('1');
+  }
+  const panel = select('[data-pre-payment-refusals]')!;
+  expect(panel.textContent).toContain('hour unavailable');
+  expect(panel.textContent).not.toContain('This reading’s hour starts');
 });

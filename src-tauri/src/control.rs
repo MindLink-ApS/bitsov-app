@@ -353,7 +353,7 @@ impl MembraneRead {
             capacity: node.capacity,
             totals: node.totals,
             events: node.events.into_iter().filter_map(MembraneEvent::checked).collect(),
-            pre_payment_refusals: node.pre_payment_refusals.and_then(|counts| counts.project(read_at)),
+            pre_payment_refusals: node.pre_payment_refusals.and_then(|counts| counts.project()),
             read_at,
         }
     }
@@ -1058,7 +1058,7 @@ mod pre_payment_refusal_tests {
         serde_json::to_value(MembraneRead::from_node(node, NOW)).unwrap()
     }
     fn counts(buckets: Value) -> Value {
-        json!({"bucket_ms":HOUR,"capacity":24,"buckets":buckets})
+        json!({"bucket_ms":HOUR,"capacity":24,"effective_hour_start_ms":100*HOUR,"buckets":buckets})
     }
 
     #[test]
@@ -1101,11 +1101,46 @@ mod pre_payment_refusal_tests {
 
     #[test]
     fn refusal_counts_rollback_keeps_the_nodes_most_recent_hour() {
-        let read = project(Some(counts(json!([
+        let mut field = counts(json!([
             {"start_ms":101*HOUR,"counts":{"admission_required":4}}
-        ]))));
+        ]));
+        field["effective_hour_start_ms"] = json!(101*HOUR);
+        let read = project(Some(field));
         assert_eq!(read["pre_payment_refusals"]["hour_start_ms"], 101*HOUR);
         assert_eq!(read["pre_payment_refusals"]["rows"][7]["hour"]["count"], "4");
+    }
+
+    #[test]
+    fn refusal_counts_quiet_hour_before_rollback_uses_authoritative_anchor() {
+        // Record at hour 100, quiet node read at 101, then read at hour 99.
+        let wire = json!({"capacity":500,"totals":{},"events":[],"pre_payment_refusals":{
+            "bucket_ms":HOUR,"capacity":24,"effective_hour_start_ms":101*HOUR,
+            "buckets":[{"start_ms":100*HOUR,"counts":{"session_before_payment":1}}]
+        }});
+        let node = serde_json::from_value(wire).unwrap();
+        let read = serde_json::to_value(MembraneRead::from_node(node, 99*HOUR)).unwrap();
+        let counts = &read["pre_payment_refusals"];
+        assert_eq!(counts["hour_start_ms"], 101*HOUR);
+        assert_eq!(counts["rows"][0]["hour"]["count"], "0");
+        assert_eq!(counts["rows"][0]["day"]["count"], "1");
+    }
+
+    #[test]
+    fn refusal_counts_older_node_keeps_day_but_hour_is_unavailable() {
+        for anchor in [None, Some(Value::Null)] {
+            let mut field = counts(json!([
+                {"start_ms":100*HOUR,"counts":{"session_before_payment":1}},
+                {"start_ms":101*HOUR,"counts":{"admission_required":4}}
+            ]));
+            field.as_object_mut().unwrap().remove("effective_hour_start_ms");
+            if let Some(anchor) = anchor { field["effective_hour_start_ms"] = anchor; }
+            let read = project(Some(field));
+            let counts = &read["pre_payment_refusals"];
+            assert!(counts["hour_start_ms"].is_null());
+            assert!(counts["rows"].as_array().unwrap().iter().all(|r| r["hour"].is_null()));
+            assert_eq!(counts["rows"][0]["day"]["count"], "1");
+            assert_eq!(counts["rows"][7]["day"]["count"], "4");
+        }
     }
 
     #[test]
@@ -1113,6 +1148,8 @@ mod pre_payment_refusal_tests {
         for field in [
             json!({"bucket_ms":1,"capacity":24,"buckets":[]}),
             json!({"bucket_ms":HOUR,"capacity":25,"buckets":[]}),
+            json!({"bucket_ms":HOUR,"capacity":24,"effective_hour_start_ms":NOW,"buckets":[]}),
+            counts(json!([{"start_ms":101*HOUR,"counts":{}}])),
             counts(json!([{"start_ms":NOW,"counts":{}}])),
             counts(json!([{"start_ms":100*HOUR,"counts":{}},{"start_ms":100*HOUR,"counts":{}}])),
             counts(json!(vec![json!({"start_ms":0,"counts":{}});25])),
