@@ -1,0 +1,68 @@
+name: Windows Compile
+
+# Split out of build.yml (job id, name and steps unchanged) so its triggers can
+# differ from the Build merge gate without adding events to Build.
+#
+# CI cost rule: Windows runners bill at 2x Linux, so this does NOT run on every
+# PR push. It runs on push to main, on workflow_dispatch, when a PR is opened
+# non-draft or marked ready_for_review, and on any PR carrying the `full-ci`
+# label (every push, plus the moment the label is added). Draft PRs without
+# `full-ci` skip it. Required gates (Authority Check, Build) are unaffected.
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-compile:
+    # app #16 review: a Unix-only import (`shared_child::unix`) and an ungated
+    # `send_signal` broke the Windows build, and Linux CI could not see it. The app
+    # ships a Windows sidecar target, so the code must at least COMPILE there. This
+    # cannot be checked from macOS — cross-compiling to MSVC needs a Windows C
+    # toolchain (`ring`'s build script fails) — so it is checked on a Windows runner.
+    #
+    # NOT a merge gate: Windows is not a supported target today (unsigned, untested
+    # package), and this job exists to catch platform-gating regressions, not to
+    # promise Windows support. Keep it out of branch protection.
+    name: Windows compile check (not a merge gate)
+    runs-on: windows-latest
+    # See the CI cost rule at the top of this file.
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.action == 'labeled' && github.event.label.name == 'full-ci') ||
+      (github.event.action != 'labeled' && contains(github.event.pull_request.labels.*.name, 'full-ci')) ||
+      github.event.action == 'ready_for_review' ||
+      (github.event.action == 'opened' && !github.event.pull_request.draft)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Placeholders for the tauri_build checks (sidecar + Windows icon)
+        shell: bash
+        run: |
+          set -euo pipefail
+          TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
+          mkdir -p src-tauri/bin
+          : > "src-tauri/bin/konsensus-${TRIPLE}.exe"
+          # tauri-build needs icons/icon.ico to emit a Windows Resource file, and the
+          # repo has no Windows icon yet (app #18). This job checks that the RUST
+          # compiles on Windows, so a throwaway icon is generated here rather than
+          # committed — same pattern as the sidecar placeholder above. It is never
+          # part of a release artifact.
+          python3 - <<'PYICO'
+          import struct
+          png = open("src-tauri/icons/icon.png", "rb").read()
+          # ICO container with a single PNG-compressed 256x256 entry.
+          header = struct.pack("<HHH", 0, 1, 1)
+          entry = struct.pack("<BBBBHHII", 0, 0, 0, 0, 1, 32, len(png), 6 + 16)
+          open("src-tauri/icons/icon.ico", "wb").write(header + entry + png)
+          print("placeholder icon.ico written")
+          PYICO
+      - name: cargo check (src-tauri)
+        working-directory: src-tauri
+        run: cargo check --locked

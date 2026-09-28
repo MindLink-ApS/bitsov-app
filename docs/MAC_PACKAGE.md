@@ -132,8 +132,10 @@ tested support claim. No macOS version has runtime evidence yet.
 
 ## CI artifact
 
-`.github/workflows/mac-package.yml` ("Mac Package") runs on pull requests to
-`main` and on pushes to `main`:
+`.github/workflows/mac-package.yml` ("Mac Package") runs on pushes to `main`,
+on `workflow_dispatch`, when a PR is opened non-draft or marked ready for
+review, and on every push to a PR labeled `full-ci`. Draft PRs without the
+label skip it (macOS minutes cost 10x Linux):
 
 - Runner: `macos-14` (arm64). Toolchain: Node 22 and stable Rust. Permissions:
   `contents: read`. It uses `github.token` read-only for `gh release download`.

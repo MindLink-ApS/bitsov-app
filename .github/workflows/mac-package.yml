@@ -7,11 +7,19 @@ name: Mac Package
 # NOT a merge gate: keep this job OUT of the required status checks. Like the
 # Build workflow's `sidecar` job it depends on network and on the genome's
 # published rc7 release, not only on this repo's source.
+#
+# CI cost rule: macOS runners bill at 10x Linux, so this does NOT run on every
+# PR push. It runs on push to main, on workflow_dispatch, when a PR is opened
+# non-draft or marked ready_for_review, and on any PR carrying the `full-ci`
+# label (every push, plus the moment the label is added). Draft PRs without
+# `full-ci` skip it. Required gates (Authority Check, Build) are unaffected.
 on:
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
   push:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -20,6 +28,13 @@ jobs:
   mac-package:
     name: Mac package (unsigned .app artifact) — not a merge gate
     runs-on: macos-14
+    # See the CI cost rule at the top of this file.
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.action == 'labeled' && github.event.label.name == 'full-ci') ||
+      (github.event.action != 'labeled' && contains(github.event.pull_request.labels.*.name, 'full-ci')) ||
+      github.event.action == 'ready_for_review' ||
+      (github.event.action == 'opened' && !github.event.pull_request.draft)
     timeout-minutes: 45
     env:
       # scripts/fetch-node-sidecar.sh reads the pinned public release with gh.
