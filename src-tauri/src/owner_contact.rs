@@ -1,6 +1,6 @@
 //! Independent-owner first-contact handoff. The app never obtains the owner's
-//! credential. The owner runs the HTTP command at the node, which writes only
-//! the public response. A receipt is a readiness signal, not spend authority:
+//! credential. The owner runs the CLI at the node; its success writes only
+//! a public readiness receipt. A receipt is a readiness signal, not spend authority:
 //! the node still checks and consumes its actual single-use grant on compose.
 use std::io::Read;
 #[cfg(unix)]
@@ -46,7 +46,7 @@ fn waiting() -> ActionError {
 }
 
 impl Pending {
-    pub fn new(base: &str, request: Request, fence: (u64, u64), now: u64, grant: &NodeGrant) -> Result<Self, ActionError> {
+    pub fn new(request: Request, fence: (u64, u64), now: u64, grant: &NodeGrant) -> Result<Self, ActionError> {
         for id in [&request.client_id, &request.grant_op_id] {
             if id.is_empty() || id.len() > 128 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
                 return Err(crate::grant::unreadable());
@@ -60,17 +60,29 @@ impl Pending {
         let dir = builder.tempdir()
             .map_err(|_| ActionError::node("Cannot prepare the owner approval receipt."))?;
         let id = dir.path().file_name().unwrap().to_string_lossy().into_owned();
-        let receipt = quote(&dir.path().join("receipt.json").to_string_lossy());
-        let partial = quote(&dir.path().join("receipt.part").to_string_lossy());
-        let body = quote(&serde_json::to_string(&request).map_err(|_| crate::grant::unreadable())?);
-        // Header comes from the OWNER'S environment over stdin, never argv,
-        // the app, the command text, or the receipt. No redirect following.
-        // Noclobber opens a fresh partial before curl runs. Curl writes to that
-        // descriptor via stdout, never reopening a potentially planted path.
-        // Also reject nonregular files/symlinks, which noclobber alone permits.
-        let owner_command = format!(
-            "(set +x; umask 077; set -C; [ ! -e {partial} ] && [ ! -L {partial} ] && {{ printf 'Authorization: Bearer %s\\n' \"${{BITSOV_OWNER_TOKEN:?Set an independent node owner credential in this terminal}}\" | curl --fail --silent --show-error --max-time 20 --proto '=http' --header @- --header 'Content-Type: application/json' --data {body} --output - {}; }} > {partial} && mv {partial} {receipt})",
-            quote(&format!("{base}/pair/first-contact-grant")));
+        let receipt = quote(&dir.path().join("receipt").to_string_lossy());
+        let command = format!(
+            "konsensus approve first-contact --client {} --op {} --to {} --max-msat {} --contact-budget-msat {}",
+            quote(&request.client_id), quote(&request.grant_op_id), quote(&request.recipient),
+            quote(&request.max_total_msat.to_string()), quote(&request.contact_budget_msat.to_string()));
+        // Genome has no read route for its single-use contact approval. Record
+        // CLI success, never authority. Start the conservative two-minute TTL
+        // BEFORE approval, and bound it by the underlying budget grant.
+        // Noclobber opens the partial before running the CLI. Existing files
+        // and all symlinks (including devices) refuse without running it.
+        let body = quote(&format!("{{\"recipient\":\"{}\",\"max_total_msat\":{},\"expires_at\":%s}}\\n",
+            request.recipient, request.max_total_msat));
+        let until = quote(&grant.expires_at.to_string());
+        let owner_command = format!(r#"(
+  umask 077; set -C
+  receipt={receipt}
+  [ ! -e "$receipt.part" ] && [ ! -L "$receipt.part" ] && {{
+    started=$(date +%s) && expires=$((started + 120)) &&
+    {{ [ "$expires" -le {until} ] || expires={until}; }} &&
+    {command} >&2 &&
+    printf {body} "$expires"
+  }} > "$receipt.part" && mv "$receipt.part" "$receipt.json"
+)"#);
         Ok(Self { view: View { id, request, owner_command, ready: false,
             expires_at_ms: now.saturating_add(15 * 60_000).min(grant.expires_at_ms()) }, fence, dir })
     }
@@ -115,21 +127,19 @@ impl Pending {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use std::io::{BufRead, BufReader, Write};
-    use std::net::TcpListener;
     use std::os::unix::fs::{symlink, PermissionsExt};
     use std::process::Command;
-    use std::sync::mpsc;
-    use std::time::Duration;
 
-    fn pending(base: &str) -> Pending {
+    fn pending() -> Pending { pending_with_expiry(120) }
+
+    fn pending_with_expiry(expires_at: i64) -> Pending {
         let grant = NodeGrant {
-            client_id: "c1".into(), op_id: "ab12".into(), expires_at: 120,
+            client_id: "c1".into(), op_id: "ab12".into(), expires_at,
             budget_msat: 50_000, used_msat: 0, remaining_msat: 50_000,
             per_call_max_msat: 5_000, per_recipient_msat: Default::default(),
             used_by_recipient: Default::default(),
         };
-        Pending::new(base, Request {
+        Pending::new(Request {
             client_id: "c1".into(), grant_op_id: "ab12".into(),
             recipient: "a".repeat(64), max_total_msat: 5_000, contact_budget_msat: 50_000,
         }, (0, 0), 0, &grant).unwrap()
@@ -139,7 +149,7 @@ mod tests {
     fn receipt_directory_is_private_under_permissive_umasks() {
         // Change umask only in a subprocess, never in the parallel test runner.
         if std::env::var_os("BITSOV_TEST_RECEIPT_UMASK_CHILD").is_some() {
-            let p = pending("http://127.0.0.1:1/api/v1");
+            let p = pending();
             assert_eq!(std::fs::metadata(p.dir.path()).unwrap().permissions().mode() & 0o777, 0o700);
             return;
         }
@@ -158,69 +168,68 @@ mod tests {
         assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
-    // Real curl and a loopback response exercise the generated shell command.
-    struct Fixture {
-        base: String,
-        stop: mpsc::Sender<()>,
-        thread: Option<std::thread::JoinHandle<()>>,
-    }
-
+    // A CLI stand-in records the actual POSIX-shell argument boundaries. The
+    // real CLI/control socket is exercised by the real-window UI-E2E fixture.
+    struct Fixture { dir: tempfile::TempDir }
     impl Fixture {
         fn new() -> Self {
-            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            let base = format!("http://127.0.0.1:{}/api/v1", listener.local_addr().unwrap().port());
-            listener.set_nonblocking(true).unwrap();
-            let (stop, stopped) = mpsc::channel();
-            let thread = std::thread::spawn(move || loop {
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-                        let mut reader = BufReader::new(&mut stream);
-                        let mut length = 0;
-                        loop {
-                            let mut line = String::new();
-                            reader.read_line(&mut line).unwrap();
-                            if line == "\r\n" || line.is_empty() { break; }
-                            if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
-                                length = value.trim().parse().unwrap();
-                            }
-                        }
-                        reader.read_exact(&mut vec![0; length]).unwrap();
-                        let body = format!("{{\"recipient\":\"{}\",\"max_total_msat\":5000,\"expires_at\":120}}", "a".repeat(64));
-                        write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        if stopped.recv_timeout(Duration::from_millis(5)) != Err(mpsc::RecvTimeoutError::Timeout) { break; }
-                    }
-                    Err(e) => panic!("fixture accept: {e}"),
-                }
-            });
-            Self { base, stop, thread: Some(thread) }
+            let dir = tempfile::tempdir().unwrap();
+            let cli = dir.path().join("konsensus");
+            std::fs::write(&cli, "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$OWNER_TEST_ARGS\"\nprintf 1050 > \"$OWNER_TEST_CLOCK\"\nexit \"${OWNER_TEST_EXIT:-0}\"\n").unwrap();
+            std::fs::set_permissions(cli, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let clock = dir.path().join("clock");
+            std::fs::write(&clock, "1000").unwrap();
+            let date = dir.path().join("date");
+            std::fs::write(&date, "#!/bin/sh\ncat \"$OWNER_TEST_CLOCK\"\n").unwrap();
+            std::fs::set_permissions(date, std::fs::Permissions::from_mode(0o700)).unwrap();
+            Self { dir }
         }
     }
-
-    impl Drop for Fixture {
-        fn drop(&mut self) {
-            let _ = self.stop.send(());
-            self.thread.take().unwrap().join().unwrap();
-        }
-    }
-
-    fn run_owner(p: &Pending) -> std::process::Output {
+    fn run_owner_with(p: &Pending, fixture: &Fixture, exit: &str) -> std::process::Output {
         Command::new("/bin/sh").args(["-c", &p.view.owner_command])
-            .env("BITSOV_OWNER_TOKEN", "synthetic-independent-owner")
-            .env("NO_PROXY", "127.0.0.1").output().unwrap()
+            .env("PATH", format!("{}:/usr/bin:/bin", fixture.dir.path().display()))
+            .env("OWNER_TEST_ARGS", fixture.dir.path().join("args"))
+            .env("OWNER_TEST_CLOCK", fixture.dir.path().join("clock"))
+            .env("OWNER_TEST_EXIT", exit).output().unwrap()
+    }
+    fn run_owner(p: &Pending, fixture: &Fixture) -> std::process::Output {
+        run_owner_with(p, fixture, "0")
+    }
+
+    #[test]
+    fn owner_cli_receives_exact_reviewed_tuple_and_failure_publishes_no_receipt() {
+        let fixture = Fixture::new();
+        let p = pending();
+        let output = run_owner_with(&p, &fixture, "1");
+        assert!(!output.status.success());
+        assert!(!p.dir.path().join("receipt.json").exists());
+        assert_eq!(std::fs::read_to_string(fixture.dir.path().join("args")).unwrap(),
+            format!("approve\nfirst-contact\n--client\nc1\n--op\nab12\n--to\n{}\n--max-msat\n5000\n--contact-budget-msat\n50000\n", "a".repeat(64)));
+    }
+
+    #[test]
+    fn receipt_expiry_starts_before_cli_and_never_outlives_budget_grant() {
+        for (grant_expiry, expected) in [(5000, 1120), (1100, 1100)] {
+            let fixture = Fixture::new();
+            let p = pending_with_expiry(grant_expiry);
+            let output = run_owner(&p, &fixture);
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            let receipt: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(p.dir.path().join("receipt.json")).unwrap()).unwrap();
+            assert_eq!(receipt["expires_at"], expected);
+            assert_eq!(std::fs::read_to_string(fixture.dir.path().join("clock")).unwrap(), "1050");
+        }
     }
 
     #[test]
     fn owner_command_refuses_a_planted_partial_symlink_without_touching_victim() {
         let fixture = Fixture::new();
-        let p = pending(&fixture.base);
+        let p = pending();
         let victim = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(victim.path(), "ORIGINAL DUMMY CONTENT").unwrap();
         let partial = p.dir.path().join("receipt.part");
         symlink(victim.path(), &partial).unwrap();
-        let output = run_owner(&p);
+        let output = run_owner(&p, &fixture);
         assert_eq!(std::fs::read_to_string(victim.path()).unwrap(), "ORIGINAL DUMMY CONTENT");
         assert!(!output.status.success());
         assert!(partial.is_symlink());
@@ -230,10 +239,10 @@ mod tests {
     #[test]
     fn owner_command_refuses_an_existing_partial_file() {
         let fixture = Fixture::new();
-        let p = pending(&fixture.base);
+        let p = pending();
         let partial = p.dir.path().join("receipt.part");
         std::fs::write(&partial, "existing partial").unwrap();
-        let output = run_owner(&p);
+        let output = run_owner(&p, &fixture);
         assert_eq!(std::fs::read_to_string(partial).unwrap(), "existing partial");
         assert!(!output.status.success());
         assert!(!p.dir.path().join("receipt.json").exists());
@@ -242,10 +251,10 @@ mod tests {
     #[test]
     fn owner_command_refuses_a_dangling_partial_symlink() {
         let fixture = Fixture::new();
-        let p = pending(&fixture.base);
+        let p = pending();
         let target = p.dir.path().join("must-not-be-created");
         symlink(&target, p.dir.path().join("receipt.part")).unwrap();
-        let output = run_owner(&p);
+        let output = run_owner(&p, &fixture);
         assert!(!target.exists());
         assert!(!output.status.success());
         assert!(!p.dir.path().join("receipt.json").exists());
@@ -254,10 +263,10 @@ mod tests {
     #[test]
     fn owner_command_refuses_a_partial_symlink_to_a_device() {
         let fixture = Fixture::new();
-        let p = pending(&fixture.base);
+        let p = pending();
         let partial = p.dir.path().join("receipt.part");
         symlink("/dev/null", &partial).unwrap();
-        let output = run_owner(&p);
+        let output = run_owner(&p, &fixture);
         assert!(!output.status.success());
         assert!(partial.is_symlink());
         assert!(!p.dir.path().join("receipt.json").is_symlink());
@@ -266,8 +275,8 @@ mod tests {
     #[test]
     fn owner_command_publishes_a_private_regular_receipt() {
         let fixture = Fixture::new();
-        let p = pending(&fixture.base);
-        let output = run_owner(&p);
+        let p = pending();
+        let output = run_owner(&p, &fixture);
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
         let receipt = p.dir.path().join("receipt.json");
         let metadata = std::fs::symlink_metadata(&receipt).unwrap();

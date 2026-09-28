@@ -202,7 +202,7 @@ pub struct OwnerApproval {
     pub owner_command: String,
 }
 
-pub fn owner_approval(base: &str, candidate: &Candidate, code: &str, now: u64) -> Result<OwnerApproval, String> {
+pub fn owner_approval(candidate: &Candidate, code: &str, now: u64) -> Result<OwnerApproval, String> {
     candidate.check()?;
     if candidate.expires_at <= now {
         return Err("This gift request expired. Make a new offer.".into());
@@ -210,18 +210,11 @@ pub fn owner_approval(base: &str, candidate: &Candidate, code: &str, now: u64) -
     if code != candidate.code {
         return Err("The code does not match this request. Nothing was paid.".into());
     }
-    let request = serde_json::json!({
-        "intro_id": candidate.intro_id, "newcomer": candidate.newcomer,
-        "payment_hash": candidate.payment_hash, "gift_msat": candidate.gift_msat,
-        "fee_max_msat": candidate.fee_max_msat, "code": code,
-    });
     let quote = |s: &str| format!("'{}'", s.replace('\'', "'\"'\"'"));
-    let body = quote(&request.to_string());
-    let url = quote(&format!("{base}/sponsor/approve"));
-    // Same owner command card contract as first contact: the owner supplies
-    // the credential in their terminal; stdin keeps it out of curl's argv.
     Ok(OwnerApproval { owner_command: format!(
-        "(set +x; printf 'Authorization: Bearer %s\\n' \"${{BITSOV_OWNER_TOKEN:?Set an independent node owner credential in this terminal}}\" | curl --fail --silent --show-error --max-time 20 --proto '=http' --header @- --header 'Content-Type: application/json' --data {body} {url})"
+        "konsensus approve gift --intro {} --newcomer {} --hash {} --gift-msat {} --fee-max-msat {} --code {}",
+        quote(&candidate.intro_id), quote(&candidate.newcomer), quote(&candidate.payment_hash),
+        quote(&candidate.gift_msat.to_string()), quote(&candidate.fee_max_msat.to_string()), quote(code),
     ) })
 }
 

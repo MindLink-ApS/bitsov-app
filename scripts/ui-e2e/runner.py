@@ -223,15 +223,14 @@ def jwt(n):
 def owner_first_contact(command):
     """FIXTURE: node A operator runs the exact public command shown by the app.
 
-    Only this separate process receives the throwaway owner token. Neither the
-    app nor command/evidence text contains it; the app sees the public receipt.
+    Only this separate operator process runs the CLI against node A's owner
+    socket. The app sees only the public readiness receipt, never the socket.
     """
-    token = jwt('a')
-    evidence.remember(token)
     env = os.environ.copy()
-    env['BITSOV_OWNER_TOKEN'] = token
+    env.pop('BITSOV_OWNER_TOKEN', None)
+    env['PATH'] = str(Path(BIN).parent) + os.pathsep + env.get('PATH', '')
     result = subprocess.run(['sandbox-exec', '-f', str(SANDBOX), '/bin/sh', '-c', command],
-                            env=env, text=True, capture_output=True, timeout=30)
+                            cwd=ROOTS['a'], env=env, text=True, capture_output=True, timeout=30)
     evidence.write('owner-first-contact-fixture.json', {
         'label': 'FIXTURE: independent node A owner authority',
         'command': command, 'exit_code': result.returncode,
