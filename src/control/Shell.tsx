@@ -1407,19 +1407,21 @@ function Composer(props: {
       if ((st.kind !== 'first' && st.kind !== 'ok') || !ready()) return;
       setBusy(true);
       const submittedRevision = composerRevision;
+      const submittedPeer = target();
       const r = await props.actions.send(props.track, draft(), shown().msat!, st.kind === 'first' ? firstPick() ?? st.suggest : undefined);
-      if (r.ok) setReadmitFor(null);
-      else if (['price_changed', 'price_cap_exceeded'].includes(r.error.code) && doorWanted()) {
+      const unchanged = composerRevision === submittedRevision;
+      if (r.ok && readmitFor() === submittedPeer) setReadmitFor(null);
+      else if (!r.ok && unchanged && ['price_changed', 'price_cap_exceeded'].includes(r.error.code) && doorWanted()) {
         // The stranger's price moved: ask for their signed quote again.
         setDoor(null);
-      } else if (r.error.code === 'grant_readmission') {
-        setDoor(null);
-        setReadmitFor(target());
+      } else if (!r.ok && r.error.code === 'grant_readmission') {
+        if (target() === submittedPeer) setDoor(null);
+        setReadmitFor(submittedPeer);
       }
       if (r.ok && composerRevision === submittedRevision) {
         setDraft('');
         setDrafted(false);
-      } else if (!r.ok && isBudgetStop(r.error)) setNote(r.error.message);
+      } else if (!r.ok && unchanged && isBudgetStop(r.error)) setNote(r.error.message);
       setBusy(false);
       return;
     }

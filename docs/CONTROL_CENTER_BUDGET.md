@@ -108,12 +108,27 @@ invoice or payment.
 2. `max_total_msat` = the displayed price, as in slice B. The node enforces it
    per message (`paid_send_caps_v1`); the budget can only refuse, never widen it.
 3. Under the journal lock, the book is re-read and re-planned, and the full
-   cap is **reserved** before dispatch. The approval is rechecked afterwards.
-4. Outcome: settled to the node's reported amount on success; **released**
+   spending bound is **reserved** before dispatch. The approval is rechecked afterwards.
+   Re-admission is separate from `max_total_msat`: on nodes supporting it,
+   a contact send reserves the remaining node contact allowance, capped by
+   the node's remaining total; a room reserves the remaining node total.
+   Without a node contact allowance, a one-time confirmation bounds admission
+   separately from the message, so both amounts are reserved. Without either,
+   the app asks for confirmation before dispatch.
+   A wider node grant can therefore make a send refuse under a lower local
+   daily or contact limit even when the displayed message price fits. Narrow
+   the node grant to match the intended local allowance; editing the app's
+   numbers alone does not change the node grant.
+4. Outcome: settled to the node's reported message **plus re-admission** amount on success; **released**
    only on refusals before any payment (401/403, `price_cap_exceeded`, approval
-   changed before dispatch); **kept at the cap** when the outcome is unknown
+   changed before dispatch); **kept at the full reserved bound** when the outcome is unknown
    (transport loss, 5xx, unresolved room). A crash between reserve and dispatch
-   also keeps the cap counted. The tally can over-count, never under-count.
+   also keeps the reservation counted. Before settlement, the reported total
+   is saved in the spend journal. If the book write fails, another spend stays
+   blocked across restart. Reconciliation writes that total to the existing
+   reservation before clearing the journal, without dispatching again or
+   relying on message history that omits admission. Repeating this recovery
+   does not count the payment twice.
 
 A 401/403 on a money route ends the budget approval as well as the window.
 
