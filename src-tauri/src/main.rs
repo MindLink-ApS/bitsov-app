@@ -134,6 +134,9 @@ struct NodeState {
     /// The supervised node's `konsensus.toml`. Captured at bootstrap so a restore can
     /// restart the SAME data dir without re-running `init`.
     config: Mutex<Option<PathBuf>>,
+    /// Fee policy from the configuration handed to the supervised node at start.
+    /// No room quote guesses a policy if this snapshot is unavailable.
+    room_routing_policy: Mutex<Option<(String, act::RoutingFeePolicy)>>,
     /// DEV ONLY (`dev_node`): an unverified node binary to run instead of the bundled
     /// sidecar. Always `None` in release builds.
     dev_sidecar: Mutex<Option<PathBuf>>,
@@ -215,6 +218,7 @@ impl NodeState {
             quitting: AtomicBool::new(false),
             token: Mutex::new(None),
             config: Mutex::new(None),
+            room_routing_policy: Mutex::new(None),
             dev_sidecar: Mutex::new(None),
             last_remint: Mutex::new(None),
             sidecar_terminated: AtomicBool::new(false),
@@ -376,7 +380,9 @@ fn spawn_node(app: &AppHandle<impl tauri::Runtime>, config: &Path) -> Result<(),
 
     state.sidecar_terminated.store(false, Ordering::SeqCst);
     *state.all_in_caps_node.lock().unwrap() = None;
+    let routing_policy = configured_routing_policy(config);
     let child = state.spawn_child(&mut cmd)?;
+    *state.room_routing_policy.lock().unwrap() = routing_policy;
 
     // Drain node output to the app log — never render node plaintext in the UI.
     // The one exception is parsed, not rendered: the pairing short code the node
@@ -2674,6 +2680,42 @@ async fn spend_advance_for(state: &NodeState, want: Option<Want>) -> Result<act:
     Ok(state.spend.lock().unwrap().view(now_ms()))
 }
 
+/// Read only the policy and backend from the SAME config passed to node start.
+/// Missing routing_fees/fields have the node's serde defaults; unreadable or
+/// malformed config is not evidence of a default policy. Never expose config
+/// parse errors (the rest of this file can contain credentials).
+fn configured_routing_policy(path: &Path) -> Option<(String, act::RoutingFeePolicy)> {
+    #[derive(Deserialize)]
+    struct Config {
+        lightning: Backend,
+        #[serde(default)]
+        routing_fees: act::RoutingFeePolicy,
+    }
+    #[derive(Deserialize)]
+    struct Backend { backend: String }
+    let text = std::fs::read_to_string(path).ok()?;
+    let config: Config = toml::from_str(&text).ok()?;
+    Some((config.lightning.backend, config.routing_fees))
+}
+
+async fn read_room_routing_policy(state: &NodeState) -> Result<act::RoutingFeePolicy, String> {
+    let status: serde_json::Value = get_json(state, "/status").await?;
+    if state.sidecar_terminated.load(Ordering::SeqCst) {
+        return Err("The supervised node stopped. Restart it before quoting a room.".into());
+    }
+    let backend = status["lightning_backend"].as_str().unwrap_or_default();
+    // dac01c8 has no ordinary member fee quote API. Mock providers explicitly
+    // use the trait default; LND/LDK load routing_fees from their startup config.
+    match backend {
+        "mock" | "shared_mock" => Ok(act::RoutingFeePolicy::default()),
+        "lnd" | "ldk" => state.room_routing_policy.lock().unwrap().as_ref()
+            .filter(|(configured, _)| configured == backend)
+            .map(|(_, policy)| *policy)
+            .ok_or_else(|| "The node's routing fee policy is unavailable. Restart the supervised node before quoting a room.".into()),
+        _ => Err("The node has not reported a supported routing fee policy. Refresh after upgrading the node.".into()),
+    }
+}
+
 async fn read_room_quote(state: &NodeState, room_id: &str) -> Result<act::RoomQuote, String> {
     let room = control::room_id(room_id)?;
     let own_id = state.node_id.lock().unwrap().clone().unwrap_or_default();
@@ -2682,7 +2724,9 @@ async fn read_room_quote(state: &NodeState, room_id: &str) -> Result<act::RoomQu
     let peers: Vec<control::Peer> = get_json(state, "/peers").await?;
     let own: control::KindPrice = get_json(state, &control::price_path(control::KIND_CHAT)).await?;
     let tables: Vec<control::PeerPrice> = get_json(state, "/pricing/peers").await?;
-    Ok(act::room_quote(&room, &own_id, own.price_msat, &members, &peers, &tables))
+    let policy = read_room_routing_policy(state).await?;
+    act::room_quote(&room, &own_id, own.price_msat, &members, &peers, &tables, policy)
+        .map_err(|e| e.message)
 }
 
 /// Only an explicit versioned node contract authorizes variable-price sends.
@@ -2729,17 +2773,22 @@ async fn do_message_send_with(
     let mut body = act::compose_body(recipient, is_room, plaintext)?;
     body["max_total_msat"] = serde_json::json!(max_msat);
     if is_room {
-        let caps = max_recipient_msat.ok_or_else(|| ActionError::new("price_changed", "Refresh the room quote before sending."))?;
+        let caps = max_recipient_msat.as_ref().ok_or_else(|| ActionError::new("price_changed", "Refresh the room quote before sending."))?;
         body["max_recipient_msat"] = serde_json::json!(caps);
     }
     let node_ok = if is_room { None } else { plan.confirm.or(first_contact_msat) };
     let price = if is_room {
         let quote = read_room_quote(state, recipient).await?;
         act::room_sendable(&quote)?;
-        // Compose accepts one caller fee limit for the entire fan-out. Bound it
-        // by every displayed member allowance; the node takes min(policy, caller)
-        // per payment. Keep the confirmed total and recipient caps unchanged.
-        let caller_fee = quote.members.iter().map(|m| m.max_routing_fee_msat).min().unwrap_or(0);
+        let caps = max_recipient_msat.as_ref().expect("room caps checked above");
+        if caps.len() != quote.members.len() || quote.members.iter().any(|member|
+            caps.get(&member.node_id).is_none_or(|cap| member.msat > *cap)) {
+            return Err(ActionError::new("price_changed", "The room all-in price changed. Review the new quote before sending."));
+        }
+        // Genome takes min(policy, caller) per member, then checks each all-in
+        // amount against its recipient cap BEFORE paying. The largest fee lets
+        // each member use its displayed policy allowance; caps remain unchanged.
+        let caller_fee = quote.members.iter().map(|m| m.max_routing_fee_msat).max().unwrap_or(0);
         body["max_routing_fee_msat"] = serde_json::json!(caller_fee);
         quote.total_msat
     } else if node_ok.is_some() {
@@ -3516,6 +3565,9 @@ impl NodeState {
     ///
     /// Returns whether there was a node to stop.
     fn stop_for_restart(&self, budget: Duration) -> bool {
+        // A restored/adopted listener may share identity and backend with the
+        // old node without sharing its startup configuration.
+        *self.room_routing_policy.lock().unwrap() = None;
         let Some(child) = self.child.lock().unwrap().as_ref().cloned() else {
             return false;
         };
@@ -4268,7 +4320,7 @@ mod control_act_tests {
         Arc::new(|_method: &str, path: &str, _body: &str| {
             let (route, _) = path.split_once('?').unwrap_or((path, ""));
             let v = match route {
-                "/status" => serde_json::json!({"api_capabilities":["paid_send_caps_v1","room_terminal_outcomes_v1"]}),
+                "/status" => serde_json::json!({"lightning_backend":"mock", "api_capabilities":["paid_send_caps_v1","room_terminal_outcomes_v1"]}),
                 "/messages/compose" if serde_json::from_str::<serde_json::Value>(_body).unwrap_or_default()["is_room"] == true => serde_json::json!({"max_routing_fee_msat": 0, "message_id":"m1","delivered":true,"amount_msat":3000,
                     "member_outcomes":[{"recipient":A,"status":"settled","amount_msat":2000,"message_id":"m1"},{"recipient":C,"status":"settled","amount_msat":1000,"message_id":"m2"}]}),
                 "/messages/compose" => serde_json::json!({"max_routing_fee_msat": 0, "message_id": "m1", "delivered": true, "amount_msat": 2000}),
@@ -4411,10 +4463,12 @@ mod control_act_tests {
         );
     }
 
-    // Exercise the real quote -> request -> journal path against the genome
-    // policy/caller minimum and its all-in room cap checks (genome dac01c8).
-    async fn room_fee_policy_case(minimum: u64, second_price: u64, second_cap: u64) {
-        let routes: Routes = Arc::new(move |m, p, b| {
+    fn room_policy_routes(minimum: u64, second_price: u64, route_fee: u64) -> Routes {
+        Arc::new(move |m, p, b| {
+            if p == "/status" {
+                return (200, serde_json::json!({"lightning_backend":"lnd",
+                    "api_capabilities":["paid_send_caps_v1","room_terminal_outcomes_v1"]}).to_string());
+            }
             if p == "/pricing/peers" {
                 return (200, serde_json::json!([
                     {"peer_id": A, "prices": {"communication": 2000}, "age_secs": 5, "stale": false},
@@ -4425,12 +4479,21 @@ mod control_act_tests {
                 let request: serde_json::Value = serde_json::from_str(b).unwrap();
                 let caller = request["max_routing_fee_msat"].as_u64().unwrap();
                 let mut fee_total = 0;
+                let mut total = 0;
+                // Model dac01c8's caps::all_in/check_room and fee-limited payment.
                 for (peer, principal) in [(A, 2000u64), (C, second_price)] {
                     let fee = (principal / 100).max(minimum).min(10_000).min(caller);
                     fee_total += fee;
+                    total += principal + fee;
                     if principal + fee > request["max_recipient_msat"][peer].as_u64().unwrap() {
                         return (409, serde_json::json!({"error":"member all-in price exceeds cap", "code":"price_cap_exceeded"}).to_string());
                     }
+                    if peer == C && route_fee > fee {
+                        return (409, serde_json::json!({"error":"route exceeds caller fee ceiling", "code":"price_cap_exceeded"}).to_string());
+                    }
+                }
+                if total > request["max_total_msat"].as_u64().unwrap() {
+                    return (409, serde_json::json!({"error":"total exceeds cap", "code":"price_cap_exceeded"}).to_string());
                 }
                 return (200, serde_json::json!({"message_id":"m1", "delivered":true,
                     "amount_msat":2000 + second_price, "max_routing_fee_msat":fee_total,
@@ -4440,66 +4503,141 @@ mod control_act_tests {
                     ]}).to_string());
             }
             happy()(m, p, b)
-        });
-        let node = fake(AuthMode::Local, routes);
+        })
+    }
+
+    fn write_room_policy(node: &Fake, minimum: u64) {
+        std::fs::write(node.state.config.lock().unwrap().as_ref().unwrap(), format!(
+            "[lightning]\nbackend = \"lnd\"\n[routing_fees]\nminimum_msat = {minimum}\nproportional_millionths = 10000\nmaximum_msat = 10000\n"
+        )).unwrap();
+        // Simulate the same policy capture as a supervised node start/restart.
+        *node.state.room_routing_policy.lock().unwrap() = configured_routing_policy(
+            node.state.config.lock().unwrap().as_ref().unwrap());
+    }
+
+    async fn room_fee_policy_case(minimum: u64, second_price: u64, first_cap: u64, second_cap: u64, caller: u64, route_fee: u64) {
+        let node = fake(AuthMode::Local, room_policy_routes(minimum, second_price, route_fee));
+        write_room_policy(&node, minimum);
         let quote = read_room_quote(&node.state, ROOM).await.unwrap();
-        assert_eq!(quote.members[0].msat, 7000);
-        assert_eq!(quote.members[0].max_routing_fee_msat, 5000);
+        assert_eq!(quote.members[0].msat, first_cap);
         assert_eq!(quote.members[1].msat, second_cap);
-        assert_eq!(quote.total_msat, 7000 + second_cap);
+        assert_eq!(quote.total_msat, first_cap + second_cap);
         with_book(&node.state, true, |b| { b.set_ceiling(2_000_000); Ok(()) }).unwrap();
         spend_advance(&node.state, true).await.unwrap();
         let caps = quote.members.iter().map(|m| (m.node_id.clone(), m.msat)).collect();
         let receipt = do_message_send(&node.state, ROOM, true, "gm", quote.total_msat, Some(caps)).await.unwrap();
-        assert_eq!(receipt.total_msat, 2000 + second_price + 10_000);
+        assert_eq!(receipt.total_msat, first_cap + second_cap);
+        assert_eq!(receipt.max_routing_fee_msat, quote.max_routing_fee_msat);
         assert!(spend_journal(&node.state).unwrap().pending().unwrap().is_none());
         let posts = node.posts();
         assert_eq!(posts.len(), 1);
-        assert_eq!(posts[0].1["max_routing_fee_msat"], 5000);
-        assert_eq!(posts[0].1["max_total_msat"], 7000 + second_cap);
-        assert_eq!(posts[0].1["max_recipient_msat"], serde_json::json!({A:7000,C:second_cap}));
+        assert_eq!(posts[0].1["max_routing_fee_msat"], caller);
+        assert_eq!(posts[0].1["max_total_msat"], first_cap + second_cap);
+        assert_eq!(posts[0].1["max_recipient_msat"], serde_json::json!({A:first_cap,C:second_cap}));
     }
 
     #[tokio::test]
     async fn room_fee_default_policy_control() {
-        room_fee_policy_case(5000, 2000, 7000).await;
+        room_fee_policy_case(5000, 2000, 7000, 7000, 5000, 0).await;
     }
 
     #[tokio::test]
-    async fn room_fee_higher_node_floor_respects_displayed_allowance() {
-        room_fee_policy_case(7500, 2000, 7000).await;
+    async fn room_fee_higher_node_floor_is_displayed_and_authorized() {
+        room_fee_policy_case(7500, 2000, 9500, 9500, 7500, 6000).await;
     }
 
     #[tokio::test]
-    async fn room_fee_mixed_prices_bound_shared_limit_to_smallest_allowance() {
-        room_fee_policy_case(7500, 750_000, 757_500).await;
+    async fn room_fee_mixed_prices_allow_a_route_inside_the_larger_member_quote() {
+        room_fee_policy_case(5000, 750_000, 7000, 757_500, 7500, 6000).await;
     }
 
     #[tokio::test]
-    async fn room_fee_higher_all_in_quote_requires_another_approval() {
+    async fn room_fee_higher_policy_requires_another_approval_at_unchanged_principal() {
         let raised = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let changing = raised.clone();
         let routes: Routes = Arc::new(move |m, p, b| {
-            if p == "/pricing/peers" && changing.load(Ordering::SeqCst) {
-                return (200, serde_json::json!([
-                    {"peer_id": A, "prices": {"communication": 4500}, "age_secs": 5, "stale": false}
-                ]).to_string());
-            }
-            happy()(m, p, b)
+            room_policy_routes(if changing.load(Ordering::SeqCst) { 7500 } else { 5000 }, 2000, 0)(m, p, b)
         });
         let node = fake(AuthMode::Local, routes);
+        write_room_policy(&node, 5000);
         let quote = read_room_quote(&node.state, ROOM).await.unwrap();
-        assert_eq!(quote.total_msat, 13000);
+        assert_eq!(quote.total_msat, 14000);
         spend_advance(&node.state, true).await.unwrap();
         raised.store(true, Ordering::SeqCst);
+        write_room_policy(&node, 7500);
         let caps = quote.members.iter().map(|m| (m.node_id.clone(), m.msat)).collect();
         let err = do_message_send(&node.state, ROOM, true, "gm", quote.total_msat, Some(caps)).await.unwrap_err();
         assert_eq!(err.code, "price_changed");
         assert!(node.posts().is_empty());
         assert!(spend_journal(&node.state).unwrap().pending().unwrap().is_none());
         let refreshed = read_room_quote(&node.state, ROOM).await.unwrap();
-        assert_eq!(refreshed.total_msat, 15500);
+        assert_eq!(refreshed.total_msat, 19000);
         assert_eq!(refreshed.members[0].msat, 9500);
+        assert_eq!(refreshed.members[0].max_routing_fee_msat, 7500);
+        let caps = refreshed.members.iter().map(|m| (m.node_id.clone(), m.msat)).collect();
+        let receipt = do_message_send(&node.state, ROOM, true, "gm", refreshed.total_msat, Some(caps)).await.unwrap();
+        assert_eq!(receipt.total_msat, 19000);
+        assert_eq!(node.posts().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn room_fee_unknown_policy_does_not_silently_use_app_defaults() {
+        let node = fake(AuthMode::Local, room_policy_routes(7500, 2000, 0));
+        assert!(read_room_quote(&node.state, ROOM).await.is_err());
+        assert!(node.posts().is_empty());
+    }
+
+    #[tokio::test]
+    async fn room_fee_config_is_a_startup_snapshot_and_invalid_policy_fails_closed() {
+        let node = fake(AuthMode::Local, room_policy_routes(7500, 2000, 0));
+        write_room_policy(&node, 7500);
+        let path = node.state.config.lock().unwrap().clone().unwrap();
+        // Editing the file alone cannot claim the running node has a new policy.
+        std::fs::write(&path, "[lightning]\nbackend = \"lnd\"\n").unwrap();
+        assert_eq!(read_room_quote(&node.state, ROOM).await.unwrap().members[0].msat, 9500);
+        // A restart loading the node's default config gives the default allowance.
+        *node.state.room_routing_policy.lock().unwrap() = configured_routing_policy(&path);
+        assert_eq!(read_room_quote(&node.state, ROOM).await.unwrap().members[0].msat, 7000);
+        for config in [
+            "not toml",
+            "[lightning]\nbackend = \"ldk\"\n", // mismatched running backend
+            "[lightning]\nbackend = \"lnd\"\n[routing_fees]\nminimum_msat = -1\n",
+            "[lightning]\nbackend = \"lnd\"\n[routing_fees]\nminimim_msat = 7500\n",
+        ] {
+            std::fs::write(&path, config).unwrap();
+            *node.state.room_routing_policy.lock().unwrap() = configured_routing_policy(&path);
+            assert!(read_room_quote(&node.state, ROOM).await.is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn room_fee_restart_discards_policy_before_adopting_another_listener() {
+        let node = fake(AuthMode::Local, room_policy_routes(7500, 2000, 0));
+        write_room_policy(&node, 7500);
+        assert_eq!(read_room_quote(&node.state, ROOM).await.unwrap().members[0].msat, 9500);
+        // restart_node calls this even when only an external listener remains.
+        node.state.stop_for_restart(Duration::ZERO);
+        assert!(read_room_quote(&node.state, ROOM).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn room_fee_terminated_node_cannot_lend_its_policy_to_a_replacement() {
+        let node = fake(AuthMode::Local, room_policy_routes(7500, 2000, 0));
+        write_room_policy(&node, 7500);
+        node.state.sidecar_terminated.store(true, Ordering::SeqCst);
+        assert!(read_room_quote(&node.state, ROOM).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn room_fee_member_increase_needs_approval_even_when_total_cap_fits() {
+        let node = fake(AuthMode::Local, room_policy_routes(7500, 2000, 0));
+        write_room_policy(&node, 7500);
+        spend_advance(&node.state, true).await.unwrap();
+        let err = do_message_send(&node.state, ROOM, true, "gm", 19000,
+            Some(std::collections::HashMap::from([(A.into(), 7000), (C.into(), 12000)]))).await.unwrap_err();
+        assert_eq!(err.code, "price_changed");
+        assert!(node.posts().is_empty());
+        assert!(spend_journal(&node.state).unwrap().pending().unwrap().is_none());
     }
 
     #[tokio::test]
@@ -5375,7 +5513,7 @@ mod control_act_tests {
             let v = match path {
                 "/status" if first_contact.lock().unwrap().is_some() => serde_json::json!({"api_capabilities": [
                     "paid_send_caps_v1", "room_terminal_outcomes_v1", "spend_budget_grant_v1", "first_contact_grant_v1"]}),
-                "/status" => serde_json::json!({"api_capabilities": ["paid_send_caps_v1", "room_terminal_outcomes_v1", "spend_budget_grant_v1"]}),
+                "/status" => serde_json::json!({"lightning_backend":"mock", "api_capabilities": ["paid_send_caps_v1", "room_terminal_outcomes_v1", "spend_budget_grant_v1"]}),
                 "/pair/first-contact-grant" if first_contact.lock().unwrap().is_some() => {
                     let (status, body) = first_contact.lock().unwrap().clone().unwrap();
                     return (status, body.to_string());

@@ -64,6 +64,31 @@ pub fn routing_fee(principal: u64) -> u64 {
     if principal == 0 { 0 } else { (principal / 100).clamp(5_000, 10_000) }
 }
 
+/// The supervised node's ordinary routing policy (genome dac01c8).
+/// This computes a display allowance; compose still enforces policy and caps.
+#[derive(Deserialize, Clone, Copy, Debug)]
+#[serde(default, deny_unknown_fields)]
+pub struct RoutingFeePolicy {
+    pub minimum_msat: u64,
+    pub proportional_millionths: u64,
+    pub maximum_msat: u64,
+}
+
+impl Default for RoutingFeePolicy {
+    fn default() -> Self {
+        Self { minimum_msat: 5000, proportional_millionths: 10_000, maximum_msat: 10_000 }
+    }
+}
+
+impl RoutingFeePolicy {
+    pub fn ceiling(self, principal: u64) -> u64 {
+        if principal == 0 { return 0; }
+        let proportional = (u128::from(principal) * u128::from(self.proportional_millionths) / 1_000_000)
+            .min(u128::from(u64::MAX)) as u64;
+        proportional.max(self.minimum_msat).min(self.maximum_msat)
+    }
+}
+
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct PaymentQuote {
     pub principal_msat: u64,
@@ -466,8 +491,11 @@ pub fn room_quote(
     members: &[String],
     peers: &[control::Peer],
     tables: &[control::PeerPrice],
-) -> RoomQuote {
+    policy: RoutingFeePolicy,
+) -> Result<RoomQuote, ActionError> {
     let mut out = Vec::new();
+    let mut total_msat = 0u64;
+    let mut max_routing_fee_msat = 0u64;
     for member in members {
         let id = member.to_ascii_lowercase();
         if id == own_id.to_ascii_lowercase() || out.iter().any(|m: &MemberCost| m.node_id == id) {
@@ -480,22 +508,30 @@ pub fn room_quote(
             .iter()
             .find(|t| t.peer_id.eq_ignore_ascii_case(&id) && !t.stale)
             .and_then(|t| t.prices.get(control::CATEGORY_COMMUNICATION).copied());
+        let principal = advertised.unwrap_or(own_msat).max(MIN_PAYMENT_MSAT);
+        let fee = policy.ceiling(principal);
+        let msat = principal.checked_add(fee)
+            .ok_or_else(|| ActionError::invalid("The room all-in quote overflows."))?;
+        total_msat = total_msat.checked_add(msat)
+            .ok_or_else(|| ActionError::invalid("The room all-in quote overflows."))?;
+        max_routing_fee_msat = max_routing_fee_msat.checked_add(fee)
+            .ok_or_else(|| ActionError::invalid("The room routing fee quote overflows."))?;
         out.push(MemberCost {
             node_id: id,
-            msat: advertised.unwrap_or(own_msat).max(MIN_PAYMENT_MSAT).saturating_add(routing_fee(advertised.unwrap_or(own_msat).max(MIN_PAYMENT_MSAT))),
-            max_routing_fee_msat: routing_fee(advertised.unwrap_or(own_msat).max(MIN_PAYMENT_MSAT)),
+            msat,
+            max_routing_fee_msat: fee,
             advertised: advertised.is_some(),
             connected,
         });
     }
-    RoomQuote {
+    Ok(RoomQuote {
         room_id: room_id.to_string(),
-        max_routing_fee_msat: out.iter().map(|m| m.max_routing_fee_msat).sum(),
-        total_msat: out.iter().map(|m| m.msat).sum(),
+        max_routing_fee_msat,
+        total_msat,
         unreachable: out.iter().filter(|m| !m.connected).map(|m| m.node_id.clone()).collect(),
         estimate: out.iter().any(|m| !m.advertised),
         members: out,
-    }
+    })
 }
 
 /// Refuse a room send unless every other member is a connected peer.
@@ -1005,7 +1041,7 @@ mod tests {
             control::PeerPrice { peer_id: B.into(), prices: HashMap::from([("communication".into(), 9_000)]), age_secs: 9_000, stale: true },
         ];
         let members = vec![OWN.into(), A.to_uppercase(), B.into(), A.into()];
-        let q = room_quote(ROOM, OWN, 500, &members, &[peer(A, true), peer(B, true)], &tables);
+        let q = room_quote(ROOM, OWN, 500, &members, &[peer(A, true), peer(B, true)], &tables, RoutingFeePolicy::default()).unwrap();
         // A: advertised 2000. B: stale table, so own price 500, floored at 1 sat. Self and duplicates skipped.
         assert_eq!(q.members.len(), 2);
         assert_eq!((q.members[0].msat, q.members[0].advertised), (7_000, true));
@@ -1018,14 +1054,25 @@ mod tests {
     }
 
     #[test]
+    fn room_policy_proportional_and_maximum_allowances_and_overflow() {
+        let policy = RoutingFeePolicy { minimum_msat: 7500, proportional_millionths: 20_000, maximum_msat: 20_000 };
+        for (principal, total, fee) in [(2000, 9500, 7500), (750_000, 765_000, 15_000), (2_000_000, 2_020_000, 20_000)] {
+            let quote = room_quote(ROOM, OWN, principal, &[A.into()], &[peer(A, true)], &[], policy).unwrap();
+            assert_eq!((quote.total_msat, quote.max_routing_fee_msat), (total, fee));
+        }
+        assert!(room_quote(ROOM, OWN, u64::MAX, &[A.into()], &[], &[], policy).is_err());
+        assert!(room_quote(ROOM, OWN, u64::MAX / 2, &[A.into(), B.into()], &[], &[], policy).is_err());
+    }
+
+    #[test]
     fn a_room_with_an_unconnected_member_is_not_sendable() {
         let members = vec![OWN.into(), A.into(), C.into()];
-        let q = room_quote(ROOM, OWN, 1_000, &members, &[peer(A, true), peer(C, false)], &[]);
+        let q = room_quote(ROOM, OWN, 1_000, &members, &[peer(A, true), peer(C, false)], &[], RoutingFeePolicy::default()).unwrap();
         assert_eq!(q.unreachable, vec![C.to_string()]);
         let err = room_sendable(&q).unwrap_err();
         assert_eq!(err.code, "room_unreachable");
         assert!(err.message.contains("1 member is not a connected peer"));
-        let alone = room_quote(ROOM, OWN, 1_000, &[OWN.into()], &[], &[]);
+        let alone = room_quote(ROOM, OWN, 1_000, &[OWN.into()], &[], &[], RoutingFeePolicy::default()).unwrap();
         assert_eq!(room_sendable(&alone).unwrap_err().code, "room_unreachable");
     }
 

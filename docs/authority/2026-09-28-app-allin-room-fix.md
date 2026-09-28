@@ -1,5 +1,8 @@
 # CODEX APP AUTHORITY — 2026-09-28 — PR #55 room fee fix
 
+> Superseded by [the node-policy correction](2026-09-28-app-allin-room-policy.md).
+> The shared-minimum approach below failed the subsequent mixed-price review.
+
 Scope: bounded follow-up to app `3eea0c5`, addressing the room fee mismatch
 reported in `55-verdict.txt`. Protocol contract checked at `dac01c8`.
 
