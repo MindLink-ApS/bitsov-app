@@ -1,4 +1,4 @@
-import { MONEY_NOT_READY } from './control/readiness';
+import { isMoneyNotReady } from './control/readiness';
 import { createMemo, createSignal, onCleanup, onMount, Show } from 'solid-js';
 import { qrSvg } from './qr';
 import { Onboarding } from './onboarding/Onboarding';
@@ -318,14 +318,14 @@ function Fund(props: { source: Source; ready: () => boolean; moneyBlocked?: () =
       setError(null);
       // The onboarding record carries the address once started; fall back to the
       // payments endpoint if the node did not include one.
-      if (state && !state.funding_address && !address()) {
+      if (state && !state.funding_address && !address() && !props.moneyBlocked?.()) {
         try {
           setAddress(await props.source.fundingAddress());
           setAddressError(null);
         } catch (e) {
           // The wallet backend may not expose one (only embedded LDK does); the
           // state address is primary, but say so instead of waiting forever.
-          setAddressError(String(e));
+          setAddressError(isMoneyNotReady(e) ? null : String(e));
         }
       }
     } catch (e) {
@@ -358,7 +358,7 @@ function Fund(props: { source: Source; ready: () => boolean; moneyBlocked?: () =
       setFund(await props.source.fundStart(value));
       await refresh();
     } catch (e) {
-      setError(e === MONEY_NOT_READY || (e && typeof e === 'object' && 'code' in e && e.code === 'not_ready') ? null : String(e));
+      setError(isMoneyNotReady(e) ? null : String(e));
     } finally {
       setBusy(false);
     }

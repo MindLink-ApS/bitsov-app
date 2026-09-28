@@ -8,8 +8,12 @@ export const MONEY_NOT_READY = 'Money is not ready yet. Your node will retry aut
 const moneyMethods = new Set<keyof Source>([
   'send', 'pay', 'keysend', 'fileSend', 'invoiceCreate', 'firstContactQuote', 'firstContactRequest',
   'sponsorOffer', 'sponsorCandidate', 'sponsorOwnerApproval', 'sponsorRequest',
-  'inviteCreate', 'inviteRedeem', 'fundStart',
+  'inviteCreate', 'inviteRedeem', 'fundStart', 'fundingAddress',
 ]);
+
+export function isMoneyNotReady(error: unknown): boolean {
+  return error === MONEY_NOT_READY || (error !== null && typeof error === 'object' && 'code' in error && error.code === 'not_ready');
+}
 
 export function readinessSource(get: () => Source, blocked: () => boolean, refused: () => void): Source {
   return new Proxy({} as Source, {
@@ -22,7 +26,7 @@ export function readinessSource(get: () => Source, blocked: () => boolean, refus
         try {
           return await Reflect.apply(get()[key] as Function, get(), args);
         } catch (e) {
-          if (e === MONEY_NOT_READY || (e && typeof e === 'object' && 'code' in e && e.code === 'not_ready')) {
+          if (isMoneyNotReady(e)) {
             refused();
             throw { code: 'not_ready', message: MONEY_NOT_READY };
           }

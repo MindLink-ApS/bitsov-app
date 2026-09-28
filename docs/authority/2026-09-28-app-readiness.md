@@ -31,3 +31,15 @@ funding source bypass, recovery quote refresh, and local error-code collision.
 
 Must-fix before next ship: no outstanding issue found within this ticket. Genome
 #107 is still under review; the bundled older node remains on legacy behavior.
+
+
+## Review follow-up — #56
+
+Offline transitions now invalidate pending owner approvals independently of input
+edits. A successful operation that was already dispatched clears its unchanged
+inputs, including across offline/recovery; cancelled requests and newer drafts
+remain intact. Funding-address preparation uses the shared readiness guard and
+notice, while local funding-state polling remains available. Recovery does not
+replay a send or payment. No host permissions, credentials, IPC grants, dependency
+versions, or sidecar pin changed. App main `060f14c` was already an ancestor of
+`8316f55`; the requested normal merge therefore required no merge commit.

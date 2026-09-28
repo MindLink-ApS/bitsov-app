@@ -110,7 +110,7 @@ describe('node money readiness', () => {
 });
 
 describe('shared money guard', () => {
-  it.each(['send', 'pay', 'keysend', 'fileSend', 'invoiceCreate', 'firstContactQuote', 'firstContactRequest', 'sponsorOffer', 'sponsorCandidate', 'sponsorOwnerApproval', 'sponsorRequest', 'inviteCreate', 'inviteRedeem', 'fundStart'] as const)('stops %s before reaching the host and permits it after recovery', async (method) => {
+  it.each(['send', 'pay', 'keysend', 'fileSend', 'invoiceCreate', 'firstContactQuote', 'firstContactRequest', 'sponsorOffer', 'sponsorCandidate', 'sponsorOwnerApproval', 'sponsorRequest', 'inviteCreate', 'inviteRedeem', 'fundStart', 'fundingAddress'] as const)('stops %s before reaching the host and permits it after recovery', async (method) => {
     const source = sampleSource();
     const call = vi.fn().mockResolvedValue('host reply');
     Object.assign(source, { [method]: call });
@@ -127,6 +127,7 @@ describe('shared money guard', () => {
     const source = sampleSource();
     const guarded = readinessSource(() => source, () => true, () => {});
     expect(await guarded.peers()).not.toHaveLength(0);
+    await expect(guarded.fundState()).resolves.toBeDefined();
     await expect(guarded.firstContactCancel('op')).resolves.toBeUndefined();
   });
 

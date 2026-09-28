@@ -1286,6 +1286,9 @@ function Composer(props: {
   // Inputs and navigation remain usable during a send. Only the submitted
   // revision may be cleared by its completion (including track A -> B -> A).
   let composerRevision = 0;
+  // Going offline invalidates undispatched approvals, not unchanged inputs
+  // belonging to an operation that already reached the host and succeeds.
+  let approvalRevision = 0;
   const [ownerWait, setOwnerWait] = createSignal<{ approval: OwnerContactApproval; revision: number; send: () => Promise<void> } | null>(null);
   const cancelOwner = () => {
     const pending = untrack(ownerWait);
@@ -1293,7 +1296,7 @@ function Composer(props: {
     if (pending) void props.actions.ownerCancel(pending.approval.id);
   };
   onCleanup(cancelOwner);
-  createEffect(() => { if (props.moneyBlocked) { composerRevision++; cancelOwner(); } });
+  createEffect(() => { if (props.moneyBlocked) { approvalRevision++; cancelOwner(); } });
   createEffect(() => {
     const pending = ownerWait();
     if (!pending) return;
@@ -1551,6 +1554,7 @@ function Composer(props: {
       if ((st.kind !== 'first' && st.kind !== 'ok') || !ready()) return;
       setBusy(true);
       const submittedRevision = composerRevision;
+      const submittedApprovalRevision = approvalRevision;
       const submittedPeer = target();
       const submittedTrack = props.track;
       const submittedText = draft();
@@ -1574,7 +1578,7 @@ function Composer(props: {
       };
       if (first !== undefined && !room()) {
         const request = await props.actions.ownerRequest(submittedPeer, cap, first);
-        if (composerRevision !== submittedRevision) {
+        if (composerRevision !== submittedRevision || approvalRevision !== submittedApprovalRevision || props.moneyBlocked) {
           if (request.ok && request.value) void props.actions.ownerCancel(request.value.id);
           setBusy(false);
           return;
