@@ -89,7 +89,7 @@ export interface Source {
   /** K1 slice 2 (newcomer): ask for the offered gift. Nothing is sent. */
   sponsorRequest(text: string): Promise<FundingAsk>;
   sponsorRequestStatus(paymentHash: string): Promise<FundingStatus>;
-  firstContactRequest(peer: string, maxMsat: number, budgetMsat: number): Promise<OwnerContactApproval | null>;
+  firstContactRequest(peer: string, maxMsat: number, budgetMsat?: number): Promise<OwnerContactApproval | null>;
   firstContactStatus(id: string): Promise<OwnerContactApproval>;
   firstContactCancel(id: string): Promise<void>;
   wallet(): Promise<WalletOverview>;
@@ -180,7 +180,7 @@ export const hostSource: Source = {
   sponsorCancel: (introId) => invoke<void>('sponsor_cancel', { intro_id: introId }),
   sponsorRequest: (text) => invoke<FundingAsk>('sponsor_request', { text }),
   sponsorRequestStatus: (paymentHash) => invoke<FundingStatus>('sponsor_request_status', { payment_hash: paymentHash }),
-  firstContactRequest: (recipient, maxMsat, budgetMsat) => invoke<OwnerContactApproval | null>('first_contact_request', { recipient, max_msat: maxMsat, contact_budget_msat: budgetMsat }),
+  firstContactRequest: (recipient, maxMsat, budgetMsat) => invoke<OwnerContactApproval | null>('first_contact_request', { recipient, max_msat: maxMsat, contact_budget_msat: budgetMsat ?? null }),
   firstContactStatus: (id) => invoke<OwnerContactApproval>('first_contact_status', { id }),
   firstContactCancel: (id) => invoke<void>('first_contact_cancel', { id }),
   wallet: () => invoke<WalletOverview>('payments_overview'),

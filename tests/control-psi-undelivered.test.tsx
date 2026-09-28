@@ -47,6 +47,8 @@ function stubHost(overrides: Record<string, Reply> = {}) {
     price_quote: () => ({ kind: 0, own_msat: 1000, peer_msat: 2000, peer_age_secs: 30, peer_stale: false }),
     payments_overview: () => ({ balance_msat: 1_000_000, lightning_outbound_msat: 500_000, channels: [] }),
     fund_state: () => null,
+    first_contact_request: () => null,
+    first_contact_cancel: () => null,
     file_price: () => 3000,
     spend_status: () => spend.v,
     spend_request: () => {
@@ -308,4 +310,63 @@ describe('paid, not delivered: in the conversation', () => {
     await vi.waitFor(() => expect($('[data-artifact="undelivered"]')).toBeNull());
     expect(host.used('spend_dismiss_undelivered').map((c) => c.args)).toEqual([{ pending_id: 'rec-9' }]);
   });
+  it('invalidates a reconciliation snapshot when its card is dismissed before an identical send', async () => {
+    let pending: string | null = null;
+    let sends = 0;
+    const host = stubHost({
+      message_send: () => {
+        pending = `attempt-${++sends}`;
+        throw UNDELIVERED(2000, true, pending);
+      },
+      spend_reconcile: () => { throw { code: 'undelivered_pending', message: 'Paid, undelivered', pending_id: pending }; },
+      spend_dismiss_undelivered: (args) => {
+        if (args!.pending_id !== pending) throw { code: 'retry_unavailable', message: 'not matching' };
+        pending = null;
+        return 'Stopped retrying.';
+      },
+    });
+    await sendUndelivered(host);
+    $<HTMLButtonElement>('[data-spend-reconcile]')!.click();
+    await vi.waitFor(() => expect(mount.querySelectorAll('[data-stop-retrying]')).toHaveLength(2));
+    $<HTMLButtonElement>('[data-artifact="undelivered"] [data-stop-retrying]')!.click();
+    await vi.waitFor(() => expect(mount.querySelectorAll('[data-stop-retrying]')).toHaveLength(0));
+    type('[data-composer] textarea', 'hello Maya'); submit();
+    await vi.waitFor(() => expect($('[data-artifact="undelivered"]')).not.toBeNull());
+    expect(mount.querySelectorAll('[data-stop-retrying]')).toHaveLength(1);
+    expect(pending).toBe('attempt-2');
+    expect(host.used('message_send')[0].args).toEqual(host.used('message_send')[1].args);
+  });
+
+  it('renews paired contact approval before retrying the same pending message', async () => {
+    let ready = false;
+    const approval = { id: 'renewal', owner_command: 'approve at node', ready: false, expires_at_ms: Date.now() + 120000,
+      request: { client_id: 'c1', grant_op_id: 'ab12', recipient: A, max_total_msat: 14000, contact_budget_msat: 14000 } };
+    const host = stubHost({
+      message_send: () => { throw UNDELIVERED(2000, true); },
+      message_retry: (args) => {
+        if (args!.approved_msat === null) throw { code: 'retry_needs_admission', message: 'Approval needed',
+          admission: { admission_msat: 2000, message_msat: 2000, max_routing_fee_msat: 10000, total_msat: 14000, quoted: true } };
+        return { message_id: 'renewed', recipient: A, is_room: false, delivered: true, amount_msat: 4000, max_routing_fee_msat: 10000, total_msat: 14000, sent_at_ms: Date.now() };
+      },
+      first_contact_request: () => approval,
+      first_contact_status: () => ({ ...approval, ready }),
+    });
+    await sendUndelivered(host);
+    $<HTMLButtonElement>('[data-retry-delivery]')!.click();
+    await vi.waitFor(() => expect($('[data-retry-approve]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-retry-approve]')!.click();
+    await vi.waitFor(() => expect(text('[data-retry-owner]')).toContain('approve at node'));
+    expect(host.used('message_retry')).toHaveLength(1);
+    expect(host.used('first_contact_request')[0].args).toEqual({ recipient: A, max_msat: 14000, contact_budget_msat: null });
+    $<HTMLButtonElement>('[data-retry-approve]')!.click();
+    await vi.waitFor(() => expect(host.used('first_contact_status')).toHaveLength(1));
+    expect(host.used('message_retry')).toHaveLength(1);
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-retry-approve]')!.disabled).toBe(false));
+    ready = true;
+    $<HTMLButtonElement>('[data-retry-approve]')!.click();
+    await vi.waitFor(() => expect($('[data-artifact="undelivered"]')).toBeNull());
+    expect(host.used('message_retry').map((c) => c.args!.approved_msat)).toEqual([null, 14000]);
+    expect(host.used('message_send')).toHaveLength(1);
+  });
+
 });

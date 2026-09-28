@@ -239,7 +239,8 @@ impl Book {
     }
 
     pub fn reserve(&mut self, id: &str, target: &str, room: bool, msat: u64, now_ms: u64) {
-        self.prune(now_ms);
+        // The journal-aware writer prunes after the edit, retaining current
+        // and rollback accounting. Pruning here would erase rows it still needs.
         self.ledger.push(Entry { id: id.to_string(), at_ms: now_ms, target: target.to_string(), room, msat, settled: false });
     }
 

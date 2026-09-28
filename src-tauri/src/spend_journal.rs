@@ -10,6 +10,12 @@ use crate::act::ActionError;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Pending {
+    /// Durable per-send identity. Separate from the deterministic operation fingerprint.
+    #[serde(default)]
+    pub id: String,
+    /// The accounting row needed if an in-flight retry is refused and rolled back.
+    #[serde(default)]
+    pub rollback_charge_id: Option<String>,
     pub node_id: String,
     pub request_hash: String,
     pub max_msat: u64,
@@ -127,12 +133,19 @@ impl Journal {
     }
 
     pub fn pending(&self) -> Result<Option<Pending>, ActionError> {
-        read_pending(&self.dir)
+        let mut pending = read_pending(&self.dir)?;
+        if let Some(p) = pending.as_mut().filter(|p| p.id.is_empty()) {
+            // Migrate under the journal lock before exposing any dismissal identity.
+            p.id = fresh_id()?;
+            self.save(p)?;
+        }
+        Ok(pending)
     }
 
     pub fn begin(&self, node_id: &str, path: &str, body: &serde_json::Value, max_msat: u64) -> Result<Pending, ActionError> {
         if self.pending()?.is_some() { return Err(unknown("Check the previous action first.")); }
         let pending = Pending {
+            id: fresh_id()?, rollback_charge_id: None,
             node_id: node_id.to_string(),
             request_hash: blake3::hash(format!("{path}\n{body}").as_bytes()).to_hex().to_string(),
             max_msat, target: None, over_budget: false, accounting_msat: None, undelivered: None, charge_id: None, budgeted: false, all_in: false,
@@ -166,6 +179,12 @@ impl Journal {
     }
 }
 
+fn fresh_id() -> Result<String, ActionError> {
+    let mut bytes = [0u8; 32];
+    getrandom::getrandom(&mut bytes).map_err(unknown)?;
+    Ok(hex::encode(bytes))
+}
+
 /// Only an exact node-issued reference can settle an ambiguous result. Never
 /// correlate by amount, timestamp, plaintext, or a guessed absence.
 pub fn terminal(pending: &Pending, rows: &[serde_json::Value]) -> Option<&'static str> {
@@ -197,6 +216,26 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn legacy_identity_is_migrated_once_without_changing_accounting_or_operation() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Journal::open(dir.path()).unwrap();
+        let original = journal.begin("node", "/messages/compose", &json!({"plaintext": "secret"}), 14000).unwrap();
+        let mut legacy = serde_json::to_value(&original).unwrap();
+        legacy.as_object_mut().unwrap().remove("id");
+        legacy.as_object_mut().unwrap().remove("rollback_charge_id");
+        std::fs::write(dir.path().join("spend-pending.json"), legacy.to_string()).unwrap();
+        let migrated = journal.pending().unwrap().unwrap();
+        assert!(!migrated.id.is_empty());
+        assert_ne!(migrated.id, original.request_hash);
+        assert_eq!(migrated.request_hash, original.request_hash);
+        assert_eq!(migrated.charge_id(), original.charge_id());
+        drop(journal);
+        let reopened = Journal::open(dir.path()).unwrap().pending().unwrap().unwrap();
+        assert_eq!(reopened.id, migrated.id);
+        assert!(!std::fs::read_to_string(dir.path().join("spend-pending.json")).unwrap().contains("secret"));
+    }
+
+    #[test]
     fn dropping_guard_unlocks_even_if_a_child_inherited_the_descriptor() {
         let dir = tempfile::tempdir().unwrap();
         let journal = Journal::open(dir.path()).unwrap();
@@ -221,7 +260,7 @@ mod tests {
 
     #[test]
     fn reconciliation_needs_exact_terminal_outgoing_evidence() {
-        let p = Pending { node_id:"node".into(), request_hash:"hash".into(), max_msat:2000,
+        let p = Pending { id: "attempt".into(), rollback_charge_id: None, node_id:"node".into(), request_hash:"hash".into(), max_msat:2000,
             target:Some(Target::Payment { hash:"abc".into() }), over_budget:false, accounting_msat: None, undelivered: None, charge_id: None, budgeted: false, all_in: false };
         assert_eq!(terminal(&p, &[]), None);
         assert_eq!(terminal(&p, &[json!({"payment_hash":"other", "amount_msat":2000, "direction":"outgoing", "status":"settled"})]), None);
@@ -237,7 +276,7 @@ mod tests {
 
     #[test]
     fn message_reconciliation_rejects_other_sender_and_recipient() {
-        let p = Pending { node_id:"node".into(), request_hash:"hash".into(), max_msat:2000,
+        let p = Pending { id: "attempt".into(), rollback_charge_id: None, node_id:"node".into(), request_hash:"hash".into(), max_msat:2000,
             target:Some(Target::Message { id:"abc".into(), peer:"peer".into() }), over_budget:false, accounting_msat: None, undelivered: None, charge_id: None, budgeted: false, all_in: false };
         let mut row = json!({"id":"abc", "sender":"other", "recipient":"peer", "payment_amount_msat":2000});
         assert_eq!(terminal(&p, &[row.clone()]), None);

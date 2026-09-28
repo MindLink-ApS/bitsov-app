@@ -119,6 +119,7 @@ export type Actions = {
   approve: () => Promise<void>;
   lock: () => Promise<void>;
   reconcile: () => Promise<Outcome<string>>;
+  pendingRevision: () => number;
   /** The owner's one approval for a daily total (B2). */
   approveBudget: (ceilingMsat: number, preset: PresetId) => Promise<void>;
   setBudget: (target: string, room: boolean, limitMsat: number) => Promise<Outcome<unknown>>;
@@ -168,6 +169,7 @@ export function ControlCenter(props: Props) {
   /** What each send actually paid, by message id: a room echo carries one member's share only. */
   const [paid, setPaid] = createStore<Record<string, number>>({});
   const [allowances, setAllowances] = createStore<Record<string, { total_msat: number; max_routing_fee_msat: number }>>({});
+  const [pendingRevision, setPendingRevision] = createSignal(0);
   const [artifacts, setArtifacts] = createStore<Record<string, Artifact[]>>({});
   const [errors, setErrors] = createStore<Record<string, string | undefined>>({});
   const [contextOpen, setContextOpen] = createSignal(false);
@@ -475,6 +477,7 @@ export function ControlCenter(props: Props) {
       const r = await act(() => props.source.spendLock());
       if (r.ok) setSpend(r.value);
     },
+    pendingRevision,
     reconcile: () => act(() => props.source.spendReconcile()),
     approveBudget: async (ceilingMsat, preset) => {
       const r = await act(() => props.source.budgetApprove(ceilingMsat, preset));
@@ -543,11 +546,38 @@ export function ControlCenter(props: Props) {
         return { ok: false, error: { code: 'retry_unavailable', message: 'Nothing to approve.' } };
       }
       const text = a.text;
-      const r = await act(() => props.source.retry(t.id, text, approvedMsat));
-      void loadBudget();
       const update = (next: Partial<Extract<Artifact, { type: 'undelivered' }>> | null) =>
         setArtifacts(key, (old) => (old ?? []).flatMap((x) => (x.id !== artifactId ? [x] : next ? [{ ...x, ...next } as Artifact] : [])));
+      const current = () => (artifacts[key] ?? []).some((x) => x.id === artifactId && x.type === 'undelivered' && x.pendingId === a.pendingId);
+      const waiting: Outcome<unknown> = { ok: false, error: { code: 'owner_only', message: 'Approve this retry at your node, then check approval.' } };
+      if (approvedMsat !== undefined) {
+        if (a.ownerApproval) {
+          const ready = await act(() => props.source.firstContactStatus(a.ownerApproval!.id));
+          if (!current()) return waiting;
+          if (!ready.ok) {
+            void props.source.firstContactCancel(a.ownerApproval.id).catch(() => {});
+            update({ ownerApproval: null, note: ready.error.message });
+            return ready;
+          }
+          if (!ready.value.ready) return waiting;
+        } else {
+          const request = await act(() => props.source.firstContactRequest(t.id, approvedMsat));
+          if (!current()) {
+            if (request.ok && request.value) void props.source.firstContactCancel(request.value.id).catch(() => {});
+            return waiting;
+          }
+          if (!request.ok) { update({ note: request.error.message }); return request; }
+          if (request.value) {
+            update({ ownerApproval: request.value, note: waiting.error.message });
+            return waiting;
+          }
+        }
+      }
+      update({ ownerApproval: null });
+      const r = await act(() => props.source.retry(t.id, text, approvedMsat));
+      void loadBudget();
       if (r.ok) {
+        setPendingRevision((v) => v + 1);
         update(null);
         sentOne(t, r.value, text);
       } else if (r.error.code === 'payment_settled_undelivered' && r.error.undelivered) {
@@ -570,8 +600,14 @@ export function ControlCenter(props: Props) {
       const r = await act(() => props.source.dismissUndelivered(pendingId));
       void loadBudget();
       if (r.ok) {
+        setPendingRevision((v) => v + 1);
         // Every card for that record ends, wherever it was stopped from.
         for (const key of Object.keys(artifacts)) {
+          for (const a of artifacts[key] ?? []) {
+            if (a.type === 'undelivered' && a.pendingId === pendingId && a.ownerApproval) {
+              void props.source.firstContactCancel(a.ownerApproval.id).catch(() => {});
+            }
+          }
           if ((artifacts[key] ?? []).some((x) => x.type === 'undelivered' && x.pendingId === pendingId)) {
             setArtifacts(key, (old) => (old ?? []).filter((x) => !(x.type === 'undelivered' && x.pendingId === pendingId)));
           }
@@ -1313,7 +1349,7 @@ function UndeliveredView(props: {
             <>
               <p class="hint" data-admission-price={adm().total_msat}>{admissionCopy(adm()).body}</p>
               <button type="button" class="link" data-retry-approve disabled={busy()} onClick={() => void run(() => props.onRetry!(props.a.id, adm().total_msat))}>
-                {busy() ? 'Retrying delivery…' : admissionCopy(adm()).action}
+                {busy() ? 'Checking…' : props.a.ownerApproval ? 'Check node approval and retry' : admissionCopy(adm()).action}
               </button>
             </>
           )}
@@ -1323,6 +1359,9 @@ function UndeliveredView(props: {
         <button type="button" class="link" data-stop-retrying disabled={busy()} onClick={() => void run(() => props.onStop!(props.a.pendingId))}>
           Stop retrying
         </button>
+      </Show>
+      <Show when={props.a.ownerApproval}>
+        {(approval) => <div data-retry-owner><p>Approve this retry at your node, then check approval.</p><code class="address">{approval().owner_command}</code></div>}
       </Show>
       <Show when={props.a.note}>
         <p class="hint" data-retry-note>{props.a.note}</p>
@@ -1954,10 +1993,16 @@ function Reconcile(props: { actions: Actions }) {
   // Paid, not delivered: the owner may stop retrying (it dispatches nothing).
   // The record the check showed: Stop retrying names it, never whatever is pending later.
   const [undelivered, setUndelivered] = createSignal<string | null>(null);
+  createEffect(on(props.actions.pendingRevision, () => {
+    setUndelivered(null);
+    setResult(null);
+  }, { defer: true }));
   const reconcile = async () => {
     if (checking()) return;
     setChecking(true);
+    const revision = props.actions.pendingRevision();
     const outcome = await props.actions.reconcile();
+    if (revision !== props.actions.pendingRevision()) { setChecking(false); return; }
     setResult(outcome.ok ? outcome.value : outcome.error.message);
     setUndelivered(!outcome.ok && outcome.error.code === 'undelivered_pending' ? outcome.error.pending_id ?? null : null);
     setChecking(false);

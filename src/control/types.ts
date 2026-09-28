@@ -436,7 +436,7 @@ export type Artifact =
    * payment is still due; this is the price to approve. `pendingId`: the host
    * record this card is about.
    */
-  | { id: string; at: number; type: 'undelivered'; text: string; paid: Undelivered; note: string | null; admission: AdmissionPrice | null; pendingId: string | null }
+  | { id: string; at: number; type: 'undelivered'; ownerApproval?: OwnerContactApproval | null; text: string; paid: Undelivered; note: string | null; admission: AdmissionPrice | null; pendingId: string | null }
   | { id: string; at: number; type: 'door'; door: DoorCard };
 
 /**
