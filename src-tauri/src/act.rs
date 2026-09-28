@@ -155,6 +155,19 @@ pub fn readiness_refusal(status: u16, body: &str) -> bool {
         .is_some_and(|v| v["code"] == "not_ready" && v["money_ready"] == false)
 }
 
+/// Genome #115: HTTP 400 with `code: "not_dispatched"` means the node proved
+/// no payment left the wallet (e.g. route above the fee ceiling). Only that
+/// exact code may clear the spend journal; any other 400 stays unknown.
+pub fn not_dispatched_refusal(status: u16, body: &str) -> bool {
+    status == 400
+        && serde_json::from_str::<serde_json::Value>(body)
+            .ok()
+            .is_some_and(|v| v["code"] == "not_dispatched")
+}
+
+pub const NOT_DISPATCHED_MESSAGE: &str =
+    "Not sent: network fee would exceed your limit.";
+
 impl ActionError {
     pub fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self {
