@@ -490,3 +490,9 @@ button.small:not(.primary) { font-size: var(--t-xs); padding: 4px 10px; backgrou
   .organ.expanded .organ-chev { transform: rotate(90deg); }
   .organ:not(.expanded) .organ-body { display: none; }
 }
+
+/* Pre-payment aggregates remain readable in the narrow Body panel, even at u64 saturation. */
+.refusal-counts { width: 100%; table-layout: fixed; border-collapse: collapse; font-size: 11px; }
+.refusal-counts th, .refusal-counts td { padding: 5px 3px; text-align: right; vertical-align: top; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.refusal-counts th:first-child { width: 40%; text-align: left; font-weight: 400; }
+.refusal-counts thead th { font-weight: 500; }

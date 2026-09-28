@@ -14,7 +14,8 @@ import {
   type Setpoint,
 } from './body';
 import { freshness } from './state';
-import type { LinkState } from './types';
+import type { LinkState, PrePaymentRefusals } from './types';
+import { RefusalCounts } from './RefusalCounts';
 
 /** One real event brightens its row for this long, then decays. Nothing moves otherwise. */
 const PULSE_MS = 400;
@@ -52,6 +53,7 @@ export type OrganismProps = {
   nodeMembrane: boolean;
   /** When the node's membrane ring was last read successfully; null before. */
   membraneReadAt?: number | null;
+  prePaymentRefusals?: PrePaymentRefusals | null;
   /** Why the last membrane read failed, if it did. */
   membraneError?: string;
   /** This node's own price for a text message: what a stranger pays at the door. */
@@ -319,11 +321,12 @@ function MembraneOrgan(props: OrganismProps & { fresh: { label: string; stale: b
       <Show
         when={props.membrane.length > 0}
         fallback={<p class="organ-line" data-membrane-quiet>{ringCurrent()
-          ? `No knocks since ${clock(props.openedAt)}.`
+          ? `${props.prePaymentRefusals ? 'No message-gate events' : 'No knocks'} since ${clock(props.openedAt)}.`
           : props.membraneError ? 'Gate history unavailable.' : 'Gate history not read yet.'}</p>}
       >
         <For each={props.membrane.slice(0, 3)}>{(e) => <MembraneLine e={e} hot={e.seq > baseline} nameOf={props.nameOf} nameOfTrack={props.nameOfTrack} />}</For>
       </Show>
+      <RefusalCounts counts={props.prePaymentRefusals} readAt={props.membraneReadAt} error={props.membraneError} now={props.now} down={props.down} />
       <Show when={!props.nodeMembrane}>
         <p class="organ-line muted" data-membrane-n2>Inbound refusals are not visible yet (node N2).</p>
       </Show>
