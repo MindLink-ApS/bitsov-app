@@ -415,7 +415,7 @@ function Fund(props: { source: Source; ready: () => boolean }) {
                 <h2>Funding seen</h2>
                 <p class="hint">
                   Your node observed {sats(received())} sats. Opening a Lightning channel and
-                  sending your first paid message come next.
+                  sending your first paid message come next. Channel actions and on-chain fees are outside the app daily principal limit; check their cost at the owner action.
                 </p>
                 <Show when={fund()!.funding_evidence}>
                   <p class="evidence">Evidence: {fund()!.funding_evidence}</p>

@@ -264,6 +264,45 @@ describe('acting from the track', () => {
     expect($('[data-artifact="invoice"] svg.qr')).not.toBeNull();
   });
 
+  it.each(['invoice', 'keysend'])('explains a refused app %s and keeps its draft', async (method) => {
+    const refuse = () => Promise.reject({ code: 'ceiling_exhausted', message: 'Your app principal limit is used up.' });
+    const host = stubHost({ payment_pay: refuse, payment_keysend: refuse });
+    host.spend.v = openView();
+    await openShell();
+    $<HTMLButtonElement>('[data-composer-mode="pay"]')!.click();
+    if (method === 'invoice') {
+      type('[data-pay-invoice]', 'lntb10n1abc');
+      await vi.waitFor(() => expect(text('[data-send]')).toBe('Pay · 1 sat'));
+    } else {
+      [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent === 'Direct')!.click();
+      type('[data-pay-pubkey]', '02' + 'ab'.repeat(32));
+      type('[data-pay-amount]', '5');
+    }
+    submit();
+    await vi.waitFor(() => expect(text('[data-composer-note]')).toContain('Your app principal limit is used up.'));
+    expect($('[data-artifact="payment"]')).toBeNull();
+    expect($('[data-artifact="failed"]')).toBeNull();
+    expect(method === 'invoice' ? $<HTMLTextAreaElement>('[data-pay-invoice]')!.value : $<HTMLInputElement>('[data-pay-amount]')!.value)
+      .toBe(method === 'invoice' ? 'lntb10n1abc' : '5');
+  });
+
+  it.each(['budget_exhausted', 'ceiling_exhausted'])('explains a refused file (%s) and keeps it selected', async (code) => {
+    const host = stubHost({ file_send: () => Promise.reject({ code, message: 'The file exceeds your app limit. Raise the budget to send.' }) });
+    host.spend.v = openView();
+    await openShell();
+    $<HTMLButtonElement>('[data-composer-mode="file"]')!.click();
+    const input = $<HTMLInputElement>('[data-file-input]')!;
+    Object.defineProperty(input, 'files', { value: [new File(['hi'], 'hi.txt', { type: 'text/plain' })] });
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    submit();
+    await vi.waitFor(() => expect(text('[data-composer-note]')).toContain('Raise the budget to send.'));
+    expect($('[data-artifact="file"]')).toBeNull();
+    expect($('[data-artifact="failed"]')).toBeNull();
+    expect($<HTMLButtonElement>('[data-send]')!.disabled).toBe(false);
+    expect(input.files?.[0].name).toBe('hi.txt');
+    expect(host.used('file_send')).toHaveLength(1);
+  });
+
   it('sends a file at the node’s file price', async () => {
     const host = stubHost();
     host.spend.v = openView();
