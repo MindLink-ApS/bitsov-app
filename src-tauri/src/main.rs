@@ -2331,6 +2331,13 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, body: serde_
         abandon(&journal)?;
         return Err(ActionError::new("not_ready", act::MONEY_NOT_READY));
     }
+    // Proven non-dispatch (#115): nothing left the wallet. Clear the journal
+    // and release the app reservation; any other error stays spend_unknown.
+    if act::not_dispatched_refusal(status.as_u16(), &text) {
+        release(state)?;
+        abandon(&journal)?;
+        return Err(ActionError::new("not_dispatched", act::not_dispatched_message(&text)));
+    }
     // G1: the node refused under its grant before reserving or paying anything.
     if let Some(refusal) = grant::refusal(status.as_u16(), &text) {
         release(state)?;
@@ -4503,6 +4510,153 @@ mod control_act_tests {
         for (status, body) in [(500, refusal), (503, "unavailable"), (503, r#"{"code":"not_ready"}"#),
             (503, r#"{"code":"not_ready","money_ready":true}"#), (503, r#"{"code":"unknown","money_ready":false}"#)] {
             assert!(!act::readiness_refusal(status, body));
+        }
+    }
+
+    #[test]
+    fn not_dispatched_mapping_requires_http_400_and_exact_code() {
+        let body = r#"{"code":"not_dispatched","max_routing_fee_msat":5000,"error":"fee ceiling"}"#;
+        assert!(act::not_dispatched_refusal(400, body));
+        assert!(act::not_dispatched_refusal(400, r#"{"code":"not_dispatched"}"#));
+        for (status, reply) in [
+            (502, body),
+            (503, body),
+            (409, body),
+            (400, r#"{"code":"price_cap_exceeded"}"#),
+            (400, r#"{"code":"not_ready","money_ready":false}"#),
+            (400, "bad request"),
+            (400, r#"{"error":"not_dispatched"}"#),
+        ] {
+            assert!(!act::not_dispatched_refusal(status, reply), "{status} {reply}");
+        }
+    }
+
+    #[test]
+    fn not_dispatched_copy_is_neutral_unless_reason_is_a_fee_limit() {
+        assert_eq!(
+            act::not_dispatched_message(r#"{"code":"not_dispatched"}"#),
+            act::NOT_DISPATCHED_MESSAGE
+        );
+        let fresh = act::not_dispatched_message(
+            r#"{"code":"not_dispatched","max_routing_fee_msat":5000,"error":"capped payments require a fresh invoice hash"}"#,
+        );
+        assert!(fresh.starts_with(act::NOT_DISPATCHED_MESSAGE), "{fresh}");
+        assert!(fresh.contains("capped payments require a fresh invoice hash"), "{fresh}");
+        assert!(
+            !fresh.to_ascii_lowercase().contains("network fee would exceed"),
+            "non-fee refusal must not blame the fee limit: {fresh}"
+        );
+        let fee = act::not_dispatched_message(
+            r#"{"code":"not_dispatched","max_routing_fee_msat":5000,"error":"fee ceiling exceeded"}"#,
+        );
+        assert!(fee.starts_with(act::NOT_DISPATCHED_MESSAGE), "{fee}");
+        assert!(fee.to_ascii_lowercase().contains("network fee would exceed your limit"), "{fee}");
+        assert!(fee.contains("fee ceiling exceeded"), "{fee}");
+        let route = act::not_dispatched_message(
+            r#"{"code":"not_dispatched","error":"route fee above ceiling"}"#,
+        );
+        assert!(route.to_ascii_lowercase().contains("network fee would exceed your limit"), "{route}");
+    }
+
+    #[tokio::test]
+    async fn not_dispatched_pay_and_keysend_release_journal_and_budget() {
+        let pk = format!("02{}", "ab".repeat(32));
+        // pay: fee-ceiling not_dispatched clears; copy mentions the fee limit
+        {
+            let routes: Routes = Arc::new(|m, p, b| {
+                if p == "/payments/pay" {
+                    return (400, serde_json::json!({
+                        "code": "not_dispatched",
+                        "max_routing_fee_msat": 5000,
+                        "error": "fee ceiling exceeded",
+                    }).to_string());
+                }
+                happy()(m, p, b)
+            });
+            let node = fake(AuthMode::Local, routes);
+            spend_advance(&node.state, true).await.unwrap();
+            let err = do_payment_pay(&node.state, "lntb10n1x", 1000, 6000).await.unwrap_err();
+            assert_eq!(err.code, "not_dispatched");
+            assert!(err.message.starts_with(act::NOT_DISPATCHED_MESSAGE), "{}", err.message);
+            assert!(err.message.to_ascii_lowercase().contains("network fee would exceed your limit"), "{}", err.message);
+            assert!(err.message.contains("fee ceiling exceeded"), "{}", err.message);
+            assert!(spend_journal(&node.state).unwrap().pending().unwrap().is_none());
+            assert!(book(&node).is_empty(), "reservation released: {:?}", book(&node));
+            assert_eq!(budget_now(&node.state).unsettled_msat, 0);
+            assert_eq!(budget_now(&node.state).spent_msat, 0);
+            // A second attempt still reaches the node (no double-count lock).
+            assert_eq!(do_payment_pay(&node.state, "lntb10n1x", 1000, 6000).await.unwrap_err().code, "not_dispatched");
+            assert_eq!(node.posts().iter().filter(|(p, _)| p == "/payments/pay").count(), 2);
+            assert!(book(&node).is_empty());
+        }
+        // keysend: non-fee not_dispatched still releases; copy stays neutral
+        {
+            let routes: Routes = Arc::new(|m, p, b| {
+                if p == "/payments/keysend" {
+                    return (400, serde_json::json!({
+                        "code": "not_dispatched",
+                        "max_routing_fee_msat": 5000,
+                        "error": "capped payments require a fresh invoice hash",
+                    }).to_string());
+                }
+                happy()(m, p, b)
+            });
+            let node = fake(AuthMode::Local, routes);
+            spend_advance(&node.state, true).await.unwrap();
+            let err = do_payment_keysend(&node.state, &pk, 5000, None, 10000).await.unwrap_err();
+            assert_eq!(err.code, "not_dispatched");
+            assert!(err.message.starts_with(act::NOT_DISPATCHED_MESSAGE), "{}", err.message);
+            assert!(err.message.contains("capped payments require a fresh invoice hash"), "{}", err.message);
+            assert!(
+                !err.message.to_ascii_lowercase().contains("network fee would exceed"),
+                "non-fee refusal must not blame the fee limit: {}",
+                err.message
+            );
+            assert!(spend_journal(&node.state).unwrap().pending().unwrap().is_none());
+            assert!(book(&node).is_empty());
+            assert_eq!(budget_now(&node.state).unsettled_msat, 0);
+            assert_eq!(budget_now(&node.state).spent_msat, 0);
+            assert_eq!(do_payment_keysend(&node.state, &pk, 5000, None, 10000).await.unwrap_err().code, "not_dispatched");
+            assert_eq!(node.posts().iter().filter(|(p, _)| p == "/payments/keysend").count(), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn pay_and_keysend_502_and_other_400s_stay_unknown_spend() {
+        let pk = format!("02{}", "ab".repeat(32));
+        for (path, status, body) in [
+            ("/payments/pay", 502u16, r#"{"error":"no route","code":502}"#.to_string()),
+            ("/payments/pay", 400, r#"{"code":"bad_request","error":"malformed"}"#.to_string()),
+            ("/payments/pay", 400, r#"{"code":"price_cap_exceeded","error":"too high"}"#.to_string()),
+            ("/payments/keysend", 502, r#"{"error":"no route","code":502}"#.to_string()),
+            ("/payments/keysend", 400, r#"{"code":"bad_request","error":"malformed"}"#.to_string()),
+            ("/payments/keysend", 400, r#"{"error":"not_dispatched"}"#.to_string()), // wrong shape
+        ] {
+            let route_path = path.to_string();
+            let reply = body.clone();
+            let routes: Routes = Arc::new(move |m, p, b| {
+                if p == route_path { return (status, reply.clone()); }
+                happy()(m, p, b)
+            });
+            let node = fake(AuthMode::Local, routes);
+            spend_advance(&node.state, true).await.unwrap();
+            let err = if path == "/payments/pay" {
+                do_payment_pay(&node.state, "lntb10n1x", 1000, 6000).await.unwrap_err()
+            } else {
+                do_payment_keysend(&node.state, &pk, 5000, None, 10000).await.unwrap_err()
+            };
+            assert_eq!(err.code, "spend_unknown", "{path} {status} {body}");
+            assert!(spend_journal(&node.state).unwrap().pending().unwrap().is_some(), "{path} journal");
+            assert!(!book(&node).is_empty(), "{path} book kept: {:?}", book(&node));
+            assert!(budget_now(&node.state).unsettled_msat > 0, "{path} reservation held");
+            // Blocked from a second dispatch (no double counting via re-send).
+            let again = if path == "/payments/pay" {
+                do_payment_pay(&node.state, "lntb10n1x", 1000, 6000).await.unwrap_err()
+            } else {
+                do_payment_keysend(&node.state, &pk, 5000, None, 10000).await.unwrap_err()
+            };
+            assert_eq!(again.code, "spend_unknown");
+            assert_eq!(node.posts().iter().filter(|(p, _)| p == path).count(), 1, "{path} no second POST");
         }
     }
 

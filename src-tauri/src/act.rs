@@ -155,6 +155,52 @@ pub fn readiness_refusal(status: u16, body: &str) -> bool {
         .is_some_and(|v| v["code"] == "not_ready" && v["money_ready"] == false)
 }
 
+/// Genome #115: HTTP 400 with `code: "not_dispatched"` means the node proved
+/// no payment left the wallet. Only that exact code may clear the spend journal;
+/// any other 400 stays unknown.
+pub fn not_dispatched_refusal(status: u16, body: &str) -> bool {
+    status == 400
+        && serde_json::from_str::<serde_json::Value>(body)
+            .ok()
+            .is_some_and(|v| v["code"] == "not_dispatched")
+}
+
+/// Neutral proven-non-dispatch copy. Fee-limit wording is added only when the
+/// node's reason identifies a route/fee ceiling (see [`not_dispatched_message`]).
+pub const NOT_DISPATCHED_MESSAGE: &str = "Not sent - nothing was paid.";
+
+const NOT_DISPATCHED_FEE_LIMIT: &str = "Network fee would exceed your limit.";
+
+/// Build user-facing copy from a `not_dispatched` body. Always starts from
+/// [`NOT_DISPATCHED_MESSAGE`]; appends the node `error` when present; mentions
+/// the network fee limit only when that reason points at a fee/route ceiling.
+pub fn not_dispatched_message(body: &str) -> String {
+    let reason = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| {
+            v.get("error")
+                .and_then(|e| e.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        });
+    match reason.as_deref() {
+        Some(r) if not_dispatched_fee_limit_reason(r) => {
+            format!("{NOT_DISPATCHED_MESSAGE} {NOT_DISPATCHED_FEE_LIMIT} ({r})")
+        }
+        Some(r) => format!("{NOT_DISPATCHED_MESSAGE} {r}"),
+        None => NOT_DISPATCHED_MESSAGE.to_string(),
+    }
+}
+
+fn not_dispatched_fee_limit_reason(reason: &str) -> bool {
+    let lower = reason.to_ascii_lowercase();
+    lower.contains("fee ceiling")
+        || lower.contains("routing fee")
+        || lower.contains("route fee")
+        || (lower.contains("fee") && lower.contains("exceed"))
+}
+
 impl ActionError {
     pub fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self {
