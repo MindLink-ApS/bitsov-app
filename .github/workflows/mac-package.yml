@@ -10,9 +10,10 @@ name: Mac Package
 #
 # CI cost rule: macOS runners bill at 10x Linux, so this does NOT run on every
 # PR push. It runs on push to main, on workflow_dispatch, when a PR is opened
-# non-draft or marked ready_for_review, and on any PR carrying the `full-ci`
-# label (every push, plus the moment the label is added). Draft PRs without
-# `full-ci` skip it. Required gates (Authority Check, Build) are unaffected.
+# non-draft or marked ready_for_review, and when the `full-ci` label is added
+# to any PR (draft or non-draft). Carrying the label does not enable runs on
+# synchronize/reopened; remove and re-add it to request another run.
+# Required gates (Authority Check, Build) are unaffected.
 on:
   pull_request:
     branches: [main]
@@ -32,7 +33,6 @@ jobs:
     if: >-
       github.event_name != 'pull_request' ||
       (github.event.action == 'labeled' && github.event.label.name == 'full-ci') ||
-      (github.event.action != 'labeled' && contains(github.event.pull_request.labels.*.name, 'full-ci')) ||
       github.event.action == 'ready_for_review' ||
       (github.event.action == 'opened' && !github.event.pull_request.draft)
     timeout-minutes: 45
