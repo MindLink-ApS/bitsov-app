@@ -129,7 +129,7 @@ export type Actions = {
    */
   retryDelivery: (t: TrackRef, artifactId: string, approvedMsat?: number) => Promise<Outcome<unknown>>;
   /** Stop retrying a paid, undelivered message. Dispatches nothing. */
-  stopRetrying: (t: TrackRef | null, artifactId: string | null) => Promise<Outcome<string>>;
+  stopRetrying: (t: TrackRef | null, pendingId: string | null) => Promise<Outcome<string>>;
   /** The door card: a stranger's signed quote, or null when the node cannot give one. */
   doorQuote: (peer: string) => Promise<FirstContactQuote | null>;
   ownerRequest: (peer: string, cap: number, budget: number) => Promise<Outcome<OwnerContactApproval | null>>;
@@ -514,7 +514,7 @@ export function ControlCenter(props: Props) {
       if (r.ok || isBudgetStop(r.error) || r.error.code === 'spend_unknown' || r.error.code === 'payment_settled_undelivered') void loadBudget();
       if (!r.ok && r.error.code === 'payment_settled_undelivered' && r.error.undelivered) {
         // Paid, not delivered: the draft moves here, with the only safe way to resend it.
-        addArtifact(t, { type: 'undelivered', text, paid: r.error.undelivered, note: null, admission: null });
+        addArtifact(t, { type: 'undelivered', text, paid: r.error.undelivered, note: null, admission: null, pendingId: r.error.pending_id ?? null });
         return r;
       }
       if (!r.ok && ['price_changed', 'price_cap_exceeded'].includes(r.error.code)) {
@@ -548,23 +548,31 @@ export function ControlCenter(props: Props) {
         sentOne(t, r.value, text);
       } else if (r.error.code === 'payment_settled_undelivered' && r.error.undelivered) {
         const paid = r.error.undelivered;
-        update({ paid, admission: null, note: `Still not delivered. Paid for this message so far: ${sats(paid.paid_msat)} ${satUnit(paid.paid_msat)}.` });
+        update({ paid, admission: null, pendingId: r.error.pending_id ?? a.pendingId, note: `Still not delivered. Paid for this message so far: ${sats(paid.paid_msat)} ${satUnit(paid.paid_msat)}.` });
       } else if (r.error.code === 'retry_needs_admission') {
         // Stopped before paying: the price to approve, when the node could tell.
         update({ admission: r.error.admission ?? null, note: r.error.message });
       } else {
         // A refusal before dispatch (approval, price) keeps the retry; anything else ends it.
+        // A refused approved price is spent: Retry delivery asks for the current one.
         const ends = ['retry_unavailable', 'spend_unknown'].includes(r.error.code);
-        update({ paid: { ...a.paid, retry: !ends }, note: r.error.message });
+        update({ paid: { ...a.paid, retry: !ends }, note: r.error.message, admission: r.error.code === 'price_cap_exceeded' ? null : a.admission });
       }
       return r;
     },
-    stopRetrying: async (t, artifactId) => {
-      const r = await act(() => props.source.dismissUndelivered());
+    stopRetrying: async (t, pendingId) => {
+      // Only the record this card (or the pending check) showed: never another one.
+      if (!pendingId) return { ok: false, error: { code: 'retry_unavailable', message: 'Check the pending result first.' } };
+      const r = await act(() => props.source.dismissUndelivered(pendingId));
       void loadBudget();
-      if (r.ok && t && artifactId) {
-        setArtifacts(trackKey(t), (old) => (old ?? []).filter((x) => x.id !== artifactId));
-        addArtifact(t, { type: 'failed', action: 'Stopped retrying', error: { code: 'undelivered_pending', message: r.value } });
+      if (r.ok) {
+        // Every card for that record ends, wherever it was stopped from.
+        for (const key of Object.keys(artifacts)) {
+          if ((artifacts[key] ?? []).some((x) => x.type === 'undelivered' && x.pendingId === pendingId)) {
+            setArtifacts(key, (old) => (old ?? []).filter((x) => !(x.type === 'undelivered' && x.pendingId === pendingId)));
+          }
+        }
+        if (t) addArtifact(t, { type: 'failed', action: 'Stopped retrying', error: { code: 'undelivered_pending', message: r.value } });
       }
       return r;
     },
@@ -1035,7 +1043,7 @@ function Conversation(props: {
                     )}
                   </Match>
                   <Match when={item.type === 'artifact' && item.artifact}>
-                    {(a) => <ArtifactView a={a()} nameOf={props.nameOf} delivery={a().type === 'file' ? props.deliveries[(a() as { receipt: { message_id: string } }).receipt.message_id] : undefined} onRetry={(id, approved) => props.actions.retryDelivery(props.track, id, approved)} onStop={(id) => props.actions.stopRetrying(props.track, id)} />}
+                    {(a) => <ArtifactView a={a()} nameOf={props.nameOf} delivery={a().type === 'file' ? props.deliveries[(a() as { receipt: { message_id: string } }).receipt.message_id] : undefined} onRetry={(id, approved) => props.actions.retryDelivery(props.track, id, approved)} onStop={(pendingId) => props.actions.stopRetrying(props.track, pendingId)} />}
                   </Match>
                 </Switch>
               </>
@@ -1175,7 +1183,7 @@ function DoorView(props: { card: DoorCard; at: number; nameOf: (id: string) => s
   );
 }
 
-function ArtifactView(props: { a: Artifact; delivery?: Delivery; nameOf: (id: string) => string; onRetry?: (id: string, approvedMsat?: number) => Promise<unknown>; onStop?: (id: string) => Promise<unknown> }) {
+function ArtifactView(props: { a: Artifact; delivery?: Delivery; nameOf: (id: string) => string; onRetry?: (id: string, approvedMsat?: number) => Promise<unknown>; onStop?: (pendingId: string | null) => Promise<unknown> }) {
   return (
     <Switch>
       <Match when={props.a.type === 'invoice' && props.a}>
@@ -1270,7 +1278,7 @@ function ArtifactView(props: { a: Artifact; delivery?: Delivery; nameOf: (id: st
 function UndeliveredView(props: {
   a: Extract<Artifact, { type: 'undelivered' }>;
   onRetry?: (id: string, approvedMsat?: number) => Promise<unknown>;
-  onStop?: (id: string) => Promise<unknown>;
+  onStop?: (pendingId: string | null) => Promise<unknown>;
 }) {
   const [busy, setBusy] = createSignal(false);
   const copy = () => undeliveredCopy(props.a.paid);
@@ -1304,7 +1312,7 @@ function UndeliveredView(props: {
         </Show>
       </Show>
       <Show when={props.onStop}>
-        <button type="button" class="link" data-stop-retrying disabled={busy()} onClick={() => void run(() => props.onStop!(props.a.id))}>
+        <button type="button" class="link" data-stop-retrying disabled={busy()} onClick={() => void run(() => props.onStop!(props.a.pendingId))}>
           Stop retrying
         </button>
       </Show>
@@ -1936,21 +1944,22 @@ function Reconcile(props: { actions: Actions }) {
   const [result, setResult] = createSignal<string | null>(null);
   const [checking, setChecking] = createSignal(false);
   // Paid, not delivered: the owner may stop retrying (it dispatches nothing).
-  const [undelivered, setUndelivered] = createSignal(false);
+  // The record the check showed: Stop retrying names it, never whatever is pending later.
+  const [undelivered, setUndelivered] = createSignal<string | null>(null);
   const reconcile = async () => {
     if (checking()) return;
     setChecking(true);
     const outcome = await props.actions.reconcile();
     setResult(outcome.ok ? outcome.value : outcome.error.message);
-    setUndelivered(!outcome.ok && outcome.error.code === 'undelivered_pending');
+    setUndelivered(!outcome.ok && outcome.error.code === 'undelivered_pending' ? outcome.error.pending_id ?? null : null);
     setChecking(false);
   };
   const stop = async () => {
     if (checking()) return;
     setChecking(true);
-    const outcome = await props.actions.stopRetrying(null, null);
+    const outcome = await props.actions.stopRetrying(null, undelivered());
     setResult(outcome.ok ? outcome.value : outcome.error.message);
-    setUndelivered(false);
+    setUndelivered(null);
     setChecking(false);
   };
   return (

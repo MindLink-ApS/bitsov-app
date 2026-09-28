@@ -288,13 +288,18 @@ export type ActionError = {
   undelivered?: Undelivered;
   /** `retry_needs_admission` only: the price to approve, when the node could tell. */
   admission?: AdmissionPrice;
+  /**
+   * `payment_settled_undelivered` / `undelivered_pending`: the host's durable
+   * record. Stop retrying names it, so a stale card never releases another message.
+   */
+  pending_id?: string;
 };
 
 /**
- * Admission may be due again before a paid, undelivered message can go (a
- * reconnect starts every connection unpaid). Nothing has been paid for it;
- * `total_msat` is the cap the owner approves. `quoted`: the contact's own
- * signed quote; otherwise an estimate from the admission paid before.
+ * Retry delivery paid nothing new, and delivering a paid, undelivered message
+ * still needs a payment: the message's price, and admission again if the
+ * contact reconnected. `total_msat` is the cap the owner approves. `quoted`:
+ * the contact's own signed quote; otherwise an estimate from the admission paid before.
  */
 export type AdmissionPrice = { admission_msat: number; message_msat: number; total_msat: number; quoted: boolean };
 
@@ -419,10 +424,11 @@ export type Artifact =
   | { id: string; at: number; type: 'failed'; action: string; error: ActionError }
   /**
    * Paid, not delivered. `text` is the owner's own draft, kept in memory for
-   * Retry delivery only. `admission`: a retry stopped before paying because
-   * admission may be due again; this is the price to approve.
+   * Retry delivery only. `admission`: Retry delivery paid nothing new and a
+   * payment is still due; this is the price to approve. `pendingId`: the host
+   * record this card is about.
    */
-  | { id: string; at: number; type: 'undelivered'; text: string; paid: Undelivered; note: string | null; admission: AdmissionPrice | null }
+  | { id: string; at: number; type: 'undelivered'; text: string; paid: Undelivered; note: string | null; admission: AdmissionPrice | null; pendingId: string | null }
   | { id: string; at: number; type: 'door'; door: DoorCard };
 
 /**

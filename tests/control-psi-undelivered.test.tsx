@@ -8,9 +8,10 @@ import type { LiveEvent, SpendView } from '../src/control/types';
 // APP-PSI-MSG: the node settled payment but the message did not go (502
 // `payment_settled_send_incomplete`, genome #100). Paid, not delivered: show the
 // amount, never invite a second send, and offer Retry delivery only when the
-// node said a retry re-sends its paid proof. Genome #100: a retry on the same
-// connection pays only the message; when admission is due again the host
-// stops before paying and the owner approves the shown price, or stops retrying.
+// node said a retry re-sends its paid proof. Retry delivery pays nothing new
+// (the host caps the node at zero); whatever is still due (the message, and
+// admission again after a reconnect) the owner approves at the shown price, or
+// stops retrying. Stop retrying names the host record the card is about.
 
 const OWN = '1'.repeat(64);
 const A = 'a'.repeat(64);
@@ -90,10 +91,11 @@ function stubHost(overrides: Record<string, Reply> = {}) {
   return { calls, emitLive, spend, used };
 }
 
-const UNDELIVERED = (paid_msat: number, retry: boolean) => ({
+const UNDELIVERED = (paid_msat: number, retry: boolean, pending_id = 'rec-1') => ({
   code: 'payment_settled_undelivered',
   message: `Payment settled (${paid_msat} msat paid), message not yet delivered.`,
   undelivered: { paid_msat, retry },
+  pending_id,
 });
 
 describe('paid, not delivered: mapping and copy', () => {
@@ -102,6 +104,7 @@ describe('paid, not delivered: mapping and copy', () => {
     expect(asActionError({ code: 'payment_settled_undelivered', message: 'm', undelivered: { paid_msat: 2000, retry: 'yes' } }).undelivered).toEqual({ paid_msat: 2000, retry: false });
     expect(asActionError({ code: 'payment_settled_undelivered', message: 'm', undelivered: { paid_msat: -1, retry: true } }).undelivered).toBeUndefined();
     expect(asActionError({ code: 'node', message: 'm' })).toEqual({ code: 'node', message: 'm' });
+    expect(asActionError({ code: 'undelivered_pending', message: 'm', pending_id: 7 }).pending_id).toBeUndefined();
   });
 
   it('keeps an admission price only when it adds up', () => {
@@ -111,12 +114,13 @@ describe('paid, not delivered: mapping and copy', () => {
     expect(asActionError({ code: 'retry_needs_admission', message: 'm', admission: { ...admission, quoted: 'yes' } }).admission?.quoted).toBe(false);
   });
 
-  it('shows the admission price to approve, and never promises what the node does not enforce', () => {
+  it('shows the price to approve, and never promises what the node does not enforce', () => {
     const quoted = admissionCopy({ admission_msat: 1500, message_msat: 2000, total_msat: 3500, quoted: true });
-    expect(quoted.body).toContain('their price is 1.5 sats to be admitted, then 2 sats for this message');
+    expect(quoted.body).toContain('Delivering it needs a new payment');
+    expect(quoted.body).toContain('1.5 sats to be admitted again, then 2 sats for this message');
     expect(quoted.action).toBe('Approve up to 3.5 sats and retry');
     const estimate = admissionCopy({ admission_msat: 2000, message_msat: 2000, total_msat: 4000, quoted: false });
-    expect(estimate.body).toContain('about 2 sats (what it cost before)');
+    expect(estimate.body).toContain('about 2 sats (what admission cost before)');
     expect(estimate.body).toContain('refuses before paying if the real price is higher');
   });
 
@@ -124,8 +128,8 @@ describe('paid, not delivered: mapping and copy', () => {
     const retry = undeliveredCopy({ paid_msat: 2000, retry: true });
     expect(retry.title).toBe('Paid 2 sats · not delivered yet');
     expect(retry.body).toContain('Payment settled, message not yet delivered. Do not send it again.');
-    expect(retry.body).toContain('Retry delivery reuses this same payment');
-    expect(retry.body).toContain('pays only this message’s price');
+    expect(retry.body).toContain('Retry delivery pays nothing new');
+    expect(retry.body).toContain('re-sends the proof it already paid for');
     expect(retry.body).toContain('asks you first, with the price');
     expect(retry.body).not.toContain('no second admission');
     const stop = undeliveredCopy({ paid_msat: 1500, retry: false });
@@ -176,6 +180,7 @@ describe('paid, not delivered: in the conversation', () => {
   }
 
   it('shows the amount paid, moves the draft to the card, and retries through compose once', async () => {
+    // A zero-price contact: the zero-capped retry delivers.
     const host = stubHost({
       message_send: () => { throw UNDELIVERED(2000, true); },
       message_retry: (args) => ({ message_id: 'sent-2', recipient: args!.recipient, is_room: false, delivered: true, amount_msat: 2000, sent_at_ms: Date.now() }),
@@ -205,12 +210,12 @@ describe('paid, not delivered: in the conversation', () => {
     expect(host.used('message_retry')).toHaveLength(0);
   });
 
-  it('asks for approval with the price when admission may be due again, then retries once at that cap', async () => {
+  it('asks for approval with the price when a payment is still due, then retries once at that cap', async () => {
     const admission = { admission_msat: 2000, message_msat: 2000, total_msat: 4000, quoted: true };
     const host = stubHost({
       message_send: () => { throw UNDELIVERED(2000, true); },
       message_retry: (args) => {
-        if (args!.approved_msat === null) throw { code: 'retry_needs_admission', message: 'Your node may have to pay this contact’s admission again before the message can go. Nothing was paid.', admission };
+        if (args!.approved_msat === null) throw { code: 'retry_needs_admission', message: 'Retry delivery paid nothing new. Delivering the message needs a new payment. Nothing was paid.', admission };
         return { message_id: 'sent-3', recipient: args!.recipient, is_room: false, delivered: true, amount_msat: 4000, sent_at_ms: Date.now() };
       },
     });
@@ -220,7 +225,7 @@ describe('paid, not delivered: in the conversation', () => {
     // Nothing paid yet: the price is shown, and the free retry is gone.
     expect(text('[data-retry-note]')).toContain('Nothing was paid');
     expect($('[data-admission-price]')!.getAttribute('data-admission-price')).toBe('4000');
-    expect(text('[data-admission-price]')).toContain('their price is 2 sats to be admitted, then 2 sats for this message');
+    expect(text('[data-admission-price]')).toContain('2 sats to be admitted again, then 2 sats for this message');
     expect($('[data-retry-delivery]')).toBeNull();
     expect(text('[data-retry-approve]')).toBe('Approve up to 4 sats and retry');
 
@@ -239,7 +244,7 @@ describe('paid, not delivered: in the conversation', () => {
     await sendUndelivered(host);
     $<HTMLButtonElement>('[data-stop-retrying]')!.click();
     await vi.waitFor(() => expect($('[data-artifact="undelivered"]')).toBeNull());
-    expect(host.used('spend_dismiss_undelivered')).toHaveLength(1);
+    expect(host.used('spend_dismiss_undelivered').map((c) => c.args)).toEqual([{ pending_id: 'rec-1' }]);
     expect(host.used('message_retry')).toHaveLength(0);
     expect(host.used('message_send')).toHaveLength(1);
     await vi.waitFor(() => expect(mount.textContent).toContain('nothing more will be paid for it'));
@@ -257,5 +262,45 @@ describe('paid, not delivered: in the conversation', () => {
     expect(text('[data-artifact="undelivered"]')).toContain('Paid 2 sats');
     expect($('[data-retry-delivery]')).not.toBeNull();
     expect(host.used('message_retry')).toHaveLength(1);
+  });
+
+  // Codex review of 0308673 (P2): a stale card names its own record, so the
+  // host refuses it instead of releasing a different unresolved message.
+  it('a stale card never stops retrying a different message', async () => {
+    let current: string | null = null;
+    let n = 0;
+    const host = stubHost({
+      message_send: () => { current = `rec-${++n}`; throw UNDELIVERED(2000, true, current); },
+      spend_dismiss_undelivered: (args) => {
+        if (args!.pending_id !== current) throw { code: 'retry_unavailable', message: 'That message is no longer waiting for delivery. Nothing was changed.' };
+        current = null;
+        return 'Stopped retrying.';
+      },
+    });
+    await sendUndelivered(host);
+    type('[data-composer] textarea', 'second message');
+    submit();
+    await vi.waitFor(() => expect(mount.querySelectorAll('[data-artifact="undelivered"]')).toHaveLength(2));
+    // The first card is stale: the host now holds rec-2.
+    mount.querySelectorAll<HTMLButtonElement>('[data-artifact="undelivered"] [data-stop-retrying]')[0].click();
+    await vi.waitFor(() => expect(host.used('spend_dismiss_undelivered')).toHaveLength(1));
+    expect(host.used('spend_dismiss_undelivered')[0].args).toEqual({ pending_id: 'rec-1' });
+    expect(current).toBe('rec-2');
+    await vi.waitFor(() => expect(mount.querySelectorAll('[data-artifact="undelivered"]')).toHaveLength(2));
+  });
+
+  it('stopping from the pending check names the record it showed and ends its card', async () => {
+    const host = stubHost({
+      message_send: () => { throw UNDELIVERED(2000, true, 'rec-9'); },
+      spend_reconcile: () => { throw { code: 'undelivered_pending', message: 'Accounted: 2000 msat paid, and the message is still not delivered.', pending_id: 'rec-9' }; },
+      spend_dismiss_undelivered: () => 'Stopped retrying.',
+    });
+    await sendUndelivered(host);
+    $<HTMLButtonElement>('[data-spend-reconcile]')!.click();
+    await vi.waitFor(() => expect(mount.querySelectorAll('[data-stop-retrying]')).toHaveLength(2));
+    const panelStop = [...mount.querySelectorAll<HTMLButtonElement>('[data-stop-retrying]')].find((b) => !b.closest('[data-artifact]'))!;
+    panelStop.click();
+    await vi.waitFor(() => expect($('[data-artifact="undelivered"]')).toBeNull());
+    expect(host.used('spend_dismiss_undelivered').map((c) => c.args)).toEqual([{ pending_id: 'rec-9' }]);
   });
 });

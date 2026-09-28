@@ -140,8 +140,9 @@ export function costToSend(
 /** Any rejection from the host, as an action error. */
 export function asActionError(e: unknown): ActionError {
   if (e && typeof e === 'object' && 'code' in e && 'message' in e) {
-    const { code, message, undelivered, admission } = e as ActionError;
+    const { code, message, undelivered, admission, pending_id } = e as ActionError;
     const out: ActionError = { code, message: String(message) };
+    if (typeof pending_id === 'string' && pending_id) out.pending_id = pending_id;
     if (undelivered && msat(undelivered.paid_msat)) out.undelivered = { paid_msat: undelivered.paid_msat, retry: undelivered.retry === true };
     if (admission && msat(admission.admission_msat) && msat(admission.message_msat) && msat(admission.total_msat)
       && admission.total_msat === admission.admission_msat + admission.message_msat) {
@@ -163,18 +164,18 @@ export function undeliveredCopy(u: Undelivered): { title: string; body: string }
   return {
     title: `Paid ${paid} · not delivered yet`,
     body: u.retry
-      ? 'Payment settled, message not yet delivered. Do not send it again. Retry delivery reuses this same payment: your node re-sends the admission proof it paid for and pays only this message’s price. If your node reconnected and admission is due again, it stops before paying and asks you first, with the price.'
+      ? 'Payment settled, message not yet delivered. Do not send it again. Retry delivery pays nothing new: your node re-sends the proof it already paid for. If anything is still due (this message’s price, or admission again after a reconnect), it stops before paying and asks you first, with the price.'
       : 'Payment settled, message not yet delivered. Do not send it again: that could pay twice. Check the pending result before sending anything else.',
   };
 }
 
-/** The approval a retry needs when admission may be due again. Nothing is paid until the owner approves. */
+/** The approval a paid, undelivered message needs once Retry delivery paid nothing new. Nothing is paid until the owner approves. */
 export function admissionCopy(a: AdmissionPrice): { body: string; action: string } {
   const s = (m: number) => `${sats(m)} ${satUnit(m)}`;
   return {
     body: a.quoted
-      ? `Admission may be due again: their price is ${s(a.admission_msat)} to be admitted, then ${s(a.message_msat)} for this message. If your node is still admitted, it pays only the message.`
-      : `Admission may be due again: about ${s(a.admission_msat)} (what it cost before), then ${s(a.message_msat)} for this message. Your node refuses before paying if the real price is higher.`,
+      ? `Delivering it needs a new payment. Their price: ${s(a.admission_msat)} to be admitted again, then ${s(a.message_msat)} for this message. If your node is still admitted, it pays only the message.`
+      : `Delivering it needs a new payment: this message’s ${s(a.message_msat)}, and about ${s(a.admission_msat)} (what admission cost before) if the contact asks for it again. Your node refuses before paying if the real price is higher.`,
     action: `Approve up to ${s(a.total_msat)} and retry`,
   };
 }

@@ -73,6 +73,10 @@ pub struct ActionError {
     /// retry that may pay admission again.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub admission: Option<AdmissionView>,
+    /// `payment_settled_undelivered` / `undelivered_pending`: the durable
+    /// record's id. Stop retrying names it, so it never releases another one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_id: Option<String>,
 }
 
 /// Paid, not delivered, as the conversation shows it.
@@ -103,12 +107,17 @@ impl ActionError {
             message: message.into(),
             undelivered: None,
             admission: None,
+            pending_id: None,
         }
+    }
+    /// Name the durable record this error is about.
+    pub fn for_pending(self, id: &str) -> Self {
+        Self { pending_id: Some(id.to_string()), ..self }
     }
     /// The node settled payment but the message did not go. Never "not sent".
     pub fn undelivered(paid_msat: u64, retry: bool) -> Self {
         let next = if retry {
-            "Do not send it again. Retry delivery reuses this same payment: your node re-sends the admission proof it paid for and pays only this message's price. If admission is due again, it asks you first, with the price."
+            "Do not send it again. Retry delivery pays nothing new: your node re-sends the proof it already paid for. If anything is still due (this message's price, or admission again after a reconnect), it stops before paying and asks you first, with the price."
         } else {
             "Do not send it again: that could pay twice. Check the pending result first."
         };
@@ -117,16 +126,17 @@ impl ActionError {
             ..Self::new("payment_settled_undelivered", format!("Payment settled ({paid_msat} msat paid), message not yet delivered. {next}"))
         }
     }
-    /// A delivery retry stopped before paying: admission may be due again.
+    /// Retry delivery paid nothing new; a payment is still due (the message,
+    /// and admission again if the contact reconnected). The owner approves it.
     pub fn needs_admission(view: Option<AdmissionView>) -> Self {
         let price = match view {
-            Some(v) if v.quoted => format!(" Their price: {} msat to be admitted again, then {} msat for this message ({} msat in all).", v.admission_msat, v.message_msat, v.total_msat),
+            Some(v) if v.quoted => format!(" Their price: {} msat to be admitted again, then {} msat for this message ({} msat in all). If your node is still admitted, it pays only the message.", v.admission_msat, v.message_msat, v.total_msat),
             Some(v) => format!(" About {} msat to be admitted again (what it cost before), then {} msat for this message: up to {} msat.", v.admission_msat, v.message_msat, v.total_msat),
             None => " Your node could not tell the price.".into(),
         };
         Self {
             admission: view,
-            ..Self::new("retry_needs_admission", format!("Your node may have to pay this contact's admission again before the message can go (a reconnect starts every connection unpaid). Nothing was paid.{price} Approve it to retry, or stop retrying."))
+            ..Self::new("retry_needs_admission", format!("Retry delivery paid nothing new. Delivering the message needs a new payment: its price, and admission again if the contact reconnected. Nothing was paid.{price} Approve it to continue, or stop retrying."))
         }
     }
     pub fn invalid(message: impl Into<String>) -> Self {
@@ -1207,7 +1217,7 @@ mod tests {
         assert_eq!(retry.code, "payment_settled_undelivered");
         assert_eq!(retry.undelivered, Some(UndeliveredView { paid_msat: 2000, retry: true }));
         assert!(retry.message.starts_with("Payment settled (2000 msat paid), message not yet delivered. Do not send it again."), "{}", retry.message);
-        assert!(retry.message.contains("pays only this message's price") && retry.message.contains("asks you first"), "{}", retry.message);
+        assert!(retry.message.contains("Retry delivery pays nothing new") && retry.message.contains("asks you first"), "{}", retry.message);
         assert!(!retry.message.contains("no second admission"), "never promise what the node does not enforce");
         let stop = ActionError::undelivered(3000, false);
         assert!(stop.message.contains("Do not send it again") && !stop.message.contains("Retry"), "{}", stop.message);
@@ -1215,6 +1225,8 @@ mod tests {
         assert_eq!(wire["undelivered"], serde_json::json!({"paid_msat": 3000, "retry": false}));
         assert!(serde_json::to_value(ActionError::node("x")).unwrap().get("undelivered").is_none());
         assert!(serde_json::to_value(ActionError::node("x")).unwrap().get("admission").is_none());
+        assert!(serde_json::to_value(ActionError::node("x")).unwrap().get("pending_id").is_none());
+        assert_eq!(serde_json::to_value(retry.for_pending("r1")).unwrap()["pending_id"], "r1");
     }
 
     #[test]

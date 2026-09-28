@@ -116,13 +116,13 @@ export interface Source {
   send(recipient: string, isRoom: boolean, plaintext: string, maxMsat: number, maxRecipientMsat?: Record<string, number>, firstContactMsat?: number): Promise<SendReceipt>;
   /**
    * Retry a paid, undelivered message through its own journal record. Without
-   * `approvedMsat` it never pays admission (the host answers
-   * `retry_needs_admission` with the price); with it, the owner approved that
-   * price (admission plus message) and the node pays at most that.
+   * `approvedMsat` it pays nothing new (the node is capped at zero; the host
+   * answers `retry_needs_admission` with the price still due); with it, the
+   * owner approved that all-in price and the node pays at most that.
    */
   retry(recipient: string, plaintext: string, approvedMsat?: number): Promise<SendReceipt>;
-  /** Stop retrying a paid, undelivered message. Dispatches nothing. */
-  dismissUndelivered(): Promise<string>;
+  /** Stop retrying the paid, undelivered message `pendingId` names. Dispatches nothing. */
+  dismissUndelivered(pendingId: string): Promise<string>;
   // budgets (B2): numbers the host keeps; the approval itself stays in host memory
   budgetStatus(): Promise<BudgetView>;
   /** The owner's one approval for a daily total. Lowering an open one needs no new approval. */
@@ -194,7 +194,7 @@ export const hostSource: Source = {
   send: (recipient, isRoom, plaintext, maxMsat, maxRecipientMsat, firstContactMsat) =>
     invoke<SendReceipt>('message_send', { recipient, is_room: isRoom, plaintext, max_msat: maxMsat, max_recipient_msat: maxRecipientMsat ?? null, first_contact_msat: firstContactMsat ?? null }),
   retry: (recipient, plaintext, approvedMsat) => invoke<SendReceipt>('message_retry', { recipient, plaintext, approved_msat: approvedMsat ?? null }),
-  dismissUndelivered: () => invoke<string>('spend_dismiss_undelivered'),
+  dismissUndelivered: (pendingId) => invoke<string>('spend_dismiss_undelivered', { pending_id: pendingId }),
   budgetStatus: () => invoke<BudgetView>('budget_status'),
   budgetApprove: (ceilingMsat, preset) => invoke<BudgetView>('budget_approve', { ceiling_msat: ceilingMsat, preset }),
   budgetSet: (target, room, limitMsat) => invoke<BudgetView>('budget_set', { target, room, limit_msat: limitMsat }),
