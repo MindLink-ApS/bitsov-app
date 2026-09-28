@@ -1935,6 +1935,10 @@ function NewTrack(props: {
   const [ownerWait, setOwnerWait] = createSignal<SponsorOwnerApproval | null>(null);
   const [candErr, setCandErr] = createSignal<string | null>(null);
   const [giving, setGiving] = createSignal(false);
+  const [cancelling, setCancelling] = createSignal(false);
+  const [cancelUnconfirmed, setCancelUnconfirmed] = createSignal(false);
+  const giftPending = () => gift()?.state === 'paying' || gift()?.state === 'unknown';
+  const requestLocked = () => giving() || !!ownerWait() || !!gift() || cancelUnconfirmed();
   let giftRevision = 0;
   let giftPoll: ReturnType<typeof setTimeout> | undefined;
   const stopGiftWait = () => {
@@ -1946,6 +1950,7 @@ function NewTrack(props: {
   };
   onCleanup(() => { giftRevision += 1; clearTimeout(giftPoll); });
   const reviewRequest = () => {
+    if (requestLocked()) return;
     stopGiftWait();
     const revision = giftRevision;
     setCand(null);
@@ -1956,9 +1961,43 @@ function NewTrack(props: {
       if (active && revision === giftRevision) setCand(c);
     }, (message) => { if (active && revision === giftRevision) setCandErr(message); });
   };
+  const pollGift = (c: SponsorCandidate, revision: number) => {
+    const current = () => active && revision === giftRevision;
+    const check = async () => {
+      try {
+        const status = await props.source.sponsorStatus();
+        if (!current()) return;
+        setSponsor(status);
+        const kit = status.kits?.find((k) => k.intro_id === c.intro_id);
+        if (kit) {
+          if (kit.candidate?.newcomer !== c.newcomer || kit.candidate?.payment_hash !== c.payment_hash ||
+              kit.candidate?.code !== c.code || kit.gift_msat !== c.gift_msat || kit.fee_msat !== c.fee_max_msat) {
+            stopGiftWait();
+            setCandErr('The node status differs from the reviewed gift. Review the request again.');
+            return;
+          }
+          if (kit.state !== 'candidate' && kit.state !== 'offered') {
+            setGift(kit);
+            setOwnerWait(null);
+            setOwnerRequired(false);
+            if (kit.state !== 'paying' && kit.state !== 'unknown') return;
+            await props.source.sponsorReconcile(c.intro_id);
+            if (!current()) return;
+          }
+        }
+      } catch (e) {
+        if (!current()) return;
+        const err = asActionError(e);
+        if (err.code === 'sponsor_owner_approval_required') setOwnerRequired(true);
+        else setCandErr(err.message);
+      }
+      if (current()) giftPoll = setTimeout(() => void check(), 3000);
+    };
+    void check();
+  };
   const prepareGift = async () => {
     const c = cand();
-    if (!c || giving() || ownerWait() || gift() || theirCode().length !== 6) return;
+    if (!c || requestLocked() || theirCode().length !== 6) return;
     const revision = ++giftRevision;
     const current = () => active && revision === giftRevision;
     setGiving(true);
@@ -1968,37 +2007,7 @@ function NewTrack(props: {
       if (!current()) return;
       setOwnerWait(approval);
       setOwnerRequired(true);
-      const check = async () => {
-        try {
-          const status = await props.source.sponsorStatus();
-          if (!current()) return;
-          setSponsor(status);
-          const kit = status.kits?.find((k) => k.intro_id === c.intro_id);
-          if (kit) {
-            if (kit.candidate?.newcomer !== c.newcomer || kit.candidate?.payment_hash !== c.payment_hash ||
-                kit.candidate?.code !== c.code || kit.gift_msat !== c.gift_msat || kit.fee_msat !== c.fee_max_msat) {
-              stopGiftWait();
-              setCandErr('The node status differs from the reviewed gift. Review the request again.');
-              return;
-            }
-            if (kit.state !== 'candidate' && kit.state !== 'offered') {
-              setGift(kit);
-              setOwnerWait(null);
-              setOwnerRequired(false);
-              if (kit.state !== 'paying' && kit.state !== 'unknown') return;
-              await props.source.sponsorReconcile(c.intro_id);
-              if (!current()) return;
-            }
-          }
-        } catch (e) {
-          if (!current()) return;
-          const err = asActionError(e);
-          if (err.code === 'sponsor_owner_approval_required') setOwnerRequired(true);
-          else setCandErr(err.message);
-        }
-        if (current()) giftPoll = setTimeout(() => void check(), 3000);
-      };
-      void check();
+      pollGift(c, revision);
     } catch (e) {
       if (!current()) return;
       const err = asActionError(e);
@@ -2010,15 +2019,31 @@ function NewTrack(props: {
   };
   const cancelKit = async () => {
     const c = cand();
-    stopGiftWait();
-    setCand(null);
-    setGift(null);
-    setTheirCode('');
+    if (!c || giving() || cancelling() || giftPending()) return;
+    // Polling may invalidate its revision on a tuple mismatch while the
+    // node still owes this candidate a cancellation response.
+    const current = () => active && cand() === c;
+    setCancelling(true);
+    setCancelUnconfirmed(true);
     setCandErr(null);
-    const revision = giftRevision;
-    if (c) {
-      try { await props.source.sponsorCancel(c.intro_id); }
-      catch (e) { if (active && revision === giftRevision) setCandErr(asActionError(e).message); }
+    try {
+      await props.source.sponsorCancel(c.intro_id);
+      if (!current()) return;
+      // Only the node's successful withdrawal releases the reviewed request.
+      stopGiftWait();
+      setCand(null);
+      setGift(null);
+      setTheirCode('');
+      setCancelUnconfirmed(false);
+    } catch (e) {
+      if (!current()) return;
+      setCandErr(asActionError(e).message);
+      // A refusal or lost response may race with dispatch. Keep all visible
+      // state and restart reads, including cancellation before owner-wait began.
+      clearTimeout(giftPoll);
+      pollGift(c, ++giftRevision);
+    } finally {
+      if (active) setCancelling(false);
     }
   };
 
@@ -2209,7 +2234,7 @@ function NewTrack(props: {
                 rows={3}
                 placeholder="bitsov://sponsor-request#…"
                 value={request()}
-                disabled={!!ownerWait() || !!gift() || giving()}
+                disabled={requestLocked()}
                 onInput={(e) => {
                   stopGiftWait();
                   setCand(null);
@@ -2218,7 +2243,7 @@ function NewTrack(props: {
                 }}
                 aria-label="Starter bitcoin request"
               />
-              <button type="submit" class="primary" disabled={!request().trim() || giving() || !!ownerWait() || !!gift()}>
+              <button type="submit" class="primary" disabled={!request().trim() || requestLocked()}>
                 {open() ? 'Review request' : 'Approve first'}
               </button>
               <Show when={cand()}>
@@ -2235,7 +2260,7 @@ function NewTrack(props: {
                       <span>Code on their screen</span>
                       <input
                         data-starter-their-code
-                        disabled={giving() || !!ownerWait() || !!gift()}
+                        disabled={requestLocked()}
                         inputmode="numeric"
                         maxLength={6}
                         value={theirCode()}
@@ -2248,12 +2273,12 @@ function NewTrack(props: {
                         type="button"
                         class="primary"
                         data-starter-approve
-                        disabled={giving() || !!ownerWait() || theirCode().length !== 6 || !!gift()}
+                        disabled={requestLocked() || theirCode().length !== 6}
                         onClick={() => void prepareGift()}
                       >
                         {giving() ? 'Preparing…' : `Sponsor up to ${sats(c().gift_msat + c().fee_max_msat)} sats`}
                       </button>
-                      <button type="button" class="quiet" data-starter-cancel onClick={() => void cancelKit()}>
+                      <button type="button" class="quiet" data-starter-cancel disabled={giving() || cancelling() || giftPending()} onClick={() => void cancelKit()}>
                         Cancel
                       </button>
                     </span>
@@ -2267,7 +2292,7 @@ function NewTrack(props: {
                     {(pending) => <>
                       <textarea readonly aria-label="Owner approval command" data-starter-owner-command value={pending().owner_command} />
                       <button type="button" class="link" onClick={() => void navigator.clipboard.writeText(pending().owner_command).catch(() => setCandErr('Select and copy the command above.'))}>Copy command</button>
-                      <p class="hint">Waiting for the node to report this gift funded. Cancel stops the wait and asks the node to withdraw the kit before dispatch; it cannot undo a payment already sent.</p>
+                      <p class="hint">Waiting for the node to report this gift funded. Cancel asks the node to withdraw the kit before dispatch; tracking continues until withdrawal is confirmed, and it cannot undo a payment already sent.</p>
                     </>}
                   </Show>
                 </div>
