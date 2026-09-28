@@ -108,10 +108,13 @@ describe('paid, not delivered: mapping and copy', () => {
   });
 
   it('keeps an admission price only when it adds up', () => {
-    const admission = { admission_msat: 2000, message_msat: 2000, total_msat: 4000, quoted: true };
+    const admission = { admission_msat: 2000, message_msat: 2000, max_routing_fee_msat: 10000, total_msat: 14000, quoted: true };
     expect(asActionError({ code: 'retry_needs_admission', message: 'm', admission }).admission).toEqual(admission);
     expect(asActionError({ code: 'retry_needs_admission', message: 'm', admission: { ...admission, total_msat: 3000 } }).admission).toBeUndefined();
     expect(asActionError({ code: 'retry_needs_admission', message: 'm', admission: { ...admission, quoted: 'yes' } }).admission?.quoted).toBe(false);
+    for (const fee of [-1, 0.5, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(asActionError({ code: 'retry_needs_admission', message: 'm', admission: { ...admission, max_routing_fee_msat: fee } }).admission).toBeUndefined();
+    }
   });
 
   it('shows the price to approve, and never promises what the node does not enforce', () => {
@@ -211,12 +214,12 @@ describe('paid, not delivered: in the conversation', () => {
   });
 
   it('asks for approval with the price when a payment is still due, then retries once at that cap', async () => {
-    const admission = { admission_msat: 2000, message_msat: 2000, total_msat: 4000, quoted: true };
+    const admission = { admission_msat: 2000, message_msat: 2000, max_routing_fee_msat: 10000, total_msat: 14000, quoted: true };
     const host = stubHost({
       message_send: () => { throw UNDELIVERED(2000, true); },
       message_retry: (args) => {
         if (args!.approved_msat === null) throw { code: 'retry_needs_admission', message: 'Retry delivery paid nothing new. Delivering the message needs a new payment. Nothing was paid.', admission };
-        return { message_id: 'sent-3', recipient: args!.recipient, is_room: false, delivered: true, amount_msat: 4000, sent_at_ms: Date.now() };
+        return { message_id: 'sent-3', recipient: args!.recipient, is_room: false, delivered: true, amount_msat: 4000, max_routing_fee_msat: 10000, total_msat: 14000, sent_at_ms: Date.now() };
       },
     });
     await sendUndelivered(host);
@@ -224,14 +227,16 @@ describe('paid, not delivered: in the conversation', () => {
     await vi.waitFor(() => expect($('[data-retry-approve]')).not.toBeNull());
     // Nothing paid yet: the price is shown, and the free retry is gone.
     expect(text('[data-retry-note]')).toContain('Nothing was paid');
-    expect($('[data-admission-price]')!.getAttribute('data-admission-price')).toBe('4000');
+    expect($('[data-admission-price]')!.getAttribute('data-admission-price')).toBe('14000');
     expect(text('[data-admission-price]')).toContain('2 sats to be admitted again, then 2 sats for this message');
     expect($('[data-retry-delivery]')).toBeNull();
-    expect(text('[data-retry-approve]')).toBe('Approve up to 4 sats and retry');
+    expect(text('[data-retry-approve]')).toBe('Approve up to 14 sats and retry');
+    expect(text('[data-admission-price]')).toContain('up to 10 sats in network fees (14 sats in all)');
 
     $<HTMLButtonElement>('[data-retry-approve]')!.click();
     await vi.waitFor(() => expect($('[data-artifact="undelivered"]')).toBeNull());
-    expect(host.used('message_retry').map((c) => c.args!.approved_msat)).toEqual([null, 4000]);
+    expect(host.used('message_retry').map((c) => c.args!.approved_msat)).toEqual([null, 14000]);
+    expect(text('article.msg.out')).toContain('all-in ceiling (up to 10 sats network fee)');
     expect(host.used('message_send')).toHaveLength(1);
     await vi.waitFor(() => expect(mount.textContent).toContain('hello Maya'));
   });

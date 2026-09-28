@@ -18,23 +18,23 @@ async function start(beforeSend?: (source: ReturnType<typeof sampleSource>, appr
   const source = sampleSource({ firstLiveMs: 1e9 });
   const budget: BudgetView = {
     paused: false, waiting_for_owner: false, preset: 'careful',
-    autopay: { state: 'open', open_until_ms: Date.now() + 86400000, ceiling_msat: 500000, basis: 'node_grant' },
+    autopay: { state: 'open', open_until_ms: Date.now() + 861400000, ceiling_msat: 500000, basis: 'node_grant' },
     ceiling_msat: 500000, spent_msat: 0, unsettled_msat: 0, rows: [],
-    presets: SAMPLE_PRESETS, window_ms: 86400000, max_daily_msat: 100000000, node_grant: null,
+    presets: SAMPLE_PRESETS, window_ms: 861400000, max_daily_msat: 100000000, node_grant: null,
   };
   source.budgetStatus = async () => ({ ...budget });
   const approval: OwnerContactApproval = {
     id: 'request-one', ready: false, expires_at_ms: Date.now() + 60000,
-    request: { client_id: 'c1', grant_op_id: 'ab12', recipient: A, max_total_msat: 4000, contact_budget_msat: 50000 },
-    owner_command: `konsensus approve first-contact --client 'c1' --op 'ab12' --to '${A}' --max-msat '4000' --contact-budget-msat '50000'`,
+    request: { client_id: 'c1', grant_op_id: 'ab12', recipient: A, max_total_msat: 14000, contact_budget_msat: 50000 },
+    owner_command: `konsensus approve first-contact --client 'c1' --op 'ab12' --to '${A}' --max-msat '14000' --contact-budget-msat '50000'`,
   };
   source.firstContactRequest = vi.fn(async () => approval);
   source.firstContactStatus = vi.fn(async () => approval);
   source.firstContactCancel = vi.fn(async () => {});
-  source.send = vi.fn(async (recipient) => ({ message_id: 'sent-one', recipient, is_room: false, delivered: true, amount_msat: 4000, sent_at_ms: Date.now() }));
+  source.send = vi.fn(async (recipient) => ({ message_id: 'sent-one', recipient, is_room: false, delivered: true, amount_msat: 14000, sent_at_ms: Date.now() }));
   mount = document.createElement('div'); document.body.appendChild(mount);
   dispose = render(() => <ControlCenter source={source} active ready error={null} ownId={SAMPLE_OWN_ID} firstRun={<span />} />, mount);
-  await vi.waitFor(() => expect(element('[data-door-quote]')?.getAttribute('data-door-quote')).toBe('4000'));
+  await vi.waitFor(() => expect(element('[data-door-quote]')?.getAttribute('data-door-quote')).toBe('14000'));
   beforeSend?.(source, approval);
   type('hello with an owner approval');
   element<HTMLButtonElement>('[data-send]').click();
@@ -48,10 +48,10 @@ it('shows a copyable exact owner handoff, waits, then sends only once after appr
   expect(element<HTMLTextAreaElement>('[data-contact-owner-command]').value).toBe(approval.owner_command);
   expect(JSON.parse(element('[data-contact-approval]').getAttribute('data-contact-request')!)).toEqual(approval.request);
   expect(element<HTMLButtonElement>('[data-send]').disabled).toBe(true);
-  expect(source.firstContactRequest).toHaveBeenCalledWith(A, 4000, 50000);
+  expect(source.firstContactRequest).toHaveBeenCalledWith(A, 14000, 50000);
   source.firstContactStatus = vi.fn(async () => ({ ...approval, ready: true }));
   await vi.waitFor(() => expect(source.send).toHaveBeenCalledTimes(1), { timeout: 2500 });
-  expect(source.send).toHaveBeenCalledWith(A, false, 'hello with an owner approval', 4000, undefined, 50000);
+  expect(source.send).toHaveBeenCalledWith(A, false, 'hello with an owner approval', 14000, undefined, 50000);
   await vi.waitFor(() => expect(element<HTMLTextAreaElement>('[data-composer] textarea').value).toBe(''));
   expect(element('[data-contact-approval]')).toBeNull();
 });

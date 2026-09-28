@@ -42,7 +42,7 @@ function stubHost(overrides: Record<string, Reply> = {}) {
     price_quote: () => ({ kind: 0, own_msat: 1000, peer_msat: 2000, peer_age_secs: 30, peer_stale: false }),
     payments_overview: () => ({ balance_msat: 1_000_000, lightning_outbound_msat: 500_000, channels: [] }),
     fund_state: () => null,
-    file_price: () => 3000,
+    file_price: () => ({ principal_msat: 3000, max_routing_fee_msat: 5000, total_msat: 8000 }),
     spend_status: () => spend.v,
     spend_request: () => {
       spend.v = view('pending', { pending: { op_id: 'ab12', expires_at_ms: Date.now() + 900_000, owner_action: 'konsensus grant --op ab12', owner_can_grant: true } });
@@ -140,7 +140,7 @@ describe('acting from the track', () => {
     await vi.waitFor(() => expect(host.used('message_send')).toHaveLength(1));
     expect(host.used('message_send')[0].args).toEqual({ recipient: A, is_room: false, plaintext: 'gm Maya', max_msat: 2000, max_recipient_msat: null, first_contact_msat: null });
     await vi.waitFor(() => expect(text('[data-message="sent-1"] .stamp .sats')).toBe('2'));
-    expect(text('[data-message="sent-1"] .stamp')).toContain('sats paid');
+    expect(text('[data-message="sent-1"] .stamp')).toContain('sats all-in ceiling');
     expect(text('[data-message="sent-1"] [data-delivery]')).toBe('sent, waiting for their node');
     expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('');
 
@@ -242,10 +242,11 @@ describe('acting from the track', () => {
     await vi.waitFor(() => expect(text('[data-composer-note]')).toContain('not a Lightning invoice'));
     expect($<HTMLButtonElement>('[data-send]')!.disabled).toBe(true);
     type('[data-pay-invoice]', 'lntb10n1abc');
-    await vi.waitFor(() => expect(text('[data-send]')).toBe('Pay · 1 sat'));
-    expect($('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('1000');
+    await vi.waitFor(() => expect(text('[data-send]')).toBe('Pay · 6 sats'));
+    expect(text('[data-composer]')).toContain('up to 5 sats network fee');
+    expect($('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('6000');
     submit();
-    await vi.waitFor(() => expect(host.used('payment_pay')[0]?.args).toEqual({ bolt11: 'lntb10n1abc', amount_msat: 1000, max_msat: 1000 }));
+    await vi.waitFor(() => expect(host.used('payment_pay')[0]?.args).toEqual({ bolt11: 'lntb10n1abc', amount_msat: 1000, max_msat: 6000 }));
     await vi.waitFor(() => expect($('[data-artifact="payment"]')?.getAttribute('data-status')).toBe('settled'));
   });
 
@@ -272,7 +273,8 @@ describe('acting from the track', () => {
     $<HTMLButtonElement>('[data-composer-mode="pay"]')!.click();
     if (method === 'invoice') {
       type('[data-pay-invoice]', 'lntb10n1abc');
-      await vi.waitFor(() => expect(text('[data-send]')).toBe('Pay · 1 sat'));
+      await vi.waitFor(() => expect(text('[data-send]')).toBe('Pay · 6 sats'));
+    expect(text('[data-composer]')).toContain('up to 5 sats network fee');
     } else {
       [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent === 'Direct')!.click();
       type('[data-pay-pubkey]', '02' + 'ab'.repeat(32));
@@ -311,9 +313,9 @@ describe('acting from the track', () => {
     const input = $<HTMLInputElement>('[data-file-input]')!;
     Object.defineProperty(input, 'files', { value: [new File(['hi'], 'hi.txt', { type: 'text/plain' })] });
     input.dispatchEvent(new Event('change', { bubbles: true }));
-    await vi.waitFor(() => expect(text('[data-send]')).toBe('Send file · 3 sats'));
+    await vi.waitFor(() => expect(text('[data-send]')).toBe('Send file · 8 sats'));
     submit();
-    await vi.waitFor(() => expect(host.used('file_send')[0]?.args).toEqual({ recipient: A, filename: 'hi.txt', mime_type: 'text/plain', data_b64: 'aGk=', max_msat: 3000 }));
+    await vi.waitFor(() => expect(host.used('file_send')[0]?.args).toEqual({ recipient: A, filename: 'hi.txt', mime_type: 'text/plain', data_b64: 'aGk=', max_msat: 8000 }));
     await vi.waitFor(() => expect(text('[data-artifact="file"]')).toContain('hi.txt'));
   });
 
@@ -372,17 +374,17 @@ describe('sample source actions', () => {
       await s.spendStatus();
       await s.spendStatus();
 
-      const toMaya = await s.send(MAYA, false, 'gm', 5000);
+      const toMaya = await s.send(MAYA, false, 'gm', 10000);
       expect(toMaya.amount_msat).toBe(2000);
-      const toGamma = await s.send(GAMMA, false, 'gm', 5000);
+      const toGamma = await s.send(GAMMA, false, 'gm', 10000);
       expect(toGamma.amount_msat).toBe(1000);
       vi.advanceTimersByTime(1500);
       expect(events).toContainEqual({ type: 'delivery', message_id: toMaya.message_id, status: 'delivered', reason: null });
       expect(events).toContainEqual(expect.objectContaining({ type: 'delivery', message_id: toGamma.message_id, status: 'rejected' }));
 
-      await expect(s.send(OFFLINE, false, 'gm', 5000)).rejects.toMatchObject({ code: 'node', message: expect.stringContaining('offline') });
-      expect((await s.roomQuote(SAMPLE_ROOM_ID)).total_msat).toBe(3000);
-      await expect(s.send(SAMPLE_OPEN_ROOM_ID, true, 'gm', 5000)).rejects.toMatchObject({ code: 'room_unreachable' });
+      await expect(s.send(OFFLINE, false, 'gm', 10000)).rejects.toMatchObject({ code: 'node', message: expect.stringContaining('offline') });
+      expect((await s.roomQuote(SAMPLE_ROOM_ID)).total_msat).toBe(13000);
+      await expect(s.send(SAMPLE_OPEN_ROOM_ID, true, 'gm', 10000)).rejects.toMatchObject({ code: 'room_unreachable' });
     } finally {
       vi.useRealTimers();
     }
@@ -398,7 +400,7 @@ describe('sample source actions', () => {
     await s.spendRequest();
     await s.spendStatus();
     await s.spendStatus();
-    await expect(s.pay(inv.bolt11, 20_000, 20_000)).rejects.toMatchObject({ code: 'invalid' });
-    expect((await s.pay(inv.bolt11, 21_000, 21_000)).status).toBe('settled');
+    await expect(s.pay(inv.bolt11, 20_000, 25_000)).rejects.toMatchObject({ code: 'invalid' });
+    expect((await s.pay(inv.bolt11, 21_000, 26_000)).status).toBe('settled');
   });
 });

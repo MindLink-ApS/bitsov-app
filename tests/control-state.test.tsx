@@ -88,7 +88,7 @@ describe('cost to send', () => {
     const c = costToSend({ kind: 'peer', id: A }, quote({ peer_msat: 2000, peer_age_secs: 240 }), { name: 'Maya’s', nowMs: now })!;
     expect(c.msat).toBe(2000);
     expect(c.estimate).toBe(false);
-    expect(c.basis).toBe('Maya’s price, updated 4 min ago');
+    expect(c.basis).toBe('Maya’s price, updated 4 min ago; up to 0 sats network fee');
   });
 
   it('never passes our own price off as theirs', () => {
@@ -117,7 +117,7 @@ describe('cost to send', () => {
     };
     const c = costToSend({ kind: 'room', id: ROOM }, null, { room })!;
     expect(c.msat).toBe(3000);
-    expect(c.basis).toBe('2 members, each paid their own price; 1 estimated from yours');
+    expect(c.basis).toBe('2 members, each paid their own price; 1 estimated from yours; up to 0 sats network fee across all members');
     expect(c.estimate).toBe(true);
     expect(costToSend({ kind: 'room', id: ROOM }, quote(), {})).toBeNull();
   });

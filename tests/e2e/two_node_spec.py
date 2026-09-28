@@ -120,8 +120,7 @@ def run(r):
         s.snap('approval-waiting')
         s.need('app shows the owner command to type at the node', op, cmd)
         s.check('send is held while waiting', r.ui_try('exists', selector='[data-approval="pending"]'))
-        # Room sends conservatively reserve the remaining node allowance.
-        # Keep the fixture's overall grant within the default 100-sat room budget.
+        # A finite node grant covers this complete mock evening.
         out = r.owner_grant(op, '--budget', '100', '--for', '10m')
         s.note('owner CLI: ' + ' '.join(out.split())[-300:])
         s.need('owner approval enables first-contact confirmation', r.ui_try('wait', selector='[data-budget="first"]', timeoutMs=20000))
@@ -137,8 +136,11 @@ def run(r):
         s.need('composer shows a positive message ceiling', quote and int(quote[0]['data-cost-msat']) > 0, quote)
         door = r.ui('attrs', selector='[data-door-quote]', names=['data-door-quote'])
         s.check('composer cap matches the confirmed admission + message quote',
-                door and int(door[0]['data-door-quote']) == int(quote[0]['data-cost-msat']) == 4000, door)
+                door and int(door[0]['data-door-quote']) == int(quote[0]['data-cost-msat']) == 14000, door)
+        s.check('first contact shows the aggregate network fee ceiling', 'up to 10 sats network fee' in r.text('[data-door-quote]'))
         total = int(quote[0]['data-cost-msat'])
+        # Leave room for the entire evening including routing allowances.
+        r.ui('click', selector='[data-first-budget="100000"]')
         s.snap('first-contact-cost')
         balance_before = r.get('a', '/payments/balance')['balance_msat']
         before_b = r.get('b', '/payments')
@@ -150,7 +152,7 @@ def run(r):
         request = json.loads(pending[0]['data-contact-request'])
         s.check('owner request binds this contact, quote, budget and paired grant',
                 request['recipient'] == b and request['max_total_msat'] == total
-                and request['contact_budget_msat'] >= total and request['client_id'] and request['grant_op_id'], request)
+                and request['contact_budget_msat'] == 100000 and request['client_id'] and request['grant_op_id'], request)
         s.snap('contact-owner-pending')
         command = r.ui('attrs', selector='[data-contact-owner-command]', names=['data-command'])[0]['data-command']
         s.note('FIXTURE: node A operator executes the displayed owner CLI through its local control socket; the app receives only the public receipt.')
@@ -212,6 +214,7 @@ def run(r):
         r.ui('fill', selector='textarea[data-pay-invoice]', value=bolt11)
         time.sleep(1)
         label = r.text('[data-send]')
+        s.check('invoice shows its all-in price and fee ceiling', int(r.ui('attrs', selector='[data-cost-msat]', names=['data-cost-msat'])[0]['data-cost-msat']) == 8000 and 'up to 5 sats network fee' in r.text('[data-composer]'))
         s.snap('pay-before')
         if 'Approve' in label:
             window(s, 'pay', 'Pay')
@@ -222,8 +225,8 @@ def run(r):
         settled_b = r.wait_until(lambda: any(p.get('payment_hash') == inv.get('payment_hash') and str(p.get('status')).lower() == 'settled'
                                              for p in r.get('b', '/payments')), 20)
         s.check('pay: B\'s invoice settled', settled_b, status)
-        s.check('payment scope and fee warning are visible', 'Routing fees are outside' in r.text('[data-budget-payment]'))
-        s.check('app invoice payment counts 3 sats in the shared daily book', r.wait_until(lambda: app_tally() == before_pay + 3, 15))
+        s.check('payment scope and fee warning are visible', 'principal plus the network fee ceiling' in r.text('[data-budget-payment]'))
+        s.check('app invoice payment reserves 8 sats including the fee ceiling in the shared daily book', r.wait_until(lambda: app_tally() == before_pay + 8, 15))
         # Independent reviewer probe: replay the already-settled invoice through
         # the real composer. Log amounts only, never invoice/token material.
         replay_tally_before = app_tally()
@@ -277,7 +280,7 @@ def run(r):
             data = r.get('b', '/files/' + got[0]['id'])
             same = base64.b64decode(data['data_b64']) == payload
         s.check('file: B received identical bytes', filed and same, r.text('[data-artifact="file"]') if filed else r.text()[:400])
-        s.check('file counts 3 sats against the shared daily book', r.wait_until(lambda: app_tally() == before_file + 3, 15))
+        s.check('file reserves 8 sats including the fee ceiling against the shared daily book', r.wait_until(lambda: app_tally() == before_file + 8, 15))
         row = f'[data-budget-row="{b}"]'
         original_limit = r.text(row + ' [data-row-tally]').split('/')[1].split('sats')[0].strip()
         r.ui('click', selector=row + ' [data-budget-edit]')
@@ -290,7 +293,7 @@ def run(r):
         refused = r.ui_try('wait', selector='[data-composer-note]', text='Raise the budget', timeoutMs=10000)
         s.check('file refused by app contact budget', refused, r.ui_try('text', within={'selector': '[data-composer-note]'}))
         s.check('refused file never reached B', not any(f.get('filename') == 'budget-refused.txt' for f in r.get('b', '/files')))
-        s.check('refusal leaves shared tally unchanged', app_tally() == before_file + 3)
+        s.check('refusal leaves shared tally unchanged', app_tally() == before_file + 8)
         s.snap('file-budget-refused')
         r.ui('click', selector=row + ' [data-budget-edit]')
         r.ui('fill', selector=row + ' [data-budget-input]', value=original_limit)
@@ -304,6 +307,18 @@ def run(r):
         opened = r.ui_try('click', selector=f'[data-track="room:{room}"]', timeoutMs=30000)
         s.check('room appears in the rail without a restart', opened)
         if opened:
+            # The node's demand price can change during the preceding sends.
+            # Derive this one-member quote from live pricing, not a fixed 2 sats.
+            principal = r.get('a', '/payments/price/0')['price_msat']
+            for table in r.get('a', '/pricing/peers'):
+                if table.get('peer_id') == b and not table.get('stale', True):
+                    principal = table.get('prices', {}).get('communication', principal)
+            principal = max(1000, principal)
+            fee = min(max(5000, principal // 100), 10000)
+            shown = int(r.ui('attrs', selector='[data-cost-msat]', names=['data-cost-msat'])[0]['data-cost-msat'])
+            s.check('room includes the fee for each paid member', shown == principal + fee and
+                    f'up to {fee // 1000} sats network fee' in r.text('[data-composer]'),
+                    {'principal_msat': principal, 'max_routing_fee_msat': fee, 'shown_msat': shown})
             s.snap('room-open')
             msg = f'UI-E2E room A+B {int(time.time())}'
             send_message(msg)

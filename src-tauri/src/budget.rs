@@ -1,13 +1,13 @@
 //! Invisible payments (B2): per-contact and per-room budgets, and the owner's
 //! one approval that lets messages pay inside them without a prompt.
 //! Manual-window messages, files, invoice payments and keysend share the same
-//! daily principal book. Fees and independent owner/node actions are outside.
+//! daily all-in book. Routing allowances count; independent owner/node actions are outside.
 //!
 //! # What is stored, and what is not
 //!
 //! - **Stored** (`app-spend/budget-<node>.json`, 0600): budget *numbers* and a
 //!   rolling 24-hour ledger of what app sends reserved and paid, plus accounted
-//!   direct-payment hashes and principal (retained for replay detection). Nothing in
+//!   direct-payment hashes and all-in allowances (retained for replay detection). Nothing in
 //!   the file can spend: no token, no scope, no grant, no approval state.
 //! - **Not stored**: the owner's approval. [`Autopay`] lives in host memory for
 //!   at most [`BUDGET_WINDOW_MS`] and ends when the app quits. After a restart
@@ -117,7 +117,7 @@ pub struct Book {
     /// Pause-all. Sticky across restarts until the owner resumes.
     pub paused: bool,
     pub ledger: Vec<Entry>,
-    /// Canonical direct-payment hashes and their original principal. Kept after
+    /// Canonical direct-payment hashes and their original accounted allowances. Kept after
     /// ledger expiry/compaction: replaying an old receipt is never a new spend.
     #[serde(default)]
     pub accounted_payments: BTreeMap<String, u64>,
@@ -257,7 +257,7 @@ impl Book {
     }
 
     /// Account a canonical direct payment once. Persist this book as one atomic
-    /// snapshot so its identity and principal cannot be committed separately.
+    /// snapshot so its identity and allowance cannot be committed separately.
     pub fn settle_payment(&mut self, id: &str, hash: &str, msat: u64, now_ms: u64) {
         let Some(entry) = self.ledger.iter().rev().find(|e| e.id == id) else { return; };
         let hash = hash.to_ascii_lowercase();
@@ -456,7 +456,7 @@ pub fn plan(book: &Book, ask: Ask<'_>) -> Result<Plan, ActionError> {
         return Err(ActionError::new(
             "ceiling_exhausted",
             format!(
-                "You have used {} of your {} sats app payment principal limit (rolling 24 hours), and this costs {}. Raise the limit to send.",
+                "You have used {} of your {} sats app all-in payment limit (rolling 24 hours), and this costs {}. Raise the limit to send.",
                 sats(spent), sats(ceiling), sats(ask.max_msat)
             ),
         ));

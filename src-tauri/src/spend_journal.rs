@@ -30,6 +30,9 @@ pub struct Pending {
     /// journals predate daily accounting and deserialize as unbudgeted.
     #[serde(default)]
     pub budgeted: bool,
+    /// New journals reserve principal plus routing allowance. Old ones stay readable.
+    #[serde(default)]
+    pub all_in: bool,
 }
 
 impl Pending {
@@ -132,7 +135,7 @@ impl Journal {
         let pending = Pending {
             node_id: node_id.to_string(),
             request_hash: blake3::hash(format!("{path}\n{body}").as_bytes()).to_hex().to_string(),
-            max_msat, target: None, over_budget: false, accounting_msat: None, undelivered: None, charge_id: None, budgeted: false,
+            max_msat, target: None, over_budget: false, accounting_msat: None, undelivered: None, charge_id: None, budgeted: false, all_in: false,
         };
         self.save(&pending)?;
         Ok(pending)
@@ -219,7 +222,7 @@ mod tests {
     #[test]
     fn reconciliation_needs_exact_terminal_outgoing_evidence() {
         let p = Pending { node_id:"node".into(), request_hash:"hash".into(), max_msat:2000,
-            target:Some(Target::Payment { hash:"abc".into() }), over_budget:false, accounting_msat: None, undelivered: None, charge_id: None, budgeted: false };
+            target:Some(Target::Payment { hash:"abc".into() }), over_budget:false, accounting_msat: None, undelivered: None, charge_id: None, budgeted: false, all_in: false };
         assert_eq!(terminal(&p, &[]), None);
         assert_eq!(terminal(&p, &[json!({"payment_hash":"other", "amount_msat":2000, "direction":"outgoing", "status":"settled"})]), None);
         for status in ["pending", "inflight", "expired", "unknown"] {
@@ -235,7 +238,7 @@ mod tests {
     #[test]
     fn message_reconciliation_rejects_other_sender_and_recipient() {
         let p = Pending { node_id:"node".into(), request_hash:"hash".into(), max_msat:2000,
-            target:Some(Target::Message { id:"abc".into(), peer:"peer".into() }), over_budget:false, accounting_msat: None, undelivered: None, charge_id: None, budgeted: false };
+            target:Some(Target::Message { id:"abc".into(), peer:"peer".into() }), over_budget:false, accounting_msat: None, undelivered: None, charge_id: None, budgeted: false, all_in: false };
         let mut row = json!({"id":"abc", "sender":"other", "recipient":"peer", "payment_amount_msat":2000});
         assert_eq!(terminal(&p, &[row.clone()]), None);
         row["sender"] = json!("node");

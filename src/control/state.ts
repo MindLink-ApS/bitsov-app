@@ -1,3 +1,4 @@
+import { feeCeiling } from './format';
 // Control-center state as pure functions over plain data, so the rules are
 // testable without a window: which track a live message belongs to, how history
 // and live traffic merge, what a send would cost and on what basis, and how
@@ -108,16 +109,16 @@ export function costToSend(
       const age = quote.peer_age_secs ?? 0;
       const when = ago((opts.nowMs ?? Date.now()) - age * 1000, opts.nowMs ?? Date.now());
       return {
-        msat: Math.max(quote.peer_msat, MIN_PAYMENT_MSAT),
+        msat: Math.max(quote.peer_msat, MIN_PAYMENT_MSAT) + (quote.max_routing_fee_msat ?? 0),
         basis: quote.peer_stale
-          ? `${opts.name ?? 'Their'} price, from a stale table (${when})`
-          : `${opts.name ?? 'Their'} price, updated ${when}`,
+          ? `${opts.name ?? 'Their'} price, from a stale table (${when}); ${feeCeiling(quote.max_routing_fee_msat ?? 0)}`
+          : `${opts.name ?? 'Their'} price, updated ${when}; ${feeCeiling(quote.max_routing_fee_msat ?? 0)}`,
         estimate: quote.peer_stale,
       };
     }
     return {
-      msat: Math.max(quote.own_msat, MIN_PAYMENT_MSAT),
-      basis: quote.peer_stale ? 'Estimate from your own price; the peer table is stale' : `Estimate from your own price; ${opts.name ?? 'this peer'} has not shared theirs yet`,
+      msat: Math.max(quote.own_msat, MIN_PAYMENT_MSAT) + (quote.max_routing_fee_msat ?? 0),
+      basis: (quote.peer_stale ? 'Estimate from your own price; the peer table is stale' : `Estimate from your own price; ${opts.name ?? 'this peer'} has not shared theirs yet`) + `; ${feeCeiling(quote.max_routing_fee_msat ?? 0)}`,
       estimate: true,
     };
   }
@@ -130,7 +131,7 @@ export function costToSend(
       msat: room.total_msat,
       basis:
         `${n} ${n === 1 ? 'member' : 'members'}, each paid their own price` +
-        (own > 0 ? `; ${own} estimated from yours` : ''),
+        (own > 0 ? `; ${own} estimated from yours` : '') + `; ${feeCeiling(room.max_routing_fee_msat ?? 0)} across all members`,
       estimate: room.estimate,
     };
   }
@@ -145,8 +146,9 @@ export function asActionError(e: unknown): ActionError {
     if (typeof pending_id === 'string' && pending_id) out.pending_id = pending_id;
     if (undelivered && msat(undelivered.paid_msat)) out.undelivered = { paid_msat: undelivered.paid_msat, retry: undelivered.retry === true };
     if (admission && msat(admission.admission_msat) && msat(admission.message_msat) && msat(admission.total_msat)
-      && admission.total_msat === admission.admission_msat + admission.message_msat) {
-      out.admission = { admission_msat: admission.admission_msat, message_msat: admission.message_msat, total_msat: admission.total_msat, quoted: admission.quoted === true };
+      && msat(admission.max_routing_fee_msat ?? 0)
+      && admission.total_msat === admission.admission_msat + admission.message_msat + (admission.max_routing_fee_msat ?? 0)) {
+      out.admission = { admission_msat: admission.admission_msat, message_msat: admission.message_msat, max_routing_fee_msat: admission.max_routing_fee_msat ?? 0, total_msat: admission.total_msat, quoted: admission.quoted === true };
     }
     return out;
   }
@@ -174,8 +176,8 @@ export function admissionCopy(a: AdmissionPrice): { body: string; action: string
   const s = (m: number) => `${sats(m)} ${satUnit(m)}`;
   return {
     body: a.quoted
-      ? `Delivering it needs a new payment. Their price: ${s(a.admission_msat)} to be admitted again, then ${s(a.message_msat)} for this message. If your node is still admitted, it pays only the message.`
-      : `Delivering it needs a new payment: this message’s ${s(a.message_msat)}, and about ${s(a.admission_msat)} (what admission cost before) if the contact asks for it again. Your node refuses before paying if the real price is higher.`,
+      ? `Delivering it needs a new payment. Their price: ${s(a.admission_msat)} to be admitted again, then ${s(a.message_msat)} for this message. Plus up to ${s(a.max_routing_fee_msat ?? 0)} in network fees (${s(a.total_msat)} in all). If your node is still admitted, it pays only the message and its network fee.`
+      : `Delivering it needs a new payment: this message’s ${s(a.message_msat)}, and about ${s(a.admission_msat)} (what admission cost before) if the contact asks for it again. Plus up to ${s(a.max_routing_fee_msat ?? 0)} in network fees (${s(a.total_msat)} in all). Your node refuses before paying if the real price is higher.`,
     action: `Approve up to ${s(a.total_msat)} and retry`,
   };
 }

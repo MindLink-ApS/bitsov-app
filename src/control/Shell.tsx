@@ -1,3 +1,4 @@
+import { allIn, routingFee, feeCeiling } from './format';
 import { createEffect, createMemo, createSignal, For, type JSX, Match, on, onCleanup, Show, Switch, untrack } from 'solid-js';
 import { createStore, produce } from 'solid-js/store';
 import { qrSvg } from '../qr';
@@ -74,6 +75,7 @@ import type {
   Peer,
   PresetId,
   PriceQuote,
+  PaymentQuote,
   Room,
   RoomQuote,
   SpendView,
@@ -159,12 +161,13 @@ export function ControlCenter(props: Props) {
   const [track, setTrack] = createSignal<TrackRef | null>(null);
   const [quote, setQuote] = createSignal<PriceQuote | null>(null);
   const [roomQuote, setRoomQuote] = createSignal<RoomQuote | null>(null);
-  const [filePrice, setFilePrice] = createSignal<number | null>(null);
+  const [filePrice, setFilePrice] = createSignal<PaymentQuote | null>(null);
   const [spend, setSpend] = createSignal<SpendView | null>(null);
   const [budget, setBudget] = createSignal<BudgetView | null>(null);
   const [deliveries, setDeliveries] = createStore<Deliveries>({});
   /** What each send actually paid, by message id: a room echo carries one member's share only. */
   const [paid, setPaid] = createStore<Record<string, number>>({});
+  const [allowances, setAllowances] = createStore<Record<string, { total_msat: number; max_routing_fee_msat: number }>>({});
   const [artifacts, setArtifacts] = createStore<Record<string, Artifact[]>>({});
   const [errors, setErrors] = createStore<Record<string, string | undefined>>({});
   const [contextOpen, setContextOpen] = createSignal(false);
@@ -446,6 +449,7 @@ export function ControlCenter(props: Props) {
   /** A message the node took: show it in the thread with what it paid. */
   const sentOne = (t: TrackRef, receipt: SendReceipt, text: string) => {
     setPaid(receipt.message_id, receipt.amount_msat);
+    setAllowances(receipt.message_id, { total_msat: receipt.total_msat ?? receipt.amount_msat + (receipt.max_routing_fee_msat ?? 0), max_routing_fee_msat: receipt.max_routing_fee_msat ?? 0 });
     if (!deliveries[receipt.message_id]) setDeliveries(receipt.message_id, deliveryFromReceipt(receipt));
     setThreads('t', trackKey(t), (old) => mergeMessages(old ?? [], [sentMessage(receipt, ownId(), text)]));
     setThreads('fresh', receipt.message_id, true);
@@ -586,7 +590,7 @@ export function ControlCenter(props: Props) {
       return r.ok ? { ok: true, value: r.value.amount_msat } : r;
     },
     pay: async (t, bolt11, msat) => {
-      const r = await act(() => props.source.pay(bolt11, msat, msat));
+      const r = await act(() => props.source.pay(bolt11, msat, allIn(msat)));
       void loadBudget();
       if (r.ok) {
         addArtifact(t, { type: 'payment', receipt: r.value, at: r.value.paid_at_ms });
@@ -595,7 +599,7 @@ export function ControlCenter(props: Props) {
       return recordFailure(t, 'Payment not sent', r);
     },
     keysend: async (t, pubkey, msat, memo) => {
-      const r = await act(() => props.source.keysend(pubkey, msat, memo.trim() || null, msat));
+      const r = await act(() => props.source.keysend(pubkey, msat, memo.trim() || null, allIn(msat)));
       void loadBudget();
       if (r.ok) {
         addArtifact(t, { type: 'payment', receipt: r.value, at: r.value.paid_at_ms });
@@ -712,6 +716,7 @@ export function ControlCenter(props: Props) {
                     fresh={threads.fresh}
                     deliveries={deliveries}
                     paid={paid}
+                    allowances={allowances}
                     ownId={ownId()}
                     nameOf={nameOf}
                     quote={quote()}
@@ -947,11 +952,12 @@ function Conversation(props: {
   fresh: Record<string, true>;
   deliveries: Deliveries;
   paid: Record<string, number>;
+  allowances: Record<string, { total_msat: number; max_routing_fee_msat: number }>;
   ownId: string;
   nameOf: (id: string) => string;
   quote: PriceQuote | null;
   roomQuote: RoomQuote | null;
-  filePrice: number | null;
+  filePrice: PaymentQuote | null;
   spend: SpendView | null;
   spendError: string | undefined;
   budget: BudgetView | null;
@@ -998,8 +1004,8 @@ function Conversation(props: {
         <Show when={props.introduced}>
           {(c) => (
             <p class="day" data-introduced={c().node_id}>
-              Opened from {props.name}’s signed introduction. Their card said: first contact {sats(c().admission_msat)} sats, each
-              message {sats(c().message_msat)} sats. You confirm their node’s own quote before anything is paid, and every
+              Opened from {props.name}’s signed introduction. Estimated from their card: admission {sats(allIn(c().admission_msat))} sats including {feeCeiling(routingFee(c().admission_msat))}, each
+              message {sats(allIn(c().message_msat))} sats including {feeCeiling(routingFee(c().message_msat))} (estimated ceilings). You confirm their node’s own quote before anything is paid, and every
               message pays.
             </p>
           )}
@@ -1038,6 +1044,7 @@ function Conversation(props: {
                         fresh={!!props.fresh[m().id]}
                         delivery={props.deliveries[m().id]}
                         paid={props.paid[m().id]}
+                        allowance={props.allowances[m().id]}
                         nameOf={props.nameOf}
                       />
                     )}
@@ -1085,9 +1092,10 @@ function MessageView(props: {
   fresh: boolean;
   delivery: Delivery | undefined;
   paid: number | undefined;
+  allowance?: { total_msat: number; max_routing_fee_msat: number };
   nameOf: (id: string) => string;
 }) {
-  const amount = () => props.paid ?? props.m.payment_amount_msat;
+  const amount = () => props.allowance?.total_msat ?? props.paid ?? props.m.payment_amount_msat;
   return (
     <article class={`msg ${props.out ? 'out' : 'in'}`} classList={{ fresh: props.fresh }} data-message={props.m.id}>
       <Show when={!props.out && props.room}>
@@ -1098,7 +1106,7 @@ function MessageView(props: {
         <Show when={amount()}>
           <Bolt />
           <span class="sats">{sats(amount()!)}</span>
-          <span>{satUnit(amount()!)} {props.out ? 'paid' : 'to you'}</span>
+          <span>{satUnit(amount()!)} {props.out ? (props.allowance ? `all-in ceiling (${feeCeiling(props.allowance.max_routing_fee_msat)})` : 'principal paid; fee not in history') : 'to you'}</span>
         </Show>
         <span>{clock(props.m.timestamp)}</span>
         <Show when={props.out && props.delivery}>
@@ -1223,8 +1231,8 @@ function ArtifactView(props: { a: Artifact; delivery?: Delivery; nameOf: (id: st
               <span class="kind">Payment · {r().method === 'keysend' ? 'direct (keysend)' : 'invoice'}</span>
               <span class="stamp">
                 <Bolt />
-                <span class="sats">{sats(r().amount_msat)}</span>
-                <span>{satUnit(r().amount_msat)} paid · {r().status} · {clock(r().paid_at_ms)}</span>
+                <span class="sats">{sats(r().amount_msat + (r().max_routing_fee_msat ?? 0))}</span>
+                <span>{satUnit(r().amount_msat + (r().max_routing_fee_msat ?? 0))} all-in ceiling ({feeCeiling(r().max_routing_fee_msat ?? 0)}) · {r().status} · {clock(r().paid_at_ms)}</span>
               </span>
             </div>
           );
@@ -1239,8 +1247,8 @@ function ArtifactView(props: { a: Artifact; delivery?: Delivery; nameOf: (id: st
               <span class="file-name">{r().filename} <span class="hint">{kb(r().size_bytes)}</span></span>
               <span class="stamp">
                 <Bolt />
-                <span class="sats">{sats(r().amount_msat)}</span>
-                <span>{satUnit(r().amount_msat)} paid · {clock(r().sent_at_ms)}</span>
+                <span class="sats">{sats((r().total_msat ?? r().amount_msat + (r().max_routing_fee_msat ?? 0)))}</span>
+                <span>{satUnit((r().total_msat ?? r().amount_msat + (r().max_routing_fee_msat ?? 0)))} all-in ceiling ({feeCeiling(r().max_routing_fee_msat ?? 0)}) · {clock(r().sent_at_ms)}</span>
                 <Show when={props.delivery}>
                   <DeliveryMark d={props.delivery!} />
                 </Show>
@@ -1335,7 +1343,7 @@ function Composer(props: {
   name: string;
   cost: ReturnType<typeof costToSend>;
   roomQuote: RoomQuote | null;
-  filePrice: number | null;
+  filePrice: PaymentQuote | null;
   firstContact: boolean;
   spend: SpendView | null;
   spendError: string | undefined;
@@ -1548,7 +1556,7 @@ function Composer(props: {
           return {
             msat: q.total_msat,
             estimate: false,
-            basis: `${props.name}’s own quote: ${sats(q.admission_msat)} sats to open their door, then ${sats(q.message_msat)} for this message`,
+            basis: `${props.name}’s own quote: ${sats(q.admission_msat)} sats to open their door, then ${sats(q.message_msat)} for this message; ${feeCeiling(q.max_routing_fee_msat ?? 0)}`,
           };
         }
         const c = props.cost;
@@ -1562,17 +1570,17 @@ function Composer(props: {
         if (payKind() === 'invoice') {
           return invoiceMsat() === null
             ? { msat: null, estimate: false, basis: 'Paste an invoice to see what it asks for' }
-            : { msat: invoiceMsat(), estimate: false, basis: 'The amount the invoice asks for, plus any routing fee' };
+            : { msat: allIn(invoiceMsat()!), estimate: false, basis: `Invoice principal plus ${feeCeiling(routingFee(invoiceMsat()!))}` };
         }
         return satsInput(amount()) === null
           ? { msat: null, estimate: false, basis: 'Enter an amount' }
-          : { msat: Math.round(satsInput(amount())! * 1000), estimate: false, basis: 'Sent directly to that node, plus any routing fee' };
+          : { msat: allIn(Math.round(satsInput(amount())! * 1000)), estimate: false, basis: `Direct payment plus ${feeCeiling(routingFee(Math.round(satsInput(amount())! * 1000)))}` };
       case 'request':
         return { msat: 0, estimate: false, basis: 'Receiving costs you nothing. The payer’s node pays the fee' };
       case 'file':
         return props.filePrice === null
           ? { msat: null, estimate: false, basis: 'Reading the file price…' }
-          : { msat: props.filePrice, estimate: false, basis: 'Your node’s price to send one file' };
+          : { msat: props.filePrice.total_msat, estimate: false, basis: `File price plus ${feeCeiling(props.filePrice.max_routing_fee_msat)}` };
     }
   };
 
@@ -1598,7 +1606,7 @@ function Composer(props: {
       switch (stand().kind) {
         case 'paused': return 'Resume payments';
         case 'waiting': return 'Waiting for approval';
-        case 'off': return 'Approve app principal limit';
+        case 'off': return 'Approve app all-in limit';
         case 'first': return `Send first message${price}`;
         case 'contact_used':
         case 'total_used': return 'Budget used up';
@@ -1825,10 +1833,10 @@ function Composer(props: {
       </div>
 
       <Show when={mode() === 'pay'}>
-        <p class="hint" data-budget-payment>App invoice payments and keysend count against the app daily principal limit. Routing fees are outside this limit; any finite node grant still applies.</p>
+        <p class="hint" data-budget-payment>App invoice payments and keysend reserve principal plus the network fee ceiling against the app daily all-in limit; any finite node grant still applies.</p>
       </Show>
       <Show when={mode() === 'file'}>
-        <p class="hint" data-budget-file>Files count against the same app payment principal limit and any contact budget, including during the ten-minute window. Routing fees are outside this limit.</p>
+        <p class="hint" data-budget-file>Files reserve principal plus the network fee ceiling against the same app all-in limit and contact budget, including during the ten-minute window.</p>
       </Show>
       <Show when={drafted()}>
         <p class="drafted" data-drafted>
@@ -2012,7 +2020,7 @@ function BudgetBar(props: {
   now: number;
   actions: Actions;
 }) {
-  const worth = (msat: number) => messagesWorth(msat, props.door?.message_msat ?? props.priceMsat);
+  const worth = (msat: number) => messagesWorth(msat, props.priceMsat);
   const who = () => (props.room ? 'this room' : props.name);
   const firstOptions = (suggest: number, ceiling: number) =>
     [...new Set([suggest, suggest * 2, suggest * 5].map((v) => Math.min(v, ceiling)))].filter((v) => v >= (props.priceMsat ?? 0));
@@ -2027,7 +2035,7 @@ function BudgetBar(props: {
         <Match when={props.stand.kind === 'waiting'}>
           <div class="approval" data-approval="pending">
             <p>
-              <strong>Confirm at your node.</strong> One approval lets messages pay for the next 24 hours, up to your app payment principal limit.
+              <strong>Confirm at your node.</strong> One approval lets messages pay for the next 24 hours, up to your app all-in payment limit.
               Run this where your node runs and type the phrase it prints:
             </p>
             <Show when={props.spend?.pending}>
@@ -2040,9 +2048,9 @@ function BudgetBar(props: {
           <div class="approval budget-setup" data-budget-setup>
             <p>
               <strong>{props.budget.autopay.state === 'expired' ? 'Your daily approval ended.' : 'Let messages pay as you chat.'}</strong>{' '}
-              Approve an app payment principal limit for each rolling 24 hours. Inside it, each message pays its recipient’s own price with no prompt. Someone new always asks first.
+              Approve an app all-in payment limit for each rolling 24 hours. Inside it, each message pays its recipient’s own price with no prompt. Someone new always asks first.
             </p>
-            <div class="presets" role="radiogroup" aria-label="App payment principal limit, rolling 24 hours">
+            <div class="presets" role="radiogroup" aria-label="App all-in payments limit, rolling 24 hours">
               <For each={props.budget.presets}>
                 {(p) => (
                   <button
@@ -2076,7 +2084,7 @@ function BudgetBar(props: {
                   <p class="door-quote" data-door-quote={q().total_msat} data-readmit>
                     {who()} reconnected and asks to be admitted again: <strong>{sats(q().admission_msat)} sats</strong>, then{' '}
                     <strong>{sats(q().message_msat)} sats</strong> for this message, <strong>{sats(q().total_msat)} sats</strong> in
-                    all, their own signed price. Nothing is paid until you send.
+                    all, including {feeCeiling(q().max_routing_fee_msat ?? 0)}. Nothing is paid until you send.
                   </p>
                 )}
               </Show>
@@ -2085,7 +2093,7 @@ function BudgetBar(props: {
                   <p class="door-quote" data-door-quote={q().total_msat}>
                     {who()}’s door: <strong>{sats(q().admission_msat)} sats</strong> once to reach them, then{' '}
                     <strong>{sats(q().message_msat)} sats</strong> a message. This first message costs{' '}
-                    <strong>{sats(q().total_msat)} sats</strong> in all, their own signed price. Nothing is paid until you send.
+                    <strong>{sats(q().total_msat)} sats</strong> in all, including {feeCeiling(q().max_routing_fee_msat ?? 0)}. Nothing is paid until you send.
                   </p>
                 )}
               </Show>
@@ -2132,9 +2140,9 @@ function BudgetBar(props: {
                 when={st().raiseTo}
                 fallback={
                   <p class="hint">
-                    This budget already equals your app principal limit.{' '}
+                    This budget already equals your app all-in limit.{' '}
                     <button type="button" class="link" data-budget-raise-total onClick={() => void props.actions.approveBudget(Math.min(props.budget.ceiling_msat * 2, props.budget.max_daily_msat), props.budget.preset)}>
-                      Raise the app principal limit to {sats(Math.min(props.budget.ceiling_msat * 2, props.budget.max_daily_msat))} sats
+                      Raise the app all-in limit to {sats(Math.min(props.budget.ceiling_msat * 2, props.budget.max_daily_msat))} sats
                     </button>
                   </p>
                 }
@@ -2152,7 +2160,7 @@ function BudgetBar(props: {
           {(st) => (
             <div class="approval budget-used" data-budget-used="total">
               <p>
-                <strong>Your app principal limit is used up.</strong> {sats(st().spent)} of {sats(st().ceiling)} sats in the last 24 hours. Raising
+                <strong>Your app all-in limit is used up.</strong> {sats(st().spent)} of {sats(st().ceiling)} sats in the last 24 hours. Raising
                 it is a new approval.
               </p>
               <Show when={st().raiseTo}>
@@ -2217,15 +2225,15 @@ function BudgetPanel(props: {
     if (b.waiting_for_owner) return 'Waiting for your approval at the node.';
     if (b.autopay.state === 'open') return `Paying automatically. The approval ends in ${hoursLeft(b.autopay.open_until_ms, props.now, b.window_ms)} h.`;
     if (b.autopay.state === 'expired') return 'The daily approval ended. Approve again from any conversation.';
-    return 'Not approved in this session. Approve an app principal limit from any conversation.';
+    return 'Not approved in this session. Approve an app all-in limit from any conversation.';
   };
   return (
     <div class="panel" data-panel="budget">
       <h2>App payment budget</h2>
       <div class="hint" data-budget-scope>
-        <strong>App payment principal · rolling 24 hours</strong>{' '}
-        Covers automatic and manual-window messages, room sends, files, app invoice payments and keysend, and reported admission principal.{' '}
-        Not covered: routing fees, channel opening/closing, on-chain transfers and fees,
+        <strong>App all-in payments · rolling 24 hours</strong>{' '}
+        Covers automatic and manual-window messages, room sends, files, app invoice payments and keysend, and admission, including their maximum network fees. This is a conservative allowance, not an exact wallet-debit total.{' '}
+        Not covered: channel opening/closing, on-chain transfers and fees,
         owner-direct CLI/API commands, or background workers.{' '}
         G1 is a separate finite node grant; it does not refill daily. This is not a wallet-wide spending limit.
       </div>
@@ -2233,7 +2241,7 @@ function BudgetPanel(props: {
         {(b) => (
           <>
             <div class="tally" data-tally>
-              <span class="label">App payment principal in the last 24 hours</span>
+              <span class="label">App all-in payments in the last 24 hours</span>
               <span class="sats big" data-tally-total>
                 {sats(b().spent_msat)} <span class="unit">/ {sats(b().ceiling_msat)} sats</span>
               </span>
@@ -2303,7 +2311,7 @@ function BudgetPanel(props: {
             <Show when={note()}><p class="err-note">{note()}</p></Show>
             <Show when={props.error}><p class="err-note">{props.error}</p></Show>
             <p class="hint">
-              A budget can go up to the app principal limit you approved; raising the total is a new approval. Budgets and this tally are
+              A budget can go up to the app all-in limit you approved; raising the total is a new approval. Budgets and this tally are
               saved on this device. Your approval is not: after a restart, approve once more. 0 forgets a contact, so they are asked
               again. Files, invoice payments and keysend still need the ten-minute manual approval and count against this app limit;
               any node grant applies separately. When a contact with a budget reconnects and
@@ -2683,7 +2691,7 @@ function NewTrack(props: {
                 </svg>
               </Show>
               <p data-intro-prices>
-                First contact: <strong>{sats(m().admission_msat)} sats</strong>. Each message: <strong>{sats(m().message_msat)} sats</strong>.
+                Admission: <strong>{sats(allIn(m().admission_msat))} sats</strong> including {feeCeiling(routingFee(m().admission_msat))}. Each message: <strong>{sats(allIn(m().message_msat))} sats</strong> including {feeCeiling(routingFee(m().message_msat))} (estimated ceilings).
               </p>
               <p class="hint">
                 Valid for about {minutesLeft(m().expires_at)} min. <button type="button" class="link" onClick={loadMine}>New card</button>
@@ -2846,7 +2854,7 @@ function NewTrack(props: {
                   <span class="kind">Door card · {shortId(c().node_id)}</span>
                   <span>Signed by the key it names.</span>
                   <p data-door-prices>
-                    First contact: <strong>{sats(c().admission_msat)} sats</strong>. Each message: <strong>{sats(c().message_msat)} sats</strong>.
+                    Admission: <strong>{sats(allIn(c().admission_msat))} sats</strong> including {feeCeiling(routingFee(c().admission_msat))}. Each message: <strong>{sats(allIn(c().message_msat))} sats</strong> including {feeCeiling(routingFee(c().message_msat))} (estimated ceilings).
                   </p>
                   <Show when={c().starter}>
                     {(st) => (
@@ -3102,7 +3110,7 @@ function WalletPanel(props: { wallet: WalletOverview | null; error?: string; fun
     <>
       <div class="panel" data-panel="wallet">
         <h2>Wallet</h2>
-        <p class="hint" data-budget-wallet-warning>Channel and on-chain actions, their fees, and owner-direct commands are outside the app daily principal limit. Opening or closing a channel can commit funds and incur on-chain fees. Check the amount and fee policy at the owner action; this app limit will not stop it.</p>
+        <p class="hint" data-budget-wallet-warning>Channel and on-chain actions, their fees, and owner-direct commands are outside the app daily all-in limit. Opening or closing a channel can commit funds and incur on-chain fees. Check the amount and fee policy at the owner action; this app limit will not stop it.</p>
         <Show when={props.wallet} fallback={<Show when={!props.error}><div class="spinner" /></Show>}>
           {(w) => (
             <>

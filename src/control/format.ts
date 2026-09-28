@@ -44,3 +44,10 @@ export function clock(ms: number): string {
 export function day(ms: number): string {
   return new Date(ms).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
 }
+
+/** Ordinary caller limit; the host passes it to the node, which can only narrow it. */
+export function routingFee(msat: number): number {
+  return msat === 0 ? 0 : Math.min(Math.max(5000, Math.floor(msat / 100)), 10000);
+}
+export const allIn = (msat: number) => msat + routingFee(msat);
+export const feeCeiling = (msat: number) => `up to ${sats(msat)} sats network fee`;

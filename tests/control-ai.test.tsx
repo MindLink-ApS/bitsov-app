@@ -329,7 +329,7 @@ function stubHost(overrides: Record<string, Reply> = {}) {
     price_quote: () => ({ kind: 0, own_msat: 1000, peer_msat: 2000, peer_age_secs: 30, peer_stale: false }),
     payments_overview: () => ({ balance_msat: 1_000_000, lightning_outbound_msat: 500_000, channels: [] }),
     fund_state: () => null,
-    file_price: () => 3000,
+    file_price: () => ({ principal_msat: 3000, max_routing_fee_msat: 5000, total_msat: 8000 }),
     spend_status: () => ({ state: 'locked', basis: null, open_until_ms: null, pending: null, window_ms: 600_000 }),
     ai_providers: () => [
       { kind: 'local', label: 'On this computer', enabled: true, host: null, model: null, note: null },
