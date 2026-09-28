@@ -4,6 +4,22 @@ import { qrSvg } from '../qr';
 import type { Proposal } from './ai';
 import { AiTrack, createAiSession } from './AiTrack';
 import { clock, day, sats, satsWhole, satUnit, shortId, uptime } from './format';
+import { Organism } from './BodyPanel';
+import {
+  doorCard,
+  gateWords,
+  homeostasis,
+  membraneLive,
+  membraneNode,
+  membraneRefused,
+  membraneSeed,
+  metabolism,
+  nodeMetabolism,
+  nucleus,
+  organismCaps,
+  outboundKind,
+  type MembraneEntry,
+} from './body';
 import type { Source } from './source';
 import {
   ADMISSION_MAX_MSAT,
@@ -31,6 +47,7 @@ import {
   type Unread,
 } from './state';
 import type {
+  OwnerContactApproval,
   FirstContactQuote,
   FundingAsk,
   FundingStatus,
@@ -45,6 +62,8 @@ import type {
   BudgetRow,
   BudgetView,
   Delivery,
+  DoorCard,
+  EnergyRead,
   LinkState,
   Message,
   NodeOverview,
@@ -59,7 +78,7 @@ import type {
 } from './types';
 
 /** How often each panel re-reads while the shell is open. Peers and balance have no live event. */
-const REFRESH_MS = { overview: 10_000, peers: 15_000, wallet: 20_000, rooms: 30_000, clock: 5_000, spend: 3_000 } as const;
+const REFRESH_MS = { overview: 10_000, peers: 15_000, wallet: 20_000, rooms: 30_000, door: 30_000, energy: 30_000, clock: 5_000, spend: 3_000 } as const;
 
 type Props = {
   source: Source;
@@ -102,6 +121,9 @@ export type Actions = {
   send: (t: TrackRef, text: string, maxMsat: number, firstContactMsat?: number) => Promise<Outcome<unknown>>;
   /** The door card: a stranger's signed quote, or null when the node cannot give one. */
   doorQuote: (peer: string) => Promise<FirstContactQuote | null>;
+  ownerRequest: (peer: string, cap: number, budget: number) => Promise<Outcome<OwnerContactApproval | null>>;
+  ownerStatus: (id: string) => Promise<Outcome<OwnerContactApproval>>;
+  ownerCancel: (id: string) => Promise<void>;
   invoice: (t: TrackRef, sats: number, note: string) => Promise<Outcome<unknown>>;
   amountOf: (bolt11: string) => Promise<Outcome<number>>;
   pay: (t: TrackRef, bolt11: string, msat: number) => Promise<Outcome<unknown>>;
@@ -143,7 +165,18 @@ export function ControlCenter(props: Props) {
     setIntroNotice(null);
     setTrack({ kind: 'peer', id: card.node_id.toLowerCase() });
   };
-  const [tab, setTab] = createSignal<'node' | 'wallet' | 'budget'>('node');
+  const [tab, setTab] = createSignal<'body' | 'node' | 'wallet' | 'budget'>('body');
+  // Organism view (O1): readings the organs are drawn from, each with its age.
+  const [openedAt, setOpenedAt] = createSignal(Date.now());
+  const [membrane, setMembrane] = createSignal<MembraneEntry[]>([]);
+  /** When the node's membrane ring (N2) was last read successfully. */
+  const [membraneReadAt, setMembraneReadAt] = createSignal<number | null>(null);
+  const [energyAt, setEnergyAt] = createSignal<number | null>(null);
+  const [budgetReadAt, setBudgetReadAt] = createSignal<number | null>(null);
+  const [door, setDoor] = createSignal<{ msat: number; read_at: number } | null>(null);
+  // O1 v2: the node's own energy read (N1) and gate decisions (N2), when advertised.
+  const [nodeEnergy, setNodeEnergy] = createSignal<{ hour: EnergyRead; day: EnergyRead } | null>(null);
+  const [energyReadAt, setEnergyReadAt] = createSignal<number | null>(null);
   const aiSession = createAiSession();
   const [prefill, setPrefill] = createSignal<Prefill | null>(null);
   let prefillSeq = 0;
@@ -163,6 +196,15 @@ export function ControlCenter(props: Props) {
 
   const ownId = () => props.ownId ?? overview()?.node_id ?? '';
   const peerById = createMemo(() => new Map(peers().map((p) => [p.node_id.toLowerCase(), p])));
+  const caps = createMemo(() => organismCaps(overview()), undefined, { equals: (a, b) => a.energy === b.energy && a.membrane === b.membrane });
+  /** First contacts at the door this session (never added to peers), newest first. */
+  const knocks = createMemo(() => {
+    const seen = new Set<string>();
+    return membrane()
+      .filter((e): e is Extract<MembraneEntry, { verdict: 'admitted' }> => e.verdict === 'admitted' && e.first_contact && !peerById().has(e.sender))
+      .filter((e) => !seen.has(e.sender) && !!seen.add(e.sender))
+      .map((e) => e.sender);
+  });
   const openKey = () => (track() ? trackKey(track()!) : null);
 
   const attempt = async <T,>(area: string, run: () => Promise<T>, apply: (v: T) => void) => {
@@ -178,13 +220,65 @@ export function ControlCenter(props: Props) {
   const loadRooms = () => attempt('rooms', () => props.source.rooms(), setRooms);
   const loadWallet = () => attempt('wallet', () => props.source.wallet(), setWallet);
   const loadSpend = () => attempt('spend', () => props.source.spendStatus(), setSpend);
-  const loadBudget = () => attempt('budget', () => props.source.budgetStatus(), setBudget);
+  const loadBudget = () =>
+    attempt('budget', () => props.source.budgetStatus(), (b) => {
+      setBudget(b);
+      setBudgetReadAt(Date.now());
+    });
+  // Our own price with no peer: what a stranger pays at this node's door.
+  const loadDoor = () => attempt('door', () => props.source.priceQuote(), (q) => setDoor({ msat: q.own_msat, read_at: Date.now() }));
+  // N1: node-wide energy, 1 h and 24 h. A failed read keeps the last one, with its age.
+  const loadEnergy = () =>
+    caps().energy
+      ? attempt('energy', () => Promise.all([props.source.energy('1h'), props.source.energy('24h')]), ([hour, day]) => {
+          setNodeEnergy({ hour, day });
+          setEnergyReadAt(Date.now());
+        })
+      : Promise.resolve();
+  let energySoon: ReturnType<typeof setTimeout> | undefined;
+  /** A live event moved energy: re-read shortly, once, however many arrive. */
+  const energyAfterEvent = () => {
+    if (!caps().energy || energySoon) return;
+    energySoon = setTimeout(() => {
+      energySoon = undefined;
+      void loadEnergy();
+    }, 1500);
+  };
+
+  /** Where a door card lives in the stream, and cards already placed (by membrane entry). */
+  const doorsPlaced = new Set<number>();
+  const placeDoor = (entry: MembraneEntry) => {
+    if (doorsPlaced.has(entry.seq)) return;
+    const d = doorCard(entry, door()?.msat ?? null);
+    if (!d) return;
+    doorsPlaced.add(entry.seq);
+    const artifact: Artifact = { id: `door-${entry.seq}`, at: d.at, type: 'door', door: d.card };
+    setArtifacts(d.track, (old) => [...(old ?? []), artifact]);
+  };
+  /** Fold into the membrane; entries it adds may also stand at the door in their track. */
+  const foldMembrane = (fold: (log: MembraneEntry[]) => MembraneEntry[]) => {
+    const before = membrane();
+    const after = fold(before);
+    if (after === before) return;
+    setMembrane(after);
+    const known = new Set(before.map((e) => e.seq));
+    after.filter((e) => !known.has(e.seq)).forEach(placeDoor);
+  };
+  const contactSet = () => new Set(peerById().keys());
+  // N2: seed from the node's ring once it is advertised; live events follow.
+  const loadMembrane = () =>
+    attempt('membrane', () => props.source.membrane(50), (read) => {
+      foldMembrane((log) => membraneSeed(log, read.events, { contacts: contactSet() }));
+      setMembraneReadAt(Date.now());
+    });
+
   const loadThread = (t: TrackRef) => {
     if (t.kind !== 'peer' && t.kind !== 'room') return;
     const key = trackKey(t);
-    void attempt('thread', () => props.source.messages(t.id), (page) =>
-      setThreads('t', key, (old) => mergeMessages(old ?? [], page)),
-    );
+    void attempt('thread', () => props.source.messages(t.id), (page) => {
+      setThreads('t', key, (old) => mergeMessages(old ?? [], page));
+      setEnergyAt(Date.now());
+    });
   };
 
   const clockTimer = setInterval(() => setNow(Date.now()), REFRESH_MS.clock);
@@ -208,7 +302,9 @@ export function ControlCenter(props: Props) {
         stop();
         if (!active) return;
         const mine = generation;
+        setOpenedAt(Date.now());
         void loadOverview();
+        void loadDoor();
         void loadPeers().then(() => {
           if (!track()) {
             const first = peers().find((p) => p.connected) ?? peers()[0];
@@ -223,6 +319,8 @@ export function ControlCenter(props: Props) {
           setInterval(() => void loadPeers(), REFRESH_MS.peers),
           setInterval(() => void loadWallet(), REFRESH_MS.wallet),
           setInterval(() => void loadRooms(), REFRESH_MS.rooms),
+          setInterval(() => void loadDoor(), REFRESH_MS.door),
+          setInterval(() => void loadEnergy(), REFRESH_MS.energy),
           // Cheap: the host asks the node only while an elevation request is pending,
           // and a budget grant lands there first.
           setInterval(() => void loadSpend().then(loadBudget), REFRESH_MS.spend),
@@ -233,7 +331,22 @@ export function ControlCenter(props: Props) {
               setLink(event.state);
               // Back after a gap: re-read the open track so nothing is missed.
               if (event.state === 'open' && track()) loadThread(track()!);
+              if (event.state === 'open' && caps().membrane) void loadMembrane();
               return;
+            }
+            if (event.type === 'membrane') {
+              foldMembrane((log) => membraneNode(log, event.event, { contacts: contactSet() }));
+              if (event.event.verdict === 'admitted') energyAfterEvent();
+              return;
+            }
+            if (event.type === 'message' || event.type === 'delivery') {
+              foldMembrane((log) =>
+                membraneLive(log, event, { ownId: ownId(), contacts: contactSet(), threads: threads.t, nowMs: Date.now(), nodeMembrane: caps().membrane }),
+              );
+            }
+            if (event.type === 'message') {
+              setEnergyAt(Date.now());
+              energyAfterEvent();
             }
             if (event.type === 'delivery') {
               const next = applyDelivery(deliveries, event);
@@ -264,6 +377,10 @@ export function ControlCenter(props: Props) {
     }),
   );
 
+  // The node says what it can report (`/status`): start reading N1 / N2 when it does.
+  createEffect(on(() => props.active && caps().energy, (on) => void (on && loadEnergy()), { defer: false }));
+  createEffect(on(() => props.active && caps().membrane, (on) => void (on && loadMembrane()), { defer: false }));
+
   // Opening a track: clear its unread count, load history, quote its cost.
   createEffect(
     on(track, (t) => {
@@ -290,6 +407,7 @@ export function ControlCenter(props: Props) {
 
   onCleanup(() => {
     clearInterval(clockTimer);
+    clearTimeout(energySoon);
     stop();
   });
 
@@ -313,7 +431,10 @@ export function ControlCenter(props: Props) {
   };
   /** A failed action that is not an approval or budget question stays in the track as a record. */
   const recordFailure = (t: TrackRef, action: string, outcome: Outcome<unknown>) => {
-    if (!outcome.ok && !needsApproval(outcome.error) && !isBudgetStop(outcome.error)) {
+    // A send that did not cross (price, setpoint) is also a membrane reading. A
+    // price refusal stands at their door in the track instead of a failure row.
+    if (!outcome.ok) foldMembrane((log) => membraneRefused(log, outcome.error, trackKey(t), Date.now()));
+    if (!outcome.ok && !needsApproval(outcome.error) && !isBudgetStop(outcome.error) && outboundKind(outcome.error) !== 'price') {
       addArtifact(t, { type: 'failed', action: outcome.error.code === 'spend_unknown' ? 'Outcome unknown / pending' : action, error: outcome.error });
     }
     return outcome;
@@ -362,6 +483,9 @@ export function ControlCenter(props: Props) {
       void loadSpend();
     },
     doorQuote: (peer) => props.source.firstContactQuote(peer).catch(() => null),
+    ownerRequest: (peer, cap, budget) => act(() => props.source.firstContactRequest(peer, cap, budget)),
+    ownerStatus: (id) => act(() => props.source.firstContactStatus(id)),
+    ownerCancel: (id) => props.source.firstContactCancel(id).catch(() => {}),
     send: async (t, text, maxMsat, firstContactMsat) => {
       if (t.kind !== 'peer' && t.kind !== 'room') return { ok: false, error: { code: 'invalid', message: 'nothing to send to' } };
       const r = await act(() => props.source.send(t.id, t.kind === 'room', text, maxMsat, t.kind === 'room' ? Object.fromEntries((roomQuote()?.members ?? []).map((m) => [m.node_id, m.msat])) : undefined, firstContactMsat));
@@ -433,6 +557,10 @@ export function ControlCenter(props: Props) {
     return t.kind === 'ai' ? 'AI' : 'Start something';
   };
   const nameOf = (id: string) => (id.toLowerCase() === ownId().toLowerCase() ? 'You' : peerName(peerById().get(id.toLowerCase()), id));
+  const trackKeyName = (key: string) => {
+    const [kind, id] = key.split(':');
+    return kind === 'room' ? rooms().find((r) => r.id.toLowerCase() === id)?.name ?? 'Room' : nameOf(id ?? key);
+  };
 
   return (
     <div class="cc" classList={{ 'no-context': !props.active }} data-mode={props.source.mode}>
@@ -442,11 +570,13 @@ export function ControlCenter(props: Props) {
         sample={props.source.mode === 'sample'}
         peers={peers()}
         rooms={rooms()}
+        knocks={knocks()}
+        nameOf={nameOf}
         unread={threads.unread}
         openKey={openKey()}
         onOpen={setTrack}
         onPill={() => {
-          setTab('node');
+          setTab('body');
           setContextOpen(true);
         }}
       />
@@ -532,16 +662,43 @@ export function ControlCenter(props: Props) {
           </Show>
         </section>
 
-        <aside class="context" classList={{ open: contextOpen() }} aria-label="Node and wallet">
+        <aside class="context" classList={{ open: contextOpen() }} aria-label="Body, node and wallet">
           <div class="row">
             <div class="tabs" role="tablist" style={{ flex: 1 }}>
-              <button role="tab" aria-selected={tab() === 'node'} onClick={() => setTab('node')}>Node</button>
-              <button role="tab" aria-selected={tab() === 'wallet'} onClick={() => setTab('wallet')}>Wallet</button>
+              <button role="tab" aria-selected={tab() === 'body'} data-tab="body" onClick={() => setTab('body')}>Body</button>
+              <button role="tab" aria-selected={tab() === 'node'} data-tab="node" onClick={() => setTab('node')}>Node</button>
+              <button role="tab" aria-selected={tab() === 'wallet'} data-tab="wallet" onClick={() => setTab('wallet')}>Wallet</button>
               <button role="tab" aria-selected={tab() === 'budget'} data-tab="budget" onClick={() => setTab('budget')}>Budget</button>
             </div>
             <button class="quiet context-toggle" onClick={() => setContextOpen(false)} aria-label="Close panel">Close</button>
           </div>
           <Switch>
+            <Match when={tab() === 'body'}>
+              <Organism
+                sample={props.source.mode === 'sample'}
+                now={now()}
+                openedAt={openedAt()}
+                link={link()}
+                down={!!props.error || (overview() !== null && freshness(overview()!.read_at, now()).stale)}
+                metabolism={nodeEnergy() ? nodeMetabolism(nodeEnergy()!.hour, nodeEnergy()!.day) : metabolism(threads.t, ownId(), now(), paid)}
+                energyAt={energyAt()}
+                energyReadAt={energyReadAt()}
+                membrane={membrane()}
+                nodeMembrane={caps().membrane}
+                membraneReadAt={membraneReadAt()}
+                membraneError={errors.membrane}
+                door={door()}
+                doorError={errors.door}
+                homeostasis={homeostasis(budget())}
+                budgetReadAt={budgetReadAt()}
+                nucleus={nucleus(props.ownId, overview())}
+                nameOfTrack={trackKeyName}
+                nameOf={nameOf}
+                onSetpoints={() => setTab('budget')}
+                onPauseAll={() => void actions.pauseAll()}
+                onResume={() => void actions.resume()}
+              />
+            </Match>
             <Match when={tab() === 'node'}>
               <NodePanel overview={overview()} link={link()} peers={peers()} now={now()} error={errors.overview ?? errors.peers} />
             </Match>
@@ -585,6 +742,9 @@ function Rail(props: {
   sample: boolean;
   peers: Peer[];
   rooms: Room[];
+  /** First contacts admitted by payment this session. Not contacts, and not added. */
+  knocks: string[];
+  nameOf: (id: string) => string;
   unread: Unread;
   openKey: string | null;
   onOpen: (t: TrackRef) => void;
@@ -641,6 +801,28 @@ function Rail(props: {
         </Show>
       </div>
 
+      <Show when={props.active && props.knocks.length > 0}>
+        <div class="track-group" data-door-group>
+          <h2>At your door</h2>
+          <For each={props.knocks}>
+            {(id) => (
+              <button
+                class="track-link knock"
+                data-door-track={`peer:${id}`}
+                aria-current={props.openKey === `peer:${id}`}
+                title="Paid your door price. Not a contact."
+                onClick={() => props.onOpen({ kind: 'peer', id })}
+              >
+                <span class="name id">{shortId(id)}</span>
+                <Show when={(props.unread[`peer:${id}`] ?? 0) > 0} fallback={<span class="meta">paid</span>}>
+                  <span class="badge">{props.unread[`peer:${id}`]}</span>
+                </Show>
+              </button>
+            )}
+          </For>
+        </div>
+      </Show>
+
       <div class="track-group">
         <h2>AI</h2>
         <Show when={props.active}>{item({ kind: 'ai' }, 'Ask your node', <span class="meta">local</span>)}</Show>
@@ -667,7 +849,7 @@ function TrackHead(props: { title: string; sub?: JSX.Element; onContext: () => v
     <header class="track-head">
       <h1>{props.title}</h1>
       <div class="sub">{props.sub}</div>
-      <button class="quiet context-toggle" onClick={() => props.onContext()}>Node and wallet</button>
+      <button class="quiet context-toggle" onClick={() => props.onContext()}>Body</button>
     </header>
   );
 }
@@ -788,7 +970,7 @@ function Conversation(props: {
                     )}
                   </Match>
                   <Match when={item.type === 'artifact' && item.artifact}>
-                    {(a) => <ArtifactView a={a()} delivery={a().type === 'file' ? props.deliveries[(a() as { receipt: { message_id: string } }).receipt.message_id] : undefined} />}
+                    {(a) => <ArtifactView a={a()} nameOf={props.nameOf} delivery={a().type === 'file' ? props.deliveries[(a() as { receipt: { message_id: string } }).receipt.message_id] : undefined} />}
                   </Match>
                 </Switch>
               </>
@@ -806,7 +988,9 @@ function Conversation(props: {
         cost={cost()}
         roomQuote={props.roomQuote}
         filePrice={props.filePrice}
-        firstContact={props.track.kind === 'peer' && props.messages.length === 0}
+        // Admission is per direction: messages they sent us do not open their
+        // door for ours. A first contact is our first outgoing message.
+        firstContact={props.track.kind === 'peer' && !props.messages.some((m) => isOutgoing(m, props.ownId))}
         spend={props.spend}
         spendError={props.spendError}
         budget={props.budget}
@@ -868,7 +1052,65 @@ function DeliveryMark(props: { d: Delivery }) {
   );
 }
 
-function ArtifactView(props: { a: Artifact; delivery?: Delivery }) {
+/**
+ * The membrane in the stream. A stranger who paid to reach you, a verified sender
+ * refused at your door, or your send refused at theirs. Stated as facts; no
+ * button that would admit, add or pay.
+ */
+function DoorView(props: { card: DoorCard; at: number; nameOf: (id: string) => string }) {
+  const c = props.card;
+  const amt = (msat: number) => (
+    <>
+      <span class="sats">{sats(msat)}</span> {satUnit(msat)}
+    </>
+  );
+  return (
+    <div class="door-card" data-door={`${c.side}-${c.verdict}`} classList={{ refused: c.verdict === 'refused' }} role="note">
+      <p class="door-rule">
+        <span>{clock(props.at)} · door</span>
+      </p>
+      <Switch>
+        <Match when={c.side === 'in' && c.verdict === 'admitted' && (c as Extract<DoorCard, { verdict: 'admitted' }>)}>
+          {(x) => (
+            <>
+              <p class="door-head">
+                <span class="id" title={x().sender}>{shortId(x().sender)}</span> paid <Show when={x().paid_msat !== null} fallback="your price">{amt(x().paid_msat!)}</Show> to reach you
+              </p>
+              <p class="door-proof">settled · recipient-bound · single-use</p>
+              <p class="door-note">Not a contact, and not added. Nothing is kept beyond this message.</p>
+            </>
+          )}
+        </Match>
+        <Match when={c.side === 'in' && c.verdict === 'refused' && (c as Extract<DoorCard, { side: 'in'; verdict: 'refused' }>)}>
+          {(x) => (
+            <>
+              <p class="door-head">
+                Refused at your door · {gateWords(x().code)}
+              </p>
+              <p class="door-proof">
+                <Show when={x().required_msat !== null}>needed {amt(x().required_msat!)}</Show>
+                <Show when={x().required_msat !== null && x().paid_msat !== null}> · </Show>
+                <Show when={x().paid_msat !== null}>paid {amt(x().paid_msat!)}</Show>
+              </p>
+              <p class="door-note">Signed by {props.nameOf(x().sender)}. Nothing was stored or delivered.</p>
+            </>
+          )}
+        </Match>
+        <Match when={c.side === 'out' && (c as Extract<DoorCard, { side: 'out' }>)}>
+          {(x) => (
+            <>
+              <p class="door-head">Not sent · their price is above your cap</p>
+              <p class="door-proof">{x().detail}</p>
+              <p class="door-note">Nothing was paid. Reopen the track to read their current price.</p>
+            </>
+          )}
+        </Match>
+      </Switch>
+    </div>
+  );
+}
+
+function ArtifactView(props: { a: Artifact; delivery?: Delivery; nameOf: (id: string) => string }) {
   return (
     <Switch>
       <Match when={props.a.type === 'invoice' && props.a}>
@@ -934,6 +1176,9 @@ function ArtifactView(props: { a: Artifact; delivery?: Delivery }) {
           );
         }}
       </Match>
+      <Match when={props.a.type === 'door' && props.a}>
+        {(a) => <DoorView card={(a() as Extract<Artifact, { type: 'door' }>).door} at={a().at} nameOf={props.nameOf} />}
+      </Match>
       <Match when={props.a.type === 'failed' && props.a}>
         {(a) => {
           const f = () => a() as Extract<Artifact, { type: 'failed' }>;
@@ -991,6 +1236,40 @@ function Composer(props: {
   // Inputs and navigation remain usable during a send. Only the submitted
   // revision may be cleared by its completion (including track A -> B -> A).
   let composerRevision = 0;
+  const [ownerWait, setOwnerWait] = createSignal<{ approval: OwnerContactApproval; revision: number; send: () => Promise<void> } | null>(null);
+  const cancelOwner = () => {
+    const pending = untrack(ownerWait);
+    setOwnerWait(null);
+    if (pending) void props.actions.ownerCancel(pending.approval.id);
+  };
+  onCleanup(cancelOwner);
+  createEffect(() => {
+    const pending = ownerWait();
+    if (!pending) return;
+    let polling = false;
+    const poll = async () => {
+      if (polling) return;
+      polling = true;
+      const result = await props.actions.ownerStatus(pending.approval.id);
+      polling = false;
+      if (ownerWait() !== pending) return;
+      if (composerRevision !== pending.revision) { cancelOwner(); return; }
+      if (!result.ok) {
+        cancelOwner();
+        setNote(result.error.message);
+      } else if (result.value.ready) {
+        setOwnerWait(null);
+        setBusy(true);
+        try { await pending.send(); } finally { setBusy(false); }
+      }
+    };
+    const timer = setInterval(() => void poll(), 1000);
+    onCleanup(() => clearInterval(timer));
+  });
+  // Budget refreshes replace the object every three seconds. Only an actual
+  // authority/mode change invalidates a pending owner request.
+  const ownerContext = createMemo(() => `${mode()}:${firstPick()}:${props.budget?.paused ?? false}`);
+  createEffect(on(ownerContext, () => { composerRevision++; cancelOwner(); }, { defer: true }));
 
   const room = () => props.track.kind === 'room';
   const modes = (): Mode[] => (room() ? ['message'] : ['message', 'pay', 'request', 'file']);
@@ -999,6 +1278,7 @@ function Composer(props: {
     on(
       () => trackKey(props.track),
       () => {
+        cancelOwner();
         composerRevision++;
         setMode('message');
         setNote(null);
@@ -1024,6 +1304,8 @@ function Composer(props: {
       () => {
         const p = props.prefill;
         if (!p || p.key !== trackKey(props.track) || room()) return;
+        cancelOwner();
+        composerRevision++;
         setMode(p.mode);
         setNote(null);
         if (p.mode === 'message') setDraft(p.text);
@@ -1059,7 +1341,18 @@ function Composer(props: {
   // reconnect (its grant does not budget them yet): the door card, once more.
   const [readmitFor, setReadmitFor] = createSignal<string | null>(null);
   const readmit = () => !room() && readmitFor() === target();
-  const doorWanted = () => props.firstContact || readmit();
+  // Is this send a first contact? While the budget decides, exactly when it
+  // has no line for this peer, whatever the thread holds: inbound history
+  // does not open their door for us (merge-gate finding 7). Otherwise, when
+  // we have never sent to them. (A cost-free stand: `shown` depends on this.)
+  const doorWanted = () => {
+    if (room()) return false;
+    if (readmit()) return true;
+    const kind = budgetStand(budget(), target(), false, null).kind;
+    if (kind === 'first') return true;
+    if (kind === 'ok' || kind === 'contact_used' || kind === 'total_used') return false;
+    return props.firstContact;
+  };
   const stand = () => budgetStand(budget(), target(), room(), shown().msat, readmit());
   createEffect(() => {
     if (room() || !doorWanted() || mode() !== 'message' || stand().kind !== 'first') return;
@@ -1128,10 +1421,10 @@ function Composer(props: {
         }
         const c = props.cost;
         if (!c) return { msat: null, estimate: false, basis: room() ? 'Reading each member’s price…' : 'Reading their price…' };
-        const basis = props.firstContact
+        const basis = doorWanted()
           ? `${c.basis}. First contact also pays their admission price once, at most ${sats(ADMISSION_MAX_MSAT)} sats`
           : c.basis;
-        return { msat: c.msat, estimate: c.estimate || props.firstContact, basis };
+        return { msat: c.msat, estimate: c.estimate || doorWanted(), basis };
       }
       case 'pay':
         if (payKind() === 'invoice') {
@@ -1166,6 +1459,7 @@ function Composer(props: {
   };
 
   const label = () => {
+    if (ownerWait()) return 'Waiting for contact approval';
     if (viaBudget()) {
       const s = shown();
       const price = s.msat === null ? '' : ` · ${s.estimate ? '≈ ' : ''}${sats(s.msat)} ${satUnit(s.msat)}`;
@@ -1190,7 +1484,7 @@ function Composer(props: {
   };
 
   const submit = async () => {
-    if (busy()) return;
+    if (busy() || ownerWait()) return;
     setNote(null);
     if (viaBudget()) {
       const st = stand();
@@ -1205,16 +1499,46 @@ function Composer(props: {
       if ((st.kind !== 'first' && st.kind !== 'ok') || !ready()) return;
       setBusy(true);
       const submittedRevision = composerRevision;
-      const r = await props.actions.send(props.track, draft(), shown().msat!, st.kind === 'first' ? firstPick() ?? st.suggest : undefined);
-      if (r.ok) setReadmitFor(null);
-      else if (r.error.code === 'grant_readmission') {
+      const submittedPeer = target();
+      const submittedTrack = props.track;
+      const submittedText = draft();
+      const cap = shown().msat!;
+      const first = st.kind === 'first' ? firstPick() ?? st.suggest : undefined;
+      const dispatch = async () => {
+      const r = await props.actions.send(submittedTrack, submittedText, cap, first);
+      const unchanged = composerRevision === submittedRevision;
+      if (r.ok && readmitFor() === submittedPeer) setReadmitFor(null);
+      else if (!r.ok && unchanged && ['price_changed', 'price_cap_exceeded'].includes(r.error.code) && doorWanted()) {
+        // The stranger's price moved: ask for their signed quote again.
         setDoor(null);
-        setReadmitFor(target());
+      } else if (!r.ok && r.error.code === 'grant_readmission') {
+        if (target() === submittedPeer) setDoor(null);
+        setReadmitFor(submittedPeer);
       }
       if (r.ok && composerRevision === submittedRevision) {
         setDraft('');
         setDrafted(false);
-      } else if (!r.ok && isBudgetStop(r.error)) setNote(r.error.message);
+      } else if (!r.ok && unchanged && (isBudgetStop(r.error) || r.error.code === 'owner_only')) setNote(r.error.message);
+      };
+      if (first !== undefined && !room()) {
+        const request = await props.actions.ownerRequest(submittedPeer, cap, first);
+        if (composerRevision !== submittedRevision) {
+          if (request.ok && request.value) void props.actions.ownerCancel(request.value.id);
+          setBusy(false);
+          return;
+        }
+        if (!request.ok) {
+          setNote(request.error.message);
+          setBusy(false);
+          return;
+        }
+        if (request.value) {
+          setOwnerWait({ approval: request.value, revision: submittedRevision, send: dispatch });
+          setBusy(false);
+          return;
+        }
+      }
+      await dispatch();
       setBusy(false);
       return;
     }
@@ -1269,7 +1593,7 @@ function Composer(props: {
   };
 
   const disabled = () =>
-    busy() ||
+    busy() || !!ownerWait() ||
     (viaBudget()
       ? ['waiting', 'contact_used', 'total_used', 'unknown'].includes(stand().kind) || ((stand().kind === 'first' || stand().kind === 'ok') && !ready())
       : spends() && !line().open
@@ -1281,7 +1605,7 @@ function Composer(props: {
       class="composer"
       data-composer
       data-mode={mode()}
-      onInput={() => { composerRevision++; }}
+      onInput={() => { cancelOwner(); composerRevision++; }}
       onSubmit={(e) => {
         e.preventDefault();
         void submit();
@@ -1378,6 +1702,16 @@ function Composer(props: {
       </Show>
       <Show when={note()}>
         <p class="err-note" data-composer-note>{note()}</p>
+      </Show>
+      <Show when={ownerWait()}>
+        {(pending) => <div class="approval" data-contact-approval="pending" data-contact-request={JSON.stringify(pending().approval.request)}>
+          <p><strong>Approve this contact at your node.</strong> Run this command once in the node terminal, with your independent owner credential in BITSOV_OWNER_TOKEN. The app never receives that credential.</p>
+          <p>The command approves this contact’s budget and first-message cap. This draft sends after approval. Editing it or pressing Cancel stops the wait.</p>
+          <textarea readonly aria-label="Owner approval command" data-contact-owner-command data-command={pending().approval.owner_command} value={pending().approval.owner_command} />
+          <button type="button" class="link" onClick={async () => { try { await navigator.clipboard.writeText(pending().approval.owner_command); } catch { setNote('Select and copy the command above.'); } }}>Copy command</button>
+          <button type="button" class="link" data-contact-cancel onClick={cancelOwner}>Cancel</button>
+          <p class="hint">Cancel does not revoke an approval already issued at the node; it expires within two minutes.</p>
+        </div>}
       </Show>
       <Show when={spends()}>
         <Show

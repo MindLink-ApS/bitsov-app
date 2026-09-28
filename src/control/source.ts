@@ -7,6 +7,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import type { NodeStatus, PairingView } from '../onboarding/pairing';
 import type {
+  OwnerContactApproval,
   FirstContactQuote,
   FundingAsk,
   FundingStatus,
@@ -40,6 +41,9 @@ import type {
   NodeOverview,
   Peer,
   PriceQuote,
+  EnergyRead,
+  EnergySpan,
+  MembraneRead,
   RestoreOutcome,
   Room,
   WalletOverview,
@@ -84,7 +88,14 @@ export interface Source {
   /** K1 slice 2 (newcomer): ask for the offered gift. Nothing is sent. */
   sponsorRequest(text: string): Promise<FundingAsk>;
   sponsorRequestStatus(paymentHash: string): Promise<FundingStatus>;
+  firstContactRequest(peer: string, maxMsat: number, budgetMsat: number): Promise<OwnerContactApproval | null>;
+  firstContactStatus(id: string): Promise<OwnerContactApproval>;
+  firstContactCancel(id: string): Promise<void>;
   wallet(): Promise<WalletOverview>;
+  /** Node-wide energy (genome N1). Call only when the overview lists `energy_v1`. */
+  energy(span: EnergySpan): Promise<EnergyRead>;
+  /** The node's membrane ring, newest first (genome N2). Only with `membrane_v1`. */
+  membrane(limit?: number): Promise<MembraneRead>;
   /** Subscribe to live events; resolves to an unsubscribe. */
   onLive(handler: (event: LiveEvent) => void): Promise<() => void>;
   /**
@@ -159,7 +170,12 @@ export const hostSource: Source = {
   sponsorCancel: (introId) => invoke<void>('sponsor_cancel', { intro_id: introId }),
   sponsorRequest: (text) => invoke<FundingAsk>('sponsor_request', { text }),
   sponsorRequestStatus: (paymentHash) => invoke<FundingStatus>('sponsor_request_status', { payment_hash: paymentHash }),
+  firstContactRequest: (recipient, maxMsat, budgetMsat) => invoke<OwnerContactApproval | null>('first_contact_request', { recipient, max_msat: maxMsat, contact_budget_msat: budgetMsat }),
+  firstContactStatus: (id) => invoke<OwnerContactApproval>('first_contact_status', { id }),
+  firstContactCancel: (id) => invoke<void>('first_contact_cancel', { id }),
   wallet: () => invoke<WalletOverview>('payments_overview'),
+  energy: (span) => invoke<EnergyRead>('energy_read', { span }),
+  membrane: (limit) => invoke<MembraneRead>('membrane_read', { limit: limit ?? null }),
   onLive: (handler) => listen<LiveEvent>(LIVE_EVENT, (e) => handler(e.payload)),
   liveLink: () => invoke<LinkState | null>('live_link'),
   spendStatus: () => invoke<SpendView>('spend_status'),

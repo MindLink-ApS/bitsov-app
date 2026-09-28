@@ -27,7 +27,9 @@ const short = (id: string) => (id.length > 20 ? `${id.slice(0, 8)}…${id.slice(
 export default function App() {
   // Dev mode: sample data with no node (a plain browser tab, or `?sample`).
   const sample = sampleRequest(window.location.search, inHost(), import.meta.env.DEV);
-  const [source, setSource] = createSignal<Source>(sample ? sampleSource() : hostSource);
+  // `?sample&organism=v2` shows the organism view against a node with N1/N2.
+  const organism = new URLSearchParams(window.location.search).get('organism') === 'v2' ? 'v2' : 'v1';
+  const [source, setSource] = createSignal<Source>(sample ? sampleSource({ organism }) : hostSource);
   const [status, setStatus] = createSignal<NodeStatus>({ ready: false, node_id: null, error: null });
   // Gate G6: the funds UI stays behind an explicit local-trust disclosure.
   const [trustAck, setTrustAck] = createSignal(sample === 'shell');
@@ -63,7 +65,7 @@ export default function App() {
     }
   };
   const useSample = (start: SampleStart) => {
-    setSource(sampleSource());
+    setSource(sampleSource({ organism }));
     setTrustAck(start === 'shell');
     void poll();
   };
@@ -301,6 +303,8 @@ function IdentityGate(props: {
 function Fund(props: { source: Source; ready: () => boolean }) {
   const [fund, setFund] = createSignal<FundState | null | undefined>(undefined);
   const [address, setAddress] = createSignal<FundingAddress | null>(null);
+  // Why the payments endpoint gave no address, so the owner is not left waiting.
+  const [addressError, setAddressError] = createSignal<string | null>(null);
   const [amount, setAmount] = createSignal(String(DEFAULT_FUNDING_SATS));
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
@@ -316,8 +320,11 @@ function Fund(props: { source: Source; ready: () => boolean }) {
       if (state && !state.funding_address && !address()) {
         try {
           setAddress(await props.source.fundingAddress());
-        } catch {
-          /* the wallet backend may not expose one — the state address is primary */
+          setAddressError(null);
+        } catch (e) {
+          // The wallet backend may not expose one (only embedded LDK does); the
+          // state address is primary, but say so instead of waiting forever.
+          setAddressError(String(e));
         }
       }
     } catch (e) {
@@ -420,7 +427,16 @@ function Fund(props: { source: Source; ready: () => boolean }) {
               <h2>Deposit to your node</h2>
               <Show
                 when={depositAddress()}
-                fallback={<p class="hint">Waiting for the node to produce a deposit address…</p>}
+                fallback={
+                  <Show
+                    when={addressError()}
+                    fallback={<p class="hint">Waiting for the node to produce a deposit address…</p>}
+                  >
+                    <p class="err-note" data-deposit-error>
+                      Your node has no deposit address to show. It said: {addressError()}
+                    </p>
+                  </Show>
+                }
               >
                 <Show when={qr()}>
                   <svg

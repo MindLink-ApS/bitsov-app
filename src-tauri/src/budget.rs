@@ -39,8 +39,9 @@ pub const BUDGET_WINDOW_MS: u64 = DAY_MS;
 /// No approval, contact or room budget may exceed 100,000 sats a day.
 pub const MAX_DAILY_MSAT: u64 = 100_000_000;
 
-/// Oldest entries are dropped past this, after the 24-hour prune.
-const LEDGER_MAX: usize = 20_000;
+/// Past this many live entries, settled ones are compacted (never dropped),
+/// and a send that would need a new line beyond it is refused.
+pub const LEDGER_MAX: usize = 20_000;
 
 const BOOK_VERSION: u32 = 1;
 
@@ -155,12 +156,40 @@ impl Book {
             .sum()
     }
 
+    /// Forget only what has left the 24-hour window. Every live charge stays
+    /// counted: past [`LEDGER_MAX`], settled entries of one contact or room
+    /// merge into a single entry holding their sum at the newest time. That
+    /// can keep sats counted a little longer than 24 hours (under-spending),
+    /// never shorter. Unsettled reservations keep their own lines, since a
+    /// later settle or release finds them by id.
     pub fn prune(&mut self, now_ms: u64) {
         self.ledger.retain(|e| in_window(e, now_ms));
-        if self.ledger.len() > LEDGER_MAX {
-            let drop = self.ledger.len() - LEDGER_MAX;
-            self.ledger.drain(..drop);
+        if self.ledger.len() <= LEDGER_MAX {
+            return;
         }
+        let mut merged: BTreeMap<(String, bool), Entry> = BTreeMap::new();
+        let mut open = Vec::new();
+        for e in self.ledger.drain(..) {
+            if !e.settled {
+                open.push(e);
+                continue;
+            }
+            merged
+                .entry((e.target.clone(), e.room))
+                .and_modify(|m| {
+                    m.msat = m.msat.saturating_add(e.msat);
+                    m.at_ms = m.at_ms.max(e.at_ms);
+                })
+                .or_insert_with(|| Entry { id: format!("compacted:{}", e.id), ..e });
+        }
+        self.ledger = merged.into_values().chain(open).collect();
+        self.ledger.sort_by_key(|e| e.at_ms);
+    }
+
+    /// True when the ledger cannot take another line without dropping a live
+    /// charge (only possible with thousands of unresolved sends).
+    pub fn full(&self) -> bool {
+        self.ledger.iter().filter(|e| !e.settled).count() >= LEDGER_MAX
     }
 
     /// Set, lower or (0) forget a budget. Never above the approved daily total.
@@ -348,6 +377,12 @@ fn sats(msat: u64) -> String {
 pub fn plan(book: &Book, ask: Ask<'_>) -> Result<Plan, ActionError> {
     if book.paused {
         return Err(ActionError::new("budget_paused", "Payments are paused. Resume them to send."));
+    }
+    if book.full() {
+        return Err(ActionError::new(
+            "budget_ledger_full",
+            "Too many unresolved sends in the last 24 hours to track another one. Check the pending results first.",
+        ));
     }
     let who = if ask.room { "this room" } else { "this contact" };
     let known = book.limit(ask.target, ask.room);

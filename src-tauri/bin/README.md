@@ -35,3 +35,7 @@ the pin; your keyring is never written). rc7 is a published pre-release, so any 
 and nothing here publishes anything. Record the sha256 in the authority
 ledger; `scripts/authority-check.sh` checks source/configuration, not sidecar integrity. The
 released artifact is the `konsensus` binary (CLI `konsensus init` / `konsensus start`).
+
+## Dev only: a node built from genome `main`
+`npm run tauri:dev:mainnode` runs an **unverified** local `konsensus` instead of this sidecar.
+It is debug-only and a compile error in release. See `docs/DEV_NODE_FROM_MAIN.md`.
