@@ -168,7 +168,7 @@ mod tests {
     impl Fixture {
         fn new() -> Self {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            let base = format!("http://{}/api/v1", listener.local_addr().unwrap());
+            let base = format!("http://127.0.0.1:{}/api/v1", listener.local_addr().unwrap().port());
             listener.set_nonblocking(true).unwrap();
             let (stop, stopped) = mpsc::channel();
             let thread = std::thread::spawn(move || loop {
