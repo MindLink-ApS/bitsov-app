@@ -69,7 +69,7 @@ function stubHost(start: BudgetView, overrides: Record<string, Reply> = {}) {
     price_quote: () => ({ kind: 0, own_msat: 1000, peer_msat: 2000, peer_age_secs: 30, peer_stale: false }),
     payments_overview: () => ({ balance_msat: 1_000_000, lightning_outbound_msat: 500_000, channels: [] }),
     fund_state: () => null,
-    file_price: () => 3000,
+    file_price: () => ({ principal_msat: 3000, max_routing_fee_msat: 5000, total_msat: 8000 }),
     spend_status: () => state.spend,
     budget_status: () => state.budget,
     first_contact_request: () => null, // Pre-owner-handoff node fixture unless overridden.
@@ -150,11 +150,11 @@ describe('invisible payments in the composer and the context panel', () => {
     await openShell();
     $<HTMLButtonElement>('[data-tab="budget"]')!.click();
     await vi.waitFor(() => expect($('[data-budget-scope]')).not.toBeNull());
-    expect(text('[data-budget-scope]').replace(/\s+/g, ' ').trim()).toMatchInlineSnapshot(`"App payment principal · rolling 24 hours Covers automatic and manual-window messages, room sends, files, app invoice payments and keysend, and reported admission principal. Not covered: routing fees, channel opening/closing, on-chain transfers and fees, owner-direct CLI/API commands, or background workers. G1 is a separate finite node grant; it does not refill daily. This is not a wallet-wide spending limit."`);
+    expect(text('[data-budget-scope]').replace(/\s+/g, ' ').trim()).toMatchInlineSnapshot(`"App all-in payments · rolling 24 hours Covers automatic and manual-window messages, room sends, files, app invoice payments and keysend, and admission, including their maximum network fees. This is a conservative allowance, not an exact wallet-debit total. Not covered: channel opening/closing, on-chain transfers and fees, owner-direct CLI/API commands, or background workers. G1 is a separate finite node grant; it does not refill daily. This is not a wallet-wide spending limit."`);
     $<HTMLButtonElement>('[data-composer-mode="pay"]')!.click();
-    expect(text('[data-budget-payment]')).toContain('count against the app daily principal limit');
+    expect(text('[data-budget-payment]')).toContain('reserve principal plus the network fee ceiling');
     $<HTMLButtonElement>('[data-composer-mode="file"]')!.click();
-    expect(text('[data-budget-file]')).toContain('count against');
+    expect(text('[data-budget-file]')).toContain('reserve principal plus the network fee ceiling');
     $<HTMLButtonElement>('[data-tab="wallet"]')!.click();
     expect(text('[data-budget-wallet-warning]')).toContain('Channel and on-chain actions');
     expect(text('[data-budget-wallet-warning]')).toContain('outside');
@@ -164,7 +164,7 @@ describe('invisible payments in the composer and the context panel', () => {
     const host = stubHost(budgetView({ rows: [{ target: MAYA, room: false, limit_msat: 50_000, spent_msat: 0 }] }));
     await openShell();
     type('[data-composer] textarea', 'gm Maya');
-    await vi.waitFor(() => expect(text('[data-send]')).toBe('Approve app principal limit'));
+    await vi.waitFor(() => expect(text('[data-send]')).toBe('Approve app all-in limit'));
     expect(text('[data-budget-setup]')).toContain('Someone new always asks first');
 
     // The owner picks a preset; the tap is the approval. Nothing is sent by it.
@@ -187,6 +187,22 @@ describe('invisible payments in the composer and the context panel', () => {
     await vi.waitFor(() => expect(host.used('message_send')).toHaveLength(2));
     expect(host.used('spend_request')).toHaveLength(0);
     await vi.waitFor(() => expect(text('[data-budget-line]')).toContain('4 of 50 sats'));
+  });
+
+  it('sends the quoted all-in first-contact cap to the owner grant and paid request', async () => {
+    const host = stubHost(open([{ target: MAYA, room: false, limit_msat: 50_000, spent_msat: 0 }]), {
+      first_contact_quote: () => ({ recipient: NEW, admission_msat: 2000, message_msat: 2000,
+        max_routing_fee_msat: 13500, total_msat: 17500, expires_at: Math.floor(Date.now() / 1000) + 60 }),
+    });
+    await openShell();
+    $<HTMLButtonElement>(`[data-track="peer:${NEW}"]`)!.click();
+    await vi.waitFor(() => expect($('[data-door-quote]')?.getAttribute('data-door-quote')).toBe('17500'));
+    expect(text('[data-door-quote]')).toContain('up to 13.5 sats network fee');
+    type('[data-composer] textarea', 'hello including fees');
+    submit();
+    await vi.waitFor(() => expect(host.used('message_send')).toHaveLength(1));
+    expect(host.used('first_contact_request')[0].args).toMatchObject({ recipient: NEW, max_msat: 17500 });
+    expect(host.used('message_send')[0].args).toMatchObject({ recipient: NEW, max_msat: 17500 });
   });
 
   it('asks once before paying someone new, with their budget in their own price', async () => {
@@ -256,7 +272,7 @@ describe('invisible payments in the composer and the context panel', () => {
     await openShell();
     $<HTMLButtonElement>('[data-track="new"]')!.click();
     await vi.waitFor(() => expect($('[data-intro-mine]')).not.toBeNull());
-    expect(text('[data-intro-prices]')).toBe('First contact: 10 sats. Each message: 10 sats.');
+    expect(text('[data-intro-prices]')).toBe('Admission: 15 sats including up to 5 sats network fee. Each message: 15 sats including up to 5 sats network fee (estimated ceilings).');
     expect($('[data-intro-mine] svg.qr')?.getAttribute('aria-label')).toBe('Your introduction as a QR code');
     expect(text('[data-intro-link]')).toBe(INTRO.replace('Q', 'M'));
     expect(text('[data-intro-mine]')).toContain('It is not admission');
@@ -264,7 +280,7 @@ describe('invisible payments in the composer and the context panel', () => {
     type('[data-intro-text]', INTRO);
     $<HTMLButtonElement>('[data-intro-open] button[type="submit"]')!.click();
     await vi.waitFor(() => expect($(`[data-door-card="${STRANGER}"]`)).not.toBeNull());
-    expect(text('[data-door-prices]')).toBe('First contact: 3 sats. Each message: 3 sats.');
+    expect(text('[data-door-prices]')).toBe('Admission: 8 sats including up to 5 sats network fee. Each message: 8 sats including up to 5 sats network fee (estimated ceilings).');
     expect(text('[data-door-local]')).toContain('192.168.1.20:9735');
     expect(host.used('introduction_read')[0].args).toEqual({ text: INTRO });
     // Reading is local: nothing dialed, quoted, granted or sent.
@@ -282,7 +298,7 @@ describe('invisible payments in the composer and the context panel', () => {
     expect(host.used('introduction_open')[0].args).toEqual({ text: INTRO, allow_local: true });
     // The conversation opens with the card beside the stranger's own fresh quote.
     await vi.waitFor(() => expect($(`[data-introduced="${STRANGER}"]`)).not.toBeNull());
-    expect(text('[data-introduced]')).toContain('first contact 3 sats, each message 3 sats');
+    expect(text('[data-introduced]')).toContain('admission 8 sats including up to 5 sats network fee, each message 8 sats');
     await vi.waitFor(() => expect($('[data-door-quote]')?.getAttribute('data-door-quote')).toBe('6000'));
     expect(host.used('first_contact_quote')[0].args).toEqual({ peer: STRANGER });
     expect(host.used('message_send')).toHaveLength(0);
@@ -1045,17 +1061,17 @@ describe('sample source budgets', () => {
     await s.spendStatus();
     expect((await s.spendStatus()).state).toBe('locked');
     expect((await s.budgetStatus()).autopay.state).toBe('open');
-    expect((await s.send(maya, false, 'gm', 2000)).amount_msat).toBe(2000);
-    await expect(s.send(gamma, false, 'gm', 2000)).rejects.toMatchObject({ code: 'first_contact' });
-    await s.send(gamma, false, 'gm', 2000, undefined, 20_000);
+    expect((await s.send(maya, false, 'gm', 7000)).amount_msat).toBe(2000);
+    await expect(s.send(gamma, false, 'gm', 7000)).rejects.toMatchObject({ code: 'first_contact' });
+    await s.send(gamma, false, 'gm', 7000, undefined, 20_000);
     const v = await s.budgetStatus();
     expect(v.rows.find((r) => r.target === gamma)?.limit_msat).toBe(20_000);
-    await expect(s.pay('lntbs10n1samplenotpayable0donotpay', 1000, 1000)).rejects.toMatchObject({ code: 'spend_locked' });
+    await expect(s.pay('lntbs10n1samplenotpayable0donotpay', 1000, 6000)).rejects.toMatchObject({ code: 'spend_locked' });
   });
 
   it('sample files and manual messages share the daily tally and refusal', async () => {
     const s = sampleSource({ firstLiveMs: 1e9 });
-    await s.budgetApprove(11000, 'careful');
+    await s.budgetApprove(16000, 'careful');
     // Cancel the pending automatic approval, then open only the manual window.
     await s.spendLock();
     await s.spendRequest();
@@ -1063,25 +1079,25 @@ describe('sample source budgets', () => {
     await s.spendStatus();
     expect((await s.budgetStatus()).autopay.state).toBe('off');
     await s.budgetSet(maya, false, 0);
-    // Fixture starts with 8 sats. A 3-sat file fills the shared 11-sat limit.
-    await s.fileSend(maya, 'a.txt', 'text/plain', 'aGk=', 3000);
-    expect((await s.budgetStatus()).spent_msat).toBe(11000);
-    await expect(s.send(maya, false, 'hi', 2000)).rejects.toMatchObject({ code: 'ceiling_exhausted' });
-    await expect(s.fileSend(maya, 'b.txt', 'text/plain', 'aGk=', 3000)).rejects.toMatchObject({ code: 'ceiling_exhausted' });
+    // Fixture starts with 8 sats. A 8-sat all-in file fills the shared 16-sat limit.
+    await s.fileSend(maya, 'a.txt', 'text/plain', 'aGk=', 8000);
+    expect((await s.budgetStatus()).spent_msat).toBe(16000);
+    await expect(s.send(maya, false, 'hi', 7000)).rejects.toMatchObject({ code: 'ceiling_exhausted' });
+    await expect(s.fileSend(maya, 'b.txt', 'text/plain', 'aGk=', 8000)).rejects.toMatchObject({ code: 'ceiling_exhausted' });
   });
 
   it('sample invoice and keysend count and refuse against the same app limit', async () => {
     const s = sampleSource({ firstLiveMs: 1e9 });
-    await s.budgetApprove(10000, 'careful');
+    await s.budgetApprove(20000, 'careful');
     await s.spendLock();
     await s.spendRequest();
     await s.spendStatus();
     await s.spendStatus();
-    await s.pay('lntbs10n1samplenotpayable0donotpay', 1000, 1000);
-    await s.keysend('02' + 'ab'.repeat(32), 1000, null, 1000);
-    expect((await s.budgetStatus()).spent_msat).toBe(10000);
-    await expect(s.pay('lntbs10n1samplenotpayable0donotpay', 1000, 1000)).rejects.toMatchObject({ code: 'ceiling_exhausted' });
-    await expect(s.keysend('02' + 'ab'.repeat(32), 1000, null, 1000)).rejects.toMatchObject({ code: 'ceiling_exhausted' });
+    await s.pay('lntbs10n1samplenotpayable0donotpay', 1000, 6000);
+    await s.keysend('02' + 'ab'.repeat(32), 1000, null, 6000);
+    expect((await s.budgetStatus()).spent_msat).toBe(20000);
+    await expect(s.pay('lntbs10n1samplenotpayable0donotpay', 1000, 6000)).rejects.toMatchObject({ code: 'ceiling_exhausted' });
+    await expect(s.keysend('02' + 'ab'.repeat(32), 1000, null, 6000)).rejects.toMatchObject({ code: 'ceiling_exhausted' });
   });
 
   it('refuses over budget, and pause stops everything until resumed', async () => {
@@ -1090,9 +1106,9 @@ describe('sample source budgets', () => {
     await s.spendStatus();
     await s.spendStatus();
     // The sample already paid Maya 4 sats today.
-    await s.budgetSet(maya, false, 7000);
-    await s.send(maya, false, 'gm', 2000);
-    await expect(s.send(maya, false, 'gm', 2000)).rejects.toMatchObject({ code: 'budget_exhausted' });
+    await s.budgetSet(maya, false, 12000);
+    await s.send(maya, false, 'gm', 7000);
+    await expect(s.send(maya, false, 'gm', 7000)).rejects.toMatchObject({ code: 'budget_exhausted' });
     await s.budgetPause();
     await expect(s.send(maya, false, 'gm', 1)).rejects.toMatchObject({ code: 'budget_paused' });
     await expect(s.spendRequest()).rejects.toMatchObject({ code: 'budget_paused' });

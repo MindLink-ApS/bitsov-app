@@ -422,7 +422,7 @@ function SetpointsOrgan(props: OrganismProps) {
       summary={<span class="sats">{summary()}</span>}
       fresh={fresh()}
       sample={props.sample}
-      source="App payment principal limits over a rolling 24 hours. Any finite node grant applies separately. See Budget for exclusions."
+      source="App all-in payment limits over a rolling 24 hours. Any finite node grant applies separately. See Budget for exclusions."
     >
       <Switch>
         <Match when={h().state === 'unknown'}>
@@ -452,7 +452,7 @@ function SetpointsOrgan(props: OrganismProps) {
         <Match when={h().state === 'holding' && (h() as Extract<Homeostasis, { state: 'holding' }>)}>
           {(x) => (
             <>
-              <SetpointBar label="app principal · 24 h" spent={x().spent_msat} limit={x().ceiling_msat} note={`${hoursLeft(x().until_ms, props.now)} h left`} data="ceiling" />
+              <SetpointBar label="app all-in · 24 h" spent={x().spent_msat} limit={x().ceiling_msat} note={`${hoursLeft(x().until_ms, props.now)} h left`} data="ceiling" />
               <Show when={x().grant}>
                 {(g) => (
                   <p class="organ-line" data-setpoint-grant>

@@ -41,6 +41,7 @@ import type {
   NodeOverview,
   Peer,
   PriceQuote,
+  PaymentQuote,
   EnergyRead,
   EnergySpan,
   MembraneRead,
@@ -129,7 +130,7 @@ export interface Source {
   keysend(destPubkey: string, amountMsat: number, memo: string | null, maxMsat: number): Promise<PaymentReceipt>;
   inviteCreate(invitee: string, addr: string, hours: number): Promise<InviteView>;
   inviteRedeem(invite: string): Promise<RedeemView>;
-  filePrice(): Promise<number>;
+  filePrice(): Promise<PaymentQuote>;
   fileSend(recipient: string, filename: string, mimeType: string, dataB64: string, maxMsat: number): Promise<FileReceipt>;
   // AI track: the host reads through its broker; a remote model gets only a body the owner saw
   aiRead(topic: AiTopic, sinceMs: number | null): Promise<TopicRead>;
@@ -197,7 +198,7 @@ export const hostSource: Source = {
     invoke<PaymentReceipt>('payment_keysend', { dest_pubkey: destPubkey, amount_msat: amountMsat, memo, max_msat: maxMsat }),
   inviteCreate: (invitee, addr, hours) => invoke<InviteView>('invite_create', { invitee, addr, hours }),
   inviteRedeem: (invite) => invoke<RedeemView>('invite_redeem', { invite }),
-  filePrice: () => invoke<number>('file_price'),
+  filePrice: () => invoke<PaymentQuote>('file_price'),
   fileSend: (recipient, filename, mimeType, dataB64, maxMsat) =>
     invoke<FileReceipt>('file_send', { recipient, filename, mime_type: mimeType, data_b64: dataB64, max_msat: maxMsat }),
   aiRead: (topic, sinceMs) => invoke<TopicRead>('ai_read', { topic, since_ms: sinceMs }),

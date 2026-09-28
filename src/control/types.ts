@@ -38,6 +38,7 @@ export type Message = {
  * holds that peer's pricing table.
  */
 export type PriceQuote = {
+  max_routing_fee_msat?: number;
   kind: number;
   own_msat: number;
   peer_msat: number | null;
@@ -51,6 +52,7 @@ export type PriceQuote = {
  * price is for this first message; the total is the cap the owner confirms.
  */
 export type FirstContactQuote = {
+  max_routing_fee_msat?: number;
   recipient: string;
   admission_msat: number;
   message_msat: number;
@@ -349,6 +351,8 @@ export type NodeGrantSummary = { expires_at_ms: number; budget_msat: number; rem
 
 /** `message_send`. */
 export type SendReceipt = {
+  total_msat?: number;
+  max_routing_fee_msat?: number;
   message_id: string;
   recipient: string;
   is_room: boolean;
@@ -357,10 +361,11 @@ export type SendReceipt = {
   sent_at_ms: number;
 };
 
-export type MemberCost = { node_id: string; msat: number; advertised: boolean; connected: boolean };
+export type MemberCost = { max_routing_fee_msat?: number; node_id: string; msat: number; advertised: boolean; connected: boolean };
 
 /** `room_quote`: each member's own price, summed. */
 export type RoomQuote = {
+  max_routing_fee_msat?: number;
   room_id: string;
   members: MemberCost[];
   total_msat: number;
@@ -371,6 +376,7 @@ export type RoomQuote = {
 export type InvoiceView = { bolt11: string; amount_msat: number; note: string | null; expires_at_ms: number };
 export type InvoiceAmount = { amount_msat: number; network: string };
 export type PaymentReceipt = {
+  max_routing_fee_msat?: number;
   method: 'invoice' | 'keysend';
   amount_msat: number;
   status: 'settled' | 'pending' | 'inflight' | 'failed';
@@ -379,6 +385,8 @@ export type PaymentReceipt = {
 export type InviteView = { invite_id: string; invite_link: string; invitee: string; expires_at_ms: number };
 export type RedeemView = { inviter_pubkey: string; addr: string };
 export type FileReceipt = {
+  total_msat?: number;
+  max_routing_fee_msat?: number;
   message_id: string;
   recipient: string;
   filename: string;
@@ -546,3 +554,6 @@ export type RemoteAnswer = {
   text: string;
   sent_bytes: number;
 };
+
+/** Principal and explicit caller routing allowance, used for file quotes. */
+export type PaymentQuote = { principal_msat: number; max_routing_fee_msat: number; total_msat: number };

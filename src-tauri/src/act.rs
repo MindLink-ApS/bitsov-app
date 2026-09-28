@@ -58,6 +58,26 @@ pub const INVITE_MAX_HOURS: u64 = 30 * 24;
 /// Rooms are scoped to already-connected peers, and the node refuses more.
 pub const ROOM_MAX_MEMBERS: usize = 256;
 
+/// The app's ordinary per-payment routing ceiling. Sent explicitly to the node,
+/// which may tighten it further; it never grants more routing authority.
+pub fn routing_fee(principal: u64) -> u64 {
+    if principal == 0 { 0 } else { (principal / 100).clamp(5_000, 10_000) }
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct PaymentQuote {
+    pub principal_msat: u64,
+    pub max_routing_fee_msat: u64,
+    pub total_msat: u64,
+}
+
+pub fn payment_quote(principal_msat: u64) -> Result<PaymentQuote, ActionError> {
+    let max_routing_fee_msat = routing_fee(principal_msat);
+    let total_msat = principal_msat.checked_add(max_routing_fee_msat)
+        .ok_or_else(|| ActionError::invalid("The all-in amount overflows."))?;
+    Ok(PaymentQuote { principal_msat, max_routing_fee_msat, total_msat })
+}
+
 // ---- errors -------------------------------------------------------------------
 
 /// A refused or failed action. `code` lets the renderer react (re-prompt for
@@ -348,6 +368,8 @@ pub fn compose_body(recipient: &str, is_room: bool, plaintext: &str) -> Result<s
 /// `compose` and `files/:id/send` response.
 #[derive(Deserialize, Debug)]
 pub struct SendReply {
+    #[serde(default)]
+    pub max_routing_fee_msat: u64,
     pub message_id: String,
     pub delivered: bool,
     pub amount_msat: u64,
@@ -356,9 +378,19 @@ pub struct SendReply {
     pub readmission_msat: Option<u64>,
 }
 
+impl SendReply {
+    pub fn total_msat(&self) -> Result<u64, ActionError> {
+        self.amount_msat.checked_add(self.readmission_msat.unwrap_or(0))
+            .and_then(|v| v.checked_add(self.max_routing_fee_msat))
+            .ok_or_else(|| ActionError::new("spend_unknown", "The reported all-in total overflows."))
+    }
+}
+
 /// What a send shows in the stream, straight after it returns.
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct SendReceipt {
+    pub total_msat: u64,
+    pub max_routing_fee_msat: u64,
     pub message_id: String,
     pub recipient: String,
     pub is_room: bool,
@@ -403,6 +435,7 @@ pub fn room_result(reply: &serde_json::Value, request: &serde_json::Value, max: 
 /// One room member's share of a room message.
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct MemberCost {
+    pub max_routing_fee_msat: u64,
     pub node_id: String,
     pub msat: u64,
     /// The member's own advertised price (fresh table), not this node's estimate.
@@ -413,6 +446,7 @@ pub struct MemberCost {
 /// `room_quote`: a room message costs each member's own price, paid separately.
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct RoomQuote {
+    pub max_routing_fee_msat: u64,
     pub room_id: String,
     pub members: Vec<MemberCost>,
     pub total_msat: u64,
@@ -448,13 +482,15 @@ pub fn room_quote(
             .and_then(|t| t.prices.get(control::CATEGORY_COMMUNICATION).copied());
         out.push(MemberCost {
             node_id: id,
-            msat: advertised.unwrap_or(own_msat).max(MIN_PAYMENT_MSAT),
+            msat: advertised.unwrap_or(own_msat).max(MIN_PAYMENT_MSAT).saturating_add(routing_fee(advertised.unwrap_or(own_msat).max(MIN_PAYMENT_MSAT))),
+            max_routing_fee_msat: routing_fee(advertised.unwrap_or(own_msat).max(MIN_PAYMENT_MSAT)),
             advertised: advertised.is_some(),
             connected,
         });
     }
     RoomQuote {
         room_id: room_id.to_string(),
+        max_routing_fee_msat: out.iter().map(|m| m.max_routing_fee_msat).sum(),
         total_msat: out.iter().map(|m| m.msat).sum(),
         unreachable: out.iter().filter(|m| !m.connected).map(|m| m.node_id.clone()).collect(),
         estimate: out.iter().any(|m| !m.advertised),
@@ -594,6 +630,8 @@ pub fn keysend_body(dest_pubkey: &str, amount_msat: u64, memo: Option<&str>) -> 
 /// `/payments/pay` response. The preimage is read so it can be dropped.
 #[derive(Deserialize, Debug)]
 pub struct PayReply {
+    #[serde(default)]
+    pub max_routing_fee_msat: u64,
     pub amount_msat: u64,
     #[serde(default)]
     pub preimage: String,
@@ -602,6 +640,8 @@ pub struct PayReply {
 /// `/payments/keysend` response. `status` is Debug-cased by the node.
 #[derive(Deserialize, Debug)]
 pub struct KeysendReply {
+    #[serde(default)]
+    pub max_routing_fee_msat: u64,
     pub amount_msat: u64,
     pub status: String,
 }
@@ -609,6 +649,7 @@ pub struct KeysendReply {
 /// A payment as the stream shows it. No hash, no preimage.
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct PaymentReceipt {
+    pub max_routing_fee_msat: u64,
     /// `invoice` or `keysend`.
     pub method: &'static str,
     pub amount_msat: u64,
@@ -621,6 +662,7 @@ impl PayReply {
     pub fn receipt(self, now_ms: u64) -> PaymentReceipt {
         PaymentReceipt {
             method: "invoice",
+            max_routing_fee_msat: self.max_routing_fee_msat,
             amount_msat: self.amount_msat,
             // The node returns once the payment resolves; an empty preimage
             // means it has not settled yet.
@@ -635,6 +677,7 @@ impl KeysendReply {
         let status = self.status.to_ascii_lowercase();
         PaymentReceipt {
             method: "keysend",
+            max_routing_fee_msat: self.max_routing_fee_msat,
             amount_msat: self.amount_msat,
             status: match status.as_str() {
                 "settled" | "pending" | "inflight" | "failed" => status,
@@ -796,6 +839,8 @@ pub fn file_send_path(file_id: &str) -> Result<String, ActionError> {
 /// A sent file, as the stream shows it.
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct FileReceipt {
+    pub total_msat: u64,
+    pub max_routing_fee_msat: u64,
     pub message_id: String,
     pub recipient: String,
     pub filename: String,
@@ -963,9 +1008,10 @@ mod tests {
         let q = room_quote(ROOM, OWN, 500, &members, &[peer(A, true), peer(B, true)], &tables);
         // A: advertised 2000. B: stale table, so own price 500, floored at 1 sat. Self and duplicates skipped.
         assert_eq!(q.members.len(), 2);
-        assert_eq!((q.members[0].msat, q.members[0].advertised), (2_000, true));
-        assert_eq!((q.members[1].msat, q.members[1].advertised), (1_000, false));
-        assert_eq!(q.total_msat, 3_000);
+        assert_eq!((q.members[0].msat, q.members[0].advertised), (7_000, true));
+        assert_eq!((q.members[1].msat, q.members[1].advertised), (6_000, false));
+        assert_eq!(q.total_msat, 13_000);
+        assert_eq!(q.max_routing_fee_msat, 10_000);
         assert!(q.estimate);
         assert!(q.unreachable.is_empty());
         assert!(room_sendable(&q).is_ok());
