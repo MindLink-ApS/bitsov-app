@@ -11,8 +11,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from two_node_evidence import Evidence
 
 
-def scan(root):
-    evidence = Evidence(root)
+def scan(root, evidence=None):
+    # Live runners can retain their exact known-secret set during media scanning.
+    evidence = evidence if evidence is not None else Evidence(root)
     if evidence.root.is_symlink() or not evidence.root.is_dir():
         return False
     media = []
