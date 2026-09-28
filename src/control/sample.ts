@@ -625,7 +625,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
     };
   };
   /** The host's `budget::plan`: pause, the contact's budget, first contact, the daily total, then the window. */
-  const planSend = (target: string, room: boolean, max: number, first: number | undefined): Promise<number | null> => {
+  const planSend = (target: string, room: boolean, max: number, first: number | undefined, manual = false): Promise<number | null> => {
     settleAutopay();
     settleSpend();
     const sats = (msat: number) => String(msat / 1000);
@@ -635,16 +635,16 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
     if (limit !== undefined && spentOn(target, room) + max > limit) {
       return refuse('budget_exhausted', `You have used ${sats(spentOn(target, room))} of ${sats(limit)} sats for ${who} in the last 24 hours, and this costs ${sats(max)}. Raise the budget to send.`);
     }
-    if (autopay) {
+    const ceiling = Math.min(!manual && autopay ? autopay.ceiling : book.ceiling, book.ceiling);
+    if (spentAll() + max > ceiling) {
+      return refuse('ceiling_exhausted', `You have used ${sats(spentAll())} of your ${sats(ceiling)} sats app payment principal limit (rolling 24 hours), and this costs ${sats(max)}. Raise the limit to send.`);
+    }
+    if (autopay && !manual) {
       let confirm: number | null = null;
       if (limit === undefined) {
         if (first === undefined) return refuse('first_contact', `Your first paid message to ${who} needs your OK once. Nothing was sent.`);
         confirm = Math.min(first, book.ceiling);
         if (confirm < max) return refuse('invalid', `A budget of ${sats(confirm)} sats does not cover this message.`);
-      }
-      const ceiling = Math.min(autopay.ceiling, book.ceiling);
-      if (spentAll() + max > ceiling) {
-        return refuse('ceiling_exhausted', `You have used ${sats(spentAll())} of your ${sats(ceiling)} sats daily total, and this costs ${sats(max)}. Raise the daily total to send.`);
       }
       return Promise.resolve(confirm);
     }
@@ -875,11 +875,15 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
       if (sampleInvoiceMsat(bolt11) !== amountMsat) {
         return refuse('invalid', 'The invoice amount does not match the cost you confirmed. Nothing was paid.');
       }
+      await planSend('app:invoice-payments', false, maxMsat, undefined, true);
+      book.ledger.push({ at: Date.now(), target: 'app:invoice-payments', room: false, msat: amountMsat });
       return { method: 'invoice', amount_msat: amountMsat, status: 'settled', paid_at_ms: Date.now() };
     },
     keysend: async (_dest, amountMsat, _memo, maxMsat) => {
       await gate();
       if (amountMsat > maxMsat) return refuse('price_changed', 'Amount above confirmed ceiling.');
+      await planSend('app:keysend-payments', false, maxMsat, undefined, true);
+      book.ledger.push({ at: Date.now(), target: 'app:keysend-payments', room: false, msat: amountMsat });
       return { method: 'keysend', amount_msat: amountMsat, status: 'settled', paid_at_ms: Date.now() };
     },
     inviteCreate: async (invitee, _addr, hours) => {
@@ -894,6 +898,9 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
     fileSend: async (recipient, filename, _mime, dataB64, maxMsat) => {
       await gate();
       if (FILE_PRICE_MSAT > maxMsat) return refuse('price_changed', 'Price above confirmed ceiling.');
+      const target = recipient.toLowerCase();
+      await planSend(target, false, maxMsat, undefined, true);
+      book.ledger.push({ at: Date.now(), target, room: false, msat: FILE_PRICE_MSAT });
       const id = nextId('file');
       later(1200, { type: 'delivery', message_id: id, status: 'delivered', reason: null });
       const pad = (dataB64.match(/=+$/)?.[0].length ?? 0);

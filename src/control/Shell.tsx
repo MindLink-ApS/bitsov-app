@@ -579,6 +579,7 @@ export function ControlCenter(props: Props) {
     },
     pay: async (t, bolt11, msat) => {
       const r = await act(() => props.source.pay(bolt11, msat, msat));
+      void loadBudget();
       if (r.ok) {
         addArtifact(t, { type: 'payment', receipt: r.value, at: r.value.paid_at_ms });
         void loadWallet();
@@ -587,6 +588,7 @@ export function ControlCenter(props: Props) {
     },
     keysend: async (t, pubkey, msat, memo) => {
       const r = await act(() => props.source.keysend(pubkey, msat, memo.trim() || null, msat));
+      void loadBudget();
       if (r.ok) {
         addArtifact(t, { type: 'payment', receipt: r.value, at: r.value.paid_at_ms });
         void loadWallet();
@@ -598,6 +600,8 @@ export function ControlCenter(props: Props) {
       const data = await readBase64(file).catch(() => null);
       if (data === null) return { ok: false, error: { code: 'invalid', message: 'the file could not be read' } };
       const r = await act(() => props.source.fileSend(t.id, file.name, file.type, data, maxMsat));
+      void loadBudget();
+      void loadWallet();
       if (!r.ok && ['price_changed', 'price_cap_exceeded'].includes(r.error.code)) void attempt('quote', () => props.source.filePrice(), setFilePrice);
       if (r.ok) {
         setPaid(r.value.message_id, r.value.amount_msat);
@@ -1586,7 +1590,7 @@ function Composer(props: {
       switch (stand().kind) {
         case 'paused': return 'Resume payments';
         case 'waiting': return 'Waiting for approval';
-        case 'off': return 'Approve daily budget';
+        case 'off': return 'Approve app principal limit';
         case 'first': return `Send first message${price}`;
         case 'contact_used':
         case 'total_used': return 'Budget used up';
@@ -1681,7 +1685,7 @@ function Composer(props: {
         if ((r.ok || paidUndelivered(r)) && unchanged()) {
           setDraft('');
           setDrafted(false);
-        }
+        } else if (!r.ok && unchanged() && isBudgetStop(r.error)) setNote(r.error.message);
         break;
       case 'pay':
         r =
@@ -1692,7 +1696,7 @@ function Composer(props: {
           setBolt11('');
           setAmount('');
           setMemo('');
-        }
+        } else if (!r.ok && unchanged() && isBudgetStop(r.error)) setNote(r.error.message);
         break;
       case 'request':
         r = await props.actions.invoice(t, satsInput(amount())!, memo());
@@ -1706,7 +1710,7 @@ function Composer(props: {
         if (r.ok && unchanged()) {
           setFile(null);
           if (fileInput) fileInput.value = '';
-        }
+        } else if (!r.ok && unchanged() && isBudgetStop(r.error)) setNote(r.error.message);
         break;
     }
     setBusy(false);
@@ -1812,6 +1816,12 @@ function Composer(props: {
         </button>
       </div>
 
+      <Show when={mode() === 'pay'}>
+        <p class="hint" data-budget-payment>App invoice payments and keysend count against the app daily principal limit. Routing fees are outside this limit; any finite node grant still applies.</p>
+      </Show>
+      <Show when={mode() === 'file'}>
+        <p class="hint" data-budget-file>Files count against the same app payment principal limit and any contact budget, including during the ten-minute window. Routing fees are outside this limit.</p>
+      </Show>
       <Show when={drafted()}>
         <p class="drafted" data-drafted>
           Drafted in the AI track. Check it and the cost, then {mode() === 'request' ? 'create the invoice' : 'send it'} yourself.
@@ -2002,13 +2012,13 @@ function BudgetBar(props: {
       <Switch>
         <Match when={props.stand.kind === 'paused'}>
           <p class="spend-line" data-budget-paused>
-            <span class="dot warn" /> <span class="line-text">Payments are paused. Nothing leaves your node until you resume.</span>
+            <span class="dot warn" /> <span class="line-text">Payments are paused. New app payments are blocked. In-flight payments, owner commands and background workers can still spend.</span>
           </p>
         </Match>
         <Match when={props.stand.kind === 'waiting'}>
           <div class="approval" data-approval="pending">
             <p>
-              <strong>Confirm at your node.</strong> One approval lets messages pay for the next 24 hours, up to your daily total.
+              <strong>Confirm at your node.</strong> One approval lets messages pay for the next 24 hours, up to your app payment principal limit.
               Run this where your node runs and type the phrase it prints:
             </p>
             <Show when={props.spend?.pending}>
@@ -2021,9 +2031,9 @@ function BudgetBar(props: {
           <div class="approval budget-setup" data-budget-setup>
             <p>
               <strong>{props.budget.autopay.state === 'expired' ? 'Your daily approval ended.' : 'Let messages pay as you chat.'}</strong>{' '}
-              Approve a daily total once. Inside it, each message pays its recipient’s own price with no prompt. Someone new always asks first.
+              Approve an app payment principal limit for each rolling 24 hours. Inside it, each message pays its recipient’s own price with no prompt. Someone new always asks first.
             </p>
-            <div class="presets" role="radiogroup" aria-label="Daily total">
+            <div class="presets" role="radiogroup" aria-label="App payment principal limit, rolling 24 hours">
               <For each={props.budget.presets}>
                 {(p) => (
                   <button
@@ -2113,9 +2123,9 @@ function BudgetBar(props: {
                 when={st().raiseTo}
                 fallback={
                   <p class="hint">
-                    This budget already equals your daily total.{' '}
+                    This budget already equals your app principal limit.{' '}
                     <button type="button" class="link" data-budget-raise-total onClick={() => void props.actions.approveBudget(Math.min(props.budget.ceiling_msat * 2, props.budget.max_daily_msat), props.budget.preset)}>
-                      Raise the daily total to {sats(Math.min(props.budget.ceiling_msat * 2, props.budget.max_daily_msat))} sats
+                      Raise the app principal limit to {sats(Math.min(props.budget.ceiling_msat * 2, props.budget.max_daily_msat))} sats
                     </button>
                   </p>
                 }
@@ -2133,7 +2143,7 @@ function BudgetBar(props: {
           {(st) => (
             <div class="approval budget-used" data-budget-used="total">
               <p>
-                <strong>Your daily total is used up.</strong> {sats(st().spent)} of {sats(st().ceiling)} sats in the last 24 hours. Raising
+                <strong>Your app principal limit is used up.</strong> {sats(st().spent)} of {sats(st().ceiling)} sats in the last 24 hours. Raising
                 it is a new approval.
               </p>
               <Show when={st().raiseTo}>
@@ -2153,7 +2163,7 @@ function BudgetBar(props: {
               <span class="line-text">
                 Pays automatically · {sats(st().spent)} of {sats(st().limit)} sats to {who()} in 24 h · approval ends in{' '}
                 {hoursLeft(props.budget.autopay.open_until_ms, props.now, props.budget.window_ms)} h ·{' '}
-                <button type="button" class="link" data-pause-all onClick={() => void props.actions.pauseAll()}>Pause all</button>
+                <button type="button" class="link" data-pause-all onClick={() => void props.actions.pauseAll()}>Pause app payments</button>
               </span>
             </p>
           )}
@@ -2191,21 +2201,30 @@ function BudgetPanel(props: {
       setNote(null);
     } else setNote(r.error.message);
   };
+  const directPaymentName = (target: string) => target === 'app:invoice-payments' ? 'Invoice payments'
+    : target === 'app:keysend-payments' ? 'Keysend payments' : null;
   const status = (b: BudgetView) => {
-    if (b.paused) return 'Paused. Nothing is paid until you resume.';
+    if (b.paused) return 'Paused. New app payments are blocked; in-flight payments and spending outside this app can continue.';
     if (b.waiting_for_owner) return 'Waiting for your approval at the node.';
     if (b.autopay.state === 'open') return `Paying automatically. The approval ends in ${hoursLeft(b.autopay.open_until_ms, props.now, b.window_ms)} h.`;
     if (b.autopay.state === 'expired') return 'The daily approval ended. Approve again from any conversation.';
-    return 'Not approved in this session. Approve a daily total from any conversation.';
+    return 'Not approved in this session. Approve an app principal limit from any conversation.';
   };
   return (
     <div class="panel" data-panel="budget">
-      <h2>Budget</h2>
+      <h2>App payment budget</h2>
+      <div class="hint" data-budget-scope>
+        <strong>App payment principal · rolling 24 hours</strong>{' '}
+        Covers automatic and manual-window messages, room sends, files, app invoice payments and keysend, and reported admission principal.{' '}
+        Not covered: routing fees, channel opening/closing, on-chain transfers and fees,
+        owner-direct CLI/API commands, or background workers.{' '}
+        G1 is a separate finite node grant; it does not refill daily. This is not a wallet-wide spending limit.
+      </div>
       <Show when={props.budget} fallback={<Show when={!props.error} fallback={<p class="err-note">{props.error}</p>}><div class="spinner" /></Show>}>
         {(b) => (
           <>
             <div class="tally" data-tally>
-              <span class="label">Spent in the last 24 hours</span>
+              <span class="label">App payment principal in the last 24 hours</span>
               <span class="sats big" data-tally-total>
                 {sats(b().spent_msat)} <span class="unit">/ {sats(b().ceiling_msat)} sats</span>
               </span>
@@ -2216,7 +2235,7 @@ function BudgetPanel(props: {
               <Show when={b().node_grant}>
                 {(g) => (
                   <span class="hint" data-node-grant>
-                    Your node allows {sats(g().remaining_msat)} of {sats(g().budget_msat)} sats more, at most {sats(g().per_call_max_msat)} per payment, for {timeLeft(g().expires_at_ms, props.now)}.
+                    Your finite node grant allows {sats(g().remaining_msat)} of {sats(g().budget_msat)} sats more, at most {sats(g().per_call_max_msat)} per payment, for {timeLeft(g().expires_at_ms, props.now)}.
                   </span>
                 )}
               </Show>
@@ -2228,7 +2247,7 @@ function BudgetPanel(props: {
               when={b().paused}
               fallback={
                 <button type="button" class="pause-all" data-pause-all onClick={() => void props.actions.pauseAll()}>
-                  Pause all payments
+                  Pause app payments
                 </button>
               }
             >
@@ -2236,14 +2255,14 @@ function BudgetPanel(props: {
                 Resume payments
               </button>
             </Show>
-            <h3>By contact and room</h3>
+            <h3>By action, contact and room</h3>
             <For each={b().rows} fallback={<p class="hint">No one has a budget yet. Your first paid message to someone sets theirs.</p>}>
               {(row) => {
                 const key = () => `${row.room ? 'room' : 'peer'}:${row.target}`;
                 return (
                   <div class="budget-row" data-budget-row={row.target}>
                     <div class="row" style={{ 'justify-content': 'space-between', gap: 'var(--s-2)' }}>
-                      <span class="who">{props.nameOf(row.target, row.room)}</span>
+                      <span class="who">{directPaymentName(row.target) ?? props.nameOf(row.target, row.room)}</span>
                       <span class="sats" data-row-tally>
                         {sats(row.spent_msat)}
                         <span class="unit">{row.limit_msat === null ? 'sats, approved by hand' : `/ ${sats(row.limit_msat)} sats`}</span>
@@ -2252,19 +2271,21 @@ function BudgetPanel(props: {
                     <Show when={row.limit_msat !== null}>
                       <span class="meter" aria-hidden="true"><span style={{ width: pct(row.spent_msat, row.limit_msat!) }} /></span>
                     </Show>
-                    <Show
-                      when={editing() === key()}
-                      fallback={
-                        <button type="button" class="link" data-budget-edit onClick={() => { setEditing(key()); setValue(String((row.limit_msat ?? 0) / 1000)); setNote(null); }}>
-                          {row.limit_msat === null ? 'Set a budget' : 'Change'}
-                        </button>
-                      }
-                    >
-                      <form class="row" onSubmit={(e) => { e.preventDefault(); void save(row); }}>
-                        <input inputmode="numeric" value={value()} onInput={(e) => setValue(e.currentTarget.value)} aria-label={`Sats a day for ${props.nameOf(row.target, row.room)}`} data-budget-input />
-                        <button type="submit" class="small" data-budget-save>Save</button>
-                        <button type="button" class="link" onClick={() => setEditing(null)}>Cancel</button>
-                      </form>
+                    <Show when={!directPaymentName(row.target)}>
+                      <Show
+                        when={editing() === key()}
+                        fallback={
+                          <button type="button" class="link" data-budget-edit onClick={() => { setEditing(key()); setValue(String((row.limit_msat ?? 0) / 1000)); setNote(null); }}>
+                            {row.limit_msat === null ? 'Set a budget' : 'Change'}
+                          </button>
+                        }
+                      >
+                        <form class="row" onSubmit={(e) => { e.preventDefault(); void save(row); }}>
+                          <input inputmode="numeric" value={value()} onInput={(e) => setValue(e.currentTarget.value)} aria-label={`Sats a day for ${props.nameOf(row.target, row.room)}`} data-budget-input />
+                          <button type="submit" class="small" data-budget-save>Save</button>
+                          <button type="button" class="link" onClick={() => setEditing(null)}>Cancel</button>
+                        </form>
+                      </Show>
                     </Show>
                   </div>
                 );
@@ -2273,10 +2294,10 @@ function BudgetPanel(props: {
             <Show when={note()}><p class="err-note">{note()}</p></Show>
             <Show when={props.error}><p class="err-note">{props.error}</p></Show>
             <p class="hint">
-              A budget can go up to the daily total you approved; raising the total is a new approval. Budgets and this tally are
+              A budget can go up to the app principal limit you approved; raising the total is a new approval. Budgets and this tally are
               saved on this device. Your approval is not: after a restart, approve once more. 0 forgets a contact, so they are asked
-              again. Inside the budget you approved at your node, paying and sending a file take one click to approve, with no
-              step at your node: your node holds every such payment to that budget. When a contact with a budget reconnects and
+              again. Files, invoice payments and keysend still need the ten-minute manual approval and count against this app limit;
+              any node grant applies separately. When a contact with a budget reconnects and
               asks to be admitted again, your node pays that from their budget without asking; anyone else asks you once.
             </p>
           </>
@@ -3072,6 +3093,7 @@ function WalletPanel(props: { wallet: WalletOverview | null; error?: string; fun
     <>
       <div class="panel" data-panel="wallet">
         <h2>Wallet</h2>
+        <p class="hint" data-budget-wallet-warning>Channel and on-chain actions, their fees, and owner-direct commands are outside the app daily principal limit. Opening or closing a channel can commit funds and incur on-chain fees. Check the amount and fee policy at the owner action; this app limit will not stop it.</p>
         <Show when={props.wallet} fallback={<Show when={!props.error}><div class="spinner" /></Show>}>
           {(w) => (
             <>

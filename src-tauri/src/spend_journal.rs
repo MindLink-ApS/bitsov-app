@@ -26,6 +26,10 @@ pub struct Pending {
     /// Budget-book reservation `accounting_msat` settles. `None`: `request_hash`.
     #[serde(default)]
     pub charge_id: Option<String>,
+    /// This request reserved principal in the app book. Older direct-payment
+    /// journals predate daily accounting and deserialize as unbudgeted.
+    #[serde(default)]
+    pub budgeted: bool,
 }
 
 impl Pending {
@@ -81,6 +85,16 @@ pub fn unknown(detail: impl std::fmt::Display) -> ActionError {
     ActionError::new("spend_unknown", format!("Outcome unknown; another spend is blocked until reconciled. {detail}"))
 }
 
+/// Read the atomic journal snapshot for conservative ledger retention only.
+/// Spending and reconciliation still require the Journal's exclusive OS lock.
+pub fn read_pending(dir: &Path) -> Result<Option<Pending>, ActionError> {
+    match std::fs::read(dir.join("spend-pending.json")) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map(Some).map_err(unknown),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(unknown(e)),
+    }
+}
+
 /// The OS lock also serializes two app processes. A crash releases the lock,
 /// but leaves the pending record. No approval, token, invoice or plaintext is saved.
 pub struct Journal {
@@ -110,11 +124,7 @@ impl Journal {
     }
 
     pub fn pending(&self) -> Result<Option<Pending>, ActionError> {
-        match std::fs::read(self.dir.join("spend-pending.json")) {
-            Ok(bytes) => serde_json::from_slice(&bytes).map(Some).map_err(unknown),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(unknown(e)),
-        }
+        read_pending(&self.dir)
     }
 
     pub fn begin(&self, node_id: &str, path: &str, body: &serde_json::Value, max_msat: u64) -> Result<Pending, ActionError> {
@@ -122,7 +132,7 @@ impl Journal {
         let pending = Pending {
             node_id: node_id.to_string(),
             request_hash: blake3::hash(format!("{path}\n{body}").as_bytes()).to_hex().to_string(),
-            max_msat, target: None, over_budget: false, accounting_msat: None, undelivered: None, charge_id: None,
+            max_msat, target: None, over_budget: false, accounting_msat: None, undelivered: None, charge_id: None, budgeted: false,
         };
         self.save(&pending)?;
         Ok(pending)
@@ -209,7 +219,7 @@ mod tests {
     #[test]
     fn reconciliation_needs_exact_terminal_outgoing_evidence() {
         let p = Pending { node_id:"node".into(), request_hash:"hash".into(), max_msat:2000,
-            target:Some(Target::Payment { hash:"abc".into() }), over_budget:false, accounting_msat: None, undelivered: None, charge_id: None };
+            target:Some(Target::Payment { hash:"abc".into() }), over_budget:false, accounting_msat: None, undelivered: None, charge_id: None, budgeted: false };
         assert_eq!(terminal(&p, &[]), None);
         assert_eq!(terminal(&p, &[json!({"payment_hash":"other", "amount_msat":2000, "direction":"outgoing", "status":"settled"})]), None);
         for status in ["pending", "inflight", "expired", "unknown"] {
@@ -225,7 +235,7 @@ mod tests {
     #[test]
     fn message_reconciliation_rejects_other_sender_and_recipient() {
         let p = Pending { node_id:"node".into(), request_hash:"hash".into(), max_msat:2000,
-            target:Some(Target::Message { id:"abc".into(), peer:"peer".into() }), over_budget:false, accounting_msat: None, undelivered: None, charge_id: None };
+            target:Some(Target::Message { id:"abc".into(), peer:"peer".into() }), over_budget:false, accounting_msat: None, undelivered: None, charge_id: None, budgeted: false };
         let mut row = json!({"id":"abc", "sender":"other", "recipient":"peer", "payment_amount_msat":2000});
         assert_eq!(terminal(&p, &[row.clone()]), None);
         row["sender"] = json!("node");
