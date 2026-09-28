@@ -696,6 +696,9 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
     // Sample strangers open their door at 2 sats and ask 2 sats a message.
     firstContactQuote: (peer) =>
       ok({ recipient: peer, admission_msat: 2000, message_msat: 2000, total_msat: 4000, expires_at: Math.floor(Date.now() / 1000) + 60 }),
+    firstContactRequest: async () => null,
+    firstContactStatus: async () => { throw new Error('Sample data has no independent owner request.'); },
+    firstContactCancel: async () => {},
     wallet: () => ok(WALLET),
     spendStatus: () => {
       settleSpend();

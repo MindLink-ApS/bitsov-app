@@ -192,6 +192,15 @@ export type ActionError = {
   message: string;
 };
 
+/** Public owner handoff only; no owner credential is exposed to the app. */
+export type OwnerContactApproval = {
+  id: string;
+  request: { client_id: string; grant_op_id: string; recipient: string; max_total_msat: number; contact_budget_msat: number };
+  owner_command: string;
+  ready: boolean;
+  expires_at_ms: number;
+};
+
 export type SpendState = 'locked' | 'pending' | 'unavailable' | 'open' | 'expired';
 
 /** `app_lock`: rc7 scopes nothing, the window is the app's own. `node_grant`: an owner-written grant. */

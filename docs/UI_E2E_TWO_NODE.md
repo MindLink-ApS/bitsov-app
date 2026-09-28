@@ -14,7 +14,7 @@ pay / request / file / room, spending lock, price refusals and
 | Node A | the same binary, **started by the app** through the #44 dev-node path (`scripts/dev-node-from-main.sh`, `BITSOV_DEV_SIDECAR` / `BITSOV_DEV_DATA_DIR`) on `127.0.0.1:3141`, in the same sandbox. The dev path starts it with `--owner-control`, so node A prints the owner's grant code on the terminal that started the app |
 | Lightning / chain | `shared_mock` Lightning (one ledger, signed regtest invoices, recipient settlement lookup) and mock chain, as in PR #46 |
 | The window | the real app (`tauri dev --features dev-node`), with `tests/e2e/driver.js` injected by the dev server |
-| The owner | `konsensus grant --op … --yes`, typed into node A's CLI with the code node A printed on its terminal |
+| The owner | `konsensus grant --op … --yes` with node A's terminal code for the overall budget; a labelled **FIXTURE** runs the displayed contact command using independent node A operator authority |
 
 The runner (`scripts/ui-e2e/runner.py`) owns every process and directory it
 creates. It records node B’s direct child PID and node A’s actual PID from a
@@ -68,7 +68,11 @@ window instead.
 
 Node-side calls in the spec are limited to three things:
 1. Evidence reads, with an operator token from the throwaway config secret.
-2. What the owner types at node A's terminal (`konsensus grant`).
+2. What the owner types at node A's terminal: `konsensus grant` for the overall
+   budget, then the app's copyable HTTP command for the single contact approval.
+   The latter is explicitly labelled **FIXTURE**: an independent node A operator
+   credential exists only in the runner and its command subprocess environment.
+   The app receives only the public receipt. See [owner handoff](OWNER_FIRST_CONTACT.md).
 3. Owner setup the app has no screen for: creating the A+B room. In step 6, B's
    owner also adds A as a known peer after raising B's price.
 
@@ -108,8 +112,12 @@ edit the app checkout during a run: Vite reloads the window.
   remain covered by component tests, not this scenario.
 - **First-contact ceiling:** B charges 2,000 msat admission plus 2,000 for the
   message. The run waits for B’s quote, checks the displayed 4,000-msat cap,
-  then verifies the actual debit against that cap and both settlements. The
+  waits for the owner contact command, then verifies the actual debit against
+  that cap and both settlements. The
   harness never bypasses a failed UI send with an operator-key compose call.
+  The fixture grants 100 sats overall so the conservative room reservation
+  (the remaining node allowance) fits its default 100-sat budget. Price refusal
+  is checked in the organism door card, alongside zero debit and no delivery.
 
 - **Deposit QR:** it cannot appear on mock Lightning. Only an embedded LDK
   backend has a deposit address. Step 1 checks the expected HTTP 400 and the

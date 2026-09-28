@@ -47,6 +47,7 @@ import {
   type Unread,
 } from './state';
 import type {
+  OwnerContactApproval,
   FirstContactQuote,
   ActionError,
   Artifact,
@@ -113,6 +114,9 @@ export type Actions = {
   send: (t: TrackRef, text: string, maxMsat: number, firstContactMsat?: number) => Promise<Outcome<unknown>>;
   /** The door card: a stranger's signed quote, or null when the node cannot give one. */
   doorQuote: (peer: string) => Promise<FirstContactQuote | null>;
+  ownerRequest: (peer: string, cap: number, budget: number) => Promise<Outcome<OwnerContactApproval | null>>;
+  ownerStatus: (id: string) => Promise<Outcome<OwnerContactApproval>>;
+  ownerCancel: (id: string) => Promise<void>;
   invoice: (t: TrackRef, sats: number, note: string) => Promise<Outcome<unknown>>;
   amountOf: (bolt11: string) => Promise<Outcome<number>>;
   pay: (t: TrackRef, bolt11: string, msat: number) => Promise<Outcome<unknown>>;
@@ -464,6 +468,9 @@ export function ControlCenter(props: Props) {
       void loadSpend();
     },
     doorQuote: (peer) => props.source.firstContactQuote(peer).catch(() => null),
+    ownerRequest: (peer, cap, budget) => act(() => props.source.firstContactRequest(peer, cap, budget)),
+    ownerStatus: (id) => act(() => props.source.firstContactStatus(id)),
+    ownerCancel: (id) => props.source.firstContactCancel(id).catch(() => {}),
     send: async (t, text, maxMsat, firstContactMsat) => {
       if (t.kind !== 'peer' && t.kind !== 'room') return { ok: false, error: { code: 'invalid', message: 'nothing to send to' } };
       const r = await act(() => props.source.send(t.id, t.kind === 'room', text, maxMsat, t.kind === 'room' ? Object.fromEntries((roomQuote()?.members ?? []).map((m) => [m.node_id, m.msat])) : undefined, firstContactMsat));
@@ -1182,6 +1189,40 @@ function Composer(props: {
   // Inputs and navigation remain usable during a send. Only the submitted
   // revision may be cleared by its completion (including track A -> B -> A).
   let composerRevision = 0;
+  const [ownerWait, setOwnerWait] = createSignal<{ approval: OwnerContactApproval; revision: number; send: () => Promise<void> } | null>(null);
+  const cancelOwner = () => {
+    const pending = untrack(ownerWait);
+    setOwnerWait(null);
+    if (pending) void props.actions.ownerCancel(pending.approval.id);
+  };
+  onCleanup(cancelOwner);
+  createEffect(() => {
+    const pending = ownerWait();
+    if (!pending) return;
+    let polling = false;
+    const poll = async () => {
+      if (polling) return;
+      polling = true;
+      const result = await props.actions.ownerStatus(pending.approval.id);
+      polling = false;
+      if (ownerWait() !== pending) return;
+      if (composerRevision !== pending.revision) { cancelOwner(); return; }
+      if (!result.ok) {
+        cancelOwner();
+        setNote(result.error.message);
+      } else if (result.value.ready) {
+        setOwnerWait(null);
+        setBusy(true);
+        try { await pending.send(); } finally { setBusy(false); }
+      }
+    };
+    const timer = setInterval(() => void poll(), 1000);
+    onCleanup(() => clearInterval(timer));
+  });
+  // Budget refreshes replace the object every three seconds. Only an actual
+  // authority/mode change invalidates a pending owner request.
+  const ownerContext = createMemo(() => `${mode()}:${firstPick()}:${props.budget?.paused ?? false}`);
+  createEffect(on(ownerContext, () => { composerRevision++; cancelOwner(); }, { defer: true }));
 
   const room = () => props.track.kind === 'room';
   const modes = (): Mode[] => (room() ? ['message'] : ['message', 'pay', 'request', 'file']);
@@ -1190,6 +1231,7 @@ function Composer(props: {
     on(
       () => trackKey(props.track),
       () => {
+        cancelOwner();
         composerRevision++;
         setMode('message');
         setNote(null);
@@ -1215,6 +1257,8 @@ function Composer(props: {
       () => {
         const p = props.prefill;
         if (!p || p.key !== trackKey(props.track) || room()) return;
+        cancelOwner();
+        composerRevision++;
         setMode(p.mode);
         setNote(null);
         if (p.mode === 'message') setDraft(p.text);
@@ -1368,6 +1412,7 @@ function Composer(props: {
   };
 
   const label = () => {
+    if (ownerWait()) return 'Waiting for contact approval';
     if (viaBudget()) {
       const s = shown();
       const price = s.msat === null ? '' : ` · ${s.estimate ? '≈ ' : ''}${sats(s.msat)} ${satUnit(s.msat)}`;
@@ -1392,7 +1437,7 @@ function Composer(props: {
   };
 
   const submit = async () => {
-    if (busy()) return;
+    if (busy() || ownerWait()) return;
     setNote(null);
     if (viaBudget()) {
       const st = stand();
@@ -1408,7 +1453,12 @@ function Composer(props: {
       setBusy(true);
       const submittedRevision = composerRevision;
       const submittedPeer = target();
-      const r = await props.actions.send(props.track, draft(), shown().msat!, st.kind === 'first' ? firstPick() ?? st.suggest : undefined);
+      const submittedTrack = props.track;
+      const submittedText = draft();
+      const cap = shown().msat!;
+      const first = st.kind === 'first' ? firstPick() ?? st.suggest : undefined;
+      const dispatch = async () => {
+      const r = await props.actions.send(submittedTrack, submittedText, cap, first);
       const unchanged = composerRevision === submittedRevision;
       if (r.ok && readmitFor() === submittedPeer) setReadmitFor(null);
       else if (!r.ok && unchanged && ['price_changed', 'price_cap_exceeded'].includes(r.error.code) && doorWanted()) {
@@ -1421,7 +1471,27 @@ function Composer(props: {
       if (r.ok && composerRevision === submittedRevision) {
         setDraft('');
         setDrafted(false);
-      } else if (!r.ok && unchanged && isBudgetStop(r.error)) setNote(r.error.message);
+      } else if (!r.ok && unchanged && (isBudgetStop(r.error) || r.error.code === 'owner_only')) setNote(r.error.message);
+      };
+      if (first !== undefined && !room()) {
+        const request = await props.actions.ownerRequest(submittedPeer, cap, first);
+        if (composerRevision !== submittedRevision) {
+          if (request.ok && request.value) void props.actions.ownerCancel(request.value.id);
+          setBusy(false);
+          return;
+        }
+        if (!request.ok) {
+          setNote(request.error.message);
+          setBusy(false);
+          return;
+        }
+        if (request.value) {
+          setOwnerWait({ approval: request.value, revision: submittedRevision, send: dispatch });
+          setBusy(false);
+          return;
+        }
+      }
+      await dispatch();
       setBusy(false);
       return;
     }
@@ -1476,7 +1546,7 @@ function Composer(props: {
   };
 
   const disabled = () =>
-    busy() ||
+    busy() || !!ownerWait() ||
     (viaBudget()
       ? ['waiting', 'contact_used', 'total_used', 'unknown'].includes(stand().kind) || ((stand().kind === 'first' || stand().kind === 'ok') && !ready())
       : spends() && !line().open
@@ -1488,7 +1558,7 @@ function Composer(props: {
       class="composer"
       data-composer
       data-mode={mode()}
-      onInput={() => { composerRevision++; }}
+      onInput={() => { cancelOwner(); composerRevision++; }}
       onSubmit={(e) => {
         e.preventDefault();
         void submit();
@@ -1585,6 +1655,16 @@ function Composer(props: {
       </Show>
       <Show when={note()}>
         <p class="err-note" data-composer-note>{note()}</p>
+      </Show>
+      <Show when={ownerWait()}>
+        {(pending) => <div class="approval" data-contact-approval="pending" data-contact-request={JSON.stringify(pending().approval.request)}>
+          <p><strong>Approve this contact at your node.</strong> Run this command once in the node terminal, with your independent owner credential in BITSOV_OWNER_TOKEN. The app never receives that credential.</p>
+          <p>The command approves this contact’s budget and first-message cap. This draft sends after approval. Editing it or pressing Cancel stops the wait.</p>
+          <textarea readonly aria-label="Owner approval command" data-contact-owner-command data-command={pending().approval.owner_command} value={pending().approval.owner_command} />
+          <button type="button" class="link" onClick={async () => { try { await navigator.clipboard.writeText(pending().approval.owner_command); } catch { setNote('Select and copy the command above.'); } }}>Copy command</button>
+          <button type="button" class="link" data-contact-cancel onClick={cancelOwner}>Cancel</button>
+          <p class="hint">Cancel does not revoke an approval already issued at the node; it expires within two minutes.</p>
+        </div>}
       </Show>
       <Show when={spends()}>
         <Show

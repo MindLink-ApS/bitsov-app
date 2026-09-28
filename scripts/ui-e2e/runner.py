@@ -220,6 +220,27 @@ def jwt(n):
     return (unsigned + b'.' + sig).decode()
 
 
+def owner_first_contact(command):
+    """FIXTURE: node A operator runs the exact public command shown by the app.
+
+    Only this separate process receives the throwaway owner token. Neither the
+    app nor command/evidence text contains it; the app sees the public receipt.
+    """
+    token = jwt('a')
+    evidence.remember(token)
+    env = os.environ.copy()
+    env['BITSOV_OWNER_TOKEN'] = token
+    result = subprocess.run(['sandbox-exec', '-f', str(SANDBOX), '/bin/sh', '-c', command],
+                            env=env, text=True, capture_output=True, timeout=30)
+    evidence.write('owner-first-contact-fixture.json', {
+        'label': 'FIXTURE: independent node A owner authority',
+        'command': command, 'exit_code': result.returncode,
+        'stdout': result.stdout, 'stderr': result.stderr,
+    })
+    if result.returncode:
+        raise RuntimeError('Owner first-contact FIXTURE command failed; see sanitized evidence.')
+
+
 def api(n, method, path, body=None, expect=None, token=None, anonymous=False):
     conn = http.client.HTTPConnection('127.0.0.1', ports[n][0], timeout=40)
     raw = None if body is None else json.dumps(body)

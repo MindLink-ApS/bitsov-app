@@ -43,6 +43,10 @@ pub const MAX_RECIPIENT_BUDGETS: usize = 256;
 /// `GET /pair/grant` → `grant`: the caller's live grant, as the node reports it.
 #[derive(Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct NodeGrant {
+    #[serde(default)]
+    pub client_id: String,
+    #[serde(default)]
+    pub op_id: String,
     /// Unix seconds.
     pub expires_at: i64,
     pub budget_msat: u64,
@@ -247,6 +251,8 @@ mod tests {
 
     fn grant(expires_at: i64) -> NodeGrant {
         NodeGrant {
+            client_id: "c1".into(),
+            op_id: "ab12".into(),
             expires_at,
             budget_msat: 10_000,
             used_msat: 4_000,

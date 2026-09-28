@@ -7,6 +7,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import type { NodeStatus, PairingView } from '../onboarding/pairing';
 import type {
+  OwnerContactApproval,
   FirstContactQuote,
   AiTopic,
   Disclosure,
@@ -61,6 +62,9 @@ export interface Source {
   priceQuote(peer?: string): Promise<PriceQuote>;
   /** The door card: a stranger's signed quote before a first contact. */
   firstContactQuote(peer: string): Promise<FirstContactQuote>;
+  firstContactRequest(peer: string, maxMsat: number, budgetMsat: number): Promise<OwnerContactApproval | null>;
+  firstContactStatus(id: string): Promise<OwnerContactApproval>;
+  firstContactCancel(id: string): Promise<void>;
   wallet(): Promise<WalletOverview>;
   /** Node-wide energy (genome N1). Call only when the overview lists `energy_v1`. */
   energy(span: EnergySpan): Promise<EnergyRead>;
@@ -129,6 +133,9 @@ export const hostSource: Source = {
   messages: (peer, before) => invoke<Message[]>('messages_list', { peer, before: before ?? null }),
   priceQuote: (peer) => invoke<PriceQuote>('price_quote', { peer: peer ?? null }),
   firstContactQuote: (peer) => invoke<FirstContactQuote>('first_contact_quote', { peer }),
+  firstContactRequest: (recipient, maxMsat, budgetMsat) => invoke<OwnerContactApproval | null>('first_contact_request', { recipient, max_msat: maxMsat, contact_budget_msat: budgetMsat }),
+  firstContactStatus: (id) => invoke<OwnerContactApproval>('first_contact_status', { id }),
+  firstContactCancel: (id) => invoke<void>('first_contact_cancel', { id }),
   wallet: () => invoke<WalletOverview>('payments_overview'),
   energy: (span) => invoke<EnergyRead>('energy_read', { span }),
   membrane: (limit) => invoke<MembraneRead>('membrane_read', { limit: limit ?? null }),

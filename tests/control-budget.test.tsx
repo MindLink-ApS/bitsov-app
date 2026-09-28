@@ -72,6 +72,7 @@ function stubHost(start: BudgetView, overrides: Record<string, Reply> = {}) {
     file_price: () => 3000,
     spend_status: () => state.spend,
     budget_status: () => state.budget,
+    first_contact_request: () => null, // Pre-owner-handoff node fixture unless overridden.
     budget_approve: (args) => (state.budget = open(state.budget.rows, { ceiling_msat: args!.ceiling_msat as number })),
     budget_set: (args) => {
       const rows = state.budget.rows.map((r) => (r.target === args!.target ? { ...r, limit_msat: args!.limit_msat as number } : r));

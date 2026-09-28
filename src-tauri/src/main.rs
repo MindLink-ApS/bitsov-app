@@ -67,6 +67,7 @@ mod model_launch;
 // DEV ONLY: run a locally built genome-`main` node instead of the verified sidecar.
 // Compiled out of release builds (compile error with the feature). See the module.
 mod dev_node;
+mod owner_contact;
 
 /// Node API bind — konsensus ApiConfig `default_api_addr()` = 127.0.0.1:3141.
 /// Loopback ONLY (Gate G2): never point this at a non-loopback host until a
@@ -166,6 +167,7 @@ struct NodeState {
     node_grant: Mutex<Option<NodeGrant>>,
     /// Serializes this process's budget-file read-modify-write.
     budget_io: Mutex<()>,
+    owner_contact: Mutex<Option<owner_contact::Pending>>,
 }
 
 /// The owner asked for these while an elevation request is pending.
@@ -200,6 +202,7 @@ impl NodeState {
             spend_timeout: Duration::from_secs(120),
             autopay: Mutex::new(budget::Autopay::default()),
             wants: Mutex::new(Wants::default()),
+            owner_contact: Mutex::new(None),
             node_grant: Mutex::new(None),
             budget_io: Mutex::new(()),
             ready: Mutex::new(false),
@@ -805,6 +808,12 @@ async fn call_api(
     path: &str,
     body: Option<serde_json::Value>,
 ) -> Result<(reqwest::StatusCode, String), String> {
+    // This channel holds the app's delegated (or legacy loopback) credential,
+    // never independent owner authority. Do not send it to an owner-only route,
+    // including after a refresh or an elevation to budget-scoped spend.
+    if path == "/pair/first-contact-grant" {
+        return Err("First-contact approval requires independent owner authority at the node. This app cannot issue it with its paired spend grant.".into());
+    }
     ensure_fresh_token(state).await;
     let mut refreshed = false;
     loop {
@@ -1513,35 +1522,87 @@ async fn node_offers(state: &NodeState, capability: &str) -> bool {
     }
 }
 
-/// The owner's one-time OK for a first contact, backed at the node: a
-/// single-use first-contact grant for exactly this contact and at most
-/// `max_msat` (admission plus the first message), inside the node's budget
-/// grant. The compose that follows consumes it. Only a paired client on a G1
-/// node that offers it needs one; anywhere else this is a no-op.
-///
-/// `contact_budget_msat` is the budget the owner chose on the door card. The
-/// node caps this contact at it inside the budget grant, which makes the
-/// contact budgeted there: after a reconnect, its admission is paid again from
-/// the budget without asking (CoS decision, 2026-09-27).
+/// Prepare a public request for the independent owner. No owner credential
+/// enters the app, and no POST to the owner-only route is made here.
+async fn do_first_contact_request(state: &NodeState, recipient: &str, max_msat: u64, contact_budget_msat: u64) -> Result<Option<owner_contact::View>, ActionError> {
+    let recipient = control::node_id(recipient).map_err(ActionError::invalid)?;
+    let (auth, _) = plan_message(state, &recipient, false, max_msat, Some(contact_budget_msat))?;
+    if state.node_grant.lock().unwrap().is_none() || !node_offers(state, grant::FIRST_CONTACT_CAPABILITY).await {
+        return Ok(None);
+    }
+    let fence = approval_fence(state);
+    let grant = read_grant(state).await?.ok_or_else(grant::ended)?;
+    grant.check(max_msat, Some(&recipient), now_ms())?;
+    if contact_budget_msat < max_msat || contact_budget_msat > grant.budget_msat || max_msat > 100_000 {
+        return Err(ActionError::invalid("The contact budget must cover this first message within the node's grant."));
+    }
+    check_auth(state, auth)?;
+    if approval_fence(state) != fence { return Err(fence_broken()); }
+    let pending = owner_contact::Pending::new(&state.api_base, owner_contact::Request {
+        client_id: grant.client_id.clone(), grant_op_id: grant.op_id.clone(),
+        recipient, max_total_msat: max_msat, contact_budget_msat,
+    }, fence, now_ms(), &grant)?;
+    let view = pending.view.clone();
+    *state.owner_contact.lock().unwrap() = Some(pending);
+    Ok(Some(view))
+}
+
+async fn do_first_contact_status(state: &NodeState, id: &str) -> Result<owner_contact::View, ActionError> {
+    let grant = read_grant(state).await?.ok_or_else(grant::ended)?;
+    let fence = approval_fence(state);
+    let pending = state.owner_contact.lock().unwrap();
+    let pending = pending.as_ref().filter(|p| p.view.id == id)
+        .ok_or_else(|| ActionError::new("owner_only", "This contact approval was cancelled."))?;
+    let r = &pending.view.request;
+    let (auth, _) = plan_message(state, &r.recipient, false, r.max_total_msat, Some(r.contact_budget_msat))?;
+    check_auth(state, auth)?;
+    pending.status(&grant, fence, now_ms())
+}
+
+fn do_first_contact_cancel(state: &NodeState, id: &str) {
+    let mut pending = state.owner_contact.lock().unwrap();
+    if pending.as_ref().is_some_and(|p| p.view.id == id) { *pending = None; }
+}
+
+/// A receipt only lets the app attempt compose; the node independently checks
+/// and consumes the actual single-use grant, under the reviewed budget.
 async fn confirm_first_contact(state: &NodeState, recipient: &str, max_msat: u64, contact_budget_msat: u64) -> Result<(), ActionError> {
     if state.node_grant.lock().unwrap().is_none() || !node_offers(state, grant::FIRST_CONTACT_CAPABILITY).await {
         return Ok(());
     }
-    let path = "/pair/first-contact-grant";
-    let body = serde_json::json!({
-        "recipient": recipient,
-        "max_total_msat": max_msat,
-        "contact_budget_msat": contact_budget_msat,
-    });
-    let (status, text) = call_api(state, reqwest::Method::POST, path, Some(body)).await.map_err(ActionError::node)?;
-    if status.is_success() {
-        return Ok(());
+    let id = state.owner_contact.lock().unwrap().as_ref().filter(|p| {
+        let r = &p.view.request;
+        r.recipient == recipient && r.max_total_msat == max_msat && r.contact_budget_msat == contact_budget_msat
+    }).map(|p| p.view.id.clone()).ok_or_else(|| ActionError::new("owner_only", "Approve this contact at your node first. Nothing was sent."))?;
+    let view = do_first_contact_status(state, &id).await?;
+    if !view.ready { return Err(ActionError::new("owner_only", "Waiting for your approval at the node. Nothing was sent.")); }
+    let mut pending = state.owner_contact.lock().unwrap();
+    if pending.as_ref().is_none_or(|p| p.view.id != id) {
+        return Err(ActionError::new("owner_only", "This contact approval was cancelled."));
     }
-    if let Some(refusal) = grant::refusal(status.as_u16(), &text) {
-        let known = state.node_grant.lock().unwrap().clone();
-        return Err(refusal.error(known.as_ref()));
-    }
-    Err(ActionError::node(api_error(path, status, &text)))
+    *pending = None;
+    Ok(())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn first_contact_request(window: WebviewWindow<impl tauri::Runtime>, state: State<'_, NodeState>, recipient: String, max_msat: u64, contact_budget_msat: u64) -> Result<Option<owner_contact::View>, ActionError> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    do_first_contact_request(state.inner(), &recipient, max_msat, contact_budget_msat).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn first_contact_status(window: WebviewWindow<impl tauri::Runtime>, state: State<'_, NodeState>, id: String) -> Result<owner_contact::View, ActionError> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    do_first_contact_status(state.inner(), &id).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn first_contact_cancel(window: WebviewWindow<impl tauri::Runtime>, state: State<'_, NodeState>, id: String) -> Result<(), ActionError> {
+    reject_sealed_window(&window)?;
+    do_first_contact_cancel(state.inner(), &id);
+    Ok(())
 }
 
 /// `GET /payments/balance` + `GET /payments/channels` — the Wallet panel.
@@ -3101,6 +3162,9 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             messages_list,
             price_quote,
             first_contact_quote,
+            first_contact_request,
+            first_contact_status,
+            first_contact_cancel,
             payments_overview,
             energy_read,
             membrane_read,
@@ -3719,9 +3783,11 @@ mod control_act_tests {
                 let mut body = vec![0u8; length];
                 let _ = reader.read_exact(&mut body);
                 let body = String::from_utf8_lossy(&body).to_string();
-                log.lock().unwrap().push((method.clone(), target.clone(), bearer, body.clone()));
+                log.lock().unwrap().push((method.clone(), target.clone(), bearer.clone(), body.clone()));
                 let path = target.strip_prefix("/api/v1").unwrap_or(&target).to_string();
-                let (status, reply) = routes(&method, &path, &body);
+                let (status, reply) = if path == "/pair/first-contact-grant" && bearer.as_deref() != Some("independent.owner.fixture") {
+                    (403, "independent owner authority required".to_string())
+                } else { routes(&method, &path, &body) };
                 let mut out = stream;
                 let _ = write!(
                     out,
@@ -4314,6 +4380,20 @@ mod control_act_tests {
         assert_eq!(t[compose - 1], "GET /pair/grant");
     }
 
+    async fn owner_approves_contact(node: &Fake, recipient: &str, cap: u64, budget: u64) -> owner_contact::View {
+        let view = do_first_contact_request(&node.state, recipient, cap, budget).await.unwrap().unwrap();
+        assert!(!do_first_contact_status(&node.state, &view.id).await.unwrap().ready);
+        let response = node.state.http.post(format!("{}/pair/first-contact-grant", node.state.api_base))
+            .bearer_auth("independent.owner.fixture")
+            .json(&view.request).send().await.unwrap();
+        assert!(response.status().is_success());
+        let receipt: serde_json::Value = response.json().await.unwrap();
+        node.state.owner_contact.lock().unwrap().as_ref().unwrap().write_receipt(
+            receipt["recipient"].as_str().unwrap(), receipt["max_total_msat"].as_u64().unwrap(), receipt["expires_at"].as_i64().unwrap());
+        assert!(do_first_contact_status(&node.state, &view.id).await.unwrap().ready);
+        view
+    }
+
     /// Where the first-contact grant sits among the POSTs, if anywhere.
     fn first_contact_then_compose(node: &Fake) -> Option<(serde_json::Value, String)> {
         let posts = node.posts();
@@ -4322,17 +4402,83 @@ mod control_act_tests {
     }
 
     #[tokio::test]
+    async fn first_contact_never_sends_a_paired_token_to_the_owner_grant_route() {
+        let (node, _dir, g1) = g1_node(&["read", "receive"]);
+        *g1.first_contact.lock().unwrap() =
+            Some((403, serde_json::json!({"error": "independent owner authority required"})));
+        g1_approved(&node, 500_000).await;
+
+        let result = do_message_send_with(
+            &node.state, C, false, "hello stranger", 5000, None, Some(50_000),
+        ).await;
+
+        assert!(call_api(&node.state, reqwest::Method::POST, "/pair/first-contact-grant", None).await.is_err());
+        assert!(!node.seen.lock().unwrap().iter().any(|(_, path, token, _)|
+            path == "/api/v1/pair/first-contact-grant" && token.as_deref() == Some("tok.spend")
+        ), "paired spend authority must never be sent to the owner-only first-contact route");
+        assert!(result.is_err(), "the owner has not approved this contact");
+        assert!(!node.posts().iter().any(|(path, _)| path == "/messages/compose"));
+    }
+
+    #[tokio::test]
     async fn g1_a_first_contact_is_confirmed_at_the_node_for_exactly_this_contact_and_cap() {
         let (node, _dir, g1) = g1_node(&["read", "receive"]);
         *g1.first_contact.lock().unwrap() =
             Some((200, serde_json::json!({"recipient": C, "max_total_msat": 5000, "expires_at": now_unix() + 120})));
         g1_approved(&node, 500_000).await;
+        let waiting = do_message_send_with(&node.state, C, false, "hello stranger", 5000, None, Some(50_000)).await.unwrap_err();
+        assert_eq!(waiting.code, "owner_only");
+        owner_approves_contact(&node, C, 5000, 50_000).await;
         do_message_send_with(&node.state, C, false, "hello stranger", 5000, None, Some(50_000)).await.unwrap();
+        assert!(!node.seen.lock().unwrap().iter().any(|(_, path, token, _)| path.ends_with("/first-contact-grant") && token.as_deref() != Some("independent.owner.fixture")));
         let (body, next) = first_contact_then_compose(&node).expect("the owner's OK reached the node");
-        assert_eq!(body, serde_json::json!({"recipient": C, "max_total_msat": 5000, "contact_budget_msat": 50_000}),
+        assert_eq!(body, serde_json::json!({"client_id": "c1", "grant_op_id": "ab12", "recipient": C, "max_total_msat": 5000, "contact_budget_msat": 50_000}),
             "the budget chosen on the door card makes the contact budgeted at the node");
         assert_eq!(next, "/messages/compose", "the grant is asked for right before the send it covers");
         assert_eq!(node.posts().last().unwrap().1["max_total_msat"], 5000);
+    }
+
+    #[tokio::test]
+    async fn owner_contact_cancel_pause_expiry_and_replaced_grants_never_send() {
+        for stop in ["cancel", "pause", "expired", "recipient", "cap", "grant", "client"] {
+            let (node, _dir, g1) = g1_node(&["read", "receive"]);
+            *g1.first_contact.lock().unwrap() = Some((200, serde_json::json!({
+                "recipient": C, "max_total_msat": 5000, "expires_at": now_unix() + 120,
+            })));
+            g1_approved(&node, 500_000).await;
+            let view = do_first_contact_request(&node.state, C, 5000, 50_000).await.unwrap().unwrap();
+            let (recipient, cap, expiry) = match stop {
+                "recipient" => (A, 5000, now_unix() + 120),
+                "cap" => (C, 6000, now_unix() + 120),
+                "expired" => (C, 5000, now_unix() - 1),
+                _ => (C, 5000, now_unix() + 120),
+            };
+            node.state.owner_contact.lock().unwrap().as_ref().unwrap().write_receipt(recipient, cap, expiry);
+            match stop {
+                "cancel" => do_first_contact_cancel(&node.state, &view.id),
+                "pause" => { do_budget_pause(&node.state).unwrap(); },
+                "grant" => g1.grant.lock().unwrap()["op_id"] = "cd34".into(),
+                "client" => g1.grant.lock().unwrap()["client_id"] = "c2".into(),
+                _ => {},
+            }
+            assert!(do_first_contact_status(&node.state, &view.id).await.is_err(), "{stop}");
+            assert!(do_message_send_with(&node.state, C, false, "do not send", 5000, None, Some(50_000)).await.is_err(), "{stop}");
+            assert!(!node.posts().iter().any(|(p, _)| p == "/messages/compose" || p == "/pair/first-contact-grant"), "{stop}");
+        }
+    }
+
+    #[tokio::test]
+    async fn public_receipt_cannot_replace_the_nodes_actual_approval() {
+        let (node, _dir, g1) = g1_node(&["read", "receive"]);
+        *g1.first_contact.lock().unwrap() = Some((403, serde_json::json!({})));
+        g1_approved(&node, 500_000).await;
+        let view = do_first_contact_request(&node.state, C, 5000, 50_000).await.unwrap().unwrap();
+        node.state.owner_contact.lock().unwrap().as_ref().unwrap().write_receipt(C, 5000, now_unix() + 120);
+        assert!(do_first_contact_status(&node.state, &view.id).await.unwrap().ready);
+        *g1.compose.lock().unwrap() = Some((409, serde_json::json!({"code": "budget_exceeded", "reason": "first_contact", "error": "no independent owner approval"})));
+        assert!(do_message_send_with(&node.state, C, false, "no approval", 5000, None, Some(50_000)).await.is_err());
+        assert_eq!(with_book(&node.state, false, |b| Ok(b.spent(C, false, now_ms()))).unwrap(), 0);
+        assert!(node.state.owner_contact.lock().unwrap().is_none(), "a receipt cannot be replayed");
     }
 
     #[tokio::test]
@@ -4508,9 +4654,10 @@ mod control_act_tests {
 
         // The door card's one OK: backed at the node, with the contact's budget.
         *g1.compose.lock().unwrap() = None;
+        owner_approves_contact(&node, A, 4000, 30_000).await;
         do_message_send_with(&node.state, A, false, "gm", 4000, None, Some(30_000)).await.unwrap();
         let (body, next) = first_contact_then_compose(&node).expect("the owner's OK reached the node");
-        assert_eq!(body, serde_json::json!({"recipient": A, "max_total_msat": 4000, "contact_budget_msat": 30_000}));
+        assert_eq!(body, serde_json::json!({"client_id": "c1", "grant_op_id": "ab12", "recipient": A, "max_total_msat": 4000, "contact_budget_msat": 30_000}));
         assert_eq!(next, "/messages/compose");
     }
 
@@ -4521,6 +4668,10 @@ mod control_act_tests {
             "recipient": C, "max_total_msat": 5000, "expires_at": now_unix() + 120,
         })));
         g1_approved(&node, 500_000).await;
+        let view = owner_approves_contact(&node, C, 5000, 50_000).await;
+        assert_eq!(view.request.contact_budget_msat, 50_000);
+        assert!(view.owner_command.contains("BITSOV_OWNER_TOKEN"));
+        assert!(!view.owner_command.contains("tok.spend"));
         do_message_send_with(&node.state, C, false, "hello stranger", 5000, None, Some(50_000))
             .await.unwrap();
         let (body, _) = first_contact_then_compose(&node).expect("first-contact confirmation sent");
@@ -4555,7 +4706,8 @@ mod control_act_tests {
             "code": "budget_exceeded", "reason": "first_contact", "remaining_msat": null, "error": "no"})));
         g1_approved(&node, 500_000).await;
         let err = do_message_send_with(&node.state, C, false, "hello stranger", 5000, None, Some(50_000)).await.unwrap_err();
-        assert_eq!(err.code, "grant_first_contact");
+        assert_eq!(err.code, "owner_only");
+        assert!(first_contact_then_compose(&node).is_none());
         assert!(!node.posts().iter().any(|(p, _)| p == "/messages/compose"), "refused before any paid request");
         assert!(with_book(&node.state, false, |b| Ok(b.limit(C, false))).unwrap().is_none(), "no budget recorded for them");
     }
@@ -5478,6 +5630,9 @@ mod assistant_acl_tests {
                 "messages_list",
                 "price_quote",
                 "first_contact_quote",
+                "first_contact_request",
+                "first_contact_status",
+                "first_contact_cancel",
                 "payments_overview",
                 // Organism reads (genome N1/N2), same guard.
                 "energy_read",
