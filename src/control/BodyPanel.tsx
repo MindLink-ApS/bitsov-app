@@ -227,7 +227,7 @@ const KIND_TEXT: Record<RefusalKind, string> = { door: 'their door', price: 'pri
 function MembraneOrgan(props: OrganismProps & { fresh: { label: string; stale: boolean } }) {
   const s = () => membraneSummary(props.membrane);
   // Rows that arrive after the panel opened pulse once; history on mount does not.
-  const baseline = untrack(() => props.membrane[0]?.seq ?? 0);
+  const baseline = untrack(() => Math.max(0, ...props.membrane.map(e => e.seq)));
   const outboundBy = () =>
     (Object.entries(s().refused_by) as [RefusalKind, number][])
       .filter(([k, n]) => k !== 'inbound' && n > 0)
@@ -242,6 +242,7 @@ function MembraneOrgan(props: OrganismProps & { fresh: { label: string; stale: b
   // read of the node's ring, the organ does not know what already happened,
   // so it never claims Live or "none" (merge-gate finding 6).
   const ringRead = () => !props.nodeMembrane || (props.membraneReadAt ?? null) !== null;
+  const ringCurrent = () => ringRead() && !(props.nodeMembrane && props.membraneError);
   const fresh = () => {
     if (props.nodeMembrane && props.membraneError) return { label: 'Reading unavailable', stale: true };
     if (!ringRead()) return { label: 'Not read yet', stale: true };
@@ -255,7 +256,7 @@ function MembraneOrgan(props: OrganismProps & { fresh: { label: string; stale: b
   const refusedNote = () => {
     const parts = [];
     if (props.nodeMembrane) {
-      parts.push(!ringRead() ? 'at your door: not read yet' : s().refused_by.inbound > 0 ? `at your door: ${inboundBy()}` : 'at your door: none');
+      parts.push(!ringRead() ? 'at your door: not read yet' : s().refused_by.inbound > 0 ? `at your door: ${inboundBy()}` : ringCurrent() ? 'at your door: none' : 'at your door: last reading had none');
     }
     if (outboundBy()) parts.push(`outbound: ${outboundBy()}`);
     return parts.join(' · ') || 'outbound';
@@ -264,7 +265,7 @@ function MembraneOrgan(props: OrganismProps & { fresh: { label: string; stale: b
     <Organ
       id="membrane"
       title="Membrane"
-      summary={<span>{s().admitted} in · {s().refused} refused</span>}
+      summary={<span>{ringRead() ? `${s().admitted} in · ${s().refused} refused` : 'Gate history not read yet'}</span>}
       fresh={fresh()}
       sample={props.sample}
       source={
@@ -294,9 +295,11 @@ function MembraneOrgan(props: OrganismProps & { fresh: { label: string; stale: b
       </p>
       <div class="organ-row" data-membrane-admitted>
         <span class="who"><span class="dot ok" /> admitted</span>
-        <span class="sats">{s().admitted}</span>
+        <span class="sats">{ringRead() ? s().admitted : '—'}</span>
         <span class="organ-note">
-          {sats(s().admitted_msat)} sats settled<Show when={s().first_contacts > 0}> · {s().first_contacts} first contact</Show>
+          <Show when={ringRead()} fallback="Not read yet">
+            {sats(s().admitted_msat)} sats settled<Show when={s().first_contacts > 0}> · {s().first_contacts} first contact</Show>
+          </Show>
         </span>
       </div>
       <Show when={s().readmitted > 0}>
@@ -310,12 +313,14 @@ function MembraneOrgan(props: OrganismProps & { fresh: { label: string; stale: b
       </Show>
       <div class="organ-row" data-membrane-refused>
         <span class="who"><span class="dot err" /> refused</span>
-        <span class="sats">{s().refused}</span>
+        <span class="sats">{ringRead() ? s().refused : '—'}</span>
         <span class="organ-note" data-membrane-refused-by>{refusedNote()}</span>
       </div>
       <Show
         when={props.membrane.length > 0}
-        fallback={<p class="organ-line" data-membrane-quiet>No knocks since {clock(props.openedAt)}.</p>}
+        fallback={<p class="organ-line" data-membrane-quiet>{ringCurrent()
+          ? `No knocks since ${clock(props.openedAt)}.`
+          : props.membraneError ? 'Gate history unavailable.' : 'Gate history not read yet.'}</p>}
       >
         <For each={props.membrane.slice(0, 3)}>{(e) => <MembraneLine e={e} hot={e.seq > baseline} nameOf={props.nameOf} nameOfTrack={props.nameOfTrack} />}</For>
       </Show>

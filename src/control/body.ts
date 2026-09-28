@@ -179,7 +179,13 @@ export const MEMBRANE_KEEP = 200;
 
 let membraneSeq = 0;
 
-const keep = (log: MembraneEntry[], entry: MembraneEntry) => [entry, ...log].slice(0, MEMBRANE_KEEP);
+// A ring read may finish after newer live events. Order before truncating so
+// backfill cannot displace current events; preserve each entry's local identity.
+const keep = (log: MembraneEntry[], entry: MembraneEntry) => [entry, ...log]
+  .sort((a, b) => b.at - a.at
+    || (b.node_seq ?? 0) - (a.node_seq ?? 0)
+    || b.seq - a.seq)
+  .slice(0, MEMBRANE_KEEP);
 
 /**
  * Fold one `/ws` event into the membrane. An inbound message is an admission
