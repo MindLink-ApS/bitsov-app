@@ -1,11 +1,10 @@
 import { MONEY_NOT_READY, readinessLine, readinessSource } from './readiness';
-import { allIn, routingFee, feeCeiling } from './format';
 import { createEffect, createMemo, createSignal, For, type JSX, Match, on, onCleanup, Show, Switch, untrack } from 'solid-js';
 import { createStore, produce } from 'solid-js/store';
 import { qrSvg } from '../qr';
 import type { Proposal } from './ai';
 import { AiTrack, createAiSession } from './AiTrack';
-import { clock, day, sats, satsWhole, satUnit, shortId, uptime } from './format';
+import { amount as fmtAmount, allIn, clock, day, feeCeiling, routingFee, sats, satsWhole, satUnit, shortId, uptime } from './format';
 import { Organism } from './BodyPanel';
 import {
   doorCard,
@@ -23,6 +22,14 @@ import {
   type MembraneEntry,
 } from './body';
 import type { Source } from './source';
+import {
+  denom,
+  setDenom,
+  setThemePref,
+  themePref,
+  type Denom,
+  type ThemePref,
+} from './prefs';
 import {
   ADMISSION_MAX_MSAT,
   applyDelivery,
@@ -200,6 +207,29 @@ export function ControlCenter(props: Props) {
   }));
   const [errors, setErrors] = createStore<Record<string, string | undefined>>({});
   const [contextOpen, setContextOpen] = createSignal(false);
+  const [settingsEl, setSettingsEl] = createSignal<HTMLElement | null>(null);
+  let settingsReturnFocus: HTMLElement | null = null;
+  createEffect(() => {
+    const open = contextOpen();
+    const panel = settingsEl();
+    // Closed modal uses visibility:hidden (CSS) so its controls leave the tab order.
+    if (open && panel) {
+      settingsReturnFocus = document.activeElement as HTMLElement | null;
+      queueMicrotask(() => panel.querySelector<HTMLElement>('[data-settings-close]')?.focus());
+      const onKey = (e: KeyboardEvent) => {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          setContextOpen(false);
+        }
+      };
+      window.addEventListener('keydown', onKey);
+      onCleanup(() => window.removeEventListener('keydown', onKey));
+    } else if (!open && settingsReturnFocus) {
+      const back = settingsReturnFocus;
+      settingsReturnFocus = null;
+      queueMicrotask(() => back?.focus?.());
+    }
+  });
   /** K1: cards the owner continued from, by node id. Display only, never admission. */
   const [introduced, setIntroduced] = createStore<Record<string, Introduction>>({});
   /** An introduction that finished while the owner was elsewhere: shown, never navigated to. */
@@ -740,8 +770,9 @@ export function ControlCenter(props: Props) {
         nameOf={nameOf}
         unread={threads.unread}
         openKey={openKey()}
+        ownId={ownId()}
         onOpen={setTrack}
-        onPill={() => {
+        onProfile={() => {
           setTab('body');
           setContextOpen(true);
         }}
@@ -833,64 +864,82 @@ export function ControlCenter(props: Props) {
             )}
           </Show>
         </section>
-
-        <aside class="context" classList={{ open: contextOpen() }} aria-label="Body, node and wallet">
-          <div class="row">
-            <div class="tabs" role="tablist" style={{ flex: 1 }}>
-              <button role="tab" aria-selected={tab() === 'body'} data-tab="body" onClick={() => setTab('body')}>Body</button>
-              <button role="tab" aria-selected={tab() === 'node'} data-tab="node" onClick={() => setTab('node')}>Node</button>
-              <button role="tab" aria-selected={tab() === 'wallet'} data-tab="wallet" onClick={() => setTab('wallet')}>Wallet</button>
-              <button role="tab" aria-selected={tab() === 'budget'} data-tab="budget" onClick={() => setTab('budget')}>Budget</button>
-            </div>
-            <button class="quiet context-toggle" onClick={() => setContextOpen(false)} aria-label="Close panel">Close</button>
-          </div>
-          <Switch>
-            <Match when={tab() === 'body'}>
-              <Organism
-                readiness={readinessLine(overview(), now())}
-                sample={source.mode === 'sample'}
-                now={now()}
-                openedAt={openedAt()}
-                link={link()}
-                down={!!props.error || (overview() !== null && freshness(overview()!.read_at, now()).stale)}
-                metabolism={nodeEnergy() ? nodeMetabolism(nodeEnergy()!.hour, nodeEnergy()!.day) : metabolism(threads.t, ownId(), now(), paid)}
-                energyAt={energyAt()}
-                energyReadAt={energyReadAt()}
-                membrane={membrane()}
-                nodeMembrane={caps().membrane}
-                membraneReadAt={membraneReadAt()}
-                prePaymentRefusals={caps().membrane ? prePaymentRefusals() : null}
-                membraneError={errors.membrane}
-                door={door()}
-                doorError={errors.door}
-                homeostasis={homeostasis(budget())}
-                budgetReadAt={budgetReadAt()}
-                nucleus={nucleus(props.ownId, overview())}
-                nameOfTrack={trackKeyName}
-                nameOf={nameOf}
-                onSetpoints={() => setTab('budget')}
-                onPauseAll={() => void actions.pauseAll()}
-                onResume={() => void actions.resume()}
-              />
-            </Match>
-            <Match when={tab() === 'node'}>
-              <NodePanel overview={overview()} link={link()} peers={peers()} now={now()} error={errors.overview ?? errors.peers} />
-            </Match>
-            <Match when={tab() === 'wallet'}>
-              <WalletPanel moneyBlocked={moneyBlocked()} wallet={wallet()} error={errors.wallet} fund={props.fund?.(source, moneyBlocked)} />
-            </Match>
-            <Match when={tab() === 'budget'}>
-              <BudgetPanel
-                budget={budget()}
-                error={errors.budget}
-                now={now()}
-                nameOf={(id, room) => (room ? rooms().find((r) => r.id.toLowerCase() === id)?.name ?? 'Room' : nameOf(id))}
-                actions={actions}
-              />
-            </Match>
-          </Switch>
-        </aside>
       </Show>
+
+      {/* Profile / settings: Body, Node, Wallet, Budget and display prefs. Always
+          mounted so existing tests can open tabs; closed until the avatar is pressed. */}
+      <div
+        class="settings-scrim"
+        classList={{ open: contextOpen() }}
+        data-settings-open={contextOpen() ? 'true' : 'false'}
+        onClick={() => setContextOpen(false)}
+      />
+      <aside
+        ref={setSettingsEl}
+        class="context settings-modal"
+        classList={{ open: contextOpen() }}
+        aria-label="Profile and settings"
+        aria-hidden={contextOpen() ? 'false' : 'true'}
+        aria-modal={contextOpen() ? true : undefined}
+        role="dialog"
+        data-settings
+      >
+        <div class="row settings-head">
+          <div class="tabs" role="tablist" style={{ flex: 1 }}>
+            <button role="tab" aria-selected={tab() === 'body'} data-tab="body" onClick={() => { setTab('body'); setContextOpen(true); }}>Body</button>
+            <button role="tab" aria-selected={tab() === 'node'} data-tab="node" onClick={() => { setTab('node'); setContextOpen(true); }}>Node</button>
+            <button role="tab" aria-selected={tab() === 'wallet'} data-tab="wallet" onClick={() => { setTab('wallet'); setContextOpen(true); }}>Wallet</button>
+            <button role="tab" aria-selected={tab() === 'budget'} data-tab="budget" onClick={() => { setTab('budget'); setContextOpen(true); }}>Budget</button>
+          </div>
+          <button class="quiet context-toggle" data-settings-close onClick={() => setContextOpen(false)} aria-label="Close settings">Close</button>
+        </div>
+        <SettingsDisplay />
+        <Switch>
+          <Match when={tab() === 'body'}>
+            <Organism
+              readiness={readinessLine(overview(), now())}
+              sample={source.mode === 'sample'}
+              now={now()}
+              openedAt={openedAt()}
+              link={link()}
+              down={!!props.error || (overview() !== null && freshness(overview()!.read_at, now()).stale)}
+              metabolism={nodeEnergy() ? nodeMetabolism(nodeEnergy()!.hour, nodeEnergy()!.day) : metabolism(threads.t, ownId(), now(), paid)}
+              energyAt={energyAt()}
+              energyReadAt={energyReadAt()}
+              membrane={membrane()}
+              nodeMembrane={caps().membrane}
+              membraneReadAt={membraneReadAt()}
+              prePaymentRefusals={caps().membrane ? prePaymentRefusals() : null}
+              membraneError={errors.membrane}
+              door={door()}
+              doorError={errors.door}
+              homeostasis={homeostasis(budget())}
+              budgetReadAt={budgetReadAt()}
+              nucleus={nucleus(props.ownId, overview())}
+              nameOfTrack={trackKeyName}
+              nameOf={nameOf}
+              onSetpoints={() => setTab('budget')}
+              onPauseAll={() => void actions.pauseAll()}
+              onResume={() => void actions.resume()}
+            />
+          </Match>
+          <Match when={tab() === 'node'}>
+            <NodePanel overview={overview()} link={link()} peers={peers()} now={now()} error={errors.overview ?? errors.peers} />
+          </Match>
+          <Match when={tab() === 'wallet'}>
+            <WalletPanel moneyBlocked={moneyBlocked()} wallet={wallet()} error={errors.wallet} fund={props.fund?.(source, moneyBlocked)} />
+          </Match>
+          <Match when={tab() === 'budget'}>
+            <BudgetPanel
+              budget={budget()}
+              error={errors.budget}
+              now={now()}
+              nameOf={(id, room) => (room ? rooms().find((r) => r.id.toLowerCase() === id)?.name ?? 'Room' : nameOf(id))}
+              actions={actions}
+            />
+          </Match>
+        </Switch>
+      </aside>
     </div>
   );
 }
@@ -908,6 +957,56 @@ function readBase64(file: File): Promise<string> {
   });
 }
 
+function SettingsDisplay() {
+  const themes: { id: ThemePref; label: string }[] = [
+    { id: 'system', label: 'System' },
+    { id: 'light', label: 'Light' },
+    { id: 'dark', label: 'Dark' },
+  ];
+  const denoms: { id: Denom; label: string }[] = [
+    { id: 'sats', label: 'Sats' },
+    { id: 'btc', label: 'BTC' },
+  ];
+  return (
+    <div class="panel settings-display" data-panel="display">
+      <h2>Display</h2>
+      <h3>Theme</h3>
+      <div class="modes soft" role="radiogroup" aria-label="Theme" data-theme-toggle>
+        <For each={themes}>
+          {(t) => (
+            <button
+              type="button"
+              role="radio"
+              aria-checked={themePref() === t.id}
+              data-theme-option={t.id}
+              onClick={() => setThemePref(t.id)}
+            >
+              {t.label}
+            </button>
+          )}
+        </For>
+      </div>
+      <h3>Amounts</h3>
+      <div class="modes soft" role="radiogroup" aria-label="Denomination" data-denom-toggle>
+        <For each={denoms}>
+          {(d) => (
+            <button
+              type="button"
+              role="radio"
+              aria-checked={denom() === d.id}
+              data-denom-option={d.id}
+              onClick={() => setDenom(d.id)}
+            >
+              {d.label}
+            </button>
+          )}
+        </For>
+      </div>
+      <p class="hint">Balances and costs use this unit everywhere. Payment amounts to the node stay in millisatoshis.</p>
+    </div>
+  );
+}
+
 // ---- rail -----------------------------------------------------------------
 
 function Rail(props: {
@@ -921,8 +1020,9 @@ function Rail(props: {
   nameOf: (id: string) => string;
   unread: Unread;
   openKey: string | null;
+  ownId: string | null;
   onOpen: (t: TrackRef) => void;
-  onPill: () => void;
+  onProfile: () => void;
 }) {
   const item = (t: TrackRef, name: string, meta?: JSX.Element) => {
     const key = trackKey(t);
@@ -942,12 +1042,17 @@ function Rail(props: {
     );
   };
 
+  const initials = () => {
+    const id = props.ownId;
+    return id && id.length >= 2 ? id.slice(0, 2).toUpperCase() : 'BS';
+  };
+
   return (
     <nav class="rail" aria-label="Tracks">
       <div class="mark">
         Bit<span>Sov</span>
       </div>
-      <button class="node-pill" title={props.pill.text} data-pill={props.pill.tone} onClick={() => props.onPill()} disabled={!props.active}>
+      <button class="node-pill" title={props.pill.text} data-pill={props.pill.tone} onClick={() => props.onProfile()} disabled={!props.active}>
         <span class={`dot ${props.pill.tone}`} classList={{ live: props.pill.live }} />
         <span class="what">{props.pill.text}</span>
         <Show when={props.active}>
@@ -1011,6 +1116,18 @@ function Rail(props: {
         <Show when={props.sample}>
           <span class="mode-tag" data-sample>Sample data, no node</span>
         </Show>
+        <button
+          type="button"
+          class="profile-avatar"
+          data-profile
+          disabled={!props.active}
+          aria-label="Open profile and settings"
+          title="Profile and settings"
+          onClick={() => props.onProfile()}
+        >
+          <span class="avatar-mark" aria-hidden="true">{initials()}</span>
+          <span class="avatar-label">You</span>
+        </button>
       </div>
     </nav>
   );
@@ -1023,7 +1140,7 @@ function TrackHead(props: { title: string; sub?: JSX.Element; onContext: () => v
     <header class="track-head">
       <h1>{props.title}</h1>
       <div class="sub">{props.sub}</div>
-      <button class="quiet context-toggle" onClick={() => props.onContext()}>Body</button>
+      <button class="quiet context-toggle" onClick={() => props.onContext()}>Settings</button>
     </header>
   );
 }
@@ -1098,11 +1215,12 @@ function Conversation(props: {
     <>
       <TrackHead title={props.name} sub={sub()} onContext={props.onContext} />
       <div class="stream" ref={stream} data-stream>
+        <div class="chat-column">
         <Show when={props.introduced}>
           {(c) => (
             <p class="day" data-introduced={c().node_id}>
-              Opened from {props.name}’s signed introduction. Estimated from their card: admission {sats(allIn(c().admission_msat))} sats including {feeCeiling(routingFee(c().admission_msat))}, each
-              message {sats(allIn(c().message_msat))} sats including {feeCeiling(routingFee(c().message_msat))} (estimated ceilings). You confirm their node’s own quote before anything is paid, and every
+              Opened from {props.name}’s signed introduction. Estimated from their card: admission {fmtAmount(allIn(c().admission_msat))} including {feeCeiling(routingFee(c().admission_msat))}, each
+              message {fmtAmount(allIn(c().message_msat))} including {feeCeiling(routingFee(c().message_msat))} (estimated ceilings). You confirm their node’s own quote before anything is paid, and every
               message pays.
             </p>
           )}
@@ -1157,6 +1275,7 @@ function Conversation(props: {
         <Show when={props.error}>
           <p class="err-note">{props.error}</p>
         </Show>
+        </div>
       </div>
 
       <Composer
@@ -1723,13 +1842,13 @@ function Composer(props: {
           return {
             msat: q.total_msat,
             estimate: false,
-            basis: `${props.name}’s own quote: ${sats(q.admission_msat)} sats to open their door, then ${sats(q.message_msat)} for this message; ${feeCeiling(q.max_routing_fee_msat ?? 0)}`,
+            basis: `${props.name}’s own quote: ${fmtAmount(q.admission_msat)} to open their door, then ${fmtAmount(q.message_msat)} for this message; ${feeCeiling(q.max_routing_fee_msat ?? 0)}`,
           };
         }
         const c = props.cost;
         if (!c) return { msat: null, estimate: false, basis: room() ? 'Reading each member’s price…' : 'Reading their price…' };
         const basis = doorWanted()
-          ? `${c.basis}. First contact also pays their admission price once, at most ${sats(ADMISSION_MAX_MSAT)} sats`
+          ? `${c.basis}. First contact also pays their admission price once, at most ${fmtAmount(ADMISSION_MAX_MSAT)}`
           : c.basis;
         return { msat: c.msat, estimate: c.estimate || doorWanted(), basis };
       }
@@ -1935,10 +2054,20 @@ function Composer(props: {
       }}
     >
       <Show when={modes().length > 1}>
-        <div class="modes" role="tablist" aria-label="What to send">
+        <div class="composer-actions" role="toolbar" aria-label="What to send">
           <For each={modes()}>
             {(m) => (
-              <button type="button" role="tab" data-composer-mode={m} aria-selected={mode() === m} onClick={() => { composerRevision++; setMode(m); setNote(null); }}>
+              <button
+                type="button"
+                class="composer-action"
+                data-composer-mode={m}
+                aria-pressed={mode() === m}
+                onClick={() => {
+                  composerRevision++;
+                  setMode(m);
+                  setNote(null);
+                }}
+              >
                 {{ message: 'Message', pay: 'Pay', request: 'Request', file: 'File' }[m]}
               </button>
             )}
@@ -1948,23 +2077,86 @@ function Composer(props: {
 
       <Switch>
         <Match when={mode() === 'message'}>
-          <textarea
-            rows={2}
-            placeholder={`Message ${props.name}`}
-            value={draft()}
-            onInput={(e) => setDraft(e.currentTarget.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-                e.preventDefault();
-                void submit();
-              }
-            }}
-            aria-label={`Message ${props.name}`}
-          />
+          <div class="composer-main">
+            <Show when={!room()}>
+              <button
+                type="button"
+                class="attach soft"
+                data-attach
+                aria-label="Attach a file"
+                title="Attach a file"
+                onClick={() => { composerRevision++; setMode('file'); setNote(null); }}
+              >
+                +
+              </button>
+            </Show>
+            <textarea
+              rows={1}
+              placeholder={`Message ${props.name}`}
+              value={draft()}
+              onInput={(e) => setDraft(e.currentTarget.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                  e.preventDefault();
+                  void submit();
+                }
+              }}
+              aria-label={`Message ${props.name}`}
+            />
+            <button type="submit" class="primary soft" disabled={disabled()} data-send>
+              {label()}
+            </button>
+          </div>
+        </Match>
+        <Match when={mode() === 'file'}>
+          <div class="composer-main">
+            <button
+              type="button"
+              class="attach soft"
+              data-attach
+              aria-label="Attach a file"
+              title="Attach a file"
+              onClick={() => fileInput?.click()}
+            >
+              +
+            </button>
+            <input
+              ref={(el) => { fileInput = el; }}
+              type="file"
+              class="sr-only"
+              data-file-input
+              onChange={(e) => {
+                composerRevision++;
+                setFile(e.currentTarget.files?.[0] ?? null);
+              }}
+              aria-label="File to send"
+            />
+            <div class="file-chip" data-file-chip>
+              <Show when={file()} fallback={<span class="hint">Choose a file for {props.name}</span>}>
+                {(f) => <span class="file-name">{f().name}</span>}
+              </Show>
+              <button
+                type="button"
+                class="link"
+                onClick={() => {
+                  composerRevision++;
+                  setFile(null);
+                  if (fileInput) fileInput.value = '';
+                  setMode('message');
+                }}
+              >
+                Remove
+              </button>
+              <span class="hint">Up to 1.4 MB · pays like a message</span>
+            </div>
+            <button type="submit" class="primary soft" disabled={disabled()} data-send>
+              {label()}
+            </button>
+          </div>
         </Match>
         <Match when={mode() === 'pay'}>
           <div class="fields">
-            <div class="modes small" role="tablist" aria-label="How to pay">
+            <div class="modes soft small" role="tablist" aria-label="How to pay">
               <button type="button" role="tab" aria-selected={payKind() === 'invoice'} onClick={() => { composerRevision++; setPayKind('invoice'); }}>Invoice</button>
               <button type="button" role="tab" aria-selected={payKind() === 'keysend'} onClick={() => { composerRevision++; setPayKind('keysend'); }}>Direct</button>
             </div>
@@ -1982,38 +2174,64 @@ function Composer(props: {
             >
               <textarea data-pay-invoice rows={2} placeholder={`Paste an invoice from ${props.name}`} value={bolt11()} onInput={(e) => setBolt11(e.currentTarget.value)} aria-label="Lightning invoice" />
             </Show>
+            <div class="composer-bar">
+              <div class="cost" data-cost>
+                <span class="label">Cost to send</span>
+                <Show when={shown().msat !== null} fallback={<span class="sats">…</span>}>
+                  <span class="sats" data-cost-msat={shown().msat!}>
+                    {shown().estimate ? '≈ ' : ''}
+                    {sats(shown().msat!)}
+                    <span class="unit">{satUnit(shown().msat!)}</span>
+                  </span>
+                </Show>
+                <span class="basis" title={shown().basis}>{shown().basis}</span>
+              </div>
+              <button type="submit" class="primary soft" disabled={disabled()} data-send>
+                {label()}
+              </button>
+            </div>
           </div>
         </Match>
         <Match when={mode() === 'request'}>
-          <div class="row fields">
-            <input data-request-amount inputmode="numeric" placeholder="Sats to receive" value={amount()} onInput={(e) => setAmount(e.currentTarget.value)} aria-label="Sats to receive" />
-            <input data-request-note placeholder="What it is for (optional)" value={memo()} onInput={(e) => setMemo(e.currentTarget.value)} aria-label="What it is for" />
-          </div>
-        </Match>
-        <Match when={mode() === 'file'}>
           <div class="fields">
-            <input ref={fileInput} type="file" data-file-input onChange={(e) => { composerRevision++; setFile(e.currentTarget.files?.[0] ?? null); }} aria-label="File to send" />
-            <span class="hint">Up to 1.4 MB · to {props.name} only · pays like a message.</span>
+            <div class="row">
+              <input data-request-amount inputmode="numeric" placeholder="Sats to receive" value={amount()} onInput={(e) => setAmount(e.currentTarget.value)} aria-label="Sats to receive" />
+              <input data-request-note placeholder="What it is for (optional)" value={memo()} onInput={(e) => setMemo(e.currentTarget.value)} aria-label="What it is for" />
+            </div>
+            <div class="composer-bar">
+              <div class="cost" data-cost>
+                <span class="label">You receive</span>
+                <Show when={shown().msat !== null} fallback={<span class="sats">…</span>}>
+                  <span class="sats" data-cost-msat={shown().msat!}>
+                    {sats(Math.round((satsInput(amount()) ?? 0) * 1000))}
+                    <span class="unit">{satUnit(Math.round((satsInput(amount()) ?? 0) * 1000) || 1000)}</span>
+                  </span>
+                </Show>
+                <span class="basis" title={shown().basis}>{shown().basis}</span>
+              </div>
+              <button type="submit" class="primary soft" disabled={disabled()} data-send>
+                {label()}
+              </button>
+            </div>
           </div>
         </Match>
       </Switch>
 
-      <div class="composer-bar">
-        <div class="cost" data-cost>
-          <span class="label">{mode() === 'request' ? 'You receive' : 'Cost to send'}</span>
-          <Show when={shown().msat !== null} fallback={<span class="sats">…</span>}>
-            <span class="sats" data-cost-msat={shown().msat!}>
-              {shown().estimate ? '≈ ' : ''}
-              {mode() === 'request' ? sats(Math.round((satsInput(amount()) ?? 0) * 1000)) : sats(shown().msat!)}
-              <span class="unit">{mode() === 'request' ? 'sats' : satUnit(shown().msat!)}</span>
-            </span>
-          </Show>
-          <span class="basis" title={shown().basis}>{shown().basis}</span>
+      <Show when={mode() === 'message' || mode() === 'file'}>
+        <div class="composer-bar cost-only">
+          <div class="cost" data-cost>
+            <span class="label">Cost to send</span>
+            <Show when={shown().msat !== null} fallback={<span class="sats">…</span>}>
+              <span class="sats" data-cost-msat={shown().msat!}>
+                {shown().estimate ? '≈ ' : ''}
+                {sats(shown().msat!)}
+                <span class="unit">{satUnit(shown().msat!)}</span>
+              </span>
+            </Show>
+            <span class="basis" title={shown().basis}>{shown().basis}</span>
+          </div>
         </div>
-        <button type="submit" class="primary" disabled={disabled()} data-send>
-          {label()}
-        </button>
-      </div>
+      </Show>
 
       <Show when={readmitPrice()}>
         {(p) => (
@@ -2271,7 +2489,7 @@ function BudgetBar(props: {
                     data-preset={p.id}
                     onClick={() => props.onPreset(p.id)}
                   >
-                    {PRESET_NAME[p.id]} · {sats(p.ceiling_msat)} sats a day
+                    {PRESET_NAME[p.id]} · {fmtAmount(p.ceiling_msat)} a day
                   </button>
                 )}
               </For>
@@ -2279,7 +2497,7 @@ function BudgetBar(props: {
             <Show when={props.preset}>
               {(p) => (
                 <p class="hint">
-                  Up to {sats(p().contact_msat)} sats a day per contact and {sats(p().room_msat)} per room, which you can lower any time.
+                  Up to {fmtAmount(p().contact_msat)} a day per contact and {fmtAmount(p().room_msat)} per room, which you can lower any time.
                   Each message still carries its own price cap. The approval lasts 24 hours and is never saved; the budgets and the tally are.
                 </p>
               )}
@@ -2292,8 +2510,8 @@ function BudgetBar(props: {
               <Show when={st().again ? props.door : null}>
                 {(q) => (
                   <p class="door-quote" data-door-quote={q().total_msat} data-readmit>
-                    {who()} reconnected and asks to be admitted again: <strong>{sats(q().admission_msat)} sats</strong>, then{' '}
-                    <strong>{sats(q().message_msat)} sats</strong> for this message, <strong>{sats(q().total_msat)} sats</strong> in
+                    {who()} reconnected and asks to be admitted again: <strong>{fmtAmount(q().admission_msat)}</strong>, then{' '}
+                    <strong>{fmtAmount(q().message_msat)}</strong> for this message, <strong>{fmtAmount(q().total_msat)}</strong> in
                     all, including {feeCeiling(q().max_routing_fee_msat ?? 0)}. Nothing is paid until you send.
                   </p>
                 )}
@@ -2301,9 +2519,9 @@ function BudgetBar(props: {
               <Show when={st().again ? null : props.door}>
                 {(q) => (
                   <p class="door-quote" data-door-quote={q().total_msat}>
-                    {who()}’s door: <strong>{sats(q().admission_msat)} sats</strong> once to reach them, then{' '}
-                    <strong>{sats(q().message_msat)} sats</strong> a message. This first message costs{' '}
-                    <strong>{sats(q().total_msat)} sats</strong> in all, including {feeCeiling(q().max_routing_fee_msat ?? 0)}. Nothing is paid until you send.
+                    {who()}’s door: <strong>{fmtAmount(q().admission_msat)}</strong> once to reach them, then{' '}
+                    <strong>{fmtAmount(q().message_msat)}</strong> a message. This first message costs{' '}
+                    <strong>{fmtAmount(q().total_msat)}</strong> in all, including {feeCeiling(q().max_routing_fee_msat ?? 0)}. Nothing is paid until you send.
                   </p>
                 )}
               </Show>
@@ -2331,7 +2549,7 @@ function BudgetBar(props: {
                       data-first-budget={msat}
                       onClick={() => props.onFirstPick(msat)}
                     >
-                      {sats(msat)} sats a day<Show when={worth(msat)}> · {worth(msat)}</Show>
+                      {fmtAmount(msat)} a day<Show when={worth(msat)}> · {worth(msat)}</Show>
                     </button>
                   )}
                 </For>
@@ -2343,7 +2561,7 @@ function BudgetBar(props: {
           {(st) => (
             <div class="approval budget-used" data-budget-used="contact">
               <p>
-                <strong>Budget for {who()} used up.</strong> {sats(st().spent)} of {sats(st().limit)} sats in the last 24 hours, and this
+                <strong>Budget for {who()} used up.</strong> {sats(st().spent)} of {fmtAmount(st().limit)} in the last 24 hours, and this
                 message costs {props.priceMsat === null ? '…' : sats(props.priceMsat)}. It frees up as older payments pass 24 hours.
               </p>
               <Show
@@ -2352,14 +2570,14 @@ function BudgetBar(props: {
                   <p class="hint">
                     This budget already equals your app all-in limit.{' '}
                     <button type="button" class="link" data-budget-raise-total onClick={() => void props.actions.approveBudget(Math.min(props.budget.ceiling_msat * 2, props.budget.max_daily_msat), props.budget.preset)}>
-                      Raise the app all-in limit to {sats(Math.min(props.budget.ceiling_msat * 2, props.budget.max_daily_msat))} sats
+                      Raise the app all-in limit to {fmtAmount(Math.min(props.budget.ceiling_msat * 2, props.budget.max_daily_msat))}
                     </button>
                   </p>
                 }
               >
                 {(to) => (
                   <button type="button" class="primary small" data-budget-raise onClick={() => void props.actions.setBudget(props.target, props.room, to())}>
-                    Raise to {sats(to())} sats a day
+                    Raise to {fmtAmount(to())} a day
                   </button>
                 )}
               </Show>
@@ -2370,13 +2588,13 @@ function BudgetBar(props: {
           {(st) => (
             <div class="approval budget-used" data-budget-used="total">
               <p>
-                <strong>Your app all-in limit is used up.</strong> {sats(st().spent)} of {sats(st().ceiling)} sats in the last 24 hours. Raising
+                <strong>Your app all-in limit is used up.</strong> {sats(st().spent)} of {fmtAmount(st().ceiling)} in the last 24 hours. Raising
                 it is a new approval.
               </p>
               <Show when={st().raiseTo}>
                 {(to) => (
                   <button type="button" class="primary small" data-budget-raise-total onClick={() => void props.actions.approveBudget(to(), props.budget.preset)}>
-                    Approve {sats(to())} sats a day
+                    Approve {fmtAmount(to())} a day
                   </button>
                 )}
               </Show>
@@ -2388,7 +2606,7 @@ function BudgetBar(props: {
             <p class="spend-line" data-budget-line>
               <span class="dot ok" />
               <span class="line-text">
-                Pays automatically · {sats(st().spent)} of {sats(st().limit)} sats to {who()} in 24 h · approval ends in{' '}
+                Pays automatically · {sats(st().spent)} of {fmtAmount(st().limit)} to {who()} in 24 h · approval ends in{' '}
                 {hoursLeft(props.budget.autopay.open_until_ms, props.now, props.budget.window_ms)} h ·{' '}
                 <button type="button" class="link" data-pause-all onClick={() => void props.actions.pauseAll()}>Pause app payments</button>
               </span>
@@ -2461,16 +2679,16 @@ function BudgetPanel(props: {
             <div class="tally" data-tally>
               <span class="label">App all-in payments in the last 24 hours</span>
               <span class="sats big" data-tally-total>
-                {sats(b().spent_msat)} <span class="unit">/ {sats(b().ceiling_msat)} sats</span>
+                {sats(b().spent_msat)} <span class="unit">/ {fmtAmount(b().ceiling_msat)}</span>
               </span>
               <span class="meter" aria-hidden="true"><span style={{ width: pct(b().spent_msat, b().ceiling_msat) }} /></span>
               <Show when={b().unsettled_msat > 0}>
-                <span class="hint" data-unsettled>Includes {sats(b().unsettled_msat)} sats whose outcome is not known yet, counted at their price cap.</span>
+                <span class="hint" data-unsettled>Includes {fmtAmount(b().unsettled_msat)} whose outcome is not known yet, counted at their price cap.</span>
               </Show>
               <Show when={b().node_grant}>
                 {(g) => (
                   <span class="hint" data-node-grant>
-                    Your finite node grant allows {sats(g().remaining_msat)} of {sats(g().budget_msat)} sats more, at most {sats(g().per_call_max_msat)} per payment, for {timeLeft(g().expires_at_ms, props.now)}.
+                    Your finite node grant allows {sats(g().remaining_msat)} of {fmtAmount(g().budget_msat)} more, at most {sats(g().per_call_max_msat)} per payment, for {timeLeft(g().expires_at_ms, props.now)}.
                   </span>
                 )}
               </Show>
@@ -2504,7 +2722,7 @@ function BudgetPanel(props: {
                       <span class="who">{directPaymentName(row.target) ?? props.nameOf(row.target, row.room)}</span>
                       <span class="sats" data-row-tally>
                         {sats(row.spent_msat)}
-                        <span class="unit">{row.limit_msat === null ? 'sats, approved by hand' : `/ ${sats(row.limit_msat)} sats`}</span>
+                        <span class="unit">{row.limit_msat === null ? `${satUnit(2000)}, approved by hand` : `/ ${fmtAmount(row.limit_msat)}`}</span>
                       </span>
                     </div>
                     <Show when={row.limit_msat !== null}>
@@ -2915,7 +3133,7 @@ function NewTrack(props: {
                 </svg>
               </Show>
               <p data-intro-prices>
-                Admission: <strong>{sats(allIn(m().admission_msat))} sats</strong> including {feeCeiling(routingFee(m().admission_msat))}. Each message: <strong>{sats(allIn(m().message_msat))} sats</strong> including {feeCeiling(routingFee(m().message_msat))} (estimated ceilings).
+                Admission: <strong>{fmtAmount(allIn(m().admission_msat))}</strong> including {feeCeiling(routingFee(m().admission_msat))}. Each message: <strong>{fmtAmount(allIn(m().message_msat))}</strong> including {feeCeiling(routingFee(m().message_msat))} (estimated ceilings).
               </p>
               <p class="hint">
                 Valid for about {minutesLeft(m().expires_at)} min. <button type="button" class="link" onClick={loadMine}>New card</button>
@@ -2925,18 +3143,18 @@ function NewTrack(props: {
                 fallback={
                   <Show when={sponsor()?.enabled}>
                     <button type="button" class="quiet" data-starter-include disabled={props.moneyBlocked} onClick={() => void includeStarter()}>
-                      {open() ? `Include starter bitcoin · ${sats(sponsor()!.gift_msat)} sats` : 'Include starter bitcoin · approve first'}
+                      {open() ? `Include starter bitcoin · ${fmtAmount(sponsor()!.gift_msat)}` : 'Include starter bitcoin · approve first'}
                     </button>
                     <p class="hint" data-starter-purse>
                       You fund it from your own node, only after you approve their request. {sats(sponsor()!.purse_used_msat)} of{' '}
-                      {sats(sponsor()!.purse_msat)} sats used in the last 24 hours.
+                      {fmtAmount(sponsor()!.purse_msat)} used in the last 24 hours.
                     </p>
                   </Show>
                 }
               >
                 {(st) => (
                   <p data-starter-offered>
-                    Starter bitcoin: up to <strong>{sats(st().gift_msat)} sats</strong>, after you approve their request. It is theirs
+                    Starter bitcoin: up to <strong>{fmtAmount(st().gift_msat)}</strong>, after you approve their request. It is theirs
                     once it arrives; every message still pays.
                   </p>
                 )}
@@ -2983,7 +3201,7 @@ function NewTrack(props: {
                   <div class="artifact" data-starter-candidate={c().newcomer}>
                     <span class="kind">Starter bitcoin · {shortId(c().newcomer)}</span>
                     <p>
-                      Lightning gift: <strong>{sats(c().gift_msat)} sats</strong>. Network fee: at most {sats(c().fee_max_msat)} sats.
+                      Lightning gift: <strong>{fmtAmount(c().gift_msat)}</strong>. Network fee: at most {fmtAmount(c().fee_max_msat)}.
                     </p>
                     <span class="hint">
                       They own it once it arrives and can keep or withdraw it. It is not a pass: their messages still pay.
@@ -3008,7 +3226,7 @@ function NewTrack(props: {
                         disabled={requestLocked() || theirCode().length !== 6}
                         onClick={() => void prepareGift()}
                       >
-                        {giving() ? 'Preparing…' : `Sponsor up to ${sats(c().gift_msat + c().fee_max_msat)} sats`}
+                        {giving() ? 'Preparing…' : `Sponsor up to ${fmtAmount(c().gift_msat + c().fee_max_msat)}`}
                       </button>
                       <button type="button" class="quiet" data-starter-cancel disabled={giving() || cancelling() || giftPending()} onClick={() => void cancelKit()}>
                         Cancel
@@ -3033,7 +3251,7 @@ function NewTrack(props: {
                 {(g) => (
                   <p class={g().state === 'funded' ? 'ok-note' : 'err-note'} data-starter-gift={g().state}>
                     {g().state === 'funded'
-                      ? `Sent ${sats(g().paid_msat)} sats. It is theirs now.`
+                      ? `Sent ${fmtAmount(g().paid_msat)}. It is theirs now.`
                       : g().state === 'paying' || g().state === 'unknown'
                         ? 'Payment pending — do not send again. Your node keeps it reserved until the outcome is known.'
                         : `Gift ${g().state}. This kit is closed.`}
@@ -3078,13 +3296,13 @@ function NewTrack(props: {
                   <span class="kind">Door card · {shortId(c().node_id)}</span>
                   <span>Signed by the key it names.</span>
                   <p data-door-prices>
-                    Admission: <strong>{sats(allIn(c().admission_msat))} sats</strong> including {feeCeiling(routingFee(c().admission_msat))}. Each message: <strong>{sats(allIn(c().message_msat))} sats</strong> including {feeCeiling(routingFee(c().message_msat))} (estimated ceilings).
+                    Admission: <strong>{fmtAmount(allIn(c().admission_msat))}</strong> including {feeCeiling(routingFee(c().admission_msat))}. Each message: <strong>{fmtAmount(allIn(c().message_msat))}</strong> including {feeCeiling(routingFee(c().message_msat))} (estimated ceilings).
                   </p>
                   <Show when={c().starter}>
                     {(st) => (
                       <div class="door-starter" data-door-starter>
                         <p>
-                          Starter bitcoin available after they approve: <strong>{sats(st().gift_msat)} sats</strong>.
+                          Starter bitcoin available after they approve: <strong>{fmtAmount(st().gift_msat)}</strong>.
                         </p>
                         <Show
                           when={ask()}
@@ -3114,7 +3332,7 @@ function NewTrack(props: {
                               </p>
                               <p class="hint" data-starter-status={arrived() ? 'received' : 'waiting'}>
                                 {arrived()
-                                  ? `Received ${sats(arrived()!.amount_msat)} sats in your own node.`
+                                  ? `Received ${fmtAmount(arrived()!.amount_msat)} in your own node.`
                                   : 'Waiting for starter bitcoin…'}
                               </p>
                               <code class="address" data-starter-request>{a().request}</code>
@@ -3341,13 +3559,13 @@ function WalletPanel(props: { moneyBlocked: boolean; wallet: WalletOverview | nu
               <div class="big-balance">
                 <span class="sats" data-balance>
                   {sats(w().balance_msat)}
-                  <span class="unit">sats</span>
+                  <span class="unit">{satUnit(w().balance_msat)}</span>
                 </span>
                 <p class="hint">Lightning and spendable on-chain together. This node version reports them as one figure.</p>
               </div>
               <dl class="facts">
                 <dt>{props.moneyBlocked ? 'Lightning outbound (money not ready)' : 'Lightning, ready to send'}</dt>
-                <dd class="sats">{sats(w().lightning_outbound_msat)}</dd>
+                <dd class="sats">{fmtAmount(w().lightning_outbound_msat)}</dd>
                 <dt>Open channels</dt>
                 <dd class="sats">
                   {active()} of {w().channels.length} active
@@ -3367,8 +3585,8 @@ function WalletPanel(props: { moneyBlocked: boolean; wallet: WalletOverview | nu
                         <div style={{ width: `${share()}%`, opacity: c.active ? 1 : 0.4 }} />
                       </div>
                       <div class="row">
-                        <span class="sats">{sats(c.local_balance_msat)} yours</span>
-                        <span class="sats">{sats(c.remote_balance_msat)} theirs</span>
+                        <span class="sats">{fmtAmount(c.local_balance_msat)} yours</span>
+                        <span class="sats">{fmtAmount(c.remote_balance_msat)} theirs</span>
                       </div>
                     </div>
                   );

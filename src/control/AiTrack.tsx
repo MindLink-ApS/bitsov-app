@@ -27,7 +27,7 @@ import {
   type Intent,
   type Proposal,
 } from './ai';
-import { clock, day, sats, satsWhole, satUnit, uptime } from './format';
+import { amount, clock, day, sats, satsWhole, satUnit, uptime } from './format';
 import type { Source } from './source';
 import { asActionError, peerName } from './state';
 import type {
@@ -463,7 +463,7 @@ function CardView(props: { card: Card; nameOf: (id: string) => string; now: numb
                 {(b) => (
                   <>
                     <span class="sats big" data-ai-balance>
-                      {fig(b().wallet_balance)} <span class="unit">sats</span>
+                      {value(b().wallet_balance) === null ? fig(b().wallet_balance) : amount(value(b().wallet_balance)!)}
                     </span>
                     <dl class="facts">
                       <dt>Lightning, yours</dt>
@@ -518,10 +518,10 @@ function CardView(props: { card: Card; nameOf: (id: string) => string; now: numb
               </div>
               <div class="row ai-totals">
                 <span>
-                  <span class="label">Spent</span> <span class="sats">{fig(r().sent_total)} sats</span>
+                  <span class="label">Spent</span> <span class="sats">{value(r().sent_total) === null ? fig(r().sent_total) : amount(value(r().sent_total)!)}</span>
                 </span>
                 <span>
-                  <span class="label">Received</span> <span class="sats">{fig(r().received_total)} sats</span>
+                  <span class="label">Received</span> <span class="sats">{value(r().received_total) === null ? fig(r().received_total) : amount(value(r().received_total)!)}</span>
                 </span>
               </div>
               <ul class="ai-payments">
@@ -562,7 +562,7 @@ function ProposalCard(props: { p: Proposal; onPrefill: (p: Proposal) => void }) 
       </Show>
       <Show when={props.p.kind !== 'message'}>
         <span class="sats big">
-          {satsWhole((props.p as { sats: number }).sats)} <span class="unit">sats</span>
+          {amount((props.p as { sats: number }).sats * 1000)}
         </span>
       </Show>
       <span class="hint">
