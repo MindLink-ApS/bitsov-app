@@ -165,6 +165,23 @@ pub fn not_dispatched_refusal(status: u16, body: &str) -> bool {
             .is_some_and(|v| v["code"] == "not_dispatched")
 }
 
+/// Genome `readmit_then_pay` (compose.rs): after a reconnect or restart the
+/// recipient asks for admission again, and the node refuses to pay it under
+/// any confirmed cap (quoted capped re-admission, genome #111, was closed
+/// fail-closed). `409 price_cap_exceeded` with this wording is that refusal,
+/// not a changed price: a fresh quote under the same cap is refused the same way.
+pub fn readmission_capped_refusal(status: u16, body: &str) -> bool {
+    status == 409
+        && serde_json::from_str::<serde_json::Value>(body).ok().is_some_and(|v| {
+            v["code"] == "price_cap_exceeded"
+                && v["error"].as_str().is_some_and(|e| e.contains("requires admission again on a new connection"))
+        })
+}
+
+pub const READMISSION_CAPPED: &str = "Not sent - nothing was paid. This contact asks your node to pay their admission again (every reconnect or node restart starts unpaid), and your node cannot pay that under the app's all-in cap yet. The app will not retry; sending the same message again reuses its operation, so it can never be paid twice.";
+
+pub const READMISSION_CAPPED_RETRY: &str = "Not delivered - nothing new was paid. This contact asks your node to pay their admission again (every reconnect or node restart starts unpaid), and your node cannot pay that under an app cap yet. The paid message stays here; retry later, or stop retrying.";
+
 /// Neutral proven-non-dispatch copy. Fee-limit wording is added only when the
 /// node's reason identifies a route/fee ceiling (see [`not_dispatched_message`]).
 pub const NOT_DISPATCHED_MESSAGE: &str = "Not sent - nothing was paid.";
@@ -1112,6 +1129,16 @@ pub fn is_scope_refusal(status: u16) -> bool {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn readmission_capped_refusal_matches_only_the_genome_readmission_refusal() {
+        let genome = r#"{"code":"price_cap_exceeded","error":"ab requires admission again on a new connection, and the confirmed cap covers the message only; no invoice was paid."}"#;
+        assert!(readmission_capped_refusal(409, genome));
+        assert!(!readmission_capped_refusal(400, genome));
+        assert!(!readmission_capped_refusal(409, r#"{"code":"price_cap_exceeded","error":"total exceeds cap"}"#));
+        assert!(!readmission_capped_refusal(409, r#"{"code":"operation_mismatch","error":"requires admission again on a new connection"}"#));
+        assert!(!readmission_capped_refusal(409, "not json"));
+    }
 
     const A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";

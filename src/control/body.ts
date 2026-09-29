@@ -324,7 +324,7 @@ export function membraneSeed(log: MembraneEntry[], events: MembraneEvent[], ctx:
 /**
  * What the stream shows at the door for one membrane entry, and in which track:
  * a first contact admitted by payment, a verified sender refused at your door,
- * or your send refused at their price. Other entries stay in the Body panel.
+ * or your send refused at their price or door. Other entries stay in the Body panel.
  */
 export function doorCard(entry: MembraneEntry, doorMsat: number | null): { track: string; at: number; card: DoorCard } | null {
   if (!entry.track || entry.verdict === 'readmitted') return null;
@@ -340,7 +340,7 @@ export function doorCard(entry: MembraneEntry, doorMsat: number | null): { track
       card: { side: 'in', verdict: 'refused', sender: entry.sender, code: entry.code, required_msat: entry.required_msat ?? null, paid_msat: entry.paid_msat ?? null },
     };
   }
-  if (entry.kind === 'price') {
+  if (entry.kind === 'price' || (entry.kind === 'door' && entry.code === 'readmission_capped')) {
     return { track: entry.track, at: entry.at, card: { side: 'out', verdict: 'refused', code: entry.code, detail: entry.detail, cap_msat: null } };
   }
   return null;
@@ -356,6 +356,8 @@ function trackOfMessage(threads: Threads, id: string): string | null {
 /** Which host refusals are the membrane's business. Asks (first contact, approval) are not refusals. */
 export function outboundKind(e: ActionError): OutboundKind | null {
   if (e.code === 'price_changed' || e.code === 'price_cap_exceeded') return 'price';
+  // Their door wants admission again; no price under the cap can pay it yet.
+  if (e.code === 'readmission_capped') return 'door';
   if (['budget_paused', 'budget_exhausted', 'ceiling_exhausted'].includes(e.code)) return 'setpoint';
   if (e.code.startsWith('grant_') && e.code !== 'grant_unknown') return 'setpoint';
   return null;

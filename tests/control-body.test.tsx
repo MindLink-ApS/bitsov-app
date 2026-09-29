@@ -88,6 +88,7 @@ describe('membrane', () => {
 
   it('takes price and setpoint refusals, never the owner’s questions', () => {
     expect(outboundKind({ code: 'price_cap_exceeded', message: '' })).toBe('price');
+    expect(outboundKind({ code: 'readmission_capped', message: '' })).toBe('door');
     expect(outboundKind({ code: 'budget_exhausted', message: '' })).toBe('setpoint');
     expect(outboundKind({ code: 'grant_exhausted', message: '' })).toBe('setpoint');
     for (const code of ['first_contact', 'budget_needed', 'spend_locked', 'spend_unknown', 'grant_unknown', 'node'] as const) {

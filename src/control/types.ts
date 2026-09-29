@@ -296,6 +296,9 @@ export type ActionError = {
     // resolved the payment; the retry's text differs from the send it retries;
     // paid and refused for good. None of them is ever re-sent on its own.
     | 'payment_unknown' | 'operation_mismatch' | 'failed_paid'
+    // The contact asks for admission again after a reconnect/restart; the node
+    // pays no re-admission under a cap (genome readmit_then_pay). Nothing paid.
+    | 'readmission_capped'
     | 'not_ready' | 'app_not_ready'
     | 'invalid'
     | 'node';

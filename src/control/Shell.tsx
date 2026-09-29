@@ -501,7 +501,7 @@ export function ControlCenter(props: Props) {
     // A send that did not cross (price, setpoint) is also a membrane reading. A
     // price refusal stands at their door in the track instead of a failure row.
     if (!outcome.ok) foldMembrane((log) => membraneRefused(log, outcome.error, trackKey(t), Date.now()));
-    if (!outcome.ok && outcome.error.code !== 'not_ready' && !needsApproval(outcome.error) && !isBudgetStop(outcome.error) && outboundKind(outcome.error) !== 'price') {
+    if (!outcome.ok && outcome.error.code !== 'not_ready' && !needsApproval(outcome.error) && !isBudgetStop(outcome.error) && outboundKind(outcome.error) !== 'price' && outcome.error.code !== 'readmission_capped') {
       addArtifact(t, { type: 'failed', action: FAILURE_LABEL[outcome.error.code] ?? action, error: outcome.error });
     }
     return outcome;
@@ -1244,7 +1244,7 @@ function DoorView(props: { card: DoorCard; at: number; nameOf: (id: string) => s
     </>
   );
   return (
-    <div class="door-card" data-door={`${c.side}-${c.verdict}`} classList={{ refused: c.verdict === 'refused' }} role="note">
+    <div class="door-card" data-door={`${c.side}-${c.verdict}`} data-code={c.side === 'out' ? c.code : undefined} classList={{ refused: c.verdict === 'refused' }} role="note">
       <p class="door-rule">
         <span>{clock(props.at)} · door</span>
       </p>
@@ -1278,9 +1278,19 @@ function DoorView(props: { card: DoorCard; at: number; nameOf: (id: string) => s
         <Match when={c.side === 'out' && (c as Extract<DoorCard, { side: 'out' }>)}>
           {(x) => (
             <>
-              <p class="door-head">Not sent · their price is above your cap</p>
-              <p class="door-proof">{x().detail}</p>
-              <p class="door-note">Nothing was paid. Reopen the track to read their current price.</p>
+              <Show
+                when={x().code === 'readmission_capped'}
+                fallback={
+                  <>
+                    <p class="door-head">Not sent · their price is above your cap</p>
+                    <p class="door-proof">{x().detail}</p>
+                    <p class="door-note">Nothing was paid. Reopen the track to read their current price.</p>
+                  </>
+                }
+              >
+                <p class="door-head">Not sent · they ask for admission again</p>
+                <p class="door-proof">{x().detail}</p>
+              </Show>
             </>
           )}
         </Match>
