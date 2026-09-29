@@ -70,6 +70,8 @@
     "allow-file-price",
     "allow-file-send",
     "allow-voice-note-fetch",
+    "allow-call-quote",
+    "allow-call-signal",
     "allow-ai-read",
     "allow-ai-providers",
     "allow-ai-disclose",

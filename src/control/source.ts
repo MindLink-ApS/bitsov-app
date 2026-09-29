@@ -26,6 +26,8 @@ import type {
   TopicRead,
   FileReceipt,
   VoiceBlob,
+  CallQuote,
+  CallReceipt,
   InvoiceAmount,
   InvoiceView,
   InviteView,
@@ -154,6 +156,10 @@ export interface Source {
   fileSend(recipient: string, filename: string, mimeType: string, dataB64: string, maxMsat: number, firstContactMsat?: number): Promise<FileReceipt>;
   /** Read-only: a received voice note (kind 200, audio/*) by its message id. Never pays. */
   voiceNote(messageId: string): Promise<VoiceBlob>;
+  /** Read-only: what calling this contact costs. */
+  callQuote(peer: string): Promise<CallQuote>;
+  /** One paid call signal (kinds 400-403) under the message budget rules. */
+  callSignal(peer: string, kind: number, plaintext: string, maxMsat: number): Promise<CallReceipt>;
   // AI track: the host reads through its broker; a remote model gets only a body the owner saw
   aiRead(topic: AiTopic, sinceMs: number | null): Promise<TopicRead>;
   aiProviders(): Promise<ProviderView[]>;
@@ -241,6 +247,8 @@ export const hostSource: Source = {
   fileSend: (recipient, filename, mimeType, dataB64, maxMsat, firstContactMsat) =>
     invoke<FileReceipt>('file_send', { recipient, filename, mime_type: mimeType, data_b64: dataB64, max_msat: maxMsat, first_contact_msat: firstContactMsat ?? null }),
   voiceNote: (messageId) => invoke<VoiceBlob>('voice_note_fetch', { message_id: messageId }),
+  callQuote: (peer) => invoke<CallQuote>('call_quote', { peer }),
+  callSignal: (peer, kind, plaintext, maxMsat) => invoke<CallReceipt>('call_signal', { peer, kind, plaintext, max_msat: maxMsat }),
   aiRead: (topic, sinceMs) => invoke<TopicRead>('ai_read', { topic, since_ms: sinceMs }),
   aiProviders: () => invoke<ProviderView[]>('ai_providers'),
   aiDisclose: (provider, topic, sinceMs, preset, question) =>

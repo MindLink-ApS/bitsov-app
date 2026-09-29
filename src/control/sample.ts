@@ -1015,6 +1015,8 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
       const pad = (dataB64.match(/=+$/)?.[0].length ?? 0);
       return { message_id: id, recipient: recipient.toLowerCase(), filename, size_bytes: (dataB64.length / 4) * 3 - pad, delivered: true, amount_msat: FILE_PRICE_MSAT, total_msat: allIn(FILE_PRICE_MSAT), max_routing_fee_msat: routingFee(FILE_PRICE_MSAT), sent_at_ms: Date.now(), accepted: true, state: 'acked' };
     },
+    callQuote: () => ok({ offer_msat: 10_000, offer_max_routing_fee_msat: 5000, signal_msat: 1000, signal_max_routing_fee_msat: 5000, call_total_msat: 21_000 }),
+    callSignal: () => refuse('invalid', 'Calls need a real node. Sample data cannot ring anyone.'),
     voiceNote: async (messageId) => {
       const note = voiceNotes.get(messageId);
       return note ? note : refuse('invalid', 'voice note not stored on this node');

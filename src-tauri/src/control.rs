@@ -496,6 +496,44 @@ pub fn price_quote(own: KindPrice, tables: &[PeerPrice], peer: Option<&str>) -> 
     }
 }
 
+/// `call_quote`: what calling this contact costs, before anything is paid.
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+pub struct CallQuote {
+    /// The offer: the callee's per-call admission. `None` when their node does
+    /// not advertise calls (older genome) or its table is stale.
+    pub offer_msat: Option<u64>,
+    pub offer_max_routing_fee_msat: u64,
+    /// Each answer, ICE and hangup: the callee's realtime signal price.
+    pub signal_msat: u64,
+    pub signal_max_routing_fee_msat: u64,
+    /// Offer plus one hangup, all-in: what a call you place costs at most.
+    pub call_total_msat: Option<u64>,
+}
+
+/// `GET /pricing/peers/:id/call`: the callee's live answer (genome asks it).
+#[derive(Deserialize, Debug, Clone)]
+pub struct PeerCallPrice {
+    pub offer_msat: u64,
+    pub signal_msat: u64,
+}
+
+/// The call price the owner sees. `None` offer: their node did not answer
+/// (older genome, offline, or not listed). Principals are floored to the
+/// smallest payment the app makes, as every other send is.
+pub fn call_quote(live: Option<&PeerCallPrice>, own_signal_msat: u64) -> CallQuote {
+    let floor = |m: u64| m.max(crate::act::MIN_PAYMENT_MSAT);
+    let offer = live.map(|p| floor(p.offer_msat));
+    let signal = floor(live.map_or(own_signal_msat, |p| p.signal_msat));
+    let fee = crate::act::routing_fee;
+    CallQuote {
+        offer_msat: offer,
+        offer_max_routing_fee_msat: offer.map(fee).unwrap_or(0),
+        signal_msat: signal,
+        signal_max_routing_fee_msat: fee(signal),
+        call_total_msat: offer.map(|o| o + fee(o) + signal + fee(signal)),
+    }
+}
+
 // ---- inputs -----------------------------------------------------------------
 
 /// A 64-hex node id, lowercased.
@@ -758,6 +796,21 @@ pub async fn run_ws_session(url: &str, emit: &(dyn Fn(LiveEvent) + Send + Sync))
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_call_costs_the_callees_offer_price_then_realtime_signals() {
+        let live = PeerCallPrice { offer_msat: 10_000, signal_msat: 50 };
+        let q = call_quote(Some(&live), 50);
+        assert_eq!(q.offer_msat, Some(10_000));
+        assert_eq!(q.offer_max_routing_fee_msat, 5_000);
+        assert_eq!((q.signal_msat, q.signal_max_routing_fee_msat), (1_000, 5_000));
+        assert_eq!(q.call_total_msat, Some(21_000));
+        // Their node did not answer: no offer, nothing to ring with.
+        let none = call_quote(None, 2_000);
+        assert_eq!((none.offer_msat, none.call_total_msat, none.signal_msat), (None, None, 2_000));
+        let big = call_quote(Some(&PeerCallPrice { offer_msat: 2_000_000, signal_msat: 50 }), 50);
+        assert_eq!(big.offer_max_routing_fee_msat, 10_000);
+    }
 
     const A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const ROOM: &str = "0f8e2b7a-1c3d-4e5f-8a9b-0c1d2e3f4a5b";

@@ -516,6 +516,26 @@ export type FileReceipt = {
   accepted?: boolean;
 };
 
+/** `call_quote`: what calling a contact costs before anything is paid (msat). */
+export type CallQuote = {
+  offer_msat: number | null;
+  offer_max_routing_fee_msat: number;
+  signal_msat: number;
+  signal_max_routing_fee_msat: number;
+  call_total_msat: number | null;
+};
+/** `call_signal`: one paid call signal. */
+export type CallReceipt = {
+  message_id: string;
+  kind: number;
+  amount_msat: number;
+  total_msat: number;
+  max_routing_fee_msat: number;
+  delivered: boolean;
+  accepted: boolean;
+  sent_at_ms: number;
+};
+
 /** `voice_note_fetch`: a received voice note's bytes, for the inline player. */
 export type VoiceBlob = { filename: string; mime_type: string; size_bytes: number; data_b64: string };
 

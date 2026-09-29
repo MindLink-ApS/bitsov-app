@@ -32,6 +32,12 @@ use crate::control::{self, KIND_CHAT};
 
 /// `KIND_FILE_REF` (konsensus-core `kind.rs`): a file sent as a message.
 pub const KIND_FILE_REF: u16 = 200;
+/// 1:1 call signalling (genome kinds 400-403): offer, answer, ICE, hangup.
+/// The offer is the per-call admission, paid at the callee's `call_msat`.
+pub const KIND_CALL_OFFER: u16 = 400;
+pub const KIND_CALL_HANGUP: u16 = 403;
+/// A call signal carries SDP (genome caps it at 16 KiB) plus a small envelope.
+pub const CALL_SIGNAL_MAX_BYTES: usize = 17 * 1024;
 
 /// How long one owner approval lets this app spend.
 pub const SPEND_WINDOW_MS: u64 = 10 * 60 * 1000;
@@ -554,6 +560,33 @@ pub fn compose_body(recipient: &str, is_room: bool, plaintext: &str) -> Result<s
         "kind": KIND_CHAT,
         "plaintext": plaintext,
     }))
+}
+
+/// `/messages/compose` body for one call signal to one contact. The node
+/// checks the payload and the call state again before paying.
+pub fn call_body(recipient: &str, kind: u16, plaintext: &str) -> Result<serde_json::Value, ActionError> {
+    let recipient = control::node_id(recipient).map_err(ActionError::invalid)?;
+    if !(KIND_CALL_OFFER..=KIND_CALL_HANGUP).contains(&kind) {
+        return Err(ActionError::invalid("not a call signal"));
+    }
+    let v: serde_json::Value = serde_json::from_str(plaintext).map_err(|_| ActionError::invalid("the call signal is not JSON"))?;
+    if !v.is_object() || plaintext.len() > CALL_SIGNAL_MAX_BYTES {
+        return Err(ActionError::invalid("the call signal is too large"));
+    }
+    Ok(json!({ "recipient": recipient, "is_room": false, "kind": kind, "plaintext": plaintext }))
+}
+
+/// What one paid call signal cost.
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+pub struct CallReceipt {
+    pub message_id: String,
+    pub kind: u16,
+    pub amount_msat: u64,
+    pub total_msat: u64,
+    pub max_routing_fee_msat: u64,
+    pub delivered: bool,
+    pub accepted: bool,
+    pub sent_at_ms: u64,
 }
 
 /// `compose` and `files/:id/send` response, and `GET /messages/operations/{id}`.
@@ -1486,6 +1519,20 @@ mod tests {
         assert!(file_send_path("stage-../x").is_err());
         assert!(file_send_path("stage-").is_err());
         assert!(file_send_path(&format!("stage-{ROOM}/../x")).is_err());
+    }
+
+    #[test]
+    fn call_bodies_are_one_contact_one_signal() {
+        let peer = "ab".repeat(32);
+        let body = call_body(&peer.to_uppercase(), 400, r#"{"v":1}"#).unwrap();
+        assert_eq!(body, json!({"recipient": peer, "is_room": false, "kind": 400, "plaintext": r#"{"v":1}"#}));
+        assert!(call_body(&peer, 0, "{}").is_err());
+        assert!(call_body(&peer, 404, "{}").is_err());
+        assert!(call_body(&peer, 401, "hi").is_err());
+        assert!(call_body(&peer, 401, "[]").is_err());
+        assert!(call_body(ROOM, 401, "{}").is_err());
+        let big = format!(r#"{{"sdp":"{}"}}"#, "a".repeat(CALL_SIGNAL_MAX_BYTES));
+        assert!(call_body(&peer, 401, &big).is_err());
     }
 
     #[test]
