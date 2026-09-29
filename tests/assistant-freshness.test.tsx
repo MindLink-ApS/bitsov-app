@@ -310,7 +310,7 @@ describe('source label freshness', () => {
     const node = freshnessOf(label);
     expect(node?.dataset.freshness).toBe('fresh');
     expect(node?.textContent).toBe('Updated 12 s ago.');
-    expect(label.textContent).toContain('Live');
+    expect(label.textContent).toContain('From your node');
 
     clock += 5_000;
     vi.advanceTimersByTime(5_000);
@@ -344,7 +344,7 @@ describe('source label freshness', () => {
     'makes no freshness claim for mock rows (%s)',
     (reason) => {
       const label = show({ source: { kind: 'mock', reason }, freshness: parsed(ALL_FRESH) });
-      expect(label.textContent).toContain('Mock data');
+      expect(label.textContent).toContain('Sample data');
       expect(freshnessOf(label)).toBeNull();
       expect(label.textContent).not.toMatch(/updated|stale|freshness/i);
     },
@@ -401,7 +401,7 @@ describe('page wiring', () => {
     expect(readView().freshness).toBeNull();
     const root = await mountPage();
     expect(root.querySelector('[data-testid="source-freshness"]')).toBeNull();
-    expect(root.textContent).toContain('Mock data');
+    expect(root.textContent).toContain('Sample data');
   });
 
   it('drops freshness when live falls back to mock for bad rows', () => {

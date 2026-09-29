@@ -165,7 +165,7 @@ describe('assistant window', () => {
     // Balance is 90 s old: fresh under its 180 s bound, though the header
     // (pricing stale) says stale.
     expect(label.dataset.freshness).toBe('fresh');
-    expect(label.textContent).toBe('Live, from your paired node. Updated 1 min ago.');
+    expect(label.textContent).toBe('From your node. Updated 1 min ago.');
     expect($(root, 'source-freshness').dataset.freshness).toBe('stale');
     expect(document.activeElement).toBe(select(root));
   });
@@ -177,7 +177,7 @@ describe('assistant window', () => {
     const label = $(root, 'answer-source');
     expect(label.dataset.freshness).toBe('stale');
     expect(label.textContent).toBe(
-      'Live, from your paired node. Stale: updated 4 s ago. Reopen to refresh.',
+      'From your node. Stale: updated 4 s ago. Reopen to refresh.',
     );
   });
 
@@ -188,7 +188,7 @@ describe('assistant window', () => {
     const label = $(root, 'answer-source');
     expect(label.dataset.source).toBe('mock');
     expect(label.dataset.freshness).toBeUndefined();
-    expect(label.textContent).toBe('Mock data, not your node. Not paired with a node.');
+    expect(label.textContent).toBe('Sample data, not your node. Not paired with a node.');
   });
 
   it('explains an unavailable answer in plain language: why, and what to do', async () => {

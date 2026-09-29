@@ -181,7 +181,7 @@ export function freshnessText(summary: FreshnessSummary): string {
 const REASON_TEXT: Record<MockReason, string> = {
   not_paired: 'Not paired with a node.',
   node_unreachable: 'Node unreachable.',
-  rc7_fallback: 'Node has no pairing routes (rc7 fallback).',
+  rc7_fallback: 'Your node version has no pairing.',
   unknown: 'Source unknown.',
 };
 
@@ -193,7 +193,7 @@ export function mockReasonText(reason: MockReason): string {
 /** Headline and detail for the label above the rows. */
 export function sourceText(source: Source): { title: string; detail: string } {
   if (source.kind === 'live') {
-    return { title: 'Live', detail: 'Read from your paired node.' };
+    return { title: 'From your node', detail: 'Read-only, from your paired node.' };
   }
-  return { title: 'Mock data', detail: `Not your node. ${REASON_TEXT[source.reason]}` };
+  return { title: 'Sample data', detail: `Not your node. ${REASON_TEXT[source.reason]}` };
 }

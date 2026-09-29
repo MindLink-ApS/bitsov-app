@@ -76,7 +76,7 @@ describe('assistant source label', () => {
     hostDefine(LIVE_ROWS_GLOBAL, LIVE_ROWS);
     const root = await mountPage();
     expect(label(root).dataset.source).toBe('live');
-    expect(label(root).textContent).toContain('Live');
+    expect(label(root).textContent).toContain('From your node');
     expect(label(root).textContent).not.toContain('Mock');
     expect(shown(root)).toEqual(LIVE_ROWS);
     expect(network).toEqual([]);
@@ -86,32 +86,32 @@ describe('assistant source label', () => {
   it.each([
     ['not_paired', 'Not paired with a node'],
     ['node_unreachable', 'Node unreachable'],
-    ['rc7_fallback', 'rc7 fallback'],
-  ])('shows mock rows labelled Mock data with reason %s', async (reason, text) => {
+    ['rc7_fallback', 'Your node version has no pairing'],
+  ])('shows mock rows labelled Sample data with reason %s', async (reason, text) => {
     hostDefine(SOURCE_GLOBAL, { kind: 'mock', reason });
     const root = await mountPage();
     expect(label(root).dataset.source).toBe('mock');
     expect(label(root).dataset.reason).toBe(reason);
-    expect(label(root).textContent).toContain('Mock data');
+    expect(label(root).textContent).toContain('Sample data');
     expect(label(root).textContent).toContain(text);
     expect(shown(root)).toEqual(MOCK_ROWS);
   });
 
-  it('is Mock data when the host set no source, even if live rows exist', async () => {
+  it('is Sample data when the host set no source, even if live rows exist', async () => {
     hostDefine(LIVE_ROWS_GLOBAL, LIVE_ROWS);
     const root = await mountPage();
     expect(label(root).dataset.source).toBe('mock');
-    expect(label(root).textContent).toContain('Mock data');
+    expect(label(root).textContent).toContain('Sample data');
     expect(label(root).textContent).toContain('Source unknown');
     expect(shown(root)).toEqual(MOCK_ROWS);
   });
 
-  it('falls back to Mock data when live rows are missing or malformed', async () => {
+  it('falls back to Sample data when live rows are missing or malformed', async () => {
     hostDefine(SOURCE_GLOBAL, { kind: 'live' });
     hostDefine(LIVE_ROWS_GLOBAL, [['q01', 5]]);
     const root = await mountPage();
     expect(label(root).dataset.source).toBe('mock');
-    expect(label(root).textContent).toContain('Mock data');
+    expect(label(root).textContent).toContain('Sample data');
     expect(shown(root)).toEqual(MOCK_ROWS);
   });
 
@@ -119,7 +119,7 @@ describe('assistant source label', () => {
     delete (window as unknown as Record<string, unknown>)[ROWS_GLOBAL];
     hostDefine(SOURCE_GLOBAL, { kind: 'mock', reason: 'not_paired' });
     const root = await mountPage();
-    expect(label(root).textContent).toContain('Mock data');
+    expect(label(root).textContent).toContain('Sample data');
     expect(root.querySelector('[data-testid="model-output"]')).not.toBeNull();
   });
 

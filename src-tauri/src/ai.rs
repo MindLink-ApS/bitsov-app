@@ -406,6 +406,37 @@ pub struct Remote {
     pub key_env: Option<String>,
 }
 
+/// How a provider is paid for, as far as this app knows. The app itself never
+/// pays anyone: there is no spend path to a model, and no AI holds spend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PayRail {
+    /// Nobody is paid through this app.
+    None,
+    /// The owner's own API key account with the provider, billed off-app.
+    Fiat,
+}
+
+/// Who gets paid when the owner uses a provider. Derived from the kind and the
+/// settings file only; the window cannot set it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Pays {
+    /// The host whose operator bills the key. `None` when nobody is paid.
+    pub to: Option<String>,
+    pub rail: PayRail,
+}
+
+impl Pays {
+    const NOBODY: Pays = Pays {
+        to: None,
+        rail: PayRail::None,
+    };
+}
+
+/// A preview always starts at the narrowest preset. The owner may widen it for
+/// one question in the preview, which shows the exact bytes before Send.
+pub const DEFAULT_PRESET: Preset = Preset::Counts;
+
 /// What the window sees of a provider: no endpoint path, no key.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ProviderView {
@@ -417,6 +448,24 @@ pub struct ProviderView {
     pub model: Option<String>,
     /// Why it is off, in one line, when it is.
     pub note: Option<String>,
+    /// Who gets paid when this provider answers.
+    pub pays: Pays,
+    /// What leaves the node: `None` means nothing (local, or off). Otherwise
+    /// the preset a preview starts at; only the previewed bytes ever leave,
+    /// and only after the owner presses Send.
+    pub data_leaves: Option<Preset>,
+}
+
+/// Who is paid for a remote that is on: the host's operator when a key is
+/// sent (billed to the owner's own account, off-app), otherwise nobody.
+fn remote_pays(host: &str, key_env: Option<&str>) -> Pays {
+    match key_env {
+        Some(_) => Pays {
+            to: Some(host.to_string()),
+            rail: PayRail::Fiat,
+        },
+        None => Pays::NOBODY,
+    }
 }
 
 /// `https://host[:port]/path`, or plain `http` to a loopback IP literal (a
@@ -465,6 +514,8 @@ pub fn providers(file: Option<&ProvidersFile>) -> (Vec<ProviderView>, Vec<Remote
         host: None,
         model: None,
         note: None,
+        pays: Pays::NOBODY,
+        data_leaves: None,
     }];
     let mut remotes = Vec::new();
     for (kind, default_label) in DEFAULT_LABELS {
@@ -480,6 +531,8 @@ pub fn providers(file: Option<&ProvidersFile>) -> (Vec<ProviderView>, Vec<Remote
                 host: None,
                 model: None,
                 note: Some("Off. Not set up on this computer.".into()),
+                pays: Pays::NOBODY,
+                data_leaves: None,
             });
             continue;
         };
@@ -495,6 +548,11 @@ pub fn providers(file: Option<&ProvidersFile>) -> (Vec<ProviderView>, Vec<Remote
             None
         };
         let enabled = note.is_none();
+        // Off means nothing can leave and nobody is paid.
+        let (pays, data_leaves) = match (enabled, host.as_deref()) {
+            (true, Some(host)) => (remote_pays(host, entry.key_env.as_deref()), Some(DEFAULT_PRESET)),
+            _ => (Pays::NOBODY, None),
+        };
         views.push(ProviderView {
             kind,
             label: short(&entry.label, 60).unwrap_or_else(|| default_label.into()),
@@ -502,6 +560,8 @@ pub fn providers(file: Option<&ProvidersFile>) -> (Vec<ProviderView>, Vec<Remote
             host: host.clone(),
             model: short(&entry.model, 80),
             note,
+            pays,
+            data_leaves,
         });
         if let (true, Some(host)) = (enabled, host) {
             remotes.push(Remote {

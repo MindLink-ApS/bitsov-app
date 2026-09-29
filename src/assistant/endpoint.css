@@ -1,0 +1,85 @@
+/* The endpoint badge, shared by the main window and the sealed assistant
+ * window. Calm: a tinted pill, the tier and endpoint in the tier's colour, the
+ * facts in muted ink. Every text colour below meets WCAG AA (4.5:1) on its own
+ * pill background in both themes (tests/endpoint-badge.test.tsx checks it).
+ * The sealed window is dark only, so it always gets the dark values. */
+:root {
+  --badge-fact: #b8aea3;
+  --badge-own-bg: #13261a;
+  --badge-own-line: #24472f;
+  --badge-own-ink: #74d69d;
+  --badge-shared-bg: #2a2108;
+  --badge-shared-line: #4d3c12;
+  --badge-shared-ink: #f0c25e;
+  --badge-frontier-bg: #2e1510;
+  --badge-frontier-line: #57271d;
+  --badge-frontier-ink: #f39479;
+}
+
+html[data-theme='light'] {
+  --badge-fact: #57504a;
+  --badge-own-bg: #e9f5ed;
+  --badge-own-line: #bfe0ca;
+  --badge-own-ink: #196b3b;
+  --badge-shared-bg: #fbf2de;
+  --badge-shared-line: #ecd6a4;
+  --badge-shared-ink: #765400;
+  --badge-frontier-bg: #fbeae5;
+  --badge-frontier-line: #f0c6ba;
+  --badge-frontier-ink: #a3361c;
+}
+
+.endpoint-badge {
+  --tier-bg: var(--badge-own-bg);
+  --tier-line: var(--badge-own-line);
+  --tier-ink: var(--badge-own-ink);
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+  max-width: 100%;
+  margin: 0;
+  padding: 4px 12px;
+  border: 1px solid var(--tier-line);
+  border-radius: 999px;
+  background: var(--tier-bg);
+  color: var(--badge-fact);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: normal;
+}
+.endpoint-badge[data-tier='shared'] {
+  --tier-bg: var(--badge-shared-bg);
+  --tier-line: var(--badge-shared-line);
+  --tier-ink: var(--badge-shared-ink);
+}
+.endpoint-badge[data-tier='frontier'] {
+  --tier-bg: var(--badge-frontier-bg);
+  --tier-line: var(--badge-frontier-line);
+  --tier-ink: var(--badge-frontier-ink);
+}
+.endpoint-tier {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--tier-ink);
+  font-weight: 600;
+}
+.endpoint-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--tier-ink);
+  flex: none;
+}
+.endpoint-where {
+  color: var(--tier-ink);
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.endpoint-fact::before {
+  content: '·';
+  margin-right: 10px;
+  color: var(--badge-fact);
+}

@@ -2,6 +2,7 @@ import { render } from 'solid-js/web';
 import { AssistantPage } from './Page';
 import { readView } from './source';
 import './assistant.css';
+import './endpoint.css';
 
 // Display surface only. This phase does not connect a model. The host hands
 // over the rows and their source (live node or mock) via the window's
