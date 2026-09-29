@@ -1,6 +1,8 @@
-//! Durable ambiguity fence, not a payment authority or a node idempotency key.
-//! A lost reply without a node-issued ID remains unknown. Absence from a paged
-//! history is never proof that a payment did not happen.
+//! Durable ambiguity fence, not a payment authority. On a node with
+//! `message_operations_v1` a 1:1 send also carries the node's idempotency key
+//! (`operation_id`), written here before the first POST and reused by every
+//! retry of that send. A lost reply without it remains unknown. Absence from a
+//! paged history is never proof that a payment did not happen.
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -39,6 +41,23 @@ pub struct Pending {
     /// New journals reserve principal plus routing allowance. Old ones stay readable.
     #[serde(default)]
     pub all_in: bool,
+    /// The node's idempotency key for this send (UUIDv4), saved before the
+    /// first POST. A retry, a restart or an unknown outcome reuses it and asks
+    /// `GET /messages/operations/{id}`; it is never replaced by a fresh one.
+    #[serde(default)]
+    pub operation_id: Option<String>,
+    /// [`operation`] of the send `operation_id` names.
+    #[serde(default)]
+    pub op: Option<String>,
+    /// Its recipient node, for a paid, undelivered record built on reconcile.
+    #[serde(default)]
+    pub peer: Option<String>,
+    /// The node reported this operation holds no payment (never recorded,
+    /// `prepared` or `released`). Nothing is owed and nothing is fenced: a
+    /// resend of this very message reuses `operation_id`, anything else
+    /// replaces the record.
+    #[serde(default)]
+    pub resumable: bool,
 }
 
 impl Pending {
@@ -72,6 +91,10 @@ pub struct Undelivered {
     /// Retries dispatched so far; each has its own book reservation.
     #[serde(default)]
     pub attempts: u32,
+    /// The operation's settled payment hash, when the node named it. A retry
+    /// reply carrying the same hash paid nothing new.
+    #[serde(default)]
+    pub payment_hash: Option<String>,
 }
 
 /// The identity of a compose, without its caps: recipient, kind and a hash of
@@ -88,6 +111,46 @@ pub fn operation(body: &serde_json::Value) -> String {
 pub enum Target {
     Payment { hash: String },
     Message { id: String, peer: String },
+}
+
+/// What `GET /messages/operations/{id}` says happened to the money and the message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    /// `acked`: the recipient's node stored it.
+    Accepted,
+    /// `sent`: paid and handed to the recipient's node, not yet accepted.
+    Sent,
+    /// `paid` / `rejected_retryable`: paid, not handed over. Its node resends;
+    /// a retry with the same id pays nothing.
+    Paid,
+    /// `prepared` / `released`: no payment is held for it.
+    NothingPaid,
+    /// `failed_paid`: paid, and refused for good.
+    FailedPaid,
+    /// `paying` / `payment_unknown`, or anything unrecognised: unresolved.
+    PaymentUnknown,
+}
+
+/// Fail closed: a state this app does not know is an unresolved payment.
+pub fn outcome(state: &str) -> Outcome {
+    match state {
+        "acked" => Outcome::Accepted,
+        "sent" => Outcome::Sent,
+        "paid" | "rejected_retryable" => Outcome::Paid,
+        "prepared" | "released" => Outcome::NothingPaid,
+        "failed_paid" => Outcome::FailedPaid,
+        _ => Outcome::PaymentUnknown,
+    }
+}
+
+/// A fresh RFC 4122 version-4 id, the only form the node accepts.
+pub fn new_operation_id() -> Result<String, ActionError> {
+    let mut b = [0u8; 16];
+    getrandom::getrandom(&mut b).map_err(unknown)?;
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    let h = hex::encode(b);
+    Ok(format!("{}-{}-{}-{}-{}", &h[..8], &h[8..12], &h[12..16], &h[16..20], &h[20..]))
 }
 
 pub fn unknown(detail: impl std::fmt::Display) -> ActionError {
@@ -143,12 +206,22 @@ impl Journal {
     }
 
     pub fn begin(&self, node_id: &str, path: &str, body: &serde_json::Value, max_msat: u64) -> Result<Pending, ActionError> {
-        if self.pending()?.is_some() { return Err(unknown("Check the previous action first.")); }
+        self.begin_operation(node_id, path, body, max_msat, None)
+    }
+
+    /// `operation`: the node idempotency key and its fingerprint, durable
+    /// before the caller posts. Only a record that holds no payment
+    /// ([`Pending::resumable`]) may be replaced.
+    pub fn begin_operation(&self, node_id: &str, path: &str, body: &serde_json::Value, max_msat: u64, operation: Option<(String, String)>) -> Result<Pending, ActionError> {
+        if self.pending()?.is_some_and(|p| !p.resumable) { return Err(unknown("Check the previous action first.")); }
+        let (operation_id, op) = operation.map_or((None, None), |(id, op)| (Some(id), Some(op)));
         let pending = Pending {
             id: fresh_id()?, rollback_charge_id: None,
             node_id: node_id.to_string(),
             request_hash: blake3::hash(format!("{path}\n{body}").as_bytes()).to_hex().to_string(),
             max_msat, target: None, over_budget: false, accounting_msat: None, undelivered: None, charge_id: None, budgeted: false, all_in: false,
+            peer: operation_id.as_ref().and(body["recipient"].as_str()).map(str::to_string),
+            operation_id, op, resumable: false,
         };
         self.save(&pending)?;
         Ok(pending)
@@ -236,6 +309,74 @@ mod tests {
     }
 
     #[test]
+    fn operation_id_is_durable_before_dispatch_and_survives_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Journal::open(dir.path()).unwrap();
+        let body = json!({"recipient": "peer", "is_room": false, "kind": 1, "plaintext": "PRIVATE"});
+        let id = new_operation_id().unwrap();
+        let begun = journal.begin_operation("node", "/messages/compose", &body, 2000, Some((id.clone(), operation(&body)))).unwrap();
+        drop(journal);
+        // A crash here, after the POST and before any reply: the id is on disk.
+        let reopened = Journal::open(dir.path()).unwrap().pending().unwrap().unwrap();
+        assert_eq!(reopened.operation_id.as_deref(), Some(id.as_str()));
+        assert_eq!(reopened.op, Some(operation(&body)));
+        assert_eq!(reopened.peer.as_deref(), Some("peer"));
+        assert_eq!(reopened.id, begun.id);
+        assert!(!reopened.resumable);
+        assert!(!std::fs::read_to_string(dir.path().join("spend-pending.json")).unwrap().contains("PRIVATE"));
+    }
+
+    #[test]
+    fn only_a_record_holding_no_payment_may_be_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Journal::open(dir.path()).unwrap();
+        let body = json!({"recipient": "peer", "plaintext": "a"});
+        let mut first = journal.begin_operation("node", "/messages/compose", &body, 2000, Some((new_operation_id().unwrap(), operation(&body)))).unwrap();
+        assert!(journal.begin("node", "/payments/pay", &json!({}), 1000).is_err(), "unknown outcome fences");
+        first.resumable = true;
+        journal.save(&first).unwrap();
+        let next = journal.begin("node", "/payments/pay", &json!({}), 1000).unwrap();
+        assert_eq!(next.operation_id, None);
+        assert_ne!(next.id, first.id);
+    }
+
+    #[test]
+    fn operation_ids_are_fresh_uuid_v4() {
+        let a = new_operation_id().unwrap();
+        let b = new_operation_id().unwrap();
+        assert_ne!(a, b);
+        for id in [a, b] {
+            assert_eq!(id.len(), 36);
+            assert_eq!(&id[14..15], "4");
+            assert!(matches!(&id[19..20], "8" | "9" | "a" | "b"), "{id}");
+        }
+    }
+
+    #[test]
+    fn unknown_operation_states_fail_closed() {
+        assert_eq!(outcome("acked"), Outcome::Accepted);
+        assert_eq!(outcome("sent"), Outcome::Sent);
+        assert_eq!(outcome("paid"), Outcome::Paid);
+        assert_eq!(outcome("rejected_retryable"), Outcome::Paid);
+        assert_eq!(outcome("prepared"), Outcome::NothingPaid);
+        assert_eq!(outcome("released"), Outcome::NothingPaid);
+        assert_eq!(outcome("failed_paid"), Outcome::FailedPaid);
+        for s in ["paying", "payment_unknown", "stalled", "", "ACKED"] {
+            assert_eq!(outcome(s), Outcome::PaymentUnknown, "{s}");
+        }
+    }
+
+    #[test]
+    fn pre_operation_journals_still_read() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("spend-pending.json"), r#"{"id":"x","node_id":"n","request_hash":"h","max_msat":1,"target":null,"over_budget":false,
+            "undelivered":{"peer":"p","paid_msat":1,"retry":true}}"#).unwrap();
+        let p = Journal::open(dir.path()).unwrap().pending().unwrap().unwrap();
+        assert_eq!((p.operation_id, p.op, p.resumable), (None, None, false));
+        assert_eq!(p.undelivered.unwrap().payment_hash, None);
+    }
+
+    #[test]
     fn dropping_guard_unlocks_even_if_a_child_inherited_the_descriptor() {
         let dir = tempfile::tempdir().unwrap();
         let journal = Journal::open(dir.path()).unwrap();
@@ -261,7 +402,7 @@ mod tests {
     #[test]
     fn reconciliation_needs_exact_terminal_outgoing_evidence() {
         let p = Pending { id: "attempt".into(), rollback_charge_id: None, node_id:"node".into(), request_hash:"hash".into(), max_msat:2000,
-            target:Some(Target::Payment { hash:"abc".into() }), over_budget:false, accounting_msat: None, undelivered: None, charge_id: None, budgeted: false, all_in: false };
+            target:Some(Target::Payment { hash:"abc".into() }), over_budget:false, accounting_msat: None, undelivered: None, charge_id: None, budgeted: false, all_in: false, operation_id: None, op: None, peer: None, resumable: false };
         assert_eq!(terminal(&p, &[]), None);
         assert_eq!(terminal(&p, &[json!({"payment_hash":"other", "amount_msat":2000, "direction":"outgoing", "status":"settled"})]), None);
         for status in ["pending", "inflight", "expired", "unknown"] {
@@ -277,7 +418,7 @@ mod tests {
     #[test]
     fn message_reconciliation_rejects_other_sender_and_recipient() {
         let p = Pending { id: "attempt".into(), rollback_charge_id: None, node_id:"node".into(), request_hash:"hash".into(), max_msat:2000,
-            target:Some(Target::Message { id:"abc".into(), peer:"peer".into() }), over_budget:false, accounting_msat: None, undelivered: None, charge_id: None, budgeted: false, all_in: false };
+            target:Some(Target::Message { id:"abc".into(), peer:"peer".into() }), over_budget:false, accounting_msat: None, undelivered: None, charge_id: None, budgeted: false, all_in: false, operation_id: None, op: None, peer: None, resumable: false };
         let mut row = json!({"id":"abc", "sender":"other", "recipient":"peer", "payment_amount_msat":2000});
         assert_eq!(terminal(&p, &[row.clone()]), None);
         row["sender"] = json!("node");

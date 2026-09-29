@@ -2040,7 +2040,8 @@ fn ceiling(price: u64, max_msat: u64) -> Result<(), ActionError> {
 }
 
 fn no_pending_spend(state: &NodeState) -> Result<(), ActionError> {
-    if spend_journal(state)?.pending()?.is_some() {
+    // A resumable record holds no payment; the next send may replace it.
+    if spend_journal(state)?.pending()?.is_some_and(|p| !p.resumable) {
         return Err(spend_journal::unknown("Check the pending result before starting another action."));
     }
     Ok(())
@@ -2075,6 +2076,9 @@ struct Charge {
     readmission_possible: bool,
     /// This call issued a bounded one-time contact confirmation.
     confirmed: bool,
+    /// The node keeps durable message operations (`message_operations_v1`):
+    /// a 1:1 compose carries a journaled `operation_id`.
+    operation: bool,
 }
 
 fn budget_dir(state: &NodeState) -> Result<(PathBuf, String), ActionError> {
@@ -2148,7 +2152,7 @@ fn plan_manual_charge(state: &NodeState, target: &str, max_msat: u64) -> Result<
     }))?;
     Ok(Charge {
         target: target.into(), room: false, confirm: None,
-        readmission_possible: false, confirmed: false,
+        readmission_possible: false, confirmed: false, operation: false,
     })
 }
 
@@ -2217,7 +2221,12 @@ async fn money_post(state: &NodeState, auth: Auth, path: &str, body: serde_json:
 /// flight. The retry never removes it: the same record is rewritten in place
 /// (atomically) as in flight before dispatch, and any refusal before dispatch
 /// writes the prior record back. A crash at any point leaves a record.
-async fn money_post_with(state: &NodeState, auth: Auth, path: &str, body: serde_json::Value, max_msat: u64, charge: Option<Charge>, retry: Option<&spend_journal::Undelivered>) -> Result<String, ActionError> {
+///
+/// A 1:1 compose on a `message_operations_v1` node carries an `operation_id`
+/// saved in the journal before the POST. A retry of the same send, or a resend
+/// of a message the node holds no payment for, reuses it: the node pays at most
+/// once per id and answers 409 if the text changed.
+async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: serde_json::Value, max_msat: u64, charge: Option<Charge>, retry: Option<&spend_journal::Undelivered>) -> Result<String, ActionError> {
     let journal = spend_journal(state)?;
     let prior = journal.pending()?;
     ensure_fresh_token(state).await;
@@ -2225,6 +2234,8 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, body: serde_
     let node_id = state.node_id.lock().unwrap().clone().ok_or_else(|| ActionError::new("app_not_ready", "No node identity."))?;
     match (&prior, retry) {
         (None, None) => {}
+        // Holds no payment: this action replaces it, or resumes it below.
+        (Some(p), None) if p.resumable && p.node_id == node_id => {}
         (Some(p), Some(u)) if u.retry && !u.in_flight && !p.over_budget && p.node_id == node_id && p.undelivered.as_ref() == Some(u) => {}
         _ => return Err(spend_journal::unknown("Check the pending result before sending again.")),
     }
@@ -2268,8 +2279,17 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, body: serde_
         _ => max_msat,
     };
     let op = spend_journal::operation(&body);
-    let mut pending = match &prior {
-        Some(p) => {
+    let one_to_one = path == "/messages/compose" && body["is_room"].as_bool() != Some(true);
+    // One send, one id. A retry of it, or a resend of the same message the node
+    // holds no payment for, reuses the saved id; a legacy record has none.
+    let operation_id = match &prior {
+        _ if !(one_to_one && charge.as_ref().is_some_and(|c| c.operation)) => None,
+        Some(p) if retry.is_some() => p.operation_id.clone(),
+        Some(p) if p.op.as_deref() == Some(op.as_str()) && p.operation_id.is_some() => p.operation_id.clone(),
+        _ => Some(spend_journal::new_operation_id()?),
+    };
+    let mut pending = match (&prior, retry) {
+        (Some(p), Some(_)) => {
             // Settled when the 502 came back; again here in case that write failed.
             if let (Some(paid), true) = (p.accounting_msat, charge.is_some()) { close_charge(state, p.charge_id(), Some(paid), p.target.as_ref())?; }
             // The same operation, the same record: rewritten in place, never
@@ -2286,8 +2306,10 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, body: serde_
             journal.save(&next)?;
             next
         }
-        None => journal.begin(&node_id, path, &body, max_msat)?,
+        _ => journal.begin_operation(&node_id, path, &body, max_msat, operation_id.clone().map(|id| (id, op.clone())))?,
     };
+    // Durable above; only now may the id leave the app.
+    if let Some(id) = &operation_id { body["operation_id"] = serde_json::json!(id); }
     pending.all_in = true;
     let charged = match &charge {
         Some(c) => match reserve(state, auth, c, pending.charge_id(), reserve_msat) {
@@ -2352,6 +2374,24 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, body: serde_
         abandon(&journal)?;
         return Err(ActionError::new("price_cap_exceeded", "The node refused the changed price before any payment. Refresh the quote."));
     }
+    // The node compared this operation before paying anything in this call.
+    if let Some(code) = operation_id.as_ref().and(act::operation_conflict(status.as_u16(), &text)) {
+        match code {
+            "operation_mismatch" => {
+                release(state)?;
+                abandon(&journal)?;
+                return Err(ActionError::new("operation_mismatch", act::OPERATION_MISMATCH));
+            }
+            "failed_paid" => {
+                release(state)?;
+                journal.clear()?;
+                return Err(ActionError::new("failed_paid", act::FAILED_PAID));
+            }
+            // An earlier attempt's payment is unresolved: keep everything held.
+            _ => return Err(ActionError::new("payment_unknown", act::PAYMENT_UNKNOWN).for_pending(&pending.id)),
+        }
+    }
+    let op_error = operation_id.as_deref().and_then(|id| act::operation_error(&text, id));
     let is_room = body["is_room"].as_bool() == Some(true);
     // BUG-PSI: the node paid, the message did not go. Known money, not an
     // unknown outcome, but the fence stays: nothing is paid again on its own.
@@ -2364,23 +2404,31 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, body: serde_
         // for a legacy success reply. A no-pay probe adds no new allowance.
         let accounted = if incomplete.amount_msat == 0 { 0 } else { reserve_msat.max(incomplete.amount_msat) };
         pending.accounting_msat = Some(accounted);
+        // The node holds this operation paid: a retry with its id re-sends, never re-pays.
+        let op_retry = op_error.as_ref().is_some_and(|e| e.retry_allowed
+            && matches!(spend_journal::outcome(e.state.as_deref().unwrap_or_default()), spend_journal::Outcome::Paid | spend_journal::Outcome::Sent));
+        let retry_safe = incomplete.retry_safe || op_retry;
         pending.undelivered = Some(spend_journal::Undelivered {
             peer: body["recipient"].as_str().unwrap_or_default().to_string(),
             paid_msat: paid,
-            retry: incomplete.retry_safe && !pending.over_budget,
+            retry: retry_safe && !pending.over_budget,
             op,
             admission_msat: retry.map_or(incomplete.amount_msat, |u| u.admission_msat),
             in_flight: false,
             attempts: retry.map_or(0, |u| u.attempts + 1),
+            payment_hash: op_error.as_ref().and_then(|e| e.payment_hash.clone()).or_else(|| retry.and_then(|u| u.payment_hash.clone())),
         });
         journal.save(&pending)?;
         if pending.over_budget {
             return Err(spend_journal::unknown(format!("The node reports {} msat settled, beyond the reserved total ({reserve_msat}). Funds may already have moved; do not retry.", incomplete.amount_msat)));
         }
         if let Some(id) = &charged { close_charge(state, id, Some(accounted), pending.target.as_ref())?; }
-        return Err(ActionError::undelivered(paid, incomplete.retry_safe).for_pending(&pending.id));
+        return Err(ActionError::undelivered(paid, retry_safe).for_pending(&pending.id));
     }
     if !status.is_success() {
+        if op_error.as_ref().is_some_and(|e| spend_journal::outcome(e.state.as_deref().unwrap_or_default()) == spend_journal::Outcome::PaymentUnknown) {
+            return Err(ActionError::new("payment_unknown", act::PAYMENT_UNKNOWN).for_pending(&pending.id));
+        }
         return Err(spend_journal::unknown(api_error(path, status, &text)));
     }
     let mut value: serde_json::Value = serde_json::from_str(&text).map_err(spend_journal::unknown)?;
@@ -2398,13 +2446,27 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, body: serde_
         (receipt.amount_msat, matches!(receipt.status.to_ascii_lowercase().as_str(), "settled" | "failed"))
     } else {
         let receipt: act::SendReply = serde_json::from_value(value.clone()).map_err(spend_journal::unknown)?;
+        if operation_id.is_some() && receipt.operation_id != operation_id {
+            return Err(spend_journal::unknown("The node answered for a different operation. Nothing was dispatched again."));
+        }
         let complete = if is_room {
             let summary = act::room_result(&value, &body, max_msat)?;
             room_refused = summary.1;
             summary.0
         } else { true };
         readmission = receipt.readmission_msat.unwrap_or(0);
-        (receipt.amount_msat, complete)
+        let mut amount = receipt.amount_msat;
+        if let (Some(u), Some(_)) = (retry, &operation_id) {
+            // An operation reply reports the whole operation. The same settled
+            // payment means this call paid nothing new; otherwise only the increase.
+            amount = if receipt.payment_hash.is_some() && receipt.payment_hash == u.payment_hash { 0 }
+                else { amount.saturating_add(readmission).saturating_sub(u.paid_msat) };
+            readmission = 0;
+            value["amount_msat"] = serde_json::json!(amount);
+            value["readmission_msat"] = serde_json::Value::Null;
+            if amount == 0 { value["max_routing_fee_msat"] = serde_json::json!(0); }
+        }
+        (amount, complete)
     };
     pending.target = value.get("payment_hash").and_then(|h| h.as_str())
         .filter(|h| h.len() == 64 && h.bytes().all(|c| c.is_ascii_hexdigit()))
@@ -2475,6 +2537,9 @@ async fn do_spend_reconcile(state: &NodeState) -> Result<String, ActionError> {
             return Err(spend_journal::unknown("The node exceeded its spending bound; inspect the owner node."));
         }
         if undelivered.in_flight {
+            if let Some(id) = pending.operation_id.clone() {
+                return reconcile_operation(state, &journal, pending, &id).await;
+            }
             return Err(spend_journal::unknown("A delivery retry was sent and its result is unknown. Missing history does not prove failure; inspect the owner node. The app will not retry."));
         }
         if let Some(paid) = pending.accounting_msat {
@@ -2492,6 +2557,12 @@ async fn do_spend_reconcile(state: &NodeState) -> Result<String, ActionError> {
         close_charge(state, pending.charge_id(), Some(paid), pending.target.as_ref())?;
         journal.clear()?;
         return Ok("Previous action accounted for. Nothing was dispatched again.".into());
+    }
+    if pending.resumable {
+        return Ok(NOTHING_PAID.into());
+    }
+    if let Some(id) = pending.operation_id.clone() {
+        return reconcile_operation(state, &journal, pending, &id).await;
     }
     let path = match &pending.target {
         Some(Target::Payment { .. }) => "/payments?limit=100".to_string(),
@@ -2523,6 +2594,104 @@ async fn do_spend_reconcile(state: &NodeState) -> Result<String, ActionError> {
             Ok(format!("Previous action {status}. Nothing was dispatched again."))
         }
         None => Err(spend_journal::unknown("No matching terminal record. Missing history does not prove failure.")),
+    }
+}
+
+const NOTHING_PAID: &str = "Not sent - nothing was paid: your node holds no payment for this message. Sending the same message again reuses its operation, so it can never be paid twice.";
+
+/// Ask the node what became of this send (`GET /messages/operations/{id}`).
+/// Never re-sends and never pays: a retry is a separate owner action that
+/// reuses the same id. Unknown or unrecognised states keep the fence.
+async fn reconcile_operation(state: &NodeState, journal: &Journal, mut pending: spend_journal::Pending, id: &str) -> Result<String, ActionError> {
+    use spend_journal::Outcome;
+    let path = format!("/messages/operations/{id}");
+    let (status, text) = call_api(state, reqwest::Method::GET, &path, None).await
+        .map_err(|e| spend_journal::unknown(format!("Your node could not be asked about this send ({e}). Nothing was dispatched again.")))?;
+    // The node writes the operation before it pays anything: never recorded is
+    // nothing paid. (A node without the route never accepted the id either.)
+    let reply = if status == reqwest::StatusCode::NOT_FOUND { None } else {
+        if !status.is_success() {
+            return Err(spend_journal::unknown(api_error(&path, status, &text)));
+        }
+        let reply: act::SendReply = serde_json::from_str(&text).map_err(spend_journal::unknown)?;
+        if reply.operation_id.as_deref() != Some(id) {
+            return Err(spend_journal::unknown("The node answered for a different operation. Nothing was dispatched again."));
+        }
+        Some(reply)
+    };
+    let outcome = reply.as_ref().map_or(Outcome::NothingPaid, |r| spend_journal::outcome(r.state.as_deref().unwrap_or_default()));
+    let retry = pending.undelivered.clone();
+    let reply = match (outcome, reply) {
+        (Outcome::PaymentUnknown, _) => {
+            return Err(ActionError::new("payment_unknown", act::PAYMENT_UNKNOWN).for_pending(&pending.id));
+        }
+        (Outcome::NothingPaid, _) if retry.is_some() => {
+            return Err(spend_journal::unknown("Your node holds no payment for a message it reported paid. Inspect the owner node; the app will not retry."));
+        }
+        (Outcome::NothingPaid, _) => {
+            if pending.budgeted { close_charge(state, pending.charge_id(), None, None)?; }
+            pending.resumable = true;
+            pending.budgeted = false;
+            pending.accounting_msat = None;
+            pending.target = None;
+            journal.save(&pending)?;
+            return Ok(NOTHING_PAID.into());
+        }
+        (_, Some(reply)) => reply,
+        (_, None) => unreachable!("only NothingPaid lacks a reply"),
+    };
+    // The reply covers the whole operation; a retry accounts only what it added.
+    let whole = reply.amount_msat.checked_add(reply.readmission_msat.unwrap_or(0))
+        .ok_or_else(|| spend_journal::unknown("The reported principal overflows."))?;
+    let principal = match &retry {
+        Some(u) if reply.payment_hash.is_some() && reply.payment_hash == u.payment_hash => 0,
+        Some(u) => whole.saturating_sub(u.paid_msat),
+        None => whole,
+    };
+    let paid = if principal == 0 { 0 } else {
+        principal.checked_add(reply.max_routing_fee_msat)
+            .ok_or_else(|| spend_journal::unknown("The reported total overflows."))?
+    };
+    let message_msat = if retry.is_some() { principal } else { reply.amount_msat };
+    if message_msat > pending.max_msat {
+        pending.over_budget = true;
+        journal.save(&pending)?;
+        return Err(spend_journal::unknown(format!("The node reports {message_msat} msat, beyond the confirmed cap ({}). Funds may already have moved; do not retry.", pending.max_msat)));
+    }
+    pending.accounting_msat = Some(paid);
+    journal.save(&pending)?;
+    if pending.budgeted { close_charge(state, pending.charge_id(), Some(paid), pending.target.as_ref())?; }
+    match outcome {
+        Outcome::Accepted | Outcome::Sent => {
+            journal.clear()?;
+            Ok(if outcome == Outcome::Accepted {
+                format!("Accepted: the recipient's node stored it ({whole} msat paid). Nothing was dispatched again.")
+            } else {
+                format!("Sent: paid ({whole} msat) and handed to the recipient's node, not yet accepted. Your node keeps delivering it; nothing was dispatched again.")
+            })
+        }
+        Outcome::FailedPaid => {
+            journal.clear()?;
+            Err(ActionError::new("failed_paid", act::FAILED_PAID))
+        }
+        _ => {
+            // Paid, not handed over: the same record, retryable with the same id.
+            let paid_msat = retry.as_ref().map_or(whole, |u| u.paid_msat.saturating_add(principal));
+            pending.undelivered = Some(spend_journal::Undelivered {
+                peer: retry.as_ref().map(|u| u.peer.clone()).or_else(|| pending.peer.clone()).unwrap_or_default(),
+                paid_msat,
+                retry: reply.retry_allowed,
+                op: retry.as_ref().map(|u| u.op.clone()).or_else(|| pending.op.clone()).unwrap_or_default(),
+                admission_msat: retry.as_ref().map_or(0, |u| u.admission_msat),
+                in_flight: false,
+                attempts: retry.as_ref().map_or(0, |u| u.attempts),
+                payment_hash: reply.payment_hash.clone(),
+            });
+            journal.save(&pending)?;
+            Err(ActionError::new("undelivered_pending", format!(
+                "Accounted: {paid_msat} msat paid, and the message is not delivered yet. Your node keeps resending it; nothing was dispatched again. Retry delivery from its card (it pays nothing new), or stop retrying it."
+            )).for_pending(&pending.id))
+        }
     }
 }
 
@@ -2876,16 +3045,27 @@ async fn read_room_quote(state: &NodeState, room_id: &str) -> Result<act::RoomQu
 }
 
 /// Only an explicit versioned node contract authorizes variable-price sends.
-async fn require_price_caps(state: &NodeState, room: bool) -> Result<bool, ActionError> {
+/// What a paid send may rely on at this node.
+struct SendCaps {
+    /// Admission may be paid separately from a message cap.
+    readmission_possible: bool,
+    /// Durable, idempotent 1:1 message operations.
+    operations: bool,
+}
+
+async fn require_price_caps(state: &NodeState, room: bool) -> Result<SendCaps, ActionError> {
     let unavailable = || ActionError::new("price_cap_unavailable", "This node cannot enforce your confirmed spending ceiling. Upgrade the node before sending messages or files.");
     let status: serde_json::Value = get_json(state, "/status").await.map_err(|_| unavailable())?;
     let capabilities = status["api_capabilities"].as_array().ok_or_else(unavailable)?;
-    if !capabilities.iter().any(|v| v.as_str() == Some("paid_send_caps_v1"))
-        || (room && !capabilities.iter().any(|v| v.as_str() == Some("room_terminal_outcomes_v1"))) {
+    let has = |cap: &str| capabilities.iter().any(|v| v.as_str() == Some(cap));
+    if !has("paid_send_caps_v1") || (room && !has("room_terminal_outcomes_v1")) {
         return Err(unavailable());
     }
-    Ok(capabilities.iter().any(|v| v.as_str() == Some(grant::FIRST_CONTACT_CAPABILITY)))
+    Ok(SendCaps { readmission_possible: has(grant::FIRST_CONTACT_CAPABILITY), operations: has(OPERATIONS_CAPABILITY) })
 }
+
+/// Genome #113: `operation_id` on 1:1 compose, idempotent POST, `GET /messages/operations/{id}`.
+const OPERATIONS_CAPABILITY: &str = "message_operations_v1";
 
 /// Slice B's call shape: no first-contact confirmation. Tests only.
 #[cfg_attr(not(test), allow(dead_code))]
@@ -2915,7 +3095,8 @@ async fn do_message_send_with(
     let target = if is_room { control::room_id(recipient) } else { control::node_id(recipient) }.map_err(ActionError::invalid)?;
     let (auth, plan) = plan_message(state, &target, is_room, max_msat, first_contact_msat)?;
     no_pending_spend(state)?;
-    let readmission_possible = require_price_caps(state, is_room).await?;
+    let caps = require_price_caps(state, is_room).await?;
+    let readmission_possible = caps.readmission_possible;
     let mut body = act::compose_body(recipient, is_room, plaintext)?;
     body["max_total_msat"] = serde_json::json!(max_msat);
     if is_room {
@@ -2959,7 +3140,7 @@ async fn do_message_send_with(
     if let Some(contact_budget) = node_ok {
         confirm_first_contact(state, &recipient, max_msat, contact_budget).await?;
     }
-    let charge = Charge { target, room: is_room, confirm: plan.confirm, readmission_possible, confirmed: node_ok.is_some() };
+    let charge = Charge { target, room: is_room, confirm: plan.confirm, readmission_possible, confirmed: node_ok.is_some(), operation: caps.operations && !is_room };
     let sent = money_post(state, auth, "/messages/compose", body, max_msat, Some(charge)).await;
     let text = match sent {
         // After a reconnect the contact asks for admission again. The node pays
@@ -2981,6 +3162,9 @@ async fn do_message_send_with(
         amount_msat: reply.amount_msat,
         max_routing_fee_msat: reply.max_routing_fee_msat,
         sent_at_ms: now_ms(),
+        operation_id: reply.operation_id,
+        state: reply.state,
+        accepted: reply.accepted,
     })
 }
 
@@ -3015,7 +3199,8 @@ async fn do_message_retry(state: &NodeState, recipient: &str, plaintext: &str, a
         .and_then(|p| p.undelivered)
         .filter(|u| u.retry && !u.in_flight && u.peer == target && u.op == op)
         .ok_or_else(unavailable)?;
-    let readmission_possible = require_price_caps(state, false).await?;
+    let caps = require_price_caps(state, false).await?;
+    let readmission_possible = caps.readmission_possible;
     // Zero for Retry delivery: the node refuses any payment before dispatch.
     let cap = approved_msat.unwrap_or(0);
     let (auth, plan) = plan_message(state, &target, false, cap, None)?;
@@ -3029,7 +3214,7 @@ async fn do_message_retry(state: &NodeState, recipient: &str, plaintext: &str, a
         confirm_first_contact(state, &target, cap, contact_budget).await?;
     }
     // Nothing can be paid under a zero cap, re-admission included.
-    let charge = Charge { target: target.clone(), room: false, confirm: None, readmission_possible: readmission_possible && approved_msat.is_some(), confirmed: approved_msat.is_some() };
+    let charge = Charge { target: target.clone(), room: false, confirm: None, readmission_possible: readmission_possible && approved_msat.is_some(), confirmed: approved_msat.is_some(), operation: caps.operations };
     let text = match money_post_with(state, auth, "/messages/compose", body, cap, Some(charge), Some(&undelivered)).await {
         // Refused before paying anything: a payment is still due.
         Err(e) if approved_msat.is_none() && matches!(e.code, "price_cap_exceeded" | "grant_first_contact" | "grant_readmission") => {
@@ -3051,6 +3236,9 @@ async fn do_message_retry(state: &NodeState, recipient: &str, plaintext: &str, a
         delivered: reply.delivered,
         amount_msat: reply.amount_msat,
         sent_at_ms: now_ms(),
+        operation_id: reply.operation_id,
+        state: reply.state,
+        accepted: reply.accepted,
     })
 }
 
@@ -3168,7 +3356,7 @@ async fn do_file_send(
     // Files retain the manual window; approval never exempts them from the
     // same daily and contact limits as messages. Check before uploading bytes.
     let mut charge = plan_manual_charge(state, &recipient, max_msat)?;
-    charge.readmission_possible = require_price_caps(state, false).await?;
+    charge.readmission_possible = require_price_caps(state, false).await?.readmission_possible;
     let body = act::file_upload_body(filename, mime_type, data_b64)?;
     let filename = body["filename"].as_str().unwrap_or_default().to_string();
     let quote: control::KindPrice = get_json(state, &control::price_path(act::KIND_FILE_REF)).await?;
@@ -4968,6 +5156,326 @@ mod control_act_tests {
         pending(node).expect("the fence stays")
     }
 
+    // ---- exactly-once slice 3: operation_id journal and reconcile ----------------
+
+    /// Genome `message_operations_v1`, reduced to what the app relies on: one
+    /// operation per id, paid at most once, 409 on changed text, and
+    /// `GET /messages/operations/{id}`. `pays` counts Lightning dispatches.
+    #[derive(Default)]
+    struct OpsNode {
+        ops: std::collections::HashMap<String, (String, &'static str)>,
+        pays: usize,
+        /// Next new operation: the state it ends in, and whether its reply is lost.
+        script: Vec<(&'static str, bool)>,
+        /// Answer a paid operation's first POST with the node's 502 (paid, not sent).
+        settled_incomplete: bool,
+        /// Record nothing for the next POST and lose its reply (never reached the handler).
+        drop_next: bool,
+    }
+
+    const OP_HASH: &str = "abababababababababababababababababababababababababababababababab";
+
+    fn op_reply(id: &str, state: &str) -> String {
+        serde_json::json!({"operation_id": id, "state": state, "accepted": state == "acked", "payment_hash": OP_HASH,
+            "retry_allowed": matches!(state, "prepared" | "released" | "paid" | "sent" | "rejected_retryable"),
+            "max_routing_fee_msat": 0, "message_id": "m1", "delivered": matches!(state, "sent" | "acked"), "amount_msat": 2000}).to_string()
+    }
+
+    fn ops_node() -> (Routes, Arc<Mutex<OpsNode>>) {
+        let node = Arc::new(Mutex::new(OpsNode::default()));
+        let n = node.clone();
+        let routes: Routes = Arc::new(move |m: &str, p: &str, b: &str| {
+            if p == "/status" {
+                return (200, serde_json::json!({"api_capabilities": ["paid_send_caps_v1", "room_terminal_outcomes_v1", "message_operations_v1"]}).to_string());
+            }
+            if let Some(id) = p.strip_prefix("/messages/operations/") {
+                return match n.lock().unwrap().ops.get(id) {
+                    Some((_, state)) => (200, op_reply(id, state)),
+                    None => (404, r#"{"error":"operation not found","code":404}"#.into()),
+                };
+            }
+            if p != "/messages/compose" { return happy()(m, p, b); }
+            let body: serde_json::Value = serde_json::from_str(b).unwrap();
+            let Some(id) = body["operation_id"].as_str().map(str::to_string) else { return happy()(m, p, b); };
+            let text = body["plaintext"].as_str().unwrap().to_string();
+            let mut node = n.lock().unwrap();
+            if std::mem::take(&mut node.drop_next) {
+                drop(node);
+                std::thread::sleep(Duration::from_millis(150));
+                return (500, "{}".into());
+            }
+            let lost = match node.ops.get(&id).cloned() {
+                Some((known, _)) if known != text => {
+                    return (409, serde_json::json!({"error": "operation_mismatch", "code": "operation_mismatch", "operation_id": id,
+                        "state": "prepared", "payment_hash": null, "accepted": false, "retry_allowed": true}).to_string());
+                }
+                // Paid already: re-send it, pay nothing. Unresolved: refuse.
+                Some((_, "paid" | "sent" | "rejected_retryable")) => { node.ops.insert(id.clone(), (text, "acked")); false }
+                Some((_, "acked")) => false,
+                Some((_, "paying" | "payment_unknown")) => {
+                    return (409, serde_json::json!({"error": "payment_unresolved", "code": "payment_unresolved", "operation_id": id,
+                        "state": "payment_unknown", "payment_hash": OP_HASH, "accepted": false, "retry_allowed": false}).to_string());
+                }
+                _ => {
+                    let (state, lost) = if node.script.is_empty() { ("acked", false) } else { node.script.remove(0) };
+                    if state != "prepared" { node.pays += 1; }
+                    node.ops.insert(id.clone(), (text, state));
+                    if state == "paid" && node.settled_incomplete {
+                        return (502, serde_json::json!({"error": "payment settled but send did not complete", "code": "payment_settled_send_incomplete",
+                            "amount_msat": 2000, "operation_id": id, "state": "paid", "payment_hash": OP_HASH, "accepted": false, "retry_allowed": true}).to_string());
+                    }
+                    lost
+                }
+            };
+            let state = node.ops[&id].1;
+            drop(node);
+            if lost { std::thread::sleep(Duration::from_millis(150)); }
+            (200, op_reply(&id, state))
+        });
+        (routes, node)
+    }
+
+    /// A node that loses replies after `spend_timeout`, as a crash after the POST would.
+    fn ops_fake(configure: impl FnOnce(&mut OpsNode)) -> (Fake, Arc<Mutex<OpsNode>>) {
+        let (routes, ops) = ops_node();
+        configure(&mut ops.lock().unwrap());
+        let mut node = fake(AuthMode::Local, routes);
+        node.state.spend_timeout = Duration::from_millis(60);
+        (node, ops)
+    }
+
+    fn op_ids(node: &Fake) -> Vec<Option<String>> {
+        compose_bodies(node).iter().map(|b| b["operation_id"].as_str().map(str::to_string)).collect()
+    }
+
+    fn gets(node: &Fake) -> Vec<String> {
+        node.targets().into_iter().filter(|t| t.starts_with("GET /messages/operations/")).collect()
+    }
+
+    #[tokio::test]
+    async fn operation_id_is_journaled_before_the_first_post_and_accepted_is_reported() {
+        let (routes, ops) = ops_node();
+        let seen: Arc<Mutex<Vec<Option<serde_json::Value>>>> = Arc::new(Mutex::new(Vec::new()));
+        let journal: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
+        let (s, j) = (seen.clone(), journal.clone());
+        let watched: Routes = Arc::new(move |m, p, b| {
+            if p == "/messages/compose" {
+                let path = j.lock().unwrap().clone().unwrap();
+                s.lock().unwrap().push(std::fs::read(path).ok().map(|bytes| serde_json::from_slice(&bytes).unwrap()));
+            }
+            routes(m, p, b)
+        });
+        let node = fake(AuthMode::Local, watched);
+        *journal.lock().unwrap() = Some(journal_file(&node));
+        spend_advance(&node.state, true).await.unwrap();
+        let receipt = do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap();
+        let ids = op_ids(&node);
+        let id = ids[0].clone().expect("a 1:1 compose carries an operation_id");
+        assert!(uuid_v4(&id), "{id}");
+        let at_post = seen.lock().unwrap()[0].clone().expect("journal on disk before the POST");
+        assert_eq!(at_post["operation_id"], id.as_str());
+        assert!(!at_post.to_string().contains("\"gm\""), "no plaintext in the journal");
+        assert_eq!((receipt.accepted, receipt.state.as_deref(), receipt.operation_id.as_deref()), (true, Some("acked"), Some(id.as_str())));
+        assert!(pending(&node).is_none());
+        assert_eq!(ops.lock().unwrap().pays, 1);
+        // A second, separate send is a separate operation.
+        do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap();
+        let ids = op_ids(&node);
+        assert_ne!(ids[0], ids[1]);
+    }
+
+    fn uuid_v4(id: &str) -> bool {
+        let parts: Vec<&str> = id.split('-').collect();
+        parts.iter().map(|p| p.len()).collect::<Vec<_>>() == [8, 4, 4, 4, 12]
+            && id.bytes().all(|c| c == b'-' || c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+            && parts[2].starts_with('4') && matches!(parts[3].as_bytes()[0], b'8' | b'9' | b'a' | b'b')
+    }
+
+    #[tokio::test]
+    async fn nodes_without_operations_and_rooms_never_get_an_operation_id() {
+        let node = fake(AuthMode::Local, happy());
+        spend_advance(&node.state, true).await.unwrap();
+        do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap();
+        let (routes, _) = ops_node();
+        let ops = fake(AuthMode::Local, routes);
+        spend_advance(&ops.state, true).await.unwrap();
+        // Even a charge that could carry one: the room body never does.
+        let (auth, plan) = plan_message(&ops.state, ROOM, true, 13000, None).unwrap();
+        let mut body = act::compose_body(ROOM, true, "hi").unwrap();
+        body["max_total_msat"] = serde_json::json!(13000);
+        body["max_recipient_msat"] = serde_json::json!({A: 7000, C: 6000});
+        let charge = Charge { target: ROOM.into(), room: true, confirm: plan.confirm, readmission_possible: false, confirmed: false, operation: true };
+        money_post(&ops.state, auth, "/messages/compose", body, 13000, Some(charge)).await.unwrap();
+        assert_eq!(op_ids(&node), [None]);
+        assert_eq!(op_ids(&ops), [None], "genome refuses operation_id for rooms (slice 4)");
+    }
+
+    #[tokio::test]
+    async fn crash_after_post_before_response_reconciles_by_operation_without_resending() {
+        for (end, says) in [("acked", "Accepted"), ("sent", "Sent")] {
+            let (node, ops) = ops_fake(|n| n.script = vec![(end, true)]);
+            spend_advance(&node.state, true).await.unwrap();
+            assert_eq!(do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap_err().code, "spend_unknown");
+            let id = pending(&node).unwrap().operation_id.expect("journaled before the POST");
+            // Still fenced, and nothing is re-sent on its own.
+            assert_eq!(do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap_err().code, "spend_unknown");
+            let restarted = reopen(&node);
+            let done = do_spend_reconcile(&restarted).await.unwrap();
+            assert!(done.starts_with(says), "{done}");
+            assert_eq!(gets(&node), [format!("GET /messages/operations/{id}")]);
+            assert!(pending(&node).is_none());
+            assert_eq!(book(&node).last().map(|e| (e.1, e.2)), Some((2000, true)), "accounted once, settled");
+            assert_eq!(op_ids(&node), [Some(id)], "one POST");
+            assert_eq!(ops.lock().unwrap().pays, 1, "zero duplicate sends");
+        }
+    }
+
+    #[tokio::test]
+    async fn unresolved_payment_stays_fenced_and_is_named_payment_unknown() {
+        let (node, ops) = ops_fake(|n| n.script = vec![("payment_unknown", true)]);
+        spend_advance(&node.state, true).await.unwrap();
+        assert_eq!(do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap_err().code, "spend_unknown");
+        let record = pending(&node).unwrap();
+        for _ in 0..2 {
+            let err = do_spend_reconcile(&reopen(&node)).await.unwrap_err();
+            assert_eq!(err.code, "payment_unknown");
+            assert_eq!(err.pending_id.as_deref(), Some(record.id.as_str()));
+        }
+        assert_eq!(serde_json::to_value(pending(&node).unwrap()).unwrap(), serde_json::to_value(&record).unwrap());
+        assert_eq!(do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap_err().code, "spend_unknown");
+        assert_eq!(compose_bodies(&node).len(), 1);
+        // The node later resolves it: the same id reconciles, still no resend.
+        ops.lock().unwrap().ops.values_mut().for_each(|op| op.1 = "acked");
+        assert!(do_spend_reconcile(&node.state).await.unwrap().starts_with("Accepted"));
+        assert_eq!((compose_bodies(&node).len(), ops.lock().unwrap().pays), (1, 1));
+    }
+
+    #[tokio::test]
+    async fn nothing_paid_resend_reuses_the_same_operation_id() {
+        // Never reached the handler (404), or recorded but never paid (prepared).
+        for drop_first in [true, false] {
+            let (node, ops) = ops_fake(|n| if drop_first { n.drop_next = true } else { n.script = vec![("prepared", true)] });
+            spend_advance(&node.state, true).await.unwrap();
+            assert_eq!(do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap_err().code, "spend_unknown");
+            let id = pending(&node).unwrap().operation_id.unwrap();
+            assert_eq!(do_spend_reconcile(&reopen(&node)).await.unwrap(), NOTHING_PAID);
+            let record = pending(&node).unwrap();
+            assert!(record.resumable && !record.budgeted);
+            assert!(book(&node).iter().all(|e| !e.2), "reservation released, nothing settled");
+            let receipt = do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap();
+            assert!(receipt.accepted);
+            assert_eq!(op_ids(&node), [Some(id.clone()), Some(id)], "the resend reuses the id");
+            assert!(pending(&node).is_none());
+            assert_eq!(ops.lock().unwrap().pays, 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_different_message_replaces_a_record_that_holds_no_payment() {
+        let (node, ops) = ops_fake(|n| n.drop_next = true);
+        spend_advance(&node.state, true).await.unwrap();
+        do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap_err();
+        do_spend_reconcile(&node.state).await.unwrap();
+        do_message_send(&node.state, A, false, "something else", 14000, None).await.unwrap();
+        let ids = op_ids(&node);
+        assert_ne!(ids[0], ids[1], "a different message is a different operation");
+        assert_eq!(ops.lock().unwrap().pays, 1);
+    }
+
+    #[tokio::test]
+    async fn changed_plaintext_under_a_reused_id_is_refused_and_surfaced() {
+        let (node, ops) = ops_fake(|n| n.script = vec![("prepared", true)]);
+        spend_advance(&node.state, true).await.unwrap();
+        do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap_err();
+        do_spend_reconcile(&node.state).await.unwrap();
+        // The saved fingerprint says this is the same message; the node knows better.
+        let journal = spend_journal(&node.state).unwrap();
+        let mut record = journal.pending().unwrap().unwrap();
+        record.op = Some(spend_journal::operation(&act::compose_body(A, false, "edited").unwrap()));
+        journal.save(&record).unwrap();
+        drop(journal);
+        let before = book(&node);
+        let err = do_message_send(&node.state, A, false, "edited", 14000, None).await.unwrap_err();
+        assert_eq!(err.code, "operation_mismatch");
+        assert!(err.message.contains("Nothing was paid"), "{}", err.message);
+        assert_eq!(serde_json::to_value(pending(&node).unwrap()).unwrap(), serde_json::to_value(&record).unwrap(), "record restored");
+        assert!(book(&node).iter().skip(before.len()).all(|e| !e.2), "no settlement for the refused call");
+        let ids = op_ids(&node);
+        assert_eq!(ids[0], ids[1]);
+        assert_eq!(ops.lock().unwrap().pays, 0);
+    }
+
+    #[tokio::test]
+    async fn paid_undelivered_retry_reuses_the_operation_at_zero_cap() {
+        let (node, ops) = ops_fake(|n| { n.script = vec![("paid", false)]; n.settled_incomplete = true; });
+        spend_advance(&node.state, true).await.unwrap();
+        let err = do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap_err();
+        assert_eq!(err.code, "payment_settled_undelivered");
+        assert!(err.undelivered.unwrap().retry, "the node holds it paid: retry re-sends");
+        let record = pending(&node).unwrap();
+        assert_eq!(record.undelivered.as_ref().unwrap().payment_hash.as_deref(), Some(OP_HASH));
+        let receipt = do_message_retry(&node.state, A, "gm", None).await.unwrap();
+        assert_eq!((receipt.accepted, receipt.amount_msat, receipt.max_routing_fee_msat), (true, 0, 0), "this call paid nothing");
+        let bodies = compose_bodies(&node);
+        assert_eq!(bodies[1]["max_total_msat"], 0, "#53 zero-cap retry");
+        assert_eq!(bodies[0]["operation_id"], bodies[1]["operation_id"]);
+        assert!(pending(&node).is_none());
+        assert_eq!(ops.lock().unwrap().pays, 1);
+    }
+
+    #[tokio::test]
+    async fn restart_with_a_paid_operation_offers_the_same_id_retry_never_a_fresh_send() {
+        let (node, ops) = ops_fake(|n| n.script = vec![("paid", true)]);
+        spend_advance(&node.state, true).await.unwrap();
+        do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap_err();
+        let restarted = reopen(&node);
+        let err = do_spend_reconcile(&restarted).await.unwrap_err();
+        assert_eq!(err.code, "undelivered_pending");
+        let record = pending(&node).unwrap();
+        let u = record.undelivered.clone().unwrap();
+        assert_eq!((u.peer.as_str(), u.paid_msat, u.retry, u.in_flight), (A, 2000, true, false));
+        assert_eq!(book(&node).last().map(|e| (e.1, e.2)), Some((2000, true)));
+        // A fresh send stays fenced; the retry reuses the id and pays nothing.
+        spend_advance(&restarted, true).await.unwrap();
+        assert_eq!(do_message_send(&restarted, A, false, "gm", 14000, None).await.unwrap_err().code, "spend_unknown");
+        assert_eq!(do_message_retry(&restarted, A, "other text", None).await.unwrap_err().code, "retry_unavailable");
+        let receipt = do_message_retry(&restarted, A, "gm", None).await.unwrap();
+        assert_eq!((receipt.accepted, receipt.amount_msat), (true, 0));
+        let ids = op_ids(&node);
+        assert_eq!(ids.len(), 2);
+        assert_eq!(ids[0], ids[1]);
+        assert_eq!(ops.lock().unwrap().pays, 1, "zero duplicate sends");
+    }
+
+    #[tokio::test]
+    async fn a_lost_retry_reply_reconciles_by_the_same_operation() {
+        let (node, ops) = ops_fake(|n| { n.script = vec![("paid", false)]; n.settled_incomplete = true; });
+        spend_advance(&node.state, true).await.unwrap();
+        do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap_err();
+        let id = pending(&node).unwrap().operation_id.unwrap();
+        // The retry reaches the node (it re-sends, acked) but its reply is lost.
+        ops.lock().unwrap().drop_next = true;
+        ops.lock().unwrap().ops.get_mut(&id).unwrap().1 = "acked";
+        assert_eq!(do_message_retry(&node.state, A, "gm", None).await.unwrap_err().code, "spend_unknown");
+        assert!(pending(&node).unwrap().undelivered.unwrap().in_flight);
+        let done = do_spend_reconcile(&reopen(&node)).await.unwrap();
+        assert!(done.starts_with("Accepted"), "{done}");
+        assert!(pending(&node).is_none());
+        assert_eq!(op_ids(&node), [Some(id.clone()), Some(id)]);
+        assert_eq!(ops.lock().unwrap().pays, 1);
+    }
+
+    #[tokio::test]
+    async fn failed_paid_is_terminal_accounted_and_never_resent() {
+        let (node, ops) = ops_fake(|n| n.script = vec![("failed_paid", true)]);
+        spend_advance(&node.state, true).await.unwrap();
+        do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap_err();
+        assert_eq!(do_spend_reconcile(&node.state).await.unwrap_err().code, "failed_paid");
+        assert!(pending(&node).is_none());
+        assert_eq!(book(&node).last().map(|e| (e.1, e.2)), Some((2000, true)));
+        assert_eq!((compose_bodies(&node).len(), ops.lock().unwrap().pays), (1, 1));
+    }
+
     // Genome a400629 compose::readmit_then_pay refuses every capped reconnect
     // readmission. Keep this refusal fenced; do not "fix" it by dropping the cap.
     #[tokio::test]
@@ -5327,7 +5835,7 @@ mod control_act_tests {
         record.accounting_msat = Some(2000);
         record.undelivered = Some(spend_journal::Undelivered {
             peer: A.into(), paid_msat: 2000, retry: true, op: spend_journal::operation(&body),
-            admission_msat: 2000, in_flight: false, attempts: 0,
+            admission_msat: 2000, in_flight: false, attempts: 0, payment_hash: None,
         });
         journal.save(&record).unwrap();
         drop(journal);

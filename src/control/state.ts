@@ -245,9 +245,14 @@ export function messagesWorth(budgetMsat: number, priceMsat: number | null): str
 
 export type Deliveries = Record<string, Delivery>;
 
-/** A send's first status, from the node's reply. */
-export const deliveryFromReceipt = (r: { delivered: boolean }): Delivery =>
-  r.delivered ? { status: 'sent', reason: null } : { status: 'queued', reason: null };
+/**
+ * A send's first status, from the node's reply. Accepted (the recipient's node
+ * stored it) is stronger than sent (handed over); queued is paid, not handed over.
+ */
+export const deliveryFromReceipt = (r: { delivered: boolean; accepted?: boolean; state?: string }): Delivery =>
+  r.accepted || r.state === 'acked' ? { status: 'accepted', reason: null }
+    : r.state === 'failed_paid' ? { status: 'rejected', reason: 'refused after payment; do not send it again' }
+    : r.delivered ? { status: 'sent', reason: null } : { status: 'queued', reason: null };
 
 /** Fold a `/ws` delivery event in. The recipient's node decides; its reason is shown as sent. */
 export function applyDelivery(deliveries: Deliveries, event: LiveEvent): Deliveries {
