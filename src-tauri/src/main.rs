@@ -1745,6 +1745,192 @@ async fn open_introduction(state: &NodeState, text: &str, allow_local: bool) -> 
     }
 }
 
+// ---- Front door (doorstep card) ---------------------------------------------------
+//
+// A front-door card is free to carry: reading is local. Knock dials unprivileged
+// (never admission), then the composer uses the existing first-contact quote.
+
+#[tauri::command(rename_all = "snake_case")]
+async fn front_door_read(
+    window: WebviewWindow<impl tauri::Runtime>,
+    text: String,
+) -> Result<bitsov_app::front_door::FrontDoor, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    bitsov_app::front_door::read(&text, now_unix().max(0) as u64)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn front_door_mine(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+) -> Result<bitsov_app::front_door::FrontDoor, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    read_own_front_door(state.inner()).await
+}
+
+async fn read_own_front_door(state: &NodeState) -> Result<bitsov_app::front_door::FrontDoor, String> {
+    use bitsov_app::front_door as fd;
+    let status: serde_json::Value = get_json(state, "/status").await?;
+    if !status["api_capabilities"]
+        .as_array()
+        .is_some_and(|caps| caps.iter().any(|v| v.as_str() == Some(fd::CAPABILITY)))
+    {
+        return Err("Your node cannot publish a front door yet.".into());
+    }
+    let path = "/front-door";
+    let (code, text) = call_api(state, reqwest::Method::GET, path, None).await?;
+    if code == reqwest::StatusCode::NOT_FOUND {
+        return Err("front_door_missing: publish one first".into());
+    }
+    if !code.is_success() {
+        return Err(api_error(path, code, &text));
+    }
+    #[derive(Deserialize)]
+    struct Mine {
+        card: fd::Card,
+        link: String,
+    }
+    let mine: Mine = serde_json::from_str(&text).map_err(|e| format!("{path} decode failed: {e}"))?;
+    let view = mine.card.view(now_unix().max(0) as u64)?;
+    if Some(mine.card.node_id.as_str()) != status["node_id"].as_str() {
+        return Err(format!("{path}: the card is not signed by this node's key"));
+    }
+    if view.link != mine.link {
+        return Err(format!("{path}: the link does not match the card"));
+    }
+    Ok(view)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct FrontDoorPublishArgs {
+    display_name: String,
+    #[serde(default)]
+    tagline: String,
+    #[serde(default)]
+    about: String,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    admission_msat: Option<u64>,
+    #[serde(default)]
+    message_msat: Option<u64>,
+    #[serde(default)]
+    page_msat: Option<u64>,
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn front_door_publish(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    fields: FrontDoorPublishArgs,
+) -> Result<bitsov_app::front_door::FrontDoor, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    use bitsov_app::front_door as fd;
+    let status: serde_json::Value = get_json(state.inner(), "/status").await?;
+    if !status["api_capabilities"]
+        .as_array()
+        .is_some_and(|caps| caps.iter().any(|v| v.as_str() == Some(fd::CAPABILITY)))
+    {
+        return Err("Your node cannot publish a front door yet.".into());
+    }
+    let path = "/front-door";
+    let body = serde_json::json!({
+        "display_name": fields.display_name,
+        "tagline": fields.tagline,
+        "about": fields.about,
+        "kind": fields.kind,
+        "admission_msat": fields.admission_msat,
+        "message_msat": fields.message_msat,
+        "page_msat": fields.page_msat,
+    });
+    let (code, text) = call_api(state.inner(), reqwest::Method::PUT, path, Some(body)).await?;
+    if !code.is_success() {
+        return Err(api_error(path, code, &text));
+    }
+    #[derive(Deserialize)]
+    struct Resp {
+        card: fd::Card,
+        link: String,
+    }
+    let resp: Resp = serde_json::from_str(&text).map_err(|e| format!("{path} decode failed: {e}"))?;
+    let view = resp.card.view(now_unix().max(0) as u64)?;
+    if Some(resp.card.node_id.as_str()) != status["node_id"].as_str() {
+        return Err(format!("{path}: the card is not signed by this node's key"));
+    }
+    if view.link != resp.link {
+        return Err(format!("{path}: the link does not match the card"));
+    }
+    Ok(view)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn front_door_open(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    text: String,
+    allow_local: bool,
+) -> Result<bitsov_app::front_door::FrontDoor, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    open_front_door(state.inner(), &text, allow_local).await
+}
+
+async fn open_front_door(
+    state: &NodeState,
+    text: &str,
+    allow_local: bool,
+) -> Result<bitsov_app::front_door::FrontDoor, String> {
+    use bitsov_app::front_door as fd;
+    let door = fd::read(text, now_unix().max(0) as u64)?;
+    if !door.fresh {
+        return Err("This front door has expired. Ask for a fresh one.".into());
+    }
+    let local = door.reach == bitsov_app::introduction::Reach::Local;
+    if local && !allow_local {
+        return Err(format!(
+            "This front door points to a local network address ({}). Allow it on the card first. Nothing was sent.",
+            door.endpoint
+        ));
+    }
+    if !node_offers(state, fd::CAPABILITY).await {
+        return Err("Your node cannot open front doors yet.".into());
+    }
+    let path = "/front-door/open";
+    let (code, body) = call_api(
+        state,
+        reqwest::Method::POST,
+        path,
+        Some(serde_json::json!({ "card": door.link, "allow_local": local && allow_local })),
+    )
+    .await?;
+    if code == reqwest::StatusCode::CONFLICT && body.contains("front_door_closed_mesh") {
+        return Err("Your node only connects to peers you added yourself, and a front door does not add one. Nothing was sent.".into());
+    }
+    if !code.is_success() {
+        return Err(api_error(path, code, &body));
+    }
+    let opened: serde_json::Value =
+        serde_json::from_str(&body).map_err(|e| format!("{path} decode failed: {e}"))?;
+    if opened["node_id"].as_str() != Some(door.node_id.as_str())
+        || opened["connected"] != serde_json::Value::Bool(true)
+    {
+        return Err(format!("{path}: the node connected to someone else"));
+    }
+    let dialed = opened["dialed"]
+        .as_str()
+        .and_then(|d| d.parse::<std::net::SocketAddr>().ok());
+    match dialed {
+        Some(addr) if bitsov_app::introduction::dial_allowed(door.reach, addr.ip()) => Ok(door),
+        _ => Err(format!(
+            "{path}: the node dialed an address this front door does not allow"
+        )),
+    }
+}
+
 // ---- K1 slice 2: sponsor kit ------------------------------------------------------
 //
 // The inviter's node pays a small, capped gift into the newcomer's own node.
@@ -3606,6 +3792,69 @@ async fn do_voice_note_fetch(state: &NodeState, message_id: &str) -> Result<act:
     Ok(blob)
 }
 
+async fn read_call_quote(state: &NodeState, peer: &str) -> Result<control::CallQuote, String> {
+    let peer = control::node_id(peer)?;
+    let own: control::KindPrice = get_json(state, &control::price_path(act::KIND_CALL_OFFER + 1)).await?;
+    // Genome asks the callee now; a refusal or an older node means no offer price.
+    let live: Option<control::PeerCallPrice> = get_json(state, &format!("/pricing/peers/{peer}/call")).await.ok();
+    Ok(control::call_quote(live.as_ref(), own.price_msat))
+}
+
+/// One paid call signal (offer, answer, ICE or hangup) to one contact.
+/// Same authority as a 1:1 message: the owner's budget or the ten-minute
+/// window, one journaled spend at a time, a durable operation id when the
+/// node keeps them. Calls go to contacts already in the book: a first
+/// contact is a message, never a ring.
+async fn do_call_signal(
+    state: &NodeState,
+    peer: &str,
+    kind: u16,
+    plaintext: &str,
+    max_msat: u64,
+) -> Result<act::CallReceipt, ActionError> {
+    let target = control::node_id(peer).map_err(ActionError::invalid)?;
+    let mut body = act::call_body(&target, kind, plaintext)?;
+    let needs_contact = || ActionError::new("call_needs_contact", "Calls go to contacts you have already paid. Send them a message first. Nothing was paid.");
+    let (auth, plan) = plan_message(state, &target, false, max_msat, None)
+        .map_err(|e| if e.code == "first_contact" { needs_contact() } else { e })?;
+    if plan.confirm.is_some() {
+        return Err(needs_contact());
+    }
+    no_pending_spend(state)?;
+    let caps = require_price_caps(state, false).await?;
+    let quote = read_call_quote(state, &target).await.map_err(ActionError::node)?;
+    let (principal, fee) = if kind == act::KIND_CALL_OFFER {
+        let offer = quote.offer_msat.ok_or_else(|| ActionError::new(
+            "call_unsupported", "Their node does not take calls yet (no call price advertised). Nothing was paid."))?;
+        (offer, quote.offer_max_routing_fee_msat)
+    } else {
+        (quote.signal_msat, quote.signal_max_routing_fee_msat)
+    };
+    ceiling(principal + fee, max_msat)?;
+    body["max_total_msat"] = serde_json::json!(max_msat);
+    body["max_routing_fee_msat"] = serde_json::json!(fee);
+    let charge = Charge {
+        target: target.clone(),
+        room: false,
+        confirm: None,
+        readmission_possible: caps.readmission_possible,
+        confirmed: false,
+        operation: caps.operations,
+    };
+    let text = money_post(state, auth, "/messages/compose", body, max_msat, Some(charge)).await?;
+    let reply: act::SendReply = decode_act("/messages/compose", &text)?;
+    Ok(act::CallReceipt {
+        total_msat: reply.total_msat()?,
+        message_id: reply.message_id,
+        kind,
+        amount_msat: reply.amount_msat,
+        max_routing_fee_msat: reply.max_routing_fee_msat,
+        delivered: reply.delivered,
+        accepted: reply.accepted,
+        sent_at_ms: now_ms(),
+    })
+}
+
 async fn do_file_send(
     state: &NodeState,
     recipient: &str,
@@ -3993,6 +4242,33 @@ async fn file_price(
     drop(window);
     let price: control::KindPrice = get_json(state.inner(), &control::price_path(act::KIND_FILE_REF)).await?;
     act::payment_quote(price.price_msat.max(act::MIN_PAYMENT_MSAT)).map_err(|e| e.to_string())
+}
+
+/// What calling a contact costs, before anything is paid. Read-only.
+#[tauri::command(rename_all = "snake_case")]
+async fn call_quote(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    peer: String,
+) -> Result<control::CallQuote, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    read_call_quote(state.inner(), &peer).await
+}
+
+/// `POST /messages/compose` for one call signal (kinds 400-403).
+#[tauri::command(rename_all = "snake_case")]
+async fn call_signal(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    peer: String,
+    kind: u16,
+    plaintext: String,
+    max_msat: u64,
+) -> Result<act::CallReceipt, ActionError> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    do_call_signal(state.inner(), &peer, kind, &plaintext, max_msat).await
 }
 
 /// `GET /files` then `GET /files/:id`: a received voice note, for playback.
@@ -4418,6 +4694,10 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             introduction_mine,
             introduction_read,
             introduction_open,
+            front_door_mine,
+            front_door_read,
+            front_door_open,
+            front_door_publish,
             sponsor_status,
             sponsor_offer,
             sponsor_candidate,
@@ -4454,6 +4734,8 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             file_price,
             file_send,
             voice_note_fetch,
+            call_quote,
+            call_signal,
             ai_read,
             ai_providers,
             ai_disclose,
@@ -6765,6 +7047,74 @@ mod control_act_tests {
         let out = serde_json::to_string(&(receipt, ks)).unwrap();
         assert!(!out.contains("PREIMAGE") && !out.contains(&"ab".repeat(32)) && !out.contains(&"cd".repeat(32)));
         assert_eq!(node.posts()[0], ("/payments/pay".to_string(), serde_json::json!({"bolt11": "lntb10n1x", "max_routing_fee_msat": 5000})));
+    }
+
+    fn call_routes(offer: Option<u64>) -> Routes {
+        let inner = happy();
+        Arc::new(move |m, p, b| {
+            let (route, _) = p.split_once('?').unwrap_or((p, ""));
+            match route {
+                r if r == format!("/pricing/peers/{A}/call") => match offer {
+                    Some(o) => (200, serde_json::json!({"peer_id": A, "offer_msat": o, "signal_msat": 50}).to_string()),
+                    None => (400, r#"{"error":"their node did not answer with a call price; nothing was paid","code":400,"reason":"call_price_unknown"}"#.into()),
+                },
+                "/payments/price/401" => (200, serde_json::json!({"kind": 401, "price_msat": 50}).to_string()),
+                "/messages/compose" => (200, serde_json::json!({"max_routing_fee_msat": 5000, "message_id": "c1", "delivered": true, "amount_msat": 10000, "accepted": true, "state": "acked"}).to_string()),
+                _ => inner(m, p, b),
+            }
+        })
+    }
+    const OFFER: &str = r#"{"v":1,"call_id":"0123456789abcdef0123456789abcdef","media":"audio","sdp":"v=0"}"#;
+
+    #[tokio::test]
+    async fn a_call_offer_pays_the_callees_call_price_inside_the_contact_budget() {
+        let node = fake(AuthMode::Local, call_routes(Some(10_000)));
+        let s = &node.state;
+        do_budget_approve(s, 500_000, budget::PresetId::Careful).await.unwrap();
+        with_book(s, true, |b| b.set_limit(A, false, 50_000)).unwrap();
+        let quote = read_call_quote(s, A).await.unwrap();
+        assert_eq!((quote.offer_msat, quote.call_total_msat), (Some(10_000), Some(21_000)));
+        let receipt = do_call_signal(s, A, 400, OFFER, 15_000).await.unwrap();
+        assert_eq!((receipt.kind, receipt.amount_msat, receipt.total_msat), (400, 10_000, 15_000));
+        let (path, body) = node.posts().into_iter().find(|(p, _)| p == "/messages/compose").unwrap();
+        assert_eq!(path, "/messages/compose");
+        assert_eq!((body["kind"].as_u64(), body["is_room"].as_bool()), (Some(400), Some(false)));
+        assert_eq!((body["max_total_msat"].as_u64(), body["max_routing_fee_msat"].as_u64()), (Some(15_000), Some(5_000)));
+        assert_eq!(body["plaintext"], OFFER);
+        assert_eq!(budget_now(s).spent_msat, 15_000);
+    }
+
+    #[tokio::test]
+    async fn a_call_is_refused_before_paying_when_it_cannot_be_priced_or_authorised() {
+        // Their node advertises no call price: nothing is posted.
+        let node = fake(AuthMode::Local, call_routes(None));
+        do_budget_approve(&node.state, 500_000, budget::PresetId::Careful).await.unwrap();
+        with_book(&node.state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
+        assert_eq!(do_call_signal(&node.state, A, 400, OFFER, 15_000).await.unwrap_err().code, "call_unsupported");
+        // The ceiling the owner saw is below the price.
+        let node2 = fake(AuthMode::Local, call_routes(Some(10_000)));
+        do_budget_approve(&node2.state, 500_000, budget::PresetId::Careful).await.unwrap();
+        with_book(&node2.state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
+        assert_eq!(do_call_signal(&node2.state, A, 400, OFFER, 14_999).await.unwrap_err().code, "price_changed");
+        // No approval at all: locked.
+        let node3 = fake(AuthMode::Local, call_routes(Some(10_000)));
+        assert_eq!(do_call_signal(&node3.state, A, 400, OFFER, 15_000).await.unwrap_err().code, "spend_locked");
+        // Not a JSON signal, or not a call kind.
+        assert_eq!(do_call_signal(&node2.state, A, 400, "ring", 15_000).await.unwrap_err().code, "invalid");
+        assert_eq!(do_call_signal(&node2.state, A, 0, "{}", 15_000).await.unwrap_err().code, "invalid");
+        for n in [&node, &node2, &node3] {
+            assert!(!n.posts().iter().any(|(p, _)| p == "/messages/compose"), "{:?}", n.posts());
+        }
+        assert_eq!(budget_now(&node2.state).spent_msat, 0);
+    }
+
+    #[tokio::test]
+    async fn a_stranger_is_never_rung() {
+        let node = fake(AuthMode::Local, call_routes(Some(10_000)));
+        do_budget_approve(&node.state, 500_000, budget::PresetId::Careful).await.unwrap();
+        let err = do_call_signal(&node.state, C, 400, OFFER, 15_000).await.unwrap_err();
+        assert_eq!(err.code, "call_needs_contact", "{err:?}");
+        assert!(!node.posts().iter().any(|(p, _)| p == "/messages/compose"));
     }
 
     #[tokio::test]
@@ -9491,6 +9841,10 @@ mod assistant_acl_tests {
                 "introduction_mine",
                 "introduction_read",
                 "introduction_open",
+                "front_door_mine",
+                "front_door_read",
+                "front_door_open",
+                "front_door_publish",
                 "sponsor_status",
                 "sponsor_offer",
                 "sponsor_candidate",
@@ -9529,6 +9883,8 @@ mod assistant_acl_tests {
                 "file_price",
                 "file_send",
                 "voice_note_fetch",
+                "call_quote",
+                "call_signal",
                 // AI track: main window only, reads through the broker.
                 "ai_read",
                 "ai_providers",

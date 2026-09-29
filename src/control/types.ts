@@ -255,7 +255,70 @@ export type TrackRef =
   | { kind: 'peer'; id: string }
   | { kind: 'room'; id: string }
   | { kind: 'ai' }
-  | { kind: 'new' };
+  | { kind: 'new' }
+  | { kind: 'discover' };
+
+/**
+ * FrontDoorCard v1 (doorstep): free to carry, signed by the node key, valid
+ * seven days. Snapshot prices only; Knock uses a fresh first-contact quote.
+ */
+export type FrontDoor = {
+  node_id: string;
+  network: string;
+  endpoint: string;
+  reach: 'public' | 'local';
+  seq: number;
+  issued_at: number;
+  expires_at: number;
+  prices: {
+    admission_msat: number;
+    message_msat: number;
+    page_msat: number;
+    price_epoch: number;
+  };
+  profile: {
+    kind: 'person' | 'company';
+    display_name: string;
+    tagline: string;
+    about: string;
+    avatar?: { inline_b64?: string; hash?: string; size?: number; mime?: string };
+  };
+  cv?: { path: string; hash: string; size: number };
+  media: { hash: string; size: number; mime: string; thumb_b64?: string; title: string }[];
+  site?: { manifest_hash?: string; index_path?: string; page_count: number; titles: string[] };
+  links: { label: string; url: string }[];
+  /** `bitsov://front-door#…` — also the QR payload. */
+  link: string;
+  verified: boolean;
+  fresh: boolean;
+};
+
+export type FrontDoorPublish = {
+  display_name: string;
+  tagline?: string;
+  about?: string;
+  kind?: 'person' | 'company';
+  admission_msat?: number;
+  message_msat?: number;
+  page_msat?: number;
+};
+
+/**
+ * Marker that a peer track was opened from a front-door Knock (not an
+ * Introduction). Display only — never admission, never re-dialed as introduce.
+ */
+export type Doorstep = {
+  node_id: string;
+  network: string;
+  endpoint: string;
+  reach: 'public' | 'local';
+  admission_msat: number;
+  message_msat: number;
+  issued_at: number;
+  expires_at: number;
+  /** `bitsov://front-door#…` */
+  link: string;
+};
 
 /** First-run funding shapes (unchanged from CS-2). */
 export type FundState = {
@@ -451,6 +514,26 @@ export type FileReceipt = {
   operation_id?: string;
   state?: string;
   accepted?: boolean;
+};
+
+/** `call_quote`: what calling a contact costs before anything is paid (msat). */
+export type CallQuote = {
+  offer_msat: number | null;
+  offer_max_routing_fee_msat: number;
+  signal_msat: number;
+  signal_max_routing_fee_msat: number;
+  call_total_msat: number | null;
+};
+/** `call_signal`: one paid call signal. */
+export type CallReceipt = {
+  message_id: string;
+  kind: number;
+  amount_msat: number;
+  total_msat: number;
+  max_routing_fee_msat: number;
+  delivered: boolean;
+  accepted: boolean;
+  sent_at_ms: number;
 };
 
 /** `voice_note_fetch`: a received voice note's bytes, for the inline player. */

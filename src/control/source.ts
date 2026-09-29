@@ -11,6 +11,8 @@ import type {
   FirstContactQuote,
   FundingAsk,
   FundingStatus,
+  FrontDoor,
+  FrontDoorPublish,
   Introduction,
   SponsorOwnerApproval,
   SponsorCandidate,
@@ -24,6 +26,8 @@ import type {
   TopicRead,
   FileReceipt,
   VoiceBlob,
+  CallQuote,
+  CallReceipt,
   InvoiceAmount,
   InvoiceView,
   InviteView,
@@ -74,8 +78,16 @@ export interface Source {
   introductionMine(): Promise<Introduction>;
   /** K1: verify a scanned or pasted introduction. Local only: nothing is sent. */
   introductionRead(text: string): Promise<Introduction>;
-  /** K1 Continue: the node dials the introduced node, unprivileged. Pays nothing. */
+  /** K1: Continue: the node dials the introduced node, unprivileged. Pays nothing. */
   introductionOpen(text: string, allowLocal: boolean): Promise<Introduction>;
+  /** Front door: this node's published card (read), or missing. */
+  frontDoorMine(): Promise<FrontDoor>;
+  /** Front door: verify a pasted/scanned card locally. Never dials. */
+  frontDoorRead(text: string): Promise<FrontDoor>;
+  /** Front door: dial unprivileged so Knock can use first contact. */
+  frontDoorOpen(text: string, allowLocal: boolean): Promise<FrontDoor>;
+  /** Front door: Admin publish / update (signs, bumps seq). */
+  frontDoorPublish(fields: FrontDoorPublish): Promise<FrontDoor>;
   /** K1 slice 2 (sponsor): whether the owner turned starter bitcoin on. */
   sponsorStatus(): Promise<SponsorStatus>;
   /** A fresh introduction with starter bitcoin (spend window). */
@@ -144,6 +156,10 @@ export interface Source {
   fileSend(recipient: string, filename: string, mimeType: string, dataB64: string, maxMsat: number, firstContactMsat?: number): Promise<FileReceipt>;
   /** Read-only: a received voice note (kind 200, audio/*) by its message id. Never pays. */
   voiceNote(messageId: string): Promise<VoiceBlob>;
+  /** Read-only: what calling this contact costs. */
+  callQuote(peer: string): Promise<CallQuote>;
+  /** One paid call signal (kinds 400-403) under the message budget rules. */
+  callSignal(peer: string, kind: number, plaintext: string, maxMsat: number): Promise<CallReceipt>;
   // AI track: the host reads through its broker; a remote model gets only a body the owner saw
   aiRead(topic: AiTopic, sinceMs: number | null): Promise<TopicRead>;
   aiProviders(): Promise<ProviderView[]>;
@@ -175,6 +191,21 @@ export const hostSource: Source = {
   introductionMine: () => invoke<Introduction>('introduction_mine'),
   introductionRead: (text) => invoke<Introduction>('introduction_read', { text }),
   introductionOpen: (text, allowLocal) => invoke<Introduction>('introduction_open', { text, allow_local: allowLocal }),
+  frontDoorMine: () => invoke<FrontDoor>('front_door_mine'),
+  frontDoorRead: (text) => invoke<FrontDoor>('front_door_read', { text }),
+  frontDoorOpen: (text, allowLocal) => invoke<FrontDoor>('front_door_open', { text, allow_local: allowLocal }),
+  frontDoorPublish: (fields) =>
+    invoke<FrontDoor>('front_door_publish', {
+      fields: {
+        display_name: fields.display_name,
+        tagline: fields.tagline ?? '',
+        about: fields.about ?? '',
+        kind: fields.kind ?? null,
+        admission_msat: fields.admission_msat ?? null,
+        message_msat: fields.message_msat ?? null,
+        page_msat: fields.page_msat ?? null,
+      },
+    }),
   sponsorStatus: () => invoke<SponsorStatus>('sponsor_status'),
   sponsorOffer: () => invoke<Introduction>('sponsor_offer'),
   sponsorCandidate: (request) => invoke<SponsorCandidate>('sponsor_candidate', { request }),
@@ -216,6 +247,8 @@ export const hostSource: Source = {
   fileSend: (recipient, filename, mimeType, dataB64, maxMsat, firstContactMsat) =>
     invoke<FileReceipt>('file_send', { recipient, filename, mime_type: mimeType, data_b64: dataB64, max_msat: maxMsat, first_contact_msat: firstContactMsat ?? null }),
   voiceNote: (messageId) => invoke<VoiceBlob>('voice_note_fetch', { message_id: messageId }),
+  callQuote: (peer) => invoke<CallQuote>('call_quote', { peer }),
+  callSignal: (peer, kind, plaintext, maxMsat) => invoke<CallReceipt>('call_signal', { peer, kind, plaintext, max_msat: maxMsat }),
   aiRead: (topic, sinceMs) => invoke<TopicRead>('ai_read', { topic, since_ms: sinceMs }),
   aiProviders: () => invoke<ProviderView[]>('ai_providers'),
   aiDisclose: (provider, topic, sinceMs, preset, question) =>
