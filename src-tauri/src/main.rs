@@ -1979,10 +1979,19 @@ async fn do_first_contact_request(state: &NodeState, recipient: &str, max_msat: 
     }
     check_auth(state, auth)?;
     if approval_fence(state) != fence { return Err(fence_broken()); }
+    // #65 external-node attach: the app already knows this node's konsensus.toml.
+    // Include --config (and a PATH hint) only then; production still expects the
+    // owner to run from the data dir or add --config themselves.
+    let owner_config = state
+        .external_node
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|dir| dir.join("konsensus.toml"));
     let pending = owner_contact::Pending::new(owner_contact::Request {
         client_id: grant.client_id.clone(), grant_op_id: grant.op_id.clone(),
         recipient, max_total_msat: max_msat, contact_budget_msat,
-    }, fence, now_ms(), &grant)?;
+    }, fence, now_ms(), &grant, owner_config.as_deref())?;
     let view = pending.view.clone();
     *state.owner_contact.lock().unwrap() = Some(pending);
     Ok(Some(view))
