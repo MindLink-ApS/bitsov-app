@@ -4313,14 +4313,29 @@ struct AiState {
     disclosures: ai::Disclosures,
 }
 
-/// `ai-providers.json` in the app config dir. The window cannot write it.
-fn ai_provider_set(app: &AppHandle<impl tauri::Runtime>) -> (Vec<ai::ProviderView>, Vec<ai::Remote>) {
-    let file = app
-        .path()
+fn ai_config_dir(app: &AppHandle<impl tauri::Runtime>) -> Result<std::path::PathBuf, String> {
+    app.path()
         .app_config_dir()
-        .ok()
+        .map_err(|_| "Could not find this app's config folder.".to_string())
+}
+
+fn ai_local_path(app: &AppHandle<impl tauri::Runtime>) -> Result<std::path::PathBuf, String> {
+    Ok(ai_config_dir(app)?.join("ai-local.json"))
+}
+
+/// Remotes from `ai-providers.json` (off by default) plus the Own model name
+/// from `ai-local.json` when the owner has picked one. The window cannot write
+/// the remotes file; it may set the Own pick through `ai_local_select`.
+fn ai_provider_set(app: &AppHandle<impl tauri::Runtime>) -> (Vec<ai::ProviderView>, Vec<ai::Remote>) {
+    let dir = app.path().app_config_dir().ok();
+    let file = dir
+        .as_ref()
         .and_then(|dir| ai::load_providers_file(&dir.join("ai-providers.json")));
-    ai::providers(file.as_ref())
+    let own = dir
+        .as_ref()
+        .and_then(|dir| ai::local::load_local_file(&dir.join("ai-local.json")))
+        .map(|local| local.model);
+    ai::providers(file.as_ref(), own.as_deref())
 }
 
 /// Read one topic through the broker, off the async runtime.
@@ -4413,6 +4428,81 @@ fn ai_cancel(
 ) -> Result<bool, String> {
     reject_sealed_window(&window)?;
     Ok(ai_state.disclosures.cancel(&disclosure_id))
+}
+
+/// Probe loopback for Ollama / llama.cpp; list models or return a short how-to.
+#[tauri::command(rename_all = "snake_case")]
+async fn ai_local_status(
+    window: WebviewWindow<impl tauri::Runtime>,
+    port: Option<u16>,
+) -> Result<ai::local::LocalStatus, String> {
+    reject_sealed_window(&window)?;
+    let saved = ai_local_path(window.app_handle())
+        .ok()
+        .and_then(|path| ai::local::load_local_file(&path));
+    let preferred = port.or_else(|| saved.as_ref().map(|s| s.port));
+    let probe = ai::local::probe(preferred).await;
+    Ok(ai::local::status_from(probe, saved.as_ref()))
+}
+
+/// Remember which loopback model Own should use. Remotes stay off.
+#[tauri::command(rename_all = "snake_case")]
+async fn ai_local_select(
+    window: WebviewWindow<impl tauri::Runtime>,
+    model: String,
+    port: Option<u16>,
+) -> Result<Vec<ai::ProviderView>, String> {
+    reject_sealed_window(&window)?;
+    let path = ai_local_path(window.app_handle())?;
+    let preferred = port.or_else(|| ai::local::load_local_file(&path).map(|s| s.port));
+    let probe = ai::local::probe(preferred)
+        .await
+        .ok_or_else(|| ai::local::HOWTO.to_string())?;
+    let model = ai::short(&model, 80).ok_or("Pick a model name.")?;
+    if !probe.models.iter().any(|name| name == &model) {
+        return Err("That model is not on the local server right now.".into());
+    }
+    let file = ai::local::LocalFile {
+        port: port.unwrap_or(probe.port),
+        model,
+        kind: Some(probe.kind),
+    };
+    ai::local::save_local_file(&path, &file)?;
+    Ok(ai_provider_set(window.app_handle()).0)
+}
+
+/// Clear the Own model pick; answers fall back to rules on this computer.
+#[tauri::command(rename_all = "snake_case")]
+fn ai_local_clear(
+    window: WebviewWindow<impl tauri::Runtime>,
+) -> Result<Vec<ai::ProviderView>, String> {
+    reject_sealed_window(&window)?;
+    let path = ai_local_path(window.app_handle())?;
+    ai::local::clear_local_file(&path)?;
+    Ok(ai_provider_set(window.app_handle()).0)
+}
+
+/// Ask the Own-tier local model on loopback. Nobody is paid; nothing leaves.
+#[tauri::command(rename_all = "snake_case")]
+async fn ai_ask_own(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    topic: ai::Topic,
+    since_ms: Option<u64>,
+    preset: Option<ai::Preset>,
+    question: String,
+) -> Result<ai::RemoteAnswer, String> {
+    reject_sealed_window(&window)?;
+    let path = ai_local_path(window.app_handle())?;
+    let saved =
+        ai::local::load_local_file(&path).ok_or_else(|| ai::local::HOWTO.to_string())?;
+    drop(window);
+    let choice = ai::local::resolve_saved(Some(&saved))
+        .await
+        .ok_or_else(|| ai::local::HOWTO.to_string())?;
+    let read = ai_read_topic(state.inner(), topic, since_ms).await?;
+    let preset = preset.unwrap_or_else(ai::local::own_preset);
+    ai::local::ask(&choice, &question, &read, preset).await
 }
 
 /// Tauri event the main window listens on for `/ws` traffic.
@@ -4740,7 +4830,11 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             ai_providers,
             ai_disclose,
             ai_send,
-            ai_cancel
+            ai_cancel,
+            ai_local_status,
+            ai_local_select,
+            ai_local_clear,
+            ai_ask_own
         ])
         .setup(|app| {
             if assistant_dev_enabled() || assistant_node_enabled() {
@@ -9891,6 +9985,10 @@ mod assistant_acl_tests {
                 "ai_disclose",
                 "ai_send",
                 "ai_cancel",
+                "ai_local_status",
+                "ai_local_select",
+                "ai_local_clear",
+                "ai_ask_own",
             ]
         );
         assert!(handler_commands(&source)

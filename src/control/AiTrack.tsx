@@ -37,6 +37,7 @@ import type {
   AiTopic,
   Amount,
   Disclosure,
+  LocalStatus,
   NoRead,
   Peer,
   Preset,
@@ -89,13 +90,32 @@ export function AiTrack(props: {
   const [session, setSession] = props.session;
   const [draft, setDraft] = createSignal('');
   const [draftText, setDraftText] = createSignal('');
+  const [localStatus, setLocalStatus] = createSignal<LocalStatus | null>(null);
+  const [localBusy, setLocalBusy] = createSignal(false);
+  const [localError, setLocalError] = createSignal<string | null>(null);
+  const [portDraft, setPortDraft] = createSignal('');
   let stream: HTMLDivElement | undefined;
+
+  const refreshLocal = (port?: number | null) => {
+    setLocalBusy(true);
+    setLocalError(null);
+    return props.source
+      .aiLocalStatus(port ?? null)
+      .then((status) => {
+        setLocalStatus(status);
+        if (status.selected_port) setPortDraft(String(status.selected_port));
+        else if (status.port) setPortDraft(String(status.port));
+      })
+      .catch((e) => setLocalError(asActionError(e).message))
+      .finally(() => setLocalBusy(false));
+  };
 
   if (session.providers === null) {
     props.source
       .aiProviders()
       .then((list) => setSession('providers', list))
       .catch(() => setSession('providers', [OWN_RULES]));
+    void refreshLocal();
   }
 
   const nameOf = (id: string) => peerName(props.peers.find((p) => p.node_id.toLowerCase() === id.toLowerCase()), id);
@@ -130,9 +150,41 @@ export function AiTrack(props: {
     return widestExposure(candidates);
   };
   const remote = () => session.provider !== 'local';
-  const busy = () => session.turns.some((t) => t.state === 'reading' || t.state === 'sending');
+  /** Own tier with a picked loopback model: chat goes there; badge stays Own. */
+  const ownModel = () => session.provider === 'local' && !!provider()?.model;
+  const busy = () => session.turns.some((t) => t.state === 'reading' || t.state === 'sending') || localBusy();
   /** Who answers is fixed while a preview waits for Send: Send or Don't send it first. */
   const locked = () => busy() || pending().length > 0;
+
+  const pickModel = async (model: string) => {
+    const port = Number.parseInt(portDraft(), 10);
+    setLocalBusy(true);
+    setLocalError(null);
+    try {
+      const list = await props.source.aiLocalSelect(model, Number.isFinite(port) && port > 0 ? port : null);
+      setSession('providers', list);
+      setSession('provider', 'local');
+      await refreshLocal(Number.isFinite(port) && port > 0 ? port : null);
+    } catch (e) {
+      setLocalError(asActionError(e).message);
+    } finally {
+      setLocalBusy(false);
+    }
+  };
+
+  const clearModel = async () => {
+    setLocalBusy(true);
+    setLocalError(null);
+    try {
+      const list = await props.source.aiLocalClear();
+      setSession('providers', list);
+      await refreshLocal();
+    } catch (e) {
+      setLocalError(asActionError(e).message);
+    } finally {
+      setLocalBusy(false);
+    }
+  };
 
   const update = (id: number, change: Partial<Turn>) =>
     setSession('turns', (t) => t.id === id, produce((t) => Object.assign(t, change)));
@@ -187,6 +239,21 @@ export function AiTrack(props: {
     if (remote()) {
       update(id, { topic: intent.topic, sinceMs: intent.sinceMs, window: intent.window });
       return disclose(id, provider()?.data_leaves ?? 'counts');
+    }
+    if (ownModel()) {
+      update(id, { topic: intent.topic, sinceMs: intent.sinceMs, window: intent.window });
+      try {
+        const answer = await props.source.aiAskOwn(
+          intent.topic,
+          intent.sinceMs ?? null,
+          'counts',
+          question,
+        );
+        update(id, { state: 'sent', remote: answer });
+      } catch (e) {
+        update(id, { state: 'error', error: asActionError(e).message });
+      }
+      return scroll();
     }
     try {
       const read = await props.source.aiRead(intent.topic, intent.sinceMs);
@@ -252,11 +319,102 @@ export function AiTrack(props: {
               onClick={() => setSession('provider', p.kind)}
             >
               <span class="name">{p.label}</span>
-              <span class="meta">{p.kind === 'local' ? 'nothing leaves' : p.enabled ? p.host : 'off'}</span>
+              <span class="meta">
+                {p.kind === 'local'
+                  ? p.model
+                    ? p.model
+                    : 'nothing leaves'
+                  : p.enabled
+                    ? p.host
+                    : 'off'}
+              </span>
             </button>
           )}
         </For>
       </div>
+
+      <Show when={session.provider === 'local'}>
+        <div class="ai-own" data-ai-own>
+          <Show
+            when={localStatus()?.running}
+            fallback={
+              <p class="hint" data-ai-own-howto>
+                {localStatus()?.howto ??
+                  'Looking for a local model server on this computer…'}
+              </p>
+            }
+          >
+            <p class="hint" data-ai-own-found>
+              Found{' '}
+              {localStatus()!.kind === 'ollama' ? 'Ollama' : 'a local model server'} on 127.0.0.1:
+              {localStatus()!.port}. Nobody is paid; nothing leaves this computer.
+            </p>
+            <div class="ai-own-row">
+              <label class="ai-own-port">
+                <span>Port</span>
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  value={portDraft()}
+                  disabled={localBusy() || locked()}
+                  onInput={(e) => setPortDraft(e.currentTarget.value)}
+                  onChange={() => {
+                    const port = Number.parseInt(portDraft(), 10);
+                    if (Number.isFinite(port) && port > 0) void refreshLocal(port);
+                  }}
+                  data-ai-own-port
+                  aria-label="Local model server port"
+                />
+              </label>
+              <button
+                type="button"
+                class="quiet"
+                disabled={localBusy() || locked()}
+                onClick={() => {
+                  const port = Number.parseInt(portDraft(), 10);
+                  void refreshLocal(Number.isFinite(port) && port > 0 ? port : null);
+                }}
+                data-ai-own-refresh
+              >
+                Refresh
+              </button>
+              <Show when={provider()?.model}>
+                <button
+                  type="button"
+                  class="quiet"
+                  disabled={localBusy() || locked()}
+                  onClick={() => void clearModel()}
+                  data-ai-own-clear
+                >
+                  Use rules only
+                </button>
+              </Show>
+            </div>
+            <div class="ai-own-models" role="listbox" aria-label="Local models" data-ai-own-models>
+              <For each={localStatus()?.models ?? []}>
+                {(name) => (
+                  <button
+                    type="button"
+                    role="option"
+                    class="chip"
+                    aria-selected={provider()?.model === name}
+                    disabled={localBusy() || locked()}
+                    data-ai-own-model={name}
+                    onClick={() => void pickModel(name)}
+                  >
+                    {name}
+                  </button>
+                )}
+              </For>
+            </div>
+          </Show>
+          <Show when={localError()}>
+            <p class="err-note" data-ai-own-error>
+              {localError()}
+            </p>
+          </Show>
+        </div>
+      </Show>
 
       <div class="stream ai-stream" ref={stream} data-stream data-ai-track>
         <Show when={session.turns.length === 0}>
@@ -343,7 +501,9 @@ export function AiTrack(props: {
         <p class="send-next" data-ai-policy>
           {remote()
             ? `Each question shows the exact request for ${provider()?.label ?? 'the remote model'} first. Nothing is approved ahead of time.`
-            : 'Nothing leaves this computer. The AI never spends: it can only prepare a draft for you to send.'}
+            : ownModel()
+              ? `Answers come from ${provider()?.model} on this computer. Nobody is paid; nothing leaves.`
+              : 'Nothing leaves this computer. The AI never spends: it can only prepare a draft for you to send.'}
         </p>
       </form>
     </>
@@ -365,7 +525,12 @@ function TurnView(props: {
       <Match when={t().state === 'reading'}>
         <div class="ai-answer" data-ai-answer="reading">
           <div class="bubble ai-thinking">
-            <span class="spinner small" /> {t().provider === 'local' ? 'Reading your node…' : 'Preparing the preview. Nothing is sent…'}
+            <span class="spinner small" />{' '}
+            {t().provider === 'local'
+              ? t().remote || t().topic
+                ? 'Asking your local model…'
+                : 'Reading your node…'
+              : 'Preparing the preview. Nothing is sent…'}
           </div>
         </div>
       </Match>
@@ -403,17 +568,32 @@ function TurnView(props: {
       </Match>
       <Match when={t().state === 'sent' && t().remote}>
         {(r) => (
-          <div class="ai-answer" data-ai-answer="remote">
-            <div class="bubble" data-ai-text>{r().text}</div>
-            <p class="ai-source" data-ai-source="remote">
-              <span class="ai-from">{r().label}</span> · {r().model} at <span class="id">{r().host}</span> · from what you
-              shared ({PRESETS.find((p) => p.id === t().disclosure?.preset)?.label.toLowerCase()},{' '}
-              {r().sent_bytes > 0 ? `${satsWhole(r().sent_bytes)} bytes` : 'sample, nothing sent'}). Your node did not check this answer.
-            </p>
-            <details class="ai-sent" data-ai-sent>
-              <summary>{r().sent_bytes > 0 ? 'What was sent' : 'What would have been sent'}</summary>
-              <pre class="ai-payload">{t().disclosure?.body}</pre>
-            </details>
+          <div class="ai-answer" data-ai-answer={r().provider === 'local' ? 'own' : 'remote'}>
+            <div class="bubble" data-ai-text>
+              {r().text}
+            </div>
+            <Show
+              when={r().provider === 'local'}
+              fallback={
+                <p class="ai-source" data-ai-source="remote">
+                  <span class="ai-from">{r().label}</span> · {r().model} at <span class="id">{r().host}</span> · from what you
+                  shared ({PRESETS.find((p) => p.id === t().disclosure?.preset)?.label.toLowerCase()},{' '}
+                  {r().sent_bytes > 0 ? `${satsWhole(r().sent_bytes)} bytes` : 'sample, nothing sent'}). Your node did not
+                  check this answer.
+                </p>
+              }
+            >
+              <p class="ai-source" data-ai-source="own">
+                <span class="ai-from">Own</span> · On this computer · {r().model} · Nobody is paid · Nothing left this
+                computer
+              </p>
+            </Show>
+            <Show when={r().provider !== 'local'}>
+              <details class="ai-sent" data-ai-sent>
+                <summary>{r().sent_bytes > 0 ? 'What was sent' : 'What would have been sent'}</summary>
+                <pre class="ai-payload">{t().disclosure?.body}</pre>
+              </details>
+            </Show>
           </div>
         )}
       </Match>

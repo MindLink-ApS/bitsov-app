@@ -20,6 +20,7 @@ import type {
   Disclosure,
   EnergyRead,
   EnergySpan,
+  LocalStatus,
   MembraneEvent,
   MembraneRead,
   Preset,
@@ -446,6 +447,18 @@ export const SAMPLE_PROVIDERS: ProviderView[] = [
   { kind: 'shared', label: 'Shared open model (sample)', enabled: true, host: 'models.sample.invalid', model: 'open-8b-sample', note: null, pays: { to: 'models.sample.invalid', rail: 'fiat' }, data_leaves: 'counts' },
   { kind: 'frontier', label: 'Frontier model', enabled: false, host: null, model: null, note: 'Off. Not set up on this computer.', pays: { to: null, rail: 'none' }, data_leaves: null },
 ];
+
+/** Sample Own-tier status: no server running; how-to only (no URL scheme — G2). */
+export const SAMPLE_LOCAL_STATUS: LocalStatus = {
+  running: false,
+  kind: null,
+  port: null,
+  models: [],
+  selected: null,
+  selected_port: null,
+  howto:
+    'Start Ollama (`ollama serve`) or a llama.cpp server on this computer (listening on 127.0.0.1, usually port 11434 or 8080). Then pick a model here. BitSov does not download or install models; nothing leaves this computer.',
+};
 
 const looksLikeId = (text: string) => text.length >= 16 && /^[0-9a-f]+$/i.test(text);
 const roundSats = (m: number) => {
@@ -1056,6 +1069,11 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
       return { provider: remote.kind, label: remote.label, host: remote.host!, model: remote.model!, text: sampleRemoteText(held.topic, held.preset), sent_bytes: 0 } satisfies RemoteAnswer;
     },
     aiCancel: (id) => ok(disclosures.delete(id)),
+    aiLocalStatus: async () => ok({ ...SAMPLE_LOCAL_STATUS }),
+    aiLocalSelect: async () =>
+      refuse('invalid', SAMPLE_LOCAL_STATUS.howto),
+    aiLocalClear: () => ok(SAMPLE_PROVIDERS.map((p) => ({ ...p }))),
+    aiAskOwn: async () => refuse('invalid', SAMPLE_LOCAL_STATUS.howto),
     liveLink: () => {
       live?.({ type: 'link', state: 'open', detail: null });
       return ok(live ? ('open' as const) : null);
