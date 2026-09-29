@@ -3582,6 +3582,20 @@ async fn do_invite_redeem(state: &NodeState, invite: &str) -> Result<act::Redeem
     decode_act("/invites/accept", &text)
 }
 
+/// A received voice note's bytes, for the inline player. Read-only: two GETs,
+/// never a payment. Anything that is not an audio file is refused.
+async fn do_voice_note_fetch(state: &NodeState, message_id: &str) -> Result<act::FileBlob, String> {
+    let message_id = control::node_id(message_id).map_err(|_| "expected a 64-character hex message id".to_string())?;
+    let rows: Vec<act::FileRow> = get_json(state, "/files?limit=1000").await?;
+    let row = act::voice_file_for(&rows, &message_id).ok_or_else(|| "voice note not stored on this node".to_string())?;
+    let id = control::room_id(&row.id).map_err(|_| "the node returned an unexpected file id".to_string())?;
+    let blob: act::FileBlob = get_json(state, &format!("/files/{id}")).await?;
+    if !act::is_voice_mime(&blob.mime_type) {
+        return Err("not a voice note".into());
+    }
+    Ok(blob)
+}
+
 async fn do_file_send(
     state: &NodeState,
     recipient: &str,
@@ -3969,6 +3983,18 @@ async fn file_price(
     drop(window);
     let price: control::KindPrice = get_json(state.inner(), &control::price_path(act::KIND_FILE_REF)).await?;
     act::payment_quote(price.price_msat.max(act::MIN_PAYMENT_MSAT)).map_err(|e| e.to_string())
+}
+
+/// `GET /files` then `GET /files/:id`: a received voice note, for playback.
+#[tauri::command(rename_all = "snake_case")]
+async fn voice_note_fetch(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    message_id: String,
+) -> Result<act::FileBlob, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    do_voice_note_fetch(state.inner(), &message_id).await
 }
 
 /// `POST /files` then `POST /files/:id/send` to one peer.
@@ -4417,6 +4443,7 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             invite_redeem,
             file_price,
             file_send,
+            voice_note_fetch,
             ai_read,
             ai_providers,
             ai_disclose,
@@ -6728,6 +6755,33 @@ mod control_act_tests {
         let out = serde_json::to_string(&(receipt, ks)).unwrap();
         assert!(!out.contains("PREIMAGE") && !out.contains(&"ab".repeat(32)) && !out.contains(&"cd".repeat(32)));
         assert_eq!(node.posts()[0], ("/payments/pay".to_string(), serde_json::json!({"bolt11": "lntb10n1x", "max_routing_fee_msat": 5000})));
+    }
+
+    #[tokio::test]
+    async fn a_received_voice_note_is_fetched_read_only_by_message_id() {
+        const MID: &str = "cd";
+        let mid = MID.repeat(32);
+        let listed = serde_json::json!([
+            {"id": ROOM, "filename": "voice-note.webm", "mime_type": "audio/webm", "size_bytes": 2, "blake3_hash": "bb", "sender": A, "message_id": mid.to_uppercase(), "created_at": ""},
+            {"id": FILE_ID, "filename": "doc.html", "mime_type": "text/html", "size_bytes": 2, "blake3_hash": "bb", "sender": A, "message_id": "ef".repeat(32), "created_at": ""}
+        ]);
+        let routes: Routes = Arc::new(move |_m, p, _b| {
+            let (route, _) = p.split_once('?').unwrap_or((p, ""));
+            match route {
+                "/files" => (200, listed.to_string()),
+                r if r == format!("/files/{ROOM}") => (200, serde_json::json!({"id": ROOM, "filename": "voice-note.webm", "mime_type": "audio/webm", "size_bytes": 2, "blake3_hash": "bb", "sender": A, "data_b64": "aGk="}).to_string()),
+                _ => (404, r#"{"error":"route","code":404}"#.into()),
+            }
+        });
+        let node = fake(AuthMode::Local, routes);
+        let blob = do_voice_note_fetch(&node.state, &mid).await.unwrap();
+        assert_eq!((blob.mime_type.as_str(), blob.data_b64.as_str()), ("audio/webm", "aGk="));
+        // A non-audio file is never handed to the player; bad ids never reach the node.
+        assert!(do_voice_note_fetch(&node.state, &"ef".repeat(32)).await.is_err());
+        let before = node.targets().len();
+        assert!(do_voice_note_fetch(&node.state, "../files").await.is_err());
+        assert_eq!(node.targets().len(), before);
+        assert!(node.posts().is_empty(), "playback must never POST");
     }
 
     #[tokio::test]
@@ -9435,6 +9489,7 @@ mod assistant_acl_tests {
                 "invite_redeem",
                 "file_price",
                 "file_send",
+                "voice_note_fetch",
                 // AI track: main window only, reads through the broker.
                 "ai_read",
                 "ai_providers",

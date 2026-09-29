@@ -1116,6 +1116,38 @@ pub fn file_upload_body(filename: &str, mime_type: &str, data_b64: &str) -> Resu
     }
 }
 
+/// One row of `GET /files` (metadata only; the node never lists file bytes).
+#[derive(Deserialize, Debug)]
+pub struct FileRow {
+    pub id: String,
+    pub mime_type: String,
+    #[serde(default)]
+    pub message_id: Option<String>,
+}
+
+/// `GET /files/:id`: one stored file with its bytes.
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
+pub struct FileBlob {
+    pub filename: String,
+    pub mime_type: String,
+    pub size_bytes: u64,
+    pub data_b64: String,
+}
+
+/// A voice note is an ordinary kind-200 file whose type is audio. Only these
+/// are handed to the webview for inline playback.
+pub fn is_voice_mime(mime: &str) -> bool {
+    mime.trim().to_ascii_lowercase().starts_with("audio/")
+}
+
+/// The stored file a received message carried, if it is a voice note. The
+/// node records the envelope id as `message_id` when it stores the file.
+pub fn voice_file_for<'a>(rows: &'a [FileRow], message_id: &str) -> Option<&'a FileRow> {
+    rows.iter().find(|r| {
+        r.message_id.as_deref().is_some_and(|m| m.eq_ignore_ascii_case(message_id)) && is_voice_mime(&r.mime_type)
+    })
+}
+
 #[derive(Deserialize, Debug)]
 pub struct UploadReply {
     pub file_id: String,
@@ -1454,6 +1486,22 @@ mod tests {
         assert!(file_send_path("stage-../x").is_err());
         assert!(file_send_path("stage-").is_err());
         assert!(file_send_path(&format!("stage-{ROOM}/../x")).is_err());
+    }
+
+    #[test]
+    fn only_audio_files_resolve_as_voice_notes() {
+        let row = |id: &str, mime: &str, m: Option<&str>| FileRow { id: id.into(), mime_type: mime.into(), message_id: m.map(Into::into) };
+        let rows = [
+            row("a", "application/pdf", Some("AB")),
+            row("b", "audio/webm", Some("ab")),
+            row("c", "audio/webm", None),
+        ];
+        assert_eq!(voice_file_for(&rows, "ab").unwrap().id, "b");
+        assert_eq!(voice_file_for(&rows, "AB").unwrap().id, "b");
+        assert!(voice_file_for(&rows[..1], "ab").is_none());
+        assert!(voice_file_for(&rows, "cd").is_none());
+        assert!(is_voice_mime(" Audio/MP4"));
+        assert!(!is_voice_mime("text/html"));
     }
 
     /// The node's BUG-PSI reply, as genome #100's compose writes it.

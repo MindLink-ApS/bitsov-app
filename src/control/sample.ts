@@ -6,6 +6,7 @@ import { amount as fmtAmount, allIn, routingFee, sats as fmtSats } from './forma
 import type { NodeStatus, PairingView } from '../onboarding/pairing';
 import type { Source } from './source';
 import type {
+  VoiceBlob,
   FundingAsk,
   Introduction,
   ActionError,
@@ -556,6 +557,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
 
   // ---- budgets ----
   type Entry = { at: number; target: string; room: boolean; msat: number };
+  const voiceNotes = new Map<string, VoiceBlob>();
   const book = {
     preset: 'careful' as BudgetView['preset'],
     ceiling: 500_000,
@@ -902,7 +904,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
       return { inviter_pubkey: hex('b'), addr: '35.204.77.3:9735' };
     },
     filePrice: () => ok({ principal_msat: FILE_PRICE_MSAT, max_routing_fee_msat: 5000, total_msat: FILE_PRICE_MSAT + 5000 }),
-    fileSend: async (recipient, filename, _mime, dataB64, maxMsat, firstContactMsat) => {
+    fileSend: async (recipient, filename, mime, dataB64, maxMsat, firstContactMsat) => {
       if (allIn(FILE_PRICE_MSAT) > maxMsat) return refuse('price_changed', 'Price above confirmed ceiling.');
       const target = recipient.toLowerCase();
       // Same budget / window route as messages (not forced-manual like invoice pay).
@@ -910,9 +912,14 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
       if (confirm !== null) book.limits.set(key(target, false), confirm);
       book.ledger.push({ at: Date.now(), target, room: false, msat: allIn(FILE_PRICE_MSAT) });
       const id = nextId('file');
+      if (mime.toLowerCase().startsWith('audio/')) voiceNotes.set(id, { filename, mime_type: mime, size_bytes: 0, data_b64: dataB64 });
       later(1200, { type: 'delivery', message_id: id, status: 'delivered', reason: null });
       const pad = (dataB64.match(/=+$/)?.[0].length ?? 0);
       return { message_id: id, recipient: recipient.toLowerCase(), filename, size_bytes: (dataB64.length / 4) * 3 - pad, delivered: true, amount_msat: FILE_PRICE_MSAT, total_msat: allIn(FILE_PRICE_MSAT), max_routing_fee_msat: routingFee(FILE_PRICE_MSAT), sent_at_ms: Date.now(), accepted: true, state: 'acked' };
+    },
+    voiceNote: async (messageId) => {
+      const note = voiceNotes.get(messageId);
+      return note ? note : refuse('invalid', 'voice note not stored on this node');
     },
     aiRead: async (topic, sinceMs) => {
       await new Promise((r) => setTimeout(r, 350));

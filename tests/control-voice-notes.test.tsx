@@ -1,0 +1,293 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { render } from 'solid-js/web';
+import App from '../src/App';
+import type { PairingView } from '../src/onboarding/pairing';
+import type { BudgetView, SpendView } from '../src/control/types';
+import {
+  duration,
+  isVoiceNote,
+  pickRecordType,
+  sendType,
+  startRecording,
+  VOICE_BITS_PER_SECOND,
+  VOICE_MAX_MS,
+  voiceFileName,
+  type RecorderDeps,
+} from '../src/control/voice';
+
+const OWN = '1'.repeat(64);
+const A = 'a'.repeat(64);
+const IN_ID = 'c'.repeat(64);
+const DAY = 86_400_000;
+const paired: PairingView = { state: 'paired', scopes: ['read', 'receive'], short_code: 'ABCD-EFGH', code_from_node: true, reason: null, bootstrap: null };
+
+type Call = { cmd: string; args: Record<string, unknown> | undefined };
+type Reply = (args?: Record<string, unknown>) => unknown;
+
+/** A MediaRecorder stand-in: one "hi" chunk when stopped. */
+class FakeRecorder {
+  static made: FakeRecorder[] = [];
+  static isTypeSupported = (t: string) => t.startsWith('audio/webm');
+  state: 'inactive' | 'recording' = 'inactive';
+  ondataavailable: ((e: { data: Blob }) => void) | null = null;
+  onstop: (() => void) | null = null;
+  constructor(public stream: MediaStream, public opts: MediaRecorderOptions) { FakeRecorder.made.push(this); }
+  start() { this.state = 'recording'; }
+  stop() {
+    this.state = 'inactive';
+    this.ondataavailable?.({ data: new Blob(['hi']) });
+    this.onstop?.();
+  }
+}
+
+function fakeStream() {
+  const track = { stop: vi.fn() };
+  return { stream: { getTracks: () => [track] } as unknown as MediaStream, track };
+}
+
+const deps = (over: Partial<RecorderDeps> = {}): RecorderDeps => ({
+  getUserMedia: async () => fakeStream().stream,
+  MediaRecorder: FakeRecorder as unknown as typeof MediaRecorder,
+  now: () => Date.UTC(2026, 8, 29, 12, 0, 0),
+  ...over,
+});
+
+describe('voice note helpers', () => {
+  it('prefers Opus in WebM and sends it as audio/webm', () => {
+    expect(pickRecordType(() => true)).toBe('audio/webm;codecs=opus');
+    expect(pickRecordType((t) => t === 'audio/mp4')).toBe('audio/mp4');
+    expect(pickRecordType(() => false)).toBeNull();
+    expect(sendType('audio/webm;codecs=opus')).toBe('audio/webm');
+    expect(sendType('audio/mp4;codecs=mp4a')).toBe('audio/mp4');
+  });
+
+  it('names clips so both ends recognise them, and nothing else', () => {
+    const name = voiceFileName(Date.UTC(2026, 8, 29, 12, 0, 0), 'audio/webm');
+    expect(name).toMatch(/^voice-note-\d{8}-\d{6}\.webm$/);
+    expect(isVoiceNote(200, name)).toBe(true);
+    expect(isVoiceNote(200, `[file: ${name}]`)).toBe(true);
+    expect(isVoiceNote(0, name)).toBe(false);
+    expect(isVoiceNote(200, 'brief.txt')).toBe(false);
+    expect(isVoiceNote(200, 'voice-note-../x.webm')).toBe(false);
+    expect(isVoiceNote(200, null)).toBe(false);
+    expect(duration(65_400)).toBe('1:05');
+    expect(duration(VOICE_MAX_MS)).toBe('2:00');
+  });
+});
+
+describe('startRecording', () => {
+  beforeEach(() => { FakeRecorder.made = []; });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('records Opus at 32 kbps and returns an audio/webm file, releasing the microphone', async () => {
+    const { stream, track } = fakeStream();
+    const rec = await startRecording(() => {}, deps({ getUserMedia: async () => stream }));
+    expect(FakeRecorder.made[0].opts).toEqual({ mimeType: 'audio/webm;codecs=opus', audioBitsPerSecond: VOICE_BITS_PER_SECOND });
+    const clip = await rec.stop();
+    expect(clip?.type).toBe('audio/webm');
+    expect(clip?.name).toMatch(/^voice-note-.*\.webm$/);
+    expect(clip?.size).toBe(2);
+    expect(track.stop).toHaveBeenCalled();
+    // A second stop hands back nothing (the clip was already taken).
+    expect(await rec.stop()).toBeNull();
+  });
+
+  it('asks the caller to stop at about two minutes', async () => {
+    vi.useFakeTimers();
+    const onLimit = vi.fn();
+    const rec = await startRecording(onLimit, deps());
+    vi.advanceTimersByTime(VOICE_MAX_MS - 1);
+    expect(onLimit).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+    expect(onLimit).toHaveBeenCalledTimes(1);
+    expect((await rec.stop())?.type).toBe('audio/webm');
+  });
+
+  it('says so plainly when there is no microphone', async () => {
+    await expect(startRecording(() => {}, null)).rejects.toThrow('cannot record audio');
+    await expect(startRecording(() => {}, deps({ getUserMedia: () => Promise.reject(new Error('NotAllowedError')) }))).rejects.toThrow(/Microphone not available/);
+    expect(FakeRecorder.made).toHaveLength(0);
+  });
+});
+
+const openBudget = (): BudgetView => ({
+  paused: false,
+  waiting_for_owner: false,
+  ceiling_msat: 500_000,
+  max_daily_msat: 100_000_000,
+  spent_msat: 0,
+  unsettled_msat: 0,
+  preset: 'careful',
+  presets: [{ id: 'careful', contact_msat: 50_000, room_msat: 100_000, ceiling_msat: 500_000 }],
+  rows: [{ target: A, room: false, limit_msat: 50_000, spent_msat: 0 }],
+  autopay: { state: 'open', open_until_ms: Date.now() + DAY, ceiling_msat: 500_000, basis: 'node_grant' },
+  window_ms: 600_000,
+  node_grant: null,
+});
+
+function stubHost(overrides: Record<string, Reply> = {}) {
+  const calls: Call[] = [];
+  const callbacks = new Map<number, (e: unknown) => void>();
+  const spend: SpendView = { state: 'locked', basis: null, open_until_ms: null, pending: null, window_ms: 600_000 };
+  const REPLIES: Record<string, Reply> = {
+    node_status: () => ({ ready: true, node_id: OWN, error: null }),
+    pairing_status: () => paired,
+    node_overview: () => ({
+      node_id: OWN, status: 'ok', version: 'api v2', connected_peers: 1, e2ee_sessions: 1, pending_deliveries: 0,
+      lightning_available: true, block_height: 1, uptime_secs: 1, lightning_backend: 'ldk', chain_backend: 'esplora', read_at: Date.now(),
+    }),
+    peers_list: () => [{ node_id: A, addr: null, label: 'Maya', connected: true, fingerprint: null }],
+    rooms_list: () => [],
+    messages_list: () => [],
+    price_quote: () => ({ kind: 0, own_msat: 1000, peer_msat: 2000, peer_age_secs: 30, peer_stale: false }),
+    payments_overview: () => ({ balance_msat: 1_000_000, lightning_outbound_msat: 500_000, channels: [] }),
+    fund_state: () => null,
+    file_price: () => ({ principal_msat: 3000, max_routing_fee_msat: 5000, total_msat: 8000 }),
+    spend_status: () => spend,
+    budget_status: () => openBudget(),
+    file_send: (args) => ({
+      message_id: 'voice-sent', recipient: args!.recipient, filename: args!.filename, size_bytes: 2,
+      delivered: true, amount_msat: 3000, total_msat: 8000, max_routing_fee_msat: 5000, sent_at_ms: Date.now(),
+      accepted: true, state: 'acked',
+    }),
+    voice_note_fetch: () => ({ filename: 'voice-note-20260929-120000.webm', mime_type: 'audio/webm', size_bytes: 2, data_b64: 'aGk=' }),
+    live_link: () => null,
+    'plugin:event|listen': () => 1,
+    'plugin:event|unlisten': () => null,
+    ...overrides,
+  };
+  vi.stubGlobal('__TAURI_INTERNALS__', {
+    transformCallback: (cb: (e: unknown) => void) => {
+      const id = callbacks.size + 1;
+      callbacks.set(id, cb);
+      return id;
+    },
+    invoke: (cmd: string, args?: Record<string, unknown>) => {
+      calls.push({ cmd, args });
+      const reply = REPLIES[cmd];
+      if (!reply) return Promise.reject(new Error(`unexpected ${cmd}`));
+      try { return Promise.resolve(reply(args)); } catch (e) { return Promise.reject(e); }
+    },
+  });
+  vi.stubGlobal('__TAURI_EVENT_PLUGIN_INTERNALS__', { unregisterListener: () => {} });
+  return { used: (cmd: string) => calls.filter((c) => c.cmd === cmd) };
+}
+
+describe('voice notes in the composer and thread', () => {
+  let dispose: (() => void) | undefined;
+  let mount: HTMLElement;
+  const createObjectURL = URL.createObjectURL;
+  const revokeObjectURL = URL.revokeObjectURL;
+
+  beforeEach(() => {
+    FakeRecorder.made = [];
+    let n = 0;
+    URL.createObjectURL = vi.fn(() => `blob:voice-${++n}`);
+    URL.revokeObjectURL = vi.fn();
+    vi.stubGlobal('MediaRecorder', FakeRecorder);
+    Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: async () => fakeStream().stream } });
+  });
+
+  afterEach(() => {
+    dispose?.();
+    dispose = undefined;
+    mount?.remove();
+    vi.unstubAllGlobals();
+    URL.createObjectURL = createObjectURL;
+    URL.revokeObjectURL = revokeObjectURL;
+  });
+
+  const $ = <T extends Element = HTMLElement>(sel: string) => mount.querySelector<T>(sel);
+  const text = (sel: string) => $(sel)?.textContent ?? '';
+
+  async function openShell() {
+    mount = document.createElement('div');
+    document.body.appendChild(mount);
+    dispose = render(() => <App />, mount);
+    await vi.waitFor(() => expect([...mount.querySelectorAll('button')].some((b) => b.textContent?.includes('I understand'))).toBe(true));
+    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
+    await vi.waitFor(() => expect($(`[data-track="peer:${A}"]`)?.getAttribute('aria-current')).toBe('true'));
+  }
+
+  async function recordClip() {
+    $<HTMLButtonElement>('[data-voice-record="start"]')!.click();
+    await vi.waitFor(() => expect($('[data-voice-record="stop"]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-voice-record="stop"]')!.click();
+    await vi.waitFor(() => expect($('[data-voice-preview]')).not.toBeNull());
+  }
+
+  it('records, previews and sends the clip once as a paid audio/webm file at the file price', async () => {
+    const host = stubHost();
+    await openShell();
+    await recordClip();
+    expect($('[data-composer]')!.getAttribute('data-mode')).toBe('file');
+    await vi.waitFor(() => expect(text('[data-send]')).toMatch(/^Send · 8 sats$/));
+    const send = $<HTMLButtonElement>('[data-send]')!;
+    send.click();
+    send.click();
+    await vi.waitFor(() => expect(host.used('file_send')).toHaveLength(1));
+    expect(host.used('file_send')[0].args).toMatchObject({ recipient: A, mime_type: 'audio/webm', data_b64: 'aGk=', max_msat: 8000 });
+    expect(host.used('file_send')[0].args!.filename).toMatch(/^voice-note-\d{8}-\d{6}\.webm$/);
+    // The sent clip plays from its own bytes: no read back from the node.
+    await vi.waitFor(() => expect($('[data-message="voice-sent"] [data-voice-play]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-message="voice-sent"] [data-voice-play]')!.click();
+    await vi.waitFor(() => expect($('[data-message="voice-sent"] audio[data-voice-audio]')).not.toBeNull());
+    expect(host.used('voice_note_fetch')).toHaveLength(0);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(host.used('file_send')).toHaveLength(1);
+  });
+
+  it('a budget stop pays nothing and does not retry', async () => {
+    const host = stubHost({ file_send: () => Promise.reject({ code: 'budget_exhausted', message: 'Maya’s budget is used up.' }) });
+    await openShell();
+    await recordClip();
+    await vi.waitFor(() => expect(text('[data-send]')).toMatch(/^Send · 8 sats$/));
+    $<HTMLButtonElement>('[data-send]')!.click();
+    await vi.waitFor(() => expect(host.used('file_send')).toHaveLength(1));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(host.used('file_send')).toHaveLength(1);
+    expect($('[data-voice-preview]')).not.toBeNull();
+  });
+
+  it('plays a received voice note inline after one read-only fetch; other files stay plain', async () => {
+    const at = Date.now() - 60_000;
+    const host = stubHost({
+      messages_list: (args) => (args!.peer === A
+        ? [
+            { id: IN_ID, kind: 200, sender: A, recipient: OWN, timestamp: at, plaintext: '[file: voice-note-20260929-120000.webm]', payment_amount_msat: 3000 },
+            { id: 'd'.repeat(64), kind: 200, sender: A, recipient: OWN, timestamp: at + 1, plaintext: '[file: brief.txt]', payment_amount_msat: 3000 },
+          ]
+        : []),
+    });
+    await openShell();
+    await vi.waitFor(() => expect($(`[data-message="${IN_ID}"] [data-voice-play]`)).not.toBeNull());
+    expect($(`[data-message="${'d'.repeat(64)}"] [data-voice-play]`)).toBeNull();
+    expect(text(`[data-message="${'d'.repeat(64)}"] .file-name`)).toBe('[file: brief.txt]');
+    expect(host.used('voice_note_fetch')).toHaveLength(0);
+    $<HTMLButtonElement>(`[data-message="${IN_ID}"] [data-voice-play]`)!.click();
+    await vi.waitFor(() => expect($(`[data-message="${IN_ID}"] audio[data-voice-audio]`)?.getAttribute('src')).toMatch(/^blob:/));
+    expect(host.used('voice_note_fetch').map((c) => c.args)).toEqual([{ message_id: IN_ID }]);
+  });
+
+  it('names a voice note this device does not hold', async () => {
+    stubHost({
+      messages_list: (args) => (args!.peer === A
+        ? [{ id: IN_ID, kind: 200, sender: A, recipient: OWN, timestamp: Date.now() - 1000, plaintext: '[file: voice-note-20260929-120000.webm]', payment_amount_msat: 3000 }]
+        : []),
+      voice_note_fetch: () => Promise.reject('voice note not stored on this node'),
+    });
+    await openShell();
+    await vi.waitFor(() => expect($(`[data-message="${IN_ID}"] [data-voice-play]`)).not.toBeNull());
+    $<HTMLButtonElement>(`[data-message="${IN_ID}"] [data-voice-play]`)!.click();
+    await vi.waitFor(() => expect(text(`[data-message="${IN_ID}"] [data-voice-play]`)).toMatch(/not stored on this device/));
+  });
+
+  it('explains a missing microphone without leaving message mode', async () => {
+    stubHost();
+    Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: () => Promise.reject(new Error('denied')) } });
+    await openShell();
+    $<HTMLButtonElement>('[data-voice-record="start"]')!.click();
+    await vi.waitFor(() => expect(mount.textContent).toMatch(/Microphone not available/));
+    expect($('[data-composer]')!.getAttribute('data-mode')).toBe('message');
+  });
+});

@@ -64,6 +64,7 @@ fn main() {
             "invite_redeem",
             "file_price",
             "file_send",
+            "voice_note_fetch",
             "ai_read",
             "ai_providers",
             "ai_disclose",
