@@ -11,6 +11,8 @@ import type {
   FirstContactQuote,
   FundingAsk,
   FundingStatus,
+  FrontDoor,
+  FrontDoorPublish,
   Introduction,
   SponsorOwnerApproval,
   SponsorCandidate,
@@ -74,8 +76,16 @@ export interface Source {
   introductionMine(): Promise<Introduction>;
   /** K1: verify a scanned or pasted introduction. Local only: nothing is sent. */
   introductionRead(text: string): Promise<Introduction>;
-  /** K1 Continue: the node dials the introduced node, unprivileged. Pays nothing. */
+  /** K1: Continue: the node dials the introduced node, unprivileged. Pays nothing. */
   introductionOpen(text: string, allowLocal: boolean): Promise<Introduction>;
+  /** Front door: this node's published card (read), or missing. */
+  frontDoorMine(): Promise<FrontDoor>;
+  /** Front door: verify a pasted/scanned card locally. Never dials. */
+  frontDoorRead(text: string): Promise<FrontDoor>;
+  /** Front door: dial unprivileged so Knock can use first contact. */
+  frontDoorOpen(text: string, allowLocal: boolean): Promise<FrontDoor>;
+  /** Front door: Admin publish / update (signs, bumps seq). */
+  frontDoorPublish(fields: FrontDoorPublish): Promise<FrontDoor>;
   /** K1 slice 2 (sponsor): whether the owner turned starter bitcoin on. */
   sponsorStatus(): Promise<SponsorStatus>;
   /** A fresh introduction with starter bitcoin (spend window). */
@@ -175,6 +185,19 @@ export const hostSource: Source = {
   introductionMine: () => invoke<Introduction>('introduction_mine'),
   introductionRead: (text) => invoke<Introduction>('introduction_read', { text }),
   introductionOpen: (text, allowLocal) => invoke<Introduction>('introduction_open', { text, allow_local: allowLocal }),
+  frontDoorMine: () => invoke<FrontDoor>('front_door_mine'),
+  frontDoorRead: (text) => invoke<FrontDoor>('front_door_read', { text }),
+  frontDoorOpen: (text, allowLocal) => invoke<FrontDoor>('front_door_open', { text, allow_local: allowLocal }),
+  frontDoorPublish: (fields) =>
+    invoke<FrontDoor>('front_door_publish', {
+      display_name: fields.display_name,
+      tagline: fields.tagline ?? '',
+      about: fields.about ?? '',
+      kind: fields.kind ?? null,
+      admission_msat: fields.admission_msat ?? null,
+      message_msat: fields.message_msat ?? null,
+      page_msat: fields.page_msat ?? null,
+    }),
   sponsorStatus: () => invoke<SponsorStatus>('sponsor_status'),
   sponsorOffer: () => invoke<Introduction>('sponsor_offer'),
   sponsorCandidate: (request) => invoke<SponsorCandidate>('sponsor_candidate', { request }),

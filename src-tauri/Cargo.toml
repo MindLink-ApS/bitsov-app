@@ -34,6 +34,7 @@ blake3 = "1"
 getrandom = "0.2"
 hex = "0.4"
 tempfile = "3"
+base64 = "0.22"
 
 # GATE G1 (docs/ARCHITECTURE_BOUNDARY.md): NO konsensus-* dependency here — the node
 # is a bundled BINARY (see tauri.conf.json `externalBin`), never a linked crate. A

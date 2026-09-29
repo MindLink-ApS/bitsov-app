@@ -6,6 +6,7 @@ import type { Proposal } from './ai';
 import { AiTrack, createAiSession } from './AiTrack';
 import { amount as fmtAmount, allIn, clock, day, feeCeiling, routingFee, sats, satsWhole, satUnit, shortId, uptime } from './format';
 import { Organism } from './BodyPanel';
+import { DiscoverPanel, FrontDoorEditor } from './Discover';
 import { blobUrl, duration, isVoiceNote, type Recording, startRecording, VOICE_MAX_MS } from './voice';
 import {
   doorCard,
@@ -241,7 +242,7 @@ export function ControlCenter(props: Props) {
     setIntroNotice(null);
     setTrack({ kind: 'peer', id: card.node_id.toLowerCase() });
   };
-  const [tab, setTab] = createSignal<'body' | 'node' | 'wallet' | 'budget'>('body');
+  const [tab, setTab] = createSignal<'body' | 'node' | 'wallet' | 'budget' | 'frontdoor'>('body');
   // Organism view (O1): readings the organs are drawn from, each with its age.
   const [openedAt, setOpenedAt] = createSignal(Date.now());
   const [membrane, setMembrane] = createSignal<MembraneEntry[]>([]);
@@ -767,7 +768,9 @@ export function ControlCenter(props: Props) {
   const trackName = (t: TrackRef): string => {
     if (t.kind === 'peer') return peerName(peerById().get(t.id), t.id);
     if (t.kind === 'room') return rooms().find((r) => r.id.toLowerCase() === t.id)?.name ?? 'Room';
-    return t.kind === 'ai' ? 'AI' : 'Start something';
+    if (t.kind === 'ai') return 'AI';
+    if (t.kind === 'discover') return 'Discover';
+    return 'Start something';
   };
   const nameOf = (id: string) => (id.toLowerCase() === ownId().toLowerCase() ? 'You' : peerName(peerById().get(id.toLowerCase()), id));
   const trackKeyName = (key: string) => {
@@ -846,6 +849,38 @@ export function ControlCenter(props: Props) {
                     }}
                   />
                 </Match>
+                <Match when={t().kind === 'discover'}>
+                  <DiscoverPanel
+                    source={source}
+                    now={now()}
+                    onKnocked={(card) => {
+                      // Same path as a finished introduction: open the peer
+                      // track so the composer can ask a fresh door quote.
+                      setIntroduced(card.node_id.toLowerCase(), {
+                        node_id: card.node_id,
+                        network: card.network,
+                        endpoint: card.endpoint,
+                        reach: card.reach,
+                        admission_msat: card.prices.admission_msat,
+                        message_msat: card.prices.message_msat,
+                        issued_at: card.issued_at,
+                        expires_at: card.expires_at,
+                        link: card.link,
+                      });
+                      openIntroduced({
+                        node_id: card.node_id,
+                        network: card.network,
+                        endpoint: card.endpoint,
+                        reach: card.reach,
+                        admission_msat: card.prices.admission_msat,
+                        message_msat: card.prices.message_msat,
+                        issued_at: card.issued_at,
+                        expires_at: card.expires_at,
+                        link: card.link,
+                      });
+                    }}
+                  />
+                </Match>
                 <Match when={t().kind === 'peer' || t().kind === 'room'}>
                   <Conversation
                     moneyBlocked={moneyBlocked()}
@@ -907,6 +942,7 @@ export function ControlCenter(props: Props) {
             <button role="tab" aria-selected={tab() === 'node'} data-tab="node" onClick={() => { setTab('node'); setContextOpen(true); }}>Node</button>
             <button role="tab" aria-selected={tab() === 'wallet'} data-tab="wallet" onClick={() => { setTab('wallet'); setContextOpen(true); }}>Wallet</button>
             <button role="tab" aria-selected={tab() === 'budget'} data-tab="budget" onClick={() => { setTab('budget'); setContextOpen(true); }}>Budget</button>
+            <button role="tab" aria-selected={tab() === 'frontdoor'} data-tab="frontdoor" onClick={() => { setTab('frontdoor'); setContextOpen(true); }}>Front door</button>
           </div>
           <button class="quiet context-toggle" data-settings-close onClick={() => setContextOpen(false)} aria-label="Close settings">Close</button>
         </div>
@@ -954,6 +990,9 @@ export function ControlCenter(props: Props) {
               nameOf={(id, room) => (room ? rooms().find((r) => r.id.toLowerCase() === id)?.name ?? 'Room' : nameOf(id))}
               actions={actions}
             />
+          </Match>
+          <Match when={tab() === 'frontdoor'}>
+            <FrontDoorEditor source={source} now={now()} />
           </Match>
         </Switch>
       </aside>
@@ -1122,6 +1161,21 @@ function Rail(props: {
       <div class="track-group">
         <h2>AI</h2>
         <Show when={props.active}>{item({ kind: 'ai' }, 'Ask your node', <span class="meta">local</span>)}</Show>
+      </div>
+
+      <div class="track-group">
+        <h2>Discover</h2>
+        <Show when={props.active}>
+          <button
+            class="track-link"
+            data-track="discover"
+            aria-current={props.openKey === 'discover'}
+            onClick={() => props.onOpen({ kind: 'discover' })}
+          >
+            <span class="name">Front doors</span>
+            <span class="meta">paste / scan</span>
+          </button>
+        </Show>
       </div>
 
       <div class="rail-foot">
