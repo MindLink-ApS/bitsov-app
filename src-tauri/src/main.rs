@@ -140,6 +140,13 @@ struct NodeState {
     /// DEV ONLY (`dev_node`): an unverified node binary to run instead of the bundled
     /// sidecar. Always `None` in release builds.
     dev_sidecar: Mutex<Option<PathBuf>>,
+    /// DEV ONLY (`dev_node::resolve_external`): the data dir of a node the owner
+    /// runs. While set, the app never inits, starts, restarts or stops a node, and
+    /// only reads this dir (pairing challenges). Always `None` in release builds.
+    external_node: Mutex<Option<PathBuf>>,
+    /// Where the app keeps its own files (spend journal, budgets). `None` means
+    /// next to the supervised node's config, as before external mode.
+    app_dir: Mutex<Option<PathBuf>>,
     /// Last throttled re-mint attempt, for `REMINT_COOLDOWN`.
     last_remint: Mutex<Option<Instant>>,
     /// Set by the wait thread when the supervised node exits.
@@ -226,6 +233,8 @@ impl NodeState {
             config: Mutex::new(None),
             room_routing_policy: Mutex::new(None),
             dev_sidecar: Mutex::new(None),
+            external_node: Mutex::new(None),
+            app_dir: Mutex::new(None),
             last_remint: Mutex::new(None),
             sidecar_terminated: AtomicBool::new(false),
             live_link: control::LiveLink::default(),
@@ -536,6 +545,7 @@ async fn restart_node(
     expected_node_id: &str,
 ) -> Result<bool, String> {
     let state = app.state::<NodeState>();
+    refuse_external(&state)?;
     *state.ready.lock().unwrap() = false;
     *state.node_id.lock().unwrap() = None;
     *state.all_in_caps_node.lock().unwrap() = None;
@@ -586,6 +596,46 @@ async fn restart_node(
     Ok(true)
 }
 
+/// External mode: the owner runs the node, so nothing here may stop, restart or
+/// replace it.
+fn refuse_external(state: &NodeState) -> Result<(), String> {
+    if state.external_node.lock().unwrap().is_some() {
+        return Err("BitSov is attached to a node you run yourself; it never restarts, \
+                    stops or restores that node. Do that at the node."
+            .into());
+    }
+    Ok(())
+}
+
+/// DEV ONLY: attach to a node the owner already runs on 127.0.0.1:3141. Nothing is
+/// initialised, started or supervised. App files go under the app's own data dir;
+/// the node's data dir is only read.
+async fn attach_external(app: &AppHandle, app_data_dir: &Path, node: dev_node::ExternalNode) {
+    let state = app.state::<NodeState>();
+    eprintln!(
+        "[dev-node] EXTERNAL node on 127.0.0.1:3141, data dir {} (not started or stopped by the app)",
+        node.data_dir.display()
+    );
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+        let _ = window.set_title(dev_node::EXTERNAL_WINDOW_TITLE);
+    }
+    let app_dir = app_data_dir.join("external-node");
+    if let Err(e) = std::fs::create_dir_all(&app_dir) {
+        return set_error(&state, format!("cannot create the app dir: {e}"));
+    }
+    *state.external_node.lock().unwrap() = Some(node.data_dir.clone());
+    *state.app_dir.lock().unwrap() = Some(app_dir.clone());
+    *state.room_routing_policy.lock().unwrap() = configured_routing_policy(&node.config);
+    if !health_ok(&state).await {
+        return set_error(
+            &state,
+            "no node answers on 127.0.0.1:3141. Start your node, then reopen BitSov; \
+             it never starts one in external mode.",
+        );
+    }
+    finish_auth(&state, &app_dir).await;
+}
+
 /// Ensure a node config exists (first run), then start + supervise the node,
 /// wait for /health, pair (or fall back to /auth/local on rc7), and read /identity.
 async fn bootstrap_node(app: AppHandle) {
@@ -595,6 +645,11 @@ async fn bootstrap_node(app: AppHandle) {
         Err(e) => return set_error(&state, format!("no app data dir: {e}")),
     };
     // Release builds: always `Ok(None)` (see `dev_node`).
+    match dev_node::resolve_external(&app_data_dir) {
+        Ok(Some(node)) => return attach_external(&app, &app_data_dir, node).await,
+        Ok(None) => {}
+        Err(e) => return set_error(&state, format!("external node: {e}")),
+    }
     let (data_dir, dev_sidecar) = match dev_node::resolve(&app_data_dir) {
         Ok(None) => (app_data_dir, None),
         Ok(Some(dev)) => {
@@ -661,14 +716,22 @@ fn now_unix() -> i64 {
 }
 
 /// Load (first run: create) the client key and the pairing client for `data_dir`.
+/// The node writes its challenge files under its own data dir: `data_dir` for a
+/// supervised node, the owner's node dir in external mode.
 fn pairing_ctx(state: &NodeState, data_dir: &Path) -> Result<Arc<PairingCtx>, PairError> {
     if let Some(ctx) = state.pairing.lock().unwrap().as_ref() {
         return Ok(ctx.clone());
     }
     let store = data_dir.join(PAIRING_STORE_DIR);
     let key = ClientKey::load_or_create(&store)?;
+    let node_dir = state
+        .external_node
+        .lock()
+        .unwrap()
+        .clone()
+        .unwrap_or_else(|| data_dir.to_path_buf());
     let client = PairingClient::new(state.http.clone(), state.api_base.clone())
-        .expect_challenge_dir(data_dir.join("pairing"));
+        .expect_challenge_dir(node_dir.join("pairing"));
     let ctx = Arc::new(PairingCtx {
         client,
         key,
@@ -1278,6 +1341,7 @@ async fn identity_restore(
 ) -> Result<RestoreOutcome, String> {
     reject_sealed_window(&window)?;
     drop(window);
+    refuse_external(state.inner())?;
     let phrase = mnemonic.trim();
     let words = phrase.split_whitespace().count();
     if words != 12 && words != 24 {
@@ -2031,10 +2095,18 @@ fn approval_generation(state: &NodeState) -> Result<u64, ActionError> {
     Ok(gate.generation())
 }
 
+/// The app's own files: `NodeState::app_dir` in external mode, else next to the
+/// supervised node's config.
+fn app_files_dir(state: &NodeState) -> Option<PathBuf> {
+    if let Some(dir) = state.app_dir.lock().unwrap().clone() {
+        return Some(dir);
+    }
+    state.config.lock().unwrap().as_deref()?.parent().map(Path::to_path_buf)
+}
+
 fn spend_journal(state: &NodeState) -> Result<Journal, ActionError> {
-    let config = state.config.lock().unwrap().clone()
+    let dir = app_files_dir(state)
         .ok_or_else(|| spend_journal::unknown("The app data directory is not ready."))?;
-    let dir = config.parent().ok_or_else(|| spend_journal::unknown("Missing app data directory."))?;
     Journal::open(&dir.join("app-spend"))
 }
 
@@ -2088,9 +2160,9 @@ struct Charge {
 }
 
 fn budget_dir(state: &NodeState) -> Result<(PathBuf, String), ActionError> {
-    let config = state.config.lock().unwrap().clone()
-        .ok_or_else(|| ActionError::new("app_not_ready", "The app data directory is not ready."))?;
-    let dir = config.parent().ok_or_else(|| ActionError::new("app_not_ready", "Missing app data directory."))?.join("app-spend");
+    let dir = app_files_dir(state)
+        .ok_or_else(|| ActionError::new("app_not_ready", "The app data directory is not ready."))?
+        .join("app-spend");
     let node_id = state.node_id.lock().unwrap().clone().ok_or_else(|| ActionError::new("app_not_ready", "No node identity."))?;
     Ok((dir, node_id))
 }
@@ -4265,6 +4337,39 @@ mod pairing_wiring_tests {
             data_dir,
             _server: server,
         }
+    }
+
+    /// External mode: challenges are read from the owner's node dir, and the app's
+    /// key and pairing record stay in the app's own dir.
+    #[tokio::test]
+    async fn external_mode_reads_the_node_dir_and_writes_only_the_app_dir() {
+        let f = fixture(PairRoutes::Live);
+        let app_dir = tempfile::tempdir().unwrap();
+        *f.state.external_node.lock().unwrap() = Some(f.data_dir.path().to_path_buf());
+        authenticate(&f.state, app_dir.path()).await.expect("paired");
+        assert!(matches!(&*f.state.auth.lock().unwrap(), AuthMode::Paired(_)));
+        assert!(app_dir.path().join(PAIRING_STORE_DIR).join(pairing::KEY_FILE).exists());
+        assert!(!f.data_dir.path().join(PAIRING_STORE_DIR).exists());
+    }
+
+    #[tokio::test]
+    async fn without_external_mode_the_challenge_must_be_in_the_data_dir() {
+        let f = fixture(PairRoutes::Live);
+        let elsewhere = tempfile::tempdir().unwrap();
+        let err = authenticate(&f.state, elsewhere.path()).await.expect_err("refused");
+        assert!(err.contains("data directory"), "{err}");
+    }
+
+    #[test]
+    fn external_mode_refuses_restart_and_keeps_app_files_out_of_the_node_dir() {
+        let state = NodeState::default();
+        state.config.lock().unwrap().replace(PathBuf::from("/node/konsensus.toml"));
+        assert_eq!(app_files_dir(&state), Some(PathBuf::from("/node")));
+        assert!(refuse_external(&state).is_ok());
+        state.external_node.lock().unwrap().replace(PathBuf::from("/node"));
+        state.app_dir.lock().unwrap().replace(PathBuf::from("/app/external-node"));
+        assert_eq!(app_files_dir(&state), Some(PathBuf::from("/app/external-node")));
+        assert!(refuse_external(&state).unwrap_err().contains("never restarts"));
     }
 
     #[tokio::test]

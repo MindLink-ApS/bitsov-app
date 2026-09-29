@@ -1,0 +1,7 @@
+{
+  "identifier": "tech.mindlink.bitsov.devexternal",
+  "bundle": {
+    "active": false,
+    "externalBin": []
+  }
+}
