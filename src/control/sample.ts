@@ -1073,7 +1073,6 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
     aiLocalSelect: async () =>
       refuse('invalid', SAMPLE_LOCAL_STATUS.howto),
     aiLocalClear: () => ok(SAMPLE_PROVIDERS.map((p) => ({ ...p }))),
-    aiAskOwn: async () => refuse('invalid', SAMPLE_LOCAL_STATUS.howto),
     liveLink: () => {
       live?.({ type: 'link', state: 'open', detail: null });
       return ok(live ? ('open' as const) : null);

@@ -81,10 +81,10 @@ Leaving the AI track cancels its pending previews and records them as not sent, 
 
 1. The host probes `127.0.0.1` only — Ollama on port 11434 (`GET /api/tags`) or an OpenAI-compatible llama.cpp server on 8080 (`GET /v1/models`). The port is configurable in the AI track.
 2. The owner picks a listed model. The pick is saved in `ai-local.json` next to `ai-providers.json`. The window cannot write the remotes file.
-3. Questions go to `http://127.0.0.1:<port>/v1/chat/completions` through the host. The badge stays **Own** (green): `On this computer · <model>` · Nobody is paid · Nothing leaves.
+3. Questions use the same two-step disclose/send as remotes: the owner sees **What you share** and **Exact bytes**, then presses Send. The host posts only those held bytes to `http://127.0.0.1:<port>/v1/chat/completions`. The badge stays **Own** (green): `On this computer · <model>` · Nobody is paid · Nothing leaves (loopback only).
 4. If nothing is listening, the track shows a short how-to. BitSov does not download or install models. Remotes stay off unless `ai-providers.json` turns them on. There is no new spend path.
 
-Commands: `ai_local_status`, `ai_local_select`, `ai_local_clear`, `ai_ask_own`.
+Commands: `ai_local_status`, `ai_local_select`, `ai_local_clear` (Own uses `ai_disclose` / `ai_send`).
 
 ## Endpoint badge
 

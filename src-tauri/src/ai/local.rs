@@ -300,9 +300,6 @@ pub fn status_from(probe: Option<LocalProbe>, saved: Option<&LocalFile>) -> Loca
 /// Resolve a saved pick against a live probe. `None` when the server is down
 /// or the model is no longer listed (owner must pick again).
 pub fn resolve_choice(saved: &LocalFile, probe: &LocalProbe) -> Option<LocalChoice> {
-    if saved.port != probe.port && !probe.models.iter().any(|m| m == &saved.model) {
-        // Different port answered; still allow if the model name is present there.
-    }
     if !probe.models.iter().any(|m| m == &saved.model) {
         return None;
     }

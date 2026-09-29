@@ -79,7 +79,6 @@
     "allow-ai-cancel",
     "allow-ai-local-status",
     "allow-ai-local-select",
-    "allow-ai-local-clear",
-    "allow-ai-ask-own"
+    "allow-ai-local-clear"
   ]
 }

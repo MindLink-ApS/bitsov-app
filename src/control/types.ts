@@ -703,7 +703,7 @@ export type Disclosure = {
   expires_in_ms: number;
 };
 
-/** `ai_send` / `ai_ask_own`. Plain text; the app never acts on it. */
+/** `ai_send`. Plain text; the app never acts on it. */
 export type RemoteAnswer = {
   provider: ProviderKind;
   label: string;

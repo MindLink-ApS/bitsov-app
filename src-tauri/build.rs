@@ -79,7 +79,6 @@ fn main() {
             "ai_local_status",
             "ai_local_select",
             "ai_local_clear",
-            "ai_ask_own",
         ])
         .permissions_path_pattern("./permissions/manual/**/*");
 

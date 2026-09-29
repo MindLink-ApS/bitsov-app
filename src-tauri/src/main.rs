@@ -4372,7 +4372,8 @@ fn ai_providers(window: WebviewWindow<impl tauri::Runtime>) -> Result<Vec<ai::Pr
 }
 
 /// Prepare, never send: re-read the topic, narrow it, build the exact body,
-/// and hold it for one send.
+/// and hold it for one send. Own-tier loopback models use the same hold/send
+/// path so the owner always sees the exact bytes before anything is posted.
 #[tauri::command(rename_all = "snake_case")]
 #[allow(clippy::too_many_arguments)]
 async fn ai_disclose(
@@ -4386,11 +4387,22 @@ async fn ai_disclose(
     question: String,
 ) -> Result<ai::Disclosure, String> {
     reject_sealed_window(&window)?;
-    let remote = ai_provider_set(window.app_handle())
-        .1
-        .into_iter()
-        .find(|remote| remote.kind == provider)
-        .ok_or("That model is off on this computer. Nothing was prepared.")?;
+    let remote = match provider {
+        ai::ProviderKind::Local => {
+            let path = ai_local_path(window.app_handle())?;
+            let saved = ai::local::load_local_file(&path)
+                .ok_or_else(|| ai::local::HOWTO.to_string())?;
+            let choice = ai::local::resolve_saved(Some(&saved))
+                .await
+                .ok_or_else(|| ai::local::HOWTO.to_string())?;
+            choice.as_remote()
+        }
+        other => ai_provider_set(window.app_handle())
+            .1
+            .into_iter()
+            .find(|remote| remote.kind == other)
+            .ok_or("That model is off on this computer. Nothing was prepared.")?,
+    };
     drop(window);
     let question = ai::clean_question(&question).ok_or("Ask a question first.")?;
     let read = ai_read_topic(state.inner(), topic, since_ms).await?;
@@ -4463,7 +4475,8 @@ async fn ai_local_select(
         return Err("That model is not on the local server right now.".into());
     }
     let file = ai::local::LocalFile {
-        port: port.unwrap_or(probe.port),
+        // Always the port that answered (N1): a dead typed port must not stick.
+        port: probe.port,
         model,
         kind: Some(probe.kind),
     };
@@ -4480,29 +4493,6 @@ fn ai_local_clear(
     let path = ai_local_path(window.app_handle())?;
     ai::local::clear_local_file(&path)?;
     Ok(ai_provider_set(window.app_handle()).0)
-}
-
-/// Ask the Own-tier local model on loopback. Nobody is paid; nothing leaves.
-#[tauri::command(rename_all = "snake_case")]
-async fn ai_ask_own(
-    window: WebviewWindow<impl tauri::Runtime>,
-    state: State<'_, NodeState>,
-    topic: ai::Topic,
-    since_ms: Option<u64>,
-    preset: Option<ai::Preset>,
-    question: String,
-) -> Result<ai::RemoteAnswer, String> {
-    reject_sealed_window(&window)?;
-    let path = ai_local_path(window.app_handle())?;
-    let saved =
-        ai::local::load_local_file(&path).ok_or_else(|| ai::local::HOWTO.to_string())?;
-    drop(window);
-    let choice = ai::local::resolve_saved(Some(&saved))
-        .await
-        .ok_or_else(|| ai::local::HOWTO.to_string())?;
-    let read = ai_read_topic(state.inner(), topic, since_ms).await?;
-    let preset = preset.unwrap_or_else(ai::local::own_preset);
-    ai::local::ask(&choice, &question, &read, preset).await
 }
 
 /// Tauri event the main window listens on for `/ws` traffic.
@@ -4833,8 +4823,7 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             ai_cancel,
             ai_local_status,
             ai_local_select,
-            ai_local_clear,
-            ai_ask_own
+            ai_local_clear
         ])
         .setup(|app| {
             if assistant_dev_enabled() || assistant_node_enabled() {
@@ -9988,7 +9977,6 @@ mod assistant_acl_tests {
                 "ai_local_status",
                 "ai_local_select",
                 "ai_local_clear",
-                "ai_ask_own",
             ]
         );
         assert!(handler_commands(&source)

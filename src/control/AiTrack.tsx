@@ -150,8 +150,9 @@ export function AiTrack(props: {
     return widestExposure(candidates);
   };
   const remote = () => session.provider !== 'local';
-  /** Own tier with a picked loopback model: chat goes there; badge stays Own. */
+  /** Own tier with a picked loopback model: same disclose/send as remotes. */
   const ownModel = () => session.provider === 'local' && !!provider()?.model;
+  const needsDisclose = () => remote() || ownModel();
   const busy = () => session.turns.some((t) => t.state === 'reading' || t.state === 'sending') || localBusy();
   /** Who answers is fixed while a preview waits for Send: Send or Don't send it first. */
   const locked = () => busy() || pending().length > 0;
@@ -236,24 +237,9 @@ export function AiTrack(props: {
       update(id, { state: 'answered', provider: 'local', answer: { text, cards: [] } });
       return scroll();
     }
-    if (remote()) {
+    if (needsDisclose()) {
       update(id, { topic: intent.topic, sinceMs: intent.sinceMs, window: intent.window });
       return disclose(id, provider()?.data_leaves ?? 'counts');
-    }
-    if (ownModel()) {
-      update(id, { topic: intent.topic, sinceMs: intent.sinceMs, window: intent.window });
-      try {
-        const answer = await props.source.aiAskOwn(
-          intent.topic,
-          intent.sinceMs ?? null,
-          'counts',
-          question,
-        );
-        update(id, { state: 'sent', remote: answer });
-      } catch (e) {
-        update(id, { state: 'error', error: asActionError(e).message });
-      }
-      return scroll();
     }
     try {
       const read = await props.source.aiRead(intent.topic, intent.sinceMs);
@@ -483,7 +469,7 @@ export function AiTrack(props: {
             data-ai-input
           />
           <button type="submit" class="primary" disabled={busy() || !draft().trim()} data-ai-ask>
-            {remote() ? 'Preview' : 'Ask'}
+            {needsDisclose() ? 'Preview' : 'Ask'}
           </button>
         </div>
         <label class="ai-draft-field">
@@ -502,7 +488,7 @@ export function AiTrack(props: {
           {remote()
             ? `Each question shows the exact request for ${provider()?.label ?? 'the remote model'} first. Nothing is approved ahead of time.`
             : ownModel()
-              ? `Answers come from ${provider()?.model} on this computer. Nobody is paid; nothing leaves.`
+              ? `Each question shows the exact request for ${provider()?.model} on this computer first. Nobody is paid; the preview never leaves this machine.`
               : 'Nothing leaves this computer. The AI never spends: it can only prepare a draft for you to send.'}
         </p>
       </form>
@@ -526,10 +512,8 @@ function TurnView(props: {
         <div class="ai-answer" data-ai-answer="reading">
           <div class="bubble ai-thinking">
             <span class="spinner small" />{' '}
-            {t().provider === 'local'
-              ? t().remote || t().topic
-                ? 'Asking your local model…'
-                : 'Reading your node…'
+            {t().provider === 'local' && !t().disclosure && !t().topic
+              ? 'Reading your node…'
               : 'Preparing the preview. Nothing is sent…'}
           </div>
         </div>
@@ -584,16 +568,16 @@ function TurnView(props: {
               }
             >
               <p class="ai-source" data-ai-source="own">
-                <span class="ai-from">Own</span> · On this computer · {r().model} · Nobody is paid · Nothing left this
-                computer
+                <span class="ai-from">Own</span> · On this computer · {r().model} · Nobody is paid · from what you shared
+                ({PRESETS.find((p) => p.id === t().disclosure?.preset)?.label.toLowerCase()},{' '}
+                {r().sent_bytes > 0 ? `${satsWhole(r().sent_bytes)} bytes` : 'sample'}). Your node did not check this
+                answer.
               </p>
             </Show>
-            <Show when={r().provider !== 'local'}>
-              <details class="ai-sent" data-ai-sent>
-                <summary>{r().sent_bytes > 0 ? 'What was sent' : 'What would have been sent'}</summary>
-                <pre class="ai-payload">{t().disclosure?.body}</pre>
-              </details>
-            </Show>
+            <details class="ai-sent" data-ai-sent>
+              <summary>{r().sent_bytes > 0 ? 'What was sent' : 'What would have been sent'}</summary>
+              <pre class="ai-payload">{t().disclosure?.body}</pre>
+            </details>
           </div>
         )}
       </Match>

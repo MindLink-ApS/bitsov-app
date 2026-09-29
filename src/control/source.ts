@@ -175,8 +175,6 @@ export interface Source {
   aiLocalSelect(model: string, port?: number | null): Promise<ProviderView[]>;
   /** Clear the Own model pick; answers fall back to rules. */
   aiLocalClear(): Promise<ProviderView[]>;
-  /** Ask the Own-tier local model. Nobody is paid; nothing leaves. */
-  aiAskOwn(topic: AiTopic, sinceMs: number | null, preset: Preset | null, question: string): Promise<RemoteAnswer>;
 }
 
 export const LIVE_EVENT = 'node-live';
@@ -268,13 +266,6 @@ export const hostSource: Source = {
   aiLocalSelect: (model, port) =>
     invoke<ProviderView[]>('ai_local_select', { model, port: port ?? null }),
   aiLocalClear: () => invoke<ProviderView[]>('ai_local_clear'),
-  aiAskOwn: (topic, sinceMs, preset, question) =>
-    invoke<RemoteAnswer>('ai_ask_own', {
-      topic,
-      since_ms: sinceMs,
-      preset,
-      question,
-    }),
 };
 
 /** Running inside the Tauri host (vs. a plain browser tab on the Vite server). */
