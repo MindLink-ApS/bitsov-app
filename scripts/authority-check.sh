@@ -41,6 +41,22 @@ png_icons_ok(){
   [ "$found" -eq 1 ]
 }
 
+# Fail when the renderer opens sockets or embeds absolute http(s) URLs outside
+# the sample fixture module (dev/test data only; never executed as fetches).
+renderer_no_direct_node_ok(){
+  if grep -REqn 'fetch\(|new WebSocket|XMLHttpRequest' src/ 2>/dev/null; then
+    echo "  direct network API in renderer" >&2
+    return 1
+  fi
+  local bad
+  bad="$(grep -REn 'https?://' src/ 2>/dev/null | grep -Ev '^src/control/sample\.ts:' || true)"
+  if [ -n "$bad" ]; then
+    printf '%s\n' "$bad" >&2
+    return 1
+  fi
+  return 0
+}
+
 echo "== charter gates =="
 chk "G1: no konsensus-* path/git dependency" \
   '! grep -REqn "konsensus[-_][a-z]+[[:space:]]*=[[:space:]]*\{?[[:space:]]*(path|git)" src-tauri/Cargo.toml Cargo.toml 2>/dev/null'
@@ -53,7 +69,7 @@ chk "G3/G4/honesty: no banned/premature claims in copy" \
 chk "G6: explicit local-trust disclosure gates the funds UI" \
   'grep -q "data-gate=\"g6-local-trust\"" src/App.tsx && grep -q "when={trustAck()}" src/App.tsx'
 chk "G2: renderer holds no node credential and makes no direct node call" \
-  '! grep -REqn "fetch\(|new WebSocket|XMLHttpRequest|https?://" src/ 2>/dev/null'
+  'renderer_no_direct_node_ok'
 chk "G2: no hard-coded STUN/TURN server (calls contact only an owner-set STUN)" \
   '! grep -REqin "(stuns?|turns?):(//)?[a-z0-9-]+\.[a-z0-9.-]+" src/ 2>/dev/null'
 chk "shell capability: no broad spawn/kill, sidecar-scoped only" \

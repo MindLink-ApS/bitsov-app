@@ -1,10 +1,15 @@
 import { For, Show, createMemo, createSignal } from 'solid-js';
+import { copyPlainText } from '../assistant/copy';
 import type { FrontDoor, FrontDoorPublish } from './types';
 import type { Source } from './source';
 import { amount as fmtAmount } from './format';
 import { asActionError } from './state';
 import {
+  CARD_TOO_LARGE,
+  dropOldestThumbsToFit,
+  estimateCardBytes,
   hashText,
+  MAX_CARD_BYTES,
   MAX_MEDIA_ITEMS,
   prepareAvatar,
   prepareMedia,
@@ -153,10 +158,8 @@ export function FrontDoorCardView(props: { card: FrontDoor; now: number }) {
     const secs = Math.max(0, Math.floor(props.now / 1000) - c().issued_at);
     return Math.max(0, Math.floor(secs / 86400));
   };
-  const openLink = (url: string) => {
-    // Explicit user action only — never auto-fetched. noopener so the remote
-    // page cannot script us back.
-    window.open(url, '_blank', 'noopener,noreferrer');
+  const copyUrl = (url: string) => {
+    void copyPlainText(url).catch(() => {});
   };
   return (
     <article class="front-door-card" data-front-door-card>
@@ -226,10 +229,10 @@ export function FrontDoorCardView(props: { card: FrontDoor; now: number }) {
                 <button
                   type="button"
                   class="link"
-                  data-fd-link-open
-                  onClick={() => openLink(l.url)}
+                  data-fd-link-copy
+                  onClick={() => copyUrl(l.url)}
                 >
-                  Open
+                  Copy
                 </button>
               </li>
             )}
@@ -262,6 +265,7 @@ export function FrontDoorEditor(props: { source: Source; now: number }) {
   const [avatar, setAvatar] = createSignal<PreparedAvatar | null>(null);
   const [media, setMedia] = createSignal<PreparedMedia[]>([]);
   const [saving, setSaving] = createSignal(false);
+  const [sizeNote, setSizeNote] = createSignal<string | null>(null);
 
   const load = () => {
     setErr(null);
@@ -293,11 +297,40 @@ export function FrontDoorEditor(props: { source: Source; now: number }) {
 
   const hashBytes = (b64: string) => props.source.frontDoorHashBytes(b64);
 
+  const estimateParts = () => {
+    const links =
+      website().trim().length > 0 ? [{ label: 'Website', url: website().trim() }] : [];
+    return {
+      display_name: name().trim() || 'x',
+      tagline: tagline(),
+      about: about(),
+      avatar: avatar(),
+      media: media(),
+      links,
+      cv: cvText().trim()
+        ? { path: 'cv.md', hash: '0'.repeat(64), size: cvText().trim().length }
+        : null,
+    };
+  };
+
+  const cardBytes = createMemo(() => estimateCardBytes(estimateParts()));
+  const overBudget = createMemo(() => cardBytes() > MAX_CARD_BYTES);
+
   const onAvatar = async (file: File | null) => {
     if (!file) return;
     setErr(null);
+    setSizeNote(null);
     try {
-      setAvatar(await prepareAvatar(file, hashBytes));
+      const prepared = await prepareAvatar(file, hashBytes);
+      const fit = dropOldestThumbsToFit({ ...estimateParts(), avatar: prepared });
+      setMedia(fit.media);
+      setAvatar(prepared);
+      if (fit.dropped > 0) {
+        setSizeNote(
+          `Dropped ${fit.dropped} older thumbnail${fit.dropped === 1 ? '' : 's'} so the card stays under ${MAX_CARD_BYTES} bytes.`,
+        );
+      }
+      if (fit.bytes > MAX_CARD_BYTES) setErr(CARD_TOO_LARGE);
     } catch (e) {
       setErr(asActionError(e).message);
     }
@@ -306,13 +339,22 @@ export function FrontDoorEditor(props: { source: Source; now: number }) {
   const onMedia = async (files: FileList | null) => {
     if (!files?.length) return;
     setErr(null);
+    setSizeNote(null);
     try {
-      const next = [...media()];
+      let next = [...media()];
       for (const file of Array.from(files)) {
         if (next.length >= MAX_MEDIA_ITEMS) break;
         next.push(await prepareMedia(file, file.name, hashBytes));
       }
-      setMedia(next.slice(0, MAX_MEDIA_ITEMS));
+      next = next.slice(0, MAX_MEDIA_ITEMS);
+      const fit = dropOldestThumbsToFit({ ...estimateParts(), media: next });
+      setMedia(fit.media);
+      if (fit.dropped > 0) {
+        setSizeNote(
+          `Dropped ${fit.dropped} older thumbnail${fit.dropped === 1 ? '' : 's'} so the card stays under ${MAX_CARD_BYTES} bytes.`,
+        );
+      }
+      if (fit.bytes > MAX_CARD_BYTES) setErr(CARD_TOO_LARGE);
     } catch (e) {
       setErr(asActionError(e).message);
     }
@@ -367,6 +409,10 @@ export function FrontDoorEditor(props: { source: Source; now: number }) {
 
   const publish = async () => {
     if (!name().trim() || saving()) return;
+    if (overBudget()) {
+      setErr(CARD_TOO_LARGE);
+      return;
+    }
     setSaving(true);
     setErr(null);
     try {
@@ -390,6 +436,14 @@ export function FrontDoorEditor(props: { source: Source; now: number }) {
       if (cvText().trim()) {
         const h = await hashText(cvText().trim(), hashBytes);
         fields.cv = { path: 'cv.md', hash: h.hash, size: h.size };
+        const afterCv = estimateCardBytes({
+          ...estimateParts(),
+          cv: fields.cv,
+        });
+        if (afterCv > MAX_CARD_BYTES) {
+          setErr(CARD_TOO_LARGE);
+          return;
+        }
       }
       const c = await props.source.frontDoorPublish(fields);
       setMine(c);
@@ -456,11 +510,11 @@ export function FrontDoorEditor(props: { source: Source; now: number }) {
         />
       </label>
       <label class="field">
-        <span>Website (shown as text; never auto-opened)</span>
+        <span>Website (shown as text; never opened)</span>
         <input
           data-fd-edit-website
-          type="url"
-          placeholder={'https' + '://'}
+          type="text"
+          placeholder="example.com"
           value={website()}
           onInput={(e) => setWebsite(e.currentTarget.value)}
           maxlength={512}
@@ -490,12 +544,21 @@ export function FrontDoorEditor(props: { source: Source; now: number }) {
           </p>
         </Show>
       </label>
+      <p class="hint" data-fd-card-bytes data-over={overBudget() ? 'true' : 'false'}>
+        Card size ≈ {cardBytes().toLocaleString()} / {MAX_CARD_BYTES.toLocaleString()} bytes
+        {overBudget() ? ' — too large to publish' : ''}
+      </p>
+      <Show when={sizeNote()}>
+        <p class="hint" data-fd-size-note>
+          {sizeNote()}
+        </p>
+      </Show>
       <div class="row">
         <button
           type="button"
           class="primary"
           data-fd-publish
-          disabled={!name().trim() || saving()}
+          disabled={!name().trim() || saving() || overBudget()}
           onClick={() => void publish()}
         >
           {mine() ? 'Update' : 'Publish'}

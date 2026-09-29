@@ -128,7 +128,8 @@ describe('front door Discover and editor', () => {
     expect(imgs.length).toBe(0);
     expect(root.querySelector('[data-fd-media] .thumb-ph')).toBeTruthy();
     expect(root.querySelector('[data-fd-link-url]')?.textContent).toBe('https://example.invalid/path');
-    expect(root.querySelector('[data-fd-link-open]')).toBeTruthy();
+    expect(root.querySelector('[data-fd-link-open]')).toBeNull();
+    expect(root.querySelector('[data-fd-link-copy]')).toBeTruthy();
   });
 
   it('disallowed dial address surfaces as a Knock error', async () => {
@@ -161,10 +162,102 @@ describe('front door Discover and editor', () => {
     web.dispatchEvent(new Event('input', { bubbles: true }));
     await viWait();
     expect(root.querySelector('[data-fd-preview] [data-fd-name]')?.textContent).toBe('Rasmus');
+    expect(root.querySelector('[data-fd-card-bytes]')?.getAttribute('data-over')).toBe('false');
     root.querySelector<HTMLButtonElement>('[data-fd-publish]')!.click();
     await viWait();
     expect(root.querySelector('[data-fd-link]')?.textContent).toMatch(/^bitsov:\/\/front-door#/);
     expect(root.querySelector('[data-fd-seq]')?.textContent).toMatch(/seq 2/);
+  });
+
+  it('blocks Publish when the serialized preview exceeds 16 KiB', async () => {
+    const source = sampleSource();
+    mount(() => <FrontDoorEditor source={source} now={Date.now()} />);
+    await viWait();
+    const name = root.querySelector<HTMLInputElement>('[data-fd-edit-name]')!;
+    name.value = 'Rasmus';
+    name.dispatchEvent(new Event('input', { bubbles: true }));
+    // Oversized about + website push the estimate over without needing canvas.
+    await viWait();
+    // Re-mount with a card that already exceeds 16 KiB (max avatar + two max thumbs).
+    root.remove();
+    const fat = sampleSource();
+    const origMine = fat.frontDoorMine.bind(fat);
+    fat.frontDoorMine = async () => {
+      const c = await origMine();
+      return {
+        ...c,
+        profile: {
+          ...c.profile,
+          avatar: {
+            inline_b64: 'A'.repeat(10_900),
+            hash: 'ab'.repeat(32),
+            size: 8000,
+            mime: 'image/jpeg',
+          },
+        },
+        media: [
+          {
+            hash: 'cd'.repeat(32),
+            size: 4000,
+            mime: 'image/jpeg',
+            thumb_b64: 'B'.repeat(5500),
+            title: 'one',
+          },
+          {
+            hash: 'ef'.repeat(32),
+            size: 4000,
+            mime: 'image/jpeg',
+            thumb_b64: 'C'.repeat(5500),
+            title: 'two',
+          },
+        ],
+      };
+    };
+    mount(() => <FrontDoorEditor source={fat} now={Date.now()} />);
+    await viWait();
+    const n = root.querySelector<HTMLInputElement>('[data-fd-edit-name]')!;
+    expect(n.value.length).toBeGreaterThan(0);
+    await viWait();
+    expect(root.querySelector('[data-fd-card-bytes]')?.getAttribute('data-over')).toBe('true');
+    const pub = root.querySelector<HTMLButtonElement>('[data-fd-publish]')!;
+    expect(pub.disabled).toBe(true);
+    expect(root.querySelector('[data-fd-card-bytes]')?.textContent).toMatch(/too large/i);
+    // Force the click path: publish() still refuses when over budget.
+    pub.disabled = false;
+    pub.click();
+    await viWait();
+    expect(root.querySelector('[data-fd-edit-error]')?.textContent).toMatch(/over|16384|bytes/i);
+  });
+
+  it('hashes CV text through the host before publish', async () => {
+    const source = sampleSource();
+    const hashes: string[] = [];
+    const orig = source.frontDoorHashBytes.bind(source);
+    source.frontDoorHashBytes = async (b64) => {
+      const h = await orig(b64);
+      hashes.push(h);
+      return h;
+    };
+    let publishedCv: { hash: string; size: number; path: string } | undefined;
+    const origPub = source.frontDoorPublish.bind(source);
+    source.frontDoorPublish = async (fields) => {
+      publishedCv = fields.cv;
+      return origPub(fields);
+    };
+    mount(() => <FrontDoorEditor source={source} now={Date.now()} />);
+    await viWait();
+    const name = root.querySelector<HTMLInputElement>('[data-fd-edit-name]')!;
+    name.value = 'Rasmus';
+    name.dispatchEvent(new Event('input', { bubbles: true }));
+    const cv = root.querySelector<HTMLTextAreaElement>('[data-fd-edit-cv]')!;
+    cv.value = 'CV line one\nCV line two';
+    cv.dispatchEvent(new Event('input', { bubbles: true }));
+    root.querySelector<HTMLButtonElement>('[data-fd-publish]')!.click();
+    await viWait();
+    expect(hashes.length).toBeGreaterThanOrEqual(1);
+    expect(publishedCv?.path).toBe('cv.md');
+    expect(publishedCv?.hash).toMatch(/^[0-9a-f]{64}$/);
+    expect(publishedCv?.size).toBe('CV line one\nCV line two'.length);
   });
 });
 

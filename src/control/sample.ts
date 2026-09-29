@@ -814,7 +814,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
                 title: 'x',
               },
             ],
-            links: [{ label: 'Website', url: 'https' + '://example.invalid/path' }],
+            links: [{ label: 'Website', url: 'https://example.invalid/path' }],
           }),
         );
       }
