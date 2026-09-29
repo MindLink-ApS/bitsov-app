@@ -172,6 +172,11 @@ struct NodeState {
     all_in_caps_node: Mutex<Option<String>>,
     /// Serializes this process's budget-file read-modify-write.
     budget_io: Mutex<()>,
+    /// Serializes every money action: each money POST (send, retry, payment,
+    /// file) from journal check to final save, pending-result reconcile, and
+    /// stopping a retry. A reconcile never reads a record a live POST is
+    /// still going to rewrite. Held across awaits, hence async.
+    money: tokio::sync::Mutex<()>,
     owner_contact: Mutex<Option<owner_contact::Pending>>,
 }
 
@@ -211,6 +216,7 @@ impl NodeState {
             node_grant: Mutex::new(None),
             all_in_caps_node: Mutex::new(None),
             budget_io: Mutex::new(()),
+            money: tokio::sync::Mutex::new(()),
             ready: Mutex::new(false),
             node_id: Mutex::new(None),
             error: Mutex::new(None),
@@ -2226,7 +2232,10 @@ async fn money_post(state: &NodeState, auth: Auth, path: &str, body: serde_json:
 /// saved in the journal before the POST. A retry of the same send, or a resend
 /// of a message the node holds no payment for, reuses it: the node pays at most
 /// once per id and answers 409 if the text changed.
+///
+/// Holds `NodeState::money` throughout: a reconcile waits for this POST.
 async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: serde_json::Value, max_msat: u64, charge: Option<Charge>, retry: Option<&spend_journal::Undelivered>) -> Result<String, ActionError> {
+    let _money = state.money.lock().await;
     let journal = spend_journal(state)?;
     let prior = journal.pending()?;
     ensure_fresh_token(state).await;
@@ -2523,7 +2532,9 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
     serde_json::to_string(&value).map_err(spend_journal::unknown)
 }
 
+/// Waits for any money POST in flight (`NodeState::money`), then reads its record.
 async fn do_spend_reconcile(state: &NodeState) -> Result<String, ActionError> {
+    let _money = state.money.lock().await;
     let journal = spend_journal(state)?;
     let Some(mut pending) = journal.pending()? else { return Ok("No pending spend.".into()); };
     if state.node_id.lock().unwrap().as_deref() != Some(pending.node_id.as_str()) {
@@ -2619,6 +2630,12 @@ async fn reconcile_operation(state: &NodeState, journal: &Journal, mut pending: 
         }
         Some(reply)
     };
+    // Serialised with every money action; still, never write over a record
+    // that another action replaced, or whose retry started or ended, meanwhile.
+    let in_flight = |p: &spend_journal::Pending| p.undelivered.as_ref().map(|u| u.in_flight);
+    if journal.pending()?.is_none_or(|now| now.id != pending.id || in_flight(&now) != in_flight(&pending)) {
+        return Err(spend_journal::unknown("The pending result changed while your node was asked. Nothing was dispatched again; check the pending result again."));
+    }
     let outcome = reply.as_ref().map_or(Outcome::NothingPaid, |r| spend_journal::outcome(r.state.as_deref().unwrap_or_default()));
     let retry = pending.undelivered.clone();
     let reply = match (outcome, reply) {
@@ -2699,6 +2716,9 @@ async fn reconcile_operation(state: &NodeState, journal: &Journal, mut pending: 
 /// money is fully known (no retry in flight, within its bound) is released,
 /// after its accounting is written. Nothing is dispatched.
 fn do_spend_dismiss_undelivered(state: &NodeState, pending_id: &str) -> Result<String, ActionError> {
+    let Ok(_money) = state.money.try_lock() else {
+        return Err(ActionError::new("money_busy", "Another payment action is still running. Nothing was changed; try again in a moment."));
+    };
     let journal = spend_journal(state)?;
     // Only the record the owner chose: a stale card never releases another message.
     let pending = journal.pending()?.filter(|p| p.id == pending_id)
@@ -4928,42 +4948,47 @@ mod control_act_tests {
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { continue };
-                let mut reader = BufReader::new(stream.try_clone().unwrap());
-                let mut line = String::new();
-                if reader.read_line(&mut line).is_err() {
-                    continue;
-                }
-                let mut parts = line.split_whitespace();
-                let method = parts.next().unwrap_or("").to_string();
-                let target = parts.next().unwrap_or("").to_string();
-                let (mut bearer, mut length) = (None, 0usize);
-                loop {
-                    let mut header = String::new();
-                    if reader.read_line(&mut header).is_err() || header == "\r\n" || header.is_empty() {
-                        break;
+                // One thread per connection: a route holding a request open
+                // never blocks another, as on a real node.
+                let (log, routes) = (log.clone(), routes.clone());
+                std::thread::spawn(move || {
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).is_err() {
+                        return;
                     }
-                    let lower = header.to_ascii_lowercase();
-                    if let Some(v) = lower.strip_prefix("content-length:") {
-                        length = v.trim().parse().unwrap_or(0);
+                    let mut parts = line.split_whitespace();
+                    let method = parts.next().unwrap_or("").to_string();
+                    let target = parts.next().unwrap_or("").to_string();
+                    let (mut bearer, mut length) = (None, 0usize);
+                    loop {
+                        let mut header = String::new();
+                        if reader.read_line(&mut header).is_err() || header == "\r\n" || header.is_empty() {
+                            break;
+                        }
+                        let lower = header.to_ascii_lowercase();
+                        if let Some(v) = lower.strip_prefix("content-length:") {
+                            length = v.trim().parse().unwrap_or(0);
+                        }
+                        if let Some(v) = header.strip_prefix("authorization: Bearer ") {
+                            bearer = Some(v.trim().to_string());
+                        }
                     }
-                    if let Some(v) = header.strip_prefix("authorization: Bearer ") {
-                        bearer = Some(v.trim().to_string());
-                    }
-                }
-                let mut body = vec![0u8; length];
-                let _ = reader.read_exact(&mut body);
-                let body = String::from_utf8_lossy(&body).to_string();
-                log.lock().unwrap().push((method.clone(), target.clone(), bearer.clone(), body.clone()));
-                let path = target.strip_prefix("/api/v1").unwrap_or(&target).to_string();
-                let (status, reply) = if path == "/pair/first-contact-grant" && bearer.as_deref() != Some("independent.owner.fixture") {
-                    (403, "independent owner authority required".to_string())
-                } else { routes(&method, &path, &body) };
-                let mut out = stream;
-                let _ = write!(
-                    out,
-                    "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{reply}",
-                    reply.len()
-                );
+                    let mut body = vec![0u8; length];
+                    let _ = reader.read_exact(&mut body);
+                    let body = String::from_utf8_lossy(&body).to_string();
+                    log.lock().unwrap().push((method.clone(), target.clone(), bearer.clone(), body.clone()));
+                    let path = target.strip_prefix("/api/v1").unwrap_or(&target).to_string();
+                    let (status, reply) = if path == "/pair/first-contact-grant" && bearer.as_deref() != Some("independent.owner.fixture") {
+                        (403, "independent owner authority required".to_string())
+                    } else { routes(&method, &path, &body) };
+                    let mut out = stream;
+                    let _ = write!(
+                        out,
+                        "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{reply}",
+                        reply.len()
+                    );
+                });
             }
         });
         let state = NodeState::for_api(format!("http://127.0.0.1:{port}/api/v1"));
@@ -5421,6 +5446,148 @@ mod control_act_tests {
         assert_eq!(bodies[0]["operation_id"], bodies[1]["operation_id"]);
         assert!(pending(&node).is_none());
         assert_eq!(ops.lock().unwrap().pays, 1);
+    }
+
+    /// The `nth` compose stays open at the node until the test releases it.
+    /// `open_at_lookup` records, per `GET /messages/operations/{id}`, whether
+    /// that compose was still open when the lookup arrived.
+    struct Hold {
+        arrived: Arc<std::sync::atomic::AtomicBool>,
+        release: std::sync::mpsc::Sender<()>,
+        open_at_lookup: Arc<Mutex<Vec<bool>>>,
+    }
+
+    /// `answer` replaces the node's own reply; `lose` loses it after the node
+    /// handled the compose (the client's `spend_timeout` fires first).
+    fn hold_compose(inner: Routes, nth: usize, answer: Option<(u16, String)>, lose: bool) -> (Routes, Hold) {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
+        let (release, gate) = std::sync::mpsc::channel::<()>();
+        let gate = Mutex::new(gate);
+        let (arrived, open, count) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)), AtomicUsize::new(0));
+        let open_at_lookup = Arc::new(Mutex::new(Vec::new()));
+        let (a, o, seen) = (arrived.clone(), open.clone(), open_at_lookup.clone());
+        let routes: Routes = Arc::new(move |m, p, b| {
+            if p.starts_with("/messages/operations/") { seen.lock().unwrap().push(o.load(SeqCst)); }
+            if p != "/messages/compose" || count.fetch_add(1, SeqCst) != nth { return inner(m, p, b); }
+            o.store(true, SeqCst);
+            a.store(true, SeqCst);
+            gate.lock().unwrap().recv_timeout(Duration::from_secs(10)).expect("the test releases the compose");
+            let reply = answer.clone().unwrap_or_else(|| inner(m, p, b));
+            o.store(false, SeqCst);
+            if lose { std::thread::sleep(Duration::from_millis(1500)); }
+            reply
+        });
+        (routes, Hold { arrived, release, open_at_lookup })
+    }
+
+    /// Runs `action`; while its compose is open at the node the owner taps
+    /// "check the pending result", and the compose is released a little later.
+    async fn reconcile_during<T>(node: &Fake, hold: &Hold, action: impl std::future::Future<Output = T>) -> (T, Result<String, ActionError>) {
+        let reconcile = async {
+            while !hold.arrived.load(std::sync::atomic::Ordering::SeqCst) { tokio::time::sleep(Duration::from_millis(5)).await; }
+            assert!(node.state.money.try_lock().is_err(), "the in-flight action holds the money lock");
+            let (done, ()) = tokio::join!(do_spend_reconcile(&node.state), async {
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                hold.release.send(()).unwrap();
+            });
+            done
+        };
+        let both = tokio::time::timeout(Duration::from_secs(10), async { tokio::join!(action, reconcile) }).await.expect("no deadlock");
+        assert!(node.state.money.try_lock().is_ok(), "the lock is free afterwards");
+        assert!(hold.open_at_lookup.lock().unwrap().iter().all(|open| !open), "no lookup while the POST was open");
+        both
+    }
+
+    fn settled(node: &Fake) -> Vec<u64> {
+        book(node).into_iter().filter(|e| e.2).map(|e| e.1).collect()
+    }
+
+    #[tokio::test]
+    async fn reconcile_during_an_in_flight_send_waits_and_accounts_it_once() {
+        for lose in [false, true] {
+            let (routes, ops) = ops_node();
+            let (routes, hold) = hold_compose(routes, 0, None, lose);
+            let mut node = fake(AuthMode::Local, routes);
+            node.state.spend_timeout = Duration::from_secs(1);
+            spend_advance(&node.state, true).await.unwrap();
+            let (sent, reconciled) = reconcile_during(&node, &hold, do_message_send(&node.state, A, false, "gm", 14000, None)).await;
+            if lose {
+                assert_eq!(sent.unwrap_err().code, "spend_unknown");
+                let done = reconciled.unwrap();
+                assert!(done.starts_with("Accepted"), "{done}");
+                assert_eq!(gets(&node).len(), 1, "looked up after the POST ended");
+            } else {
+                assert!(sent.unwrap().accepted);
+                assert_eq!(reconciled.unwrap(), "No pending spend.");
+                assert!(gets(&node).is_empty());
+            }
+            assert!(pending(&node).is_none());
+            assert_eq!(settled(&node), [2000], "accounted once");
+            assert!(book(&node).iter().all(|e| e.2), "no reservation left open");
+            assert_eq!((compose_bodies(&node).len(), ops.lock().unwrap().pays), (1, 1));
+        }
+    }
+
+    #[tokio::test]
+    async fn reconcile_during_an_in_flight_zero_cap_retry_waits_and_leaks_no_reservation() {
+        let (routes, ops) = ops_node();
+        { let mut n = ops.lock().unwrap(); n.script = vec![("paid", false)]; n.settled_incomplete = true; }
+        let (routes, hold) = hold_compose(routes, 1, None, false);
+        let mut node = fake(AuthMode::Local, routes);
+        node.state.spend_timeout = Duration::from_secs(1);
+        let record = psi_first(&node).await;
+        let (retried, reconciled) = reconcile_during(&node, &hold, do_message_retry(&node.state, A, "gm", None)).await;
+        let receipt = retried.unwrap();
+        assert_eq!((receipt.accepted, receipt.amount_msat), (true, 0), "#53: the retry paid nothing");
+        assert_eq!(reconciled.unwrap(), "No pending spend.");
+        assert!(pending(&node).is_none());
+        assert_eq!(compose_bodies(&node)[1]["max_total_msat"], 0);
+        assert_eq!(book(&node).last().cloned(), Some((format!("{}-retry-1", record.request_hash), 0, true)), "retry reservation closed");
+        assert!(book(&node).iter().all(|e| e.2));
+        assert_eq!(ops.lock().unwrap().pays, 1);
+    }
+
+    #[tokio::test]
+    async fn readiness_refusal_under_the_money_lock_frees_it_for_reconcile() {
+        let refusal = (503, serde_json::json!({"code":"not_ready","money_ready":false,"error":"offline"}).to_string());
+        // A fresh send (#56): nothing pending afterwards.
+        let (routes, _) = ops_node();
+        let (routes, hold) = hold_compose(routes, 0, Some(refusal.clone()), false);
+        let node = fake(AuthMode::Local, routes);
+        spend_advance(&node.state, true).await.unwrap();
+        let (sent, reconciled) = reconcile_during(&node, &hold, do_message_send(&node.state, A, false, "gm", 14000, None)).await;
+        assert_eq!(sent.unwrap_err().code, "not_ready");
+        assert_eq!(reconciled.unwrap(), "No pending spend.");
+        assert!(pending(&node).is_none());
+        // A zero-cap retry (#53 + #56): the paid record is restored, then retried.
+        let (routes, ops) = ops_node();
+        { let mut n = ops.lock().unwrap(); n.script = vec![("paid", false)]; n.settled_incomplete = true; }
+        let (routes, hold) = hold_compose(routes, 1, Some(refusal), false);
+        let node = fake(AuthMode::Local, routes);
+        let record = psi_first(&node).await;
+        let (retried, reconciled) = reconcile_during(&node, &hold, do_message_retry(&node.state, A, "gm", None)).await;
+        assert_eq!(retried.unwrap_err().code, "not_ready");
+        assert_eq!(reconciled.unwrap_err().code, "undelivered_pending");
+        assert_eq!(serde_json::to_value(pending(&node).unwrap()).unwrap(), serde_json::to_value(&record).unwrap());
+        assert!(do_message_retry(&node.state, A, "gm", None).await.unwrap().accepted);
+        assert_eq!(ops.lock().unwrap().pays, 1);
+    }
+
+    #[tokio::test]
+    async fn reconcile_never_saves_over_a_record_that_changed_during_the_lookup() {
+        // Replaced by another action, or a retry that ended meanwhile.
+        for replaced in [true, false] {
+            let (node, _) = ops_fake(|n| { n.script = vec![("paid", false)]; n.settled_incomplete = true; });
+            let record = psi_first(&node).await;
+            let id = record.operation_id.clone().unwrap();
+            let journal = spend_journal(&node.state).unwrap();
+            let mut seen = record.clone();
+            if replaced { seen.id = "an-earlier-record".into(); } else { seen.undelivered.as_mut().unwrap().in_flight = true; }
+            let err = reconcile_operation(&node.state, &journal, seen, &id).await.unwrap_err();
+            drop(journal);
+            assert_eq!(err.code, "spend_unknown", "{}", err.message);
+            assert_eq!(serde_json::to_value(pending(&node).unwrap()).unwrap(), serde_json::to_value(&record).unwrap(), "left as it is");
+        }
     }
 
     #[tokio::test]
