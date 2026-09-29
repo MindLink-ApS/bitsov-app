@@ -10,7 +10,10 @@ import {
   sendType,
   startRecording,
   VOICE_BITS_PER_SECOND,
+  VOICE_MAX_BYTES,
   VOICE_MAX_MS,
+  VOICE_MP4_MAX_MS,
+  voiceLimitMs,
   voiceFileName,
   type RecorderDeps,
 } from '../src/control/voice';
@@ -18,6 +21,7 @@ import {
 const OWN = '1'.repeat(64);
 const A = 'a'.repeat(64);
 const IN_ID = 'c'.repeat(64);
+const C = 'e'.repeat(64);
 const DAY = 86_400_000;
 const paired: PairingView = { state: 'paired', scopes: ['read', 'receive'], short_code: 'ABCD-EFGH', code_from_node: true, reason: null, bootstrap: null };
 
@@ -33,9 +37,10 @@ class FakeRecorder {
   onstop: (() => void) | null = null;
   constructor(public stream: MediaStream, public opts: MediaRecorderOptions) { FakeRecorder.made.push(this); }
   start() { this.state = 'recording'; }
+  static clip: () => Blob = () => new Blob(['hi']);
   stop() {
     this.state = 'inactive';
-    this.ondataavailable?.({ data: new Blob(['hi']) });
+    this.ondataavailable?.({ data: FakeRecorder.clip() });
     this.onstop?.();
   }
 }
@@ -76,7 +81,27 @@ describe('voice note helpers', () => {
 });
 
 describe('startRecording', () => {
-  beforeEach(() => { FakeRecorder.made = []; });
+  beforeEach(() => { FakeRecorder.made = []; FakeRecorder.clip = () => new Blob(['hi']); });
+
+  it('caps the MP4/AAC fallback shorter than WebM, and stops on a byte budget whatever the codec', async () => {
+    expect(voiceLimitMs('audio/webm;codecs=opus')).toBe(VOICE_MAX_MS);
+    expect(voiceLimitMs('audio/mp4')).toBe(VOICE_MP4_MAX_MS);
+    // 128 kbps for the MP4 limit stays under the 1.4 MB file cap.
+    expect((VOICE_MP4_MAX_MS / 1000) * 128_000 / 8).toBeLessThan(1_400_000);
+    const onlyMp4 = class extends FakeRecorder { static isTypeSupported = (t: string) => t === 'audio/mp4'; };
+    const mp4 = await startRecording(() => {}, deps({ MediaRecorder: onlyMp4 as unknown as typeof MediaRecorder }));
+    expect(mp4.limitMs).toBe(VOICE_MP4_MAX_MS);
+    mp4.cancel();
+    const onLimit = vi.fn();
+    const rec = await startRecording(onLimit, deps());
+    const r = FakeRecorder.made[FakeRecorder.made.length - 1];
+    r.ondataavailable!({ data: new Blob([new Uint8Array(VOICE_MAX_BYTES - 1)]) });
+    expect(onLimit).not.toHaveBeenCalled();
+    r.ondataavailable!({ data: new Blob([new Uint8Array(1)]) });
+    r.ondataavailable!({ data: new Blob([new Uint8Array(1)]) });
+    expect(onLimit).toHaveBeenCalledTimes(1);
+    rec.cancel();
+  });
   afterEach(() => { vi.useRealTimers(); });
 
   it('records Opus at 32 kbps and returns an audio/webm file, releasing the microphone', async () => {
@@ -136,7 +161,7 @@ function stubHost(overrides: Record<string, Reply> = {}) {
       node_id: OWN, status: 'ok', version: 'api v2', connected_peers: 1, e2ee_sessions: 1, pending_deliveries: 0,
       lightning_available: true, block_height: 1, uptime_secs: 1, lightning_backend: 'ldk', chain_backend: 'esplora', read_at: Date.now(),
     }),
-    peers_list: () => [{ node_id: A, addr: null, label: 'Maya', connected: true, fingerprint: null }],
+    peers_list: () => [{ node_id: A, addr: null, label: 'Maya', connected: true, fingerprint: null }, { node_id: C, addr: null, label: 'Josh', connected: true, fingerprint: null }],
     rooms_list: () => [],
     messages_list: () => [],
     price_quote: () => ({ kind: 0, own_msat: 1000, peer_msat: 2000, peer_age_secs: 30, peer_stale: false }),
@@ -289,5 +314,65 @@ describe('voice notes in the composer and thread', () => {
     $<HTMLButtonElement>('[data-voice-record="start"]')!.click();
     await vi.waitFor(() => expect(mount.textContent).toMatch(/Microphone not available/));
     expect($('[data-composer]')!.getAttribute('data-mode')).toBe('message');
+  });
+
+  it('stops recording when the window loses focus and keeps the clip unsent', async () => {
+    const host = stubHost();
+    await openShell();
+    $<HTMLButtonElement>('[data-voice-record="start"]')!.click();
+    await vi.waitFor(() => expect($('[data-voice-record="stop"]')).not.toBeNull());
+    window.dispatchEvent(new Event('blur'));
+    await vi.waitFor(() => expect($('[data-voice-preview]')).not.toBeNull());
+    expect(FakeRecorder.made[0].state).toBe('inactive');
+    expect(host.used('file_send')).toHaveLength(0);
+  });
+
+  it('a microphone prompt answered after switching contact does not record for the new one', async () => {
+    stubHost();
+    let grant!: (s: MediaStream) => void;
+    const { stream, track } = fakeStream();
+    Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: () => new Promise<MediaStream>((r) => { grant = r; }) } });
+    await openShell();
+    $<HTMLButtonElement>('[data-voice-record="start"]')!.click();
+    await vi.waitFor(() => expect(grant).toBeDefined());
+    $<HTMLElement>(`[data-track="peer:${C}"]`)!.click();
+    await vi.waitFor(() => expect($(`[data-track="peer:${C}"]`)?.getAttribute('aria-current')).toBe('true'));
+    grant(stream);
+    await vi.waitFor(() => expect(track.stop).toHaveBeenCalled());
+    expect($('[data-voice-record="stop"]')).toBeNull();
+    expect(FakeRecorder.made.every((r) => r.state === 'inactive')).toBe(true);
+  });
+
+  it('refuses a clip over the file cap before anything is sent', async () => {
+    const host = stubHost();
+    FakeRecorder.clip = () => new Blob([new Uint8Array(1_400_001)]);
+    await openShell();
+    $<HTMLButtonElement>('[data-voice-record="start"]')!.click();
+    await vi.waitFor(() => expect($('[data-voice-record="stop"]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-voice-record="stop"]')!.click();
+    await vi.waitFor(() => expect(mount.textContent).toMatch(/over 1\.4 MB, too large to send/));
+    expect($('[data-voice-preview]')).toBeNull();
+    expect(host.used('file_send')).toHaveLength(0);
+    FakeRecorder.clip = () => new Blob(['hi']);
+  });
+
+  it('names a spoofed voice-note file as not audio, not as missing', async () => {
+    stubHost({
+      messages_list: (args) => (args!.peer === A
+        ? [{ id: IN_ID, kind: 200, sender: A, recipient: OWN, timestamp: Date.now() - 1000, plaintext: '[file: voice-note-20260929-120000.webm]', payment_amount_msat: 3000 }]
+        : []),
+      voice_note_fetch: () => Promise.reject('not a voice note'),
+    });
+    await openShell();
+    await vi.waitFor(() => expect($(`[data-message="${IN_ID}"] [data-voice-play]`)).not.toBeNull());
+    $<HTMLButtonElement>(`[data-message="${IN_ID}"] [data-voice-play]`)!.click();
+    await vi.waitFor(() => expect(text(`[data-message="${IN_ID}"] [data-voice-play]`)).toBe('File · voice-note-20260929-120000.webm (not audio, not played)'));
+  });
+
+  it('the recording pill uses the accent ink for contrast', async () => {
+    const css = (await import('node:fs')).readFileSync('src/styles.css', 'utf8');
+    const rule = css.split('\n').find((l) => l.startsWith('.attach.soft.voice-record.recording'))!;
+    expect(rule).toContain('background: var(--accent)');
+    expect(rule).toContain('color: var(--accent-ink)');
   });
 });

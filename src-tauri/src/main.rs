@@ -3772,12 +3772,22 @@ async fn do_invite_redeem(state: &NodeState, invite: &str) -> Result<act::Redeem
 /// never a payment. Anything that is not an audio file is refused.
 async fn do_voice_note_fetch(state: &NodeState, message_id: &str) -> Result<act::FileBlob, String> {
     let message_id = control::node_id(message_id).map_err(|_| "expected a 64-character hex message id".to_string())?;
-    let rows: Vec<act::FileRow> = get_json(state, "/files?limit=1000").await?;
-    let row = act::voice_file_for(&rows, &message_id).ok_or_else(|| "voice note not stored on this node".to_string())?;
-    let id = control::room_id(&row.id).map_err(|_| "the node returned an unexpected file id".to_string())?;
+    let mut found = None;
+    for limit in act::FILE_LIST_WINDOWS {
+        let rows: Vec<act::FileRow> = get_json(state, &format!("/files?limit={limit}")).await?;
+        match act::voice_file_for(&rows, &message_id) {
+            act::VoiceLookup::Voice(row) => { found = Some(row.id.clone()); break; }
+            act::VoiceLookup::NotVoice => return Err(act::NOT_A_VOICE_NOTE.into()),
+            // A short page is the whole list: no wider window can hold it.
+            act::VoiceLookup::Missing if rows.len() < limit => break,
+            act::VoiceLookup::Missing => {}
+        }
+    }
+    let row = found.ok_or_else(|| act::VOICE_NOT_STORED.to_string())?;
+    let id = control::room_id(&row).map_err(|_| "the node returned an unexpected file id".to_string())?;
     let blob: act::FileBlob = get_json(state, &format!("/files/{id}")).await?;
     if !act::is_voice_mime(&blob.mime_type) {
-        return Err("not a voice note".into());
+        return Err(act::NOT_A_VOICE_NOTE.into());
     }
     Ok(blob)
 }
@@ -7127,11 +7137,40 @@ mod control_act_tests {
         let blob = do_voice_note_fetch(&node.state, &mid).await.unwrap();
         assert_eq!((blob.mime_type.as_str(), blob.data_b64.as_str()), ("audio/webm", "aGk="));
         // A non-audio file is never handed to the player; bad ids never reach the node.
-        assert!(do_voice_note_fetch(&node.state, &"ef".repeat(32)).await.is_err());
+        // A spoofed voice-note name on a non-audio file is named as such.
+        assert_eq!(do_voice_note_fetch(&node.state, &"ef".repeat(32)).await.unwrap_err(), act::NOT_A_VOICE_NOTE);
+        // A short list is the whole list: one small read, then "not stored".
+        let before = node.targets().len();
+        assert_eq!(do_voice_note_fetch(&node.state, &"99".repeat(32)).await.unwrap_err(), act::VOICE_NOT_STORED);
+        assert_eq!(node.targets()[before..], ["GET /files?limit=50".to_string()]);
         let before = node.targets().len();
         assert!(do_voice_note_fetch(&node.state, "../files").await.is_err());
         assert_eq!(node.targets().len(), before);
         assert!(node.posts().is_empty(), "playback must never POST");
+    }
+
+    #[tokio::test]
+    async fn a_voice_note_lookup_widens_the_file_window_only_as_needed() {
+        let mid = "cd".repeat(32);
+        // 250 newer files, then the note: found in the 1000 window, after 50 and 200.
+        let rows: Vec<serde_json::Value> = (0..250)
+            .map(|i| serde_json::json!({"id": FILE_ID, "mime_type": "application/pdf", "message_id": format!("{i:064x}")}))
+            .chain(std::iter::once(serde_json::json!({"id": ROOM, "mime_type": "audio/webm", "message_id": mid.clone()})))
+            .collect();
+        let routes: Routes = Arc::new(move |_m, p, _b| {
+            let (route, query) = p.split_once('?').unwrap_or((p, ""));
+            match route {
+                "/files" => {
+                    let limit: usize = query.trim_start_matches("limit=").parse().unwrap();
+                    (200, serde_json::Value::Array(rows.iter().take(limit).cloned().collect()).to_string())
+                }
+                r if r == format!("/files/{ROOM}") => (200, serde_json::json!({"filename": "voice-note.webm", "mime_type": "audio/webm", "size_bytes": 2, "data_b64": "aGk="}).to_string()),
+                _ => (404, r#"{"error":"route","code":404}"#.into()),
+            }
+        });
+        let node = fake(AuthMode::Local, routes);
+        do_voice_note_fetch(&node.state, &mid).await.unwrap();
+        assert_eq!(node.targets(), ["GET /files?limit=50", "GET /files?limit=200", "GET /files?limit=1000", &format!("GET /files/{ROOM}")]);
     }
 
     #[tokio::test]

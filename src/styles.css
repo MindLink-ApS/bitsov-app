@@ -269,7 +269,7 @@ select { font: inherit; font-size: var(--t-sm); background: var(--sunk); color: 
 .voice-play { border: none; background: none; color: inherit; font: inherit; font-weight: 500; padding: 0; cursor: pointer; }
 .voice-play:disabled { cursor: default; opacity: 0.7; }
 .attach.soft.voice-record { font-size: var(--t-md); }
-.attach.soft.voice-record.recording { width: auto; padding: 0 12px; border-radius: 17px; background: var(--accent); color: #fff; font-variant-numeric: tabular-nums; }
+.attach.soft.voice-record.recording { width: auto; padding: 0 12px; border-radius: 17px; background: var(--accent); color: var(--accent-ink); font-variant-numeric: tabular-nums; }
 .quiet-detail { margin: var(--s-1) 0 0; color: var(--muted); font-size: var(--t-sm); }
 .quiet-detail > summary { cursor: pointer; color: var(--faint); list-style: none; }
 .quiet-detail > summary::-webkit-details-marker { display: none; }
