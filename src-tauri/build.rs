@@ -69,6 +69,8 @@ fn main() {
             "file_price",
             "file_send",
             "voice_note_fetch",
+            "call_quote",
+            "call_signal",
             "ai_read",
             "ai_providers",
             "ai_disclose",

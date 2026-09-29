@@ -3,6 +3,8 @@
 <plist version="1.0">
 <dict>
   <key>NSMicrophoneUsageDescription</key>
-  <string>BitSov uses the microphone only while you record a voice note.</string>
+  <string>BitSov uses the microphone only while you record a voice note or are on a call.</string>
+  <key>NSCameraUsageDescription</key>
+  <string>BitSov uses the camera only during a video call you place or accept.</string>
 </dict>
 </plist>

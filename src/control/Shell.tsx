@@ -7,6 +7,7 @@ import { AiTrack, createAiSession } from './AiTrack';
 import { amount as fmtAmount, allIn, clock, day, feeCeiling, routingFee, sats, satsWhole, satUnit, shortId, uptime } from './format';
 import { Organism } from './BodyPanel';
 import { DiscoverPanel, FrontDoorEditor } from './Discover';
+import { callCost, createCallEngine, IDLE as CALL_IDLE, isCallKind, signalCost, stunServer, type CallMedia, type CallView } from './call';
 import { blobUrl, duration, isVoiceNote, type Recording, startRecording, VOICE_MAX_MS } from './voice';
 import {
   doorCard,
@@ -27,7 +28,9 @@ import type { Source } from './source';
 import {
   denom,
   setDenom,
+  setStunPref,
   setThemePref,
+  stunPref,
   themePref,
   type Denom,
   type ThemePref,
@@ -61,6 +64,7 @@ import {
   type Unread,
 } from './state';
 import type {
+  CallQuote,
   AdmissionPrice,
   PrePaymentRefusals,
   OwnerContactApproval,
@@ -158,6 +162,11 @@ export type Actions = {
   file: (t: TrackRef, file: File, maxMsat: number, firstContactMsat?: number) => Promise<Outcome<unknown>>;
   /** Read-only: a playable URL for a voice note in the thread. Never pays. */
   voiceUrl: (messageId: string) => Promise<string>;
+  /** Read-only: what calling this contact costs. */
+  callQuote: (peer: string) => Promise<Outcome<CallQuote>>;
+  /** Place a call after the price was shown. */
+  placeCall: (peer: string, media: CallMedia, quote: CallQuote) => void;
+  callActive: () => boolean;
 };
 
 let artifactSeq = 0;
@@ -441,6 +450,11 @@ export function ControlCenter(props: Props) {
               if (event.event.verdict === 'admitted') energyAfterEvent();
               return;
             }
+            // Call signals ring or steer the call; they are not chat.
+            if (event.type === 'message' && isCallKind(event.message.kind)) {
+              void calls.receive(event.message, ownId());
+              return;
+            }
             if (event.type === 'message' || event.type === 'delivery') {
               foldMembrane((log) =>
                 membraneLive(log, event, { ownId: ownId(), contacts: contactSet(), threads: threads.t, nowMs: Date.now(), nodeMembrane: caps().membrane }),
@@ -554,11 +568,36 @@ export function ControlCenter(props: Props) {
     return outcome;
   };
 
+  // Calls: media is peer to peer in this webview; each signal is one paid send.
+  const [callView, setCallView] = createSignal<CallView>(CALL_IDLE);
+  const [callStreams, setCallStreams] = createSignal<{ local: MediaStream | null; remote: MediaStream | null }>({ local: null, remote: null });
+  const calls = createCallEngine({
+    quote: (peer) => act(() => source.callQuote(peer)),
+    signal: async (peer, kind, plaintext, maxMsat) => {
+      const r = await act(() => source.callSignal(peer, kind, plaintext, maxMsat));
+      void loadBudget();
+      void loadWallet();
+      return r;
+    },
+    getUserMedia: (c) => navigator.mediaDevices.getUserMedia(c),
+    peerConnection: (config) => new RTCPeerConnection(config),
+    now: () => Date.now(),
+    onView: setCallView,
+    onStreams: (local, remote) => setCallStreams({ local, remote }),
+    // No STUN unless the owner set one: host candidates only.
+    iceServers: () => stunServer(stunPref()),
+  });
+  // Closing the window ends the call here without paying; only Hang up pays.
+  onCleanup(() => calls.endLocal());
+
   // Voice notes: one object URL per message, revoked when the shell goes.
   // A just-sent clip plays from its own bytes; a received one is read once.
   const voiceUrls = new Map<string, Promise<string>>();
   onCleanup(() => voiceUrls.forEach((u) => void u.then(URL.revokeObjectURL, () => undefined)));
   const actions: Actions = {
+    callQuote: (peer) => act(() => source.callQuote(peer)),
+    placeCall: (peer, media, quote) => void calls.place(peer, media, quote),
+    callActive: () => !['idle', 'ended'].includes(callView().phase),
     voiceUrl: (messageId) => {
       let url = voiceUrls.get(messageId);
       if (!url) {
@@ -993,6 +1032,18 @@ export function ControlCenter(props: Props) {
           </Match>
         </Switch>
       </aside>
+      <CallPanel
+        view={callView()}
+        streams={callStreams()}
+        nameOf={nameOf}
+        quote={actions.callQuote}
+        accept={() => void calls.accept()}
+        decline={() => void calls.decline()}
+        hangup={() => void calls.hangup()}
+        mute={() => calls.toggleMute()}
+        camera={() => void calls.toggleCamera()}
+        dismiss={() => calls.dismiss()}
+      />
     </div>
   );
 }
@@ -1008,6 +1059,45 @@ function readBase64(file: File): Promise<string> {
     reader.onerror = () => reject(reader.error);
     reader.readAsDataURL(file);
   });
+}
+
+/**
+ * The owner's STUN server for calls. Off by default: with none, calls use
+ * host candidates only and connect on the same network. A STUN server learns
+ * your public address each time you place or accept a call.
+ */
+function CallSettings() {
+  const [draft, setDraft] = createSignal(stunPref());
+  const [error, setError] = createSignal<string | null>(null);
+  const save = () => {
+    const v = draft().trim();
+    if (v && stunServer(v).length === 0) {
+      setError('Use stun:host or stun:host:port. TURN relays are not supported.');
+      return;
+    }
+    setError(null);
+    setStunPref(v);
+  };
+  return (
+    <section data-call-settings>
+      <h3>Calls</h3>
+      <p class="hint" data-stun-note>
+        {stunPref()
+          ? `Calls ask ${stunPref()} for your public address, so that server sees your IP address each time you place or accept a call.`
+          : 'No STUN server: calls contact no third party and connect only on the same network (or a VPN). Calls across routers need a STUN server you choose, for example one run on your own node.'}
+      </p>
+      <div class="row">
+        <input data-stun-input placeholder="stun:host:3478" value={draft()} onInput={(e) => setDraft(e.currentTarget.value)} aria-label="STUN server for calls (optional)" />
+        <button type="button" class="soft" data-stun-save onClick={save}>Save</button>
+        <Show when={stunPref()}>
+          <button type="button" class="soft" data-stun-clear onClick={() => { setDraft(''); setStunPref(''); setError(null); }}>Remove</button>
+        </Show>
+      </div>
+      <Show when={error()}>
+        <p class="hint" role="alert" data-stun-error>{error()}</p>
+      </Show>
+    </section>
+  );
 }
 
 function SettingsDisplay() {
@@ -1056,6 +1146,7 @@ function SettingsDisplay() {
         </For>
       </div>
       <p class="hint">Balances and costs use this unit everywhere. Payment amounts to the node stay in millisatoshis.</p>
+      <CallSettings />
     </div>
   );
 }
@@ -1203,11 +1294,12 @@ function Rail(props: {
 
 // ---- tracks ---------------------------------------------------------------
 
-function TrackHead(props: { title: string; sub?: JSX.Element; onContext: () => void }) {
+function TrackHead(props: { title: string; sub?: JSX.Element; extra?: JSX.Element; onContext: () => void }) {
   return (
     <header class="track-head">
       <h1>{props.title}</h1>
       <div class="sub">{props.sub}</div>
+      {props.extra}
       <button class="quiet context-toggle" onClick={() => props.onContext()}>Settings</button>
     </header>
   );
@@ -1260,7 +1352,7 @@ function Conversation(props: {
       room: props.roomQuote,
       nowMs: props.now,
     });
-  const items = () => streamItems(props.messages, props.artifacts);
+  const items = () => streamItems(props.messages.filter((m) => !isCallKind(m.kind)), props.artifacts);
 
   createEffect(
     on(
@@ -1283,7 +1375,16 @@ function Conversation(props: {
 
   return (
     <>
-      <TrackHead title={props.name} sub={sub()} onContext={props.onContext} />
+      <TrackHead
+        title={props.name}
+        sub={sub()}
+        extra={
+          <Show when={props.track.kind === 'peer' && props.peer ? props.track.id : null}>
+            {(peer) => <CallButtons peer={peer()} name={props.name} blocked={props.moneyBlocked} actions={props.actions} />}
+          </Show>
+        }
+        onContext={props.onContext}
+      />
       <div class="stream" ref={stream} data-stream>
         <div class="chat-column">
         <Show when={props.introduced}>
@@ -1420,6 +1521,138 @@ function MessageView(props: {
         </Show>
       </div>
     </article>
+  );
+}
+
+/**
+ * Call and video buttons. The price is read (never paid) first and shown on
+ * the button: the offer to this contact plus one hangup, all-in.
+ */
+function CallButtons(props: { peer: string; name: string; blocked: boolean; actions: Actions }) {
+  const [quote, setQuote] = createSignal<CallQuote | null>(null);
+  const [why, setWhy] = createSignal<string | null>(null);
+  createEffect(on(() => props.peer, (peer) => {
+    setQuote(null);
+    setWhy(null);
+    void props.actions.callQuote(peer).then((r) => {
+      if (props.peer !== peer) return;
+      if (r.ok) setQuote(r.value);
+      else setWhy(r.error.message);
+    });
+  }));
+  const cost = () => {
+    const q = quote();
+    return q && callCost(q) !== null ? callCost(q)! : null;
+  };
+  const off = () => props.blocked || cost() === null || props.actions.callActive();
+  const title = () =>
+    why() ?? (quote() && cost() === null ? `${props.name}’s node does not take calls yet` : cost() !== null
+      ? `Up to ${fmtAmount(cost()!)}: ${fmtAmount(quote()!.offer_msat! + quote()!.offer_max_routing_fee_msat)} to ring (their call price plus ${feeCeiling(quote()!.offer_max_routing_fee_msat)}), then ${fmtAmount(signalCost(quote()!))} to hang up. Media goes directly between you; it is not billed. ${stunPref() ? `Uses your STUN server ${stunPref()} to find a route.` : 'No STUN server is set, so calls connect only on the same network (Settings).'}`
+      : 'Reading their call price…');
+  const place = (media: CallMedia) => { const q = quote(); if (q && !off()) props.actions.placeCall(props.peer, media, q); };
+  return (
+    <div class="call-buttons" data-call-buttons>
+      <button type="button" class="soft call-button" data-call="audio" disabled={off()} title={title()} aria-label={`Call ${props.name}${cost() !== null ? `, up to ${fmtAmount(cost()!)}` : ''}`} onClick={() => place('audio')}>
+        Call{cost() !== null ? ` · ${sats(cost()!)} ${satUnit(cost()!)}` : ''}
+      </button>
+      <button type="button" class="soft call-button" data-call="video" disabled={off()} title={title()} onClick={() => place('video')} aria-label={`Video call ${props.name}${cost() !== null ? `, up to ${fmtAmount(cost()!)}` : ''}`}>
+        Video
+      </button>
+    </div>
+  );
+}
+
+const CALL_TITLE: Record<CallView['phase'], string> = {
+  idle: '', calling: 'Calling', ringing: 'Ringing', incoming: 'Incoming call', connecting: 'Connecting', live: 'On call', ended: 'Call ended',
+};
+const END_REASON: Record<string, string> = {
+  hangup: 'Hung up', declined: 'Declined', busy: 'Busy', timeout: 'No answer', failed: 'Connection failed',
+};
+
+function MediaView(props: { stream: MediaStream | null; video: boolean; muted: boolean; kind: 'local' | 'remote' }) {
+  let el: HTMLMediaElement | undefined;
+  createEffect(() => { if (el) el.srcObject = props.stream; });
+  return props.video
+    ? <video ref={(v) => { el = v; }} autoplay playsinline muted={props.muted} class={`call-video ${props.kind}`} data-call-media={props.kind} />
+    : <audio ref={(a) => { el = a; }} autoplay muted={props.muted} data-call-media={props.kind} />;
+}
+
+/** The call card: incoming (accept/decline with price), ringing, live (mute, camera, duration, hang up), ended. */
+function CallPanel(props: {
+  view: CallView;
+  streams: { local: MediaStream | null; remote: MediaStream | null };
+  nameOf: (id: string) => string;
+  quote: (peer: string) => Promise<Outcome<CallQuote>>;
+  accept: () => void;
+  decline: () => void;
+  hangup: () => void;
+  mute: () => void;
+  camera: () => void;
+  dismiss: () => void;
+}) {
+  const [tick, setTick] = createSignal(Date.now());
+  const [answer, setAnswer] = createSignal<number | null>(null);
+  createEffect(() => {
+    if (props.view.phase !== 'live') return;
+    const t = setInterval(() => setTick(Date.now()), 1000);
+    onCleanup(() => clearInterval(t));
+  });
+  createEffect(on(() => (props.view.phase === 'incoming' ? props.view.peer : null), (peer) => {
+    setAnswer(null);
+    if (peer) void props.quote(peer).then((r) => { if (r.ok) setAnswer(signalCost(r.value)); });
+  }));
+  const v = () => props.view;
+  const who = () => (v().peer ? props.nameOf(v().peer!) : '');
+  const price = (m: number | null) => (m === null ? '' : ` · ${sats(m)} ${satUnit(m)}`);
+  return (
+    <Show when={v().phase !== 'idle'}>
+      <aside class="call-panel" data-call-panel={v().phase} role="dialog" aria-label={`${CALL_TITLE[v().phase]} ${who()}`}>
+        <header>
+          <strong data-call-title>{CALL_TITLE[v().phase]}{v().media === 'video' ? ' (video)' : ''}</strong>
+          <span class="who">{who()}</span>
+          <Show when={v().phase === 'live' && v().liveAt}>
+            <span class="duration" data-call-duration>{duration(Math.max(0, tick() - v().liveAt!))}</span>
+          </Show>
+        </header>
+        <Show when={v().media === 'video' && (v().phase === 'live' || v().phase === 'connecting')}>
+          <div class="call-videos">
+            <MediaView stream={props.streams.remote} video muted={false} kind="remote" />
+            <MediaView stream={props.streams.local} video muted kind="local" />
+          </div>
+        </Show>
+        <Show when={v().media === 'audio'}>
+          <MediaView stream={props.streams.remote} video={false} muted={false} kind="remote" />
+        </Show>
+        <Show when={v().paidMsat > 0}>
+          <p class="hint" data-call-paid>Paid {fmtAmount(v().paidMsat)} for this call’s signals. Media is direct and not billed.</p>
+        </Show>
+        <Show when={v().phase === 'ended'}>
+          <p class="hint" data-call-ended>{v().error ?? END_REASON[v().reason ?? 'hangup']}</p>
+        </Show>
+        <div class="call-actions">
+          <Switch>
+            <Match when={v().phase === 'incoming'}>
+              <button type="button" class="primary soft" data-call-accept onClick={() => props.accept()}>Accept{price(answer())}</button>
+              <button type="button" class="soft" data-call-decline onClick={() => props.decline()}>Decline{price(answer())}</button>
+            </Match>
+            <Match when={v().phase === 'ended'}>
+              <button type="button" class="soft" data-call-dismiss onClick={() => props.dismiss()}>Close</button>
+            </Match>
+            <Match when={true}>
+              <Show when={v().phase === 'live' || v().phase === 'connecting'}>
+                <button type="button" class="soft" data-call-mute aria-pressed={v().muted} onClick={() => props.mute()}>Mute</button>
+                <Show when={v().media === 'video'}>
+                  <button type="button" class="soft" data-call-camera aria-pressed={v().camera} onClick={() => props.camera()}>Camera</button>
+                </Show>
+              </Show>
+              <button type="button" class="danger soft" data-call-hangup onClick={() => props.hangup()}>
+                {v().phase === 'calling' ? 'Cancel' : 'Hang up'}
+              </button>
+            </Match>
+          </Switch>
+        </div>
+      </aside>
+    </Show>
   );
 }
 
