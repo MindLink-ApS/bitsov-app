@@ -1819,6 +1819,31 @@ struct FrontDoorPublishArgs {
     message_msat: Option<u64>,
     #[serde(default)]
     page_msat: Option<u64>,
+    #[serde(default)]
+    avatar: Option<serde_json::Value>,
+    #[serde(default)]
+    media: Vec<serde_json::Value>,
+    #[serde(default)]
+    cv: Option<serde_json::Value>,
+    #[serde(default)]
+    links: Vec<serde_json::Value>,
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn front_door_hash_bytes(
+    window: WebviewWindow<impl tauri::Runtime>,
+    bytes_b64: String,
+) -> Result<String, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    if bytes_b64.len() > 4 * 1024 * 1024 {
+        return Err("That file is too large to hash for a front-door card.".into());
+    }
+    let bytes = STANDARD
+        .decode(bytes_b64.trim())
+        .map_err(|_| "The image bytes were not readable.".to_string())?;
+    Ok(hex::encode(blake3::hash(&bytes).as_bytes()))
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -1846,6 +1871,10 @@ async fn front_door_publish(
         "admission_msat": fields.admission_msat,
         "message_msat": fields.message_msat,
         "page_msat": fields.page_msat,
+        "avatar": fields.avatar,
+        "media": fields.media,
+        "cv": fields.cv,
+        "links": fields.links,
     });
     let (code, text) = call_api(state.inner(), reqwest::Method::PUT, path, Some(body)).await?;
     if !code.is_success() {
@@ -4688,6 +4717,7 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             front_door_read,
             front_door_open,
             front_door_publish,
+            front_door_hash_bytes,
             sponsor_status,
             sponsor_offer,
             sponsor_candidate,
@@ -9806,6 +9836,7 @@ mod assistant_acl_tests {
                 "front_door_read",
                 "front_door_open",
                 "front_door_publish",
+                "front_door_hash_bytes",
                 "sponsor_status",
                 "sponsor_offer",
                 "sponsor_candidate",
