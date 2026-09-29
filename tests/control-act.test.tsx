@@ -220,6 +220,74 @@ describe('acting from the track', () => {
     expect(host.used('spend_reconcile')).toHaveLength(1);
   });
 
+  // Exactly-once slice 3: the node's operation state, on the message card.
+  it('tells accepted apart from sent and queued on the message card', async () => {
+    const OP = '6f1c2a4e-9b3d-4c5e-8f70-112233445566';
+    const replies = [
+      { state: 'acked', accepted: true, delivered: true, want: ['accepted', 'accepted by their node'] },
+      { state: 'sent', accepted: false, delivered: true, want: ['sent', 'sent, waiting for their node'] },
+      { state: 'paid', accepted: false, delivered: false, want: ['queued', 'queued until they reconnect'] },
+    ];
+    let n = 0;
+    const host = stubHost({
+      message_send: (args) => {
+        const r = replies[n];
+        n += 1;
+        return { message_id: `op-${n}`, recipient: args!.recipient, is_room: false, delivered: r.delivered, amount_msat: 2000, sent_at_ms: Date.now(), operation_id: OP, state: r.state, accepted: r.accepted };
+      },
+    });
+    host.spend.v = openView();
+    await openShell();
+    for (const [i, r] of replies.entries()) {
+      type('[data-composer] textarea', `hello ${i}`);
+      // A send the node took makes the contact's price known: no longer an estimate.
+      await vi.waitFor(() => expect(text('[data-send]')).toMatch(/^Send · (≈ )?2 sats$/));
+      submit();
+      await vi.waitFor(() => expect($(`[data-message="op-${i + 1}"] [data-delivery]`)).not.toBeNull());
+      expect($(`[data-message="op-${i + 1}"] [data-delivery]`)!.getAttribute('data-delivery')).toBe(r.want[0]);
+      expect(text(`[data-message="op-${i + 1}"] [data-delivery]`)).toBe(r.want[1]);
+    }
+    expect(host.used('message_send')).toHaveLength(3);
+  });
+
+  it('names an unresolved payment on its card and never sends it again', async () => {
+    const host = stubHost({
+      message_send: () => { throw { code: 'payment_unknown', message: 'Payment unknown: your node has not resolved whether this message\'s payment went through. It will not pay for it again, and the app will not resend it. Check the pending result later.', pending_id: 'p1' }; },
+      spend_reconcile: () => { throw { code: 'payment_unknown', message: 'Payment unknown: still unresolved.', pending_id: 'p1' }; },
+    });
+    host.spend.v = openView();
+    await openShell();
+    type('[data-composer] textarea', 'hi');
+    submit();
+    await vi.waitFor(() => expect($('[data-artifact="failed"][data-code="payment_unknown"]')).not.toBeNull());
+    const card = text('[data-artifact="failed"]');
+    expect(card).toContain('Payment unknown · not resent');
+    expect(card).not.toContain('not sent');
+    expect(card).not.toContain('Message not sent');
+    $<HTMLButtonElement>('[data-spend-reconcile]')!.click();
+    await vi.waitFor(() => expect(text('[data-reconciliation]')).toContain('Payment unknown'));
+    expect(host.used('message_send')).toHaveLength(1);
+  });
+
+  it('labels a paid, refused-for-good send and a changed-text retry refusal', async () => {
+    const codes = [
+      { code: 'failed_paid', message: 'Paid, and the recipient\'s node refused this message for good. The payment is not refundable. Do not send it again.', label: 'Paid · refused by their node' },
+      { code: 'operation_mismatch', message: 'Your node refused this retry: its text differs from the message it retries. Nothing was paid.', label: 'Message not sent' },
+    ];
+    let n = 0;
+    const host = stubHost({ message_send: () => { throw codes[n++]; } });
+    host.spend.v = openView();
+    await openShell();
+    for (const c of codes) {
+      type('[data-composer] textarea', `try ${c.code}`);
+      await vi.waitFor(() => expect(text('[data-send]')).toBe('Send · ≈ 2 sats'));
+      submit();
+      await vi.waitFor(() => expect($(`[data-artifact="failed"][data-code="${c.code}"]`)).not.toBeNull());
+      expect(text(`[data-artifact="failed"][data-code="${c.code}"]`)).toContain(c.label);
+    }
+    expect(host.used('message_send')).toHaveLength(2);
+  });
+
   it('sends to a room at the summed member price', async () => {
     const host = stubHost();
     host.spend.v = openView();

@@ -512,18 +512,65 @@ pub fn compose_body(recipient: &str, is_room: bool, plaintext: &str) -> Result<s
     }))
 }
 
-/// `compose` and `files/:id/send` response.
+/// `compose` and `files/:id/send` response, and `GET /messages/operations/{id}`.
 #[derive(Deserialize, Debug)]
 pub struct SendReply {
     #[serde(default)]
     pub max_routing_fee_msat: u64,
+    #[serde(default)]
     pub message_id: String,
     pub delivered: bool,
     pub amount_msat: u64,
     /// Admission paid again during this send after a reconnect (genome #85).
     #[serde(default)]
     pub readmission_msat: Option<u64>,
+    /// `message_operations_v1`: the node's idempotency key, echoed.
+    #[serde(default)]
+    pub operation_id: Option<String>,
+    /// The operation's state (`acked`, `sent`, `paid`, ...). Older nodes omit it.
+    #[serde(default)]
+    pub state: Option<String>,
+    /// The recipient's node stored it (`acked`).
+    #[serde(default)]
+    pub accepted: bool,
+    #[serde(default)]
+    pub payment_hash: Option<String>,
+    #[serde(default)]
+    pub retry_allowed: bool,
 }
+
+/// The operation fields genome adds to an error body (`ApiError::Operation`)
+/// or a 409 `OperationConflict`: `{code, state, operation_id, retry_allowed}`.
+#[derive(Deserialize, Debug, Default, Clone, PartialEq, Eq)]
+pub struct OperationError {
+    #[serde(default)]
+    pub code: serde_json::Value,
+    #[serde(default)]
+    pub state: Option<String>,
+    #[serde(default)]
+    pub operation_id: Option<String>,
+    #[serde(default)]
+    pub payment_hash: Option<String>,
+    #[serde(default)]
+    pub retry_allowed: bool,
+}
+
+/// The error body's operation fields, only when they name `operation_id`.
+pub fn operation_error(body: &str, operation_id: &str) -> Option<OperationError> {
+    let e: OperationError = serde_json::from_str(body).ok()?;
+    (e.operation_id.as_deref() == Some(operation_id)).then_some(e)
+}
+
+/// 409 codes the node answers for an operation before it pays anything in this call.
+pub fn operation_conflict(status: u16, body: &str) -> Option<&'static str> {
+    if status != 409 { return None; }
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    ["operation_mismatch", "payment_unresolved", "failed_paid"].into_iter().find(|c| v["code"] == *c)
+}
+
+pub const OPERATION_MISMATCH: &str = "Your node refused this retry: its text differs from the message it retries. Nothing was paid. Retry with the original text, or send it as a new message once the earlier one is resolved.";
+pub const PAYMENT_UNKNOWN: &str = "Payment unknown: your node has not resolved whether this message's payment went through. It will not pay for it again, and the app will not resend it. Check the pending result later.";
+pub const FAILED_PAID: &str = "Paid, and the recipient's node refused this message for good. The payment is not refundable. Do not send it again.";
 
 /// `502 payment_settled_send_incomplete` from compose: the node paid, the
 /// message did not go. The prior/current admission amounts are read from the
@@ -583,6 +630,14 @@ pub struct SendReceipt {
     /// What this send actually paid, summed over room members.
     pub amount_msat: u64,
     pub sent_at_ms: u64,
+    /// The node's idempotency key for this send, when it has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+    /// The operation's state from the node (`acked`, `sent`, `paid`, ...).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    /// The recipient's node stored it. `delivered` alone is only a transport write.
+    pub accepted: bool,
 }
 
 /// Validate complete, unique per-member evidence against the confirmed room.

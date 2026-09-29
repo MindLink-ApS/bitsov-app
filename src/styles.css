@@ -221,6 +221,8 @@ select { font: inherit; font-size: var(--t-sm); background: var(--sunk); color: 
 .delivery { color: var(--faint); }
 .delivery[data-delivery='delivered'] { color: var(--ok); }
 .delivery[data-delivery='delivered']::before { content: '✓ '; }
+.delivery[data-delivery='accepted'] { color: var(--ok); }
+.delivery[data-delivery='accepted']::before { content: '✓ '; }
 .delivery[data-delivery='rejected'] { color: var(--err); overflow-wrap: anywhere; white-space: normal; }
 .stamp { flex-wrap: wrap; justify-content: flex-end; }
 .msg.in .stamp { justify-content: flex-start; }

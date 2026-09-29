@@ -502,7 +502,7 @@ export function ControlCenter(props: Props) {
     // price refusal stands at their door in the track instead of a failure row.
     if (!outcome.ok) foldMembrane((log) => membraneRefused(log, outcome.error, trackKey(t), Date.now()));
     if (!outcome.ok && outcome.error.code !== 'not_ready' && !needsApproval(outcome.error) && !isBudgetStop(outcome.error) && outboundKind(outcome.error) !== 'price') {
-      addArtifact(t, { type: 'failed', action: outcome.error.code === 'spend_unknown' ? 'Outcome unknown / pending' : action, error: outcome.error });
+      addArtifact(t, { type: 'failed', action: FAILURE_LABEL[outcome.error.code] ?? action, error: outcome.error });
     }
     return outcome;
   };
@@ -558,7 +558,7 @@ export function ControlCenter(props: Props) {
       if (t.kind !== 'peer' && t.kind !== 'room') return { ok: false, error: { code: 'invalid', message: 'nothing to send to' } };
       const r = await act(() => source.send(t.id, t.kind === 'room', text, maxMsat, t.kind === 'room' ? Object.fromEntries((roomQuote()?.members ?? []).map((m) => [m.node_id, m.msat])) : undefined, firstContactMsat));
       // The tally moved, or a budget rule stopped the send: either way, re-read it.
-      if (r.ok || isBudgetStop(r.error) || r.error.code === 'spend_unknown' || r.error.code === 'payment_settled_undelivered') void loadBudget();
+      if (r.ok || isBudgetStop(r.error) || ['spend_unknown', 'payment_unknown', 'failed_paid', 'payment_settled_undelivered'].includes(r.error.code)) void loadBudget();
       if (!r.ok && r.error.code === 'payment_settled_undelivered' && r.error.undelivered) {
         // Paid, not delivered: the draft moves here, with the only safe way to resend it.
         addArtifact(t, { type: 'undelivered', text, paid: r.error.undelivered, note: null, admission: null, pendingId: r.error.pending_id ?? null });
@@ -635,7 +635,7 @@ export function ControlCenter(props: Props) {
       } else {
         // A refusal before dispatch (approval, price) keeps the retry; anything else ends it.
         // A refused approved price is spent: Retry delivery asks for the current one.
-        const ends = ['retry_unavailable', 'spend_unknown'].includes(r.error.code);
+        const ends = ['retry_unavailable', 'spend_unknown', 'payment_unknown', 'failed_paid'].includes(r.error.code);
         update({ paid: { ...a.paid, retry: !ends }, note: r.error.message, admission: r.error.code === 'price_cap_exceeded' ? null : a.admission });
       }
       return r;
@@ -1207,7 +1207,15 @@ function MessageView(props: {
   );
 }
 
+/** A send whose money is not settled either way, named on its card. Never "not sent". */
+const FAILURE_LABEL: Partial<Record<ActionError['code'], string>> = {
+  spend_unknown: 'Outcome unknown / pending',
+  payment_unknown: 'Payment unknown · not resent',
+  failed_paid: 'Paid · refused by their node',
+};
+
 const DELIVERY_TEXT: Record<Delivery['status'], string> = {
+  accepted: 'accepted by their node',
   sent: 'sent, waiting for their node',
   queued: 'queued until they reconnect',
   delivered: 'delivered',

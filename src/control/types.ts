@@ -292,6 +292,10 @@ export type ActionError = {
     | 'room_unreachable'
     // Paid, not delivered (node 502 `payment_settled_send_incomplete`), and its retry.
     | 'payment_settled_undelivered' | 'retry_unavailable' | 'retry_needs_admission' | 'undelivered_pending'
+    // Durable message operations (genome `message_operations_v1`): the node has not
+    // resolved the payment; the retry's text differs from the send it retries;
+    // paid and refused for good. None of them is ever re-sent on its own.
+    | 'payment_unknown' | 'operation_mismatch' | 'failed_paid'
     | 'not_ready' | 'app_not_ready'
     | 'invalid'
     | 'node';
@@ -394,6 +398,12 @@ export type SendReceipt = {
   delivered: boolean;
   amount_msat: number;
   sent_at_ms: number;
+  /** The node's idempotency key for this send; every retry of it reuses it. */
+  operation_id?: string;
+  /** The node's operation state: `acked`, `sent`, `paid`, `failed_paid`, ... */
+  state?: string;
+  /** The recipient's node stored it. `delivered` alone is only a transport write. */
+  accepted?: boolean;
 };
 
 export type MemberCost = { max_routing_fee_msat?: number; node_id: string; msat: number; advertised: boolean; connected: boolean };
@@ -432,7 +442,7 @@ export type FileReceipt = {
 };
 
 /** Delivery of one sent message, from the send reply and then `/ws`. */
-export type Delivery = { status: 'sent' | 'queued' | 'delivered' | 'rejected'; reason: string | null };
+export type Delivery = { status: 'accepted' | 'sent' | 'queued' | 'delivered' | 'rejected'; reason: string | null };
 
 /** A local, inline artifact in a track: the result of an action taken there. */
 export type Artifact =

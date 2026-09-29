@@ -10,6 +10,7 @@ import {
   trackKey,
   trackOf,
   STALE_AFTER_MS,
+  deliveryFromReceipt,
 } from '../src/control/state';
 import type { LiveEvent, Message, NodeOverview, PriceQuote } from '../src/control/types';
 
@@ -172,5 +173,16 @@ describe('dev sample mode', () => {
     expect(sampleRequest('?mock', true, true)).toBe('shell');
     expect(sampleRequest('', true, true)).toBeNull();
     expect(sampleRequest('?sample', true, false)).toBeNull(); // a release inside the host never samples
+  });
+});
+
+describe('deliveryFromReceipt (exactly-once slice 3)', () => {
+  it('accepted beats sent; queued is paid, not handed over; older nodes keep sent/queued', () => {
+    expect(deliveryFromReceipt({ delivered: true, accepted: true, state: 'acked' }).status).toBe('accepted');
+    expect(deliveryFromReceipt({ delivered: true, state: 'sent', accepted: false }).status).toBe('sent');
+    expect(deliveryFromReceipt({ delivered: false, state: 'paid', accepted: false }).status).toBe('queued');
+    expect(deliveryFromReceipt({ delivered: false, state: 'failed_paid' })).toEqual({ status: 'rejected', reason: 'refused after payment; do not send it again' });
+    expect(deliveryFromReceipt({ delivered: true }).status).toBe('sent');
+    expect(deliveryFromReceipt({ delivered: false }).status).toBe('queued');
   });
 });
