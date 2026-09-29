@@ -715,6 +715,59 @@ describe('the AI track', () => {
     expect(text('[data-ai-source="remote"]')).toContain('sample, nothing sent');
   });
 
+  it('Own: saved model is unavailable on the badge when the server is down', async () => {
+    const host = stubHost({
+      ai_local_status: () => ({
+        running: false,
+        kind: null,
+        port: null,
+        models: [],
+        selected: 'tiny-local',
+        selected_port: 11434,
+        howto:
+          'Start Ollama (`ollama serve`) or a llama.cpp server on this computer (listening on 127.0.0.1, usually port 11434 or 8080). Then pick a model here. BitSov does not download or install models; nothing leaves this computer.',
+      }),
+      ai_providers: () => [
+        {
+          kind: 'local',
+          label: 'On this computer',
+          enabled: true,
+          host: null,
+          model: null,
+          note: 'Local model "tiny-local" is unavailable. Start Ollama or llama.cpp on this computer, then Refresh.',
+          pays: { to: null, rail: 'none' },
+          data_leaves: null,
+        },
+        {
+          kind: 'shared',
+          label: 'Shared open model',
+          enabled: false,
+          host: null,
+          model: null,
+          note: 'Off. Not set up on this computer.',
+          pays: { to: null, rail: 'none' },
+          data_leaves: null,
+        },
+        {
+          kind: 'frontier',
+          label: 'Frontier model',
+          enabled: false,
+          host: null,
+          model: null,
+          note: 'Off. Not set up on this computer.',
+          pays: { to: null, rail: 'none' },
+          data_leaves: null,
+        },
+      ],
+    });
+    await openAi();
+    await vi.waitFor(() => expect($('[data-ai-own-howto]')).not.toBeNull());
+    await vi.waitFor(() => expect(text('.endpoint-badge')).toContain('rules'));
+    expect(text('.endpoint-badge')).not.toContain('tiny-local');
+    expect(text('[data-provider="local"] .meta')).toContain('nothing leaves');
+    expect(host.used('ai_providers').length).toBeGreaterThan(0);
+  });
+
   it('Own: shows a how-to when no local model server is running', async () => {
     const host = stubHost();
     await openAi();
@@ -729,6 +782,38 @@ describe('the AI track', () => {
 
   it('Own: picks a loopback model, badges Own, and discloses before send', async () => {
     let selected: string | null = null;
+    const ownProviders = () => [
+      {
+        kind: 'local' as const,
+        label: 'On this computer',
+        enabled: true,
+        host: null,
+        model: selected,
+        note: null,
+        pays: { to: null, rail: 'none' as const },
+        data_leaves: null,
+      },
+      {
+        kind: 'shared' as const,
+        label: 'Shared open model',
+        enabled: false,
+        host: null,
+        model: null,
+        note: 'Off. Not set up on this computer.',
+        pays: { to: null, rail: 'none' as const },
+        data_leaves: null,
+      },
+      {
+        kind: 'frontier' as const,
+        label: 'Frontier model',
+        enabled: false,
+        host: null,
+        model: null,
+        note: 'Off. Not set up on this computer.',
+        pays: { to: null, rail: 'none' as const },
+        data_leaves: null,
+      },
+    ];
     const host = stubHost({
       ai_local_status: () => ({
         running: true,
@@ -739,40 +824,10 @@ describe('the AI track', () => {
         selected_port: selected ? 11434 : null,
         howto: 'unused when running',
       }),
+      ai_providers: () => ownProviders(),
       ai_local_select: (args) => {
         selected = String(args!.model);
-        return [
-          {
-            kind: 'local',
-            label: 'On this computer',
-            enabled: true,
-            host: null,
-            model: selected,
-            note: null,
-            pays: { to: null, rail: 'none' },
-            data_leaves: null,
-          },
-          {
-            kind: 'shared',
-            label: 'Shared open model',
-            enabled: false,
-            host: null,
-            model: null,
-            note: 'Off. Not set up on this computer.',
-            pays: { to: null, rail: 'none' },
-            data_leaves: null,
-          },
-          {
-            kind: 'frontier',
-            label: 'Frontier model',
-            enabled: false,
-            host: null,
-            model: null,
-            note: 'Off. Not set up on this computer.',
-            pays: { to: null, rail: 'none' },
-            data_leaves: null,
-          },
-        ];
+        return ownProviders();
       },
       ai_disclose: (args) => ({
         id: `d-own`,

@@ -101,10 +101,17 @@ export function AiTrack(props: {
     setLocalError(null);
     return props.source
       .aiLocalStatus(port ?? null)
-      .then((status) => {
+      .then(async (status) => {
         setLocalStatus(status);
         if (status.selected_port) setPortDraft(String(status.selected_port));
         else if (status.port) setPortDraft(String(status.port));
+        // N2: re-read providers so Own badges as rules when the server is down.
+        try {
+          const list = await props.source.aiProviders();
+          setSession('providers', list);
+        } catch {
+          /* keep last providers list */
+        }
       })
       .catch((e) => setLocalError(asActionError(e).message))
       .finally(() => setLocalBusy(false));

@@ -4323,19 +4323,45 @@ fn ai_local_path(app: &AppHandle<impl tauri::Runtime>) -> Result<std::path::Path
     Ok(ai_config_dir(app)?.join("ai-local.json"))
 }
 
-/// Remotes from `ai-providers.json` (off by default) plus the Own model name
-/// from `ai-local.json` when the owner has picked one. The window cannot write
-/// the remotes file; it may set the Own pick through `ai_local_select`.
+/// Remotes from `ai-providers.json` (off by default). Own-tier model name is
+/// applied only when [`ai_provider_views`] finds a live loopback server.
 fn ai_provider_set(app: &AppHandle<impl tauri::Runtime>) -> (Vec<ai::ProviderView>, Vec<ai::Remote>) {
     let dir = app.path().app_config_dir().ok();
     let file = dir
         .as_ref()
         .and_then(|dir| ai::load_providers_file(&dir.join("ai-providers.json")));
-    let own = dir
-        .as_ref()
-        .and_then(|dir| ai::local::load_local_file(&dir.join("ai-local.json")))
-        .map(|local| local.model);
-    ai::providers(file.as_ref(), own.as_deref())
+    // Do not attach a saved Own model here: a down server must not badge as ready (N2).
+    ai::providers(file.as_ref(), None)
+}
+
+/// Provider list for the window: remotes from the settings file, plus Own with
+/// a model name only when the saved pick resolves on loopback right now.
+async fn ai_provider_views(app: &AppHandle<impl tauri::Runtime>) -> Vec<ai::ProviderView> {
+    let (mut views, _remotes) = ai_provider_set(app);
+    let saved = ai_local_path(app)
+        .ok()
+        .and_then(|path| ai::local::load_local_file(&path));
+    let Some(saved) = saved else {
+        return views;
+    };
+    match ai::local::resolve_saved(Some(&saved)).await {
+        Some(choice) => {
+            if let Some(local) = views.iter_mut().find(|v| v.kind == ai::ProviderKind::Local) {
+                local.model = Some(choice.model);
+                local.note = None;
+            }
+        }
+        None => {
+            if let Some(local) = views.iter_mut().find(|v| v.kind == ai::ProviderKind::Local) {
+                local.model = None;
+                local.note = Some(format!(
+                    "Local model \"{}\" is unavailable. Start Ollama or llama.cpp on this computer, then Refresh.",
+                    saved.model
+                ));
+            }
+        }
+    }
+    views
 }
 
 /// Read one topic through the broker, off the async runtime.
@@ -4365,10 +4391,15 @@ async fn ai_read(
 }
 
 /// Local first; remote ones say whether they are on and where they would send.
+/// Own shows a model name only when the loopback server answers right now.
 #[tauri::command(rename_all = "snake_case")]
-fn ai_providers(window: WebviewWindow<impl tauri::Runtime>) -> Result<Vec<ai::ProviderView>, String> {
+async fn ai_providers(
+    window: WebviewWindow<impl tauri::Runtime>,
+) -> Result<Vec<ai::ProviderView>, String> {
     reject_sealed_window(&window)?;
-    Ok(ai_provider_set(window.app_handle()).0)
+    let app = window.app_handle().clone();
+    drop(window);
+    Ok(ai_provider_views(&app).await)
 }
 
 /// Prepare, never send: re-read the topic, narrow it, build the exact body,
@@ -4481,18 +4512,18 @@ async fn ai_local_select(
         kind: Some(probe.kind),
     };
     ai::local::save_local_file(&path, &file)?;
-    Ok(ai_provider_set(window.app_handle()).0)
+    Ok(ai_provider_views(window.app_handle()).await)
 }
 
 /// Clear the Own model pick; answers fall back to rules on this computer.
 #[tauri::command(rename_all = "snake_case")]
-fn ai_local_clear(
+async fn ai_local_clear(
     window: WebviewWindow<impl tauri::Runtime>,
 ) -> Result<Vec<ai::ProviderView>, String> {
     reject_sealed_window(&window)?;
     let path = ai_local_path(window.app_handle())?;
     ai::local::clear_local_file(&path)?;
-    Ok(ai_provider_set(window.app_handle()).0)
+    Ok(ai_provider_views(window.app_handle()).await)
 }
 
 /// Tauri event the main window listens on for `/ws` traffic.
