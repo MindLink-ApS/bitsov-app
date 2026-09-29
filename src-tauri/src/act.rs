@@ -168,15 +168,25 @@ pub fn not_dispatched_refusal(status: u16, body: &str) -> bool {
 /// Genome `readmit_then_pay` (compose.rs): after a reconnect or restart the
 /// recipient asks for admission again, and the node refuses to pay it under
 /// any confirmed cap (quoted capped re-admission, genome #111, was closed
-/// fail-closed). `409 price_cap_exceeded` with this wording is that refusal,
-/// not a changed price: a fresh quote under the same cap is refused the same way.
+/// fail-closed). That `409 price_cap_exceeded` is not a changed price: a fresh
+/// quote under the same cap is refused the same way.
+///
+/// Genome names it with `reason: "readmission_required"`; when a node sends a
+/// `reason`, it decides. Older nodes send none, so their English wording is the
+/// fallback.
 pub fn readmission_capped_refusal(status: u16, body: &str) -> bool {
     status == 409
         && serde_json::from_str::<serde_json::Value>(body).ok().is_some_and(|v| {
             v["code"] == "price_cap_exceeded"
-                && v["error"].as_str().is_some_and(|e| e.contains("requires admission again on a new connection"))
+                && match v.get("reason") {
+                    Some(reason) => reason == READMISSION_REQUIRED,
+                    None => v["error"].as_str().is_some_and(|e| e.contains("requires admission again on a new connection")),
+                }
         })
 }
+
+/// Genome's stable `reason` for the capped re-admission refusal.
+pub const READMISSION_REQUIRED: &str = "readmission_required";
 
 pub const READMISSION_CAPPED: &str = "Not sent - nothing was paid. This contact asks your node to pay their admission again (every reconnect or node restart starts unpaid), and your node cannot pay that under the app's all-in cap yet. The app will not retry; sending the same message again reuses its operation, so it can never be paid twice.";
 
@@ -1131,7 +1141,18 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
-    fn readmission_capped_refusal_matches_only_the_genome_readmission_refusal() {
+    fn readmission_capped_refusal_matches_the_reason_code_first() {
+        // Current genome: the stable reason decides, whatever the wording.
+        let coded = r#"{"code":"price_cap_exceeded","reason":"readmission_required","error":"reworded by a later genome"}"#;
+        assert!(readmission_capped_refusal(409, coded));
+        assert!(!readmission_capped_refusal(400, coded));
+        assert!(!readmission_capped_refusal(409, r#"{"code":"operation_mismatch","reason":"readmission_required"}"#));
+        // A different reason is not this refusal, even with the old wording.
+        assert!(!readmission_capped_refusal(409, r#"{"code":"price_cap_exceeded","reason":"total_exceeds_cap","error":"ab requires admission again on a new connection"}"#));
+    }
+
+    #[test]
+    fn readmission_capped_refusal_falls_back_to_the_wording_of_older_nodes() {
         let genome = r#"{"code":"price_cap_exceeded","error":"ab requires admission again on a new connection, and the confirmed cap covers the message only; no invoice was paid."}"#;
         assert!(readmission_capped_refusal(409, genome));
         assert!(!readmission_capped_refusal(400, genome));

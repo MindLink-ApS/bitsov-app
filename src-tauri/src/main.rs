@@ -5207,9 +5207,20 @@ mod control_act_tests {
         /// The peer asks for admission again (reconnect/restart) and the node
         /// refuses to pay it under the cap, as genome `readmit_then_pay` does.
         readmission_capped: bool,
+        /// Refusals answered so far: the first carries genome's `reason`, the
+        /// next an older node's wording only.
+        readmission_refusals: usize,
     }
 
-    /// Genome main's refusal of a capped reconnect re-admission (compose.rs `readmit_then_pay`).
+    /// Genome's refusal of a capped reconnect re-admission with its stable
+    /// `reason` (the wording deliberately not the older nodes').
+    fn readmission_coded_reply() -> (u16, String) {
+        (409, serde_json::json!({"code": "price_cap_exceeded", "reason": "readmission_required",
+            "error": format!("{A} needs a paid admission on this connection; nothing was paid.")}).to_string())
+    }
+
+    /// An older genome's refusal of a capped reconnect re-admission (compose.rs
+    /// `readmit_then_pay` before the reason code): English wording only.
     fn readmission_capped_reply() -> (u16, String) {
         (409, serde_json::json!({"code": "price_cap_exceeded", "error": format!(
             "{A} requires admission again on a new connection, and the confirmed cap covers the message only; \
@@ -5261,7 +5272,8 @@ mod control_act_tests {
                 }
                 _ if node.readmission_capped => {
                     node.ops.insert(id.clone(), (text, "released"));
-                    return readmission_capped_reply();
+                    node.readmission_refusals += 1;
+                    return if node.readmission_refusals == 1 { readmission_coded_reply() } else { readmission_capped_reply() };
                 }
                 _ => {
                     let (state, lost) = if node.script.is_empty() { ("acked", false) } else { node.script.remove(0) };
@@ -5431,6 +5443,7 @@ mod control_act_tests {
         let restarted = reopen(&node);
         assert_eq!(do_spend_reconcile(&restarted).await.unwrap(), NOTHING_PAID);
         ops.lock().unwrap().readmission_capped = true;
+        // First refusal carries genome's reason code, the second an older node's wording only.
         for _ in 0..2 {
             let err = do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap_err();
             assert_eq!(err.code, "readmission_capped", "{}", err.message);
@@ -5443,6 +5456,7 @@ mod control_act_tests {
         assert!(bodies[1..].iter().all(|b| b["max_total_msat"] == 14000), "the normal all-in cap, not a #53 zero cap");
         assert_eq!(op_ids(&node), vec![Some(id.clone()); 3], "every resend reuses the id");
         assert!(book(&node).iter().all(|e| !e.2), "nothing settled");
+        assert_eq!(ops.lock().unwrap().readmission_refusals, 2, "coded, then legacy");
         assert_eq!(ops.lock().unwrap().pays, 0);
         // Once the connection is paid for again, the same resend pays exactly once.
         ops.lock().unwrap().readmission_capped = false;
@@ -5726,7 +5740,7 @@ mod control_act_tests {
     #[tokio::test]
     async fn psi_retry_refused_for_capped_readmission_does_not_ask_for_approval() {
         let node = fake(AuthMode::Local, compose_script(vec![
-            psi_502(2000, 0, 2000, PSI_TIMEOUT), readmission_capped_reply(), readmission_capped_reply(),
+            psi_502(2000, 0, 2000, PSI_TIMEOUT), readmission_coded_reply(), readmission_capped_reply(),
         ]));
         let original = psi_first(&node).await;
         for approved in [None, Some(14000)] {
