@@ -1,12 +1,14 @@
 import { MONEY_NOT_READY, readinessLine, readinessSource } from './readiness';
-import { allIn, routingFee, feeCeiling } from './format';
 import { createEffect, createMemo, createSignal, For, type JSX, Match, on, onCleanup, Show, Switch, untrack } from 'solid-js';
 import { createStore, produce } from 'solid-js/store';
 import { qrSvg } from '../qr';
 import type { Proposal } from './ai';
 import { AiTrack, createAiSession } from './AiTrack';
-import { clock, day, sats, satsWhole, satUnit, shortId, uptime } from './format';
+import { amount as fmtAmount, allIn, clock, day, feeCeiling, routingFee, sats, satsWhole, satUnit, shortId, uptime } from './format';
 import { Organism } from './BodyPanel';
+import { DiscoverPanel, FrontDoorEditor } from './Discover';
+import { callCost, createCallEngine, IDLE as CALL_IDLE, isCallKind, signalCost, stunServer, type CallMedia, type CallView } from './call';
+import { blobUrl, duration, FILE_MAX_BYTES, fileNameOf, isVoiceNote, type Recording, startRecording, VOICE_MAX_MS } from './voice';
 import {
   doorCard,
   gateWords,
@@ -24,6 +26,16 @@ import {
 } from './body';
 import type { Source } from './source';
 import {
+  denom,
+  setDenom,
+  setStunPref,
+  setThemePref,
+  stunPref,
+  themePref,
+  type Denom,
+  type ThemePref,
+} from './prefs';
+import {
   ADMISSION_MAX_MSAT,
   applyDelivery,
   applyLive,
@@ -33,6 +45,7 @@ import {
   budgetStand,
   costToSend,
   deliveryFromReceipt,
+  sentFileMessage,
   freshness,
   isBudgetStop,
   isOutgoing,
@@ -51,12 +64,15 @@ import {
   type Unread,
 } from './state';
 import type {
+  CallQuote,
+  AdmissionPrice,
   PrePaymentRefusals,
   OwnerContactApproval,
   FirstContactQuote,
   FundingAsk,
   FundingStatus,
   Introduction,
+  Doorstep,
   SponsorKit,
   SponsorOwnerApproval,
   SponsorCandidate,
@@ -143,7 +159,14 @@ export type Actions = {
   amountOf: (bolt11: string) => Promise<Outcome<number>>;
   pay: (t: TrackRef, bolt11: string, msat: number) => Promise<Outcome<unknown>>;
   keysend: (t: TrackRef, pubkey: string, msat: number, memo: string) => Promise<Outcome<unknown>>;
-  file: (t: TrackRef, file: File, maxMsat: number) => Promise<Outcome<unknown>>;
+  file: (t: TrackRef, file: File, maxMsat: number, firstContactMsat?: number) => Promise<Outcome<unknown>>;
+  /** Read-only: a playable URL for a voice note in the thread. Never pays. */
+  voiceUrl: (messageId: string) => Promise<string>;
+  /** Read-only: what calling this contact costs. */
+  callQuote: (peer: string) => Promise<Outcome<CallQuote>>;
+  /** Place a call after the price was shown. */
+  placeCall: (peer: string, media: CallMedia, quote: CallQuote) => void;
+  callActive: () => boolean;
 };
 
 let artifactSeq = 0;
@@ -177,7 +200,7 @@ export function ControlCenter(props: Props) {
   const [deliveries, setDeliveries] = createStore<Deliveries>({});
   /** What each send actually paid, by message id: a room echo carries one member's share only. */
   const [paid, setPaid] = createStore<Record<string, number>>({});
-  const [allowances, setAllowances] = createStore<Record<string, { total_msat: number; max_routing_fee_msat: number }>>({});
+  const [allowances, setAllowances] = createStore<Record<string, { total_msat: number; max_routing_fee_msat: number; readmission_msat?: number }>>({});
   const [pendingRevision, setPendingRevision] = createSignal(0);
   const [artifacts, setArtifacts] = createStore<Record<string, Artifact[]>>({});
   // An offline transition consumes undispatched retry approvals, even if their
@@ -198,15 +221,44 @@ export function ControlCenter(props: Props) {
   }));
   const [errors, setErrors] = createStore<Record<string, string | undefined>>({});
   const [contextOpen, setContextOpen] = createSignal(false);
+  const [settingsEl, setSettingsEl] = createSignal<HTMLElement | null>(null);
+  let settingsReturnFocus: HTMLElement | null = null;
+  createEffect(() => {
+    const open = contextOpen();
+    const panel = settingsEl();
+    // Closed modal uses visibility:hidden (CSS) so its controls leave the tab order.
+    if (open && panel) {
+      settingsReturnFocus = document.activeElement as HTMLElement | null;
+      queueMicrotask(() => panel.querySelector<HTMLElement>('[data-settings-close]')?.focus());
+      const onKey = (e: KeyboardEvent) => {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          setContextOpen(false);
+        }
+      };
+      window.addEventListener('keydown', onKey);
+      onCleanup(() => window.removeEventListener('keydown', onKey));
+    } else if (!open && settingsReturnFocus) {
+      const back = settingsReturnFocus;
+      settingsReturnFocus = null;
+      queueMicrotask(() => back?.focus?.());
+    }
+  });
   /** K1: cards the owner continued from, by node id. Display only, never admission. */
   const [introduced, setIntroduced] = createStore<Record<string, Introduction>>({});
+  /** Front-door Knocks: distinct from introductions so we never re-dial as introduce. */
+  const [doorstep, setDoorstep] = createStore<Record<string, Doorstep>>({});
   /** An introduction that finished while the owner was elsewhere: shown, never navigated to. */
   const [introNotice, setIntroNotice] = createSignal<Introduction | null>(null);
   const openIntroduced = (card: Introduction) => {
     setIntroNotice(null);
     setTrack({ kind: 'peer', id: card.node_id.toLowerCase() });
   };
-  const [tab, setTab] = createSignal<'body' | 'node' | 'wallet' | 'budget'>('body');
+  const openDoorstep = (card: Doorstep) => {
+    setIntroNotice(null);
+    setTrack({ kind: 'peer', id: card.node_id.toLowerCase() });
+  };
+  const [tab, setTab] = createSignal<'body' | 'node' | 'wallet' | 'budget' | 'frontdoor'>('body');
   // Organism view (O1): readings the organs are drawn from, each with its age.
   const [openedAt, setOpenedAt] = createSignal(Date.now());
   const [membrane, setMembrane] = createSignal<MembraneEntry[]>([]);
@@ -398,6 +450,11 @@ export function ControlCenter(props: Props) {
               if (event.event.verdict === 'admitted') energyAfterEvent();
               return;
             }
+            // Call signals ring or steer the call; they are not chat.
+            if (event.type === 'message' && isCallKind(event.message.kind)) {
+              void calls.receive(event.message, ownId());
+              return;
+            }
             if (event.type === 'message' || event.type === 'delivery') {
               foldMembrane((log) =>
                 membraneLive(log, event, { ownId: ownId(), contacts: contactSet(), threads: threads.t, nowMs: Date.now(), nodeMembrane: caps().membrane }),
@@ -491,7 +548,11 @@ export function ControlCenter(props: Props) {
   /** A message the node took: show it in the thread with what it paid. */
   const sentOne = (t: TrackRef, receipt: SendReceipt, text: string) => {
     setPaid(receipt.message_id, receipt.amount_msat);
-    setAllowances(receipt.message_id, { total_msat: receipt.total_msat ?? receipt.amount_msat + (receipt.max_routing_fee_msat ?? 0), max_routing_fee_msat: receipt.max_routing_fee_msat ?? 0 });
+    setAllowances(receipt.message_id, {
+      total_msat: receipt.total_msat ?? receipt.amount_msat + (receipt.readmission_msat ?? 0) + (receipt.max_routing_fee_msat ?? 0),
+      max_routing_fee_msat: receipt.max_routing_fee_msat ?? 0,
+      ...(receipt.readmission_msat ? { readmission_msat: receipt.readmission_msat } : {}),
+    });
     if (!deliveries[receipt.message_id]) setDeliveries(receipt.message_id, deliveryFromReceipt(receipt));
     setThreads('t', trackKey(t), (old) => mergeMessages(old ?? [], [sentMessage(receipt, ownId(), text)]));
     setThreads('fresh', receipt.message_id, true);
@@ -501,13 +562,51 @@ export function ControlCenter(props: Props) {
     // A send that did not cross (price, setpoint) is also a membrane reading. A
     // price refusal stands at their door in the track instead of a failure row.
     if (!outcome.ok) foldMembrane((log) => membraneRefused(log, outcome.error, trackKey(t), Date.now()));
-    if (!outcome.ok && outcome.error.code !== 'not_ready' && !needsApproval(outcome.error) && !isBudgetStop(outcome.error) && outboundKind(outcome.error) !== 'price' && outcome.error.code !== 'readmission_capped') {
+    if (!outcome.ok && outcome.error.code !== 'not_ready' && !needsApproval(outcome.error) && !isBudgetStop(outcome.error) && outboundKind(outcome.error) !== 'price' && outcome.error.code !== 'readmission_capped' && outcome.error.code !== 'readmission_quoted') {
       addArtifact(t, { type: 'failed', action: FAILURE_LABEL[outcome.error.code] ?? action, error: outcome.error });
     }
     return outcome;
   };
 
+  // Calls: media is peer to peer in this webview; each signal is one paid send.
+  const [callView, setCallView] = createSignal<CallView>(CALL_IDLE);
+  const [callStreams, setCallStreams] = createSignal<{ local: MediaStream | null; remote: MediaStream | null }>({ local: null, remote: null });
+  const calls = createCallEngine({
+    quote: (peer) => act(() => source.callQuote(peer)),
+    signal: async (peer, kind, plaintext, maxMsat) => {
+      const r = await act(() => source.callSignal(peer, kind, plaintext, maxMsat));
+      void loadBudget();
+      void loadWallet();
+      return r;
+    },
+    getUserMedia: (c) => navigator.mediaDevices.getUserMedia(c),
+    peerConnection: (config) => new RTCPeerConnection(config),
+    now: () => Date.now(),
+    onView: setCallView,
+    onStreams: (local, remote) => setCallStreams({ local, remote }),
+    // No STUN unless the owner set one: host candidates only.
+    iceServers: () => stunServer(stunPref()),
+  });
+  // Closing the window ends the call here without paying; only Hang up pays.
+  onCleanup(() => calls.endLocal());
+
+  // Voice notes: one object URL per message, revoked when the shell goes.
+  // A just-sent clip plays from its own bytes; a received one is read once.
+  const voiceUrls = new Map<string, Promise<string>>();
+  onCleanup(() => voiceUrls.forEach((u) => void u.then(URL.revokeObjectURL, () => undefined)));
   const actions: Actions = {
+    callQuote: (peer) => act(() => source.callQuote(peer)),
+    placeCall: (peer, media, quote) => void calls.place(peer, media, quote),
+    callActive: () => !['idle', 'ended'].includes(callView().phase),
+    voiceUrl: (messageId) => {
+      let url = voiceUrls.get(messageId);
+      if (!url) {
+        url = source.voiceNote(messageId).then((b) => blobUrl(b.data_b64, b.mime_type));
+        url.catch(() => voiceUrls.delete(messageId));
+        voiceUrls.set(messageId, url);
+      }
+      return url;
+    },
     approve: async () => {
       const r = await act(() => source.spendRequest());
       if (r.ok) setSpend(r.value);
@@ -689,18 +788,21 @@ export function ControlCenter(props: Props) {
       }
       return recordFailure(t, 'Payment not sent', r);
     },
-    file: async (t, file, maxMsat) => {
+    file: async (t, file, maxMsat, firstContactMsat) => {
       if (t.kind !== 'peer') return { ok: false, error: { code: 'invalid', message: 'Files go to one peer at a time.' } };
       const data = await readBase64(file).catch(() => null);
       if (data === null) return { ok: false, error: { code: 'invalid', message: 'the file could not be read' } };
-      const r = await act(() => source.fileSend(t.id, file.name, file.type, data, maxMsat));
+      const r = await act(() => source.fileSend(t.id, file.name, file.type, data, maxMsat, firstContactMsat));
       void loadBudget();
       void loadWallet();
       if (!r.ok && ['price_changed', 'price_cap_exceeded'].includes(r.error.code)) void attempt('quote', () => source.filePrice(), setFilePrice);
       if (r.ok) {
+        if (isVoiceNote(200, file.name)) voiceUrls.set(r.value.message_id, Promise.resolve(URL.createObjectURL(file)));
         setPaid(r.value.message_id, r.value.amount_msat);
+        setAllowances(r.value.message_id, { total_msat: r.value.total_msat ?? r.value.amount_msat + (r.value.max_routing_fee_msat ?? 0), max_routing_fee_msat: r.value.max_routing_fee_msat ?? 0 });
         if (!deliveries[r.value.message_id]) setDeliveries(r.value.message_id, deliveryFromReceipt(r.value));
-        addArtifact(t, { type: 'file', receipt: r.value, at: r.value.sent_at_ms });
+        setThreads('t', trackKey(t), (old) => mergeMessages(old ?? [], [sentFileMessage(r.value, ownId())]));
+        setThreads('fresh', r.value.message_id, true);
       }
       return recordFailure(t, 'File not sent', r);
     },
@@ -712,7 +814,9 @@ export function ControlCenter(props: Props) {
   const trackName = (t: TrackRef): string => {
     if (t.kind === 'peer') return peerName(peerById().get(t.id), t.id);
     if (t.kind === 'room') return rooms().find((r) => r.id.toLowerCase() === t.id)?.name ?? 'Room';
-    return t.kind === 'ai' ? 'AI' : 'Start something';
+    if (t.kind === 'ai') return 'AI';
+    if (t.kind === 'discover') return 'Discover';
+    return 'Start something';
   };
   const nameOf = (id: string) => (id.toLowerCase() === ownId().toLowerCase() ? 'You' : peerName(peerById().get(id.toLowerCase()), id));
   const trackKeyName = (key: string) => {
@@ -732,8 +836,9 @@ export function ControlCenter(props: Props) {
         nameOf={nameOf}
         unread={threads.unread}
         openKey={openKey()}
+        ownId={ownId()}
         onOpen={setTrack}
-        onPill={() => {
+        onProfile={() => {
           setTab('body');
           setContextOpen(true);
         }}
@@ -790,6 +895,27 @@ export function ControlCenter(props: Props) {
                     }}
                   />
                 </Match>
+                <Match when={t().kind === 'discover'}>
+                  <DiscoverPanel
+                    source={source}
+                    now={now()}
+                    onKnocked={(card) => {
+                      const step: Doorstep = {
+                        node_id: card.node_id,
+                        network: card.network,
+                        endpoint: card.endpoint,
+                        reach: card.reach,
+                        admission_msat: card.prices.admission_msat,
+                        message_msat: card.prices.message_msat,
+                        issued_at: card.issued_at,
+                        expires_at: card.expires_at,
+                        link: card.link,
+                      };
+                      setDoorstep(card.node_id.toLowerCase(), step);
+                      openDoorstep(step);
+                    }}
+                  />
+                </Match>
                 <Match when={t().kind === 'peer' || t().kind === 'room'}>
                   <Conversation
                     moneyBlocked={moneyBlocked()}
@@ -797,6 +923,7 @@ export function ControlCenter(props: Props) {
                     name={trackName(t())}
                     peer={t().kind === 'peer' ? peerById().get((t() as { id: string }).id) : undefined}
                     introduced={t().kind === 'peer' ? introduced[(t() as { id: string }).id] : undefined}
+                    doorstep={t().kind === 'peer' ? doorstep[(t() as { id: string }).id] : undefined}
                     members={t().kind === 'room' ? members[(t() as { id: string }).id] ?? null : null}
                     messages={threads.t[trackKey(t())] ?? []}
                     artifacts={artifacts[trackKey(t())] ?? []}
@@ -825,64 +952,98 @@ export function ControlCenter(props: Props) {
             )}
           </Show>
         </section>
-
-        <aside class="context" classList={{ open: contextOpen() }} aria-label="Body, node and wallet">
-          <div class="row">
-            <div class="tabs" role="tablist" style={{ flex: 1 }}>
-              <button role="tab" aria-selected={tab() === 'body'} data-tab="body" onClick={() => setTab('body')}>Body</button>
-              <button role="tab" aria-selected={tab() === 'node'} data-tab="node" onClick={() => setTab('node')}>Node</button>
-              <button role="tab" aria-selected={tab() === 'wallet'} data-tab="wallet" onClick={() => setTab('wallet')}>Wallet</button>
-              <button role="tab" aria-selected={tab() === 'budget'} data-tab="budget" onClick={() => setTab('budget')}>Budget</button>
-            </div>
-            <button class="quiet context-toggle" onClick={() => setContextOpen(false)} aria-label="Close panel">Close</button>
-          </div>
-          <Switch>
-            <Match when={tab() === 'body'}>
-              <Organism
-                readiness={readinessLine(overview(), now())}
-                sample={source.mode === 'sample'}
-                now={now()}
-                openedAt={openedAt()}
-                link={link()}
-                down={!!props.error || (overview() !== null && freshness(overview()!.read_at, now()).stale)}
-                metabolism={nodeEnergy() ? nodeMetabolism(nodeEnergy()!.hour, nodeEnergy()!.day) : metabolism(threads.t, ownId(), now(), paid)}
-                energyAt={energyAt()}
-                energyReadAt={energyReadAt()}
-                membrane={membrane()}
-                nodeMembrane={caps().membrane}
-                membraneReadAt={membraneReadAt()}
-                prePaymentRefusals={caps().membrane ? prePaymentRefusals() : null}
-                membraneError={errors.membrane}
-                door={door()}
-                doorError={errors.door}
-                homeostasis={homeostasis(budget())}
-                budgetReadAt={budgetReadAt()}
-                nucleus={nucleus(props.ownId, overview())}
-                nameOfTrack={trackKeyName}
-                nameOf={nameOf}
-                onSetpoints={() => setTab('budget')}
-                onPauseAll={() => void actions.pauseAll()}
-                onResume={() => void actions.resume()}
-              />
-            </Match>
-            <Match when={tab() === 'node'}>
-              <NodePanel overview={overview()} link={link()} peers={peers()} now={now()} error={errors.overview ?? errors.peers} />
-            </Match>
-            <Match when={tab() === 'wallet'}>
-              <WalletPanel moneyBlocked={moneyBlocked()} wallet={wallet()} error={errors.wallet} fund={props.fund?.(source, moneyBlocked)} />
-            </Match>
-            <Match when={tab() === 'budget'}>
-              <BudgetPanel
-                budget={budget()}
-                error={errors.budget}
-                now={now()}
-                nameOf={(id, room) => (room ? rooms().find((r) => r.id.toLowerCase() === id)?.name ?? 'Room' : nameOf(id))}
-                actions={actions}
-              />
-            </Match>
-          </Switch>
-        </aside>
       </Show>
+
+      {/* Profile / settings: Body, Node, Wallet, Budget and display prefs. Always
+          mounted so existing tests can open tabs; closed until the avatar is pressed. */}
+      <div
+        class="settings-scrim"
+        classList={{ open: contextOpen() }}
+        data-settings-open={contextOpen() ? 'true' : 'false'}
+        onClick={() => setContextOpen(false)}
+      />
+      <aside
+        ref={setSettingsEl}
+        class="context settings-modal"
+        classList={{ open: contextOpen() }}
+        aria-label="Profile and settings"
+        aria-hidden={contextOpen() ? 'false' : 'true'}
+        aria-modal={contextOpen() ? true : undefined}
+        role="dialog"
+        data-settings
+      >
+        <div class="row settings-head">
+          <div class="tabs" role="tablist" style={{ flex: 1 }}>
+            <button role="tab" aria-selected={tab() === 'body'} data-tab="body" onClick={() => { setTab('body'); setContextOpen(true); }}>Body</button>
+            <button role="tab" aria-selected={tab() === 'node'} data-tab="node" onClick={() => { setTab('node'); setContextOpen(true); }}>Node</button>
+            <button role="tab" aria-selected={tab() === 'wallet'} data-tab="wallet" onClick={() => { setTab('wallet'); setContextOpen(true); }}>Wallet</button>
+            <button role="tab" aria-selected={tab() === 'budget'} data-tab="budget" onClick={() => { setTab('budget'); setContextOpen(true); }}>Budget</button>
+            <button role="tab" aria-selected={tab() === 'frontdoor'} data-tab="frontdoor" onClick={() => { setTab('frontdoor'); setContextOpen(true); }}>Front door</button>
+          </div>
+          <button class="quiet context-toggle" data-settings-close onClick={() => setContextOpen(false)} aria-label="Close settings">Close</button>
+        </div>
+        <SettingsDisplay />
+        <Switch>
+          <Match when={tab() === 'body'}>
+            <Organism
+              readiness={readinessLine(overview(), now())}
+              sample={source.mode === 'sample'}
+              now={now()}
+              openedAt={openedAt()}
+              link={link()}
+              down={!!props.error || (overview() !== null && freshness(overview()!.read_at, now()).stale)}
+              metabolism={nodeEnergy() ? nodeMetabolism(nodeEnergy()!.hour, nodeEnergy()!.day) : metabolism(threads.t, ownId(), now(), paid)}
+              energyAt={energyAt()}
+              energyReadAt={energyReadAt()}
+              membrane={membrane()}
+              nodeMembrane={caps().membrane}
+              membraneReadAt={membraneReadAt()}
+              prePaymentRefusals={caps().membrane ? prePaymentRefusals() : null}
+              membraneError={errors.membrane}
+              door={door()}
+              doorError={errors.door}
+              homeostasis={homeostasis(budget())}
+              budgetReadAt={budgetReadAt()}
+              nucleus={nucleus(props.ownId, overview())}
+              nameOfTrack={trackKeyName}
+              nameOf={nameOf}
+              onSetpoints={() => setTab('budget')}
+              onPauseAll={() => void actions.pauseAll()}
+              onResume={() => void actions.resume()}
+            />
+          </Match>
+          <Match when={tab() === 'node'}>
+            <NodePanel overview={overview()} link={link()} peers={peers()} now={now()} error={errors.overview ?? errors.peers} />
+          </Match>
+          <Match when={tab() === 'wallet'}>
+            <WalletPanel moneyBlocked={moneyBlocked()} wallet={wallet()} error={errors.wallet} fund={props.fund?.(source, moneyBlocked)} />
+          </Match>
+          <Match when={tab() === 'budget'}>
+            <BudgetPanel
+              budget={budget()}
+              error={errors.budget}
+              now={now()}
+              nameOf={(id, room) => (room ? rooms().find((r) => r.id.toLowerCase() === id)?.name ?? 'Room' : nameOf(id))}
+              actions={actions}
+            />
+          </Match>
+          <Match when={tab() === 'frontdoor'}>
+            <FrontDoorEditor source={source} now={now()} />
+          </Match>
+        </Switch>
+      </aside>
+      <CallPanel
+        view={callView()}
+        streams={callStreams()}
+        nameOf={nameOf}
+        quote={actions.callQuote}
+        accept={() => void calls.accept()}
+        decline={() => void calls.decline()}
+        hangup={() => void calls.hangup()}
+        mute={() => calls.toggleMute()}
+        camera={() => void calls.toggleCamera()}
+        dismiss={() => calls.dismiss()}
+      />
     </div>
   );
 }
@@ -900,6 +1061,96 @@ function readBase64(file: File): Promise<string> {
   });
 }
 
+/**
+ * The owner's STUN server for calls. Off by default: with none, calls use
+ * host candidates only and connect on the same network. A STUN server learns
+ * your public address each time you place or accept a call.
+ */
+function CallSettings() {
+  const [draft, setDraft] = createSignal(stunPref());
+  const [error, setError] = createSignal<string | null>(null);
+  const save = () => {
+    const v = draft().trim();
+    if (v && stunServer(v).length === 0) {
+      setError('Use stun:host or stun:host:port. TURN relays are not supported.');
+      return;
+    }
+    setError(null);
+    setStunPref(v);
+  };
+  return (
+    <section data-call-settings>
+      <h3>Calls</h3>
+      <p class="hint" data-stun-note>
+        {stunPref()
+          ? `Calls ask ${stunPref()} for your public address, so that server sees your IP address each time you place or accept a call.`
+          : 'No STUN server: calls contact no third party and connect only on the same network (or a VPN). Calls across routers need a STUN server you choose, for example one run on your own node.'}
+      </p>
+      <div class="row">
+        <input data-stun-input placeholder="stun:host:3478" value={draft()} onInput={(e) => setDraft(e.currentTarget.value)} aria-label="STUN server for calls (optional)" />
+        <button type="button" class="soft" data-stun-save onClick={save}>Save</button>
+        <Show when={stunPref()}>
+          <button type="button" class="soft" data-stun-clear onClick={() => { setDraft(''); setStunPref(''); setError(null); }}>Remove</button>
+        </Show>
+      </div>
+      <Show when={error()}>
+        <p class="hint" role="alert" data-stun-error>{error()}</p>
+      </Show>
+    </section>
+  );
+}
+
+function SettingsDisplay() {
+  const themes: { id: ThemePref; label: string }[] = [
+    { id: 'system', label: 'System' },
+    { id: 'light', label: 'Light' },
+    { id: 'dark', label: 'Dark' },
+  ];
+  const denoms: { id: Denom; label: string }[] = [
+    { id: 'sats', label: 'Sats' },
+    { id: 'btc', label: 'BTC' },
+  ];
+  return (
+    <div class="panel settings-display" data-panel="display">
+      <h2>Display</h2>
+      <h3>Theme</h3>
+      <div class="modes soft" role="radiogroup" aria-label="Theme" data-theme-toggle>
+        <For each={themes}>
+          {(t) => (
+            <button
+              type="button"
+              role="radio"
+              aria-checked={themePref() === t.id}
+              data-theme-option={t.id}
+              onClick={() => setThemePref(t.id)}
+            >
+              {t.label}
+            </button>
+          )}
+        </For>
+      </div>
+      <h3>Amounts</h3>
+      <div class="modes soft" role="radiogroup" aria-label="Denomination" data-denom-toggle>
+        <For each={denoms}>
+          {(d) => (
+            <button
+              type="button"
+              role="radio"
+              aria-checked={denom() === d.id}
+              data-denom-option={d.id}
+              onClick={() => setDenom(d.id)}
+            >
+              {d.label}
+            </button>
+          )}
+        </For>
+      </div>
+      <p class="hint">Balances and costs use this unit everywhere. Payment amounts to the node stay in millisatoshis.</p>
+      <CallSettings />
+    </div>
+  );
+}
+
 // ---- rail -----------------------------------------------------------------
 
 function Rail(props: {
@@ -913,8 +1164,9 @@ function Rail(props: {
   nameOf: (id: string) => string;
   unread: Unread;
   openKey: string | null;
+  ownId: string | null;
   onOpen: (t: TrackRef) => void;
-  onPill: () => void;
+  onProfile: () => void;
 }) {
   const item = (t: TrackRef, name: string, meta?: JSX.Element) => {
     const key = trackKey(t);
@@ -934,12 +1186,17 @@ function Rail(props: {
     );
   };
 
+  const initials = () => {
+    const id = props.ownId;
+    return id && id.length >= 2 ? id.slice(0, 2).toUpperCase() : 'BS';
+  };
+
   return (
     <nav class="rail" aria-label="Tracks">
       <div class="mark">
         Bit<span>Sov</span>
       </div>
-      <button class="node-pill" title={props.pill.text} data-pill={props.pill.tone} onClick={() => props.onPill()} disabled={!props.active}>
+      <button class="node-pill" title={props.pill.text} data-pill={props.pill.tone} onClick={() => props.onProfile()} disabled={!props.active}>
         <span class={`dot ${props.pill.tone}`} classList={{ live: props.pill.live }} />
         <span class="what">{props.pill.text}</span>
         <Show when={props.active}>
@@ -994,6 +1251,21 @@ function Rail(props: {
         <Show when={props.active}>{item({ kind: 'ai' }, 'Ask your node', <span class="meta">local</span>)}</Show>
       </div>
 
+      <div class="track-group">
+        <h2>Discover</h2>
+        <Show when={props.active}>
+          <button
+            class="track-link"
+            data-track="discover"
+            aria-current={props.openKey === 'discover'}
+            onClick={() => props.onOpen({ kind: 'discover' })}
+          >
+            <span class="name">Front doors</span>
+            <span class="meta">paste / scan</span>
+          </button>
+        </Show>
+      </div>
+
       <div class="rail-foot">
         <Show when={props.active}>
           <button class="track-link new-track" data-track="new" aria-current={props.openKey === 'new'} onClick={() => props.onOpen({ kind: 'new' })}>
@@ -1003,6 +1275,18 @@ function Rail(props: {
         <Show when={props.sample}>
           <span class="mode-tag" data-sample>Sample data, no node</span>
         </Show>
+        <button
+          type="button"
+          class="profile-avatar"
+          data-profile
+          disabled={!props.active}
+          aria-label="Open profile and settings"
+          title="Profile and settings"
+          onClick={() => props.onProfile()}
+        >
+          <span class="avatar-mark" aria-hidden="true">{initials()}</span>
+          <span class="avatar-label">You</span>
+        </button>
       </div>
     </nav>
   );
@@ -1010,12 +1294,13 @@ function Rail(props: {
 
 // ---- tracks ---------------------------------------------------------------
 
-function TrackHead(props: { title: string; sub?: JSX.Element; onContext: () => void }) {
+function TrackHead(props: { title: string; sub?: JSX.Element; extra?: JSX.Element; onContext: () => void }) {
   return (
     <header class="track-head">
       <h1>{props.title}</h1>
       <div class="sub">{props.sub}</div>
-      <button class="quiet context-toggle" onClick={() => props.onContext()}>Body</button>
+      {props.extra}
+      <button class="quiet context-toggle" onClick={() => props.onContext()}>Settings</button>
     </header>
   );
 }
@@ -1035,6 +1320,8 @@ function Conversation(props: {
   peer: Peer | undefined;
   /** K1: the verified card this conversation was opened from, if any. */
   introduced?: Introduction;
+  /** Front-door Knock marker — not an Introduction. */
+  doorstep?: Doorstep;
   members: string[] | null;
   messages: Message[];
   artifacts: Artifact[];
@@ -1065,7 +1352,7 @@ function Conversation(props: {
       room: props.roomQuote,
       nowMs: props.now,
     });
-  const items = () => streamItems(props.messages, props.artifacts);
+  const items = () => streamItems(props.messages.filter((m) => !isCallKind(m.kind)), props.artifacts);
 
   createEffect(
     on(
@@ -1088,14 +1375,32 @@ function Conversation(props: {
 
   return (
     <>
-      <TrackHead title={props.name} sub={sub()} onContext={props.onContext} />
+      <TrackHead
+        title={props.name}
+        sub={sub()}
+        extra={
+          <Show when={props.track.kind === 'peer' && props.peer ? props.track.id : null}>
+            {(peer) => <CallButtons peer={peer()} name={props.name} blocked={props.moneyBlocked} actions={props.actions} />}
+          </Show>
+        }
+        onContext={props.onContext}
+      />
       <div class="stream" ref={stream} data-stream>
+        <div class="chat-column">
         <Show when={props.introduced}>
           {(c) => (
             <p class="day" data-introduced={c().node_id}>
-              Opened from {props.name}’s signed introduction. Estimated from their card: admission {sats(allIn(c().admission_msat))} sats including {feeCeiling(routingFee(c().admission_msat))}, each
-              message {sats(allIn(c().message_msat))} sats including {feeCeiling(routingFee(c().message_msat))} (estimated ceilings). You confirm their node’s own quote before anything is paid, and every
+              Opened from {props.name}’s signed introduction. Estimated from their card: admission {fmtAmount(allIn(c().admission_msat))} including {feeCeiling(routingFee(c().admission_msat))}, each
+              message {fmtAmount(allIn(c().message_msat))} including {feeCeiling(routingFee(c().message_msat))} (estimated ceilings). You confirm their node’s own quote before anything is paid, and every
               message pays.
+            </p>
+          )}
+        </Show>
+        <Show when={props.doorstep}>
+          {(c) => (
+            <p class="day" data-doorstep={c().node_id}>
+              Opened from {props.name}’s front door. Card snapshot (display only): admission {fmtAmount(allIn(c().admission_msat))}, each
+              message {fmtAmount(allIn(c().message_msat))}. Knock uses their live first-contact quote — you confirm before anything is paid.
             </p>
           )}
         </Show>
@@ -1135,6 +1440,7 @@ function Conversation(props: {
                         paid={props.paid[m().id]}
                         allowance={props.allowances[m().id]}
                         nameOf={props.nameOf}
+                        voiceUrl={props.actions.voiceUrl}
                       />
                     )}
                   </Match>
@@ -1149,6 +1455,7 @@ function Conversation(props: {
         <Show when={props.error}>
           <p class="err-note">{props.error}</p>
         </Show>
+        </div>
       </div>
 
       <Composer
@@ -1182,8 +1489,9 @@ function MessageView(props: {
   fresh: boolean;
   delivery: Delivery | undefined;
   paid: number | undefined;
-  allowance?: { total_msat: number; max_routing_fee_msat: number };
+  allowance?: { total_msat: number; max_routing_fee_msat: number; readmission_msat?: number };
   nameOf: (id: string) => string;
+  voiceUrl?: (messageId: string) => Promise<string>;
 }) {
   const amount = () => props.allowance?.total_msat ?? props.paid ?? props.m.payment_amount_msat;
   return (
@@ -1191,12 +1499,21 @@ function MessageView(props: {
       <Show when={!props.out && props.room}>
         <span class="who">{props.nameOf(props.m.sender)}</span>
       </Show>
-      <div class="bubble">{props.m.plaintext ?? 'Encrypted content not available on this device'}</div>
+      <div class="bubble" classList={{ file: props.m.kind === 200 }} data-kind={props.m.kind}>
+        <Show when={props.m.kind === 200} fallback={props.m.plaintext ?? 'Encrypted content not available on this device'}>
+          <Show when={props.voiceUrl && isVoiceNote(props.m.kind, props.m.plaintext)} fallback={<span class="file-name">{props.m.plaintext ?? 'File'}</span>}>
+            <VoiceNote id={props.m.id} name={fileNameOf(props.m.plaintext) ?? 'file'} load={props.voiceUrl!} />
+          </Show>
+        </Show>
+      </div>
       <div class="stamp">
         <Show when={amount()}>
           <Bolt />
           <span class="sats">{sats(amount()!)}</span>
           <span>{satUnit(amount()!)} {props.out ? (props.allowance ? `all-in ceiling (${feeCeiling(props.allowance.max_routing_fee_msat)})` : 'principal paid; fee not in history') : 'to you'}</span>
+          <Show when={props.out && props.allowance?.readmission_msat}>
+            <span data-readmission-paid>incl. admission again {sats(props.allowance!.readmission_msat!)} {satUnit(props.allowance!.readmission_msat!)}</span>
+          </Show>
         </Show>
         <span>{clock(props.m.timestamp)}</span>
         <Show when={props.out && props.delivery}>
@@ -1204,6 +1521,175 @@ function MessageView(props: {
         </Show>
       </div>
     </article>
+  );
+}
+
+/**
+ * Call and video buttons. The price is read (never paid) first and shown on
+ * the button: the offer to this contact plus one hangup, all-in.
+ */
+function CallButtons(props: { peer: string; name: string; blocked: boolean; actions: Actions }) {
+  const [quote, setQuote] = createSignal<CallQuote | null>(null);
+  const [why, setWhy] = createSignal<string | null>(null);
+  createEffect(on(() => props.peer, (peer) => {
+    setQuote(null);
+    setWhy(null);
+    void props.actions.callQuote(peer).then((r) => {
+      if (props.peer !== peer) return;
+      if (r.ok) setQuote(r.value);
+      else setWhy(r.error.message);
+    });
+  }));
+  const cost = () => {
+    const q = quote();
+    return q && callCost(q) !== null ? callCost(q)! : null;
+  };
+  const off = () => props.blocked || cost() === null || props.actions.callActive();
+  const title = () =>
+    why() ?? (quote() && cost() === null ? `${props.name}’s node does not take calls yet` : cost() !== null
+      ? `Up to ${fmtAmount(cost()!)}: ${fmtAmount(quote()!.offer_msat! + quote()!.offer_max_routing_fee_msat)} to ring (their call price plus ${feeCeiling(quote()!.offer_max_routing_fee_msat)}), then ${fmtAmount(signalCost(quote()!))} to hang up. Media goes directly between you; it is not billed. ${stunPref() ? `Uses your STUN server ${stunPref()} to find a route.` : 'No STUN server is set, so calls connect only on the same network (Settings).'}`
+      : 'Reading their call price…');
+  const place = (media: CallMedia) => { const q = quote(); if (q && !off()) props.actions.placeCall(props.peer, media, q); };
+  return (
+    <div class="call-buttons" data-call-buttons>
+      <button type="button" class="soft call-button" data-call="audio" disabled={off()} title={title()} aria-label={`Call ${props.name}${cost() !== null ? `, up to ${fmtAmount(cost()!)}` : ''}`} onClick={() => place('audio')}>
+        Call{cost() !== null ? ` · ${sats(cost()!)} ${satUnit(cost()!)}` : ''}
+      </button>
+      <button type="button" class="soft call-button" data-call="video" disabled={off()} title={title()} onClick={() => place('video')} aria-label={`Video call ${props.name}${cost() !== null ? `, up to ${fmtAmount(cost()!)}` : ''}`}>
+        Video
+      </button>
+    </div>
+  );
+}
+
+const CALL_TITLE: Record<CallView['phase'], string> = {
+  idle: '', calling: 'Calling', ringing: 'Ringing', incoming: 'Incoming call', connecting: 'Connecting', live: 'On call', ended: 'Call ended',
+};
+const END_REASON: Record<string, string> = {
+  hangup: 'Hung up', declined: 'Declined', busy: 'Busy', timeout: 'No answer', failed: 'Connection failed',
+};
+
+function MediaView(props: { stream: MediaStream | null; video: boolean; muted: boolean; kind: 'local' | 'remote' }) {
+  let el: HTMLMediaElement | undefined;
+  createEffect(() => { if (el) el.srcObject = props.stream; });
+  return props.video
+    ? <video ref={(v) => { el = v; }} autoplay playsinline muted={props.muted} class={`call-video ${props.kind}`} data-call-media={props.kind} />
+    : <audio ref={(a) => { el = a; }} autoplay muted={props.muted} data-call-media={props.kind} />;
+}
+
+/** The call card: incoming (accept/decline with price), ringing, live (mute, camera, duration, hang up), ended. */
+function CallPanel(props: {
+  view: CallView;
+  streams: { local: MediaStream | null; remote: MediaStream | null };
+  nameOf: (id: string) => string;
+  quote: (peer: string) => Promise<Outcome<CallQuote>>;
+  accept: () => void;
+  decline: () => void;
+  hangup: () => void;
+  mute: () => void;
+  camera: () => void;
+  dismiss: () => void;
+}) {
+  const [tick, setTick] = createSignal(Date.now());
+  const [answer, setAnswer] = createSignal<number | null>(null);
+  createEffect(() => {
+    if (props.view.phase !== 'live') return;
+    const t = setInterval(() => setTick(Date.now()), 1000);
+    onCleanup(() => clearInterval(t));
+  });
+  createEffect(on(() => (props.view.phase === 'incoming' ? props.view.peer : null), (peer) => {
+    setAnswer(null);
+    if (peer) void props.quote(peer).then((r) => { if (r.ok) setAnswer(signalCost(r.value)); });
+  }));
+  const v = () => props.view;
+  const who = () => (v().peer ? props.nameOf(v().peer!) : '');
+  const price = (m: number | null) => (m === null ? '' : ` · ${sats(m)} ${satUnit(m)}`);
+  return (
+    <Show when={v().phase !== 'idle'}>
+      <aside class="call-panel" data-call-panel={v().phase} role="dialog" aria-label={`${CALL_TITLE[v().phase]} ${who()}`}>
+        <header>
+          <strong data-call-title>{CALL_TITLE[v().phase]}{v().media === 'video' ? ' (video)' : ''}</strong>
+          <span class="who">{who()}</span>
+          <Show when={v().phase === 'live' && v().liveAt}>
+            <span class="duration" data-call-duration>{duration(Math.max(0, tick() - v().liveAt!))}</span>
+          </Show>
+        </header>
+        <Show when={v().media === 'video' && (v().phase === 'live' || v().phase === 'connecting')}>
+          <div class="call-videos">
+            <MediaView stream={props.streams.remote} video muted={false} kind="remote" />
+            <MediaView stream={props.streams.local} video muted kind="local" />
+          </div>
+        </Show>
+        <Show when={v().media === 'audio'}>
+          <MediaView stream={props.streams.remote} video={false} muted={false} kind="remote" />
+        </Show>
+        <Show when={v().paidMsat > 0}>
+          <p class="hint" data-call-paid>Paid {fmtAmount(v().paidMsat)} for this call’s signals. Media is direct and not billed.</p>
+        </Show>
+        <Show when={v().phase === 'ended'}>
+          <p class="hint" data-call-ended>{v().error ?? END_REASON[v().reason ?? 'hangup']}</p>
+        </Show>
+        <div class="call-actions">
+          <Switch>
+            <Match when={v().phase === 'incoming'}>
+              <button type="button" class="primary soft" data-call-accept onClick={() => props.accept()}>Accept{price(answer())}</button>
+              <button type="button" class="soft" data-call-decline onClick={() => props.decline()}>Decline{price(answer())}</button>
+            </Match>
+            <Match when={v().phase === 'ended'}>
+              <button type="button" class="soft" data-call-dismiss onClick={() => props.dismiss()}>Close</button>
+            </Match>
+            <Match when={true}>
+              <Show when={v().phase === 'live' || v().phase === 'connecting'}>
+                <button type="button" class="soft" data-call-mute aria-pressed={v().muted} onClick={() => props.mute()}>Mute</button>
+                <Show when={v().media === 'video'}>
+                  <button type="button" class="soft" data-call-camera aria-pressed={v().camera} onClick={() => props.camera()}>Camera</button>
+                </Show>
+              </Show>
+              <button type="button" class="danger soft" data-call-hangup onClick={() => props.hangup()}>
+                {v().phase === 'calling' ? 'Cancel' : 'Hang up'}
+              </button>
+            </Match>
+          </Switch>
+        </div>
+      </aside>
+    </Show>
+  );
+}
+
+/** Inline player for a voice note. Loads on first tap (read-only), then plays in place. */
+/** Host error for a message whose file is not audio (act.rs NOT_A_VOICE_NOTE). */
+const NOT_A_VOICE_NOTE = 'not a voice note';
+
+function VoiceNote(props: { id: string; name: string; load: (messageId: string) => Promise<string> }) {
+  const [url, setUrl] = createSignal<string | null>(null);
+  const [busy, setBusy] = createSignal(false);
+  // Why it cannot play: the file is gone, or it is not audio despite its name.
+  const [missing, setMissing] = createSignal<'gone' | 'not_audio' | null>(null);
+  const open = async () => {
+    setBusy(true);
+    try {
+      setUrl(await props.load(props.id));
+    } catch (e) {
+      setMissing(String(e).includes(NOT_A_VOICE_NOTE) ? 'not_audio' : 'gone');
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <span class="voice-note" data-voice-note={props.id}>
+      <Show
+        when={url()}
+        fallback={
+          <button type="button" class="voice-play" data-voice-play disabled={busy() || missing() !== null} onClick={() => void open()}>
+            {missing() === 'not_audio'
+              ? `File · ${props.name} (not audio, not played)`
+              : missing() === 'gone' ? 'Voice note · not stored on this device' : busy() ? 'Loading…' : '▶ Voice note'}
+          </button>
+        }
+      >
+        <audio controls autoplay preload="auto" src={url()!} data-voice-audio />
+      </Show>
+    </span>
   );
 }
 
@@ -1215,18 +1701,26 @@ const FAILURE_LABEL: Partial<Record<ActionError['code'], string>> = {
 };
 
 const DELIVERY_TEXT: Record<Delivery['status'], string> = {
-  accepted: 'accepted by their node',
-  sent: 'sent, waiting for their node',
-  queued: 'queued until they reconnect',
-  delivered: 'delivered',
-  rejected: 'rejected',
+  accepted: 'Delivered',
+  sent: 'Sent',
+  queued: 'Queued',
+  delivered: 'Delivered',
+  rejected: 'Rejected',
 };
 
+/** Single ✓ when acked/delivered; other states keep one short word (details in title). */
 function DeliveryMark(props: { d: Delivery }) {
+  const tick = () => props.d.status === 'accepted' || props.d.status === 'delivered';
+  const label = () => {
+    const base = DELIVERY_TEXT[props.d.status];
+    return props.d.reason ? `${base}: ${props.d.reason}` : base;
+  };
   return (
-    <span class="delivery" data-delivery={props.d.status}>
-      {DELIVERY_TEXT[props.d.status]}
-      <Show when={props.d.reason}>: {props.d.reason}</Show>
+    <span class="delivery" data-delivery={props.d.status} title={label()} aria-label={label()}>
+      <Show when={!tick()}>
+        {DELIVERY_TEXT[props.d.status]}
+        <Show when={props.d.reason}>: {props.d.reason}</Show>
+      </Show>
     </span>
   );
 }
@@ -1408,21 +1902,29 @@ function UndeliveredView(props: {
   return (
     <div class="artifact out failed" data-artifact="undelivered" data-paid-msat={props.a.paid.paid_msat}>
       <span class="kind">{copy().title}</span>
-      <span>{copy().body}</span>
+      <span data-undelivered-line>{copy().body}</span>
+      <details class="quiet-detail" data-undelivered-detail>
+        <summary>Details</summary>
+        <p>{copy().detail}</p>
+      </details>
       <Show when={props.a.paid.retry && props.onRetry}>
         <Show
           when={props.a.admission}
           fallback={
             <button type="button" class="link" data-retry-delivery disabled={props.moneyBlocked || busy()} onClick={() => void run(() => props.onRetry!(props.a.id))}>
-              {busy() ? 'Retrying delivery…' : 'Retry delivery'}
+              {busy() ? 'Retrying…' : 'Retry delivery'}
             </button>
           }
         >
           {(adm) => (
             <>
-              <p class="hint" data-admission-price={adm().total_msat}>{admissionCopy(adm()).body}</p>
+              <p class="hint" data-admission-price={adm().total_msat} data-admission-line>{admissionCopy(adm()).body}</p>
+              <details class="quiet-detail" data-admission-detail>
+                <summary>Details</summary>
+                <p>{admissionCopy(adm()).detail}</p>
+              </details>
               <button type="button" class="link" data-retry-approve disabled={props.moneyBlocked || busy()} onClick={() => void run(() => props.onRetry!(props.a.id, adm().total_msat))}>
-                {busy() ? 'Checking…' : props.a.ownerApproval ? 'Check node approval and retry' : admissionCopy(adm()).action}
+                {busy() ? 'Checking…' : props.a.ownerApproval ? 'Check approval and retry' : admissionCopy(adm()).action}
               </button>
             </>
           )}
@@ -1434,7 +1936,7 @@ function UndeliveredView(props: {
         </button>
       </Show>
       <Show when={props.a.ownerApproval}>
-        {(approval) => <div data-retry-owner><p>Approve this retry at your node, then check approval.</p><code class="address">{approval().owner_command}</code></div>}
+        {(approval) => <div data-retry-owner><p>Approve at your node, then check.</p><code class="address">{approval().owner_command}</code></div>}
       </Show>
       <Show when={props.a.note}>
         <p class="hint" data-retry-note>{props.a.note}</p>
@@ -1486,6 +1988,84 @@ function Composer(props: {
   // file
   const [file, setFile] = createSignal<File | null>(null);
   let fileInput: HTMLInputElement | undefined;
+  // voice note: recorded here, then sent exactly like a chosen file
+  const [recording, setRecording] = createSignal<{ rec: Recording; startedAt: number } | null>(null);
+  const [recordedMs, setRecordedMs] = createSignal(0);
+  const [starting, setStarting] = createSignal(false);
+  const voiceFile = () => {
+    const f = file();
+    return f && isVoiceNote(200, f.name) ? f : null;
+  };
+  const voicePreview = createMemo(() => {
+    const f = voiceFile();
+    if (!f) return null;
+    const url = URL.createObjectURL(f);
+    onCleanup(() => URL.revokeObjectURL(url));
+    return url;
+  });
+  // Bumped when the track changes or the composer goes away: a microphone
+  // prompt answered after that must not start recording for another contact.
+  let voiceGeneration = 0;
+  const dropRecording = () => {
+    voiceGeneration++;
+    const r = untrack(recording);
+    setRecording(null);
+    r?.rec.cancel();
+  };
+  onCleanup(dropRecording);
+  // Leaving the window stops the microphone; the clip stays as a preview, unsent.
+  const onLeave = () => { if (untrack(recording)) void stopRecording(); };
+  const onVisibility = () => { if (document.visibilityState === 'hidden') onLeave(); };
+  window.addEventListener('blur', onLeave);
+  document.addEventListener('visibilitychange', onVisibility);
+  onCleanup(() => {
+    window.removeEventListener('blur', onLeave);
+    document.removeEventListener('visibilitychange', onVisibility);
+  });
+  createEffect(() => {
+    const r = recording();
+    if (!r) return;
+    const tick = setInterval(() => setRecordedMs(Date.now() - r.startedAt), 250);
+    onCleanup(() => clearInterval(tick));
+  });
+  const stopRecording = async () => {
+    const r = untrack(recording);
+    if (!r) return;
+    setRecording(null);
+    const clip = await r.rec.stop();
+    composerRevision++;
+    if (!clip) {
+      setNote('Nothing was recorded.');
+      return;
+    }
+    if (clip.size > FILE_MAX_BYTES) {
+      setNote('That clip is over 1.4 MB, too large to send. Nothing was sent; record a shorter one.');
+      return;
+    }
+    if (fileInput) fileInput.value = '';
+    setFile(clip);
+    setMode('file');
+  };
+  const startVoice = async () => {
+    if (untrack(recording) || untrack(starting)) return;
+    setNote(null);
+    setStarting(true);
+    const generation = voiceGeneration;
+    try {
+      const rec = await startRecording(() => void stopRecording());
+      if (generation !== voiceGeneration) {
+        // The track changed (or the composer closed) while the prompt was open.
+        rec.cancel();
+        return;
+      }
+      setRecordedMs(0);
+      setRecording({ rec, startedAt: Date.now() });
+    } catch (e) {
+      setNote(e instanceof Error ? e.message : 'This window cannot record audio.');
+    } finally {
+      setStarting(false);
+    }
+  };
   // Inputs and navigation remain usable during a send. Only the submitted
   // revision may be cleared by its completion (including track A -> B -> A).
   let composerRevision = 0;
@@ -1540,6 +2120,7 @@ function Composer(props: {
         setMode('message');
         setNote(null);
         setDraft('');
+        dropRecording();
         setFile(null);
         if (fileInput) fileInput.value = '';
         setBolt11('');
@@ -1591,13 +2172,23 @@ function Composer(props: {
    */
   const viaBudget = () => {
     const b = budget();
-    if (mode() !== 'message' || !b) return false;
+    // Messages and files share budget / window rules; pay & request stay manual.
+    if ((mode() !== 'message' && mode() !== 'file') || !b) return false;
     return b.paused || b.waiting_for_owner || b.autopay.state === 'open' || !line().open;
   };
   // A known contact the node would not re-admit from the budget after a
   // reconnect (its grant does not budget them yet): the door card, once more.
   const [readmitFor, setReadmitFor] = createSignal<string | null>(null);
   const readmit = () => !room() && readmitFor() === target();
+  // Genome quoted_readmission_v1: after a reconnect or restart the contact
+  // asks for admission again and the node kept their signed quote. Outside the
+  // contact's budget the owner sees it here, inside the all-in cost, and sends
+  // once more at that price (the same message keeps its operation).
+  const [readmitQuote, setReadmitQuote] = createSignal<{ peer: string; price: AdmissionPrice } | null>(null);
+  const readmitPrice = (): AdmissionPrice | null => {
+    const q = readmitQuote();
+    return q && !room() && mode() === 'message' && q.peer === target() ? q.price : null;
+  };
   // Is this send a first contact? While the budget decides, exactly when it
   // has no line for this peer, whatever the thread holds: inbound history
   // does not open their door for us (merge-gate finding 7). Otherwise, when
@@ -1613,7 +2204,7 @@ function Composer(props: {
   const stand = () => budgetStand(budget(), target(), room(), shown().msat, readmit());
   createEffect(() => {
     if (props.moneyBlocked) { setDoor(null); return; }
-    if (room() || !doorWanted() || mode() !== 'message' || stand().kind !== 'first') return;
+    if (room() || !doorWanted() || (mode() !== 'message' && mode() !== 'file') || stand().kind !== 'first') return;
     const peer = target();
     if (untrack(door)?.peer === peer) return;
     setDoor({ peer, quote: null });
@@ -1669,18 +2260,26 @@ function Composer(props: {
   const shown = (): { msat: number | null; estimate: boolean; basis: string } => {
     switch (mode()) {
       case 'message': {
+        const again = readmitPrice();
+        if (again) {
+          return {
+            msat: again.total_msat,
+            estimate: false,
+            basis: `${props.name} asks for admission again: ${sats(again.admission_msat)} ${satUnit(again.admission_msat)}, then ${sats(again.message_msat)} for this message; ${feeCeiling(again.max_routing_fee_msat ?? 0)}`,
+          };
+        }
         const q = doorWanted() ? doorQuote() : null;
         if (q) {
           return {
             msat: q.total_msat,
             estimate: false,
-            basis: `${props.name}’s own quote: ${sats(q.admission_msat)} sats to open their door, then ${sats(q.message_msat)} for this message; ${feeCeiling(q.max_routing_fee_msat ?? 0)}`,
+            basis: `${props.name}’s own quote: ${fmtAmount(q.admission_msat)} to open their door, then ${fmtAmount(q.message_msat)} for this message; ${feeCeiling(q.max_routing_fee_msat ?? 0)}`,
           };
         }
         const c = props.cost;
         if (!c) return { msat: null, estimate: false, basis: room() ? 'Reading each member’s price…' : 'Reading their price…' };
         const basis = doorWanted()
-          ? `${c.basis}. First contact also pays their admission price once, at most ${sats(ADMISSION_MAX_MSAT)} sats`
+          ? `${c.basis}. First contact also pays their admission price once, at most ${fmtAmount(ADMISSION_MAX_MSAT)}`
           : c.basis;
         return { msat: c.msat, estimate: c.estimate || doorWanted(), basis };
       }
@@ -1725,7 +2324,7 @@ function Composer(props: {
         case 'paused': return 'Resume payments';
         case 'waiting': return 'Waiting for approval';
         case 'off': return 'Approve app all-in limit';
-        case 'first': return `Send first message${price}`;
+        case 'first': return `Send first ${mode() === 'file' ? 'file' : 'message'}${price}`;
         case 'contact_used':
         case 'total_used': return 'Budget used up';
         default: return `Send${price}`;
@@ -1761,11 +2360,17 @@ function Composer(props: {
       const submittedPeer = target();
       const submittedTrack = props.track;
       const submittedText = draft();
+      const submittedFile = file();
+      const submittedMode = mode();
       const cap = shown().msat!;
       const first = st.kind === 'first' ? firstPick() ?? st.suggest : undefined;
       const dispatch = async () => {
-      const r = await props.actions.send(submittedTrack, submittedText, cap, first);
+      const r = submittedMode === 'file'
+        ? await props.actions.file(submittedTrack, submittedFile!, cap, first)
+        : await props.actions.send(submittedTrack, submittedText, cap, first);
       const unchanged = composerRevision === submittedRevision;
+      if (r.ok && readmitQuote()?.peer === submittedPeer) setReadmitQuote(null);
+      if (!r.ok && r.error.code === 'readmission_quoted' && r.error.admission) setReadmitQuote({ peer: submittedPeer, price: r.error.admission });
       if (r.ok && readmitFor() === submittedPeer) setReadmitFor(null);
       else if (!r.ok && unchanged && ['price_changed', 'price_cap_exceeded'].includes(r.error.code) && doorWanted()) {
         // The stranger's price moved: ask for their signed quote again.
@@ -1775,8 +2380,13 @@ function Composer(props: {
         setReadmitFor(submittedPeer);
       }
       if ((r.ok || paidUndelivered(r)) && composerRevision === submittedRevision) {
-        setDraft('');
-        setDrafted(false);
+        if (submittedMode === 'file') {
+          setFile(null);
+          if (fileInput) fileInput.value = '';
+        } else {
+          setDraft('');
+          setDrafted(false);
+        }
       } else if (!r.ok && unchanged && (isBudgetStop(r.error) || r.error.code === 'owner_only')) setNote(r.error.message);
       };
       if (first !== undefined && !room()) {
@@ -1815,13 +2425,17 @@ function Composer(props: {
     const unchanged = () => composerRevision === submittedRevision;
     let r: Awaited<ReturnType<Actions['send']>>;
     switch (mode()) {
-      case 'message':
+      case 'message': {
+        const peer = target();
         r = await props.actions.send(t, draft(), shown().msat!);
+        if (r.ok && readmitQuote()?.peer === peer) setReadmitQuote(null);
+        if (!r.ok && r.error.code === 'readmission_quoted' && r.error.admission) setReadmitQuote({ peer, price: r.error.admission });
         if ((r.ok || paidUndelivered(r)) && unchanged()) {
           setDraft('');
           setDrafted(false);
         } else if (!r.ok && unchanged() && isBudgetStop(r.error)) setNote(r.error.message);
         break;
+      }
       case 'pay':
         r =
           payKind() === 'invoice'
@@ -1871,10 +2485,20 @@ function Composer(props: {
       }}
     >
       <Show when={modes().length > 1}>
-        <div class="modes" role="tablist" aria-label="What to send">
+        <div class="composer-actions" role="toolbar" aria-label="What to send">
           <For each={modes()}>
             {(m) => (
-              <button type="button" role="tab" data-composer-mode={m} aria-selected={mode() === m} onClick={() => { composerRevision++; setMode(m); setNote(null); }}>
+              <button
+                type="button"
+                class="composer-action"
+                data-composer-mode={m}
+                aria-pressed={mode() === m}
+                onClick={() => {
+                  composerRevision++;
+                  setMode(m);
+                  setNote(null);
+                }}
+              >
                 {{ message: 'Message', pay: 'Pay', request: 'Request', file: 'File' }[m]}
               </button>
             )}
@@ -1884,23 +2508,114 @@ function Composer(props: {
 
       <Switch>
         <Match when={mode() === 'message'}>
-          <textarea
-            rows={2}
-            placeholder={`Message ${props.name}`}
-            value={draft()}
-            onInput={(e) => setDraft(e.currentTarget.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-                e.preventDefault();
-                void submit();
-              }
-            }}
-            aria-label={`Message ${props.name}`}
-          />
+          <div class="composer-main">
+            <Show when={!room()}>
+              <button
+                type="button"
+                class="attach soft"
+                data-attach
+                aria-label="Attach a file"
+                title="Attach a file"
+                onClick={() => { composerRevision++; setMode('file'); setNote(null); }}
+              >
+                +
+              </button>
+              <button
+                type="button"
+                class="attach soft voice-record"
+                classList={{ recording: recording() !== null }}
+                data-voice-record={recording() ? 'stop' : 'start'}
+                aria-label={recording() ? 'Stop recording' : 'Record a voice note'}
+                title={recording() ? 'Stop recording' : `Record a voice note (up to ${duration(VOICE_MAX_MS)})`}
+                disabled={starting() || busy()}
+                onClick={() => void (recording() ? stopRecording() : startVoice())}
+              >
+                {recording() ? `■ ${duration(recordedMs())}` : '🎙'}
+              </button>
+            </Show>
+            <textarea
+              rows={1}
+              placeholder={`Message ${props.name}`}
+              value={draft()}
+              onInput={(e) => setDraft(e.currentTarget.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                  e.preventDefault();
+                  void submit();
+                }
+              }}
+              aria-label={`Message ${props.name}`}
+            />
+            <button type="submit" class="primary soft" disabled={disabled()} data-send>
+              {label()}
+            </button>
+          </div>
+        </Match>
+        <Match when={mode() === 'file'}>
+          <div class="composer-main">
+            <button
+              type="button"
+              class="attach soft"
+              data-attach
+              aria-label="Attach a file"
+              title="Attach a file"
+              onClick={() => fileInput?.click()}
+            >
+              +
+            </button>
+            <button
+              type="button"
+              class="attach soft voice-record"
+              classList={{ recording: recording() !== null }}
+              data-voice-record={recording() ? 'stop' : 'start'}
+              aria-label={recording() ? 'Stop recording' : 'Record a voice note'}
+              title={recording() ? 'Stop recording' : `Record a voice note (up to ${duration(VOICE_MAX_MS)})`}
+              disabled={starting() || busy()}
+              onClick={() => void (recording() ? stopRecording() : startVoice())}
+            >
+              {recording() ? `■ ${duration(recordedMs())}` : '🎙'}
+            </button>
+            <input
+              ref={(el) => { fileInput = el; }}
+              type="file"
+              class="sr-only"
+              data-file-input
+              onChange={(e) => {
+                composerRevision++;
+                setFile(e.currentTarget.files?.[0] ?? null);
+              }}
+              aria-label="File to send"
+            />
+            <div class="file-chip" data-file-chip>
+              <Show when={file()} fallback={<span class="hint">{recording() ? `Recording… up to ${duration(recording()?.rec.limitMs ?? VOICE_MAX_MS)}` : `Choose a file for ${props.name}`}</span>}>
+                {(f) => (
+                  <Show when={voicePreview()} fallback={<span class="file-name">{f().name}</span>}>
+                    <audio controls src={voicePreview()!} data-voice-preview aria-label="Voice note preview" />
+                  </Show>
+                )}
+              </Show>
+              <button
+                type="button"
+                class="link"
+                onClick={() => {
+                  composerRevision++;
+                  setFile(null);
+                  if (fileInput) fileInput.value = '';
+                  setMode('message');
+                }}
+              >
+                Remove
+              </button>
+              <span class="hint">Up to 1.4 MB · pays like a message</span>
+            </div>
+            <button type="submit" class="primary soft" disabled={disabled()} data-send>
+              {label()}
+            </button>
+          </div>
         </Match>
         <Match when={mode() === 'pay'}>
           <div class="fields">
-            <div class="modes small" role="tablist" aria-label="How to pay">
+            <div class="modes soft small" role="tablist" aria-label="How to pay">
               <button type="button" role="tab" aria-selected={payKind() === 'invoice'} onClick={() => { composerRevision++; setPayKind('invoice'); }}>Invoice</button>
               <button type="button" role="tab" aria-selected={payKind() === 'keysend'} onClick={() => { composerRevision++; setPayKind('keysend'); }}>Direct</button>
             </div>
@@ -1918,44 +2633,86 @@ function Composer(props: {
             >
               <textarea data-pay-invoice rows={2} placeholder={`Paste an invoice from ${props.name}`} value={bolt11()} onInput={(e) => setBolt11(e.currentTarget.value)} aria-label="Lightning invoice" />
             </Show>
+            <div class="composer-bar">
+              <div class="cost" data-cost>
+                <span class="label">Cost to send</span>
+                <Show when={shown().msat !== null} fallback={<span class="sats">…</span>}>
+                  <span class="sats" data-cost-msat={shown().msat!}>
+                    {shown().estimate ? '≈ ' : ''}
+                    {sats(shown().msat!)}
+                    <span class="unit">{satUnit(shown().msat!)}</span>
+                  </span>
+                </Show>
+                <span class="basis" title={shown().basis}>{shown().basis}</span>
+              </div>
+              <button type="submit" class="primary soft" disabled={disabled()} data-send>
+                {label()}
+              </button>
+            </div>
           </div>
         </Match>
         <Match when={mode() === 'request'}>
-          <div class="row fields">
-            <input data-request-amount inputmode="numeric" placeholder="Sats to receive" value={amount()} onInput={(e) => setAmount(e.currentTarget.value)} aria-label="Sats to receive" />
-            <input data-request-note placeholder="What it is for (optional)" value={memo()} onInput={(e) => setMemo(e.currentTarget.value)} aria-label="What it is for" />
-          </div>
-        </Match>
-        <Match when={mode() === 'file'}>
           <div class="fields">
-            <input ref={fileInput} type="file" data-file-input onChange={(e) => { composerRevision++; setFile(e.currentTarget.files?.[0] ?? null); }} aria-label="File to send" />
-            <span class="hint">Up to 1.4 MB. It goes to {props.name} only, end to end encrypted, and pays like a message.</span>
+            <div class="row">
+              <input data-request-amount inputmode="numeric" placeholder="Sats to receive" value={amount()} onInput={(e) => setAmount(e.currentTarget.value)} aria-label="Sats to receive" />
+              <input data-request-note placeholder="What it is for (optional)" value={memo()} onInput={(e) => setMemo(e.currentTarget.value)} aria-label="What it is for" />
+            </div>
+            <div class="composer-bar">
+              <div class="cost" data-cost>
+                <span class="label">You receive</span>
+                <Show when={shown().msat !== null} fallback={<span class="sats">…</span>}>
+                  <span class="sats" data-cost-msat={shown().msat!}>
+                    {sats(Math.round((satsInput(amount()) ?? 0) * 1000))}
+                    <span class="unit">{satUnit(Math.round((satsInput(amount()) ?? 0) * 1000) || 1000)}</span>
+                  </span>
+                </Show>
+                <span class="basis" title={shown().basis}>{shown().basis}</span>
+              </div>
+              <button type="submit" class="primary soft" disabled={disabled()} data-send>
+                {label()}
+              </button>
+            </div>
           </div>
         </Match>
       </Switch>
 
-      <div class="composer-bar">
-        <div class="cost" data-cost>
-          <span class="label">{mode() === 'request' ? 'You receive' : 'Cost to send'}</span>
-          <Show when={shown().msat !== null} fallback={<span class="sats">…</span>}>
-            <span class="sats" data-cost-msat={shown().msat!}>
-              {shown().estimate ? '≈ ' : ''}
-              {mode() === 'request' ? sats(Math.round((satsInput(amount()) ?? 0) * 1000)) : sats(shown().msat!)}
-              <span class="unit">{mode() === 'request' ? 'sats' : satUnit(shown().msat!)}</span>
-            </span>
-          </Show>
-          <span class="basis" title={shown().basis}>{shown().basis}</span>
+      <Show when={mode() === 'message' || mode() === 'file'}>
+        <div class="composer-bar cost-only">
+          <div class="cost" data-cost>
+            <span class="label">Cost to send</span>
+            <Show when={shown().msat !== null} fallback={<span class="sats">…</span>}>
+              <span class="sats" data-cost-msat={shown().msat!}>
+                {shown().estimate ? '≈ ' : ''}
+                {sats(shown().msat!)}
+                <span class="unit">{satUnit(shown().msat!)}</span>
+              </span>
+            </Show>
+            <span class="basis" title={shown().basis}>{shown().basis}</span>
+          </div>
         </div>
-        <button type="submit" class="primary" disabled={disabled()} data-send>
-          {label()}
-        </button>
-      </div>
+      </Show>
 
+      <Show when={readmitPrice()}>
+        {(p) => (
+          <>
+            <p class="hint" data-readmission-quote>
+              {props.name} asks for admission again, {sats(p().admission_msat)} {satUnit(p().admission_msat)}. Nothing was paid. Send again: {sats(p().total_msat)} {satUnit(p().total_msat)} in all.
+            </p>
+            <details class="quiet-detail" data-readmission-detail>
+              <summary>Details</summary>
+              <p>The same message keeps its operation, so it is never paid twice.</p>
+            </details>
+          </>
+        )}
+      </Show>
       <Show when={mode() === 'pay'}>
         <p class="hint" data-budget-payment>App invoice payments and keysend reserve principal plus the network fee ceiling against the app daily all-in limit; any finite node grant still applies.</p>
       </Show>
       <Show when={mode() === 'file'}>
-        <p class="hint" data-budget-file>Files reserve principal plus the network fee ceiling against the same app all-in limit and contact budget, including during the ten-minute window.</p>
+        <details class="quiet-detail" data-budget-file>
+          <summary>File spend rules</summary>
+          <p>Files reserve principal plus the network fee ceiling against the same app all-in limit and contact budget, including during the ten-minute window.</p>
+        </details>
       </Show>
       <Show when={drafted()}>
         <p class="drafted" data-drafted>
@@ -2019,11 +2776,16 @@ function SpendBar(props: { spend: SpendView | null; error: string | undefined; n
         <Match when={props.spend?.state === 'open' && line().open}>
           <p class="spend-line">
             <span class="dot ok" /> {line().text}.{' '}
-            {props.spend?.basis === 'app_lock'
-              ? 'This node version does not limit app tokens, so this window is the app’s own lock, kept in memory only.'
-              : 'Your node’s owner grant is in effect; this app uses it for ten minutes per approval.'}{' '}
             <button type="button" class="link" data-spend-lock onClick={() => void props.actions.lock()}>Lock now</button>
           </p>
+          <details class="quiet-detail" data-spend-detail>
+            <summary>Details</summary>
+            <p>
+              {props.spend?.basis === 'app_lock'
+                ? 'This node version does not limit app tokens, so this window is the app’s own lock, kept in memory only.'
+                : 'Your node’s owner grant is in effect; this app uses it for ten minutes per approval.'}
+            </p>
+          </details>
         </Match>
         <Match when={props.spend?.state === 'pending' && props.spend.pending}>
           {(p) => (
@@ -2186,7 +2948,7 @@ function BudgetBar(props: {
                     data-preset={p.id}
                     onClick={() => props.onPreset(p.id)}
                   >
-                    {PRESET_NAME[p.id]} · {sats(p.ceiling_msat)} sats a day
+                    {PRESET_NAME[p.id]} · {fmtAmount(p.ceiling_msat)} a day
                   </button>
                 )}
               </For>
@@ -2194,7 +2956,7 @@ function BudgetBar(props: {
             <Show when={props.preset}>
               {(p) => (
                 <p class="hint">
-                  Up to {sats(p().contact_msat)} sats a day per contact and {sats(p().room_msat)} per room, which you can lower any time.
+                  Up to {fmtAmount(p().contact_msat)} a day per contact and {fmtAmount(p().room_msat)} per room, which you can lower any time.
                   Each message still carries its own price cap. The approval lasts 24 hours and is never saved; the budgets and the tally are.
                 </p>
               )}
@@ -2207,8 +2969,8 @@ function BudgetBar(props: {
               <Show when={st().again ? props.door : null}>
                 {(q) => (
                   <p class="door-quote" data-door-quote={q().total_msat} data-readmit>
-                    {who()} reconnected and asks to be admitted again: <strong>{sats(q().admission_msat)} sats</strong>, then{' '}
-                    <strong>{sats(q().message_msat)} sats</strong> for this message, <strong>{sats(q().total_msat)} sats</strong> in
+                    {who()} reconnected and asks to be admitted again: <strong>{fmtAmount(q().admission_msat)}</strong>, then{' '}
+                    <strong>{fmtAmount(q().message_msat)}</strong> for this message, <strong>{fmtAmount(q().total_msat)}</strong> in
                     all, including {feeCeiling(q().max_routing_fee_msat ?? 0)}. Nothing is paid until you send.
                   </p>
                 )}
@@ -2216,9 +2978,9 @@ function BudgetBar(props: {
               <Show when={st().again ? null : props.door}>
                 {(q) => (
                   <p class="door-quote" data-door-quote={q().total_msat}>
-                    {who()}’s door: <strong>{sats(q().admission_msat)} sats</strong> once to reach them, then{' '}
-                    <strong>{sats(q().message_msat)} sats</strong> a message. This first message costs{' '}
-                    <strong>{sats(q().total_msat)} sats</strong> in all, including {feeCeiling(q().max_routing_fee_msat ?? 0)}. Nothing is paid until you send.
+                    {who()}’s door: <strong>{fmtAmount(q().admission_msat)}</strong> once to reach them, then{' '}
+                    <strong>{fmtAmount(q().message_msat)}</strong> a message. This first message costs{' '}
+                    <strong>{fmtAmount(q().total_msat)}</strong> in all, including {feeCeiling(q().max_routing_fee_msat ?? 0)}. Nothing is paid until you send.
                   </p>
                 )}
               </Show>
@@ -2246,7 +3008,7 @@ function BudgetBar(props: {
                       data-first-budget={msat}
                       onClick={() => props.onFirstPick(msat)}
                     >
-                      {sats(msat)} sats a day<Show when={worth(msat)}> · {worth(msat)}</Show>
+                      {fmtAmount(msat)} a day<Show when={worth(msat)}> · {worth(msat)}</Show>
                     </button>
                   )}
                 </For>
@@ -2258,7 +3020,7 @@ function BudgetBar(props: {
           {(st) => (
             <div class="approval budget-used" data-budget-used="contact">
               <p>
-                <strong>Budget for {who()} used up.</strong> {sats(st().spent)} of {sats(st().limit)} sats in the last 24 hours, and this
+                <strong>Budget for {who()} used up.</strong> {sats(st().spent)} of {fmtAmount(st().limit)} in the last 24 hours, and this
                 message costs {props.priceMsat === null ? '…' : sats(props.priceMsat)}. It frees up as older payments pass 24 hours.
               </p>
               <Show
@@ -2267,14 +3029,14 @@ function BudgetBar(props: {
                   <p class="hint">
                     This budget already equals your app all-in limit.{' '}
                     <button type="button" class="link" data-budget-raise-total onClick={() => void props.actions.approveBudget(Math.min(props.budget.ceiling_msat * 2, props.budget.max_daily_msat), props.budget.preset)}>
-                      Raise the app all-in limit to {sats(Math.min(props.budget.ceiling_msat * 2, props.budget.max_daily_msat))} sats
+                      Raise the app all-in limit to {fmtAmount(Math.min(props.budget.ceiling_msat * 2, props.budget.max_daily_msat))}
                     </button>
                   </p>
                 }
               >
                 {(to) => (
                   <button type="button" class="primary small" data-budget-raise onClick={() => void props.actions.setBudget(props.target, props.room, to())}>
-                    Raise to {sats(to())} sats a day
+                    Raise to {fmtAmount(to())} a day
                   </button>
                 )}
               </Show>
@@ -2285,13 +3047,13 @@ function BudgetBar(props: {
           {(st) => (
             <div class="approval budget-used" data-budget-used="total">
               <p>
-                <strong>Your app all-in limit is used up.</strong> {sats(st().spent)} of {sats(st().ceiling)} sats in the last 24 hours. Raising
+                <strong>Your app all-in limit is used up.</strong> {sats(st().spent)} of {fmtAmount(st().ceiling)} in the last 24 hours. Raising
                 it is a new approval.
               </p>
               <Show when={st().raiseTo}>
                 {(to) => (
                   <button type="button" class="primary small" data-budget-raise-total onClick={() => void props.actions.approveBudget(to(), props.budget.preset)}>
-                    Approve {sats(to())} sats a day
+                    Approve {fmtAmount(to())} a day
                   </button>
                 )}
               </Show>
@@ -2303,7 +3065,7 @@ function BudgetBar(props: {
             <p class="spend-line" data-budget-line>
               <span class="dot ok" />
               <span class="line-text">
-                Pays automatically · {sats(st().spent)} of {sats(st().limit)} sats to {who()} in 24 h · approval ends in{' '}
+                Pays automatically · {sats(st().spent)} of {fmtAmount(st().limit)} to {who()} in 24 h · approval ends in{' '}
                 {hoursLeft(props.budget.autopay.open_until_ms, props.now, props.budget.window_ms)} h ·{' '}
                 <button type="button" class="link" data-pause-all onClick={() => void props.actions.pauseAll()}>Pause app payments</button>
               </span>
@@ -2346,38 +3108,46 @@ function BudgetPanel(props: {
   const directPaymentName = (target: string) => target === 'app:invoice-payments' ? 'Invoice payments'
     : target === 'app:keysend-payments' ? 'Keysend payments' : null;
   const status = (b: BudgetView) => {
-    if (b.paused) return 'Paused. New app payments are blocked; in-flight payments and spending outside this app can continue.';
-    if (b.waiting_for_owner) return 'Waiting for your approval at the node.';
-    if (b.autopay.state === 'open') return `Paying automatically. The approval ends in ${hoursLeft(b.autopay.open_until_ms, props.now, b.window_ms)} h.`;
-    if (b.autopay.state === 'expired') return 'The daily approval ended. Approve again from any conversation.';
-    return 'Not approved in this session. Approve an app all-in limit from any conversation.';
+    if (b.paused) return 'Paused · new app payments blocked';
+    if (b.waiting_for_owner) return 'Waiting for node approval';
+    if (b.autopay.state === 'open') return `Autopay open · ${hoursLeft(b.autopay.open_until_ms, props.now, b.window_ms)} h left`;
+    if (b.autopay.state === 'expired') return 'Daily approval ended';
+    return 'Not approved this session';
+  };
+  const statusDetail = (b: BudgetView) => {
+    if (b.paused) return 'In-flight payments and spending outside this app can continue.';
+    if (b.waiting_for_owner) return 'Confirm the pending approval at your node.';
+    if (b.autopay.state === 'open') return 'Messages and files pay inside this all-in limit until it ends.';
+    if (b.autopay.state === 'expired') return 'Approve again from any conversation.';
+    return 'Approve an app all-in limit from any conversation.';
   };
   return (
     <div class="panel" data-panel="budget">
       <h2>App payment budget</h2>
-      <div class="hint" data-budget-scope>
-        <strong>App all-in payments · rolling 24 hours</strong>{' '}
-        Covers automatic and manual-window messages, room sends, files, app invoice payments and keysend, and admission, including their maximum network fees. This is a conservative allowance, not an exact wallet-debit total.{' '}
-        Not covered: channel opening/closing, on-chain transfers and fees,
-        owner-direct CLI/API commands, or background workers.{' '}
-        G1 is a separate finite node grant; it does not refill daily. This is not a wallet-wide spending limit.
-      </div>
+      <details class="quiet-detail hint" data-budget-scope>
+        <summary><strong>App all-in · rolling 24 h</strong> — what it covers</summary>
+        <p>
+          Covers automatic and manual-window messages, room sends, files, app invoice payments and keysend, and admission, including their maximum network fees. Conservative allowance, not an exact wallet-debit total.
+          Not covered: channel opening/closing, on-chain transfers and fees, owner-direct CLI/API, or background workers.
+          G1 is a separate finite node grant; it does not refill daily. Not a wallet-wide limit.
+        </p>
+      </details>
       <Show when={props.budget} fallback={<Show when={!props.error} fallback={<p class="err-note">{props.error}</p>}><div class="spinner" /></Show>}>
         {(b) => (
           <>
             <div class="tally" data-tally>
               <span class="label">App all-in payments in the last 24 hours</span>
               <span class="sats big" data-tally-total>
-                {sats(b().spent_msat)} <span class="unit">/ {sats(b().ceiling_msat)} sats</span>
+                {sats(b().spent_msat)} <span class="unit">/ {fmtAmount(b().ceiling_msat)}</span>
               </span>
               <span class="meter" aria-hidden="true"><span style={{ width: pct(b().spent_msat, b().ceiling_msat) }} /></span>
               <Show when={b().unsettled_msat > 0}>
-                <span class="hint" data-unsettled>Includes {sats(b().unsettled_msat)} sats whose outcome is not known yet, counted at their price cap.</span>
+                <span class="hint" data-unsettled>Includes {fmtAmount(b().unsettled_msat)} whose outcome is not known yet, counted at their price cap.</span>
               </Show>
               <Show when={b().node_grant}>
                 {(g) => (
                   <span class="hint" data-node-grant>
-                    Your finite node grant allows {sats(g().remaining_msat)} of {sats(g().budget_msat)} sats more, at most {sats(g().per_call_max_msat)} per payment, for {timeLeft(g().expires_at_ms, props.now)}.
+                    Your finite node grant allows {sats(g().remaining_msat)} of {fmtAmount(g().budget_msat)} more, at most {sats(g().per_call_max_msat)} per payment, for {timeLeft(g().expires_at_ms, props.now)}.
                   </span>
                 )}
               </Show>
@@ -2385,6 +3155,10 @@ function BudgetPanel(props: {
             <p class="spend-line" classList={{ paused: b().paused }} data-autopay={b().paused ? 'paused' : b().autopay.state}>
               <span class={`dot ${b().paused ? 'warn' : b().autopay.state === 'open' ? 'ok' : ''}`} /> <span class="line-text">{status(b())}</span>
             </p>
+            <details class="quiet-detail" data-budget-status-detail>
+              <summary>Details</summary>
+              <p>{statusDetail(b())}</p>
+            </details>
             <Show
               when={b().paused}
               fallback={
@@ -2407,7 +3181,7 @@ function BudgetPanel(props: {
                       <span class="who">{directPaymentName(row.target) ?? props.nameOf(row.target, row.room)}</span>
                       <span class="sats" data-row-tally>
                         {sats(row.spent_msat)}
-                        <span class="unit">{row.limit_msat === null ? 'sats, approved by hand' : `/ ${sats(row.limit_msat)} sats`}</span>
+                        <span class="unit">{row.limit_msat === null ? `${satUnit(2000)}, approved by hand` : `/ ${fmtAmount(row.limit_msat)}`}</span>
                       </span>
                     </div>
                     <Show when={row.limit_msat !== null}>
@@ -2818,7 +3592,7 @@ function NewTrack(props: {
                 </svg>
               </Show>
               <p data-intro-prices>
-                Admission: <strong>{sats(allIn(m().admission_msat))} sats</strong> including {feeCeiling(routingFee(m().admission_msat))}. Each message: <strong>{sats(allIn(m().message_msat))} sats</strong> including {feeCeiling(routingFee(m().message_msat))} (estimated ceilings).
+                Admission: <strong>{fmtAmount(allIn(m().admission_msat))}</strong> including {feeCeiling(routingFee(m().admission_msat))}. Each message: <strong>{fmtAmount(allIn(m().message_msat))}</strong> including {feeCeiling(routingFee(m().message_msat))} (estimated ceilings).
               </p>
               <p class="hint">
                 Valid for about {minutesLeft(m().expires_at)} min. <button type="button" class="link" onClick={loadMine}>New card</button>
@@ -2828,18 +3602,18 @@ function NewTrack(props: {
                 fallback={
                   <Show when={sponsor()?.enabled}>
                     <button type="button" class="quiet" data-starter-include disabled={props.moneyBlocked} onClick={() => void includeStarter()}>
-                      {open() ? `Include starter bitcoin · ${sats(sponsor()!.gift_msat)} sats` : 'Include starter bitcoin · approve first'}
+                      {open() ? `Include starter bitcoin · ${fmtAmount(sponsor()!.gift_msat)}` : 'Include starter bitcoin · approve first'}
                     </button>
                     <p class="hint" data-starter-purse>
                       You fund it from your own node, only after you approve their request. {sats(sponsor()!.purse_used_msat)} of{' '}
-                      {sats(sponsor()!.purse_msat)} sats used in the last 24 hours.
+                      {fmtAmount(sponsor()!.purse_msat)} used in the last 24 hours.
                     </p>
                   </Show>
                 }
               >
                 {(st) => (
                   <p data-starter-offered>
-                    Starter bitcoin: up to <strong>{sats(st().gift_msat)} sats</strong>, after you approve their request. It is theirs
+                    Starter bitcoin: up to <strong>{fmtAmount(st().gift_msat)}</strong>, after you approve their request. It is theirs
                     once it arrives; every message still pays.
                   </p>
                 )}
@@ -2886,7 +3660,7 @@ function NewTrack(props: {
                   <div class="artifact" data-starter-candidate={c().newcomer}>
                     <span class="kind">Starter bitcoin · {shortId(c().newcomer)}</span>
                     <p>
-                      Lightning gift: <strong>{sats(c().gift_msat)} sats</strong>. Network fee: at most {sats(c().fee_max_msat)} sats.
+                      Lightning gift: <strong>{fmtAmount(c().gift_msat)}</strong>. Network fee: at most {fmtAmount(c().fee_max_msat)}.
                     </p>
                     <span class="hint">
                       They own it once it arrives and can keep or withdraw it. It is not a pass: their messages still pay.
@@ -2911,7 +3685,7 @@ function NewTrack(props: {
                         disabled={requestLocked() || theirCode().length !== 6}
                         onClick={() => void prepareGift()}
                       >
-                        {giving() ? 'Preparing…' : `Sponsor up to ${sats(c().gift_msat + c().fee_max_msat)} sats`}
+                        {giving() ? 'Preparing…' : `Sponsor up to ${fmtAmount(c().gift_msat + c().fee_max_msat)}`}
                       </button>
                       <button type="button" class="quiet" data-starter-cancel disabled={giving() || cancelling() || giftPending()} onClick={() => void cancelKit()}>
                         Cancel
@@ -2936,7 +3710,7 @@ function NewTrack(props: {
                 {(g) => (
                   <p class={g().state === 'funded' ? 'ok-note' : 'err-note'} data-starter-gift={g().state}>
                     {g().state === 'funded'
-                      ? `Sent ${sats(g().paid_msat)} sats. It is theirs now.`
+                      ? `Sent ${fmtAmount(g().paid_msat)}. It is theirs now.`
                       : g().state === 'paying' || g().state === 'unknown'
                         ? 'Payment pending — do not send again. Your node keeps it reserved until the outcome is known.'
                         : `Gift ${g().state}. This kit is closed.`}
@@ -2981,13 +3755,13 @@ function NewTrack(props: {
                   <span class="kind">Door card · {shortId(c().node_id)}</span>
                   <span>Signed by the key it names.</span>
                   <p data-door-prices>
-                    Admission: <strong>{sats(allIn(c().admission_msat))} sats</strong> including {feeCeiling(routingFee(c().admission_msat))}. Each message: <strong>{sats(allIn(c().message_msat))} sats</strong> including {feeCeiling(routingFee(c().message_msat))} (estimated ceilings).
+                    Admission: <strong>{fmtAmount(allIn(c().admission_msat))}</strong> including {feeCeiling(routingFee(c().admission_msat))}. Each message: <strong>{fmtAmount(allIn(c().message_msat))}</strong> including {feeCeiling(routingFee(c().message_msat))} (estimated ceilings).
                   </p>
                   <Show when={c().starter}>
                     {(st) => (
                       <div class="door-starter" data-door-starter>
                         <p>
-                          Starter bitcoin available after they approve: <strong>{sats(st().gift_msat)} sats</strong>.
+                          Starter bitcoin available after they approve: <strong>{fmtAmount(st().gift_msat)}</strong>.
                         </p>
                         <Show
                           when={ask()}
@@ -3017,7 +3791,7 @@ function NewTrack(props: {
                               </p>
                               <p class="hint" data-starter-status={arrived() ? 'received' : 'waiting'}>
                                 {arrived()
-                                  ? `Received ${sats(arrived()!.amount_msat)} sats in your own node.`
+                                  ? `Received ${fmtAmount(arrived()!.amount_msat)} in your own node.`
                                   : 'Waiting for starter bitcoin…'}
                               </p>
                               <code class="address" data-starter-request>{a().request}</code>
@@ -3244,13 +4018,13 @@ function WalletPanel(props: { moneyBlocked: boolean; wallet: WalletOverview | nu
               <div class="big-balance">
                 <span class="sats" data-balance>
                   {sats(w().balance_msat)}
-                  <span class="unit">sats</span>
+                  <span class="unit">{satUnit(w().balance_msat)}</span>
                 </span>
                 <p class="hint">Lightning and spendable on-chain together. This node version reports them as one figure.</p>
               </div>
               <dl class="facts">
                 <dt>{props.moneyBlocked ? 'Lightning outbound (money not ready)' : 'Lightning, ready to send'}</dt>
-                <dd class="sats">{sats(w().lightning_outbound_msat)}</dd>
+                <dd class="sats">{fmtAmount(w().lightning_outbound_msat)}</dd>
                 <dt>Open channels</dt>
                 <dd class="sats">
                   {active()} of {w().channels.length} active
@@ -3270,8 +4044,8 @@ function WalletPanel(props: { moneyBlocked: boolean; wallet: WalletOverview | nu
                         <div style={{ width: `${share()}%`, opacity: c.active ? 1 : 0.4 }} />
                       </div>
                       <div class="row">
-                        <span class="sats">{sats(c.local_balance_msat)} yours</span>
-                        <span class="sats">{sats(c.remote_balance_msat)} theirs</span>
+                        <span class="sats">{fmtAmount(c.local_balance_msat)} yours</span>
+                        <span class="sats">{fmtAmount(c.remote_balance_msat)} theirs</span>
                       </div>
                     </div>
                   );

@@ -79,6 +79,122 @@ pub fn resolve(_app_data_dir: &Path) -> Result<Option<DevNode>, String> {
     Ok(None)
 }
 
+/// Absolute path to the data dir of a node the owner already runs (external mode).
+pub const EXTERNAL_ENV: &str = "BITSOV_DEV_EXTERNAL_NODE";
+/// Window title while attached to an external node.
+pub const EXTERNAL_WINDOW_TITLE: &str = "BitSov — DEV, EXTERNAL NODE (127.0.0.1:3141, not started by the app)";
+/// The only API bind the app talks to (`API_BASE` in main.rs).
+#[cfg_attr(not(all(debug_assertions, feature = "dev-node")), allow(dead_code))]
+const LOOPBACK_API: &str = "127.0.0.1:3141";
+
+/// A node the owner started and supervises. The app attaches to its loopback API
+/// and never inits, starts, restarts or stops it.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ExternalNode {
+    /// The node's data dir. Read only: the app reads its pairing challenge files
+    /// (`<data_dir>/pairing`) and the routing policy in `konsensus.toml`.
+    pub data_dir: PathBuf,
+    pub config: PathBuf,
+}
+
+/// External mode for this process, from `BITSOV_DEV_EXTERNAL_NODE`. `Ok(None)` when
+/// it is unset.
+#[cfg(all(debug_assertions, feature = "dev-node"))]
+pub fn resolve_external(app_data_dir: &Path) -> Result<Option<ExternalNode>, String> {
+    let external = std::env::var(EXTERNAL_ENV).ok();
+    let spawn_set = [SIDECAR_ENV, DATA_DIR_ENV]
+        .iter()
+        .any(|name| non_empty(std::env::var(name).ok().as_deref()).is_some());
+    let forbidden = [
+        app_data_dir.to_path_buf(),
+        app_data_dir.with_file_name(PRODUCT_IDENTIFIER),
+    ];
+    external_from(external.as_deref(), spawn_set, &forbidden)
+}
+
+/// Release and ordinary debug builds: no external mode, and the environment is not read.
+#[cfg(not(all(debug_assertions, feature = "dev-node")))]
+pub fn resolve_external(_app_data_dir: &Path) -> Result<Option<ExternalNode>, String> {
+    Ok(None)
+}
+
+/// The external-mode rules, separate from the environment so tests can drive them.
+///
+/// Refuses: a relative or missing dir, a dir inside an app data dir, a dir without
+/// `konsensus.toml` + `NODE_INITIALIZED` (the app never initialises a node here), a
+/// config whose API is not bound to `127.0.0.1:3141`, and the spawn variables set
+/// at the same time (external mode never starts a node).
+#[cfg_attr(not(all(debug_assertions, feature = "dev-node")), allow(dead_code))]
+pub fn external_from(
+    external: Option<&str>,
+    spawn_set: bool,
+    forbidden: &[PathBuf],
+) -> Result<Option<ExternalNode>, String> {
+    let Some(external) = non_empty(external) else {
+        return Ok(None);
+    };
+    if spawn_set {
+        return Err(format!(
+            "{EXTERNAL_ENV} attaches to a node you already run; unset {SIDECAR_ENV} and {DATA_DIR_ENV}"
+        ));
+    }
+    let dir = PathBuf::from(external);
+    if !dir.is_absolute() {
+        return Err(format!("{EXTERNAL_ENV} must be an absolute path"));
+    }
+    let data_dir = std::fs::canonicalize(&dir)
+        .ok()
+        .filter(|d| d.is_dir())
+        .ok_or_else(|| format!("{EXTERNAL_ENV}: no node data dir at {}", dir.display()))?;
+    for app_dir in forbidden {
+        if is_within(&data_dir, &canonical_directory(app_dir)?) {
+            return Err(format!(
+                "{EXTERNAL_ENV} is inside an app data dir ({}); point it at your own node's data dir",
+                app_dir.display()
+            ));
+        }
+    }
+    let config = data_dir.join("konsensus.toml");
+    if !config.is_file() || !data_dir.join("NODE_INITIALIZED").is_file() {
+        return Err(format!(
+            "{EXTERNAL_ENV}: {} is not an initialised node (konsensus.toml and NODE_INITIALIZED); the app never initialises one in this mode",
+            data_dir.display()
+        ));
+    }
+    match configured_api_addr(&config).as_deref() {
+        Some(LOOPBACK_API) => {}
+        _ => {
+            return Err(format!(
+                "{EXTERNAL_ENV}: the node's [api] listen_addr must be {LOOPBACK_API}, the only address the app talks to"
+            ))
+        }
+    }
+    Ok(Some(ExternalNode { data_dir, config }))
+}
+
+/// `[api] listen_addr` from the node config, or the node default when absent.
+/// `None` when the file is unreadable or malformed. Parse errors are never shown:
+/// the rest of the file can hold credentials.
+#[cfg_attr(not(all(debug_assertions, feature = "dev-node")), allow(dead_code))]
+fn configured_api_addr(config: &Path) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct Config {
+        api: Option<Api>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Api {
+        listen_addr: Option<String>,
+    }
+    let text = std::fs::read_to_string(config).ok()?;
+    let parsed: Config = toml::from_str(&text).ok()?;
+    Some(
+        parsed
+            .api
+            .and_then(|a| a.listen_addr)
+            .unwrap_or_else(|| LOOPBACK_API.to_string()),
+    )
+}
+
 /// The rules, separate from the environment so tests can drive them.
 ///
 /// Both variables or neither. A binary without a data dir would run unverified code
@@ -441,6 +557,100 @@ mod tests {
         assert!(resolve_from(Some(&f.bin), Some(&f.dev), &[f.app], None).is_err());
     }
 
+    struct External {
+        _tmp: tempfile::TempDir,
+        app: PathBuf,
+        node: PathBuf,
+    }
+
+    fn external_fixture(api: Option<&str>) -> External {
+        let tmp = tempfile::tempdir().unwrap();
+        let node = tmp.path().join("pilot");
+        std::fs::create_dir(&node).unwrap();
+        let mut config = String::from("[lightning]\nbackend = \"ldk\"\n");
+        if let Some(api) = api {
+            config.push_str(&format!("[api]\nlisten_addr = \"{api}\"\n"));
+        }
+        std::fs::write(node.join("konsensus.toml"), config).unwrap();
+        std::fs::write(node.join("NODE_INITIALIZED"), b"").unwrap();
+        External {
+            app: tmp.path().join("app/tech.mindlink.bitsov.devnode"),
+            node,
+            _tmp: tmp,
+        }
+    }
+
+    fn attach(f: &External, dir: Option<&str>, spawn_set: bool) -> Result<Option<ExternalNode>, String> {
+        external_from(dir, spawn_set, std::slice::from_ref(&f.app))
+    }
+
+    #[test]
+    fn external_unset_means_no_external_mode() {
+        let f = external_fixture(Some("127.0.0.1:3141"));
+        assert_eq!(attach(&f, None, false), Ok(None));
+        assert_eq!(attach(&f, Some("  "), true), Ok(None));
+    }
+
+    #[test]
+    fn external_attaches_to_an_initialised_loopback_node() {
+        for api in [Some("127.0.0.1:3141"), None] {
+            let f = external_fixture(api);
+            let node = attach(&f, f.node.to_str(), false).unwrap().unwrap();
+            let canonical = std::fs::canonicalize(&f.node).unwrap();
+            assert_eq!(node.config, canonical.join("konsensus.toml"));
+            assert_eq!(node.data_dir, canonical);
+        }
+    }
+
+    #[test]
+    fn external_refuses_the_spawn_variables_at_the_same_time() {
+        let f = external_fixture(Some("127.0.0.1:3141"));
+        let err = attach(&f, f.node.to_str(), true).unwrap_err();
+        assert!(err.contains(SIDECAR_ENV) && err.contains(DATA_DIR_ENV), "{err}");
+    }
+
+    #[test]
+    fn external_refuses_other_api_binds() {
+        for api in ["0.0.0.0:3141", "127.0.0.1:3142", "[::1]:3141", "192.168.1.5:3141"] {
+            let f = external_fixture(Some(api));
+            let err = attach(&f, f.node.to_str(), false).unwrap_err();
+            assert!(err.contains("127.0.0.1:3141"), "{api}: {err}");
+        }
+        let f = external_fixture(None);
+        std::fs::write(f.node.join("konsensus.toml"), "not = [valid").unwrap();
+        assert!(attach(&f, f.node.to_str(), false).is_err());
+    }
+
+    #[test]
+    fn external_refuses_relative_missing_and_uninitialised_dirs() {
+        let f = external_fixture(Some("127.0.0.1:3141"));
+        assert!(attach(&f, Some("pilot"), false).is_err());
+        let missing = f.node.join("missing");
+        assert!(attach(&f, missing.to_str(), false).is_err());
+        std::fs::remove_file(f.node.join("NODE_INITIALIZED")).unwrap();
+        let err = attach(&f, f.node.to_str(), false).unwrap_err();
+        assert!(err.contains("never initialises"), "{err}");
+        assert!(!f.node.join("NODE_INITIALIZED").exists());
+    }
+
+    #[test]
+    fn external_refuses_app_data_dirs() {
+        let f = external_fixture(Some("127.0.0.1:3141"));
+        std::fs::create_dir_all(&f.app).unwrap();
+        std::fs::write(f.app.join("konsensus.toml"), "").unwrap();
+        std::fs::write(f.app.join("NODE_INITIALIZED"), "").unwrap();
+        let err = attach(&f, f.app.to_str(), false).unwrap_err();
+        assert!(err.contains("app data dir"), "{err}");
+    }
+
+    /// Without `debug_assertions` + `dev-node`, external mode never exists.
+    #[cfg(not(all(debug_assertions, feature = "dev-node")))]
+    #[test]
+    fn builds_without_the_feature_have_no_external_mode() {
+        let f = external_fixture(Some("127.0.0.1:3141"));
+        assert_eq!(resolve_external(&f.app), Ok(None));
+    }
+
     /// Without `debug_assertions` + `dev-node`, `resolve` must be the stub: no override
     /// whatever the environment says. (`cargo test` builds without `dev-node`.)
     #[cfg(not(all(debug_assertions, feature = "dev-node")))]
@@ -466,8 +676,15 @@ mod tests {
         let stub = "#[cfg(not(all(debug_assertions, feature = \"dev-node\")))]\npub fn resolve(_app_data_dir: &Path) -> Result<Option<DevNode>, String> {\n    Ok(None)\n}";
         assert!(source.contains(gate));
         assert!(source.contains(stub));
-        // Only the gated body reads the environment.
-        assert_eq!(source.matches("std::env::var").count(), 3);
+        let external_gate =
+            "#[cfg(all(debug_assertions, feature = \"dev-node\"))]\npub fn resolve_external(";
+        let external_stub = "#[cfg(not(all(debug_assertions, feature = \"dev-node\")))]\npub fn resolve_external(_app_data_dir: &Path) -> Result<Option<ExternalNode>, String> {\n    Ok(None)\n}";
+        assert!(source.contains(external_gate));
+        assert!(source.contains(external_stub));
+        // Only the gated bodies read the environment.
+        assert_eq!(source.matches("std::env::var").count(), 5);
+        let external_at = source.find(external_gate).unwrap();
+        assert!(source[external_at..source.find(external_stub).unwrap()].contains("std::env::var"));
         let stub_at = source.find(stub).unwrap();
         assert!(source.find("std::env::var").unwrap() < stub_at);
 

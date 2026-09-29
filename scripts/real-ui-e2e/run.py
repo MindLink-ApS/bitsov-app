@@ -186,6 +186,9 @@ def main():
         r.run(r.BIN,'pair-window','--config',str(r.ROOTS['a']/'konsensus.toml'),'--seconds','60')
         for n in ('a', 'b'): r.pair_reader(n)
         setup_channels(infra)
+        # Step 10 restarts node A the way the app does: the same app command,
+        # which starts its sidecar node again on the same data directory.
+        r.relaunch_app = lambda: r.in_pty('app', ['scripts/dev-node-from-main.sh', '--no-watch', '--config',str(local_config)], app, env)
         from scenario import run
         run(r, fixture, capacities)
         code = 0 if r.results and all(x['status'] == 'PASS' for x in r.results) else 2

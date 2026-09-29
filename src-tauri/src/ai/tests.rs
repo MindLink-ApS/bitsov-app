@@ -433,6 +433,88 @@ fn a_remote_turns_on_only_when_enabled_with_https_and_a_variable_name() {
 }
 
 #[test]
+fn the_badge_says_who_is_paid_and_what_leaves() {
+    let entry = |endpoint: &str, enabled: bool, key: Option<&str>| RemoteConfig {
+        label: "Remote".into(),
+        endpoint: endpoint.into(),
+        model: "m".into(),
+        key_env: key.map(str::to_string),
+        enabled,
+    };
+    // Local, and remotes that are not set up: nobody is paid, nothing leaves.
+    let (views, _) = providers(None);
+    for view in &views {
+        assert_eq!(view.pays, Pays { to: None, rail: PayRail::None }, "{:?}", view.kind);
+        assert_eq!(view.data_leaves, None, "{:?}", view.kind);
+    }
+
+    let file = ProvidersFile {
+        shared: Some(entry("http://127.0.0.1:11434/v1/chat/completions", true, None)),
+        frontier: Some(entry("https://api.vendor.example/v1/chat/completions", true, Some("BITSOV_FRONTIER_KEY"))),
+    };
+    let (views, _) = providers(Some(&file));
+    // A keyless model server: nobody is billed, but the preview still leaves the app.
+    assert_eq!(views[1].kind, ProviderKind::Shared);
+    assert_eq!(views[1].pays, Pays { to: None, rail: PayRail::None });
+    assert_eq!(views[1].data_leaves, Some(Preset::Counts));
+    // A keyed vendor: its host's operator bills the owner's own account.
+    assert_eq!(views[2].kind, ProviderKind::Frontier);
+    assert_eq!(
+        views[2].pays,
+        Pays { to: Some("api.vendor.example".into()), rail: PayRail::Fiat }
+    );
+    assert_eq!(views[2].data_leaves, Some(DEFAULT_PRESET));
+    assert_eq!(DEFAULT_PRESET, Preset::Counts, "a preview starts at the narrowest preset");
+
+    // Off in the file, or an address that is not allowed: nothing leaves, nobody paid.
+    for (endpoint, enabled) in [
+        ("https://api.vendor.example/v1", false),
+        ("http://api.vendor.example/v1", true),
+    ] {
+        let file = ProvidersFile {
+            shared: None,
+            frontier: Some(entry(endpoint, enabled, Some("BITSOV_FRONTIER_KEY"))),
+        };
+        let (views, _) = providers(Some(&file));
+        assert!(!views[2].enabled);
+        assert_eq!(views[2].pays, Pays { to: None, rail: PayRail::None }, "{endpoint}");
+        assert_eq!(views[2].data_leaves, None, "{endpoint}");
+    }
+}
+
+#[test]
+fn the_provider_view_carries_no_endpoint_path_key_or_spend() {
+    let file = ProvidersFile {
+        shared: Some(RemoteConfig {
+            label: "Open".into(),
+            endpoint: "https://open.example.org/secret/path/v1/chat/completions".into(),
+            model: "open-8b".into(),
+            key_env: Some("BITSOV_SHARED_KEY".into()),
+            enabled: true,
+        }),
+        frontier: None,
+    };
+    let (views, _) = providers(Some(&file));
+    let value = serde_json::to_value(&views).unwrap();
+    let text = value.to_string();
+    assert!(!text.contains("secret/path"), "{text}");
+    assert!(!text.contains("BITSOV_SHARED_KEY"), "{text}");
+    let keys: Vec<&str> = value[1].as_object().unwrap().keys().map(String::as_str).collect();
+    let mut keys = keys;
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        ["data_leaves", "enabled", "host", "kind", "label", "model", "note", "pays"]
+    );
+    assert_eq!(value[1]["pays"], json!({"to": "open.example.org", "rail": "fiat"}));
+    assert_eq!(value[1]["data_leaves"], json!("counts"));
+    assert_eq!(value[0]["pays"], json!({"to": null, "rail": "none"}));
+    assert_eq!(value[0]["data_leaves"], Value::Null);
+    // There is no rail by which the app, or any model, pays.
+    assert!(!text.contains("spend"), "{text}");
+}
+
+#[test]
 fn endpoint_hosts_are_parsed_strictly() {
     for (endpoint, host) in [
         ("https://ai.example.org/v1/chat", Some("ai.example.org")),

@@ -255,7 +255,70 @@ export type TrackRef =
   | { kind: 'peer'; id: string }
   | { kind: 'room'; id: string }
   | { kind: 'ai' }
-  | { kind: 'new' };
+  | { kind: 'new' }
+  | { kind: 'discover' };
+
+/**
+ * FrontDoorCard v1 (doorstep): free to carry, signed by the node key, valid
+ * seven days. Snapshot prices only; Knock uses a fresh first-contact quote.
+ */
+export type FrontDoor = {
+  node_id: string;
+  network: string;
+  endpoint: string;
+  reach: 'public' | 'local';
+  seq: number;
+  issued_at: number;
+  expires_at: number;
+  prices: {
+    admission_msat: number;
+    message_msat: number;
+    page_msat: number;
+    price_epoch: number;
+  };
+  profile: {
+    kind: 'person' | 'company';
+    display_name: string;
+    tagline: string;
+    about: string;
+    avatar?: { inline_b64?: string; hash?: string; size?: number; mime?: string };
+  };
+  cv?: { path: string; hash: string; size: number };
+  media: { hash: string; size: number; mime: string; thumb_b64?: string; title: string }[];
+  site?: { manifest_hash?: string; index_path?: string; page_count: number; titles: string[] };
+  links: { label: string; url: string }[];
+  /** `bitsov://front-door#…` — also the QR payload. */
+  link: string;
+  verified: boolean;
+  fresh: boolean;
+};
+
+export type FrontDoorPublish = {
+  display_name: string;
+  tagline?: string;
+  about?: string;
+  kind?: 'person' | 'company';
+  admission_msat?: number;
+  message_msat?: number;
+  page_msat?: number;
+};
+
+/**
+ * Marker that a peer track was opened from a front-door Knock (not an
+ * Introduction). Display only — never admission, never re-dialed as introduce.
+ */
+export type Doorstep = {
+  node_id: string;
+  network: string;
+  endpoint: string;
+  reach: 'public' | 'local';
+  admission_msat: number;
+  message_msat: number;
+  issued_at: number;
+  expires_at: number;
+  /** `bitsov://front-door#…` */
+  link: string;
+};
 
 /** First-run funding shapes (unchanged from CS-2). */
 export type FundState = {
@@ -299,13 +362,17 @@ export type ActionError = {
     // The contact asks for admission again after a reconnect/restart; the node
     // pays no re-admission under a cap (genome readmit_then_pay). Nothing paid.
     | 'readmission_capped'
+    // Genome quoted_readmission_v1: the contact asks for admission again and its
+    // signed quote (`admission`) is the new all-in price; nothing was paid. The
+    // owner sends once more at that price; the same message keeps its operation.
+    | 'readmission_quoted'
     | 'not_ready' | 'app_not_ready'
     | 'invalid'
     | 'node';
   message: string;
   /** `payment_settled_undelivered` only. */
   undelivered?: Undelivered;
-  /** `retry_needs_admission` only: the price to approve, when the node could tell. */
+  /** `retry_needs_admission` / `readmission_quoted`: the price to approve, when the node could tell. */
   admission?: AdmissionPrice;
   /**
    * `payment_settled_undelivered` / `undelivered_pending`: the host's durable
@@ -407,6 +474,8 @@ export type SendReceipt = {
   state?: string;
   /** The recipient's node stored it. `delivered` alone is only a transport write. */
   accepted?: boolean;
+  /** Admission paid again in this send after a reconnect; included in `total_msat`. */
+  readmission_msat?: number;
 };
 
 export type MemberCost = { max_routing_fee_msat?: number; node_id: string; msat: number; advertised: boolean; connected: boolean };
@@ -442,7 +511,33 @@ export type FileReceipt = {
   delivered: boolean;
   amount_msat: number;
   sent_at_ms: number;
+  operation_id?: string;
+  state?: string;
+  accepted?: boolean;
 };
+
+/** `call_quote`: what calling a contact costs before anything is paid (msat). */
+export type CallQuote = {
+  offer_msat: number | null;
+  offer_max_routing_fee_msat: number;
+  signal_msat: number;
+  signal_max_routing_fee_msat: number;
+  call_total_msat: number | null;
+};
+/** `call_signal`: one paid call signal. */
+export type CallReceipt = {
+  message_id: string;
+  kind: number;
+  amount_msat: number;
+  total_msat: number;
+  max_routing_fee_msat: number;
+  delivered: boolean;
+  accepted: boolean;
+  sent_at_ms: number;
+};
+
+/** `voice_note_fetch`: a received voice note's bytes, for the inline player. */
+export type VoiceBlob = { filename: string; mime_type: string; size_bytes: number; data_b64: string };
 
 /** Delivery of one sent message, from the send reply and then `/ws`. */
 export type Delivery = { status: 'accepted' | 'sent' | 'queued' | 'delivered' | 'rejected'; reason: string | null };
@@ -576,6 +671,11 @@ export type TopicRead =
 export type ProviderKind = 'local' | 'shared' | 'frontier';
 export type Preset = 'exact' | 'rounded' | 'counts';
 
+/** How a provider is paid, as far as the app knows. The app never pays a model. */
+export type PayRail = 'none' | 'fiat';
+/** Who gets paid when a provider answers. Host-derived; the window cannot set it. */
+export type Pays = { to: string | null; rail: PayRail };
+
 /** `ai_providers`. Remote ones are off unless this computer's settings turn them on. */
 export type ProviderView = {
   kind: ProviderKind;
@@ -584,6 +684,9 @@ export type ProviderView = {
   host: string | null;
   model: string | null;
   note: string | null;
+  pays: Pays;
+  /** `null`: nothing leaves. Otherwise the preset a preview starts at. */
+  data_leaves: Preset | null;
 };
 
 /** `ai_disclose`: what would leave, byte for byte. Nothing has been sent. */

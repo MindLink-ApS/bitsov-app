@@ -10,6 +10,8 @@
 import { createSignal, For, Match, onCleanup, Show, Switch, type JSX } from 'solid-js';
 import { createStore, produce } from 'solid-js/store';
 import { copyPlainText } from '../assistant/copy';
+import { EndpointBadge } from '../assistant/EndpointBadge';
+import { OWN_RULES, endpointBadge, widestExposure, type Exposure } from '../assistant/endpoint';
 import {
   answerFrom,
   cardText,
@@ -27,7 +29,7 @@ import {
   type Intent,
   type Proposal,
 } from './ai';
-import { clock, day, sats, satsWhole, satUnit, uptime } from './format';
+import { amount, clock, day, sats, satsWhole, satUnit, uptime } from './format';
 import type { Source } from './source';
 import { asActionError, peerName } from './state';
 import type {
@@ -93,13 +95,44 @@ export function AiTrack(props: {
     props.source
       .aiProviders()
       .then((list) => setSession('providers', list))
-      .catch(() => setSession('providers', [{ kind: 'local', label: 'On this computer', enabled: true, host: null, model: null, note: null }]));
+      .catch(() => setSession('providers', [OWN_RULES]));
   }
 
   const nameOf = (id: string) => peerName(props.peers.find((p) => p.node_id.toLowerCase() === id.toLowerCase()), id);
   const provider = () => session.providers?.find((p) => p.kind === session.provider) ?? null;
+  /** Turns whose preview is on screen or being sent: bytes held for a remote. */
+  const pending = () => session.turns.filter((t) => t.disclosure && (t.state === 'preview' || t.state === 'sending'));
+  /** The provider a pending turn's disclosure goes to, as the host described it. */
+  const viewOf = (t: Turn): ProviderView => {
+    const d = t.disclosure!;
+    const listed = session.providers?.find((p) => p.kind === d.provider);
+    return (
+      listed ?? {
+        kind: d.provider,
+        label: d.label,
+        enabled: true,
+        host: d.host,
+        model: d.model,
+        note: null,
+        pays: { to: d.key_env ? d.host : null, rail: d.key_env ? 'fiat' : 'none' },
+        data_leaves: d.preset,
+      }
+    );
+  };
+  /**
+   * The header badge: the widest exposure of the selection and every preview
+   * still waiting for Send, so it can never say less than what could leave.
+   * Until the provider list loads, the selection is Own.
+   */
+  const exposure = () => {
+    const candidates: Exposure[] = [{ provider: provider() ?? OWN_RULES, previewed: null }];
+    for (const t of pending()) candidates.push({ provider: viewOf(t), previewed: t.disclosure!.preset });
+    return widestExposure(candidates);
+  };
   const remote = () => session.provider !== 'local';
   const busy = () => session.turns.some((t) => t.state === 'reading' || t.state === 'sending');
+  /** Who answers is fixed while a preview waits for Send: Send or Don't send it first. */
+  const locked = () => busy() || pending().length > 0;
 
   const update = (id: number, change: Partial<Turn>) =>
     setSession('turns', (t) => t.id === id, produce((t) => Object.assign(t, change)));
@@ -153,7 +186,7 @@ export function AiTrack(props: {
     }
     if (remote()) {
       update(id, { topic: intent.topic, sinceMs: intent.sinceMs, window: intent.window });
-      return disclose(id, 'counts');
+      return disclose(id, provider()?.data_leaves ?? 'counts');
     }
     try {
       const read = await props.source.aiRead(intent.topic, intent.sinceMs);
@@ -190,11 +223,9 @@ export function AiTrack(props: {
     update(id, { state: 'not-sent' });
   };
 
-  const sub = () => (
-    <span class="id" data-ai-where>
-      {remote() ? `Previews before sending to ${provider()?.host ?? 'a remote model'}` : 'Answers from your node, composed on this computer'}
-    </span>
-  );
+  // The persistent endpoint badge: which endpoint answers, who gets paid and
+  // what leaves. It changes with the selection, before the first question.
+  const sub = () => <EndpointBadge provider={exposure().provider} previewed={exposure().previewed} />;
 
   return (
     <>
@@ -207,9 +238,17 @@ export function AiTrack(props: {
               role="radio"
               class="ai-provider"
               aria-checked={session.provider === p.kind}
-              disabled={!p.enabled || busy()}
-              title={p.note ?? (p.host ? `${p.model ?? ''} at ${p.host}` : 'Nothing leaves this computer')}
+              disabled={!p.enabled || locked()}
+              title={
+                p.note ??
+                (locked() && session.provider !== p.kind
+                  ? 'Send or don’t send the preview first'
+                  : p.host
+                    ? `${p.model ?? ''} at ${p.host}`
+                    : 'Nothing leaves this computer')
+              }
               data-provider={p.kind}
+              data-tier={endpointBadge(p).tier}
               onClick={() => setSession('provider', p.kind)}
             >
               <span class="name">{p.label}</span>
@@ -463,7 +502,7 @@ function CardView(props: { card: Card; nameOf: (id: string) => string; now: numb
                 {(b) => (
                   <>
                     <span class="sats big" data-ai-balance>
-                      {fig(b().wallet_balance)} <span class="unit">sats</span>
+                      {value(b().wallet_balance) === null ? fig(b().wallet_balance) : amount(value(b().wallet_balance)!)}
                     </span>
                     <dl class="facts">
                       <dt>Lightning, yours</dt>
@@ -518,10 +557,10 @@ function CardView(props: { card: Card; nameOf: (id: string) => string; now: numb
               </div>
               <div class="row ai-totals">
                 <span>
-                  <span class="label">Spent</span> <span class="sats">{fig(r().sent_total)} sats</span>
+                  <span class="label">Spent</span> <span class="sats">{value(r().sent_total) === null ? fig(r().sent_total) : amount(value(r().sent_total)!)}</span>
                 </span>
                 <span>
-                  <span class="label">Received</span> <span class="sats">{fig(r().received_total)} sats</span>
+                  <span class="label">Received</span> <span class="sats">{value(r().received_total) === null ? fig(r().received_total) : amount(value(r().received_total)!)}</span>
                 </span>
               </div>
               <ul class="ai-payments">
@@ -562,7 +601,7 @@ function ProposalCard(props: { p: Proposal; onPrefill: (p: Proposal) => void }) 
       </Show>
       <Show when={props.p.kind !== 'message'}>
         <span class="sats big">
-          {satsWhole((props.p as { sats: number }).sats)} <span class="unit">sats</span>
+          {amount((props.p as { sats: number }).sats * 1000)}
         </span>
       </Show>
       <span class="hint">

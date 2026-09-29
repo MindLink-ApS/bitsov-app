@@ -297,7 +297,7 @@ fn split_endpoint(endpoint: &str) -> Result<(String, u16), String> {
 /// Same classification as the genome: never-dialable ranges (link-local and
 /// cloud metadata included) are refused; loopback/private/CGNAT/ULA literals
 /// are local; everything else, DNS names included, is public.
-fn reach_of(endpoint: &str) -> Result<Reach, String> {
+pub(crate) fn reach_of(endpoint: &str) -> Result<Reach, String> {
     use std::net::IpAddr;
     let (host, _) = split_endpoint(endpoint)?;
     if host == "localhost" || host.ends_with(".localhost") || host.ends_with(".local") {

@@ -3,6 +3,7 @@
 //! a public readiness receipt. A receipt is a readiness signal, not spend authority:
 //! the node still checks and consumes its actual single-use grant on compose.
 use std::io::Read;
+use std::path::Path;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use serde::{Deserialize, Serialize};
@@ -46,7 +47,17 @@ fn waiting() -> ActionError {
 }
 
 impl Pending {
-    pub fn new(request: Request, fence: (u64, u64), now: u64, grant: &NodeGrant) -> Result<Self, ActionError> {
+    /// `owner_config` is set only in the #65 external-node attach path, where the
+    /// app already knows the node's `konsensus.toml`. Production and ordinary
+    /// supervised runs leave it unset; the owner runs from the data dir or adds
+    /// `--config` themselves.
+    pub fn new(
+        request: Request,
+        fence: (u64, u64),
+        now: u64,
+        grant: &NodeGrant,
+        owner_config: Option<&Path>,
+    ) -> Result<Self, ActionError> {
         for id in [&request.client_id, &request.grant_op_id] {
             if id.is_empty() || id.len() > 128 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
                 return Err(crate::grant::unreadable());
@@ -61,27 +72,58 @@ impl Pending {
             .map_err(|_| ActionError::node("Cannot prepare the owner approval receipt."))?;
         let id = dir.path().file_name().unwrap().to_string_lossy().into_owned();
         let receipt = quote(&dir.path().join("receipt").to_string_lossy());
+        let (dev_hint, config_arg) = match owner_config {
+            Some(path) => (
+                "# Dev external node: if konsensus is not on PATH, replace it with its absolute path.\n",
+                format!(" --config {}", quote(&path.to_string_lossy())),
+            ),
+            None => ("", String::new()),
+        };
         let command = format!(
-            "konsensus approve first-contact --client {} --op {} --to {} --max-msat {} --contact-budget-msat {}",
+            "konsensus approve first-contact --client {} --op {} --to {} --max-msat {} --contact-budget-msat {}{config_arg}",
             quote(&request.client_id), quote(&request.grant_op_id), quote(&request.recipient),
             quote(&request.max_total_msat.to_string()), quote(&request.contact_budget_msat.to_string()));
         // Genome has no read route for its single-use contact approval. Record
         // CLI success, never authority. Start the conservative two-minute TTL
         // BEFORE approval, and bound it by the underlying budget grant.
-        // Noclobber opens the partial before running the CLI. Existing files
-        // and all symlinks (including devices) refuse without running it.
+        //
+        // A failed first run (CLI missing / wrong cwd) used to leave an empty
+        // receipt.part via the noclobber redirect; later runs then exited 1 with
+        // no message. Pre-check planted files/symlinks, exclusive-create the
+        // partial, remove it on failure, and publish with `ln` (fails if the
+        // destination already exists). Use `{ … } > f || { … }` — not
+        // `if ! { … } > f` — so bash 3.2 and zsh both take the failure path when
+        // the redirect open itself fails.
         let body = quote(&format!("{{\"recipient\":\"{}\",\"max_total_msat\":{},\"expires_at\":%s}}\\n",
             request.recipient, request.max_total_msat));
         let until = quote(&grant.expires_at.to_string());
-        let owner_command = format!(r#"(
+        let owner_command = format!(r#"{dev_hint}(
   umask 077; set -C
   receipt={receipt}
-  [ ! -e "$receipt.part" ] && [ ! -L "$receipt.part" ] && {{
+  if [ -e "$receipt.part" ] || [ -L "$receipt.part" ]; then
+    printf '%s\n' 'bitsov: receipt.part already exists (or is a symlink); cancel and request approval again.' >&2
+    exit 1
+  fi
+  if [ -e "$receipt.json" ] || [ -L "$receipt.json" ]; then
+    printf '%s\n' 'bitsov: receipt already published; if the app still waits, click Check pending result.' >&2
+    exit 1
+  fi
+  {{
     started=$(date +%s) && expires=$((started + 120)) &&
     {{ [ "$expires" -le {until} ] || expires={until}; }} &&
     {command} >&2 &&
     printf {body} "$expires"
-  }} > "$receipt.part" && mv "$receipt.part" "$receipt.json"
+  }} > "$receipt.part" || {{
+    printf '%s\n' 'bitsov: owner approval failed; no receipt published.' >&2
+    rm -f "$receipt.part"
+    exit 1
+  }}
+  ln "$receipt.part" "$receipt.json" || {{
+    printf '%s\n' 'bitsov: could not publish receipt.json.' >&2
+    rm -f "$receipt.part"
+    exit 1
+  }}
+  rm -f "$receipt.part"
 )"#);
         Ok(Self { view: View { id, request, owner_command, ready: false,
             expires_at_ms: now.saturating_add(15 * 60_000).min(grant.expires_at_ms()) }, fence, dir })
@@ -133,6 +175,10 @@ mod tests {
     fn pending() -> Pending { pending_with_expiry(120) }
 
     fn pending_with_expiry(expires_at: i64) -> Pending {
+        pending_with(expires_at, None)
+    }
+
+    fn pending_with(expires_at: i64, owner_config: Option<&Path>) -> Pending {
         let grant = NodeGrant {
             client_id: "c1".into(), op_id: "ab12".into(), expires_at,
             budget_msat: 50_000, used_msat: 0, remaining_msat: 50_000,
@@ -142,7 +188,7 @@ mod tests {
         Pending::new(Request {
             client_id: "c1".into(), grant_op_id: "ab12".into(),
             recipient: "a".repeat(64), max_total_msat: 5_000, contact_budget_msat: 50_000,
-        }, (0, 0), 0, &grant).unwrap()
+        }, (0, 0), 0, &grant, owner_config).unwrap()
     }
 
     #[test]
@@ -195,6 +241,13 @@ mod tests {
     fn run_owner(p: &Pending, fixture: &Fixture) -> std::process::Output {
         run_owner_with(p, fixture, "0")
     }
+    fn run_owner_shell(shell: &str, p: &Pending, fixture: &Fixture) -> std::process::Output {
+        Command::new(shell).args(["-c", &p.view.owner_command])
+            .env("PATH", format!("{}:/usr/bin:/bin", fixture.dir.path().display()))
+            .env("OWNER_TEST_ARGS", fixture.dir.path().join("args"))
+            .env("OWNER_TEST_CLOCK", fixture.dir.path().join("clock"))
+            .env("OWNER_TEST_EXIT", "0").output().unwrap()
+    }
 
     #[test]
     fn owner_cli_receives_exact_reviewed_tuple_and_failure_publishes_no_receipt() {
@@ -203,6 +256,10 @@ mod tests {
         let output = run_owner_with(&p, &fixture, "1");
         assert!(!output.status.success());
         assert!(!p.dir.path().join("receipt.json").exists());
+        assert!(!p.dir.path().join("receipt.part").exists(),
+            "failed run must not leave an empty receipt.part that blocks retry");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("owner approval failed"), "{stderr}");
         assert_eq!(std::fs::read_to_string(fixture.dir.path().join("args")).unwrap(),
             format!("approve\nfirst-contact\n--client\nc1\n--op\nab12\n--to\n{}\n--max-msat\n5000\n--contact-budget-msat\n50000\n", "a".repeat(64)));
     }
@@ -232,8 +289,11 @@ mod tests {
         let output = run_owner(&p, &fixture);
         assert_eq!(std::fs::read_to_string(victim.path()).unwrap(), "ORIGINAL DUMMY CONTENT");
         assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("receipt.part already exists"), "{stderr}");
         assert!(partial.is_symlink());
         assert!(!p.dir.path().join("receipt.json").exists());
+        assert!(!fixture.dir.path().join("args").exists(), "CLI must not run after pre-check refusal");
     }
 
     #[test]
@@ -245,6 +305,8 @@ mod tests {
         let output = run_owner(&p, &fixture);
         assert_eq!(std::fs::read_to_string(partial).unwrap(), "existing partial");
         assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("receipt.part already exists"), "{stderr}");
         assert!(!p.dir.path().join("receipt.json").exists());
     }
 
@@ -285,5 +347,100 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&std::fs::read(receipt).unwrap()).unwrap();
         assert_eq!(body, serde_json::json!({"recipient": "a".repeat(64), "max_total_msat": 5000, "expires_at": 120}));
         assert!(!p.dir.path().join("receipt.part").exists());
+    }
+
+    /// The generated command text must publish exactly once under both bash and
+    /// zsh. A second run must refuse without rewriting receipt.json.
+    #[test]
+    fn owner_command_publishes_once_under_bash_and_zsh_and_second_run_refuses() {
+        for shell in ["/bin/bash", "/bin/zsh"] {
+            if !std::path::Path::new(shell).exists() {
+                continue;
+            }
+            let fixture = Fixture::new();
+            let p = pending();
+            let first = run_owner_shell(shell, &p, &fixture);
+            assert!(first.status.success(), "{shell} first: {}", String::from_utf8_lossy(&first.stderr));
+            let receipt = p.dir.path().join("receipt.json");
+            let first_body = std::fs::read(&receipt).unwrap();
+            assert!(!first_body.is_empty());
+            assert!(!p.dir.path().join("receipt.part").exists());
+
+            std::fs::write(fixture.dir.path().join("args"), "MUST_NOT_RERUN").unwrap();
+            let second = run_owner_shell(shell, &p, &fixture);
+            assert!(!second.status.success(), "{shell} second must refuse");
+            let stderr = String::from_utf8_lossy(&second.stderr);
+            assert!(stderr.contains("receipt already published"), "{shell} stderr: {stderr}");
+            assert!(stderr.contains("Check pending result"), "{shell} stderr: {stderr}");
+            assert_eq!(std::fs::read(&receipt).unwrap(), first_body, "{shell} must not rewrite receipt");
+            assert_eq!(std::fs::read_to_string(fixture.dir.path().join("args")).unwrap(), "MUST_NOT_RERUN",
+                "{shell} must not re-run konsensus on the second attempt");
+        }
+    }
+
+    #[test]
+    fn owner_command_failed_run_does_not_leave_blocking_empty_part() {
+        // Real defect on main before #66: a failed first run (CLI missing / exit
+        // non-zero) left an empty receipt.part from the noclobber redirect, after
+        // which every later run exited 1 silently. Failure must clean the partial
+        // and print a clear message.
+        let fixture = Fixture::new();
+        let p = pending();
+        let output = run_owner_with(&p, &fixture, "1");
+        assert!(!output.status.success());
+        assert!(!p.dir.path().join("receipt.part").exists());
+        assert!(!p.dir.path().join("receipt.json").exists());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("owner approval failed"), "{stderr}");
+    }
+
+    #[test]
+    fn owner_command_redirect_open_failure_reports_in_bash_and_zsh() {
+        // bash 3.2 skipped the then-branch of `if ! { … } > f`; the `||` form
+        // must take the failure path in both shells when the open itself fails.
+        for shell in ["/bin/bash", "/bin/zsh"] {
+            if !std::path::Path::new(shell).exists() {
+                continue;
+            }
+            let fixture = Fixture::new();
+            let p = pending();
+            // Make the receipt directory unwritable so `> receipt.part` fails.
+            let mut perms = std::fs::metadata(p.dir.path()).unwrap().permissions();
+            perms.set_mode(0o500);
+            std::fs::set_permissions(p.dir.path(), perms).unwrap();
+            let output = run_owner_shell(shell, &p, &fixture);
+            // Restore so TempDir cleanup succeeds.
+            let mut perms = std::fs::metadata(p.dir.path()).unwrap().permissions();
+            perms.set_mode(0o700);
+            std::fs::set_permissions(p.dir.path(), perms).unwrap();
+            assert!(!output.status.success(), "{shell}");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(stderr.contains("owner approval failed"), "{shell} stderr: {stderr}");
+            assert!(!stderr.contains("could not publish receipt.json"),
+                "{shell} must not fall through to mv/ln with a misleading message: {stderr}");
+            assert!(!p.dir.path().join("receipt.json").exists());
+        }
+    }
+
+    #[test]
+    fn external_node_command_includes_config_and_absolute_binary_hint() {
+        let config = Path::new("/tmp/owner-node/konsensus.toml");
+        let p = pending_with(120, Some(config));
+        assert!(p.view.owner_command.contains(
+            "# Dev external node: if konsensus is not on PATH, replace it with its absolute path."
+        ));
+        assert!(p.view.owner_command.contains("--config '/tmp/owner-node/konsensus.toml'"));
+        let fixture = Fixture::new();
+        let output = run_owner(&p, &fixture);
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert_eq!(std::fs::read_to_string(fixture.dir.path().join("args")).unwrap(),
+            format!("approve\nfirst-contact\n--client\nc1\n--op\nab12\n--to\n{}\n--max-msat\n5000\n--contact-budget-msat\n50000\n--config\n/tmp/owner-node/konsensus.toml\n", "a".repeat(64)));
+    }
+
+    #[test]
+    fn production_command_has_no_config_or_dev_hint() {
+        let p = pending();
+        assert!(!p.view.owner_command.contains("--config"));
+        assert!(!p.view.owner_command.contains("Dev external node"));
     }
 }

@@ -3,6 +3,7 @@ import { createMemo, createSignal, onCleanup, onMount, Show } from 'solid-js';
 import { qrSvg } from './qr';
 import { Onboarding } from './onboarding/Onboarding';
 import { INITIAL_PAIRING, type NodeStatus, type PairingView } from './onboarding/pairing';
+import { amount as fmtAmount } from './control/format';
 import { ControlCenter } from './control/Shell';
 import { hostSource, inHost, sampleRequest, type SampleStart, type Source } from './control/source';
 import { sampleSource } from './control/sample';
@@ -416,7 +417,7 @@ function Fund(props: { source: Source; ready: () => boolean; moneyBlocked?: () =
               <div class="panel funded">
                 <h2>Funding seen</h2>
                 <p class="hint">
-                  Your node observed {sats(received())} sats. Opening a Lightning channel and
+                  Your node observed {fmtAmount(received() * 1000)}. Opening a Lightning channel and
                   sending your first paid message come next. Channel actions and on-chain fees are outside the app daily all-in limit; check their cost at the owner action.
                 </p>
                 <Show when={fund()!.funding_evidence}>
@@ -465,7 +466,7 @@ function Fund(props: { source: Source; ready: () => boolean; moneyBlocked?: () =
                   <div class="fill" style={{ width: `${progress()}%` }} />
                 </div>
                 <div class="numbers">
-                  <strong>{sats(received())}</strong> of {sats(required())} sats seen
+                  <strong>{fmtAmount(received() * 1000)}</strong> of {fmtAmount(required() * 1000)} seen
                 </div>
               </div>
               <p class="hint">

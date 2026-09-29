@@ -32,6 +32,12 @@ use crate::control::{self, KIND_CHAT};
 
 /// `KIND_FILE_REF` (konsensus-core `kind.rs`): a file sent as a message.
 pub const KIND_FILE_REF: u16 = 200;
+/// 1:1 call signalling (genome kinds 400-403): offer, answer, ICE, hangup.
+/// The offer is the per-call admission, paid at the callee's `call_msat`.
+pub const KIND_CALL_OFFER: u16 = 400;
+pub const KIND_CALL_HANGUP: u16 = 403;
+/// A call signal carries SDP (genome caps it at 16 KiB) plus a small envelope.
+pub const CALL_SIGNAL_MAX_BYTES: usize = 17 * 1024;
 
 /// How long one owner approval lets this app spend.
 pub const SPEND_WINDOW_MS: u64 = 10 * 60 * 1000;
@@ -114,8 +120,8 @@ pub struct ActionError {
     /// `payment_settled_undelivered` only: what was paid, and whether a retry is offered.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub undelivered: Option<UndeliveredView>,
-    /// `retry_needs_admission` only: the price the owner approves before a
-    /// retry that may pay admission again.
+    /// `retry_needs_admission` / `readmission_quoted`: the price the owner
+    /// approves before a send or retry that may pay admission again.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub admission: Option<AdmissionView>,
     /// `payment_settled_undelivered` / `undelivered_pending`: the durable
@@ -189,6 +195,11 @@ pub fn readmission_capped_refusal(status: u16, body: &str) -> bool {
 pub const READMISSION_REQUIRED: &str = "readmission_required";
 
 pub const READMISSION_CAPPED: &str = "Not sent - nothing was paid. This contact asks your node to pay their admission again (every reconnect or node restart starts unpaid), and your node cannot pay that under the app's all-in cap yet. The app will not retry; sending the same message again reuses its operation, so it can never be paid twice.";
+
+/// Genome `quoted_readmission_v1` (#111 revived): under a cap that fits the
+/// contact's fresh signed quote the node pays admission again once for this
+/// connection, then the message. Nodes without it refuse any capped re-admission.
+pub const QUOTED_READMISSION_CAPABILITY: &str = "quoted_readmission_v1";
 
 pub const READMISSION_CAPPED_RETRY: &str = "Not delivered - nothing new was paid. This contact asks your node to pay their admission again (every reconnect or node restart starts unpaid), and your node cannot pay that under an app cap yet. The paid message stays here; retry later, or stop retrying.";
 
@@ -265,6 +276,18 @@ impl ActionError {
         Self {
             admission: view,
             ..Self::new("retry_needs_admission", format!("Retry delivery paid nothing new. Delivering the message needs a new payment: its price, and admission again if the contact reconnected. Nothing was paid.{price} Approve it to continue, or stop retrying."))
+        }
+    }
+    /// The contact asks for admission again after a reconnect or restart and
+    /// its signed quote does not fit this send's cap or the contact's budget.
+    /// Nothing was paid; the owner approves the all-in price once.
+    pub fn readmission_quoted(view: AdmissionView) -> Self {
+        Self {
+            admission: Some(view),
+            ..Self::new("readmission_quoted", format!(
+                "Not sent - nothing was paid. This contact asks for admission again (every reconnect or node restart starts unpaid): {} msat to be admitted again, then {} msat for this message, plus up to {} msat in network fees ({} msat in all). Send again to pay it; the same message keeps its operation, so it is never paid twice.",
+                view.admission_msat, view.message_msat, view.max_routing_fee_msat, view.total_msat,
+            ))
         }
     }
     pub fn invalid(message: impl Into<String>) -> Self {
@@ -539,6 +562,33 @@ pub fn compose_body(recipient: &str, is_room: bool, plaintext: &str) -> Result<s
     }))
 }
 
+/// `/messages/compose` body for one call signal to one contact. The node
+/// checks the payload and the call state again before paying.
+pub fn call_body(recipient: &str, kind: u16, plaintext: &str) -> Result<serde_json::Value, ActionError> {
+    let recipient = control::node_id(recipient).map_err(ActionError::invalid)?;
+    if !(KIND_CALL_OFFER..=KIND_CALL_HANGUP).contains(&kind) {
+        return Err(ActionError::invalid("not a call signal"));
+    }
+    let v: serde_json::Value = serde_json::from_str(plaintext).map_err(|_| ActionError::invalid("the call signal is not JSON"))?;
+    if !v.is_object() || plaintext.len() > CALL_SIGNAL_MAX_BYTES {
+        return Err(ActionError::invalid("the call signal is too large"));
+    }
+    Ok(json!({ "recipient": recipient, "is_room": false, "kind": kind, "plaintext": plaintext }))
+}
+
+/// What one paid call signal cost.
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+pub struct CallReceipt {
+    pub message_id: String,
+    pub kind: u16,
+    pub amount_msat: u64,
+    pub total_msat: u64,
+    pub max_routing_fee_msat: u64,
+    pub delivered: bool,
+    pub accepted: bool,
+    pub sent_at_ms: u64,
+}
+
 /// `compose` and `files/:id/send` response, and `GET /messages/operations/{id}`.
 #[derive(Deserialize, Debug)]
 pub struct SendReply {
@@ -665,6 +715,10 @@ pub struct SendReceipt {
     pub state: Option<String>,
     /// The recipient's node stored it. `delivered` alone is only a transport write.
     pub accepted: bool,
+    /// Admission paid again in this send after a reconnect, msat. Part of
+    /// `total_msat`; `amount_msat` stays the message alone.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readmission_msat: Option<u64>,
 }
 
 /// Validate complete, unique per-member evidence against the confirmed room.
@@ -1095,6 +1149,56 @@ pub fn file_upload_body(filename: &str, mime_type: &str, data_b64: &str) -> Resu
     }
 }
 
+/// One row of `GET /files` (metadata only; the node never lists file bytes).
+#[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct FileRow {
+    pub id: String,
+    pub mime_type: String,
+    #[serde(default)]
+    pub message_id: Option<String>,
+}
+
+/// `GET /files/:id`: one stored file with its bytes.
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
+pub struct FileBlob {
+    pub filename: String,
+    pub mime_type: String,
+    pub size_bytes: u64,
+    pub data_b64: String,
+}
+
+/// A voice note is an ordinary kind-200 file whose type is audio. Only these
+/// are handed to the webview for inline playback.
+pub fn is_voice_mime(mime: &str) -> bool {
+    mime.trim().to_ascii_lowercase().starts_with("audio/")
+}
+
+/// `GET /files` windows, newest first. Genome's list takes only `limit`, so a
+/// lookup widens the window until it finds the message or the list ends.
+pub const FILE_LIST_WINDOWS: [usize; 3] = [50, 200, 1000];
+/// Error text the renderer tells apart: the file exists but is not audio
+/// (a name that only looks like a voice note).
+pub const NOT_A_VOICE_NOTE: &str = "not a voice note";
+pub const VOICE_NOT_STORED: &str = "voice note not stored on this node";
+
+/// What a message's stored file is, by its type (never its name).
+#[derive(Debug, PartialEq, Eq)]
+pub enum VoiceLookup<'a> {
+    Voice(&'a FileRow),
+    NotVoice,
+    Missing,
+}
+
+/// The stored file a received message carried. The node records the
+/// envelope id as `message_id` when it stores the file.
+pub fn voice_file_for<'a>(rows: &'a [FileRow], message_id: &str) -> VoiceLookup<'a> {
+    match rows.iter().find(|r| r.message_id.as_deref().is_some_and(|m| m.eq_ignore_ascii_case(message_id))) {
+        Some(r) if is_voice_mime(&r.mime_type) => VoiceLookup::Voice(r),
+        Some(_) => VoiceLookup::NotVoice,
+        None => VoiceLookup::Missing,
+    }
+}
+
 #[derive(Deserialize, Debug)]
 pub struct UploadReply {
     pub file_id: String,
@@ -1125,6 +1229,12 @@ pub struct FileReceipt {
     pub delivered: bool,
     pub amount_msat: u64,
     pub sent_at_ms: u64,
+    /// Present when the node echoes operation fields (compose-shaped replies).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    pub accepted: bool,
 }
 
 // ---- node refusals --------------------------------------------------------------
@@ -1427,6 +1537,38 @@ mod tests {
         assert!(file_send_path("stage-../x").is_err());
         assert!(file_send_path("stage-").is_err());
         assert!(file_send_path(&format!("stage-{ROOM}/../x")).is_err());
+    }
+
+    #[test]
+    fn call_bodies_are_one_contact_one_signal() {
+        let peer = "ab".repeat(32);
+        let body = call_body(&peer.to_uppercase(), 400, r#"{"v":1}"#).unwrap();
+        assert_eq!(body, json!({"recipient": peer, "is_room": false, "kind": 400, "plaintext": r#"{"v":1}"#}));
+        assert!(call_body(&peer, 0, "{}").is_err());
+        assert!(call_body(&peer, 404, "{}").is_err());
+        assert!(call_body(&peer, 401, "hi").is_err());
+        assert!(call_body(&peer, 401, "[]").is_err());
+        assert!(call_body(ROOM, 401, "{}").is_err());
+        let big = format!(r#"{{"sdp":"{}"}}"#, "a".repeat(CALL_SIGNAL_MAX_BYTES));
+        assert!(call_body(&peer, 401, &big).is_err());
+    }
+
+    #[test]
+    fn only_audio_files_resolve_as_voice_notes() {
+        let row = |id: &str, mime: &str, m: Option<&str>| FileRow { id: id.into(), mime_type: mime.into(), message_id: m.map(Into::into) };
+        let rows = [
+            row("a", "application/pdf", Some("AB")),
+            row("b", "audio/webm", Some("ab")),
+            row("c", "audio/webm", None),
+        ];
+        let rows = [rows[1].clone(), rows[0].clone(), rows[2].clone()];
+        assert_eq!(voice_file_for(&rows, "ab"), VoiceLookup::Voice(&rows[0]));
+        assert_eq!(voice_file_for(&rows, "AB"), VoiceLookup::Voice(&rows[0]));
+        // A name that looks like a voice note does not make a PDF one.
+        assert_eq!(voice_file_for(&rows[1..], "ab"), VoiceLookup::NotVoice);
+        assert_eq!(voice_file_for(&rows, "cd"), VoiceLookup::Missing);
+        assert!(is_voice_mime(" Audio/MP4"));
+        assert!(!is_voice_mime("text/html"));
     }
 
     /// The node's BUG-PSI reply, as genome #100's compose writes it.

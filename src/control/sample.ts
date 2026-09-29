@@ -1,4 +1,4 @@
-import { allIn, routingFee } from './format';
+import { amount as fmtAmount, allIn, routingFee, sats as fmtSats } from './format';
 // Dev-mode sample data: the whole shell clickable with no node running. Nothing
 // here reaches a network or the host. The sample deposit address is not valid
 // bech32 on purpose, so it cannot receive funds by mistake.
@@ -6,8 +6,10 @@ import { allIn, routingFee } from './format';
 import type { NodeStatus, PairingView } from '../onboarding/pairing';
 import type { Source } from './source';
 import type {
+  VoiceBlob,
   FundingAsk,
   Introduction,
+  FrontDoor,
   ActionError,
   AiFreshness,
   BudgetPreset,
@@ -41,6 +43,9 @@ export const SAMPLE_OWN_ID = '3f9a' + '1'.repeat(56) + 'c0de';
 /** A sample stranger, reachable only through the sample introduction link. */
 export const SAMPLE_STRANGER_ID = '5e1f' + '7'.repeat(56) + 'a11e';
 export const SAMPLE_INTRO_LINK = 'bitsov://introduce#SAMPLE';
+export const SAMPLE_FRONT_DOOR_LINK = 'bitsov://front-door#SAMPLE';
+export const SAMPLE_EXPIRED_FRONT_DOOR_LINK = 'bitsov://front-door#EXPIRED';
+export const SAMPLE_PUBLIC_FRONT_DOOR_LINK = 'bitsov://front-door#PUBLIC';
 
 function sampleIntroduction(nodeId: string, endpoint: string, reach: Introduction['reach'], msat: number): Introduction {
   const now = Math.floor(Date.now() / 1000);
@@ -54,6 +59,40 @@ function sampleIntroduction(nodeId: string, endpoint: string, reach: Introductio
     issued_at: now,
     expires_at: now + 600,
     link: nodeId === SAMPLE_OWN_ID ? 'bitsov://introduce#AQdyZWd0ZXN0' + 'A'.repeat(240) : SAMPLE_INTRO_LINK,
+  };
+}
+
+function sampleFrontDoor(
+  nodeId: string,
+  endpoint: string,
+  reach: FrontDoor['reach'],
+  name: string,
+  opts?: { expired?: boolean; link?: string },
+): FrontDoor {
+  const now = Math.floor(Date.now() / 1000);
+  const issued = opts?.expired ? now - 8 * 24 * 3600 : now;
+  return {
+    node_id: nodeId,
+    network: 'regtest',
+    endpoint,
+    reach,
+    seq: 1,
+    issued_at: issued,
+    expires_at: opts?.expired ? now - 24 * 3600 : now + 7 * 24 * 3600,
+    prices: { admission_msat: 100_000, message_msat: 10_000, page_msat: 1_000, price_epoch: 0 },
+    profile: {
+      kind: 'person',
+      display_name: name,
+      tagline: 'Sample doorstep',
+      about: 'A sample front-door card for Discover.',
+    },
+    media: [],
+    links: [],
+    link:
+      opts?.link ??
+      (nodeId === SAMPLE_OWN_ID ? 'bitsov://front-door#OWN' + 'A'.repeat(40) : SAMPLE_FRONT_DOOR_LINK),
+    verified: true,
+    fresh: !opts?.expired,
   };
 }
 export const SAMPLE_PEERS: Peer[] = [
@@ -403,9 +442,9 @@ export function sampleRead(topic: AiTopic, sinceMs: number | null): TopicRead {
 }
 
 export const SAMPLE_PROVIDERS: ProviderView[] = [
-  { kind: 'local', label: 'On this computer', enabled: true, host: null, model: null, note: null },
-  { kind: 'shared', label: 'Shared open model (sample)', enabled: true, host: 'models.sample.invalid', model: 'open-8b-sample', note: null },
-  { kind: 'frontier', label: 'Frontier model', enabled: false, host: null, model: null, note: 'Off. Not set up on this computer.' },
+  { kind: 'local', label: 'On this computer', enabled: true, host: null, model: null, note: null, pays: { to: null, rail: 'none' }, data_leaves: null },
+  { kind: 'shared', label: 'Shared open model (sample)', enabled: true, host: 'models.sample.invalid', model: 'open-8b-sample', note: null, pays: { to: 'models.sample.invalid', rail: 'fiat' }, data_leaves: 'counts' },
+  { kind: 'frontier', label: 'Frontier model', enabled: false, host: null, model: null, note: 'Off. Not set up on this computer.', pays: { to: null, rail: 'none' }, data_leaves: null },
 ];
 
 const looksLikeId = (text: string) => text.length >= 16 && /^[0-9a-f]+$/i.test(text);
@@ -556,6 +595,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
 
   // ---- budgets ----
   type Entry = { at: number; target: string; room: boolean; msat: number };
+  const voiceNotes = new Map<string, VoiceBlob>();
   const book = {
     preset: 'careful' as BudgetView['preset'],
     ceiling: 500_000,
@@ -631,23 +671,23 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
   const planSend = (target: string, room: boolean, max: number, first: number | undefined, manual = false): Promise<number | null> => {
     settleAutopay();
     settleSpend();
-    const sats = (msat: number) => String(msat / 1000);
+    const sats = (msat: number) => String(msat / 1000); // sample fallback; prefer fmtAmount for unit
     if (book.paused) return refuse('budget_paused', 'Payments are paused. Resume them to send.');
     const who = room ? 'this room' : 'this contact';
     const limit = book.limits.get(key(target, room));
     if (limit !== undefined && spentOn(target, room) + max > limit) {
-      return refuse('budget_exhausted', `You have used ${sats(spentOn(target, room))} of ${sats(limit)} sats for ${who} in the last 24 hours, and this costs ${sats(max)}. Raise the budget to send.`);
+      return refuse('budget_exhausted', `You have used ${fmtSats(spentOn(target, room))} of ${fmtAmount(limit)} for ${who} in the last 24 hours, and this costs ${fmtAmount(max)}. Raise the budget to send.`);
     }
     const ceiling = Math.min(!manual && autopay ? autopay.ceiling : book.ceiling, book.ceiling);
     if (spentAll() + max > ceiling) {
-      return refuse('ceiling_exhausted', `You have used ${sats(spentAll())} of your ${sats(ceiling)} sats app all-in payment limit (rolling 24 hours), and this costs ${sats(max)}. Raise the limit to send.`);
+      return refuse('ceiling_exhausted', `You have used ${fmtSats(spentAll())} of your ${fmtAmount(ceiling)} app all-in payment limit (rolling 24 hours), and this costs ${fmtAmount(max)}. Raise the limit to send.`);
     }
     if (autopay && !manual) {
       let confirm: number | null = null;
       if (limit === undefined) {
         if (first === undefined) return refuse('first_contact', `Your first paid message to ${who} needs your OK once. Nothing was sent.`);
         confirm = Math.min(first, book.ceiling);
-        if (confirm < max) return refuse('invalid', `A budget of ${sats(confirm)} sats does not cover this message.`);
+        if (confirm < max) return refuse('invalid', `A budget of ${fmtAmount(confirm)} does not cover this message.`);
       }
       return Promise.resolve(confirm);
     }
@@ -730,6 +770,66 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
       text.trim() === SAMPLE_INTRO_LINK
         ? ok(sampleIntroduction(SAMPLE_STRANGER_ID, '192.168.1.20:9735', 'local', 2000))
         : Promise.reject('That is not an introduction.'),
+    frontDoorMine: () => ok(sampleFrontDoor(SAMPLE_OWN_ID, 'node.example.org:9735', 'public', 'You')),
+    frontDoorRead: (text) => {
+      const t = text.trim();
+      if (t === SAMPLE_FRONT_DOOR_LINK) {
+        return ok(sampleFrontDoor(SAMPLE_STRANGER_ID, '192.168.1.20:9735', 'local', 'Ada'));
+      }
+      if (t === SAMPLE_PUBLIC_FRONT_DOOR_LINK) {
+        return ok(
+          sampleFrontDoor(SAMPLE_STRANGER_ID, 'node.example.org:9735', 'public', 'Ada', {
+            link: SAMPLE_PUBLIC_FRONT_DOOR_LINK,
+          }),
+        );
+      }
+      if (t === SAMPLE_EXPIRED_FRONT_DOOR_LINK) {
+        return ok(
+          sampleFrontDoor(SAMPLE_STRANGER_ID, '192.168.1.20:9735', 'local', 'Ada', {
+            expired: true,
+            link: SAMPLE_EXPIRED_FRONT_DOOR_LINK,
+          }),
+        );
+      }
+      return Promise.reject('That is not a front-door card.');
+    },
+    frontDoorOpen: (text, allowLocal) => {
+      const t = text.trim();
+      if (t === SAMPLE_EXPIRED_FRONT_DOOR_LINK) {
+        return Promise.reject('This front door has expired. Ask for a fresh one.');
+      }
+      if (t === SAMPLE_FRONT_DOOR_LINK) {
+        if (!allowLocal) {
+          return Promise.reject('This front door points to a local network address. Allow it on the card first.');
+        }
+        return ok(sampleFrontDoor(SAMPLE_STRANGER_ID, '192.168.1.20:9735', 'local', 'Ada'));
+      }
+      if (t === SAMPLE_PUBLIC_FRONT_DOOR_LINK) {
+        return ok(
+          sampleFrontDoor(SAMPLE_STRANGER_ID, 'node.example.org:9735', 'public', 'Ada', {
+            link: SAMPLE_PUBLIC_FRONT_DOOR_LINK,
+          }),
+        );
+      }
+      return Promise.reject('That is not a front-door card.');
+    },
+    frontDoorPublish: (fields) =>
+      ok({
+        ...sampleFrontDoor(SAMPLE_OWN_ID, 'node.example.org:9735', 'public', fields.display_name),
+        profile: {
+          kind: fields.kind ?? 'person',
+          display_name: fields.display_name,
+          tagline: fields.tagline ?? '',
+          about: fields.about ?? '',
+        },
+        prices: {
+          admission_msat: fields.admission_msat ?? 100_000,
+          message_msat: fields.message_msat ?? 10_000,
+          page_msat: fields.page_msat ?? 1_000,
+          price_epoch: 0,
+        },
+        seq: 2,
+      }),
     // K1 slice 2: a sample kit. Nothing here is signed or paid.
     sponsorStatus: () => ok({ enabled: true, gift_msat: 20_000_000, fee_msat: 100_000, purse_msat: 100_000_000, purse_used_msat: 0, kits_per_day: 2, kits_today: 0 }),
     sponsorOffer: () => {
@@ -902,16 +1002,24 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
       return { inviter_pubkey: hex('b'), addr: '35.204.77.3:9735' };
     },
     filePrice: () => ok({ principal_msat: FILE_PRICE_MSAT, max_routing_fee_msat: 5000, total_msat: FILE_PRICE_MSAT + 5000 }),
-    fileSend: async (recipient, filename, _mime, dataB64, maxMsat) => {
-      await gate();
+    fileSend: async (recipient, filename, mime, dataB64, maxMsat, firstContactMsat) => {
       if (allIn(FILE_PRICE_MSAT) > maxMsat) return refuse('price_changed', 'Price above confirmed ceiling.');
       const target = recipient.toLowerCase();
-      await planSend(target, false, maxMsat, undefined, true);
+      // Same budget / window route as messages (not forced-manual like invoice pay).
+      const confirm = await planSend(target, false, maxMsat, firstContactMsat);
+      if (confirm !== null) book.limits.set(key(target, false), confirm);
       book.ledger.push({ at: Date.now(), target, room: false, msat: allIn(FILE_PRICE_MSAT) });
       const id = nextId('file');
+      if (mime.toLowerCase().startsWith('audio/')) voiceNotes.set(id, { filename, mime_type: mime, size_bytes: 0, data_b64: dataB64 });
       later(1200, { type: 'delivery', message_id: id, status: 'delivered', reason: null });
       const pad = (dataB64.match(/=+$/)?.[0].length ?? 0);
-      return { message_id: id, recipient: recipient.toLowerCase(), filename, size_bytes: (dataB64.length / 4) * 3 - pad, delivered: true, amount_msat: FILE_PRICE_MSAT, total_msat: allIn(FILE_PRICE_MSAT), max_routing_fee_msat: routingFee(FILE_PRICE_MSAT), sent_at_ms: Date.now() };
+      return { message_id: id, recipient: recipient.toLowerCase(), filename, size_bytes: (dataB64.length / 4) * 3 - pad, delivered: true, amount_msat: FILE_PRICE_MSAT, total_msat: allIn(FILE_PRICE_MSAT), max_routing_fee_msat: routingFee(FILE_PRICE_MSAT), sent_at_ms: Date.now(), accepted: true, state: 'acked' };
+    },
+    callQuote: () => ok({ offer_msat: 10_000, offer_max_routing_fee_msat: 5000, signal_msat: 1000, signal_max_routing_fee_msat: 5000, call_total_msat: 21_000 }),
+    callSignal: () => refuse('invalid', 'Calls need a real node. Sample data cannot ring anyone.'),
+    voiceNote: async (messageId) => {
+      const note = voiceNotes.get(messageId);
+      return note ? note : refuse('invalid', 'voice note not stored on this node');
     },
     aiRead: async (topic, sinceMs) => {
       await new Promise((r) => setTimeout(r, 350));

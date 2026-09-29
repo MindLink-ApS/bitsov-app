@@ -140,6 +140,13 @@ struct NodeState {
     /// DEV ONLY (`dev_node`): an unverified node binary to run instead of the bundled
     /// sidecar. Always `None` in release builds.
     dev_sidecar: Mutex<Option<PathBuf>>,
+    /// DEV ONLY (`dev_node::resolve_external`): the data dir of a node the owner
+    /// runs. While set, the app never inits, starts, restarts or stops a node, and
+    /// only reads this dir (pairing challenges). Always `None` in release builds.
+    external_node: Mutex<Option<PathBuf>>,
+    /// Where the app keeps its own files (spend journal, budgets). `None` means
+    /// next to the supervised node's config, as before external mode.
+    app_dir: Mutex<Option<PathBuf>>,
     /// Last throttled re-mint attempt, for `REMINT_COOLDOWN`.
     last_remint: Mutex<Option<Instant>>,
     /// Set by the wait thread when the supervised node exits.
@@ -170,6 +177,9 @@ struct NodeState {
     node_grant: Mutex<Option<NodeGrant>>,
     /// This run observed the fee-aware quote contract for this node identity.
     all_in_caps_node: Mutex<Option<String>>,
+    /// The contact's re-admission quote the owner was last asked about
+    /// (`readmission_quoted`), for this node identity. Memory only.
+    readmission_ask: Mutex<Option<ReadmissionAsk>>,
     /// Serializes this process's budget-file read-modify-write.
     budget_io: Mutex<()>,
     /// Serializes every money action: each money POST (send, retry, payment,
@@ -181,6 +191,18 @@ struct NodeState {
 }
 
 /// The owner asked for these while an elevation request is pending.
+/// A contact's signed re-admission quote shown to the owner. A send of exactly
+/// its total to exactly that contact, before it expires, is the owner's OK for
+/// it: that send carries the quote's routing ceilings for both payments.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ReadmissionAsk {
+    node_id: String,
+    peer: String,
+    total_msat: u64,
+    max_routing_fee_msat: u64,
+    expires_at_ms: u64,
+}
+
 #[derive(Default, Clone, Copy, Debug)]
 struct Wants {
     window: bool,
@@ -215,6 +237,7 @@ impl NodeState {
             owner_contact: Mutex::new(None),
             node_grant: Mutex::new(None),
             all_in_caps_node: Mutex::new(None),
+            readmission_ask: Mutex::new(None),
             budget_io: Mutex::new(()),
             money: tokio::sync::Mutex::new(()),
             ready: Mutex::new(false),
@@ -226,6 +249,8 @@ impl NodeState {
             config: Mutex::new(None),
             room_routing_policy: Mutex::new(None),
             dev_sidecar: Mutex::new(None),
+            external_node: Mutex::new(None),
+            app_dir: Mutex::new(None),
             last_remint: Mutex::new(None),
             sidecar_terminated: AtomicBool::new(false),
             live_link: control::LiveLink::default(),
@@ -386,6 +411,7 @@ fn spawn_node(app: &AppHandle<impl tauri::Runtime>, config: &Path) -> Result<(),
 
     state.sidecar_terminated.store(false, Ordering::SeqCst);
     *state.all_in_caps_node.lock().unwrap() = None;
+    *state.readmission_ask.lock().unwrap() = None;
     let routing_policy = configured_routing_policy(config);
     let child = state.spawn_child(&mut cmd)?;
     *state.room_routing_policy.lock().unwrap() = routing_policy;
@@ -536,9 +562,11 @@ async fn restart_node(
     expected_node_id: &str,
 ) -> Result<bool, String> {
     let state = app.state::<NodeState>();
+    refuse_external(&state)?;
     *state.ready.lock().unwrap() = false;
     *state.node_id.lock().unwrap() = None;
     *state.all_in_caps_node.lock().unwrap() = None;
+    *state.readmission_ask.lock().unwrap() = None;
     *state.token.lock().unwrap() = None;
 
     if state.stop_for_restart(NODE_SHUTDOWN_BUDGET) {
@@ -586,6 +614,46 @@ async fn restart_node(
     Ok(true)
 }
 
+/// External mode: the owner runs the node, so nothing here may stop, restart or
+/// replace it.
+fn refuse_external(state: &NodeState) -> Result<(), String> {
+    if state.external_node.lock().unwrap().is_some() {
+        return Err("BitSov is attached to a node you run yourself; it never restarts, \
+                    stops or restores that node. Do that at the node."
+            .into());
+    }
+    Ok(())
+}
+
+/// DEV ONLY: attach to a node the owner already runs on 127.0.0.1:3141. Nothing is
+/// initialised, started or supervised. App files go under the app's own data dir;
+/// the node's data dir is only read.
+async fn attach_external(app: &AppHandle, app_data_dir: &Path, node: dev_node::ExternalNode) {
+    let state = app.state::<NodeState>();
+    eprintln!(
+        "[dev-node] EXTERNAL node on 127.0.0.1:3141, data dir {} (not started or stopped by the app)",
+        node.data_dir.display()
+    );
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+        let _ = window.set_title(dev_node::EXTERNAL_WINDOW_TITLE);
+    }
+    let app_dir = app_data_dir.join("external-node");
+    if let Err(e) = std::fs::create_dir_all(&app_dir) {
+        return set_error(&state, format!("cannot create the app dir: {e}"));
+    }
+    *state.external_node.lock().unwrap() = Some(node.data_dir.clone());
+    *state.app_dir.lock().unwrap() = Some(app_dir.clone());
+    *state.room_routing_policy.lock().unwrap() = configured_routing_policy(&node.config);
+    if !health_ok(&state).await {
+        return set_error(
+            &state,
+            "no node answers on 127.0.0.1:3141. Start your node, then reopen BitSov; \
+             it never starts one in external mode.",
+        );
+    }
+    finish_auth(&state, &app_dir).await;
+}
+
 /// Ensure a node config exists (first run), then start + supervise the node,
 /// wait for /health, pair (or fall back to /auth/local on rc7), and read /identity.
 async fn bootstrap_node(app: AppHandle) {
@@ -595,6 +663,11 @@ async fn bootstrap_node(app: AppHandle) {
         Err(e) => return set_error(&state, format!("no app data dir: {e}")),
     };
     // Release builds: always `Ok(None)` (see `dev_node`).
+    match dev_node::resolve_external(&app_data_dir) {
+        Ok(Some(node)) => return attach_external(&app, &app_data_dir, node).await,
+        Ok(None) => {}
+        Err(e) => return set_error(&state, format!("external node: {e}")),
+    }
     let (data_dir, dev_sidecar) = match dev_node::resolve(&app_data_dir) {
         Ok(None) => (app_data_dir, None),
         Ok(Some(dev)) => {
@@ -661,14 +734,22 @@ fn now_unix() -> i64 {
 }
 
 /// Load (first run: create) the client key and the pairing client for `data_dir`.
+/// The node writes its challenge files under its own data dir: `data_dir` for a
+/// supervised node, the owner's node dir in external mode.
 fn pairing_ctx(state: &NodeState, data_dir: &Path) -> Result<Arc<PairingCtx>, PairError> {
     if let Some(ctx) = state.pairing.lock().unwrap().as_ref() {
         return Ok(ctx.clone());
     }
     let store = data_dir.join(PAIRING_STORE_DIR);
     let key = ClientKey::load_or_create(&store)?;
+    let node_dir = state
+        .external_node
+        .lock()
+        .unwrap()
+        .clone()
+        .unwrap_or_else(|| data_dir.to_path_buf());
     let client = PairingClient::new(state.http.clone(), state.api_base.clone())
-        .expect_challenge_dir(data_dir.join("pairing"));
+        .expect_challenge_dir(node_dir.join("pairing"));
     let ctx = Arc::new(PairingCtx {
         client,
         key,
@@ -1278,6 +1359,7 @@ async fn identity_restore(
 ) -> Result<RestoreOutcome, String> {
     reject_sealed_window(&window)?;
     drop(window);
+    refuse_external(state.inner())?;
     let phrase = mnemonic.trim();
     let words = phrase.split_whitespace().count();
     if words != 12 && words != 24 {
@@ -1663,6 +1745,192 @@ async fn open_introduction(state: &NodeState, text: &str, allow_local: bool) -> 
     }
 }
 
+// ---- Front door (doorstep card) ---------------------------------------------------
+//
+// A front-door card is free to carry: reading is local. Knock dials unprivileged
+// (never admission), then the composer uses the existing first-contact quote.
+
+#[tauri::command(rename_all = "snake_case")]
+async fn front_door_read(
+    window: WebviewWindow<impl tauri::Runtime>,
+    text: String,
+) -> Result<bitsov_app::front_door::FrontDoor, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    bitsov_app::front_door::read(&text, now_unix().max(0) as u64)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn front_door_mine(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+) -> Result<bitsov_app::front_door::FrontDoor, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    read_own_front_door(state.inner()).await
+}
+
+async fn read_own_front_door(state: &NodeState) -> Result<bitsov_app::front_door::FrontDoor, String> {
+    use bitsov_app::front_door as fd;
+    let status: serde_json::Value = get_json(state, "/status").await?;
+    if !status["api_capabilities"]
+        .as_array()
+        .is_some_and(|caps| caps.iter().any(|v| v.as_str() == Some(fd::CAPABILITY)))
+    {
+        return Err("Your node cannot publish a front door yet.".into());
+    }
+    let path = "/front-door";
+    let (code, text) = call_api(state, reqwest::Method::GET, path, None).await?;
+    if code == reqwest::StatusCode::NOT_FOUND {
+        return Err("front_door_missing: publish one first".into());
+    }
+    if !code.is_success() {
+        return Err(api_error(path, code, &text));
+    }
+    #[derive(Deserialize)]
+    struct Mine {
+        card: fd::Card,
+        link: String,
+    }
+    let mine: Mine = serde_json::from_str(&text).map_err(|e| format!("{path} decode failed: {e}"))?;
+    let view = mine.card.view(now_unix().max(0) as u64)?;
+    if Some(mine.card.node_id.as_str()) != status["node_id"].as_str() {
+        return Err(format!("{path}: the card is not signed by this node's key"));
+    }
+    if view.link != mine.link {
+        return Err(format!("{path}: the link does not match the card"));
+    }
+    Ok(view)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct FrontDoorPublishArgs {
+    display_name: String,
+    #[serde(default)]
+    tagline: String,
+    #[serde(default)]
+    about: String,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    admission_msat: Option<u64>,
+    #[serde(default)]
+    message_msat: Option<u64>,
+    #[serde(default)]
+    page_msat: Option<u64>,
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn front_door_publish(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    fields: FrontDoorPublishArgs,
+) -> Result<bitsov_app::front_door::FrontDoor, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    use bitsov_app::front_door as fd;
+    let status: serde_json::Value = get_json(state.inner(), "/status").await?;
+    if !status["api_capabilities"]
+        .as_array()
+        .is_some_and(|caps| caps.iter().any(|v| v.as_str() == Some(fd::CAPABILITY)))
+    {
+        return Err("Your node cannot publish a front door yet.".into());
+    }
+    let path = "/front-door";
+    let body = serde_json::json!({
+        "display_name": fields.display_name,
+        "tagline": fields.tagline,
+        "about": fields.about,
+        "kind": fields.kind,
+        "admission_msat": fields.admission_msat,
+        "message_msat": fields.message_msat,
+        "page_msat": fields.page_msat,
+    });
+    let (code, text) = call_api(state.inner(), reqwest::Method::PUT, path, Some(body)).await?;
+    if !code.is_success() {
+        return Err(api_error(path, code, &text));
+    }
+    #[derive(Deserialize)]
+    struct Resp {
+        card: fd::Card,
+        link: String,
+    }
+    let resp: Resp = serde_json::from_str(&text).map_err(|e| format!("{path} decode failed: {e}"))?;
+    let view = resp.card.view(now_unix().max(0) as u64)?;
+    if Some(resp.card.node_id.as_str()) != status["node_id"].as_str() {
+        return Err(format!("{path}: the card is not signed by this node's key"));
+    }
+    if view.link != resp.link {
+        return Err(format!("{path}: the link does not match the card"));
+    }
+    Ok(view)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn front_door_open(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    text: String,
+    allow_local: bool,
+) -> Result<bitsov_app::front_door::FrontDoor, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    open_front_door(state.inner(), &text, allow_local).await
+}
+
+async fn open_front_door(
+    state: &NodeState,
+    text: &str,
+    allow_local: bool,
+) -> Result<bitsov_app::front_door::FrontDoor, String> {
+    use bitsov_app::front_door as fd;
+    let door = fd::read(text, now_unix().max(0) as u64)?;
+    if !door.fresh {
+        return Err("This front door has expired. Ask for a fresh one.".into());
+    }
+    let local = door.reach == bitsov_app::introduction::Reach::Local;
+    if local && !allow_local {
+        return Err(format!(
+            "This front door points to a local network address ({}). Allow it on the card first. Nothing was sent.",
+            door.endpoint
+        ));
+    }
+    if !node_offers(state, fd::CAPABILITY).await {
+        return Err("Your node cannot open front doors yet.".into());
+    }
+    let path = "/front-door/open";
+    let (code, body) = call_api(
+        state,
+        reqwest::Method::POST,
+        path,
+        Some(serde_json::json!({ "card": door.link, "allow_local": local && allow_local })),
+    )
+    .await?;
+    if code == reqwest::StatusCode::CONFLICT && body.contains("front_door_closed_mesh") {
+        return Err("Your node only connects to peers you added yourself, and a front door does not add one. Nothing was sent.".into());
+    }
+    if !code.is_success() {
+        return Err(api_error(path, code, &body));
+    }
+    let opened: serde_json::Value =
+        serde_json::from_str(&body).map_err(|e| format!("{path} decode failed: {e}"))?;
+    if opened["node_id"].as_str() != Some(door.node_id.as_str())
+        || opened["connected"] != serde_json::Value::Bool(true)
+    {
+        return Err(format!("{path}: the node connected to someone else"));
+    }
+    let dialed = opened["dialed"]
+        .as_str()
+        .and_then(|d| d.parse::<std::net::SocketAddr>().ok());
+    match dialed {
+        Some(addr) if bitsov_app::introduction::dial_allowed(door.reach, addr.ip()) => Ok(door),
+        _ => Err(format!(
+            "{path}: the node dialed an address this front door does not allow"
+        )),
+    }
+}
+
 // ---- K1 slice 2: sponsor kit ------------------------------------------------------
 //
 // The inviter's node pays a small, capped gift into the newcomer's own node.
@@ -1915,10 +2183,19 @@ async fn do_first_contact_request(state: &NodeState, recipient: &str, max_msat: 
     }
     check_auth(state, auth)?;
     if approval_fence(state) != fence { return Err(fence_broken()); }
+    // #65 external-node attach: the app already knows this node's konsensus.toml.
+    // Include --config (and a PATH hint) only then; production still expects the
+    // owner to run from the data dir or add --config themselves.
+    let owner_config = state
+        .external_node
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|dir| dir.join("konsensus.toml"));
     let pending = owner_contact::Pending::new(owner_contact::Request {
         client_id: grant.client_id.clone(), grant_op_id: grant.op_id.clone(),
         recipient, max_total_msat: max_msat, contact_budget_msat,
-    }, fence, now_ms(), &grant)?;
+    }, fence, now_ms(), &grant, owner_config.as_deref())?;
     let view = pending.view.clone();
     *state.owner_contact.lock().unwrap() = Some(pending);
     Ok(Some(view))
@@ -2005,13 +2282,23 @@ fn decode_act<T: serde::de::DeserializeOwned>(path: &str, body: &str) -> Result<
     serde_json::from_str(body).map_err(|e| ActionError::node(format!("{path} decode failed: {e}")))
 }
 
-/// An admin POST (invites or file upload), never a money request.
+/// An admin POST (invites), never a money request. Always needs the spend window.
 async fn gated_post(
     state: &NodeState,
     path: &str,
     body: serde_json::Value,
 ) -> Result<String, ActionError> {
-    state.spend.lock().unwrap().check(now_ms())?;
+    gated_post_auth(state, Auth::Window(approval_generation(state)?), path, body).await
+}
+
+/// Admin POST under the same budget / window authority as a paid send (file upload).
+async fn gated_post_auth(
+    state: &NodeState,
+    auth: Auth,
+    path: &str,
+    body: serde_json::Value,
+) -> Result<String, ActionError> {
+    check_auth(state, auth)?;
     let (status, text) = call_api(state, reqwest::Method::POST, path, Some(body)).await?;
     if act::is_scope_refusal(status.as_u16()) {
         return Err(ActionError::new(
@@ -2031,10 +2318,18 @@ fn approval_generation(state: &NodeState) -> Result<u64, ActionError> {
     Ok(gate.generation())
 }
 
+/// The app's own files: `NodeState::app_dir` in external mode, else next to the
+/// supervised node's config.
+fn app_files_dir(state: &NodeState) -> Option<PathBuf> {
+    if let Some(dir) = state.app_dir.lock().unwrap().clone() {
+        return Some(dir);
+    }
+    state.config.lock().unwrap().as_deref()?.parent().map(Path::to_path_buf)
+}
+
 fn spend_journal(state: &NodeState) -> Result<Journal, ActionError> {
-    let config = state.config.lock().unwrap().clone()
+    let dir = app_files_dir(state)
         .ok_or_else(|| spend_journal::unknown("The app data directory is not ready."))?;
-    let dir = config.parent().ok_or_else(|| spend_journal::unknown("Missing app data directory."))?;
     Journal::open(&dir.join("app-spend"))
 }
 
@@ -2088,9 +2383,9 @@ struct Charge {
 }
 
 fn budget_dir(state: &NodeState) -> Result<(PathBuf, String), ActionError> {
-    let config = state.config.lock().unwrap().clone()
-        .ok_or_else(|| ActionError::new("app_not_ready", "The app data directory is not ready."))?;
-    let dir = config.parent().ok_or_else(|| ActionError::new("app_not_ready", "Missing app data directory."))?.join("app-spend");
+    let dir = app_files_dir(state)
+        .ok_or_else(|| ActionError::new("app_not_ready", "The app data directory is not ready."))?
+        .join("app-spend");
     let node_id = state.node_id.lock().unwrap().clone().ok_or_else(|| ActionError::new("app_not_ready", "No node identity."))?;
     Ok((dir, node_id))
 }
@@ -2380,11 +2675,23 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
     if status == reqwest::StatusCode::CONFLICT && body.get("max_total_msat").is_some()
         && serde_json::from_str::<serde_json::Value>(&text).ok().is_some_and(|v| v["code"] == "price_cap_exceeded") {
         release(state)?;
-        abandon(&journal)?;
-        // Not a price change: no fresh quote under a cap can pay a re-admission yet.
+        // Not a price change: the contact asks for admission again.
         if act::readmission_capped_refusal(status.as_u16(), &text) {
+            if operation_id.is_some() && retry.is_none() {
+                // The node holds this operation `prepared`, nothing paid: sending
+                // this very message again (under the contact's re-admission
+                // quote) reuses its id, so it can never be paid twice.
+                pending.resumable = true;
+                pending.budgeted = false;
+                pending.accounting_msat = None;
+                pending.target = None;
+                journal.save(&pending)?;
+            } else {
+                abandon(&journal)?;
+            }
             return Err(ActionError::new("readmission_capped", act::READMISSION_CAPPED));
         }
+        abandon(&journal)?;
         return Err(ActionError::new("price_cap_exceeded", "The node refused the changed price before any payment. Refresh the quote."));
     }
     // The node compared this operation before paying anything in this call.
@@ -3075,6 +3382,9 @@ struct SendCaps {
     readmission_possible: bool,
     /// Durable, idempotent 1:1 message operations.
     operations: bool,
+    /// A capped 1:1 chat may pay a reconnect's re-admission under the
+    /// contact's fresh signed quote (genome #111 revived).
+    quoted_readmission: bool,
 }
 
 async fn require_price_caps(state: &NodeState, room: bool) -> Result<SendCaps, ActionError> {
@@ -3085,7 +3395,11 @@ async fn require_price_caps(state: &NodeState, room: bool) -> Result<SendCaps, A
     if !has("paid_send_caps_v1") || (room && !has("room_terminal_outcomes_v1")) {
         return Err(unavailable());
     }
-    Ok(SendCaps { readmission_possible: has(grant::FIRST_CONTACT_CAPABILITY), operations: has(OPERATIONS_CAPABILITY) })
+    Ok(SendCaps {
+        readmission_possible: has(grant::FIRST_CONTACT_CAPABILITY),
+        operations: has(OPERATIONS_CAPABILITY),
+        quoted_readmission: has(act::QUOTED_READMISSION_CAPABILITY),
+    })
 }
 
 /// Genome #113: `operation_id` on 1:1 compose, idempotent POST, `GET /messages/operations/{id}`.
@@ -3164,8 +3478,24 @@ async fn do_message_send_with(
     if let Some(contact_budget) = node_ok {
         confirm_first_contact(state, &recipient, max_msat, contact_budget).await?;
     }
-    let charge = Charge { target, room: is_room, confirm: plan.confirm, readmission_possible, confirmed: node_ok.is_some(), operation: caps.operations && !is_room };
-    let sent = money_post(state, auth, "/messages/compose", body, max_msat, Some(charge)).await;
+    let quoted_readmission = !is_room && node_ok.is_none() && caps.quoted_readmission;
+    // The owner approved the contact's re-admission quote (`readmission_quoted`):
+    // that send carries its routing ceilings for both payments, under its total.
+    if quoted_readmission {
+        if let Some(ask) = take_readmission_ask(state, &recipient, max_msat) {
+            body["max_routing_fee_msat"] = serde_json::json!(ask.max_routing_fee_msat);
+        }
+    }
+    let charge = Charge { target: target.clone(), room: is_room, confirm: plan.confirm, readmission_possible, confirmed: node_ok.is_some(), operation: caps.operations && !is_room };
+    let sent = money_post(state, auth, "/messages/compose", body.clone(), max_msat, Some(charge)).await;
+    let sent = match sent {
+        // After a reconnect or restart the contact asks for admission again,
+        // and the node kept its signed quote for this connection.
+        Err(e) if e.code == "readmission_capped" && quoted_readmission => {
+            readmit_under_quote(state, &target, body, max_msat, readmission_possible, caps.operations, e).await
+        }
+        other => other,
+    };
     let text = match sent {
         // After a reconnect the contact asks for admission again. The node pays
         // it from the budget only for a contact its grant budgets; this one it
@@ -3189,7 +3519,69 @@ async fn do_message_send_with(
         operation_id: reply.operation_id,
         state: reply.state,
         accepted: reply.accepted,
+        readmission_msat: reply.readmission_msat.filter(|m| *m > 0),
     })
+}
+
+/// Genome `quoted_readmission_v1`: the contact asked for admission again and
+/// the node refused this send's cap before paying anything, keeping the
+/// contact's fresh signed quote for this connection. The quote's total
+/// (admission once, this message, both routing ceilings) is the new all-in
+/// price. Inside the contact's existing budget the app sends again under it,
+/// with the same operation id, without a prompt; otherwise the owner is asked
+/// once (`readmission_quoted`). Anything unexpected keeps the refusal.
+async fn readmit_under_quote(
+    state: &NodeState,
+    target: &str,
+    mut body: serde_json::Value,
+    max_msat: u64,
+    readmission_possible: bool,
+    operations: bool,
+    refused: ActionError,
+) -> Result<String, ActionError> {
+    let recipient = body["recipient"].as_str().unwrap_or_default().to_string();
+    let Ok(quote) = read_first_contact_quote(state, &recipient).await else { return Err(refused) };
+    // A cap that already covered this quote was refused: never loop.
+    if quote.total_msat <= max_msat { return Err(refused); }
+    let view = act::AdmissionView {
+        admission_msat: quote.admission_msat,
+        message_msat: quote.message_msat,
+        max_routing_fee_msat: quote.max_routing_fee_msat,
+        total_msat: quote.total_msat,
+        quoted: true,
+    };
+    let within_budget = match plan_message(state, target, false, quote.total_msat, None) {
+        Ok((auth @ Auth::Budget(_), plan)) if plan.confirm.is_none() => Some(auth),
+        _ => None,
+    };
+    let Some(auth) = within_budget else {
+        remember_readmission_ask(state, &recipient, &quote);
+        return Err(ActionError::readmission_quoted(view));
+    };
+    body["max_total_msat"] = serde_json::json!(quote.total_msat);
+    body["max_routing_fee_msat"] = serde_json::json!(quote.max_routing_fee_msat);
+    let charge = Charge { target: target.to_string(), room: false, confirm: None, readmission_possible, confirmed: false, operation: operations };
+    money_post(state, auth, "/messages/compose", body, quote.total_msat, Some(charge)).await
+}
+
+fn remember_readmission_ask(state: &NodeState, peer: &str, quote: &control::FirstContactQuote) {
+    let Some(node_id) = state.node_id.lock().unwrap().clone() else { return };
+    *state.readmission_ask.lock().unwrap() = Some(ReadmissionAsk {
+        node_id,
+        peer: peer.to_string(),
+        total_msat: quote.total_msat,
+        max_routing_fee_msat: quote.max_routing_fee_msat,
+        expires_at_ms: quote.expires_at.saturating_mul(1000),
+    });
+}
+
+/// The re-admission quote the owner was shown for `peer`, if this send is for
+/// exactly its total and it has not expired. Single use.
+fn take_readmission_ask(state: &NodeState, peer: &str, max_msat: u64) -> Option<ReadmissionAsk> {
+    let node_id = state.node_id.lock().unwrap().clone()?;
+    let mut ask = state.readmission_ask.lock().unwrap();
+    let matches = ask.as_ref().is_some_and(|a| a.node_id == node_id && a.peer == peer && a.total_msat == max_msat && a.expires_at_ms > now_ms());
+    if matches { ask.take() } else { None }
 }
 
 fn readmission_needs_ok() -> ActionError {
@@ -3240,6 +3632,11 @@ async fn do_message_retry(state: &NodeState, recipient: &str, plaintext: &str, a
     // Nothing can be paid under a zero cap, re-admission included.
     let charge = Charge { target: target.clone(), room: false, confirm: None, readmission_possible: readmission_possible && approved_msat.is_some(), confirmed: approved_msat.is_some(), operation: caps.operations };
     let text = match money_post_with(state, auth, "/messages/compose", body, cap, Some(charge), Some(&undelivered)).await {
+        // The node pays re-admission under a cap that fits the contact's signed
+        // quote: Retry delivery (zero cap) asks the owner for that price.
+        Err(e) if e.code == "readmission_capped" && caps.quoted_readmission && approved_msat.is_none() => {
+            return Err(needs_admission(state, &target, &undelivered).await);
+        }
         // Asking the owner to approve a price cannot help: any cap refuses it.
         Err(e) if e.code == "readmission_capped" => {
             return Err(ActionError::new("readmission_capped", act::READMISSION_CAPPED_RETRY));
@@ -3267,6 +3664,7 @@ async fn do_message_retry(state: &NodeState, recipient: &str, plaintext: &str, a
         operation_id: reply.operation_id,
         state: reply.state,
         accepted: reply.accepted,
+        readmission_msat: reply.readmission_msat.filter(|m| *m > 0),
     })
 }
 
@@ -3370,6 +3768,93 @@ async fn do_invite_redeem(state: &NodeState, invite: &str) -> Result<act::Redeem
     decode_act("/invites/accept", &text)
 }
 
+/// A received voice note's bytes, for the inline player. Read-only: two GETs,
+/// never a payment. Anything that is not an audio file is refused.
+async fn do_voice_note_fetch(state: &NodeState, message_id: &str) -> Result<act::FileBlob, String> {
+    let message_id = control::node_id(message_id).map_err(|_| "expected a 64-character hex message id".to_string())?;
+    let mut found = None;
+    for limit in act::FILE_LIST_WINDOWS {
+        let rows: Vec<act::FileRow> = get_json(state, &format!("/files?limit={limit}")).await?;
+        match act::voice_file_for(&rows, &message_id) {
+            act::VoiceLookup::Voice(row) => { found = Some(row.id.clone()); break; }
+            act::VoiceLookup::NotVoice => return Err(act::NOT_A_VOICE_NOTE.into()),
+            // A short page is the whole list: no wider window can hold it.
+            act::VoiceLookup::Missing if rows.len() < limit => break,
+            act::VoiceLookup::Missing => {}
+        }
+    }
+    let row = found.ok_or_else(|| act::VOICE_NOT_STORED.to_string())?;
+    let id = control::room_id(&row).map_err(|_| "the node returned an unexpected file id".to_string())?;
+    let blob: act::FileBlob = get_json(state, &format!("/files/{id}")).await?;
+    if !act::is_voice_mime(&blob.mime_type) {
+        return Err(act::NOT_A_VOICE_NOTE.into());
+    }
+    Ok(blob)
+}
+
+async fn read_call_quote(state: &NodeState, peer: &str) -> Result<control::CallQuote, String> {
+    let peer = control::node_id(peer)?;
+    let own: control::KindPrice = get_json(state, &control::price_path(act::KIND_CALL_OFFER + 1)).await?;
+    // Genome asks the callee now; a refusal or an older node means no offer price.
+    let live: Option<control::PeerCallPrice> = get_json(state, &format!("/pricing/peers/{peer}/call")).await.ok();
+    Ok(control::call_quote(live.as_ref(), own.price_msat))
+}
+
+/// One paid call signal (offer, answer, ICE or hangup) to one contact.
+/// Same authority as a 1:1 message: the owner's budget or the ten-minute
+/// window, one journaled spend at a time, a durable operation id when the
+/// node keeps them. Calls go to contacts already in the book: a first
+/// contact is a message, never a ring.
+async fn do_call_signal(
+    state: &NodeState,
+    peer: &str,
+    kind: u16,
+    plaintext: &str,
+    max_msat: u64,
+) -> Result<act::CallReceipt, ActionError> {
+    let target = control::node_id(peer).map_err(ActionError::invalid)?;
+    let mut body = act::call_body(&target, kind, plaintext)?;
+    let needs_contact = || ActionError::new("call_needs_contact", "Calls go to contacts you have already paid. Send them a message first. Nothing was paid.");
+    let (auth, plan) = plan_message(state, &target, false, max_msat, None)
+        .map_err(|e| if e.code == "first_contact" { needs_contact() } else { e })?;
+    if plan.confirm.is_some() {
+        return Err(needs_contact());
+    }
+    no_pending_spend(state)?;
+    let caps = require_price_caps(state, false).await?;
+    let quote = read_call_quote(state, &target).await.map_err(ActionError::node)?;
+    let (principal, fee) = if kind == act::KIND_CALL_OFFER {
+        let offer = quote.offer_msat.ok_or_else(|| ActionError::new(
+            "call_unsupported", "Their node does not take calls yet (no call price advertised). Nothing was paid."))?;
+        (offer, quote.offer_max_routing_fee_msat)
+    } else {
+        (quote.signal_msat, quote.signal_max_routing_fee_msat)
+    };
+    ceiling(principal + fee, max_msat)?;
+    body["max_total_msat"] = serde_json::json!(max_msat);
+    body["max_routing_fee_msat"] = serde_json::json!(fee);
+    let charge = Charge {
+        target: target.clone(),
+        room: false,
+        confirm: None,
+        readmission_possible: caps.readmission_possible,
+        confirmed: false,
+        operation: caps.operations,
+    };
+    let text = money_post(state, auth, "/messages/compose", body, max_msat, Some(charge)).await?;
+    let reply: act::SendReply = decode_act("/messages/compose", &text)?;
+    Ok(act::CallReceipt {
+        total_msat: reply.total_msat()?,
+        message_id: reply.message_id,
+        kind,
+        amount_msat: reply.amount_msat,
+        max_routing_fee_msat: reply.max_routing_fee_msat,
+        delivered: reply.delivered,
+        accepted: reply.accepted,
+        sent_at_ms: now_ms(),
+    })
+}
+
 async fn do_file_send(
     state: &NodeState,
     recipient: &str,
@@ -3377,25 +3862,51 @@ async fn do_file_send(
     mime_type: &str,
     data_b64: &str,
     max_msat: u64,
+    first_contact_msat: Option<u64>,
 ) -> Result<act::FileReceipt, ActionError> {
-    let generation = approval_generation(state)?;
-    no_pending_spend(state)?;
     let recipient = control::node_id(recipient).map_err(ActionError::invalid)?;
-    // Files retain the manual window; approval never exempts them from the
-    // same daily and contact limits as messages. Check before uploading bytes.
-    let mut charge = plan_manual_charge(state, &recipient, max_msat)?;
-    charge.readmission_possible = require_price_caps(state, false).await?.readmission_possible;
+    // Same budget / ten-minute window rules as a 1:1 message. Genome's file
+    // send has no `operation_id` field (`deny_unknown_fields`), so we keep
+    // `operation: false`; the spend journal still fences concurrent money posts.
+    let (auth, plan) = plan_message(state, &recipient, false, max_msat, first_contact_msat)?;
+    no_pending_spend(state)?;
+    let caps = require_price_caps(state, false).await?;
     let body = act::file_upload_body(filename, mime_type, data_b64)?;
     let filename = body["filename"].as_str().unwrap_or_default().to_string();
     let quote: control::KindPrice = get_json(state, &control::price_path(act::KIND_FILE_REF)).await?;
     ceiling(act::payment_quote(quote.price_msat.max(act::MIN_PAYMENT_MSAT))?.total_msat, max_msat)?;
-    let text = gated_post(state, "/files", body).await?;
+    let text = gated_post_auth(state, auth, "/files", body).await?;
     let upload: act::UploadReply = decode_act("/files", &text)?;
     let path = act::file_send_path(&upload.file_id)?;
     // Upload can take time; quote again immediately before the money request.
     let quote: control::KindPrice = get_json(state, &control::price_path(act::KIND_FILE_REF)).await?;
-    ceiling(act::payment_quote(quote.price_msat.max(act::MIN_PAYMENT_MSAT))?.total_msat, max_msat)?;
-    let text = money_post(state, Auth::Window(generation), &path, serde_json::json!({ "recipient": recipient, "max_total_msat": max_msat, "max_routing_fee_msat": act::routing_fee(quote.price_msat.max(act::MIN_PAYMENT_MSAT)) }), max_msat, Some(charge)).await?;
+    let principal = quote.price_msat.max(act::MIN_PAYMENT_MSAT);
+    ceiling(act::payment_quote(principal)?.total_msat, max_msat)?;
+    let node_ok = plan.confirm.or(first_contact_msat);
+    if let Some(contact_budget) = node_ok {
+        confirm_first_contact(state, &recipient, max_msat, contact_budget).await?;
+    }
+    let charge = Charge {
+        target: recipient.clone(),
+        room: false,
+        confirm: plan.confirm,
+        readmission_possible: caps.readmission_possible,
+        confirmed: node_ok.is_some(),
+        operation: false,
+    };
+    let text = money_post(
+        state,
+        auth,
+        &path,
+        serde_json::json!({
+            "recipient": recipient,
+            "max_total_msat": max_msat,
+            "max_routing_fee_msat": act::routing_fee(principal),
+        }),
+        max_msat,
+        Some(charge),
+    )
+    .await?;
     let reply: act::SendReply = decode_act("/files/send", &text)?;
     let total_msat = reply.total_msat()?;
     Ok(act::FileReceipt {
@@ -3408,6 +3919,9 @@ async fn do_file_send(
         amount_msat: reply.amount_msat,
         max_routing_fee_msat: reply.max_routing_fee_msat,
         sent_at_ms: now_ms(),
+        operation_id: reply.operation_id,
+        state: reply.state,
+        accepted: reply.accepted,
     })
 }
 
@@ -3730,8 +4244,48 @@ async fn file_price(
     act::payment_quote(price.price_msat.max(act::MIN_PAYMENT_MSAT)).map_err(|e| e.to_string())
 }
 
+/// What calling a contact costs, before anything is paid. Read-only.
+#[tauri::command(rename_all = "snake_case")]
+async fn call_quote(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    peer: String,
+) -> Result<control::CallQuote, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    read_call_quote(state.inner(), &peer).await
+}
+
+/// `POST /messages/compose` for one call signal (kinds 400-403).
+#[tauri::command(rename_all = "snake_case")]
+async fn call_signal(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    peer: String,
+    kind: u16,
+    plaintext: String,
+    max_msat: u64,
+) -> Result<act::CallReceipt, ActionError> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    do_call_signal(state.inner(), &peer, kind, &plaintext, max_msat).await
+}
+
+/// `GET /files` then `GET /files/:id`: a received voice note, for playback.
+#[tauri::command(rename_all = "snake_case")]
+async fn voice_note_fetch(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    message_id: String,
+) -> Result<act::FileBlob, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    do_voice_note_fetch(state.inner(), &message_id).await
+}
+
 /// `POST /files` then `POST /files/:id/send` to one peer.
 #[tauri::command(rename_all = "snake_case")]
+#[allow(clippy::too_many_arguments)]
 async fn file_send(
     window: WebviewWindow<impl tauri::Runtime>,
     state: State<'_, NodeState>,
@@ -3740,10 +4294,11 @@ async fn file_send(
     mime_type: String,
     data_b64: String,
     max_msat: u64,
+    first_contact_msat: Option<u64>,
 ) -> Result<act::FileReceipt, ActionError> {
     reject_sealed_window(&window)?;
     drop(window);
-    do_file_send(state.inner(), &recipient, &filename, &mime_type, &data_b64, max_msat).await
+    do_file_send(state.inner(), &recipient, &filename, &mime_type, &data_b64, max_msat, first_contact_msat).await
 }
 
 // ---- AI track (main window) -------------------------------------------------
@@ -4139,6 +4694,10 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             introduction_mine,
             introduction_read,
             introduction_open,
+            front_door_mine,
+            front_door_read,
+            front_door_open,
+            front_door_publish,
             sponsor_status,
             sponsor_offer,
             sponsor_candidate,
@@ -4174,6 +4733,9 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             invite_redeem,
             file_price,
             file_send,
+            voice_note_fetch,
+            call_quote,
+            call_signal,
             ai_read,
             ai_providers,
             ai_disclose,
@@ -4265,6 +4827,39 @@ mod pairing_wiring_tests {
             data_dir,
             _server: server,
         }
+    }
+
+    /// External mode: challenges are read from the owner's node dir, and the app's
+    /// key and pairing record stay in the app's own dir.
+    #[tokio::test]
+    async fn external_mode_reads_the_node_dir_and_writes_only_the_app_dir() {
+        let f = fixture(PairRoutes::Live);
+        let app_dir = tempfile::tempdir().unwrap();
+        *f.state.external_node.lock().unwrap() = Some(f.data_dir.path().to_path_buf());
+        authenticate(&f.state, app_dir.path()).await.expect("paired");
+        assert!(matches!(&*f.state.auth.lock().unwrap(), AuthMode::Paired(_)));
+        assert!(app_dir.path().join(PAIRING_STORE_DIR).join(pairing::KEY_FILE).exists());
+        assert!(!f.data_dir.path().join(PAIRING_STORE_DIR).exists());
+    }
+
+    #[tokio::test]
+    async fn without_external_mode_the_challenge_must_be_in_the_data_dir() {
+        let f = fixture(PairRoutes::Live);
+        let elsewhere = tempfile::tempdir().unwrap();
+        let err = authenticate(&f.state, elsewhere.path()).await.expect_err("refused");
+        assert!(err.contains("data directory"), "{err}");
+    }
+
+    #[test]
+    fn external_mode_refuses_restart_and_keeps_app_files_out_of_the_node_dir() {
+        let state = NodeState::default();
+        state.config.lock().unwrap().replace(PathBuf::from("/node/konsensus.toml"));
+        assert_eq!(app_files_dir(&state), Some(PathBuf::from("/node")));
+        assert!(refuse_external(&state).is_ok());
+        state.external_node.lock().unwrap().replace(PathBuf::from("/node"));
+        state.app_dir.lock().unwrap().replace(PathBuf::from("/app/external-node"));
+        assert_eq!(app_files_dir(&state), Some(PathBuf::from("/app/external-node")));
+        assert!(refuse_external(&state).unwrap_err().contains("never restarts"));
     }
 
     #[tokio::test]
@@ -4650,7 +5245,7 @@ mod control_act_tests {
             spend_advance(&node.state,true).await.unwrap();
             assert_eq!(do_message_send(&node.state,A,false,"hi",7000,None).await.unwrap_err().code,"price_cap_unavailable");
             assert_eq!(do_message_send(&node.state,ROOM,true,"hi",13000,Some(std::collections::HashMap::from([(A.into(),7000),(C.into(),6000)]))).await.unwrap_err().code,"price_cap_unavailable");
-            assert_eq!(do_file_send(&node.state,A,"a.txt","text/plain","aGk=",8000).await.unwrap_err().code,"price_cap_unavailable");
+            assert_eq!(do_file_send(&node.state,A,"a.txt","text/plain","aGk=",8000, None).await.unwrap_err().code,"price_cap_unavailable");
             assert!(node.posts().is_empty());
         }
     }
@@ -4664,7 +5259,7 @@ mod control_act_tests {
         let node=fake(AuthMode::Local,routes);
         spend_advance(&node.state,true).await.unwrap();
         assert_eq!(do_message_send(&node.state,A,false,"hi",7000, None).await.unwrap_err().code,"price_cap_unavailable");
-        assert_eq!(do_file_send(&node.state,A,"a.txt","text/plain","aGk=",8000).await.unwrap_err().code,"price_cap_unavailable");
+        assert_eq!(do_file_send(&node.state,A,"a.txt","text/plain","aGk=",8000, None).await.unwrap_err().code,"price_cap_unavailable");
         assert!(node.posts().is_empty());
     }
     #[tokio::test]
@@ -5051,7 +5646,7 @@ mod control_act_tests {
             do_payment_keysend(s, &format!("02{}", "ab".repeat(32)), 5000, None, 10000).await.unwrap_err().code,
             do_invite_create(s, A, "203.0.113.5:9735", 24).await.unwrap_err().code,
             do_invite_redeem(s, "bitsov://invite/tok").await.unwrap_err().code,
-            do_file_send(s, A, "a.txt", "text/plain", "aGk=", 8000).await.unwrap_err().code,
+            do_file_send(s, A, "a.txt", "text/plain", "aGk=", 8000, None).await.unwrap_err().code,
         ];
         assert!(codes.iter().all(|c| *c == "spend_locked"), "{codes:?}");
         assert!(node.targets().is_empty(), "{:?}", node.targets());
@@ -6454,11 +7049,135 @@ mod control_act_tests {
         assert_eq!(node.posts()[0], ("/payments/pay".to_string(), serde_json::json!({"bolt11": "lntb10n1x", "max_routing_fee_msat": 5000})));
     }
 
+    fn call_routes(offer: Option<u64>) -> Routes {
+        let inner = happy();
+        Arc::new(move |m, p, b| {
+            let (route, _) = p.split_once('?').unwrap_or((p, ""));
+            match route {
+                r if r == format!("/pricing/peers/{A}/call") => match offer {
+                    Some(o) => (200, serde_json::json!({"peer_id": A, "offer_msat": o, "signal_msat": 50}).to_string()),
+                    None => (400, r#"{"error":"their node did not answer with a call price; nothing was paid","code":400,"reason":"call_price_unknown"}"#.into()),
+                },
+                "/payments/price/401" => (200, serde_json::json!({"kind": 401, "price_msat": 50}).to_string()),
+                "/messages/compose" => (200, serde_json::json!({"max_routing_fee_msat": 5000, "message_id": "c1", "delivered": true, "amount_msat": 10000, "accepted": true, "state": "acked"}).to_string()),
+                _ => inner(m, p, b),
+            }
+        })
+    }
+    const OFFER: &str = r#"{"v":1,"call_id":"0123456789abcdef0123456789abcdef","media":"audio","sdp":"v=0"}"#;
+
+    #[tokio::test]
+    async fn a_call_offer_pays_the_callees_call_price_inside_the_contact_budget() {
+        let node = fake(AuthMode::Local, call_routes(Some(10_000)));
+        let s = &node.state;
+        do_budget_approve(s, 500_000, budget::PresetId::Careful).await.unwrap();
+        with_book(s, true, |b| b.set_limit(A, false, 50_000)).unwrap();
+        let quote = read_call_quote(s, A).await.unwrap();
+        assert_eq!((quote.offer_msat, quote.call_total_msat), (Some(10_000), Some(21_000)));
+        let receipt = do_call_signal(s, A, 400, OFFER, 15_000).await.unwrap();
+        assert_eq!((receipt.kind, receipt.amount_msat, receipt.total_msat), (400, 10_000, 15_000));
+        let (path, body) = node.posts().into_iter().find(|(p, _)| p == "/messages/compose").unwrap();
+        assert_eq!(path, "/messages/compose");
+        assert_eq!((body["kind"].as_u64(), body["is_room"].as_bool()), (Some(400), Some(false)));
+        assert_eq!((body["max_total_msat"].as_u64(), body["max_routing_fee_msat"].as_u64()), (Some(15_000), Some(5_000)));
+        assert_eq!(body["plaintext"], OFFER);
+        assert_eq!(budget_now(s).spent_msat, 15_000);
+    }
+
+    #[tokio::test]
+    async fn a_call_is_refused_before_paying_when_it_cannot_be_priced_or_authorised() {
+        // Their node advertises no call price: nothing is posted.
+        let node = fake(AuthMode::Local, call_routes(None));
+        do_budget_approve(&node.state, 500_000, budget::PresetId::Careful).await.unwrap();
+        with_book(&node.state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
+        assert_eq!(do_call_signal(&node.state, A, 400, OFFER, 15_000).await.unwrap_err().code, "call_unsupported");
+        // The ceiling the owner saw is below the price.
+        let node2 = fake(AuthMode::Local, call_routes(Some(10_000)));
+        do_budget_approve(&node2.state, 500_000, budget::PresetId::Careful).await.unwrap();
+        with_book(&node2.state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
+        assert_eq!(do_call_signal(&node2.state, A, 400, OFFER, 14_999).await.unwrap_err().code, "price_changed");
+        // No approval at all: locked.
+        let node3 = fake(AuthMode::Local, call_routes(Some(10_000)));
+        assert_eq!(do_call_signal(&node3.state, A, 400, OFFER, 15_000).await.unwrap_err().code, "spend_locked");
+        // Not a JSON signal, or not a call kind.
+        assert_eq!(do_call_signal(&node2.state, A, 400, "ring", 15_000).await.unwrap_err().code, "invalid");
+        assert_eq!(do_call_signal(&node2.state, A, 0, "{}", 15_000).await.unwrap_err().code, "invalid");
+        for n in [&node, &node2, &node3] {
+            assert!(!n.posts().iter().any(|(p, _)| p == "/messages/compose"), "{:?}", n.posts());
+        }
+        assert_eq!(budget_now(&node2.state).spent_msat, 0);
+    }
+
+    #[tokio::test]
+    async fn a_stranger_is_never_rung() {
+        let node = fake(AuthMode::Local, call_routes(Some(10_000)));
+        do_budget_approve(&node.state, 500_000, budget::PresetId::Careful).await.unwrap();
+        let err = do_call_signal(&node.state, C, 400, OFFER, 15_000).await.unwrap_err();
+        assert_eq!(err.code, "call_needs_contact", "{err:?}");
+        assert!(!node.posts().iter().any(|(p, _)| p == "/messages/compose"));
+    }
+
+    #[tokio::test]
+    async fn a_received_voice_note_is_fetched_read_only_by_message_id() {
+        const MID: &str = "cd";
+        let mid = MID.repeat(32);
+        let listed = serde_json::json!([
+            {"id": ROOM, "filename": "voice-note.webm", "mime_type": "audio/webm", "size_bytes": 2, "blake3_hash": "bb", "sender": A, "message_id": mid.to_uppercase(), "created_at": ""},
+            {"id": FILE_ID, "filename": "doc.html", "mime_type": "text/html", "size_bytes": 2, "blake3_hash": "bb", "sender": A, "message_id": "ef".repeat(32), "created_at": ""}
+        ]);
+        let routes: Routes = Arc::new(move |_m, p, _b| {
+            let (route, _) = p.split_once('?').unwrap_or((p, ""));
+            match route {
+                "/files" => (200, listed.to_string()),
+                r if r == format!("/files/{ROOM}") => (200, serde_json::json!({"id": ROOM, "filename": "voice-note.webm", "mime_type": "audio/webm", "size_bytes": 2, "blake3_hash": "bb", "sender": A, "data_b64": "aGk="}).to_string()),
+                _ => (404, r#"{"error":"route","code":404}"#.into()),
+            }
+        });
+        let node = fake(AuthMode::Local, routes);
+        let blob = do_voice_note_fetch(&node.state, &mid).await.unwrap();
+        assert_eq!((blob.mime_type.as_str(), blob.data_b64.as_str()), ("audio/webm", "aGk="));
+        // A non-audio file is never handed to the player; bad ids never reach the node.
+        // A spoofed voice-note name on a non-audio file is named as such.
+        assert_eq!(do_voice_note_fetch(&node.state, &"ef".repeat(32)).await.unwrap_err(), act::NOT_A_VOICE_NOTE);
+        // A short list is the whole list: one small read, then "not stored".
+        let before = node.targets().len();
+        assert_eq!(do_voice_note_fetch(&node.state, &"99".repeat(32)).await.unwrap_err(), act::VOICE_NOT_STORED);
+        assert_eq!(node.targets()[before..], ["GET /files?limit=50".to_string()]);
+        let before = node.targets().len();
+        assert!(do_voice_note_fetch(&node.state, "../files").await.is_err());
+        assert_eq!(node.targets().len(), before);
+        assert!(node.posts().is_empty(), "playback must never POST");
+    }
+
+    #[tokio::test]
+    async fn a_voice_note_lookup_widens_the_file_window_only_as_needed() {
+        let mid = "cd".repeat(32);
+        // 250 newer files, then the note: found in the 1000 window, after 50 and 200.
+        let rows: Vec<serde_json::Value> = (0..250)
+            .map(|i| serde_json::json!({"id": FILE_ID, "mime_type": "application/pdf", "message_id": format!("{i:064x}")}))
+            .chain(std::iter::once(serde_json::json!({"id": ROOM, "mime_type": "audio/webm", "message_id": mid.clone()})))
+            .collect();
+        let routes: Routes = Arc::new(move |_m, p, _b| {
+            let (route, query) = p.split_once('?').unwrap_or((p, ""));
+            match route {
+                "/files" => {
+                    let limit: usize = query.trim_start_matches("limit=").parse().unwrap();
+                    (200, serde_json::Value::Array(rows.iter().take(limit).cloned().collect()).to_string())
+                }
+                r if r == format!("/files/{ROOM}") => (200, serde_json::json!({"filename": "voice-note.webm", "mime_type": "audio/webm", "size_bytes": 2, "data_b64": "aGk="}).to_string()),
+                _ => (404, r#"{"error":"route","code":404}"#.into()),
+            }
+        });
+        let node = fake(AuthMode::Local, routes);
+        do_voice_note_fetch(&node.state, &mid).await.unwrap();
+        assert_eq!(node.targets(), ["GET /files?limit=50", "GET /files?limit=200", "GET /files?limit=1000", &format!("GET /files/{ROOM}")]);
+    }
+
     #[tokio::test]
     async fn a_file_is_uploaded_then_sent_to_one_peer() {
         let node = fake(AuthMode::Local, happy());
         spend_advance(&node.state, true).await.unwrap();
-        let receipt = do_file_send(&node.state, A, "hi.txt", "text/plain", "aGk=", 8000).await.unwrap();
+        let receipt = do_file_send(&node.state, A, "hi.txt", "text/plain", "aGk=", 8000, None).await.unwrap();
         assert_eq!((receipt.filename.as_str(), receipt.size_bytes, receipt.amount_msat), ("hi.txt", 2, 3000));
         assert_eq!(
             node.posts(),
@@ -6569,7 +7288,7 @@ mod control_act_tests {
                     "message" => do_message_send(s, A, false, "hi", 7000, None).await.map(|r| r.amount_msat),
                     "room" => do_message_send(s, ROOM, true, "hi", 13000,
                         Some(std::collections::HashMap::from([(A.into(), 7000), (C.into(), 6000)]))).await.map(|r| r.amount_msat),
-                    _ => do_file_send(s, A, "a.txt", "text/plain", "aGk=", 8000).await.map(|r| r.amount_msat),
+                    _ => do_file_send(s, A, "a.txt", "text/plain", "aGk=", 8000, None).await.map(|r| r.amount_msat),
                 }
             };
             let paid = send().await.unwrap();
@@ -6584,19 +7303,29 @@ mod control_act_tests {
     }
 
     #[tokio::test]
-    async fn budget_scope_files_share_contact_limits_and_keep_manual_authority() {
+    async fn budget_scope_files_share_contact_limits_and_use_budget_like_messages() {
         let node = fake(AuthMode::Local, happy());
         let s = &node.state;
-        do_budget_approve(s, 10000, budget::PresetId::Careful).await.unwrap();
+        let view = do_budget_approve(s, 500_000, budget::PresetId::Careful).await.unwrap();
+        assert_eq!(view.autopay.state, budget::AutopayState::Open);
         with_book(s, true, |b| b.set_limit(A, false, 9000)).unwrap();
-        assert_eq!(do_file_send(s, A, "a.txt", "text/plain", "aGk=", 8000).await.unwrap_err().code, "spend_locked");
-        spend_advance(s, true).await.unwrap();
-        do_file_send(s, A, "a.txt", "text/plain", "aGk=", 8000).await.unwrap();
+        // Files use the same budget route as messages: no ten-minute window needed.
+        do_file_send(s, A, "a.txt", "text/plain", "aGk=", 8000, None).await.unwrap();
         assert_eq!(budget_now(s).spent_msat, 3000);
         let requests = node.targets().len();
         assert_eq!(do_message_send(s, A, false, "hi", 7000, None).await.unwrap_err().code, "budget_exhausted");
-        assert_eq!(do_file_send(s, A, "a.txt", "text/plain", "aGk=", 8000).await.unwrap_err().code, "budget_exhausted");
+        assert_eq!(do_file_send(s, A, "a.txt", "text/plain", "aGk=", 8000, None).await.unwrap_err().code, "budget_exhausted");
         assert_eq!(node.targets().len(), requests);
+    }
+
+    #[tokio::test]
+    async fn budget_scope_files_still_need_window_without_budget_approval() {
+        let node = fake(AuthMode::Local, happy());
+        let s = &node.state;
+        assert_eq!(do_file_send(s, A, "a.txt", "text/plain", "aGk=", 8000, None).await.unwrap_err().code, "spend_locked");
+        spend_advance(s, true).await.unwrap();
+        do_file_send(s, A, "a.txt", "text/plain", "aGk=", 8000, None).await.unwrap();
+        assert_eq!(budget_now(s).spent_msat, 3000);
     }
 
     #[tokio::test]
@@ -6607,10 +7336,10 @@ mod control_act_tests {
         });
         let node = fake(AuthMode::Local, routes);
         spend_advance(&node.state, true).await.unwrap();
-        assert_eq!(do_file_send(&node.state, A, "a.txt", "text/plain", "aGk=", 8000).await.unwrap_err().code, "spend_unknown");
+        assert_eq!(do_file_send(&node.state, A, "a.txt", "text/plain", "aGk=", 8000, None).await.unwrap_err().code, "spend_unknown");
         assert_eq!(budget_now(&reopen(&node)).unsettled_msat, 8000);
         let requests = node.targets().len();
-        assert_eq!(do_file_send(&node.state, A, "a.txt", "text/plain", "aGk=", 8000).await.unwrap_err().code, "spend_unknown");
+        assert_eq!(do_file_send(&node.state, A, "a.txt", "text/plain", "aGk=", 8000, None).await.unwrap_err().code, "spend_unknown");
         assert_eq!(node.targets().len(), requests);
     }
 
@@ -6630,7 +7359,7 @@ mod control_act_tests {
         let node = fake(AuthMode::Local, routes);
         *config.lock().unwrap() = node.state.config.lock().unwrap().clone();
         spend_advance(&node.state, true).await.unwrap();
-        assert_eq!(do_file_send(&node.state, A, "a.txt", "text/plain", "aGk=", 8000).await.unwrap_err().code, "ceiling_exhausted");
+        assert_eq!(do_file_send(&node.state, A, "a.txt", "text/plain", "aGk=", 8000, None).await.unwrap_err().code, "ceiling_exhausted");
         assert_eq!(node.posts().iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(), ["/files"]);
         assert_eq!(budget_now(&node.state).spent_msat, 0);
         assert!(spend_journal(&node.state).unwrap().pending().unwrap().is_none());
@@ -6640,11 +7369,17 @@ mod control_act_tests {
     async fn budget_scope_automatic_messages_and_files_share_global_total() {
         let node = fake(AuthMode::Local, happy());
         let s = &node.state;
-        do_budget_approve(s, 10000, budget::PresetId::Careful).await.unwrap();
-        with_book(s, true, |b| { b.set_limit(A, false, 10000)?; b.set_limit(C, false, 10000) }).unwrap();
+        do_budget_approve(s, 500_000, budget::PresetId::Careful).await.unwrap();
+        with_book(s, true, |b| {
+            b.set_ceiling(10000);
+            b.set_limit(A, false, 10000)?;
+            b.set_limit(C, false, 10000)
+        }).unwrap();
+        // Narrow the open autopay ceiling to the test's 10-sat total.
+        s.autopay.lock().unwrap().narrow(10000);
         do_message_send(s, A, false, "automatic", 7000, None).await.unwrap();
-        spend_advance(s, true).await.unwrap();
-        do_file_send(s, C, "a.txt", "text/plain", "aGk=", 8000).await.unwrap();
+        // File to C also rides the open budget (same contact book as messages).
+        do_file_send(s, C, "a.txt", "text/plain", "aGk=", 8000, None).await.unwrap();
         assert_eq!(budget_now(s).spent_msat, 5000);
         let requests = node.targets().len();
         assert_eq!(do_message_send(s, A, false, "automatic", 7000, None).await.unwrap_err().code, "ceiling_exhausted");
@@ -6665,7 +7400,7 @@ mod control_act_tests {
             }).unwrap();
             // Genome 4aa5089 can pay admission beyond the 3-sat file cap.
             // Its 50-sat recipient allowance must fit before paid dispatch.
-            let error = do_file_send(&node.state, A, "a.txt", "text/plain", "aGk=", 8000).await.unwrap_err();
+            let error = do_file_send(&node.state, A, "a.txt", "text/plain", "aGk=", 8000, None).await.unwrap_err();
             assert_eq!(error.code, if limit == "daily" { "ceiling_exhausted" } else { "budget_exhausted" });
             assert!(!node.posts().iter().any(|(p, _)| p.ends_with("/send")));
             assert_eq!(budget_now(&node.state).spent_msat, 0);
@@ -6809,7 +7544,7 @@ mod control_act_tests {
         spend_advance(&node.state, true).await.unwrap();
         assert!(do_payment_pay(&node.state, "lntb10n1x", 1000, 1000).await.is_err());
         assert!(do_payment_keysend(&node.state, &format!("02{}", "ab".repeat(32)), 5000, None, 5000).await.is_err());
-        assert!(do_file_send(&node.state, A, "a.txt", "text/plain", "aGk=", 3000).await.is_err());
+        assert!(do_file_send(&node.state, A, "a.txt", "text/plain", "aGk=", 3000, None).await.is_err());
         assert!(node.posts().is_empty());
     }
 
@@ -7107,8 +7842,9 @@ mod control_act_tests {
         let v = budget_now(s);
         assert_eq!((v.spent_msat, v.unsettled_msat), (4000, 0));
         assert_eq!(v.rows, [budget::Row { target: A.into(), room: false, limit_msat: Some(50_000), spent_msat: 4000 }]);
-        // Pay and files still need the ten-minute window.
+        // Pay still needs the ten-minute window; files share the message budget route.
         assert_eq!(do_payment_pay(s, "lntb10n1x", 1000, 6000).await.unwrap_err().code, "spend_locked");
+        do_file_send(s, A, "note.txt", "text/plain", "aGk=", 8000, None).await.unwrap();
     }
 
     #[tokio::test]
@@ -7298,6 +8034,11 @@ mod control_act_tests {
     }
 
     fn g1_node(scopes: &[&str]) -> (Fake, tempfile::TempDir, G1) {
+        g1_node_with(scopes, None)
+    }
+
+    /// [`g1_node`] with `first` answering before it; its status 0 falls through.
+    fn g1_node_with(scopes: &[&str], first: Option<Routes>) -> (Fake, tempfile::TempDir, G1) {
         let g1 = G1 {
             grant: Arc::new(Mutex::new(g1_grant(3600, 400_000, 400_000))),
             compose: Arc::new(Mutex::new(None)),
@@ -7311,6 +8052,10 @@ mod control_act_tests {
         let polls = Arc::new(AtomicUsize::new(0));
         let far = now_unix() + 900;
         let routes: Routes = Arc::new(move |m: &str, path: &str, b: &str| {
+            if let Some(first) = &first {
+                let (status, body) = first(m, path, b);
+                if status != 0 { return (status, body); }
+            }
             let v = match path {
                 "/messages/first-contact/quote" if quote.lock().unwrap().is_some() => quote.lock().unwrap().clone().unwrap(),
                 "/status" if first_contact.lock().unwrap().is_some() => serde_json::json!({"api_capabilities": [
@@ -7628,6 +8373,157 @@ mod control_act_tests {
         g1.grant.lock().unwrap()["used_by_recipient"] = serde_json::json!({A: 2000});
         do_message_send(&node.state, A, false, "again", 7000, None).await.unwrap();
         assert_eq!(budget_now(&reopen(&node)).spent_msat, 4000);
+    }
+
+
+    // ---- quoted re-admission (genome quoted_readmission_v1, #111 revived) --------
+
+    /// A genome node after a restart: the contact asks for admission again on
+    /// the new connection. A compose whose cap is below the quote's total is
+    /// refused before paying (409 `readmission_required`, operation kept
+    /// `prepared`); a cap that fits pays admission once and the message once,
+    /// and the connection then stays admitted. One operation pays at most once.
+    #[derive(Default)]
+    struct ReadmitNode {
+        admitted: bool,
+        /// Operation id -> the reply that settled it.
+        paid: std::collections::HashMap<String, serde_json::Value>,
+        /// Lightning dispatches: admission and message count one each.
+        pays: usize,
+        quotes: usize,
+    }
+
+    const READMIT_QUOTE: (u64, u64, u64) = (1000, 1000, 10_000);
+
+    fn readmit_routes(node: Arc<Mutex<ReadmitNode>>) -> Routes {
+        Arc::new(move |_m: &str, p: &str, b: &str| {
+            let (admission, message, fees) = READMIT_QUOTE;
+            match p {
+                "/status" => (200, serde_json::json!({"api_capabilities": ["paid_send_caps_v1", "room_terminal_outcomes_v1",
+                    "spend_budget_grant_v1", "first_contact_grant_v1", "message_operations_v1", "quoted_readmission_v1"]}).to_string()),
+                "/messages/first-contact/quote" => {
+                    node.lock().unwrap().quotes += 1;
+                    (200, serde_json::json!({"recipient": A, "admission_msat": admission, "message_msat": message,
+                        "max_routing_fee_msat": fees, "total_msat": admission + message + fees, "expires_at": now_unix() + 60}).to_string())
+                }
+                "/messages/compose" => {
+                    let body: serde_json::Value = serde_json::from_str(b).unwrap();
+                    let id = body["operation_id"].as_str().unwrap().to_string();
+                    let cap = body["max_total_msat"].as_u64().unwrap();
+                    let mut n = node.lock().unwrap();
+                    if let Some(reply) = n.paid.get(&id) { return (200, reply.to_string()); }
+                    let readmission = if n.admitted { 0 } else { admission };
+                    if cap < readmission + message + if n.admitted { 0 } else { fees } {
+                        return (409, serde_json::json!({"code": "price_cap_exceeded", "reason": "readmission_required",
+                            "error": format!("{A} asks {admission} msat for admission again; no invoice was paid"),
+                            "operation_id": id, "state": "prepared", "payment_hash": null, "accepted": false, "retry_allowed": true}).to_string());
+                    }
+                    n.pays += if n.admitted { 1 } else { 2 };
+                    n.admitted = true;
+                    let reply = serde_json::json!({"operation_id": id, "state": "acked", "accepted": true, "payment_hash": OP_HASH,
+                        "retry_allowed": false, "message_id": format!("m{}", n.paid.len() + 1), "delivered": true,
+                        "amount_msat": message, "readmission_msat": (readmission > 0).then_some(readmission), "max_routing_fee_msat": 0});
+                    n.paid.insert(id, reply.clone());
+                    (200, reply.to_string())
+                }
+                _ => (0, String::new()),
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn quoted_readmission_within_the_contact_budget_pays_once_without_a_prompt() {
+        let readmit = Arc::new(Mutex::new(ReadmitNode::default()));
+        let (node, _dir, g1) = g1_node_with(&["read", "receive"], Some(readmit_routes(readmit.clone())));
+        with_book(&node.state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
+        g1.grant.lock().unwrap()["per_recipient_msat"] = serde_json::json!({A: 50_000});
+        g1_approved(&node, 500_000).await;
+        let receipt = do_message_send(&node.state, A, false, "gm", 7000, None).await.unwrap();
+        let bodies = compose_bodies(&node);
+        assert_eq!(bodies.len(), 2, "refused under the message cap, then sent under the quote");
+        assert_eq!(bodies[0]["operation_id"], bodies[1]["operation_id"], "the same operation");
+        assert_eq!((bodies[0]["max_total_msat"].as_u64(), bodies[1]["max_total_msat"].as_u64()), (Some(7000), Some(12_000)));
+        assert_eq!(bodies[1]["max_routing_fee_msat"], 10_000, "the quote's ceilings for both payments");
+        assert_eq!((receipt.amount_msat, receipt.readmission_msat, receipt.total_msat), (1000, Some(1000), 2000), "admission is in the all-in cost");
+        assert_eq!(receipt.operation_id.as_deref(), bodies[0]["operation_id"].as_str());
+        // Quotes: the #99 all-in probe before the first POST, then the refusal's.
+        let counts = { let r = readmit.lock().unwrap(); (r.pays, r.quotes) };
+        assert_eq!(counts, (2, 2), "admission once, message once");
+        assert!(pending(&node).is_none());
+        assert_eq!(with_book(&node.state, false, |b| Ok(b.spent(A, false, now_ms()))).unwrap(), 2000, "counted against the contact");
+        // The connection stays admitted: the next message pays the message only.
+        let next = do_message_send(&node.state, A, false, "again", 7000, None).await.unwrap();
+        assert_eq!((next.amount_msat, next.readmission_msat), (1000, None));
+        assert_eq!(readmit.lock().unwrap().pays, 3);
+        assert_eq!(compose_bodies(&node).len(), 3);
+    }
+
+    #[tokio::test]
+    async fn quoted_readmission_outside_the_budget_asks_once_and_keeps_the_operation() {
+        let readmit = Arc::new(Mutex::new(ReadmitNode::default()));
+        let node = fake(AuthMode::Local, {
+            let routes = readmit_routes(readmit.clone());
+            Arc::new(move |m: &str, p: &str, b: &str| match routes(m, p, b) {
+                (0, _) => happy()(m, p, b),
+                other => other,
+            })
+        });
+        spend_advance(&node.state, true).await.unwrap();
+        let e = do_message_send(&node.state, A, false, "gm", 7000, None).await.unwrap_err();
+        assert_eq!(e.code, "readmission_quoted", "{}", e.message);
+        assert_eq!(e.admission, Some(act::AdmissionView { admission_msat: 1000, message_msat: 1000, max_routing_fee_msat: 10_000, total_msat: 12_000, quoted: true }));
+        assert_eq!(readmit.lock().unwrap().pays, 0, "nothing was paid");
+        let record = pending(&node).expect("kept for the same message");
+        assert!(record.resumable && !record.budgeted, "resumable, reservation released");
+        let id = record.operation_id.clone().unwrap();
+        assert_eq!(compose_bodies(&node).len(), 1, "no automatic resend outside the budget");
+        // The owner's one OK: the same message at the quoted all-in total.
+        let receipt = do_message_send(&node.state, A, false, "gm", 12_000, None).await.unwrap();
+        let bodies = compose_bodies(&node);
+        assert_eq!(bodies[1]["operation_id"], id.as_str());
+        assert_eq!((bodies[1]["max_total_msat"].as_u64(), bodies[1]["max_routing_fee_msat"].as_u64()), (Some(12_000), Some(10_000)));
+        assert_eq!((receipt.readmission_msat, receipt.total_msat), (Some(1000), 2000));
+        assert_eq!(readmit.lock().unwrap().pays, 2);
+        assert!(pending(&node).is_none());
+    }
+
+    #[tokio::test]
+    async fn quoted_readmission_a_refused_cap_that_already_fits_is_never_resent() {
+        // A node that refuses even the quoted total: the app keeps the refusal.
+        let quotes = Arc::new(AtomicUsize::new(0));
+        let q = quotes.clone();
+        let node = fake(AuthMode::Local, Arc::new(move |m: &str, p: &str, b: &str| match p {
+            "/status" => (200, serde_json::json!({"api_capabilities": ["paid_send_caps_v1", "room_terminal_outcomes_v1",
+                "first_contact_grant_v1", "message_operations_v1", "quoted_readmission_v1"]}).to_string()),
+            "/messages/first-contact/quote" => {
+                q.fetch_add(1, Ordering::SeqCst);
+                (200, serde_json::json!({"recipient": A, "admission_msat": 1000, "message_msat": 1000,
+                    "max_routing_fee_msat": 0, "total_msat": 2000, "expires_at": now_unix() + 60}).to_string())
+            }
+            "/messages/compose" => readmission_coded_reply(),
+            _ => happy()(m, p, b),
+        }));
+        spend_advance(&node.state, true).await.unwrap();
+        let e = do_message_send(&node.state, A, false, "gm", 7000, None).await.unwrap_err();
+        assert_eq!(e.code, "readmission_capped", "{}", e.message);
+        assert_eq!(compose_bodies(&node).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn quoted_readmission_retry_delivery_asks_for_the_contacts_quote() {
+        let composes = compose_script(vec![psi_502(2000, 0, 2000, PSI_TIMEOUT), readmission_coded_reply()]);
+        let node = fake(AuthMode::Local, Arc::new(move |m: &str, p: &str, b: &str| match p {
+            "/status" => (200, serde_json::json!({"api_capabilities": ["paid_send_caps_v1", "room_terminal_outcomes_v1",
+                "first_contact_grant_v1", "quoted_readmission_v1"]}).to_string()),
+            "/messages/first-contact/quote" => (200, serde_json::json!({"recipient": A, "admission_msat": 1000, "message_msat": 1000,
+                "max_routing_fee_msat": 10_000, "total_msat": 12_000, "expires_at": now_unix() + 60}).to_string()),
+            _ => composes(m, p, b),
+        }));
+        let first = psi_first(&node).await;
+        assert!(first.undelivered.is_some());
+        let e = do_message_retry(&node.state, A, "gm", None).await.unwrap_err();
+        assert_eq!(e.code, "retry_needs_admission", "{}", e.message);
+        assert_eq!(e.admission, Some(act::AdmissionView { admission_msat: 1000, message_msat: 1000, max_routing_fee_msat: 10_000, total_msat: 12_000, quoted: true }));
     }
 
     #[tokio::test]
@@ -8425,7 +9321,7 @@ mod control_act_tests {
         });
         let node = fake(AuthMode::Local, routes);
         spend_advance(&node.state, true).await.unwrap();
-        assert_eq!(do_file_send(&node.state, A, "hi.txt", "text/plain", "aGk=", 8000).await.unwrap_err().code, "price_changed");
+        assert_eq!(do_file_send(&node.state, A, "hi.txt", "text/plain", "aGk=", 8000, None).await.unwrap_err().code, "price_changed");
         assert_eq!(node.posts().len(), 1);
         assert_eq!(node.posts()[0].0, "/files");
     }
@@ -8945,6 +9841,10 @@ mod assistant_acl_tests {
                 "introduction_mine",
                 "introduction_read",
                 "introduction_open",
+                "front_door_mine",
+                "front_door_read",
+                "front_door_open",
+                "front_door_publish",
                 "sponsor_status",
                 "sponsor_offer",
                 "sponsor_candidate",
@@ -8982,6 +9882,9 @@ mod assistant_acl_tests {
                 "invite_redeem",
                 "file_price",
                 "file_send",
+                "voice_note_fetch",
+                "call_quote",
+                "call_signal",
                 // AI track: main window only, reads through the broker.
                 "ai_read",
                 "ai_providers",

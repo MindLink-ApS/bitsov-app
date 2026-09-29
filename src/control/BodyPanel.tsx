@@ -1,5 +1,5 @@
 import { createEffect, createSignal, For, type JSX, Match, on, onCleanup, Show, Switch, untrack } from 'solid-js';
-import { ago, clock, sats, satsWhole, satUnit, shortId } from './format';
+import { ago, amount, clock, sats, satsWhole, satUnit, shortId } from './format';
 import {
   feedState,
   gateWords,
@@ -172,7 +172,7 @@ function MetabolismOrgan(props: OrganismProps & { fresh: { label: string; stale:
         <span class="sats energy-fig" data-energy="out-1h">{minus(m().hour.out_msat)}</span>
         <span class="sats energy-fig" data-energy="out-24h">{minus(m().day.out_msat)}</span>
       </div>
-      <p class="organ-unit">sats</p>
+      <p class="organ-unit">{satUnit(2000)}</p>
       <Show when={m().bars}>{(b) => <Bars bars={b()} now={props.now} />}</Show>
       <Show when={idle(m().hour)}>
         <p class="organ-line" data-energy-idle>No energy crossed in the last hour.</p>
@@ -200,7 +200,7 @@ function Bars(props: { bars: NonNullable<Metabolism['bars']>; now: number }) {
       <For each={slots()}>
         {(b) =>
           b ? (
-            <span class="hour-bar" title={`+${sats(b.in_msat)} / −${sats(b.out_msat)} sats`} data-bar>
+            <span class="hour-bar" title={`+${amount(b.in_msat)} / −${amount(b.out_msat)}`} data-bar>
               <span class="bar-in" style={{ height: h(b.in_msat) }} classList={{ none: b.in_msat === 0 }} />
               <span class="bar-out" style={{ height: h(b.out_msat) }} classList={{ none: b.out_msat === 0 }} />
             </span>
@@ -302,7 +302,7 @@ function MembraneOrgan(props: OrganismProps & { fresh: { label: string; stale: b
         <span class="sats">{ringRead() ? s().admitted : '—'}</span>
         <span class="organ-note">
           <Show when={ringRead()} fallback="Not read yet">
-            {sats(s().admitted_msat)} sats settled<Show when={s().first_contacts > 0}> · {s().first_contacts} first contact</Show>
+            {amount(s().admitted_msat)} settled<Show when={s().first_contacts > 0}> · {s().first_contacts} first contact</Show>
           </Show>
         </span>
       </div>
@@ -311,7 +311,7 @@ function MembraneOrgan(props: OrganismProps & { fresh: { label: string; stale: b
           <span class="who"><span class="dot ok" /> admitted again</span>
           <span class="sats">{s().readmitted}</span>
           <span class="organ-note">
-            {sats(s().readmitted_msat)} sats paid after a reconnect, from their own quote
+            {amount(s().readmitted_msat)} paid after a reconnect, from their own quote
           </span>
         </div>
       </Show>
@@ -458,7 +458,7 @@ function SetpointsOrgan(props: OrganismProps) {
               <Show when={x().grant}>
                 {(g) => (
                   <p class="organ-line" data-setpoint-grant>
-                    Finite node grant: <span class="sats">{sats(g().remaining_msat)}</span> of {sats(g().budget_msat)} sats left, {hoursLeft(g().expires_at_ms, props.now)} h
+                    Finite node grant: <span class="sats">{sats(g().remaining_msat)}</span> of {amount(g().budget_msat)} left, {hoursLeft(g().expires_at_ms, props.now)} h
                   </p>
                 )}
               </Show>
@@ -468,12 +468,12 @@ function SetpointsOrgan(props: OrganismProps) {
               <For each={x().reached.slice(0, 2)}>
                 {(r: Setpoint) => (
                   <p class="organ-line" data-setpoint-reached={r.target}>
-                    Resting: {props.nameOfTrack(`${r.room ? 'room' : 'peer'}:${r.target}`)} setpoint reached ({sats(r.spent_msat)}/{sats(r.limit_msat)} sats today). Frees as older payments pass 24 h.
+                    Resting: {props.nameOfTrack(`${r.room ? 'room' : 'peer'}:${r.target}`)} setpoint reached ({sats(r.spent_msat)}/{amount(r.limit_msat)} today). Frees as older payments pass 24 h.
                   </p>
                 )}
               </For>
               <Show when={x().unsettled_msat > 0}>
-                <p class="organ-note">Includes {sats(x().unsettled_msat)} sats whose outcome is not known yet.</p>
+                <p class="organ-note">Includes {amount(x().unsettled_msat)} whose outcome is not known yet.</p>
               </Show>
             </>
           )}
