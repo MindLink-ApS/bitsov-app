@@ -6,7 +6,7 @@ import type { Proposal } from './ai';
 import { AiTrack, createAiSession } from './AiTrack';
 import { amount as fmtAmount, allIn, clock, day, feeCeiling, routingFee, sats, satsWhole, satUnit, shortId, uptime } from './format';
 import { Organism } from './BodyPanel';
-import { blobUrl, duration, isVoiceNote, type Recording, startRecording, VOICE_MAX_MS } from './voice';
+import { blobUrl, duration, FILE_MAX_BYTES, fileNameOf, isVoiceNote, type Recording, startRecording, VOICE_MAX_MS } from './voice';
 import {
   doorCard,
   gateWords,
@@ -1340,7 +1340,7 @@ function MessageView(props: {
       <div class="bubble" classList={{ file: props.m.kind === 200 }} data-kind={props.m.kind}>
         <Show when={props.m.kind === 200} fallback={props.m.plaintext ?? 'Encrypted content not available on this device'}>
           <Show when={props.voiceUrl && isVoiceNote(props.m.kind, props.m.plaintext)} fallback={<span class="file-name">{props.m.plaintext ?? 'File'}</span>}>
-            <VoiceNote id={props.m.id} load={props.voiceUrl!} />
+            <VoiceNote id={props.m.id} name={fileNameOf(props.m.plaintext) ?? 'file'} load={props.voiceUrl!} />
           </Show>
         </Show>
       </div>
@@ -1363,16 +1363,20 @@ function MessageView(props: {
 }
 
 /** Inline player for a voice note. Loads on first tap (read-only), then plays in place. */
-function VoiceNote(props: { id: string; load: (messageId: string) => Promise<string> }) {
+/** Host error for a message whose file is not audio (act.rs NOT_A_VOICE_NOTE). */
+const NOT_A_VOICE_NOTE = 'not a voice note';
+
+function VoiceNote(props: { id: string; name: string; load: (messageId: string) => Promise<string> }) {
   const [url, setUrl] = createSignal<string | null>(null);
   const [busy, setBusy] = createSignal(false);
-  const [missing, setMissing] = createSignal(false);
+  // Why it cannot play: the file is gone, or it is not audio despite its name.
+  const [missing, setMissing] = createSignal<'gone' | 'not_audio' | null>(null);
   const open = async () => {
     setBusy(true);
     try {
       setUrl(await props.load(props.id));
-    } catch {
-      setMissing(true);
+    } catch (e) {
+      setMissing(String(e).includes(NOT_A_VOICE_NOTE) ? 'not_audio' : 'gone');
     } finally {
       setBusy(false);
     }
@@ -1382,8 +1386,10 @@ function VoiceNote(props: { id: string; load: (messageId: string) => Promise<str
       <Show
         when={url()}
         fallback={
-          <button type="button" class="voice-play" data-voice-play disabled={busy() || missing()} onClick={() => void open()}>
-            {missing() ? 'Voice note · not stored on this device' : busy() ? 'Loading…' : '▶ Voice note'}
+          <button type="button" class="voice-play" data-voice-play disabled={busy() || missing() !== null} onClick={() => void open()}>
+            {missing() === 'not_audio'
+              ? `File · ${props.name} (not audio, not played)`
+              : missing() === 'gone' ? 'Voice note · not stored on this device' : busy() ? 'Loading…' : '▶ Voice note'}
           </button>
         }
       >
@@ -1703,12 +1709,25 @@ function Composer(props: {
     onCleanup(() => URL.revokeObjectURL(url));
     return url;
   });
+  // Bumped when the track changes or the composer goes away: a microphone
+  // prompt answered after that must not start recording for another contact.
+  let voiceGeneration = 0;
   const dropRecording = () => {
+    voiceGeneration++;
     const r = untrack(recording);
     setRecording(null);
     r?.rec.cancel();
   };
   onCleanup(dropRecording);
+  // Leaving the window stops the microphone; the clip stays as a preview, unsent.
+  const onLeave = () => { if (untrack(recording)) void stopRecording(); };
+  const onVisibility = () => { if (document.visibilityState === 'hidden') onLeave(); };
+  window.addEventListener('blur', onLeave);
+  document.addEventListener('visibilitychange', onVisibility);
+  onCleanup(() => {
+    window.removeEventListener('blur', onLeave);
+    document.removeEventListener('visibilitychange', onVisibility);
+  });
   createEffect(() => {
     const r = recording();
     if (!r) return;
@@ -1725,6 +1744,10 @@ function Composer(props: {
       setNote('Nothing was recorded.');
       return;
     }
+    if (clip.size > FILE_MAX_BYTES) {
+      setNote('That clip is over 1.4 MB, too large to send. Nothing was sent; record a shorter one.');
+      return;
+    }
     if (fileInput) fileInput.value = '';
     setFile(clip);
     setMode('file');
@@ -1733,8 +1756,14 @@ function Composer(props: {
     if (untrack(recording) || untrack(starting)) return;
     setNote(null);
     setStarting(true);
+    const generation = voiceGeneration;
     try {
       const rec = await startRecording(() => void stopRecording());
+      if (generation !== voiceGeneration) {
+        // The track changed (or the composer closed) while the prompt was open.
+        rec.cancel();
+        return;
+      }
       setRecordedMs(0);
       setRecording({ rec, startedAt: Date.now() });
     } catch (e) {
@@ -2264,7 +2293,7 @@ function Composer(props: {
               aria-label="File to send"
             />
             <div class="file-chip" data-file-chip>
-              <Show when={file()} fallback={<span class="hint">{recording() ? `Recording… up to ${duration(VOICE_MAX_MS)}` : `Choose a file for ${props.name}`}</span>}>
+              <Show when={file()} fallback={<span class="hint">{recording() ? `Recording… up to ${duration(recording()?.rec.limitMs ?? VOICE_MAX_MS)}` : `Choose a file for ${props.name}`}</span>}>
                 {(f) => (
                   <Show when={voicePreview()} fallback={<span class="file-name">{f().name}</span>}>
                     <audio controls src={voicePreview()!} data-voice-preview aria-label="Voice note preview" />

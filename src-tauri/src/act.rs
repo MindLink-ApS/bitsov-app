@@ -1117,7 +1117,7 @@ pub fn file_upload_body(filename: &str, mime_type: &str, data_b64: &str) -> Resu
 }
 
 /// One row of `GET /files` (metadata only; the node never lists file bytes).
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct FileRow {
     pub id: String,
     pub mime_type: String,
@@ -1140,12 +1140,30 @@ pub fn is_voice_mime(mime: &str) -> bool {
     mime.trim().to_ascii_lowercase().starts_with("audio/")
 }
 
-/// The stored file a received message carried, if it is a voice note. The
-/// node records the envelope id as `message_id` when it stores the file.
-pub fn voice_file_for<'a>(rows: &'a [FileRow], message_id: &str) -> Option<&'a FileRow> {
-    rows.iter().find(|r| {
-        r.message_id.as_deref().is_some_and(|m| m.eq_ignore_ascii_case(message_id)) && is_voice_mime(&r.mime_type)
-    })
+/// `GET /files` windows, newest first. Genome's list takes only `limit`, so a
+/// lookup widens the window until it finds the message or the list ends.
+pub const FILE_LIST_WINDOWS: [usize; 3] = [50, 200, 1000];
+/// Error text the renderer tells apart: the file exists but is not audio
+/// (a name that only looks like a voice note).
+pub const NOT_A_VOICE_NOTE: &str = "not a voice note";
+pub const VOICE_NOT_STORED: &str = "voice note not stored on this node";
+
+/// What a message's stored file is, by its type (never its name).
+#[derive(Debug, PartialEq, Eq)]
+pub enum VoiceLookup<'a> {
+    Voice(&'a FileRow),
+    NotVoice,
+    Missing,
+}
+
+/// The stored file a received message carried. The node records the
+/// envelope id as `message_id` when it stores the file.
+pub fn voice_file_for<'a>(rows: &'a [FileRow], message_id: &str) -> VoiceLookup<'a> {
+    match rows.iter().find(|r| r.message_id.as_deref().is_some_and(|m| m.eq_ignore_ascii_case(message_id))) {
+        Some(r) if is_voice_mime(&r.mime_type) => VoiceLookup::Voice(r),
+        Some(_) => VoiceLookup::NotVoice,
+        None => VoiceLookup::Missing,
+    }
 }
 
 #[derive(Deserialize, Debug)]
@@ -1496,10 +1514,12 @@ mod tests {
             row("b", "audio/webm", Some("ab")),
             row("c", "audio/webm", None),
         ];
-        assert_eq!(voice_file_for(&rows, "ab").unwrap().id, "b");
-        assert_eq!(voice_file_for(&rows, "AB").unwrap().id, "b");
-        assert!(voice_file_for(&rows[..1], "ab").is_none());
-        assert!(voice_file_for(&rows, "cd").is_none());
+        let rows = [rows[1].clone(), rows[0].clone(), rows[2].clone()];
+        assert_eq!(voice_file_for(&rows, "ab"), VoiceLookup::Voice(&rows[0]));
+        assert_eq!(voice_file_for(&rows, "AB"), VoiceLookup::Voice(&rows[0]));
+        // A name that looks like a voice note does not make a PDF one.
+        assert_eq!(voice_file_for(&rows[1..], "ab"), VoiceLookup::NotVoice);
+        assert_eq!(voice_file_for(&rows, "cd"), VoiceLookup::Missing);
         assert!(is_voice_mime(" Audio/MP4"));
         assert!(!is_voice_mime("text/html"));
     }

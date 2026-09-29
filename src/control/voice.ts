@@ -7,6 +7,20 @@
 
 /** About two minutes; the recorder stops itself here. */
 export const VOICE_MAX_MS = 120_000;
+/**
+ * WebKit's MP4/AAC recorder may ignore the requested bitrate (about 128 kbps
+ * observed), so its clips are capped shorter: 80 s at 128 kbps is 1.28 MB.
+ */
+export const VOICE_MP4_MAX_MS = 80_000;
+/** The app sends files up to 1.4 MB (act.rs FILE_MAX_BYTES). */
+export const FILE_MAX_BYTES = 1_400_000;
+/** The recorder stops itself once the clip reaches this, whatever the codec. */
+export const VOICE_MAX_BYTES = 1_300_000;
+
+/** How long a clip of this recorded type may run. */
+export function voiceLimitMs(recorded: string): number {
+  return sendType(recorded) === 'audio/mp4' ? VOICE_MP4_MAX_MS : VOICE_MAX_MS;
+}
 /** Opus at 32 kbps keeps two minutes near 480 KB, well inside the 1.4 MB file cap. */
 export const VOICE_BITS_PER_SECOND = 32_000;
 /** The wire type for a voice note. WebKit before WebM recording falls back to MP4/AAC. */
@@ -54,6 +68,8 @@ export function duration(ms: number): string {
 }
 
 export type Recording = {
+  /** How long this clip may run (depends on the container the webview records). */
+  limitMs: number;
   /** Stops and hands back the clip, or null when nothing was captured. */
   stop(): Promise<File | null>;
   /** Stops and drops the clip. */
@@ -97,10 +113,20 @@ export async function startRecording(onLimit: () => void, deps: RecorderDeps | n
   }
   const chunks: Blob[] = [];
   const startedAt = deps.now();
-  recorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) chunks.push(e.data); };
+  const limitMs = voiceLimitMs(type);
+  let bytes = 0;
+  let limited = false;
+  const limit = () => { if (!limited) { limited = true; onLimit(); } };
+  recorder.ondataavailable = (e) => {
+    if (!e.data || e.data.size === 0) return;
+    chunks.push(e.data);
+    bytes += e.data.size;
+    // Whatever the codec really does, stop before the clip outgrows a file.
+    if (bytes >= VOICE_MAX_BYTES) limit();
+  };
   const done = new Promise<void>((resolve) => { recorder.onstop = () => resolve(); });
   recorder.start(1000);
-  const timer = setTimeout(onLimit, VOICE_MAX_MS);
+  const timer = setTimeout(limit, limitMs);
   let finished = false;
   const finish = async (): Promise<Blob[]> => {
     if (finished) return [];
@@ -112,6 +138,7 @@ export async function startRecording(onLimit: () => void, deps: RecorderDeps | n
     return chunks;
   };
   return {
+    limitMs,
     stop: async () => {
       const parts = await finish();
       if (parts.length === 0) return null;
