@@ -6,6 +6,7 @@ import { amount as fmtAmount } from './format';
 import { asActionError } from './state';
 import {
   CARD_TOO_LARGE,
+  CARD_PUBLISH_BUDGET,
   dropOldestThumbsToFit,
   estimateCardBytes,
   hashText,
@@ -314,7 +315,7 @@ export function FrontDoorEditor(props: { source: Source; now: number }) {
   };
 
   const cardBytes = createMemo(() => estimateCardBytes(estimateParts()));
-  const overBudget = createMemo(() => cardBytes() > MAX_CARD_BYTES);
+  const overBudget = createMemo(() => cardBytes() > CARD_PUBLISH_BUDGET);
 
   const onAvatar = async (file: File | null) => {
     if (!file) return;
@@ -327,10 +328,10 @@ export function FrontDoorEditor(props: { source: Source; now: number }) {
       setAvatar(prepared);
       if (fit.dropped > 0) {
         setSizeNote(
-          `Dropped ${fit.dropped} older thumbnail${fit.dropped === 1 ? '' : 's'} so the card stays under ${MAX_CARD_BYTES} bytes.`,
+          `Dropped ${fit.dropped} older thumbnail${fit.dropped === 1 ? '' : 's'} so the card stays under ${CARD_PUBLISH_BUDGET} bytes.`,
         );
       }
-      if (fit.bytes > MAX_CARD_BYTES) setErr(CARD_TOO_LARGE);
+      if (fit.bytes > CARD_PUBLISH_BUDGET) setErr(CARD_TOO_LARGE);
     } catch (e) {
       setErr(asActionError(e).message);
     }
@@ -351,10 +352,10 @@ export function FrontDoorEditor(props: { source: Source; now: number }) {
       setMedia(fit.media);
       if (fit.dropped > 0) {
         setSizeNote(
-          `Dropped ${fit.dropped} older thumbnail${fit.dropped === 1 ? '' : 's'} so the card stays under ${MAX_CARD_BYTES} bytes.`,
+          `Dropped ${fit.dropped} older thumbnail${fit.dropped === 1 ? '' : 's'} so the card stays under ${CARD_PUBLISH_BUDGET} bytes.`,
         );
       }
-      if (fit.bytes > MAX_CARD_BYTES) setErr(CARD_TOO_LARGE);
+      if (fit.bytes > CARD_PUBLISH_BUDGET) setErr(CARD_TOO_LARGE);
     } catch (e) {
       setErr(asActionError(e).message);
     }
@@ -440,7 +441,7 @@ export function FrontDoorEditor(props: { source: Source; now: number }) {
           ...estimateParts(),
           cv: fields.cv,
         });
-        if (afterCv > MAX_CARD_BYTES) {
+        if (afterCv > CARD_PUBLISH_BUDGET) {
           setErr(CARD_TOO_LARGE);
           return;
         }
@@ -545,7 +546,8 @@ export function FrontDoorEditor(props: { source: Source; now: number }) {
         </Show>
       </label>
       <p class="hint" data-fd-card-bytes data-over={overBudget() ? 'true' : 'false'}>
-        Card size ≈ {cardBytes().toLocaleString()} / {MAX_CARD_BYTES.toLocaleString()} bytes
+        Card size ≈ {cardBytes().toLocaleString()} / {CARD_PUBLISH_BUDGET.toLocaleString()} bytes
+        {' '}(node max {MAX_CARD_BYTES.toLocaleString()})
         {overBudget() ? ' — too large to publish' : ''}
       </p>
       <Show when={sizeNote()}>
