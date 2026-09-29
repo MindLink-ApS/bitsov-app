@@ -902,16 +902,17 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
       return { inviter_pubkey: hex('b'), addr: '35.204.77.3:9735' };
     },
     filePrice: () => ok({ principal_msat: FILE_PRICE_MSAT, max_routing_fee_msat: 5000, total_msat: FILE_PRICE_MSAT + 5000 }),
-    fileSend: async (recipient, filename, _mime, dataB64, maxMsat) => {
-      await gate();
+    fileSend: async (recipient, filename, _mime, dataB64, maxMsat, firstContactMsat) => {
       if (allIn(FILE_PRICE_MSAT) > maxMsat) return refuse('price_changed', 'Price above confirmed ceiling.');
       const target = recipient.toLowerCase();
-      await planSend(target, false, maxMsat, undefined, true);
+      // Same budget / window route as messages (not forced-manual like invoice pay).
+      const confirm = await planSend(target, false, maxMsat, firstContactMsat);
+      if (confirm !== null) book.limits.set(key(target, false), confirm);
       book.ledger.push({ at: Date.now(), target, room: false, msat: allIn(FILE_PRICE_MSAT) });
       const id = nextId('file');
       later(1200, { type: 'delivery', message_id: id, status: 'delivered', reason: null });
       const pad = (dataB64.match(/=+$/)?.[0].length ?? 0);
-      return { message_id: id, recipient: recipient.toLowerCase(), filename, size_bytes: (dataB64.length / 4) * 3 - pad, delivered: true, amount_msat: FILE_PRICE_MSAT, total_msat: allIn(FILE_PRICE_MSAT), max_routing_fee_msat: routingFee(FILE_PRICE_MSAT), sent_at_ms: Date.now() };
+      return { message_id: id, recipient: recipient.toLowerCase(), filename, size_bytes: (dataB64.length / 4) * 3 - pad, delivered: true, amount_msat: FILE_PRICE_MSAT, total_msat: allIn(FILE_PRICE_MSAT), max_routing_fee_msat: routingFee(FILE_PRICE_MSAT), sent_at_ms: Date.now(), accepted: true, state: 'acked' };
     },
     aiRead: async (topic, sinceMs) => {
       await new Promise((r) => setTimeout(r, 350));

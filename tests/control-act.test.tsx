@@ -141,7 +141,7 @@ describe('acting from the track', () => {
     expect(host.used('message_send')[0].args).toEqual({ recipient: A, is_room: false, plaintext: 'gm Maya', max_msat: 2000, max_recipient_msat: null, first_contact_msat: null });
     await vi.waitFor(() => expect(text('[data-message="sent-1"] .stamp .sats')).toBe('2'));
     expect(text('[data-message="sent-1"] .stamp')).toContain('sats all-in ceiling');
-    expect(text('[data-message="sent-1"] [data-delivery]')).toBe('sent, waiting for their node');
+    expect(text('[data-message="sent-1"] [data-delivery]').trim()).toBe('Sent');
     expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('');
 
     host.emitLive({ type: 'delivery', message_id: 'sent-1', status: 'delivered', reason: null });
@@ -161,7 +161,7 @@ describe('acting from the track', () => {
     submit();
     await vi.waitFor(() => expect($('[data-message="sent-1"]')).not.toBeNull());
     host.emitLive({ type: 'delivery', message_id: 'sent-1', status: 'rejected', reason: 'insufficient payment: required 3000 msat, got 2000 msat' });
-    await vi.waitFor(() => expect(text('[data-message="sent-1"] [data-delivery]')).toBe('rejected: insufficient payment: required 3000 msat, got 2000 msat'));
+    await vi.waitFor(() => expect(text('[data-message="sent-1"] [data-delivery]')).toBe('Rejected: insufficient payment: required 3000 msat, got 2000 msat'));
   });
 
   it('an expired approval re-prompts, records no failure, and keeps the draft', async () => {
@@ -224,9 +224,9 @@ describe('acting from the track', () => {
   it('tells accepted apart from sent and queued on the message card', async () => {
     const OP = '6f1c2a4e-9b3d-4c5e-8f70-112233445566';
     const replies = [
-      { state: 'acked', accepted: true, delivered: true, want: ['accepted', 'accepted by their node'] },
-      { state: 'sent', accepted: false, delivered: true, want: ['sent', 'sent, waiting for their node'] },
-      { state: 'paid', accepted: false, delivered: false, want: ['queued', 'queued until they reconnect'] },
+      { state: 'acked', accepted: true, delivered: true, want: ['accepted', ''] },
+      { state: 'sent', accepted: false, delivered: true, want: ['sent', 'Sent'] },
+      { state: 'paid', accepted: false, delivered: false, want: ['queued', 'Queued'] },
     ];
     let n = 0;
     const host = stubHost({
@@ -431,8 +431,10 @@ describe('acting from the track', () => {
     input.dispatchEvent(new Event('change', { bubbles: true }));
     await vi.waitFor(() => expect(text('[data-send]')).toBe('Send file · 8 sats'));
     submit();
-    await vi.waitFor(() => expect(host.used('file_send')[0]?.args).toEqual({ recipient: A, filename: 'hi.txt', mime_type: 'text/plain', data_b64: 'aGk=', max_msat: 8000 }));
-    await vi.waitFor(() => expect(text('[data-artifact="file"]')).toContain('hi.txt'));
+    await vi.waitFor(() => expect(host.used('file_send')[0]?.args).toEqual({ recipient: A, filename: 'hi.txt', mime_type: 'text/plain', data_b64: 'aGk=', max_msat: 8000, first_contact_msat: null }));
+    await vi.waitFor(() => expect(text('[data-message="file-1"] .file-name')).toBe('hi.txt'));
+    expect($('[data-message="file-1"] .bubble')!.classList.contains('file')).toBe(true);
+    expect($('[data-message="file-1"] [data-delivery]')?.getAttribute('data-delivery')).toBe('sent');
   });
 
   it('creates an invite from the New track once approved', async () => {

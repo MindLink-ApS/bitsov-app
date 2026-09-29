@@ -33,6 +33,7 @@ import {
   budgetStand,
   costToSend,
   deliveryFromReceipt,
+  sentFileMessage,
   freshness,
   isBudgetStop,
   isOutgoing,
@@ -144,7 +145,7 @@ export type Actions = {
   amountOf: (bolt11: string) => Promise<Outcome<number>>;
   pay: (t: TrackRef, bolt11: string, msat: number) => Promise<Outcome<unknown>>;
   keysend: (t: TrackRef, pubkey: string, msat: number, memo: string) => Promise<Outcome<unknown>>;
-  file: (t: TrackRef, file: File, maxMsat: number) => Promise<Outcome<unknown>>;
+  file: (t: TrackRef, file: File, maxMsat: number, firstContactMsat?: number) => Promise<Outcome<unknown>>;
 };
 
 let artifactSeq = 0;
@@ -694,18 +695,20 @@ export function ControlCenter(props: Props) {
       }
       return recordFailure(t, 'Payment not sent', r);
     },
-    file: async (t, file, maxMsat) => {
+    file: async (t, file, maxMsat, firstContactMsat) => {
       if (t.kind !== 'peer') return { ok: false, error: { code: 'invalid', message: 'Files go to one peer at a time.' } };
       const data = await readBase64(file).catch(() => null);
       if (data === null) return { ok: false, error: { code: 'invalid', message: 'the file could not be read' } };
-      const r = await act(() => source.fileSend(t.id, file.name, file.type, data, maxMsat));
+      const r = await act(() => source.fileSend(t.id, file.name, file.type, data, maxMsat, firstContactMsat));
       void loadBudget();
       void loadWallet();
       if (!r.ok && ['price_changed', 'price_cap_exceeded'].includes(r.error.code)) void attempt('quote', () => source.filePrice(), setFilePrice);
       if (r.ok) {
         setPaid(r.value.message_id, r.value.amount_msat);
+        setAllowances(r.value.message_id, { total_msat: r.value.total_msat ?? r.value.amount_msat + (r.value.max_routing_fee_msat ?? 0), max_routing_fee_msat: r.value.max_routing_fee_msat ?? 0 });
         if (!deliveries[r.value.message_id]) setDeliveries(r.value.message_id, deliveryFromReceipt(r.value));
-        addArtifact(t, { type: 'file', receipt: r.value, at: r.value.sent_at_ms });
+        setThreads('t', trackKey(t), (old) => mergeMessages(old ?? [], [sentFileMessage(r.value, ownId())]));
+        setThreads('fresh', r.value.message_id, true);
       }
       return recordFailure(t, 'File not sent', r);
     },
@@ -1196,7 +1199,11 @@ function MessageView(props: {
       <Show when={!props.out && props.room}>
         <span class="who">{props.nameOf(props.m.sender)}</span>
       </Show>
-      <div class="bubble">{props.m.plaintext ?? 'Encrypted content not available on this device'}</div>
+      <div class="bubble" classList={{ file: props.m.kind === 200 }} data-kind={props.m.kind}>
+        <Show when={props.m.kind === 200} fallback={props.m.plaintext ?? 'Encrypted content not available on this device'}>
+          <span class="file-name">{props.m.plaintext ?? 'File'}</span>
+        </Show>
+      </div>
       <div class="stamp">
         <Show when={amount()}>
           <Bolt />
@@ -1223,18 +1230,26 @@ const FAILURE_LABEL: Partial<Record<ActionError['code'], string>> = {
 };
 
 const DELIVERY_TEXT: Record<Delivery['status'], string> = {
-  accepted: 'accepted by their node',
-  sent: 'sent, waiting for their node',
-  queued: 'queued until they reconnect',
-  delivered: 'delivered',
-  rejected: 'rejected',
+  accepted: 'Delivered',
+  sent: 'Sent',
+  queued: 'Queued',
+  delivered: 'Delivered',
+  rejected: 'Rejected',
 };
 
+/** Single ✓ when acked/delivered; other states keep one short word (details in title). */
 function DeliveryMark(props: { d: Delivery }) {
+  const tick = () => props.d.status === 'accepted' || props.d.status === 'delivered';
+  const label = () => {
+    const base = DELIVERY_TEXT[props.d.status];
+    return props.d.reason ? `${base}: ${props.d.reason}` : base;
+  };
   return (
-    <span class="delivery" data-delivery={props.d.status}>
-      {DELIVERY_TEXT[props.d.status]}
-      <Show when={props.d.reason}>: {props.d.reason}</Show>
+    <span class="delivery" data-delivery={props.d.status} title={label()} aria-label={label()}>
+      <Show when={!tick()}>
+        {DELIVERY_TEXT[props.d.status]}
+        <Show when={props.d.reason}>: {props.d.reason}</Show>
+      </Show>
     </span>
   );
 }
@@ -1416,21 +1431,29 @@ function UndeliveredView(props: {
   return (
     <div class="artifact out failed" data-artifact="undelivered" data-paid-msat={props.a.paid.paid_msat}>
       <span class="kind">{copy().title}</span>
-      <span>{copy().body}</span>
+      <span data-undelivered-line>{copy().body}</span>
+      <details class="quiet-detail" data-undelivered-detail>
+        <summary>Details</summary>
+        <p>{copy().detail}</p>
+      </details>
       <Show when={props.a.paid.retry && props.onRetry}>
         <Show
           when={props.a.admission}
           fallback={
             <button type="button" class="link" data-retry-delivery disabled={props.moneyBlocked || busy()} onClick={() => void run(() => props.onRetry!(props.a.id))}>
-              {busy() ? 'Retrying delivery…' : 'Retry delivery'}
+              {busy() ? 'Retrying…' : 'Retry delivery'}
             </button>
           }
         >
           {(adm) => (
             <>
-              <p class="hint" data-admission-price={adm().total_msat}>{admissionCopy(adm()).body}</p>
+              <p class="hint" data-admission-price={adm().total_msat} data-admission-line>{admissionCopy(adm()).body}</p>
+              <details class="quiet-detail" data-admission-detail>
+                <summary>Details</summary>
+                <p>{admissionCopy(adm()).detail}</p>
+              </details>
               <button type="button" class="link" data-retry-approve disabled={props.moneyBlocked || busy()} onClick={() => void run(() => props.onRetry!(props.a.id, adm().total_msat))}>
-                {busy() ? 'Checking…' : props.a.ownerApproval ? 'Check node approval and retry' : admissionCopy(adm()).action}
+                {busy() ? 'Checking…' : props.a.ownerApproval ? 'Check approval and retry' : admissionCopy(adm()).action}
               </button>
             </>
           )}
@@ -1442,7 +1465,7 @@ function UndeliveredView(props: {
         </button>
       </Show>
       <Show when={props.a.ownerApproval}>
-        {(approval) => <div data-retry-owner><p>Approve this retry at your node, then check approval.</p><code class="address">{approval().owner_command}</code></div>}
+        {(approval) => <div data-retry-owner><p>Approve at your node, then check.</p><code class="address">{approval().owner_command}</code></div>}
       </Show>
       <Show when={props.a.note}>
         <p class="hint" data-retry-note>{props.a.note}</p>
@@ -1599,7 +1622,8 @@ function Composer(props: {
    */
   const viaBudget = () => {
     const b = budget();
-    if (mode() !== 'message' || !b) return false;
+    // Messages and files share budget / window rules; pay & request stay manual.
+    if ((mode() !== 'message' && mode() !== 'file') || !b) return false;
     return b.paused || b.waiting_for_owner || b.autopay.state === 'open' || !line().open;
   };
   // A known contact the node would not re-admit from the budget after a
@@ -1630,7 +1654,7 @@ function Composer(props: {
   const stand = () => budgetStand(budget(), target(), room(), shown().msat, readmit());
   createEffect(() => {
     if (props.moneyBlocked) { setDoor(null); return; }
-    if (room() || !doorWanted() || mode() !== 'message' || stand().kind !== 'first') return;
+    if (room() || !doorWanted() || (mode() !== 'message' && mode() !== 'file') || stand().kind !== 'first') return;
     const peer = target();
     if (untrack(door)?.peer === peer) return;
     setDoor({ peer, quote: null });
@@ -1750,7 +1774,7 @@ function Composer(props: {
         case 'paused': return 'Resume payments';
         case 'waiting': return 'Waiting for approval';
         case 'off': return 'Approve app all-in limit';
-        case 'first': return `Send first message${price}`;
+        case 'first': return `Send first ${mode() === 'file' ? 'file' : 'message'}${price}`;
         case 'contact_used':
         case 'total_used': return 'Budget used up';
         default: return `Send${price}`;
@@ -1786,10 +1810,14 @@ function Composer(props: {
       const submittedPeer = target();
       const submittedTrack = props.track;
       const submittedText = draft();
+      const submittedFile = file();
+      const submittedMode = mode();
       const cap = shown().msat!;
       const first = st.kind === 'first' ? firstPick() ?? st.suggest : undefined;
       const dispatch = async () => {
-      const r = await props.actions.send(submittedTrack, submittedText, cap, first);
+      const r = submittedMode === 'file'
+        ? await props.actions.file(submittedTrack, submittedFile!, cap, first)
+        : await props.actions.send(submittedTrack, submittedText, cap, first);
       const unchanged = composerRevision === submittedRevision;
       if (r.ok && readmitQuote()?.peer === submittedPeer) setReadmitQuote(null);
       if (!r.ok && r.error.code === 'readmission_quoted' && r.error.admission) setReadmitQuote({ peer: submittedPeer, price: r.error.admission });
@@ -1802,8 +1830,13 @@ function Composer(props: {
         setReadmitFor(submittedPeer);
       }
       if ((r.ok || paidUndelivered(r)) && composerRevision === submittedRevision) {
-        setDraft('');
-        setDrafted(false);
+        if (submittedMode === 'file') {
+          setFile(null);
+          if (fileInput) fileInput.value = '';
+        } else {
+          setDraft('');
+          setDrafted(false);
+        }
       } else if (!r.ok && unchanged && (isBudgetStop(r.error) || r.error.code === 'owner_only')) setNote(r.error.message);
       };
       if (first !== undefined && !room()) {
@@ -1960,7 +1993,7 @@ function Composer(props: {
         <Match when={mode() === 'file'}>
           <div class="fields">
             <input ref={fileInput} type="file" data-file-input onChange={(e) => { composerRevision++; setFile(e.currentTarget.files?.[0] ?? null); }} aria-label="File to send" />
-            <span class="hint">Up to 1.4 MB. It goes to {props.name} only, end to end encrypted, and pays like a message.</span>
+            <span class="hint">Up to 1.4 MB · to {props.name} only · pays like a message.</span>
           </div>
         </Match>
       </Switch>
@@ -1984,16 +2017,25 @@ function Composer(props: {
 
       <Show when={readmitPrice()}>
         {(p) => (
-          <p class="hint" data-readmission-quote>
-            {props.name} asks for admission again, {sats(p().admission_msat)} {satUnit(p().admission_msat)}. Nothing was paid. Send again to pay {sats(p().total_msat)} {satUnit(p().total_msat)} in all; the same message keeps its operation, so it is never paid twice.
-          </p>
+          <>
+            <p class="hint" data-readmission-quote>
+              {props.name} asks for admission again, {sats(p().admission_msat)} {satUnit(p().admission_msat)}. Nothing was paid. Send again: {sats(p().total_msat)} {satUnit(p().total_msat)} in all.
+            </p>
+            <details class="quiet-detail" data-readmission-detail>
+              <summary>Details</summary>
+              <p>The same message keeps its operation, so it is never paid twice.</p>
+            </details>
+          </>
         )}
       </Show>
       <Show when={mode() === 'pay'}>
         <p class="hint" data-budget-payment>App invoice payments and keysend reserve principal plus the network fee ceiling against the app daily all-in limit; any finite node grant still applies.</p>
       </Show>
       <Show when={mode() === 'file'}>
-        <p class="hint" data-budget-file>Files reserve principal plus the network fee ceiling against the same app all-in limit and contact budget, including during the ten-minute window.</p>
+        <details class="quiet-detail" data-budget-file>
+          <summary>File spend rules</summary>
+          <p>Files reserve principal plus the network fee ceiling against the same app all-in limit and contact budget, including during the ten-minute window.</p>
+        </details>
       </Show>
       <Show when={drafted()}>
         <p class="drafted" data-drafted>
@@ -2057,11 +2099,16 @@ function SpendBar(props: { spend: SpendView | null; error: string | undefined; n
         <Match when={props.spend?.state === 'open' && line().open}>
           <p class="spend-line">
             <span class="dot ok" /> {line().text}.{' '}
-            {props.spend?.basis === 'app_lock'
-              ? 'This node version does not limit app tokens, so this window is the app’s own lock, kept in memory only.'
-              : 'Your node’s owner grant is in effect; this app uses it for ten minutes per approval.'}{' '}
             <button type="button" class="link" data-spend-lock onClick={() => void props.actions.lock()}>Lock now</button>
           </p>
+          <details class="quiet-detail" data-spend-detail>
+            <summary>Details</summary>
+            <p>
+              {props.spend?.basis === 'app_lock'
+                ? 'This node version does not limit app tokens, so this window is the app’s own lock, kept in memory only.'
+                : 'Your node’s owner grant is in effect; this app uses it for ten minutes per approval.'}
+            </p>
+          </details>
         </Match>
         <Match when={props.spend?.state === 'pending' && props.spend.pending}>
           {(p) => (
@@ -2384,22 +2431,30 @@ function BudgetPanel(props: {
   const directPaymentName = (target: string) => target === 'app:invoice-payments' ? 'Invoice payments'
     : target === 'app:keysend-payments' ? 'Keysend payments' : null;
   const status = (b: BudgetView) => {
-    if (b.paused) return 'Paused. New app payments are blocked; in-flight payments and spending outside this app can continue.';
-    if (b.waiting_for_owner) return 'Waiting for your approval at the node.';
-    if (b.autopay.state === 'open') return `Paying automatically. The approval ends in ${hoursLeft(b.autopay.open_until_ms, props.now, b.window_ms)} h.`;
-    if (b.autopay.state === 'expired') return 'The daily approval ended. Approve again from any conversation.';
-    return 'Not approved in this session. Approve an app all-in limit from any conversation.';
+    if (b.paused) return 'Paused · new app payments blocked';
+    if (b.waiting_for_owner) return 'Waiting for node approval';
+    if (b.autopay.state === 'open') return `Autopay open · ${hoursLeft(b.autopay.open_until_ms, props.now, b.window_ms)} h left`;
+    if (b.autopay.state === 'expired') return 'Daily approval ended';
+    return 'Not approved this session';
+  };
+  const statusDetail = (b: BudgetView) => {
+    if (b.paused) return 'In-flight payments and spending outside this app can continue.';
+    if (b.waiting_for_owner) return 'Confirm the pending approval at your node.';
+    if (b.autopay.state === 'open') return 'Messages and files pay inside this all-in limit until it ends.';
+    if (b.autopay.state === 'expired') return 'Approve again from any conversation.';
+    return 'Approve an app all-in limit from any conversation.';
   };
   return (
     <div class="panel" data-panel="budget">
       <h2>App payment budget</h2>
-      <div class="hint" data-budget-scope>
-        <strong>App all-in payments · rolling 24 hours</strong>{' '}
-        Covers automatic and manual-window messages, room sends, files, app invoice payments and keysend, and admission, including their maximum network fees. This is a conservative allowance, not an exact wallet-debit total.{' '}
-        Not covered: channel opening/closing, on-chain transfers and fees,
-        owner-direct CLI/API commands, or background workers.{' '}
-        G1 is a separate finite node grant; it does not refill daily. This is not a wallet-wide spending limit.
-      </div>
+      <details class="quiet-detail hint" data-budget-scope>
+        <summary><strong>App all-in · rolling 24 h</strong> — what it covers</summary>
+        <p>
+          Covers automatic and manual-window messages, room sends, files, app invoice payments and keysend, and admission, including their maximum network fees. Conservative allowance, not an exact wallet-debit total.
+          Not covered: channel opening/closing, on-chain transfers and fees, owner-direct CLI/API, or background workers.
+          G1 is a separate finite node grant; it does not refill daily. Not a wallet-wide limit.
+        </p>
+      </details>
       <Show when={props.budget} fallback={<Show when={!props.error} fallback={<p class="err-note">{props.error}</p>}><div class="spinner" /></Show>}>
         {(b) => (
           <>
@@ -2423,6 +2478,10 @@ function BudgetPanel(props: {
             <p class="spend-line" classList={{ paused: b().paused }} data-autopay={b().paused ? 'paused' : b().autopay.state}>
               <span class={`dot ${b().paused ? 'warn' : b().autopay.state === 'open' ? 'ok' : ''}`} /> <span class="line-text">{status(b())}</span>
             </p>
+            <details class="quiet-detail" data-budget-status-detail>
+              <summary>Details</summary>
+              <p>{statusDetail(b())}</p>
+            </details>
             <Show
               when={b().paused}
               fallback={

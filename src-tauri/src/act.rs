@@ -1146,6 +1146,12 @@ pub struct FileReceipt {
     pub delivered: bool,
     pub amount_msat: u64,
     pub sent_at_ms: u64,
+    /// Present when the node echoes operation fields (compose-shaped replies).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    pub accepted: bool,
 }
 
 // ---- node refusals --------------------------------------------------------------

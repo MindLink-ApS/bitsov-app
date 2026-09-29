@@ -1997,10 +1997,19 @@ async fn do_first_contact_request(state: &NodeState, recipient: &str, max_msat: 
     }
     check_auth(state, auth)?;
     if approval_fence(state) != fence { return Err(fence_broken()); }
+    // #65 external-node attach: the app already knows this node's konsensus.toml.
+    // Include --config (and a PATH hint) only then; production still expects the
+    // owner to run from the data dir or add --config themselves.
+    let owner_config = state
+        .external_node
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|dir| dir.join("konsensus.toml"));
     let pending = owner_contact::Pending::new(owner_contact::Request {
         client_id: grant.client_id.clone(), grant_op_id: grant.op_id.clone(),
         recipient, max_total_msat: max_msat, contact_budget_msat,
-    }, fence, now_ms(), &grant)?;
+    }, fence, now_ms(), &grant, owner_config.as_deref())?;
     let view = pending.view.clone();
     *state.owner_contact.lock().unwrap() = Some(pending);
     Ok(Some(view))
@@ -2087,13 +2096,23 @@ fn decode_act<T: serde::de::DeserializeOwned>(path: &str, body: &str) -> Result<
     serde_json::from_str(body).map_err(|e| ActionError::node(format!("{path} decode failed: {e}")))
 }
 
-/// An admin POST (invites or file upload), never a money request.
+/// An admin POST (invites), never a money request. Always needs the spend window.
 async fn gated_post(
     state: &NodeState,
     path: &str,
     body: serde_json::Value,
 ) -> Result<String, ActionError> {
-    state.spend.lock().unwrap().check(now_ms())?;
+    gated_post_auth(state, Auth::Window(approval_generation(state)?), path, body).await
+}
+
+/// Admin POST under the same budget / window authority as a paid send (file upload).
+async fn gated_post_auth(
+    state: &NodeState,
+    auth: Auth,
+    path: &str,
+    body: serde_json::Value,
+) -> Result<String, ActionError> {
+    check_auth(state, auth)?;
     let (status, text) = call_api(state, reqwest::Method::POST, path, Some(body)).await?;
     if act::is_scope_refusal(status.as_u16()) {
         return Err(ActionError::new(
@@ -3570,25 +3589,51 @@ async fn do_file_send(
     mime_type: &str,
     data_b64: &str,
     max_msat: u64,
+    first_contact_msat: Option<u64>,
 ) -> Result<act::FileReceipt, ActionError> {
-    let generation = approval_generation(state)?;
-    no_pending_spend(state)?;
     let recipient = control::node_id(recipient).map_err(ActionError::invalid)?;
-    // Files retain the manual window; approval never exempts them from the
-    // same daily and contact limits as messages. Check before uploading bytes.
-    let mut charge = plan_manual_charge(state, &recipient, max_msat)?;
-    charge.readmission_possible = require_price_caps(state, false).await?.readmission_possible;
+    // Same budget / ten-minute window rules as a 1:1 message. Genome's file
+    // send has no `operation_id` field (`deny_unknown_fields`), so we keep
+    // `operation: false`; the spend journal still fences concurrent money posts.
+    let (auth, plan) = plan_message(state, &recipient, false, max_msat, first_contact_msat)?;
+    no_pending_spend(state)?;
+    let caps = require_price_caps(state, false).await?;
     let body = act::file_upload_body(filename, mime_type, data_b64)?;
     let filename = body["filename"].as_str().unwrap_or_default().to_string();
     let quote: control::KindPrice = get_json(state, &control::price_path(act::KIND_FILE_REF)).await?;
     ceiling(act::payment_quote(quote.price_msat.max(act::MIN_PAYMENT_MSAT))?.total_msat, max_msat)?;
-    let text = gated_post(state, "/files", body).await?;
+    let text = gated_post_auth(state, auth, "/files", body).await?;
     let upload: act::UploadReply = decode_act("/files", &text)?;
     let path = act::file_send_path(&upload.file_id)?;
     // Upload can take time; quote again immediately before the money request.
     let quote: control::KindPrice = get_json(state, &control::price_path(act::KIND_FILE_REF)).await?;
-    ceiling(act::payment_quote(quote.price_msat.max(act::MIN_PAYMENT_MSAT))?.total_msat, max_msat)?;
-    let text = money_post(state, Auth::Window(generation), &path, serde_json::json!({ "recipient": recipient, "max_total_msat": max_msat, "max_routing_fee_msat": act::routing_fee(quote.price_msat.max(act::MIN_PAYMENT_MSAT)) }), max_msat, Some(charge)).await?;
+    let principal = quote.price_msat.max(act::MIN_PAYMENT_MSAT);
+    ceiling(act::payment_quote(principal)?.total_msat, max_msat)?;
+    let node_ok = plan.confirm.or(first_contact_msat);
+    if let Some(contact_budget) = node_ok {
+        confirm_first_contact(state, &recipient, max_msat, contact_budget).await?;
+    }
+    let charge = Charge {
+        target: recipient.clone(),
+        room: false,
+        confirm: plan.confirm,
+        readmission_possible: caps.readmission_possible,
+        confirmed: node_ok.is_some(),
+        operation: false,
+    };
+    let text = money_post(
+        state,
+        auth,
+        &path,
+        serde_json::json!({
+            "recipient": recipient,
+            "max_total_msat": max_msat,
+            "max_routing_fee_msat": act::routing_fee(principal),
+        }),
+        max_msat,
+        Some(charge),
+    )
+    .await?;
     let reply: act::SendReply = decode_act("/files/send", &text)?;
     let total_msat = reply.total_msat()?;
     Ok(act::FileReceipt {
@@ -3601,6 +3646,9 @@ async fn do_file_send(
         amount_msat: reply.amount_msat,
         max_routing_fee_msat: reply.max_routing_fee_msat,
         sent_at_ms: now_ms(),
+        operation_id: reply.operation_id,
+        state: reply.state,
+        accepted: reply.accepted,
     })
 }
 
@@ -3925,6 +3973,7 @@ async fn file_price(
 
 /// `POST /files` then `POST /files/:id/send` to one peer.
 #[tauri::command(rename_all = "snake_case")]
+#[allow(clippy::too_many_arguments)]
 async fn file_send(
     window: WebviewWindow<impl tauri::Runtime>,
     state: State<'_, NodeState>,
@@ -3933,10 +3982,11 @@ async fn file_send(
     mime_type: String,
     data_b64: String,
     max_msat: u64,
+    first_contact_msat: Option<u64>,
 ) -> Result<act::FileReceipt, ActionError> {
     reject_sealed_window(&window)?;
     drop(window);
-    do_file_send(state.inner(), &recipient, &filename, &mime_type, &data_b64, max_msat).await
+    do_file_send(state.inner(), &recipient, &filename, &mime_type, &data_b64, max_msat, first_contact_msat).await
 }
 
 // ---- AI track (main window) -------------------------------------------------
@@ -4876,7 +4926,7 @@ mod control_act_tests {
             spend_advance(&node.state,true).await.unwrap();
             assert_eq!(do_message_send(&node.state,A,false,"hi",7000,None).await.unwrap_err().code,"price_cap_unavailable");
             assert_eq!(do_message_send(&node.state,ROOM,true,"hi",13000,Some(std::collections::HashMap::from([(A.into(),7000),(C.into(),6000)]))).await.unwrap_err().code,"price_cap_unavailable");
-            assert_eq!(do_file_send(&node.state,A,"a.txt","text/plain","aGk=",8000).await.unwrap_err().code,"price_cap_unavailable");
+            assert_eq!(do_file_send(&node.state,A,"a.txt","text/plain","aGk=",8000, None).await.unwrap_err().code,"price_cap_unavailable");
             assert!(node.posts().is_empty());
         }
     }
@@ -4890,7 +4940,7 @@ mod control_act_tests {
         let node=fake(AuthMode::Local,routes);
         spend_advance(&node.state,true).await.unwrap();
         assert_eq!(do_message_send(&node.state,A,false,"hi",7000, None).await.unwrap_err().code,"price_cap_unavailable");
-        assert_eq!(do_file_send(&node.state,A,"a.txt","text/plain","aGk=",8000).await.unwrap_err().code,"price_cap_unavailable");
+        assert_eq!(do_file_send(&node.state,A,"a.txt","text/plain","aGk=",8000, None).await.unwrap_err().code,"price_cap_unavailable");
         assert!(node.posts().is_empty());
     }
     #[tokio::test]
@@ -5277,7 +5327,7 @@ mod control_act_tests {
             do_payment_keysend(s, &format!("02{}", "ab".repeat(32)), 5000, None, 10000).await.unwrap_err().code,
             do_invite_create(s, A, "203.0.113.5:9735", 24).await.unwrap_err().code,
             do_invite_redeem(s, "bitsov://invite/tok").await.unwrap_err().code,
-            do_file_send(s, A, "a.txt", "text/plain", "aGk=", 8000).await.unwrap_err().code,
+            do_file_send(s, A, "a.txt", "text/plain", "aGk=", 8000, None).await.unwrap_err().code,
         ];
         assert!(codes.iter().all(|c| *c == "spend_locked"), "{codes:?}");
         assert!(node.targets().is_empty(), "{:?}", node.targets());
@@ -6684,7 +6734,7 @@ mod control_act_tests {
     async fn a_file_is_uploaded_then_sent_to_one_peer() {
         let node = fake(AuthMode::Local, happy());
         spend_advance(&node.state, true).await.unwrap();
-        let receipt = do_file_send(&node.state, A, "hi.txt", "text/plain", "aGk=", 8000).await.unwrap();
+        let receipt = do_file_send(&node.state, A, "hi.txt", "text/plain", "aGk=", 8000, None).await.unwrap();
         assert_eq!((receipt.filename.as_str(), receipt.size_bytes, receipt.amount_msat), ("hi.txt", 2, 3000));
         assert_eq!(
             node.posts(),
@@ -6795,7 +6845,7 @@ mod control_act_tests {
                     "message" => do_message_send(s, A, false, "hi", 7000, None).await.map(|r| r.amount_msat),
                     "room" => do_message_send(s, ROOM, true, "hi", 13000,
                         Some(std::collections::HashMap::from([(A.into(), 7000), (C.into(), 6000)]))).await.map(|r| r.amount_msat),
-                    _ => do_file_send(s, A, "a.txt", "text/plain", "aGk=", 8000).await.map(|r| r.amount_msat),
+                    _ => do_file_send(s, A, "a.txt", "text/plain", "aGk=", 8000, None).await.map(|r| r.amount_msat),
                 }
             };
             let paid = send().await.unwrap();
@@ -6810,19 +6860,29 @@ mod control_act_tests {
     }
 
     #[tokio::test]
-    async fn budget_scope_files_share_contact_limits_and_keep_manual_authority() {
+    async fn budget_scope_files_share_contact_limits_and_use_budget_like_messages() {
         let node = fake(AuthMode::Local, happy());
         let s = &node.state;
-        do_budget_approve(s, 10000, budget::PresetId::Careful).await.unwrap();
+        let view = do_budget_approve(s, 500_000, budget::PresetId::Careful).await.unwrap();
+        assert_eq!(view.autopay.state, budget::AutopayState::Open);
         with_book(s, true, |b| b.set_limit(A, false, 9000)).unwrap();
-        assert_eq!(do_file_send(s, A, "a.txt", "text/plain", "aGk=", 8000).await.unwrap_err().code, "spend_locked");
-        spend_advance(s, true).await.unwrap();
-        do_file_send(s, A, "a.txt", "text/plain", "aGk=", 8000).await.unwrap();
+        // Files use the same budget route as messages: no ten-minute window needed.
+        do_file_send(s, A, "a.txt", "text/plain", "aGk=", 8000, None).await.unwrap();
         assert_eq!(budget_now(s).spent_msat, 3000);
         let requests = node.targets().len();
         assert_eq!(do_message_send(s, A, false, "hi", 7000, None).await.unwrap_err().code, "budget_exhausted");
-        assert_eq!(do_file_send(s, A, "a.txt", "text/plain", "aGk=", 8000).await.unwrap_err().code, "budget_exhausted");
+        assert_eq!(do_file_send(s, A, "a.txt", "text/plain", "aGk=", 8000, None).await.unwrap_err().code, "budget_exhausted");
         assert_eq!(node.targets().len(), requests);
+    }
+
+    #[tokio::test]
+    async fn budget_scope_files_still_need_window_without_budget_approval() {
+        let node = fake(AuthMode::Local, happy());
+        let s = &node.state;
+        assert_eq!(do_file_send(s, A, "a.txt", "text/plain", "aGk=", 8000, None).await.unwrap_err().code, "spend_locked");
+        spend_advance(s, true).await.unwrap();
+        do_file_send(s, A, "a.txt", "text/plain", "aGk=", 8000, None).await.unwrap();
+        assert_eq!(budget_now(s).spent_msat, 3000);
     }
 
     #[tokio::test]
@@ -6833,10 +6893,10 @@ mod control_act_tests {
         });
         let node = fake(AuthMode::Local, routes);
         spend_advance(&node.state, true).await.unwrap();
-        assert_eq!(do_file_send(&node.state, A, "a.txt", "text/plain", "aGk=", 8000).await.unwrap_err().code, "spend_unknown");
+        assert_eq!(do_file_send(&node.state, A, "a.txt", "text/plain", "aGk=", 8000, None).await.unwrap_err().code, "spend_unknown");
         assert_eq!(budget_now(&reopen(&node)).unsettled_msat, 8000);
         let requests = node.targets().len();
-        assert_eq!(do_file_send(&node.state, A, "a.txt", "text/plain", "aGk=", 8000).await.unwrap_err().code, "spend_unknown");
+        assert_eq!(do_file_send(&node.state, A, "a.txt", "text/plain", "aGk=", 8000, None).await.unwrap_err().code, "spend_unknown");
         assert_eq!(node.targets().len(), requests);
     }
 
@@ -6856,7 +6916,7 @@ mod control_act_tests {
         let node = fake(AuthMode::Local, routes);
         *config.lock().unwrap() = node.state.config.lock().unwrap().clone();
         spend_advance(&node.state, true).await.unwrap();
-        assert_eq!(do_file_send(&node.state, A, "a.txt", "text/plain", "aGk=", 8000).await.unwrap_err().code, "ceiling_exhausted");
+        assert_eq!(do_file_send(&node.state, A, "a.txt", "text/plain", "aGk=", 8000, None).await.unwrap_err().code, "ceiling_exhausted");
         assert_eq!(node.posts().iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(), ["/files"]);
         assert_eq!(budget_now(&node.state).spent_msat, 0);
         assert!(spend_journal(&node.state).unwrap().pending().unwrap().is_none());
@@ -6866,11 +6926,17 @@ mod control_act_tests {
     async fn budget_scope_automatic_messages_and_files_share_global_total() {
         let node = fake(AuthMode::Local, happy());
         let s = &node.state;
-        do_budget_approve(s, 10000, budget::PresetId::Careful).await.unwrap();
-        with_book(s, true, |b| { b.set_limit(A, false, 10000)?; b.set_limit(C, false, 10000) }).unwrap();
+        do_budget_approve(s, 500_000, budget::PresetId::Careful).await.unwrap();
+        with_book(s, true, |b| {
+            b.set_ceiling(10000);
+            b.set_limit(A, false, 10000)?;
+            b.set_limit(C, false, 10000)
+        }).unwrap();
+        // Narrow the open autopay ceiling to the test's 10-sat total.
+        s.autopay.lock().unwrap().narrow(10000);
         do_message_send(s, A, false, "automatic", 7000, None).await.unwrap();
-        spend_advance(s, true).await.unwrap();
-        do_file_send(s, C, "a.txt", "text/plain", "aGk=", 8000).await.unwrap();
+        // File to C also rides the open budget (same contact book as messages).
+        do_file_send(s, C, "a.txt", "text/plain", "aGk=", 8000, None).await.unwrap();
         assert_eq!(budget_now(s).spent_msat, 5000);
         let requests = node.targets().len();
         assert_eq!(do_message_send(s, A, false, "automatic", 7000, None).await.unwrap_err().code, "ceiling_exhausted");
@@ -6891,7 +6957,7 @@ mod control_act_tests {
             }).unwrap();
             // Genome 4aa5089 can pay admission beyond the 3-sat file cap.
             // Its 50-sat recipient allowance must fit before paid dispatch.
-            let error = do_file_send(&node.state, A, "a.txt", "text/plain", "aGk=", 8000).await.unwrap_err();
+            let error = do_file_send(&node.state, A, "a.txt", "text/plain", "aGk=", 8000, None).await.unwrap_err();
             assert_eq!(error.code, if limit == "daily" { "ceiling_exhausted" } else { "budget_exhausted" });
             assert!(!node.posts().iter().any(|(p, _)| p.ends_with("/send")));
             assert_eq!(budget_now(&node.state).spent_msat, 0);
@@ -7035,7 +7101,7 @@ mod control_act_tests {
         spend_advance(&node.state, true).await.unwrap();
         assert!(do_payment_pay(&node.state, "lntb10n1x", 1000, 1000).await.is_err());
         assert!(do_payment_keysend(&node.state, &format!("02{}", "ab".repeat(32)), 5000, None, 5000).await.is_err());
-        assert!(do_file_send(&node.state, A, "a.txt", "text/plain", "aGk=", 3000).await.is_err());
+        assert!(do_file_send(&node.state, A, "a.txt", "text/plain", "aGk=", 3000, None).await.is_err());
         assert!(node.posts().is_empty());
     }
 
@@ -7333,8 +7399,9 @@ mod control_act_tests {
         let v = budget_now(s);
         assert_eq!((v.spent_msat, v.unsettled_msat), (4000, 0));
         assert_eq!(v.rows, [budget::Row { target: A.into(), room: false, limit_msat: Some(50_000), spent_msat: 4000 }]);
-        // Pay and files still need the ten-minute window.
+        // Pay still needs the ten-minute window; files share the message budget route.
         assert_eq!(do_payment_pay(s, "lntb10n1x", 1000, 6000).await.unwrap_err().code, "spend_locked");
+        do_file_send(s, A, "note.txt", "text/plain", "aGk=", 8000, None).await.unwrap();
     }
 
     #[tokio::test]
@@ -8811,7 +8878,7 @@ mod control_act_tests {
         });
         let node = fake(AuthMode::Local, routes);
         spend_advance(&node.state, true).await.unwrap();
-        assert_eq!(do_file_send(&node.state, A, "hi.txt", "text/plain", "aGk=", 8000).await.unwrap_err().code, "price_changed");
+        assert_eq!(do_file_send(&node.state, A, "hi.txt", "text/plain", "aGk=", 8000, None).await.unwrap_err().code, "price_changed");
         assert_eq!(node.posts().len(), 1);
         assert_eq!(node.posts()[0].0, "/files");
     }

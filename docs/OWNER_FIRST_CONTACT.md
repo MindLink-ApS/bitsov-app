@@ -16,7 +16,11 @@ Run the displayed command in the owner's terminal from the node's data
 directory (`konsensus.toml`), with the node started using `--owner-control`.
 The CLI line can instead take `--config '/path/to/konsensus.toml'`. Every
 interpolated value is POSIX-shell quoted, including amounts and the gift code.
-The app does not supply or discover the owner's config path.
+In production the app does not supply or discover the owner's config path. In
+the #65 **dev external-node** attach mode only — where the app already knows
+the node's `konsensus.toml` — the displayed command includes `--config` and a
+short hint to replace `konsensus` with an absolute binary path if it is not on
+`PATH`.
 
 The first-contact command contains this CLI invocation:
 
@@ -32,10 +36,15 @@ before calling the CLI, bounded by the underlying budget grant's expiry. A
 slow command can leave an expired receipt, which fails closed.
 
 The receipt directory is created with mode `0700` on Unix regardless of umask.
-The wrapper uses `umask 077`, opens `receipt.part` with noclobber before the
-CLI runs, refuses existing partial files or symlinks, and publishes by rename.
-Cancel and request approval again if a partial file already exists. CLI output
-remains visible in the owner's terminal; it is not parsed as an API contract.
+The wrapper uses `umask 077`, pre-checks that `receipt.part` and `receipt.json`
+are absent (including as symlinks), then opens `receipt.part` with noclobber
+and publishes with `ln` (exclusive) plus remove of the partial. A failed first
+run (for example `konsensus` not on `PATH`) must not leave an empty
+`receipt.part` that makes every later run exit silently — failures print to
+stderr and remove the partial. A second run after a successful publish says the
+receipt is already published and points the owner at **Check pending result**.
+CLI output remains visible in the owner's terminal; it is not parsed as an API
+contract.
 
 Gift approval needs no file wrapper:
 
