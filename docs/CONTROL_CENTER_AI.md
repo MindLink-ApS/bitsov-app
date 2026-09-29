@@ -75,6 +75,20 @@ Leaving the AI track cancels its pending previews and records them as not sent, 
 | Rounded | amounts to two significant figures in sats, times to the day, no node ids |
 | Exact | the broker projection unchanged |
 
+## Endpoint badge
+
+The chat header always shows which endpoint answers, who gets paid and what leaves the node. The sealed assistant window shows the same badge (always Own: it has no model).
+
+| Badge | Endpoint | Who gets paid | What leaves |
+|---|---|---|---|
+| **Own** (green) | On this computer · rules | Nobody | Nothing |
+| **Shared open** (amber) | `<model> at <host>` | The host's operator, on your own API key (billed off-app); nobody when no key is set | The preview you send, at its preset (counts only by default) |
+| **Frontier** (red) | `<model> at <host>` | The vendor at that host, on your own API key | The same, and vendor terms apply |
+
+The host derives it: `ProviderView` carries `pays: {to, rail: none | fiat}` and `data_leaves` (`null` = nothing; otherwise the preset a preview starts at), both from the provider kind and `ai-providers.json`. The window cannot set them. Switching provider changes the badge before the first question; after a preview, it names that preview's preset. There is no sats rail and no spend path to any model: the badge only describes, and no AI holds spend. The tier is written out, so colour is never the only signal; every badge colour meets WCAG AA in both themes (`tests/endpoint-badge.test.tsx`).
+
+The sealed window uses the same words as the AI track: **From your node** for live rows and **Sample data** (not "Mock data") otherwise; the rc7 reason reads "Your node version has no pairing."
+
 ## Actions never spend
 
 A request like "draft a 2-sat message to Maya", "pay Josh 500 sats" or "request 2000 sats from Josh" produces a draft card. **Open in Maya's composer** fills that peer's composer once, in Message, Pay (direct, amount only) or Request mode. From there slice B takes over:

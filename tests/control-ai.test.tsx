@@ -332,9 +332,9 @@ function stubHost(overrides: Record<string, Reply> = {}) {
     file_price: () => ({ principal_msat: 3000, max_routing_fee_msat: 5000, total_msat: 8000 }),
     spend_status: () => ({ state: 'locked', basis: null, open_until_ms: null, pending: null, window_ms: 600_000 }),
     ai_providers: () => [
-      { kind: 'local', label: 'On this computer', enabled: true, host: null, model: null, note: null },
-      { kind: 'shared', label: 'Shared open model', enabled: true, host: 'models.example.org', model: 'open-8b', note: null },
-      { kind: 'frontier', label: 'Frontier model', enabled: false, host: null, model: null, note: 'Off. Not set up on this computer.' },
+      { kind: 'local', label: 'On this computer', enabled: true, host: null, model: null, note: null, pays: { to: null, rail: 'none' }, data_leaves: null },
+      { kind: 'shared', label: 'Shared open model', enabled: true, host: 'models.example.org', model: 'open-8b', note: null, pays: { to: 'models.example.org', rail: 'fiat' }, data_leaves: 'counts' },
+      { kind: 'frontier', label: 'Frontier model', enabled: false, host: null, model: null, note: 'Off. Not set up on this computer.', pays: { to: null, rail: 'none' }, data_leaves: null },
     ],
     ai_read: () => paymentsRead(),
     ai_disclose: (args) => ({
@@ -535,6 +535,37 @@ describe('the AI track', () => {
     expect(text('[data-ai-source="remote"]')).toContain('Your node did not check this answer');
     // The record of what left stays under the answer.
     expect(text('[data-ai-sent] pre')).toBe(BODY);
+  });
+
+  it('keeps a persistent endpoint badge in the header that follows the selection and the preview', async () => {
+    const host = stubHost();
+    await openAi();
+    const badge = () => $('.track-head [data-testid="endpoint-badge"]');
+    // Own before anything is asked: nobody paid, nothing leaves.
+    await vi.waitFor(() => expect(badge()?.getAttribute('data-tier')).toBe('own'));
+    expect(badge()!.textContent).toContain('Own');
+    expect(badge()!.textContent).toContain('On this computer · rules');
+    expect(text('.track-head [data-endpoint-paid]')).toBe('Nobody is paid');
+    expect(text('.track-head [data-endpoint-leaves]')).toBe('Nothing leaves');
+
+    // Switching changes the badge before the first question.
+    click('[data-provider="shared"]');
+    expect(badge()!.getAttribute('data-tier')).toBe('shared');
+    expect(badge()!.textContent).toContain('Shared open');
+    expect(badge()!.textContent).toContain('open-8b at models.example.org');
+    expect(text('.track-head [data-endpoint-paid]')).toBe('Paid: models.example.org, your API key');
+    expect(text('.track-head [data-endpoint-leaves]')).toBe('Leaves: the preview you send, counts only');
+    expect(host.used('ai_disclose')).toHaveLength(0);
+    expect($('[data-provider="shared"]')!.getAttribute('data-tier')).toBe('shared');
+
+    // The badge names the preset of the preview on screen.
+    ask('What did I spend this week?');
+    await vi.waitFor(() => expect($('[data-ai-payload]')).not.toBeNull());
+    click('[data-preset-option="rounded"]');
+    await vi.waitFor(() => expect(text('.track-head [data-endpoint-leaves]')).toBe('Leaves: the preview you send, rounded figures'));
+    // Still nothing sent, and the badge never offers a way to pay or spend.
+    expect(host.used('ai_send')).toHaveLength(0);
+    expect(badge()!.querySelector('button, a, input')).toBeNull();
   });
 
   it('keeps a canceled preview unsendable after switching tracks and returning', async () => {

@@ -10,6 +10,8 @@
 import { createSignal, For, Match, onCleanup, Show, Switch, type JSX } from 'solid-js';
 import { createStore, produce } from 'solid-js/store';
 import { copyPlainText } from '../assistant/copy';
+import { EndpointBadge } from '../assistant/EndpointBadge';
+import { OWN_RULES, endpointBadge } from '../assistant/endpoint';
 import {
   answerFrom,
   cardText,
@@ -93,11 +95,21 @@ export function AiTrack(props: {
     props.source
       .aiProviders()
       .then((list) => setSession('providers', list))
-      .catch(() => setSession('providers', [{ kind: 'local', label: 'On this computer', enabled: true, host: null, model: null, note: null }]));
+      .catch(() => setSession('providers', [OWN_RULES]));
   }
 
   const nameOf = (id: string) => peerName(props.peers.find((p) => p.node_id.toLowerCase() === id.toLowerCase()), id);
   const provider = () => session.providers?.find((p) => p.kind === session.provider) ?? null;
+  /** The badge follows the selected endpoint; until the list loads, it is Own. */
+  const badgeFor = () => provider() ?? OWN_RULES;
+  /** The preset of the latest preview for the selected endpoint, if any. */
+  const previewed = () => {
+    for (let i = session.turns.length - 1; i >= 0; i--) {
+      const t = session.turns[i];
+      if (t.provider === session.provider && t.disclosure) return t.disclosure.preset;
+    }
+    return null;
+  };
   const remote = () => session.provider !== 'local';
   const busy = () => session.turns.some((t) => t.state === 'reading' || t.state === 'sending');
 
@@ -153,7 +165,7 @@ export function AiTrack(props: {
     }
     if (remote()) {
       update(id, { topic: intent.topic, sinceMs: intent.sinceMs, window: intent.window });
-      return disclose(id, 'counts');
+      return disclose(id, provider()?.data_leaves ?? 'counts');
     }
     try {
       const read = await props.source.aiRead(intent.topic, intent.sinceMs);
@@ -190,11 +202,9 @@ export function AiTrack(props: {
     update(id, { state: 'not-sent' });
   };
 
-  const sub = () => (
-    <span class="id" data-ai-where>
-      {remote() ? `Previews before sending to ${provider()?.host ?? 'a remote model'}` : 'Answers from your node, composed on this computer'}
-    </span>
-  );
+  // The persistent endpoint badge: which endpoint answers, who gets paid and
+  // what leaves. It changes with the selection, before the first question.
+  const sub = () => <EndpointBadge provider={badgeFor()} previewed={previewed()} />;
 
   return (
     <>
@@ -210,6 +220,7 @@ export function AiTrack(props: {
               disabled={!p.enabled || busy()}
               title={p.note ?? (p.host ? `${p.model ?? ''} at ${p.host}` : 'Nothing leaves this computer')}
               data-provider={p.kind}
+              data-tier={endpointBadge(p).tier}
               onClick={() => setSession('provider', p.kind)}
             >
               <span class="name">{p.label}</span>

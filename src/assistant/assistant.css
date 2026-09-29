@@ -72,6 +72,9 @@ body {
   display: flex;
   flex-direction: column;
 }
+.assistant-head {
+  margin: 16px 16px 0;
+}
 .assistant-page > .assistant-seal {
   flex: 1;
   min-height: 0;
