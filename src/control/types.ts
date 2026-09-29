@@ -301,6 +301,10 @@ export type FrontDoorPublish = {
   admission_msat?: number;
   message_msat?: number;
   page_msat?: number;
+  avatar?: { inline_b64?: string; hash?: string; size?: number; mime?: string };
+  media?: { hash: string; size: number; mime: string; thumb_b64?: string; title: string }[];
+  cv?: { path: string; hash: string; size: number };
+  links?: { label: string; url: string }[];
 };
 
 /**

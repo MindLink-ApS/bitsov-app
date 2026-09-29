@@ -34,6 +34,7 @@
     "allow-front-door-read",
     "allow-front-door-open",
     "allow-front-door-publish",
+    "allow-front-door-hash-bytes",
     "allow-sponsor-status",
     "allow-sponsor-offer",
     "allow-sponsor-candidate",

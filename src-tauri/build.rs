@@ -33,6 +33,7 @@ fn main() {
             "front_door_read",
             "front_door_open",
             "front_door_publish",
+            "front_door_hash_bytes",
             "sponsor_status",
             "sponsor_offer",
             "sponsor_candidate",
