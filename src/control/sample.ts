@@ -46,6 +46,8 @@ export const SAMPLE_INTRO_LINK = 'bitsov://introduce#SAMPLE';
 export const SAMPLE_FRONT_DOOR_LINK = 'bitsov://front-door#SAMPLE';
 export const SAMPLE_EXPIRED_FRONT_DOOR_LINK = 'bitsov://front-door#EXPIRED';
 export const SAMPLE_PUBLIC_FRONT_DOOR_LINK = 'bitsov://front-door#PUBLIC';
+export const SAMPLE_HOSTILE_MIME_FRONT_DOOR_LINK = 'bitsov://front-door#HOSTILE';
+export const SAMPLE_DISALLOWED_FRONT_DOOR_LINK = 'bitsov://front-door#DISALLOWED';
 
 function sampleIntroduction(nodeId: string, endpoint: string, reach: Introduction['reach'], msat: number): Introduction {
   const now = Math.floor(Date.now() / 1000);
@@ -67,7 +69,13 @@ function sampleFrontDoor(
   endpoint: string,
   reach: FrontDoor['reach'],
   name: string,
-  opts?: { expired?: boolean; link?: string },
+  opts?: {
+    expired?: boolean;
+    link?: string;
+    media?: FrontDoor['media'];
+    links?: FrontDoor['links'];
+    avatar?: FrontDoor['profile']['avatar'];
+  },
 ): FrontDoor {
   const now = Math.floor(Date.now() / 1000);
   const issued = opts?.expired ? now - 8 * 24 * 3600 : now;
@@ -85,9 +93,10 @@ function sampleFrontDoor(
       display_name: name,
       tagline: 'Sample doorstep',
       about: 'A sample front-door card for Discover.',
+      avatar: opts?.avatar,
     },
-    media: [],
-    links: [],
+    media: opts?.media ?? [],
+    links: opts?.links ?? [],
     link:
       opts?.link ??
       (nodeId === SAMPLE_OWN_ID ? 'bitsov://front-door#OWN' + 'A'.repeat(40) : SAMPLE_FRONT_DOOR_LINK),
@@ -791,6 +800,31 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
           }),
         );
       }
+      if (t === SAMPLE_HOSTILE_MIME_FRONT_DOOR_LINK) {
+        return ok(
+          sampleFrontDoor(SAMPLE_STRANGER_ID, 'node.example.org:9735', 'public', 'Ada', {
+            link: SAMPLE_HOSTILE_MIME_FRONT_DOOR_LINK,
+            // Hostile mime must not become an executable data: URL.
+            media: [
+              {
+                hash: 'ab'.repeat(32),
+                size: 12,
+                mime: 'image/png" onerror="alert(1)',
+                thumb_b64: 'AAAA',
+                title: 'x',
+              },
+            ],
+            links: [{ label: 'Website', url: 'https://example.invalid/path' }],
+          }),
+        );
+      }
+      if (t === SAMPLE_DISALLOWED_FRONT_DOOR_LINK) {
+        return ok(
+          sampleFrontDoor(SAMPLE_STRANGER_ID, '0.0.0.0:9', 'public', 'Ada', {
+            link: SAMPLE_DISALLOWED_FRONT_DOOR_LINK,
+          }),
+        );
+      }
       return Promise.reject('That is not a front-door card.');
     },
     frontDoorOpen: (text, allowLocal) => {
@@ -798,20 +832,31 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
       if (t === SAMPLE_EXPIRED_FRONT_DOOR_LINK) {
         return Promise.reject('This front door has expired. Ask for a fresh one.');
       }
+      if (t === SAMPLE_DISALLOWED_FRONT_DOOR_LINK) {
+        return Promise.reject(
+          'front_door_invalid: the node dialed an address this front door does not allow',
+        );
+      }
       if (t === SAMPLE_FRONT_DOOR_LINK) {
         if (!allowLocal) {
           return Promise.reject('This front door points to a local network address. Allow it on the card first.');
         }
         return ok(sampleFrontDoor(SAMPLE_STRANGER_ID, '192.168.1.20:9735', 'local', 'Ada'));
       }
-      if (t === SAMPLE_PUBLIC_FRONT_DOOR_LINK) {
+      if (t === SAMPLE_PUBLIC_FRONT_DOOR_LINK || t === SAMPLE_HOSTILE_MIME_FRONT_DOOR_LINK) {
         return ok(
           sampleFrontDoor(SAMPLE_STRANGER_ID, 'node.example.org:9735', 'public', 'Ada', {
-            link: SAMPLE_PUBLIC_FRONT_DOOR_LINK,
+            link: t,
           }),
         );
       }
       return Promise.reject('That is not a front-door card.');
+    },
+    frontDoorHashBytes: async (bytesB64) => {
+      // Deterministic stand-in for blake3 in the sample source (tests only).
+      let h = 0;
+      for (let i = 0; i < bytesB64.length; i++) h = (h * 31 + bytesB64.charCodeAt(i)) >>> 0;
+      return h.toString(16).padStart(64, '0').slice(0, 64);
     },
     frontDoorPublish: (fields) =>
       ok({
@@ -821,6 +866,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
           display_name: fields.display_name,
           tagline: fields.tagline ?? '',
           about: fields.about ?? '',
+          avatar: fields.avatar,
         },
         prices: {
           admission_msat: fields.admission_msat ?? 100_000,
@@ -828,6 +874,9 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
           page_msat: fields.page_msat ?? 1_000,
           price_epoch: 0,
         },
+        media: fields.media ?? [],
+        cv: fields.cv,
+        links: fields.links ?? [],
         seq: 2,
       }),
     // K1 slice 2: a sample kit. Nothing here is signed or paid.

@@ -2,11 +2,14 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { render } from 'solid-js/web';
 import type { JSX } from 'solid-js';
 import { DiscoverPanel, FrontDoorEditor } from '../src/control/Discover';
+import { safeImageMime } from '../src/control/frontDoorMedia';
 import {
   sampleSource,
   SAMPLE_FRONT_DOOR_LINK,
   SAMPLE_EXPIRED_FRONT_DOOR_LINK,
   SAMPLE_PUBLIC_FRONT_DOOR_LINK,
+  SAMPLE_HOSTILE_MIME_FRONT_DOOR_LINK,
+  SAMPLE_DISALLOWED_FRONT_DOOR_LINK,
 } from '../src/control/sample';
 
 describe('front door Discover and editor', () => {
@@ -41,7 +44,6 @@ describe('front door Discover and editor', () => {
     expect(root.querySelector('[data-fd-name]')?.textContent).toBe('Ada');
     expect(root.querySelector('[data-discover-knock]')?.textContent).toBe('Knock');
     expect(root.querySelector('[data-fd-knock-price]')?.textContent).toMatch(/sat/);
-    // Local reach needs consent before Knock.
     root.querySelector<HTMLInputElement>('[data-discover-local]')!.click();
     root.querySelector<HTMLButtonElement>('[data-discover-knock]')!.click();
     await viWait();
@@ -110,17 +112,152 @@ describe('front door Discover and editor', () => {
     expect(knocked).toBe('');
   });
 
-  it('publishes My front door from the editor', async () => {
+  it('hostile mime never becomes an image src', async () => {
+    expect(safeImageMime('image/png" onerror="alert(1)')).toBeNull();
+    expect(safeImageMime('image/png')).toBe('image/png');
+    const source = sampleSource();
+    mount(() => (
+      <DiscoverPanel source={source} now={Date.now()} onKnocked={() => {}} />
+    ));
+    const paste = root.querySelector<HTMLTextAreaElement>('[data-discover-paste]')!;
+    paste.value = SAMPLE_HOSTILE_MIME_FRONT_DOOR_LINK;
+    paste.dispatchEvent(new Event('input', { bubbles: true }));
+    root.querySelector<HTMLButtonElement>('[data-discover-read]')!.click();
+    await viWait();
+    const imgs = root.querySelectorAll('[data-fd-media] img');
+    expect(imgs.length).toBe(0);
+    expect(root.querySelector('[data-fd-media] .thumb-ph')).toBeTruthy();
+    expect(root.querySelector('[data-fd-link-url]')?.textContent).toBe('https://example.invalid/path');
+    expect(root.querySelector('[data-fd-link-open]')).toBeNull();
+    expect(root.querySelector('[data-fd-link-copy]')).toBeTruthy();
+  });
+
+  it('disallowed dial address surfaces as a Knock error', async () => {
+    const source = sampleSource();
+    mount(() => (
+      <DiscoverPanel source={source} now={Date.now()} onKnocked={() => {}} />
+    ));
+    const paste = root.querySelector<HTMLTextAreaElement>('[data-discover-paste]')!;
+    paste.value = SAMPLE_DISALLOWED_FRONT_DOOR_LINK;
+    paste.dispatchEvent(new Event('input', { bubbles: true }));
+    root.querySelector<HTMLButtonElement>('[data-discover-read]')!.click();
+    await viWait();
+    root.querySelector<HTMLButtonElement>('[data-discover-knock]')!.click();
+    await viWait();
+    expect(root.querySelector('[data-discover-error]')?.textContent).toMatch(/does not allow/i);
+  });
+
+  it('publishes My front door from the editor with preview', async () => {
     const source = sampleSource();
     mount(() => <FrontDoorEditor source={source} now={Date.now()} />);
     await viWait();
     const name = root.querySelector<HTMLInputElement>('[data-fd-edit-name]')!;
     name.value = 'Rasmus';
     name.dispatchEvent(new Event('input', { bubbles: true }));
+    const about = root.querySelector<HTMLTextAreaElement>('[data-fd-edit-about]')!;
+    about.value = 'Builder';
+    about.dispatchEvent(new Event('input', { bubbles: true }));
+    const web = root.querySelector<HTMLInputElement>('[data-fd-edit-website]')!;
+    web.value = 'https://example.com';
+    web.dispatchEvent(new Event('input', { bubbles: true }));
+    await viWait();
+    expect(root.querySelector('[data-fd-preview] [data-fd-name]')?.textContent).toBe('Rasmus');
+    expect(root.querySelector('[data-fd-card-bytes]')?.getAttribute('data-over')).toBe('false');
     root.querySelector<HTMLButtonElement>('[data-fd-publish]')!.click();
     await viWait();
     expect(root.querySelector('[data-fd-link]')?.textContent).toMatch(/^bitsov:\/\/front-door#/);
     expect(root.querySelector('[data-fd-seq]')?.textContent).toMatch(/seq 2/);
+  });
+
+  it('blocks Publish when the serialized preview exceeds 16 KiB', async () => {
+    const source = sampleSource();
+    mount(() => <FrontDoorEditor source={source} now={Date.now()} />);
+    await viWait();
+    const name = root.querySelector<HTMLInputElement>('[data-fd-edit-name]')!;
+    name.value = 'Rasmus';
+    name.dispatchEvent(new Event('input', { bubbles: true }));
+    // Oversized about + website push the estimate over without needing canvas.
+    await viWait();
+    // Re-mount with a card that already exceeds 16 KiB (max avatar + two max thumbs).
+    root.remove();
+    const fat = sampleSource();
+    const origMine = fat.frontDoorMine.bind(fat);
+    fat.frontDoorMine = async () => {
+      const c = await origMine();
+      return {
+        ...c,
+        profile: {
+          ...c.profile,
+          avatar: {
+            inline_b64: 'A'.repeat(10_900),
+            hash: 'ab'.repeat(32),
+            size: 8000,
+            mime: 'image/jpeg',
+          },
+        },
+        media: [
+          {
+            hash: 'cd'.repeat(32),
+            size: 4000,
+            mime: 'image/jpeg',
+            thumb_b64: 'B'.repeat(5500),
+            title: 'one',
+          },
+          {
+            hash: 'ef'.repeat(32),
+            size: 4000,
+            mime: 'image/jpeg',
+            thumb_b64: 'C'.repeat(5500),
+            title: 'two',
+          },
+        ],
+      };
+    };
+    mount(() => <FrontDoorEditor source={fat} now={Date.now()} />);
+    await viWait();
+    const n = root.querySelector<HTMLInputElement>('[data-fd-edit-name]')!;
+    expect(n.value.length).toBeGreaterThan(0);
+    await viWait();
+    expect(root.querySelector('[data-fd-card-bytes]')?.getAttribute('data-over')).toBe('true');
+    const pub = root.querySelector<HTMLButtonElement>('[data-fd-publish]')!;
+    expect(pub.disabled).toBe(true);
+    expect(root.querySelector('[data-fd-card-bytes]')?.textContent).toMatch(/too large/i);
+    // Force the click path: publish() still refuses when over budget.
+    pub.disabled = false;
+    pub.click();
+    await viWait();
+    expect(root.querySelector('[data-fd-edit-error]')?.textContent).toMatch(/over|16384|bytes/i);
+  });
+
+  it('hashes CV text through the host before publish', async () => {
+    const source = sampleSource();
+    const hashes: string[] = [];
+    const orig = source.frontDoorHashBytes.bind(source);
+    source.frontDoorHashBytes = async (b64) => {
+      const h = await orig(b64);
+      hashes.push(h);
+      return h;
+    };
+    let publishedCv: { hash: string; size: number; path: string } | undefined;
+    const origPub = source.frontDoorPublish.bind(source);
+    source.frontDoorPublish = async (fields) => {
+      publishedCv = fields.cv;
+      return origPub(fields);
+    };
+    mount(() => <FrontDoorEditor source={source} now={Date.now()} />);
+    await viWait();
+    const name = root.querySelector<HTMLInputElement>('[data-fd-edit-name]')!;
+    name.value = 'Rasmus';
+    name.dispatchEvent(new Event('input', { bubbles: true }));
+    const cv = root.querySelector<HTMLTextAreaElement>('[data-fd-edit-cv]')!;
+    cv.value = 'CV line one\nCV line two';
+    cv.dispatchEvent(new Event('input', { bubbles: true }));
+    root.querySelector<HTMLButtonElement>('[data-fd-publish]')!.click();
+    await viWait();
+    expect(hashes.length).toBeGreaterThanOrEqual(1);
+    expect(publishedCv?.path).toBe('cv.md');
+    expect(publishedCv?.hash).toMatch(/^[0-9a-f]{64}$/);
+    expect(publishedCv?.size).toBe('CV line one\nCV line two'.length);
   });
 });
 
