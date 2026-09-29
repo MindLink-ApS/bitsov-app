@@ -83,13 +83,13 @@ export function AskPanel(props: {
   const label = (route: RouteKey | null): Label => {
     const source = props.source;
     if (source.kind === 'mock') {
-      return { source: 'mock', text: `Mock data, not your node. ${mockReasonText(source.reason)}` };
+      return { source: 'mock', text: `Sample data, not your node. ${mockReasonText(source.reason)}` };
     }
     const summary = summarize(props.freshness, props.openMs(), route ?? undefined);
     return {
       source: 'live',
       freshness: summary.state,
-      text: `Live, from your paired node. ${freshnessText(summary)}`,
+      text: `From your node. ${freshnessText(summary)}`,
     };
   };
 

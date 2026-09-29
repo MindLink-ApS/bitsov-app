@@ -651,6 +651,11 @@ export type TopicRead =
 export type ProviderKind = 'local' | 'shared' | 'frontier';
 export type Preset = 'exact' | 'rounded' | 'counts';
 
+/** How a provider is paid, as far as the app knows. The app never pays a model. */
+export type PayRail = 'none' | 'fiat';
+/** Who gets paid when a provider answers. Host-derived; the window cannot set it. */
+export type Pays = { to: string | null; rail: PayRail };
+
 /** `ai_providers`. Remote ones are off unless this computer's settings turn them on. */
 export type ProviderView = {
   kind: ProviderKind;
@@ -659,6 +664,9 @@ export type ProviderView = {
   host: string | null;
   model: string | null;
   note: string | null;
+  pays: Pays;
+  /** `null`: nothing leaves. Otherwise the preset a preview starts at. */
+  data_leaves: Preset | null;
 };
 
 /** `ai_disclose`: what would leave, byte for byte. Nothing has been sent. */

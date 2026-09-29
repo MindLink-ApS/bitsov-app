@@ -394,7 +394,10 @@ select { font: inherit; font-size: var(--t-sm); background: var(--sunk); color: 
 .ai-provider { display: inline-flex; align-items: baseline; gap: var(--s-2); background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-chip); padding: 5px 12px; font-size: var(--t-sm); color: var(--muted); }
 .ai-provider .meta { font-family: var(--font-mono); font-size: var(--t-xs); color: var(--faint); }
 .ai-provider[aria-checked='true'] { border-color: var(--line-strong); background: var(--raised); color: var(--ink); }
-.ai-provider[aria-checked='true'] .meta { color: var(--ok); }
+.ai-provider[aria-checked='true'] .meta { color: var(--badge-own-ink); }
+.ai-provider[aria-checked='true'][data-tier='shared'] .meta { color: var(--badge-shared-ink); }
+.ai-provider[aria-checked='true'][data-tier='frontier'] .meta { color: var(--badge-frontier-ink); }
+.track-head .sub:has(.endpoint-badge) { white-space: normal; overflow: visible; }
 .ai-provider:disabled { opacity: 0.55; cursor: not-allowed; }
 .ai-answer { align-self: flex-start; max-width: min(620px, 88%); display: flex; flex-direction: column; gap: var(--s-2); animation: arrive var(--d-mid) var(--ease); }
 .ai-answer > .bubble { border-bottom-left-radius: 4px; }

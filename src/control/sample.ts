@@ -442,9 +442,9 @@ export function sampleRead(topic: AiTopic, sinceMs: number | null): TopicRead {
 }
 
 export const SAMPLE_PROVIDERS: ProviderView[] = [
-  { kind: 'local', label: 'On this computer', enabled: true, host: null, model: null, note: null },
-  { kind: 'shared', label: 'Shared open model (sample)', enabled: true, host: 'models.sample.invalid', model: 'open-8b-sample', note: null },
-  { kind: 'frontier', label: 'Frontier model', enabled: false, host: null, model: null, note: 'Off. Not set up on this computer.' },
+  { kind: 'local', label: 'On this computer', enabled: true, host: null, model: null, note: null, pays: { to: null, rail: 'none' }, data_leaves: null },
+  { kind: 'shared', label: 'Shared open model (sample)', enabled: true, host: 'models.sample.invalid', model: 'open-8b-sample', note: null, pays: { to: 'models.sample.invalid', rail: 'fiat' }, data_leaves: 'counts' },
+  { kind: 'frontier', label: 'Frontier model', enabled: false, host: null, model: null, note: 'Off. Not set up on this computer.', pays: { to: null, rail: 'none' }, data_leaves: null },
 ];
 
 const looksLikeId = (text: string) => text.length >= 16 && /^[0-9a-f]+$/i.test(text);
