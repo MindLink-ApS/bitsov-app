@@ -1745,6 +1745,192 @@ async fn open_introduction(state: &NodeState, text: &str, allow_local: bool) -> 
     }
 }
 
+// ---- Front door (doorstep card) ---------------------------------------------------
+//
+// A front-door card is free to carry: reading is local. Knock dials unprivileged
+// (never admission), then the composer uses the existing first-contact quote.
+
+#[tauri::command(rename_all = "snake_case")]
+async fn front_door_read(
+    window: WebviewWindow<impl tauri::Runtime>,
+    text: String,
+) -> Result<bitsov_app::front_door::FrontDoor, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    bitsov_app::front_door::read(&text, now_unix().max(0) as u64)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn front_door_mine(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+) -> Result<bitsov_app::front_door::FrontDoor, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    read_own_front_door(state.inner()).await
+}
+
+async fn read_own_front_door(state: &NodeState) -> Result<bitsov_app::front_door::FrontDoor, String> {
+    use bitsov_app::front_door as fd;
+    let status: serde_json::Value = get_json(state, "/status").await?;
+    if !status["api_capabilities"]
+        .as_array()
+        .is_some_and(|caps| caps.iter().any(|v| v.as_str() == Some(fd::CAPABILITY)))
+    {
+        return Err("Your node cannot publish a front door yet.".into());
+    }
+    let path = "/front-door";
+    let (code, text) = call_api(state, reqwest::Method::GET, path, None).await?;
+    if code == reqwest::StatusCode::NOT_FOUND {
+        return Err("front_door_missing: publish one first".into());
+    }
+    if !code.is_success() {
+        return Err(api_error(path, code, &text));
+    }
+    #[derive(Deserialize)]
+    struct Mine {
+        card: fd::Card,
+        link: String,
+    }
+    let mine: Mine = serde_json::from_str(&text).map_err(|e| format!("{path} decode failed: {e}"))?;
+    let view = mine.card.view(now_unix().max(0) as u64)?;
+    if Some(mine.card.node_id.as_str()) != status["node_id"].as_str() {
+        return Err(format!("{path}: the card is not signed by this node's key"));
+    }
+    if view.link != mine.link {
+        return Err(format!("{path}: the link does not match the card"));
+    }
+    Ok(view)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct FrontDoorPublishArgs {
+    display_name: String,
+    #[serde(default)]
+    tagline: String,
+    #[serde(default)]
+    about: String,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    admission_msat: Option<u64>,
+    #[serde(default)]
+    message_msat: Option<u64>,
+    #[serde(default)]
+    page_msat: Option<u64>,
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn front_door_publish(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    fields: FrontDoorPublishArgs,
+) -> Result<bitsov_app::front_door::FrontDoor, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    use bitsov_app::front_door as fd;
+    let status: serde_json::Value = get_json(state.inner(), "/status").await?;
+    if !status["api_capabilities"]
+        .as_array()
+        .is_some_and(|caps| caps.iter().any(|v| v.as_str() == Some(fd::CAPABILITY)))
+    {
+        return Err("Your node cannot publish a front door yet.".into());
+    }
+    let path = "/front-door";
+    let body = serde_json::json!({
+        "display_name": fields.display_name,
+        "tagline": fields.tagline,
+        "about": fields.about,
+        "kind": fields.kind,
+        "admission_msat": fields.admission_msat,
+        "message_msat": fields.message_msat,
+        "page_msat": fields.page_msat,
+    });
+    let (code, text) = call_api(state.inner(), reqwest::Method::PUT, path, Some(body)).await?;
+    if !code.is_success() {
+        return Err(api_error(path, code, &text));
+    }
+    #[derive(Deserialize)]
+    struct Resp {
+        card: fd::Card,
+        link: String,
+    }
+    let resp: Resp = serde_json::from_str(&text).map_err(|e| format!("{path} decode failed: {e}"))?;
+    let view = resp.card.view(now_unix().max(0) as u64)?;
+    if Some(resp.card.node_id.as_str()) != status["node_id"].as_str() {
+        return Err(format!("{path}: the card is not signed by this node's key"));
+    }
+    if view.link != resp.link {
+        return Err(format!("{path}: the link does not match the card"));
+    }
+    Ok(view)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn front_door_open(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    text: String,
+    allow_local: bool,
+) -> Result<bitsov_app::front_door::FrontDoor, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    open_front_door(state.inner(), &text, allow_local).await
+}
+
+async fn open_front_door(
+    state: &NodeState,
+    text: &str,
+    allow_local: bool,
+) -> Result<bitsov_app::front_door::FrontDoor, String> {
+    use bitsov_app::front_door as fd;
+    let door = fd::read(text, now_unix().max(0) as u64)?;
+    if !door.fresh {
+        return Err("This front door has expired. Ask for a fresh one.".into());
+    }
+    let local = door.reach == bitsov_app::introduction::Reach::Local;
+    if local && !allow_local {
+        return Err(format!(
+            "This front door points to a local network address ({}). Allow it on the card first. Nothing was sent.",
+            door.endpoint
+        ));
+    }
+    if !node_offers(state, fd::CAPABILITY).await {
+        return Err("Your node cannot open front doors yet.".into());
+    }
+    let path = "/front-door/open";
+    let (code, body) = call_api(
+        state,
+        reqwest::Method::POST,
+        path,
+        Some(serde_json::json!({ "card": door.link, "allow_local": local && allow_local })),
+    )
+    .await?;
+    if code == reqwest::StatusCode::CONFLICT && body.contains("front_door_closed_mesh") {
+        return Err("Your node only connects to peers you added yourself, and a front door does not add one. Nothing was sent.".into());
+    }
+    if !code.is_success() {
+        return Err(api_error(path, code, &body));
+    }
+    let opened: serde_json::Value =
+        serde_json::from_str(&body).map_err(|e| format!("{path} decode failed: {e}"))?;
+    if opened["node_id"].as_str() != Some(door.node_id.as_str())
+        || opened["connected"] != serde_json::Value::Bool(true)
+    {
+        return Err(format!("{path}: the node connected to someone else"));
+    }
+    let dialed = opened["dialed"]
+        .as_str()
+        .and_then(|d| d.parse::<std::net::SocketAddr>().ok());
+    match dialed {
+        Some(addr) if bitsov_app::introduction::dial_allowed(door.reach, addr.ip()) => Ok(door),
+        _ => Err(format!(
+            "{path}: the node dialed an address this front door does not allow"
+        )),
+    }
+}
+
 // ---- K1 slice 2: sponsor kit ------------------------------------------------------
 //
 // The inviter's node pays a small, capped gift into the newcomer's own node.
@@ -4408,6 +4594,10 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             introduction_mine,
             introduction_read,
             introduction_open,
+            front_door_mine,
+            front_door_read,
+            front_door_open,
+            front_door_publish,
             sponsor_status,
             sponsor_offer,
             sponsor_candidate,
@@ -9452,6 +9642,10 @@ mod assistant_acl_tests {
                 "introduction_mine",
                 "introduction_read",
                 "introduction_open",
+                "front_door_mine",
+                "front_door_read",
+                "front_door_open",
+                "front_door_publish",
                 "sponsor_status",
                 "sponsor_offer",
                 "sponsor_candidate",

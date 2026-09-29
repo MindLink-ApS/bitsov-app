@@ -9,6 +9,7 @@ import type {
   VoiceBlob,
   FundingAsk,
   Introduction,
+  FrontDoor,
   ActionError,
   AiFreshness,
   BudgetPreset,
@@ -42,6 +43,9 @@ export const SAMPLE_OWN_ID = '3f9a' + '1'.repeat(56) + 'c0de';
 /** A sample stranger, reachable only through the sample introduction link. */
 export const SAMPLE_STRANGER_ID = '5e1f' + '7'.repeat(56) + 'a11e';
 export const SAMPLE_INTRO_LINK = 'bitsov://introduce#SAMPLE';
+export const SAMPLE_FRONT_DOOR_LINK = 'bitsov://front-door#SAMPLE';
+export const SAMPLE_EXPIRED_FRONT_DOOR_LINK = 'bitsov://front-door#EXPIRED';
+export const SAMPLE_PUBLIC_FRONT_DOOR_LINK = 'bitsov://front-door#PUBLIC';
 
 function sampleIntroduction(nodeId: string, endpoint: string, reach: Introduction['reach'], msat: number): Introduction {
   const now = Math.floor(Date.now() / 1000);
@@ -55,6 +59,40 @@ function sampleIntroduction(nodeId: string, endpoint: string, reach: Introductio
     issued_at: now,
     expires_at: now + 600,
     link: nodeId === SAMPLE_OWN_ID ? 'bitsov://introduce#AQdyZWd0ZXN0' + 'A'.repeat(240) : SAMPLE_INTRO_LINK,
+  };
+}
+
+function sampleFrontDoor(
+  nodeId: string,
+  endpoint: string,
+  reach: FrontDoor['reach'],
+  name: string,
+  opts?: { expired?: boolean; link?: string },
+): FrontDoor {
+  const now = Math.floor(Date.now() / 1000);
+  const issued = opts?.expired ? now - 8 * 24 * 3600 : now;
+  return {
+    node_id: nodeId,
+    network: 'regtest',
+    endpoint,
+    reach,
+    seq: 1,
+    issued_at: issued,
+    expires_at: opts?.expired ? now - 24 * 3600 : now + 7 * 24 * 3600,
+    prices: { admission_msat: 100_000, message_msat: 10_000, page_msat: 1_000, price_epoch: 0 },
+    profile: {
+      kind: 'person',
+      display_name: name,
+      tagline: 'Sample doorstep',
+      about: 'A sample front-door card for Discover.',
+    },
+    media: [],
+    links: [],
+    link:
+      opts?.link ??
+      (nodeId === SAMPLE_OWN_ID ? 'bitsov://front-door#OWN' + 'A'.repeat(40) : SAMPLE_FRONT_DOOR_LINK),
+    verified: true,
+    fresh: !opts?.expired,
   };
 }
 export const SAMPLE_PEERS: Peer[] = [
@@ -732,6 +770,66 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
       text.trim() === SAMPLE_INTRO_LINK
         ? ok(sampleIntroduction(SAMPLE_STRANGER_ID, '192.168.1.20:9735', 'local', 2000))
         : Promise.reject('That is not an introduction.'),
+    frontDoorMine: () => ok(sampleFrontDoor(SAMPLE_OWN_ID, 'node.example.org:9735', 'public', 'You')),
+    frontDoorRead: (text) => {
+      const t = text.trim();
+      if (t === SAMPLE_FRONT_DOOR_LINK) {
+        return ok(sampleFrontDoor(SAMPLE_STRANGER_ID, '192.168.1.20:9735', 'local', 'Ada'));
+      }
+      if (t === SAMPLE_PUBLIC_FRONT_DOOR_LINK) {
+        return ok(
+          sampleFrontDoor(SAMPLE_STRANGER_ID, 'node.example.org:9735', 'public', 'Ada', {
+            link: SAMPLE_PUBLIC_FRONT_DOOR_LINK,
+          }),
+        );
+      }
+      if (t === SAMPLE_EXPIRED_FRONT_DOOR_LINK) {
+        return ok(
+          sampleFrontDoor(SAMPLE_STRANGER_ID, '192.168.1.20:9735', 'local', 'Ada', {
+            expired: true,
+            link: SAMPLE_EXPIRED_FRONT_DOOR_LINK,
+          }),
+        );
+      }
+      return Promise.reject('That is not a front-door card.');
+    },
+    frontDoorOpen: (text, allowLocal) => {
+      const t = text.trim();
+      if (t === SAMPLE_EXPIRED_FRONT_DOOR_LINK) {
+        return Promise.reject('This front door has expired. Ask for a fresh one.');
+      }
+      if (t === SAMPLE_FRONT_DOOR_LINK) {
+        if (!allowLocal) {
+          return Promise.reject('This front door points to a local network address. Allow it on the card first.');
+        }
+        return ok(sampleFrontDoor(SAMPLE_STRANGER_ID, '192.168.1.20:9735', 'local', 'Ada'));
+      }
+      if (t === SAMPLE_PUBLIC_FRONT_DOOR_LINK) {
+        return ok(
+          sampleFrontDoor(SAMPLE_STRANGER_ID, 'node.example.org:9735', 'public', 'Ada', {
+            link: SAMPLE_PUBLIC_FRONT_DOOR_LINK,
+          }),
+        );
+      }
+      return Promise.reject('That is not a front-door card.');
+    },
+    frontDoorPublish: (fields) =>
+      ok({
+        ...sampleFrontDoor(SAMPLE_OWN_ID, 'node.example.org:9735', 'public', fields.display_name),
+        profile: {
+          kind: fields.kind ?? 'person',
+          display_name: fields.display_name,
+          tagline: fields.tagline ?? '',
+          about: fields.about ?? '',
+        },
+        prices: {
+          admission_msat: fields.admission_msat ?? 100_000,
+          message_msat: fields.message_msat ?? 10_000,
+          page_msat: fields.page_msat ?? 1_000,
+          price_epoch: 0,
+        },
+        seq: 2,
+      }),
     // K1 slice 2: a sample kit. Nothing here is signed or paid.
     sponsorStatus: () => ok({ enabled: true, gift_msat: 20_000_000, fee_msat: 100_000, purse_msat: 100_000_000, purse_used_msat: 0, kits_per_day: 2, kits_today: 0 }),
     sponsorOffer: () => {
