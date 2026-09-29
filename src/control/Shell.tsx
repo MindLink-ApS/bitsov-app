@@ -6,6 +6,7 @@ import type { Proposal } from './ai';
 import { AiTrack, createAiSession } from './AiTrack';
 import { amount as fmtAmount, allIn, clock, day, feeCeiling, routingFee, sats, satsWhole, satUnit, shortId, uptime } from './format';
 import { Organism } from './BodyPanel';
+import { blobUrl, duration, isVoiceNote, type Recording, startRecording, VOICE_MAX_MS } from './voice';
 import {
   doorCard,
   gateWords,
@@ -153,6 +154,8 @@ export type Actions = {
   pay: (t: TrackRef, bolt11: string, msat: number) => Promise<Outcome<unknown>>;
   keysend: (t: TrackRef, pubkey: string, msat: number, memo: string) => Promise<Outcome<unknown>>;
   file: (t: TrackRef, file: File, maxMsat: number, firstContactMsat?: number) => Promise<Outcome<unknown>>;
+  /** Read-only: a playable URL for a voice note in the thread. Never pays. */
+  voiceUrl: (messageId: string) => Promise<string>;
 };
 
 let artifactSeq = 0;
@@ -543,7 +546,20 @@ export function ControlCenter(props: Props) {
     return outcome;
   };
 
+  // Voice notes: one object URL per message, revoked when the shell goes.
+  // A just-sent clip plays from its own bytes; a received one is read once.
+  const voiceUrls = new Map<string, Promise<string>>();
+  onCleanup(() => voiceUrls.forEach((u) => void u.then(URL.revokeObjectURL, () => undefined)));
   const actions: Actions = {
+    voiceUrl: (messageId) => {
+      let url = voiceUrls.get(messageId);
+      if (!url) {
+        url = source.voiceNote(messageId).then((b) => blobUrl(b.data_b64, b.mime_type));
+        url.catch(() => voiceUrls.delete(messageId));
+        voiceUrls.set(messageId, url);
+      }
+      return url;
+    },
     approve: async () => {
       const r = await act(() => source.spendRequest());
       if (r.ok) setSpend(r.value);
@@ -734,6 +750,7 @@ export function ControlCenter(props: Props) {
       void loadWallet();
       if (!r.ok && ['price_changed', 'price_cap_exceeded'].includes(r.error.code)) void attempt('quote', () => source.filePrice(), setFilePrice);
       if (r.ok) {
+        if (isVoiceNote(200, file.name)) voiceUrls.set(r.value.message_id, Promise.resolve(URL.createObjectURL(file)));
         setPaid(r.value.message_id, r.value.amount_msat);
         setAllowances(r.value.message_id, { total_msat: r.value.total_msat ?? r.value.amount_msat + (r.value.max_routing_fee_msat ?? 0), max_routing_fee_msat: r.value.max_routing_fee_msat ?? 0 });
         if (!deliveries[r.value.message_id]) setDeliveries(r.value.message_id, deliveryFromReceipt(r.value));
@@ -1261,6 +1278,7 @@ function Conversation(props: {
                         paid={props.paid[m().id]}
                         allowance={props.allowances[m().id]}
                         nameOf={props.nameOf}
+                        voiceUrl={props.actions.voiceUrl}
                       />
                     )}
                   </Match>
@@ -1311,6 +1329,7 @@ function MessageView(props: {
   paid: number | undefined;
   allowance?: { total_msat: number; max_routing_fee_msat: number; readmission_msat?: number };
   nameOf: (id: string) => string;
+  voiceUrl?: (messageId: string) => Promise<string>;
 }) {
   const amount = () => props.allowance?.total_msat ?? props.paid ?? props.m.payment_amount_msat;
   return (
@@ -1320,7 +1339,9 @@ function MessageView(props: {
       </Show>
       <div class="bubble" classList={{ file: props.m.kind === 200 }} data-kind={props.m.kind}>
         <Show when={props.m.kind === 200} fallback={props.m.plaintext ?? 'Encrypted content not available on this device'}>
-          <span class="file-name">{props.m.plaintext ?? 'File'}</span>
+          <Show when={props.voiceUrl && isVoiceNote(props.m.kind, props.m.plaintext)} fallback={<span class="file-name">{props.m.plaintext ?? 'File'}</span>}>
+            <VoiceNote id={props.m.id} load={props.voiceUrl!} />
+          </Show>
         </Show>
       </div>
       <div class="stamp">
@@ -1338,6 +1359,37 @@ function MessageView(props: {
         </Show>
       </div>
     </article>
+  );
+}
+
+/** Inline player for a voice note. Loads on first tap (read-only), then plays in place. */
+function VoiceNote(props: { id: string; load: (messageId: string) => Promise<string> }) {
+  const [url, setUrl] = createSignal<string | null>(null);
+  const [busy, setBusy] = createSignal(false);
+  const [missing, setMissing] = createSignal(false);
+  const open = async () => {
+    setBusy(true);
+    try {
+      setUrl(await props.load(props.id));
+    } catch {
+      setMissing(true);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <span class="voice-note" data-voice-note={props.id}>
+      <Show
+        when={url()}
+        fallback={
+          <button type="button" class="voice-play" data-voice-play disabled={busy() || missing()} onClick={() => void open()}>
+            {missing() ? 'Voice note · not stored on this device' : busy() ? 'Loading…' : '▶ Voice note'}
+          </button>
+        }
+      >
+        <audio controls autoplay preload="auto" src={url()!} data-voice-audio />
+      </Show>
+    </span>
   );
 }
 
@@ -1636,6 +1688,61 @@ function Composer(props: {
   // file
   const [file, setFile] = createSignal<File | null>(null);
   let fileInput: HTMLInputElement | undefined;
+  // voice note: recorded here, then sent exactly like a chosen file
+  const [recording, setRecording] = createSignal<{ rec: Recording; startedAt: number } | null>(null);
+  const [recordedMs, setRecordedMs] = createSignal(0);
+  const [starting, setStarting] = createSignal(false);
+  const voiceFile = () => {
+    const f = file();
+    return f && isVoiceNote(200, f.name) ? f : null;
+  };
+  const voicePreview = createMemo(() => {
+    const f = voiceFile();
+    if (!f) return null;
+    const url = URL.createObjectURL(f);
+    onCleanup(() => URL.revokeObjectURL(url));
+    return url;
+  });
+  const dropRecording = () => {
+    const r = untrack(recording);
+    setRecording(null);
+    r?.rec.cancel();
+  };
+  onCleanup(dropRecording);
+  createEffect(() => {
+    const r = recording();
+    if (!r) return;
+    const tick = setInterval(() => setRecordedMs(Date.now() - r.startedAt), 250);
+    onCleanup(() => clearInterval(tick));
+  });
+  const stopRecording = async () => {
+    const r = untrack(recording);
+    if (!r) return;
+    setRecording(null);
+    const clip = await r.rec.stop();
+    composerRevision++;
+    if (!clip) {
+      setNote('Nothing was recorded.');
+      return;
+    }
+    if (fileInput) fileInput.value = '';
+    setFile(clip);
+    setMode('file');
+  };
+  const startVoice = async () => {
+    if (untrack(recording) || untrack(starting)) return;
+    setNote(null);
+    setStarting(true);
+    try {
+      const rec = await startRecording(() => void stopRecording());
+      setRecordedMs(0);
+      setRecording({ rec, startedAt: Date.now() });
+    } catch (e) {
+      setNote(e instanceof Error ? e.message : 'This window cannot record audio.');
+    } finally {
+      setStarting(false);
+    }
+  };
   // Inputs and navigation remain usable during a send. Only the submitted
   // revision may be cleared by its completion (including track A -> B -> A).
   let composerRevision = 0;
@@ -1690,6 +1797,7 @@ function Composer(props: {
         setMode('message');
         setNote(null);
         setDraft('');
+        dropRecording();
         setFile(null);
         if (fileInput) fileInput.value = '';
         setBolt11('');
@@ -2089,6 +2197,18 @@ function Composer(props: {
               >
                 +
               </button>
+              <button
+                type="button"
+                class="attach soft voice-record"
+                classList={{ recording: recording() !== null }}
+                data-voice-record={recording() ? 'stop' : 'start'}
+                aria-label={recording() ? 'Stop recording' : 'Record a voice note'}
+                title={recording() ? 'Stop recording' : `Record a voice note (up to ${duration(VOICE_MAX_MS)})`}
+                disabled={starting() || busy()}
+                onClick={() => void (recording() ? stopRecording() : startVoice())}
+              >
+                {recording() ? `■ ${duration(recordedMs())}` : '🎙'}
+              </button>
             </Show>
             <textarea
               rows={1}
@@ -2120,6 +2240,18 @@ function Composer(props: {
             >
               +
             </button>
+            <button
+              type="button"
+              class="attach soft voice-record"
+              classList={{ recording: recording() !== null }}
+              data-voice-record={recording() ? 'stop' : 'start'}
+              aria-label={recording() ? 'Stop recording' : 'Record a voice note'}
+              title={recording() ? 'Stop recording' : `Record a voice note (up to ${duration(VOICE_MAX_MS)})`}
+              disabled={starting() || busy()}
+              onClick={() => void (recording() ? stopRecording() : startVoice())}
+            >
+              {recording() ? `■ ${duration(recordedMs())}` : '🎙'}
+            </button>
             <input
               ref={(el) => { fileInput = el; }}
               type="file"
@@ -2132,8 +2264,12 @@ function Composer(props: {
               aria-label="File to send"
             />
             <div class="file-chip" data-file-chip>
-              <Show when={file()} fallback={<span class="hint">Choose a file for {props.name}</span>}>
-                {(f) => <span class="file-name">{f().name}</span>}
+              <Show when={file()} fallback={<span class="hint">{recording() ? `Recording… up to ${duration(VOICE_MAX_MS)}` : `Choose a file for ${props.name}`}</span>}>
+                {(f) => (
+                  <Show when={voicePreview()} fallback={<span class="file-name">{f().name}</span>}>
+                    <audio controls src={voicePreview()!} data-voice-preview aria-label="Voice note preview" />
+                  </Show>
+                )}
               </Show>
               <button
                 type="button"
