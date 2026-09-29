@@ -269,6 +269,24 @@ describe('acting from the track', () => {
     expect(host.used('message_send')).toHaveLength(1);
   });
 
+  it('says a capped re-admission refusal as it is: their door, not their price, and keeps the draft', async () => {
+    const message = 'Not sent - nothing was paid. This contact asks your node to pay their admission again (every reconnect or node restart starts unpaid), and your node cannot pay that under the app\'s all-in cap yet. The app will not retry; sending the same message again reuses its operation, so it can never be paid twice.';
+    const host = stubHost({ message_send: () => { throw { code: 'readmission_capped', message }; } });
+    host.spend.v = openView();
+    await openShell();
+    type('[data-composer] textarea', 'after the restart');
+    submit();
+    await vi.waitFor(() => expect($('[data-door="out-refused"][data-code="readmission_capped"]')).not.toBeNull());
+    const card = text('[data-door="out-refused"]');
+    expect(card).toContain('Not sent · they ask for admission again');
+    expect(card).toContain('Not sent - nothing was paid.');
+    expect(card).not.toContain('their price is above your cap');
+    expect(card).not.toContain('Reopen the track');
+    expect($('[data-artifact="failed"]'), 'the door card is the record, not a failure row').toBeNull();
+    expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('after the restart');
+    expect(host.used('message_send')).toHaveLength(1);
+  });
+
   it('labels a paid, refused-for-good send and a changed-text retry refusal', async () => {
     const codes = [
       { code: 'failed_paid', message: 'Paid, and the recipient\'s node refused this message for good. The payment is not refundable. Do not send it again.', label: 'Paid · refused by their node' },

@@ -2381,6 +2381,10 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
         && serde_json::from_str::<serde_json::Value>(&text).ok().is_some_and(|v| v["code"] == "price_cap_exceeded") {
         release(state)?;
         abandon(&journal)?;
+        // Not a price change: no fresh quote under a cap can pay a re-admission yet.
+        if act::readmission_capped_refusal(status.as_u16(), &text) {
+            return Err(ActionError::new("readmission_capped", act::READMISSION_CAPPED));
+        }
         return Err(ActionError::new("price_cap_exceeded", "The node refused the changed price before any payment. Refresh the quote."));
     }
     // The node compared this operation before paying anything in this call.
@@ -3236,6 +3240,10 @@ async fn do_message_retry(state: &NodeState, recipient: &str, plaintext: &str, a
     // Nothing can be paid under a zero cap, re-admission included.
     let charge = Charge { target: target.clone(), room: false, confirm: None, readmission_possible: readmission_possible && approved_msat.is_some(), confirmed: approved_msat.is_some(), operation: caps.operations };
     let text = match money_post_with(state, auth, "/messages/compose", body, cap, Some(charge), Some(&undelivered)).await {
+        // Asking the owner to approve a price cannot help: any cap refuses it.
+        Err(e) if e.code == "readmission_capped" => {
+            return Err(ActionError::new("readmission_capped", act::READMISSION_CAPPED_RETRY));
+        }
         // Refused before paying anything: a payment is still due.
         Err(e) if approved_msat.is_none() && matches!(e.code, "price_cap_exceeded" | "grant_first_contact" | "grant_readmission") => {
             return Err(needs_admission(state, &target, &undelivered).await);
@@ -5196,6 +5204,16 @@ mod control_act_tests {
         settled_incomplete: bool,
         /// Record nothing for the next POST and lose its reply (never reached the handler).
         drop_next: bool,
+        /// The peer asks for admission again (reconnect/restart) and the node
+        /// refuses to pay it under the cap, as genome `readmit_then_pay` does.
+        readmission_capped: bool,
+    }
+
+    /// Genome main's refusal of a capped reconnect re-admission (compose.rs `readmit_then_pay`).
+    fn readmission_capped_reply() -> (u16, String) {
+        (409, serde_json::json!({"code": "price_cap_exceeded", "error": format!(
+            "{A} requires admission again on a new connection, and the confirmed cap covers the message only; \
+             no invoice was paid. Send without a cap to pay admission.")}).to_string())
     }
 
     const OP_HASH: &str = "abababababababababababababababababababababababababababababababab";
@@ -5240,6 +5258,10 @@ mod control_act_tests {
                 Some((_, "paying" | "payment_unknown")) => {
                     return (409, serde_json::json!({"error": "payment_unresolved", "code": "payment_unresolved", "operation_id": id,
                         "state": "payment_unknown", "payment_hash": OP_HASH, "accepted": false, "retry_allowed": false}).to_string());
+                }
+                _ if node.readmission_capped => {
+                    node.ops.insert(id.clone(), (text, "released"));
+                    return readmission_capped_reply();
                 }
                 _ => {
                     let (state, lost) = if node.script.is_empty() { ("acked", false) } else { node.script.remove(0) };
@@ -5393,6 +5415,41 @@ mod control_act_tests {
             assert!(pending(&node).is_none());
             assert_eq!(ops.lock().unwrap().pays, 1);
         }
+    }
+
+    /// Real-UI 10b: the app is killed mid-send, the node restarts and reports
+    /// the operation `prepared` (nothing paid), and the owner sends the same
+    /// message again. The contact now asks for admission again and the node
+    /// refuses it under the cap. That is said as it is, not as a price change;
+    /// the record stays resumable under the same id; nothing is paid, ever twice.
+    #[tokio::test]
+    async fn resend_after_restart_refused_for_capped_readmission_is_named_and_stays_resumable() {
+        let (node, ops) = ops_fake(|n| n.script = vec![("prepared", true)]);
+        spend_advance(&node.state, true).await.unwrap();
+        assert_eq!(do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap_err().code, "spend_unknown");
+        let id = pending(&node).unwrap().operation_id.unwrap();
+        let restarted = reopen(&node);
+        assert_eq!(do_spend_reconcile(&restarted).await.unwrap(), NOTHING_PAID);
+        ops.lock().unwrap().readmission_capped = true;
+        for _ in 0..2 {
+            let err = do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap_err();
+            assert_eq!(err.code, "readmission_capped", "{}", err.message);
+            assert!(err.message.starts_with("Not sent - nothing was paid."), "{}", err.message);
+            let record = pending(&node).unwrap();
+            assert!(record.resumable && !record.budgeted, "still resumable, reservation released");
+            assert_eq!(record.operation_id.as_deref(), Some(id.as_str()));
+        }
+        let bodies = compose_bodies(&node);
+        assert!(bodies[1..].iter().all(|b| b["max_total_msat"] == 14000), "the normal all-in cap, not a #53 zero cap");
+        assert_eq!(op_ids(&node), vec![Some(id.clone()); 3], "every resend reuses the id");
+        assert!(book(&node).iter().all(|e| !e.2), "nothing settled");
+        assert_eq!(ops.lock().unwrap().pays, 0);
+        // Once the connection is paid for again, the same resend pays exactly once.
+        ops.lock().unwrap().readmission_capped = false;
+        assert!(do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap().accepted);
+        assert_eq!(op_ids(&node).last().unwrap().as_deref(), Some(id.as_str()));
+        assert!(pending(&node).is_none());
+        assert_eq!(ops.lock().unwrap().pays, 1);
     }
 
     #[tokio::test]
@@ -5661,6 +5718,25 @@ mod control_act_tests {
         assert_eq!(book(&node).len(), 1);
         assert_eq!(do_spend_reconcile(&node.state).await.unwrap_err().code, "undelivered_pending");
         do_spend_dismiss_undelivered(&node.state, &original.id).unwrap();
+    }
+
+    /// #53 Retry delivery when the contact asks for admission again: no cap can
+    /// pay it yet, so the app says so instead of asking for an approval that
+    /// the node would refuse the same way. The paid record is untouched.
+    #[tokio::test]
+    async fn psi_retry_refused_for_capped_readmission_does_not_ask_for_approval() {
+        let node = fake(AuthMode::Local, compose_script(vec![
+            psi_502(2000, 0, 2000, PSI_TIMEOUT), readmission_capped_reply(), readmission_capped_reply(),
+        ]));
+        let original = psi_first(&node).await;
+        for approved in [None, Some(14000)] {
+            let err = do_message_retry(&node.state, A, "gm", approved).await.unwrap_err();
+            assert_eq!(err.code, "readmission_capped", "{approved:?}");
+            assert!(err.message.starts_with("Not delivered - nothing new was paid."), "{}", err.message);
+            assert_eq!(pending(&node).unwrap().id, original.id);
+            assert_eq!(pending(&node).unwrap().undelivered, original.undelivered);
+        }
+        assert_eq!(book(&node).len(), 1);
     }
 
     #[tokio::test]

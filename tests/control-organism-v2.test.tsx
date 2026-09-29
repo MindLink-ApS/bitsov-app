@@ -162,6 +162,8 @@ describe('door cards', () => {
     expect(doorCard(price, null)?.card).toMatchObject({ side: 'out', code: 'price_changed' });
     const [setpoint] = membraneRefused([], { code: 'budget_exhausted', message: '' }, `peer:${A}`, NOW);
     expect(doorCard(setpoint, null)).toBeNull();
+    const [readmit] = membraneRefused([], { code: 'readmission_capped', message: 'Not sent - nothing was paid.' }, `peer:${A}`, NOW);
+    expect(doorCard(readmit, null)?.card).toEqual({ side: 'out', verdict: 'refused', code: 'readmission_capped', detail: 'Not sent - nothing was paid.', cap_msat: null });
 
     const [contact] = membraneNode([], ev({ seq: 4, verdict: 'admitted', code: 'settled', counterparty: A, paid_msat: 1000 }), { contacts: new Set([A]) });
     expect(doorCard(contact, null)).toBeNull();
