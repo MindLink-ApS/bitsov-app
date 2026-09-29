@@ -110,7 +110,8 @@ def run(r, fixture, capacities):
                 owner_window(s)
             s.need('payment window ready',r.wait_until(lambda:r.text('[data-send]').strip().startswith('Pay'),10))
             r.ui('click',selector='[data-send]')
-        s.need('UI explicitly reports payment not dispatched',r.ui_try('wait',text='payment not dispatched',timeoutMs=45000))
+        s.need('UI explicitly reports payment not dispatched',r.ui_try('wait',selector='[data-artifact="failed"][data-code="not_dispatched"]',timeoutMs=45000))
+        s.check('UI says nothing was paid','Not sent - nothing was paid.' in r.text('[data-artifact="failed"][data-code="not_dispatched"]'))
         s.snap('over-cap-refused')
         failed=[p for p in r.get('a','/payments') if p['payment_hash']==inv['payment_hash']]
         s.check('payer failed pre-dispatch',len(failed)==1 and failed[0]['status']=='failed',failed)
@@ -212,6 +213,8 @@ def run(r, fixture, capacities):
         s.need('paired after restart',r.ui_try('wait',selector='[data-pairing="paired"]',timeoutMs=90000))
         r.ui_try('click',text='I understand — continue to funding',role='button',timeoutMs=5000)
         s.need('A money ready after restart',r.wait_until(lambda:r.get('a','/status').get('money_ready'),180))
+        # money_ready precedes channel reestablishment with the router C.
+        s.need('A-C channel usable again after restart',r.wait_until(lambda:any(ch['active'] for ch in r.get('a','/payments/channels')),180,1))
         def b_connected():
             return any(p.get('node_id','').lower()==b.lower() and p.get('connected') for p in r.get('a','/peers'))
         if not r.wait_until(b_connected,60,1):
