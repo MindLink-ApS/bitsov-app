@@ -1,6 +1,9 @@
 /**
  * 1:1 calls (regtest prototype). Media runs peer to peer over WebRTC in this
- * webview, STUN only, and never touches the node. Signalling is four paid
+ * webview and never touches the node. By default no ICE server is contacted:
+ * host candidates only, so calls connect on one network (or a VPN). Calls
+ * across NAT need a STUN server the owner chooses in Settings (for example one
+ * run on their own node later); the app ships none. Signalling is four paid
  * UKM kinds through the node: the offer (400) is the per-call admission at
  * the callee's `call_msat`; answer (401), ICE (402) and hangup (403) pay the
  * realtime price. Each signal is one `call_signal` host command: same budget,
@@ -18,8 +21,19 @@ export const CALL_HANGUP = 403;
 export const RING_MS = 60_000;
 /** How long to wait for ICE gathering before sending what we have. */
 export const GATHER_MS = 3_000;
-/** STUN only: no TURN relay, so no third party carries (or bills) media. */
-export const ICE_SERVERS: RTCIceServer[] = [{ urls: 'stun:stun.l.google.com:19302' }];
+/** How long a dropped connection may take to come back before the call ends. */
+export const DISCONNECT_GRACE_MS = 10_000;
+/** How long an accepted call may stay 'connecting' before it ends. */
+export const CONNECT_TIMEOUT_MS = 30_000;
+
+/**
+ * The owner's STUN server, if any: `stun:host` or `stun:host:port`. No TURN
+ * (a relay would carry media), no credentials, nothing else.
+ */
+export function stunServer(url: string | null | undefined): RTCIceServer[] {
+  const v = (url ?? '').trim();
+  return /^stun:[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:\d{1,5})?$/i.test(v) ? [{ urls: v }] : [];
+}
 
 export const isCallKind = (kind: number) => kind >= CALL_OFFER && kind <= CALL_HANGUP;
 
@@ -106,8 +120,8 @@ export type CallDeps = {
   onView: (v: CallView) => void;
   onStreams: (local: MediaStream | null, remote: MediaStream | null) => void;
   newCallId?: () => string;
-  /** Defaults to {@link ICE_SERVERS}; a loopback test passes `[]`. */
-  iceServers?: RTCIceServer[];
+  /** Read at each call: the owner's STUN setting, `[]` (host only) by default. */
+  iceServers?: () => RTCIceServer[];
 };
 
 /** Wait for ICE gathering to finish, or `ms`, whichever comes first. */
@@ -135,6 +149,10 @@ export function createCallEngine(deps: CallDeps) {
   let quote: CallQuote | null = null;
   let offerSdp: string | null = null;
   let ringTimer: ReturnType<typeof setTimeout> | undefined;
+  let dropTimer: ReturnType<typeof setTimeout> | undefined;
+  let videoSender: RTCRtpSender | null = null;
+  /** The call the owner cancelled while its offer was being prepared or paid. */
+  let cancelled: string | null = null;
   // Serialises user actions: a double click never pays twice.
   let busy = false;
 
@@ -147,6 +165,9 @@ export function createCallEngine(deps: CallDeps) {
   const teardown = () => {
     clearTimeout(ringTimer);
     ringTimer = undefined;
+    clearTimeout(dropTimer);
+    dropTimer = undefined;
+    videoSender = null;
     pc?.close();
     pc = null;
     local?.getTracks().forEach((t) => t.stop());
@@ -161,22 +182,35 @@ export function createCallEngine(deps: CallDeps) {
   };
 
   const open = async (media: CallMedia) => {
-    local = await deps.getUserMedia({ audio: true, video: media === 'video' });
-    const conn = deps.peerConnection({ iceServers: deps.iceServers ?? ICE_SERVERS });
+    const stream = await deps.getUserMedia({ audio: true, video: media === 'video' });
+    local = stream;
+    const conn = deps.peerConnection({ iceServers: deps.iceServers?.() ?? [] });
     pc = conn;
-    local.getTracks().forEach((t) => conn.addTrack(t, local!));
+    stream.getTracks().forEach((t) => {
+      const sender = conn.addTrack(t, stream);
+      if (t.kind === 'video') videoSender = sender ?? null;
+    });
     conn.ontrack = (e) => {
       remote = e.streams[0] ?? new MediaStream([e.track]);
       deps.onStreams(local, remote);
     };
     conn.onconnectionstatechange = () => {
       if (pc !== conn) return;
-      if (conn.connectionState === 'connected' && view.phase !== 'live') {
-        clearTimeout(ringTimer);
-        set({ phase: 'live', liveAt: deps.now() });
-      } else if (conn.connectionState === 'failed') {
+      const state = conn.connectionState;
+      if (state === 'connected') {
+        clearTimeout(dropTimer);
+        dropTimer = undefined;
+        if (view.phase !== 'live') {
+          clearTimeout(ringTimer);
+          set({ phase: 'live', liveAt: view.liveAt ?? deps.now() });
+        }
+      } else if (state === 'disconnected') {
+        // Give a network blip a moment; a vanished peer ends the call (nothing paid).
+        clearTimeout(dropTimer);
+        dropTimer = setTimeout(() => { if (pc === conn) end('failed', 'The connection was lost.'); }, DISCONNECT_GRACE_MS);
+      } else if (state === 'failed' || state === 'closed') {
         // The other side sees the same failure; ending locally pays nothing.
-        end('failed', 'The direct connection failed (no TURN relay in this prototype).');
+        end('failed', 'The direct connection failed. Across different networks, calls need a STUN server (Settings).');
       }
     };
     deps.onStreams(local, null);
@@ -187,6 +221,14 @@ export function createCallEngine(deps: CallDeps) {
     const r = await deps.signal(view.peer!, kind, JSON.stringify({ v: 1, call_id: view.callId!, ...body }), maxMsat);
     if (r.ok) set({ paidMsat: view.paidMsat + r.value.total_msat });
     return r;
+  };
+
+  /** Media is set up but not flowing yet: give up after a while (nothing paid). */
+  const awaitConnect = (callId: string) => {
+    clearTimeout(ringTimer);
+    ringTimer = setTimeout(() => {
+      if (view.callId === callId && view.phase === 'connecting') end('failed', 'The call could not connect.');
+    }, CONNECT_TIMEOUT_MS);
   };
 
   const guarded = async (run: () => Promise<void>) => {
@@ -211,19 +253,24 @@ export function createCallEngine(deps: CallDeps) {
       }
       quote = q;
       const callId = (deps.newCallId ?? newCallId)();
+      cancelled = null;
       set({ ...IDLE, phase: 'calling', peer, callId, media, outgoing: true, camera: media === 'video' });
       let conn: RTCPeerConnection;
       try {
         conn = await open(media);
+        if (cancelled === callId) { teardown(); return; }
         await conn.setLocalDescription(await conn.createOffer());
         await gathered(conn, GATHER_MS);
       } catch {
+        if (cancelled === callId) { teardown(); return; }
         end(null, media === 'video' ? 'Camera or microphone not available. Nothing was paid.' : 'Microphone not available. Nothing was paid.');
         return;
       }
-      if (view.callId !== callId) return;
+      // Cancelled before the offer went out: nothing is paid.
+      if (cancelled === callId || view.callId !== callId) { teardown(); return; }
       const r = await pay(CALL_OFFER, { media, sdp: conn.localDescription!.sdp }, q.offer_msat + q.offer_max_routing_fee_msat);
-      if (view.callId !== callId) return;
+      // Cancelled while the offer was in flight: the mic is already off; send nothing more.
+      if (cancelled === callId || view.callId !== callId) return;
       if (!r.ok) {
         end(null, r.error.message);
         return;
@@ -254,6 +301,7 @@ export function createCallEngine(deps: CallDeps) {
       if (view.callId !== callId) return;
       const r = await pay(CALL_ANSWER, { sdp: conn.localDescription!.sdp }, signalCost(quote));
       if (!r.ok) end(null, r.error.message);
+      else if ((view.phase as Phase) === 'connecting') awaitConnect(callId!);
     }),
 
     /** Decline a ringing call: one paid hangup, so the caller stops ringing. */
@@ -264,12 +312,31 @@ export function createCallEngine(deps: CallDeps) {
       end('declined');
     }),
 
-    /** Hang up: one paid hangup once the offer went out; before that, nothing to pay. */
-    hangup: () => guarded(async () => {
-      if (!active() || view.phase === 'incoming') return;
-      if (view.phase !== 'calling' && quote) await pay(CALL_HANGUP, { reason: 'hangup' }, signalCost(quote));
+    /**
+     * Hang up: one paid hangup once the offer went out. While calling it
+     * cancels at once (not serialised behind the offer): the mic stops now;
+     * an offer not yet sent is never paid, one in flight is not followed by
+     * anything else.
+     */
+    hangup: async () => {
+      if (view.phase === 'calling') {
+        cancelled = view.callId;
+        end('hangup');
+        return;
+      }
+      await guarded(async () => {
+        if (!active() || view.phase === 'incoming') return;
+        if (quote) await pay(CALL_HANGUP, { reason: 'hangup' }, signalCost(quote));
+        end('hangup');
+      });
+    },
+
+    /** End without paying anything (the window is closing). The peer's side times out. */
+    endLocal: () => {
+      if (!active()) return;
+      if (view.phase === 'calling') cancelled = view.callId;
       end('hangup');
-    }),
+    },
 
     toggleMute: () => {
       if (!local) return;
@@ -278,11 +345,35 @@ export function createCallEngine(deps: CallDeps) {
       set({ muted });
     },
 
-    toggleCamera: () => {
-      if (!local || view.media !== 'video') return;
-      const camera = !view.camera;
-      local.getVideoTracks().forEach((t) => { t.enabled = camera; });
-      set({ camera });
+    /**
+     * Camera off stops the video track (the camera light goes off); camera on
+     * captures a fresh one and puts it back on the same sender.
+     */
+    toggleCamera: async () => {
+      const stream = local;
+      if (!stream || view.media !== 'video') return;
+      if (view.camera) {
+        stream.getVideoTracks().forEach((t) => { t.stop(); stream.removeTrack(t); });
+        await videoSender?.replaceTrack(null);
+        set({ camera: false });
+        deps.onStreams(local, remote);
+        return;
+      }
+      let fresh: MediaStream;
+      try {
+        fresh = await deps.getUserMedia({ video: true });
+      } catch {
+        set({ error: 'Camera not available.' });
+        return;
+      }
+      const track = fresh.getVideoTracks()[0];
+      // Keep only the new camera track; anything else the capture returned stops.
+      fresh.getTracks().forEach((t) => { if (t !== track) t.stop(); });
+      if (!track || local !== stream || view.media !== 'video') { track?.stop(); return; }
+      stream.addTrack(track);
+      await videoSender?.replaceTrack(track);
+      set({ camera: true, error: null });
+      deps.onStreams(local, remote);
     },
 
     /** Close the ended card. */
@@ -305,8 +396,8 @@ export function createCallEngine(deps: CallDeps) {
           return;
         case CALL_ANSWER:
           if (!ours || view.phase !== 'ringing' || !pc) return;
-          clearTimeout(ringTimer);
           set({ phase: 'connecting' });
+          awaitConnect(s.call_id);
           try {
             await pc.setRemoteDescription({ type: 'answer', sdp: s.sdp! });
           } catch {

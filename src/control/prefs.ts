@@ -78,3 +78,36 @@ export function watchSystemTheme() {
   mq.addEventListener?.('change', sync);
   return () => mq.removeEventListener?.('change', sync);
 }
+
+// ---- calls: the owner's STUN server (off by default) ------------------------
+
+const STUN_KEY = 'bitsov.stun';
+
+function readStun(): string {
+  try {
+    return localStorage.getItem(STUN_KEY) ?? '';
+  } catch {
+    return '';
+  }
+}
+
+let stunSignal: (() => string) | null = null;
+let setStunSignal: ((v: string) => void) | null = null;
+createRoot(() => {
+  const [stun, setStun] = createSignal(readStun());
+  stunSignal = stun;
+  setStunSignal = setStun;
+});
+
+/** The STUN URL the owner set, or '' (none: calls use host candidates only). */
+export const stunPref = () => stunSignal?.() ?? readStun();
+
+/** Set or clear ('') the owner's STUN server. Validation is the caller's. */
+export function setStunPref(url: string) {
+  const v = url.trim();
+  setStunSignal?.(v);
+  try {
+    if (v) localStorage.setItem(STUN_KEY, v);
+    else localStorage.removeItem(STUN_KEY);
+  } catch { /* ignore */ }
+}

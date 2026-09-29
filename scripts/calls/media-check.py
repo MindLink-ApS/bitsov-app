@@ -71,7 +71,7 @@ window.engine = Calls.createCallEngine({
   now: () => Date.now(),
   onView: (v) => { window.view = v; },
   onStreams: (local, remote) => { window.local = local; window.remote = remote; },
-  iceServers: [],
+  iceServers: () => [],
 });
 window.stats = async () => {
   const out = { audioIn: 0, videoIn: 0, audioOut: 0, audioLevel: null, candidate: null };
@@ -170,10 +170,20 @@ def main():
             if media == 'video':
                 check('video: frames decoded both ways', sa['videoIn'] > 0 and sb['videoIn'] > 0,
                       f"A decoded {sa['videoIn']}, B decoded {sb['videoIn']}")
+                off = a.evaluate("""async () => {
+                  const cam = window.local.getVideoTracks()[0];
+                  await window.engine.toggleCamera();
+                  const sender = window.pc.getSenders().find((x) => x.track === null || x.track.kind === 'video');
+                  return cam.readyState === 'ended' && window.local.getVideoTracks().length === 0
+                    && sender && sender.track === null && window.view.camera === false;
+                }""")
+                check('video: camera off stops the capture track (light off) and sends no video', off)
+                before = b.evaluate('window.stats()')['videoIn']
                 a.evaluate('window.engine.toggleCamera()')
-                off = a.evaluate("window.local.getVideoTracks().every(t => !t.enabled) && window.view.camera === false")
-                check('video: camera toggle disables the local video track', off)
-                a.evaluate('window.engine.toggleCamera()')
+                a.wait_for_timeout(1500)
+                after = b.evaluate('window.stats()')['videoIn']
+                back = a.evaluate("window.view.camera === true && window.local.getVideoTracks()[0].readyState === 'live'")
+                check('video: camera on re-acquires and frames resume', back and after > before, f'B decoded {before} -> {after}')
             a.evaluate('window.engine.toggleMute()')
             muted = a.evaluate("window.local.getAudioTracks().every(t => !t.enabled) && window.view.muted === true")
             # Headless has no playout device, so B's audioLevel is not a measure of silence.
