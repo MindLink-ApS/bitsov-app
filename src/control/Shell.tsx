@@ -52,6 +52,7 @@ import {
   type Unread,
 } from './state';
 import type {
+  AdmissionPrice,
   PrePaymentRefusals,
   OwnerContactApproval,
   FirstContactQuote,
@@ -178,7 +179,7 @@ export function ControlCenter(props: Props) {
   const [deliveries, setDeliveries] = createStore<Deliveries>({});
   /** What each send actually paid, by message id: a room echo carries one member's share only. */
   const [paid, setPaid] = createStore<Record<string, number>>({});
-  const [allowances, setAllowances] = createStore<Record<string, { total_msat: number; max_routing_fee_msat: number }>>({});
+  const [allowances, setAllowances] = createStore<Record<string, { total_msat: number; max_routing_fee_msat: number; readmission_msat?: number }>>({});
   const [pendingRevision, setPendingRevision] = createSignal(0);
   const [artifacts, setArtifacts] = createStore<Record<string, Artifact[]>>({});
   // An offline transition consumes undispatched retry approvals, even if their
@@ -492,7 +493,11 @@ export function ControlCenter(props: Props) {
   /** A message the node took: show it in the thread with what it paid. */
   const sentOne = (t: TrackRef, receipt: SendReceipt, text: string) => {
     setPaid(receipt.message_id, receipt.amount_msat);
-    setAllowances(receipt.message_id, { total_msat: receipt.total_msat ?? receipt.amount_msat + (receipt.max_routing_fee_msat ?? 0), max_routing_fee_msat: receipt.max_routing_fee_msat ?? 0 });
+    setAllowances(receipt.message_id, {
+      total_msat: receipt.total_msat ?? receipt.amount_msat + (receipt.readmission_msat ?? 0) + (receipt.max_routing_fee_msat ?? 0),
+      max_routing_fee_msat: receipt.max_routing_fee_msat ?? 0,
+      ...(receipt.readmission_msat ? { readmission_msat: receipt.readmission_msat } : {}),
+    });
     if (!deliveries[receipt.message_id]) setDeliveries(receipt.message_id, deliveryFromReceipt(receipt));
     setThreads('t', trackKey(t), (old) => mergeMessages(old ?? [], [sentMessage(receipt, ownId(), text)]));
     setThreads('fresh', receipt.message_id, true);
@@ -502,7 +507,7 @@ export function ControlCenter(props: Props) {
     // A send that did not cross (price, setpoint) is also a membrane reading. A
     // price refusal stands at their door in the track instead of a failure row.
     if (!outcome.ok) foldMembrane((log) => membraneRefused(log, outcome.error, trackKey(t), Date.now()));
-    if (!outcome.ok && outcome.error.code !== 'not_ready' && !needsApproval(outcome.error) && !isBudgetStop(outcome.error) && outboundKind(outcome.error) !== 'price' && outcome.error.code !== 'readmission_capped') {
+    if (!outcome.ok && outcome.error.code !== 'not_ready' && !needsApproval(outcome.error) && !isBudgetStop(outcome.error) && outboundKind(outcome.error) !== 'price' && outcome.error.code !== 'readmission_capped' && outcome.error.code !== 'readmission_quoted') {
       addArtifact(t, { type: 'failed', action: FAILURE_LABEL[outcome.error.code] ?? action, error: outcome.error });
     }
     return outcome;
@@ -1185,7 +1190,7 @@ function MessageView(props: {
   fresh: boolean;
   delivery: Delivery | undefined;
   paid: number | undefined;
-  allowance?: { total_msat: number; max_routing_fee_msat: number };
+  allowance?: { total_msat: number; max_routing_fee_msat: number; readmission_msat?: number };
   nameOf: (id: string) => string;
 }) {
   const amount = () => props.allowance?.total_msat ?? props.paid ?? props.m.payment_amount_msat;
@@ -1204,6 +1209,9 @@ function MessageView(props: {
           <Bolt />
           <span class="sats">{sats(amount()!)}</span>
           <span>{satUnit(amount()!)} {props.out ? (props.allowance ? `all-in ceiling (${feeCeiling(props.allowance.max_routing_fee_msat)})` : 'principal paid; fee not in history') : 'to you'}</span>
+          <Show when={props.out && props.allowance?.readmission_msat}>
+            <span data-readmission-paid>incl. admission again {sats(props.allowance!.readmission_msat!)} {satUnit(props.allowance!.readmission_msat!)}</span>
+          </Show>
         </Show>
         <span>{clock(props.m.timestamp)}</span>
         <Show when={props.out && props.delivery}>
@@ -1622,6 +1630,15 @@ function Composer(props: {
   // reconnect (its grant does not budget them yet): the door card, once more.
   const [readmitFor, setReadmitFor] = createSignal<string | null>(null);
   const readmit = () => !room() && readmitFor() === target();
+  // Genome quoted_readmission_v1: after a reconnect or restart the contact
+  // asks for admission again and the node kept their signed quote. Outside the
+  // contact's budget the owner sees it here, inside the all-in cost, and sends
+  // once more at that price (the same message keeps its operation).
+  const [readmitQuote, setReadmitQuote] = createSignal<{ peer: string; price: AdmissionPrice } | null>(null);
+  const readmitPrice = (): AdmissionPrice | null => {
+    const q = readmitQuote();
+    return q && !room() && mode() === 'message' && q.peer === target() ? q.price : null;
+  };
   // Is this send a first contact? While the budget decides, exactly when it
   // has no line for this peer, whatever the thread holds: inbound history
   // does not open their door for us (merge-gate finding 7). Otherwise, when
@@ -1693,6 +1710,14 @@ function Composer(props: {
   const shown = (): { msat: number | null; estimate: boolean; basis: string } => {
     switch (mode()) {
       case 'message': {
+        const again = readmitPrice();
+        if (again) {
+          return {
+            msat: again.total_msat,
+            estimate: false,
+            basis: `${props.name} asks for admission again: ${sats(again.admission_msat)} ${satUnit(again.admission_msat)}, then ${sats(again.message_msat)} for this message; ${feeCeiling(again.max_routing_fee_msat ?? 0)}`,
+          };
+        }
         const q = doorWanted() ? doorQuote() : null;
         if (q) {
           return {
@@ -1794,6 +1819,8 @@ function Composer(props: {
         ? await props.actions.file(submittedTrack, submittedFile!, cap, first)
         : await props.actions.send(submittedTrack, submittedText, cap, first);
       const unchanged = composerRevision === submittedRevision;
+      if (r.ok && readmitQuote()?.peer === submittedPeer) setReadmitQuote(null);
+      if (!r.ok && r.error.code === 'readmission_quoted' && r.error.admission) setReadmitQuote({ peer: submittedPeer, price: r.error.admission });
       if (r.ok && readmitFor() === submittedPeer) setReadmitFor(null);
       else if (!r.ok && unchanged && ['price_changed', 'price_cap_exceeded'].includes(r.error.code) && doorWanted()) {
         // The stranger's price moved: ask for their signed quote again.
@@ -1848,13 +1875,17 @@ function Composer(props: {
     const unchanged = () => composerRevision === submittedRevision;
     let r: Awaited<ReturnType<Actions['send']>>;
     switch (mode()) {
-      case 'message':
+      case 'message': {
+        const peer = target();
         r = await props.actions.send(t, draft(), shown().msat!);
+        if (r.ok && readmitQuote()?.peer === peer) setReadmitQuote(null);
+        if (!r.ok && r.error.code === 'readmission_quoted' && r.error.admission) setReadmitQuote({ peer, price: r.error.admission });
         if ((r.ok || paidUndelivered(r)) && unchanged()) {
           setDraft('');
           setDrafted(false);
         } else if (!r.ok && unchanged() && isBudgetStop(r.error)) setNote(r.error.message);
         break;
+      }
       case 'pay':
         r =
           payKind() === 'invoice'
@@ -1984,6 +2015,19 @@ function Composer(props: {
         </button>
       </div>
 
+      <Show when={readmitPrice()}>
+        {(p) => (
+          <>
+            <p class="hint" data-readmission-quote>
+              {props.name} asks for admission again, {sats(p().admission_msat)} {satUnit(p().admission_msat)}. Nothing was paid. Send again: {sats(p().total_msat)} {satUnit(p().total_msat)} in all.
+            </p>
+            <details class="quiet-detail" data-readmission-detail>
+              <summary>Details</summary>
+              <p>The same message keeps its operation, so it is never paid twice.</p>
+            </details>
+          </>
+        )}
+      </Show>
       <Show when={mode() === 'pay'}>
         <p class="hint" data-budget-payment>App invoice payments and keysend reserve principal plus the network fee ceiling against the app daily all-in limit; any finite node grant still applies.</p>
       </Show>

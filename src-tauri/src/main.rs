@@ -177,6 +177,9 @@ struct NodeState {
     node_grant: Mutex<Option<NodeGrant>>,
     /// This run observed the fee-aware quote contract for this node identity.
     all_in_caps_node: Mutex<Option<String>>,
+    /// The contact's re-admission quote the owner was last asked about
+    /// (`readmission_quoted`), for this node identity. Memory only.
+    readmission_ask: Mutex<Option<ReadmissionAsk>>,
     /// Serializes this process's budget-file read-modify-write.
     budget_io: Mutex<()>,
     /// Serializes every money action: each money POST (send, retry, payment,
@@ -188,6 +191,18 @@ struct NodeState {
 }
 
 /// The owner asked for these while an elevation request is pending.
+/// A contact's signed re-admission quote shown to the owner. A send of exactly
+/// its total to exactly that contact, before it expires, is the owner's OK for
+/// it: that send carries the quote's routing ceilings for both payments.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ReadmissionAsk {
+    node_id: String,
+    peer: String,
+    total_msat: u64,
+    max_routing_fee_msat: u64,
+    expires_at_ms: u64,
+}
+
 #[derive(Default, Clone, Copy, Debug)]
 struct Wants {
     window: bool,
@@ -222,6 +237,7 @@ impl NodeState {
             owner_contact: Mutex::new(None),
             node_grant: Mutex::new(None),
             all_in_caps_node: Mutex::new(None),
+            readmission_ask: Mutex::new(None),
             budget_io: Mutex::new(()),
             money: tokio::sync::Mutex::new(()),
             ready: Mutex::new(false),
@@ -395,6 +411,7 @@ fn spawn_node(app: &AppHandle<impl tauri::Runtime>, config: &Path) -> Result<(),
 
     state.sidecar_terminated.store(false, Ordering::SeqCst);
     *state.all_in_caps_node.lock().unwrap() = None;
+    *state.readmission_ask.lock().unwrap() = None;
     let routing_policy = configured_routing_policy(config);
     let child = state.spawn_child(&mut cmd)?;
     *state.room_routing_policy.lock().unwrap() = routing_policy;
@@ -549,6 +566,7 @@ async fn restart_node(
     *state.ready.lock().unwrap() = false;
     *state.node_id.lock().unwrap() = None;
     *state.all_in_caps_node.lock().unwrap() = None;
+    *state.readmission_ask.lock().unwrap() = None;
     *state.token.lock().unwrap() = None;
 
     if state.stop_for_restart(NODE_SHUTDOWN_BUDGET) {
@@ -2471,11 +2489,23 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
     if status == reqwest::StatusCode::CONFLICT && body.get("max_total_msat").is_some()
         && serde_json::from_str::<serde_json::Value>(&text).ok().is_some_and(|v| v["code"] == "price_cap_exceeded") {
         release(state)?;
-        abandon(&journal)?;
-        // Not a price change: no fresh quote under a cap can pay a re-admission yet.
+        // Not a price change: the contact asks for admission again.
         if act::readmission_capped_refusal(status.as_u16(), &text) {
+            if operation_id.is_some() && retry.is_none() {
+                // The node holds this operation `prepared`, nothing paid: sending
+                // this very message again (under the contact's re-admission
+                // quote) reuses its id, so it can never be paid twice.
+                pending.resumable = true;
+                pending.budgeted = false;
+                pending.accounting_msat = None;
+                pending.target = None;
+                journal.save(&pending)?;
+            } else {
+                abandon(&journal)?;
+            }
             return Err(ActionError::new("readmission_capped", act::READMISSION_CAPPED));
         }
+        abandon(&journal)?;
         return Err(ActionError::new("price_cap_exceeded", "The node refused the changed price before any payment. Refresh the quote."));
     }
     // The node compared this operation before paying anything in this call.
@@ -3166,6 +3196,9 @@ struct SendCaps {
     readmission_possible: bool,
     /// Durable, idempotent 1:1 message operations.
     operations: bool,
+    /// A capped 1:1 chat may pay a reconnect's re-admission under the
+    /// contact's fresh signed quote (genome #111 revived).
+    quoted_readmission: bool,
 }
 
 async fn require_price_caps(state: &NodeState, room: bool) -> Result<SendCaps, ActionError> {
@@ -3176,7 +3209,11 @@ async fn require_price_caps(state: &NodeState, room: bool) -> Result<SendCaps, A
     if !has("paid_send_caps_v1") || (room && !has("room_terminal_outcomes_v1")) {
         return Err(unavailable());
     }
-    Ok(SendCaps { readmission_possible: has(grant::FIRST_CONTACT_CAPABILITY), operations: has(OPERATIONS_CAPABILITY) })
+    Ok(SendCaps {
+        readmission_possible: has(grant::FIRST_CONTACT_CAPABILITY),
+        operations: has(OPERATIONS_CAPABILITY),
+        quoted_readmission: has(act::QUOTED_READMISSION_CAPABILITY),
+    })
 }
 
 /// Genome #113: `operation_id` on 1:1 compose, idempotent POST, `GET /messages/operations/{id}`.
@@ -3255,8 +3292,24 @@ async fn do_message_send_with(
     if let Some(contact_budget) = node_ok {
         confirm_first_contact(state, &recipient, max_msat, contact_budget).await?;
     }
-    let charge = Charge { target, room: is_room, confirm: plan.confirm, readmission_possible, confirmed: node_ok.is_some(), operation: caps.operations && !is_room };
-    let sent = money_post(state, auth, "/messages/compose", body, max_msat, Some(charge)).await;
+    let quoted_readmission = !is_room && node_ok.is_none() && caps.quoted_readmission;
+    // The owner approved the contact's re-admission quote (`readmission_quoted`):
+    // that send carries its routing ceilings for both payments, under its total.
+    if quoted_readmission {
+        if let Some(ask) = take_readmission_ask(state, &recipient, max_msat) {
+            body["max_routing_fee_msat"] = serde_json::json!(ask.max_routing_fee_msat);
+        }
+    }
+    let charge = Charge { target: target.clone(), room: is_room, confirm: plan.confirm, readmission_possible, confirmed: node_ok.is_some(), operation: caps.operations && !is_room };
+    let sent = money_post(state, auth, "/messages/compose", body.clone(), max_msat, Some(charge)).await;
+    let sent = match sent {
+        // After a reconnect or restart the contact asks for admission again,
+        // and the node kept its signed quote for this connection.
+        Err(e) if e.code == "readmission_capped" && quoted_readmission => {
+            readmit_under_quote(state, &target, body, max_msat, readmission_possible, caps.operations, e).await
+        }
+        other => other,
+    };
     let text = match sent {
         // After a reconnect the contact asks for admission again. The node pays
         // it from the budget only for a contact its grant budgets; this one it
@@ -3280,7 +3333,69 @@ async fn do_message_send_with(
         operation_id: reply.operation_id,
         state: reply.state,
         accepted: reply.accepted,
+        readmission_msat: reply.readmission_msat.filter(|m| *m > 0),
     })
+}
+
+/// Genome `quoted_readmission_v1`: the contact asked for admission again and
+/// the node refused this send's cap before paying anything, keeping the
+/// contact's fresh signed quote for this connection. The quote's total
+/// (admission once, this message, both routing ceilings) is the new all-in
+/// price. Inside the contact's existing budget the app sends again under it,
+/// with the same operation id, without a prompt; otherwise the owner is asked
+/// once (`readmission_quoted`). Anything unexpected keeps the refusal.
+async fn readmit_under_quote(
+    state: &NodeState,
+    target: &str,
+    mut body: serde_json::Value,
+    max_msat: u64,
+    readmission_possible: bool,
+    operations: bool,
+    refused: ActionError,
+) -> Result<String, ActionError> {
+    let recipient = body["recipient"].as_str().unwrap_or_default().to_string();
+    let Ok(quote) = read_first_contact_quote(state, &recipient).await else { return Err(refused) };
+    // A cap that already covered this quote was refused: never loop.
+    if quote.total_msat <= max_msat { return Err(refused); }
+    let view = act::AdmissionView {
+        admission_msat: quote.admission_msat,
+        message_msat: quote.message_msat,
+        max_routing_fee_msat: quote.max_routing_fee_msat,
+        total_msat: quote.total_msat,
+        quoted: true,
+    };
+    let within_budget = match plan_message(state, target, false, quote.total_msat, None) {
+        Ok((auth @ Auth::Budget(_), plan)) if plan.confirm.is_none() => Some(auth),
+        _ => None,
+    };
+    let Some(auth) = within_budget else {
+        remember_readmission_ask(state, &recipient, &quote);
+        return Err(ActionError::readmission_quoted(view));
+    };
+    body["max_total_msat"] = serde_json::json!(quote.total_msat);
+    body["max_routing_fee_msat"] = serde_json::json!(quote.max_routing_fee_msat);
+    let charge = Charge { target: target.to_string(), room: false, confirm: None, readmission_possible, confirmed: false, operation: operations };
+    money_post(state, auth, "/messages/compose", body, quote.total_msat, Some(charge)).await
+}
+
+fn remember_readmission_ask(state: &NodeState, peer: &str, quote: &control::FirstContactQuote) {
+    let Some(node_id) = state.node_id.lock().unwrap().clone() else { return };
+    *state.readmission_ask.lock().unwrap() = Some(ReadmissionAsk {
+        node_id,
+        peer: peer.to_string(),
+        total_msat: quote.total_msat,
+        max_routing_fee_msat: quote.max_routing_fee_msat,
+        expires_at_ms: quote.expires_at.saturating_mul(1000),
+    });
+}
+
+/// The re-admission quote the owner was shown for `peer`, if this send is for
+/// exactly its total and it has not expired. Single use.
+fn take_readmission_ask(state: &NodeState, peer: &str, max_msat: u64) -> Option<ReadmissionAsk> {
+    let node_id = state.node_id.lock().unwrap().clone()?;
+    let mut ask = state.readmission_ask.lock().unwrap();
+    let matches = ask.as_ref().is_some_and(|a| a.node_id == node_id && a.peer == peer && a.total_msat == max_msat && a.expires_at_ms > now_ms());
+    if matches { ask.take() } else { None }
 }
 
 fn readmission_needs_ok() -> ActionError {
@@ -3331,6 +3446,11 @@ async fn do_message_retry(state: &NodeState, recipient: &str, plaintext: &str, a
     // Nothing can be paid under a zero cap, re-admission included.
     let charge = Charge { target: target.clone(), room: false, confirm: None, readmission_possible: readmission_possible && approved_msat.is_some(), confirmed: approved_msat.is_some(), operation: caps.operations };
     let text = match money_post_with(state, auth, "/messages/compose", body, cap, Some(charge), Some(&undelivered)).await {
+        // The node pays re-admission under a cap that fits the contact's signed
+        // quote: Retry delivery (zero cap) asks the owner for that price.
+        Err(e) if e.code == "readmission_capped" && caps.quoted_readmission && approved_msat.is_none() => {
+            return Err(needs_admission(state, &target, &undelivered).await);
+        }
         // Asking the owner to approve a price cannot help: any cap refuses it.
         Err(e) if e.code == "readmission_capped" => {
             return Err(ActionError::new("readmission_capped", act::READMISSION_CAPPED_RETRY));
@@ -3358,6 +3478,7 @@ async fn do_message_retry(state: &NodeState, recipient: &str, plaintext: &str, a
         operation_id: reply.operation_id,
         state: reply.state,
         accepted: reply.accepted,
+        readmission_msat: reply.readmission_msat.filter(|m| *m > 0),
     })
 }
 
@@ -7470,6 +7591,11 @@ mod control_act_tests {
     }
 
     fn g1_node(scopes: &[&str]) -> (Fake, tempfile::TempDir, G1) {
+        g1_node_with(scopes, None)
+    }
+
+    /// [`g1_node`] with `first` answering before it; its status 0 falls through.
+    fn g1_node_with(scopes: &[&str], first: Option<Routes>) -> (Fake, tempfile::TempDir, G1) {
         let g1 = G1 {
             grant: Arc::new(Mutex::new(g1_grant(3600, 400_000, 400_000))),
             compose: Arc::new(Mutex::new(None)),
@@ -7483,6 +7609,10 @@ mod control_act_tests {
         let polls = Arc::new(AtomicUsize::new(0));
         let far = now_unix() + 900;
         let routes: Routes = Arc::new(move |m: &str, path: &str, b: &str| {
+            if let Some(first) = &first {
+                let (status, body) = first(m, path, b);
+                if status != 0 { return (status, body); }
+            }
             let v = match path {
                 "/messages/first-contact/quote" if quote.lock().unwrap().is_some() => quote.lock().unwrap().clone().unwrap(),
                 "/status" if first_contact.lock().unwrap().is_some() => serde_json::json!({"api_capabilities": [
@@ -7800,6 +7930,157 @@ mod control_act_tests {
         g1.grant.lock().unwrap()["used_by_recipient"] = serde_json::json!({A: 2000});
         do_message_send(&node.state, A, false, "again", 7000, None).await.unwrap();
         assert_eq!(budget_now(&reopen(&node)).spent_msat, 4000);
+    }
+
+
+    // ---- quoted re-admission (genome quoted_readmission_v1, #111 revived) --------
+
+    /// A genome node after a restart: the contact asks for admission again on
+    /// the new connection. A compose whose cap is below the quote's total is
+    /// refused before paying (409 `readmission_required`, operation kept
+    /// `prepared`); a cap that fits pays admission once and the message once,
+    /// and the connection then stays admitted. One operation pays at most once.
+    #[derive(Default)]
+    struct ReadmitNode {
+        admitted: bool,
+        /// Operation id -> the reply that settled it.
+        paid: std::collections::HashMap<String, serde_json::Value>,
+        /// Lightning dispatches: admission and message count one each.
+        pays: usize,
+        quotes: usize,
+    }
+
+    const READMIT_QUOTE: (u64, u64, u64) = (1000, 1000, 10_000);
+
+    fn readmit_routes(node: Arc<Mutex<ReadmitNode>>) -> Routes {
+        Arc::new(move |_m: &str, p: &str, b: &str| {
+            let (admission, message, fees) = READMIT_QUOTE;
+            match p {
+                "/status" => (200, serde_json::json!({"api_capabilities": ["paid_send_caps_v1", "room_terminal_outcomes_v1",
+                    "spend_budget_grant_v1", "first_contact_grant_v1", "message_operations_v1", "quoted_readmission_v1"]}).to_string()),
+                "/messages/first-contact/quote" => {
+                    node.lock().unwrap().quotes += 1;
+                    (200, serde_json::json!({"recipient": A, "admission_msat": admission, "message_msat": message,
+                        "max_routing_fee_msat": fees, "total_msat": admission + message + fees, "expires_at": now_unix() + 60}).to_string())
+                }
+                "/messages/compose" => {
+                    let body: serde_json::Value = serde_json::from_str(b).unwrap();
+                    let id = body["operation_id"].as_str().unwrap().to_string();
+                    let cap = body["max_total_msat"].as_u64().unwrap();
+                    let mut n = node.lock().unwrap();
+                    if let Some(reply) = n.paid.get(&id) { return (200, reply.to_string()); }
+                    let readmission = if n.admitted { 0 } else { admission };
+                    if cap < readmission + message + if n.admitted { 0 } else { fees } {
+                        return (409, serde_json::json!({"code": "price_cap_exceeded", "reason": "readmission_required",
+                            "error": format!("{A} asks {admission} msat for admission again; no invoice was paid"),
+                            "operation_id": id, "state": "prepared", "payment_hash": null, "accepted": false, "retry_allowed": true}).to_string());
+                    }
+                    n.pays += if n.admitted { 1 } else { 2 };
+                    n.admitted = true;
+                    let reply = serde_json::json!({"operation_id": id, "state": "acked", "accepted": true, "payment_hash": OP_HASH,
+                        "retry_allowed": false, "message_id": format!("m{}", n.paid.len() + 1), "delivered": true,
+                        "amount_msat": message, "readmission_msat": (readmission > 0).then_some(readmission), "max_routing_fee_msat": 0});
+                    n.paid.insert(id, reply.clone());
+                    (200, reply.to_string())
+                }
+                _ => (0, String::new()),
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn quoted_readmission_within_the_contact_budget_pays_once_without_a_prompt() {
+        let readmit = Arc::new(Mutex::new(ReadmitNode::default()));
+        let (node, _dir, g1) = g1_node_with(&["read", "receive"], Some(readmit_routes(readmit.clone())));
+        with_book(&node.state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
+        g1.grant.lock().unwrap()["per_recipient_msat"] = serde_json::json!({A: 50_000});
+        g1_approved(&node, 500_000).await;
+        let receipt = do_message_send(&node.state, A, false, "gm", 7000, None).await.unwrap();
+        let bodies = compose_bodies(&node);
+        assert_eq!(bodies.len(), 2, "refused under the message cap, then sent under the quote");
+        assert_eq!(bodies[0]["operation_id"], bodies[1]["operation_id"], "the same operation");
+        assert_eq!((bodies[0]["max_total_msat"].as_u64(), bodies[1]["max_total_msat"].as_u64()), (Some(7000), Some(12_000)));
+        assert_eq!(bodies[1]["max_routing_fee_msat"], 10_000, "the quote's ceilings for both payments");
+        assert_eq!((receipt.amount_msat, receipt.readmission_msat, receipt.total_msat), (1000, Some(1000), 2000), "admission is in the all-in cost");
+        assert_eq!(receipt.operation_id.as_deref(), bodies[0]["operation_id"].as_str());
+        // Quotes: the #99 all-in probe before the first POST, then the refusal's.
+        let counts = { let r = readmit.lock().unwrap(); (r.pays, r.quotes) };
+        assert_eq!(counts, (2, 2), "admission once, message once");
+        assert!(pending(&node).is_none());
+        assert_eq!(with_book(&node.state, false, |b| Ok(b.spent(A, false, now_ms()))).unwrap(), 2000, "counted against the contact");
+        // The connection stays admitted: the next message pays the message only.
+        let next = do_message_send(&node.state, A, false, "again", 7000, None).await.unwrap();
+        assert_eq!((next.amount_msat, next.readmission_msat), (1000, None));
+        assert_eq!(readmit.lock().unwrap().pays, 3);
+        assert_eq!(compose_bodies(&node).len(), 3);
+    }
+
+    #[tokio::test]
+    async fn quoted_readmission_outside_the_budget_asks_once_and_keeps_the_operation() {
+        let readmit = Arc::new(Mutex::new(ReadmitNode::default()));
+        let node = fake(AuthMode::Local, {
+            let routes = readmit_routes(readmit.clone());
+            Arc::new(move |m: &str, p: &str, b: &str| match routes(m, p, b) {
+                (0, _) => happy()(m, p, b),
+                other => other,
+            })
+        });
+        spend_advance(&node.state, true).await.unwrap();
+        let e = do_message_send(&node.state, A, false, "gm", 7000, None).await.unwrap_err();
+        assert_eq!(e.code, "readmission_quoted", "{}", e.message);
+        assert_eq!(e.admission, Some(act::AdmissionView { admission_msat: 1000, message_msat: 1000, max_routing_fee_msat: 10_000, total_msat: 12_000, quoted: true }));
+        assert_eq!(readmit.lock().unwrap().pays, 0, "nothing was paid");
+        let record = pending(&node).expect("kept for the same message");
+        assert!(record.resumable && !record.budgeted, "resumable, reservation released");
+        let id = record.operation_id.clone().unwrap();
+        assert_eq!(compose_bodies(&node).len(), 1, "no automatic resend outside the budget");
+        // The owner's one OK: the same message at the quoted all-in total.
+        let receipt = do_message_send(&node.state, A, false, "gm", 12_000, None).await.unwrap();
+        let bodies = compose_bodies(&node);
+        assert_eq!(bodies[1]["operation_id"], id.as_str());
+        assert_eq!((bodies[1]["max_total_msat"].as_u64(), bodies[1]["max_routing_fee_msat"].as_u64()), (Some(12_000), Some(10_000)));
+        assert_eq!((receipt.readmission_msat, receipt.total_msat), (Some(1000), 2000));
+        assert_eq!(readmit.lock().unwrap().pays, 2);
+        assert!(pending(&node).is_none());
+    }
+
+    #[tokio::test]
+    async fn quoted_readmission_a_refused_cap_that_already_fits_is_never_resent() {
+        // A node that refuses even the quoted total: the app keeps the refusal.
+        let quotes = Arc::new(AtomicUsize::new(0));
+        let q = quotes.clone();
+        let node = fake(AuthMode::Local, Arc::new(move |m: &str, p: &str, b: &str| match p {
+            "/status" => (200, serde_json::json!({"api_capabilities": ["paid_send_caps_v1", "room_terminal_outcomes_v1",
+                "first_contact_grant_v1", "message_operations_v1", "quoted_readmission_v1"]}).to_string()),
+            "/messages/first-contact/quote" => {
+                q.fetch_add(1, Ordering::SeqCst);
+                (200, serde_json::json!({"recipient": A, "admission_msat": 1000, "message_msat": 1000,
+                    "max_routing_fee_msat": 0, "total_msat": 2000, "expires_at": now_unix() + 60}).to_string())
+            }
+            "/messages/compose" => readmission_coded_reply(),
+            _ => happy()(m, p, b),
+        }));
+        spend_advance(&node.state, true).await.unwrap();
+        let e = do_message_send(&node.state, A, false, "gm", 7000, None).await.unwrap_err();
+        assert_eq!(e.code, "readmission_capped", "{}", e.message);
+        assert_eq!(compose_bodies(&node).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn quoted_readmission_retry_delivery_asks_for_the_contacts_quote() {
+        let composes = compose_script(vec![psi_502(2000, 0, 2000, PSI_TIMEOUT), readmission_coded_reply()]);
+        let node = fake(AuthMode::Local, Arc::new(move |m: &str, p: &str, b: &str| match p {
+            "/status" => (200, serde_json::json!({"api_capabilities": ["paid_send_caps_v1", "room_terminal_outcomes_v1",
+                "first_contact_grant_v1", "quoted_readmission_v1"]}).to_string()),
+            "/messages/first-contact/quote" => (200, serde_json::json!({"recipient": A, "admission_msat": 1000, "message_msat": 1000,
+                "max_routing_fee_msat": 10_000, "total_msat": 12_000, "expires_at": now_unix() + 60}).to_string()),
+            _ => composes(m, p, b),
+        }));
+        let first = psi_first(&node).await;
+        assert!(first.undelivered.is_some());
+        let e = do_message_retry(&node.state, A, "gm", None).await.unwrap_err();
+        assert_eq!(e.code, "retry_needs_admission", "{}", e.message);
+        assert_eq!(e.admission, Some(act::AdmissionView { admission_msat: 1000, message_msat: 1000, max_routing_fee_msat: 10_000, total_msat: 12_000, quoted: true }));
     }
 
     #[tokio::test]

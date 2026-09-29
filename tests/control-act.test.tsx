@@ -287,6 +287,36 @@ describe('acting from the track', () => {
     expect(host.used('message_send')).toHaveLength(1);
   });
 
+  it('shows a quoted re-admission inline, in the all-in cost, and sends once more at that price', async () => {
+    const admission = { admission_msat: 1000, message_msat: 2000, max_routing_fee_msat: 10_000, total_msat: 13_000, quoted: true };
+    let n = 0;
+    const host = stubHost({
+      message_send: (args) => {
+        if (n++ === 0) throw { code: 'readmission_quoted', message: 'Not sent - nothing was paid. This contact asks for admission again.', admission };
+        return { message_id: 'sent-1', recipient: args!.recipient, is_room: false, delivered: true, amount_msat: 2000, readmission_msat: 1000,
+          max_routing_fee_msat: 0, total_msat: 3000, sent_at_ms: Date.now() };
+      },
+    });
+    host.spend.v = openView();
+    await openShell();
+    type('[data-composer] textarea', 'after the restart');
+    submit();
+    await vi.waitFor(() => expect($('[data-readmission-quote]')).not.toBeNull());
+    expect(text('[data-readmission-quote]')).toContain('Maya asks for admission again, 1 sat. Nothing was paid.');
+    expect(text('[data-readmission-quote]')).toContain('13 sats in all');
+    expect($('[data-cost-msat]')!.getAttribute('data-cost-msat')).toBe('13000');
+    expect(text('[data-cost]')).toContain('Maya asks for admission again: 1 sat, then 2 for this message');
+    expect($('[data-artifact="failed"]'), 'an ask, not a failure').toBeNull();
+    expect($('[data-door="out-refused"]')).toBeNull();
+    expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value, 'the draft stays').toBe('after the restart');
+    submit();
+    await vi.waitFor(() => expect(host.used('message_send')).toHaveLength(2));
+    expect(host.used('message_send')[1].args!.max_msat, 'the quoted all-in total').toBe(13_000);
+    await vi.waitFor(() => expect($('[data-readmission-paid]')).not.toBeNull());
+    expect(text('[data-readmission-paid]')).toContain('incl. admission again 1 sat');
+    expect($('[data-readmission-quote]')).toBeNull();
+  });
+
   it('labels a paid, refused-for-good send and a changed-text retry refusal', async () => {
     const codes = [
       { code: 'failed_paid', message: 'Paid, and the recipient\'s node refused this message for good. The payment is not refundable. Do not send it again.', label: 'Paid · refused by their node' },

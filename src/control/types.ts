@@ -299,13 +299,17 @@ export type ActionError = {
     // The contact asks for admission again after a reconnect/restart; the node
     // pays no re-admission under a cap (genome readmit_then_pay). Nothing paid.
     | 'readmission_capped'
+    // Genome quoted_readmission_v1: the contact asks for admission again and its
+    // signed quote (`admission`) is the new all-in price; nothing was paid. The
+    // owner sends once more at that price; the same message keeps its operation.
+    | 'readmission_quoted'
     | 'not_ready' | 'app_not_ready'
     | 'invalid'
     | 'node';
   message: string;
   /** `payment_settled_undelivered` only. */
   undelivered?: Undelivered;
-  /** `retry_needs_admission` only: the price to approve, when the node could tell. */
+  /** `retry_needs_admission` / `readmission_quoted`: the price to approve, when the node could tell. */
   admission?: AdmissionPrice;
   /**
    * `payment_settled_undelivered` / `undelivered_pending`: the host's durable
@@ -407,6 +411,8 @@ export type SendReceipt = {
   state?: string;
   /** The recipient's node stored it. `delivered` alone is only a transport write. */
   accepted?: boolean;
+  /** Admission paid again in this send after a reconnect; included in `total_msat`. */
+  readmission_msat?: number;
 };
 
 export type MemberCost = { max_routing_fee_msat?: number; node_id: string; msat: number; advertised: boolean; connected: boolean };
