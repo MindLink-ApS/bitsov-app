@@ -150,7 +150,7 @@ describe('invisible payments in the composer and the context panel', () => {
     await openShell();
     $<HTMLButtonElement>('[data-tab="budget"]')!.click();
     await vi.waitFor(() => expect($('[data-budget-scope]')).not.toBeNull());
-    expect(text('[data-budget-scope]').replace(/\s+/g, ' ').trim()).toMatchInlineSnapshot(`"App all-in payments · rolling 24 hours Covers automatic and manual-window messages, room sends, files, app invoice payments and keysend, and admission, including their maximum network fees. This is a conservative allowance, not an exact wallet-debit total. Not covered: channel opening/closing, on-chain transfers and fees, owner-direct CLI/API commands, or background workers. G1 is a separate finite node grant; it does not refill daily. This is not a wallet-wide spending limit."`);
+    expect(text('[data-budget-scope]').replace(/\s+/g, ' ').trim()).toMatchInlineSnapshot(`"App all-in · rolling 24 h — what it coversCovers automatic and manual-window messages, room sends, files, app invoice payments and keysend, and admission, including their maximum network fees. Conservative allowance, not an exact wallet-debit total. Not covered: channel opening/closing, on-chain transfers and fees, owner-direct CLI/API, or background workers. G1 is a separate finite node grant; it does not refill daily. Not a wallet-wide limit."`);
     $<HTMLButtonElement>('[data-composer-mode="pay"]')!.click();
     expect(text('[data-budget-payment]')).toContain('reserve principal plus the network fee ceiling');
     $<HTMLButtonElement>('[data-composer-mode="file"]')!.click();
@@ -884,7 +884,7 @@ describe('invisible payments in the composer and the context panel', () => {
     expect(text(`[data-budget-row="${MAYA}"]`)).toContain('Maya');
     expect(text(`[data-budget-row="${MAYA}"] [data-row-tally]`)).toBe('4/ 50 sats');
     expect(text(`[data-budget-row="${ROOM}"]`)).toContain('Mexico build');
-    expect(text('[data-autopay]')).toContain('Paying automatically');
+    expect(text('[data-autopay]')).toContain('Autopay open');
 
     $<HTMLButtonElement>('[data-panel="budget"] [data-pause-all]')!.click();
     await vi.waitFor(() => expect(host.used('budget_pause')).toHaveLength(1));
@@ -1101,6 +1101,21 @@ describe('sample source budgets', () => {
     const v = await s.budgetStatus();
     expect(v.rows.find((r) => r.target === gamma)?.limit_msat).toBe(20_000);
     await expect(s.pay('lntbs10n1samplenotpayable0donotpay', 1000, 6000)).rejects.toMatchObject({ code: 'spend_locked' });
+  });
+
+  it('sample files pay through the open budget without the ten-minute window', async () => {
+    const s = sampleSource({ firstLiveMs: 1e9 });
+    await s.budgetApprove(500_000, 'careful');
+    await s.spendStatus();
+    await s.spendStatus();
+    expect((await s.budgetStatus()).autopay.state).toBe('open');
+    expect((await s.spendStatus()).state).toBe('locked');
+    const receipt = await s.fileSend(maya, 'note.txt', 'text/plain', 'aGk=', 8000);
+    expect(receipt.filename).toBe('note.txt');
+    expect(receipt.accepted).toBe(true);
+    expect(receipt.state).toBe('acked');
+    // Sample book starts with 8 sats already spent; this file adds another 8.
+    expect((await s.budgetStatus()).spent_msat).toBe(16000);
   });
 
   it('sample files and manual messages share the daily tally and refusal', async () => {

@@ -1,7 +1,8 @@
 //! Invisible payments (B2): per-contact and per-room budgets, and the owner's
 //! one approval that lets messages pay inside them without a prompt.
-//! Manual-window messages, files, invoice payments and keysend share the same
-//! daily all-in book. Routing allowances count; independent owner/node actions are outside.
+//! Messages, files, invoice payments and keysend share the same daily all-in book.
+//! Messages and files may ride an open budget approval; invoice/keysend stay
+//! window-only. Routing allowances count; independent owner/node actions are outside.
 //!
 //! # What is stored, and what is not
 //!
@@ -426,7 +427,7 @@ fn sats(msat: u64) -> String {
 ///
 /// Budgets are limits and approvals are authority: contact budgets
 /// and the global daily ceiling hold even inside a ten-minute window.
-/// Only the budget route is automatic; files still require manual authority.
+/// Messages and files share this plan; invoice/keysend stay window-only.
 pub fn plan(book: &Book, ask: Ask<'_>) -> Result<Plan, ActionError> {
     if book.paused {
         return Err(ActionError::new("budget_paused", "Payments are paused. Resume them to send."));

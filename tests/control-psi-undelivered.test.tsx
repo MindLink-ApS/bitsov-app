@@ -121,25 +121,25 @@ describe('paid, not delivered: mapping and copy', () => {
 
   it('shows the price to approve, and never promises what the node does not enforce', () => {
     const quoted = admissionCopy({ admission_msat: 1500, message_msat: 2000, total_msat: 3500, quoted: true });
-    expect(quoted.body).toContain('Delivering it needs a new payment');
-    expect(quoted.body).toContain('1.5 sats to be admitted again, then 2 sats for this message');
+    expect(quoted.body).toBe('Needs up to 3.5 sats more (admission + message + fees).');
+    expect(quoted.detail).toContain('1.5 sats to be admitted again, then 2 sats for this message');
     expect(quoted.action).toBe('Approve up to 3.5 sats and retry');
     const estimate = admissionCopy({ admission_msat: 2000, message_msat: 2000, total_msat: 4000, quoted: false });
-    expect(estimate.body).toContain('about 2 sats (what admission cost before)');
-    expect(estimate.body).toContain('refuses before paying if the real price is higher');
+    expect(estimate.body).toContain('about 4 sats more if admission is due again');
+    expect(estimate.detail).toContain('refuses before paying if the real price is higher');
   });
 
   it('says paid, not delivered, and never to send again', () => {
     const retry = undeliveredCopy({ paid_msat: 2000, retry: true });
     expect(retry.title).toBe('Paid 2 sats · not delivered yet');
-    expect(retry.body).toContain('Payment settled, message not yet delivered. Do not send it again.');
-    expect(retry.body).toContain('Retry delivery pays nothing new');
-    expect(retry.body).toContain('re-sends the proof it already paid for');
-    expect(retry.body).toContain('asks you first, with the price');
+    expect(retry.body).toBe('Do not send again. Retry delivery pays nothing new.');
+    expect(retry.detail).toContain('Retry re-sends the proof already paid for');
+    expect(retry.detail).toContain('asks first with the price');
     expect(retry.body).not.toContain('no second admission');
     const stop = undeliveredCopy({ paid_msat: 1500, retry: false });
     expect(stop.title).toBe('Paid 1.5 sats · not delivered yet');
-    expect(stop.body).toContain('Do not send it again: that could pay twice.');
+    expect(stop.body).toContain('Do not send again');
+    expect(stop.body).toContain('pay twice');
     expect(stop.body).not.toContain('Retry');
     expect(undeliveredCopy({ paid_msat: 1000, retry: true }).title).toBe('Paid 1 sat · not delivered yet');
     for (const c of [retry, stop]) expect(`${c.title} ${c.body}`.toLowerCase()).not.toMatch(/not sent|try sending|send it again to/);
@@ -193,7 +193,7 @@ describe('paid, not delivered: in the conversation', () => {
     await sendUndelivered(host);
     const card = text('[data-artifact="undelivered"]');
     expect(card).toContain('Paid 2 sats · not delivered yet');
-    expect(card).toContain('Do not send it again');
+    expect(card).toContain('Do not send again');
     expect($('[data-artifact="undelivered"]')!.getAttribute('data-paid-msat')).toBe('2000');
     expect($('[data-artifact="failed"]')).toBeNull();
     // The draft is paid for: it is not left in the composer to be sent twice.
@@ -230,10 +230,11 @@ describe('paid, not delivered: in the conversation', () => {
     // Nothing paid yet: the price is shown, and the free retry is gone.
     expect(text('[data-retry-note]')).toContain('Nothing was paid');
     expect($('[data-admission-price]')!.getAttribute('data-admission-price')).toBe('14000');
-    expect(text('[data-admission-price]')).toContain('2 sats to be admitted again, then 2 sats for this message');
+    expect(text('[data-admission-line]')).toContain('Needs up to 14 sats more');
+    expect(text('[data-admission-detail]')).toContain('2 sats to be admitted again, then 2 sats for this message');
+    expect(text('[data-admission-detail]')).toContain('up to 10 sats network fees (14 sats in all)');
     expect($('[data-retry-delivery]')).toBeNull();
     expect(text('[data-retry-approve]')).toBe('Approve up to 14 sats and retry');
-    expect(text('[data-admission-price]')).toContain('up to 10 sats in network fees (14 sats in all)');
 
     $<HTMLButtonElement>('[data-retry-approve]')!.click();
     await vi.waitFor(() => expect($('[data-artifact="undelivered"]')).toBeNull());

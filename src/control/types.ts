@@ -442,6 +442,9 @@ export type FileReceipt = {
   delivered: boolean;
   amount_msat: number;
   sent_at_ms: number;
+  operation_id?: string;
+  state?: string;
+  accepted?: boolean;
 };
 
 /** Delivery of one sent message, from the send reply and then `/ws`. */

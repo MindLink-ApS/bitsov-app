@@ -219,11 +219,19 @@ select { font: inherit; font-size: var(--t-sm); background: var(--sunk); color: 
 
 /* delivery of a sent message: the recipient's node decides */
 .delivery { color: var(--faint); }
-.delivery[data-delivery='delivered'] { color: var(--ok); }
-.delivery[data-delivery='delivered']::before { content: '✓ '; }
-.delivery[data-delivery='accepted'] { color: var(--ok); }
-.delivery[data-delivery='accepted']::before { content: '✓ '; }
+.delivery[data-delivery='delivered'],
+.delivery[data-delivery='accepted'] { color: var(--ok); font-size: 0; letter-spacing: 0; }
+.delivery[data-delivery='delivered']::before,
+.delivery[data-delivery='accepted']::before { content: '✓'; font-size: var(--t-sm); }
 .delivery[data-delivery='rejected'] { color: var(--err); overflow-wrap: anywhere; white-space: normal; }
+.bubble.file { display: flex; align-items: center; gap: var(--s-2); }
+.bubble.file .file-name { font-weight: 500; }
+.quiet-detail { margin: var(--s-1) 0 0; color: var(--muted); font-size: var(--t-sm); }
+.quiet-detail > summary { cursor: pointer; color: var(--faint); list-style: none; }
+.quiet-detail > summary::-webkit-details-marker { display: none; }
+.quiet-detail > summary::before { content: '▸ '; }
+.quiet-detail[open] > summary::before { content: '▾ '; }
+.quiet-detail > p { margin: var(--s-1) 0 0; color: var(--muted); }
 .stamp { flex-wrap: wrap; justify-content: flex-end; }
 .msg.in .stamp { justify-content: flex-start; }
 
