@@ -11,6 +11,14 @@ export const THUMB_EDGE = 64;
 export const MAX_MEDIA_ITEMS = 12;
 /** Same ceiling the node enforces on the signed card JSON. */
 export const MAX_CARD_BYTES = 16 * 1024;
+/**
+ * Editor publish budget. Below {@link MAX_CARD_BYTES} so the estimate's omitted
+ * pieces (Ed25519 `sig` ≈ 136 JSON bytes, node-attached `site`, longer
+ * endpoints) cannot push a "fits" card into a node refusal.
+ */
+export const CARD_PUBLISH_BUDGET = 15 * 1024;
+/** Extra bytes reserved on top of the preview JSON for sig / site / endpoint. */
+export const CARD_ESTIMATE_OVERHEAD = 256;
 
 /** Re-encoded canvas output; never a source type like image/svg+xml. */
 export const REENCODED_IMAGE_MIME = 'image/jpeg';
@@ -156,8 +164,10 @@ export type CardEstimateParts = {
 };
 
 /**
- * Byte length of a JSON body shaped like the node's canonical card fields.
- * Used as a running pre-check before Publish (node max = {@link MAX_CARD_BYTES}).
+ * Byte length of a JSON body shaped like the node's canonical card fields,
+ * plus {@link CARD_ESTIMATE_OVERHEAD} for `sig`, `site`, and endpoint variance.
+ * Used as a running pre-check before Publish (editor budget =
+ * {@link CARD_PUBLISH_BUDGET}; node max = {@link MAX_CARD_BYTES}).
  */
 export function estimateCardBytes(parts: CardEstimateParts): number {
   const avatar = parts.avatar
@@ -172,8 +182,9 @@ export function estimateCardBytes(parts: CardEstimateParts): number {
     v: 1,
     network: 'regtest',
     node_id: '0'.repeat(64),
-    endpoint: '127.0.0.1:9735',
-    reach: 'local',
+    // Prefer a longer endpoint sample so public DNS names are not understated.
+    endpoint: 'node.example.invalid:9735',
+    reach: 'public',
     seq: 1,
     issued_at: 1_700_000_000,
     expires_at: 1_700_000_000 + 7 * 86_400,
@@ -187,9 +198,13 @@ export function estimateCardBytes(parts: CardEstimateParts): number {
     },
     ...(parts.cv ? { cv: parts.cv } : {}),
     ...(parts.media.length ? { media: parts.media } : {}),
+    // Node may attach a site block the editor does not edit (length reserve only).
+    site: { title: 'site', url: 'example.invalid/path' },
     ...(parts.links.length ? { links: parts.links } : {}),
+    // Ed25519 signature as hex (64 bytes → 128 hex chars).
+    sig: '00'.repeat(64),
   };
-  return new TextEncoder().encode(JSON.stringify(body)).length;
+  return new TextEncoder().encode(JSON.stringify(body)).length + CARD_ESTIMATE_OVERHEAD;
 }
 
 /**
@@ -198,7 +213,7 @@ export function estimateCardBytes(parts: CardEstimateParts): number {
  */
 export function dropOldestThumbsToFit(
   parts: CardEstimateParts,
-  maxBytes: number = MAX_CARD_BYTES,
+  maxBytes: number = CARD_PUBLISH_BUDGET,
 ): { media: PreparedMedia[]; dropped: number; bytes: number } {
   const media = parts.media.map((m) => ({ ...m }));
   let dropped = 0;
@@ -214,4 +229,4 @@ export function dropOldestThumbsToFit(
 }
 
 export const CARD_TOO_LARGE =
-  `This front door is over ${MAX_CARD_BYTES} bytes once serialized. Remove media or shorten the text, then try again.`;
+  `This front door is over ${CARD_PUBLISH_BUDGET} bytes once serialized (node max ${MAX_CARD_BYTES}). Remove media or shorten the text, then try again.`;

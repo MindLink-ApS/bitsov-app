@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   AVATAR_MAX_INLINE,
+  CARD_PUBLISH_BUDGET,
   CARD_TOO_LARGE,
   dropOldestThumbsToFit,
   estimateCardBytes,
@@ -73,7 +74,7 @@ describe('frontDoorMedia prep', () => {
     expect(item.size).toBe(4);
   });
 
-  it('estimateCardBytes and dropOldestThumbsToFit keep publish under 16 KiB', () => {
+  it('estimateCardBytes includes sig/site and dropOldest fits under publish budget', () => {
     const thumb = 'A'.repeat(5500); // ~base64 of a max-ish thumb
     const media: PreparedMedia[] = [
       { hash: 'ab'.repeat(32), size: 1000, mime: REENCODED_IMAGE_MIME, thumb_b64: thumb, title: 'a' },
@@ -95,11 +96,32 @@ describe('frontDoorMedia prep', () => {
       links: [{ label: 'Website', url: 'https://example.invalid/path' }],
       cv: null,
     };
-    expect(estimateCardBytes(parts)).toBeGreaterThan(MAX_CARD_BYTES);
+    const over = estimateCardBytes(parts);
+    expect(over).toBeGreaterThan(CARD_PUBLISH_BUDGET);
+    // Estimate must count sig + site so a "fits budget" card cannot hit node 16 KiB.
+    const bare = JSON.parse(
+      JSON.stringify({
+        v: 1,
+        profile: { display_name: 'Rasmus', tagline: 'hi', about: 'about', avatar },
+        media,
+        links: parts.links,
+      }),
+    );
+    // Sanity: full estimate (with sig/site/overhead) exceeds a body that omits them.
+    expect(over).toBeGreaterThan(new TextEncoder().encode(JSON.stringify(bare)).length);
+
     const fit = dropOldestThumbsToFit(parts);
     expect(fit.dropped).toBeGreaterThan(0);
+    expect(fit.bytes).toBeLessThanOrEqual(CARD_PUBLISH_BUDGET);
     expect(fit.bytes).toBeLessThanOrEqual(MAX_CARD_BYTES);
     expect(fit.media[0]!.thumb_b64).toBeUndefined();
+    expect(CARD_TOO_LARGE).toMatch(/15360|15/);
     expect(CARD_TOO_LARGE).toMatch(/16384|16/);
+  });
+
+  it('CARD_PUBLISH_BUDGET leaves headroom under node max', () => {
+    expect(CARD_PUBLISH_BUDGET).toBe(15 * 1024);
+    expect(MAX_CARD_BYTES).toBe(16 * 1024);
+    expect(CARD_PUBLISH_BUDGET).toBeLessThan(MAX_CARD_BYTES);
   });
 });
