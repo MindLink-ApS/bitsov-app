@@ -190,13 +190,15 @@ export const hostSource: Source = {
   frontDoorOpen: (text, allowLocal) => invoke<FrontDoor>('front_door_open', { text, allow_local: allowLocal }),
   frontDoorPublish: (fields) =>
     invoke<FrontDoor>('front_door_publish', {
-      display_name: fields.display_name,
-      tagline: fields.tagline ?? '',
-      about: fields.about ?? '',
-      kind: fields.kind ?? null,
-      admission_msat: fields.admission_msat ?? null,
-      message_msat: fields.message_msat ?? null,
-      page_msat: fields.page_msat ?? null,
+      fields: {
+        display_name: fields.display_name,
+        tagline: fields.tagline ?? '',
+        about: fields.about ?? '',
+        kind: fields.kind ?? null,
+        admission_msat: fields.admission_msat ?? null,
+        message_msat: fields.message_msat ?? null,
+        page_msat: fields.page_msat ?? null,
+      },
     }),
   sponsorStatus: () => invoke<SponsorStatus>('sponsor_status'),
   sponsorOffer: () => invoke<Introduction>('sponsor_offer'),

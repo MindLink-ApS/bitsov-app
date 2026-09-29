@@ -303,6 +303,23 @@ export type FrontDoorPublish = {
   page_msat?: number;
 };
 
+/**
+ * Marker that a peer track was opened from a front-door Knock (not an
+ * Introduction). Display only — never admission, never re-dialed as introduce.
+ */
+export type Doorstep = {
+  node_id: string;
+  network: string;
+  endpoint: string;
+  reach: 'public' | 'local';
+  admission_msat: number;
+  message_msat: number;
+  issued_at: number;
+  expires_at: number;
+  /** `bitsov://front-door#…` */
+  link: string;
+};
+
 /** First-run funding shapes (unchanged from CS-2). */
 export type FundState = {
   current_step: string;

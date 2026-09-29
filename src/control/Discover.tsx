@@ -117,7 +117,7 @@ export function DiscoverPanel(props: Props) {
               disabled={opening() || (c().reach === 'local' && !localConsent())}
               onClick={() => void knock()}
             >
-              Knock · {fmtAmount(c().prices.admission_msat)}
+              Knock
             </button>
           </>
         )}
@@ -194,11 +194,11 @@ export function FrontDoorCardView(props: { card: FrontDoor; now: number }) {
       </Show>
       <dl class="prices">
         <div>
-          <dt>Knock</dt>
+          <dt>Knock (from card)</dt>
           <dd data-fd-knock-price>{fmtAmount(c().prices.admission_msat)}</dd>
         </div>
         <div>
-          <dt>Message</dt>
+          <dt>Message (from card)</dt>
           <dd>{fmtAmount(c().prices.message_msat)}</dd>
         </div>
       </dl>

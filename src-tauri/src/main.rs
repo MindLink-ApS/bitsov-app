@@ -1803,33 +1803,49 @@ async fn read_own_front_door(state: &NodeState) -> Result<bitsov_app::front_door
     Ok(view)
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct FrontDoorPublishArgs {
+    display_name: String,
+    #[serde(default)]
+    tagline: String,
+    #[serde(default)]
+    about: String,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    admission_msat: Option<u64>,
+    #[serde(default)]
+    message_msat: Option<u64>,
+    #[serde(default)]
+    page_msat: Option<u64>,
+}
+
 #[tauri::command(rename_all = "snake_case")]
 async fn front_door_publish(
     window: WebviewWindow<impl tauri::Runtime>,
     state: State<'_, NodeState>,
-    display_name: String,
-    tagline: String,
-    about: String,
-    kind: Option<String>,
-    admission_msat: Option<u64>,
-    message_msat: Option<u64>,
-    page_msat: Option<u64>,
+    fields: FrontDoorPublishArgs,
 ) -> Result<bitsov_app::front_door::FrontDoor, String> {
     reject_sealed_window(&window)?;
     drop(window);
     use bitsov_app::front_door as fd;
-    if !node_offers(state.inner(), fd::CAPABILITY).await {
+    let status: serde_json::Value = get_json(state.inner(), "/status").await?;
+    if !status["api_capabilities"]
+        .as_array()
+        .is_some_and(|caps| caps.iter().any(|v| v.as_str() == Some(fd::CAPABILITY)))
+    {
         return Err("Your node cannot publish a front door yet.".into());
     }
     let path = "/front-door";
     let body = serde_json::json!({
-        "display_name": display_name,
-        "tagline": tagline,
-        "about": about,
-        "kind": kind,
-        "admission_msat": admission_msat,
-        "message_msat": message_msat,
-        "page_msat": page_msat,
+        "display_name": fields.display_name,
+        "tagline": fields.tagline,
+        "about": fields.about,
+        "kind": fields.kind,
+        "admission_msat": fields.admission_msat,
+        "message_msat": fields.message_msat,
+        "page_msat": fields.page_msat,
     });
     let (code, text) = call_api(state.inner(), reqwest::Method::PUT, path, Some(body)).await?;
     if !code.is_success() {
@@ -1842,6 +1858,9 @@ async fn front_door_publish(
     }
     let resp: Resp = serde_json::from_str(&text).map_err(|e| format!("{path} decode failed: {e}"))?;
     let view = resp.card.view(now_unix().max(0) as u64)?;
+    if Some(resp.card.node_id.as_str()) != status["node_id"].as_str() {
+        return Err(format!("{path}: the card is not signed by this node's key"));
+    }
     if view.link != resp.link {
         return Err(format!("{path}: the link does not match the card"));
     }

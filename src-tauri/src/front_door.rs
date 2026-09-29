@@ -31,6 +31,11 @@ const MAX_THUMB_INLINE: usize = 4 * 1024;
 const MAX_MEDIA_TITLE: usize = 64;
 const MAX_LINKS: usize = 5;
 const MAX_SITE_TITLES: usize = 20;
+const MAX_PATH_LEN: usize = 128;
+const MAX_MIME_LEN: usize = 64;
+const MAX_LINK_LABEL: usize = 64;
+const MAX_LINK_URL: usize = 512;
+const HASH_HEX_LEN: usize = 64;
 const NETWORKS: [&str; 4] = ["bitcoin", "testnet", "signet", "regtest"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -192,6 +197,49 @@ fn reach_of(endpoint: &str) -> Result<Reach, String> {
     crate::introduction::reach_of(endpoint)
 }
 
+fn check_hash_hex(value: &str) -> Result<(), String> {
+    if value.len() != HASH_HEX_LEN || !value.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err("A content hash on this front door is not usable.".into());
+    }
+    Ok(())
+}
+
+fn check_mime(value: &str) -> Result<(), String> {
+    if value.is_empty() || value.len() > MAX_MIME_LEN || value.chars().any(|c| c.is_control()) {
+        return Err("A media type on this front door is not usable.".into());
+    }
+    Ok(())
+}
+
+fn check_safe_path(path: &str) -> Result<(), String> {
+    if path.is_empty() || path.len() > MAX_PATH_LEN {
+        return Err("A path on this front door is not usable.".into());
+    }
+    if path.starts_with('/')
+        || path.contains("..")
+        || path.contains('\\')
+        || path.contains('\0')
+        || path.contains('/')
+    {
+        return Err("A path on this front door is not usable.".into());
+    }
+    Ok(())
+}
+
+fn check_link_url(url: &str) -> Result<(), String> {
+    if url.len() > MAX_LINK_URL {
+        return Err("A link on this front door is too long.".into());
+    }
+    let lower = url.to_ascii_lowercase();
+    if !(lower.starts_with("https://") || lower.starts_with("http://")) {
+        return Err("A link on this front door must be an http(s) URL.".into());
+    }
+    if url.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err("A link on this front door is not usable.".into());
+    }
+    Ok(())
+}
+
 impl Card {
     fn canonical_json(&self) -> Result<Vec<u8>, String> {
         #[derive(Serialize)]
@@ -279,11 +327,19 @@ impl Card {
                     return Err("This front door's avatar is too large.".into());
                 }
             }
+            if let Some(h) = &av.hash {
+                check_hash_hex(h)?;
+            }
+            if let Some(m) = &av.mime {
+                check_mime(m)?;
+            }
         }
         if self.media.len() > MAX_MEDIA {
             return Err("This front door lists too many media items.".into());
         }
         for m in &self.media {
+            check_hash_hex(&m.hash)?;
+            check_mime(&m.mime)?;
             if m.title.len() > MAX_MEDIA_TITLE {
                 return Err("A media title on this front door is too long.".into());
             }
@@ -299,9 +355,30 @@ impl Card {
         if self.links.len() > MAX_LINKS {
             return Err("This front door lists too many links.".into());
         }
+        for link in &self.links {
+            if link.label.is_empty() || link.label.len() > MAX_LINK_LABEL {
+                return Err("A link label on this front door is not usable.".into());
+            }
+            check_link_url(&link.url)?;
+        }
+        if let Some(cv) = &self.cv {
+            check_safe_path(&cv.path)?;
+            check_hash_hex(&cv.hash)?;
+        }
         if let Some(site) = &self.site {
             if site.titles.len() > MAX_SITE_TITLES {
                 return Err("This front door's site list is too long.".into());
+            }
+            for t in &site.titles {
+                if t.len() > MAX_MEDIA_TITLE {
+                    return Err("This front door's site list is too long.".into());
+                }
+            }
+            if let Some(p) = &site.index_path {
+                check_safe_path(p)?;
+            }
+            if let Some(h) = &site.manifest_hash {
+                check_hash_hex(h)?;
             }
         }
         let encoded = serde_json::to_vec(self).map_err(|e| e.to_string())?;

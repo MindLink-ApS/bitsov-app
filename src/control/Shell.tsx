@@ -68,6 +68,7 @@ import type {
   FundingAsk,
   FundingStatus,
   Introduction,
+  Doorstep,
   SponsorKit,
   SponsorOwnerApproval,
   SponsorCandidate,
@@ -236,9 +237,15 @@ export function ControlCenter(props: Props) {
   });
   /** K1: cards the owner continued from, by node id. Display only, never admission. */
   const [introduced, setIntroduced] = createStore<Record<string, Introduction>>({});
+  /** Front-door Knocks: distinct from introductions so we never re-dial as introduce. */
+  const [doorstep, setDoorstep] = createStore<Record<string, Doorstep>>({});
   /** An introduction that finished while the owner was elsewhere: shown, never navigated to. */
   const [introNotice, setIntroNotice] = createSignal<Introduction | null>(null);
   const openIntroduced = (card: Introduction) => {
+    setIntroNotice(null);
+    setTrack({ kind: 'peer', id: card.node_id.toLowerCase() });
+  };
+  const openDoorstep = (card: Doorstep) => {
     setIntroNotice(null);
     setTrack({ kind: 'peer', id: card.node_id.toLowerCase() });
   };
@@ -854,9 +861,7 @@ export function ControlCenter(props: Props) {
                     source={source}
                     now={now()}
                     onKnocked={(card) => {
-                      // Same path as a finished introduction: open the peer
-                      // track so the composer can ask a fresh door quote.
-                      setIntroduced(card.node_id.toLowerCase(), {
+                      const step: Doorstep = {
                         node_id: card.node_id,
                         network: card.network,
                         endpoint: card.endpoint,
@@ -866,18 +871,9 @@ export function ControlCenter(props: Props) {
                         issued_at: card.issued_at,
                         expires_at: card.expires_at,
                         link: card.link,
-                      });
-                      openIntroduced({
-                        node_id: card.node_id,
-                        network: card.network,
-                        endpoint: card.endpoint,
-                        reach: card.reach,
-                        admission_msat: card.prices.admission_msat,
-                        message_msat: card.prices.message_msat,
-                        issued_at: card.issued_at,
-                        expires_at: card.expires_at,
-                        link: card.link,
-                      });
+                      };
+                      setDoorstep(card.node_id.toLowerCase(), step);
+                      openDoorstep(step);
                     }}
                   />
                 </Match>
@@ -888,6 +884,7 @@ export function ControlCenter(props: Props) {
                     name={trackName(t())}
                     peer={t().kind === 'peer' ? peerById().get((t() as { id: string }).id) : undefined}
                     introduced={t().kind === 'peer' ? introduced[(t() as { id: string }).id] : undefined}
+                    doorstep={t().kind === 'peer' ? doorstep[(t() as { id: string }).id] : undefined}
                     members={t().kind === 'room' ? members[(t() as { id: string }).id] ?? null : null}
                     messages={threads.t[trackKey(t())] ?? []}
                     artifacts={artifacts[trackKey(t())] ?? []}
@@ -1231,6 +1228,8 @@ function Conversation(props: {
   peer: Peer | undefined;
   /** K1: the verified card this conversation was opened from, if any. */
   introduced?: Introduction;
+  /** Front-door Knock marker — not an Introduction. */
+  doorstep?: Doorstep;
   members: string[] | null;
   messages: Message[];
   artifacts: Artifact[];
@@ -1293,6 +1292,14 @@ function Conversation(props: {
               Opened from {props.name}’s signed introduction. Estimated from their card: admission {fmtAmount(allIn(c().admission_msat))} including {feeCeiling(routingFee(c().admission_msat))}, each
               message {fmtAmount(allIn(c().message_msat))} including {feeCeiling(routingFee(c().message_msat))} (estimated ceilings). You confirm their node’s own quote before anything is paid, and every
               message pays.
+            </p>
+          )}
+        </Show>
+        <Show when={props.doorstep}>
+          {(c) => (
+            <p class="day" data-doorstep={c().node_id}>
+              Opened from {props.name}’s front door. Card snapshot (display only): admission {fmtAmount(allIn(c().admission_msat))}, each
+              message {fmtAmount(allIn(c().message_msat))}. Knock uses their live first-contact quote — you confirm before anything is paid.
             </p>
           )}
         </Show>
