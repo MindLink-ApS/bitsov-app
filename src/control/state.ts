@@ -20,6 +20,7 @@ import type {
   Peer,
   PriceQuote,
   RoomQuote,
+  FileReceipt,
   SendReceipt,
   SpendView,
   TrackRef,
@@ -163,23 +164,29 @@ const msat = (n: unknown): n is number => Number.isSafeInteger(n) && (n as numbe
  * Paid, not delivered (node 502 `payment_settled_send_incomplete`). Never "not
  * sent", never "send again": a second send could pay twice.
  */
-export function undeliveredCopy(u: Undelivered): { title: string; body: string } {
+export function undeliveredCopy(u: Undelivered): { title: string; body: string; detail: string } {
   const paid = `${sats(u.paid_msat)} ${satUnit(u.paid_msat)}`;
   return {
     title: `Paid ${paid} · not delivered yet`,
     body: u.retry
-      ? 'Payment settled, message not yet delivered. Do not send it again. Retry delivery pays nothing new: your node re-sends the proof it already paid for. If anything is still due (this message’s price, or admission again after a reconnect), it stops before paying and asks you first, with the price.'
-      : 'Payment settled, message not yet delivered. Do not send it again: that could pay twice. Check the pending result before sending anything else.',
+      ? 'Do not send again. Retry delivery pays nothing new.'
+      : 'Do not send again — that could pay twice.',
+    detail: u.retry
+      ? 'Payment settled; message not delivered. Retry re-sends the proof already paid for. If more is due (message price or admission after a reconnect), it stops before paying and asks first with the price.'
+      : 'Payment settled; message not delivered. Check the pending result before sending anything else.',
   };
 }
 
 /** The approval a paid, undelivered message needs once Retry delivery paid nothing new. Nothing is paid until the owner approves. */
-export function admissionCopy(a: AdmissionPrice): { body: string; action: string } {
+export function admissionCopy(a: AdmissionPrice): { body: string; detail: string; action: string } {
   const s = (m: number) => `${sats(m)} ${satUnit(m)}`;
   return {
     body: a.quoted
-      ? `Delivering it needs a new payment. Their price: ${s(a.admission_msat)} to be admitted again, then ${s(a.message_msat)} for this message. Plus up to ${s(a.max_routing_fee_msat ?? 0)} in network fees (${s(a.total_msat)} in all). If your node is still admitted, it pays only the message and its network fee.`
-      : `Delivering it needs a new payment: this message’s ${s(a.message_msat)}, and about ${s(a.admission_msat)} (what admission cost before) if the contact asks for it again. Plus up to ${s(a.max_routing_fee_msat ?? 0)} in network fees (${s(a.total_msat)} in all). Your node refuses before paying if the real price is higher.`,
+      ? `Needs up to ${s(a.total_msat)} more (admission + message + fees).`
+      : `Needs about ${s(a.total_msat)} more if admission is due again.`,
+    detail: a.quoted
+      ? `Their price: ${s(a.admission_msat)} to be admitted again, then ${s(a.message_msat)} for this message. Plus up to ${s(a.max_routing_fee_msat ?? 0)} network fees (${s(a.total_msat)} in all). If still admitted, pays only the message and its fee.`
+      : `This message’s ${s(a.message_msat)}, and about ${s(a.admission_msat)} if admission is asked again. Plus up to ${s(a.max_routing_fee_msat ?? 0)} network fees (${s(a.total_msat)} in all). Node refuses before paying if the real price is higher.`,
     action: `Approve up to ${s(a.total_msat)} and retry`,
   };
 }
@@ -271,6 +278,19 @@ export function sentMessage(receipt: SendReceipt, ownId: string, plaintext: stri
     recipient: receipt.recipient,
     timestamp: receipt.sent_at_ms,
     plaintext,
+    payment_amount_msat: receipt.amount_msat,
+  };
+}
+
+/** A just-sent file, shown as a bubble until `/ws` / history echo it. KIND_FILE_REF = 200. */
+export function sentFileMessage(receipt: FileReceipt, ownId: string): Message {
+  return {
+    id: receipt.message_id,
+    kind: 200,
+    sender: ownId,
+    recipient: receipt.recipient,
+    timestamp: receipt.sent_at_ms,
+    plaintext: receipt.filename,
     payment_amount_msat: receipt.amount_msat,
   };
 }

@@ -140,7 +140,7 @@ export interface Source {
   inviteCreate(invitee: string, addr: string, hours: number): Promise<InviteView>;
   inviteRedeem(invite: string): Promise<RedeemView>;
   filePrice(): Promise<PaymentQuote>;
-  fileSend(recipient: string, filename: string, mimeType: string, dataB64: string, maxMsat: number): Promise<FileReceipt>;
+  fileSend(recipient: string, filename: string, mimeType: string, dataB64: string, maxMsat: number, firstContactMsat?: number): Promise<FileReceipt>;
   // AI track: the host reads through its broker; a remote model gets only a body the owner saw
   aiRead(topic: AiTopic, sinceMs: number | null): Promise<TopicRead>;
   aiProviders(): Promise<ProviderView[]>;
@@ -210,8 +210,8 @@ export const hostSource: Source = {
   inviteCreate: (invitee, addr, hours) => invoke<InviteView>('invite_create', { invitee, addr, hours }),
   inviteRedeem: (invite) => invoke<RedeemView>('invite_redeem', { invite }),
   filePrice: () => invoke<PaymentQuote>('file_price'),
-  fileSend: (recipient, filename, mimeType, dataB64, maxMsat) =>
-    invoke<FileReceipt>('file_send', { recipient, filename, mime_type: mimeType, data_b64: dataB64, max_msat: maxMsat }),
+  fileSend: (recipient, filename, mimeType, dataB64, maxMsat, firstContactMsat) =>
+    invoke<FileReceipt>('file_send', { recipient, filename, mime_type: mimeType, data_b64: dataB64, max_msat: maxMsat, first_contact_msat: firstContactMsat ?? null }),
   aiRead: (topic, sinceMs) => invoke<TopicRead>('ai_read', { topic, since_ms: sinceMs }),
   aiProviders: () => invoke<ProviderView[]>('ai_providers'),
   aiDisclose: (provider, topic, sinceMs, preset, question) =>
