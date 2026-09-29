@@ -32,9 +32,12 @@ before calling the CLI, bounded by the underlying budget grant's expiry. A
 slow command can leave an expired receipt, which fails closed.
 
 The receipt directory is created with mode `0700` on Unix regardless of umask.
-The wrapper uses `umask 077`, opens `receipt.part` with noclobber before the
-CLI runs, refuses existing partial files or symlinks, and publishes by rename.
-Cancel and request approval again if a partial file already exists. CLI output
+The wrapper uses `umask 077`, pre-checks that `receipt.part` and `receipt.json`
+are absent (including as symlinks), then opens `receipt.part` with noclobber
+and publishes by rename. An empty redirect-before-test pattern is refused: the
+existence check must run before the shell opens the redirect target. Cancel and
+request approval again if a partial or published receipt already exists. CLI
+failures print to stderr and do not leave a blocking empty `.part`. CLI output
 remains visible in the owner's terminal; it is not parsed as an API contract.
 
 Gift approval needs no file wrapper:

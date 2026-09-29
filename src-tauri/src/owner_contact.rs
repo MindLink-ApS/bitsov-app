@@ -68,20 +68,40 @@ impl Pending {
         // Genome has no read route for its single-use contact approval. Record
         // CLI success, never authority. Start the conservative two-minute TTL
         // BEFORE approval, and bound it by the underlying budget grant.
-        // Noclobber opens the partial before running the CLI. Existing files
-        // and all symlinks (including devices) refuse without running it.
+        //
+        // Pre-check BEFORE any redirect: `{ … } > "$receipt.part"` opens (and
+        // creates) the target before the group runs, so an existence test
+        // *inside* the redirected group is always false and leaves an empty
+        // `.part` with no `receipt.json`. Refuse planted files/symlinks first,
+        // then exclusive-create with noclobber; publish by rename only.
         let body = quote(&format!("{{\"recipient\":\"{}\",\"max_total_msat\":{},\"expires_at\":%s}}\\n",
             request.recipient, request.max_total_msat));
         let until = quote(&grant.expires_at.to_string());
         let owner_command = format!(r#"(
   umask 077; set -C
   receipt={receipt}
-  [ ! -e "$receipt.part" ] && [ ! -L "$receipt.part" ] && {{
+  if [ -e "$receipt.part" ] || [ -L "$receipt.part" ]; then
+    printf '%s\n' 'bitsov: receipt.part already exists (or is a symlink); cancel and request approval again.' >&2
+    exit 1
+  fi
+  if [ -e "$receipt.json" ] || [ -L "$receipt.json" ]; then
+    printf '%s\n' 'bitsov: receipt.json already exists; cancel and request approval again.' >&2
+    exit 1
+  fi
+  if ! {{
     started=$(date +%s) && expires=$((started + 120)) &&
     {{ [ "$expires" -le {until} ] || expires={until}; }} &&
     {command} >&2 &&
     printf {body} "$expires"
-  }} > "$receipt.part" && mv "$receipt.part" "$receipt.json"
+  }} > "$receipt.part"; then
+    printf '%s\n' 'bitsov: owner approval failed; no receipt published.' >&2
+    rm -f "$receipt.part"
+    exit 1
+  fi
+  if ! mv "$receipt.part" "$receipt.json"; then
+    printf '%s\n' 'bitsov: could not publish receipt.json.' >&2
+    exit 1
+  fi
 )"#);
         Ok(Self { view: View { id, request, owner_command, ready: false,
             expires_at_ms: now.saturating_add(15 * 60_000).min(grant.expires_at_ms()) }, fence, dir })
@@ -195,6 +215,13 @@ mod tests {
     fn run_owner(p: &Pending, fixture: &Fixture) -> std::process::Output {
         run_owner_with(p, fixture, "0")
     }
+    fn run_owner_shell(shell: &str, p: &Pending, fixture: &Fixture) -> std::process::Output {
+        Command::new(shell).args(["-c", &p.view.owner_command])
+            .env("PATH", format!("{}:/usr/bin:/bin", fixture.dir.path().display()))
+            .env("OWNER_TEST_ARGS", fixture.dir.path().join("args"))
+            .env("OWNER_TEST_CLOCK", fixture.dir.path().join("clock"))
+            .env("OWNER_TEST_EXIT", "0").output().unwrap()
+    }
 
     #[test]
     fn owner_cli_receives_exact_reviewed_tuple_and_failure_publishes_no_receipt() {
@@ -203,6 +230,10 @@ mod tests {
         let output = run_owner_with(&p, &fixture, "1");
         assert!(!output.status.success());
         assert!(!p.dir.path().join("receipt.json").exists());
+        assert!(!p.dir.path().join("receipt.part").exists(),
+            "failed run must not leave an empty receipt.part that blocks retry");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("owner approval failed"), "{stderr}");
         assert_eq!(std::fs::read_to_string(fixture.dir.path().join("args")).unwrap(),
             format!("approve\nfirst-contact\n--client\nc1\n--op\nab12\n--to\n{}\n--max-msat\n5000\n--contact-budget-msat\n50000\n", "a".repeat(64)));
     }
@@ -232,8 +263,11 @@ mod tests {
         let output = run_owner(&p, &fixture);
         assert_eq!(std::fs::read_to_string(victim.path()).unwrap(), "ORIGINAL DUMMY CONTENT");
         assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("receipt.part already exists"), "{stderr}");
         assert!(partial.is_symlink());
         assert!(!p.dir.path().join("receipt.json").exists());
+        assert!(!fixture.dir.path().join("args").exists(), "CLI must not run after pre-check refusal");
     }
 
     #[test]
@@ -245,6 +279,8 @@ mod tests {
         let output = run_owner(&p, &fixture);
         assert_eq!(std::fs::read_to_string(partial).unwrap(), "existing partial");
         assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("receipt.part already exists"), "{stderr}");
         assert!(!p.dir.path().join("receipt.json").exists());
     }
 
@@ -285,5 +321,50 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&std::fs::read(receipt).unwrap()).unwrap();
         assert_eq!(body, serde_json::json!({"recipient": "a".repeat(64), "max_total_msat": 5000, "expires_at": 120}));
         assert!(!p.dir.path().join("receipt.part").exists());
+    }
+
+    /// The generated command text must publish exactly once under both bash and
+    /// zsh. A second run must refuse without rewriting receipt.json.
+    #[test]
+    fn owner_command_publishes_once_under_bash_and_zsh_and_second_run_refuses() {
+        for shell in ["/bin/bash", "/bin/zsh"] {
+            if !std::path::Path::new(shell).exists() {
+                continue;
+            }
+            let fixture = Fixture::new();
+            let p = pending();
+            let first = run_owner_shell(shell, &p, &fixture);
+            assert!(first.status.success(), "{shell} first: {}", String::from_utf8_lossy(&first.stderr));
+            let receipt = p.dir.path().join("receipt.json");
+            let first_body = std::fs::read(&receipt).unwrap();
+            assert!(!first_body.is_empty());
+            assert!(!p.dir.path().join("receipt.part").exists());
+
+            std::fs::write(fixture.dir.path().join("args"), "MUST_NOT_RERUN").unwrap();
+            let second = run_owner_shell(shell, &p, &fixture);
+            assert!(!second.status.success(), "{shell} second must refuse");
+            let stderr = String::from_utf8_lossy(&second.stderr);
+            assert!(stderr.contains("receipt.json already exists"), "{shell} stderr: {stderr}");
+            assert_eq!(std::fs::read(&receipt).unwrap(), first_body, "{shell} must not rewrite receipt");
+            assert_eq!(std::fs::read_to_string(fixture.dir.path().join("args")).unwrap(), "MUST_NOT_RERUN",
+                "{shell} must not re-run konsensus on the second attempt");
+        }
+    }
+
+    #[test]
+    fn owner_command_precheck_runs_before_redirect_does_not_create_empty_part_on_refusal() {
+        // Historical bug: `{ [ ! -e part ] && … } > part` creates part before the
+        // test, so the test always fails and leaves an empty file. Pre-check must
+        // refuse a planted .part without opening it for write.
+        let fixture = Fixture::new();
+        let p = pending();
+        let partial = p.dir.path().join("receipt.part");
+        std::fs::write(&partial, "planted").unwrap();
+        let before = std::fs::metadata(&partial).unwrap().modified().unwrap();
+        let output = run_owner(&p, &fixture);
+        assert!(!output.status.success());
+        assert_eq!(std::fs::read_to_string(&partial).unwrap(), "planted");
+        assert_eq!(std::fs::metadata(&partial).unwrap().modified().unwrap(), before);
+        assert!(!p.dir.path().join("receipt.json").exists());
     }
 }
