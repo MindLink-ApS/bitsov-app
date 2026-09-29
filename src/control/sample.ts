@@ -1,4 +1,4 @@
-import { allIn, routingFee } from './format';
+import { amount as fmtAmount, allIn, routingFee, sats as fmtSats } from './format';
 // Dev-mode sample data: the whole shell clickable with no node running. Nothing
 // here reaches a network or the host. The sample deposit address is not valid
 // bech32 on purpose, so it cannot receive funds by mistake.
@@ -631,23 +631,23 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
   const planSend = (target: string, room: boolean, max: number, first: number | undefined, manual = false): Promise<number | null> => {
     settleAutopay();
     settleSpend();
-    const sats = (msat: number) => String(msat / 1000);
+    const sats = (msat: number) => String(msat / 1000); // sample fallback; prefer fmtAmount for unit
     if (book.paused) return refuse('budget_paused', 'Payments are paused. Resume them to send.');
     const who = room ? 'this room' : 'this contact';
     const limit = book.limits.get(key(target, room));
     if (limit !== undefined && spentOn(target, room) + max > limit) {
-      return refuse('budget_exhausted', `You have used ${sats(spentOn(target, room))} of ${sats(limit)} sats for ${who} in the last 24 hours, and this costs ${sats(max)}. Raise the budget to send.`);
+      return refuse('budget_exhausted', `You have used ${fmtSats(spentOn(target, room))} of ${fmtAmount(limit)} for ${who} in the last 24 hours, and this costs ${fmtAmount(max)}. Raise the budget to send.`);
     }
     const ceiling = Math.min(!manual && autopay ? autopay.ceiling : book.ceiling, book.ceiling);
     if (spentAll() + max > ceiling) {
-      return refuse('ceiling_exhausted', `You have used ${sats(spentAll())} of your ${sats(ceiling)} sats app all-in payment limit (rolling 24 hours), and this costs ${sats(max)}. Raise the limit to send.`);
+      return refuse('ceiling_exhausted', `You have used ${fmtSats(spentAll())} of your ${fmtAmount(ceiling)} app all-in payment limit (rolling 24 hours), and this costs ${fmtAmount(max)}. Raise the limit to send.`);
     }
     if (autopay && !manual) {
       let confirm: number | null = null;
       if (limit === undefined) {
         if (first === undefined) return refuse('first_contact', `Your first paid message to ${who} needs your OK once. Nothing was sent.`);
         confirm = Math.min(first, book.ceiling);
-        if (confirm < max) return refuse('invalid', `A budget of ${sats(confirm)} sats does not cover this message.`);
+        if (confirm < max) return refuse('invalid', `A budget of ${fmtAmount(confirm)} does not cover this message.`);
       }
       return Promise.resolve(confirm);
     }

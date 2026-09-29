@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 /**
- * Capture light + dark theme screenshots via the existing DOM-replay pipeline
- * (scripts/ui-e2e/render.mjs). Writes HTML snapshots under docs/control-center/theme-shots/
- * then renders PNGs when Playwright is available.
+ * Capture light + dark THEME MOCK screenshots (palette / tokens only — not a live
+ * app render). Builds a static demo page with src/styles.css variables, then
+ * writes HTML under docs/control-center/theme-shots/ and PNGs when Playwright is
+ * available via scripts/ui-e2e/render.mjs.
  *
  *   node scripts/capture-theme-shots.mjs
  */
@@ -52,7 +53,7 @@ body{margin:0;font-family:system-ui,sans-serif}
         <span style="flex:1;color:var(--muted);font-size:13.5px;padding:0 6px">Message Maya</span>
         <button class="primary soft">Send · 2 sats</button>
       </div>
-      <p style="font-size:12px;color:var(--faint);margin:0">Theme: ${theme}. Profile settings hold Body, Node, Wallet, Budget, and BTC/sats.</p>
+      <p style="font-size:12px;color:var(--faint);margin:0">MOCK theme shot (${theme}) — palette only, not a live app render. Profile settings hold Body, Node, Wallet, Budget, and BTC/sats.</p>
     </div>
   </main>
 </div>

@@ -1,11 +1,14 @@
 // Display helpers. Sats are the unit people read; msat precision is kept when
 // a figure is not a whole sat, never rounded into a different price.
 // Denomination (sats vs BTC) follows the settings toggle — amounts stay msat.
+// Call sites must use amount() (or sats()+satUnit()); never append a unit literal.
 
 import { denom } from './prefs';
 
-const SATS_PER_BTC = 100_000_000;
+/** 1 BTC = 1e8 sats = 1e11 msat. */
+const MSAT_PER_BTC = 100_000_000_000;
 
+/** Number only (no unit). BTC mode keeps every msat digit (up to 11 fractional places). */
 export function sats(msat: number): string {
   if (denom() === 'btc') return btc(msat);
   const whole = Math.floor(msat / 1000);
@@ -14,14 +17,20 @@ export function sats(msat: number): string {
   return rest === 0 ? head : `${head}.${String(rest).padStart(3, '0').replace(/0+$/, '')}`;
 }
 
-/** Whole BTC string from msat, up to 8 fractional digits (no trailing zeros). */
+/**
+ * Exact BTC string from msat. No Math.round — 500 msat is 0.000000005 BTC,
+ * and values just under 1 BTC never carry into a different sat.
+ */
 export function btc(msat: number): string {
-  const satsWhole = msat / 1000;
-  const whole = Math.floor(satsWhole / SATS_PER_BTC);
-  const fracSats = Math.round(satsWhole - whole * SATS_PER_BTC);
-  if (fracSats === 0) return String(whole);
-  const frac = String(fracSats).padStart(8, '0').replace(/0+$/, '');
-  return `${whole}.${frac}`;
+  const n = Math.trunc(msat);
+  if (!Number.isFinite(n) || n === 0) return '0';
+  const sign = n < 0 ? '-' : '';
+  const abs = Math.abs(n);
+  const whole = Math.floor(abs / MSAT_PER_BTC);
+  const fracMsat = abs - whole * MSAT_PER_BTC;
+  if (fracMsat === 0) return `${sign}${whole}`;
+  const frac = String(fracMsat).padStart(11, '0').replace(/0+$/, '');
+  return `${sign}${whole}.${frac}`;
 }
 
 /** `sat` / `sats` / `BTC` depending on amount and denomination toggle. */
@@ -29,6 +38,9 @@ export const satUnit = (msat: number) => {
   if (denom() === 'btc') return 'BTC';
   return msat === 1000 ? 'sat' : 'sats';
 };
+
+/** Number and unit together. Prefer this at every display site. */
+export const amount = (msat: number) => `${sats(msat)} ${satUnit(msat)}`;
 
 export const satsWhole = (value: number) => value.toLocaleString('en-US');
 
@@ -69,4 +81,4 @@ export function routingFee(msat: number): number {
   return msat === 0 ? 0 : Math.min(Math.max(5000, Math.floor(msat / 100)), 10000);
 }
 export const allIn = (msat: number) => msat + routingFee(msat);
-export const feeCeiling = (msat: number) => `up to ${sats(msat)} ${satUnit(msat)} network fee`;
+export const feeCeiling = (msat: number) => `up to ${amount(msat)} network fee`;

@@ -79,15 +79,15 @@ html[data-theme='light'] {
   --line: #e2ddd6;
   --line-strong: #cfc7bc;
   --ink: #1c1916;
-  --muted: #6b635c;
-  --faint: #9a9086;
-  --accent: #c97818;
-  --accent-hi: #e8922a;
-  --accent-ink: #fff8ef;
+  --muted: #5c554e;
+  --faint: #6b635c;
+  --accent: #9a5a0a;
+  --accent-hi: #b86d12;
+  --accent-ink: #ffffff;
   --ember: #fff4e6;
   --ember-line: #edd5b0;
-  --ok: #2f9e5b;
-  --warn: #b8860b;
+  --ok: #1f7a45;
+  --warn: #8a6500;
   --err: #c44a2f;
 }
 
@@ -128,7 +128,7 @@ button:disabled { opacity: 0.5; cursor: default; }
 .row { display: flex; align-items: center; gap: var(--s-3); width: 100%; }
 .unit { font-size: var(--t-sm); color: var(--muted); }
 input, textarea { font: inherit; font-size: var(--t-md); width: 100%; background: var(--sunk); color: var(--ink); border: 1px solid transparent; border-radius: var(--r-control); padding: 10px 14px; }
-input:focus, textarea:focus { outline: none; border-color: var(--line-strong); background: var(--surface); }
+input:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: 1px; border-color: var(--accent); background: var(--surface); }
 .hint { font-size: var(--t-sm); color: var(--muted); line-height: var(--lh-body); max-width: 60ch; }
 .ok-note { font-size: var(--t-sm); color: var(--ok); }
 .err-note { font-size: var(--t-sm); color: var(--err); overflow-wrap: anywhere; }
@@ -204,19 +204,19 @@ input:focus, textarea:focus { outline: none; border-color: var(--line-strong); b
 .empty-track h2 { font-size: var(--t-2xl); }
 
 /* composer: Claude-like single bar */
-.composer { border-top: 1px solid var(--line); padding: var(--s-3) var(--s-4) var(--s-5); display: flex; flex-direction: column; gap: var(--s-2); background: var(--bg); width: min(var(--chat-max), 100%); align-self: center; }
+.composer { border-top: 1px solid var(--line); padding: var(--s-3) var(--s-4) var(--s-5); display: flex; flex-direction: column; align-items: center; gap: var(--s-2); background: var(--bg); width: 100%; flex: none; position: sticky; bottom: 0; z-index: 2; }
 .composer textarea { resize: none; min-height: 40px; max-height: 160px; border-radius: 18px; }
-.composer-actions { display: flex; gap: var(--s-1); align-self: flex-start; }
+.composer-actions { display: flex; gap: var(--s-1); align-self: center; width: min(var(--chat-max), 100%); }
 .composer-action { border: none; background: transparent; color: var(--muted); font-size: var(--t-xs); padding: 4px 10px; border-radius: var(--r-chip); }
 .composer-action[aria-pressed='true'] { background: var(--raised); color: var(--ink); }
 .composer-action:hover:not(:disabled) { color: var(--ink); }
-.composer-main { display: flex; align-items: flex-end; gap: var(--s-2); background: var(--surface); border-radius: 22px; padding: 6px 6px 6px 8px; }
+.composer-main { display: flex; align-items: flex-end; gap: var(--s-2); background: var(--surface); border-radius: 22px; padding: 6px 6px 6px 8px; width: min(var(--chat-max), 100%); }
 .composer-main textarea { flex: 1; background: transparent; border: none; padding: 8px 6px; min-height: 36px; }
 .composer-main textarea:focus { background: transparent; border: none; }
 .attach.soft { width: 34px; height: 34px; border-radius: 50%; border: none; background: var(--raised); color: var(--ink); font-size: var(--t-lg); line-height: 1; flex: none; }
 .attach.soft:hover { background: var(--line-strong); color: var(--accent-ink); }
 .file-chip { flex: 1; display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); padding: 6px 8px; }
-.composer-bar { display: flex; align-items: center; gap: var(--s-3); }
+.composer-bar { display: flex; align-items: center; gap: var(--s-3); width: min(var(--chat-max), 100%); }
 .composer-bar.cost-only { padding: 0 4px; }
 .cost { display: flex; align-items: baseline; gap: var(--s-2); flex: 1; min-width: 0; }
 .cost .label { font-size: var(--t-sm); color: var(--muted); white-space: nowrap; }
@@ -291,6 +291,7 @@ select { font: inherit; font-size: var(--t-sm); background: var(--sunk); color: 
 /* context — profile / settings modal (body, node, wallet, budget) */
 .settings-scrim { position: fixed; inset: 0; background: rgba(0,0,0,0.35); z-index: 20; opacity: 0; pointer-events: none; transition: opacity var(--d-mid) var(--ease); }
 .settings-scrim.open { opacity: 1; pointer-events: auto; }
+.context.settings-modal:not(.open) { visibility: hidden; }
 .context, .settings-modal {
   position: fixed; top: 0; right: 0; bottom: 0;
   width: min(var(--context-w), 94vw);
@@ -594,7 +595,7 @@ body{margin:0;font-family:system-ui,sans-serif}
         <span style="flex:1;color:var(--muted);font-size:13.5px;padding:0 6px">Message Maya</span>
         <button class="primary soft">Send · 2 sats</button>
       </div>
-      <p style="font-size:12px;color:var(--faint);margin:0">Theme: light. Profile settings hold Body, Node, Wallet, Budget, and BTC/sats.</p>
+      <p style="font-size:12px;color:var(--faint);margin:0">MOCK theme shot (light) — palette only, not a live app render. Profile settings hold Body, Node, Wallet, Budget, and BTC/sats.</p>
     </div>
   </main>
 </div>
