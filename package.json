@@ -13,7 +13,8 @@
     "smoke:cs2": "scripts/cs2-local-smoke.sh",
     "tauri": "tauri",
     "tauri:assistant": "BITSOV_ASSISTANT=1 tauri dev --features sit-mock",
-    "tauri:dev:mainnode": "scripts/dev-node-from-main.sh"
+    "tauri:dev:mainnode": "scripts/dev-node-from-main.sh",
+    "tauri:dev:external": "scripts/dev-external-node.sh"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

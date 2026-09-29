@@ -6,6 +6,9 @@
 > at**, with no signature, hash or version check. Use it only on your own machine, with a
 > binary you built yourself. It is not a release, and nothing here publishes one.
 
+To use a node you already run, without the app starting one, see
+[DEV_EXTERNAL_NODE.md](DEV_EXTERNAL_NODE.md).
+
 Why it exists: the pinned rc7 sidecar has no pairing (#77), so the control center
 (#42/#43) can't be tried against a real node. Genome `main` has pairing.
 
