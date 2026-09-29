@@ -59,12 +59,49 @@ export function endpointBadge(p: BadgeInput, previewed: Preset | null = null): B
     return { ...quiet, text: join(quiet) };
   }
   const where = `${p.model ?? 'model'} at ${p.host ?? 'a remote host'}`;
-  const paid = p.pays.rail === 'fiat' && p.pays.to ? `Paid: ${p.pays.to}, your API key` : 'Nobody is paid by this app';
+  const paid =
+    p.pays.rail !== 'fiat' || !p.pays.to
+      ? 'Nobody is paid by this app'
+      : isLoopback(p.pays.to)
+        ? 'Paid: your API key (local endpoint)'
+        : `Paid: ${p.pays.to}, your API key`;
   const preset = previewed ?? p.data_leaves;
   const leaves =
     `Leaves: the preview you send, ${PRESET_WORDS[preset]}` + (tier === 'frontier' ? '; vendor terms apply' : '');
   const badge = { tier, name, where, paid, leaves };
   return { ...badge, text: join(badge) };
+}
+
+/** A loopback IP literal: the only plain-http host the app allows (a model server on this computer). */
+function isLoopback(host: string): boolean {
+  return host === '::1' || /^127(\.\d{1,3}){3}$/.test(host);
+}
+
+/** One endpoint the badge could describe, with the preset of its preview, if one is on screen. */
+export type Exposure = { provider: BadgeInput; previewed: Preset | null };
+
+const TIER_RANK: Record<Tier, number> = { own: 0, shared: 1, frontier: 2 };
+const PRESET_RANK: Record<Preset, number> = { counts: 0, rounded: 1, exact: 2 };
+
+function rank(e: Exposure): [number, number] {
+  const preset = e.previewed ?? e.provider.data_leaves;
+  // An endpoint that lets nothing leave ranks below every one that does.
+  if (preset === null) return [-1, 0];
+  return [TIER_RANK[TIER[e.provider.kind]], PRESET_RANK[preset]];
+}
+
+/**
+ * The widest of `candidates`: a frontier endpoint over a shared one over Own,
+ * and a wider preset over a narrower one. The header shows this, so a preview
+ * still waiting for Send can never be understated by the selection.
+ */
+export function widestExposure(candidates: readonly Exposure[]): Exposure {
+  let widest = candidates[0] ?? { provider: OWN_RULES, previewed: null };
+  for (const c of candidates.slice(1)) {
+    const [a, b] = [rank(c), rank(widest)];
+    if (a[0] > b[0] || (a[0] === b[0] && a[1] > b[1])) widest = c;
+  }
+  return widest;
 }
 
 function join(b: Omit<Badge, 'text'>): string {

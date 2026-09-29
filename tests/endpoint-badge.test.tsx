@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { render } from 'solid-js/web';
 import { afterEach, describe, expect, it } from 'vitest';
 import { AssistantPage } from '../src/assistant/Page';
-import { endpointBadge, OWN_RULES, PRESET_WORDS } from '../src/assistant/endpoint';
+import { endpointBadge, OWN_RULES, PRESET_WORDS, widestExposure } from '../src/assistant/endpoint';
 import type { ProviderView } from '../src/control/types';
 
 const shared: ProviderView = {
@@ -67,6 +67,29 @@ describe('endpoint badge text', () => {
   });
 });
 
+describe('widest exposure', () => {
+  it('a pending remote preview outranks an Own selection, and a wider preset a narrower one', () => {
+    const own = { provider: OWN_RULES, previewed: null };
+    expect(widestExposure([own]).provider.kind).toBe('local');
+    expect(widestExposure([own, { provider: shared, previewed: 'counts' }]).provider.kind).toBe('shared');
+    expect(widestExposure([{ provider: shared, previewed: null }, { provider: frontier, previewed: 'counts' }]).provider.kind).toBe(
+      'frontier',
+    );
+    expect(widestExposure([{ provider: shared, previewed: null }, { provider: shared, previewed: 'exact' }]).previewed).toBe('exact');
+    // An off remote lets nothing leave: it never outranks Own.
+    const off: ProviderView = { ...frontier, enabled: false, data_leaves: null, pays: { to: null, rail: 'none' } };
+    expect(widestExposure([own, { provider: off, previewed: null }]).provider.kind).toBe('local');
+    expect(widestExposure([]).provider).toBe(OWN_RULES);
+  });
+
+  it('a keyed model server on this computer is billed to your key, not a named host', () => {
+    for (const host of ['127.0.0.1', '::1']) {
+      const local: ProviderView = { ...shared, host, pays: { to: host, rail: 'fiat' } };
+      expect(endpointBadge(local).paid).toBe('Paid: your API key (local endpoint)');
+    }
+  });
+});
+
 describe('the sealed assistant window', () => {
   let dispose: (() => void) | undefined;
   afterEach(() => {
@@ -83,6 +106,8 @@ describe('the sealed assistant window', () => {
     );
     const badge = mount.querySelector('[data-testid="endpoint-badge"]')!;
     expect(badge.getAttribute('data-tier')).toBe('own');
+    expect(badge.getAttribute('role')).toBe('status');
+    expect(badge.getAttribute('aria-label')).toContain('Own · On this computer');
     expect(badge.textContent).toContain('Own');
     expect(badge.textContent).toContain('Nobody is paid');
     expect(badge.textContent).toContain('Nothing leaves');

@@ -11,7 +11,7 @@ import { createSignal, For, Match, onCleanup, Show, Switch, type JSX } from 'sol
 import { createStore, produce } from 'solid-js/store';
 import { copyPlainText } from '../assistant/copy';
 import { EndpointBadge } from '../assistant/EndpointBadge';
-import { OWN_RULES, endpointBadge } from '../assistant/endpoint';
+import { OWN_RULES, endpointBadge, widestExposure, type Exposure } from '../assistant/endpoint';
 import {
   answerFrom,
   cardText,
@@ -100,18 +100,39 @@ export function AiTrack(props: {
 
   const nameOf = (id: string) => peerName(props.peers.find((p) => p.node_id.toLowerCase() === id.toLowerCase()), id);
   const provider = () => session.providers?.find((p) => p.kind === session.provider) ?? null;
-  /** The badge follows the selected endpoint; until the list loads, it is Own. */
-  const badgeFor = () => provider() ?? OWN_RULES;
-  /** The preset of the latest preview for the selected endpoint, if any. */
-  const previewed = () => {
-    for (let i = session.turns.length - 1; i >= 0; i--) {
-      const t = session.turns[i];
-      if (t.provider === session.provider && t.disclosure) return t.disclosure.preset;
-    }
-    return null;
+  /** Turns whose preview is on screen or being sent: bytes held for a remote. */
+  const pending = () => session.turns.filter((t) => t.disclosure && (t.state === 'preview' || t.state === 'sending'));
+  /** The provider a pending turn's disclosure goes to, as the host described it. */
+  const viewOf = (t: Turn): ProviderView => {
+    const d = t.disclosure!;
+    const listed = session.providers?.find((p) => p.kind === d.provider);
+    return (
+      listed ?? {
+        kind: d.provider,
+        label: d.label,
+        enabled: true,
+        host: d.host,
+        model: d.model,
+        note: null,
+        pays: { to: d.key_env ? d.host : null, rail: d.key_env ? 'fiat' : 'none' },
+        data_leaves: d.preset,
+      }
+    );
+  };
+  /**
+   * The header badge: the widest exposure of the selection and every preview
+   * still waiting for Send, so it can never say less than what could leave.
+   * Until the provider list loads, the selection is Own.
+   */
+  const exposure = () => {
+    const candidates: Exposure[] = [{ provider: provider() ?? OWN_RULES, previewed: null }];
+    for (const t of pending()) candidates.push({ provider: viewOf(t), previewed: t.disclosure!.preset });
+    return widestExposure(candidates);
   };
   const remote = () => session.provider !== 'local';
   const busy = () => session.turns.some((t) => t.state === 'reading' || t.state === 'sending');
+  /** Who answers is fixed while a preview waits for Send: Send or Don't send it first. */
+  const locked = () => busy() || pending().length > 0;
 
   const update = (id: number, change: Partial<Turn>) =>
     setSession('turns', (t) => t.id === id, produce((t) => Object.assign(t, change)));
@@ -204,7 +225,7 @@ export function AiTrack(props: {
 
   // The persistent endpoint badge: which endpoint answers, who gets paid and
   // what leaves. It changes with the selection, before the first question.
-  const sub = () => <EndpointBadge provider={badgeFor()} previewed={previewed()} />;
+  const sub = () => <EndpointBadge provider={exposure().provider} previewed={exposure().previewed} />;
 
   return (
     <>
@@ -217,8 +238,15 @@ export function AiTrack(props: {
               role="radio"
               class="ai-provider"
               aria-checked={session.provider === p.kind}
-              disabled={!p.enabled || busy()}
-              title={p.note ?? (p.host ? `${p.model ?? ''} at ${p.host}` : 'Nothing leaves this computer')}
+              disabled={!p.enabled || locked()}
+              title={
+                p.note ??
+                (locked() && session.provider !== p.kind
+                  ? 'Send or don’t send the preview first'
+                  : p.host
+                    ? `${p.model ?? ''} at ${p.host}`
+                    : 'Nothing leaves this computer')
+              }
               data-provider={p.kind}
               data-tier={endpointBadge(p).tier}
               onClick={() => setSession('provider', p.kind)}

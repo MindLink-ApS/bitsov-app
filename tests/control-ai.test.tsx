@@ -568,6 +568,51 @@ describe('the AI track', () => {
     expect(badge()!.querySelector('button, a, input')).toBeNull();
   });
 
+  it('never lets the badge understate a preview waiting for Send (review F1 repro)', async () => {
+    const host = stubHost();
+    await openAi();
+    const badge = () => $('.track-head [data-testid="endpoint-badge"]')!;
+    click('[data-provider="shared"]');
+    ask('What did I spend this week?');
+    await vi.waitFor(() => expect($('[data-ai-payload]')).not.toBeNull());
+    expect(badge().getAttribute('data-tier')).toBe('shared');
+
+    // Who answers is locked while the preview waits: "On this computer" cannot be picked.
+    const local = $<HTMLButtonElement>('[data-provider="local"]')!;
+    expect(local.disabled).toBe(true);
+    local.click();
+    expect($('[data-provider="shared"]')!.getAttribute('aria-checked')).toBe('true');
+    expect(badge().getAttribute('data-tier')).toBe('shared');
+    expect(text('.track-head [data-endpoint-leaves]')).toBe('Leaves: the preview you send, counts only');
+    expect(text('.track-head [data-endpoint-paid]')).toBe('Paid: models.example.org, your API key');
+
+    // Sending keeps the badge at the remote until the answer is back.
+    click('[data-ai-send]');
+    await vi.waitFor(() => expect($('[data-ai-answer="remote"]')).not.toBeNull());
+    expect(host.used('ai_send')).toHaveLength(1);
+    expect(badge().getAttribute('data-tier')).toBe('shared');
+    // Nothing pending any more: switching is allowed again and the badge follows.
+    expect(local.disabled).toBe(false);
+    local.click();
+    expect(badge().getAttribute('data-tier')).toBe('own');
+    expect(text('.track-head [data-endpoint-leaves]')).toBe('Nothing leaves');
+  });
+
+  it("drops the badge back to the selection's preset after Don't send", async () => {
+    stubHost();
+    await openAi();
+    click('[data-provider="shared"]');
+    ask('What did I spend this week?');
+    await vi.waitFor(() => expect($('[data-ai-payload]')).not.toBeNull());
+    click('[data-preset-option="exact"]');
+    await vi.waitFor(() =>
+      expect(text('.track-head [data-endpoint-leaves]')).toBe('Leaves: the preview you send, exact figures and node ids'),
+    );
+    click('[data-ai-dont-send]');
+    await vi.waitFor(() => expect(text('.track-head [data-endpoint-leaves]')).toBe('Leaves: the preview you send, counts only'));
+    expect($<HTMLButtonElement>('[data-provider="local"]')!.disabled).toBe(false);
+  });
+
   it('keeps a canceled preview unsendable after switching tracks and returning', async () => {
     const host = stubHost();
     await openAi();
