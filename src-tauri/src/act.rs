@@ -114,8 +114,8 @@ pub struct ActionError {
     /// `payment_settled_undelivered` only: what was paid, and whether a retry is offered.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub undelivered: Option<UndeliveredView>,
-    /// `retry_needs_admission` only: the price the owner approves before a
-    /// retry that may pay admission again.
+    /// `retry_needs_admission` / `readmission_quoted`: the price the owner
+    /// approves before a send or retry that may pay admission again.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub admission: Option<AdmissionView>,
     /// `payment_settled_undelivered` / `undelivered_pending`: the durable
@@ -189,6 +189,11 @@ pub fn readmission_capped_refusal(status: u16, body: &str) -> bool {
 pub const READMISSION_REQUIRED: &str = "readmission_required";
 
 pub const READMISSION_CAPPED: &str = "Not sent - nothing was paid. This contact asks your node to pay their admission again (every reconnect or node restart starts unpaid), and your node cannot pay that under the app's all-in cap yet. The app will not retry; sending the same message again reuses its operation, so it can never be paid twice.";
+
+/// Genome `quoted_readmission_v1` (#111 revived): under a cap that fits the
+/// contact's fresh signed quote the node pays admission again once for this
+/// connection, then the message. Nodes without it refuse any capped re-admission.
+pub const QUOTED_READMISSION_CAPABILITY: &str = "quoted_readmission_v1";
 
 pub const READMISSION_CAPPED_RETRY: &str = "Not delivered - nothing new was paid. This contact asks your node to pay their admission again (every reconnect or node restart starts unpaid), and your node cannot pay that under an app cap yet. The paid message stays here; retry later, or stop retrying.";
 
@@ -265,6 +270,18 @@ impl ActionError {
         Self {
             admission: view,
             ..Self::new("retry_needs_admission", format!("Retry delivery paid nothing new. Delivering the message needs a new payment: its price, and admission again if the contact reconnected. Nothing was paid.{price} Approve it to continue, or stop retrying."))
+        }
+    }
+    /// The contact asks for admission again after a reconnect or restart and
+    /// its signed quote does not fit this send's cap or the contact's budget.
+    /// Nothing was paid; the owner approves the all-in price once.
+    pub fn readmission_quoted(view: AdmissionView) -> Self {
+        Self {
+            admission: Some(view),
+            ..Self::new("readmission_quoted", format!(
+                "Not sent - nothing was paid. This contact asks for admission again (every reconnect or node restart starts unpaid): {} msat to be admitted again, then {} msat for this message, plus up to {} msat in network fees ({} msat in all). Send again to pay it; the same message keeps its operation, so it is never paid twice.",
+                view.admission_msat, view.message_msat, view.max_routing_fee_msat, view.total_msat,
+            ))
         }
     }
     pub fn invalid(message: impl Into<String>) -> Self {
@@ -665,6 +682,10 @@ pub struct SendReceipt {
     pub state: Option<String>,
     /// The recipient's node stored it. `delivered` alone is only a transport write.
     pub accepted: bool,
+    /// Admission paid again in this send after a reconnect, msat. Part of
+    /// `total_msat`; `amount_msat` stays the message alone.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readmission_msat: Option<u64>,
 }
 
 /// Validate complete, unique per-member evidence against the confirmed room.
