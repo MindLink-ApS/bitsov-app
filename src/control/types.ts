@@ -717,5 +717,17 @@ export type RemoteAnswer = {
   sent_bytes: number;
 };
 
+/** `ai_local_status`: loopback Ollama / llama.cpp, or a short how-to when none. */
+export type LocalKind = 'ollama' | 'open_ai_compat';
+export type LocalStatus = {
+  running: boolean;
+  kind: LocalKind | null;
+  port: number | null;
+  models: string[];
+  selected: string | null;
+  selected_port: number | null;
+  howto: string;
+};
+
 /** Principal and explicit caller routing allowance, used for file quotes. */
 export type PaymentQuote = { principal_msat: number; max_routing_fee_msat: number; total_msat: number };

@@ -19,6 +19,7 @@ import type {
   SponsorStatus,
   AiTopic,
   Disclosure,
+  LocalStatus,
   Preset,
   ProviderKind,
   ProviderView,
@@ -170,6 +171,12 @@ export interface Source {
   /** Send the prepared body, once. Takes the id only. */
   aiSend(disclosureId: string): Promise<RemoteAnswer>;
   aiCancel(disclosureId: string): Promise<boolean>;
+  /** Probe loopback for a local model server (Ollama / llama.cpp). */
+  aiLocalStatus(port?: number | null): Promise<LocalStatus>;
+  /** Pick an Own-tier model on loopback. Remotes stay off. */
+  aiLocalSelect(model: string, port?: number | null): Promise<ProviderView[]>;
+  /** Clear the Own model pick; answers fall back to rules. */
+  aiLocalClear(): Promise<ProviderView[]>;
 }
 
 export const LIVE_EVENT = 'node-live';
@@ -262,6 +269,10 @@ export const hostSource: Source = {
     invoke<Disclosure>('ai_disclose', { provider, topic, since_ms: sinceMs, preset, question }),
   aiSend: (disclosureId) => invoke<RemoteAnswer>('ai_send', { disclosure_id: disclosureId }),
   aiCancel: (disclosureId) => invoke<boolean>('ai_cancel', { disclosure_id: disclosureId }),
+  aiLocalStatus: (port) => invoke<LocalStatus>('ai_local_status', { port: port ?? null }),
+  aiLocalSelect: (model, port) =>
+    invoke<ProviderView[]>('ai_local_select', { model, port: port ?? null }),
+  aiLocalClear: () => invoke<ProviderView[]>('ai_local_clear'),
 };
 
 /** Running inside the Tauri host (vs. a plain browser tab on the Vite server). */

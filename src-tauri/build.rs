@@ -77,6 +77,9 @@ fn main() {
             "ai_disclose",
             "ai_send",
             "ai_cancel",
+            "ai_local_status",
+            "ai_local_select",
+            "ai_local_clear",
         ])
         .permissions_path_pattern("./permissions/manual/**/*");
 

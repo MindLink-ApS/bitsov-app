@@ -75,13 +75,24 @@ Leaving the AI track cancels its pending previews and records them as not sent, 
 | Rounded | amounts to two significant figures in sats, times to the day, no node ids |
 | Exact | the broker projection unchanged |
 
+## Own tier: a model on this computer (P2)
+
+"On this computer" still defaults to **rules** (compose from the broker read; nothing leaves). When a local model server is already running on loopback, Own can use it:
+
+1. The host probes `127.0.0.1` only — Ollama on port 11434 (`GET /api/tags`) or an OpenAI-compatible llama.cpp server on 8080 (`GET /v1/models`). The port is configurable in the AI track.
+2. The owner picks a listed model. The pick is saved in `ai-local.json` next to `ai-providers.json`. The window cannot write the remotes file.
+3. Questions use the same two-step disclose/send as remotes: the owner sees **What you share** and **Exact bytes**, then presses Send. The host posts only those held bytes to `http://127.0.0.1:<port>/v1/chat/completions`. The badge stays **Own** (green): `On this computer · <model>` · Nobody is paid · Nothing leaves (loopback only).
+4. If nothing is listening, the track shows a short how-to and Own badges as **rules** (the model name is cleared) until the server answers again — a saved pick that is down is unavailable, not silently ready. BitSov does not download or install models. Remotes stay off unless `ai-providers.json` turns them on. There is no new spend path.
+
+Commands: `ai_local_status`, `ai_local_select`, `ai_local_clear` (Own uses `ai_disclose` / `ai_send`).
+
 ## Endpoint badge
 
 The chat header always shows which endpoint answers, who gets paid and what leaves the node. The sealed assistant window shows the same badge (always Own: it has no model).
 
 | Badge | Endpoint | Who gets paid | What leaves |
 |---|---|---|---|
-| **Own** (green) | On this computer · rules | Nobody | Nothing |
+| **Own** (green) | On this computer · rules *or* `<model>` | Nobody | Nothing |
 | **Shared open** (amber) | `<model> at <host>` | The host's operator, on your own API key (billed off-app); nobody when no key is set | The preview you send, at its preset (counts only by default) |
 | **Frontier** (red) | `<model> at <host>` | The vendor at that host, on your own API key | The same, and vendor terms apply |
 
@@ -127,7 +138,10 @@ Payment and invoice drafts accept whole positive sats only (including correctly 
 
 ## Not in this slice
 
-- A local model runtime: "On this computer" composes answers from rules, not a model.
+- Remotes on by default: shared and frontier stay off until `ai-providers.json` enables them.
+- Downloading or installing a model: Own only talks to a server you already run (Ollama or llama.cpp).
+- A sats rail to any model vendor (see research `AI-ENDPOINTS-AND-SATS-VENDORS.md` P3).
+- Outside-agent credentials or a receptor/x402 door (P4).
 - Streaming answers.
 - Other Lightning payment history.
 - Remembering the chosen provider between launches.
