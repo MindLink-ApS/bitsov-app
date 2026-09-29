@@ -7,8 +7,13 @@ re-verify a pre-existing sidecar; closing that gap is required before public dis
 Sidecars are named with the Rust target triple
 Tauri's resolver expects: `bin/konsensus-<target-triple>[.exe]`.
 
-## Hosts published at `v0.3.0-rc7`
-`v0.3.0-rc7` publishes Linux, macOS and Windows node binaries, so all three hosts can
+## Hosts published at `v0.3.0-rc8`
+
+> **DO NOT MERGE** this pin until `MindLink-ApS/BitSov-bitsov` release `v0.3.0-rc8`
+> exists with signed `SHA256SUMS.asc`. Checksum/signature placeholders live in
+> `scripts/fetch-node-sidecar.sh` (`EXPECTED_*`).
+
+`v0.3.0-rc8` publishes Linux, macOS and Windows node binaries, so all three hosts can
 produce a sidecar:
 
 | host | release asset | installed sidecar |
@@ -28,12 +33,13 @@ runs on Linux and macOS (the Darwin `SKIP` was retired with `v0.3.0-rc5`) and st
 ```bash
 ./scripts/fetch-node-sidecar.sh     # downloads the pinned binary for this host, verifies GPG + sha256, installs it
 ```
-The script pins `v0.3.0-rc7` and verifies, fail-closed, that `SHA256SUMS.asc` is a valid
+The script pins `v0.3.0-rc8` and verifies, fail-closed, that `SHA256SUMS.asc` is a valid
 signature by the pinned release key `B299274C…`; if that key is not in your keyring it imports
 `RELEASE_KEY.asc` from BitSov-bitsov `main` into a throwaway keyring (fingerprint checked against
-the pin; your keyring is never written). rc7 is a published pre-release, so any `gh` reaches it,
-and nothing here publishes anything. Record the sha256 in the authority
-ledger; `scripts/authority-check.sh` checks source/configuration, not sidecar integrity. The
+the pin; your keyring is never written). Do not merge this pin until rc8 is a published
+pre-release (placeholders `EXPECTED_TAG_SOURCE_SHA` / `EXPECTED_SHA256SUMS_*` must be filled).
+Nothing here publishes anything. Record the sha256 in the authority ledger;
+`scripts/authority-check.sh` checks source/configuration, not sidecar integrity. The
 released artifact is the `konsensus` binary (CLI `konsensus init` / `konsensus start`).
 
 ## Dev only: a node built from genome `main`

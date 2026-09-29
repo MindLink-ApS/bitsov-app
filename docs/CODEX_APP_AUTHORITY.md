@@ -96,12 +96,12 @@ Must-fix before next ship: <list>
 - **NO-GO** on any A violation or an unmet gate for the thing being shipped.
 
 ## G. Executable checks (run these — don't eyeball it)
-Pinned protocol: **release `v0.3.0-rc7`, source-ref `958e3997f9969497c1d270f557282b9bb591fe85`, repo `MindLink-ApS/BitSov-bitsov`**
-(published 2026-09-15; five signed CLI targets — linux x86_64/aarch64, darwin aarch64/x86_64,
-windows x86_64 — `SHA256SUMS` signed by release key `B299…EF6E`; Darwin/Windows binaries are not
-notarized / Authenticode-signed). rc7 fixes the startup fee-data probe (#66) and updates
-rustls/event-listener; old operator configurations are not rewritten. The app remains unpublished.
-Re-pin here when the app upgrades the bundled node. Exact route contract: `bitsov-app/docs/API_READINESS.md`.
+Pinned protocol: **release `v0.3.0-rc8` (DO NOT MERGE until published), source-ref `REPLACE_ME_AFTER_TAG`, repo `MindLink-ApS/BitSov-bitsov`**
+(five signed CLI targets — linux x86_64/aarch64, darwin aarch64/x86_64, windows x86_64 —
+`SHA256SUMS` signed by release key `B299…EF6E`; Darwin/Windows binaries are not notarized /
+Authenticode-signed). Fill `REPLACE_ME_AFTER_TAG` and the `EXPECTED_SHA256SUMS_*`
+placeholders in `scripts/fetch-node-sidecar.sh` after the genome release is published.
+The app remains unpublished. Exact route contract: `bitsov-app/docs/API_READINESS.md`.
 Machine form of these checks: `scripts/authority-check.sh` (CI "Authority Check"; the "Build" job
 is the compile gate, PR #9). Run from the app repo root; adjust the Website path to your checkout.
 **Any FAIL = that gate FAILs.**

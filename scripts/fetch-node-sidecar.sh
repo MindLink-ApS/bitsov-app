@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Fetch + VERIFY the pinned, signed BitSov node binary and place it as the Tauri
 # sidecar for this host. The node binary is NEVER committed (Gate G1: bundled binary,
-# fetched + verified, not vendored). v0.3.0-rc7 publishes Linux, macOS and Windows node
+# fetched + verified, not vendored). v0.3.0-rc8 publishes Linux, macOS and Windows node
 # binaries, so all three hosts can produce a sidecar. Release assets carry no .exe suffix
 # on any host; only the installed Windows sidecar is renamed to .exe (Tauri's resolver).
-# rc7 is a PUBLISHED pre-release: `gh release download` reaches it with any gh, a CI
+# DO-NOT-MERGE: v0.3.0-rc8 must be a PUBLISHED pre-release before this pin lands.
+# After publish, `gh release download` reaches it with any gh, a CI
 # repo-scoped GITHUB_TOKEN included. Nothing here publishes anything.
 #
 # Verification is fail-closed, in two steps:
@@ -24,9 +25,18 @@
 # verify_release_signature against local test keys, including every refusal class above.
 set -euo pipefail
 
-TAG="v0.3.0-rc7"
+TAG="v0.3.0-rc8"
 REPO="MindLink-ApS/BitSov-bitsov"
 KEY_FPR="B299274C200301714DC6F51A7C2D6F8AC842EF6E"
+
+# Placeholders for the signed release trust bundle. Fill after genome v0.3.0-rc8
+# is tagged, CI has staged assets, and SHA256SUMS.asc is published. Verification
+# still uses the downloaded SHA256SUMS / .asc; these fields are operator
+# cross-checks for the pin PR that merges after publish.
+# shellcheck disable=SC2034
+EXPECTED_TAG_SOURCE_SHA="REPLACE_ME_AFTER_TAG"
+EXPECTED_SHA256SUMS_SHA256="REPLACE_ME_AFTER_PUBLISH"
+EXPECTED_SHA256SUMS_ASC_SHA256="REPLACE_ME_AFTER_PUBLISH"
 
 # GNU coreutils on Linux, perl shasum on macOS; same check either way.
 sha256_check() { if command -v sha256sum >/dev/null 2>&1; then sha256sum -c -; else shasum -a 256 -c -; fi; }
