@@ -24,6 +24,14 @@ import {
 } from './body';
 import type { Source } from './source';
 import {
+  denom,
+  setDenom,
+  setThemePref,
+  themePref,
+  type Denom,
+  type ThemePref,
+} from './prefs';
+import {
   ADMISSION_MAX_MSAT,
   applyDelivery,
   applyLive,
@@ -740,8 +748,9 @@ export function ControlCenter(props: Props) {
         nameOf={nameOf}
         unread={threads.unread}
         openKey={openKey()}
+        ownId={ownId()}
         onOpen={setTrack}
-        onPill={() => {
+        onProfile={() => {
           setTab('body');
           setContextOpen(true);
         }}
@@ -833,64 +842,79 @@ export function ControlCenter(props: Props) {
             )}
           </Show>
         </section>
-
-        <aside class="context" classList={{ open: contextOpen() }} aria-label="Body, node and wallet">
-          <div class="row">
-            <div class="tabs" role="tablist" style={{ flex: 1 }}>
-              <button role="tab" aria-selected={tab() === 'body'} data-tab="body" onClick={() => setTab('body')}>Body</button>
-              <button role="tab" aria-selected={tab() === 'node'} data-tab="node" onClick={() => setTab('node')}>Node</button>
-              <button role="tab" aria-selected={tab() === 'wallet'} data-tab="wallet" onClick={() => setTab('wallet')}>Wallet</button>
-              <button role="tab" aria-selected={tab() === 'budget'} data-tab="budget" onClick={() => setTab('budget')}>Budget</button>
-            </div>
-            <button class="quiet context-toggle" onClick={() => setContextOpen(false)} aria-label="Close panel">Close</button>
-          </div>
-          <Switch>
-            <Match when={tab() === 'body'}>
-              <Organism
-                readiness={readinessLine(overview(), now())}
-                sample={source.mode === 'sample'}
-                now={now()}
-                openedAt={openedAt()}
-                link={link()}
-                down={!!props.error || (overview() !== null && freshness(overview()!.read_at, now()).stale)}
-                metabolism={nodeEnergy() ? nodeMetabolism(nodeEnergy()!.hour, nodeEnergy()!.day) : metabolism(threads.t, ownId(), now(), paid)}
-                energyAt={energyAt()}
-                energyReadAt={energyReadAt()}
-                membrane={membrane()}
-                nodeMembrane={caps().membrane}
-                membraneReadAt={membraneReadAt()}
-                prePaymentRefusals={caps().membrane ? prePaymentRefusals() : null}
-                membraneError={errors.membrane}
-                door={door()}
-                doorError={errors.door}
-                homeostasis={homeostasis(budget())}
-                budgetReadAt={budgetReadAt()}
-                nucleus={nucleus(props.ownId, overview())}
-                nameOfTrack={trackKeyName}
-                nameOf={nameOf}
-                onSetpoints={() => setTab('budget')}
-                onPauseAll={() => void actions.pauseAll()}
-                onResume={() => void actions.resume()}
-              />
-            </Match>
-            <Match when={tab() === 'node'}>
-              <NodePanel overview={overview()} link={link()} peers={peers()} now={now()} error={errors.overview ?? errors.peers} />
-            </Match>
-            <Match when={tab() === 'wallet'}>
-              <WalletPanel moneyBlocked={moneyBlocked()} wallet={wallet()} error={errors.wallet} fund={props.fund?.(source, moneyBlocked)} />
-            </Match>
-            <Match when={tab() === 'budget'}>
-              <BudgetPanel
-                budget={budget()}
-                error={errors.budget}
-                now={now()}
-                nameOf={(id, room) => (room ? rooms().find((r) => r.id.toLowerCase() === id)?.name ?? 'Room' : nameOf(id))}
-                actions={actions}
-              />
-            </Match>
-          </Switch>
-        </aside>
       </Show>
+
+      {/* Profile / settings: Body, Node, Wallet, Budget and display prefs. Always
+          mounted so existing tests can open tabs; closed until the avatar is pressed. */}
+      <div
+        class="settings-scrim"
+        classList={{ open: contextOpen() }}
+        data-settings-open={contextOpen() ? 'true' : 'false'}
+        onClick={() => setContextOpen(false)}
+      />
+      <aside
+        class="context settings-modal"
+        classList={{ open: contextOpen() }}
+        aria-label="Profile and settings"
+        aria-hidden={!contextOpen()}
+        data-settings
+      >
+        <div class="row settings-head">
+          <div class="tabs" role="tablist" style={{ flex: 1 }}>
+            <button role="tab" aria-selected={tab() === 'body'} data-tab="body" onClick={() => { setTab('body'); setContextOpen(true); }}>Body</button>
+            <button role="tab" aria-selected={tab() === 'node'} data-tab="node" onClick={() => { setTab('node'); setContextOpen(true); }}>Node</button>
+            <button role="tab" aria-selected={tab() === 'wallet'} data-tab="wallet" onClick={() => { setTab('wallet'); setContextOpen(true); }}>Wallet</button>
+            <button role="tab" aria-selected={tab() === 'budget'} data-tab="budget" onClick={() => { setTab('budget'); setContextOpen(true); }}>Budget</button>
+          </div>
+          <button class="quiet context-toggle" data-settings-close onClick={() => setContextOpen(false)} aria-label="Close settings">Close</button>
+        </div>
+        <SettingsDisplay />
+        <Switch>
+          <Match when={tab() === 'body'}>
+            <Organism
+              readiness={readinessLine(overview(), now())}
+              sample={source.mode === 'sample'}
+              now={now()}
+              openedAt={openedAt()}
+              link={link()}
+              down={!!props.error || (overview() !== null && freshness(overview()!.read_at, now()).stale)}
+              metabolism={nodeEnergy() ? nodeMetabolism(nodeEnergy()!.hour, nodeEnergy()!.day) : metabolism(threads.t, ownId(), now(), paid)}
+              energyAt={energyAt()}
+              energyReadAt={energyReadAt()}
+              membrane={membrane()}
+              nodeMembrane={caps().membrane}
+              membraneReadAt={membraneReadAt()}
+              prePaymentRefusals={caps().membrane ? prePaymentRefusals() : null}
+              membraneError={errors.membrane}
+              door={door()}
+              doorError={errors.door}
+              homeostasis={homeostasis(budget())}
+              budgetReadAt={budgetReadAt()}
+              nucleus={nucleus(props.ownId, overview())}
+              nameOfTrack={trackKeyName}
+              nameOf={nameOf}
+              onSetpoints={() => setTab('budget')}
+              onPauseAll={() => void actions.pauseAll()}
+              onResume={() => void actions.resume()}
+            />
+          </Match>
+          <Match when={tab() === 'node'}>
+            <NodePanel overview={overview()} link={link()} peers={peers()} now={now()} error={errors.overview ?? errors.peers} />
+          </Match>
+          <Match when={tab() === 'wallet'}>
+            <WalletPanel moneyBlocked={moneyBlocked()} wallet={wallet()} error={errors.wallet} fund={props.fund?.(source, moneyBlocked)} />
+          </Match>
+          <Match when={tab() === 'budget'}>
+            <BudgetPanel
+              budget={budget()}
+              error={errors.budget}
+              now={now()}
+              nameOf={(id, room) => (room ? rooms().find((r) => r.id.toLowerCase() === id)?.name ?? 'Room' : nameOf(id))}
+              actions={actions}
+            />
+          </Match>
+        </Switch>
+      </aside>
     </div>
   );
 }
@@ -908,6 +932,56 @@ function readBase64(file: File): Promise<string> {
   });
 }
 
+function SettingsDisplay() {
+  const themes: { id: ThemePref; label: string }[] = [
+    { id: 'system', label: 'System' },
+    { id: 'light', label: 'Light' },
+    { id: 'dark', label: 'Dark' },
+  ];
+  const denoms: { id: Denom; label: string }[] = [
+    { id: 'sats', label: 'Sats' },
+    { id: 'btc', label: 'BTC' },
+  ];
+  return (
+    <div class="panel settings-display" data-panel="display">
+      <h2>Display</h2>
+      <h3>Theme</h3>
+      <div class="modes soft" role="radiogroup" aria-label="Theme" data-theme-toggle>
+        <For each={themes}>
+          {(t) => (
+            <button
+              type="button"
+              role="radio"
+              aria-checked={themePref() === t.id}
+              data-theme-option={t.id}
+              onClick={() => setThemePref(t.id)}
+            >
+              {t.label}
+            </button>
+          )}
+        </For>
+      </div>
+      <h3>Amounts</h3>
+      <div class="modes soft" role="radiogroup" aria-label="Denomination" data-denom-toggle>
+        <For each={denoms}>
+          {(d) => (
+            <button
+              type="button"
+              role="radio"
+              aria-checked={denom() === d.id}
+              data-denom-option={d.id}
+              onClick={() => setDenom(d.id)}
+            >
+              {d.label}
+            </button>
+          )}
+        </For>
+      </div>
+      <p class="hint">Balances and costs use this unit everywhere. Payment amounts to the node stay in millisatoshis.</p>
+    </div>
+  );
+}
+
 // ---- rail -----------------------------------------------------------------
 
 function Rail(props: {
@@ -921,8 +995,9 @@ function Rail(props: {
   nameOf: (id: string) => string;
   unread: Unread;
   openKey: string | null;
+  ownId: string | null;
   onOpen: (t: TrackRef) => void;
-  onPill: () => void;
+  onProfile: () => void;
 }) {
   const item = (t: TrackRef, name: string, meta?: JSX.Element) => {
     const key = trackKey(t);
@@ -942,12 +1017,17 @@ function Rail(props: {
     );
   };
 
+  const initials = () => {
+    const id = props.ownId;
+    return id && id.length >= 2 ? id.slice(0, 2).toUpperCase() : 'BS';
+  };
+
   return (
     <nav class="rail" aria-label="Tracks">
       <div class="mark">
         Bit<span>Sov</span>
       </div>
-      <button class="node-pill" title={props.pill.text} data-pill={props.pill.tone} onClick={() => props.onPill()} disabled={!props.active}>
+      <button class="node-pill" title={props.pill.text} data-pill={props.pill.tone} onClick={() => props.onProfile()} disabled={!props.active}>
         <span class={`dot ${props.pill.tone}`} classList={{ live: props.pill.live }} />
         <span class="what">{props.pill.text}</span>
         <Show when={props.active}>
@@ -1011,6 +1091,18 @@ function Rail(props: {
         <Show when={props.sample}>
           <span class="mode-tag" data-sample>Sample data, no node</span>
         </Show>
+        <button
+          type="button"
+          class="profile-avatar"
+          data-profile
+          disabled={!props.active}
+          aria-label="Open profile and settings"
+          title="Profile and settings"
+          onClick={() => props.onProfile()}
+        >
+          <span class="avatar-mark" aria-hidden="true">{initials()}</span>
+          <span class="avatar-label">You</span>
+        </button>
       </div>
     </nav>
   );
@@ -1023,7 +1115,7 @@ function TrackHead(props: { title: string; sub?: JSX.Element; onContext: () => v
     <header class="track-head">
       <h1>{props.title}</h1>
       <div class="sub">{props.sub}</div>
-      <button class="quiet context-toggle" onClick={() => props.onContext()}>Body</button>
+      <button class="quiet context-toggle" onClick={() => props.onContext()}>Settings</button>
     </header>
   );
 }
@@ -1098,6 +1190,7 @@ function Conversation(props: {
     <>
       <TrackHead title={props.name} sub={sub()} onContext={props.onContext} />
       <div class="stream" ref={stream} data-stream>
+        <div class="chat-column">
         <Show when={props.introduced}>
           {(c) => (
             <p class="day" data-introduced={c().node_id}>
@@ -1157,6 +1250,7 @@ function Conversation(props: {
         <Show when={props.error}>
           <p class="err-note">{props.error}</p>
         </Show>
+        </div>
       </div>
 
       <Composer
@@ -1935,10 +2029,20 @@ function Composer(props: {
       }}
     >
       <Show when={modes().length > 1}>
-        <div class="modes" role="tablist" aria-label="What to send">
+        <div class="composer-actions" role="toolbar" aria-label="What to send">
           <For each={modes()}>
             {(m) => (
-              <button type="button" role="tab" data-composer-mode={m} aria-selected={mode() === m} onClick={() => { composerRevision++; setMode(m); setNote(null); }}>
+              <button
+                type="button"
+                class="composer-action"
+                data-composer-mode={m}
+                aria-pressed={mode() === m}
+                onClick={() => {
+                  composerRevision++;
+                  setMode(m);
+                  setNote(null);
+                }}
+              >
                 {{ message: 'Message', pay: 'Pay', request: 'Request', file: 'File' }[m]}
               </button>
             )}
@@ -1948,23 +2052,84 @@ function Composer(props: {
 
       <Switch>
         <Match when={mode() === 'message'}>
-          <textarea
-            rows={2}
-            placeholder={`Message ${props.name}`}
-            value={draft()}
-            onInput={(e) => setDraft(e.currentTarget.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-                e.preventDefault();
-                void submit();
-              }
-            }}
-            aria-label={`Message ${props.name}`}
-          />
+          <div class="composer-main">
+            <button
+              type="button"
+              class="attach soft"
+              data-attach
+              aria-label="Attach a file"
+              title="Attach a file"
+              onClick={() => { composerRevision++; setMode('file'); setNote(null); }}
+            >
+              +
+            </button>
+            <textarea
+              rows={1}
+              placeholder={`Message ${props.name}`}
+              value={draft()}
+              onInput={(e) => setDraft(e.currentTarget.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                  e.preventDefault();
+                  void submit();
+                }
+              }}
+              aria-label={`Message ${props.name}`}
+            />
+            <button type="submit" class="primary soft" disabled={disabled()} data-send>
+              {label()}
+            </button>
+          </div>
+        </Match>
+        <Match when={mode() === 'file'}>
+          <div class="composer-main">
+            <button
+              type="button"
+              class="attach soft"
+              data-attach
+              aria-label="Attach a file"
+              title="Attach a file"
+              onClick={() => fileInput?.click()}
+            >
+              +
+            </button>
+            <input
+              ref={(el) => { fileInput = el; }}
+              type="file"
+              class="sr-only"
+              data-file-input
+              onChange={(e) => {
+                composerRevision++;
+                setFile(e.currentTarget.files?.[0] ?? null);
+              }}
+              aria-label="File to send"
+            />
+            <div class="file-chip" data-file-chip>
+              <Show when={file()} fallback={<span class="hint">Choose a file for {props.name}</span>}>
+                {(f) => <span class="file-name">{f().name}</span>}
+              </Show>
+              <button
+                type="button"
+                class="link"
+                onClick={() => {
+                  composerRevision++;
+                  setFile(null);
+                  if (fileInput) fileInput.value = '';
+                  setMode('message');
+                }}
+              >
+                Remove
+              </button>
+              <span class="hint">Up to 1.4 MB · pays like a message</span>
+            </div>
+            <button type="submit" class="primary soft" disabled={disabled()} data-send>
+              {label()}
+            </button>
+          </div>
         </Match>
         <Match when={mode() === 'pay'}>
           <div class="fields">
-            <div class="modes small" role="tablist" aria-label="How to pay">
+            <div class="modes soft small" role="tablist" aria-label="How to pay">
               <button type="button" role="tab" aria-selected={payKind() === 'invoice'} onClick={() => { composerRevision++; setPayKind('invoice'); }}>Invoice</button>
               <button type="button" role="tab" aria-selected={payKind() === 'keysend'} onClick={() => { composerRevision++; setPayKind('keysend'); }}>Direct</button>
             </div>
@@ -1982,38 +2147,64 @@ function Composer(props: {
             >
               <textarea data-pay-invoice rows={2} placeholder={`Paste an invoice from ${props.name}`} value={bolt11()} onInput={(e) => setBolt11(e.currentTarget.value)} aria-label="Lightning invoice" />
             </Show>
+            <div class="composer-bar">
+              <div class="cost" data-cost>
+                <span class="label">Cost to send</span>
+                <Show when={shown().msat !== null} fallback={<span class="sats">…</span>}>
+                  <span class="sats" data-cost-msat={shown().msat!}>
+                    {shown().estimate ? '≈ ' : ''}
+                    {sats(shown().msat!)}
+                    <span class="unit">{satUnit(shown().msat!)}</span>
+                  </span>
+                </Show>
+                <span class="basis" title={shown().basis}>{shown().basis}</span>
+              </div>
+              <button type="submit" class="primary soft" disabled={disabled()} data-send>
+                {label()}
+              </button>
+            </div>
           </div>
         </Match>
         <Match when={mode() === 'request'}>
-          <div class="row fields">
-            <input data-request-amount inputmode="numeric" placeholder="Sats to receive" value={amount()} onInput={(e) => setAmount(e.currentTarget.value)} aria-label="Sats to receive" />
-            <input data-request-note placeholder="What it is for (optional)" value={memo()} onInput={(e) => setMemo(e.currentTarget.value)} aria-label="What it is for" />
-          </div>
-        </Match>
-        <Match when={mode() === 'file'}>
           <div class="fields">
-            <input ref={fileInput} type="file" data-file-input onChange={(e) => { composerRevision++; setFile(e.currentTarget.files?.[0] ?? null); }} aria-label="File to send" />
-            <span class="hint">Up to 1.4 MB · to {props.name} only · pays like a message.</span>
+            <div class="row">
+              <input data-request-amount inputmode="numeric" placeholder="Sats to receive" value={amount()} onInput={(e) => setAmount(e.currentTarget.value)} aria-label="Sats to receive" />
+              <input data-request-note placeholder="What it is for (optional)" value={memo()} onInput={(e) => setMemo(e.currentTarget.value)} aria-label="What it is for" />
+            </div>
+            <div class="composer-bar">
+              <div class="cost" data-cost>
+                <span class="label">You receive</span>
+                <Show when={shown().msat !== null} fallback={<span class="sats">…</span>}>
+                  <span class="sats" data-cost-msat={shown().msat!}>
+                    {sats(Math.round((satsInput(amount()) ?? 0) * 1000))}
+                    <span class="unit">{satUnit(Math.round((satsInput(amount()) ?? 0) * 1000) || 1000)}</span>
+                  </span>
+                </Show>
+                <span class="basis" title={shown().basis}>{shown().basis}</span>
+              </div>
+              <button type="submit" class="primary soft" disabled={disabled()} data-send>
+                {label()}
+              </button>
+            </div>
           </div>
         </Match>
       </Switch>
 
-      <div class="composer-bar">
-        <div class="cost" data-cost>
-          <span class="label">{mode() === 'request' ? 'You receive' : 'Cost to send'}</span>
-          <Show when={shown().msat !== null} fallback={<span class="sats">…</span>}>
-            <span class="sats" data-cost-msat={shown().msat!}>
-              {shown().estimate ? '≈ ' : ''}
-              {mode() === 'request' ? sats(Math.round((satsInput(amount()) ?? 0) * 1000)) : sats(shown().msat!)}
-              <span class="unit">{mode() === 'request' ? 'sats' : satUnit(shown().msat!)}</span>
-            </span>
-          </Show>
-          <span class="basis" title={shown().basis}>{shown().basis}</span>
+      <Show when={mode() === 'message' || mode() === 'file'}>
+        <div class="composer-bar cost-only">
+          <div class="cost" data-cost>
+            <span class="label">Cost to send</span>
+            <Show when={shown().msat !== null} fallback={<span class="sats">…</span>}>
+              <span class="sats" data-cost-msat={shown().msat!}>
+                {shown().estimate ? '≈ ' : ''}
+                {sats(shown().msat!)}
+                <span class="unit">{satUnit(shown().msat!)}</span>
+              </span>
+            </Show>
+            <span class="basis" title={shown().basis}>{shown().basis}</span>
+          </div>
         </div>
-        <button type="submit" class="primary" disabled={disabled()} data-send>
-          {label()}
-        </button>
-      </div>
+      </Show>
 
       <Show when={readmitPrice()}>
         {(p) => (

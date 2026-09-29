@@ -1,15 +1,34 @@
 // Display helpers. Sats are the unit people read; msat precision is kept when
 // a figure is not a whole sat, never rounded into a different price.
+// Denomination (sats vs BTC) follows the settings toggle — amounts stay msat.
+
+import { denom } from './prefs';
+
+const SATS_PER_BTC = 100_000_000;
 
 export function sats(msat: number): string {
+  if (denom() === 'btc') return btc(msat);
   const whole = Math.floor(msat / 1000);
   const rest = msat % 1000;
   const head = whole.toLocaleString('en-US');
   return rest === 0 ? head : `${head}.${String(rest).padStart(3, '0').replace(/0+$/, '')}`;
 }
 
-/** `sat` for exactly one sat, `sats` otherwise (including fractions). */
-export const satUnit = (msat: number) => (msat === 1000 ? 'sat' : 'sats');
+/** Whole BTC string from msat, up to 8 fractional digits (no trailing zeros). */
+export function btc(msat: number): string {
+  const satsWhole = msat / 1000;
+  const whole = Math.floor(satsWhole / SATS_PER_BTC);
+  const fracSats = Math.round(satsWhole - whole * SATS_PER_BTC);
+  if (fracSats === 0) return String(whole);
+  const frac = String(fracSats).padStart(8, '0').replace(/0+$/, '');
+  return `${whole}.${frac}`;
+}
+
+/** `sat` / `sats` / `BTC` depending on amount and denomination toggle. */
+export const satUnit = (msat: number) => {
+  if (denom() === 'btc') return 'BTC';
+  return msat === 1000 ? 'sat' : 'sats';
+};
 
 export const satsWhole = (value: number) => value.toLocaleString('en-US');
 
@@ -50,4 +69,4 @@ export function routingFee(msat: number): number {
   return msat === 0 ? 0 : Math.min(Math.max(5000, Math.floor(msat / 100)), 10000);
 }
 export const allIn = (msat: number) => msat + routingFee(msat);
-export const feeCeiling = (msat: number) => `up to ${sats(msat)} sats network fee`;
+export const feeCeiling = (msat: number) => `up to ${sats(msat)} ${satUnit(msat)} network fee`;
