@@ -264,6 +264,12 @@ select { font: inherit; font-size: var(--t-sm); background: var(--sunk); color: 
 .delivery[data-delivery='rejected'] { color: var(--err); overflow-wrap: anywhere; white-space: normal; }
 .bubble.file { display: flex; align-items: center; gap: var(--s-2); }
 .bubble.file .file-name { font-weight: 500; }
+.voice-note { display: inline-flex; align-items: center; }
+.voice-note audio, .file-chip audio { height: 32px; max-width: min(280px, 100%); }
+.voice-play { border: none; background: none; color: inherit; font: inherit; font-weight: 500; padding: 0; cursor: pointer; }
+.voice-play:disabled { cursor: default; opacity: 0.7; }
+.attach.soft.voice-record { font-size: var(--t-md); }
+.attach.soft.voice-record.recording { width: auto; padding: 0 12px; border-radius: 17px; background: var(--accent); color: #fff; font-variant-numeric: tabular-nums; }
 .quiet-detail { margin: var(--s-1) 0 0; color: var(--muted); font-size: var(--t-sm); }
 .quiet-detail > summary { cursor: pointer; color: var(--faint); list-style: none; }
 .quiet-detail > summary::-webkit-details-marker { display: none; }

@@ -23,6 +23,7 @@ import type {
   RemoteAnswer,
   TopicRead,
   FileReceipt,
+  VoiceBlob,
   InvoiceAmount,
   InvoiceView,
   InviteView,
@@ -141,6 +142,8 @@ export interface Source {
   inviteRedeem(invite: string): Promise<RedeemView>;
   filePrice(): Promise<PaymentQuote>;
   fileSend(recipient: string, filename: string, mimeType: string, dataB64: string, maxMsat: number, firstContactMsat?: number): Promise<FileReceipt>;
+  /** Read-only: a received voice note (kind 200, audio/*) by its message id. Never pays. */
+  voiceNote(messageId: string): Promise<VoiceBlob>;
   // AI track: the host reads through its broker; a remote model gets only a body the owner saw
   aiRead(topic: AiTopic, sinceMs: number | null): Promise<TopicRead>;
   aiProviders(): Promise<ProviderView[]>;
@@ -212,6 +215,7 @@ export const hostSource: Source = {
   filePrice: () => invoke<PaymentQuote>('file_price'),
   fileSend: (recipient, filename, mimeType, dataB64, maxMsat, firstContactMsat) =>
     invoke<FileReceipt>('file_send', { recipient, filename, mime_type: mimeType, data_b64: dataB64, max_msat: maxMsat, first_contact_msat: firstContactMsat ?? null }),
+  voiceNote: (messageId) => invoke<VoiceBlob>('voice_note_fetch', { message_id: messageId }),
   aiRead: (topic, sinceMs) => invoke<TopicRead>('ai_read', { topic, since_ms: sinceMs }),
   aiProviders: () => invoke<ProviderView[]>('ai_providers'),
   aiDisclose: (provider, topic, sinceMs, preset, question) =>

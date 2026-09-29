@@ -453,6 +453,9 @@ export type FileReceipt = {
   accepted?: boolean;
 };
 
+/** `voice_note_fetch`: a received voice note's bytes, for the inline player. */
+export type VoiceBlob = { filename: string; mime_type: string; size_bytes: number; data_b64: string };
+
 /** Delivery of one sent message, from the send reply and then `/ws`. */
 export type Delivery = { status: 'accepted' | 'sent' | 'queued' | 'delivered' | 'rejected'; reason: string | null };
 

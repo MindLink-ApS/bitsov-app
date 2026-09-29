@@ -65,6 +65,7 @@
     "allow-invite-redeem",
     "allow-file-price",
     "allow-file-send",
+    "allow-voice-note-fetch",
     "allow-ai-read",
     "allow-ai-providers",
     "allow-ai-disclose",
