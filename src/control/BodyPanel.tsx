@@ -1,4 +1,4 @@
-import { createEffect, createSignal, For, type JSX, Match, on, onCleanup, Show, Switch, untrack } from 'solid-js';
+import { createEffect, createSignal, For, type JSX, Match, on, onCleanup, onMount, Show, Switch, untrack } from 'solid-js';
 import { ago, amount, clock, sats, satsWhole, satUnit, shortId } from './format';
 import {
   feedState,
@@ -33,6 +33,91 @@ function usePulse(value: () => unknown, startHot = false) {
   createEffect(on(value, fire, { defer: true }));
   onCleanup(() => clearTimeout(timer));
   return hot;
+}
+
+// ---- plain-language help (ⓘ) --------------------------------------------------
+
+type InfoCard = { head: string; body: string };
+const INFO: Record<string, { title: string; cards: InfoCard[] }> = {
+  metabolism: {
+    title: 'Metabolism',
+    cards: [
+      { head: 'What it is', body: 'The sats moving in and out of your node: what you were paid and what you spent.' },
+      { head: 'What you see', body: 'A plus for sats that came in, a minus for sats that went out, and when the node last confirmed the figures.' },
+      { head: 'Why it matters', body: 'It is the quick way to check that money is only moving when you meant it to.' },
+    ],
+  },
+  membrane: {
+    title: 'Membrane',
+    cards: [
+      { head: 'What it is', body: 'The gate at the edge of your node. Everything from other people is checked here before it reaches you.' },
+      { head: 'What you see', body: 'Who was let in, who was let back in, and who was turned away, with the reason.' },
+      { head: 'Why it matters', body: 'A refusal means nothing got through and nothing was paid for it.' },
+    ],
+  },
+  setpoints: {
+    title: 'Set points',
+    cards: [
+      { head: 'What it is', body: 'Spending limits you choose. Each one is a level the app tries to stay under.' },
+      { head: 'What you see', body: 'How much was spent against each limit over the last 24 hours, and how long until the approval ends.' },
+      { head: 'Why it matters', body: 'When a limit is reached, spending pauses until you raise it or older payments age out. You can lower a limit any time.' },
+    ],
+  },
+  immune: {
+    title: 'Immune memory',
+    cards: [
+      { head: 'What it is', body: 'A place to keep evidence of past problems, such as a sender that misbehaved.' },
+      { head: 'What you see', body: 'For now: not built. Nothing is stored here yet.' },
+      { head: 'Why it matters', body: 'Once it exists, your node can remember bad experiences instead of relearning them each time.' },
+    ],
+  },
+};
+const [infoKey, setInfoKey] = createSignal<string | null>(null);
+
+function InfoButton(props: { id: string }) {
+  return (
+    <Show when={INFO[props.id]}>
+      <button
+        type="button"
+        class="info-btn"
+        data-info={props.id}
+        aria-label={`What is ${INFO[props.id].title}?`}
+        title={`What is ${INFO[props.id].title}?`}
+        onClick={() => setInfoKey(props.id)}
+      >
+        ⓘ
+      </button>
+    </Show>
+  );
+}
+
+function InfoModal() {
+  onMount(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape' && infoKey()) { e.stopPropagation(); setInfoKey(null); } };
+    window.addEventListener('keydown', onKey, true);
+    onCleanup(() => window.removeEventListener('keydown', onKey, true));
+  });
+  onCleanup(() => setInfoKey(null));
+  return (
+    <Show when={INFO[infoKey() ?? '']}>
+      {(i) => (
+        <div class="info-scrim" data-info-modal={infoKey()!} onClick={(e) => { if (e.target === e.currentTarget) setInfoKey(null); }}>
+          <div class="info-modal" role="dialog" aria-modal="true" aria-label={i().title}>
+            <h3>{i().title}</h3>
+            <For each={i().cards}>
+              {(c) => (
+                <div class="info-card">
+                  <strong>{c.head}</strong>
+                  <p>{c.body}</p>
+                </div>
+              )}
+            </For>
+            <button type="button" class="primary soft" data-info-close onClick={() => setInfoKey(null)}>Got it</button>
+          </div>
+        </div>
+      )}
+    </Show>
+  );
 }
 
 export type OrganismProps = {
@@ -89,6 +174,7 @@ export function Organism(props: OrganismProps) {
         <p class="organ-line" data-immune>Evidence keeping: not built.</p>
       </Organ>
       <NucleusOrgan {...props} />
+      <InfoModal />
     </div>
   );
 }
@@ -107,15 +193,18 @@ function Organ(props: {
   const [open, setOpen] = createSignal(false);
   return (
     <section class="organ" data-organ={props.id} classList={{ expanded: open(), stale: props.fresh.stale, hot: !!props.hot }}>
-      <button type="button" class="organ-head" aria-expanded={open()} onClick={() => setOpen(!open())}>
-        <span class="organ-name">{props.title}</span>
-        <span class="organ-summary">{props.summary}</span>
-        <Show when={props.sample}>
-          <span class="sample-tag" data-sample-tag>Sample</span>
-        </Show>
-        <span class="organ-fresh" classList={{ stale: props.fresh.stale }} data-organ-fresh>{props.fresh.label}</span>
-        <span class="organ-chev" aria-hidden="true">›</span>
-      </button>
+      <div class="organ-headrow">
+        <button type="button" class="organ-head" aria-expanded={open()} onClick={() => setOpen(!open())}>
+          <span class="organ-name">{props.title}</span>
+          <span class="organ-summary">{props.summary}</span>
+          <Show when={props.sample}>
+            <span class="sample-tag" data-sample-tag>Sample</span>
+          </Show>
+          <span class="organ-fresh" classList={{ stale: props.fresh.stale }} data-organ-fresh>{props.fresh.label}</span>
+          <span class="organ-chev" aria-hidden="true">›</span>
+        </button>
+        <InfoButton id={props.id} />
+      </div>
       <div class="organ-body">
         {props.children}
         <p class="organ-src">{props.source}</p>

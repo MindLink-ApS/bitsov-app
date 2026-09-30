@@ -7,6 +7,7 @@ import { AiTrack, createAiSession } from './AiTrack';
 import { amount as fmtAmount, allIn, clock, day, feeCeiling, routingFee, sats, satsWhole, satUnit, shortId, uptime } from './format';
 import { amountText, inPaymentBounds, MAX_PAYMENT_MSAT, MIN_PAYMENT_MSAT, parseAmount } from './amountInput';
 import { Organism } from './BodyPanel';
+import { SoftError } from './SoftError';
 import { DiscoverPanel, FrontDoorEditor } from './Discover';
 import { callCost, createCallEngine, IDLE as CALL_IDLE, isCallKind, signalCost, stunServer, type CallMedia, type CallView } from './call';
 import { createMeetingEngine, declineCost, inviteCost, joinCost, MAX_PARTICIPANTS, MEETING_IDLE, type LegState, type MeetingView, type ShownQuotes } from './meeting';
@@ -868,7 +869,7 @@ export function ControlCenter(props: Props) {
     if (t.kind === 'peer') return peerName(peerById().get(t.id), t.id);
     if (t.kind === 'room') return rooms().find((r) => r.id.toLowerCase() === t.id)?.name ?? 'Room';
     if (t.kind === 'ai') return 'AI';
-    if (t.kind === 'discover') return 'Discover';
+    if (t.kind === 'discover') return 'Browse';
     return 'Start something';
   };
   const nameOf = (id: string) => (id.toLowerCase() === ownId().toLowerCase() ? 'You' : peerName(peerById().get(id.toLowerCase()), id));
@@ -1032,7 +1033,7 @@ export function ControlCenter(props: Props) {
             <button role="tab" aria-selected={tab() === 'node'} data-tab="node" onClick={() => { setTab('node'); setContextOpen(true); }}>Node</button>
             <button role="tab" aria-selected={tab() === 'wallet'} data-tab="wallet" onClick={() => { setTab('wallet'); setContextOpen(true); }}>Wallet</button>
             <button role="tab" aria-selected={tab() === 'budget'} data-tab="budget" onClick={() => { setTab('budget'); setContextOpen(true); }}>Budget</button>
-            <button role="tab" aria-selected={tab() === 'frontdoor'} data-tab="frontdoor" onClick={() => { setTab('frontdoor'); setContextOpen(true); }}>Front door</button>
+            <button role="tab" aria-selected={tab() === 'frontdoor'} data-tab="frontdoor" onClick={() => { setTab('frontdoor'); setContextOpen(true); }}>Profile</button>
           </div>
           <button class="quiet context-toggle" data-settings-close onClick={() => setContextOpen(false)} aria-label="Close settings">Close</button>
         </div>
@@ -1313,10 +1314,13 @@ function Rail(props: {
         </Show>
       </div>
 
-      <div class="track-group">
+      <div class="track-group" data-rooms-soon>
         <h2>Rooms</h2>
-        <Show when={props.active}>
-          <For each={props.rooms} fallback={<p class="track-empty">No rooms yet</p>}>
+        <p class="track-empty" data-rooms-coming-soon>
+          Coming soon — group chat is not on the protocol yet.
+        </p>
+        <Show when={props.active && props.rooms.length > 0}>
+          <For each={props.rooms}>
             {(r) => item({ kind: 'room', id: r.id.toLowerCase() }, r.name)}
           </For>
         </Show>
@@ -1350,7 +1354,7 @@ function Rail(props: {
       </div>
 
       <div class="track-group">
-        <h2>Discover</h2>
+        <h2>Browse</h2>
         <Show when={props.active}>
           <button
             class="track-link"
@@ -1358,9 +1362,12 @@ function Rail(props: {
             aria-current={props.openKey === 'discover'}
             onClick={() => props.onOpen({ kind: 'discover' })}
           >
-            <span class="name">Front doors</span>
+            <span class="name">Profiles</span>
             <span class="meta">paste / scan</span>
           </button>
+          <p class="track-empty" data-browse-pages-soon>
+            Fetching another node’s pages is coming soon.
+          </p>
         </Show>
       </div>
 
@@ -1513,7 +1520,7 @@ function Conversation(props: {
         <Show when={props.doorstep}>
           {(c) => (
             <p class="day" data-doorstep={c().node_id}>
-              Opened from {props.name}’s front door. Card snapshot (display only): admission {fmtAmount(allIn(c().admission_msat))}, each
+              Opened from {props.name}’s profile. Card snapshot (display only): admission {fmtAmount(allIn(c().admission_msat))}, each
               message {fmtAmount(allIn(c().message_msat))}. Knock uses their live first-contact quote — you confirm before anything is paid.
             </p>
           )}
@@ -1801,14 +1808,14 @@ function CallButtons(props: { peer: string; name: string; blocked: boolean; acti
   const place = (media: CallMedia) => { const q = quote(); if (q && !off()) props.actions.placeCall(props.peer, media, q); };
   return (
     <div class="call-buttons" data-call-buttons>
-      <button type="button" class="soft call-button" data-call="audio" disabled={off()} title={title()} aria-label={`Call ${props.name}${cost() !== null ? `, up to ${fmtAmount(cost()!)}` : ''}`} onClick={() => place('audio')}>
-        Call{cost() !== null ? ` · ${sats(cost()!)} ${satUnit(cost()!)}` : ''}
+      <button type="button" class="soft call-button icon-btn" data-call="audio" disabled={off()} title={title()} aria-label={`Call ${props.name}${cost() !== null ? `, up to ${fmtAmount(cost()!)}` : ''}`} onClick={() => place('audio')}>
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4h4l2 5-2.5 1.5a11 11 0 0 0 5 5L15 13l5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2z" /></svg>
       </button>
-      <button type="button" class="soft call-button" data-call="video" disabled={off()} title={title()} onClick={() => place('video')} aria-label={`Video call ${props.name}${cost() !== null ? `, up to ${fmtAmount(cost()!)}` : ''}`}>
-        Video
+      <button type="button" class="soft call-button icon-btn" data-call="video" disabled={off()} title={title()} onClick={() => place('video')} aria-label={`Video call ${props.name}${cost() !== null ? `, up to ${fmtAmount(cost()!)}` : ''}`}>
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="12" height="12" rx="2" /><path d="m15 10 6-3v10l-6-3z" /></svg>
       </button>
-      <button type="button" class="soft call-button" data-call="meeting" disabled={off()} title={`Start a meeting with ${props.name} and up to ${MAX_PARTICIPANTS - 2} more contacts. The price shows before anyone is rung.`} onClick={() => props.actions.planMeeting(props.peer)}>
-        Meeting
+      <button type="button" class="soft call-button icon-btn quiet" data-call="meeting" disabled={off()} title={`Start a meeting with ${props.name} and up to ${MAX_PARTICIPANTS - 2} more contacts. The price shows before anyone is rung.`} aria-label={`Start a meeting with ${props.name}`} onClick={() => props.actions.planMeeting(props.peer)}>
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3" /><path d="M3 20a6 6 0 0 1 12 0" /><circle cx="17" cy="9" r="2.5" /><path d="M17 14a5 5 0 0 1 4 5" /></svg>
       </button>
     </div>
   );
@@ -2348,12 +2355,16 @@ function ArtifactView(props: { moneyBlocked: boolean; a: Artifact; delivery?: De
         {(a) => {
           const r = () => (a() as Extract<Artifact, { type: 'payment' }>).receipt;
           return (
-            <div class="artifact out" data-artifact="payment" data-status={r().status}>
-              <span class="kind">Payment · {r().method === 'keysend' ? 'direct (keysend)' : 'invoice'}</span>
+            <div class="artifact out payment-line" data-artifact="payment" data-status={r().status}>
               <span class="stamp">
                 <Bolt />
-                <span class="sats">{sats(r().amount_msat + (r().max_routing_fee_msat ?? 0))}</span>
-                <span>{satUnit(r().amount_msat + (r().max_routing_fee_msat ?? 0))} all-in ceiling ({feeCeiling(r().max_routing_fee_msat ?? 0)}) · {r().status} · {clock(r().paid_at_ms)}</span>
+                <Show
+                  when={r().status !== 'failed'}
+                  fallback={<span class="err-note">Payment of <span class="sats">{sats(r().amount_msat)}</span> {satUnit(r().amount_msat)} failed</span>}
+                >
+                  <span>You sent <span class="sats">{sats(r().amount_msat)}</span> {satUnit(r().amount_msat)}</span>
+                </Show>
+                <span class="hint">{clock(r().paid_at_ms)}</span>
               </span>
             </div>
           );
@@ -2536,6 +2547,7 @@ function Composer(props: {
   payRequest?: { seq: number; bolt11: string } | null;
 }) {
   const [mode, setMode] = createSignal<Mode>('message');
+  const [menuOpen, setMenuOpen] = createSignal(false);
   // B2: the owner's pick of starting preset, and of a first contact's budget.
   const [presetPick, setPresetPick] = createSignal<PresetId | null>(null);
   const [firstPick, setFirstPick] = createSignal<number | null>(null);
@@ -2964,7 +2976,7 @@ function Composer(props: {
       switch (stand().kind) {
         case 'paused': return 'Resume payments';
         case 'waiting': return 'Waiting for approval';
-        case 'off': return 'Approve app all-in limit';
+        case 'off': return 'Send';
         case 'first': return `Send first ${mode() === 'file' ? 'file' : 'message'}${price}`;
         case 'contact_used':
         case 'total_used': return 'Budget used up';
@@ -2974,12 +2986,42 @@ function Composer(props: {
     if (spends() && !line().open) {
       if (props.spend?.state === 'pending') return 'Waiting for approval';
       if (props.spend?.state === 'unavailable') return 'Spending unavailable';
-      return 'Approve spending';
+      return 'Send';
     }
     const s = shown();
     const price = s.msat === null ? '' : ` · ${s.estimate ? '≈ ' : ''}${sats(s.msat)} ${satUnit(s.msat)}`;
     return { message: 'Send', pay: 'Pay', request: 'Create invoice', file: 'Send file' }[mode()] + (mode() === 'request' ? '' : price);
   };
+
+  // The message bar shows a plain "Send"; the price rides along for screen
+  // readers and the tooltip, and the cost line lives behind the ⓘ.
+  const sendParts = () => {
+    const full = label();
+    const i = full.indexOf(' · ');
+    return i < 0 ? { main: full, price: '' } : { main: full.slice(0, i), price: full.slice(i + 3) };
+  };
+  const sendMain = () => sendParts().main;
+  const sendPrice = () => sendParts().price;
+  const sendTitle = () => label();
+  /** Pay / Request / File panels close back to the single message bar. */
+  const closePanel = () => {
+    composerRevision++;
+    if (mode() === 'file') {
+      setFile(null);
+      if (fileInput) fileInput.value = '';
+    }
+    setMode('message');
+    setNote(null);
+  };
+  createEffect(on(mode, () => setMenuOpen(false), { defer: true }));
+  createEffect(() => {
+    if (!menuOpen()) return;
+    const onDoc = (e: Event) => {
+      if (!(e.target as Element | null)?.closest?.('.composer-plus-wrap')) setMenuOpen(false);
+    };
+    document.addEventListener('click', onDoc);
+    onCleanup(() => document.removeEventListener('click', onDoc));
+  });
 
   /**
    * `shownMsat`: the message price the owner saw on the button they pressed
@@ -3184,180 +3226,62 @@ function Composer(props: {
         void submit();
       }}
     >
-      <Show when={modes().length > 1}>
-        <div class="composer-actions" role="toolbar" aria-label="What to send">
-          <For each={modes()}>
-            {(m) => (
-              <button
-                type="button"
-                class="composer-action"
-                data-composer-mode={m}
-                aria-pressed={mode() === m}
-                onClick={() => {
-                  // Reselecting the active mode is not an edit: it must not
-                  // detach an in-flight send from the draft it will clear.
-                  if (mode() === m) return;
-                  composerRevision++;
-                  setMode(m);
-                  setNote(null);
-                }}
-              >
-                {{ message: 'Message', pay: 'Pay', request: 'Request', file: 'File' }[m]}
-              </button>
-            )}
-          </For>
-        </div>
-      </Show>
+      <input
+        ref={(el) => { fileInput = el; }}
+        type="file"
+        class="sr-only"
+        tabindex="-1"
+        data-file-input
+        onChange={(e) => {
+          composerRevision++;
+          setFile(e.currentTarget.files?.[0] ?? null);
+        }}
+        aria-label="File to send"
+      />
 
       <Switch>
-        <Match when={mode() === 'message'}>
-          <div class="composer-main">
-            <Show when={!room()}>
+        <Match when={mode() === 'file'}>
+          <div class="composer-panel file-panel" data-composer-panel="file">
+            <div class="panel-head">
+              <strong>Send a file</strong>
+              <button type="button" class="link" data-composer-close aria-label="Close" onClick={closePanel}>✕</button>
+            </div>
+            <div class="composer-main">
               <button
                 type="button"
-                class="attach soft"
-                data-attach
-                aria-label="Attach a file"
-                title="Attach a file"
-                onClick={() => { composerRevision++; setMode('file'); setNote(null); }}
+                class="attach soft icon-btn"
+                data-file-choose
+                aria-label="Choose a file"
+                title="Choose a file"
+                onClick={() => fileInput?.click()}
               >
                 +
               </button>
-              <button
-                type="button"
-                class="attach soft voice-record"
-                classList={{ recording: recording() !== null }}
-                data-voice-record={recording() ? 'stop' : 'start'}
-                aria-label={recording() ? 'Stop recording' : 'Record a voice note'}
-                title={recording() ? 'Stop recording' : `Record a voice note (up to ${duration(VOICE_MAX_MS)})`}
-                disabled={starting() || busy()}
-                onClick={() => void (recording() ? stopRecording() : startVoice())}
-              >
-                {recording() ? `■ ${duration(recordedMs())}` : '🎙'}
+              <div class="file-chip" data-file-chip>
+                <Show when={file()} fallback={<span class="hint">{recording() ? `Recording… up to ${duration(recording()?.rec.limitMs ?? VOICE_MAX_MS)}` : `Choose a file for ${props.name}`}</span>}>
+                  {(f) => (
+                    <Show when={voicePreview()} fallback={<span class="file-name">{f().name}</span>}>
+                      <audio controls src={voicePreview()!} data-voice-preview aria-label="Voice note preview" />
+                    </Show>
+                  )}
+                </Show>
+                <button type="button" class="link" onClick={closePanel}>
+                  Remove
+                </button>
+                <span class="hint">Up to 1.4 MB · pays like a message</span>
+              </div>
+              <button type="submit" class="primary soft" disabled={disabled()} data-send>
+                {label()}
               </button>
-            </Show>
-            <button
-              type="button"
-              class="attach soft"
-              data-emoji
-              aria-label="Emoji"
-              aria-expanded={emojiOpen()}
-              title="Emoji"
-              onClick={() => setEmojiOpen((v) => !v)}
-            >
-              🙂
-            </button>
-            <textarea
-              ref={(el) => { draftInput = el; }}
-              rows={1}
-              placeholder={`Message ${props.name}`}
-              value={draft()}
-              onInput={(e) => setDraft(e.currentTarget.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-                  e.preventDefault();
-                  void submit();
-                }
-              }}
-              aria-label={`Message ${props.name}`}
-            />
-            <button type="submit" class="primary soft" disabled={disabled()} data-send>
-              {label()}
-            </button>
-          </div>
-          <Show when={emojiOpen()}>
-            <div class="emoji-picker" data-emoji-picker role="listbox" aria-label="Emoji">
-              <For each={[...EMOJIS]}>
-                {(e) => (
-                  <button
-                    type="button"
-                    class="emoji-pick"
-                    data-emoji-pick={e}
-                    onClick={() => {
-                      const el = draftInput;
-                      const start = el?.selectionStart ?? draft().length;
-                      const end = el?.selectionEnd ?? start;
-                      const { next, caret } = insertEmoji(draft(), e, start, end);
-                      composerRevision++;
-                      setDraft(next);
-                      setEmojiOpen(false);
-                      queueMicrotask(() => {
-                        el?.focus();
-                        el?.setSelectionRange(caret, caret);
-                      });
-                    }}
-                  >
-                    {e}
-                  </button>
-                )}
-              </For>
             </div>
-          </Show>
-        </Match>
-        <Match when={mode() === 'file'}>
-          <div class="composer-main">
-            <button
-              type="button"
-              class="attach soft"
-              data-attach
-              aria-label="Attach a file"
-              title="Attach a file"
-              onClick={() => fileInput?.click()}
-            >
-              +
-            </button>
-            <button
-              type="button"
-              class="attach soft voice-record"
-              classList={{ recording: recording() !== null }}
-              data-voice-record={recording() ? 'stop' : 'start'}
-              aria-label={recording() ? 'Stop recording' : 'Record a voice note'}
-              title={recording() ? 'Stop recording' : `Record a voice note (up to ${duration(VOICE_MAX_MS)})`}
-              disabled={starting() || busy()}
-              onClick={() => void (recording() ? stopRecording() : startVoice())}
-            >
-              {recording() ? `■ ${duration(recordedMs())}` : '🎙'}
-            </button>
-            <input
-              ref={(el) => { fileInput = el; }}
-              type="file"
-              class="sr-only"
-              data-file-input
-              onChange={(e) => {
-                composerRevision++;
-                setFile(e.currentTarget.files?.[0] ?? null);
-              }}
-              aria-label="File to send"
-            />
-            <div class="file-chip" data-file-chip>
-              <Show when={file()} fallback={<span class="hint">{recording() ? `Recording… up to ${duration(recording()?.rec.limitMs ?? VOICE_MAX_MS)}` : `Choose a file for ${props.name}`}</span>}>
-                {(f) => (
-                  <Show when={voicePreview()} fallback={<span class="file-name">{f().name}</span>}>
-                    <audio controls src={voicePreview()!} data-voice-preview aria-label="Voice note preview" />
-                  </Show>
-                )}
-              </Show>
-              <button
-                type="button"
-                class="link"
-                onClick={() => {
-                  composerRevision++;
-                  setFile(null);
-                  if (fileInput) fileInput.value = '';
-                  setMode('message');
-                }}
-              >
-                Remove
-              </button>
-              <span class="hint">Up to 1.4 MB · pays like a message</span>
-            </div>
-            <button type="submit" class="primary soft" disabled={disabled()} data-send>
-              {label()}
-            </button>
           </div>
         </Match>
         <Match when={mode() === 'pay'}>
-          <div class="fields pay-flow">
+          <div class="fields pay-flow composer-panel" data-composer-panel="pay">
+            <div class="panel-head">
+              <strong>Pay {props.name}</strong>
+              <button type="button" class="link" data-composer-close aria-label="Done" onClick={closePanel}>Done</button>
+            </div>
             <div class="modes soft small" role="tablist" aria-label="How to pay">
               <button type="button" role="tab" aria-selected={payKind() === 'invoice'} onClick={() => { if (payKind() === 'invoice') return; composerRevision++; setPayKind('invoice'); }}>Invoice</button>
               <button type="button" role="tab" aria-selected={payKind() === 'keysend'} onClick={() => { if (payKind() === 'keysend') return; composerRevision++; setPayKind('keysend'); }}>Direct</button>
@@ -3439,7 +3363,11 @@ function Composer(props: {
           </div>
         </Match>
         <Match when={mode() === 'request'}>
-          <div class="fields pay-flow">
+          <div class="fields pay-flow composer-panel" data-composer-panel="request">
+            <div class="panel-head">
+              <strong>Request from {props.name}</strong>
+              <button type="button" class="link" data-composer-close aria-label="Done" onClick={closePanel}>Done</button>
+            </div>
             <AmountField data="request" label="Amount to request" value={amount()} onInput={setAmount} />
             <input data-request-note placeholder="What for? e.g. dinner" value={memo()} onInput={(e) => setMemo(e.currentTarget.value)} aria-label="What it is for" />
             <div class="composer-bar">
@@ -3466,19 +3394,127 @@ function Composer(props: {
         </Match>
       </Switch>
 
-      <Show when={mode() === 'message' || mode() === 'file'}>
-        <div class="composer-bar cost-only">
-          <div class="cost" data-cost>
-            <span class="label">Cost to send</span>
-            <Show when={shown().msat !== null} fallback={<span class="sats">…</span>}>
-              <span class="sats" data-cost-msat={shown().msat!}>
-                {shown().estimate ? '≈ ' : ''}
-                {sats(shown().msat!)}
-                <span class="unit">{satUnit(shown().msat!)}</span>
-              </span>
-            </Show>
-            <span class="basis" title={shown().basis}>{shown().basis}</span>
+      <div class="composer-main signal-bar" data-composer-bar>
+        <button
+          type="button"
+          class="attach soft icon-btn"
+          data-emoji
+          aria-label="Emoji"
+          aria-expanded={emojiOpen()}
+          title="Emoji"
+          disabled={mode() !== 'message'}
+          onClick={() => setEmojiOpen((v) => !v)}
+        >
+          🙂
+        </button>
+        <textarea
+          ref={(el) => { draftInput = el; }}
+          rows={1}
+          placeholder={`Message ${props.name}`}
+          value={draft()}
+          disabled={mode() !== 'message'}
+          onInput={(e) => setDraft(e.currentTarget.value)}
+          onKeyDown={(e) => {
+            // Signal-like: Enter sends, Shift+Enter is a new line.
+            if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+              e.preventDefault();
+              void submit();
+            }
+          }}
+          aria-label={`Message ${props.name}`}
+        />
+        <Show when={!room()}>
+          <button
+            type="button"
+            class="attach soft icon-btn voice-record"
+            classList={{ recording: recording() !== null }}
+            data-voice-record={recording() ? 'stop' : 'start'}
+            aria-label={recording() ? 'Stop recording' : 'Record a voice note'}
+            title={recording() ? 'Stop recording' : `Record a voice note (up to ${duration(VOICE_MAX_MS)})`}
+            disabled={starting() || busy()}
+            onClick={() => void (recording() ? stopRecording() : startVoice())}
+          >
+            {recording() ? `■ ${duration(recordedMs())}` : '🎙'}
+          </button>
+          <div class="composer-plus-wrap">
+            <button
+              type="button"
+              class="attach soft icon-btn"
+              data-composer-plus
+              aria-label="More: attach, pay, request"
+              aria-haspopup="menu"
+              aria-expanded={menuOpen()}
+              title="Attach, pay or request"
+              onClick={() => setMenuOpen((v) => !v)}
+            >
+              +
+            </button>
+            <div class="composer-menu" data-composer-menu role="menu" hidden={!menuOpen()}>
+              <For each={modes().filter((m) => m !== 'message')}>
+                {(m) => (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    class="composer-menu-item"
+                    data-composer-mode={m}
+                    data-attach={m === 'file' ? '' : undefined}
+                    onClick={() => {
+                      setMenuOpen(false);
+                      if (m === 'file') fileInput?.click();
+                      // Reselecting the active mode is not an edit: it must not
+                      // detach an in-flight send from the draft it will clear.
+                      if (mode() === m) return;
+                      composerRevision++;
+                      setMode(m);
+                      setNote(null);
+                    }}
+                  >
+                    {{ message: 'Message', pay: 'Pay', request: 'Request', file: 'Attach' }[m]}
+                  </button>
+                )}
+              </For>
+            </div>
           </div>
+        </Show>
+        <Show when={mode() === 'message'}>
+          <button
+            type="submit"
+            class="primary soft send-btn"
+            disabled={disabled()}
+            data-send
+            title={sendTitle()}
+            aria-label={sendTitle()}
+          >
+            {sendMain()}<Show when={sendPrice()}><span class="sr-only"> · {sendPrice()}</span></Show>
+          </button>
+        </Show>
+      </div>
+      <Show when={emojiOpen()}>
+        <div class="emoji-picker" data-emoji-picker role="listbox" aria-label="Emoji">
+          <For each={[...EMOJIS]}>
+            {(e) => (
+              <button
+                type="button"
+                class="emoji-pick"
+                data-emoji-pick={e}
+                onClick={() => {
+                  const el = draftInput;
+                  const start = el?.selectionStart ?? draft().length;
+                  const end = el?.selectionEnd ?? start;
+                  const { next, caret } = insertEmoji(draft(), e, start, end);
+                  composerRevision++;
+                  setDraft(next);
+                  setEmojiOpen(false);
+                  queueMicrotask(() => {
+                    el?.focus();
+                    el?.setSelectionRange(caret, caret);
+                  });
+                }}
+              >
+                {e}
+              </button>
+            )}
+          </For>
         </div>
       </Show>
 
@@ -3495,18 +3531,30 @@ function Composer(props: {
           </>
         )}
       </Show>
-      <Show when={mode() === 'pay'}>
-        <details class="quiet-detail" data-budget-payment>
-          <summary>Payment rules</summary>
-          <p>App invoice payments and keysend reserve principal plus the network fee ceiling against the app daily all-in limit; any finite node grant still applies.</p>
-        </details>
-      </Show>
-      <Show when={mode() === 'file'}>
-        <details class="quiet-detail" data-budget-file>
-          <summary>File spend rules</summary>
-          <p>Files reserve principal plus the network fee ceiling against the same app all-in limit and contact budget, including during the ten-minute window.</p>
-        </details>
-      </Show>
+      <details class="quiet-detail composer-info" data-composer-info>
+        <summary aria-label="Cost and rules" title="Cost and rules">ⓘ</summary>
+        <Show when={mode() === 'message' || mode() === 'file'}>
+          <div class="composer-bar cost-only">
+            <div class="cost" data-cost>
+              <span class="label">Cost to send</span>
+              <Show when={shown().msat !== null} fallback={<span class="sats">…</span>}>
+                <span class="sats" data-cost-msat={shown().msat!}>
+                  {shown().estimate ? '≈ ' : ''}
+                  {sats(shown().msat!)}
+                  <span class="unit">{satUnit(shown().msat!)}</span>
+                </span>
+              </Show>
+              <span class="basis" title={shown().basis}>{shown().basis}</span>
+            </div>
+          </div>
+        </Show>
+        <Show when={mode() === 'pay'}>
+          <p data-budget-payment><strong>Payment rules.</strong> App invoice payments and keysend reserve principal plus the network fee ceiling against the app daily all-in limit; any finite node grant still applies.</p>
+        </Show>
+        <Show when={mode() === 'file'}>
+          <p data-budget-file><strong>File spend rules.</strong> Files reserve principal plus the network fee ceiling against the same app all-in limit and contact budget, including during the ten-minute window.</p>
+        </Show>
+      </details>
       <Show when={drafted()}>
         <p class="drafted" data-drafted>
           Drafted in the AI track. Check it and the cost, then {mode() === 'request' ? 'create the invoice' : 'send it'} yourself.
@@ -3567,17 +3615,20 @@ function SpendBar(props: { spend: SpendView | null; error: string | undefined; n
     <div class="spend" data-spend={props.spend?.state ?? 'unknown'}>
       <Switch>
         <Match when={props.spend?.state === 'open' && line().open}>
-          <p class="spend-line">
-            <span class="dot ok" /> {line().text}.{' '}
-            <button type="button" class="link" data-spend-lock onClick={() => void props.actions.lock()}>Lock now</button>
-          </p>
-          <details class="quiet-detail" data-spend-detail>
-            <summary>Details</summary>
-            <p>
-              {props.spend?.basis === 'app_lock'
-                ? 'This node version does not limit app tokens, so this window is the app’s own lock, kept in memory only.'
-                : 'Your node’s owner grant is in effect; this app uses it for ten minutes per approval.'}
+          <details class="quiet-detail passive-status" data-spend-status>
+            <summary aria-label="Spending status" title="Spending status">ⓘ</summary>
+            <p class="spend-line">
+              <span class="dot ok" /> {line().text}.{' '}
+              <button type="button" class="link" data-spend-lock onClick={() => void props.actions.lock()}>Lock now</button>
             </p>
+            <details class="quiet-detail" data-spend-detail>
+              <summary>Details</summary>
+              <p>
+                {props.spend?.basis === 'app_lock'
+                  ? 'This node version does not limit app tokens, so this window is the app’s own lock, kept in memory only.'
+                  : 'Your node’s owner grant is in effect; this app uses it for ten minutes per approval.'}
+              </p>
+            </details>
           </details>
         </Match>
         <Match when={props.spend?.state === 'pending' && props.spend.pending}>
@@ -3855,14 +3906,17 @@ function BudgetBar(props: {
         </Match>
         <Match when={props.stand.kind === 'ok' && (props.stand as Extract<BudgetStandT, { kind: 'ok' }>)}>
           {(st) => (
-            <p class="spend-line" data-budget-line>
-              <span class="dot ok" />
-              <span class="line-text">
-                Pays automatically · {sats(st().spent)} of {fmtAmount(st().limit)} to {who()} in 24 h · approval ends in{' '}
-                {hoursLeft(props.budget.autopay.open_until_ms, props.now, props.budget.window_ms)} h ·{' '}
-                <button type="button" class="link" data-pause-all onClick={() => void props.actions.pauseAll()}>Pause app payments</button>
-              </span>
-            </p>
+            <details class="quiet-detail passive-status" data-budget-status>
+              <summary aria-label="Payment status" title="Payment status">ⓘ</summary>
+              <p class="spend-line" data-budget-line>
+                <span class="dot ok" />
+                <span class="line-text">
+                  Pays automatically · {sats(st().spent)} of {fmtAmount(st().limit)} to {who()} in 24 h · approval ends in{' '}
+                  {hoursLeft(props.budget.autopay.open_until_ms, props.now, props.budget.window_ms)} h ·{' '}
+                  <button type="button" class="link" data-pause-all onClick={() => void props.actions.pauseAll()}>Pause app payments</button>
+                </span>
+              </p>
+            </details>
           )}
         </Match>
       </Switch>
@@ -4016,6 +4070,12 @@ function BudgetPanel(props: {
   );
 }
 
+/** Product default hides bitsov://introduce; money-safety tests enable the still-shipped door/consent UI. */
+let showLegacyIntroductionUi = false;
+export function setShowLegacyIntroductionUi(enabled: boolean) {
+  showLegacyIntroductionUi = enabled;
+}
+
 function NewTrack(props: {
   moneyBlocked: boolean;
   ownId: string;
@@ -4032,6 +4092,9 @@ function NewTrack(props: {
   let formRevision = 0;
   onCleanup(() => { active = false; });
   const editForm = () => { formRevision += 1; };
+  // Product hides bitsov://introduce (protocol audit): Profile cards live under
+  // Browse. Sponsor starter-bitcoin stays reachable on this track. Tests may
+  // flip showLegacyIntroductionUi to exercise the still-shipped door/consent UI.
   // K1: your own signed introduction. Without one (older node, no dialable
   // endpoint) the plain node id is shown as before.
   const [mine, setMine] = createSignal<Introduction | null>(null);
@@ -4043,9 +4106,10 @@ function NewTrack(props: {
       setMineErr(asActionError(e).message);
     });
   };
-  loadMine();
+  if (showLegacyIntroductionUi) loadMine();
   const nowSecs = () => Math.floor(props.now / 1000);
   const mineLive = () => {
+    if (!showLegacyIntroductionUi) return null;
     const m = mine();
     return m && m.expires_at > nowSecs() ? m : null;
   };
@@ -4350,8 +4414,8 @@ function NewTrack(props: {
             <div class="empty-track" data-new-track>
               <h2>Share your node id</h2>
               <p class="hint">
-                Anyone who knows it can offer to pay you to talk. Knowing an id is an introduction, not admission: each
-                message is admitted only when its payment settles.
+                Anyone who knows it can offer to pay you to talk. Knowing an id is not admission: each message is
+                admitted only when its payment settles. To open someone else’s profile card, use Browse.
               </p>
               <Show when={qr()}>
                 <svg class="qr" viewBox={`0 0 ${qr()!.extent} ${qr()!.extent}`} shape-rendering="crispEdges" role="img" aria-label="Your node id as a QR code">
@@ -4360,13 +4424,42 @@ function NewTrack(props: {
                 </svg>
               </Show>
               <code class="address">{props.ownId}</code>
-              <Show when={mine()}>
+              <Show when={sponsor()?.enabled}>
+                <Show
+                  when={mine()?.starter}
+                  fallback={
+                    <>
+                      <button type="button" class="quiet" data-starter-include disabled={props.moneyBlocked} onClick={() => void includeStarter()}>
+                        {open() ? `Include starter bitcoin · ${fmtAmount(sponsor()!.gift_msat)}` : 'Include starter bitcoin · approve first'}
+                      </button>
+                      <p class="hint" data-starter-purse>
+                        You fund it from your own node, only after you approve their request. {sats(sponsor()!.purse_used_msat)} of{' '}
+                        {fmtAmount(sponsor()!.purse_msat)} used in the last 24 hours.
+                      </p>
+                    </>
+                  }
+                >
+                  {(st) => (
+                    <>
+                      <p data-starter-offered>
+                        Starter bitcoin: up to <strong>{fmtAmount(st().gift_msat)}</strong>, after you approve their request. It is theirs
+                        once it arrives; every message still pays.
+                      </p>
+                      <code class="address" data-intro-link>{mine()!.offer_link ?? mine()!.link}</code>
+                    </>
+                  )}
+                </Show>
+                <Show when={kitErr() && kitErr() !== MONEY_NOT_READY}>
+                  <p class="err-note" data-starter-error>{kitErr()}</p>
+                </Show>
+              </Show>
+              <Show when={showLegacyIntroductionUi && mine()}>
                 <p class="hint" data-intro-expired>
                   Your introduction expired. <button type="button" class="link" onClick={loadMine}>Make a new one</button>
                 </p>
               </Show>
               <Show when={mineErr()}>
-                <p class="hint" data-intro-unavailable>{mineErr()}</p>
+                {(e) => <SoftError message={e()} data="intro-unavailable" />}
               </Show>
             </div>
           }
@@ -4515,6 +4608,7 @@ function NewTrack(props: {
               </Show>
             </form>
           </Show>
+          <Show when={showLegacyIntroductionUi}>
           <form
             class="panel"
             data-intro-open
@@ -4647,9 +4741,10 @@ function NewTrack(props: {
               )}
             </Show>
             <Show when={cardErr()}>
-              <p class="err-note" data-door-error>{cardErr()}</p>
+              {(e) => <SoftError message={e()} data="door-error" />}
             </Show>
           </form>
+          </Show>
 
           <form
             class="panel"
@@ -4725,8 +4820,8 @@ function NewTrack(props: {
           </form>
         </div>
         <p class="send-next">
-          Invites change your node, so they use the same owner approval as spending. Adding a peer by address and creating
-          rooms are not in the app yet.
+          Invites change your node, so they use the same owner approval as spending. Profile cards live under Browse.
+          Rooms (group chat) are coming soon — not on the protocol yet.
         </p>
       </div>
     </>

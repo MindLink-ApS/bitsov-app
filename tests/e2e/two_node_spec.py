@@ -38,7 +38,7 @@ def run(r):
         r.ui('click', selector='[data-send]', timeoutMs=timeout)
 
     def window(s, what, ready):
-        """'Approve spending' for pay/file: the owner at the node, or the live G1 grant."""
+        """Send still opens spend approval for pay/file: owner at the node, or the live G1 grant."""
         r.ui('click', selector='[data-send]')
         r.wait_until(lambda: r.ui_try('exists', selector='[data-owner-action]') or ready in r.text('[data-send]'), 20)
         if r.ui_try('exists', selector='[data-owner-action]'):
@@ -47,7 +47,7 @@ def run(r):
             out = r.owner_grant(op, '--budget', '100', '--for', '10m')
             s.note(f'{what}: owner granted the 10-minute window at node A: ' + ' '.join(out.split())[-160:])
         else:
-            s.note(f'{what}: "Approve spending" opened the 10-minute window with no owner step at the node '
+            s.note(f'{what}: Send opened the 10-minute window with no owner step at the node '
                    f'(the live owner grant was reused): {r.ui_try("text", within={"selector": "[data-composer]"})!r}'[:400])
         s.check(f'{what}: spending window open', r.wait_until(lambda: ready in r.text('[data-send]'), 20), r.text('[data-send]'))
 
@@ -216,7 +216,10 @@ def run(r):
         label = r.text('[data-send]')
         s.check('invoice shows its all-in price and fee ceiling', int(r.ui('attrs', selector='[data-cost-msat]', names=['data-cost-msat'])[0]['data-cost-msat']) == 8000 and 'up to 5 sats network fee' in r.text('[data-composer]'))
         s.snap('pay-before')
-        if 'Approve' in label:
+        # Spend approval still runs under Send (M2 dropped the "Approve …" label).
+        if r.ui_try('exists', selector='[data-spend="locked"], [data-spend="expired"], [data-spend="closed"]'):
+            window(s, 'pay', 'Pay')
+        elif 'Approve' in label:
             window(s, 'pay', 'Pay')
         r.ui('click', selector='[data-send]', timeoutMs=20000)
         # Pay shows exactly what it will pay first; only the confirm tap pays.
@@ -231,7 +234,7 @@ def run(r):
         settled_b = r.wait_until(lambda: any(p.get('payment_hash') == inv.get('payment_hash') and str(p.get('status')).lower() == 'settled'
                                              for p in r.get('b', '/payments')), 20)
         s.check('pay: B\'s invoice settled', settled_b, status)
-        r.ui_try('click', selector='[data-budget-payment] > summary')
+        r.ui_try('click', selector='[data-composer-info] > summary')
         s.check('payment scope and fee warning are visible', 'principal plus the network fee ceiling' in r.text('[data-budget-payment]'))
         s.check('app invoice payment reserves 8 sats including the fee ceiling in the shared daily book', r.wait_until(lambda: app_tally() == before_pay + 8, 15))
         # Independent reviewer probe: replay the already-settled invoice through
@@ -365,13 +368,14 @@ def run(r):
         r.ui('click', selector='[data-composer-mode="pay"]')
         r.ui('click', selector='[data-spend-lock]')
         s.need('lock closes the spending window', r.ui_try('wait', selector='[data-spend="locked"]'))
-        s.check('locked send offers approval', 'Approve' in r.text('[data-send]'))
+        s.check('locked send is still available', 'Send' in r.text('[data-send]') or 'Pay' in r.text('[data-send]'))
         r.ui('click', selector='[data-send]')
         if r.ui_try('exists', selector='[data-owner-action]'):
             _, op = owner_op()
             r.owner_grant(op, '--budget', '100', '--for', '10m')
         s.need('approval window reopened', r.ui_try('wait', selector='[data-spend="open"]', timeoutMs=20000))
-        r.ui('click', selector='[data-composer-mode="message"]')
+        r.ui_try('click', selector='[data-composer-close]')
+        r.ui_try('click', selector='[data-composer-info] > summary')
         shown = r.ui('attrs', selector='[data-cost-msat]', names=['data-cost-msat'])
         s.note(f'composer price before B raises it: {shown}')
         r.restart_b(5000)

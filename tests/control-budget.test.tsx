@@ -3,6 +3,7 @@ import { render } from 'solid-js/web';
 import App from '../src/App';
 import type { PairingView } from '../src/onboarding/pairing';
 import { sampleSource, SAMPLE_PEERS, SAMPLE_PRESETS } from '../src/control/sample';
+import { setShowLegacyIntroductionUi } from '../src/control/Shell';
 import { budgetStand, messagesWorth } from '../src/control/state';
 import type { BudgetRow, BudgetView, SpendView } from '../src/control/types';
 
@@ -124,6 +125,7 @@ describe('invisible payments in the composer and the context panel', () => {
     dispose = undefined;
     mount?.remove();
     vi.unstubAllGlobals();
+    setShowLegacyIntroductionUi(false);
   });
 
   const $ = <T extends Element = HTMLElement>(sel: string) => mount.querySelector<T>(sel);
@@ -164,7 +166,7 @@ describe('invisible payments in the composer and the context panel', () => {
     const host = stubHost(budgetView({ rows: [{ target: MAYA, room: false, limit_msat: 50_000, spent_msat: 0 }] }));
     await openShell();
     type('[data-composer] textarea', 'gm Maya');
-    await vi.waitFor(() => expect(text('[data-send]')).toBe('Approve app all-in limit'));
+    await vi.waitFor(() => expect(text('[data-send]')).toBe('Send'));
     expect(text('[data-budget-setup]')).toContain('Someone new always asks first');
 
     // The owner picks a preset; the tap is the approval. Nothing is sent by it.
@@ -251,13 +253,32 @@ describe('invisible payments in the composer and the context panel', () => {
     expect(host.used('first_contact_quote')[0].args).toEqual({ peer: NEW });
   });
 
-  // K1 slice 1: an introduction is a signed door card, never admission.
+  // Default product path hides bitsov://introduce (M3 honesty). Money-safety
+  // door/consent tests enable setShowLegacyIntroductionUi to exercise the
+  // still-shipped component; sponsor include stays on Start without that flag.
   const STRANGER = 'd'.repeat(64);
   const INTRO = 'bitsov://introduce#AQdyZWd0ZXN0' + 'Q'.repeat(240);
   const card = (node_id: string, reach: 'public' | 'local', msat: number) => ({
     node_id, network: 'regtest', endpoint: reach === 'local' ? '192.168.1.20:9735' : 'node.example.org:9735', reach,
     admission_msat: msat, message_msat: msat, issued_at: Math.floor(Date.now() / 1000), expires_at: Math.floor(Date.now() / 1000) + 600,
     link: node_id === OWN ? INTRO.replace('Q', 'M') : INTRO,
+  });
+
+  it('hides the legacy introduction path; Browse is where profile cards open', async () => {
+    stubHost(open([{ target: MAYA, room: false, limit_msat: 50_000, spent_msat: 0 }]), {
+      introduction_mine: () => card(OWN, 'public', 10_000),
+    });
+    await openShell();
+    $<HTMLButtonElement>('[data-track="new"]')!.click();
+    await vi.waitFor(() => expect($('[data-new-track]')).not.toBeNull());
+    expect($('[data-intro-mine]')).toBeNull();
+    expect($('[data-intro-open]')).toBeNull();
+    expect(text('[data-new-track]')).toContain('Share your node id');
+    expect(text('[data-new-track]')).toContain('Browse');
+    $<HTMLButtonElement>('[data-track="discover"]')!.click();
+    await vi.waitFor(() => expect($('[data-panel="discover"]')).not.toBeNull());
+    expect(text('[data-panel="discover"]')).toMatch(/profile/i);
+    expect($('[data-browse-pages-soon]')).not.toBeNull();
   });
 
   it('shows your signed introduction, and a pasted one opens a door card that Continue hands to the first-contact door', async () => {
@@ -270,6 +291,7 @@ describe('invisible payments in the composer and the context panel', () => {
         expires_at: Math.floor(Date.now() / 1000) + 60,
       }),
     });
+    setShowLegacyIntroductionUi(true);
     await openShell();
     $<HTMLButtonElement>('[data-track="new"]')!.click();
     await vi.waitFor(() => expect($('[data-intro-mine]')).not.toBeNull());
@@ -317,6 +339,7 @@ describe('invisible payments in the composer and the context panel', () => {
         expires_at: Math.floor(Date.now() / 1000) + 60,
       }),
     });
+    setShowLegacyIntroductionUi(true);
     await openShell();
     $<HTMLButtonElement>('[data-track="new"]')!.click();
     type('[data-intro-text]', INTRO);
@@ -351,6 +374,7 @@ describe('invisible payments in the composer and the context panel', () => {
         introduction_read: () => card(STRANGER, 'public', 3000),
         introduction_open: () => pending,
       });
+      setShowLegacyIntroductionUi(true);
       await openShell();
       $<HTMLButtonElement>('[data-track="new"]')!.click();
       type('[data-intro-text]', INTRO);
@@ -400,6 +424,7 @@ describe('invisible payments in the composer and the context panel', () => {
       introduction_mine: () => card(OWN, 'public', 10000),
       introduction_read: args => args!.text === a.link ? pendingA : b,
     });
+    setShowLegacyIntroductionUi(true);
     await openShell();
     $<HTMLButtonElement>('[data-track="new"]')!.click();
     type('[data-intro-text]', a.link);
@@ -426,6 +451,7 @@ describe('invisible payments in the composer and the context panel', () => {
       introduction_mine: () => card(OWN, 'public', 10000),
       introduction_read: args => args!.text === INTRO ? pendingA : b,
     });
+    setShowLegacyIntroductionUi(true);
     await openShell();
     $<HTMLButtonElement>('[data-track="new"]')!.click();
     type('[data-intro-text]', INTRO);
@@ -459,6 +485,7 @@ describe('invisible payments in the composer and the context panel', () => {
       introduction_read: () => next,
       introduction_open: () => replacement,
     });
+    setShowLegacyIntroductionUi(true);
     await openShell();
     $<HTMLButtonElement>('[data-track="new"]')!.click();
     type('[data-intro-text]', INTRO);
@@ -482,6 +509,7 @@ describe('invisible payments in the composer and the context panel', () => {
       introduction_mine: () => { throw 'Your node cannot sign an introduction yet. Share your node id instead.'; },
       introduction_read: () => { throw 'The signature does not match this node’s key. Do not use this introduction.'; },
     });
+    setShowLegacyIntroductionUi(true);
     await openShell();
     $<HTMLButtonElement>('[data-track="new"]')!.click();
     // Without a card the node id is still shareable.
@@ -818,6 +846,7 @@ describe('invisible payments in the composer and the context panel', () => {
       sponsor_request: () => ({ request: 'bitsov://sponsor-request#' + 'R'.repeat(200), code: '482913', sponsor: STRANGER, amount_msat: 20_000_000, payment_hash: 'ef'.repeat(32), expires_at: Math.floor(Date.now() / 1000) + 500 }),
       sponsor_request_status: (args) => ({ payment_hash: args!.payment_hash, state: 'received', amount_msat: 20_000_000 }),
     });
+    setShowLegacyIntroductionUi(true);
     await openShell();
     $<HTMLButtonElement>('[data-track="new"]')!.click();
     type('[data-intro-text]', OFFER_LINK);
@@ -843,6 +872,7 @@ describe('invisible payments in the composer and the context panel', () => {
       introduction_mine: () => card(OWN, 'public', 10_000),
       introduction_read: () => ({ ...card(STRANGER, 'public', 3000), expires_at: Math.floor(Date.now() / 1000) - 1 }),
     });
+    setShowLegacyIntroductionUi(true);
     await openShell();
     $<HTMLButtonElement>('[data-track="new"]')!.click();
     type('[data-intro-text]', INTRO);
@@ -1053,7 +1083,7 @@ describe('invisible payments in the composer and the context panel', () => {
     stubHost(open([{ target: MAYA, room: false, limit_msat: 50_000, spent_msat: 0 }]));
     await openShell();
     $<HTMLButtonElement>('[data-composer-mode="pay"]')!.click();
-    await vi.waitFor(() => expect(text('[data-send]')).toBe('Approve spending'));
+    await vi.waitFor(() => expect(text('[data-send]')).toBe('Send'));
     expect($('[data-budget]')).toBeNull();
   });
 });

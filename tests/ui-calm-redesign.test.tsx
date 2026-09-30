@@ -92,21 +92,29 @@ describe('settings modal + theme', () => {
     start();
     await vi.waitFor(() => expect(mount.querySelector('[data-composer]')).not.toBeNull());
     expect(mount.querySelector('[data-attach]')).not.toBeNull();
-    expect(mount.querySelector('[data-composer-mode="pay"]')?.classList.contains('composer-action')).toBe(true);
-    expect(mount.querySelector('[data-composer-mode="request"]')?.classList.contains('composer-action')).toBe(true);
-    expect(mount.querySelector('[data-composer-mode="file"]')?.classList.contains('composer-action')).toBe(true);
+    // No visible Message / Pay / Request / File tabs: one bar, a + menu.
+    expect(mount.querySelector('.composer-actions')).toBeNull();
+    expect(mount.querySelector('[data-composer-plus]')).not.toBeNull();
+    const menu = mount.querySelector('[data-composer-menu]') as HTMLElement;
+    expect(menu.hidden).toBe(true);
+    (mount.querySelector('[data-composer-plus]') as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(menu.hidden).toBe(false));
+    for (const m of ['file', 'pay', 'request']) {
+      expect(menu.querySelector(`[data-composer-mode="${m}"]`)?.classList.contains('composer-menu-item')).toBe(true);
+    }
+    // Attach is one click: the file mode and the picker together.
+    const input = mount.querySelector('[data-file-input]') as HTMLInputElement;
+    const picker = vi.spyOn(input, 'click');
     (mount.querySelector('[data-attach]') as HTMLButtonElement).click();
-    await vi.waitFor(() => expect(mount.querySelector('[data-file-input]')).not.toBeNull());
+    expect(picker).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(mount.querySelector('[data-composer-panel="file"]')).not.toBeNull());
+    expect(menu.hidden).toBe(true);
   });
 
-  it('hides attach in rooms', async () => {
+  it('marks Rooms as coming soon while still listing any existing sample rooms', async () => {
     start();
-    await vi.waitFor(() => expect(mount.querySelector('[data-composer]')).not.toBeNull());
-    const room = [...mount.querySelectorAll('[data-track]')].find((el) => el.getAttribute('data-track')?.startsWith('room:'));
-    expect(room).toBeTruthy();
-    (room as HTMLButtonElement).click();
-    await vi.waitFor(() => expect(mount.querySelector('[data-composer]')).not.toBeNull());
-    expect(mount.querySelector('[data-attach]')).toBeNull();
+    await vi.waitFor(() => expect(mount.querySelector('[data-rooms-coming-soon]')).not.toBeNull());
+    expect(mount.querySelector('[data-rooms-coming-soon]')!.textContent).toMatch(/Coming soon/);
   });
 
   it('moves focus into settings and closes on Escape', async () => {

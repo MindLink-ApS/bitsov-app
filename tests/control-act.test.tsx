@@ -132,7 +132,7 @@ describe('acting from the track', () => {
     type('[data-composer] textarea', 'gm Maya');
 
     // Locked: the button is the approval. Pressing it asks; it sends nothing.
-    await vi.waitFor(() => expect(text('[data-send]')).toBe('Approve spending'));
+    await vi.waitFor(() => expect(text('[data-send]')).toBe('Send'));
     submit();
     await vi.waitFor(() => expect(text('[data-owner-action]')).toBe('konsensus grant --op ab12'));
     expect(text('[data-approval="pending"]')).toContain('This app cannot approve it for you');
@@ -159,7 +159,7 @@ describe('acting from the track', () => {
 
     // Lock now closes it again.
     $<HTMLButtonElement>('[data-spend-lock]')!.click();
-    await vi.waitFor(() => expect(text('[data-send]')).toBe('Approve spending'));
+    await vi.waitFor(() => expect(text('[data-send]')).toBe('Send'));
   }, 10_000);
 
   it('shows a rejection with the recipient node’s own reason', async () => {
@@ -186,7 +186,7 @@ describe('acting from the track', () => {
     await vi.waitFor(() => expect(text('[data-send]')).toBe('Send · ≈ 2 sats'));
     host.spend.v = view('expired');
     submit();
-    await vi.waitFor(() => expect(text('[data-send]')).toBe('Approve spending'));
+    await vi.waitFor(() => expect(text('[data-send]')).toBe('Send'));
     expect(text('[data-spend="expired"]')).toContain('Approve again');
     expect($('[data-artifact="failed"]')).toBeNull();
     expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('still there?');
@@ -671,7 +671,7 @@ describe('acting from the track', () => {
         view('unavailable', { pending: { op_id: 'cd', expires_at_ms: Date.now() + 900_000, owner_action: 'unavailable in this deployment: no owner control socket', owner_can_grant: false } }),
     });
     await openShell();
-    await vi.waitFor(() => expect(text('[data-send]')).toBe('Approve spending'));
+    await vi.waitFor(() => expect(text('[data-send]')).toBe('Send'));
     host.spend.v = view('unavailable', { pending: { op_id: 'cd', expires_at_ms: Date.now() + 900_000, owner_action: 'unavailable in this deployment: no owner control socket', owner_can_grant: false } });
     submit();
     await vi.waitFor(() => expect(text('[data-approval="unavailable"]')).toContain('Receiving still works'));

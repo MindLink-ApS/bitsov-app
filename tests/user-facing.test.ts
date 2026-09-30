@@ -1,0 +1,20 @@
+import { describe, expect, it } from 'vitest';
+import { softenError } from '../src/control/userFacing';
+
+describe('softenError', () => {
+  it('maps introduction_unavailable to a plain public-address sentence', () => {
+    const soft = softenError(
+      'introduction_unavailable: no dialable peer endpoint; set [network] advertised_addr',
+    );
+    expect(soft.summary).toBe('We could not find a public address for your node yet.');
+    expect(soft.detail).toContain('introduction_unavailable');
+    expect(soft.detail).toContain('advertised_addr');
+  });
+
+  it('leaves ordinary sentences alone', () => {
+    expect(softenError('Select and copy the link above.')).toEqual({
+      summary: 'Select and copy the link above.',
+      detail: null,
+    });
+  });
+});

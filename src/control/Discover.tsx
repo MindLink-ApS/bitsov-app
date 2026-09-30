@@ -5,6 +5,7 @@ import type { FrontDoor, FrontDoorPublish } from './types';
 import type { Source } from './source';
 import { amount as fmtAmount } from './format';
 import { asActionError } from './state';
+import { SoftError } from './SoftError';
 import {
   CARD_TOO_LARGE,
   CARD_PUBLISH_BUDGET,
@@ -129,14 +130,18 @@ export function DiscoverPanel(props: Props) {
 
   return (
     <div class="panel discover" data-panel="discover">
-      <h2>Discover</h2>
+      <h2>Browse</h2>
       <p class="hint">
-        Paste a front-door link to read it. Reading is free and local. After Read, the card shows a
-        QR you can hold up for someone else — this desktop app does not scan a camera. Knocking uses
-        the existing first-contact path — you pay their admission price once.
+        Paste a profile link (or hold up its QR for someone else to paste). Reading is free and local.
+        This desktop app does not scan a camera. Knocking uses first contact — you pay their admission
+        price once.
+      </p>
+      <p class="hint" data-browse-pages-soon>
+        Coming soon: fetching another node’s public pages or site. Today Browse only opens profile
+        cards you paste or scan.
       </p>
       <label class="field">
-        <span>Front-door link</span>
+        <span>Profile link</span>
         <textarea
           data-discover-paste
           rows={3}
@@ -155,9 +160,7 @@ export function DiscoverPanel(props: Props) {
         </button>
       </div>
       <Show when={err()}>
-        <p class="hint err" data-discover-error>
-          {err()}
-        </p>
+        {(e) => <SoftError message={e()} data="discover-error" />}
       </Show>
       <Show when={card()} keyed>
         {(c) => <FrontDoorCardView card={c} now={props.now} shareQr />}
@@ -240,7 +243,7 @@ export function FrontDoorCardView(props: { card: FrontDoor; now: number; shareQr
         </div>
       </header>
       <Show when={props.shareQr && c().link}>
-        <FrontDoorShareQr link={c().link} label="Front-door link as a QR code" />
+        <FrontDoorShareQr link={c().link} label="Profile link as a QR code" />
       </Show>
       <Show when={c().profile.about}>
         <p data-fd-about>{c().profile.about}</p>
@@ -525,7 +528,7 @@ export function FrontDoorEditor(props: { source: Source; now: number }) {
 
   return (
     <div class="panel" data-panel="front-door">
-      <h2>My front door</h2>
+      <h2>My profile</h2>
       <p class="hint">
         A signed card anyone may carry. Reading it costs nothing. Knocking still pays your admission
         price. Media is hashed locally; large images stay off the card.
@@ -629,10 +632,8 @@ export function FrontDoorEditor(props: { source: Source; now: number }) {
           </button>
         </Show>
       </div>
-      <Show when={err() && !ownerAsk()}>
-        <p class="hint err" data-fd-edit-error>
-          {err()}
-        </p>
+      <Show when={!ownerAsk() ? err() : null}>
+        {(e) => <SoftError message={e()} data="fd-edit-error" class="hint" />}
       </Show>
       <Show when={ownerAsk()}>
         {(ask) => (
@@ -651,7 +652,7 @@ export function FrontDoorEditor(props: { source: Source; now: number }) {
               seq {c().seq} · expires {new Date(c().expires_at * 1000).toLocaleDateString()}
             </p>
             <p class="hint">Hold this QR up for someone to scan with their phone, or copy the link.</p>
-            <FrontDoorShareQr link={c().link} label="Your front-door link as a QR code" />
+            <FrontDoorShareQr link={c().link} label="Your profile link as a QR code" />
             <code class="mono" data-fd-link>
               {c().link}
             </code>

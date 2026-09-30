@@ -632,7 +632,7 @@ describe('a request in chat', () => {
     await vi.waitFor(() => expect($('[data-request-pay]')).not.toBeNull());
     $<HTMLButtonElement>('[data-request-pay]')!.click();
     await vi.waitFor(() => expect($<HTMLTextAreaElement>('[data-pay-invoice]')?.value).toBe(invoice()));
-    await vi.waitFor(() => expect(text('[data-send]')).toBe('Approve spending'));
+    await vi.waitFor(() => expect(text('[data-send]')).toBe('Send'));
     expect($('[data-pay-review]')).toBeNull();
     expect(host.used('payment_pay')).toHaveLength(0);
   });

@@ -144,7 +144,7 @@ it.each(['message', 'pay', 'request', 'file'] as const)('cleans up successful %s
     mount = document.createElement('div'); document.body.appendChild(mount);
     dispose = render(() => <ControlCenter source={source} active ready error={null} ownId={SAMPLE_OWN_ID} firstRun={<span />} />, mount);
     await vi.waitFor(() => expect(mount.querySelector('[data-send]')).not.toBeNull());
-    mount.querySelector<HTMLButtonElement>(`[data-composer-mode="${mode}"]`)!.click();
+    if (mode !== 'message') mount.querySelector<HTMLButtonElement>(`[data-composer-mode="${mode}"]`)!.click();
     const selector = { message: '[data-composer] textarea', pay: '[data-pay-invoice]', request: '[data-request-amount]', file: '[data-file-input]' }[mode];
     const fill = (replacement: boolean) => {
       if (mode === 'file') {
