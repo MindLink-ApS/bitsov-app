@@ -13,9 +13,9 @@ Tauri's resolver expects: `bin/konsensus-<target-triple>[.exe]`.
 > exists with signed `SHA256SUMS.asc`. Checksum/signature placeholders live in
 > `scripts/fetch-node-sidecar.sh` (`EXPECTED_*`).
 
-## App changes that ride with this pin (#60–#76)
+## App changes that ride with this pin (#60–#78)
 
-When rc8 publishes and this pin merges, the app on `main` already carries (or will carry via open #76):
+When rc8 publishes and this pin merges, the app on `main` already carries:
 
 - **#60** operation-id journal and reconcile (exactly-once slice 3)
 - **#61** money-action lock (serialize spend)
@@ -28,8 +28,10 @@ When rc8 publishes and this pin merges, the app on `main` already carries (or wi
 - **#71 / #75** voice notes as paid `audio/webm`
 - **#72** AI endpoint badge (own / shared open / frontier)
 - **#73** Discover view + My front door editor
-- **#74** 1:1 voice/video calls over paid signalling (owner-set STUN; regtest prototype)
-- **#76** front-door editor media / CV / website / safe render (open companion at pin time)
+- **#74** 1:1 voice/video calls over paid signalling (owner-set STUN; regtest prototype; genome #131)
+- **#76** front-door editor media / CV / website / safe render
+- **#77** Own-tier local model via loopback (AI P2)
+- **#78** 15 KiB front-door publish budget (sig/site/endpoint margin vs node 16 KiB)
 
 Genome companion (draft): https://github.com/MindLink-ApS/BitSov-bitsov/pull/124
 
