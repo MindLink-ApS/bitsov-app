@@ -1540,7 +1540,7 @@ function Conversation(props: {
       </span>
     ) : (
       <span class="id">
-        {props.members === null ? 'Reading members…' : `${props.members.length} members`}
+        {props.members === null ? 'Reading members…' : `${props.members.length} members · Coming soon`}
       </span>
     );
 
@@ -1589,7 +1589,9 @@ function Conversation(props: {
           )}
         </Show>
         <Show when={props.track.kind === 'room'}>
-          <p class="day">Members added here are not notified yet. A room message pays each member their own price, separately.</p>
+          <p class="day" data-room-day-notice>
+            Coming soon — group chat is not on the protocol yet. Members added here are not notified yet. A room message pays each member their own price, separately.
+          </p>
         </Show>
         <For
           each={items()}
@@ -1598,7 +1600,7 @@ function Conversation(props: {
               <h2>Nothing here yet</h2>
               <p class="hint">
                 {props.track.kind === 'room'
-                  ? 'A message here pays each member separately, and reaches each one when their payment settles.'
+                  ? 'Coming soon — group chat is not on the protocol yet. A message here pays each member separately, and reaches each one when their payment settles.'
                   : `Your first message to ${props.name} is a paid first contact: it is admitted when the payment settles.`}
               </p>
             </div>
@@ -4847,8 +4849,8 @@ function NewTrack(props: {
                 </div>
               )}
             </Show>
-            <Show when={errs.create && errs.create !== MONEY_NOT_READY}>
-              <p class="err-note">{errs.create}</p>
+            <Show when={errs.create && errs.create !== MONEY_NOT_READY ? errs.create : null}>
+              {(e) => <SoftError message={e()} data="invite-create-error" />}
             </Show>
           </form>
 
@@ -4877,8 +4879,8 @@ function NewTrack(props: {
                 </p>
               )}
             </Show>
-            <Show when={errs.redeem && errs.redeem !== MONEY_NOT_READY}>
-              <p class="err-note">{errs.redeem}</p>
+            <Show when={errs.redeem && errs.redeem !== MONEY_NOT_READY ? errs.redeem : null}>
+              {(e) => <SoftError message={e()} data="invite-redeem-error" />}
             </Show>
           </form>
         </div>
