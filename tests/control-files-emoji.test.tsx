@@ -10,6 +10,7 @@ const A = 'bb'.repeat(32);
 const IN_ID = 'cc'.repeat(32);
 const BIG_ID = 'dd'.repeat(32);
 const IMG_ID = 'ee'.repeat(32);
+const VOICE_ID = 'ff'.repeat(32);
 
 type Reply = (args?: Record<string, unknown>) => unknown;
 type Call = { cmd: string; args?: Record<string, unknown> };
@@ -58,6 +59,7 @@ function stubHost(overrides: Record<string, Reply> = {}) {
     budget_status: () => openBudget(),
     file_fetch: () => ({ filename: 'brief.txt', mime_type: 'text/plain', size_bytes: 2, data_b64: 'aGk=' }),
     file_save: () => ({ saved: true, filename: 'brief.txt', mime_type: 'text/plain', size_bytes: 2 }),
+    voice_note_fetch: () => ({ filename: 'voice-note-1.webm', mime_type: 'audio/webm', size_bytes: 2, data_b64: 'aGk=' }),
     live_link: () => null,
     'plugin:event|listen': () => 1,
     'plugin:event|unlisten': () => null,
@@ -115,7 +117,7 @@ describe('received files and emoji in the thread', () => {
     await vi.waitFor(() => expect($(`[data-track="peer:${A}"]`)?.getAttribute('aria-current')).toBe('true'));
   }
 
-  it('shows size and type, saves via the host, and previews only safe image mimes', async () => {
+  it('shows size and type, saves via the host, and previews only safe image mimes as data URLs', async () => {
     const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
     const host = stubHost({
       messages_list: () => [
@@ -133,25 +135,65 @@ describe('received files and emoji in the thread', () => {
       file_save: (args) => {
         const id = String(args!.message_id);
         if (id === BIG_ID) throw 'file over 1.4 MB';
-        return { saved: true, filename: 'brief.txt', mime_type: 'text/plain', size_bytes: 2 };
+        if (id === IN_ID) return { saved: true, filename: 'brief.txt', mime_type: 'text/plain', size_bytes: 2 };
+        return { saved: true, filename: 'shot.png', mime_type: 'image/png', size_bytes: 68 };
       },
     });
     await openShell();
     await vi.waitFor(() => expect($(`[data-received-file="${IN_ID}"]`)).not.toBeNull());
-    expect(text(`[data-received-file="${IN_ID}"] [data-file-meta]`)).toMatch(/2 B · plain/);
+
+    // N1: text/bin are not fetched on mount — only the image preview path fetches.
+    await vi.waitFor(() => expect(host.used('file_fetch').some((c) => c.args?.message_id === IMG_ID)).toBe(true));
+    expect(host.used('file_fetch').every((c) => c.args?.message_id === IMG_ID)).toBe(true);
+
     expect($(`[data-received-file="${IN_ID}"] [data-file-preview]`)).toBeNull();
     $<HTMLButtonElement>(`[data-received-file="${IN_ID}"] [data-file-save]`)!.click();
     await vi.waitFor(() => expect(host.used('file_save')).toHaveLength(1));
     expect(host.used('file_save')[0].args).toEqual({ message_id: IN_ID });
     await vi.waitFor(() => expect(text(`[data-received-file="${IN_ID}"] [data-file-save]`)).toBe('Saved'));
+    expect(text(`[data-received-file="${IN_ID}"] [data-file-meta]`)).toMatch(/2 B · plain/);
 
     await vi.waitFor(() => expect($(`[data-received-file="${IMG_ID}"] [data-file-preview]`)).not.toBeNull());
+    const previewSrc = $<HTMLImageElement>(`[data-received-file="${IMG_ID}"] [data-file-preview]`)!.getAttribute('src') ?? '';
+    expect(previewSrc.startsWith('data:image/')).toBe(true);
+    expect(previewSrc).toContain(png);
     expect(safeImageMime('image/png')).toBe('image/png');
     expect(safeImageMime('image/svg+xml')).toBeNull();
     expect(safeImageMime('text/html')).toBeNull();
 
+    $<HTMLButtonElement>(`[data-received-file="${BIG_ID}"] [data-file-save]`)!.click();
     await vi.waitFor(() => expect(text(`[data-received-file="${BIG_ID}"] [data-file-meta]`)).toMatch(/Over 1\.4 MB/));
     expect($(`[data-received-file="${BIG_ID}"] [data-file-save]`)).toBeNull();
+  });
+
+  it('does not file_fetch voice notes on mount (voice_note_fetch only on play)', async () => {
+    const host = stubHost({
+      messages_list: () => [
+        { id: VOICE_ID, kind: 200, sender: A, recipient: OWN, timestamp: Date.now() - 1000, plaintext: '[file: voice-note-abc.webm]', payment_amount_msat: 3000 },
+      ],
+    });
+    await openShell();
+    await vi.waitFor(() => expect($(`[data-received-file="${VOICE_ID}"]`)).not.toBeNull());
+    await vi.waitFor(() => expect($(`[data-voice-note="${VOICE_ID}"]`)).not.toBeNull());
+    expect(host.used('file_fetch')).toHaveLength(0);
+    $<HTMLButtonElement>(`[data-voice-play]`)!.click();
+    await vi.waitFor(() => expect(host.used('voice_note_fetch').length).toBeGreaterThan(0));
+    expect(host.used('file_fetch')).toHaveLength(0);
+  });
+
+  it('labels save I/O errors as could not save and keeps Save', async () => {
+    const host = stubHost({
+      messages_list: () => [
+        { id: IN_ID, kind: 200, sender: A, recipient: OWN, timestamp: Date.now() - 1000, plaintext: '[file: brief.txt]', payment_amount_msat: 3000 },
+      ],
+      file_save: () => { throw 'could not save: disk full'; },
+    });
+    await openShell();
+    await vi.waitFor(() => expect($(`[data-received-file="${IN_ID}"] [data-file-save]`)).not.toBeNull());
+    $<HTMLButtonElement>(`[data-received-file="${IN_ID}"] [data-file-save]`)!.click();
+    await vi.waitFor(() => expect(text(`[data-received-file="${IN_ID}"] [data-file-meta]`)).toMatch(/could not save/));
+    expect($(`[data-received-file="${IN_ID}"] [data-file-save]`)).not.toBeNull();
+    expect(host.used('file_fetch')).toHaveLength(0);
   });
 
   it('inserts a built-in emoji at the cursor in the composer', async () => {

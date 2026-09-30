@@ -10,7 +10,7 @@ import { DiscoverPanel, FrontDoorEditor } from './Discover';
 import { callCost, createCallEngine, IDLE as CALL_IDLE, isCallKind, signalCost, stunServer, type CallMedia, type CallView } from './call';
 import { blobUrl, duration, FILE_MAX_BYTES, fileNameOf, isVoiceNote, type Recording, startRecording, VOICE_MAX_MS } from './voice';
 import { EMOJIS, insertEmoji } from './emoji';
-import { safeImageMime } from './frontDoorMedia';
+import { safeImageMime, looksLikeSafeImageName, dataImageUrl } from './frontDoorMedia';
 import type { FileSaveResult, VoiceBlob } from './types';
 import {
   doorCard,
@@ -1716,6 +1716,12 @@ function CallPanel(props: {
 /** Host error for a message whose file is not audio (act.rs NOT_A_VOICE_NOTE). */
 const NOT_A_VOICE_NOTE = 'not a voice note';
 const FILE_TOO_LARGE = 'file over 1.4 MB';
+const FILE_NOT_STORED = 'not stored';
+
+/** One native save dialog across all bubbles (host also guards). */
+let saveDialogOpen = false;
+
+type FileMeta = { filename: string; mime_type: string; size_bytes: number };
 
 /** A received kind-200 file: size/type, optional safe image preview, Save via native dialog. */
 function ReceivedFile(props: {
@@ -1725,41 +1731,53 @@ function ReceivedFile(props: {
   loadFile: (messageId: string) => Promise<VoiceBlob>;
   save: (messageId: string) => Promise<FileSaveResult>;
 }) {
-  const [meta, setMeta] = createSignal<VoiceBlob | null>(null);
-  const [err, setErr] = createSignal<'gone' | 'large' | null>(null);
+  const [meta, setMeta] = createSignal<FileMeta | null>(null);
+  const [err, setErr] = createSignal<'gone' | 'large' | 'save' | null>(null);
   const [busy, setBusy] = createSignal(false);
   const [saved, setSaved] = createSignal(false);
   const [preview, setPreview] = createSignal<string | null>(null);
-  onCleanup(() => { const u = preview(); if (u) URL.revokeObjectURL(u); });
 
-  const load = async () => {
-    if (meta() || err() || busy()) return;
+  /** Fetch only for a likely safe image preview — never for voice, never for every bubble. */
+  const loadPreview = async () => {
+    if (props.voice || meta() || err() || preview()) return;
+    if (!looksLikeSafeImageName(props.name)) return;
     setBusy(true);
     try {
       const blob = await props.loadFile(props.id);
-      setMeta(blob);
+      setMeta({ filename: blob.filename, mime_type: blob.mime_type, size_bytes: blob.size_bytes });
       const mime = safeImageMime(blob.mime_type);
-      if (mime) setPreview(blobUrl(blob.data_b64, mime));
+      if (mime) setPreview(dataImageUrl(blob.data_b64, mime));
     } catch (e) {
-      setErr(String(e).includes(FILE_TOO_LARGE) ? 'large' : 'gone');
+      const s = String(e);
+      if (s.includes(FILE_TOO_LARGE)) setErr('large');
+      else if (s.includes(FILE_NOT_STORED)) setErr('gone');
+      // Other preview failures leave Save available.
     } finally {
       setBusy(false);
     }
   };
 
-  // Load meta once when the bubble mounts (read-only).
-  onMount(() => { void load(); });
+  onMount(() => { void loadPreview(); });
 
   const onSave = async () => {
-    if (err() === 'large' || busy()) return;
+    if (err() === 'large' || err() === 'gone' || busy() || saveDialogOpen) return;
+    saveDialogOpen = true;
     setBusy(true);
     try {
       const r = await props.save(props.id);
-      if (r.saved) setSaved(true);
+      if (r.saved) {
+        setSaved(true);
+        setMeta({ filename: r.filename, mime_type: r.mime_type, size_bytes: r.size_bytes });
+        if (err() === 'save') setErr(null);
+      }
     } catch (e) {
-      setErr(String(e).includes(FILE_TOO_LARGE) ? 'large' : 'gone');
+      const s = String(e);
+      if (s.includes(FILE_TOO_LARGE)) setErr('large');
+      else if (s.includes(FILE_NOT_STORED)) setErr('gone');
+      else setErr('save');
     } finally {
       setBusy(false);
+      saveDialogOpen = false;
     }
   };
 
@@ -1783,6 +1801,7 @@ function ReceivedFile(props: {
           Over 1.4 MB · not saved
         </Show>
         <Show when={err() === 'gone'}> · not stored</Show>
+        <Show when={err() === 'save'}> · could not save</Show>
       </p>
       <Show when={err() !== 'large' && err() !== 'gone'}>
         <button type="button" class="link" data-file-save disabled={busy() || saved()} onClick={() => void onSave()}>

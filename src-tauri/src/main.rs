@@ -3841,10 +3841,17 @@ async fn do_file_fetch(state: &NodeState, message_id: &str) -> Result<act::FileB
     Ok(blob)
 }
 
+/// One native save dialog at a time (N6): a second Save click while the first
+/// dialog is open gets a clear error instead of stacking dialogs.
+static FILE_SAVE_DIALOG: Mutex<()> = Mutex::new(());
+
 /// Fetch then write only where the owner picks in the native save dialog.
 /// Cancel → `saved: false`. Never auto-saves or opens the file.
 async fn do_file_save(state: &NodeState, message_id: &str) -> Result<act::FileSaveResult, String> {
     let blob = do_file_fetch(state, message_id).await?;
+    let _guard = FILE_SAVE_DIALOG
+        .try_lock()
+        .map_err(|_| "save already in progress".to_string())?;
     let name = act::safe_save_name(&blob.filename);
     let path = rfd::FileDialog::new().set_file_name(&name).save_file();
     let Some(path) = path else {

@@ -1228,6 +1228,9 @@ pub fn blob_within_cap(blob: &FileBlob) -> Result<(), String> {
     }
 }
 
+/// Cap on the save-dialog name suggestion (peer input can be arbitrarily long).
+pub const SAVE_NAME_MAX: usize = 180;
+
 /// A single path segment for the save dialog: no directories, no empty name.
 pub fn safe_save_name(filename: &str) -> String {
     let base = filename
@@ -1240,7 +1243,10 @@ pub fn safe_save_name(filename: &str) -> String {
         .chars()
         .map(|c| if c.is_control() || c == ':' { '_' } else { c })
         .collect();
-    if cleaned.is_empty() { "file".into() } else { cleaned }
+    // Truncate then drop trailing spaces/dots (Windows reserved tails).
+    let truncated: String = cleaned.chars().take(SAVE_NAME_MAX).collect();
+    let trimmed = truncated.trim_end_matches([' ', '.']).to_string();
+    if trimmed.is_empty() { "file".into() } else { trimmed }
 }
 
 /// Decode base64 and write exactly to `path` (caller chose it via the save dialog).
@@ -1658,6 +1664,11 @@ mod tests {
         assert_eq!(safe_save_name("../etc/passwd"), "passwd");
         assert_eq!(safe_save_name("a\\b:c.png"), "b_c.png");
         assert_eq!(safe_save_name("..."), "file");
+        assert_eq!(safe_save_name("note.txt   "), "note.txt");
+        let long = format!("{}.png", "a".repeat(SAVE_NAME_MAX + 40));
+        let capped = safe_save_name(&long);
+        assert!(capped.len() <= SAVE_NAME_MAX);
+        assert!(!capped.ends_with('.'));
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(safe_save_name("hi.txt"));
         write_file_bytes(&path, "aGk=").unwrap();
