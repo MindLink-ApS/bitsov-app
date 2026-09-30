@@ -72,6 +72,7 @@ describe('settings modal + theme', () => {
     expect(mount.querySelector('[data-settings]')?.classList.contains('open')).toBe(false);
     expect(mount.querySelector('.cc')!.className).not.toMatch(/context-w/);
     (mount.querySelector('[data-profile]') as HTMLButtonElement).click();
+    (mount.querySelector('[data-open-settings]') as HTMLButtonElement).click();
     expect(mount.querySelector('[data-settings]')?.classList.contains('open')).toBe(true);
     expect(mount.querySelector('[data-panel="display"]')).not.toBeNull();
     expect(mount.querySelector('[data-theme-toggle]')).not.toBeNull();
@@ -82,6 +83,7 @@ describe('settings modal + theme', () => {
     start();
     await vi.waitFor(() => expect(mount.querySelector('[data-profile]')).not.toBeNull());
     (mount.querySelector('[data-profile]') as HTMLButtonElement).click();
+    (mount.querySelector('[data-open-settings]') as HTMLButtonElement).click();
     (mount.querySelector('[data-theme-option="light"]') as HTMLButtonElement).click();
     expect(document.documentElement.dataset.theme).toBe('light');
     (mount.querySelector('[data-theme-option="dark"]') as HTMLButtonElement).click();
@@ -123,6 +125,7 @@ describe('settings modal + theme', () => {
     const profile = mount.querySelector('[data-profile]') as HTMLButtonElement;
     profile.focus();
     profile.click();
+    (mount.querySelector('[data-open-settings]') as HTMLButtonElement).click();
     const panel = () => mount.querySelector('[data-settings]') as HTMLElement;
     await vi.waitFor(() => expect(panel()?.classList.contains('open')).toBe(true));
     await vi.waitFor(() => expect(document.activeElement).toBe(mount.querySelector('[data-settings-close]')));
@@ -163,6 +166,7 @@ describe('BTC mode never appends sats to a BTC figure', () => {
 
     // Settings → Budget panel (tally, rows)
     (mount.querySelector('[data-profile]') as HTMLButtonElement).click();
+    (mount.querySelector('[data-open-settings]') as HTMLButtonElement).click();
     (mount.querySelector('[data-tab="budget"]') as HTMLButtonElement).click();
     await vi.waitFor(() => expect(mount.querySelector('[data-tally-total]')).not.toBeNull());
     expect(mount.querySelector('[data-tally-total]')!.textContent).toMatch(/BTC/);

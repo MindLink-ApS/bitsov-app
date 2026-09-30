@@ -11,6 +11,8 @@ import { SoftError } from './SoftError';
 import { DiscoverPanel, FrontDoorEditor } from './Discover';
 import { ContactPanel } from './ContactPanel';
 import { custodyBadge, CustodyBadgeView } from './custody';
+import { WalletPage, type WalletActions, type WalletTab } from './WalletPage';
+import { artifactActivity, logActivity, type LoggedActivity } from './wallet';
 import { callCost, createCallEngine, IDLE as CALL_IDLE, isCallKind, signalCost, stunServer, type CallMedia, type CallView } from './call';
 import { createMeetingEngine, declineCost, inviteCost, joinCost, MAX_PARTICIPANTS, MEETING_IDLE, type LegState, type MeetingView, type ShownQuotes } from './meeting';
 import { blobUrl, duration, FILE_MAX_BYTES, fileNameOf, isVoiceNote, type Recording, startRecording, VOICE_MAX_MS } from './voice';
@@ -106,6 +108,7 @@ import type {
   Room,
   RoomQuote,
   SpendView,
+  DeviceView,
   TrackRef,
   WalletOverview,
 } from './types';
@@ -145,6 +148,16 @@ type Outcome<T> = { ok: true; value: T } | { ok: false; error: ActionError };
 export type Actions = {
   approve: () => Promise<void>;
   lock: () => Promise<void>;
+  /** Withdraw the pending request at the node. */
+  cancelSpend: () => Promise<void>;
+  /** This Mac's Touch ID approvals, as last read. */
+  device: () => DeviceView | null;
+  registerDevice: () => Promise<void>;
+  cancelDevice: () => Promise<void>;
+  /** One contact's envelope, signed with Touch ID. */
+  approveContact: (peer: string, perActMsat: number | null) => Promise<void>;
+  /** The contact the node last refused for having no envelope (`grant_no_envelope`). */
+  noEnvelopeFor: () => string | null;
   reconcile: () => Promise<Outcome<string>>;
   pendingRevision: () => number;
   /** The owner's one approval for a daily total (B2). */
@@ -219,6 +232,8 @@ export function ControlCenter(props: Props) {
   const [roomQuote, setRoomQuote] = createSignal<RoomQuote | null>(null);
   const [filePrice, setFilePrice] = createSignal<PaymentQuote | null>(null);
   const [spend, setSpend] = createSignal<SpendView | null>(null);
+  const [device, setDevice] = createSignal<DeviceView | null>(null);
+  const [noEnvelopeFor, setNoEnvelopeFor] = createSignal<string | null>(null);
   const [budget, setBudget] = createSignal<BudgetView | null>(null);
   const [deliveries, setDeliveries] = createStore<Deliveries>({});
   /** What each send actually paid, by message id: a room echo carries one member's share only. */
@@ -244,6 +259,19 @@ export function ControlCenter(props: Props) {
   }));
   const [errors, setErrors] = createStore<Record<string, string | undefined>>({});
   const [contextOpen, setContextOpen] = createSignal(false);
+  /** The full-screen Wallet page, on this tab; null when closed. */
+  const [walletTab, setWalletTab] = createSignal<WalletTab | null>(null);
+  createEffect(() => {
+    if (!walletTab()) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !contextOpen()) {
+        e.preventDefault();
+        setWalletTab(null);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    onCleanup(() => window.removeEventListener('keydown', onKey));
+  });
   const [settingsEl, setSettingsEl] = createSignal<HTMLElement | null>(null);
   let settingsReturnFocus: HTMLElement | null = null;
   createEffect(() => {
@@ -352,6 +380,8 @@ export function ControlCenter(props: Props) {
   const loadRooms = () => attempt('rooms', () => source.rooms(), setRooms);
   const loadWallet = () => attempt('wallet', () => source.wallet(), setWallet);
   const loadSpend = () => attempt('spend', () => source.spendStatus(), setSpend);
+  // Never an error line of its own: without a device key the console path stays.
+  const loadDevice = () => source.deviceKeyStatus().then(setDevice, () => setDevice(null));
   const loadBudget = () =>
     attempt('budget', () => source.budgetStatus(), (b) => {
       setBudget(b);
@@ -447,7 +477,9 @@ export function ControlCenter(props: Props) {
         void loadRooms();
         void loadWallet();
         void loadSpend().then(loadBudget);
+        void loadDevice();
         timers.push(
+          setInterval(() => void loadDevice(), REFRESH_MS.peers),
           setInterval(() => void loadOverview(), REFRESH_MS.overview),
           setInterval(() => void loadPeers(), REFRESH_MS.peers),
           setInterval(() => void loadWallet(), REFRESH_MS.wallet),
@@ -559,6 +591,18 @@ export function ControlCenter(props: Props) {
     const full = { id: `local-${artifactSeq++}`, at: artifact.at ?? Date.now(), ...artifact } as Artifact;
     setArtifacts(key, (old) => [...(old ?? []), full]);
   };
+  // The Wallet's history of payments and invoices made here (the node lists neither).
+  createEffect(() => {
+    const entries: LoggedActivity[] = [];
+    for (const [key, list] of Object.entries(artifacts)) {
+      const who = key.startsWith('peer:') || key.startsWith('room:') ? key.slice(5) : null;
+      for (const a of list ?? []) {
+        const entry = artifactActivity(a, who);
+        if (entry) entries.push(entry);
+      }
+    }
+    untrack(() => logActivity(entries));
+  });
 
   /** Run one action. An approval error re-reads the window; the caller shows the rest. */
   const act = async <T,>(run: () => Promise<T>): Promise<Outcome<T>> => {
@@ -676,6 +720,37 @@ export function ControlCenter(props: Props) {
       const r = await act(() => source.spendLock());
       if (r.ok) setSpend(r.value);
     },
+    cancelSpend: async () => {
+      const r = await act(() => source.spendCancel());
+      if (r.ok) setSpend(r.value);
+      else setErrors('spend', r.error.message);
+      void loadBudget();
+    },
+    device,
+    registerDevice: async () => {
+      const r = await act(() => source.deviceKeyRegister());
+      if (r.ok) {
+        setDevice(r.value);
+        setErrors('spend', undefined);
+      } else setErrors('spend', r.error.message);
+    },
+    cancelDevice: async () => {
+      const r = await act(() => source.deviceKeyCancel());
+      if (r.ok) setDevice(r.value);
+    },
+    noEnvelopeFor,
+    approveContact: async (peer, perActMsat) => {
+      const r = await act(() => source.relationApprove(peer, null, perActMsat));
+      if (r.ok) {
+        setSpend(r.value);
+        setErrors('spend', undefined);
+        if (noEnvelopeFor() === peer) setNoEnvelopeFor(null);
+      } else {
+        setErrors('spend', r.error.message);
+        if (r.error.code === 'device_invalid') void loadDevice();
+      }
+      void loadBudget();
+    },
     pendingRevision,
     reconcile: () => act(() => source.spendReconcile()),
     approveBudget: async (ceilingMsat, preset) => {
@@ -718,6 +793,8 @@ export function ControlCenter(props: Props) {
       const r = await act(() => source.send(t.id, t.kind === 'room', text, maxMsat, t.kind === 'room' ? Object.fromEntries((roomQuote()?.members ?? []).map((m) => [m.node_id, m.msat])) : undefined, firstContactMsat));
       // The tally moved, or a budget rule stopped the send: either way, re-read it.
       if (r.ok || isBudgetStop(r.error) || ['spend_unknown', 'payment_unknown', 'failed_paid', 'payment_settled_undelivered'].includes(r.error.code)) void loadBudget();
+      // Approved another contact with Touch ID, not this one: offer the tap here.
+      if (!r.ok && r.error.code === 'grant_no_envelope' && t.kind === 'peer') setNoEnvelopeFor(t.id);
       if (!r.ok && r.error.code === 'payment_settled_undelivered' && r.error.undelivered) {
         // Paid, not delivered: the draft moves here, with the only safe way to resend it.
         addArtifact(t, { type: 'undelivered', text, paid: r.error.undelivered, note: null, admission: null, pendingId: r.error.pending_id ?? null });
@@ -880,6 +957,20 @@ export function ControlCenter(props: Props) {
     const [kind, id] = key.split(':');
     return kind === 'room' ? rooms().find((r) => r.id.toLowerCase() === id)?.name ?? 'Room' : nameOf(id ?? key);
   };
+  // The Wallet pays only through the composer's own actions; its receipts go to the `wallet` key.
+  const WALLET: TrackRef = { kind: 'wallet' };
+  const walletActions: WalletActions = {
+    readInvoice: (bolt11) => actions.readInvoice(bolt11),
+    pay: (bolt11, msat) => actions.pay(WALLET, bolt11, msat),
+    keysend: (pubkey, msat, memo) => actions.keysend(WALLET, pubkey, msat, memo),
+    invoice: (msat, note) => actions.invoice(WALLET, msat, note),
+    approve: () => actions.approve(),
+  };
+  const openWallet = (tab: WalletTab = 'activity') => {
+    setContextOpen(false);
+    setWalletTab(tab);
+    void loadWallet();
+  };
 
   return (
     <div class="cc" classList={{ 'no-context': !props.active }} data-mode={source.mode}>
@@ -899,10 +990,13 @@ export function ControlCenter(props: Props) {
           setTab('body');
           setContextOpen(true);
         }}
+        onWallet={() => openWallet()}
+        balanceMsat={wallet()?.balance_msat ?? null}
+        behind={walletTab() !== null}
       />
 
       <Show when={props.active} fallback={<section class="track">{props.firstRun}</section>}>
-        <section class="track" aria-label="Track">
+        <section class="track" aria-label="Track" inert={walletTab() !== null}>
           <Show when={moneyBlocked()}>
             <p class="hint money-notice" data-money-notice role="status">{MONEY_NOT_READY} Sending, paying, first contact, files, rooms, channels and gifts will be available when it is ready.</p>
           </Show>
@@ -1074,6 +1168,7 @@ export function ControlCenter(props: Props) {
             <NodePanel overview={overview()} link={link()} peers={peers()} now={now()} error={errors.overview ?? errors.peers} />
           </Match>
           <Match when={tab() === 'wallet'}>
+            <button type="button" class="primary soft" data-open-wallet-page onClick={() => openWallet()}>Open Wallet</button>
             <WalletPanel moneyBlocked={moneyBlocked()} wallet={wallet()} error={errors.wallet} fund={props.fund?.(source, moneyBlocked)} />
           </Match>
           <Match when={tab() === 'budget'}>
@@ -1121,6 +1216,28 @@ export function ControlCenter(props: Props) {
         camera={() => void meetings.toggleCamera()}
         dismiss={() => meetings.dismiss()}
       />
+      <Show when={props.active && walletTab()}>
+        {(tab) => (
+          <WalletPage
+            tab={tab()}
+            onTab={setWalletTab}
+            onClose={() => setWalletTab(null)}
+            wallet={wallet()}
+            walletError={errors.wallet}
+            moneyBlocked={moneyBlocked()}
+            spend={spend()}
+            spendGate={<SpendBar spend={spend()} error={errors.spend} now={now()} actions={actions} />}
+            now={now()}
+            ownId={ownId()}
+            histories={[...peers().map((p) => p.node_id.toLowerCase()), ...rooms().map((r) => r.id.toLowerCase())]}
+            threadMessages={Object.values(threads.t).flat()}
+            nameOf={(id) => rooms().find((r) => r.id.toLowerCase() === id.toLowerCase())?.name ?? nameOf(id)}
+            actions={walletActions}
+            reads={{ fundingAddress: () => source.fundingAddress(), invoiceStatus: (b) => source.invoiceStatus(b), messages: (id) => source.messages(id) }}
+            onRefresh={() => void loadWallet()}
+          />
+        )}
+      </Show>
     </div>
   );
 }
@@ -1269,7 +1386,26 @@ function Rail(props: {
   ownId: string | null;
   onOpen: (t: TrackRef) => void;
   onProfile: () => void;
+  onWallet: () => void;
+  balanceMsat: number | null;
+  /** Under the full-screen Wallet: out of reach. */
+  behind: boolean;
 }) {
+  // The avatar menu: Wallet, or Profile and settings.
+  const [menuOpen, setMenuOpen] = createSignal(false);
+  let avatar: HTMLButtonElement | undefined;
+  // Focus goes back to the avatar first, so closing what opens returns there.
+  const choose = (open: () => void) => {
+    setMenuOpen(false);
+    avatar?.focus();
+    open();
+  };
+  createEffect(() => {
+    if (!menuOpen()) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setMenuOpen(false); };
+    window.addEventListener('keydown', onKey);
+    onCleanup(() => window.removeEventListener('keydown', onKey));
+  });
   const item = (t: TrackRef, name: string, meta?: JSX.Element) => {
     const key = trackKey(t);
     return (
@@ -1294,7 +1430,7 @@ function Rail(props: {
   };
 
   return (
-    <nav class="rail" aria-label="Tracks">
+    <nav class="rail" aria-label="Tracks" inert={props.behind}>
       <div class="mark">
         Bit<span>Sov</span>
       </div>
@@ -1383,18 +1519,37 @@ function Rail(props: {
         <Show when={props.sample}>
           <span class="mode-tag" data-sample>Sample data, no node</span>
         </Show>
-        <button
-          type="button"
-          class="profile-avatar"
-          data-profile
-          disabled={!props.active}
-          aria-label="Open profile and settings"
-          title="Profile and settings"
-          onClick={() => props.onProfile()}
-        >
-          <span class="avatar-mark" aria-hidden="true">{initials()}</span>
-          <span class="avatar-label">You</span>
-        </button>
+        <div class="avatar-menu-wrap">
+          <Show when={menuOpen()}>
+            <div class="avatar-scrim" onClick={() => setMenuOpen(false)} />
+            <div class="avatar-menu" role="menu" aria-label="You" data-avatar-menu>
+              <button type="button" role="menuitem" class="avatar-menu-item wallet" data-open-wallet onClick={() => choose(props.onWallet)}>
+                <span class="name">Wallet</span>
+                <Show when={props.balanceMsat !== null}>
+                  <span class="meta sats" data-avatar-balance>{fmtAmount(props.balanceMsat!)}</span>
+                </Show>
+              </button>
+              <button type="button" role="menuitem" class="avatar-menu-item" data-open-settings onClick={() => choose(props.onProfile)}>
+                <span class="name">Profile and settings</span>
+              </button>
+            </div>
+          </Show>
+          <button
+            ref={avatar}
+            type="button"
+            class="profile-avatar"
+            data-profile
+            disabled={!props.active}
+            aria-label="You: wallet, profile and settings"
+            aria-haspopup="menu"
+            aria-expanded={menuOpen()}
+            title="Wallet, profile and settings"
+            onClick={() => setMenuOpen((v) => !v)}
+          >
+            <span class="avatar-mark" aria-hidden="true">{initials()}</span>
+            <span class="avatar-label">You</span>
+          </button>
+        </div>
       </div>
     </nav>
   );
@@ -2407,14 +2562,14 @@ function ArtifactView(props: { moneyBlocked: boolean; a: Artifact; delivery?: De
         {(a) => {
           const r = () => (a() as Extract<Artifact, { type: 'payment' }>).receipt;
           return (
-            <div class="artifact out payment-line" data-artifact="payment" data-status={r().status}>
+            <div class="artifact out payment-line" data-artifact="payment" data-status={r().status} data-pay-method={r().method}>
               <span class="stamp">
                 <Bolt />
                 <Show
                   when={r().status !== 'failed'}
                   fallback={<span class="err-note">Payment of <span class="sats">{sats(r().amount_msat)}</span> {satUnit(r().amount_msat)} failed</span>}
                 >
-                  <span>You sent <span class="sats">{sats(r().amount_msat)}</span> {satUnit(r().amount_msat)}</span>
+                  <span>You sent <span class="sats">{sats(r().amount_msat)}</span> {satUnit(r().amount_msat)}{r().method === 'keysend' ? ' · direct (keysend)' : ''}</span>
                 </Show>
                 <span class="hint">{clock(r().paid_at_ms)}</span>
               </span>
@@ -2863,7 +3018,20 @@ function Composer(props: {
   const line = () => spendLine(props.spend, props.now);
   const spends = () => mode() !== 'request';
   const target = () => (props.track as { id: string }).id;
+  /** One contact, and this Mac approves with Touch ID. */
+  const touchable = () => spends() && !room() && props.actions.device()?.state === 'registered';
   const budget = () => props.budget ?? null;
+  /** A Touch ID grant is open, but not for this contact. */
+  const lacksEnvelope = () => {
+    if (props.actions.noEnvelopeFor() === target()) return true;
+    const envelopes = budget()?.node_grant?.envelopes;
+    if (!envelopes) return false;
+    const until = envelopes[target()];
+    return !until || until <= Date.now();
+  };
+  /** The next tap here is Touch ID for this contact. */
+  const needsTouch = () =>
+    touchable() && !budget()?.paused && props.spend?.state !== 'pending' && (!line().open || lacksEnvelope());
   /**
    * Messages go through the budget unless the owner opened the ten-minute
    * window by hand with no budget approval, or the host has no budget to show.
@@ -3022,6 +3190,7 @@ function Composer(props: {
   const label = () => {
     if (paying()) return 'Paying…';
     if (ownerWait()) return 'Waiting for contact approval';
+    if (needsTouch()) return 'Approve with Touch ID';
     if (viaBudget()) {
       const s = shown();
       const price = s.msat === null ? '' : ` · ${s.estimate ? '≈ ' : ''}${sats(s.msat)} ${satUnit(s.msat)}`;
@@ -3087,6 +3256,13 @@ function Composer(props: {
       setNote('The message price changed since you pressed. Nothing was sent. Check the price on Send and press it to send.');
       return;
     }
+    if (needsTouch()) {
+      // This contact is approved with Touch ID; the draft stays where it is.
+      setBusy(true);
+      await props.actions.approveContact(target(), shown().msat);
+      setBusy(false);
+      return;
+    }
     if (viaBudget()) {
       const st = stand();
       if (st.kind === 'paused' || st.kind === 'off') {
@@ -3097,7 +3273,13 @@ function Composer(props: {
         setBusy(false);
         return;
       }
-      if ((st.kind !== 'first' && st.kind !== 'ok') || !ready()) return;
+      if (st.kind !== 'first' && st.kind !== 'ok') return;
+      if (!ready()) {
+        // A press before the price is known must not look like a send: the draft
+        // stays, and the owner sees why nothing moved (real-window step 10).
+        setNote(draft().trim() ? 'The message price is not ready yet. Nothing was sent. Wait for the cost, then press Send.' : 'Type a message first.');
+        return;
+      }
       setBusy(true);
       const submittedRevision = composerRevision;
       const submittedApprovalRevision = approvalRevision;
@@ -3156,13 +3338,21 @@ function Composer(props: {
       return;
     }
     if (spends() && !line().open) {
-      // The one tap: the draft stays where it is.
+      // The one tap: the draft stays where it is. With this Mac registered,
+      // a single contact is approved with Touch ID; otherwise at the node.
       setBusy(true);
       await props.actions.approve();
       setBusy(false);
       return;
     }
-    if (!ready()) return;
+    if (!ready()) {
+      setNote(
+        mode() === 'message' && draft().trim()
+          ? 'The message price is not ready yet. Nothing was sent. Wait for the cost, then press Send.'
+          : 'Nothing was sent yet — finish the fields first.',
+      );
+      return;
+    }
     if (mode() === 'pay') {
       // Pay never pays from here: it shows the review, and only its confirm pays.
       setReview(
@@ -3261,7 +3451,8 @@ function Composer(props: {
 
   const disabled = () =>
     props.moneyBlocked || busy() || !!ownerWait() ||
-    (viaBudget()
+    // Touch ID approves the contact, not the draft: no draft needed yet.
+    (needsTouch() ? false : viaBudget()
       ? ['waiting', 'contact_used', 'total_used', 'unknown'].includes(stand().kind) || ((stand().kind === 'first' || stand().kind === 'ok') && !ready())
       : spends() && !line().open
       ? props.spend?.state === 'pending' || props.spend?.state === 'unavailable' || props.spend === null
@@ -3446,6 +3637,10 @@ function Composer(props: {
         </Match>
       </Switch>
 
+      {/* Above the capsule: the terms read before Send, which is the Touch ID tap. */}
+      <Show when={needsTouch()}>
+        <TouchApproval peer={target()} name={props.name} priceMsat={shown().msat} actions={props.actions} />
+      </Show>
       <div class="composer-main signal-bar" data-composer-bar>
         <button
           type="button"
@@ -3663,6 +3858,17 @@ function Composer(props: {
 function SpendBar(props: { spend: SpendView | null; error: string | undefined; now: number; actions: Actions }) {
   const line = () => spendLine(props.spend, props.now);
   const minutes = (ms: number) => Math.max(1, Math.ceil((ms - props.now) / 60_000));
+  // One Ask again at a time: a double click must not print two requests at the node.
+  const [asking, setAsking] = createSignal(false);
+  const askAgain = async () => {
+    if (asking()) return;
+    setAsking(true);
+    try {
+      await props.actions.approve();
+    } finally {
+      setAsking(false);
+    }
+  };
   return (
     <div class="spend" data-spend={props.spend?.state ?? 'unknown'}>
       <Switch>
@@ -3687,12 +3893,15 @@ function SpendBar(props: { spend: SpendView | null; error: string | undefined; n
           {(p) => (
             <div class="approval" data-approval="pending">
               <p>
-                <strong>Confirm at your node.</strong> Your node asks its owner to approve this app spending. Run this where
-                your node runs and type the phrase it prints:
+                <strong>Confirm at your node.</strong> Your node asks its owner to approve this app spending. Run this on
+                the node's computer. It shows the terms and asks for the short code your node's terminal shows:
               </p>
               <code class="address" data-owner-action>{p().owner_action}</code>
               <p class="hint">
-                This app cannot approve it for you. The request lapses in {minutes(p().expires_at_ms)} min. Your draft is kept.
+                This app cannot approve it for you. The request lapses in {minutes(p().expires_at_ms)} min. Your draft is kept.{' '}
+                <button type="button" class="link" data-spend-cancel onClick={() => void props.actions.cancelSpend()}>
+                  Cancel request
+                </button>
               </p>
             </div>
           )}
@@ -3707,6 +3916,19 @@ function SpendBar(props: { spend: SpendView | null; error: string | undefined; n
             </div>
           )}
         </Match>
+        <Match when={props.spend?.state === 'expired' && props.spend.lapse}>
+          {(lapse) => (
+            <p class="spend-line" data-spend-lapse={lapse()}>
+              <span class="dot" />{' '}
+              {lapse() === 'lost'
+                ? 'Your node can no longer approve that request (for example, it restarted).'
+                : 'That request lapsed before it was approved.'}{' '}
+              <button type="button" class="link" data-spend-ask-again disabled={asking()} onClick={() => void askAgain()}>
+                Ask again
+              </button>
+            </p>
+          )}
+        </Match>
         <Match when={true}>
           <p class="spend-line">
             <span class="dot" /> {line().text}.{' '}
@@ -3716,10 +3938,102 @@ function SpendBar(props: { spend: SpendView | null; error: string | undefined; n
           </p>
         </Match>
       </Switch>
+      <DeviceSetup device={props.actions.device()} now={props.now} actions={props.actions} />
       <Reconcile actions={props.actions} />
       <Show when={props.error}>
         <p class="err-note">{props.error}</p>
       </Show>
+    </div>
+  );
+}
+
+/** What one Touch ID tap allows a contact by default (the host uses the same). */
+export const ENVELOPE_BUDGET_MSAT = 200_000;
+export const envelopePerAct = (priceMsat: number | null) =>
+  Math.min(Math.max(priceMsat ?? 10_000, 1_000), ENVELOPE_BUDGET_MSAT);
+
+/**
+ * Touch ID approvals: set up once (the owner approves this Mac at the node),
+ * then one tap opens a contact's envelope. The console path stays for recovery.
+ */
+function DeviceSetup(props: { device: DeviceView | null; now: number; actions: Actions }) {
+  const [busy, setBusy] = createSignal(false);
+  const run = async (action: () => Promise<void>) => {
+    if (busy()) return;
+    setBusy(true);
+    try {
+      await action();
+    } finally {
+      setBusy(false);
+    }
+  };
+  const minutes = (ms: number) => Math.max(1, Math.ceil((ms - props.now) / 60_000));
+  return (
+    <Switch>
+      <Match when={props.device?.state === 'off' && props.device}>
+        {(d) => (
+          <p class="hint" data-device-off={d().off_reason ?? 'off'}>
+            <strong>Touch ID approvals are off.</strong> {d().off_message}
+          </p>
+        )}
+      </Match>
+      <Match when={props.device?.state === 'none' || props.device?.state === 'lapsed'}>
+        <p class="hint" data-device-setup={props.device?.state}>
+          {props.device?.state === 'lapsed' ? 'Your last Touch ID setup request lapsed. ' : ''}
+          Approve payments per contact with Touch ID on this Mac instead of at the node.{' '}
+          <button type="button" class="link" data-device-register disabled={busy()} onClick={() => void run(props.actions.registerDevice)}>
+            Set up Touch ID approvals
+          </button>
+        </p>
+      </Match>
+      <Match when={props.device?.state === 'pending' && props.device}>
+        {(d) => (
+          <div class="approval" data-device="pending">
+            <p>
+              <strong>Approve this Mac once at your node.</strong> Run this on the node’s computer. It shows this Mac’s key
+              fingerprint <code data-device-fingerprint>{d().fingerprint}</code>; check that it matches, then type the short
+              code your node’s terminal shows:
+            </p>
+            <code class="address" data-device-owner-action>{d().owner_action}</code>
+            <p class="hint">
+              This app cannot approve it for you.
+              {d().expires_at_ms ? ` The request lapses in ${minutes(d().expires_at_ms!)} min.` : ''}{' '}
+              <button type="button" class="link" data-device-cancel disabled={busy()} onClick={() => void run(props.actions.cancelDevice)}>
+                Cancel
+              </button>
+            </p>
+          </div>
+        )}
+      </Match>
+    </Switch>
+  );
+}
+
+/**
+ * One contact's envelope, approved with Touch ID: a slim line above the
+ * composer. The terms and the contact's id show here before the tap, and the
+ * system dialog repeats them. Send in the composer is the tap.
+ */
+export function TouchApproval(props: { peer: string; name: string; priceMsat: number | null; actions: Actions }) {
+  const perAct = () => envelopePerAct(props.priceMsat);
+  return (
+    <div class="spend touch-line" data-touch-approval>
+      <p class="spend-line">
+        <span class="dot" />{' '}
+        <span class="line-text">
+          {/* The petname is local; Touch ID names the same key, never a name. */}
+          <strong>Approve {props.name} (node <code data-touch-peer>{shortId(props.peer)}</code>) with Touch ID.</strong> Up
+          to <span data-touch-budget>{fmtAmount(ENVELOPE_BUDGET_MSAT)}</span> a day, at most{' '}
+          <span data-touch-per-act>{fmtAmount(perAct())}</span> per message, for 24 hours.
+        </span>
+      </p>
+      <details class="quiet-detail" data-touch-detail>
+        <summary>Details</summary>
+        <p>
+          Touch ID shows the same amounts for node {shortId(props.peer)}. Your node checks every payment against them;
+          nothing else can be paid under this approval.
+        </p>
+      </details>
     </div>
   );
 }
@@ -3819,7 +4133,7 @@ function BudgetBar(props: {
           <div class="approval" data-approval="pending">
             <p>
               <strong>Confirm at your node.</strong> One approval lets messages pay for the next 24 hours, up to your app all-in payment limit.
-              Run this where your node runs and type the phrase it prints:
+              Run this on the node's computer. It shows the terms and asks for the short code your node's terminal shows:
             </p>
             <Show when={props.spend?.pending}>
               {(p) => <code class="address" data-owner-action>{p().owner_action}</code>}
@@ -3833,6 +4147,15 @@ function BudgetBar(props: {
               <strong>{props.budget.autopay.state === 'expired' ? 'Your daily approval ended.' : 'Let messages pay as you chat.'}</strong>{' '}
               Approve an app all-in payment limit for each rolling 24 hours. Inside it, each message pays its recipient’s own price with no prompt. Someone new always asks first.
             </p>
+            <Show when={props.spend?.lapse}>
+              {(lapse) => (
+                <p class="hint" data-budget-lapse={lapse()}>
+                  {lapse() === 'lost'
+                    ? 'Your node can no longer approve your last request (for example, it restarted). Approve again to ask again.'
+                    : 'Your last request lapsed before it was approved. Approve again to ask again.'}
+                </p>
+              )}
+            </Show>
             <div class="presets" role="radiogroup" aria-label="App all-in payments limit, rolling 24 hours">
               <For each={props.budget.presets}>
                 {(p) => (
