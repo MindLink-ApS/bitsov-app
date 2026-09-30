@@ -124,4 +124,26 @@ describe('frontDoorMedia prep', () => {
     expect(MAX_CARD_BYTES).toBe(16 * 1024);
     expect(CARD_PUBLISH_BUDGET).toBeLessThan(MAX_CARD_BYTES);
   });
+
+  it('a near-16 KiB body without margin is refused by the publish budget', () => {
+    // Pad about so bare profile JSON sits just under the node max; the editor
+    // estimate (sig + site + endpoint + overhead) must still block Publish.
+    const about = 'x'.repeat(14_800);
+    const parts = {
+      display_name: 'Rasmus',
+      tagline: 'hi',
+      about,
+      avatar: null,
+      media: [] as PreparedMedia[],
+      links: [] as { label: string; url: string }[],
+      cv: null,
+    };
+    const bareLen = new TextEncoder().encode(
+      JSON.stringify({ profile: { display_name: 'Rasmus', tagline: 'hi', about } }),
+    ).length;
+    expect(bareLen).toBeLessThan(MAX_CARD_BYTES);
+    const estimated = estimateCardBytes(parts);
+    expect(estimated).toBeGreaterThan(CARD_PUBLISH_BUDGET);
+    expect(estimated).toBeGreaterThan(bareLen);
+  });
 });

@@ -327,6 +327,35 @@ describe('voice notes in the composer and thread', () => {
     expect(host.used('file_send')).toHaveLength(0);
   });
 
+  it('a track switch while stop awaits does not attach the clip to the new track', async () => {
+    stubHost();
+    let releaseStop: (() => void) | null = null;
+    class SlowRecorder extends FakeRecorder {
+      stop() {
+        this.state = 'inactive';
+        // Resolve after the test switches tracks — generation must discard the clip.
+        void new Promise<void>((r) => { releaseStop = r; }).then(() => {
+          this.ondataavailable?.({ data: FakeRecorder.clip() });
+          this.onstop?.();
+        });
+      }
+    }
+    vi.stubGlobal('MediaRecorder', SlowRecorder);
+    await openShell();
+    $<HTMLButtonElement>('[data-voice-record="start"]')!.click();
+    await vi.waitFor(() => expect($('[data-voice-record="stop"]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-voice-record="stop"]')!.click();
+    await vi.waitFor(() => expect(releaseStop).not.toBeNull());
+    $<HTMLElement>(`[data-track="peer:${C}"]`)!.click();
+    await vi.waitFor(() => expect($(`[data-track="peer:${C}"]`)?.getAttribute('aria-current')).toBe('true'));
+    releaseStop!();
+    // Give stopRecording's await a turn; the clip must not land on the new track.
+    await Promise.resolve();
+    await Promise.resolve();
+    expect($('[data-voice-preview]')).toBeNull();
+    expect($('[data-composer]')!.getAttribute('data-mode')).toBe('message');
+  });
+
   it('a microphone prompt answered after switching contact does not record for the new one', async () => {
     stubHost();
     let grant!: (s: MediaStream) => void;

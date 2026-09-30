@@ -2061,8 +2061,12 @@ function Composer(props: {
   const stopRecording = async () => {
     const r = untrack(recording);
     if (!r) return;
+    // Capture before await: a track switch bumps voiceGeneration and must not
+    // land this clip as the new track's unsent preview.
+    const generation = voiceGeneration;
     setRecording(null);
     const clip = await r.rec.stop();
+    if (generation !== voiceGeneration) return;
     composerRevision++;
     if (!clip) {
       setNote('Nothing was recorded.');
