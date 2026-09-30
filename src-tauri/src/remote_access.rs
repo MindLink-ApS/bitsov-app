@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use snow::{Builder, TransportState};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch, Semaphore};
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 
 use crate::pairing::{self, ClientKey};
@@ -34,8 +34,15 @@ pub const MAX_NOISE_PLAINTEXT: usize = 16 * 1024;
 pub const MAX_TRANSPORT_FRAME: usize = MAX_NOISE_PLAINTEXT + 2 + 16;
 pub const MAX_HANDSHAKE_FRAME: usize = 65_535;
 pub const MAX_AUTH_PLAINTEXT: usize = 8 * 1024;
+pub const LOCAL_AUTH_HEADER: &str = "x-bitsov-proxy-auth";
 const MAX_LINK_BYTES: usize = 8 * 1024;
+const MAX_LOCAL_REQUEST_PREFIX: usize = 64 * 1024;
+const LOCAL_AUTH_TIMEOUT: Duration = Duration::from_secs(2);
+const REMOTE_READER_QUEUE: usize = 2;
+const MAX_LOCAL_CONNECTIONS: usize = 8;
+const MAX_PENDING_LOCAL_AUTH: usize = 16;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+pub const HANDSHAKE_UNAVAILABLE: &str = "remote handshake limit or endpoint unavailable";
 
 /// Pairing-link JSON carried as unpadded base64url after `bitsov://pair/`.
 #[derive(Clone, Serialize, Deserialize)]
@@ -149,7 +156,7 @@ pub enum RemoteAuthResponse {
 #[derive(Debug, Clone, Serialize)]
 pub struct RemoteImportView {
     pub endpoint: String,
-    pub node_id: String,
+    pub node_id_fingerprint: String,
     pub restart_required: bool,
 }
 
@@ -159,6 +166,7 @@ pub enum RemoteError {
     Local(String),
     Transport(String),
     Refused(String),
+    HandshakeUnavailable,
 }
 
 impl fmt::Display for RemoteError {
@@ -168,6 +176,7 @@ impl fmt::Display for RemoteError {
             Self::Local(message) => f.write_str(message),
             Self::Transport(message) => write!(f, "remote transport failed: {message}"),
             Self::Refused(message) => write!(f, "remote node refused pairing: {message}"),
+            Self::HandshakeUnavailable => f.write_str(HANDSHAKE_UNAVAILABLE),
         }
     }
 }
@@ -177,6 +186,22 @@ impl std::error::Error for RemoteError {}
 /// Exact UTF-8 string signed by the node for the pairing link.
 pub fn descriptor_signature_message(node_id_hex: &str, transport_pubkey_hex: &str) -> String {
     format!("{TRANSPORT_PROOF_DOMAIN}:{node_id_hex}:{transport_pubkey_hex}")
+}
+
+pub fn node_id_fingerprint(node_id_hex: &str) -> String {
+    format!(
+        "{}…{}",
+        &node_id_hex[..8],
+        &node_id_hex[node_id_hex.len() - 8..]
+    )
+}
+
+pub fn new_local_auth_token() -> Result<String, RemoteError> {
+    let mut token = [0u8; 32];
+    getrandom::getrandom(&mut token).map_err(|error| {
+        RemoteError::Local(format!("cannot secure remote loopback proxy: {error}"))
+    })?;
+    Ok(hex::encode(token))
 }
 
 /// Exact UTF-8 string signed by a newly pairing client.
@@ -409,7 +434,7 @@ pub fn import_pairing_link(
     persist_at(&config_path(app_data_dir), &descriptor)?;
     Ok(RemoteImportView {
         endpoint: descriptor.endpoint.clone(),
-        node_id: descriptor.node_id.clone(),
+        node_id_fingerprint: node_id_fingerprint(&descriptor.node_id),
         restart_required: true,
     })
 }
@@ -693,9 +718,35 @@ async fn encrypted_auth(
 
 async fn tunnel(
     mut local: TcpStream,
-    mut remote: TcpStream,
+    remote: TcpStream,
     mut noise: TransportState,
+    initial_local: Vec<u8>,
 ) -> Result<(), RemoteError> {
+    let (mut remote_reader, mut remote_writer) = remote.into_split();
+    let (frames_tx, mut frames_rx) =
+        mpsc::channel::<Result<Vec<u8>, RemoteError>>(REMOTE_READER_QUEUE);
+    let reader_task = tokio::spawn(async move {
+        loop {
+            let frame = read_frame(&mut remote_reader, MAX_TRANSPORT_FRAME).await;
+            let stop = frame.is_err();
+            if frames_tx.send(frame).await.is_err() || stop {
+                break;
+            }
+        }
+    });
+    struct AbortOnDrop(tokio::task::JoinHandle<()>);
+    impl Drop for AbortOnDrop {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+    let _reader_task = AbortOnDrop(reader_task);
+
+    for chunk in initial_local.chunks(MAX_NOISE_PLAINTEXT) {
+        let encrypted = encode_transport(&mut noise, chunk)?;
+        write_frame(&mut remote_writer, &encrypted).await?;
+    }
+
     let mut local_buffer = vec![0u8; MAX_NOISE_PLAINTEXT];
     loop {
         tokio::select! {
@@ -705,10 +756,12 @@ async fn tunnel(
                     return Ok(());
                 }
                 let encrypted = encode_transport(&mut noise, &local_buffer[..read])?;
-                write_frame(&mut remote, &encrypted).await?;
+                write_frame(&mut remote_writer, &encrypted).await?;
             }
-            frame = read_frame(&mut remote, MAX_TRANSPORT_FRAME) => {
-                let frame = frame?;
+            frame = frames_rx.recv() => {
+                let frame = frame.ok_or_else(|| {
+                    RemoteError::Transport("remote framed reader stopped unexpectedly".into())
+                })??;
                 let plaintext = decode_transport(&mut noise, &frame, MAX_NOISE_PLAINTEXT)?;
                 local.write_all(&plaintext)
                     .await
@@ -718,8 +771,167 @@ async fn tunnel(
     }
 }
 
+fn auth_token_matches(expected: &str, presented: Option<&str>) -> bool {
+    let Some(presented) = presented else {
+        return false;
+    };
+    if expected.len() != presented.len() {
+        return false;
+    }
+    expected
+        .bytes()
+        .zip(presented.bytes())
+        .fold(0u8, |difference, (a, b)| difference | (a ^ b))
+        == 0
+}
+
+#[cfg(test)]
+fn request_has_local_auth(prefix: &[u8], expected: &str) -> bool {
+    strip_local_auth_header(prefix, expected).is_some()
+}
+
+fn strip_local_auth_header(prefix: &[u8], expected: &str) -> Option<Vec<u8>> {
+    let header_end = prefix.windows(4).position(|window| window == b"\r\n\r\n")?;
+    let Ok(head) = std::str::from_utf8(&prefix[..header_end]) else {
+        return None;
+    };
+    let mut lines = head.split("\r\n");
+    let request_line = lines.next()?;
+    if request_line.is_empty() || request_line.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let mut presented = None;
+    let mut sanitized = Vec::with_capacity(prefix.len());
+    sanitized.extend_from_slice(request_line.as_bytes());
+    sanitized.extend_from_slice(b"\r\n");
+    for line in lines {
+        if line.starts_with([' ', '\t']) {
+            return None;
+        }
+        let (name, value) = line.split_once(':')?;
+        if name.eq_ignore_ascii_case(LOCAL_AUTH_HEADER) {
+            if presented.is_some() {
+                return None;
+            }
+            presented = Some(value.trim());
+        } else {
+            sanitized.extend_from_slice(line.as_bytes());
+            sanitized.extend_from_slice(b"\r\n");
+        }
+    }
+    if !auth_token_matches(expected, presented) {
+        return None;
+    }
+    sanitized.extend_from_slice(b"\r\n");
+    sanitized.extend_from_slice(&prefix[header_end + 4..]);
+    Some(sanitized)
+}
+
+async fn authenticated_prefix(
+    local: &mut TcpStream,
+    expected: &str,
+) -> Result<Vec<u8>, RemoteError> {
+    let read = async {
+        let mut prefix = Vec::with_capacity(4096);
+        loop {
+            if prefix.len() >= MAX_LOCAL_REQUEST_PREFIX {
+                return Err(RemoteError::Local(
+                    "remote proxy request headers exceed the limit".into(),
+                ));
+            }
+            let remaining = MAX_LOCAL_REQUEST_PREFIX - prefix.len();
+            let mut buffer = vec![0u8; remaining.min(4096)];
+            let count = local.read(&mut buffer).await.map_err(|error| {
+                RemoteError::Local(format!("cannot read local request: {error}"))
+            })?;
+            if count == 0 {
+                return Err(RemoteError::Local(
+                    "local request closed before authentication".into(),
+                ));
+            }
+            prefix.extend_from_slice(&buffer[..count]);
+            if prefix.windows(4).any(|window| window == b"\r\n\r\n") {
+                return strip_local_auth_header(&prefix, expected).ok_or_else(|| {
+                    RemoteError::Local(
+                        "remote proxy rejected unauthenticated local connection".into(),
+                    )
+                });
+            }
+        }
+    };
+    tokio::time::timeout(LOCAL_AUTH_TIMEOUT, read)
+        .await
+        .map_err(|_| RemoteError::Local("local proxy authentication timed out".into()))?
+}
+
+fn map_pre_auth_failure(error: RemoteError) -> RemoteError {
+    match error {
+        RemoteError::Transport(message)
+            if message.starts_with("cannot read frame")
+                || message.starts_with("cannot write frame")
+                || message.starts_with("cannot connect to endpoint")
+                || message == "connection timed out" =>
+        {
+            RemoteError::HandshakeUnavailable
+        }
+        other => other,
+    }
+}
+
+fn is_unauthenticated_local(error: &RemoteError) -> bool {
+    matches!(
+        error,
+        RemoteError::Local(message)
+            if message.starts_with("remote proxy rejected unauthenticated")
+                || message.starts_with("local request closed before authentication")
+                || message.starts_with("local proxy authentication timed out")
+                || message.starts_with("cannot read local request")
+                || message.starts_with("remote proxy request headers exceed")
+    )
+}
+
+async fn write_proxy_error(local: &mut TcpStream, status: &str, code: &str, message: &str) {
+    let body = format!(r#"{{"code":"{code}","message":"{message}"}}"#);
+    let response = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let _ = local.write_all(response.as_bytes()).await;
+    let _ = local.shutdown().await;
+}
+
+fn finalize_authenticated_pairing(
+    descriptor: &Mutex<RemoteDescriptor>,
+    config_path: &Path,
+    pairing_store: &Path,
+    key: &ClientKey,
+    client_id: String,
+    scopes: Vec<String>,
+) -> Result<(), RemoteError> {
+    let mut current = descriptor
+        .lock()
+        .map_err(|_| RemoteError::Local("remote descriptor lock is poisoned".into()))?;
+    if current.code.is_some() {
+        current.code = None;
+        if let Err(error) = persist_at(config_path, &current) {
+            // Fail closed: never leave a confirmed one-time code available
+            // for replay after restart if the atomic replacement failed.
+            let _ = std::fs::remove_file(config_path);
+            return Err(error);
+        }
+        // This durable write is deliberately after descriptor replacement.
+        pairing::save_remote_record(pairing_store, key, client_id, scopes)
+            .map_err(|e| RemoteError::Local(e.to_string()))?;
+    } else {
+        pairing::save_remote_record_once(pairing_store, key, client_id, scopes)
+            .map_err(|e| RemoteError::Local(e.to_string()))?;
+    }
+    Ok(())
+}
+
 async fn serve_connection(
-    local: TcpStream,
+    mut local: TcpStream,
+    initial_local: Vec<u8>,
     descriptor: Arc<Mutex<RemoteDescriptor>>,
     config_path: PathBuf,
     key: Arc<ClientKey>,
@@ -730,40 +942,87 @@ async fn serve_connection(
         .lock()
         .map_err(|_| RemoteError::Local("remote descriptor lock is poisoned".into()))?
         .clone();
-    let mut remote = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(snapshot.endpoint()))
+    let remote_result =
+        tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(snapshot.endpoint()))
+            .await
+            .map_err(|_| RemoteError::Transport("connection timed out".into()))
+            .and_then(|result| {
+                result
+                    .map_err(|e| RemoteError::Transport(format!("cannot connect to endpoint: {e}")))
+            })
+            .map_err(map_pre_auth_failure);
+    let mut remote = match remote_result {
+        Ok(remote) => remote,
+        Err(error) => {
+            if matches!(error, RemoteError::HandshakeUnavailable) {
+                write_proxy_error(
+                    &mut local,
+                    "503 Service Unavailable",
+                    "remote_handshake_unavailable",
+                    HANDSHAKE_UNAVAILABLE,
+                )
+                .await;
+            }
+            return Err(error);
+        }
+    };
+    let mut noise = match pinned_handshake(&mut remote, &snapshot, &key)
         .await
-        .map_err(|_| RemoteError::Transport("connection timed out".into()))?
-        .map_err(|e| RemoteError::Transport(format!("cannot connect to endpoint: {e}")))?;
-    let mut noise = pinned_handshake(&mut remote, &snapshot, &key).await?;
-    let (client_id, scopes) =
-        encrypted_auth(&mut remote, &mut noise, &snapshot, &key, &client_name).await?;
-
+        .map_err(map_pre_auth_failure)
     {
-        let mut current = descriptor
-            .lock()
-            .map_err(|_| RemoteError::Local("remote descriptor lock is poisoned".into()))?;
-        if current.code.is_some() {
-            current.code = None;
-            if let Err(error) = persist_at(&config_path, &current) {
-                // Fail closed: never leave a confirmed one-time code available
-                // for replay after restart if the atomic replacement failed.
-                let _ = std::fs::remove_file(&config_path);
+        Ok(noise) => noise,
+        Err(error) => {
+            if matches!(error, RemoteError::HandshakeUnavailable) {
+                write_proxy_error(
+                    &mut local,
+                    "503 Service Unavailable",
+                    "remote_handshake_unavailable",
+                    HANDSHAKE_UNAVAILABLE,
+                )
+                .await;
+            }
+            return Err(error);
+        }
+    };
+    let (client_id, scopes) =
+        match encrypted_auth(&mut remote, &mut noise, &snapshot, &key, &client_name)
+            .await
+            .map_err(map_pre_auth_failure)
+        {
+            Ok(auth) => auth,
+            Err(error) => {
+                if matches!(error, RemoteError::HandshakeUnavailable) {
+                    write_proxy_error(
+                        &mut local,
+                        "503 Service Unavailable",
+                        "remote_handshake_unavailable",
+                        HANDSHAKE_UNAVAILABLE,
+                    )
+                    .await;
+                }
                 return Err(error);
             }
-        }
-        // Serialize the fixed-name atomic temp file across concurrent HTTP
-        // connections. Saving on reuse also repairs an interrupted first save.
-        pairing::save_remote_record(&pairing_store, &key, client_id, scopes)
-            .map_err(|e| RemoteError::Local(e.to_string()))?;
-    }
-    tunnel(local, remote, noise).await
+        };
+
+    finalize_authenticated_pairing(
+        &descriptor,
+        &config_path,
+        &pairing_store,
+        &key,
+        client_id,
+        scopes,
+    )?;
+    tunnel(local, remote, noise, initial_local).await
 }
 
-/// Process-local listener. Dropping or stopping it closes the listener and
-/// asks all accepted connection tasks to close.
+/// Process-local listener. Loopback alone is not process isolation, so every
+/// accepted HTTP/WebSocket connection must present a memory-only credential
+/// generated by this app process. Dropping or stopping the proxy closes the
+/// listener and asks all accepted connection tasks to close.
 pub struct RemoteProxy {
     local_addr: SocketAddr,
     shutdown: watch::Sender<bool>,
+    last_error: Arc<Mutex<Option<String>>>,
 }
 
 impl RemoteProxy {
@@ -773,6 +1032,10 @@ impl RemoteProxy {
 
     pub fn stop(&self) {
         let _ = self.shutdown.send(true);
+    }
+
+    pub fn last_error(&self) -> Option<String> {
+        self.last_error.lock().ok().and_then(|error| error.clone())
     }
 }
 
@@ -810,6 +1073,7 @@ pub async fn start_proxy(
     key: Arc<ClientKey>,
     client_name: &str,
     pairing_store: PathBuf,
+    local_auth: Arc<str>,
 ) -> Result<RemoteProxy, RemoteError> {
     let local_addr = loopback_addr(api_base)?;
     let listener = TcpListener::bind(local_addr)
@@ -822,11 +1086,19 @@ pub async fn start_proxy(
     let config_path = config_path(app_data_dir);
     let client_name: Arc<str> = Arc::from(client_name);
     let (shutdown, mut stopped) = watch::channel(false);
+    // HTTP keep-alive and WebSocket connections each retain one remote
+    // TCP/Noise tunnel. Independent byte streams are never interleaved; this
+    // bounded set is the safe reusable pool without adding a mux wire protocol.
+    let tunnel_permits = Arc::new(Semaphore::new(MAX_LOCAL_CONNECTIONS));
+    let auth_permits = Arc::new(Semaphore::new(MAX_PENDING_LOCAL_AUTH));
+    let last_error = Arc::new(Mutex::new(None));
 
     tokio::spawn({
         let descriptor = descriptor.clone();
         let key = key.clone();
+        let last_error = last_error.clone();
         async move {
+            let mut accept_backoff = Duration::from_millis(10);
             loop {
                 tokio::select! {
                     changed = stopped.changed() => {
@@ -835,23 +1107,80 @@ pub async fn start_proxy(
                         }
                     }
                     accepted = listener.accept() => {
-                        let Ok((stream, peer)) = accepted else {
-                            break;
+                        let (mut stream, peer) = match accepted {
+                            Ok(accepted) => {
+                                accept_backoff = Duration::from_millis(10);
+                                accepted
+                            }
+                            Err(error) => {
+                                if let Ok(mut slot) = last_error.lock() {
+                                    *slot = Some(format!("remote proxy accept failed: {error}"));
+                                }
+                                tokio::time::sleep(accept_backoff).await;
+                                accept_backoff = (accept_backoff * 2).min(Duration::from_secs(1));
+                                continue;
+                            }
                         };
                         if !peer.ip().is_loopback() {
                             continue;
                         }
+                        let Ok(auth_permit) = auth_permits.clone().try_acquire_owned() else {
+                            write_proxy_error(
+                                &mut stream,
+                                "503 Service Unavailable",
+                                "remote_proxy_auth_busy",
+                                "remote proxy authentication limit reached",
+                            )
+                            .await;
+                            continue;
+                        };
                         let descriptor = descriptor.clone();
                         let config_path = config_path.clone();
                         let key = key.clone();
                         let client_name = client_name.clone();
                         let pairing_store = pairing_store.clone();
+                        let local_auth = local_auth.clone();
+                        let last_error = last_error.clone();
+                        let tunnel_permits = tunnel_permits.clone();
                         let mut connection_stopped = stopped.clone();
                         tokio::spawn(async move {
+                            let initial_local =
+                                match authenticated_prefix(&mut stream, &local_auth).await {
+                                    Ok(prefix) => prefix,
+                                    Err(error) => {
+                                        write_proxy_error(
+                                            &mut stream,
+                                            "403 Forbidden",
+                                            "remote_proxy_unauthorized",
+                                            "remote proxy accepts authenticated app traffic only",
+                                        )
+                                        .await;
+                                        drop(auth_permit);
+                                        if !is_unauthenticated_local(&error) {
+                                            if let Ok(mut slot) = last_error.lock() {
+                                                *slot = Some(error.to_string());
+                                            }
+                                        }
+                                        return;
+                                    }
+                                };
+                            drop(auth_permit);
+                            let Ok(tunnel_permit) = tunnel_permits.try_acquire_owned() else {
+                                write_proxy_error(
+                                    &mut stream,
+                                    "503 Service Unavailable",
+                                    "remote_proxy_busy",
+                                    "remote proxy connection limit reached",
+                                )
+                                .await;
+                                return;
+                            };
+                            let _tunnel_permit = tunnel_permit;
                             tokio::select! {
                                 _ = connection_stopped.changed() => {}
                                 result = serve_connection(
                                     stream,
+                                    initial_local,
                                     descriptor,
                                     config_path,
                                     key,
@@ -859,8 +1188,13 @@ pub async fn start_proxy(
                                     pairing_store,
                                 ) => {
                                     if let Err(error) = result {
-                                        // Never include descriptors, auth JSON, or codes.
-                                        eprintln!("[remote] connection closed: {error}");
+                                        if !is_unauthenticated_local(&error) {
+                                            if let Ok(mut slot) = last_error.lock() {
+                                                *slot = Some(error.to_string());
+                                            }
+                                            // Never include descriptors, auth JSON, or codes.
+                                            eprintln!("[remote] connection closed: {error}");
+                                        }
                                     }
                                 }
                             }
@@ -874,6 +1208,7 @@ pub async fn start_proxy(
     Ok(RemoteProxy {
         local_addr: actual_addr,
         shutdown,
+        last_error,
     })
 }
 
@@ -973,6 +1308,93 @@ mod tests {
         let text = std::fs::read_to_string(path).unwrap();
         assert!(!text.contains(&code));
         assert!(!text.contains("\"code\""));
+    }
+
+    #[test]
+    fn import_view_exposes_only_a_short_node_id_fingerprint() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = SigningKey::from_bytes(&[13u8; 32]);
+        let node_id = hex::encode(node.verifying_key().as_bytes());
+        let transport = X25519PublicKey::from(&StaticSecret::from([14u8; 32])).to_bytes();
+        let view = import_pairing_link(
+            dir.path(),
+            &signed_link("127.0.0.1:4242".into(), &node, transport, &test_code(7)),
+        )
+        .unwrap();
+        assert_eq!(
+            view.node_id_fingerprint,
+            format!("{}…{}", &node_id[..8], &node_id[node_id.len() - 8..])
+        );
+        assert_ne!(view.node_id_fingerprint, node_id);
+    }
+
+    #[test]
+    fn successful_auth_removes_code_before_pairing_record_failure() {
+        let app_dir = tempfile::tempdir().unwrap();
+        let key_dir = tempfile::tempdir().unwrap();
+        let key = ClientKey::load_or_create(key_dir.path()).unwrap();
+        let node = SigningKey::from_bytes(&[15u8; 32]);
+        let transport = X25519PublicKey::from(&StaticSecret::from([16u8; 32])).to_bytes();
+        import_pairing_link(
+            app_dir.path(),
+            &signed_link("127.0.0.1:4242".into(), &node, transport, &test_code(8)),
+        )
+        .unwrap();
+        let descriptor = Mutex::new(load_persisted(app_dir.path()).unwrap().unwrap());
+        let invalid_store = app_dir.path().join("not-a-directory");
+        std::fs::write(&invalid_store, b"file").unwrap();
+
+        let error = finalize_authenticated_pairing(
+            &descriptor,
+            &config_path(app_dir.path()),
+            &invalid_store,
+            &key,
+            "0123456789abcdef0123456789abcdef".into(),
+            vec!["read".into()],
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("cannot create"));
+        let persisted = std::fs::read_to_string(config_path(app_dir.path())).unwrap();
+        assert!(!persisted.contains("\"code\""));
+        assert!(!descriptor.lock().unwrap().has_code());
+    }
+
+    #[test]
+    fn returning_auth_validates_existing_record_without_rewriting_it() {
+        let app_dir = tempfile::tempdir().unwrap();
+        let pairing_store = tempfile::tempdir().unwrap();
+        let key = ClientKey::load_or_create(pairing_store.path()).unwrap();
+        let node = SigningKey::from_bytes(&[17u8; 32]);
+        let transport = X25519PublicKey::from(&StaticSecret::from([18u8; 32])).to_bytes();
+        import_pairing_link(
+            app_dir.path(),
+            &signed_link("127.0.0.1:4242".into(), &node, transport, &test_code(9)),
+        )
+        .unwrap();
+        let descriptor = Mutex::new(load_persisted(app_dir.path()).unwrap().unwrap());
+        finalize_authenticated_pairing(
+            &descriptor,
+            &config_path(app_dir.path()),
+            pairing_store.path(),
+            &key,
+            "0123456789abcdef0123456789abcdef".into(),
+            vec!["read".into()],
+        )
+        .unwrap();
+
+        std::fs::set_permissions(pairing_store.path(), std::fs::Permissions::from_mode(0o500))
+            .unwrap();
+        let result = finalize_authenticated_pairing(
+            &descriptor,
+            &config_path(app_dir.path()),
+            pairing_store.path(),
+            &key,
+            "0123456789abcdef0123456789abcdef".into(),
+            vec!["read".into()],
+        );
+        std::fs::set_permissions(pairing_store.path(), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        result.unwrap();
     }
 
     #[test]
@@ -1141,6 +1563,120 @@ mod tests {
         );
     }
 
+    async fn fragmented_reply_survives_outgoing_local_traffic(split_at: usize) {
+        let local_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let local_client = TcpStream::connect(local_listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (local_proxy, _) = local_listener.accept().await.unwrap();
+
+        let remote_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let remote_proxy = TcpStream::connect(remote_listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (mut remote_node, _) = remote_listener.accept().await.unwrap();
+
+        let (app_noise, mut node_noise) = transport_pair();
+        let bridge = tokio::spawn(tunnel(local_proxy, remote_proxy, app_noise, Vec::new()));
+        let mut local_client = local_client;
+
+        let reply = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+        let record = encode_transport(&mut node_noise, reply).unwrap();
+        let mut outer = Vec::with_capacity(record.len() + 4);
+        outer.extend_from_slice(&(record.len() as u32).to_be_bytes());
+        outer.extend_from_slice(&record);
+        assert!(split_at > 0 && split_at < outer.len());
+        remote_node.write_all(&outer[..split_at]).await.unwrap();
+
+        // Give the framed reader time to consume the fragment. The old
+        // select-owned read_frame lost these bytes when this local read won.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let outgoing = b"GET /api/v1/health HTTP/1.1\r\n\r\n";
+        local_client.write_all(outgoing).await.unwrap();
+
+        let outgoing_record = tokio::time::timeout(
+            Duration::from_secs(1),
+            read_frame(&mut remote_node, MAX_TRANSPORT_FRAME),
+        )
+        .await
+        .expect("outgoing frame must arrive while reply is fragmented")
+        .unwrap();
+        assert_eq!(
+            decode_transport(&mut node_noise, &outgoing_record, MAX_NOISE_PLAINTEXT).unwrap(),
+            outgoing
+        );
+
+        remote_node.write_all(&outer[split_at..]).await.unwrap();
+        let mut received = vec![0u8; reply.len()];
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            local_client.read_exact(&mut received),
+        )
+        .await
+        .expect("fragmented reply must survive the competing local read")
+        .unwrap();
+        assert_eq!(received, reply);
+
+        local_client.shutdown().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), bridge)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn tunnel_keeps_partial_outer_header_when_local_traffic_wins() {
+        fragmented_reply_survives_outgoing_local_traffic(2).await;
+    }
+
+    #[tokio::test]
+    async fn tunnel_keeps_partial_outer_body_when_local_traffic_wins() {
+        fragmented_reply_survives_outgoing_local_traffic(7).await;
+    }
+
+    #[test]
+    fn local_proxy_auth_predicate_rejects_missing_duplicate_and_wrong_tokens() {
+        let request = |headers: &str| {
+            format!("GET /api/v1/health HTTP/1.1\r\nHost: localhost\r\n{headers}\r\n")
+        };
+        assert!(request_has_local_auth(
+            request("X-BitSov-Proxy-Auth: abc123\r\n").as_bytes(),
+            "abc123"
+        ));
+        assert!(!request_has_local_auth(request("").as_bytes(), "abc123"));
+        assert!(!request_has_local_auth(
+            request("X-BitSov-Proxy-Auth: wrong\r\n").as_bytes(),
+            "abc123"
+        ));
+        assert!(!request_has_local_auth(
+            request("X-BitSov-Proxy-Auth: abc123\r\nx-bitsov-proxy-auth: abc123\r\n").as_bytes(),
+            "abc123"
+        ));
+    }
+
+    #[test]
+    fn local_proxy_auth_is_stripped_before_tunneling() {
+        let request = b"POST /api/v1/messages HTTP/1.1\r\nHost: localhost\r\nX-BitSov-Proxy-Auth: abc123\r\nContent-Length: 4\r\n\r\nbody";
+        let sanitized = strip_local_auth_header(request, "abc123").unwrap();
+        assert_eq!(
+            sanitized,
+            b"POST /api/v1/messages HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\n\r\nbody"
+        );
+        assert!(!sanitized
+            .windows(LOCAL_AUTH_HEADER.len())
+            .any(|window| window.eq_ignore_ascii_case(LOCAL_AUTH_HEADER.as_bytes())));
+    }
+
+    #[test]
+    fn pre_auth_eof_has_stable_handshake_limit_error() {
+        let error = map_pre_auth_failure(RemoteError::Transport(
+            "cannot read frame length: early eof".into(),
+        ));
+        assert!(matches!(error, RemoteError::HandshakeUnavailable));
+        assert_eq!(error.to_string(), HANDSHAKE_UNAVAILABLE);
+    }
+
     async fn responder(listener: TcpListener, secret: [u8; 32]) -> Result<(), RemoteError> {
         let (mut stream, _) = listener.accept().await.unwrap();
         let params = NOISE_PROTOCOL.parse().unwrap();
@@ -1196,6 +1732,146 @@ mod tests {
         assert!(error.to_string().contains("does not match"));
         drop(stream);
         assert!(server.await.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn proxy_caps_authenticated_local_connections() {
+        let remote_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let remote_endpoint = remote_listener.local_addr().unwrap().to_string();
+        let (accepted_tx, mut accepted_rx) = mpsc::channel(MAX_LOCAL_CONNECTIONS);
+        let remote_server = tokio::spawn(async move {
+            let mut held = Vec::new();
+            loop {
+                let (stream, _) = remote_listener.accept().await.unwrap();
+                held.push(stream);
+                accepted_tx.send(()).await.unwrap();
+            }
+        });
+
+        let node = SigningKey::from_bytes(&[35u8; 32]);
+        let responder_public = X25519PublicKey::from(&StaticSecret::from([36u8; 32])).to_bytes();
+        let descriptor = parse_pairing_link(&signed_link(
+            remote_endpoint,
+            &node,
+            responder_public,
+            &test_code(10),
+        ))
+        .unwrap();
+        let app_dir = tempfile::tempdir().unwrap();
+        persist_at(&config_path(app_dir.path()), &descriptor).unwrap();
+        let pairing_store = tempfile::tempdir().unwrap();
+        let key = Arc::new(ClientKey::load_or_create(pairing_store.path()).unwrap());
+        let port_probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let local_addr = port_probe.local_addr().unwrap();
+        drop(port_probe);
+        let local_auth: Arc<str> = Arc::from("a".repeat(64));
+        let proxy = start_proxy(
+            &format!("http://{local_addr}/{}", "api/v1"),
+            app_dir.path(),
+            descriptor,
+            key,
+            "BitSov test",
+            pairing_store.path().to_path_buf(),
+            local_auth.clone(),
+        )
+        .await
+        .unwrap();
+
+        let request = format!(
+            "GET /api/v1/health HTTP/1.1\r\nHost: localhost\r\n{LOCAL_AUTH_HEADER}: {local_auth}\r\n\r\n"
+        );
+        let mut held_local = Vec::new();
+        for _ in 0..MAX_LOCAL_CONNECTIONS {
+            let mut stream = TcpStream::connect(proxy.local_addr()).await.unwrap();
+            stream.write_all(request.as_bytes()).await.unwrap();
+            held_local.push(stream);
+        }
+        for _ in 0..MAX_LOCAL_CONNECTIONS {
+            tokio::time::timeout(Duration::from_secs(1), accepted_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+        }
+
+        let mut refused = TcpStream::connect(proxy.local_addr()).await.unwrap();
+        refused.write_all(request.as_bytes()).await.unwrap();
+        let mut response = Vec::new();
+        let read = tokio::time::timeout(Duration::from_secs(1), refused.read_to_end(&mut response))
+            .await
+            .unwrap();
+        assert!(
+            read.is_ok()
+                || read.is_err_and(|error| error.kind() == std::io::ErrorKind::ConnectionReset)
+        );
+        let response = String::from_utf8(response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 503 Service Unavailable"));
+        assert!(response.contains("remote_proxy_busy"));
+
+        drop(held_local);
+        drop(proxy);
+        remote_server.abort();
+    }
+
+    #[tokio::test]
+    async fn silent_pre_auth_close_returns_stable_http_status() {
+        let remote_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let remote_endpoint = remote_listener.local_addr().unwrap().to_string();
+        let remote_server = tokio::spawn(async move {
+            let (mut stream, _) = remote_listener.accept().await.unwrap();
+            let _ = read_frame(&mut stream, MAX_HANDSHAKE_FRAME).await;
+            // Simulate a node silently enforcing its handshake/rate limit.
+        });
+
+        let node = SigningKey::from_bytes(&[37u8; 32]);
+        let responder_public = X25519PublicKey::from(&StaticSecret::from([38u8; 32])).to_bytes();
+        let descriptor = parse_pairing_link(&signed_link(
+            remote_endpoint,
+            &node,
+            responder_public,
+            &test_code(11),
+        ))
+        .unwrap();
+        let app_dir = tempfile::tempdir().unwrap();
+        persist_at(&config_path(app_dir.path()), &descriptor).unwrap();
+        let pairing_store = tempfile::tempdir().unwrap();
+        let key = Arc::new(ClientKey::load_or_create(pairing_store.path()).unwrap());
+        let port_probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let local_addr = port_probe.local_addr().unwrap();
+        drop(port_probe);
+        let local_auth: Arc<str> = Arc::from("b".repeat(64));
+        let proxy = start_proxy(
+            &format!("http://{local_addr}/{}", "api/v1"),
+            app_dir.path(),
+            descriptor,
+            key,
+            "BitSov test",
+            pairing_store.path().to_path_buf(),
+            local_auth.clone(),
+        )
+        .await
+        .unwrap();
+
+        let mut local = TcpStream::connect(proxy.local_addr()).await.unwrap();
+        local
+            .write_all(
+                format!(
+                    "GET /api/v1/health HTTP/1.1\r\nHost: localhost\r\n{LOCAL_AUTH_HEADER}: {local_auth}\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut response = Vec::new();
+        tokio::time::timeout(Duration::from_secs(1), local.read_to_end(&mut response))
+            .await
+            .unwrap()
+            .unwrap();
+        let response = String::from_utf8(response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 503 Service Unavailable"));
+        assert!(response.contains("remote_handshake_unavailable"));
+        assert!(response.contains(HANDSHAKE_UNAVAILABLE));
+
+        remote_server.await.unwrap();
     }
 
     #[test]

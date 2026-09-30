@@ -19,6 +19,16 @@ const READ_SCOPE: &str = "read";
 
 /// Read the 50-question fixture from the node, or fall back to mock.
 pub fn build(auth: NodeAuth, base_url: &str, audit: Arc<dyn AuditSink>) -> Feed {
+    build_with_proxy_auth(auth, base_url, audit, None)
+}
+
+/// Read through the authenticated remote loopback proxy when configured.
+pub fn build_with_proxy_auth(
+    auth: NodeAuth,
+    base_url: &str,
+    audit: Arc<dyn AuditSink>,
+    proxy_auth: Option<Arc<str>>,
+) -> Feed {
     let token = match auth {
         NodeAuth::NotPaired => return Feed::mock(MockReason::NotPaired),
         NodeAuth::Rc7Fallback => return Feed::mock(MockReason::Rc7Fallback),
@@ -32,6 +42,7 @@ pub fn build(auth: NodeAuth, base_url: &str, audit: Arc<dyn AuditSink>) -> Feed 
     let Ok(node) = LocalNodeRead::new(base_url, token, audit) else {
         return Feed::mock(MockReason::NodeUnreachable);
     };
+    let node = node.with_proxy_auth(proxy_auth);
     let snapshot = Snapshot::new(&node);
     let rows = healthy(&snapshot).then(|| sit_mock::live_rows(&snapshot));
     if snapshot.transport_failed() {

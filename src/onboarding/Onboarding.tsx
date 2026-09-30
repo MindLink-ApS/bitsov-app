@@ -19,7 +19,11 @@ export function Onboarding(props: {
   pairing: () => PairingView;
   trustAck: () => boolean;
   onRetry: () => void;
-  onImportRemote?: (link: string) => Promise<{ endpoint: string; restart_required: boolean }>;
+  onImportRemote?: (link: string) => Promise<{
+    endpoint: string;
+    node_id_fingerprint: string;
+    restart_required: boolean;
+  }>;
 }) {
   const steps = () => onboardingSteps(props.status(), props.pairing(), props.trustAck());
   const [remoteLink, setRemoteLink] = createSignal('');
@@ -41,7 +45,9 @@ export function Onboarding(props: {
     try {
       if (!props.onImportRemote) throw new Error('Remote access import is unavailable.');
       const result = await props.onImportRemote(link);
-      setImportResult(`Remote node ${result.endpoint} saved. Restart BitSov to connect.`);
+      setImportResult(
+        `Remote node ${result.endpoint} saved. Node ID fingerprint: ${result.node_id_fingerprint}. Restart BitSov to connect.`,
+      );
     } catch (error) {
       setImportError(String(error));
     } finally {

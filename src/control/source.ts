@@ -60,7 +60,7 @@ import type {
 
 export type RemoteImportView = {
   endpoint: string;
-  node_id: string;
+  node_id_fingerprint: string;
   restart_required: boolean;
 };
 

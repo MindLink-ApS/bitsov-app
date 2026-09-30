@@ -262,6 +262,22 @@ pub fn save_remote_record(
     )
 }
 
+/// Repair the narrow crash window after the remote one-time code was durably
+/// removed but before its pairing record was saved. Ordinary returning
+/// connections only validate the existing owner-only record and perform no
+/// disk write.
+pub fn save_remote_record_once(
+    store: &Path,
+    key: &ClientKey,
+    client_id: String,
+    scopes: Vec<String>,
+) -> Result<(), PairError> {
+    if load_record(store, key)?.is_some() {
+        return Ok(());
+    }
+    save_remote_record(store, key, client_id, scopes)
+}
+
 /// Drop the stored pairing so the next [`establish`] runs the ceremony again.
 pub fn forget_pairing(store: &Path) {
     let _ = std::fs::remove_file(store.join(RECORD_FILE));

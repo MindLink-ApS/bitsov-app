@@ -172,4 +172,39 @@ describe('pairing panel', () => {
     expect(el.textContent).toContain('identity-free');
     expect(el.textContent).toContain('genome release');
   });
+
+  it('shows the remote Node ID short fingerprint without echoing the pairing link', async () => {
+    const link = 'bitsov://pair/secret-pairing-material';
+    const onImportRemote = vi.fn().mockResolvedValue({
+      endpoint: 'node.example:4242',
+      node_id_fingerprint: '01234567…89abcdef',
+      restart_required: true,
+    });
+    mount = document.createElement('div');
+    document.body.appendChild(mount);
+    dispose = render(
+      () => (
+        <Onboarding
+          status={() => booting}
+          pairing={() => starting}
+          trustAck={() => false}
+          onRetry={() => {}}
+          onImportRemote={onImportRemote}
+        />
+      ),
+      mount,
+    );
+
+    const input = mount.querySelector<HTMLInputElement>('#remote-pairing-link')!;
+    input.value = link;
+    input.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    mount.querySelector<HTMLFormElement>('[data-remote-access]')!.requestSubmit();
+
+    await vi.waitFor(() => {
+      expect(mount!.textContent).toContain('Node ID fingerprint: 01234567…89abcdef');
+    });
+    expect(onImportRemote).toHaveBeenCalledWith(link);
+    expect(input.value).toBe('');
+    expect(mount.textContent).not.toContain(link);
+  });
 });

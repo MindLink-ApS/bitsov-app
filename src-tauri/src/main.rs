@@ -163,6 +163,9 @@ struct NodeState {
     /// The `/ws` link as the bridge's socket last reported it (`live_link`).
     live_link: control::LiveLink,
     http: reqwest::Client,
+    /// Memory-only credential attached by this process to every loopback HTTP
+    /// and WebSocket connection. The remote proxy rejects traffic without it.
+    remote_proxy_auth: Arc<str>,
     /// `API_BASE` in the app; an ephemeral loopback port in tests.
     api_base: String,
     auth: Mutex<AuthMode>,
@@ -256,6 +259,16 @@ impl Default for NodeState {
 
 impl NodeState {
     fn for_api(api_base: impl Into<String>) -> Self {
+        let remote_proxy_auth: Arc<str> = Arc::from(
+            remote_access::new_local_auth_token()
+                .expect("operating-system randomness for remote proxy authentication"),
+        );
+        let mut default_headers = reqwest::header::HeaderMap::new();
+        default_headers.insert(
+            reqwest::header::HeaderName::from_static(remote_access::LOCAL_AUTH_HEADER),
+            reqwest::header::HeaderValue::from_str(&remote_proxy_auth)
+                .expect("hex proxy authentication is a valid HTTP header"),
+        );
         Self {
             api_base: api_base.into(),
             auth: Mutex::new(AuthMode::Unauthenticated),
@@ -302,8 +315,10 @@ impl NodeState {
                 .timeout(Duration::from_secs(5))
                 .no_proxy()
                 .redirect(reqwest::redirect::Policy::none())
+                .default_headers(default_headers)
                 .build()
                 .expect("reqwest client"),
+            remote_proxy_auth,
         }
     }
 }
@@ -746,16 +761,16 @@ async fn attach_remote(
         key,
         PAIRING_CLIENT_NAME,
         store,
+        state.remote_proxy_auth.clone(),
     )
     .await
     {
         Ok(proxy) => proxy,
         Err(error) => return set_error(&state, error.to_string()),
     };
+    // The remote router deliberately omits public health probes. The encrypted
+    // pairing/token exchange is the readiness check for this pinned endpoint.
     *state.remote_proxy.lock().unwrap() = Some(proxy);
-    if let Err(error) = wait_for_health(&state).await {
-        return set_error(&state, error);
-    }
     finish_auth(&state, app_data_dir).await;
 }
 
@@ -1161,7 +1176,16 @@ fn assistant_source_script(app: &AppHandle) -> String {
         use bitsov_app::jarvis::assistant_feed;
         tauri::async_runtime::block_on(ensure_fresh_token(&state));
         let audit = Arc::new(bitsov_app::jarvis::broker::StderrAudit);
-        let feed = assistant_feed::build(node_auth(&state), &state.api_base, audit);
+        let proxy_auth = state
+            .remote_mode
+            .load(Ordering::SeqCst)
+            .then(|| state.remote_proxy_auth.clone());
+        let feed = assistant_feed::build_with_proxy_auth(
+            node_auth(&state),
+            &state.api_base,
+            audit,
+            proxy_auth,
+        );
         return feed.init_script();
     }
     let _ = app;
@@ -5220,9 +5244,13 @@ async fn ai_read_topic(state: &NodeState, topic: ai::Topic, since_ms: Option<u64
     ensure_fresh_token(state).await;
     let auth = node_auth(state);
     let base = state.api_base.clone();
+    let proxy_auth = state
+        .remote_mode
+        .load(Ordering::SeqCst)
+        .then(|| state.remote_proxy_auth.clone());
     tauri::async_runtime::spawn_blocking(move || {
         let audit = Arc::new(bitsov_app::jarvis::broker::StderrAudit);
-        ai::read_topic(auth, &base, audit, topic, since_ms)
+        ai::read_topic_with_proxy_auth(auth, &base, audit, topic, since_ms, proxy_auth)
     })
     .await
     .map_err(|_| "The read did not finish.".to_string())
@@ -5445,7 +5473,13 @@ async fn live_bridge(app: AppHandle) {
             detail: None,
         });
         let emit = |event| emit_live(&app, event);
-        let detail = match control::run_ws_session(&url, &emit).await {
+        let detail = match control::run_ws_session(
+            &url,
+            Some(&state.remote_proxy_auth),
+            &emit,
+        )
+        .await
+        {
             Ok(()) => {
                 attempt = 0;
                 None
@@ -6025,7 +6059,7 @@ mod ai_track_tests {
     fn reads_use_the_broker_and_the_paired_token_only() {
         let section = section();
         assert!(section.contains("let auth = node_auth(state);"));
-        assert!(section.contains("ai::read_topic(auth, &base, audit, topic, since_ms)"));
+        assert!(section.contains("ai::read_topic_with_proxy_auth("));
         for token in ["call_api", "get_json", "state.token", "auth/local", "gated_post", "reqwest::"] {
             assert!(!section.contains(token), "AI track section uses {token}");
         }
@@ -11512,7 +11546,7 @@ mod assistant_acl_tests {
         assert!(chooser.contains("app: &AppHandle"), "{chooser}");
         assert!(!chooser.contains("WebviewWindow"), "{chooser}");
         assert!(!chooser.contains("#[tauri::command]"));
-        assert!(chooser.contains("assistant_feed::build(node_auth(&state), &state.api_base"));
+        assert!(chooser.contains("assistant_feed::build_with_proxy_auth("));
 
         let opener = function_source(&source, "open_assistant_window");
         assert!(opener.contains(".initialization_script(assistant_rows_script())"));
@@ -11523,7 +11557,7 @@ mod assistant_acl_tests {
             .nth(1)
             .and_then(|rest| rest.split("// ---- commands").next())
             .expect("sealed section");
-        for token in ["assistant_feed::build", "LocalNodeRead", "api_base", "NodeState"] {
+        for token in ["assistant_feed::build_with_proxy_auth", "LocalNodeRead", "api_base", "NodeState"] {
             assert!(!sealed.contains(token), "sealed section uses {token}");
         }
         let menu = function_source(&source, "install_assistant_menu");
