@@ -119,14 +119,16 @@ describe('acting from the track', () => {
     $<HTMLButtonElement>('[data-pay-confirm]')!.click();
   };
 
-  async function openShell() {
+  async function openShell(opts: { waitCost?: boolean } = {}) {
     mount = document.createElement('div');
     document.body.appendChild(mount);
     dispose = render(() => <App />, mount);
     await vi.waitFor(() => expect([...mount.querySelectorAll('button')].some((b) => b.textContent?.includes('I understand'))).toBe(true));
     [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
     await vi.waitFor(() => expect($(`[data-track="peer:${A}"]`)?.getAttribute('aria-current')).toBe('true'));
-    await vi.waitFor(() => expect($('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('2000'));
+    if (opts.waitCost !== false) {
+      await vi.waitFor(() => expect($('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('2000'));
+    }
   }
 
   it('asks the owner once, keeps the draft, then sends and shows the receipt and delivery', async () => {
@@ -340,7 +342,7 @@ describe('acting from the track', () => {
       price_quote: () => new Promise(() => { /* never settles */ }),
     });
     host.spend.v = openView();
-    await openShell();
+    await openShell({ waitCost: false });
     type('[data-composer] textarea', 'too soon');
     await vi.waitFor(() => expect($('[data-send]')!.hasAttribute('disabled')).toBe(true));
     // Disabled Send cannot click; a form submit still must not clear the draft.
