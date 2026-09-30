@@ -349,11 +349,28 @@ describe('voice notes in the composer and thread', () => {
     $<HTMLElement>(`[data-track="peer:${C}"]`)!.click();
     await vi.waitFor(() => expect($(`[data-track="peer:${C}"]`)?.getAttribute('aria-current')).toBe('true'));
     releaseStop!();
-    // Give stopRecording's await a turn; the clip must not land on the new track.
-    await Promise.resolve();
-    await Promise.resolve();
+    // Macrotask drain: stopRecording's await chain needs more than two microtasks.
+    await new Promise((r) => setTimeout(r, 20));
     expect($('[data-voice-preview]')).toBeNull();
     expect($('[data-composer]')!.getAttribute('data-mode')).toBe('message');
+  });
+
+  it('a microphone prompt answered after the window blurs does not start recording', async () => {
+    stubHost();
+    let grant!: (s: MediaStream) => void;
+    const { stream, track } = fakeStream();
+    Object.defineProperty(navigator, 'mediaDevices', {
+      configurable: true,
+      value: { getUserMedia: () => new Promise<MediaStream>((r) => { grant = r; }) },
+    });
+    await openShell();
+    $<HTMLButtonElement>('[data-voice-record="start"]')!.click();
+    await vi.waitFor(() => expect(grant).toBeDefined());
+    window.dispatchEvent(new Event('blur'));
+    grant(stream);
+    await vi.waitFor(() => expect(track.stop).toHaveBeenCalled());
+    expect($('[data-voice-record="stop"]')).toBeNull();
+    expect(FakeRecorder.made.every((r) => r.state === 'inactive')).toBe(true);
   });
 
   it('a microphone prompt answered after switching contact does not record for the new one', async () => {

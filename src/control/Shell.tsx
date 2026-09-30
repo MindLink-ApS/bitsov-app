@@ -2043,8 +2043,16 @@ function Composer(props: {
     r?.rec.cancel();
   };
   onCleanup(dropRecording);
-  // Leaving the window stops the microphone; the clip stays as a preview, unsent.
-  const onLeave = () => { if (untrack(recording)) void stopRecording(); };
+  // Leaving the window stops an active recording (clip stays as an unsent
+  // preview). If the mic prompt is still open, bump generation so a late
+  // grant does not start capture while the user is not looking.
+  const onLeave = () => {
+    if (untrack(recording)) {
+      void stopRecording();
+    } else {
+      voiceGeneration++;
+    }
+  };
   const onVisibility = () => { if (document.visibilityState === 'hidden') onLeave(); };
   window.addEventListener('blur', onLeave);
   document.addEventListener('visibilitychange', onVisibility);
