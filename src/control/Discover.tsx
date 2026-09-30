@@ -5,6 +5,7 @@ import type { FrontDoor, FrontDoorPublish } from './types';
 import type { Source } from './source';
 import { amount as fmtAmount } from './format';
 import { asActionError } from './state';
+import { SoftError } from './SoftError';
 import {
   CARD_TOO_LARGE,
   CARD_PUBLISH_BUDGET,
@@ -131,9 +132,13 @@ export function DiscoverPanel(props: Props) {
     <div class="panel discover" data-panel="discover">
       <h2>Browse</h2>
       <p class="hint">
-        Paste a profile link to read it. Reading is free and local. After Read, the card shows a
-        QR you can hold up for someone else — this desktop app does not scan a camera. Knocking uses
-        the existing first-contact path — you pay their admission price once.
+        Paste a profile link (or hold up its QR for someone else to paste). Reading is free and local.
+        This desktop app does not scan a camera. Knocking uses first contact — you pay their admission
+        price once.
+      </p>
+      <p class="hint" data-browse-pages-soon>
+        Coming soon: fetching another node’s public pages or site. Today Browse only opens profile
+        cards you paste or scan.
       </p>
       <label class="field">
         <span>Profile link</span>
@@ -155,9 +160,7 @@ export function DiscoverPanel(props: Props) {
         </button>
       </div>
       <Show when={err()}>
-        <p class="hint err" data-discover-error>
-          {err()}
-        </p>
+        {(e) => <SoftError message={e()} data="discover-error" />}
       </Show>
       <Show when={card()} keyed>
         {(c) => <FrontDoorCardView card={c} now={props.now} shareQr />}
@@ -629,10 +632,8 @@ export function FrontDoorEditor(props: { source: Source; now: number }) {
           </button>
         </Show>
       </div>
-      <Show when={err() && !ownerAsk()}>
-        <p class="hint err" data-fd-edit-error>
-          {err()}
-        </p>
+      <Show when={!ownerAsk() ? err() : null}>
+        {(e) => <SoftError message={e()} data="fd-edit-error" class="hint" />}
       </Show>
       <Show when={ownerAsk()}>
         {(ask) => (

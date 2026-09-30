@@ -203,7 +203,10 @@ describe('control center shell', () => {
     expect(mount.querySelector('[data-mode="sample"]')).not.toBeNull();
     await vi.waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Send'));
     click('[data-track="new"]');
-    await vi.waitFor(() => expect(mount.querySelector('[data-new-track]')?.textContent).toContain('introduction, not admission'));
+    await vi.waitFor(() => expect(mount.querySelector('[data-new-track]')?.textContent).toContain('Share your node id'));
+    expect(mount.querySelector('[data-new-track]')?.textContent).toContain('Browse');
+    expect(mount.querySelector('[data-intro-mine]')).toBeNull();
+    expect(mount.querySelector('[data-intro-open]')).toBeNull();
     click('[data-track="ai"]');
     await vi.waitFor(() => expect(mount.querySelector('[data-ai-track]')?.textContent).toContain('Ask about your own node'));
     expect(mount.querySelector('[data-ai-policy]')?.textContent).toContain('Nothing leaves this computer');

@@ -7,6 +7,7 @@ import { AiTrack, createAiSession } from './AiTrack';
 import { amount as fmtAmount, allIn, clock, day, feeCeiling, routingFee, sats, satsWhole, satUnit, shortId, uptime } from './format';
 import { amountText, inPaymentBounds, MAX_PAYMENT_MSAT, MIN_PAYMENT_MSAT, parseAmount } from './amountInput';
 import { Organism } from './BodyPanel';
+import { SoftError } from './SoftError';
 import { DiscoverPanel, FrontDoorEditor } from './Discover';
 import { callCost, createCallEngine, IDLE as CALL_IDLE, isCallKind, signalCost, stunServer, type CallMedia, type CallView } from './call';
 import { createMeetingEngine, declineCost, inviteCost, joinCost, MAX_PARTICIPANTS, MEETING_IDLE, type LegState, type MeetingView, type ShownQuotes } from './meeting';
@@ -1313,10 +1314,13 @@ function Rail(props: {
         </Show>
       </div>
 
-      <div class="track-group">
+      <div class="track-group" data-rooms-soon>
         <h2>Rooms</h2>
-        <Show when={props.active}>
-          <For each={props.rooms} fallback={<p class="track-empty">No rooms yet</p>}>
+        <p class="track-empty" data-rooms-coming-soon>
+          Coming soon — group chat is not on the protocol yet.
+        </p>
+        <Show when={props.active && props.rooms.length > 0}>
+          <For each={props.rooms}>
             {(r) => item({ kind: 'room', id: r.id.toLowerCase() }, r.name)}
           </For>
         </Show>
@@ -1361,6 +1365,9 @@ function Rail(props: {
             <span class="name">Profiles</span>
             <span class="meta">paste / scan</span>
           </button>
+          <p class="track-empty" data-browse-pages-soon>
+            Fetching another node’s pages is coming soon.
+          </p>
         </Show>
       </div>
 
@@ -4079,6 +4086,10 @@ function NewTrack(props: {
   let formRevision = 0;
   onCleanup(() => { active = false; });
   const editForm = () => { formRevision += 1; };
+  // Legacy bitsov://introduce UI is hidden (protocol audit): Profile cards live
+  // under Browse. The invite forms below stay. Keep the helpers so sponsor /
+  // door plumbing compiles; they are unreachable from the render tree.
+  const LEGACY_INTRO_UI = false;
   // K1: your own signed introduction. Without one (older node, no dialable
   // endpoint) the plain node id is shown as before.
   const [mine, setMine] = createSignal<Introduction | null>(null);
@@ -4090,9 +4101,10 @@ function NewTrack(props: {
       setMineErr(asActionError(e).message);
     });
   };
-  loadMine();
+  if (LEGACY_INTRO_UI) loadMine();
   const nowSecs = () => Math.floor(props.now / 1000);
   const mineLive = () => {
+    if (!LEGACY_INTRO_UI) return null;
     const m = mine();
     return m && m.expires_at > nowSecs() ? m : null;
   };
@@ -4397,8 +4409,8 @@ function NewTrack(props: {
             <div class="empty-track" data-new-track>
               <h2>Share your node id</h2>
               <p class="hint">
-                Anyone who knows it can offer to pay you to talk. Knowing an id is an introduction, not admission: each
-                message is admitted only when its payment settles.
+                Anyone who knows it can offer to pay you to talk. Knowing an id is not admission: each message is
+                admitted only when its payment settles. To open someone else’s profile card, use Browse.
               </p>
               <Show when={qr()}>
                 <svg class="qr" viewBox={`0 0 ${qr()!.extent} ${qr()!.extent}`} shape-rendering="crispEdges" role="img" aria-label="Your node id as a QR code">
@@ -4413,7 +4425,7 @@ function NewTrack(props: {
                 </p>
               </Show>
               <Show when={mineErr()}>
-                <p class="hint" data-intro-unavailable>{mineErr()}</p>
+                {(e) => <SoftError message={e()} data="intro-unavailable" />}
               </Show>
             </div>
           }
@@ -4562,6 +4574,7 @@ function NewTrack(props: {
               </Show>
             </form>
           </Show>
+          <Show when={LEGACY_INTRO_UI}>
           <form
             class="panel"
             data-intro-open
@@ -4694,9 +4707,10 @@ function NewTrack(props: {
               )}
             </Show>
             <Show when={cardErr()}>
-              <p class="err-note" data-door-error>{cardErr()}</p>
+              {(e) => <SoftError message={e()} data="door-error" />}
             </Show>
           </form>
+          </Show>
 
           <form
             class="panel"
@@ -4772,8 +4786,8 @@ function NewTrack(props: {
           </form>
         </div>
         <p class="send-next">
-          Invites change your node, so they use the same owner approval as spending. Adding a peer by address and creating
-          rooms are not in the app yet.
+          Invites change your node, so they use the same owner approval as spending. Profile cards live under Browse.
+          Rooms (group chat) are coming soon — not on the protocol yet.
         </p>
       </div>
     </>

@@ -111,14 +111,10 @@ describe('settings modal + theme', () => {
     expect(menu.hidden).toBe(true);
   });
 
-  it('hides attach in rooms', async () => {
+  it('marks Rooms as coming soon while still listing any existing sample rooms', async () => {
     start();
-    await vi.waitFor(() => expect(mount.querySelector('[data-composer]')).not.toBeNull());
-    const room = [...mount.querySelectorAll('[data-track]')].find((el) => el.getAttribute('data-track')?.startsWith('room:'));
-    expect(room).toBeTruthy();
-    (room as HTMLButtonElement).click();
-    await vi.waitFor(() => expect(mount.querySelector('[data-composer]')).not.toBeNull());
-    expect(mount.querySelector('[data-attach]')).toBeNull();
+    await vi.waitFor(() => expect(mount.querySelector('[data-rooms-coming-soon]')).not.toBeNull());
+    expect(mount.querySelector('[data-rooms-coming-soon]')!.textContent).toMatch(/Coming soon/);
   });
 
   it('moves focus into settings and closes on Escape', async () => {

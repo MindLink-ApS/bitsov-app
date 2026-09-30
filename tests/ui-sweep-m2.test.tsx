@@ -67,6 +67,16 @@ describe('M2 UI sweep', () => {
     const heads = [...mount.querySelectorAll('.track-group h2')].map((h) => h.textContent);
     expect(heads).toContain('Browse');
     expect(heads).not.toContain('Discover');
+    expect($('[data-rooms-coming-soon]')!.textContent).toMatch(/Coming soon/);
+    expect($('[data-browse-pages-soon]')).not.toBeNull();
+  });
+
+  it('hides the legacy introduction path on Start', async () => {
+    await start();
+    mount.querySelector<HTMLButtonElement>('[data-track="new"]')!.click();
+    await vi.waitFor(() => expect($('[data-new-track]')).not.toBeNull());
+    expect($('[data-intro-mine]')).toBeNull();
+    expect($('[data-intro-open]')).toBeNull();
   });
 
   it('opens a plain-language card from each Body term ⓘ', async () => {
