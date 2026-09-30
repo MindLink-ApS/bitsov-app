@@ -3158,10 +3158,11 @@ function Composer(props: {
                   <Show
                     when={rv().kind === 'invoice'}
                     fallback={
-                      <p class="pay-review-title">
-                        Pay {props.name}
-                        <span class="hint"> · direct to {shortId((rv() as { pubkey: string }).pubkey)}</span>
-                      </p>
+                      <>
+                        {/* A typed pubkey is not bound to this chat's contact either. */}
+                        <p class="pay-review-title">Pay a Lightning node directly</p>
+                        <PayeeLine payee={(rv() as { pubkey: string }).pubkey.toLowerCase()} peer={target()} name={props.name} />
+                      </>
                     }
                   >
                     {/* Whoever sent or pasted the invoice need not be who it pays. */}

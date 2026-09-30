@@ -78,7 +78,7 @@ function sign(hrp: string, data: number[], key: bigint): number[] {
   return bytesToWords(new Uint8Array([...be32(r), ...be32(s), recid]));
 }
 
-function invoice(opts: { hrp?: string; purpose?: string | null; descBytes?: Uint8Array; at?: number; expiry?: number; hash?: boolean; hashByte?: number; key?: bigint; payeeTag?: string } = {}) {
+function invoice(opts: { hrp?: string; purpose?: string | null; descBytes?: Uint8Array; at?: number; expiry?: number; hash?: boolean; hashByte?: number; key?: bigint; payeeTags?: string[] } = {}) {
   const hrp = opts.hrp ?? 'lnbcrt210n';
   const desc = opts.descBytes ?? (opts.purpose === null ? null : new TextEncoder().encode(opts.purpose ?? 'dinner'));
   const data = [
@@ -86,7 +86,7 @@ function invoice(opts: { hrp?: string; purpose?: string | null; descBytes?: Uint
     ...(opts.hash === false ? [] : tag(1, bytesToWords(new Uint8Array(32).fill(opts.hashByte ?? 7)))),
     ...(desc === null ? [] : tag(13, bytesToWords(desc))),
     ...(opts.expiry === undefined ? [] : tag(6, words(opts.expiry, 3))),
-    ...(opts.payeeTag ? tag(19, bytesToWords(Uint8Array.from(opts.payeeTag.match(/../g)!.map((h) => parseInt(h, 16))))) : []),
+    ...(opts.payeeTags ?? []).flatMap((n) => tag(19, bytesToWords(Uint8Array.from(n.match(/../g)!.map((h) => parseInt(h, 16)))))),
   ];
   const all = [...data, ...sign(hrp, data, opts.key ?? MAYA_KEY)];
   return hrp + '1' + [...all, ...bech32Checksum(hrp, all)].map((w) => BECH32_CHARSET[w]).join('');
@@ -111,14 +111,23 @@ describe('reading a chat invoice', () => {
     expect(readChatInvoice(donation, 1496314658_000, 'mainnet')).toEqual({ ok: false, reason: 'no_amount' });
   });
 
-  it('reads the payee from the signature, or from an n field', () => {
+  it('reads the payee from the signature; an n field must be the one signer', () => {
     const coffee =
       'lnbc2500u1pvjluezpp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqdq5xysxxatsyp3k7enxv4jsxqzpuaztrnwngzn3kdzw5hydlzf03qdgm2hdq27cqv3agm2awhz5se903vruatfhq77w3ls4evs3ch9zw97j25emudupq63nyw24cg27h2rspfj9srp';
     // The spec's payee for every example invoice.
     expect(invoicePayee(coffee)).toBe('03e7156ae33b0a208d0744199163177e909e80176e55d97a2f221ede0f934dd9ad');
     expect(readChatInvoice(invoice(), NOW, 'regtest')).toMatchObject({ ok: true, invoice: { payee: pubOf(MAYA_KEY) } });
     expect(readChatInvoice(invoice({ key: STRANGER_KEY }), NOW, 'regtest')).toMatchObject({ ok: true, invoice: { payee: pubOf(STRANGER_KEY) } });
-    expect(invoicePayee(invoice({ payeeTag: pubOf(STRANGER_KEY) }))).toBe(pubOf(STRANGER_KEY));
+    const maya = pubOf(MAYA_KEY);
+    const stranger = pubOf(STRANGER_KEY);
+    expect(readChatInvoice(invoice({ payeeTags: [maya] }), NOW, 'regtest')).toMatchObject({ ok: true, invoice: { payee: maya } });
+    // Fable #85 F1: an n that is not the signer is not an invoice, whatever it names.
+    expect(readChatInvoice(invoice({ payeeTags: [stranger] }), NOW, 'regtest')).toEqual({ ok: false, reason: 'invalid' });
+    expect(invoicePayee(invoice({ payeeTags: [stranger] }))).toBeNull();
+    // Codex #85 P1: more than one n, even with the signer first, is not an invoice.
+    expect(readChatInvoice(invoice({ payeeTags: [maya, stranger] }), NOW, 'regtest')).toEqual({ ok: false, reason: 'invalid' });
+    expect(readChatInvoice(invoice({ payeeTags: [stranger, maya] }), NOW, 'regtest')).toEqual({ ok: false, reason: 'invalid' });
+    expect(readChatInvoice(invoice({ payeeTags: [maya, maya] }), NOW, 'regtest')).toEqual({ ok: false, reason: 'invalid' });
     // A signature that recovers no key is not an invoice.
     const good = invoice();
     const body = good.slice(0, good.length - 6 - 104);
@@ -126,6 +135,34 @@ describe('reading a chat invoice', () => {
     const data = [...body.slice(hrp.length + 1)].map((c) => BECH32_CHARSET.indexOf(c));
     const zeroSig = [...data, ...new Array(104).fill(0)];
     expect(readChatInvoice(hrp + '1' + [...zeroSig, ...bech32Checksum(hrp, zeroSig)].map((w) => BECH32_CHARSET[w]).join(''), NOW, 'regtest')).toEqual({ ok: false, reason: 'invalid' });
+  });
+
+  // Made by the node's own parser, lightning-invoice 0.34.1 (build_raw, then
+  // sign with key A = [1; 32]; n fields as named), and read back by it: it pays
+  // the FIRST n and checks the signature only against that one. The app must
+  // never show a payee the node would not pay.
+  it('agrees with the node’s parser on n fields, refusing every invoice whose n it could read differently', () => {
+    const A_KEY = '031b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f';
+    const at = 1_800_000_000_000 + 1000;
+    const pre = 'lnbcrt210n1p45n5sqdq2v35kumn9wgpp5vj92t3telvc08zhhgnvh6mkggrr6jynh5jv6p4uq70nnznk2py9ssp5qszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszq9qrsgqcqpj';
+    const fixtures = {
+      // node: pays A
+      none: pre + 'gpd0vndshg0682c4gpxyde0sr785uz9eqc36yjugphpzpkn55zmy6v4nszm0ym8vqwvgrp4jh9us9d593yftaz5sgxwyxyf9z0hmsnsqcufc8l',
+      // node: pays A
+      singleMatch: pre + 'np4qvdcf32k0vfxgsyet5ldt246q4jaw8scx3sysx0lnstlt6w4m5rc7utvphkf0r6r8hqss2xsg5pa3k5094vr0szxcaq96z28ytekr7at380elc26wu0j6u7fzhxwwux67vsqs7jpyfk0dqar3y86qj3urrvqpvaf6md',
+      // node: refused, InvalidSignature (n = B)
+      singleMismatch: pre + 'np4qfx5kmx3xcgr9j5m62htnkgq4fx5tk02mq9vjs3nwnz9rfe9f5rkv8wux8u2ga730fxufdqte2kkh7vk2yu57uemxxguwr26kpwhh528qq36j5yrvjd0mgtvazaghc2svyvauk5u4sacaarg20n4upjk3jjsqa2gc5d',
+      // node: pays A, the first n; the second n (B) is what the old decoder showed
+      firstASecondB: pre + 'np4qvdcf32k0vfxgsyet5ldt246q4jaw8scx3sysx0lnstlt6w4m5rc7np4qfx5kmx3xcgr9j5m62htnkgq4fx5tk02mq9vjs3nwnz9rfe9f5rkv3rm04y0hjt5slsn8hkpnr6dwmddgyeyvl0aemz5g5d2ctczrjj5pp4wncd5lyr20gflggpvvfx46k4a0xc846dz9ph0qvtdaq24fcscp7jk8gj',
+      // node: refused, InvalidSignature (first n = B)
+      firstBSecondA: pre + 'np4qfx5kmx3xcgr9j5m62htnkgq4fx5tk02mq9vjs3nwnz9rfe9f5rkvnp4qvdcf32k0vfxgsyet5ldt246q4jaw8scx3sysx0lnstlt6w4m5rc7j44sjlpqhxkph2mgd8te06zgfs2rrd7fsaas4se6a8agvdeyu6nhxq0cpfqnd0fx8q00r5smg33r8wzz3vk75mfex5crwdrm3eqt37cpafxyt3',
+    };
+    expect(readChatInvoice(fixtures.none, at, 'regtest')).toMatchObject({ ok: true, invoice: { payee: A_KEY, msat: 21_000, purpose: 'dinner' } });
+    expect(readChatInvoice(fixtures.singleMatch, at, 'regtest')).toMatchObject({ ok: true, invoice: { payee: A_KEY, msat: 21_000 } });
+    for (const bolt11 of [fixtures.singleMismatch, fixtures.firstASecondB, fixtures.firstBSecondA]) {
+      expect(readChatInvoice(bolt11, at, 'regtest')).toEqual({ ok: false, reason: 'invalid' });
+      expect(invoicePayee(bolt11)).toBeNull();
+    }
   });
 
   it('names the payee as the contact only when their Lightning node id is known and matches', () => {
@@ -398,6 +435,52 @@ describe('a request in chat', () => {
     expect(text('[data-pay-review]')).not.toContain('Pay Maya');
     expect(text('[data-pay-review]')).not.toContain('their invoice');
     expect(host.used('payment_pay')).toHaveLength(0);
+  });
+
+  // Codex #85 P1: the card must not name a second n while the node pays the first.
+  it('an invoice with two n fields is plain text with a note: no card, no Pay, no payee', async () => {
+    const bolt11 = invoice({ payeeTags: [pubOf(MAYA_KEY), pubOf(STRANGER_KEY)] });
+    const host = stubHost({ messages_list: () => [msg('two-n', bolt11), msg('bad-n', invoice({ payeeTags: [pubOf(STRANGER_KEY)] }))] });
+    host.spend.v = openView();
+    await openShell();
+    await vi.waitFor(() => expect($('[data-message="bad-n"] [data-request-plain]')).not.toBeNull());
+    for (const id of ['two-n', 'bad-n']) {
+      expect($(`[data-message="${id}"] [data-request-card]`)).toBeNull();
+      expect($(`[data-message="${id}"] [data-payee]`)).toBeNull();
+      expect(text(`[data-message="${id}"] [data-request-plain]`)).toBe('Looks like an invoice, but it is not a valid one.');
+    }
+    // Pasted into Pay, the host may still price it, but the review names no
+    // node at all rather than either n.
+    $<HTMLButtonElement>('[data-composer-mode="pay"]')!.click();
+    type('[data-pay-invoice]', bolt11);
+    await vi.waitFor(() => expect(text('[data-send]')).toBe('Pay · 26 sats'));
+    $<HTMLButtonElement>('[data-send]')!.click();
+    await vi.waitFor(() => expect($('[data-pay-review] [data-payee]')).not.toBeNull());
+    expect(text('[data-pay-review] [data-payee]')).toBe('Pays a Lightning node this app could not read, not verified as Maya.');
+    expect(text('[data-pay-review]')).not.toContain(pubOf(MAYA_KEY).slice(0, 8));
+    expect(text('[data-pay-review]')).not.toContain(pubOf(STRANGER_KEY).slice(0, 8));
+    expect(host.used('payment_pay')).toHaveLength(0);
+  });
+
+  // Codex #85 P2: a typed pubkey in Maya's thread is not Maya's node either.
+  it('the Direct review names the typed node, not verified as the contact, not "Pay Maya"', async () => {
+    const stranger = pubOf(STRANGER_KEY);
+    const host = stubHost();
+    host.spend.v = openView();
+    await openShell();
+    $<HTMLButtonElement>('[data-composer-mode="pay"]')!.click();
+    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent === 'Direct')!.click();
+    await vi.waitFor(() => expect($('[data-pay-pubkey]')).not.toBeNull());
+    type('[data-pay-amount]', '21');
+    type('[data-pay-pubkey]', stranger);
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-send]')!.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-send]')!.click();
+    await vi.waitFor(() => expect($('[data-pay-review]')).not.toBeNull());
+    expect(text('[data-pay-review] .pay-review-title')).toBe('Pay a Lightning node directly');
+    expect(text('[data-pay-review] [data-payee]')).toBe(`Pays Lightning node ${stranger.slice(0, 8)}…${stranger.slice(-4)}, not verified as Maya.`);
+    expect($('[data-pay-review] [data-payee]')!.getAttribute('data-payee')).toBe('unverified');
+    expect(text('[data-pay-review]')).not.toContain('Pay Maya');
+    expect(host.used('payment_keysend')).toHaveLength(0);
   });
 
   // Fable #85 F2: after paying, the card says so and offers no second Pay.

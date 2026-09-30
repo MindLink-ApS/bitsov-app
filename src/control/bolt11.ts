@@ -2,8 +2,10 @@
 // only. Nothing here pays or trusts the text. The amount, purpose and expiry
 // are shown on a request card; paying still goes through the host's own
 // invoice_amount read, the Pay review and its one confirm tap. The payee is
-// read from the signature for display; the signature is not *checked* here:
-// the node checks it and refuses to pay a bad invoice.
+// always recovered from the signature for display. An `n` field is only
+// accepted when there is exactly one and it names that same key: the node's
+// parser pays the first `n`, so any other `n` could make the card name a node
+// the payment does not go to.
 
 import { MAX_PAYMENT_MSAT, MIN_PAYMENT_MSAT } from './amountInput';
 import { hex, recoverPubkey, sha256 } from './secp';
@@ -21,9 +23,9 @@ export type ChatInvoice = {
   /** Unix ms. */
   expiresAtMs: number;
   /**
-   * The Lightning node the payment goes to (compressed pubkey, hex): the
-   * invoice's `n` field, else recovered from its signature. Whoever sent the
-   * message is not necessarily this node.
+   * The Lightning node the payment goes to (compressed pubkey, hex),
+   * recovered from the signature (and equal to the `n` field, if any).
+   * Whoever sent the message is not necessarily this node.
    */
   payee: string;
   /** The `p` field, hex: the same invoice however it is cased or prefixed. */
@@ -138,7 +140,7 @@ function decodeUncached(raw: string): Decoded | null {
   let expirySecs = 3600;
   let purpose: string | null = null;
   let hasHash = false;
-  let payee: string | null = null;
+  const named: string[] = [];
   let paymentHash: string | null = null;
   let at = 7;
   while (at < fields.length) {
@@ -153,7 +155,7 @@ function decodeUncached(raw: string): Decoded | null {
       hasHash = true;
       paymentHash ??= hex(toBytes(value)!.slice(0, 32));
     }
-    else if (type === 19 && len === 53) payee = hex(toBytes(value)!.slice(0, 33)); // n: payee node
+    else if (type === 19) named.push(len === 53 ? hex(toBytes(value)!.slice(0, 33)) : ''); // n: payee node
     else if (type === 6) expirySecs = toInt(value); // x: expiry
     else if (type === 13) {
       // d: description, UTF-8
@@ -169,8 +171,11 @@ function decodeUncached(raw: string): Decoded | null {
   if (!hasHash || !paymentHash) return null;
   // BOLT11 signs SHA-256(hrp ‖ data words as bytes, zero-padded).
   const signed = new Uint8Array([...new TextEncoder().encode(hrp), ...toBytes(fields, true)!]);
-  payee ??= recoverPubkey(sha256(signed), toBytes(data.slice(-104))!);
+  const payee = recoverPubkey(sha256(signed), toBytes(data.slice(-104))!);
   if (!payee) return null;
+  // One `n` naming the signer, or none. Parsers differ on which of several `n`
+  // they use (lightning-invoice: the first), so any other shape is refused.
+  if (named.length > 1 || (named.length === 1 && named[0] !== payee)) return null;
   return { bolt11: s, msat, network, purpose, expiresAtMs: (timestamp + expirySecs) * 1000, payee, paymentHash };
 }
 
