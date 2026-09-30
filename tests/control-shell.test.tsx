@@ -131,7 +131,7 @@ describe('control center shell', () => {
     expect(mount.querySelector('[data-first-run]')).not.toBeNull();
     expect(mount.querySelector('.rail')).not.toBeNull();
     expect(mount.querySelector('[data-panel="wallet"]')).toBeNull();
-    expect(new Set(calls.map((c) => c.cmd))).toEqual(new Set(['node_status', 'pairing_status']));
+    expect(new Set(calls.map((c) => c.cmd))).toEqual(new Set(['node_status', 'pairing_status', 'device_key_status']));
   });
 
   it('offers Ask again when the node lost the pending request in a restart', async () => {

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'solid-js/web';
 import { Onboarding } from '../src/onboarding/Onboarding';
 import { onboardingSteps, type NodeStatus, type PairingView } from '../src/onboarding/pairing';
+import type { DeviceView } from '../src/control/types';
 
 const starting: PairingView = {
   state: 'starting',
@@ -97,7 +98,12 @@ describe('pairing panel', () => {
     mount = undefined;
   });
 
-  const show = (pairing: PairingView, status: NodeStatus = booting, onRetry = () => {}) => {
+  const show = (
+    pairing: PairingView,
+    status: NodeStatus = booting,
+    onRetry = () => {},
+    device: DeviceView | null = null,
+  ) => {
     mount = document.createElement('div');
     document.body.appendChild(mount);
     dispose = render(
@@ -107,6 +113,7 @@ describe('pairing panel', () => {
           pairing={() => pairing}
           trustAck={() => false}
           onRetry={onRetry}
+          device={() => device}
         />
       ),
       mount,
@@ -171,5 +178,117 @@ describe('pairing panel', () => {
     expect(panel.textContent).toContain('read + receive + identity');
     expect(el.textContent).toContain('identity-free');
     expect(el.textContent).toContain('genome release');
+  });
+
+  it('renders 3 honest node location choices: local active, network and cloud disabled Coming soon', () => {
+    const el = show(starting, booting);
+    const local = el.querySelector<HTMLButtonElement>('[data-target="local"]')!;
+    const network = el.querySelector<HTMLButtonElement>('[data-target="network"]')!;
+    const cloud = el.querySelector<HTMLButtonElement>('[data-target="cloud"]')!;
+
+    expect(local).not.toBeNull();
+    expect(network).not.toBeNull();
+    expect(cloud).not.toBeNull();
+
+    expect(local.disabled).toBe(false);
+    expect(local.classList.contains('selected')).toBe(true);
+    expect(local.textContent).toContain('This computer');
+    expect(local.textContent).toContain('Run your sovereign node directly on this Mac');
+
+    expect(network.disabled).toBe(true);
+    expect(network.getAttribute('aria-disabled')).toBe('true');
+    expect(network.textContent).toContain('A node on my network');
+    expect(network.textContent).toContain('Coming soon');
+    expect(network.textContent).toContain(
+      'Connecting to a home server on your local network is coming soon; today the app connects to the node on this Mac.',
+    );
+
+    expect(cloud.disabled).toBe(true);
+    expect(cloud.getAttribute('aria-disabled')).toBe('true');
+    expect(cloud.textContent).toContain('A cloud node');
+    expect(cloud.textContent).toContain('Coming soon');
+    expect(cloud.textContent).toContain(
+      'Hosted cloud nodes and remote signing are coming soon; today the app connects to the node on this Mac.',
+    );
+
+    // Simulated scan spinners and fake address inputs are removed
+    expect(el.querySelector('.spinner')).toBeNull();
+    expect(el.querySelector('input[type="text"]')).toBeNull();
+  });
+
+  it('describes pairing honestly without Touch ID / Secure Enclave claims when device key is not registered', () => {
+    const el = show(paired, ready, () => {}, {
+      available: true,
+      state: 'none',
+      fingerprint: null,
+      owner_action: null,
+      expires_at_ms: null,
+    });
+    const panel = el.querySelector('[data-pairing="paired"]')!;
+    expect(panel.querySelector('[data-device-badge="none"]')?.textContent).toBe('App paired');
+    expect(panel.querySelector('[data-device-badge="registered"]')).toBeNull();
+    expect(panel.textContent).not.toContain('Touch ID Enrolled');
+    expect(panel.textContent).not.toContain('Secure Enclave');
+    expect(panel.textContent).not.toContain('Touch ID approves every payment');
+    expect(panel.textContent).toContain('Loopback authenticated. Ordinary pairing is file-backed on this Mac.');
+    expect(el.textContent).toContain('The app connects to your sovereign node on this Mac.');
+    expect(el.textContent).not.toContain('Touch ID on this Mac can approve a contact or budget.');
+  });
+
+  it('claims Touch ID Enrolled and Secure Enclave only when device key is registered', () => {
+    const enrolledDevice: DeviceView = {
+      available: true,
+      state: 'registered',
+      fingerprint: 'fp-1234',
+      owner_action: null,
+      expires_at_ms: null,
+    };
+    const el = show(paired, ready, () => {}, enrolledDevice);
+    const panel = el.querySelector('[data-pairing="paired"]')!;
+    expect(panel.querySelector('[data-device-badge="registered"]')?.textContent).toBe(
+      'Touch ID Enrolled · Secure Enclave',
+    );
+    expect(panel.textContent).toContain(
+      'Loopback authenticated. Touch ID on this Mac can approve a contact or budget; it does not sign every payment.',
+    );
+    expect(panel.textContent).not.toContain('Touch ID approves every payment');
+    expect(el.textContent).toContain('Touch ID on this Mac can approve a contact or budget.');
+  });
+
+  it('never infers Touch ID enrollment from pairing alone', () => {
+    // Paired with no device prop / null device must not show the enclave badge.
+    const el = show(paired, ready);
+    const panel = el.querySelector('[data-pairing="paired"]')!;
+    expect(panel.querySelector('[data-device-badge="registered"]')).toBeNull();
+    expect(panel.textContent).toContain('App paired');
+    expect(panel.textContent).not.toContain('Touch ID Enrolled');
+    expect(panel.textContent).not.toContain('Secure Enclave');
+  });
+
+  it('pending pairing stays distinct from device registration', () => {
+    const unenrolled = show(pending, booting, () => {}, null);
+    const unenrolledPanel = unenrolled.querySelector('[data-pairing="pending"]')!;
+    expect(unenrolledPanel.textContent).toContain(
+      'Establishing an authenticated pairing between this app and your node.',
+    );
+    expect(unenrolledPanel.textContent).not.toContain('Secure Enclave');
+    expect(unenrolledPanel.textContent).not.toContain('Registering');
+
+    const enrolledDevice: DeviceView = {
+      available: true,
+      state: 'registered',
+      fingerprint: 'fp-1234',
+      owner_action: null,
+      expires_at_ms: null,
+    };
+    const enrolled = show(pending, booting, () => {}, enrolledDevice);
+    const enrolledPanel = enrolled.querySelector('[data-pairing="pending"]')!;
+    expect(enrolledPanel.textContent).toContain(
+      'Establishing an authenticated pairing between this app and your node.',
+    );
+    expect(enrolledPanel.textContent).toContain(
+      'Touch ID approvals are already set up on this Mac; pairing does not create that key.',
+    );
+    expect(enrolledPanel.textContent).not.toContain('Registering Secure Enclave');
   });
 });
