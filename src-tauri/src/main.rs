@@ -542,6 +542,10 @@ fn loopback_api_port(api_base: &str) -> Option<u16> {
 /// PIDs listening on the loopback control plane (3141, or the dev override's port).
 /// POST /identity/restore only writes files; whoever still answers the API port keeps
 /// the old id until that process is replaced.
+///
+/// Port-wide: used only to free the port on restore. Custody provenance must use
+/// [`ipv4_api_listen_owners`] / [`verified_local_node`] so an IPv6 sibling on the
+/// same port cannot impersonate the IPv4 endpoint the app talks to.
 fn loopback_listener_pids(port: u16) -> Vec<u32> {
     let mut pids = Vec::new();
     if let Ok(out) = std::process::Command::new("lsof")
@@ -557,6 +561,176 @@ fn loopback_listener_pids(port: u16) -> Vec<u32> {
     pids.sort_unstable();
     pids.dedup();
     pids
+}
+
+/// Process that owns an IPv4 LISTEN socket which can answer `127.0.0.1:<port>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ApiListenOwner {
+    pid: u32,
+    uid: u32,
+}
+
+/// Parse `lsof -Fpun` records into `(pid, uid, name)` triples.
+fn parse_lsof_pun(stdout: &str) -> Vec<(u32, u32, String)> {
+    let mut out = Vec::new();
+    let mut pid = None;
+    let mut uid = None;
+    for line in stdout.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        let (tag, rest) = line.split_at(1);
+        match tag {
+            "p" => {
+                pid = rest.parse().ok();
+                uid = None;
+            }
+            "u" => uid = rest.parse().ok(),
+            "n" => {
+                if let (Some(p), Some(u)) = (pid, uid) {
+                    out.push((p, u, rest.to_string()));
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// IPv4 LISTEN owners for `port` (`127.0.0.1` or `*` / `0.0.0.0`). Excludes
+/// `[::1]` so a supervised IPv6 listener cannot satisfy an IPv4 API base.
+fn ipv4_api_listen_owners(port: u16) -> Vec<ApiListenOwner> {
+    let Ok(out) = std::process::Command::new("lsof")
+        .args(["-nP", &format!("-i4TCP:{port}"), "-sTCP:LISTEN", "-Fpun"])
+        .output()
+    else {
+        return Vec::new();
+    };
+    let mut owners = Vec::new();
+    for (pid, uid, name) in parse_lsof_pun(&String::from_utf8_lossy(&out.stdout)) {
+        // NAME is like "127.0.0.1:3141" or "*:3141" (field mode omits " (LISTEN)").
+        let hostport = name.split_whitespace().next().unwrap_or(&name);
+        if listen_name_serves_ipv4_loopback(hostport, port) {
+            owners.push(ApiListenOwner { pid, uid });
+        }
+    }
+    owners.sort_by_key(|o| (o.pid, o.uid));
+    owners.dedup();
+    owners
+}
+
+fn listen_name_serves_ipv4_loopback(hostport: &str, port: u16) -> bool {
+    let suffix = format!(":{port}");
+    if !hostport.ends_with(&suffix) {
+        return false;
+    }
+    let host = &hostport[..hostport.len() - suffix.len()];
+    matches!(host, "127.0.0.1" | "0.0.0.0" | "*")
+}
+
+/// After connecting to the API, resolve the process that owns the peer side of
+/// that established socket (local → peer), with its pid and uid.
+fn connected_api_peer_owner(port: u16) -> Option<ApiListenOwner> {
+    use std::net::{Shutdown, TcpStream};
+    use std::time::Duration;
+    let stream =
+        TcpStream::connect_timeout(&(std::net::Ipv4Addr::LOCALHOST, port).into(), Duration::from_millis(500))
+            .ok()?;
+    let local = stream.local_addr().ok()?;
+    let local_port = local.port();
+    // Keep the connection up while lsof runs so the ESTABLISHED rows exist.
+    let out = std::process::Command::new("lsof")
+        .args(["-nP", &format!("-i4TCP:{port}"), "-Fpun"])
+        .output()
+        .ok();
+    // Server accept: "127.0.0.1:PORT->127.0.0.1:LOCAL". LISTEN fallbacks cover
+    // the brief window before accept shows up.
+    let server_pat = format!("127.0.0.1:{port}->127.0.0.1:{local_port}");
+    let listen_exact = format!("127.0.0.1:{port}");
+    let listen_any = format!("*:{port}");
+    let listen_all = format!("0.0.0.0:{port}");
+    let mut owners = Vec::new();
+    if let Some(out) = out.as_ref() {
+        for (pid, uid, name) in parse_lsof_pun(&String::from_utf8_lossy(&out.stdout)) {
+            let n = name.split_whitespace().next().unwrap_or(&name);
+            let rank = if n == server_pat {
+                0
+            } else if n == listen_exact || n == listen_any || n == listen_all {
+                1
+            } else {
+                continue;
+            };
+            owners.push((rank, ApiListenOwner { pid, uid }));
+        }
+    }
+    let _ = stream.shutdown(Shutdown::Both);
+    if !owners.is_empty() {
+        owners.sort_by_key(|(rank, o)| (*rank, o.pid, o.uid));
+        let best = owners.first()?.0;
+        let best_owners: Vec<_> = owners
+            .into_iter()
+            .filter(|(r, _)| *r == best)
+            .map(|(_, o)| o)
+            .collect();
+        let pid = best_owners.first()?.pid;
+        if best_owners.iter().any(|o| o.pid != pid) {
+            return None;
+        }
+        return best_owners.into_iter().next();
+    }
+    // Connect succeeded but ESTABLISHED rows were not visible yet: unique IPv4
+    // LISTEN owner is still the process that answered.
+    let listeners = ipv4_api_listen_owners(port);
+    (listeners.len() == 1).then(|| listeners.into_iter().next().unwrap())
+}
+
+/// True when `pid` is running the supervised node for `config` (argv mentions the
+/// config path, or the process holds the data directory open).
+fn process_matches_node_config(pid: u32, config: &std::path::Path) -> bool {
+    let config_display = config.to_string_lossy();
+    let canon = std::fs::canonicalize(config).unwrap_or_else(|_| config.to_path_buf());
+    let canon_display = canon.to_string_lossy();
+    if let Ok(out) = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "args="])
+        .output()
+    {
+        let args = String::from_utf8_lossy(&out.stdout);
+        if args.contains(config_display.as_ref()) || args.contains(canon_display.as_ref()) {
+            return true;
+        }
+    }
+    let dir = canon
+        .parent()
+        .or_else(|| config.parent())
+        .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()));
+    match dir {
+        Some(dir) => process_holds_data_dir(pid, &dir),
+        None => false,
+    }
+}
+
+/// True when `pid` has the node data directory open (cwd or a file under it).
+fn process_holds_data_dir(pid: u32, data_dir: &std::path::Path) -> bool {
+    let Ok(out) = std::process::Command::new("lsof")
+        .args(["-nP", "-a", "-p", &pid.to_string(), "-Fn"])
+        .output()
+    else {
+        return false;
+    };
+    let dir = std::fs::canonicalize(data_dir).unwrap_or_else(|_| data_dir.to_path_buf());
+    let dir = dir.to_string_lossy();
+    let dir = dir.trim_end_matches('/');
+    String::from_utf8_lossy(&out.stdout).lines().any(|line| {
+        let Some(name) = line.strip_prefix('n') else {
+            return false;
+        };
+        let name = name.trim_end_matches('/');
+        name == dir || name.starts_with(&format!("{dir}/"))
+    })
+}
+
+fn child_is_live(child: &SharedChild) -> bool {
+    matches!(child.try_wait(), Ok(None))
 }
 
 /// Stop the process that holds the API port so a restart can bind the restored
@@ -1495,11 +1669,66 @@ async fn get_json<T: serde::de::DeserializeOwned>(state: &NodeState, path: &str)
 async fn read_node_overview(state: &NodeState) -> Result<control::NodeOverview, String> {
     let status: control::NodeStatusResponse = get_json(state, "/status").await?;
     let mut overview = control::NodeOverview::from_status(status, now_ms());
+    // Local seed labels need verified provenance, not a loopback URL alone.
+    overview.custody_mode =
+        control::custody_mode(overview.custody_mode, verified_local_node(state));
     // Only while the node answering is the LDK node that config started.
     if overview.lightning_backend.as_deref() == Some("ldk") {
         overview.network = state.configured_network.lock().unwrap().clone();
     }
     Ok(overview)
+}
+
+/// True when the process answering the IPv4 API endpoint is the live node this
+/// host supervises — matched by the exact socket (`127.0.0.1` / `*`, not a sibling
+/// `[::1]` listener on the same port), that process's pid and uid, and its open
+/// data directory. An SSH forward or reverse proxy on loopback fails this check:
+/// there is no supervised child, the child's PID is not the owner, or ownership
+/// is ambiguous. Fail closed when evidence is missing.
+fn verified_local_node(state: &NodeState) -> bool {
+    let Some(port) = loopback_api_port(&state.api_base) else {
+        return false;
+    };
+    let guard = match state.child.lock() {
+        Ok(g) => g,
+        Err(_) => return false,
+    };
+    let Some(child) = guard.as_ref() else {
+        return false;
+    };
+    if !child_is_live(child) {
+        return false;
+    }
+    let child_pid = child.id();
+    let our_uid = unsafe { libc::getuid() } as u32;
+
+    // Unique IPv4 LISTEN owner for this port (excludes [::1]).
+    let listeners = ipv4_api_listen_owners(port);
+    if listeners.len() != 1 {
+        return false;
+    }
+    let listener = &listeners[0];
+    if listener.pid != child_pid || listener.uid != our_uid {
+        return false;
+    }
+
+    // The socket a connect to api_base actually reaches must be that same process.
+    let Some(peer) = connected_api_peer_owner(port) else {
+        return false;
+    };
+    if peer.pid != child_pid || peer.uid != our_uid {
+        return false;
+    }
+
+    // Data dir / config from the supervised start must belong to that process.
+    let config = match state.config.lock() {
+        Ok(guard) => guard.clone(),
+        Err(_) => return false,
+    };
+    let Some(config) = config else {
+        return false;
+    };
+    process_matches_node_config(child_pid, &config)
 }
 
 async fn read_room_members(state: &NodeState, room_id: &str) -> Result<Vec<String>, String> {
@@ -5727,6 +5956,108 @@ mod api_base_tests {
         ] {
             assert_eq!(loopback_api_port(other), None, "{other}");
         }
+    }
+}
+
+/// Custody provenance must bind the IPv4 endpoint the app dials, not any
+/// listener that shares its port (Codex app95 delta1).
+#[cfg(test)]
+mod verified_local_socket_tests {
+    use super::{
+        connected_api_peer_owner, ipv4_api_listen_owners, listen_name_serves_ipv4_loopback,
+        loopback_listener_pids, process_holds_data_dir, process_matches_node_config,
+    };
+    use std::net::{Ipv6Addr, TcpListener};
+    use std::process::{Command, Stdio};
+
+    #[test]
+    fn listen_name_accepts_ipv4_loopback_and_wildcards_only() {
+        assert!(listen_name_serves_ipv4_loopback("127.0.0.1:3141", 3141));
+        assert!(listen_name_serves_ipv4_loopback("*:3141", 3141));
+        assert!(listen_name_serves_ipv4_loopback("0.0.0.0:3141", 3141));
+        assert!(!listen_name_serves_ipv4_loopback("[::1]:3141", 3141));
+        assert!(!listen_name_serves_ipv4_loopback("127.0.0.1:3142", 3141));
+        assert!(!listen_name_serves_ipv4_loopback("192.168.1.5:3141", 3141));
+    }
+
+    /// Supervised analogue on `[::1]`, decoy forward on `127.0.0.1` — same port.
+    /// Port-wide PID membership would accept the supervised child; the IPv4
+    /// endpoint and a real connect must attribute the socket to the decoy.
+    #[test]
+    fn decoy_ipv4_listener_is_not_the_supervised_ipv6_sibling() {
+        use std::io::BufRead;
+        let supervised = TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).expect("bind ::1");
+        let port = supervised.local_addr().unwrap().port();
+        let supervised_pid = std::process::id();
+
+        let mut decoy = Command::new("python3")
+            .args([
+                "-u",
+                "-c",
+                "import socket,sys,time; s=socket.socket(); \
+                 s.bind(('127.0.0.1',int(sys.argv[1]))); s.listen(); \
+                 print('ready',flush=True); time.sleep(60)",
+                &port.to_string(),
+            ])
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("python decoy");
+        let mut line = String::new();
+        std::io::BufReader::new(decoy.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        assert_eq!(line.trim(), "ready");
+        let decoy_pid = decoy.id();
+
+        struct Kill(std::process::Child);
+        impl Drop for Kill {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let _keepalive = Kill(decoy);
+
+        let port_wide = loopback_listener_pids(port);
+        assert!(
+            port_wide.contains(&supervised_pid) && port_wide.contains(&decoy_pid),
+            "precondition: port-wide lsof sees both PIDs ({port_wide:?})"
+        );
+        let ipv4 = ipv4_api_listen_owners(port);
+        assert_eq!(
+            ipv4.iter().map(|o| o.pid).collect::<Vec<_>>(),
+            vec![decoy_pid],
+            "IPv4 endpoint must be the decoy alone, not the supervised IPv6 sibling"
+        );
+        let peer = connected_api_peer_owner(port).expect("connect to decoy");
+        assert_eq!(peer.pid, decoy_pid, "connect peer must be the decoy");
+        assert_ne!(peer.pid, supervised_pid);
+        drop(supervised);
+    }
+
+    #[test]
+    fn ipv4_owner_matches_the_process_we_connect_to() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        // Leave the handshake in the backlog (no accept thread): connect still
+        // reaches this process's LISTEN socket.
+        let owners = ipv4_api_listen_owners(port);
+        assert_eq!(owners.len(), 1);
+        assert_eq!(owners[0].pid, std::process::id());
+        let peer = connected_api_peer_owner(port).expect("peer");
+        assert_eq!(peer.pid, std::process::id());
+        assert_eq!(peer.uid, unsafe { libc::getuid() } as u32);
+        drop(listener);
+    }
+
+    #[test]
+    fn process_data_dir_match_uses_open_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("konsensus.toml");
+        std::fs::write(&config, "network = \"regtest\"\n").unwrap();
+        let _hold = std::fs::File::open(&config).unwrap();
+        assert!(process_holds_data_dir(std::process::id(), dir.path()));
+        assert!(process_matches_node_config(std::process::id(), &config));
     }
 }
 
