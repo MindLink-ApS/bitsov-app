@@ -27,12 +27,12 @@ export const DISCONNECT_GRACE_MS = 10_000;
 export const CONNECT_TIMEOUT_MS = 30_000;
 
 /**
- * The owner's STUN server, if any: `stun:host` or `stun:host:port`. No TURN
- * (a relay would carry media), no credentials, nothing else.
+ * The owner's STUN server, if any: `stun:host` or `stun:host:port` (IPv6 in
+ * brackets). No TURN (a relay would carry media), no credentials, nothing else.
  */
 export function stunServer(url: string | null | undefined): RTCIceServer[] {
   const v = (url ?? '').trim();
-  return /^stun:[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:\d{1,5})?$/i.test(v) ? [{ urls: v }] : [];
+  return /^stun:(\[[0-9a-f:.]+\]|[a-z0-9]([a-z0-9.-]*[a-z0-9])?)(:\d{1,5})?$/i.test(v) ? [{ urls: v }] : [];
 }
 
 export const isCallKind = (kind: number) => kind >= CALL_OFFER && kind <= CALL_HANGUP;

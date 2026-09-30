@@ -183,6 +183,10 @@ export type NodeOverview = {
   chain_backend: string | null;
   /** Known node capabilities (`energy_v1`, `membrane_v1`); absent or empty on rc7. */
   capabilities?: string[];
+  /** UDP port of the node's own STUN responder (`[calls] stun_listen`); absent when off. */
+  stun_port?: number | null;
+  /** `stun:host:port` for it at the node's public host; absent without one. Offered, never applied. */
+  stun_url?: string | null;
   /** Unix ms when the host read it. */
   read_at: number;
 };

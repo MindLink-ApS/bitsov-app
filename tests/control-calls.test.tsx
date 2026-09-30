@@ -207,7 +207,8 @@ describe('call engine: review #74 fixes', () => {
     expect(stunServer('')).toEqual([]);
     expect(stunServer(null)).toEqual([]);
     expect(stunServer('stun:stun.example.org:3478')).toEqual([{ urls: 'stun:stun.example.org:3478' }]);
-    for (const bad of ['turn:relay.example.org', 'stun:user:pw@host', 'https://x.org', 'stun:host:3478?transport=tcp', 'stun:']) expect(stunServer(bad)).toEqual([]);
+    expect(stunServer('stun:[2001:db8::1]:3478')).toEqual([{ urls: 'stun:[2001:db8::1]:3478' }]);
+    for (const bad of ['turn:relay.example.org', 'stun:user:pw@host', 'https://x.org', 'stun:host:3478?transport=tcp', 'stun:', 'stun:[x@y]:1', 'stun:2001:db8::1']) expect(stunServer(bad)).toEqual([]);
     const { e } = engine({ iceServers: () => stunServer('stun:own-node.example:3478') });
     await e.place(A, 'audio', QUOTE);
     expect(FakePc.made[0].config.iceServers).toEqual([{ urls: 'stun:own-node.example:3478' }]);
@@ -482,5 +483,51 @@ describe('calls in the shell', () => {
     expect(FakePc.made[0].config.iceServers).toEqual([{ urls: 'stun:own-node.example:3478' }]);
     $<HTMLButtonElement>('[data-stun-clear]')!.click();
     await vi.waitFor(() => expect(text('[data-stun-note]')).toMatch(/No STUN server/));
+  });
+
+  const overviewWith = (extra: Record<string, unknown>) => () => ({ node_id: OWN, status: 'ok', version: 'api v2', connected_peers: 1, e2ee_sessions: 1, pending_deliveries: 0,
+    lightning_available: true, block_height: 1, uptime_secs: 1, lightning_backend: 'ldk', chain_backend: 'esplora', read_at: Date.now(), ...extra });
+
+  it('offers the node\'s own STUN responder, used only after the owner saves it', async () => {
+    const own = 'stun:mynode.example.org:3478';
+    stubHost({ node_overview: overviewWith({ stun_port: 3478, stun_url: own }) });
+    await openShell();
+    $<HTMLButtonElement>('[data-profile]')!.click();
+    await vi.waitFor(() => expect($('[data-stun-own]')).not.toBeNull());
+    expect(text('[data-stun-own]')).toContain(own);
+    expect(text('[data-stun-note]')).toMatch(/No STUN server/);
+    // Offering changes nothing: a call now still uses no STUN server.
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect(FakePc.made).toHaveLength(1));
+    expect(FakePc.made[0].config.iceServers).toEqual([]);
+    $<HTMLButtonElement>('[data-call-hangup]')!.click();
+    // Choosing it only fills the field and asks for Save.
+    $<HTMLButtonElement>('[data-stun-own]')!.click();
+    await vi.waitFor(() => expect($<HTMLInputElement>('[data-stun-input]')!.value).toBe(own));
+    expect(text('[data-stun-own-confirm]')).toMatch(/Press Save to use your node/);
+    expect(localStorage.getItem('bitsov.stun')).toBeNull();
+    expect(text('[data-stun-note]')).toMatch(/No STUN server/);
+    $<HTMLButtonElement>('[data-stun-save]')!.click();
+    await vi.waitFor(() => expect(text('[data-stun-note]')).toMatch(/your own node \(stun:mynode\.example\.org:3478\).*No third party/));
+    expect(localStorage.getItem('bitsov.stun')).toBe(own);
+    expect($('[data-stun-own]')).toBeNull();
+  });
+
+  it('never offers a malformed or relay URL, and explains a responder without a public address', async () => {
+    stubHost({ node_overview: overviewWith({ stun_port: 3478, stun_url: 'turn:mynode.example.org:3478' }) });
+    await openShell();
+    $<HTMLButtonElement>('[data-profile]')!.click();
+    await vi.waitFor(() => expect($('[data-stun-own-hint]')).not.toBeNull());
+    expect($('[data-stun-own]')).toBeNull();
+    expect(text('[data-stun-own-hint]')).toMatch(/UDP port 3478, but it has no public address set/);
+  });
+
+  it('shows nothing about an own responder when the node runs none', async () => {
+    stubHost();
+    await openShell();
+    $<HTMLButtonElement>('[data-profile]')!.click();
+    await vi.waitFor(() => expect($('[data-call-settings]')).not.toBeNull());
+    expect($('[data-stun-own]')).toBeNull();
+    expect($('[data-stun-own-hint]')).toBeNull();
   });
 });
