@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   clearVerified,
   dismissKeyWarning,
@@ -20,9 +20,14 @@ import type { Peer } from '../src/control/types';
 const A = 'a'.repeat(64);
 const B = 'b'.repeat(64);
 const C = 'c'.repeat(64);
+const V1_KEY = 'bitsov.contacts.v1';
+const V2_KEY = 'bitsov.contacts.v2';
 
 beforeEach(() => resetContactsForTests());
-afterEach(() => resetContactsForTests());
+afterEach(() => {
+  vi.restoreAllMocks();
+  resetContactsForTests();
+});
 
 describe('petnames', () => {
   it('stores a local petname and never uses peer.label as the display name', () => {
@@ -111,5 +116,38 @@ describe('petnames', () => {
     markVerified(A);
     expect(replaceContactKey(A, 'not-a-key')).toBe(false);
     expect(replaceContactKey(C, B)).toBe(false);
+  });
+
+  it('keeps v1 when a v2 write fails during migration, and recovers on the next successful start', () => {
+    const v1Body = JSON.stringify({
+      [A]: { petname: 'Maya', verifiedKey: A, verifiedAt: 1_700_000_000_000 },
+    });
+    localStorage.removeItem(V2_KEY);
+    localStorage.setItem(V1_KEY, v1Body);
+
+    const original = localStorage.setItem.bind(localStorage);
+    const setItemSpy = vi.spyOn(localStorage, 'setItem').mockImplementation((key: string, value: string) => {
+      if (key === V2_KEY) {
+        const err = new Error('QuotaExceededError');
+        err.name = 'QuotaExceededError';
+        throw err;
+      }
+      return original(key, value);
+    });
+
+    reloadContactsFromStorageForTests();
+    expect(petnameOf(A)).toBe('Maya');
+    expect(verifyState(A)).toBe('verified');
+    expect(localStorage.getItem(V1_KEY)).toBe(v1Body);
+    expect(localStorage.getItem(V2_KEY)).toBeNull();
+
+    setItemSpy.mockRestore();
+
+    reloadContactsFromStorageForTests();
+    expect(petnameOf(A)).toBe('Maya');
+    expect(verifyState(A)).toBe('verified');
+    expect(localStorage.getItem(V1_KEY)).toBeNull();
+    expect(localStorage.getItem(V2_KEY)).toBeTruthy();
+    expect(JSON.parse(localStorage.getItem(V2_KEY)!).v).toBe(2);
   });
 });

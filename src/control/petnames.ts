@@ -111,11 +111,14 @@ function readStore(): Store {
     const v1 = localStorage.getItem(STORE_KEY_V1);
     if (v1) {
       const migrated = parseStore(v1);
-      writeStore(migrated);
-      try {
-        localStorage.removeItem(STORE_KEY_V1);
-      } catch {
-        /* ignore */
+      // Only drop v1 after v2 is durable. A failed write (quota, private mode)
+      // must leave v1 so the next startup can retry migration.
+      if (writeStore(migrated)) {
+        try {
+          localStorage.removeItem(STORE_KEY_V1);
+        } catch {
+          /* ignore */
+        }
       }
       return migrated;
     }
@@ -125,11 +128,13 @@ function readStore(): Store {
   return emptyStore();
 }
 
-function writeStore(store: Store) {
+/** Persist v2. Returns false when storage refused the write (e.g. QuotaExceededError). */
+function writeStore(store: Store): boolean {
   try {
     localStorage.setItem(STORE_KEY, JSON.stringify({ v: 2, byId: store.byId }));
+    return true;
   } catch {
-    /* private mode / quota */
+    return false;
   }
 }
 
