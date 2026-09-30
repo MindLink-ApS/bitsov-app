@@ -2043,8 +2043,18 @@ function Composer(props: {
     r?.rec.cancel();
   };
   onCleanup(dropRecording);
-  // Leaving the window stops the microphone; the clip stays as a preview, unsent.
-  const onLeave = () => { if (untrack(recording)) void stopRecording(); };
+  // Leaving the window stops an active recording (clip stays as an unsent
+  // preview). If the mic prompt is still open (`starting`), bump generation so
+  // a late grant does not start capture while the user is not looking. Do not
+  // bump merely because recording is null — stopRecording clears it before
+  // awaiting onstop, and blur+visibilitychange would then drop the clip.
+  const onLeave = () => {
+    if (untrack(recording)) {
+      void stopRecording();
+    } else if (untrack(starting)) {
+      voiceGeneration++;
+    }
+  };
   const onVisibility = () => { if (document.visibilityState === 'hidden') onLeave(); };
   window.addEventListener('blur', onLeave);
   document.addEventListener('visibilitychange', onVisibility);
@@ -2061,8 +2071,12 @@ function Composer(props: {
   const stopRecording = async () => {
     const r = untrack(recording);
     if (!r) return;
+    // Capture before await: a track switch bumps voiceGeneration and must not
+    // land this clip as the new track's unsent preview.
+    const generation = voiceGeneration;
     setRecording(null);
     const clip = await r.rec.stop();
+    if (generation !== voiceGeneration) return;
     composerRevision++;
     if (!clip) {
       setNote('Nothing was recorded.');
