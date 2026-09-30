@@ -176,6 +176,8 @@ function stubHost(overrides: Record<string, Reply> = {}) {
       accepted: true, state: 'acked',
     }),
     voice_note_fetch: () => ({ filename: 'voice-note-20260929-120000.webm', mime_type: 'audio/webm', size_bytes: 2, data_b64: 'aGk=' }),
+    file_fetch: () => ({ filename: 'voice-note-20260929-120000.webm', mime_type: 'audio/webm', size_bytes: 2, data_b64: 'aGk=' }),
+    file_save: () => ({ saved: true, filename: 'voice-note-20260929-120000.webm', mime_type: 'audio/webm', size_bytes: 2 }),
     live_link: () => null,
     'plugin:event|listen': () => 1,
     'plugin:event|unlisten': () => null,
@@ -287,7 +289,7 @@ describe('voice notes in the composer and thread', () => {
     await openShell();
     await vi.waitFor(() => expect($(`[data-message="${IN_ID}"] [data-voice-play]`)).not.toBeNull());
     expect($(`[data-message="${'d'.repeat(64)}"] [data-voice-play]`)).toBeNull();
-    expect(text(`[data-message="${'d'.repeat(64)}"] .file-name`)).toBe('[file: brief.txt]');
+    expect(text(`[data-message="${'d'.repeat(64)}"] .file-name`)).toBe('brief.txt');
     expect(host.used('voice_note_fetch')).toHaveLength(0);
     $<HTMLButtonElement>(`[data-message="${IN_ID}"] [data-voice-play]`)!.click();
     await vi.waitFor(() => expect($(`[data-message="${IN_ID}"] audio[data-voice-audio]`)?.getAttribute('src')).toMatch(/^blob:/));
@@ -325,6 +327,67 @@ describe('voice notes in the composer and thread', () => {
     await vi.waitFor(() => expect($('[data-voice-preview]')).not.toBeNull());
     expect(FakeRecorder.made[0].state).toBe('inactive');
     expect(host.used('file_send')).toHaveLength(0);
+  });
+
+  it('blur then hide while recording still keeps the clip as a preview', async () => {
+    const host = stubHost();
+    await openShell();
+    $<HTMLButtonElement>('[data-voice-record="start"]')!.click();
+    await vi.waitFor(() => expect($('[data-voice-record="stop"]')).not.toBeNull());
+    // Real webviews fire blur then visibilitychange(hidden) on minimise / tab switch.
+    // stopRecording clears recording before onstop; a blind gen bump would drop the clip.
+    window.dispatchEvent(new Event('blur'));
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' });
+    document.dispatchEvent(new Event('visibilitychange'));
+    await vi.waitFor(() => expect($('[data-voice-preview]')).not.toBeNull());
+    expect($('[data-composer]')!.getAttribute('data-mode')).toBe('file');
+    expect(host.used('file_send')).toHaveLength(0);
+  });
+
+  it('a track switch while stop awaits does not attach the clip to the new track', async () => {
+    stubHost();
+    let releaseStop: (() => void) | null = null;
+    class SlowRecorder extends FakeRecorder {
+      stop() {
+        this.state = 'inactive';
+        // Resolve after the test switches tracks — generation must discard the clip.
+        void new Promise<void>((r) => { releaseStop = r; }).then(() => {
+          this.ondataavailable?.({ data: FakeRecorder.clip() });
+          this.onstop?.();
+        });
+      }
+    }
+    vi.stubGlobal('MediaRecorder', SlowRecorder);
+    await openShell();
+    $<HTMLButtonElement>('[data-voice-record="start"]')!.click();
+    await vi.waitFor(() => expect($('[data-voice-record="stop"]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-voice-record="stop"]')!.click();
+    await vi.waitFor(() => expect(releaseStop).not.toBeNull());
+    $<HTMLElement>(`[data-track="peer:${C}"]`)!.click();
+    await vi.waitFor(() => expect($(`[data-track="peer:${C}"]`)?.getAttribute('aria-current')).toBe('true'));
+    releaseStop!();
+    // Macrotask drain: stopRecording's await chain needs more than two microtasks.
+    await new Promise((r) => setTimeout(r, 20));
+    expect($('[data-voice-preview]')).toBeNull();
+    expect($('[data-composer]')!.getAttribute('data-mode')).toBe('message');
+  });
+
+  it('a microphone prompt answered after the window blurs does not start recording', async () => {
+    stubHost();
+    let grant!: (s: MediaStream) => void;
+    const { stream, track } = fakeStream();
+    Object.defineProperty(navigator, 'mediaDevices', {
+      configurable: true,
+      value: { getUserMedia: () => new Promise<MediaStream>((r) => { grant = r; }) },
+    });
+    await openShell();
+    $<HTMLButtonElement>('[data-voice-record="start"]')!.click();
+    await vi.waitFor(() => expect(grant).toBeDefined());
+    window.dispatchEvent(new Event('blur'));
+    grant(stream);
+    await vi.waitFor(() => expect(track.stop).toHaveBeenCalled());
+    expect($('[data-voice-record="stop"]')).toBeNull();
+    expect(FakeRecorder.made.every((r) => r.state === 'inactive')).toBe(true);
   });
 
   it('a microphone prompt answered after switching contact does not record for the new one', async () => {

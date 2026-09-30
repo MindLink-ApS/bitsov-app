@@ -16,11 +16,13 @@ git -C "$GENOME" merge-base --is-ancestor a97ab0e HEAD || {
 export CARGO_NET_OFFLINE=true npm_config_offline=true BITCOIND_SKIP_DOWNLOAD=1 ELECTRS_SKIP_DOWNLOAD=1
 export PYTHONDONTWRITEBYTECODE=1
 export CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/bitsov-target-a22}"
 export NO_PROXY='*' no_proxy='*'
 unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
 WORK=$(mktemp -d /tmp/real-ui-e2e-run.XXXXXX)
 EVIDENCE=$(mktemp -d /tmp/real-ui-e2e-evidence.XXXXXX)
+# Build dirs are private to this run unless the caller shares a cache on purpose.
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$WORK/target}"
+export APP_CARGO_TARGET_DIR="${APP_CARGO_TARGET_DIR:-$WORK/app-target}"
 echo "Evidence: $EVIDENCE"
 runner=''
 finish() {

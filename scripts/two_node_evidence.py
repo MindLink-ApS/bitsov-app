@@ -13,7 +13,8 @@ REDACTED = '<redacted>'
 SECRET_KEY = re.compile(r'(?:authorization|cookie|token|secret|password|passphrase|mnemonic|seed|preimage|macaroon|private[_.-]?key|grant_phrase)', re.I)
 JWT = re.compile(r'\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b')
 BEARER = re.compile(r'(?i)\bBearer\s+(?!<redacted>)[A-Za-z0-9._~+/=-]+')
-GRANT = re.compile(r'GRANT spend TO ([\w-]+) CODE ([0-9a-f]{64})')
+# Owner console codes for a spend grant or a front-door grant (genome front_door scope).
+GRANT = re.compile(r'GRANT (?:spend|front_door) TO ([\w-]+) CODE ([0-9a-f]{64})')
 PEM = re.compile(r'-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----.*?(?:-----END (?:[A-Z]+ )?PRIVATE KEY-----|$)', re.S)
 # Handles TOML, JSON and common log key=value/key: value representations.
 FIELD = re.compile(r'''(?ix)(["']?\b[\w-]*(?:authorization|cookie|token|secret|password|passphrase|mnemonic|seed|preimage|macaroon|private[_.-]?key)[\w-]*["']?\s*[:=]\s*)("(?:\\.|[^"\\])*"|'[^']*'|[^\r\n]+)''')

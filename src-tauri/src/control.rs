@@ -478,8 +478,24 @@ pub struct NodeOverview {
     /// Its URL, only when well-formed and naming the reported port.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stun_url: Option<String>,
+    /// The Bitcoin network in the LDK config the host started the node with,
+    /// named as `act::bolt11_network` names a currency. Absent for other backends or
+    /// an unreadable config: the app then does not know its network.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub network: Option<String>,
     /// Unix ms when the host read it, for the freshness line.
     pub read_at: u64,
+}
+
+/// An LDK config's `network` as the app names networks; unknown names are none.
+pub fn ldk_network_name(configured: &str) -> Option<&'static str> {
+    match configured {
+        "bitcoin" => Some("mainnet"),
+        "testnet" => Some("testnet"),
+        "signet" => Some("signet"),
+        "regtest" => Some("regtest"),
+        _ => None,
+    }
 }
 
 /// The node's `stun_url`, kept only when it is a plain `stun:host:port` (no
@@ -519,6 +535,7 @@ impl NodeOverview {
             capabilities: known_capabilities(&status.api_capabilities),
             stun_url: own_stun_url(status.stun_url.as_deref(), status.stun_port),
             stun_port: status.stun_port,
+            network: None,
             read_at,
         }
     }

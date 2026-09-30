@@ -25,6 +25,7 @@
 //! Receipts carry amounts, status and ids the user already knows. Preimages,
 //! payment hashes and tokens are dropped here, as in `control`.
 
+use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescriptionRef, Currency, TaggedField};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -851,85 +852,96 @@ pub fn room_sendable(quote: &RoomQuote) -> Result<(), ActionError> {
 
 // ---- payments -----------------------------------------------------------------
 
-/// The amount a BOLT 11 invoice names, in msat, read from its human-readable
-/// part. `None` for an amountless invoice. The app refuses those: it cannot
-/// show the cost before paying.
-pub fn bolt11_amount_msat(invoice: &str) -> Result<Option<u64>, ActionError> {
-    let lower = invoice.trim().to_ascii_lowercase();
-    let lower = lower.strip_prefix("lightning:").unwrap_or(&lower);
-    if lower.len() > 2048 {
+/// The one reading of a BOLT 11 invoice the app shows or pays. It is decoded
+/// with `lightning-invoice` at the same version the node's payment path parses
+/// it with (genome `dac01c8`, via ldk-node 0.7.0), so the payee, amount and
+/// expiry shown are the ones the node acts on.
+///
+/// An invoice is refused unless it is exactly its canonical encoding. The
+/// parser hashes its own re-serialization of the fields; a string with padding
+/// bits, leading zero words or other non-canonical field encodings still parses,
+/// but anything that read its raw words would name a different signer.
+/// Refusing them keeps every reader of the string in agreement.
+fn decode_bolt11(invoice: &str) -> Result<Bolt11Invoice, ActionError> {
+    let text = invoice.trim();
+    if text.len() > 2048 {
         return Err(ActionError::invalid("that invoice is too long"));
     }
-    let hrp = lower
-        .rfind('1')
-        .map(|i| &lower[..i])
-        .and_then(|h| h.strip_prefix("ln"))
-        .ok_or_else(|| ActionError::invalid("that is not a Lightning invoice"))?;
-    let digits_at = hrp.find(|c: char| c.is_ascii_digit()).unwrap_or(hrp.len());
-    let (currency, amount) = hrp.split_at(digits_at);
-    if !matches!(currency, "bc" | "tb" | "tbs" | "bcrt" | "sb") {
-        return Err(ActionError::invalid("that is not a Lightning invoice"));
+    let lower = text.to_ascii_lowercase();
+    let lower = lower.strip_prefix("lightning:").unwrap_or(&lower);
+    let bad = || ActionError::invalid("That is not a valid Lightning invoice.");
+    let parsed: Bolt11Invoice = lower.parse().map_err(|_| bad())?;
+    if parsed.to_string() != lower {
+        return Err(ActionError::invalid(
+            "This invoice is not in its standard encoding, so the app cannot be sure who it pays. Ask for a fresh invoice.",
+        ));
     }
-    if amount.is_empty() {
-        return Ok(None);
-    }
-    let (number, multiplier) = match amount.chars().last() {
-        Some(c @ ('m' | 'u' | 'n' | 'p')) => (&amount[..amount.len() - 1], Some(c)),
-        _ => (amount, None),
-    };
-    let bad = || ActionError::invalid("the invoice amount could not be read");
-    if number.is_empty() || !number.chars().all(|c| c.is_ascii_digit()) || number.starts_with('0') {
+    // The parser uses the first `n`; more than one is refused, not guessed at.
+    let named = parsed.tagged_fields().filter(|f| matches!(f, TaggedField::PayeePubKey(_))).count();
+    if named > 1 {
         return Err(bad());
     }
-    let n: u64 = number.parse().map_err(|_| bad())?;
-    let msat = match multiplier {
-        None => n.checked_mul(100_000_000_000),
-        Some('m') => n.checked_mul(100_000_000),
-        Some('u') => n.checked_mul(100_000),
-        Some('n') => n.checked_mul(100),
-        Some('p') if n.is_multiple_of(10) => Some(n / 10),
-        _ => None,
-    }
-    .ok_or_else(bad)?;
-    Ok(Some(msat))
+    Ok(parsed)
 }
 
-/// Which chain an invoice is for, from its prefix. Shown next to the amount.
-pub fn bolt11_network(invoice: &str) -> &'static str {
-    let lower = invoice.trim().to_ascii_lowercase();
-    let lower = lower.strip_prefix("lightning:").unwrap_or(&lower);
-    if lower.starts_with("lnbcrt") {
-        "regtest"
-    } else if lower.starts_with("lnbc") {
-        "mainnet"
-    } else if lower.starts_with("lntbs") {
-        "signet"
-    } else if lower.starts_with("lntb") {
-        "testnet"
-    } else {
-        "unknown"
+/// Which chain an invoice is for. Shown next to the amount.
+pub fn bolt11_network(currency: Currency) -> &'static str {
+    match currency {
+        Currency::Bitcoin => "mainnet",
+        Currency::BitcoinTestnet => "testnet",
+        Currency::Signet => "signet",
+        Currency::Regtest => "regtest",
+        Currency::Simnet => "simnet",
     }
 }
 
-/// `invoice_amount`: what paying this invoice would cost, before paying.
+/// `invoice_amount`: what paying this invoice would cost and whom it pays,
+/// before paying. The only source of an invoice's payee the renderer shows.
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct InvoiceAmount {
     pub amount_msat: u64,
     pub network: &'static str,
+    /// The node the payment goes to: the `n` field, else the signer.
+    pub payee: String,
+    /// Unix ms.
+    pub expires_at_ms: u64,
+    /// The canonical invoice, lower case, without `lightning:`. Pay sends this.
+    pub bolt11: String,
+    /// The `p` field, hex.
+    pub payment_hash: String,
+    /// The `d` field as the payee wrote it; null for a description hash.
+    pub description: Option<String>,
 }
 
 pub fn invoice_amount(invoice: &str) -> Result<InvoiceAmount, ActionError> {
-    let amount_msat = bolt11_amount_msat(invoice)?.ok_or_else(|| {
+    let parsed = decode_bolt11(invoice)?;
+    let amount_msat = parsed.amount_milli_satoshis().filter(|m| *m > 0).ok_or_else(|| {
         ActionError::invalid("This invoice names no amount. The app pays only invoices whose cost it can show first.")
     })?;
+    let expires_at_ms = parsed
+        .expires_at()
+        .and_then(|d| u64::try_from(d.as_millis()).ok())
+        .ok_or_else(|| ActionError::invalid("That is not a valid Lightning invoice."))?;
     Ok(InvoiceAmount {
         amount_msat,
-        network: bolt11_network(invoice),
+        network: bolt11_network(parsed.currency()),
+        payee: parsed.get_payee_pub_key().to_string(),
+        expires_at_ms,
+        bolt11: parsed.to_string(),
+        payment_hash: parsed.payment_hash().to_string(),
+        description: match parsed.description() {
+            Bolt11InvoiceDescriptionRef::Direct(d) => Some(d.as_inner().0.clone()),
+            Bolt11InvoiceDescriptionRef::Hash(_) => None,
+        },
     })
 }
 
+/// A valid 1,000-msat testnet invoice (payee `0324653e…ab1c`) for host tests.
+#[doc(hidden)]
+pub const TEST_INVOICE_1000: &str = "lntb10n1pj48ugqdq8w3jhxaqpp5qurswpc8qurswpc8qurswpc8qurswpc8qurswpc8qurswpc8qurssp5pyysjzgfpyysjzgfpyysjzgfpyysjzgfpyysjzgfpyysjzgfpyys9qrsgqcqpjwcyh3lmtqk07y4678usw99mc95k5xkn5nl3g3rv0kucq4m8603d4pv4vzzaj3pqffa6zge5xgz2lzn238xt7z5w3q8v8z8wkj9ylxcqpl5fqza";
+
 /// `POST /payments/pay` body, refused unless the invoice asks for exactly the
-/// amount the owner was shown.
+/// amount the owner was shown. The body carries the canonical invoice.
 pub fn pay_body(invoice: &str, confirmed_msat: u64) -> Result<serde_json::Value, ActionError> {
     let shown = invoice_amount(invoice)?;
     if shown.amount_msat != confirmed_msat {
@@ -937,9 +949,7 @@ pub fn pay_body(invoice: &str, confirmed_msat: u64) -> Result<serde_json::Value,
             "The invoice amount does not match the cost you confirmed. Nothing was paid.",
         ));
     }
-    let bolt11 = invoice.trim();
-    let bolt11 = bolt11.strip_prefix("lightning:").unwrap_or(bolt11);
-    Ok(json!({ "bolt11": bolt11 }))
+    Ok(json!({ "bolt11": shown.bolt11 }))
 }
 
 /// `POST /payments/keysend` body.
@@ -1180,6 +1190,9 @@ pub const FILE_LIST_WINDOWS: [usize; 3] = [50, 200, 1000];
 /// (a name that only looks like a voice note).
 pub const NOT_A_VOICE_NOTE: &str = "not a voice note";
 pub const VOICE_NOT_STORED: &str = "voice note not stored on this node";
+pub const FILE_NOT_STORED: &str = "file not stored on this node";
+/// Received file over the app's 1.4 MB send/receive cap.
+pub const FILE_TOO_LARGE: &str = "file over 1.4 MB";
 
 /// What a message's stored file is, by its type (never its name).
 #[derive(Debug, PartialEq, Eq)]
@@ -1189,14 +1202,82 @@ pub enum VoiceLookup<'a> {
     Missing,
 }
 
+/// Any stored file for a message id (voice or not).
+#[derive(Debug, PartialEq, Eq)]
+pub enum StoredLookup<'a> {
+    Found(&'a FileRow),
+    Missing,
+}
+
 /// The stored file a received message carried. The node records the
 /// envelope id as `message_id` when it stores the file.
-pub fn voice_file_for<'a>(rows: &'a [FileRow], message_id: &str) -> VoiceLookup<'a> {
+pub fn stored_file_for<'a>(rows: &'a [FileRow], message_id: &str) -> StoredLookup<'a> {
     match rows.iter().find(|r| r.message_id.as_deref().is_some_and(|m| m.eq_ignore_ascii_case(message_id))) {
-        Some(r) if is_voice_mime(&r.mime_type) => VoiceLookup::Voice(r),
-        Some(_) => VoiceLookup::NotVoice,
-        None => VoiceLookup::Missing,
+        Some(r) => StoredLookup::Found(r),
+        None => StoredLookup::Missing,
     }
+}
+
+/// Voice notes only: same lookup, then require an audio mime.
+pub fn voice_file_for<'a>(rows: &'a [FileRow], message_id: &str) -> VoiceLookup<'a> {
+    match stored_file_for(rows, message_id) {
+        StoredLookup::Found(r) if is_voice_mime(&r.mime_type) => VoiceLookup::Voice(r),
+        StoredLookup::Found(_) => VoiceLookup::NotVoice,
+        StoredLookup::Missing => VoiceLookup::Missing,
+    }
+}
+
+/// Refuse a blob whose declared size or decoded bytes exceed [`FILE_MAX_BYTES`].
+pub fn blob_within_cap(blob: &FileBlob) -> Result<(), String> {
+    let decoded = base64_decoded_len(&blob.data_b64).unwrap_or(usize::MAX);
+    let declared = usize::try_from(blob.size_bytes).unwrap_or(usize::MAX);
+    if declared > FILE_MAX_BYTES || decoded > FILE_MAX_BYTES {
+        Err(FILE_TOO_LARGE.into())
+    } else {
+        Ok(())
+    }
+}
+
+/// Cap on the save-dialog name suggestion (peer input can be arbitrarily long).
+pub const SAVE_NAME_MAX: usize = 180;
+
+/// A single path segment for the save dialog: no directories, no empty name.
+pub fn safe_save_name(filename: &str) -> String {
+    let base = filename
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or("")
+        .trim()
+        .trim_start_matches('.');
+    let cleaned: String = base
+        .chars()
+        .map(|c| if c.is_control() || c == ':' { '_' } else { c })
+        .collect();
+    // Truncate then drop trailing spaces/dots (Windows reserved tails).
+    let truncated: String = cleaned.chars().take(SAVE_NAME_MAX).collect();
+    let trimmed = truncated.trim_end_matches([' ', '.']).to_string();
+    if trimmed.is_empty() { "file".into() } else { trimmed }
+}
+
+/// Decode base64 and write exactly to `path` (caller chose it via the save dialog).
+pub fn write_file_bytes(path: &std::path::Path, data_b64: &str) -> Result<(), String> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data_b64)
+        .map_err(|_| "corrupt file data".to_string())?;
+    if bytes.len() > FILE_MAX_BYTES {
+        return Err(FILE_TOO_LARGE.into());
+    }
+    std::fs::write(path, bytes).map_err(|e| format!("could not save: {e}"))
+}
+
+/// Result of a user-chosen save (or cancel).
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+pub struct FileSaveResult {
+    pub saved: bool,
+    pub filename: String,
+    pub mime_type: String,
+    pub size_bytes: u64,
 }
 
 #[derive(Deserialize, Debug)]
@@ -1448,31 +1529,80 @@ mod tests {
         assert_eq!(room_sendable(&alone).unwrap_err().code, "room_unreachable");
     }
 
+    /// Codex's review fixture: a 21,000-msat regtest invoice signed by
+    /// `CANONICAL_PAYEE`, and three re-encodings the node's parser accepts as
+    /// that same invoice (a set padding bit in `p`, a leading zero word in `c`,
+    /// a leading zero word in the features). Read from their raw words, each
+    /// names a different node.
+    const CANONICAL: &str = "lnbcrt210n1p45n5sqdq2v35kumn9wgpp5vj92t3telvc08zhhgnvh6mkggrr6jynh5jv6p4uq70nnznk2py9ssp5qszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszq9qrsgqcqpjgpd0vndshg0682c4gpxyde0sr785uz9eqc36yjugphpzpkn55zmy6v4nszm0ym8vqwvgrp4jh9us9d593yftaz5sgxwyxyf9z0hmsnsqcufc8l";
+    const CANONICAL_PAYEE: &str = "031b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f";
+    const NONCANONICAL: [&str; 3] = [
+        "lnbcrt210n1p45n5sqdq2v35kumn9wgpp5vj92t3telvc08zhhgnvh6mkggrr6jynh5jv6p4uq70nnznk2py93sp5qszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszq9qrsgqcqpjgpd0vndshg0682c4gpxyde0sr785uz9eqc36yjugphpzpkn55zmy6v4nszm0ym8vqwvgrp4jh9us9d593yftaz5sgxwyxyf9z0hmsnsq3ul59u",
+        "lnbcrt210n1p45n5sqdq2v35kumn9wgpp5vj92t3telvc08zhhgnvh6mkggrr6jynh5jv6p4uq70nnznk2py9ssp5qszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszq9qrsgqcqzqjgpd0vndshg0682c4gpxyde0sr785uz9eqc36yjugphpzpkn55zmy6v4nszm0ym8vqwvgrp4jh9us9d593yftaz5sgxwyxyf9z0hmsnsq53y0av",
+        "lnbcrt210n1p45n5sqdq2v35kumn9wgpp5vj92t3telvc08zhhgnvh6mkggrr6jynh5jv6p4uq70nnznk2py9ssp5qszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszq9qyqsgqcqpjgpd0vndshg0682c4gpxyde0sr785uz9eqc36yjugphpzpkn55zmy6v4nszm0ym8vqwvgrp4jh9us9d593yftaz5sgxwyxyf9z0hmsnsqfvef43",
+    ];
+    /// Two `n` fields (A then B), both parsable; which one pays is refused, not guessed.
+    const DUPLICATE_N: &str = "lnbcrt210n1p4tex6ldpvv3jkxmmyv4ezqcm0denx7undv9hxxefqve5hsar4wfjspp5vj92t3telvc08zhhgnvh6mkggrr6jynh5jv6p4uq70nnznk2py9ssp5qszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszq9qrsgqcqpjnp4qvdcf32k0vfxgsyet5ldt246q4jaw8scx3sysx0lnstlt6w4m5rc7np4qfx5kmx3xcgr9j5m62htnkgq4fx5tk02mq9vjs3nwnz9rfe9f5rkvku2gq78kmvpjp67txksuenlzjsfndm0jy4k4m8hz2sv56kc0h8fsuj4a95rfnvqd2j8kj376s5zjyn276428cvn7x3glf405m28246cqu503zx";
+
     #[test]
-    fn bolt11_amounts_are_read_from_the_prefix() {
-        assert_eq!(bolt11_amount_msat("lnbc2500u1pvjluez").unwrap(), Some(250_000_000));
-        assert_eq!(bolt11_amount_msat("LNBC20M1PVJLUEZ").unwrap(), Some(2_000_000_000));
-        assert_eq!(bolt11_amount_msat("lntb10n1abc").unwrap(), Some(1_000));
-        assert_eq!(bolt11_amount_msat("lnbcrt1500n1xyz").unwrap(), Some(150_000));
-        assert_eq!(bolt11_amount_msat("lnbc10p1abc").unwrap(), Some(1));
-        assert_eq!(bolt11_amount_msat("lightning:lnbc1u1abc").unwrap(), Some(100_000));
-        assert_eq!(bolt11_amount_msat("lnbc1pvjluez").unwrap(), None, "amountless");
-        assert!(bolt11_amount_msat("lnbc15p1abc").is_err(), "sub-msat");
-        assert!(bolt11_amount_msat("lnbc01u1abc").is_err());
-        assert!(bolt11_amount_msat("hello").is_err());
-        assert!(bolt11_amount_msat("lnxx10u1abc").is_err());
-        assert!(bolt11_amount_msat("lnbc99999999999999999999m1abc").is_err());
-        assert_eq!(bolt11_network("lnbcrt1n1x"), "regtest");
-        assert_eq!(bolt11_network("lntb1n1x"), "testnet");
-        assert_eq!(bolt11_network("lnbc1n1x"), "mainnet");
+    fn an_invoice_is_read_as_the_node_parses_it() {
+        let read = invoice_amount(CANONICAL).unwrap();
+        assert_eq!(read.amount_msat, 21_000);
+        assert_eq!(read.network, "regtest");
+        assert_eq!(read.payee, CANONICAL_PAYEE);
+        assert_eq!(read.bolt11, CANONICAL);
+        assert_eq!(read.payment_hash, "648aa5c579fb30f38af744d97d6ec840c7a91277a499a0d780f3e7314eca090b");
+        assert_eq!(read.description.as_deref(), Some("dinner"));
+        let parsed: Bolt11Invoice = CANONICAL.parse().unwrap();
+        assert_eq!(read.expires_at_ms, (parsed.duration_since_epoch().as_secs() + 3600) * 1000);
+        // Case and a `lightning:` prefix are not re-encodings: the same invoice.
+        let upper = invoice_amount(&format!("  LIGHTNING:{}\n", CANONICAL.to_ascii_uppercase())).unwrap();
+        assert_eq!(upper, read);
+        let t = invoice_amount(TEST_INVOICE_1000).unwrap();
+        assert_eq!((t.amount_msat, t.network), (1_000, "testnet"));
+        assert_eq!(t.payee, "0324653eac434488002cc06bbfb7f10fe18991e35f9fe4302dbea6d2353dc0ab1c");
+    }
+
+    #[test]
+    fn a_non_canonical_encoding_is_refused_whatever_its_signer() {
+        // The node's parser accepts each as the canonical invoice; the app does not.
+        for bolt11 in NONCANONICAL {
+            assert_eq!(bolt11.parse::<Bolt11Invoice>().unwrap().get_payee_pub_key().to_string(), CANONICAL_PAYEE);
+            let err = invoice_amount(bolt11).unwrap_err();
+            assert_eq!(err.code, "invalid");
+            assert!(err.message.contains("standard encoding"), "{}", err.message);
+            assert!(pay_body(bolt11, 21_000).unwrap_err().message.contains("standard encoding"));
+        }
+        assert_eq!(invoice_amount(DUPLICATE_N).unwrap_err().code, "invalid");
+        // One `n`: the signer's is read as the payee; anyone else's fails the signature.
+        let pre = &CANONICAL[..CANONICAL.len() - 110];
+        let single_match = format!("{pre}np4qvdcf32k0vfxgsyet5ldt246q4jaw8scx3sysx0lnstlt6w4m5rc7utvphkf0r6r8hqss2xsg5pa3k5094vr0szxcaq96z28ytekr7at380elc26wu0j6u7fzhxwwux67vsqs7jpyfk0dqar3y86qj3urrvqpvaf6md");
+        let single_other = format!("{pre}np4qfx5kmx3xcgr9j5m62htnkgq4fx5tk02mq9vjs3nwnz9rfe9f5rkv8wux8u2ga730fxufdqte2kkh7vk2yu57uemxxguwr26kpwhh528qq36j5yrvjd0mgtvazaghc2svyvauk5u4sacaarg20n4upjk3jjsqa2gc5d");
+        assert_eq!(invoice_amount(&single_match).unwrap().payee, CANONICAL_PAYEE);
+        assert_eq!(invoice_amount(&single_other).unwrap_err().code, "invalid");
+        assert!(pay_body(DUPLICATE_N, 21_000).is_err());
+    }
+
+    #[test]
+    fn malformed_and_amountless_invoices_are_refused() {
+        for bad in ["hello", "lnbc10n1abc", "lntb10n1x", "lnbc1pvjluez", "", &format!("{}q", CANONICAL)] {
+            assert_eq!(invoice_amount(bad).unwrap_err().code, "invalid", "{bad}");
+        }
+        // One changed character fails the checksum.
+        let mut flipped = CANONICAL.to_string();
+        flipped.replace_range(30..31, "q");
+        assert!(invoice_amount(&flipped).is_err());
+        assert_eq!(bolt11_network(Currency::Signet), "signet");
+        assert_eq!(bolt11_network(Currency::Bitcoin), "mainnet");
     }
 
     #[test]
     fn pay_refuses_amountless_and_mismatched_invoices() {
-        assert_eq!(pay_body("lnbc10n1abc", 1_000).unwrap(), json!({"bolt11": "lnbc10n1abc"}));
-        assert_eq!(pay_body("lightning:lnbc10n1abc", 1_000).unwrap(), json!({"bolt11": "lnbc10n1abc"}));
-        assert!(pay_body("lnbc10n1abc", 999).unwrap_err().message.contains("does not match"));
-        assert!(pay_body("lnbc1abc", 0).unwrap_err().message.contains("no amount"));
+        assert_eq!(pay_body(TEST_INVOICE_1000, 1_000).unwrap(), json!({"bolt11": TEST_INVOICE_1000}));
+        let prefixed = format!("lightning:{}", TEST_INVOICE_1000.to_ascii_uppercase());
+        assert_eq!(pay_body(&prefixed, 1_000).unwrap(), json!({"bolt11": TEST_INVOICE_1000}));
+        assert!(pay_body(TEST_INVOICE_1000, 999).unwrap_err().message.contains("does not match"));
+        assert!(pay_body("lnbc1abc", 0).is_err());
     }
 
     #[test]
@@ -1569,6 +1699,39 @@ mod tests {
         assert_eq!(voice_file_for(&rows, "cd"), VoiceLookup::Missing);
         assert!(is_voice_mime(" Audio/MP4"));
         assert!(!is_voice_mime("text/html"));
+        assert_eq!(stored_file_for(&rows, "ab"), StoredLookup::Found(&rows[0]));
+        assert_eq!(stored_file_for(&rows[1..], "ab"), StoredLookup::Found(&rows[1]));
+        assert_eq!(stored_file_for(&rows, "zz"), StoredLookup::Missing);
+    }
+
+    #[test]
+    fn received_files_refuse_the_size_cap_and_sanitize_save_names() {
+        let ok = FileBlob {
+            filename: "note.txt".into(),
+            mime_type: "text/plain".into(),
+            size_bytes: 2,
+            data_b64: "aGk=".into(),
+        };
+        blob_within_cap(&ok).unwrap();
+        let big = FileBlob {
+            filename: "big.bin".into(),
+            mime_type: "application/octet-stream".into(),
+            size_bytes: (FILE_MAX_BYTES as u64) + 1,
+            data_b64: "aGk=".into(),
+        };
+        assert_eq!(blob_within_cap(&big).unwrap_err(), FILE_TOO_LARGE);
+        assert_eq!(safe_save_name("../etc/passwd"), "passwd");
+        assert_eq!(safe_save_name("a\\b:c.png"), "b_c.png");
+        assert_eq!(safe_save_name("..."), "file");
+        assert_eq!(safe_save_name("note.txt   "), "note.txt");
+        let long = format!("{}.png", "a".repeat(SAVE_NAME_MAX + 40));
+        let capped = safe_save_name(&long);
+        assert!(capped.len() <= SAVE_NAME_MAX);
+        assert!(!capped.ends_with('.'));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(safe_save_name("hi.txt"));
+        write_file_bytes(&path, "aGk=").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"hi");
     }
 
     /// The node's BUG-PSI reply, as genome #100's compose writes it.

@@ -147,10 +147,12 @@ def main():
         signal.signal(sig, r.interrupted)
     try:
         r.SHOTS.mkdir()
-        for port in (3141, 1420):
+        # Ephemeral app API and Vite ports (runner.A_API / UI_PORT), never 3141 or
+        # 1420: a pilot node there is never contacted, probed or signalled.
+        for port in (r.A_API, r.UI_PORT):
             with socket.socket() as sock:
                 sock.bind(('127.0.0.1', port))
-        r.ports = {'a': [3141, r.free_port(), r.free_port()], 'b': [r.free_port(), r.free_port(), r.free_port()]}
+        r.ports = {'a': [r.A_API, r.free_port(), r.free_port()], 'b': [r.free_port(), r.free_port(), r.free_port()]}
         r.in_pty('fixture', ['sandbox-exec', '-f', str(r.SANDBOX), str(root/'fixture'),
                  'regtest_e2e::real_ui_fixture', '--ignored', '--nocapture', '--test-threads=1'], root, os.environ.copy())
         need(r.wait_until((root/'fixture-ready.json').exists, 120), 'chain/router startup')
@@ -164,18 +166,16 @@ def main():
             r.secrets[n] = os.urandom(32).hex()
         for n in ('a', 'b'):
             configure(n, infra)
-        r.evidence.write('runtime.json', {'ports':r.ports,'ids':r.ids,'network':'regtest'})
+        r.evidence.write('runtime.json', {'ports':r.ports,'vite_port':r.UI_PORT,'ids':r.ids,'network':'regtest'})
         proc = r.in_pty('node-b', ['sandbox-exec', '-f', str(r.SANDBOX), r.BIN, 'start', '--config', str(r.ROOTS['b']/'konsensus.toml')], r.ROOTS['b'], {**os.environ, 'RUST_LOG':'info'})
         r.network_guard.add('b', proc)
         need(r.wait_until(lambda: r.api('b', 'GET', '/health')[0] == 200, 90), 'node B startup')
         wrapper = r.ROOTS['a']/'konsensus-dev-sidecar'
         wrapper.write_text(f'#!/bin/sh\nif [ "$1" = start ]; then echo $$ > "{r.ROOTS["a"]}/node.pid"; fi\nexec sandbox-exec -f "{r.SANDBOX}" "{r.BIN}" "$@"\n')
         wrapper.chmod(0o700)
-        env = {**os.environ, 'BITSOV_DEV_SIDECAR':str(wrapper), 'BITSOV_DEV_DATA_DIR':str(r.ROOTS['a']),
-               'BITSOV_UI_E2E':'1','RUST_LOG':'info','CARGO_TARGET_DIR':os.environ.get('APP_CARGO_TARGET_DIR','/tmp/bitsov-target-app')}
-        local_config = root/'tauri.local.json'
-        local_config.write_text(json.dumps({'identifier':bundle_id,'build':{'devUrl':'http://127.0.0.1:1420',
-            'beforeDevCommand':'npm run dev -- --host 127.0.0.1'}}))
+        r.SAVE_DIR.mkdir(mode=0o700, exist_ok=True)
+        env = r.app_env({'BITSOV_DEV_SIDECAR':str(wrapper), 'BITSOV_DEV_DATA_DIR':str(r.ROOTS['a'])})
+        local_config = r.tauri_config(root/'tauri.local.json', bundle_id)
         r.in_pty('app', ['scripts/dev-node-from-main.sh', '--no-watch', '--config',str(local_config)], app, env)
         need(r.wait_until(r.register_a, 600, .5), 'app starts node A')
         need(r.wait_until(lambda: r.ui('ping'), 120, 1), 'real window driver')

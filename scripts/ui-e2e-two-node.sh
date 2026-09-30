@@ -26,7 +26,10 @@
 # Needs: macOS, cargo (offline deps), Python 3.11+, npm deps installed, and a
 # Playwright install with Chromium for the screenshots (optional; set
 # PLAYWRIGHT_MODULE=/path/to/node_modules/playwright if it is not found).
-# Ports 127.0.0.1:3141 (node A, fixed by the app) and 1420 (vite) must be free.
+# Never uses 127.0.0.1:3141 or 1420: node A's API port reaches the dev build through
+# BITSOV_DEV_API_BASE and Vite's through BITSOV_VITE_PORT, both ephemeral, so a
+# pilot node on 3141 keeps running untouched. Build dirs are private to the run
+# (CARGO_TARGET_DIR / APP_CARGO_TARGET_DIR override that, e.g. to share a cache).
 set -euo pipefail
 umask 077
 
@@ -41,9 +44,6 @@ python3 -c 'import tomllib' 2>/dev/null || { echo 'Python 3.11+ required.' >&2; 
 EVIDENCE=$(mktemp -d /tmp/uie2e-evidence.XXXXXX)
 echo "Evidence: $EVIDENCE"
 
-# Cache dependencies, but link into a private runtime directory. Another build
-# must never replace the executable this invocation launches.
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/bitsov-target-l1}"
 WORK=''
 runner_pid=''
 finish() {
@@ -68,6 +68,10 @@ finish() {
 trap finish EXIT
 trap 'exit 1' HUP INT TERM
 WORK=$(mktemp -d /tmp/uie2e-run.XXXXXX)
+# Private build dirs inside the run dir unless the caller shares a cache. Either
+# way the executable is linked into WORK: another build never replaces it.
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$WORK/target}"
+export APP_CARGO_TARGET_DIR="${APP_CARGO_TARGET_DIR:-$WORK/app-target}"
 git -C "$GENOME" rev-parse HEAD > "$EVIDENCE/genome-head.txt"
 git -C "$APP" rev-parse HEAD > "$EVIDENCE/app-head.txt"
 git -C "$GENOME" log --oneline -12 | python3 "$APP/scripts/two_node_evidence.py" --build-log "$EVIDENCE/genome-log.txt"

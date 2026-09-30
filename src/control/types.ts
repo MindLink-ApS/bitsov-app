@@ -189,6 +189,8 @@ export type NodeOverview = {
   stun_port?: number | null;
   /** `stun:host:port` for it at the node's public host; absent without one. Offered, never applied. */
   stun_url?: string | null;
+  /** The LDK network the host started the node with (`mainnet`, `regtest`, …); absent when unknown. */
+  network?: string | null;
   /** Unix ms when the host read it. */
   read_at: number;
 };
@@ -501,7 +503,22 @@ export type RoomQuote = {
 };
 
 export type InvoiceView = { bolt11: string; amount_msat: number; note: string | null; expires_at_ms: number };
-export type InvoiceAmount = { amount_msat: number; network: string };
+/**
+ * The host's reading of an invoice (`invoice_amount`), decoded by the same
+ * parser the node pays with. The only source of a payee the app shows.
+ */
+export type InvoiceAmount = {
+  amount_msat: number;
+  network: string;
+  /** The node the payment goes to, compressed pubkey hex. */
+  payee: string;
+  expires_at_ms: number;
+  /** Canonical, lower case, no `lightning:`: what Pay sends. */
+  bolt11: string;
+  payment_hash: string;
+  /** The `d` field as written by the payee; null for a description hash. */
+  description: string | null;
+};
 export type PaymentReceipt = {
   max_routing_fee_msat?: number;
   method: 'invoice' | 'keysend';
@@ -546,8 +563,11 @@ export type CallReceipt = {
   sent_at_ms: number;
 };
 
-/** `voice_note_fetch`: a received voice note's bytes, for the inline player. */
+/** `voice_note_fetch` / `file_fetch`: a received file's bytes (read-only). */
 export type VoiceBlob = { filename: string; mime_type: string; size_bytes: number; data_b64: string };
+
+/** `file_save`: wrote only if the owner confirmed the native save dialog. */
+export type FileSaveResult = { saved: boolean; filename: string; mime_type: string; size_bytes: number };
 
 /** Delivery of one sent message, from the send reply and then `/ws`. */
 export type Delivery = { status: 'accepted' | 'sent' | 'queued' | 'delivered' | 'rejected'; reason: string | null };
@@ -555,7 +575,8 @@ export type Delivery = { status: 'accepted' | 'sent' | 'queued' | 'delivered' | 
 /** A local, inline artifact in a track: the result of an action taken there. */
 export type Artifact =
   | { id: string; at: number; type: 'invoice'; invoice: InvoiceView }
-  | { id: string; at: number; type: 'payment'; receipt: PaymentReceipt }
+  /** `invoice`: the bolt11 an invoice payment paid, so a request card can show it paid. */
+  | { id: string; at: number; type: 'payment'; receipt: PaymentReceipt; invoice?: string }
   | { id: string; at: number; type: 'file'; receipt: FileReceipt }
   | { id: string; at: number; type: 'failed'; action: string; error: ActionError }
   /**

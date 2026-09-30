@@ -71,6 +71,8 @@
     "allow-file-price",
     "allow-file-send",
     "allow-voice-note-fetch",
+    "allow-file-fetch",
+    "allow-file-save",
     "allow-call-quote",
     "allow-call-signal",
     "allow-ai-read",

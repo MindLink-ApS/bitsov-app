@@ -219,12 +219,19 @@ def run(r):
         if 'Approve' in label:
             window(s, 'pay', 'Pay')
         r.ui('click', selector='[data-send]', timeoutMs=20000)
+        # Pay shows exactly what it will pay first; only the confirm tap pays.
+        s.check('pay: review shows amount, fee ceiling and total before paying',
+                r.ui_try('wait', selector='[data-pay-review]', timeoutMs=20000)
+                and r.ui('attrs', selector='[data-pay-review]', names=['data-review-max-msat'])[0]['data-review-max-msat'] == '8000')
+        s.snap('pay-review')
+        r.ui('click', selector='[data-pay-confirm]', timeoutMs=20000)
         paid = r.ui_try('wait', selector='[data-artifact="payment"]', timeoutMs=30000)
         s.snap('pay-result')
         status = r.ui('attrs', selector='[data-artifact="payment"]', names=['data-status']) if paid else None
         settled_b = r.wait_until(lambda: any(p.get('payment_hash') == inv.get('payment_hash') and str(p.get('status')).lower() == 'settled'
                                              for p in r.get('b', '/payments')), 20)
         s.check('pay: B\'s invoice settled', settled_b, status)
+        r.ui_try('click', selector='[data-budget-payment] > summary')
         s.check('payment scope and fee warning are visible', 'principal plus the network fee ceiling' in r.text('[data-budget-payment]'))
         s.check('app invoice payment reserves 8 sats including the fee ceiling in the shared daily book', r.wait_until(lambda: app_tally() == before_pay + 8, 15))
         # Independent reviewer probe: replay the already-settled invoice through
@@ -238,6 +245,7 @@ def run(r):
         r.ui('fill', selector='textarea[data-pay-invoice]', value=bolt11)
         r.ui('wait', text='Pay', selector='[data-send]', timeoutMs=20000)
         r.ui('click', selector='[data-send]', timeoutMs=20000)
+        r.ui('click', selector='[data-pay-confirm]', timeoutMs=20000)
         replay_completed = r.wait_until(lambda: len(r.ui('attrs', selector='[data-artifact="payment"]', names=['data-status'])) > replay_receipts_before, 20)
         # Let the asynchronous budget refresh triggered by the action finish.
         r.wait_until(lambda: app_tally() != replay_tally_before, 5)
