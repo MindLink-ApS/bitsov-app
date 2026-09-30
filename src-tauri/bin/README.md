@@ -13,7 +13,7 @@ Tauri's resolver expects: `bin/konsensus-<target-triple>[.exe]`.
 > exists with signed `SHA256SUMS.asc`. Checksum/signature placeholders live in
 > `scripts/fetch-node-sidecar.sh` (`EXPECTED_*`).
 
-## App changes that ride with this pin (#60–#78)
+## App changes that ride with this pin (#60–#79)
 
 When rc8 publishes and this pin merges, the app on `main` already carries:
 
@@ -32,6 +32,7 @@ When rc8 publishes and this pin merges, the app on `main` already carries:
 - **#76** front-door editor media / CV / website / safe render
 - **#77** Own-tier local model via loopback (AI P2)
 - **#78** 15 KiB front-door publish budget (sig/site/endpoint margin vs node 16 KiB)
+- **#79** offer the node's own STUN responder (`stun_url` from `/status`) in Calls settings (genome #136); Save still required
 
 Genome companion (draft): https://github.com/MindLink-ApS/BitSov-bitsov/pull/124
 
