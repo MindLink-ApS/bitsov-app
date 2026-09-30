@@ -1321,7 +1321,7 @@ function Rail(props: {
         <p class="track-empty" data-rooms-coming-soon>
           Coming soon — group chat is not on the protocol yet.
         </p>
-        <Show when={props.active && props.rooms.length > 0}>
+        <Show when={showLegacyRoomsUi && props.active && props.rooms.length > 0}>
           <For each={props.rooms}>
             {(r) => item({ kind: 'room', id: r.id.toLowerCase() }, r.name)}
           </For>
@@ -1672,6 +1672,16 @@ function Conversation(props: {
         prefill={props.prefill}
         onPrefillUsed={props.onPrefillUsed}
         payRequest={payRequest()}
+        hasPending={
+          props.artifacts.some(
+            (a) =>
+              a.type === 'undelivered' ||
+              (a.type === 'failed' &&
+                ['spend_unknown', 'payment_unknown', 'failed_paid', 'payment_settled_undelivered'].includes(a.error.code))
+          ) ||
+          Boolean(props.spend?.pending) ||
+          Boolean(props.budget && props.budget.unsettled_msat > 0)
+        }
       />
     </>
   );
@@ -1829,9 +1839,19 @@ function MessageView(props: {
       </Show>
       <div class="stamp">
         <Show when={amount()}>
-          <Bolt />
-          <span class="sats">{sats(amount()!)}</span>
-          <span>{satUnit(amount()!)} {props.out ? (props.allowance ? `all-in ceiling (${feeCeiling(props.allowance.max_routing_fee_msat)})` : 'principal paid; fee not in history') : 'to you'}</span>
+          <span
+            class="sats-meta"
+            title={`${sats(amount()!)} ${satUnit(amount()!)} · ${props.out ? (props.allowance ? `all-in ceiling (${feeCeiling(props.allowance.max_routing_fee_msat)})` : 'principal paid; fee not in history') : 'to you'}`}
+          >
+            <Bolt />
+            <span class="sats">{sats(amount()!)}</span>
+            <Show when={props.out && props.allowance}>
+              <span class="sr-only">{satUnit(amount()!)} all-in ceiling ({feeCeiling(props.allowance!.max_routing_fee_msat)})</span>
+            </Show>
+            <Show when={props.out && !props.allowance}>
+              <span class="sr-only">principal paid; fee not in history</span>
+            </Show>
+          </span>
           <Show when={props.out && props.allowance?.readmission_msat}>
             <span data-readmission-paid>incl. admission again {sats(props.allowance!.readmission_msat!)} {satUnit(props.allowance!.readmission_msat!)}</span>
           </Show>
@@ -2610,6 +2630,7 @@ function Composer(props: {
   onPrefillUsed?: () => void;
   /** A request card's Pay: prefill this invoice and show its review. Never pays. */
   payRequest?: { seq: number; bolt11: string } | null;
+  hasPending?: boolean;
 }) {
   const [mode, setMode] = createSignal<Mode>('message');
   const [menuOpen, setMenuOpen] = createSignal(false);
@@ -3550,7 +3571,11 @@ function Composer(props: {
             title={sendTitle()}
             aria-label={sendTitle()}
           >
-            {sendMain()}<Show when={sendPrice()}><span class="sr-only"> · {sendPrice()}</span></Show>
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <line x1="12" y1="19" x2="12" y2="5" />
+              <polyline points="5 12 12 5 19 12" />
+            </svg>
+            <span class="sr-only">{sendMain()}<Show when={sendPrice()}> · {sendPrice()}</Show></span>
           </button>
         </Show>
       </div>
@@ -3596,7 +3621,7 @@ function Composer(props: {
           </>
         )}
       </Show>
-      <details class="quiet-detail composer-info" data-composer-info>
+      <details class="sr-only composer-info" data-composer-info open>
         <summary aria-label="Cost and rules" title="Cost and rules">ⓘ</summary>
         <Show when={mode() === 'message' || mode() === 'file'}>
           <div class="composer-bar cost-only">
@@ -3644,7 +3669,7 @@ function Composer(props: {
       <Show when={spends()}>
         <Show
           when={viaBudget()}
-          fallback={<SpendBar spend={props.spend} error={props.spendError} now={props.now} actions={props.actions} />}
+          fallback={<SpendBar spend={props.spend} error={props.spendError} now={props.now} actions={props.actions} hasPending={props.hasPending} />}
         >
           <BudgetBar
             stand={stand()}
@@ -3662,6 +3687,7 @@ function Composer(props: {
             error={props.budgetError}
             now={props.now}
             actions={props.actions}
+            hasPending={props.hasPending}
           />
         </Show>
       </Show>
@@ -3673,7 +3699,7 @@ function Composer(props: {
  * The owner's spend window. One tap opens it for ten minutes; it can only
  * narrow what the node allows, never widen it.
  */
-function SpendBar(props: { spend: SpendView | null; error: string | undefined; now: number; actions: Actions }) {
+function SpendBar(props: { spend: SpendView | null; error: string | undefined; now: number; actions: Actions; hasPending?: boolean }) {
   const line = () => spendLine(props.spend, props.now);
   const minutes = (ms: number) => Math.max(1, Math.ceil((ms - props.now) / 60_000));
   return (
@@ -3729,7 +3755,7 @@ function SpendBar(props: { spend: SpendView | null; error: string | undefined; n
           </p>
         </Match>
       </Switch>
-      <Reconcile actions={props.actions} />
+      <Reconcile actions={props.actions} hasPending={props.hasPending} />
       <Show when={props.error}>
         <p class="err-note">{props.error}</p>
       </Show>
@@ -3738,7 +3764,7 @@ function SpendBar(props: { spend: SpendView | null; error: string | undefined; n
 }
 
 /** Read-only: match an unknown outcome to the node's own records. Never re-sends. */
-function Reconcile(props: { actions: Actions }) {
+function Reconcile(props: { actions: Actions; hasPending?: boolean }) {
   const [result, setResult] = createSignal<string | null>(null);
   const [checking, setChecking] = createSignal(false);
   // Paid, not delivered: the owner may stop retrying (it dispatches nothing).
@@ -3766,8 +3792,9 @@ function Reconcile(props: { actions: Actions }) {
     setUndelivered(null);
     setChecking(false);
   };
+  const isPending = () => Boolean(props.hasPending || result() || undelivered() || checking());
   return (
-    <>
+    <Show when={isPending()}>
       <button type="button" class="link" data-spend-reconcile disabled={checking()} onClick={() => void reconcile()}>
         Check pending result
       </button>
@@ -3777,7 +3804,7 @@ function Reconcile(props: { actions: Actions }) {
         </button>
       </Show>
       <Show when={result()}><p class="hint" data-reconciliation>{result()}</p></Show>
-    </>
+    </Show>
   );
 }
 
@@ -3815,6 +3842,7 @@ function BudgetBar(props: {
   error: string | undefined;
   now: number;
   actions: Actions;
+  hasPending?: boolean;
 }) {
   const worth = (msat: number) => messagesWorth(msat, props.priceMsat);
   const who = () => (props.room ? 'this room' : props.name);
@@ -3841,11 +3869,10 @@ function BudgetBar(props: {
           </div>
         </Match>
         <Match when={props.stand.kind === 'off'}>
-          <div class="approval budget-setup" data-budget-setup>
-            <p>
-              <strong>{props.budget.autopay.state === 'expired' ? 'Your daily approval ended.' : 'Let messages pay as you chat.'}</strong>{' '}
-              Approve an app all-in payment limit for each rolling 24 hours. Inside it, each message pays its recipient’s own price with no prompt. Someone new always asks first.
-            </p>
+          <div class="approval slim-approval budget-setup" data-budget-setup>
+            <span class="slim-label">
+              <strong>Approval needed.</strong> {props.budget.autopay.state === 'expired' ? 'Your daily approval ended.' : 'Let messages pay as you chat.'} (Someone new always asks first)
+            </span>
             <div class="presets" role="radiogroup" aria-label="App all-in payments limit, rolling 24 hours">
               <For each={props.budget.presets}>
                 {(p) => (
@@ -3862,14 +3889,6 @@ function BudgetBar(props: {
                 )}
               </For>
             </div>
-            <Show when={props.preset}>
-              {(p) => (
-                <p class="hint">
-                  Up to {fmtAmount(p().contact_msat)} a day per contact and {fmtAmount(p().room_msat)} per room, which you can lower any time.
-                  Each message still carries its own price cap. The approval lasts 24 hours and is never saved; the budgets and the tally are.
-                </p>
-              )}
-            </Show>
           </div>
         </Match>
         <Match when={props.stand.kind === 'first' && (props.stand as Extract<BudgetStandT, { kind: 'first' }>)}>
@@ -3971,8 +3990,7 @@ function BudgetBar(props: {
         </Match>
         <Match when={props.stand.kind === 'ok' && (props.stand as Extract<BudgetStandT, { kind: 'ok' }>)}>
           {(st) => (
-            <details class="quiet-detail passive-status" data-budget-status>
-              <summary aria-label="Payment status" title="Payment status">ⓘ</summary>
+            <div class="sr-only" data-budget-status>
               <p class="spend-line" data-budget-line>
                 <span class="dot ok" />
                 <span class="line-text">
@@ -3981,11 +3999,11 @@ function BudgetBar(props: {
                   <button type="button" class="link" data-pause-all onClick={() => void props.actions.pauseAll()}>Pause app payments</button>
                 </span>
               </p>
-            </details>
+            </div>
           )}
         </Match>
       </Switch>
-      <Reconcile actions={props.actions} />
+      <Reconcile actions={props.actions} hasPending={props.hasPending} />
       <Show when={props.error}>
         <p class="err-note" data-budget-error>{props.error}</p>
       </Show>
@@ -4139,6 +4157,12 @@ function BudgetPanel(props: {
 let showLegacyIntroductionUi = false;
 export function setShowLegacyIntroductionUi(enabled: boolean) {
   showLegacyIntroductionUi = enabled;
+}
+
+/** Product default hides prototype rooms (not on the protocol yet); prototype tests enable them. */
+let showLegacyRoomsUi = false;
+export function setShowLegacyRoomsUi(enabled: boolean) {
+  showLegacyRoomsUi = enabled;
 }
 
 function NewTrack(props: {

@@ -257,16 +257,18 @@ label.field input {
 .composer-panel .panel-head { display: flex; align-items: center; justify-content: space-between; gap: var(--s-2); font-size: var(--t-sm); }
 .composer-panel .panel-head .link { padding: 0 4px; }
 .composer-panel .composer-main { width: 100%; padding: 0; background: transparent; }
-.composer-info { width: min(var(--chat-max), 100%); align-self: center; margin: 0; }
-.composer-info > summary { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 50%; font-size: var(--t-xs); color: var(--muted); cursor: pointer; transition: background var(--d-fast) var(--ease), color var(--d-fast) var(--ease); }
-.composer-info > summary:hover { color: var(--ink); background: var(--surface); }
-.composer-info > summary::-webkit-details-marker, .passive-status > summary::-webkit-details-marker { display: none; }
-.composer-info[open] > summary { color: var(--accent); }
+.composer-info { display: none; }
+.composer-info > summary { display: none; }
 .passive-status { margin: 0; }
-.passive-status > summary { display: inline-flex; width: 22px; height: 22px; align-items: center; justify-content: center; font-size: var(--t-xs); }
+.passive-status > summary { display: none; }
 .signal-bar { align-items: flex-end; }
 .icon-btn { display: inline-flex; align-items: center; justify-content: center; }
-.send-btn { align-self: flex-end; width: 34px; height: 34px; padding: 0; flex: none; border-radius: 50%; }
+.send-btn { align-self: flex-end; width: 34px; height: 34px; min-width: 34px; min-height: 34px; padding: 0; flex: none; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; color: #fff; }
+.send-btn svg { display: block; }
+.approval.slim-approval { flex-direction: row; align-items: center; justify-content: space-between; padding: 6px 14px; gap: var(--s-3); border-radius: var(--r-chip); }
+.approval.slim-approval .slim-label { font-size: var(--t-xs); color: var(--ink); }
+.approval.slim-approval .presets { display: flex; gap: var(--s-1); flex-wrap: wrap; }
+.approval.slim-approval .chip { padding: 3px 10px; font-size: var(--t-xs); }
 .composer-main { display: flex; align-items: flex-end; gap: var(--s-2); background: var(--surface); border: 1px solid var(--line-strong); border-radius: 24px; padding: 5px 6px 5px 10px; width: min(var(--chat-max), 100%); box-shadow: 0 2px 8px rgba(0,0,0,0.1); transition: border-color var(--d-fast) var(--ease), box-shadow var(--d-fast) var(--ease); }
 .composer-main:focus-within { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent), 0 4px 12px rgba(0,0,0,0.18); }
 .composer-main textarea { flex: 1; background: transparent; border: none; padding: 8px 6px; min-height: 36px; }
