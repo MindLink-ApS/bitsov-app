@@ -22,9 +22,15 @@ separate from the normal app. Node data, fixture files, generated Swift cache,
 and that identifier's UI caches are removed on exit. Pre-existing shared Cargo
 and executable caches are retained; never delete another run's cache.
 
-Current app API port 3141 and Vite port 1420 must be free. The harness refuses
-occupied ports and never stops their owners. Other listeners use ephemeral
-127.0.0.1 ports. Seatbelt accepts `localhost`, which includes local LAN
+The harness never uses 127.0.0.1:3141 or 1420, so a pilot node on 3141 keeps
+running untouched. The debug `dev-node` app build is pointed at node A's
+ephemeral API port with `BITSOV_DEV_API_BASE` (loopback `http://127.0.0.1:<port>`
+only; release builds ignore it and always use 3141), and Vite moves with
+`BITSOV_VITE_PORT` plus a matching `devUrl` in a private `--config`. Every other
+listener also uses an ephemeral 127.0.0.1 port. Cargo builds go to private
+directories inside the run dir (`CARGO_TARGET_DIR` / `APP_CARGO_TARGET_DIR`
+override that to share a cache on purpose). The harness never stops a process
+it did not start. Seatbelt accepts `localhost`, which includes local LAN
 addresses; explicit configuration and sampled socket checks constrain and
 observe the actual nodes. The checks cannot prove absence of short-lived
 connections between samples.
@@ -36,6 +42,17 @@ sends the reply via its real API; A receives it in the real window. To exercise
 the UI's fixed 5,000-msat routing ceiling, C temporarily advertises a
 6,000-msat fee. The fixture confirms that fee in B's invoice route hint before
 the UI attempts payment, then restores C's 1,000-msat fee.
+
+Steps 11-15 cover the EUT-3 beats: My front door publish with its share QR
+(the rendered SVG path must equal the app encoder's output for the link);
+Discover reading B's card, its QR, local-address consent and Knock; a PNG B
+sends that A saves from the window (with `BITSOV_UI_E2E=1` the dev build writes
+Save to `BITSOV_UI_E2E_SAVE_DIR` instead of opening the native dialog; release
+builds always open the dialog); a call offer B places through its API that
+rings A's window and that A declines (a paid hangup, no microphone needed);
+and Pay -> Direct (keysend) 21 sats. Keysend has no route hints and cannot cross
+the private C-B channel, so step 15 first opens a direct A-B channel. Each step
+reconciles channel balances against the settled payment records to the msat.
 
 Evidence goes to a private `/tmp/real-ui-e2e-evidence.*` directory. The driver
 serializes the real window DOM, and the harness attempts native captures of

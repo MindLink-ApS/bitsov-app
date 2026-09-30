@@ -71,7 +71,8 @@ mod owner_contact;
 
 /// Node API bind — konsensus ApiConfig `default_api_addr()` = 127.0.0.1:3141.
 /// Loopback ONLY (Gate G2): never point this at a non-loopback host until a
-/// confidential remote transport + delegated auth exist.
+/// confidential remote transport + delegated auth exist. Release builds always use
+/// this; only a debug `dev-node` build may move the port (`dev_node::api_base`).
 const API_BASE: &str = "http://127.0.0.1:3141/api/v1";
 
 /// Pinned onboarding contract (BitSov-bitsov `v0.3.0-rc7` / `958e399`): the funding
@@ -217,7 +218,13 @@ enum Want {
 
 impl Default for NodeState {
     fn default() -> Self {
-        Self::for_api(API_BASE)
+        // Release builds: always API_BASE; the environment is not read (see `dev_node`).
+        // A bad dev override stops here rather than fall back to a pilot on 3141.
+        let api_base = dev_node::api_base(API_BASE).unwrap_or_else(|e| {
+            eprintln!("[dev-node] {e}");
+            std::process::exit(2)
+        });
+        Self::for_api(api_base)
     }
 }
 
@@ -498,12 +505,19 @@ async fn wait_for_health(state: &NodeState) -> Result<(), String> {
     Err("node did not become healthy within 60s".into())
 }
 
-/// PIDs listening on the loopback control plane. POST /identity/restore only writes
-/// files; whoever still answers 3141 keeps the old id until that process is replaced.
-fn loopback_listener_pids() -> Vec<u32> {
+/// The port of a loopback `http://127.0.0.1:<port>/api/v1` base; `None` otherwise.
+fn loopback_api_port(api_base: &str) -> Option<u16> {
+    let port = api_base.strip_prefix("http://127.0.0.1:")?.strip_suffix("/api/v1")?;
+    port.parse().ok().filter(|p| *p != 0)
+}
+
+/// PIDs listening on the loopback control plane (3141, or the dev override's port).
+/// POST /identity/restore only writes files; whoever still answers the API port keeps
+/// the old id until that process is replaced.
+fn loopback_listener_pids(port: u16) -> Vec<u32> {
     let mut pids = Vec::new();
     if let Ok(out) = std::process::Command::new("lsof")
-        .args(["-nP", "-iTCP:3141", "-sTCP:LISTEN", "-t"])
+        .args(["-nP", &format!("-iTCP:{port}"), "-sTCP:LISTEN", "-t"])
         .output()
     {
         for line in String::from_utf8_lossy(&out.stdout).lines() {
@@ -517,10 +531,15 @@ fn loopback_listener_pids() -> Vec<u32> {
     pids
 }
 
-/// Stop the process that holds 127.0.0.1:3141 so a restart can bind the restored identity.
-fn stop_loopback_listener() {
+/// Stop the process that holds the API port so a restart can bind the restored
+/// identity. Only this app's own API base names the port: a dev run moved off 3141
+/// never signals a pilot node there.
+fn stop_loopback_listener(api_base: &str) {
+    let Some(port) = loopback_api_port(api_base) else {
+        return;
+    };
     let our_pid = std::process::id();
-    for pid in loopback_listener_pids() {
+    for pid in loopback_listener_pids(port) {
         if pid == our_pid {
             continue;
         }
@@ -583,7 +602,7 @@ async fn restart_node(
             return Ok(false);
         }
         // Wrong identity: actually restart the listener that holds 3141.
-        stop_loopback_listener();
+        stop_loopback_listener(&state.api_base);
         for _ in 0..20 {
             if !health_ok(&state).await {
                 break;
@@ -591,7 +610,7 @@ async fn restart_node(
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
         if health_ok(&state).await {
-            return Err("could not free 127.0.0.1:3141 after identity restore".into());
+            return Err(format!("could not free {} after identity restore", state.api_base));
         }
     }
 
@@ -631,7 +650,8 @@ fn refuse_external(state: &NodeState) -> Result<(), String> {
 async fn attach_external(app: &AppHandle, app_data_dir: &Path, node: dev_node::ExternalNode) {
     let state = app.state::<NodeState>();
     eprintln!(
-        "[dev-node] EXTERNAL node on 127.0.0.1:3141, data dir {} (not started or stopped by the app)",
+        "[dev-node] EXTERNAL node on {}, data dir {} (not started or stopped by the app)",
+        state.api_base,
         node.data_dir.display()
     );
     if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
@@ -647,8 +667,11 @@ async fn attach_external(app: &AppHandle, app_data_dir: &Path, node: dev_node::E
     if !health_ok(&state).await {
         return set_error(
             &state,
-            "no node answers on 127.0.0.1:3141. Start your node, then reopen BitSov; \
-             it never starts one in external mode.",
+            format!(
+                "no node answers on {}. Start your node, then reopen BitSov; \
+                 it never starts one in external mode.",
+                state.api_base
+            ),
         );
     }
     finish_auth(&state, &app_dir).await;
@@ -3853,7 +3876,17 @@ async fn do_file_save(state: &NodeState, message_id: &str) -> Result<act::FileSa
         .try_lock()
         .map_err(|_| "save already in progress".to_string())?;
     let name = act::safe_save_name(&blob.filename);
-    let path = rfd::FileDialog::new().set_file_name(&name).save_file();
+    // Release builds: always the native dialog (`dev_node::save_dir` is `Ok(None)`).
+    let path = match dev_node::save_dir()? {
+        Some(dir) => {
+            let path = dir.join(&name);
+            if path.exists() {
+                return Err(format!("{} already exists; the test save dir never overwrites", path.display()));
+            }
+            Some(path)
+        }
+        None => rfd::FileDialog::new().set_file_name(&name).save_file(),
+    };
     let Some(path) = path else {
         return Ok(act::FileSaveResult {
             saved: false,
@@ -5015,6 +5048,36 @@ mod node_start_args_tests {
             node_start_args(config, true),
             ["start", "--config", "/tmp/dev/konsensus.toml", "--owner-control"]
         );
+    }
+}
+
+#[cfg(test)]
+mod api_base_tests {
+    use super::{loopback_api_port, API_BASE};
+
+    #[test]
+    fn the_app_talks_to_3141_unless_a_dev_build_moves_it() {
+        assert_eq!(API_BASE, "http://127.0.0.1:3141/api/v1");
+        // `cargo test` builds without `dev-node`: the product base, always.
+        #[cfg(not(all(debug_assertions, feature = "dev-node")))]
+        assert_eq!(super::NodeState::default().api_base, API_BASE);
+    }
+
+    /// The restore path stops only the listener on this app's own API port.
+    #[test]
+    fn restore_signals_only_the_app_api_port() {
+        assert_eq!(loopback_api_port(API_BASE), Some(3141));
+        assert_eq!(loopback_api_port("http://127.0.0.1:47123/api/v1"), Some(47123));
+        let lan = format!("{}://192.168.1.5:3141/api/v1", "http");
+        for other in [
+            "http://127.0.0.1:0/api/v1",
+            "http://localhost:3141/api/v1",
+            "http://127.0.0.1:3141",
+            lan.as_str(),
+            "http://127.0.0.1:x/api/v1",
+        ] {
+            assert_eq!(loopback_api_port(other), None, "{other}");
+        }
     }
 }
 
