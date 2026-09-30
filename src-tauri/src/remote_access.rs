@@ -720,6 +720,7 @@ async fn tunnel(
     mut local: TcpStream,
     remote: TcpStream,
     mut noise: TransportState,
+    mut local_http: LocalHttpSanitizer,
     initial_local: Vec<u8>,
 ) -> Result<(), RemoteError> {
     let (mut remote_reader, mut remote_writer) = remote.into_split();
@@ -755,8 +756,11 @@ async fn tunnel(
                 if read == 0 {
                     return Ok(());
                 }
-                let encrypted = encode_transport(&mut noise, &local_buffer[..read])?;
-                write_frame(&mut remote_writer, &encrypted).await?;
+                let sanitized = local_http.push(&local_buffer[..read])?;
+                for chunk in sanitized.chunks(MAX_NOISE_PLAINTEXT) {
+                    let encrypted = encode_transport(&mut noise, chunk)?;
+                    write_frame(&mut remote_writer, &encrypted).await?;
+                }
             }
             frame = frames_rx.recv() => {
                 let frame = frame.ok_or_else(|| {
@@ -785,62 +789,275 @@ fn auth_token_matches(expected: &str, presented: Option<&str>) -> bool {
         == 0
 }
 
-#[cfg(test)]
-fn request_has_local_auth(prefix: &[u8], expected: &str) -> bool {
-    strip_local_auth_header(prefix, expected).is_some()
+enum LocalHttpState {
+    Headers(Vec<u8>),
+    FixedBody(usize),
+    ChunkSize(Vec<u8>),
+    ChunkData(usize),
+    ChunkDataCrlf(u8),
+    ChunkTrailers { line: Vec<u8>, total: usize },
+    Upgraded,
 }
 
-fn strip_local_auth_header(prefix: &[u8], expected: &str) -> Option<Vec<u8>> {
-    let header_end = prefix.windows(4).position(|window| window == b"\r\n\r\n")?;
-    let Ok(head) = std::str::from_utf8(&prefix[..header_end]) else {
-        return None;
-    };
-    let mut lines = head.split("\r\n");
-    let request_line = lines.next()?;
-    if request_line.is_empty() || request_line.starts_with(char::is_whitespace) {
-        return None;
-    }
-    let mut presented = None;
-    let mut sanitized = Vec::with_capacity(prefix.len());
-    sanitized.extend_from_slice(request_line.as_bytes());
-    sanitized.extend_from_slice(b"\r\n");
-    for line in lines {
-        if line.starts_with([' ', '\t']) {
-            return None;
+struct LocalHttpSanitizer {
+    expected_auth: String,
+    state: LocalHttpState,
+    authenticated_requests: usize,
+}
+
+impl LocalHttpSanitizer {
+    fn new(expected_auth: &str) -> Self {
+        Self {
+            expected_auth: expected_auth.to_owned(),
+            state: LocalHttpState::Headers(Vec::with_capacity(4096)),
+            authenticated_requests: 0,
         }
-        let (name, value) = line.split_once(':')?;
-        if name.eq_ignore_ascii_case(LOCAL_AUTH_HEADER) {
-            if presented.is_some() {
-                return None;
+    }
+
+    fn has_authenticated_request(&self) -> bool {
+        self.authenticated_requests != 0
+    }
+
+    fn rejected(message: &str) -> RemoteError {
+        RemoteError::Local(format!(
+            "remote proxy rejected unauthenticated local connection: {message}"
+        ))
+    }
+
+    fn sanitized_headers(&self, header: &[u8]) -> Result<(Vec<u8>, LocalHttpState), RemoteError> {
+        let head = header
+            .strip_suffix(b"\r\n\r\n")
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            .ok_or_else(|| Self::rejected("malformed HTTP headers"))?;
+        let mut lines = head.split("\r\n");
+        let request_line = lines
+            .next()
+            .filter(|line| {
+                !line.is_empty()
+                    && !line.starts_with(char::is_whitespace)
+                    && line.ends_with(" HTTP/1.1")
+            })
+            .ok_or_else(|| Self::rejected("malformed HTTP request line"))?;
+        let mut presented = None;
+        let mut content_length = None;
+        let mut chunked = false;
+        let mut websocket = false;
+        let mut connection_upgrade = false;
+        let mut sanitized = Vec::with_capacity(header.len());
+        sanitized.extend_from_slice(request_line.as_bytes());
+        sanitized.extend_from_slice(b"\r\n");
+
+        for line in lines {
+            if line.starts_with([' ', '\t']) {
+                return Err(Self::rejected("folded HTTP headers are not accepted"));
             }
-            presented = Some(value.trim());
-        } else {
+            let (name, value) = line
+                .split_once(':')
+                .filter(|(name, _)| !name.is_empty() && name.trim() == *name)
+                .ok_or_else(|| Self::rejected("malformed HTTP header"))?;
+            let value = value.trim();
+            if name.eq_ignore_ascii_case(LOCAL_AUTH_HEADER) {
+                if presented.replace(value).is_some() {
+                    return Err(Self::rejected("duplicate proxy credential"));
+                }
+                continue;
+            }
+            if name.eq_ignore_ascii_case("content-length") {
+                if content_length.is_some() {
+                    return Err(Self::rejected("duplicate content length"));
+                }
+                content_length = Some(
+                    value
+                        .parse::<usize>()
+                        .map_err(|_| Self::rejected("invalid content length"))?,
+                );
+            } else if name.eq_ignore_ascii_case("transfer-encoding") {
+                if chunked || !value.eq_ignore_ascii_case("chunked") {
+                    return Err(Self::rejected("unsupported transfer encoding"));
+                }
+                chunked = true;
+            } else if name.eq_ignore_ascii_case("upgrade") {
+                websocket = value.eq_ignore_ascii_case("websocket");
+            } else if name.eq_ignore_ascii_case("connection") {
+                connection_upgrade = value
+                    .split(',')
+                    .any(|token| token.trim().eq_ignore_ascii_case("upgrade"));
+            }
             sanitized.extend_from_slice(line.as_bytes());
             sanitized.extend_from_slice(b"\r\n");
         }
+        if !auth_token_matches(&self.expected_auth, presented) {
+            return Err(Self::rejected("missing or wrong proxy credential"));
+        }
+        if content_length.is_some() && chunked {
+            return Err(Self::rejected(
+                "content length and transfer encoding cannot be combined",
+            ));
+        }
+        if websocket
+            && connection_upgrade
+            && (chunked || content_length.is_some_and(|length| length != 0))
+        {
+            return Err(Self::rejected("WebSocket upgrade cannot carry a body"));
+        }
+        sanitized.extend_from_slice(b"\r\n");
+
+        let next = if websocket && connection_upgrade {
+            LocalHttpState::Upgraded
+        } else if chunked {
+            LocalHttpState::ChunkSize(Vec::new())
+        } else if let Some(length) = content_length.filter(|length| *length != 0) {
+            LocalHttpState::FixedBody(length)
+        } else {
+            LocalHttpState::Headers(Vec::with_capacity(4096))
+        };
+        Ok((sanitized, next))
     }
-    if !auth_token_matches(expected, presented) {
-        return None;
+
+    fn push(&mut self, input: &[u8]) -> Result<Vec<u8>, RemoteError> {
+        let mut output = Vec::with_capacity(input.len());
+        let mut offset = 0;
+        while offset < input.len() {
+            let state = std::mem::replace(
+                &mut self.state,
+                LocalHttpState::Headers(Vec::with_capacity(4096)),
+            );
+            match state {
+                LocalHttpState::Headers(mut header) => {
+                    while offset < input.len() && !header.ends_with(b"\r\n\r\n") {
+                        if header.len() >= MAX_LOCAL_REQUEST_PREFIX {
+                            return Err(Self::rejected("HTTP headers exceed the limit"));
+                        }
+                        header.push(input[offset]);
+                        offset += 1;
+                    }
+                    if header.ends_with(b"\r\n\r\n") {
+                        let (sanitized, next) = self.sanitized_headers(&header)?;
+                        output.extend_from_slice(&sanitized);
+                        self.authenticated_requests += 1;
+                        self.state = next;
+                    } else {
+                        self.state = LocalHttpState::Headers(header);
+                    }
+                }
+                LocalHttpState::FixedBody(mut remaining) => {
+                    let take = remaining.min(input.len() - offset);
+                    output.extend_from_slice(&input[offset..offset + take]);
+                    offset += take;
+                    remaining -= take;
+                    self.state = if remaining == 0 {
+                        LocalHttpState::Headers(Vec::with_capacity(4096))
+                    } else {
+                        LocalHttpState::FixedBody(remaining)
+                    };
+                }
+                LocalHttpState::ChunkSize(mut line) => {
+                    while offset < input.len() && !line.ends_with(b"\r\n") {
+                        if line.len() >= 1024 {
+                            return Err(Self::rejected("chunk size line exceeds the limit"));
+                        }
+                        let byte = input[offset];
+                        line.push(byte);
+                        output.push(byte);
+                        offset += 1;
+                    }
+                    if line.ends_with(b"\r\n") {
+                        let size = line[..line.len() - 2]
+                            .split(|byte| *byte == b';')
+                            .next()
+                            .filter(|size| !size.is_empty())
+                            .and_then(|size| std::str::from_utf8(size).ok())
+                            .and_then(|size| usize::from_str_radix(size, 16).ok())
+                            .ok_or_else(|| Self::rejected("invalid chunk size"))?;
+                        self.state = if size == 0 {
+                            LocalHttpState::ChunkTrailers {
+                                line: Vec::new(),
+                                total: 0,
+                            }
+                        } else {
+                            LocalHttpState::ChunkData(size)
+                        };
+                    } else {
+                        self.state = LocalHttpState::ChunkSize(line);
+                    }
+                }
+                LocalHttpState::ChunkData(mut remaining) => {
+                    let take = remaining.min(input.len() - offset);
+                    output.extend_from_slice(&input[offset..offset + take]);
+                    offset += take;
+                    remaining -= take;
+                    self.state = if remaining == 0 {
+                        LocalHttpState::ChunkDataCrlf(0)
+                    } else {
+                        LocalHttpState::ChunkData(remaining)
+                    };
+                }
+                LocalHttpState::ChunkDataCrlf(mut seen) => {
+                    while offset < input.len() && seen < 2 {
+                        let expected = if seen == 0 { b'\r' } else { b'\n' };
+                        if input[offset] != expected {
+                            return Err(Self::rejected("invalid chunk delimiter"));
+                        }
+                        output.push(input[offset]);
+                        offset += 1;
+                        seen += 1;
+                    }
+                    self.state = if seen == 2 {
+                        LocalHttpState::ChunkSize(Vec::new())
+                    } else {
+                        LocalHttpState::ChunkDataCrlf(seen)
+                    };
+                }
+                LocalHttpState::ChunkTrailers {
+                    mut line,
+                    mut total,
+                } => {
+                    while offset < input.len() && !line.ends_with(b"\r\n") {
+                        if total >= MAX_LOCAL_REQUEST_PREFIX {
+                            return Err(Self::rejected("chunk trailers exceed the limit"));
+                        }
+                        let byte = input[offset];
+                        line.push(byte);
+                        output.push(byte);
+                        offset += 1;
+                        total += 1;
+                    }
+                    if line == b"\r\n" {
+                        self.state = LocalHttpState::Headers(Vec::with_capacity(4096));
+                    } else if line.ends_with(b"\r\n") {
+                        self.state = LocalHttpState::ChunkTrailers {
+                            line: Vec::new(),
+                            total,
+                        };
+                    } else {
+                        self.state = LocalHttpState::ChunkTrailers { line, total };
+                    }
+                }
+                LocalHttpState::Upgraded => {
+                    output.extend_from_slice(&input[offset..]);
+                    offset = input.len();
+                    self.state = LocalHttpState::Upgraded;
+                }
+            }
+        }
+        Ok(output)
     }
-    sanitized.extend_from_slice(b"\r\n");
-    sanitized.extend_from_slice(&prefix[header_end + 4..]);
-    Some(sanitized)
+}
+
+#[cfg(test)]
+fn request_has_local_auth(prefix: &[u8], expected: &str) -> bool {
+    let mut sanitizer = LocalHttpSanitizer::new(expected);
+    sanitizer.push(prefix).is_ok() && sanitizer.has_authenticated_request()
 }
 
 async fn authenticated_prefix(
     local: &mut TcpStream,
     expected: &str,
-) -> Result<Vec<u8>, RemoteError> {
+) -> Result<(LocalHttpSanitizer, Vec<u8>), RemoteError> {
     let read = async {
-        let mut prefix = Vec::with_capacity(4096);
+        let mut sanitizer = LocalHttpSanitizer::new(expected);
         loop {
-            if prefix.len() >= MAX_LOCAL_REQUEST_PREFIX {
-                return Err(RemoteError::Local(
-                    "remote proxy request headers exceed the limit".into(),
-                ));
-            }
-            let remaining = MAX_LOCAL_REQUEST_PREFIX - prefix.len();
-            let mut buffer = vec![0u8; remaining.min(4096)];
+            let mut buffer = vec![0u8; 4096];
             let count = local.read(&mut buffer).await.map_err(|error| {
                 RemoteError::Local(format!("cannot read local request: {error}"))
             })?;
@@ -849,13 +1066,9 @@ async fn authenticated_prefix(
                     "local request closed before authentication".into(),
                 ));
             }
-            prefix.extend_from_slice(&buffer[..count]);
-            if prefix.windows(4).any(|window| window == b"\r\n\r\n") {
-                return strip_local_auth_header(&prefix, expected).ok_or_else(|| {
-                    RemoteError::Local(
-                        "remote proxy rejected unauthenticated local connection".into(),
-                    )
-                });
+            let sanitized = sanitizer.push(&buffer[..count])?;
+            if sanitizer.has_authenticated_request() {
+                return Ok((sanitizer, sanitized));
             }
         }
     };
@@ -929,15 +1142,70 @@ fn finalize_authenticated_pairing(
     Ok(())
 }
 
+/// Complete the pinned Noise authentication before any paired HTTP token flow.
+///
+/// A fresh import has no pairing record yet, so `establish_remote` cannot be
+/// the operation that opens the first proxy connection. This direct bootstrap
+/// consumes the one-time code, durably saves the returned client record, and
+/// returns the descriptor with its code removed.
+pub async fn authenticate_pinned_transport_and_save_record(
+    app_data_dir: &Path,
+    descriptor: RemoteDescriptor,
+    key: &ClientKey,
+    client_name: &str,
+    pairing_store: &Path,
+) -> Result<RemoteDescriptor, RemoteError> {
+    let snapshot = descriptor.clone();
+    let mut remote = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(snapshot.endpoint()))
+        .await
+        .map_err(|_| RemoteError::HandshakeUnavailable)?
+        .map_err(|_| RemoteError::HandshakeUnavailable)?;
+    let mut noise = tokio::time::timeout(
+        CONNECT_TIMEOUT,
+        pinned_handshake(&mut remote, &snapshot, key),
+    )
+    .await
+    .map_err(|_| RemoteError::HandshakeUnavailable)??;
+    let (client_id, scopes) = tokio::time::timeout(
+        CONNECT_TIMEOUT,
+        encrypted_auth(&mut remote, &mut noise, &snapshot, key, client_name),
+    )
+    .await
+    .map_err(|_| RemoteError::HandshakeUnavailable)??;
+
+    let descriptor = Mutex::new(descriptor);
+    finalize_authenticated_pairing(
+        &descriptor,
+        &config_path(app_data_dir),
+        pairing_store,
+        key,
+        client_id,
+        scopes,
+    )?;
+    descriptor
+        .into_inner()
+        .map_err(|_| RemoteError::Local("remote descriptor lock is poisoned".into()))
+}
+
+struct AuthenticatedLocal {
+    stream: TcpStream,
+    http: LocalHttpSanitizer,
+    initial: Vec<u8>,
+}
+
 async fn serve_connection(
-    mut local: TcpStream,
-    initial_local: Vec<u8>,
+    local: AuthenticatedLocal,
     descriptor: Arc<Mutex<RemoteDescriptor>>,
     config_path: PathBuf,
     key: Arc<ClientKey>,
     client_name: Arc<str>,
     pairing_store: PathBuf,
 ) -> Result<(), RemoteError> {
+    let AuthenticatedLocal {
+        stream: mut local,
+        http: local_http,
+        initial: initial_local,
+    } = local;
     let snapshot = descriptor
         .lock()
         .map_err(|_| RemoteError::Local("remote descriptor lock is poisoned".into()))?
@@ -1012,7 +1280,7 @@ async fn serve_connection(
         client_id,
         scopes,
     )?;
-    tunnel(local, remote, noise, initial_local).await
+    tunnel(local, remote, noise, local_http, initial_local).await
 }
 
 /// Process-local listener. Loopback alone is not process isolation, so every
@@ -1144,7 +1412,7 @@ pub async fn start_proxy(
                         let tunnel_permits = tunnel_permits.clone();
                         let mut connection_stopped = stopped.clone();
                         tokio::spawn(async move {
-                            let initial_local =
+                            let (local_http, initial_local) =
                                 match authenticated_prefix(&mut stream, &local_auth).await {
                                     Ok(prefix) => prefix,
                                     Err(error) => {
@@ -1179,8 +1447,11 @@ pub async fn start_proxy(
                             tokio::select! {
                                 _ = connection_stopped.changed() => {}
                                 result = serve_connection(
-                                    stream,
-                                    initial_local,
+                                    AuthenticatedLocal {
+                                        stream,
+                                        http: local_http,
+                                        initial: initial_local,
+                                    },
                                     descriptor,
                                     config_path,
                                     key,
@@ -1577,7 +1848,14 @@ mod tests {
         let (mut remote_node, _) = remote_listener.accept().await.unwrap();
 
         let (app_noise, mut node_noise) = transport_pair();
-        let bridge = tokio::spawn(tunnel(local_proxy, remote_proxy, app_noise, Vec::new()));
+        let local_auth = "fragment-auth";
+        let bridge = tokio::spawn(tunnel(
+            local_proxy,
+            remote_proxy,
+            app_noise,
+            LocalHttpSanitizer::new(local_auth),
+            Vec::new(),
+        ));
         let mut local_client = local_client;
 
         let reply = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
@@ -1591,7 +1869,7 @@ mod tests {
         // Give the framed reader time to consume the fragment. The old
         // select-owned read_frame lost these bytes when this local read won.
         tokio::time::sleep(Duration::from_millis(50)).await;
-        let outgoing = b"GET /api/v1/health HTTP/1.1\r\n\r\n";
+        let outgoing = b"GET /api/v1/health HTTP/1.1\r\nHost: localhost\r\nX-BitSov-Proxy-Auth: fragment-auth\r\n\r\n";
         local_client.write_all(outgoing).await.unwrap();
 
         let outgoing_record = tokio::time::timeout(
@@ -1603,7 +1881,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             decode_transport(&mut node_noise, &outgoing_record, MAX_NOISE_PLAINTEXT).unwrap(),
-            outgoing
+            b"GET /api/v1/health HTTP/1.1\r\nHost: localhost\r\n\r\n"
         );
 
         remote_node.write_all(&outer[split_at..]).await.unwrap();
@@ -1635,6 +1913,55 @@ mod tests {
         fragmented_reply_survives_outgoing_local_traffic(7).await;
     }
 
+    #[tokio::test]
+    async fn tunnel_strips_proxy_auth_from_two_keep_alive_requests() {
+        let local_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut local_client = TcpStream::connect(local_listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (local_proxy, _) = local_listener.accept().await.unwrap();
+        let remote_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let remote_proxy = TcpStream::connect(remote_listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (mut remote_node, _) = remote_listener.accept().await.unwrap();
+        let (app_noise, mut node_noise) = transport_pair();
+        let secret = "keep-alive-secret";
+        let bridge = tokio::spawn(tunnel(
+            local_proxy,
+            remote_proxy,
+            app_noise,
+            LocalHttpSanitizer::new(secret),
+            Vec::new(),
+        ));
+
+        for path in ["/first", "/second"] {
+            let request = format!(
+                "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n{LOCAL_AUTH_HEADER}: {secret}\r\n\r\n"
+            );
+            local_client.write_all(request.as_bytes()).await.unwrap();
+            let frame = tokio::time::timeout(
+                Duration::from_secs(1),
+                read_frame(&mut remote_node, MAX_TRANSPORT_FRAME),
+            )
+            .await
+            .expect("sanitized keep-alive request must reach the remote")
+            .unwrap();
+            let plaintext = decode_transport(&mut node_noise, &frame, MAX_NOISE_PLAINTEXT).unwrap();
+            let text = std::str::from_utf8(&plaintext).unwrap();
+            assert!(text.starts_with(&format!("GET {path} HTTP/1.1\r\n")));
+            assert!(!text.to_ascii_lowercase().contains(LOCAL_AUTH_HEADER));
+            assert!(!text.contains(secret));
+        }
+
+        local_client.shutdown().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), bridge)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
     #[test]
     fn local_proxy_auth_predicate_rejects_missing_duplicate_and_wrong_tokens() {
         let request = |headers: &str| {
@@ -1658,7 +1985,8 @@ mod tests {
     #[test]
     fn local_proxy_auth_is_stripped_before_tunneling() {
         let request = b"POST /api/v1/messages HTTP/1.1\r\nHost: localhost\r\nX-BitSov-Proxy-Auth: abc123\r\nContent-Length: 4\r\n\r\nbody";
-        let sanitized = strip_local_auth_header(request, "abc123").unwrap();
+        let mut sanitizer = LocalHttpSanitizer::new("abc123");
+        let sanitized = sanitizer.push(request).unwrap();
         assert_eq!(
             sanitized,
             b"POST /api/v1/messages HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\n\r\nbody"
@@ -1666,6 +1994,48 @@ mod tests {
         assert!(!sanitized
             .windows(LOCAL_AUTH_HEADER.len())
             .any(|window| window.eq_ignore_ascii_case(LOCAL_AUTH_HEADER.as_bytes())));
+    }
+
+    #[test]
+    fn pipelined_requests_each_require_and_strip_the_proxy_credential() {
+        let mut sanitizer = LocalHttpSanitizer::new("abc123");
+        let requests = b"GET /one HTTP/1.1\r\nHost: localhost\r\nX-BitSov-Proxy-Auth: abc123\r\n\r\nGET /two HTTP/1.1\r\nHost: localhost\r\nx-bitsov-proxy-auth: abc123\r\n\r\n";
+        let sanitized = sanitizer.push(requests).unwrap();
+        assert_eq!(
+            sanitized,
+            b"GET /one HTTP/1.1\r\nHost: localhost\r\n\r\nGET /two HTTP/1.1\r\nHost: localhost\r\n\r\n"
+        );
+        assert_eq!(sanitizer.authenticated_requests, 2);
+
+        let mut missing_second = LocalHttpSanitizer::new("abc123");
+        assert!(missing_second
+            .push(b"GET /one HTTP/1.1\r\nX-BitSov-Proxy-Auth: abc123\r\n\r\nGET /two HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .is_err());
+    }
+
+    #[test]
+    fn websocket_upgrade_is_sanitized_then_frames_are_forwarded_raw() {
+        let mut sanitizer = LocalHttpSanitizer::new("abc123");
+        let request = b"GET /api/v1/ws HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nX-BitSov-Proxy-Auth: abc123\r\n\r\n";
+        let sanitized = sanitizer.push(request).unwrap();
+        assert_eq!(
+            sanitized,
+            b"GET /api/v1/ws HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n"
+        );
+        let frame = [0x81, 0x02, b'o', b'k'];
+        assert_eq!(sanitizer.push(&frame).unwrap(), frame);
+    }
+
+    #[test]
+    fn chunked_body_boundary_preserves_the_next_authenticated_request() {
+        let mut sanitizer = LocalHttpSanitizer::new("abc123");
+        let requests = b"POST /one HTTP/1.1\r\nTransfer-Encoding: chunked\r\nX-BitSov-Proxy-Auth: abc123\r\n\r\n4\r\nbody\r\n0\r\n\r\nGET /two HTTP/1.1\r\nX-BitSov-Proxy-Auth: abc123\r\n\r\n";
+        let sanitized = sanitizer.push(requests).unwrap();
+        assert_eq!(
+            sanitized,
+            b"POST /one HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nbody\r\n0\r\n\r\nGET /two HTTP/1.1\r\n\r\n"
+        );
+        assert_eq!(sanitizer.authenticated_requests, 2);
     }
 
     #[test]
@@ -1692,6 +2062,93 @@ mod tests {
         let message = read_frame(&mut stream, MAX_HANDSHAKE_FRAME).await?;
         noise.read_message(&message, &mut output).unwrap();
         Ok(())
+    }
+
+    async fn pairing_responder(
+        listener: TcpListener,
+        secret: [u8; 32],
+    ) -> Result<RemoteAuthRequest, RemoteError> {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let params = NOISE_PROTOCOL.parse().unwrap();
+        let mut noise = Builder::new(params)
+            .local_private_key(&secret)
+            .build_responder()
+            .unwrap();
+        let mut output = vec![0u8; MAX_HANDSHAKE_FRAME];
+        let message = read_frame(&mut stream, MAX_HANDSHAKE_FRAME).await?;
+        noise.read_message(&message, &mut output).unwrap();
+        let length = noise.write_message(&[], &mut output).unwrap();
+        write_frame(&mut stream, &output[..length]).await?;
+        let message = read_frame(&mut stream, MAX_HANDSHAKE_FRAME).await?;
+        noise.read_message(&message, &mut output).unwrap();
+        let mut noise = noise.into_transport_mode().unwrap();
+
+        let encrypted = read_frame(&mut stream, MAX_TRANSPORT_FRAME).await?;
+        let plaintext = decode_transport(&mut noise, &encrypted, MAX_AUTH_PLAINTEXT)?;
+        let request = serde_json::from_slice::<RemoteAuthRequest>(&plaintext).unwrap();
+        let response = serde_json::to_vec(&RemoteAuthResponse::Ok {
+            v: 1,
+            client_id: "0123456789abcdef0123456789abcdef".into(),
+            scopes: vec!["read".into(), "receive".into()],
+        })
+        .unwrap();
+        let encrypted = encode_transport(&mut noise, &response)?;
+        write_frame(&mut stream, &encrypted).await?;
+        Ok(request)
+    }
+
+    #[tokio::test]
+    async fn fresh_import_bootstraps_pinned_noise_before_remote_establish() {
+        let app_dir = tempfile::tempdir().unwrap();
+        let pairing_store = tempfile::tempdir().unwrap();
+        let key = ClientKey::load_or_create(pairing_store.path()).unwrap();
+        let node = SigningKey::from_bytes(&[27u8; 32]);
+        let responder_secret = [28u8; 32];
+        let responder_public =
+            X25519PublicKey::from(&StaticSecret::from(responder_secret)).to_bytes();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let descriptor = parse_pairing_link(&signed_link(
+            listener.local_addr().unwrap().to_string(),
+            &node,
+            responder_public,
+            &test_code(11),
+        ))
+        .unwrap();
+        persist_at(&config_path(app_dir.path()), &descriptor).unwrap();
+        assert!(!pairing_store.path().join(pairing::RECORD_FILE).exists());
+        let server = tokio::spawn(pairing_responder(listener, responder_secret));
+
+        let descriptor = authenticate_pinned_transport_and_save_record(
+            app_dir.path(),
+            descriptor,
+            &key,
+            "BitSov test",
+            pairing_store.path(),
+        )
+        .await
+        .unwrap();
+        let request = server.await.unwrap().unwrap();
+        assert!(request.code.is_some());
+        assert!(!descriptor.has_code());
+        assert!(pairing_store.path().join(pairing::RECORD_FILE).exists());
+        assert!(!std::fs::read_to_string(config_path(app_dir.path()))
+            .unwrap()
+            .contains("\"code\""));
+
+        let dead = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead_base = format!("http://{}/{}", dead.local_addr().unwrap(), "api/v1");
+        drop(dead);
+        let client = pairing::PairingClient::new(reqwest::Client::new(), dead_base);
+        let error = pairing::establish_remote(&client, &key, pairing_store.path())
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            pairing::PairError::Transport {
+                step: "/pair/challenge",
+                ..
+            }
+        ));
     }
 
     #[tokio::test]

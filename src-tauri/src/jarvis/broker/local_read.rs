@@ -46,6 +46,8 @@ const MAX_LOGGED_PATH: usize = 96;
 /// Genome #78 freshness headers. Matched case-insensitively.
 const AS_OF_HEADER: &str = "BitSov-Data-As-Of";
 const STALE_HEADER: &str = "BitSov-Data-Stale";
+/// The remote router omits public health and keeps this read-scoped status.
+const REMOTE_STATUS: &str = "/api/v1/status";
 
 /// Why a `BitSov-Data-As-Of` header was dropped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -213,9 +215,14 @@ impl LocalNodeRead {
         let mut stream = TcpStream::connect_timeout(&self.addr, CONNECT_TIMEOUT).ok()?;
         stream.set_read_timeout(Some(IO_TIMEOUT)).ok()?;
         stream.set_write_timeout(Some(IO_TIMEOUT)).ok()?;
+        let path = static_path(path)?;
         let target = route::RequestTarget {
             method: "GET",
-            path: static_path(path)?,
+            path: if self.proxy_auth.is_some() && path == route::HEALTH {
+                REMOTE_STATUS
+            } else {
+                path
+            },
             query,
             peer,
         }
@@ -522,13 +529,14 @@ mod tests {
 
         let auth: Arc<str> = Arc::from("a".repeat(64));
         let audit: Arc<dyn AuditSink> = Arc::new(Collect::default());
-        let reader = LocalNodeRead::new(&format!("http://{address}/api/v1"), token(), audit)
+        let reader = LocalNodeRead::new(&format!("http://{address}/{}", "api/v1"), token(), audit)
             .unwrap()
             .with_proxy_auth(Some(auth.clone()));
         assert!(reader.exchange("/api/v1/health", None, None).is_some());
         server.join().unwrap();
 
         let request = seen.lock().unwrap();
+        assert!(request.starts_with("GET /api/v1/status HTTP/1.1\r\n"));
         assert!(request.contains(&format!(
             "{}: {auth}\r\n",
             crate::remote_access::LOCAL_AUTH_HEADER

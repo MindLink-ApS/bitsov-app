@@ -754,6 +754,18 @@ async fn attach_remote(
     *state.expected_remote_node_id.lock().unwrap() = Some(descriptor.node_id().to_string());
     state.remote_mode.store(true, Ordering::SeqCst);
 
+    let descriptor = match remote_access::authenticate_pinned_transport_and_save_record(
+        app_data_dir,
+        descriptor,
+        &key,
+        PAIRING_CLIENT_NAME,
+        &store,
+    )
+    .await
+    {
+        Ok(descriptor) => descriptor,
+        Err(error) => return set_error(&state, error.to_string()),
+    };
     let proxy = match remote_access::start_proxy(
         &state.api_base,
         app_data_dir,
