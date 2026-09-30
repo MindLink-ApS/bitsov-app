@@ -606,6 +606,8 @@ export function ControlCenter(props: Props) {
   const [meetingStreams, setMeetingStreams] = createSignal<{ local: MediaStream | null; remote: Record<string, MediaStream> }>({ local: null, remote: {} });
   const [meetingPlan, setMeetingPlan] = createSignal<string[] | null>(null);
   const meetingOn = () => meetingView().phase === 'invited' || meetingView().phase === 'active';
+  // Our own node takes meeting legs (genome `call_meeting_v1` on /status).
+  const nodeMeets = () => overview()?.capabilities?.includes('call_meeting_v1') === true;
   const meetings = createMeetingEngine({
     quote: (peer) => act(() => source.callQuote(peer)),
     signal: async (peer, kind, plaintext, maxMsat) => {
@@ -617,6 +619,7 @@ export function ControlCenter(props: Props) {
     getUserMedia: (c) => navigator.mediaDevices.getUserMedia(c),
     peerConnection: (config) => new RTCPeerConnection(config),
     ownId: () => ownId(),
+    canMeet: (peer) => nodeMeets() && peerById().get(peer.toLowerCase())?.meetings === true,
     onView: setMeetingView,
     onStreams: (local, remote) => setMeetingStreams({ local, remote }),
     iceServers: () => stunServer(stunPref()),
@@ -632,7 +635,12 @@ export function ControlCenter(props: Props) {
     callQuote: (peer) => act(() => source.callQuote(peer)),
     placeCall: (peer, media, quote) => void calls.place(peer, media, quote),
     callActive: () => !['idle', 'ended'].includes(callView().phase) || meetingOn(),
-    planMeeting: (peer) => { if (!meetingOn()) setMeetingPlan([peer.toLowerCase()]); },
+    // Opens the planner; the contact is pre-picked only if their node takes meetings.
+    planMeeting: (peer) => {
+      if (meetingOn()) return;
+      const id = peer.toLowerCase();
+      setMeetingPlan(nodeMeets() && peerById().get(id)?.meetings === true ? [id] : []);
+    },
     voiceUrl: (messageId) => {
       let url = voiceUrls.get(messageId);
       if (!url) {
@@ -1083,7 +1091,8 @@ export function ControlCenter(props: Props) {
         view={meetingView()}
         streams={meetingStreams()}
         plan={meetingPlan()}
-        contacts={peers().map((p) => ({ id: p.node_id.toLowerCase(), name: peerName(p, p.node_id) }))}
+        contacts={peers().map((p) => ({ id: p.node_id.toLowerCase(), name: peerName(p, p.node_id), meetings: p.meetings === true, connected: p.connected }))}
+        nodeMeets={nodeMeets()}
         ownId={ownId()}
         blocked={moneyBlocked()}
         nameOf={nameOf}
@@ -1750,7 +1759,9 @@ function MeetingPanel(props: {
   view: MeetingView;
   streams: { local: MediaStream | null; remote: Record<string, MediaStream> };
   plan: string[] | null;
-  contacts: { id: string; name: string }[];
+  contacts: { id: string; name: string; meetings: boolean; connected: boolean }[];
+  /** Our own node takes meeting legs. */
+  nodeMeets: boolean;
   ownId: string;
   /** Money is not ready: nobody can be invited. */
   blocked: boolean;
@@ -1783,12 +1794,15 @@ function MeetingPanel(props: {
   }));
   const shown = (ids: string[]): ShownQuotes => Object.fromEntries(ids.map((id) => [id, quotes[id] ?? null]));
   const priced = (id: string) => { const q = quotes[id]; return !!q && callCost(q) !== null; };
-  const pickable = (id: string) => !props.blocked && priced(id);
+  const contact = (id: string) => props.contacts.find((c) => c.id === id);
+  // Only a connected contact whose node advertises meetings is ever rung with a leg.
+  const meets = (id: string) => props.nodeMeets && contact(id)?.meetings === true;
+  const pickable = (id: string) => !props.blocked && meets(id) && priced(id);
   const toggle = (id: string) => {
     const plan = props.plan ?? [];
     props.setPlan(plan.includes(id) ? plan.filter((x) => x !== id) : plan.length < MAX_PARTICIPANTS - 1 ? [...plan, id] : plan);
   };
-  const planCost = () => (props.plan?.length && !props.blocked ? inviteCost(props.plan.map((id) => quotes[id] ?? null)) : null);
+  const planCost = () => (props.plan?.length && !props.blocked && props.plan.every(meets) ? inviteCost(props.plan.map((id) => quotes[id] ?? null)) : null);
   const joinPrice = () => joinCost(props.view.roster, props.ownId.toLowerCase(), shown(props.view.roster));
   const declinePrice = () => declineCost(props.view, shown(props.view.legs.map((l) => l.peer)));
   const price = (m: number | null) => (m === null ? '' : ` · ${sats(m)} ${satUnit(m)}`);
@@ -1810,12 +1824,17 @@ function MeetingPanel(props: {
                       onChange={() => toggle(c.id)} />
                     <span classList={{ muted: !pickable(c.id) }}>{c.name}</span>
                   </label>
-                  <Show when={quotes[c.id] === undefined}><span class="hint" data-meeting-pick-note={c.id}> reading price…</span></Show>
-                  <Show when={quotes[c.id] !== undefined && !priced(c.id)}><span class="hint" data-meeting-pick-note={c.id}> does not take calls</span></Show>
+                  <Switch>
+                    <Match when={props.nodeMeets && !c.connected}><span class="hint" data-meeting-pick-note={c.id}> not connected</span></Match>
+                    <Match when={props.nodeMeets && !c.meetings}><span class="hint" data-meeting-pick-note={c.id}> needs update</span></Match>
+                    <Match when={quotes[c.id] === undefined}><span class="hint" data-meeting-pick-note={c.id}> reading price…</span></Match>
+                    <Match when={!priced(c.id)}><span class="hint" data-meeting-pick-note={c.id}> does not take calls</span></Match>
+                  </Switch>
                 </li>
               )}
             </For>
           </ul>
+          <Show when={!props.nodeMeets}><p class="hint" data-meeting-node-update>Your node needs an update before it can hold meetings.</p></Show>
           <Show when={props.blocked}><p class="hint" data-meeting-blocked>Payments are not ready yet, so nobody can be invited.</p></Show>
           <p class="hint" data-meeting-note>You ring each person you pick (their call price, once each). Picked contacts who are not each other’s contacts will not hear each other. Media goes directly between you; it is not billed.</p>
           <div class="call-actions">

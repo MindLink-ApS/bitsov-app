@@ -60,6 +60,7 @@ window.engine = Meeting.createMeetingEngine({
   getUserMedia: async () => synthetic(),
   peerConnection: (cfg) => { const pc = new RTCPeerConnection(cfg); window.pcs.push(pc); return pc; },
   ownId: () => OWN,
+  canMeet: () => true,
   onView: (v) => { window.view = v; },
   onStreams: () => {},
   iceServers: () => [],

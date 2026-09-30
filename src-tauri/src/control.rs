@@ -39,6 +39,29 @@ pub struct Peer {
     pub connected: bool,
     #[serde(default)]
     pub fingerprint: Option<String>,
+    /// The peer's federation-Hello capabilities as the node lists them (only
+    /// while connected). Read here to derive `meetings`; never forwarded.
+    #[serde(default, skip_serializing)]
+    pub capabilities: Option<Vec<String>>,
+    /// Their node takes mesh-meeting legs: connected now and advertising
+    /// `call_meeting_v1`. Derived by [`with_meeting_support`], never read from the node.
+    #[serde(default, skip_deserializing)]
+    pub meetings: bool,
+}
+
+/// How a connected peer's node lists the meeting advert (genome
+/// `Capability::Custom("call_meeting_v1")`, rendered with `{:?}`).
+pub const PEER_MEETING_CAPABILITY: &str = r#"Custom("call_meeting_v1")"#;
+
+/// Mark each peer whose node is known to take meeting legs. A node without
+/// the advert (older, or not connected so we cannot tell) would withdraw a
+/// paid meeting leg, so it is never offered one.
+pub fn with_meeting_support(mut peers: Vec<Peer>) -> Vec<Peer> {
+    for p in &mut peers {
+        p.meetings = p.connected
+            && p.capabilities.as_ref().is_some_and(|c| c.iter().any(|x| x == PEER_MEETING_CAPABILITY));
+    }
+    peers
 }
 
 /// `GET /rooms` — `RoomResponse`. `metadata` is not forwarded.
@@ -163,7 +186,7 @@ pub struct NodeStatusResponse {
 // signatures are not in these node shapes and are not accepted if they appear.
 
 /// Capabilities the renderer may act on. Anything else the node lists is dropped.
-pub const KNOWN_CAPABILITIES: &[&str] = &["energy_v1", "membrane_v1"];
+pub const KNOWN_CAPABILITIES: &[&str] = &["energy_v1", "membrane_v1", "call_meeting_v1"];
 
 pub fn known_capabilities(listed: &[String]) -> Vec<String> {
     KNOWN_CAPABILITIES
@@ -1054,6 +1077,24 @@ mod tests {
             r#"{"type":"membrane","seq":2,"at":2,"direction":"inbound","verdict":"refused","code":"unpaid","required_msat":20000,"paid_msat":0}"#,
         ) else { panic!() };
         assert_eq!((event.counterparty, event.required_msat), (None, Some(20000)));
+    }
+
+    #[test]
+    fn a_peer_takes_meetings_only_when_connected_with_the_exact_advert() {
+        let peers: Vec<Peer> = serde_json::from_str(r#"[
+            {"node_id":"a","connected":true,"capabilities":["X3dh","Custom(\"call_meeting_v1\")"]},
+            {"node_id":"b","connected":true,"capabilities":["X3dh"]},
+            {"node_id":"c","connected":false,"capabilities":["Custom(\"call_meeting_v1\")"]},
+            {"node_id":"d","connected":true},
+            {"node_id":"e","connected":true,"capabilities":["Custom(\"call_meeting_v1x\")","call_meeting_v1"]},
+            {"node_id":"f","connected":true,"meetings":true}
+        ]"#).unwrap();
+        let peers = with_meeting_support(peers);
+        assert_eq!(peers.iter().map(|p| p.meetings).collect::<Vec<_>>(), [true, false, false, false, false, false]);
+        // The renderer sees the derived flag, never the raw capability list.
+        let out = serde_json::to_value(&peers[0]).unwrap();
+        assert_eq!(out["meetings"], true);
+        assert!(out.get("capabilities").is_none(), "{out}");
     }
 
     #[test]

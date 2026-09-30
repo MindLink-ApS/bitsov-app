@@ -96,6 +96,7 @@ export function declineCost(view: MeetingView, quotes: Record<string, CallQuote 
 /** Shown quotes, by lowercase node id. */
 export type ShownQuotes = Record<string, CallQuote | null>;
 
+const NEEDS_UPDATE = 'Their node needs an update for meetings. Nothing was paid.';
 const RAISED = 'Their call price went up since it was shown. Nothing was paid; start again to see the new price.';
 
 /**
@@ -130,6 +131,12 @@ export const MEETING_IDLE: MeetingView = {
 
 export type MeetingDeps = Pick<CallDeps, 'quote' | 'signal' | 'getUserMedia' | 'peerConnection' | 'newCallId' | 'iceServers'> & {
   ownId: () => string;
+  /**
+   * Both nodes take meeting legs (their node advertises `call_meeting_v1`
+   * and so does ours). A node without it withdraws a meeting leg after it
+   * was paid, so a leg to anyone else is refused here, before any quote.
+   */
+  canMeet: (peer: string) => boolean;
   onView: (v: MeetingView) => void;
   onStreams: (local: MediaStream | null, remote: Record<string, MediaStream>) => void;
   /** A 1:1 call holds the mic: a meeting invite rings out. */
@@ -321,6 +328,11 @@ export function createMeetingEngine(deps: MeetingDeps) {
   /** Ring a later participant: one offer at their call price, with the roster. */
   const placeLeg = (l: Leg, e: number) => serial(async () => {
     if (e !== epoch || l.state !== 'waiting') return;
+    if (!deps.canMeet(l.peer)) {
+      closeLeg(l, 'nolink', NEEDS_UPDATE);
+      settle();
+      return;
+    }
     l.state = 'placing';
     l.error = null;
     publish();

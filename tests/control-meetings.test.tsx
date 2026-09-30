@@ -70,6 +70,7 @@ function engine(over: Partial<MeetingDeps> = {}) {
     getUserMedia: async (c) => { const s = stream(!!c.video); captures.push(s); return s; },
     peerConnection: (config) => new FakePc(config) as unknown as RTCPeerConnection,
     ownId: () => OWN,
+    canMeet: () => true,
     onView: (v) => views.push(v),
     onStreams: () => {},
     newCallId: () => (++ids).toString(16).padStart(32, '0'),
@@ -366,6 +367,30 @@ describe('meeting engine: review #81 fixes', () => {
   });
 });
 
+describe('meeting engine: node capability gate (#138 review N1)', () => {
+  beforeEach(() => { FakePc.made = []; });
+
+  it('never rings a peer whose node does not advertise meetings: no quote, no payment, "needs update"', async () => {
+    const asked: string[] = [];
+    const { e, sent, last } = engine({
+      canMeet: (peer) => peer !== B,
+      quote: async (peer) => { asked.push(peer); return { ok: true, value: QUOTE }; },
+    });
+    await e.invite([A, B], 'audio', SHOWN);
+    expect(sent.map((s) => [s.peer, s.kind])).toEqual([[A, 400]]);
+    expect(asked).toEqual([A]);
+    expect(legOf(last(), B)).toMatchObject({ state: 'nolink', error: expect.stringMatching(/needs an update for meetings\. Nothing was paid/) });
+  });
+
+  it('on join, a later participant without the advert gets no leg; the earlier legs are still answered', async () => {
+    const { e, sent, last } = engine({ canMeet: (peer) => peer !== C });
+    await e.receive(offer(A, cid(0xa1), [A, OWN, C]), OWN);
+    await e.join(SHOWN);
+    expect(sent.map((s) => [s.peer, s.kind])).toEqual([[A, 401]]);
+    expect(legOf(last(), C).state).toBe('nolink');
+  });
+});
+
 // ---- the shell: planner price, invite, incoming invite with a join price ----
 
 const paired: PairingView = { state: 'paired', scopes: ['read', 'receive'], short_code: 'ABCD-EFGH', code_from_node: true, reason: null, bootstrap: null };
@@ -386,10 +411,11 @@ function stubHost(overrides: Record<string, Reply> = {}) {
     node_status: () => ({ ready: true, node_id: OWN, error: null }),
     pairing_status: () => paired,
     node_overview: () => ({ node_id: OWN, status: 'ok', version: 'api v2', connected_peers: 2, e2ee_sessions: 2, pending_deliveries: 0,
-      lightning_available: true, block_height: 1, uptime_secs: 1, lightning_backend: 'ldk', chain_backend: 'esplora', read_at: Date.now() }),
+      lightning_available: true, block_height: 1, uptime_secs: 1, lightning_backend: 'ldk', chain_backend: 'esplora', read_at: Date.now(),
+      capabilities: ['call_meeting_v1'] }),
     peers_list: () => [
-      { node_id: A, addr: null, label: 'Maya', connected: true, fingerprint: null },
-      { node_id: B, addr: null, label: 'Jon', connected: true, fingerprint: null },
+      { node_id: A, addr: null, label: 'Maya', connected: true, fingerprint: null, meetings: true },
+      { node_id: B, addr: null, label: 'Jon', connected: true, fingerprint: null, meetings: true },
     ],
     rooms_list: () => [],
     messages_list: () => [],
@@ -530,6 +556,67 @@ describe('meetings in the shell', () => {
     $<HTMLButtonElement>('[data-meeting-decline]')!.click();
     await vi.waitFor(() => expect(host.used('call_signal')).toHaveLength(1));
     expect(host.used('call_signal')[0].args).toMatchObject({ peer: A, kind: 403, max_msat: 6_000 });
+  });
+  it('#138 N1: contacts whose node lacks the meeting advert show "needs update" (or "not connected") and are never rung', async () => {
+    const C_ID = 'c'.repeat(64);
+    const host = stubHost({
+      peers_list: () => [
+        { node_id: A, addr: null, label: 'Maya', connected: true, fingerprint: null, meetings: true },
+        { node_id: B, addr: null, label: 'Jon', connected: true, fingerprint: null, meetings: false },
+        { node_id: C_ID, addr: null, label: 'Lee', connected: false, fingerprint: null, meetings: false },
+      ],
+    });
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="meeting"]')?.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call="meeting"]')!.click();
+    await vi.waitFor(() => expect(text('[data-meeting-invite]')).toBe('Invite · 21 sats'));
+    expect(text(`[data-meeting-pick-note="${B}"]`)).toMatch(/needs update/);
+    expect(text(`[data-meeting-pick-note="${C_ID}"]`)).toMatch(/not connected/);
+    expect($<HTMLInputElement>(`[data-meeting-pick="${B}"]`)!.disabled).toBe(true);
+    expect($<HTMLInputElement>(`[data-meeting-pick="${C_ID}"]`)!.disabled).toBe(true);
+    $<HTMLButtonElement>('[data-meeting-invite]')!.click();
+    await vi.waitFor(() => expect(host.used('call_signal')).toHaveLength(1));
+    expect(host.used('call_signal').map((c) => c.args!.peer)).toEqual([A]);
+  });
+
+  it('#138 N1: a contact without the advert is not pre-picked, and nothing can be invited', async () => {
+    const host = stubHost({ peers_list: () => [{ node_id: A, addr: null, label: 'Maya', connected: true, fingerprint: null, meetings: false }] });
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="meeting"]')?.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call="meeting"]')!.click();
+    await vi.waitFor(() => expect(text(`[data-meeting-pick-note="${A}"]`)).toMatch(/needs update/));
+    expect($<HTMLInputElement>(`[data-meeting-pick="${A}"]`)!.checked).toBe(false);
+    expect($<HTMLButtonElement>('[data-meeting-invite]')!.disabled).toBe(true);
+    expect(host.used('call_signal')).toHaveLength(0);
+  });
+
+  it('#138 N1: our own node without the advert cannot hold meetings', async () => {
+    const host = stubHost({
+      node_overview: () => ({ node_id: OWN, status: 'ok', version: 'api v2', connected_peers: 2, e2ee_sessions: 2, pending_deliveries: 0,
+        lightning_available: true, block_height: 1, uptime_secs: 1, lightning_backend: 'ldk', chain_backend: 'esplora', read_at: Date.now(), capabilities: [] }),
+    });
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="meeting"]')?.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call="meeting"]')!.click();
+    await vi.waitFor(() => expect($('[data-meeting-node-update]')).not.toBeNull());
+    expect($<HTMLInputElement>(`[data-meeting-pick="${A}"]`)!.disabled).toBe(true);
+    expect($<HTMLButtonElement>('[data-meeting-invite]')!.disabled).toBe(true);
+    expect(host.used('call_signal')).toHaveLength(0);
+  });
+
+  it('#138 N1: joining never rings a later participant whose node lacks the advert', async () => {
+    const host = stubHost({
+      peers_list: () => [
+        { node_id: A, addr: null, label: 'Maya', connected: true, fingerprint: null, meetings: true },
+        { node_id: B, addr: null, label: 'Jon', connected: true, fingerprint: null, meetings: false },
+      ],
+    });
+    await openShell();
+    host.emitLive({ type: 'message', room_id: null, message: offer(A, cid(0xa1), [A, OWN, B]) });
+    await vi.waitFor(() => expect(text('[data-meeting-join]')).toMatch(/^Join · /));
+    $<HTMLButtonElement>('[data-meeting-join]')!.click();
+    await vi.waitFor(() => expect($(`[data-meeting-leg="${B}"]`)?.getAttribute('data-leg-state')).toBe('nolink'));
+    expect(host.used('call_signal').map((c) => [c.args!.peer, c.args!.kind])).toEqual([[A, 401]]);
   });
 });
 
