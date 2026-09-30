@@ -433,7 +433,7 @@ export type Elevation = {
 };
 
 /** This Mac as a paired device (`device_key_status`). */
-export type DeviceState = 'unavailable' | 'none' | 'pending' | 'registered' | 'lapsed';
+export type DeviceState = 'unavailable' | 'none' | 'pending' | 'registered' | 'lapsed' | 'off';
 export type DeviceView = {
   /** This Mac has a Secure Enclave the app can use. */
   available: boolean;
@@ -443,6 +443,9 @@ export type DeviceView = {
   /** While pending: the node's one-time owner command, verbatim. */
   owner_action: string | null;
   expires_at_ms: number | null;
+  /** State `off`: the node's reason code (e.g. `seed_not_encrypted`) and what the owner is told. */
+  off_reason?: string | null;
+  off_message?: string | null;
 };
 
 /** Why the last request ended without a grant. `lost`: the node restarted (or cancelled it) and can no longer approve it. */

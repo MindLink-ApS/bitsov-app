@@ -3748,6 +3748,13 @@ function DeviceSetup(props: { device: DeviceView | null; now: number; actions: A
   const minutes = (ms: number) => Math.max(1, Math.ceil((ms - props.now) / 60_000));
   return (
     <Switch>
+      <Match when={props.device?.state === 'off' && props.device}>
+        {(d) => (
+          <p class="hint" data-device-off={d().off_reason ?? 'off'}>
+            <strong>Touch ID approvals are off.</strong> {d().off_message}
+          </p>
+        )}
+      </Match>
       <Match when={props.device?.state === 'none' || props.device?.state === 'lapsed'}>
         <p class="hint" data-device-setup={props.device?.state}>
           {props.device?.state === 'lapsed' ? 'Your last Touch ID setup request lapsed. ' : ''}

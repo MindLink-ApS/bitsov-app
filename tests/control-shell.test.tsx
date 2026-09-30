@@ -209,6 +209,22 @@ describe('control center shell', () => {
     expect(mount.querySelector('[data-touch-approval]')).toBeNull();
   });
 
+  it('says Touch ID approvals are off, and why, while the node runs from a plaintext recovery phrase', async () => {
+    const msg = 'Encrypt your recovery phrase to enable Touch ID approvals. On the node\'s computer: stop the node, run `konsensus seed encrypt --config <path>` once, then start it again and type the password.';
+    stubHost({
+      device_key_status: () => ({ available: true, state: 'off', fingerprint: null, owner_action: null, expires_at_ms: null,
+        off_reason: 'seed_not_encrypted', off_message: msg }),
+    });
+    start();
+    await vi.waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
+    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
+
+    await vi.waitFor(() => expect(mount.querySelector('[data-device-off="seed_not_encrypted"]')).not.toBeNull());
+    expect(mount.querySelector('[data-device-off]')?.textContent).toContain('Encrypt your recovery phrase to enable Touch ID approvals');
+    expect(mount.querySelector('[data-device-register]')).toBeNull();
+    expect(mount.querySelector('[data-touch-approval]')).toBeNull();
+  });
+
   it('shows the one-time owner command for this Mac, and a pending request can be cancelled', async () => {
     const cmd = 'konsensus device approve --op dd01 --config /Users/owner/node/konsensus.toml';
     const { calls } = stubHost({

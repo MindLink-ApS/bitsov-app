@@ -68,6 +68,10 @@ pub struct DeviceView {
     pub fingerprint: Option<String>,
     pub owner_action: Option<String>,
     pub expires_at_ms: Option<u64>,
+    /// When the node has Touch ID approvals off: its reason code
+    /// (`seed_not_encrypted`, …) and what the owner is told.
+    pub off_reason: Option<String>,
+    pub off_message: Option<String>,
 }
 
 #[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,6 +87,35 @@ pub enum DeviceState {
     Registered,
     /// The last registration request lapsed or was cancelled by wrong codes.
     Lapsed,
+    /// The node has device approvals off (e.g. its recovery phrase is not
+    /// encrypted). Nothing device-signed works until the owner fixes that.
+    Off,
+}
+
+/// The node's reason codes for device approvals being off
+/// (`GET /pair/device-keys` → `device_approvals`, or a 403 `reason`).
+pub const NODE_OFF_REASONS: [&str; 3] = ["seed_not_encrypted", "seed_password_not_typed", "owner_key_unavailable"];
+
+/// What the owner is told for a reason code; `None` for a code this app does
+/// not know (shown as generic "off").
+pub fn node_off_message(reason: &str) -> &'static str {
+    match reason {
+        "seed_not_encrypted" => "Encrypt your recovery phrase to enable Touch ID approvals. On the node's computer: stop the node, run `konsensus seed encrypt --config <path>` once, then start it again and type the password.",
+        "seed_password_not_typed" => "Restart your node and type its recovery-phrase password at start to enable Touch ID approvals (a password file or flag leaves them off).",
+        _ => "Touch ID approvals are off on your node. Approve at the node instead.",
+    }
+}
+
+/// A node refusal that means device approvals are off, as an app error.
+pub fn node_off_error(reason: &str) -> crate::act::ActionError {
+    crate::act::ActionError::new("device_approvals_off", node_off_message(reason))
+}
+
+/// The `reason` of a node refusal body, when it is one of [`NODE_OFF_REASONS`].
+pub fn node_off_reason(body: &str) -> Option<&'static str> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    let reason = v.get("reason")?.as_str()?;
+    NODE_OFF_REASONS.into_iter().find(|r| *r == reason)
 }
 
 impl DeviceView {
@@ -93,6 +126,8 @@ impl DeviceView {
             fingerprint: None,
             owner_action: None,
             expires_at_ms: None,
+            off_reason: None,
+            off_message: None,
         };
         if !available {
             return view;
@@ -110,6 +145,23 @@ impl DeviceView {
             }
         }
         view
+    }
+}
+
+impl DeviceView {
+    /// Apply the node's `device_approvals` value: anything but "enabled"
+    /// (or absent, on an older node) turns this Mac's approvals off.
+    pub fn with_node_approvals(mut self, device_approvals: Option<&str>) -> Self {
+        if let Some(reason) = device_approvals.filter(|r| *r != "enabled") {
+            if self.available {
+                self.state = DeviceState::Off;
+                self.owner_action = None;
+                self.expires_at_ms = None;
+                self.off_reason = Some(NODE_OFF_REASONS.into_iter().find(|r| *r == reason).unwrap_or("off").to_string());
+                self.off_message = Some(node_off_message(reason).to_string());
+            }
+        }
+        self
     }
 }
 
@@ -411,5 +463,26 @@ mod tests {
         save_pending(&p, None).unwrap();
         assert!(!p.exists());
         save_pending(&p, None).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod node_off_tests {
+    use super::*;
+
+    #[test]
+    fn node_off_reasons_map_to_the_owner_message() {
+        assert_eq!(node_off_reason(r#"{"error":"x","reason":"seed_not_encrypted"}"#), Some("seed_not_encrypted"));
+        assert_eq!(node_off_reason(r#"{"error":"x","reason":"budget_exceeded"}"#), None);
+        assert_eq!(node_off_reason("not json"), None);
+        let base = DeviceView::of(true, None, false, 0);
+        assert_eq!(base.clone().with_node_approvals(Some("enabled")), base);
+        assert_eq!(base.clone().with_node_approvals(None), base, "older nodes: unchanged");
+        let off = base.with_node_approvals(Some("seed_not_encrypted"));
+        assert_eq!(off.state, DeviceState::Off);
+        assert!(off.off_message.unwrap().contains("konsensus seed encrypt"));
+        // A Mac without an enclave stays "unavailable", whatever the node says.
+        let none = DeviceView::of(false, None, false, 0).with_node_approvals(Some("seed_not_encrypted"));
+        assert_eq!(none.state, DeviceState::Unavailable);
     }
 }

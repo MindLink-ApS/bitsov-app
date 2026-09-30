@@ -4351,6 +4351,10 @@ struct DeviceBinding {
     client_id: String,
     #[serde(default)]
     device_keys: Vec<RegisteredKey>,
+    /// "enabled", or why the node has device approvals off. Absent on nodes
+    /// before the node-wide gate.
+    #[serde(default)]
+    device_approvals: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -4405,6 +4409,14 @@ fn local_key(store: &Path) -> Option<(Vec<u8>, device::Record)> {
 }
 
 async fn do_device_key_status(state: &NodeState) -> Result<device::DeviceView, ActionError> {
+    let view = do_device_key_status_local(state).await?;
+    // Whether the node takes device approvals at all (e.g. not while its
+    // recovery phrase is unencrypted). Unreadable → leave the view as is.
+    let approvals = device_binding(state).await.ok().and_then(|b| b.device_approvals);
+    Ok(view.with_node_approvals(approvals.as_deref()))
+}
+
+async fn do_device_key_status_local(state: &NodeState) -> Result<device::DeviceView, ActionError> {
     let store = device_store(state)?;
     let Some((_, mut record)) = local_key(&store) else { return Ok(device_view(state, None)) };
     if let Some(p) = record.pending.clone() {
@@ -4468,11 +4480,18 @@ async fn do_device_key_register(state: &NodeState) -> Result<device::DeviceView,
         }
     };
     let binding = device_binding(state).await?;
+    if let Some(reason) = binding.device_approvals.as_deref().filter(|r| *r != "enabled") {
+        // Before any Touch ID prompt: the node would refuse it anyway.
+        return Err(device::node_off_error(reason));
+    }
     let message = device::registration_message(&binding.node, &binding.client_id, &record.public_key);
     let proof = device_sign(blob, message, "register this Mac with your BitSov node, so it can approve payments with Touch ID".into()).await?;
     let body = serde_json::json!({"public_key": record.public_key, "name": "BitSov app on this Mac", "proof": proof});
     let (status, text) = call_api(state, reqwest::Method::POST, "/pair/device-key", Some(body)).await.map_err(ActionError::node)?;
     if !status.is_success() {
+        if let Some(reason) = device::node_off_reason(&text) {
+            return Err(device::node_off_error(reason));
+        }
         return Err(ActionError::node(api_error("/pair/device-key", status, &text)));
     }
     let reply: DeviceKeyReply = decode_act("/pair/device-key", &text)?;
@@ -4531,6 +4550,10 @@ async fn do_relation_approve(
     let key_id = record.key_id.clone().ok_or_else(|| ActionError::new("device_not_registered", "Set up Touch ID approvals first."))?;
     let intent = device::Intent::contact(&key_id, peer, budget_msat, per_act_max_msat, now_unix())?;
     let binding = device_binding(state).await?;
+    if let Some(reason) = binding.device_approvals.as_deref().filter(|r| *r != "enabled") {
+        // Before any Touch ID prompt: the node would refuse the signature.
+        return Err(device::node_off_error(reason));
+    }
     let message = device::intent_message(&binding.node, &binding.client_id, &intent);
     // The dialog's contact name comes from the node's own peer list, never
     // from the renderer: the dialog is where the owner reads what they sign.
@@ -4553,6 +4576,9 @@ async fn do_relation_approve(
     let body = serde_json::json!({"intent": intent, "signature": signature});
     let (status, text) = call_api(state, reqwest::Method::POST, "/pair/relation-intent", Some(body)).await.map_err(ActionError::node)?;
     if !status.is_success() {
+        if let Some(reason) = device::node_off_reason(&text) {
+            return Err(device::node_off_error(reason));
+        }
         return Err(ActionError::node(api_error("/pair/relation-intent", status, &text)));
     }
     // The grant reaches a token only on re-issue. Open the window over the
@@ -9167,13 +9193,19 @@ mod control_act_tests {
     struct DeviceNode {
         registered: Arc<std::sync::atomic::AtomicBool>,
         intents: Arc<Mutex<Vec<serde_json::Value>>>,
+        /// The node's `device_approvals`: "enabled" or a reason it is off.
+        approvals: Arc<Mutex<&'static str>>,
     }
 
     #[cfg(target_os = "macos")]
     fn device_node() -> (DeviceNode, Routes) {
         use ring::signature::{UnparsedPublicKey, ECDSA_P256_SHA256_ASN1};
-        let d = DeviceNode { registered: Arc::new(std::sync::atomic::AtomicBool::new(false)), intents: Arc::new(Mutex::new(Vec::new())) };
-        let (registered, intents) = (d.registered.clone(), d.intents.clone());
+        let d = DeviceNode {
+            registered: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            intents: Arc::new(Mutex::new(Vec::new())),
+            approvals: Arc::new(Mutex::new("enabled")),
+        };
+        let (registered, intents, approvals) = (d.registered.clone(), d.intents.clone(), d.approvals.clone());
         let public: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let far = now_unix() + 900;
         let verify = |public: &str, msg: &str, sig: &str| {
@@ -9183,8 +9215,12 @@ mod control_act_tests {
         };
         let routes: Routes = Arc::new(move |m: &str, path: &str, b: &str| {
             let body: serde_json::Value = serde_json::from_str(b).unwrap_or_default();
+            let off = *approvals.lock().unwrap();
+            if m == "POST" && (path == "/pair/device-key" || path == "/pair/relation-intent") && off != "enabled" {
+                return (403, serde_json::json!({"error": "Touch ID approvals are off on this node", "code": 403, "reason": off}).to_string());
+            }
             let v = match (m, path) {
-                ("GET", "/pair/device-keys") => serde_json::json!({"node": "fp1", "client_id": "c1", "owner_control": true,
+                ("GET", "/pair/device-keys") => serde_json::json!({"node": "fp1", "client_id": "c1", "owner_control": true, "device_approvals": off,
                     "device_keys": if registered.load(Ordering::SeqCst) { serde_json::json!([{"key_id": "k1", "fingerprint": "K1K1-0000", "name": "mac", "registered_at": 1}]) } else { serde_json::json!([]) }}),
                 ("POST", "/pair/device-key") => {
                     let pk = body["public_key"].as_str().unwrap().to_string();
@@ -9227,6 +9263,39 @@ mod control_act_tests {
             "budget_msat": 200_000, "used_msat": 0, "remaining_msat": 200_000, "per_call_max_msat": 200_000,
             "per_recipient_msat": {peer: 200_000}, "used_by_recipient": {}, "recipients_only": true,
             "per_act_max_by_recipient": {peer: per_act_msat}, "recipient_expires_at": {peer: now + 86_400}})
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn a_node_with_a_plaintext_seed_turns_touch_id_off_before_any_prompt() {
+        let (dn, first) = device_node();
+        let (node, _dir, _g1) = g1_node_with(&["read", "receive"], Some(first));
+        *node.state.device_policy.lock().unwrap() = device_key::Policy::NoPromptForTests;
+        let s = &node.state;
+        *dn.approvals.lock().unwrap() = "seed_not_encrypted";
+        let view = do_device_key_status(s).await.unwrap();
+        assert_eq!(view.state, device::DeviceState::Off);
+        assert_eq!(view.off_reason.as_deref(), Some("seed_not_encrypted"));
+        assert!(view.off_message.as_deref().unwrap().starts_with("Encrypt your recovery phrase to enable Touch ID approvals"));
+        // Register is refused before a key is used or anything is sent.
+        let err = do_device_key_register(s).await.unwrap_err();
+        assert_eq!(err.code, "device_approvals_off");
+        assert!(node.posts().iter().all(|(p, _)| p != "/pair/device-key"));
+
+        // After `seed encrypt` and a typed restart the node says "enabled": setup works.
+        *dn.approvals.lock().unwrap() = "enabled";
+        assert_eq!(do_device_key_status(s).await.unwrap().state, device::DeviceState::None);
+        assert_eq!(do_device_key_register(s).await.unwrap().state, device::DeviceState::Pending);
+        dn.registered.store(true, Ordering::SeqCst);
+        assert_eq!(do_device_key_status(s).await.unwrap().state, device::DeviceState::Registered);
+
+        // A node restarted with a password file turns it off again: no Touch ID prompt, no intent.
+        *dn.approvals.lock().unwrap() = "seed_password_not_typed";
+        assert_eq!(do_device_key_status(s).await.unwrap().state, device::DeviceState::Off);
+        let err = do_relation_approve(s, A, None, Some(7000)).await.unwrap_err();
+        assert_eq!(err.code, "device_approvals_off");
+        assert!(err.message.contains("type its recovery-phrase password"), "{}", err.message);
+        assert!(dn.intents.lock().unwrap().is_empty());
     }
 
     #[cfg(target_os = "macos")]
