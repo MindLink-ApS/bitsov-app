@@ -1,0 +1,11 @@
+[
+  { "http": 200, "body": { "payment_hash": "00", "status": "Settled", "amount_msat": 2000, "direction": "Incoming", "liquidity": null }, "want": { "state": "paid", "amount_msat": 2000 } },
+  { "http": 200, "body": { "payment_hash": "00", "status": "Pending", "amount_msat": 2000, "direction": "Incoming", "liquidity": null }, "want": { "state": "waiting", "amount_msat": 2000 } },
+  { "http": 200, "body": { "payment_hash": "00", "status": "InFlight", "amount_msat": 2000, "direction": "Incoming", "liquidity": null }, "want": { "state": "waiting", "amount_msat": 2000 } },
+  { "http": 200, "body": { "payment_hash": "00", "status": "Failed", "amount_msat": 2000, "direction": "Incoming", "liquidity": null }, "want": { "state": "failed", "amount_msat": 2000 } },
+  { "http": 200, "body": { "payment_hash": "00", "status": "Expired", "amount_msat": 2000, "direction": "Incoming", "liquidity": null }, "want": { "state": "failed", "amount_msat": 2000 } },
+  { "http": 200, "body": { "payment_hash": "00", "status": "Settled", "amount_msat": 2000, "direction": "Outgoing", "liquidity": null }, "want": { "state": "unknown", "amount_msat": null } },
+  { "http": 200, "body": { "payment_hash": "00", "status": "Succeeded", "amount_msat": 2000, "direction": "Incoming", "liquidity": null }, "want": { "state": "unknown", "amount_msat": null } },
+  { "http": 200, "body": { "payment_hash": "00", "status": "Settled", "amount_msat": 2000, "direction": "Inbound", "liquidity": null }, "want": { "state": "unknown", "amount_msat": null } },
+  { "http": 502, "body": { "error": "payment not found" }, "want": { "state": "unknown", "amount_msat": null } }
+]

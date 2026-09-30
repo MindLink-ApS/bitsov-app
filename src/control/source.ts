@@ -31,6 +31,7 @@ import type {
   CallQuote,
   CallReceipt,
   InvoiceAmount,
+  InvoiceStatus,
   InvoiceView,
   InviteView,
   PaymentReceipt,
@@ -163,6 +164,8 @@ export interface Source {
   roomQuote(roomId: string): Promise<RoomQuote>;
   invoiceCreate(amountMsat: number, note: string): Promise<InvoiceView>;
   invoiceAmount(bolt11: string): Promise<InvoiceAmount>;
+  /** Read only: whether an invoice we issued was paid to this node. */
+  invoiceStatus(bolt11: string): Promise<InvoiceStatus>;
   pay(bolt11: string, amountMsat: number, maxMsat: number): Promise<PaymentReceipt>;
   keysend(destPubkey: string, amountMsat: number, memo: string | null, maxMsat: number): Promise<PaymentReceipt>;
   inviteCreate(invitee: string, addr: string, hours: number): Promise<InviteView>;
@@ -274,6 +277,7 @@ export const hostSource: Source = {
   roomQuote: (roomId) => invoke<RoomQuote>('room_quote', { room_id: roomId }),
   invoiceCreate: (amountMsat, note) => invoke<InvoiceView>('invoice_create', { amount_msat: amountMsat, note, expiry_secs: null }),
   invoiceAmount: (bolt11) => invoke<InvoiceAmount>('invoice_amount', { bolt11 }),
+  invoiceStatus: (bolt11) => invoke<InvoiceStatus>('invoice_status', { bolt11 }),
   pay: (bolt11, amountMsat, maxMsat) => invoke<PaymentReceipt>('payment_pay', { bolt11, amount_msat: amountMsat, max_msat: maxMsat }),
   keysend: (destPubkey, amountMsat, memo, maxMsat) =>
     invoke<PaymentReceipt>('payment_keysend', { dest_pubkey: destPubkey, amount_msat: amountMsat, memo, max_msat: maxMsat }),

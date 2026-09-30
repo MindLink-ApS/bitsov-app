@@ -4907,6 +4907,22 @@ fn invoice_amount(
     act::invoice_amount(&bolt11)
 }
 
+/// `GET /payments/{hash}` for an invoice the app shows: was it paid to us. Read
+/// only; the hash comes from the host's own decode of the invoice.
+#[tauri::command(rename_all = "snake_case")]
+async fn invoice_status(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    bolt11: String,
+) -> Result<act::InvoiceStatus, ActionError> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    let read = act::invoice_amount(&bolt11)?;
+    let path = format!("/payments/{}", read.payment_hash);
+    let (status, body) = call_api(state.inner(), reqwest::Method::GET, &path, None).await?;
+    Ok(act::invoice_status(status.as_u16(), &body))
+}
+
 /// `POST /payments/pay`, only for the amount the owner was shown.
 #[tauri::command(rename_all = "snake_case")]
 async fn payment_pay(
@@ -5607,6 +5623,7 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             room_quote,
             invoice_create,
             invoice_amount,
+            invoice_status,
             payment_pay,
             payment_keysend,
             invite_create,
@@ -11376,6 +11393,7 @@ mod assistant_acl_tests {
                 "room_quote",
                 "invoice_create",
                 "invoice_amount",
+                "invoice_status",
                 "payment_pay",
                 "payment_keysend",
                 "invite_create",
