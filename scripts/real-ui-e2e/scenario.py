@@ -228,10 +228,14 @@ def run(r, fixture, capacities):
             rows=r.ui_try('attrs',selector='[data-composer] textarea',names=['value'])
             return ((rows[0].get('value') if rows else None) or '').strip()
 
-        def shown_price():
-            # Cost lives behind ⓘ; the Send aria-label/title always carries it.
+        def send_label():
+            # Visible text is often plain "Send"; aria-label/title carry the price.
             attrs=r.ui('attrs',selector='[data-send]',names=['aria-label','title'])
-            label=((attrs[0].get('aria-label') or attrs[0].get('title') or '') if attrs else '')
+            full=((attrs[0].get('aria-label') or attrs[0].get('title') or '') if attrs else '').strip()
+            return full or r.text('[data-send]').strip()
+
+        def shown_price():
+            label=send_label()
             m=re.search(r'([\d.]+)\s*sats',label)
             return int(Decimal(m.group(1))*1000) if m else None
 
@@ -240,6 +244,10 @@ def run(r, fixture, capacities):
             m=re.search(r'Send again:\s*([\d.]+)\s*sats',hint)
             return int(Decimal(m.group(1))*1000) if m else None
 
+        def is_priced_send(label):
+            head=label.split('·')[0].strip()
+            return head.startswith('Send') and 'sat' in label.lower()
+
         r.ui('fill',selector='[data-composer] textarea',value=plaintext)
         s.need('draft accepted once',current_draft()==plaintext,current_draft())
 
@@ -247,15 +255,15 @@ def run(r, fixture, capacities):
         for _ in range(6):
             s.need('message Send ready',wait_message_send_ready())
             s.need('draft still present before Send',current_draft()==plaintext,current_draft())
-            label=r.text('[data-send]').strip(); path.append(label)
+            label=send_label(); path.append(label)
             r.ui('click',selector='[data-send]')
-            if not label.startswith('Send'):
-                # Approve / Resume opens the spend window; draft must stay.
+            if not is_priced_send(label):
+                # Approve / Resume / plain Send opens the spend window; draft stays.
                 if r.wait_until(lambda:r.ui_try('exists',selector='[data-owner-action]'),3):
                     owner_window(s)
                 s.need('draft survives approval',current_draft()==plaintext,current_draft())
-                s.need('Send after approval',r.wait_until(lambda:r.text('[data-send]').strip().startswith('Send'),20),
-                       r.text('[data-send]'))
+                s.need('priced Send after approval',
+                       r.wait_until(lambda:is_priced_send(send_label()),30),send_label())
                 continue
             def after_send():
                 if any(m.get('plaintext')==plaintext for m in r.get('b','/messages?limit=50')): return 'ok'
@@ -277,7 +285,7 @@ def run(r, fixture, capacities):
                 s.need('composer note is the price-not-ready wait',note==price_not_ready,note)
                 continue  # wait for cost on the next Send-ready check
             s.need('Send delivered without an unexplained retry',False,
-                   {'got':got,'path':path,'draft':current_draft(),'send':r.text('[data-send]')})
+                   {'got':got,'path':path,'draft':current_draft(),'send':send_label()})
         s.need('Send delivered without exhausting expected transitions',delivered,path)
         ok=received('b',plaintext)
         done.set(); watcher.join(2)
