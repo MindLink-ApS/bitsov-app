@@ -464,15 +464,15 @@ select { font: inherit; font-size: var(--t-sm); background: var(--sunk); color: 
 
 /* first run, inside the shell ------------------------------------------- */
 .first-run { flex: 1; min-height: 0; overflow-y: auto; padding: var(--s-8) var(--s-6); display: flex; flex-direction: column; align-items: center; gap: var(--s-5); }
-.first-run > * { width: 100%; max-width: 440px; }
-.first-run .intro { display: flex; flex-direction: column; gap: var(--s-2); }
+.first-run > * { width: 100%; max-width: 560px; }
+.first-run .intro { display: flex; flex-direction: column; gap: var(--s-2); text-align: center; align-items: center; }
 .first-run .intro h1 { font-size: var(--t-3xl); }
 .state { display: flex; flex-direction: column; align-items: center; gap: var(--s-3); color: var(--muted); }
 .state.ready { color: var(--ink); align-items: stretch; }
 .state.error { color: var(--err); }
 .state.error code { font-size: var(--t-sm); color: var(--muted); background: var(--surface); padding: 8px 10px; border-radius: var(--r-control); overflow-wrap: anywhere; }
-.node-id { font-family: var(--font-mono); font-size: var(--t-md); color: var(--accent); background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-control); padding: 8px 12px; align-self: flex-start; }
-.running { display: flex; align-items: center; gap: var(--s-2); }
+.node-id { font-family: var(--font-mono); font-size: var(--t-sm); color: var(--accent); background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-control); padding: 6px 10px; align-self: flex-start; overflow-wrap: anywhere; }
+.running { display: flex; align-items: center; gap: var(--s-2); font-size: var(--t-md); font-weight: 500; }
 
 /* Gate G6: the local-trust disclosure shown before any funding UI. */
 .disclosure { border-color: var(--ember-line); background: var(--ember); }
@@ -483,8 +483,41 @@ select { font: inherit; font-size: var(--t-sm); background: var(--sunk); color: 
 .restore .row { justify-content: space-between; }
 .panel label { font-size: var(--t-sm); color: var(--muted); }
 
+/* onboarding: 3 choices for node location */
+.node-target-section { width: 100%; display: flex; flex-direction: column; gap: var(--s-2); }
+.node-target-title { font-family: var(--font-sans); font-size: var(--t-md); font-weight: 600; color: var(--ink); margin: 0; }
+.node-target-grid { display: flex; flex-direction: column; gap: var(--s-2); margin-top: var(--s-2); }
+.node-target-card { display: flex; align-items: flex-start; gap: var(--s-3); padding: var(--s-3) var(--s-4); border: 1px solid var(--line); border-radius: var(--r-panel); background: var(--surface); color: inherit; text-align: left; cursor: pointer; transition: border-color var(--d-fast) var(--ease), background var(--d-fast) var(--ease), box-shadow var(--d-fast) var(--ease); }
+.node-target-card:hover { background: var(--raised); border-color: var(--line-strong); }
+.node-target-card.selected { background: var(--raised); border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent), 0 4px 14px rgba(0,0,0,0.12); }
+.target-icon { width: 38px; height: 38px; border-radius: 10px; background: var(--sunk); color: var(--accent); display: grid; place-items: center; flex: none; margin-top: 2px; }
+.target-info { flex: 1; display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.target-head { display: flex; align-items: center; justify-content: space-between; gap: var(--s-2); flex-wrap: wrap; }
+.target-head strong { font-size: var(--t-md); font-weight: 600; color: var(--ink); }
+.target-radio-indicator { width: 20px; height: 20px; border-radius: 50%; border: 1.5px solid var(--line-strong); display: grid; place-items: center; font-size: 11px; font-weight: 700; color: transparent; flex: none; transition: all var(--d-fast) var(--ease); }
+.node-target-card.selected .target-radio-indicator { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.target-badge { font-size: var(--t-xs); font-weight: 500; padding: 2px 8px; border-radius: var(--r-chip); background: var(--sunk); color: var(--muted); }
+.target-badge.ok { background: color-mix(in srgb, var(--ok) 14%, transparent); color: var(--ok); }
+.target-badge.honest { background: color-mix(in srgb, var(--warn) 14%, transparent); color: var(--warn); }
+.target-info p { font-size: var(--t-sm); color: var(--muted); line-height: 1.4; margin: 0; }
+.node-target-aux { padding: var(--s-3); background: var(--sunk); border: 1px solid var(--line); border-radius: var(--r-control); margin-top: var(--s-2); font-size: var(--t-sm); display: flex; flex-direction: column; gap: var(--s-2); }
+
+/* progressive disclosure toggles: no hex or host:port unless asked */
+.node-advanced, .node-details, .pairing-details { margin-top: var(--s-1); font-size: var(--t-xs); color: var(--muted); }
+.node-advanced > summary, .node-details > summary, .pairing-details > summary { cursor: pointer; color: var(--faint); padding: 4px 0; user-select: none; transition: color var(--d-fast) var(--ease); }
+.node-advanced > summary:hover, .node-details > summary:hover, .pairing-details > summary:hover { color: var(--ink); }
+.pairing-details-body { margin-top: var(--s-2); padding-top: var(--s-2); border-top: 1px dashed var(--line); display: flex; flex-direction: column; gap: var(--s-2); }
+
+/* Touch ID hero in pairing */
+.touchid-hero { display: flex; align-items: center; gap: var(--s-3); }
+.touchid-badge { position: relative; width: 44px; height: 44px; border-radius: 50%; background: var(--sunk); color: var(--accent); display: grid; place-items: center; flex: none; border: 1px solid var(--line); }
+.touchid-badge.ok { color: var(--ok); background: color-mix(in srgb, var(--ok) 12%, transparent); border-color: color-mix(in srgb, var(--ok) 30%, transparent); }
+.touchid-check { position: absolute; right: -2px; bottom: -2px; width: 16px; height: 16px; border-radius: 50%; background: var(--ok); color: #fff; font-size: 10px; font-weight: 700; display: grid; place-items: center; }
+.touchid-badge-pulse { width: 44px; height: 44px; border-radius: 50%; background: var(--ember); color: var(--accent); display: grid; place-items: center; flex: none; animation: breathe 2s var(--ease) infinite; }
+.touchid-status-pill { font-size: var(--t-xs); font-weight: 500; color: var(--ok); background: color-mix(in srgb, var(--ok) 12%, transparent); padding: 2px 8px; border-radius: var(--r-chip); display: inline-block; margin-top: 2px; }
+
 /* onboarding steps: a real sequence, so it is numbered */
-.onboarding { display: flex; flex-direction: column; gap: var(--s-3); }
+.onboarding { display: flex; flex-direction: column; gap: var(--s-4); width: 100%; }
 .steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; counter-reset: step; }
 .step { display: flex; align-items: baseline; gap: var(--s-3); color: var(--faint); font-size: var(--t-md); padding: 4px 0; counter-increment: step; }
 .step::before { content: counter(step); font-family: var(--font-mono); font-size: var(--t-xs); width: 18px; height: 18px; border-radius: 50%; border: 1px solid var(--line-strong); display: inline-grid; place-items: center; flex: none; }

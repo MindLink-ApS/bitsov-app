@@ -172,4 +172,37 @@ describe('pairing panel', () => {
     expect(el.textContent).toContain('identity-free');
     expect(el.textContent).toContain('genome release');
   });
+
+  it('renders 3 honest node location choices: local, network, cloud', () => {
+    const el = show(starting, booting);
+    const local = el.querySelector('[data-target="local"]');
+    const network = el.querySelector('[data-target="network"]');
+    const cloud = el.querySelector('[data-target="cloud"]');
+
+    expect(local).not.toBeNull();
+    expect(network).not.toBeNull();
+    expect(cloud).not.toBeNull();
+
+    expect(local?.textContent).toContain('This computer');
+    expect(network?.textContent).toContain('A node on my network');
+    expect(cloud?.textContent).toContain('A cloud node');
+    expect(cloud?.textContent).toContain('Honest label');
+  });
+
+  it('hides network and cloud manual inputs under progressive disclosure', () => {
+    const el = show(starting, booting);
+    const networkBtn = el.querySelector<HTMLButtonElement>('[data-target="network"]')!;
+    networkBtn.click();
+    const networkAux = el.querySelector('[data-target-aux="network"]')!;
+    expect(networkAux.textContent).toContain('Scanning local network');
+    // The manual input is inside <details>
+    const details = networkAux.querySelector('details')!;
+    expect(details.open).toBe(false);
+
+    const cloudBtn = el.querySelector<HTMLButtonElement>('[data-target="cloud"]')!;
+    cloudBtn.click();
+    const cloudAux = el.querySelector('[data-target-aux="cloud"]')!;
+    expect(cloudAux.textContent).toContain('Honest custody notice');
+    expect(cloudAux.querySelector('details')!.open).toBe(false);
+  });
 });

@@ -85,8 +85,7 @@ export default function App() {
       <div class="intro">
         <h1>Your node, your seat</h1>
         <p class="hint">
-          BitSov runs your own node on this computer. Set it up once; then every conversation, peer and
-          payment lives here.
+          Welcome to BitSov. Sovereign private messaging and bitcoin payments, powered by your own node.
         </p>
       </div>
 
@@ -218,11 +217,14 @@ function IdentityGate(props: {
       </Show>
       <div class="running">
         <div class="dot ok" />
-        <div>Your node is running.</div>
+        <div>Your node is running and connected.</div>
       </div>
-      <div class="node-id" title={props.nodeId() ?? ''}>
-        {short(props.nodeId() ?? '')}
-      </div>
+      <details class="node-details">
+        <summary>Technical node details & address</summary>
+        <div class="node-id" title={props.nodeId() ?? ''}>
+          {short(props.nodeId() ?? '')}
+        </div>
+      </details>
 
       <section class="panel disclosure" data-gate="g6-local-trust">
         <h2>Local trust — read this before you deposit</h2>
