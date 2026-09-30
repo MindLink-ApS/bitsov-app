@@ -4,6 +4,7 @@ import App from '../src/App';
 import type { PairingView } from '../src/onboarding/pairing';
 import { sampleInvoiceMsat, sampleSource, SAMPLE_OPEN_ROOM_ID, SAMPLE_ROOM_ID } from '../src/control/sample';
 import type { LiveEvent, SpendView } from '../src/control/types';
+import { setDenom } from '../src/control/prefs';
 
 // Slice B: acting from the track against a stubbed host whose spend window is
 // stateful, plus the dev sample source on its own. No node, no network.
@@ -52,6 +53,7 @@ function stubHost(overrides: Record<string, Reply> = {}) {
     message_send: (args) => ({ message_id: 'sent-1', recipient: args!.recipient, is_room: args!.is_room, delivered: true, amount_msat: 2000, sent_at_ms: Date.now() }),
     invoice_amount: (args) => (String(args!.bolt11).startsWith('lntb10n') ? { amount_msat: 1000, network: 'testnet' } : Promise.reject({ code: 'invalid', message: 'that is not a Lightning invoice' })),
     payment_pay: (args) => ({ method: 'invoice', amount_msat: args!.amount_msat, status: 'settled', paid_at_ms: Date.now() }),
+    payment_keysend: (args) => ({ method: 'keysend', amount_msat: args!.amount_msat, status: 'settled', paid_at_ms: Date.now() }),
     invoice_create: (args) => ({ bolt11: 'lntb210n1sample', amount_msat: args!.amount_msat, note: args!.note || null, expires_at_ms: Date.now() + 3_600_000 }),
     file_send: (args) => ({ message_id: 'file-1', recipient: args!.recipient, filename: args!.filename, size_bytes: 2, delivered: true, amount_msat: 3000, sent_at_ms: Date.now() }),
     invite_create: (args) => ({ invite_id: 'i1', invite_link: 'bitsov://invite/tok', invitee: args!.invitee, expires_at_ms: Date.now() + 86_400_000 }),
@@ -105,6 +107,11 @@ describe('acting from the track', () => {
     el.dispatchEvent(new Event('input', { bubbles: true }));
   };
   const submit = () => $<HTMLButtonElement>('[data-send]')!.click();
+  /** Pay's one confirm tap, after the review shows what will be paid. */
+  const confirmPay = async () => {
+    await vi.waitFor(() => expect($('[data-pay-confirm]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-pay-confirm]')!.click();
+  };
 
   async function openShell() {
     mount = document.createElement('div');
@@ -362,6 +369,12 @@ describe('acting from the track', () => {
     expect(text('[data-composer]')).toContain('up to 5 sats network fee');
     expect($('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('6000');
     submit();
+    await vi.waitFor(() => expect($('[data-pay-review]')).not.toBeNull());
+    expect(host.used('payment_pay')).toHaveLength(0);
+    expect(text('[data-review-amount]')).toBe('1 sat');
+    expect(text('[data-review-fee]')).toBe('up to 5 sats');
+    expect(text('[data-review-total]')).toBe('6 sats');
+    await confirmPay();
     await vi.waitFor(() => expect(host.used('payment_pay')[0]?.args).toEqual({ bolt11: 'lntb10n1abc', amount_msat: 1000, max_msat: 6000 }));
     await vi.waitFor(() => expect($('[data-artifact="payment"]')?.getAttribute('data-status')).toBe('settled'));
   });
@@ -397,11 +410,114 @@ describe('acting from the track', () => {
       type('[data-pay-amount]', '5');
     }
     submit();
+    await confirmPay();
     await vi.waitFor(() => expect(text('[data-composer-note]')).toContain('Your app principal limit is used up.'));
     expect($('[data-artifact="payment"]')).toBeNull();
     expect($('[data-artifact="failed"]')).toBeNull();
     expect(method === 'invoice' ? $<HTMLTextAreaElement>('[data-pay-invoice]')!.value : $<HTMLInputElement>('[data-pay-amount]')!.value)
       .toBe(method === 'invoice' ? 'lntb10n1abc' : '5');
+  });
+
+  describe('amount-first Pay and Request', () => {
+    afterEach(() => setDenom('sats'));
+    const direct = () => [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent === 'Direct')!.click();
+    const PUB = '02' + 'ab'.repeat(32);
+
+    it('pays a BTC amount as exact msat, only on the confirm tap', async () => {
+      const host = stubHost();
+      host.spend.v = openView();
+      setDenom('btc');
+      await openShell();
+      $<HTMLButtonElement>('[data-composer-mode="pay"]')!.click();
+      direct();
+      expect(text('.amount-unit')).toBe('BTC');
+      type('[data-pay-amount]', '0.00000005');
+      type('[data-pay-pubkey]', PUB);
+      type('[data-pay-note]', 'lunch');
+      await vi.waitFor(() => expect($('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('10000'));
+      submit();
+      await vi.waitFor(() => expect($('[data-pay-review]')).not.toBeNull());
+      expect(text('[data-review-amount]')).toBe('0.00000005 BTC');
+      expect(text('[data-review-fee]')).toBe('up to 0.00000005 BTC');
+      expect(text('[data-review-total]')).toBe('0.0000001 BTC');
+      expect($('[data-pay-review]')!.getAttribute('data-review-max-msat')).toBe('10000');
+      expect(text('[data-pay-review]')).toContain('lunch');
+      expect(host.used('payment_keysend')).toHaveLength(0);
+      await confirmPay();
+      await vi.waitFor(() => expect(host.used('payment_keysend')[0]?.args).toEqual({ dest_pubkey: PUB, amount_msat: 5000, memo: 'lunch', max_msat: 10000 }));
+      expect(host.used('payment_keysend')).toHaveLength(1);
+      await vi.waitFor(() => expect($<HTMLInputElement>('[data-pay-amount]')!.value).toBe(''));
+      expect($('[data-pay-review]')).toBeNull();
+    });
+
+    it('drops the review on any edit or Back, and pays nothing', async () => {
+      const host = stubHost();
+      host.spend.v = openView();
+      await openShell();
+      $<HTMLButtonElement>('[data-composer-mode="pay"]')!.click();
+      direct();
+      type('[data-pay-amount]', '21');
+      type('[data-pay-pubkey]', PUB);
+      submit();
+      await vi.waitFor(() => expect(text('[data-review-amount]')).toBe('21 sats'));
+      type('[data-pay-amount]', '210');
+      expect($('[data-pay-review]')).toBeNull();
+      submit();
+      await vi.waitFor(() => expect(text('[data-review-amount]')).toBe('210 sats'));
+      $<HTMLButtonElement>('[data-pay-back]')!.click();
+      expect($('[data-pay-review]')).toBeNull();
+      submit();
+      await vi.waitFor(() => expect($('[data-pay-review]')).not.toBeNull());
+      $<HTMLButtonElement>('[data-composer-mode="request"]')!.click();
+      $<HTMLButtonElement>('[data-composer-mode="pay"]')!.click();
+      expect($('[data-pay-review]')).toBeNull();
+      expect(host.used('payment_keysend')).toHaveLength(0);
+      expect(host.used('payment_pay')).toHaveLength(0);
+    });
+
+    it('refuses an amount finer than one msat instead of rounding it', async () => {
+      const host = stubHost();
+      host.spend.v = openView();
+      await openShell();
+      $<HTMLButtonElement>('[data-composer-mode="pay"]')!.click();
+      direct();
+      type('[data-pay-pubkey]', PUB);
+      type('[data-pay-amount]', '0.0005');
+      await vi.waitFor(() => expect($('[data-amount-invalid]')).not.toBeNull());
+      expect($<HTMLButtonElement>('[data-send]')!.disabled).toBe(true);
+      submit();
+      expect($('[data-pay-review]')).toBeNull();
+      type('[data-pay-amount]', '0.001');
+      await vi.waitFor(() => expect($('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('5001'));
+      expect($('[data-amount-invalid]')).toBeNull();
+      expect(host.used('payment_keysend')).toHaveLength(0);
+    });
+
+    it('keeps the same msat when the denomination switches', async () => {
+      stubHost();
+      await openShell();
+      $<HTMLButtonElement>('[data-composer-mode="request"]')!.click();
+      type('[data-request-amount]', '1500');
+      setDenom('btc');
+      await vi.waitFor(() => expect($<HTMLInputElement>('[data-request-amount]')!.value).toBe('0.000015'));
+      setDenom('sats');
+      await vi.waitFor(() => expect($<HTMLInputElement>('[data-request-amount]')!.value).toBe('1500'));
+    });
+
+    it('requests a BTC amount with a purpose and shows the invoice QR', async () => {
+      const host = stubHost();
+      setDenom('btc');
+      await openShell();
+      $<HTMLButtonElement>('[data-composer-mode="request"]')!.click();
+      expect(text('[data-request-hint]')).toContain('Receiving is free');
+      type('[data-request-amount]', '0.00000021');
+      type('[data-request-note]', 'dinner');
+      await vi.waitFor(() => expect(text('[data-send]')).toBe('Create invoice'));
+      submit();
+      await vi.waitFor(() => expect($('[data-artifact="invoice"] svg.qr')).not.toBeNull());
+      expect(host.used('invoice_create')[0].args).toEqual({ amount_msat: 21_000, note: 'dinner', expiry_secs: null });
+      expect(host.used('spend_request')).toHaveLength(0);
+    });
   });
 
   it.each(['budget_exhausted', 'ceiling_exhausted'])('explains a refused file (%s) and keeps it selected', async (code) => {

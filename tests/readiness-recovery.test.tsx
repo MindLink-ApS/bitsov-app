@@ -34,6 +34,9 @@ it.each([false, true])('clears successfully paid unchanged inputs, intervening o
   expect(mount.querySelector<HTMLButtonElement>('[data-send]')!.disabled).toBe(false);
   mount.querySelector<HTMLButtonElement>('[data-send]')!.click();
   await vi.advanceTimersByTimeAsync(0);
+  expect(source.keysend).not.toHaveBeenCalled();
+  mount.querySelector<HTMLButtonElement>('[data-pay-confirm]')!.click();
+  await vi.advanceTimersByTimeAsync(0);
   expect(source.keysend).toHaveBeenCalledTimes(1);
   if (outage) {
     ready = false;
@@ -155,6 +158,11 @@ it.each(['message', 'pay', 'request', 'file'] as const)('cleans up successful %s
     fill(false);
     await vi.waitFor(() => expect(mount.querySelector<HTMLButtonElement>('[data-send]')!.disabled).toBe(false));
     mount.querySelector<HTMLButtonElement>('[data-send]')!.click();
+    if (mode === 'pay') {
+      await vi.waitFor(() => expect(mount.querySelector('[data-pay-confirm]')).not.toBeNull());
+      expect(call).not.toHaveBeenCalled();
+      mount.querySelector<HTMLButtonElement>('[data-pay-confirm]')!.click();
+    }
     await vi.waitFor(() => expect(call).toHaveBeenCalledTimes(1));
     ready = false;
     await vi.advanceTimersByTimeAsync(10000);
