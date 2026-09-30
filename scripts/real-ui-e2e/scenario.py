@@ -356,6 +356,23 @@ def run(r, fixture, capacities):
         r.ui('fill',selector='[data-fd-edit-name]',value=name)
         r.ui('fill',selector='[data-fd-edit-tagline]',value='EUT-3 regtest front door')
         r.ui('click',selector='[data-fd-publish]')
+        # A paired app publishes only under the owner's front_door grant (genome
+        # front-door scope): the editor shows the node's command; the owner runs
+        # it at A's terminal with the console code; Publish again.
+        def outcome():
+            return r.ui_try('exists',selector='[data-fd-seq]') or r.ui_try('exists',selector='[data-fd-owner-command]') \
+                or r.ui_try('exists',selector='[data-fd-edit-error]')
+        r.wait_until(outcome,30)
+        if r.ui_try('exists',selector='[data-fd-owner-command]'):
+            command=r.text('[data-fd-owner-command]')
+            match=re.fullmatch(r'konsensus grant --op ([0-9a-f]+)',command)
+            s.need('editor names the owner front_door command',match,command)
+            s.snap('front-door-owner-request')
+            out=r.owner_grant(match.group(1),'--for','10m')
+            s.check('owner granted front_door only (no spend)','granted front_door' in out and 'moves no value' in out,out[-300:])
+            status=r.run(r.BIN,'pair-status','--config',str(r.ROOTS['a']/'konsensus.toml'))
+            s.check('pair-status lists the front-door grant','FRONT DOOR GRANT' in status,status[-400:])
+            r.ui('click',selector='[data-fd-publish]')
         s.need('published: seq shown',r.ui_try('wait',selector='[data-fd-seq]',timeoutMs=30000),r.ui_try('text',within={'selector':'[data-panel="front-door"]'}))
         shown=r.text('[data-fd-link]')
         mine=r.get('a','/front-door')
