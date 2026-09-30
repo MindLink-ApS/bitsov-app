@@ -38,6 +38,7 @@ import type {
   RoomQuote,
   SendReceipt,
   SpendView,
+  DeviceView,
   BudgetView,
   PresetId,
   FundingAddress,
@@ -126,6 +127,16 @@ export interface Source {
   /** The owner's one tap: open the short spend window, or ask the node for spend. */
   spendRequest(): Promise<SpendView>;
   spendLock(): Promise<SpendView>;
+  /** Withdraw the pending request at the node, then forget it. */
+  spendCancel(): Promise<SpendView>;
+  /** This Mac's Touch ID approvals: where the registration stands. */
+  deviceKeyStatus(): Promise<DeviceView>;
+  /** Create the enclave key, prove it with Touch ID, ask the owner once. */
+  deviceKeyRegister(): Promise<DeviceView>;
+  deviceKeyCancel(): Promise<DeviceView>;
+  /** One contact's envelope, signed with Touch ID; null takes the host default. */
+  /** The host names the contact in the Touch ID dialog from the node's own peer list. */
+  relationApprove(peer: string, budgetMsat: number | null, perActMaxMsat: number | null): Promise<SpendView>;
   spendReconcile(): Promise<string>;
   /**
    * A message pays inside the owner's budget with no prompt. `firstContactMsat`
@@ -244,6 +255,12 @@ export const hostSource: Source = {
   spendStatus: () => invoke<SpendView>('spend_status'),
   spendRequest: () => invoke<SpendView>('spend_request'),
   spendLock: () => invoke<SpendView>('spend_lock'),
+  spendCancel: () => invoke<SpendView>('spend_cancel'),
+  deviceKeyStatus: () => invoke<DeviceView>('device_key_status'),
+  deviceKeyRegister: () => invoke<DeviceView>('device_key_register'),
+  deviceKeyCancel: () => invoke<DeviceView>('device_key_cancel'),
+  relationApprove: (peer, budgetMsat, perActMaxMsat) =>
+    invoke<SpendView>('relation_approve', { peer, budget_msat: budgetMsat, per_act_max_msat: perActMaxMsat }),
   spendReconcile: () => invoke<string>('spend_reconcile'),
   send: (recipient, isRoom, plaintext, maxMsat, maxRecipientMsat, firstContactMsat) =>
     invoke<SendReceipt>('message_send', { recipient, is_room: isRoom, plaintext, max_msat: maxMsat, max_recipient_msat: maxRecipientMsat ?? null, first_contact_msat: firstContactMsat ?? null }),

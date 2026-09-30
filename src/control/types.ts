@@ -364,6 +364,9 @@ export type ActionError = {
     | 'budget_paused' | 'budget_exhausted' | 'ceiling_exhausted' | 'first_contact' | 'budget_needed' | 'budget_unreadable'
     // G1 node grants: refused before any payment (see src-tauri/src/grant.rs).
     | 'grant_ended' | 'grant_exhausted' | 'grant_per_call' | 'grant_recipient' | 'grant_unpriced' | 'grant_ledger' | 'grant_refused' | 'grant_unknown' | 'grant_first_contact' | 'grant_readmission'
+    | 'grant_no_envelope'
+    // This Mac's Touch ID approvals (device key).
+    | 'device_not_registered' | 'device_biometry' | 'device_cancelled' | 'device_unavailable' | 'device_invalid' | 'device_key' | 'device_unsupported'
     | 'room_unreachable'
     // Paid, not delivered (node 502 `payment_settled_send_incomplete`), and its retry.
     | 'payment_settled_undelivered' | 'retry_unavailable' | 'retry_needs_admission' | 'undelivered_pending'
@@ -429,9 +432,30 @@ export type Elevation = {
   owner_can_grant: boolean;
 };
 
+/** This Mac as a paired device (`device_key_status`). */
+export type DeviceState = 'unavailable' | 'none' | 'pending' | 'registered' | 'lapsed' | 'off';
+export type DeviceView = {
+  /** This Mac has a Secure Enclave the app can use. */
+  available: boolean;
+  state: DeviceState;
+  /** This Mac's key fingerprint, as the node shows it to the owner. */
+  fingerprint: string | null;
+  /** While pending: the node's one-time owner command, verbatim. */
+  owner_action: string | null;
+  expires_at_ms: number | null;
+  /** State `off`: the node's reason code (e.g. `seed_not_encrypted`) and what the owner is told. */
+  off_reason?: string | null;
+  off_message?: string | null;
+};
+
+/** Why the last request ended without a grant. `lost`: the node restarted (or cancelled it) and can no longer approve it. */
+export type SpendLapse = 'expired' | 'lost';
+
 /** `spend_status` / `spend_request` / `spend_lock`. */
 export type SpendView = {
   state: SpendState;
+  /** Set with `expired` when a request ended ungranted: offer Ask again. */
+  lapse?: SpendLapse | null;
   basis: SpendBasis | null;
   open_until_ms: number | null;
   pending: Elevation | null;
@@ -468,7 +492,14 @@ export type BudgetView = {
 };
 
 /** What the node reports about its budget grant. Numbers only. */
-export type NodeGrantSummary = { expires_at_ms: number; budget_msat: number; remaining_msat: number; per_call_max_msat: number };
+export type NodeGrantSummary = {
+  expires_at_ms: number;
+  budget_msat: number;
+  remaining_msat: number;
+  per_call_max_msat: number;
+  /** A Touch ID relation grant: each contact with an envelope → when it ends (ms). Absent for a console grant. */
+  envelopes?: Record<string, number> | null;
+};
 
 /** `message_send`. */
 export type SendReceipt = {
