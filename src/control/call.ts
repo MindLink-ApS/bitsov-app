@@ -49,6 +49,8 @@ export type Signal = {
   sdp_mid?: string | null;
   sdp_mline_index?: number | null;
   reason?: HangupReason;
+  /** 400 only: this call is one leg of a mesh meeting (see meeting.ts). */
+  meeting?: { id: string; roster: string[] };
 };
 
 const CALL_ID = /^[0-9a-f]{32}$/;
@@ -122,10 +124,12 @@ export type CallDeps = {
   newCallId?: () => string;
   /** Read at each call: the owner's STUN setting, `[]` (host only) by default. */
   iceServers?: () => RTCIceServer[];
+  /** Something else (a meeting) holds the mic: an incoming offer rings out. */
+  busy?: () => boolean;
 };
 
 /** Wait for ICE gathering to finish, or `ms`, whichever comes first. */
-function gathered(pc: RTCPeerConnection, ms: number): Promise<void> {
+export function gathered(pc: RTCPeerConnection, ms: number): Promise<void> {
   if (pc.iceGatheringState === 'complete') return Promise.resolve();
   return new Promise((resolve) => {
     const done = () => {
@@ -246,7 +250,7 @@ export function createCallEngine(deps: CallDeps) {
 
     /** Place a call. The price was shown before this is called. */
     place: (peer: string, media: CallMedia, q: CallQuote) => guarded(async () => {
-      if (active()) return;
+      if (active() || deps.busy?.()) return;
       if (q.offer_msat === null || q.call_total_msat === null) {
         set({ ...IDLE, phase: 'ended', peer, error: 'Their node does not take calls yet. Nothing was paid.' });
         return;
@@ -388,8 +392,9 @@ export function createCallEngine(deps: CallDeps) {
       const ours = view.callId === s.call_id && view.peer === peer;
       switch (m.kind) {
         case CALL_OFFER:
-          // Busy: let their ring time out rather than pay to say so.
-          if (active()) return;
+          // A meeting leg belongs to the meeting engine. Busy: let their ring
+          // time out rather than pay to say so.
+          if (s.meeting || active() || deps.busy?.()) return;
           offerSdp = s.sdp!;
           set({ ...IDLE, phase: 'incoming', peer, callId: s.call_id, media: s.media!, camera: s.media === 'video' });
           ringTimer = setTimeout(() => { if (view.callId === s.call_id && view.phase === 'incoming') end('timeout'); }, RING_MS);

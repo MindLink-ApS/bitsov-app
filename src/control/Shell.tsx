@@ -1,6 +1,6 @@
 import { MONEY_NOT_READY, readinessLine, readinessSource } from './readiness';
 import { createEffect, createMemo, createResource, createSignal, For, type JSX, Match, on, onCleanup, onMount, Show, Switch, untrack } from 'solid-js';
-import { createStore, produce } from 'solid-js/store';
+import { createStore, produce, reconcile } from 'solid-js/store';
 import { qrSvg } from '../qr';
 import type { Proposal } from './ai';
 import { AiTrack, createAiSession } from './AiTrack';
@@ -9,6 +9,7 @@ import { amountText, inPaymentBounds, MAX_PAYMENT_MSAT, MIN_PAYMENT_MSAT, parseA
 import { Organism } from './BodyPanel';
 import { DiscoverPanel, FrontDoorEditor } from './Discover';
 import { callCost, createCallEngine, IDLE as CALL_IDLE, isCallKind, signalCost, stunServer, type CallMedia, type CallView } from './call';
+import { createMeetingEngine, declineCost, inviteCost, joinCost, MAX_PARTICIPANTS, MEETING_IDLE, type LegState, type MeetingView, type ShownQuotes } from './meeting';
 import { blobUrl, duration, FILE_MAX_BYTES, fileNameOf, isVoiceNote, type Recording, startRecording, VOICE_MAX_MS } from './voice';
 import { EMOJIS, insertEmoji } from './emoji';
 import { cleanPurpose, hostReadProblem, invoicePaymentHash, NOT_PAYABLE_NOTE, type NotPayable, payeeView, readChatInvoice } from './bolt11';
@@ -178,6 +179,8 @@ export type Actions = {
   /** Place a call after the price was shown. */
   placeCall: (peer: string, media: CallMedia, quote: CallQuote) => void;
   callActive: () => boolean;
+  /** Open the meeting planner with this contact picked. Pays nothing. */
+  planMeeting: (peer: string) => void;
 };
 
 let artifactSeq = 0;
@@ -468,7 +471,9 @@ export function ControlCenter(props: Props) {
             }
             // Call signals ring or steer the call; they are not chat.
             if (event.type === 'message' && isCallKind(event.message.kind)) {
+              // Each engine takes only its own: meeting legs carry a roster.
               void calls.receive(event.message, ownId());
+              void meetings.receive(event.message, ownId());
               return;
             }
             if (event.type === 'message' || event.type === 'delivery') {
@@ -602,9 +607,36 @@ export function ControlCenter(props: Props) {
     onStreams: (local, remote) => setCallStreams({ local, remote }),
     // No STUN unless the owner set one: host candidates only.
     iceServers: () => stunServer(stunPref()),
+    busy: () => meetingOn(),
   });
   // Closing the window ends the call here without paying; only Hang up pays.
   onCleanup(() => calls.endLocal());
+
+  // Meetings: up to 4 people, one ordinary paid 1:1 call per pair (meeting.ts).
+  const [meetingView, setMeetingView] = createSignal<MeetingView>(MEETING_IDLE);
+  const [meetingStreams, setMeetingStreams] = createSignal<{ local: MediaStream | null; remote: Record<string, MediaStream> }>({ local: null, remote: {} });
+  const [meetingPlan, setMeetingPlan] = createSignal<string[] | null>(null);
+  const meetingOn = () => meetingView().phase === 'invited' || meetingView().phase === 'active';
+  // Our own node takes meeting legs (genome `call_meeting_v1` on /status).
+  const nodeMeets = () => overview()?.capabilities?.includes('call_meeting_v1') === true;
+  const meetings = createMeetingEngine({
+    quote: (peer) => act(() => source.callQuote(peer)),
+    signal: async (peer, kind, plaintext, maxMsat) => {
+      const r = await act(() => source.callSignal(peer, kind, plaintext, maxMsat));
+      void loadBudget();
+      void loadWallet();
+      return r;
+    },
+    getUserMedia: (c) => navigator.mediaDevices.getUserMedia(c),
+    peerConnection: (config) => new RTCPeerConnection(config),
+    ownId: () => ownId(),
+    canMeet: (peer) => nodeMeets() && peerById().get(peer.toLowerCase())?.meetings === true,
+    onView: setMeetingView,
+    onStreams: (local, remote) => setMeetingStreams({ local, remote }),
+    iceServers: () => stunServer(stunPref()),
+    busy: () => !['idle', 'ended'].includes(callView().phase),
+  });
+  onCleanup(() => meetings.endLocal());
 
   // Voice notes: one object URL per message, revoked when the shell goes.
   // A just-sent clip plays from its own bytes; a received one is read once.
@@ -613,7 +645,13 @@ export function ControlCenter(props: Props) {
   const actions: Actions = {
     callQuote: (peer) => act(() => source.callQuote(peer)),
     placeCall: (peer, media, quote) => void calls.place(peer, media, quote),
-    callActive: () => !['idle', 'ended'].includes(callView().phase),
+    callActive: () => !['idle', 'ended'].includes(callView().phase) || meetingOn(),
+    // Opens the planner; the contact is pre-picked only if their node takes meetings.
+    planMeeting: (peer) => {
+      if (meetingOn()) return;
+      const id = peer.toLowerCase();
+      setMeetingPlan(nodeMeets() && peerById().get(id)?.meetings === true ? [id] : []);
+    },
     voiceUrl: (messageId) => {
       let url = voiceUrls.get(messageId);
       if (!url) {
@@ -1059,6 +1097,25 @@ export function ControlCenter(props: Props) {
         mute={() => calls.toggleMute()}
         camera={() => void calls.toggleCamera()}
         dismiss={() => calls.dismiss()}
+      />
+      <MeetingPanel
+        view={meetingView()}
+        streams={meetingStreams()}
+        plan={meetingPlan()}
+        contacts={peers().map((p) => ({ id: p.node_id.toLowerCase(), name: peerName(p, p.node_id), meetings: p.meetings === true, connected: p.connected }))}
+        nodeMeets={nodeMeets()}
+        ownId={ownId()}
+        blocked={moneyBlocked()}
+        nameOf={nameOf}
+        quote={actions.callQuote}
+        setPlan={setMeetingPlan}
+        invite={(ids, media, quotes) => { setMeetingPlan(null); void meetings.invite(ids, media, quotes); }}
+        join={(quotes) => void meetings.join(quotes)}
+        decline={(quotes) => void meetings.decline(quotes)}
+        leave={() => void meetings.leave()}
+        mute={() => meetings.toggleMute()}
+        camera={() => void meetings.toggleCamera()}
+        dismiss={() => meetings.dismiss()}
       />
     </div>
   );
@@ -1750,6 +1807,9 @@ function CallButtons(props: { peer: string; name: string; blocked: boolean; acti
       <button type="button" class="soft call-button" data-call="video" disabled={off()} title={title()} onClick={() => place('video')} aria-label={`Video call ${props.name}${cost() !== null ? `, up to ${fmtAmount(cost()!)}` : ''}`}>
         Video
       </button>
+      <button type="button" class="soft call-button" data-call="meeting" disabled={off()} title={`Start a meeting with ${props.name} and up to ${MAX_PARTICIPANTS - 2} more contacts. The price shows before anyone is rung.`} onClick={() => props.actions.planMeeting(props.peer)}>
+        Meeting
+      </button>
     </div>
   );
 }
@@ -1845,6 +1905,167 @@ function CallPanel(props: {
         </div>
       </aside>
     </Show>
+  );
+}
+
+const LEG_STATE: Record<LegState, string> = {
+  waiting: 'Waiting', placing: 'Preparing…', ringing: 'Ringing', incoming: 'Ringing you', connecting: 'Connecting', live: 'Live', ended: 'Ended', nolink: 'No link',
+};
+
+/**
+ * Meetings: the planner (pick up to 3 contacts, all-in price before anyone is
+ * rung), the invite card (join price), and the meeting itself (one tile per
+ * other participant; a missing pair shows "No link" and the rest goes on).
+ */
+function MeetingPanel(props: {
+  view: MeetingView;
+  streams: { local: MediaStream | null; remote: Record<string, MediaStream> };
+  plan: string[] | null;
+  contacts: { id: string; name: string; meetings: boolean; connected: boolean }[];
+  /** Our own node takes meeting legs. */
+  nodeMeets: boolean;
+  ownId: string;
+  /** Money is not ready: nobody can be invited. */
+  blocked: boolean;
+  nameOf: (id: string) => string;
+  quote: (peer: string) => Promise<Outcome<CallQuote>>;
+  setPlan: (ids: string[] | null) => void;
+  /** `quotes` are exactly the prices shown: the engine never pays above them. */
+  invite: (ids: string[], media: CallMedia, quotes: ShownQuotes) => void;
+  join: (quotes: ShownQuotes) => void;
+  decline: (quotes: ShownQuotes) => void;
+  leave: () => void;
+  mute: () => void;
+  camera: () => void;
+  dismiss: () => void;
+}) {
+  // Read-only call quotes, read afresh each time the planner or an invite card
+  // opens. What is shown is what binds: the engine pays at most these.
+  // `undefined` = still reading, `null` = no call price.
+  const [quotes, setQuotes] = createStore<Record<string, CallQuote | null | undefined>>({});
+  let generation = 0;
+  const refresh = (ids: string[]) => {
+    const g = ++generation;
+    setQuotes(reconcile(Object.fromEntries(ids.map((id) => [id, undefined]))));
+    ids.forEach((id) => void props.quote(id).then((r) => { if (g === generation) setQuotes(id, r.ok ? r.value : null); }));
+  };
+  const planning = () => props.plan !== null && (props.view.phase === 'idle' || props.view.phase === 'ended');
+  createEffect(on(planning, (open) => { if (open) refresh(props.contacts.map((c) => c.id)); }));
+  createEffect(on(() => (props.view.phase === 'invited' ? props.view.id : null), (id) => {
+    if (id) refresh(untrack(() => props.view.roster).filter((x) => x !== props.ownId.toLowerCase()));
+  }));
+  const shown = (ids: string[]): ShownQuotes => Object.fromEntries(ids.map((id) => [id, quotes[id] ?? null]));
+  const priced = (id: string) => { const q = quotes[id]; return !!q && callCost(q) !== null; };
+  const contact = (id: string) => props.contacts.find((c) => c.id === id);
+  // Only a connected contact whose node advertises meetings is ever rung with a leg.
+  const meets = (id: string) => props.nodeMeets && contact(id)?.meetings === true;
+  const pickable = (id: string) => !props.blocked && meets(id) && priced(id);
+  const toggle = (id: string) => {
+    const plan = props.plan ?? [];
+    props.setPlan(plan.includes(id) ? plan.filter((x) => x !== id) : plan.length < MAX_PARTICIPANTS - 1 ? [...plan, id] : plan);
+  };
+  const planCost = () => (props.plan?.length && !props.blocked && props.plan.every(meets) ? inviteCost(props.plan.map((id) => quotes[id] ?? null)) : null);
+  const joinPrice = () => joinCost(props.view.roster, props.ownId.toLowerCase(), shown(props.view.roster));
+  const declinePrice = () => declineCost(props.view, shown(props.view.legs.map((l) => l.peer)));
+  const price = (m: number | null) => (m === null ? '' : ` · ${sats(m)} ${satUnit(m)}`);
+  const v = () => props.view;
+  const host = () => (v().roster[0] ? props.nameOf(v().roster[0]) : '');
+  const others = () => v().roster.slice(1).filter((id) => id !== props.ownId.toLowerCase()).map(props.nameOf).join(', ');
+  return (
+    <>
+      <Show when={planning()}>
+        <aside class="call-panel meeting-panel" data-meeting-panel="planning" role="dialog" aria-label="Plan a meeting">
+          <header><strong>Meeting</strong><span class="who">you and up to {MAX_PARTICIPANTS - 1} contacts</span></header>
+          <ul class="meeting-legs">
+            <For each={props.contacts}>
+              {(c) => (
+                <li>
+                  <label>
+                    <input type="checkbox" data-meeting-pick={c.id} checked={props.plan?.includes(c.id) ?? false}
+                      disabled={!pickable(c.id) || (!(props.plan?.includes(c.id)) && (props.plan?.length ?? 0) >= MAX_PARTICIPANTS - 1)}
+                      onChange={() => toggle(c.id)} />
+                    <span classList={{ muted: !pickable(c.id) }}>{c.name}</span>
+                  </label>
+                  <Switch>
+                    <Match when={props.nodeMeets && !c.connected}><span class="hint" data-meeting-pick-note={c.id}> not connected</span></Match>
+                    <Match when={props.nodeMeets && !c.meetings}><span class="hint" data-meeting-pick-note={c.id}> needs update</span></Match>
+                    <Match when={quotes[c.id] === undefined}><span class="hint" data-meeting-pick-note={c.id}> reading price…</span></Match>
+                    <Match when={!priced(c.id)}><span class="hint" data-meeting-pick-note={c.id}> does not take calls</span></Match>
+                  </Switch>
+                </li>
+              )}
+            </For>
+          </ul>
+          <Show when={!props.nodeMeets}><p class="hint" data-meeting-node-update>Your node needs an update before it can hold meetings.</p></Show>
+          <Show when={props.blocked}><p class="hint" data-meeting-blocked>Payments are not ready yet, so nobody can be invited.</p></Show>
+          <p class="hint" data-meeting-note>You ring each person you pick (their call price, once each). Picked contacts who are not each other’s contacts will not hear each other. Media goes directly between you; it is not billed.</p>
+          <div class="call-actions">
+            <button type="button" class="primary soft" data-meeting-invite disabled={planCost() === null} onClick={() => props.invite(props.plan!, 'audio', shown(props.plan!))}
+              aria-label={`Invite${planCost() !== null ? `, up to ${fmtAmount(planCost()!)}` : ''}`}>
+              Invite{price(planCost())}
+            </button>
+            <button type="button" class="soft" data-meeting-invite-video disabled={planCost() === null} onClick={() => props.invite(props.plan!, 'video', shown(props.plan!))}
+              aria-label={`Video invite${planCost() !== null ? `, up to ${fmtAmount(planCost()!)}` : ''}`}>
+              Video invite{price(planCost())}
+            </button>
+            <button type="button" class="soft" data-meeting-cancel onClick={() => props.setPlan(null)}>Cancel</button>
+          </div>
+        </aside>
+      </Show>
+      <Show when={v().phase !== 'idle' && !planning()}>
+        <aside class="call-panel meeting-panel" data-meeting-panel={v().phase} role="dialog" aria-label={`Meeting ${v().phase}`}>
+          <header>
+            <strong data-meeting-title>{v().phase === 'invited' ? 'Meeting invite' : v().phase === 'ended' ? 'Meeting ended' : `Meeting · ${v().roster.length} people`}</strong>
+            <span class="who">{v().phase === 'invited' ? `${host()} invites you, with ${others() || 'nobody else'}` : ''}</span>
+          </header>
+          <Show when={v().phase === 'active' || (v().phase === 'ended' && v().legs.length > 0)}>
+            <ul class="meeting-legs">
+              <For each={v().legs}>
+                {(l) => (
+                  <li data-meeting-leg={l.peer} data-leg-state={l.state}>
+                    <strong>{props.nameOf(l.peer)}</strong> <span class="hint">{LEG_STATE[l.state]}{l.error && (l.state === 'nolink' || l.state === 'ended') ? ` · ${l.error}` : ''}</span>
+                    <MediaView stream={props.streams.remote[l.peer] ?? null} video={v().media === 'video'} muted={false} kind="remote" />
+                  </li>
+                )}
+              </For>
+            </ul>
+          </Show>
+          <Show when={v().phase === 'invited'}>
+            <p class="hint" data-meeting-ignore>Ignore it: nothing is paid, and the invite ends by itself after a minute.</p>
+          </Show>
+          <Show when={v().paidMsat > 0}>
+            <p class="hint" data-meeting-paid>Paid {fmtAmount(v().paidMsat)} for this meeting’s signals. Media is direct and not billed.</p>
+          </Show>
+          <Show when={v().phase === 'ended' && v().error}>
+            <p class="hint" data-meeting-ended>{v().error}</p>
+          </Show>
+          <div class="call-actions">
+            <Switch>
+              <Match when={v().phase === 'invited'}>
+                <button type="button" class="primary soft" data-meeting-join disabled={joinPrice() === null} onClick={() => props.join(shown(v().roster))}
+                  aria-label={`Join${joinPrice() !== null ? `, up to ${fmtAmount(joinPrice()!)}` : ''}`}>
+                  Join{price(joinPrice())}
+                </button>
+                <button type="button" class="soft" data-meeting-decline disabled={declinePrice() === null} onClick={() => props.decline(shown(v().roster))}
+                  aria-label={`Decline${declinePrice() !== null ? `, up to ${fmtAmount(declinePrice()!)}` : ''}`}>
+                  Decline{declinePrice() !== null ? ` · up to ${sats(declinePrice()!)} ${satUnit(declinePrice()!)}` : ''}
+                </button>
+              </Match>
+              <Match when={v().phase === 'active'}>
+                <button type="button" class="soft" data-meeting-mute aria-pressed={v().muted} onClick={() => props.mute()}>Mute</button>
+                <Show when={v().media === 'video'}>
+                  <button type="button" class="soft" data-meeting-camera aria-pressed={v().camera} onClick={() => props.camera()}>Camera</button>
+                </Show>
+                <button type="button" class="danger soft" data-meeting-leave onClick={() => props.leave()}>Leave</button>
+              </Match>
+              <Match when={v().phase === 'ended'}>
+                <button type="button" class="soft" data-meeting-dismiss onClick={() => props.dismiss()}>Close</button>
+              </Match>
+            </Switch>
+          </div>
+        </aside>
+      </Show>
+    </>
   );
 }
 

@@ -9,6 +9,8 @@ export type Peer = {
   label: string | null;
   connected: boolean;
   fingerprint: string | null;
+  /** Their node takes mesh-meeting legs (connected, advertising `call_meeting_v1`). */
+  meetings?: boolean;
 };
 
 /** `rooms_list` — `GET /rooms`. */
@@ -181,7 +183,7 @@ export type NodeOverview = {
   uptime_secs: number;
   lightning_backend: string | null;
   chain_backend: string | null;
-  /** Known node capabilities (`energy_v1`, `membrane_v1`); absent or empty on rc7. */
+  /** Known node capabilities (`energy_v1`, `membrane_v1`, `call_meeting_v1`); absent or empty on rc7. */
   capabilities?: string[];
   /** UDP port of the node's own STUN responder (`[calls] stun_listen`); absent when off. */
   stun_port?: number | null;
