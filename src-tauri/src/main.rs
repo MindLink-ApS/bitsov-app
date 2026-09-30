@@ -71,7 +71,8 @@ mod owner_contact;
 
 /// Node API bind — konsensus ApiConfig `default_api_addr()` = 127.0.0.1:3141.
 /// Loopback ONLY (Gate G2): never point this at a non-loopback host until a
-/// confidential remote transport + delegated auth exist.
+/// confidential remote transport + delegated auth exist. Release builds always use
+/// this; only a debug `dev-node` build may move the port (`dev_node::api_base`).
 const API_BASE: &str = "http://127.0.0.1:3141/api/v1";
 
 /// Pinned onboarding contract (BitSov-bitsov `v0.3.0-rc7` / `958e399`): the funding
@@ -191,6 +192,9 @@ struct NodeState {
     /// still going to rewrite. Held across awaits, hence async.
     money: tokio::sync::Mutex<()>,
     owner_contact: Mutex<Option<owner_contact::Pending>>,
+    /// The pending owner request for `front_door` (publish the front-door
+    /// card only), so repeated Publish presses reuse one request. Memory only.
+    front_door_ask: Mutex<Option<act::Elevation>>,
 }
 
 /// The owner asked for these while an elevation request is pending.
@@ -220,7 +224,13 @@ enum Want {
 
 impl Default for NodeState {
     fn default() -> Self {
-        Self::for_api(API_BASE)
+        // Release builds: always API_BASE; the environment is not read (see `dev_node`).
+        // A bad dev override stops here rather than fall back to a pilot on 3141.
+        let api_base = dev_node::api_base(API_BASE).unwrap_or_else(|e| {
+            eprintln!("[dev-node] {e}");
+            std::process::exit(2)
+        });
+        Self::for_api(api_base)
     }
 }
 
@@ -238,6 +248,7 @@ impl NodeState {
             autopay: Mutex::new(budget::Autopay::default()),
             wants: Mutex::new(Wants::default()),
             owner_contact: Mutex::new(None),
+            front_door_ask: Mutex::new(None),
             node_grant: Mutex::new(None),
             all_in_caps_node: Mutex::new(None),
             readmission_ask: Mutex::new(None),
@@ -504,12 +515,19 @@ async fn wait_for_health(state: &NodeState) -> Result<(), String> {
     Err("node did not become healthy within 60s".into())
 }
 
-/// PIDs listening on the loopback control plane. POST /identity/restore only writes
-/// files; whoever still answers 3141 keeps the old id until that process is replaced.
-fn loopback_listener_pids() -> Vec<u32> {
+/// The port of a loopback `http://127.0.0.1:<port>/api/v1` base; `None` otherwise.
+fn loopback_api_port(api_base: &str) -> Option<u16> {
+    let port = api_base.strip_prefix("http://127.0.0.1:")?.strip_suffix("/api/v1")?;
+    port.parse().ok().filter(|p| *p != 0)
+}
+
+/// PIDs listening on the loopback control plane (3141, or the dev override's port).
+/// POST /identity/restore only writes files; whoever still answers the API port keeps
+/// the old id until that process is replaced.
+fn loopback_listener_pids(port: u16) -> Vec<u32> {
     let mut pids = Vec::new();
     if let Ok(out) = std::process::Command::new("lsof")
-        .args(["-nP", "-iTCP:3141", "-sTCP:LISTEN", "-t"])
+        .args(["-nP", &format!("-iTCP:{port}"), "-sTCP:LISTEN", "-t"])
         .output()
     {
         for line in String::from_utf8_lossy(&out.stdout).lines() {
@@ -523,10 +541,15 @@ fn loopback_listener_pids() -> Vec<u32> {
     pids
 }
 
-/// Stop the process that holds 127.0.0.1:3141 so a restart can bind the restored identity.
-fn stop_loopback_listener() {
+/// Stop the process that holds the API port so a restart can bind the restored
+/// identity. Only this app's own API base names the port: a dev run moved off 3141
+/// never signals a pilot node there.
+fn stop_loopback_listener(api_base: &str) {
+    let Some(port) = loopback_api_port(api_base) else {
+        return;
+    };
     let our_pid = std::process::id();
-    for pid in loopback_listener_pids() {
+    for pid in loopback_listener_pids(port) {
         if pid == our_pid {
             continue;
         }
@@ -589,7 +612,7 @@ async fn restart_node(
             return Ok(false);
         }
         // Wrong identity: actually restart the listener that holds 3141.
-        stop_loopback_listener();
+        stop_loopback_listener(&state.api_base);
         for _ in 0..20 {
             if !health_ok(&state).await {
                 break;
@@ -597,7 +620,7 @@ async fn restart_node(
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
         if health_ok(&state).await {
-            return Err("could not free 127.0.0.1:3141 after identity restore".into());
+            return Err(format!("could not free {} after identity restore", state.api_base));
         }
     }
 
@@ -637,7 +660,8 @@ fn refuse_external(state: &NodeState) -> Result<(), String> {
 async fn attach_external(app: &AppHandle, app_data_dir: &Path, node: dev_node::ExternalNode) {
     let state = app.state::<NodeState>();
     eprintln!(
-        "[dev-node] EXTERNAL node on 127.0.0.1:3141, data dir {} (not started or stopped by the app)",
+        "[dev-node] EXTERNAL node on {}, data dir {} (not started or stopped by the app)",
+        state.api_base,
         node.data_dir.display()
     );
     if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
@@ -654,8 +678,11 @@ async fn attach_external(app: &AppHandle, app_data_dir: &Path, node: dev_node::E
     if !health_ok(&state).await {
         return set_error(
             &state,
-            "no node answers on 127.0.0.1:3141. Start your node, then reopen BitSov; \
-             it never starts one in external mode.",
+            format!(
+                "no node answers on {}. Start your node, then reopen BitSov; \
+                 it never starts one in external mode.",
+                state.api_base
+            ),
         );
     }
     finish_auth(&state, &app_dir).await;
@@ -1888,10 +1915,7 @@ async fn front_door_publish(
         "cv": fields.cv,
         "links": fields.links,
     });
-    let (code, text) = call_api(state.inner(), reqwest::Method::PUT, path, Some(body)).await?;
-    if !code.is_success() {
-        return Err(api_error(path, code, &text));
-    }
+    let text = put_front_door(state.inner(), body).await?;
     #[derive(Deserialize)]
     struct Resp {
         card: fd::Card,
@@ -1906,6 +1930,73 @@ async fn front_door_publish(
         return Err(format!("{path}: the link does not match the card"));
     }
     Ok(view)
+}
+
+/// Marks the error that asks the owner for `front_door`; the editor shows it
+/// with the owner's command instead of as a plain failure.
+const FRONT_DOOR_OWNER: &str = "front_door_owner";
+
+/// `PUT /front-door`. The node demands `front_door` (or `admin`, which a paired
+/// app never holds). Without it the app asks the owner once
+/// (`POST /pair/elevation-request {"scopes":["front_door"]}`), which carries no
+/// authority, and says what the owner must run. After the owner grants, the
+/// next Publish re-mints the paired token, which then carries `front_door`.
+/// Nothing here can grant it: only the owner's CLI at the node can.
+async fn put_front_door(state: &NodeState, body: serde_json::Value) -> Result<String, String> {
+    let path = "/front-door";
+    let lacks_scope = |code: reqwest::StatusCode, text: &str| {
+        code == reqwest::StatusCode::FORBIDDEN && text.contains("front_door")
+    };
+    let (mut code, mut text) = call_api(state, reqwest::Method::PUT, path, Some(body.clone())).await?;
+    let paired = matches!(&*state.auth.lock().unwrap(), AuthMode::Paired(_));
+    if paired && lacks_scope(code, &text) {
+        // The owner may have granted since this token was issued.
+        if refresh_paired(state).await.is_ok() {
+            (code, text) = call_api(state, reqwest::Method::PUT, path, Some(body)).await?;
+        }
+        if lacks_scope(code, &text) {
+            return Err(ask_front_door_owner(state).await);
+        }
+    }
+    if !code.is_success() {
+        return Err(api_error(path, code, &text));
+    }
+    *state.front_door_ask.lock().unwrap() = None;
+    Ok(text)
+}
+
+/// One pending `front_door` request at a time; the owner's words, verbatim.
+async fn ask_front_door_owner(state: &NodeState) -> String {
+    let current = state.front_door_ask.lock().unwrap().clone();
+    let pending = match current.filter(|e| e.expires_at_ms > now_ms()) {
+        Some(e) => Ok(e),
+        None => {
+            let ask = serde_json::json!({ "scopes": ["front_door"] });
+            match call_api(state, reqwest::Method::POST, "/pair/elevation-request", Some(ask)).await {
+                Ok((code, body)) if code.is_success() => decode_act::<act::ElevationReply>("/pair/elevation-request", &body)
+                    .and_then(|r| r.into_elevation())
+                    .map_err(|e| e.message),
+                Ok((code, body)) => Err(api_error("/pair/elevation-request", code, &body)),
+                Err(e) => Err(e),
+            }
+        }
+    };
+    match pending {
+        Ok(e) => {
+            *state.front_door_ask.lock().unwrap() = Some(e.clone());
+            if e.owner_can_grant {
+                format!(
+                    "{FRONT_DOOR_OWNER}: Publishing your front door needs your permission at the node \
+                     (it allows the card only: no spending, nothing else). On the node's computer run: \
+                     {} Then press Publish again.",
+                    e.owner_action
+                )
+            } else {
+                format!("{FRONT_DOOR_OWNER}: This node cannot let the app publish its front door. {}", e.owner_action)
+            }
+        }
+        Err(e) => format!("Your node refused to publish the front door and could not take a request: {e}"),
+    }
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -3886,7 +3977,17 @@ async fn do_file_save(state: &NodeState, message_id: &str) -> Result<act::FileSa
         .try_lock()
         .map_err(|_| "save already in progress".to_string())?;
     let name = act::safe_save_name(&blob.filename);
-    let path = rfd::FileDialog::new().set_file_name(&name).save_file();
+    // Release builds: always the native dialog (`dev_node::save_dir` is `Ok(None)`).
+    let path = match dev_node::save_dir()? {
+        Some(dir) => {
+            let path = dir.join(&name);
+            if path.exists() {
+                return Err(format!("{} already exists; the test save dir never overwrites", path.display()));
+            }
+            Some(path)
+        }
+        None => rfd::FileDialog::new().set_file_name(&name).save_file(),
+    };
     let Some(path) = path else {
         return Ok(act::FileSaveResult {
             saved: false,
@@ -5049,6 +5150,36 @@ mod node_start_args_tests {
             node_start_args(config, true),
             ["start", "--config", "/tmp/dev/konsensus.toml", "--owner-control"]
         );
+    }
+}
+
+#[cfg(test)]
+mod api_base_tests {
+    use super::{loopback_api_port, API_BASE};
+
+    #[test]
+    fn the_app_talks_to_3141_unless_a_dev_build_moves_it() {
+        assert_eq!(API_BASE, "http://127.0.0.1:3141/api/v1");
+        // `cargo test` builds without `dev-node`: the product base, always.
+        #[cfg(not(all(debug_assertions, feature = "dev-node")))]
+        assert_eq!(super::NodeState::default().api_base, API_BASE);
+    }
+
+    /// The restore path stops only the listener on this app's own API port.
+    #[test]
+    fn restore_signals_only_the_app_api_port() {
+        assert_eq!(loopback_api_port(API_BASE), Some(3141));
+        assert_eq!(loopback_api_port("http://127.0.0.1:47123/api/v1"), Some(47123));
+        let lan = format!("{}://192.168.1.5:3141/api/v1", "http");
+        for other in [
+            "http://127.0.0.1:0/api/v1",
+            "http://localhost:3141/api/v1",
+            "http://127.0.0.1:3141",
+            lan.as_str(),
+            "http://127.0.0.1:x/api/v1",
+        ] {
+            assert_eq!(loopback_api_port(other), None, "{other}");
+        }
     }
 }
 
@@ -7549,6 +7680,67 @@ mod control_act_tests {
             data_dir: dir.path().to_path_buf(),
         }));
         (node, dir)
+    }
+
+    /// A node that demands `front_door` for `PUT /front-door` until `granted`.
+    fn front_door_node(granted: Arc<std::sync::atomic::AtomicBool>, owner_action: &'static str) -> Routes {
+        let far = now_unix() + 900;
+        // Only a token minted after the grant carries `front_door`.
+        let minted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        Arc::new(move |m: &str, path: &str, _b: &str| {
+            let ok = granted.load(Ordering::SeqCst);
+            if m == "POST" && path == "/pair/token" && ok {
+                minted.store(true, Ordering::SeqCst);
+            }
+            let v = match (m, path) {
+                ("PUT", "/front-door") if minted.load(Ordering::SeqCst) => serde_json::json!({"card": {}, "link": "bitsov://front-door#x"}),
+                ("PUT", "/front-door") => return (403, "token lacks required scope: front_door".into()),
+                ("POST", "/pair/elevation-request") => serde_json::json!({"op_id": "fd01", "expires_at": far, "owner_action": owner_action}),
+                (_, p) if p.starts_with("/pair/challenge") => serde_json::json!({"challenge": "bitsov-pair-token-v1:ch"}),
+                ("POST", "/pair/token") => serde_json::json!({"token": if ok { "tok.fd" } else { "tok.2" }, "expires_at": far,
+                    "scopes": if ok { vec!["read", "receive", "front_door"] } else { vec!["read", "receive"] }}),
+                _ => return (404, r#"{"error":"route","code":404}"#.into()),
+            };
+            (200, v.to_string())
+        })
+    }
+
+    #[tokio::test]
+    async fn front_door_publish_asks_the_owner_once_and_publishes_after_the_grant() {
+        let granted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (node, _dir) = paired_fake(front_door_node(granted.clone(), "konsensus grant --op fd01"));
+        let body = serde_json::json!({"display_name": "Ada"});
+
+        let err = put_front_door(&node.state, body.clone()).await.unwrap_err();
+        assert!(err.starts_with(&format!("{FRONT_DOOR_OWNER}:")), "{err}");
+        assert!(err.contains("konsensus grant --op fd01") && err.contains("no spending"), "{err}");
+        // Pressing Publish again before the owner acts reuses the one request.
+        put_front_door(&node.state, body.clone()).await.unwrap_err();
+        let asks: Vec<_> = node.posts().into_iter().filter(|(p, _)| p == "/pair/elevation-request").collect();
+        assert_eq!(asks, [("/pair/elevation-request".to_string(), serde_json::json!({"scopes": ["front_door"]}))]);
+
+        // The owner grants at the node; the next Publish re-mints and publishes.
+        granted.store(true, Ordering::SeqCst);
+        put_front_door(&node.state, body).await.unwrap();
+        assert_eq!(node.state.token.lock().unwrap().as_deref(), Some("tok.fd"));
+        assert!(node.state.front_door_ask.lock().unwrap().is_none());
+        let puts = node.targets().into_iter().filter(|t| t == "PUT /front-door").count();
+        assert_eq!(puts, 6, "each press: one PUT, and one retry after a fresh token");
+    }
+
+    #[tokio::test]
+    async fn front_door_publish_says_plainly_when_the_node_cannot_grant_it() {
+        let granted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (node, _dir) = paired_fake(front_door_node(granted, "unavailable in this deployment: no owner control socket"));
+        let err = put_front_door(&node.state, serde_json::json!({"display_name": "Ada"})).await.unwrap_err();
+        assert!(err.contains("cannot let the app publish") && err.contains("unavailable in this deployment"), "{err}");
+
+        // Any other refusal is shown as the node wrote it, and asks nobody.
+        let routes: Routes = Arc::new(|_: &str, _: &str, _: &str| (403, "token lacks required scope: admin".into()));
+        let (node, _dir) = paired_fake(routes);
+        let err = put_front_door(&node.state, serde_json::json!({"display_name": "Ada"})).await.unwrap_err();
+        assert!(!err.starts_with(FRONT_DOOR_OWNER) && err.contains("admin"), "{err}");
+        assert!(node.posts().is_empty());
     }
 
     #[tokio::test]

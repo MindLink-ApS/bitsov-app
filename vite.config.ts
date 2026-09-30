@@ -116,12 +116,24 @@ if (assistantIncluded(process.env)) {
   input.assistant = resolve(root, 'assistant.html');
 }
 
-// Tauri desktop dev server. Fixed port so tauri.conf.json devUrl matches.
+// The dev server port. 1420 matches tauri.conf.json devUrl. The real-window
+// harness moves it with BITSOV_VITE_PORT (and a matching devUrl in its own
+// --config) so a test run never collides with another dev server. Anything but
+// a plain port number 1024-65535 keeps 1420.
+export function devPort(env: Record<string, string | undefined>): number {
+  const raw = env.BITSOV_VITE_PORT?.trim() ?? '';
+  if (!/^[1-9][0-9]{3,4}$/.test(raw)) return 1420;
+  const port = Number(raw);
+  return port >= 1024 && port <= 65535 ? port : 1420;
+}
+
+// Tauri desktop dev server. strictPort: a taken port fails instead of moving,
+// so devUrl always matches.
 // The assistant entry is not the window Tauri shows at startup.
 export default defineConfig({
   plugins: [solid(), assistantDevCsp(), uiE2eDriver()],
   clearScreen: false,
-  server: { port: 1420, strictPort: true },
+  server: { port: devPort(process.env), strictPort: true },
   build: {
     rollupOptions: { input },
   },

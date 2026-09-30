@@ -1,5 +1,6 @@
 import { For, Show, createMemo, createSignal } from 'solid-js';
 import { copyPlainText } from '../assistant/copy';
+import { qrSvg } from '../qr';
 import type { FrontDoor, FrontDoorPublish } from './types';
 import type { Source } from './source';
 import { amount as fmtAmount } from './format';
@@ -19,6 +20,54 @@ import {
   type PreparedMedia,
 } from './frontDoorMedia';
 
+/** Host prefix of the error that asks the owner for `front_door` (main.rs `FRONT_DOOR_OWNER`). */
+const FRONT_DOOR_OWNER = 'front_door_owner:';
+
+/** Split the owner request into its text and the `konsensus grant --op <id>` command, if named. */
+export function frontDoorOwnerAsk(message: string | null): { text: string; command: string | null } | null {
+  if (!message?.startsWith(FRONT_DOOR_OWNER)) return null;
+  const text = message.slice(FRONT_DOOR_OWNER.length).trim();
+  const command = /konsensus grant --op [0-9a-f]{1,64}/.exec(text)?.[0] ?? null;
+  return { text, command };
+}
+
+/** Encoder-only QR of a share link; null when the link is too long for versions 1–30. */
+function shareQr(link: string): { extent: number; path: string } | null {
+  try {
+    return qrSvg(link);
+  } catch {
+    return null;
+  }
+}
+
+function FrontDoorShareQr(props: { link: string; label: string }) {
+  const qr = createMemo(() => shareQr(props.link));
+  return (
+    <Show
+      when={qr()}
+      fallback={
+        <p class="hint" data-fd-qr-skip>
+          This link is too long for a QR — copy it instead.
+        </p>
+      }
+    >
+      {(q) => (
+        <svg
+          class="qr"
+          data-fd-qr
+          viewBox={`0 0 ${q().extent} ${q().extent}`}
+          shape-rendering="crispEdges"
+          role="img"
+          aria-label={props.label}
+        >
+          <rect width={q().extent} height={q().extent} fill="#ffffff" />
+          <path d={q().path} fill="#000000" />
+        </svg>
+      )}
+    </Show>
+  );
+}
+
 type Props = {
   source: Source;
   now: number;
@@ -27,8 +76,9 @@ type Props = {
 };
 
 /**
- * Discover: paste or scan a front-door link, preview the card, Knock via the
- * existing first-contact path (unprivileged dial, then composer quote).
+ * Discover: paste a front-door link, preview the card (with share QR), Knock via
+ * the existing first-contact path (unprivileged dial, then composer quote).
+ * Desktop has no camera scan — show a QR to share; paste to read.
  */
 export function DiscoverPanel(props: Props) {
   const [pasted, setPasted] = createSignal('');
@@ -81,8 +131,9 @@ export function DiscoverPanel(props: Props) {
     <div class="panel discover" data-panel="discover">
       <h2>Discover</h2>
       <p class="hint">
-        Paste a front-door link or scan a QR. Reading is free and local. Knocking uses the existing
-        first-contact path — you pay their admission price once.
+        Paste a front-door link to read it. Reading is free and local. After Read, the card shows a
+        QR you can hold up for someone else — this desktop app does not scan a camera. Knocking uses
+        the existing first-contact path — you pay their admission price once.
       </p>
       <label class="field">
         <span>Front-door link</span>
@@ -109,7 +160,7 @@ export function DiscoverPanel(props: Props) {
         </p>
       </Show>
       <Show when={card()} keyed>
-        {(c) => <FrontDoorCardView card={c} now={props.now} />}
+        {(c) => <FrontDoorCardView card={c} now={props.now} shareQr />}
       </Show>
       <Show when={live()}>
         {(c) => (
@@ -146,7 +197,7 @@ export function DiscoverPanel(props: Props) {
   );
 }
 
-export function FrontDoorCardView(props: { card: FrontDoor; now: number }) {
+export function FrontDoorCardView(props: { card: FrontDoor; now: number; shareQr?: boolean }) {
   const c = () => props.card;
   const avatarSrc = () => {
     const a = c().profile.avatar;
@@ -188,6 +239,9 @@ export function FrontDoorCardView(props: { card: FrontDoor; now: number }) {
           </p>
         </div>
       </header>
+      <Show when={props.shareQr && c().link}>
+        <FrontDoorShareQr link={c().link} label="Front-door link as a QR code" />
+      </Show>
       <Show when={c().profile.about}>
         <p data-fd-about>{c().profile.about}</p>
       </Show>
@@ -408,6 +462,10 @@ export function FrontDoorEditor(props: { source: Source; now: number }) {
     };
   });
 
+  // The host's `front_door_owner` refusal: the owner must allow publishing at
+  // the node. Shown as a request with the node's own command, not a failure.
+  const ownerAsk = createMemo(() => frontDoorOwnerAsk(err()));
+
   const publish = async () => {
     if (!name().trim() || saving()) return;
     if (overBudget()) {
@@ -571,10 +629,20 @@ export function FrontDoorEditor(props: { source: Source; now: number }) {
           </button>
         </Show>
       </div>
-      <Show when={err()}>
+      <Show when={err() && !ownerAsk()}>
         <p class="hint err" data-fd-edit-error>
           {err()}
         </p>
+      </Show>
+      <Show when={ownerAsk()}>
+        {(ask) => (
+          <div class="hint" data-fd-owner-action>
+            <p>{ask().text}</p>
+            <Show when={ask().command}>
+              <code class="mono" data-fd-owner-command>{ask().command}</code>
+            </Show>
+          </div>
+        )}
       </Show>
       <Show when={mine()}>
         {(c) => (
@@ -582,6 +650,8 @@ export function FrontDoorEditor(props: { source: Source; now: number }) {
             <p class="hint" data-fd-seq>
               seq {c().seq} · expires {new Date(c().expires_at * 1000).toLocaleDateString()}
             </p>
+            <p class="hint">Hold this QR up for someone to scan with their phone, or copy the link.</p>
+            <FrontDoorShareQr link={c().link} label="Your front-door link as a QR code" />
             <code class="mono" data-fd-link>
               {c().link}
             </code>
