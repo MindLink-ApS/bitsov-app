@@ -4070,6 +4070,12 @@ function BudgetPanel(props: {
   );
 }
 
+/** Product default hides bitsov://introduce; money-safety tests enable the still-shipped door/consent UI. */
+let showLegacyIntroductionUi = false;
+export function setShowLegacyIntroductionUi(enabled: boolean) {
+  showLegacyIntroductionUi = enabled;
+}
+
 function NewTrack(props: {
   moneyBlocked: boolean;
   ownId: string;
@@ -4086,10 +4092,9 @@ function NewTrack(props: {
   let formRevision = 0;
   onCleanup(() => { active = false; });
   const editForm = () => { formRevision += 1; };
-  // Legacy bitsov://introduce UI is hidden (protocol audit): Profile cards live
-  // under Browse. The invite forms below stay. Keep the helpers so sponsor /
-  // door plumbing compiles; they are unreachable from the render tree.
-  const LEGACY_INTRO_UI = false;
+  // Product hides bitsov://introduce (protocol audit): Profile cards live under
+  // Browse. Sponsor starter-bitcoin stays reachable on this track. Tests may
+  // flip showLegacyIntroductionUi to exercise the still-shipped door/consent UI.
   // K1: your own signed introduction. Without one (older node, no dialable
   // endpoint) the plain node id is shown as before.
   const [mine, setMine] = createSignal<Introduction | null>(null);
@@ -4101,10 +4106,10 @@ function NewTrack(props: {
       setMineErr(asActionError(e).message);
     });
   };
-  if (LEGACY_INTRO_UI) loadMine();
+  if (showLegacyIntroductionUi) loadMine();
   const nowSecs = () => Math.floor(props.now / 1000);
   const mineLive = () => {
-    if (!LEGACY_INTRO_UI) return null;
+    if (!showLegacyIntroductionUi) return null;
     const m = mine();
     return m && m.expires_at > nowSecs() ? m : null;
   };
@@ -4419,7 +4424,36 @@ function NewTrack(props: {
                 </svg>
               </Show>
               <code class="address">{props.ownId}</code>
-              <Show when={mine()}>
+              <Show when={sponsor()?.enabled}>
+                <Show
+                  when={mine()?.starter}
+                  fallback={
+                    <>
+                      <button type="button" class="quiet" data-starter-include disabled={props.moneyBlocked} onClick={() => void includeStarter()}>
+                        {open() ? `Include starter bitcoin · ${fmtAmount(sponsor()!.gift_msat)}` : 'Include starter bitcoin · approve first'}
+                      </button>
+                      <p class="hint" data-starter-purse>
+                        You fund it from your own node, only after you approve their request. {sats(sponsor()!.purse_used_msat)} of{' '}
+                        {fmtAmount(sponsor()!.purse_msat)} used in the last 24 hours.
+                      </p>
+                    </>
+                  }
+                >
+                  {(st) => (
+                    <>
+                      <p data-starter-offered>
+                        Starter bitcoin: up to <strong>{fmtAmount(st().gift_msat)}</strong>, after you approve their request. It is theirs
+                        once it arrives; every message still pays.
+                      </p>
+                      <code class="address" data-intro-link>{mine()!.offer_link ?? mine()!.link}</code>
+                    </>
+                  )}
+                </Show>
+                <Show when={kitErr() && kitErr() !== MONEY_NOT_READY}>
+                  <p class="err-note" data-starter-error>{kitErr()}</p>
+                </Show>
+              </Show>
+              <Show when={showLegacyIntroductionUi && mine()}>
                 <p class="hint" data-intro-expired>
                   Your introduction expired. <button type="button" class="link" onClick={loadMine}>Make a new one</button>
                 </p>
@@ -4574,7 +4608,7 @@ function NewTrack(props: {
               </Show>
             </form>
           </Show>
-          <Show when={LEGACY_INTRO_UI}>
+          <Show when={showLegacyIntroductionUi}>
           <form
             class="panel"
             data-intro-open
