@@ -147,6 +147,12 @@ pub struct NodeStatusResponse {
     /// What this node build can do (`energy_v1`, `membrane_v1`, …). Absent on rc7.
     #[serde(default)]
     pub api_capabilities: Vec<String>,
+    /// UDP port of the node's own STUN responder (`[calls] stun_listen`); absent when off.
+    #[serde(default)]
+    pub stun_port: Option<u16>,
+    /// `stun:host:port` for it at the node's public host; absent without one.
+    #[serde(default)]
+    pub stun_url: Option<String>,
 }
 
 // ---- organism reads (O1 v2: genome N1 + N2) ----------------------------------
@@ -442,8 +448,33 @@ pub struct NodeOverview {
     pub chain_backend: Option<String>,
     /// Known capabilities only (see [`KNOWN_CAPABILITIES`]).
     pub capabilities: Vec<String>,
+    /// The node's own STUN responder, if it runs. Only ever *offered* in
+    /// Settings; the owner confirms before calls use it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stun_port: Option<u16>,
+    /// Its URL, only when well-formed and naming the reported port.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stun_url: Option<String>,
     /// Unix ms when the host read it, for the freshness line.
     pub read_at: u64,
+}
+
+/// The node's `stun_url`, kept only when it is a plain `stun:host:port` (no
+/// TURN, credentials or query; IPv6 in brackets) on the port the node reported.
+pub fn own_stun_url(url: Option<&str>, port: Option<u16>) -> Option<String> {
+    let (url, port) = (url?.trim(), port?);
+    let host = url.strip_prefix("stun:")?.strip_suffix(&format!(":{port}"))?;
+    let ok = match host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
+        Some(v6) => v6.parse::<std::net::Ipv6Addr>().is_ok(),
+        None => {
+            !host.is_empty()
+                && host.len() <= 253
+                && host.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+                && !host.starts_with(['.', '-'])
+                && !host.ends_with(['.', '-'])
+        }
+    };
+    ok.then(|| url.to_string())
 }
 
 impl NodeOverview {
@@ -463,6 +494,8 @@ impl NodeOverview {
             lightning_backend: status.lightning_backend,
             chain_backend: status.chain_backend,
             capabilities: known_capabilities(&status.api_capabilities),
+            stun_url: own_stun_url(status.stun_url.as_deref(), status.stun_port),
+            stun_port: status.stun_port,
             read_at,
         }
     }
@@ -1053,6 +1086,26 @@ mod tests {
         assert_eq!(NodeOverview::from_status(status, 1).capabilities, ["energy_v1", "membrane_v1"]);
         let rc7: NodeStatusResponse = serde_json::from_str(r#"{"status":"ok","node_id":"x"}"#).unwrap();
         assert!(NodeOverview::from_status(rc7, 1).capabilities.is_empty(), "rc7 advertises nothing: v1 sources");
+    }
+
+    #[test]
+    fn own_stun_is_projected_only_when_well_formed() {
+        let read = |extra: &str| {
+            let s: NodeStatusResponse = serde_json::from_str(&format!(r#"{{"status":"ok","node_id":"x"{extra}}}"#)).unwrap();
+            serde_json::to_value(NodeOverview::from_status(s, 1)).unwrap()
+        };
+        let off = read("");
+        assert!(off.get("stun_port").is_none() && off.get("stun_url").is_none(), "no responder, nothing offered");
+        let port_only = read(r#","stun_port":3478"#);
+        assert_eq!(port_only["stun_port"], 3478);
+        assert!(port_only.get("stun_url").is_none());
+        assert_eq!(read(r#","stun_port":3478,"stun_url":"stun:node.example.org:3478""#)["stun_url"], "stun:node.example.org:3478");
+        assert_eq!(read(r#","stun_port":3478,"stun_url":"stun:[2001:db8::1]:3478""#)["stun_url"], "stun:[2001:db8::1]:3478");
+        for bad in ["turn:node.example.org:3478", "stun:node.example.org:9999", "stun:u:p@h:3478", "stun:h:3478?transport=tcp",
+            "stun:-h:3478", "stun::3478", "stun:[not-v6]:3478", "stun:node.example.org"] {
+            assert!(read(&format!(r#","stun_port":3478,"stun_url":"{bad}""#)).get("stun_url").is_none(), "{bad}");
+        }
+        assert!(read(r#","stun_url":"stun:node.example.org:3478""#).get("stun_url").is_none(), "URL without a port is ignored");
     }
 
     #[test]

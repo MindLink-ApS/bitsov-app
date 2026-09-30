@@ -179,6 +179,11 @@ export function ControlCenter(props: Props) {
   const [overview, setOverview] = createSignal<NodeOverview | null>(null);
   const [readinessRefused, setReadinessRefused] = createSignal(false);
   const moneyBlocked = () => readinessRefused() || overview()?.money_ready === false;
+  // The node's own STUN responder, if `/status` reports one (offered in Settings).
+  const ownStun = createMemo<OwnStun | null>(() => {
+    const o = overview();
+    return o?.stun_port ? { port: o.stun_port, url: o.stun_url ?? null } : null;
+  }, null, { equals: (a, b) => a?.port === b?.port && a?.url === b?.url });
   let overviewRevision = 0;
   const source = readinessSource(() => props.source, moneyBlocked, () => {
     overviewRevision += 1;
@@ -982,7 +987,7 @@ export function ControlCenter(props: Props) {
           </div>
           <button class="quiet context-toggle" data-settings-close onClick={() => setContextOpen(false)} aria-label="Close settings">Close</button>
         </div>
-        <SettingsDisplay />
+        <SettingsDisplay own={ownStun()} />
         <Switch>
           <Match when={tab() === 'body'}>
             <Organism
@@ -1061,14 +1066,22 @@ function readBase64(file: File): Promise<string> {
   });
 }
 
+/** The node's own STUN responder, as `/status` reports it. */
+type OwnStun = { port: number; url: string | null };
+
 /**
  * The owner's STUN server for calls. Off by default: with none, calls use
  * host candidates only and connect on the same network. A STUN server learns
- * your public address each time you place or accept a call.
+ * your public address each time you place or accept a call. When the node
+ * runs its own responder, it is offered here, and used only after Save.
  */
-function CallSettings() {
+function CallSettings(props: { own: OwnStun | null }) {
   const [draft, setDraft] = createSignal(stunPref());
   const [error, setError] = createSignal<string | null>(null);
+  const ownUrl = () => {
+    const url = props.own?.url ?? '';
+    return stunServer(url).length ? url : null;
+  };
   const save = () => {
     const v = draft().trim();
     if (v && stunServer(v).length === 0) {
@@ -1083,9 +1096,26 @@ function CallSettings() {
       <h3>Calls</h3>
       <p class="hint" data-stun-note>
         {stunPref()
-          ? `Calls ask ${stunPref()} for your public address, so that server sees your IP address each time you place or accept a call.`
+          ? stunPref() === ownUrl()
+            ? `Calls ask your own node (${stunPref()}) for your public address. No third party is contacted; your node sees your IP address each time you place or accept a call.`
+            : `Calls ask ${stunPref()} for your public address, so that server sees your IP address each time you place or accept a call.`
           : 'No STUN server: calls contact no third party and connect only on the same network (or a VPN). Calls across routers need a STUN server you choose, for example one run on your own node.'}
       </p>
+      <Show when={ownUrl() && stunPref() !== ownUrl()}>
+        <div class="row">
+          <button type="button" class="soft" data-stun-own onClick={() => { setDraft(ownUrl()!); setError(null); }}>
+            Use my node ({ownUrl()})
+          </button>
+        </div>
+        <Show when={draft().trim() === ownUrl()}>
+          <p class="hint" data-stun-own-confirm>Press Save to use your node. It then sees your IP address each time you place or accept a call.</p>
+        </Show>
+      </Show>
+      <Show when={props.own && !ownUrl()}>
+        <p class="hint" data-stun-own-hint>
+          {`Your node answers STUN on UDP port ${props.own!.port}, but it has no public address set ([network] advertised_addr), so it cannot be offered here. You can enter stun:your-public-address:${props.own!.port} yourself.`}
+        </p>
+      </Show>
       <div class="row">
         <input data-stun-input placeholder="stun:host:3478" value={draft()} onInput={(e) => setDraft(e.currentTarget.value)} aria-label="STUN server for calls (optional)" />
         <button type="button" class="soft" data-stun-save onClick={save}>Save</button>
@@ -1100,7 +1130,7 @@ function CallSettings() {
   );
 }
 
-function SettingsDisplay() {
+function SettingsDisplay(props: { own: OwnStun | null }) {
   const themes: { id: ThemePref; label: string }[] = [
     { id: 'system', label: 'System' },
     { id: 'light', label: 'Light' },
@@ -1146,7 +1176,7 @@ function SettingsDisplay() {
         </For>
       </div>
       <p class="hint">Balances and costs use this unit everywhere. Payment amounts to the node stay in millisatoshis.</p>
-      <CallSettings />
+      <CallSettings own={props.own} />
     </div>
   );
 }
