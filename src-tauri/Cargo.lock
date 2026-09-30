@@ -408,6 +408,7 @@ dependencies = [
  "mock-node",
  "reqwest 0.12.28",
  "rfd",
+ "ring",
  "serde",
  "serde_json",
  "shared_child",

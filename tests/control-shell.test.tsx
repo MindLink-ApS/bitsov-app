@@ -23,7 +23,7 @@ const paired: PairingView = {
 
 type Call = { cmd: string; args: Record<string, unknown> | undefined };
 
-function stubHost() {
+function stubHost(overrides: Record<string, (args?: Record<string, unknown>) => unknown> = {}) {
   resetContactsForTests();
   setPetname(A, 'Maya');
   const calls: Call[] = [];
@@ -77,6 +77,7 @@ function stubHost() {
     },
     'plugin:event|listen': () => 1,
     'plugin:event|unlisten': () => null,
+    ...overrides,
   };
   vi.stubGlobal('__TAURI_INTERNALS__', {
     transformCallback: (cb: (e: unknown) => void) => {
@@ -127,6 +128,131 @@ describe('control center shell', () => {
     expect(new Set(calls.map((c) => c.cmd))).toEqual(new Set(['node_status', 'pairing_status']));
   });
 
+  it('offers Ask again when the node lost the pending request in a restart', async () => {
+    const cmd = "konsensus grant --op ab02 --config '/Users/owner/node/konsensus.toml'";
+    const { calls } = stubHost({
+      spend_status: () => ({ state: 'expired', lapse: 'lost', basis: null, open_until_ms: null, pending: null, window_ms: 600_000 }),
+      spend_request: () => ({
+        state: 'pending', lapse: null, basis: null, open_until_ms: null, window_ms: 600_000,
+        pending: { op_id: 'ab02', expires_at_ms: Date.now() + 900_000, owner_action: cmd, owner_can_grant: true },
+      }),
+    });
+    start();
+    await vi.waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
+    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
+
+    await vi.waitFor(() => expect(mount.querySelector('[data-spend-lapse="lost"]')).not.toBeNull());
+    expect(mount.querySelector('[data-spend-lapse]')?.textContent).toContain('restarted');
+    expect(calls.some((c) => c.cmd === 'spend_request')).toBe(false);
+
+    // A double click asks once.
+    click('[data-spend-ask-again]');
+    click('[data-spend-ask-again]');
+    await vi.waitFor(() => expect(mount.querySelector('[data-approval="pending"] [data-owner-action]')?.textContent).toBe(cmd));
+    expect(mount.querySelector('[data-approval="pending"]')?.textContent).toContain('short code');
+    expect(calls.filter((c) => c.cmd === 'spend_request')).toHaveLength(1);
+  });
+
+  it('with this Mac registered, the composer approves one contact with Touch ID, terms first', async () => {
+    const open = { state: 'open', lapse: null, basis: 'node_grant', open_until_ms: Date.now() + 600_000, pending: null, window_ms: 600_000 };
+    const { calls } = stubHost({
+      device_key_status: () => ({ available: true, state: 'registered', fingerprint: '3F9A-12C4', owner_action: null, expires_at_ms: null }),
+      relation_approve: () => open,
+    });
+    start();
+    await vi.waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
+    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
+
+    await vi.waitFor(() => expect(mount.querySelector('[data-touch-approval]')).not.toBeNull());
+    const box = mount.querySelector('[data-touch-approval]')!.textContent!;
+    expect(box).toContain('200 sats a day');
+    expect(box).toContain('at most 2 sats per message');
+    expect(mount.querySelector('[data-touch-peer]')?.textContent).toBe(`${A.slice(0, 8)}…${A.slice(-8)}`);
+    await vi.waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Approve with Touch ID'));
+    expect(calls.some((c) => c.cmd === 'relation_approve' || c.cmd === 'spend_request')).toBe(false);
+
+    // Send in the composer is the Touch ID tap; the line above it only states the terms.
+    expect(mount.querySelector('[data-touch-approval] button')).toBeNull();
+    click('[data-send]');
+    await vi.waitFor(() => expect(calls.filter((c) => c.cmd === 'relation_approve')).toHaveLength(1));
+    const args = calls.find((c) => c.cmd === 'relation_approve')!.args!;
+    expect(args).toMatchObject({ peer: A, budget_msat: null, per_act_max_msat: 2000 });
+    expect(calls.some((c) => c.cmd === 'spend_request')).toBe(false);
+  });
+
+  it('a Touch ID window opened for another contact offers Touch ID here, not Send', async () => {
+    const other = 'c'.repeat(64);
+    const open = { state: 'open', lapse: null, basis: 'node_grant', open_until_ms: Date.now() + 600_000, pending: null, window_ms: 600_000 };
+    const grant = (envelopes: Record<string, number>) => ({
+      paused: false, waiting_for_owner: false, ceiling_msat: 500_000, max_daily_msat: 100_000_000, spent_msat: 0, unsettled_msat: 0,
+      preset: 'careful', presets: [{ id: 'careful', contact_msat: 50_000, room_msat: 100_000, ceiling_msat: 500_000 }], rows: [],
+      autopay: { state: 'off', open_until_ms: null, ceiling_msat: null, basis: null }, window_ms: 600_000,
+      node_grant: { expires_at_ms: Date.now() + 86_400_000, budget_msat: 200_000, remaining_msat: 200_000, per_call_max_msat: 200_000, envelopes },
+    });
+    let envelopes: Record<string, number> = { [other]: Date.now() + 86_400_000 };
+    const { calls } = stubHost({
+      device_key_status: () => ({ available: true, state: 'registered', fingerprint: '3F9A-12C4', owner_action: null, expires_at_ms: null }),
+      spend_status: () => open,
+      budget_status: () => grant(envelopes),
+      relation_approve: () => {
+        envelopes = { ...envelopes, [A]: Date.now() + 86_400_000 };
+        return open;
+      },
+    });
+    start();
+    await vi.waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
+    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
+
+    await vi.waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Approve with Touch ID'));
+    expect(mount.querySelector('[data-touch-approval]')).not.toBeNull();
+    click('[data-send]');
+    await vi.waitFor(() => expect(calls.filter((c) => c.cmd === 'relation_approve')).toHaveLength(1));
+    expect(calls.find((c) => c.cmd === 'relation_approve')!.args).toMatchObject({ peer: A });
+    expect(calls.some((c) => c.cmd === 'message_send')).toBe(false);
+    // With the envelope in place, Send is back.
+    await vi.waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toMatch(/^Send/));
+    expect(mount.querySelector('[data-touch-approval]')).toBeNull();
+  });
+
+  it('says Touch ID approvals are off, and why, while the node runs from a plaintext recovery phrase', async () => {
+    const msg = 'Encrypt your recovery phrase to enable Touch ID approvals. On the node\'s computer: stop the node, run `konsensus seed encrypt --config <path>` once, then start it again and type the password.';
+    stubHost({
+      device_key_status: () => ({ available: true, state: 'off', fingerprint: null, owner_action: null, expires_at_ms: null,
+        off_reason: 'seed_not_encrypted', off_message: msg }),
+    });
+    start();
+    await vi.waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
+    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
+
+    await vi.waitFor(() => expect(mount.querySelector('[data-device-off="seed_not_encrypted"]')).not.toBeNull());
+    expect(mount.querySelector('[data-device-off]')?.textContent).toContain('Encrypt your recovery phrase to enable Touch ID approvals');
+    expect(mount.querySelector('[data-device-register]')).toBeNull();
+    expect(mount.querySelector('[data-touch-approval]')).toBeNull();
+  });
+
+  it('shows the one-time owner command for this Mac, and a pending request can be cancelled', async () => {
+    const cmd = 'konsensus device approve --op dd01 --config /Users/owner/node/konsensus.toml';
+    const { calls } = stubHost({
+      device_key_status: () => ({ available: true, state: 'pending', fingerprint: '3F9A-12C4', owner_action: cmd, expires_at_ms: Date.now() + 600_000 }),
+      device_key_cancel: () => ({ available: true, state: 'none', fingerprint: null, owner_action: null, expires_at_ms: null }),
+      spend_status: () => ({ state: 'pending', lapse: null, basis: null, open_until_ms: null, window_ms: 600_000,
+        pending: { op_id: 'ab01', expires_at_ms: Date.now() + 600_000, owner_action: 'konsensus grant --op ab01', owner_can_grant: true } }),
+      spend_cancel: () => ({ state: 'locked', lapse: null, basis: null, open_until_ms: null, pending: null, window_ms: 600_000 }),
+    });
+    start();
+    await vi.waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
+    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
+
+    await vi.waitFor(() => expect(mount.querySelector('[data-device-owner-action]')?.textContent).toBe(cmd));
+    expect(mount.querySelector('[data-device-fingerprint]')?.textContent).toBe('3F9A-12C4');
+    click('[data-device-cancel]');
+    await vi.waitFor(() => expect(calls.some((c) => c.cmd === 'device_key_cancel')).toBe(true));
+
+    await vi.waitFor(() => expect(mount.querySelector('[data-spend-cancel]')).not.toBeNull());
+    click('[data-spend-cancel]');
+    await vi.waitFor(() => expect(calls.some((c) => c.cmd === 'spend_cancel')).toBe(true));
+  });
+
   it('opens the shell after the gate: tracks, live stream, cost before send, nothing spent unasked', async () => {
     const { calls, emitLive } = stubHost();
     start();
@@ -167,7 +293,7 @@ describe('control center shell', () => {
     // Only reads and the spend-window status were used; nothing that spends or edits.
     const used = new Set(calls.map((c) => c.cmd));
     for (const cmd of used) {
-      expect(cmd).toMatch(/^(node_status|pairing_status|node_overview|peers_list|rooms_list|room_members|messages_list|price_quote|payments_overview|fund_state|spend_status|budget_status|file_price|call_quote|room_quote|live_link|plugin:event\|(un)?listen)$/);
+      expect(cmd).toMatch(/^(node_status|pairing_status|node_overview|peers_list|rooms_list|room_members|messages_list|price_quote|payments_overview|fund_state|spend_status|device_key_status|budget_status|file_price|call_quote|room_quote|live_link|plugin:event\|(un)?listen)$/);
     }
     expect(calls.find((c) => c.cmd === 'plugin:event|listen')?.args?.event).toBe('node-live');
 
