@@ -44,6 +44,9 @@ describe('front door Discover and editor', () => {
     expect(root.querySelector('[data-fd-name]')?.textContent).toBe('Ada');
     expect(root.querySelector('[data-discover-knock]')?.textContent).toBe('Knock');
     expect(root.querySelector('[data-fd-knock-price]')?.textContent).toMatch(/sat/);
+    expect(root.querySelector('[data-fd-qr]')).toBeTruthy();
+    expect(root.querySelector('[data-panel="discover"] .hint')?.textContent).not.toMatch(/scan a QR/i);
+    expect(root.querySelector('[data-panel="discover"] .hint')?.textContent).toMatch(/does not scan/i);
     root.querySelector<HTMLInputElement>('[data-discover-local]')!.click();
     root.querySelector<HTMLButtonElement>('[data-discover-knock]')!.click();
     await viWait();
@@ -167,6 +170,8 @@ describe('front door Discover and editor', () => {
     await viWait();
     expect(root.querySelector('[data-fd-link]')?.textContent).toMatch(/^bitsov:\/\/front-door#/);
     expect(root.querySelector('[data-fd-seq]')?.textContent).toMatch(/seq 2/);
+    expect(root.querySelector('[data-fd-qr]')).toBeTruthy();
+    expect(root.querySelector('[data-fd-preview] [data-fd-qr]')).toBeNull();
   });
 
   it('blocks Publish when the serialized preview exceeds 16 KiB', async () => {
