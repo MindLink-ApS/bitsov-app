@@ -1477,13 +1477,33 @@ async fn get_json<T: serde::de::DeserializeOwned>(state: &NodeState, path: &str)
 async fn read_node_overview(state: &NodeState) -> Result<control::NodeOverview, String> {
     let status: control::NodeStatusResponse = get_json(state, "/status").await?;
     let mut overview = control::NodeOverview::from_status(status, now_ms());
-    // A node answering off loopback holds its seed on someone's server.
-    overview.custody_mode = control::custody_mode(overview.custody_mode, loopback_api_port(&state.api_base).is_some());
+    // Local seed labels need verified provenance, not a loopback URL alone.
+    overview.custody_mode =
+        control::custody_mode(overview.custody_mode, verified_local_node(state));
     // Only while the node answering is the LDK node that config started.
     if overview.lightning_backend.as_deref() == Some("ldk") {
         overview.network = state.configured_network.lock().unwrap().clone();
     }
     Ok(overview)
+}
+
+/// True when the process answering the API is the node this host supervises
+/// (SharedChild PID listening on our loopback API port). An SSH forward or
+/// reverse proxy to a remote Full/Light node looks like loopback but fails
+/// this check — there is no supervised child, or its PID is not the listener.
+fn verified_local_node(state: &NodeState) -> bool {
+    let Some(port) = loopback_api_port(&state.api_base) else {
+        return false;
+    };
+    let guard = match state.child.lock() {
+        Ok(g) => g,
+        Err(_) => return false,
+    };
+    let Some(child) = guard.as_ref() else {
+        return false;
+    };
+    let pid = child.id();
+    loopback_listener_pids(port).contains(&pid)
 }
 
 async fn read_room_members(state: &NodeState, room_id: &str) -> Result<Vec<String>, String> {

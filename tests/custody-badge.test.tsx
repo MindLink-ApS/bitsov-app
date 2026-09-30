@@ -22,8 +22,13 @@ describe('custody badge (node REMOTE-SIGNER.md §2)', () => {
     const hosted = custodyBadge('hosted_custody')!;
     expect(hosted).toMatchObject({ label: 'Hosted custody', tone: 'warn' });
     expect(hosted.title).toContain('Whoever runs that server can spend');
-    expect(custodyBadge('remote_signer')).toMatchObject({ label: 'Your keys, remote node', tone: 'ok' });
-    expect(custodyBadge('remote_signer')!.title).toContain('Messages are stored on the server');
+    const money = custodyBadge('money_signer')!;
+    expect(money).toMatchObject({ label: 'Money on your device', tone: 'warn' });
+    expect(money.title).toContain('NodeId chat-identity private key stays on the server');
+    const remote = custodyBadge('remote_signer')!;
+    expect(remote).toMatchObject({ label: 'Your keys, remote node', tone: 'ok' });
+    expect(remote.title).toContain('identity root stay on your device');
+    expect(remote.title).toContain('Transport and storage keys');
   });
 
   it('claims nothing for an older node or an unknown value', () => {

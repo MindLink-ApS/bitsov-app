@@ -197,7 +197,12 @@ export type NodeOverview = {
   read_at: number;
 };
 
-export type CustodyMode = 'local_seed' | 'encrypted_seed' | 'hosted_custody' | 'remote_signer';
+export type CustodyMode =
+  | 'local_seed'
+  | 'encrypted_seed'
+  | 'hosted_custody'
+  | 'money_signer'
+  | 'remote_signer';
 
 // ---- organism reads (genome N1 / N2) ------------------------------------------
 // Mirrors `bitsov_app::control` EnergyRead / MembraneRead. Local reads of the

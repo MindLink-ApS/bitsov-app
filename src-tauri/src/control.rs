@@ -494,22 +494,42 @@ pub struct NodeOverview {
 }
 
 /// The custody label for the node's reported `custody_mode` (node
-/// REMOTE-SIGNER.md §2). Unknown values are dropped. A node reached over a
-/// non-loopback API that is not a remote signer holds its seed on someone's
-/// server, so it is `hosted_custody` whatever it reports, older nodes too:
-/// the label may get stronger here, never weaker.
-pub fn custody_mode(reported: Option<&str>, api_loopback: bool) -> Option<&'static str> {
+/// REMOTE-SIGNER.md §2). Unknown values are dropped.
+///
+/// A loopback URL is not proof the node runs here (SSH forwards and proxies
+/// look identical). Local seed labels require `verified_local_node`: the host
+/// has bound this authenticated node to a process it supervises on this
+/// machine. Otherwise the label is strengthened to `hosted_custody` —
+/// including older nodes that report nothing over an unverified connection.
+/// `remote_signer` / `money_signer` do not claim a local seed, so they pass
+/// through. The label may get stronger here, never weaker.
+pub fn custody_mode(reported: Option<&str>, verified_local_node: bool) -> Option<&'static str> {
     let known = match reported {
         Some("local_seed") => Some("local_seed"),
         Some("encrypted_seed") => Some("encrypted_seed"),
         Some("hosted_custody") => Some("hosted_custody"),
+        Some("money_signer") => Some("money_signer"),
         Some("remote_signer") => Some("remote_signer"),
         _ => None,
     };
-    if api_loopback || known == Some("remote_signer") {
-        known
-    } else {
-        Some("hosted_custody")
+    match known {
+        Some("remote_signer" | "money_signer" | "hosted_custody") => known,
+        Some("local_seed" | "encrypted_seed") => {
+            if verified_local_node {
+                known
+            } else {
+                Some("hosted_custody")
+            }
+        }
+        None => {
+            if verified_local_node {
+                None
+            } else {
+                Some("hosted_custody")
+            }
+        }
+        // `known` is only built from the arms above.
+        Some(_) => None,
     }
 }
 
@@ -562,7 +582,16 @@ impl NodeOverview {
             stun_url: own_stun_url(status.stun_url.as_deref(), status.stun_port),
             stun_port: status.stun_port,
             network: None,
-            custody_mode: custody_mode(status.custody_mode.as_deref(), true),
+            // Provenance is applied by the caller (`verified_local_node`); raw
+            // report only, so tests can project both sides.
+            custody_mode: match status.custody_mode.as_deref() {
+                Some("local_seed") => Some("local_seed"),
+                Some("encrypted_seed") => Some("encrypted_seed"),
+                Some("hosted_custody") => Some("hosted_custody"),
+                Some("money_signer") => Some("money_signer"),
+                Some("remote_signer") => Some("remote_signer"),
+                _ => None,
+            },
             read_at,
         }
     }
@@ -1179,17 +1208,23 @@ mod tests {
             let s: NodeStatusResponse = serde_json::from_str(&format!(r#"{{"status":"ok","node_id":"x"{extra}}}"#)).unwrap();
             serde_json::to_value(NodeOverview::from_status(s, 1)).unwrap()
         };
-        assert!(read("").get("custody_mode").is_none(), "an older node reports nothing, the app claims nothing");
-        for mode in ["local_seed", "encrypted_seed", "hosted_custody", "remote_signer"] {
+        assert!(read("").get("custody_mode").is_none(), "an older node reports nothing raw");
+        for mode in ["local_seed", "encrypted_seed", "hosted_custody", "money_signer", "remote_signer"] {
             assert_eq!(read(&format!(r#","custody_mode":"{mode}""#))["custody_mode"], mode);
         }
         assert!(read(r#","custody_mode":"<b>trust me</b>""#).get("custody_mode").is_none(), "unknown values are dropped");
-        // Over a non-loopback API, only a remote signer escapes the hosted label.
+        // Verified local: report passes through; older nodes stay silent.
+        for mode in ["local_seed", "encrypted_seed", "hosted_custody", "money_signer", "remote_signer"] {
+            assert_eq!(custody_mode(Some(mode), true), Some(mode));
+        }
+        assert_eq!(custody_mode(None, true), None);
+        // Unverified (SSH forward, proxy, external attach): local seed claims
+        // become hosted; signer modes and explicit hosted pass through.
         for reported in [None, Some("local_seed"), Some("encrypted_seed"), Some("hosted_custody"), Some("bogus")] {
             assert_eq!(custody_mode(reported, false), Some("hosted_custody"), "{reported:?}");
         }
         assert_eq!(custody_mode(Some("remote_signer"), false), Some("remote_signer"));
-        assert_eq!(custody_mode(None, true), None);
+        assert_eq!(custody_mode(Some("money_signer"), false), Some("money_signer"));
     }
 
     #[test]
