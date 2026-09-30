@@ -64,6 +64,8 @@ window.engine = Meeting.createMeetingEngine({
   onStreams: () => {},
   iceServers: () => [],
 });
+// What the owner was shown: every other participant at the same quote.
+window.shown = () => Object.fromEntries(['a', 'b', 'c'].map((x) => [x.repeat(64), QUOTE]));
 window.states = () => Object.fromEntries(window.view.legs.map((l) => [l.peer.slice(0, 1), l.state]));
 window.audioIn = async () => {
   const out = [];
@@ -144,14 +146,14 @@ def main():
         states = lambda page: page.evaluate('window.states()')
 
         t0 = time.time()
-        a.evaluate('([peers]) => { window.inviting = window.engine.invite(peers, "audio"); }', [[B_ID, C_ID]])
+        a.evaluate('([peers]) => { window.inviting = window.engine.invite(peers, "audio", window.shown()); }', [[B_ID, C_ID]])
         check('host rings B and C', pump(lambda: phase(b) == 'invited' and phase(c) == 'invited'), f'{time.time() - t0:.2f}s')
         check('invites carry the roster [A, B, C]', a.evaluate('window.view.roster.map((x) => x[0]).join("")') == 'abc'
               and b.evaluate('window.view.roster.map((x) => x[0]).join("")') == 'abc')
-        b.evaluate('() => { window.joining = window.engine.join(); }')
+        b.evaluate('() => { window.joining = window.engine.join(window.shown()); }')
         check('B joins: A-B live, C rung by B', pump(lambda: states(a).get('b') == 'live' and states(c).get('b') == 'incoming'),
               json.dumps({'a': states(a), 'b': states(b), 'c': states(c)}))
-        c.evaluate('() => { window.joining = window.engine.join(); }')
+        c.evaluate('() => { window.joining = window.engine.join(window.shown()); }')
         full = pump(lambda: all(v == 'live' for pg in (a, b, c) for v in states(pg).values()))
         check('C joins: full mesh, every leg live on every side', full, json.dumps({'a': states(a), 'b': states(b), 'c': states(c)}))
         a.wait_for_timeout(2500)

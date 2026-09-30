@@ -12,6 +12,8 @@ const B = 'b'.repeat(64);
 const C = 'c'.repeat(64);
 const MID = 'f'.repeat(32);
 const QUOTE: CallQuote = { offer_msat: 10_000, offer_max_routing_fee_msat: 5_000, signal_msat: 1_000, signal_max_routing_fee_msat: 5_000, call_total_msat: 21_000 };
+/** The prices the owner was shown, per participant. */
+const SHOWN = Object.fromEntries([A, B, C].map((id) => [id, QUOTE]));
 
 class FakePc {
   static made: FakePc[] = [];
@@ -110,7 +112,7 @@ describe('meeting engine', () => {
 
   it('the host rings each invitee once, one paid offer at a time, with the roster; leaving pays one hangup per known leg', async () => {
     const { e, sent, captures, last } = engine();
-    await Promise.all([e.invite([A, B], 'audio'), e.invite([A, B], 'audio')]);
+    await Promise.all([e.invite([A, B], 'audio', SHOWN), e.invite([A, B], 'audio', SHOWN)]);
     expect(captures).toHaveLength(1);
     expect(FakePc.made).toHaveLength(2);
     expect(FakePc.made.map((p) => p.config.iceServers)).toEqual([[], []]);
@@ -141,7 +143,7 @@ describe('meeting engine', () => {
           : { ok: true, value: { message_id: 'm', kind, amount_msat: 10_000, total_msat: 15_000, max_routing_fee_msat: 5_000, delivered: true, accepted: true, sent_at_ms: 0 } };
       },
     });
-    await e.invite([A, B, C], 'audio');
+    await e.invite([A, B, C], 'audio', SHOWN);
     expect(sent.map((s) => s.peer)).toEqual([A, C]);
     expect(last().legs.map((l) => l.state)).toEqual(['ringing', 'nolink', 'nolink']);
     expect(legOf(last(), B).error).toMatch(/does not take calls/);
@@ -151,11 +153,11 @@ describe('meeting engine', () => {
 
   it('nobody reachable ends the meeting with nothing paid', async () => {
     const { e, sent, last } = engine({ quote: async () => ({ ok: true, value: { ...QUOTE, offer_msat: null, call_total_msat: null } }) });
-    await e.invite([A], 'audio');
+    await e.invite([A], 'audio', SHOWN);
     expect(sent).toHaveLength(0);
     expect(last()).toMatchObject({ phase: 'ended', paidMsat: 0 });
     const alone = engine();
-    await alone.e.invite([OWN], 'audio');
+    await alone.e.invite([OWN], 'audio', SHOWN);
     expect(alone.last()).toMatchObject({ phase: 'ended', error: expect.stringMatching(/1 to 3 contacts/) });
     expect(alone.sent).toHaveLength(0);
   });
@@ -168,7 +170,7 @@ describe('meeting engine', () => {
     expect(legOf(last(), A)).toMatchObject({ state: 'incoming', outgoing: false });
     expect(legOf(last(), B)).toMatchObject({ state: 'waiting', outgoing: true });
     expect(sent).toHaveLength(0);
-    await e.join();
+    await e.join(SHOWN);
     expect(sent.map((s) => [s.peer, s.kind, s.max])).toEqual([[A, 401, 6_000], [B, 400, 15_000]]);
     expect(sent[0].body).toEqual({ v: 1, call_id: cid(0xa1), sdp: 'v=0 answer' });
     expect(sent[1].body).toMatchObject({ meeting: { id: MID, roster } });
@@ -179,7 +181,7 @@ describe('meeting engine', () => {
     const { e, sent, last } = engine();
     const roster = [A, B, OWN];
     await e.receive(offer(A, cid(0xa1), roster), OWN);
-    await e.join();
+    await e.join(SHOWN);
     expect(sent.map((s) => [s.peer, s.kind])).toEqual([[A, 401]]);
     expect(legOf(last(), B).state).toBe('waiting');
     await e.receive(offer(B, cid(0xb1), roster), OWN);
@@ -232,7 +234,7 @@ describe('meeting engine', () => {
     const roster = [A, B, OWN];
     await e.receive(offer(A, cid(0xa1), roster), OWN);
     await e.receive(offer(B, cid(0xb1), roster), OWN);
-    await e.decline();
+    await e.decline(SHOWN);
     expect(sent.map((s) => [s.peer, s.kind, s.body.reason])).toEqual([[A, 403, 'declined'], [B, 403, 'declined']]);
     expect(last()).toMatchObject({ phase: 'ended', error: 'Declined' });
 
@@ -246,7 +248,7 @@ describe('meeting engine', () => {
 
   it('their hangup ends only that leg; the last leg ending ends the meeting; closing the window pays nothing', async () => {
     const { e, sent, last } = engine();
-    await e.invite([A, B], 'audio');
+    await e.invite([A, B], 'audio', SHOWN);
     await e.receive(sig(401, A, cid(1), { sdp: 'v=0 answer' }), OWN);
     await e.receive(sig(401, B, cid(2), { sdp: 'v=0 answer' }), OWN);
     FakePc.made.forEach((p) => p.connect());
@@ -261,7 +263,7 @@ describe('meeting engine', () => {
     expect(sent.filter((s) => s.kind === 403)).toHaveLength(0);
 
     const closing = engine();
-    await closing.e.invite([A], 'audio');
+    await closing.e.invite([A], 'audio', SHOWN);
     closing.e.endLocal();
     expect(closing.last().phase).toBe('ended');
     expect(closing.sent.map((s) => s.kind)).toEqual([400]);
@@ -271,7 +273,7 @@ describe('meeting engine', () => {
     let release!: () => void;
     const gate = new Promise<void>((r) => { release = r; });
     const { e, sent, last } = engine({ quote: async (peer) => { if (peer === B) await gate; return { ok: true, value: QUOTE }; } });
-    const inviting = e.invite([A, B], 'audio');
+    const inviting = e.invite([A, B], 'audio', SHOWN);
     await vi.waitFor(() => expect(sent.map((s) => s.peer)).toEqual([A]));
     expect(legOf(last(), B).state).toBe('placing');
     // Media stops at once; the hangups queue behind the in-flight step.
@@ -282,6 +284,85 @@ describe('meeting engine', () => {
     // A's paid offer gets its hangup; B was never rung and costs nothing.
     expect(sent.map((s) => [s.peer, s.kind])).toEqual([[A, 400], [A, 403]]);
     expect(last().phase).toBe('ended');
+  });
+});
+
+describe('meeting engine: review #81 fixes', () => {
+  beforeEach(() => { FakePc.made = []; });
+
+  it('B1: leaving while the microphone is still opening stops the stream the moment it arrives, and never keeps it', async () => {
+    let give!: (s: MediaStream) => void;
+    const pending = new Promise<MediaStream>((r) => { give = r; });
+    const published: (MediaStream | null)[] = [];
+    const { e, sent, last } = engine({ getUserMedia: () => pending, onStreams: (local) => published.push(local) });
+    const inviting = e.invite([A], 'audio', SHOWN);
+    await vi.waitFor(() => expect(legOf(last(), A).state).toBe('placing'));
+    await e.leave();
+    const s = stream();
+    give(s);
+    await inviting;
+    expect(s.getTracks().every((t) => (t.stop as ReturnType<typeof vi.fn>).mock.calls.length === 1)).toBe(true);
+    expect(published).not.toContain(s);
+    expect(sent).toHaveLength(0);
+    e.dismiss();
+    expect(last().phase).toBe('idle');
+  });
+
+  it('B1: the same holds when joining and the window closes during capture', async () => {
+    let give!: (s: MediaStream) => void;
+    const { e, sent } = engine({ getUserMedia: () => new Promise<MediaStream>((r) => { give = r; }) });
+    await e.receive(offer(A, cid(0xa1), [A, OWN]), OWN);
+    const joining = e.join(SHOWN);
+    await vi.waitFor(() => expect(give).toBeTypeOf('function'));
+    e.endLocal();
+    const s = stream(true);
+    give(s);
+    await joining;
+    expect(s.getTracks().map((t) => (t.stop as ReturnType<typeof vi.fn>).mock.calls.length)).toEqual([1, 1]);
+    expect(sent).toHaveLength(0);
+  });
+
+  it('B1: dismiss releases whatever capture is still held', async () => {
+    const { e, captures } = engine();
+    await e.invite([A], 'audio', SHOWN);
+    await e.receive(sig(403, A, cid(1), { reason: 'declined' }), OWN);
+    e.dismiss();
+    expect(captures[0].getTracks().every((t) => (t.stop as ReturnType<typeof vi.fn>).mock.calls.length >= 1)).toBe(true);
+  });
+
+  it('B2: a leg never pays above the shown quote; a live price above it is refused with nothing paid', async () => {
+    const live: Record<string, CallQuote> = {
+      [A]: { ...QUOTE, offer_msat: 12_000, call_total_msat: 23_000 }, // raised since shown
+      [B]: { ...QUOTE, offer_msat: 8_000, call_total_msat: 19_000 }, // lowered: pay at most the live all-in
+      [C]: { ...QUOTE, offer_max_routing_fee_msat: 9_000 }, // same price, higher fee cap: the shown cap binds
+    };
+    const { e, sent, last } = engine({ quote: async (peer) => ({ ok: true, value: live[peer] }) });
+    await e.invite([A, B, C], 'audio', SHOWN);
+    expect(sent.map((s) => [s.peer, s.kind, s.max])).toEqual([[B, 400, 13_000], [C, 400, 15_000]]);
+    expect(legOf(last(), A)).toMatchObject({ state: 'nolink', error: expect.stringMatching(/went up since it was shown\. Nothing was paid/) });
+    // No quote shown for someone: refused too.
+    const unshown = engine();
+    await unshown.e.invite([A], 'audio', {});
+    expect(unshown.sent).toHaveLength(0);
+  });
+
+  it('B2: join and later auto-answers pay at most the shown price; decline pays nothing above it', async () => {
+    let raised = false;
+    const { e, sent, last } = engine({ quote: async () => ({ ok: true, value: raised ? { ...QUOTE, signal_msat: 2_000 } : QUOTE }) });
+    const roster = [A, B, OWN];
+    await e.receive(offer(A, cid(0xa1), roster), OWN);
+    await e.join({ [A]: QUOTE, [B]: QUOTE });
+    expect(sent.map((s) => [s.peer, s.kind, s.max])).toEqual([[A, 401, 6_000]]);
+    raised = true;
+    await e.receive(offer(B, cid(0xb1), roster), OWN);
+    await vi.waitFor(() => expect(legOf(last(), B).state).toBe('nolink'));
+    expect(sent).toHaveLength(1);
+
+    const d = engine({ quote: async () => ({ ok: true, value: { ...QUOTE, signal_msat: 2_000 } }) });
+    await d.e.receive(offer(A, cid(0xa2), [A, OWN]), OWN);
+    await d.e.decline({ [A]: QUOTE });
+    expect(d.sent).toHaveLength(0);
+    expect(d.last().phase).toBe('ended');
   });
 });
 
@@ -409,4 +490,46 @@ describe('meetings in the shell', () => {
     expect(host.used('call_signal').map((c) => [c.args!.peer, c.args!.kind])).toEqual([[A, 401], [B, 400]]);
     expect(host.used('call_signal')[0].args!.max_msat).toBe(6_000);
   });
+  it('B2: prices are read afresh when the planner opens, and a price raised after it was shown is refused with nothing paid', async () => {
+    let offerMsat = 10_000;
+    const host = stubHost({ call_quote: () => ({ ...QUOTE, offer_msat: offerMsat, call_total_msat: offerMsat + 11_000 }) });
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="meeting"]')?.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call="meeting"]')!.click();
+    await vi.waitFor(() => expect(text('[data-meeting-invite]')).toBe('Invite · 21 sats'));
+    $<HTMLButtonElement>('[data-meeting-cancel]')!.click();
+    offerMsat = 20_000;
+    $<HTMLButtonElement>('[data-call="meeting"]')!.click();
+    await vi.waitFor(() => expect(text('[data-meeting-invite]')).toBe('Invite · 31 sats'));
+    // Raised again after it was shown: the leg is refused before paying.
+    offerMsat = 30_000;
+    $<HTMLButtonElement>('[data-meeting-invite]')!.click();
+    await vi.waitFor(() => expect($(`[data-meeting-leg="${A}"]`)?.textContent ?? '').toMatch(/went up since it was shown/));
+    expect(host.used('call_signal')).toHaveLength(0);
+  });
+
+  it('N2/N3: video invite is labelled with its price; contacts without a call price are greyed out up front', async () => {
+    stubHost({ call_quote: (args) => (args!.peer === B ? { ...QUOTE, offer_msat: null, offer_max_routing_fee_msat: 0, call_total_msat: null } : QUOTE) });
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="meeting"]')?.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call="meeting"]')!.click();
+    await vi.waitFor(() => expect(text(`[data-meeting-pick-note="${B}"]`)).toMatch(/does not take calls/));
+    expect($<HTMLInputElement>(`[data-meeting-pick="${B}"]`)!.disabled).toBe(true);
+    expect($<HTMLInputElement>(`[data-meeting-pick="${A}"]`)!.disabled).toBe(false);
+    expect(text('[data-meeting-invite-video]')).toBe('Video invite · 21 sats');
+    expect($('[data-meeting-invite-video]')!.getAttribute('aria-label')).toBe('Video invite, up to 21 sats');
+  });
+
+  it('N1: Decline shows what it costs, and says ignoring is free', async () => {
+    const host = stubHost();
+    await openShell();
+    host.emitLive({ type: 'message', room_id: null, message: offer(A, cid(0xa1), [A, OWN, B]) });
+    await vi.waitFor(() => expect(text('[data-meeting-decline]')).toBe('Decline · up to 6 sats'));
+    expect($('[data-meeting-decline]')!.getAttribute('aria-label')).toBe('Decline, up to 6 sats');
+    expect(text('[data-meeting-ignore]')).toMatch(/nothing is paid/);
+    $<HTMLButtonElement>('[data-meeting-decline]')!.click();
+    await vi.waitFor(() => expect(host.used('call_signal')).toHaveLength(1));
+    expect(host.used('call_signal')[0].args).toMatchObject({ peer: A, kind: 403, max_msat: 6_000 });
+  });
 });
+

@@ -1,6 +1,6 @@
 import { MONEY_NOT_READY, readinessLine, readinessSource } from './readiness';
 import { createEffect, createMemo, createSignal, For, type JSX, Match, on, onCleanup, Show, Switch, untrack } from 'solid-js';
-import { createStore, produce } from 'solid-js/store';
+import { createStore, produce, reconcile } from 'solid-js/store';
 import { qrSvg } from '../qr';
 import type { Proposal } from './ai';
 import { AiTrack, createAiSession } from './AiTrack';
@@ -8,7 +8,7 @@ import { amount as fmtAmount, allIn, clock, day, feeCeiling, routingFee, sats, s
 import { Organism } from './BodyPanel';
 import { DiscoverPanel, FrontDoorEditor } from './Discover';
 import { callCost, createCallEngine, IDLE as CALL_IDLE, isCallKind, signalCost, stunServer, type CallMedia, type CallView } from './call';
-import { createMeetingEngine, inviteCost, joinCost, MAX_PARTICIPANTS, MEETING_IDLE, type LegState, type MeetingView } from './meeting';
+import { createMeetingEngine, declineCost, inviteCost, joinCost, MAX_PARTICIPANTS, MEETING_IDLE, type LegState, type MeetingView, type ShownQuotes } from './meeting';
 import { blobUrl, duration, FILE_MAX_BYTES, fileNameOf, isVoiceNote, type Recording, startRecording, VOICE_MAX_MS } from './voice';
 import {
   doorCard,
@@ -1085,12 +1085,13 @@ export function ControlCenter(props: Props) {
         plan={meetingPlan()}
         contacts={peers().map((p) => ({ id: p.node_id.toLowerCase(), name: peerName(p, p.node_id) }))}
         ownId={ownId()}
+        blocked={moneyBlocked()}
         nameOf={nameOf}
         quote={actions.callQuote}
         setPlan={setMeetingPlan}
-        invite={(ids, media) => { setMeetingPlan(null); void meetings.invite(ids, media); }}
-        join={() => void meetings.join()}
-        decline={() => void meetings.decline()}
+        invite={(ids, media, quotes) => { setMeetingPlan(null); void meetings.invite(ids, media, quotes); }}
+        join={(quotes) => void meetings.join(quotes)}
+        decline={(quotes) => void meetings.decline(quotes)}
         leave={() => void meetings.leave()}
         mute={() => meetings.toggleMute()}
         camera={() => void meetings.toggleCamera()}
@@ -1737,7 +1738,7 @@ function CallPanel(props: {
 }
 
 const LEG_STATE: Record<LegState, string> = {
-  waiting: 'Waiting', placing: 'Ringing…', ringing: 'Ringing', incoming: 'Ringing you', connecting: 'Connecting', live: 'Live', ended: 'Left', nolink: 'No link',
+  waiting: 'Waiting', placing: 'Preparing…', ringing: 'Ringing', incoming: 'Ringing you', connecting: 'Connecting', live: 'Live', ended: 'Ended', nolink: 'No link',
 };
 
 /**
@@ -1751,33 +1752,45 @@ function MeetingPanel(props: {
   plan: string[] | null;
   contacts: { id: string; name: string }[];
   ownId: string;
+  /** Money is not ready: nobody can be invited. */
+  blocked: boolean;
   nameOf: (id: string) => string;
   quote: (peer: string) => Promise<Outcome<CallQuote>>;
   setPlan: (ids: string[] | null) => void;
-  invite: (ids: string[], media: CallMedia) => void;
-  join: () => void;
-  decline: () => void;
+  /** `quotes` are exactly the prices shown: the engine never pays above them. */
+  invite: (ids: string[], media: CallMedia, quotes: ShownQuotes) => void;
+  join: (quotes: ShownQuotes) => void;
+  decline: (quotes: ShownQuotes) => void;
   leave: () => void;
   mute: () => void;
   camera: () => void;
   dismiss: () => void;
 }) {
-  // Read-only call quotes, per contact, for the price shown before acting.
-  const [quotes, setQuotes] = createStore<Record<string, CallQuote | null>>({});
-  const want = (ids: string[]) => ids.forEach((id) => {
-    if (id in quotes) return;
-    setQuotes(id, null);
-    void props.quote(id).then((r) => setQuotes(id, r.ok ? r.value : null));
-  });
-  createEffect(() => { if (props.plan) want(props.plan); });
-  createEffect(() => { if (props.view.phase === 'invited') want(props.view.roster.filter((id) => id !== props.ownId.toLowerCase())); });
+  // Read-only call quotes, read afresh each time the planner or an invite card
+  // opens. What is shown is what binds: the engine pays at most these.
+  // `undefined` = still reading, `null` = no call price.
+  const [quotes, setQuotes] = createStore<Record<string, CallQuote | null | undefined>>({});
+  let generation = 0;
+  const refresh = (ids: string[]) => {
+    const g = ++generation;
+    setQuotes(reconcile(Object.fromEntries(ids.map((id) => [id, undefined]))));
+    ids.forEach((id) => void props.quote(id).then((r) => { if (g === generation) setQuotes(id, r.ok ? r.value : null); }));
+  };
   const planning = () => props.plan !== null && (props.view.phase === 'idle' || props.view.phase === 'ended');
+  createEffect(on(planning, (open) => { if (open) refresh(props.contacts.map((c) => c.id)); }));
+  createEffect(on(() => (props.view.phase === 'invited' ? props.view.id : null), (id) => {
+    if (id) refresh(untrack(() => props.view.roster).filter((x) => x !== props.ownId.toLowerCase()));
+  }));
+  const shown = (ids: string[]): ShownQuotes => Object.fromEntries(ids.map((id) => [id, quotes[id] ?? null]));
+  const priced = (id: string) => { const q = quotes[id]; return !!q && callCost(q) !== null; };
+  const pickable = (id: string) => !props.blocked && priced(id);
   const toggle = (id: string) => {
     const plan = props.plan ?? [];
     props.setPlan(plan.includes(id) ? plan.filter((x) => x !== id) : plan.length < MAX_PARTICIPANTS - 1 ? [...plan, id] : plan);
   };
-  const planCost = () => (props.plan?.length ? inviteCost(props.plan.map((id) => quotes[id] ?? null)) : null);
-  const joinPrice = () => joinCost(props.view.roster, props.ownId.toLowerCase(), quotes);
+  const planCost = () => (props.plan?.length && !props.blocked ? inviteCost(props.plan.map((id) => quotes[id] ?? null)) : null);
+  const joinPrice = () => joinCost(props.view.roster, props.ownId.toLowerCase(), shown(props.view.roster));
+  const declinePrice = () => declineCost(props.view, shown(props.view.legs.map((l) => l.peer)));
   const price = (m: number | null) => (m === null ? '' : ` · ${sats(m)} ${satUnit(m)}`);
   const v = () => props.view;
   const host = () => (v().roster[0] ? props.nameOf(v().roster[0]) : '');
@@ -1793,24 +1806,27 @@ function MeetingPanel(props: {
                 <li>
                   <label>
                     <input type="checkbox" data-meeting-pick={c.id} checked={props.plan?.includes(c.id) ?? false}
-                      disabled={!(props.plan?.includes(c.id)) && (props.plan?.length ?? 0) >= MAX_PARTICIPANTS - 1}
+                      disabled={!pickable(c.id) || (!(props.plan?.includes(c.id)) && (props.plan?.length ?? 0) >= MAX_PARTICIPANTS - 1)}
                       onChange={() => toggle(c.id)} />
-                    {c.name}
+                    <span classList={{ muted: !pickable(c.id) }}>{c.name}</span>
                   </label>
-                  <Show when={props.plan?.includes(c.id) && c.id in quotes && quotes[c.id] && callCost(quotes[c.id]!) === null}>
-                    <span class="hint"> does not take calls</span>
-                  </Show>
+                  <Show when={quotes[c.id] === undefined}><span class="hint" data-meeting-pick-note={c.id}> reading price…</span></Show>
+                  <Show when={quotes[c.id] !== undefined && !priced(c.id)}><span class="hint" data-meeting-pick-note={c.id}> does not take calls</span></Show>
                 </li>
               )}
             </For>
           </ul>
+          <Show when={props.blocked}><p class="hint" data-meeting-blocked>Payments are not ready yet, so nobody can be invited.</p></Show>
           <p class="hint" data-meeting-note>You ring each person you pick (their call price, once each). Picked contacts who are not each other’s contacts will not hear each other. Media goes directly between you; it is not billed.</p>
           <div class="call-actions">
-            <button type="button" class="primary soft" data-meeting-invite disabled={planCost() === null} onClick={() => props.invite(props.plan!, 'audio')}
+            <button type="button" class="primary soft" data-meeting-invite disabled={planCost() === null} onClick={() => props.invite(props.plan!, 'audio', shown(props.plan!))}
               aria-label={`Invite${planCost() !== null ? `, up to ${fmtAmount(planCost()!)}` : ''}`}>
               Invite{price(planCost())}
             </button>
-            <button type="button" class="soft" data-meeting-invite-video disabled={planCost() === null} onClick={() => props.invite(props.plan!, 'video')}>Video</button>
+            <button type="button" class="soft" data-meeting-invite-video disabled={planCost() === null} onClick={() => props.invite(props.plan!, 'video', shown(props.plan!))}
+              aria-label={`Video invite${planCost() !== null ? `, up to ${fmtAmount(planCost()!)}` : ''}`}>
+              Video invite{price(planCost())}
+            </button>
             <button type="button" class="soft" data-meeting-cancel onClick={() => props.setPlan(null)}>Cancel</button>
           </div>
         </aside>
@@ -1821,7 +1837,7 @@ function MeetingPanel(props: {
             <strong data-meeting-title>{v().phase === 'invited' ? 'Meeting invite' : v().phase === 'ended' ? 'Meeting ended' : `Meeting · ${v().roster.length} people`}</strong>
             <span class="who">{v().phase === 'invited' ? `${host()} invites you, with ${others() || 'nobody else'}` : ''}</span>
           </header>
-          <Show when={v().phase === 'active'}>
+          <Show when={v().phase === 'active' || (v().phase === 'ended' && v().legs.length > 0)}>
             <ul class="meeting-legs">
               <For each={v().legs}>
                 {(l) => (
@@ -1833,6 +1849,9 @@ function MeetingPanel(props: {
               </For>
             </ul>
           </Show>
+          <Show when={v().phase === 'invited'}>
+            <p class="hint" data-meeting-ignore>Ignore it: nothing is paid, and the invite ends by itself after a minute.</p>
+          </Show>
           <Show when={v().paidMsat > 0}>
             <p class="hint" data-meeting-paid>Paid {fmtAmount(v().paidMsat)} for this meeting’s signals. Media is direct and not billed.</p>
           </Show>
@@ -1842,11 +1861,14 @@ function MeetingPanel(props: {
           <div class="call-actions">
             <Switch>
               <Match when={v().phase === 'invited'}>
-                <button type="button" class="primary soft" data-meeting-join disabled={joinPrice() === null} onClick={() => props.join()}
+                <button type="button" class="primary soft" data-meeting-join disabled={joinPrice() === null} onClick={() => props.join(shown(v().roster))}
                   aria-label={`Join${joinPrice() !== null ? `, up to ${fmtAmount(joinPrice()!)}` : ''}`}>
                   Join{price(joinPrice())}
                 </button>
-                <button type="button" class="soft" data-meeting-decline onClick={() => props.decline()}>Decline</button>
+                <button type="button" class="soft" data-meeting-decline disabled={declinePrice() === null} onClick={() => props.decline(shown(v().roster))}
+                  aria-label={`Decline${declinePrice() !== null ? `, up to ${fmtAmount(declinePrice()!)}` : ''}`}>
+                  Decline{declinePrice() !== null ? ` · up to ${sats(declinePrice()!)} ${satUnit(declinePrice()!)}` : ''}
+                </button>
               </Match>
               <Match when={v().phase === 'active'}>
                 <button type="button" class="soft" data-meeting-mute aria-pressed={v().muted} onClick={() => props.mute()}>Mute</button>

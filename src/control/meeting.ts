@@ -64,6 +64,41 @@ export function joinCost(roster: string[], own: string, quotes: Record<string, C
 }
 
 /**
+ * The quote a leg may pay under: the one the owner was shown, capped by the
+ * live one. `null` when the live price is higher than what was shown (the leg
+ * is refused, nothing paid) or when no price was shown at all.
+ */
+export function boundQuote(shown: CallQuote | null | undefined, live: CallQuote, offer: boolean): CallQuote | null {
+  if (!shown) return null;
+  if (offer && (shown.offer_msat === null || live.offer_msat === null || live.offer_msat > shown.offer_msat)) return null;
+  if (live.signal_msat > shown.signal_msat) return null;
+  const min = (a: number | null, b: number | null) => (a === null || b === null ? null : Math.min(a, b));
+  return {
+    offer_msat: min(shown.offer_msat, live.offer_msat),
+    offer_max_routing_fee_msat: Math.min(shown.offer_max_routing_fee_msat, live.offer_max_routing_fee_msat),
+    signal_msat: Math.min(shown.signal_msat, live.signal_msat),
+    signal_max_routing_fee_msat: Math.min(shown.signal_max_routing_fee_msat, live.signal_max_routing_fee_msat),
+    call_total_msat: min(shown.call_total_msat, live.call_total_msat),
+  };
+}
+
+/** What declining costs at most: one hangup per ringing leg, at the shown price. */
+export function declineCost(view: MeetingView, quotes: Record<string, CallQuote | null>): number | null {
+  let total = 0;
+  for (const l of view.legs.filter((x) => x.state === 'incoming')) {
+    const q = quotes[l.peer];
+    if (!q) return null;
+    total += signalCost(q);
+  }
+  return total;
+}
+
+/** Shown quotes, by lowercase node id. */
+export type ShownQuotes = Record<string, CallQuote | null>;
+
+const RAISED = 'Their call price went up since it was shown. Nothing was paid; start again to see the new price.';
+
+/**
  * One leg as the owner sees it. `waiting`: not rung yet (ours to place once we
  * join, or theirs when they join); `nolink`: this pair has no leg (refused,
  * not a contact, no call price); the rest of the meeting goes on.
@@ -128,6 +163,8 @@ export function createMeetingEngine(deps: MeetingDeps) {
   let local: MediaStream | null = null;
   let joined = false;
   let inviteTimer: ReturnType<typeof setTimeout> | undefined;
+  // The quotes the owner saw on Invite/Join: every leg pays at most these.
+  let shown: ShownQuotes = {};
   // Bumped whenever a meeting starts or ends: stale async work stops there.
   let epoch = 0;
   // One paid signal at a time (the host allows one journaled spend at a time).
@@ -177,7 +214,7 @@ export function createMeetingEngine(deps: MeetingDeps) {
     epoch += 1;
     clearTimeout(inviteTimer);
     legs.forEach((l) => { if (!terminal(l)) closeLeg(l, 'ended'); });
-    local?.getTracks().forEach((t) => t.stop());
+    stopAll(local);
     local = null;
     joined = false;
     view = { ...view, phase: 'ended', error };
@@ -205,11 +242,25 @@ export function createMeetingEngine(deps: MeetingDeps) {
     publish();
   };
 
+  const stopAll = (s: MediaStream | null) => s?.getTracks().forEach((t) => t.stop());
+  /**
+   * The shared capture. If the meeting ended (or another began) while the
+   * device was opening, the fresh stream is stopped at once and never kept.
+   */
   const capture = async () => {
-    if (!local) {
-      local = await deps.getUserMedia({ audio: true, video: view.media === 'video' });
-      streams();
+    if (local) return local;
+    const e = epoch;
+    const stream = await deps.getUserMedia({ audio: true, video: view.media === 'video' });
+    if (e !== epoch || !active()) {
+      stopAll(stream);
+      throw new Error('the meeting ended');
     }
+    if (local) {
+      stopAll(stream);
+      return local;
+    }
+    local = stream;
+    streams();
     return local;
   };
 
@@ -280,7 +331,13 @@ export function createMeetingEngine(deps: MeetingDeps) {
       settle();
       return;
     }
-    l.quote = q.value;
+    const bound = boundQuote(shown[l.peer], q.value, true);
+    if (!bound) {
+      closeLeg(l, 'nolink', RAISED);
+      settle();
+      return;
+    }
+    l.quote = bound;
     let conn: RTCPeerConnection;
     try {
       const stream = await capture();
@@ -297,7 +354,7 @@ export function createMeetingEngine(deps: MeetingDeps) {
     if (e !== epoch || l.state !== 'placing') return;
     l.callId = (deps.newCallId ?? newCallId)();
     const r = await pay(l, CALL_OFFER, { media: view.media, sdp: conn.localDescription!.sdp, meeting: { id: view.id!, roster: view.roster } },
-      q.value.offer_msat + q.value.offer_max_routing_fee_msat);
+      bound.offer_msat! + bound.offer_max_routing_fee_msat);
     // Left while the offer was in flight: the mic is already off; nothing more is sent.
     if (e !== epoch || l.state !== 'placing') {
       publish();
@@ -331,7 +388,13 @@ export function createMeetingEngine(deps: MeetingDeps) {
       settle();
       return;
     }
-    l.quote = q.value;
+    const bound = boundQuote(shown[l.peer], q.value, false);
+    if (!bound) {
+      closeLeg(l, 'nolink', RAISED);
+      settle();
+      return;
+    }
+    l.quote = bound;
     let conn: RTCPeerConnection;
     try {
       const stream = await capture();
@@ -347,7 +410,7 @@ export function createMeetingEngine(deps: MeetingDeps) {
       return;
     }
     if (e !== epoch || l.state !== 'connecting') return;
-    const r = await pay(l, CALL_ANSWER, { sdp: conn.localDescription!.sdp }, signalCost(q.value));
+    const r = await pay(l, CALL_ANSWER, { sdp: conn.localDescription!.sdp }, signalCost(bound));
     if (e !== epoch) {
       publish();
       return;
@@ -365,8 +428,12 @@ export function createMeetingEngine(deps: MeetingDeps) {
     view: () => view,
     active,
 
-    /** Invite 1 to 3 contacts (the price was shown). We are the host: we ring everyone. */
-    invite: (peers: string[], media: CallMedia) => guarded(async () => {
+    /**
+     * Invite 1 to 3 contacts. `quotes` are the prices the owner was shown:
+     * each leg pays at most that (and at most the live price); a leg whose
+     * live price went up is refused before anything is paid.
+     */
+    invite: (peers: string[], media: CallMedia, quotes: ShownQuotes) => guarded(async () => {
       if (active() || deps.busy?.()) return;
       const own = deps.ownId().toLowerCase();
       const invitees = [...new Set(peers.map((p) => p.toLowerCase()))].filter((p) => p !== own);
@@ -378,6 +445,7 @@ export function createMeetingEngine(deps: MeetingDeps) {
       }
       const id = deps.newMeetingId?.() ?? newCallId();
       start(id, roster, media, true);
+      shown = { ...quotes };
       const e = epoch;
       await Promise.all(legs.map((l) => placeLeg(l, e)));
       if (e === epoch) settle();
@@ -389,8 +457,9 @@ export function createMeetingEngine(deps: MeetingDeps) {
      * are answered without another click: joining was the consent, and their
      * price was in the Join ceiling.
      */
-    join: () => guarded(async () => {
+    join: (quotes: ShownQuotes) => guarded(async () => {
       if (view.phase !== 'invited') return;
+      shown = { ...quotes };
       clearTimeout(inviteTimer);
       joined = true;
       view = { ...view, phase: 'active' };
@@ -415,15 +484,19 @@ export function createMeetingEngine(deps: MeetingDeps) {
       if (e === epoch) settle();
     }),
 
-    /** Decline: one paid hangup per ringing leg, so nobody keeps ringing. */
-    decline: () => guarded(async () => {
+    /**
+     * Decline: one paid hangup per ringing leg, so nobody keeps ringing, each
+     * at most the shown price. (Ignoring is free: the invite ends by itself.)
+     */
+    decline: (quotes: ShownQuotes) => guarded(async () => {
       if (view.phase !== 'invited') return;
       const ringing = legs.filter((l) => l.state === 'incoming');
       finish('Declined');
       for (const l of ringing) {
         await serial(async () => {
           const q = await deps.quote(l.peer);
-          if (q.ok) await pay(l, CALL_HANGUP, { reason: 'declined' }, signalCost(q.value));
+          const bound = q.ok ? boundQuote(quotes[l.peer], q.value, false) : null;
+          if (bound) await pay(l, CALL_HANGUP, { reason: 'declined' }, signalCost(bound));
         });
       }
       publish();
@@ -453,6 +526,9 @@ export function createMeetingEngine(deps: MeetingDeps) {
 
     dismiss: () => {
       if (view.phase === 'ended') {
+        stopAll(local);
+        local = null;
+        legs.forEach((l) => l.pc?.close());
         legs = [];
         view = MEETING_IDLE;
         deps.onView(view);
