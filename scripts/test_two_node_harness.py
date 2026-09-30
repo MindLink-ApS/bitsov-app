@@ -100,8 +100,11 @@ class HarnessEvidenceTests(unittest.TestCase):
                 capture.feed(piece.encode())
             capture.finish()
             self.assertEqual(grants['op-id'], phrase)
+            front_door = 'GRANT front_door TO fd-op CODE ' + 'c'*64
+            capture.feed((front_door + '\n').encode())
+            self.assertEqual(grants['fd-op'], front_door)
             persisted = ''.join(p.read_text() for p in Path(temp).iterdir())
-            for secret in ('admin-secret', 'macaroon-secret', 'a'*64, 'abandon abandon'):
+            for secret in ('admin-secret', 'macaroon-secret', 'a'*64, 'c'*64, 'abandon abandon'):
                 self.assertNotIn(secret, persisted)
             self.assertIn('ordinary startup', persisted)
             self.assertTrue(evidence.scan())
