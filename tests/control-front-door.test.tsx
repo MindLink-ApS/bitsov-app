@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { render } from 'solid-js/web';
 import type { JSX } from 'solid-js';
-import { DiscoverPanel, FrontDoorEditor } from '../src/control/Discover';
+import { DiscoverPanel, FrontDoorEditor, frontDoorOwnerAsk } from '../src/control/Discover';
 import { safeImageMime } from '../src/control/frontDoorMedia';
 import {
   sampleSource,
@@ -172,6 +172,42 @@ describe('front door Discover and editor', () => {
     expect(root.querySelector('[data-fd-seq]')?.textContent).toMatch(/seq 2/);
     expect(root.querySelector('[data-fd-qr]')).toBeTruthy();
     expect(root.querySelector('[data-fd-preview] [data-fd-qr]')).toBeNull();
+  });
+
+  it('shows the owner request with the node command when publishing needs front_door', async () => {
+    const source = sampleSource();
+    const publish = source.frontDoorPublish.bind(source);
+    let asks = 0;
+    source.frontDoorPublish = async (fields) => {
+      if (asks++ === 0) {
+        throw 'front_door_owner: Publishing your front door needs your permission at the node (it allows the card only: no spending, nothing else). On the node\'s computer run: konsensus grant --op 0a1b2c Then press Publish again.';
+      }
+      return publish(fields);
+    };
+    mount(() => <FrontDoorEditor source={source} now={Date.now()} />);
+    await viWait();
+    const name = root.querySelector<HTMLInputElement>('[data-fd-edit-name]')!;
+    name.value = 'Rasmus';
+    name.dispatchEvent(new Event('input', { bubbles: true }));
+    await viWait();
+    root.querySelector<HTMLButtonElement>('[data-fd-publish]')!.click();
+    await viWait();
+    expect(root.querySelector('[data-fd-owner-command]')?.textContent).toBe('konsensus grant --op 0a1b2c');
+    expect(root.querySelector('[data-fd-owner-action]')?.textContent).toContain('no spending');
+    expect(root.querySelector('[data-fd-edit-error]')).toBeNull();
+    // After the owner grants, the same button publishes and the request goes away.
+    root.querySelector<HTMLButtonElement>('[data-fd-publish]')!.click();
+    await viWait();
+    expect(root.querySelector('[data-fd-owner-action]')).toBeNull();
+    expect(root.querySelector('[data-fd-link]')?.textContent).toMatch(/^bitsov:\/\/front-door#/);
+  });
+
+  it('reads the owner request only from the host prefix', () => {
+    expect(frontDoorOwnerAsk(null)).toBeNull();
+    expect(frontDoorOwnerAsk('/front-door failed (403): token lacks required scope: admin')).toBeNull();
+    expect(frontDoorOwnerAsk('front_door_owner: This node cannot let the app publish its front door. unavailable in this deployment'))
+      .toEqual({ text: 'This node cannot let the app publish its front door. unavailable in this deployment', command: null });
+    expect(frontDoorOwnerAsk('front_door_owner: run: konsensus grant --op ab12; rm -rf x')?.command).toBe('konsensus grant --op ab12');
   });
 
   it('blocks Publish when the serialized preview exceeds 16 KiB', async () => {
