@@ -5,6 +5,7 @@ import { qrSvg } from '../qr';
 import type { Proposal } from './ai';
 import { AiTrack, createAiSession } from './AiTrack';
 import { amount as fmtAmount, allIn, clock, day, feeCeiling, routingFee, sats, satsWhole, satUnit, shortId, uptime } from './format';
+import { amountText, inPaymentBounds, MAX_PAYMENT_MSAT, MIN_PAYMENT_MSAT, parseAmount } from './amountInput';
 import { Organism } from './BodyPanel';
 import { DiscoverPanel, FrontDoorEditor } from './Discover';
 import { callCost, createCallEngine, IDLE as CALL_IDLE, isCallKind, signalCost, stunServer, type CallMedia, type CallView } from './call';
@@ -158,7 +159,8 @@ export type Actions = {
   ownerRequest: (peer: string, cap: number, budget: number) => Promise<Outcome<OwnerContactApproval | null>>;
   ownerStatus: (id: string) => Promise<Outcome<OwnerContactApproval>>;
   ownerCancel: (id: string) => Promise<void>;
-  invoice: (t: TrackRef, sats: number, note: string) => Promise<Outcome<unknown>>;
+  /** Create an invoice for an exact msat amount (never rounded here). */
+  invoice: (t: TrackRef, msat: number, note: string) => Promise<Outcome<unknown>>;
   amountOf: (bolt11: string) => Promise<Outcome<number>>;
   pay: (t: TrackRef, bolt11: string, msat: number) => Promise<Outcome<unknown>>;
   keysend: (t: TrackRef, pubkey: string, msat: number, memo: string) => Promise<Outcome<unknown>>;
@@ -775,8 +777,8 @@ export function ControlCenter(props: Props) {
       }
       return r;
     },
-    invoice: async (t, amount, note) => {
-      const r = await act(() => source.invoiceCreate(Math.round(amount * 1000), note));
+    invoice: async (t, msat, note) => {
+      const r = await act(() => source.invoiceCreate(msat, note));
       if (r.ok) addArtifact(t, { type: 'invoice', invoice: r.value });
       return r;
     },
@@ -2112,7 +2114,48 @@ const paidUndelivered = (r: Outcome<unknown>) => !r.ok && r.error.code === 'paym
 
 const kb = (bytes: number) => (bytes < 1024 ? `${bytes} B` : `${(bytes / 1024).toFixed(bytes < 10_240 ? 1 : 0)} KB`);
 
+/** `sats` or `BTC`: the unit typed amounts are read in. */
+const unitName = () => (denom() === 'btc' ? 'BTC' : 'sats');
+
+/** Amount first: one big field in the chosen denomination. Refuses, never rounds, a finer amount. */
+function AmountField(props: { data: 'pay' | 'request'; label: string; value: string; onInput: (v: string) => void }) {
+  /** Why the typed amount cannot be used, before any review. */
+  const problem = (): string | null => {
+    if (props.value.trim() === '') return null;
+    const msat = parseAmount(props.value, denom());
+    if (msat === null) return `Use digits and one dot, at most ${denom() === 'btc' ? 11 : 3} decimals.`;
+    return inPaymentBounds(msat) ? null : `Between ${fmtAmount(MIN_PAYMENT_MSAT)} and ${fmtAmount(MAX_PAYMENT_MSAT)}.`;
+  };
+  const invalid = () => problem() !== null;
+  return (
+    <>
+      <label class="amount-field" classList={{ invalid: invalid() }}>
+        <input
+          ref={(el) => queueMicrotask(() => el.isConnected && el.focus())}
+          data-pay-amount={props.data === 'pay' ? '' : undefined}
+          data-request-amount={props.data === 'request' ? '' : undefined}
+          class="amount-input"
+          inputmode="decimal"
+          autocomplete="off"
+          placeholder="0"
+          value={props.value}
+          onInput={(e) => props.onInput(e.currentTarget.value)}
+          aria-label={`${props.label} in ${unitName()}`}
+          aria-invalid={invalid()}
+        />
+        <span class="amount-unit">{unitName()}</span>
+      </label>
+      <Show when={invalid()}>
+        <p class="hint" data-amount-invalid>{problem()}</p>
+      </Show>
+    </>
+  );
+}
+
 type Mode = 'message' | 'pay' | 'request' | 'file';
+type PayReview =
+  | { kind: 'invoice'; bolt11: string; msat: number }
+  | { kind: 'keysend'; pubkey: string; msat: number; memo: string };
 
 function Composer(props: {
   moneyBlocked: boolean;
@@ -2147,6 +2190,16 @@ function Composer(props: {
   const [pubkey, setPubkey] = createSignal('');
   const [amount, setAmount] = createSignal('');
   const [memo, setMemo] = createSignal('');
+  /** The typed amount as exact msat in the current denomination, or null when not exact or outside 1 sat to 1 BTC. */
+  const amountMsat = () => {
+    const msat = parseAmount(amount(), denom());
+    return msat !== null && inPaymentBounds(msat) ? msat : null;
+  };
+  // The one confirm step: exactly what Pay will send, frozen when shown.
+  // Any edit, mode, track or denomination change drops it; nothing is paid
+  // until its own button is pressed.
+  const [review, setReview] = createSignal<PayReview | null>(null);
+  const [paying, setPaying] = createSignal(false);
   // file
   const [file, setFile] = createSignal<File | null>(null);
   let fileInput: HTMLInputElement | undefined;
@@ -2312,6 +2365,18 @@ function Composer(props: {
       { defer: true },
     ),
   );
+  // Switching sats/BTC rewrites the typed amount, so it still means the same msat.
+  createEffect(
+    on(
+      denom,
+      (next, prev) => {
+        if (!prev) return;
+        const msat = parseAmount(untrack(amount), prev);
+        if (msat !== null) setAmount(amountText(msat, next));
+      },
+    ),
+  );
+  createEffect(on([mode, payKind, bolt11, invoiceMsat, pubkey, amount, memo, denom, () => trackKey(props.track)], () => setReview(null), { defer: true }));
   // A draft from the AI track: fill this composer once. Sending is still the
   // owner's press, with the cost shown and the spend approval unchanged.
   createEffect(
@@ -2325,13 +2390,14 @@ function Composer(props: {
         setMode(p.mode);
         setNote(null);
         if (p.mode === 'message') setDraft(p.text);
+        const draftAmount = p.sats === null ? '' : amountText(Math.round(p.sats * 1000), denom());
         if (p.mode === 'pay') {
           setPayKind('keysend');
-          setAmount(p.sats === null ? '' : String(p.sats));
+          setAmount(draftAmount);
           setMemo('');
         }
         if (p.mode === 'request') {
-          setAmount(p.sats === null ? '' : String(p.sats));
+          setAmount(draftAmount);
           setMemo(p.text);
         }
         setDrafted(true);
@@ -2419,11 +2485,6 @@ function Composer(props: {
     }),
   );
 
-  const satsInput = (v: string) => {
-    const n = Number(v);
-    return Number.isFinite(n) && n > 0 ? n : null;
-  };
-
   // The door card (genome first_contact_grant_v1): before a first paid message
   // to a stranger, read the stranger's own signed quote once. Its total is the
   // cap the owner confirms; the node pays that very invoice. Without it (older
@@ -2465,13 +2526,13 @@ function Composer(props: {
         if (payKind() === 'invoice') {
           return invoiceMsat() === null
             ? { msat: null, estimate: false, basis: 'Paste an invoice to see what it asks for' }
-            : { msat: allIn(invoiceMsat()!), estimate: false, basis: `Invoice principal plus ${feeCeiling(routingFee(invoiceMsat()!))}` };
+            : { msat: allIn(invoiceMsat()!), estimate: false, basis: `Includes ${feeCeiling(routingFee(invoiceMsat()!))}` };
         }
-        return satsInput(amount()) === null
+        return amountMsat() === null
           ? { msat: null, estimate: false, basis: 'Enter an amount' }
-          : { msat: allIn(Math.round(satsInput(amount())! * 1000)), estimate: false, basis: `Direct payment plus ${feeCeiling(routingFee(Math.round(satsInput(amount())! * 1000)))}` };
+          : { msat: allIn(amountMsat()!), estimate: false, basis: `Includes ${feeCeiling(routingFee(amountMsat()!))}` };
       case 'request':
-        return { msat: 0, estimate: false, basis: 'Receiving costs you nothing. The payer’s node pays the fee' };
+        return { msat: 0, estimate: false, basis: 'Receiving is free' };
       case 'file':
         return props.filePrice === null
           ? { msat: null, estimate: false, basis: 'Reading the file price…' }
@@ -2485,15 +2546,16 @@ function Composer(props: {
       case 'message':
         return draft().trim().length > 0 && props.cost !== null;
       case 'pay':
-        return payKind() === 'invoice' ? invoiceMsat() !== null : pubkey().trim().length > 0 && satsInput(amount()) !== null;
+        return payKind() === 'invoice' ? invoiceMsat() !== null : pubkey().trim().length > 0 && amountMsat() !== null;
       case 'request':
-        return satsInput(amount()) !== null;
+        return amountMsat() !== null;
       case 'file':
         return file() !== null && props.filePrice !== null;
     }
   };
 
   const label = () => {
+    if (paying()) return 'Paying…';
     if (ownerWait()) return 'Waiting for contact approval';
     if (viaBudget()) {
       const s = shown();
@@ -2597,6 +2659,16 @@ function Composer(props: {
       return;
     }
     if (!ready()) return;
+    if (mode() === 'pay') {
+      // Pay never pays from here: it shows the review, and only its confirm pays.
+      const principal = payKind() === 'invoice' ? invoiceMsat()! : amountMsat()!;
+      setReview(
+        payKind() === 'invoice'
+          ? { kind: 'invoice', bolt11: bolt11().trim(), msat: principal }
+          : { kind: 'keysend', pubkey: pubkey().trim(), msat: principal, memo: memo() },
+      );
+      return;
+    }
     setBusy(true);
     const t = props.track;
     const submittedRevision = composerRevision;
@@ -2615,18 +2687,9 @@ function Composer(props: {
         break;
       }
       case 'pay':
-        r =
-          payKind() === 'invoice'
-            ? await props.actions.pay(t, bolt11().trim(), invoiceMsat()!)
-            : await props.actions.keysend(t, pubkey().trim(), Math.round(satsInput(amount())! * 1000), memo());
-        if (r.ok && unchanged()) {
-          setBolt11('');
-          setAmount('');
-          setMemo('');
-        } else if (!r.ok && unchanged() && isBudgetStop(r.error)) setNote(r.error.message);
-        break;
+        return;
       case 'request':
-        r = await props.actions.invoice(t, satsInput(amount())!, memo());
+        r = await props.actions.invoice(t, amountMsat()!, memo());
         if (r.ok && unchanged()) {
           setAmount('');
           setMemo('');
@@ -2642,6 +2705,34 @@ function Composer(props: {
     }
     setBusy(false);
   };
+
+  /** The confirm tap: pays exactly the reviewed amount through the same host command. */
+  const confirmPay = async () => {
+    const rv = review();
+    if (!rv || props.moneyBlocked || busy() || !line().open) return;
+    // Consumed at dispatch: a review pays at most once, whatever happens to
+    // the draft while the host answers. Paying again needs a new review.
+    setReview(null);
+    setNote(null);
+    setBusy(true);
+    setPaying(true);
+    const t = props.track;
+    const submittedRevision = composerRevision;
+    const r = await (rv.kind === 'invoice'
+      ? props.actions.pay(t, rv.bolt11, rv.msat)
+      : props.actions.keysend(t, rv.pubkey, rv.msat, rv.memo)
+    ).finally(() => setPaying(false));
+    if (composerRevision === submittedRevision) {
+      if (r.ok) {
+        setBolt11('');
+        setAmount('');
+        setMemo('');
+      } else if (isBudgetStop(r.error)) setNote(r.error.message);
+    }
+    setBusy(false);
+  };
+  // A closed spending window or money going offline withdraws the review.
+  createEffect(() => { if (props.moneyBlocked || !line().open) setReview(null); });
 
   const disabled = () =>
     props.moneyBlocked || busy() || !!ownerWait() ||
@@ -2672,6 +2763,9 @@ function Composer(props: {
                 data-composer-mode={m}
                 aria-pressed={mode() === m}
                 onClick={() => {
+                  // Reselecting the active mode is not an edit: it must not
+                  // detach an in-flight send from the draft it will clear.
+                  if (mode() === m) return;
                   composerRevision++;
                   setMode(m);
                   setNote(null);
@@ -2832,59 +2926,84 @@ function Composer(props: {
           </div>
         </Match>
         <Match when={mode() === 'pay'}>
-          <div class="fields">
+          <div class="fields pay-flow">
             <div class="modes soft small" role="tablist" aria-label="How to pay">
-              <button type="button" role="tab" aria-selected={payKind() === 'invoice'} onClick={() => { composerRevision++; setPayKind('invoice'); }}>Invoice</button>
-              <button type="button" role="tab" aria-selected={payKind() === 'keysend'} onClick={() => { composerRevision++; setPayKind('keysend'); }}>Direct</button>
+              <button type="button" role="tab" aria-selected={payKind() === 'invoice'} onClick={() => { if (payKind() === 'invoice') return; composerRevision++; setPayKind('invoice'); }}>Invoice</button>
+              <button type="button" role="tab" aria-selected={payKind() === 'keysend'} onClick={() => { if (payKind() === 'keysend') return; composerRevision++; setPayKind('keysend'); }}>Direct</button>
             </div>
             <Show
               when={payKind() === 'invoice'}
               fallback={
                 <>
-                  <input data-pay-pubkey placeholder="Their Lightning node pubkey (66 hex)" value={pubkey()} onInput={(e) => setPubkey(e.currentTarget.value)} aria-label="Lightning node pubkey" />
-                  <div class="row">
-                    <input data-pay-amount inputmode="numeric" placeholder="Sats" value={amount()} onInput={(e) => setAmount(e.currentTarget.value)} aria-label="Amount in sats" />
-                    <input placeholder="Note (optional)" value={memo()} onInput={(e) => setMemo(e.currentTarget.value)} aria-label="Note" />
-                  </div>
+                  <AmountField data="pay" label="Amount to pay" value={amount()} onInput={setAmount} />
+                  <input data-pay-pubkey placeholder="Their Lightning node ID" value={pubkey()} onInput={(e) => setPubkey(e.currentTarget.value)} aria-label="Lightning node pubkey" />
+                  <input data-pay-note placeholder="Note (optional)" value={memo()} onInput={(e) => setMemo(e.currentTarget.value)} aria-label="Note" />
                 </>
               }
             >
+              <div class="amount-field shown" data-pay-invoice-amount={invoiceMsat() ?? ''}>
+                <span class="amount-value">{invoiceMsat() === null ? '0' : sats(invoiceMsat()!)}</span>
+                <span class="amount-unit">{unitName()}</span>
+              </div>
               <textarea data-pay-invoice rows={2} placeholder={`Paste an invoice from ${props.name}`} value={bolt11()} onInput={(e) => setBolt11(e.currentTarget.value)} aria-label="Lightning invoice" />
             </Show>
-            <div class="composer-bar">
-              <div class="cost" data-cost>
-                <span class="label">Cost to send</span>
-                <Show when={shown().msat !== null} fallback={<span class="sats">…</span>}>
-                  <span class="sats" data-cost-msat={shown().msat!}>
-                    {shown().estimate ? '≈ ' : ''}
-                    {sats(shown().msat!)}
-                    <span class="unit">{satUnit(shown().msat!)}</span>
-                  </span>
-                </Show>
-                <span class="basis" title={shown().basis}>{shown().basis}</span>
-              </div>
-              <button type="submit" class="primary soft" disabled={disabled()} data-send>
-                {label()}
-              </button>
-            </div>
+            <Show
+              when={review()}
+              fallback={
+                <div class="composer-bar">
+                  <div class="cost" data-cost>
+                    <span class="label">Cost to send</span>
+                    <Show when={shown().msat !== null} fallback={<span class="sats">…</span>}>
+                      <span class="sats" data-cost-msat={shown().msat!}>
+                        {sats(shown().msat!)}
+                        <span class="unit">{satUnit(shown().msat!)}</span>
+                      </span>
+                    </Show>
+                    <span class="basis" title={shown().basis}>{shown().basis}</span>
+                  </div>
+                  <button type="submit" class="primary soft" disabled={disabled()} data-send>
+                    {label()}
+                  </button>
+                </div>
+              }
+            >
+              {(rv) => (
+                <div class="pay-review" data-pay-review data-review-msat={rv().msat} data-review-max-msat={allIn(rv().msat)}>
+                  <p class="pay-review-title">
+                    Pay {props.name}
+                    <span class="hint"> · {rv().kind === 'invoice' ? 'their invoice' : `direct to ${shortId((rv() as { pubkey: string }).pubkey)}`}</span>
+                  </p>
+                  <dl>
+                    <dt>Amount</dt>
+                    <dd data-review-amount>{fmtAmount(rv().msat)}</dd>
+                    <dt>Network fee</dt>
+                    <dd data-review-fee>up to {fmtAmount(routingFee(rv().msat))}</dd>
+                    <dt>Total at most</dt>
+                    <dd data-review-total>{fmtAmount(allIn(rv().msat))}</dd>
+                    <Show when={rv().kind === 'keysend' && (rv() as { memo: string }).memo.trim()}>
+                      <dt>Note</dt>
+                      <dd>{(rv() as { memo: string }).memo.trim()}</dd>
+                    </Show>
+                  </dl>
+                  <div class="composer-bar">
+                    <button type="button" class="link" data-pay-back disabled={busy()} onClick={() => setReview(null)}>Back</button>
+                    <span class="basis">You pay the real fee, never above this.</span>
+                    <button type="button" class="primary soft" data-pay-confirm disabled={busy() || props.moneyBlocked} onClick={() => void confirmPay()}>
+                      Confirm and pay
+                    </button>
+                  </div>
+                </div>
+              )}
+            </Show>
           </div>
         </Match>
         <Match when={mode() === 'request'}>
-          <div class="fields">
-            <div class="row">
-              <input data-request-amount inputmode="numeric" placeholder="Sats to receive" value={amount()} onInput={(e) => setAmount(e.currentTarget.value)} aria-label="Sats to receive" />
-              <input data-request-note placeholder="What it is for (optional)" value={memo()} onInput={(e) => setMemo(e.currentTarget.value)} aria-label="What it is for" />
-            </div>
+          <div class="fields pay-flow">
+            <AmountField data="request" label="Amount to request" value={amount()} onInput={setAmount} />
+            <input data-request-note placeholder="What for? e.g. dinner" value={memo()} onInput={(e) => setMemo(e.currentTarget.value)} aria-label="What it is for" />
             <div class="composer-bar">
               <div class="cost" data-cost>
-                <span class="label">You receive</span>
-                <Show when={shown().msat !== null} fallback={<span class="sats">…</span>}>
-                  <span class="sats" data-cost-msat={shown().msat!}>
-                    {sats(Math.round((satsInput(amount()) ?? 0) * 1000))}
-                    <span class="unit">{satUnit(Math.round((satsInput(amount()) ?? 0) * 1000) || 1000)}</span>
-                  </span>
-                </Show>
-                <span class="basis" title={shown().basis}>{shown().basis}</span>
+                <span class="basis" data-request-hint>{props.name} gets an invoice and QR. Receiving is free.</span>
               </div>
               <button type="submit" class="primary soft" disabled={disabled()} data-send>
                 {label()}
@@ -2924,7 +3043,10 @@ function Composer(props: {
         )}
       </Show>
       <Show when={mode() === 'pay'}>
-        <p class="hint" data-budget-payment>App invoice payments and keysend reserve principal plus the network fee ceiling against the app daily all-in limit; any finite node grant still applies.</p>
+        <details class="quiet-detail" data-budget-payment>
+          <summary>Payment rules</summary>
+          <p>App invoice payments and keysend reserve principal plus the network fee ceiling against the app daily all-in limit; any finite node grant still applies.</p>
+        </details>
       </Show>
       <Show when={mode() === 'file'}>
         <details class="quiet-detail" data-budget-file>

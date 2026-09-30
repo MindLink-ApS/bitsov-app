@@ -110,6 +110,7 @@ def run(r, fixture, capacities):
                 owner_window(s)
             s.need('payment window ready',r.wait_until(lambda:r.text('[data-send]').strip().startswith('Pay'),10))
             r.ui('click',selector='[data-send]')
+        r.ui('click',selector='[data-pay-confirm]',timeoutMs=20000)
         s.need('UI explicitly reports payment not dispatched',r.ui_try('wait',selector='[data-artifact="failed"][data-code="not_dispatched"]',timeoutMs=45000))
         s.check('UI says nothing was paid','Not sent - nothing was paid.' in r.text('[data-artifact="failed"][data-code="not_dispatched"]'))
         s.snap('over-cap-refused')
