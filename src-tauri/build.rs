@@ -124,6 +124,8 @@ fn build_device_key_swift() {
     const SOURCE: &str = "native/device_key.swift";
     println!("cargo:rerun-if-changed={SOURCE}");
     println!("cargo:rerun-if-env-changed=MACOSX_DEPLOYMENT_TARGET");
+    println!("cargo:rerun-if-env-changed=DEVELOPER_DIR");
+    println!("cargo:rerun-if-env-changed=SDKROOT");
 
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
     let arch = match std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() {

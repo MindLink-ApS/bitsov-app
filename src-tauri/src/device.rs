@@ -165,20 +165,28 @@ pub fn intent_message(node: &str, client_id: &str, i: &Intent) -> String {
 }
 
 /// What the Touch ID dialog says. It is where the owner reads what they
-/// approve, so it names the contact and both amounts.
+/// approve: the amounts come first, then the contact.
 pub fn intent_reason(contact: &str, budget_msat: u64, per_act_max_msat: u64) -> String {
     format!(
-        "let {contact} be paid up to {} sats per day, at most {} sats per message",
+        "approve paying up to {} sats per day, at most {} sats per message, to {contact}",
         sats(budget_msat),
         sats(per_act_max_msat)
     )
 }
 
-/// A contact's name for the dialog: the label if the owner gave one (bounded,
-/// no control characters), else the short node id.
+/// Characters that could hide or reorder what the owner reads in the dialog
+/// (bidi controls, zero-width and other invisible formatting).
+fn invisible(c: char) -> bool {
+    c.is_control()
+        || matches!(c, '\u{00AD}' | '\u{061C}' | '\u{180E}' | '\u{200B}'..='\u{200F}'
+            | '\u{2028}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}')
+}
+
+/// A contact's name for the dialog: the node's label for the peer (only
+/// visible characters, at most 32), with the short node id, else the id.
 pub fn contact_name(label: Option<&str>, peer: &str) -> String {
     let clean: Option<String> = label
-        .map(|l| l.chars().filter(|c| !c.is_control()).take(40).collect::<String>())
+        .map(|l| l.chars().filter(|c| !invisible(*c)).take(32).collect::<String>())
         .map(|l| l.trim().to_string())
         .filter(|l| !l.is_empty());
     let short = format!("{}…{}", &peer[..8.min(peer.len())], &peer[peer.len().saturating_sub(4)..]);
@@ -205,7 +213,10 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let tmp = path.with_extension("tmp");
+    // Per file: the blob and the record must never share a temporary name.
+    let mut tmp_name = path.file_name().unwrap_or_default().to_os_string();
+    tmp_name.push(".tmp");
+    let tmp = path.with_file_name(tmp_name);
     let _ = std::fs::remove_file(&tmp);
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
@@ -331,7 +342,12 @@ mod tests {
         let name = contact_name(Some("Maya\u{7}"), PEER);
         assert_eq!(name, "Maya (aaaaaaaa…aaaa)");
         assert_eq!(contact_name(None, PEER), "aaaaaaaa…aaaa");
-        assert_eq!(intent_reason(&name, 200_000, 2_000), "let Maya (aaaaaaaa…aaaa) be paid up to 200 sats per day, at most 2 sats per message");
+        assert_eq!(intent_reason(&name, 200_000, 2_000), "approve paying up to 200 sats per day, at most 2 sats per message, to Maya (aaaaaaaa…aaaa)");
+        // No character that hides or reverses what the owner reads survives.
+        let hostile = "Ma\u{202E}ya\u{200B}\u{2066}\u{00AD}\u{FEFF}\u{061C}\u{180E}\u{2028}\u{2060}";
+        assert_eq!(contact_name(Some(hostile), PEER), "Maya (aaaaaaaa…aaaa)");
+        assert_eq!(contact_name(Some("\u{202E}\u{200F}"), PEER), "aaaaaaaa…aaaa");
+        assert_eq!(contact_name(Some(&"x".repeat(100)), PEER), format!("{} (aaaaaaaa…aaaa)", "x".repeat(32)));
         assert_eq!(default_per_act(Some(2_000), 200_000), 2_000);
         assert_eq!(default_per_act(None, 200_000), 10_000);
         assert_eq!(default_per_act(Some(500_000), 200_000), 200_000);
@@ -349,6 +365,21 @@ mod tests {
         assert_eq!((lapsed.state, lapsed.owner_action), (DeviceState::Lapsed, None));
         assert_eq!(DeviceView::of(false, Some(&r), false, 0).state, DeviceState::Unavailable);
         assert_eq!(DeviceView::of(true, None, false, 0).state, DeviceState::None);
+    }
+
+    #[test]
+    fn the_blob_and_the_record_never_share_a_temporary_file() {
+        let dir = tempfile::tempdir().unwrap();
+        save_blob(dir.path(), b"blob").unwrap();
+        save_record(dir.path(), &Record { public_key: "04".into(), ..Default::default() }).unwrap();
+        assert_eq!(load_blob(dir.path()).unwrap(), b"blob");
+        assert_eq!(load_record(dir.path()).unwrap().public_key, "04");
+        // Leftover temporaries of both, as after a crash, do not collide either.
+        std::fs::write(dir.path().join("device-key.blob.tmp"), b"x").unwrap();
+        std::fs::write(dir.path().join("device-key.json.tmp"), b"y").unwrap();
+        save_blob(dir.path(), b"blob2").unwrap();
+        save_record(dir.path(), &Record { public_key: "05".into(), ..Default::default() }).unwrap();
+        assert_eq!(load_blob(dir.path()).unwrap(), b"blob2");
     }
 
     #[test]

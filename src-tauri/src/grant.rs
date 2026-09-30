@@ -125,15 +125,13 @@ impl NodeGrant {
         }
         if self.recipients_only {
             if let Some(r) = recipient {
-                let key = r.to_ascii_lowercase();
-                let live = self.recipient_expires_at.get(&key).is_some_and(|at| ((*at).max(0) as u64).saturating_mul(1000) > now_ms);
-                if !live {
+                if !self.has_envelope(r, now_ms) {
                     return Err(no_envelope());
                 }
-                if let Some(per_act) = self.per_act_max_by_recipient.get(&key) {
-                    if max_msat > *per_act {
-                        return Err(per_call(*per_act));
-                    }
+                // As the node: an envelope without a per-act maximum pays nothing.
+                let per_act = self.per_act_max_by_recipient.get(&r.to_ascii_lowercase()).copied().unwrap_or(0);
+                if max_msat > per_act {
+                    return Err(per_call(per_act));
                 }
             }
         }
@@ -158,6 +156,9 @@ pub struct GrantSummary {
     pub budget_msat: u64,
     pub remaining_msat: u64,
     pub per_call_max_msat: u64,
+    /// A relation grant: each contact with an envelope, and when it ends (ms).
+    /// None for an owner console grant, which pays any contact within it.
+    pub envelopes: Option<BTreeMap<String, u64>>,
 }
 
 impl From<&NodeGrant> for GrantSummary {
@@ -167,6 +168,12 @@ impl From<&NodeGrant> for GrantSummary {
             budget_msat: g.budget_msat,
             remaining_msat: g.remaining_msat,
             per_call_max_msat: g.per_call_max_msat,
+            envelopes: g.recipients_only.then(|| {
+                g.recipient_expires_at
+                    .iter()
+                    .map(|(peer, at)| (peer.clone(), ((*at).max(0) as u64).saturating_mul(1000)))
+                    .collect()
+            }),
         }
     }
 }
@@ -319,6 +326,10 @@ mod tests {
         g.check(500, Some(A), 999_000).unwrap();
         assert_eq!(g.check(501, Some(A), 999_000).unwrap_err().code, "grant_per_call");
         assert_eq!(g.check(1, Some(B), 0).unwrap_err().code, "grant_no_envelope");
+        // No per-act maximum on record: nothing may be paid, as on the node.
+        g.per_act_max_by_recipient.clear();
+        assert_eq!(g.check(1, Some(A), 999_000).unwrap_err().code, "grant_per_call");
+        g.per_act_max_by_recipient = BTreeMap::from([(A.into(), 500)]);
         // The envelope's own end, before the grant's.
         assert_eq!(g.check(1, Some(A), 1_000_000).unwrap_err().code, "grant_no_envelope");
     }

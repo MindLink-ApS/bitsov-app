@@ -366,7 +366,7 @@ export type ActionError = {
     | 'grant_ended' | 'grant_exhausted' | 'grant_per_call' | 'grant_recipient' | 'grant_unpriced' | 'grant_ledger' | 'grant_refused' | 'grant_unknown' | 'grant_first_contact' | 'grant_readmission'
     | 'grant_no_envelope'
     // This Mac's Touch ID approvals (device key).
-    | 'device_not_registered' | 'device_cancelled' | 'device_unavailable' | 'device_invalid' | 'device_key' | 'device_unsupported'
+    | 'device_not_registered' | 'device_biometry' | 'device_cancelled' | 'device_unavailable' | 'device_invalid' | 'device_key' | 'device_unsupported'
     | 'room_unreachable'
     // Paid, not delivered (node 502 `payment_settled_send_incomplete`), and its retry.
     | 'payment_settled_undelivered' | 'retry_unavailable' | 'retry_needs_admission' | 'undelivered_pending'
@@ -489,7 +489,14 @@ export type BudgetView = {
 };
 
 /** What the node reports about its budget grant. Numbers only. */
-export type NodeGrantSummary = { expires_at_ms: number; budget_msat: number; remaining_msat: number; per_call_max_msat: number };
+export type NodeGrantSummary = {
+  expires_at_ms: number;
+  budget_msat: number;
+  remaining_msat: number;
+  per_call_max_msat: number;
+  /** A Touch ID relation grant: each contact with an envelope → when it ends (ms). Absent for a console grant. */
+  envelopes?: Record<string, number> | null;
+};
 
 /** `message_send`. */
 export type SendReceipt = {

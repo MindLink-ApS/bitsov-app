@@ -4274,9 +4274,8 @@ async fn spend_cancel(
 async fn do_spend_cancel(state: &NodeState) -> Result<act::SpendView, ActionError> {
     let pending = state.spend.lock().unwrap().pending().cloned();
     if let Some(p) = pending {
-        // Best effort: an unknown or already-answered request is fine to forget.
         if let Ok(path) = act::elevation_status_path(&p.op_id) {
-            let _ = call_api(state, reqwest::Method::DELETE, &path, None).await;
+            withdraw_at_node(state, &path).await?;
         }
     }
     let view = {
@@ -4287,6 +4286,21 @@ async fn do_spend_cancel(state: &NodeState) -> Result<act::SpendView, ActionErro
     };
     save_spend_pending(state);
     Ok(view)
+}
+
+/// DELETE a pending request at the node. Gone already (404) is withdrawn; any
+/// other failure is reported, and the request is kept, never claimed cancelled.
+async fn withdraw_at_node(state: &NodeState, path: &str) -> Result<(), ActionError> {
+    let (status, body) = call_api(state, reqwest::Method::DELETE, path, None)
+        .await
+        .map_err(|e| ActionError::node(format!("Could not reach your node to cancel the request; it may still be approved there. {e}")))?;
+    if status.is_success() || status == reqwest::StatusCode::NOT_FOUND {
+        return Ok(());
+    }
+    Err(ActionError::node(format!(
+        "Your node did not cancel the request; it may still be approved there. {}",
+        api_error(path, status, &body)
+    )))
 }
 
 // ---- this Mac as a paired device (relation ladder steps 1–2) -------------------
@@ -4301,10 +4315,20 @@ fn device_store(state: &NodeState) -> Result<PathBuf, ActionError> {
         .ok_or_else(|| ActionError::new("app_not_ready", "This app is not paired with a node."))
 }
 
+/// Whether this Mac can approve with a device key. Test keys need no Touch
+/// ID, so tests only need the enclave.
+fn device_available(state: &NodeState) -> bool {
+    match *state.device_policy.lock().unwrap() {
+        device_key::Policy::NoPromptForTests => device_key::enclave_available(),
+        device_key::Policy::Biometry => device_key::available(),
+    }
+}
+
 fn device_error(e: device_key::DeviceKeyError) -> ActionError {
     match e {
         device_key::DeviceKeyError::Cancelled => ActionError::new("device_cancelled", "Touch ID was cancelled. Nothing was approved."),
         device_key::DeviceKeyError::Unavailable => ActionError::new("device_unavailable", "This Mac has no Secure Enclave the app can use. Approve at the node instead."),
+        device_key::DeviceKeyError::BiometryUnavailable => ActionError::new("device_biometry", "Touch ID is not available on this Mac right now (no finger enrolled, or locked out after failed tries). Nothing was approved. Approve at the node instead, with the konsensus grant command."),
         device_key::DeviceKeyError::Invalid => ActionError::new("device_invalid", "This Mac's approval key no longer works (for example, the enrolled fingerprints changed). Set up Touch ID approvals again."),
         device_key::DeviceKeyError::Other(code) => ActionError::new("device_key", format!("The Secure Enclave refused ({code}). Nothing was approved.")),
     }
@@ -4346,7 +4370,7 @@ async fn device_binding(state: &NodeState) -> Result<DeviceBinding, ActionError>
 }
 
 fn device_view(state: &NodeState, record: Option<&device::Record>) -> device::DeviceView {
-    device::DeviceView::of(device_key::available(), record, state.device_lapsed.load(Ordering::SeqCst), now_ms())
+    device::DeviceView::of(device_available(state), record, state.device_lapsed.load(Ordering::SeqCst), now_ms())
 }
 
 #[derive(Deserialize)]
@@ -4360,9 +4384,29 @@ struct DeviceKeyReply {
 
 /// Where this Mac's registration stands; asks the node while one is pending,
 /// and notices a key the owner revoked.
+/// The local key, only when the record and the enclave blob agree. A record
+/// whose blob is missing, unreadable or holds another key is dropped, so setup
+/// is offered again rather than "registered" forever.
+fn local_key(store: &Path) -> Option<(Vec<u8>, device::Record)> {
+    let record = device::load_record(store)?;
+    let consistent = device::load_blob(store).filter(|blob| {
+        device_key::public_key(blob).is_ok_and(|public| hex::encode(public) == record.public_key)
+    });
+    match consistent {
+        Some(blob) => Some((blob, record)),
+        None => {
+            // Not on a Mac without an enclave, where nothing can be read back.
+            if device_key::enclave_available() {
+                device::forget(store);
+            }
+            None
+        }
+    }
+}
+
 async fn do_device_key_status(state: &NodeState) -> Result<device::DeviceView, ActionError> {
     let store = device_store(state)?;
-    let Some(mut record) = device::load_record(&store) else { return Ok(device_view(state, None)) };
+    let Some((_, mut record)) = local_key(&store) else { return Ok(device_view(state, None)) };
     if let Some(p) = record.pending.clone() {
         let path = format!("/pair/device-key/{}", p.op_id);
         if act::elevation_status_path(&p.op_id).is_err() {
@@ -4401,17 +4445,17 @@ async fn do_device_key_status(state: &NodeState) -> Result<device::DeviceView, A
 /// node with one Touch ID signature, and wait for the owner's one-time
 /// approval at the node. This app cannot approve it.
 async fn do_device_key_register(state: &NodeState) -> Result<device::DeviceView, ActionError> {
-    if !device_key::available() {
-        return Err(device_error(device_key::DeviceKeyError::Unavailable));
+    if !device_available(state) {
+        return Err(device_error(device_key::DeviceKeyError::BiometryUnavailable));
     }
     let store = device_store(state)?;
-    let existing = device::load_record(&store);
-    if existing.as_ref().is_some_and(|r| r.registered) {
-        return Ok(device_view(state, existing.as_ref()));
+    let existing = local_key(&store);
+    if let Some((_, r)) = existing.as_ref().filter(|(_, r)| r.registered) {
+        return Ok(device_view(state, Some(r)));
     }
-    let (blob, mut record) = match (device::load_blob(&store), existing) {
-        (Some(blob), Some(record)) => (blob, record),
-        _ => {
+    let (blob, mut record) = match existing {
+        Some((blob, record)) => (blob, record),
+        None => {
             let policy = *state.device_policy.lock().unwrap();
             let (blob, public) = tokio::task::spawn_blocking(move || device_key::create(policy))
                 .await
@@ -4451,10 +4495,11 @@ async fn do_device_key_register(state: &NodeState) -> Result<device::DeviceView,
 async fn do_device_key_cancel(state: &NodeState) -> Result<device::DeviceView, ActionError> {
     let store = device_store(state)?;
     let Some(mut record) = device::load_record(&store) else { return Ok(device_view(state, None)) };
-    if let Some(p) = record.pending.take() {
+    if let Some(p) = record.pending.clone() {
         if act::elevation_status_path(&p.op_id).is_ok() {
-            let _ = call_api(state, reqwest::Method::DELETE, &format!("/pair/device-key/{}", p.op_id), None).await;
+            withdraw_at_node(state, &format!("/pair/device-key/{}", p.op_id)).await?;
         }
+        record.pending = None;
         device::save_record(&store, &record)?;
     }
     state.device_lapsed.store(false, Ordering::SeqCst);
@@ -4467,7 +4512,6 @@ async fn do_device_key_cancel(state: &NodeState) -> Result<device::DeviceView, A
 async fn do_relation_approve(
     state: &NodeState,
     peer: &str,
-    label: Option<&str>,
     budget_msat: Option<u64>,
     per_act_max_msat: Option<u64>,
 ) -> Result<act::SpendView, ActionError> {
@@ -4477,16 +4521,25 @@ async fn do_relation_approve(
     if budget_paused(state)? {
         return Err(ActionError::new("budget_paused", "Payments are paused. Resume them first."));
     }
+    // Taken before the Touch ID prompt: a Lock or Pause while the owner is
+    // at the dialog, or while the node answers, opens nothing.
+    let fence = approval_fence(state);
     let store = device_store(state)?;
-    let record = device::load_record(&store).filter(|r| r.registered);
-    let (Some(record), Some(blob)) = (record, device::load_blob(&store)) else {
+    let Some((blob, record)) = local_key(&store).filter(|(_, r)| r.registered) else {
         return Err(ActionError::new("device_not_registered", "Set up Touch ID approvals first."));
     };
     let key_id = record.key_id.clone().ok_or_else(|| ActionError::new("device_not_registered", "Set up Touch ID approvals first."))?;
     let intent = device::Intent::contact(&key_id, peer, budget_msat, per_act_max_msat, now_unix())?;
     let binding = device_binding(state).await?;
     let message = device::intent_message(&binding.node, &binding.client_id, &intent);
-    let reason = device::intent_reason(&device::contact_name(label, &intent.peer), budget_msat, per_act_max_msat);
+    // The dialog's contact name comes from the node's own peer list, never
+    // from the renderer: the dialog is where the owner reads what they sign.
+    let label = get_json::<Vec<control::Peer>>(state, "/peers")
+        .await
+        .ok()
+        .and_then(|peers| peers.into_iter().find(|p| p.node_id.eq_ignore_ascii_case(&intent.peer)))
+        .and_then(|p| p.label);
+    let reason = device::intent_reason(&device::contact_name(label.as_deref(), &intent.peer), budget_msat, per_act_max_msat);
     let signature = match device_sign(blob, message, reason).await {
         Ok(signature) => signature,
         Err(e) => {
@@ -4502,9 +4555,20 @@ async fn do_relation_approve(
     if !status.is_success() {
         return Err(ActionError::node(api_error("/pair/relation-intent", status, &text)));
     }
-    // The grant reaches a token only on re-issue; then open the window over it.
+    // The grant reaches a token only on re-issue. Open the window over the
+    // relation grant and nothing else: never a console elevation request.
     refresh_paired(state).await.map_err(ActionError::node)?;
-    spend_advance_for(state, Some(Want::Window)).await
+    let has_spend = matches!(&*state.auth.lock().unwrap(), AuthMode::Paired(s) if s.scopes.iter().any(|x| x == "spend"));
+    let grant = read_grant(state).await?.filter(|g| g.recipients_only && g.has_envelope(&intent.peer, now_ms()));
+    let (true, Some(grant)) = (has_spend, grant) else {
+        return Err(ActionError::new(
+            "grant_no_envelope",
+            "Your node accepted the approval, but its spend grant for this contact could not be confirmed. Nothing was opened; try again.",
+        ));
+    };
+    open_fenced(state, fence, Want::Window, act::SpendBasis::NodeGrant, Some(&grant))?;
+    save_spend_pending(state);
+    Ok(state.spend.lock().unwrap().view(now_ms()))
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -4543,13 +4607,12 @@ async fn relation_approve(
     window: WebviewWindow<impl tauri::Runtime>,
     state: State<'_, NodeState>,
     peer: String,
-    contact_name: Option<String>,
     budget_msat: Option<u64>,
     per_act_max_msat: Option<u64>,
 ) -> Result<act::SpendView, ActionError> {
     reject_sealed_window(&window)?;
     drop(window);
-    do_relation_approve(state.inner(), &peer, contact_name.as_deref(), budget_msat, per_act_max_msat).await
+    do_relation_approve(state.inner(), &peer, budget_msat, per_act_max_msat).await
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -9175,7 +9238,7 @@ mod control_act_tests {
         *node.state.device_policy.lock().unwrap() = device_key::Policy::NoPromptForTests;
         let s = &node.state;
         assert_eq!(do_device_key_status(s).await.unwrap().state, device::DeviceState::None);
-        assert_eq!(do_relation_approve(s, A, None, None, Some(7000)).await.unwrap_err().code, "device_not_registered");
+        assert_eq!(do_relation_approve(s, A, None, Some(7000)).await.unwrap_err().code, "device_not_registered");
 
         // Register: the node checked the proof; the owner must approve at the node.
         let view = do_device_key_register(s).await.unwrap();
@@ -9193,7 +9256,7 @@ mod control_act_tests {
 
         // One tap for Maya: the node verified the signature over the exact terms.
         *g1.grant.lock().unwrap() = relation_grant(A, 7000);
-        let view = do_relation_approve(s, A, Some("Maya"), None, Some(7000)).await.unwrap();
+        let view = do_relation_approve(s, A, None, Some(7000)).await.unwrap();
         assert_eq!((view.state, view.basis), (act::SpendState::Open, Some(act::SpendBasis::NodeGrant)));
         let intents = dn.intents.lock().unwrap().clone();
         assert_eq!(intents.len(), 1);
@@ -9224,6 +9287,93 @@ mod control_act_tests {
         dn.registered.store(true, Ordering::SeqCst);
         assert_eq!(do_device_key_status(s).await.unwrap().state, device::DeviceState::Registered);
         dn.registered.store(false, Ordering::SeqCst);
+        assert_eq!(do_device_key_status(s).await.unwrap().state, device::DeviceState::None);
+    }
+
+    /// `device_node` with `DELETE` answering `delete_status`.
+    #[cfg(target_os = "macos")]
+    fn device_node_deleting(delete_status: u16) -> (DeviceNode, Routes) {
+        let (dn, inner) = device_node();
+        let routes: Routes = Arc::new(move |m: &str, path: &str, b: &str| {
+            if m == "DELETE" {
+                return (delete_status, r#"{"error":"nope"}"#.into());
+            }
+            inner(m, path, b)
+        });
+        (dn, routes)
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn a_cancel_the_node_refused_is_reported_and_keeps_the_request() {
+        let (_dn, first) = device_node_deleting(500);
+        let (node, _dir, _g1) = g1_node_with(&["read", "receive"], Some(first));
+        *node.state.device_policy.lock().unwrap() = device_key::Policy::NoPromptForTests;
+        let s = &node.state;
+        do_device_key_register(s).await.unwrap();
+        let err = do_device_key_cancel(s).await.unwrap_err();
+        assert!(err.message.contains("may still be approved"), "{}", err.message);
+        assert_eq!(do_device_key_status(s).await.unwrap().state, device::DeviceState::Pending);
+
+        // Gone already at the node (404) counts as withdrawn.
+        let (_dn, first) = device_node_deleting(404);
+        let (node, _dir, _g1) = g1_node_with(&["read", "receive"], Some(first));
+        *node.state.device_policy.lock().unwrap() = device_key::Policy::NoPromptForTests;
+        do_device_key_register(&node.state).await.unwrap();
+        assert_eq!(do_device_key_cancel(&node.state).await.unwrap().state, device::DeviceState::None);
+    }
+
+    #[tokio::test]
+    async fn a_console_cancel_the_node_refused_keeps_waiting() {
+        let failing: Routes = Arc::new(|m: &str, path: &str, b: &str| {
+            if m == "DELETE" {
+                return (500, r#"{"error":"nope"}"#.into());
+            }
+            asking_node("pending", "konsensus grant --op {op}")(m, path, b)
+        });
+        let (node, _dir) = paired_fake(failing);
+        spend_advance(&node.state, true).await.unwrap();
+        assert!(do_spend_cancel(&node.state).await.is_err());
+        assert_eq!(node.state.spend.lock().unwrap().view(now_ms()).state, act::SpendState::Pending);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn a_touch_id_approval_opens_only_over_the_relation_grant_never_a_console_request() {
+        let (dn, first) = device_node();
+        let (node, _dir, _g1) = g1_node_with(&["read", "receive"], Some(first));
+        *node.state.device_policy.lock().unwrap() = device_key::Policy::NoPromptForTests;
+        let s = &node.state;
+        do_device_key_register(s).await.unwrap();
+        dn.registered.store(true, Ordering::SeqCst);
+        do_device_key_status(s).await.unwrap();
+        // The node still reports a console grant (no envelope for A): nothing opens,
+        // and the app does not fall back to asking at the console.
+        let err = do_relation_approve(s, A, None, Some(7000)).await.unwrap_err();
+        assert_eq!(err.code, "grant_no_envelope");
+        assert_eq!(s.spend.lock().unwrap().view(now_ms()).state, act::SpendState::Locked);
+        assert!(node.posts().iter().all(|(p, _)| p != "/pair/elevation-request"), "{:?}", node.posts());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn a_record_without_its_key_is_not_registered_forever() {
+        let (dn, first) = device_node();
+        let (node, _dir, _g1) = g1_node_with(&["read", "receive"], Some(first));
+        *node.state.device_policy.lock().unwrap() = device_key::Policy::NoPromptForTests;
+        let s = &node.state;
+        do_device_key_register(s).await.unwrap();
+        dn.registered.store(true, Ordering::SeqCst);
+        assert_eq!(do_device_key_status(s).await.unwrap().state, device::DeviceState::Registered);
+        let store = device_store(s).unwrap();
+        // Another enclave key in place of this one: setup is offered again.
+        let (other, _) = device_key::create(device_key::Policy::NoPromptForTests).unwrap();
+        device::save_blob(&store, &other).unwrap();
+        assert_eq!(do_device_key_status(s).await.unwrap().state, device::DeviceState::None);
+        assert!(device::load_record(&store).is_none());
+        // And a missing blob, likewise.
+        do_device_key_register(s).await.unwrap();
+        std::fs::remove_file(store.join(device::BLOB_FILE)).unwrap();
         assert_eq!(do_device_key_status(s).await.unwrap().state, device::DeviceState::None);
     }
 

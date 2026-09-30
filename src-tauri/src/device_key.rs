@@ -52,6 +52,8 @@ pub enum DeviceKeyError {
     Cancelled,
     /// The blob is not a key for this device's enclave.
     Invalid,
+    /// No Touch ID to ask: none on this Mac, no finger enrolled, or locked out.
+    BiometryUnavailable,
     /// Any other bridge status code.
     Other(i32),
 }
@@ -62,6 +64,7 @@ impl fmt::Display for DeviceKeyError {
             DeviceKeyError::Unavailable => f.write_str("Secure Enclave is not available"),
             DeviceKeyError::Cancelled => f.write_str("device key approval was cancelled"),
             DeviceKeyError::Invalid => f.write_str("device key is not valid on this device"),
+            DeviceKeyError::BiometryUnavailable => f.write_str("Touch ID is not available (none, not enrolled, or locked out)"),
             DeviceKeyError::Other(code) => write!(f, "device key error (code {code})"),
         }
     }
@@ -74,12 +77,14 @@ const OK: i32 = 0;
 const ERR_UNAVAILABLE: i32 = -1;
 const ERR_CANCELLED: i32 = -2;
 const ERR_INVALID_BLOB: i32 = -3;
+const ERR_BIOMETRY_UNAVAILABLE: i32 = -7;
 
 fn status_error(code: i32) -> DeviceKeyError {
     match code {
         ERR_UNAVAILABLE => DeviceKeyError::Unavailable,
         ERR_CANCELLED => DeviceKeyError::Cancelled,
         ERR_INVALID_BLOB => DeviceKeyError::Invalid,
+        ERR_BIOMETRY_UNAVAILABLE => DeviceKeyError::BiometryUnavailable,
         other => DeviceKeyError::Other(other),
     }
 }
@@ -88,6 +93,8 @@ fn status_error(code: i32) -> DeviceKeyError {
 mod ffi {
     extern "C" {
         pub fn bitsov_dk_available() -> i32;
+        pub fn bitsov_dk_biometry() -> i32;
+        pub fn bitsov_dk_public(blob: *const u8, blob_len: usize, out_pub: *mut u8) -> i32;
         pub fn bitsov_dk_create(
             policy: i32,
             out_blob: *mut u8,
@@ -108,11 +115,21 @@ mod ffi {
     }
 }
 
-/// True when this Mac has a usable Secure Enclave.
+/// True when this Mac has a usable Secure Enclave. Keys can be created; see
+/// [`available`] for whether the owner can approve with them.
 #[cfg(target_os = "macos")]
-pub fn available() -> bool {
+pub fn enclave_available() -> bool {
     // SAFETY: no arguments; the Swift function only reads SecureEnclave.isAvailable.
     unsafe { ffi::bitsov_dk_available() == 1 }
+}
+
+/// True when this Mac can approve with a device key now: a Secure Enclave and
+/// Touch ID with an enrolled finger, not locked out. Never prompts.
+#[cfg(target_os = "macos")]
+pub fn available() -> bool {
+    // SAFETY: no arguments; the Swift function only asks LAContext whether
+    // biometric authentication can be evaluated, which never prompts.
+    enclave_available() && unsafe { ffi::bitsov_dk_biometry() == OK }
 }
 
 /// Create a new enclave key. Never prompts, even for [`Policy::Biometry`].
@@ -188,8 +205,35 @@ pub fn sign(blob: &[u8], message: &[u8], reason: &str) -> Result<Vec<u8>, Device
     Ok(sig)
 }
 
+/// The public key of the key in `blob`. Never prompts.
+#[cfg(target_os = "macos")]
+pub fn public_key(blob: &[u8]) -> Result<[u8; PUBLIC_KEY_LEN], DeviceKeyError> {
+    if blob.is_empty() || blob.len() > BLOB_CAP {
+        return Err(DeviceKeyError::Invalid);
+    }
+    let mut public = [0u8; PUBLIC_KEY_LEN];
+    // SAFETY: `blob` is a live slice passed with its exact length and only
+    // read; `public` is exactly 65 writable bytes, what the Swift side writes.
+    // Nothing is retained after the call.
+    let status = unsafe { ffi::bitsov_dk_public(blob.as_ptr(), blob.len(), public.as_mut_ptr()) };
+    if status != OK {
+        return Err(status_error(status));
+    }
+    Ok(public)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn public_key(_blob: &[u8]) -> Result<[u8; PUBLIC_KEY_LEN], DeviceKeyError> {
+    Err(DeviceKeyError::Unavailable)
+}
+
 #[cfg(not(target_os = "macos"))]
 pub fn available() -> bool {
+    false
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn enclave_available() -> bool {
     false
 }
 
@@ -218,7 +262,7 @@ mod tests {
 
     #[test]
     fn enclave_is_available() {
-        assert!(available());
+        assert!(enclave_available());
     }
 
     #[test]
@@ -249,6 +293,13 @@ mod tests {
         let (blob, public) = create(Policy::NoPromptForTests).expect("create");
         let der = sign(&blob, b"", "BitSov test").expect("sign");
         assert!(verify(&public, b"", &der));
+    }
+
+    #[test]
+    fn the_public_key_reads_back_from_the_blob_without_signing() {
+        let (blob, public) = create(Policy::NoPromptForTests).unwrap();
+        assert_eq!(public_key(&blob).unwrap(), public);
+        assert_eq!(public_key(&[7u8; 64]).unwrap_err(), DeviceKeyError::Invalid);
     }
 
     #[test]

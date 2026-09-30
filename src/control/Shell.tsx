@@ -149,7 +149,9 @@ export type Actions = {
   registerDevice: () => Promise<void>;
   cancelDevice: () => Promise<void>;
   /** One contact's envelope, signed with Touch ID. */
-  approveContact: (peer: string, label: string | null, perActMsat: number | null) => Promise<void>;
+  approveContact: (peer: string, perActMsat: number | null) => Promise<void>;
+  /** The contact the node last refused for having no envelope (`grant_no_envelope`). */
+  noEnvelopeFor: () => string | null;
   reconcile: () => Promise<Outcome<string>>;
   pendingRevision: () => number;
   /** The owner's one approval for a daily total (B2). */
@@ -225,6 +227,7 @@ export function ControlCenter(props: Props) {
   const [filePrice, setFilePrice] = createSignal<PaymentQuote | null>(null);
   const [spend, setSpend] = createSignal<SpendView | null>(null);
   const [device, setDevice] = createSignal<DeviceView | null>(null);
+  const [noEnvelopeFor, setNoEnvelopeFor] = createSignal<string | null>(null);
   const [budget, setBudget] = createSignal<BudgetView | null>(null);
   const [deliveries, setDeliveries] = createStore<Deliveries>({});
   /** What each send actually paid, by message id: a room echo carries one member's share only. */
@@ -704,11 +707,13 @@ export function ControlCenter(props: Props) {
       const r = await act(() => source.deviceKeyCancel());
       if (r.ok) setDevice(r.value);
     },
-    approveContact: async (peer, label, perActMsat) => {
-      const r = await act(() => source.relationApprove(peer, label, null, perActMsat));
+    noEnvelopeFor,
+    approveContact: async (peer, perActMsat) => {
+      const r = await act(() => source.relationApprove(peer, null, perActMsat));
       if (r.ok) {
         setSpend(r.value);
         setErrors('spend', undefined);
+        if (noEnvelopeFor() === peer) setNoEnvelopeFor(null);
       } else {
         setErrors('spend', r.error.message);
         if (r.error.code === 'device_invalid') void loadDevice();
@@ -757,6 +762,8 @@ export function ControlCenter(props: Props) {
       const r = await act(() => source.send(t.id, t.kind === 'room', text, maxMsat, t.kind === 'room' ? Object.fromEntries((roomQuote()?.members ?? []).map((m) => [m.node_id, m.msat])) : undefined, firstContactMsat));
       // The tally moved, or a budget rule stopped the send: either way, re-read it.
       if (r.ok || isBudgetStop(r.error) || ['spend_unknown', 'payment_unknown', 'failed_paid', 'payment_settled_undelivered'].includes(r.error.code)) void loadBudget();
+      // Approved another contact with Touch ID, not this one: offer the tap here.
+      if (!r.ok && r.error.code === 'grant_no_envelope' && t.kind === 'peer') setNoEnvelopeFor(t.id);
       if (!r.ok && r.error.code === 'payment_settled_undelivered' && r.error.undelivered) {
         // Paid, not delivered: the draft moves here, with the only safe way to resend it.
         addArtifact(t, { type: 'undelivered', text, paid: r.error.undelivered, note: null, admission: null, pendingId: r.error.pending_id ?? null });
@@ -2845,6 +2852,17 @@ function Composer(props: {
   /** One contact, and this Mac approves with Touch ID. */
   const touchable = () => spends() && !room() && props.actions.device()?.state === 'registered';
   const budget = () => props.budget ?? null;
+  /** A Touch ID grant is open, but not for this contact. */
+  const lacksEnvelope = () => {
+    if (props.actions.noEnvelopeFor() === target()) return true;
+    const envelopes = budget()?.node_grant?.envelopes;
+    if (!envelopes) return false;
+    const until = envelopes[target()];
+    return !until || until <= Date.now();
+  };
+  /** The next tap here is Touch ID for this contact. */
+  const needsTouch = () =>
+    touchable() && !budget()?.paused && props.spend?.state !== 'pending' && (!line().open || lacksEnvelope());
   /**
    * Messages go through the budget unless the owner opened the ten-minute
    * window by hand with no budget approval, or the host has no budget to show.
@@ -3003,6 +3021,7 @@ function Composer(props: {
   const label = () => {
     if (paying()) return 'Paying…';
     if (ownerWait()) return 'Waiting for contact approval';
+    if (needsTouch()) return 'Approve with Touch ID';
     if (viaBudget()) {
       const s = shown();
       const price = s.msat === null ? '' : ` · ${s.estimate ? '≈ ' : ''}${sats(s.msat)} ${satUnit(s.msat)}`;
@@ -3018,7 +3037,6 @@ function Composer(props: {
     }
     if (spends() && !line().open) {
       if (props.spend?.state === 'pending') return 'Waiting for approval';
-      if (touchable()) return 'Approve with Touch ID';
       if (props.spend?.state === 'unavailable') return 'Spending unavailable';
       return 'Approve spending';
     }
@@ -3037,6 +3055,13 @@ function Composer(props: {
     setNote(null);
     if (shownMsat !== undefined && (mode() !== 'message' || shown().msat !== shownMsat)) {
       setNote('The message price changed since you pressed. Nothing was sent. Check the price on Send and press it to send.');
+      return;
+    }
+    if (needsTouch()) {
+      // This contact is approved with Touch ID; the draft stays where it is.
+      setBusy(true);
+      await props.actions.approveContact(target(), shown().msat);
+      setBusy(false);
       return;
     }
     if (viaBudget()) {
@@ -3111,8 +3136,7 @@ function Composer(props: {
       // The one tap: the draft stays where it is. With this Mac registered,
       // a single contact is approved with Touch ID; otherwise at the node.
       setBusy(true);
-      if (touchable()) await props.actions.approveContact(target(), props.name, shown().msat);
-      else await props.actions.approve();
+      await props.actions.approve();
       setBusy(false);
       return;
     }
@@ -3215,7 +3239,8 @@ function Composer(props: {
 
   const disabled = () =>
     props.moneyBlocked || busy() || !!ownerWait() ||
-    (viaBudget()
+    // Touch ID approves the contact, not the draft: no draft needed yet.
+    (needsTouch() ? false : viaBudget()
       ? ['waiting', 'contact_used', 'total_used', 'unknown'].includes(stand().kind) || ((stand().kind === 'first' || stand().kind === 'ok') && !ready())
       : spends() && !line().open
       ? props.spend?.state === 'pending' || props.spend?.state === 'unavailable' || props.spend === null
@@ -3576,7 +3601,7 @@ function Composer(props: {
           <p class="hint">Cancel does not revoke an approval already issued at the node; it expires within two minutes.</p>
         </div>}
       </Show>
-      <Show when={touchable() && !line().open && props.spend?.state !== 'pending'}>
+      <Show when={needsTouch()}>
         <TouchApproval peer={target()} name={props.name} priceMsat={shown().msat} actions={props.actions} />
       </Show>
       <Show when={spends()}>
@@ -3766,7 +3791,7 @@ function TouchApproval(props: { peer: string; name: string; priceMsat: number | 
     if (busy()) return;
     setBusy(true);
     try {
-      await props.actions.approveContact(props.peer, props.name, props.priceMsat);
+      await props.actions.approveContact(props.peer, props.priceMsat);
     } finally {
       setBusy(false);
     }

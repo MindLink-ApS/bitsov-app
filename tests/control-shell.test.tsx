@@ -175,6 +175,40 @@ describe('control center shell', () => {
     expect(calls.some((c) => c.cmd === 'spend_request')).toBe(false);
   });
 
+  it('a Touch ID window opened for another contact offers Touch ID here, not Send', async () => {
+    const other = 'c'.repeat(64);
+    const open = { state: 'open', lapse: null, basis: 'node_grant', open_until_ms: Date.now() + 600_000, pending: null, window_ms: 600_000 };
+    const grant = (envelopes: Record<string, number>) => ({
+      paused: false, waiting_for_owner: false, ceiling_msat: 500_000, max_daily_msat: 100_000_000, spent_msat: 0, unsettled_msat: 0,
+      preset: 'careful', presets: [{ id: 'careful', contact_msat: 50_000, room_msat: 100_000, ceiling_msat: 500_000 }], rows: [],
+      autopay: { state: 'off', open_until_ms: null, ceiling_msat: null, basis: null }, window_ms: 600_000,
+      node_grant: { expires_at_ms: Date.now() + 86_400_000, budget_msat: 200_000, remaining_msat: 200_000, per_call_max_msat: 200_000, envelopes },
+    });
+    let envelopes: Record<string, number> = { [other]: Date.now() + 86_400_000 };
+    const { calls } = stubHost({
+      device_key_status: () => ({ available: true, state: 'registered', fingerprint: '3F9A-12C4', owner_action: null, expires_at_ms: null }),
+      spend_status: () => open,
+      budget_status: () => grant(envelopes),
+      relation_approve: () => {
+        envelopes = { ...envelopes, [A]: Date.now() + 86_400_000 };
+        return open;
+      },
+    });
+    start();
+    await vi.waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
+    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
+
+    await vi.waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Approve with Touch ID'));
+    expect(mount.querySelector('[data-touch-approval]')).not.toBeNull();
+    click('[data-send]');
+    await vi.waitFor(() => expect(calls.filter((c) => c.cmd === 'relation_approve')).toHaveLength(1));
+    expect(calls.find((c) => c.cmd === 'relation_approve')!.args).toMatchObject({ peer: A });
+    expect(calls.some((c) => c.cmd === 'message_send')).toBe(false);
+    // With the envelope in place, Send is back.
+    await vi.waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toMatch(/^Send/));
+    expect(mount.querySelector('[data-touch-approval]')).toBeNull();
+  });
+
   it('shows the one-time owner command for this Mac, and a pending request can be cancelled', async () => {
     const cmd = 'konsensus device approve --op dd01 --config /Users/owner/node/konsensus.toml';
     const { calls } = stubHost({

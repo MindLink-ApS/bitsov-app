@@ -16,6 +16,7 @@
 //   -4  output buffer too small
 //   -5  bad argument (null pointer, unknown policy, bad UTF-8)
 //   -6  other failure (access control creation, key creation, signing)
+//   -7  biometry unavailable (no Touch ID, none enrolled, or locked out)
 
 import CryptoKit
 import Foundation
@@ -29,6 +30,7 @@ private let errInvalidBlob: Int32 = -3
 private let errBufferTooSmall: Int32 = -4
 private let errBadArgument: Int32 = -5
 private let errOther: Int32 = -6
+private let errBiometryUnavailable: Int32 = -7
 
 // CryptoTokenKit TKError codes surfaced by enclave operations.
 private let tkErrorDomain = "CryptoTokenKit"
@@ -39,7 +41,18 @@ private let tkAuthenticationNeeded = -9
 /// 1 when this Mac has a Secure Enclave CryptoKit can use, else 0.
 @_cdecl("bitsov_dk_available")
 public func bitsov_dk_available() -> Int32 {
-    return SecureEnclave.isAvailable ? 1 : 0
+    return autoreleasepool { SecureEnclave.isAvailable ? 1 : 0 }
+}
+
+/// 0 when Touch ID can approve a signature now (hardware present, a finger
+/// enrolled, not locked out), else -7. Never prompts.
+@_cdecl("bitsov_dk_biometry")
+public func bitsov_dk_biometry() -> Int32 {
+    return autoreleasepool {
+        var error: NSError?
+        let ok = LAContext().canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &error)
+        return ok ? okStatus : errBiometryUnavailable
+    }
 }
 
 /// Create a new enclave key.
@@ -52,6 +65,16 @@ public func bitsov_dk_available() -> Int32 {
 /// 65-byte X9.63 uncompressed public key to `out_pub`. Creation never prompts.
 @_cdecl("bitsov_dk_create")
 public func bitsov_dk_create(
+    _ policy: Int32,
+    _ outBlob: UnsafeMutablePointer<UInt8>?,
+    _ blobCap: Int,
+    _ outBlobLen: UnsafeMutablePointer<Int>?,
+    _ outPub: UnsafeMutablePointer<UInt8>?
+) -> Int32 {
+    return autoreleasepool { createKey(policy, outBlob, blobCap, outBlobLen, outPub) }
+}
+
+private func createKey(
     _ policy: Int32,
     _ outBlob: UnsafeMutablePointer<UInt8>?,
     _ blobCap: Int,
@@ -97,6 +120,28 @@ public func bitsov_dk_create(
     return okStatus
 }
 
+/// Write the 65-byte public key of the key in `blob` to `out_pub`. Loading a
+/// key never prompts; only signing does. -3 when the blob is not a key for
+/// this device's enclave.
+@_cdecl("bitsov_dk_public")
+public func bitsov_dk_public(
+    _ blob: UnsafePointer<UInt8>?,
+    _ blobLen: Int,
+    _ outPub: UnsafeMutablePointer<UInt8>?
+) -> Int32 {
+    return autoreleasepool {
+        guard let blob = blob, let outPub = outPub, blobLen > 0 else { return errBadArgument }
+        guard SecureEnclave.isAvailable else { return errUnavailable }
+        guard let key = try? SecureEnclave.P256.Signing.PrivateKey(
+            dataRepresentation: Data(bytes: blob, count: blobLen)
+        ) else { return errInvalidBlob }
+        let pub = key.publicKey.x963Representation
+        guard pub.count == 65 else { return errOther }
+        pub.copyBytes(to: outPub, count: 65)
+        return okStatus
+    }
+}
+
 /// Sign `msg` (SHA-256 is applied inside CryptoKit) with the key in `blob`.
 ///
 /// Blocking. For a biometry key this shows the system Touch ID sheet with
@@ -104,6 +149,19 @@ public func bitsov_dk_create(
 /// ECDSA signature to `out_sig` (length in `out_sig_len`).
 @_cdecl("bitsov_dk_sign")
 public func bitsov_dk_sign(
+    _ blob: UnsafePointer<UInt8>?,
+    _ blobLen: Int,
+    _ msg: UnsafePointer<UInt8>?,
+    _ msgLen: Int,
+    _ reason: UnsafePointer<CChar>?,
+    _ outSig: UnsafeMutablePointer<UInt8>?,
+    _ sigCap: Int,
+    _ outSigLen: UnsafeMutablePointer<Int>?
+) -> Int32 {
+    return autoreleasepool { signMessage(blob, blobLen, msg, msgLen, reason, outSig, sigCap, outSigLen) }
+}
+
+private func signMessage(
     _ blob: UnsafePointer<UInt8>?,
     _ blobLen: Int,
     _ msg: UnsafePointer<UInt8>?,
@@ -155,9 +213,18 @@ public func bitsov_dk_sign(
 }
 
 private func statusForSigningError(_ error: Error) -> Int32 {
-    if error is LAError { return errCancelled }
     let ns = error as NSError
-    if ns.domain == LAErrorDomain { return errCancelled }
+    if ns.domain == LAErrorDomain || error is LAError {
+        // No Touch ID to ask is not the owner saying no: point to the fallback.
+        switch ns.code {
+        case LAError.biometryNotAvailable.rawValue,
+             LAError.biometryNotEnrolled.rawValue,
+             LAError.biometryLockout.rawValue:
+            return errBiometryUnavailable
+        default:
+            return errCancelled
+        }
+    }
     if ns.domain == tkErrorDomain,
        [tkCanceledByUser, tkAuthenticationFailed, tkAuthenticationNeeded].contains(ns.code) {
         return errCancelled
