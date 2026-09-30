@@ -39,7 +39,7 @@ export function Onboarding(props: {
       {/* Node location selection: 3 honest choices */}
       <div class="node-target-section">
         <h2 class="node-target-title">Where does your node live?</h2>
-        <p class="hint">Select how you want to connect. Your keys always remain under your biometric control.</p>
+        <p class="hint">Select how you want to connect. Touch ID on this device approves every payment the app makes.</p>
 
         <div class="node-target-grid" role="radiogroup" aria-label="Choose node location">
           {/* Option 1: This computer (local node) */}
@@ -67,7 +67,7 @@ export function Onboarding(props: {
                   <span class="target-radio-indicator" aria-hidden="true">✓</span>
                 </div>
               </div>
-              <p>Run your sovereign node directly on this Mac. Zero third-party trust; maximum privacy and offline readiness.</p>
+              <p>Run your sovereign node directly on this Mac. Keys on this Mac; nothing to trust but your own machine.</p>
             </div>
           </button>
 
@@ -97,7 +97,7 @@ export function Onboarding(props: {
                   <span class="target-radio-indicator" aria-hidden="true">✓</span>
                 </div>
               </div>
-              <p>Connect to an Umbrel, Start9, or dedicated home server on your local Wi-Fi or wired network.</p>
+              <p>Connect to a home server running BitSov on your local Wi-Fi or wired network.</p>
             </div>
           </button>
 
@@ -120,11 +120,11 @@ export function Onboarding(props: {
               <div class="target-head">
                 <strong>A cloud node</strong>
                 <div class="row" style={{ width: 'auto', gap: '8px' }}>
-                  <span class="target-badge honest">Hosted 24/7 · Honest label</span>
+                  <span class="target-badge honest">Hosted custody</span>
                   <span class="target-radio-indicator" aria-hidden="true">✓</span>
                 </div>
               </div>
-              <p>Hosted VPS or cloud instance. Signer stays on this Mac with Touch ID; node routing and storage run 24/7 in cloud.</p>
+              <p>Hosted: the machine that runs your node holds its keys. Good for always-on; choose this only if you trust the host. A remote signer that keeps keys on your Mac is coming.</p>
             </div>
           </button>
         </div>
@@ -138,7 +138,7 @@ export function Onboarding(props: {
             <details class="node-advanced">
               <summary>Enter connection address manually</summary>
               <div class="fields" style={{ 'margin-top': '8px' }}>
-                <input type="text" placeholder="e.g. umbrel.local or my-node.lan" aria-label="Network node address" />
+                <input type="text" placeholder="e.g. bitsov-server.local or my-node.lan" aria-label="Network node address" />
               </div>
             </details>
           </div>
@@ -147,7 +147,7 @@ export function Onboarding(props: {
         <Show when={target() === 'cloud'}>
           <div class="node-target-aux" data-target-aux="cloud">
             <p class="hint">
-              <strong>Honest custody notice:</strong> Cloud nodes provide high availability without running your Mac 24/7. Your private keys never leave this Mac; all signing is gated by your device biometrics.
+              <strong>Honest custody notice:</strong> Hosted: the machine that runs your node holds its keys. Good for always-on; choose this only if you trust the host. A remote signer that keeps keys on your Mac is coming.
             </p>
             <details class="node-advanced">
               <summary>Enter cloud provider details</summary>

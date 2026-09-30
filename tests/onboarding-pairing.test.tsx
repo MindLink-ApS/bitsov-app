@@ -186,7 +186,7 @@ describe('pairing panel', () => {
     expect(local?.textContent).toContain('This computer');
     expect(network?.textContent).toContain('A node on my network');
     expect(cloud?.textContent).toContain('A cloud node');
-    expect(cloud?.textContent).toContain('Honest label');
+    expect(cloud?.textContent).toContain('Hosted custody');
   });
 
   it('hides network and cloud manual inputs under progressive disclosure', () => {
