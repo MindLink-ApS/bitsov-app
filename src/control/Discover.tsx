@@ -20,6 +20,17 @@ import {
   type PreparedMedia,
 } from './frontDoorMedia';
 
+/** Host prefix of the error that asks the owner for `front_door` (main.rs `FRONT_DOOR_OWNER`). */
+const FRONT_DOOR_OWNER = 'front_door_owner:';
+
+/** Split the owner request into its text and the `konsensus grant --op <id>` command, if named. */
+export function frontDoorOwnerAsk(message: string | null): { text: string; command: string | null } | null {
+  if (!message?.startsWith(FRONT_DOOR_OWNER)) return null;
+  const text = message.slice(FRONT_DOOR_OWNER.length).trim();
+  const command = /konsensus grant --op [0-9a-f]{1,64}/.exec(text)?.[0] ?? null;
+  return { text, command };
+}
+
 /** Encoder-only QR of a share link; null when the link is too long for versions 1–30. */
 function shareQr(link: string): { extent: number; path: string } | null {
   try {
@@ -451,6 +462,10 @@ export function FrontDoorEditor(props: { source: Source; now: number }) {
     };
   });
 
+  // The host's `front_door_owner` refusal: the owner must allow publishing at
+  // the node. Shown as a request with the node's own command, not a failure.
+  const ownerAsk = createMemo(() => frontDoorOwnerAsk(err()));
+
   const publish = async () => {
     if (!name().trim() || saving()) return;
     if (overBudget()) {
@@ -614,10 +629,20 @@ export function FrontDoorEditor(props: { source: Source; now: number }) {
           </button>
         </Show>
       </div>
-      <Show when={err()}>
+      <Show when={err() && !ownerAsk()}>
         <p class="hint err" data-fd-edit-error>
           {err()}
         </p>
+      </Show>
+      <Show when={ownerAsk()}>
+        {(ask) => (
+          <div class="hint" data-fd-owner-action>
+            <p>{ask().text}</p>
+            <Show when={ask().command}>
+              <code class="mono" data-fd-owner-command>{ask().command}</code>
+            </Show>
+          </div>
+        )}
       </Show>
       <Show when={mine()}>
         {(c) => (

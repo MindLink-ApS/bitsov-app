@@ -188,6 +188,9 @@ struct NodeState {
     /// still going to rewrite. Held across awaits, hence async.
     money: tokio::sync::Mutex<()>,
     owner_contact: Mutex<Option<owner_contact::Pending>>,
+    /// The pending owner request for `front_door` (publish the front-door
+    /// card only), so repeated Publish presses reuse one request. Memory only.
+    front_door_ask: Mutex<Option<act::Elevation>>,
 }
 
 /// The owner asked for these while an elevation request is pending.
@@ -235,6 +238,7 @@ impl NodeState {
             autopay: Mutex::new(budget::Autopay::default()),
             wants: Mutex::new(Wants::default()),
             owner_contact: Mutex::new(None),
+            front_door_ask: Mutex::new(None),
             node_grant: Mutex::new(None),
             all_in_caps_node: Mutex::new(None),
             readmission_ask: Mutex::new(None),
@@ -1876,10 +1880,7 @@ async fn front_door_publish(
         "cv": fields.cv,
         "links": fields.links,
     });
-    let (code, text) = call_api(state.inner(), reqwest::Method::PUT, path, Some(body)).await?;
-    if !code.is_success() {
-        return Err(api_error(path, code, &text));
-    }
+    let text = put_front_door(state.inner(), body).await?;
     #[derive(Deserialize)]
     struct Resp {
         card: fd::Card,
@@ -1894,6 +1895,73 @@ async fn front_door_publish(
         return Err(format!("{path}: the link does not match the card"));
     }
     Ok(view)
+}
+
+/// Marks the error that asks the owner for `front_door`; the editor shows it
+/// with the owner's command instead of as a plain failure.
+const FRONT_DOOR_OWNER: &str = "front_door_owner";
+
+/// `PUT /front-door`. The node demands `front_door` (or `admin`, which a paired
+/// app never holds). Without it the app asks the owner once
+/// (`POST /pair/elevation-request {"scopes":["front_door"]}`), which carries no
+/// authority, and says what the owner must run. After the owner grants, the
+/// next Publish re-mints the paired token, which then carries `front_door`.
+/// Nothing here can grant it: only the owner's CLI at the node can.
+async fn put_front_door(state: &NodeState, body: serde_json::Value) -> Result<String, String> {
+    let path = "/front-door";
+    let lacks_scope = |code: reqwest::StatusCode, text: &str| {
+        code == reqwest::StatusCode::FORBIDDEN && text.contains("front_door")
+    };
+    let (mut code, mut text) = call_api(state, reqwest::Method::PUT, path, Some(body.clone())).await?;
+    let paired = matches!(&*state.auth.lock().unwrap(), AuthMode::Paired(_));
+    if paired && lacks_scope(code, &text) {
+        // The owner may have granted since this token was issued.
+        if refresh_paired(state).await.is_ok() {
+            (code, text) = call_api(state, reqwest::Method::PUT, path, Some(body)).await?;
+        }
+        if lacks_scope(code, &text) {
+            return Err(ask_front_door_owner(state).await);
+        }
+    }
+    if !code.is_success() {
+        return Err(api_error(path, code, &text));
+    }
+    *state.front_door_ask.lock().unwrap() = None;
+    Ok(text)
+}
+
+/// One pending `front_door` request at a time; the owner's words, verbatim.
+async fn ask_front_door_owner(state: &NodeState) -> String {
+    let current = state.front_door_ask.lock().unwrap().clone();
+    let pending = match current.filter(|e| e.expires_at_ms > now_ms()) {
+        Some(e) => Ok(e),
+        None => {
+            let ask = serde_json::json!({ "scopes": ["front_door"] });
+            match call_api(state, reqwest::Method::POST, "/pair/elevation-request", Some(ask)).await {
+                Ok((code, body)) if code.is_success() => decode_act::<act::ElevationReply>("/pair/elevation-request", &body)
+                    .and_then(|r| r.into_elevation())
+                    .map_err(|e| e.message),
+                Ok((code, body)) => Err(api_error("/pair/elevation-request", code, &body)),
+                Err(e) => Err(e),
+            }
+        }
+    };
+    match pending {
+        Ok(e) => {
+            *state.front_door_ask.lock().unwrap() = Some(e.clone());
+            if e.owner_can_grant {
+                format!(
+                    "{FRONT_DOOR_OWNER}: Publishing your front door needs your permission at the node \
+                     (it allows the card only: no spending, nothing else). On the node's computer run: \
+                     {} Then press Publish again.",
+                    e.owner_action
+                )
+            } else {
+                format!("{FRONT_DOOR_OWNER}: This node cannot let the app publish its front door. {}", e.owner_action)
+            }
+        }
+        Err(e) => format!("Your node refused to publish the front door and could not take a request: {e}"),
+    }
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -7495,6 +7563,67 @@ mod control_act_tests {
             data_dir: dir.path().to_path_buf(),
         }));
         (node, dir)
+    }
+
+    /// A node that demands `front_door` for `PUT /front-door` until `granted`.
+    fn front_door_node(granted: Arc<std::sync::atomic::AtomicBool>, owner_action: &'static str) -> Routes {
+        let far = now_unix() + 900;
+        // Only a token minted after the grant carries `front_door`.
+        let minted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        Arc::new(move |m: &str, path: &str, _b: &str| {
+            let ok = granted.load(Ordering::SeqCst);
+            if m == "POST" && path == "/pair/token" && ok {
+                minted.store(true, Ordering::SeqCst);
+            }
+            let v = match (m, path) {
+                ("PUT", "/front-door") if minted.load(Ordering::SeqCst) => serde_json::json!({"card": {}, "link": "bitsov://front-door#x"}),
+                ("PUT", "/front-door") => return (403, "token lacks required scope: front_door".into()),
+                ("POST", "/pair/elevation-request") => serde_json::json!({"op_id": "fd01", "expires_at": far, "owner_action": owner_action}),
+                (_, p) if p.starts_with("/pair/challenge") => serde_json::json!({"challenge": "bitsov-pair-token-v1:ch"}),
+                ("POST", "/pair/token") => serde_json::json!({"token": if ok { "tok.fd" } else { "tok.2" }, "expires_at": far,
+                    "scopes": if ok { vec!["read", "receive", "front_door"] } else { vec!["read", "receive"] }}),
+                _ => return (404, r#"{"error":"route","code":404}"#.into()),
+            };
+            (200, v.to_string())
+        })
+    }
+
+    #[tokio::test]
+    async fn front_door_publish_asks_the_owner_once_and_publishes_after_the_grant() {
+        let granted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (node, _dir) = paired_fake(front_door_node(granted.clone(), "konsensus grant --op fd01"));
+        let body = serde_json::json!({"display_name": "Ada"});
+
+        let err = put_front_door(&node.state, body.clone()).await.unwrap_err();
+        assert!(err.starts_with(&format!("{FRONT_DOOR_OWNER}:")), "{err}");
+        assert!(err.contains("konsensus grant --op fd01") && err.contains("no spending"), "{err}");
+        // Pressing Publish again before the owner acts reuses the one request.
+        put_front_door(&node.state, body.clone()).await.unwrap_err();
+        let asks: Vec<_> = node.posts().into_iter().filter(|(p, _)| p == "/pair/elevation-request").collect();
+        assert_eq!(asks, [("/pair/elevation-request".to_string(), serde_json::json!({"scopes": ["front_door"]}))]);
+
+        // The owner grants at the node; the next Publish re-mints and publishes.
+        granted.store(true, Ordering::SeqCst);
+        put_front_door(&node.state, body).await.unwrap();
+        assert_eq!(node.state.token.lock().unwrap().as_deref(), Some("tok.fd"));
+        assert!(node.state.front_door_ask.lock().unwrap().is_none());
+        let puts = node.targets().into_iter().filter(|t| t == "PUT /front-door").count();
+        assert_eq!(puts, 6, "each press: one PUT, and one retry after a fresh token");
+    }
+
+    #[tokio::test]
+    async fn front_door_publish_says_plainly_when_the_node_cannot_grant_it() {
+        let granted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (node, _dir) = paired_fake(front_door_node(granted, "unavailable in this deployment: no owner control socket"));
+        let err = put_front_door(&node.state, serde_json::json!({"display_name": "Ada"})).await.unwrap_err();
+        assert!(err.contains("cannot let the app publish") && err.contains("unavailable in this deployment"), "{err}");
+
+        // Any other refusal is shown as the node wrote it, and asks nobody.
+        let routes: Routes = Arc::new(|_: &str, _: &str, _: &str| (403, "token lacks required scope: admin".into()));
+        let (node, _dir) = paired_fake(routes);
+        let err = put_front_door(&node.state, serde_json::json!({"display_name": "Ada"})).await.unwrap_err();
+        assert!(!err.starts_with(FRONT_DOOR_OWNER) && err.contains("admin"), "{err}");
+        assert!(node.posts().is_empty());
     }
 
     #[tokio::test]
