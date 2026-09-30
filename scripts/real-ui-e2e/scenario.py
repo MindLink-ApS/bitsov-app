@@ -224,7 +224,9 @@ def run(r, fixture, capacities):
         price_not_ready='The message price is not ready yet. Nothing was sent. Wait for the cost, then press Send.'
 
         def current_draft():
-            return (r.text('[data-composer] textarea') or '').strip()
+            # Live .value via the driver (WKWebView textarea innerText is empty).
+            rows=r.ui_try('attrs',selector='[data-composer] textarea',names=['value'])
+            return ((rows[0].get('value') if rows else None) or '').strip()
 
         def shown_price():
             # Cost lives behind ⓘ; the Send aria-label/title always carries it.

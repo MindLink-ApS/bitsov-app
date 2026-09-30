@@ -158,8 +158,13 @@ const ops = {
     return el.files.length;
   },
   async attrs({ selector, names }) {
+    // `value` is the live form property (Solid controlled inputs do not mirror
+    // it as an HTML attribute; innerText on a textarea is empty in WKWebView).
     return [...document.querySelectorAll(selector)].filter(visible).map((el) =>
-      Object.fromEntries([['text', norm(el.innerText)], ...names.map((n) => [n, el.getAttribute(n)])]));
+      Object.fromEntries([['text', norm(el.innerText)], ...names.map((n) => {
+        if (n === 'value' && 'value' in el) return [n, el.value];
+        return [n, el.getAttribute(n)];
+      })]));
   },
   async snapshot() { return snapshot(); },
 };
