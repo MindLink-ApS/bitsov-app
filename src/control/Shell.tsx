@@ -2406,14 +2406,14 @@ function ArtifactView(props: { moneyBlocked: boolean; a: Artifact; delivery?: De
         {(a) => {
           const r = () => (a() as Extract<Artifact, { type: 'payment' }>).receipt;
           return (
-            <div class="artifact out payment-line" data-artifact="payment" data-status={r().status}>
+            <div class="artifact out payment-line" data-artifact="payment" data-status={r().status} data-pay-method={r().method}>
               <span class="stamp">
                 <Bolt />
                 <Show
                   when={r().status !== 'failed'}
                   fallback={<span class="err-note">Payment of <span class="sats">{sats(r().amount_msat)}</span> {satUnit(r().amount_msat)} failed</span>}
                 >
-                  <span>You sent <span class="sats">{sats(r().amount_msat)}</span> {satUnit(r().amount_msat)}</span>
+                  <span>You sent <span class="sats">{sats(r().amount_msat)}</span> {satUnit(r().amount_msat)}{r().method === 'keysend' ? ' · direct (keysend)' : ''}</span>
                 </Show>
                 <span class="hint">{clock(r().paid_at_ms)}</span>
               </span>
@@ -3096,7 +3096,13 @@ function Composer(props: {
         setBusy(false);
         return;
       }
-      if ((st.kind !== 'first' && st.kind !== 'ok') || !ready()) return;
+      if (st.kind !== 'first' && st.kind !== 'ok') return;
+      if (!ready()) {
+        // A press before the price is known must not look like a send: the draft
+        // stays, and the owner sees why nothing moved (real-window step 10).
+        setNote(draft().trim() ? 'The message price is not ready yet. Nothing was sent. Wait for the cost, then press Send.' : 'Type a message first.');
+        return;
+      }
       setBusy(true);
       const submittedRevision = composerRevision;
       const submittedApprovalRevision = approvalRevision;
@@ -3161,7 +3167,14 @@ function Composer(props: {
       setBusy(false);
       return;
     }
-    if (!ready()) return;
+    if (!ready()) {
+      setNote(
+        mode() === 'message' && draft().trim()
+          ? 'The message price is not ready yet. Nothing was sent. Wait for the cost, then press Send.'
+          : 'Nothing was sent yet — finish the fields first.',
+      );
+      return;
+    }
     if (mode() === 'pay') {
       // Pay never pays from here: it shows the review, and only its confirm pays.
       setReview(
