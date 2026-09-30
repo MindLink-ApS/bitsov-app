@@ -67,6 +67,8 @@ mod model_launch;
 // DEV ONLY: run a locally built genome-`main` node instead of the verified sidecar.
 // Compiled out of release builds (compile error with the feature). See the module.
 mod dev_node;
+// Secure Enclave device key bridge (the only FFI `unsafe`; lib crate forbids it).
+mod device_key;
 mod owner_contact;
 
 /// Node API bind — konsensus ApiConfig `default_api_addr()` = 127.0.0.1:3141.
