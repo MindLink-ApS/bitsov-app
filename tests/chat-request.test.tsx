@@ -78,12 +78,12 @@ function sign(hrp: string, data: number[], key: bigint): number[] {
   return bytesToWords(new Uint8Array([...be32(r), ...be32(s), recid]));
 }
 
-function invoice(opts: { hrp?: string; purpose?: string | null; descBytes?: Uint8Array; at?: number; expiry?: number; hash?: boolean; key?: bigint; payeeTag?: string } = {}) {
+function invoice(opts: { hrp?: string; purpose?: string | null; descBytes?: Uint8Array; at?: number; expiry?: number; hash?: boolean; hashByte?: number; key?: bigint; payeeTag?: string } = {}) {
   const hrp = opts.hrp ?? 'lnbcrt210n';
   const desc = opts.descBytes ?? (opts.purpose === null ? null : new TextEncoder().encode(opts.purpose ?? 'dinner'));
   const data = [
     ...words(opts.at ?? NOW_S, 7),
-    ...(opts.hash === false ? [] : tag(1, bytesToWords(new Uint8Array(32).fill(7)))),
+    ...(opts.hash === false ? [] : tag(1, bytesToWords(new Uint8Array(32).fill(opts.hashByte ?? 7)))),
     ...(desc === null ? [] : tag(13, bytesToWords(desc))),
     ...(opts.expiry === undefined ? [] : tag(6, words(opts.expiry, 3))),
     ...(opts.payeeTag ? tag(19, bytesToWords(Uint8Array.from(opts.payeeTag.match(/../g)!.map((h) => parseInt(h, 16))))) : []),
@@ -99,7 +99,7 @@ describe('reading a chat invoice', () => {
     const coffee =
       'lnbc2500u1pvjluezpp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqdq5xysxxatsyp3k7enxv4jsxqzpuaztrnwngzn3kdzw5hydlzf03qdgm2hdq27cqv3agm2awhz5se903vruatfhq77w3ls4evs3ch9zw97j25emudupq63nyw24cg27h2rspfj9srp';
     const r = readChatInvoice(coffee, 1496314658_000, 'mainnet');
-    expect(r).toEqual({ ok: true, invoice: { bolt11: coffee, msat: 250_000_000, network: 'mainnet', purpose: '1 cup coffee', expiresAtMs: 1496314718_000, payee: '03e7156ae33b0a208d0744199163177e909e80176e55d97a2f221ede0f934dd9ad' } });
+    expect(r).toEqual({ ok: true, invoice: { bolt11: coffee, msat: 250_000_000, network: 'mainnet', purpose: '1 cup coffee', expiresAtMs: 1496314718_000, payee: '03e7156ae33b0a208d0744199163177e909e80176e55d97a2f221ede0f934dd9ad', paymentHash: '0001020304050607080900010203040506070809000102030405060708090102' } });
     // The same invoice a minute later, and on a regtest node.
     expect(readChatInvoice(coffee, 1496314718_000, 'mainnet')).toEqual({ ok: false, reason: 'expired' });
     expect(readChatInvoice(coffee, 1496314658_000, 'regtest')).toEqual({ ok: false, reason: 'wrong_network' });
@@ -380,14 +380,66 @@ describe('a request in chat', () => {
     await openShell();
     await vi.waitFor(() => expect($('[data-request-card] [data-payee]')).not.toBeNull());
     expect($('[data-request-card] [data-payee]')!.getAttribute('data-payee')).toBe('unverified');
-    // A pasted invoice's confirm says the same.
+  });
+
+  // The #83 pasted-invoice review had the same "Pay Maya · their invoice" wording.
+  it('a pasted invoice’s review names its payee, not verified as the contact', async () => {
+    const stranger = pubOf(STRANGER_KEY);
+    const host = stubHost();
+    host.spend.v = openView();
+    await openShell();
     $<HTMLButtonElement>('[data-composer-mode="pay"]')!.click();
     type('[data-pay-invoice]', invoice({ key: STRANGER_KEY }));
     await vi.waitFor(() => expect(text('[data-send]')).toBe('Pay · 26 sats'));
     $<HTMLButtonElement>('[data-send]')!.click();
     await vi.waitFor(() => expect($('[data-pay-review] [data-payee]')).not.toBeNull());
-    expect(text('[data-pay-review] [data-payee]')).toContain('not verified as Maya');
+    expect(text('[data-pay-review] .pay-review-title')).toBe('Pay this Lightning invoice');
+    expect(text('[data-pay-review] [data-payee]')).toBe(`Pays Lightning node ${stranger.slice(0, 8)}…${stranger.slice(-4)}, not verified as Maya.`);
+    expect(text('[data-pay-review]')).not.toContain('Pay Maya');
     expect(text('[data-pay-review]')).not.toContain('their invoice');
+    expect(host.used('payment_pay')).toHaveLength(0);
+  });
+
+  // Fable #85 F2: after paying, the card says so and offers no second Pay.
+  it('marks a paid card by payment hash, including a re-cased copy, and keeps other cards payable', async () => {
+    const bolt11 = invoice();
+    const other = invoice({ purpose: 'second round', hashByte: 8 });
+    const host = stubHost({ messages_list: () => [msg('in-1', bolt11), msg('in-2', `lightning:${bolt11.toUpperCase()}`), msg('in-3', other)] });
+    host.spend.v = openView();
+    await openShell();
+    await vi.waitFor(() => expect($('[data-message="in-3"] [data-request-card]')).not.toBeNull());
+    for (const id of ['in-1', 'in-2', 'in-3']) expect($(`[data-message="${id}"] [data-request-card]`)!.getAttribute('data-request-status')).toBe('open');
+    $<HTMLButtonElement>('[data-message="in-1"] [data-request-pay]')!.click();
+    await vi.waitFor(() => expect($('[data-pay-confirm]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-pay-confirm]')!.click();
+    await vi.waitFor(() => expect($('[data-message="in-1"] [data-request-paid]')).not.toBeNull());
+    expect(text('[data-message="in-1"] [data-request-paid]')).toBe('Paid. You paid this invoice.');
+    for (const id of ['in-1', 'in-2']) {
+      expect($(`[data-message="${id}"] [data-request-card]`)!.getAttribute('data-request-status')).toBe('settled');
+      expect($(`[data-message="${id}"] [data-request-pay]`)).toBeNull();
+    }
+    expect($('[data-message="in-3"] [data-request-pay]')).not.toBeNull();
+    expect(host.used('payment_pay')).toHaveLength(1);
+  });
+
+  it.each([
+    ['pending', 'pending'],
+    ['inflight', 'inflight'],
+    ['failed', 'open'],
+  ])('a %s payment leaves the card %s', async (status, shown) => {
+    const host = stubHost({
+      messages_list: () => [msg('in-1', invoice())],
+      payment_pay: (args) => ({ method: 'invoice', amount_msat: args!.amount_msat, status, paid_at_ms: Date.now() }),
+    });
+    host.spend.v = openView();
+    await openShell();
+    await vi.waitFor(() => expect($('[data-request-pay]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-request-pay]')!.click();
+    await vi.waitFor(() => expect($('[data-pay-confirm]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-pay-confirm]')!.click();
+    await vi.waitFor(() => expect($('[data-artifact="payment"]')).not.toBeNull());
+    expect($('[data-request-card]')!.getAttribute('data-request-status')).toBe(shown);
+    expect($('[data-request-pay]') === null).toBe(shown !== 'open');
   });
 
   // Codex #85 P1b: a retained readmission quote raises the message price.

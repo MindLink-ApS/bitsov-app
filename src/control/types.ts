@@ -558,7 +558,8 @@ export type Delivery = { status: 'accepted' | 'sent' | 'queued' | 'delivered' | 
 /** A local, inline artifact in a track: the result of an action taken there. */
 export type Artifact =
   | { id: string; at: number; type: 'invoice'; invoice: InvoiceView }
-  | { id: string; at: number; type: 'payment'; receipt: PaymentReceipt }
+  /** `invoice`: the bolt11 an invoice payment paid, so a request card can show it paid. */
+  | { id: string; at: number; type: 'payment'; receipt: PaymentReceipt; invoice?: string }
   | { id: string; at: number; type: 'file'; receipt: FileReceipt }
   | { id: string; at: number; type: 'failed'; action: string; error: ActionError }
   /**

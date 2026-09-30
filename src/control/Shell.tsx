@@ -11,7 +11,7 @@ import { DiscoverPanel, FrontDoorEditor } from './Discover';
 import { callCost, createCallEngine, IDLE as CALL_IDLE, isCallKind, signalCost, stunServer, type CallMedia, type CallView } from './call';
 import { blobUrl, duration, FILE_MAX_BYTES, fileNameOf, isVoiceNote, type Recording, startRecording, VOICE_MAX_MS } from './voice';
 import { EMOJIS, insertEmoji } from './emoji';
-import { invoicePayee, NOT_PAYABLE_NOTE, payeeView, readChatInvoice, type ChatInvoice } from './bolt11';
+import { invoicePayee, invoicePaymentHash, NOT_PAYABLE_NOTE, payeeView, readChatInvoice, type ChatInvoice } from './bolt11';
 import { safeImageMime, looksLikeSafeImageName, dataImageUrl } from './frontDoorMedia';
 import type { FileSaveResult, InvoiceView, VoiceBlob } from './types';
 import {
@@ -791,7 +791,7 @@ export function ControlCenter(props: Props) {
       const r = await act(() => source.pay(bolt11, msat, allIn(msat)));
       void loadBudget();
       if (r.ok) {
-        addArtifact(t, { type: 'payment', receipt: r.value, at: r.value.paid_at_ms });
+        addArtifact(t, { type: 'payment', receipt: r.value, invoice: bolt11, at: r.value.paid_at_ms });
         void loadWallet();
       }
       return recordFailure(t, 'Payment not sent', r);
@@ -1394,6 +1394,17 @@ function Conversation(props: {
   // A request card's Pay: hands the invoice to the composer's Pay review. Never pays.
   const [payRequest, setPayRequest] = createSignal<{ seq: number; bolt11: string } | null>(null);
   let payRequestSeq = 0;
+  // Invoice payments made in this thread, by payment hash: a card they paid shows it.
+  // Only this session's records; after a restart the node's duplicate refusal remains.
+  const paidInvoices = createMemo(() => {
+    const out = new Map<string, PaymentStatus>();
+    for (const a of props.artifacts) {
+      if (a.type !== 'payment' || !a.invoice) continue;
+      const hash = invoicePaymentHash(a.invoice);
+      if (hash && out.get(hash) !== 'settled') out.set(hash, a.receipt.status);
+    }
+    return out;
+  });
   const cost = () =>
     costToSend(props.track, props.quote, {
       name: props.track.kind === 'peer' ? `${props.name}’s` : undefined,
@@ -1492,6 +1503,7 @@ function Conversation(props: {
                         homeNetwork={props.homeNetwork}
                         moneyBlocked={props.moneyBlocked}
                         onPay={props.track.kind === 'peer' ? (bolt11) => setPayRequest({ seq: ++payRequestSeq, bolt11 }) : undefined}
+                        paidInvoices={paidInvoices()}
                         voiceUrl={props.actions.voiceUrl}
                         fileFetch={props.actions.fileFetch}
                         fileSave={props.actions.fileSave}
@@ -1562,19 +1574,36 @@ function PayeeLine(props: { payee: string | null; peer: string; name: string }) 
  * A received message whose whole body is a payable invoice. Display only:
  * Pay opens the composer's amount-first review, and only its confirm pays.
  */
-function RequestCard(props: { inv: ChatInvoice; peer: string; name: string; blocked: boolean; onPay: (bolt11: string) => void }) {
+type PaymentStatus = Extract<Artifact, { type: 'payment' }>['receipt']['status'];
+
+function RequestCard(props: { inv: ChatInvoice; peer: string; name: string; blocked: boolean; paid?: PaymentStatus; onPay: (bolt11: string) => void }) {
+  // A failed attempt may be tried again; a settled or unresolved one may not.
+  const done = () => (props.paid && props.paid !== 'failed' ? props.paid : null);
   return (
-    <div class="request-card" data-request-card data-request-msat={props.inv.msat}>
+    <div class="request-card" data-request-card data-request-msat={props.inv.msat} data-request-status={done() ?? 'open'}>
       <span class="kind">Payment request from {props.name}</span>
       <span class="sats big">{sats(props.inv.msat)} <span class="unit">{satUnit(props.inv.msat)}</span></span>
       <Show when={props.inv.purpose} fallback={<span class="hint">No purpose given</span>}>
         <span class="purpose" data-request-purpose>For: {props.inv.purpose}</span>
       </Show>
       <PayeeLine payee={props.inv.payee} peer={props.peer} name={props.name} />
-      <span class="hint">Expires at {clock(props.inv.expiresAtMs)}. Nothing is paid until you confirm.</span>
-      <button type="button" class="primary" data-request-pay disabled={props.blocked} onClick={() => props.onPay(props.inv.bolt11)}>
-        Pay
-      </button>
+      <Show
+        when={done()}
+        fallback={
+          <>
+            <span class="hint">Expires at {clock(props.inv.expiresAtMs)}. Nothing is paid until you confirm.</span>
+            <button type="button" class="primary" data-request-pay disabled={props.blocked} onClick={() => props.onPay(props.inv.bolt11)}>
+              Pay
+            </button>
+          </>
+        }
+      >
+        {(status) => (
+          <span class="request-paid" data-request-paid={status()}>
+            {status() === 'settled' ? 'Paid. You paid this invoice.' : 'Payment in progress. Check its receipt below before trying again.'}
+          </span>
+        )}
+      </Show>
     </div>
   );
 }
@@ -1593,6 +1622,8 @@ function MessageView(props: {
   moneyBlocked?: boolean;
   /** Present in a peer thread: a received invoice may be paid from its card. */
   onPay?: (bolt11: string) => void;
+  /** This thread's invoice payments by payment hash. */
+  paidInvoices?: Map<string, PaymentStatus>;
   voiceUrl?: (messageId: string) => Promise<string>;
   fileFetch?: (messageId: string) => Promise<VoiceBlob>;
   fileSave?: (messageId: string) => Promise<FileSaveResult>;
@@ -1642,7 +1673,7 @@ function MessageView(props: {
           </div>
         }
       >
-        {(inv) => <RequestCard inv={inv()} peer={props.m.sender} name={props.nameOf(props.m.sender)} blocked={!!props.moneyBlocked} onPay={props.onPay!} />}
+        {(inv) => <RequestCard inv={inv()} peer={props.m.sender} name={props.nameOf(props.m.sender)} blocked={!!props.moneyBlocked} paid={props.paidInvoices?.get(inv().paymentHash)} onPay={props.onPay!} />}
       </Show>
       <Show when={notPayable()}>
         {(reason) => <p class="hint request-note" data-request-plain={reason()}>{NOT_PAYABLE_NOTE[reason()]}</p>}

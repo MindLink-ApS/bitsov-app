@@ -26,6 +26,8 @@ export type ChatInvoice = {
    * message is not necessarily this node.
    */
   payee: string;
+  /** The `p` field, hex: the same invoice however it is cased or prefixed. */
+  paymentHash: string;
 };
 
 /** Why a body that looks like an invoice is shown as plain text. */
@@ -83,6 +85,13 @@ function decode(raw: string): Decoded | null {
   return d;
 }
 
+/** The payment hash of any well-formed invoice, or null. */
+export function invoicePaymentHash(text: string): string | null {
+  const t = text.trim();
+  if (t.length > BODY_MAX || !INVOICE_LIKE.test(t)) return null;
+  return decode(t.replace(/^lightning:/i, ''))?.paymentHash ?? null;
+}
+
 /** The payee of any well-formed invoice (network, amount and expiry aside), or null. */
 export function invoicePayee(text: string): string | null {
   const t = text.trim();
@@ -130,6 +139,7 @@ function decodeUncached(raw: string): Decoded | null {
   let purpose: string | null = null;
   let hasHash = false;
   let payee: string | null = null;
+  let paymentHash: string | null = null;
   let at = 7;
   while (at < fields.length) {
     if (at + 3 > fields.length) return null;
@@ -138,7 +148,11 @@ function decodeUncached(raw: string): Decoded | null {
     const value = fields.slice(at + 3, at + 3 + len);
     if (value.length !== len) return null;
     at += 3 + len;
-    if (type === 1 && len === 52) hasHash = true; // p: payment hash
+    if (type === 1 && len === 52) {
+      // p: payment hash (the first one counts, as in BOLT11)
+      hasHash = true;
+      paymentHash ??= hex(toBytes(value)!.slice(0, 32));
+    }
     else if (type === 19 && len === 53) payee = hex(toBytes(value)!.slice(0, 33)); // n: payee node
     else if (type === 6) expirySecs = toInt(value); // x: expiry
     else if (type === 13) {
@@ -152,12 +166,12 @@ function decodeUncached(raw: string): Decoded | null {
       }
     }
   }
-  if (!hasHash) return null;
+  if (!hasHash || !paymentHash) return null;
   // BOLT11 signs SHA-256(hrp ‖ data words as bytes, zero-padded).
   const signed = new Uint8Array([...new TextEncoder().encode(hrp), ...toBytes(fields, true)!]);
   payee ??= recoverPubkey(sha256(signed), toBytes(data.slice(-104))!);
   if (!payee) return null;
-  return { bolt11: s, msat, network, purpose, expiresAtMs: (timestamp + expirySecs) * 1000, payee };
+  return { bolt11: s, msat, network, purpose, expiresAtMs: (timestamp + expirySecs) * 1000, payee, paymentHash };
 }
 
 /**
