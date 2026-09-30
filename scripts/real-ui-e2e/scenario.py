@@ -30,6 +30,29 @@ def run(r, fixture, capacities):
         r.ui('fill', selector='[data-composer] textarea', value=plaintext)
         r.ui('click', selector='[data-send]')
 
+    def composer_mode(mode):
+        # #91: Pay / Request / Attach live in the + menu, not as visible tabs.
+        # A loopback-visible selector alone times out when the menu is closed.
+        if mode == 'message':
+            r.ui_try('click', selector='[data-composer-close]', timeoutMs=2000)
+            return
+        r.ui('click', selector='[data-composer-plus]', timeoutMs=20000)
+        r.ui('click', selector=f'[data-composer-mode="{mode}"]', timeoutMs=20000)
+
+    def wait_message_send_ready():
+        # After a restart the budget may still be loading (Send disabled) or
+        # autopay closed (label is plain "Send", first press re-opens it). Cost
+        # lives behind a closed ⓘ details row, so do not require a visible
+        # data-cost-msat. Wait until Send/Resume is enabled.
+        def ready():
+            attrs = r.ui('attrs', selector='[data-send]', names=['disabled', 'aria-label', 'title'])
+            if not attrs or attrs[0].get('disabled') is not None:
+                return False
+            label = (attrs[0].get('aria-label') or attrs[0].get('title') or '').strip()
+            head = label.split('·')[0].strip()
+            return head.startswith('Send') or head.startswith('Resume') or head.startswith('Approve')
+        return r.wait_until(ready, 90)
+
     def owner_window(s):
         r.ui('wait', selector='[data-owner-action]', timeoutMs=20000)
         command = r.text('[data-owner-action]')
@@ -108,7 +131,7 @@ def run(r, fixture, capacities):
         inv=r.wait_until(expensive_invoice,60,1)
         s.need('B invoice advertises C fee 6000 msat',inv)
         cap_before=capacities()
-        r.ui('click',selector='[data-composer-mode="pay"]')
+        composer_mode('pay')
         r.ui_try('click',text='Invoice',role='tab')
         r.ui('fill',selector='textarea[data-pay-invoice]',value=inv['bolt11'])
         r.ui('wait',text='up to 5 sats network fee',timeoutMs=20000)
@@ -185,7 +208,9 @@ def run(r, fixture, capacities):
                 and p['direction']==direction and p['status']=='settled']
 
     def send_from_composer(s, plaintext, journal, ops):
-        # Records every operation id the app journals for this send.
+        # Records every operation id the app journals for this send. Fill once;
+        # never refill — a lost draft is a product failure the harness must
+        # catch. Retries only for identified expected transitions.
         import threading
         done=threading.Event()
         def watch():
@@ -195,15 +220,73 @@ def run(r, fixture, capacities):
                 if op: ops.add(op)
                 time.sleep(.005)
         watcher=threading.Thread(target=watch,daemon=True); watcher.start()
-        r.ui('fill',selector='[data-composer] textarea',value=plaintext)
         path=[]
-        for _ in range(4):
-            # A restart forgets the app-side all-in approval: approve, then Send.
-            label=r.text('[data-send]').strip(); path.append(label)
+        price_not_ready='The message price is not ready yet. Nothing was sent. Wait for the cost, then press Send.'
+
+        def current_draft():
+            # Live .value via the driver (WKWebView textarea innerText is empty).
+            rows=r.ui_try('attrs',selector='[data-composer] textarea',names=['value'])
+            return ((rows[0].get('value') if rows else None) or '').strip()
+
+        def send_label():
+            # Visible text is often plain "Send"; aria-label/title carry the price.
+            attrs=r.ui('attrs',selector='[data-send]',names=['aria-label','title'])
+            full=((attrs[0].get('aria-label') or attrs[0].get('title') or '') if attrs else '').strip()
+            return full or r.text('[data-send]').strip()
+
+        def shown_price():
+            label=send_label()
+            m=re.search(r'([\d.]+)\s*sats',label)
+            return int(Decimal(m.group(1))*1000) if m else None
+
+        def quoted_price():
+            hint=r.text('[data-readmission-quote]')
+            m=re.search(r'Send again:\s*([\d.]+)\s*sats',hint)
+            return int(Decimal(m.group(1))*1000) if m else None
+
+        def is_priced_send(label):
+            head=label.split('·')[0].strip()
+            return head.startswith('Send') and 'sat' in label.lower()
+
+        r.ui('fill',selector='[data-composer] textarea',value=plaintext)
+        s.need('draft accepted once',current_draft()==plaintext,current_draft())
+
+        delivered=False
+        for _ in range(6):
+            s.need('message Send ready',wait_message_send_ready())
+            s.need('draft still present before Send',current_draft()==plaintext,current_draft())
+            label=send_label(); path.append(label)
             r.ui('click',selector='[data-send]')
-            if label.startswith('Send'): break
-            if r.wait_until(lambda:r.ui_try('exists',selector='[data-owner-action]'),3): owner_window(s)
-            r.wait_until(lambda:r.text('[data-send]').strip().startswith('Send'),20)
+            if not is_priced_send(label):
+                # Approve / Resume / plain Send opens the spend window; draft stays.
+                if r.wait_until(lambda:r.ui_try('exists',selector='[data-owner-action]'),3):
+                    owner_window(s)
+                s.need('draft survives approval',current_draft()==plaintext,current_draft())
+                s.need('priced Send after approval',
+                       r.wait_until(lambda:is_priced_send(send_label()),30),send_label())
+                continue
+            def after_send():
+                if any(m.get('plaintext')==plaintext for m in r.get('b','/messages?limit=50')): return 'ok'
+                if r.ui_try('exists',selector='[data-readmission-quote]'): return 'quote'
+                if r.ui_try('exists',selector='[data-composer-note]'): return 'note'
+                return None
+            got=r.wait_until(after_send,20)
+            if got=='ok':
+                delivered=True
+                break
+            if got=='quote':
+                s.need('draft survives readmission',current_draft()==plaintext,current_draft())
+                s.need('quoted price is shown',shown_price() is not None and shown_price()==quoted_price(),
+                       {'shown':shown_price(),'quoted':quoted_price(),'hint':r.text('[data-readmission-quote]')})
+                continue  # one explicit confirmation at the new quote
+            if got=='note':
+                note=r.text('[data-composer-note]')
+                s.need('draft survives composer note',current_draft()==plaintext,current_draft())
+                s.need('composer note is the price-not-ready wait',note==price_not_ready,note)
+                continue  # wait for cost on the next Send-ready check
+            s.need('Send delivered without an unexplained retry',False,
+                   {'got':got,'path':path,'draft':current_draft(),'send':send_label()})
+        s.need('Send delivered without exhausting expected transitions',delivered,path)
         ok=received('b',plaintext)
         done.set(); watcher.join(2)
         return ok, path
@@ -234,7 +317,7 @@ def run(r, fixture, capacities):
             r.api('a','POST','/peers',{'node_id':b,'addr':f"127.0.0.1:{r.ports['b'][1]}",'auto_connect':False})
         s.need('A reconnected to B on a new connection',r.wait_until(b_connected,120,1))
         r.ui('click',selector=track,timeoutMs=60000)
-        r.ui_try('click',selector='[data-composer-mode="message"]',timeoutMs=5000)
+        composer_mode('message')
 
         # Message 1 after the restart: admission again once, then the message.
         ops=set()
@@ -333,7 +416,7 @@ def run(r, fixture, capacities):
         # A decline pays like a message: make sure the owner's window is open
         # first (the step-10 grant lasts ten minutes).
         r.ui('click',selector=track,timeoutMs=30000)
-        r.ui_try('click',selector='[data-composer-mode="message"]',timeoutMs=5000)
+        composer_mode('message')
         r.ui('fill',selector='[data-composer] textarea',value='window check (not sent)')
         if not r.text('[data-send]').strip().startswith('Send'):
             r.ui('click',selector='[data-send]')
@@ -416,7 +499,7 @@ def run(r, fixture, capacities):
         sent=r.api('b','POST',f"/files/{up['file_id']}/send",{'recipient':a,'max_total_msat':20000,'max_routing_fee_msat':1000},expect=200)[1]
         s.check('B file send delivered',sent.get('delivered') is not False,sent)
         r.ui('click',selector=track,timeoutMs=30000)
-        r.ui_try('click',selector='[data-composer-mode="message"]',timeoutMs=5000)
+        composer_mode('message')
         s.need('file bubble in the window',r.ui_try('wait',selector='[data-received-file]',text=filename,timeoutMs=60000))
         r.ui('click',selector='[data-file-save]',nth=-1)
         s.need('Save finished',r.ui_try('wait',selector='[data-file-save]',text='Saved',timeoutMs=30000),r.ui_try('attrs',selector='[data-file-meta]',names=[]))
@@ -497,7 +580,7 @@ def run(r, fixture, capacities):
         s.need('B balance on the A-B channel above its reserve',r.wait_until(lambda: b_ab()>0,60),b_ab())
         k0=capacities(); sa,sb=seen('a'),seen('b')
         r.ui('click',selector=track,timeoutMs=30000)
-        r.ui('click',selector='[data-composer-mode="pay"]')
+        composer_mode('pay')
         r.ui('click',text='Direct',role='tab')
         unit=r.text('.pay-flow .amount-unit')
         r.ui('fill',selector='[data-pay-amount]',value='21' if unit=='sats' else '0.00000021')
