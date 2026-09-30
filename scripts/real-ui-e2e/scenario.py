@@ -208,7 +208,9 @@ def run(r, fixture, capacities):
                 and p['direction']==direction and p['status']=='settled']
 
     def send_from_composer(s, plaintext, journal, ops):
-        # Records every operation id the app journals for this send.
+        # Records every operation id the app journals for this send. Fill once;
+        # never refill — a lost draft is a product failure the harness must
+        # catch. Retries only for identified expected transitions.
         import threading
         done=threading.Event()
         def watch():
@@ -219,16 +221,39 @@ def run(r, fixture, capacities):
                 time.sleep(.005)
         watcher=threading.Thread(target=watch,daemon=True); watcher.start()
         path=[]
+        price_not_ready='The message price is not ready yet. Nothing was sent. Wait for the cost, then press Send.'
+
+        def current_draft():
+            return (r.text('[data-composer] textarea') or '').strip()
+
+        def shown_price():
+            # Cost lives behind ⓘ; the Send aria-label/title always carries it.
+            attrs=r.ui('attrs',selector='[data-send]',names=['aria-label','title'])
+            label=((attrs[0].get('aria-label') or attrs[0].get('title') or '') if attrs else '')
+            m=re.search(r'([\d.]+)\s*sats',label)
+            return int(Decimal(m.group(1))*1000) if m else None
+
+        def quoted_price():
+            hint=r.text('[data-readmission-quote]')
+            m=re.search(r'Send again:\s*([\d.]+)\s*sats',hint)
+            return int(Decimal(m.group(1))*1000) if m else None
+
+        r.ui('fill',selector='[data-composer] textarea',value=plaintext)
+        s.need('draft accepted once',current_draft()==plaintext,current_draft())
+
+        delivered=False
         for _ in range(6):
-            # Re-fill each attempt: a restart can remount the composer and wipe
-            # the Solid draft while the DOM still looks filled.
-            r.ui('fill',selector='[data-composer] textarea',value=plaintext)
-            s.need('message Send ready', wait_message_send_ready())
+            s.need('message Send ready',wait_message_send_ready())
+            s.need('draft still present before Send',current_draft()==plaintext,current_draft())
             label=r.text('[data-send]').strip(); path.append(label)
             r.ui('click',selector='[data-send]')
             if not label.startswith('Send'):
-                if r.wait_until(lambda:r.ui_try('exists',selector='[data-owner-action]'),3): owner_window(s)
-                r.wait_until(lambda:r.text('[data-send]').strip().startswith('Send'),20)
+                # Approve / Resume opens the spend window; draft must stay.
+                if r.wait_until(lambda:r.ui_try('exists',selector='[data-owner-action]'),3):
+                    owner_window(s)
+                s.need('draft survives approval',current_draft()==plaintext,current_draft())
+                s.need('Send after approval',r.wait_until(lambda:r.text('[data-send]').strip().startswith('Send'),20),
+                       r.text('[data-send]'))
                 continue
             def after_send():
                 if any(m.get('plaintext')==plaintext for m in r.get('b','/messages?limit=50')): return 'ok'
@@ -237,12 +262,21 @@ def run(r, fixture, capacities):
                 return None
             got=r.wait_until(after_send,20)
             if got=='ok':
+                delivered=True
                 break
-            if got in ('quote', 'note'):
-                continue
-            if r.wait_until(lambda: any(m.get('plaintext')==plaintext for m in r.get('b','/messages?limit=50')),40):
-                break
-            continue
+            if got=='quote':
+                s.need('draft survives readmission',current_draft()==plaintext,current_draft())
+                s.need('quoted price is shown',shown_price() is not None and shown_price()==quoted_price(),
+                       {'shown':shown_price(),'quoted':quoted_price(),'hint':r.text('[data-readmission-quote]')})
+                continue  # one explicit confirmation at the new quote
+            if got=='note':
+                note=r.text('[data-composer-note]')
+                s.need('draft survives composer note',current_draft()==plaintext,current_draft())
+                s.need('composer note is the price-not-ready wait',note==price_not_ready,note)
+                continue  # wait for cost on the next Send-ready check
+            s.need('Send delivered without an unexplained retry',False,
+                   {'got':got,'path':path,'draft':current_draft(),'send':r.text('[data-send]')})
+        s.need('Send delivered without exhausting expected transitions',delivered,path)
         ok=received('b',plaintext)
         done.set(); watcher.join(2)
         return ok, path
