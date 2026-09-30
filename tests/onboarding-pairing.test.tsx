@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'solid-js/web';
 import { Onboarding } from '../src/onboarding/Onboarding';
 import { onboardingSteps, type NodeStatus, type PairingView } from '../src/onboarding/pairing';
+import type { DeviceView } from '../src/control/types';
 
 const starting: PairingView = {
   state: 'starting',
@@ -97,7 +98,12 @@ describe('pairing panel', () => {
     mount = undefined;
   });
 
-  const show = (pairing: PairingView, status: NodeStatus = booting, onRetry = () => {}) => {
+  const show = (
+    pairing: PairingView,
+    status: NodeStatus = booting,
+    onRetry = () => {},
+    device: DeviceView | null = null,
+  ) => {
     mount = document.createElement('div');
     document.body.appendChild(mount);
     dispose = render(
@@ -107,6 +113,7 @@ describe('pairing panel', () => {
           pairing={() => pairing}
           trustAck={() => false}
           onRetry={onRetry}
+          device={() => device}
         />
       ),
       mount,
@@ -173,36 +180,96 @@ describe('pairing panel', () => {
     expect(el.textContent).toContain('genome release');
   });
 
-  it('renders 3 honest node location choices: local, network, cloud', () => {
+  it('renders 3 honest node location choices: local active, network and cloud disabled Coming soon', () => {
     const el = show(starting, booting);
-    const local = el.querySelector('[data-target="local"]');
-    const network = el.querySelector('[data-target="network"]');
-    const cloud = el.querySelector('[data-target="cloud"]');
+    const local = el.querySelector<HTMLButtonElement>('[data-target="local"]')!;
+    const network = el.querySelector<HTMLButtonElement>('[data-target="network"]')!;
+    const cloud = el.querySelector<HTMLButtonElement>('[data-target="cloud"]')!;
 
     expect(local).not.toBeNull();
     expect(network).not.toBeNull();
     expect(cloud).not.toBeNull();
 
-    expect(local?.textContent).toContain('This computer');
-    expect(network?.textContent).toContain('A node on my network');
-    expect(cloud?.textContent).toContain('A cloud node');
-    expect(cloud?.textContent).toContain('Hosted custody');
+    expect(local.disabled).toBe(false);
+    expect(local.classList.contains('selected')).toBe(true);
+    expect(local.textContent).toContain('This computer');
+    expect(local.textContent).toContain('Run your sovereign node directly on this Mac');
+
+    expect(network.disabled).toBe(true);
+    expect(network.getAttribute('aria-disabled')).toBe('true');
+    expect(network.textContent).toContain('A node on my network');
+    expect(network.textContent).toContain('Coming soon');
+    expect(network.textContent).toContain(
+      'Connecting to a home server on your local network is coming soon; today the app connects to the node on this Mac.',
+    );
+
+    expect(cloud.disabled).toBe(true);
+    expect(cloud.getAttribute('aria-disabled')).toBe('true');
+    expect(cloud.textContent).toContain('A cloud node');
+    expect(cloud.textContent).toContain('Coming soon');
+    expect(cloud.textContent).toContain(
+      'Hosted cloud nodes and remote signing are coming soon; today the app connects to the node on this Mac.',
+    );
+
+    // Simulated scan spinners and fake address inputs are removed
+    expect(el.querySelector('.spinner')).toBeNull();
+    expect(el.querySelector('input[type="text"]')).toBeNull();
   });
 
-  it('hides network and cloud manual inputs under progressive disclosure', () => {
-    const el = show(starting, booting);
-    const networkBtn = el.querySelector<HTMLButtonElement>('[data-target="network"]')!;
-    networkBtn.click();
-    const networkAux = el.querySelector('[data-target-aux="network"]')!;
-    expect(networkAux.textContent).toContain('Scanning local network');
-    // The manual input is inside <details>
-    const details = networkAux.querySelector('details')!;
-    expect(details.open).toBe(false);
+  it('describes pairing honestly without Touch ID / Secure Enclave claims when device key is not registered', () => {
+    const el = show(paired, ready, () => {}, {
+      available: true,
+      state: 'none',
+      fingerprint: null,
+      owner_action: null,
+      expires_at_ms: null,
+    });
+    const panel = el.querySelector('[data-pairing="paired"]')!;
+    expect(panel.textContent).toContain('App paired');
+    expect(panel.textContent).not.toContain('Touch ID Enrolled');
+    expect(panel.textContent).not.toContain('Secure Enclave');
+    expect(panel.textContent).not.toContain('Touch ID approves every payment');
+    expect(panel.textContent).toContain('Loopback authenticated. Ordinary pairing is file-backed on this Mac.');
+    expect(el.textContent).toContain('The app connects to your sovereign node on this Mac.');
+    expect(el.textContent).not.toContain('Touch ID on this device can approve payments per contact.');
+  });
 
-    const cloudBtn = el.querySelector<HTMLButtonElement>('[data-target="cloud"]')!;
-    cloudBtn.click();
-    const cloudAux = el.querySelector('[data-target-aux="cloud"]')!;
-    expect(cloudAux.textContent).toContain('Honest custody notice');
-    expect(cloudAux.querySelector('details')!.open).toBe(false);
+  it('claims Touch ID Enrolled and Secure Enclave only when device key is registered', () => {
+    const enrolledDevice: DeviceView = {
+      available: true,
+      state: 'registered',
+      fingerprint: 'fp-1234',
+      owner_action: null,
+      expires_at_ms: null,
+    };
+    const el = show(paired, ready, () => {}, enrolledDevice);
+    const panel = el.querySelector('[data-pairing="paired"]')!;
+    expect(panel.textContent).toContain('Touch ID Enrolled · Secure Enclave');
+    expect(panel.textContent).toContain(
+      'Loopback authenticated. Touch ID approves every payment to authorized contacts.',
+    );
+    expect(el.textContent).toContain('Touch ID on this device can approve payments per contact.');
+  });
+
+  it('pending pairing accurately reflects device enrollment state', () => {
+    const unenrolled = show(pending, booting, () => {}, null);
+    const unenrolledPanel = unenrolled.querySelector('[data-pairing="pending"]')!;
+    expect(unenrolledPanel.textContent).toContain(
+      'Establishing an authenticated pairing between this app and your node.',
+    );
+    expect(unenrolledPanel.textContent).not.toContain('Secure Enclave');
+
+    const enrolledDevice: DeviceView = {
+      available: true,
+      state: 'registered',
+      fingerprint: 'fp-1234',
+      owner_action: null,
+      expires_at_ms: null,
+    };
+    const enrolled = show(pending, booting, () => {}, enrolledDevice);
+    const enrolledPanel = enrolled.querySelector('[data-pairing="pending"]')!;
+    expect(enrolledPanel.textContent).toContain(
+      'Registering Secure Enclave key and establishing an authenticated pairing.',
+    );
   });
 });

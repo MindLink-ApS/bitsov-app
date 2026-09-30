@@ -1,5 +1,6 @@
 import { createSignal, For, Match, Show, Switch } from 'solid-js';
 import { onboardingSteps, scopeList, type NodeStatus, type PairingView } from './pairing';
+import type { DeviceView } from '../control/types';
 
 // Claim discipline (BitSov-bitsov docs/security/pairing.md): less exposure, not solved
 // local security. The short code is a tripwire, never described as what protects the
@@ -23,6 +24,7 @@ export function Onboarding(props: {
   onRetry: () => void;
   selectedTarget?: NodeTarget;
   onTargetChange?: (target: NodeTarget) => void;
+  device?: () => DeviceView | null;
 }) {
   const steps = () => onboardingSteps(props.status(), props.pairing(), props.trustAck());
   const [internalTarget, setInternalTarget] = createSignal<NodeTarget>('local');
@@ -31,15 +33,19 @@ export function Onboarding(props: {
     setInternalTarget(t);
     props.onTargetChange?.(t);
   };
-
-  const [touchIdSimulated, setTouchIdSimulated] = createSignal(false);
+  const isEnrolled = () => props.device?.()?.state === 'registered';
 
   return (
     <section class="onboarding" aria-label="First-run setup">
       {/* Node location selection: 3 honest choices */}
       <div class="node-target-section">
         <h2 class="node-target-title">Where does your node live?</h2>
-        <p class="hint">Select how you want to connect. Touch ID on this device approves every payment the app makes.</p>
+        <Show
+          when={isEnrolled()}
+          fallback={<p class="hint">Select where your node runs. The app connects to your sovereign node on this Mac.</p>}
+        >
+          <p class="hint">Select where your node runs. Touch ID on this device can approve payments per contact.</p>
+        </Show>
 
         <div class="node-target-grid" role="radiogroup" aria-label="Choose node location">
           {/* Option 1: This computer (local node) */}
@@ -71,14 +77,14 @@ export function Onboarding(props: {
             </div>
           </button>
 
-          {/* Option 2: A node on my network */}
+          {/* Option 2: A node on my network (disabled, coming soon) */}
           <button
             type="button"
-            class="node-target-card"
-            classList={{ selected: target() === 'network' }}
+            class="node-target-card disabled"
             role="radio"
-            aria-checked={target() === 'network'}
-            onClick={() => setTarget('network')}
+            aria-checked="false"
+            disabled
+            aria-disabled="true"
             data-target="network"
           >
             <div class="target-icon">
@@ -93,22 +99,21 @@ export function Onboarding(props: {
               <div class="target-head">
                 <strong>A node on my network</strong>
                 <div class="row" style={{ width: 'auto', gap: '8px' }}>
-                  <span class="target-badge">Home Server · LAN</span>
-                  <span class="target-radio-indicator" aria-hidden="true">✓</span>
+                  <span class="target-badge coming-soon">Coming soon</span>
                 </div>
               </div>
-              <p>Connect to a home server running BitSov on your local Wi-Fi or wired network.</p>
+              <p>Connecting to a home server on your local network is coming soon; today the app connects to the node on this Mac.</p>
             </div>
           </button>
 
-          {/* Option 3: A cloud node (hosted, labelled honestly) */}
+          {/* Option 3: A cloud node (disabled, coming soon) */}
           <button
             type="button"
-            class="node-target-card"
-            classList={{ selected: target() === 'cloud' }}
+            class="node-target-card disabled"
             role="radio"
-            aria-checked={target() === 'cloud'}
-            onClick={() => setTarget('cloud')}
+            aria-checked="false"
+            disabled
+            aria-disabled="true"
             data-target="cloud"
           >
             <div class="target-icon">
@@ -120,43 +125,13 @@ export function Onboarding(props: {
               <div class="target-head">
                 <strong>A cloud node</strong>
                 <div class="row" style={{ width: 'auto', gap: '8px' }}>
-                  <span class="target-badge honest">Hosted custody</span>
-                  <span class="target-radio-indicator" aria-hidden="true">✓</span>
+                  <span class="target-badge coming-soon">Coming soon</span>
                 </div>
               </div>
-              <p>Hosted: the machine that runs your node holds its keys. Good for always-on; choose this only if you trust the host. A remote signer that keeps keys on your Mac is coming.</p>
+              <p>Hosted cloud nodes and remote signing are coming soon; today the app connects to the node on this Mac.</p>
             </div>
           </button>
         </div>
-
-        <Show when={target() === 'network'}>
-          <div class="node-target-aux" data-target-aux="network">
-            <div class="row">
-              <div class="spinner small" />
-              <span>Scanning local network for BitSov nodes…</span>
-            </div>
-            <details class="node-advanced">
-              <summary>Enter connection address manually</summary>
-              <div class="fields" style={{ 'margin-top': '8px' }}>
-                <input type="text" placeholder="e.g. bitsov-server.local or my-node.lan" aria-label="Network node address" />
-              </div>
-            </details>
-          </div>
-        </Show>
-
-        <Show when={target() === 'cloud'}>
-          <div class="node-target-aux" data-target-aux="cloud">
-            <p class="hint">
-              <strong>Honest custody notice:</strong> Hosted: the machine that runs your node holds its keys. Good for always-on; choose this only if you trust the host. A remote signer that keeps keys on your Mac is coming.
-            </p>
-            <details class="node-advanced">
-              <summary>Enter cloud provider details</summary>
-              <div class="fields" style={{ 'margin-top': '8px' }}>
-                <input type="text" placeholder="e.g. node.bitsov.cloud" aria-label="Cloud provider hostname" />
-              </div>
-            </details>
-          </div>
-        </Show>
       </div>
 
       <ol class="steps">
@@ -187,7 +162,12 @@ export function Onboarding(props: {
               </div>
               <div>
                 <h2>Pairing this app with your node…</h2>
-                <p>Registering this Mac’s Secure Enclave key with Touch ID.</p>
+                <Show
+                  when={isEnrolled()}
+                  fallback={<p>Establishing an authenticated pairing between this app and your node.</p>}
+                >
+                  <p>Registering Secure Enclave key and establishing an authenticated pairing.</p>
+                </Show>
               </div>
             </div>
             <p class="hint">
@@ -212,7 +192,18 @@ export function Onboarding(props: {
               </div>
               <div class="touchid-text">
                 <h2>This app is paired</h2>
-                <span class="touchid-status-pill">Touch ID Enrolled · Secure Enclave</span>
+                <Show
+                  when={isEnrolled()}
+                  fallback={<span class="touchid-status-pill">App paired</span>}
+                >
+                  <span class="touchid-status-pill">Touch ID Enrolled · Secure Enclave</span>
+                </Show>
+                <Show
+                  when={isEnrolled()}
+                  fallback={<p class="hint" style={{ margin: '4px 0 0' }}>Loopback authenticated. Ordinary pairing is file-backed on this Mac.</p>}
+                >
+                  <p class="hint" style={{ margin: '4px 0 0' }}>Loopback authenticated. Touch ID approves every payment to authorized contacts.</p>
+                </Show>
               </div>
             </div>
 

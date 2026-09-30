@@ -499,6 +499,9 @@ select { font: inherit; font-size: var(--t-sm); background: var(--sunk); color: 
 .target-badge { font-size: var(--t-xs); font-weight: 500; padding: 2px 8px; border-radius: var(--r-chip); background: var(--sunk); color: var(--muted); }
 .target-badge.ok { background: color-mix(in srgb, var(--ok) 14%, transparent); color: var(--ok); }
 .target-badge.honest { background: color-mix(in srgb, var(--warn) 14%, transparent); color: var(--warn); }
+.target-badge.coming-soon { background: var(--sunk); color: var(--muted); border: 1px solid var(--line); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
+.node-target-card:disabled, .node-target-card.disabled { opacity: 0.55; cursor: not-allowed; }
+.node-target-card:disabled:hover, .node-target-card.disabled:hover { background: var(--surface); border-color: var(--line); }
 .target-info p { font-size: var(--t-sm); color: var(--muted); line-height: 1.4; margin: 0; }
 .node-target-aux { padding: var(--s-3); background: var(--sunk); border: 1px solid var(--line); border-radius: var(--r-control); margin-top: var(--s-2); font-size: var(--t-sm); display: flex; flex-direction: column; gap: var(--s-2); }
 

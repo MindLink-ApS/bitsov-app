@@ -7,7 +7,7 @@ import { amount as fmtAmount } from './control/format';
 import { ControlCenter } from './control/Shell';
 import { hostSource, inHost, sampleRequest, type SampleStart, type Source } from './control/source';
 import { sampleSource } from './control/sample';
-import type { FundingAddress, FundState } from './control/types';
+import type { DeviceView, FundingAddress, FundState } from './control/types';
 
 // The control center. First run (Start node → Pair this app → Create/restore
 // identity → Fund) is the shell's first state, shown in the centre track until
@@ -42,6 +42,7 @@ export default function App() {
   const [restoreError, setRestoreError] = createSignal<string | null>(null);
   const showIdentityGate = () => status().ready || restoring() || restoreError() !== null;
   const [pairing, setPairing] = createSignal<PairingView>(INITIAL_PAIRING);
+  const [device, setDevice] = createSignal<DeviceView | null>(null);
   // Once pairing has an outcome, the start spinner no longer describes the state.
   const starting = () => pairing().state === 'starting' || pairing().state === 'pending';
 
@@ -56,6 +57,11 @@ export default function App() {
       setPairing(await source().pairingStatus());
     } catch {
       /* keep the last known pairing state; node_status carries host errors */
+    }
+    try {
+      setDevice(await source().deviceKeyStatus());
+    } catch {
+      /* keep last known or null */
     }
   };
   const retryPairing = async () => {
@@ -89,7 +95,13 @@ export default function App() {
         </p>
       </div>
 
-      <Onboarding status={status} pairing={pairing} trustAck={trustAck} onRetry={() => void retryPairing()} />
+      <Onboarding
+        status={status}
+        pairing={pairing}
+        trustAck={trustAck}
+        onRetry={() => void retryPairing()}
+        device={device}
+      />
 
       <Show
         when={showIdentityGate()}
