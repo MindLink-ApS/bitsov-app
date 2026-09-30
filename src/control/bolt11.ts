@@ -1,10 +1,12 @@
 // A chat message whose whole body is a BOLT11 invoice: read it for display
 // only. Nothing here pays or trusts the text. The amount, purpose and expiry
 // are shown on a request card; paying still goes through the host's own
-// invoice_amount read, the Pay review and its one confirm tap. The signature
-// is not checked here: the node checks it and refuses to pay a bad invoice.
+// invoice_amount read, the Pay review and its one confirm tap. The payee is
+// read from the signature for display; the signature is not *checked* here:
+// the node checks it and refuses to pay a bad invoice.
 
 import { MAX_PAYMENT_MSAT, MIN_PAYMENT_MSAT } from './amountInput';
+import { hex, recoverPubkey, sha256 } from './secp';
 
 /** Networks as the host names them (`act::bolt11_network`). */
 export type InvoiceNetwork = 'mainnet' | 'testnet' | 'signet' | 'regtest';
@@ -18,6 +20,12 @@ export type ChatInvoice = {
   purpose: string | null;
   /** Unix ms. */
   expiresAtMs: number;
+  /**
+   * The Lightning node the payment goes to (compressed pubkey, hex): the
+   * invoice's `n` field, else recovered from its signature. Whoever sent the
+   * message is not necessarily this node.
+   */
+  payee: string;
 };
 
 /** Why a body that looks like an invoice is shown as plain text. */
@@ -65,7 +73,24 @@ export function readChatInvoice(body: string | null | undefined, nowMs: number, 
 
 type Decoded = Omit<ChatInvoice, 'msat'> & { msat: number | null };
 
+/** Decoding recovers a public key; message views re-read on every clock tick. */
+const cache = new Map<string, Decoded | null>();
 function decode(raw: string): Decoded | null {
+  if (cache.has(raw)) return cache.get(raw)!;
+  const d = decodeUncached(raw);
+  if (cache.size >= 256) cache.delete(cache.keys().next().value!);
+  cache.set(raw, d);
+  return d;
+}
+
+/** The payee of any well-formed invoice (network, amount and expiry aside), or null. */
+export function invoicePayee(text: string): string | null {
+  const t = text.trim();
+  if (t.length > BODY_MAX || !INVOICE_LIKE.test(t)) return null;
+  return decode(t.replace(/^lightning:/i, ''))?.payee ?? null;
+}
+
+function decodeUncached(raw: string): Decoded | null {
   // Bech32 is single-case; mixed case is invalid.
   if (raw !== raw.toLowerCase() && raw !== raw.toUpperCase()) return null;
   const s = raw.toLowerCase();
@@ -104,6 +129,7 @@ function decode(raw: string): Decoded | null {
   let expirySecs = 3600;
   let purpose: string | null = null;
   let hasHash = false;
+  let payee: string | null = null;
   let at = 7;
   while (at < fields.length) {
     if (at + 3 > fields.length) return null;
@@ -113,6 +139,7 @@ function decode(raw: string): Decoded | null {
     if (value.length !== len) return null;
     at += 3 + len;
     if (type === 1 && len === 52) hasHash = true; // p: payment hash
+    else if (type === 19 && len === 53) payee = hex(toBytes(value)!.slice(0, 33)); // n: payee node
     else if (type === 6) expirySecs = toInt(value); // x: expiry
     else if (type === 13) {
       // d: description, UTF-8
@@ -126,7 +153,11 @@ function decode(raw: string): Decoded | null {
     }
   }
   if (!hasHash) return null;
-  return { bolt11: s, msat, network, purpose, expiresAtMs: (timestamp + expirySecs) * 1000 };
+  // BOLT11 signs SHA-256(hrp ‖ data words as bytes, zero-padded).
+  const signed = new Uint8Array([...new TextEncoder().encode(hrp), ...toBytes(fields, true)!]);
+  payee ??= recoverPubkey(sha256(signed), toBytes(data.slice(-104))!);
+  if (!payee) return null;
+  return { bolt11: s, msat, network, purpose, expiresAtMs: (timestamp + expirySecs) * 1000, payee };
 }
 
 /**
@@ -147,8 +178,8 @@ function toInt(words: number[]): number {
   return words.reduce((acc, w) => acc * 32 + w, 0);
 }
 
-/** 5-bit words to bytes; trailing padding bits are dropped. */
-function toBytes(words: number[]): Uint8Array | null {
+/** 5-bit words to bytes; trailing bits are dropped, or zero-padded to a byte with `pad`. */
+function toBytes(words: number[], pad = false): Uint8Array | null {
   const out: number[] = [];
   let acc = 0;
   let bits = 0;
@@ -161,6 +192,7 @@ function toBytes(words: number[]): Uint8Array | null {
     }
     acc &= (1 << bits) - 1;
   }
+  if (pad && bits > 0) out.push((acc << (8 - bits)) & 0xff);
   return new Uint8Array(out);
 }
 
@@ -195,3 +227,17 @@ export function bech32Checksum(hrp: string, data: number[]): number[] {
 }
 
 export const BECH32_CHARSET = CHARSET;
+
+/** Short form of a Lightning node id for display: first 8 and last 4 hex. */
+export const shortPayee = (payee: string) => `${payee.slice(0, 8)}…${payee.slice(-4)}`;
+
+/**
+ * Who an invoice pays, as the owner may be told. Named only when this
+ * contact's Lightning node id is known and equals the payee; otherwise the
+ * short payee id, explicitly not verified as the contact.
+ */
+export function payeeView(payee: string, contactLn: string | null, name: string): { verified: boolean; text: string } {
+  return contactLn !== null && contactLn.toLowerCase() === payee
+    ? { verified: true, text: name }
+    : { verified: false, text: `Lightning node ${shortPayee(payee)}, not verified as ${name}` };
+}

@@ -11,7 +11,7 @@ import { DiscoverPanel, FrontDoorEditor } from './Discover';
 import { callCost, createCallEngine, IDLE as CALL_IDLE, isCallKind, signalCost, stunServer, type CallMedia, type CallView } from './call';
 import { blobUrl, duration, FILE_MAX_BYTES, fileNameOf, isVoiceNote, type Recording, startRecording, VOICE_MAX_MS } from './voice';
 import { EMOJIS, insertEmoji } from './emoji';
-import { NOT_PAYABLE_NOTE, readChatInvoice, type ChatInvoice } from './bolt11';
+import { invoicePayee, NOT_PAYABLE_NOTE, payeeView, readChatInvoice, type ChatInvoice } from './bolt11';
 import { safeImageMime, looksLikeSafeImageName, dataImageUrl } from './frontDoorMedia';
 import type { FileSaveResult, InvoiceView, VoiceBlob } from './types';
 import {
@@ -1538,10 +1538,31 @@ function Conversation(props: {
 }
 
 /**
+ * A contact's Lightning node id, when the app knows it. The node keeps one
+ * per connected peer for its own keysend but exposes none (GET /peers has no
+ * such field), so today no invoice payee is ever named as a contact.
+ */
+const contactLightningId = (_peer: string): string | null => null;
+
+/** Payee line: never asserts that the chat contact owns the invoice. */
+function PayeeLine(props: { payee: string | null; peer: string; name: string }) {
+  const v = () => (props.payee === null ? null : payeeView(props.payee, contactLightningId(props.peer), props.name));
+  return (
+    <span class="payee" classList={{ unverified: !v()?.verified }} data-payee={v()?.verified ? 'verified' : 'unverified'} title={props.payee ?? undefined}>
+      {v() === null
+        ? `Pays a Lightning node this app could not read, not verified as ${props.name}.`
+        : v()!.verified
+          ? `Pays ${v()!.text}’s Lightning node.`
+          : `Pays ${v()!.text}.`}
+    </span>
+  );
+}
+
+/**
  * A received message whose whole body is a payable invoice. Display only:
  * Pay opens the composer's amount-first review, and only its confirm pays.
  */
-function RequestCard(props: { inv: ChatInvoice; name: string; blocked: boolean; onPay: (bolt11: string) => void }) {
+function RequestCard(props: { inv: ChatInvoice; peer: string; name: string; blocked: boolean; onPay: (bolt11: string) => void }) {
   return (
     <div class="request-card" data-request-card data-request-msat={props.inv.msat}>
       <span class="kind">Payment request from {props.name}</span>
@@ -1549,6 +1570,7 @@ function RequestCard(props: { inv: ChatInvoice; name: string; blocked: boolean; 
       <Show when={props.inv.purpose} fallback={<span class="hint">No purpose given</span>}>
         <span class="purpose" data-request-purpose>For: {props.inv.purpose}</span>
       </Show>
+      <PayeeLine payee={props.inv.payee} peer={props.peer} name={props.name} />
       <span class="hint">Expires at {clock(props.inv.expiresAtMs)}. Nothing is paid until you confirm.</span>
       <button type="button" class="primary" data-request-pay disabled={props.blocked} onClick={() => props.onPay(props.inv.bolt11)}>
         Pay
@@ -1620,7 +1642,7 @@ function MessageView(props: {
           </div>
         }
       >
-        {(inv) => <RequestCard inv={inv()} name={props.nameOf(props.m.sender)} blocked={!!props.moneyBlocked} onPay={props.onPay!} />}
+        {(inv) => <RequestCard inv={inv()} peer={props.m.sender} name={props.nameOf(props.m.sender)} blocked={!!props.moneyBlocked} onPay={props.onPay!} />}
       </Show>
       <Show when={notPayable()}>
         {(reason) => <p class="hint request-note" data-request-plain={reason()}>{NOT_PAYABLE_NOTE[reason()]}</p>}
@@ -2520,9 +2542,10 @@ function Composer(props: {
   // contact's budget the owner sees it here, inside the all-in cost, and sends
   // once more at that price (the same message keeps its operation).
   const [readmitQuote, setReadmitQuote] = createSignal<{ peer: string; price: AdmissionPrice } | null>(null);
+  // Whatever the mode: Send in chat shows (and caps) a message from Request.
   const readmitPrice = (): AdmissionPrice | null => {
     const q = readmitQuote();
-    return q && !room() && mode() === 'message' && q.peer === target() ? q.price : null;
+    return q && !room() && q.peer === target() ? q.price : null;
   };
   // Is this send a first contact? While the budget decides, exactly when it
   // has no line for this peer, whatever the thread holds: inbound history
@@ -2681,9 +2704,18 @@ function Composer(props: {
     return { message: 'Send', pay: 'Pay', request: 'Create invoice', file: 'Send file' }[mode()] + (mode() === 'request' ? '' : price);
   };
 
-  const submit = async () => {
+  /**
+   * `shownMsat`: the message price the owner saw on the button they pressed
+   * (Send in chat). If the price is not that any more, nothing is sent: the
+   * new price shows on Send, which needs another press.
+   */
+  const submit = async (shownMsat?: number | null) => {
     if (props.moneyBlocked || busy() || ownerWait()) return;
     setNote(null);
+    if (shownMsat !== undefined && (mode() !== 'message' || shown().msat !== shownMsat)) {
+      setNote('The message price changed since you pressed. Nothing was sent. Check the price on Send and press it to send.');
+      return;
+    }
     if (viaBudget()) {
       const st = stand();
       if (st.kind === 'paused' || st.kind === 'off') {
@@ -2841,10 +2873,12 @@ function Composer(props: {
   const sendInChat = async () => {
     const inv = created();
     if (!inv || props.moneyBlocked || busy() || ownerWait()) return;
+    // The price on the pressed button is the only price this press may pay.
+    const pressedMsat = messageShown().msat;
     setMode('message');
     setDraft(inv.bolt11);
     setDrafted(false);
-    await submit();
+    await submit(pressedMsat);
     if (untrack(draft) === '') setCreated(null);
   };
   const chatPrice = () => {
@@ -3090,10 +3124,19 @@ function Composer(props: {
             >
               {(rv) => (
                 <div class="pay-review" data-pay-review data-review-msat={rv().msat} data-review-max-msat={allIn(rv().msat)}>
-                  <p class="pay-review-title">
-                    Pay {props.name}
-                    <span class="hint"> · {rv().kind === 'invoice' ? 'their invoice' : `direct to ${shortId((rv() as { pubkey: string }).pubkey)}`}</span>
-                  </p>
+                  <Show
+                    when={rv().kind === 'invoice'}
+                    fallback={
+                      <p class="pay-review-title">
+                        Pay {props.name}
+                        <span class="hint"> · direct to {shortId((rv() as { pubkey: string }).pubkey)}</span>
+                      </p>
+                    }
+                  >
+                    {/* Whoever sent or pasted the invoice need not be who it pays. */}
+                    <p class="pay-review-title">Pay this Lightning invoice</p>
+                    <PayeeLine payee={invoicePayee((rv() as { bolt11: string }).bolt11)} peer={target()} name={props.name} />
+                  </Show>
                   <dl>
                     <dt>Amount</dt>
                     <dd data-review-amount>{fmtAmount(rv().msat)}</dd>
@@ -3162,7 +3205,7 @@ function Composer(props: {
         </div>
       </Show>
 
-      <Show when={readmitPrice()}>
+      <Show when={mode() === 'message' && readmitPrice()}>
         {(p) => (
           <>
             <p class="hint" data-readmission-quote>

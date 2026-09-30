@@ -312,6 +312,9 @@ select { font: inherit; font-size: var(--t-sm); background: var(--sunk); color: 
 .request-card .sats.big { font-size: var(--t-xl); color: var(--accent); font-weight: 600; }
 .request-card .purpose { white-space: pre-wrap; overflow-wrap: anywhere; }
 .request-card button { align-self: flex-start; margin-top: var(--s-1); }
+.payee { font-size: var(--t-sm); }
+.payee.unverified { color: var(--warn); }
+.pay-review .payee { display: block; margin-bottom: var(--s-1); }
 .msg .request-note { margin: 2px 0 0; font-size: var(--t-xs); }
 .artifact.failed { border-color: rgba(217, 96, 63, 0.4); background: rgba(217, 96, 63, 0.08); font-size: var(--t-sm); }
 .artifact.failed .kind { color: var(--err); }
