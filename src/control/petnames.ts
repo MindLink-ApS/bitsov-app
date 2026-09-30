@@ -3,59 +3,131 @@
  *
  * A petname is the name *you* give a contact. It never leaves this device /
  * renderer. A peer's `label` or front-door `display_name` is only a suggestion
- * (self-claimed). Verified means you compared fingerprints out-of-band; if the
- * node key ever changes, verified drops and a warning is shown.
+ * (self-claimed). Verified means you compared fingerprints out-of-band.
+ *
+ * Contacts have a stable local id and a current node key. When the owner
+ * confirms a key replacement, verification clears and a durable warning is
+ * kept. Sameness is never inferred from a claimed name or address.
  */
 
 import { createRoot, createSignal } from 'solid-js';
 
-const STORE_KEY = 'bitsov.contacts.v1';
+const STORE_KEY = 'bitsov.contacts.v2';
+const STORE_KEY_V1 = 'bitsov.contacts.v1';
 
 export type ContactLocal = {
+  /** Stable local identity (not the node key). */
+  id: string;
+  /** Current node key (64 hex). */
+  nodeKey: string;
   /** Owner-chosen name. Never published. */
   petname?: string;
-  /** Lowercase node_id hex at the moment of Verify. */
+  /** Node key hex at the moment of Verify (equals nodeKey while verified). */
   verifiedKey?: string;
   /** Unix ms when Verify was confirmed. */
   verifiedAt?: number;
-  /** Prior verified key no longer matches this contact's node id. */
+  /** Set after an owner-confirmed key replacement until dismiss or re-verify. */
   keyChanged?: boolean;
 };
 
 export type VerifyState = 'unverified' | 'verified' | 'key-changed';
 
-type Store = Record<string, ContactLocal>;
+type Store = { byId: Record<string, ContactLocal> };
 
 function normId(nodeId: string): string {
   return nodeId.trim().toLowerCase();
 }
 
+function isNodeKey(hex: string): boolean {
+  return /^[0-9a-f]{64}$/.test(hex);
+}
+
+function newContactId(): string {
+  try {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+  } catch {
+    /* ignore */
+  }
+  return `c-${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}`;
+}
+
+function emptyStore(): Store {
+  return { byId: {} };
+}
+
+function migrateV1(raw: unknown): Store {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return emptyStore();
+  const out = emptyStore();
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (!v || typeof v !== 'object' || Array.isArray(v)) continue;
+    const row = v as Record<string, unknown>;
+    const nodeKey = normId(k);
+    if (!isNodeKey(nodeKey)) continue;
+    const entry: ContactLocal = { id: newContactId(), nodeKey };
+    if (typeof row.petname === 'string' && row.petname.trim()) entry.petname = row.petname.trim();
+    if (typeof row.verifiedKey === 'string' && row.verifiedKey) entry.verifiedKey = row.verifiedKey.toLowerCase();
+    if (typeof row.verifiedAt === 'number' && Number.isFinite(row.verifiedAt)) entry.verifiedAt = row.verifiedAt;
+    if (row.keyChanged === true) entry.keyChanged = true;
+    if (entry.petname || entry.verifiedKey || entry.keyChanged) out.byId[entry.id] = entry;
+  }
+  return out;
+}
+
+function parseStore(raw: string | null): Store {
+  if (!raw) return emptyStore();
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return emptyStore();
+    const obj = parsed as Record<string, unknown>;
+    if (obj.v === 2 && obj.byId && typeof obj.byId === 'object' && !Array.isArray(obj.byId)) {
+      const out = emptyStore();
+      for (const [id, v] of Object.entries(obj.byId as Record<string, unknown>)) {
+        if (!v || typeof v !== 'object' || Array.isArray(v)) continue;
+        const row = v as Record<string, unknown>;
+        const nodeKey = typeof row.nodeKey === 'string' ? normId(row.nodeKey) : '';
+        if (!isNodeKey(nodeKey)) continue;
+        const entry: ContactLocal = { id: typeof row.id === 'string' && row.id ? row.id : id, nodeKey };
+        if (typeof row.petname === 'string' && row.petname.trim()) entry.petname = row.petname.trim();
+        if (typeof row.verifiedKey === 'string' && row.verifiedKey) entry.verifiedKey = row.verifiedKey.toLowerCase();
+        if (typeof row.verifiedAt === 'number' && Number.isFinite(row.verifiedAt)) entry.verifiedAt = row.verifiedAt;
+        if (row.keyChanged === true) entry.keyChanged = true;
+        out.byId[entry.id] = entry;
+      }
+      return out;
+    }
+    // Legacy v1: map keyed by node id.
+    return migrateV1(parsed);
+  } catch {
+    return emptyStore();
+  }
+}
+
 function readStore(): Store {
   try {
-    const raw = localStorage.getItem(STORE_KEY);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw) as unknown;
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
-    const out: Store = {};
-    for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
-      if (!v || typeof v !== 'object' || Array.isArray(v)) continue;
-      const row = v as Record<string, unknown>;
-      const entry: ContactLocal = {};
-      if (typeof row.petname === 'string' && row.petname.trim()) entry.petname = row.petname.trim();
-      if (typeof row.verifiedKey === 'string' && row.verifiedKey) entry.verifiedKey = row.verifiedKey.toLowerCase();
-      if (typeof row.verifiedAt === 'number' && Number.isFinite(row.verifiedAt)) entry.verifiedAt = row.verifiedAt;
-      if (row.keyChanged === true) entry.keyChanged = true;
-      if (entry.petname || entry.verifiedKey || entry.keyChanged) out[normId(k)] = entry;
+    const v2 = localStorage.getItem(STORE_KEY);
+    if (v2) return parseStore(v2);
+    const v1 = localStorage.getItem(STORE_KEY_V1);
+    if (v1) {
+      const migrated = parseStore(v1);
+      writeStore(migrated);
+      try {
+        localStorage.removeItem(STORE_KEY_V1);
+      } catch {
+        /* ignore */
+      }
+      return migrated;
     }
-    return out;
   } catch {
-    return {};
+    /* private mode */
   }
+  return emptyStore();
 }
 
 function writeStore(store: Store) {
   try {
-    localStorage.setItem(STORE_KEY, JSON.stringify(store));
+    localStorage.setItem(STORE_KEY, JSON.stringify({ v: 2, byId: store.byId }));
   } catch {
     /* private mode / quota */
   }
@@ -88,122 +160,162 @@ function store(): Store {
   return storeSignal?.() ?? readStore();
 }
 
-export function getContact(nodeId: string): ContactLocal {
-  contactRevision();
-  return store()[normId(nodeId)] ?? {};
+function findByNodeKey(nodeKey: string): ContactLocal | undefined {
+  const key = normId(nodeKey);
+  for (const c of Object.values(store().byId)) {
+    if (c.nodeKey === key) return c;
+  }
+  return undefined;
 }
 
-/** Owner petname, or null. */
+function isEmptyContact(c: ContactLocal): boolean {
+  return !c.petname && !c.verifiedKey && !c.keyChanged;
+}
+
+function putContact(next: Store, c: ContactLocal) {
+  if (isEmptyContact(c)) delete next.byId[c.id];
+  else next.byId[c.id] = c;
+}
+
+export function getContact(nodeId: string): ContactLocal {
+  contactRevision();
+  return findByNodeKey(nodeId) ?? { id: '', nodeKey: normId(nodeId) };
+}
+
+/** Owner petname for the contact that currently holds this node key, or null. */
 export function petnameOf(nodeId: string): string | null {
   const n = getContact(nodeId).petname?.trim();
   return n || null;
 }
 
 /**
- * Set or clear the local petname. Empty / whitespace clears it.
- * Never syncs to the node or the peer.
+ * Set or clear the local petname for the contact at this node key.
+ * Empty / whitespace clears it. Never syncs to the node or the peer.
  */
 export function setPetname(nodeId: string, name: string | null | undefined) {
-  const id = normId(nodeId);
-  if (!id) return;
-  const next = { ...store() };
-  const cur = { ...(next[id] ?? {}) };
+  const key = normId(nodeId);
+  if (!isNodeKey(key)) return;
+  const next = { byId: { ...store().byId } };
+  let cur = findByNodeKey(key);
+  if (!cur) {
+    cur = { id: newContactId(), nodeKey: key };
+  } else {
+    cur = { ...cur };
+  }
   const trimmed = (name ?? '').trim();
   if (trimmed) cur.petname = trimmed;
   else delete cur.petname;
-  if (!cur.petname && !cur.verifiedKey && !cur.keyChanged) delete next[id];
-  else next[id] = cur;
+  putContact(next, cur);
   bump(next);
 }
 
 /** Seed a sample/demo petname only when none is set yet. */
 export function seedPetnameIfEmpty(nodeId: string, name: string) {
-  const id = normId(nodeId);
-  if (store()[id]?.petname?.trim()) return;
+  const key = normId(nodeId);
+  if (findByNodeKey(key)?.petname?.trim()) return;
   const trimmed = name.trim();
   if (!trimmed) return;
-  setPetname(id, trimmed);
+  setPetname(key, trimmed);
 }
 
 /** Mark this node key verified after an out-of-band fingerprint compare. */
 export function markVerified(nodeId: string, atMs = Date.now()) {
-  const id = normId(nodeId);
-  if (!/^[0-9a-f]{64}$/.test(id)) return;
-  const next = { ...store() };
-  const cur = { ...(next[id] ?? {}) };
-  cur.verifiedKey = id;
+  const key = normId(nodeId);
+  if (!isNodeKey(key)) return;
+  const next = { byId: { ...store().byId } };
+  let cur = findByNodeKey(key);
+  if (!cur) cur = { id: newContactId(), nodeKey: key };
+  else cur = { ...cur };
+  cur.nodeKey = key;
+  cur.verifiedKey = key;
   cur.verifiedAt = atMs;
   delete cur.keyChanged;
-  next[id] = cur;
+  next.byId[cur.id] = cur;
   bump(next);
 }
 
 export function clearVerified(nodeId: string) {
-  const id = normId(nodeId);
-  const next = { ...store() };
-  const cur = next[id];
+  const key = normId(nodeId);
+  const cur = findByNodeKey(key);
   if (!cur?.verifiedKey && !cur?.keyChanged) return;
+  const next = { byId: { ...store().byId } };
   const copy = { ...cur };
   delete copy.verifiedKey;
   delete copy.verifiedAt;
   delete copy.keyChanged;
-  if (!copy.petname) delete next[id];
-  else next[id] = copy;
+  putContact(next, copy);
   bump(next);
 }
 
 /** Clear the key-changed warning after the owner has seen it (without re-verify). */
 export function dismissKeyWarning(nodeId: string) {
-  const id = normId(nodeId);
-  const next = { ...store() };
-  const cur = next[id];
+  const key = normId(nodeId);
+  const cur = findByNodeKey(key);
   if (!cur?.keyChanged) return;
+  const next = { byId: { ...store().byId } };
   const copy = { ...cur };
   delete copy.keyChanged;
-  if (!copy.petname && !copy.verifiedKey) delete next[id];
-  else next[id] = copy;
+  putContact(next, copy);
   bump(next);
+}
+
+/**
+ * Owner-confirmed key replacement: the same local contact now uses `toNodeKey`.
+ * Clears verified and persists a key-changed warning. Never call this because
+ * two peers share a claimed name or address — only after an explicit owner act.
+ *
+ * @returns false when keys are invalid, identical, unknown, or `to` is already another contact.
+ */
+export function replaceContactKey(fromNodeKey: string, toNodeKey: string): boolean {
+  const from = normId(fromNodeKey);
+  const to = normId(toNodeKey);
+  if (!isNodeKey(from) || !isNodeKey(to) || from === to) return false;
+  const cur = findByNodeKey(from);
+  if (!cur) return false;
+  const conflict = findByNodeKey(to);
+  if (conflict && conflict.id !== cur.id) return false;
+  const next = { byId: { ...store().byId } };
+  const copy: ContactLocal = { ...cur, nodeKey: to, keyChanged: true };
+  delete copy.verifiedKey;
+  delete copy.verifiedAt;
+  next.byId[copy.id] = copy;
+  bump(next);
+  return true;
 }
 
 /**
  * Verification against the contact's current node key.
- * `key-changed` means we verified a different key earlier — drop trust UX.
+ * `key-changed` means the owner linked a replacement key after a prior verify.
  */
 export function verifyState(nodeId: string): VerifyState {
-  const id = normId(nodeId);
-  const c = getContact(id);
+  const key = normId(nodeId);
+  const c = findByNodeKey(key);
+  if (!c) return 'unverified';
+  contactRevision();
   if (c.keyChanged) return 'key-changed';
   if (!c.verifiedKey) return 'unverified';
-  if (c.verifiedKey !== id) return 'key-changed';
+  if (c.verifiedKey !== c.nodeKey) return 'key-changed';
   return 'verified';
 }
 
 /**
- * If the stored verified key no longer matches this contact's node id, drop
- * verified and keep a durable warning until dismiss or re-verify.
+ * Safety net: if verifiedKey drifts from nodeKey without going through
+ * replaceContactKey, drop verified and keep the warning.
  */
 export function reconcileKeyChange(nodeId: string): VerifyState {
-  const id = normId(nodeId);
-  const c = getContact(id);
-  if (c.verifiedKey && c.verifiedKey !== id) {
-    const next = { ...store() };
+  const key = normId(nodeId);
+  const c = findByNodeKey(key);
+  if (!c) return 'unverified';
+  if (c.verifiedKey && c.verifiedKey !== c.nodeKey) {
+    const next = { byId: { ...store().byId } };
     const copy: ContactLocal = { ...c, keyChanged: true };
     delete copy.verifiedKey;
     delete copy.verifiedAt;
-    next[id] = copy;
+    next.byId[copy.id] = copy;
     bump(next);
     return 'key-changed';
   }
-  return verifyState(id);
-}
-
-/** Test/helper: plant a mismatched verified key under this contact id. */
-export function plantVerifiedKeyForTests(nodeId: string, verifiedKey: string) {
-  const id = normId(nodeId);
-  const next = { ...store() };
-  next[id] = { ...(next[id] ?? {}), verifiedKey: normId(verifiedKey), verifiedAt: Date.now() };
-  delete next[id].keyChanged;
-  bump(next);
+  return verifyState(key);
 }
 
 /** Grouped hex of the node key for aloud / in-person compare (ACCOUNT-LAYER §6). */
@@ -235,8 +347,14 @@ export function fingerprintQrPayload(nodeId: string): string {
 export function resetContactsForTests() {
   try {
     localStorage.removeItem(STORE_KEY);
+    localStorage.removeItem(STORE_KEY_V1);
   } catch {
     /* ignore */
   }
-  bump({});
+  bump(emptyStore());
+}
+
+/** Test helper: re-read durable store as after a process restart. */
+export function reloadContactsFromStorageForTests() {
+  bump(readStore());
 }

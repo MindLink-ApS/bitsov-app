@@ -6,8 +6,8 @@ import {
   fingerprintQrPayload,
   markVerified,
   petnameOf,
-  plantVerifiedKeyForTests,
-  reconcileKeyChange,
+  reloadContactsFromStorageForTests,
+  replaceContactKey,
   resetContactsForTests,
   setPetname,
   shortFingerprint,
@@ -19,6 +19,7 @@ import type { Peer } from '../src/control/types';
 
 const A = 'a'.repeat(64);
 const B = 'b'.repeat(64);
+const C = 'c'.repeat(64);
 
 beforeEach(() => resetContactsForTests());
 afterEach(() => resetContactsForTests());
@@ -47,13 +48,53 @@ describe('petnames', () => {
     expect(verifyState(A)).toBe('unverified');
   });
 
-  it('drops verified and warns when the stored key no longer matches', () => {
-    plantVerifiedKeyForTests(A, B);
-    expect(verifyState(A)).toBe('key-changed');
-    expect(reconcileKeyChange(A)).toBe('key-changed');
-    expect(verifyState(A)).toBe('key-changed');
-    dismissKeyWarning(A);
+  it('owner-confirmed key replacement clears verified, keeps petname, and warns until dismiss', () => {
+    setPetname(A, 'Maya');
+    markVerified(A);
+    expect(verifyState(A)).toBe('verified');
+
+    expect(replaceContactKey(A, B)).toBe(true);
+    expect(petnameOf(A)).toBeNull();
+    expect(petnameOf(B)).toBe('Maya');
+    expect(verifyState(B)).toBe('key-changed');
     expect(verifyState(A)).toBe('unverified');
+
+    // Durable across a storage reload (new process / reopen).
+    reloadContactsFromStorageForTests();
+    expect(petnameOf(B)).toBe('Maya');
+    expect(verifyState(B)).toBe('key-changed');
+
+    dismissKeyWarning(B);
+    expect(verifyState(B)).toBe('unverified');
+    expect(petnameOf(B)).toBe('Maya');
+  });
+
+  it('re-verify after replacement clears the warning', () => {
+    setPetname(A, 'Maya');
+    markVerified(A);
+    expect(replaceContactKey(A, B)).toBe(true);
+    expect(verifyState(B)).toBe('key-changed');
+    markVerified(B);
+    expect(verifyState(B)).toBe('verified');
+  });
+
+  it('refuses replacement when the new key already belongs to another contact', () => {
+    setPetname(A, 'Maya');
+    markVerified(A);
+    setPetname(B, 'Other');
+    expect(replaceContactKey(A, B)).toBe(false);
+    expect(verifyState(A)).toBe('verified');
+    expect(petnameOf(B)).toBe('Other');
+  });
+
+  it('does not infer sameness: a new key alone is a different contact', () => {
+    setPetname(A, 'Maya');
+    markVerified(A);
+    // B appears with the same claimed label — still unrelated until replaceContactKey.
+    const peerB: Peer = { node_id: B, addr: null, label: 'Maya', connected: true, fingerprint: null };
+    expect(peerName(peerB, B)).toBe(shortId(B));
+    expect(verifyState(B)).toBe('unverified');
+    expect(verifyState(A)).toBe('verified');
   });
 
   it('formats a grouped hex fingerprint and a bare hex QR payload', () => {
@@ -61,7 +102,14 @@ describe('petnames', () => {
     expect(formatNodeFingerprint(A).startsWith('aaaa · aaaa')).toBe(true);
     expect(formatNodeFingerprint(A).split(' · ')).toHaveLength(16);
     expect(fingerprintQrPayload(A)).toBe(A);
-    // Authority: no http(s) scheme in renderer payloads.
     expect(fingerprintQrPayload(A)).not.toMatch(/^https?:/i);
+  });
+
+  it('replaceContactKey rejects identical or unknown keys', () => {
+    expect(replaceContactKey(A, A)).toBe(false);
+    expect(replaceContactKey(A, B)).toBe(false);
+    markVerified(A);
+    expect(replaceContactKey(A, 'not-a-key')).toBe(false);
+    expect(replaceContactKey(C, B)).toBe(false);
   });
 });

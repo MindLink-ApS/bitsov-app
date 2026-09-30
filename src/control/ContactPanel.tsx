@@ -3,7 +3,7 @@
  * Petnames never leave the device. Peer labels / profile names are suggestions.
  */
 
-import { createEffect, createMemo, createSignal, Show, type JSX } from 'solid-js';
+import { createEffect, createMemo, createSignal, on, Show, untrack, type JSX } from 'solid-js';
 import { qrSvg } from '../qr';
 import { shortId } from './format';
 import {
@@ -14,6 +14,7 @@ import {
   markVerified,
   petnameOf,
   reconcileKeyChange,
+  replaceContactKey,
   setPetname,
   shortFingerprint,
   verifyState,
@@ -29,39 +30,65 @@ export function ContactPanel(props: {
   doorName?: string | null;
   onClose: () => void;
 }): JSX.Element {
-  const id = () => props.peer.node_id;
+  const contactKey = createMemo(() => props.peer.node_id.trim().toLowerCase());
   const [draft, setDraft] = createSignal('');
   const [confirming, setConfirming] = createSignal(false);
+  const [prevKeyDraft, setPrevKeyDraft] = createSignal('');
+  const [linkError, setLinkError] = createSignal<string | null>(null);
 
-  createEffect(() => {
-    if (!props.open) return;
-    setDraft(petnameOf(id()) ?? '');
-    setConfirming(false);
-    reconcileKeyChange(id());
-  });
+  // Init only when the panel opens or the contact's node key actually changes —
+  // not on every peer-object refresh from the host poll.
+  createEffect(
+    on(
+      () => [props.open, contactKey()] as const,
+      ([open, key]) => {
+        if (!open) return;
+        setDraft(untrack(() => petnameOf(key)) ?? '');
+        setConfirming(false);
+        setPrevKeyDraft('');
+        setLinkError(null);
+        reconcileKeyChange(key);
+      },
+    ),
+  );
 
-  const state = (): VerifyState => verifyState(id());
+  const state = (): VerifyState => verifyState(contactKey());
 
   const claimed = () => claimedName(props.peer) || props.doorName?.trim() || null;
-  const fpText = () => formatNodeFingerprint(id());
-  const shortFp = () => shortFingerprint(id());
+  const fpText = () => formatNodeFingerprint(contactKey());
+  const shortFp = () => shortFingerprint(contactKey());
   const qr = createMemo(() => {
     try {
-      return qrSvg(fingerprintQrPayload(id()));
+      return qrSvg(fingerprintQrPayload(contactKey()));
     } catch {
       return null;
     }
   });
 
   const saveName = () => {
-    setPetname(id(), draft());
+    setPetname(contactKey(), draft());
   };
 
   const useSuggestion = () => {
     const c = claimed();
     if (!c) return;
     setDraft(c);
-    setPetname(id(), c);
+    setPetname(contactKey(), c);
+  };
+
+  const linkReplacement = () => {
+    setLinkError(null);
+    const prev = prevKeyDraft().trim().toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(prev)) {
+      setLinkError('Enter the previous 64-character node key.');
+      return;
+    }
+    if (!replaceContactKey(prev, contactKey())) {
+      setLinkError('Could not link — unknown previous key, or this key already belongs to another contact.');
+      return;
+    }
+    setPrevKeyDraft('');
+    setDraft(untrack(() => petnameOf(contactKey())) ?? draft());
   };
 
   return (
@@ -80,7 +107,7 @@ export function ContactPanel(props: {
         aria-modal={props.open ? true : undefined}
         role="dialog"
         data-contact-panel={props.open ? 'open' : 'closed'}
-        data-contact-id={id().toLowerCase()}
+        data-contact-id={contactKey()}
       >
         <div class="row settings-head">
           <h2 style={{ flex: 1, margin: 0 }}>Contact</h2>
@@ -93,10 +120,9 @@ export function ContactPanel(props: {
           <div class="panel contact-key-warn" data-contact-key-changed role="alert">
             <h3>Node key changed</h3>
             <p class="hint">
-              This contact’s node key no longer matches the fingerprint you verified. Verified status was cleared.
-              Compare fingerprints again before you trust this name.
+              You linked a new node key to this contact. Verified status was cleared. Compare fingerprints again before you trust this name.
             </p>
-            <button type="button" class="quiet" data-contact-dismiss-key onClick={() => dismissKeyWarning(id())}>
+            <button type="button" class="quiet" data-contact-dismiss-key onClick={() => dismissKeyWarning(contactKey())}>
               Dismiss warning
             </button>
           </div>
@@ -112,7 +138,7 @@ export function ContactPanel(props: {
               data-contact-petname
               maxlength={64}
               value={draft()}
-              placeholder={shortId(id())}
+              placeholder={shortId(contactKey())}
               onInput={(e) => setDraft(e.currentTarget.value)}
               onChange={() => saveName()}
               onBlur={() => saveName()}
@@ -167,11 +193,11 @@ export function ContactPanel(props: {
             )}
           </Show>
           <p class="hint mono" data-contact-qr-text>
-            {fingerprintQrPayload(id())}
+            {fingerprintQrPayload(contactKey())}
           </p>
           <div class="row" style={{ 'justify-content': 'flex-end', gap: 'var(--s-2)' }}>
             <Show when={state() === 'verified'}>
-              <button type="button" class="quiet" data-contact-unverify onClick={() => clearVerified(id())}>
+              <button type="button" class="quiet" data-contact-unverify onClick={() => clearVerified(contactKey())}>
                 Clear verified
               </button>
             </Show>
@@ -191,13 +217,45 @@ export function ContactPanel(props: {
                 class="primary"
                 data-contact-verify-confirm
                 onClick={() => {
-                  markVerified(id());
+                  markVerified(contactKey());
                   setConfirming(false);
                 }}
               >
                 We matched
               </button>
             </Show>
+          </div>
+        </div>
+
+        <div class="panel" data-contact-replace>
+          <h3>Key replacement</h3>
+          <p class="hint">
+            If this person rotated their node key, paste the previous key you already knew. Only you confirm the link — never from a name or address.
+          </p>
+          <label class="field">
+            <span>Previous node key</span>
+            <input
+              type="text"
+              class="mono"
+              data-contact-replace-from
+              maxlength={64}
+              spellcheck={false}
+              value={prevKeyDraft()}
+              placeholder="64 hex characters"
+              onInput={(e) => setPrevKeyDraft(e.currentTarget.value)}
+            />
+          </label>
+          <Show when={linkError()}>
+            {(e) => (
+              <p class="hint" data-contact-replace-error style={{ color: 'var(--err)' }}>
+                {e()}
+              </p>
+            )}
+          </Show>
+          <div class="row" style={{ 'justify-content': 'flex-end' }}>
+            <button type="button" class="quiet" data-contact-replace-link onClick={() => linkReplacement()}>
+              Link as this contact
+            </button>
           </div>
         </div>
       </aside>

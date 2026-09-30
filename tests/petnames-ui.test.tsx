@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { createSignal } from 'solid-js';
 import { render } from 'solid-js/web';
 import { ControlCenter } from '../src/control/Shell';
+import { ContactPanel } from '../src/control/ContactPanel';
 import {
   sampleSource,
   SAMPLE_OWN_ID,
@@ -8,10 +10,13 @@ import {
   SAMPLE_FRONT_DOOR_LINK,
 } from '../src/control/sample';
 import {
-  plantVerifiedKeyForTests,
+  markVerified,
+  replaceContactKey,
   resetContactsForTests,
   setPetname,
+  verifyState,
 } from '../src/control/petnames';
+import type { Peer } from '../src/control/types';
 
 let dispose: (() => void) | undefined;
 let mount: HTMLElement;
@@ -25,6 +30,7 @@ beforeEach(() => resetContactsForTests());
 
 const $ = <T extends HTMLElement = HTMLElement>(s: string) => mount.querySelector<T>(s)!;
 const maya = SAMPLE_PEERS[0].node_id;
+const OLD = 'f'.repeat(64);
 
 async function openMaya() {
   const source = sampleSource({ firstLiveMs: 1e9 });
@@ -67,13 +73,46 @@ it('shows fingerprint + QR and marks verified locally', async () => {
   await vi.waitFor(() => expect($('[data-contact-pill="verified"]')).not.toBeNull());
 });
 
-it('warns when a previously verified key no longer matches', async () => {
-  setPetname(maya, 'Maya');
-  plantVerifiedKeyForTests(maya, 'b'.repeat(64));
+it('warns after an owner-confirmed key replacement, and the warning survives reopen', async () => {
+  setPetname(OLD, 'Maya');
+  markVerified(OLD);
+  expect(replaceContactKey(OLD, maya)).toBe(true);
+  expect(verifyState(maya)).toBe('key-changed');
+
   await openMaya();
   await vi.waitFor(() => expect($('[data-contact-pill="key-changed"]')).not.toBeNull());
   $<HTMLButtonElement>('[data-contact-open]').click();
   await vi.waitFor(() => expect($('[data-contact-key-changed]')).not.toBeNull());
+
+  // Close and reopen the panel — warning persists (not cleared by re-init).
+  $<HTMLButtonElement>('[data-contact-close]').click();
+  await vi.waitFor(() => expect($('[data-contact-panel="closed"]')).not.toBeNull());
+  $<HTMLButtonElement>('[data-contact-open]').click();
+  await vi.waitFor(() => expect($('[data-contact-key-changed]')).not.toBeNull());
+  expect(verifyState(maya)).toBe('key-changed');
+});
+
+it('keeps an unsaved petname draft and verify confirmation across a same-key peer refresh', async () => {
+  const peerA: Peer = { node_id: maya, addr: null, label: 'Maya', connected: true, fingerprint: 'aaaaaaaa' };
+  const [peer, setPeer] = createSignal(peerA);
+  const [open, setOpen] = createSignal(true);
+  mount = document.createElement('div');
+  document.body.appendChild(mount);
+  dispose = render(() => <ContactPanel open={open()} peer={peer()} onClose={() => setOpen(false)} />, mount);
+
+  await vi.waitFor(() => expect($('[data-contact-panel="open"]')).not.toBeNull());
+  const input = $<HTMLInputElement>('[data-contact-petname]');
+  input.value = 'Unsaved local name';
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  expect(input.value).toBe('Unsaved local name');
+  $<HTMLButtonElement>('[data-contact-verify-start]').click();
+  expect($('[data-contact-verify-confirm]')).not.toBeNull();
+
+  // Same node_id, new object — as peers_list refresh does.
+  setPeer({ ...peerA, connected: false, label: 'Maya' });
+  await Promise.resolve();
+  expect($<HTMLInputElement>('[data-contact-petname]').value).toBe('Unsaved local name');
+  expect($('[data-contact-verify-confirm]')).not.toBeNull();
 });
 
 it('marks front-door display names as self-claimed suggestions', async () => {
