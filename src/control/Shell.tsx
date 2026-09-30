@@ -3563,6 +3563,17 @@ function Composer(props: {
 function SpendBar(props: { spend: SpendView | null; error: string | undefined; now: number; actions: Actions }) {
   const line = () => spendLine(props.spend, props.now);
   const minutes = (ms: number) => Math.max(1, Math.ceil((ms - props.now) / 60_000));
+  // One Ask again at a time: a double click must not print two requests at the node.
+  const [asking, setAsking] = createSignal(false);
+  const askAgain = async () => {
+    if (asking()) return;
+    setAsking(true);
+    try {
+      await props.actions.approve();
+    } finally {
+      setAsking(false);
+    }
+  };
   return (
     <div class="spend" data-spend={props.spend?.state ?? 'unknown'}>
       <Switch>
@@ -3609,9 +3620,9 @@ function SpendBar(props: { spend: SpendView | null; error: string | undefined; n
             <p class="spend-line" data-spend-lapse={lapse()}>
               <span class="dot" />{' '}
               {lapse() === 'lost'
-                ? 'Your node can no longer approve that request (it restarted). Nothing was granted.'
-                : 'That request lapsed before it was approved. Nothing was granted.'}{' '}
-              <button type="button" class="link" data-spend-ask-again onClick={() => void props.actions.approve()}>
+                ? 'Your node can no longer approve that request (for example, it restarted).'
+                : 'That request lapsed before it was approved.'}{' '}
+              <button type="button" class="link" data-spend-ask-again disabled={asking()} onClick={() => void askAgain()}>
                 Ask again
               </button>
             </p>
@@ -3747,7 +3758,7 @@ function BudgetBar(props: {
               {(lapse) => (
                 <p class="hint" data-budget-lapse={lapse()}>
                   {lapse() === 'lost'
-                    ? 'Your node restarted, so your last request can no longer be approved. Approve again to ask again.'
+                    ? 'Your node can no longer approve your last request (for example, it restarted). Approve again to ask again.'
                     : 'Your last request lapsed before it was approved. Approve again to ask again.'}
                 </p>
               )}

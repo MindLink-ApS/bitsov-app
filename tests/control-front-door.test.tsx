@@ -209,8 +209,13 @@ describe('front door Discover and editor', () => {
       .toEqual({ text: 'This node cannot let the app publish its front door. unavailable in this deployment', command: null });
     expect(frontDoorOwnerAsk('front_door_owner: run: konsensus grant --op ab12; rm -rf x')?.command).toBe('konsensus grant --op ab12');
     // The node's config rides along, quoted or plain; nothing past it does.
-    expect(frontDoorOwnerAsk("front_door_owner: run: konsensus grant --op ab12 --config '/Users/o'\\''neil/My Node/konsensus.toml' It asks")?.command)
-      .toBe("konsensus grant --op ab12 --config '/Users/o'\\''neil/My Node/konsensus.toml'");
+    expect(frontDoorOwnerAsk("front_door_owner: run: konsensus grant --op ab12 --config '/Users/owner/My Node/konsensus.toml' It asks")?.command)
+      .toBe("konsensus grant --op ab12 --config '/Users/owner/My Node/konsensus.toml'");
+    // Nothing that could hide or rewrite what the owner reads.
+    for (const hostile of ["'/a/‮lmot.toml'", "'/a/o'\\''neil.toml'", "'/a\\'"]) {
+      expect(frontDoorOwnerAsk(`front_door_owner: run: konsensus grant --op ab12 --config ${hostile} x`)?.command)
+        .toBe('konsensus grant --op ab12');
+    }
     expect(frontDoorOwnerAsk('front_door_owner: run: konsensus grant --op ab12 --config /srv/n/konsensus.toml It asks')?.command)
       .toBe('konsensus grant --op ab12 --config /srv/n/konsensus.toml');
     expect(frontDoorOwnerAsk('front_door_owner: run: konsensus grant --op ab12 --config $(rm -rf ~) x')?.command)

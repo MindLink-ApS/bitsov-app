@@ -142,6 +142,8 @@ describe('control center shell', () => {
     expect(mount.querySelector('[data-spend-lapse]')?.textContent).toContain('restarted');
     expect(calls.some((c) => c.cmd === 'spend_request')).toBe(false);
 
+    // A double click asks once.
+    click('[data-spend-ask-again]');
     click('[data-spend-ask-again]');
     await vi.waitFor(() => expect(mount.querySelector('[data-approval="pending"] [data-owner-action]')?.textContent).toBe(cmd));
     expect(mount.querySelector('[data-approval="pending"]')?.textContent).toContain('short code');

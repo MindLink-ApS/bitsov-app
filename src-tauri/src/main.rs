@@ -7851,12 +7851,18 @@ mod control_act_tests {
     #[tokio::test]
     async fn the_owner_command_names_the_nodes_config_when_the_node_does_not() {
         let (node, _dir) = paired_fake(asking_node("pending", "konsensus grant --op {op}"));
-        *node.state.config.lock().unwrap() = Some(PathBuf::from("/Users/o'neil/Bitsov Node/konsensus.toml"));
+        *node.state.config.lock().unwrap() = Some(PathBuf::from("/Users/owner/Bitsov Node/konsensus.toml"));
         let view = spend_advance(&node.state, true).await.unwrap();
         assert_eq!(
             view.pending.unwrap().owner_action,
-            r"konsensus grant --op ab01 --config '/Users/o'\''neil/Bitsov Node/konsensus.toml'"
+            "konsensus grant --op ab01 --config '/Users/owner/Bitsov Node/konsensus.toml'"
         );
+        // An attached external node's config wins over the one the app started.
+        let (node, _dir) = paired_fake(asking_node("pending", "konsensus grant --op {op}"));
+        *node.state.config.lock().unwrap() = Some(PathBuf::from("/own/konsensus.toml"));
+        *node.state.external_node.lock().unwrap() = Some(PathBuf::from("/ext"));
+        let view = spend_advance(&node.state, true).await.unwrap();
+        assert_eq!(view.pending.unwrap().owner_action, "konsensus grant --op ab01 --config '/ext/konsensus.toml'");
         // A node that already names its config is shown verbatim.
         let (node, _dir) = paired_fake(asking_node("pending", "konsensus grant --op {op} --config /srv/n/konsensus.toml"));
         *node.state.config.lock().unwrap() = Some(PathBuf::from("/elsewhere/konsensus.toml"));

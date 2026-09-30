@@ -481,10 +481,12 @@ impl SpendGate {
         }
         if let Some(p) = &self.pending {
             if p.expires_at_ms <= now_ms {
+                // A request this node could never grant (a sidecar) offers no Ask again.
+                let lapse = p.owner_can_grant.then_some(Lapse::Expired);
                 self.generation = self.generation.wrapping_add(1);
                 self.pending = None;
                 self.expired = true;
-                self.lapse = Some(Lapse::Expired);
+                self.lapse = lapse;
             }
         }
     }
@@ -569,19 +571,23 @@ impl ElevationReply {
     }
 }
 
-/// An absolute config path, single-quoted for a POSIX shell. None for a
-/// relative path or one with characters no owner should be asked to paste.
+/// An absolute config path, single-quoted for a shell. None for a relative or
+/// overlong path, or one with characters no owner should be asked to paste. A
+/// quote or backslash is refused rather than escaped: no escape is safe in
+/// every shell (fish reads `\'` inside single quotes).
 fn config_arg(path: &std::path::Path) -> Option<String> {
     let text = path.to_str()?;
     if !path.is_absolute()
+        || text.len() > 400
         || text.chars().any(|c| {
             c.is_control()
-                || matches!(c, '\u{061C}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}')
+                || c == '\'' || c == '\\'
+                || matches!(c, '\u{00AD}' | '\u{061C}' | '\u{180E}' | '\u{200B}'..='\u{200F}' | '\u{2028}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}')
         })
     {
         return None;
     }
-    Some(format!("'{}'", text.replace('\'', "'\\''")))
+    Some(format!("'{text}'"))
 }
 
 /// `GET /pair/elevation/:op_id` → `status`.
@@ -1537,6 +1543,14 @@ mod tests {
         gate.lock();
         assert_eq!(gate.view(100_000).lapse, None);
 
+        // A sidecar request running out offers no Ask again: it can never be granted.
+        let sidecar = ElevationReply { op_id: "cd34".into(), expires_at: 100, owner_action: "unavailable in this deployment".into() }
+            .into_elevation(None)
+            .unwrap();
+        gate.set_pending(sidecar);
+        let view = gate.view(100_000);
+        assert_eq!((view.state, view.lapse), (SpendState::Expired, None));
+
         assert_eq!(Lapse::from_status("lost"), Some(Lapse::Lost));
         assert_eq!(Lapse::from_status("absent"), Some(Lapse::Lost));
         assert_eq!(Lapse::from_status("expired"), Some(Lapse::Expired));
@@ -1553,6 +1567,9 @@ mod tests {
         assert_eq!(with("konsensus grant --op ab12", "n/konsensus.toml"), "konsensus grant --op ab12");
         assert_eq!(with("konsensus grant --op ab12", "/n/\u{202E}lmot.toml"), "konsensus grant --op ab12");
         assert_eq!(with("konsensus grant --op ab12", "/n/\nx.toml"), "konsensus grant --op ab12");
+        assert_eq!(with("konsensus grant --op ab12", "/Users/o'neil/konsensus.toml"), "konsensus grant --op ab12");
+        assert_eq!(with("konsensus grant --op ab12", r"/a\' ; touch /tmp/p ; \'/k.toml"), "konsensus grant --op ab12");
+        assert_eq!(with("konsensus grant --op ab12", &format!("/{}", "n".repeat(500))), "konsensus grant --op ab12");
         // Only the bare command of THIS request is extended.
         assert_eq!(with("konsensus grant --op cd34", "/n/konsensus.toml"), "konsensus grant --op cd34");
         assert_eq!(with("unavailable in this deployment", "/n/konsensus.toml"), "unavailable in this deployment");

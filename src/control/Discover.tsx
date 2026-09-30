@@ -27,7 +27,12 @@ const FRONT_DOOR_OWNER = 'front_door_owner:';
 export function frontDoorOwnerAsk(message: string | null): { text: string; command: string | null } | null {
   if (!message?.startsWith(FRONT_DOOR_OWNER)) return null;
   const text = message.slice(FRONT_DOOR_OWNER.length).trim();
-  const command = /konsensus grant --op [0-9a-f]{1,64}(?: --config (?:'(?:[^']|'\\'')*'|[\w/.+:@%,=-]+))?/.exec(text)?.[0] ?? null;
+  // A quoted config may hold spaces, but no quote, backslash, control or
+  // invisible formatting character (the node leaves such a path out), and it
+  // must end the word: never a truncated half of something longer.
+  const command =
+    /konsensus grant --op [0-9a-f]{1,64}(?: --config (?:'[^'\\\p{Cc}\u00AD\u061C\u180E\u200B-\u200F\u2028-\u202E\u2060-\u2069\uFEFF]*'|[\w/.+:@%,=-]+)(?=\s|$))?/u.exec(text)?.[0] ??
+    null;
   return { text, command };
 }
 
