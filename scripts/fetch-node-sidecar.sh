@@ -8,8 +8,12 @@
 # After publish, `gh release download` reaches it with any gh, a CI
 # repo-scoped GITHUB_TOKEN included. Nothing here publishes anything.
 #
-# Verification is fail-closed, in two steps:
-#   1. SHA256SUMS.asc must be ACCEPTED by verify_release_signature (below): gpg exits 0, a
+# Verification is fail-closed, in three steps:
+#   0. EXPECTED_TAG_SOURCE_SHA / EXPECTED_SHA256SUMS_SHA256 / EXPECTED_SHA256SUMS_ASC_SHA256
+#      must be filled (no REPLACE_ME_* prefix). Unfilled pins refuse before any download.
+#   1. After download, sha256 of SHA256SUMS and SHA256SUMS.asc must match those pins, and
+#      `git/ref/tags/$TAG` (peeled) must equal EXPECTED_TAG_SOURCE_SHA.
+#   2. SHA256SUMS.asc must be ACCEPTED by verify_release_signature (below): gpg exits 0, a
 #      GOODSIG is present, a VALIDSIG names the pinned release key ($KEY_FPR), and NONE of
 #      REVKEYSIG / EXPKEYSIG / EXPSIG / BADSIG / ERRSIG / KEYREVOKED / KEYEXPIRED / SIGEXPIRED /
 #      NO_PUBKEY appear. GnuPG emits VALIDSIG next to REVKEYSIG, EXPKEYSIG and EXPSIG too —
@@ -18,7 +22,7 @@
 #      If the pinned key is not in the caller's keyring, RELEASE_KEY.asc is fetched from the
 #      genome's main into a THROWAWAY keyring (under $TMP, removed on exit) and its
 #      fingerprint must equal the pin. The caller's keyring is never written to.
-#   2. The downloaded binary must match its line in the signed SHA256SUMS.
+#   3. The downloaded binary must match its line in the signed SHA256SUMS.
 #
 # Sourceable: `source scripts/fetch-node-sidecar.sh` defines the functions and fetches
 # nothing (main is guarded on BASH_SOURCE). scripts/test-fetch-verify.sh uses that to run
@@ -29,11 +33,11 @@ TAG="v0.3.0-rc8"
 REPO="MindLink-ApS/BitSov-bitsov"
 KEY_FPR="B299274C200301714DC6F51A7C2D6F8AC842EF6E"
 
-# Placeholders for the signed release trust bundle. Fill after genome v0.3.0-rc8
-# is tagged, CI has staged assets, and SHA256SUMS.asc is published. Verification
-# still uses the downloaded SHA256SUMS / .asc; these fields are operator
-# cross-checks for the pin PR that merges after publish.
-# shellcheck disable=SC2034
+# Pins for the signed release trust bundle. Fill after genome v0.3.0-rc8 is
+# tagged, CI has staged assets, and SHA256SUMS.asc is published. Until then
+# every value starts with REPLACE_ME_ and main() refuses to run (fail closed).
+# After fill: sha256 of the downloaded SHA256SUMS / .asc must match, and the
+# tag must resolve to EXPECTED_TAG_SOURCE_SHA.
 EXPECTED_TAG_SOURCE_SHA="REPLACE_ME_AFTER_TAG"
 EXPECTED_SHA256SUMS_SHA256="REPLACE_ME_AFTER_PUBLISH"
 EXPECTED_SHA256SUMS_ASC_SHA256="REPLACE_ME_AFTER_PUBLISH"
@@ -41,6 +45,42 @@ EXPECTED_SHA256SUMS_ASC_SHA256="REPLACE_ME_AFTER_PUBLISH"
 # GNU coreutils on Linux, perl shasum on macOS; same check either way.
 sha256_check() { if command -v sha256sum >/dev/null 2>&1; then sha256sum -c -; else shasum -a 256 -c -; fi; }
 sha256_of()    { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1"; else shasum -a 256 "$1"; fi | awk '{print $1}'; }
+
+# Refuse while any pin still starts with REPLACE_ME_ (unfilled DO-NOT-MERGE state).
+assert_pins_filled() {
+  local v
+  for v in EXPECTED_TAG_SOURCE_SHA EXPECTED_SHA256SUMS_SHA256 EXPECTED_SHA256SUMS_ASC_SHA256; do
+    case "${!v}" in
+      REPLACE_ME_*)
+        echo "FAIL: $v is a placeholder; fill it after rc8 publishes" >&2
+        return 1
+        ;;
+    esac
+  done
+  return 0
+}
+
+# Compare sha256_of <path> to an expected hex digest; exit 1 style return on mismatch.
+assert_sha256_eq() { # <path> <expected-hex> <label>
+  local path="$1" want="$2" label="$3" got
+  got="$(sha256_of "$path")"
+  if [ "$got" != "$want" ]; then
+    echo "FAIL: $label sha256 mismatch (got $got, expected $want)" >&2
+    return 1
+  fi
+  return 0
+}
+
+# Peel annotated (or lightweight) tag to the commit object SHA.
+resolve_tag_commit() { # <repo> <tag>
+  local repo="$1" tag="$2" typ sha
+  typ="$(gh api "repos/$repo/git/ref/tags/$tag" --jq .object.type)"
+  sha="$(gh api "repos/$repo/git/ref/tags/$tag" --jq .object.sha)"
+  if [ "$typ" = "tag" ]; then
+    sha="$(gh api "repos/$repo/git/tags/$sha" --jq .object.sha)"
+  fi
+  printf '%s\n' "$sha"
+}
 
 # verify_release_signature <detached.asc> <file> <pinned-fingerprint>
 #
@@ -84,7 +124,9 @@ verify_release_signature() {
 }
 
 main() {
-  local OS ARCH EXT ASSET TRIPLE SIDECAR imported
+  local OS ARCH EXT ASSET TRIPLE SIDECAR imported got_src
+  assert_pins_filled || exit 1
+
   OS="$(uname -s)"; ARCH="$(uname -m)"
   EXT=""   # sidecar filename suffix; Windows only
   case "$OS/$ARCH" in
@@ -103,6 +145,19 @@ main() {
   TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT   # TMP stays global: the trap runs after main returns
   echo "→ downloading $ASSET + trust bundle from $REPO@$TAG"
   gh release download "$TAG" --repo "$REPO" -p "$ASSET" -p "SHA256SUMS" -p "SHA256SUMS.asc" --dir "$TMP" --clobber
+
+  echo "→ checking pinned sha256 of SHA256SUMS and SHA256SUMS.asc"
+  assert_sha256_eq "$TMP/SHA256SUMS" "$EXPECTED_SHA256SUMS_SHA256" "SHA256SUMS" || exit 1
+  assert_sha256_eq "$TMP/SHA256SUMS.asc" "$EXPECTED_SHA256SUMS_ASC_SHA256" "SHA256SUMS.asc" || exit 1
+  echo "  ✓ trust-bundle digests match the pin"
+
+  echo "→ verifying tag $TAG resolves to pinned source SHA"
+  got_src="$(resolve_tag_commit "$REPO" "$TAG")"
+  if [ "$got_src" != "$EXPECTED_TAG_SOURCE_SHA" ]; then
+    echo "FAIL: tag $TAG resolves to $got_src, expected $EXPECTED_TAG_SOURCE_SHA" >&2
+    exit 1
+  fi
+  echo "  ✓ $TAG → $got_src"
 
   echo "→ verifying GPG signature (pinned release key $KEY_FPR)"
   if ! gpg --batch --list-keys "$KEY_FPR" >/dev/null 2>&1; then

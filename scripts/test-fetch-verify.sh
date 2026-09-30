@@ -88,6 +88,52 @@ S="$(gen_key "Test SigExpiry S <s@test.invalid>" 0 "$PAST")"
 sign "$S" "$T/file" "$T/expsig.asc" --faked-system-time "$PAST" --default-sig-expire 1d
 run_case "reject: expired signature (EXPSIG)" 1 'EXPSIG' "$T/expsig.asc" "$T/file" "$S"
 
+echo "== pin placeholders (fail closed) =="
+# Defaults from the sourced script are REPLACE_ME_*; refuse before any download.
+out=""; rc=0
+out="$(assert_pins_filled 2>&1)" || rc=$?
+check "refuse: unfilled EXPECTED_* placeholders" 1 'is a placeholder' "$rc" "$out"
+
+# One field still REPLACE_ME_ is enough to refuse.
+EXPECTED_TAG_SOURCE_SHA="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+EXPECTED_SHA256SUMS_SHA256="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+EXPECTED_SHA256SUMS_ASC_SHA256="REPLACE_ME_AFTER_PUBLISH"
+out=""; rc=0
+out="$(assert_pins_filled 2>&1)" || rc=$?
+check "refuse: one EXPECTED_* still REPLACE_ME_" 1 'EXPECTED_SHA256SUMS_ASC_SHA256 is a placeholder' "$rc" "$out"
+
+EXPECTED_SHA256SUMS_ASC_SHA256="cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+out=""; rc=0
+out="$(assert_pins_filled 2>&1)" || rc=$?
+check "accept: all EXPECTED_* filled" 0 '' "$rc" "$out"
+
+echo "== pin digest mismatch =="
+printf 'trust-bundle body\n' > "$T/sums"
+printf 'detached sig body\n' > "$T/sums.asc"
+good_sums="$(sha256_of "$T/sums")"
+good_asc="$(sha256_of "$T/sums.asc")"
+
+out=""; rc=0
+out="$(assert_sha256_eq "$T/sums" "$good_sums" "SHA256SUMS" 2>&1)" || rc=$?
+check "accept: SHA256SUMS digest matches pin" 0 '' "$rc" "$out"
+
+out=""; rc=0
+out="$(assert_sha256_eq "$T/sums" "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" "SHA256SUMS" 2>&1)" || rc=$?
+check "refuse: SHA256SUMS digest mismatch" 1 'SHA256SUMS sha256 mismatch' "$rc" "$out"
+
+out=""; rc=0
+out="$(assert_sha256_eq "$T/sums.asc" "$good_asc" "SHA256SUMS.asc" 2>&1)" || rc=$?
+check "accept: SHA256SUMS.asc digest matches pin" 0 '' "$rc" "$out"
+
+out=""; rc=0
+out="$(assert_sha256_eq "$T/sums.asc" "0000000000000000000000000000000000000000000000000000000000000000" "SHA256SUMS.asc" 2>&1)" || rc=$?
+check "refuse: SHA256SUMS.asc digest mismatch" 1 'SHA256SUMS.asc sha256 mismatch' "$rc" "$out"
+
+# Restore placeholders so a later sourced main() in the same shell still refuses.
+EXPECTED_TAG_SOURCE_SHA="REPLACE_ME_AFTER_TAG"
+EXPECTED_SHA256SUMS_SHA256="REPLACE_ME_AFTER_PUBLISH"
+EXPECTED_SHA256SUMS_ASC_SHA256="REPLACE_ME_AFTER_PUBLISH"
+
 echo
 total=$((pass + fail))
 if [ "$fail" -eq 0 ]; then
