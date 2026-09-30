@@ -387,8 +387,19 @@ fn payments_counts_keeps_the_count_of_entries_only() {
 // ---- providers -----------------------------------------------------------------
 
 #[test]
+fn own_model_name_shows_on_local_without_enabling_remotes() {
+    let (views, remotes) = providers(None, Some("llama3.2"));
+    assert_eq!(views[0].kind, ProviderKind::Local);
+    assert_eq!(views[0].model.as_deref(), Some("llama3.2"));
+    assert_eq!(views[0].pays, Pays::NOBODY);
+    assert!(views[0].data_leaves.is_none());
+    assert!(remotes.is_empty());
+    assert!(views.iter().skip(1).all(|v| !v.enabled));
+}
+
+#[test]
 fn only_local_is_on_without_a_settings_file() {
-    let (views, remotes) = providers(None);
+    let (views, remotes) = providers(None, None);
     assert!(remotes.is_empty());
     assert_eq!(views.len(), 3);
     assert_eq!(views[0].kind, ProviderKind::Local);
@@ -407,7 +418,7 @@ fn a_remote_turns_on_only_when_enabled_with_https_and_a_variable_name() {
     };
     let on = |shared: RemoteConfig| {
         let file = ProvidersFile { shared: Some(shared), frontier: None };
-        providers(Some(&file))
+        providers(Some(&file), None)
     };
     let (views, remotes) = on(entry("https://ai.example.org/v1/chat/completions", true, Some("BITSOV_SHARED_KEY")));
     assert!(views[1].enabled);
@@ -442,7 +453,7 @@ fn the_badge_says_who_is_paid_and_what_leaves() {
         enabled,
     };
     // Local, and remotes that are not set up: nobody is paid, nothing leaves.
-    let (views, _) = providers(None);
+    let (views, _) = providers(None, None);
     for view in &views {
         assert_eq!(view.pays, Pays { to: None, rail: PayRail::None }, "{:?}", view.kind);
         assert_eq!(view.data_leaves, None, "{:?}", view.kind);
@@ -452,7 +463,7 @@ fn the_badge_says_who_is_paid_and_what_leaves() {
         shared: Some(entry("http://127.0.0.1:11434/v1/chat/completions", true, None)),
         frontier: Some(entry("https://api.vendor.example/v1/chat/completions", true, Some("BITSOV_FRONTIER_KEY"))),
     };
-    let (views, _) = providers(Some(&file));
+    let (views, _) = providers(Some(&file), None);
     // A keyless model server: nobody is billed, but the preview still leaves the app.
     assert_eq!(views[1].kind, ProviderKind::Shared);
     assert_eq!(views[1].pays, Pays { to: None, rail: PayRail::None });
@@ -475,7 +486,7 @@ fn the_badge_says_who_is_paid_and_what_leaves() {
             shared: None,
             frontier: Some(entry(endpoint, enabled, Some("BITSOV_FRONTIER_KEY"))),
         };
-        let (views, _) = providers(Some(&file));
+        let (views, _) = providers(Some(&file), None);
         assert!(!views[2].enabled);
         assert_eq!(views[2].pays, Pays { to: None, rail: PayRail::None }, "{endpoint}");
         assert_eq!(views[2].data_leaves, None, "{endpoint}");
@@ -494,7 +505,7 @@ fn the_provider_view_carries_no_endpoint_path_key_or_spend() {
         }),
         frontier: None,
     };
-    let (views, _) = providers(Some(&file));
+    let (views, _) = providers(Some(&file), None);
     let value = serde_json::to_value(&views).unwrap();
     let text = value.to_string();
     assert!(!text.contains("secret/path"), "{text}");

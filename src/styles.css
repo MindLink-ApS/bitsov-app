@@ -399,6 +399,13 @@ select { font: inherit; font-size: var(--t-sm); background: var(--sunk); color: 
 .ai-provider[aria-checked='true'][data-tier='frontier'] .meta { color: var(--badge-frontier-ink); }
 .track-head .sub:has(.endpoint-badge) { white-space: normal; overflow: visible; }
 .ai-provider:disabled { opacity: 0.55; cursor: not-allowed; }
+.ai-own { padding: var(--s-2) var(--s-6) 0; display: flex; flex-direction: column; gap: var(--s-2); }
+.ai-own .hint { margin: 0; color: var(--muted); font-size: var(--t-sm); max-width: 42rem; }
+.ai-own-row { display: flex; flex-wrap: wrap; gap: var(--s-2); align-items: flex-end; }
+.ai-own-port { display: flex; flex-direction: column; gap: 2px; font-size: var(--t-xs); color: var(--faint); }
+.ai-own-port input { width: 5.5rem; font-family: var(--font-mono); font-size: var(--t-sm); padding: 4px 8px; border: 1px solid var(--line); border-radius: var(--r-chip); background: var(--surface); color: var(--ink); }
+.ai-own-models { display: flex; flex-wrap: wrap; gap: var(--s-2); }
+.ai-own-models .chip[aria-selected='true'] { border-color: var(--badge-own-ink); color: var(--badge-own-ink); }
 .ai-answer { align-self: flex-start; max-width: min(620px, 88%); display: flex; flex-direction: column; gap: var(--s-2); animation: arrive var(--d-mid) var(--ease); }
 .ai-answer > .bubble { border-bottom-left-radius: 4px; }
 .ai-thinking { display: inline-flex; align-items: center; gap: var(--s-2); color: var(--muted); }
@@ -583,6 +590,9 @@ button.small:not(.primary) { font-size: var(--t-xs); padding: 4px 10px; backgrou
 .front-door-card .prices div { display: grid; gap: 2px; }
 .front-door-card .prices dt { font-size: var(--t-sm); color: var(--muted); }
 .front-door-card .prices dd { margin: 0; font-variant-numeric: tabular-nums; }
+.front-door-card .fd-links { list-style: none; padding: 0; margin: 0; display: grid; gap: var(--s-2); }
+.front-door-card .fd-links li { display: flex; flex-wrap: wrap; gap: var(--s-2); align-items: baseline; }
+.fd-preview { margin-top: var(--s-5); padding-top: var(--s-4); border-top: 1px solid var(--line); }
 .media-strip { display: flex; gap: var(--s-3); overflow-x: auto; }
 .media-strip figure { margin: 0; flex: none; width: 72px; }
 .media-strip img, .media-strip .thumb-ph { display: block; width: 72px; height: 72px; object-fit: cover; background: var(--surface); font-size: 10px; }

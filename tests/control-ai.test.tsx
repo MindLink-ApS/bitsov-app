@@ -343,6 +343,24 @@ function stubHost(overrides: Record<string, Reply> = {}) {
     }),
     ai_cancel: () => true,
     ai_send: () => ({ provider: 'shared', label: 'Shared open model', host: 'models.example.org', model: 'open-8b', text: '<img src=x onerror=alert(1)> You spent 3 sats.', sent_bytes: BODY.length }),
+    ai_local_status: () => ({
+      running: false,
+      kind: null,
+      port: null,
+      models: [],
+      selected: null,
+      selected_port: null,
+      howto:
+        'Start Ollama (`ollama serve`) or a llama.cpp server on this computer (listening on 127.0.0.1, usually port 11434 or 8080). Then pick a model here. BitSov does not download or install models; nothing leaves this computer.',
+    }),
+    ai_local_select: () => {
+      throw new Error('Start Ollama (`ollama serve`) or a llama.cpp server on this computer.');
+    },
+    ai_local_clear: () => [
+      { kind: 'local', label: 'On this computer', enabled: true, host: null, model: null, note: null, pays: { to: null, rail: 'none' }, data_leaves: null },
+      { kind: 'shared', label: 'Shared open model', enabled: true, host: 'models.example.org', model: 'open-8b', note: null, pays: { to: 'models.example.org', rail: 'fiat' }, data_leaves: 'counts' },
+      { kind: 'frontier', label: 'Frontier model', enabled: false, host: null, model: null, note: 'Off. Not set up on this computer.', pays: { to: null, rail: 'none' }, data_leaves: null },
+    ],
     live_link: () => null,
     'plugin:event|listen': () => 1,
     'plugin:event|unlisten': () => null,
@@ -695,5 +713,163 @@ describe('the AI track', () => {
     await vi.waitFor(() => expect($('[data-ai-answer="remote"]')).not.toBeNull(), { timeout: 3000 });
     expect(text('[data-ai-answer="remote"]')).toContain('nothing left this computer');
     expect(text('[data-ai-source="remote"]')).toContain('sample, nothing sent');
+  });
+
+  it('Own: saved model is unavailable on the badge when the server is down', async () => {
+    const host = stubHost({
+      ai_local_status: () => ({
+        running: false,
+        kind: null,
+        port: null,
+        models: [],
+        selected: 'tiny-local',
+        selected_port: 11434,
+        howto:
+          'Start Ollama (`ollama serve`) or a llama.cpp server on this computer (listening on 127.0.0.1, usually port 11434 or 8080). Then pick a model here. BitSov does not download or install models; nothing leaves this computer.',
+      }),
+      ai_providers: () => [
+        {
+          kind: 'local',
+          label: 'On this computer',
+          enabled: true,
+          host: null,
+          model: null,
+          note: 'Local model "tiny-local" is unavailable. Start Ollama or llama.cpp on this computer, then Refresh.',
+          pays: { to: null, rail: 'none' },
+          data_leaves: null,
+        },
+        {
+          kind: 'shared',
+          label: 'Shared open model',
+          enabled: false,
+          host: null,
+          model: null,
+          note: 'Off. Not set up on this computer.',
+          pays: { to: null, rail: 'none' },
+          data_leaves: null,
+        },
+        {
+          kind: 'frontier',
+          label: 'Frontier model',
+          enabled: false,
+          host: null,
+          model: null,
+          note: 'Off. Not set up on this computer.',
+          pays: { to: null, rail: 'none' },
+          data_leaves: null,
+        },
+      ],
+    });
+    await openAi();
+    await vi.waitFor(() => expect($('[data-ai-own-howto]')).not.toBeNull());
+    await vi.waitFor(() => expect(text('.endpoint-badge')).toContain('rules'));
+    expect(text('.endpoint-badge')).not.toContain('tiny-local');
+    expect(text('[data-provider="local"] .meta')).toContain('nothing leaves');
+    expect(host.used('ai_providers').length).toBeGreaterThan(0);
+  });
+
+  it('Own: shows a how-to when no local model server is running', async () => {
+    const host = stubHost();
+    await openAi();
+    await vi.waitFor(() => expect($('[data-ai-own-howto]')).not.toBeNull());
+    expect(text('[data-ai-own-howto]')).toContain('ollama serve');
+    expect(text('[data-ai-own-howto]')).toContain('127.0.0.1');
+    expect(text('[data-ai-own-howto]')).not.toMatch(/https?:\/\//);
+    expect(host.used('ai_local_status').length).toBeGreaterThan(0);
+    expect(text('.endpoint-badge')).toContain('Own');
+    expect(text('.endpoint-badge')).toContain('rules');
+  });
+
+  it('Own: picks a loopback model, badges Own, and discloses before send', async () => {
+    let selected: string | null = null;
+    const ownProviders = () => [
+      {
+        kind: 'local' as const,
+        label: 'On this computer',
+        enabled: true,
+        host: null,
+        model: selected,
+        note: null,
+        pays: { to: null, rail: 'none' as const },
+        data_leaves: null,
+      },
+      {
+        kind: 'shared' as const,
+        label: 'Shared open model',
+        enabled: false,
+        host: null,
+        model: null,
+        note: 'Off. Not set up on this computer.',
+        pays: { to: null, rail: 'none' as const },
+        data_leaves: null,
+      },
+      {
+        kind: 'frontier' as const,
+        label: 'Frontier model',
+        enabled: false,
+        host: null,
+        model: null,
+        note: 'Off. Not set up on this computer.',
+        pays: { to: null, rail: 'none' as const },
+        data_leaves: null,
+      },
+    ];
+    const host = stubHost({
+      ai_local_status: () => ({
+        running: true,
+        kind: 'ollama',
+        port: 11434,
+        models: ['tiny-local', 'other'],
+        selected,
+        selected_port: selected ? 11434 : null,
+        howto: 'unused when running',
+      }),
+      ai_providers: () => ownProviders(),
+      ai_local_select: (args) => {
+        selected = String(args!.model);
+        return ownProviders();
+      },
+      ai_disclose: (args) => ({
+        id: `d-own`,
+        provider: 'local',
+        label: 'On this computer',
+        host: '127.0.0.1',
+        model: 'tiny-local',
+        preset: args!.preset,
+        body: BODY,
+        bytes: BODY.length,
+        key_env: null,
+        expires_in_ms: 300_000,
+      }),
+      ai_send: () => ({
+        provider: 'local',
+        label: 'On this computer',
+        host: '127.0.0.1',
+        model: 'tiny-local',
+        text: 'Your local model says you spent nothing notable.',
+        sent_bytes: BODY.length,
+      }),
+    });
+    await openAi();
+    await vi.waitFor(() => expect($('[data-ai-own-model="tiny-local"]')).not.toBeNull());
+    expect(text('[data-ai-own-found]')).toContain('Ollama');
+    click('[data-ai-own-model="tiny-local"]');
+    await vi.waitFor(() => expect(text('[data-provider="local"] .meta')).toContain('tiny-local'));
+    await vi.waitFor(() => expect(text('.endpoint-badge')).toContain('tiny-local'));
+    expect(text('.endpoint-badge')).toContain('Nobody is paid');
+    expect(text('.endpoint-badge')).toContain('Nothing leaves');
+    ask('What did I spend this week?');
+    await vi.waitFor(() => expect($('[data-ai-send]')).not.toBeNull());
+    expect(host.used('ai_disclose')).toHaveLength(1);
+    expect(host.used('ai_disclose')[0]?.args).toMatchObject({ provider: 'local' });
+    expect(host.used('ai_send')).toHaveLength(0);
+    click('[data-ai-send]');
+    await vi.waitFor(() => expect($('[data-ai-answer="own"]')).not.toBeNull());
+    expect(text('[data-ai-answer="own"]')).toContain('local model says');
+    expect(text('[data-ai-source="own"]')).toContain('Nobody is paid');
+    expect(text('[data-ai-source="own"]')).toContain('did not check');
+    expect($('[data-ai-sent]')).not.toBeNull();
+    expect(host.used('ai_send')).toHaveLength(1);
+    expect(host.used('ai_local_select')[0]?.args).toMatchObject({ model: 'tiny-local' });
   });
 });

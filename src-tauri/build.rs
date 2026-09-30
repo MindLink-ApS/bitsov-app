@@ -33,6 +33,7 @@ fn main() {
             "front_door_read",
             "front_door_open",
             "front_door_publish",
+            "front_door_hash_bytes",
             "sponsor_status",
             "sponsor_offer",
             "sponsor_candidate",
@@ -76,6 +77,9 @@ fn main() {
             "ai_disclose",
             "ai_send",
             "ai_cancel",
+            "ai_local_status",
+            "ai_local_select",
+            "ai_local_clear",
         ])
         .permissions_path_pattern("./permissions/manual/**/*");
 

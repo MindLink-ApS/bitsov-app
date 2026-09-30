@@ -48,7 +48,7 @@ const MAX_PENDING: usize = 8;
 /// A remote answer is cut to this many characters.
 pub const MAX_ANSWER_CHARS: usize = 4000;
 /// A remote answer body larger than this is refused unread.
-const MAX_REMOTE_BYTES: usize = 256 * 1024;
+pub(crate) const MAX_REMOTE_BYTES: usize = 256 * 1024;
 const REMOTE_TIMEOUT: Duration = Duration::from_secs(60);
 
 // ---- topics ------------------------------------------------------------------
@@ -506,13 +506,20 @@ const DEFAULT_LABELS: [(ProviderKind, &str); 2] = [
 
 /// Every provider, local first. Remote ones are off unless the file enables
 /// them with a valid endpoint. A missing or unreadable file means local only.
-pub fn providers(file: Option<&ProvidersFile>) -> (Vec<ProviderView>, Vec<Remote>) {
+///
+/// `own_model` is the owner's picked loopback model (Own tier). It never
+/// becomes a remote provider: chat stays on loopback via [`local::ask`], the
+/// badge stays Own, and nothing is paid.
+pub fn providers(
+    file: Option<&ProvidersFile>,
+    own_model: Option<&str>,
+) -> (Vec<ProviderView>, Vec<Remote>) {
     let mut views = vec![ProviderView {
         kind: ProviderKind::Local,
         label: "On this computer".into(),
         enabled: true,
         host: None,
-        model: None,
+        model: own_model.and_then(|name| short(name, 80)),
         note: None,
         pays: Pays::NOBODY,
         data_leaves: None,
@@ -583,7 +590,7 @@ fn valid_env_name(name: &str) -> bool {
         && name.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
 }
 
-fn short(text: &str, max: usize) -> Option<String> {
+pub fn short(text: &str, max: usize) -> Option<String> {
     let clean: String = text.chars().filter(|c| !c.is_control()).take(max).collect();
     let clean = clean.trim().to_string();
     (!clean.is_empty()).then_some(clean)
@@ -827,6 +834,8 @@ pub async fn send(remote: &Remote, body: String, key: Option<String>) -> Result<
         sent_bytes,
     })
 }
+
+pub mod local;
 
 #[cfg(test)]
 mod tests;
