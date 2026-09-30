@@ -36,6 +36,9 @@ hex = "0.4"
 tempfile = "3"
 base64 = "0.22"
 rfd = "0.15"
+# Decode BOLT 11 invoices exactly as the node's payment path does (genome
+# dac01c8 locks lightning-invoice 0.34.1 via ldk-node 0.7.0). Keep in lockstep.
+lightning-invoice = "=0.34.1"
 
 # GATE G1 (docs/ARCHITECTURE_BOUNDARY.md): NO konsensus-* dependency here — the node
 # is a bundled BINARY (see tauri.conf.json `externalBin`), never a linked crate. A

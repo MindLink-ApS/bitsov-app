@@ -1,5 +1,5 @@
 import { MONEY_NOT_READY, readinessLine, readinessSource } from './readiness';
-import { createEffect, createMemo, createSignal, For, type JSX, Match, on, onCleanup, onMount, Show, Switch, untrack } from 'solid-js';
+import { createEffect, createMemo, createResource, createSignal, For, type JSX, Match, on, onCleanup, onMount, Show, Switch, untrack } from 'solid-js';
 import { createStore, produce } from 'solid-js/store';
 import { qrSvg } from '../qr';
 import type { Proposal } from './ai';
@@ -11,8 +11,9 @@ import { DiscoverPanel, FrontDoorEditor } from './Discover';
 import { callCost, createCallEngine, IDLE as CALL_IDLE, isCallKind, signalCost, stunServer, type CallMedia, type CallView } from './call';
 import { blobUrl, duration, FILE_MAX_BYTES, fileNameOf, isVoiceNote, type Recording, startRecording, VOICE_MAX_MS } from './voice';
 import { EMOJIS, insertEmoji } from './emoji';
+import { cleanPurpose, hostReadProblem, invoicePaymentHash, NOT_PAYABLE_NOTE, type NotPayable, payeeView, readChatInvoice } from './bolt11';
 import { safeImageMime, looksLikeSafeImageName, dataImageUrl } from './frontDoorMedia';
-import type { FileSaveResult, VoiceBlob } from './types';
+import type { FileSaveResult, InvoiceAmount, InvoiceView, VoiceBlob } from './types';
 import {
   doorCard,
   gateWords,
@@ -161,7 +162,8 @@ export type Actions = {
   ownerCancel: (id: string) => Promise<void>;
   /** Create an invoice for an exact msat amount (never rounded here). */
   invoice: (t: TrackRef, msat: number, note: string) => Promise<Outcome<unknown>>;
-  amountOf: (bolt11: string) => Promise<Outcome<number>>;
+  /** The host's read-only decode of an invoice: the only payee and amount shown. */
+  readInvoice: (bolt11: string) => Promise<Outcome<InvoiceAmount>>;
   pay: (t: TrackRef, bolt11: string, msat: number) => Promise<Outcome<unknown>>;
   keysend: (t: TrackRef, pubkey: string, msat: number, memo: string) => Promise<Outcome<unknown>>;
   file: (t: TrackRef, file: File, maxMsat: number, firstContactMsat?: number) => Promise<Outcome<unknown>>;
@@ -782,15 +784,12 @@ export function ControlCenter(props: Props) {
       if (r.ok) addArtifact(t, { type: 'invoice', invoice: r.value });
       return r;
     },
-    amountOf: async (bolt11) => {
-      const r = await act(() => source.invoiceAmount(bolt11));
-      return r.ok ? { ok: true, value: r.value.amount_msat } : r;
-    },
+    readInvoice: (bolt11) => act(() => source.invoiceAmount(bolt11)),
     pay: async (t, bolt11, msat) => {
       const r = await act(() => source.pay(bolt11, msat, allIn(msat)));
       void loadBudget();
       if (r.ok) {
-        addArtifact(t, { type: 'payment', receipt: r.value, at: r.value.paid_at_ms });
+        addArtifact(t, { type: 'payment', receipt: r.value, invoice: bolt11, at: r.value.paid_at_ms });
         void loadWallet();
       }
       return recordFailure(t, 'Payment not sent', r);
@@ -948,6 +947,7 @@ export function ControlCenter(props: Props) {
                     paid={paid}
                     allowances={allowances}
                     ownId={ownId()}
+                    homeNetwork={overview()?.network ?? null}
                     nameOf={nameOf}
                     quote={quote()}
                     roomQuote={roomQuote()}
@@ -1371,6 +1371,8 @@ function Conversation(props: {
   paid: Record<string, number>;
   allowances: Record<string, { total_msat: number; max_routing_fee_msat: number }>;
   ownId: string;
+  /** This node's Bitcoin network, when the host knows it. */
+  homeNetwork: string | null;
   nameOf: (id: string) => string;
   quote: PriceQuote | null;
   roomQuote: RoomQuote | null;
@@ -1387,6 +1389,20 @@ function Conversation(props: {
   onContext: () => void;
 }) {
   let stream: HTMLDivElement | undefined;
+  // A request card's Pay: hands the invoice to the composer's Pay review. Never pays.
+  const [payRequest, setPayRequest] = createSignal<{ seq: number; bolt11: string } | null>(null);
+  let payRequestSeq = 0;
+  // Invoice payments made in this thread, by payment hash: a card they paid shows it.
+  // Only this session's records; after a restart the node's duplicate refusal remains.
+  const paidInvoices = createMemo(() => {
+    const out = new Map<string, PaymentStatus>();
+    for (const a of props.artifacts) {
+      if (a.type !== 'payment' || !a.invoice) continue;
+      const hash = invoicePaymentHash(a.invoice);
+      if (hash && out.get(hash) !== 'settled') out.set(hash, a.receipt.status);
+    }
+    return out;
+  });
   const cost = () =>
     costToSend(props.track, props.quote, {
       name: props.track.kind === 'peer' ? `${props.name}’s` : undefined,
@@ -1481,6 +1497,12 @@ function Conversation(props: {
                         paid={props.paid[m().id]}
                         allowance={props.allowances[m().id]}
                         nameOf={props.nameOf}
+                        now={props.now}
+                        homeNetwork={props.homeNetwork}
+                        moneyBlocked={props.moneyBlocked}
+                        onPay={props.track.kind === 'peer' ? (bolt11) => setPayRequest({ seq: ++payRequestSeq, bolt11 }) : undefined}
+                        readInvoice={props.track.kind === 'peer' ? props.actions.readInvoice : undefined}
+                        paidInvoices={paidInvoices()}
                         voiceUrl={props.actions.voiceUrl}
                         fileFetch={props.actions.fileFetch}
                         fileSave={props.actions.fileSave}
@@ -1520,8 +1542,68 @@ function Conversation(props: {
         now={props.now}
         prefill={props.prefill}
         onPrefillUsed={props.onPrefillUsed}
+        payRequest={payRequest()}
       />
     </>
+  );
+}
+
+/**
+ * A contact's Lightning node id, when the app knows it. The node keeps one
+ * per connected peer for its own keysend but exposes none (GET /peers has no
+ * such field), so today no invoice payee is ever named as a contact.
+ */
+const contactLightningId = (_peer: string): string | null => null;
+
+/**
+ * Payee line: never asserts that the chat contact owns the invoice. An
+ * invoice's payee is only ever the host's decode (`InvoiceAmount.payee`).
+ */
+function PayeeLine(props: { payee: string; peer: string; name: string }) {
+  const v = () => payeeView(props.payee, contactLightningId(props.peer), props.name);
+  return (
+    <span class="payee" classList={{ unverified: !v().verified }} data-payee={v().verified ? 'verified' : 'unverified'} title={props.payee}>
+      {v().verified ? `Pays ${v().text}’s Lightning node.` : `Pays ${v().text}.`}
+    </span>
+  );
+}
+
+/**
+ * A received message whose whole body is a payable invoice. Display only:
+ * Pay opens the composer's amount-first review, and only its confirm pays.
+ */
+type PaymentStatus = Extract<Artifact, { type: 'payment' }>['receipt']['status'];
+
+function RequestCard(props: { inv: InvoiceAmount; peer: string; name: string; blocked: boolean; paid?: PaymentStatus; onPay: (bolt11: string) => void }) {
+  // A failed attempt may be tried again; a settled or unresolved one may not.
+  const done = () => (props.paid && props.paid !== 'failed' ? props.paid : null);
+  const purpose = () => (props.inv.description === null ? null : cleanPurpose(props.inv.description));
+  return (
+    <div class="request-card" data-request-card data-request-msat={props.inv.amount_msat} data-request-status={done() ?? 'open'}>
+      <span class="kind">Payment request from {props.name}</span>
+      <span class="sats big">{sats(props.inv.amount_msat)} <span class="unit">{satUnit(props.inv.amount_msat)}</span></span>
+      <Show when={purpose()} fallback={<span class="hint">No purpose given</span>}>
+        <span class="purpose" data-request-purpose>For: {purpose()}</span>
+      </Show>
+      <PayeeLine payee={props.inv.payee} peer={props.peer} name={props.name} />
+      <Show
+        when={done()}
+        fallback={
+          <>
+            <span class="hint">Expires at {clock(props.inv.expires_at_ms)}. Nothing is paid until you confirm.</span>
+            <button type="button" class="primary" data-request-pay disabled={props.blocked} onClick={() => props.onPay(props.inv.bolt11)}>
+              Pay
+            </button>
+          </>
+        }
+      >
+        {(status) => (
+          <span class="request-paid" data-request-paid={status()}>
+            {status() === 'settled' ? 'Paid. You paid this invoice.' : 'Payment in progress. Check its receipt below before trying again.'}
+          </span>
+        )}
+      </Show>
+    </div>
   );
 }
 
@@ -1534,36 +1616,88 @@ function MessageView(props: {
   paid: number | undefined;
   allowance?: { total_msat: number; max_routing_fee_msat: number; readmission_msat?: number };
   nameOf: (id: string) => string;
+  now?: number;
+  homeNetwork?: string | null;
+  moneyBlocked?: boolean;
+  /** Present in a peer thread: a received invoice may be paid from its card. */
+  onPay?: (bolt11: string) => void;
+  /** The host's decode; a card shows only what it returns. */
+  readInvoice?: (bolt11: string) => Promise<Outcome<InvoiceAmount>>;
+  /** This thread's invoice payments by payment hash. */
+  paidInvoices?: Map<string, PaymentStatus>;
   voiceUrl?: (messageId: string) => Promise<string>;
   fileFetch?: (messageId: string) => Promise<VoiceBlob>;
   fileSave?: (messageId: string) => Promise<FileSaveResult>;
 }) {
   const amount = () => props.allowance?.total_msat ?? props.paid ?? props.m.payment_amount_msat;
+  // Only a received chat message in a peer thread can be a request card.
+  const request = createMemo(() =>
+    props.out || props.room || !props.onPay || props.m.kind === 200
+      ? null
+      : readChatInvoice(props.m.plaintext, props.now ?? Date.now(), props.homeNetwork ?? null),
+  );
+  // The shape filter passed: ask the host. Nothing is shown as payable until it answers.
+  const [hostRead] = createResource(
+    () => {
+      const r = request();
+      return r?.ok && props.readInvoice ? r.invoice.bolt11 : null;
+    },
+    (bolt11) => props.readInvoice!(bolt11),
+  );
+  const hostVerdict = (): { ok: true; inv: InvoiceAmount } | { ok: false; reason: NotPayable } | null => {
+    const r = request();
+    if (!r?.ok) return null;
+    const read = hostRead.loading ? undefined : hostRead();
+    if (read === undefined) return null;
+    if (!read.ok) return { ok: false, reason: 'invalid' };
+    const problem = hostReadProblem(read.value, props.now ?? Date.now(), props.homeNetwork ?? null);
+    return problem ? { ok: false, reason: problem } : { ok: true, inv: read.value };
+  };
+  const payable = () => {
+    const v = hostVerdict();
+    return v?.ok ? v.inv : null;
+  };
+  const notPayable = () => {
+    const r = request();
+    if (r && !r.ok) return r.reason;
+    const v = hostVerdict();
+    return v && !v.ok ? v.reason : null;
+  };
   return (
     <article class={`msg ${props.out ? 'out' : 'in'}`} classList={{ fresh: props.fresh }} data-message={props.m.id}>
       <Show when={!props.out && props.room}>
         <span class="who">{props.nameOf(props.m.sender)}</span>
       </Show>
-      <div class="bubble" classList={{ file: props.m.kind === 200 }} data-kind={props.m.kind}>
-        <Show when={props.m.kind === 200} fallback={props.m.plaintext ?? 'Encrypted content not available on this device'}>
-          <Show
-            when={!props.out && props.fileFetch && props.fileSave}
-            fallback={
-              <Show when={props.voiceUrl && isVoiceNote(props.m.kind, props.m.plaintext)} fallback={<span class="file-name">{props.m.plaintext ?? 'File'}</span>}>
-                <VoiceNote id={props.m.id} name={fileNameOf(props.m.plaintext) ?? 'file'} load={props.voiceUrl!} />
+      <Show
+        when={payable()}
+        fallback={
+          <div class="bubble" classList={{ file: props.m.kind === 200 }} data-kind={props.m.kind}>
+            <Show when={props.m.kind === 200} fallback={props.m.plaintext ?? 'Encrypted content not available on this device'}>
+              <Show
+                when={!props.out && props.fileFetch && props.fileSave}
+                fallback={
+                  <Show when={props.voiceUrl && isVoiceNote(props.m.kind, props.m.plaintext)} fallback={<span class="file-name">{props.m.plaintext ?? 'File'}</span>}>
+                    <VoiceNote id={props.m.id} name={fileNameOf(props.m.plaintext) ?? 'file'} load={props.voiceUrl!} />
+                  </Show>
+                }
+              >
+                <ReceivedFile
+                  id={props.m.id}
+                  name={fileNameOf(props.m.plaintext) ?? 'file'}
+                  voice={isVoiceNote(props.m.kind, props.m.plaintext) ? props.voiceUrl : undefined}
+                  loadFile={props.fileFetch!}
+                  save={props.fileSave!}
+                />
               </Show>
-            }
-          >
-            <ReceivedFile
-              id={props.m.id}
-              name={fileNameOf(props.m.plaintext) ?? 'file'}
-              voice={isVoiceNote(props.m.kind, props.m.plaintext) ? props.voiceUrl : undefined}
-              loadFile={props.fileFetch!}
-              save={props.fileSave!}
-            />
-          </Show>
-        </Show>
-      </div>
+            </Show>
+          </div>
+        }
+      >
+        {(inv) => <RequestCard inv={inv()} peer={props.m.sender} name={props.nameOf(props.m.sender)} blocked={!!props.moneyBlocked} paid={props.paidInvoices?.get(inv().payment_hash)} onPay={props.onPay!} />}
+      </Show>
+      <Show when={notPayable()}>
+        {(reason) => <p class="hint request-note" data-request-plain={reason()}>{NOT_PAYABLE_NOTE[reason()]}</p>}
+      </Show>
       <div class="stamp">
         <Show when={amount()}>
           <Bolt />
@@ -2153,8 +2287,11 @@ function AmountField(props: { data: 'pay' | 'request'; label: string; value: str
 }
 
 type Mode = 'message' | 'pay' | 'request' | 'file';
+/** An invoice review: only the host's decode, paid as its canonical string. */
+const invoiceReview = (read: InvoiceAmount): PayReview => ({ kind: 'invoice', bolt11: read.bolt11, msat: read.amount_msat, payee: read.payee });
+
 type PayReview =
-  | { kind: 'invoice'; bolt11: string; msat: number }
+  | { kind: 'invoice'; bolt11: string; msat: number; payee: string }
   | { kind: 'keysend'; pubkey: string; msat: number; memo: string };
 
 function Composer(props: {
@@ -2174,6 +2311,8 @@ function Composer(props: {
   now: number;
   prefill?: Prefill | null;
   onPrefillUsed?: () => void;
+  /** A request card's Pay: prefill this invoice and show its review. Never pays. */
+  payRequest?: { seq: number; bolt11: string } | null;
 }) {
   const [mode, setMode] = createSignal<Mode>('message');
   // B2: the owner's pick of starting preset, and of a first contact's budget.
@@ -2186,7 +2325,9 @@ function Composer(props: {
   // pay
   const [payKind, setPayKind] = createSignal<'invoice' | 'keysend'>('invoice');
   const [bolt11, setBolt11] = createSignal('');
-  const [invoiceMsat, setInvoiceMsat] = createSignal<number | null>(null);
+  // The host's decode of the pasted invoice: its amount, payee and canonical form.
+  const [invoiceRead, setInvoiceRead] = createSignal<InvoiceAmount | null>(null);
+  const invoiceMsat = () => invoiceRead()?.amount_msat ?? null;
   const [pubkey, setPubkey] = createSignal('');
   const [amount, setAmount] = createSignal('');
   const [memo, setMemo] = createSignal('');
@@ -2200,6 +2341,10 @@ function Composer(props: {
   // until its own button is pressed.
   const [review, setReview] = createSignal<PayReview | null>(null);
   const [paying, setPaying] = createSignal(false);
+  // The invoice a request card handed over: its review opens once its amount is read.
+  let reviewWhenRead: string | null = null;
+  // The invoice just created here, offered to send in chat as an ordinary message.
+  const [created, setCreated] = createSignal<InvoiceView | null>(null);
   // file
   const [file, setFile] = createSignal<File | null>(null);
   let fileInput: HTMLInputElement | undefined;
@@ -2355,7 +2500,9 @@ function Composer(props: {
         setFile(null);
         if (fileInput) fileInput.value = '';
         setBolt11('');
-        setInvoiceMsat(null);
+        setInvoiceRead(null);
+        reviewWhenRead = null;
+        setCreated(null);
         setPubkey('');
         setAmount('');
         setMemo('');
@@ -2376,7 +2523,7 @@ function Composer(props: {
       },
     ),
   );
-  createEffect(on([mode, payKind, bolt11, invoiceMsat, pubkey, amount, memo, denom, () => trackKey(props.track)], () => setReview(null), { defer: true }));
+  createEffect(on([mode, payKind, bolt11, invoiceRead, pubkey, amount, memo, denom, () => trackKey(props.track)], () => setReview(null), { defer: true }));
   // A draft from the AI track: fill this composer once. Sending is still the
   // owner's press, with the cost shown and the spend approval unchanged.
   createEffect(
@@ -2406,6 +2553,28 @@ function Composer(props: {
     ),
   );
 
+  // A request card's Pay: the Pay composer with that invoice. Its review opens
+  // when the host has read the amount; paying is still the review's confirm.
+  createEffect(
+    on(
+      () => props.payRequest?.seq,
+      () => {
+        const p = props.payRequest;
+        if (!p || room()) return;
+        cancelOwner();
+        composerRevision++;
+        setNote(null);
+        setMode('pay');
+        setPayKind('invoice');
+        reviewWhenRead = p.bolt11;
+        // Re-set even when unchanged, so the amount is read (and reviewed) again.
+        setBolt11('');
+        setBolt11(p.bolt11);
+      },
+      { defer: true },
+    ),
+  );
+
   const line = () => spendLine(props.spend, props.now);
   const spends = () => mode() !== 'request';
   const target = () => (props.track as { id: string }).id;
@@ -2429,9 +2598,10 @@ function Composer(props: {
   // contact's budget the owner sees it here, inside the all-in cost, and sends
   // once more at that price (the same message keeps its operation).
   const [readmitQuote, setReadmitQuote] = createSignal<{ peer: string; price: AdmissionPrice } | null>(null);
+  // Whatever the mode: Send in chat shows (and caps) a message from Request.
   const readmitPrice = (): AdmissionPrice | null => {
     const q = readmitQuote();
-    return q && !room() && mode() === 'message' && q.peer === target() ? q.price : null;
+    return q && !room() && q.peer === target() ? q.price : null;
   };
   // Is this send a first contact? While the budget decides, exactly when it
   // has no line for this peer, whatever the thread holds: inbound history
@@ -2472,14 +2642,20 @@ function Composer(props: {
   // Read the invoice amount as it is pasted: the cost is shown before paying.
   createEffect(
     on(bolt11, (text) => {
-      setInvoiceMsat(null);
+      setInvoiceRead(null);
       const value = text.trim();
       if (!value) return;
-      void props.actions.amountOf(value).then((r) => {
+      void props.actions.readInvoice(value).then((r) => {
         if (bolt11().trim() !== value) return;
+        const fromCard = reviewWhenRead === value;
+        reviewWhenRead = null;
         if (r.ok) {
-          setInvoiceMsat(r.value);
+          setInvoiceRead(r.value);
           setNote(null);
+          // Same as pressing Pay: the review, with the host's reading of the invoice.
+          if (fromCard && mode() === 'pay' && payKind() === 'invoice' && !props.moneyBlocked && line().open && !busy()) {
+            setReview(invoiceReview(r.value));
+          }
         } else setNote(r.error.message);
       });
     }),
@@ -2496,32 +2672,36 @@ function Composer(props: {
   };
 
   /** What this mode costs, shown before the button is pressed. */
+  /** What one message costs here, whatever the current mode (Send in chat uses it too). */
+  const messageShown = (): { msat: number | null; estimate: boolean; basis: string } => {
+    const again = readmitPrice();
+    if (again) {
+      return {
+        msat: again.total_msat,
+        estimate: false,
+        basis: `${props.name} asks for admission again: ${sats(again.admission_msat)} ${satUnit(again.admission_msat)}, then ${sats(again.message_msat)} for this message; ${feeCeiling(again.max_routing_fee_msat ?? 0)}`,
+      };
+    }
+    const q = doorWanted() ? doorQuote() : null;
+    if (q) {
+      return {
+        msat: q.total_msat,
+        estimate: false,
+        basis: `${props.name}’s own quote: ${fmtAmount(q.admission_msat)} to open their door, then ${fmtAmount(q.message_msat)} for this message; ${feeCeiling(q.max_routing_fee_msat ?? 0)}`,
+      };
+    }
+    const c = props.cost;
+    if (!c) return { msat: null, estimate: false, basis: room() ? 'Reading each member’s price…' : 'Reading their price…' };
+    const basis = doorWanted()
+      ? `${c.basis}. First contact also pays their admission price once, at most ${fmtAmount(ADMISSION_MAX_MSAT)}`
+      : c.basis;
+    return { msat: c.msat, estimate: c.estimate || doorWanted(), basis };
+  };
+
   const shown = (): { msat: number | null; estimate: boolean; basis: string } => {
     switch (mode()) {
-      case 'message': {
-        const again = readmitPrice();
-        if (again) {
-          return {
-            msat: again.total_msat,
-            estimate: false,
-            basis: `${props.name} asks for admission again: ${sats(again.admission_msat)} ${satUnit(again.admission_msat)}, then ${sats(again.message_msat)} for this message; ${feeCeiling(again.max_routing_fee_msat ?? 0)}`,
-          };
-        }
-        const q = doorWanted() ? doorQuote() : null;
-        if (q) {
-          return {
-            msat: q.total_msat,
-            estimate: false,
-            basis: `${props.name}’s own quote: ${fmtAmount(q.admission_msat)} to open their door, then ${fmtAmount(q.message_msat)} for this message; ${feeCeiling(q.max_routing_fee_msat ?? 0)}`,
-          };
-        }
-        const c = props.cost;
-        if (!c) return { msat: null, estimate: false, basis: room() ? 'Reading each member’s price…' : 'Reading their price…' };
-        const basis = doorWanted()
-          ? `${c.basis}. First contact also pays their admission price once, at most ${fmtAmount(ADMISSION_MAX_MSAT)}`
-          : c.basis;
-        return { msat: c.msat, estimate: c.estimate || doorWanted(), basis };
-      }
+      case 'message':
+        return messageShown();
       case 'pay':
         if (payKind() === 'invoice') {
           return invoiceMsat() === null
@@ -2580,9 +2760,18 @@ function Composer(props: {
     return { message: 'Send', pay: 'Pay', request: 'Create invoice', file: 'Send file' }[mode()] + (mode() === 'request' ? '' : price);
   };
 
-  const submit = async () => {
+  /**
+   * `shownMsat`: the message price the owner saw on the button they pressed
+   * (Send in chat). If the price is not that any more, nothing is sent: the
+   * new price shows on Send, which needs another press.
+   */
+  const submit = async (shownMsat?: number | null) => {
     if (props.moneyBlocked || busy() || ownerWait()) return;
     setNote(null);
+    if (shownMsat !== undefined && (mode() !== 'message' || shown().msat !== shownMsat)) {
+      setNote('The message price changed since you pressed. Nothing was sent. Check the price on Send and press it to send.');
+      return;
+    }
     if (viaBudget()) {
       const st = stand();
       if (st.kind === 'paused' || st.kind === 'off') {
@@ -2661,11 +2850,10 @@ function Composer(props: {
     if (!ready()) return;
     if (mode() === 'pay') {
       // Pay never pays from here: it shows the review, and only its confirm pays.
-      const principal = payKind() === 'invoice' ? invoiceMsat()! : amountMsat()!;
       setReview(
         payKind() === 'invoice'
-          ? { kind: 'invoice', bolt11: bolt11().trim(), msat: principal }
-          : { kind: 'keysend', pubkey: pubkey().trim(), msat: principal, memo: memo() },
+          ? invoiceReview(invoiceRead()!)
+          : { kind: 'keysend', pubkey: pubkey().trim(), msat: amountMsat()!, memo: memo() },
       );
       return;
     }
@@ -2693,6 +2881,7 @@ function Composer(props: {
         if (r.ok && unchanged()) {
           setAmount('');
           setMemo('');
+          setCreated(r.value as InvoiceView);
         } else if (!r.ok && unchanged()) setNote(r.error.message);
         break;
       case 'file':
@@ -2731,6 +2920,27 @@ function Composer(props: {
     }
     setBusy(false);
   };
+  /**
+   * Send in chat: the created invoice as an ordinary message, through the
+   * Send button's own path (its price, budget and approvals). The draft shows
+   * exactly what is sent; if an approval comes first, it waits there.
+   */
+  const sendInChat = async () => {
+    const inv = created();
+    if (!inv || props.moneyBlocked || busy() || ownerWait()) return;
+    // The price on the pressed button is the only price this press may pay.
+    const pressedMsat = messageShown().msat;
+    setMode('message');
+    setDraft(inv.bolt11);
+    setDrafted(false);
+    await submit(pressedMsat);
+    if (untrack(draft) === '') setCreated(null);
+  };
+  const chatPrice = () => {
+    const c = messageShown();
+    return c.msat === null ? '' : ` · ${c.estimate ? '≈ ' : ''}${sats(c.msat)} ${satUnit(c.msat)}`;
+  };
+
   // A closed spending window or money going offline withdraws the review.
   createEffect(() => { if (props.moneyBlocked || !line().open) setReview(null); });
 
@@ -2969,10 +3179,20 @@ function Composer(props: {
             >
               {(rv) => (
                 <div class="pay-review" data-pay-review data-review-msat={rv().msat} data-review-max-msat={allIn(rv().msat)}>
-                  <p class="pay-review-title">
-                    Pay {props.name}
-                    <span class="hint"> · {rv().kind === 'invoice' ? 'their invoice' : `direct to ${shortId((rv() as { pubkey: string }).pubkey)}`}</span>
-                  </p>
+                  <Show
+                    when={rv().kind === 'invoice'}
+                    fallback={
+                      <>
+                        {/* A typed pubkey is not bound to this chat's contact either. */}
+                        <p class="pay-review-title">Pay a Lightning node directly</p>
+                        <PayeeLine payee={(rv() as { pubkey: string }).pubkey.toLowerCase()} peer={target()} name={props.name} />
+                      </>
+                    }
+                  >
+                    {/* Whoever sent or pasted the invoice need not be who it pays. */}
+                    <p class="pay-review-title">Pay this Lightning invoice</p>
+                    <PayeeLine payee={(rv() as { payee: string }).payee} peer={target()} name={props.name} />
+                  </Show>
                   <dl>
                     <dt>Amount</dt>
                     <dd data-review-amount>{fmtAmount(rv().msat)}</dd>
@@ -3003,12 +3223,24 @@ function Composer(props: {
             <input data-request-note placeholder="What for? e.g. dinner" value={memo()} onInput={(e) => setMemo(e.currentTarget.value)} aria-label="What it is for" />
             <div class="composer-bar">
               <div class="cost" data-cost>
-                <span class="basis" data-request-hint>{props.name} gets an invoice and QR. Receiving is free.</span>
+                <span class="basis" data-request-hint>Makes an invoice and QR here. Send it in chat so {props.name} can pay it. Receiving is free.</span>
               </div>
               <button type="submit" class="primary soft" disabled={disabled()} data-send>
                 {label()}
               </button>
             </div>
+            <Show when={created()}>
+              {(inv) => (
+                <div class="composer-bar" data-request-created>
+                  <span class="basis">
+                    Invoice for {fmtAmount(inv().amount_msat)} is ready. Send it to {props.name} as a chat message; it pays like any message.
+                  </span>
+                  <button type="button" class="primary soft" data-send-in-chat disabled={props.moneyBlocked || busy() || !!ownerWait()} onClick={() => void sendInChat()}>
+                    Send in chat{chatPrice()}
+                  </button>
+                </div>
+              )}
+            </Show>
           </div>
         </Match>
       </Switch>
@@ -3029,7 +3261,7 @@ function Composer(props: {
         </div>
       </Show>
 
-      <Show when={readmitPrice()}>
+      <Show when={mode() === 'message' && readmitPrice()}>
         {(p) => (
           <>
             <p class="hint" data-readmission-quote>
