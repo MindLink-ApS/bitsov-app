@@ -31,6 +31,16 @@ export function safeImageMime(mime: string | undefined | null): string | null {
   return null;
 }
 
+/** Filename that might be a safe raster image — used to decide whether to fetch a preview. */
+export function looksLikeSafeImageName(name: string): boolean {
+  return /\.(png|jpe?g|gif|webp)$/i.test(name.trim());
+}
+
+/** CSP allows data: on img-src; blob: is media-only. Avatars use this same shape. */
+export function dataImageUrl(data_b64: string, mime: string): string {
+  return `data:${mime};base64,${data_b64}`;
+}
+
 export type PreparedAvatar = {
   inline_b64?: string;
   hash: string;

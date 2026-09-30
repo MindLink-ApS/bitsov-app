@@ -278,8 +278,14 @@ select { font: inherit; font-size: var(--t-sm); background: var(--sunk); color: 
 .delivery[data-delivery='delivered']::before,
 .delivery[data-delivery='accepted']::before { content: '✓'; font-size: var(--t-sm); }
 .delivery[data-delivery='rejected'] { color: var(--err); overflow-wrap: anywhere; white-space: normal; }
-.bubble.file { display: flex; align-items: center; gap: var(--s-2); }
+.bubble.file { display: flex; flex-direction: column; align-items: flex-start; gap: var(--s-1); }
 .bubble.file .file-name { font-weight: 500; }
+.received-file { display: flex; flex-direction: column; align-items: flex-start; gap: var(--s-1); max-width: min(280px, 100%); }
+.received-file .file-meta { margin: 0; color: var(--faint); font-size: var(--t-xs); }
+.received-file .file-preview { max-width: 100%; max-height: 160px; border-radius: var(--r-control); object-fit: contain; }
+.emoji-picker { display: flex; flex-wrap: wrap; gap: 2px; padding: var(--s-2); margin: var(--s-1) 0 0; background: var(--sunk); border: 1px solid var(--line); border-radius: var(--r-control); max-width: 240px; }
+.emoji-pick { border: none; background: transparent; font-size: var(--t-lg); line-height: 1.2; padding: 4px; cursor: pointer; border-radius: var(--r-chip); }
+.emoji-pick:hover { background: var(--line); }
 .voice-note { display: inline-flex; align-items: center; }
 .voice-note audio, .file-chip audio { height: 32px; max-width: min(280px, 100%); }
 .voice-play { border: none; background: none; color: inherit; font: inherit; font-weight: 500; padding: 0; cursor: pointer; }

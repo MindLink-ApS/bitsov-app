@@ -176,6 +176,8 @@ function stubHost(overrides: Record<string, Reply> = {}) {
       accepted: true, state: 'acked',
     }),
     voice_note_fetch: () => ({ filename: 'voice-note-20260929-120000.webm', mime_type: 'audio/webm', size_bytes: 2, data_b64: 'aGk=' }),
+    file_fetch: () => ({ filename: 'voice-note-20260929-120000.webm', mime_type: 'audio/webm', size_bytes: 2, data_b64: 'aGk=' }),
+    file_save: () => ({ saved: true, filename: 'voice-note-20260929-120000.webm', mime_type: 'audio/webm', size_bytes: 2 }),
     live_link: () => null,
     'plugin:event|listen': () => 1,
     'plugin:event|unlisten': () => null,
@@ -287,7 +289,7 @@ describe('voice notes in the composer and thread', () => {
     await openShell();
     await vi.waitFor(() => expect($(`[data-message="${IN_ID}"] [data-voice-play]`)).not.toBeNull());
     expect($(`[data-message="${'d'.repeat(64)}"] [data-voice-play]`)).toBeNull();
-    expect(text(`[data-message="${'d'.repeat(64)}"] .file-name`)).toBe('[file: brief.txt]');
+    expect(text(`[data-message="${'d'.repeat(64)}"] .file-name`)).toBe('brief.txt');
     expect(host.used('voice_note_fetch')).toHaveLength(0);
     $<HTMLButtonElement>(`[data-message="${IN_ID}"] [data-voice-play]`)!.click();
     await vi.waitFor(() => expect($(`[data-message="${IN_ID}"] audio[data-voice-audio]`)?.getAttribute('src')).toMatch(/^blob:/));

@@ -544,8 +544,11 @@ export type CallReceipt = {
   sent_at_ms: number;
 };
 
-/** `voice_note_fetch`: a received voice note's bytes, for the inline player. */
+/** `voice_note_fetch` / `file_fetch`: a received file's bytes (read-only). */
 export type VoiceBlob = { filename: string; mime_type: string; size_bytes: number; data_b64: string };
+
+/** `file_save`: wrote only if the owner confirmed the native save dialog. */
+export type FileSaveResult = { saved: boolean; filename: string; mime_type: string; size_bytes: number };
 
 /** Delivery of one sent message, from the send reply and then `/ws`. */
 export type Delivery = { status: 'accepted' | 'sent' | 'queued' | 'delivered' | 'rejected'; reason: string | null };
