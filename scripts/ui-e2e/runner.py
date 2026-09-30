@@ -8,8 +8,15 @@ identities. No seed, wallet, mainnet or funds.
 
 Topology (setup follows bitsov-app PR #46, scripts/two-node-mock-harness.sh):
   node A  the owner's node, started BY THE APP through the #44 dev-node path
-          (BITSOV_DEV_SIDECAR / BITSOV_DEV_DATA_DIR) on 127.0.0.1:3141, with
+          (BITSOV_DEV_SIDECAR / BITSOV_DEV_DATA_DIR) on an ephemeral loopback API
+          port the dev build is pointed at with BITSOV_DEV_API_BASE, with
           --owner-control so the owner can grant a budget from A's terminal.
+
+Ports: never 127.0.0.1:3141 or 1420. The app's API port (BITSOV_DEV_API_BASE)
+and the Vite dev server (BITSOV_VITE_PORT, plus a matching devUrl in a private
+--config) are ephemeral, so a pilot node on 3141 and another lane's dev server
+keep running untouched. The app build goes to APP_CARGO_TARGET_DIR, by default
+a private directory inside this run's work dir.
   node B  a stranger in price_open mode; A knows B's address, B knows nothing.
 
 The steps live in tests/e2e/two_node_spec.py; this file is plumbing.
@@ -44,8 +51,10 @@ APP = Path(sys.argv[2])          # bitsov-app checkout under test
 BIN = sys.argv[3]                # konsensus built from the integration genome
 SANDBOX = E / 'loopback.sb'
 ROOTS = {n: Path(BIN).parent / f'node-{n}' for n in ('a', 'b')}
-A_API = 3141                     # fixed: the app's API_BASE
 SHOTS = E / 'snapshots'
+# Private by default: inside the run's work dir, removed with it.
+APP_TARGET = os.environ.get('APP_CARGO_TARGET_DIR') or str(Path(BIN).parent / 'app-target')
+SAVE_DIR = Path(BIN).parent / 'saved'  # where the test-mode Save writes (no dialog)
 
 owned, procs, logs = [], {}, {}
 ids, ports, secrets = {}, {}, {}
@@ -170,7 +179,7 @@ def bug(title, detail, where):
 
 def ui(op, **args):
     body = json.dumps({'op': op, 'args': args})
-    conn = http.client.HTTPConnection('localhost', 1420, timeout=(args.get('timeoutMs', 15000) / 1000) + 20)
+    conn = http.client.HTTPConnection('127.0.0.1', UI_PORT, timeout=(args.get('timeoutMs', 15000) / 1000) + 20)
     try:
         conn.request('POST', '/__e2e/run', body, {'Content-Type': 'application/json'})
         out = json.loads(conn.getresponse().read() or b'{}')
@@ -330,6 +339,32 @@ def free_port():
     with socket.socket() as s:
         s.bind(('127.0.0.1', 0))
         return s.getsockname()[1]
+
+
+# The app's node API and the Vite dev server, both ephemeral (see the module doc).
+A_API = int(os.environ.get('UIE2E_A_API') or free_port())
+UI_PORT = int(os.environ.get('UIE2E_UI_PORT') or free_port())
+if A_API == 3141 or UI_PORT == 1420:
+    raise SystemExit('UI-E2E never uses 127.0.0.1:3141 or 1420; pick other ports')
+
+
+def app_env(extra=None):
+    """The app's environment: dev node A, its moved API port, the driver, Vite."""
+    return {**os.environ, **(extra or {}),
+            'BITSOV_DEV_API_BASE': f'http://127.0.0.1:{A_API}',
+            'BITSOV_VITE_PORT': str(UI_PORT),
+            'BITSOV_UI_E2E': '1', 'BITSOV_UI_E2E_SAVE_DIR': str(SAVE_DIR),
+            'RUST_LOG': 'info', 'CARGO_TARGET_DIR': APP_TARGET}
+
+
+def tauri_config(path, identifier=None):
+    """A private --config overlay: devUrl on UI_PORT (and a test bundle id)."""
+    config = {'build': {'devUrl': f'http://127.0.0.1:{UI_PORT}',
+                        'beforeDevCommand': 'npm run dev -- --host 127.0.0.1'}}
+    if identifier:
+        config['identifier'] = identifier
+    path.write_text(json.dumps(config))
+    return path
 
 
 def run(*argv, input=None, timeout=60):
@@ -526,7 +561,7 @@ def main():
         for root in ROOTS.values():
             if os.path.lexists(root):
                 raise RuntimeError(f'refusing to reuse existing {root}')
-        for host, port in (('127.0.0.1', A_API), ('127.0.0.1', 1420), ('::1', 1420)):
+        for host, port in (('127.0.0.1', A_API), ('127.0.0.1', UI_PORT), ('::1', UI_PORT)):
             with socket.socket(socket.AF_INET6 if ':' in host else socket.AF_INET) as s:
                 if s.connect_ex((host, port)) == 0:
                     raise RuntimeError(f'{host}:{port} is already in use; stop that process first')
@@ -560,11 +595,10 @@ def main():
     exec sandbox-exec -f "{SANDBOX}" "{BIN}" "$@"
     ''')
         wrapper.chmod(0o700)
-        env = {**os.environ,
-               'BITSOV_DEV_SIDECAR': str(wrapper), 'BITSOV_DEV_DATA_DIR': str(ROOTS['a']),
-               'BITSOV_UI_E2E': '1', 'RUST_LOG': 'info',
-               'CARGO_TARGET_DIR': os.environ.get('APP_CARGO_TARGET_DIR', '/tmp/bitsov-target-app')}
-        in_pty('app', ['scripts/dev-node-from-main.sh'], APP, env)
+        SAVE_DIR.mkdir(mode=0o700, exist_ok=True)
+        env = app_env({'BITSOV_DEV_SIDECAR': str(wrapper), 'BITSOV_DEV_DATA_DIR': str(ROOTS['a'])})
+        local = tauri_config(Path(BIN).parent / 'tauri.local.json')
+        in_pty('app', ['scripts/dev-node-from-main.sh', '--config', str(local)], APP, env)
         if not wait_until(register_a, 600, .25):
             raise RuntimeError('app never started node A')
         if not wait_until(lambda: ui('ping'), 120, 1):
