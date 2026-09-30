@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'solid-js/web';
 import App from '../src/App';
 import type { PairingView } from '../src/onboarding/pairing';
+import { resetContactsForTests, setPetname } from '../src/control/petnames';
 
 // The control center against a stubbed host (command replies + one `node-live`
 // listener) and against dev sample data. No node, no network.
@@ -23,6 +24,8 @@ const paired: PairingView = {
 type Call = { cmd: string; args: Record<string, unknown> | undefined };
 
 function stubHost() {
+  resetContactsForTests();
+  setPetname(A, 'Maya');
   const calls: Call[] = [];
   const callbacks = new Map<number, (e: unknown) => void>();
   // The host's socket state (`live_link`). Opening it here emits nothing, like a

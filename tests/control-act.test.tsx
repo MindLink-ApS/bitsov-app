@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'solid-js/web';
 import App from '../src/App';
 import type { PairingView } from '../src/onboarding/pairing';
+import { resetContactsForTests, setPetname } from '../src/control/petnames';
 import { sampleInvoiceMsat, sampleSource, SAMPLE_OPEN_ROOM_ID, SAMPLE_ROOM_ID } from '../src/control/sample';
 import type { LiveEvent, SpendView } from '../src/control/types';
 import { setDenom } from '../src/control/prefs';
@@ -25,6 +26,8 @@ const view = (state: SpendView['state'], extra: Partial<SpendView> = {}): SpendV
 const openView = () => view('open', { basis: 'node_grant', open_until_ms: Date.now() + WINDOW });
 
 function stubHost(overrides: Record<string, Reply> = {}) {
+  resetContactsForTests();
+  setPetname(A, 'Maya');
   const calls: Call[] = [];
   const callbacks = new Map<number, (e: unknown) => void>();
   const spend = { v: view('locked') };

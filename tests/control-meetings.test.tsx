@@ -5,6 +5,7 @@ import type { PairingView } from '../src/onboarding/pairing';
 import type { BudgetView, CallQuote, CallReceipt, LiveEvent, Message, SpendView } from '../src/control/types';
 import { createCallEngine, RING_MS } from '../src/control/call';
 import { createMeetingEngine, inviteCost, joinCost, validRoster, type MeetingDeps, type MeetingView } from '../src/control/meeting';
+import { resetContactsForTests, setPetname } from '../src/control/petnames';
 
 const OWN = '1'.repeat(64);
 const A = 'a'.repeat(64);
@@ -458,12 +459,16 @@ describe('meetings in the shell', () => {
     FakePc.made = [];
     vi.stubGlobal('RTCPeerConnection', FakePc);
     Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: async (c: MediaStreamConstraints) => stream(!!c.video) } });
+    resetContactsForTests();
+    setPetname(A, 'Maya');
+    setPetname(B, 'Jon');
   });
   afterEach(() => {
     dispose?.();
     dispose = undefined;
     mount?.remove();
     vi.unstubAllGlobals();
+    resetContactsForTests();
   });
   const $ = <T extends Element = HTMLElement>(sel: string) => mount.querySelector<T>(sel);
   const text = (sel: string) => $(sel)?.textContent ?? '';

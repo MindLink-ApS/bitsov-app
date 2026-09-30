@@ -4,6 +4,7 @@ import { amount as fmtAmount, allIn, routingFee, sats as fmtSats } from './forma
 // bech32 on purpose, so it cannot receive funds by mistake.
 
 import type { NodeStatus, PairingView } from '../onboarding/pairing';
+import { seedPetnameIfEmpty } from './petnames';
 import type { Source } from './source';
 import type {
   VoiceBlob,
@@ -551,6 +552,11 @@ const sampleBolt11 = (msat: number) =>
   msat % 100 === 0 ? `lntbs${msat / 100}n1samplenotpayable0donotpay` : `lntbs${msat * 10}p1samplenotpayable0donotpay`;
 
 export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number; organism?: 'v1' | 'v2' } = {}): Source {
+  // Demo convenience: sample peers carry remote labels; mirror them into local
+  // petnames once so the rail shows owner names without treating labels as truth.
+  for (const p of SAMPLE_PEERS) {
+    if (p.label) seedPetnameIfEmpty(p.node_id, p.label);
+  }
   // v1 (default) is today's rc7 node: no energy read, no membrane events.
   const v2 = opts.organism === 'v2';
   let knocks = v2 ? sampleKnocks() : [];

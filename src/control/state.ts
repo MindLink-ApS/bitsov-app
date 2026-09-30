@@ -6,6 +6,7 @@ import { feeCeiling } from './format';
 // fresh the node's figures are.
 
 import { ago, sats, satUnit, shortId } from './format';
+import { contactRevision, petnameOf } from './petnames';
 import type {
   ActionError,
   AdmissionPrice,
@@ -32,8 +33,20 @@ export type Unread = Record<string, number>;
 export const trackKey = (t: TrackRef): string =>
   t.kind === 'peer' || t.kind === 'room' ? `${t.kind}:${t.id.toLowerCase()}` : t.kind;
 
-export const peerName = (peer: Peer | undefined, id: string): string =>
-  peer?.label?.trim() || shortId(id);
+/**
+ * Display name for a contact: the owner's local petname, else a short id.
+ * Never uses `peer.label` — that is a self-claimed suggestion only (ACCOUNT-LAYER §6).
+ */
+export const peerName = (_peer: Peer | undefined, id: string): string => {
+  contactRevision();
+  return petnameOf(id) || shortId(id);
+};
+
+/** Remote-supplied name (peer label / profile card). Suggestion only — never truth. */
+export const claimedName = (peer: Peer | undefined): string | null => {
+  const n = peer?.label?.trim();
+  return n || null;
+};
 
 /** History + live, deduplicated by id, oldest first. */
 export function mergeMessages(existing: Message[], incoming: Message[]): Message[] {

@@ -231,6 +231,9 @@ export function FrontDoorCardView(props: { card: FrontDoor; now: number; shareQr
         </Show>
         <div>
           <h3 data-fd-name>{c().profile.display_name}</h3>
+          <p class="hint" data-fd-claimed>
+            Self-claimed name on their profile card — a suggestion only, not a verified identity.
+          </p>
           <p class="hint" data-fd-tagline>
             {c().profile.tagline || c().profile.kind}
           </p>

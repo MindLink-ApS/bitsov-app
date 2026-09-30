@@ -7,6 +7,8 @@
 // model only ever sees a body the owner was shown first (see `Disclosure`).
 
 import { ago, sats, satsWhole, satUnit, shortId, uptime } from './format';
+import { petnameOf } from './petnames';
+import { peerName } from './state';
 import type {
   AiFreshness,
   AiTopic,
@@ -63,14 +65,16 @@ export const SUGGESTIONS: readonly string[] = [
 
 const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-/** The one peer a question names, by label (whole word) or an id prefix of 8+ hex. */
+/** The one peer a question names, by petname or label (whole word) or an id prefix of 8+ hex. */
 export function peerIn(text: string, peers: Peer[]): Peer | null {
   const lower = text.toLowerCase();
   const hex = lower.match(/\b[0-9a-f]{8,64}\b/g) ?? [];
   const matches = peers.filter((p) => {
+    const pet = petnameOf(p.node_id)?.toLowerCase();
     const label = p.label?.trim().toLowerCase();
+    const byPet = !!pet && new RegExp(`(^|[^\\p{L}\\p{N}])${escape(pet)}($|[^\\p{L}\\p{N}])`, 'u').test(lower);
     const byLabel = !!label && new RegExp(`(^|[^\\p{L}\\p{N}])${escape(label)}($|[^\\p{L}\\p{N}])`, 'u').test(lower);
-    return byLabel || hex.some((h) => p.node_id.toLowerCase().startsWith(h));
+    return byPet || byLabel || hex.some((h) => p.node_id.toLowerCase().startsWith(h));
   });
   // Both naming forms must agree on one distinct contact. A label must not
   // override another contact's id (or an ambiguous prefix).
@@ -134,7 +138,7 @@ export function understand(text: string, peers: Peer[], nowMs: number, draft?: D
   if (what && (peer || explicit)) {
     if (!peer) return { kind: 'no-peer', what };
     const id = peer.node_id.toLowerCase();
-    const name = peer.label?.trim() || shortId(peer.node_id);
+    const name = peerName(peer, peer.node_id);
     if (what === 'pay') return { kind: 'act', proposal: { kind: 'pay', peer: id, name, sats: amount! } };
     if (what === 'request') {
       return { kind: 'act', proposal: { kind: 'request', peer: id, name, sats: amount!, note: draft?.draft_text ?? '' } };

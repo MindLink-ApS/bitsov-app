@@ -182,6 +182,33 @@ input:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: 
 .track-head .price { font-size: var(--t-sm); color: var(--muted); }
 .track-head .price .sats { color: var(--accent); }
 .context-toggle { display: inline-flex; }
+.track-title-btn {
+  display: inline-flex; align-items: center; gap: var(--s-2);
+  border: none; background: none; padding: 0; margin: 0; cursor: pointer; color: inherit; text-align: left;
+}
+.track-title-btn h1 { margin: 0; }
+.contact-pill {
+  font-size: var(--t-xs); font-weight: 600; padding: 2px 8px; border-radius: var(--r-chip);
+  background: var(--raised); color: var(--muted);
+}
+.contact-pill.ok { color: var(--ok); background: color-mix(in srgb, var(--ok) 16%, transparent); }
+.contact-pill.warn { color: var(--warn); background: color-mix(in srgb, var(--warn) 16%, transparent); }
+.contact-panel .contact-fp-short {
+  font-size: var(--t-lg); letter-spacing: 0.06em; margin: 0;
+}
+.contact-panel .contact-fp {
+  font-size: var(--t-sm); color: var(--muted); overflow-wrap: anywhere; margin: 0;
+  line-height: 1.5;
+}
+.contact-panel .contact-qr { width: min(200px, 70vw); height: auto; align-self: center; border-radius: var(--r-control); }
+.contact-panel .claimed-tag { color: var(--faint); font-style: italic; }
+.contact-key-warn { border-color: var(--warn); }
+.contact-key-warn h3 { color: var(--warn); }
+label.field { display: flex; flex-direction: column; gap: 4px; font-size: var(--t-sm); color: var(--muted); }
+label.field input {
+  font: inherit; color: var(--ink); background: var(--raised); border: 1px solid var(--line);
+  border-radius: var(--r-control); padding: 8px 10px;
+}
 
 .stream { flex: 1; min-height: 0; overflow-y: auto; padding: var(--s-6) var(--s-4); display: flex; flex-direction: column; align-items: center; }
 .chat-column { width: min(var(--chat-max), 100%); display: flex; flex-direction: column; gap: var(--s-4); }

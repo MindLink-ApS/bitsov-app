@@ -3,6 +3,7 @@ import { render } from 'solid-js/web';
 import App from '../src/App';
 import type { PairingView } from '../src/onboarding/pairing';
 import { sampleSource, SAMPLE_PEERS, SAMPLE_PRESETS } from '../src/control/sample';
+import { resetContactsForTests, setPetname } from '../src/control/petnames';
 import { setShowLegacyIntroductionUi } from '../src/control/Shell';
 import { budgetStand, messagesWorth } from '../src/control/state';
 import type { BudgetRow, BudgetView, SpendView } from '../src/control/types';
@@ -49,6 +50,9 @@ type Call = { cmd: string; args: Record<string, unknown> | undefined };
 type Reply = (args?: Record<string, unknown>) => unknown;
 
 function stubHost(start: BudgetView, overrides: Record<string, Reply> = {}) {
+  resetContactsForTests();
+  setPetname(MAYA, 'Maya');
+  setPetname(NEW, 'Nadia');
   const calls: Call[] = [];
   const callbacks = new Map<number, (e: unknown) => void>();
   const state = { budget: start, spend: locked };
