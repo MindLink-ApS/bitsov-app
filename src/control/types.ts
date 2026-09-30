@@ -187,6 +187,8 @@ export type NodeOverview = {
   stun_port?: number | null;
   /** `stun:host:port` for it at the node's public host; absent without one. Offered, never applied. */
   stun_url?: string | null;
+  /** The LDK network the host started the node with (`mainnet`, `regtest`, …); absent when unknown. */
+  network?: string | null;
   /** Unix ms when the host read it. */
   read_at: number;
 };

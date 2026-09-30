@@ -137,6 +137,9 @@ struct NodeState {
     /// Fee policy from the configuration handed to the supervised node at start.
     /// No room quote guesses a policy if this snapshot is unavailable.
     room_routing_policy: Mutex<Option<(String, act::RoutingFeePolicy)>>,
+    /// The LDK network from that same configuration (`mainnet`, `regtest`, …).
+    /// Display only: a chat invoice for another network is shown as text.
+    configured_network: Mutex<Option<String>>,
     /// DEV ONLY (`dev_node`): an unverified node binary to run instead of the bundled
     /// sidecar. Always `None` in release builds.
     dev_sidecar: Mutex<Option<PathBuf>>,
@@ -248,6 +251,7 @@ impl NodeState {
             token: Mutex::new(None),
             config: Mutex::new(None),
             room_routing_policy: Mutex::new(None),
+            configured_network: Mutex::new(None),
             dev_sidecar: Mutex::new(None),
             external_node: Mutex::new(None),
             app_dir: Mutex::new(None),
@@ -413,8 +417,10 @@ fn spawn_node(app: &AppHandle<impl tauri::Runtime>, config: &Path) -> Result<(),
     *state.all_in_caps_node.lock().unwrap() = None;
     *state.readmission_ask.lock().unwrap() = None;
     let routing_policy = configured_routing_policy(config);
+    let network = configured_network(config);
     let child = state.spawn_child(&mut cmd)?;
     *state.room_routing_policy.lock().unwrap() = routing_policy;
+    *state.configured_network.lock().unwrap() = network;
 
     // Drain node output to the app log — never render node plaintext in the UI.
     // The one exception is parsed, not rendered: the pairing short code the node
@@ -644,6 +650,7 @@ async fn attach_external(app: &AppHandle, app_data_dir: &Path, node: dev_node::E
     *state.external_node.lock().unwrap() = Some(node.data_dir.clone());
     *state.app_dir.lock().unwrap() = Some(app_dir.clone());
     *state.room_routing_policy.lock().unwrap() = configured_routing_policy(&node.config);
+    *state.configured_network.lock().unwrap() = configured_network(&node.config);
     if !health_ok(&state).await {
         return set_error(
             &state,
@@ -1442,7 +1449,12 @@ async fn get_json<T: serde::de::DeserializeOwned>(state: &NodeState, path: &str)
 
 async fn read_node_overview(state: &NodeState) -> Result<control::NodeOverview, String> {
     let status: control::NodeStatusResponse = get_json(state, "/status").await?;
-    Ok(control::NodeOverview::from_status(status, now_ms()))
+    let mut overview = control::NodeOverview::from_status(status, now_ms());
+    // Only while the node answering is the LDK node that config started.
+    if overview.lightning_backend.as_deref() == Some("ldk") {
+        overview.network = state.configured_network.lock().unwrap().clone();
+    }
+    Ok(overview)
 }
 
 async fn read_room_members(state: &NodeState, room_id: &str) -> Result<Vec<String>, String> {
@@ -3373,6 +3385,27 @@ fn configured_routing_policy(path: &Path) -> Option<(String, act::RoutingFeePoli
     Some((config.lightning.backend, config.routing_fees))
 }
 
+/// The LDK `network` from the SAME config passed to node start, or none for
+/// another backend or an unreadable config. Same rules as the policy read.
+fn configured_network(path: &Path) -> Option<String> {
+    #[derive(Deserialize)]
+    struct Config { lightning: Backend }
+    #[derive(Deserialize)]
+    struct Backend {
+        backend: String,
+        // The node's own serde default for LDK.
+        #[serde(default = "mainnet")]
+        network: String,
+    }
+    fn mainnet() -> String { "bitcoin".into() }
+    let text = std::fs::read_to_string(path).ok()?;
+    let config: Config = toml::from_str(&text).ok()?;
+    if config.lightning.backend != "ldk" {
+        return None;
+    }
+    control::ldk_network_name(&config.lightning.network).map(str::to_owned)
+}
+
 async fn read_room_routing_policy(state: &NodeState) -> Result<act::RoutingFeePolicy, String> {
     let status: serde_json::Value = get_json(state, "/status").await?;
     if state.sidecar_terminated.load(Ordering::SeqCst) {
@@ -4814,6 +4847,7 @@ impl NodeState {
         // A restored/adopted listener may share identity and backend with the
         // old node without sharing its startup configuration.
         *self.room_routing_policy.lock().unwrap() = None;
+        *self.configured_network.lock().unwrap() = None;
         let Some(child) = self.child.lock().unwrap().as_ref().cloned() else {
             return false;
         };
@@ -7221,6 +7255,26 @@ mod control_act_tests {
             *node.state.room_routing_policy.lock().unwrap() = configured_routing_policy(&path);
             assert!(read_room_quote(&node.state, ROOM).await.is_err());
         }
+    }
+
+    #[test]
+    fn configured_network_names_only_an_ldk_config_network() {
+        let path = std::env::temp_dir().join(format!("bitsov-network-{}.toml", std::process::id()));
+        for (config, want) in [
+            ("[lightning]\nbackend = \"ldk\"\nnetwork = \"regtest\"\n", Some("regtest")),
+            ("[lightning]\nbackend = \"ldk\"\nnetwork = \"signet\"\nesplora_url = \"x\"\n", Some("signet")),
+            // The node's default for LDK is mainnet.
+            ("[lightning]\nbackend = \"ldk\"\n", Some("mainnet")),
+            ("[lightning]\nbackend = \"ldk\"\nnetwork = \"liquid\"\n", None),
+            ("[lightning]\nbackend = \"lnd\"\nnetwork = \"regtest\"\n", None),
+            ("[lightning]\nbackend = \"mock\"\n", None),
+            ("not toml", None),
+        ] {
+            std::fs::write(&path, config).unwrap();
+            assert_eq!(configured_network(&path).as_deref(), want, "{config}");
+        }
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(configured_network(&path), None, "missing file");
     }
 
     #[tokio::test]
