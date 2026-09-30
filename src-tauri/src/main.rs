@@ -3821,6 +3821,49 @@ async fn do_voice_note_fetch(state: &NodeState, message_id: &str) -> Result<act:
     Ok(blob)
 }
 
+/// Any received kind-200 file by message id. Read-only: list + GET /files/:id,
+/// never a payment. Over the app size cap → refused (nothing written).
+async fn do_file_fetch(state: &NodeState, message_id: &str) -> Result<act::FileBlob, String> {
+    let message_id = control::node_id(message_id).map_err(|_| "expected a 64-character hex message id".to_string())?;
+    let mut found = None;
+    for limit in act::FILE_LIST_WINDOWS {
+        let rows: Vec<act::FileRow> = get_json(state, &format!("/files?limit={limit}")).await?;
+        match act::stored_file_for(&rows, &message_id) {
+            act::StoredLookup::Found(row) => { found = Some(row.id.clone()); break; }
+            act::StoredLookup::Missing if rows.len() < limit => break,
+            act::StoredLookup::Missing => {}
+        }
+    }
+    let row = found.ok_or_else(|| act::FILE_NOT_STORED.to_string())?;
+    let id = control::room_id(&row).map_err(|_| "the node returned an unexpected file id".to_string())?;
+    let blob: act::FileBlob = get_json(state, &format!("/files/{id}")).await?;
+    act::blob_within_cap(&blob)?;
+    Ok(blob)
+}
+
+/// Fetch then write only where the owner picks in the native save dialog.
+/// Cancel → `saved: false`. Never auto-saves or opens the file.
+async fn do_file_save(state: &NodeState, message_id: &str) -> Result<act::FileSaveResult, String> {
+    let blob = do_file_fetch(state, message_id).await?;
+    let name = act::safe_save_name(&blob.filename);
+    let path = rfd::FileDialog::new().set_file_name(&name).save_file();
+    let Some(path) = path else {
+        return Ok(act::FileSaveResult {
+            saved: false,
+            filename: blob.filename,
+            mime_type: blob.mime_type,
+            size_bytes: blob.size_bytes,
+        });
+    };
+    act::write_file_bytes(&path, &blob.data_b64)?;
+    Ok(act::FileSaveResult {
+        saved: true,
+        filename: blob.filename,
+        mime_type: blob.mime_type,
+        size_bytes: blob.size_bytes,
+    })
+}
+
 async fn read_call_quote(state: &NodeState, peer: &str) -> Result<control::CallQuote, String> {
     let peer = control::node_id(peer)?;
     let own: control::KindPrice = get_json(state, &control::price_path(act::KIND_CALL_OFFER + 1)).await?;
@@ -4310,6 +4353,30 @@ async fn voice_note_fetch(
     reject_sealed_window(&window)?;
     drop(window);
     do_voice_note_fetch(state.inner(), &message_id).await
+}
+
+/// `GET /files` then `GET /files/:id`: any received file (for preview / Save meta).
+#[tauri::command(rename_all = "snake_case")]
+async fn file_fetch(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    message_id: String,
+) -> Result<act::FileBlob, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    do_file_fetch(state.inner(), &message_id).await
+}
+
+/// Fetch a received file and write it only where the owner picks (native save dialog).
+#[tauri::command(rename_all = "snake_case")]
+async fn file_save(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    message_id: String,
+) -> Result<act::FileSaveResult, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    do_file_save(state.inner(), &message_id).await
 }
 
 /// `POST /files` then `POST /files/:id/send` to one peer.
@@ -4875,6 +4942,8 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             file_price,
             file_send,
             voice_note_fetch,
+            file_fetch,
+            file_save,
             call_quote,
             call_signal,
             ai_read,
@@ -7315,6 +7384,53 @@ mod control_act_tests {
         let node = fake(AuthMode::Local, routes);
         do_voice_note_fetch(&node.state, &mid).await.unwrap();
         assert_eq!(node.targets(), ["GET /files?limit=50", "GET /files?limit=200", "GET /files?limit=1000", &format!("GET /files/{ROOM}")]);
+    }
+
+    #[tokio::test]
+    async fn a_received_file_is_fetched_and_can_be_written_under_the_size_cap() {
+        let mid = "ab".repeat(32);
+        let listed = serde_json::json!([
+            {"id": FILE_ID, "filename": "brief.txt", "mime_type": "text/plain", "size_bytes": 2, "message_id": mid, "created_at": ""}
+        ]);
+        let routes: Routes = Arc::new(move |_m, p, _b| {
+            let (route, _) = p.split_once('?').unwrap_or((p, ""));
+            match route {
+                "/files" => (200, listed.to_string()),
+                r if r == format!("/files/{FILE_ID}") => (200, serde_json::json!({
+                    "id": FILE_ID, "filename": "brief.txt", "mime_type": "text/plain", "size_bytes": 2, "data_b64": "aGk="
+                }).to_string()),
+                _ => (404, r#"{"error":"route","code":404}"#.into()),
+            }
+        });
+        let node = fake(AuthMode::Local, routes);
+        let blob = do_file_fetch(&node.state, &mid).await.unwrap();
+        assert_eq!((blob.filename.as_str(), blob.mime_type.as_str(), blob.size_bytes), ("brief.txt", "text/plain", 2));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(act::safe_save_name(&blob.filename));
+        act::write_file_bytes(&path, &blob.data_b64).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"hi");
+        assert!(node.posts().is_empty(), "save must never POST");
+        assert_eq!(do_file_fetch(&node.state, &"99".repeat(32)).await.unwrap_err(), act::FILE_NOT_STORED);
+    }
+
+    #[tokio::test]
+    async fn an_oversized_received_file_is_refused_before_any_write() {
+        let mid = "cd".repeat(32);
+        let listed = serde_json::json!([{"id": FILE_ID, "mime_type": "application/octet-stream", "message_id": mid}]);
+        // Declared size over the cap; payload is tiny so we only exercise the size gate.
+        let routes: Routes = Arc::new(move |_m, p, _b| {
+            let (route, _) = p.split_once('?').unwrap_or((p, ""));
+            match route {
+                "/files" => (200, listed.to_string()),
+                r if r == format!("/files/{FILE_ID}") => (200, serde_json::json!({
+                    "filename": "big.bin", "mime_type": "application/octet-stream",
+                    "size_bytes": act::FILE_MAX_BYTES as u64 + 1, "data_b64": "aGk="
+                }).to_string()),
+                _ => (404, r#"{"error":"route","code":404}"#.into()),
+            }
+        });
+        let node = fake(AuthMode::Local, routes);
+        assert_eq!(do_file_fetch(&node.state, &mid).await.unwrap_err(), act::FILE_TOO_LARGE);
     }
 
     #[tokio::test]
@@ -10028,6 +10144,8 @@ mod assistant_acl_tests {
                 "file_price",
                 "file_send",
                 "voice_note_fetch",
+                "file_fetch",
+                "file_save",
                 "call_quote",
                 "call_signal",
                 // AI track: main window only, reads through the broker.
