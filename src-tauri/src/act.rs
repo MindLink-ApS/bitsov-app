@@ -352,10 +352,35 @@ pub enum SpendState {
     Expired,
 }
 
+/// Why a pending request ended without a grant.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Lapse {
+    /// Its window closed before the owner approved it.
+    Expired,
+    /// The node can no longer approve it: it restarted after the request was
+    /// made (the owner code lived only in its memory), wrong codes cancelled
+    /// it, or it no longer knows the request at all.
+    Lost,
+}
+
+impl Lapse {
+    /// `GET /pair/elevation/:op_id` → `status`, when the request is over.
+    pub fn from_status(status: &str) -> Option<Self> {
+        match status {
+            "expired" => Some(Self::Expired),
+            "lost" | "absent" => Some(Self::Lost),
+            _ => None,
+        }
+    }
+}
+
 /// What the renderer is told about spending. No token, no scope list.
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct SpendView {
     pub state: SpendState,
+    /// Set when the last request ended without a grant: the owner can ask again.
+    pub lapse: Option<Lapse>,
     pub basis: Option<SpendBasis>,
     pub open_until_ms: Option<u64>,
     pub pending: Option<Elevation>,
@@ -369,6 +394,7 @@ pub struct SpendGate {
     open: Option<(u64, SpendBasis)>,
     pending: Option<Elevation>,
     expired: bool,
+    lapse: Option<Lapse>,
 }
 
 impl SpendGate {
@@ -383,6 +409,7 @@ impl SpendGate {
         self.open = Some(((now_ms + SPEND_WINDOW_MS).min(until_ms), basis));
         self.pending = None;
         self.expired = false;
+        self.lapse = None;
     }
 
     /// The owner locked spending, or the app lost its authority.
@@ -391,12 +418,14 @@ impl SpendGate {
         self.open = None;
         self.pending = None;
         self.expired = false;
+        self.lapse = None;
     }
 
     pub fn set_pending(&mut self, elevation: Elevation) {
         self.generation = self.generation.wrapping_add(1);
         self.open = None;
         self.expired = false;
+        self.lapse = None;
         self.pending = Some(elevation);
     }
 
@@ -430,13 +459,15 @@ impl SpendGate {
         self.generation = self.generation.wrapping_add(1);
         self.pending = None;
         self.expired = false;
+        self.lapse = None;
     }
 
-    /// The owner's request lapsed on the node.
-    pub fn pending_expired(&mut self) {
+    /// The owner's request lapsed on the node; the owner may ask again.
+    pub fn pending_expired(&mut self, lapse: Lapse) {
         self.generation = self.generation.wrapping_add(1);
         self.pending = None;
         self.expired = true;
+        self.lapse = Some(lapse);
     }
 
     fn settle(&mut self, now_ms: u64) {
@@ -445,6 +476,7 @@ impl SpendGate {
                 self.generation = self.generation.wrapping_add(1);
                 self.open = None;
                 self.expired = true;
+                self.lapse = None;
             }
         }
         if let Some(p) = &self.pending {
@@ -452,6 +484,7 @@ impl SpendGate {
                 self.generation = self.generation.wrapping_add(1);
                 self.pending = None;
                 self.expired = true;
+                self.lapse = Some(Lapse::Expired);
             }
         }
     }
@@ -493,6 +526,7 @@ impl SpendGate {
         };
         SpendView {
             state,
+            lapse: if state == SpendState::Expired { self.lapse } else { None },
             basis: self.open.map(|(_, b)| b),
             open_until_ms: self.open.map(|(u, _)| u),
             pending: self.pending.clone(),
@@ -511,18 +545,43 @@ pub struct ElevationReply {
 }
 
 impl ElevationReply {
-    pub fn into_elevation(self) -> Result<Elevation, ActionError> {
+    /// `owner_config` is the node's `konsensus.toml` when this app knows it
+    /// (the node it launched, or an attached external node). A node that names
+    /// no config in its command gets it appended, so the owner can run the
+    /// command from any directory.
+    pub fn into_elevation(self, owner_config: Option<&std::path::Path>) -> Result<Elevation, ActionError> {
         if self.op_id.is_empty() || self.op_id.len() > 64 || !self.op_id.chars().all(|c| c.is_ascii_hexdigit()) {
             return Err(ActionError::node("the node returned an unexpected operation id"));
         }
         let owner_can_grant = self.owner_action.trim_start().starts_with("konsensus grant");
+        let mut owner_action = self.owner_action;
+        if owner_action.trim() == format!("konsensus grant --op {}", self.op_id) {
+            if let Some(path) = owner_config.and_then(config_arg) {
+                owner_action = format!("{} --config {path}", owner_action.trim());
+            }
+        }
         Ok(Elevation {
             op_id: self.op_id,
             expires_at_ms: (self.expires_at.max(0) as u64).saturating_mul(1000),
-            owner_action: self.owner_action.chars().take(600).collect(),
+            owner_action: owner_action.chars().take(600).collect(),
             owner_can_grant,
         })
     }
+}
+
+/// An absolute config path, single-quoted for a POSIX shell. None for a
+/// relative path or one with characters no owner should be asked to paste.
+fn config_arg(path: &std::path::Path) -> Option<String> {
+    let text = path.to_str()?;
+    if !path.is_absolute()
+        || text.chars().any(|c| {
+            c.is_control()
+                || matches!(c, '\u{061C}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}')
+        })
+    {
+        return None;
+    }
+    Some(format!("'{}'", text.replace('\'', "'\\''")))
 }
 
 /// `GET /pair/elevation/:op_id` → `status`.
@@ -1441,7 +1500,7 @@ mod tests {
             owner_action: "konsensus grant --op ab12".into(),
         };
         let mut gate = SpendGate::default();
-        gate.set_pending(reply.into_elevation().unwrap());
+        gate.set_pending(reply.into_elevation(None).unwrap());
         assert_eq!(gate.view(99_999).state, SpendState::Pending);
         assert_eq!(gate.check(99_999).unwrap_err().code, "spend_locked");
         assert_eq!(gate.view(100_000).state, SpendState::Expired);
@@ -1451,14 +1510,52 @@ mod tests {
             expires_at: 100,
             owner_action: "unavailable in this deployment: …".into(),
         };
-        gate.set_pending(sidecar.into_elevation().unwrap());
+        gate.set_pending(sidecar.into_elevation(None).unwrap());
         let view = gate.view(0);
         assert_eq!(view.state, SpendState::Unavailable);
         assert!(!view.pending.unwrap().owner_can_grant);
 
         let hostile = ElevationReply { op_id: "../x".into(), expires_at: 1, owner_action: String::new() };
-        assert!(hostile.into_elevation().is_err());
+        assert!(hostile.into_elevation(None).is_err());
         assert!(elevation_status_path("../../payments").is_err());
+    }
+
+    #[test]
+    fn a_lapsed_request_says_why_until_the_next_ask() {
+        let pending = |op: &str| ElevationReply { op_id: op.into(), expires_at: 100, owner_action: format!("konsensus grant --op {op}") }
+            .into_elevation(None)
+            .unwrap();
+        let mut gate = SpendGate::default();
+        gate.set_pending(pending("ab12"));
+        gate.pending_expired(Lapse::Lost);
+        let view = gate.view(0);
+        assert_eq!((view.state, view.lapse), (SpendState::Expired, Some(Lapse::Lost)));
+        gate.set_pending(pending("ab13"));
+        assert_eq!(gate.view(0).lapse, None);
+        // Running out on the app's clock is an expiry too.
+        assert_eq!(gate.view(100_000).lapse, Some(Lapse::Expired));
+        gate.lock();
+        assert_eq!(gate.view(100_000).lapse, None);
+
+        assert_eq!(Lapse::from_status("lost"), Some(Lapse::Lost));
+        assert_eq!(Lapse::from_status("absent"), Some(Lapse::Lost));
+        assert_eq!(Lapse::from_status("expired"), Some(Lapse::Expired));
+        assert_eq!(Lapse::from_status("pending"), None);
+        assert_eq!(Lapse::from_status("granted"), None);
+    }
+
+    #[test]
+    fn only_a_safe_absolute_config_is_added_to_the_owner_command() {
+        let reply = |action: &str| ElevationReply { op_id: "ab12".into(), expires_at: 1, owner_action: action.into() };
+        let with = |action: &str, config: &str| reply(action).into_elevation(Some(std::path::Path::new(config))).unwrap().owner_action;
+        assert_eq!(with("konsensus grant --op ab12", "/n/konsensus.toml"), "konsensus grant --op ab12 --config '/n/konsensus.toml'");
+        // Relative, or with characters that could rewrite what the owner sees: left out.
+        assert_eq!(with("konsensus grant --op ab12", "n/konsensus.toml"), "konsensus grant --op ab12");
+        assert_eq!(with("konsensus grant --op ab12", "/n/\u{202E}lmot.toml"), "konsensus grant --op ab12");
+        assert_eq!(with("konsensus grant --op ab12", "/n/\nx.toml"), "konsensus grant --op ab12");
+        // Only the bare command of THIS request is extended.
+        assert_eq!(with("konsensus grant --op cd34", "/n/konsensus.toml"), "konsensus grant --op cd34");
+        assert_eq!(with("unavailable in this deployment", "/n/konsensus.toml"), "unavailable in this deployment");
     }
 
     #[test]

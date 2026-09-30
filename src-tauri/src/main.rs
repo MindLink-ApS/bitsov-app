@@ -1965,16 +1965,41 @@ async fn put_front_door(state: &NodeState, body: serde_json::Value) -> Result<St
     Ok(text)
 }
 
+/// The node's `konsensus.toml` when this app knows it: an attached external
+/// node's, else the one it started. Only ever shown in an owner command.
+fn owner_config(state: &NodeState) -> Option<PathBuf> {
+    let external = state.external_node.lock().unwrap().as_ref().map(|dir| dir.join("konsensus.toml"));
+    external.or_else(|| state.config.lock().unwrap().clone())
+}
+
+/// Whether the node still waits on this request. A request the node reports
+/// over (expired, or lost to a restart) is not reused; an unreadable status
+/// keeps the request, since the owner may be approving it right now.
+async fn front_door_ask_alive(state: &NodeState, ask: &act::Elevation) -> bool {
+    let Ok(path) = act::elevation_status_path(&ask.op_id) else { return false };
+    match call_api(state, reqwest::Method::GET, &path, None).await {
+        Ok((code, body)) if code.is_success() => decode_act::<act::ElevationStatusReply>("/pair/elevation", &body)
+            .map(|r| act::Lapse::from_status(&r.status).is_none())
+            .unwrap_or(true),
+        _ => true,
+    }
+}
+
 /// One pending `front_door` request at a time; the owner's words, verbatim.
 async fn ask_front_door_owner(state: &NodeState) -> String {
-    let current = state.front_door_ask.lock().unwrap().clone();
-    let pending = match current.filter(|e| e.expires_at_ms > now_ms()) {
+    let mut current = state.front_door_ask.lock().unwrap().clone().filter(|e| e.expires_at_ms > now_ms());
+    if let Some(ask) = &current {
+        if !front_door_ask_alive(state, ask).await {
+            current = None;
+        }
+    }
+    let pending = match current {
         Some(e) => Ok(e),
         None => {
             let ask = serde_json::json!({ "scopes": ["front_door"] });
             match call_api(state, reqwest::Method::POST, "/pair/elevation-request", Some(ask)).await {
                 Ok((code, body)) if code.is_success() => decode_act::<act::ElevationReply>("/pair/elevation-request", &body)
-                    .and_then(|r| r.into_elevation())
+                    .and_then(|r| r.into_elevation(owner_config(state).as_deref()))
                     .map_err(|e| e.message),
                 Ok((code, body)) => Err(api_error("/pair/elevation-request", code, &body)),
                 Err(e) => Err(e),
@@ -1988,7 +2013,7 @@ async fn ask_front_door_owner(state: &NodeState) -> String {
                 format!(
                     "{FRONT_DOOR_OWNER}: Publishing your front door needs your permission at the node \
                      (it allows the card only: no spending, nothing else). On the node's computer run: \
-                     {} Then press Publish again.",
+                     {} It asks for the short code your node's terminal shows. Then press Publish again.",
                     e.owner_action
                 )
             } else {
@@ -3424,14 +3449,16 @@ async fn spend_advance_for(state: &NodeState, want: Option<Want>) -> Result<act:
                         }
                         *state.node_grant.lock().unwrap() = node.clone();
                     }
-                    "expired" | "absent" => {
+                    // Over without a grant: expired, or lost to a node restart
+                    // (the node's owner code lived in memory). Never wait out a
+                    // request nothing can approve; the owner asks again.
+                    status => if let Some(lapse) = act::Lapse::from_status(status) {
                         let mut gate = state.spend.lock().unwrap();
                         if gate.matches_poll(generation, &pending, now_ms()) {
-                            gate.pending_expired();
+                            gate.pending_expired(lapse);
                             *state.wants.lock().unwrap() = Wants::default();
                         }
                     },
-                    _ => {}
                 }
             } else if let Some(want) = want {
                 let mut ask = serde_json::json!({ "scopes": ["spend"] });
@@ -3447,7 +3474,7 @@ async fn spend_advance_for(state: &NodeState, want: Option<Want>) -> Result<act:
                     return Err(ActionError::node(api_error("/pair/elevation-request", status, &body)));
                 }
                 let reply: act::ElevationReply = decode_act("/pair/elevation-request", &body)?;
-                let pending = reply.into_elevation()?;
+                let pending = reply.into_elevation(owner_config(state).as_deref())?;
                 let mut gate = state.spend.lock().unwrap();
                 if gate.generation() == generation && pending.expires_at_ms > now_ms() {
                     gate.set_pending(pending);
@@ -7743,6 +7770,100 @@ mod control_act_tests {
         assert!(node.posts().is_empty());
     }
 
+    /// A node that numbers each elevation request and reports `status` for all.
+    fn asking_node(status: &'static str, owner_action: &'static str) -> Routes {
+        let asks = Arc::new(AtomicUsize::new(0));
+        let far = now_unix() + 900;
+        Arc::new(move |m: &str, path: &str, b: &str| {
+            let v = match path {
+                "/pair/elevation-request" => {
+                    let n = asks.fetch_add(1, Ordering::SeqCst) + 1;
+                    let op = format!("ab{n:02}");
+                    serde_json::json!({"op_id": op, "expires_at": far, "owner_action": owner_action.replace("{op}", &op)})
+                }
+                p if p.starts_with("/pair/elevation/") => serde_json::json!({"status": status}),
+                "/front-door" => return (403, "token lacks required scope: front_door".into()),
+                r if r.starts_with("/pair/challenge") => serde_json::json!({"challenge": "bitsov-pair-token-v1:00ff"}),
+                "/pair/token" => serde_json::json!({"token": "tok.2", "expires_at": far, "scopes": ["read", "receive"]}),
+                _ => return happy()(m, path, b),
+            };
+            (200, v.to_string())
+        })
+    }
+
+    #[tokio::test]
+    async fn a_request_the_node_lost_in_a_restart_offers_ask_again_instead_of_waiting() {
+        let (node, _dir) = paired_fake(asking_node("lost", "konsensus grant --op {op}"));
+        let view = spend_advance(&node.state, true).await.unwrap();
+        assert_eq!((view.state, view.lapse), (act::SpendState::Pending, None));
+        let first = view.pending.unwrap().op_id;
+
+        // The node restarted: its owner code is gone, and it says so.
+        let view = spend_advance(&node.state, false).await.unwrap();
+        assert_eq!((view.state, view.lapse), (act::SpendState::Expired, Some(act::Lapse::Lost)));
+        assert!(view.pending.is_none(), "never wait on a request nothing can approve");
+        assert_eq!(do_message_send(&node.state, A, false, "gm", 7000, None).await.unwrap_err().code, "spend_expired");
+
+        // Ask again: a fresh request, and the lapse note clears.
+        let view = spend_advance(&node.state, true).await.unwrap();
+        assert_eq!((view.state, view.lapse), (act::SpendState::Pending, None));
+        assert_ne!(view.pending.unwrap().op_id, first);
+        let asks = node.posts().into_iter().filter(|(p, _)| p == "/pair/elevation-request").count();
+        assert_eq!(asks, 2);
+    }
+
+    #[tokio::test]
+    async fn an_expired_or_forgotten_request_also_offers_ask_again() {
+        for (status, lapse) in [("expired", act::Lapse::Expired), ("absent", act::Lapse::Lost)] {
+            let (node, _dir) = paired_fake(asking_node(status, "konsensus grant --op {op}"));
+            spend_advance(&node.state, true).await.unwrap();
+            let view = spend_advance(&node.state, false).await.unwrap();
+            assert_eq!((view.state, view.lapse), (act::SpendState::Expired, Some(lapse)), "{status}");
+        }
+        // Still pending on the node: keep waiting, no lapse.
+        let (node, _dir) = paired_fake(asking_node("pending", "konsensus grant --op {op}"));
+        spend_advance(&node.state, true).await.unwrap();
+        let view = spend_advance(&node.state, false).await.unwrap();
+        assert_eq!((view.state, view.lapse), (act::SpendState::Pending, None));
+    }
+
+    #[tokio::test]
+    async fn front_door_publish_asks_again_when_the_node_lost_the_request() {
+        let (node, _dir) = paired_fake(asking_node("lost", "konsensus grant --op {op}"));
+        let body = serde_json::json!({"display_name": "Ada"});
+        let err = put_front_door(&node.state, body.clone()).await.unwrap_err();
+        assert!(err.contains("konsensus grant --op ab01"), "{err}");
+        // The node restarted in between: Publish shows a new, approvable command.
+        let err = put_front_door(&node.state, body).await.unwrap_err();
+        assert!(err.contains("konsensus grant --op ab02") && !err.contains("ab01"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn front_door_publish_reuses_a_request_the_node_still_waits_on() {
+        let (node, _dir) = paired_fake(asking_node("pending", "konsensus grant --op {op}"));
+        let body = serde_json::json!({"display_name": "Ada"});
+        put_front_door(&node.state, body.clone()).await.unwrap_err();
+        let err = put_front_door(&node.state, body).await.unwrap_err();
+        assert!(err.contains("konsensus grant --op ab01"), "{err}");
+        assert_eq!(node.posts().into_iter().filter(|(p, _)| p == "/pair/elevation-request").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn the_owner_command_names_the_nodes_config_when_the_node_does_not() {
+        let (node, _dir) = paired_fake(asking_node("pending", "konsensus grant --op {op}"));
+        *node.state.config.lock().unwrap() = Some(PathBuf::from("/Users/o'neil/Bitsov Node/konsensus.toml"));
+        let view = spend_advance(&node.state, true).await.unwrap();
+        assert_eq!(
+            view.pending.unwrap().owner_action,
+            r"konsensus grant --op ab01 --config '/Users/o'\''neil/Bitsov Node/konsensus.toml'"
+        );
+        // A node that already names its config is shown verbatim.
+        let (node, _dir) = paired_fake(asking_node("pending", "konsensus grant --op {op} --config /srv/n/konsensus.toml"));
+        *node.state.config.lock().unwrap() = Some(PathBuf::from("/elsewhere/konsensus.toml"));
+        let view = spend_advance(&node.state, true).await.unwrap();
+        assert_eq!(view.pending.unwrap().owner_action, "konsensus grant --op ab01 --config /srv/n/konsensus.toml");
+    }
+
     #[tokio::test]
     async fn a_paired_node_is_asked_and_the_owners_grant_opens_the_window() {
         let polls = Arc::new(AtomicUsize::new(0));
@@ -7766,7 +7887,9 @@ mod control_act_tests {
         let view = spend_advance(&node.state, true).await.unwrap();
         assert_eq!(view.state, act::SpendState::Pending);
         let pending = view.pending.unwrap();
-        assert_eq!(pending.owner_action, "konsensus grant --op ab12");
+        // The node named no config; the app adds the one it started the node with.
+        let config = node.state.config.lock().unwrap().clone().unwrap();
+        assert_eq!(pending.owner_action, format!("konsensus grant --op ab12 --config '{}'", config.display()));
         assert_eq!(node.posts()[0], ("/pair/elevation-request".to_string(), serde_json::json!({"scopes": ["spend"]})));
         assert_eq!(do_message_send(&node.state, A, false, "gm", 7000, None).await.unwrap_err().code, "spend_locked");
 

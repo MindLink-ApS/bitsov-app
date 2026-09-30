@@ -429,9 +429,14 @@ export type Elevation = {
   owner_can_grant: boolean;
 };
 
+/** Why the last request ended without a grant. `lost`: the node restarted (or cancelled it) and can no longer approve it. */
+export type SpendLapse = 'expired' | 'lost';
+
 /** `spend_status` / `spend_request` / `spend_lock`. */
 export type SpendView = {
   state: SpendState;
+  /** Set with `expired` when a request ended ungranted: offer Ask again. */
+  lapse?: SpendLapse | null;
   basis: SpendBasis | null;
   open_until_ms: number | null;
   pending: Elevation | null;

@@ -22,7 +22,7 @@ const paired: PairingView = {
 
 type Call = { cmd: string; args: Record<string, unknown> | undefined };
 
-function stubHost() {
+function stubHost(overrides: Record<string, (args?: Record<string, unknown>) => unknown> = {}) {
   const calls: Call[] = [];
   const callbacks = new Map<number, (e: unknown) => void>();
   // The host's socket state (`live_link`). Opening it here emits nothing, like a
@@ -74,6 +74,7 @@ function stubHost() {
     },
     'plugin:event|listen': () => 1,
     'plugin:event|unlisten': () => null,
+    ...overrides,
   };
   vi.stubGlobal('__TAURI_INTERNALS__', {
     transformCallback: (cb: (e: unknown) => void) => {
@@ -122,6 +123,29 @@ describe('control center shell', () => {
     expect(mount.querySelector('.rail')).not.toBeNull();
     expect(mount.querySelector('[data-panel="wallet"]')).toBeNull();
     expect(new Set(calls.map((c) => c.cmd))).toEqual(new Set(['node_status', 'pairing_status']));
+  });
+
+  it('offers Ask again when the node lost the pending request in a restart', async () => {
+    const cmd = "konsensus grant --op ab02 --config '/Users/owner/node/konsensus.toml'";
+    const { calls } = stubHost({
+      spend_status: () => ({ state: 'expired', lapse: 'lost', basis: null, open_until_ms: null, pending: null, window_ms: 600_000 }),
+      spend_request: () => ({
+        state: 'pending', lapse: null, basis: null, open_until_ms: null, window_ms: 600_000,
+        pending: { op_id: 'ab02', expires_at_ms: Date.now() + 900_000, owner_action: cmd, owner_can_grant: true },
+      }),
+    });
+    start();
+    await vi.waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
+    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
+
+    await vi.waitFor(() => expect(mount.querySelector('[data-spend-lapse="lost"]')).not.toBeNull());
+    expect(mount.querySelector('[data-spend-lapse]')?.textContent).toContain('restarted');
+    expect(calls.some((c) => c.cmd === 'spend_request')).toBe(false);
+
+    click('[data-spend-ask-again]');
+    await vi.waitFor(() => expect(mount.querySelector('[data-approval="pending"] [data-owner-action]')?.textContent).toBe(cmd));
+    expect(mount.querySelector('[data-approval="pending"]')?.textContent).toContain('short code');
+    expect(calls.filter((c) => c.cmd === 'spend_request')).toHaveLength(1);
   });
 
   it('opens the shell after the gate: tracks, live stream, cost before send, nothing spent unasked', async () => {

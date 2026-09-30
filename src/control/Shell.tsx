@@ -3584,8 +3584,8 @@ function SpendBar(props: { spend: SpendView | null; error: string | undefined; n
           {(p) => (
             <div class="approval" data-approval="pending">
               <p>
-                <strong>Confirm at your node.</strong> Your node asks its owner to approve this app spending. Run this where
-                your node runs and type the phrase it prints:
+                <strong>Confirm at your node.</strong> Your node asks its owner to approve this app spending. Run this on
+                the node's computer. It shows the terms and asks for the short code your node's terminal shows:
               </p>
               <code class="address" data-owner-action>{p().owner_action}</code>
               <p class="hint">
@@ -3602,6 +3602,19 @@ function SpendBar(props: { spend: SpendView | null; error: string | undefined; n
               </p>
               <code class="address" data-owner-action>{p().owner_action}</code>
             </div>
+          )}
+        </Match>
+        <Match when={props.spend?.state === 'expired' && props.spend.lapse}>
+          {(lapse) => (
+            <p class="spend-line" data-spend-lapse={lapse()}>
+              <span class="dot" />{' '}
+              {lapse() === 'lost'
+                ? 'Your node can no longer approve that request (it restarted). Nothing was granted.'
+                : 'That request lapsed before it was approved. Nothing was granted.'}{' '}
+              <button type="button" class="link" data-spend-ask-again onClick={() => void props.actions.approve()}>
+                Ask again
+              </button>
+            </p>
           )}
         </Match>
         <Match when={true}>
@@ -3716,7 +3729,7 @@ function BudgetBar(props: {
           <div class="approval" data-approval="pending">
             <p>
               <strong>Confirm at your node.</strong> One approval lets messages pay for the next 24 hours, up to your app all-in payment limit.
-              Run this where your node runs and type the phrase it prints:
+              Run this on the node's computer. It shows the terms and asks for the short code your node's terminal shows:
             </p>
             <Show when={props.spend?.pending}>
               {(p) => <code class="address" data-owner-action>{p().owner_action}</code>}
@@ -3730,6 +3743,15 @@ function BudgetBar(props: {
               <strong>{props.budget.autopay.state === 'expired' ? 'Your daily approval ended.' : 'Let messages pay as you chat.'}</strong>{' '}
               Approve an app all-in payment limit for each rolling 24 hours. Inside it, each message pays its recipient’s own price with no prompt. Someone new always asks first.
             </p>
+            <Show when={props.spend?.lapse}>
+              {(lapse) => (
+                <p class="hint" data-budget-lapse={lapse()}>
+                  {lapse() === 'lost'
+                    ? 'Your node restarted, so your last request can no longer be approved. Approve again to ask again.'
+                    : 'Your last request lapsed before it was approved. Approve again to ask again.'}
+                </p>
+              )}
+            </Show>
             <div class="presets" role="radiogroup" aria-label="App all-in payments limit, rolling 24 hours">
               <For each={props.budget.presets}>
                 {(p) => (

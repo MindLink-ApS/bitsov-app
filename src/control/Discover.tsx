@@ -23,11 +23,11 @@ import {
 /** Host prefix of the error that asks the owner for `front_door` (main.rs `FRONT_DOOR_OWNER`). */
 const FRONT_DOOR_OWNER = 'front_door_owner:';
 
-/** Split the owner request into its text and the `konsensus grant --op <id>` command, if named. */
+/** Split the owner request into its text and the `konsensus grant --op <id> [--config <path>]` command, if named. */
 export function frontDoorOwnerAsk(message: string | null): { text: string; command: string | null } | null {
   if (!message?.startsWith(FRONT_DOOR_OWNER)) return null;
   const text = message.slice(FRONT_DOOR_OWNER.length).trim();
-  const command = /konsensus grant --op [0-9a-f]{1,64}/.exec(text)?.[0] ?? null;
+  const command = /konsensus grant --op [0-9a-f]{1,64}(?: --config (?:'(?:[^']|'\\'')*'|[\w/.+:@%,=-]+))?/.exec(text)?.[0] ?? null;
   return { text, command };
 }
 
