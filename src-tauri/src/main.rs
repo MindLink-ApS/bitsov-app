@@ -204,6 +204,9 @@ struct NodeState {
     device_policy: Mutex<device_key::Policy>,
     /// The last device registration lapsed (expired or cancelled at the node).
     device_lapsed: AtomicBool,
+    /// Serializes every write of the device record (status, register, cancel).
+    /// Held only around a load-compare-save, never across an await.
+    device_lifecycle: Mutex<()>,
     /// A pending console approval saved by an earlier run was loaded once.
     approvals_restored: AtomicBool,
 }
@@ -262,6 +265,7 @@ impl NodeState {
             front_door_ask: Mutex::new(None),
             device_policy: Mutex::new(device_key::Policy::Biometry),
             device_lapsed: AtomicBool::new(false),
+            device_lifecycle: Mutex::new(()),
             approvals_restored: AtomicBool::new(false),
             node_grant: Mutex::new(None),
             all_in_caps_node: Mutex::new(None),
@@ -4418,39 +4422,77 @@ async fn do_device_key_status(state: &NodeState) -> Result<device::DeviceView, A
 
 async fn do_device_key_status_local(state: &NodeState) -> Result<device::DeviceView, ActionError> {
     let store = device_store(state)?;
-    let Some((_, mut record)) = local_key(&store) else { return Ok(device_view(state, None)) };
-    if let Some(p) = record.pending.clone() {
+    let Some((_, record)) = local_key(&store) else { return Ok(device_view(state, None)) };
+    // What this poll found, applied only if the record is still the one polled.
+    let before = record.clone();
+    let mut updated = record;
+    let mut lapsed = None;
+    if let Some(p) = updated.pending.clone() {
         let path = format!("/pair/device-key/{}", p.op_id);
         if act::elevation_status_path(&p.op_id).is_err() {
-            record.pending = None;
+            updated.pending = None;
         } else if let Ok((code, body)) = call_api(state, reqwest::Method::GET, &path, None).await {
             if code.is_success() {
                 let reply: act::ElevationStatusReply = decode_act("/pair/device-key", &body)?;
-                match reply.status.as_str() {
-                    "registered" => {
-                        record.registered = true;
-                        record.pending = None;
-                        state.device_lapsed.store(false, Ordering::SeqCst);
-                    }
-                    "expired" | "lost" | "absent" => {
-                        record.pending = None;
-                        state.device_lapsed.store(true, Ordering::SeqCst);
-                    }
-                    _ => {}
-                }
-                device::save_record(&store, &record)?;
+                lapsed = apply_device_status(&mut updated, &reply.status);
             }
         }
-    } else if record.registered {
+    } else if updated.registered {
         // The owner may have revoked it at the node.
-        if let (Ok(binding), Some(key_id)) = (device_binding(state).await, record.key_id.clone()) {
+        if let (Ok(binding), Some(key_id)) = (device_binding(state).await, updated.key_id.clone()) {
             if !binding.device_keys.iter().any(|k| k.key_id == key_id) {
-                record.registered = false;
-                device::save_record(&store, &record)?;
+                updated.registered = false;
             }
         }
     }
-    Ok(device_view(state, Some(&record)))
+    if updated == before {
+        return Ok(device_view(state, Some(&updated)));
+    }
+    match save_device_record_if(state, &store, &before, &updated, lapsed)? {
+        None => Ok(device_view(state, Some(&updated))),
+        // A Cancel or a new Set up landed while this poll waited: its reply is
+        // about a request that is no longer this Mac's. Drop it.
+        Some(current) => Ok(device_view(state, current.as_ref())),
+    }
+}
+
+/// A registration's node status applied to the record; returns the new
+/// "lapsed" flag when the status changes it.
+fn apply_device_status(record: &mut device::Record, status: &str) -> Option<bool> {
+    match status {
+        "registered" => {
+            record.registered = true;
+            record.pending = None;
+            Some(false)
+        }
+        "expired" | "lost" | "absent" => {
+            record.pending = None;
+            Some(true)
+        }
+        _ => None,
+    }
+}
+
+/// Save `updated` only if the record on disk is still `before`, with the
+/// compare and the save under the device-lifecycle lock that register and
+/// cancel also hold. `None` when saved, else the record now on disk.
+fn save_device_record_if(
+    state: &NodeState,
+    store: &Path,
+    before: &device::Record,
+    updated: &device::Record,
+    lapsed: Option<bool>,
+) -> Result<Option<Option<device::Record>>, ActionError> {
+    let _guard = state.device_lifecycle.lock().unwrap();
+    let current = device::load_record(store);
+    if current.as_ref() != Some(before) {
+        return Ok(Some(current));
+    }
+    device::save_record(store, updated)?;
+    if let Some(lapsed) = lapsed {
+        state.device_lapsed.store(lapsed, Ordering::SeqCst);
+    }
+    Ok(None)
 }
 
 /// Set up Touch ID approvals: create the enclave key (once), prove it to the
@@ -4473,9 +4515,12 @@ async fn do_device_key_register(state: &NodeState) -> Result<device::DeviceView,
                 .await
                 .map_err(|_| ActionError::new("device_key", "Creating the key stopped unexpectedly."))?
                 .map_err(device_error)?;
-            device::save_blob(&store, &blob)?;
             let record = device::Record { public_key: hex::encode(public), ..Default::default() };
-            device::save_record(&store, &record)?;
+            {
+                let _guard = state.device_lifecycle.lock().unwrap();
+                device::save_blob(&store, &blob)?;
+                device::save_record(&store, &record)?;
+            }
             (blob, record)
         }
     };
@@ -4505,8 +4550,11 @@ async fn do_device_key_register(state: &NodeState) -> Result<device::DeviceView,
         owner_action: reply.owner_action.chars().take(600).collect(),
         expires_at_ms: (reply.expires_at.max(0) as u64).saturating_mul(1000),
     });
-    device::save_record(&store, &record)?;
-    state.device_lapsed.store(false, Ordering::SeqCst);
+    {
+        let _guard = state.device_lifecycle.lock().unwrap();
+        device::save_record(&store, &record)?;
+        state.device_lapsed.store(false, Ordering::SeqCst);
+    }
     Ok(device_view(state, Some(&record)))
 }
 
@@ -4518,8 +4566,14 @@ async fn do_device_key_cancel(state: &NodeState) -> Result<device::DeviceView, A
         if act::elevation_status_path(&p.op_id).is_ok() {
             withdraw_at_node(state, &format!("/pair/device-key/{}", p.op_id)).await?;
         }
-        record.pending = None;
-        device::save_record(&store, &record)?;
+        let _guard = state.device_lifecycle.lock().unwrap();
+        // Clear only the request that was withdrawn at the node.
+        let mut current = device::load_record(&store).unwrap_or_default();
+        if current.pending.as_ref().map(|c| &c.op_id) == Some(&p.op_id) {
+            current.pending = None;
+            device::save_record(&store, &current)?;
+        }
+        record = current;
     }
     state.device_lapsed.store(false, Ordering::SeqCst);
     Ok(device_view(state, Some(&record)))
@@ -9296,6 +9350,72 @@ mod control_act_tests {
         assert_eq!(err.code, "device_approvals_off");
         assert!(err.message.contains("type its recovery-phrase password"), "{}", err.message);
         assert!(dn.intents.lock().unwrap().is_empty());
+    }
+
+    /// Codex app#90: a status poll of request aa01 is still waiting on the node
+    /// when the owner cancels and sets up again (aa02). The delayed reply must
+    /// not write aa01 back, nor clear aa02, in either direction.
+    #[test]
+    fn a_stale_status_reply_cannot_overwrite_a_newer_registration() {
+        let (node, _dir) = paired_fake(happy());
+        let s = &node.state;
+        let store = device_store(s).unwrap();
+        let pending = |op: &str| device::Record {
+            public_key: "04ab".into(),
+            key_id: Some("k1".into()),
+            fingerprint: Some("K1K1-0000".into()),
+            registered: false,
+            pending: Some(device::PendingRegistration {
+                op_id: op.into(),
+                owner_action: format!("konsensus device approve --op {op}"),
+                expires_at_ms: u64::MAX,
+            }),
+        };
+        for reply in ["pending", "expired", "absent", "registered"] {
+            device::save_record(&store, &pending("aa01")).unwrap();
+            // The poll snapshots aa01 and waits on the node...
+            let polled = device::load_record(&store).unwrap();
+            // ...meanwhile Cancel and a new Set up store aa02.
+            device::save_record(&store, &pending("aa02")).unwrap();
+            // The delayed reply about aa01 arrives.
+            let mut updated = polled.clone();
+            let lapsed = apply_device_status(&mut updated, reply);
+            let outcome = save_device_record_if(s, &store, &polled, &updated, lapsed).unwrap();
+            assert!(outcome.is_some(), "{reply}: a stale reply is dropped");
+            assert_eq!(device::load_record(&store), Some(pending("aa02")), "{reply}: aa02 survives");
+        }
+        // POSITIVE CONTROL: with nothing in between, the reply is applied.
+        device::save_record(&store, &pending("aa02")).unwrap();
+        let polled = device::load_record(&store).unwrap();
+        let mut updated = polled.clone();
+        let lapsed = apply_device_status(&mut updated, "registered");
+        assert!(save_device_record_if(s, &store, &polled, &updated, lapsed).unwrap().is_none());
+        assert!(device::load_record(&store).unwrap().registered);
+    }
+
+    /// The compare and the save share the lock register and cancel hold: a
+    /// writer holding it makes the poll wait, then see the newer record.
+    #[test]
+    fn the_status_save_waits_for_the_device_lifecycle_lock() {
+        let (node, _dir) = paired_fake(happy());
+        let s = Arc::new(node);
+        let store = device_store(&s.state).unwrap();
+        let aa01 = device::Record { public_key: "04ab".into(), key_id: Some("aa01".into()), ..Default::default() };
+        let aa02 = device::Record { public_key: "04cd".into(), key_id: Some("aa02".into()), ..Default::default() };
+        device::save_record(&store, &aa01).unwrap();
+        let guard = s.state.device_lifecycle.lock().unwrap();
+        let (s2, store2, before) = (Arc::clone(&s), store.clone(), aa01.clone());
+        let poll = std::thread::spawn(move || {
+            let updated = device::Record { registered: true, ..before.clone() };
+            save_device_record_if(&s2.state, &store2, &before, &updated, Some(false)).unwrap()
+        });
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        // Holding the lock, a Set up replaces the record.
+        device::save_record(&store, &aa02).unwrap();
+        drop(guard);
+        let outcome = poll.join().unwrap();
+        assert_eq!(outcome, Some(Some(aa02.clone())), "the poll saw the newer record and saved nothing");
+        assert_eq!(device::load_record(&store), Some(aa02));
     }
 
     #[cfg(target_os = "macos")]

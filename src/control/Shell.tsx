@@ -3791,7 +3791,7 @@ function DeviceSetup(props: { device: DeviceView | null; now: number; actions: A
  * One contact's envelope, approved with Touch ID. The terms and the contact's
  * id show here before the tap, and the system dialog repeats them.
  */
-function TouchApproval(props: { peer: string; name: string; priceMsat: number | null; actions: Actions }) {
+export function TouchApproval(props: { peer: string; name: string; priceMsat: number | null; actions: Actions }) {
   const [busy, setBusy] = createSignal(false);
   const perAct = () => envelopePerAct(props.priceMsat);
   const approve = async () => {
@@ -3806,8 +3806,9 @@ function TouchApproval(props: { peer: string; name: string; priceMsat: number | 
   return (
     <div class="approval" data-touch-approval>
       <p>
-        <strong>Approve {props.name} with Touch ID.</strong> Up to {sats(ENVELOPE_BUDGET_MSAT)} sats a day to this contact, at
-        most {sats(perAct())} {satUnit(perAct())} per message, for 24 hours. Your node checks every payment against it.
+        <strong>Approve {props.name} with Touch ID.</strong> Up to <span data-touch-budget>{fmtAmount(ENVELOPE_BUDGET_MSAT)}</span> a
+        day to this contact, at most <span data-touch-per-act>{fmtAmount(perAct())}</span> per message, for 24 hours. Your node
+        checks every payment against it.
       </p>
       <p class="hint">
         Contact <code data-touch-peer>{shortId(props.peer)}</code>. Touch ID shows the same terms. Nothing else can be paid under it.
