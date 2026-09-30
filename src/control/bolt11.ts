@@ -1,14 +1,12 @@
-// A chat message whose whole body is a BOLT11 invoice: read it for display
-// only. Nothing here pays or trusts the text. The amount, purpose and expiry
-// are shown on a request card; paying still goes through the host's own
-// invoice_amount read, the Pay review and its one confirm tap. The payee is
-// always recovered from the signature for display. An `n` field is only
-// accepted when there is exactly one and it names that same key: the node's
-// parser pays the first `n`, so any other `n` could make the card name a node
-// the payment does not go to.
+// A chat message whose whole body is a BOLT11 invoice: a cheap shape filter
+// only. Nothing here pays, trusts the text or names a payee. What a request
+// card and the Pay review show (payee, amount, purpose, expiry) comes from the
+// host's `invoice_amount`, which decodes with the node's own parser and refuses
+// any non-canonical encoding. This file only decides which bodies are worth
+// asking the host about, and which are plain text with a note.
 
 import { MAX_PAYMENT_MSAT, MIN_PAYMENT_MSAT } from './amountInput';
-import { hex, recoverPubkey, sha256 } from './secp';
+import type { InvoiceAmount } from './types';
 
 /** Networks as the host names them (`act::bolt11_network`). */
 export type InvoiceNetwork = 'mainnet' | 'testnet' | 'signet' | 'regtest';
@@ -22,12 +20,6 @@ export type ChatInvoice = {
   purpose: string | null;
   /** Unix ms. */
   expiresAtMs: number;
-  /**
-   * The Lightning node the payment goes to (compressed pubkey, hex),
-   * recovered from the signature (and equal to the `n` field, if any).
-   * Whoever sent the message is not necessarily this node.
-   */
-  payee: string;
   /** The `p` field, hex: the same invoice however it is cased or prefixed. */
   paymentHash: string;
 };
@@ -77,7 +69,7 @@ export function readChatInvoice(body: string | null | undefined, nowMs: number, 
 
 type Decoded = Omit<ChatInvoice, 'msat'> & { msat: number | null };
 
-/** Decoding recovers a public key; message views re-read on every clock tick. */
+/** Message views re-read on every clock tick. */
 const cache = new Map<string, Decoded | null>();
 function decode(raw: string): Decoded | null {
   if (cache.has(raw)) return cache.get(raw)!;
@@ -94,11 +86,16 @@ export function invoicePaymentHash(text: string): string | null {
   return decode(t.replace(/^lightning:/i, ''))?.paymentHash ?? null;
 }
 
-/** The payee of any well-formed invoice (network, amount and expiry aside), or null. */
-export function invoicePayee(text: string): string | null {
-  const t = text.trim();
-  if (t.length > BODY_MAX || !INVOICE_LIKE.test(t)) return null;
-  return decode(t.replace(/^lightning:/i, ''))?.payee ?? null;
+/**
+ * Why the host's reading of an invoice is not payable here, or null when it
+ * is. The host decoded it; these are the same refusals as for the shape.
+ */
+export function hostReadProblem(read: InvoiceAmount, nowMs: number, homeNetwork: string | null): NotPayable | null {
+  if (homeNetwork !== null && read.network !== homeNetwork) return 'wrong_network';
+  if (!(read.amount_msat > 0)) return 'no_amount';
+  if (read.amount_msat < MIN_PAYMENT_MSAT || read.amount_msat > MAX_PAYMENT_MSAT) return 'out_of_bounds';
+  if (read.expires_at_ms <= nowMs) return 'expired';
+  return null;
 }
 
 function decodeUncached(raw: string): Decoded | null {
@@ -140,7 +137,7 @@ function decodeUncached(raw: string): Decoded | null {
   let expirySecs = 3600;
   let purpose: string | null = null;
   let hasHash = false;
-  const named: string[] = [];
+  let named = 0;
   let paymentHash: string | null = null;
   let at = 7;
   while (at < fields.length) {
@@ -155,7 +152,7 @@ function decodeUncached(raw: string): Decoded | null {
       hasHash = true;
       paymentHash ??= hex(toBytes(value)!.slice(0, 32));
     }
-    else if (type === 19) named.push(len === 53 ? hex(toBytes(value)!.slice(0, 33)) : ''); // n: payee node
+    else if (type === 19) named++; // n: payee node
     else if (type === 6) expirySecs = toInt(value); // x: expiry
     else if (type === 13) {
       // d: description, UTF-8
@@ -169,14 +166,9 @@ function decodeUncached(raw: string): Decoded | null {
     }
   }
   if (!hasHash || !paymentHash) return null;
-  // BOLT11 signs SHA-256(hrp ‖ data words as bytes, zero-padded).
-  const signed = new Uint8Array([...new TextEncoder().encode(hrp), ...toBytes(fields, true)!]);
-  const payee = recoverPubkey(sha256(signed), toBytes(data.slice(-104))!);
-  if (!payee) return null;
-  // One `n` naming the signer, or none. Parsers differ on which of several `n`
-  // they use (lightning-invoice: the first), so any other shape is refused.
-  if (named.length > 1 || (named.length === 1 && named[0] !== payee)) return null;
-  return { bolt11: s, msat, network, purpose, expiresAtMs: (timestamp + expirySecs) * 1000, payee, paymentHash };
+  // Parsers differ on which of several `n` they use; the host refuses them too.
+  if (named > 1) return null;
+  return { bolt11: s, msat, network, purpose, expiresAtMs: (timestamp + expirySecs) * 1000, paymentHash };
 }
 
 /**
@@ -197,8 +189,10 @@ function toInt(words: number[]): number {
   return words.reduce((acc, w) => acc * 32 + w, 0);
 }
 
-/** 5-bit words to bytes; trailing bits are dropped, or zero-padded to a byte with `pad`. */
-function toBytes(words: number[], pad = false): Uint8Array | null {
+const hex = (bytes: Uint8Array) => Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+
+/** 5-bit words to bytes; trailing bits are dropped. */
+function toBytes(words: number[]): Uint8Array | null {
   const out: number[] = [];
   let acc = 0;
   let bits = 0;
@@ -211,7 +205,6 @@ function toBytes(words: number[], pad = false): Uint8Array | null {
     }
     acc &= (1 << bits) - 1;
   }
-  if (pad && bits > 0) out.push((acc << (8 - bits)) & 0xff);
   return new Uint8Array(out);
 }
 

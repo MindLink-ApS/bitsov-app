@@ -501,7 +501,22 @@ export type RoomQuote = {
 };
 
 export type InvoiceView = { bolt11: string; amount_msat: number; note: string | null; expires_at_ms: number };
-export type InvoiceAmount = { amount_msat: number; network: string };
+/**
+ * The host's reading of an invoice (`invoice_amount`), decoded by the same
+ * parser the node pays with. The only source of a payee the app shows.
+ */
+export type InvoiceAmount = {
+  amount_msat: number;
+  network: string;
+  /** The node the payment goes to, compressed pubkey hex. */
+  payee: string;
+  expires_at_ms: number;
+  /** Canonical, lower case, no `lightning:`: what Pay sends. */
+  bolt11: string;
+  payment_hash: string;
+  /** The `d` field as written by the payee; null for a description hash. */
+  description: string | null;
+};
 export type PaymentReceipt = {
   max_routing_fee_msat?: number;
   method: 'invoice' | 'keysend';

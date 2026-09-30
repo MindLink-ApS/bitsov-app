@@ -1,8 +1,6 @@
-// Display-only crypto for a chat invoice's payee: SHA-256 and secp256k1
-// public-key recovery (BOLT11 signs with a recoverable signature). Nothing
-// here authorizes a payment: the node checks the invoice signature itself
-// before paying. Plain BigInt, no dependency; not constant-time (it only ever
-// handles public data).
+// Test-only crypto for signing BOLT11 fixtures: SHA-256 and secp256k1 point
+// arithmetic. The app does no key recovery: an invoice's payee comes only
+// from the host's decode. Plain BigInt, no dependency; not constant-time.
 
 const K = new Uint32Array([
   0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
@@ -122,25 +120,3 @@ export const toBig = (bytes: Uint8Array) => (bytes.length === 0 ? 0n : BigInt('0
 
 /** 33-byte compressed public key, hex. */
 export const compress = (p: NonNullable<Point>) => (p.y & 1n ? '03' : '02') + p.x.toString(16).padStart(64, '0');
-
-/**
- * The public key that made a recoverable signature (r ‖ s ‖ recovery id) over
- * this 32-byte digest, compressed hex; null when the signature is malformed.
- */
-export function recoverPubkey(digest: Uint8Array, sig: Uint8Array): string | null {
-  if (digest.length !== 32 || sig.length !== 65) return null;
-  const r = toBig(sig.slice(0, 32));
-  const s = toBig(sig.slice(32, 64));
-  const recid = sig[64];
-  if (recid > 3 || r <= 0n || r >= N || s <= 0n || s >= N) return null;
-  const x = r + (recid & 2 ? N : 0n);
-  if (x >= P) return null;
-  const alpha = mod(x * x * x + 7n, P);
-  let y = pow(alpha, (P + 1n) / 4n, P);
-  if ((y * y) % P !== alpha) return null;
-  if ((y & 1n) !== BigInt(recid & 1)) y = P - y;
-  const e = mod(toBig(digest), N);
-  const ri = inv(r, N);
-  const q = toAffine(jAdd(jMul(toJ(G), mod(-e * ri, N)), jMul([x, y, 1n], mod(s * ri, N))));
-  return q ? compress(q) : null;
-}

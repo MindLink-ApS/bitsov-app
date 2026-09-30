@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'solid-js/web';
 import App from '../src/App';
-import { BECH32_CHARSET, bech32Checksum, cleanPurpose, invoicePayee, payeeView, readChatInvoice } from '../src/control/bolt11';
-import { compress, G, N, pointMul, sha256, toBig } from '../src/control/secp';
-import type { SpendView } from '../src/control/types';
+import * as bolt11Module from '../src/control/bolt11';
+import { BECH32_CHARSET, bech32Checksum, cleanPurpose, payeeView, readChatInvoice } from '../src/control/bolt11';
+import { compress, G, N, pointMul, sha256, toBig } from './secp';
+import type { InvoiceAmount, SpendView } from '../src/control/types';
 
 // Demo gap 6: Request's invoice travels as an ordinary paid chat message, and
 // a received one renders as a request card whose Pay only opens the review.
@@ -89,8 +90,65 @@ function invoice(opts: { hrp?: string; purpose?: string | null; descBytes?: Uint
     ...(opts.payeeTags ?? []).flatMap((n) => tag(19, bytesToWords(Uint8Array.from(n.match(/../g)!.map((h) => parseInt(h, 16)))))),
   ];
   const all = [...data, ...sign(hrp, data, opts.key ?? MAYA_KEY)];
-  return hrp + '1' + [...all, ...bech32Checksum(hrp, all)].map((w) => BECH32_CHARSET[w]).join('');
+  const out = hrp + '1' + [...all, ...bech32Checksum(hrp, all)].map((w) => BECH32_CHARSET[w]).join('');
+  HOST_READS.set(out, hostReadOf(hrp, opts, desc));
+  return out;
 }
+
+// ---- a test stand-in for the host's `invoice_amount` ----
+// The real host decodes with lightning-invoice (src-tauri act.rs tests); here
+// each invoice this file signs is registered with what that decode returns.
+// Anything else is refused, as the host refuses what it cannot parse.
+
+const HOST_READS = new Map<string, Omit<InvoiceAmount, 'bolt11'> | null>();
+const HRP = /^ln(bcrt|bc|tbs|tb)(?:(\d+)([munp]?))?$/;
+const NET: Record<string, string> = { bc: 'mainnet', tb: 'testnet', tbs: 'signet', bcrt: 'regtest' };
+const UNIT: Record<string, number> = { '': 100_000_000_000, m: 100_000_000, u: 100_000, n: 100, p: 0.1 };
+
+function hostReadOf(hrp: string, opts: Parameters<typeof invoice>[0] & object, desc: Uint8Array | null): Omit<InvoiceAmount, 'bolt11'> | null {
+  const h = HRP.exec(hrp);
+  const signer = pubOf(opts.key ?? MAYA_KEY);
+  const tags = opts.payeeTags ?? [];
+  // lightning-invoice checks the signature against the first n; this file never writes two.
+  if (!h || !h[2] || opts.hash === false || tags.length > 1 || (tags.length === 1 && tags[0] !== signer)) return null;
+  let description: string | null = null;
+  try {
+    description = desc === null ? null : new TextDecoder('utf-8', { fatal: true }).decode(desc);
+  } catch {
+    return null;
+  }
+  return {
+    amount_msat: Math.round(Number(h[2]) * UNIT[h[3]]),
+    network: NET[h[1]],
+    payee: signer,
+    expires_at_ms: ((opts.at ?? NOW_S) + (opts.expiry ?? 3600)) * 1000,
+    payment_hash: (opts.hashByte ?? 7).toString(16).padStart(2, '0').repeat(32),
+    description,
+  };
+}
+
+const HOST_REFUSAL = { code: 'invalid', message: 'That is not a valid Lightning invoice.' };
+function hostDecode(text: string): InvoiceAmount {
+  const bolt11 = text.trim().toLowerCase().replace(/^lightning:/, '');
+  const read = HOST_READS.get(bolt11);
+  if (!read) throw HOST_REFUSAL;
+  return { ...read, bolt11 };
+}
+
+/**
+ * Codex #85 delta 2: a regtest invoice signed by CANONICAL_PAYEE, and three
+ * re-encodings (a set padding bit in p, a leading zero word in c and in the
+ * features) that the node's parser reads as that same invoice while their raw
+ * words recover other keys. The real host refuses all three (act.rs tests).
+ */
+const CANONICAL_PAYEE = '031b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f';
+const NONCANONICAL = [
+  'lnbcrt210n1p45n5sqdq2v35kumn9wgpp5vj92t3telvc08zhhgnvh6mkggrr6jynh5jv6p4uq70nnznk2py93sp5qszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszq9qrsgqcqpjgpd0vndshg0682c4gpxyde0sr785uz9eqc36yjugphpzpkn55zmy6v4nszm0ym8vqwvgrp4jh9us9d593yftaz5sgxwyxyf9z0hmsnsq3ul59u',
+  'lnbcrt210n1p45n5sqdq2v35kumn9wgpp5vj92t3telvc08zhhgnvh6mkggrr6jynh5jv6p4uq70nnznk2py9ssp5qszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszq9qrsgqcqzqjgpd0vndshg0682c4gpxyde0sr785uz9eqc36yjugphpzpkn55zmy6v4nszm0ym8vqwvgrp4jh9us9d593yftaz5sgxwyxyf9z0hmsnsq53y0av',
+  'lnbcrt210n1p45n5sqdq2v35kumn9wgpp5vj92t3telvc08zhhgnvh6mkggrr6jynh5jv6p4uq70nnznk2py9ssp5qszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszq9qyqsgqcqpjgpd0vndshg0682c4gpxyde0sr785uz9eqc36yjugphpzpkn55zmy6v4nszm0ym8vqwvgrp4jh9us9d593yftaz5sgxwyxyf9z0hmsnsqfvef43',
+];
+/** When the fixtures (timestamp 1_800_000_000) are still unexpired. */
+const FIXTURE_NOW = 1_800_000_000_000 + 1000;
 
 const NOW = Date.now();
 
@@ -99,7 +157,7 @@ describe('reading a chat invoice', () => {
     const coffee =
       'lnbc2500u1pvjluezpp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqdq5xysxxatsyp3k7enxv4jsxqzpuaztrnwngzn3kdzw5hydlzf03qdgm2hdq27cqv3agm2awhz5se903vruatfhq77w3ls4evs3ch9zw97j25emudupq63nyw24cg27h2rspfj9srp';
     const r = readChatInvoice(coffee, 1496314658_000, 'mainnet');
-    expect(r).toEqual({ ok: true, invoice: { bolt11: coffee, msat: 250_000_000, network: 'mainnet', purpose: '1 cup coffee', expiresAtMs: 1496314718_000, payee: '03e7156ae33b0a208d0744199163177e909e80176e55d97a2f221ede0f934dd9ad', paymentHash: '0001020304050607080900010203040506070809000102030405060708090102' } });
+    expect(r).toEqual({ ok: true, invoice: { bolt11: coffee, msat: 250_000_000, network: 'mainnet', purpose: '1 cup coffee', expiresAtMs: 1496314718_000, paymentHash: '0001020304050607080900010203040506070809000102030405060708090102' } });
     // The same invoice a minute later, and on a regtest node.
     expect(readChatInvoice(coffee, 1496314718_000, 'mainnet')).toEqual({ ok: false, reason: 'expired' });
     expect(readChatInvoice(coffee, 1496314658_000, 'regtest')).toEqual({ ok: false, reason: 'wrong_network' });
@@ -111,58 +169,60 @@ describe('reading a chat invoice', () => {
     expect(readChatInvoice(donation, 1496314658_000, 'mainnet')).toEqual({ ok: false, reason: 'no_amount' });
   });
 
-  it('reads the payee from the signature; an n field must be the one signer', () => {
-    const coffee =
-      'lnbc2500u1pvjluezpp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqdq5xysxxatsyp3k7enxv4jsxqzpuaztrnwngzn3kdzw5hydlzf03qdgm2hdq27cqv3agm2awhz5se903vruatfhq77w3ls4evs3ch9zw97j25emudupq63nyw24cg27h2rspfj9srp';
-    // The spec's payee for every example invoice.
-    expect(invoicePayee(coffee)).toBe('03e7156ae33b0a208d0744199163177e909e80176e55d97a2f221ede0f934dd9ad');
-    expect(readChatInvoice(invoice(), NOW, 'regtest')).toMatchObject({ ok: true, invoice: { payee: pubOf(MAYA_KEY) } });
-    expect(readChatInvoice(invoice({ key: STRANGER_KEY }), NOW, 'regtest')).toMatchObject({ ok: true, invoice: { payee: pubOf(STRANGER_KEY) } });
+  // Codex #85 delta 2: the node hashes its canonical re-serialization, so a
+  // payee recovered from raw words can differ from the one it pays. The shape
+  // filter therefore names no payee at all; only the host's decode does.
+  it('never names a payee: not for canonical, non-canonical or n-carrying invoices', () => {
+    expect('invoicePayee' in bolt11Module).toBe(false);
     const maya = pubOf(MAYA_KEY);
-    const stranger = pubOf(STRANGER_KEY);
-    expect(readChatInvoice(invoice({ payeeTags: [maya] }), NOW, 'regtest')).toMatchObject({ ok: true, invoice: { payee: maya } });
-    // Fable #85 F1: an n that is not the signer is not an invoice, whatever it names.
-    expect(readChatInvoice(invoice({ payeeTags: [stranger] }), NOW, 'regtest')).toEqual({ ok: false, reason: 'invalid' });
-    expect(invoicePayee(invoice({ payeeTags: [stranger] }))).toBeNull();
-    // Codex #85 P1: more than one n, even with the signer first, is not an invoice.
-    expect(readChatInvoice(invoice({ payeeTags: [maya, stranger] }), NOW, 'regtest')).toEqual({ ok: false, reason: 'invalid' });
-    expect(readChatInvoice(invoice({ payeeTags: [stranger, maya] }), NOW, 'regtest')).toEqual({ ok: false, reason: 'invalid' });
+    for (const body of [invoice(), invoice({ key: STRANGER_KEY }), invoice({ payeeTags: [maya] }), invoice({ payeeTags: [pubOf(STRANGER_KEY)] }), ...NONCANONICAL]) {
+      const r = readChatInvoice(body, 0, null); // expiry aside
+      const inv = r?.ok ? r.invoice : null;
+      expect(inv).not.toBeNull();
+      expect(inv).not.toHaveProperty('payee');
+      expect(JSON.stringify(inv)).not.toContain(maya.slice(2, 20));
+    }
+    // Codex's contract: anything displayed for these is null or the node's payee.
+    for (const body of NONCANONICAL) {
+      const r = readChatInvoice(body, FIXTURE_NOW, 'regtest');
+      expect(r).toMatchObject({ ok: true, invoice: { msat: 21_000 } });
+      expect(JSON.stringify(r)).not.toMatch(/0[23][0-9a-f]{64}/);
+      expect(() => hostDecode(body)).toThrow();
+    }
+    // More than one n is refused before the host is asked.
+    expect(readChatInvoice(invoice({ payeeTags: [maya, pubOf(STRANGER_KEY)] }), NOW, 'regtest')).toEqual({ ok: false, reason: 'invalid' });
     expect(readChatInvoice(invoice({ payeeTags: [maya, maya] }), NOW, 'regtest')).toEqual({ ok: false, reason: 'invalid' });
-    // A signature that recovers no key is not an invoice.
-    const good = invoice();
-    const body = good.slice(0, good.length - 6 - 104);
-    const hrp = good.slice(0, good.lastIndexOf('1'));
-    const data = [...body.slice(hrp.length + 1)].map((c) => BECH32_CHARSET.indexOf(c));
-    const zeroSig = [...data, ...new Array(104).fill(0)];
-    expect(readChatInvoice(hrp + '1' + [...zeroSig, ...bech32Checksum(hrp, zeroSig)].map((w) => BECH32_CHARSET[w]).join(''), NOW, 'regtest')).toEqual({ ok: false, reason: 'invalid' });
+  });
+
+  it('checks the host reading against network, bounds and expiry', () => {
+    const read = { ...hostDecode(invoice()) };
+    expect(bolt11Module.hostReadProblem(read, NOW, 'regtest')).toBeNull();
+    expect(bolt11Module.hostReadProblem(read, NOW, null)).toBeNull();
+    expect(bolt11Module.hostReadProblem(read, NOW, 'mainnet')).toBe('wrong_network');
+    expect(bolt11Module.hostReadProblem({ ...read, amount_msat: 0 }, NOW, 'regtest')).toBe('no_amount');
+    expect(bolt11Module.hostReadProblem({ ...read, amount_msat: 999 }, NOW, 'regtest')).toBe('out_of_bounds');
+    expect(bolt11Module.hostReadProblem({ ...read, amount_msat: 100_000_000_001 }, NOW, 'regtest')).toBe('out_of_bounds');
+    expect(bolt11Module.hostReadProblem(read, read.expires_at_ms, 'regtest')).toBe('expired');
   });
 
   // Made by the node's own parser, lightning-invoice 0.34.1 (build_raw, then
-  // sign with key A = [1; 32]; n fields as named), and read back by it: it pays
-  // the FIRST n and checks the signature only against that one. The app must
-  // never show a payee the node would not pay.
-  it('agrees with the node’s parser on n fields, refusing every invoice whose n it could read differently', () => {
-    const A_KEY = '031b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f';
-    const at = 1_800_000_000_000 + 1000;
+  // sign with key A = [1; 32]; n fields as named). The node pays the FIRST n
+  // and checks the signature only against it; the host decode reports that.
+  // The shape filter only drops the ambiguous two-n forms early.
+  it('passes single-n invoices to the host and drops two-n ones', () => {
+    const at = FIXTURE_NOW;
     const pre = 'lnbcrt210n1p45n5sqdq2v35kumn9wgpp5vj92t3telvc08zhhgnvh6mkggrr6jynh5jv6p4uq70nnznk2py9ssp5qszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszq9qrsgqcqpj';
     const fixtures = {
-      // node: pays A
       none: pre + 'gpd0vndshg0682c4gpxyde0sr785uz9eqc36yjugphpzpkn55zmy6v4nszm0ym8vqwvgrp4jh9us9d593yftaz5sgxwyxyf9z0hmsnsqcufc8l',
-      // node: pays A
       singleMatch: pre + 'np4qvdcf32k0vfxgsyet5ldt246q4jaw8scx3sysx0lnstlt6w4m5rc7utvphkf0r6r8hqss2xsg5pa3k5094vr0szxcaq96z28ytekr7at380elc26wu0j6u7fzhxwwux67vsqs7jpyfk0dqar3y86qj3urrvqpvaf6md',
-      // node: refused, InvalidSignature (n = B)
+      // host: refused, InvalidSignature (n = B)
       singleMismatch: pre + 'np4qfx5kmx3xcgr9j5m62htnkgq4fx5tk02mq9vjs3nwnz9rfe9f5rkv8wux8u2ga730fxufdqte2kkh7vk2yu57uemxxguwr26kpwhh528qq36j5yrvjd0mgtvazaghc2svyvauk5u4sacaarg20n4upjk3jjsqa2gc5d',
-      // node: pays A, the first n; the second n (B) is what the old decoder showed
       firstASecondB: pre + 'np4qvdcf32k0vfxgsyet5ldt246q4jaw8scx3sysx0lnstlt6w4m5rc7np4qfx5kmx3xcgr9j5m62htnkgq4fx5tk02mq9vjs3nwnz9rfe9f5rkv3rm04y0hjt5slsn8hkpnr6dwmddgyeyvl0aemz5g5d2ctczrjj5pp4wncd5lyr20gflggpvvfx46k4a0xc846dz9ph0qvtdaq24fcscp7jk8gj',
-      // node: refused, InvalidSignature (first n = B)
       firstBSecondA: pre + 'np4qfx5kmx3xcgr9j5m62htnkgq4fx5tk02mq9vjs3nwnz9rfe9f5rkvnp4qvdcf32k0vfxgsyet5ldt246q4jaw8scx3sysx0lnstlt6w4m5rc7j44sjlpqhxkph2mgd8te06zgfs2rrd7fsaas4se6a8agvdeyu6nhxq0cpfqnd0fx8q00r5smg33r8wzz3vk75mfex5crwdrm3eqt37cpafxyt3',
     };
-    expect(readChatInvoice(fixtures.none, at, 'regtest')).toMatchObject({ ok: true, invoice: { payee: A_KEY, msat: 21_000, purpose: 'dinner' } });
-    expect(readChatInvoice(fixtures.singleMatch, at, 'regtest')).toMatchObject({ ok: true, invoice: { payee: A_KEY, msat: 21_000 } });
-    for (const bolt11 of [fixtures.singleMismatch, fixtures.firstASecondB, fixtures.firstBSecondA]) {
-      expect(readChatInvoice(bolt11, at, 'regtest')).toEqual({ ok: false, reason: 'invalid' });
-      expect(invoicePayee(bolt11)).toBeNull();
-    }
+    expect(readChatInvoice(fixtures.none, at, 'regtest')).toMatchObject({ ok: true, invoice: { msat: 21_000, purpose: 'dinner' } });
+    for (const bolt11 of [fixtures.singleMatch, fixtures.singleMismatch]) expect(readChatInvoice(bolt11, at, 'regtest')).toMatchObject({ ok: true });
+    for (const bolt11 of [fixtures.firstASecondB, fixtures.firstBSecondA]) expect(readChatInvoice(bolt11, at, 'regtest')).toEqual({ ok: false, reason: 'invalid' });
   });
 
   it('names the payee as the contact only when their Lightning node id is known and matches', () => {
@@ -263,7 +323,7 @@ function stubHost(overrides: Record<string, Reply> = {}, network: string | null 
       return spend.v;
     },
     message_send: (args) => ({ message_id: 'sent-1', recipient: args!.recipient, is_room: args!.is_room, delivered: true, amount_msat: 2000, sent_at_ms: Date.now() }),
-    invoice_amount: () => ({ amount_msat: 21_000, network: 'regtest' }),
+    invoice_amount: (args) => hostDecode(args!.bolt11 as string),
     payment_pay: (args) => ({ method: 'invoice', amount_msat: args!.amount_msat, status: 'settled', paid_at_ms: Date.now() }),
     invoice_create: (args) => ({ bolt11: invoice(), amount_msat: args!.amount_msat, note: args!.note || null, expires_at_ms: Date.now() + 3_600_000 }),
     live_link: () => null,
@@ -438,7 +498,7 @@ describe('a request in chat', () => {
   });
 
   // Codex #85 P1: the card must not name a second n while the node pays the first.
-  it('an invoice with two n fields is plain text with a note: no card, no Pay, no payee', async () => {
+  it('an invoice with two n fields, or an n the host refuses, is plain text with a note: no card, no Pay, no payee', async () => {
     const bolt11 = invoice({ payeeTags: [pubOf(MAYA_KEY), pubOf(STRANGER_KEY)] });
     const host = stubHost({ messages_list: () => [msg('two-n', bolt11), msg('bad-n', invoice({ payeeTags: [pubOf(STRANGER_KEY)] }))] });
     host.spend.v = openView();
@@ -449,16 +509,15 @@ describe('a request in chat', () => {
       expect($(`[data-message="${id}"] [data-payee]`)).toBeNull();
       expect(text(`[data-message="${id}"] [data-request-plain]`)).toBe('Looks like an invoice, but it is not a valid one.');
     }
-    // Pasted into Pay, the host may still price it, but the review names no
-    // node at all rather than either n.
+    // The two-n body never reached the host; the single bad n did and was refused.
+    expect(host.used('invoice_amount').map((c) => c.args)).toEqual([{ bolt11: invoice({ payeeTags: [pubOf(STRANGER_KEY)] }) }]);
+    // Pasted into Pay, the host refuses it: no amount, no review, no node named.
     $<HTMLButtonElement>('[data-composer-mode="pay"]')!.click();
     type('[data-pay-invoice]', bolt11);
-    await vi.waitFor(() => expect(text('[data-send]')).toBe('Pay · 26 sats'));
+    await vi.waitFor(() => expect(text('[data-composer]')).toContain('That is not a valid Lightning invoice.'));
+    expect($<HTMLButtonElement>('[data-send]')!.disabled).toBe(true);
     $<HTMLButtonElement>('[data-send]')!.click();
-    await vi.waitFor(() => expect($('[data-pay-review] [data-payee]')).not.toBeNull());
-    expect(text('[data-pay-review] [data-payee]')).toBe('Pays a Lightning node this app could not read, not verified as Maya.');
-    expect(text('[data-pay-review]')).not.toContain(pubOf(MAYA_KEY).slice(0, 8));
-    expect(text('[data-pay-review]')).not.toContain(pubOf(STRANGER_KEY).slice(0, 8));
+    expect($('[data-pay-review]')).toBeNull();
     expect(host.used('payment_pay')).toHaveLength(0);
   });
 
@@ -609,7 +668,8 @@ describe('a request in chat', () => {
     // Our own sent invoice stays plain: no card, no Pay.
     expect($('[data-message="out-1"] [data-request-card]')).toBeNull();
     expect($('[data-message="out-1"] [data-request-plain]')).toBeNull();
-    expect(host.used('invoice_amount')).toHaveLength(0);
+    // Only the body that passed the shape filter was read by the host.
+    expect(host.used('invoice_amount').map((c) => c.args)).toEqual([{ bolt11: hostile }]);
     expect(host.used('payment_pay')).toHaveLength(0);
   });
 
@@ -617,5 +677,78 @@ describe('a request in chat', () => {
     stubHost({ messages_list: () => [msg('in-1', invoice({ hrp: 'lnbc210n' }))] }, null);
     await openShell();
     await vi.waitFor(() => expect($('[data-message="in-1"] [data-request-card]')).not.toBeNull());
+  });
+  // Codex #85 delta 2: card and confirm show only the host's decode.
+  it('card and confirm show the host’s payee and amount, and pay its canonical invoice', async () => {
+    const hostPayee = pubOf(STRANGER_KEY);
+    const signedByMaya = invoice({ purpose: 'dinner' });
+    const host = stubHost({
+      messages_list: () => [msg('in-1', `lightning:${signedByMaya.toUpperCase()}`)],
+      // Whatever a local decoder would recover, the host's answer is what is shown.
+      invoice_amount: (args) => ({ ...hostDecode(args!.bolt11 as string), payee: hostPayee, amount_msat: 22_000, description: 'host says lunch' }),
+    });
+    host.spend.v = openView();
+    await openShell();
+    await vi.waitFor(() => expect($('[data-request-card]')).not.toBeNull());
+    const short = `${hostPayee.slice(0, 8)}…${hostPayee.slice(-4)}`;
+    expect($('[data-request-card]')!.getAttribute('data-request-msat')).toBe('22000');
+    expect(text('[data-request-purpose]')).toBe('For: host says lunch');
+    expect(text('[data-request-card] [data-payee]')).toBe(`Pays Lightning node ${short}, not verified as Maya.`);
+    expect(text('[data-request-card]')).not.toContain(pubOf(MAYA_KEY).slice(0, 8));
+
+    $<HTMLButtonElement>('[data-request-pay]')!.click();
+    await vi.waitFor(() => expect($('[data-pay-review]')).not.toBeNull());
+    expect(text('[data-pay-review] [data-payee]')).toBe(`Pays Lightning node ${short}, not verified as Maya.`);
+    expect(text('[data-review-amount]')).toBe('22 sats');
+    $<HTMLButtonElement>('[data-pay-confirm]')!.click();
+    await vi.waitFor(() => expect(host.used('payment_pay')).toHaveLength(1));
+    // The canonical string the host returned, not the prefixed upper-case body.
+    expect(host.used('payment_pay')[0].args).toEqual({ bolt11: signedByMaya, amount_msat: 22_000, max_msat: 27_000 });
+  });
+
+  it('until the host answers, a received invoice is plain text with no card, amount or payee', async () => {
+    let answer: (v: InvoiceAmount) => void = () => {};
+    const bolt11 = invoice();
+    const host = stubHost({ messages_list: () => [msg('in-1', bolt11)], invoice_amount: () => new Promise<InvoiceAmount>((r) => { answer = r; }) });
+    host.spend.v = openView();
+    await openShell();
+    await vi.waitFor(() => expect(host.used('invoice_amount')).toHaveLength(1));
+    expect($('[data-request-card]')).toBeNull();
+    expect($('[data-payee]')).toBeNull();
+    expect(text('[data-message="in-1"] .bubble')).toBe(bolt11);
+    answer(hostDecode(bolt11));
+    await vi.waitFor(() => expect($('[data-request-card] [data-payee]')).not.toBeNull());
+  });
+
+  it('Codex non-canonical encodings: no card, no payee, no review, nothing paid', async () => {
+    vi.useFakeTimers({ toFake: ['Date'], now: FIXTURE_NOW });
+    try {
+      const refusal = { code: 'invalid', message: 'This invoice is not in its standard encoding, so the app cannot be sure who it pays. Ask for a fresh invoice.' };
+      const host = stubHost({
+        messages_list: () => NONCANONICAL.map((b, i) => msg(`nc-${i}`, b)),
+        // What the real host returns for each (act.rs: a_non_canonical_encoding_is_refused_whatever_its_signer).
+        invoice_amount: () => { throw refusal; },
+      });
+      host.spend.v = openView();
+      await openShell();
+      await vi.waitFor(() => expect($('[data-message="nc-2"] [data-request-plain]')).not.toBeNull());
+      NONCANONICAL.forEach((b, i) => {
+        expect($(`[data-message="nc-${i}"] [data-request-card]`)).toBeNull();
+        expect(text(`[data-message="nc-${i}"] .bubble`)).toBe(b);
+        expect(text(`[data-message="nc-${i}"] [data-request-plain]`)).toBe('Looks like an invoice, but it is not a valid one.');
+      });
+      expect($('[data-payee]')).toBeNull();
+      expect(mount.textContent).not.toMatch(/Lightning node 0[23]/);
+
+      $<HTMLButtonElement>('[data-composer-mode="pay"]')!.click();
+      type('[data-pay-invoice]', NONCANONICAL[0]);
+      await vi.waitFor(() => expect(text('[data-composer]')).toContain('not in its standard encoding'));
+      $<HTMLButtonElement>('[data-send]')!.click();
+      expect($('[data-pay-review]')).toBeNull();
+      expect(mount.textContent).not.toContain(CANONICAL_PAYEE.slice(0, 8));
+      expect(host.used('payment_pay')).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

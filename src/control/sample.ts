@@ -543,6 +543,9 @@ export function sampleInvoiceMsat(bolt11: string): number | null {
   return Math.round(n * per);
 }
 
+/** The payee the sample host reports for every sample invoice. */
+const SAMPLE_PAYEE = `02${'5a'.repeat(32)}`;
+
 /** A sample invoice: the right prefix and amount, and a body no wallet will accept. */
 const sampleBolt11 = (msat: number) =>
   msat % 100 === 0 ? `lntbs${msat / 100}n1samplenotpayable0donotpay` : `lntbs${msat * 10}p1samplenotpayable0donotpay`;
@@ -1038,7 +1041,17 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
     invoiceAmount: (bolt11) => {
       const msat = sampleInvoiceMsat(bolt11);
       if (msat === null) return refuse('invalid', 'This invoice names no amount. The app pays only invoices whose cost it can show first.');
-      return ok({ amount_msat: msat, network: bolt11.toLowerCase().startsWith('lnbc') ? 'mainnet' : 'sample' });
+      // Sample invoices are not signed: a fixed sample payee stands in for the host's decode.
+      const canonical = bolt11.trim().toLowerCase().replace(/^lightning:/, '');
+      return ok({
+        amount_msat: msat,
+        network: canonical.startsWith('lnbc') ? 'mainnet' : 'sample',
+        payee: SAMPLE_PAYEE,
+        expires_at_ms: Date.now() + 3600_000,
+        bolt11: canonical,
+        payment_hash: '00'.repeat(32),
+        description: null,
+      });
     },
     pay: async (bolt11, amountMsat, maxMsat) => {
       await gate();

@@ -131,7 +131,7 @@ it.each(['message', 'pay', 'request', 'file'] as const)('cleans up successful %s
       await pending;
       return { method: 'invoice', status: 'settled', amount_msat: 10000, paid_at_ms: Date.now() };
     });
-    source.invoiceAmount = async () => ({ amount_msat: 10000, network: 'testnet' });
+    source.invoiceAmount = async (bolt11) => ({ amount_msat: 10000, network: 'testnet', payee: `02${'ab'.repeat(32)}`, expires_at_ms: Date.now() + 3600000, bolt11: bolt11.trim().toLowerCase(), payment_hash: '00'.repeat(32), description: null });
     source.invoiceCreate = vi.fn(async (amount_msat, note) => {
       await pending;
       return { bolt11: 'lntb100n1result', amount_msat, note, expires_at_ms: Date.now() + 3600000 };

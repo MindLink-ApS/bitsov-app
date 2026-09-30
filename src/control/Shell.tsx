@@ -1,5 +1,5 @@
 import { MONEY_NOT_READY, readinessLine, readinessSource } from './readiness';
-import { createEffect, createMemo, createSignal, For, type JSX, Match, on, onCleanup, onMount, Show, Switch, untrack } from 'solid-js';
+import { createEffect, createMemo, createResource, createSignal, For, type JSX, Match, on, onCleanup, onMount, Show, Switch, untrack } from 'solid-js';
 import { createStore, produce } from 'solid-js/store';
 import { qrSvg } from '../qr';
 import type { Proposal } from './ai';
@@ -11,9 +11,9 @@ import { DiscoverPanel, FrontDoorEditor } from './Discover';
 import { callCost, createCallEngine, IDLE as CALL_IDLE, isCallKind, signalCost, stunServer, type CallMedia, type CallView } from './call';
 import { blobUrl, duration, FILE_MAX_BYTES, fileNameOf, isVoiceNote, type Recording, startRecording, VOICE_MAX_MS } from './voice';
 import { EMOJIS, insertEmoji } from './emoji';
-import { invoicePayee, invoicePaymentHash, NOT_PAYABLE_NOTE, payeeView, readChatInvoice, type ChatInvoice } from './bolt11';
+import { cleanPurpose, hostReadProblem, invoicePaymentHash, NOT_PAYABLE_NOTE, type NotPayable, payeeView, readChatInvoice } from './bolt11';
 import { safeImageMime, looksLikeSafeImageName, dataImageUrl } from './frontDoorMedia';
-import type { FileSaveResult, InvoiceView, VoiceBlob } from './types';
+import type { FileSaveResult, InvoiceAmount, InvoiceView, VoiceBlob } from './types';
 import {
   doorCard,
   gateWords,
@@ -162,7 +162,8 @@ export type Actions = {
   ownerCancel: (id: string) => Promise<void>;
   /** Create an invoice for an exact msat amount (never rounded here). */
   invoice: (t: TrackRef, msat: number, note: string) => Promise<Outcome<unknown>>;
-  amountOf: (bolt11: string) => Promise<Outcome<number>>;
+  /** The host's read-only decode of an invoice: the only payee and amount shown. */
+  readInvoice: (bolt11: string) => Promise<Outcome<InvoiceAmount>>;
   pay: (t: TrackRef, bolt11: string, msat: number) => Promise<Outcome<unknown>>;
   keysend: (t: TrackRef, pubkey: string, msat: number, memo: string) => Promise<Outcome<unknown>>;
   file: (t: TrackRef, file: File, maxMsat: number, firstContactMsat?: number) => Promise<Outcome<unknown>>;
@@ -783,10 +784,7 @@ export function ControlCenter(props: Props) {
       if (r.ok) addArtifact(t, { type: 'invoice', invoice: r.value });
       return r;
     },
-    amountOf: async (bolt11) => {
-      const r = await act(() => source.invoiceAmount(bolt11));
-      return r.ok ? { ok: true, value: r.value.amount_msat } : r;
-    },
+    readInvoice: (bolt11) => act(() => source.invoiceAmount(bolt11)),
     pay: async (t, bolt11, msat) => {
       const r = await act(() => source.pay(bolt11, msat, allIn(msat)));
       void loadBudget();
@@ -1503,6 +1501,7 @@ function Conversation(props: {
                         homeNetwork={props.homeNetwork}
                         moneyBlocked={props.moneyBlocked}
                         onPay={props.track.kind === 'peer' ? (bolt11) => setPayRequest({ seq: ++payRequestSeq, bolt11 }) : undefined}
+                        readInvoice={props.track.kind === 'peer' ? props.actions.readInvoice : undefined}
                         paidInvoices={paidInvoices()}
                         voiceUrl={props.actions.voiceUrl}
                         fileFetch={props.actions.fileFetch}
@@ -1556,16 +1555,15 @@ function Conversation(props: {
  */
 const contactLightningId = (_peer: string): string | null => null;
 
-/** Payee line: never asserts that the chat contact owns the invoice. */
-function PayeeLine(props: { payee: string | null; peer: string; name: string }) {
-  const v = () => (props.payee === null ? null : payeeView(props.payee, contactLightningId(props.peer), props.name));
+/**
+ * Payee line: never asserts that the chat contact owns the invoice. An
+ * invoice's payee is only ever the host's decode (`InvoiceAmount.payee`).
+ */
+function PayeeLine(props: { payee: string; peer: string; name: string }) {
+  const v = () => payeeView(props.payee, contactLightningId(props.peer), props.name);
   return (
-    <span class="payee" classList={{ unverified: !v()?.verified }} data-payee={v()?.verified ? 'verified' : 'unverified'} title={props.payee ?? undefined}>
-      {v() === null
-        ? `Pays a Lightning node this app could not read, not verified as ${props.name}.`
-        : v()!.verified
-          ? `Pays ${v()!.text}’s Lightning node.`
-          : `Pays ${v()!.text}.`}
+    <span class="payee" classList={{ unverified: !v().verified }} data-payee={v().verified ? 'verified' : 'unverified'} title={props.payee}>
+      {v().verified ? `Pays ${v().text}’s Lightning node.` : `Pays ${v().text}.`}
     </span>
   );
 }
@@ -1576,22 +1574,23 @@ function PayeeLine(props: { payee: string | null; peer: string; name: string }) 
  */
 type PaymentStatus = Extract<Artifact, { type: 'payment' }>['receipt']['status'];
 
-function RequestCard(props: { inv: ChatInvoice; peer: string; name: string; blocked: boolean; paid?: PaymentStatus; onPay: (bolt11: string) => void }) {
+function RequestCard(props: { inv: InvoiceAmount; peer: string; name: string; blocked: boolean; paid?: PaymentStatus; onPay: (bolt11: string) => void }) {
   // A failed attempt may be tried again; a settled or unresolved one may not.
   const done = () => (props.paid && props.paid !== 'failed' ? props.paid : null);
+  const purpose = () => (props.inv.description === null ? null : cleanPurpose(props.inv.description));
   return (
-    <div class="request-card" data-request-card data-request-msat={props.inv.msat} data-request-status={done() ?? 'open'}>
+    <div class="request-card" data-request-card data-request-msat={props.inv.amount_msat} data-request-status={done() ?? 'open'}>
       <span class="kind">Payment request from {props.name}</span>
-      <span class="sats big">{sats(props.inv.msat)} <span class="unit">{satUnit(props.inv.msat)}</span></span>
-      <Show when={props.inv.purpose} fallback={<span class="hint">No purpose given</span>}>
-        <span class="purpose" data-request-purpose>For: {props.inv.purpose}</span>
+      <span class="sats big">{sats(props.inv.amount_msat)} <span class="unit">{satUnit(props.inv.amount_msat)}</span></span>
+      <Show when={purpose()} fallback={<span class="hint">No purpose given</span>}>
+        <span class="purpose" data-request-purpose>For: {purpose()}</span>
       </Show>
       <PayeeLine payee={props.inv.payee} peer={props.peer} name={props.name} />
       <Show
         when={done()}
         fallback={
           <>
-            <span class="hint">Expires at {clock(props.inv.expiresAtMs)}. Nothing is paid until you confirm.</span>
+            <span class="hint">Expires at {clock(props.inv.expires_at_ms)}. Nothing is paid until you confirm.</span>
             <button type="button" class="primary" data-request-pay disabled={props.blocked} onClick={() => props.onPay(props.inv.bolt11)}>
               Pay
             </button>
@@ -1622,6 +1621,8 @@ function MessageView(props: {
   moneyBlocked?: boolean;
   /** Present in a peer thread: a received invoice may be paid from its card. */
   onPay?: (bolt11: string) => void;
+  /** The host's decode; a card shows only what it returns. */
+  readInvoice?: (bolt11: string) => Promise<Outcome<InvoiceAmount>>;
   /** This thread's invoice payments by payment hash. */
   paidInvoices?: Map<string, PaymentStatus>;
   voiceUrl?: (messageId: string) => Promise<string>;
@@ -1635,13 +1636,32 @@ function MessageView(props: {
       ? null
       : readChatInvoice(props.m.plaintext, props.now ?? Date.now(), props.homeNetwork ?? null),
   );
-  const payable = () => {
+  // The shape filter passed: ask the host. Nothing is shown as payable until it answers.
+  const [hostRead] = createResource(
+    () => {
+      const r = request();
+      return r?.ok && props.readInvoice ? r.invoice.bolt11 : null;
+    },
+    (bolt11) => props.readInvoice!(bolt11),
+  );
+  const hostVerdict = (): { ok: true; inv: InvoiceAmount } | { ok: false; reason: NotPayable } | null => {
     const r = request();
-    return r?.ok ? r.invoice : null;
+    if (!r?.ok) return null;
+    const read = hostRead.loading ? undefined : hostRead();
+    if (read === undefined) return null;
+    if (!read.ok) return { ok: false, reason: 'invalid' };
+    const problem = hostReadProblem(read.value, props.now ?? Date.now(), props.homeNetwork ?? null);
+    return problem ? { ok: false, reason: problem } : { ok: true, inv: read.value };
+  };
+  const payable = () => {
+    const v = hostVerdict();
+    return v?.ok ? v.inv : null;
   };
   const notPayable = () => {
     const r = request();
-    return r && !r.ok ? r.reason : null;
+    if (r && !r.ok) return r.reason;
+    const v = hostVerdict();
+    return v && !v.ok ? v.reason : null;
   };
   return (
     <article class={`msg ${props.out ? 'out' : 'in'}`} classList={{ fresh: props.fresh }} data-message={props.m.id}>
@@ -1673,7 +1693,7 @@ function MessageView(props: {
           </div>
         }
       >
-        {(inv) => <RequestCard inv={inv()} peer={props.m.sender} name={props.nameOf(props.m.sender)} blocked={!!props.moneyBlocked} paid={props.paidInvoices?.get(inv().paymentHash)} onPay={props.onPay!} />}
+        {(inv) => <RequestCard inv={inv()} peer={props.m.sender} name={props.nameOf(props.m.sender)} blocked={!!props.moneyBlocked} paid={props.paidInvoices?.get(inv().payment_hash)} onPay={props.onPay!} />}
       </Show>
       <Show when={notPayable()}>
         {(reason) => <p class="hint request-note" data-request-plain={reason()}>{NOT_PAYABLE_NOTE[reason()]}</p>}
@@ -2267,8 +2287,11 @@ function AmountField(props: { data: 'pay' | 'request'; label: string; value: str
 }
 
 type Mode = 'message' | 'pay' | 'request' | 'file';
+/** An invoice review: only the host's decode, paid as its canonical string. */
+const invoiceReview = (read: InvoiceAmount): PayReview => ({ kind: 'invoice', bolt11: read.bolt11, msat: read.amount_msat, payee: read.payee });
+
 type PayReview =
-  | { kind: 'invoice'; bolt11: string; msat: number }
+  | { kind: 'invoice'; bolt11: string; msat: number; payee: string }
   | { kind: 'keysend'; pubkey: string; msat: number; memo: string };
 
 function Composer(props: {
@@ -2302,7 +2325,9 @@ function Composer(props: {
   // pay
   const [payKind, setPayKind] = createSignal<'invoice' | 'keysend'>('invoice');
   const [bolt11, setBolt11] = createSignal('');
-  const [invoiceMsat, setInvoiceMsat] = createSignal<number | null>(null);
+  // The host's decode of the pasted invoice: its amount, payee and canonical form.
+  const [invoiceRead, setInvoiceRead] = createSignal<InvoiceAmount | null>(null);
+  const invoiceMsat = () => invoiceRead()?.amount_msat ?? null;
   const [pubkey, setPubkey] = createSignal('');
   const [amount, setAmount] = createSignal('');
   const [memo, setMemo] = createSignal('');
@@ -2475,7 +2500,7 @@ function Composer(props: {
         setFile(null);
         if (fileInput) fileInput.value = '';
         setBolt11('');
-        setInvoiceMsat(null);
+        setInvoiceRead(null);
         reviewWhenRead = null;
         setCreated(null);
         setPubkey('');
@@ -2498,7 +2523,7 @@ function Composer(props: {
       },
     ),
   );
-  createEffect(on([mode, payKind, bolt11, invoiceMsat, pubkey, amount, memo, denom, () => trackKey(props.track)], () => setReview(null), { defer: true }));
+  createEffect(on([mode, payKind, bolt11, invoiceRead, pubkey, amount, memo, denom, () => trackKey(props.track)], () => setReview(null), { defer: true }));
   // A draft from the AI track: fill this composer once. Sending is still the
   // owner's press, with the cost shown and the spend approval unchanged.
   createEffect(
@@ -2617,19 +2642,19 @@ function Composer(props: {
   // Read the invoice amount as it is pasted: the cost is shown before paying.
   createEffect(
     on(bolt11, (text) => {
-      setInvoiceMsat(null);
+      setInvoiceRead(null);
       const value = text.trim();
       if (!value) return;
-      void props.actions.amountOf(value).then((r) => {
+      void props.actions.readInvoice(value).then((r) => {
         if (bolt11().trim() !== value) return;
         const fromCard = reviewWhenRead === value;
         reviewWhenRead = null;
         if (r.ok) {
-          setInvoiceMsat(r.value);
+          setInvoiceRead(r.value);
           setNote(null);
-          // Same as pressing Pay: the review, with the host's reading of the amount.
+          // Same as pressing Pay: the review, with the host's reading of the invoice.
           if (fromCard && mode() === 'pay' && payKind() === 'invoice' && !props.moneyBlocked && line().open && !busy()) {
-            setReview({ kind: 'invoice', bolt11: value, msat: r.value });
+            setReview(invoiceReview(r.value));
           }
         } else setNote(r.error.message);
       });
@@ -2825,11 +2850,10 @@ function Composer(props: {
     if (!ready()) return;
     if (mode() === 'pay') {
       // Pay never pays from here: it shows the review, and only its confirm pays.
-      const principal = payKind() === 'invoice' ? invoiceMsat()! : amountMsat()!;
       setReview(
         payKind() === 'invoice'
-          ? { kind: 'invoice', bolt11: bolt11().trim(), msat: principal }
-          : { kind: 'keysend', pubkey: pubkey().trim(), msat: principal, memo: memo() },
+          ? invoiceReview(invoiceRead()!)
+          : { kind: 'keysend', pubkey: pubkey().trim(), msat: amountMsat()!, memo: memo() },
       );
       return;
     }
@@ -3167,7 +3191,7 @@ function Composer(props: {
                   >
                     {/* Whoever sent or pasted the invoice need not be who it pays. */}
                     <p class="pay-review-title">Pay this Lightning invoice</p>
-                    <PayeeLine payee={invoicePayee((rv() as { bolt11: string }).bolt11)} peer={target()} name={props.name} />
+                    <PayeeLine payee={(rv() as { payee: string }).payee} peer={target()} name={props.name} />
                   </Show>
                   <dl>
                     <dt>Amount</dt>

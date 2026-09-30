@@ -456,7 +456,7 @@ pub struct NodeOverview {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stun_url: Option<String>,
     /// The Bitcoin network in the LDK config the host started the node with,
-    /// named as `act::bolt11_network` names it. Absent for other backends or
+    /// named as `act::bolt11_network` names a currency. Absent for other backends or
     /// an unreadable config: the app then does not know its network.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub network: Option<String>,

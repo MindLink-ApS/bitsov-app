@@ -51,7 +51,10 @@ function stubHost(overrides: Record<string, Reply> = {}) {
     },
     spend_lock: () => (spend.v = view('locked')),
     message_send: (args) => ({ message_id: 'sent-1', recipient: args!.recipient, is_room: args!.is_room, delivered: true, amount_msat: 2000, sent_at_ms: Date.now() }),
-    invoice_amount: (args) => (String(args!.bolt11).startsWith('lntb10n') ? { amount_msat: 1000, network: 'testnet' } : Promise.reject({ code: 'invalid', message: 'that is not a Lightning invoice' })),
+    invoice_amount: (args) =>
+      String(args!.bolt11).startsWith('lntb10n')
+        ? { amount_msat: 1000, network: 'testnet', payee: `02${'cd'.repeat(32)}`, expires_at_ms: Date.now() + 3_600_000, bolt11: String(args!.bolt11).trim().toLowerCase(), payment_hash: '07'.repeat(32), description: null }
+        : Promise.reject({ code: 'invalid', message: 'that is not a Lightning invoice' }),
     payment_pay: (args) => ({ method: 'invoice', amount_msat: args!.amount_msat, status: 'settled', paid_at_ms: Date.now() }),
     payment_keysend: (args) => ({ method: 'keysend', amount_msat: args!.amount_msat, status: 'settled', paid_at_ms: Date.now() }),
     invoice_create: (args) => ({ bolt11: 'lntb210n1sample', amount_msat: args!.amount_msat, note: args!.note || null, expires_at_ms: Date.now() + 3_600_000 }),
