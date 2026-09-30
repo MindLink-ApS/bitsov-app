@@ -27,6 +27,7 @@ import type {
   TopicRead,
   FileReceipt,
   VoiceBlob,
+  FileSaveResult,
   CallQuote,
   CallReceipt,
   InvoiceAmount,
@@ -159,6 +160,10 @@ export interface Source {
   fileSend(recipient: string, filename: string, mimeType: string, dataB64: string, maxMsat: number, firstContactMsat?: number): Promise<FileReceipt>;
   /** Read-only: a received voice note (kind 200, audio/*) by its message id. Never pays. */
   voiceNote(messageId: string): Promise<VoiceBlob>;
+  /** Read-only: any received kind-200 file by message id. Never pays. Refuses over 1.4 MB. */
+  fileFetch(messageId: string): Promise<VoiceBlob>;
+  /** Fetch then save via the native dialog (user path only). Never auto-saves. */
+  fileSave(messageId: string): Promise<FileSaveResult>;
   /** Read-only: what calling this contact costs. */
   callQuote(peer: string): Promise<CallQuote>;
   /** One paid call signal (kinds 400-403) under the message budget rules. */
@@ -261,6 +266,8 @@ export const hostSource: Source = {
   fileSend: (recipient, filename, mimeType, dataB64, maxMsat, firstContactMsat) =>
     invoke<FileReceipt>('file_send', { recipient, filename, mime_type: mimeType, data_b64: dataB64, max_msat: maxMsat, first_contact_msat: firstContactMsat ?? null }),
   voiceNote: (messageId) => invoke<VoiceBlob>('voice_note_fetch', { message_id: messageId }),
+  fileFetch: (messageId) => invoke<VoiceBlob>('file_fetch', { message_id: messageId }),
+  fileSave: (messageId) => invoke<FileSaveResult>('file_save', { message_id: messageId }),
   callQuote: (peer) => invoke<CallQuote>('call_quote', { peer }),
   callSignal: (peer, kind, plaintext, maxMsat) => invoke<CallReceipt>('call_signal', { peer, kind, plaintext, max_msat: maxMsat }),
   aiRead: (topic, sinceMs) => invoke<TopicRead>('ai_read', { topic, since_ms: sinceMs }),

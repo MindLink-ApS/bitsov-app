@@ -1180,6 +1180,9 @@ pub const FILE_LIST_WINDOWS: [usize; 3] = [50, 200, 1000];
 /// (a name that only looks like a voice note).
 pub const NOT_A_VOICE_NOTE: &str = "not a voice note";
 pub const VOICE_NOT_STORED: &str = "voice note not stored on this node";
+pub const FILE_NOT_STORED: &str = "file not stored on this node";
+/// Received file over the app's 1.4 MB send/receive cap.
+pub const FILE_TOO_LARGE: &str = "file over 1.4 MB";
 
 /// What a message's stored file is, by its type (never its name).
 #[derive(Debug, PartialEq, Eq)]
@@ -1189,14 +1192,82 @@ pub enum VoiceLookup<'a> {
     Missing,
 }
 
+/// Any stored file for a message id (voice or not).
+#[derive(Debug, PartialEq, Eq)]
+pub enum StoredLookup<'a> {
+    Found(&'a FileRow),
+    Missing,
+}
+
 /// The stored file a received message carried. The node records the
 /// envelope id as `message_id` when it stores the file.
-pub fn voice_file_for<'a>(rows: &'a [FileRow], message_id: &str) -> VoiceLookup<'a> {
+pub fn stored_file_for<'a>(rows: &'a [FileRow], message_id: &str) -> StoredLookup<'a> {
     match rows.iter().find(|r| r.message_id.as_deref().is_some_and(|m| m.eq_ignore_ascii_case(message_id))) {
-        Some(r) if is_voice_mime(&r.mime_type) => VoiceLookup::Voice(r),
-        Some(_) => VoiceLookup::NotVoice,
-        None => VoiceLookup::Missing,
+        Some(r) => StoredLookup::Found(r),
+        None => StoredLookup::Missing,
     }
+}
+
+/// Voice notes only: same lookup, then require an audio mime.
+pub fn voice_file_for<'a>(rows: &'a [FileRow], message_id: &str) -> VoiceLookup<'a> {
+    match stored_file_for(rows, message_id) {
+        StoredLookup::Found(r) if is_voice_mime(&r.mime_type) => VoiceLookup::Voice(r),
+        StoredLookup::Found(_) => VoiceLookup::NotVoice,
+        StoredLookup::Missing => VoiceLookup::Missing,
+    }
+}
+
+/// Refuse a blob whose declared size or decoded bytes exceed [`FILE_MAX_BYTES`].
+pub fn blob_within_cap(blob: &FileBlob) -> Result<(), String> {
+    let decoded = base64_decoded_len(&blob.data_b64).unwrap_or(usize::MAX);
+    let declared = usize::try_from(blob.size_bytes).unwrap_or(usize::MAX);
+    if declared > FILE_MAX_BYTES || decoded > FILE_MAX_BYTES {
+        Err(FILE_TOO_LARGE.into())
+    } else {
+        Ok(())
+    }
+}
+
+/// Cap on the save-dialog name suggestion (peer input can be arbitrarily long).
+pub const SAVE_NAME_MAX: usize = 180;
+
+/// A single path segment for the save dialog: no directories, no empty name.
+pub fn safe_save_name(filename: &str) -> String {
+    let base = filename
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or("")
+        .trim()
+        .trim_start_matches('.');
+    let cleaned: String = base
+        .chars()
+        .map(|c| if c.is_control() || c == ':' { '_' } else { c })
+        .collect();
+    // Truncate then drop trailing spaces/dots (Windows reserved tails).
+    let truncated: String = cleaned.chars().take(SAVE_NAME_MAX).collect();
+    let trimmed = truncated.trim_end_matches([' ', '.']).to_string();
+    if trimmed.is_empty() { "file".into() } else { trimmed }
+}
+
+/// Decode base64 and write exactly to `path` (caller chose it via the save dialog).
+pub fn write_file_bytes(path: &std::path::Path, data_b64: &str) -> Result<(), String> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data_b64)
+        .map_err(|_| "corrupt file data".to_string())?;
+    if bytes.len() > FILE_MAX_BYTES {
+        return Err(FILE_TOO_LARGE.into());
+    }
+    std::fs::write(path, bytes).map_err(|e| format!("could not save: {e}"))
+}
+
+/// Result of a user-chosen save (or cancel).
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+pub struct FileSaveResult {
+    pub saved: bool,
+    pub filename: String,
+    pub mime_type: String,
+    pub size_bytes: u64,
 }
 
 #[derive(Deserialize, Debug)]
@@ -1569,6 +1640,39 @@ mod tests {
         assert_eq!(voice_file_for(&rows, "cd"), VoiceLookup::Missing);
         assert!(is_voice_mime(" Audio/MP4"));
         assert!(!is_voice_mime("text/html"));
+        assert_eq!(stored_file_for(&rows, "ab"), StoredLookup::Found(&rows[0]));
+        assert_eq!(stored_file_for(&rows[1..], "ab"), StoredLookup::Found(&rows[1]));
+        assert_eq!(stored_file_for(&rows, "zz"), StoredLookup::Missing);
+    }
+
+    #[test]
+    fn received_files_refuse_the_size_cap_and_sanitize_save_names() {
+        let ok = FileBlob {
+            filename: "note.txt".into(),
+            mime_type: "text/plain".into(),
+            size_bytes: 2,
+            data_b64: "aGk=".into(),
+        };
+        blob_within_cap(&ok).unwrap();
+        let big = FileBlob {
+            filename: "big.bin".into(),
+            mime_type: "application/octet-stream".into(),
+            size_bytes: (FILE_MAX_BYTES as u64) + 1,
+            data_b64: "aGk=".into(),
+        };
+        assert_eq!(blob_within_cap(&big).unwrap_err(), FILE_TOO_LARGE);
+        assert_eq!(safe_save_name("../etc/passwd"), "passwd");
+        assert_eq!(safe_save_name("a\\b:c.png"), "b_c.png");
+        assert_eq!(safe_save_name("..."), "file");
+        assert_eq!(safe_save_name("note.txt   "), "note.txt");
+        let long = format!("{}.png", "a".repeat(SAVE_NAME_MAX + 40));
+        let capped = safe_save_name(&long);
+        assert!(capped.len() <= SAVE_NAME_MAX);
+        assert!(!capped.ends_with('.'));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(safe_save_name("hi.txt"));
+        write_file_bytes(&path, "aGk=").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"hi");
     }
 
     /// The node's BUG-PSI reply, as genome #100's compose writes it.

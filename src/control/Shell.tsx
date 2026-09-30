@@ -1,5 +1,5 @@
 import { MONEY_NOT_READY, readinessLine, readinessSource } from './readiness';
-import { createEffect, createMemo, createSignal, For, type JSX, Match, on, onCleanup, Show, Switch, untrack } from 'solid-js';
+import { createEffect, createMemo, createSignal, For, type JSX, Match, on, onCleanup, onMount, Show, Switch, untrack } from 'solid-js';
 import { createStore, produce } from 'solid-js/store';
 import { qrSvg } from '../qr';
 import type { Proposal } from './ai';
@@ -9,6 +9,9 @@ import { Organism } from './BodyPanel';
 import { DiscoverPanel, FrontDoorEditor } from './Discover';
 import { callCost, createCallEngine, IDLE as CALL_IDLE, isCallKind, signalCost, stunServer, type CallMedia, type CallView } from './call';
 import { blobUrl, duration, FILE_MAX_BYTES, fileNameOf, isVoiceNote, type Recording, startRecording, VOICE_MAX_MS } from './voice';
+import { EMOJIS, insertEmoji } from './emoji';
+import { safeImageMime, looksLikeSafeImageName, dataImageUrl } from './frontDoorMedia';
+import type { FileSaveResult, VoiceBlob } from './types';
 import {
   doorCard,
   gateWords,
@@ -162,6 +165,10 @@ export type Actions = {
   file: (t: TrackRef, file: File, maxMsat: number, firstContactMsat?: number) => Promise<Outcome<unknown>>;
   /** Read-only: a playable URL for a voice note in the thread. Never pays. */
   voiceUrl: (messageId: string) => Promise<string>;
+  /** Read-only: fetch a received file (refuses over 1.4 MB). */
+  fileFetch: (messageId: string) => Promise<VoiceBlob>;
+  /** Save a received file via the native dialog. Never auto-saves. */
+  fileSave: (messageId: string) => Promise<FileSaveResult>;
   /** Read-only: what calling this contact costs. */
   callQuote: (peer: string) => Promise<Outcome<CallQuote>>;
   /** Place a call after the price was shown. */
@@ -612,6 +619,8 @@ export function ControlCenter(props: Props) {
       }
       return url;
     },
+    fileFetch: (messageId) => source.fileFetch(messageId),
+    fileSave: (messageId) => source.fileSave(messageId),
     approve: async () => {
       const r = await act(() => source.spendRequest());
       if (r.ok) setSpend(r.value);
@@ -1471,6 +1480,8 @@ function Conversation(props: {
                         allowance={props.allowances[m().id]}
                         nameOf={props.nameOf}
                         voiceUrl={props.actions.voiceUrl}
+                        fileFetch={props.actions.fileFetch}
+                        fileSave={props.actions.fileSave}
                       />
                     )}
                   </Match>
@@ -1522,6 +1533,8 @@ function MessageView(props: {
   allowance?: { total_msat: number; max_routing_fee_msat: number; readmission_msat?: number };
   nameOf: (id: string) => string;
   voiceUrl?: (messageId: string) => Promise<string>;
+  fileFetch?: (messageId: string) => Promise<VoiceBlob>;
+  fileSave?: (messageId: string) => Promise<FileSaveResult>;
 }) {
   const amount = () => props.allowance?.total_msat ?? props.paid ?? props.m.payment_amount_msat;
   return (
@@ -1531,8 +1544,21 @@ function MessageView(props: {
       </Show>
       <div class="bubble" classList={{ file: props.m.kind === 200 }} data-kind={props.m.kind}>
         <Show when={props.m.kind === 200} fallback={props.m.plaintext ?? 'Encrypted content not available on this device'}>
-          <Show when={props.voiceUrl && isVoiceNote(props.m.kind, props.m.plaintext)} fallback={<span class="file-name">{props.m.plaintext ?? 'File'}</span>}>
-            <VoiceNote id={props.m.id} name={fileNameOf(props.m.plaintext) ?? 'file'} load={props.voiceUrl!} />
+          <Show
+            when={!props.out && props.fileFetch && props.fileSave}
+            fallback={
+              <Show when={props.voiceUrl && isVoiceNote(props.m.kind, props.m.plaintext)} fallback={<span class="file-name">{props.m.plaintext ?? 'File'}</span>}>
+                <VoiceNote id={props.m.id} name={fileNameOf(props.m.plaintext) ?? 'file'} load={props.voiceUrl!} />
+              </Show>
+            }
+          >
+            <ReceivedFile
+              id={props.m.id}
+              name={fileNameOf(props.m.plaintext) ?? 'file'}
+              voice={isVoiceNote(props.m.kind, props.m.plaintext) ? props.voiceUrl : undefined}
+              loadFile={props.fileFetch!}
+              save={props.fileSave!}
+            />
           </Show>
         </Show>
       </div>
@@ -1689,6 +1715,112 @@ function CallPanel(props: {
 /** Inline player for a voice note. Loads on first tap (read-only), then plays in place. */
 /** Host error for a message whose file is not audio (act.rs NOT_A_VOICE_NOTE). */
 const NOT_A_VOICE_NOTE = 'not a voice note';
+const FILE_TOO_LARGE = 'file over 1.4 MB';
+const FILE_NOT_STORED = 'not stored';
+
+/** One native save dialog across all bubbles (host also guards). */
+let saveDialogOpen = false;
+
+type FileMeta = { filename: string; mime_type: string; size_bytes: number };
+
+/** A received kind-200 file: size/type, optional safe image preview, Save via native dialog. */
+function ReceivedFile(props: {
+  id: string;
+  name: string;
+  voice?: (messageId: string) => Promise<string>;
+  loadFile: (messageId: string) => Promise<VoiceBlob>;
+  save: (messageId: string) => Promise<FileSaveResult>;
+}) {
+  const [meta, setMeta] = createSignal<FileMeta | null>(null);
+  const [err, setErr] = createSignal<'gone' | 'large' | 'save' | null>(null);
+  const [busy, setBusy] = createSignal(false);
+  const [saved, setSaved] = createSignal(false);
+  const [preview, setPreview] = createSignal<string | null>(null);
+
+  /** Fetch only for a likely safe image preview — never for voice, never for every bubble. */
+  const loadPreview = async () => {
+    if (props.voice || meta() || err() || preview()) return;
+    if (!looksLikeSafeImageName(props.name)) return;
+    setBusy(true);
+    try {
+      const blob = await props.loadFile(props.id);
+      setMeta({ filename: blob.filename, mime_type: blob.mime_type, size_bytes: blob.size_bytes });
+      const mime = safeImageMime(blob.mime_type);
+      if (mime) setPreview(dataImageUrl(blob.data_b64, mime));
+    } catch (e) {
+      const s = String(e);
+      if (s.includes(FILE_TOO_LARGE)) setErr('large');
+      else if (s.includes(FILE_NOT_STORED)) setErr('gone');
+      // Other preview failures leave Save available.
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  onMount(() => { void loadPreview(); });
+
+  const onSave = async () => {
+    if (err() === 'large' || err() === 'gone' || busy() || saveDialogOpen) return;
+    saveDialogOpen = true;
+    setBusy(true);
+    try {
+      const r = await props.save(props.id);
+      if (r.saved) {
+        setSaved(true);
+        setMeta({ filename: r.filename, mime_type: r.mime_type, size_bytes: r.size_bytes });
+        if (err() === 'save') setErr(null);
+      }
+    } catch (e) {
+      const s = String(e);
+      if (s.includes(FILE_TOO_LARGE)) setErr('large');
+      else if (s.includes(FILE_NOT_STORED)) setErr('gone');
+      else setErr('save');
+    } finally {
+      setBusy(false);
+      saveDialogOpen = false;
+    }
+  };
+
+  return (
+    <div class="received-file" data-received-file={props.id}>
+      <Show when={props.voice}>
+        <VoiceNote id={props.id} name={props.name} load={props.voice!} />
+      </Show>
+      <Show when={!props.voice}>
+        <span class="file-name" data-file-name>{props.name}</span>
+      </Show>
+      <Show when={preview()}>
+        <img class="file-preview" data-file-preview src={preview()!} alt="" />
+      </Show>
+      <p class="file-meta" data-file-meta>
+        <Show when={err() === 'large'} fallback={
+          <Show when={meta()} fallback={busy() ? '…' : ''}>
+            {(b) => <>{kb(b().size_bytes)} · {shortMime(b().mime_type)}</>}
+          </Show>
+        }>
+          Over 1.4 MB · not saved
+        </Show>
+        <Show when={err() === 'gone'}> · not stored</Show>
+        <Show when={err() === 'save'}> · could not save</Show>
+      </p>
+      <Show when={err() !== 'large' && err() !== 'gone'}>
+        <button type="button" class="link" data-file-save disabled={busy() || saved()} onClick={() => void onSave()}>
+          {saved() ? 'Saved' : busy() ? '…' : 'Save'}
+        </button>
+      </Show>
+    </div>
+  );
+}
+
+function shortMime(mime: string): string {
+  const m = mime.toLowerCase().split(';')[0]!.trim();
+  if (m.startsWith('image/')) return m.slice(6) || 'image';
+  if (m.startsWith('audio/')) return m.slice(6) || 'audio';
+  if (m.startsWith('text/')) return m.slice(5) || 'text';
+  if (m === 'application/pdf') return 'pdf';
+  if (m === 'application/octet-stream') return 'file';
+  return m || 'file';
+}
 
 function VoiceNote(props: { id: string; name: string; load: (messageId: string) => Promise<string> }) {
   const [url, setUrl] = createSignal<string | null>(null);
@@ -2018,6 +2150,8 @@ function Composer(props: {
   // file
   const [file, setFile] = createSignal<File | null>(null);
   let fileInput: HTMLInputElement | undefined;
+  let draftInput: HTMLTextAreaElement | undefined;
+  const [emojiOpen, setEmojiOpen] = createSignal(false);
   // voice note: recorded here, then sent exactly like a chosen file
   const [recording, setRecording] = createSignal<{ rec: Recording; startedAt: number } | null>(null);
   const [recordedMs, setRecordedMs] = createSignal(0);
@@ -2577,7 +2711,19 @@ function Composer(props: {
                 {recording() ? `■ ${duration(recordedMs())}` : '🎙'}
               </button>
             </Show>
+            <button
+              type="button"
+              class="attach soft"
+              data-emoji
+              aria-label="Emoji"
+              aria-expanded={emojiOpen()}
+              title="Emoji"
+              onClick={() => setEmojiOpen((v) => !v)}
+            >
+              🙂
+            </button>
             <textarea
+              ref={(el) => { draftInput = el; }}
               rows={1}
               placeholder={`Message ${props.name}`}
               value={draft()}
@@ -2594,6 +2740,34 @@ function Composer(props: {
               {label()}
             </button>
           </div>
+          <Show when={emojiOpen()}>
+            <div class="emoji-picker" data-emoji-picker role="listbox" aria-label="Emoji">
+              <For each={[...EMOJIS]}>
+                {(e) => (
+                  <button
+                    type="button"
+                    class="emoji-pick"
+                    data-emoji-pick={e}
+                    onClick={() => {
+                      const el = draftInput;
+                      const start = el?.selectionStart ?? draft().length;
+                      const end = el?.selectionEnd ?? start;
+                      const { next, caret } = insertEmoji(draft(), e, start, end);
+                      composerRevision++;
+                      setDraft(next);
+                      setEmojiOpen(false);
+                      queueMicrotask(() => {
+                        el?.focus();
+                        el?.setSelectionRange(caret, caret);
+                      });
+                    }}
+                  >
+                    {e}
+                  </button>
+                )}
+              </For>
+            </div>
+          </Show>
         </Match>
         <Match when={mode() === 'file'}>
           <div class="composer-main">

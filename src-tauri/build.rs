@@ -70,6 +70,8 @@ fn main() {
             "file_price",
             "file_send",
             "voice_note_fetch",
+            "file_fetch",
+            "file_save",
             "call_quote",
             "call_signal",
             "ai_read",
