@@ -225,13 +225,14 @@ describe('pairing panel', () => {
       expires_at_ms: null,
     });
     const panel = el.querySelector('[data-pairing="paired"]')!;
-    expect(panel.textContent).toContain('App paired');
+    expect(panel.querySelector('[data-device-badge="none"]')?.textContent).toBe('App paired');
+    expect(panel.querySelector('[data-device-badge="registered"]')).toBeNull();
     expect(panel.textContent).not.toContain('Touch ID Enrolled');
     expect(panel.textContent).not.toContain('Secure Enclave');
     expect(panel.textContent).not.toContain('Touch ID approves every payment');
     expect(panel.textContent).toContain('Loopback authenticated. Ordinary pairing is file-backed on this Mac.');
     expect(el.textContent).toContain('The app connects to your sovereign node on this Mac.');
-    expect(el.textContent).not.toContain('Touch ID on this device can approve payments per contact.');
+    expect(el.textContent).not.toContain('Touch ID on this Mac can approve a contact or budget.');
   });
 
   it('claims Touch ID Enrolled and Secure Enclave only when device key is registered', () => {
@@ -244,20 +245,34 @@ describe('pairing panel', () => {
     };
     const el = show(paired, ready, () => {}, enrolledDevice);
     const panel = el.querySelector('[data-pairing="paired"]')!;
-    expect(panel.textContent).toContain('Touch ID Enrolled · Secure Enclave');
-    expect(panel.textContent).toContain(
-      'Loopback authenticated. Touch ID approves every payment to authorized contacts.',
+    expect(panel.querySelector('[data-device-badge="registered"]')?.textContent).toBe(
+      'Touch ID Enrolled · Secure Enclave',
     );
-    expect(el.textContent).toContain('Touch ID on this device can approve payments per contact.');
+    expect(panel.textContent).toContain(
+      'Loopback authenticated. Touch ID on this Mac can approve a contact or budget; it does not sign every payment.',
+    );
+    expect(panel.textContent).not.toContain('Touch ID approves every payment');
+    expect(el.textContent).toContain('Touch ID on this Mac can approve a contact or budget.');
   });
 
-  it('pending pairing accurately reflects device enrollment state', () => {
+  it('never infers Touch ID enrollment from pairing alone', () => {
+    // Paired with no device prop / null device must not show the enclave badge.
+    const el = show(paired, ready);
+    const panel = el.querySelector('[data-pairing="paired"]')!;
+    expect(panel.querySelector('[data-device-badge="registered"]')).toBeNull();
+    expect(panel.textContent).toContain('App paired');
+    expect(panel.textContent).not.toContain('Touch ID Enrolled');
+    expect(panel.textContent).not.toContain('Secure Enclave');
+  });
+
+  it('pending pairing stays distinct from device registration', () => {
     const unenrolled = show(pending, booting, () => {}, null);
     const unenrolledPanel = unenrolled.querySelector('[data-pairing="pending"]')!;
     expect(unenrolledPanel.textContent).toContain(
       'Establishing an authenticated pairing between this app and your node.',
     );
     expect(unenrolledPanel.textContent).not.toContain('Secure Enclave');
+    expect(unenrolledPanel.textContent).not.toContain('Registering');
 
     const enrolledDevice: DeviceView = {
       available: true,
@@ -269,7 +284,11 @@ describe('pairing panel', () => {
     const enrolled = show(pending, booting, () => {}, enrolledDevice);
     const enrolledPanel = enrolled.querySelector('[data-pairing="pending"]')!;
     expect(enrolledPanel.textContent).toContain(
-      'Registering Secure Enclave key and establishing an authenticated pairing.',
+      'Establishing an authenticated pairing between this app and your node.',
     );
+    expect(enrolledPanel.textContent).toContain(
+      'Touch ID approvals are already set up on this Mac; pairing does not create that key.',
+    );
+    expect(enrolledPanel.textContent).not.toContain('Registering Secure Enclave');
   });
 });

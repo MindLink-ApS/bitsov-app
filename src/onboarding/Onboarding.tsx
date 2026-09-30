@@ -44,7 +44,7 @@ export function Onboarding(props: {
           when={isEnrolled()}
           fallback={<p class="hint">Select where your node runs. The app connects to your sovereign node on this Mac.</p>}
         >
-          <p class="hint">Select where your node runs. Touch ID on this device can approve payments per contact.</p>
+          <p class="hint">Select where your node runs. Touch ID on this Mac can approve a contact or budget.</p>
         </Show>
 
         <div class="node-target-grid" role="radiogroup" aria-label="Choose node location">
@@ -162,11 +162,9 @@ export function Onboarding(props: {
               </div>
               <div>
                 <h2>Pairing this app with your node…</h2>
-                <Show
-                  when={isEnrolled()}
-                  fallback={<p>Establishing an authenticated pairing between this app and your node.</p>}
-                >
-                  <p>Registering Secure Enclave key and establishing an authenticated pairing.</p>
+                <p>Establishing an authenticated pairing between this app and your node.</p>
+                <Show when={isEnrolled()}>
+                  <p class="hint">Touch ID approvals are already set up on this Mac; pairing does not create that key.</p>
                 </Show>
               </div>
             </div>
@@ -194,15 +192,17 @@ export function Onboarding(props: {
                 <h2>This app is paired</h2>
                 <Show
                   when={isEnrolled()}
-                  fallback={<span class="touchid-status-pill">App paired</span>}
+                  fallback={<span class="touchid-status-pill" data-device-badge="none">App paired</span>}
                 >
-                  <span class="touchid-status-pill">Touch ID Enrolled · Secure Enclave</span>
+                  <span class="touchid-status-pill" data-device-badge="registered">Touch ID Enrolled · Secure Enclave</span>
                 </Show>
                 <Show
                   when={isEnrolled()}
                   fallback={<p class="hint" style={{ margin: '4px 0 0' }}>Loopback authenticated. Ordinary pairing is file-backed on this Mac.</p>}
                 >
-                  <p class="hint" style={{ margin: '4px 0 0' }}>Loopback authenticated. Touch ID approves every payment to authorized contacts.</p>
+                  <p class="hint" style={{ margin: '4px 0 0' }}>
+                    Loopback authenticated. Touch ID on this Mac can approve a contact or budget; it does not sign every payment.
+                  </p>
                 </Show>
               </div>
             </div>
