@@ -327,6 +327,21 @@ describe('voice notes in the composer and thread', () => {
     expect(host.used('file_send')).toHaveLength(0);
   });
 
+  it('blur then hide while recording still keeps the clip as a preview', async () => {
+    const host = stubHost();
+    await openShell();
+    $<HTMLButtonElement>('[data-voice-record="start"]')!.click();
+    await vi.waitFor(() => expect($('[data-voice-record="stop"]')).not.toBeNull());
+    // Real webviews fire blur then visibilitychange(hidden) on minimise / tab switch.
+    // stopRecording clears recording before onstop; a blind gen bump would drop the clip.
+    window.dispatchEvent(new Event('blur'));
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' });
+    document.dispatchEvent(new Event('visibilitychange'));
+    await vi.waitFor(() => expect($('[data-voice-preview]')).not.toBeNull());
+    expect($('[data-composer]')!.getAttribute('data-mode')).toBe('file');
+    expect(host.used('file_send')).toHaveLength(0);
+  });
+
   it('a track switch while stop awaits does not attach the clip to the new track', async () => {
     stubHost();
     let releaseStop: (() => void) | null = null;

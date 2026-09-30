@@ -2044,12 +2044,14 @@ function Composer(props: {
   };
   onCleanup(dropRecording);
   // Leaving the window stops an active recording (clip stays as an unsent
-  // preview). If the mic prompt is still open, bump generation so a late
-  // grant does not start capture while the user is not looking.
+  // preview). If the mic prompt is still open (`starting`), bump generation so
+  // a late grant does not start capture while the user is not looking. Do not
+  // bump merely because recording is null — stopRecording clears it before
+  // awaiting onstop, and blur+visibilitychange would then drop the clip.
   const onLeave = () => {
     if (untrack(recording)) {
       void stopRecording();
-    } else {
+    } else if (untrack(starting)) {
       voiceGeneration++;
     }
   };
