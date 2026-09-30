@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'solid-js/web';
 import { ControlCenter } from '../src/control/Shell';
 import { sampleSource, SAMPLE_OWN_ID, SAMPLE_PEERS, SAMPLE_PRESETS } from '../src/control/sample';
+import { resetContactsForTests, setPetname } from '../src/control/petnames';
 import { ago } from '../src/control/format';
 import { feedState, homeostasis, membraneLive, membraneRefused, membraneSummary, metabolism, nucleus, outboundKind, MEMBRANE_KEEP, type MembraneEntry } from '../src/control/body';
 import type { BudgetView, LiveEvent, Message } from '../src/control/types';

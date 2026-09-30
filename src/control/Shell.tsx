@@ -9,6 +9,7 @@ import { amountText, inPaymentBounds, MAX_PAYMENT_MSAT, MIN_PAYMENT_MSAT, parseA
 import { Organism } from './BodyPanel';
 import { SoftError } from './SoftError';
 import { DiscoverPanel, FrontDoorEditor } from './Discover';
+import { ContactPanel } from './ContactPanel';
 import { callCost, createCallEngine, IDLE as CALL_IDLE, isCallKind, signalCost, stunServer, type CallMedia, type CallView } from './call';
 import { createMeetingEngine, declineCost, inviteCost, joinCost, MAX_PARTICIPANTS, MEETING_IDLE, type LegState, type MeetingView, type ShownQuotes } from './meeting';
 import { blobUrl, duration, FILE_MAX_BYTES, fileNameOf, isVoiceNote, type Recording, startRecording, VOICE_MAX_MS } from './voice';
@@ -42,6 +43,7 @@ import {
   type Denom,
   type ThemePref,
 } from './prefs';
+import { reconcileKeyChange, verifyState } from './petnames';
 import {
   ADMISSION_MAX_MSAT,
   applyDelivery,
@@ -1399,10 +1401,37 @@ function Rail(props: {
 
 // ---- tracks ---------------------------------------------------------------
 
-function TrackHead(props: { title: string; sub?: JSX.Element; extra?: JSX.Element; onContext: () => void }) {
+function TrackHead(props: {
+  title: string;
+  sub?: JSX.Element;
+  extra?: JSX.Element;
+  onContext: () => void;
+  onContact?: () => void;
+  verified?: boolean;
+  keyChanged?: boolean;
+}) {
   return (
     <header class="track-head">
-      <h1>{props.title}</h1>
+      <Show
+        when={props.onContact}
+        fallback={<h1>{props.title}</h1>}
+      >
+        <button
+          type="button"
+          class="track-title-btn"
+          data-contact-open
+          onClick={() => props.onContact?.()}
+          aria-label={`Contact ${props.title}`}
+        >
+          <h1>{props.title}</h1>
+          <Show when={props.keyChanged}>
+            <span class="contact-pill warn" data-contact-pill="key-changed">Key changed</span>
+          </Show>
+          <Show when={props.verified && !props.keyChanged}>
+            <span class="contact-pill ok" data-contact-pill="verified">Verified</span>
+          </Show>
+        </button>
+      </Show>
       <div class="sub">{props.sub}</div>
       {props.extra}
       <button class="quiet context-toggle" onClick={() => props.onContext()}>Settings</button>
@@ -1456,6 +1485,15 @@ function Conversation(props: {
   // A request card's Pay: hands the invoice to the composer's Pay review. Never pays.
   const [payRequest, setPayRequest] = createSignal<{ seq: number; bolt11: string } | null>(null);
   let payRequestSeq = 0;
+  const [contactOpen, setContactOpen] = createSignal(false);
+  createEffect(() => {
+    if (props.track.kind === 'peer') reconcileKeyChange(props.track.id);
+  });
+  const peerVerify = () => {
+    if (props.track.kind !== 'peer') return { verified: false, keyChanged: false };
+    const st = verifyState(props.track.id);
+    return { verified: st === 'verified', keyChanged: st === 'key-changed' };
+  };
   // Invoice payments made in this thread, by payment hash: a card they paid shows it.
   // Only this session's records; after a restart the node's duplicate refusal remains.
   const paidInvoices = createMemo(() => {
@@ -1505,7 +1543,20 @@ function Conversation(props: {
           </Show>
         }
         onContext={props.onContext}
+        onContact={props.track.kind === 'peer' && props.peer ? () => setContactOpen(true) : undefined}
+        verified={peerVerify().verified}
+        keyChanged={peerVerify().keyChanged}
       />
+      <Show when={props.track.kind === 'peer' && props.peer ? props.peer : null}>
+        {(p) => (
+          <ContactPanel
+            open={contactOpen()}
+            peer={p()}
+            doorName={null}
+            onClose={() => setContactOpen(false)}
+          />
+        )}
+      </Show>
       <div class="stream" ref={stream} data-stream>
         <div class="chat-column">
         <Show when={props.introduced}>

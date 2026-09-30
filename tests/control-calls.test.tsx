@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'solid-js/web';
 import App from '../src/App';
 import type { PairingView } from '../src/onboarding/pairing';
+import { resetContactsForTests, setPetname } from '../src/control/petnames';
 import type { BudgetView, CallQuote, CallReceipt, LiveEvent, Message, SpendView } from '../src/control/types';
 import { CONNECT_TIMEOUT_MS, createCallEngine, DISCONNECT_GRACE_MS, isCallKind, newCallId, parseSignal, RING_MS, stunServer, type CallDeps, type CallView } from '../src/control/call';
 
@@ -308,6 +309,8 @@ const openBudget = (): BudgetView => ({
 
 type Reply = (args?: Record<string, unknown>) => unknown;
 function stubHost(overrides: Record<string, Reply> = {}) {
+  resetContactsForTests();
+  setPetname(A, 'Maya');
   const calls: { cmd: string; args?: Record<string, unknown> }[] = [];
   const callbacks = new Map<number, (e: unknown) => void>();
   const spend: SpendView = { state: 'locked', basis: null, open_until_ms: null, pending: null, window_ms: 600_000 };

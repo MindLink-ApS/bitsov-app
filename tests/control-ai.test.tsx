@@ -1,8 +1,9 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'solid-js/web';
 import App from '../src/App';
 import { answerFrom, cardText, peerIn, satsIn, sourceLine, understand, WEEK_MS, type Intent } from '../src/control/ai';
 import { sampleNarrow, sampleRead } from '../src/control/sample';
+import { resetContactsForTests, setPetname } from '../src/control/petnames';
 import type { PairingView } from '../src/onboarding/pairing';
 import type { Amount, PaymentsReport, Peer, TopicRead } from '../src/control/types';
 
@@ -20,6 +21,13 @@ const PEERS: Peer[] = [
   { node_id: B, addr: null, label: 'Josh', connected: true, fingerprint: null },
   { node_id: 'c'.repeat(64), addr: null, label: null, connected: false, fingerprint: null },
 ];
+
+beforeEach(() => {
+  resetContactsForTests();
+  setPetname(A, 'Maya');
+  setPetname(B, 'Josh');
+});
+afterEach(() => resetContactsForTests());
 
 // Draft text is a separate value, never extracted from the question or answer.
 const DRAFT_TEXTS = [

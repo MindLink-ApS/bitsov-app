@@ -5,6 +5,7 @@ import * as bolt11Module from '../src/control/bolt11';
 import { BECH32_CHARSET, bech32Checksum, cleanPurpose, payeeView, readChatInvoice } from '../src/control/bolt11';
 import { compress, G, N, pointMul, sha256, toBig } from './secp';
 import type { InvoiceAmount, SpendView } from '../src/control/types';
+import { resetContactsForTests, setPetname } from '../src/control/petnames';
 
 // Demo gap 6: Request's invoice travels as an ordinary paid chat message, and
 // a received one renders as a request card whose Pay only opens the review.
@@ -300,6 +301,8 @@ const msg = (id: string, plaintext: string, sender = A, kind = 1) =>
   ({ id, kind, sender, recipient: sender === A ? OWN : A, timestamp: Date.now() - 1000, plaintext, payment_amount_msat: 2000 });
 
 function stubHost(overrides: Record<string, Reply> = {}, network: string | null = 'regtest') {
+  resetContactsForTests();
+  setPetname(A, 'Maya');
   const calls: Call[] = [];
   const spend = { v: view('locked') };
   const REPLIES: Record<string, Reply> = {
