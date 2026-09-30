@@ -5,6 +5,11 @@
 
 import type { Denom } from './prefs';
 
+/** The host's bounds for a typed keysend or invoice amount (act.rs MIN/MAX_PAYMENT_MSAT). */
+export const MIN_PAYMENT_MSAT = 1_000;
+export const MAX_PAYMENT_MSAT = 100_000_000_000;
+export const inPaymentBounds = (msat: number) => msat >= MIN_PAYMENT_MSAT && msat <= MAX_PAYMENT_MSAT;
+
 /** Fractional digits that still land on a whole msat. */
 const PLACES: Record<Denom, number> = { sats: 3, btc: 11 };
 

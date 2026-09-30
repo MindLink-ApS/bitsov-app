@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { amountText, parseAmount } from '../src/control/amountInput';
+import { amountText, inPaymentBounds, parseAmount } from '../src/control/amountInput';
 
 // Pay and Request read typed amounts as exact integer msat. Anything finer
 // than one msat is refused, never rounded into a different amount.
@@ -62,5 +62,16 @@ describe('amount text round-trips exactly', () => {
     expect(amountText(1_500_000, 'btc')).toBe('0.000015');
     expect(amountText(100_000_000_000, 'btc')).toBe('1');
     expect(amountText(1, 'btc')).toBe('0.00000000001');
+  });
+});
+
+describe('host payment bounds (1 sat to 1 BTC)', () => {
+  it.each([
+    [999, false],
+    [1_000, true],
+    [100_000_000_000, true],
+    [100_000_000_001, false],
+  ])('%d msat in bounds: %s', (msat, ok) => {
+    expect(inPaymentBounds(msat)).toBe(ok);
   });
 });

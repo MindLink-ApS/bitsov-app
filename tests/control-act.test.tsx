@@ -475,6 +475,72 @@ describe('acting from the track', () => {
       expect(host.used('payment_pay')).toHaveLength(0);
     });
 
+    // Codex #83 P1: reselecting the active mode or tab while a payment is in
+    // flight must not leave a reusable review (or draft) that pays again.
+    const deferred = () => {
+      let resolve!: (v: unknown) => void;
+      const reply = () => new Promise((r) => { resolve = r; });
+      return { reply, done: (v: unknown) => resolve(v) };
+    };
+    const reselect = (tab: string | null, mode: 'pay' | 'request') => {
+      $<HTMLButtonElement>(`[data-composer-mode="${mode}"]`)!.click();
+      if (tab) [...mount.querySelectorAll<HTMLButtonElement>('button[role="tab"]')].find((b) => b.textContent === tab)!.click();
+    };
+    const tryAgain = async () => {
+      await new Promise((r) => setTimeout(r, 20));
+      $<HTMLButtonElement>('[data-pay-confirm]')?.click();
+      const send = $<HTMLButtonElement>('[data-send]');
+      if (send && !send.disabled) send.click();
+      await new Promise((r) => setTimeout(r, 20));
+      $<HTMLButtonElement>('[data-pay-confirm]')?.click();
+      await new Promise((r) => setTimeout(r, 20));
+    };
+
+    it.each([
+      ['keysend', 'payment_keysend', 'Direct'],
+      ['bolt11', 'payment_pay', 'Invoice'],
+    ] as const)('pays a %s once when the active mode and tab are reselected mid-payment', async (_kind, cmd, tab) => {
+      const d = deferred();
+      const host = stubHost({ [cmd]: d.reply });
+      host.spend.v = openView();
+      await openShell();
+      $<HTMLButtonElement>('[data-composer-mode="pay"]')!.click();
+      if (tab === 'Direct') {
+        direct();
+        type('[data-pay-amount]', '5');
+        type('[data-pay-pubkey]', PUB);
+      } else {
+        type('[data-pay-invoice]', 'lntb10n1abc');
+        await vi.waitFor(() => expect(text('[data-send]')).toBe('Pay · 6 sats'));
+      }
+      submit();
+      await confirmPay();
+      await vi.waitFor(() => expect(host.used(cmd)).toHaveLength(1));
+      expect($('[data-pay-confirm]')).toBeNull();
+      reselect(tab, 'pay');
+      $<HTMLButtonElement>('[data-pay-confirm]')?.click();
+      d.done({ method: tab === 'Direct' ? 'keysend' : 'invoice', amount_msat: tab === 'Direct' ? 5000 : 1000, status: 'settled', paid_at_ms: Date.now() });
+      await vi.waitFor(() => expect($('[data-artifact="payment"]')).not.toBeNull());
+      await tryAgain();
+      expect(host.used(cmd)).toHaveLength(1);
+      expect($('[data-pay-confirm]')).toBeNull();
+    });
+
+    it('creates one invoice when the active Request mode is reselected mid-request', async () => {
+      const d = deferred();
+      const host = stubHost({ invoice_create: d.reply });
+      await openShell();
+      $<HTMLButtonElement>('[data-composer-mode="request"]')!.click();
+      type('[data-request-amount]', '21');
+      submit();
+      await vi.waitFor(() => expect(host.used('invoice_create')).toHaveLength(1));
+      reselect(null, 'request');
+      d.done({ bolt11: 'lntb210n1sample', amount_msat: 21_000, note: null, expires_at_ms: Date.now() + 3_600_000 });
+      await vi.waitFor(() => expect($('[data-artifact="invoice"]')).not.toBeNull());
+      await tryAgain();
+      expect(host.used('invoice_create')).toHaveLength(1);
+    });
+
     it('refuses an amount finer than one msat instead of rounding it', async () => {
       const host = stubHost();
       host.spend.v = openView();
@@ -487,10 +553,38 @@ describe('acting from the track', () => {
       expect($<HTMLButtonElement>('[data-send]')!.disabled).toBe(true);
       submit();
       expect($('[data-pay-review]')).toBeNull();
-      type('[data-pay-amount]', '0.001');
-      await vi.waitFor(() => expect($('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('5001'));
+      type('[data-pay-amount]', '1');
+      await vi.waitFor(() => expect($('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('6000'));
       expect($('[data-amount-invalid]')).toBeNull();
       expect(host.used('payment_keysend')).toHaveLength(0);
+    });
+
+    it.each([
+      ['sats', '0.999', 'Between 1 sat and 100,000,000 sats.'],
+      ['sats', '100000000.001', 'Between 1 sat and 100,000,000 sats.'],
+      ['btc', '1.00000000001', 'Between 0.00000001 BTC and 1 BTC.'],
+      ['btc', '0.000000009', 'Between 0.00000001 BTC and 1 BTC.'],
+    ] as const)('refuses %s %s outside the host bounds before review', async (unit, typed, message) => {
+      const host = stubHost();
+      host.spend.v = openView();
+      setDenom(unit);
+      await openShell();
+      $<HTMLButtonElement>('[data-composer-mode="pay"]')!.click();
+      direct();
+      type('[data-pay-pubkey]', PUB);
+      type('[data-pay-amount]', typed);
+      await vi.waitFor(() => expect(text('[data-amount-invalid]')).toBe(message));
+      expect($<HTMLButtonElement>('[data-send]')!.disabled).toBe(true);
+      submit();
+      expect($('[data-pay-review]')).toBeNull();
+      $<HTMLButtonElement>('[data-composer-mode="request"]')!.click();
+      type('[data-request-amount]', typed);
+      await vi.waitFor(() => expect(text('[data-amount-invalid]')).toBe(message));
+      expect($<HTMLButtonElement>('[data-send]')!.disabled).toBe(true);
+      submit();
+      await new Promise((r) => setTimeout(r, 0));
+      expect(host.used('payment_keysend')).toHaveLength(0);
+      expect(host.used('invoice_create')).toHaveLength(0);
     });
 
     it('keeps the same msat when the denomination switches', async () => {

@@ -5,7 +5,7 @@ import { qrSvg } from '../qr';
 import type { Proposal } from './ai';
 import { AiTrack, createAiSession } from './AiTrack';
 import { amount as fmtAmount, allIn, clock, day, feeCeiling, routingFee, sats, satsWhole, satUnit, shortId, uptime } from './format';
-import { amountText, parseAmount } from './amountInput';
+import { amountText, inPaymentBounds, MAX_PAYMENT_MSAT, MIN_PAYMENT_MSAT, parseAmount } from './amountInput';
 import { Organism } from './BodyPanel';
 import { DiscoverPanel, FrontDoorEditor } from './Discover';
 import { callCost, createCallEngine, IDLE as CALL_IDLE, isCallKind, signalCost, stunServer, type CallMedia, type CallView } from './call';
@@ -1987,7 +1987,14 @@ const unitName = () => (denom() === 'btc' ? 'BTC' : 'sats');
 
 /** Amount first: one big field in the chosen denomination. Refuses, never rounds, a finer amount. */
 function AmountField(props: { data: 'pay' | 'request'; label: string; value: string; onInput: (v: string) => void }) {
-  const invalid = () => props.value.trim() !== '' && parseAmount(props.value, denom()) === null;
+  /** Why the typed amount cannot be used, before any review. */
+  const problem = (): string | null => {
+    if (props.value.trim() === '') return null;
+    const msat = parseAmount(props.value, denom());
+    if (msat === null) return `Use digits and one dot, at most ${denom() === 'btc' ? 11 : 3} decimals.`;
+    return inPaymentBounds(msat) ? null : `Between ${fmtAmount(MIN_PAYMENT_MSAT)} and ${fmtAmount(MAX_PAYMENT_MSAT)}.`;
+  };
+  const invalid = () => problem() !== null;
   return (
     <>
       <label class="amount-field" classList={{ invalid: invalid() }}>
@@ -2007,7 +2014,7 @@ function AmountField(props: { data: 'pay' | 'request'; label: string; value: str
         <span class="amount-unit">{unitName()}</span>
       </label>
       <Show when={invalid()}>
-        <p class="hint" data-amount-invalid>Use digits and one dot, at most {denom() === 'btc' ? 11 : 3} decimals.</p>
+        <p class="hint" data-amount-invalid>{problem()}</p>
       </Show>
     </>
   );
@@ -2051,12 +2058,16 @@ function Composer(props: {
   const [pubkey, setPubkey] = createSignal('');
   const [amount, setAmount] = createSignal('');
   const [memo, setMemo] = createSignal('');
-  /** The typed amount as exact msat in the current denomination, or null. */
-  const amountMsat = () => parseAmount(amount(), denom());
+  /** The typed amount as exact msat in the current denomination, or null when not exact or outside 1 sat to 1 BTC. */
+  const amountMsat = () => {
+    const msat = parseAmount(amount(), denom());
+    return msat !== null && inPaymentBounds(msat) ? msat : null;
+  };
   // The one confirm step: exactly what Pay will send, frozen when shown.
   // Any edit, mode, track or denomination change drops it; nothing is paid
   // until its own button is pressed.
   const [review, setReview] = createSignal<PayReview | null>(null);
+  const [paying, setPaying] = createSignal(false);
   // file
   const [file, setFile] = createSignal<File | null>(null);
   let fileInput: HTMLInputElement | undefined;
@@ -2410,6 +2421,7 @@ function Composer(props: {
   };
 
   const label = () => {
+    if (paying()) return 'Paying…';
     if (ownerWait()) return 'Waiting for contact approval';
     if (viaBudget()) {
       const s = shown();
@@ -2564,15 +2576,19 @@ function Composer(props: {
   const confirmPay = async () => {
     const rv = review();
     if (!rv || props.moneyBlocked || busy() || !line().open) return;
+    // Consumed at dispatch: a review pays at most once, whatever happens to
+    // the draft while the host answers. Paying again needs a new review.
+    setReview(null);
     setNote(null);
     setBusy(true);
+    setPaying(true);
     const t = props.track;
     const submittedRevision = composerRevision;
-    const r = rv.kind === 'invoice'
-      ? await props.actions.pay(t, rv.bolt11, rv.msat)
-      : await props.actions.keysend(t, rv.pubkey, rv.msat, rv.memo);
+    const r = await (rv.kind === 'invoice'
+      ? props.actions.pay(t, rv.bolt11, rv.msat)
+      : props.actions.keysend(t, rv.pubkey, rv.msat, rv.memo)
+    ).finally(() => setPaying(false));
     if (composerRevision === submittedRevision) {
-      setReview(null);
       if (r.ok) {
         setBolt11('');
         setAmount('');
@@ -2613,6 +2629,9 @@ function Composer(props: {
                 data-composer-mode={m}
                 aria-pressed={mode() === m}
                 onClick={() => {
+                  // Reselecting the active mode is not an edit: it must not
+                  // detach an in-flight send from the draft it will clear.
+                  if (mode() === m) return;
                   composerRevision++;
                   setMode(m);
                   setNote(null);
@@ -2735,8 +2754,8 @@ function Composer(props: {
         <Match when={mode() === 'pay'}>
           <div class="fields pay-flow">
             <div class="modes soft small" role="tablist" aria-label="How to pay">
-              <button type="button" role="tab" aria-selected={payKind() === 'invoice'} onClick={() => { composerRevision++; setPayKind('invoice'); }}>Invoice</button>
-              <button type="button" role="tab" aria-selected={payKind() === 'keysend'} onClick={() => { composerRevision++; setPayKind('keysend'); }}>Direct</button>
+              <button type="button" role="tab" aria-selected={payKind() === 'invoice'} onClick={() => { if (payKind() === 'invoice') return; composerRevision++; setPayKind('invoice'); }}>Invoice</button>
+              <button type="button" role="tab" aria-selected={payKind() === 'keysend'} onClick={() => { if (payKind() === 'keysend') return; composerRevision++; setPayKind('keysend'); }}>Direct</button>
             </div>
             <Show
               when={payKind() === 'invoice'}
@@ -2796,7 +2815,7 @@ function Composer(props: {
                     <button type="button" class="link" data-pay-back disabled={busy()} onClick={() => setReview(null)}>Back</button>
                     <span class="basis">You pay the real fee, never above this.</span>
                     <button type="button" class="primary soft" data-pay-confirm disabled={busy() || props.moneyBlocked} onClick={() => void confirmPay()}>
-                      {busy() ? 'Paying…' : 'Confirm and pay'}
+                      Confirm and pay
                     </button>
                   </div>
                 </div>
