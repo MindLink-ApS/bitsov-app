@@ -37,6 +37,7 @@ import type {
   Room,
   RoomQuote,
   SpendView,
+  DeviceView,
   WalletOverview,
 } from './types';
 
@@ -583,6 +584,10 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
       spend = { ...spend, state: 'expired', basis: null, open_until_ms: null };
     }
   };
+  // This Mac as a paired device: set up once, the owner approves at the node
+  // (the sample approves after a few polls), then one Touch ID tap per contact.
+  let device: DeviceView = { available: true, state: 'none', fingerprint: null, owner_action: null, expires_at_ms: null };
+  let devicePolls = 0;
   const openWindow = () => {
     spend = { state: 'open', basis: 'node_grant', open_until_ms: Date.now() + WINDOW_MS, pending: null, window_ms: WINDOW_MS };
   };
@@ -945,6 +950,39 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
         requestElevation();
       }
       wants.window = true;
+      return ok(spend);
+    },
+    spendCancel: () => {
+      spend = { state: 'locked', basis: null, open_until_ms: null, pending: null, window_ms: WINDOW_MS };
+      wants.window = false;
+      wants.budget = null;
+      return ok(spend);
+    },
+    deviceKeyStatus: () => {
+      if (device.state === 'pending' && ++devicePolls >= GRANT_AFTER_POLLS) {
+        device = { ...device, state: 'registered', owner_action: null, expires_at_ms: null };
+      }
+      return ok(device);
+    },
+    deviceKeyRegister: () => {
+      devicePolls = 0;
+      device = {
+        available: true,
+        state: 'pending',
+        fingerprint: '3F9A-12C4-77B0-E51D',
+        owner_action: 'konsensus device approve --op 7c2e91d04b5a3f6e8d1c0b2a --config /Users/you/bitsov/konsensus.toml',
+        expires_at_ms: Date.now() + 15 * 60_000,
+      };
+      return ok(device);
+    },
+    deviceKeyCancel: () => {
+      device = { available: true, state: 'none', fingerprint: null, owner_action: null, expires_at_ms: null };
+      return ok(device);
+    },
+    relationApprove: () => {
+      if (device.state !== 'registered') return refuse('device_not_registered', 'Set up Touch ID approvals first.');
+      if (book.paused) return refuse('budget_paused', 'Payments are paused. Resume them first.');
+      openWindow();
       return ok(spend);
     },
     spendLock: () => {

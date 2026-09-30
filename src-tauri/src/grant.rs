@@ -41,7 +41,7 @@ pub const MIN_TTL_SECS: u64 = 60;
 pub const MAX_RECIPIENT_BUDGETS: usize = 256;
 
 /// `GET /pair/grant` → `grant`: the caller's live grant, as the node reports it.
-#[derive(Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Deserialize, Clone, Debug, PartialEq, Eq, Default)]
 pub struct NodeGrant {
     #[serde(default)]
     pub client_id: String,
@@ -57,6 +57,16 @@ pub struct NodeGrant {
     pub per_recipient_msat: BTreeMap<String, u64>,
     #[serde(default)]
     pub used_by_recipient: BTreeMap<String, u64>,
+    /// A relation grant (device-signed envelopes): only recipients with a
+    /// live envelope may be paid.
+    #[serde(default)]
+    pub recipients_only: bool,
+    /// Relation grants: the most one act may pay each recipient, msat.
+    #[serde(default)]
+    pub per_act_max_by_recipient: BTreeMap<String, u64>,
+    /// Relation grants: when each envelope ends, unix seconds.
+    #[serde(default)]
+    pub recipient_expires_at: BTreeMap<String, i64>,
 }
 
 /// Parse `GET /pair/grant`. Anything but the documented shape is an error: a
@@ -113,7 +123,31 @@ impl NodeGrant {
                 return Err(recipient_left(left));
             }
         }
+        if self.recipients_only {
+            if let Some(r) = recipient {
+                let key = r.to_ascii_lowercase();
+                let live = self.recipient_expires_at.get(&key).is_some_and(|at| ((*at).max(0) as u64).saturating_mul(1000) > now_ms);
+                if !live {
+                    return Err(no_envelope());
+                }
+                if let Some(per_act) = self.per_act_max_by_recipient.get(&key) {
+                    if max_msat > *per_act {
+                        return Err(per_call(*per_act));
+                    }
+                }
+            }
+        }
         Ok(())
+    }
+
+    /// Whether `recipient` has a live device-signed envelope.
+    pub fn has_envelope(&self, recipient: &str, now_ms: u64) -> bool {
+        let key = recipient.to_ascii_lowercase();
+        self.recipients_only
+            && self
+                .recipient_expires_at
+                .get(&key)
+                .is_some_and(|at| ((*at).max(0) as u64).saturating_mul(1000) > now_ms)
     }
 }
 
@@ -215,6 +249,14 @@ impl Refusal {
     }
 }
 
+/// A relation grant without an envelope for this contact.
+pub fn no_envelope() -> ActionError {
+    ActionError::new(
+        "grant_no_envelope",
+        "You have not approved spending for this contact yet. Nothing was sent. Approve it with Touch ID first.",
+    )
+}
+
 pub fn ended() -> ActionError {
     ActionError::new(
         "grant_ended",
@@ -260,7 +302,25 @@ mod tests {
             per_call_max_msat: 3_000,
             per_recipient_msat: BTreeMap::from([(A.into(), 5_000)]),
             used_by_recipient: BTreeMap::from([(A.into(), 4_000)]),
+            ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_relation_grant_refuses_a_contact_outside_its_envelope_before_any_request() {
+        const B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let mut g = grant(2_000_000_000);
+        g.recipients_only = true;
+        g.per_act_max_by_recipient = BTreeMap::from([(A.into(), 500)]);
+        g.recipient_expires_at = BTreeMap::from([(A.into(), 1_000)]);
+        g.per_recipient_msat = BTreeMap::from([(A.into(), 5_000)]);
+        g.used_by_recipient = BTreeMap::new();
+        assert!(g.has_envelope(A, 999_000) && !g.has_envelope(B, 0));
+        g.check(500, Some(A), 999_000).unwrap();
+        assert_eq!(g.check(501, Some(A), 999_000).unwrap_err().code, "grant_per_call");
+        assert_eq!(g.check(1, Some(B), 0).unwrap_err().code, "grant_no_envelope");
+        // The envelope's own end, before the grant's.
+        assert_eq!(g.check(1, Some(A), 1_000_000).unwrap_err().code, "grant_no_envelope");
     }
 
     #[test]

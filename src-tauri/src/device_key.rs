@@ -12,7 +12,7 @@
 //! Other targets get a stub where [`available`] is false and every call returns
 //! [`DeviceKeyError::Unavailable`].
 
-// Wired into commands in a follow-up; until then only the tests call it.
+// `Policy::NoPromptForTests` is constructed only by tests.
 #![allow(dead_code)]
 
 use std::fmt;

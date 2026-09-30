@@ -325,8 +325,9 @@ pub enum SpendBasis {
     NodeGrant,
 }
 
-/// A pending `POST /pair/elevation-request`.
-#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+/// A pending `POST /pair/elevation-request`. Deserialize: restored from the
+/// app's private approvals file after a restart.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct Elevation {
     pub op_id: String,
     /// Unix ms after which the owner can no longer confirm it.

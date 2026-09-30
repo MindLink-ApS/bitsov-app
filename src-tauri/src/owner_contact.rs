@@ -183,7 +183,7 @@ mod tests {
             client_id: "c1".into(), op_id: "ab12".into(), expires_at,
             budget_msat: 50_000, used_msat: 0, remaining_msat: 50_000,
             per_call_max_msat: 5_000, per_recipient_msat: Default::default(),
-            used_by_recipient: Default::default(),
+            used_by_recipient: Default::default(), ..Default::default()
         };
         Pending::new(Request {
             client_id: "c1".into(), grant_op_id: "ab12".into(),
