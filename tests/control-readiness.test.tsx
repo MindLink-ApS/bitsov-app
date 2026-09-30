@@ -39,7 +39,8 @@ describe('node money readiness', () => {
     expect(mount.querySelector('[data-readiness]')?.textContent).toContain('Retrying');
     expect(mount.querySelector('[data-readiness]')?.textContent).toContain('2 min');
     const send = vi.spyOn(source, 'send');
-    for (const mode of ['message', 'pay', 'request', 'file']) {
+    expect((mount.querySelector('[data-send]') as HTMLButtonElement).disabled).toBe(true);
+    for (const mode of ['pay', 'request', 'file']) {
       (mount.querySelector(`[data-composer-mode="${mode}"]`) as HTMLButtonElement).click();
       expect((mount.querySelector('[data-send]') as HTMLButtonElement).disabled).toBe(true);
     }
@@ -48,7 +49,7 @@ describe('node money readiness', () => {
     status.money_ready = true;
     await vi.advanceTimersByTimeAsync(10_000);
     expect(mount.querySelector('[data-money-notice]')).toBeNull();
-    (mount.querySelector('[data-composer-mode="message"]') as HTMLButtonElement).click();
+    (mount.querySelector('[data-composer-close]') as HTMLButtonElement).click();
     expect((mount.querySelector('[data-send]') as HTMLButtonElement).disabled).toBe(false);
     expect(send).not.toHaveBeenCalled();
   });

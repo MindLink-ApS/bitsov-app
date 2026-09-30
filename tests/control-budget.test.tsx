@@ -164,7 +164,7 @@ describe('invisible payments in the composer and the context panel', () => {
     const host = stubHost(budgetView({ rows: [{ target: MAYA, room: false, limit_msat: 50_000, spent_msat: 0 }] }));
     await openShell();
     type('[data-composer] textarea', 'gm Maya');
-    await vi.waitFor(() => expect(text('[data-send]')).toBe('Approve app all-in limit'));
+    await vi.waitFor(() => expect(text('[data-send]')).toBe('Send'));
     expect(text('[data-budget-setup]')).toContain('Someone new always asks first');
 
     // The owner picks a preset; the tap is the approval. Nothing is sent by it.
@@ -1053,7 +1053,7 @@ describe('invisible payments in the composer and the context panel', () => {
     stubHost(open([{ target: MAYA, room: false, limit_msat: 50_000, spent_msat: 0 }]));
     await openShell();
     $<HTMLButtonElement>('[data-composer-mode="pay"]')!.click();
-    await vi.waitFor(() => expect(text('[data-send]')).toBe('Approve spending'));
+    await vi.waitFor(() => expect(text('[data-send]')).toBe('Send'));
     expect($('[data-budget]')).toBeNull();
   });
 });

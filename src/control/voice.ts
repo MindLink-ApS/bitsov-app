@@ -105,15 +105,24 @@ export async function startRecording(onLimit: () => void, deps: RecorderDeps | n
   }
   const release = () => stream.getTracks().forEach((t) => t.stop());
   let recorder: MediaRecorder;
+  // The container actually recorded: the requested one, or whatever the webview
+  // picked when it refused the typed request (some WebKit builds do).
+  let recordedType = type;
   try {
     recorder = new deps.MediaRecorder(stream, { mimeType: type, audioBitsPerSecond: VOICE_BITS_PER_SECOND });
   } catch {
-    release();
-    throw new Error('This window cannot record audio.');
+    try {
+      recorder = new deps.MediaRecorder(stream);
+      const actual = (recorder.mimeType ?? '').toLowerCase();
+      if (actual.startsWith('audio/webm') || actual.startsWith('audio/mp4')) recordedType = actual;
+    } catch {
+      release();
+      throw new Error('This window cannot record audio.');
+    }
   }
   const chunks: Blob[] = [];
   const startedAt = deps.now();
-  const limitMs = voiceLimitMs(type);
+  const limitMs = voiceLimitMs(recordedType);
   let bytes = 0;
   let limited = false;
   const limit = () => { if (!limited) { limited = true; onLimit(); } };
@@ -142,7 +151,7 @@ export async function startRecording(onLimit: () => void, deps: RecorderDeps | n
     stop: async () => {
       const parts = await finish();
       if (parts.length === 0) return null;
-      const wire = sendType(type);
+      const wire = sendType(recordedType);
       return new File(parts, voiceFileName(startedAt, wire), { type: wire });
     },
     cancel: () => { void finish(); },

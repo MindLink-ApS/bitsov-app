@@ -384,7 +384,9 @@ describe('calls in the shell', () => {
   it('shows the all-in call price before calling, then pays one offer at that ceiling', async () => {
     const host = stubHost();
     await openShell();
-    await vi.waitFor(() => expect(text('[data-call="audio"]')).toBe('Call · 21 sats'));
+    // Icon buttons: no price text on the button; the price rides in the label and title.
+    await vi.waitFor(() => expect($('[data-call="audio"]')!.getAttribute('aria-label')).toBe('Call Maya, up to 21 sats'));
+    expect(text('[data-call="audio"]')).toBe('');
     expect($('[data-call="audio"]')!.getAttribute('title')).toMatch(/Media goes directly between you/);
     // Call signals from history are not chat bubbles.
     await vi.waitFor(() => expect($('[data-message="chat-1"]')).not.toBeNull());

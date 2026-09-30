@@ -28,9 +28,9 @@ it('clears the selected file when switching recipients', async () => {
   select<HTMLButtonElement>(`[data-track="peer:${'b'.repeat(64)}"]`).click();
   select<HTMLButtonElement>('[data-composer-mode="file"]').click();
   const newInput = select<HTMLInputElement>('[data-file-input]');
-  expect(newInput).not.toBe(oldInput);
-  expect(newInput.files?.length).toBe(0);
+  // The file input now persists across recipients; its selection must not.
   expect(newInput.value).toBe('');
+  expect(select('[data-file-chip]').textContent).not.toContain('A-private.txt');
   expect(select<HTMLButtonElement>('[data-send]').disabled).toBe(true);
   select<HTMLButtonElement>('[data-send]').click();
   expect(source.fileSend).not.toHaveBeenCalled();

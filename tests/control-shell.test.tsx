@@ -139,7 +139,7 @@ describe('control center shell', () => {
     await vi.waitFor(() => expect(mount.querySelector('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('2000'));
     expect(mount.querySelector('[data-cost]')?.textContent).toContain('Maya’s price');
     // Until the owner approves, the one action on screen is the approval itself.
-    await vi.waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Approve spending'));
+    await vi.waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Send'));
     expect(mount.querySelector('[data-spend="locked"]')?.textContent).toContain('never saved');
 
     // A live message for the open track lands in the stream; one for another peer counts unread.
@@ -201,7 +201,7 @@ describe('control center shell', () => {
     await vi.waitFor(() => expect(mount.querySelector('[data-sample]')).not.toBeNull());
     await vi.waitFor(() => expect(mount.querySelector('[data-stream]')?.textContent).toContain('Morning.'));
     expect(mount.querySelector('[data-mode="sample"]')).not.toBeNull();
-    await vi.waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Approve app all-in limit'));
+    await vi.waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Send'));
     click('[data-track="new"]');
     await vi.waitFor(() => expect(mount.querySelector('[data-new-track]')?.textContent).toContain('introduction, not admission'));
     click('[data-track="ai"]');

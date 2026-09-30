@@ -5020,6 +5020,14 @@ fn main() {
 /// Normal CS-1 / CS-2 desktop shell: NodeState, wallet commands, bootstrap.
 fn app_builder() -> tauri::Builder<tauri::Wry> {
     tauri::Builder::default()
+        // Voice notes and calls: let the webview use the mic/camera without a
+        // second in-page prompt. The OS still asks once (Info.plist usage text).
+        .on_permission_request(|_webview, kind| match kind {
+            tauri::webview::PermissionKind::Microphone | tauri::webview::PermissionKind::Camera => {
+                tauri::webview::PermissionResponse::Allow
+            }
+            _ => tauri::webview::PermissionResponse::Default,
+        })
         .plugin(tauri_plugin_shell::init())
         .manage(NodeState::default())
         .manage(AiState::default())
