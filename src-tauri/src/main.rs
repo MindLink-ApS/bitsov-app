@@ -4609,14 +4609,10 @@ async fn do_relation_approve(
         return Err(device::node_off_error(reason));
     }
     let message = device::intent_message(&binding.node, &binding.client_id, &intent);
-    // The dialog's contact name comes from the node's own peer list, never
-    // from the renderer: the dialog is where the owner reads what they sign.
-    let label = get_json::<Vec<control::Peer>>(state, "/peers")
-        .await
-        .ok()
-        .and_then(|peers| peers.into_iter().find(|p| p.node_id.eq_ignore_ascii_case(&intent.peer)))
-        .and_then(|p| p.label);
-    let reason = device::intent_reason(&device::contact_name(label.as_deref(), &intent.peer), budget_msat, per_act_max_msat);
+    // The dialog names the contact by the key it signs, never by a name: the
+    // node's /peers label may be the peer's own claim (PR #92 keeps those
+    // apart from local petnames), and petnames never leave this Mac.
+    let reason = device::contact_intent_reason(&intent);
     let signature = match device_sign(blob, message, reason).await {
         Ok(signature) => signature,
         Err(e) => {

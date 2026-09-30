@@ -226,26 +226,17 @@ pub fn intent_reason(contact: &str, budget_msat: u64, per_act_max_msat: u64) -> 
     )
 }
 
-/// Characters that could hide or reorder what the owner reads in the dialog
-/// (bidi controls, zero-width and other invisible formatting).
-fn invisible(c: char) -> bool {
-    c.is_control()
-        || matches!(c, '\u{00AD}' | '\u{061C}' | '\u{180E}' | '\u{200B}'..='\u{200F}'
-            | '\u{2028}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}')
+/// The contact as the dialog names it: the node key the intent signs, shown
+/// short as the app shows it (`shortId`: first 8 and last 8 hex). Never a name:
+/// a node-side label may be the peer's own claim, and petnames stay on this Mac.
+pub fn contact_key(peer: &str) -> String {
+    format!("node {}…{}", &peer[..8.min(peer.len())], &peer[peer.len().saturating_sub(8)..])
 }
 
-/// A contact's name for the dialog: the node's label for the peer (only
-/// visible characters, at most 32), with the short node id, else the id.
-pub fn contact_name(label: Option<&str>, peer: &str) -> String {
-    let clean: Option<String> = label
-        .map(|l| l.chars().filter(|c| !invisible(*c)).take(32).collect::<String>())
-        .map(|l| l.trim().to_string())
-        .filter(|l| !l.is_empty());
-    let short = format!("{}…{}", &peer[..8.min(peer.len())], &peer[peer.len().saturating_sub(4)..]);
-    match clean {
-        Some(l) => format!("{l} ({short})"),
-        None => short,
-    }
+/// The dialog text for one signed intent, from the intent alone: the amounts
+/// and key the owner reads are exactly the ones signed.
+pub fn contact_intent_reason(intent: &Intent) -> String {
+    intent_reason(&contact_key(&intent.peer), intent.budget_msat, intent.per_act_max_msat)
 }
 
 fn sats(msat: u64) -> String {
@@ -390,16 +381,13 @@ mod tests {
     }
 
     #[test]
-    fn the_dialog_names_the_contact_and_both_amounts() {
-        let name = contact_name(Some("Maya\u{7}"), PEER);
-        assert_eq!(name, "Maya (aaaaaaaa…aaaa)");
-        assert_eq!(contact_name(None, PEER), "aaaaaaaa…aaaa");
-        assert_eq!(intent_reason(&name, 200_000, 2_000), "approve paying up to 200 sats per day, at most 2 sats per message, to Maya (aaaaaaaa…aaaa)");
-        // No character that hides or reverses what the owner reads survives.
-        let hostile = "Ma\u{202E}ya\u{200B}\u{2066}\u{00AD}\u{FEFF}\u{061C}\u{180E}\u{2028}\u{2060}";
-        assert_eq!(contact_name(Some(hostile), PEER), "Maya (aaaaaaaa…aaaa)");
-        assert_eq!(contact_name(Some("\u{202E}\u{200F}"), PEER), "aaaaaaaa…aaaa");
-        assert_eq!(contact_name(Some(&"x".repeat(100)), PEER), format!("{} (aaaaaaaa…aaaa)", "x".repeat(32)));
+    fn the_dialog_names_the_contact_by_key_and_both_amounts() {
+        assert_eq!(contact_key(PEER), "node aaaaaaaa…aaaaaaaa");
+        assert_eq!(intent_reason(&contact_key(PEER), 200_000, 2_000), "approve paying up to 200 sats per day, at most 2 sats per message, to node aaaaaaaa…aaaaaaaa");
+        // Built from the signed intent alone: no label, node-side or local, can reach it.
+        let peer = format!("AB12CD34{}EF56AB78", "0".repeat(48));
+        let intent = Intent::contact("k1", &peer, 200_000, 2_000, 5).unwrap();
+        assert_eq!(contact_intent_reason(&intent), "approve paying up to 200 sats per day, at most 2 sats per message, to node ab12cd34…ef56ab78");
         assert_eq!(default_per_act(Some(2_000), 200_000), 2_000);
         assert_eq!(default_per_act(None, 200_000), 10_000);
         assert_eq!(default_per_act(Some(500_000), 200_000), 200_000);

@@ -3518,6 +3518,10 @@ function Composer(props: {
         </Match>
       </Switch>
 
+      {/* Above the capsule: the terms read before Send, which is the Touch ID tap. */}
+      <Show when={needsTouch()}>
+        <TouchApproval peer={target()} name={props.name} priceMsat={shown().msat} actions={props.actions} />
+      </Show>
       <div class="composer-main signal-bar" data-composer-bar>
         <button
           type="button"
@@ -3699,9 +3703,6 @@ function Composer(props: {
           <button type="button" class="link" data-contact-cancel onClick={cancelOwner}>Cancel</button>
           <p class="hint">Cancel does not revoke an approval already issued at the node; it expires within two minutes.</p>
         </div>}
-      </Show>
-      <Show when={needsTouch()}>
-        <TouchApproval peer={target()} name={props.name} priceMsat={shown().msat} actions={props.actions} />
       </Show>
       <Show when={spends()}>
         <Show
@@ -3901,15 +3902,17 @@ export function TouchApproval(props: { peer: string; name: string; priceMsat: nu
       <p class="spend-line">
         <span class="dot" />{' '}
         <span class="line-text">
-          <strong>Approve {props.name} with Touch ID.</strong> Up to <span data-touch-budget>{fmtAmount(ENVELOPE_BUDGET_MSAT)}</span> a
-          day, at most <span data-touch-per-act>{fmtAmount(perAct())}</span> per message, for 24 hours.
+          {/* The petname is local; Touch ID names the same key, never a name. */}
+          <strong>Approve {props.name} (node <code data-touch-peer>{shortId(props.peer)}</code>) with Touch ID.</strong> Up
+          to <span data-touch-budget>{fmtAmount(ENVELOPE_BUDGET_MSAT)}</span> a day, at most{' '}
+          <span data-touch-per-act>{fmtAmount(perAct())}</span> per message, for 24 hours.
         </span>
       </p>
       <details class="quiet-detail" data-touch-detail>
         <summary>Details</summary>
         <p>
-          Contact <code data-touch-peer>{shortId(props.peer)}</code>. Touch ID shows the same terms. Your node checks every
-          payment against them; nothing else can be paid under this approval.
+          Touch ID shows the same amounts for node {shortId(props.peer)}. Your node checks every payment against them;
+          nothing else can be paid under this approval.
         </p>
       </details>
     </div>

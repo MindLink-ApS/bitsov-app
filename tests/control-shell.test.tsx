@@ -158,6 +158,11 @@ describe('control center shell', () => {
     const { calls } = stubHost({
       device_key_status: () => ({ available: true, state: 'registered', fingerprint: '3F9A-12C4', owner_action: null, expires_at_ms: null }),
       relation_approve: () => open,
+      // The node's label for A is a self-claim that differs from the local petname (Maya).
+      peers_list: () => [
+        { node_id: A, addr: '127.0.0.1:9735', label: 'Bank Support', connected: true, fingerprint: 'aaaaaaaa' },
+        { node_id: B, addr: '127.0.0.1:9736', label: null, connected: false, fingerprint: 'bbbbbbbb' },
+      ],
     });
     start();
     await vi.waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
@@ -168,6 +173,13 @@ describe('control center shell', () => {
     expect(box).toContain('200 sats a day');
     expect(box).toContain('at most 2 sats per message');
     expect(mount.querySelector('[data-touch-peer]')?.textContent).toBe(`${A.slice(0, 8)}…${A.slice(-8)}`);
+    // Petname plus the short key, visible on the line; never the node's claimed label.
+    expect(box).toContain(`Approve Maya (node ${A.slice(0, 8)}…${A.slice(-8)}) with Touch ID.`);
+    expect(box).not.toContain('Bank Support');
+    // Above the capsule, so the terms read before Send.
+    const line = mount.querySelector('[data-touch-approval]')!;
+    const bar = mount.querySelector('[data-composer-bar]')!;
+    expect(line.compareDocumentPosition(bar) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     await vi.waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Approve with Touch ID'));
     expect(calls.some((c) => c.cmd === 'relation_approve' || c.cmd === 'spend_request')).toBe(false);
 
@@ -177,6 +189,9 @@ describe('control center shell', () => {
     await vi.waitFor(() => expect(calls.filter((c) => c.cmd === 'relation_approve')).toHaveLength(1));
     const args = calls.find((c) => c.cmd === 'relation_approve')!.args!;
     expect(args).toMatchObject({ peer: A, budget_msat: null, per_act_max_msat: 2000 });
+    // No name of any kind goes to the host: the petname stays on this Mac.
+    expect(Object.keys(args).sort()).toEqual(['budget_msat', 'peer', 'per_act_max_msat']);
+    expect(JSON.stringify(calls.map((c) => c.args ?? {}))).not.toContain('Maya');
     expect(calls.some((c) => c.cmd === 'spend_request')).toBe(false);
   });
 
