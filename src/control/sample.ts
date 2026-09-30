@@ -7,6 +7,7 @@ import type { NodeStatus, PairingView } from '../onboarding/pairing';
 import { seedPetnameIfEmpty } from './petnames';
 import type { Source } from './source';
 import type {
+  InvoiceStatus,
   VoiceBlob,
   FileSaveResult,
   FundingAsk,
@@ -108,6 +109,24 @@ function sampleFrontDoor(
     fresh: !opts?.expired,
   };
 }
+
+const NODE_PAYMENT_STATE = new Map<string, InvoiceStatus['state']>([
+  ['Settled', 'paid'], ['Pending', 'waiting'], ['InFlight', 'waiting'], ['Failed', 'failed'], ['Expired', 'failed'],
+]);
+/**
+ * The host's `act::invoice_status`, for the sample: it reads the node's
+ * `GET /payments/{hash}` reply in the node's own names, so the sample cannot
+ * show a state a real node never would.
+ */
+export function invoiceFromNode(http: number, body: Record<string, unknown>): InvoiceStatus {
+  const unknown: InvoiceStatus = { state: 'unknown', amount_msat: null };
+  if (http < 200 || http >= 300 || typeof body.status !== 'string' || typeof body.direction !== 'string') return unknown;
+  if (body.direction.toLowerCase() !== 'incoming') return unknown;
+  const state = NODE_PAYMENT_STATE.get(body.status);
+  if (!state) return unknown;
+  return { state, amount_msat: typeof body.amount_msat === 'number' ? body.amount_msat : null };
+}
+
 export const SAMPLE_PEERS: Peer[] = [
   { node_id: hex('a'), addr: '34.90.12.8:9735', label: 'Maya', connected: true, fingerprint: 'aaaaaaaa' },
   { node_id: hex('b'), addr: '35.204.77.3:9735', label: 'Josh', connected: true, fingerprint: 'bbbbbbbb' },
@@ -1102,12 +1121,13 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
       });
     },
     invoiceStatus: (bolt11) => {
-      // A sample invoice made here is "paid" by the sample payer after a few reads.
+      // A sample invoice made here is paid by the sample payer after a few reads.
       const key = bolt11.trim().toLowerCase();
-      if (!issued.has(key)) return ok({ state: 'unknown', amount_msat: null });
+      if (!issued.has(key)) return ok(invoiceFromNode(502, { error: 'payment not found' }));
       const reads = (issued.get(key) ?? 0) + 1;
       issued.set(key, reads);
-      return ok(reads >= 3 ? { state: 'paid', amount_msat: sampleInvoiceMsat(key) } : { state: 'waiting', amount_msat: null });
+      const status = reads >= 3 ? 'Settled' : reads === 2 ? 'InFlight' : 'Pending';
+      return ok(invoiceFromNode(200, { payment_hash: '00'.repeat(32), status, amount_msat: sampleInvoiceMsat(key), direction: 'Incoming', liquidity: null }));
     },
     pay: async (bolt11, amountMsat, maxMsat) => {
       await gate();

@@ -1143,21 +1143,22 @@ struct PaymentStatusReply {
     direction: String,
 }
 
-/// The node's reply for one payment hash, read as an invoice we issued: only
-/// an inbound payment counts, and only `Succeeded` is paid.
+/// The node's reply for one payment hash, read as an invoice we issued. The
+/// node writes konsensus-core's `PaymentStatus` and `PaymentDirection` by name:
+/// only an `Incoming` payment counts, and only `Settled` is paid.
 pub fn invoice_status(status: u16, body: &str) -> InvoiceStatus {
     let unknown = InvoiceStatus { state: "unknown", amount_msat: None };
     if !(200..300).contains(&status) {
         return unknown;
     }
     let Ok(reply) = serde_json::from_str::<PaymentStatusReply>(body) else { return unknown };
-    if reply.direction != "Inbound" {
+    if !reply.direction.eq_ignore_ascii_case("Incoming") {
         return unknown;
     }
     let state = match reply.status.as_str() {
-        "Succeeded" => "paid",
-        "Pending" => "waiting",
-        "Failed" => "failed",
+        "Settled" => "paid",
+        "Pending" | "InFlight" => "waiting",
+        "Failed" | "Expired" => "failed",
         _ => return unknown,
     };
     InvoiceStatus { state, amount_msat: reply.amount_msat }
@@ -1435,17 +1436,21 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
-    fn an_invoice_is_paid_only_when_the_node_reports_an_inbound_success() {
-        let reply = |status: &str, direction: &str| {
-            format!(r#"{{"payment_hash":"00","status":"{status}","amount_msat":2000,"direction":"{direction}","liquidity":null}}"#)
-        };
-        assert_eq!(invoice_status(200, &reply("Succeeded", "Inbound")), InvoiceStatus { state: "paid", amount_msat: Some(2000) });
-        assert_eq!(invoice_status(200, &reply("Pending", "Inbound")).state, "waiting");
-        assert_eq!(invoice_status(200, &reply("Failed", "Inbound")).state, "failed");
-        // Our own outbound payment with that hash is not this invoice being paid.
-        assert_eq!(invoice_status(200, &reply("Succeeded", "Outbound")).state, "unknown");
-        assert_eq!(invoice_status(200, &reply("Weird", "Inbound")).state, "unknown");
-        assert_eq!(invoice_status(404, "{}").state, "unknown");
+    fn an_invoice_is_paid_only_when_the_node_reports_an_incoming_settlement() {
+        // The node's own replies (konsensus-core PaymentStatus / PaymentDirection by
+        // name), shared with the renderer's sample so neither can drift from them.
+        #[derive(Deserialize)]
+        struct Case {
+            http: u16,
+            body: serde_json::Value,
+            want: serde_json::Value,
+        }
+        let cases: Vec<Case> = serde_json::from_str(include_str!("../../tests/fixtures/node-payment-status.json")).unwrap();
+        assert!(cases.len() >= 9);
+        for case in cases {
+            let got = serde_json::to_value(invoice_status(case.http, &case.body.to_string())).unwrap();
+            assert_eq!(got, case.want, "{}", case.body);
+        }
         assert_eq!(invoice_status(200, "not json").state, "unknown");
     }
 

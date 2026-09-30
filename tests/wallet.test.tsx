@@ -9,12 +9,17 @@ import {
 } from '../src/control/wallet';
 import { resetContactsForTests, setPetname } from '../src/control/petnames';
 import { setDenom } from '../src/control/prefs';
+import { invoiceFromNode } from '../src/control/sample';
+import NODE_PAYMENT_STATUS from './fixtures/node-payment-status.json';
 
 const OWN = '1'.repeat(64);
 const A = 'a'.repeat(64);
 const B = 'b'.repeat(64);
 const PAYEE = `02${'5a'.repeat(32)}`;
 const INVOICE = 'lntb20n1walletsampleinvoice';
+/** The node's `GET /payments/{hash}` reply, in its own names; the stub maps it as the host does. */
+const nodePayment = (status: string, amountMsat = 2000) =>
+  invoiceFromNode(200, { payment_hash: '00'.repeat(32), status, amount_msat: amountMsat, direction: 'Incoming', liquidity: null });
 
 const channel = (over: Partial<Channel> = {}): Channel => ({
   channel_id: 'c1', peer_pubkey: `02${'c1'.repeat(32)}`, capacity_msat: 500_000_000, local_balance_msat: 300_000_000, remote_balance_msat: 190_000_000, active: true, ...over,
@@ -105,6 +110,13 @@ describe('wallet: activity', () => {
   });
 });
 
+describe('the node payment contract', () => {
+  it('reads the node’s own names exactly as the host does (shared fixture with act.rs)', () => {
+    expect(NODE_PAYMENT_STATUS.length).toBeGreaterThanOrEqual(9);
+    for (const c of NODE_PAYMENT_STATUS) expect(invoiceFromNode(c.http, c.body), JSON.stringify(c.body)).toEqual(c.want);
+  });
+});
+
 // ---- the page, in the shell ---------------------------------------------------
 
 const paired: PairingView = { state: 'paired', scopes: ['read', 'receive'], short_code: 'ABCD-EFGH', code_from_node: true, reason: null, bootstrap: null };
@@ -143,7 +155,7 @@ function stubHost(overrides: Record<string, Reply> = {}) {
     spend_status: () => locked,
     budget_status: () => budget(),
     invoice_create: (args) => ({ bolt11: 'lntb25u1walletreceive', amount_msat: args!.amount_msat, note: args!.note || null, expires_at_ms: Date.now() + 3_600_000 }),
-    invoice_status: () => ({ state: 'waiting', amount_msat: null }),
+    invoice_status: () => nodePayment('Pending'),
     invoice_amount: (args) => ({ amount_msat: 2000, network: 'signet', payee: PAYEE, expires_at_ms: Date.now() + 3_600_000, bolt11: String(args!.bolt11).toLowerCase(), payment_hash: '00'.repeat(32), description: 'coffee' }),
     payment_pay: (args) => ({ method: 'invoice', amount_msat: args!.amount_msat, max_routing_fee_msat: 5000, status: 'settled', paid_at_ms: Date.now() }),
     payment_keysend: (args) => ({ method: 'keysend', amount_msat: args!.amount_msat, max_routing_fee_msat: 5000, status: 'settled', paid_at_ms: Date.now() }),
@@ -250,7 +262,7 @@ describe('the Wallet page', () => {
 
   it('Receive over Lightning: an amount makes an invoice with a QR; it reads as received once the node says paid; nothing is paid', async () => {
     let paid = false;
-    const host = stubHost({ invoice_status: () => (paid ? { state: 'paid', amount_msat: 2_500_000 } : { state: 'waiting', amount_msat: null }) });
+    const host = stubHost({ invoice_status: () => nodePayment(paid ? 'Settled' : 'Pending', 2_500_000) });
     await openWallet('receive');
     await vi.waitFor(() => expect($('[data-receive-create]')).not.toBeNull());
     expect($<HTMLButtonElement>('[data-receive-create]')!.disabled).toBe(true);
@@ -271,6 +283,16 @@ describe('the Wallet page', () => {
     await vi.waitFor(() => expect($('[data-activity="invoice"]')).not.toBeNull());
     expect(text('[data-activity="invoice"]')).toMatch(/Invoice · lunch.*Received.*\+2,500 sats/);
   }, 10_000);
+
+  it('Receive over Lightning: an invoice the node reports Expired reads as not paid', async () => {
+    const host = stubHost({ invoice_status: () => nodePayment('Expired', 2_500_000) });
+    await openWallet('receive');
+    await vi.waitFor(() => expect($('[data-receive-create]')).not.toBeNull());
+    type('[data-receive-amount]', '2500');
+    click('[data-receive-create]');
+    await vi.waitFor(() => expect(text('[data-receive-state]')).toBe('Not paid'));
+    expect(moneyCalls(host)).toHaveLength(0);
+  });
 
   it('Receive on-chain: the node’s address with a QR; the amount is optional and whole sats', async () => {
     const host = stubHost();
