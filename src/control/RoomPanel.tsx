@@ -1,0 +1,321 @@
+/**
+ * Rooms MVP UI (room.ts): the "New room" picker and a room's thread.
+ *
+ * Money: Send never pays. It freezes a review of each member's leg at the
+ * price shown for them, and only that review's one confirm sends, each leg
+ * capped at exactly that price. Any edit, a closed spending window or money
+ * going offline withdraws the review. Skipped members are never charged.
+ */
+import { createEffect, createMemo, createSignal, For, on, Show, Switch, Match, type JSX } from 'solid-js';
+import { createStore, reconcile } from 'solid-js/store';
+import { amount as fmtAmount, clock, day, sats, satUnit } from './format';
+import {
+  MAX_MEMBERS, planLegs, planTotal, roomChatText, roomThread,
+  type LegOutcome, type LegPlan, type LocalRoom, type MemberInfo,
+} from './room';
+import type { Message, PriceQuote } from './types';
+
+export type RoomContact = { id: string; name: string } & MemberInfo;
+
+/** Why a contact cannot be picked, or `null` when they can. */
+function unpickable(c: RoomContact, nodeRooms: boolean): string | null {
+  if (!nodeRooms) return null;
+  if (!c.connected) return 'not connected';
+  if (!c.rooms) return 'needs update';
+  if (!c.session) return 'message them once first';
+  return null;
+}
+
+/** Pick 1 to 3 contacts. Creating a room is local and free: nothing is sent. */
+export function NewRoomPanel(props: {
+  contacts: RoomContact[];
+  /** Our own node checks room bindings (`room_binding_v1` on /status). */
+  nodeRooms: boolean;
+  onCreate: (picks: string[]) => void;
+  onCancel: () => void;
+}) {
+  const [picks, setPicks] = createSignal<string[]>([]);
+  const toggle = (id: string) =>
+    setPicks((p) => (p.includes(id) ? p.filter((x) => x !== id) : p.length < MAX_MEMBERS - 1 ? [...p, id] : p));
+  const ok = (c: RoomContact) => props.nodeRooms && unpickable(c, true) === null;
+  return (
+    <aside class="call-panel meeting-panel room-panel" data-room-panel="new" role="dialog" aria-label="New room">
+      <header><strong>New room</strong><span class="who">you and up to {MAX_MEMBERS - 1} contacts</span></header>
+      <ul class="meeting-legs">
+        <For each={props.contacts} fallback={<li class="hint">No contacts yet.</li>}>
+          {(c) => (
+            <li>
+              <label>
+                <input type="checkbox" data-room-pick={c.id} checked={picks().includes(c.id)}
+                  disabled={!ok(c) || (!picks().includes(c.id) && picks().length >= MAX_MEMBERS - 1)}
+                  onChange={() => toggle(c.id)} />
+                <span classList={{ muted: !ok(c) }}>{c.name}</span>
+              </label>
+              <Show when={unpickable(c, props.nodeRooms)}>
+                {(why) => <span class="hint" data-room-pick-note={c.id}> {why()}</span>}
+              </Show>
+            </li>
+          )}
+        </For>
+      </ul>
+      <Show when={!props.nodeRooms}><p class="hint" data-room-node-update>Your node needs an update before it can hold rooms.</p></Show>
+      <p class="hint" data-room-note>
+        Creating a room is free and sends nothing. Each message you send in it pays each member their own price, separately.
+        Members who are not each other’s contacts will not see each other’s messages.
+      </p>
+      <div class="call-actions">
+        <button type="button" class="primary soft" data-room-create disabled={!props.nodeRooms || picks().length === 0} onClick={() => props.onCreate(picks())}>
+          Create room
+        </button>
+        <button type="button" class="soft" data-room-cancel onClick={() => props.onCancel()}>Cancel</button>
+      </div>
+    </aside>
+  );
+}
+
+/** One send of this session: what each member's leg did. */
+export type RoomSend = { at: number; text: string; outcomes: LegOutcome[] };
+
+const OUTCOME: Record<LegOutcome['state'], string> = {
+  sent: 'sent',
+  skipped: 'skipped',
+  refused: 'paid, refused by their node; do not send it again',
+  failed: 'not sent',
+  undelivered: 'paid, not delivered yet',
+  unknown: 'outcome unknown, may have been paid',
+  stopped: 'not sent',
+};
+
+type Review = { legs: LegPlan[]; total: number; text: string };
+
+export function RoomThread(props: {
+  room: LocalRoom;
+  ownId: string;
+  nameOf: (id: string) => string;
+  /** This room's chats (every member's copy of ours included). */
+  messages: Message[];
+  sends: RoomSend[];
+  fresh: Record<string, true>;
+  info: (peer: string) => MemberInfo | undefined;
+  /** Read-only: the member's chat price. Never pays. */
+  quote: (peer: string) => Promise<PriceQuote | null>;
+  /** A budget or window rule would refuse this member before paying: why, or null. */
+  budgetSkip?: (peer: string, msat: number) => string | null;
+  moneyBlocked: boolean;
+  /** A budget or the spending window lets this app pay now. */
+  canSpend: boolean;
+  /** The one tap that opens spending, shown while it is closed. */
+  spendGate?: JSX.Element;
+  now: number;
+  /** Sends the confirmed legs, each capped at its shown price. */
+  send: (legs: LegPlan[], plaintext: string, text: string) => Promise<LegOutcome[]>;
+  onLeave: () => void;
+  onContext: () => void;
+}) {
+  const own = () => props.ownId.toLowerCase();
+  const others = () => props.room.roster.filter((p) => p !== own());
+  const title = () => others().map(props.nameOf).join(', ');
+
+  // The shown prices, read afresh when the room opens and after each send.
+  // `undefined`: still reading; `null`: no price.
+  const [quotes, setQuotes] = createStore<Record<string, PriceQuote | null | undefined>>({});
+  let generation = 0;
+  const refresh = () => {
+    const g = ++generation;
+    const ids = others();
+    setQuotes(reconcile(Object.fromEntries(ids.map((id) => [id, undefined]))));
+    ids.forEach((id) => void props.quote(id).then((q) => { if (g === generation) setQuotes(id, q); }));
+  };
+  createEffect(on(() => props.room.id, refresh));
+
+  const legs = createMemo(() => planLegs(props.room.roster, own(), props.info, quotes).map((l): LegPlan => {
+    const why = l.state === 'pay' ? props.budgetSkip?.(l.peer, l.msat) : null;
+    return why ? { peer: l.peer, state: 'skip', reason: why } : l;
+  }));
+  const total = () => planTotal(legs());
+  const estimate = () => legs().some((l) => l.state === 'pay' && l.estimate);
+
+  const [draft, setDraft] = createSignal('');
+  const [busy, setBusy] = createSignal(false);
+  const [review, setReview] = createSignal<Review | null>(null);
+  const [leaving, setLeaving] = createSignal(false);
+  // Any change to what would be sent, or to whether it may be paid, withdraws the review.
+  createEffect(on([draft, () => props.room.id], () => setReview(null), { defer: true }));
+  createEffect(() => { if (props.moneyBlocked || !props.canSpend) setReview(null); });
+
+  const ready = () => !props.moneyBlocked && props.canSpend && !busy() && draft().trim().length > 0 && total() !== null;
+  const openReview = () => {
+    if (!ready()) return;
+    setReview({ legs: legs(), total: total()!, text: draft() });
+  };
+  const confirm = async () => {
+    const rv = review();
+    if (!rv || busy() || props.moneyBlocked || !props.canSpend) return;
+    // Consumed at dispatch: one review sends at most once.
+    setReview(null);
+    setBusy(true);
+    try {
+      await props.send(rv.legs, roomChatText(props.room, rv.text), rv.text);
+      if (draft() === rv.text) setDraft('');
+    } finally {
+      setBusy(false);
+      refresh();
+    }
+  };
+
+  type Item = { at: number; message?: Message; send?: RoomSend };
+  const items = createMemo<Item[]>(() =>
+    [
+      ...roomThread(props.messages, props.ownId).map((m) => ({ at: m.timestamp, message: m })),
+      ...props.sends.map((s) => ({ at: s.at + 1, send: s })),
+    ].sort((a, b) => a.at - b.at));
+  let stream: HTMLDivElement | undefined;
+  createEffect(on(() => items().length, () => queueMicrotask(() => stream?.scrollTo?.({ top: stream.scrollHeight }))));
+
+  const legLine = (l: LegPlan) =>
+    l.state === 'pay' ? `${l.estimate ? '≈ ' : ''}${fmtAmount(l.msat)}` : l.state === 'skip' ? l.reason : 'reading price…';
+
+  return (
+    <>
+      <header class="track-head" data-room-head={props.room.id}>
+        <h1 data-room-title>{title()}</h1>
+        <div class="sub"><span class="id">You and {others().length} · each message pays each member</span></div>
+        <button type="button" class="quiet" data-room-leave onClick={() => setLeaving(true)}>Leave</button>
+        <button class="quiet context-toggle" onClick={() => props.onContext()}>Settings</button>
+      </header>
+      <Show when={leaving()}>
+        <div class="approval" data-room-leave-confirm>
+          <p>Leave this room? It is hidden on this device only. Nobody is told and nothing is paid; members may keep sending, and their messages stay hidden here.</p>
+          <div class="call-actions">
+            <button type="button" class="primary soft" data-room-leave-yes onClick={() => { setLeaving(false); props.onLeave(); }}>Leave</button>
+            <button type="button" class="soft" data-room-leave-no onClick={() => setLeaving(false)}>Stay</button>
+          </div>
+        </div>
+      </Show>
+      <div class="stream" ref={stream} data-stream data-room-stream>
+        <div class="chat-column">
+          <p class="day" data-room-honesty>
+            Each message is a separate paid, end-to-end encrypted message to each member. There is no group key and no moderation.
+          </p>
+          <For each={items()} fallback={<div class="empty-track"><h2>Nothing here yet</h2><p class="hint">Your first message pays each member their own price.</p></div>}>
+            {(item, i) => {
+              const prev = () => items()[i() - 1];
+              const newDay = () => !prev() || day(prev()!.at) !== day(item.at);
+              return (
+                <>
+                  <Show when={newDay()}><p class="day">{day(item.at)}</p></Show>
+                  <Switch>
+                    <Match when={item.message}>
+                      {(m) => {
+                        const out = () => m().sender.toLowerCase() === own();
+                        return (
+                          <article class={`msg ${out() ? 'out' : 'in'}`} classList={{ fresh: !!props.fresh[m().id] }} data-message={m().id}>
+                            <Show when={!out()}><span class="who">{props.nameOf(m().sender)}</span></Show>
+                            <div class="bubble" data-kind={0}>{roomText(m())}</div>
+                            <div class="stamp"><span>{clock(m().timestamp)}</span></div>
+                          </article>
+                        );
+                      }}
+                    </Match>
+                    <Match when={item.send}>
+                      {(s) => (
+                        <div class="artifact room-send" data-room-send>
+                          <span class="kind" data-room-send-msat={s().outcomes.reduce((t, o) => t + o.paidMsat, 0)}>
+                            Room message · up to {fmtAmount(s().outcomes.reduce((t, o) => t + o.paidMsat, 0))} in all
+                          </span>
+                          <ul class="room-legs">
+                            <For each={s().outcomes}>
+                              {(o) => (
+                                <li data-room-leg={o.peer} data-leg-state={o.state}>
+                                  <strong>{props.nameOf(o.peer)}</strong>{' '}
+                                  <span class="hint">{OUTCOME[o.state]}{o.paidMsat > 0 ? ` · up to ${fmtAmount(o.paidMsat)}` : ' · not charged'}{o.note && o.state !== 'sent' ? ` · ${o.note}` : ''}</span>
+                                </li>
+                              )}
+                            </For>
+                          </ul>
+                        </div>
+                      )}
+                    </Match>
+                  </Switch>
+                </>
+              );
+            }}
+          </For>
+        </div>
+      </div>
+
+      <form class="composer" data-composer data-room-composer onSubmit={(e) => { e.preventDefault(); openReview(); }}>
+        <Show
+          when={review()}
+          fallback={
+            <>
+              <ul class="room-legs room-cost" data-room-cost>
+                <For each={legs()}>
+                  {(l) => (
+                    <li data-room-cost-leg={l.peer} data-leg-plan={l.state} data-leg-msat={l.state === 'pay' ? l.msat : ''}>
+                      <strong>{props.nameOf(l.peer)}</strong> <span class="hint">{legLine(l)}</span>
+                    </li>
+                  )}
+                </For>
+              </ul>
+              <div class="composer-main">
+                <textarea rows={1} data-room-draft placeholder={`Message ${title()}`} value={draft()} onInput={(e) => setDraft(e.currentTarget.value)}
+                  aria-label="Room message" disabled={props.moneyBlocked} />
+              </div>
+              <div class="composer-bar">
+                <div class="cost" data-cost>
+                  <span class="label">Cost to send</span>
+                  <Show when={total() !== null} fallback={<span class="sats">…</span>}>
+                    <span class="sats" data-cost-msat={total()!}>{estimate() ? '≈ ' : ''}{sats(total()!)}<span class="unit">{satUnit(total()!)}</span></span>
+                  </Show>
+                  <span class="basis">Each member’s own price and its network fee ceiling, added up</span>
+                </div>
+                <button type="submit" class="primary soft" data-send disabled={!ready()}>Send</button>
+              </div>
+            </>
+          }
+        >
+          {(rv) => (
+            <div class="pay-review" data-room-review data-review-msat={rv().total}>
+              <p class="pay-review-title">Send to {rv().legs.filter((l) => l.state === 'pay').length} of {rv().legs.length}</p>
+              <blockquote class="pay-review-text" data-review-text>{rv().text}</blockquote>
+              <dl>
+                <For each={rv().legs}>
+                  {(l) => (
+                    <>
+                      <dt>{props.nameOf(l.peer)}</dt>
+                      <dd data-review-leg={l.peer} data-review-leg-msat={l.state === 'pay' ? l.msat : 0}>
+                        {l.state === 'pay' ? `at most ${fmtAmount(l.msat)}` : l.state === 'skip' ? l.reason : 'skipped'}
+                      </dd>
+                    </>
+                  )}
+                </For>
+                <dt>Total at most</dt>
+                <dd data-review-total>{fmtAmount(rv().total)}</dd>
+              </dl>
+              <div class="composer-bar">
+                <button type="button" class="link" data-room-back disabled={busy()} onClick={() => setReview(null)}>Back</button>
+                <span class="basis">One member at a time, each at most the price above. A member whose price went up is not sent to.</span>
+                <button type="button" class="primary soft" data-room-confirm disabled={busy() || props.moneyBlocked || !props.canSpend} onClick={() => void confirm()}>
+                  Confirm and send
+                </button>
+              </div>
+            </div>
+          )}
+        </Show>
+        <Show when={props.moneyBlocked}><p class="hint" data-room-blocked>Payments are not ready yet, so this room cannot send.</p></Show>
+        <Show when={!props.moneyBlocked && !props.canSpend}>{props.spendGate}</Show>
+      </form>
+    </>
+  );
+}
+
+/** The text of a room chat (the binding itself is never shown). */
+function roomText(m: Message): string {
+  try {
+    const v = JSON.parse(m.plaintext ?? '') as { text?: unknown };
+    return typeof v.text === 'string' ? v.text : '';
+  } catch {
+    return '';
+  }
+}

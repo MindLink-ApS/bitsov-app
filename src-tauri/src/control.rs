@@ -40,26 +40,55 @@ pub struct Peer {
     #[serde(default)]
     pub fingerprint: Option<String>,
     /// The peer's federation-Hello capabilities as the node lists them (only
-    /// while connected). Read here to derive `meetings`; never forwarded.
+    /// while connected). Read here to derive `meetings` and `rooms`; never forwarded.
     #[serde(default, skip_serializing)]
     pub capabilities: Option<Vec<String>>,
     /// Their node takes mesh-meeting legs: connected now and advertising
     /// `call_meeting_v1`. Derived by [`with_meeting_support`], never read from the node.
     #[serde(default, skip_deserializing)]
     pub meetings: bool,
+    /// Their node checks room bindings: connected now and advertising
+    /// `room_binding_v1`. Derived by [`with_meeting_support`], never read from the node.
+    #[serde(default, skip_deserializing)]
+    pub rooms: bool,
+    /// Our node has an E2EE session with them (`GET /sessions`). Derived by
+    /// [`with_sessions`], never read from `/peers`.
+    #[serde(default, skip_deserializing)]
+    pub session: bool,
 }
 
 /// How a connected peer's node lists the meeting advert (genome
 /// `Capability::Custom("call_meeting_v1")`, rendered with `{:?}`).
 pub const PEER_MEETING_CAPABILITY: &str = r#"Custom("call_meeting_v1")"#;
+/// How a connected peer's node lists the room advert (genome
+/// `Capability::Custom("room_binding_v1")`).
+pub const PEER_ROOM_CAPABILITY: &str = r#"Custom("room_binding_v1")"#;
 
-/// Mark each peer whose node is known to take meeting legs. A node without
-/// the advert (older, or not connected so we cannot tell) would withdraw a
-/// paid meeting leg, so it is never offered one.
+/// Mark each peer whose node is known to take meeting legs, and room chats.
+/// A node without the advert (older, or not connected so we cannot tell)
+/// would withdraw a paid meeting leg, or show a room chat as raw text, so it
+/// is never offered one.
 pub fn with_meeting_support(mut peers: Vec<Peer>) -> Vec<Peer> {
     for p in &mut peers {
-        p.meetings = p.connected
-            && p.capabilities.as_ref().is_some_and(|c| c.iter().any(|x| x == PEER_MEETING_CAPABILITY));
+        let lists = |cap: &str| p.connected && p.capabilities.as_ref().is_some_and(|c| c.iter().any(|x| x == cap));
+        (p.meetings, p.rooms) = (lists(PEER_MEETING_CAPABILITY), lists(PEER_ROOM_CAPABILITY));
+    }
+    peers
+}
+
+/// `GET /sessions` — `SessionStatusResponse`.
+#[derive(Deserialize, Clone, Debug)]
+pub struct Session {
+    pub peer_id: String,
+    #[serde(default)]
+    pub active: bool,
+}
+
+/// Mark each peer our node holds an active E2EE session with. `None` (the
+/// list could not be read) marks nobody: a room then skips them all.
+pub fn with_sessions(mut peers: Vec<Peer>, sessions: Option<&[Session]>) -> Vec<Peer> {
+    for p in &mut peers {
+        p.session = sessions.is_some_and(|s| s.iter().any(|x| x.active && x.peer_id.eq_ignore_ascii_case(&p.node_id)));
     }
     peers
 }
@@ -186,7 +215,7 @@ pub struct NodeStatusResponse {
 // signatures are not in these node shapes and are not accepted if they appear.
 
 /// Capabilities the renderer may act on. Anything else the node lists is dropped.
-pub const KNOWN_CAPABILITIES: &[&str] = &["energy_v1", "membrane_v1", "call_meeting_v1"];
+pub const KNOWN_CAPABILITIES: &[&str] = &["energy_v1", "membrane_v1", "call_meeting_v1", "room_binding_v1"];
 
 pub fn known_capabilities(listed: &[String]) -> Vec<String> {
     KNOWN_CAPABILITIES
@@ -1112,6 +1141,23 @@ mod tests {
         let out = serde_json::to_value(&peers[0]).unwrap();
         assert_eq!(out["meetings"], true);
         assert!(out.get("capabilities").is_none(), "{out}");
+    }
+
+    #[test]
+    fn a_peer_takes_rooms_only_when_connected_with_the_exact_advert_and_sessions_come_from_the_node() {
+        let peers: Vec<Peer> = serde_json::from_str(r#"[
+            {"node_id":"AA","connected":true,"capabilities":["Custom(\"room_binding_v1\")"]},
+            {"node_id":"bb","connected":false,"capabilities":["Custom(\"room_binding_v1\")"]},
+            {"node_id":"cc","connected":true,"capabilities":["room_binding_v1","Custom(\"call_meeting_v1\")"]},
+            {"node_id":"dd","connected":true,"rooms":true,"session":true}
+        ]"#).unwrap();
+        let peers = with_meeting_support(peers);
+        assert_eq!(peers.iter().map(|p| (p.rooms, p.meetings)).collect::<Vec<_>>(), [(true, false), (false, false), (false, true), (false, false)]);
+        let sessions: Vec<Session> = serde_json::from_str(r#"[{"peer_id":"aa","active":true},{"peer_id":"cc","active":false}]"#).unwrap();
+        let with = with_sessions(peers.clone(), Some(&sessions));
+        assert_eq!(with.iter().map(|p| p.session).collect::<Vec<_>>(), [true, false, false, false]);
+        assert!(with_sessions(peers, None).iter().all(|p| !p.session), "unreadable sessions: nobody");
+        assert_eq!(serde_json::to_value(&with[0]).unwrap()["rooms"], true);
     }
 
     #[test]

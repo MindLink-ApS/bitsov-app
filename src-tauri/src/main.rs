@@ -1535,7 +1535,9 @@ async fn peers_list(
 ) -> Result<Vec<control::Peer>, String> {
     reject_sealed_window(&window)?;
     drop(window);
-    get_json(state.inner(), "/peers").await.map(control::with_meeting_support)
+    let peers = get_json(state.inner(), "/peers").await.map(control::with_meeting_support)?;
+    let sessions: Option<Vec<control::Session>> = get_json(state.inner(), "/sessions").await.ok();
+    Ok(control::with_sessions(peers, sessions.as_deref()))
 }
 
 /// `GET /rooms`.

@@ -11,6 +11,10 @@ export type Peer = {
   fingerprint: string | null;
   /** Their node takes mesh-meeting legs (connected, advertising `call_meeting_v1`). */
   meetings?: boolean;
+  /** Their node checks room bindings (connected, advertising `room_binding_v1`). */
+  rooms?: boolean;
+  /** Our node holds an E2EE session with them (`GET /sessions`). */
+  session?: boolean;
 };
 
 /** `rooms_list` — `GET /rooms`. */
@@ -183,7 +187,7 @@ export type NodeOverview = {
   uptime_secs: number;
   lightning_backend: string | null;
   chain_backend: string | null;
-  /** Known node capabilities (`energy_v1`, `membrane_v1`, `call_meeting_v1`); absent or empty on rc7. */
+  /** Known node capabilities (`energy_v1`, `membrane_v1`, `call_meeting_v1`, `room_binding_v1`); absent or empty on rc7. */
   capabilities?: string[];
   /** UDP port of the node's own STUN responder (`[calls] stun_listen`); absent when off. */
   stun_port?: number | null;
@@ -262,6 +266,8 @@ export type LiveEvent =
 export type TrackRef =
   | { kind: 'peer'; id: string }
   | { kind: 'room'; id: string }
+  /** A room bound on chat (`room_binding_v1`): its id; the roster is on this device (room.ts). */
+  | { kind: 'bound'; id: string }
   | { kind: 'ai' }
   | { kind: 'new' }
   | { kind: 'discover' };
@@ -379,6 +385,8 @@ export type ActionError = {
     // owner sends once more at that price; the same message keeps its operation.
     | 'readmission_quoted'
     | 'not_ready' | 'app_not_ready'
+    // Genome #115: the node proved nothing left the wallet (a room leg it could not bind, a fee ceiling).
+    | 'not_dispatched'
     | 'invalid'
     | 'node';
   message: string;
