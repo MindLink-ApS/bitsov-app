@@ -58,12 +58,19 @@ import type {
   WalletOverview,
 } from './types';
 
+export type RemoteImportView = {
+  endpoint: string;
+  node_id: string;
+  restart_required: boolean;
+};
+
 export interface Source {
   readonly mode: 'node' | 'sample';
   // first run
   nodeStatus(): Promise<NodeStatus>;
   pairingStatus(): Promise<PairingView>;
   pairingRetry(): Promise<PairingView>;
+  remoteAccessImport(link: string): Promise<RemoteImportView>;
   identityRestore(mnemonic: string): Promise<RestoreOutcome>;
   fundState(): Promise<FundState | null>;
   fundStart(sats: number): Promise<FundState>;
@@ -202,6 +209,7 @@ export const hostSource: Source = {
   nodeStatus: () => invoke<NodeStatus>('node_status'),
   pairingStatus: () => invoke<PairingView>('pairing_status'),
   pairingRetry: () => invoke<PairingView>('pairing_retry'),
+  remoteAccessImport: (link) => invoke<RemoteImportView>('remote_access_import', { link }),
   identityRestore: (mnemonic) => invoke<RestoreOutcome>('identity_restore', { mnemonic }),
   fundState: () => invoke<FundState | null>('fund_state'),
   fundStart: (sats) => invoke<FundState>('fund_start', { funding_amount_sats: sats }),

@@ -1,4 +1,4 @@
-import { For, Match, Show, Switch } from 'solid-js';
+import { createSignal, For, Match, Show, Switch } from 'solid-js';
 import { onboardingSteps, scopeList, type NodeStatus, type PairingView } from './pairing';
 
 // Claim discipline (BitSov-bitsov docs/security/pairing.md): less exposure, not solved
@@ -19,8 +19,35 @@ export function Onboarding(props: {
   pairing: () => PairingView;
   trustAck: () => boolean;
   onRetry: () => void;
+  onImportRemote?: (link: string) => Promise<{ endpoint: string; restart_required: boolean }>;
 }) {
   const steps = () => onboardingSteps(props.status(), props.pairing(), props.trustAck());
+  const [remoteLink, setRemoteLink] = createSignal('');
+  const [importing, setImporting] = createSignal(false);
+  const [importResult, setImportResult] = createSignal<string | null>(null);
+  const [importError, setImportError] = createSignal<string | null>(null);
+
+  const importRemote = async (event: Event) => {
+    event.preventDefault();
+    const link = remoteLink().trim();
+    setRemoteLink('');
+    if (!link) {
+      setImportError('Paste a remote pairing link.');
+      return;
+    }
+    setImporting(true);
+    setImportError(null);
+    setImportResult(null);
+    try {
+      if (!props.onImportRemote) throw new Error('Remote access import is unavailable.');
+      const result = await props.onImportRemote(link);
+      setImportResult(`Remote node ${result.endpoint} saved. Restart BitSov to connect.`);
+    } catch (error) {
+      setImportError(String(error));
+    } finally {
+      setImporting(false);
+    }
+  };
 
   return (
     <section class="onboarding" aria-label="First-run setup">
@@ -110,6 +137,33 @@ export function Onboarding(props: {
           </div>
         </Match>
       </Switch>
+
+      <form class="panel pairing" data-remote-access onSubmit={importRemote}>
+        <h2>Connect to a remote node</h2>
+        <label for="remote-pairing-link">Pairing link</label>
+        <input
+          id="remote-pairing-link"
+          type="password"
+          autocomplete="off"
+          autocapitalize="none"
+          autocorrect="off"
+          spellcheck={false}
+          disabled={importing()}
+          value={remoteLink()}
+          onInput={(event) => setRemoteLink(event.currentTarget.value)}
+          placeholder="bitsov://pair/…"
+        />
+        <button type="submit" class="quiet" disabled={importing()}>
+          {importing() ? 'Saving…' : 'Use remote node'}
+        </button>
+        <p class="hint">The link is verified and stored for the next app start.</p>
+        <Show when={importResult()}>
+          <p class="ok-note">{importResult()}</p>
+        </Show>
+        <Show when={importError()}>
+          <p class="err-note">{importError()}</p>
+        </Show>
+      </form>
     </section>
   );
 }

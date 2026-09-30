@@ -51,6 +51,7 @@ use bitsov_app::pairing::{
     self, ClientKey, Established, PairError, PairedSession, PairingClient, PairingView,
     PrintedCodes,
 };
+use bitsov_app::remote_access::{self, RemoteImportView, RemoteProxy};
 use serde::{Deserialize, Serialize};
 #[cfg(unix)]
 use shared_child::unix::SharedChildExt;
@@ -117,7 +118,7 @@ enum AuthMode {
 
 struct PairingCtx {
     client: PairingClient,
-    key: ClientKey,
+    key: Arc<ClientKey>,
     store: PathBuf,
     data_dir: PathBuf,
 }
@@ -167,6 +168,11 @@ struct NodeState {
     auth: Mutex<AuthMode>,
     pairing: Mutex<Option<Arc<PairingCtx>>>,
     pairing_view: Mutex<PairingView>,
+    /// Present only when the loopback API is backed by a pinned remote Noise
+    /// tunnel. Its drop/stop signal closes the process-local listener.
+    remote_proxy: Mutex<Option<RemoteProxy>>,
+    remote_mode: AtomicBool,
+    expected_remote_node_id: Mutex<Option<String>>,
     /// Short codes the node printed to its stdout (the tripwire).
     printed_codes: PrintedCodes,
     /// The node answered 404 for this client's stored pairing (revoked or
@@ -255,6 +261,9 @@ impl NodeState {
             auth: Mutex::new(AuthMode::Unauthenticated),
             pairing: Mutex::new(None),
             pairing_view: Mutex::new(PairingView::starting()),
+            remote_proxy: Mutex::new(None),
+            remote_mode: AtomicBool::new(false),
+            expected_remote_node_id: Mutex::new(None),
             printed_codes: PrintedCodes::default(),
             stale_pairing: AtomicBool::new(false),
             spend: Mutex::new(act::SpendGate::default()),
@@ -706,6 +715,50 @@ async fn attach_external(app: &AppHandle, app_data_dir: &Path, node: dev_node::E
     finish_auth(&state, &app_dir).await;
 }
 
+/// Remote mode is selected before every local-node resolution path. The only
+/// listener is the loopback Noise proxy; no sidecar is initialized or spawned.
+async fn attach_remote(
+    app: &AppHandle,
+    app_data_dir: &Path,
+    descriptor: remote_access::RemoteDescriptor,
+) {
+    let state = app.state::<NodeState>();
+    let store = app_data_dir.join(PAIRING_STORE_DIR);
+    let key = match ClientKey::load_or_create(&store) {
+        Ok(key) => Arc::new(key),
+        Err(error) => return set_error(&state, error.to_string()),
+    };
+    let ctx = Arc::new(PairingCtx {
+        client: PairingClient::new(state.http.clone(), state.api_base.clone()),
+        key: key.clone(),
+        store: store.clone(),
+        data_dir: app_data_dir.to_path_buf(),
+    });
+    *state.pairing.lock().unwrap() = Some(ctx);
+    *state.app_dir.lock().unwrap() = Some(app_data_dir.to_path_buf());
+    *state.expected_remote_node_id.lock().unwrap() = Some(descriptor.node_id().to_string());
+    state.remote_mode.store(true, Ordering::SeqCst);
+
+    let proxy = match remote_access::start_proxy(
+        &state.api_base,
+        app_data_dir,
+        descriptor,
+        key,
+        PAIRING_CLIENT_NAME,
+        store,
+    )
+    .await
+    {
+        Ok(proxy) => proxy,
+        Err(error) => return set_error(&state, error.to_string()),
+    };
+    *state.remote_proxy.lock().unwrap() = Some(proxy);
+    if let Err(error) = wait_for_health(&state).await {
+        return set_error(&state, error);
+    }
+    finish_auth(&state, app_data_dir).await;
+}
+
 /// Ensure a node config exists (first run), then start + supervise the node,
 /// wait for /health, pair (or fall back to /auth/local on rc7), and read /identity.
 async fn bootstrap_node(app: AppHandle) {
@@ -714,6 +767,11 @@ async fn bootstrap_node(app: AppHandle) {
         Ok(d) => d,
         Err(e) => return set_error(&state, format!("no app data dir: {e}")),
     };
+    match remote_access::load_persisted(&app_data_dir) {
+        Ok(Some(descriptor)) => return attach_remote(&app, &app_data_dir, descriptor).await,
+        Ok(None) => {}
+        Err(error) => return set_error(&state, error.to_string()),
+    }
     // Release builds: always `Ok(None)` (see `dev_node`).
     match dev_node::resolve_external(&app_data_dir) {
         Ok(Some(node)) => return attach_external(&app, &app_data_dir, node).await,
@@ -769,6 +827,19 @@ async fn finish_auth(state: &NodeState, data_dir: &Path) {
     }
     match fetch_node_id(state).await {
         Ok(node_id) => {
+            if state
+                .expected_remote_node_id
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|expected| expected != &node_id)
+            {
+                *state.token.lock().unwrap() = None;
+                return set_error(
+                    state,
+                    "remote node identity does not match the signed pairing descriptor",
+                );
+            }
             *state.node_id.lock().unwrap() = Some(node_id);
             *state.ready.lock().unwrap() = true;
         }
@@ -793,7 +864,7 @@ fn pairing_ctx(state: &NodeState, data_dir: &Path) -> Result<Arc<PairingCtx>, Pa
         return Ok(ctx.clone());
     }
     let store = data_dir.join(PAIRING_STORE_DIR);
-    let key = ClientKey::load_or_create(&store)?;
+    let key = Arc::new(ClientKey::load_or_create(&store)?);
     let node_dir = state
         .external_node
         .lock()
@@ -819,6 +890,9 @@ async fn authenticate(state: &NodeState, data_dir: &Path) -> Result<(), String> 
     *state.auth.lock().unwrap() = AuthMode::Unauthenticated;
     *state.token.lock().unwrap() = None;
     let outcome = match pairing_ctx(state, data_dir) {
+        Ok(ctx) if state.remote_mode.load(Ordering::SeqCst) => {
+            pairing::establish_remote(&ctx.client, &ctx.key, &ctx.store).await
+        }
         Ok(ctx) => {
             pairing::establish(
                 &ctx.client,
@@ -1278,6 +1352,29 @@ fn pairing_status(
 ) -> Result<PairingView, String> {
     reject_sealed_window(&window)?;
     Ok(state.pairing_view.lock().unwrap().clone())
+}
+
+/// Validate and persist a pasted remote pairing link. The running mode is
+/// never changed in place; bootstrap selects it on the next app start.
+#[tauri::command(rename_all = "snake_case")]
+fn remote_access_import(
+    window: WebviewWindow<impl tauri::Runtime>,
+    app: AppHandle<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    link: String,
+) -> Result<RemoteImportView, String> {
+    reject_sealed_window(&window)?;
+    if state.remote_proxy.lock().unwrap().is_some() {
+        return Err(
+            "remote access is already active; quit BitSov before replacing its pairing link".into(),
+        );
+    }
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("no app data dir: {error}"))?;
+    remote_access::import_pairing_link(&app_data_dir, link.trim())
+        .map_err(|error| error.to_string())
 }
 
 /// Retry after a pairing failure. A no-op unless the last attempt failed. Only
@@ -5529,7 +5626,11 @@ fn main() {
         // A repeated shutdown event is a no-op, and a restore in flight can neither
         // hide its old node from this nor start a new one after it (`stop_for_quit`).
         if matches!(event, RunEvent::ExitRequested { .. } | RunEvent::Exit) {
-            app.state::<NodeState>().stop_for_quit(NODE_SHUTDOWN_BUDGET);
+            let state = app.state::<NodeState>();
+            if let Some(proxy) = state.remote_proxy.lock().unwrap().take() {
+                proxy.stop();
+            }
+            state.stop_for_quit(NODE_SHUTDOWN_BUDGET);
         }
     });
 }
@@ -5557,6 +5658,7 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             identity_restore,
             pairing_status,
             pairing_retry,
+            remote_access_import,
             node_overview,
             live_link,
             peers_list,
@@ -8205,7 +8307,7 @@ mod control_act_tests {
         let client = PairingClient::new(node.state.http.clone(), node.state.api_base.clone());
         *node.state.pairing.lock().unwrap() = Some(Arc::new(PairingCtx {
             client,
-            key,
+            key: Arc::new(key),
             store,
             data_dir: dir.path().to_path_buf(),
         }));
@@ -11323,6 +11425,7 @@ mod assistant_acl_tests {
                 "identity_restore",
                 "pairing_status",
                 "pairing_retry",
+                "remote_access_import",
                 // Control center reads (main window only, ACL + reject_sealed_window).
                 "node_overview",
                 "live_link",
@@ -11974,6 +12077,7 @@ mod assistant_acl_tests {
                 super::identity_restore,
                 super::pairing_status,
                 super::pairing_retry,
+                super::remote_access_import,
             ])
             // `test = true` skips the macOS Info.plist embed. A second plain
             // generate_context!() defines `_EMBED_INFO_PLIST` again and cargo
@@ -12058,7 +12162,15 @@ mod assistant_acl_tests {
             invoke(&main, "pairing_retry", serde_json::json!({})),
             "the node has not started",
         );
-        for cmd in ["pairing_status", "pairing_retry"] {
+        assert_handler_ran(
+            invoke(
+                &main,
+                "remote_access_import",
+                serde_json::json!({ "link": "not-a-link" }),
+            ),
+            "invalid remote pairing link",
+        );
+        for cmd in ["pairing_status", "pairing_retry", "remote_access_import"] {
             assert_acl_denied(invoke(&assistant, cmd, serde_json::json!({})), cmd);
         }
     }

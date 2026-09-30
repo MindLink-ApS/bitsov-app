@@ -739,6 +739,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
     nodeStatus: () => ok(status),
     pairingStatus: () => ok(pairing),
     pairingRetry: () => ok(pairing),
+    remoteAccessImport: () => Promise.reject('Remote access is not available with sample data.'),
     identityRestore: () => Promise.reject('Restore is not available with sample data.'),
     fundState: () => {
       if (fund && !fund.funded && ++polls >= 3) {
