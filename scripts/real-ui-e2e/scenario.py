@@ -365,7 +365,7 @@ def run(r, fixture, capacities):
         r.wait_until(outcome,30)
         if r.ui_try('exists',selector='[data-fd-owner-command]'):
             command=r.text('[data-fd-owner-command]')
-            match=re.fullmatch(r'konsensus grant --op ([0-9a-f]+)',command)
+            match=re.fullmatch(r"konsensus grant --op ([0-9a-f]+)(?: --config (?:'[^']+'|\S+))?",command)
             s.need('editor names the owner front_door command',match,command)
             s.snap('front-door-owner-request')
             out=r.owner_grant(match.group(1),'--for','10m')

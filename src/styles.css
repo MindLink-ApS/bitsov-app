@@ -263,8 +263,32 @@ label.field input {
 .passive-status > summary { display: none; }
 .signal-bar { align-items: flex-end; }
 .icon-btn { display: inline-flex; align-items: center; justify-content: center; }
-.send-btn { align-self: flex-end; width: 34px; height: 34px; min-width: 34px; min-height: 34px; padding: 0; flex: none; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; color: #fff; }
-.send-btn svg { display: block; }
+.send-btn.primary,
+.primary.soft.send-btn,
+.send-btn {
+  align-self: flex-end;
+  width: 34px;
+  height: 34px;
+  min-width: 34px;
+  min-height: 34px;
+  padding: 0 !important;
+  flex: none;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  background: var(--accent);
+  box-sizing: border-box;
+}
+.send-btn svg {
+  display: block;
+  width: 16px;
+  height: 16px;
+  stroke: currentColor;
+  fill: none;
+  flex: none;
+}
 .approval.slim-approval { flex-direction: row; align-items: center; justify-content: space-between; padding: 6px 14px; gap: var(--s-3); border-radius: var(--r-chip); }
 .approval.slim-approval .slim-label { font-size: var(--t-xs); color: var(--ink); }
 .approval.slim-approval .presets { display: flex; gap: var(--s-1); flex-wrap: wrap; }
@@ -329,6 +353,12 @@ select { font: inherit; font-size: var(--t-sm); background: var(--sunk); color: 
 .track > .spend .spend-line .dot { display: inline-block; vertical-align: middle; margin-right: var(--s-1); }
 .spend[data-spend='open'] .spend-line { color: var(--ink); }
 .spend[data-spend='expired'] .spend-line .dot { background: var(--warn); }
+/* Touch ID for one contact: a slim line above the composer, not a card. Send is the tap. */
+.touch-line { width: min(var(--chat-max), 100%); align-self: center; gap: 0; }
+.touch-line .spend-line { color: var(--ink); }
+.touch-line .spend-line .dot { background: var(--accent); }
+.touch-line strong { color: var(--accent); font-weight: 600; }
+.touch-line .quiet-detail { font-size: var(--t-xs); margin: 0; }
 .approval { border: 1px solid var(--ember-line); background: var(--ember); border-radius: var(--r-panel); padding: var(--s-3) var(--s-4); display: flex; flex-direction: column; gap: var(--s-2); font-size: var(--t-sm); animation: arrive var(--d-mid) var(--ease); }
 .approval strong { color: var(--accent); font-weight: 600; }
 .approval[data-approval='unavailable'] strong { color: var(--warn); }
