@@ -3698,7 +3698,7 @@ function Composer(props: {
           </>
         )}
       </Show>
-      <details class="sr-only composer-info" data-composer-info open>
+      <details class="composer-info" data-composer-info>
         <summary aria-label="Cost and rules" title="Cost and rules">ⓘ</summary>
         <Show when={mode() === 'message' || mode() === 'file'}>
           <div class="composer-bar cost-only">
@@ -3988,9 +3988,8 @@ function Reconcile(props: { actions: Actions; hasPending?: boolean }) {
     setUndelivered(null);
     setChecking(false);
   };
-  const isPending = () => Boolean(props.hasPending || result() || undelivered() || checking());
   return (
-    <Show when={isPending()}>
+    <>
       <button type="button" class="link" data-spend-reconcile disabled={checking()} onClick={() => void reconcile()}>
         Check pending result
       </button>
@@ -4000,7 +3999,7 @@ function Reconcile(props: { actions: Actions; hasPending?: boolean }) {
         </button>
       </Show>
       <Show when={result()}><p class="hint" data-reconciliation>{result()}</p></Show>
-    </Show>
+    </>
   );
 }
 

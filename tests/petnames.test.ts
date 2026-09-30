@@ -30,11 +30,11 @@ afterEach(() => {
 });
 
 describe('petnames', () => {
-  it('stores a local petname and falls back to claimed label or unnamed contact', () => {
+  it('stores a local petname and never uses peer.label as the display name', () => {
     const peerWithoutLabel: Peer = { node_id: A, addr: null, label: null, connected: true, fingerprint: 'aaaaaaaa' };
     expect(peerName(peerWithoutLabel, A)).toBe(`Unnamed contact (${shortId(A)})`);
     const peer: Peer = { node_id: A, addr: null, label: 'RemoteClaim', connected: true, fingerprint: 'aaaaaaaa' };
-    expect(peerName(peer, A)).toBe('RemoteClaim');
+    expect(peerName(peer, A)).toBe(`Unnamed contact (${shortId(A)})`);
     expect(claimedName(peer)).toBe('RemoteClaim');
     setPetname(A, '  Maya  ');
     expect(petnameOf(A)).toBe('Maya');
@@ -99,7 +99,7 @@ describe('petnames', () => {
     markVerified(A);
     // B appears with the same claimed label — still unrelated until replaceContactKey.
     const peerB: Peer = { node_id: B, addr: null, label: 'Maya', connected: true, fingerprint: null };
-    expect(peerName(peerB, B)).toBe('Maya');
+    expect(peerName(peerB, B)).toBe(`Unnamed contact (${shortId(B)})`);
     expect(verifyState(B)).toBe('unverified');
     expect(verifyState(A)).toBe('verified');
   });
