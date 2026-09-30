@@ -648,6 +648,8 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
     ].map((e) => ({ ...e, at: Date.now() - (T0 + 60 * 60_000 - e.at) })) as Entry[],
   };
   let autopay: { until: number; ceiling: number } | null = null;
+  /** Invoices made in this sample session, and how often their status was read. */
+  const issued = new Map<string, number>();
   let autopayExpired = false;
   const wants = { window: false, budget: null as number | null };
   const key = (target: string, room: boolean) => `${room ? 'room' : 'peer'}:${target}`;
@@ -1078,10 +1080,12 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
       return { message_id: id, recipient: to, is_room: isRoom, delivered: true, amount_msat: amount, total_msat: amount + fee, max_routing_fee_msat: fee, sent_at_ms: at };
     },
     roomQuote: (id) => ok(roomQuote(id.toLowerCase())),
-    invoiceCreate: (amountMsat, note) =>
-      amountMsat < 1000
-        ? refuse('invalid', 'the amount must be between 1 sat and 1 BTC')
-        : ok({ bolt11: sampleBolt11(amountMsat), amount_msat: amountMsat, note: note.trim() || null, expires_at_ms: Date.now() + 3600_000 }),
+    invoiceCreate: (amountMsat, note) => {
+      if (amountMsat < 1000) return refuse('invalid', 'the amount must be between 1 sat and 1 BTC');
+      const bolt11 = sampleBolt11(amountMsat);
+      issued.set(bolt11, 0);
+      return ok({ bolt11, amount_msat: amountMsat, note: note.trim() || null, expires_at_ms: Date.now() + 3600_000 });
+    },
     invoiceAmount: (bolt11) => {
       const msat = sampleInvoiceMsat(bolt11);
       if (msat === null) return refuse('invalid', 'This invoice names no amount. The app pays only invoices whose cost it can show first.');
@@ -1096,6 +1100,14 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
         payment_hash: '00'.repeat(32),
         description: null,
       });
+    },
+    invoiceStatus: (bolt11) => {
+      // A sample invoice made here is "paid" by the sample payer after a few reads.
+      const key = bolt11.trim().toLowerCase();
+      if (!issued.has(key)) return ok({ state: 'unknown', amount_msat: null });
+      const reads = (issued.get(key) ?? 0) + 1;
+      issued.set(key, reads);
+      return ok(reads >= 3 ? { state: 'paid', amount_msat: sampleInvoiceMsat(key) } : { state: 'waiting', amount_msat: null });
     },
     pay: async (bolt11, amountMsat, maxMsat) => {
       await gate();

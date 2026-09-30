@@ -264,7 +264,9 @@ export type TrackRef =
   | { kind: 'room'; id: string }
   | { kind: 'ai' }
   | { kind: 'new' }
-  | { kind: 'discover' };
+  | { kind: 'discover' }
+  /** Receipts of payments made from the Wallet page. Never an open conversation. */
+  | { kind: 'wallet' };
 
 /**
  * FrontDoorCard v1 (doorstep): free to carry, signed by the node key, valid
@@ -550,6 +552,8 @@ export type InvoiceAmount = {
   /** The `d` field as written by the payee; null for a description hash. */
   description: string | null;
 };
+/** `invoice_status`: an invoice we issued, as the node reports it. Read only. */
+export type InvoiceStatus = { state: 'paid' | 'waiting' | 'failed' | 'unknown'; amount_msat: number | null };
 export type PaymentReceipt = {
   max_routing_fee_msat?: number;
   method: 'invoice' | 'keysend';
