@@ -8,3 +8,14 @@
 - **Ending a call:** Hang up pays one hangup message. Cancel while calling pays nothing if the offer has not gone out; if it is already being paid, the microphone stops at once and nothing more is sent. Closing the window, a lost connection (10 s grace) or a call that never connects (30 s) end the call locally without paying.
 - **Camera off** stops the camera (its light goes off); camera on captures it again.
 - Checks: `scripts/calls/media-check.py` (real WebRTC in Chromium through the app's call engine, loopback only) and `scripts/calls/regtest-demo.sh <genome>` (paid signalling on regtest plus the media check).
+
+## Meetings (up to 4, regtest prototype)
+
+- **A meeting is a set of 1:1 calls.** The roster is you plus 1 to 3 contacts, fixed when you invite. Every pair of participants is one ordinary paid call ("leg"), placed and paid by whoever is earlier in the roster: the host rings everyone, the first invitee rings the later ones, and so on. No new price, no per-minute payment, no relay.
+- **Invite:** Call buttons → **Meeting**, pick up to 3 contacts. The button shows the all-in ceiling (each invitee's call price plus one hangup) before anyone is rung. Legs are paid one at a time through the same budget, approval and exactly-once path as a call.
+- **Join:** the invite card names everyone in it and the join ceiling (an answer and a hangup to each earlier participant, a call to each later one). Joining answers every ringing leg and rings the later participants; a leg that rings after you joined is answered without another click. **Decline** pays one hangup per ringing leg; ignoring an invite pays nothing (it ends after 60 s).
+- **Leave:** media stops at once, then one paid hangup per leg the other side knows about. A leg still being placed is cancelled and pays nothing more. The others stay connected; the host has no "end for all".
+- **When a leg fails** (their node takes no calls, they are not your contact, the payment is refused) that pair shows **No link** and the rest of the meeting goes on. Two invitees who are not each other's contacts will not hear each other. Nothing retries on its own.
+- **Media** is full mesh: one direct connection per other participant, sharing one microphone (and camera). Upload grows with each participant. Same STUN rule as calls: none unless you set one.
+- Your node refuses a leg out of roster order (or to someone not in the roster) before paying anything. One meeting or one call at a time.
+- Checks: `scripts/calls/meeting-media-check.py` (real WebRTC between three Chromium pages through the app's meeting engine, loopback only) and genome `real_ldk_regtest_meeting` (three nodes on real LDK regtest, msat-exact).
