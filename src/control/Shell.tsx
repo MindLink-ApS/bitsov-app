@@ -10,6 +10,7 @@ import { Organism } from './BodyPanel';
 import { SoftError } from './SoftError';
 import { DiscoverPanel, FrontDoorEditor } from './Discover';
 import { ContactPanel } from './ContactPanel';
+import { custodyBadge, CustodyBadgeView } from './custody';
 import { callCost, createCallEngine, IDLE as CALL_IDLE, isCallKind, signalCost, stunServer, type CallMedia, type CallView } from './call';
 import { createMeetingEngine, declineCost, inviteCost, joinCost, MAX_PARTICIPANTS, MEETING_IDLE, type LegState, type MeetingView, type ShownQuotes } from './meeting';
 import { blobUrl, duration, FILE_MAX_BYTES, fileNameOf, isVoiceNote, type Recording, startRecording, VOICE_MAX_MS } from './voice';
@@ -4900,6 +4901,10 @@ function NodePanel(props: { overview: NodeOverview | null; link: LinkState | nul
             </dd>
             <dt>Node id</dt>
             <dd class="id" title={o().node_id}>{shortId(o().node_id)}</dd>
+            <Show when={custodyBadge(o().custody_mode)}>
+              <dt>Keys</dt>
+              <dd><CustodyBadgeView mode={o().custody_mode} /></dd>
+            </Show>
             <dt>Live feed</dt>
             <dd data-link={props.link ?? 'none'}>{linkText()}</dd>
             <dt>Peers connected</dt>

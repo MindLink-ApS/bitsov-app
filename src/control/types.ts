@@ -191,9 +191,13 @@ export type NodeOverview = {
   stun_url?: string | null;
   /** The LDK network the host started the node with (`mainnet`, `regtest`, …); absent when unknown. */
   network?: string | null;
+  /** Where the node's seed lives (node REMOTE-SIGNER.md §2); absent from older nodes. */
+  custody_mode?: CustodyMode | null;
   /** Unix ms when the host read it. */
   read_at: number;
 };
+
+export type CustodyMode = 'local_seed' | 'encrypted_seed' | 'hosted_custody' | 'remote_signer';
 
 // ---- organism reads (genome N1 / N2) ------------------------------------------
 // Mirrors `bitsov_app::control` EnergyRead / MembraneRead. Local reads of the

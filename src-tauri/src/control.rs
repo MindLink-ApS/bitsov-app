@@ -176,6 +176,9 @@ pub struct NodeStatusResponse {
     /// `stun:host:port` for it at the node's public host; absent without one.
     #[serde(default)]
     pub stun_url: Option<String>,
+    /// Where the node's seed lives (node REMOTE-SIGNER.md §2); absent before it.
+    #[serde(default)]
+    pub custody_mode: Option<String>,
 }
 
 // ---- organism reads (O1 v2: genome N1 + N2) ----------------------------------
@@ -483,8 +486,31 @@ pub struct NodeOverview {
     /// an unreadable config: the app then does not know its network.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub network: Option<String>,
+    /// Where the seed lives, as the badge shows it: see [`custody_mode`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custody_mode: Option<&'static str>,
     /// Unix ms when the host read it, for the freshness line.
     pub read_at: u64,
+}
+
+/// The custody label for the node's reported `custody_mode` (node
+/// REMOTE-SIGNER.md §2). Unknown values are dropped. A node reached over a
+/// non-loopback API that is not a remote signer holds its seed on someone's
+/// server, so it is `hosted_custody` whatever it reports, older nodes too:
+/// the label may get stronger here, never weaker.
+pub fn custody_mode(reported: Option<&str>, api_loopback: bool) -> Option<&'static str> {
+    let known = match reported {
+        Some("local_seed") => Some("local_seed"),
+        Some("encrypted_seed") => Some("encrypted_seed"),
+        Some("hosted_custody") => Some("hosted_custody"),
+        Some("remote_signer") => Some("remote_signer"),
+        _ => None,
+    };
+    if api_loopback || known == Some("remote_signer") {
+        known
+    } else {
+        Some("hosted_custody")
+    }
 }
 
 /// An LDK config's `network` as the app names networks; unknown names are none.
@@ -536,6 +562,7 @@ impl NodeOverview {
             stun_url: own_stun_url(status.stun_url.as_deref(), status.stun_port),
             stun_port: status.stun_port,
             network: None,
+            custody_mode: custody_mode(status.custody_mode.as_deref(), true),
             read_at,
         }
     }
@@ -1144,6 +1171,25 @@ mod tests {
         assert_eq!(NodeOverview::from_status(status, 1).capabilities, ["energy_v1", "membrane_v1"]);
         let rc7: NodeStatusResponse = serde_json::from_str(r#"{"status":"ok","node_id":"x"}"#).unwrap();
         assert!(NodeOverview::from_status(rc7, 1).capabilities.is_empty(), "rc7 advertises nothing: v1 sources");
+    }
+
+    #[test]
+    fn custody_mode_is_projected_and_only_ever_strengthened() {
+        let read = |extra: &str| {
+            let s: NodeStatusResponse = serde_json::from_str(&format!(r#"{{"status":"ok","node_id":"x"{extra}}}"#)).unwrap();
+            serde_json::to_value(NodeOverview::from_status(s, 1)).unwrap()
+        };
+        assert!(read("").get("custody_mode").is_none(), "an older node reports nothing, the app claims nothing");
+        for mode in ["local_seed", "encrypted_seed", "hosted_custody", "remote_signer"] {
+            assert_eq!(read(&format!(r#","custody_mode":"{mode}""#))["custody_mode"], mode);
+        }
+        assert!(read(r#","custody_mode":"<b>trust me</b>""#).get("custody_mode").is_none(), "unknown values are dropped");
+        // Over a non-loopback API, only a remote signer escapes the hosted label.
+        for reported in [None, Some("local_seed"), Some("encrypted_seed"), Some("hosted_custody"), Some("bogus")] {
+            assert_eq!(custody_mode(reported, false), Some("hosted_custody"), "{reported:?}");
+        }
+        assert_eq!(custody_mode(Some("remote_signer"), false), Some("remote_signer"));
+        assert_eq!(custody_mode(None, true), None);
     }
 
     #[test]

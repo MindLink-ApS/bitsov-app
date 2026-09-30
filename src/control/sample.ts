@@ -758,6 +758,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
         lightning_available: true,
         block_height: 860_123,
         uptime_secs: 3 * 86_400 + 4 * 3600,
+        custody_mode: 'encrypted_seed',
         lightning_backend: 'ldk',
         chain_backend: 'esplora',
         capabilities: v2 ? ['energy_v1', 'membrane_v1'] : [],

@@ -1477,6 +1477,8 @@ async fn get_json<T: serde::de::DeserializeOwned>(state: &NodeState, path: &str)
 async fn read_node_overview(state: &NodeState) -> Result<control::NodeOverview, String> {
     let status: control::NodeStatusResponse = get_json(state, "/status").await?;
     let mut overview = control::NodeOverview::from_status(status, now_ms());
+    // A node answering off loopback holds its seed on someone's server.
+    overview.custody_mode = control::custody_mode(overview.custody_mode, loopback_api_port(&state.api_base).is_some());
     // Only while the node answering is the LDK node that config started.
     if overview.lightning_backend.as_deref() == Some("ldk") {
         overview.network = state.configured_network.lock().unwrap().clone();
