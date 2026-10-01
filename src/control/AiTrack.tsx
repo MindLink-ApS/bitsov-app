@@ -90,6 +90,7 @@ export function AiTrack(props: {
   const [session, setSession] = props.session;
   const [draft, setDraft] = createSignal('');
   const [draftText, setDraftText] = createSignal('');
+  const [showExtras, setShowExtras] = createSignal(false);
   const [localStatus, setLocalStatus] = createSignal<LocalStatus | null>(null);
   const [localBusy, setLocalBusy] = createSignal(false);
   const [localError, setLocalError] = createSignal<string | null>(null);
@@ -290,157 +291,192 @@ export function AiTrack(props: {
   return (
     <>
       {props.head('Ask your node', sub())}
-      <div class="ai-providers" role="radiogroup" aria-label="Who answers" data-ai-providers>
-        <For each={session.providers ?? []}>
-          {(p) => (
-            <button
-              type="button"
-              role="radio"
-              class="ai-provider"
-              aria-checked={session.provider === p.kind}
-              disabled={!p.enabled || locked()}
-              title={
-                p.note ??
-                (locked() && session.provider !== p.kind
-                  ? 'Send or don’t send the preview first'
-                  : p.host
-                    ? `${p.model ?? ''} at ${p.host}`
-                    : 'Nothing leaves this computer')
-              }
-              data-provider={p.kind}
-              data-tier={endpointBadge(p).tier}
-              onClick={() => setSession('provider', p.kind)}
-            >
-              <span class="name">{p.label}</span>
-              <span class="meta">
-                {p.kind === 'local'
-                  ? p.model
+      <div class="ai-providers-bar">
+        <div class="ai-providers" role="radiogroup" aria-label="Who answers" data-ai-providers>
+          <For each={session.providers ?? []}>
+            {(p) => (
+              <button
+                type="button"
+                role="radio"
+                class="ai-provider"
+                classList={{ current: session.provider === p.kind }}
+                aria-checked={session.provider === p.kind}
+                disabled={!p.enabled || locked()}
+                title={
+                  p.note ??
+                  (locked() && session.provider !== p.kind
+                    ? 'Send or don’t send the preview first'
+                    : p.host
+                      ? `${p.model ?? ''} at ${p.host}`
+                      : 'Nothing leaves this computer')
+                }
+                data-provider={p.kind}
+                data-tier={endpointBadge(p).tier}
+                onClick={() => setSession('provider', p.kind)}
+              >
+                <span class="name">{p.label}</span>
+                <span class="meta">
+                  {p.kind === 'local'
                     ? p.model
-                    : 'nothing leaves'
-                  : p.enabled
-                    ? p.host
-                    : 'off'}
-              </span>
-            </button>
-          )}
-        </For>
+                      ? p.model
+                      : 'nothing leaves'
+                    : p.enabled
+                      ? p.host
+                      : 'off'}
+                </span>
+              </button>
+            )}
+          </For>
+        </div>
       </div>
 
       <Show when={session.provider === 'local'}>
-        <div class="ai-own" data-ai-own>
-          <Show
-            when={localStatus()?.running}
-            fallback={
-              <p class="hint" data-ai-own-howto>
-                {localStatus()?.howto ??
-                  'Looking for a local model server on this computer…'}
-              </p>
-            }
-          >
-            <p class="hint" data-ai-own-found>
-              Found{' '}
-              {localStatus()!.kind === 'ollama' ? 'Ollama' : 'a local model server'} on 127.0.0.1:
-              {localStatus()!.port}. Nobody is paid; nothing leaves this computer.
-            </p>
-            <div class="ai-own-row">
-              <label class="ai-own-port">
-                <span>Port</span>
-                <input
-                  type="text"
-                  inputMode="numeric"
-                  value={portDraft()}
-                  disabled={localBusy() || locked()}
-                  onInput={(e) => setPortDraft(e.currentTarget.value)}
-                  onChange={() => {
-                    const port = Number.parseInt(portDraft(), 10);
-                    if (Number.isFinite(port) && port > 0) void refreshLocal(port);
-                  }}
-                  data-ai-own-port
-                  aria-label="Local model server port"
-                />
-              </label>
-              <button
-                type="button"
-                class="quiet"
-                disabled={localBusy() || locked()}
-                onClick={() => {
-                  const port = Number.parseInt(portDraft(), 10);
-                  void refreshLocal(Number.isFinite(port) && port > 0 ? port : null);
-                }}
-                data-ai-own-refresh
+        <div class="ai-own-bar">
+          <details class="ai-own-details" open={Boolean(localStatus()?.running)}>
+            <summary class="ai-own-summary">
+              <span class="ai-own-icon" aria-hidden="true">⚙</span>
+              <span class="ai-own-title">
+                {localStatus()?.running
+                  ? `Local model server active (${localStatus()!.kind === 'ollama' ? 'Ollama' : 'Server'} :${localStatus()!.port})`
+                  : 'Local server options (Ollama / llama.cpp)'}
+              </span>
+              <span class="ai-own-toggle-hint">Configure ▾</span>
+            </summary>
+            <div class="ai-own" data-ai-own>
+              <Show
+                when={localStatus()?.running}
+                fallback={
+                  <p class="hint" data-ai-own-howto>
+                    {localStatus()?.howto ??
+                      'Looking for a local model server on this computer…'}
+                  </p>
+                }
               >
-                Refresh
-              </button>
-              <Show when={provider()?.model}>
-                <button
-                  type="button"
-                  class="quiet"
-                  disabled={localBusy() || locked()}
-                  onClick={() => void clearModel()}
-                  data-ai-own-clear
-                >
-                  Use rules only
-                </button>
-              </Show>
-            </div>
-            <div class="ai-own-models" role="listbox" aria-label="Local models" data-ai-own-models>
-              <For each={localStatus()?.models ?? []}>
-                {(name) => (
+                <p class="hint" data-ai-own-found>
+                  Found{' '}
+                  {localStatus()!.kind === 'ollama' ? 'Ollama' : 'a local model server'} on 127.0.0.1:
+                  {localStatus()!.port}. Nobody is paid; nothing leaves this computer.
+                </p>
+                <div class="ai-own-row">
+                  <label class="ai-own-port">
+                    <span>Port</span>
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      value={portDraft()}
+                      disabled={localBusy() || locked()}
+                      onInput={(e) => setPortDraft(e.currentTarget.value)}
+                      onChange={() => {
+                        const port = Number.parseInt(portDraft(), 10);
+                        if (Number.isFinite(port) && port > 0) void refreshLocal(port);
+                      }}
+                      data-ai-own-port
+                      aria-label="Local model server port"
+                    />
+                  </label>
                   <button
                     type="button"
-                    role="option"
-                    class="chip"
-                    aria-selected={provider()?.model === name}
+                    class="quiet"
                     disabled={localBusy() || locked()}
-                    data-ai-own-model={name}
-                    onClick={() => void pickModel(name)}
+                    onClick={() => {
+                      const port = Number.parseInt(portDraft(), 10);
+                      void refreshLocal(Number.isFinite(port) && port > 0 ? port : null);
+                    }}
+                    data-ai-own-refresh
                   >
-                    {name}
+                    Refresh
                   </button>
-                )}
-              </For>
+                  <Show when={provider()?.model}>
+                    <button
+                      type="button"
+                      class="quiet"
+                      disabled={localBusy() || locked()}
+                      onClick={() => void clearModel()}
+                      data-ai-own-clear
+                    >
+                      Use rules only
+                    </button>
+                  </Show>
+                </div>
+                <div class="ai-own-models" role="listbox" aria-label="Local models" data-ai-own-models>
+                  <For each={localStatus()?.models ?? []}>
+                    {(name) => (
+                      <button
+                        type="button"
+                        role="option"
+                        class="chip"
+                        aria-selected={provider()?.model === name}
+                        disabled={localBusy() || locked()}
+                        data-ai-own-model={name}
+                        onClick={() => void pickModel(name)}
+                      >
+                        {name}
+                      </button>
+                    )}
+                  </For>
+                </div>
+              </Show>
+              <Show when={localError()}>
+                <p class="err-note" data-ai-own-error>
+                  {localError()}
+                </p>
+              </Show>
             </div>
-          </Show>
-          <Show when={localError()}>
-            <p class="err-note" data-ai-own-error>
-              {localError()}
-            </p>
-          </Show>
+          </details>
         </div>
       </Show>
 
       <div class="stream ai-stream" ref={stream} data-stream data-ai-track>
-        <Show when={session.turns.length === 0}>
-          <div class="empty-track">
-            <h2>Ask about your own node</h2>
-            <p class="hint">
-              This app reads your node through a closed list of read-only routes and answers here. Your node never talks
-              to a model. If you turn on a remote model, each question shows exactly what would leave this computer, and
-              nothing is sent until you press Send.
-            </p>
-          </div>
-        </Show>
-        <For each={session.turns}>
-          {(t, i) => (
-            <>
-              <Show when={i() === 0 || day(session.turns[i() - 1].at) !== day(t.at)}>
-                <p class="day">{day(t.at)}</p>
-              </Show>
-              <article class="msg out" data-ai-question>
-                <div class="bubble">{t.question}</div>
-              </article>
-              <TurnView
-                turn={t}
-                now={props.now}
-                nameOf={nameOf}
-                onPreset={(p) => void disclose(t.id, p)}
-                onSend={() => void send(t.id)}
-                onDontSend={() => dontSend(t.id)}
-                onPrefill={props.onPrefill}
-              />
-            </>
-          )}
-        </For>
+        <div class="chat-column ai-chat-column">
+          <Show when={session.turns.length === 0}>
+            <div class="empty-track ai-hero">
+              <div class="ai-hero-spark" aria-hidden="true">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
+                </svg>
+              </div>
+              <h2>Ask about your own node</h2>
+              <p class="hint">
+                This app reads your node through a closed list of read-only routes and answers here. Your node never talks
+                to a model. If you turn on a remote model, each question shows exactly what would leave this computer, and
+                nothing is sent until you press Send.
+              </p>
+              <div class="ai-hero-suggestions" aria-label="Suggestions">
+                <For each={SUGGESTIONS}>
+                  {(s) => (
+                    <button type="button" class="ai-hero-card" disabled={busy()} onClick={() => void ask(s)} data-suggestion>
+                      <span class="ai-hero-card-arrow" aria-hidden="true">↳</span>
+                      <span class="ai-hero-card-text">{s}</span>
+                    </button>
+                  )}
+                </For>
+              </div>
+            </div>
+          </Show>
+          <For each={session.turns}>
+            {(t, i) => (
+              <>
+                <Show when={i() === 0 || day(session.turns[i() - 1].at) !== day(t.at)}>
+                  <p class="day">{day(t.at)}</p>
+                </Show>
+                <article class="msg out ai-question-out" data-ai-question>
+                  <div class="bubble">{t.question}</div>
+                </article>
+                <div class="ai-turn-wrap">
+                  <TurnView
+                    turn={t}
+                    now={props.now}
+                    nameOf={nameOf}
+                    onPreset={(p) => void disclose(t.id, p)}
+                    onSend={() => void send(t.id)}
+                    onDontSend={() => dontSend(t.id)}
+                    onPrefill={props.onPrefill}
+                  />
+                </div>
+              </>
+            )}
+          </For>
+        </div>
       </div>
 
       <form
@@ -451,21 +487,75 @@ export function AiTrack(props: {
           void ask(draft());
         }}
       >
-        <div class="ai-suggest" aria-label="Suggestions">
-          <For each={SUGGESTIONS}>
-            {(s) => (
-              <button type="button" class="chip" disabled={busy()} onClick={() => void ask(s)} data-suggestion>
-                {s}
+        <Show when={session.turns.length > 0}>
+          <div class="ai-suggest" aria-label="Suggestions">
+            <For each={SUGGESTIONS}>
+              {(s) => (
+                <button type="button" class="chip" disabled={busy()} onClick={() => void ask(s)} data-suggestion>
+                  {s}
+                </button>
+              )}
+            </For>
+          </div>
+        </Show>
+
+        <div
+          class="ai-composer-extras"
+          classList={{ 'is-open': showExtras() || Boolean(draftText()) }}
+        >
+          <div class="ai-extras-card">
+            <div class="ai-extras-head">
+              <span class="ai-extras-title">Draft note attachment</span>
+              <button
+                type="button"
+                class="ai-extras-close"
+                onClick={() => {
+                  setShowExtras(false);
+                  if (draftText()) setDraftText('');
+                }}
+                title="Clear and close"
+                aria-label="Close draft field"
+              >
+                ✕
               </button>
-            )}
-          </For>
+            </div>
+            <label class="ai-draft-field">
+              <textarea
+                rows={2}
+                placeholder="Message or invoice note — copied exactly into the draft"
+                value={draftText()}
+                onInput={(e) => setDraftText(e.currentTarget.value)}
+                disabled={busy()}
+                data-ai-draft-text
+              />
+              <span class="hint">For messages and invoice notes. Leave blank to write in the composer.</span>
+            </label>
+          </div>
         </div>
-        <div class="composer-bar">
+
+        <div class="composer-main ai-composer-main">
+          <button
+            type="button"
+            class="attach soft ai-plus-btn"
+            classList={{ active: showExtras() || Boolean(draftText()) }}
+            onClick={() => setShowExtras((v) => !v)}
+            title="Attach message draft note or options"
+            aria-label="Composer options"
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <line x1="12" y1="5" x2="12" y2="19" />
+              <line x1="5" y1="12" x2="19" y2="12" />
+            </svg>
+          </button>
           <textarea
             rows={1}
             placeholder="Ask your node…"
             value={draft()}
-            onInput={(e) => setDraft(e.currentTarget.value)}
+            onInput={(e) => {
+              setDraft(e.currentTarget.value);
+              e.currentTarget.style.height = 'auto';
+              e.currentTarget.style.height = `${Math.min(e.currentTarget.scrollHeight, 120)}px`;
+            }}
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
@@ -475,28 +565,38 @@ export function AiTrack(props: {
             aria-label="Ask your node"
             data-ai-input
           />
-          <button type="submit" class="primary" disabled={busy() || !draft().trim()} data-ai-ask>
-            {needsDisclose() ? 'Preview' : 'Ask'}
+          <button
+            type="submit"
+            class="primary ai-ask-btn"
+            classList={{ 'is-preview': needsDisclose() }}
+            disabled={busy() || !draft().trim()}
+            data-ai-ask
+            title={needsDisclose() ? 'Preview what will be sent' : 'Ask your node'}
+            aria-label={needsDisclose() ? 'Preview' : 'Ask'}
+          >
+            <Show when={needsDisclose()} fallback={
+              <>
+                <span class="sr-only">Ask</span>
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <line x1="12" y1="19" x2="12" y2="5" />
+                  <polyline points="5 12 12 5 19 12" />
+                </svg>
+              </>
+            }>
+              <span>Preview</span>
+            </Show>
           </button>
         </div>
-        <label class="ai-draft-field">
-          <span>Draft text (optional)</span>
-          <textarea
-            rows={2}
-            placeholder="Message or invoice note — copied exactly into the draft"
-            value={draftText()}
-            onInput={(e) => setDraftText(e.currentTarget.value)}
-            disabled={busy()}
-            data-ai-draft-text
-          />
-          <span class="hint">For messages and invoice notes. Leave blank to write in the composer.</span>
-        </label>
-        <p class="send-next" data-ai-policy>
-          {remote()
-            ? `Each question shows the exact request for ${provider()?.label ?? 'the remote model'} first. Nothing is approved ahead of time.`
-            : ownModel()
-              ? `Each question shows the exact request for ${provider()?.model} on this computer first. Nobody is paid; the preview never leaves this machine.`
-              : 'Nothing leaves this computer. The AI never spends: it can only prepare a draft for you to send.'}
+
+        <p class="send-next ai-policy" data-ai-policy>
+          <span class="ai-policy-lock" aria-hidden="true">🔒</span>
+          <span>
+            {remote()
+              ? `Each question shows the exact request for ${provider()?.label ?? 'the remote model'} first. Nothing is approved ahead of time.`
+              : ownModel()
+                ? `Each question shows the exact request for ${provider()?.model} on this computer first. Nobody is paid; the preview never leaves this machine.`
+                : 'Nothing leaves this computer. The AI never spends: it can only prepare a draft for you to send.'}
+          </span>
         </p>
       </form>
     </>
