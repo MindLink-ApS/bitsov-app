@@ -74,6 +74,7 @@ fn main() {
             "room_quote",
             "invoice_create",
             "invoice_amount",
+            "invoice_status",
             "payment_pay",
             "payment_keysend",
             "invite_create",

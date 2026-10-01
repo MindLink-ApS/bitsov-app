@@ -10,6 +10,9 @@ import { Organism } from './BodyPanel';
 import { SoftError } from './SoftError';
 import { DiscoverPanel, FrontDoorEditor } from './Discover';
 import { ContactPanel } from './ContactPanel';
+import { custodyBadge, CustodyBadgeView } from './custody';
+import { WalletPage, type WalletActions, type WalletTab } from './WalletPage';
+import { artifactActivity, logActivity, type LoggedActivity } from './wallet';
 import { callCost, createCallEngine, IDLE as CALL_IDLE, isCallKind, signalCost, stunServer, type CallMedia, type CallView } from './call';
 import { createMeetingEngine, declineCost, inviteCost, joinCost, MAX_PARTICIPANTS, MEETING_IDLE, type LegState, type MeetingView, type ShownQuotes } from './meeting';
 import { blobUrl, duration, FILE_MAX_BYTES, fileNameOf, isVoiceNote, type Recording, startRecording, VOICE_MAX_MS } from './voice';
@@ -256,6 +259,19 @@ export function ControlCenter(props: Props) {
   }));
   const [errors, setErrors] = createStore<Record<string, string | undefined>>({});
   const [contextOpen, setContextOpen] = createSignal(false);
+  /** The full-screen Wallet page, on this tab; null when closed. */
+  const [walletTab, setWalletTab] = createSignal<WalletTab | null>(null);
+  createEffect(() => {
+    if (!walletTab()) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !contextOpen()) {
+        e.preventDefault();
+        setWalletTab(null);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    onCleanup(() => window.removeEventListener('keydown', onKey));
+  });
   const [settingsEl, setSettingsEl] = createSignal<HTMLElement | null>(null);
   let settingsReturnFocus: HTMLElement | null = null;
   createEffect(() => {
@@ -575,6 +591,18 @@ export function ControlCenter(props: Props) {
     const full = { id: `local-${artifactSeq++}`, at: artifact.at ?? Date.now(), ...artifact } as Artifact;
     setArtifacts(key, (old) => [...(old ?? []), full]);
   };
+  // The Wallet's history of payments and invoices made here (the node lists neither).
+  createEffect(() => {
+    const entries: LoggedActivity[] = [];
+    for (const [key, list] of Object.entries(artifacts)) {
+      const who = key.startsWith('peer:') || key.startsWith('room:') ? key.slice(5) : null;
+      for (const a of list ?? []) {
+        const entry = artifactActivity(a, who);
+        if (entry) entries.push(entry);
+      }
+    }
+    untrack(() => logActivity(entries));
+  });
 
   /** Run one action. An approval error re-reads the window; the caller shows the rest. */
   const act = async <T,>(run: () => Promise<T>): Promise<Outcome<T>> => {
@@ -929,6 +957,20 @@ export function ControlCenter(props: Props) {
     const [kind, id] = key.split(':');
     return kind === 'room' ? rooms().find((r) => r.id.toLowerCase() === id)?.name ?? 'Room' : nameOf(id ?? key);
   };
+  // The Wallet pays only through the composer's own actions; its receipts go to the `wallet` key.
+  const WALLET: TrackRef = { kind: 'wallet' };
+  const walletActions: WalletActions = {
+    readInvoice: (bolt11) => actions.readInvoice(bolt11),
+    pay: (bolt11, msat) => actions.pay(WALLET, bolt11, msat),
+    keysend: (pubkey, msat, memo) => actions.keysend(WALLET, pubkey, msat, memo),
+    invoice: (msat, note) => actions.invoice(WALLET, msat, note),
+    approve: () => actions.approve(),
+  };
+  const openWallet = (tab: WalletTab = 'activity') => {
+    setContextOpen(false);
+    setWalletTab(tab);
+    void loadWallet();
+  };
 
   return (
     <div class="cc" classList={{ 'no-context': !props.active }} data-mode={source.mode}>
@@ -948,10 +990,13 @@ export function ControlCenter(props: Props) {
           setTab('body');
           setContextOpen(true);
         }}
+        onWallet={() => openWallet()}
+        balanceMsat={wallet()?.balance_msat ?? null}
+        behind={walletTab() !== null}
       />
 
       <Show when={props.active} fallback={<section class="track">{props.firstRun}</section>}>
-        <section class="track" aria-label="Track">
+        <section class="track" aria-label="Track" inert={walletTab() !== null}>
           <Show when={moneyBlocked()}>
             <p class="hint money-notice" data-money-notice role="status">{MONEY_NOT_READY} Sending, paying, first contact, files, rooms, channels and gifts will be available when it is ready.</p>
           </Show>
@@ -1123,6 +1168,7 @@ export function ControlCenter(props: Props) {
             <NodePanel overview={overview()} link={link()} peers={peers()} now={now()} error={errors.overview ?? errors.peers} />
           </Match>
           <Match when={tab() === 'wallet'}>
+            <button type="button" class="primary soft" data-open-wallet-page onClick={() => openWallet()}>Open Wallet</button>
             <WalletPanel moneyBlocked={moneyBlocked()} wallet={wallet()} error={errors.wallet} fund={props.fund?.(source, moneyBlocked)} />
           </Match>
           <Match when={tab() === 'budget'}>
@@ -1170,6 +1216,28 @@ export function ControlCenter(props: Props) {
         camera={() => void meetings.toggleCamera()}
         dismiss={() => meetings.dismiss()}
       />
+      <Show when={props.active && walletTab()}>
+        {(tab) => (
+          <WalletPage
+            tab={tab()}
+            onTab={setWalletTab}
+            onClose={() => setWalletTab(null)}
+            wallet={wallet()}
+            walletError={errors.wallet}
+            moneyBlocked={moneyBlocked()}
+            spend={spend()}
+            spendGate={<SpendBar spend={spend()} error={errors.spend} now={now()} actions={actions} />}
+            now={now()}
+            ownId={ownId()}
+            histories={[...peers().map((p) => p.node_id.toLowerCase()), ...rooms().map((r) => r.id.toLowerCase())]}
+            threadMessages={Object.values(threads.t).flat()}
+            nameOf={(id) => rooms().find((r) => r.id.toLowerCase() === id.toLowerCase())?.name ?? nameOf(id)}
+            actions={walletActions}
+            reads={{ fundingAddress: () => source.fundingAddress(), invoiceStatus: (b) => source.invoiceStatus(b), messages: (id) => source.messages(id) }}
+            onRefresh={() => void loadWallet()}
+          />
+        )}
+      </Show>
     </div>
   );
 }
@@ -1318,7 +1386,26 @@ function Rail(props: {
   ownId: string | null;
   onOpen: (t: TrackRef) => void;
   onProfile: () => void;
+  onWallet: () => void;
+  balanceMsat: number | null;
+  /** Under the full-screen Wallet: out of reach. */
+  behind: boolean;
 }) {
+  // The avatar menu: Wallet, or Profile and settings.
+  const [menuOpen, setMenuOpen] = createSignal(false);
+  let avatar: HTMLButtonElement | undefined;
+  // Focus goes back to the avatar first, so closing what opens returns there.
+  const choose = (open: () => void) => {
+    setMenuOpen(false);
+    avatar?.focus();
+    open();
+  };
+  createEffect(() => {
+    if (!menuOpen()) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setMenuOpen(false); };
+    window.addEventListener('keydown', onKey);
+    onCleanup(() => window.removeEventListener('keydown', onKey));
+  });
   const item = (t: TrackRef, name: string, meta?: JSX.Element) => {
     const key = trackKey(t);
     return (
@@ -1343,7 +1430,7 @@ function Rail(props: {
   };
 
   return (
-    <nav class="rail" aria-label="Tracks">
+    <nav class="rail" aria-label="Tracks" inert={props.behind}>
       <div class="mark">
         Bit<span>Sov</span>
       </div>
@@ -1432,18 +1519,37 @@ function Rail(props: {
         <Show when={props.sample}>
           <span class="mode-tag" data-sample>Sample data, no node</span>
         </Show>
-        <button
-          type="button"
-          class="profile-avatar"
-          data-profile
-          disabled={!props.active}
-          aria-label="Open profile and settings"
-          title="Profile and settings"
-          onClick={() => props.onProfile()}
-        >
-          <span class="avatar-mark" aria-hidden="true">{initials()}</span>
-          <span class="avatar-label">You</span>
-        </button>
+        <div class="avatar-menu-wrap">
+          <Show when={menuOpen()}>
+            <div class="avatar-scrim" onClick={() => setMenuOpen(false)} />
+            <div class="avatar-menu" role="menu" aria-label="You" data-avatar-menu>
+              <button type="button" role="menuitem" class="avatar-menu-item wallet" data-open-wallet onClick={() => choose(props.onWallet)}>
+                <span class="name">Wallet</span>
+                <Show when={props.balanceMsat !== null}>
+                  <span class="meta sats" data-avatar-balance>{fmtAmount(props.balanceMsat!)}</span>
+                </Show>
+              </button>
+              <button type="button" role="menuitem" class="avatar-menu-item" data-open-settings onClick={() => choose(props.onProfile)}>
+                <span class="name">Profile and settings</span>
+              </button>
+            </div>
+          </Show>
+          <button
+            ref={avatar}
+            type="button"
+            class="profile-avatar"
+            data-profile
+            disabled={!props.active}
+            aria-label="You: wallet, profile and settings"
+            aria-haspopup="menu"
+            aria-expanded={menuOpen()}
+            title="Wallet, profile and settings"
+            onClick={() => setMenuOpen((v) => !v)}
+          >
+            <span class="avatar-mark" aria-hidden="true">{initials()}</span>
+            <span class="avatar-label">You</span>
+          </button>
+        </div>
       </div>
     </nav>
   );
@@ -2490,14 +2596,14 @@ function ArtifactView(props: { moneyBlocked: boolean; a: Artifact; delivery?: De
         {(a) => {
           const r = () => (a() as Extract<Artifact, { type: 'payment' }>).receipt;
           return (
-            <div class="artifact out payment-line" data-artifact="payment" data-status={r().status}>
+            <div class="artifact out payment-line" data-artifact="payment" data-status={r().status} data-pay-method={r().method}>
               <span class="stamp">
                 <Bolt />
                 <Show
                   when={r().status !== 'failed'}
                   fallback={<span class="err-note">Payment of <span class="sats">{sats(r().amount_msat)}</span> {satUnit(r().amount_msat)} failed</span>}
                 >
-                  <span>You sent <span class="sats">{sats(r().amount_msat)}</span> {satUnit(r().amount_msat)}</span>
+                  <span>You sent <span class="sats">{sats(r().amount_msat)}</span> {satUnit(r().amount_msat)}{r().method === 'keysend' ? ' · direct (keysend)' : ''}</span>
                 </Show>
                 <span class="hint">{clock(r().paid_at_ms)}</span>
               </span>
@@ -3202,7 +3308,13 @@ function Composer(props: {
         setBusy(false);
         return;
       }
-      if ((st.kind !== 'first' && st.kind !== 'ok') || !ready()) return;
+      if (st.kind !== 'first' && st.kind !== 'ok') return;
+      if (!ready()) {
+        // A press before the price is known must not look like a send: the draft
+        // stays, and the owner sees why nothing moved (real-window step 10).
+        setNote(draft().trim() ? 'The message price is not ready yet. Nothing was sent. Wait for the cost, then press Send.' : 'Type a message first.');
+        return;
+      }
       setBusy(true);
       const submittedRevision = composerRevision;
       const submittedApprovalRevision = approvalRevision;
@@ -3268,7 +3380,14 @@ function Composer(props: {
       setBusy(false);
       return;
     }
-    if (!ready()) return;
+    if (!ready()) {
+      setNote(
+        mode() === 'message' && draft().trim()
+          ? 'The message price is not ready yet. Nothing was sent. Wait for the cost, then press Send.'
+          : 'Nothing was sent yet — finish the fields first.',
+      );
+      return;
+    }
     if (mode() === 'pay') {
       // Pay never pays from here: it shows the review, and only its confirm pays.
       setReview(
@@ -5144,6 +5263,10 @@ function NodePanel(props: { overview: NodeOverview | null; link: LinkState | nul
             </dd>
             <dt>Node id</dt>
             <dd class="id" title={o().node_id}>{shortId(o().node_id)}</dd>
+            <Show when={custodyBadge(o().custody_mode)}>
+              <dt>Keys</dt>
+              <dd><CustodyBadgeView mode={o().custody_mode} /></dd>
+            </Show>
             <dt>Live feed</dt>
             <dd data-link={props.link ?? 'none'}>{linkText()}</dd>
             <dt>Peers connected</dt>

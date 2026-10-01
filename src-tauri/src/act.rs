@@ -1126,6 +1126,44 @@ pub struct InvoiceView {
     pub expires_at_ms: u64,
 }
 
+/// Whether an invoice was paid to this node, as `GET /payments/{hash}` reports
+/// it. Read only. `state`: `paid`, `waiting`, `failed`, or `unknown` (the node
+/// has no inbound payment for it, or answered something else).
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct InvoiceStatus {
+    pub state: &'static str,
+    pub amount_msat: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct PaymentStatusReply {
+    status: String,
+    #[serde(default)]
+    amount_msat: Option<u64>,
+    direction: String,
+}
+
+/// The node's reply for one payment hash, read as an invoice we issued. The
+/// node writes konsensus-core's `PaymentStatus` and `PaymentDirection` by name:
+/// only an `Incoming` payment counts, and only `Settled` is paid.
+pub fn invoice_status(status: u16, body: &str) -> InvoiceStatus {
+    let unknown = InvoiceStatus { state: "unknown", amount_msat: None };
+    if !(200..300).contains(&status) {
+        return unknown;
+    }
+    let Ok(reply) = serde_json::from_str::<PaymentStatusReply>(body) else { return unknown };
+    if !reply.direction.eq_ignore_ascii_case("Incoming") {
+        return unknown;
+    }
+    let state = match reply.status.as_str() {
+        "Settled" => "paid",
+        "Pending" | "InFlight" => "waiting",
+        "Failed" | "Expired" => "failed",
+        _ => return unknown,
+    };
+    InvoiceStatus { state, amount_msat: reply.amount_msat }
+}
+
 // ---- invites ------------------------------------------------------------------
 
 /// `POST /invites` body: an invite bound to one invitee's key.
@@ -1396,6 +1434,25 @@ pub fn is_scope_refusal(status: u16) -> bool {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn an_invoice_is_paid_only_when_the_node_reports_an_incoming_settlement() {
+        // The node's own replies (konsensus-core PaymentStatus / PaymentDirection by
+        // name), shared with the renderer's sample so neither can drift from them.
+        #[derive(Deserialize)]
+        struct Case {
+            http: u16,
+            body: serde_json::Value,
+            want: serde_json::Value,
+        }
+        let cases: Vec<Case> = serde_json::from_str(include_str!("../../tests/fixtures/node-payment-status.json")).unwrap();
+        assert!(cases.len() >= 9);
+        for case in cases {
+            let got = serde_json::to_value(invoice_status(case.http, &case.body.to_string())).unwrap();
+            assert_eq!(got, case.want, "{}", case.body);
+        }
+        assert_eq!(invoice_status(200, "not json").state, "unknown");
+    }
 
     #[test]
     fn readmission_capped_refusal_matches_the_reason_code_first() {

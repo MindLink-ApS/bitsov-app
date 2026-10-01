@@ -7,6 +7,7 @@ import type { NodeStatus, PairingView } from '../onboarding/pairing';
 import { seedPetnameIfEmpty } from './petnames';
 import type { Source } from './source';
 import type {
+  InvoiceStatus,
   VoiceBlob,
   FileSaveResult,
   FundingAsk,
@@ -108,6 +109,24 @@ function sampleFrontDoor(
     fresh: !opts?.expired,
   };
 }
+
+const NODE_PAYMENT_STATE = new Map<string, InvoiceStatus['state']>([
+  ['Settled', 'paid'], ['Pending', 'waiting'], ['InFlight', 'waiting'], ['Failed', 'failed'], ['Expired', 'failed'],
+]);
+/**
+ * The host's `act::invoice_status`, for the sample: it reads the node's
+ * `GET /payments/{hash}` reply in the node's own names, so the sample cannot
+ * show a state a real node never would.
+ */
+export function invoiceFromNode(http: number, body: Record<string, unknown>): InvoiceStatus {
+  const unknown: InvoiceStatus = { state: 'unknown', amount_msat: null };
+  if (http < 200 || http >= 300 || typeof body.status !== 'string' || typeof body.direction !== 'string') return unknown;
+  if (body.direction.toLowerCase() !== 'incoming') return unknown;
+  const state = NODE_PAYMENT_STATE.get(body.status);
+  if (!state) return unknown;
+  return { state, amount_msat: typeof body.amount_msat === 'number' ? body.amount_msat : null };
+}
+
 export const SAMPLE_PEERS: Peer[] = [
   { node_id: hex('a'), addr: '34.90.12.8:9735', label: 'Maya', connected: true, fingerprint: 'aaaaaaaa' },
   { node_id: hex('b'), addr: '35.204.77.3:9735', label: 'Josh', connected: true, fingerprint: 'bbbbbbbb' },
@@ -654,6 +673,8 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
     ].map((e) => ({ ...e, at: Date.now() - (T0 + 60 * 60_000 - e.at) })) as Entry[],
   };
   let autopay: { until: number; ceiling: number } | null = null;
+  /** Invoices made in this sample session, and how often their status was read. */
+  const issued = new Map<string, number>();
   let autopayExpired = false;
   const wants = { window: false, budget: null as number | null };
   const key = (target: string, room: boolean) => `${room ? 'room' : 'peer'}:${target}`;
@@ -769,6 +790,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
         lightning_available: true,
         block_height: 860_123,
         uptime_secs: 3 * 86_400 + 4 * 3600,
+        custody_mode: 'encrypted_seed',
         lightning_backend: 'ldk',
         chain_backend: 'esplora',
         capabilities: v2 ? ['energy_v1', 'membrane_v1'] : [],
@@ -1084,10 +1106,12 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
       return { message_id: id, recipient: to, is_room: isRoom, delivered: true, amount_msat: amount, total_msat: amount + fee, max_routing_fee_msat: fee, sent_at_ms: at };
     },
     roomQuote: (id) => ok(roomQuote(id.toLowerCase())),
-    invoiceCreate: (amountMsat, note) =>
-      amountMsat < 1000
-        ? refuse('invalid', 'the amount must be between 1 sat and 1 BTC')
-        : ok({ bolt11: sampleBolt11(amountMsat), amount_msat: amountMsat, note: note.trim() || null, expires_at_ms: Date.now() + 3600_000 }),
+    invoiceCreate: (amountMsat, note) => {
+      if (amountMsat < 1000) return refuse('invalid', 'the amount must be between 1 sat and 1 BTC');
+      const bolt11 = sampleBolt11(amountMsat);
+      issued.set(bolt11, 0);
+      return ok({ bolt11, amount_msat: amountMsat, note: note.trim() || null, expires_at_ms: Date.now() + 3600_000 });
+    },
     invoiceAmount: (bolt11) => {
       const msat = sampleInvoiceMsat(bolt11);
       if (msat === null) return refuse('invalid', 'This invoice names no amount. The app pays only invoices whose cost it can show first.');
@@ -1102,6 +1126,15 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
         payment_hash: '00'.repeat(32),
         description: null,
       });
+    },
+    invoiceStatus: (bolt11) => {
+      // A sample invoice made here is paid by the sample payer after a few reads.
+      const key = bolt11.trim().toLowerCase();
+      if (!issued.has(key)) return ok(invoiceFromNode(502, { error: 'payment not found' }));
+      const reads = (issued.get(key) ?? 0) + 1;
+      issued.set(key, reads);
+      const status = reads >= 3 ? 'Settled' : reads === 2 ? 'InFlight' : 'Pending';
+      return ok(invoiceFromNode(200, { payment_hash: '00'.repeat(32), status, amount_msat: sampleInvoiceMsat(key), direction: 'Incoming', liquidity: null }));
     },
     pay: async (bolt11, amountMsat, maxMsat) => {
       await gate();

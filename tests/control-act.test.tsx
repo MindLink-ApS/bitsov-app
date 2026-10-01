@@ -125,14 +125,16 @@ describe('acting from the track', () => {
     $<HTMLButtonElement>('[data-pay-confirm]')!.click();
   };
 
-  async function openShell() {
+  async function openShell(opts: { waitCost?: boolean } = {}) {
     mount = document.createElement('div');
     document.body.appendChild(mount);
     dispose = render(() => <App />, mount);
     await vi.waitFor(() => expect([...mount.querySelectorAll('button')].some((b) => b.textContent?.includes('I understand'))).toBe(true));
     [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
     await vi.waitFor(() => expect($(`[data-track="peer:${A}"]`)?.getAttribute('aria-current')).toBe('true'));
-    await vi.waitFor(() => expect($('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('2000'));
+    if (opts.waitCost !== false) {
+      await vi.waitFor(() => expect($('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('2000'));
+    }
   }
 
   it('asks the owner once, keeps the draft, then sends and shows the receipt and delivery', async () => {
@@ -307,6 +309,9 @@ describe('acting from the track', () => {
   });
 
   it('shows a quoted re-admission inline, in the all-in cost, and sends once more at that price', async () => {
+    // Real-window step 10: one Send after a node restart only gets the quote;
+    // the draft must stay, and a second Send at the quoted all-in must deliver.
+    // The harness used to break after the first "Send" label and leave it unsent.
     const admission = { admission_msat: 1000, message_msat: 2000, max_routing_fee_msat: 10_000, total_msat: 13_000, quoted: true };
     let n = 0;
     const host = stubHost({
@@ -328,12 +333,31 @@ describe('acting from the track', () => {
     expect($('[data-artifact="failed"]'), 'an ask, not a failure').toBeNull();
     expect($('[data-door="out-refused"]')).toBeNull();
     expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value, 'the draft stays').toBe('after the restart');
+    expect(text('[data-send]').trim().startsWith('Send'), 'Send stays ready for the quoted retry').toBe(true);
     submit();
     await vi.waitFor(() => expect(host.used('message_send')).toHaveLength(2));
     expect(host.used('message_send')[1].args!.max_msat, 'the quoted all-in total').toBe(13_000);
     await vi.waitFor(() => expect($('[data-readmission-paid]')).not.toBeNull());
     expect(text('[data-readmission-paid]')).toContain('incl. admission again 1 sat');
     expect($('[data-readmission-quote]')).toBeNull();
+    expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value, 'draft clears only after the paid send').toBe('');
+  });
+
+  it('keeps the draft and says so when Send is pressed before the message price is known', async () => {
+    const host = stubHost({
+      price_quote: () => new Promise(() => { /* never settles */ }),
+    });
+    host.spend.v = openView();
+    await openShell({ waitCost: false });
+    type('[data-composer] textarea', 'too soon');
+    await vi.waitFor(() => expect($('[data-send]')!.hasAttribute('disabled')).toBe(true));
+    // Disabled Send cannot click; a form submit still must not clear the draft.
+    const form = $('[data-composer]') as HTMLFormElement;
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect($('[data-composer-note]')).not.toBeNull());
+    expect(text('[data-composer-note]')).toContain('price is not ready yet');
+    expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('too soon');
+    expect(host.used('message_send')).toHaveLength(0);
   });
 
   it('labels a paid, refused-for-good send and a changed-text retry refusal', async () => {
