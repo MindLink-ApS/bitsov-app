@@ -101,6 +101,7 @@ export default function App() {
         trustAck={trustAck}
         onRetry={() => void retryPairing()}
         device={device}
+        onImportRemote={(link) => source().remoteAccessImport(link)}
       />
 
       <Show

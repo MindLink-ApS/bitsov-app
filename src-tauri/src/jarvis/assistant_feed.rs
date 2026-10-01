@@ -19,6 +19,16 @@ const READ_SCOPE: &str = "read";
 
 /// Read the 50-question fixture from the node, or fall back to mock.
 pub fn build(auth: NodeAuth, base_url: &str, audit: Arc<dyn AuditSink>) -> Feed {
+    build_with_proxy_auth(auth, base_url, audit, None)
+}
+
+/// Read through the authenticated remote loopback proxy when configured.
+pub fn build_with_proxy_auth(
+    auth: NodeAuth,
+    base_url: &str,
+    audit: Arc<dyn AuditSink>,
+    proxy_auth: Option<Arc<str>>,
+) -> Feed {
     let token = match auth {
         NodeAuth::NotPaired => return Feed::mock(MockReason::NotPaired),
         NodeAuth::Rc7Fallback => return Feed::mock(MockReason::Rc7Fallback),
@@ -32,6 +42,7 @@ pub fn build(auth: NodeAuth, base_url: &str, audit: Arc<dyn AuditSink>) -> Feed 
     let Ok(node) = LocalNodeRead::new(base_url, token, audit) else {
         return Feed::mock(MockReason::NodeUnreachable);
     };
+    let node = node.with_proxy_auth(proxy_auth);
     let snapshot = Snapshot::new(&node);
     let rows = healthy(&snapshot).then(|| sit_mock::live_rows(&snapshot));
     if snapshot.transport_failed() {
@@ -64,6 +75,7 @@ fn healthy(node: &impl NodeRead) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read, Write};
     use std::sync::Mutex;
     use std::time::Instant;
 
@@ -102,6 +114,46 @@ mod tests {
             assert!(!line.contains(TOKEN), "token in log: {line}");
         }
         (feed, lines)
+    }
+
+    #[test]
+    fn remote_health_uses_authenticated_status_when_public_health_is_absent() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let seen = Arc::new(Mutex::new(String::new()));
+        let server_seen = seen.clone();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut byte = [0u8; 1];
+            while !request.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+            }
+            *server_seen.lock().unwrap() = String::from_utf8(request).unwrap();
+            let body = r#"{"status":"ok","connected_peers":1,"e2ee_sessions":1,"pending_deliveries":0,"lightning_available":true,"lightning_payment_capable":true,"uptime_secs":10,"version":2,"lightning_backend":"mock","chain_backend":"mock","block_height":1}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+        });
+
+        let audit: Arc<dyn AuditSink> = Arc::new(Collect::default());
+        let node = LocalNodeRead::new(
+            &format!("http://{address}/{}", "api/v1"),
+            BearerToken::new(TOKEN.to_string()).unwrap(),
+            audit,
+        )
+        .unwrap()
+        .with_proxy_auth(Some(Arc::from("a".repeat(64))));
+        assert!(healthy(&node));
+        server.join().unwrap();
+        let request = seen.lock().unwrap();
+        assert!(request.starts_with("GET /api/v1/status HTTP/1.1\r\n"));
+        assert!(!request.starts_with("GET /api/v1/health "));
+        assert!(request.contains("Authorization: Bearer paired-FEED-CANARY-91c0\r\n"));
     }
 
     /// Every fixture question, each against a node with that question's

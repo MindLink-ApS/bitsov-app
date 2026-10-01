@@ -25,6 +25,11 @@ export function Onboarding(props: {
   selectedTarget?: NodeTarget;
   onTargetChange?: (target: NodeTarget) => void;
   device?: () => DeviceView | null;
+  onImportRemote?: (link: string) => Promise<{
+    endpoint: string;
+    node_id_fingerprint: string;
+    restart_required: boolean;
+  }>;
 }) {
   const steps = () => onboardingSteps(props.status(), props.pairing(), props.trustAck());
   const [internalTarget, setInternalTarget] = createSignal<NodeTarget>('local');
@@ -34,6 +39,34 @@ export function Onboarding(props: {
     props.onTargetChange?.(t);
   };
   const isEnrolled = () => props.device?.()?.state === 'registered';
+  const [remoteLink, setRemoteLink] = createSignal('');
+  const [importing, setImporting] = createSignal(false);
+  const [importResult, setImportResult] = createSignal<string | null>(null);
+  const [importError, setImportError] = createSignal<string | null>(null);
+
+  const importRemote = async (event: Event) => {
+    event.preventDefault();
+    const link = remoteLink().trim();
+    setRemoteLink('');
+    if (!link) {
+      setImportError('Paste a remote pairing link.');
+      return;
+    }
+    setImporting(true);
+    setImportError(null);
+    setImportResult(null);
+    try {
+      if (!props.onImportRemote) throw new Error('Remote access import is unavailable.');
+      const result = await props.onImportRemote(link);
+      setImportResult(
+        `Remote node ${result.endpoint} saved. Node ID fingerprint: ${result.node_id_fingerprint}. Restart BitSov to connect.`,
+      );
+    } catch (error) {
+      setImportError(String(error));
+    } finally {
+      setImporting(false);
+    }
+  };
 
   return (
     <section class="onboarding" aria-label="First-run setup">
@@ -77,14 +110,14 @@ export function Onboarding(props: {
             </div>
           </button>
 
-          {/* Option 2: A node on my network (disabled, coming soon) */}
+          {/* Option 2: A node on my network (remote pairing link) */}
           <button
             type="button"
-            class="node-target-card disabled"
+            class="node-target-card"
+            classList={{ selected: target() === 'network' }}
             role="radio"
-            aria-checked="false"
-            disabled
-            aria-disabled="true"
+            aria-checked={target() === 'network'}
+            onClick={() => setTarget('network')}
             data-target="network"
           >
             <div class="target-icon">
@@ -99,21 +132,22 @@ export function Onboarding(props: {
               <div class="target-head">
                 <strong>A node on my network</strong>
                 <div class="row" style={{ width: 'auto', gap: '8px' }}>
-                  <span class="target-badge coming-soon">Coming soon</span>
+                  <span class="target-badge ok">Remote pairing</span>
+                  <span class="target-radio-indicator" aria-hidden="true">✓</span>
                 </div>
               </div>
-              <p>Connecting to a home server on your local network is coming soon; today the app connects to the node on this Mac.</p>
+              <p>Connect to a home server on your local network with a remote pairing link. Paste the link below to save it for the next start.</p>
             </div>
           </button>
 
-          {/* Option 3: A cloud node (disabled, coming soon) */}
+          {/* Option 3: A cloud / remotely hosted node (remote pairing link) */}
           <button
             type="button"
-            class="node-target-card disabled"
+            class="node-target-card"
+            classList={{ selected: target() === 'cloud' }}
             role="radio"
-            aria-checked="false"
-            disabled
-            aria-disabled="true"
+            aria-checked={target() === 'cloud'}
+            onClick={() => setTarget('cloud')}
             data-target="cloud"
           >
             <div class="target-icon">
@@ -125,10 +159,11 @@ export function Onboarding(props: {
               <div class="target-head">
                 <strong>A cloud node</strong>
                 <div class="row" style={{ width: 'auto', gap: '8px' }}>
-                  <span class="target-badge coming-soon">Coming soon</span>
+                  <span class="target-badge ok">Remote pairing</span>
+                  <span class="target-radio-indicator" aria-hidden="true">✓</span>
                 </div>
               </div>
-              <p>Hosted cloud nodes and remote signing are coming soon; today the app connects to the node on this Mac.</p>
+              <p>Connect to a remotely hosted node with a remote pairing link. Paste the link below to save it for the next start.</p>
             </div>
           </button>
         </div>
@@ -273,6 +308,33 @@ export function Onboarding(props: {
           </div>
         </Match>
       </Switch>
+
+      <form class="panel pairing" data-remote-access onSubmit={importRemote}>
+        <h2>Connect to a remote node</h2>
+        <label for="remote-pairing-link">Pairing link</label>
+        <input
+          id="remote-pairing-link"
+          type="password"
+          autocomplete="off"
+          autocapitalize="none"
+          autocorrect="off"
+          spellcheck={false}
+          disabled={importing()}
+          value={remoteLink()}
+          onInput={(event) => setRemoteLink(event.currentTarget.value)}
+          placeholder="bitsov://pair/…"
+        />
+        <button type="submit" class="quiet" disabled={importing()}>
+          {importing() ? 'Saving…' : 'Use remote node'}
+        </button>
+        <p class="hint">The link is verified and stored for the next app start.</p>
+        <Show when={importResult()}>
+          <p class="ok-note">{importResult()}</p>
+        </Show>
+        <Show when={importError()}>
+          <p class="err-note">{importError()}</p>
+        </Show>
+      </form>
     </section>
   );
 }

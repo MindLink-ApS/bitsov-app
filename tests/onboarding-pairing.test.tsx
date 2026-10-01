@@ -180,7 +180,7 @@ describe('pairing panel', () => {
     expect(el.textContent).toContain('genome release');
   });
 
-  it('renders 3 honest node location choices: local active, network and cloud disabled Coming soon', () => {
+  it('renders 3 honest node location choices: local default, network and cloud enabled for remote pairing', () => {
     const el = show(starting, booting);
     const local = el.querySelector<HTMLButtonElement>('[data-target="local"]')!;
     const network = el.querySelector<HTMLButtonElement>('[data-target="network"]')!;
@@ -195,25 +195,26 @@ describe('pairing panel', () => {
     expect(local.textContent).toContain('This computer');
     expect(local.textContent).toContain('Run your sovereign node directly on this Mac');
 
-    expect(network.disabled).toBe(true);
-    expect(network.getAttribute('aria-disabled')).toBe('true');
+    expect(network.disabled).toBe(false);
+    expect(network.getAttribute('aria-disabled')).toBeNull();
     expect(network.textContent).toContain('A node on my network');
-    expect(network.textContent).toContain('Coming soon');
+    expect(network.textContent).not.toContain('Coming soon');
     expect(network.textContent).toContain(
-      'Connecting to a home server on your local network is coming soon; today the app connects to the node on this Mac.',
+      'Connect to a home server on your local network with a remote pairing link',
     );
 
-    expect(cloud.disabled).toBe(true);
-    expect(cloud.getAttribute('aria-disabled')).toBe('true');
+    expect(cloud.disabled).toBe(false);
+    expect(cloud.getAttribute('aria-disabled')).toBeNull();
     expect(cloud.textContent).toContain('A cloud node');
-    expect(cloud.textContent).toContain('Coming soon');
+    expect(cloud.textContent).not.toContain('Coming soon');
     expect(cloud.textContent).toContain(
-      'Hosted cloud nodes and remote signing are coming soon; today the app connects to the node on this Mac.',
+      'Connect to a remotely hosted node with a remote pairing link',
     );
 
-    // Simulated scan spinners and fake address inputs are removed
+    // No fake scan spinners; remote pairing uses a password input, not a text address field
     expect(el.querySelector('.spinner')).toBeNull();
     expect(el.querySelector('input[type="text"]')).toBeNull();
+    expect(el.querySelector('[data-remote-access]')).not.toBeNull();
   });
 
   it('describes pairing honestly without Touch ID / Secure Enclave claims when device key is not registered', () => {
@@ -291,4 +292,40 @@ describe('pairing panel', () => {
     );
     expect(enrolledPanel.textContent).not.toContain('Registering Secure Enclave');
   });
+
+  it('shows the remote Node ID short fingerprint without echoing the pairing link', async () => {
+    const link = 'bitsov://pair/secret-pairing-material';
+    const onImportRemote = vi.fn().mockResolvedValue({
+      endpoint: 'node.example:4242',
+      node_id_fingerprint: '01234567…89abcdef',
+      restart_required: true,
+    });
+    mount = document.createElement('div');
+    document.body.appendChild(mount);
+    dispose = render(
+      () => (
+        <Onboarding
+          status={() => booting}
+          pairing={() => starting}
+          trustAck={() => false}
+          onRetry={() => {}}
+          onImportRemote={onImportRemote}
+        />
+      ),
+      mount,
+    );
+
+    const input = mount.querySelector<HTMLInputElement>('#remote-pairing-link')!;
+    input.value = link;
+    input.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    mount.querySelector<HTMLFormElement>('[data-remote-access]')!.requestSubmit();
+
+    await vi.waitFor(() => {
+      expect(mount!.textContent).toContain('Node ID fingerprint: 01234567…89abcdef');
+    });
+    expect(onImportRemote).toHaveBeenCalledWith(link);
+    expect(input.value).toBe('');
+    expect(mount.textContent).not.toContain(link);
+  });
 });
+
