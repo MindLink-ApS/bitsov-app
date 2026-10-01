@@ -1,13 +1,14 @@
 import { readinessSource } from '../src/control/readiness';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'solid-js/web';
-import { ControlCenter } from '../src/control/Shell';
+import { ControlCenter, setShowLegacyRoomsUi } from '../src/control/Shell';
 import { sampleSource, SAMPLE_OWN_ID, SAMPLE_OPEN_ROOM_ID, SAMPLE_PEERS } from '../src/control/sample';
 import { asActionError, nodePill } from '../src/control/state';
 
 let dispose: (() => void) | undefined;
 let mount: HTMLElement;
-afterEach(() => { dispose?.(); mount?.remove(); vi.useRealTimers(); });
+beforeEach(() => { setShowLegacyRoomsUi(true); });
+afterEach(() => { dispose?.(); mount?.remove(); vi.useRealTimers(); setShowLegacyRoomsUi(false); });
 
 async function start(ready: boolean | undefined, setup?: (s: ReturnType<typeof sampleSource>) => void) {
   const source = sampleSource({ firstLiveMs: 1e9 });

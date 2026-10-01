@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'solid-js/web';
 import App from '../src/App';
 import type { PairingView } from '../src/onboarding/pairing';
@@ -6,6 +6,7 @@ import { resetContactsForTests, setPetname } from '../src/control/petnames';
 import { sampleInvoiceMsat, sampleSource, SAMPLE_OPEN_ROOM_ID, SAMPLE_ROOM_ID } from '../src/control/sample';
 import type { LiveEvent, SpendView } from '../src/control/types';
 import { setDenom } from '../src/control/prefs';
+import { setShowLegacyRoomsUi } from '../src/control/Shell';
 
 // Slice B: acting from the track against a stubbed host whose spend window is
 // stateful, plus the dev sample source on its own. No node, no network.
@@ -98,7 +99,12 @@ describe('acting from the track', () => {
   let dispose: (() => void) | undefined;
   let mount: HTMLElement;
 
+  beforeEach(() => {
+    setShowLegacyRoomsUi(true);
+  });
+
   afterEach(() => {
+    setShowLegacyRoomsUi(false);
     dispose?.();
     dispose = undefined;
     mount?.remove();

@@ -17,7 +17,7 @@ export function softenError(raw: unknown): SoftenedError {
 
   if (
     /introduction_unavailable/i.test(m) ||
-    /no dialable peer endpoint/i.test(m) ||
+    /no[ _]dialable[ _]peer[ _]endpoint/i.test(m) ||
     /advertised_addr/i.test(m)
   ) {
     return {

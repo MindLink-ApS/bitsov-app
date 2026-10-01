@@ -611,7 +611,13 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
   };
   // This Mac as a paired device: set up once, the owner approves at the node
   // (the sample approves after a few polls), then one Touch ID tap per contact.
-  let device: DeviceView = { available: true, state: 'none', fingerprint: null, owner_action: null, expires_at_ms: null };
+  let device: DeviceView = {
+    available: true,
+    state: typeof window !== 'undefined' && (new URLSearchParams(window.location?.search).get('device') === 'registered' || window.localStorage?.getItem('bitsov.sample_device') === 'registered') ? 'registered' : 'none',
+    fingerprint: typeof window !== 'undefined' && (new URLSearchParams(window.location?.search).get('device') === 'registered' || window.localStorage?.getItem('bitsov.sample_device') === 'registered') ? '3F9A-12C4' : null,
+    owner_action: null,
+    expires_at_ms: null,
+  };
   let devicePolls = 0;
   const openWindow = () => {
     spend = { state: 'open', basis: 'node_grant', open_until_ms: Date.now() + WINDOW_MS, pending: null, window_ms: WINDOW_MS };

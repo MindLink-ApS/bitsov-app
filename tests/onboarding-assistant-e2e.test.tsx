@@ -76,6 +76,15 @@ describe('first run to the first assistant answer (mock)', () => {
           poll += 1;
           return Promise.resolve(step.pairing);
         }
+        if (cmd === 'device_key_status') {
+          return Promise.resolve({
+            available: false,
+            state: 'none',
+            fingerprint: null,
+            owner_action: null,
+            expires_at_ms: null,
+          });
+        }
         return Promise.reject(new Error(`unexpected ${cmd}`));
       },
     });
@@ -98,7 +107,7 @@ describe('first run to the first assistant answer (mock)', () => {
     const paired = shell.querySelector('[data-pairing="paired"]');
     expect(paired?.textContent).toContain('read + receive');
     expect(paired?.textContent).toContain('ABCD-EFGH');
-    expect(new Set(calls)).toEqual(new Set(['node_status', 'pairing_status']));
+    expect(new Set(calls)).toEqual(new Set(['node_status', 'pairing_status', 'device_key_status']));
     vi.useRealTimers();
 
     // --- assistant window: the host's live init script for that pairing ---
