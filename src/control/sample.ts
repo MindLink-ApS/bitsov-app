@@ -13,6 +13,8 @@ import type {
   FundingAsk,
   Introduction,
   FrontDoor,
+  PorchCard,
+  PorchRead,
   ActionError,
   AiFreshness,
   BudgetPreset,
@@ -110,6 +112,20 @@ function sampleFrontDoor(
   };
 }
 
+/** The sample porch: Maya's node answers reads (`porch_read_v1`). */
+const PORCH_READ_MSAT = 1000;
+const SAMPLE_PORCH_PAGES: Record<string, string> = {
+  '/index.md': '# Maya\n\nBuilding a **sovereign** mesh, one paid hop at a time.\n\n## Now\n\n- Pilot node in Lisbon\n- Writing `notes.txt` weekly\n\n> Every act paid, recipient-bound.\n\n<script>alert(1)</script> stays text. [Site](https://example.invalid) is never opened.',
+  '/notes.txt': 'Plain notes.\nLine two.',
+};
+function samplePorchCard(nodeId: string): FrontDoor {
+  return {
+    ...sampleFrontDoor(nodeId, '34.90.12.8:9735', 'public', 'Maya'),
+    site: { index_path: 'index.md', page_count: 2, titles: ['Maya', 'Notes'] },
+    cv: { path: 'cv.md', hash: 'ab'.repeat(32), size: 120 },
+  };
+}
+
 const NODE_PAYMENT_STATE = new Map<string, InvoiceStatus['state']>([
   ['Settled', 'paid'], ['Pending', 'waiting'], ['InFlight', 'waiting'], ['Failed', 'failed'], ['Expired', 'failed'],
 ]);
@@ -128,7 +144,7 @@ export function invoiceFromNode(http: number, body: Record<string, unknown>): In
 }
 
 export const SAMPLE_PEERS: Peer[] = [
-  { node_id: hex('a'), addr: '34.90.12.8:9735', label: 'Maya', connected: true, fingerprint: 'aaaaaaaa' },
+  { node_id: hex('a'), addr: '34.90.12.8:9735', label: 'Maya', connected: true, fingerprint: 'aaaaaaaa', porch: true },
   { node_id: hex('b'), addr: '35.204.77.3:9735', label: 'Josh', connected: true, fingerprint: 'bbbbbbbb' },
   { node_id: hex('c'), addr: '34.141.2.19:9735', label: null, connected: false, fingerprint: 'cccccccc' },
   // Connected, but its cached price table is stale: a send underpays and its node rejects it.
@@ -611,7 +627,13 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
   };
   // This Mac as a paired device: set up once, the owner approves at the node
   // (the sample approves after a few polls), then one Touch ID tap per contact.
-  let device: DeviceView = { available: true, state: 'none', fingerprint: null, owner_action: null, expires_at_ms: null };
+  let device: DeviceView = {
+    available: true,
+    state: typeof window !== 'undefined' && (new URLSearchParams(window.location?.search).get('device') === 'registered' || window.localStorage?.getItem('bitsov.sample_device') === 'registered') ? 'registered' : 'none',
+    fingerprint: typeof window !== 'undefined' && (new URLSearchParams(window.location?.search).get('device') === 'registered' || window.localStorage?.getItem('bitsov.sample_device') === 'registered') ? '3F9A-12C4' : null,
+    owner_action: null,
+    expires_at_ms: null,
+  };
   let devicePolls = 0;
   const openWindow = () => {
     spend = { state: 'open', basis: 'node_grant', open_until_ms: Date.now() + WINDOW_MS, pending: null, window_ms: WINDOW_MS };
@@ -753,6 +775,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
     return gate().then(() => (limit === undefined && first !== undefined && first >= max && first <= book.ceiling ? first : null));
   };
   const disclosures = new Map<string, { topic: AiTopic; preset: Preset }>();
+  const porchHeld = new Map<string, PorchCard>();
   const nextId = (prefix: string) => `${prefix}-${(sent++).toString(16).padStart(4, '0')}`;
 
   return {
@@ -760,6 +783,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
     nodeStatus: () => ok(status),
     pairingStatus: () => ok(pairing),
     pairingRetry: () => ok(pairing),
+    remoteAccessImport: () => Promise.reject('Remote access is not available with sample data.'),
     identityRestore: () => Promise.reject('Restore is not available with sample data.'),
     fundState: () => {
       if (fund && !fund.funded && ++polls >= 3) {
@@ -787,7 +811,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
         custody_mode: 'encrypted_seed',
         lightning_backend: 'ldk',
         chain_backend: 'esplora',
-        capabilities: v2 ? ['energy_v1', 'membrane_v1'] : [],
+        capabilities: v2 ? ['energy_v1', 'membrane_v1', 'porch_read_v1'] : [],
         read_at: Date.now(),
       }),
     energy: (span) => (v2 ? ok(sampleEnergy(span, Date.now())) : Promise.reject('not found: this node has no energy read (N1)')),
@@ -904,6 +928,32 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
       }
       return Promise.reject('That is not a front-door card.');
     },
+    porchQuote: (peer) =>
+      SAMPLE_PEERS.some((p) => p.porch && p.node_id === peer.toLowerCase())
+        ? ok({ principal_msat: PORCH_READ_MSAT, max_routing_fee_msat: routingFee(PORCH_READ_MSAT), total_msat: allIn(PORCH_READ_MSAT) })
+        : refuse('porch_unsupported', 'Their node does not offer porch reads (it does not advertise porch_read_v1). Nothing was paid.'),
+    porchRead: async (peer, path, maxMsat) => {
+      const target = peer.toLowerCase();
+      if (!SAMPLE_PEERS.some((p) => p.porch && p.node_id === target)) {
+        return refuse('porch_unsupported', 'Their node does not offer porch reads (it does not advertise porch_read_v1). Nothing was paid.');
+      }
+      if (allIn(PORCH_READ_MSAT) > maxMsat) return refuse('price_changed', 'Price above confirmed ceiling.');
+      if (await planSend(target, false, maxMsat, undefined) !== null) {
+        return refuse('porch_needs_contact', 'Porch reads go to contacts you have already paid. Knock or send them a message first. Nothing was paid.');
+      }
+      book.ledger.push({ at: Date.now(), target, room: false, msat: maxMsat });
+      const paid = { amount_msat: PORCH_READ_MSAT, total_msat: maxMsat, message_id: nextId('porch') };
+      if (path === '/front-door.json') {
+        const card: PorchCard = { ...samplePorchCard(target), cached: false, stale: false };
+        porchHeld.set(target, { ...card, cached: true });
+        return { node_id: target, path, status: 'ok', kind: 'card', body: '', card, ...paid } satisfies PorchRead;
+      }
+      const body = SAMPLE_PORCH_PAGES[path];
+      return body === undefined
+        ? ({ node_id: target, path, status: 'not_found', kind: 'none', body: '', card: null, ...paid } satisfies PorchRead)
+        : ({ node_id: target, path, status: 'ok', kind: path.endsWith('.md') ? 'markdown' : 'text', body, card: null, ...paid } satisfies PorchRead);
+    },
+    porchCards: () => ok([...porchHeld.values()]),
     frontDoorHashBytes: async (bytesB64) => {
       // Deterministic stand-in for blake3 in the sample source (tests only).
       let h = 0;

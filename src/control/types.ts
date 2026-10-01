@@ -15,6 +15,8 @@ export type Peer = {
   rooms?: boolean;
   /** Our node holds an E2EE session with them (`GET /sessions`). */
   session?: boolean;
+  /** Their node answers porch reads (connected, advertising `porch_read_v1`). */
+  porch?: boolean;
 };
 
 /** `rooms_list` — `GET /rooms`. */
@@ -285,6 +287,8 @@ export type TrackRef =
   | { kind: 'ai' }
   | { kind: 'new' }
   | { kind: 'discover' }
+  /** Paid reads of a contact's card and pages (porch_read_v1). */
+  | { kind: 'porch' }
   /** Receipts of payments made from the Wallet page. Never an open conversation. */
   | { kind: 'wallet' };
 
@@ -321,6 +325,29 @@ export type FrontDoor = {
   link: string;
   verified: boolean;
   fresh: boolean;
+};
+
+/** `bitsov_app::porch::PorchCard`: a card the host verified for this view. */
+export type PorchCard = FrontDoor & {
+  /** Held by this node from an earlier read; nothing was paid to show it. */
+  cached: boolean;
+  /** Their node served an older card than the one this node holds. */
+  stale: boolean;
+};
+
+/** `porch_read`: one paid read of a contact's card or a flat page. */
+export type PorchRead = {
+  node_id: string;
+  path: string;
+  status: 'ok' | 'not_found' | 'unavailable';
+  /** `markdown` and `text` bodies are text only; nothing renders HTML. */
+  kind: 'card' | 'markdown' | 'text' | 'none';
+  body: string;
+  card: PorchCard | null;
+  amount_msat: number;
+  /** What the read counts against the budget (its all-in ceiling). */
+  total_msat: number;
+  message_id: string;
 };
 
 export type FrontDoorPublish = {
@@ -403,6 +430,11 @@ export type ActionError = {
     // signed quote (`admission`) is the new all-in price; nothing was paid. The
     // owner sends once more at that price; the same message keeps its operation.
     | 'readmission_quoted'
+    // Porch reads (src-tauri/src/porch.rs). Refused before paying:
+    | 'porch_knock_first' | 'porch_unreachable' | 'porch_busy' | 'porch_own_node' | 'porch_path_invalid'
+    | 'porch_unsupported' | 'porch_unavailable' | 'porch_needs_contact' | 'porch_readmission'
+    // Paid, with no usable answer; never retried:
+    | 'porch_timeout' | 'porch_reply_invalid' | 'porch_card_mismatch'
     | 'not_ready' | 'app_not_ready'
     // Genome #115: the node proved nothing left the wallet (a room leg it could not bind, a fee ceiling).
     | 'not_dispatched'

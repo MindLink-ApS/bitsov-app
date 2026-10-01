@@ -34,12 +34,14 @@ export const trackKey = (t: TrackRef): string =>
   t.kind === 'peer' || t.kind === 'room' || t.kind === 'bound' ? `${t.kind}:${t.id.toLowerCase()}` : t.kind;
 
 /**
- * Display name for a contact: the owner's local petname, else a short id.
- * Never uses `peer.label` — that is a self-claimed suggestion only (ACCOUNT-LAYER §6).
+ * Display name for a contact: the owner's local petname, else Unnamed contact plus a short id.
+ * Remote profile names live in {@link claimedName} only — never as the rail title.
  */
-export const peerName = (_peer: Peer | undefined, id: string): string => {
+export const peerName = (peer: Peer | undefined, id: string): string => {
   contactRevision();
-  return petnameOf(id) || shortId(id);
+  const pet = petnameOf(id);
+  if (pet) return pet;
+  return `Unnamed contact (${shortId(id)})`;
 };
 
 /** Remote-supplied name (peer label / profile card). Suggestion only — never truth. */

@@ -9,6 +9,13 @@ describe('softenError', () => {
     expect(soft.summary).toBe('We could not find a public address for your node yet.');
     expect(soft.detail).toContain('introduction_unavailable');
     expect(soft.detail).toContain('advertised_addr');
+
+    const softBare = softenError('introduction_unavailable');
+    expect(softBare.summary).toBe('We could not find a public address for your node yet.');
+    expect(softBare.detail).toBe('introduction_unavailable');
+
+    const softSnake = softenError('error: no_dialable_peer_endpoint');
+    expect(softSnake.summary).toBe('We could not find a public address for your node yet.');
   });
 
   it('leaves ordinary sentences alone', () => {

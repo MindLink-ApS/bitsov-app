@@ -61,14 +61,20 @@ describe('M2 UI sweep', () => {
     }
   });
 
-  it('Profile and Browse replace Front door and Discover', async () => {
+  it('Profile and Browse replace Front door and Discover; Rooms displays coming soon', async () => {
     await start();
     expect($('[data-tab="frontdoor"]')!.textContent).toBe('Profile');
     const heads = [...mount.querySelectorAll('.track-group h2')].map((h) => h.textContent);
     expect(heads).toContain('Browse');
     expect(heads).not.toContain('Discover');
     expect($('[data-rooms-coming-soon]')!.textContent).toMatch(/Coming soon/);
-    expect($('[data-browse-pages-soon]')).not.toBeNull();
+    expect($('[data-track="porch"]')!.textContent).toContain('Porch');
+    const roomBtn = mount.querySelector<HTMLButtonElement>('[data-track^="room:"]');
+    if (roomBtn) {
+      roomBtn.click();
+      await vi.waitFor(() => expect($('[data-room-day-notice]')).not.toBeNull());
+      expect($('[data-room-day-notice]')!.textContent).toMatch(/Coming soon — group chat is not on the protocol yet/);
+    }
   });
 
   it('hides the legacy introduction path on Start', async () => {

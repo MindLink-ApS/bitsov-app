@@ -46,6 +46,8 @@ const MAX_LOGGED_PATH: usize = 96;
 /// Genome #78 freshness headers. Matched case-insensitively.
 const AS_OF_HEADER: &str = "BitSov-Data-As-Of";
 const STALE_HEADER: &str = "BitSov-Data-Stale";
+/// The remote router omits public health and keeps this read-scoped status.
+const REMOTE_STATUS: &str = "/api/v1/status";
 
 /// Why a `BitSov-Data-As-Of` header was dropped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,6 +122,7 @@ impl AuditSink for StderrAudit {
 pub struct LocalNodeRead {
     addr: SocketAddr,
     token: BearerToken,
+    proxy_auth: Option<Arc<str>>,
     audit: Arc<dyn AuditSink>,
 }
 
@@ -140,7 +143,7 @@ impl LocalNodeRead {
         audit: Arc<dyn AuditSink>,
     ) -> Result<Self, BaseUrlRejected> {
         match loopback_addr(base_url) {
-            Some(addr) => Ok(Self { addr, token, audit }),
+            Some(addr) => Ok(Self { addr, token, proxy_auth: None, audit }),
             None => {
                 audit.record(&format!(
                     "{LOG_PREFIX} refused base url: not http on a loopback IP with /api/v1"
@@ -148,6 +151,13 @@ impl LocalNodeRead {
                 Err(BaseUrlRejected)
             }
         }
+    }
+
+    /// Attach the process-memory credential required by the remote loopback
+    /// proxy. Local-node readers leave this absent.
+    pub(crate) fn with_proxy_auth(mut self, proxy_auth: Option<Arc<str>>) -> Self {
+        self.proxy_auth = proxy_auth;
+        self
     }
 
     /// The one place a request is written. [`admit`] runs first.
@@ -205,17 +215,34 @@ impl LocalNodeRead {
         let mut stream = TcpStream::connect_timeout(&self.addr, CONNECT_TIMEOUT).ok()?;
         stream.set_read_timeout(Some(IO_TIMEOUT)).ok()?;
         stream.set_write_timeout(Some(IO_TIMEOUT)).ok()?;
+        let path = static_path(path)?;
         let target = route::RequestTarget {
             method: "GET",
-            path: static_path(path)?,
+            path: if self.proxy_auth.is_some() && path == route::HEALTH {
+                REMOTE_STATUS
+            } else {
+                path
+            },
             query,
             peer,
         }
         .uri();
+        let proxy_header = match self.proxy_auth.as_deref() {
+            None => String::new(),
+            Some(value)
+                if value.len() == 64
+                    && value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)) =>
+            {
+                format!("{}: {value}\r\n", crate::remote_access::LOCAL_AUTH_HEADER)
+            }
+            Some(_) => return None,
+        };
         let request = format!(
             "GET {target} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\n\
-             Accept: application/json\r\nConnection: close\r\n\r\n",
-            self.addr, self.token.0
+             Accept: application/json\r\n{proxy_header}Connection: close\r\n\r\n",
+            self.addr, self.token.0,
         );
         stream.write_all(request.as_bytes()).ok()?;
 
@@ -478,6 +505,42 @@ mod tests {
                 "{bad}"
             );
         }
+    }
+
+    #[test]
+    fn remote_reader_adds_the_process_proxy_credential() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let seen = Arc::new(Mutex::new(String::new()));
+        let server_seen = seen.clone();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut byte = [0u8; 1];
+            while !request.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+            }
+            *server_seen.lock().unwrap() = String::from_utf8(request).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}")
+                .unwrap();
+        });
+
+        let auth: Arc<str> = Arc::from("a".repeat(64));
+        let audit: Arc<dyn AuditSink> = Arc::new(Collect::default());
+        let reader = LocalNodeRead::new(&format!("http://{address}/{}", "api/v1"), token(), audit)
+            .unwrap()
+            .with_proxy_auth(Some(auth.clone()));
+        assert!(reader.exchange("/api/v1/health", None, None).is_some());
+        server.join().unwrap();
+
+        let request = seen.lock().unwrap();
+        assert!(request.starts_with("GET /api/v1/status HTTP/1.1\r\n"));
+        assert!(request.contains(&format!(
+            "{}: {auth}\r\n",
+            crate::remote_access::LOCAL_AUTH_HEADER
+        )));
     }
 
     #[test]

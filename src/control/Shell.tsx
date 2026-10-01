@@ -9,6 +9,7 @@ import { amountText, inPaymentBounds, MAX_PAYMENT_MSAT, MIN_PAYMENT_MSAT, parseA
 import { Organism } from './BodyPanel';
 import { SoftError } from './SoftError';
 import { DiscoverPanel, FrontDoorEditor } from './Discover';
+import { PorchPanel } from './Porch';
 import { ContactPanel } from './ContactPanel';
 import { custodyBadge, CustodyBadgeView } from './custody';
 import { WalletPage, type WalletActions, type WalletTab } from './WalletPage';
@@ -1061,6 +1062,7 @@ export function ControlCenter(props: Props) {
     if (t.kind === 'bound') return boundName(t.id);
     if (t.kind === 'ai') return 'AI';
     if (t.kind === 'discover') return 'Browse';
+    if (t.kind === 'porch') return 'Porch';
     return 'Start something';
   };
   const nameOf = (id: string) => (id.toLowerCase() === ownId().toLowerCase() ? 'You' : peerName(peerById().get(id.toLowerCase()), id));
@@ -1220,6 +1222,18 @@ export function ControlCenter(props: Props) {
                       onContext={() => setContextOpen(true)}
                     />
                   )}
+                </Match>
+                <Match when={t().kind === 'porch'}>
+                  <PorchPanel
+                    source={source}
+                    now={now()}
+                    peers={peers()}
+                    nodeReads={overview()?.capabilities?.includes('porch_read_v1') === true}
+                    moneyBlocked={moneyBlocked()}
+                    spend={spend()}
+                    spendGate={<SpendBar spend={spend()} error={errors.spend} now={now()} actions={actions} />}
+                    nameOf={nameOf}
+                  />
                 </Match>
                 <Match when={t().kind === 'peer' || t().kind === 'room'}>
                   <Conversation
@@ -1632,7 +1646,7 @@ function Rail(props: {
             + New room
           </button>
         </Show>
-        <Show when={props.active && props.rooms.length > 0}>
+        <Show when={showLegacyRoomsUi && props.active && props.rooms.length > 0}>
           <For each={props.rooms}>
             {(r) => item({ kind: 'room', id: r.id.toLowerCase() }, r.name)}
           </For>
@@ -1678,9 +1692,15 @@ function Rail(props: {
             <span class="name">Profiles</span>
             <span class="meta">paste / scan</span>
           </button>
-          <p class="track-empty" data-browse-pages-soon>
-            Fetching another node’s pages is coming soon.
-          </p>
+          <button
+            class="track-link"
+            data-track="porch"
+            aria-current={props.openKey === 'porch'}
+            onClick={() => props.onOpen({ kind: 'porch' })}
+          >
+            <span class="name">Porch</span>
+            <span class="meta">cards & pages · paid</span>
+          </button>
         </Show>
       </div>
 
@@ -1764,7 +1784,19 @@ function TrackHead(props: {
       </Show>
       <div class="sub">{props.sub}</div>
       {props.extra}
-      <button class="quiet context-toggle" onClick={() => props.onContext()}>Settings</button>
+      <button
+        type="button"
+        class="quiet context-toggle icon-btn"
+        onClick={() => props.onContext()}
+        title="Settings"
+        aria-label="Settings"
+      >
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="3" />
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+        </svg>
+        <span class="sr-only">Settings</span>
+      </button>
     </header>
   );
 }
@@ -1859,7 +1891,7 @@ function Conversation(props: {
       </span>
     ) : (
       <span class="id">
-        {props.members === null ? 'Reading members…' : `${props.members.length} members`}
+        {props.members === null ? 'Reading members…' : `${props.members.length} members · Coming soon`}
       </span>
     );
 
@@ -1908,7 +1940,9 @@ function Conversation(props: {
           )}
         </Show>
         <Show when={props.track.kind === 'room'}>
-          <p class="day">Members added here are not notified yet. A room message pays each member their own price, separately.</p>
+          <p class="day" data-room-day-notice>
+            Coming soon — group chat is not on the protocol yet. Members added here are not notified yet. A room message pays each member their own price, separately.
+          </p>
         </Show>
         <For
           each={items()}
@@ -1917,7 +1951,7 @@ function Conversation(props: {
               <h2>Nothing here yet</h2>
               <p class="hint">
                 {props.track.kind === 'room'
-                  ? 'A message here pays each member separately, and reaches each one when their payment settles.'
+                  ? 'Coming soon — group chat is not on the protocol yet. A message here pays each member separately, and reaches each one when their payment settles.'
                   : `Your first message to ${props.name} is a paid first contact: it is admitted when the payment settles.`}
               </p>
             </div>
@@ -1989,6 +2023,16 @@ function Conversation(props: {
         prefill={props.prefill}
         onPrefillUsed={props.onPrefillUsed}
         payRequest={payRequest()}
+        hasPending={
+          props.artifacts.some(
+            (a) =>
+              a.type === 'undelivered' ||
+              (a.type === 'failed' &&
+                ['spend_unknown', 'payment_unknown', 'failed_paid', 'payment_settled_undelivered'].includes(a.error.code))
+          ) ||
+          Boolean(props.spend?.pending) ||
+          Boolean(props.budget && props.budget.unsettled_msat > 0)
+        }
       />
     </>
   );
@@ -2146,9 +2190,19 @@ function MessageView(props: {
       </Show>
       <div class="stamp">
         <Show when={amount()}>
-          <Bolt />
-          <span class="sats">{sats(amount()!)}</span>
-          <span>{satUnit(amount()!)} {props.out ? (props.allowance ? `all-in ceiling (${feeCeiling(props.allowance.max_routing_fee_msat)})` : 'principal paid; fee not in history') : 'to you'}</span>
+          <span
+            class="sats-meta"
+            title={`${sats(amount()!)} ${satUnit(amount()!)} · ${props.out ? (props.allowance ? `all-in ceiling (${feeCeiling(props.allowance.max_routing_fee_msat)})` : 'principal paid; fee not in history') : 'to you'}`}
+          >
+            <Bolt />
+            <span class="sats">{sats(amount()!)}</span>
+            <Show when={props.out && props.allowance}>
+              <span class="sr-only">{satUnit(amount()!)} all-in ceiling ({feeCeiling(props.allowance!.max_routing_fee_msat)})</span>
+            </Show>
+            <Show when={props.out && !props.allowance}>
+              <span class="sr-only">principal paid; fee not in history</span>
+            </Show>
+          </span>
           <Show when={props.out && props.allowance?.readmission_msat}>
             <span data-readmission-paid>incl. admission again {sats(props.allowance!.readmission_msat!)} {satUnit(props.allowance!.readmission_msat!)}</span>
           </Show>
@@ -2927,6 +2981,7 @@ function Composer(props: {
   onPrefillUsed?: () => void;
   /** A request card's Pay: prefill this invoice and show its review. Never pays. */
   payRequest?: { seq: number; bolt11: string } | null;
+  hasPending?: boolean;
 }) {
   const [mode, setMode] = createSignal<Mode>('message');
   const [menuOpen, setMenuOpen] = createSignal(false);
@@ -3907,7 +3962,11 @@ function Composer(props: {
             title={sendTitle()}
             aria-label={sendTitle()}
           >
-            {sendMain()}<Show when={sendPrice()}><span class="sr-only"> · {sendPrice()}</span></Show>
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <line x1="12" y1="19" x2="12" y2="5" />
+              <polyline points="5 12 12 5 19 12" />
+            </svg>
+            <span class="sr-only">{sendMain()}<Show when={sendPrice()}> · {sendPrice()}</Show></span>
           </button>
         </Show>
       </div>
@@ -3953,7 +4012,7 @@ function Composer(props: {
           </>
         )}
       </Show>
-      <details class="quiet-detail composer-info" data-composer-info>
+      <details class="composer-info" data-composer-info>
         <summary aria-label="Cost and rules" title="Cost and rules">ⓘ</summary>
         <Show when={mode() === 'message' || mode() === 'file'}>
           <div class="composer-bar cost-only">
@@ -4001,7 +4060,7 @@ function Composer(props: {
       <Show when={spends()}>
         <Show
           when={viaBudget()}
-          fallback={<SpendBar spend={props.spend} error={props.spendError} now={props.now} actions={props.actions} />}
+          fallback={<SpendBar spend={props.spend} error={props.spendError} now={props.now} actions={props.actions} hasPending={props.hasPending} />}
         >
           <BudgetBar
             stand={stand()}
@@ -4019,6 +4078,7 @@ function Composer(props: {
             error={props.budgetError}
             now={props.now}
             actions={props.actions}
+            hasPending={props.hasPending}
           />
         </Show>
       </Show>
@@ -4030,7 +4090,7 @@ function Composer(props: {
  * The owner's spend window. One tap opens it for ten minutes; it can only
  * narrow what the node allows, never widen it.
  */
-function SpendBar(props: { spend: SpendView | null; error: string | undefined; now: number; actions: Actions }) {
+function SpendBar(props: { spend: SpendView | null; error: string | undefined; now: number; actions: Actions; hasPending?: boolean }) {
   const line = () => spendLine(props.spend, props.now);
   const minutes = (ms: number) => Math.max(1, Math.ceil((ms - props.now) / 60_000));
   // One Ask again at a time: a double click must not print two requests at the node.
@@ -4114,7 +4174,7 @@ function SpendBar(props: { spend: SpendView | null; error: string | undefined; n
         </Match>
       </Switch>
       <DeviceSetup device={props.actions.device()} now={props.now} actions={props.actions} />
-      <Reconcile actions={props.actions} />
+      <Reconcile actions={props.actions} hasPending={props.hasPending} />
       <Show when={props.error}>
         <p class="err-note">{props.error}</p>
       </Show>
@@ -4214,7 +4274,7 @@ export function TouchApproval(props: { peer: string; name: string; priceMsat: nu
 }
 
 /** Read-only: match an unknown outcome to the node's own records. Never re-sends. */
-function Reconcile(props: { actions: Actions }) {
+function Reconcile(props: { actions: Actions; hasPending?: boolean }) {
   const [result, setResult] = createSignal<string | null>(null);
   const [checking, setChecking] = createSignal(false);
   // Paid, not delivered: the owner may stop retrying (it dispatches nothing).
@@ -4291,6 +4351,7 @@ function BudgetBar(props: {
   error: string | undefined;
   now: number;
   actions: Actions;
+  hasPending?: boolean;
 }) {
   const worth = (msat: number) => messagesWorth(msat, props.priceMsat);
   const who = () => (props.room ? 'this room' : props.name);
@@ -4317,45 +4378,38 @@ function BudgetBar(props: {
           </div>
         </Match>
         <Match when={props.stand.kind === 'off'}>
-          <div class="approval budget-setup" data-budget-setup>
-            <p>
-              <strong>{props.budget.autopay.state === 'expired' ? 'Your daily approval ended.' : 'Let messages pay as you chat.'}</strong>{' '}
-              Approve an app all-in payment limit for each rolling 24 hours. Inside it, each message pays its recipient’s own price with no prompt. Someone new always asks first.
-            </p>
-            <Show when={props.spend?.lapse}>
-              {(lapse) => (
-                <p class="hint" data-budget-lapse={lapse()}>
-                  {lapse() === 'lost'
-                    ? 'Your node can no longer approve your last request (for example, it restarted). Approve again to ask again.'
-                    : 'Your last request lapsed before it was approved. Approve again to ask again.'}
-                </p>
-              )}
-            </Show>
-            <div class="presets" role="radiogroup" aria-label="App all-in payments limit, rolling 24 hours">
-              <For each={props.budget.presets}>
-                {(p) => (
-                  <button
-                    type="button"
-                    class="chip"
-                    role="radio"
-                    aria-checked={props.preset?.id === p.id}
-                    data-preset={p.id}
-                    onClick={() => props.onPreset(p.id)}
-                  >
-                    {PRESET_NAME[p.id]} · {fmtAmount(p.ceiling_msat)} a day
-                  </button>
+          <Show when={props.room || props.actions.device()?.state !== 'registered'}>
+            <div class="approval slim-approval budget-setup" data-budget-setup>
+              <span class="slim-label">
+                <strong>Approval needed.</strong> {props.budget.autopay.state === 'expired' ? 'Your daily approval ended.' : 'Let messages pay as you chat.'} (Someone new always asks first)
+              </span>
+              <Show when={props.spend?.lapse}>
+                {(lapse) => (
+                  <p class="hint" data-budget-lapse={lapse()}>
+                    {lapse() === 'lost'
+                      ? 'Your node can no longer approve your last request (for example, it restarted). Approve again to ask again.'
+                      : 'Your last request lapsed before it was approved. Approve again to ask again.'}
+                  </p>
                 )}
-              </For>
+              </Show>
+              <div class="presets" role="radiogroup" aria-label="App all-in payments limit, rolling 24 hours">
+                <For each={props.budget.presets}>
+                  {(p) => (
+                    <button
+                      type="button"
+                      class="chip"
+                      role="radio"
+                      aria-checked={props.preset?.id === p.id}
+                      data-preset={p.id}
+                      onClick={() => props.onPreset(p.id)}
+                    >
+                      {PRESET_NAME[p.id]} · {fmtAmount(p.ceiling_msat)} a day
+                    </button>
+                  )}
+                </For>
+              </div>
             </div>
-            <Show when={props.preset}>
-              {(p) => (
-                <p class="hint">
-                  Up to {fmtAmount(p().contact_msat)} a day per contact and {fmtAmount(p().room_msat)} per room, which you can lower any time.
-                  Each message still carries its own price cap. The approval lasts 24 hours and is never saved; the budgets and the tally are.
-                </p>
-              )}
-            </Show>
-          </div>
+          </Show>
         </Match>
         <Match when={props.stand.kind === 'first' && (props.stand as Extract<BudgetStandT, { kind: 'first' }>)}>
           {(st) => (
@@ -4456,8 +4510,7 @@ function BudgetBar(props: {
         </Match>
         <Match when={props.stand.kind === 'ok' && (props.stand as Extract<BudgetStandT, { kind: 'ok' }>)}>
           {(st) => (
-            <details class="quiet-detail passive-status" data-budget-status>
-              <summary aria-label="Payment status" title="Payment status">ⓘ</summary>
+            <div class="sr-only" data-budget-status>
               <p class="spend-line" data-budget-line>
                 <span class="dot ok" />
                 <span class="line-text">
@@ -4466,11 +4519,11 @@ function BudgetBar(props: {
                   <button type="button" class="link" data-pause-all onClick={() => void props.actions.pauseAll()}>Pause app payments</button>
                 </span>
               </p>
-            </details>
+            </div>
           )}
         </Match>
       </Switch>
-      <Reconcile actions={props.actions} />
+      <Reconcile actions={props.actions} hasPending={props.hasPending} />
       <Show when={props.error}>
         <p class="err-note" data-budget-error>{props.error}</p>
       </Show>
@@ -4624,6 +4677,12 @@ function BudgetPanel(props: {
 let showLegacyIntroductionUi = false;
 export function setShowLegacyIntroductionUi(enabled: boolean) {
   showLegacyIntroductionUi = enabled;
+}
+
+/** Product default hides prototype rooms (not on the protocol yet); prototype tests enable them. */
+let showLegacyRoomsUi = false;
+export function setShowLegacyRoomsUi(enabled: boolean) {
+  showLegacyRoomsUi = enabled;
 }
 
 function NewTrack(props: {
@@ -5334,8 +5393,8 @@ function NewTrack(props: {
                 </div>
               )}
             </Show>
-            <Show when={errs.create && errs.create !== MONEY_NOT_READY}>
-              <p class="err-note">{errs.create}</p>
+            <Show when={errs.create && errs.create !== MONEY_NOT_READY ? errs.create : null}>
+              {(e) => <SoftError message={e()} data="invite-create-error" />}
             </Show>
           </form>
 
@@ -5364,8 +5423,8 @@ function NewTrack(props: {
                 </p>
               )}
             </Show>
-            <Show when={errs.redeem && errs.redeem !== MONEY_NOT_READY}>
-              <p class="err-note">{errs.redeem}</p>
+            <Show when={errs.redeem && errs.redeem !== MONEY_NOT_READY ? errs.redeem : null}>
+              {(e) => <SoftError message={e()} data="invite-redeem-error" />}
             </Show>
           </form>
         </div>

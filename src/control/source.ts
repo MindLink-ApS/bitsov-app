@@ -13,6 +13,8 @@ import type {
   FundingStatus,
   FrontDoor,
   FrontDoorPublish,
+  PorchCard,
+  PorchRead,
   Introduction,
   SponsorOwnerApproval,
   SponsorCandidate,
@@ -59,12 +61,19 @@ import type {
   WalletOverview,
 } from './types';
 
+export type RemoteImportView = {
+  endpoint: string;
+  node_id_fingerprint: string;
+  restart_required: boolean;
+};
+
 export interface Source {
   readonly mode: 'node' | 'sample';
   // first run
   nodeStatus(): Promise<NodeStatus>;
   pairingStatus(): Promise<PairingView>;
   pairingRetry(): Promise<PairingView>;
+  remoteAccessImport(link: string): Promise<RemoteImportView>;
   identityRestore(mnemonic: string): Promise<RestoreOutcome>;
   fundState(): Promise<FundState | null>;
   fundStart(sats: number): Promise<FundState>;
@@ -96,6 +105,12 @@ export interface Source {
   frontDoorPublish(fields: FrontDoorPublish): Promise<FrontDoor>;
   /** Front door: blake3-hex of base64 bytes (avatar/media/CV prep). */
   frontDoorHashBytes(bytesB64: string): Promise<string>;
+  /** Porch (`porch_read_v1`): what one read of this contact costs. Pays nothing. */
+  porchQuote(peer: string): Promise<PaymentQuote>;
+  /** One paid read of the card (`/front-door.json`) or a flat page, under `maxMsat`. Never retried. */
+  porchRead(peer: string, path: string, maxMsat: number): Promise<PorchRead>;
+  /** Cards this node holds from earlier reads, verified again. Pays nothing. */
+  porchCards(): Promise<PorchCard[]>;
   /** K1 slice 2 (sponsor): whether the owner turned starter bitcoin on. */
   sponsorStatus(): Promise<SponsorStatus>;
   /** A fresh introduction with starter bitcoin (spend window). */
@@ -207,6 +222,7 @@ export const hostSource: Source = {
   nodeStatus: () => invoke<NodeStatus>('node_status'),
   pairingStatus: () => invoke<PairingView>('pairing_status'),
   pairingRetry: () => invoke<PairingView>('pairing_retry'),
+  remoteAccessImport: (link) => invoke<RemoteImportView>('remote_access_import', { link }),
   identityRestore: (mnemonic) => invoke<RestoreOutcome>('identity_restore', { mnemonic }),
   fundState: () => invoke<FundState | null>('fund_state'),
   fundStart: (sats) => invoke<FundState>('fund_start', { funding_amount_sats: sats }),
@@ -242,6 +258,9 @@ export const hostSource: Source = {
       },
     }),
   frontDoorHashBytes: (bytesB64) => invoke<string>('front_door_hash_bytes', { bytes_b64: bytesB64 }),
+  porchQuote: (peer) => invoke<PaymentQuote>('porch_quote', { peer }),
+  porchRead: (peer, path, maxMsat) => invoke<PorchRead>('porch_read', { peer, path, max_msat: maxMsat }),
+  porchCards: () => invoke<PorchCard[]>('porch_cards'),
   sponsorStatus: () => invoke<SponsorStatus>('sponsor_status'),
   sponsorOffer: () => invoke<Introduction>('sponsor_offer'),
   sponsorCandidate: (request) => invoke<SponsorCandidate>('sponsor_candidate', { request }),

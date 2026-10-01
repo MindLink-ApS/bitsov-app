@@ -209,6 +209,18 @@ pub fn read_topic(
     topic: Topic,
     since_ms: Option<u64>,
 ) -> TopicRead {
+    read_topic_with_proxy_auth(auth, base_url, audit, topic, since_ms, None)
+}
+
+/// Read a topic through the process-authenticated remote loopback proxy.
+pub fn read_topic_with_proxy_auth(
+    auth: NodeAuth,
+    base_url: &str,
+    audit: Arc<dyn AuditSink>,
+    topic: Topic,
+    since_ms: Option<u64>,
+    proxy_auth: Option<Arc<str>>,
+) -> TopicRead {
     let unavailable = |reason| TopicRead::Unavailable { topic, reason };
     let token = match auth {
         NodeAuth::NotPaired => return unavailable(NoRead::NotPaired),
@@ -223,6 +235,7 @@ pub fn read_topic(
     let Ok(node) = LocalNodeRead::new(base_url, token, audit) else {
         return unavailable(NoRead::NodeUnreachable);
     };
+    let node = node.with_proxy_auth(proxy_auth);
     let Ok(broker) = Broker::new() else {
         return unavailable(NoRead::NodeUnreachable);
     };

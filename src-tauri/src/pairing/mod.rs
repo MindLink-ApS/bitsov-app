@@ -237,6 +237,47 @@ fn save_record(store: &Path, record: &Record) -> Result<(), PairError> {
         .map_err(|e| PairError::Local(format!("cannot write the pairing record: {e}")))
 }
 
+/// Persist the ordinary pairing record returned by the encrypted remote
+/// ingress authentication. This is the same record the local ceremony writes,
+/// so token issuance and refresh stay on the existing pairing path.
+pub fn save_remote_record(
+    store: &Path,
+    key: &ClientKey,
+    client_id: String,
+    scopes: Vec<String>,
+) -> Result<(), PairError> {
+    if client_id.is_empty() || client_id.len() > 256 {
+        return Err(PairError::Local(
+            "remote pairing returned an invalid client id".into(),
+        ));
+    }
+    key::restrict_dir(store)?;
+    save_record(
+        store,
+        &Record {
+            client_id,
+            client_pubkey: key.public_hex().to_string(),
+            scopes,
+        },
+    )
+}
+
+/// Repair the narrow crash window after the remote one-time code was durably
+/// removed but before its pairing record was saved. Ordinary returning
+/// connections only validate the existing owner-only record and perform no
+/// disk write.
+pub fn save_remote_record_once(
+    store: &Path,
+    key: &ClientKey,
+    client_id: String,
+    scopes: Vec<String>,
+) -> Result<(), PairError> {
+    if load_record(store, key)?.is_some() {
+        return Ok(());
+    }
+    save_remote_record(store, key, client_id, scopes)
+}
+
 /// Drop the stored pairing so the next [`establish`] runs the ceremony again.
 pub fn forget_pairing(store: &Path) {
     let _ = std::fs::remove_file(store.join(RECORD_FILE));
@@ -302,6 +343,33 @@ pub async fn establish(
             short_code: derived,
             node_printed: printed.is_some(),
         }),
+    })
+}
+
+/// Reuse a pairing established by the encrypted remote ingress.
+///
+/// Unlike [`establish`], absence of a record is an error. Remote mode must
+/// never probe `/pair/request` and can therefore never downgrade to
+/// `/auth/local`.
+pub async fn establish_remote(
+    client: &PairingClient,
+    key: &ClientKey,
+    store: &Path,
+) -> Result<Established, PairError> {
+    let record = load_record(store, key)?.ok_or_else(|| {
+        PairError::Local(
+            "remote transport authenticated but no paired client record was saved".into(),
+        )
+    })?;
+    let issued = client.token(key, &record.client_id).await?;
+    Ok(Established::Paired {
+        session: PairedSession {
+            client_id: record.client_id,
+            scopes: issued.scopes,
+            token: issued.token,
+            expires_at: issued.expires_at,
+        },
+        ceremony: None,
     })
 }
 

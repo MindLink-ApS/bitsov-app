@@ -1,8 +1,9 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'solid-js/web';
 import App from '../src/App';
 import type { PairingView } from '../src/onboarding/pairing';
 import { resetContactsForTests, setPetname } from '../src/control/petnames';
+import { setShowLegacyRoomsUi } from '../src/control/Shell';
 
 // The control center against a stubbed host (command replies + one `node-live`
 // listener) and against dev sample data. No node, no network.
@@ -104,7 +105,12 @@ describe('control center shell', () => {
   let dispose: (() => void) | undefined;
   let mount: HTMLElement;
 
+  beforeEach(() => {
+    setShowLegacyRoomsUi(true);
+  });
+
   afterEach(() => {
+    setShowLegacyRoomsUi(false);
     dispose?.();
     dispose = undefined;
     mount?.remove();
@@ -125,7 +131,7 @@ describe('control center shell', () => {
     expect(mount.querySelector('[data-first-run]')).not.toBeNull();
     expect(mount.querySelector('.rail')).not.toBeNull();
     expect(mount.querySelector('[data-panel="wallet"]')).toBeNull();
-    expect(new Set(calls.map((c) => c.cmd))).toEqual(new Set(['node_status', 'pairing_status']));
+    expect(new Set(calls.map((c) => c.cmd))).toEqual(new Set(['node_status', 'pairing_status', 'device_key_status']));
   });
 
   it('offers Ask again when the node lost the pending request in a restart', async () => {

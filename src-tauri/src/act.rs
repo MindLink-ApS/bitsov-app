@@ -1683,7 +1683,7 @@ mod tests {
     }
 
     fn peer(id: &str, connected: bool) -> control::Peer {
-        control::Peer { node_id: id.into(), addr: None, label: None, connected, fingerprint: None, capabilities: None, meetings: false, rooms: false, session: false }
+        control::Peer { node_id: id.into(), addr: None, label: None, connected, fingerprint: None, capabilities: None, meetings: false, rooms: false, session: false, porch: false }
     }
 
     #[test]
