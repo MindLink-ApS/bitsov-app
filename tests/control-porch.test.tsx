@@ -124,6 +124,34 @@ describe('porch paths and text', () => {
       { t: 'image', text: 'pic' },
     ]);
   });
+
+  it.each([
+    ['[', '['],
+    ['![', '!['],
+    ['open link', '[a]('],
+    ['link url with a space', '[a](b '],
+    ['star', '*'],
+    ['star and text', '*a'],
+    ['strong opener', '**a'],
+    ['underscore and text', '_a'],
+    ['backtick and text', '`a'],
+    ['heading spaces', null],
+  ] as const)('parses a 256 KiB page of repeated %s in linear time', (_, unit) => {
+    const max = 256 * 1024;
+    const page = unit === null ? `# a${' '.repeat(max - 5)}b` : unit.repeat(Math.ceil(max / unit.length)).slice(0, max);
+    const started = performance.now();
+    const blocks = parseMarkdown(page);
+    expect(performance.now() - started).toBeLessThan(1000);
+    expect(blocks.length).toBe(1);
+  });
+
+  it('shows a page as plain text when it would render too many elements', () => {
+    const page = '*a* '.repeat(64 * 1024);
+    const started = performance.now();
+    expect(parseMarkdown(page)).toEqual([{ t: 'code', text: page }]);
+    expect(performance.now() - started).toBeLessThan(1000);
+    expect(parseMarkdown('[['.repeat(1000))).toEqual([{ t: 'p', inline: [{ t: 'text', text: '[['.repeat(1000) }] }]);
+  });
 });
 
 describe('PorchPanel', () => {
