@@ -888,12 +888,24 @@ pub fn backoff(attempt: u32) -> Duration {
 /// Run one `/ws` session: connect, forward each parsed frame to `emit`, return
 /// when the socket closes. Errors are phrased without the URL, which holds the
 /// token.
-pub async fn run_ws_session(url: &str, emit: &(dyn Fn(LiveEvent) + Send + Sync)) -> Result<(), String> {
+pub async fn run_ws_session(
+    url: &str,
+    local_proxy_auth: Option<&str>,
+    emit: &(dyn Fn(LiveEvent) + Send + Sync),
+) -> Result<(), String> {
     let mut request = tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(url)
         .map_err(|_| "the live-event request could not be built".to_string())?;
     request
         .headers_mut()
         .insert("Sec-WebSocket-Protocol", "bitsov.v1".parse().expect("static header"));
+    if let Some(local_proxy_auth) = local_proxy_auth {
+        request.headers_mut().insert(
+            crate::remote_access::LOCAL_AUTH_HEADER,
+            local_proxy_auth
+                .parse()
+                .map_err(|_| "the local proxy credential is invalid".to_string())?,
+        );
+    }
     let (mut socket, _) = tokio_tungstenite::connect_async(request)
         .await
         .map_err(|e| match e {
@@ -1284,7 +1296,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         assert_ne!(port, 3141);
-        let seen = Arc::new(Mutex::new(None::<(String, String)>));
+        let seen = Arc::new(Mutex::new(None::<(String, String, String)>));
         let seen_srv = seen.clone();
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
@@ -1295,7 +1307,13 @@ mod tests {
                     .and_then(|v| v.to_str().ok())
                     .unwrap_or("")
                     .to_string();
-                *seen_srv.lock().unwrap() = Some((req.uri().to_string(), proto));
+                let local_auth = req
+                    .headers()
+                    .get(crate::remote_access::LOCAL_AUTH_HEADER)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("")
+                    .to_string();
+                *seen_srv.lock().unwrap() = Some((req.uri().to_string(), proto, local_auth));
                 res.headers_mut()
                     .insert("Sec-WebSocket-Protocol", "bitsov.v1".parse().unwrap());
                 Ok(res)
@@ -1317,12 +1335,15 @@ mod tests {
         let url = ws_url(&format!("http://127.0.0.1:{port}/api/v1"), "tok").unwrap();
         let events = Arc::new(Mutex::new(Vec::new()));
         let sink = events.clone();
-        run_ws_session(&url, &move |e| sink.lock().unwrap().push(e)).await.unwrap();
+        run_ws_session(&url, Some("local-secret"), &move |e| sink.lock().unwrap().push(e))
+            .await
+            .unwrap();
         server.await.unwrap();
 
-        let (uri, proto) = seen.lock().unwrap().clone().unwrap();
+        let (uri, proto, local_auth) = seen.lock().unwrap().clone().unwrap();
         assert_eq!(uri, "/api/v1/ws?token=tok");
         assert_eq!(proto, "bitsov.v1");
+        assert_eq!(local_auth, "local-secret");
         {
             let events = events.lock().unwrap();
             assert_eq!(events.len(), 3, "{events:?}");
@@ -1336,7 +1357,7 @@ mod tests {
         let dead_port = dead.local_addr().unwrap().port();
         drop(dead);
         let url = ws_url(&format!("http://127.0.0.1:{dead_port}/api/v1"), "SECRET").unwrap();
-        let err = run_ws_session(&url, &|_| {}).await.unwrap_err();
+        let err = run_ws_session(&url, None, &|_| {}).await.unwrap_err();
         assert!(!err.contains("SECRET") && !err.contains("ws://"), "{err}");
     }
 }

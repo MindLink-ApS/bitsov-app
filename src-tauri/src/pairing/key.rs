@@ -85,6 +85,20 @@ impl ClientKey {
     pub(crate) fn sign_hex(&self, message: &[u8]) -> String {
         hex::encode(self.signing.sign(message).to_bytes())
     }
+
+    /// Raw signature bytes for protocols with their own canonical encoding.
+    pub(crate) fn sign_bytes(&self, message: &[u8]) -> [u8; 64] {
+        self.signing.sign(message).to_bytes()
+    }
+
+    /// Borrow a short-lived copy of the Ed25519 seed for domain-separated key
+    /// derivation. The copy is cleared before returning.
+    pub(crate) fn with_seed<R>(&self, f: impl FnOnce(&[u8; 32]) -> R) -> R {
+        let mut seed = self.signing.to_bytes();
+        let result = f(&seed);
+        seed.fill(0);
+        result
+    }
 }
 
 /// Create `dir` if needed and restrict it to the owner (`0700`).

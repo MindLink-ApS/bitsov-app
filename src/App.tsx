@@ -90,7 +90,13 @@ export default function App() {
         </p>
       </div>
 
-      <Onboarding status={status} pairing={pairing} trustAck={trustAck} onRetry={() => void retryPairing()} />
+      <Onboarding
+        status={status}
+        pairing={pairing}
+        trustAck={trustAck}
+        onRetry={() => void retryPairing()}
+        onImportRemote={(link) => source().remoteAccessImport(link)}
+      />
 
       <Show
         when={showIdentityGate()}

@@ -19,6 +19,7 @@
     "allow-identity-restore",
     "allow-pairing-status",
     "allow-pairing-retry",
+    "allow-remote-access-import",
     "allow-node-overview",
     "allow-live-link",
     "allow-peers-list",
