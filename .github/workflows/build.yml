@@ -22,8 +22,21 @@ jobs:
   build:
     name: Build (tsc + vite + cargo check)
     runs-on: ubuntu-latest
+    # Smaller debug info: the Tauri test binaries link several GB of objects, and
+    # ld died with SIGBUS (signal 7, disk full on the runner) on 1 Oct.
+    env:
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@v4
+
+      # Free runner disk (toolchains this job never uses) so the link step has room.
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
 
       # Unit test of THIS repo's fail-closed signature predicate (scripts/fetch-node-sidecar.sh
       # verify_release_signature): local throwaway keys, no network, no release dependency.
@@ -94,6 +107,10 @@ jobs:
       - name: Rust — cargo test (src-tauri)
         working-directory: src-tauri
         run: cargo test --locked
+
+      - name: Disk after tests
+        if: always()
+        run: df -h /
 
       # The debug app with `sit-mock` hands the mock rows to the sealed
       # assistant window. Compile that path so it cannot rot.
