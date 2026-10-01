@@ -57,7 +57,8 @@ const validBinding = (room: unknown): room is RoomBinding => {
  * the node on shape (unknown fields refused); `verifyRoom` checks the id.
  */
 export function parseRoomChat(kind: number, plaintext: string | null): RoomChat | null {
-  if (kind !== 0 || !plaintext || plaintext[0] !== '{') return null;
+  // The genome's rule: leading whitespace is allowed, then one JSON object.
+  if (kind !== 0 || !plaintext || !plaintext.trimStart().startsWith('{')) return null;
   let v: unknown;
   try {
     v = JSON.parse(plaintext);
@@ -344,6 +345,8 @@ export type LegOutcome = {
   state: 'sent' | 'skipped' | 'refused' | 'failed' | 'undelivered' | 'unknown' | 'stopped';
   /** At most this was paid, all-in (a sent leg's fee ceiling included); 0 when nothing was. */
   paidMsat: number;
+  /** Paid but not delivered, or refused after payment: what reached them, without the network fee. */
+  principalMsat?: number;
   note: string | null;
   receipt?: SendReceipt;
   error?: ActionError;
@@ -390,7 +393,8 @@ export async function sendRoom(
     const e = r.error;
     if (e.code === 'failed_paid') {
       // Paid, then refused by their node: only this member, and never resent.
-      out.push({ peer: leg.peer, state: 'refused', paidMsat: e.undelivered?.paid_msat ?? leg.msat, note: e.message, error: e });
+      // The node reports what reached them, not the routing fee: the bound is the confirmed all-in cap.
+      out.push({ peer: leg.peer, state: 'refused', paidMsat: leg.msat, principalMsat: e.undelivered?.paid_msat, note: e.message, error: e });
       continue;
     }
     if (MEMBER_ONLY.has(e.code)) {
@@ -402,8 +406,10 @@ export async function sendRoom(
     out.push({
       peer: leg.peer,
       state: paidUndelivered ? 'undelivered' : unknown ? 'unknown' : 'failed',
-      // Unknown may have paid: counted at its cap, never as "not charged".
-      paidMsat: paidUndelivered ? e.undelivered?.paid_msat ?? leg.msat : unknown ? leg.msat : 0,
+      // Paid-undelivered reports what reached them, without the routing fee, and
+      // unknown may have paid: both are counted at the confirmed all-in cap.
+      paidMsat: paidUndelivered || unknown ? leg.msat : 0,
+      ...(paidUndelivered && e.undelivered ? { principalMsat: e.undelivered.paid_msat } : {}),
       note: e.message,
       error: e,
     });

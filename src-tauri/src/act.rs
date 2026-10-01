@@ -202,6 +202,17 @@ pub const READMISSION_CAPPED: &str = "Not sent - nothing was paid. This contact 
 /// connection, then the message. Nodes without it refuse any capped re-admission.
 pub const QUOTED_READMISSION_CAPABILITY: &str = "quoted_readmission_v1";
 
+/// Genome `RoomChat::parse`: a chat whose plaintext is a JSON object (after
+/// leading whitespace) with a top-level `room` key is room-bound, valid or not.
+pub fn is_room_chat(plaintext: &str) -> bool {
+    plaintext.trim_start().starts_with('{')
+        && serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(plaintext).is_ok_and(|o| o.contains_key("room"))
+}
+
+/// A room leg is capped at what the owner confirmed for that member: a
+/// re-admission that would cost more is refused, never paid under a new cap.
+pub const ROOM_LEG_READMISSION: &str = "Not sent - nothing was paid. They reconnected and ask to be admitted again, which costs more than you confirmed for this room message. Message them once in their own chat, then send to the room again.";
+
 pub const READMISSION_CAPPED_RETRY: &str = "Not delivered - nothing new was paid. This contact asks your node to pay their admission again (every reconnect or node restart starts unpaid), and your node cannot pay that under an app cap yet. The paid message stays here; retry later, or stop retrying.";
 
 /// Neutral proven-non-dispatch copy. Fee-limit wording is added only when the

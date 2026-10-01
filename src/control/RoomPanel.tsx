@@ -346,6 +346,7 @@ export function RoomThread(props: {
  */
 function legOutcome(o: LegOutcome): string {
   if (o.state === 'failed' && o.paidMsat === 0 && o.note) return o.note;
-  const paid = o.paidMsat > 0 ? ` · up to ${fmtAmount(o.paidMsat)}` : ' · not charged';
+  const reached = o.principalMsat !== undefined ? ` (${fmtAmount(o.principalMsat)} to them, plus a network fee)` : '';
+  const paid = o.paidMsat > 0 ? ` · up to ${fmtAmount(o.paidMsat)}${reached}` : ' · not charged';
   return `${OUTCOME[o.state]}${paid}${o.note && o.state !== 'sent' ? ` · ${o.note}` : ''}`;
 }

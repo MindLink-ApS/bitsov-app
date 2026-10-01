@@ -74,7 +74,16 @@ describe('room chat format', () => {
       'plain words',
     ];
     for (const pt of bad) expect(parseRoomChat(0, pt), pt).toBeNull();
+    // Unicode space is not JSON whitespace: the genome's parser refuses it too.
+    expect(parseRoomChat(0, `\u00a0${roomChatText(room, MSG, 'x')}`)).toBeNull();
     expect(parseRoomChat(400, roomChatText(room, MSG, 'x'))).toBeNull();
+  });
+  it('legal JSON whitespace around the binding is still a room chat, as the genome reads it', () => {
+    const pt = roomChatText(room, MSG, 'hello');
+    for (const ws of [' ', '\n', '\t', '\r\n ', '  \n\t']) {
+      expect(parseRoomChat(0, `${ws}${pt}`), JSON.stringify(ws)).toEqual({ room, msg: MSG, text: 'hello' });
+      expect(parseRoomChat(0, `${ws}${pt}${ws}`), JSON.stringify(ws)).not.toBeNull();
+    }
   });
   it('a chat counts only when its roster holds the sender and us', async () => {
     const m = (sender: string, r: RoomBinding): Message => ({ id: 'm', kind: 0, sender, recipient: OWN, timestamp: 1, plaintext: roomChatText(r, MSG, 'x'), payment_amount_msat: 0 });
@@ -160,7 +169,18 @@ describe('room send', () => {
     const send = vi.fn(async () => ({ ok: false as const, error: { code: 'payment_settled_undelivered' as const, message: 'paid, not delivered', undelivered: { paid_msat: 2100 } as never } }));
     const undelivered = await sendRoom([pay(A, 2500), pay(B, 3500)], 'pt', send);
     expect(send).toHaveBeenCalledTimes(1);
-    expect(undelivered.map((o) => [o.state, o.paidMsat])).toEqual([['undelivered', 2100], ['stopped', 0]]);
+    // The node reports what reached them (2,100), not the routing fee: the bound stays the confirmed all-in cap.
+    expect(undelivered.map((o) => [o.state, o.paidMsat, o.principalMsat])).toEqual([['undelivered', 2500, 2100], ['stopped', 0, undefined]]);
+    const refused = await sendRoom([pay(A, 2500)], 'pt', async () => ({ ok: false, error: { code: 'failed_paid', message: 'refused', undelivered: { paid_msat: 2100 } as never } }));
+    expect(refused.map((o) => [o.state, o.paidMsat, o.principalMsat])).toEqual([['refused', 2500, 2100]]);
+  });
+  it('a re-admission above the confirmed cap is refused for that member only, with nothing paid', async () => {
+    const send = vi.fn(async (peer: string, _pt: string, max: number) => (peer === A
+      ? { ok: false as const, error: { code: 'readmission_capped' as const, message: 'Not sent - nothing was paid. They reconnected and ask to be admitted again.' } }
+      : { ok: true as const, value: receipt(peer, max) }));
+    const out = await sendRoom([pay(A, 2500), pay(B, 3500)], 'pt', send);
+    expect(send.mock.calls.map((c) => [c[0], c[2]])).toEqual([[A, 2500], [B, 3500]]);
+    expect(out.map((o) => [o.state, o.paidMsat])).toEqual([['failed', 0], ['sent', 3500]]);
   });
 });
 
@@ -532,6 +552,51 @@ describe('rooms in the shell', () => {
     await vi.waitFor(() => expect($(`[data-room-refused="${A}"]`)).not.toBeNull());
     expect(text(`[data-room-refused="${A}"]`)).toBe('Maya: Their node could not match this room’s details, so it refused the message. It was paid; do not send it again.');
     expect($(`[data-room-refused="${B}"]`)).toBeNull();
+  });
+
+  it('a paid, undelivered leg shows its confirmed all-in maximum, not only what reached them', async () => {
+    const host = stubHost({
+      message_send: (args) => {
+        if (args!.recipient === A) throw { code: 'payment_settled_undelivered', message: 'Paid, not delivered yet.', undelivered: { paid_msat: 2100, retry: true } };
+        return receipt(args!.recipient as string, args!.max_msat as number, 2);
+      },
+    });
+    await openShell();
+    rememberRoom(AB);
+    await vi.waitFor(() => expect($(`[data-track="bound:${AB.id}"]`)).not.toBeNull());
+    click(`[data-track="bound:${AB.id}"]`);
+    await vi.waitFor(() => expect($('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('6000'));
+    typeDraft('hi');
+    click('[data-send]');
+    await vi.waitFor(() => expect($('[data-room-confirm]')).not.toBeNull());
+    click('[data-room-confirm]');
+    await vi.waitFor(() => expect($('[data-room-send]')).not.toBeNull());
+    expect(host.used('message_send')).toHaveLength(1);
+    expect($(`[data-room-leg="${A}"]`)!.getAttribute('data-leg-state')).toBe('undelivered');
+    expect($('[data-room-send-msat]')!.getAttribute('data-room-send-msat')).toBe('2500');
+    expect(text(`[data-room-leg="${A}"]`)).toMatch(/up to 2\.5 sats \(2\.1 sats to them, plus a network fee\)/);
+    expect(text('[data-room-send] .kind')).toMatch(/up to 2\.5 sats in all/);
+  });
+
+  it('a room chat with legal leading JSON whitespace goes to its room, never the direct chat, and stays hidden after Leave', async () => {
+    const host = stubHost();
+    await openShell();
+    const spaced = (text: string) => `\n  ${roomChatText(AB, MSG, text)}`;
+    host.emitLive({ type: 'message', room_id: null, message: { id: 'w1', kind: 0, sender: A, recipient: OWN, timestamp: Date.now(), plaintext: spaced('spaced hello'), payment_amount_msat: 2000 } });
+    await vi.waitFor(() => expect($(`[data-track="bound:${AB.id}"] .badge`)?.textContent).toBe('1'));
+    // Maya's direct chat is open: the binding never shows there.
+    expect(mount.textContent).not.toMatch(/spaced hello|"roster"/);
+    click(`[data-track="bound:${AB.id}"]`);
+    await vi.waitFor(() => expect(text('[data-room-stream] .msg.in .bubble')).toBe('spaced hello'));
+    click('[data-room-leave]');
+    click('[data-room-leave-yes]');
+    await vi.waitFor(() => expect($(`[data-track="bound:${AB.id}"]`)).toBeNull());
+    host.emitLive({ type: 'message', room_id: null, message: { id: 'w2', kind: 0, sender: A, recipient: OWN, timestamp: Date.now(), plaintext: spaced('after leave'), payment_amount_msat: 2000 } });
+    click(`[data-track="peer:${A}"]`);
+    await vi.waitFor(() => expect($(`[data-track="peer:${A}"]`)?.getAttribute('aria-current')).toBe('true'));
+    await new Promise((r) => setTimeout(r, 30));
+    expect(mount.textContent).not.toMatch(/after leave|"roster"/);
+    expect($(`[data-track="bound:${AB.id}"]`)).toBeNull();
   });
 
   it('a chat naming a room id that does not commit to its roster never becomes a room', async () => {
