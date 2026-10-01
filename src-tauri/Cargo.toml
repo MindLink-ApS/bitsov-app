@@ -67,6 +67,9 @@ optional = true
 tauri = { version = "2", features = ["test"] }
 # In-process stand-in for broker tests. The app binary does not link this.
 mock-node = { path = "crates/mock-node" }
+# Verifies Secure Enclave P-256 signatures in device_key tests. Already in the
+# lock (via rustls), so this adds no new crate.
+ring = "0.17"
 
 [[example]]
 name = "jarvis_sit_mock"

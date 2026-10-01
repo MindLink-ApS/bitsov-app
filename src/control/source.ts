@@ -31,6 +31,7 @@ import type {
   CallQuote,
   CallReceipt,
   InvoiceAmount,
+  InvoiceStatus,
   InvoiceView,
   InviteView,
   PaymentReceipt,
@@ -38,6 +39,7 @@ import type {
   RoomQuote,
   SendReceipt,
   SpendView,
+  DeviceView,
   BudgetView,
   PresetId,
   FundingAddress,
@@ -128,6 +130,16 @@ export interface Source {
   /** The owner's one tap: open the short spend window, or ask the node for spend. */
   spendRequest(): Promise<SpendView>;
   spendLock(): Promise<SpendView>;
+  /** Withdraw the pending request at the node, then forget it. */
+  spendCancel(): Promise<SpendView>;
+  /** This Mac's Touch ID approvals: where the registration stands. */
+  deviceKeyStatus(): Promise<DeviceView>;
+  /** Create the enclave key, prove it with Touch ID, ask the owner once. */
+  deviceKeyRegister(): Promise<DeviceView>;
+  deviceKeyCancel(): Promise<DeviceView>;
+  /** One contact's envelope, signed with Touch ID; null takes the host default. */
+  /** The host names the contact in the Touch ID dialog from the node's own peer list. */
+  relationApprove(peer: string, budgetMsat: number | null, perActMaxMsat: number | null): Promise<SpendView>;
   spendReconcile(): Promise<string>;
   /**
    * A message pays inside the owner's budget with no prompt. `firstContactMsat`
@@ -154,6 +166,8 @@ export interface Source {
   roomQuote(roomId: string): Promise<RoomQuote>;
   invoiceCreate(amountMsat: number, note: string): Promise<InvoiceView>;
   invoiceAmount(bolt11: string): Promise<InvoiceAmount>;
+  /** Read only: whether an invoice we issued was paid to this node. */
+  invoiceStatus(bolt11: string): Promise<InvoiceStatus>;
   pay(bolt11: string, amountMsat: number, maxMsat: number): Promise<PaymentReceipt>;
   keysend(destPubkey: string, amountMsat: number, memo: string | null, maxMsat: number): Promise<PaymentReceipt>;
   inviteCreate(invitee: string, addr: string, hours: number): Promise<InviteView>;
@@ -247,6 +261,12 @@ export const hostSource: Source = {
   spendStatus: () => invoke<SpendView>('spend_status'),
   spendRequest: () => invoke<SpendView>('spend_request'),
   spendLock: () => invoke<SpendView>('spend_lock'),
+  spendCancel: () => invoke<SpendView>('spend_cancel'),
+  deviceKeyStatus: () => invoke<DeviceView>('device_key_status'),
+  deviceKeyRegister: () => invoke<DeviceView>('device_key_register'),
+  deviceKeyCancel: () => invoke<DeviceView>('device_key_cancel'),
+  relationApprove: (peer, budgetMsat, perActMaxMsat) =>
+    invoke<SpendView>('relation_approve', { peer, budget_msat: budgetMsat, per_act_max_msat: perActMaxMsat }),
   spendReconcile: () => invoke<string>('spend_reconcile'),
   send: (recipient, isRoom, plaintext, maxMsat, maxRecipientMsat, firstContactMsat) =>
     invoke<SendReceipt>('message_send', { recipient, is_room: isRoom, plaintext, max_msat: maxMsat, max_recipient_msat: maxRecipientMsat ?? null, first_contact_msat: firstContactMsat ?? null }),
@@ -260,6 +280,7 @@ export const hostSource: Source = {
   roomQuote: (roomId) => invoke<RoomQuote>('room_quote', { room_id: roomId }),
   invoiceCreate: (amountMsat, note) => invoke<InvoiceView>('invoice_create', { amount_msat: amountMsat, note, expiry_secs: null }),
   invoiceAmount: (bolt11) => invoke<InvoiceAmount>('invoice_amount', { bolt11 }),
+  invoiceStatus: (bolt11) => invoke<InvoiceStatus>('invoice_status', { bolt11 }),
   pay: (bolt11, amountMsat, maxMsat) => invoke<PaymentReceipt>('payment_pay', { bolt11, amount_msat: amountMsat, max_msat: maxMsat }),
   keysend: (destPubkey, amountMsat, memo, maxMsat) =>
     invoke<PaymentReceipt>('payment_keysend', { dest_pubkey: destPubkey, amount_msat: amountMsat, memo, max_msat: maxMsat }),

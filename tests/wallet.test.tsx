@@ -1,0 +1,423 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { render } from 'solid-js/web';
+import App from '../src/App';
+import type { PairingView } from '../src/onboarding/pairing';
+import type { Artifact, BudgetView, Channel, Message, SpendView, WalletOverview } from '../src/control/types';
+import {
+  activityTotals, artifactActivity, bitcoinUri, channelWords, filterActivity, logActivity, loggedActivity, mergeActivity, messageActivity,
+  openInvoices, readRecipient, resetActivityLog, splitBalance, statusWords, updateInvoice,
+} from '../src/control/wallet';
+import { resetContactsForTests, setPetname } from '../src/control/petnames';
+import { setDenom } from '../src/control/prefs';
+import { invoiceFromNode } from '../src/control/sample';
+import NODE_PAYMENT_STATUS from './fixtures/node-payment-status.json';
+
+const OWN = '1'.repeat(64);
+const A = 'a'.repeat(64);
+const B = 'b'.repeat(64);
+const PAYEE = `02${'5a'.repeat(32)}`;
+const INVOICE = 'lntb20n1walletsampleinvoice';
+/** The node's `GET /payments/{hash}` reply, in its own names; the stub maps it as the host does. */
+const nodePayment = (status: string, amountMsat = 2000) =>
+  invoiceFromNode(200, { payment_hash: '00'.repeat(32), status, amount_msat: amountMsat, direction: 'Incoming', liquidity: null });
+
+const channel = (over: Partial<Channel> = {}): Channel => ({
+  channel_id: 'c1', peer_pubkey: `02${'c1'.repeat(32)}`, capacity_msat: 500_000_000, local_balance_msat: 300_000_000, remote_balance_msat: 190_000_000, active: true, ...over,
+});
+const WALLET: WalletOverview = {
+  balance_msat: 480_000_000,
+  lightning_outbound_msat: 300_000_000,
+  channels: [
+    channel(),
+    channel({ channel_id: 'c2', peer_pubkey: `03${'c2'.repeat(32)}`, capacity_msat: 100_000_000, local_balance_msat: 80_000_000, remote_balance_msat: 15_000_000, active: false }),
+  ],
+};
+const msg = (id: string, kind: number, sender: string, recipient: string, paid: number | null, timestamp = 1_000): Message => ({
+  id, kind, sender, recipient, timestamp, plaintext: 'x', payment_amount_msat: paid,
+});
+
+describe('wallet: balance and channels in plain words', () => {
+  it('splits the node’s one total into what the channels can send and the on-chain rest', () => {
+    expect(splitBalance(WALLET)).toEqual({ total: 480_000_000, lightning: 380_000_000, ready: 300_000_000, onchain: 100_000_000 });
+  });
+  it('never shows more in channels than the total, nor a negative on-chain part', () => {
+    expect(splitBalance({ ...WALLET, balance_msat: 200_000_000 })).toMatchObject({ lightning: 200_000_000, onchain: 0 });
+  });
+  it('an open channel says what can be sent and received; an offline one says funds stay yours', () => {
+    expect(channelWords(channel())).toMatchObject({ state: 'open', line: 'You can send up to 300,000 sats and receive up to 190,000 sats through it.' });
+    expect(channelWords(channel({ active: false })).line).toMatch(/offline, or the channel is still opening or closing\. What you hold in it stays yours/);
+  });
+});
+
+describe('wallet: receive and send inputs', () => {
+  it('an on-chain request carries its amount in whole sats only', () => {
+    expect(bitcoinUri('tb1qaddr', null)).toBe('bitcoin:tb1qaddr');
+    expect(bitcoinUri('tb1qaddr', 150_000_000)).toBe('bitcoin:tb1qaddr?amount=0.0015');
+    expect(bitcoinUri('tb1qaddr', 100_000_000_000)).toBe('bitcoin:tb1qaddr?amount=1');
+    expect(bitcoinUri('tb1qaddr', 1_500)).toBeNull();
+  });
+  it('tells an invoice from a node id and an on-chain address', () => {
+    expect(readRecipient(' lightning:LNTB20N1abc ')).toEqual({ kind: 'invoice', text: 'lightning:LNTB20N1abc' });
+    expect(readRecipient(PAYEE.toUpperCase())).toEqual({ kind: 'node', pubkey: PAYEE });
+    expect(readRecipient('tb1qsampledata0notarealaddress0donotsend')).toEqual({ kind: 'onchain' });
+    expect(readRecipient('hello')).toEqual({ kind: 'unknown' });
+  });
+});
+
+describe('wallet: activity', () => {
+  beforeEach(() => resetActivityLog());
+  it('lists paid messages, calls and files with their direction; unpaid messages are not transactions', () => {
+    const items = messageActivity([
+      msg('m1', 0, A, OWN, 2000),
+      msg('m2', 0, OWN, A, 3000),
+      msg('m3', 400, OWN, B, 10_000),
+      msg('m4', 200, B, OWN, 4000),
+      msg('m5', 0, A, OWN, null),
+    ], OWN);
+    expect(items.map((a) => [a.kind, a.direction, a.who, a.label])).toEqual([
+      ['message', 'in', A, 'Message received'],
+      ['message', 'out', A, 'Message sent'],
+      ['call', 'out', B, 'Call'],
+      ['file', 'in', B, 'Received a file'],
+    ]);
+  });
+  it('filters by kind and direction, and totals only money that moved', () => {
+    const invoice = artifactActivity({ id: 'x', at: 5, type: 'invoice', invoice: { bolt11: INVOICE, amount_msat: 9000, note: null, expires_at_ms: 10 } }, null)!;
+    const items = mergeActivity(messageActivity([msg('m1', 0, A, OWN, 2000, 1), msg('m3', 400, OWN, B, 10_000, 2)], OWN), [invoice]);
+    expect(items.map((a) => a.id)).toEqual([invoice.id, 'm:m3', 'm:m1']);
+    expect(filterActivity(items, 'calls', 'all').map((a) => a.id)).toEqual(['m:m3']);
+    expect(filterActivity(items, 'all', 'in').map((a) => a.id)).toEqual([invoice.id, 'm:m1']);
+    expect(filterActivity(items, 'payments', 'all').map((a) => a.id)).toEqual([invoice.id]);
+    // An invoice not paid yet moved nothing.
+    expect(activityTotals(items)).toEqual({ in: 2000, out: 10_000 });
+    expect(activityTotals([{ ...invoice, status: 'paid' }])).toEqual({ in: 9000, out: 0 });
+  });
+  it('logs a payment or invoice once, keeps it across reads, and reads an invoice as received when the node says paid', () => {
+    const inv: Artifact = { id: 'local-1', at: 100, type: 'invoice', invoice: { bolt11: INVOICE, amount_msat: 2000, note: 'lunch', expires_at_ms: Date.now() + 60_000 } };
+    const paid: Artifact = { id: 'local-2', at: 200, type: 'payment', receipt: { method: 'invoice', amount_msat: 1000, status: 'settled', paid_at_ms: 200 } };
+    logActivity([artifactActivity(inv, A)!, artifactActivity(paid, null)!]);
+    logActivity([artifactActivity(inv, A)!]);
+    expect(loggedActivity().map((a) => [a.kind, a.label, a.status])).toEqual([['payment', 'Paid an invoice', 'settled'], ['invoice', 'Invoice · lunch', 'waiting']]);
+    const open = openInvoices(loggedActivity(), Date.now());
+    expect(open).toHaveLength(1);
+    updateInvoice(open[0].id, { state: 'paid', amount_msat: 2000 });
+    const now = loggedActivity().find((a) => a.kind === 'invoice')!;
+    expect(statusWords(now, Date.now())).toBe('Received');
+    expect(openInvoices(loggedActivity(), Date.now())).toHaveLength(0);
+    // "unknown" never overwrites what is known.
+    updateInvoice(now.id, { state: 'unknown', amount_msat: null });
+    expect(loggedActivity().find((a) => a.kind === 'invoice')!.status).toBe('paid');
+  });
+});
+
+describe('the node payment contract', () => {
+  it('reads the node’s own names exactly as the host does (shared fixture with act.rs)', () => {
+    expect(NODE_PAYMENT_STATUS.length).toBeGreaterThanOrEqual(9);
+    for (const c of NODE_PAYMENT_STATUS) expect(invoiceFromNode(c.http, c.body), JSON.stringify(c.body)).toEqual(c.want);
+  });
+});
+
+// ---- the page, in the shell ---------------------------------------------------
+
+const paired: PairingView = { state: 'paired', scopes: ['read', 'receive'], short_code: 'ABCD-EFGH', code_from_node: true, reason: null, bootstrap: null };
+const budget = (): BudgetView => ({
+  paused: false, waiting_for_owner: false, ceiling_msat: 500_000, max_daily_msat: 100_000_000, spent_msat: 0, unsettled_msat: 0,
+  preset: 'careful', presets: [{ id: 'careful', contact_msat: 50_000, room_msat: 100_000, ceiling_msat: 500_000 }],
+  rows: [{ target: A, room: false, limit_msat: 50_000, spent_msat: 0 }],
+  autopay: { state: 'open', open_until_ms: Date.now() + 86_400_000, ceiling_msat: 500_000, basis: 'node_grant' },
+  window_ms: 600_000, node_grant: null,
+});
+const locked: SpendView = { state: 'locked', basis: null, open_until_ms: null, pending: null, window_ms: 600_000 };
+const open = (): SpendView => ({ state: 'open', basis: 'node_grant', open_until_ms: Date.now() + 600_000, pending: null, window_ms: 600_000 });
+
+type Reply = (args?: Record<string, unknown>) => unknown;
+function stubHost(overrides: Record<string, Reply> = {}) {
+  const calls: { cmd: string; args?: Record<string, unknown> }[] = [];
+  const callbacks = new Map<number, (e: unknown) => void>();
+  const REPLIES: Record<string, Reply> = {
+    node_status: () => ({ ready: true, node_id: OWN, error: null }),
+    pairing_status: () => paired,
+    node_overview: () => ({ node_id: OWN, status: 'ok', version: 'api v2', connected_peers: 2, e2ee_sessions: 2, pending_deliveries: 0,
+      lightning_available: true, block_height: 1, uptime_secs: 1, lightning_backend: 'ldk', chain_backend: 'esplora', read_at: Date.now(), capabilities: [] }),
+    peers_list: () => [
+      { node_id: A, addr: null, label: 'Maya', connected: true, fingerprint: null },
+      { node_id: B, addr: null, label: 'Jon', connected: true, fingerprint: null },
+    ],
+    rooms_list: () => [],
+    messages_list: (args) => (args!.peer === A
+      ? [msg('ma1', 0, A, OWN, 2000, Date.now() - 60_000), msg('ma2', 0, OWN, A, 3000, Date.now() - 50_000)]
+      : args!.peer === B ? [msg('mb1', 400, OWN, B, 10_000, Date.now() - 40_000)] : []),
+    price_quote: () => ({ kind: 0, own_msat: 1000, peer_msat: 2000, peer_age_secs: 30, peer_stale: false }),
+    payments_overview: () => WALLET,
+    fund_state: () => null,
+    funding_address: () => ({ address: 'tb1qwalletaddress0000000000000000000000', network: 'signet', note: null }),
+    file_price: () => ({ principal_msat: 3000, max_routing_fee_msat: 5000, total_msat: 8000 }),
+    spend_status: () => locked,
+    budget_status: () => budget(),
+    invoice_create: (args) => ({ bolt11: 'lntb25u1walletreceive', amount_msat: args!.amount_msat, note: args!.note || null, expires_at_ms: Date.now() + 3_600_000 }),
+    invoice_status: () => nodePayment('Pending'),
+    invoice_amount: (args) => ({ amount_msat: 2000, network: 'signet', payee: PAYEE, expires_at_ms: Date.now() + 3_600_000, bolt11: String(args!.bolt11).toLowerCase(), payment_hash: '00'.repeat(32), description: 'coffee' }),
+    payment_pay: (args) => ({ method: 'invoice', amount_msat: args!.amount_msat, max_routing_fee_msat: 5000, status: 'settled', paid_at_ms: Date.now() }),
+    payment_keysend: (args) => ({ method: 'keysend', amount_msat: args!.amount_msat, max_routing_fee_msat: 5000, status: 'settled', paid_at_ms: Date.now() }),
+    live_link: () => null,
+    'plugin:event|listen': () => 1,
+    'plugin:event|unlisten': () => null,
+    ...overrides,
+  };
+  vi.stubGlobal('__TAURI_INTERNALS__', {
+    transformCallback: (cb: (e: unknown) => void) => { const id = callbacks.size + 1; callbacks.set(id, cb); return id; },
+    invoke: (cmd: string, args?: Record<string, unknown>) => {
+      calls.push({ cmd, args });
+      const reply = REPLIES[cmd];
+      if (!reply) return Promise.reject(new Error(`unexpected ${cmd}`));
+      try { return Promise.resolve(reply(args)); } catch (e) { return Promise.reject(e); }
+    },
+  });
+  vi.stubGlobal('__TAURI_EVENT_PLUGIN_INTERNALS__', { unregisterListener: () => {} });
+  return { used: (cmd: string) => calls.filter((c) => c.cmd === cmd) };
+}
+
+describe('the Wallet page', () => {
+  let dispose: (() => void) | undefined;
+  let mount: HTMLElement;
+  beforeEach(() => {
+    resetContactsForTests();
+    resetActivityLog();
+    setDenom('sats');
+    setPetname(A, 'Maya');
+    setPetname(B, 'Jon');
+  });
+  afterEach(() => {
+    dispose?.();
+    dispose = undefined;
+    mount?.remove();
+    vi.unstubAllGlobals();
+    resetContactsForTests();
+    resetActivityLog();
+  });
+  const $ = <T extends Element = HTMLElement>(sel: string) => mount.querySelector<T>(sel);
+  const text = (sel: string) => $(sel)?.textContent ?? '';
+  const click = (sel: string) => $<HTMLButtonElement>(sel)!.click();
+  const type = (sel: string, value: string) => {
+    const el = $<HTMLInputElement | HTMLTextAreaElement>(sel)!;
+    el.value = value;
+    el.dispatchEvent(new InputEvent('input', { bubbles: true }));
+  };
+  const moneyCalls = (host: ReturnType<typeof stubHost>) => [...host.used('payment_pay'), ...host.used('payment_keysend'), ...host.used('message_send')];
+  async function openWallet(tab?: string) {
+    mount = document.createElement('div');
+    document.body.appendChild(mount);
+    dispose = render(() => <App />, mount);
+    await vi.waitFor(() => expect([...mount.querySelectorAll('button')].some((b) => b.textContent?.includes('I understand'))).toBe(true));
+    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-profile]')?.disabled).toBe(false));
+    click('[data-profile]');
+    await vi.waitFor(() => expect($('[data-avatar-menu]')).not.toBeNull());
+    click('[data-open-wallet]');
+    await vi.waitFor(() => expect($('[data-wallet-page]')).not.toBeNull());
+    if (tab) click(`[data-wallet-tab="${tab}"]`);
+  }
+
+  it('opens full screen from the avatar menu: the total, with Lightning and on-chain split; Escape closes it', async () => {
+    stubHost();
+    await openWallet();
+    expect(text('[data-avatar-balance]')).toBe('');
+    await vi.waitFor(() => expect($('[data-balance-total]')?.getAttribute('data-balance-total')).toBe('480000000'));
+    expect(text('[data-balance-total]')).toBe('480,000sats');
+    expect($('[data-balance-lightning]')!.getAttribute('data-balance-lightning')).toBe('380000000');
+    expect(text('[data-balance-lightning]')).toMatch(/300,000 sats ready to send now/);
+    expect($('[data-balance-onchain]')!.getAttribute('data-balance-onchain')).toBe('100000000');
+    expect(text('[data-wallet-basis]')).toMatch(/Your node reports one total/);
+    // What is behind the page is out of reach while it is open.
+    const inert = (el: Element | null) => !!el && (el.hasAttribute('inert') || (el as HTMLElement & { inert?: boolean }).inert === true);
+    expect(inert($('nav.rail'))).toBe(true);
+    expect(inert($('section.track'))).toBe(true);
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await vi.waitFor(() => expect($('[data-wallet-page]')).toBeNull());
+    expect(inert($('nav.rail'))).toBe(false);
+    // The menu shows the balance once it is read.
+    click('[data-profile]');
+    await vi.waitFor(() => expect(text('[data-avatar-balance]')).toBe('480,000 sats'));
+  });
+
+  it('follows the BTC setting', async () => {
+    stubHost();
+    setDenom('btc');
+    await openWallet();
+    await vi.waitFor(() => expect(text('[data-balance-total]')).toBe('0.0048BTC'));
+    expect(text('[data-balance-onchain]')).toMatch(/0\.001 BTC/);
+  });
+
+  it('Channels: each peer, size, what you can send and receive, and its state in plain words', async () => {
+    stubHost();
+    await openWallet('channels');
+    await vi.waitFor(() => expect($('[data-channel="c1"]')).not.toBeNull());
+    expect(text('[data-channels-summary]')).toMatch(/1 of 2 open.*You can send 300,000 sats.*receive 190,000 sats/);
+    expect($('[data-channel="c1"]')!.getAttribute('data-channel-state')).toBe('open');
+    expect($('[data-channel="c1"] [data-channel-capacity]')!.getAttribute('data-channel-capacity')).toBe('500000000');
+    expect(text('[data-channel="c1"] [data-channel-words]')).toMatch(/send up to 300,000 sats and receive up to 190,000 sats/);
+    expect(text('[data-channel="c2"] [data-channel-pill]')).toBe('Not usable now');
+    expect(text('[data-channel="c2"] [data-channel-words]')).toMatch(/stays yours/);
+  });
+
+  it('Receive over Lightning: an amount makes an invoice with a QR; it reads as received once the node says paid; nothing is paid', async () => {
+    let paid = false;
+    const host = stubHost({ invoice_status: () => nodePayment(paid ? 'Settled' : 'Pending', 2_500_000) });
+    await openWallet('receive');
+    await vi.waitFor(() => expect($('[data-receive-create]')).not.toBeNull());
+    expect($<HTMLButtonElement>('[data-receive-create]')!.disabled).toBe(true);
+    expect(text('[data-receive-hint]')).toMatch(/needs an amount for a Lightning invoice/);
+    type('[data-receive-amount]', '2500');
+    type('[data-receive-memo]', 'lunch');
+    click('[data-receive-create]');
+    await vi.waitFor(() => expect($('[data-receive-invoice]')).not.toBeNull());
+    expect(host.used('invoice_create')[0].args).toMatchObject({ amount_msat: 2_500_000, note: 'lunch' });
+    expect($('[data-receive-invoice] [data-wallet-qr]')).not.toBeNull();
+    expect(text('[data-receive-invoice] [data-bolt11]')).toBe('lntb25u1walletreceive');
+    await vi.waitFor(() => expect(text('[data-receive-state]')).toBe('Waiting to be paid'));
+    paid = true;
+    await vi.waitFor(() => expect(text('[data-receive-state]')).toBe('Received'), { timeout: 6000 });
+    expect(host.used('invoice_status').every((c) => c.args!.bolt11 === 'lntb25u1walletreceive')).toBe(true);
+    expect(moneyCalls(host)).toHaveLength(0);
+    click('[data-wallet-tab="activity"]');
+    await vi.waitFor(() => expect($('[data-activity="invoice"]')).not.toBeNull());
+    expect(text('[data-activity="invoice"]')).toMatch(/Invoice · lunch.*Received.*\+2,500 sats/);
+  }, 10_000);
+
+  it('Receive over Lightning: an invoice the node reports Expired reads as not paid', async () => {
+    const host = stubHost({ invoice_status: () => nodePayment('Expired', 2_500_000) });
+    await openWallet('receive');
+    await vi.waitFor(() => expect($('[data-receive-create]')).not.toBeNull());
+    type('[data-receive-amount]', '2500');
+    click('[data-receive-create]');
+    await vi.waitFor(() => expect(text('[data-receive-state]')).toBe('Not paid'));
+    expect(moneyCalls(host)).toHaveLength(0);
+  });
+
+  it('Receive on-chain: the node’s address with a QR; the amount is optional and whole sats', async () => {
+    const host = stubHost();
+    await openWallet('receive');
+    click('[data-receive-how="onchain"]');
+    await vi.waitFor(() => expect($('[data-receive-address]')).not.toBeNull());
+    expect(host.used('funding_address')).toHaveLength(1);
+    expect($('[data-receive-address] [data-wallet-qr]')).not.toBeNull();
+    expect(text('[data-receive-address] .address')).toBe('tb1qwalletaddress0000000000000000000000');
+    expect(text('[data-receive-note]')).toMatch(/Amount is optional/);
+    type('[data-receive-amount]', '1.5');
+    await vi.waitFor(() => expect($('[data-receive-whole]')).not.toBeNull());
+    expect($('[data-receive-address] [data-wallet-qr]')).toBeNull();
+    type('[data-receive-amount]', '1500');
+    await vi.waitFor(() => expect($('[data-receive-address] [data-wallet-qr]')).not.toBeNull());
+    expect(moneyCalls(host)).toHaveLength(0);
+  });
+
+  it('Send needs the ten-minute window: the button is the one tap that asks for it, and it pays nothing', async () => {
+    const pending: SpendView = { ...locked, state: 'pending', pending: { owner_action: 'konsensus approve ABCD', expires_at_ms: Date.now() + 300_000 } } as SpendView;
+    const host = stubHost({ spend_request: () => pending });
+    await openWallet('send');
+    await vi.waitFor(() => expect($('[data-send-amount]')).not.toBeNull());
+    expect($<HTMLButtonElement>('[data-send-review]')!.disabled).toBe(true);
+    type('[data-send-amount]', '2');
+    type('[data-send-to]', INVOICE);
+    await vi.waitFor(() => expect($('[data-send-invoice]')).not.toBeNull());
+    expect(text('[data-send-window]')).toMatch(/ten-minute approval/);
+    expect(text('[data-send-review]')).toBe('Approve spending');
+    click('[data-send-review]');
+    await vi.waitFor(() => expect(host.used('spend_request')).toHaveLength(1));
+    await vi.waitFor(() => expect(text('[data-send-review]')).toBe('Waiting for approval'));
+    expect($<HTMLButtonElement>('[data-send-review]')!.disabled).toBe(true);
+    expect(text('[data-wallet-send] [data-owner-action]')).toBe('konsensus approve ABCD');
+    expect($('[data-wallet-review]')).toBeNull();
+    expect(moneyCalls(host)).toHaveLength(0);
+  });
+
+  it('Send an invoice, amount first: the host reads the invoice, a mismatch blocks, the one review pays once at its all-in cap', async () => {
+    const host = stubHost({ spend_status: () => open() });
+    await openWallet('send');
+    await vi.waitFor(() => expect($('[data-send-amount]')).not.toBeNull());
+    type('[data-send-amount]', '3');
+    type('[data-send-to]', INVOICE);
+    await vi.waitFor(() => expect($('[data-send-mismatch]')).not.toBeNull());
+    expect(host.used('invoice_amount')[0].args).toEqual({ bolt11: INVOICE });
+    expect(text('[data-send-mismatch]')).toMatch(/asks for 2 sats, not the amount above/);
+    await vi.waitFor(() => expect($('[data-wallet-send] [data-cost-msat]')).not.toBeNull());
+    expect($<HTMLButtonElement>('[data-send-review]')!.disabled).toBe(true);
+    click('[data-send-use-invoice]');
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-send-review]')!.disabled).toBe(false));
+    expect($('[data-wallet-send] [data-cost-msat]')!.getAttribute('data-cost-msat')).toBe('7000');
+    click('[data-send-review]');
+    await vi.waitFor(() => expect($('[data-wallet-review]')).not.toBeNull());
+    expect($('[data-wallet-review]')!.getAttribute('data-review-max-msat')).toBe('7000');
+    expect(text('[data-review-payee]')).toMatch(/025a5a5a…5a5a5a5a/);
+    expect(moneyCalls(host)).toHaveLength(0);
+    // Back withdraws it; a fresh review is needed.
+    click('[data-review-back]');
+    await vi.waitFor(() => expect($('[data-wallet-review]')).toBeNull());
+    click('[data-send-review]');
+    await vi.waitFor(() => expect($('[data-wallet-confirm]')).not.toBeNull());
+    click('[data-wallet-confirm]');
+    expect($('[data-wallet-confirm]')).toBeNull();
+    await vi.waitFor(() => expect($('[data-send-result="ok"]')).not.toBeNull());
+    expect(host.used('payment_pay').map((c) => c.args)).toEqual([{ bolt11: INVOICE, amount_msat: 2000, max_msat: 7000 }]);
+    expect(text('[data-send-result]')).toMatch(/Paid 2 sats/);
+    click('[data-wallet-tab="activity"]');
+    await vi.waitFor(() => expect($('[data-activity="payment"]')).not.toBeNull());
+    expect(text('[data-activity="payment"]')).toMatch(/Paid an invoice.*Paid.*−2 sats/);
+  });
+
+  it('Send to a node id pays directly (keysend) through the same review; an on-chain address is not sent from here', async () => {
+    const host = stubHost({ spend_status: () => open() });
+    await openWallet('send');
+    await vi.waitFor(() => expect($('[data-send-amount]')).not.toBeNull());
+    type('[data-send-amount]', '1');
+    type('[data-send-to]', 'tb1qsampledata0notarealaddress0donotsend');
+    await vi.waitFor(() => expect(text('[data-send-hint]')).toMatch(/on-chain is an owner action at your node/));
+    expect($<HTMLButtonElement>('[data-send-review]')!.disabled).toBe(true);
+    type('[data-send-to]', PAYEE);
+    type('[data-send-memo]', 'thanks');
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-send-review]')!.disabled).toBe(false));
+    click('[data-send-review]');
+    await vi.waitFor(() => expect($('[data-wallet-confirm]')).not.toBeNull());
+    click('[data-wallet-confirm]');
+    await vi.waitFor(() => expect(host.used('payment_keysend')).toHaveLength(1));
+    expect(host.used('payment_keysend')[0].args).toEqual({ dest_pubkey: PAYEE, amount_msat: 1000, memo: 'thanks', max_msat: 6000 });
+    expect(host.used('payment_pay')).toHaveLength(0);
+  });
+
+  it('a failed payment says why, and nothing else is tried', async () => {
+    const host = stubHost({
+      spend_status: () => open(),
+      payment_pay: () => { throw { code: 'ceiling_exhausted', message: 'Today’s all-in limit is used up. Nothing was paid.' }; },
+    });
+    await openWallet('send');
+    await vi.waitFor(() => expect($('[data-send-to]')).not.toBeNull());
+    type('[data-send-to]', INVOICE);
+    // An empty amount takes the invoice's.
+    await vi.waitFor(() => expect($<HTMLInputElement>('[data-send-amount]')!.value).toBe('2'));
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-send-review]')!.disabled).toBe(false));
+    click('[data-send-review]');
+    await vi.waitFor(() => expect($('[data-wallet-confirm]')).not.toBeNull());
+    click('[data-wallet-confirm]');
+    await vi.waitFor(() => expect($('[data-send-result="failed"]')).not.toBeNull());
+    expect(text('[data-send-result]')).toMatch(/limit is used up/);
+    expect(host.used('payment_pay')).toHaveLength(1);
+  });
+
+  it('Activity: paid messages and calls from each contact’s history, filtered by kind and direction', async () => {
+    stubHost();
+    await openWallet();
+    await vi.waitFor(() => expect(mount.querySelectorAll('[data-activity-list] .wallet-row')).toHaveLength(3));
+    expect(text('[data-activity-in]')).toBe('2 sats');
+    expect(text('[data-activity-out]')).toBe('13 sats');
+    expect(text('[data-activity-id="m:mb1"]')).toMatch(/Call.*Jon.*−10 sats/);
+    click('[data-activity-filter="calls"]');
+    await vi.waitFor(() => expect(mount.querySelectorAll('[data-activity-list] .wallet-row')).toHaveLength(1));
+    click('[data-activity-filter="all"]');
+    click('[data-activity-direction="in"]');
+    await vi.waitFor(() => expect(mount.querySelectorAll('[data-activity-list] .wallet-row')).toHaveLength(1));
+    expect(text('[data-activity-list] .wallet-row')).toMatch(/Message received.*Maya.*\+2 sats/);
+    click('[data-activity-filter="payments"]');
+    await vi.waitFor(() => expect($('[data-activity-empty]')).not.toBeNull());
+    expect(text('[data-activity-scope]')).toMatch(/made in this app on this Mac/);
+  });
+});
