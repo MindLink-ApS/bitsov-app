@@ -2,6 +2,7 @@ import solid from 'vite-plugin-solid';
 import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
+  cacheDir: '.cache/vitest',
   plugins: [solid()],
   test: {
     environment: 'happy-dom',

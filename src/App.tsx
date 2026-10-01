@@ -1,3 +1,5 @@
+import { SoftError } from './control/SoftError';
+import { DelayedSpinner } from './control/DelayedSpinner';
 import { isMoneyNotReady } from './control/readiness';
 import { createMemo, createSignal, onCleanup, onMount, Show } from 'solid-js';
 import { qrSvg } from './qr';
@@ -108,22 +110,18 @@ export default function App() {
         when={showIdentityGate()}
         fallback={
           <Show
-            when={status().error}
+            when={status().error && pairing().state !== 'failed'}
             fallback={
               <Show when={starting()}>
                 <div class="state">
-                  <div class="spinner" />
+                  <DelayedSpinner />
                   Starting your node…
                 </div>
               </Show>
             }
           >
             <div class="state error">
-              <div>Your node didn’t start.</div>
-              <code>{status().error}</code>
-              <p class="hint">
-                Check that the node binary is in <code>src-tauri/bin/</code> — see <code>bin/README.md</code>.
-              </p>
+              <SoftError message={status().error!} summary="Your node is unavailable." onReconnect={poll} />
               <Show when={import.meta.env.DEV && source().mode === 'node'}>
                 <button class="quiet" data-use-sample onClick={() => useSample('shell')}>
                   Explore with sample data
@@ -225,12 +223,12 @@ function IdentityGate(props: {
   return (
     <div class="state ready">
       <Show when={busy()}>
-        <div class="spinner" />
+        <DelayedSpinner />
         <div>Restarting with your restored identity…</div>
       </Show>
       <div class="running">
         <div class="dot ok" />
-        <div>Your node is running and connected.</div>
+        <div>Your node is running.</div>
       </div>
       <details class="node-details">
         <summary>Technical node details & address</summary>
@@ -306,7 +304,7 @@ function IdentityGate(props: {
       </Show>
 
       <Show when={displayError()}>
-        <p class="err-note">{displayError()}</p>
+        <SoftError message={displayError()!} />
       </Show>
     </div>
   );
@@ -396,7 +394,7 @@ function Fund(props: { source: Source; ready: () => boolean; moneyBlocked?: () =
 
   return (
     <div class="state ready fund">
-      <Show when={fund() !== undefined} fallback={<div class="spinner" />}>
+      <Show when={fund() !== undefined} fallback={<Show when={!error()}><DelayedSpinner /></Show>}>
         <Show
           when={fund()}
           fallback={
@@ -450,9 +448,7 @@ function Fund(props: { source: Source; ready: () => boolean; moneyBlocked?: () =
                     when={addressError()}
                     fallback={<p class="hint">Waiting for the node to produce a deposit address…</p>}
                   >
-                    <p class="err-note" data-deposit-error>
-                      Your node has no deposit address to show. It said: {addressError()}
-                    </p>
+                    <div data-deposit-error><SoftError message={addressError()!} summary="Your node has no deposit address to show." /></div>
                   </Show>
                 }
               >
@@ -495,7 +491,7 @@ function Fund(props: { source: Source; ready: () => boolean; moneyBlocked?: () =
 
 
       <Show when={error()}>
-        <p class="err-note">{error()}</p>
+        <SoftError message={error()!} />
       </Show>
     </div>
   );

@@ -1,3 +1,5 @@
+import { WelcomeHome } from './WelcomeHome';
+import { DelayedSpinner } from './DelayedSpinner';
 import { MONEY_NOT_READY, readinessLine, readinessSource } from './readiness';
 import { createEffect, createMemo, createResource, createSignal, For, type JSX, Match, on, onCleanup, onMount, Show, Switch, untrack } from 'solid-js';
 import { createStore, produce, reconcile } from 'solid-js/store';
@@ -225,6 +227,7 @@ export function ControlCenter(props: Props) {
     setOverview((old) => old ? { ...old, money_ready: false, readiness: null } : old);
   });
   const [peers, setPeers] = createSignal<Peer[]>([]);
+  const [peersLoaded, setPeersLoaded] = createSignal(false);
   const [rooms, setRooms] = createSignal<Room[]>([]);
   const [members, setMembers] = createStore<Record<string, string[]>>({});
   const [wallet, setWallet] = createSignal<WalletOverview | null>(null);
@@ -428,7 +431,14 @@ export function ControlCenter(props: Props) {
       }
     });
   };
-  const loadPeers = () => attempt('peers', () => source.peers(), setPeers);
+  const loadPeers = () => attempt('peers', () => source.peers(), (value) => {
+    setPeers(value);
+    setPeersLoaded(true);
+    if (!track()) {
+      const first = value.find((p) => p.connected) ?? value[0];
+      if (first) setTrack({ kind: 'peer', id: first.node_id.toLowerCase() });
+    }
+  });
   const loadRooms = () => attempt('rooms', () => source.rooms(), setRooms);
   const loadWallet = () => attempt('wallet', () => source.wallet(), setWallet);
   const loadSpend = () => attempt('spend', () => source.spendStatus(), setSpend);
@@ -526,12 +536,7 @@ export function ControlCenter(props: Props) {
         setOpenedAt(Date.now());
         void loadOverview();
         void loadDoor();
-        void loadPeers().then(() => {
-          if (!track()) {
-            const first = peers().find((p) => p.connected) ?? peers()[0];
-            if (first) setTrack({ kind: 'peer', id: first.node_id.toLowerCase() });
-          }
-        });
+        void loadPeers();
         void loadRooms();
         void loadWallet();
         void loadSpend().then(loadBudget);
@@ -1095,6 +1100,11 @@ export function ControlCenter(props: Props) {
     void loadWallet();
   };
 
+  const welcomeHome = () => <WelcomeHome overview={overview()} moneyBlocked={moneyBlocked()} walletReady={wallet() !== null && !errors.wallet}
+      onShare={() => { setTab('frontdoor'); setContextOpen(true); }}
+      onAddContact={() => setTrack({ kind: 'discover' })}
+      onAddSats={() => openWallet('receive')} />;
+
   return (
     <div class="cc" classList={{ 'no-context': !props.active }} data-mode={source.mode}>
       <Rail
@@ -1112,7 +1122,7 @@ export function ControlCenter(props: Props) {
         unread={threads.unread}
         openKey={openKey()}
         ownId={ownId()}
-        onOpen={setTrack}
+        onOpen={(next) => setTrack(next.kind === 'new' && peersLoaded() && peers().length === 0 && !showLegacyIntroductionUi ? null : next)}
         onProfile={() => {
           setTab('body');
           setContextOpen(true);
@@ -1140,7 +1150,15 @@ export function ControlCenter(props: Props) {
               </p>
             )}
           </Show>
-          <Show when={track()} fallback={<div class="empty-track"><h2>No tracks yet</h2><p class="hint">Peers and rooms your node knows appear on the left.</p></div>}>
+          <Show when={track()} fallback={
+            <Show when={peersLoaded()} fallback={
+              <div class="empty-track">
+                <Show when={errors.peers} fallback={<DelayedSpinner />}>
+                  <SoftError message={errors.peers!} summary="We could not load your contacts." onReconnect={loadPeers} />
+                </Show>
+              </div>
+            }>{welcomeHome()}</Show>
+          }>
             {(t) => (
               <Switch>
                 <Match when={t().kind === 'ai'}>
@@ -1263,6 +1281,7 @@ export function ControlCenter(props: Props) {
                     actions={actions}
                     now={now()}
                     error={errors.thread}
+                    onReconnect={() => loadThread(t())}
                     prefill={prefill()}
                     onPrefillUsed={() => setPrefill(null)}
                     onContext={() => setContextOpen(true)}
@@ -1333,11 +1352,11 @@ export function ControlCenter(props: Props) {
             />
           </Match>
           <Match when={tab() === 'node'}>
-            <NodePanel overview={overview()} link={link()} peers={peers()} now={now()} error={errors.overview ?? errors.peers} />
+            <NodePanel overview={overview()} link={link()} peers={peers()} now={now()} error={errors.overview ?? errors.peers} onReconnect={async () => { await loadOverview(); await loadPeers(); }} />
           </Match>
           <Match when={tab() === 'wallet'}>
             <button type="button" class="primary soft" data-open-wallet-page onClick={() => openWallet()}>Open Wallet</button>
-            <WalletPanel moneyBlocked={moneyBlocked()} wallet={wallet()} error={errors.wallet} fund={props.fund?.(source, moneyBlocked)} />
+            <WalletPanel moneyBlocked={moneyBlocked()} wallet={wallet()} error={errors.wallet} onReconnect={loadWallet} fund={props.fund?.(source, moneyBlocked)} />
           </Match>
           <Match when={tab() === 'budget'}>
             <BudgetPanel
@@ -1600,11 +1619,6 @@ function Rail(props: {
     );
   };
 
-  const initials = () => {
-    const id = props.ownId;
-    return id && id.length >= 2 ? id.slice(0, 2).toUpperCase() : 'BS';
-  };
-
   return (
     <nav class="rail" aria-label="Tracks" inert={props.behind}>
       <div class="mark">
@@ -1690,7 +1704,7 @@ function Rail(props: {
             onClick={() => props.onOpen({ kind: 'discover' })}
           >
             <span class="name">Profiles</span>
-            <span class="meta">paste / scan</span>
+            <span class="meta">paste a card</span>
           </button>
           <button
             class="track-link"
@@ -1740,7 +1754,7 @@ function Rail(props: {
             title="Wallet, profile and settings"
             onClick={() => setMenuOpen((v) => !v)}
           >
-            <span class="avatar-mark" aria-hidden="true">{initials()}</span>
+            <span class="avatar-mark" aria-hidden="true">BS</span>
             <span class="avatar-label">You</span>
           </button>
         </div>
@@ -1839,6 +1853,7 @@ function Conversation(props: {
   actions: Actions;
   now: number;
   error: string | undefined;
+  onReconnect: () => void;
   prefill: Prefill | null;
   onPrefillUsed: () => void;
   onContext: () => void;
@@ -1998,7 +2013,7 @@ function Conversation(props: {
           }}
         </For>
         <Show when={props.error}>
-          <p class="err-note">{props.error}</p>
+          <SoftError message={props.error!} onReconnect={props.onReconnect} />
         </Show>
         </div>
       </div>
@@ -4582,7 +4597,7 @@ function BudgetPanel(props: {
           G1 is a separate finite node grant; it does not refill daily. Not a wallet-wide limit.
         </p>
       </details>
-      <Show when={props.budget} fallback={<Show when={!props.error} fallback={<p class="err-note">{props.error}</p>}><div class="spinner" /></Show>}>
+      <Show when={props.budget} fallback={<Show when={!props.error} fallback={<p class="err-note">{props.error}</p>}><DelayedSpinner /></Show>}>
         {(b) => (
           <>
             <div class="tally" data-tally>
@@ -5439,14 +5454,14 @@ function NewTrack(props: {
 
 // ---- context panels ---------------------------------------------------------
 
-function NodePanel(props: { overview: NodeOverview | null; link: LinkState | null; peers: Peer[]; now: number; error?: string }) {
+function NodePanel(props: { overview: NodeOverview | null; link: LinkState | null; peers: Peer[]; now: number; error?: string; onReconnect: () => Promise<void> }) {
   const fresh = () => freshness(props.overview?.read_at ?? null, props.now);
   const linkText = () =>
     props.link === 'open' ? 'Live' : props.link === 'connecting' ? 'Connecting' : props.link === 'closed' ? 'Reconnecting' : 'Waiting';
   return (
     <div class="panel" data-panel="node">
       <h2>Your node</h2>
-      <Show when={props.overview} fallback={<div class="spinner" />}>
+      <Show when={props.overview} fallback={<Show when={!props.error}><DelayedSpinner /></Show>}>
         {(o) => (
           <dl class="facts">
             <dt>Status</dt>
@@ -5487,7 +5502,7 @@ function NodePanel(props: { overview: NodeOverview | null; link: LinkState | nul
         {fresh().label}
       </p>
       <Show when={props.error}>
-        <p class="err-note">{props.error}</p>
+        <SoftError message={props.error!} onReconnect={props.onReconnect} />
       </Show>
       <h3>Peers</h3>
       <For each={props.peers} fallback={<p class="hint">Your node has no peers yet.</p>}>
@@ -5506,14 +5521,14 @@ function NodePanel(props: { overview: NodeOverview | null; link: LinkState | nul
   );
 }
 
-function WalletPanel(props: { moneyBlocked: boolean; wallet: WalletOverview | null; error?: string; fund?: JSX.Element }) {
+function WalletPanel(props: { moneyBlocked: boolean; wallet: WalletOverview | null; error?: string; onReconnect: () => Promise<void>; fund?: JSX.Element }) {
   const active = () => props.wallet?.channels.filter((c) => c.active).length ?? 0;
   return (
     <>
       <div class="panel" data-panel="wallet">
         <h2>Wallet</h2>
         <p class="hint" data-budget-wallet-warning>Channel and on-chain actions, their fees, and owner-direct commands are outside the app daily all-in limit. Opening or closing a channel can commit funds and incur on-chain fees. Check the amount and fee policy at the owner action; this app limit will not stop it.</p>
-        <Show when={props.wallet} fallback={<Show when={!props.error}><div class="spinner" /></Show>}>
+        <Show when={props.wallet} fallback={<Show when={!props.error}><DelayedSpinner /></Show>}>
           {(w) => (
             <>
               <div class="big-balance">
@@ -5556,7 +5571,7 @@ function WalletPanel(props: { moneyBlocked: boolean; wallet: WalletOverview | nu
           )}
         </Show>
         <Show when={props.error}>
-          <p class="err-note">{props.error}</p>
+          <SoftError message={props.error!} onReconnect={props.onReconnect} />
         </Show>
       </div>
       <Show when={props.fund}>
