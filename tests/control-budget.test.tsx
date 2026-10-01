@@ -1,10 +1,10 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'solid-js/web';
 import App from '../src/App';
 import type { PairingView } from '../src/onboarding/pairing';
 import { sampleSource, SAMPLE_PEERS, SAMPLE_PRESETS } from '../src/control/sample';
 import { resetContactsForTests, setPetname } from '../src/control/petnames';
-import { setShowLegacyIntroductionUi } from '../src/control/Shell';
+import { setShowLegacyIntroductionUi, setShowLegacyRoomsUi } from '../src/control/Shell';
 import { budgetStand, messagesWorth } from '../src/control/state';
 import type { BudgetRow, BudgetView, SpendView } from '../src/control/types';
 
@@ -124,12 +124,17 @@ describe('invisible payments in the composer and the context panel', () => {
   let dispose: (() => void) | undefined;
   let mount: HTMLElement;
 
+  beforeEach(() => {
+    setShowLegacyRoomsUi(true);
+  });
+
   afterEach(() => {
     dispose?.();
     dispose = undefined;
     mount?.remove();
     vi.unstubAllGlobals();
     setShowLegacyIntroductionUi(false);
+    setShowLegacyRoomsUi(false);
   });
 
   const $ = <T extends Element = HTMLElement>(sel: string) => mount.querySelector<T>(sel);

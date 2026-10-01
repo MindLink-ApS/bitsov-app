@@ -17,3 +17,4 @@ pub mod spend_journal;
 pub mod control;
 pub mod jarvis;
 pub mod pairing;
+pub mod remote_access;
