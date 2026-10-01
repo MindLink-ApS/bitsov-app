@@ -44,6 +44,7 @@ use bitsov_app::budget::{self, Book};
 use bitsov_app::grant::{self, NodeGrant};
 use bitsov_app::ai;
 use bitsov_app::control;
+use bitsov_app::porch;
 use bitsov_app::spend_journal::{self, Journal, Target};
 use bitsov_app::jarvis::assistant_source::{Feed, MockReason, NodeAuth};
 use bitsov_app::jarvis::broker::BearerToken;
@@ -1782,7 +1783,7 @@ async fn peers_list(
 ) -> Result<Vec<control::Peer>, String> {
     reject_sealed_window(&window)?;
     drop(window);
-    get_json(state.inner(), "/peers").await.map(control::with_meeting_support)
+    get_json(state.inner(), "/peers").await.map(control::with_meeting_support).map(control::with_porch_support)
 }
 
 /// `GET /rooms`.
@@ -3557,6 +3558,7 @@ async fn check_node_grant(state: &NodeState, path: &str, body: &serde_json::Valu
     let recipient = match path {
         "/payments/keysend" => body["dest_pubkey"].as_str(),
         "/payments/pay" => None,
+        porch::ROUTE => body["node_id"].as_str(),
         _ if body["is_room"].as_bool() == Some(true) => None,
         _ => body["recipient"].as_str(),
     };
@@ -4380,6 +4382,173 @@ async fn do_call_signal(
         accepted: reply.accepted,
         sent_at_ms: now_ms(),
     })
+}
+
+// ---- porch reads (genome BROWSE.md, `porch_read_v1`) ------------------------------
+//
+// One paid read of a contact's card or a page, through the node's
+// `/browse/fetch`. Same authority as a 1:1 message (the budget or the window),
+// one journaled spend at a time, and never a retry: reading again pays again.
+
+/// What one read costs this peer, before anything is paid. Refused when either
+/// node lacks the porch, so a read is never offered where it goes unanswered.
+async fn read_porch_quote(state: &NodeState, peer: &str) -> Result<act::PaymentQuote, ActionError> {
+    let peer = control::node_id(peer).map_err(ActionError::invalid)?;
+    if !node_offers(state, porch::CAPABILITY).await {
+        return Err(porch::refused("porch_unavailable"));
+    }
+    let peers: Vec<control::Peer> = get_json(state, "/peers").await.map_err(ActionError::node)?;
+    match control::with_porch_support(peers).into_iter().find(|p| p.node_id.eq_ignore_ascii_case(&peer)) {
+        Some(p) if p.porch => {}
+        Some(p) if p.connected => return Err(porch::refused("porch_unsupported")),
+        _ => return Err(porch::refused("porch_unreachable")),
+    }
+    let own: control::KindPrice = get_json(state, &control::price_path(porch::KIND_PAGE_REQUEST)).await.map_err(ActionError::node)?;
+    let tables: Vec<control::PeerPrice> = get_json(state, "/pricing/peers").await.map_err(ActionError::node)?;
+    let table = tables.iter().find(|t| t.peer_id.eq_ignore_ascii_case(&peer));
+    act::payment_quote(porch::read_price(table, own.price_msat))
+}
+
+async fn do_porch_read(state: &NodeState, peer: &str, path: &str, max_msat: u64) -> Result<porch::PorchRead, ActionError> {
+    let target = control::node_id(peer).map_err(ActionError::invalid)?;
+    let path = porch::porch_path(path)?;
+    let (auth, plan) = plan_message(state, &target, false, max_msat, None)
+        .map_err(|e| if e.code == "first_contact" { porch::refused("porch_needs_contact") } else { e })?;
+    if plan.confirm.is_some() {
+        return Err(porch::refused("porch_needs_contact"));
+    }
+    no_pending_spend(state)?;
+    let quote = read_porch_quote(state, &target).await?;
+    ceiling(quote.total_msat, max_msat)?;
+    let body = porch::fetch_body(&target, &path, max_msat, quote.max_routing_fee_msat);
+    let charge = Charge {
+        target: target.clone(),
+        room: false,
+        confirm: None,
+        readmission_possible: false,
+        confirmed: false,
+        operation: false,
+    };
+    let (text, accounted) = porch_post(state, auth, body, max_msat, charge).await?;
+    porch::project(&text, &target, &path, accounted, now_unix().max(0) as u64).map_err(|e| {
+        ActionError::new("porch_reply_invalid", format!("Paid {}, but the answer could not be shown: {e}.", porch::amount(accounted)))
+    })
+}
+
+/// `money_post` for a read: its reply is a page, not a send receipt. A refusal
+/// the node proves came before paying releases everything; a paid read with
+/// no usable reply is known money, accounted and not retried; any other
+/// failure keeps the journal fenced as an unknown outcome. Returns the reply
+/// and what it counts against the budget (the all-in ceiling: the node
+/// reports no routing fee for a read).
+async fn porch_post(state: &NodeState, auth: Auth, body: serde_json::Value, max_msat: u64, charge: Charge) -> Result<(String, u64), ActionError> {
+    let _money = state.money.lock().await;
+    let journal = spend_journal(state)?;
+    let prior = journal.pending()?;
+    ensure_fresh_token(state).await;
+    let token = state.token.lock().unwrap().clone().ok_or_else(|| ActionError::new("app_not_ready", "Not authenticated."))?;
+    let node_id = state.node_id.lock().unwrap().clone().ok_or_else(|| ActionError::new("app_not_ready", "No node identity."))?;
+    match &prior {
+        None => {}
+        Some(p) if p.resumable && p.node_id == node_id => {}
+        _ => return Err(spend_journal::unknown("Check the pending result before sending again.")),
+    }
+    let abandon = |journal: &Journal| match &prior {
+        Some(p) => journal.save(p),
+        None => journal.clear(),
+    };
+    refuse_if_paused(state)?;
+    check_auth(state, auth)?;
+    check_node_grant(state, porch::ROUTE, &body, max_msat).await?;
+    let mut pending = journal.begin(&node_id, porch::ROUTE, &body, max_msat)?;
+    pending.all_in = true;
+    let charge_id = pending.charge_id().to_string();
+    if let Err(e) = reserve(state, auth, &charge, &charge_id, max_msat) {
+        abandon(&journal)?;
+        return Err(e);
+    }
+    pending.budgeted = true;
+    journal.save(&pending)?;
+    let release = |state: &NodeState| close_charge(state, &charge_id, None, None);
+    if let Err(e) = refuse_if_paused(state).and_then(|()| check_auth(state, auth)) {
+        release(state)?;
+        abandon(&journal)?;
+        return Err(e);
+    }
+    let response = state.http.post(format!("{}{}", state.api_base, porch::ROUTE))
+        .bearer_auth(token).json(&body).timeout(state.spend_timeout).send().await
+        .map_err(|_| spend_journal::unknown("The node did not return a complete response."))?;
+    let status = response.status();
+    if status == reqwest::StatusCode::FORBIDDEN || status == reqwest::StatusCode::UNAUTHORIZED {
+        release(state)?;
+        abandon(&journal)?;
+        state.autopay.lock().unwrap().lock();
+        *state.node_grant.lock().unwrap() = None;
+        return Err(state.spend.lock().unwrap().refused());
+    }
+    let text = response.text().await.map_err(|_| spend_journal::unknown("The response was interrupted."))?;
+    let code = status.as_u16();
+    let nothing_paid = if act::readiness_refusal(code, &text) {
+        Some(ActionError::new("not_ready", act::MONEY_NOT_READY))
+    } else if act::not_dispatched_refusal(code, &text) {
+        Some(ActionError::new("not_dispatched", act::not_dispatched_message(&text)))
+    } else if let Some(refusal) = grant::refusal(code, &text) {
+        let known = state.node_grant.lock().unwrap().clone();
+        if refusal.ends_grant() { drop_grant(state); }
+        Some(refusal.error(known.as_ref()))
+    } else if act::readmission_capped_refusal(code, &text) {
+        Some(porch::refused("porch_readmission"))
+    } else if status == reqwest::StatusCode::CONFLICT
+        && serde_json::from_str::<serde_json::Value>(&text).ok().is_some_and(|v| v["code"] == "price_cap_exceeded") {
+        Some(ActionError::new("price_cap_exceeded", "The node refused the changed price before any payment. Refresh the quote."))
+    } else {
+        match porch::answer(code, &text) {
+            Some(porch::Answer::Refused(e)) => Some(e),
+            Some(porch::Answer::Paid { paid_msat, error }) => {
+                if paid_msat > max_msat {
+                    pending.over_budget = true;
+                    journal.save(&pending)?;
+                    return Err(spend_journal::unknown(format!("The node reports {paid_msat} msat paid, beyond the confirmed ceiling ({max_msat}). Funds may already have moved; do not retry.")));
+                }
+                pending.accounting_msat = Some(max_msat);
+                journal.save(&pending)?;
+                close_charge(state, &charge_id, Some(max_msat), None)?;
+                journal.clear()?;
+                return Err(error);
+            }
+            None => None,
+        }
+    };
+    if let Some(e) = nothing_paid {
+        release(state)?;
+        abandon(&journal)?;
+        return Err(e);
+    }
+    if !status.is_success() {
+        return Err(spend_journal::unknown(api_error(porch::ROUTE, status, &text)));
+    }
+    let principal = porch::principal(&text).ok_or_else(|| spend_journal::unknown(format!("{} decode failed.", porch::ROUTE)))?;
+    if principal > max_msat {
+        pending.over_budget = true;
+        journal.save(&pending)?;
+        return Err(spend_journal::unknown(format!("The node reports {principal} msat for this read, beyond the confirmed ceiling ({max_msat}). Funds may already have moved; do not retry.")));
+    }
+    pending.accounting_msat = Some(max_msat);
+    journal.save(&pending)?;
+    close_charge(state, &charge_id, Some(max_msat), None)?;
+    journal.clear()?;
+    Ok((text, max_msat))
+}
+
+async fn read_porch_cards(state: &NodeState) -> Result<Vec<porch::PorchCard>, String> {
+    if !node_offers(state, porch::CAPABILITY).await {
+        return Ok(Vec::new());
+    }
+    let (status, text) = call_api(state, reqwest::Method::GET, porch::CARDS_ROUTE, None).await?;
+    if !status.is_success() {
+        return Err(api_error(porch::CARDS_ROUTE, status, &text));
+    }
+    porch::cached_cards(&text, now_unix().max(0) as u64)
 }
 
 async fn do_file_send(
@@ -5246,6 +5415,43 @@ async fn call_signal(
     do_call_signal(state.inner(), &peer, kind, &plaintext, max_msat).await
 }
 
+/// What one porch read of this contact costs, before anything is paid. Read-only.
+#[tauri::command(rename_all = "snake_case")]
+async fn porch_quote(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    peer: String,
+) -> Result<act::PaymentQuote, ActionError> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    read_porch_quote(state.inner(), &peer).await
+}
+
+/// `POST /browse/fetch`: one paid read of a contact's card or page.
+#[tauri::command(rename_all = "snake_case")]
+async fn porch_read(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    peer: String,
+    path: String,
+    max_msat: u64,
+) -> Result<porch::PorchRead, ActionError> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    do_porch_read(state.inner(), &peer, &path, max_msat).await
+}
+
+/// `GET /browse/cards`: the verified cards this node holds. Never pays.
+#[tauri::command(rename_all = "snake_case")]
+async fn porch_cards(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+) -> Result<Vec<porch::PorchCard>, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    read_porch_cards(state.inner()).await
+}
+
 /// `GET /files` then `GET /files/:id`: a received voice note, for playback.
 #[tauri::command(rename_all = "snake_case")]
 async fn voice_note_fetch(
@@ -5864,6 +6070,9 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             file_save,
             call_quote,
             call_signal,
+            porch_quote,
+            porch_read,
+            porch_cards,
             ai_read,
             ai_providers,
             ai_disclose,
@@ -8398,6 +8607,168 @@ mod control_act_tests {
         let err = do_call_signal(&node.state, C, 400, OFFER, 15_000).await.unwrap_err();
         assert_eq!(err.code, "call_needs_contact", "{err:?}");
         assert!(!node.posts().iter().any(|(p, _)| p == "/messages/compose"));
+    }
+
+    /// A signed card for the node behind `key` (a porch peer must be a real key).
+    fn porch_card(key: &ed25519_dalek::SigningKey, seq: u64) -> bitsov_app::front_door::Card {
+        use bitsov_app::front_door::{Card, FrontDoorPrices, FrontDoorProfile, ProfileKind};
+        use ed25519_dalek::Signer;
+        let now = now_unix().max(0) as u64;
+        let mut card = Card {
+            v: 1,
+            network: "regtest".into(),
+            node_id: hex::encode(key.verifying_key().to_bytes()),
+            endpoint: "node.example.org:9000".into(),
+            reach: bitsov_app::introduction::Reach::Public,
+            seq,
+            issued_at: now,
+            expires_at: now + 24 * 3600,
+            prices: FrontDoorPrices { admission_msat: 100_000, message_msat: 10_000, page_msat: 1_000, price_epoch: 0 },
+            profile: FrontDoorProfile { kind: ProfileKind::Person, display_name: "Maya".into(), tagline: String::new(), about: String::new(), avatar: None },
+            cv: None,
+            media: vec![],
+            site: None,
+            links: vec![],
+            sig: String::new(),
+        };
+        card.sig = hex::encode(key.sign(&card.digest().unwrap()).to_bytes());
+        card
+    }
+
+    /// A node with the porch, one porch peer (`peer`, connected and advertising)
+    /// and A connected without the advert. `fetch` answers `/browse/fetch`.
+    fn porch_routes(peer: String, own_caps: &'static [&'static str], fetch: Routes) -> Routes {
+        let inner = happy();
+        Arc::new(move |m, p, b| {
+            let (route, _) = p.split_once('?').unwrap_or((p, ""));
+            match route {
+                "/status" => (200, serde_json::json!({"api_capabilities": own_caps}).to_string()),
+                "/peers" => (200, serde_json::json!([
+                    {"node_id": peer, "connected": true, "capabilities": ["X3dh", "Custom(\"porch_read_v1\")"]},
+                    {"node_id": A, "connected": true, "capabilities": ["X3dh"]},
+                ]).to_string()),
+                "/payments/price/500" => (200, serde_json::json!({"kind": 500, "price_msat": 50}).to_string()),
+                "/pricing/peers" => (200, serde_json::json!([{"peer_id": peer, "prices": {"web_content": 1000}, "age_secs": 5, "stale": false}]).to_string()),
+                "/browse/fetch" | "/browse/cards" => fetch(m, p, b),
+                _ => inner(m, p, b),
+            }
+        })
+    }
+
+    fn porch_node(fetch: Routes) -> (Fake, String, ed25519_dalek::SigningKey) {
+        let key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let peer = hex::encode(key.verifying_key().to_bytes());
+        let node = fake(AuthMode::Local, porch_routes(peer.clone(), &["porch_read_v1"], fetch));
+        (node, peer, key)
+    }
+
+    async fn porch_budget(node: &Fake, peer: &str) {
+        do_budget_approve(&node.state, 500_000, budget::PresetId::Careful).await.unwrap();
+        with_book(&node.state, true, |b| b.set_limit(peer, false, 50_000)).unwrap();
+    }
+
+    fn fetches(node: &Fake) -> Vec<serde_json::Value> {
+        node.posts().into_iter().filter(|(p, _)| p == porch::ROUTE).map(|(_, b)| b).collect()
+    }
+
+    #[tokio::test]
+    async fn a_porch_read_pays_its_quote_once_and_shows_the_verified_card() {
+        let key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let card = porch_card(&key, 2);
+        let reply = serde_json::json!({
+            "node_id": card.node_id, "path": porch::CARD_PATH, "status": "Ok", "content_type": "application/json",
+            "body": "{}", "amount_msat": 1000, "message_id": "ab".repeat(32),
+            "card": {"card": card, "link": card.to_link().unwrap(), "fresh": true},
+        }).to_string();
+        let (node, peer, _) = porch_node(Arc::new(move |_, _, _| (200, reply.clone())));
+        porch_budget(&node, &peer).await;
+        let quote = read_porch_quote(&node.state, &peer).await.unwrap();
+        assert_eq!((quote.principal_msat, quote.max_routing_fee_msat, quote.total_msat), (1_000, 5_000, 6_000));
+        let read = do_porch_read(&node.state, &peer, porch::CARD_PATH, quote.total_msat).await.unwrap();
+        assert_eq!((read.status, read.kind, read.amount_msat, read.total_msat), ("ok", "card", 1_000, 6_000));
+        let shown = read.card.unwrap();
+        assert_eq!((shown.view.profile.display_name.as_str(), shown.view.seq, shown.cached), ("Maya", 2, false));
+        assert_eq!(fetches(&node), [serde_json::json!({"node_id": peer, "path": "/front-door.json", "max_total_msat": 6000, "max_routing_fee_msat": 5000})]);
+        assert_eq!(budget_now(&node.state).spent_msat, 6_000);
+        assert!(spend_journal(&node.state).unwrap().pending().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_porch_read_is_refused_before_paying_where_it_cannot_be_answered_or_authorised() {
+        let (node, peer, _) = porch_node(Arc::new(|_, _, _| (500, "{}".into())));
+        porch_budget(&node, &peer).await;
+        let code = |e: ActionError| e.code;
+        // Not a porch page: refused before any request.
+        assert_eq!(code(do_porch_read(&node.state, &peer, "/site.html", 6_000).await.unwrap_err()), "porch_path_invalid");
+        // A contact whose node does not advertise the porch.
+        with_book(&node.state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
+        assert_eq!(code(do_porch_read(&node.state, A, "/index.md", 6_000).await.unwrap_err()), "porch_unsupported");
+        // Not connected, or not listed at all.
+        with_book(&node.state, true, |b| b.set_limit(C, false, 50_000)).unwrap();
+        assert_eq!(code(do_porch_read(&node.state, C, "/index.md", 6_000).await.unwrap_err()), "porch_unreachable");
+        // The confirmed ceiling is below the quote.
+        assert_eq!(code(do_porch_read(&node.state, &peer, "/index.md", 5_999).await.unwrap_err()), "price_changed");
+        // Not in the budget: a stranger is never read under it.
+        let (stranger, other, _) = porch_node(Arc::new(|_, _, _| (500, "{}".into())));
+        do_budget_approve(&stranger.state, 500_000, budget::PresetId::Careful).await.unwrap();
+        assert_eq!(code(do_porch_read(&stranger.state, &other, "/index.md", 6_000).await.unwrap_err()), "porch_needs_contact");
+        // This node has no porch.
+        let key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let old = fake(AuthMode::Local, porch_routes(hex::encode(key.verifying_key().to_bytes()), &[], Arc::new(|_, _, _| (500, "{}".into()))));
+        porch_budget(&old, &other).await;
+        assert_eq!(code(do_porch_read(&old.state, &other, "/index.md", 6_000).await.unwrap_err()), "porch_unavailable");
+        assert!(read_porch_cards(&old.state).await.unwrap().is_empty());
+        for n in [&node, &stranger, &old] {
+            assert!(fetches(n).is_empty(), "{:?}", n.posts());
+            assert_eq!(budget_now(&n.state).spent_msat, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn the_node_refusing_a_read_before_paying_releases_the_budget_and_the_journal() {
+        for (status, reason) in [(409, "porch_knock_first"), (409, "porch_unreachable"), (409, "porch_busy")] {
+            let body = serde_json::json!({"error": format!("{reason}: detail"), "code": status, "reason": reason}).to_string();
+            let (node, peer, _) = porch_node(Arc::new(move |_, _, _| (status, body.clone())));
+            porch_budget(&node, &peer).await;
+            let err = do_porch_read(&node.state, &peer, "/index.md", 6_000).await.unwrap_err();
+            assert_eq!(err.code, reason);
+            assert!(err.message.ends_with("Nothing was paid."), "{}", err.message);
+            assert_eq!(fetches(&node).len(), 1);
+            assert_eq!(budget_now(&node.state).spent_msat, 0, "{reason}");
+            assert!(spend_journal(&node.state).unwrap().pending().unwrap().is_none(), "{reason}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_paid_read_without_an_answer_is_accounted_and_an_unknown_one_stays_fenced() {
+        let timeout = r#"{"error":"porch_timeout: paid 1000 msat, no reply within 20 s; not retried, a retry pays again","code":502,"reason":"porch_timeout"}"#;
+        let (node, peer, _) = porch_node(Arc::new(move |_, _, _| (502, timeout.into())));
+        porch_budget(&node, &peer).await;
+        let err = do_porch_read(&node.state, &peer, "/index.md", 6_000).await.unwrap_err();
+        assert_eq!(err.code, "porch_timeout");
+        assert!(err.message.starts_with("Paid 1 sat"), "{}", err.message);
+        assert_eq!(budget_now(&node.state).spent_msat, 6_000);
+        assert!(spend_journal(&node.state).unwrap().pending().unwrap().is_none(), "known money: nothing left to reconcile");
+
+        let (node, peer, _) = porch_node(Arc::new(|_, _, _| (500, r#"{"error":"boom","code":500}"#.into())));
+        porch_budget(&node, &peer).await;
+        assert_eq!(do_porch_read(&node.state, &peer, "/index.md", 6_000).await.unwrap_err().code, "spend_unknown");
+        assert!(spend_journal(&node.state).unwrap().pending().unwrap().is_some());
+        assert_eq!(do_porch_read(&node.state, &peer, "/index.md", 6_000).await.unwrap_err().code, "spend_unknown");
+        assert_eq!(fetches(&node).len(), 1, "never re-dispatched");
+    }
+
+    #[tokio::test]
+    async fn held_cards_are_read_without_paying() {
+        let key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let card = porch_card(&key, 4);
+        let cards = serde_json::json!({"cards": [{"card": card, "link": card.to_link().unwrap(), "fresh": true}]}).to_string();
+        let (node, _, _) = porch_node(Arc::new(move |m, p, _| if m == "GET" && p == porch::CARDS_ROUTE { (200, cards.clone()) } else { (404, "{}".into()) }));
+        let held = read_porch_cards(&node.state).await.unwrap();
+        assert_eq!(held.len(), 1);
+        assert!(held[0].cached);
+        assert_eq!(held[0].view.seq, 4);
+        assert!(node.posts().is_empty());
     }
 
     #[tokio::test]
@@ -11736,6 +12107,9 @@ mod assistant_acl_tests {
                 "file_save",
                 "call_quote",
                 "call_signal",
+                "porch_quote",
+                "porch_read",
+                "porch_cards",
                 // AI track: main window only, reads through the broker.
                 "ai_read",
                 "ai_providers",

@@ -282,7 +282,8 @@ impl Card {
         .map_err(|e| e.to_string())
     }
 
-    fn digest(&self) -> Result<[u8; 32], String> {
+    /// What `sig` signs: BLAKE3 over the domain and the canonical JSON without `sig`.
+    pub fn digest(&self) -> Result<[u8; 32], String> {
         let mut buf = Vec::with_capacity(DOMAIN_V1.len() + 256);
         buf.extend_from_slice(DOMAIN_V1);
         buf.extend_from_slice(&self.canonical_json()?);

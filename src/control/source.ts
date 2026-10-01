@@ -13,6 +13,8 @@ import type {
   FundingStatus,
   FrontDoor,
   FrontDoorPublish,
+  PorchCard,
+  PorchRead,
   Introduction,
   SponsorOwnerApproval,
   SponsorCandidate,
@@ -94,6 +96,12 @@ export interface Source {
   frontDoorPublish(fields: FrontDoorPublish): Promise<FrontDoor>;
   /** Front door: blake3-hex of base64 bytes (avatar/media/CV prep). */
   frontDoorHashBytes(bytesB64: string): Promise<string>;
+  /** Porch (`porch_read_v1`): what one read of this contact costs. Pays nothing. */
+  porchQuote(peer: string): Promise<PaymentQuote>;
+  /** One paid read of the card (`/front-door.json`) or a flat page, under `maxMsat`. Never retried. */
+  porchRead(peer: string, path: string, maxMsat: number): Promise<PorchRead>;
+  /** Cards this node holds from earlier reads, verified again. Pays nothing. */
+  porchCards(): Promise<PorchCard[]>;
   /** K1 slice 2 (sponsor): whether the owner turned starter bitcoin on. */
   sponsorStatus(): Promise<SponsorStatus>;
   /** A fresh introduction with starter bitcoin (spend window). */
@@ -239,6 +247,9 @@ export const hostSource: Source = {
       },
     }),
   frontDoorHashBytes: (bytesB64) => invoke<string>('front_door_hash_bytes', { bytes_b64: bytesB64 }),
+  porchQuote: (peer) => invoke<PaymentQuote>('porch_quote', { peer }),
+  porchRead: (peer, path, maxMsat) => invoke<PorchRead>('porch_read', { peer, path, max_msat: maxMsat }),
+  porchCards: () => invoke<PorchCard[]>('porch_cards'),
   sponsorStatus: () => invoke<SponsorStatus>('sponsor_status'),
   sponsorOffer: () => invoke<Introduction>('sponsor_offer'),
   sponsorCandidate: (request) => invoke<SponsorCandidate>('sponsor_candidate', { request }),

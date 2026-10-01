@@ -681,6 +681,17 @@ button.small:not(.primary) { font-size: var(--t-xs); padding: 4px 10px; backgrou
 .discover textarea, [data-panel="front-door"] textarea { width: 100%; }
 [data-fd-link] { display: block; word-break: break-all; font-size: 11px; margin-top: var(--s-2); }
 
+/* Porch reads */
+.porch-peers, .porch-held ul { list-style: none; padding: 0; margin: 0; display: grid; gap: var(--s-2); }
+.porch-peers li, .porch-held li { display: flex; flex-wrap: wrap; gap: var(--s-3); align-items: baseline; }
+.porch-reader { display: grid; gap: var(--s-3); margin-top: var(--s-4); }
+.porch-pages { display: flex; flex-wrap: wrap; gap: var(--s-3); align-items: baseline; }
+.porch-other { display: flex; gap: var(--s-2); align-items: baseline; }
+.porch-page { padding: var(--s-4) 0; border-top: 1px solid var(--line); max-width: 68ch; overflow-wrap: anywhere; }
+.porch-page blockquote { margin: 0; padding-left: var(--s-3); border-left: 2px solid var(--line); color: var(--muted); }
+.porch-text { font-family: var(--font-mono); font-size: var(--t-sm); white-space: pre-wrap; overflow-wrap: anywhere; background: var(--surface); padding: var(--s-3); border-radius: 4px; }
+.porch-held { margin-top: var(--s-5); }
+
 /* ---- calls (regtest prototype) ---- */
 .call-buttons { display: flex; gap: var(--s-2); flex: none; }
 .call-button { font-size: var(--t-sm); padding: 4px 10px; }
