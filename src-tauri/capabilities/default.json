@@ -25,6 +25,7 @@
     "allow-rooms-list",
     "allow-room-members",
     "allow-messages-list",
+    "allow-room-thread",
     "allow-price-quote",
     "allow-first-contact-quote",
     "allow-introduction-mine",

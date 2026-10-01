@@ -36,7 +36,12 @@ export type Message = {
   timestamp: number;
   plaintext: string | null;
   payment_amount_msat: number | null;
+  /** Room thread (`room_thread`) only: our one room message, each member's copy. */
+  copies?: RoomCopy[];
 };
+
+/** One member's copy of our own room message (genome `RoomCopy`). */
+export type RoomCopy = { recipient: string; id: string; payment_amount_msat: number | null };
 
 /**
  * `price_quote`. `own_msat` is what *this* node charges for a text message.

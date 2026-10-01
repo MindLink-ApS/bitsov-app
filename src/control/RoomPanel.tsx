@@ -10,10 +10,10 @@ import { createEffect, createMemo, createSignal, For, on, Show, Switch, Match, t
 import { createStore, reconcile } from 'solid-js/store';
 import { amount as fmtAmount, clock, day, sats, satUnit } from './format';
 import {
-  MAX_MEMBERS, planLegs, planTotal, roomChatText, roomThread,
-  type LegOutcome, type LegPlan, type LocalRoom, type MemberInfo,
+  MAX_MEMBERS, newMsgId, planLegs, planTotal, roomChatText, roomRefusalWords, roomThread,
+  type LegOutcome, type LegPlan, type LocalRoom, type MemberInfo, type RoomEntry,
 } from './room';
-import type { Message, PriceQuote } from './types';
+import type { Delivery, Message, PriceQuote } from './types';
 
 export type RoomContact = { id: string; name: string } & MemberInfo;
 
@@ -94,6 +94,12 @@ export function RoomThread(props: {
   nameOf: (id: string) => string;
   /** This room's chats (every member's copy of ours included). */
   messages: Message[];
+  /** What each member's node said about a copy of ours (a refusal after payment). */
+  deliveries: Record<string, Delivery>;
+  /** The node has older messages in this room. */
+  earlier: boolean;
+  loadingEarlier: boolean;
+  onEarlier: () => void;
   sends: RoomSend[];
   fresh: Record<string, true>;
   info: (peer: string) => MemberInfo | undefined;
@@ -155,7 +161,8 @@ export function RoomThread(props: {
     setReview(null);
     setBusy(true);
     try {
-      await props.send(rv.legs, roomChatText(props.room, rv.text), rv.text);
+      // One msg for every member's copy, so each node shows it as one message.
+      await props.send(rv.legs, roomChatText(props.room, newMsgId(), rv.text), rv.text);
       if (draft() === rv.text) setDraft('');
     } finally {
       setBusy(false);
@@ -163,10 +170,10 @@ export function RoomThread(props: {
     }
   };
 
-  type Item = { at: number; message?: Message; send?: RoomSend };
+  type Item = { at: number; entry?: RoomEntry; send?: RoomSend };
   const items = createMemo<Item[]>(() =>
     [
-      ...roomThread(props.messages, props.ownId).map((m) => ({ at: m.timestamp, message: m })),
+      ...roomThread(props.messages, props.ownId).map((e) => ({ at: e.timestamp, entry: e })),
       ...props.sends.map((s) => ({ at: s.at + 1, send: s })),
     ].sort((a, b) => a.at - b.at));
   let stream: HTMLDivElement | undefined;
@@ -197,6 +204,11 @@ export function RoomThread(props: {
           <p class="day" data-room-honesty>
             Each message is a separate paid, end-to-end encrypted message to each member. There is no group key and no moderation.
           </p>
+          <Show when={props.earlier}>
+            <button type="button" class="link" data-room-earlier disabled={props.loadingEarlier} onClick={() => props.onEarlier()}>
+              {props.loadingEarlier ? 'Loading…' : 'Show earlier messages'}
+            </button>
+          </Show>
           <For each={items()} fallback={<div class="empty-track"><h2>Nothing here yet</h2><p class="hint">Your first message pays each member their own price.</p></div>}>
             {(item, i) => {
               const prev = () => items()[i() - 1];
@@ -205,14 +217,32 @@ export function RoomThread(props: {
                 <>
                   <Show when={newDay()}><p class="day">{day(item.at)}</p></Show>
                   <Switch>
-                    <Match when={item.message}>
-                      {(m) => {
-                        const out = () => m().sender.toLowerCase() === own();
+                    <Match when={item.entry}>
+                      {(e) => {
+                        const out = () => e().sender === own();
+                        // A member's node refused our paid copy: said plainly, per member.
+                        const refusals = () => e().copies.flatMap((c) => {
+                          const d = props.deliveries[c.id];
+                          return d?.status === 'rejected' ? [{ peer: c.recipient, words: roomRefusalWords(d.reason) ?? 'Their node refused it.' }] : [];
+                        });
                         return (
-                          <article class={`msg ${out() ? 'out' : 'in'}`} classList={{ fresh: !!props.fresh[m().id] }} data-message={m().id}>
-                            <Show when={!out()}><span class="who">{props.nameOf(m().sender)}</span></Show>
-                            <div class="bubble" data-kind={0}>{roomText(m())}</div>
-                            <div class="stamp"><span>{clock(m().timestamp)}</span></div>
+                          <article class={`msg ${out() ? 'out' : 'in'}`} classList={{ fresh: e().ids.some((id) => props.fresh[id]) }}
+                            data-message={e().ids[0]} data-room-msg={e().msg} data-room-copies={out() ? e().copies.length : undefined}>
+                            <Show when={!out()}><span class="who">{props.nameOf(e().sender)}</span></Show>
+                            <div class="bubble" data-kind={0}>{e().text}</div>
+                            <div class="stamp">
+                              <span>{clock(e().timestamp)}</span>
+                              <Show when={out() && e().copies.length > 0}>
+                                <span data-room-to> · to {e().copies.map((c) => props.nameOf(c.recipient)).join(', ')}</span>
+                              </Show>
+                            </div>
+                            <For each={refusals()}>
+                              {(r) => (
+                                <p class="hint" data-room-refused={r.peer}>
+                                  {props.nameOf(r.peer)}: {r.words} It was paid; do not send it again.
+                                </p>
+                              )}
+                            </For>
                           </article>
                         );
                       }}
@@ -228,7 +258,7 @@ export function RoomThread(props: {
                               {(o) => (
                                 <li data-room-leg={o.peer} data-leg-state={o.state}>
                                   <strong>{props.nameOf(o.peer)}</strong>{' '}
-                                  <span class="hint">{OUTCOME[o.state]}{o.paidMsat > 0 ? ` · up to ${fmtAmount(o.paidMsat)}` : ' · not charged'}{o.note && o.state !== 'sent' ? ` · ${o.note}` : ''}</span>
+                                  <span class="hint" data-room-leg-note>{legOutcome(o)}</span>
                                 </li>
                               )}
                             </For>
@@ -310,12 +340,12 @@ export function RoomThread(props: {
   );
 }
 
-/** The text of a room chat (the binding itself is never shown). */
-function roomText(m: Message): string {
-  try {
-    const v = JSON.parse(m.plaintext ?? '') as { text?: unknown };
-    return typeof v.text === 'string' ? v.text : '';
-  } catch {
-    return '';
-  }
+/**
+ * One member's leg after a send, as a sentence. A refusal before payment is
+ * the host's own plain sentence (it says nothing was paid).
+ */
+function legOutcome(o: LegOutcome): string {
+  if (o.state === 'failed' && o.paidMsat === 0 && o.note) return o.note;
+  const paid = o.paidMsat > 0 ? ` · up to ${fmtAmount(o.paidMsat)}` : ' · not charged';
+  return `${OUTCOME[o.state]}${paid}${o.note && o.state !== 'sent' ? ` · ${o.note}` : ''}`;
 }

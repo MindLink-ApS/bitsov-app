@@ -119,6 +119,19 @@ pub struct Message {
     pub plaintext: Option<String>,
     #[serde(default)]
     pub payment_amount_msat: Option<u64>,
+    /// Room thread (`?room=`) only: our one room message is one entry, and
+    /// this lists each member's copy. Empty everywhere else.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub copies: Vec<RoomCopy>,
+}
+
+/// One member's copy of our own room message (genome `RoomCopy`).
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+pub struct RoomCopy {
+    pub recipient: String,
+    pub id: String,
+    #[serde(default)]
+    pub payment_amount_msat: Option<u64>,
 }
 
 /// `GET /payments/price/:kind` — `PriceResponse`.
@@ -680,6 +693,20 @@ pub fn messages_path(peer: &str, before: Option<u64>, limit: Option<u32>) -> Res
     Ok(path)
 }
 
+/// `GET /messages?room=`: a bound room's thread (genome `room_binding_v1`),
+/// both directions. The room id is 64 lowercase hex, never a peer: the two
+/// are the same shape, so this is its own path. `before`/`limit` count whole
+/// messages.
+pub fn room_thread_path(room: &str, before: Option<u64>, limit: Option<u32>) -> Result<String, String> {
+    let room = node_id(room).map_err(|_| "expected a 64-character hex room id".to_string())?;
+    let limit = limit.unwrap_or(DEFAULT_PAGE).clamp(1, MAX_PAGE);
+    let mut path = format!("/messages?room={room}&limit={limit}");
+    if let Some(before) = before {
+        path.push_str(&format!("&before={before}"));
+    }
+    Ok(path)
+}
+
 pub fn room_members_path(id: &str) -> Result<String, String> {
     Ok(format!("/rooms/{}/members", room_id(id)?))
 }
@@ -830,6 +857,7 @@ pub fn parse_ws_frame(text: &str) -> Option<LiveEvent> {
             timestamp: env.timestamp,
             plaintext: env.plaintext,
             payment_amount_msat: env.payment_proof.and_then(|p| p.amount_msat),
+            copies: Vec::new(),
         },
         room_id,
     })
@@ -983,6 +1011,27 @@ mod tests {
         );
         assert!(messages_path(A, None, Some(0)).unwrap().contains("limit=1"));
         assert!(messages_path("zz&limit=1000", None, None).is_err());
+    }
+
+    #[test]
+    fn a_room_thread_is_its_own_path_and_keeps_each_copy() {
+        let room = "AB".repeat(32);
+        assert_eq!(room_thread_path(&room, None, None).unwrap(), format!("/messages?room={}&limit=50", "ab".repeat(32)));
+        assert_eq!(room_thread_path(&room, Some(7), Some(5000)).unwrap(), format!("/messages?room={}&limit=200&before=7", "ab".repeat(32)));
+        assert!(room_thread_path(ROOM, None, None).is_err(), "a UUID room is not a bound room");
+        assert!(room_thread_path(&format!("{}&peer=x", "ab".repeat(32)), None, None).is_err());
+        let body = serde_json::json!([{
+            "id": "c2", "kind": 0, "sender": A, "recipient": "ab".repeat(32), "timestamp": 9,
+            "ciphertext": "deadbeef", "payment_amount_msat": 5000, "payment_hash": "ff", "plaintext": "{}",
+            "room": {"id": "ab".repeat(32), "roster": [], "salt": "00"}, "room_msg": "11",
+            "copies": [{"recipient": "bb", "id": "c1", "payment_amount_msat": 2000}, {"recipient": "cc", "id": "c2", "payment_amount_msat": 3000}]
+        }, {"id": "x", "kind": 0, "sender": A, "recipient": "bb", "timestamp": 1}]);
+        let messages: Vec<Message> = serde_json::from_value(body).unwrap();
+        let out = serde_json::to_value(&messages).unwrap();
+        assert_eq!(out[0]["copies"][1], serde_json::json!({"recipient": "cc", "id": "c2", "payment_amount_msat": 3000}));
+        assert!(out[1].get("copies").is_none(), "no copies outside a room thread");
+        let text = out.to_string();
+        assert!(!text.contains("deadbeef") && !text.contains("payment_hash"), "{text}");
     }
 
     #[test]

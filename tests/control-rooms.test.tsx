@@ -1,11 +1,12 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'solid-js/web';
 import App from '../src/App';
 import type { PairingView } from '../src/onboarding/pairing';
 import type { BudgetView, LiveEvent, Message, PriceQuote, SendReceipt, SpendView } from '../src/control/types';
 import {
-  leaveRoom, localRooms, makeRoster, parseRoomChat, planLegs, planTotal, rememberRoom, resetRooms, roomChatText, roomOf, roomThread, sendRoom, SKIP,
-  type LegPlan, type MemberInfo,
+  admitRoom, leaveRoom, localRooms, makeRoster, newMsgId, newRoom, parseRoomChat, planLegs, planTotal, rememberRoom, resetRooms, roomChatText, roomIdOf, roomOf,
+  roomRefusalWords, roomThread, sendRoom, SKIP, verifyRoom,
+  type LegPlan, type MemberInfo, type RoomBinding,
 } from '../src/control/room';
 import { resetContactsForTests, setPetname } from '../src/control/petnames';
 
@@ -14,7 +15,10 @@ const A = 'a'.repeat(64);
 const B = 'b'.repeat(64);
 const C = 'c'.repeat(64);
 const D = 'd'.repeat(64);
-const RID = 'e'.repeat(32);
+const SALT = '07'.repeat(16);
+const MSG = '00112233445566778899aabbccddeeff';
+/** A room as the genome builds it: sorted roster, a salt, and the id that commits to both. */
+const bind = async (roster: string[], salt = SALT): Promise<RoomBinding> => ({ id: await roomIdOf(roster, salt), roster, salt });
 const quote = (peer_msat: number): PriceQuote => ({ kind: 0, own_msat: 1000, peer_msat, peer_age_secs: 30, peer_stale: false, max_routing_fee_msat: 500 });
 const ok: MemberInfo = { contact: true, connected: true, rooms: true, session: true };
 const receipt = (recipient: string, max: number, n = 1): SendReceipt => ({
@@ -22,41 +26,94 @@ const receipt = (recipient: string, max: number, n = 1): SendReceipt => ({
 });
 
 describe('room chat format', () => {
-  const room = { id: RID, roster: [OWN, A, B] };
-  it('round-trips exactly the binding the node checks', () => {
-    const pt = roomChatText(room, 'hello');
-    expect(JSON.parse(pt)).toEqual({ v: 1, room: { id: RID, roster: [OWN, A, B] }, text: 'hello' });
-    expect(parseRoomChat(0, pt)).toEqual({ room, text: 'hello' });
+  let room: RoomBinding;
+  beforeAll(async () => { room = await bind([OWN, A, B]); });
+  it('the id is the genome’s: SHA-256 of the domain, the roster size, each sorted member and the salt', async () => {
+    // konsensus-core payloads::room::the_room_id_commits_to_the_roster_and_salt: nodes [1;32],[2;32],[3;32], salt [7;16].
+    const node = (b: number) => b.toString(16).padStart(2, '0').repeat(32);
+    expect(await roomIdOf([node(1), node(2), node(3)], '07'.repeat(16))).toBe('ae52d5b56fbe295723d99bf99eded3910ed3fcffe4ee8daf054edc479a0e9be6');
+    const one = await newRoom(OWN, [B, A]);
+    const two = await newRoom(OWN, [A, B]);
+    expect(one.roster).toEqual([OWN, A, B]);
+    expect(one.salt).toMatch(/^[0-9a-f]{32}$/);
+    expect(one.id).not.toBe(two.id);
+    expect(await verifyRoom(one)).toBe(true);
   });
-  it('is as strict as the node: unknown fields, unsorted or oversized rosters, bad ids, other kinds and empty text are not room chats', () => {
+  it('a room id names exactly one roster and salt: any other is not that room', async () => {
+    expect(await verifyRoom(room)).toBe(true);
+    expect(await verifyRoom({ ...room, roster: [OWN, A, C] })).toBe(false);
+    expect(await verifyRoom({ ...room, roster: [OWN, A] })).toBe(false);
+    expect(await verifyRoom({ ...room, roster: [OWN, A, B, C] })).toBe(false);
+    expect(await verifyRoom({ ...room, salt: '08'.repeat(16) })).toBe(false);
+    expect(await verifyRoom({ ...room, id: 'ab'.repeat(32) })).toBe(false);
+  });
+  it('round-trips exactly the binding the node checks, with one msg id', () => {
+    const pt = roomChatText(room, MSG, 'hello');
+    expect(JSON.parse(pt)).toEqual({ v: 1, room: { id: room.id, roster: [OWN, A, B], salt: SALT }, msg: MSG, text: 'hello' });
+    expect(parseRoomChat(0, pt)).toEqual({ room, msg: MSG, text: 'hello' });
+    expect(newMsgId()).toMatch(/^[0-9a-f]{32}$/);
+    expect(newMsgId()).not.toBe(newMsgId());
+  });
+  it('is as strict as the node: unknown fields, a missing salt or msg, unsorted or oversized rosters, bad ids, other kinds and empty text are not room chats', () => {
+    const chat = (over: Record<string, unknown>, r: Record<string, unknown> = room) => JSON.stringify({ v: 1, room: r, msg: MSG, text: 'x', ...over });
     const bad = [
-      JSON.stringify({ v: 1, room, text: 'x', extra: 1 }),
-      JSON.stringify({ v: 1, room: { ...room, name: 'n' }, text: 'x' }),
-      JSON.stringify({ v: 2, room, text: 'x' }),
-      JSON.stringify({ v: 1, room: { id: RID, roster: [A, OWN] }, text: 'x' }),
-      JSON.stringify({ v: 1, room: { id: RID, roster: [OWN, A, B, C, D] }, text: 'x' }),
-      JSON.stringify({ v: 1, room: { id: RID, roster: [OWN] }, text: 'x' }),
-      JSON.stringify({ v: 1, room: { id: RID.toUpperCase(), roster: [OWN, A] }, text: 'x' }),
-      JSON.stringify({ v: 1, room, text: '' }),
+      chat({ extra: 1 }),
+      chat({}, { ...room, name: 'n' }),
+      chat({}, { id: room.id, roster: room.roster }),
+      chat({}, { ...room, salt: '07' }),
+      chat({}, { ...room, id: room.id.slice(0, 32) }),
+      chat({}, { ...room, id: room.id.toUpperCase() }),
+      chat({}, { ...room, roster: [A, OWN] }),
+      chat({}, { ...room, roster: [OWN, A, B, C, D] }),
+      chat({}, { ...room, roster: [OWN] }),
+      chat({ v: 2 }),
+      chat({ text: '' }),
+      chat({ msg: 'ABC' }),
+      chat({ msg: MSG.toUpperCase() }),
+      JSON.stringify({ v: 1, room, text: 'x' }),
       'plain words',
     ];
-    for (const pt of bad) expect(parseRoomChat(0, pt)).toBeNull();
-    expect(parseRoomChat(400, roomChatText(room, 'x'))).toBeNull();
+    for (const pt of bad) expect(parseRoomChat(0, pt), pt).toBeNull();
+    expect(parseRoomChat(400, roomChatText(room, MSG, 'x'))).toBeNull();
   });
-  it('a chat counts only when its roster holds the sender and us', () => {
-    const m = (sender: string, roster: string[]): Message => ({ id: 'm', kind: 0, sender, recipient: OWN, timestamp: 1, plaintext: roomChatText({ id: RID, roster }, 'x'), payment_amount_msat: 0 });
-    expect(roomOf(m(A, [OWN, A]), OWN)).not.toBeNull();
-    expect(roomOf(m(C, [OWN, A]), OWN)).toBeNull();
-    expect(roomOf(m(A, [A, B]), OWN)).toBeNull();
+  it('a chat counts only when its roster holds the sender and us', async () => {
+    const m = (sender: string, r: RoomBinding): Message => ({ id: 'm', kind: 0, sender, recipient: OWN, timestamp: 1, plaintext: roomChatText(r, MSG, 'x'), payment_amount_msat: 0 });
+    const withA = await bind([OWN, A]);
+    expect(roomOf(m(A, withA), OWN)).not.toBeNull();
+    expect(roomOf(m(C, withA), OWN)).toBeNull();
+    expect(roomOf(m(A, await bind([A, B])), OWN)).toBeNull();
   });
   it('a roster is us and the picks, lowercase, deduplicated and sorted', () => {
     expect(makeRoster(OWN, [B, A.toUpperCase(), B])).toEqual([OWN, A, B]);
   });
-  it('our copies of one chat (one per member) show once', () => {
-    const pt = roomChatText({ id: RID, roster: [OWN, A, B] }, 'x');
-    const mine = (id: string, recipient: string, timestamp: number): Message => ({ id, kind: 0, sender: OWN, recipient, timestamp, plaintext: pt, payment_amount_msat: 0 });
-    expect(roomThread([mine('1', A, 1000), mine('2', B, 2000)], OWN).map((m) => m.id)).toEqual(['1']);
-    expect(roomThread([mine('1', A, 1000), mine('2', B, 120_000)], OWN)).toHaveLength(2);
+  it('our copies of one message (same msg) are one entry, however far apart they were sent, wherever they came from', () => {
+    const mine = (id: string, recipient: string, timestamp: number, msg = MSG, over: Partial<Message> = {}): Message =>
+      ({ id, kind: 0, sender: OWN, recipient, timestamp, plaintext: roomChatText(room, msg, 'x'), payment_amount_msat: recipient === A ? 2000 : 3000, ...over });
+    // Leg by leg, the second resent much later: one entry, at its newest copy.
+    const legs = roomThread([mine('1', A, 1000), mine('2', B, 600_000)], OWN);
+    expect(legs).toHaveLength(1);
+    expect(legs[0]).toMatchObject({ timestamp: 600_000, paidMsat: 5000, ids: ['1', '2'] });
+    expect(legs[0].copies.map((c) => c.recipient)).toEqual([A, B]);
+    // The same words twice are two messages.
+    expect(roomThread([mine('1', A, 1000), mine('3', A, 1001, 'ff'.repeat(16))], OWN)).toHaveLength(2);
+    // The node's entry (recipient = the room, every copy) and a copy-less echo of one copy: still one entry, two copies.
+    const entry = mine('2', room.id, 600_000, MSG, { payment_amount_msat: 5000, copies: [{ recipient: A, id: '1', payment_amount_msat: 2000 }, { recipient: B, id: '2', payment_amount_msat: 3000 }] });
+    const both = roomThread([entry, mine('1', A, 1000)], OWN);
+    expect(both).toHaveLength(1);
+    expect(both[0]).toMatchObject({ paidMsat: 5000, timestamp: 600_000 });
+    expect(both[0].copies).toHaveLength(2);
+    // Theirs: one entry per sender, at what it paid us.
+    const theirs: Message = { id: 'in', kind: 0, sender: A, recipient: OWN, timestamp: 5, plaintext: roomChatText(room, MSG, 'hey'), payment_amount_msat: 2000 };
+    expect(roomThread([theirs, mine('1', A, 1000)], OWN).map((e) => [e.sender, e.text, e.paidMsat])).toEqual([[A, 'hey', 2000], [OWN, 'x', 2000]]);
+  });
+  it('a member’s node refusing our paid copy reads as a sentence, never a code', () => {
+    for (const code of ['room_binding_invalid', 'room_sender_not_member', 'room_recipient_not_member', 'room_binding_unsupported', 'room_member_no_session']) {
+      const words = roomRefusalWords(`${code}: invalid room binding: room id does not commit to this roster and salt`);
+      expect(words).toMatch(/^[A-Z].*\.$/);
+      expect(words).not.toMatch(/room_|commit/);
+    }
+    expect(roomRefusalWords('price too high')).toBeNull();
+    expect(roomRefusalWords(null)).toBeNull();
   });
 });
 
@@ -109,13 +166,17 @@ describe('room send', () => {
 
 describe('rooms on this device', () => {
   beforeEach(() => resetRooms());
-  it('a known id with another roster is not that room; leaving hides it here only', () => {
-    expect(rememberRoom({ id: RID, roster: [OWN, A] }, 1)).not.toBeNull();
-    expect(rememberRoom({ id: RID, roster: [OWN, B] }, 2)).toBeNull();
-    expect(localRooms().map((r) => r.roster)).toEqual([[OWN, A]]);
-    leaveRoom(RID);
-    expect(localRooms()).toEqual([]);
-    expect(rememberRoom({ id: RID, roster: [OWN, A] })?.left).toBe(true);
+  it('a known id with another roster is not that room; a chat’s room is kept only once its id checks; leaving hides it here only', async () => {
+    const room = await bind([OWN, A]);
+    expect(rememberRoom(room, 1)).not.toBeNull();
+    expect(rememberRoom({ ...room, roster: [OWN, B] }, 2)).toBeNull();
+    expect(rememberRoom({ ...room, salt: '08'.repeat(16) }, 2)).toBeNull();
+    expect(await admitRoom({ id: 'ab'.repeat(32), roster: [OWN, B], salt: SALT })).toBeNull();
+    expect(await admitRoom(await bind([OWN, B]))).not.toBeNull();
+    expect(localRooms().map((r) => r.roster)).toEqual([[OWN, B], [OWN, A]]);
+    leaveRoom(room.id);
+    expect(localRooms().map((r) => r.roster)).toEqual([[OWN, B]]);
+    expect(rememberRoom(room)?.left).toBe(true);
   });
 });
 
@@ -155,6 +216,7 @@ function stubHost(overrides: Record<string, Reply> = {}) {
     ],
     rooms_list: () => [],
     messages_list: () => [],
+    room_thread: () => [],
     price_quote: (args) => quote(PRICES[args!.peer as string] ?? 1000),
     payments_overview: () => ({ balance_msat: 1_000_000, lightning_outbound_msat: 500_000, channels: [] }),
     fund_state: () => null,
@@ -187,6 +249,12 @@ function stubHost(overrides: Record<string, Reply> = {}) {
 }
 
 describe('rooms in the shell', () => {
+  let AB: RoomBinding;
+  let ABD: RoomBinding;
+  beforeAll(async () => {
+    AB = await bind(makeRoster(OWN, [A, B]));
+    ABD = await bind(makeRoster(OWN, [A, B, D]));
+  });
   let dispose: (() => void) | undefined;
   let mount: HTMLElement;
   beforeEach(() => {
@@ -273,7 +341,7 @@ describe('rooms in the shell', () => {
     const host = stubHost({ peers_list: () => [peer(A, 'Maya'), peer(B, 'Jon'), peer(D, 'Ana', { session: false })] });
     await openShell();
     await openRoom(A, B);
-    const room = rememberRoom({ id: RID, roster: makeRoster(OWN, [A, B, D]) })!;
+    const room = rememberRoom(ABD)!;
     click(`[data-track="bound:${room.id}"]`);
     await vi.waitFor(() => expect($(`[data-cost-msat]`)?.getAttribute('data-cost-msat')).toBe('6000'));
     expect($(`[data-room-cost-leg="${A}"]`)!.getAttribute('data-leg-msat')).toBe('2500');
@@ -286,9 +354,9 @@ describe('rooms in the shell', () => {
   it('Send opens a review and pays nothing; its one confirm sends each leg at its shown price, once', async () => {
     const host = stubHost({ peers_list: () => [peer(A, 'Maya'), peer(B, 'Jon'), peer(D, 'Ana', { session: false })] });
     await openShell();
-    const room = rememberRoom({ id: RID, roster: makeRoster(OWN, [A, B, D]) })!;
-    await vi.waitFor(() => expect($(`[data-track="bound:${RID}"]`)).not.toBeNull());
-    click(`[data-track="bound:${RID}"]`);
+    const room = rememberRoom(ABD)!;
+    await vi.waitFor(() => expect($(`[data-track="bound:${ABD.id}"]`)).not.toBeNull());
+    click(`[data-track="bound:${ABD.id}"]`);
     await vi.waitFor(() => expect($('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('6000'));
     typeDraft('hello room');
     click('[data-send]');
@@ -303,13 +371,18 @@ describe('rooms in the shell', () => {
     await vi.waitFor(() => expect($('[data-room-send]')).not.toBeNull());
     const sent = host.used('message_send').map((c) => c.args!);
     expect(sent.map((a) => [a.recipient, a.is_room, a.max_msat])).toEqual([[A, false, 2500], [B, false, 3500]]);
-    for (const a of sent) expect(JSON.parse(a.plaintext as string)).toEqual({ v: 1, room: { id: RID, roster: room.roster }, text: 'hello room' });
+    const bodies = sent.map((a) => JSON.parse(a.plaintext as string));
+    for (const body of bodies) expect(body).toEqual({ v: 1, room: { id: ABD.id, roster: room.roster, salt: SALT }, msg: expect.stringMatching(/^[0-9a-f]{32}$/), text: 'hello room' });
+    // One message: the same msg on every member's copy.
+    expect(new Set(bodies.map((b) => b.msg)).size).toBe(1);
     expect($(`[data-room-leg="${D}"]`)!.getAttribute('data-leg-state')).toBe('skipped');
     expect(text(`[data-room-leg="${D}"]`)).toMatch(/not charged/);
     expect($('[data-room-send] [data-room-send-msat]')!.getAttribute('data-room-send-msat')).toBe('6000');
     // Our chat shows once in the room, and not as raw text in Maya's 1:1 thread.
     await vi.waitFor(() => expect(mount.querySelectorAll('[data-room-stream] .msg.out')).toHaveLength(1));
     expect(text('[data-room-stream] .msg.out .bubble')).toBe('hello room');
+    expect($('[data-room-stream] .msg.out')!.getAttribute('data-room-copies')).toBe('2');
+    expect(text('[data-room-stream] .msg.out [data-room-to]')).toMatch(/to Maya, Jon/);
     click(`[data-track="peer:${A}"]`);
     await vi.waitFor(() => expect($(`[data-track="peer:${A}"]`)?.getAttribute('aria-current')).toBe('true'));
     expect(mount.textContent).not.toMatch(/"roster"/);
@@ -318,9 +391,9 @@ describe('rooms in the shell', () => {
   it('a review is of the text it froze; Back, or leaving the room, withdraws it with nothing paid', async () => {
     const host = stubHost();
     await openShell();
-    rememberRoom({ id: RID, roster: makeRoster(OWN, [A, B]) });
-    await vi.waitFor(() => expect($(`[data-track="bound:${RID}"]`)).not.toBeNull());
-    click(`[data-track="bound:${RID}"]`);
+    rememberRoom(AB);
+    await vi.waitFor(() => expect($(`[data-track="bound:${AB.id}"]`)).not.toBeNull());
+    click(`[data-track="bound:${AB.id}"]`);
     await vi.waitFor(() => expect($('[data-cost-msat]')).not.toBeNull());
     typeDraft('one');
     click('[data-send]');
@@ -332,7 +405,7 @@ describe('rooms in the shell', () => {
     await vi.waitFor(() => expect(text('[data-review-text]')).toBe('two'));
     click(`[data-track="peer:${A}"]`);
     await vi.waitFor(() => expect($('[data-room-review]')).toBeNull());
-    click(`[data-track="bound:${RID}"]`);
+    click(`[data-track="bound:${AB.id}"]`);
     await vi.waitFor(() => expect($('[data-room-draft]')).not.toBeNull());
     expect($('[data-room-review]')).toBeNull();
     expect(host.used('message_send')).toHaveLength(0);
@@ -341,9 +414,9 @@ describe('rooms in the shell', () => {
   it('with spending closed (a paused budget, no window) Send is off and the one-tap gate shows; nothing is paid', async () => {
     const host = stubHost({ budget_status: () => budget({ paused: true }) });
     await openShell();
-    rememberRoom({ id: RID, roster: makeRoster(OWN, [A, B]) });
-    await vi.waitFor(() => expect($(`[data-track="bound:${RID}"]`)).not.toBeNull());
-    click(`[data-track="bound:${RID}"]`);
+    rememberRoom(AB);
+    await vi.waitFor(() => expect($(`[data-track="bound:${AB.id}"]`)).not.toBeNull());
+    click(`[data-track="bound:${AB.id}"]`);
     await vi.waitFor(() => expect($('[data-cost-msat]')).not.toBeNull());
     typeDraft('hi');
     expect($<HTMLButtonElement>('[data-send]')!.disabled).toBe(true);
@@ -361,9 +434,9 @@ describe('rooms in the shell', () => {
       },
     });
     await openShell();
-    rememberRoom({ id: RID, roster: makeRoster(OWN, [A, B]) });
-    await vi.waitFor(() => expect($(`[data-track="bound:${RID}"]`)).not.toBeNull());
-    click(`[data-track="bound:${RID}"]`);
+    rememberRoom(AB);
+    await vi.waitFor(() => expect($(`[data-track="bound:${AB.id}"]`)).not.toBeNull());
+    click(`[data-track="bound:${AB.id}"]`);
     await vi.waitFor(() => expect($('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('6000'));
     typeDraft('hi');
     click('[data-send]');
@@ -372,38 +445,121 @@ describe('rooms in the shell', () => {
     await vi.waitFor(() => expect($('[data-room-send]')).not.toBeNull());
     expect(host.used('message_send').map((c) => [c.args!.recipient, c.args!.max_msat])).toEqual([[A, 2500], [B, 3500]]);
     expect($(`[data-room-leg="${A}"]`)!.getAttribute('data-leg-state')).toBe('failed');
-    expect(text(`[data-room-leg="${A}"]`)).toMatch(/not charged/);
+    expect(text(`[data-room-leg="${A}"]`)).toMatch(/Nothing was paid/);
     expect($('[data-room-send-msat]')!.getAttribute('data-room-send-msat')).toBe('3500');
   });
 
   it('a chat for a room arrives: the room appears with it, unread; it is not shown in the member’s 1:1 thread', async () => {
     const host = stubHost();
     await openShell();
-    const plaintext = roomChatText({ id: RID, roster: makeRoster(OWN, [A, B]) }, 'hi all');
+    const plaintext = roomChatText(AB, MSG, 'hi all');
     host.emitLive({ type: 'message', room_id: null, message: { id: 'in1', kind: 0, sender: A, recipient: OWN, timestamp: Date.now(), plaintext, payment_amount_msat: 2000 } });
-    await vi.waitFor(() => expect($(`[data-track="bound:${RID}"] .badge`)?.textContent).toBe('1'));
-    expect(text(`[data-track="bound:${RID}"]`)).toMatch(/Maya, Jon/);
+    await vi.waitFor(() => expect($(`[data-track="bound:${AB.id}"] .badge`)?.textContent).toBe('1'));
+    expect(text(`[data-track="bound:${AB.id}"]`)).toMatch(/Maya, Jon/);
     expect(mount.textContent).not.toMatch(/hi all/);
-    click(`[data-track="bound:${RID}"]`);
+    click(`[data-track="bound:${AB.id}"]`);
     await vi.waitFor(() => expect(text('[data-room-stream] .msg.in .bubble')).toBe('hi all'));
     expect(text('[data-room-stream] .msg.in .who')).toBe('Maya');
+  });
+
+  it('the thread is the node’s room thread (both directions, our copies as one message), paged by whole messages', async () => {
+    const theirs = (i: number): Message => ({ id: `in${i}`, kind: 0, sender: A, recipient: OWN, timestamp: 10_000 + i, plaintext: roomChatText(AB, i.toString(16).padStart(32, '0'), `hi ${i}`), payment_amount_msat: 2000 });
+    const ours: Message = {
+      id: 'c2', kind: 0, sender: OWN, recipient: AB.id, timestamp: 5_000, plaintext: roomChatText(AB, MSG, 'first'), payment_amount_msat: 5000,
+      copies: [{ recipient: B, id: 'c2', payment_amount_msat: 3000 }, { recipient: A, id: 'c1', payment_amount_msat: 2000 }],
+    };
+    const host = stubHost({
+      room_thread: (args) => (args!.before == null ? Array.from({ length: 50 }, (_, i) => theirs(i)) : [ours]),
+    });
+    await openShell();
+    rememberRoom(AB);
+    await vi.waitFor(() => expect($(`[data-track="bound:${AB.id}"]`)).not.toBeNull());
+    const before = host.used('messages_list').length;
+    click(`[data-track="bound:${AB.id}"]`);
+    await vi.waitFor(() => expect(mount.querySelectorAll('[data-room-stream] .msg.in')).toHaveLength(50));
+    expect(host.used('room_thread')[0].args).toEqual({ room: AB.id, before: null, limit: 50 });
+    // Not read member by member from their 1:1 histories.
+    expect(host.used('messages_list')).toHaveLength(before);
+    click('[data-room-earlier]');
+    await vi.waitFor(() => expect($('[data-room-stream] .msg.out')).not.toBeNull());
+    expect(host.used('room_thread')[1].args).toEqual({ room: AB.id, before: 10_000, limit: 50 });
+    expect($('[data-room-earlier]')).toBeNull();
+    expect(mount.querySelectorAll('[data-room-stream] .msg')).toHaveLength(51);
+    expect($('[data-room-stream] .msg.out')!.getAttribute('data-room-copies')).toBe('2');
+    expect(text('[data-room-stream] .msg.out [data-room-to]')).toMatch(/to Maya, Jon/);
+    expect(text('[data-room-stream] .msg.out .bubble')).toBe('first');
+    expect(host.used('message_send')).toHaveLength(0);
+  });
+
+  it('a member refused before paying reads as the host’s plain sentence, for that member only; the next member is still sent', async () => {
+    const sentence = 'Not sent - nothing was paid. There is no secure session with them yet. Message them once in their own chat first; a room never pays a first contact.';
+    const host = stubHost({
+      message_send: (args) => {
+        if (args!.recipient === A) throw { code: 'not_dispatched', message: sentence };
+        return receipt(args!.recipient as string, args!.max_msat as number, 2);
+      },
+    });
+    await openShell();
+    rememberRoom(AB);
+    await vi.waitFor(() => expect($(`[data-track="bound:${AB.id}"]`)).not.toBeNull());
+    click(`[data-track="bound:${AB.id}"]`);
+    await vi.waitFor(() => expect($('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('6000'));
+    typeDraft('hi');
+    click('[data-send]');
+    await vi.waitFor(() => expect($('[data-room-confirm]')).not.toBeNull());
+    click('[data-room-confirm]');
+    await vi.waitFor(() => expect($('[data-room-send]')).not.toBeNull());
+    expect(host.used('message_send').map((c) => c.args!.recipient)).toEqual([A, B]);
+    expect(text(`[data-room-leg="${A}"] [data-room-leg-note]`)).toBe(sentence);
+    expect(text('[data-room-send]')).not.toMatch(/room_|not_dispatched/);
+    expect($(`[data-room-leg="${B}"]`)!.getAttribute('data-leg-state')).toBe('sent');
+  });
+
+  it('a member’s node refusing our paid copy shows in the room as a sentence, for that member', async () => {
+    const host = stubHost();
+    await openShell();
+    rememberRoom(AB);
+    await vi.waitFor(() => expect($(`[data-track="bound:${AB.id}"]`)).not.toBeNull());
+    click(`[data-track="bound:${AB.id}"]`);
+    await vi.waitFor(() => expect($('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('6000'));
+    typeDraft('hi');
+    click('[data-send]');
+    await vi.waitFor(() => expect($('[data-room-confirm]')).not.toBeNull());
+    click('[data-room-confirm]');
+    await vi.waitFor(() => expect($('[data-room-stream] .msg.out')).not.toBeNull());
+    const maya = host.used('message_send').findIndex((c) => c.args!.recipient === A);
+    host.emitLive({ type: 'delivery', message_id: `r${maya + 1}`, status: 'rejected', reason: 'room_binding_invalid: invalid room binding: room id does not commit to this roster and salt' });
+    await vi.waitFor(() => expect($(`[data-room-refused="${A}"]`)).not.toBeNull());
+    expect(text(`[data-room-refused="${A}"]`)).toBe('Maya: Their node could not match this room’s details, so it refused the message. It was paid; do not send it again.');
+    expect($(`[data-room-refused="${B}"]`)).toBeNull();
+  });
+
+  it('a chat naming a room id that does not commit to its roster never becomes a room', async () => {
+    const host = stubHost();
+    await openShell();
+    const forged = { ...AB, roster: makeRoster(OWN, [A, C]) };
+    host.emitLive({ type: 'message', room_id: null, message: { id: 'f1', kind: 0, sender: A, recipient: OWN, timestamp: Date.now(), plaintext: roomChatText(forged, MSG, 'sneaky'), payment_amount_msat: 2000 } });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(localRooms()).toEqual([]);
+    expect($(`[data-track="bound:${AB.id}"]`)).toBeNull();
+    expect(mount.textContent).not.toMatch(/sneaky/);
   });
 
   it('Leave is local: nothing is sent, the room is hidden, and later chats to it stay hidden', async () => {
     const host = stubHost();
     await openShell();
-    rememberRoom({ id: RID, roster: makeRoster(OWN, [A, B]) });
-    await vi.waitFor(() => expect($(`[data-track="bound:${RID}"]`)).not.toBeNull());
-    click(`[data-track="bound:${RID}"]`);
+    rememberRoom(AB);
+    await vi.waitFor(() => expect($(`[data-track="bound:${AB.id}"]`)).not.toBeNull());
+    click(`[data-track="bound:${AB.id}"]`);
     await vi.waitFor(() => expect($('[data-room-leave]')).not.toBeNull());
     click('[data-room-leave]');
     expect(text('[data-room-leave-confirm]')).toMatch(/this device only.*Nobody is told and nothing is paid/);
     click('[data-room-leave-yes]');
-    await vi.waitFor(() => expect($(`[data-track="bound:${RID}"]`)).toBeNull());
-    const plaintext = roomChatText({ id: RID, roster: makeRoster(OWN, [A, B]) }, 'still here?');
+    await vi.waitFor(() => expect($(`[data-track="bound:${AB.id}"]`)).toBeNull());
+    const plaintext = roomChatText(AB, MSG, 'still here?');
     host.emitLive({ type: 'message', room_id: null, message: { id: 'in2', kind: 0, sender: A, recipient: OWN, timestamp: Date.now(), plaintext, payment_amount_msat: 2000 } });
     await new Promise((r) => setTimeout(r, 20));
-    expect($(`[data-track="bound:${RID}"]`)).toBeNull();
+    expect($(`[data-track="bound:${AB.id}"]`)).toBeNull();
     expect(host.used('message_send')).toHaveLength(0);
   });
 });

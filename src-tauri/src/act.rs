@@ -214,8 +214,11 @@ const NOT_DISPATCHED_FEE_LIMIT: &str = "Network fee would exceed your limit.";
 /// [`NOT_DISPATCHED_MESSAGE`]; appends the node `error` when present; mentions
 /// the network fee limit only when that reason points at a fee/route ceiling.
 pub fn not_dispatched_message(body: &str) -> String {
-    let reason = serde_json::from_str::<serde_json::Value>(body)
-        .ok()
+    let parsed = serde_json::from_str::<serde_json::Value>(body).ok();
+    if let Some(words) = parsed.as_ref().and_then(|v| v.get("reason")?.as_str()).and_then(room_refusal_words) {
+        return format!("{NOT_DISPATCHED_MESSAGE} {words}");
+    }
+    let reason = parsed
         .and_then(|v| {
             v.get("error")
                 .and_then(|e| e.as_str())
@@ -230,6 +233,19 @@ pub fn not_dispatched_message(body: &str) -> String {
         Some(r) => format!("{NOT_DISPATCHED_MESSAGE} {r}"),
         None => NOT_DISPATCHED_MESSAGE.to_string(),
     }
+}
+
+/// Genome `room_binding_v1` compose refusals (`reason` on a `not_dispatched`),
+/// in plain words. The node's own `error` is for developers and is not shown.
+fn room_refusal_words(reason: &str) -> Option<&'static str> {
+    Some(match reason {
+        "room_member_no_session" => "There is no secure session with them yet. Message them once in their own chat first; a room never pays a first contact.",
+        "room_binding_unsupported" => "Their node cannot take room messages right now: it is not connected, or it needs an update.",
+        "room_binding_invalid" => "This room's details did not check out at your node. Start a new room with the same people.",
+        "room_sender_not_member" => "Your node is not in this room's member list.",
+        "room_recipient_not_member" => "They are not in this room's member list.",
+        _ => return None,
+    })
 }
 
 fn not_dispatched_fee_limit_reason(reason: &str) -> bool {

@@ -781,6 +781,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
     peers: () => ok(SAMPLE_PEERS),
     rooms: () => ok(SAMPLE_ROOMS),
     roomMembers: (id) => ok(ROOM_MEMBERS[id.toLowerCase()] ?? []),
+    roomThread: () => ok([]),
     messages: (peer) => ok(THREADS[peer.toLowerCase()] ?? (v2 && peer.toLowerCase() === SAMPLE_STRANGER ? strangerThread() : [])),
     priceQuote: (peer) =>
       ok({

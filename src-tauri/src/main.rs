@@ -1578,6 +1578,22 @@ async fn messages_list(
     read_messages(state.inner(), &peer, before, limit).await
 }
 
+/// `GET /messages?room=` — a bound room's thread (genome `room_binding_v1`):
+/// both directions, our copies of one message as one entry. Read only.
+#[tauri::command(rename_all = "snake_case")]
+async fn room_thread(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    room: String,
+    before: Option<u64>,
+    limit: Option<u32>,
+) -> Result<Vec<control::Message>, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    let page: Vec<control::Message> = get_json(state.inner(), &control::room_thread_path(&room, before, limit)?).await?;
+    Ok(control::chronological(page))
+}
+
 /// `GET /payments/price/0` + `GET /pricing/peers` — what one text message to
 /// `peer` costs. Without a cached peer table the renderer labels the figure as
 /// this node's own price, never as the peer's.
@@ -5048,6 +5064,7 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             rooms_list,
             room_members,
             messages_list,
+            room_thread,
             price_quote,
             first_contact_quote,
             introduction_mine,
@@ -5735,6 +5752,26 @@ mod control_act_tests {
         ] {
             assert!(!act::not_dispatched_refusal(status, reply), "{status} {reply}");
         }
+    }
+
+    #[test]
+    fn a_room_refusal_reads_as_a_plain_sentence_never_the_node_text() {
+        for (reason, words) in [
+            ("room_member_no_session", "no secure session with them yet"),
+            ("room_binding_unsupported", "cannot take room messages right now"),
+            ("room_binding_invalid", "did not check out"),
+            ("room_sender_not_member", "Your node is not in this room"),
+            ("room_recipient_not_member", "They are not in this room"),
+        ] {
+            let body = serde_json::json!({"code": "not_dispatched", "reason": reason, "error": "invalid room binding: room id does not commit"}).to_string();
+            assert!(act::not_dispatched_refusal(400, &body));
+            let copy = act::not_dispatched_message(&body);
+            assert!(copy.starts_with(act::NOT_DISPATCHED_MESSAGE) && copy.contains(words), "{copy}");
+            assert!(!copy.contains(reason) && !copy.contains("commit"), "{copy}");
+        }
+        // Another reason keeps the node's wording, as before.
+        let other = act::not_dispatched_message(r#"{"code":"not_dispatched","reason":"something_else","error":"route fee above ceiling"}"#);
+        assert!(other.contains("route fee above ceiling"), "{other}");
     }
 
     #[test]
@@ -10359,6 +10396,7 @@ mod assistant_acl_tests {
                 "rooms_list",
                 "room_members",
                 "messages_list",
+                "room_thread",
                 "price_quote",
                 "first_contact_quote",
                 "introduction_mine",

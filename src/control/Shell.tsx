@@ -12,7 +12,7 @@ import { DiscoverPanel, FrontDoorEditor } from './Discover';
 import { ContactPanel } from './ContactPanel';
 import { callCost, createCallEngine, IDLE as CALL_IDLE, isCallKind, signalCost, stunServer, type CallMedia, type CallView } from './call';
 import { createMeetingEngine, declineCost, inviteCost, joinCost, MAX_PARTICIPANTS, MEETING_IDLE, type LegState, type MeetingView, type ShownQuotes } from './meeting';
-import { leaveRoom, localRoom, localRooms, makeRoster, newRoomId, rememberRoom, ROOM_CAPABILITY, roomOf, sendRoom, type LegPlan, type LocalRoom } from './room';
+import { admitRoom, leaveRoom, localRoom, localRooms, newRoom, rememberRoom, ROOM_CAPABILITY, ROOM_PAGE, roomOf, sameRoom, sendRoom, type LegPlan, type LocalRoom } from './room';
 import { NewRoomPanel, RoomThread, type RoomSend } from './RoomPanel';
 import { blobUrl, duration, FILE_MAX_BYTES, fileNameOf, isVoiceNote, type Recording, startRecording, VOICE_MAX_MS } from './voice';
 import { EMOJIS, insertEmoji } from './emoji';
@@ -230,6 +230,8 @@ export function ControlCenter(props: Props) {
   // Rooms (room.ts): what each room send did this session, by room id; the New room picker.
   const [roomSends, setRoomSends] = createStore<Record<string, RoomSend[]>>({});
   const [roomPlan, setRoomPlan] = createSignal(false);
+  // Each bound room's thread read (`?room=`): the next page's cursor, and whether there is one.
+  const [roomPages, setRoomPages] = createStore<Record<string, { before: number | null; more: boolean; loading: boolean }>>({});
   // An offline transition consumes undispatched retry approvals, even if their
   // request/status response arrives only after readiness has recovered.
   let retryApprovalRevision = 0;
@@ -331,25 +333,45 @@ export function ControlCenter(props: Props) {
   const nodeRooms = () => overview()?.capabilities?.includes(ROOM_CAPABILITY) === true;
   /**
    * Room chats go to their room's thread (they stay in the member's 1:1
-   * history, hidden there). A left room, or a chat naming a known room id
-   * with another roster, shows nowhere. `bump`: a live arrival is unread.
+   * history, hidden there). A room is first remembered only once its id is
+   * checked against its roster and salt. A left room, or a chat naming a
+   * known room id with another roster, shows nowhere. `bump`: a live arrival is unread.
    */
-  const foldRooms = (messages: Message[], bump: boolean) => {
+  const foldRoom = (room: LocalRoom, m: Message, bump: boolean) => {
+    if (room.left) return;
     const own = ownId();
+    const key = trackKey({ kind: 'bound', id: room.id });
+    const before = threads.t[key] ?? [];
+    const known = before.find((x) => x.id === m.id);
+    // A thread entry's copies outlive a copy-less echo of the same message.
+    const next = known?.copies?.length && !m.copies?.length ? { ...m, copies: known.copies, recipient: known.recipient } : m;
+    if (known && JSON.stringify(known) === JSON.stringify(next)) return;
+    setThreads(produce((s) => {
+      s.t[key] = mergeMessages(before, [next]);
+      if (!known && bump && key !== openKey() && !isOutgoing(m, own)) s.unread[key] = (s.unread[key] ?? 0) + 1;
+    }));
+  };
+  const foldRooms = (messages: Message[], bump: boolean) => {
     for (const m of messages) {
-      const chat = roomOf(m, own);
+      const chat = roomOf(m, ownId());
       if (!chat) continue;
-      const room = rememberRoom(chat.room, m.timestamp);
-      if (!room || room.left) continue;
-      const key = trackKey({ kind: 'bound', id: room.id });
-      const before = threads.t[key] ?? [];
-      const after = mergeMessages(before, [m]);
-      if (after.length === before.length) continue;
-      setThreads(produce((s) => {
-        s.t[key] = after;
-        if (bump && key !== openKey() && !isOutgoing(m, own)) s.unread[key] = (s.unread[key] ?? 0) + 1;
-      }));
+      const known = localRoom(chat.room.id);
+      if (known) {
+        if (sameRoom(known, chat.room)) foldRoom(known, m, bump);
+        continue;
+      }
+      void admitRoom(chat.room, m.timestamp).then((room) => { if (room) foldRoom(room, m, bump); });
     }
+  };
+  /** One page of a bound room's thread from the node: whole messages, older than `before`. */
+  const loadRoomPage = (id: string, before: number | null) => {
+    if (roomPages[id]?.loading) return;
+    setRoomPages(id, { before, more: roomPages[id]?.more ?? false, loading: true });
+    void attempt('thread', () => source.roomThread(id, before ?? undefined, ROOM_PAGE), (page) => {
+      foldRooms(page, false);
+      const oldest = page.length ? Math.min(...page.map((m) => m.timestamp)) : before;
+      setRoomPages(id, { before: oldest, more: page.length >= ROOM_PAGE, loading: false });
+    }).finally(() => setRoomPages(id, 'loading', false));
   };
 
   const attempt = async <T,>(area: string, run: () => Promise<T>, apply: (v: T) => void) => {
@@ -435,14 +457,8 @@ export function ControlCenter(props: Props) {
 
   const loadThread = (t: TrackRef) => {
     if (t.kind === 'bound') {
-      // A room's thread is read from each member's 1:1 history.
-      const own = ownId().toLowerCase();
-      for (const peer of localRoom(t.id)?.roster.filter((p) => p !== own) ?? []) {
-        void attempt('thread', () => source.messages(peer), (page) => {
-          setThreads('t', trackKey({ kind: 'peer', id: peer }), (old) => mergeMessages(old ?? [], page));
-          foldRooms(page, false);
-        });
-      }
+      // The node's room thread: both directions, our copies of one message as one entry.
+      loadRoomPage(t.id, null);
       return;
     }
     if (t.kind !== 'peer' && t.kind !== 'room') return;
@@ -670,8 +686,8 @@ export function ControlCenter(props: Props) {
     if (stand.kind === 'contact_used') return 'Their budget is used up for today. Not charged.';
     return null;
   };
-  const createRoom = (picks: string[]) => {
-    const room = rememberRoom({ id: newRoomId(), roster: makeRoster(ownId(), picks) });
+  const createRoom = async (picks: string[]) => {
+    const room = rememberRoom(await newRoom(ownId(), picks));
     setRoomPlan(false);
     if (room) setTrack({ kind: 'bound', id: room.id });
   };
@@ -1088,6 +1104,10 @@ export function ControlCenter(props: Props) {
                       ownId={ownId()}
                       nameOf={nameOf}
                       messages={threads.t[trackKey(t())] ?? []}
+                      deliveries={deliveries}
+                      earlier={roomPages[room().id]?.more === true}
+                      loadingEarlier={roomPages[room().id]?.loading === true}
+                      onEarlier={() => loadRoomPage(room().id, roomPages[room().id]?.before ?? null)}
                       sends={roomSends[room().id] ?? []}
                       fresh={threads.fresh}
                       info={(peer) => roomContacts().find((c) => c.id === peer)}
@@ -1255,7 +1275,7 @@ export function ControlCenter(props: Props) {
         dismiss={() => meetings.dismiss()}
       />
       <Show when={roomPlan() && props.active}>
-        <NewRoomPanel contacts={roomContacts()} nodeRooms={nodeRooms()} onCreate={createRoom} onCancel={() => setRoomPlan(false)} />
+        <NewRoomPanel contacts={roomContacts()} nodeRooms={nodeRooms()} onCreate={(picks) => void createRoom(picks)} onCancel={() => setRoomPlan(false)} />
       </Show>
     </div>
   );
