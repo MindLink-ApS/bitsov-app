@@ -47,6 +47,10 @@ pub struct Peer {
     /// `call_meeting_v1`. Derived by [`with_meeting_support`], never read from the node.
     #[serde(default, skip_deserializing)]
     pub meetings: bool,
+    /// Their node answers porch reads: connected now and advertising
+    /// `porch_read_v1`. Derived by [`with_porch_support`], never read from the node.
+    #[serde(default, skip_deserializing)]
+    pub porch: bool,
 }
 
 /// How a connected peer's node lists the meeting advert (genome
@@ -60,6 +64,17 @@ pub fn with_meeting_support(mut peers: Vec<Peer>) -> Vec<Peer> {
     for p in &mut peers {
         p.meetings = p.connected
             && p.capabilities.as_ref().is_some_and(|c| c.iter().any(|x| x == PEER_MEETING_CAPABILITY));
+    }
+    peers
+}
+
+/// Mark each peer whose node is known to answer a porch read. A node without
+/// the advert (older, or not connected so we cannot tell) would leave a paid
+/// read unanswered, so it is never offered one.
+pub fn with_porch_support(mut peers: Vec<Peer>) -> Vec<Peer> {
+    for p in &mut peers {
+        p.porch = p.connected
+            && p.capabilities.as_ref().is_some_and(|c| c.iter().any(|x| x == crate::porch::PEER_CAPABILITY));
     }
     peers
 }
@@ -189,7 +204,7 @@ pub struct NodeStatusResponse {
 // signatures are not in these node shapes and are not accepted if they appear.
 
 /// Capabilities the renderer may act on. Anything else the node lists is dropped.
-pub const KNOWN_CAPABILITIES: &[&str] = &["energy_v1", "membrane_v1", "call_meeting_v1"];
+pub const KNOWN_CAPABILITIES: &[&str] = &["energy_v1", "membrane_v1", "call_meeting_v1", "porch_read_v1"];
 
 pub fn known_capabilities(listed: &[String]) -> Vec<String> {
     KNOWN_CAPABILITIES
@@ -1180,6 +1195,21 @@ mod tests {
         let out = serde_json::to_value(&peers[0]).unwrap();
         assert_eq!(out["meetings"], true);
         assert!(out.get("capabilities").is_none(), "{out}");
+    }
+
+    #[test]
+    fn a_peer_is_offered_porch_reads_only_when_connected_with_the_exact_advert() {
+        let peers: Vec<Peer> = serde_json::from_str(r#"[
+            {"node_id":"a","connected":true,"capabilities":["X3dh","Custom(\"porch_read_v1\")"]},
+            {"node_id":"b","connected":true,"capabilities":["X3dh","Custom(\"call_meeting_v1\")"]},
+            {"node_id":"c","connected":false,"capabilities":["Custom(\"porch_read_v1\")"]},
+            {"node_id":"d","connected":true,"capabilities":["porch_read_v1","Custom(\"porch_read_v1x\")"]},
+            {"node_id":"e","connected":true,"porch":true}
+        ]"#).unwrap();
+        let peers = with_porch_support(with_meeting_support(peers));
+        assert_eq!(peers.iter().map(|p| p.porch).collect::<Vec<_>>(), [true, false, false, false, false]);
+        assert_eq!(peers.iter().map(|p| p.meetings).collect::<Vec<_>>(), [false, true, false, false, false]);
+        assert_eq!(serde_json::to_value(&peers[0]).unwrap()["porch"], true);
     }
 
     #[test]

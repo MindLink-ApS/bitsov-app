@@ -287,7 +287,7 @@ describe('invisible payments in the composer and the context panel', () => {
     $<HTMLButtonElement>('[data-track="discover"]')!.click();
     await vi.waitFor(() => expect($('[data-panel="discover"]')).not.toBeNull());
     expect(text('[data-panel="discover"]')).toMatch(/profile/i);
-    expect($('[data-browse-pages-soon]')).not.toBeNull();
+    expect(text('[data-browse-porch-hint]')).toContain('Porch');
   });
 
   it('shows your signed introduction, and a pasted one opens a door card that Continue hands to the first-contact door', async () => {

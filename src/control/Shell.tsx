@@ -9,6 +9,7 @@ import { amountText, inPaymentBounds, MAX_PAYMENT_MSAT, MIN_PAYMENT_MSAT, parseA
 import { Organism } from './BodyPanel';
 import { SoftError } from './SoftError';
 import { DiscoverPanel, FrontDoorEditor } from './Discover';
+import { PorchPanel } from './Porch';
 import { ContactPanel } from './ContactPanel';
 import { custodyBadge, CustodyBadgeView } from './custody';
 import { WalletPage, type WalletActions, type WalletTab } from './WalletPage';
@@ -950,6 +951,7 @@ export function ControlCenter(props: Props) {
     if (t.kind === 'room') return rooms().find((r) => r.id.toLowerCase() === t.id)?.name ?? 'Room';
     if (t.kind === 'ai') return 'AI';
     if (t.kind === 'discover') return 'Browse';
+    if (t.kind === 'porch') return 'Porch';
     return 'Start something';
   };
   const nameOf = (id: string) => (id.toLowerCase() === ownId().toLowerCase() ? 'You' : peerName(peerById().get(id.toLowerCase()), id));
@@ -1065,6 +1067,18 @@ export function ControlCenter(props: Props) {
                       setDoorstep(card.node_id.toLowerCase(), step);
                       openDoorstep(step);
                     }}
+                  />
+                </Match>
+                <Match when={t().kind === 'porch'}>
+                  <PorchPanel
+                    source={source}
+                    now={now()}
+                    peers={peers()}
+                    nodeReads={overview()?.capabilities?.includes('porch_read_v1') === true}
+                    moneyBlocked={moneyBlocked()}
+                    spend={spend()}
+                    spendGate={<SpendBar spend={spend()} error={errors.spend} now={now()} actions={actions} />}
+                    nameOf={nameOf}
                   />
                 </Match>
                 <Match when={t().kind === 'peer' || t().kind === 'room'}>
@@ -1504,9 +1518,15 @@ function Rail(props: {
             <span class="name">Profiles</span>
             <span class="meta">paste / scan</span>
           </button>
-          <p class="track-empty" data-browse-pages-soon>
-            Fetching another node’s pages is coming soon.
-          </p>
+          <button
+            class="track-link"
+            data-track="porch"
+            aria-current={props.openKey === 'porch'}
+            onClick={() => props.onOpen({ kind: 'porch' })}
+          >
+            <span class="name">Porch</span>
+            <span class="meta">cards & pages · paid</span>
+          </button>
         </Show>
       </div>
 

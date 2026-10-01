@@ -68,8 +68,7 @@ describe('M2 UI sweep', () => {
     expect(heads).toContain('Browse');
     expect(heads).not.toContain('Discover');
     expect($('[data-rooms-coming-soon]')!.textContent).toMatch(/Coming soon/);
-    expect($('[data-browse-pages-soon]')).not.toBeNull();
-
+    expect($('[data-track="porch"]')!.textContent).toContain('Porch');
     const roomBtn = mount.querySelector<HTMLButtonElement>('[data-track^="room:"]');
     if (roomBtn) {
       roomBtn.click();

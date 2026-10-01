@@ -141,9 +141,9 @@ export function DiscoverPanel(props: Props) {
         This desktop app does not scan a camera. Knocking uses first contact — you pay their admission
         price once.
       </p>
-      <p class="hint" data-browse-pages-soon>
-        Coming soon: fetching another node’s public pages or site. Today Browse only opens profile
-        cards you paste or scan.
+      <p class="hint" data-browse-porch-hint>
+        To read a contact’s pages, or fetch their card from their node, open Porch. Each read is paid
+        once, after you confirm it.
       </p>
       <label class="field">
         <span>Profile link</span>
