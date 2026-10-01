@@ -917,6 +917,9 @@ button.danger { background: var(--err); color: #fff; border: none; }
 .meeting-panel .meeting-legs { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--s-2); }
 .meeting-panel .meeting-legs label { display: flex; align-items: center; gap: var(--s-2); }
 .meeting-panel .muted { color: var(--muted); }
+.room-legs { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--s-1, 4px); font-size: 0.9em; }
+.room-cost { margin-bottom: var(--s-2); }
+.pay-review-text { margin: 0 0 var(--s-2); color: var(--muted); white-space: pre-wrap; }
 
 /* organism info (ⓘ) */
 .organ-headrow { display: flex; align-items: baseline; gap: var(--s-2); }

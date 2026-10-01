@@ -202,6 +202,17 @@ pub const READMISSION_CAPPED: &str = "Not sent - nothing was paid. This contact 
 /// connection, then the message. Nodes without it refuse any capped re-admission.
 pub const QUOTED_READMISSION_CAPABILITY: &str = "quoted_readmission_v1";
 
+/// Genome `RoomChat::parse`: a chat whose plaintext is a JSON object (after
+/// leading whitespace) with a top-level `room` key is room-bound, valid or not.
+pub fn is_room_chat(plaintext: &str) -> bool {
+    plaintext.trim_start().starts_with('{')
+        && serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(plaintext).is_ok_and(|o| o.contains_key("room"))
+}
+
+/// A room leg is capped at what the owner confirmed for that member: a
+/// re-admission that would cost more is refused, never paid under a new cap.
+pub const ROOM_LEG_READMISSION: &str = "Not sent - nothing was paid. They reconnected and ask to be admitted again, which costs more than you confirmed for this room message. Message them once in their own chat, then send to the room again.";
+
 pub const READMISSION_CAPPED_RETRY: &str = "Not delivered - nothing new was paid. This contact asks your node to pay their admission again (every reconnect or node restart starts unpaid), and your node cannot pay that under an app cap yet. The paid message stays here; retry later, or stop retrying.";
 
 /// Neutral proven-non-dispatch copy. Fee-limit wording is added only when the
@@ -214,8 +225,11 @@ const NOT_DISPATCHED_FEE_LIMIT: &str = "Network fee would exceed your limit.";
 /// [`NOT_DISPATCHED_MESSAGE`]; appends the node `error` when present; mentions
 /// the network fee limit only when that reason points at a fee/route ceiling.
 pub fn not_dispatched_message(body: &str) -> String {
-    let reason = serde_json::from_str::<serde_json::Value>(body)
-        .ok()
+    let parsed = serde_json::from_str::<serde_json::Value>(body).ok();
+    if let Some(words) = parsed.as_ref().and_then(|v| v.get("reason")?.as_str()).and_then(room_refusal_words) {
+        return format!("{NOT_DISPATCHED_MESSAGE} {words}");
+    }
+    let reason = parsed
         .and_then(|v| {
             v.get("error")
                 .and_then(|e| e.as_str())
@@ -230,6 +244,19 @@ pub fn not_dispatched_message(body: &str) -> String {
         Some(r) => format!("{NOT_DISPATCHED_MESSAGE} {r}"),
         None => NOT_DISPATCHED_MESSAGE.to_string(),
     }
+}
+
+/// Genome `room_binding_v1` compose refusals (`reason` on a `not_dispatched`),
+/// in plain words. The node's own `error` is for developers and is not shown.
+fn room_refusal_words(reason: &str) -> Option<&'static str> {
+    Some(match reason {
+        "room_member_no_session" => "There is no secure session with them yet. Message them once in their own chat first; a room never pays a first contact.",
+        "room_binding_unsupported" => "Their node cannot take room messages right now: it is not connected, or it needs an update.",
+        "room_binding_invalid" => "This room's details did not check out at your node. Start a new room with the same people.",
+        "room_sender_not_member" => "Your node is not in this room's member list.",
+        "room_recipient_not_member" => "They are not in this room's member list.",
+        _ => return None,
+    })
 }
 
 fn not_dispatched_fee_limit_reason(reason: &str) -> bool {
@@ -1656,7 +1683,7 @@ mod tests {
     }
 
     fn peer(id: &str, connected: bool) -> control::Peer {
-        control::Peer { node_id: id.into(), addr: None, label: None, connected, fingerprint: None, capabilities: None, meetings: false, porch: false }
+        control::Peer { node_id: id.into(), addr: None, label: None, connected, fingerprint: None, capabilities: None, meetings: false, rooms: false, session: false, porch: false }
     }
 
     #[test]

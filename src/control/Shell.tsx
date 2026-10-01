@@ -16,6 +16,8 @@ import { WalletPage, type WalletActions, type WalletTab } from './WalletPage';
 import { artifactActivity, logActivity, type LoggedActivity } from './wallet';
 import { callCost, createCallEngine, IDLE as CALL_IDLE, isCallKind, signalCost, stunServer, type CallMedia, type CallView } from './call';
 import { createMeetingEngine, declineCost, inviteCost, joinCost, MAX_PARTICIPANTS, MEETING_IDLE, type LegState, type MeetingView, type ShownQuotes } from './meeting';
+import { admitRoom, leaveRoom, localRoom, localRooms, newRoom, rememberRoom, ROOM_CAPABILITY, ROOM_PAGE, roomOf, sameRoom, sendRoom, type LegPlan, type LocalRoom } from './room';
+import { NewRoomPanel, RoomThread, type RoomSend } from './RoomPanel';
 import { blobUrl, duration, FILE_MAX_BYTES, fileNameOf, isVoiceNote, type Recording, startRecording, VOICE_MAX_MS } from './voice';
 import { EMOJIS, insertEmoji } from './emoji';
 import { cleanPurpose, hostReadProblem, invoicePaymentHash, NOT_PAYABLE_NOTE, type NotPayable, payeeView, readChatInvoice } from './bolt11';
@@ -242,6 +244,11 @@ export function ControlCenter(props: Props) {
   const [allowances, setAllowances] = createStore<Record<string, { total_msat: number; max_routing_fee_msat: number; readmission_msat?: number }>>({});
   const [pendingRevision, setPendingRevision] = createSignal(0);
   const [artifacts, setArtifacts] = createStore<Record<string, Artifact[]>>({});
+  // Rooms (room.ts): what each room send did this session, by room id; the New room picker.
+  const [roomSends, setRoomSends] = createStore<Record<string, RoomSend[]>>({});
+  const [roomPlan, setRoomPlan] = createSignal(false);
+  // Each bound room's thread read (`?room=`): the next page's cursor, and whether there is one.
+  const [roomPages, setRoomPages] = createStore<Record<string, { before: number | null; more: boolean; loading: boolean }>>({});
   // An offline transition consumes undispatched retry approvals, even if their
   // request/status response arrives only after readiness has recovered.
   let retryApprovalRevision = 0;
@@ -352,6 +359,50 @@ export function ControlCenter(props: Props) {
       .map((e) => e.sender);
   });
   const openKey = () => (track() ? trackKey(track()!) : null);
+  // Our own node checks room bindings (genome `room_binding_v1` on /status).
+  const nodeRooms = () => overview()?.capabilities?.includes(ROOM_CAPABILITY) === true;
+  /**
+   * Room chats go to their room's thread (they stay in the member's 1:1
+   * history, hidden there). A room is first remembered only once its id is
+   * checked against its roster and salt. A left room, or a chat naming a
+   * known room id with another roster, shows nowhere. `bump`: a live arrival is unread.
+   */
+  const foldRoom = (room: LocalRoom, m: Message, bump: boolean) => {
+    if (room.left) return;
+    const own = ownId();
+    const key = trackKey({ kind: 'bound', id: room.id });
+    const before = threads.t[key] ?? [];
+    const known = before.find((x) => x.id === m.id);
+    // A thread entry's copies outlive a copy-less echo of the same message.
+    const next = known?.copies?.length && !m.copies?.length ? { ...m, copies: known.copies, recipient: known.recipient } : m;
+    if (known && JSON.stringify(known) === JSON.stringify(next)) return;
+    setThreads(produce((s) => {
+      s.t[key] = mergeMessages(before, [next]);
+      if (!known && bump && key !== openKey() && !isOutgoing(m, own)) s.unread[key] = (s.unread[key] ?? 0) + 1;
+    }));
+  };
+  const foldRooms = (messages: Message[], bump: boolean) => {
+    for (const m of messages) {
+      const chat = roomOf(m, ownId());
+      if (!chat) continue;
+      const known = localRoom(chat.room.id);
+      if (known) {
+        if (sameRoom(known, chat.room)) foldRoom(known, m, bump);
+        continue;
+      }
+      void admitRoom(chat.room, m.timestamp).then((room) => { if (room) foldRoom(room, m, bump); });
+    }
+  };
+  /** One page of a bound room's thread from the node: whole messages, older than `before`. */
+  const loadRoomPage = (id: string, before: number | null) => {
+    if (roomPages[id]?.loading) return;
+    setRoomPages(id, { before, more: roomPages[id]?.more ?? false, loading: true });
+    void attempt('thread', () => source.roomThread(id, before ?? undefined, ROOM_PAGE), (page) => {
+      foldRooms(page, false);
+      const oldest = page.length ? Math.min(...page.map((m) => m.timestamp)) : before;
+      setRoomPages(id, { before: oldest, more: page.length >= ROOM_PAGE, loading: false });
+    }).finally(() => setRoomPages(id, 'loading', false));
+  };
 
   const attempt = async <T,>(area: string, run: () => Promise<T>, apply: (v: T) => void) => {
     try {
@@ -437,10 +488,16 @@ export function ControlCenter(props: Props) {
     }) : Promise.resolve();
 
   const loadThread = (t: TrackRef) => {
+    if (t.kind === 'bound') {
+      // The node's room thread: both directions, our copies of one message as one entry.
+      loadRoomPage(t.id, null);
+      return;
+    }
     if (t.kind !== 'peer' && t.kind !== 'room') return;
     const key = trackKey(t);
     void attempt('thread', () => source.messages(t.id), (page) => {
       setThreads('t', key, (old) => mergeMessages(old ?? [], page));
+      if (t.kind === 'peer') foldRooms(page, false);
       setEnergyAt(Date.now());
     });
   };
@@ -525,6 +582,15 @@ export function ControlCenter(props: Props) {
             if (event.type === 'delivery') {
               const next = applyDelivery(deliveries, event);
               if (next !== deliveries) setDeliveries(event.message_id, next[event.message_id]);
+              return;
+            }
+            if (event.type === 'message' && roomOf(event.message, ownId())) {
+              // A room chat: unread in its room, kept (hidden) in the member's 1:1 history.
+              const m = event.message;
+              const peer = (isOutgoing(m, ownId()) ? m.recipient : m.sender).toLowerCase();
+              setThreads('t', trackKey({ kind: 'peer', id: peer }), (old) => mergeMessages(old ?? [], [m]));
+              foldRooms([m], true);
+              setThreads('fresh', m.id, true);
               return;
             }
             const next = applyLive(threads.t, threads.unread, openKey(), event, ownId());
@@ -624,8 +690,52 @@ export function ControlCenter(props: Props) {
       ...(receipt.readmission_msat ? { readmission_msat: receipt.readmission_msat } : {}),
     });
     if (!deliveries[receipt.message_id]) setDeliveries(receipt.message_id, deliveryFromReceipt(receipt));
-    setThreads('t', trackKey(t), (old) => mergeMessages(old ?? [], [sentMessage(receipt, ownId(), text)]));
+    const sent = sentMessage(receipt, ownId(), text);
+    setThreads('t', trackKey(t), (old) => mergeMessages(old ?? [], [sent]));
+    foldRooms([sent], false);
     setThreads('fresh', receipt.message_id, true);
+  };
+
+  /**
+   * One room chat: each confirmed leg in turn through the ordinary 1:1 send
+   * (its budget, window, journal and exactly-once rules), capped at the price
+   * the owner confirmed for that member. A paid leg that was not delivered
+   * waits in that member's chat, where its only safe retry lives.
+   */
+  const roomSend = async (room: LocalRoom, legs: LegPlan[], plaintext: string, text: string) => {
+    const outcomes = await sendRoom(legs, plaintext, async (peer, body, maxMsat) => {
+      const t: TrackRef = { kind: 'peer', id: peer };
+      const r = await act(() => source.send(peer, false, body, maxMsat));
+      void loadBudget();
+      if (r.ok) sentOne(t, r.value, body);
+      else if (r.error.code === 'payment_settled_undelivered' && r.error.undelivered) {
+        addArtifact(t, { type: 'undelivered', text: body, paid: r.error.undelivered, note: null, admission: null, pendingId: r.error.pending_id ?? null });
+      }
+      return r;
+    });
+    setRoomSends(room.id, (old) => [...(old ?? []), { at: Date.now(), text, outcomes }]);
+    void loadWallet();
+    return outcomes;
+  };
+  /** A budget open for autopay, or the owner's ten-minute window: the app may pay now. */
+  const roomCanSpend = () => {
+    const b = budget();
+    if (b?.paused) return false;
+    return (!!b && !b.waiting_for_owner && b.autopay.state === 'open') || spendLine(spend(), now()).open;
+  };
+  /** Through the budget alone, a member it would refuse before paying is skipped here. */
+  const roomBudgetSkip = (peer: string, msat: number): string | null => {
+    const b = budget();
+    if (!b || spendLine(spend(), now()).open) return null;
+    const stand = budgetStand(b, peer, false, msat);
+    if (stand.kind === 'first') return 'No budget for them yet: message them once in their chat first. Not charged.';
+    if (stand.kind === 'contact_used') return 'Their budget is used up for today. Not charged.';
+    return null;
+  };
+  const createRoom = async (picks: string[]) => {
+    const room = rememberRoom(await newRoom(ownId(), picks));
+    setRoomPlan(false);
+    if (room) setTrack({ kind: 'bound', id: room.id });
   };
   /** A failed action that is not an approval or budget question stays in the track as a record. */
   const recordFailure = (t: TrackRef, action: string, outcome: Outcome<unknown>) => {
@@ -949,16 +1059,27 @@ export function ControlCenter(props: Props) {
   const trackName = (t: TrackRef): string => {
     if (t.kind === 'peer') return peerName(peerById().get(t.id), t.id);
     if (t.kind === 'room') return rooms().find((r) => r.id.toLowerCase() === t.id)?.name ?? 'Room';
+    if (t.kind === 'bound') return boundName(t.id);
     if (t.kind === 'ai') return 'AI';
     if (t.kind === 'discover') return 'Browse';
     if (t.kind === 'porch') return 'Porch';
     return 'Start something';
   };
   const nameOf = (id: string) => (id.toLowerCase() === ownId().toLowerCase() ? 'You' : peerName(peerById().get(id.toLowerCase()), id));
+  /** A room is named by its other members, as the owner calls them. */
+  const boundName = (id: string) => {
+    const own = ownId().toLowerCase();
+    return localRoom(id)?.roster.filter((p) => p !== own).map(nameOf).join(', ') || 'Room';
+  };
   const trackKeyName = (key: string) => {
     const [kind, id] = key.split(':');
+    if (kind === 'bound') return boundName(id ?? '');
     return kind === 'room' ? rooms().find((r) => r.id.toLowerCase() === id)?.name ?? 'Room' : nameOf(id ?? key);
   };
+  const roomContacts = () => peers().map((p) => ({
+    id: p.node_id.toLowerCase(), name: peerName(p, p.node_id),
+    contact: true, connected: p.connected, rooms: p.rooms === true, session: p.session === true,
+  }));
   // The Wallet pays only through the composer's own actions; its receipts go to the `wallet` key.
   const WALLET: TrackRef = { kind: 'wallet' };
   const walletActions: WalletActions = {
@@ -982,6 +1103,10 @@ export function ControlCenter(props: Props) {
         sample={source.mode === 'sample'}
         peers={peers()}
         rooms={rooms()}
+        nodeRooms={nodeRooms()}
+        boundRooms={localRooms()}
+        boundName={boundName}
+        onNewRoom={() => setRoomPlan(true)}
         knocks={knocks()}
         nameOf={nameOf}
         unread={threads.unread}
@@ -1068,6 +1193,35 @@ export function ControlCenter(props: Props) {
                       openDoorstep(step);
                     }}
                   />
+                </Match>
+                <Match when={t().kind === 'bound' ? localRoom((t() as { id: string }).id) : undefined}>
+                  {(room) => (
+                    <RoomThread
+                      room={room()}
+                      ownId={ownId()}
+                      nameOf={nameOf}
+                      messages={threads.t[trackKey(t())] ?? []}
+                      deliveries={deliveries}
+                      earlier={roomPages[room().id]?.more === true}
+                      loadingEarlier={roomPages[room().id]?.loading === true}
+                      onEarlier={() => loadRoomPage(room().id, roomPages[room().id]?.before ?? null)}
+                      sends={roomSends[room().id] ?? []}
+                      fresh={threads.fresh}
+                      info={(peer) => roomContacts().find((c) => c.id === peer)}
+                      quote={(peer) => source.priceQuote(peer).catch(() => null)}
+                      budgetSkip={roomBudgetSkip}
+                      moneyBlocked={moneyBlocked()}
+                      canSpend={roomCanSpend()}
+                      spendGate={<SpendBar spend={spend()} error={errors.spend} now={now()} actions={actions} />}
+                      now={now()}
+                      send={(legs, plaintext, text) => roomSend(room(), legs, plaintext, text)}
+                      onLeave={() => {
+                        leaveRoom(room().id);
+                        setTrack(null);
+                      }}
+                      onContext={() => setContextOpen(true)}
+                    />
+                  )}
                 </Match>
                 <Match when={t().kind === 'porch'}>
                   <PorchPanel
@@ -1230,6 +1384,9 @@ export function ControlCenter(props: Props) {
         camera={() => void meetings.toggleCamera()}
         dismiss={() => meetings.dismiss()}
       />
+      <Show when={roomPlan() && props.active}>
+        <NewRoomPanel contacts={roomContacts()} nodeRooms={nodeRooms()} onCreate={(picks) => void createRoom(picks)} onCancel={() => setRoomPlan(false)} />
+      </Show>
       <Show when={props.active && walletTab()}>
         {(tab) => (
           <WalletPage
@@ -1392,6 +1549,11 @@ function Rail(props: {
   sample: boolean;
   peers: Peer[];
   rooms: Room[];
+  /** Our node checks room bindings: bound rooms and "New room" replace the coming-soon line. */
+  nodeRooms: boolean;
+  boundRooms: LocalRoom[];
+  boundName: (id: string) => string;
+  onNewRoom: () => void;
   /** First contacts admitted by payment this session. Not contacts, and not added. */
   knocks: string[];
   nameOf: (id: string) => string;
@@ -1467,11 +1629,23 @@ function Rail(props: {
         </Show>
       </div>
 
-      <div class="track-group" data-rooms-soon>
+      <div class="track-group" data-rooms-soon={props.active && props.nodeRooms ? undefined : ''}>
         <h2>Rooms</h2>
-        <p class="track-empty" data-rooms-coming-soon>
-          Coming soon — group chat is not on the protocol yet.
-        </p>
+        <Show
+          when={props.active && props.nodeRooms}
+          fallback={
+            <p class="track-empty" data-rooms-coming-soon>
+              Coming soon — group chat is not on the protocol yet.
+            </p>
+          }
+        >
+          <For each={props.boundRooms}>
+            {(r) => item({ kind: 'bound', id: r.id }, props.boundName(r.id), <span class="meta">{r.roster.length}</span>)}
+          </For>
+          <button class="track-link new-track" data-room-new onClick={() => props.onNewRoom()}>
+            + New room
+          </button>
+        </Show>
         <Show when={showLegacyRoomsUi && props.active && props.rooms.length > 0}>
           <For each={props.rooms}>
             {(r) => item({ kind: 'room', id: r.id.toLowerCase() }, r.name)}
@@ -1699,7 +1873,8 @@ function Conversation(props: {
       room: props.roomQuote,
       nowMs: props.now,
     });
-  const items = () => streamItems(props.messages.filter((m) => !isCallKind(m.kind)), props.artifacts);
+  // Room chats show in their room, not as raw text here.
+  const items = () => streamItems(props.messages.filter((m) => !isCallKind(m.kind) && !(props.track.kind === 'peer' && roomOf(m, props.ownId))), props.artifacts);
 
   createEffect(
     on(

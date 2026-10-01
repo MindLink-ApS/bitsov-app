@@ -1916,7 +1916,9 @@ async fn peers_list(
 ) -> Result<Vec<control::Peer>, String> {
     reject_sealed_window(&window)?;
     drop(window);
-    get_json(state.inner(), "/peers").await.map(control::with_meeting_support).map(control::with_porch_support)
+    let peers = get_json(state.inner(), "/peers").await.map(control::with_meeting_support).map(control::with_porch_support)?;
+    let sessions: Option<Vec<control::Session>> = get_json(state.inner(), "/sessions").await.ok();
+    Ok(control::with_sessions(peers, sessions.as_deref()))
 }
 
 /// `GET /rooms`.
@@ -1955,6 +1957,22 @@ async fn messages_list(
     reject_sealed_window(&window)?;
     drop(window);
     read_messages(state.inner(), &peer, before, limit).await
+}
+
+/// `GET /messages?room=` — a bound room's thread (genome `room_binding_v1`):
+/// both directions, our copies of one message as one entry. Read only.
+#[tauri::command(rename_all = "snake_case")]
+async fn room_thread(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    room: String,
+    before: Option<u64>,
+    limit: Option<u32>,
+) -> Result<Vec<control::Message>, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    let page: Vec<control::Message> = get_json(state.inner(), &control::room_thread_path(&room, before, limit)?).await?;
+    Ok(control::chronological(page))
 }
 
 /// `GET /payments/price/0` + `GET /pricing/peers` — what one text message to
@@ -4033,6 +4051,12 @@ async fn do_message_send_with(
     first_contact_msat: Option<u64>,
 ) -> Result<act::SendReceipt, ActionError> {
     let target = if is_room { control::room_id(recipient) } else { control::node_id(recipient) }.map_err(ActionError::invalid)?;
+    // A room leg (genome `room_binding_v1`) pays at most the owner's confirmed
+    // cap for that member, fee included: no first contact, no raised re-admission cap.
+    let room_leg = !is_room && act::is_room_chat(plaintext);
+    if room_leg && first_contact_msat.is_some() {
+        return Err(ActionError::invalid("A room never pays a first contact."));
+    }
     let (auth, plan) = plan_message(state, &target, is_room, max_msat, first_contact_msat)?;
     no_pending_spend(state)?;
     let caps = require_price_caps(state, is_room).await?;
@@ -4080,7 +4104,7 @@ async fn do_message_send_with(
     if let Some(contact_budget) = node_ok {
         confirm_first_contact(state, &recipient, max_msat, contact_budget).await?;
     }
-    let quoted_readmission = !is_room && node_ok.is_none() && caps.quoted_readmission;
+    let quoted_readmission = !is_room && !room_leg && node_ok.is_none() && caps.quoted_readmission;
     // The owner approved the contact's re-admission quote (`readmission_quoted`):
     // that send carries its routing ceilings for both payments, under its total.
     if quoted_readmission {
@@ -4096,6 +4120,7 @@ async fn do_message_send_with(
         Err(e) if e.code == "readmission_capped" && quoted_readmission => {
             readmit_under_quote(state, &target, body, max_msat, readmission_possible, caps.operations, e).await
         }
+        Err(e) if e.code == "readmission_capped" && room_leg => Err(ActionError::new("readmission_capped", act::ROOM_LEG_READMISSION)),
         other => other,
     };
     let text = match sent {
@@ -6162,6 +6187,7 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             rooms_list,
             room_members,
             messages_list,
+            room_thread,
             price_quote,
             first_contact_quote,
             introduction_mine,
@@ -6960,6 +6986,26 @@ mod control_act_tests {
         ] {
             assert!(!act::not_dispatched_refusal(status, reply), "{status} {reply}");
         }
+    }
+
+    #[test]
+    fn a_room_refusal_reads_as_a_plain_sentence_never_the_node_text() {
+        for (reason, words) in [
+            ("room_member_no_session", "no secure session with them yet"),
+            ("room_binding_unsupported", "cannot take room messages right now"),
+            ("room_binding_invalid", "did not check out"),
+            ("room_sender_not_member", "Your node is not in this room"),
+            ("room_recipient_not_member", "They are not in this room"),
+        ] {
+            let body = serde_json::json!({"code": "not_dispatched", "reason": reason, "error": "invalid room binding: room id does not commit"}).to_string();
+            assert!(act::not_dispatched_refusal(400, &body));
+            let copy = act::not_dispatched_message(&body);
+            assert!(copy.starts_with(act::NOT_DISPATCHED_MESSAGE) && copy.contains(words), "{copy}");
+            assert!(!copy.contains(reason) && !copy.contains("commit"), "{copy}");
+        }
+        // Another reason keeps the node's wording, as before.
+        let other = act::not_dispatched_message(r#"{"code":"not_dispatched","reason":"something_else","error":"route fee above ceiling"}"#);
+        assert!(other.contains("route fee above ceiling"), "{other}");
     }
 
     #[test]
@@ -10820,6 +10866,46 @@ mod control_act_tests {
     }
 
     #[tokio::test]
+    async fn a_room_leg_never_pays_above_its_confirmed_cap_even_when_the_budget_would_readmit() {
+        // Codex #101 P1: the same budgeted reconnect that the 1:1 path pays under
+        // the contact's fresh quote. A room leg keeps its confirmed 7,000 msat.
+        let readmit = Arc::new(Mutex::new(ReadmitNode::default()));
+        let (node, _dir, g1) = g1_node_with(&["read", "receive"], Some(readmit_routes(readmit.clone())));
+        with_book(&node.state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
+        g1.grant.lock().unwrap()["per_recipient_msat"] = serde_json::json!({A: 50_000});
+        g1_approved(&node, 500_000).await;
+        let room = format!(r#"{{"v":1,"room":{{"id":"{}","roster":["{}","{A}"],"salt":"{}"}},"msg":"{}","text":"hi room"}}"#, "ab".repeat(32), "1".repeat(64), "07".repeat(16), "00".repeat(16));
+        for plaintext in [room.clone(), format!(" \n\t{room}")] {
+            let e = do_message_send(&node.state, A, false, &plaintext, 7000, None).await.unwrap_err();
+            assert_eq!(e.code, "readmission_capped", "{}", e.message);
+            assert_eq!(e.message, act::ROOM_LEG_READMISSION);
+        }
+        let bodies = compose_bodies(&node);
+        assert_eq!(bodies.len(), 2, "one refused POST per leg, never resent under a larger cap");
+        assert!(bodies.iter().all(|b| b["max_total_msat"] == 7000), "{bodies:?}");
+        assert_eq!(readmit.lock().unwrap().pays, 0, "nothing was paid");
+        assert_eq!(with_book(&node.state, false, |b| Ok(b.spent(A, false, now_ms()))).unwrap(), 0);
+        // A room never pays a first contact, whatever the caller asks.
+        let e = do_message_send_with(&node.state, A, false, &room, 7000, None, Some(50_000)).await.unwrap_err();
+        assert_eq!(e.code, "invalid");
+        assert_eq!(compose_bodies(&node).len(), 2);
+        // The same contact's ordinary chat still re-admits inside its budget.
+        do_message_send(&node.state, A, false, "gm", 7000, None).await.unwrap();
+        assert_eq!(readmit.lock().unwrap().pays, 2);
+    }
+
+    #[test]
+    fn a_room_chat_is_recognised_as_the_genome_does() {
+        let room = r#"{"v":1,"room":{},"msg":"x","text":"t"}"#;
+        for text in [room.to_string(), format!(" {room}"), format!("\n\t\r {room}"), format!("{room} \n")] {
+            assert!(act::is_room_chat(&text), "{text:?}");
+        }
+        for text in ["gm", "", "{not json", r#"{"text":"a json note"}"#, "[1,2]", r#"  {"roomy":1}"#, r#"x{"room":{}}"#] {
+            assert!(!act::is_room_chat(text), "{text:?}");
+        }
+    }
+
+    #[tokio::test]
     async fn quoted_readmission_outside_the_budget_asks_once_and_keeps_the_operation() {
         let readmit = Arc::new(Mutex::new(ReadmitNode::default()));
         let node = fake(AuthMode::Local, {
@@ -12198,6 +12284,7 @@ mod assistant_acl_tests {
                 "rooms_list",
                 "room_members",
                 "messages_list",
+                "room_thread",
                 "price_quote",
                 "first_contact_quote",
                 "introduction_mine",
