@@ -35,7 +35,26 @@ export default function App() {
   const [source, setSource] = createSignal<Source>(sample ? sampleSource({ organism }) : hostSource);
   const [status, setStatus] = createSignal<NodeStatus>({ ready: false, node_id: null, error: null });
   // Gate G6: the funds UI stays behind an explicit trust disclosure.
-  const [trustAck, setTrustAck] = createSignal(sample === 'shell');
+  const [sessionTrust, setSessionTrust] = createSignal<string | null>(null);
+  const trustKey = () => status().node_id ? `bitsov.trust.v1.${pairing().remote ? 'remote' : 'local'}.${status().node_id!.toLowerCase()}` : null;
+  const trustAck = () => {
+    if (source().mode === 'sample') return sessionTrust() === 'sample' || sample === 'shell';
+    const key = trustKey();
+    // A transient read failure is not a new trust boundary. Keep the shell
+    // mounted; active/ready still stops its node reads and money actions.
+    if (sessionTrust() && (sessionTrust() === key || !status().node_id) && !pairing().bootstrap) return true;
+    if (!status().ready || !['paired', 'fallback'].includes(pairing().state) || pairing().bootstrap) return false;
+    if (!key) return false;
+    try { return localStorage.getItem(key) === 'accepted'; } catch { return false; }
+  };
+  const acceptTrust = () => {
+    const key = source().mode === 'sample' ? 'sample' : trustKey();
+    if (!key) return;
+    if (key !== 'sample') {
+      try { localStorage.setItem(key, 'accepted'); } catch { /* session acceptance still works */ }
+    }
+    setSessionTrust(key);
+  };
   const [restoring, setRestoring] = createSignal(false);
   // Lifted so IdentityGate can stay mounted when ready is false (restart_node
   // clears ready). Restore retry/error must not be gated on ready: IdentityGate
@@ -47,6 +66,9 @@ export default function App() {
   const showIdentityGate = () =>
     (status().ready && (pairing().state === 'paired' || pairing().state === 'fallback')) ||
     restoring() || restoreError() !== null;
+  createEffect(() => {
+    if (source().mode === 'node' && trustAck() && trustKey()) setSessionTrust(trustKey());
+  });
   const [selectedTarget, setSelectedTarget] = createSignal<NodeTarget>('local');
   const remote = createMemo(() => pairing().remote);
   createEffect(() => setSelectedTarget(remote() ? 'cloud' : 'local'));
@@ -83,7 +105,7 @@ export default function App() {
   };
   const useSample = (start: SampleStart) => {
     setSource(sampleSource({ organism }));
-    setTrustAck(start === 'shell');
+    setSessionTrust(start === 'shell' ? 'sample' : null);
     void poll();
   };
 
@@ -145,7 +167,7 @@ export default function App() {
             source={source()}
             nodeId={() => status().node_id}
             remote={pairing().remote}
-            onContinue={() => setTrustAck(true)}
+            onContinue={acceptTrust}
             onRestoring={setRestoring}
             restoreError={restoreError}
             setRestoreError={setRestoreError}

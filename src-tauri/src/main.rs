@@ -8820,6 +8820,26 @@ mod control_act_tests {
     const OFFER: &str = r#"{"v":1,"call_id":"0123456789abcdef0123456789abcdef","media":"audio","sdp":"v=0"}"#;
 
     #[tokio::test]
+    async fn a_refused_call_returns_without_payment_and_releases_its_reservation() {
+        let inner = call_routes(Some(10_000));
+        let node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
+            if p == "/messages/compose" { (403, "token lacks required scope: spend".into()) }
+            else { inner(m, p, b) }
+        }));
+        let s = &node.state;
+        do_budget_approve(s, 500_000, budget::PresetId::Everyday).await.unwrap();
+        with_book(s, true, |b| b.set_limit(A, false, 50_000)).unwrap();
+        let error = tokio::time::timeout(Duration::from_secs(2), do_call_signal(s, A, 400, OFFER, 15_000))
+            .await.expect("a refusal must not leave the call waiting").unwrap_err();
+        assert_eq!(error.code, "spend_refused");
+        assert!(error.message.contains("cannot spend"));
+        let view = budget_now(s);
+        assert_eq!((view.spent_msat, view.unsettled_msat), (0, 0));
+        assert_eq!(view.autopay.state, budget::AutopayState::Off);
+        assert_eq!(budget_now(&reopen(&node)).preset, budget::PresetId::Everyday);
+    }
+
+    #[tokio::test]
     async fn a_call_offer_pays_the_callees_call_price_inside_the_contact_budget() {
         let node = fake(AuthMode::Local, call_routes(Some(10_000)));
         let s = &node.state;

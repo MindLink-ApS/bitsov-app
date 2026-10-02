@@ -1,3 +1,4 @@
+import { readSpendPreset, saveSpendPreset } from './prefs';
 import { WelcomeHome } from './WelcomeHome';
 import { DelayedSpinner } from './DelayedSpinner';
 import { MONEY_NOT_READY, readinessLine, readinessSource } from './readiness';
@@ -455,11 +456,16 @@ export function ControlCenter(props: Props) {
   });
   const loadRooms = () => attempt('rooms', () => source.rooms(), setRooms);
   const loadWallet = () => attempt('wallet', () => source.wallet(), setWallet);
-  const loadSpend = () => attempt('spend', () => source.spendStatus(), setSpend);
+  const loadSpend = () => attempt('spendPoll', () => source.spendStatus(), (value) => {
+    const resolved = spend()?.state !== 'open' && value.state === 'open';
+    setSpend(value);
+    if (resolved) setErrors('spend', undefined);
+  });
   // Never an error line of its own: without a device key the console path stays.
   const loadDevice = () => source.deviceKeyStatus().then(setDevice, () => setDevice(null));
   const loadBudget = () =>
-    attempt('budget', () => source.budgetStatus(), (b) => {
+    attempt('budgetPoll', () => source.budgetStatus(), (b) => {
+      if (budget()?.autopay.state !== 'open' && b.autopay.state === 'open') setErrors('budget', undefined);
       setBudget(b);
       setBudgetReadAt(Date.now());
     });
@@ -842,15 +848,18 @@ export function ControlCenter(props: Props) {
     fileFetch: (messageId) => source.fileFetch(messageId),
     fileSave: (messageId) => source.fileSave(messageId),
     approve: async () => {
+      setErrors('spend', undefined);
       const r = await act(() => source.spendRequest());
       if (r.ok) setSpend(r.value);
       else setErrors('spend', r.error.message);
     },
     lock: async () => {
+      setErrors('spend', undefined);
       const r = await act(() => source.spendLock());
       if (r.ok) setSpend(r.value);
     },
     cancelSpend: async () => {
+      setErrors('spend', undefined);
       const r = await act(() => source.spendCancel());
       if (r.ok) setSpend(r.value);
       else setErrors('spend', r.error.message);
@@ -858,6 +867,7 @@ export function ControlCenter(props: Props) {
     },
     device,
     registerDevice: async () => {
+      setErrors('spend', undefined);
       const r = await act(() => source.deviceKeyRegister());
       if (r.ok) {
         setDevice(r.value);
@@ -870,6 +880,7 @@ export function ControlCenter(props: Props) {
     },
     noEnvelopeFor,
     approveContact: async (peer, perActMsat) => {
+      setErrors('spend', undefined);
       const r = await act(() => source.relationApprove(peer, null, perActMsat));
       if (r.ok) {
         setSpend(r.value);
@@ -884,6 +895,7 @@ export function ControlCenter(props: Props) {
     pendingRevision,
     reconcile: () => act(() => source.spendReconcile()),
     approveBudget: async (ceilingMsat, preset) => {
+      setErrors('budget', undefined);
       const r = await act(() => source.budgetApprove(ceilingMsat, preset));
       if (r.ok) {
         setBudget(r.value);
@@ -898,12 +910,14 @@ export function ControlCenter(props: Props) {
       return r;
     },
     pauseAll: async () => {
+      setErrors('budget', undefined);
       const r = await act(() => source.budgetPause());
       if (r.ok) setBudget(r.value);
       else setErrors('budget', r.error.message);
       void loadSpend();
     },
     resume: async () => {
+      setErrors('budget', undefined);
       const r = await act(() => source.budgetResume());
       if (r.ok) {
         setBudget(r.value);
@@ -1083,6 +1097,11 @@ export function ControlCenter(props: Props) {
     return 'Start something';
   };
   const nameOf = (id: string) => (id.toLowerCase() === ownId().toLowerCase() ? 'You' : peerName(peerById().get(id.toLowerCase()), id));
+  /** Resolve only an unambiguous mapping reported by the node. */
+  const channelName = (pubkey: string) => {
+    const matches = peers().filter((p) => p.ln_pubkey?.toLowerCase() === pubkey.toLowerCase());
+    return matches.length === 1 ? nameOf(matches[0].node_id) : nameOf(pubkey);
+  };
   /** A room is named by its other members, as the owner calls them. */
   const boundName = (id: string) => {
     const own = ownId().toLowerCase();
@@ -1193,7 +1212,7 @@ export function ControlCenter(props: Props) {
                     spend={spend()}
                     now={now()}
                     actions={actions}
-                    spendError={errors.spend}
+                    spendError={errors.spend ?? errors.spendPoll}
                     onContext={() => setContextOpen(true)}
                     onIntroduced={(card, follow) => {
                       setIntroduced(card.node_id.toLowerCase(), card);
@@ -1243,7 +1262,7 @@ export function ControlCenter(props: Props) {
                       budgetSkip={roomBudgetSkip}
                       moneyBlocked={moneyBlocked()}
                       canSpend={roomCanSpend()}
-                      spendGate={<SpendBar spend={spend()} error={errors.spend} now={now()} actions={actions} />}
+                      spendGate={<SpendBar spend={spend()} error={errors.spend ?? errors.spendPoll} now={now()} actions={actions} />}
                       now={now()}
                       send={(legs, plaintext, text) => roomSend(room(), legs, plaintext, text)}
                       onLeave={() => {
@@ -1262,7 +1281,7 @@ export function ControlCenter(props: Props) {
                     nodeReads={overview()?.capabilities?.includes('porch_read_v1') === true}
                     moneyBlocked={moneyBlocked()}
                     spend={spend()}
-                    spendGate={<SpendBar spend={spend()} error={errors.spend} now={now()} actions={actions} />}
+                    spendGate={<SpendBar spend={spend()} error={errors.spend ?? errors.spendPoll} now={now()} actions={actions} />}
                     nameOf={nameOf}
                   />
                 </Match>
@@ -1291,9 +1310,9 @@ export function ControlCenter(props: Props) {
                     roomQuote={roomQuote()}
                     filePrice={filePrice()}
                     spend={spend()}
-                    spendError={errors.spend}
+                    spendError={errors.spend ?? errors.spendPoll}
                     budget={budget()}
-                    budgetError={errors.budget}
+                    budgetError={errors.budget ?? errors.budgetPoll}
                     actions={actions}
                     now={now()}
                     error={errors.thread}
@@ -1377,7 +1396,7 @@ export function ControlCenter(props: Props) {
           <Match when={tab() === 'budget'}>
             <BudgetPanel
               budget={budget()}
-              error={errors.budget}
+              error={errors.budget ?? errors.budgetPoll}
               now={now()}
               nameOf={(id, room) => (room ? rooms().find((r) => r.id.toLowerCase() === id)?.name ?? 'Room' : nameOf(id))}
               actions={actions}
@@ -1432,12 +1451,12 @@ export function ControlCenter(props: Props) {
             walletError={errors.wallet}
             moneyBlocked={moneyBlocked()}
             spend={spend()}
-            spendGate={<SpendBar spend={spend()} error={errors.spend} now={now()} actions={actions} />}
+            spendGate={<SpendBar spend={spend()} error={errors.spend ?? errors.spendPoll} now={now()} actions={actions} />}
             now={now()}
             ownId={ownId()}
             histories={[...peers().map((p) => p.node_id.toLowerCase()), ...rooms().map((r) => r.id.toLowerCase())]}
             threadMessages={Object.values(threads.t).flat()}
-            nameOf={(id) => rooms().find((r) => r.id.toLowerCase() === id.toLowerCase())?.name ?? nameOf(id)}
+            nameOf={(id) => rooms().find((r) => r.id.toLowerCase() === id.toLowerCase())?.name ?? channelName(id)}
             actions={walletActions}
             reads={{ fundingAddress: () => source.fundingAddress(), invoiceStatus: (b) => source.invoiceStatus(b), messages: (id) => source.messages(id) }}
             onRefresh={() => void loadWallet()}
@@ -1665,7 +1684,7 @@ function Rail(props: {
           when={props.active && props.nodeRooms}
           fallback={
             <p class="track-empty" data-rooms-coming-soon>
-              This node does not support rooms yet.
+              {props.active ? 'This node does not support rooms yet.' : 'Room availability is checked after setup.'}
             </p>
           }
         >
@@ -2039,6 +2058,7 @@ function Conversation(props: {
       </div>
 
       <Composer
+        ownId={props.ownId}
         moneyBlocked={props.moneyBlocked}
         track={props.track}
         name={props.name}
@@ -3008,6 +3028,7 @@ type PayReview =
   | { kind: 'keysend'; pubkey: string; msat: number; memo: string };
 
 function Composer(props: {
+  ownId: string;
   moneyBlocked: boolean;
   track: TrackRef;
   name: string;
@@ -3034,7 +3055,7 @@ function Composer(props: {
   const [mode, setMode] = createSignal<Mode>('message');
   const [menuOpen, setMenuOpen] = createSignal(false);
   // B2: the owner's pick of starting preset, and of a first contact's budget.
-  const [presetPick, setPresetPick] = createSignal<PresetId | null>(null);
+  const [presetPick, setPresetPick] = createSignal<PresetId | null>(readSpendPreset(props.ownId));
   const [firstPick, setFirstPick] = createSignal<number | null>(null);
   const [drafted, setDrafted] = createSignal(false);
   const [draft, setDraft] = createSignal('');
@@ -4191,7 +4212,7 @@ function Composer(props: {
             priceMsat={shown().msat}
             door={doorQuote()}
             preset={presetChosen()}
-            onPreset={setPresetPick}
+            onPreset={(id) => { setPresetPick(id); saveSpendPreset(props.ownId, id); }}
             firstPick={firstPick()}
             onFirstPick={setFirstPick}
             error={props.budgetError}

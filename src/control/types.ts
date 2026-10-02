@@ -4,6 +4,8 @@
 
 /** `peers_list` — `GET /peers`. Contacts are private local knowledge, not an allow-list. */
 export type Peer = {
+  /** Optional node-reported Ed25519 contact to Lightning identity mapping. */
+  ln_pubkey?: string | null;
   node_id: string;
   addr: string | null;
   label: string | null;

@@ -30,6 +30,9 @@ pub const MAX_PAGE: u32 = 200;
 /// `GET /peers` — `PeerResponse`.
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
 pub struct Peer {
+    /// Optional node-reported Lightning identity; older nodes omit the mapping.
+    #[serde(default)]
+    pub ln_pubkey: Option<String>,
     pub node_id: String,
     #[serde(default)]
     pub addr: Option<String>,
@@ -1052,6 +1055,16 @@ pub async fn run_ws_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn peer_lightning_mapping_is_preserved_when_reported_and_optional_on_old_nodes() {
+        let node_id = "ab".repeat(32);
+        let ln = format!("02{}", "cd".repeat(32));
+        let peer: Peer = serde_json::from_value(serde_json::json!({"node_id": node_id, "ln_pubkey": ln})).unwrap();
+        assert_eq!(serde_json::to_value(peer).unwrap()["ln_pubkey"], ln);
+        let legacy: Peer = serde_json::from_value(serde_json::json!({"node_id": node_id})).unwrap();
+        assert!(serde_json::to_value(legacy).unwrap()["ln_pubkey"].is_null());
+    }
 
     #[test]
     fn conversation_ceiling_evidence_distinguishes_missing_contract_from_failed_quote() {

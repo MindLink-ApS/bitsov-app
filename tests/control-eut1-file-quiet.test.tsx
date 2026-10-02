@@ -149,7 +149,7 @@ describe('EUT-1: file send, quiet copy, delivery tick', () => {
     expect(`${retry.title} ${retry.body} ${retry.detail}`.toLowerCase()).toMatch(/paid|do not send|retry/);
     const adm = admissionCopy({ admission_msat: 1500, message_msat: 2000, total_msat: 3500, quoted: true });
     expect(adm.body.split('\n')).toHaveLength(1);
-    expect(adm.detail).toContain('1,500 msat');
+    expect(adm.detail).toContain('1.5 sats');
     expect(deliveryFromReceipt({ delivered: true, accepted: true, state: 'acked' }).status).toBe('accepted');
   });
 });

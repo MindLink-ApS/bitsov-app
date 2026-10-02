@@ -6,6 +6,7 @@ export default defineConfig({
   plugins: [solid()],
   test: {
     environment: 'happy-dom',
+    setupFiles: ['tests/setup.ts'],
     include: ['tests/**/*.test.tsx', 'tests/**/*.test.ts'],
   },
 });
