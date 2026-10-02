@@ -37,11 +37,11 @@ const msg = (id: string, kind: number, sender: string, recipient: string, paid: 
 });
 
 describe('wallet: balance and channels in plain words', () => {
-  it('splits the node’s one total into what the channels can send and the on-chain rest', () => {
-    expect(splitBalance(WALLET)).toEqual({ total: 480_000_000, lightning: 380_000_000, ready: 300_000_000, onchain: 100_000_000 });
+  it('keeps the node total without treating channel capacity or the remainder as spendable', () => {
+    expect(splitBalance(WALLET)).toEqual({ total: 480_000_000, spendable: null, reserved: null, closing: null });
   });
-  it('never shows more in channels than the total, nor a negative on-chain part', () => {
-    expect(splitBalance({ ...WALLET, balance_msat: 200_000_000 })).toMatchObject({ lightning: 200_000_000, onchain: 0 });
+  it.each([0, 200_000_000, 480_000_000])('preserves a reported total of %i even without a breakdown', (total) => {
+    expect(splitBalance({ ...WALLET, balance_msat: total })).toEqual({ total, spendable: null, reserved: null, closing: null });
   });
   it('an open channel says what can be sent and received; an offline one says funds stay yours', () => {
     expect(channelWords(channel())).toMatchObject({ state: 'open', line: 'You can send up to 300,000 sats and receive up to 190,000 sats through it.' });
@@ -218,16 +218,20 @@ describe('the Wallet page', () => {
     if (tab) click(`[data-wallet-tab="${tab}"]`);
   }
 
-  it('opens full screen from the avatar menu: the total, with Lightning and on-chain split; Escape closes it', async () => {
+  it('opens full screen from the avatar menu: the node total with unknown spendability; Escape closes it', async () => {
     stubHost();
     await openWallet();
     expect(text('[data-avatar-balance]')).toBe('');
     await vi.waitFor(() => expect($('[data-balance-total]')?.getAttribute('data-balance-total')).toBe('480000000'));
     expect(text('[data-balance-total]')).toBe('480,000sats');
-    expect($('[data-balance-lightning]')!.getAttribute('data-balance-lightning')).toBe('380000000');
-    expect(text('[data-balance-lightning]')).toMatch(/300,000 sats ready to send now/);
-    expect($('[data-balance-onchain]')!.getAttribute('data-balance-onchain')).toBe('100000000');
-    expect(text('[data-wallet-basis]')).toMatch(/Your node reports one total/);
+    for (const category of ['spendable', 'reserved', 'closing']) {
+      expect(text(`[data-balance-${category}] .split-amount`)).toBe('Unknown');
+    }
+    expect(text('[data-balance-spendable]')).toMatch(/Spendable/);
+    expect(text('[data-balance-reserved]')).toMatch(/Reserved.*channel fee reserve/i);
+    expect(text('[data-balance-closing]')).toMatch(/Closing\/locked/);
+    expect(text('[data-wallet-basis]')).toMatch(/does not report.*separately/);
+    expect(text('[data-wallet-online]')).toMatch(/home node must stay online.*no watchtower/i);
     // What is behind the page is out of reach while it is open.
     const inert = (el: Element | null) => !!el && (el.hasAttribute('inert') || (el as HTMLElement & { inert?: boolean }).inert === true);
     expect(inert($('nav.rail'))).toBe(true);
@@ -240,12 +244,26 @@ describe('the Wallet page', () => {
     await vi.waitFor(() => expect(text('[data-avatar-balance]')).toBe('480,000 sats'));
   });
 
+  it('does not invent reserve or closing amounts from a wallet with active and closing channels', async () => {
+    // The public API loses the underlying reserve/closing breakdown. A 25k-sat
+    // reserve and 80k-sat closing balance cannot be recovered from this reply.
+    // Even the inactive channel might instead be opening or temporarily offline.
+    stubHost({ payments_overview: () => ({ ...WALLET, balance_msat: 505_000_000 }) });
+    await openWallet();
+    await vi.waitFor(() => expect(text('[data-balance-total]')).toBe('505,000sats'));
+    expect(text('[data-balance-spendable] .split-amount')).toBe('Unknown');
+    expect(text('[data-balance-reserved] .split-amount')).toBe('Unknown');
+    expect(text('[data-balance-closing] .split-amount')).toBe('Unknown');
+    expect($('[data-balance-onchain]')).toBeNull();
+    expect($('[data-balance-lightning]')).toBeNull();
+  });
+
   it('follows the BTC setting', async () => {
     stubHost();
     setDenom('btc');
     await openWallet();
     await vi.waitFor(() => expect(text('[data-balance-total]')).toBe('0.0048BTC'));
-    expect(text('[data-balance-onchain]')).toMatch(/0\.001 BTC/);
+    expect(text('[data-balance-reserved] .split-amount')).toBe('Unknown');
   });
 
   it('Channels: each peer, size, what you can send and receive, and its state in plain words', async () => {

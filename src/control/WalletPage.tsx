@@ -1,6 +1,6 @@
 /**
- * The Wallet page: full screen from the avatar menu. Balance (Lightning and
- * on-chain, split), Receive, Send, Channels and Activity.
+ * The Wallet page: full screen from the avatar menu. Node-reported balance and
+ * spendability, Receive, Send, Channels and Activity.
  *
  * Money: this page adds no way to pay. Send calls the composer's own `pay`
  * and `keysend` actions (the host's invoice decode, spend window, budget book
@@ -138,10 +138,6 @@ export function WalletPage(props: {
   onRefresh: () => void;
 }) {
   const split = () => (props.wallet ? splitBalance(props.wallet) : null);
-  const share = () => {
-    const s = split();
-    return s && s.total > 0 ? (s.lightning / s.total) * 100 : 0;
-  };
 
   // Invoices we issued: read whether they were paid while this page is open.
   let reading = false;
@@ -180,34 +176,39 @@ export function WalletPage(props: {
 
       <div class="wallet-body">
         <section class="wallet-hero" data-wallet-balance>
-          <span class="label">Total balance</span>
+          <span class="label">Node-reported total</span>
           <Show when={split()} fallback={<Show when={!props.walletError} fallback={<p class="err-note">{props.walletError}</p>}><div class="spinner" /></Show>}>
             {(s) => (
               <>
                 <span class="wallet-total" data-balance-total={s().total}>
                   {sats(s().total)}<span class="unit">{satUnit(s().total)}</span>
                 </span>
-                <div class="wallet-split-bar" aria-hidden="true">
-                  <div class="lightning" style={{ width: `${share()}%` }} />
-                </div>
                 <div class="wallet-split">
-                  <div class="split lightning" data-balance-lightning={s().lightning}>
-                    <span class="split-name"><span class="dot" />Lightning</span>
-                    <span class="split-amount">{fmtAmount(s().lightning)}</span>
-                    <span class="hint">{props.moneyBlocked ? 'Money is not ready yet.' : `${fmtAmount(s().ready)} ready to send now`}</span>
+                  <div class="split" data-balance-spendable={s().spendable ?? 'unknown'}>
+                    <span class="split-name">Spendable</span>
+                    <span class="split-amount">{s().spendable === null ? 'Unknown' : fmtAmount(s().spendable!)}</span>
+                    <span class="hint">Funds available to spend, excluding reserves and locked funds.</span>
                   </div>
-                  <div class="split onchain" data-balance-onchain={s().onchain}>
-                    <span class="split-name"><span class="dot" />On-chain</span>
-                    <span class="split-amount">{fmtAmount(s().onchain)}</span>
-                    <span class="hint">Also counts channel reserves and funds still settling</span>
+                  <div class="split" data-balance-reserved={s().reserved ?? 'unknown'}>
+                    <span class="split-name">Reserved (channel fee reserve)</span>
+                    <span class="split-amount">{s().reserved === null ? 'Unknown' : fmtAmount(s().reserved!)}</span>
+                    <span class="hint">Held back for channel closing fees; unavailable to spend.</span>
+                  </div>
+                  <div class="split" data-balance-closing={s().closing ?? 'unknown'}>
+                    <span class="split-name">Closing/locked</span>
+                    <span class="split-amount">{s().closing === null ? 'Unknown' : fmtAmount(s().closing!)}</span>
+                    <span class="hint">Waiting for a channel closure or time lock; unavailable to spend.</span>
                   </div>
                 </div>
                 <p class="hint wallet-basis" data-wallet-basis>
-                  Your node reports one total. Lightning is what your channels can send; on-chain is the rest of that total.
+                  Your node reports one total, but does not report these amounts separately. The total is not a spendable balance.
                 </p>
               </>
             )}
           </Show>
+          <p class="hint wallet-basis" data-wallet-online>
+            Your home node must stay online to monitor and protect your Lightning channels; there is no watchtower yet.
+          </p>
           <div class="wallet-actions">
             <button type="button" class="primary soft" data-wallet-go="receive" onClick={() => props.onTab('receive')}>Receive</button>
             <button type="button" class="primary soft" data-wallet-go="send" onClick={() => props.onTab('send')}>Send</button>

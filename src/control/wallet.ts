@@ -11,23 +11,22 @@ import type { Artifact, Channel, InvoiceStatus, Message, WalletOverview } from '
 // ---- balance -----------------------------------------------------------------
 
 export type BalanceSplit = {
-  /** What the node reports: Lightning and spendable on-chain, as one figure. */
+  /** The node's reported figure, unchanged; not a claim of spendability. */
   total: number;
-  /** What your channels can send (their reserve excluded), active or not. */
-  lightning: number;
-  /** Of that, in channels that are usable right now. */
-  ready: number;
-  /** The rest of the total: on-chain, plus channel reserves and funds still settling. */
-  onchain: number;
+  /** Null means the node API does not provide this amount. */
+  spendable: number | null;
+  reserved: number | null;
+  closing: number | null;
 };
 
 /**
- * The node reports one total, so the on-chain part is that total minus what
- * the channels hold for you. Never negative, and never more than the total.
+ * GET /payments/balance exposes only balance_msat (rc7). The node combines
+ * total Lightning with spendable on-chain, but does not expose ldk-node's fee
+ * reserve or closing/locked balances. Channel capacity is not a breakdown of
+ * that total. Do not infer amounts from a remainder, channel count or status.
  */
 export function splitBalance(w: WalletOverview): BalanceSplit {
-  const lightning = Math.min(w.balance_msat, w.channels.reduce((s, c) => s + c.local_balance_msat, 0));
-  return { total: w.balance_msat, lightning, ready: Math.min(lightning, w.lightning_outbound_msat), onchain: w.balance_msat - lightning };
+  return { total: w.balance_msat, spendable: null, reserved: null, closing: null };
 }
 
 // ---- channels ----------------------------------------------------------------
