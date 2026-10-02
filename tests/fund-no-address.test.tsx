@@ -14,7 +14,7 @@ function stubHost(address?: string, money?: { ready: boolean; starts: number }) 
     node_status: () => ({ ready: true, node_id: OWN, error: null }),
     pairing_status: () => ({
       state: 'paired', scopes: ['read', 'receive'], short_code: 'ABCD-EFGH',
-      code_from_node: true, reason: null, bootstrap: null,
+      code_from_node: true, reason: null, remote: false, bootstrap: null,
     }),
     node_overview: () => ({
       money_ready: money?.ready,

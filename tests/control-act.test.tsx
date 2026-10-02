@@ -16,7 +16,7 @@ const A = 'a'.repeat(64);
 const ROOM = '0f8e2b7a-1c3d-4e5f-8a9b-0c1d2e3f4a5b';
 const WINDOW = 600_000;
 
-const paired: PairingView = { state: 'paired', scopes: ['read', 'receive'], short_code: 'ABCD-EFGH', code_from_node: true, reason: null, bootstrap: null };
+const paired: PairingView = { state: 'paired', scopes: ['read', 'receive'], short_code: 'ABCD-EFGH', code_from_node: true, reason: null, remote: false, bootstrap: null };
 
 type Call = { cmd: string; args: Record<string, unknown> | undefined };
 type Reply = (args?: Record<string, unknown>) => unknown;

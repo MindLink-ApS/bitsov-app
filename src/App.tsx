@@ -1,9 +1,9 @@
 import { SoftError } from './control/SoftError';
 import { DelayedSpinner } from './control/DelayedSpinner';
 import { isMoneyNotReady } from './control/readiness';
-import { createMemo, createSignal, onCleanup, onMount, Show } from 'solid-js';
+import { createEffect, createMemo, createSignal, onCleanup, onMount, Show } from 'solid-js';
 import { qrSvg } from './qr';
-import { Onboarding } from './onboarding/Onboarding';
+import { Onboarding, type NodeTarget } from './onboarding/Onboarding';
 import { INITIAL_PAIRING, type NodeStatus, type PairingView } from './onboarding/pairing';
 import { amount as fmtAmount } from './control/format';
 import { ControlCenter } from './control/Shell';
@@ -35,15 +35,22 @@ export default function App() {
   const organism = new URLSearchParams(window.location.search).get('organism') === 'v2' ? 'v2' : 'v1';
   const [source, setSource] = createSignal<Source>(sample ? sampleSource({ organism }) : hostSource);
   const [status, setStatus] = createSignal<NodeStatus>({ ready: false, node_id: null, error: null });
-  // Gate G6: the funds UI stays behind an explicit local-trust disclosure.
+  // Gate G6: the funds UI stays behind an explicit trust disclosure.
   const [trustAck, setTrustAck] = createSignal(sample === 'shell');
   const [restoring, setRestoring] = createSignal(false);
   // Lifted so IdentityGate can stay mounted when ready is false (restart_node
   // clears ready). Restore retry/error must not be gated on ready: IdentityGate
   // must still show restore errors if ready is false.
   const [restoreError, setRestoreError] = createSignal<string | null>(null);
-  const showIdentityGate = () => status().ready || restoring() || restoreError() !== null;
   const [pairing, setPairing] = createSignal<PairingView>(INITIAL_PAIRING);
+  // A ready node can arrive before its pairing reply. Startup snapshots do not
+  // establish the final mode, so wait for authentication before offering trust.
+  const showIdentityGate = () =>
+    (status().ready && (pairing().state === 'paired' || pairing().state === 'fallback')) ||
+    restoring() || restoreError() !== null;
+  const [selectedTarget, setSelectedTarget] = createSignal<NodeTarget>('local');
+  const remote = createMemo(() => pairing().remote);
+  createEffect(() => setSelectedTarget(remote() ? 'cloud' : 'local'));
   const [device, setDevice] = createSignal<DeviceView | null>(null);
   // Once pairing has an outcome, the start spinner no longer describes the state.
   const starting = () => pairing().state === 'starting' || pairing().state === 'pending';
@@ -67,11 +74,12 @@ export default function App() {
     }
   };
   const retryPairing = async () => {
-    setPairing({ ...INITIAL_PAIRING, state: 'pending' });
+    const remote = pairing().remote;
+    setPairing({ ...INITIAL_PAIRING, remote, state: 'pending' });
     try {
       setPairing(await source().pairingRetry());
     } catch (e) {
-      setPairing({ ...INITIAL_PAIRING, state: 'failed', reason: String(e) });
+      setPairing({ ...INITIAL_PAIRING, remote, state: 'failed', reason: String(e) });
     }
   };
   const useSample = (start: SampleStart) => {
@@ -100,6 +108,8 @@ export default function App() {
       <Onboarding
         status={status}
         pairing={pairing}
+        selectedTarget={selectedTarget()}
+        onTargetChange={setSelectedTarget}
         trustAck={trustAck}
         onRetry={() => void retryPairing()}
         device={device}
@@ -135,6 +145,7 @@ export default function App() {
           <IdentityGate
             source={source()}
             nodeId={() => status().node_id}
+            remote={pairing().remote}
             onContinue={() => setTrustAck(true)}
             onRestoring={setRestoring}
             restoreError={restoreError}
@@ -145,7 +156,7 @@ export default function App() {
     </div>
   );
 
-  // The shell reads the node only once it is running AND the local-trust
+  // The shell reads the node only once it is running AND the trust
   // disclosure is accepted; before that it may call node_status and
   // pairing_status, nothing else.
   return (
@@ -169,13 +180,14 @@ export default function App() {
 }
 
 /**
- * Identity + the Gate G6 local-trust disclosure, which must be read and accepted
+ * Identity + the Gate G6 trust disclosure, which must be read and accepted
  * before any funding UI is shown. Also the place to restore an existing identity —
  * before there is money on this node, not after.
  */
 function IdentityGate(props: {
   source: Source;
   nodeId: () => string | null;
+  remote: boolean;
   onContinue: () => void;
   onRestoring: (value: boolean) => void;
   restoreError: () => string | null;
@@ -237,18 +249,35 @@ function IdentityGate(props: {
         </div>
       </details>
 
-      <section class="panel disclosure" data-gate="g6-local-trust">
-        <h2>Local trust — read this before you deposit</h2>
-        <p>
-          This node trusts every program on this computer. Anything running under your user
-          account can ask it for full access over <code>127.0.0.1</code> — enough to spend what
-          you deposit and read your history. Only fund a node on a machine you control.
-        </p>
-        <p>
-          Your keys stay in the node. BitSov never shows you your recovery phrase and never
-          copies it anywhere.
-        </p>
-      </section>
+      <Show
+        when={props.remote}
+        fallback={
+          <section class="panel disclosure" data-gate="g6-local-trust">
+            <h2>Local trust — read this before you deposit</h2>
+            <p>
+              This node trusts every program on this computer. Anything running under your user
+              account can ask it for full access over <code>127.0.0.1</code> — enough to spend what
+              you deposit and read your history. Only fund a node on a machine you control.
+            </p>
+            <p>
+              Your keys stay in the node. BitSov never shows you your recovery phrase and never
+              copies it anywhere.
+            </p>
+          </section>
+        }
+      >
+        <section class="panel disclosure" data-gate="g6-remote-trust">
+          <h2>Remote trust — read this before you deposit</h2>
+          <p>
+            This node’s keys live on the remote machine. Whoever operates that machine
+            (for example, the VM host) can spend what you deposit. Only fund a node whose host you trust.
+          </p>
+          <p>
+            Your keys stay in the node. BitSov never shows you your recovery phrase and never
+            copies it anywhere.
+          </p>
+        </section>
+      </Show>
 
       <button class="primary" onClick={props.onContinue}>
         I understand — continue to funding

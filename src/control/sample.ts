@@ -605,6 +605,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
   let polls = 0;
   const status: NodeStatus = { ready: true, node_id: SAMPLE_OWN_ID, error: null };
   const pairing: PairingView = {
+    remote: false,
     state: 'paired',
     scopes: ['read', 'receive'],
     short_code: 'SMPL-DATA',

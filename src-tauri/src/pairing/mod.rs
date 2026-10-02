@@ -410,6 +410,8 @@ pub async fn bootstrap_state(client: &PairingClient) -> Result<Option<String>, P
 /// What the renderer learns about pairing. Carries no token and no key.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct PairingView {
+    /// The host is attached through the pinned remote transport.
+    pub remote: bool,
     /// `starting` | `pending` | `paired` | `failed` | `fallback`.
     pub state: &'static str,
     pub scopes: Vec<String>,
@@ -424,6 +426,7 @@ pub struct PairingView {
 impl PairingView {
     fn with_state(state: &'static str) -> Self {
         Self {
+            remote: false,
             state,
             scopes: Vec::new(),
             short_code: None,

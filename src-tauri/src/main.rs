@@ -259,6 +259,13 @@ impl Default for NodeState {
 }
 
 impl NodeState {
+    /// Export the running mode even before authentication, or after it fails.
+    fn pairing_snapshot(&self) -> PairingView {
+        let mut view = self.pairing_view.lock().unwrap().clone();
+        view.remote = self.remote_mode.load(Ordering::SeqCst);
+        view
+    }
+
     fn for_api(api_base: impl Into<String>) -> Self {
         let remote_proxy_auth: Arc<str> = Arc::from(
             remote_access::new_local_auth_token()
@@ -1556,7 +1563,7 @@ fn pairing_status(
     state: State<'_, NodeState>,
 ) -> Result<PairingView, String> {
     reject_sealed_window(&window)?;
-    Ok(state.pairing_view.lock().unwrap().clone())
+    Ok(state.pairing_snapshot())
 }
 
 /// Validate and persist a pasted remote pairing link. The running mode is
@@ -1600,13 +1607,13 @@ async fn pairing_retry(
         .clone()
         .ok_or_else(|| "pairing is not available yet: the node has not started".to_string())?;
     if state.pairing_view.lock().unwrap().state != "failed" {
-        return Ok(state.pairing_view.lock().unwrap().clone());
+        return Ok(state.pairing_snapshot());
     }
     if state.stale_pairing.swap(false, Ordering::SeqCst) {
         pairing::forget_pairing(&ctx.store);
     }
     finish_auth(state.inner(), &ctx.data_dir).await;
-    Ok(state.pairing_view.lock().unwrap().clone())
+    Ok(state.pairing_snapshot())
 }
 
 /// `GET /onboarding/state`. `None` means the first-run funding flow has not been
@@ -6472,6 +6479,31 @@ mod verified_local_socket_tests {
         let _hold = std::fs::File::open(&config).unwrap();
         assert!(process_holds_data_dir(std::process::id(), dir.path()));
         assert!(process_matches_node_config(std::process::id(), &config));
+    }
+}
+
+#[cfg(test)]
+mod remote_onboarding_tests {
+    use super::*;
+
+    #[test]
+    fn pairing_snapshot_exports_running_mode_in_every_state_without_credentials() {
+        // Constructing the host does not start it or make any requests.
+        let state = NodeState::for_api("http://127.0.0.1:1/api/v1");
+        for remote in [false, true] {
+            state.remote_mode.store(remote, Ordering::SeqCst);
+            for phase in ["starting", "pending", "paired", "failed", "fallback"] {
+                let mut view = PairingView::starting();
+                view.state = phase;
+                *state.pairing_view.lock().unwrap() = view;
+                let json = serde_json::to_value(state.pairing_snapshot()).unwrap();
+                assert_eq!(json["remote"], remote);
+                assert_eq!(json["state"], phase);
+                assert_eq!(json.as_object().unwrap().len(), 7);
+                assert!(json.get("token").is_none());
+                assert!(json.get("key").is_none());
+            }
+        }
     }
 }
 
