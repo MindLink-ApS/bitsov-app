@@ -25,15 +25,12 @@ export type BalanceSplit = {
 };
 
 /** Independent observations, never summed into a spendable balance.
- * Pending prefers the explicit field, otherwise the reported on-chain difference.
+ * Pending is only known when explicitly reported by the node.
  * Closing sweeps may overlap on-chain funds; contested claims are conditional. */
 export function splitBalance(w: WalletOverview): BalanceSplit {
   const msat = (sats: number | null | undefined) => sats == null ? null : sats * 1000;
-  const total = w.onchain_total_sats;
-  const spendable = w.onchain_spendable_sats;
-  const pending = w.onchain_pending_sats ?? (total != null && spendable != null && total >= spendable ? total - spendable : null);
   return {
-    pending: msat(pending),
+    pending: msat(w.onchain_pending_sats),
     total: w.balance_msat,
     hasBreakdown: [w.lightning_spendable_sats, w.onchain_spendable_sats, w.onchain_total_sats,
       w.onchain_pending_sats, w.anchor_reserve_sats, w.closing_sats, w.contested_sats].some((value) => value != null),

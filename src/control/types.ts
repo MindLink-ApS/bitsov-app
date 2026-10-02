@@ -415,7 +415,7 @@ export type ActionError = {
   // Unknown includes transport loss after dispatch: it must never mean "not sent".
   code:
     | 'spend_unknown'
-    | 'price_changed' | 'price_cap_exceeded' | 'price_cap_unavailable' | 'room_partial'
+    | 'price_changed' | 'price_cap_exceeded' | 'price_cap_unavailable' | 'price_quote_unavailable' | 'room_partial'
     | 'spend_locked'
     | 'spend_expired'
     | 'spend_refused'

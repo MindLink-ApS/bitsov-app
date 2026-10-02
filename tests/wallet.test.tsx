@@ -43,6 +43,17 @@ describe('wallet: balance and channels in plain words', () => {
   it.each([0, 200_000_000, 480_000_000])('preserves a reported total of %i even without a breakdown', (total) => {
     expect(splitBalance({ ...WALLET, balance_msat: total })).toEqual({ total, hasBreakdown: false, pending: null, lightning: null, onchain: null, onchainTotal: null, reserved: null, closing: null, contested: null });
   });
+  it.each([
+    [undefined, null],
+    [null, null],
+    [0, 0],
+    [15_000, 15_000_000],
+  ])('uses only reported pending with an anchor reserve: %s', (reported, pending) => {
+    expect(splitBalance({ ...WALLET,
+      onchain_total_sats: 130_000, onchain_spendable_sats: 90_000,
+      anchor_reserve_sats: 25_000, onchain_pending_sats: reported,
+    })).toMatchObject({ pending, onchainTotal: 130_000_000, onchain: 90_000_000, reserved: 25_000_000 });
+  });
   it('an open channel says what can be sent and received; an offline one says funds stay yours', () => {
     expect(channelWords(channel())).toMatchObject({ state: 'open', line: 'You can send up to 300,000 sats and receive up to 190,000 sats through it.' });
     expect(channelWords(channel({ active: false })).line).toMatch(/offline, or the channel is still opening or closing\. What you hold in it stays yours/);
@@ -260,7 +271,10 @@ describe('the Wallet page', () => {
   });
 
   it.each([
-    [{ onchain_total_sats: 190804, onchain_spendable_sats: 2004 }, '188,800 sats pending'],
+    [{ onchain_total_sats: 190804, onchain_spendable_sats: 2004 }, 'Pending on-chain: Unknown'],
+    [{ onchain_total_sats: 130_000, onchain_spendable_sats: 90_000, anchor_reserve_sats: 25_000 }, 'Pending on-chain: Unknown'],
+    [{ onchain_total_sats: 130_000, onchain_spendable_sats: 90_000, anchor_reserve_sats: 25_000, onchain_pending_sats: null }, 'Pending on-chain: Unknown'],
+    [{ onchain_total_sats: 130_000, onchain_spendable_sats: 90_000, anchor_reserve_sats: 25_000, onchain_pending_sats: 15_000 }, '15,000 sats pending'],
     [{ onchain_pending_sats: 188800 }, '188,800 sats pending'],
     [{ onchain_pending_sats: 0, onchain_total_sats: 190804, onchain_spendable_sats: 2004 }, '0 sats pending'],
     [{ onchain_total_sats: 190804 }, 'Pending on-chain: Unknown'],
@@ -288,6 +302,8 @@ describe('the Wallet page', () => {
     expect(text('[data-balance-onchain-total] .split-name')).toBe('On-chain total');
     expect(text('[data-balance-onchain-total] .split-amount')).toBe('130,000 sats');
     expect(text('[data-balance-reserved] .split-amount')).toBe('25,000 sats');
+    expect(text('[data-balance-pending]')).toBe('Pending on-chain: Unknown');
+    expect($('[data-balance-pending]')?.getAttribute('data-balance-pending')).toBe('unknown');
     expect(text('[data-balance-closing] .split-amount')).toBe('80,000 sats');
     expect(text('[data-balance-contested] .split-amount')).toBe('7,000 sats');
     expect(text('[data-balance-lightning]')).toMatch(/outbound capacity.*not.*guarantee.*routing fees.*per-HTLC limits.*remote liquidity/i);
