@@ -51,6 +51,8 @@ export type RoomCopy = { recipient: string; id: string; payment_amount_msat: num
  * holds that peer's pricing table.
  */
 export type PriceQuote = {
+  /** Host refuses to promise an all-in message cap on an older node. */
+  send_unavailable?: string | null;
   max_routing_fee_msat?: number;
   kind: number;
   own_msat: number;

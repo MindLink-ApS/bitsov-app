@@ -52,8 +52,8 @@ function stubHost(overrides: Record<string, (args?: Record<string, unknown>) => 
         : [],
     price_quote: (args) =>
       args?.peer === A
-        ? { kind: 0, own_msat: 1000, peer_msat: 2000, peer_age_secs: 60, peer_stale: false }
-        : { kind: 0, own_msat: 1000, peer_msat: null, peer_age_secs: null, peer_stale: false },
+        ? { kind: 0, own_msat: 1000, peer_msat: 2000, peer_age_secs: 60, max_routing_fee_msat: 0, peer_stale: false }
+        : { kind: 0, own_msat: 1000, peer_msat: null, peer_age_secs: null, max_routing_fee_msat: 0, peer_stale: false },
     payments_overview: () => ({
       balance_msat: 52_500_000,
       lightning_outbound_msat: 500_000,

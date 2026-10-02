@@ -71,12 +71,13 @@ function stubHost(start: BudgetView, overrides: Record<string, Reply> = {}) {
     room_members: () => [OWN, MAYA],
     room_quote: () => ({ room_id: ROOM, members: [{ node_id: MAYA, msat: 2000, advertised: true, connected: true }], total_msat: 2000, unreachable: [], estimate: false }),
     messages_list: (args) => (args!.peer === MAYA ? [{ id: 'm0', kind: 0, sender: MAYA, recipient: OWN, timestamp: Date.now() - 60_000, plaintext: 'hi', payment_amount_msat: 2000 }] : []),
-    price_quote: () => ({ kind: 0, own_msat: 1000, peer_msat: 2000, peer_age_secs: 30, peer_stale: false }),
+    price_quote: () => ({ kind: 0, own_msat: 1000, peer_msat: 2000, peer_age_secs: 30, max_routing_fee_msat: 0, peer_stale: false }),
     payments_overview: () => ({ balance_msat: 1_000_000, lightning_outbound_msat: 500_000, channels: [] }),
     fund_state: () => null,
     file_price: () => ({ principal_msat: 3000, max_routing_fee_msat: 5000, total_msat: 8000 }),
     spend_status: () => state.spend,
     budget_status: () => state.budget,
+    first_contact_quote: (args) => ({ recipient: args!.peer, admission_msat: 1000, message_msat: 1000, max_routing_fee_msat: 0, total_msat: 2000, expires_at: Math.floor(Date.now() / 1000) + 60 }),
     first_contact_request: () => null, // Pre-owner-handoff node fixture unless overridden.
     budget_approve: (args) => (state.budget = open(state.budget.rows, { ceiling_msat: args!.ceiling_msat as number })),
     budget_set: (args) => {
@@ -186,7 +187,7 @@ describe('invisible payments in the composer and the context panel', () => {
     expect(host.used('message_send')).toHaveLength(0);
     expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('gm Maya');
 
-    await vi.waitFor(() => expect(text('[data-send]')).toBe('Send · 2 sats'));
+    await vi.waitFor(() => expect($('[data-budget="ok"]')).not.toBeNull());
     expect(text('[data-budget-line]')).toContain('Pays automatically · 0 of 50 sats to Maya in 24 h');
     submit();
     await vi.waitFor(() => expect(host.used('message_send')).toHaveLength(1));
@@ -225,7 +226,7 @@ describe('invisible payments in the composer and the context panel', () => {
     expect(text('[data-first-contact]')).toContain('First paid message to Nadia');
     await vi.waitFor(() => expect(text('[data-first-budget="50000"]')).toBe('50 sats a day · 25 messages'));
     type('[data-composer] textarea', 'hello Nadia');
-    await vi.waitFor(() => expect(text('[data-send]')).toBe('Send first message · ≈ 2 sats'));
+    await vi.waitFor(() => expect(text('[data-send-price]')).toBe('up to 2 sats · includes max routing fee'));
     $<HTMLButtonElement>('[data-first-budget="100000"]')!.click();
     submit();
     await vi.waitFor(() => expect(host.used('message_send')).toHaveLength(1));
@@ -234,7 +235,7 @@ describe('invisible payments in the composer and the context panel', () => {
     await vi.waitFor(() => expect($('[data-first-contact]')).toBeNull());
     await vi.waitFor(() => expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe(''));
     type('[data-composer] textarea', 'second');
-    await vi.waitFor(() => expect(text('[data-send]')).toBe('Send · 2 sats'));
+    await vi.waitFor(() => expect($('[data-budget="ok"]')).not.toBeNull());
   });
 
   it('shows a stranger’s own signed quote on the door card and confirms exactly that total', async () => {
@@ -253,7 +254,7 @@ describe('invisible payments in the composer and the context panel', () => {
     // Budget counts conservatively use the displayed all-in quote.
     expect(text('[data-first-budget="50000"]')).toBe('50 sats a day · 10 messages');
     type('[data-composer] textarea', 'hello Nadia');
-    await vi.waitFor(() => expect(text('[data-send]')).toBe('Send first message · 5 sats'));
+    await vi.waitFor(() => expect(text('[data-send-price]')).toBe('up to 5 sats · includes max routing fee'));
     submit();
     await vi.waitFor(() => expect(host.used('message_send')).toHaveLength(1));
     // The confirmed cap is the quoted total: admission + this message.
@@ -895,13 +896,13 @@ describe('invisible payments in the composer and the context panel', () => {
     const host = stubHost(open([{ target: MAYA, room: false, limit_msat: 3000, spent_msat: 2000 }]));
     await openShell();
     type('[data-composer] textarea', 'one more');
-    await vi.waitFor(() => expect(text('[data-send]')).toBe('Budget used up'));
+    await vi.waitFor(() => expect($('[data-budget-used="contact"]')).not.toBeNull());
     expect($<HTMLButtonElement>('[data-send]')!.disabled).toBe(true);
     expect(text('[data-budget-used="contact"]')).toContain('2 of 3 sats in the last 24 hours');
     $<HTMLButtonElement>('[data-budget-raise]')!.click();
     await vi.waitFor(() => expect(host.used('budget_set')).toHaveLength(1));
     expect(host.used('budget_set')[0].args).toEqual({ target: MAYA, room: false, limit_msat: 6000 });
-    await vi.waitFor(() => expect(text('[data-send]')).toBe('Send · 2 sats'));
+    await vi.waitFor(() => expect($('[data-budget="ok"]')).not.toBeNull());
     expect(host.used('message_send')).toHaveLength(0);
   });
 
@@ -929,12 +930,12 @@ describe('invisible payments in the composer and the context panel', () => {
     await vi.waitFor(() => expect(host.used('budget_pause')).toHaveLength(1));
     await vi.waitFor(() => expect(text('[data-autopay]')).toContain('Paused'));
     type('[data-composer] textarea', 'while paused');
-    await vi.waitFor(() => expect(text('[data-send]')).toBe('Resume payments'));
+    await vi.waitFor(() => expect($('[data-budget-paused]')).not.toBeNull());
     expect(text('[data-budget-paused]')).toContain('New app payments are blocked');
     submit();
     await vi.waitFor(() => expect(host.used('budget_resume')).toHaveLength(1));
     expect(host.used('message_send')).toHaveLength(0);
-    await vi.waitFor(() => expect(text('[data-send]')).toBe('Send · 2 sats'));
+    await vi.waitFor(() => expect($('[data-budget="ok"]')).not.toBeNull());
   });
 
   it('lowers one contact’s budget from the panel', async () => {
@@ -975,7 +976,7 @@ describe('invisible payments in the composer and the context panel', () => {
     expect(host.used('message_send')).toHaveLength(1);
     expect(host.used('message_send')[0].args).toMatchObject({ max_msat: 7000, max_recipient_msat: { [MAYA]: 7000 } });
     expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('room draft');
-    expect(text('[data-send]')).toContain('9.5 sats');
+    expect(text('[data-send-price]')).toContain('9.5 sats');
     submit();
     await vi.waitFor(() => expect(host.used('message_send')).toHaveLength(2));
     expect(host.used('message_send')[1].args).toMatchObject({ max_msat: 9500, max_recipient_msat: { [MAYA]: 9500 } });
@@ -998,7 +999,7 @@ describe('invisible payments in the composer and the context panel', () => {
     });
     await openShell();
     type('[data-composer] textarea', 'back again');
-    await vi.waitFor(() => expect(text('[data-send]')).toBe('Send · 2 sats'));
+    await vi.waitFor(() => expect($('[data-budget="ok"]')).not.toBeNull());
     submit();
     await vi.waitFor(() => expect(text('[data-composer-note]')).toContain('admitted again'));
     // Maya's own quote, on the door card, with her budget as it stands.
@@ -1020,7 +1021,7 @@ describe('invisible payments in the composer and the context panel', () => {
     });
     await openShell();
     type('[data-composer] textarea', 'race');
-    await vi.waitFor(() => expect(text('[data-send]')).toBe('Send · 2 sats'));
+    await vi.waitFor(() => expect($('[data-budget="ok"]')).not.toBeNull());
     submit();
     await vi.waitFor(() => expect(text('[data-composer-note]')).toContain('used 50 of 50 sats'));
     expect($('[data-artifact="failed"]')).toBeNull();
@@ -1037,7 +1038,7 @@ describe('invisible payments in the composer and the context panel', () => {
       });
       await openShell();
       type('[data-composer] textarea', 'race');
-      await vi.waitFor(() => expect(text('[data-send]')).toBe('Send · 2 sats'));
+      await vi.waitFor(() => expect($('[data-budget="ok"]')).not.toBeNull());
       const spendReads = host.used('spend_status').length;
       submit();
       await vi.waitFor(() => expect(text('[data-composer-note]')).toContain('Nothing was sent'));

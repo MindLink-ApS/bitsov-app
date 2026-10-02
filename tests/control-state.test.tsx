@@ -80,7 +80,7 @@ describe('cost to send', () => {
     own_msat: 1000,
     peer_msat: null,
     peer_age_secs: null,
-    peer_stale: false,
+    max_routing_fee_msat: 0, peer_stale: false,
     ...over,
   });
   const now = 1_000_000_000;
@@ -100,7 +100,7 @@ describe('cost to send', () => {
   });
 
   it('flags a stale peer table as an estimate', () => {
-    const c = costToSend({ kind: 'peer', id: A }, quote({ peer_msat: 3000, peer_age_secs: 86400, peer_stale: true }), { nowMs: now })!;
+    const c = costToSend({ kind: 'peer', id: A }, quote({ peer_msat: 3000, peer_age_secs: 86400, max_routing_fee_msat: 0, peer_stale: true }), { nowMs: now })!;
     expect(c.estimate).toBe(true);
     expect(c.basis).toContain('stale');
   });

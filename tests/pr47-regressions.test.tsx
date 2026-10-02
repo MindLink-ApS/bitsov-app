@@ -70,7 +70,7 @@ describe('PR47 independent frontend regressions', () => {
       ceiling_msat: 500_000, spent_msat: 0, unsettled_msat: 0, rows: [],
       presets: SAMPLE_PRESETS, window_ms: 86_400_000, max_daily_msat: 100_000_000, node_grant: null,
     });
-    source.priceQuote = async () => ({ kind: 0, own_msat: 1000, peer_msat: 2000, peer_age_secs: 0, peer_stale: false });
+    source.priceQuote = async () => ({ kind: 0, own_msat: 1000, peer_msat: 2000, peer_age_secs: 0, max_routing_fee_msat: 0, peer_stale: false });
     source.firstContactQuote = async () => ({ recipient: peer, admission_msat: 3000, message_msat: 2000, total_msat: 5000, expires_at: Math.floor(Date.now() / 1000) + 60 });
     start(source);
     await vi.waitFor(() => expect(mount!.textContent).toContain('review: inbound only, never paid this peer'));
@@ -122,7 +122,7 @@ describe('PR47 independent frontend regressions', () => {
     source.peers = async () => [SAMPLE_PEERS[0]];
     source.messages = async () => [];
     source.budgetStatus = openBudget;
-    source.priceQuote = async () => ({ kind: 0, own_msat: 1000, peer_msat: 2000, peer_age_secs: 0, peer_stale: false });
+    source.priceQuote = async () => ({ kind: 0, own_msat: 1000, peer_msat: 2000, peer_age_secs: 0, max_routing_fee_msat: 0, peer_stale: false });
     const quotes = vi.fn(async () => ({ recipient: peer, admission_msat: 3000, message_msat: 2000, total_msat: 5000, expires_at: Math.floor(Date.now() / 1000) + 60 }));
     source.firstContactQuote = quotes;
     source.send = async () => { throw { code: 'price_cap_exceeded', message: 'The node refused the changed price before any payment.' }; };

@@ -44,7 +44,7 @@ function stubHost(overrides: Record<string, Reply> = {}) {
     peers_list: () => [{ node_id: A, addr: null, label: 'Maya', connected: true, fingerprint: null }],
     rooms_list: () => [],
     messages_list: () => [],
-    price_quote: () => ({ kind: 0, own_msat: 1000, peer_msat: 2000, peer_age_secs: 30, peer_stale: false }),
+    price_quote: () => ({ kind: 0, own_msat: 1000, peer_msat: 2000, peer_age_secs: 30, max_routing_fee_msat: 0, peer_stale: false }),
     payments_overview: () => ({ balance_msat: 1_000_000, lightning_outbound_msat: 500_000, channels: [] }),
     fund_state: () => null,
     file_price: () => ({ principal_msat: 3000, max_routing_fee_msat: 5000, total_msat: 8000 }),
@@ -136,7 +136,7 @@ describe('EUT-1: file send, quiet copy, delivery tick', () => {
     const ta = $<HTMLTextAreaElement>('[data-composer] textarea')!;
     ta.value = 'ping';
     ta.dispatchEvent(new Event('input', { bubbles: true }));
-    await vi.waitFor(() => expect(text('[data-send]')).toMatch(/^Send · /));
+    await vi.waitFor(() => expect(text('[data-send-price]')).toMatch(/^up to /));
     $<HTMLButtonElement>('[data-send]')!.click();
     await vi.waitFor(() => expect($('[data-message="msg-acked"] [data-delivery]')?.getAttribute('data-delivery')).toBe('accepted'));
     expect(text('[data-message="msg-acked"] [data-delivery]').trim()).toBe('');
