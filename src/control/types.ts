@@ -164,10 +164,18 @@ export type Channel = {
 
 /** `payments_overview`. */
 export type WalletOverview = {
-  /** rc7 reports one combined figure: Lightning + spendable on-chain. */
+  /** Legacy node-reported aggregate; not a claim of spendability. */
   balance_msat: number;
   /** Sum of active channels' outbound capacity. Not a partition of `balance_msat`. */
   lightning_outbound_msat: number;
+  /** Optional measured categories in sats. Missing/null means unknown, not zero.
+   * These overlap and are not an additive partition of balance_msat. */
+  lightning_spendable_sats?: number | null;
+  onchain_spendable_sats?: number | null;
+  onchain_total_sats?: number | null;
+  anchor_reserve_sats?: number | null;
+  closing_sats?: number | null;
+  contested_sats?: number | null;
   channels: Channel[];
 };
 

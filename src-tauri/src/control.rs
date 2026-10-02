@@ -501,13 +501,34 @@ pub struct FirstContactQuote {
     pub expires_at: u64,
 }
 
+/// `GET /payments/balance`. Unknown categories are omitted by the node and
+/// become null at the host boundary; a reported zero remains a known zero.
+#[derive(Serialize, Deserialize)]
+pub struct Balance {
+    pub balance_msat: u64,
+    pub onchain_spendable_sats: Option<u64>,
+    pub onchain_total_sats: Option<u64>,
+    pub anchor_reserve_sats: Option<u64>,
+    pub lightning_spendable_sats: Option<u64>,
+    pub closing_sats: Option<u64>,
+    pub contested_sats: Option<u64>,
+}
+
 /// `payments_overview`.
 #[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct WalletOverview {
-    /// rc7 returns ONE figure: Lightning + spendable on-chain. No split exists.
+    /// Legacy node-reported aggregate, unchanged; not a spendable balance.
     pub balance_msat: u64,
     /// Sum of channel outbound capacity. Not a partition of `balance_msat`.
     pub lightning_outbound_msat: u64,
+    /// Independent categories in sats, passed through without arithmetic.
+    /// They overlap and cannot reconcile the legacy total.
+    pub onchain_spendable_sats: Option<u64>,
+    pub onchain_total_sats: Option<u64>,
+    pub anchor_reserve_sats: Option<u64>,
+    pub lightning_spendable_sats: Option<u64>,
+    pub closing_sats: Option<u64>,
+    pub contested_sats: Option<u64>,
     pub channels: Vec<Channel>,
 }
 
@@ -654,15 +675,21 @@ impl NodeOverview {
     }
 }
 
-pub fn wallet_overview(balance_msat: u64, channels: Vec<Channel>) -> WalletOverview {
+pub fn wallet_overview(balance: Balance, channels: Vec<Channel>) -> WalletOverview {
     let lightning_outbound_msat = channels
         .iter()
         .filter(|c| c.active)
         .map(|c| c.local_balance_msat)
         .sum();
     WalletOverview {
-        balance_msat,
+        balance_msat: balance.balance_msat,
         lightning_outbound_msat,
+        onchain_spendable_sats: balance.onchain_spendable_sats,
+        onchain_total_sats: balance.onchain_total_sats,
+        anchor_reserve_sats: balance.anchor_reserve_sats,
+        lightning_spendable_sats: balance.lightning_spendable_sats,
+        closing_sats: balance.closing_sats,
+        contested_sats: balance.contested_sats,
         channels,
     }
 }
@@ -1162,6 +1189,33 @@ mod tests {
     }
 
     #[test]
+    fn wallet_breakdown_preserves_present_absent_zero_and_partial_categories() {
+        let fields = [
+            "onchain_spendable_sats", "onchain_total_sats", "anchor_reserve_sats",
+            "lightning_spendable_sats", "closing_sats", "contested_sats",
+        ];
+        for body in [
+            serde_json::json!({"balance_msat": 480_000_000}),
+            serde_json::json!({"balance_msat": 480_000_000,
+                "onchain_spendable_sats": 90_000, "onchain_total_sats": 130_000,
+                "anchor_reserve_sats": 25_000, "lightning_spendable_sats": 210_000,
+                "closing_sats": 80_000, "contested_sats": 7_000}),
+            serde_json::json!({"balance_msat": 480_000_000,
+                "onchain_spendable_sats": 0, "onchain_total_sats": 0,
+                "anchor_reserve_sats": 0, "lightning_spendable_sats": 0,
+                "closing_sats": 0, "contested_sats": 0}),
+            serde_json::json!({"balance_msat": 480_000_000, "closing_sats": 42}),
+        ] {
+            let balance = serde_json::from_value(body.clone()).unwrap();
+            let out = serde_json::to_value(wallet_overview(balance, vec![])).unwrap();
+            assert_eq!(out["balance_msat"], 480_000_000);
+            for field in fields {
+                assert_eq!(out.get(field), Some(&body[field]), "{field}: {body}");
+            }
+        }
+    }
+
+    #[test]
     fn wallet_outbound_counts_active_channels_only() {
         let ch = |local, active| Channel {
             channel_id: "c".into(),
@@ -1171,7 +1225,8 @@ mod tests {
             remote_balance_msat: 1,
             active,
         };
-        let w = wallet_overview(52_500_000, vec![ch(500_000, true), ch(80_000, false)]);
+        let balance = serde_json::from_value(serde_json::json!({"balance_msat": 52_500_000})).unwrap();
+        let w = wallet_overview(balance, vec![ch(500_000, true), ch(80_000, false)]);
         assert_eq!(w.balance_msat, 52_500_000);
         assert_eq!(w.lightning_outbound_msat, 500_000);
         assert_eq!(w.channels.len(), 2);

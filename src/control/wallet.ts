@@ -11,22 +11,31 @@ import type { Artifact, Channel, InvoiceStatus, Message, WalletOverview } from '
 // ---- balance -----------------------------------------------------------------
 
 export type BalanceSplit = {
-  /** The node's reported figure, unchanged; not a claim of spendability. */
+  /** All display amounts are msat; the reported total is unchanged. */
   total: number;
+  hasBreakdown: boolean;
   /** Null means the node API does not provide this amount. */
-  spendable: number | null;
+  lightning: number | null;
+  onchain: number | null;
   reserved: number | null;
   closing: number | null;
+  contested: number | null;
 };
 
-/**
- * GET /payments/balance exposes only balance_msat (rc7). The node combines
- * total Lightning with spendable on-chain, but does not expose ldk-node's fee
- * reserve or closing/locked balances. Channel capacity is not a breakdown of
- * that total. Do not infer amounts from a remainder, channel count or status.
- */
+/** Independent observations, never summed or inferred from channels/remainders.
+ * Closing sweeps may overlap on-chain funds; contested claims are conditional. */
 export function splitBalance(w: WalletOverview): BalanceSplit {
-  return { total: w.balance_msat, spendable: null, reserved: null, closing: null };
+  const msat = (sats: number | null | undefined) => sats == null ? null : sats * 1000;
+  return {
+    total: w.balance_msat,
+    hasBreakdown: [w.lightning_spendable_sats, w.onchain_spendable_sats, w.onchain_total_sats,
+      w.anchor_reserve_sats, w.closing_sats, w.contested_sats].some((value) => value != null),
+    lightning: msat(w.lightning_spendable_sats),
+    onchain: msat(w.onchain_spendable_sats),
+    reserved: msat(w.anchor_reserve_sats),
+    closing: msat(w.closing_sats),
+    contested: msat(w.contested_sats),
+  };
 }
 
 // ---- channels ----------------------------------------------------------------

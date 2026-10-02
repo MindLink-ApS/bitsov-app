@@ -5536,11 +5536,11 @@ function WalletPanel(props: { moneyBlocked: boolean; wallet: WalletOverview | nu
                   {sats(w().balance_msat)}
                   <span class="unit">{satUnit(w().balance_msat)}</span>
                 </span>
-                <p class="hint">Lightning and spendable on-chain together. This node version reports them as one figure.</p>
+                <p class="hint">Node-reported total: one figure, not a spendable balance.</p>
               </div>
               <dl class="facts">
-                <dt>{props.moneyBlocked ? 'Lightning outbound (money not ready)' : 'Lightning, ready to send'}</dt>
-                <dd class="sats">{fmtAmount(w().lightning_outbound_msat)}</dd>
+                <dt>{props.moneyBlocked ? 'Lightning outbound capacity (money not ready)' : 'Lightning outbound capacity'}</dt>
+                <dd class="sats">{fmtAmount(w().lightning_spendable_sats == null ? w().lightning_outbound_msat : w().lightning_spendable_sats! * 1000)}</dd>
                 <dt>Open channels</dt>
                 <dd class="sats">
                   {active()} of {w().channels.length} active

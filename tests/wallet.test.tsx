@@ -38,10 +38,10 @@ const msg = (id: string, kind: number, sender: string, recipient: string, paid: 
 
 describe('wallet: balance and channels in plain words', () => {
   it('keeps the node total without treating channel capacity or the remainder as spendable', () => {
-    expect(splitBalance(WALLET)).toEqual({ total: 480_000_000, spendable: null, reserved: null, closing: null });
+    expect(splitBalance(WALLET)).toEqual({ total: 480_000_000, hasBreakdown: false, lightning: null, onchain: null, reserved: null, closing: null, contested: null });
   });
   it.each([0, 200_000_000, 480_000_000])('preserves a reported total of %i even without a breakdown', (total) => {
-    expect(splitBalance({ ...WALLET, balance_msat: total })).toEqual({ total, spendable: null, reserved: null, closing: null });
+    expect(splitBalance({ ...WALLET, balance_msat: total })).toEqual({ total, hasBreakdown: false, lightning: null, onchain: null, reserved: null, closing: null, contested: null });
   });
   it('an open channel says what can be sent and received; an offline one says funds stay yours', () => {
     expect(channelWords(channel())).toMatchObject({ state: 'open', line: 'You can send up to 300,000 sats and receive up to 190,000 sats through it.' });
@@ -256,6 +256,86 @@ describe('the Wallet page', () => {
     expect(text('[data-balance-closing] .split-amount')).toBe('Unknown');
     expect($('[data-balance-onchain]')).toBeNull();
     expect($('[data-balance-lightning]')).toBeNull();
+  });
+
+  it('shows independent node categories with overlap and routing limits, without a derived total', async () => {
+    const host = stubHost({ payments_overview: () => ({ ...WALLET,
+      lightning_spendable_sats: 210_000, onchain_spendable_sats: 90_000,
+      onchain_total_sats: 130_000, anchor_reserve_sats: 25_000,
+      closing_sats: 80_000, contested_sats: 7_000,
+    }) });
+    await openWallet();
+    await vi.waitFor(() => expect(text('[data-balance-lightning] .split-amount')).toBe('210,000 sats'));
+    expect(text('[data-balance-onchain] .split-amount')).toBe('90,000 sats');
+    expect(text('[data-balance-reserved] .split-amount')).toBe('25,000 sats');
+    expect(text('[data-balance-closing] .split-amount')).toBe('80,000 sats');
+    expect(text('[data-balance-contested] .split-amount')).toBe('7,000 sats');
+    expect(text('[data-balance-lightning]')).toMatch(/outbound capacity.*not.*guarantee.*routing fees.*per-HTLC limits.*remote liquidity/i);
+    expect(text('[data-balance-contested]')).toMatch(/conditional.*not guaranteed/i);
+    expect(text('[data-wallet-basis]')).toMatch(/overlap.*do not add up/i);
+    expect(text('[data-wallet-basis]')).toMatch(/closing.*before sweep fees.*already.*on-chain/i);
+    expect(text('[data-balance-reserved]')).toMatch(/included in.*on-chain total/i);
+    expect(text('[data-wallet-balance]')).toContain('Node-reported total');
+    expect(text('[data-balance-total]')).toBe('480,000sats');
+    // These deliberately non-reconciling amounts must never become a second total.
+    expect(text('[data-wallet-balance]')).not.toMatch(/387,000|412,000|452,000/);
+    expect(mount.querySelectorAll('.wallet-hero .split-amount')).toHaveLength(5);
+    expect(moneyCalls(host)).toHaveLength(0);
+  });
+
+  it('shows known zeros and hides zero contested claims', async () => {
+    stubHost({ payments_overview: () => ({ ...WALLET,
+      lightning_spendable_sats: 0, onchain_spendable_sats: 0, onchain_total_sats: 0,
+      anchor_reserve_sats: 0, closing_sats: 0, contested_sats: 0,
+    }) });
+    await openWallet();
+    await vi.waitFor(() => expect(text('[data-balance-lightning] .split-amount')).toBe('0 sats'));
+    for (const category of ['onchain', 'reserved', 'closing']) {
+      expect(text(`[data-balance-${category}] .split-amount`)).toBe('0 sats');
+    }
+    expect($('[data-balance-contested]')).toBeNull();
+    expect(text('[data-balance-total]')).toBe('480,000sats');
+  });
+
+  it.each([
+    { closing_sats: 42 },
+    { onchain_total_sats: 42 },
+  ])('keeps missing categories unknown with a partial breakdown %j', async (fields) => {
+    stubHost({ payments_overview: () => ({ ...WALLET, ...fields }) });
+    await openWallet();
+    await vi.waitFor(() => expect(text('[data-balance-lightning] .split-amount')).toBe('Unknown'));
+    expect(text('[data-balance-onchain] .split-amount')).toBe('Unknown');
+    expect(text('[data-balance-reserved] .split-amount')).toBe('Unknown');
+    expect(text('[data-balance-closing] .split-amount')).toBe('closing_sats' in fields ? '42 sats' : 'Unknown');
+    expect($('[data-balance-contested]')).toBeNull();
+    expect(text('[data-wallet-basis]')).toMatch(/overlap/);
+  });
+
+  it.each([undefined, null])('preserves the entire old-node view for absent categories (%s)', async (missing) => {
+    stubHost({ payments_overview: () => ({ ...WALLET,
+      lightning_spendable_sats: missing, onchain_spendable_sats: missing, onchain_total_sats: missing,
+      anchor_reserve_sats: missing, closing_sats: missing, contested_sats: missing,
+    }) });
+    await openWallet();
+    await vi.waitFor(() => expect(text('[data-balance-total]')).toBe('480,000sats'));
+    expect([...mount.querySelectorAll('.wallet-hero .split-name')].map((el) => el.textContent))
+      .toEqual(['Spendable', 'Reserved (channel fee reserve)', 'Closing/locked']);
+    expect([...mount.querySelectorAll('.wallet-hero .split-amount')].map((el) => el.textContent))
+      .toEqual(['Unknown', 'Unknown', 'Unknown']);
+    expect(text('[data-wallet-basis]').trim()).toBe('Your node reports one total, but does not report these amounts separately. The total is not a spendable balance.');
+    expect($('[data-balance-contested]')).toBeNull();
+  });
+
+  it.each([
+    [undefined, '300,000 sats'], [null, '300,000 sats'], [210_000, '210,000 sats'], [0, '0 sats'],
+  ])('side panel uses outbound capacity and prefers a reported spendable value (%s)', async (reported, expected) => {
+    stubHost({ payments_overview: () => ({ ...WALLET, lightning_spendable_sats: reported }) });
+    await openWallet();
+    click('[data-wallet-close]');
+    click('[data-tab="wallet"]');
+    await vi.waitFor(() => expect(text('[data-panel="wallet"] dl.facts dd')).toBe(expected));
+    expect(text('[data-panel="wallet"] dl.facts dt')).toBe('Lightning outbound capacity');
+    expect(text('[data-panel="wallet"]')).not.toMatch(/ready to send/);
   });
 
   it('follows the BTC setting', async () => {
