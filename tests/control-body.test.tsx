@@ -212,7 +212,7 @@ describe('Body panel', () => {
     expect(row.classList.contains('hot')).toBe(true);
     await vi.waitFor(() => expect(row.classList.contains('hot')).toBe(false), { timeout: 1000 });
     // The stranger's message is energy that crossed in; the rail still lists contacts only.
-    await vi.waitFor(() => expect($('[data-energy="in-1h"]')?.textContent).toBe('+1'));
+    await vi.waitFor(() => expect($('[data-energy="in-1h"]')?.textContent).toBe('+1 sat'));
     expect(mount.querySelector(`[data-track="peer:${STRANGER}"]`)).toBeNull();
   });
 

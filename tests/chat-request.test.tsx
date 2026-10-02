@@ -290,7 +290,7 @@ describe('reading a chat invoice', () => {
 
 // ---- in the app ----
 
-const paired = { state: 'paired', scopes: ['read', 'receive'], short_code: 'ABCD-EFGH', code_from_node: true, reason: null, bootstrap: null };
+const paired = { state: 'paired', scopes: ['read', 'receive'], short_code: 'ABCD-EFGH', code_from_node: true, reason: null, remote: false, bootstrap: null };
 type Call = { cmd: string; args: Record<string, unknown> | undefined };
 type Reply = (args?: Record<string, unknown>) => unknown;
 const view = (state: SpendView['state'], extra: Partial<SpendView> = {}): SpendView => ({

@@ -510,6 +510,8 @@ pub struct Balance {
     pub balance_msat: u64,
     pub onchain_spendable_sats: Option<u64>,
     pub onchain_total_sats: Option<u64>,
+    #[serde(alias = "onchain_unconfirmed_sats")]
+    pub onchain_pending_sats: Option<u64>,
     pub anchor_reserve_sats: Option<u64>,
     pub lightning_spendable_sats: Option<u64>,
     pub closing_sats: Option<u64>,
@@ -527,6 +529,7 @@ pub struct WalletOverview {
     /// They overlap and cannot reconcile the legacy total.
     pub onchain_spendable_sats: Option<u64>,
     pub onchain_total_sats: Option<u64>,
+    pub onchain_pending_sats: Option<u64>,
     pub anchor_reserve_sats: Option<u64>,
     pub lightning_spendable_sats: Option<u64>,
     pub closing_sats: Option<u64>,
@@ -688,6 +691,7 @@ pub fn wallet_overview(balance: Balance, channels: Vec<Channel>) -> WalletOvervi
         lightning_outbound_msat,
         onchain_spendable_sats: balance.onchain_spendable_sats,
         onchain_total_sats: balance.onchain_total_sats,
+        onchain_pending_sats: balance.onchain_pending_sats,
         anchor_reserve_sats: balance.anchor_reserve_sats,
         lightning_spendable_sats: balance.lightning_spendable_sats,
         closing_sats: balance.closing_sats,
@@ -710,6 +714,15 @@ pub fn price_quote(own: KindPrice, tables: &[PeerPrice], peer: Option<&str>) -> 
         peer_age_secs: peer_msat.and(table.map(|t| t.age_secs)),
         peer_stale: peer_msat.is_some() && table.is_some_and(|t| t.stale),
     }
+}
+
+/// Classify the evidence from an attempted all-in quote probe. A failed read
+/// is not evidence that the node lacks the contract.
+pub fn conversation_ceiling_evidence(proven: bool, probe: Result<(), String>) -> Result<(), crate::act::ActionError> {
+    probe.map_err(|reason| crate::act::ActionError::new(
+        "price_quote_unavailable", format!("Quote unavailable: {reason}")))?;
+    if proven { return Ok(()); }
+    Err(crate::act::ActionError::new("price_cap_unavailable", "Upgrade the node to enforce an all-in message ceiling."))
 }
 
 /// `call_quote`: what calling this contact costs, before anything is paid.
@@ -1039,6 +1052,32 @@ pub async fn run_ws_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn conversation_ceiling_evidence_distinguishes_missing_contract_from_failed_quote() {
+        for reason in ["No route or channel yet", "Peer offline", "Quote unavailable", "Owner approval required"] {
+            let err = conversation_ceiling_evidence(false, Err(reason.into())).unwrap_err();
+            assert_eq!(err.code, "price_quote_unavailable");
+            assert!(err.message.contains(reason));
+            assert!(!err.message.contains("Upgrade"));
+        }
+        let legacy = conversation_ceiling_evidence(false, Ok(())).unwrap_err();
+        assert_eq!(legacy.code, "price_cap_unavailable");
+        assert!(legacy.message.contains("Upgrade"));
+        assert!(conversation_ceiling_evidence(true, Ok(())).is_ok());
+    }
+
+    #[test]
+    fn wallet_pending_fields_survive_host_projection() {
+        for field in ["onchain_pending_sats", "onchain_unconfirmed_sats"] {
+            for amount in [0, 188800] {
+                let balance: Balance = serde_json::from_value(serde_json::json!({"balance_msat": 2004000, field: amount})).unwrap();
+                let out = serde_json::to_value(wallet_overview(balance, vec![])).unwrap();
+                assert_eq!(out["onchain_pending_sats"], amount);
+                assert_eq!(out["balance_msat"], 2004000);
+            }
+        }
+    }
 
     #[test]
     fn a_call_costs_the_callees_offer_price_then_realtime_signals() {

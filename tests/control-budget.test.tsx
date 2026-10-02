@@ -18,7 +18,7 @@ const NEW = 'e'.repeat(64);
 const ROOM = '0f8e2b7a-1c3d-4e5f-8a9b-0c1d2e3f4a5b';
 const DAY = 86_400_000;
 
-const paired: PairingView = { state: 'paired', scopes: ['read', 'receive'], short_code: 'ABCD-EFGH', code_from_node: true, reason: null, bootstrap: null };
+const paired: PairingView = { state: 'paired', scopes: ['read', 'receive'], short_code: 'ABCD-EFGH', code_from_node: true, reason: null, remote: false, bootstrap: null };
 const locked: SpendView = { state: 'locked', basis: null, open_until_ms: null, pending: null, window_ms: 600_000 };
 
 function budgetView(extra: Partial<BudgetView> = {}): BudgetView {
@@ -188,7 +188,7 @@ describe('invisible payments in the composer and the context panel', () => {
     expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('gm Maya');
 
     await vi.waitFor(() => expect($('[data-budget="ok"]')).not.toBeNull());
-    expect(text('[data-budget-line]')).toContain('Pays automatically · 0 of 50 sats to Maya in 24 h');
+    expect(text('[data-budget-line]')).toContain('Pays automatically · 0 sats of 50 sats to Maya in 24 h');
     submit();
     await vi.waitFor(() => expect(host.used('message_send')).toHaveLength(1));
     expect(host.used('message_send')[0].args).toMatchObject({ recipient: MAYA, max_msat: 2000, first_contact_msat: null });
@@ -198,7 +198,7 @@ describe('invisible payments in the composer and the context panel', () => {
     submit();
     await vi.waitFor(() => expect(host.used('message_send')).toHaveLength(2));
     expect(host.used('spend_request')).toHaveLength(0);
-    await vi.waitFor(() => expect(text('[data-budget-line]')).toContain('4 of 50 sats'));
+    await vi.waitFor(() => expect(text('[data-budget-line]')).toContain('4 sats of 50 sats'));
   });
 
   it('sends the quoted all-in first-contact cap to the owner grant and paid request', async () => {
@@ -209,7 +209,7 @@ describe('invisible payments in the composer and the context panel', () => {
     await openShell();
     $<HTMLButtonElement>(`[data-track="peer:${NEW}"]`)!.click();
     await vi.waitFor(() => expect($('[data-door-quote]')?.getAttribute('data-door-quote')).toBe('17500'));
-    expect(text('[data-door-quote]')).toContain('up to 13.5 sats network fee');
+    expect(text('[data-door-quote]')).toContain('up to 13,500 msat network fee');
     expect(text('[data-first-budget="50000"]')).toBe('50 sats a day · 2 messages');
     type('[data-composer] textarea', 'hello including fees');
     submit();
@@ -553,7 +553,7 @@ describe('invisible payments in the composer and the context panel', () => {
     await openShell();
     $<HTMLButtonElement>('[data-track="new"]')!.click();
     await vi.waitFor(() => expect($('[data-starter-include]')).not.toBeNull());
-    expect(text('[data-starter-purse]')).toContain('0 of 100,000 sats');
+    expect(text('[data-starter-purse]')).toContain('0 sats of 100,000 sats');
     $<HTMLButtonElement>('[data-starter-include]')!.click();
     await vi.waitFor(() => expect($('[data-starter-offered]')).not.toBeNull());
     expect(text('[data-starter-offered]')).toContain('up to 20,000 sats');
@@ -898,7 +898,7 @@ describe('invisible payments in the composer and the context panel', () => {
     type('[data-composer] textarea', 'one more');
     await vi.waitFor(() => expect($('[data-budget-used="contact"]')).not.toBeNull());
     expect($<HTMLButtonElement>('[data-send]')!.disabled).toBe(true);
-    expect(text('[data-budget-used="contact"]')).toContain('2 of 3 sats in the last 24 hours');
+    expect(text('[data-budget-used="contact"]')).toContain('2 sats of 3 sats in the last 24 hours');
     $<HTMLButtonElement>('[data-budget-raise]')!.click();
     await vi.waitFor(() => expect(host.used('budget_set')).toHaveLength(1));
     expect(host.used('budget_set')[0].args).toEqual({ target: MAYA, room: false, limit_msat: 6000 });
@@ -920,9 +920,9 @@ describe('invisible payments in the composer and the context panel', () => {
     const host = stubHost(open([{ target: MAYA, room: false, limit_msat: 50_000, spent_msat: 4000 }, { target: ROOM, room: true, limit_msat: 100_000, spent_msat: 3000 }]));
     await openShell();
     $<HTMLButtonElement>('[data-tab="budget"]')!.click();
-    await vi.waitFor(() => expect(text('[data-tally-total]')).toBe('7 / 500 sats'));
+    await vi.waitFor(() => expect(text('[data-tally-total]')).toBe('7 sats / 500 sats'));
     expect(text(`[data-budget-row="${MAYA}"]`)).toContain('Maya');
-    expect(text(`[data-budget-row="${MAYA}"] [data-row-tally]`)).toBe('4/ 50 sats');
+    expect(text(`[data-budget-row="${MAYA}"] [data-row-tally]`)).toBe('4 sats/ 50 sats');
     expect(text(`[data-budget-row="${ROOM}"]`)).toContain('Mexico build');
     expect(text('[data-autopay]')).toContain('Autopay open');
 
@@ -972,11 +972,11 @@ describe('invisible payments in the composer and the context panel', () => {
     type('[data-composer] textarea', 'room draft');
     submit();
     await vi.waitFor(() => expect($('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('9500'));
-    expect(text('[data-cost]')).toContain('7.5');
+    expect(text('[data-cost]')).toContain('7,500 msat');
     expect(host.used('message_send')).toHaveLength(1);
     expect(host.used('message_send')[0].args).toMatchObject({ max_msat: 7000, max_recipient_msat: { [MAYA]: 7000 } });
     expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('room draft');
-    expect(text('[data-send-price]')).toContain('9.5 sats');
+    expect(text('[data-send-price]')).toContain('9,500 msat');
     submit();
     await vi.waitFor(() => expect(host.used('message_send')).toHaveLength(2));
     expect(host.used('message_send')[1].args).toMatchObject({ max_msat: 9500, max_recipient_msat: { [MAYA]: 9500 } });
@@ -1060,7 +1060,7 @@ describe('invisible payments in the composer and the context panel', () => {
     await openShell();
     $<HTMLButtonElement>('[data-tab="budget"]')!.click();
     await vi.waitFor(() => expect($('[data-node-grant]')).not.toBeNull());
-    expect(text('[data-node-grant]')).toBe('Your finite node grant allows 396 of 400 sats more, at most 50 per payment, for 30 min.');
+    expect(text('[data-node-grant]')).toBe('Your finite node grant allows 396 sats of 400 sats more, at most 50 sats per payment, for 30 min.');
   });
 
   it('labels invoice/keysend tally rows without offering contact-budget edits', async () => {

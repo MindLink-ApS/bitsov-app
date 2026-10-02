@@ -76,7 +76,9 @@ export function Onboarding(props: {
         <h2 class="node-target-title">Where does your node live?</h2>
         <Show
           when={isEnrolled()}
-          fallback={<p class="hint">Select where your node runs. The app connects to your sovereign node on this Mac.</p>}
+          fallback={<p class="hint">{props.pairing().remote
+            ? 'The app connects to your remote node.'
+            : 'Select where your node runs. The app connects to your sovereign node on this Mac.'}</p>}
         >
           <p class="hint">Select where your node runs. Touch ID on this Mac can approve a contact or budget.</p>
         </Show>
@@ -233,11 +235,21 @@ export function Onboarding(props: {
                   <span class="touchid-status-pill" data-device-badge="registered">Touch ID Enrolled · Secure Enclave</span>
                 </Show>
                 <Show
-                  when={isEnrolled()}
-                  fallback={<p class="hint" style={{ margin: '4px 0 0' }}>Loopback authenticated. Ordinary pairing is file-backed on this Mac.</p>}
+                  when={props.pairing().remote}
+                  fallback={
+                    <Show
+                      when={isEnrolled()}
+                      fallback={<p class="hint" style={{ margin: '4px 0 0' }}>Loopback authenticated. Ordinary pairing is file-backed on this Mac.</p>}
+                    >
+                      <p class="hint" style={{ margin: '4px 0 0' }}>
+                        Loopback authenticated. Touch ID on this Mac can approve a contact or budget; it does not sign every payment.
+                      </p>
+                    </Show>
+                  }
                 >
                   <p class="hint" style={{ margin: '4px 0 0' }}>
-                    Loopback authenticated. Touch ID on this Mac can approve a contact or budget; it does not sign every payment.
+                    This app is paired with a remote node over a pinned encrypted connection;
+                    the local proxy only accepts this app’s credential.
                   </p>
                 </Show>
               </div>

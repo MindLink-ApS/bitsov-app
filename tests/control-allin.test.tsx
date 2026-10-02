@@ -8,6 +8,6 @@ describe('all-in quote boundaries', () => {
       peer_stale: false, max_routing_fee_msat: 7500 } as PriceQuote;
     const cost = costToSend({ kind: 'peer', id: 'a'.repeat(64) }, quote)!;
     expect(cost.msat).toBe(9500);
-    expect(cost.basis).toContain('up to 7.5 sats network fee');
+    expect(cost.basis).toContain('up to 7,500 msat network fee');
   });
 });

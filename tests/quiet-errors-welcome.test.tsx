@@ -72,7 +72,7 @@ describe('quiet errors', () => {
     vi.stubGlobal('__TAURI_INTERNALS__', { invoke: async (cmd: string) => {
       if (cmd === 'node_status') return { ready: false, node_id: null, error: null };
       if (cmd === 'pairing_retry') recovered = true;
-      if (cmd === 'pairing_status' || cmd === 'pairing_retry') return { state: recovered ? 'paired' : 'failed', reason: 'Error: /pair/confirm (401): invalid_proof', scopes: [], short_code: null, code_from_node: false, bootstrap: null };
+      if (cmd === 'pairing_status' || cmd === 'pairing_retry') return { state: recovered ? 'paired' : 'failed', reason: 'Error: /pair/confirm (401): invalid_proof', scopes: [], short_code: null, code_from_node: false, remote: false, bootstrap: null };
       return null;
     } });
     start(() => <App />);
@@ -90,7 +90,7 @@ describe('quiet errors', () => {
     let failed = false;
     vi.stubGlobal('__TAURI_INTERNALS__', { invoke: async (cmd: string) => {
       if (cmd === 'node_status') return { ready: false, node_id: null, error: null };
-      if (cmd === 'pairing_status') return { state: failed ? 'failed' : 'starting', reason: 'connection_refused', scopes: [], short_code: null, code_from_node: false, bootstrap: null };
+      if (cmd === 'pairing_status') return { state: failed ? 'failed' : 'starting', reason: 'connection_refused', scopes: [], short_code: null, code_from_node: false, remote: false, bootstrap: null };
       return null;
     } });
     start(() => <App />);

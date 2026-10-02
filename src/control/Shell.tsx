@@ -1186,6 +1186,7 @@ export function ControlCenter(props: Props) {
                 </Match>
                 <Match when={t().kind === 'new'}>
                   <NewTrack
+                    nodeRooms={nodeRooms()}
                     moneyBlocked={moneyBlocked()}
                     ownId={ownId()}
                     source={source}
@@ -1267,6 +1268,7 @@ export function ControlCenter(props: Props) {
                 </Match>
                 <Match when={t().kind === 'peer' || t().kind === 'room'}>
                   <Conversation
+                    nodeRooms={nodeRooms()}
                     moneyBlocked={moneyBlocked()}
                     track={t()}
                     name={trackName(t())}
@@ -1663,7 +1665,7 @@ function Rail(props: {
           when={props.active && props.nodeRooms}
           fallback={
             <p class="track-empty" data-rooms-coming-soon>
-              Coming soon — group chat is not on the protocol yet.
+              This node does not support rooms yet.
             </p>
           }
         >
@@ -1838,6 +1840,7 @@ function Bolt() {
 }
 
 function Conversation(props: {
+  nodeRooms: boolean;
   moneyBlocked: boolean;
   track: TrackRef;
   name: string;
@@ -1922,7 +1925,7 @@ function Conversation(props: {
       </span>
     ) : (
       <span class="id">
-        {props.members === null ? 'Reading members…' : `${props.members.length} members · Coming soon`}
+        {props.members === null ? 'Reading members…' : `${props.members.length} members · ${props.nodeRooms ? 'Legacy room' : 'Rooms unavailable on this node'}`}
       </span>
     );
 
@@ -1941,6 +1944,7 @@ function Conversation(props: {
         verified={peerVerify().verified}
         keyChanged={peerVerify().keyChanged}
       />
+      <Show when={props.track.kind === 'peer' && props.peer}><CallNetworkNote /></Show>
       <Show when={props.track.kind === 'peer' && props.peer ? props.peer : null}>
         {(p) => (
           <ContactPanel
@@ -1972,7 +1976,7 @@ function Conversation(props: {
         </Show>
         <Show when={props.track.kind === 'room'}>
           <p class="day" data-room-day-notice>
-            Coming soon — group chat is not on the protocol yet. Members added here are not notified yet. A room message pays each member their own price, separately.
+            {props.nodeRooms ? 'This is a legacy room. Create a new room to use group chat.' : 'This node does not support rooms yet.'} Members added here are not notified yet. A room message pays each member their own price, separately.
           </p>
         </Show>
         <For
@@ -1982,7 +1986,7 @@ function Conversation(props: {
               <h2>Nothing here yet</h2>
               <p class="hint">
                 {props.track.kind === 'room'
-                  ? 'Coming soon — group chat is not on the protocol yet. A message here pays each member separately, and reaches each one when their payment settles.'
+                  ? `${props.nodeRooms ? 'This is a legacy room. Create a new room to use group chat.' : 'This node does not support rooms yet.'} A message here pays each member separately, and reaches each one when their payment settles.`
                   : `Your first message to ${props.name} is a paid first contact: it is admitted when the payment settles.`}
               </p>
             </div>
@@ -2229,9 +2233,9 @@ function MessageView(props: {
             title={`${sats(amount()!)} ${satUnit(amount()!)} · ${props.out ? (props.allowance ? `all-in ceiling (${feeCeiling(props.allowance.max_routing_fee_msat)})` : 'principal paid; fee not in history') : 'to you'}`}
           >
             <Bolt />
-            <span class="sats">{sats(amount()!)}</span>
+            <span class="sats">{fmtAmount(amount()!)}</span>
             <Show when={props.out && props.allowance}>
-              <span class="sr-only">{satUnit(amount()!)} all-in ceiling ({feeCeiling(props.allowance!.max_routing_fee_msat)})</span>
+              <span class="sr-only">{' '}all-in ceiling ({feeCeiling(props.allowance!.max_routing_fee_msat)})</span>
             </Show>
             <Show when={props.out && !props.allowance}>
               <span class="sr-only">principal paid; fee not in history</span>
@@ -2248,6 +2252,12 @@ function MessageView(props: {
       </div>
     </article>
   );
+}
+
+function CallNetworkNote() {
+  return <Show when={!stunPref()}>
+    <p class="hint call-network-note" data-call-network-note>Calls may not connect across networks yet. No STUN server is set. Choose one in Settings → Calls.</p>
+  </Show>;
 }
 
 /**
@@ -2343,6 +2353,7 @@ function CallPanel(props: {
             <span class="duration" data-call-duration>{duration(Math.max(0, tick() - v().liveAt!))}</span>
           </Show>
         </header>
+        <CallNetworkNote />
         <Show when={v().media === 'video' && (v().phase === 'live' || v().phase === 'connecting')}>
           <div class="call-videos">
             <MediaView stream={props.streams.remote} video muted={false} kind="remote" />
@@ -3423,12 +3434,6 @@ function Composer(props: {
     if (!props.cost || !Number.isSafeInteger(props.cost.msat)) return 'price unavailable · invalid price';
     return null;
   };
-  // Sats here are deliberate: this disclosure never rounds an enforced msat cap.
-  const sendSats = (msat: number) => {
-    const exact = BigInt(msat);
-    const fraction = (exact % 1000n).toString().padStart(3, '0').replace(/0+$/, '');
-    return `${(exact / 1000n).toLocaleString('en-US')}${fraction ? `.${fraction}` : ''}`;
-  };
   const paymentResult = (result: Outcome<unknown>) => {
     if (!result.ok) {
       if (['spend_unknown', 'payment_unknown', 'failed_paid', 'payment_settled_undelivered'].includes(result.error.code))
@@ -3439,7 +3444,7 @@ function Composer(props: {
     const fee = receipt.fee_paid_msat ?? (receipt.max_routing_fee_msat === 0 ? 0 : undefined);
     const paid = receipt.amount_msat + (receipt.readmission_msat ?? 0) + (fee ?? 0);
     setPaidLine(fee !== undefined && Number.isSafeInteger(fee) && fee >= 0 && Number.isSafeInteger(paid) && paid >= 0
-      ? `paid ${sendSats(paid)} sats`
+      ? `paid ${fmtAmount(paid)}`
       : 'paid amount unknown · routing fee not reported');
   };
   const priceLine = () => {
@@ -3447,8 +3452,8 @@ function Composer(props: {
     if (priceProblem()) return priceProblem();
     const cap = messageShown().msat;
     if (cap === null) return 'price loading…';
-    if (readmitPrice() || (raisedFrom() !== null && cap > raisedFrom()!)) return `price went up to ${sendSats(cap)} sats, send?`;
-    return `up to ${sendSats(cap)} sats · includes max routing fee`;
+    if (readmitPrice() || (raisedFrom() !== null && cap > raisedFrom()!)) return `price went up to ${fmtAmount(cap)}, send?`;
+    return `up to ${fmtAmount(cap)} · includes max routing fee`;
   };
 
   /** What this mode costs, shown before the button is pressed. */
@@ -3461,7 +3466,7 @@ function Composer(props: {
       return {
         msat: again.total_msat,
         estimate: false,
-        basis: `${props.name} asks for admission again: ${sats(again.admission_msat)} ${satUnit(again.admission_msat)}, then ${sats(again.message_msat)} for this message; ${feeCeiling(again.max_routing_fee_msat ?? 0)}`,
+        basis: `${props.name} asks for admission again: ${sats(again.admission_msat)} ${satUnit(again.admission_msat)}, then ${fmtAmount(again.message_msat)} for this message; ${feeCeiling(again.max_routing_fee_msat ?? 0)}`,
       };
     }
     const q = doorWanted() ? doorQuote() : null;
@@ -3877,7 +3882,7 @@ function Composer(props: {
             >
               <div class="amount-field shown" data-pay-invoice-amount={invoiceMsat() ?? ''}>
                 <span class="amount-value">{invoiceMsat() === null ? '0' : sats(invoiceMsat()!)}</span>
-                <span class="amount-unit">{unitName()}</span>
+                <span class="amount-unit">{invoiceMsat() === null ? unitName() : satUnit(invoiceMsat()!)}</span>
               </div>
               <textarea data-pay-invoice rows={2} placeholder={`Paste an invoice from ${props.name}`} value={bolt11()} onInput={(e) => setBolt11(e.currentTarget.value)} aria-label="Lightning invoice" />
             </Show>
@@ -4582,8 +4587,8 @@ function BudgetBar(props: {
           {(st) => (
             <div class="approval budget-used" data-budget-used="contact">
               <p>
-                <strong>Budget for {who()} used up.</strong> {sats(st().spent)} of {fmtAmount(st().limit)} in the last 24 hours, and this
-                message costs {props.priceMsat === null ? '…' : sats(props.priceMsat)}. It frees up as older payments pass 24 hours.
+                <strong>Budget for {who()} used up.</strong> {fmtAmount(st().spent)} of {fmtAmount(st().limit)} in the last 24 hours, and this
+                message costs {props.priceMsat === null ? '…' : fmtAmount(props.priceMsat)}. It frees up as older payments pass 24 hours.
               </p>
               <Show
                 when={st().raiseTo}
@@ -4609,7 +4614,7 @@ function BudgetBar(props: {
           {(st) => (
             <div class="approval budget-used" data-budget-used="total">
               <p>
-                <strong>Your app all-in limit is used up.</strong> {sats(st().spent)} of {fmtAmount(st().ceiling)} in the last 24 hours. Raising
+                <strong>Your app all-in limit is used up.</strong> {fmtAmount(st().spent)} of {fmtAmount(st().ceiling)} in the last 24 hours. Raising
                 it is a new approval.
               </p>
               <Show when={st().raiseTo}>
@@ -4628,7 +4633,7 @@ function BudgetBar(props: {
               <p class="spend-line" data-budget-line>
                 <span class="dot ok" />
                 <span class="line-text">
-                  Pays automatically · {sats(st().spent)} of {fmtAmount(st().limit)} to {who()} in 24 h · approval ends in{' '}
+                  Pays automatically · {fmtAmount(st().spent)} of {fmtAmount(st().limit)} to {who()} in 24 h · approval ends in{' '}
                   {hoursLeft(props.budget.autopay.open_until_ms, props.now, props.budget.window_ms)} h ·{' '}
                   <button type="button" class="link" data-pause-all onClick={() => void props.actions.pauseAll()}>Pause app payments</button>
                 </span>
@@ -4702,7 +4707,7 @@ function BudgetPanel(props: {
             <div class="tally" data-tally>
               <span class="label">App all-in payments in the last 24 hours</span>
               <span class="sats big" data-tally-total>
-                {sats(b().spent_msat)} <span class="unit">/ {fmtAmount(b().ceiling_msat)}</span>
+                {fmtAmount(b().spent_msat)} <span class="unit">/ {fmtAmount(b().ceiling_msat)}</span>
               </span>
               <span class="meter" aria-hidden="true"><span style={{ width: pct(b().spent_msat, b().ceiling_msat) }} /></span>
               <Show when={b().unsettled_msat > 0}>
@@ -4711,7 +4716,7 @@ function BudgetPanel(props: {
               <Show when={b().node_grant}>
                 {(g) => (
                   <span class="hint" data-node-grant>
-                    Your finite node grant allows {sats(g().remaining_msat)} of {fmtAmount(g().budget_msat)} more, at most {sats(g().per_call_max_msat)} per payment, for {timeLeft(g().expires_at_ms, props.now)}.
+                    Your finite node grant allows {fmtAmount(g().remaining_msat)} of {fmtAmount(g().budget_msat)} more, at most {fmtAmount(g().per_call_max_msat)} per payment, for {timeLeft(g().expires_at_ms, props.now)}.
                   </span>
                 )}
               </Show>
@@ -4744,8 +4749,8 @@ function BudgetPanel(props: {
                     <div class="row" style={{ 'justify-content': 'space-between', gap: 'var(--s-2)' }}>
                       <span class="who">{directPaymentName(row.target) ?? props.nameOf(row.target, row.room)}</span>
                       <span class="sats" data-row-tally>
-                        {sats(row.spent_msat)}
-                        <span class="unit">{row.limit_msat === null ? `${satUnit(2000)}, approved by hand` : `/ ${fmtAmount(row.limit_msat)}`}</span>
+                        {fmtAmount(row.spent_msat)}
+                        <span class="unit">{row.limit_msat === null ? ', approved by hand' : `/ ${fmtAmount(row.limit_msat)}`}</span>
                       </span>
                     </div>
                     <Show when={row.limit_msat !== null}>
@@ -4793,13 +4798,14 @@ export function setShowLegacyIntroductionUi(enabled: boolean) {
   showLegacyIntroductionUi = enabled;
 }
 
-/** Product default hides prototype rooms (not on the protocol yet); prototype tests enable them. */
+/** Product default hides legacy prototype rooms; current rooms use node-verified bindings. */
 let showLegacyRoomsUi = false;
 export function setShowLegacyRoomsUi(enabled: boolean) {
   showLegacyRoomsUi = enabled;
 }
 
 function NewTrack(props: {
+  nodeRooms: boolean;
   moneyBlocked: boolean;
   ownId: string;
   source: Source;
@@ -5156,7 +5162,7 @@ function NewTrack(props: {
                         {open() ? `Include starter bitcoin · ${fmtAmount(sponsor()!.gift_msat)}` : 'Include starter bitcoin · approve first'}
                       </button>
                       <p class="hint" data-starter-purse>
-                        You fund it from your own node, only after you approve their request. {sats(sponsor()!.purse_used_msat)} of{' '}
+                        You fund it from your own node, only after you approve their request. {fmtAmount(sponsor()!.purse_used_msat)} of{' '}
                         {fmtAmount(sponsor()!.purse_msat)} used in the last 24 hours.
                       </p>
                     </>
@@ -5214,7 +5220,7 @@ function NewTrack(props: {
                       {open() ? `Include starter bitcoin · ${fmtAmount(sponsor()!.gift_msat)}` : 'Include starter bitcoin · approve first'}
                     </button>
                     <p class="hint" data-starter-purse>
-                      You fund it from your own node, only after you approve their request. {sats(sponsor()!.purse_used_msat)} of{' '}
+                      You fund it from your own node, only after you approve their request. {fmtAmount(sponsor()!.purse_used_msat)} of{' '}
                       {fmtAmount(sponsor()!.purse_msat)} used in the last 24 hours.
                     </p>
                   </Show>
@@ -5544,7 +5550,7 @@ function NewTrack(props: {
         </div>
         <p class="send-next">
           Invites change your node, so they use the same owner approval as spending. Profile cards live under Browse.
-          Rooms (group chat) are coming soon — not on the protocol yet.
+          <Show when={!props.nodeRooms}> This node does not support rooms yet.</Show>
         </p>
       </div>
     </>

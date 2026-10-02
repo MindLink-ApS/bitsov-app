@@ -31,7 +31,7 @@ import {
   type Intent,
   type Proposal,
 } from './ai';
-import { amount, clock, day, sats, satsWhole, satUnit, uptime } from './format';
+import { amount, clock, day, satsWhole, uptime } from './format';
 import type { Source } from './source';
 import { asActionError, peerName } from './state';
 import type {
@@ -723,7 +723,7 @@ function CopyButton(props: { text: () => string }) {
   );
 }
 
-const fig = (a: Amount | undefined) => (value(a) === null ? 'unavailable' : sats(value(a)!));
+const fig = (a: Amount | undefined) => (value(a) === null ? 'unavailable' : amount(value(a)!));
 
 function CardView(props: { card: Card; nameOf: (id: string) => string; now: number }) {
   const text = () => cardText(props.card, props.nameOf);
@@ -843,7 +843,7 @@ function CardView(props: { card: Card; nameOf: (id: string) => string; now: numb
                       <span class="when">{day(e.at_ms)} {clock(e.at_ms)}</span>
                       <span class="sats">
                         {e.direction === 'sent' ? '−' : '+'}
-                        {fig(e.amount)} {value(e.amount) === null ? '' : satUnit(value(e.amount)!)}
+                        {fig(e.amount)}
                       </span>
                     </li>
                   )}

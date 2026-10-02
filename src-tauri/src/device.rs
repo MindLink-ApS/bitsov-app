@@ -12,6 +12,7 @@
 //! Nothing here holds authority on its own. The blob signs nothing without
 //! the owner's finger, and a signature is only the terms it covers.
 
+use bitsov_app::format::amount;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -220,9 +221,9 @@ pub fn intent_message(node: &str, client_id: &str, i: &Intent) -> String {
 /// approve: the amounts come first, then the contact.
 pub fn intent_reason(contact: &str, budget_msat: u64, per_act_max_msat: u64) -> String {
     format!(
-        "approve paying up to {} sats per day, at most {} sats per message, to {contact}",
-        sats(budget_msat),
-        sats(per_act_max_msat)
+        "approve paying up to {} per day, at most {} per message, to {contact}",
+        amount(budget_msat),
+        amount(per_act_max_msat)
     )
 }
 
@@ -237,10 +238,6 @@ pub fn contact_key(peer: &str) -> String {
 /// and key the owner reads are exactly the ones signed.
 pub fn contact_intent_reason(intent: &Intent) -> String {
     intent_reason(&contact_key(&intent.peer), intent.budget_msat, intent.per_act_max_msat)
-}
-
-fn sats(msat: u64) -> String {
-    if msat.is_multiple_of(1000) { (msat / 1000).to_string() } else { format!("{:.3}", msat as f64 / 1000.0) }
 }
 
 /// The per-message maximum for a contact: its quoted price, at least 1 sat
@@ -382,6 +379,7 @@ mod tests {
 
     #[test]
     fn the_dialog_names_the_contact_by_key_and_both_amounts() {
+        assert_eq!(intent_reason("Maya", 200_000, 21_187), "approve paying up to 200 sats per day, at most 21187 msat per message, to Maya");
         assert_eq!(contact_key(PEER), "node aaaaaaaa…aaaaaaaa");
         assert_eq!(intent_reason(&contact_key(PEER), 200_000, 2_000), "approve paying up to 200 sats per day, at most 2 sats per message, to node aaaaaaaa…aaaaaaaa");
         // Built from the signed intent alone: no label, node-side or local, can reach it.

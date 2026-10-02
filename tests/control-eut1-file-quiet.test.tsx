@@ -9,7 +9,7 @@ const OWN = '1'.repeat(64);
 const A = 'a'.repeat(64);
 const WINDOW = 600_000;
 const DAY = 86_400_000;
-const paired: PairingView = { state: 'paired', scopes: ['read', 'receive'], short_code: 'ABCD-EFGH', code_from_node: true, reason: null, bootstrap: null };
+const paired: PairingView = { state: 'paired', scopes: ['read', 'receive'], short_code: 'ABCD-EFGH', code_from_node: true, reason: null, remote: false, bootstrap: null };
 
 type Call = { cmd: string; args: Record<string, unknown> | undefined };
 type Reply = (args?: Record<string, unknown>) => unknown;
@@ -149,7 +149,7 @@ describe('EUT-1: file send, quiet copy, delivery tick', () => {
     expect(`${retry.title} ${retry.body} ${retry.detail}`.toLowerCase()).toMatch(/paid|do not send|retry/);
     const adm = admissionCopy({ admission_msat: 1500, message_msat: 2000, total_msat: 3500, quoted: true });
     expect(adm.body.split('\n')).toHaveLength(1);
-    expect(adm.detail).toContain('1.5 sats');
+    expect(adm.detail).toContain('1,500 msat');
     expect(deliveryFromReceipt({ delivered: true, accepted: true, state: 'acked' }).status).toBe('accepted');
   });
 });

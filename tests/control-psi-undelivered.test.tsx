@@ -18,7 +18,7 @@ const A = 'a'.repeat(64);
 const ROOM = '0f8e2b7a-1c3d-4e5f-8a9b-0c1d2e3f4a5b';
 const WINDOW = 600_000;
 
-const paired: PairingView = { state: 'paired', scopes: ['read', 'receive'], short_code: 'ABCD-EFGH', code_from_node: true, reason: null, bootstrap: null };
+const paired: PairingView = { state: 'paired', scopes: ['read', 'receive'], short_code: 'ABCD-EFGH', code_from_node: true, reason: null, remote: false, bootstrap: null };
 
 type Call = { cmd: string; args: Record<string, unknown> | undefined };
 type Reply = (args?: Record<string, unknown>) => unknown;
@@ -121,9 +121,9 @@ describe('paid, not delivered: mapping and copy', () => {
 
   it('shows the price to approve, and never promises what the node does not enforce', () => {
     const quoted = admissionCopy({ admission_msat: 1500, message_msat: 2000, total_msat: 3500, quoted: true });
-    expect(quoted.body).toBe('Needs up to 3.5 sats more (admission + message + fees).');
-    expect(quoted.detail).toContain('1.5 sats to be admitted again, then 2 sats for this message');
-    expect(quoted.action).toBe('Approve up to 3.5 sats and retry');
+    expect(quoted.body).toBe('Needs up to 3,500 msat more (admission + message + fees).');
+    expect(quoted.detail).toContain('1,500 msat to be admitted again, then 2 sats for this message');
+    expect(quoted.action).toBe('Approve up to 3,500 msat and retry');
     const estimate = admissionCopy({ admission_msat: 2000, message_msat: 2000, total_msat: 4000, quoted: false });
     expect(estimate.body).toContain('about 4 sats more if admission is due again');
     expect(estimate.detail).toContain('refuses before paying if the real price is higher');
@@ -137,7 +137,7 @@ describe('paid, not delivered: mapping and copy', () => {
     expect(retry.detail).toContain('asks first with the price');
     expect(retry.body).not.toContain('no second admission');
     const stop = undeliveredCopy({ paid_msat: 1500, retry: false });
-    expect(stop.title).toBe('Paid 1.5 sats · not delivered yet');
+    expect(stop.title).toBe('Paid 1,500 msat · not delivered yet');
     expect(stop.body).toContain('Do not send again');
     expect(stop.body).toContain('pay twice');
     expect(stop.body).not.toContain('Retry');

@@ -16,6 +16,7 @@
 //! (`docs/CONTROL_CENTER_BUDGET.md`). When the capability cannot be read at
 //! the moment authority would open, nothing opens.
 
+use crate::format::amount;
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
@@ -82,11 +83,6 @@ pub fn unreadable() -> ActionError {
         "grant_unknown",
         "Your node's spend budget could not be read. Nothing was sent or opened.",
     )
-}
-
-fn sats(msat: u64) -> String {
-    let whole = msat / 1000;
-    if msat.is_multiple_of(1000) { whole.to_string() } else { format!("{:.3}", msat as f64 / 1000.0) }
 }
 
 impl NodeGrant {
@@ -274,21 +270,21 @@ pub fn ended() -> ActionError {
 fn per_call(max_msat: u64) -> ActionError {
     ActionError::new(
         "grant_per_call",
-        format!("This is more than the {} sats per payment your node allows. Nothing was sent.", sats(max_msat)),
+        format!("This is more than the {} per payment your node allows. Nothing was sent.", amount(max_msat)),
     )
 }
 
 fn total(remaining_msat: u64) -> ActionError {
     ActionError::new(
         "grant_exhausted",
-        format!("Your node's spend budget has {} sats left, less than this costs. Nothing was sent. Ask for a new budget.", sats(remaining_msat)),
+        format!("Your node's spend budget has {} left, less than this costs. Nothing was sent. Ask for a new budget.", amount(remaining_msat)),
     )
 }
 
 fn recipient_left(remaining_msat: u64) -> ActionError {
     ActionError::new(
         "grant_recipient",
-        format!("Your node's budget for this recipient has {} sats left, less than this costs. Nothing was sent.", sats(remaining_msat)),
+        format!("Your node's budget for this recipient has {} left, less than this costs. Nothing was sent.", amount(remaining_msat)),
     )
 }
 
@@ -369,7 +365,7 @@ mod tests {
         assert_eq!(r("no_grant").error(None).code, "grant_ended");
         assert!(r("no_grant").ends_grant() && !r("total").ends_grant());
         assert!(r("per_call").error(Some(&g)).message.contains("3 sats"));
-        assert!(r("total").error(None).message.contains("0.500 sats left"));
+        assert!(r("total").error(None).message.contains("500 msat left"));
         assert_eq!(r("recipient").error(None).code, "grant_recipient");
         assert_eq!(r("unpriced").error(None).code, "grant_unpriced");
         assert_eq!(r("ledger").error(None).code, "grant_ledger");

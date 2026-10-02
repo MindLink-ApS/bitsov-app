@@ -10,7 +10,7 @@ const starting: PairingView = {
   short_code: null,
   code_from_node: false,
   reason: null,
-  bootstrap: null,
+  remote: false, bootstrap: null,
 };
 const pending: PairingView = { ...starting, state: 'pending' };
 const paired: PairingView = {
@@ -59,6 +59,15 @@ describe('onboarding steps', () => {
       'done',
       'active',
     ]);
+  });
+
+  it('only completes remote identity when the host has confirmed it', () => {
+    const remote = { ...paired, remote: true };
+    expect(onboardingSteps(ready, remote, false).map((s) => s.status)).toEqual(['done', 'done', 'done', 'active']);
+    expect(onboardingSteps({ ...ready, node_id: null }, remote, false)[2].status).toBe('active');
+    expect(onboardingSteps(booting, remote, false)[2].status).toBe('todo');
+    expect(onboardingSteps(ready, { ...remote, bootstrap: 'bootstrap' }, false)[2].status).toBe('blocked');
+    expect(onboardingSteps(ready, { ...remote, state: 'failed' }, false)[2].status).toBe('todo');
   });
 
   it('failed pairing blocks everything after it', () => {
@@ -141,6 +150,18 @@ describe('pairing panel', () => {
     expect(panel.textContent).toContain('cannot replace a live identity');
     expect(panel.textContent).toContain('owner CLI');
     expect(panel.textContent).toContain('Less exposure, not solved local security');
+  });
+
+  it.each(['none', 'registered'] as const)('uses remote pairing copy with device state %s', (state) => {
+    const el = show({ ...paired, remote: true }, ready, () => {}, {
+      available: true, state, fingerprint: state === 'registered' ? 'fp-1234' : null,
+      owner_action: null, expires_at_ms: null,
+    });
+    const panel = el.querySelector('[data-pairing="paired"]')!;
+    expect(panel.textContent).toContain('pinned encrypted connection');
+    expect(panel.textContent).toContain("local proxy only accepts this app’s credential");
+    expect(panel.textContent).not.toContain('Loopback authenticated');
+    expect(panel.textContent).not.toContain('file-backed on this Mac');
   });
 
   it('a code the app could not match against node output is not labelled as matching', () => {

@@ -63,7 +63,7 @@ it.each([false, true])('funding-address refusal joins the shared readiness notic
   const own = '1'.repeat(64);
   const replies: Record<string, () => unknown> = {
     node_status: () => ({ ready: true, node_id: own, error: null }),
-    pairing_status: () => ({ state: 'paired', scopes: ['read', 'receive'], short_code: null, code_from_node: true, reason: null, bootstrap: null }),
+    pairing_status: () => ({ state: 'paired', scopes: ['read', 'receive'], short_code: null, code_from_node: true, reason: null, remote: false, bootstrap: null }),
     node_overview: () => ({ money_ready: ready, node_id: own, status: 'ok', version: 'api v2', connected_peers: 0, e2ee_sessions: 0, pending_deliveries: 0, lightning_available: lastReady, block_height: null, uptime_secs: 1, lightning_backend: 'ldk', chain_backend: 'esplora', read_at: Date.now() }),
     peers_list: () => [], rooms_list: () => [],
     payments_overview: () => ({ balance_msat: 0, lightning_outbound_msat: 0, channels: [] }),

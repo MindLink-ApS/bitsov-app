@@ -25,7 +25,7 @@ const BASE: PairingView = {
   short_code: null,
   code_from_node: false,
   reason: null,
-  bootstrap: null,
+  remote: false, bootstrap: null,
 };
 
 /** What the host reports on each 1.5 s poll of a first run. */

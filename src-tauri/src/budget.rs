@@ -25,6 +25,7 @@
 //! "Daily" is a rolling 24 hours, not a calendar day: there is no midnight
 //! reset that would allow twice the budget around it, and no time zone to trust.
 
+use crate::format::amount;
 use std::collections::BTreeMap;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -222,8 +223,8 @@ impl Book {
         }
         if msat > self.ceiling_msat {
             return Err(ActionError::invalid(format!(
-                "That is above your approved daily total of {} sats. Raise the total first.",
-                self.ceiling_msat / 1000
+                "That is above your approved daily total of {}. Raise the total first.",
+                amount(self.ceiling_msat)
             )));
         }
         self.map_mut(room).insert(target.to_string(), msat);
@@ -418,11 +419,6 @@ pub struct Ask<'a> {
     pub now_ms: u64,
 }
 
-fn sats(msat: u64) -> String {
-    let whole = msat / 1000;
-    if msat.is_multiple_of(1000) { whole.to_string() } else { format!("{:.3}", msat as f64 / 1000.0) }
-}
-
 /// Decide, before any request, whether this message may be paid and by what.
 ///
 /// Budgets are limits and approvals are authority: contact budgets
@@ -446,8 +442,8 @@ pub fn plan(book: &Book, ask: Ask<'_>) -> Result<Plan, ActionError> {
             return Err(ActionError::new(
                 "budget_exhausted",
                 format!(
-                    "You have used {} of {} sats for {who} in the last 24 hours, and this costs {}. Raise the budget to send.",
-                    sats(spent), sats(limit), sats(ask.max_msat)
+                    "You have used {} of {} for {who} in the last 24 hours, and this costs {}. Raise the budget to send.",
+                    amount(spent), amount(limit), amount(ask.max_msat)
                 ),
             ));
         }
@@ -458,8 +454,8 @@ pub fn plan(book: &Book, ask: Ask<'_>) -> Result<Plan, ActionError> {
         return Err(ActionError::new(
             "ceiling_exhausted",
             format!(
-                "You have used {} of your {} sats app all-in payment limit (rolling 24 hours), and this costs {}. Raise the limit to send.",
-                sats(spent), sats(ceiling), sats(ask.max_msat)
+                "You have used {} of your {} app all-in payment limit (rolling 24 hours), and this costs {}. Raise the limit to send.",
+                amount(spent), amount(ceiling), amount(ask.max_msat)
             ),
         ));
     }
@@ -476,8 +472,8 @@ pub fn plan(book: &Book, ask: Ask<'_>) -> Result<Plan, ActionError> {
                 let msat = msat.min(book.ceiling_msat);
                 if msat < ask.max_msat {
                     return Err(ActionError::invalid(format!(
-                        "A budget of {} sats does not cover this message ({} sats).",
-                        sats(msat), sats(ask.max_msat)
+                        "A budget of {} does not cover this message ({}).",
+                        amount(msat), amount(ask.max_msat)
                     )));
                 }
                 Some(msat)
@@ -625,6 +621,18 @@ mod tests {
     }
 
     #[test]
+    fn fractional_budget_refusals_use_explicit_integer_msat() {
+        let b = book_with_maya(2000);
+        let error = plan(&b, ask(MAYA, 21187, Some(500_000))).unwrap_err();
+        assert!(error.message.contains("used 0 sats of 2 sats"), "{}", error.message);
+        assert!(error.message.contains("costs 21187 msat"), "{}", error.message);
+        assert!(!error.message.contains("21.187"));
+        let mut b = Book::new(ME);
+        b.set_ceiling(21187);
+        assert!(b.set_limit(MAYA, false, 22000).unwrap_err().message.contains("21187 msat"));
+    }
+
+    #[test]
     fn inside_the_budget_pays_automatically() {
         let b = book_with_maya(50_000);
         assert_eq!(plan(&b, ask(MAYA, 2000, Some(500_000))).unwrap(), Plan { route: Route::Budget, confirm: None });
@@ -656,7 +664,7 @@ mod tests {
         assert!(plan(&b, ask(MAYA, 1000, Some(500_000))).is_ok());
         let e = plan(&b, ask(MAYA, 2000, Some(500_000))).unwrap_err();
         assert_eq!(e.code, "budget_exhausted");
-        assert!(e.message.contains("used 4 of 5 sats"), "{}", e.message);
+        assert!(e.message.contains("used 4 sats of 5 sats"), "{}", e.message);
         // The contact budget holds inside a ten-minute window too.
         let mut windowed = ask(MAYA, 2000, None);
         windowed.window = Ok(());

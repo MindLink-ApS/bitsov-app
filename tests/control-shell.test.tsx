@@ -19,7 +19,7 @@ const paired: PairingView = {
   short_code: 'ABCD-EFGH',
   code_from_node: true,
   reason: null,
-  bootstrap: null,
+  remote: false, bootstrap: null,
 };
 
 type Call = { cmd: string; args: Record<string, unknown> | undefined };

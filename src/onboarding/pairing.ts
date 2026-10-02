@@ -6,6 +6,8 @@ export type NodeStatus = { ready: boolean; node_id: string | null; error: string
 
 /** Mirrors `bitsov_app::pairing::PairingView`. */
 export type PairingView = {
+  /** The running node uses the pinned remote transport. */
+  remote: boolean;
   state: 'starting' | 'pending' | 'paired' | 'failed' | 'fallback';
   scopes: string[];
   short_code: string | null;
@@ -20,6 +22,7 @@ export type StepStatus = 'todo' | 'active' | 'done' | 'failed' | 'skipped' | 'bl
 export type Step = { id: 'node' | 'pair' | 'identity' | 'fund'; label: string; status: StepStatus };
 
 export const INITIAL_PAIRING: PairingView = {
+  remote: false,
   state: 'starting',
   scopes: [],
   short_code: null,
@@ -49,7 +52,7 @@ export function onboardingSteps(status: NodeStatus, pairing: PairingView, trustA
       ? 'blocked'
       : !status.ready
         ? 'todo'
-        : trustAck
+        : trustAck || (pairing.remote && !!status.node_id)
           ? 'done'
           : 'active';
 

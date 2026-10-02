@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 pub mod act;
+pub mod format;
 pub mod budget;
 pub mod grant;
 pub mod introduction;

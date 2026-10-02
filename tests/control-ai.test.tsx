@@ -310,7 +310,7 @@ describe('composing an answer', () => {
 
 // ---- the track against a stubbed host -------------------------------------------
 
-const paired: PairingView = { state: 'paired', scopes: ['read', 'receive'], short_code: 'ABCD-EFGH', code_from_node: true, reason: null, bootstrap: null };
+const paired: PairingView = { state: 'paired', scopes: ['read', 'receive'], short_code: 'ABCD-EFGH', code_from_node: true, reason: null, remote: false, bootstrap: null };
 
 type Call = { cmd: string; args: Record<string, unknown> | undefined };
 type Reply = (args?: Record<string, unknown>) => unknown;
@@ -658,7 +658,7 @@ describe('the AI track', () => {
   it('does not offer a payment prefill for a decimal amount', async () => {
     const host = stubHost();
     await openAi();
-    ask('Pay Josh 1.50 sats');
+    ask('Pay Josh 1,500 msat');
     await vi.waitFor(() => expect($('[data-ai-answer="answered"]')).not.toBeNull());
     expect($('[data-ai-prefill]')).toBeNull();
     for (const cmd of ['payment_pay', 'payment_keysend', 'spend_request']) expect(host.used(cmd)).toHaveLength(0);

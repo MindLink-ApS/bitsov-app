@@ -38,10 +38,21 @@ const msg = (id: string, kind: number, sender: string, recipient: string, paid: 
 
 describe('wallet: balance and channels in plain words', () => {
   it('keeps the node total without treating channel capacity or the remainder as spendable', () => {
-    expect(splitBalance(WALLET)).toEqual({ total: 480_000_000, hasBreakdown: false, lightning: null, onchain: null, onchainTotal: null, reserved: null, closing: null, contested: null });
+    expect(splitBalance(WALLET)).toEqual({ total: 480_000_000, hasBreakdown: false, pending: null, lightning: null, onchain: null, onchainTotal: null, reserved: null, closing: null, contested: null });
   });
   it.each([0, 200_000_000, 480_000_000])('preserves a reported total of %i even without a breakdown', (total) => {
-    expect(splitBalance({ ...WALLET, balance_msat: total })).toEqual({ total, hasBreakdown: false, lightning: null, onchain: null, onchainTotal: null, reserved: null, closing: null, contested: null });
+    expect(splitBalance({ ...WALLET, balance_msat: total })).toEqual({ total, hasBreakdown: false, pending: null, lightning: null, onchain: null, onchainTotal: null, reserved: null, closing: null, contested: null });
+  });
+  it.each([
+    [undefined, null],
+    [null, null],
+    [0, 0],
+    [15_000, 15_000_000],
+  ])('uses only reported pending with an anchor reserve: %s', (reported, pending) => {
+    expect(splitBalance({ ...WALLET,
+      onchain_total_sats: 130_000, onchain_spendable_sats: 90_000,
+      anchor_reserve_sats: 25_000, onchain_pending_sats: reported,
+    })).toMatchObject({ pending, onchainTotal: 130_000_000, onchain: 90_000_000, reserved: 25_000_000 });
   });
   it('an open channel says what can be sent and received; an offline one says funds stay yours', () => {
     expect(channelWords(channel())).toMatchObject({ state: 'open', line: 'You can send up to 300,000 sats and receive up to 190,000 sats through it.' });
@@ -119,7 +130,7 @@ describe('the node payment contract', () => {
 
 // ---- the page, in the shell ---------------------------------------------------
 
-const paired: PairingView = { state: 'paired', scopes: ['read', 'receive'], short_code: 'ABCD-EFGH', code_from_node: true, reason: null, bootstrap: null };
+const paired: PairingView = { state: 'paired', scopes: ['read', 'receive'], short_code: 'ABCD-EFGH', code_from_node: true, reason: null, remote: false, bootstrap: null };
 const budget = (): BudgetView => ({
   paused: false, waiting_for_owner: false, ceiling_msat: 500_000, max_daily_msat: 100_000_000, spent_msat: 0, unsettled_msat: 0,
   preset: 'careful', presets: [{ id: 'careful', contact_msat: 50_000, room_msat: 100_000, ceiling_msat: 500_000 }],
@@ -259,6 +270,26 @@ describe('the Wallet page', () => {
     expect($('[data-balance-lightning]')).toBeNull();
   });
 
+  it.each([
+    [{ onchain_total_sats: 190804, onchain_spendable_sats: 2004 }, 'Pending on-chain: Unknown'],
+    [{ onchain_total_sats: 130_000, onchain_spendable_sats: 90_000, anchor_reserve_sats: 25_000 }, 'Pending on-chain: Unknown'],
+    [{ onchain_total_sats: 130_000, onchain_spendable_sats: 90_000, anchor_reserve_sats: 25_000, onchain_pending_sats: null }, 'Pending on-chain: Unknown'],
+    [{ onchain_total_sats: 130_000, onchain_spendable_sats: 90_000, anchor_reserve_sats: 25_000, onchain_pending_sats: 15_000 }, '15,000 sats pending'],
+    [{ onchain_pending_sats: 188800 }, '188,800 sats pending'],
+    [{ onchain_pending_sats: 0, onchain_total_sats: 190804, onchain_spendable_sats: 2004 }, '0 sats pending'],
+    [{ onchain_total_sats: 190804 }, 'Pending on-chain: Unknown'],
+    [{ onchain_spendable_sats: 2004 }, 'Pending on-chain: Unknown'],
+    [{ onchain_total_sats: 1000, onchain_spendable_sats: 2004 }, 'Pending on-chain: Unknown'],
+    [{}, 'Pending on-chain: Unknown'],
+  ])('keeps pending funds separate from the headline: %j', async (fields, pending) => {
+    stubHost({ payments_overview: () => ({ ...WALLET, balance_msat: 2004000, ...fields }) });
+    await openWallet();
+    await vi.waitFor(() => expect(text('[data-balance-total]')).toBe('2,004sats'));
+    expect(text('[data-balance-pending]')).toBe(pending);
+    if ('onchain_pending_sats' in fields) expect(text('[data-wallet-basis]')).not.toContain('one total');
+    expect($('[data-balance-pending]')?.closest('[data-wallet-balance]')).not.toBeNull();
+  });
+
   it('shows independent node categories with overlap and routing limits, without a derived total', async () => {
     const host = stubHost({ payments_overview: () => ({ ...WALLET,
       lightning_spendable_sats: 210_000, onchain_spendable_sats: 90_000,
@@ -271,6 +302,8 @@ describe('the Wallet page', () => {
     expect(text('[data-balance-onchain-total] .split-name')).toBe('On-chain total');
     expect(text('[data-balance-onchain-total] .split-amount')).toBe('130,000 sats');
     expect(text('[data-balance-reserved] .split-amount')).toBe('25,000 sats');
+    expect(text('[data-balance-pending]')).toBe('Pending on-chain: Unknown');
+    expect($('[data-balance-pending]')?.getAttribute('data-balance-pending')).toBe('unknown');
     expect(text('[data-balance-closing] .split-amount')).toBe('80,000 sats');
     expect(text('[data-balance-contested] .split-amount')).toBe('7,000 sats');
     expect(text('[data-balance-lightning]')).toMatch(/outbound capacity.*not.*guarantee.*routing fees.*per-HTLC limits.*remote liquidity/i);

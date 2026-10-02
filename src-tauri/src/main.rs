@@ -259,6 +259,13 @@ impl Default for NodeState {
 }
 
 impl NodeState {
+    /// Export the running mode even before authentication, or after it fails.
+    fn pairing_snapshot(&self) -> PairingView {
+        let mut view = self.pairing_view.lock().unwrap().clone();
+        view.remote = self.remote_mode.load(Ordering::SeqCst);
+        view
+    }
+
     fn for_api(api_base: impl Into<String>) -> Self {
         let remote_proxy_auth: Arc<str> = Arc::from(
             remote_access::new_local_auth_token()
@@ -1556,7 +1563,7 @@ fn pairing_status(
     state: State<'_, NodeState>,
 ) -> Result<PairingView, String> {
     reject_sealed_window(&window)?;
-    Ok(state.pairing_view.lock().unwrap().clone())
+    Ok(state.pairing_snapshot())
 }
 
 /// Validate and persist a pasted remote pairing link. The running mode is
@@ -1600,13 +1607,13 @@ async fn pairing_retry(
         .clone()
         .ok_or_else(|| "pairing is not available yet: the node has not started".to_string())?;
     if state.pairing_view.lock().unwrap().state != "failed" {
-        return Ok(state.pairing_view.lock().unwrap().clone());
+        return Ok(state.pairing_snapshot());
     }
     if state.stale_pairing.swap(false, Ordering::SeqCst) {
         pairing::forget_pairing(&ctx.store);
     }
     finish_auth(state.inner(), &ctx.data_dir).await;
-    Ok(state.pairing_view.lock().unwrap().clone())
+    Ok(state.pairing_snapshot())
 }
 
 /// `GET /onboarding/state`. `None` means the first-run funding flow has not been
@@ -2029,7 +2036,9 @@ async fn first_contact_quote(
 
 async fn read_first_contact_quote(state: &NodeState, peer: &str) -> Result<control::FirstContactQuote, String> {
     let peer = control::node_id(peer)?;
-    if !node_offers(state, grant::FIRST_CONTACT_CAPABILITY).await {
+    let status: serde_json::Value = get_json(state, "/status").await?;
+    if !status["api_capabilities"].as_array().is_some_and(|caps|
+        caps.iter().any(|v| v.as_str() == Some(grant::FIRST_CONTACT_CAPABILITY))) {
         return Err("This node cannot quote a first contact before paying.".into());
     }
     let path = "/messages/first-contact/quote";
@@ -4003,7 +4012,8 @@ struct SendCaps {
 
 async fn require_price_caps(state: &NodeState, room: bool) -> Result<SendCaps, ActionError> {
     let unavailable = || ActionError::new("price_cap_unavailable", "This node cannot enforce your confirmed spending ceiling. Upgrade the node before sending messages or files.");
-    let status: serde_json::Value = get_json(state, "/status").await.map_err(|_| unavailable())?;
+    let status: serde_json::Value = get_json(state, "/status").await.map_err(|reason|
+        ActionError::new("price_quote_unavailable", format!("Node capabilities unavailable: {reason}")))?;
     let capabilities = status["api_capabilities"].as_array().ok_or_else(unavailable)?;
     let has = |cap: &str| capabilities.iter().any(|v| v.as_str() == Some(cap));
     if !has("paid_send_caps_v1") || (room && !has("room_terminal_outcomes_v1")) {
@@ -4024,14 +4034,15 @@ const OPERATIONS_CAPABILITY: &str = "message_operations_v1";
 /// promise this ceiling. Keep legacy accounting for recovery and other flows.
 async fn require_conversation_ceiling(state: &NodeState, peer: &str) -> Result<(), ActionError> {
     let peer = control::node_id(peer).map_err(ActionError::invalid)?;
-    require_price_caps(state, false).await?;
-    if !has_all_in_caps(state) {
-        let _ = read_first_contact_quote(state, &peer).await;
+    let caps = require_price_caps(state, false).await?;
+    if has_all_in_caps(state) { return Ok(()); }
+    // A successful status read without the quote capability proves this is
+    // a legacy node. Do not turn that evidence into a failed quote probe.
+    if !caps.readmission_possible {
+        return control::conversation_ceiling_evidence(false, Ok(()));
     }
-    if !has_all_in_caps(state) {
-        return Err(ActionError::new("price_cap_unavailable", "Upgrade the node to enforce an all-in message ceiling."));
-    }
-    Ok(())
+    let probe = read_first_contact_quote(state, &peer).await.map(|_| ());
+    control::conversation_ceiling_evidence(has_all_in_caps(state), probe)
 }
 
 async fn read_conversation_quote(state: &NodeState, peer: Option<&str>) -> Result<control::PriceQuote, String> {
@@ -6472,6 +6483,31 @@ mod verified_local_socket_tests {
         let _hold = std::fs::File::open(&config).unwrap();
         assert!(process_holds_data_dir(std::process::id(), dir.path()));
         assert!(process_matches_node_config(std::process::id(), &config));
+    }
+}
+
+#[cfg(test)]
+mod remote_onboarding_tests {
+    use super::*;
+
+    #[test]
+    fn pairing_snapshot_exports_running_mode_in_every_state_without_credentials() {
+        // Constructing the host does not start it or make any requests.
+        let state = NodeState::for_api("http://127.0.0.1:1/api/v1");
+        for remote in [false, true] {
+            state.remote_mode.store(remote, Ordering::SeqCst);
+            for phase in ["starting", "pending", "paired", "failed", "fallback"] {
+                let mut view = PairingView::starting();
+                view.state = phase;
+                *state.pairing_view.lock().unwrap() = view;
+                let json = serde_json::to_value(state.pairing_snapshot()).unwrap();
+                assert_eq!(json["remote"], remote);
+                assert_eq!(json["state"], phase);
+                assert_eq!(json.as_object().unwrap().len(), 7);
+                assert!(json.get("token").is_none());
+                assert!(json.get("key").is_none());
+            }
+        }
     }
 }
 
@@ -9978,7 +10014,7 @@ mod control_act_tests {
         do_message_send(s, A, false, "two", 7000, None).await.unwrap();
         let err = do_message_send(s, A, false, "three", 7000, None).await.unwrap_err();
         assert_eq!(err.code, "budget_exhausted");
-        assert!(err.message.contains("used 4 of 10 sats"), "{}", err.message);
+        assert!(err.message.contains("used 4 sats of 10 sats"), "{}", err.message);
         // A cap above what is left is refused too, not trimmed.
         assert_eq!(do_message_send(s, A, false, "big", 6001, None).await.unwrap_err().code, "budget_exhausted");
         assert_eq!(composes(&node), 2);
@@ -10903,16 +10939,59 @@ mod control_act_tests {
 
     #[tokio::test]
     async fn conversation_ceiling_refuses_legacy_admission_outside_the_cap() {
-        let (node, _dir, g1) = g1_node(&["read", "receive"]);
-        with_book(&node.state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
-        g1.grant.lock().unwrap()["per_recipient_msat"] = serde_json::json!({A: 50_000});
-        g1_approved(&node, 500_000).await;
-        let quote = read_conversation_quote(&node.state, Some(A)).await.unwrap();
-        assert!(quote.send_unavailable.is_some(), "never advertise an unenforceable ceiling");
-        let error = do_conversation_send(&node.state, A, false, "gm", 7000, None, None).await.unwrap_err();
-        assert_eq!(error.code, "price_cap_unavailable");
-        assert_eq!(composes(&node), 0);
-        assert_eq!(budget_now(&node.state).spent_msat, 0);
+        // Both legacy shapes lack #99: no quote capability, or a successful
+        // first-contact quote whose total includes no routing-fee contract.
+        for offers_quote in [false, true] {
+            let (node, _dir, g1) = g1_node(&["read", "receive"]);
+            if offers_quote {
+                *g1.first_contact.lock().unwrap() = Some((200, serde_json::json!({})));
+                *g1.quote.lock().unwrap() = Some(serde_json::json!({"recipient": A,
+                    "admission_msat": 1500, "message_msat": 2000,
+                    "total_msat": 3500, "expires_at": now_unix() + 60}));
+                assert!(read_first_contact_quote(&node.state, A).await.is_ok());
+            }
+            with_book(&node.state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
+            g1.grant.lock().unwrap()["per_recipient_msat"] = serde_json::json!({A: 50_000});
+            g1_approved(&node, 500_000).await;
+            let quote = read_conversation_quote(&node.state, Some(A)).await.unwrap();
+            assert!(quote.send_unavailable.is_some(), "never advertise an unenforceable ceiling");
+            assert!(quote.send_unavailable.unwrap().contains("Upgrade the node"));
+            let error = do_conversation_send(&node.state, A, false, "gm", 7000, None, None).await.unwrap_err();
+            assert_eq!(error.code, "price_cap_unavailable");
+            assert!(error.message.contains("Upgrade the node"));
+            assert!(!has_all_in_caps(&node.state));
+            assert_eq!(node.posts().iter().any(|(p, _)| p == "/messages/first-contact/quote"), offers_quote);
+            assert_eq!(composes(&node), 0);
+            assert_eq!(budget_now(&node.state).spent_msat, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn conversation_ceiling_failed_probe_does_not_claim_a_missing_contract() {
+        for (path, status, body) in [
+            ("/status", 503, r#"{"error":"Node offline"}"#),
+            ("/messages/first-contact/quote", 502, r#"{"error":"Peer offline"}"#),
+            ("/messages/first-contact/quote", 403, r#"{"error":"Owner approval required"}"#),
+            ("/messages/first-contact/quote", 200, "malformed quote"),
+        ] {
+            let routes: Routes = Arc::new(move |m, p, b| {
+                if p == path { return (status, body.into()); }
+                if p == "/status" {
+                    return (200, serde_json::json!({"api_capabilities": ["paid_send_caps_v1", "first_contact_grant_v1"]}).to_string());
+                }
+                happy()(m, p, b)
+            });
+            let node = fake(AuthMode::Local, routes);
+            spend_advance(&node.state, true).await.unwrap();
+            let quote = read_conversation_quote(&node.state, Some(A)).await.unwrap();
+            let error = do_conversation_send(&node.state, A, false, "gm", 7000, None, None).await.unwrap_err();
+            assert_eq!(error.code, "price_quote_unavailable", "{path}: {status}");
+            assert_eq!(quote.send_unavailable.as_deref(), Some(error.message.as_str()));
+            assert!(!error.message.contains("Upgrade"));
+            assert!(!has_all_in_caps(&node.state));
+            assert_eq!(composes(&node), 0);
+            assert_eq!(budget_now(&node.state).spent_msat, 0);
+        }
     }
 
     #[tokio::test]
@@ -11535,7 +11614,7 @@ mod control_act_tests {
         *g1.grant.lock().unwrap() = g1_grant(3600, 400_000, 1_500);
         let err = do_message_send(&node.state, A, false, "gm", 7000, None).await.unwrap_err();
         assert_eq!(err.code, "grant_exhausted");
-        assert!(err.message.contains("1.500 sats left"), "{}", err.message);
+        assert!(err.message.contains("1500 msat left"), "{}", err.message);
         let mut per_call = g1_grant(3600, 400_000, 400_000);
         per_call["per_call_max_msat"] = 1000.into();
         *g1.grant.lock().unwrap() = per_call;
