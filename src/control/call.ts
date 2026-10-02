@@ -11,6 +11,7 @@
  * before the offer/answer is sent (vanilla ICE), so a call normally costs
  * one offer and one hangup for the caller, one answer for the callee.
  */
+import { asActionError } from './state';
 import type { ActionError, CallQuote, CallReceipt, Message } from './types';
 
 export const CALL_OFFER = 400;
@@ -19,6 +20,8 @@ export const CALL_ICE = 402;
 export const CALL_HANGUP = 403;
 /** How long an offer rings before either side gives up (genome: 60 s). */
 export const RING_MS = 60_000;
+/** Bound the renderer wait; the host journal still owns any unresolved payment. */
+export const SIGNAL_TIMEOUT_MS = 30_000;
 /** How long to wait for ICE gathering before sending what we have. */
 export const GATHER_MS = 3_000;
 /** How long a dropped connection may take to come back before the call ends. */
@@ -222,7 +225,17 @@ export function createCallEngine(deps: CallDeps) {
   };
 
   const pay = async (kind: number, body: Omit<Signal, 'v' | 'call_id'>, maxMsat: number) => {
-    const r = await deps.signal(view.peer!, kind, JSON.stringify({ v: 1, call_id: view.callId!, ...body }), maxMsat);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<Outcome<CallReceipt>>((resolve) => {
+      timer = setTimeout(() => resolve({ ok: false, error: {
+        code: 'spend_unknown',
+        message: 'The node did not answer in time. The payment outcome is unknown; check the pending result before trying again.',
+      } }), SIGNAL_TIMEOUT_MS);
+    });
+    let r: Outcome<CallReceipt>;
+    try {
+      r = await Promise.race([deps.signal(view.peer!, kind, JSON.stringify({ v: 1, call_id: view.callId!, ...body }), maxMsat), timeout]);
+    } finally { clearTimeout(timer); }
     if (r.ok) set({ paidMsat: view.paidMsat + r.value.total_msat });
     return r;
   };
@@ -238,8 +251,13 @@ export function createCallEngine(deps: CallDeps) {
   const guarded = async (run: () => Promise<void>) => {
     if (busy) return;
     busy = true;
+    let callId = view.callId;
     try {
-      await run();
+      const running = run();
+      callId = view.callId;
+      await running;
+    } catch (error) {
+      if (view.callId === callId && active()) end(null, asActionError(error).message);
     } finally {
       busy = false;
     }

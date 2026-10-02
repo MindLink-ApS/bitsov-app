@@ -111,3 +111,15 @@ export function setStunPref(url: string) {
     else localStorage.removeItem(STUN_KEY);
   } catch { /* ignore */ }
 }
+
+// A preset is a saved suggestion, never a spending authority.
+export function readSpendPreset(nodeId: string): import('./types').PresetId | null {
+  try {
+    const value = localStorage.getItem(`bitsov.spend-preset.${nodeId.toLowerCase()}`);
+    return value === 'careful' || value === 'everyday' || value === 'generous' ? value : null;
+  } catch { return null; }
+}
+
+export function saveSpendPreset(nodeId: string, value: import('./types').PresetId) {
+  try { localStorage.setItem(`bitsov.spend-preset.${nodeId.toLowerCase()}`, value); } catch { /* session only */ }
+}

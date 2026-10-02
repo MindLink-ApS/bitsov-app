@@ -290,6 +290,23 @@ describe('the Wallet page', () => {
     expect($('[data-balance-pending]')?.closest('[data-wallet-balance]')).not.toBeNull();
   });
 
+  it('names a channel only from an unambiguous node-reported LN mapping', async () => {
+    stubHost({ peers_list: () => [{ node_id: A, connected: true, label: null, addr: null, fingerprint: null, ln_pubkey: WALLET.channels[0].peer_pubkey.toUpperCase() }] });
+    setPetname(A, 'Maya');
+    await openWallet();
+    $<HTMLButtonElement>('[data-wallet-tab="channels"]')!.click();
+    await vi.waitFor(() => expect(text('[data-channel="c1"] .channel-peer')).toBe('Maya'));
+    expect(text('[data-channel="c2"] .channel-peer')).toContain('Unnamed contact');
+  });
+
+  it('keeps the honest channel fallback when two contacts claim the same LN key', async () => {
+    stubHost({ peers_list: () => [A, B].map((node_id) => ({ node_id, connected: true, label: null, addr: null, fingerprint: null, ln_pubkey: WALLET.channels[0].peer_pubkey })) });
+    setPetname(A, 'Maya'); setPetname(B, 'Josh');
+    await openWallet();
+    $<HTMLButtonElement>('[data-wallet-tab="channels"]')!.click();
+    expect(text('[data-channel="c1"] .channel-peer')).toContain('Unnamed contact');
+  });
+
   it('shows independent node categories with overlap and routing limits, without a derived total', async () => {
     const host = stubHost({ payments_overview: () => ({ ...WALLET,
       lightning_spendable_sats: 210_000, onchain_spendable_sats: 90_000,

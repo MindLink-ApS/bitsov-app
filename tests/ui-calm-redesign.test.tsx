@@ -35,11 +35,11 @@ describe('denomination formatting', () => {
     expect(btc(100_000_000_000)).toBe('1');
     expect(btc(100_000_000_001)).toBe('1.00000000001');
     setDenom('sats');
-    expect(sats(500)).toBe('500');
-    expect(sats(1500)).toBe('1,500');
-    expect(sats(999)).toBe('999');
-    expect(sats(12_345)).toBe('12,345');
-    expect(sats(99_999_999_500)).toBe('99,999,999,500');
+    expect(sats(500)).toBe('0.5');
+    expect(sats(1500)).toBe('1.5');
+    expect(sats(999)).toBe('0.999');
+    expect(sats(12_345)).toBe('12.345');
+    expect(sats(99_999_999_500)).toBe('99,999,999.5');
   });
 });
 

@@ -151,11 +151,41 @@ describe('invisible payments in the composer and the context panel', () => {
     mount = document.createElement('div');
     document.body.appendChild(mount);
     dispose = render(() => <App />, mount);
-    await vi.waitFor(() => expect([...mount.querySelectorAll('button')].some((b) => b.textContent?.includes('I understand'))).toBe(true));
-    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
+    await vi.waitFor(() => expect(mount.querySelector('[data-composer]') || [...mount.querySelectorAll('button')].find((b) => b.textContent?.includes('I understand'))).toBeTruthy());
+    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))?.click();
     await vi.waitFor(() => expect($(`[data-track="peer:${MAYA}"]`)?.getAttribute('aria-current')).toBe('true'));
     await vi.waitFor(() => expect($('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('2000'));
   }
+
+  it('keeps the selected Everyday preset after remount without requesting a grant', async () => {
+    const host = stubHost(budgetView());
+    await openShell();
+    type('[data-composer] textarea', 'hello');
+    $<HTMLButtonElement>('[data-preset="everyday"]')!.click();
+    dispose?.(); mount.remove();
+    mount = document.createElement('div'); document.body.appendChild(mount);
+    dispose = render(() => <App />, mount);
+    await vi.waitFor(() => expect($('[data-composer] textarea')).not.toBeNull());
+    type('[data-composer] textarea', 'hello');
+    await vi.waitFor(() => expect($('[data-preset="everyday"]')?.getAttribute('aria-checked')).toBe('true'));
+    expect(host.used('budget_approve')).toHaveLength(0);
+    expect(host.used('message_send')).toHaveLength(0);
+  });
+
+  it('clears a failed pause after the user retries successfully', async () => {
+    let failed = true;
+    stubHost(budgetView(), { budget_pause: () => {
+      if (failed) throw { code: 'node', message: 'Pause could not be saved' };
+      return budgetView({ paused: true });
+    } });
+    await openShell();
+    $<HTMLButtonElement>('[data-tab="budget"]')!.click();
+    $<HTMLButtonElement>('[data-pause-all]')!.click();
+    await vi.waitFor(() => expect(mount.textContent).toContain('Pause could not be saved'));
+    failed = false;
+    $<HTMLButtonElement>('[data-pause-all]')!.click();
+    await vi.waitFor(() => expect(mount.textContent).not.toContain('Pause could not be saved'));
+  });
 
   it('shows the daily scope and exclusions together, and warns at direct spending', async () => {
     stubHost(open([{ target: MAYA, room: false, limit_msat: 50_000, spent_msat: 0 }]));
@@ -209,7 +239,7 @@ describe('invisible payments in the composer and the context panel', () => {
     await openShell();
     $<HTMLButtonElement>(`[data-track="peer:${NEW}"]`)!.click();
     await vi.waitFor(() => expect($('[data-door-quote]')?.getAttribute('data-door-quote')).toBe('17500'));
-    expect(text('[data-door-quote]')).toContain('up to 13,500 msat network fee');
+    expect(text('[data-door-quote]')).toContain('up to 13.5 sats network fee');
     expect(text('[data-first-budget="50000"]')).toBe('50 sats a day · 2 messages');
     type('[data-composer] textarea', 'hello including fees');
     submit();
@@ -972,11 +1002,11 @@ describe('invisible payments in the composer and the context panel', () => {
     type('[data-composer] textarea', 'room draft');
     submit();
     await vi.waitFor(() => expect($('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('9500'));
-    expect(text('[data-cost]')).toContain('7,500 msat');
+    expect(text('[data-cost]')).toContain('7.5 sats');
     expect(host.used('message_send')).toHaveLength(1);
     expect(host.used('message_send')[0].args).toMatchObject({ max_msat: 7000, max_recipient_msat: { [MAYA]: 7000 } });
     expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('room draft');
-    expect(text('[data-send-price]')).toContain('9,500 msat');
+    expect(text('[data-send-price]')).toContain('9.5 sats');
     submit();
     await vi.waitFor(() => expect(host.used('message_send')).toHaveLength(2));
     expect(host.used('message_send')[1].args).toMatchObject({ max_msat: 9500, max_recipient_msat: { [MAYA]: 9500 } });

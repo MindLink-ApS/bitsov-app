@@ -584,8 +584,8 @@ describe('rooms in the shell', () => {
     expect(host.used('message_send')).toHaveLength(1);
     expect($(`[data-room-leg="${A}"]`)!.getAttribute('data-leg-state')).toBe('undelivered');
     expect($('[data-room-send-msat]')!.getAttribute('data-room-send-msat')).toBe('2500');
-    expect(text(`[data-room-leg="${A}"]`)).toMatch(/up to 2,500 msat \(2,100 msat to them, plus a network fee\)/);
-    expect(text('[data-room-send] .kind')).toMatch(/up to 2,500 msat in all/);
+    expect(text(`[data-room-leg="${A}"]`)).toMatch(/up to 2.5 sats \(2.1 sats to them, plus a network fee\)/);
+    expect(text('[data-room-send] .kind')).toMatch(/up to 2.5 sats in all/);
   });
 
   it('a room chat with legal leading JSON whitespace goes to its room, never the direct chat, and stays hidden after Leave', async () => {

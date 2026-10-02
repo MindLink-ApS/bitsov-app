@@ -1,4 +1,4 @@
-import { setStunPref } from '../src/control/prefs';
+import { setStunPref, setDenom } from '../src/control/prefs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'solid-js/web';
 import App from '../src/App';
@@ -84,6 +84,48 @@ function engine(over: Partial<CallDeps> = {}) {
 
 const msg = (kind: number, body: Record<string, unknown>, sender = A): Message => ({
   id: `in-${kind}-${Math.random()}`, kind, sender, recipient: OWN, timestamp: 0, plaintext: JSON.stringify({ v: 1, call_id: ID, ...body }), payment_amount_msat: 1000,
+});
+
+describe('call refusal recovery', () => {
+  it('ends a stalled host request without retrying or reviving on a late receipt', async () => {
+    vi.useFakeTimers();
+    try {
+      let finish!: (outcome: { ok: true; value: CallReceipt }) => void;
+      const signal = vi.fn(() => new Promise<{ ok: true; value: CallReceipt }>((resolve) => { finish = resolve; }));
+      const { e } = engine({ signal });
+      const placing = e.place(A, 'audio', QUOTE);
+      await vi.advanceTimersByTimeAsync(30_001);
+      expect(e.view()).toMatchObject({ phase: 'ended', error: expect.stringMatching(/outcome.*unknown/i) });
+      await placing;
+      expect(FakePc.made[FakePc.made.length - 1].closed).toBe(true);
+      finish({ ok: true, value: { message_id: 'late', kind: 400, amount_msat: 10000, total_msat: 15000, max_routing_fee_msat: 5000, delivered: true, accepted: true, sent_at_ms: 0 } });
+      await vi.advanceTimersByTimeAsync(1);
+      expect(e.view().phase).toBe('ended');
+      expect(signal).toHaveBeenCalledTimes(1);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('does not let a cancelled operation rejection end a newer incoming call', async () => {
+    let reject!: (error: Error) => void;
+    const { e } = engine({ signal: () => new Promise((_, no) => { reject = no; }) });
+    const placing = e.place(A, 'audio', QUOTE);
+    await vi.waitFor(() => expect(reject).toBeDefined());
+    await e.hangup();
+    await e.receive(msg(400, { call_id: 'f'.repeat(32), media: 'audio', sdp: 'offer' }), OWN);
+    reject(new Error('old refusal'));
+    await placing;
+    expect(e.view()).toMatchObject({ phase: 'incoming', callId: 'f'.repeat(32), error: null });
+    e.endLocal();
+  });
+
+  it.each(['token lacks required scope: spend', { code: 'spend_refused', message: 'Owner grant required' }])('ends and releases media when signalling rejects: %s', async (error) => {
+    const local = stream();
+    const { e } = engine({ getUserMedia: async () => local, signal: async () => { throw error; } });
+    await e.place(A, 'audio', QUOTE);
+    expect(e.view()).toMatchObject({ phase: 'ended', error: typeof error === 'string' ? error : error.message });
+    expect(local.getTracks().every((t) => vi.mocked(t.stop).mock.calls.length === 1)).toBe(true);
+    expect(FakePc.made[FakePc.made.length - 1]?.closed).toBe(true);
+  });
 });
 
 describe('call signals', () => {
@@ -287,6 +329,7 @@ describe('call engine: review #74 fixes', () => {
     FakePc.made[0].state('closed');
     expect(a.last()).toMatchObject({ phase: 'ended', reason: 'failed' });
     setStunPref('');
+    setDenom('sats');
     FakePc.made = [];
     const b = engine();
     await b.e.receive(msg(400, { media: 'audio', sdp: 'v=0 offer' }), OWN);
@@ -366,6 +409,7 @@ describe('calls in the shell', () => {
   let mount: HTMLElement;
   beforeEach(() => {
     setStunPref('');
+    setDenom('sats');
     FakePc.made = [];
     vi.stubGlobal('RTCPeerConnection', FakePc);
     Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: async (c: MediaStreamConstraints) => stream(!!c.video) } });
@@ -386,6 +430,24 @@ describe('calls in the shell', () => {
     [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
     await vi.waitFor(() => expect($(`[data-track="peer:${A}"]`)?.getAttribute('aria-current')).toBe('true'));
   }
+
+  it('shows a host spend refusal and ends the call in the shell', async () => {
+    stubHost({ call_signal: () => { throw { code: 'spend_refused', message: 'token lacks required scope: spend' }; } });
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect(text('[data-call-ended]')).toBe('token lacks required scope: spend'));
+    expect($('[data-call-panel="calling"]')).toBeNull();
+    expect(FakePc.made[0].closed).toBe(true);
+  });
+
+  it.each([['sats', '21.381 sats'], ['btc', '0.00000021381 BTC']] as const)('uses the %s denomination for a fractional call quote', async (denomination, shown) => {
+    setDenom(denomination);
+    stubHost({ call_quote: () => ({ ...QUOTE, call_total_msat: 21_381 }) });
+    await openShell();
+    await vi.waitFor(() => expect($('[data-call="audio"]')!.getAttribute('aria-label')).toBe(`Call Maya, up to ${shown}`));
+    expect($('[data-call="video"]')!.getAttribute('title')).toContain(`Up to ${shown}:`);
+  });
 
   it('shows the all-in call price before calling, then pays one offer at that ceiling', async () => {
     const host = stubHost();

@@ -1,5 +1,4 @@
-// Display helpers. Sats are the unit people read; msat precision is kept when
-// a figure is not a whole sat: show exact integer msat, never a rounded price.
+// Display helpers. Keep msat precision in the selected denomination.
 // Denomination (sats vs BTC) follows the settings toggle — amounts stay msat.
 // Call sites must use amount() (or sats()+satUnit()); never append a unit literal.
 
@@ -11,9 +10,7 @@ const MSAT_PER_BTC = 100_000_000_000;
 /** Number only (no unit). BTC mode keeps every msat digit (up to 11 fractional places). */
 export function sats(msat: number): string {
   if (denom() === 'btc') return btc(msat);
-  // Fractional sats are displayed as exact integer msat. Decimal separators
-  // cannot be mistaken for thousands separators, even in another locale.
-  return satsWhole(msat % 1000 === 0 ? msat / 1000 : msat);
+  return (msat / 1000).toLocaleString(navigator.language, { maximumFractionDigits: 3 });
 }
 
 /**
@@ -32,10 +29,9 @@ export function btc(msat: number): string {
   return `${sign}${whole}.${frac}`;
 }
 
-/** `sat` / `sats` / `msat` / `BTC`, matching the number returned by sats(). */
+/** `sat` / `sats` / `BTC`, matching the number returned by sats(). */
 export const satUnit = (msat: number) => {
   if (denom() === 'btc') return 'BTC';
-  if (msat % 1000 !== 0) return 'msat';
   return msat === 1000 ? 'sat' : 'sats';
 };
 

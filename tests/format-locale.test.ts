@@ -4,9 +4,9 @@ import { setDenom } from '../src/control/prefs';
 
 afterEach(() => { vi.restoreAllMocks(); setDenom('sats'); });
 it.each([
-  ['da-DK', '188.800 sats', '21.187 msat', '11 msat', '1.019 msat'],
-  ['en-US', '188,800 sats', '21,187 msat', '11 msat', '1,019 msat'],
-])('formats exact amounts without fractional sats in %s', (locale, whole, call, tiny, price) => {
+  ['da-DK', '188.800 sats', '21,187 sats', '0,011 sats', '1,019 sats'],
+  ['en-US', '188,800 sats', '21.187 sats', '0.011 sats', '1.019 sats'],
+])('formats exact amounts in the chosen denomination in %s', (locale, whole, call, tiny, price) => {
   vi.spyOn(navigator, 'language', 'get').mockReturnValue(locale);
   setDenom('sats');
   expect(amount(188800000)).toBe(whole);

@@ -33,6 +33,21 @@ describe('app shell pairing wiring', () => {
     vi.unstubAllGlobals();
   });
 
+  it.each([
+    ['different node', 'cd'.repeat(32), false],
+    ['different connection mode', 'ab'.repeat(32), true],
+  ] as const)('requires a fresh trust disclosure for a %s', async (_case, nodeId, remote) => {
+    localStorage.setItem(`bitsov.trust.v1.local.${'ab'.repeat(32)}`, 'accepted');
+    vi.stubGlobal('__TAURI_INTERNALS__', { invoke: (cmd: string) => {
+      if (cmd === 'node_status') return Promise.resolve({ ready: true, node_id: nodeId, error: null });
+      if (cmd === 'pairing_status') return Promise.resolve({ ...paired, remote });
+      return Promise.reject(new Error('not available'));
+    } });
+    mount = document.createElement('div'); document.body.appendChild(mount);
+    dispose = render(() => <App />, mount);
+    await vi.waitFor(() => expect(mount!.querySelector(`[data-gate="g6-${remote ? 'remote' : 'local'}-trust"]`)).not.toBeNull());
+  });
+
   it.each([false, true])('renders the actual connection and trust boundary (remote=%s)', async (remote) => {
     const calls: string[] = [];
     vi.stubGlobal('__TAURI_INTERNALS__', {

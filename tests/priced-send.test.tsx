@@ -32,12 +32,12 @@ async function open(source: Source) {
 }
 it('shows the exact host-sourced cap separately from plain Send and reports actual paid', async () => {
   const source = sourceForSend(); await open(source);
-  await vi.waitFor(() => expect(line()).toBe('up to 9,750 msat · includes max routing fee'));
+  await vi.waitFor(() => expect(line()).toBe('up to 9.75 sats · includes max routing fee'));
   expect($('[data-send]').textContent).toBe('Send');
   $<HTMLButtonElement>('[data-send]').click();
-  await vi.waitFor(() => expect(line()).toBe('paid 2,250 msat'));
+  await vi.waitFor(() => expect(line()).toBe('paid 2.25 sats'));
   expect(vi.mocked(source.send).mock.calls[0].slice(0, 4)).toEqual([A, false, 'gm', 9750]);
-  type('next'); expect(line()).toBe('up to 9,750 msat · includes max routing fee');
+  type('next'); expect(line()).toBe('up to 9.75 sats · includes max routing fee');
 });
 it('never relabels a retained fee allowance as actual paid', async () => {
   const source = sourceForSend();
@@ -46,18 +46,18 @@ it('never relabels a retained fee allowance as actual paid', async () => {
   await vi.waitFor(() => expect(line()).toBe('paid amount unknown · routing fee not reported'));
 });
 it.each([
-  { fee: 375, readmission: undefined, ceiling: 7500, paid: '2,625' },
-  { fee: 0, readmission: undefined, ceiling: 7500, paid: '2,250' },
-  { fee: 375, readmission: 1000, ceiling: 7500, paid: '3,625' },
-  { fee: 0, readmission: 1000, ceiling: 7500, paid: '3,250' },
-  { fee: 375, readmission: undefined, ceiling: undefined, paid: '2,625' },
+  { fee: 375, readmission: undefined, ceiling: 7500, paid: '2.625' },
+  { fee: 0, readmission: undefined, ceiling: 7500, paid: '2.25' },
+  { fee: 375, readmission: 1000, ceiling: 7500, paid: '3.625' },
+  { fee: 0, readmission: 1000, ceiling: 7500, paid: '3.25' },
+  { fee: 375, readmission: undefined, ceiling: undefined, paid: '2.625' },
 ])('shows the proven fee $fee with readmission $readmission and ceiling $ceiling', async ({ fee, readmission, ceiling, paid }) => {
   const source = sourceForSend();
   source.send = vi.fn(async (recipient, isRoom) => ({ message_id: 'paid', recipient, is_room: isRoom,
     delivered: true, amount_msat: 2250, readmission_msat: readmission, fee_paid_msat: fee,
     max_routing_fee_msat: ceiling, total_msat: 9750, sent_at_ms: Date.now() }));
   await open(source); $<HTMLButtonElement>('[data-send]').click();
-  await vi.waitFor(() => expect(line()).toBe(`paid ${paid} msat`));
+  await vi.waitFor(() => expect(line()).toBe(`paid ${paid} sats`));
 });
 it('keeps the paid amount unknown for an older node omitting both fee fields', async () => {
   const source = sourceForSend();
@@ -95,10 +95,10 @@ it('ignores double-click and held Enter, including after a raised-price refusal'
 });
 it('restores the ceiling for an emoji-only new draft', async () => {
   const source = sourceForSend(); await open(source); $<HTMLButtonElement>('[data-send]').click();
-  await vi.waitFor(() => expect(line()).toBe('paid 2,250 msat'));
+  await vi.waitFor(() => expect(line()).toBe('paid 2.25 sats'));
   $<HTMLButtonElement>('[data-emoji]').click();
   $<HTMLButtonElement>('[data-emoji-pick]').click();
-  expect(line()).toBe('up to 9,750 msat · includes max routing fee');
+  expect(line()).toBe('up to 9.75 sats · includes max routing fee');
 });
 it('a late price refusal from A does not erase B’s price', async () => {
   const source = sourceForSend(); let finish!: () => void;
@@ -106,9 +106,9 @@ it('a late price refusal from A does not erase B’s price', async () => {
   await open(source); $<HTMLButtonElement>('[data-send]').click();
   await vi.waitFor(() => expect(source.send).toHaveBeenCalledTimes(1));
   $<HTMLButtonElement>(`[data-track="peer:${'b'.repeat(64)}"]`).click(); type('B draft');
-  await vi.waitFor(() => expect(line()).toBe('up to 9,750 msat · includes max routing fee'));
+  await vi.waitFor(() => expect(line()).toBe('up to 9.75 sats · includes max routing fee'));
   finish(); await vi.waitFor(() => expect($<HTMLButtonElement>('[data-send]').disabled).toBe(false));
-  expect(line()).toBe('up to 9,750 msat · includes max routing fee');
+  expect(line()).toBe('up to 9.75 sats · includes max routing fee');
 });
 it('ignores the second click of a double-click after a fast price-rise refusal', async () => {
   const source = sourceForSend();
@@ -158,7 +158,7 @@ it.each(['No route or channel to this peer yet.', 'Peer offline.', 'Quote unavai
   expect($<HTMLButtonElement>('[data-send]').disabled).toBe(true);
 });
 
-it.each([['da-DK', '9.750 msat'], ['en-US', '9,750 msat']])('uses exact locale-safe units under Send in %s', async (locale, price) => {
+it.each([['da-DK', '9,75 sats'], ['en-US', '9.75 sats']])('uses exact locale-safe units under Send in %s', async (locale, price) => {
   vi.spyOn(navigator, 'language', 'get').mockReturnValue(locale);
   await open(sourceForSend());
   await vi.waitFor(() => expect(line()).toBe(`up to ${price} · includes max routing fee`));

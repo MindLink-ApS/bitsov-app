@@ -134,6 +134,57 @@ describe('control center shell', () => {
     expect(new Set(calls.map((c) => c.cmd))).toEqual(new Set(['node_status', 'pairing_status', 'device_key_status']));
   });
 
+  it('keeps a spend approval refusal across status polls, then clears it on retry', async () => {
+    let reject = true;
+    stubHost({ spend_status: () => ({ state: 'expired', lapse: 'lost', basis: null, open_until_ms: null, pending: null, window_ms: 600_000 }), spend_request: () => {
+      if (reject) throw { code: 'node', message: '/pair/elevation-request failed (404)' };
+      return { state: 'pending', basis: null, open_until_ms: null, window_ms: 600_000,
+        pending: { op_id: 'op', expires_at_ms: Date.now() + 900_000, owner_action: 'grant op', owner_can_grant: true } };
+    } });
+    start();
+    await vi.waitFor(() => expect(mount.textContent).toContain('I understand'));
+    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
+    await vi.waitFor(() => expect(mount.querySelector('[data-spend-ask-again]')).not.toBeNull());
+    click('[data-spend-ask-again]');
+    await vi.waitFor(() => expect(mount.textContent).toContain('/pair/elevation-request failed (404)'));
+    await new Promise((resolve) => setTimeout(resolve, 3200));
+    expect(mount.textContent).toContain('/pair/elevation-request failed (404)');
+    reject = false;
+    click('[data-spend-ask-again]');
+    await vi.waitFor(() => expect(mount.textContent).not.toContain('/pair/elevation-request failed (404)'));
+  });
+
+  it('relaunches into the real shell with rc8 rooms after accepting trust for this node', async () => {
+    stubHost({ node_overview: () => ({ node_id: OWN, capabilities: ['room_binding_v1'], money_ready: true }) });
+    start();
+    await vi.waitFor(() => expect(mount.textContent).toContain('I understand'));
+    expect(mount.querySelector('.rail')?.textContent).not.toContain('does not support rooms');
+    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
+    await vi.waitFor(() => expect(mount.querySelector('[data-first-run]')).toBeNull());
+    dispose?.(); mount.remove();
+    start();
+    await vi.waitFor(() => expect(mount.querySelector('[data-first-run]')).toBeNull());
+    await vi.waitFor(() => expect(mount.querySelector('.rail')?.textContent).toContain('New room'));
+    expect(mount.querySelector('.rail')?.textContent).not.toContain('Available after setup');
+  });
+
+  it('keeps the acknowledged shell mounted through a transient node-status failure', async () => {
+    let failed = false;
+    stubHost({ node_status: () => { if (failed) throw new Error('temporarily unavailable'); return { ready: true, node_id: OWN, error: null }; } });
+    start();
+    await vi.waitFor(() => expect(mount.textContent).toContain('I understand'));
+    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
+    await vi.waitFor(() => expect(mount.querySelector('[data-first-run]')).toBeNull());
+    const shell = mount.querySelector('.cc');
+    failed = true;
+    await new Promise((resolve) => setTimeout(resolve, 1600));
+    expect(mount.querySelector('.cc')).toBe(shell);
+    failed = false;
+    await new Promise((resolve) => setTimeout(resolve, 1600));
+    expect(mount.querySelector('.cc')).toBe(shell);
+    expect(mount.querySelector('[data-first-run]')).toBeNull();
+  });
+
   it('offers Ask again when the node lost the pending request in a restart', async () => {
     const cmd = "konsensus grant --op ab02 --config '/Users/owner/node/konsensus.toml'";
     const { calls } = stubHost({
