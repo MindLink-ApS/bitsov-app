@@ -50,7 +50,7 @@ describe('quiet errors', () => {
     expect(mount.querySelector('button')).toBeNull();
   });
 
-  it.each(['budget_exhausted', 'budget_exhausted: connection refused'])('keeps the full budget stop visible: %s', raw => {
+  it.each(['budget_exhausted', 'budget_exhausted: connection refused', 'ceiling_exhausted', 'ceiling_exhausted: connection refused'])('keeps the full budget stop visible: %s', raw => {
     expect(softenError(raw)).toEqual({ summary: raw, detail: null, money: true });
     start(() => <SoftError message={raw} summary="Your node is unavailable." onReconnect={() => {}} />);
     expect(mount.querySelector('[data-soft-summary]')!.textContent).toBe(raw);

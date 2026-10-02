@@ -17,6 +17,7 @@ export type BalanceSplit = {
   /** Null means the node API does not provide this amount. */
   lightning: number | null;
   onchain: number | null;
+  onchainTotal: number | null;
   reserved: number | null;
   closing: number | null;
   contested: number | null;
@@ -32,6 +33,7 @@ export function splitBalance(w: WalletOverview): BalanceSplit {
       w.anchor_reserve_sats, w.closing_sats, w.contested_sats].some((value) => value != null),
     lightning: msat(w.lightning_spendable_sats),
     onchain: msat(w.onchain_spendable_sats),
+    onchainTotal: msat(w.onchain_total_sats),
     reserved: msat(w.anchor_reserve_sats),
     closing: msat(w.closing_sats),
     contested: msat(w.contested_sats),

@@ -213,6 +213,11 @@ export function WalletPage(props: {
                       <span class="split-amount">{s().lightning === null ? 'Unknown' : fmtAmount(s().lightning!)}</span>
                       <span class="hint">Outbound capacity, not a guarantee a payment of this size will route: routing fees, per-HTLC limits and remote liquidity still apply.</span>
                     </div>
+                    <div class="split" data-balance-onchain-total={s().onchainTotal ?? 'unknown'}>
+                      <span class="split-name">On-chain total</span>
+                      <span class="split-amount">{s().onchainTotal === null ? 'Unknown' : fmtAmount(s().onchainTotal!)}</span>
+                      <span class="hint">Total on-chain wallet funds, including unconfirmed funds and the anchor reserve.</span>
+                    </div>
                     <div class="split" data-balance-onchain={s().onchain ?? 'unknown'}>
                       <span class="split-name">On-chain spendable</span>
                       <span class="split-amount">{s().onchain === null ? 'Unknown' : fmtAmount(s().onchain!)}</span>

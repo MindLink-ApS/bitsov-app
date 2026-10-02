@@ -38,10 +38,10 @@ const msg = (id: string, kind: number, sender: string, recipient: string, paid: 
 
 describe('wallet: balance and channels in plain words', () => {
   it('keeps the node total without treating channel capacity or the remainder as spendable', () => {
-    expect(splitBalance(WALLET)).toEqual({ total: 480_000_000, hasBreakdown: false, lightning: null, onchain: null, reserved: null, closing: null, contested: null });
+    expect(splitBalance(WALLET)).toEqual({ total: 480_000_000, hasBreakdown: false, lightning: null, onchain: null, onchainTotal: null, reserved: null, closing: null, contested: null });
   });
   it.each([0, 200_000_000, 480_000_000])('preserves a reported total of %i even without a breakdown', (total) => {
-    expect(splitBalance({ ...WALLET, balance_msat: total })).toEqual({ total, hasBreakdown: false, lightning: null, onchain: null, reserved: null, closing: null, contested: null });
+    expect(splitBalance({ ...WALLET, balance_msat: total })).toEqual({ total, hasBreakdown: false, lightning: null, onchain: null, onchainTotal: null, reserved: null, closing: null, contested: null });
   });
   it('an open channel says what can be sent and received; an offline one says funds stay yours', () => {
     expect(channelWords(channel())).toMatchObject({ state: 'open', line: 'You can send up to 300,000 sats and receive up to 190,000 sats through it.' });
@@ -255,6 +255,7 @@ describe('the Wallet page', () => {
     expect(text('[data-balance-reserved] .split-amount')).toBe('Unknown');
     expect(text('[data-balance-closing] .split-amount')).toBe('Unknown');
     expect($('[data-balance-onchain]')).toBeNull();
+    expect($('[data-balance-onchain-total]')).toBeNull();
     expect($('[data-balance-lightning]')).toBeNull();
   });
 
@@ -267,6 +268,8 @@ describe('the Wallet page', () => {
     await openWallet();
     await vi.waitFor(() => expect(text('[data-balance-lightning] .split-amount')).toBe('210,000 sats'));
     expect(text('[data-balance-onchain] .split-amount')).toBe('90,000 sats');
+    expect(text('[data-balance-onchain-total] .split-name')).toBe('On-chain total');
+    expect(text('[data-balance-onchain-total] .split-amount')).toBe('130,000 sats');
     expect(text('[data-balance-reserved] .split-amount')).toBe('25,000 sats');
     expect(text('[data-balance-closing] .split-amount')).toBe('80,000 sats');
     expect(text('[data-balance-contested] .split-amount')).toBe('7,000 sats');
@@ -279,7 +282,7 @@ describe('the Wallet page', () => {
     expect(text('[data-balance-total]')).toBe('480,000sats');
     // These deliberately non-reconciling amounts must never become a second total.
     expect(text('[data-wallet-balance]')).not.toMatch(/387,000|412,000|452,000/);
-    expect(mount.querySelectorAll('.wallet-hero .split-amount')).toHaveLength(5);
+    expect(mount.querySelectorAll('.wallet-hero .split-amount')).toHaveLength(6);
     expect(moneyCalls(host)).toHaveLength(0);
   });
 
@@ -290,7 +293,7 @@ describe('the Wallet page', () => {
     }) });
     await openWallet();
     await vi.waitFor(() => expect(text('[data-balance-lightning] .split-amount')).toBe('0 sats'));
-    for (const category of ['onchain', 'reserved', 'closing']) {
+    for (const category of ['onchain', 'onchain-total', 'reserved', 'closing']) {
       expect(text(`[data-balance-${category}] .split-amount`)).toBe('0 sats');
     }
     expect($('[data-balance-contested]')).toBeNull();
@@ -305,6 +308,7 @@ describe('the Wallet page', () => {
     await openWallet();
     await vi.waitFor(() => expect(text('[data-balance-lightning] .split-amount')).toBe('Unknown'));
     expect(text('[data-balance-onchain] .split-amount')).toBe('Unknown');
+    expect(text('[data-balance-onchain-total] .split-amount')).toBe('onchain_total_sats' in fields ? '42 sats' : 'Unknown');
     expect(text('[data-balance-reserved] .split-amount')).toBe('Unknown');
     expect(text('[data-balance-closing] .split-amount')).toBe('closing_sats' in fields ? '42 sats' : 'Unknown');
     expect($('[data-balance-contested]')).toBeNull();
