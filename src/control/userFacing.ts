@@ -19,7 +19,7 @@ export function softenError(raw: unknown): SoftenedError {
 
   // Preserve the entire money warning. In particular, transport/address text
   // inside an unknown or settled outcome must not turn it into a connection error.
-  if (/\b(?:payment|spend)_[a-z_]+\b|\b(?:failed_paid|undelivered_pending|price_cap_exceeded|budget_exceeded|budget_exhausted)\b|\b(?:paid|charged|settled)\b|\b(?:payment|spend)(?: status| outcome)? (?:is )?(?:unknown|refused|failed|uncertain)\b/i.test(m)) {
+  if (/\b(?:payment|spend)_[a-z_]+\b|\b(?:failed_paid|undelivered_pending|price_cap_exceeded|budget_exceeded|budget_exhausted|ceiling_exhausted)\b|\b(?:paid|charged|settled)\b|\b(?:payment|spend)(?: status| outcome)? (?:is )?(?:unknown|refused|failed|uncertain)\b/i.test(m)) {
     return { summary: m.replace(/\b(payment_refused|spend_unknown|payment_unknown|payment_settled_undelivered)\b/g, code => code.replace(/_/g, ' ')), detail: null, money: true };
   }
 
