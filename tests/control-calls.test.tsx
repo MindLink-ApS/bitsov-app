@@ -1,3 +1,4 @@
+import { setStunPref } from '../src/control/prefs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'solid-js/web';
 import App from '../src/App';
@@ -285,6 +286,7 @@ describe('call engine: review #74 fixes', () => {
     await a.e.receive(msg(401, { sdp: 'v=0 answer' }), OWN);
     FakePc.made[0].state('closed');
     expect(a.last()).toMatchObject({ phase: 'ended', reason: 'failed' });
+    setStunPref('');
     FakePc.made = [];
     const b = engine();
     await b.e.receive(msg(400, { media: 'audio', sdp: 'v=0 offer' }), OWN);
@@ -363,6 +365,7 @@ describe('calls in the shell', () => {
   let dispose: (() => void) | undefined;
   let mount: HTMLElement;
   beforeEach(() => {
+    setStunPref('');
     FakePc.made = [];
     vi.stubGlobal('RTCPeerConnection', FakePc);
     Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: async (c: MediaStreamConstraints) => stream(!!c.video) } });
@@ -402,6 +405,16 @@ describe('calls in the shell', () => {
     expect(args).toMatchObject({ peer: A, kind: 400, max_msat: 15_000 });
     expect(JSON.parse(args.plaintext as string)).toMatchObject({ v: 1, media: 'audio', sdp: 'v=0 offer' });
     expect(text('[data-call-paid]')).toMatch(/Paid 15 sats/);
+  });
+
+  it.each(['', 'stun:owner.example:3478'])('shows a visible cross-network note only without configured STUN (%s)', async (stun) => {
+    setStunPref(stun);
+    stubHost();
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    const note = $('[data-call-network-note]');
+    if (stun) expect(note).toBeNull();
+    else expect(note?.textContent).toMatch(/calls may not connect across networks/i);
   });
 
   it('rings on a live offer with the answer price, and never adds call signals to the thread', async () => {

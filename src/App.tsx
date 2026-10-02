@@ -24,7 +24,6 @@ import type { DeviceView, FundingAddress, FundState } from './control/types';
 // straight to the host, and cleared the moment it is submitted.
 
 const DEFAULT_FUNDING_SATS = 50_000;
-const sats = (value: number) => value.toLocaleString('en-US');
 // The Wallet panel shows the node balance; this block is deposit-only.
 const short = (id: string) => (id.length > 20 ? `${id.slice(0, 8)}…${id.slice(-8)}` : id);
 

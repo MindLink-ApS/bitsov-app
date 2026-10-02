@@ -318,11 +318,21 @@ describe('rooms in the shell', () => {
     t.dispatchEvent(new InputEvent('input', { bubbles: true }));
   };
 
+  it.each([true, false])('Start and sidebar describe the node rooms capability (%s)', async (supported) => {
+    stubHost({ node_overview: () => overview(supported ? ['room_binding_v1'] : []) });
+    await openShell();
+    click('[data-track="new"]');
+    await vi.waitFor(() => expect($('[data-new-track]')).not.toBeNull());
+    expect(mount.textContent).not.toMatch(/coming soon|not on the protocol/i);
+    expect(mount.textContent?.includes('This node does not support rooms yet.')).toBe(!supported);
+    expect($('[data-room-new]') !== null).toBe(supported);
+  });
+
   it('keeps the coming-soon line (and no New room) while our node does not check room bindings', async () => {
     stubHost({ node_overview: () => overview(['call_meeting_v1']) });
     await openShell();
     await vi.waitFor(() => expect($('[data-rooms-coming-soon]')).not.toBeNull());
-    expect(text('[data-rooms-coming-soon]')).toMatch(/Coming soon/);
+    expect(text('[data-rooms-coming-soon]')).toMatch(/This node does not support rooms yet/);
     expect($('[data-room-new]')).toBeNull();
   });
 
@@ -574,8 +584,8 @@ describe('rooms in the shell', () => {
     expect(host.used('message_send')).toHaveLength(1);
     expect($(`[data-room-leg="${A}"]`)!.getAttribute('data-leg-state')).toBe('undelivered');
     expect($('[data-room-send-msat]')!.getAttribute('data-room-send-msat')).toBe('2500');
-    expect(text(`[data-room-leg="${A}"]`)).toMatch(/up to 2\.5 sats \(2\.1 sats to them, plus a network fee\)/);
-    expect(text('[data-room-send] .kind')).toMatch(/up to 2\.5 sats in all/);
+    expect(text(`[data-room-leg="${A}"]`)).toMatch(/up to 2,500 msat \(2,100 msat to them, plus a network fee\)/);
+    expect(text('[data-room-send] .kind')).toMatch(/up to 2,500 msat in all/);
   });
 
   it('a room chat with legal leading JSON whitespace goes to its room, never the direct chat, and stays hidden after Leave', async () => {

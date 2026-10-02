@@ -38,10 +38,10 @@ const msg = (id: string, kind: number, sender: string, recipient: string, paid: 
 
 describe('wallet: balance and channels in plain words', () => {
   it('keeps the node total without treating channel capacity or the remainder as spendable', () => {
-    expect(splitBalance(WALLET)).toEqual({ total: 480_000_000, hasBreakdown: false, lightning: null, onchain: null, onchainTotal: null, reserved: null, closing: null, contested: null });
+    expect(splitBalance(WALLET)).toEqual({ total: 480_000_000, hasBreakdown: false, pending: null, lightning: null, onchain: null, onchainTotal: null, reserved: null, closing: null, contested: null });
   });
   it.each([0, 200_000_000, 480_000_000])('preserves a reported total of %i even without a breakdown', (total) => {
-    expect(splitBalance({ ...WALLET, balance_msat: total })).toEqual({ total, hasBreakdown: false, lightning: null, onchain: null, onchainTotal: null, reserved: null, closing: null, contested: null });
+    expect(splitBalance({ ...WALLET, balance_msat: total })).toEqual({ total, hasBreakdown: false, pending: null, lightning: null, onchain: null, onchainTotal: null, reserved: null, closing: null, contested: null });
   });
   it('an open channel says what can be sent and received; an offline one says funds stay yours', () => {
     expect(channelWords(channel())).toMatchObject({ state: 'open', line: 'You can send up to 300,000 sats and receive up to 190,000 sats through it.' });
@@ -257,6 +257,23 @@ describe('the Wallet page', () => {
     expect($('[data-balance-onchain]')).toBeNull();
     expect($('[data-balance-onchain-total]')).toBeNull();
     expect($('[data-balance-lightning]')).toBeNull();
+  });
+
+  it.each([
+    [{ onchain_total_sats: 190804, onchain_spendable_sats: 2004 }, '188,800 sats pending'],
+    [{ onchain_pending_sats: 188800 }, '188,800 sats pending'],
+    [{ onchain_pending_sats: 0, onchain_total_sats: 190804, onchain_spendable_sats: 2004 }, '0 sats pending'],
+    [{ onchain_total_sats: 190804 }, 'Pending on-chain: Unknown'],
+    [{ onchain_spendable_sats: 2004 }, 'Pending on-chain: Unknown'],
+    [{ onchain_total_sats: 1000, onchain_spendable_sats: 2004 }, 'Pending on-chain: Unknown'],
+    [{}, 'Pending on-chain: Unknown'],
+  ])('keeps pending funds separate from the headline: %j', async (fields, pending) => {
+    stubHost({ payments_overview: () => ({ ...WALLET, balance_msat: 2004000, ...fields }) });
+    await openWallet();
+    await vi.waitFor(() => expect(text('[data-balance-total]')).toBe('2,004sats'));
+    expect(text('[data-balance-pending]')).toBe(pending);
+    if ('onchain_pending_sats' in fields) expect(text('[data-wallet-basis]')).not.toContain('one total');
+    expect($('[data-balance-pending]')?.closest('[data-wallet-balance]')).not.toBeNull();
   });
 
   it('shows independent node categories with overlap and routing limits, without a derived total', async () => {

@@ -67,13 +67,13 @@ describe('M2 UI sweep', () => {
     const heads = [...mount.querySelectorAll('.track-group h2')].map((h) => h.textContent);
     expect(heads).toContain('Browse');
     expect(heads).not.toContain('Discover');
-    expect($('[data-rooms-coming-soon]')!.textContent).toMatch(/Coming soon/);
+    expect($('[data-rooms-coming-soon]')!.textContent).toMatch(/This node does not support rooms yet/);
     expect($('[data-track="porch"]')!.textContent).toContain('Porch');
     const roomBtn = mount.querySelector<HTMLButtonElement>('[data-track^="room:"]');
     if (roomBtn) {
       roomBtn.click();
       await vi.waitFor(() => expect($('[data-room-day-notice]')).not.toBeNull());
-      expect($('[data-room-day-notice]')!.textContent).toMatch(/Coming soon — group chat is not on the protocol yet/);
+      expect($('[data-room-day-notice]')!.textContent).toMatch(/This node does not support rooms yet/);
     }
   });
 

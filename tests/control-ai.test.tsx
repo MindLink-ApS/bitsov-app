@@ -658,7 +658,7 @@ describe('the AI track', () => {
   it('does not offer a payment prefill for a decimal amount', async () => {
     const host = stubHost();
     await openAi();
-    ask('Pay Josh 1.50 sats');
+    ask('Pay Josh 1,500 msat');
     await vi.waitFor(() => expect($('[data-ai-answer="answered"]')).not.toBeNull());
     expect($('[data-ai-prefill]')).toBeNull();
     for (const cmd of ['payment_pay', 'payment_keysend', 'spend_request']) expect(host.used(cmd)).toHaveLength(0);

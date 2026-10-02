@@ -870,6 +870,7 @@ button.small:not(.primary) { font-size: var(--t-xs); padding: 4px 10px; backgrou
 .porch-held { margin-top: var(--s-5); }
 
 /* ---- calls (regtest prototype) ---- */
+.track > .call-network-note { margin: var(--s-2) var(--s-6); }
 .call-buttons { display: flex; gap: var(--s-2); flex: none; }
 .call-button { font-size: var(--t-sm); padding: 4px 10px; }
 .call-button.icon-btn { width: 34px; height: 34px; padding: 0; border: none; border-radius: 50%; background: transparent; color: var(--muted); }

@@ -35,11 +35,11 @@ describe('denomination formatting', () => {
     expect(btc(100_000_000_000)).toBe('1');
     expect(btc(100_000_000_001)).toBe('1.00000000001');
     setDenom('sats');
-    expect(sats(500)).toBe('0.5');
-    expect(sats(1500)).toBe('1.5');
-    expect(sats(999)).toBe('0.999');
-    expect(sats(12_345)).toBe('12.345');
-    expect(sats(99_999_999_500)).toBe('99,999,999.5');
+    expect(sats(500)).toBe('500');
+    expect(sats(1500)).toBe('1,500');
+    expect(sats(999)).toBe('999');
+    expect(sats(12_345)).toBe('12,345');
+    expect(sats(99_999_999_500)).toBe('99,999,999,500');
   });
 });
 
@@ -116,7 +116,7 @@ describe('settings modal + theme', () => {
   it('marks Rooms as coming soon while still listing any existing sample rooms', async () => {
     start();
     await vi.waitFor(() => expect(mount.querySelector('[data-rooms-coming-soon]')).not.toBeNull());
-    expect(mount.querySelector('[data-rooms-coming-soon]')!.textContent).toMatch(/Coming soon/);
+    expect(mount.querySelector('[data-rooms-coming-soon]')!.textContent).toMatch(/This node does not support rooms yet/);
   });
 
   it('moves focus into settings and closes on Escape', async () => {

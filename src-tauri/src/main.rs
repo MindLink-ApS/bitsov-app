@@ -2036,7 +2036,9 @@ async fn first_contact_quote(
 
 async fn read_first_contact_quote(state: &NodeState, peer: &str) -> Result<control::FirstContactQuote, String> {
     let peer = control::node_id(peer)?;
-    if !node_offers(state, grant::FIRST_CONTACT_CAPABILITY).await {
+    let status: serde_json::Value = get_json(state, "/status").await?;
+    if !status["api_capabilities"].as_array().is_some_and(|caps|
+        caps.iter().any(|v| v.as_str() == Some(grant::FIRST_CONTACT_CAPABILITY))) {
         return Err("This node cannot quote a first contact before paying.".into());
     }
     let path = "/messages/first-contact/quote";
@@ -4010,7 +4012,8 @@ struct SendCaps {
 
 async fn require_price_caps(state: &NodeState, room: bool) -> Result<SendCaps, ActionError> {
     let unavailable = || ActionError::new("price_cap_unavailable", "This node cannot enforce your confirmed spending ceiling. Upgrade the node before sending messages or files.");
-    let status: serde_json::Value = get_json(state, "/status").await.map_err(|_| unavailable())?;
+    let status: serde_json::Value = get_json(state, "/status").await.map_err(|reason|
+        ActionError::new("price_quote_unavailable", format!("Node capabilities unavailable: {reason}")))?;
     let capabilities = status["api_capabilities"].as_array().ok_or_else(unavailable)?;
     let has = |cap: &str| capabilities.iter().any(|v| v.as_str() == Some(cap));
     if !has("paid_send_caps_v1") || (room && !has("room_terminal_outcomes_v1")) {
@@ -4032,13 +4035,9 @@ const OPERATIONS_CAPABILITY: &str = "message_operations_v1";
 async fn require_conversation_ceiling(state: &NodeState, peer: &str) -> Result<(), ActionError> {
     let peer = control::node_id(peer).map_err(ActionError::invalid)?;
     require_price_caps(state, false).await?;
-    if !has_all_in_caps(state) {
-        let _ = read_first_contact_quote(state, &peer).await;
-    }
-    if !has_all_in_caps(state) {
-        return Err(ActionError::new("price_cap_unavailable", "Upgrade the node to enforce an all-in message ceiling."));
-    }
-    Ok(())
+    if has_all_in_caps(state) { return Ok(()); }
+    let probe = read_first_contact_quote(state, &peer).await.map(|_| ());
+    control::conversation_ceiling_evidence(has_all_in_caps(state), probe)
 }
 
 async fn read_conversation_quote(state: &NodeState, peer: Option<&str>) -> Result<control::PriceQuote, String> {
@@ -10010,7 +10009,7 @@ mod control_act_tests {
         do_message_send(s, A, false, "two", 7000, None).await.unwrap();
         let err = do_message_send(s, A, false, "three", 7000, None).await.unwrap_err();
         assert_eq!(err.code, "budget_exhausted");
-        assert!(err.message.contains("used 4 of 10 sats"), "{}", err.message);
+        assert!(err.message.contains("used 4 sats of 10 sats"), "{}", err.message);
         // A cap above what is left is refused too, not trimmed.
         assert_eq!(do_message_send(s, A, false, "big", 6001, None).await.unwrap_err().code, "budget_exhausted");
         assert_eq!(composes(&node), 2);
@@ -11567,7 +11566,7 @@ mod control_act_tests {
         *g1.grant.lock().unwrap() = g1_grant(3600, 400_000, 1_500);
         let err = do_message_send(&node.state, A, false, "gm", 7000, None).await.unwrap_err();
         assert_eq!(err.code, "grant_exhausted");
-        assert!(err.message.contains("1.500 sats left"), "{}", err.message);
+        assert!(err.message.contains("1500 msat left"), "{}", err.message);
         let mut per_call = g1_grant(3600, 400_000, 400_000);
         per_call["per_call_max_msat"] = 1000.into();
         *g1.grant.lock().unwrap() = per_call;

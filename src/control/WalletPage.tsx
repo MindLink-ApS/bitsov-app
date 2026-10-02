@@ -185,6 +185,9 @@ export function WalletPage(props: {
                 <span class="wallet-total" data-balance-total={s().total}>
                   {sats(s().total)}<span class="unit">{satUnit(s().total)}</span>
                 </span>
+                <span class="hint" data-balance-pending={s().pending ?? 'unknown'}>
+                  {s().pending === null ? 'Pending on-chain: Unknown' : `${fmtAmount(s().pending!)} pending`}
+                </span>
                 <Show when={s().hasBreakdown} fallback={<>
                   <div class="wallet-split">
                     <div class="split" data-balance-spendable="unknown">

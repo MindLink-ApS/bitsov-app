@@ -175,6 +175,7 @@ export type WalletOverview = {
   lightning_spendable_sats?: number | null;
   onchain_spendable_sats?: number | null;
   onchain_total_sats?: number | null;
+  onchain_pending_sats?: number | null;
   anchor_reserve_sats?: number | null;
   closing_sats?: number | null;
   contested_sats?: number | null;

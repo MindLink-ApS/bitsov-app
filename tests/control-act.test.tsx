@@ -160,7 +160,7 @@ describe('acting from the track', () => {
     submit();
     await vi.waitFor(() => expect(host.used('message_send')).toHaveLength(1));
     expect(host.used('message_send')[0].args).toEqual({ recipient: A, is_room: false, plaintext: 'gm Maya', max_msat: 2000, max_recipient_msat: null, first_contact_msat: null });
-    await vi.waitFor(() => expect(text('[data-message="sent-1"] .stamp .sats')).toBe('2'));
+    await vi.waitFor(() => expect(text('[data-message="sent-1"] .stamp .sats')).toBe('2 sats'));
     expect(text('[data-message="sent-1"] .stamp')).toContain('sats all-in ceiling');
     expect(text('[data-message="sent-1"] [data-delivery]').trim()).toBe('Sent');
     expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('');
@@ -329,7 +329,7 @@ describe('acting from the track', () => {
     expect(text('[data-readmission-quote]')).toContain('Maya asks for admission again, 1 sat. Nothing was paid.');
     expect(text('[data-readmission-quote]')).toContain('13 sats in all');
     expect($('[data-cost-msat]')!.getAttribute('data-cost-msat')).toBe('13000');
-    expect(text('[data-cost]')).toContain('Maya asks for admission again: 1 sat, then 2 for this message');
+    expect(text('[data-cost]')).toContain('Maya asks for admission again: 1 sat, then 2 sats for this message');
     expect($('[data-artifact="failed"]'), 'an ask, not a failure').toBeNull();
     expect($('[data-door="out-refused"]')).toBeNull();
     expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value, 'the draft stays').toBe('after the restart');
