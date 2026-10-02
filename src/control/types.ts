@@ -569,6 +569,8 @@ export type NodeGrantSummary = {
 
 /** `message_send`. */
 export type SendReceipt = {
+  /** Proven routing fee for a settled payment; absent when unknown or unsupported. */
+  fee_paid_msat?: number;
   total_msat?: number;
   max_routing_fee_msat?: number;
   message_id: string;
@@ -619,6 +621,8 @@ export type InvoiceAmount = {
 /** `invoice_status`: an invoice we issued, as the node reports it. Read only. */
 export type InvoiceStatus = { state: 'paid' | 'waiting' | 'failed' | 'unknown'; amount_msat: number | null };
 export type PaymentReceipt = {
+  /** Proven routing fee for a settled payment; absent when unknown or unsupported. */
+  fee_paid_msat?: number;
   max_routing_fee_msat?: number;
   method: 'invoice' | 'keysend';
   amount_msat: number;

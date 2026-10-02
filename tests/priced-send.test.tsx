@@ -45,6 +45,27 @@ it('never relabels a retained fee allowance as actual paid', async () => {
   await open(source); $<HTMLButtonElement>('[data-send]').click();
   await vi.waitFor(() => expect(line()).toBe('paid amount unknown · routing fee not reported'));
 });
+it.each([
+  { fee: 375, readmission: undefined, ceiling: 7500, paid: '2.625' },
+  { fee: 0, readmission: undefined, ceiling: 7500, paid: '2.25' },
+  { fee: 375, readmission: 1000, ceiling: 7500, paid: '3.625' },
+  { fee: 0, readmission: 1000, ceiling: 7500, paid: '3.25' },
+  { fee: 375, readmission: undefined, ceiling: undefined, paid: '2.625' },
+])('shows the proven fee $fee with readmission $readmission and ceiling $ceiling', async ({ fee, readmission, ceiling, paid }) => {
+  const source = sourceForSend();
+  source.send = vi.fn(async (recipient, isRoom) => ({ message_id: 'paid', recipient, is_room: isRoom,
+    delivered: true, amount_msat: 2250, readmission_msat: readmission, fee_paid_msat: fee,
+    max_routing_fee_msat: ceiling, total_msat: 9750, sent_at_ms: Date.now() }));
+  await open(source); $<HTMLButtonElement>('[data-send]').click();
+  await vi.waitFor(() => expect(line()).toBe(`paid ${paid} sats`));
+});
+it('keeps the paid amount unknown for an older node omitting both fee fields', async () => {
+  const source = sourceForSend();
+  source.send = vi.fn(async (recipient, isRoom) => ({ message_id: 'paid', recipient, is_room: isRoom,
+    delivered: true, amount_msat: 2250, sent_at_ms: Date.now() }));
+  await open(source); $<HTMLButtonElement>('[data-send]').click();
+  await vi.waitFor(() => expect(line()).toBe('paid amount unknown · routing fee not reported'));
+});
 it.each(['loading', 'failed', 'missing', 'stale', 'fee'] as const)('disables send with an honest reason when price is %s', async (state) => {
   const source = sourceForSend();
   source.priceQuote = () => state === 'loading' ? new Promise(() => {}) : state === 'failed' ? Promise.reject('price read failed') : Promise.resolve({ ...quote, ...(state === 'missing' ? { peer_msat: null } : state === 'stale' ? { peer_stale: true } : { max_routing_fee_msat: undefined }) });

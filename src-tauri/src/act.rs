@@ -686,6 +686,9 @@ pub struct CallReceipt {
 /// `compose` and `files/:id/send` response, and `GET /messages/operations/{id}`.
 #[derive(Deserialize, Debug)]
 pub struct SendReply {
+    /// Proven routing fee for a settled payment; absent when the node cannot report it.
+    #[serde(default)]
+    pub fee_paid_msat: Option<u64>,
     #[serde(default)]
     pub max_routing_fee_msat: u64,
     #[serde(default)]
@@ -791,6 +794,8 @@ impl SendReply {
 /// What a send shows in the stream, straight after it returns.
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct SendReceipt {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fee_paid_msat: Option<u64>,
     pub total_msat: u64,
     pub max_routing_fee_msat: u64,
     pub message_id: String,
@@ -1065,6 +1070,8 @@ pub fn keysend_body(dest_pubkey: &str, amount_msat: u64, memo: Option<&str>) -> 
 #[derive(Deserialize, Debug)]
 pub struct PayReply {
     #[serde(default)]
+    pub fee_paid_msat: Option<u64>,
+    #[serde(default)]
     pub max_routing_fee_msat: u64,
     pub amount_msat: u64,
     #[serde(default)]
@@ -1075,6 +1082,8 @@ pub struct PayReply {
 #[derive(Deserialize, Debug)]
 pub struct KeysendReply {
     #[serde(default)]
+    pub fee_paid_msat: Option<u64>,
+    #[serde(default)]
     pub max_routing_fee_msat: u64,
     pub amount_msat: u64,
     pub status: String,
@@ -1083,6 +1092,9 @@ pub struct KeysendReply {
 /// A payment as the stream shows it. No hash, no preimage.
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct PaymentReceipt {
+    /// Proven routing fee, independent of the allowance. Missing stays missing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fee_paid_msat: Option<u64>,
     pub max_routing_fee_msat: u64,
     /// `invoice` or `keysend`.
     pub method: &'static str,
@@ -1096,6 +1108,7 @@ impl PayReply {
     pub fn receipt(self, now_ms: u64) -> PaymentReceipt {
         PaymentReceipt {
             method: "invoice",
+            fee_paid_msat: self.fee_paid_msat,
             max_routing_fee_msat: self.max_routing_fee_msat,
             amount_msat: self.amount_msat,
             // The node returns once the payment resolves; an empty preimage
@@ -1111,6 +1124,7 @@ impl KeysendReply {
         let status = self.status.to_ascii_lowercase();
         PaymentReceipt {
             method: "keysend",
+            fee_paid_msat: self.fee_paid_msat,
             max_routing_fee_msat: self.max_routing_fee_msat,
             amount_msat: self.amount_msat,
             status: match status.as_str() {
