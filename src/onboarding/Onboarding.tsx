@@ -1,3 +1,4 @@
+import { SoftError } from '../control/SoftError';
 import { createSignal, For, Match, Show, Switch } from 'solid-js';
 import { onboardingSteps, scopeList, type NodeStatus, type PairingView } from './pairing';
 import type { DeviceView } from '../control/types';
@@ -286,14 +287,7 @@ export function Onboarding(props: {
         <Match when={props.pairing().state === 'failed'}>
           <div class="panel pairing error" data-pairing="failed">
             <h2>Pairing failed</h2>
-            <code>{props.pairing().reason}</code>
-            <p class="hint">
-              The app did not fall back to the older unpaired login. Check that your node is
-              the one this app started, then retry.
-            </p>
-            <button class="primary" onClick={() => props.onRetry()}>
-              Retry pairing
-            </button>
+            <SoftError message={props.pairing().reason ?? 'Pairing failed.'} summary="We could not pair this app with your node." detailNote="The app did not fall back to the older unpaired login. Check that your node is the one this app started, then reconnect." onReconnect={props.onRetry} />
           </div>
         </Match>
 
@@ -332,7 +326,7 @@ export function Onboarding(props: {
           <p class="ok-note">{importResult()}</p>
         </Show>
         <Show when={importError()}>
-          <p class="err-note">{importError()}</p>
+          <SoftError message={importError()!} />
         </Show>
       </form>
     </section>

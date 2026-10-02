@@ -246,7 +246,7 @@ pub struct NodeStatusResponse {
 // signatures are not in these node shapes and are not accepted if they appear.
 
 /// Capabilities the renderer may act on. Anything else the node lists is dropped.
-pub const KNOWN_CAPABILITIES: &[&str] = &["energy_v1", "membrane_v1", "call_meeting_v1", "room_binding_v1", "porch_read_v1"];
+pub const KNOWN_CAPABILITIES: &[&str] = &["energy_v1", "membrane_v1", "call_meeting_v1", "room_binding_v1", "porch_read_v1", "front_door_v1"];
 
 pub fn known_capabilities(listed: &[String]) -> Vec<String> {
     KNOWN_CAPABILITIES
@@ -1049,6 +1049,22 @@ mod tests {
                 assert_eq!(projected["readiness"]["events"][0]["timestamp"], 1725000000u64);
             }
         }
+    }
+
+    #[test]
+    fn overview_preserves_advertised_front_door_and_filters_unknown_capabilities() {
+        let status = serde_json::from_value(serde_json::json!({
+            "status": "ok", "node_id": "x",
+            "api_capabilities": ["unknown_future_v1", "front_door_v1", "front_door_v1"]
+        })).unwrap();
+        let projected = serde_json::to_value(NodeOverview::from_status(status, 123)).unwrap();
+        assert_eq!(projected["capabilities"], serde_json::json!(["front_door_v1"]));
+
+        let status = serde_json::from_value(serde_json::json!({
+            "status": "ok", "node_id": "x", "api_capabilities": ["unknown_future_v1"]
+        })).unwrap();
+        let projected = serde_json::to_value(NodeOverview::from_status(status, 123)).unwrap();
+        assert_eq!(projected["capabilities"], serde_json::json!([]));
     }
 
     #[test]

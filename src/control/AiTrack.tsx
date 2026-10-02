@@ -1,3 +1,5 @@
+import { SoftError } from './SoftError';
+import { DelayedSpinner } from './DelayedSpinner';
 // "Ask your node": the AI track in the main window.
 //
 // The app is the broker. A question becomes a topic; the host reads it through
@@ -417,9 +419,7 @@ export function AiTrack(props: {
                 </div>
               </Show>
               <Show when={localError()}>
-                <p class="err-note" data-ai-own-error>
-                  {localError()}
-                </p>
+                <div data-ai-own-error><SoftError message={localError()!} /></div>
               </Show>
             </div>
           </details>
@@ -618,7 +618,7 @@ function TurnView(props: {
       <Match when={t().state === 'reading'}>
         <div class="ai-answer" data-ai-answer="reading">
           <div class="bubble ai-thinking">
-            <span class="spinner small" />{' '}
+            <DelayedSpinner small />{' '}
             {t().provider === 'local' && !t().disclosure && !t().topic
               ? 'Reading your node…'
               : 'Preparing the preview. Nothing is sent…'}
@@ -627,7 +627,7 @@ function TurnView(props: {
       </Match>
       <Match when={t().state === 'error'}>
         <div class="ai-answer" data-ai-answer="error">
-          <div class="bubble err-note">{t().error}</div>
+          <SoftError class="bubble soft-error" message={t().error ?? 'The answer is unavailable.'} />
         </div>
       </Match>
       <Match when={t().state === 'no-read'}>

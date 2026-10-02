@@ -5,8 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build",
-    "test": "vitest run",
+    "build": "tsc --noEmit && vite build --configLoader runner",
+    "test": "vitest run --configLoader runner",
     "preview": "vite preview",
     "authority": "scripts/authority-check.sh",
     "smoke:cs1": "scripts/cs1-local-smoke.sh",

@@ -1,3 +1,5 @@
+import { SoftError } from './SoftError';
+import { DelayedSpinner } from './DelayedSpinner';
 /**
  * The Wallet page: full screen from the avatar menu. Node-reported balance and
  * spendability, Receive, Send, Channels and Activity.
@@ -177,7 +179,7 @@ export function WalletPage(props: {
       <div class="wallet-body">
         <section class="wallet-hero" data-wallet-balance>
           <span class="label">Node-reported total</span>
-          <Show when={split()} fallback={<Show when={!props.walletError} fallback={<p class="err-note">{props.walletError}</p>}><div class="spinner" /></Show>}>
+          <Show when={split()} fallback={<Show when={!props.walletError} fallback={<SoftError message={props.walletError!} data="wallet-read" onReconnect={props.onRefresh} />}><DelayedSpinner /></Show>}>
             {(s) => (
               <>
                 <span class="wallet-total" data-balance-total={s().total}>
@@ -309,7 +311,7 @@ function ActivityView(props: {
         <span>Received <strong data-activity-in={totals().in}>{fmtAmount(totals().in)}</strong></span>
         <span>Sent <strong data-activity-out={totals().out}>{fmtAmount(totals().out)}</strong></span>
       </p>
-      <Show when={!loading() || shown().length > 0} fallback={<div class="spinner" />}>
+      <Show when={!loading() || shown().length > 0} fallback={<DelayedSpinner />}>
         <ul class="wallet-list" data-activity-list>
           <For each={shown()} fallback={<li class="empty hint" data-activity-empty>Nothing here yet.</li>}>
             {(a, i) => {
@@ -352,7 +354,7 @@ function ChannelsView(props: { wallet: WalletOverview | null; nameOf: (id: strin
   const canReceive = () => open().reduce((s, c) => s + c.remote_balance_msat, 0);
   return (
     <section class="wallet-panel" data-wallet-channels>
-      <Show when={props.wallet} fallback={<div class="spinner" />}>
+      <Show when={props.wallet} fallback={<DelayedSpinner />}>
         <p class="wallet-totals" data-channels-summary>
           <span>{open().length} of {channels().length} open</span>
           <span>You can send <strong>{fmtAmount(canSend())}</strong></span>
@@ -459,8 +461,8 @@ function ReceiveView(props: { moneyBlocked: boolean; actions: WalletActions; rea
               when={address()}
               fallback={
                 <Show when={!props.moneyBlocked} fallback={<p class="hint">Your node is not ready to give an address yet.</p>}>
-                  <Show when={addressError()} fallback={<div class="spinner" />}>
-                    <p class="err-note" data-receive-error>Your node has no address to show. It said: {addressError()}</p>
+                  <Show when={addressError()} fallback={<DelayedSpinner />}>
+                    <div data-receive-error><SoftError message={addressError()!} summary="Your node has no address to show." /></div>
                   </Show>
                 </Show>
               }
