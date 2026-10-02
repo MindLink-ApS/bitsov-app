@@ -183,26 +183,61 @@ export function WalletPage(props: {
                 <span class="wallet-total" data-balance-total={s().total}>
                   {sats(s().total)}<span class="unit">{satUnit(s().total)}</span>
                 </span>
-                <div class="wallet-split">
-                  <div class="split" data-balance-spendable={s().spendable ?? 'unknown'}>
-                    <span class="split-name">Spendable</span>
-                    <span class="split-amount">{s().spendable === null ? 'Unknown' : fmtAmount(s().spendable!)}</span>
-                    <span class="hint">Funds available to spend, excluding reserves and locked funds.</span>
+                <Show when={s().hasBreakdown} fallback={<>
+                  <div class="wallet-split">
+                    <div class="split" data-balance-spendable="unknown">
+                      <span class="split-name">Spendable</span>
+                      <span class="split-amount">Unknown</span>
+                      <span class="hint">Funds available to spend, excluding reserves and locked funds.</span>
+                    </div>
+                    <div class="split" data-balance-reserved="unknown">
+                      <span class="split-name">Reserved (channel fee reserve)</span>
+                      <span class="split-amount">Unknown</span>
+                      <span class="hint">Held back for channel closing fees; unavailable to spend.</span>
+                    </div>
+                    <div class="split" data-balance-closing="unknown">
+                      <span class="split-name">Closing/locked</span>
+                      <span class="split-amount">Unknown</span>
+                      <span class="hint">Waiting for a channel closure or time lock; unavailable to spend.</span>
+                    </div>
                   </div>
-                  <div class="split" data-balance-reserved={s().reserved ?? 'unknown'}>
-                    <span class="split-name">Reserved (channel fee reserve)</span>
-                    <span class="split-amount">{s().reserved === null ? 'Unknown' : fmtAmount(s().reserved!)}</span>
-                    <span class="hint">Held back for channel closing fees; unavailable to spend.</span>
+                  <p class="hint wallet-basis" data-wallet-basis>
+                    Your node reports one total, but does not report these amounts separately. The total is not a spendable balance.
+                  </p>
+                </>}>
+                  <div class="wallet-split">
+                    <div class="split" data-balance-lightning={s().lightning ?? 'unknown'}>
+                      <span class="split-name">Lightning spendable (outbound capacity)</span>
+                      <span class="split-amount">{s().lightning === null ? 'Unknown' : fmtAmount(s().lightning!)}</span>
+                      <span class="hint">Outbound capacity, not a guarantee a payment of this size will route: routing fees, per-HTLC limits and remote liquidity still apply.</span>
+                    </div>
+                    <div class="split" data-balance-onchain={s().onchain ?? 'unknown'}>
+                      <span class="split-name">On-chain spendable</span>
+                      <span class="split-amount">{s().onchain === null ? 'Unknown' : fmtAmount(s().onchain!)}</span>
+                      <span class="hint">Spendable after confirmation requirements and the anchor reserve.</span>
+                    </div>
+                    <div class="split" data-balance-reserved={s().reserved ?? 'unknown'}>
+                      <span class="split-name">Reserved (anchor closing fees)</span>
+                      <span class="split-amount">{s().reserved === null ? 'Unknown' : fmtAmount(s().reserved!)}</span>
+                      <span class="hint">On-chain funds held for anchor-channel closing fees; already included in the on-chain total.</span>
+                    </div>
+                    <div class="split" data-balance-closing={s().closing ?? 'unknown'}>
+                      <span class="split-name">Closing (closures and sweeps)</span>
+                      <span class="split-amount">{s().closing === null ? 'Unknown' : fmtAmount(s().closing!)}</span>
+                      <span class="hint">Tracked closures, time locks and sweeps; some proceeds may already be spendable on-chain.</span>
+                    </div>
+                    <Show when={(s().contested ?? 0) > 0}>
+                      <div class="split" data-balance-contested={s().contested}>
+                        <span class="split-name">Contested</span>
+                        <span class="split-amount">{fmtAmount(s().contested!)}</span>
+                        <span class="hint">Conditional claims, not guaranteed wallet funds or spendable liquidity.</span>
+                      </div>
+                    </Show>
                   </div>
-                  <div class="split" data-balance-closing={s().closing ?? 'unknown'}>
-                    <span class="split-name">Closing/locked</span>
-                    <span class="split-amount">{s().closing === null ? 'Unknown' : fmtAmount(s().closing!)}</span>
-                    <span class="hint">Waiting for a channel closure or time lock; unavailable to spend.</span>
-                  </div>
-                </div>
-                <p class="hint wallet-basis" data-wallet-basis>
-                  Your node reports one total, but does not report these amounts separately. The total is not a spendable balance.
-                </p>
+                  <p class="hint wallet-basis" data-wallet-basis>
+                    These categories overlap and do not add up to the node-reported total. Closing includes sweeps before sweep fees; proceeds may already be in the on-chain total or spendable on-chain. Do not add closing to on-chain funds or subtract it from on-chain spendable. Unknown means the node did not report that category. The total is not a spendable balance.
+                  </p>
+                </Show>
               </>
             )}
           </Show>

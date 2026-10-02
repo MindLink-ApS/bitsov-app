@@ -43,7 +43,7 @@ use bitsov_app::act::{self, ActionError};
 use bitsov_app::budget::{self, Book};
 use bitsov_app::grant::{self, NodeGrant};
 use bitsov_app::ai;
-use bitsov_app::control;
+use bitsov_app::control::{self, Balance};
 use bitsov_app::porch;
 use bitsov_app::spend_journal::{self, Journal, Target};
 use bitsov_app::jarvis::assistant_source::{Feed, MockReason, NodeAuth};
@@ -359,12 +359,6 @@ struct FundingAddress {
     network: Option<String>,
     #[serde(default)]
     note: Option<String>,
-}
-
-/// `GET /payments/balance`.
-#[derive(Serialize, Deserialize)]
-struct Balance {
-    balance_msat: u64,
 }
 
 /// `POST /identity/restore` (RestoreResponse) — node-side shape.
@@ -1894,7 +1888,7 @@ async fn read_price_quote(state: &NodeState, peer: Option<&str>) -> Result<contr
 async fn read_wallet(state: &NodeState) -> Result<control::WalletOverview, String> {
     let balance: Balance = get_json(state, "/payments/balance").await?;
     let channels: Vec<control::Channel> = get_json(state, "/payments/channels").await?;
-    Ok(control::wallet_overview(balance.balance_msat, channels))
+    Ok(control::wallet_overview(balance, channels))
 }
 
 /// `GET /status` — the Node panel and the rail's node pill.
