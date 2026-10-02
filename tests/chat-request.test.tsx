@@ -316,7 +316,7 @@ function stubHost(overrides: Record<string, Reply> = {}, network: string | null 
     peers_list: () => [{ node_id: A, addr: null, label: 'Maya', connected: true, fingerprint: null }],
     rooms_list: () => [],
     messages_list: () => [],
-    price_quote: () => ({ kind: 0, own_msat: 1000, peer_msat: 2000, peer_age_secs: 30, peer_stale: false }),
+    price_quote: () => ({ kind: 0, own_msat: 1000, peer_msat: 2000, peer_age_secs: 30, max_routing_fee_msat: 0, peer_stale: false }),
     payments_overview: () => ({ balance_msat: 1_000_000, lightning_outbound_msat: 500_000, channels: [] }),
     fund_state: () => null,
     file_price: () => ({ principal_msat: 3000, max_routing_fee_msat: 5000, total_msat: 8000 }),
@@ -392,7 +392,7 @@ describe('a request in chat', () => {
     $<HTMLButtonElement>('[data-send]')!.click();
     await vi.waitFor(() => expect($('[data-send-in-chat]')).not.toBeNull());
     expect(host.used('message_send')).toHaveLength(0);
-    expect(text('[data-send-in-chat]')).toBe('Send in chat · ≈ 2 sats');
+    expect(text('[data-send-in-chat]')).toBe('Send in chat · 2 sats');
     $<HTMLButtonElement>('[data-send-in-chat]')!.click();
     await vi.waitFor(() => expect(host.used('message_send')).toHaveLength(1));
     // Exactly the Send button's message: same command, price cap and no new kind.
@@ -414,7 +414,7 @@ describe('a request in chat', () => {
     expect(host.used('message_send')).toHaveLength(0);
     // The invoice waits in the message draft for the owner's Send.
     expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe(invoice());
-    await vi.waitFor(() => expect(text('[data-send]')).toBe('Waiting for approval'));
+    await vi.waitFor(() => expect($('[data-approval="pending"]')).not.toBeNull());
   });
 
   it('renders a received invoice as a request card; Pay opens the review and only confirm pays', async () => {
@@ -620,7 +620,7 @@ describe('a request in chat', () => {
     expect(host.used('message_send')[1].args).toMatchObject({ plaintext: invoice(), max_msat: 13_000 });
 
     // Their node now asks more: nothing more is sent until the owner presses Send at that price.
-    await vi.waitFor(() => expect(text('[data-send]')).toBe('Send · 23 sats'));
+    await vi.waitFor(() => expect(text('[data-send-price]')).toBe('price went up to 23 sats, send?'));
     expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe(invoice());
     await new Promise((r) => setTimeout(r, 50));
     expect(host.used('message_send')).toHaveLength(2);

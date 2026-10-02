@@ -288,13 +288,13 @@ label.field input {
 .primary.soft.send-btn,
 .send-btn {
   align-self: flex-end;
-  width: 34px;
+  width: auto;
   height: 34px;
-  min-width: 34px;
+  min-width: 58px;
   min-height: 34px;
-  padding: 0 !important;
+  padding: 0 12px !important;
   flex: none;
-  border-radius: 50%;
+  border-radius: 17px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1041,3 +1041,5 @@ button.danger { background: var(--err); color: #fff; border: none; }
 .welcome-cards button { margin-top: auto; }
 .soft-error .quiet-detail p { white-space: pre-wrap; overflow-wrap: anywhere; }
 .spinner { display: inline-block; flex-shrink: 0; }
+
+.send-price { margin: 4px 2px 0; text-align: right; color: var(--muted); font-size: 11px; line-height: 1.4; }

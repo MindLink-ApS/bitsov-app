@@ -1980,7 +1980,7 @@ async fn price_quote(
 ) -> Result<control::PriceQuote, String> {
     reject_sealed_window(&window)?;
     drop(window);
-    read_price_quote(state.inner(), peer.as_deref()).await
+    read_conversation_quote(state.inner(), peer.as_deref()).await
 }
 
 /// `GET /energy?window=` (genome N1) — node-wide sats in/out per counterparty
@@ -4019,6 +4019,50 @@ async fn require_price_caps(state: &NodeState, room: bool) -> Result<SendCaps, A
 /// Genome #113: `operation_id` on 1:1 compose, idempotent POST, `GET /messages/operations/{id}`.
 const OPERATIONS_CAPABILITY: &str = "message_operations_v1";
 
+/// The visible conversation ceiling includes admission and routing. Older
+/// nodes reuse paid_send_caps_v1 but may admit outside it; their quote cannot
+/// promise this ceiling. Keep legacy accounting for recovery and other flows.
+async fn require_conversation_ceiling(state: &NodeState, peer: &str) -> Result<(), ActionError> {
+    let peer = control::node_id(peer).map_err(ActionError::invalid)?;
+    require_price_caps(state, false).await?;
+    if !has_all_in_caps(state) {
+        let _ = read_first_contact_quote(state, &peer).await;
+    }
+    if !has_all_in_caps(state) {
+        return Err(ActionError::new("price_cap_unavailable", "Upgrade the node to enforce an all-in message ceiling."));
+    }
+    Ok(())
+}
+
+async fn read_conversation_quote(state: &NodeState, peer: Option<&str>) -> Result<control::PriceQuote, String> {
+    let mut quote = read_price_quote(state, peer).await?;
+    if let Some(peer) = peer {
+        quote.send_unavailable = require_conversation_ceiling(state, peer).await.err().map(|e| e.message);
+    }
+    Ok(quote)
+}
+
+/// Public conversation sends opt into the displayed all-in promise. Room
+/// legs keep their existing individual caps and never raise for admission.
+async fn do_conversation_send(
+    state: &NodeState,
+    recipient: &str,
+    is_room: bool,
+    plaintext: &str,
+    max_msat: u64,
+    max_recipient_msat: Option<std::collections::HashMap<String, u64>>,
+    first_contact_msat: Option<u64>,
+) -> Result<act::SendReceipt, ActionError> {
+    if !is_room && !act::is_room_chat(plaintext) {
+        let target = control::node_id(recipient).map_err(ActionError::invalid)?;
+        // Budget and approval refusals still take precedence, before any quote.
+        plan_message(state, &target, false, max_msat, first_contact_msat)?;
+        no_pending_spend(state)?;
+        require_conversation_ceiling(state, &target).await?;
+    }
+    do_message_send_with(state, recipient, is_room, plaintext, max_msat, max_recipient_msat, first_contact_msat).await
+}
+
 /// Slice B's call shape: no first-contact confirmation. Tests only.
 #[cfg_attr(not(test), allow(dead_code))]
 async fn do_message_send(
@@ -4082,6 +4126,7 @@ async fn do_message_send_with(
         max_msat
     } else {
         let quote = read_price_quote(state, Some(recipient)).await?;
+        body["max_routing_fee_msat"] = serde_json::json!(quote.max_routing_fee_msat);
         (if quote.peer_stale { quote.own_msat } else { quote.peer_msat.unwrap_or(quote.own_msat) })
             .max(act::MIN_PAYMENT_MSAT).checked_add(quote.max_routing_fee_msat)
             .ok_or_else(|| ActionError::invalid("The all-in quote overflows."))?
@@ -4091,10 +4136,6 @@ async fn do_message_send_with(
     // A confirmed first paid message to a contact: the node backs that one OK
     // with a single-use grant for exactly this contact and this cap. The same
     // OK re-admits a known contact the node's grant does not budget yet.
-    if node_ok.is_none() && !is_room {
-        let quote = read_price_quote(state, Some(&recipient)).await?;
-        body["max_routing_fee_msat"] = serde_json::json!(quote.max_routing_fee_msat);
-    }
     if let Some(contact_budget) = node_ok {
         confirm_first_contact(state, &recipient, max_msat, contact_budget).await?;
     }
@@ -4112,7 +4153,7 @@ async fn do_message_send_with(
         // After a reconnect or restart the contact asks for admission again,
         // and the node kept its signed quote for this connection.
         Err(e) if e.code == "readmission_capped" && quoted_readmission => {
-            readmit_under_quote(state, &target, body, max_msat, readmission_possible, caps.operations, e).await
+            readmit_under_quote(state, &target, body, max_msat, e).await
         }
         Err(e) if e.code == "readmission_capped" && room_leg => Err(ActionError::new("readmission_capped", act::ROOM_LEG_READMISSION)),
         other => other,
@@ -4148,16 +4189,14 @@ async fn do_message_send_with(
 /// the node refused this send's cap before paying anything, keeping the
 /// contact's fresh signed quote for this connection. The quote's total
 /// (admission once, this message, both routing ceilings) is the new all-in
-/// price. Inside the contact's existing budget the app sends again under it,
-/// with the same operation id, without a prompt; otherwise the owner is asked
-/// once (`readmission_quoted`). Anything unexpected keeps the refusal.
+/// ceiling. Even inside an approved budget a higher cap requires a fresh
+/// press (`readmission_quoted`). Nothing here dispatches another compose;
+/// the next send keeps the same operation id. Unexpected replies keep the refusal.
 async fn readmit_under_quote(
     state: &NodeState,
     target: &str,
-    mut body: serde_json::Value,
+    body: serde_json::Value,
     max_msat: u64,
-    readmission_possible: bool,
-    operations: bool,
     refused: ActionError,
 ) -> Result<String, ActionError> {
     let recipient = body["recipient"].as_str().unwrap_or_default().to_string();
@@ -4171,18 +4210,14 @@ async fn readmit_under_quote(
         total_msat: quote.total_msat,
         quoted: true,
     };
-    let within_budget = match plan_message(state, target, false, quote.total_msat, None) {
-        Ok((auth @ Auth::Budget(_), plan)) if plan.confirm.is_none() => Some(auth),
-        _ => None,
-    };
-    let Some(auth) = within_budget else {
-        remember_readmission_ask(state, &recipient, &quote);
-        return Err(ActionError::readmission_quoted(view));
-    };
-    body["max_total_msat"] = serde_json::json!(quote.total_msat);
-    body["max_routing_fee_msat"] = serde_json::json!(quote.max_routing_fee_msat);
-    let charge = Charge { target: target.to_string(), room: false, confirm: None, readmission_possible, confirmed: false, operation: operations };
-    money_post(state, auth, "/messages/compose", body, quote.total_msat, Some(charge)).await
+    // Approval and budget limits still win over a price confirmation. Reading
+    // a new quote is not permission to reserve or pay it.
+    let (auth, _) = plan_message(state, target, false, quote.total_msat, None)?;
+    refuse_if_paused(state)?;
+    check_auth(state, auth)?;
+    check_node_grant(state, "/messages/compose", &body, quote.total_msat).await?;
+    remember_readmission_ask(state, &recipient, &quote);
+    Err(ActionError::readmission_quoted(view))
 }
 
 fn remember_readmission_ask(state: &NodeState, peer: &str, quote: &control::FirstContactQuote) {
@@ -5266,7 +5301,7 @@ async fn message_send(
 ) -> Result<act::SendReceipt, ActionError> {
     reject_sealed_window(&window)?;
     drop(window);
-    do_message_send_with(state.inner(), &recipient, is_room, &plaintext, max_msat, max_recipient_msat, first_contact_msat).await
+    do_conversation_send(state.inner(), &recipient, is_room, &plaintext, max_msat, max_recipient_msat, first_contact_msat).await
 }
 
 /// Retry a paid, undelivered message through its own journal record. Without
@@ -10833,15 +10868,71 @@ mod control_act_tests {
     }
 
     #[tokio::test]
-    async fn quoted_readmission_within_the_contact_budget_pays_once_without_a_prompt() {
+    async fn conversation_ceiling_refuses_legacy_admission_outside_the_cap() {
+        let (node, _dir, g1) = g1_node(&["read", "receive"]);
+        with_book(&node.state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
+        g1.grant.lock().unwrap()["per_recipient_msat"] = serde_json::json!({A: 50_000});
+        g1_approved(&node, 500_000).await;
+        let quote = read_conversation_quote(&node.state, Some(A)).await.unwrap();
+        assert!(quote.send_unavailable.is_some(), "never advertise an unenforceable ceiling");
+        let error = do_conversation_send(&node.state, A, false, "gm", 7000, None, None).await.unwrap_err();
+        assert_eq!(error.code, "price_cap_unavailable");
+        assert_eq!(composes(&node), 0);
+        assert_eq!(budget_now(&node.state).spent_msat, 0);
+    }
+
+    #[tokio::test]
+    async fn conversation_quote_matches_dispatch_cap_and_higher_price_requires_new_press() {
         let readmit = Arc::new(Mutex::new(ReadmitNode::default()));
         let (node, _dir, g1) = g1_node_with(&["read", "receive"], Some(readmit_routes(readmit.clone())));
         with_book(&node.state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
         g1.grant.lock().unwrap()["per_recipient_msat"] = serde_json::json!({A: 50_000});
         g1_approved(&node, 500_000).await;
-        let receipt = do_message_send(&node.state, A, false, "gm", 7000, None).await.unwrap();
+        let quote = read_conversation_quote(&node.state, Some(A)).await.unwrap();
+        assert!(quote.send_unavailable.is_none());
+        assert_eq!((quote.peer_msat, quote.max_routing_fee_msat), (Some(2000), 5000));
+        let error = do_conversation_send(&node.state, A, false, "gm", 7000, None, None).await.unwrap_err();
+        assert_eq!(error.code, "readmission_quoted");
+        assert_eq!(compose_bodies(&node)[0]["max_total_msat"], 7000);
+        assert_eq!(compose_bodies(&node)[0]["max_routing_fee_msat"], 5000);
+        assert_eq!(readmit.lock().unwrap().pays, 0);
+        do_conversation_send(&node.state, A, false, "gm", 12_000, None, None).await.unwrap();
+        assert_eq!(compose_bodies(&node).len(), 2);
+        assert_eq!(compose_bodies(&node)[1]["max_total_msat"], 12_000);
+        assert_eq!(readmit.lock().unwrap().pays, 2, "one admission and one message, not two attempts paying");
+    }
+
+    #[tokio::test]
+    async fn raised_conversation_price_obeys_budget_before_confirmation() {
+        for (limit, expected) in [(6000, "budget_exhausted"), (10000, "budget_exhausted"), (50000, "readmission_quoted")] {
+            let readmit = Arc::new(Mutex::new(ReadmitNode::default()));
+            let (node, _dir, g1) = g1_node_with(&["read", "receive"], Some(readmit_routes(readmit.clone())));
+            with_book(&node.state, true, |b| b.set_limit(A, false, limit)).unwrap();
+            g1.grant.lock().unwrap()["per_recipient_msat"] = serde_json::json!({A: 50_000});
+            g1_approved(&node, 500_000).await;
+            let error = do_conversation_send(&node.state, A, false, "gm", 7000, None, None).await.unwrap_err();
+            assert_eq!(error.code, expected);
+            assert_eq!(composes(&node), if limit < 7000 { 0 } else { 1 });
+            assert_eq!(readmit.lock().unwrap().pays, 0);
+            assert_eq!(budget_now(&node.state).spent_msat, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn quoted_readmission_within_the_contact_budget_needs_a_new_press() {
+        let readmit = Arc::new(Mutex::new(ReadmitNode::default()));
+        let (node, _dir, g1) = g1_node_with(&["read", "receive"], Some(readmit_routes(readmit.clone())));
+        with_book(&node.state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
+        g1.grant.lock().unwrap()["per_recipient_msat"] = serde_json::json!({A: 50_000});
+        g1_approved(&node, 500_000).await;
+        let error = do_message_send(&node.state, A, false, "gm", 7000, None).await.unwrap_err();
+        assert_eq!(error.code, "readmission_quoted");
+        assert_eq!(error.admission.unwrap().total_msat, 12_000);
+        assert_eq!(compose_bodies(&node).len(), 1, "never automatically resend");
+        assert_eq!(readmit.lock().unwrap().pays, 0, "no payment before a new press");
+        let receipt = do_message_send(&node.state, A, false, "gm", 12_000, None).await.unwrap();
         let bodies = compose_bodies(&node);
-        assert_eq!(bodies.len(), 2, "refused under the message cap, then sent under the quote");
+        assert_eq!(bodies.len(), 2, "new press accepts the higher cap");
         assert_eq!(bodies[0]["operation_id"], bodies[1]["operation_id"], "the same operation");
         assert_eq!((bodies[0]["max_total_msat"].as_u64(), bodies[1]["max_total_msat"].as_u64()), (Some(7000), Some(12_000)));
         assert_eq!(bodies[1]["max_routing_fee_msat"], 10_000, "the quote's ceilings for both payments");
@@ -10883,8 +10974,10 @@ mod control_act_tests {
         let e = do_message_send_with(&node.state, A, false, &room, 7000, None, Some(50_000)).await.unwrap_err();
         assert_eq!(e.code, "invalid");
         assert_eq!(compose_bodies(&node).len(), 2);
-        // The same contact's ordinary chat still re-admits inside its budget.
-        do_message_send(&node.state, A, false, "gm", 7000, None).await.unwrap();
+        // Ordinary chat asks even inside its budget, then a new press re-admits.
+        assert_eq!(do_message_send(&node.state, A, false, "gm", 7000, None).await.unwrap_err().code, "readmission_quoted");
+        assert_eq!(readmit.lock().unwrap().pays, 0);
+        do_message_send(&node.state, A, false, "gm", 12_000, None).await.unwrap();
         assert_eq!(readmit.lock().unwrap().pays, 2);
     }
 

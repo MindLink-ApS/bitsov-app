@@ -27,7 +27,7 @@ function type(text: string) {
 it('keeps a delayed readmission refusal attached to submitted peer A after switching to B', async () => {
   const source = sampleSource({ firstLiveMs: 1e9 });
   source.budgetStatus = async () => openBudget();
-  source.priceQuote = async () => ({ kind: 0, own_msat: 1000, peer_msat: 2000, peer_age_secs: 0, peer_stale: false });
+  source.priceQuote = async () => ({ kind: 0, own_msat: 1000, peer_msat: 2000, peer_age_secs: 0, max_routing_fee_msat: 0, peer_stale: false });
   let finish!: () => void;
   source.send = vi.fn(async () => {
     await new Promise<void>(resolve => { finish = resolve; });

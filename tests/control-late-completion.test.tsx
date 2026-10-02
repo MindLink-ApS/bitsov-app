@@ -10,6 +10,7 @@ const select = <T extends HTMLElement = HTMLElement>(s: string) => mount.querySe
 
 it.each(['same', 'other', 'return'])('preserves a newer draft after late success (%s track)', async (track) => {
   const source = sampleSource({ firstLiveMs: 1e9 });
+  source.priceQuote = async () => ({ kind: 0, own_msat: 1000, peer_msat: 2000, peer_age_secs: 0, peer_stale: false, max_routing_fee_msat: 5000 });
   source.spendStatus = async () => ({ state: 'open', basis: 'node_grant', open_until_ms: Date.now() + 600000, pending: null, window_ms: 600000 });
   let finish!: () => void;
   source.send = vi.fn(async (recipient, isRoom) => {
@@ -43,6 +44,7 @@ it.each(['same', 'other', 'return'])('preserves a newer draft after late success
 
 it.each(['same', 'other', 'return'])('keeps a replacement file after late success (%s track)', async (track) => {
   const source = sampleSource({ firstLiveMs: 1e9 });
+  source.priceQuote = async () => ({ kind: 0, own_msat: 1000, peer_msat: 2000, peer_age_secs: 0, peer_stale: false, max_routing_fee_msat: 5000 });
   source.spendStatus = async () => ({ state: 'open', basis: 'node_grant', open_until_ms: Date.now() + 600000, pending: null, window_ms: 600000 });
   let finish!: () => void;
   source.fileSend = vi.fn(async (recipient, filename) => {

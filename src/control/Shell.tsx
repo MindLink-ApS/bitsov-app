@@ -235,6 +235,20 @@ export function ControlCenter(props: Props) {
   const [threads, setThreads] = createStore<{ t: Threads; unread: Unread; fresh: Record<string, true> }>({ t: {}, unread: {}, fresh: {} });
   const [track, setTrack] = createSignal<TrackRef | null>(null);
   const [quote, setQuote] = createSignal<PriceQuote | null>(null);
+  const [quoteError, setQuoteError] = createSignal<string | undefined>();
+  let quoteRead = 0;
+  const loadPrice = async (t: TrackRef) => {
+    if (!track() || trackKey(track()!) !== trackKey(t)) return;
+    const read = ++quoteRead;
+    setQuote(null);
+    setQuoteError(undefined);
+    try {
+      const q = await source.priceQuote((t as { id: string }).id);
+      if (read === quoteRead && track() && trackKey(track()!) === trackKey(t)) setQuote(q);
+    } catch {
+      if (read === quoteRead && track() && trackKey(track()!) === trackKey(t)) setQuoteError('price unavailable · could not read peer price');
+    }
+  };
   const [roomQuote, setRoomQuote] = createSignal<RoomQuote | null>(null);
   const [filePrice, setFilePrice] = createSignal<PaymentQuote | null>(null);
   const [spend, setSpend] = createSignal<SpendView | null>(null);
@@ -426,7 +440,7 @@ export function ControlCenter(props: Props) {
         void loadWallet(); void loadDoor(); void loadBudget();
         void attempt('quote', () => source.filePrice(), setFilePrice);
         const t = track();
-        if (t?.kind === 'peer') void attempt('quote', () => source.priceQuote(t.id), (q) => { if (track() && trackKey(track()!) === trackKey(t)) setQuote(q); });
+        if (t?.kind === 'peer') void loadPrice(t);
         if (t?.kind === 'room') void attempt('quote', () => source.roomQuote(t.id), (q) => { if (track() && trackKey(track()!) === trackKey(t)) setRoomQuote(q); });
       }
     });
@@ -631,13 +645,13 @@ export function ControlCenter(props: Props) {
     on(track, (t) => {
       if (!t || !props.active) return;
       setThreads('unread', trackKey(t), 0);
+      quoteRead++;
       setQuote(null);
+      setQuoteError(undefined);
       setRoomQuote(null);
       loadThread(t);
       if (t.kind === 'peer') {
-        void attempt('quote', () => source.priceQuote(t.id), (q) => {
-          if (track() && trackKey(track()!) === trackKey(t)) setQuote(q);
-        });
+        void loadPrice(t);
         if (filePrice() === null) void attempt('quote', () => source.filePrice(), setFilePrice);
       }
       if (t.kind === 'room') {
@@ -917,9 +931,7 @@ export function ControlCenter(props: Props) {
         return r;
       }
       if (!r.ok && ['price_changed', 'price_cap_exceeded'].includes(r.error.code)) {
-        if (t.kind === 'peer') void attempt('quote', () => source.priceQuote(t.id), (q) => {
-          if (track() && trackKey(track()!) === trackKey(t)) setQuote(q);
-        });
+        if (t.kind === 'peer') void loadPrice(t);
         else void attempt('quote', () => source.roomQuote(t.id), (q) => {
           if (track() && trackKey(track()!) === trackKey(t)) setRoomQuote(q);
         });
@@ -1272,6 +1284,8 @@ export function ControlCenter(props: Props) {
                     homeNetwork={overview()?.network ?? null}
                     nameOf={nameOf}
                     quote={quote()}
+                    quoteError={quoteError()}
+                    refreshPrice={() => void loadPrice(t())}
                     roomQuote={roomQuote()}
                     filePrice={filePrice()}
                     spend={spend()}
@@ -1844,6 +1858,8 @@ function Conversation(props: {
   homeNetwork: string | null;
   nameOf: (id: string) => string;
   quote: PriceQuote | null;
+  quoteError?: string;
+  refreshPrice: () => void;
   roomQuote: RoomQuote | null;
   filePrice: PaymentQuote | null;
   spend: SpendView | null;
@@ -2023,6 +2039,9 @@ function Conversation(props: {
         track={props.track}
         name={props.name}
         cost={cost()}
+        quote={props.quote}
+        quoteError={props.quoteError}
+        refreshPrice={props.refreshPrice}
         roomQuote={props.roomQuote}
         filePrice={props.filePrice}
         // Admission is per direction: messages they sent us do not open their
@@ -2982,6 +3001,9 @@ function Composer(props: {
   track: TrackRef;
   name: string;
   cost: ReturnType<typeof costToSend>;
+  quote: PriceQuote | null;
+  quoteError?: string;
+  refreshPrice: () => void;
   roomQuote: RoomQuote | null;
   filePrice: PaymentQuote | null;
   firstContact: boolean;
@@ -3005,6 +3027,9 @@ function Composer(props: {
   const [firstPick, setFirstPick] = createSignal<number | null>(null);
   const [drafted, setDrafted] = createSignal(false);
   const [draft, setDraft] = createSignal('');
+  const [paidLine, setPaidLine] = createSignal<string | null>(null);
+  const [raisedFrom, setRaisedFrom] = createSignal<number | null>(null);
+  createEffect(on(draft, (text) => { if (text.trim()) setPaidLine(null); }));
   const [busy, setBusy] = createSignal(false);
   const [note, setNote] = createSignal<string | null>(null);
   // pay
@@ -3181,6 +3206,9 @@ function Composer(props: {
         setMode('message');
         setNote(null);
         setDraft('');
+        setPaidLine(null);
+        setRaisedFrom(null);
+        setDoor(null);
         dropRecording();
         setFile(null);
         if (fileInput) fileInput.value = '';
@@ -3292,8 +3320,8 @@ function Composer(props: {
   const [readmitFor, setReadmitFor] = createSignal<string | null>(null);
   const readmit = () => !room() && readmitFor() === target();
   // Genome quoted_readmission_v1: after a reconnect or restart the contact
-  // asks for admission again and the node kept their signed quote. Outside the
-  // contact's budget the owner sees it here, inside the all-in cost, and sends
+  // asks for admission again and the node kept their signed quote. The
+  // owner sees it here, inside the all-in cost, and sends
   // once more at that price (the same message keeps its operation).
   const [readmitQuote, setReadmitQuote] = createSignal<{ peer: string; price: AdmissionPrice } | null>(null);
   // Whatever the mode: Send in chat shows (and caps) a message from Request.
@@ -3319,9 +3347,10 @@ function Composer(props: {
     if (room() || !doorWanted() || (mode() !== 'message' && mode() !== 'file') || stand().kind !== 'first') return;
     const peer = target();
     if (untrack(door)?.peer === peer) return;
-    setDoor({ peer, quote: null });
+    const request = { peer, quote: null, loading: true };
+    setDoor(request);
     void props.actions.doorQuote(peer).then((quote) => {
-      if (untrack(door)?.peer === peer) setDoor({ peer, quote });
+      if (untrack(door) === request) setDoor({ peer, quote });
     });
   });
   const presetChosen = () => {
@@ -3361,17 +3390,71 @@ function Composer(props: {
 
   // The door card (genome first_contact_grant_v1): before a first paid message
   // to a stranger, read the stranger's own signed quote once. Its total is the
-  // cap the owner confirms; the node pays that very invoice. Without it (older
-  // node, no budget yet) the composer keeps its labelled estimate.
-  const [door, setDoor] = createSignal<{ peer: string; quote: FirstContactQuote | null } | null>(null);
+  // cap the owner confirms; the node pays that very invoice. A missing or
+  // expired first-contact quote disables Send and offers a read-only retry.
+  const [door, setDoor] = createSignal<{ peer: string; quote: FirstContactQuote | null; loading?: boolean } | null>(null);
   const doorQuote = (): FirstContactQuote | null => {
     const d = door();
     return d && !room() && d.peer === target() ? d.quote : null;
   };
 
+  const priceProblem = (): string | null => {
+    if (!room()) {
+      if (props.quoteError) return props.quoteError;
+      if (!props.quote) return 'price loading…';
+      if (props.quote.send_unavailable) return `price unavailable · ${props.quote.send_unavailable}`;
+    }
+    if (readmitPrice()) return Number.isSafeInteger(readmitPrice()!.total_msat) && readmitPrice()!.total_msat > 0 ? null : 'price unavailable · invalid price';
+    if (room()) return props.cost ? null : 'price loading…';
+    if (doorWanted() && door()) {
+      const d = door()!;
+      if (d.loading) return 'price loading…';
+      if (!d.quote) return 'price unavailable · first-contact quote unavailable';
+      if (!Number.isSafeInteger(d.quote.total_msat) || d.quote.total_msat <= 0) return 'price unavailable · invalid price';
+      if (d.quote.expires_at * 1000 <= props.now) return 'price unavailable · first-contact quote expired';
+      return null;
+    }
+    const q = props.quote!;
+    if (q.peer_msat === null) return 'price unavailable · peer has not shared a price';
+    if (!Number.isSafeInteger(q.peer_msat) || q.peer_msat < 0) return 'price unavailable · invalid peer price';
+    if (q.peer_stale) return 'price unavailable · peer price is stale';
+    if (!Number.isSafeInteger(q.max_routing_fee_msat) || q.max_routing_fee_msat! < 0)
+      return 'price unavailable · routing fee allowance missing';
+    if (!props.cost || !Number.isSafeInteger(props.cost.msat)) return 'price unavailable · invalid price';
+    return null;
+  };
+  // Sats here are deliberate: this disclosure never rounds an enforced msat cap.
+  const sendSats = (msat: number) => {
+    const exact = BigInt(msat);
+    const fraction = (exact % 1000n).toString().padStart(3, '0').replace(/0+$/, '');
+    return `${(exact / 1000n).toLocaleString('en-US')}${fraction ? `.${fraction}` : ''}`;
+  };
+  const paymentResult = (result: Outcome<unknown>) => {
+    if (!result.ok) {
+      if (['spend_unknown', 'payment_unknown', 'failed_paid', 'payment_settled_undelivered'].includes(result.error.code))
+        setPaidLine('paid amount unknown · check payment result');
+      return;
+    }
+    const receipt = result.value as SendReceipt;
+    const paid = receipt.amount_msat + (receipt.readmission_msat ?? 0);
+    setPaidLine(receipt.max_routing_fee_msat === 0 && Number.isSafeInteger(paid) && paid >= 0
+      ? `paid ${sendSats(paid)} sats`
+      : 'paid amount unknown · routing fee not reported');
+  };
+  const priceLine = () => {
+    if (paidLine()) return paidLine();
+    if (priceProblem()) return priceProblem();
+    const cap = messageShown().msat;
+    if (cap === null) return 'price loading…';
+    if (readmitPrice() || (raisedFrom() !== null && cap > raisedFrom()!)) return `price went up to ${sendSats(cap)} sats, send?`;
+    return `up to ${sendSats(cap)} sats · includes max routing fee`;
+  };
+
   /** What this mode costs, shown before the button is pressed. */
   /** What one message costs here, whatever the current mode (Send in chat uses it too). */
   const messageShown = (): { msat: number | null; estimate: boolean; basis: string } => {
+    const problem = priceProblem();
+    if (problem) return { msat: null, estimate: false, basis: problem };
     const again = readmitPrice();
     if (again) {
       return {
@@ -3391,9 +3474,9 @@ function Composer(props: {
     const c = props.cost;
     if (!c) return { msat: null, estimate: false, basis: room() ? 'Reading each member’s price…' : 'Reading their price…' };
     const basis = doorWanted()
-      ? `${c.basis}. First contact also pays their admission price once, at most ${fmtAmount(ADMISSION_MAX_MSAT)}`
+      ? `${c.basis}. First-contact admission must fit this ceiling; otherwise nothing is paid and a new price needs your confirmation.`
       : c.basis;
-    return { msat: c.msat, estimate: c.estimate || doorWanted(), basis };
+    return { msat: c.msat, estimate: c.estimate, basis };
   };
 
   const shown = (): { msat: number | null; estimate: boolean; basis: string } => {
@@ -3422,7 +3505,7 @@ function Composer(props: {
     if (blocked()) return false;
     switch (mode()) {
       case 'message':
-        return draft().trim().length > 0 && props.cost !== null;
+        return draft().trim().length > 0 && messageShown().msat !== null;
       case 'pay':
         return payKind() === 'invoice' ? invoiceMsat() !== null : pubkey().trim().length > 0 && amountMsat() !== null;
       case 'request':
@@ -3459,16 +3542,7 @@ function Composer(props: {
     return { message: 'Send', pay: 'Pay', request: 'Create invoice', file: 'Send file' }[mode()] + (mode() === 'request' ? '' : price);
   };
 
-  // The message bar shows a plain "Send"; the price rides along for screen
-  // readers and the tooltip, and the cost line lives behind the ⓘ.
-  const sendParts = () => {
-    const full = label();
-    const i = full.indexOf(' · ');
-    return i < 0 ? { main: full, price: '' } : { main: full.slice(0, i), price: full.slice(i + 3) };
-  };
-  const sendMain = () => sendParts().main;
-  const sendPrice = () => sendParts().price;
-  const sendTitle = () => label();
+  const sendTitle = () => needsTouch() ? 'Approve with Touch ID' : 'Send';
   /** Pay / Request / File panels close back to the single message bar. */
   const closePanel = () => {
     composerRevision++;
@@ -3496,6 +3570,7 @@ function Composer(props: {
    */
   const submit = async (shownMsat?: number | null) => {
     if (props.moneyBlocked || busy() || ownerWait()) return;
+    if (mode() === 'message' && priceProblem()) { setNote(priceProblem()); return; }
     setNote(null);
     if (shownMsat !== undefined && (mode() !== 'message' || shown().msat !== shownMsat)) {
       setNote('The message price changed since you pressed. Nothing was sent. Check the price on Send and press it to send.');
@@ -3534,12 +3609,17 @@ function Composer(props: {
       const submittedFile = file();
       const submittedMode = mode();
       const cap = shown().msat!;
+      if (submittedMode === 'message') { setPaidLine(null); setRaisedFrom(null); }
       const first = st.kind === 'first' ? firstPick() ?? st.suggest : undefined;
       const dispatch = async () => {
       const r = submittedMode === 'file'
         ? await props.actions.file(submittedTrack, submittedFile!, cap, first)
         : await props.actions.send(submittedTrack, submittedText, cap, first);
       const unchanged = composerRevision === submittedRevision;
+      if (unchanged && submittedMode === 'message') {
+        paymentResult(r);
+        if (!r.ok && ['price_changed', 'price_cap_exceeded'].includes(r.error.code)) { setRaisedFrom(cap); setReadmitQuote(null); }
+      }
       if (r.ok && readmitQuote()?.peer === submittedPeer) setReadmitQuote(null);
       if (!r.ok && r.error.code === 'readmission_quoted' && r.error.admission) setReadmitQuote({ peer: submittedPeer, price: r.error.admission });
       if (r.ok && readmitFor() === submittedPeer) setReadmitFor(null);
@@ -3615,7 +3695,14 @@ function Composer(props: {
     switch (mode()) {
       case 'message': {
         const peer = target();
-        r = await props.actions.send(t, draft(), shown().msat!);
+        setPaidLine(null);
+        setRaisedFrom(null);
+        const cap = shown().msat!;
+        r = await props.actions.send(t, draft(), cap);
+        if (unchanged()) {
+          paymentResult(r);
+          if (!r.ok && ['price_changed', 'price_cap_exceeded'].includes(r.error.code)) { setRaisedFrom(cap); setReadmitQuote(null); }
+        }
         if (r.ok && readmitQuote()?.peer === peer) setReadmitQuote(null);
         if (!r.ok && r.error.code === 'readmission_quoted' && r.error.admission) setReadmitQuote({ peer, price: r.error.admission });
         if ((r.ok || paidUndelivered(r)) && unchanged()) {
@@ -3695,7 +3782,7 @@ function Composer(props: {
   createEffect(() => { if (props.moneyBlocked || !line().open) setReview(null); });
 
   const disabled = () =>
-    props.moneyBlocked || busy() || !!ownerWait() ||
+    props.moneyBlocked || busy() || !!ownerWait() || (mode() === 'message' && priceProblem() !== null) ||
     // Touch ID approves the contact, not the draft: no draft needed yet.
     (needsTouch() ? false : viaBudget()
       ? ['waiting', 'contact_used', 'total_used', 'unknown'].includes(stand().kind) || ((stand().kind === 'first' || stand().kind === 'ok') && !ready())
@@ -3708,7 +3795,10 @@ function Composer(props: {
       class="composer"
       data-composer
       data-mode={mode()}
-      onInput={() => { cancelOwner(); composerRevision++; }}
+      onInput={() => { cancelOwner(); composerRevision++; setPaidLine(null); }}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' && e.repeat && !e.shiftKey && !e.isComposing) e.preventDefault();
+      }}
       onSubmit={(e) => {
         e.preventDefault();
         void submit();
@@ -3910,7 +4000,7 @@ function Composer(props: {
             // Signal-like: Enter sends, Shift+Enter is a new line.
             if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
               e.preventDefault();
-              void submit();
+              if (!e.repeat) void submit();
             }
           }}
           aria-label={`Message ${props.name}`}
@@ -3974,17 +4064,25 @@ function Composer(props: {
             class="primary soft send-btn"
             disabled={disabled()}
             data-send
+            onClick={(e) => { if (e.detail > 1) e.preventDefault(); }}
             title={sendTitle()}
             aria-label={sendTitle()}
           >
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <line x1="12" y1="19" x2="12" y2="5" />
-              <polyline points="5 12 12 5 19 12" />
-            </svg>
-            <span class="sr-only">{sendMain()}<Show when={sendPrice()}> · {sendPrice()}</Show></span>
+            {sendTitle()}
           </button>
         </Show>
       </div>
+      <Show when={mode() === 'message'}>
+        <div class="send-price">
+          <span data-send-price aria-live="polite">{priceLine()}</span>
+          <Show when={priceProblem()?.startsWith('price unavailable')}>
+            {' '}<button type="button" class="link" data-price-retry disabled={busy()} onClick={() => {
+              if (doorWanted() && door()) setDoor(null);
+              props.refreshPrice();
+            }}>Retry</button>
+          </Show>
+        </div>
+      </Show>
       <Show when={emojiOpen()}>
         <div class="emoji-picker" data-emoji-picker role="listbox" aria-label="Emoji">
           <For each={[...EMOJIS]}>

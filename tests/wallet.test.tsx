@@ -147,7 +147,7 @@ function stubHost(overrides: Record<string, Reply> = {}) {
     messages_list: (args) => (args!.peer === A
       ? [msg('ma1', 0, A, OWN, 2000, Date.now() - 60_000), msg('ma2', 0, OWN, A, 3000, Date.now() - 50_000)]
       : args!.peer === B ? [msg('mb1', 400, OWN, B, 10_000, Date.now() - 40_000)] : []),
-    price_quote: () => ({ kind: 0, own_msat: 1000, peer_msat: 2000, peer_age_secs: 30, peer_stale: false }),
+    price_quote: () => ({ kind: 0, own_msat: 1000, peer_msat: 2000, peer_age_secs: 30, max_routing_fee_msat: 0, peer_stale: false }),
     payments_overview: () => WALLET,
     fund_state: () => null,
     funding_address: () => ({ address: 'tb1qwalletaddress0000000000000000000000', network: 'signet', note: null }),

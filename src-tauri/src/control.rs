@@ -475,6 +475,8 @@ impl MembraneRead {
 /// `price_quote`: what reaching one track costs, and where the figure came from.
 #[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct PriceQuote {
+    /// Why ordinary conversation sends cannot promise an enforced all-in cap.
+    pub send_unavailable: Option<String>,
     pub max_routing_fee_msat: u64,
     pub kind: u16,
     /// This node's own price for the kind.
@@ -699,6 +701,7 @@ pub fn price_quote(own: KindPrice, tables: &[PeerPrice], peer: Option<&str>) -> 
     let table = peer.and_then(|id| tables.iter().find(|t| t.peer_id.eq_ignore_ascii_case(id)));
     let peer_msat = table.and_then(|t| t.prices.get(CATEGORY_COMMUNICATION).copied());
     PriceQuote {
+        send_unavailable: None,
         max_routing_fee_msat: crate::act::routing_fee(
             peer_msat.filter(|_| table.is_some_and(|t| !t.stale)).unwrap_or(own.price_msat).max(crate::act::MIN_PAYMENT_MSAT)),
         kind: own.kind,
