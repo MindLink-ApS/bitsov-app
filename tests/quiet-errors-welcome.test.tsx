@@ -50,6 +50,14 @@ describe('quiet errors', () => {
     expect(mount.querySelector('button')).toBeNull();
   });
 
+  it.each(['budget_exhausted', 'budget_exhausted: connection refused'])('keeps the full budget stop visible: %s', raw => {
+    expect(softenError(raw)).toEqual({ summary: raw, detail: null, money: true });
+    start(() => <SoftError message={raw} summary="Your node is unavailable." onReconnect={() => {}} />);
+    expect(mount.querySelector('[data-soft-summary]')!.textContent).toBe(raw);
+    expect(mount.querySelector('details')).toBeNull();
+    expect(mount.querySelector('button')).toBeNull();
+  });
+
   it.each([
     ['payment_refused: admission not settled', /payment.*refused/i],
     ['spend_unknown: connection refused', /spend.*unknown/i],
@@ -173,9 +181,6 @@ describe('welcome home', () => {
     expect(welcome.querySelectorAll('article')).toHaveLength(3);
     expect(welcome.textContent).not.toMatch(/[a-f0-9]{16}|host:port|node\.example|127\.0\.0\.1/);
     expect(welcome.textContent).toMatch(/camera.*not available/i);
-    mount.querySelector<HTMLButtonElement>('[data-track="new"]')!.click();
-    expect(mount.querySelector('[data-welcome]')).not.toBeNull();
-    expect(mount.querySelector('[data-new-track] .address')).toBeNull();
     button('Share my card / QR').click();
     await vi.waitFor(() => expect(mount.querySelector('[data-fd-edit-name]')).not.toBeNull());
     expect(mount.querySelector('[data-settings-open="true"]')).not.toBeNull();
@@ -188,6 +193,16 @@ describe('welcome home', () => {
     expect(send).not.toHaveBeenCalled();
     expect(pay).not.toHaveBeenCalled();
     expect(invoice).not.toHaveBeenCalled();
+  });
+
+  it('opens invite forms and starter bitcoin from + New with zero peers', async () => {
+    home(emptySource());
+    await vi.waitFor(() => expect(mount.querySelector('[data-welcome]')).not.toBeNull());
+    mount.querySelector<HTMLButtonElement>('[data-track="new"]')!.click();
+    await vi.waitFor(() => expect(mount.querySelector('[data-invite-create]')).not.toBeNull());
+    expect(mount.querySelector('[data-invite-redeem]')).not.toBeNull();
+    await vi.waitFor(() => expect(mount.querySelector('[data-starter-include]')).not.toBeNull());
+    expect(mount.querySelector('[data-welcome]')).toBeNull();
   });
 
   it('disables unsupported actions with associated reasons and updates after recovery', async () => {

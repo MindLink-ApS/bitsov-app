@@ -1122,7 +1122,7 @@ export function ControlCenter(props: Props) {
         unread={threads.unread}
         openKey={openKey()}
         ownId={ownId()}
-        onOpen={(next) => setTrack(next.kind === 'new' && peersLoaded() && peers().length === 0 && !showLegacyIntroductionUi ? null : next)}
+        onOpen={(next) => setTrack(next)}
         onProfile={() => {
           setTab('body');
           setContextOpen(true);
