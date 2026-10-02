@@ -4171,6 +4171,7 @@ async fn do_message_send_with(
     let total_msat = reply.total_msat()?;
     Ok(act::SendReceipt {
         total_msat,
+        fee_paid_msat: reply.fee_paid_msat,
         message_id: reply.message_id,
         recipient,
         is_room,
@@ -4310,6 +4311,7 @@ async fn do_message_retry(state: &NodeState, recipient: &str, plaintext: &str, a
     let total_msat = reply.total_msat()?;
     Ok(act::SendReceipt {
         total_msat,
+        fee_paid_msat: reply.fee_paid_msat,
         max_routing_fee_msat: reply.max_routing_fee_msat,
         message_id: reply.message_id,
         recipient: undelivered.peer,
@@ -9528,6 +9530,38 @@ mod control_act_tests {
         let result = do_message_send_with(&node.state, A, false, "hi", 4000, None, Some(50000)).await;
         assert!(result.is_ok(), "{result:?}");
         assert_eq!(node.posts().last().unwrap().1["max_total_msat"], 4000);
+    }
+
+    #[tokio::test]
+    async fn paid_fee_survives_host_receipts_without_defaulting_missing_to_zero() {
+        for (fee, ceiling) in [(Some(375), Some(5000)), (Some(0), Some(5000)), (None, Some(5000)), (None, None)] {
+            for action in ["send", "invoice", "keysend"] {
+                let routes: Routes = Arc::new(move |m, p, b| {
+                    let mut reply = match p {
+                        "/messages/compose" => serde_json::json!({"message_id": "m1", "delivered": true,
+                            "amount_msat": 2000, "readmission_msat": 1000}),
+                        "/payments/pay" => serde_json::json!({"payment_hash": "ab".repeat(32),
+                            "amount_msat": 1000, "preimage": "PREIMAGE"}),
+                        "/payments/keysend" => serde_json::json!({"payment_hash": "cd".repeat(32),
+                            "amount_msat": 5000, "status": "Settled"}),
+                        _ => return happy()(m, p, b),
+                    };
+                    if let Some(fee) = fee { reply["fee_paid_msat"] = serde_json::json!(fee); }
+                    if let Some(ceiling) = ceiling { reply["max_routing_fee_msat"] = serde_json::json!(ceiling); }
+                    (200, reply.to_string())
+                });
+                let node = fake(AuthMode::Local, routes);
+                spend_advance(&node.state, true).await.unwrap();
+                let receipt = match action {
+                    "send" => serde_json::to_value(do_message_send(&node.state, A, false, "hi", 8000, None).await.unwrap()).unwrap(),
+                    "invoice" => serde_json::to_value(do_payment_pay(&node.state, act::TEST_INVOICE_1000, 1000, 6000).await.unwrap()).unwrap(),
+                    _ => serde_json::to_value(do_payment_keysend(&node.state, &format!("02{}", "ab".repeat(32)), 5000, None, 10000).await.unwrap()).unwrap(),
+                };
+                assert_eq!(receipt.get("fee_paid_msat"), fee.map(|v| serde_json::json!(v)).as_ref(), "{action}: fee {fee:?}");
+                assert_eq!(receipt["max_routing_fee_msat"], 5000, "the allowance stays separate");
+                if action == "send" { assert_eq!(receipt["readmission_msat"], 1000); }
+            }
+        }
     }
 
     #[tokio::test]

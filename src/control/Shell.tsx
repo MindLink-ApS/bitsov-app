@@ -3436,8 +3436,9 @@ function Composer(props: {
       return;
     }
     const receipt = result.value as SendReceipt;
-    const paid = receipt.amount_msat + (receipt.readmission_msat ?? 0);
-    setPaidLine(receipt.max_routing_fee_msat === 0 && Number.isSafeInteger(paid) && paid >= 0
+    const fee = receipt.fee_paid_msat ?? (receipt.max_routing_fee_msat === 0 ? 0 : undefined);
+    const paid = receipt.amount_msat + (receipt.readmission_msat ?? 0) + (fee ?? 0);
+    setPaidLine(fee !== undefined && Number.isSafeInteger(fee) && fee >= 0 && Number.isSafeInteger(paid) && paid >= 0
       ? `paid ${sendSats(paid)} sats`
       : 'paid amount unknown · routing fee not reported');
   };
