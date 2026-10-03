@@ -265,12 +265,14 @@ export function budgetStand(view: BudgetView | null, target: string, room: boole
     return { kind: 'first', suggest, ceiling };
   }
   if (readmit && !room) return { kind: 'first', suggest: Math.min(row.limit_msat, ceiling), ceiling, again: true };
-  if (row.spent_msat + cost > row.limit_msat) {
-    const want = Math.max(row.limit_msat * 2, row.spent_msat + cost);
+  const rowAccounted = row.accounted_msat ?? row.spent_msat + (row.unsettled_msat ?? 0);
+  const totalAccounted = view.accounted_msat ?? view.spent_msat + view.unsettled_msat;
+  if (rowAccounted + cost > row.limit_msat) {
+    const want = Math.max(row.limit_msat * 2, rowAccounted + cost);
     return { kind: 'contact_used', limit: row.limit_msat, spent: row.spent_msat, raiseTo: want <= ceiling ? want : ceiling > row.limit_msat ? ceiling : null };
   }
-  if (view.spent_msat + cost > ceiling) {
-    const want = Math.min(Math.max(ceiling * 2, view.spent_msat + cost), view.max_daily_msat);
+  if (totalAccounted + cost > ceiling) {
+    const want = Math.min(Math.max(ceiling * 2, totalAccounted + cost), view.max_daily_msat);
     return { kind: 'total_used', ceiling, spent: view.spent_msat, raiseTo: want > ceiling ? want : null };
   }
   return { kind: 'ok', limit: row.limit_msat, spent: row.spent_msat, ceiling, totalSpent: view.spent_msat };

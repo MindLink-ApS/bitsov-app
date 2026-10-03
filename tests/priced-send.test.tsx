@@ -21,7 +21,7 @@ function sourceForSend() {
   const source = sampleSource({ firstLiveMs: 1e9 });
   source.spendStatus = async () => ({ state: 'open', basis: 'node_grant', open_until_ms: Date.now() + 600000, pending: null, window_ms: 600000 });
   source.priceQuote = async () => quote;
-  source.send = vi.fn(async (recipient, isRoom) => ({ message_id: 'paid', recipient, is_room: isRoom, delivered: true, amount_msat: 2250, max_routing_fee_msat: 0, total_msat: 2250, sent_at_ms: Date.now() }));
+  source.send = vi.fn(async (recipient, isRoom) => ({ message_id: 'paid', recipient, is_room: isRoom, delivered: true, amount_msat: 2250, fee_paid_msat: 0, max_routing_fee_msat: 0, total_msat: 2250, sent_at_ms: Date.now() }));
   return source;
 }
 async function open(source: Source) {
@@ -43,7 +43,7 @@ it('never relabels a retained fee allowance as actual paid', async () => {
   const source = sourceForSend();
   source.send = vi.fn(async (recipient, isRoom) => ({ message_id: 'paid', recipient, is_room: isRoom, delivered: true, amount_msat: 2250, total_msat: 9750, max_routing_fee_msat: 7500, sent_at_ms: Date.now() }));
   await open(source); $<HTMLButtonElement>('[data-send]').click();
-  await vi.waitFor(() => expect(line()).toBe('paid amount unknown · routing fee not reported'));
+  await vi.waitFor(() => expect(line()).toBe('paid 2.25 sats · fee unknown'));
 });
 it.each([
   { fee: 375, readmission: undefined, ceiling: 7500, paid: '2.625' },
@@ -64,7 +64,7 @@ it('keeps the paid amount unknown for an older node omitting both fee fields', a
   source.send = vi.fn(async (recipient, isRoom) => ({ message_id: 'paid', recipient, is_room: isRoom,
     delivered: true, amount_msat: 2250, sent_at_ms: Date.now() }));
   await open(source); $<HTMLButtonElement>('[data-send]').click();
-  await vi.waitFor(() => expect(line()).toBe('paid amount unknown · routing fee not reported'));
+  await vi.waitFor(() => expect(line()).toBe('paid 2.25 sats · fee unknown'));
 });
 it.each(['loading', 'failed', 'missing', 'stale', 'fee'] as const)('disables send with an honest reason when price is %s', async (state) => {
   const source = sourceForSend();
@@ -81,7 +81,7 @@ it('ignores double-click and held Enter, including after a raised-price refusal'
       await new Promise<void>(resolve => { finish = resolve; });
       throw { code: 'readmission_quoted', message: 'Nothing paid', admission: { admission_msat: 1000, message_msat: 2000, max_routing_fee_msat: 10000, total_msat: 13000, quoted: true } };
     }
-    return { message_id: 'paid', recipient, is_room: isRoom, delivered: true, amount_msat: 2000, readmission_msat: 1000, max_routing_fee_msat: 0, sent_at_ms: Date.now() };
+    return { message_id: 'paid', recipient, is_room: isRoom, delivered: true, amount_msat: 2000, readmission_msat: 1000, fee_paid_msat: 0, max_routing_fee_msat: 0, sent_at_ms: Date.now() };
   });
   await open(source);
   $<HTMLButtonElement>('[data-send]').click(); $<HTMLButtonElement>('[data-send]').click(); enter(true);
@@ -192,4 +192,21 @@ it('preserves a first-contact readiness refusal under Send and recovers on retry
   source.firstContactQuote = async (recipient) => ({ recipient, admission_msat: 1000, message_msat: 2000, max_routing_fee_msat: 10000, total_msat: 13000, expires_at: Math.floor(Date.now() / 1000) + 60 });
   $<HTMLButtonElement>('[data-price-retry]').click();
   await vi.waitFor(() => expect(line()).toBe('up to 13 sats · includes max routing fee'));
+});
+
+// #125: receipt ceilings must never become the amount displayed in the bubble.
+it.each([
+  { principal: 0, fee: 375, ceiling: 5000, expected: 'paid 0.375 sats' },
+  { fee: 0, ceiling: 5000, expected: 'paid 1 sat' },
+  { fee: 375, ceiling: 5000, expected: 'paid 1.375 sats' },
+  { fee: undefined, ceiling: 5000, expected: 'paid 1 sat · fee unknown' },
+  { fee: undefined, ceiling: 0, expected: 'paid 1 sat · fee unknown' },
+])('bubble uses settlement evidence: $expected (ceiling $ceiling)', async ({ principal = 1000, fee, ceiling, expected }) => {
+  const source = sourceForSend();
+  source.send = async (recipient, isRoom) => ({ message_id: 'paid', recipient, is_room: isRoom,
+    delivered: true, amount_msat: principal, fee_paid_msat: fee, max_routing_fee_msat: ceiling,
+    total_msat: 6000, sent_at_ms: Date.now() });
+  await open(source); $<HTMLButtonElement>('[data-send]').click();
+  await vi.waitFor(() => expect($('[data-message="paid"] .sats-meta')?.textContent).toBe(expected));
+  expect(line()).toBe(expected);
 });

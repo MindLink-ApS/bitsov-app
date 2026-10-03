@@ -9,7 +9,7 @@ fn review_active_ledger_cannot_forget_spend_after_restart() {
     book.set_limit("contact", false, 20_001_000).unwrap();
     book.ledger = (0..20_001).map(|i| Entry {
         id: i.to_string(), at_ms: now, target: "contact".into(), room: false,
-        msat: 1000, settled: true,
+        msat: 1000, settled: true, paid: None,
     }).collect();
     book.prune(now);
     let dir = tempfile::tempdir().unwrap();
@@ -29,7 +29,7 @@ fn unsettled_reservations_keep_their_lines_and_a_full_book_refuses() {
     let mut book = Book::new(&"a".repeat(64));
     book.set_ceiling(100_000_000);
     book.ledger = (0..budget::LEDGER_MAX).map(|i| Entry {
-        id: i.to_string(), at_ms: now, target: "contact".into(), room: false, msat: 1, settled: false,
+        id: i.to_string(), at_ms: now, target: "contact".into(), room: false, msat: 1, settled: false, paid: None,
     }).collect();
     book.prune(now);
     assert_eq!(book.ledger.len(), budget::LEDGER_MAX, "reservations are never merged or dropped");

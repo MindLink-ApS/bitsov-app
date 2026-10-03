@@ -7,7 +7,7 @@ import { createStore, produce, reconcile } from 'solid-js/store';
 import { qrSvg } from '../qr';
 import type { Proposal } from './ai';
 import { AiTrack, createAiSession } from './AiTrack';
-import { amount as fmtAmount, allIn, clock, day, feeCeiling, routingFee, sats, satsWhole, satUnit, shortId, uptime } from './format';
+import { amount as fmtAmount, paidAmount, budgetNote, allIn, clock, day, feeCeiling, routingFee, sats, satsWhole, satUnit, shortId, uptime } from './format';
 import { amountText, inPaymentBounds, MAX_PAYMENT_MSAT, MIN_PAYMENT_MSAT, parseAmount } from './amountInput';
 import { Organism } from './BodyPanel';
 import { SoftError } from './SoftError';
@@ -265,7 +265,7 @@ export function ControlCenter(props: Props) {
   const [deliveries, setDeliveries] = createStore<Deliveries>({});
   /** What each send actually paid, by message id: a room echo carries one member's share only. */
   const [paid, setPaid] = createStore<Record<string, number>>({});
-  const [allowances, setAllowances] = createStore<Record<string, { total_msat: number; max_routing_fee_msat: number; readmission_msat?: number }>>({});
+  const [allowances, setAllowances] = createStore<Record<string, { total_msat: number; max_routing_fee_msat: number; fee_paid_msat?: number; readmission_msat?: number }>>({});
   const [pendingRevision, setPendingRevision] = createSignal(0);
   const [artifacts, setArtifacts] = createStore<Record<string, Artifact[]>>({});
   // Rooms (room.ts): what each room send did this session, by room id; the New room picker.
@@ -737,6 +737,7 @@ export function ControlCenter(props: Props) {
     setAllowances(receipt.message_id, {
       total_msat: receipt.total_msat ?? receipt.amount_msat + (receipt.readmission_msat ?? 0) + (receipt.max_routing_fee_msat ?? 0),
       max_routing_fee_msat: receipt.max_routing_fee_msat ?? 0,
+      fee_paid_msat: receipt.fee_paid_msat,
       ...(receipt.readmission_msat ? { readmission_msat: receipt.readmission_msat } : {}),
     });
     if (!deliveries[receipt.message_id]) setDeliveries(receipt.message_id, deliveryFromReceipt(receipt));
@@ -1101,7 +1102,7 @@ export function ControlCenter(props: Props) {
       if (r.ok) {
         if (isVoiceNote(200, file.name)) voiceUrls.set(r.value.message_id, Promise.resolve(URL.createObjectURL(file)));
         setPaid(r.value.message_id, r.value.amount_msat);
-        setAllowances(r.value.message_id, { total_msat: r.value.total_msat ?? r.value.amount_msat + (r.value.max_routing_fee_msat ?? 0), max_routing_fee_msat: r.value.max_routing_fee_msat ?? 0 });
+        setAllowances(r.value.message_id, { total_msat: r.value.total_msat ?? r.value.amount_msat + (r.value.max_routing_fee_msat ?? 0), max_routing_fee_msat: r.value.max_routing_fee_msat ?? 0, fee_paid_msat: r.value.fee_paid_msat, readmission_msat: r.value.readmission_msat });
         if (!deliveries[r.value.message_id]) setDeliveries(r.value.message_id, deliveryFromReceipt(r.value));
         setThreads('t', trackKey(t), (old) => mergeMessages(old ?? [], [sentFileMessage(r.value, ownId())]));
         setThreads('fresh', r.value.message_id, true);
@@ -1901,7 +1902,7 @@ function Conversation(props: {
   fresh: Record<string, true>;
   deliveries: Deliveries;
   paid: Record<string, number>;
-  allowances: Record<string, { total_msat: number; max_routing_fee_msat: number }>;
+  allowances: Record<string, { total_msat: number; max_routing_fee_msat: number; fee_paid_msat?: number; readmission_msat?: number }>;
   ownId: string;
   /** This node's Bitcoin network, when the host knows it. */
   homeNetwork: string | null;
@@ -2191,7 +2192,7 @@ function MessageView(props: {
   fresh: boolean;
   delivery: Delivery | undefined;
   paid: number | undefined;
-  allowance?: { total_msat: number; max_routing_fee_msat: number; readmission_msat?: number };
+  allowance?: { total_msat: number; max_routing_fee_msat: number; fee_paid_msat?: number; readmission_msat?: number };
   nameOf: (id: string) => string;
   now?: number;
   homeNetwork?: string | null;
@@ -2206,7 +2207,8 @@ function MessageView(props: {
   fileFetch?: (messageId: string) => Promise<VoiceBlob>;
   fileSave?: (messageId: string) => Promise<FileSaveResult>;
 }) {
-  const amount = () => props.allowance?.total_msat ?? props.paid ?? props.m.payment_amount_msat;
+  const amount = () => (props.paid ?? props.m.payment_amount_msat ?? 0) + (props.allowance?.readmission_msat ?? 0);
+  const paidLabel = () => paidAmount(amount(), props.allowance?.fee_paid_msat);
   // Only a received chat message in a peer thread can be a request card.
   const request = createMemo(() =>
     props.out || props.room || !props.onPay || props.m.kind === 200
@@ -2276,19 +2278,13 @@ function MessageView(props: {
         {(reason) => <p class="hint request-note" data-request-plain={reason()}>{NOT_PAYABLE_NOTE[reason()]}</p>}
       </Show>
       <div class="stamp">
-        <Show when={amount()}>
+        <Show when={props.paid !== undefined || props.m.payment_amount_msat != null}>
           <span
             class="sats-meta"
-            title={`${sats(amount()!)} ${satUnit(amount()!)} · ${props.out ? (props.allowance ? `all-in ceiling (${feeCeiling(props.allowance.max_routing_fee_msat)})` : 'principal paid; fee not in history') : 'to you'}`}
+            title={props.out ? paidLabel() : `${fmtAmount(amount())} · to you`}
           >
             <Bolt />
-            <span class="sats">{fmtAmount(amount()!)}</span>
-            <Show when={props.out && props.allowance}>
-              <span class="sr-only">{' '}all-in ceiling ({feeCeiling(props.allowance!.max_routing_fee_msat)})</span>
-            </Show>
-            <Show when={props.out && !props.allowance}>
-              <span class="sr-only">principal paid; fee not in history</span>
-            </Show>
+            <span class="sats">{props.out ? paidLabel() : fmtAmount(amount())}</span>
           </span>
           <Show when={props.out && props.allowance?.readmission_msat}>
             <span data-readmission-paid>incl. admission again {sats(props.allowance!.readmission_msat!)} {satUnit(props.allowance!.readmission_msat!)}</span>
@@ -3495,11 +3491,7 @@ function Composer(props: {
       return;
     }
     const receipt = result.value as SendReceipt;
-    const fee = receipt.fee_paid_msat ?? (receipt.max_routing_fee_msat === 0 ? 0 : undefined);
-    const paid = receipt.amount_msat + (receipt.readmission_msat ?? 0) + (fee ?? 0);
-    setPaidLine(fee !== undefined && Number.isSafeInteger(fee) && fee >= 0 && Number.isSafeInteger(paid) && paid >= 0
-      ? `paid ${fmtAmount(paid)}`
-      : 'paid amount unknown · routing fee not reported');
+    setPaidLine(paidAmount(receipt.amount_msat + (receipt.readmission_msat ?? 0), receipt.fee_paid_msat));
   };
   const priceLine = () => {
     if (paidLine()) return paidLine();
@@ -4648,7 +4640,9 @@ function BudgetBar(props: {
             <div class="approval budget-used" data-budget-used="contact">
               <p>
                 <strong>Budget for {who()} used up.</strong> {fmtAmount(st().spent)} of {fmtAmount(st().limit)} in the last 24 hours, and this
-                message costs {props.priceMsat === null ? '…' : fmtAmount(props.priceMsat)}. It frees up as older payments pass 24 hours.
+                message costs {props.priceMsat === null ? '…' : fmtAmount(props.priceMsat)}.
+                <Show when={budgetNote(props.budget.rows.find(r => r.target === props.target && r.room === props.room))}>{note => <> {note()}.</>}</Show>
+                {' '}It frees up as older payments pass 24 hours.
               </p>
               <Show
                 when={st().raiseTo}
@@ -4675,7 +4669,7 @@ function BudgetBar(props: {
             <div class="approval budget-used" data-budget-used="total">
               <p>
                 <strong>Your app all-in limit is used up.</strong> {fmtAmount(st().spent)} of {fmtAmount(st().ceiling)} in the last 24 hours. Raising
-                it is a new approval.
+                it is a new approval. {budgetNote(props.budget)}
               </p>
               <Show when={st().raiseTo}>
                 {(to) => (
@@ -4693,7 +4687,9 @@ function BudgetBar(props: {
               <p class="spend-line" data-budget-line>
                 <span class="dot ok" />
                 <span class="line-text">
-                  Pays automatically · {fmtAmount(st().spent)} of {fmtAmount(st().limit)} to {who()} in 24 h · approval ends in{' '}
+                  Pays automatically · {fmtAmount(st().spent)} of {fmtAmount(st().limit)} to {who()} in 24 h
+                  <Show when={budgetNote(props.budget.rows.find(r => r.target === props.target && r.room === props.room))}>{note => <> · {note()}</>}</Show>
+                  {' '}· approval ends in{' '}
                   {hoursLeft(props.budget.autopay.open_until_ms, props.now, props.budget.window_ms)} h ·{' '}
                   <button type="button" class="link" data-pause-all onClick={() => void props.actions.pauseAll()}>Pause app payments</button>
                 </span>
@@ -4756,7 +4752,7 @@ function BudgetPanel(props: {
       <details class="quiet-detail hint" data-budget-scope>
         <summary><strong>App all-in · rolling 24 h</strong> — what it covers</summary>
         <p>
-          Covers automatic and manual-window messages, room sends, files, app invoice payments and keysend, and admission, including their maximum network fees. Conservative allowance, not an exact wallet-debit total.
+          Covers automatic and manual-window messages, room sends, files, app invoice payments and keysend, and admission, including their maximum network fees. Paid totals use reported principal and fees. In-flight ceilings are reserved separately; unreported fees remain unknown.
           Not covered: channel opening/closing, on-chain transfers and fees, owner-direct CLI/API, or background workers.
           G1 is a separate finite node grant; it does not refill daily. Not a wallet-wide limit.
         </p>
@@ -4765,13 +4761,16 @@ function BudgetPanel(props: {
         {(b) => (
           <>
             <div class="tally" data-tally>
-              <span class="label">App all-in payments in the last 24 hours</span>
+              <span class="label">Known paid in the last 24 hours</span>
               <span class="sats big" data-tally-total>
                 {fmtAmount(b().spent_msat)} <span class="unit">/ {fmtAmount(b().ceiling_msat)}</span>
               </span>
               <span class="meter" aria-hidden="true"><span style={{ width: pct(b().spent_msat, b().ceiling_msat) }} /></span>
               <Show when={b().unsettled_msat > 0}>
-                <span class="hint" data-unsettled>Includes {fmtAmount(b().unsettled_msat)} whose outcome is not known yet, counted at their price cap.</span>
+                <span class="hint" data-unsettled>{fmtAmount(b().unsettled_msat)} reserved at send ceilings; outcome not known yet.</span>
+              </Show>
+              <Show when={b().fee_unknown}>
+                <span class="hint" data-fee-unknown>{budgetNote({ ...b(), unsettled_msat: 0, accounted_msat: (b().accounted_msat ?? b().spent_msat) - b().unsettled_msat })}</span>
               </Show>
               <Show when={b().node_grant}>
                 {(g) => (
@@ -4813,6 +4812,7 @@ function BudgetPanel(props: {
                         <span class="unit">{row.limit_msat === null ? ', approved by hand' : `/ ${fmtAmount(row.limit_msat)}`}</span>
                       </span>
                     </div>
+                    <Show when={budgetNote(row)}>{note => <span class="hint">{note()}</span>}</Show>
                     <Show when={row.limit_msat !== null}>
                       <span class="meter" aria-hidden="true"><span style={{ width: pct(row.spent_msat, row.limit_msat!) }} /></span>
                     </Show>

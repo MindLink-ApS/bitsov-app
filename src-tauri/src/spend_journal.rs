@@ -23,9 +23,12 @@ pub struct Pending {
     pub max_msat: u64,
     pub target: Option<Target>,
     pub over_budget: bool,
-    /// Reported aggregate paid amount awaiting durable local accounting.
+    /// Conservative charge awaiting durable accounting; `paid` holds the evidence.
     #[serde(default)]
     pub accounting_msat: Option<u64>,
+    /// Payment evidence saved atomically with the conservative accounting amount.
+    #[serde(default)]
+    pub paid: Option<crate::budget::Paid>,
     /// Paid, not delivered (502 `payment_settled_send_incomplete`). A delivery
     /// retry updates this same record in place; nothing else passes the fence,
     /// and reconciliation never removes it (see [`Undelivered`]).
@@ -219,7 +222,7 @@ impl Journal {
             id: fresh_id()?, rollback_charge_id: None,
             node_id: node_id.to_string(),
             request_hash: blake3::hash(format!("{path}\n{body}").as_bytes()).to_hex().to_string(),
-            max_msat, target: None, over_budget: false, accounting_msat: None, undelivered: None, charge_id: None, budgeted: false, all_in: false,
+            max_msat, target: None, over_budget: false, accounting_msat: None, paid: None, undelivered: None, charge_id: None, budgeted: false, all_in: false,
             peer: operation_id.as_ref().and(body["recipient"].as_str()).map(str::to_string),
             operation_id, op, resumable: false,
         };
@@ -402,7 +405,7 @@ mod tests {
     #[test]
     fn reconciliation_needs_exact_terminal_outgoing_evidence() {
         let p = Pending { id: "attempt".into(), rollback_charge_id: None, node_id:"node".into(), request_hash:"hash".into(), max_msat:2000,
-            target:Some(Target::Payment { hash:"abc".into() }), over_budget:false, accounting_msat: None, undelivered: None, charge_id: None, budgeted: false, all_in: false, operation_id: None, op: None, peer: None, resumable: false };
+            target:Some(Target::Payment { hash:"abc".into() }), over_budget:false, accounting_msat: None, paid: None, undelivered: None, charge_id: None, budgeted: false, all_in: false, operation_id: None, op: None, peer: None, resumable: false };
         assert_eq!(terminal(&p, &[]), None);
         assert_eq!(terminal(&p, &[json!({"payment_hash":"other", "amount_msat":2000, "direction":"outgoing", "status":"settled"})]), None);
         for status in ["pending", "inflight", "expired", "unknown"] {
@@ -418,7 +421,7 @@ mod tests {
     #[test]
     fn message_reconciliation_rejects_other_sender_and_recipient() {
         let p = Pending { id: "attempt".into(), rollback_charge_id: None, node_id:"node".into(), request_hash:"hash".into(), max_msat:2000,
-            target:Some(Target::Message { id:"abc".into(), peer:"peer".into() }), over_budget:false, accounting_msat: None, undelivered: None, charge_id: None, budgeted: false, all_in: false, operation_id: None, op: None, peer: None, resumable: false };
+            target:Some(Target::Message { id:"abc".into(), peer:"peer".into() }), over_budget:false, accounting_msat: None, paid: None, undelivered: None, charge_id: None, budgeted: false, all_in: false, operation_id: None, op: None, peer: None, resumable: false };
         let mut row = json!({"id":"abc", "sender":"other", "recipient":"peer", "payment_amount_msat":2000});
         assert_eq!(terminal(&p, &[row.clone()]), None);
         row["sender"] = json!("node");

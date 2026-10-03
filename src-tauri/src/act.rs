@@ -1446,6 +1446,10 @@ pub fn file_send_path(file_id: &str) -> Result<String, ActionError> {
 /// A sent file, as the stream shows it.
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct FileReceipt {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readmission_msat: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fee_paid_msat: Option<u64>,
     pub total_msat: u64,
     pub max_routing_fee_msat: u64,
     pub message_id: String,
