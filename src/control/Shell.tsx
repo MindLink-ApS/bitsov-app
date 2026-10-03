@@ -124,6 +124,9 @@ import type {
 const REFRESH_MS = { overview: 10_000, peers: 15_000, wallet: 20_000, rooms: 30_000, door: 30_000, energy: 30_000, membrane: 30_000, clock: 5_000, spend: 3_000 } as const;
 
 type Props = {
+  remote?: boolean;
+  retryAfterSecs?: number | null;
+  onReconnect?: () => Promise<void>;
   source: Source;
   /** Node running and the local-trust disclosure accepted: the shell may read. */
   active: boolean;
@@ -1086,7 +1089,7 @@ export function ControlCenter(props: Props) {
   };
 
   const pill = () =>
-    nodePill({ ready: props.ready, error: props.error, overview: overview(), link: link(), nowMs: now() });
+    nodePill({ remote: props.remote, retryAfterSecs: props.retryAfterSecs, ready: props.ready, error: props.error, overview: overview(), link: link(), nowMs: now() });
 
   const trackName = (t: TrackRef): string => {
     if (t.kind === 'peer') return peerName(peerById().get(t.id), t.id);
@@ -1186,7 +1189,7 @@ export function ControlCenter(props: Props) {
             <Show when={peersLoaded()} fallback={
               <div class="empty-track">
                 <Show when={errors.peers} fallback={<DelayedSpinner />}>
-                  <SoftError message={errors.peers!} summary="We could not load your contacts." onReconnect={loadPeers} />
+                  <SoftError message={errors.peers!} summary="We could not load your contacts." onReconnect={async () => { await props.onReconnect?.(); await loadPeers(); }} />
                 </Show>
               </div>
             }>{welcomeHome()}</Show>
@@ -1317,7 +1320,7 @@ export function ControlCenter(props: Props) {
                     actions={actions}
                     now={now()}
                     error={errors.thread}
-                    onReconnect={() => loadThread(t())}
+                    onReconnect={async () => { await props.onReconnect?.(); await loadThread(t()); }}
                     prefill={prefill()}
                     onPrefillUsed={() => setPrefill(null)}
                     onContext={() => setContextOpen(true)}
@@ -1388,11 +1391,11 @@ export function ControlCenter(props: Props) {
             />
           </Match>
           <Match when={tab() === 'node'}>
-            <NodePanel overview={overview()} link={link()} peers={peers()} now={now()} error={errors.overview ?? errors.peers} onReconnect={async () => { await loadOverview(); await loadPeers(); }} />
+            <NodePanel overview={overview()} link={link()} peers={peers()} now={now()} error={props.error ?? errors.overview ?? errors.peers} onReconnect={async () => { await props.onReconnect?.(); await loadOverview(); await loadPeers(); }} />
           </Match>
           <Match when={tab() === 'wallet'}>
             <button type="button" class="primary soft" data-open-wallet-page onClick={() => openWallet()}>Open Wallet</button>
-            <WalletPanel moneyBlocked={moneyBlocked()} wallet={wallet()} error={errors.wallet} onReconnect={loadWallet} fund={props.fund?.(source, moneyBlocked)} />
+            <WalletPanel moneyBlocked={moneyBlocked()} wallet={wallet()} error={errors.wallet} onReconnect={async () => { await props.onReconnect?.(); await loadWallet(); }} fund={props.fund?.(source, moneyBlocked)} />
           </Match>
           <Match when={tab() === 'budget'}>
             <BudgetPanel
@@ -1461,6 +1464,7 @@ export function ControlCenter(props: Props) {
             actions={walletActions}
             reads={{ fundingAddress: () => source.fundingAddress(), invoiceStatus: (b) => source.invoiceStatus(b), messages: (id) => source.messages(id) }}
             onRefresh={() => void loadWallet()}
+            onReconnect={async () => { await props.onReconnect?.(); await loadWallet(); }}
           />
         )}
       </Show>

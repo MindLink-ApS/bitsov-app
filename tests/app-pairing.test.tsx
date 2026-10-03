@@ -33,6 +33,36 @@ describe('app shell pairing wiring', () => {
     vi.unstubAllGlobals();
   });
 
+  it('Reconnect recovers an already-paired remote connection instead of polling only', async () => {
+    let recovered = false;
+    vi.stubGlobal('__TAURI_INTERNALS__', { invoke: (cmd: string) => {
+      if (cmd === 'node_status') return Promise.resolve({ ready: recovered, node_id: 'ef'.repeat(32), error: recovered ? null : 'remote handshake limit or endpoint unavailable' });
+      if (cmd === 'pairing_status') return Promise.resolve({ ...paired, remote: true });
+      if (cmd === 'pairing_retry') { recovered = true; return Promise.resolve({ ...paired, remote: true }); }
+      return Promise.reject(new Error('not available'));
+    } });
+    mount = document.createElement('div'); document.body.appendChild(mount);
+    dispose = render(() => <App />, mount);
+    await vi.waitFor(() => expect(mount!.textContent).toContain('Reconnect'));
+    Array.from(mount.querySelectorAll('button')).find(b => b.textContent === 'Reconnect')!.click();
+    await vi.waitFor(() => expect(mount!.querySelector('[data-gate="g6-remote-trust"]')).not.toBeNull());
+  });
+
+  it('shows the host retry countdown without claiming the remote node stopped', async () => {
+    let remaining = 42;
+    vi.stubGlobal('__TAURI_INTERNALS__', { invoke: (cmd: string) => {
+      if (cmd === 'node_status') return Promise.resolve({ ready: false, node_id: null, error: 'remote handshake limit or endpoint unavailable', retry_after_secs: remaining });
+      if (cmd === 'pairing_status') return Promise.resolve({ ...paired, remote: true });
+      return Promise.reject(new Error('not available'));
+    } });
+    mount = document.createElement('div'); document.body.appendChild(mount);
+    dispose = render(() => <App />, mount);
+    await vi.waitFor(() => expect(mount!.textContent).toMatch(/waiting 42 s/i));
+    expect(mount.textContent).not.toContain('Node stopped');
+    remaining = 40;
+    await vi.waitFor(() => expect(mount!.textContent).toMatch(/waiting 40 s/i), { timeout: 2000 });
+  });
+
   it.each([
     ['different node', 'cd'.repeat(32), false],
     ['different connection mode', 'ab'.repeat(32), true],

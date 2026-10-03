@@ -138,6 +138,7 @@ export function WalletPage(props: {
   actions: WalletActions;
   reads: WalletReads;
   onRefresh: () => void;
+  onReconnect?: () => void | Promise<void>;
 }) {
   const split = () => (props.wallet ? splitBalance(props.wallet) : null);
 
@@ -179,7 +180,7 @@ export function WalletPage(props: {
       <div class="wallet-body">
         <section class="wallet-hero" data-wallet-balance>
           <span class="label">Node-reported total</span>
-          <Show when={split()} fallback={<Show when={!props.walletError} fallback={<SoftError message={props.walletError!} data="wallet-read" onReconnect={props.onRefresh} />}><DelayedSpinner /></Show>}>
+          <Show when={split()} fallback={<Show when={!props.walletError} fallback={<SoftError message={props.walletError!} data="wallet-read" onReconnect={props.onReconnect ?? props.onRefresh} />}><DelayedSpinner /></Show>}>
             {(s) => (
               <>
                 <span class="wallet-total" data-balance-total={s().total}>

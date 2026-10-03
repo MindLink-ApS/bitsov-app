@@ -101,6 +101,8 @@ export default function App() {
       setPairing(await source().pairingRetry());
     } catch (e) {
       setPairing({ ...INITIAL_PAIRING, remote, state: 'failed', reason: String(e) });
+    } finally {
+      await poll();
     }
   };
   const useSample = (start: SampleStart) => {
@@ -125,6 +127,12 @@ export default function App() {
           Welcome to BitSov. Sovereign private messaging and bitcoin payments, powered by your own node.
         </p>
       </div>
+
+      <Show when={status().retry_after_secs}>
+        <div class="state" role="status" aria-live="polite" data-remote-retry>
+          Remote connection unavailable · waiting {status().retry_after_secs} s before retrying.
+        </div>
+      </Show>
 
       <Onboarding
         status={status}
@@ -152,7 +160,7 @@ export default function App() {
             }
           >
             <div class="state error">
-              <SoftError message={status().error!} summary="Your node is unavailable." onReconnect={poll} />
+              <SoftError message={status().error!} summary="Your node is unavailable." onReconnect={retryPairing} />
               <Show when={import.meta.env.DEV && source().mode === 'node'}>
                 <button class="quiet" data-use-sample onClick={() => useSample('shell')}>
                   Explore with sample data
@@ -184,10 +192,13 @@ export default function App() {
     <Show
       when={trustAck()}
       fallback={
-        <ControlCenter source={source()} active={false} ready={status().ready} error={status().error} ownId={status().node_id} firstRun={firstRun} />
+        <ControlCenter remote={pairing().remote} retryAfterSecs={status().retry_after_secs} onReconnect={retryPairing} source={source()} active={false} ready={status().ready} error={status().error} ownId={status().node_id} firstRun={firstRun} />
       }
     >
       <ControlCenter
+        remote={pairing().remote}
+        retryAfterSecs={status().retry_after_secs}
+        onReconnect={retryPairing}
         source={source()}
         active={status().ready}
         ready={status().ready}
