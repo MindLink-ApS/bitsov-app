@@ -383,12 +383,17 @@ export type Pill = { tone: 'ok' | 'warn' | 'err' | 'idle'; text: string; live: b
 
 /** The rail's node pill: one glance at whether this seat is connected to its node. */
 export function nodePill(input: {
+  remote?: boolean;
+  retryAfterSecs?: number | null;
   ready: boolean;
   error: string | null;
   overview: NodeOverview | null;
   link: LinkState | null;
   nowMs: number;
 }): Pill {
+  if (input.retryAfterSecs) return { tone: 'warn', text: `Remote connection · waiting ${input.retryAfterSecs} s`, live: false };
+  if (input.remote && input.error) return { tone: 'warn', text: 'Remote connection unavailable', live: false };
+  if (input.remote && !input.ready) return { tone: 'idle', text: 'Connecting to remote node', live: false };
   if (input.error) return { tone: 'err', text: 'Node stopped', live: false };
   if (!input.ready) return { tone: 'idle', text: 'Starting node', live: false };
   if (!input.overview) return { tone: 'ok', text: 'Node running', live: false };

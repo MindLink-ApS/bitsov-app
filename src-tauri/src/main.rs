@@ -176,6 +176,8 @@ struct NodeState {
     /// tunnel. Its drop/stop signal closes the process-local listener.
     remote_proxy: Mutex<Option<RemoteProxy>>,
     remote_mode: AtomicBool,
+    remote_retry: Arc<bitsov_app::connection_retry::RemoteRetry>,
+    remote_recovery: tokio::sync::Mutex<()>,
     expected_remote_node_id: Mutex<Option<String>>,
     /// Short codes the node printed to its stdout (the tripwire).
     printed_codes: PrintedCodes,
@@ -266,6 +268,19 @@ impl NodeState {
         view
     }
 
+    fn status_snapshot(&self) -> Status {
+        let retrying = self.remote_retry.is_retrying();
+        let retry_after_secs = if retrying { self.remote_retry.remaining() } else { None };
+        Status {
+            retry_after_secs,
+            // A surviving WebSocket may keep the bridge occupied. Resume HTTP
+            // polling after cooldown so it can recover independently of /ws.
+            ready: *self.ready.lock().unwrap() && retry_after_secs.is_none(),
+            node_id: self.node_id.lock().unwrap().clone(),
+            error: self.error.lock().unwrap().clone(),
+        }
+    }
+
     fn for_api(api_base: impl Into<String>) -> Self {
         let remote_proxy_auth: Arc<str> = Arc::from(
             remote_access::new_local_auth_token()
@@ -284,6 +299,8 @@ impl NodeState {
             pairing_view: Mutex::new(PairingView::starting()),
             remote_proxy: Mutex::new(None),
             remote_mode: AtomicBool::new(false),
+            remote_retry: Arc::new(bitsov_app::connection_retry::RemoteRetry::default()),
+            remote_recovery: tokio::sync::Mutex::new(()),
             expected_remote_node_id: Mutex::new(None),
             printed_codes: PrintedCodes::default(),
             stale_pairing: AtomicBool::new(false),
@@ -335,6 +352,7 @@ impl NodeState {
 
 #[derive(Serialize, Clone)]
 struct Status {
+    retry_after_secs: Option<u64>,
     ready: bool,
     node_id: Option<String>,
     error: Option<String>,
@@ -934,17 +952,33 @@ async fn attach_remote(
     *state.error.lock().unwrap() = None;
     *state.pairing_view.lock().unwrap() = PairingView::pending();
     let failed = |error: remote_access::RemoteError| {
-        *state.pairing_view.lock().unwrap() = PairingView::from_outcome(&Err(PairError::Local(error.to_string())));
+        *state.pairing_view.lock().unwrap() =
+            PairingView::from_outcome(&Err(PairError::Local(error.to_string())));
     };
-    let descriptor = match bitsov_app::connection_retry::while_connecting(
-        || remote_access::authenticate_pinned_transport_and_save_record(
-            app_data_dir, descriptor.clone(), &key, PAIRING_CLIENT_NAME, &store,
-        ),
-        |error| matches!(error, remote_access::RemoteError::HandshakeUnavailable),
-        || remote_access::RemoteError::Transport("timed out connecting to your node after 30 seconds".into()),
-    ).await {
-        Ok(descriptor) => descriptor,
-        Err(error) => return failed(error),
+    let descriptor = loop {
+        if state.quitting.load(Ordering::SeqCst) {
+            return;
+        }
+        match remote_access::authenticate_pinned_transport_and_save_record(
+            app_data_dir,
+            descriptor.clone(),
+            &key,
+            PAIRING_CLIENT_NAME,
+            &store,
+            &state.remote_retry,
+        )
+        .await
+        {
+            Ok(descriptor) => break descriptor,
+            Err(
+                remote_access::RemoteError::HandshakeUnavailable
+                | remote_access::RemoteError::RateLimited(_)
+                | remote_access::RemoteError::Waiting(_),
+            ) => {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            Err(error) => return failed(error),
+        }
     };
     let proxy = match remote_access::start_proxy(
         &state.api_base,
@@ -954,6 +988,7 @@ async fn attach_remote(
         PAIRING_CLIENT_NAME,
         store,
         state.remote_proxy_auth.clone(),
+        state.remote_retry.clone(),
     )
     .await
     {
@@ -963,7 +998,7 @@ async fn attach_remote(
     // The remote router deliberately omits public health probes. The encrypted
     // pairing/token exchange is the readiness check for this pinned endpoint.
     *state.remote_proxy.lock().unwrap() = Some(proxy);
-    finish_auth(&state, app_data_dir).await;
+    finish_remote_auth(state, app_data_dir).await;
 }
 
 /// Ensure a node config exists (first run), then start + supervise the node,
@@ -975,7 +1010,10 @@ async fn bootstrap_node(app: AppHandle) {
         Err(e) => return set_error(&state, format!("no app data dir: {e}")),
     };
     match remote_access::load_persisted(&app_data_dir) {
-        Ok(Some(descriptor)) => return attach_remote(&state, &app_data_dir, descriptor).await,
+        Ok(Some(descriptor)) => {
+            let _recovery = state.remote_recovery.lock().await;
+            return attach_remote(&state, &app_data_dir, descriptor).await;
+        }
         Ok(None) => {}
         Err(error) => return set_error(&state, error.to_string()),
     }
@@ -1048,10 +1086,61 @@ async fn finish_auth(state: &NodeState, data_dir: &Path) {
                 );
             }
             *state.node_id.lock().unwrap() = Some(node_id);
+            *state.error.lock().unwrap() = None;
             *state.ready.lock().unwrap() = true;
         }
         Err(e) => set_error(state, e),
     }
+}
+
+/// Retry transport outages without restarting the proxy or discarding durable
+/// pairing. A long node cooldown outlives the HTTP client's startup timeout.
+async fn finish_remote_auth(state: &NodeState, data_dir: &Path) {
+    loop {
+        if state.quitting.load(Ordering::SeqCst) {
+            return;
+        }
+        if state.remote_retry.remaining().is_some() {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            continue;
+        }
+        let revision = state.remote_retry.failure_revision();
+        *state.ready.lock().unwrap() = false;
+        finish_auth(state, data_dir).await;
+        // A retained HTTP tunnel can finish auth without opening a handshake.
+        // Only a new transport failure warrants another recovery iteration;
+        // an old retry flag must not spin token requests or hard refusals.
+        if *state.ready.lock().unwrap()
+            || !state.remote_retry.is_retrying()
+            || state.remote_retry.failure_revision() == revision
+        {
+            state.remote_retry.clear_expired();
+            return;
+        }
+    }
+}
+
+async fn reconnect_remote(state: &NodeState) -> Result<(), String> {
+    // A click while recovery is in flight joins that attempt; it never cancels
+    // the cooldown or starts another bootstrap/proxy.
+    let Ok(_recovery) = state.remote_recovery.try_lock() else {
+        return Ok(());
+    };
+    let ctx = state
+        .pairing
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| "pairing is not available yet: the node has not started".to_string())?;
+    if state.remote_proxy.lock().unwrap().is_none() {
+        let descriptor = remote_access::load_persisted(&ctx.data_dir)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "remote pairing descriptor is missing".to_string())?;
+        attach_remote(state, &ctx.data_dir, descriptor).await;
+    } else {
+        finish_remote_auth(state, &ctx.data_dir).await;
+    }
+    Ok(())
 }
 
 // ---- pairing ----------------------------------------------------------------
@@ -1562,11 +1651,7 @@ fn node_status(
     state: State<'_, NodeState>,
 ) -> Result<Status, String> {
     reject_sealed_window(&window)?;
-    Ok(Status {
-        ready: *state.ready.lock().unwrap(),
-        node_id: state.node_id.lock().unwrap().clone(),
-        error: state.error.lock().unwrap().clone(),
-    })
+    Ok(state.status_snapshot())
 }
 
 /// Pairing state for the onboarding screen. Carries no token and no key.
@@ -1602,10 +1687,9 @@ fn remote_access_import(
         .map_err(|error| error.to_string())
 }
 
-/// Retry after a pairing failure. A no-op unless the last attempt failed. Only
-/// when the node said it no longer knows this client is the stored pairing
-/// dropped for a fresh ceremony — still gated by the challenge file and the
-/// node's own pairing window. Never falls back to `/auth/local` on a failure.
+/// Reconnect the remote transport even if pairing already succeeded. Local
+/// pairing retries only a failed ceremony; only a confirmed unknown local
+/// client can discard its stored pairing. Never downgrades remote auth.
 #[tauri::command(rename_all = "snake_case")]
 async fn pairing_retry(
     window: WebviewWindow<impl tauri::Runtime>,
@@ -1613,6 +1697,10 @@ async fn pairing_retry(
 ) -> Result<PairingView, String> {
     reject_sealed_window(&window)?;
     drop(window);
+    if state.remote_mode.load(Ordering::SeqCst) {
+        reconnect_remote(state.inner()).await?;
+        return Ok(state.pairing_snapshot());
+    }
     let ctx = state
         .pairing
         .lock()
@@ -1620,13 +1708,6 @@ async fn pairing_retry(
         .clone()
         .ok_or_else(|| "pairing is not available yet: the node has not started".to_string())?;
     if state.pairing_view.lock().unwrap().state != "failed" {
-        return Ok(state.pairing_snapshot());
-    }
-    if state.remote_mode.load(Ordering::SeqCst) && state.remote_proxy.lock().unwrap().is_none() {
-        let descriptor = remote_access::load_persisted(&ctx.data_dir)
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| "remote pairing descriptor is missing".to_string())?;
-        attach_remote(state.inner(), &ctx.data_dir, descriptor).await;
         return Ok(state.pairing_snapshot());
     }
     if state.stale_pairing.swap(false, Ordering::SeqCst) {
@@ -6153,6 +6234,9 @@ async fn live_bridge(app: AppHandle) {
     let state = app.state::<NodeState>();
     control::run_live_feed(
         || async {
+            if state.remote_mode.load(Ordering::SeqCst) && state.remote_retry.is_retrying() {
+                let _ = reconnect_remote(&state).await;
+            }
             if !*state.ready.lock().unwrap() { return Ok(None); }
             ensure_fresh_token(&state).await;
             let Some(token) = state.token.lock().unwrap().clone() else { return Ok(None); };
@@ -6627,6 +6711,122 @@ mod verified_local_socket_tests {
 mod remote_onboarding_tests {
     use super::*;
 
+    #[tokio::test(start_paused = true)]
+    async fn healthy_handshakes_do_not_report_a_cooldown_or_disable_the_shell() {
+        let state = NodeState::for_api("http://127.0.0.1:1/api/v1");
+        *state.ready.lock().unwrap() = true;
+        state
+            .remote_retry
+            .run(|| async {
+                assert!(state.status_snapshot().ready);
+                assert_eq!(state.status_snapshot().retry_after_secs, None);
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let _: Result<(), _> = state
+            .remote_retry
+            .run(|| async { Err(remote_access::RemoteError::RateLimited(60)) })
+            .await;
+        assert!(!state.status_snapshot().ready);
+        assert!(state.status_snapshot().retry_after_secs.unwrap() >= 60);
+        // The existing WebSocket may still be open, so its bridge cannot drive
+        // recovery. Expired retry debt must not leave HTTP polling disabled.
+        tokio::time::advance(Duration::from_secs(61)).await;
+        assert!(state.remote_retry.is_retrying());
+        assert!(state.status_snapshot().ready);
+        assert_eq!(state.status_snapshot().retry_after_secs, None);
+    }
+
+    #[tokio::test]
+    async fn reconnect_when_already_paired_sends_and_preserves_the_hint_and_durable_keys() {
+        use base64::Engine;
+        use ed25519_dalek::{Signer, SigningKey};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = listener.local_addr().unwrap().to_string();
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = attempts.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                seen.fetch_add(1, Ordering::SeqCst);
+                let length = stream.read_u32().await.unwrap();
+                let mut message = vec![0; length as usize];
+                stream.read_exact(&mut message).await.unwrap();
+                let hint = br#"{"v":1,"code":"rate_limited","retry_after_secs":60}"#;
+                stream.write_u32(hint.len() as u32).await.unwrap();
+                stream.write_all(hint).await.unwrap();
+            }
+        });
+        let data = tempfile::tempdir().unwrap();
+        let state = NodeState::for_api("http://127.0.0.1:1/api/v1");
+        state.remote_mode.store(true, Ordering::SeqCst);
+        let ctx = pairing_ctx(&state, data.path()).unwrap();
+        pairing::save_remote_record(
+            &ctx.store,
+            &ctx.key,
+            "0123456789abcdef0123456789abcdef".into(),
+            vec!["read".into()],
+        )
+        .unwrap();
+        let node = SigningKey::from_bytes(&[42; 32]);
+        let node_id = hex::encode(node.verifying_key().to_bytes());
+        let transport_pubkey = hex::encode([43; 32]);
+        let signature = node.sign(
+            remote_access::descriptor_signature_message(&node_id, &transport_pubkey).as_bytes(),
+        );
+        let link = remote_access::PairingLinkV1 {
+            v: 1,
+            endpoint,
+            node_id,
+            transport_pubkey,
+            transport_signature: base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(signature.to_bytes()),
+            code: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([44; 32]),
+        };
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&link).unwrap());
+        remote_access::import_pairing_link(data.path(), &format!("bitsov://pair/{encoded}"))
+            .unwrap();
+        let descriptor_path = data
+            .path()
+            .join(remote_access::REMOTE_CONFIG_DIR)
+            .join(remote_access::REMOTE_CONFIG_FILE);
+        let mut stored: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&descriptor_path).unwrap()).unwrap();
+        stored.as_object_mut().unwrap().remove("code");
+        std::fs::write(&descriptor_path, serde_json::to_vec(&stored).unwrap()).unwrap();
+        let key_before = std::fs::read(ctx.store.join(pairing::KEY_FILE)).unwrap();
+        let record_before = std::fs::read(ctx.store.join(pairing::RECORD_FILE)).unwrap();
+        state.pairing_view.lock().unwrap().state = "paired";
+        *state.error.lock().unwrap() = Some(remote_access::HANDSHAKE_UNAVAILABLE.into());
+        // A previous paired outcome must not short-circuit the actual attempt.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), reconnect_remote(&state))
+                .await
+                .is_err()
+        );
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert!(state.remote_retry.remaining().unwrap() >= 60);
+        // Cancellation / another Reconnect cannot clear the node's deadline.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), reconnect_remote(&state))
+                .await
+                .is_err()
+        );
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            std::fs::read(ctx.store.join(pairing::KEY_FILE)).unwrap(),
+            key_before
+        );
+        assert_eq!(
+            std::fs::read(ctx.store.join(pairing::RECORD_FILE)).unwrap(),
+            record_before
+        );
+        server.abort();
+    }
+
     #[test]
     fn pairing_snapshot_exports_running_mode_in_every_state_without_credentials() {
         // Constructing the host does not start it or make any requests.
@@ -6731,6 +6931,88 @@ mod pairing_wiring_tests {
             let mode = std::fs::metadata(key).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600);
         }
+    }
+
+    #[tokio::test]
+    async fn remote_reauthentication_waits_then_recovers_paired_state_and_clears_stale_error() {
+        let f = fixture(PairRoutes::Live);
+        authenticate(&f.state, f.data_dir.path()).await.unwrap();
+        f.state.remote_mode.store(true, Ordering::SeqCst);
+        *f.state.expected_remote_node_id.lock().unwrap() = Some(mock_node::NODE_ID.into());
+        *f.state.error.lock().unwrap() = Some(remote_access::HANDSHAKE_UNAVAILABLE.into());
+        let ctx = f.state.pairing.lock().unwrap().clone().unwrap();
+        let key_before = std::fs::read(ctx.store.join(pairing::KEY_FILE)).unwrap();
+        let record_before = std::fs::read(ctx.store.join(pairing::RECORD_FILE)).unwrap();
+        let before = f.node.calls("/api/v1/pair/challenge");
+        f.state
+            .remote_retry
+            .failed(&remote_access::RemoteError::RateLimited(1));
+        assert!(tokio::time::timeout(
+            Duration::from_millis(100),
+            finish_remote_auth(&f.state, f.data_dir.path())
+        )
+        .await
+        .is_err());
+        assert_eq!(f.node.calls("/api/v1/pair/challenge"), before);
+        // An existing authenticated HTTP connection can recover without a new
+        // handshake. Its success must still complete this recovery exactly once.
+        tokio::time::sleep(Duration::from_secs(
+            f.state.remote_retry.remaining().unwrap(),
+        ))
+        .await;
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            finish_remote_auth(&f.state, f.data_dir.path()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(f.node.calls("/api/v1/pair/challenge"), before + 1);
+        assert!(f.state.status_snapshot().ready);
+        assert_eq!(f.state.status_snapshot().error, None);
+        assert_eq!(f.state.status_snapshot().retry_after_secs, None);
+        assert_eq!(f.state.pairing_snapshot().state, "paired");
+        assert_eq!(
+            std::fs::read(ctx.store.join(pairing::KEY_FILE)).unwrap(),
+            key_before
+        );
+        assert_eq!(
+            std::fs::read(ctx.store.join(pairing::RECORD_FILE)).unwrap(),
+            record_before
+        );
+        assert_eq!(f.node.calls("/api/v1/auth/local"), 0);
+    }
+
+    #[tokio::test]
+    async fn remote_reauthentication_stops_on_refusal_even_with_old_retry_debt() {
+        let f = fixture(PairRoutes::Live);
+        authenticate(&f.state, f.data_dir.path()).await.unwrap();
+        f.state.remote_mode.store(true, Ordering::SeqCst);
+        let ctx = f.state.pairing.lock().unwrap().clone().unwrap();
+        let record_before = std::fs::read(ctx.store.join(pairing::RECORD_FILE)).unwrap();
+        f.node.revoke_all();
+        let before = f.node.calls("/api/v1/pair/challenge");
+        f.state
+            .remote_retry
+            .failed(&remote_access::RemoteError::HandshakeUnavailable);
+        tokio::time::sleep(Duration::from_secs(
+            f.state.remote_retry.remaining().unwrap(),
+        ))
+        .await;
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            finish_remote_auth(&f.state, f.data_dir.path()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(f.node.calls("/api/v1/pair/challenge"), before + 1);
+        assert!(!f.state.status_snapshot().ready);
+        assert_eq!(f.state.pairing_snapshot().state, "failed");
+        assert!(!f.state.remote_retry.is_retrying());
+        assert_eq!(
+            std::fs::read(ctx.store.join(pairing::RECORD_FILE)).unwrap(),
+            record_before
+        );
+        assert_eq!(f.node.calls("/api/v1/auth/local"), 0);
     }
 
     #[tokio::test]

@@ -20,6 +20,7 @@ use tokio::sync::{mpsc, watch, Semaphore};
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 
 use crate::pairing::{self, ClientKey};
+use crate::connection_retry::RemoteRetry;
 
 /// Exact Noise protocol used by both app and node ingress.
 pub const NOISE_PROTOCOL: &str = "Noise_XX_25519_ChaChaPoly_BLAKE2s";
@@ -169,6 +170,8 @@ pub enum RemoteError {
     Transport(String),
     Refused(String),
     HandshakeUnavailable,
+    RateLimited(u64),
+    Waiting(u64),
 }
 
 impl fmt::Display for RemoteError {
@@ -179,6 +182,8 @@ impl fmt::Display for RemoteError {
             Self::Transport(message) => write!(f, "remote transport failed: {message}"),
             Self::Refused(message) => write!(f, "remote node refused pairing: {message}"),
             Self::HandshakeUnavailable => f.write_str(HANDSHAKE_UNAVAILABLE),
+            Self::RateLimited(seconds) => write!(f, "Remote connection limited; waiting {seconds} s"),
+            Self::Waiting(seconds) => write!(f, "Remote connection unavailable; waiting {seconds} s"),
         }
     }
 }
@@ -624,6 +629,21 @@ fn decode_transport(
     Ok(plaintext)
 }
 
+fn retry_hint(message: &[u8]) -> Option<u64> {
+    #[derive(Deserialize)]
+    struct Hint {
+        code: String,
+        v: u64,
+        retry_after_secs: u64,
+    }
+    if message.len() > 1024 {
+        return None;
+    }
+    let hint: Hint = serde_json::from_slice(message).ok()?;
+    (hint.code == "rate_limited" && hint.v == 1 && (1..=60).contains(&hint.retry_after_secs))
+        .then_some(hint.retry_after_secs)
+}
+
 async fn pinned_handshake<S: AsyncRead + AsyncWrite + Unpin>(
     stream: &mut S,
     descriptor: &RemoteDescriptor,
@@ -645,6 +665,11 @@ async fn pinned_handshake<S: AsyncRead + AsyncWrite + Unpin>(
         write_frame(stream, &output[..length]).await?;
 
         let message = read_frame(stream, MAX_HANDSHAKE_FRAME).await?;
+        // This unauthenticated record can only delay a retry. It never grants
+        // pairing, changes the descriptor, or bypasses the Noise pin checks.
+        if let Some(seconds) = retry_hint(&message) {
+            return Err(RemoteError::RateLimited(seconds));
+        }
         noise
             .read_message(&message, &mut output)
             .map_err(|e| RemoteError::Transport(format!("Noise message 2 failed: {e}")))?;
@@ -1133,6 +1158,10 @@ async fn write_proxy_error(local: &mut TcpStream, status: &str, code: &str, mess
 }
 
 async fn write_connection_error(local: &mut TcpStream, error: &RemoteError) {
+    if let RemoteError::RateLimited(seconds) | RemoteError::Waiting(seconds) = error {
+        write_proxy_error(local, "503 Service Unavailable", "remote_retry_wait", &format!("Remote connection unavailable; waiting {seconds} s")).await;
+        return;
+    }
     let (status, code, message) = match error {
         RemoteError::HandshakeUnavailable => ("503 Service Unavailable", "remote_handshake_unavailable", HANDSHAKE_UNAVAILABLE),
         RemoteError::Refused(_) => ("403 Forbidden", "remote_pairing_refused", "remote node refused pairing"),
@@ -1170,6 +1199,25 @@ fn finalize_authenticated_pairing(
     Ok(())
 }
 
+async fn connect_authenticated(
+    descriptor: &RemoteDescriptor,
+    key: &ClientKey,
+    client_name: &str,
+) -> Result<(TcpStream, TransportState, String, Vec<String>), RemoteError> {
+    let mut remote =
+        tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(descriptor.endpoint()))
+            .await
+            .map_err(|_| RemoteError::HandshakeUnavailable)?
+            .map_err(|_| RemoteError::HandshakeUnavailable)?;
+    let mut noise = pinned_handshake(&mut remote, descriptor, key)
+        .await
+        .map_err(map_pre_auth_failure)?;
+    let (client_id, scopes) = encrypted_auth(&mut remote, &mut noise, descriptor, key, client_name)
+        .await
+        .map_err(map_pre_auth_failure)?;
+    Ok((remote, noise, client_id, scopes))
+}
+
 /// Complete the pinned Noise authentication before any paired HTTP token flow.
 ///
 /// A fresh import has no pairing record yet, so `establish_remote` cannot be
@@ -1182,16 +1230,11 @@ pub async fn authenticate_pinned_transport_and_save_record(
     key: &ClientKey,
     client_name: &str,
     pairing_store: &Path,
+    retry: &RemoteRetry,
 ) -> Result<RemoteDescriptor, RemoteError> {
-    let snapshot = descriptor.clone();
-    let mut remote = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(snapshot.endpoint()))
-        .await
-        .map_err(|_| RemoteError::HandshakeUnavailable)?
-        .map_err(|_| RemoteError::HandshakeUnavailable)?;
-    let mut noise = pinned_handshake(&mut remote, &snapshot, key)
-        .await.map_err(map_pre_auth_failure)?;
-    let (client_id, scopes) = encrypted_auth(&mut remote, &mut noise, &snapshot, key, client_name)
-        .await.map_err(map_pre_auth_failure)?;
+    let (_remote, _noise, client_id, scopes) = retry
+        .run(|| connect_authenticated(&descriptor, key, client_name))
+        .await?;
 
     let descriptor = Mutex::new(descriptor);
     finalize_authenticated_pairing(
@@ -1220,6 +1263,7 @@ async fn serve_connection(
     key: Arc<ClientKey>,
     client_name: Arc<str>,
     pairing_store: PathBuf,
+    retry: Arc<RemoteRetry>,
 ) -> Result<(), RemoteError> {
     let AuthenticatedLocal {
         stream: mut local,
@@ -1230,43 +1274,16 @@ async fn serve_connection(
         .lock()
         .map_err(|_| RemoteError::Local("remote descriptor lock is poisoned".into()))?
         .clone();
-    let remote_result =
-        tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(snapshot.endpoint()))
-            .await
-            .map_err(|_| RemoteError::Transport("connection timed out".into()))
-            .and_then(|result| {
-                result
-                    .map_err(|e| RemoteError::Transport(format!("cannot connect to endpoint: {e}")))
-            })
-            .map_err(map_pre_auth_failure);
-    let mut remote = match remote_result {
-        Ok(remote) => remote,
-        Err(error) => {
-            write_connection_error(&mut local, &error).await;
-            return Err(error);
-        }
-    };
-    let mut noise = match pinned_handshake(&mut remote, &snapshot, &key)
+    let (remote, noise, client_id, scopes) = match retry
+        .run(|| connect_authenticated(&snapshot, &key, &client_name))
         .await
-        .map_err(map_pre_auth_failure)
     {
-        Ok(noise) => noise,
+        Ok(connection) => connection,
         Err(error) => {
             write_connection_error(&mut local, &error).await;
             return Err(error);
         }
     };
-    let (client_id, scopes) =
-        match encrypted_auth(&mut remote, &mut noise, &snapshot, &key, &client_name)
-            .await
-            .map_err(map_pre_auth_failure)
-        {
-            Ok(auth) => auth,
-            Err(error) => {
-                write_connection_error(&mut local, &error).await;
-                return Err(error);
-            }
-        };
 
     finalize_authenticated_pairing(
         &descriptor,
@@ -1276,6 +1293,9 @@ async fn serve_connection(
         client_id,
         scopes,
     )?;
+    // Established streams may close normally (HTTP keep-alive expiry or a
+    // cancelled local consumer). Only failed connection/authentication attempts
+    // incur the shared retry debt; the next handshake detects an actual outage.
     tunnel(local, remote, noise, local_http, initial_local).await
 }
 
@@ -1338,6 +1358,7 @@ pub async fn start_proxy(
     client_name: &str,
     pairing_store: PathBuf,
     local_auth: Arc<str>,
+    retry: Arc<RemoteRetry>,
 ) -> Result<RemoteProxy, RemoteError> {
     let local_addr = loopback_addr(api_base)?;
     let listener = TcpListener::bind(local_addr)
@@ -1406,6 +1427,7 @@ pub async fn start_proxy(
                         let local_auth = local_auth.clone();
                         let last_error = last_error.clone();
                         let tunnel_permits = tunnel_permits.clone();
+                        let retry = retry.clone();
                         let mut connection_stopped = stopped.clone();
                         tokio::spawn(async move {
                             let (local_http, initial_local) =
@@ -1453,6 +1475,7 @@ pub async fn start_proxy(
                                     key,
                                     client_name,
                                     pairing_store,
+                                    retry,
                                 ) => {
                                     if let Err(error) = result {
                                         if !is_unauthenticated_local(&error) {
@@ -2210,6 +2233,7 @@ mod tests {
             &key,
             "BitSov test",
             pairing_store.path(),
+            &RemoteRetry::default(),
         )
         .await
         .unwrap();
@@ -2316,6 +2340,7 @@ mod tests {
             "BitSov test",
             pairing_store.path().to_path_buf(),
             local_auth.clone(),
+            Arc::new(RemoteRetry::default()),
         )
         .await
         .unwrap();
@@ -2329,12 +2354,11 @@ mod tests {
             stream.write_all(request.as_bytes()).await.unwrap();
             held_local.push(stream);
         }
-        for _ in 0..MAX_LOCAL_CONNECTIONS {
-            tokio::time::timeout(Duration::from_secs(1), accepted_rx.recv())
-                .await
-                .unwrap()
-                .unwrap();
-        }
+        // Only the first handshake may be in flight. The remaining local
+        // requests still occupy the bounded slots while awaiting its outcome.
+        tokio::time::timeout(Duration::from_secs(1), accepted_rx.recv())
+            .await.unwrap().unwrap();
+        assert!(tokio::time::timeout(Duration::from_millis(50), accepted_rx.recv()).await.is_err());
 
         let mut refused = TcpStream::connect(proxy.local_addr()).await.unwrap();
         refused.write_all(request.as_bytes()).await.unwrap();
@@ -2357,12 +2381,34 @@ mod tests {
 
     #[tokio::test]
     async fn silent_pre_auth_close_returns_stable_http_status() {
+        refusal_blocks_poll_burst(false).await;
+    }
+
+    #[tokio::test]
+    async fn framed_rate_limit_blocks_all_proxy_poll_retries() {
+        refusal_blocks_poll_burst(true).await;
+    }
+
+    async fn refusal_blocks_poll_burst(hinted: bool) {
         let remote_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let remote_endpoint = remote_listener.local_addr().unwrap().to_string();
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = attempts.clone();
         let remote_server = tokio::spawn(async move {
-            let (mut stream, _) = remote_listener.accept().await.unwrap();
-            let _ = read_frame(&mut stream, MAX_HANDSHAKE_FRAME).await;
-            // Simulate a node silently enforcing its handshake/rate limit.
+            loop {
+                let (mut stream, _) = remote_listener.accept().await.unwrap();
+                seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _ = read_frame(&mut stream, MAX_HANDSHAKE_FRAME).await;
+                if hinted {
+                    write_frame(
+                        &mut stream,
+                        br#"{"code":"rate_limited","v":1,"retry_after_secs":60}"#,
+                    )
+                    .await
+                    .unwrap();
+                }
+                // Old nodes close without a hint; new nodes send one then close.
+            }
         });
 
         let node = SigningKey::from_bytes(&[37u8; 32]);
@@ -2390,6 +2436,7 @@ mod tests {
             "BitSov test",
             pairing_store.path().to_path_buf(),
             local_auth.clone(),
+            Arc::new(RemoteRetry::default()),
         )
         .await
         .unwrap();
@@ -2411,10 +2458,82 @@ mod tests {
             .unwrap();
         let response = String::from_utf8(response).unwrap();
         assert!(response.starts_with("HTTP/1.1 503 Service Unavailable"));
-        assert!(response.contains("remote_handshake_unavailable"));
-        assert!(response.contains(HANDSHAKE_UNAVAILABLE));
+        if hinted {
+            assert!(response.contains("waiting 60 s"));
+        } else {
+            assert!(response.contains("remote_handshake_unavailable"));
+            assert!(response.contains(HANDSHAKE_UNAVAILABLE));
+        }
+        for _ in 0..10 {
+            let mut local = TcpStream::connect(proxy.local_addr()).await.unwrap();
+            local.write_all(format!("GET /api/v1/health HTTP/1.1\r\nHost: localhost\r\n{LOCAL_AUTH_HEADER}: {local_auth}\r\n\r\n").as_bytes()).await.unwrap();
+            let mut response = String::new();
+            tokio::time::timeout(Duration::from_secs(1), local.read_to_string(&mut response))
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(response.contains("remote_retry_wait"));
+        }
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
 
-        remote_server.await.unwrap();
+        remote_server.abort();
+    }
+
+    #[test]
+    fn only_bounded_version_one_rate_limit_hints_are_used() {
+        for seconds in [1, 3, 60] {
+            assert_eq!(
+                retry_hint(
+                    format!(r#"{{"v":1,"code":"rate_limited","retry_after_secs":{seconds}}}"#)
+                        .as_bytes()
+                ),
+                Some(seconds)
+            );
+        }
+        for body in [
+            r#"{"v":2,"code":"rate_limited","retry_after_secs":3}"#,
+            r#"{"v":1,"code":"ok","retry_after_secs":3}"#,
+            r#"{"v":1,"code":"rate_limited","retry_after_secs":0}"#,
+            r#"{"v":1,"code":"rate_limited","retry_after_secs":61}"#,
+            r#"{"v":1,"code":"rate_limited","retry_after_secs":-1}"#,
+            r#"{"v":1,"code":"rate_limited","retry_after_secs":1.5}"#,
+            r#"{"v":1,"code":"rate_limited","retry_after_secs":"60"}"#,
+            r#"{"v":1,"code":"rate_limited"}"#,
+            "not json",
+        ] {
+            assert_eq!(retry_hint(body.as_bytes()), None, "{body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn framed_rate_limit_is_a_retry_hint_not_a_noise_failure() {
+        let (mut app, mut node_stream) = tokio::io::duplex(4096);
+        let node = SigningKey::from_bytes(&[37u8; 32]);
+        let descriptor = parse_pairing_link(&signed_link(
+            "127.0.0.1:1234".into(),
+            &node,
+            [38; 32],
+            &test_code(11),
+        ))
+        .unwrap();
+        let store = tempfile::tempdir().unwrap();
+        let key = ClientKey::load_or_create(store.path()).unwrap();
+        let server = tokio::spawn(async move {
+            read_frame(&mut node_stream, MAX_HANDSHAKE_FRAME)
+                .await
+                .unwrap();
+            write_frame(
+                &mut node_stream,
+                br#"{"code":"rate_limited","v":1,"retry_after_secs":60}"#,
+            )
+            .await
+            .unwrap();
+        });
+        let error = pinned_handshake(&mut app, &descriptor, &key)
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "Remote connection limited; waiting 60 s");
+        server.await.unwrap();
     }
 
     #[test]

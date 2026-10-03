@@ -2,7 +2,7 @@
 // Pure functions over what the host reports (`node_status`, `pairing_status`), so the
 // step logic is testable without a window. The host never sends a token or key here.
 
-export type NodeStatus = { ready: boolean; node_id: string | null; error: string | null };
+export type NodeStatus = { retry_after_secs?: number | null; ready: boolean; node_id: string | null; error: string | null };
 
 /** Mirrors `bitsov_app::pairing::PairingView`. */
 export type PairingView = {
