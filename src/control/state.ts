@@ -236,6 +236,7 @@ export type BudgetStand =
   | { kind: 'paused' }
   | { kind: 'waiting' }
   | { kind: 'off' }
+  | { kind: 'grant_limited' }
   | { kind: 'first'; suggest: number; ceiling: number; again?: boolean }
   | { kind: 'contact_used'; limit: number; spent: number; raiseTo: number | null }
   | { kind: 'total_used'; ceiling: number; spent: number; raiseTo: number | null }
@@ -252,6 +253,10 @@ export function budgetStand(view: BudgetView | null, target: string, room: boole
   if (view.waiting_for_owner) return { kind: 'waiting' };
   if (view.autopay.state !== 'open') return { kind: 'off' };
   const cost = costMsat ?? 0;
+  const grant = view.node_grant;
+  if (grant && (grant.remaining_msat === 0 || grant.per_call_max_msat === 0 || cost > grant.remaining_msat || cost > grant.per_call_max_msat)) {
+    return { kind: 'grant_limited' };
+  }
   const ceiling = Math.min(view.autopay.ceiling_msat ?? 0, view.ceiling_msat);
   const row = view.rows.find((r) => r.target === target.toLowerCase() && r.room === room);
   const preset = view.presets.find((p) => p.id === view.preset) ?? view.presets[0];

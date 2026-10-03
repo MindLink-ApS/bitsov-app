@@ -256,7 +256,12 @@ export function ControlCenter(props: Props) {
   const [spend, setSpend] = createSignal<SpendView | null>(null);
   const [device, setDevice] = createSignal<DeviceView | null>(null);
   const [noEnvelopeFor, setNoEnvelopeFor] = createSignal<string | null>(null);
-  const [budget, setBudget] = createSignal<BudgetView | null>(null);
+  const [budget, setBudgetValue] = createSignal<BudgetView | null>(null);
+  let budgetRevision = 0;
+  const setBudget = (value: BudgetView) => {
+    budgetRevision += 1;
+    setBudgetValue(value);
+  };
   const [deliveries, setDeliveries] = createStore<Deliveries>({});
   /** What each send actually paid, by message id: a room echo carries one member's share only. */
   const [paid, setPaid] = createStore<Record<string, number>>({});
@@ -344,6 +349,8 @@ export function ControlCenter(props: Props) {
   /** When the node's membrane ring and aggregates were last read successfully. */
   const [membraneReadAt, setMembraneReadAt] = createSignal<number | null>(null);
   const [energyAt, setEnergyAt] = createSignal<number | null>(null);
+  const [budgetConfirmed, setBudgetConfirmed] = createSignal(false);
+  const [grantUnknown, setGrantUnknown] = createSignal(false);
   const [budgetReadAt, setBudgetReadAt] = createSignal<number | null>(null);
   const [door, setDoor] = createSignal<{ msat: number; read_at: number } | null>(null);
   // O1 v2: the node's own energy read (N1) and gate decisions (N2), when advertised.
@@ -464,12 +471,25 @@ export function ControlCenter(props: Props) {
   });
   // Never an error line of its own: without a device key the console path stays.
   const loadDevice = () => source.deviceKeyStatus().then(setDevice, () => setDevice(null));
-  const loadBudget = () =>
-    attempt('budgetPoll', () => source.budgetStatus(), (b) => {
+  const loadBudget = async () => {
+    const revision = ++budgetRevision;
+    try {
+      const b = await source.budgetStatus();
+      if (revision !== budgetRevision) return;
       if (budget()?.autopay.state !== 'open' && b.autopay.state === 'open') setErrors('budget', undefined);
       setBudget(b);
       setBudgetReadAt(Date.now());
-    });
+      setBudgetConfirmed(true);
+      setGrantUnknown(false);
+      setErrors('budgetPoll', undefined);
+    } catch (e) {
+      if (revision !== budgetRevision) return;
+      setBudgetConfirmed(false);
+      const error = asActionError(e);
+      setGrantUnknown(error.code === 'grant_unknown');
+      setErrors('budgetPoll', typeof e === 'string' ? e : error.message);
+    }
+  };
   // Our own price with no peer: what a stranger pays at this node's door.
   const loadDoor = () => attempt('door', () => source.priceQuote(), (q) => setDoor({ msat: q.own_msat, read_at: Date.now() }));
   // N1: node-wide energy, 1 h and 24 h. A failed read keeps the last one, with its age.
@@ -540,6 +560,8 @@ export function ControlCenter(props: Props) {
   let generation = 0;
   const stop = () => {
     generation += 1;
+    budgetRevision += 1;
+    setBudgetConfirmed(false);
     timers.forEach(clearInterval);
     timers = [];
     unlisten?.();
@@ -571,14 +593,16 @@ export function ControlCenter(props: Props) {
           setInterval(() => void loadDoor(), REFRESH_MS.door),
           setInterval(() => void loadEnergy(), REFRESH_MS.energy),
           setInterval(() => void loadMembrane(), REFRESH_MS.membrane),
-          // Cheap: the host asks the node only while an elevation request is pending,
-          // and a budget grant lands there first.
+          // Poll pending approvals, then reconcile the current node grant.
           setInterval(() => void loadSpend().then(loadBudget), REFRESH_MS.spend),
         );
         source
           .onLive((event) => {
             if (event.type === 'link') {
+              if (mine !== generation) return;
               setLink(event.state);
+              if (event.state !== 'open') { budgetRevision += 1; setBudgetConfirmed(false); }
+              else void loadSpend().then(loadBudget);
               // Back after a gap: re-read the open track so nothing is missed.
               if (event.state === 'open' && track()) loadThread(track()!);
               if (event.state === 'open' && caps().membrane) void loadMembrane();
@@ -1314,6 +1338,7 @@ export function ControlCenter(props: Props) {
                     spendError={errors.spend ?? errors.spendPoll}
                     budget={budget()}
                     budgetError={errors.budget ?? errors.budgetPoll}
+                    budgetStale={grantUnknown() || (budget() !== null && (!budgetConfirmed() || !!errors.budgetPoll))}
                     actions={actions}
                     now={now()}
                     error={errors.thread}
@@ -1889,6 +1914,7 @@ function Conversation(props: {
   spendError: string | undefined;
   budget: BudgetView | null;
   budgetError: string | undefined;
+  budgetStale: boolean;
   actions: Actions;
   now: number;
   error: string | undefined;
@@ -2076,6 +2102,7 @@ function Conversation(props: {
         spendError={props.spendError}
         budget={props.budget}
         budgetError={props.budgetError}
+        budgetStale={props.budgetStale}
         actions={props.actions}
         nameOf={props.nameOf}
         now={props.now}
@@ -3044,6 +3071,7 @@ function Composer(props: {
   spendError: string | undefined;
   budget?: BudgetView | null;
   budgetError?: string;
+  budgetStale?: boolean;
   actions: Actions;
   nameOf: (id: string) => string;
   now: number;
@@ -3337,7 +3365,8 @@ function Composer(props: {
   };
   /** The next tap here is Touch ID for this contact. */
   const needsTouch = () =>
-    touchable() && !budget()?.paused && props.spend?.state !== 'pending' && (!line().open || lacksEnvelope());
+    touchable() && !budget()?.paused && props.spend?.state !== 'pending' &&
+    (!(line().open || ((mode() === 'message' || mode() === 'file') && budget()?.autopay.state === 'open')) || lacksEnvelope());
   /**
    * Messages go through the budget unless the owner opened the ten-minute
    * window by hand with no budget approval, or the host has no budget to show.
@@ -3559,6 +3588,7 @@ function Composer(props: {
         case 'first': return `Send first ${mode() === 'file' ? 'file' : 'message'}${price}`;
         case 'contact_used':
         case 'total_used': return 'Budget used up';
+        case 'grant_limited': return 'Node grant limit';
         default: return `Send${price}`;
       }
     }
@@ -3599,7 +3629,7 @@ function Composer(props: {
    * new price shows on Send, which needs another press.
    */
   const submit = async (shownMsat?: number | null) => {
-    if (props.moneyBlocked || busy() || ownerWait()) return;
+    if (props.moneyBlocked || (spends() && props.budgetStale) || busy() || ownerWait()) return;
     if (mode() === 'message' && priceProblem()) { setNote(priceProblem()); return; }
     setNote(null);
     if (shownMsat !== undefined && (mode() !== 'message' || shown().msat !== shownMsat)) {
@@ -3765,7 +3795,7 @@ function Composer(props: {
   /** The confirm tap: pays exactly the reviewed amount through the same host command. */
   const confirmPay = async () => {
     const rv = review();
-    if (!rv || props.moneyBlocked || busy() || !line().open) return;
+    if (!rv || props.moneyBlocked || props.budgetStale || busy() || !line().open) return;
     // Consumed at dispatch: a review pays at most once, whatever happens to
     // the draft while the host answers. Paying again needs a new review.
     setReview(null);
@@ -3809,13 +3839,13 @@ function Composer(props: {
   };
 
   // A closed spending window or money going offline withdraws the review.
-  createEffect(() => { if (props.moneyBlocked || !line().open) setReview(null); });
+  createEffect(() => { if (props.moneyBlocked || props.budgetStale || !line().open) setReview(null); });
 
   const disabled = () =>
-    props.moneyBlocked || busy() || !!ownerWait() || (mode() === 'message' && priceProblem() !== null) ||
+    props.moneyBlocked || (spends() && !!props.budgetStale) || busy() || !!ownerWait() || (mode() === 'message' && priceProblem() !== null) ||
     // Touch ID approves the contact, not the draft: no draft needed yet.
     (needsTouch() ? false : viaBudget()
-      ? ['waiting', 'contact_used', 'total_used', 'unknown'].includes(stand().kind) || ((stand().kind === 'first' || stand().kind === 'ok') && !ready())
+      ? ['waiting', 'contact_used', 'total_used', 'grant_limited', 'unknown'].includes(stand().kind) || ((stand().kind === 'first' || stand().kind === 'ok') && !ready())
       : spends() && !line().open
       ? props.spend?.state === 'pending' || props.spend?.state === 'unavailable' || props.spend === null
       : !ready());
@@ -4201,28 +4231,30 @@ function Composer(props: {
         </div>}
       </Show>
       <Show when={spends()}>
-        <Show
-          when={viaBudget()}
-          fallback={<SpendBar spend={props.spend} error={props.spendError} now={props.now} actions={props.actions} hasPending={props.hasPending} />}
-        >
-          <BudgetBar
-            stand={stand()}
-            budget={budget()!}
-            spend={props.spend}
-            name={props.name}
-            room={room()}
-            target={target()}
-            priceMsat={shown().msat}
-            door={doorQuote()}
-            preset={presetChosen()}
-            onPreset={(id) => { setPresetPick(id); saveSpendPreset(props.ownId, id); }}
-            firstPick={firstPick()}
-            onFirstPick={setFirstPick}
-            error={props.budgetError}
-            now={props.now}
-            actions={props.actions}
-            hasPending={props.hasPending}
-          />
+        <Show when={!props.budgetStale} fallback={<p class="spend-line" data-budget-stale>Spend grant stale — checking your node. Auto-pay unavailable until confirmed.</p>}>
+          <Show
+            when={viaBudget()}
+            fallback={<SpendBar spend={props.spend} error={props.spendError} now={props.now} actions={props.actions} hasPending={props.hasPending} />}
+          >
+            <BudgetBar
+              stand={stand()}
+              budget={budget()!}
+              spend={props.spend}
+              name={props.name}
+              room={room()}
+              target={target()}
+              priceMsat={shown().msat}
+              door={doorQuote()}
+              preset={presetChosen()}
+              onPreset={(id) => { setPresetPick(id); saveSpendPreset(props.ownId, id); }}
+              firstPick={firstPick()}
+              onFirstPick={setFirstPick}
+              error={props.budgetError}
+              now={props.now}
+              actions={props.actions}
+              hasPending={props.hasPending}
+            />
+          </Show>
         </Show>
       </Show>
     </form>
@@ -4606,6 +4638,9 @@ function BudgetBar(props: {
               </div>
             </div>
           )}
+        </Match>
+        <Match when={props.stand.kind === 'grant_limited'}>
+          <p class="spend-line" data-node-grant-limit>Your node’s spend grant cannot cover this payment. It has {fmtAmount(props.budget.node_grant?.remaining_msat ?? 0)} left and allows at most {fmtAmount(props.budget.node_grant?.per_call_max_msat ?? 0)} per payment. Ask your node’s owner for a new grant.</p>
         </Match>
         <Match when={props.stand.kind === 'contact_used' && (props.stand as Extract<BudgetStandT, { kind: 'contact_used' }>)}>
           {(st) => (

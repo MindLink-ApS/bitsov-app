@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use futures_util::StreamExt;
+use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio_tungstenite::tungstenite::Message as Frame;
 
@@ -1003,9 +1003,59 @@ pub fn ws_url(api_base: &str, token: &str) -> Result<String, String> {
     Ok(format!("ws://{}/ws?token={token}", rest.trim_end_matches('/')))
 }
 
-/// Backoff after a dropped or refused socket: 1s, 2s, 4s … capped at 30s.
+/// Exponential retry ceiling; equal jitter avoids synchronized reconnects.
 pub fn backoff(attempt: u32) -> Duration {
-    Duration::from_secs(1u64 << attempt.min(5)).min(Duration::from_secs(30))
+    let ceiling_ms = ((1u64 << attempt.min(5)) * 1000).min(30_000);
+    let mut entropy = [0u8; 8];
+    let _ = getrandom::getrandom(&mut entropy);
+    Duration::from_millis(ceiling_ms / 2 + u64::from_le_bytes(entropy) % (ceiling_ms / 2 + 1))
+}
+
+/// Own the subscription for the app lifetime. Rebuild credentials on every
+/// attempt; a ready HTTP API does not imply a healthy event feed.
+pub async fn run_live_feed<F, Fut>(
+    mut prepare: F,
+    emit: &(dyn Fn(LiveEvent) + Send + Sync),
+    stopping: &(dyn Fn() -> bool + Send + Sync),
+) where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<Option<(String, String)>, String>>,
+{
+    let reconnect = async {
+        let mut attempt = 0u32;
+        loop {
+            let connection = prepare().await;
+            let detail = match connection {
+                Ok(None) => {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+                Ok(Some((url, credential))) => {
+                    emit(LiveEvent::Link { state: LinkState::Connecting, detail: None });
+                    let opened = std::sync::atomic::AtomicBool::new(false);
+                    let forward = |event| {
+                        if matches!(event, LiveEvent::Link { state: LinkState::Open, .. }) {
+                            opened.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        emit(event);
+                    };
+                    let result = run_ws_session(&url, Some(&credential), &forward).await;
+                    if opened.load(std::sync::atomic::Ordering::Relaxed) { attempt = 0; }
+                    result.err()
+                }
+                Err(error) => Some(error),
+            };
+            emit(LiveEvent::Link { state: LinkState::Closed, detail });
+            tokio::time::sleep(backoff(attempt)).await;
+            attempt = attempt.saturating_add(1);
+        }
+    };
+    tokio::select! {
+        _ = reconnect => {},
+        _ = async {
+            while !stopping() { tokio::time::sleep(Duration::from_millis(250)).await; }
+        } => {},
+    }
 }
 
 /// Run one `/ws` session: connect, forward each parsed frame to `emit`, return
@@ -1029,8 +1079,9 @@ pub async fn run_ws_session(
                 .map_err(|_| "the local proxy credential is invalid".to_string())?,
         );
     }
-    let (mut socket, _) = tokio_tungstenite::connect_async(request)
+    let (mut socket, _) = tokio::time::timeout(Duration::from_secs(10), tokio_tungstenite::connect_async(request))
         .await
+        .map_err(|_| "the live-event handshake timed out".to_string())?
         .map_err(|e| match e {
             tokio_tungstenite::tungstenite::Error::Http(response) => {
                 format!("the node refused live events ({})", response.status().as_u16())
@@ -1041,7 +1092,22 @@ pub async fn run_ws_session(
         state: LinkState::Open,
         detail: None,
     });
-    while let Some(frame) = socket.next().await {
+    let heartbeat = Duration::from_secs(15);
+    let mut deadline = tokio::time::Instant::now() + heartbeat;
+    let mut awaiting_pong = false;
+    loop {
+        let frame = tokio::select! {
+            frame = socket.next() => match frame { Some(frame) => frame, None => break },
+            _ = tokio::time::sleep_until(deadline) => {
+                if awaiting_pong { return Err("the live-event heartbeat timed out".into()); }
+                tokio::time::timeout(Duration::from_secs(5), socket.send(Frame::Ping(b"bitsov-live".to_vec().into())))
+                    .await.map_err(|_| "the live-event heartbeat timed out".to_string())?
+                    .map_err(|_| "the live-event socket dropped".to_string())?;
+                awaiting_pong = true;
+                deadline = tokio::time::Instant::now() + heartbeat;
+                continue;
+            }
+        };
         match frame {
             Ok(Frame::Text(text)) => {
                 if let Some(event) = parse_ws_frame(text.as_str()) {
@@ -1049,7 +1115,16 @@ pub async fn run_ws_session(
                 }
             }
             Ok(Frame::Close(_)) => break,
-            // tungstenite answers pings itself; binary frames are not part of the contract.
+            Ok(Frame::Pong(payload)) if payload.as_ref() == b"bitsov-live" => {
+                awaiting_pong = false;
+                deadline = tokio::time::Instant::now() + heartbeat;
+            }
+            Ok(Frame::Ping(_)) => {
+                // Flush tungstenite's queued pong even on an otherwise idle feed.
+                tokio::time::timeout(Duration::from_secs(5), socket.flush()).await
+                    .map_err(|_| "the live-event heartbeat timed out".to_string())?
+                    .map_err(|_| "the live-event socket dropped".to_string())?;
+            }
             Ok(_) => {}
             Err(_) => return Err("the live-event socket dropped".into()),
         }
@@ -1535,9 +1610,99 @@ mod tests {
 
     #[test]
     fn backoff_grows_and_caps() {
-        assert_eq!(backoff(0), Duration::from_secs(1));
-        assert_eq!(backoff(3), Duration::from_secs(8));
-        assert_eq!(backoff(40), Duration::from_secs(30));
+        for (attempt, low, high) in [(0, 500, 1000), (3, 4000, 8000), (40, 15_000, 30_000)] {
+            for _ in 0..64 {
+                assert!((Duration::from_millis(low)..=Duration::from_millis(high)).contains(&backoff(attempt)));
+            }
+        }
+        assert!((0..32).map(|_| backoff(3)).collect::<std::collections::HashSet<_>>().len() > 1);
+    }
+
+    #[tokio::test]
+    async fn silent_handshake_is_bounded() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}/api/v1/ws?token=SECRET", listener.local_addr().unwrap());
+        let client = tokio::spawn(async move { run_ws_session(&url, None, &|_| {}).await });
+        let (_held, _) = listener.accept().await.unwrap();
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(11)).await;
+        for _ in 0..20 { tokio::task::yield_now().await; }
+        assert!(client.is_finished(), "a silent handshake must release the retry loop");
+        assert!(!client.await.unwrap().unwrap_err().contains("SECRET"));
+    }
+
+    async fn accept_feed(listener: &tokio::net::TcpListener) -> tokio_tungstenite::WebSocketStream<tokio::net::TcpStream> {
+        let (stream, _) = listener.accept().await.unwrap();
+        tokio_tungstenite::accept_hdr_async(stream, |_: &tokio_tungstenite::tungstenite::handshake::server::Request, mut response: tokio_tungstenite::tungstenite::handshake::server::Response| {
+            response.headers_mut().insert("Sec-WebSocket-Protocol", "bitsov.v1".parse().unwrap());
+            Ok(response)
+        }).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn feed_reconnects_after_node_restart_and_silent_network_drop() {
+        use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+        for silent_drop in [false, true] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let url = format!("ws://{address}/api/v1/ws?token=tok");
+            let stop = Arc::new(AtomicBool::new(false));
+            let stopping = stop.clone();
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let client = tokio::spawn(async move {
+                run_live_feed(|| std::future::ready(Ok(Some((url.clone(), "local-secret".into())))),
+                    &|e| { let _ = tx.send(e); }, &|| stopping.load(Ordering::SeqCst)).await;
+            });
+            let socket = accept_feed(&listener).await;
+            while !matches!(rx.recv().await.unwrap(), LiveEvent::Link { state: LinkState::Open, .. }) {}
+            let held = if silent_drop { Some(socket) } else { drop(socket); None };
+            drop(listener); // Same node endpoint will return after the gap.
+            if silent_drop {
+                tokio::time::pause();
+                tokio::time::advance(Duration::from_secs(16)).await;
+                for _ in 0..50 { tokio::task::yield_now().await; }
+                tokio::time::advance(Duration::from_secs(16)).await;
+                for _ in 0..50 { tokio::task::yield_now().await; }
+                tokio::time::resume();
+            }
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while !matches!(rx.recv().await.unwrap(), LiveEvent::Link { state: LinkState::Closed, .. }) {}
+            }).await.expect("drop must become visibly disconnected");
+            drop(held);
+            let listener = tokio::net::TcpListener::bind(address).await.unwrap();
+            let mut recovered = tokio::time::timeout(Duration::from_secs(3), accept_feed(&listener)).await.expect("feed must resubscribe");
+            recovered.send(Frame::text(r#"{"type":"delivery_status","message_id":"after-restart","status":"delivered"}"#)).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while !matches!(rx.recv().await.unwrap(), LiveEvent::Delivery { message_id, .. } if message_id == "after-restart") {}
+            }).await.expect("reconnected feed must deliver events");
+            stop.store(true, Ordering::SeqCst);
+            tokio::time::timeout(Duration::from_secs(1), client).await.unwrap().unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn feed_keeps_retrying_beyond_four_failed_connections() {
+        use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}/api/v1/ws?token=tok", listener.local_addr().unwrap());
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopping = stop.clone();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let client = tokio::spawn(async move {
+            run_live_feed(|| std::future::ready(Ok(Some((url.clone(), "local-secret".into())))),
+                &|e| { let _ = tx.send(e); }, &|| stopping.load(Ordering::SeqCst)).await;
+        });
+        tokio::time::timeout(Duration::from_secs(40), async {
+            for _ in 0..5 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                stream.write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n").await.unwrap();
+            }
+            let _socket = accept_feed(&listener).await;
+            while !matches!(rx.recv().await.unwrap(), LiveEvent::Link { state: LinkState::Open, .. }) {}
+        }).await.expect("retry budget must not be exhausted");
+        stop.store(true, Ordering::SeqCst);
+        tokio::time::timeout(Duration::from_secs(1), client).await.unwrap().unwrap();
     }
 
     /// A real socket on an ephemeral loopback port: the session presents the

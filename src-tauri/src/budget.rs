@@ -337,6 +337,14 @@ impl Autopay {
         }
     }
 
+    /// A fresh node read can only narrow an already-open local approval.
+    pub fn restrict(&mut self, until_ms: u64, ceiling_msat: u64) {
+        if let Some((until, ceiling, _)) = &mut self.open {
+            *until = (*until).min(until_ms);
+            *ceiling = (*ceiling).min(ceiling_msat);
+        }
+    }
+
     pub fn generation(&self) -> u64 {
         self.generation
     }
