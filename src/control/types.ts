@@ -421,7 +421,7 @@ export type ActionError = {
     | 'spend_locked'
     | 'spend_expired'
     | 'spend_refused'
-    | 'owner_only'
+    | 'owner_only' | 'owner_contact_expired' | 'owner_contact_unavailable'
     | 'sponsor_owner_approval_required'
     | 'budget_paused' | 'budget_exhausted' | 'ceiling_exhausted' | 'first_contact' | 'budget_needed' | 'budget_unreadable'
     // G1 node grants: refused before any payment (see src-tauri/src/grant.rs).
@@ -484,6 +484,8 @@ export type OwnerContactApproval = {
   id: string;
   request: { client_id: string; grant_op_id: string; recipient: string; max_total_msat: number; contact_budget_msat: number };
   owner_command: string;
+  /** Present for remote status polling; absent for the local receipt path. */
+  approval_window_secs?: number;
   ready: boolean;
   expires_at_ms: number;
 };
