@@ -1306,25 +1306,6 @@ fn api_error(path: &str, status: reqwest::StatusCode, body: &str) -> String {
     }
 }
 
-#[cfg(test)]
-mod peer_readiness_tests {
-    use super::*;
-    #[test]
-    fn quote_errors_preserve_typed_peer_readiness_without_matching_prose() {
-        for reason in ["chain_unavailable", "not_synced"] {
-            let body = serde_json::json!({"code":"peer_not_ready", "reason":reason, "error":"price unavailable"}).to_string();
-            let error = api_error("/messages/first-contact/quote", reqwest::StatusCode::SERVICE_UNAVAILABLE, &body);
-            assert_eq!(error, format!("peer_not_ready:{reason}"));
-            let ceiling = control::conversation_ceiling_evidence(false, Err(error.clone())).unwrap_err();
-            assert_eq!(ceiling.code, "peer_not_ready");
-            assert_eq!(ceiling.message, error);
-        }
-        let ordinary = api_error("/price", reqwest::StatusCode::INTERNAL_SERVER_ERROR,
-            r#"{"error":"peer_not_ready chain_unavailable"}"#);
-        assert!(ordinary.starts_with("/price failed (500)"));
-    }
-}
-
 fn decode<T: serde::de::DeserializeOwned>(
     path: &str,
     status: reqwest::StatusCode,
@@ -13339,5 +13320,24 @@ mod assistant_acl_tests {
 
         assert_acl_denied(invoke(&assistant, "live_link", serde_json::json!({})), "live_link");
         assert_eq!(heard.lock().unwrap().len(), 1, "a denied call replays nothing");
+    }
+}
+
+#[cfg(test)]
+mod peer_readiness_tests {
+    use super::*;
+    #[test]
+    fn quote_errors_preserve_typed_peer_readiness_without_matching_prose() {
+        for reason in ["chain_unavailable", "not_synced"] {
+            let body = serde_json::json!({"code":"peer_not_ready", "reason":reason, "error":"price unavailable"}).to_string();
+            let error = api_error("/messages/first-contact/quote", reqwest::StatusCode::SERVICE_UNAVAILABLE, &body);
+            assert_eq!(error, format!("peer_not_ready:{reason}"));
+            let ceiling = control::conversation_ceiling_evidence(false, Err(error.clone())).unwrap_err();
+            assert_eq!(ceiling.code, "peer_not_ready");
+            assert_eq!(ceiling.message, error);
+        }
+        let ordinary = api_error("/price", reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            r#"{"error":"peer_not_ready chain_unavailable"}"#);
+        assert!(ordinary.starts_with("/price failed (500)"));
     }
 }
