@@ -5428,6 +5428,52 @@ async fn do_budget_resume(state: &NodeState) -> Result<budget::BudgetView, Actio
     budget_view(state)
 }
 
+/// Reconcile from node authority, never from a saved local approval. Serialize
+/// with payments so a disappearing grant cannot remove their pre-send check.
+async fn do_budget_status(state: &NodeState) -> Result<budget::BudgetView, ActionError> {
+    let _money = state.money.lock().await;
+    if !matches!(&*state.auth.lock().unwrap(), AuthMode::Paired(_)) {
+        return budget_view(state);
+    }
+    let fence = approval_fence(state);
+    if !node_has_g1(state).await? {
+        // Losing the grant capability is not evidence that an existing grant
+        // became unlimited. Keep its pre-send check and report an unknown read.
+        if state.node_grant.lock().unwrap().is_some() { return Err(grant::unreadable()); }
+        return budget_view(state);
+    }
+    let node = read_grant(state).await?.filter(|g| g.live(now_ms()));
+    let book = with_book(state, false, |b| Ok(b.clone()))?;
+    let mut spend = state.spend.lock().unwrap();
+    let mut autopay = state.autopay.lock().unwrap();
+    if (spend.generation(), autopay.generation()) != fence { return Err(fence_broken()); }
+    let mut known = state.node_grant.lock().unwrap();
+    match node {
+        Some(g) => {
+            // Only pristine process state can restore an approval. Lock/pause,
+            // expiry, and a revoked grant must never be undone by a late read.
+            if fence == (0, 0) && !book.paused && spend.pending().is_none()
+                && g.remaining_msat > 0 && g.per_call_max_msat > 0 {
+                arm_want(&mut spend, &mut autopay, Want::Budget(book.ceiling_msat), act::SpendBasis::NodeGrant, Some(&g));
+            }
+            autopay.restrict(g.expires_at_ms(), g.budget_msat);
+            *known = Some(g);
+        }
+        None => {
+            if known.is_some() {
+                autopay.lock();
+                spend.lock();
+                *state.wants.lock().unwrap() = Wants::default();
+            }
+            *known = None;
+        }
+    }
+    drop(known);
+    drop(autopay);
+    drop(spend);
+    budget_view(state)
+}
+
 /// Budgets, the running 24-hour tally, and whether automatic payment is on.
 #[tauri::command(rename_all = "snake_case")]
 async fn budget_status(
@@ -5436,8 +5482,7 @@ async fn budget_status(
 ) -> Result<budget::BudgetView, ActionError> {
     reject_sealed_window(&window)?;
     drop(window);
-    // `spend_status` polls a pending elevation; a budget grant lands there.
-    budget_view(state.inner())
+    do_budget_status(state.inner()).await
 }
 
 /// The owner's one approval: messages pay automatically up to this daily total.
@@ -5992,59 +6037,17 @@ fn live_link(
 /// with backoff, and stops once the app is quitting.
 async fn live_bridge(app: AppHandle) {
     let state = app.state::<NodeState>();
-    let mut attempt = 0u32;
-    loop {
-        if state.quitting.load(Ordering::SeqCst) {
-            return;
-        }
-        let ready = *state.ready.lock().unwrap();
-        if !ready {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            continue;
-        }
-        ensure_fresh_token(&state).await;
-        let token = state.token.lock().unwrap().clone();
-        let Some(token) = token else {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            continue;
-        };
-        let url = match control::ws_url(&state.api_base, &token) {
-            Ok(url) => url,
-            Err(detail) => {
-                emit_live(&app, control::LiveEvent::Link {
-                    state: control::LinkState::Closed,
-                    detail: Some(detail),
-                });
-                return;
-            }
-        };
-        emit_live(&app, control::LiveEvent::Link {
-            state: control::LinkState::Connecting,
-            detail: None,
-        });
-        let emit = |event| emit_live(&app, event);
-        let detail = match control::run_ws_session(
-            &url,
-            Some(&state.remote_proxy_auth),
-            &emit,
-        )
-        .await
-        {
-            Ok(()) => {
-                attempt = 0;
-                None
-            }
-            Err(detail) => {
-                attempt = attempt.saturating_add(1);
-                Some(detail)
-            }
-        };
-        emit_live(&app, control::LiveEvent::Link {
-            state: control::LinkState::Closed,
-            detail,
-        });
-        tokio::time::sleep(control::backoff(attempt)).await;
-    }
+    control::run_live_feed(
+        || async {
+            if !*state.ready.lock().unwrap() { return Ok(None); }
+            ensure_fresh_token(&state).await;
+            let Some(token) = state.token.lock().unwrap().clone() else { return Ok(None); };
+            let url = control::ws_url(&state.api_base, &token)?;
+            Ok(Some((url, state.remote_proxy_auth.to_string())))
+        },
+        &|event| emit_live(&app, event),
+        &|| state.quitting.load(Ordering::SeqCst),
+    ).await;
 }
 
 /// What a stop attempt actually did. Returned so the REAL adapter can be asserted
@@ -10209,6 +10212,83 @@ mod control_act_tests {
     }
 
     // ---- G1: budget-scoped node grants -----------------------------------------
+
+    #[tokio::test]
+    async fn relaunch_reads_live_grant_without_requesting_or_spending() {
+        let (node, _dir, g1) = g1_node(&["read", "receive", "spend"]);
+        *g1.grant.lock().unwrap() = g1_grant(3600, 5_000_000, 4_995_000);
+        let view = do_budget_status(&node.state).await.unwrap();
+        assert_eq!(view.autopay.state, budget::AutopayState::Open);
+        assert_eq!(view.node_grant.unwrap().remaining_msat, 4_995_000);
+        assert!(view.autopay.ceiling_msat.unwrap() <= 5_000_000);
+        assert_eq!(view.autopay.open_until_ms, Some(g1.grant.lock().unwrap()["expires_at"].as_u64().unwrap() * 1000));
+        assert_eq!(node.posts().len(), 0);
+        // A later read must observe exhaustion, and the send must still re-read.
+        *g1.grant.lock().unwrap() = g1_grant(3600, 5_000_000, 500);
+        assert_eq!(do_budget_status(&node.state).await.unwrap().node_grant.unwrap().remaining_msat, 500);
+        assert_eq!(check_node_grant(&node.state, "/messages/compose", &serde_json::json!({"recipient": A}), 1000).await.unwrap_err().code, "grant_exhausted");
+    }
+
+    #[tokio::test]
+    async fn relaunch_unknown_absent_expired_and_paused_grants_never_open() {
+        let (node, _dir, g1) = g1_node(&["read", "receive", "spend"]);
+        *g1.grant_status.lock().unwrap() = 500;
+        assert_eq!(do_budget_status(&node.state).await.unwrap_err().code, "grant_unknown");
+        assert_eq!(budget_now(&node.state).autopay.state, budget::AutopayState::Off);
+        *g1.grant_status.lock().unwrap() = 200;
+        for grant in [serde_json::Value::Null, g1_grant(-1, 5000, 5000)] {
+            *g1.grant.lock().unwrap() = grant;
+            assert_ne!(do_budget_status(&node.state).await.unwrap().autopay.state, budget::AutopayState::Open);
+        }
+        *g1.grant.lock().unwrap() = g1_grant(3600, 5000, 5000);
+        do_budget_pause(&node.state).unwrap();
+        assert_ne!(do_budget_status(&node.state).await.unwrap().autopay.state, budget::AutopayState::Open);
+        assert!(node.posts().is_empty());
+    }
+
+    #[tokio::test]
+    async fn relaunch_late_grant_read_cannot_undo_pause() {
+        let entered = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+        let (e, r) = (entered.clone(), release.clone());
+        let first: Routes = Arc::new(move |_, path, _| {
+            if path != "/pair/grant" { return (0, String::new()); }
+            e.store(true, Ordering::SeqCst);
+            while !r.load(Ordering::SeqCst) { std::thread::sleep(Duration::from_millis(1)); }
+            (200, serde_json::json!({"grant": g1_grant(3600, 5_000_000, 4_995_000)}).to_string())
+        });
+        let (node, _dir, _) = g1_node_with(&["read", "receive", "spend"], Some(first));
+        let pause = async {
+            while !entered.load(Ordering::SeqCst) { tokio::time::sleep(Duration::from_millis(1)).await; }
+            do_budget_pause(&node.state).unwrap();
+            release.store(true, Ordering::SeqCst);
+        };
+        let (read, ()) = tokio::join!(do_budget_status(&node.state), pause);
+        assert_eq!(read.unwrap_err().code, "budget_needed");
+        assert_eq!(do_budget_status(&node.state).await.unwrap().autopay.state, budget::AutopayState::Off);
+        assert!(node.posts().is_empty());
+    }
+
+    #[tokio::test]
+    async fn relaunch_retry_reads_current_grant_and_revocation_closes_it() {
+        let (node, _dir, g1) = g1_node(&["read", "receive", "spend"]);
+        *g1.grant_status.lock().unwrap() = 500;
+        assert!(do_budget_status(&node.state).await.is_err());
+        *g1.grant_status.lock().unwrap() = 200;
+        assert_eq!(do_budget_status(&node.state).await.unwrap().autopay.state, budget::AutopayState::Open);
+        *g1.grant.lock().unwrap() = g1_grant(60, 50_000, 30_000);
+        let narrowed = do_budget_status(&node.state).await.unwrap();
+        assert_eq!(narrowed.autopay.ceiling_msat, Some(50_000));
+        assert_eq!(narrowed.autopay.open_until_ms, Some(g1.grant.lock().unwrap()["expires_at"].as_u64().unwrap() * 1000));
+        *g1.grant_status.lock().unwrap() = 500;
+        assert!(do_budget_status(&node.state).await.is_err());
+        assert_eq!(check_node_grant(&node.state, "/messages/compose", &serde_json::json!({}), 1000).await.unwrap_err().code, "grant_unknown");
+        *g1.grant_status.lock().unwrap() = 200;
+        *g1.grant.lock().unwrap() = serde_json::Value::Null;
+        let revoked = do_budget_status(&node.state).await.unwrap();
+        assert_eq!((revoked.autopay.state, revoked.node_grant), (budget::AutopayState::Off, None));
+        assert!(node.posts().is_empty());
+    }
 
     /// A G1 node: advertises `spend_budget_grant_v1`, grants on the second poll,
     /// and answers `GET /pair/grant` with whatever `grant` holds. `compose`
