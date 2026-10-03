@@ -90,6 +90,14 @@ pub fn preset(id: PresetId) -> Preset {
 
 // ---- the book (persisted numbers) ---------------------------------------------
 
+/// Proven paid amount; with an unknown fee this is only the settled principal.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Paid {
+    pub msat: u64,
+    pub fee_unknown: bool,
+}
+
 /// One reservation or payment by an app-initiated paid send.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -99,10 +107,14 @@ pub struct Entry {
     pub at_ms: u64,
     pub target: String,
     pub room: bool,
-    /// Reserved at the confirmed ceiling until the node reports the amount paid.
+    /// Amount held against limits: in-flight ceiling, proven payment, or
+    /// settled principal plus an allowance while the fee remains unknown.
     pub msat: u64,
     /// False while the outcome is unknown: the full ceiling stays counted.
     pub settled: bool,
+    /// Old books stored allowances only. Missing evidence is never an exact payment.
+    #[serde(default)]
+    pub paid: Option<Paid>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -159,6 +171,7 @@ impl Book {
         self.map(room).get(target).copied()
     }
 
+    /// Conservative enforcement total. Renderer paid totals come from `view`.
     pub fn spent_total(&self, now_ms: u64) -> u64 {
         self.ledger.iter().filter(|e| in_window(e, now_ms)).map(|e| e.msat).sum()
     }
@@ -200,6 +213,10 @@ impl Book {
             merged
                 .entry((e.target.clone(), e.room))
                 .and_modify(|m| {
+                    m.paid = Some(Paid {
+                        msat: m.paid.map_or(0, |p| p.msat).saturating_add(e.paid.map_or(0, |p| p.msat)),
+                        fee_unknown: m.paid.is_none_or(|p| p.fee_unknown) || e.paid.is_none_or(|p| p.fee_unknown),
+                    });
                     m.msat = m.msat.saturating_add(e.msat);
                     m.at_ms = m.at_ms.max(e.at_ms);
                 })
@@ -243,7 +260,7 @@ impl Book {
     pub fn reserve(&mut self, id: &str, target: &str, room: bool, msat: u64, now_ms: u64) {
         // The journal-aware writer prunes after the edit, retaining current
         // and rollback accounting. Pruning here would erase rows it still needs.
-        self.ledger.push(Entry { id: id.to_string(), at_ms: now_ms, target: target.to_string(), room, msat, settled: false });
+        self.ledger.push(Entry { id: id.to_string(), at_ms: now_ms, target: target.to_string(), room, msat, settled: false, paid: None });
     }
 
     /// The node reported what was paid. Over the reservation is recorded as is.
@@ -256,6 +273,7 @@ impl Book {
             }
             e.msat = msat;
             e.settled = true;
+            e.paid = Some(Paid { msat, fee_unknown: false });
         }
     }
 
@@ -542,7 +560,12 @@ pub struct Row {
     pub room: bool,
     /// None: paid under a ten-minute window, never confirmed for autopay.
     pub limit_msat: Option<u64>,
+    pub unsettled_msat: u64,
+    /// Proven payments only; excludes reservations and unreported fees.
     pub spent_msat: u64,
+    /// Conservative amount used for limit enforcement, including unknown fees.
+    pub accounted_msat: u64,
+    pub fee_unknown: bool,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
@@ -553,8 +576,12 @@ pub struct BudgetView {
     pub waiting_for_owner: bool,
     pub preset: PresetId,
     pub ceiling_msat: u64,
+    /// Proven payments only; excludes reservations and unreported fees.
     pub spent_msat: u64,
-    /// Reserved sends whose outcome is not known yet, counted in `spent_msat`.
+    /// Conservative amount used for limit enforcement, including unknown fees.
+    pub accounted_msat: u64,
+    pub fee_unknown: bool,
+    /// Reserved ceilings for sends whose outcome is not known yet; separate from paid.
     pub unsettled_msat: u64,
     pub rows: Vec<Row>,
     pub presets: Vec<Preset>,
@@ -565,37 +592,86 @@ pub struct BudgetView {
 }
 
 pub fn view(book: &Book, autopay: AutopayView, waiting_for_owner: bool, now_ms: u64) -> BudgetView {
+    let row = |target: &str, room: bool, limit_msat| {
+        let entries: Vec<_> = book.ledger.iter().filter(|e| e.target == target && e.room == room && in_window(e, now_ms)).collect();
+        Row {
+            target: target.into(), room, limit_msat,
+            spent_msat: entries.iter().filter(|e| e.settled).map(|e| e.paid.map_or(0, |p| p.msat)).sum(),
+            unsettled_msat: entries.iter().filter(|e| !e.settled).map(|e| e.msat).sum(),
+            accounted_msat: entries.iter().map(|e| e.msat).sum(),
+            fee_unknown: entries.iter().any(|e| e.settled && e.paid.is_none_or(|p| p.fee_unknown)),
+        }
+    };
     let mut rows: Vec<Row> = Vec::new();
     for room in [false, true] {
         for (target, limit) in book.map(room) {
-            rows.push(Row { target: target.clone(), room, limit_msat: Some(*limit), spent_msat: book.spent(target, room, now_ms) });
+            rows.push(row(target, room, Some(*limit)));
         }
     }
     for e in book.ledger.iter().filter(|e| in_window(e, now_ms)) {
         if !rows.iter().any(|r| r.target == e.target && r.room == e.room) {
-            rows.push(Row { target: e.target.clone(), room: e.room, limit_msat: None, spent_msat: book.spent(&e.target, e.room, now_ms) });
+            rows.push(row(&e.target, e.room, None));
         }
     }
     rows.sort_by(|a, b| b.spent_msat.cmp(&a.spent_msat).then(a.target.cmp(&b.target)));
     BudgetView {
-        paused: book.paused,
-        autopay,
-        waiting_for_owner,
-        preset: book.preset,
+        paused: book.paused, autopay, waiting_for_owner, preset: book.preset,
         ceiling_msat: book.ceiling_msat,
-        spent_msat: book.spent_total(now_ms),
-        unsettled_msat: book.ledger.iter().filter(|e| !e.settled && in_window(e, now_ms)).map(|e| e.msat).sum(),
-        rows,
-        presets: PRESETS.to_vec(),
-        window_ms: BUDGET_WINDOW_MS,
-        max_daily_msat: MAX_DAILY_MSAT,
-        node_grant: None,
+        spent_msat: rows.iter().map(|r| r.spent_msat).sum(),
+        unsettled_msat: rows.iter().map(|r| r.unsettled_msat).sum(),
+        accounted_msat: book.spent_total(now_ms),
+        fee_unknown: rows.iter().any(|r| r.fee_unknown),
+        rows, presets: PRESETS.to_vec(), window_ms: BUDGET_WINDOW_MS,
+        max_daily_msat: MAX_DAILY_MSAT, node_grant: None,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paid_totals_exclude_in_flight_ceiling_but_limits_include_it() {
+        let mut book = Book::new(ME);
+        book.set_limit(MAYA, false, 50_000).unwrap();
+        book.reserve("paid", MAYA, false, 6000, T);
+        book.settle("paid", 1000, T);
+        book.reserve("pending", MAYA, false, 6000, T);
+        let view = serde_json::to_value(view(&book, Autopay::default().view(T), false, T)).unwrap();
+        assert_eq!(view["spent_msat"], 1000);
+        assert_eq!(view["unsettled_msat"], 6000);
+        assert_eq!(view["rows"][0]["spent_msat"], 1000);
+        assert_eq!(view["rows"][0]["unsettled_msat"], 6000);
+        assert_eq!(book.spent_total(T), 7000, "enforcement still includes reservations");
+    }
+
+    #[test]
+    fn old_allowances_are_unknown_and_paid_evidence_survives_restart_and_compaction() {
+        let mut book = Book::new(ME);
+        book.reserve("legacy", MAYA, false, 6000, T);
+        book.settle("legacy", 6000, T);
+        let mut old = serde_json::to_value(&book).unwrap();
+        old["ledger"][0].as_object_mut().unwrap().remove("paid");
+        let mut book: Book = serde_json::from_value(old).unwrap();
+        let legacy = view(&book, Autopay::default().view(T), false, T);
+        assert_eq!((legacy.spent_msat, legacy.accounted_msat), (0, 6000));
+        assert!(legacy.fee_unknown, "old ceilings do not prove payments");
+        for i in 0..LEDGER_MAX {
+            book.reserve(&format!("new-{i}"), MAYA, false, 6000, T);
+            book.settle(&format!("new-{i}"), 6000, T);
+            book.ledger.last_mut().unwrap().paid = Some(Paid { msat: 1000, fee_unknown: true });
+        }
+        book.prune(T);
+        assert_eq!(book.ledger.len(), 1);
+        let dir = tempfile::tempdir().unwrap();
+        save(dir.path(), &book).unwrap();
+        let loaded = load(dir.path(), ME).unwrap();
+        let shown = view(&loaded, Autopay::default().view(T), false, T);
+        assert_eq!(shown.spent_msat, 20_000_000);
+        assert_eq!(shown.accounted_msat, 120_006_000);
+        assert_eq!(shown.unsettled_msat, 0);
+        assert!(shown.fee_unknown);
+    }
 
     const ME: &str = "1111111111111111111111111111111111111111111111111111111111111111";
     const MAYA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -688,8 +764,8 @@ mod tests {
     #[test]
     fn a_rolling_day_forgets_old_spends_and_keeps_future_dated_ones() {
         let mut b = book_with_maya(5000);
-        b.ledger.push(Entry { id: "old".into(), at_ms: T - DAY_MS, target: MAYA.into(), room: false, msat: 5000, settled: true });
-        b.ledger.push(Entry { id: "skew".into(), at_ms: T + 60_000, target: MAYA.into(), room: false, msat: 3000, settled: true });
+        b.ledger.push(Entry { id: "old".into(), at_ms: T - DAY_MS, target: MAYA.into(), room: false, msat: 5000, settled: true, paid: Some(Paid { msat: 5000, fee_unknown: false }) });
+        b.ledger.push(Entry { id: "skew".into(), at_ms: T + 60_000, target: MAYA.into(), room: false, msat: 3000, settled: true, paid: Some(Paid { msat: 3000, fee_unknown: false }) });
         assert_eq!(b.spent(MAYA, false, T), 3000);
         b.prune(T);
         assert_eq!(b.ledger.len(), 1);
@@ -821,8 +897,8 @@ mod tests {
         b.reserve("r1", JOSH, false, 1000, T);
         let v = view(&b, Autopay::default().view(T), false, T);
         assert_eq!(v.rows.len(), 2);
-        assert_eq!(v.rows[0], Row { target: JOSH.into(), room: false, limit_msat: None, spent_msat: 1000 });
-        assert_eq!(v.rows[1].limit_msat, Some(50_000));
+        assert_eq!(v.rows.iter().find(|r| r.target == JOSH).unwrap(), &Row { target: JOSH.into(), room: false, limit_msat: None, spent_msat: 0, accounted_msat: 1000, unsettled_msat: 1000, fee_unknown: false });
+        assert_eq!(v.rows.iter().find(|r| r.target == MAYA).unwrap().limit_msat, Some(50_000));
         assert_eq!(v.unsettled_msat, 1000);
     }
 }

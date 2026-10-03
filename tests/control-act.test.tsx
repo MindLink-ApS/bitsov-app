@@ -160,8 +160,8 @@ describe('acting from the track', () => {
     submit();
     await vi.waitFor(() => expect(host.used('message_send')).toHaveLength(1));
     expect(host.used('message_send')[0].args).toEqual({ recipient: A, is_room: false, plaintext: 'gm Maya', max_msat: 2000, max_recipient_msat: null, first_contact_msat: null });
-    await vi.waitFor(() => expect(text('[data-message="sent-1"] .stamp .sats')).toBe('2 sats'));
-    expect(text('[data-message="sent-1"] .stamp')).toContain('sats all-in ceiling');
+    await vi.waitFor(() => expect(text('[data-message="sent-1"] .stamp .sats')).toBe('paid 2 sats · fee unknown'));
+    expect(text('[data-message="sent-1"] .stamp')).not.toContain('ceiling');
     expect(text('[data-message="sent-1"] [data-delivery]').trim()).toBe('Sent');
     expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('');
 
@@ -667,8 +667,8 @@ describe('acting from the track', () => {
     expect(host.used('file_send')).toHaveLength(1);
   });
 
-  it('sends a file at the node’s file price', async () => {
-    const host = stubHost();
+  it('sends a file at the node’s file price and displays paid admission and fee', async () => {
+    const host = stubHost({ file_send: (args) => ({ message_id: 'file-1', recipient: args!.recipient, filename: args!.filename, size_bytes: 2, delivered: true, amount_msat: 3000, readmission_msat: 1000, fee_paid_msat: 375, total_msat: 8000, max_routing_fee_msat: 4000, sent_at_ms: Date.now() }) });
     host.spend.v = openView();
     await openShell();
     $<HTMLButtonElement>('[data-composer-mode="file"]')!.click();
@@ -679,6 +679,7 @@ describe('acting from the track', () => {
     submit();
     await vi.waitFor(() => expect(host.used('file_send')[0]?.args).toEqual({ recipient: A, filename: 'hi.txt', mime_type: 'text/plain', data_b64: 'aGk=', max_msat: 8000, first_contact_msat: null }));
     await vi.waitFor(() => expect(text('[data-message="file-1"] .file-name')).toBe('hi.txt'));
+    expect(text('[data-message="file-1"] .sats-meta')).toBe('paid 4.375 sats');
     expect($('[data-message="file-1"] .bubble')!.classList.contains('file')).toBe(true);
     expect($('[data-message="file-1"] [data-delivery]')?.getAttribute('data-delivery')).toBe('sent');
   });

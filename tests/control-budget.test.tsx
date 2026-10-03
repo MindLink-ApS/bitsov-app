@@ -192,7 +192,7 @@ describe('invisible payments in the composer and the context panel', () => {
     await openShell();
     $<HTMLButtonElement>('[data-tab="budget"]')!.click();
     await vi.waitFor(() => expect($('[data-budget-scope]')).not.toBeNull());
-    expect(text('[data-budget-scope]').replace(/\s+/g, ' ').trim()).toMatchInlineSnapshot(`"App all-in · rolling 24 h — what it coversCovers automatic and manual-window messages, room sends, files, app invoice payments and keysend, and admission, including their maximum network fees. Conservative allowance, not an exact wallet-debit total. Not covered: channel opening/closing, on-chain transfers and fees, owner-direct CLI/API, or background workers. G1 is a separate finite node grant; it does not refill daily. Not a wallet-wide limit."`);
+    expect(text('[data-budget-scope]').replace(/\s+/g, ' ').trim()).toMatchInlineSnapshot(`"App all-in · rolling 24 h — what it coversCovers automatic and manual-window messages, room sends, files, app invoice payments and keysend, and admission, including their maximum network fees. Paid totals use reported principal and fees. In-flight ceilings are reserved separately; unreported fees remain unknown. Not covered: channel opening/closing, on-chain transfers and fees, owner-direct CLI/API, or background workers. G1 is a separate finite node grant; it does not refill daily. Not a wallet-wide limit."`);
     $<HTMLButtonElement>('[data-composer-mode="pay"]')!.click();
     expect(text('[data-budget-payment]')).toContain('reserve principal plus the network fee ceiling');
     $<HTMLButtonElement>('[data-composer-mode="file"]')!.click();
@@ -1126,6 +1126,30 @@ describe('invisible payments in the composer and the context panel', () => {
     await vi.waitFor(() => expect(text('[data-send]')).toBe('Send'));
     expect($('[data-budget]')).toBeNull();
   });
+  it('shows paid amounts and reservations separately without freeing reserved budget', async () => {
+    const row = { target: MAYA, room: false, limit_msat: 50_000, spent_msat: 1000,
+      unsettled_msat: 6000, accounted_msat: 7000, fee_unknown: false };
+    const budget = open([row], { spent_msat: 1000, unsettled_msat: 6000, accounted_msat: 7000 });
+    stubHost(budget);
+    await openShell();
+    type('[data-composer] textarea', 'next');
+    await vi.waitFor(() => expect(text('[data-budget-line]')).toContain('1 sat of 50 sats'));
+    expect(text('[data-budget-line]')).toContain('6 sats reserved');
+    $<HTMLButtonElement>('[data-tab="budget"]')!.click();
+    expect(text('[data-tally-total]')).toBe('1 sat / 500 sats');
+    expect(text('[data-unsettled]')).toContain('6 sats reserved');
+    expect(text(`[data-budget-row="${MAYA}"]`)).toContain('6 sats reserved');
+    expect(budgetStand(budget, MAYA, false, 44_000).kind).toBe('contact_used');
+  });
+  it('labels a settled legacy fee unknown while counting only proven principal', async () => {
+    stubHost(open([{ target: MAYA, room: false, limit_msat: 50_000, spent_msat: 1000,
+      accounted_msat: 6000, fee_unknown: true }], { spent_msat: 1000, accounted_msat: 6000, fee_unknown: true }));
+    await openShell();
+    $<HTMLButtonElement>('[data-tab="budget"]')!.click();
+    expect(text('[data-tally-total]')).toBe('1 sat / 500 sats');
+    expect(text('[data-fee-unknown]')).toContain('fee unknown');
+    expect(text(`[data-budget-row="${MAYA}"]`)).toContain('fee unknown');
+  });
 });
 
 describe('budget rules', () => {
@@ -1152,6 +1176,7 @@ describe('budget rules', () => {
     expect(messagesWorth(1000, 2000)).toBe('0 messages');
     expect(T).toBeGreaterThan(0);
   });
+
 });
 
 describe('sample source budgets', () => {
@@ -1234,4 +1259,6 @@ describe('sample source budgets', () => {
     await expect(s.budgetSet(maya, false, 600_000)).rejects.toMatchObject({ code: 'invalid' });
     expect((await s.budgetResume()).paused).toBe(false);
   });
+
+
 });
