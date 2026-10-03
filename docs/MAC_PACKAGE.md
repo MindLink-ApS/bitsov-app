@@ -35,12 +35,21 @@ What the script does:
    `src-tauri/target/release/bundle` so a stale bundle cannot be checked or
    uploaded. Then it runs
    `npm run tauri -- build --bundles app[,dmg] --no-sign --ci -- --locked`.
-   `--ci` skips the Finder layout step of the DMG script, so no volume window
-   opens.
+   The command receives `CI=true TAURI_BUNDLER_DMG_IGNORE_CI=false` to skip
+   Finder layout even when the caller's environment says otherwise. `--ci`
+   alone only disables CLI prompts. Build output is retained in
+   `src-tauri/target/package-mac.log`.
 3. **Static checks.** Runs `scripts/check-mac-bundle.sh` (below).
 4. **Inspection (informational).** `file`, `otool -L`, the sidecar's Mach-O
    `minos`, and `codesign -dvv`. With `--dmg` it also runs `hdiutil verify`,
    which checks the image checksum without mounting it.
+5. **DMG recovery.** If Tauri reports `error running bundle_dmg.sh`, the script
+   first requires the fresh app to pass the static checks. It then discards
+   partial DMGs and falls back to `hdiutil create -srcfolder BitSov.app
+   -volname BitSov -format UDZO` (using the full app and output paths).
+   This plain image has no Finder layout or Applications shortcut. It must
+   pass `hdiutil verify` too. Other build errors, invalid apps, failed image
+   creation, and failed verification remain fatal.
 
 It prints `PACKAGE: PASS (structure and sidecar integrity only)` at the end.
 The script never opens, launches, or executes the app or the node, and binds
@@ -51,6 +60,35 @@ Output:
 
 - `src-tauri/target/release/bundle/macos/BitSov.app`
 - `src-tauri/target/release/bundle/dmg/BitSov_<version>_aarch64.dmg` (with `--dmg`)
+
+### DMG failure investigation (#120)
+
+Comparing the known-working `c268bbd` with main `39c7ec4` shows no changes to
+`package-mac.sh`, `tauri.conf.json`, icons, either dependency lockfile, or the
+packaging workflows. The intervening commit changes runtime UI/state code and
+tests, not packaging. Both revisions pin Tauri CLI 2.12.0. The config uses
+the default DMG settings (no custom background/layout), product/volume name
+`BitSov`, and the same valid ICNS/PNG assets. There is no evidence of a new
+config, volume-name, icon, or dependency regression between these revisions.
+
+The pre-existing script incorrectly assumed `--ci` suppressed Finder.
+Tauri's [CLI build option](https://github.com/tauri-apps/tauri/blob/tauri-cli-v2.12.0/crates/tauri-cli/src/build.rs)
+controls prompting; its [DMG bundler](https://github.com/tauri-apps/tauri/blob/tauri-cli-v2.12.0/crates/tauri-bundler/src/bundle/macos/dmg/mod.rs)
+separately checks for the literal environment value `CI=true`, unless
+`TAURI_BUNDLER_DMG_IGNORE_CI=true`. A local run without that environment can
+therefore reach Finder automation. Setting the environment fixes that gap;
+the fallback avoids the generated script's mount/layout/conversion sequence
+if it still fails. The generic `Running bundle_dmg.sh` line does not identify
+which macOS operation failed; the exact environmental cause is unconfirmed
+without the underlying output. See the retained build log on the next run.
+
+`python3 scripts/test-package-mac.py` exercises the real package script and
+bundle checker against fake build outputs and stubbed macOS commands. It
+covers both image paths, conflicting CI settings, app-only mode, stale
+outputs, and fatal build/check/create/verify errors, including paths with
+spaces. It performs no real build, mount, app launch, or network access.
+Actual DMG creation and checksum verification require an unsandboxed macOS
+run; these tests do not establish that a real image passed `hdiutil verify`.
 
 ## Bundle checks
 
