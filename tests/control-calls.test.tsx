@@ -431,6 +431,58 @@ describe('calls in the shell', () => {
     await vi.waitFor(() => expect($(`[data-track="peer:${A}"]`)?.getAttribute('aria-current')).toBe('true'));
   }
 
+  it.each([
+    ['per-call cap', 500_000, 50_000_000],
+    ['remaining budget', 50_000_000, 500_000],
+  ])('refuses the full call ceiling against the grant %s before media or signalling', async (_reason, cap, remaining) => {
+    const capture = vi.spyOn(navigator.mediaDevices, 'getUserMedia');
+    const host = stubHost({
+      call_quote: () => ({ ...QUOTE, call_total_msat: 21_205_000 }),
+      budget_status: () => ({ ...openBudget(), node_grant: {
+        expires_at_ms: Date.now() + 3600_000, budget_msat: 50_000_000,
+        remaining_msat: remaining, per_call_max_msat: cap,
+      } }),
+    });
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect(text('[data-call-ended]')).toMatch(/owner.*approve/i));
+    expect(text('[data-call-ended]')).toContain('21,205 sats');
+    expect(text('[data-call-ended]')).toContain('500 sats');
+    expect(capture).not.toHaveBeenCalled();
+    expect(FakePc.made).toHaveLength(0);
+    expect(host.used('call_signal')).toHaveLength(0);
+    expect(host.used('budget_approve')).toHaveLength(0);
+  });
+
+  it('dials when the full ceiling equals both grant limits', async () => {
+    const host = stubHost({ budget_status: () => ({ ...openBudget(), node_grant: {
+      expires_at_ms: Date.now() + 3600_000, budget_msat: 21_000,
+      remaining_msat: 21_000, per_call_max_msat: 21_000,
+    } }) });
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
+    expect(host.used('call_signal')).toHaveLength(1);
+    expect(host.used('call_signal')[0].args).toMatchObject({ kind: 400, max_msat: 15_000 });
+  });
+
+  it('shows a bounded node timeout in the shell and releases media', async () => {
+    const host = stubHost({ call_signal: () => new Promise(() => {}) });
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    vi.useFakeTimers();
+    try {
+      $<HTMLButtonElement>('[data-call="audio"]')!.click();
+      await vi.advanceTimersByTimeAsync(30_001);
+      expect(text('[data-call-ended]')).toMatch(/node did not answer.*outcome is unknown/i);
+      expect($('[data-call-panel="calling"]')).toBeNull();
+      expect(FakePc.made[0].closed).toBe(true);
+      expect(host.used('call_signal')).toHaveLength(1);
+    } finally { vi.useRealTimers(); }
+  });
+
   it('shows a host spend refusal and ends the call in the shell', async () => {
     stubHost({ call_signal: () => { throw { code: 'spend_refused', message: 'token lacks required scope: spend' }; } });
     await openShell();

@@ -4580,6 +4580,20 @@ async fn do_call_signal(
         (quote.signal_msat, quote.signal_max_routing_fee_msat)
     };
     ceiling(principal + fee, max_msat)?;
+    if kind == act::KIND_CALL_OFFER {
+        // Admission plus one hangup: check the ceiling shown for the whole
+        // call, not just this offer. money_post still rechecks the paid step.
+        let total = quote.call_total_msat.expect("an offer has a call total");
+        check_node_grant(state, "/messages/compose", &body, total).await.map_err(|mut error| {
+            if matches!(error.code, "grant_per_call" | "grant_exhausted") {
+                error.message = format!(
+                    "This call needs up to {}. {} The owner would need to approve at least {} per call and enough remaining budget for that ceiling. Nothing was sent or paid.",
+                    bitsov_app::format::amount(total), error.message, bitsov_app::format::amount(total),
+                );
+            }
+            error
+        })?;
+    }
     body["max_total_msat"] = serde_json::json!(max_msat);
     body["max_routing_fee_msat"] = serde_json::json!(fee);
     let charge = Charge {
@@ -8838,6 +8852,73 @@ mod control_act_tests {
         })
     }
     const OFFER: &str = r#"{"v":1,"call_id":"0123456789abcdef0123456789abcdef","media":"audio","sdp":"v=0"}"#;
+
+    #[tokio::test]
+    async fn call_grant_checks_the_full_ceiling_before_posting() {
+        let routes = call_routes(Some(10_000));
+        let first: Routes = Arc::new(move |m, p, b| {
+            if p.contains("/call") || p == "/payments/price/401" || p == "/messages/compose" {
+                routes(m, p, b)
+            } else { (0, String::new()) }
+        });
+        let (node, _dir, g1) = g1_node_with(&["read", "receive"], Some(first));
+        g1_approved(&node, 500_000).await;
+        with_book(&node.state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
+        // The 15-sat offer fits, but the 21-sat call does not.
+        for (cap, left, code) in [(20_000, 400_000, "grant_per_call"), (400_000, 20_000, "grant_exhausted")] {
+            let mut grant = g1_grant(3600, 400_000, left);
+            grant["per_call_max_msat"] = cap.into();
+            *g1.grant.lock().unwrap() = grant.clone();
+            let error = do_call_signal(&node.state, A, 400, OFFER, 15_000).await.unwrap_err();
+            assert_eq!(error.code, code);
+            assert!(error.message.contains("21 sats") && error.message.contains("owner") && error.message.contains("approve"), "{}", error.message);
+            assert_eq!(composes(&node), 0);
+            assert_eq!(*g1.grant.lock().unwrap(), grant, "never raise the grant");
+            assert!(spend_journal(&node.state).unwrap().pending().unwrap().is_none());
+            assert_eq!(budget_now(&node.state).spent_msat, 0);
+        }
+        let mut grant = g1_grant(3600, 400_000, 21_000);
+        grant["per_call_max_msat"] = 21_000.into();
+        *g1.grant.lock().unwrap() = grant;
+        let receipt = do_call_signal(&node.state, A, 400, OFFER, 15_000).await.unwrap();
+        assert_eq!(receipt.total_msat, 15_000);
+        assert_eq!(composes(&node), 1);
+    }
+
+    #[tokio::test]
+    async fn call_node_error_surfaces_and_keeps_an_uncertain_payment_pending() {
+        let inner = call_routes(Some(10_000));
+        let node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
+            if p == "/messages/compose" { (500, r#"{"error":"call routing unavailable"}"#.into()) }
+            else { inner(m, p, b) }
+        }));
+        do_budget_approve(&node.state, 500_000, budget::PresetId::Careful).await.unwrap();
+        with_book(&node.state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
+        let error = do_call_signal(&node.state, A, 400, OFFER, 15_000).await.unwrap_err();
+        assert_eq!(error.code, "spend_unknown");
+        assert!(error.message.contains("call routing unavailable"));
+        assert_eq!(composes(&node), 1);
+        assert!(spend_journal(&node.state).unwrap().pending().unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn call_node_timeout_is_bounded_and_keeps_the_payment_pending() {
+        let inner = call_routes(Some(10_000));
+        let mut node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
+            if p == "/messages/compose" { std::thread::sleep(Duration::from_millis(500)); }
+            inner(m, p, b)
+        }));
+        node.state.spend_timeout = Duration::from_millis(150);
+        do_budget_approve(&node.state, 500_000, budget::PresetId::Careful).await.unwrap();
+        with_book(&node.state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
+        let error = tokio::time::timeout(Duration::from_secs(2), do_call_signal(&node.state, A, 400, OFFER, 15_000))
+            .await.expect("bounded call request").unwrap_err();
+        assert_eq!(error.code, "spend_unknown");
+        assert!(error.message.contains("node"));
+        assert_eq!(composes(&node), 1);
+        assert!(spend_journal(&node.state).unwrap().pending().unwrap().is_some());
+        assert_eq!(budget_now(&node.state).unsettled_msat, 15_000);
+    }
 
     #[tokio::test]
     async fn a_refused_call_returns_without_payment_and_releases_its_reservation() {
