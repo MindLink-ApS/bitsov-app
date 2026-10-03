@@ -1,0 +1,123 @@
+<title>BitSov Design Choices</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one reading column of direction rows, each a 3-up strip of real screenshots; the recommendation leads. */
+:root {
+  --bg: #f6f4f0; --panel: #ffffff; --ink: #1f1d1a; --muted: #625d55; --line: #dedad2; --money: #c24e00; --money-bg: #fbeadc; --rec: #2a7e4f;
+  --f-display: 'Instrument Serif', Georgia, serif; --f-body: 'IBM Plex Sans', system-ui, sans-serif; --f-mono: 'IBM Plex Mono', ui-monospace, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg: #14120f; --panel: #1d1a16; --ink: #eee9e2; --muted: #aca59a; --line: #34302a; --money: #ff9a4d; --money-bg: #33200f; --rec: #6fcf97; color-scheme: dark; } }
+:root[data-theme="dark"] { --bg: #14120f; --panel: #1d1a16; --ink: #eee9e2; --muted: #aca59a; --line: #34302a; --money: #ff9a4d; --money-bg: #33200f; --rec: #6fcf97; color-scheme: dark; }
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--ink); font-family: var(--f-body); font-size: 15px; line-height: 1.55; padding-inline: 20px; }
+.wrap { max-width: 1180px; margin: 0 auto; padding-block: 48px 80px; display: flex; flex-direction: column; gap: 44px; }
+h1, h2 { font-family: var(--f-display); font-weight: 400; text-wrap: balance; margin: 0; letter-spacing: -0.01em; }
+h1 { font-size: clamp(38px, 6vw, 60px); line-height: 1.02; }
+h2 { font-size: 32px; line-height: 1.1; }
+p { margin: 0; max-width: 68ch; }
+.muted { color: var(--muted); }
+header { display: flex; flex-direction: column; gap: 14px; }
+.toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; font-size: 13.5px; color: var(--muted); }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.seg button { font: inherit; border: 0; background: var(--panel); color: var(--muted); padding: 6px 12px; cursor: pointer; }
+.seg button[aria-pressed="true"] { background: var(--ink); color: var(--bg); }
+button:focus-visible, a:focus-visible { outline: 2px solid var(--money); outline-offset: 2px; }
+.rec { background: var(--panel); border: 1px solid var(--line); border-left: 4px solid var(--rec); border-radius: 10px; padding: 22px 24px; display: flex; flex-direction: column; gap: 12px; }
+.rec ul { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 6px; max-width: 80ch; }
+.dir { display: flex; flex-direction: column; gap: 14px; border-top: 1px solid var(--line); padding-top: 28px; }
+.dir-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 16px; }
+.dir-head .letter { font-family: var(--f-mono); font-size: 13px; color: var(--muted); }
+.tag { font-size: 12.5px; padding: 2px 10px; border-radius: 999px; background: var(--money-bg); color: var(--money); }
+.tag.ok { background: transparent; color: var(--rec); border: 1px solid currentColor; }
+.shots { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.shots figure { margin: 0; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.shots img { width: 100%; height: auto; border-radius: 8px; border: 1px solid var(--line); display: block; aspect-ratio: 1280 / 820; background: var(--panel); }
+.shots figcaption { font-size: 12.5px; color: var(--muted); }
+.facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; font-size: 14px; }
+.facts b { display: block; font-size: 12.5px; font-weight: 500; color: var(--muted); margin-bottom: 2px; }
+.decisions { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
+.decision { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; display: flex; flex-direction: column; gap: 8px; }
+.decision h3 { margin: 0; font-size: 15px; font-weight: 600; }
+.decision ol { margin: 0; padding-left: 20px; font-size: 14px; color: var(--muted); }
+.decision li.pick { color: var(--ink); font-weight: 500; }
+.decision li.pick::after { content: ' (recommended)'; color: var(--rec); font-weight: 400; font-size: 12.5px; }
+.doctrine { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px 24px; font-size: 14px; }
+.doctrine b { display: block; }
+.num { font-family: var(--f-mono); font-variant-numeric: tabular-nums; }
+@media (max-width: 760px) { .shots, .facts { grid-template-columns: 1fr; } .wrap { padding-block: 28px 56px; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>Six ways BitSov could look</h1>
+    <p class="muted">Test #5 found the app honest but heavy: a long onboarding page, technical copy, no motion, and orange used for everything. Each direction below mocks the same three screens with the same sample data: picking a node, a chat with a priced send, and the wallet. Every mock keeps the doctrine: prices are ceilings, unknowns stay unknown, and custody is labelled.</p>
+    <div class="toolbar"><span>Screenshots:</span>
+      <div class="seg" role="group" aria-label="Screenshot theme">
+        <button type="button" data-shot="primary" aria-pressed="true">Each direction’s own theme</button>
+        <button type="button" data-shot="light" aria-pressed="false">All light</button>
+        <button type="button" data-shot="dark" aria-pressed="false">All dark</button>
+      </div>
+    </div>
+  </header>
+
+  <section class="rec" aria-label="Recommendation">
+    <h2>Recommendation: Ember 2.0, with three borrowed rules</h2>
+    <ul>
+      <li><b>Base on F.</b> Keep the warm identity and the serif wordmark, rebuilt on accessible colour scales, with a light theme that gets equal care.</li>
+      <li><b>From A: orange means money.</b> Buttons and outgoing bubbles go neutral. Orange is kept for prices, the send action and the wallet.</li>
+      <li><b>From C: the fee breakdown.</b> The price chip opens “Maya’s price 2 · routing at most 5 · you pay at most 7”. A settled message shows what it actually cost.</li>
+      <li><b>From D: purposeful motion.</b> A message slides in, the price highlights while sending, then settles. Reduced motion turns this into a fade.</li>
+      <li><b>Onboarding in three focused steps</b> (node, identity, optional sats) replaces today’s single long page.</li>
+    </ul>
+    <p class="muted">No new JavaScript dependencies. The only addition is about 180 KB of local OFL font files bundled with the app.</p>
+  </section>
+
+  <div id="dirs"></div>
+
+  <section class="dir" aria-label="Decisions">
+    <h2>What to decide</h2>
+    <div class="decisions">
+      <div class="decision"><h3>Overall direction</h3><ol><li>A Quiet Instrument</li><li>B Ledger Paper</li><li>C Wallet-native</li><li>D Signal-clear</li><li>E Command Deck</li><li class="pick">F Ember 2.0 blend</li></ol></div>
+      <div class="decision"><h3>Typography</h3><ol><li class="pick">Instrument Serif, Inter, JetBrains Mono</li><li>Geist and Geist Mono</li><li>Fraunces and IBM Plex</li><li>Inter only</li></ol></div>
+      <div class="decision"><h3>Colour and theme</h3><ol><li class="pick">Warm dark-first, equal light</li><li>Cool greyscale, light-first</li><li>Ledger green paper</li><li>Neutral with Bitcoin orange</li></ol></div>
+      <div class="decision"><h3>Motion</h3><ol><li>None</li><li class="pick">Purposeful, 150–250 ms on actions</li><li>Expressive: springs, count-ups</li></ol></div>
+      <div class="decision"><h3>Onboarding</h3><ol><li class="pick">Three focused steps</li><li>Conversational</li><li>Editorial pages with explainer</li><li>Checklist and command palette</li></ol></div>
+    </div>
+  </section>
+
+  <section class="dir" aria-label="Doctrine check">
+    <h2>What every mock keeps</h2>
+    <div class="doctrine">
+      <div><b>Prices are ceilings</b><span class="muted">“up to 7 sats” before sending; actual cost after, such as <span class="num">3 sats</span> (2 + 1 routing).</span></div>
+      <div><b>Unknown stays unknown</b><span class="muted">Spendable and reserved amounts say “Not reported”. No fiat value without a rate.</span></div>
+      <div><b>Custody, honestly</b><span class="muted">“Self-custody, this Mac” or “your server”. No hosted option, because none exists.</span></div>
+      <div><b>No connection claims</b><span class="muted">“Last paid message 10:21”, never “online” or “connected”.</span></div>
+    </div>
+  </section>
+</div>
+
+<script>
+const D = [
+  ['A', 'Quiet Instrument', 'light', 'Greyscale tool. Orange appears only where sats move.', 'The price signal is unmistakable. Calm and fast to build.', 'Can feel cold or like a developer tool to consumer testers.', 'Geist and Geist Mono fonts, about 100 KB'],
+  ['B', 'Ledger Paper', 'light', 'Green ledger paper, navy ink, and a receipt under every message.', 'Warmest and most explanatory. Receipts make “payment is the connection” literal.', 'Low density for heavy chat. The most work.', 'Fraunces and IBM Plex fonts, about 200 KB'],
+  ['C', 'Wallet-native', 'dark', 'Bitcoin Design Guide rules made visible: big balance, unit toggle, fee review row.', 'Clearest money handling: units, fees and custody.', 'Reads as a wallet with chat attached.', 'Inter font, about 70 KB'],
+  ['D', 'Signal-clear', 'light', 'Bright consumer messenger with the price on the Send button.', 'Most familiar and modern; answers test #5 directly.', 'Friendliness can imply guarantees we cannot make. Closest to generic.', 'Inter font, about 70 KB'],
+  ['E', 'Command Deck', 'dark', 'Dense, keyboard-first node console with a status bar.', 'Ideal for node operators; every number visible.', 'Wrong for the test #5 audience. Better as a later advanced mode.', 'Inter and JetBrains Mono, about 100 KB'],
+  ['F', 'Ember 2.0', 'dark', 'Today’s warm BitSov on accessible scales, with orange kept for money.', 'Keeps brand recognition. Lowest risk; no architecture change.', 'Least visibly new on its own.', 'Instrument Serif, Inter, JetBrains Mono, about 180 KB'],
+];
+const screens = [['onboarding', 'Choosing where the node runs'], ['chat', 'Chat with the priced send'], ['wallet', 'Wallet']];
+let mode = 'primary';
+try { mode = localStorage.getItem('shot-mode') || 'primary'; } catch (e) {}
+function render() {
+  document.getElementById('dirs').innerHTML = D.map(([k, name, prim, tag, good, risk, deps]) => {
+    const t = mode === 'primary' ? prim : mode;
+    return `<section class="dir" id="dir-${k}"><div class="dir-head"><span class="letter">${k}</span><h2>${name}</h2>${k === 'F' ? '<span class="tag ok">Recommended base</span>' : ''}</div>
+      <p class="muted">${tag}</p>
+      <div class="shots">${screens.map(([s, cap]) => `<figure><a href="shots/${k}-${s}-${t}.png" target="_blank" rel="noopener"><img loading="lazy" src="shots/${k}-${s}-${t}.png" alt="${name}: ${cap}, ${t} theme"></a><figcaption>${cap} · ${t}</figcaption></figure>`).join('')}</div>
+      <div class="facts"><div><b>Strength</b>${good}</div><div><b>Risk</b>${risk}</div><div><b>Adds</b>${deps}. No JavaScript dependencies.</div></div></section>`;
+  }).join('');
+  document.querySelectorAll('[data-shot]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.shot === mode)));
+}
+document.querySelectorAll('[data-shot]').forEach((b) => b.addEventListener('click', () => { mode = b.dataset.shot; try { localStorage.setItem('shot-mode', mode); } catch (e) {} render(); }));
+render();
+</script>
