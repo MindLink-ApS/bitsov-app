@@ -2752,7 +2752,7 @@ async fn do_first_contact_request(state: &NodeState, recipient: &str, max_msat: 
     };
     let (auth, _) = plan_message(state, &recipient, false, max_msat, Some(contact_budget_msat))?;
     if state.node_grant.lock().unwrap().is_none() || !node_offers(state, grant::FIRST_CONTACT_CAPABILITY).await {
-        return Ok(None);
+        return if state.remote_mode.load(Ordering::SeqCst) { Err(owner_contact::unavailable()) } else { Ok(None) };
     }
     let fence = approval_fence(state);
     let grant = read_grant(state).await?.ok_or_else(grant::ended)?;
@@ -2771,25 +2771,56 @@ async fn do_first_contact_request(state: &NodeState, recipient: &str, max_msat: 
         .unwrap()
         .as_ref()
         .map(|dir| dir.join("konsensus.toml"));
-    let pending = owner_contact::Pending::new(owner_contact::Request {
+    let request = owner_contact::Request {
         client_id: grant.client_id.clone(), grant_op_id: grant.op_id.clone(),
         recipient, max_total_msat: max_msat, contact_budget_msat,
-    }, fence, now_ms(), &grant, owner_config.as_deref())?;
-    let view = pending.view.clone();
+    };
+    let mut pending = if state.remote_mode.load(Ordering::SeqCst) {
+        owner_contact::Pending::remote(request, fence, now_ms(), &grant)?
+    } else {
+        owner_contact::Pending::new(request, fence, now_ms(), &grant, owner_config.as_deref())?
+    };
+    // Discover availability and the advertised window before presenting a wait.
+    let view = if let Some(path) = pending.remote_path() {
+        let body = read_remote_contact_status(state, &path).await?;
+        check_auth(state, auth)?;
+        pending.remote_discover(&body, &grant, approval_fence(state), now_ms())?
+    } else { pending.view.clone() };
     *state.owner_contact.lock().unwrap() = Some(pending);
     Ok(Some(view))
 }
 
+async fn read_remote_contact_status(state: &NodeState, path: &str) -> Result<String, ActionError> {
+    let (status, body) = call_api(state, reqwest::Method::GET, path, None).await
+        .map_err(|_| ActionError::node("Cannot read remote contact approval. Nothing was sent. Try again when the node is reachable."))?;
+    if status == reqwest::StatusCode::NOT_FOUND { return Err(owner_contact::unavailable()); }
+    if !status.is_success() { return Err(ActionError::node("Cannot read remote contact approval. Nothing was sent.")); }
+    Ok(body)
+}
+
 async fn do_first_contact_status(state: &NodeState, id: &str) -> Result<owner_contact::View, ActionError> {
     let grant = read_grant(state).await?.ok_or_else(grant::ended)?;
-    let fence = approval_fence(state);
-    let pending = state.owner_contact.lock().unwrap();
-    let pending = pending.as_ref().filter(|p| p.view.id == id)
-        .ok_or_else(|| ActionError::new("owner_only", "This contact approval was cancelled."))?;
-    let r = &pending.view.request;
-    let (auth, _) = plan_message(state, &r.recipient, false, r.max_total_msat, Some(r.contact_budget_msat))?;
+    let (request, path) = {
+        let pending = state.owner_contact.lock().unwrap();
+        let pending = pending.as_ref().filter(|p| p.view.id == id)
+            .ok_or_else(|| ActionError::new("owner_only", "This contact approval was cancelled."))?;
+        pending.status(&grant, approval_fence(state), now_ms())?;
+        (pending.view.request.clone(), pending.remote_path())
+    };
+    let (auth, _) = plan_message(state, &request.recipient, false, request.max_total_msat, Some(request.contact_budget_msat))?;
+    let body = match path {
+        Some(path) => Some(read_remote_contact_status(state, &path).await?),
+        None => None,
+    };
     check_auth(state, auth)?;
-    pending.status(&grant, fence, now_ms())
+    let fence = approval_fence(state);
+    let mut pending = state.owner_contact.lock().unwrap();
+    let pending = pending.as_mut().filter(|p| p.view.id == id)
+        .ok_or_else(|| ActionError::new("owner_only", "This contact approval was cancelled."))?;
+    match body {
+        Some(body) => pending.remote_status(&body, &grant, fence, now_ms()),
+        None => pending.status(&grant, fence, now_ms()),
+    }
 }
 
 fn do_first_contact_cancel(state: &NodeState, id: &str) {
@@ -2801,7 +2832,7 @@ fn do_first_contact_cancel(state: &NodeState, id: &str) {
 /// and consumes the actual single-use grant, under the reviewed budget.
 async fn confirm_first_contact(state: &NodeState, recipient: &str, max_msat: u64, contact_budget_msat: u64) -> Result<(), ActionError> {
     if state.node_grant.lock().unwrap().is_none() || !node_offers(state, grant::FIRST_CONTACT_CAPABILITY).await {
-        return Ok(());
+        return if state.remote_mode.load(Ordering::SeqCst) { Err(owner_contact::unavailable()) } else { Ok(()) };
     }
     let id = state.owner_contact.lock().unwrap().as_ref().filter(|p| {
         let r = &p.view.request;
@@ -8189,33 +8220,64 @@ mod control_act_tests {
 
     #[tokio::test]
     async fn psi_paired_approved_retry_renews_the_consumed_contact_authorization() {
-        let (node, _dir, g1) = g1_node(&["read", "receive"]);
-        *g1.quote.lock().unwrap() = Some(serde_json::json!({"recipient": A,
-            "admission_msat": 2000, "message_msat": 2000, "max_routing_fee_msat": 10000,
-            "total_msat": 14000, "expires_at": now_unix() + 60}));
-        *g1.first_contact.lock().unwrap() = Some((200, serde_json::json!({
-            "recipient": A, "max_total_msat": 14000, "expires_at": now_unix() + 120,
-        })));
-        g1_approved(&node, 500_000).await;
-        owner_approves_contact(&node, A, 14000, Some(100000)).await;
-        let (status, reply) = psi_502(2000, 0, 2000, PSI_TIMEOUT);
-        *g1.compose.lock().unwrap() = Some((status, serde_json::from_str(&reply).unwrap()));
-        assert_eq!(do_message_send_with(&node.state, A, false, "gm", 14000, None, Some(100000)).await.unwrap_err().code, "payment_settled_undelivered");
-        let original = pending(&node).unwrap();
-        assert!(node.state.owner_contact.lock().unwrap().is_none());
-        let (status, reply) = delivered("renewed", 2000);
-        *g1.compose.lock().unwrap() = Some((status, serde_json::from_str(&reply).unwrap()));
-        assert_eq!(do_message_retry(&node.state, A, "gm", Some(14000)).await.unwrap_err().code, "owner_only");
-        assert_eq!(compose_bodies(&node).len(), 1, "no compose without renewed owner approval");
-        assert_eq!(pending(&node).unwrap().id, original.id);
-        g1.grant.lock().unwrap()["per_recipient_msat"][A] = serde_json::json!(100000);
-        let renewed = owner_approves_contact(&node, A, 14000, None).await;
-        assert_eq!(renewed.request.contact_budget_msat, 100000);
-        assert_eq!(renewed.request.max_total_msat, 14000);
-        do_message_retry(&node.state, A, "gm", Some(14000)).await.unwrap();
-        assert!(node.state.owner_contact.lock().unwrap().is_none());
-        assert_eq!(compose_bodies(&node)[1]["max_total_msat"], 14000);
-        assert!(pending(&node).is_none());
+        for remote in [false, true] {
+            let response = Arc::new(Mutex::new(serde_json::json!({
+                "grant_op_id": "ab12", "recipient": A, "state": "approved", "approval_window_secs": 300,
+                "approval": {"recipient": A, "max_total_msat": 14000, "expires_at": now_unix() + 300},
+            })));
+            let reply = response.clone();
+            let route: Routes = Arc::new(move |m, p, _| {
+                if p == format!("/pair/first-contact-grant/ab12?recipient={A}") {
+                    assert_eq!(m, "GET");
+                    return (200, reply.lock().unwrap().to_string());
+                }
+                (0, String::new())
+            });
+            let (node, _dir, g1) = g1_node_with(&["read", "receive"], Some(route));
+            *g1.quote.lock().unwrap() = Some(serde_json::json!({"recipient": A,
+                "admission_msat": 2000, "message_msat": 2000, "max_routing_fee_msat": 10000,
+                "total_msat": 14000, "expires_at": now_unix() + 60}));
+            *g1.first_contact.lock().unwrap() = Some((200, serde_json::json!({
+                "recipient": A, "max_total_msat": 14000, "expires_at": now_unix() + 120,
+            })));
+            g1_approved(&node, 500_000).await;
+            node.state.remote_mode.store(remote, Ordering::SeqCst);
+            if remote {
+                assert!(do_first_contact_request(&node.state, A, 14000, Some(100000)).await.unwrap().unwrap().ready);
+            } else {
+                owner_approves_contact(&node, A, 14000, Some(100000)).await;
+            }
+            let (status, reply) = psi_502(2000, 0, 2000, PSI_TIMEOUT);
+            *g1.compose.lock().unwrap() = Some((status, serde_json::from_str(&reply).unwrap()));
+            assert_eq!(do_message_send_with(&node.state, A, false, "gm", 14000, None, Some(100000)).await.unwrap_err().code, "payment_settled_undelivered");
+            let original = pending(&node).unwrap();
+            assert!(node.state.owner_contact.lock().unwrap().is_none());
+            let (status, reply) = delivered("renewed", 2000);
+            *g1.compose.lock().unwrap() = Some((status, serde_json::from_str(&reply).unwrap()));
+            assert_eq!(do_message_retry(&node.state, A, "gm", Some(14000)).await.unwrap_err().code, "owner_only");
+            assert_eq!(compose_bodies(&node).len(), 1, "no compose without renewed owner approval");
+            assert_eq!(pending(&node).unwrap().id, original.id);
+            g1.grant.lock().unwrap()["per_recipient_msat"][A] = serde_json::json!(100000);
+            let renewed = if remote {
+                response.lock().unwrap()["state"] = "consumed".into();
+                let renewed = do_first_contact_request(&node.state, A, 14000, None).await.unwrap().unwrap();
+                assert!(!renewed.ready);
+                assert!(!do_first_contact_status(&node.state, &renewed.id).await.unwrap().ready);
+                assert_eq!(do_message_retry(&node.state, A, "gm", Some(14000)).await.unwrap_err().code, "owner_only");
+                assert_eq!(compose_bodies(&node).len(), 1);
+                assert_eq!(pending(&node).unwrap().id, original.id);
+                assert_eq!(pending(&node).unwrap().undelivered, original.undelivered);
+                response.lock().unwrap()["state"] = "approved".into();
+                renewed
+            } else { owner_approves_contact(&node, A, 14000, None).await };
+            assert_eq!(renewed.request.contact_budget_msat, 100000);
+            assert_eq!(renewed.request.max_total_msat, 14000);
+            do_message_retry(&node.state, A, "gm", Some(14000)).await.unwrap();
+            assert!(node.state.owner_contact.lock().unwrap().is_none());
+            assert_eq!(compose_bodies(&node)[1]["max_total_msat"], 14000);
+            assert!(pending(&node).is_none());
+            assert_eq!(compose_bodies(&node)[0]["plaintext"], compose_bodies(&node)[1]["plaintext"]);
+        }
     }
 
     #[tokio::test]
@@ -11012,6 +11074,66 @@ mod control_act_tests {
         let t = node.targets();
         let compose = t.iter().position(|x| x == "POST /messages/compose").unwrap();
         assert_eq!(t[compose - 1], "GET /pair/grant");
+    }
+
+    #[tokio::test]
+    async fn remote_contact_polls_bound_operation_and_never_sends_before_approval() {
+        let reply = Arc::new(Mutex::new((200, serde_json::json!({
+            "grant_op_id": "ab12", "recipient": C, "state": "pending",
+            "approval_window_secs": 300, "approval": null,
+        }))));
+        let response = reply.clone();
+        let route: Routes = Arc::new(move |m, p, _| {
+            if p.starts_with("/pair/first-contact-grant/") {
+                assert_eq!(m, "GET");
+                assert_eq!(p, format!("/pair/first-contact-grant/ab12?recipient={C}"));
+                let r = response.lock().unwrap();
+                return (r.0, r.1.to_string());
+            }
+            (0, String::new())
+        });
+        let (node, _dir, g1) = g1_node_with(&["read", "receive"], Some(route));
+        *g1.first_contact.lock().unwrap() = Some((200, serde_json::json!({})));
+        g1_approved(&node, 500_000).await;
+        node.state.remote_mode.store(true, Ordering::SeqCst);
+        let mut view = do_first_contact_request(&node.state, C, 10000, Some(50_000)).await.unwrap().unwrap();
+        assert!(!view.owner_command.contains("receipt"), "remote commands cannot write an app-local receipt");
+        assert!(view.expires_at_ms > now_ms() + 290_000);
+        assert!(!do_first_contact_status(&node.state, &view.id).await.unwrap().ready);
+        assert!(do_message_send_with(&node.state, C, false, "hello", 10000, None, Some(50_000)).await.is_err());
+        assert!(compose_bodies(&node).is_empty());
+        for state in ["expired", "consumed", "approved"] {
+            reply.lock().unwrap().1["state"] = state.into();
+            // Even approved without its matching approval must fail closed.
+            assert!(do_first_contact_status(&node.state, &view.id).await.is_err());
+        }
+        // Requoting must expose a replacement command while the old expired
+        // marker is still held by the node. Waiting still cannot compose.
+        reply.lock().unwrap().1["state"] = "expired".into();
+        view = do_first_contact_request(&node.state, C, 10000, Some(50_000)).await.unwrap().unwrap();
+        assert!(!view.ready);
+        assert!(!do_first_contact_status(&node.state, &view.id).await.unwrap().ready);
+        assert!(do_message_send_with(&node.state, C, false, "hello", 10000, None, Some(50_000)).await.is_err());
+        // A cancelled handoff may also leave an approval for a different cap.
+        reply.lock().unwrap().1["state"] = "approved".into();
+        reply.lock().unwrap().1["approval"] = serde_json::json!({
+            "recipient": C, "max_total_msat": 9000, "expires_at": now_unix() + 300,
+        });
+        view = do_first_contact_request(&node.state, C, 10000, Some(50_000)).await.unwrap().unwrap();
+        assert!(!view.ready);
+        assert!(!do_first_contact_status(&node.state, &view.id).await.unwrap().ready);
+        assert!(compose_bodies(&node).is_empty());
+        reply.lock().unwrap().1["approval"]["max_total_msat"] = 10000.into();
+        assert!(do_first_contact_status(&node.state, &view.id).await.unwrap().ready);
+        do_message_send_with(&node.state, C, false, "hello", 10000, None, Some(50_000)).await.unwrap();
+        assert_eq!(compose_bodies(&node).len(), 1);
+        assert!(node.seen.lock().unwrap().iter().filter(|(_, p, _, _)| p.contains("/first-contact-grant/"))
+            .all(|(m, _, token, _)| m == "GET" && token.as_deref() == Some("tok.spend")));
+        // An unavailable route is not pending and must not fall back to a receipt.
+        *reply.lock().unwrap() = (404, serde_json::json!({}));
+        let err = do_first_contact_request(&node.state, C, 10000, Some(50_000)).await.unwrap_err();
+        assert_eq!(err.code, "owner_contact_unavailable");
+        assert!(err.message.contains("older node") && err.message.contains("owner control"));
     }
 
     async fn owner_approves_contact(node: &Fake, recipient: &str, cap: u64, budget: Option<u64>) -> owner_contact::View {

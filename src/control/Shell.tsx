@@ -3224,27 +3224,51 @@ function Composer(props: {
   };
   onCleanup(cancelOwner);
   createEffect(() => { if (props.moneyBlocked) { approvalRevision++; cancelOwner(); } });
+  const [ownerCountdown, setOwnerCountdown] = createSignal(0);
+  const [ownerExpired, setOwnerExpired] = createSignal(false);
   createEffect(() => {
     const pending = ownerWait();
     if (!pending) return;
+    const remote = pending.approval.approval_window_secs !== undefined;
+    let deadline = pending.approval.expires_at_ms;
+    let delay = 1000;
+    let nextPoll = Date.now() + delay;
     let polling = false;
-    const poll = async () => {
-      if (polling) return;
+    const expire = () => {
+      cancelOwner();
+      setOwnerExpired(true);
+      setNote('Contact approval expired. Nothing was sent. Get a fresh quote to try again.');
+    };
+    const tick = async () => {
+      if (ownerWait() !== pending) return;
+      setOwnerCountdown(Math.max(0, Math.ceil((deadline - Date.now()) / 1000)));
+      if (remote && Date.now() >= deadline) { expire(); return; }
+      if (polling || Date.now() < nextPoll) return;
       polling = true;
       const result = await props.actions.ownerStatus(pending.approval.id);
       polling = false;
       if (ownerWait() !== pending) return;
       if (composerRevision !== pending.revision) { cancelOwner(); return; }
+      if (remote && Date.now() >= deadline) { expire(); return; }
       if (!result.ok) {
+        if (result.error.code === 'owner_contact_expired') { expire(); return; }
         cancelOwner();
         setNote(result.error.message);
-      } else if (result.value.ready) {
-        setOwnerWait(null);
-        setBusy(true);
-        try { await pending.send(); } finally { setBusy(false); }
+      } else {
+        deadline = Math.min(deadline, result.value.expires_at_ms);
+        if (remote && Date.now() >= deadline) { expire(); return; }
+        if (result.value.ready) {
+          setOwnerWait(null);
+          setBusy(true);
+          try { await pending.send(); } finally { setBusy(false); }
+        } else {
+          delay = remote ? Math.min(delay * 2, 10000) : 1000;
+          nextPoll = Date.now() + delay;
+        }
       }
     };
-    const timer = setInterval(() => void poll(), 1000);
+    setOwnerCountdown(Math.max(0, Math.ceil((deadline - Date.now()) / 1000)));
+    const timer = setInterval(() => void tick(), 1000);
     onCleanup(() => clearInterval(timer));
   });
   // Budget refreshes replace the object every three seconds. Only an actual
@@ -3260,6 +3284,7 @@ function Composer(props: {
       () => trackKey(props.track),
       () => {
         cancelOwner();
+        setOwnerExpired(false);
         composerRevision++;
         setMode('message');
         setNote(null);
@@ -3304,6 +3329,7 @@ function Composer(props: {
         const p = props.prefill;
         if (!p || p.key !== trackKey(props.track) || room()) return;
         cancelOwner();
+        setOwnerExpired(false);
         composerRevision++;
         setMode(p.mode);
         setNote(null);
@@ -3333,6 +3359,7 @@ function Composer(props: {
         const p = props.payRequest;
         if (!p || room()) return;
         cancelOwner();
+        setOwnerExpired(false);
         composerRevision++;
         setNote(null);
         setMode('pay');
@@ -3460,6 +3487,7 @@ function Composer(props: {
   };
 
   const priceProblem = (): string | null => {
+    if (ownerExpired()) return 'Contact approval expired · get a fresh quote';
     if (!room()) {
       if (props.quoteError) return props.quoteError;
       if (!props.quote) return 'price loading…';
@@ -3691,7 +3719,10 @@ function Composer(props: {
           setDraft('');
           setDrafted(false);
         }
-      } else if (!r.ok && unchanged && (isBudgetStop(r.error) || r.error.code === 'owner_only')) setNote(r.error.message);
+      } else if (!r.ok && unchanged && r.error.code === 'owner_contact_expired') {
+        setOwnerExpired(true);
+        setNote(r.error.message);
+      } else if (!r.ok && unchanged && (isBudgetStop(r.error) || ['owner_only', 'owner_contact_unavailable'].includes(r.error.code))) setNote(r.error.message);
       };
       if (first !== undefined && !room()) {
         const request = await props.actions.ownerRequest(submittedPeer, cap, first);
@@ -4213,14 +4244,25 @@ function Composer(props: {
       <Show when={note() && note() !== MONEY_NOT_READY}>
         <p class="err-note" data-composer-note>{note()}</p>
       </Show>
+      <Show when={ownerExpired()}>
+        <button type="button" class="link" data-contact-requote onClick={() => {
+          setDoor(null);
+          setOwnerExpired(false);
+          setNote(null);
+          props.refreshPrice();
+        }}>Get a fresh quote</button>
+      </Show>
       <Show when={ownerWait()}>
         {(pending) => <div class="approval" data-contact-approval="pending" data-contact-request={JSON.stringify(pending().approval.request)}>
           <p><strong>Approve this contact at your node.</strong> Run this command once in the owner’s terminal from the node’s data directory, with owner control enabled. The app never receives an owner credential.</p>
           <p>The command approves this contact’s budget and first-message cap. This draft sends after approval. Editing it or pressing Cancel stops the wait.</p>
+          <Show when={pending().approval.approval_window_secs !== undefined}>
+            <p role="status" data-contact-countdown>Waiting for remote approval · {Math.floor(ownerCountdown() / 60)}:{String(ownerCountdown() % 60).padStart(2, '0')} remaining</p>
+          </Show>
           <textarea readonly aria-label="Owner approval command" data-contact-owner-command data-command={pending().approval.owner_command} value={pending().approval.owner_command} />
           <button type="button" class="link" onClick={async () => { try { await navigator.clipboard.writeText(pending().approval.owner_command); } catch { setNote('Select and copy the command above.'); } }}>Copy command</button>
           <button type="button" class="link" data-contact-cancel onClick={cancelOwner}>Cancel</button>
-          <p class="hint">Cancel does not revoke an approval already issued at the node; it expires within two minutes.</p>
+          <p class="hint">Cancel does not revoke an approval already issued at the node; it expires within {pending().approval.approval_window_secs !== undefined ? 'five' : 'two'} minutes.</p>
         </div>}
       </Show>
       <Show when={spends()}>

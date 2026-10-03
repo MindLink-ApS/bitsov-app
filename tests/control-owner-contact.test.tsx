@@ -145,3 +145,80 @@ it('clears an approved successful first-contact send completed while offline', a
   expect(element<HTMLButtonElement>('[data-send]').disabled).toBe(true);
   expect(source.send).toHaveBeenCalledTimes(1);
 });
+
+it('waits with backoff and a countdown for remote approval beyond fifteen seconds', async () => {
+  vi.useFakeTimers();
+  const { source, approval } = await start((_source, approval) => {
+    Object.assign(approval, { approval_window_secs: 300, expires_at_ms: Date.now() + 300000 });
+  });
+  await vi.advanceTimersByTimeAsync(20000);
+  expect(element('[data-contact-countdown]')?.textContent).toMatch(/4:4\d/);
+  expect(vi.mocked(source.firstContactStatus).mock.calls.length).toBeLessThan(10);
+  expect(source.send).not.toHaveBeenCalled();
+  expect(element<HTMLTextAreaElement>('[data-composer] textarea').value).toBe('hello with an owner approval');
+  source.firstContactStatus = vi.fn(async () => ({ ...approval, ready: true }));
+  await vi.advanceTimersByTimeAsync(10000);
+  expect(source.send).toHaveBeenCalledTimes(1);
+});
+
+it.each(['deadline', 'expired'] as const)('remote %s retains the draft and offers a fresh quote without sending', async reason => {
+  vi.useFakeTimers();
+  const { source } = await start((source, approval) => {
+    Object.assign(approval, { approval_window_secs: 30, expires_at_ms: Date.now() + 30000 });
+    if (reason === 'expired') source.firstContactStatus = vi.fn(async () => { throw { code: 'owner_contact_expired', message: 'Approval expired. Nothing was sent.' }; });
+  });
+  await vi.advanceTimersByTimeAsync(31000);
+  expect(source.send).not.toHaveBeenCalled();
+  expect(element('[data-contact-approval]')).toBeNull();
+  expect(element<HTMLTextAreaElement>('[data-composer] textarea').value).toBe('hello with an owner approval');
+  expect(element('[data-contact-requote]')).not.toBeNull();
+  element<HTMLButtonElement>('[data-contact-requote]').click();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(source.send).not.toHaveBeenCalled();
+  expect(element('[data-contact-requote]')).toBeNull();
+});
+
+it('stops at five minutes even if a status request is stuck, ignoring its late approval', async () => {
+  vi.useFakeTimers();
+  let finish!: (approval: OwnerContactApproval) => void;
+  const { source, approval } = await start((source, approval) => {
+    Object.assign(approval, { approval_window_secs: 300, expires_at_ms: Date.now() + 300000 });
+    source.firstContactStatus = vi.fn(() => new Promise<OwnerContactApproval>(resolve => { finish = resolve; }));
+  });
+  await vi.advanceTimersByTimeAsync(299000);
+  expect(element('[data-contact-approval]')).not.toBeNull();
+  expect(source.send).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(element('[data-contact-requote]')).not.toBeNull();
+  finish({ ...approval, ready: true });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(source.send).not.toHaveBeenCalled();
+});
+
+it('shows unavailable status honestly and stops polling without losing the draft', async () => {
+  vi.useFakeTimers();
+  const { source } = await start((source, approval) => {
+    Object.assign(approval, { approval_window_secs: 300, expires_at_ms: Date.now() + 300000 });
+    source.firstContactStatus = vi.fn(async () => { throw {
+      code: 'owner_contact_unavailable', message: 'Remote contact approval status is not available: older node or owner control off. Nothing was sent.',
+    }; });
+  });
+  await vi.advanceTimersByTimeAsync(10000);
+  expect(mount.textContent).toContain('older node or owner control off');
+  expect(source.firstContactStatus).toHaveBeenCalledTimes(1);
+  expect(source.send).not.toHaveBeenCalled();
+  expect(element<HTMLTextAreaElement>('[data-composer] textarea').value).toBe('hello with an owner approval');
+});
+
+it('offers a fresh quote if approval expires during the host send recheck', async () => {
+  vi.useFakeTimers();
+  const { source } = await start((source, approval) => {
+    Object.assign(approval, { approval_window_secs: 300, expires_at_ms: Date.now() + 300000 });
+    source.firstContactStatus = vi.fn(async () => ({ ...approval, ready: true }));
+    source.send = vi.fn(async () => { throw { code: 'owner_contact_expired', message: 'Contact approval expired. Nothing was sent.' }; });
+  });
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(element('[data-contact-requote]')).not.toBeNull();
+  expect(element<HTMLTextAreaElement>('[data-composer] textarea').value).toBe('hello with an owner approval');
+  expect(source.send).toHaveBeenCalledTimes(1);
+});
