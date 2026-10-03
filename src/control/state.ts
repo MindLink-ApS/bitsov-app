@@ -155,6 +155,19 @@ export function costToSend(
   return null;
 }
 
+/** Only typed peer refusals (or the host's canonical quote error) get this copy. */
+export function peerNotReadyMessage(error: unknown, name: string): string | null {
+  let reason: unknown;
+  if (error && typeof error === 'object' && 'code' in error && error.code === 'peer_not_ready') {
+    reason = 'reason' in error ? error.reason : undefined;
+  } else if (typeof error === 'string' && error.startsWith('peer_not_ready:')) {
+    reason = error.slice('peer_not_ready:'.length);
+  }
+  return reason === 'chain_unavailable' || reason === 'not_synced'
+    ? `${name}'s node isn't ready to receive yet (its chain connection is down)`
+    : null;
+}
+
 /** Any rejection from the host, as an action error. */
 export function asActionError(e: unknown): ActionError {
   if (e === MONEY_NOT_READY) return { code: 'not_ready', message: MONEY_NOT_READY };

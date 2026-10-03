@@ -722,8 +722,13 @@ pub fn price_quote(own: KindPrice, tables: &[PeerPrice], peer: Option<&str>) -> 
 /// Classify the evidence from an attempted all-in quote probe. A failed read
 /// is not evidence that the node lacks the contract.
 pub fn conversation_ceiling_evidence(proven: bool, probe: Result<(), String>) -> Result<(), crate::act::ActionError> {
-    probe.map_err(|reason| crate::act::ActionError::new(
-        "price_quote_unavailable", format!("Quote unavailable: {reason}")))?;
+    probe.map_err(|reason| {
+        if matches!(reason.as_str(), "peer_not_ready:chain_unavailable" | "peer_not_ready:not_synced") {
+            crate::act::ActionError::new("peer_not_ready", reason)
+        } else {
+            crate::act::ActionError::new("price_quote_unavailable", format!("Quote unavailable: {reason}"))
+        }
+    })?;
     if proven { return Ok(()); }
     Err(crate::act::ActionError::new("price_cap_unavailable", "Upgrade the node to enforce an all-in message ceiling."))
 }

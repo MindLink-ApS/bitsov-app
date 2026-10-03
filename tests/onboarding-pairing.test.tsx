@@ -130,6 +130,13 @@ describe('pairing panel', () => {
     return mount;
   };
 
+  it('remote pending describes connecting instead of local file pairing', () => {
+    const el = show({ ...pending, remote: true });
+    expect(el.textContent).toContain('Connecting to your node…');
+    expect(el.textContent).not.toContain('challenge the node wrote there');
+    expect(el.querySelector('[data-pairing="failed"]')).toBeNull();
+  });
+
   it('pending shows progress and no code yet', () => {
     const el = show(pending);
     const panel = el.querySelector('[data-pairing="pending"]');

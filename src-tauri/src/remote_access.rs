@@ -42,6 +42,8 @@ const REMOTE_READER_QUEUE: usize = 2;
 const MAX_LOCAL_CONNECTIONS: usize = 8;
 const MAX_PENDING_LOCAL_AUTH: usize = 16;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 pub const HANDSHAKE_UNAVAILABLE: &str = "remote handshake limit or endpoint unavailable";
 
 /// Pairing-link JSON carried as unpadded base64url after `bitsov://pair/`.
@@ -515,14 +517,16 @@ async fn write_frame<W: AsyncWrite + Unpin>(
             "outbound frame exceeds the limit".into(),
         ));
     }
-    writer
-        .write_all(&(frame.len() as u32).to_be_bytes())
-        .await
-        .map_err(|e| RemoteError::Transport(format!("cannot write frame length: {e}")))?;
-    writer
-        .write_all(frame)
-        .await
-        .map_err(|e| RemoteError::Transport(format!("cannot write frame: {e}")))
+    tokio::time::timeout(WRITE_TIMEOUT, async {
+        writer
+            .write_all(&(frame.len() as u32).to_be_bytes())
+            .await
+            .map_err(|e| RemoteError::Transport(format!("cannot write frame length: {e}")))?;
+        writer
+            .write_all(frame)
+            .await
+            .map_err(|e| RemoteError::Transport(format!("cannot write frame: {e}")))
+    }).await.map_err(|_| RemoteError::Transport("frame write timed out".into()))?
 }
 
 async fn read_frame<R: AsyncRead + Unpin>(
@@ -620,110 +624,118 @@ fn decode_transport(
     Ok(plaintext)
 }
 
-async fn pinned_handshake(
-    stream: &mut TcpStream,
+async fn pinned_handshake<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
     descriptor: &RemoteDescriptor,
     key: &ClientKey,
 ) -> Result<TransportState, RemoteError> {
-    let (secret, _) = derived_transport_key(key);
-    let params = NOISE_PROTOCOL
-        .parse()
-        .map_err(|_| RemoteError::Local("invalid built-in Noise protocol".into()))?;
-    let mut noise = Builder::new(params)
-        .local_private_key(&secret)
-        .build_initiator()
-        .map_err(|e| RemoteError::Local(format!("cannot initialize Noise: {e}")))?;
-    let mut output = vec![0u8; MAX_HANDSHAKE_FRAME];
-    let length = noise
-        .write_message(&[], &mut output)
-        .map_err(|e| RemoteError::Transport(format!("Noise message 1 failed: {e}")))?;
-    write_frame(stream, &output[..length]).await?;
+    tokio::time::timeout(CONNECT_TIMEOUT, async {
+        let (secret, _) = derived_transport_key(key);
+        let params = NOISE_PROTOCOL
+            .parse()
+            .map_err(|_| RemoteError::Local("invalid built-in Noise protocol".into()))?;
+        let mut noise = Builder::new(params)
+            .local_private_key(&secret)
+            .build_initiator()
+            .map_err(|e| RemoteError::Local(format!("cannot initialize Noise: {e}")))?;
+        let mut output = vec![0u8; MAX_HANDSHAKE_FRAME];
+        let length = noise
+            .write_message(&[], &mut output)
+            .map_err(|e| RemoteError::Transport(format!("Noise message 1 failed: {e}")))?;
+        write_frame(stream, &output[..length]).await?;
 
-    let message = read_frame(stream, MAX_HANDSHAKE_FRAME).await?;
-    noise
-        .read_message(&message, &mut output)
-        .map_err(|e| RemoteError::Transport(format!("Noise message 2 failed: {e}")))?;
-    let responder = noise.get_remote_static().ok_or_else(|| {
-        RemoteError::Transport("Noise responder did not present a static key".into())
-    })?;
-    if responder != descriptor.transport_pubkey_bytes {
-        return Err(RemoteError::Transport(
-            "Noise responder static key does not match the pairing link".into(),
-        ));
-    }
+        let message = read_frame(stream, MAX_HANDSHAKE_FRAME).await?;
+        noise
+            .read_message(&message, &mut output)
+            .map_err(|e| RemoteError::Transport(format!("Noise message 2 failed: {e}")))?;
+        let responder = noise.get_remote_static().ok_or_else(|| {
+            RemoteError::Transport("Noise responder did not present a static key".into())
+        })?;
+        if responder != descriptor.transport_pubkey_bytes {
+            return Err(RemoteError::Transport(
+                "Noise responder static key does not match the pairing link".into(),
+            ));
+        }
 
-    let length = noise
-        .write_message(&[], &mut output)
-        .map_err(|e| RemoteError::Transport(format!("Noise message 3 failed: {e}")))?;
-    write_frame(stream, &output[..length]).await?;
-    noise
-        .into_transport_mode()
-        .map_err(|e| RemoteError::Transport(format!("Noise transport transition failed: {e}")))
+        let length = noise
+            .write_message(&[], &mut output)
+            .map_err(|e| RemoteError::Transport(format!("Noise message 3 failed: {e}")))?;
+        write_frame(stream, &output[..length]).await?;
+        noise
+            .into_transport_mode()
+            .map_err(|e| RemoteError::Transport(format!("Noise transport transition failed: {e}")))
+    }).await.map_err(|_| RemoteError::HandshakeUnavailable)?
 }
 
-async fn encrypted_auth(
-    stream: &mut TcpStream,
+async fn encrypted_auth<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
     noise: &mut TransportState,
     descriptor: &RemoteDescriptor,
     key: &ClientKey,
     client_name: &str,
 ) -> Result<(String, Vec<String>), RemoteError> {
-    let request = serde_json::to_vec(&auth_request(descriptor, key, client_name))
-        .map_err(|_| RemoteError::Local("cannot serialize remote authentication".into()))?;
-    if request.is_empty() || request.len() > MAX_AUTH_PLAINTEXT {
-        return Err(RemoteError::Local(
-            "remote authentication request is oversized".into(),
-        ));
-    }
-    let encrypted = encode_transport(noise, &request)?;
-    write_frame(stream, &encrypted).await?;
+    tokio::time::timeout(CONNECT_TIMEOUT, async {
+        let request = serde_json::to_vec(&auth_request(descriptor, key, client_name))
+            .map_err(|_| RemoteError::Local("cannot serialize remote authentication".into()))?;
+        if request.is_empty() || request.len() > MAX_AUTH_PLAINTEXT {
+            return Err(RemoteError::Local(
+                "remote authentication request is oversized".into(),
+            ));
+        }
+        let encrypted = encode_transport(noise, &request)?;
+        write_frame(stream, &encrypted).await?;
 
-    let encrypted = read_frame(stream, MAX_TRANSPORT_FRAME).await?;
-    let plaintext = decode_transport(noise, &encrypted, MAX_AUTH_PLAINTEXT)?;
-    let response: RemoteAuthResponse = serde_json::from_slice(&plaintext)
-        .map_err(|_| RemoteError::Transport("authentication reply has the wrong shape".into()))?;
-    match response {
-        RemoteAuthResponse::Ok {
-            v,
-            client_id,
-            scopes,
-        } => {
-            if v != 1 {
-                return Err(RemoteError::Transport(
-                    "authentication reply has an unsupported version".into(),
-                ));
+        let encrypted = read_frame(stream, MAX_TRANSPORT_FRAME).await?;
+        let plaintext = decode_transport(noise, &encrypted, MAX_AUTH_PLAINTEXT)?;
+        let response: RemoteAuthResponse = serde_json::from_slice(&plaintext)
+            .map_err(|_| RemoteError::Transport("authentication reply has the wrong shape".into()))?;
+        match response {
+            RemoteAuthResponse::Ok {
+                v,
+                client_id,
+                scopes,
+            } => {
+                if v != 1 {
+                    return Err(RemoteError::Transport(
+                        "authentication reply has an unsupported version".into(),
+                    ));
+                }
+                if client_id.len() != 32
+                    || !client_id
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                {
+                    return Err(RemoteError::Transport(
+                        "authentication reply has an invalid client id".into(),
+                    ));
+                }
+                Ok((client_id, scopes))
             }
-            if client_id.len() != 32
-                || !client_id
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-            {
-                return Err(RemoteError::Transport(
-                    "authentication reply has an invalid client id".into(),
-                ));
+            RemoteAuthResponse::Error { v, code, message } => {
+                if v != 1 {
+                    return Err(RemoteError::Transport(
+                        "authentication reply has an unsupported version".into(),
+                    ));
+                }
+                let reason: String = format!("{code}: {message}").chars().take(160).collect();
+                Err(RemoteError::Refused(reason))
             }
-            Ok((client_id, scopes))
         }
-        RemoteAuthResponse::Error { v, code, message } => {
-            if v != 1 {
-                return Err(RemoteError::Transport(
-                    "authentication reply has an unsupported version".into(),
-                ));
-            }
-            let reason: String = format!("{code}: {message}").chars().take(160).collect();
-            Err(RemoteError::Refused(reason))
-        }
-    }
+    }).await.map_err(|_| RemoteError::HandshakeUnavailable)?
 }
 
-async fn tunnel(
-    mut local: TcpStream,
-    remote: TcpStream,
+async fn tunnel<L, R>(
+    mut local: L,
+    remote: R,
     mut noise: TransportState,
     mut local_http: LocalHttpSanitizer,
     initial_local: Vec<u8>,
-) -> Result<(), RemoteError> {
-    let (mut remote_reader, mut remote_writer) = remote.into_split();
+) -> Result<(), RemoteError>
+where
+    L: AsyncRead + AsyncWrite + Unpin,
+    R: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let (mut remote_reader, mut remote_writer) = tokio::io::split(remote);
     let (frames_tx, mut frames_rx) =
         mpsc::channel::<Result<Vec<u8>, RemoteError>>(REMOTE_READER_QUEUE);
     let reader_task = tokio::spawn(async move {
@@ -751,6 +763,9 @@ async fn tunnel(
     let mut local_buffer = vec![0u8; MAX_NOISE_PLAINTEXT];
     loop {
         tokio::select! {
+            // Pooled HTTP streams and silent/half-open peers must not reserve
+            // a Noise session indefinitely. Active WebSockets reset this timer.
+            _ = tokio::time::sleep(IDLE_TIMEOUT) => return Ok(()),
             read = local.read(&mut local_buffer) => {
                 let read = read.map_err(|e| RemoteError::Transport(format!("loopback read failed: {e}")))?;
                 if read == 0 {
@@ -767,8 +782,9 @@ async fn tunnel(
                     RemoteError::Transport("remote framed reader stopped unexpectedly".into())
                 })??;
                 let plaintext = decode_transport(&mut noise, &frame, MAX_NOISE_PLAINTEXT)?;
-                local.write_all(&plaintext)
+                tokio::time::timeout(WRITE_TIMEOUT, local.write_all(&plaintext))
                     .await
+                    .map_err(|_| RemoteError::Transport("loopback write timed out".into()))?
                     .map_err(|e| RemoteError::Transport(format!("loopback write failed: {e}")))?;
             }
         }
@@ -1083,7 +1099,8 @@ fn map_pre_auth_failure(error: RemoteError) -> RemoteError {
             if message.starts_with("cannot read frame")
                 || message.starts_with("cannot write frame")
                 || message.starts_with("cannot connect to endpoint")
-                || message == "connection timed out" =>
+                || message == "connection timed out"
+                || message == "frame write timed out" =>
         {
             RemoteError::HandshakeUnavailable
         }
@@ -1109,8 +1126,19 @@ async fn write_proxy_error(local: &mut TcpStream, status: &str, code: &str, mess
         "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
-    let _ = local.write_all(response.as_bytes()).await;
-    let _ = local.shutdown().await;
+    let _ = tokio::time::timeout(WRITE_TIMEOUT, async {
+        local.write_all(response.as_bytes()).await?;
+        local.shutdown().await
+    }).await;
+}
+
+async fn write_connection_error(local: &mut TcpStream, error: &RemoteError) {
+    let (status, code, message) = match error {
+        RemoteError::HandshakeUnavailable => ("503 Service Unavailable", "remote_handshake_unavailable", HANDSHAKE_UNAVAILABLE),
+        RemoteError::Refused(_) => ("403 Forbidden", "remote_pairing_refused", "remote node refused pairing"),
+        _ => ("502 Bad Gateway", "remote_transport_refused", "remote transport validation failed"),
+    };
+    write_proxy_error(local, status, code, message).await;
 }
 
 fn finalize_authenticated_pairing(
@@ -1160,18 +1188,10 @@ pub async fn authenticate_pinned_transport_and_save_record(
         .await
         .map_err(|_| RemoteError::HandshakeUnavailable)?
         .map_err(|_| RemoteError::HandshakeUnavailable)?;
-    let mut noise = tokio::time::timeout(
-        CONNECT_TIMEOUT,
-        pinned_handshake(&mut remote, &snapshot, key),
-    )
-    .await
-    .map_err(|_| RemoteError::HandshakeUnavailable)??;
-    let (client_id, scopes) = tokio::time::timeout(
-        CONNECT_TIMEOUT,
-        encrypted_auth(&mut remote, &mut noise, &snapshot, key, client_name),
-    )
-    .await
-    .map_err(|_| RemoteError::HandshakeUnavailable)??;
+    let mut noise = pinned_handshake(&mut remote, &snapshot, key)
+        .await.map_err(map_pre_auth_failure)?;
+    let (client_id, scopes) = encrypted_auth(&mut remote, &mut noise, &snapshot, key, client_name)
+        .await.map_err(map_pre_auth_failure)?;
 
     let descriptor = Mutex::new(descriptor);
     finalize_authenticated_pairing(
@@ -1222,15 +1242,7 @@ async fn serve_connection(
     let mut remote = match remote_result {
         Ok(remote) => remote,
         Err(error) => {
-            if matches!(error, RemoteError::HandshakeUnavailable) {
-                write_proxy_error(
-                    &mut local,
-                    "503 Service Unavailable",
-                    "remote_handshake_unavailable",
-                    HANDSHAKE_UNAVAILABLE,
-                )
-                .await;
-            }
+            write_connection_error(&mut local, &error).await;
             return Err(error);
         }
     };
@@ -1240,15 +1252,7 @@ async fn serve_connection(
     {
         Ok(noise) => noise,
         Err(error) => {
-            if matches!(error, RemoteError::HandshakeUnavailable) {
-                write_proxy_error(
-                    &mut local,
-                    "503 Service Unavailable",
-                    "remote_handshake_unavailable",
-                    HANDSHAKE_UNAVAILABLE,
-                )
-                .await;
-            }
+            write_connection_error(&mut local, &error).await;
             return Err(error);
         }
     };
@@ -1259,15 +1263,7 @@ async fn serve_connection(
         {
             Ok(auth) => auth,
             Err(error) => {
-                if matches!(error, RemoteError::HandshakeUnavailable) {
-                    write_proxy_error(
-                        &mut local,
-                        "503 Service Unavailable",
-                        "remote_handshake_unavailable",
-                        HANDSHAKE_UNAVAILABLE,
-                    )
-                    .await;
-                }
+                write_connection_error(&mut local, &error).await;
                 return Err(error);
             }
         };
@@ -1834,18 +1830,116 @@ mod tests {
         );
     }
 
-    async fn fragmented_reply_survives_outgoing_local_traffic(split_at: usize) {
-        let local_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let local_client = TcpStream::connect(local_listener.local_addr().unwrap())
-            .await
-            .unwrap();
-        let (local_proxy, _) = local_listener.accept().await.unwrap();
+    // In-memory IO: these regressions never bind or connect to a socket.
+    #[tokio::test(start_paused = true)]
+    async fn resilience_silent_handshake_is_bounded() {
+        let node = SigningKey::from_bytes(&[35u8; 32]);
+        let public = X25519PublicKey::from(&StaticSecret::from([36u8; 32])).to_bytes();
+        let descriptor = parse_pairing_link(&signed_link(
+            "example.invalid:8443".into(), &node, public, &test_code(10),
+        )).unwrap();
+        let store = tempfile::tempdir().unwrap();
+        let key = ClientKey::load_or_create(store.path()).unwrap();
+        let (mut app, _silent_node) = tokio::io::duplex(65536);
+        let result = tokio::time::timeout(Duration::from_secs(6), pinned_handshake(&mut app, &descriptor, &key)).await;
+        assert!(matches!(result, Ok(Err(_))), "a silent handshake must release its connection slot");
+        let (mut app, _silent_node) = tokio::io::duplex(65536);
+        let (mut noise, _) = transport_pair();
+        let result = tokio::time::timeout(Duration::from_secs(6), encrypted_auth(&mut app, &mut noise, &descriptor, &key, "test")).await;
+        assert!(matches!(result, Ok(Err(_))), "silent encrypted auth must also be bounded");
+    }
 
-        let remote_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let remote_proxy = TcpStream::connect(remote_listener.local_addr().unwrap())
-            .await
-            .unwrap();
-        let (mut remote_node, _) = remote_listener.accept().await.unwrap();
+    #[tokio::test(start_paused = true)]
+    async fn resilience_idle_and_blocked_connections_release_slots() {
+        let slots = Arc::new(Semaphore::new(MAX_LOCAL_CONNECTIONS));
+        for blocked in [false, true] {
+            let (local, _caller) = tokio::io::duplex(1);
+            let (remote, _node) = tokio::io::duplex(1);
+            let (noise, _) = transport_pair();
+            let permit = slots.clone().acquire_owned().await.unwrap();
+            let connection = async {
+                let _permit = permit;
+                tunnel(local, remote, noise, LocalHttpSanitizer::new("test"),
+                    if blocked { vec![1; 1024] } else { Vec::new() }).await
+            };
+            assert!(tokio::time::timeout(Duration::from_secs(65), connection).await.is_ok(),
+                "idle or blocked connections cannot retain a slot forever");
+            assert_eq!(slots.available_permits(), MAX_LOCAL_CONNECTIONS);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn resilience_remote_eof_during_blocked_local_write_releases_slot() {
+        let slots = Arc::new(Semaphore::new(1));
+        let permit = slots.clone().acquire_owned().await.unwrap();
+        let (local, _caller) = tokio::io::duplex(1);
+        let (remote, mut node) = tokio::io::duplex(4096);
+        let (noise, mut node_noise) = transport_pair();
+        let reply = encode_transport(&mut node_noise, &[1; 1024]).unwrap();
+        write_frame(&mut node, &reply).await.unwrap();
+        drop(node);
+        let result = tokio::time::timeout(Duration::from_secs(6), async {
+            let _permit = permit;
+            tunnel(local, remote, noise, LocalHttpSanitizer::new("test"), Vec::new()).await
+        }).await;
+        assert!(matches!(result, Ok(Err(_))));
+        assert_eq!(slots.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn resilience_restart_and_many_short_connections_release_every_slot() {
+        let slots = Arc::new(Semaphore::new(MAX_LOCAL_CONNECTIONS));
+        for cycle in 0..32 {
+            let mut tasks = Vec::new();
+            let mut callers = Vec::new();
+            let mut nodes = Vec::new();
+            for _ in 0..MAX_LOCAL_CONNECTIONS {
+                let (local, caller) = tokio::io::duplex(4096);
+                let (remote, node) = tokio::io::duplex(4096);
+                let (noise, mut node_noise) = transport_pair();
+                let permit = slots.clone().try_acquire_owned().unwrap();
+                tasks.push(tokio::spawn(async move {
+                    let _permit = permit;
+                    tunnel(local, remote, noise, LocalHttpSanitizer::new("test"), Vec::new()).await
+                }));
+                let mut node = node;
+                let mut caller = caller;
+                let reply = encode_transport(&mut node_noise, b"ok").unwrap();
+                write_frame(&mut node, &reply).await.unwrap();
+                let mut received = [0; 2];
+                caller.read_exact(&mut received).await.unwrap();
+                assert_eq!(&received, b"ok"); // Fresh Noise session works after every restart.
+                callers.push(caller);
+                nodes.push(node);
+            }
+            assert_eq!(slots.available_permits(), 0);
+            match cycle % 4 {
+                0 => nodes.clear(), // Node restart / remote EOF.
+                1 => callers.clear(), // Short local connection / local EOF.
+                2 => { // Invalid ciphertext must tear down the session too.
+                    for node in &mut nodes { write_frame(node, &[0; 32]).await.unwrap(); }
+                }
+                _ => { for task in &tasks { task.abort(); } } // Proxy shutdown.
+            }
+            for task in tasks {
+                let result = tokio::time::timeout(Duration::from_secs(1), task).await.unwrap();
+                if cycle % 4 == 3 { assert!(result.unwrap_err().is_cancelled()); }
+                else { assert_eq!(result.unwrap().is_ok(), cycle % 4 == 1); }
+            }
+            assert_eq!(slots.available_permits(), MAX_LOCAL_CONNECTIONS, "cycle {cycle}");
+            // The framed reader must also release its half of the transport:
+            // a returned permit alone is insufficient if a Noise socket lingers.
+            for endpoint in nodes.iter_mut().chain(callers.iter_mut()) {
+                let mut byte = [0];
+                assert_eq!(tokio::time::timeout(Duration::from_secs(1), endpoint.read(&mut byte))
+                    .await.unwrap().unwrap(), 0);
+            }
+        }
+    }
+
+    async fn fragmented_reply_survives_outgoing_local_traffic(split_at: usize) {
+        let (local_proxy, local_client) = tokio::io::duplex(65536);
+        let (remote_proxy, mut remote_node) = tokio::io::duplex(65536);
 
         let (app_noise, mut node_noise) = transport_pair();
         let local_auth = "fragment-auth";
@@ -1915,16 +2009,8 @@ mod tests {
 
     #[tokio::test]
     async fn tunnel_strips_proxy_auth_from_two_keep_alive_requests() {
-        let local_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let mut local_client = TcpStream::connect(local_listener.local_addr().unwrap())
-            .await
-            .unwrap();
-        let (local_proxy, _) = local_listener.accept().await.unwrap();
-        let remote_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let remote_proxy = TcpStream::connect(remote_listener.local_addr().unwrap())
-            .await
-            .unwrap();
-        let (mut remote_node, _) = remote_listener.accept().await.unwrap();
+        let (local_proxy, mut local_client) = tokio::io::duplex(65536);
+        let (remote_proxy, mut remote_node) = tokio::io::duplex(65536);
         let (app_noise, mut node_noise) = transport_pair();
         let secret = "keep-alive-secret";
         let bridge = tokio::spawn(tunnel(

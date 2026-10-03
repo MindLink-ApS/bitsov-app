@@ -320,6 +320,8 @@ impl NodeState {
             // Bounded so a hung loopback /health or /auth/local cannot pin restoring().
             http: reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(2))
+                .pool_max_idle_per_host(2)
+                .pool_idle_timeout(Duration::from_secs(30))
                 .timeout(Duration::from_secs(5))
                 .no_proxy()
                 .redirect(reqwest::redirect::Policy::none())
@@ -909,11 +911,10 @@ async fn attach_external(app: &AppHandle, app_data_dir: &Path, node: dev_node::E
 /// Remote mode is selected before every local-node resolution path. The only
 /// listener is the loopback Noise proxy; no sidecar is initialized or spawned.
 async fn attach_remote(
-    app: &AppHandle,
+    state: &NodeState,
     app_data_dir: &Path,
     descriptor: remote_access::RemoteDescriptor,
 ) {
-    let state = app.state::<NodeState>();
     let store = app_data_dir.join(PAIRING_STORE_DIR);
     let key = match ClientKey::load_or_create(&store) {
         Ok(key) => Arc::new(key),
@@ -930,17 +931,20 @@ async fn attach_remote(
     *state.expected_remote_node_id.lock().unwrap() = Some(descriptor.node_id().to_string());
     state.remote_mode.store(true, Ordering::SeqCst);
 
-    let descriptor = match remote_access::authenticate_pinned_transport_and_save_record(
-        app_data_dir,
-        descriptor,
-        &key,
-        PAIRING_CLIENT_NAME,
-        &store,
-    )
-    .await
-    {
+    *state.error.lock().unwrap() = None;
+    *state.pairing_view.lock().unwrap() = PairingView::pending();
+    let failed = |error: remote_access::RemoteError| {
+        *state.pairing_view.lock().unwrap() = PairingView::from_outcome(&Err(PairError::Local(error.to_string())));
+    };
+    let descriptor = match bitsov_app::connection_retry::while_connecting(
+        || remote_access::authenticate_pinned_transport_and_save_record(
+            app_data_dir, descriptor.clone(), &key, PAIRING_CLIENT_NAME, &store,
+        ),
+        |error| matches!(error, remote_access::RemoteError::HandshakeUnavailable),
+        || remote_access::RemoteError::Transport("timed out connecting to your node after 30 seconds".into()),
+    ).await {
         Ok(descriptor) => descriptor,
-        Err(error) => return set_error(&state, error.to_string()),
+        Err(error) => return failed(error),
     };
     let proxy = match remote_access::start_proxy(
         &state.api_base,
@@ -954,7 +958,7 @@ async fn attach_remote(
     .await
     {
         Ok(proxy) => proxy,
-        Err(error) => return set_error(&state, error.to_string()),
+        Err(error) => return failed(error),
     };
     // The remote router deliberately omits public health probes. The encrypted
     // pairing/token exchange is the readiness check for this pinned endpoint.
@@ -971,7 +975,7 @@ async fn bootstrap_node(app: AppHandle) {
         Err(e) => return set_error(&state, format!("no app data dir: {e}")),
     };
     match remote_access::load_persisted(&app_data_dir) {
-        Ok(Some(descriptor)) => return attach_remote(&app, &app_data_dir, descriptor).await,
+        Ok(Some(descriptor)) => return attach_remote(&state, &app_data_dir, descriptor).await,
         Ok(None) => {}
         Err(error) => return set_error(&state, error.to_string()),
     }
@@ -1281,6 +1285,15 @@ async fn call_api(
 /// The node reports failures as `{"error": "..."}`; surface that, bounded.
 fn api_error(path: &str, status: reqwest::StatusCode, body: &str) -> String {
     if act::readiness_refusal(status.as_u16(), body) { return act::MONEY_NOT_READY.into(); }
+    // Quote commands historically return strings. Preserve a canonical typed
+    // marker instead of discarding the peer's structured readiness reason.
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(body) {
+        if !status.is_success() && value["code"] == "peer_not_ready" {
+            if let Some(reason @ ("chain_unavailable" | "not_synced")) = value["reason"].as_str() {
+                return format!("peer_not_ready:{reason}");
+            }
+        }
+    }
     let detail = serde_json::from_str::<serde_json::Value>(body)
         .ok()
         .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_owned))
@@ -1607,6 +1620,13 @@ async fn pairing_retry(
         .clone()
         .ok_or_else(|| "pairing is not available yet: the node has not started".to_string())?;
     if state.pairing_view.lock().unwrap().state != "failed" {
+        return Ok(state.pairing_snapshot());
+    }
+    if state.remote_mode.load(Ordering::SeqCst) && state.remote_proxy.lock().unwrap().is_none() {
+        let descriptor = remote_access::load_persisted(&ctx.data_dir)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "remote pairing descriptor is missing".to_string())?;
+        attach_remote(state.inner(), &ctx.data_dir, descriptor).await;
         return Ok(state.pairing_snapshot());
     }
     if state.stale_pairing.swap(false, Ordering::SeqCst) {
@@ -13300,5 +13320,24 @@ mod assistant_acl_tests {
 
         assert_acl_denied(invoke(&assistant, "live_link", serde_json::json!({})), "live_link");
         assert_eq!(heard.lock().unwrap().len(), 1, "a denied call replays nothing");
+    }
+}
+
+#[cfg(test)]
+mod peer_readiness_tests {
+    use super::*;
+    #[test]
+    fn quote_errors_preserve_typed_peer_readiness_without_matching_prose() {
+        for reason in ["chain_unavailable", "not_synced"] {
+            let body = serde_json::json!({"code":"peer_not_ready", "reason":reason, "error":"price unavailable"}).to_string();
+            let error = api_error("/messages/first-contact/quote", reqwest::StatusCode::SERVICE_UNAVAILABLE, &body);
+            assert_eq!(error, format!("peer_not_ready:{reason}"));
+            let ceiling = control::conversation_ceiling_evidence(false, Err(error.clone())).unwrap_err();
+            assert_eq!(ceiling.code, "peer_not_ready");
+            assert_eq!(ceiling.message, error);
+        }
+        let ordinary = api_error("/price", reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            r#"{"error":"peer_not_ready chain_unavailable"}"#);
+        assert!(ordinary.starts_with("/price failed (500)"));
     }
 }
