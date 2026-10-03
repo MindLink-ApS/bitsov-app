@@ -7,8 +7,8 @@
 # plutil / codesign -dvv / hdiutil verify only. Nothing here binds a port.
 #
 # Usage: scripts/package-mac.sh [--dmg] [--use-existing-sidecar]
-#   --dmg                   also build the .dmg (tauri --ci skips the Finder
-#                           layout script, so no volume window is opened)
+#   --dmg                   also build the .dmg (CI=true skips Finder layout;
+#                           falls back to a plain image if bundle_dmg.sh fails)
 #   --use-existing-sidecar  local dev only: bundle the sidecar already at
 #                           src-tauri/bin/konsensus-aarch64-apple-darwin instead
 #                           of fetching. This script does NOT re-verify it; use
@@ -71,7 +71,30 @@ if [ "$WANT_DMG" = 1 ]; then BUNDLES="app,dmg"; fi
 # The Tauri CLI sets TAURI_ENV_PLATFORM and no TAURI_ENV_DEBUG for this
 # release build, so vite.config.ts leaves assistant.html out of dist (checked
 # below).
-npm run tauri -- build --bundles "$BUNDLES" --no-sign --ci -- --locked
+# --ci only disables CLI prompts. The DMG bundler independently reads CI and
+# TAURI_BUNDLER_DMG_IGNORE_CI before passing --skip-jenkins to bundle_dmg.sh.
+# Force both here so a caller's environment cannot enable Finder automation.
+BUILD_LOG="src-tauri/target/package-mac.log"
+mkdir -p src-tauri/target
+DMG_FALLBACK=0
+if CI=true TAURI_BUNDLER_DMG_IGNORE_CI=false \
+  npm run tauri -- build --bundles "$BUNDLES" --no-sign --ci -- --locked 2>&1 | tee "$BUILD_LOG"; then
+  :
+else
+  BUILD_STATUS=("${PIPESTATUS[@]}")
+  # Only recover the generated DMG script's failure, never npm, compilation,
+  # app bundling, or logging failures. The bundle tree was cleared above, and
+  # the fresh app must still pass every static check before image creation.
+  if [ "${BUILD_STATUS[0]}" -ne 0 ] && [ "${BUILD_STATUS[1]}" -eq 0 ] && \
+    [ "$WANT_DMG" = 1 ] && [ -f "$DMG_DIR/bundle_dmg.sh" ] && \
+    grep -qF 'error running bundle_dmg.sh' "$BUILD_LOG"; then
+    DMG_FALLBACK=1
+    echo "Tauri bundle_dmg.sh failed (see $BUILD_LOG); checking the app before falling back to a plain DMG." >&2
+  else
+    echo "Bundle build failed; see $BUILD_LOG. No DMG fallback attempted." >&2
+    exit 1
+  fi
+fi
 
 echo "== 3. static checks =="
 bash scripts/check-mac-bundle.sh --app "$APP" --sidecar "$SIDECAR" --dist dist
@@ -86,6 +109,15 @@ du -sh "$APP"
 
 if [ "$WANT_DMG" = 1 ]; then
   echo "== 5. dmg =="
+  if [ "$DMG_FALLBACK" = 1 ]; then
+    VERSION="$(node -p 'require("./src-tauri/tauri.conf.json").version')"
+    DMG="$DMG_DIR/BitSov_${VERSION}_aarch64.dmg"
+    # Discard partial images from the failed bundler. Use only the checked app
+    # as input, never the macos directory (which may contain a temporary DMG).
+    rm -f "$DMG_DIR"/*.dmg
+    echo "→ falling back to hdiutil create -srcfolder BitSov.app -format UDZO (no Finder layout or Applications shortcut)"
+    hdiutil create -srcfolder "$APP" -volname BitSov -format UDZO "$DMG"
+  fi
   DMG="$(find "$DMG_DIR" -maxdepth 1 -name '*.dmg' -print | head -n 1)"
   if [ -z "$DMG" ] || [ ! -s "$DMG" ]; then
     echo "no .dmg under $DMG_DIR" >&2

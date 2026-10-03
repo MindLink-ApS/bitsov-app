@@ -43,7 +43,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Unit test — bundle checker (no network)
-        run: bash scripts/test-check-mac-bundle.sh
+        run: |
+          bash scripts/test-check-mac-bundle.sh
+          python3 scripts/test-package-mac.py
 
       - uses: actions/setup-node@v4
         with:

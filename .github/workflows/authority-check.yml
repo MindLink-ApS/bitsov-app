@@ -28,6 +28,7 @@ jobs:
         run: |
           shellcheck scripts/package-mac.sh scripts/check-mac-bundle.sh scripts/test-check-mac-bundle.sh
           bash scripts/test-check-mac-bundle.sh
+          python3 scripts/test-package-mac.py
 
       # app #16. The source-guard layer needs no bundle and no macOS: it asserts the
       # run loop still handles BOTH RunEvent variants, that teardown never hunts a
