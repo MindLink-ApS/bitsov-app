@@ -12,7 +12,8 @@
  * one offer and one hangup for the caller, one answer for the callee.
  */
 import { asActionError } from './state';
-import type { ActionError, CallQuote, CallReceipt, Message } from './types';
+import { amount } from './format';
+import type { ActionError, CallQuote, CallReceipt, Message, NodeGrantSummary } from './types';
 
 export const CALL_OFFER = 400;
 export const CALL_ANSWER = 401;
@@ -118,6 +119,8 @@ type Outcome<T> = { ok: true; value: T } | { ok: false; error: ActionError };
 
 export type CallDeps = {
   quote: (peer: string) => Promise<Outcome<CallQuote>>;
+  /** Latest grant read by the shell; the host rechecks it before paying. */
+  grant?: () => NodeGrantSummary | null;
   signal: (peer: string, kind: number, plaintext: string, maxMsat: number) => Promise<Outcome<CallReceipt>>;
   getUserMedia: (c: MediaStreamConstraints) => Promise<MediaStream>;
   peerConnection: (config: RTCConfiguration) => RTCPeerConnection;
@@ -271,6 +274,12 @@ export function createCallEngine(deps: CallDeps) {
       if (active() || deps.busy?.()) return;
       if (q.offer_msat === null || q.call_total_msat === null) {
         set({ ...IDLE, phase: 'ended', peer, error: 'Their node does not take calls yet. Nothing was paid.' });
+        return;
+      }
+      const grant = deps.grant?.();
+      if (grant && (q.call_total_msat > grant.per_call_max_msat || q.call_total_msat > grant.remaining_msat)) {
+        set({ ...IDLE, phase: 'ended', peer, error:
+          `This call needs up to ${amount(q.call_total_msat)}. Your node grant allows ${amount(grant.per_call_max_msat)} per call and has ${amount(grant.remaining_msat)} remaining. The owner would need to approve at least ${amount(q.call_total_msat)} per call and enough remaining budget for that ceiling. Nothing was sent or paid.` });
         return;
       }
       quote = q;
