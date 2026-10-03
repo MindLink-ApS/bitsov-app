@@ -7,7 +7,8 @@
 //! `409 {"code":"budget_exceeded","reason":…}` otherwise.
 //!
 //! `GET /pair/grant` is the source of truth. This app reads it when an owner
-//! grant lands and again before every paid request, and bounds its own
+//! grant lands, on startup/reconnect budget reads, and before every paid
+//! request, and bounds its own
 //! approvals by it: the budget approval and the ten-minute window never
 //! outlive the node grant, and the budget approval's ceiling is never above
 //! the grant's total. The app keeps the latest read in host memory only.

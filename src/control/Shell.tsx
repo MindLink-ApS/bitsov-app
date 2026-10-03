@@ -7,7 +7,7 @@ import { createStore, produce, reconcile } from 'solid-js/store';
 import { qrSvg } from '../qr';
 import type { Proposal } from './ai';
 import { AiTrack, createAiSession } from './AiTrack';
-import { amount as fmtAmount, allIn, clock, day, feeCeiling, routingFee, sats, satsWhole, satUnit, shortId, uptime } from './format';
+import { amount as fmtAmount, paidAmount, budgetNote, allIn, clock, day, feeCeiling, routingFee, sats, satsWhole, satUnit, shortId, uptime } from './format';
 import { amountText, inPaymentBounds, MAX_PAYMENT_MSAT, MIN_PAYMENT_MSAT, parseAmount } from './amountInput';
 import { Organism } from './BodyPanel';
 import { SoftError } from './SoftError';
@@ -259,11 +259,16 @@ export function ControlCenter(props: Props) {
   const [spend, setSpend] = createSignal<SpendView | null>(null);
   const [device, setDevice] = createSignal<DeviceView | null>(null);
   const [noEnvelopeFor, setNoEnvelopeFor] = createSignal<string | null>(null);
-  const [budget, setBudget] = createSignal<BudgetView | null>(null);
+  const [budget, setBudgetValue] = createSignal<BudgetView | null>(null);
+  let budgetRevision = 0;
+  const setBudget = (value: BudgetView) => {
+    budgetRevision += 1;
+    setBudgetValue(value);
+  };
   const [deliveries, setDeliveries] = createStore<Deliveries>({});
   /** What each send actually paid, by message id: a room echo carries one member's share only. */
   const [paid, setPaid] = createStore<Record<string, number>>({});
-  const [allowances, setAllowances] = createStore<Record<string, { total_msat: number; max_routing_fee_msat: number; readmission_msat?: number }>>({});
+  const [allowances, setAllowances] = createStore<Record<string, { total_msat: number; max_routing_fee_msat: number; fee_paid_msat?: number; readmission_msat?: number }>>({});
   const [pendingRevision, setPendingRevision] = createSignal(0);
   const [artifacts, setArtifacts] = createStore<Record<string, Artifact[]>>({});
   // Rooms (room.ts): what each room send did this session, by room id; the New room picker.
@@ -347,6 +352,8 @@ export function ControlCenter(props: Props) {
   /** When the node's membrane ring and aggregates were last read successfully. */
   const [membraneReadAt, setMembraneReadAt] = createSignal<number | null>(null);
   const [energyAt, setEnergyAt] = createSignal<number | null>(null);
+  const [budgetConfirmed, setBudgetConfirmed] = createSignal(false);
+  const [grantUnknown, setGrantUnknown] = createSignal(false);
   const [budgetReadAt, setBudgetReadAt] = createSignal<number | null>(null);
   const [door, setDoor] = createSignal<{ msat: number; read_at: number } | null>(null);
   // O1 v2: the node's own energy read (N1) and gate decisions (N2), when advertised.
@@ -467,12 +474,25 @@ export function ControlCenter(props: Props) {
   });
   // Never an error line of its own: without a device key the console path stays.
   const loadDevice = () => source.deviceKeyStatus().then(setDevice, () => setDevice(null));
-  const loadBudget = () =>
-    attempt('budgetPoll', () => source.budgetStatus(), (b) => {
+  const loadBudget = async () => {
+    const revision = ++budgetRevision;
+    try {
+      const b = await source.budgetStatus();
+      if (revision !== budgetRevision) return;
       if (budget()?.autopay.state !== 'open' && b.autopay.state === 'open') setErrors('budget', undefined);
       setBudget(b);
       setBudgetReadAt(Date.now());
-    });
+      setBudgetConfirmed(true);
+      setGrantUnknown(false);
+      setErrors('budgetPoll', undefined);
+    } catch (e) {
+      if (revision !== budgetRevision) return;
+      setBudgetConfirmed(false);
+      const error = asActionError(e);
+      setGrantUnknown(error.code === 'grant_unknown');
+      setErrors('budgetPoll', typeof e === 'string' ? e : error.message);
+    }
+  };
   // Our own price with no peer: what a stranger pays at this node's door.
   const loadDoor = () => attempt('door', () => source.priceQuote(), (q) => setDoor({ msat: q.own_msat, read_at: Date.now() }));
   // N1: node-wide energy, 1 h and 24 h. A failed read keeps the last one, with its age.
@@ -543,6 +563,8 @@ export function ControlCenter(props: Props) {
   let generation = 0;
   const stop = () => {
     generation += 1;
+    budgetRevision += 1;
+    setBudgetConfirmed(false);
     timers.forEach(clearInterval);
     timers = [];
     unlisten?.();
@@ -574,14 +596,16 @@ export function ControlCenter(props: Props) {
           setInterval(() => void loadDoor(), REFRESH_MS.door),
           setInterval(() => void loadEnergy(), REFRESH_MS.energy),
           setInterval(() => void loadMembrane(), REFRESH_MS.membrane),
-          // Cheap: the host asks the node only while an elevation request is pending,
-          // and a budget grant lands there first.
+          // Poll pending approvals, then reconcile the current node grant.
           setInterval(() => void loadSpend().then(loadBudget), REFRESH_MS.spend),
         );
         source
           .onLive((event) => {
             if (event.type === 'link') {
+              if (mine !== generation) return;
               setLink(event.state);
+              if (event.state !== 'open') { budgetRevision += 1; setBudgetConfirmed(false); }
+              else void loadSpend().then(loadBudget);
               // Back after a gap: re-read the open track so nothing is missed.
               if (event.state === 'open' && track()) loadThread(track()!);
               if (event.state === 'open' && caps().membrane) void loadMembrane();
@@ -716,6 +740,7 @@ export function ControlCenter(props: Props) {
     setAllowances(receipt.message_id, {
       total_msat: receipt.total_msat ?? receipt.amount_msat + (receipt.readmission_msat ?? 0) + (receipt.max_routing_fee_msat ?? 0),
       max_routing_fee_msat: receipt.max_routing_fee_msat ?? 0,
+      fee_paid_msat: receipt.fee_paid_msat,
       ...(receipt.readmission_msat ? { readmission_msat: receipt.readmission_msat } : {}),
     });
     if (!deliveries[receipt.message_id]) setDeliveries(receipt.message_id, deliveryFromReceipt(receipt));
@@ -781,6 +806,7 @@ export function ControlCenter(props: Props) {
   const [callView, setCallView] = createSignal<CallView>(CALL_IDLE);
   const [callStreams, setCallStreams] = createSignal<{ local: MediaStream | null; remote: MediaStream | null }>({ local: null, remote: null });
   const calls = createCallEngine({
+    grant: () => budget()?.node_grant ?? null,
     quote: (peer) => act(() => source.callQuote(peer)),
     signal: async (peer, kind, plaintext, maxMsat) => {
       const r = await act(() => source.callSignal(peer, kind, plaintext, maxMsat));
@@ -1079,7 +1105,7 @@ export function ControlCenter(props: Props) {
       if (r.ok) {
         if (isVoiceNote(200, file.name)) voiceUrls.set(r.value.message_id, Promise.resolve(URL.createObjectURL(file)));
         setPaid(r.value.message_id, r.value.amount_msat);
-        setAllowances(r.value.message_id, { total_msat: r.value.total_msat ?? r.value.amount_msat + (r.value.max_routing_fee_msat ?? 0), max_routing_fee_msat: r.value.max_routing_fee_msat ?? 0 });
+        setAllowances(r.value.message_id, { total_msat: r.value.total_msat ?? r.value.amount_msat + (r.value.max_routing_fee_msat ?? 0), max_routing_fee_msat: r.value.max_routing_fee_msat ?? 0, fee_paid_msat: r.value.fee_paid_msat, readmission_msat: r.value.readmission_msat });
         if (!deliveries[r.value.message_id]) setDeliveries(r.value.message_id, deliveryFromReceipt(r.value));
         setThreads('t', trackKey(t), (old) => mergeMessages(old ?? [], [sentFileMessage(r.value, ownId())]));
         setThreads('fresh', r.value.message_id, true);
@@ -1317,6 +1343,7 @@ export function ControlCenter(props: Props) {
                     spendError={errors.spend ?? errors.spendPoll}
                     budget={budget()}
                     budgetError={errors.budget ?? errors.budgetPoll}
+                    budgetStale={grantUnknown() || (budget() !== null && (!budgetConfirmed() || !!errors.budgetPoll))}
                     actions={actions}
                     now={now()}
                     error={errors.thread}
@@ -1879,7 +1906,7 @@ function Conversation(props: {
   fresh: Record<string, true>;
   deliveries: Deliveries;
   paid: Record<string, number>;
-  allowances: Record<string, { total_msat: number; max_routing_fee_msat: number }>;
+  allowances: Record<string, { total_msat: number; max_routing_fee_msat: number; fee_paid_msat?: number; readmission_msat?: number }>;
   ownId: string;
   /** This node's Bitcoin network, when the host knows it. */
   homeNetwork: string | null;
@@ -1893,6 +1920,7 @@ function Conversation(props: {
   spendError: string | undefined;
   budget: BudgetView | null;
   budgetError: string | undefined;
+  budgetStale: boolean;
   actions: Actions;
   now: number;
   error: string | undefined;
@@ -2080,6 +2108,7 @@ function Conversation(props: {
         spendError={props.spendError}
         budget={props.budget}
         budgetError={props.budgetError}
+        budgetStale={props.budgetStale}
         actions={props.actions}
         nameOf={props.nameOf}
         now={props.now}
@@ -2167,7 +2196,7 @@ function MessageView(props: {
   fresh: boolean;
   delivery: Delivery | undefined;
   paid: number | undefined;
-  allowance?: { total_msat: number; max_routing_fee_msat: number; readmission_msat?: number };
+  allowance?: { total_msat: number; max_routing_fee_msat: number; fee_paid_msat?: number; readmission_msat?: number };
   nameOf: (id: string) => string;
   now?: number;
   homeNetwork?: string | null;
@@ -2182,7 +2211,8 @@ function MessageView(props: {
   fileFetch?: (messageId: string) => Promise<VoiceBlob>;
   fileSave?: (messageId: string) => Promise<FileSaveResult>;
 }) {
-  const amount = () => props.allowance?.total_msat ?? props.paid ?? props.m.payment_amount_msat;
+  const amount = () => (props.paid ?? props.m.payment_amount_msat ?? 0) + (props.allowance?.readmission_msat ?? 0);
+  const paidLabel = () => paidAmount(amount(), props.allowance?.fee_paid_msat);
   // Only a received chat message in a peer thread can be a request card.
   const request = createMemo(() =>
     props.out || props.room || !props.onPay || props.m.kind === 200
@@ -2252,19 +2282,13 @@ function MessageView(props: {
         {(reason) => <p class="hint request-note" data-request-plain={reason()}>{NOT_PAYABLE_NOTE[reason()]}</p>}
       </Show>
       <div class="stamp">
-        <Show when={amount()}>
+        <Show when={props.paid !== undefined || props.m.payment_amount_msat != null}>
           <span
             class="sats-meta"
-            title={`${sats(amount()!)} ${satUnit(amount()!)} · ${props.out ? (props.allowance ? `all-in ceiling (${feeCeiling(props.allowance.max_routing_fee_msat)})` : 'principal paid; fee not in history') : 'to you'}`}
+            title={props.out ? paidLabel() : `${fmtAmount(amount())} · to you`}
           >
             <Bolt />
-            <span class="sats">{fmtAmount(amount()!)}</span>
-            <Show when={props.out && props.allowance}>
-              <span class="sr-only">{' '}all-in ceiling ({feeCeiling(props.allowance!.max_routing_fee_msat)})</span>
-            </Show>
-            <Show when={props.out && !props.allowance}>
-              <span class="sr-only">principal paid; fee not in history</span>
-            </Show>
+            <span class="sats">{props.out ? paidLabel() : fmtAmount(amount())}</span>
           </span>
           <Show when={props.out && props.allowance?.readmission_msat}>
             <span data-readmission-paid>incl. admission again {sats(props.allowance!.readmission_msat!)} {satUnit(props.allowance!.readmission_msat!)}</span>
@@ -3048,6 +3072,7 @@ function Composer(props: {
   spendError: string | undefined;
   budget?: BudgetView | null;
   budgetError?: string;
+  budgetStale?: boolean;
   actions: Actions;
   nameOf: (id: string) => string;
   now: number;
@@ -3203,27 +3228,51 @@ function Composer(props: {
   };
   onCleanup(cancelOwner);
   createEffect(() => { if (props.moneyBlocked) { approvalRevision++; cancelOwner(); } });
+  const [ownerCountdown, setOwnerCountdown] = createSignal(0);
+  const [ownerExpired, setOwnerExpired] = createSignal(false);
   createEffect(() => {
     const pending = ownerWait();
     if (!pending) return;
+    const remote = pending.approval.approval_window_secs !== undefined;
+    let deadline = pending.approval.expires_at_ms;
+    let delay = 1000;
+    let nextPoll = Date.now() + delay;
     let polling = false;
-    const poll = async () => {
-      if (polling) return;
+    const expire = () => {
+      cancelOwner();
+      setOwnerExpired(true);
+      setNote('Contact approval expired. Nothing was sent. Get a fresh quote to try again.');
+    };
+    const tick = async () => {
+      if (ownerWait() !== pending) return;
+      setOwnerCountdown(Math.max(0, Math.ceil((deadline - Date.now()) / 1000)));
+      if (remote && Date.now() >= deadline) { expire(); return; }
+      if (polling || Date.now() < nextPoll) return;
       polling = true;
       const result = await props.actions.ownerStatus(pending.approval.id);
       polling = false;
       if (ownerWait() !== pending) return;
       if (composerRevision !== pending.revision) { cancelOwner(); return; }
+      if (remote && Date.now() >= deadline) { expire(); return; }
       if (!result.ok) {
+        if (result.error.code === 'owner_contact_expired') { expire(); return; }
         cancelOwner();
         setNote(result.error.message);
-      } else if (result.value.ready) {
-        setOwnerWait(null);
-        setBusy(true);
-        try { await pending.send(); } finally { setBusy(false); }
+      } else {
+        deadline = Math.min(deadline, result.value.expires_at_ms);
+        if (remote && Date.now() >= deadline) { expire(); return; }
+        if (result.value.ready) {
+          setOwnerWait(null);
+          setBusy(true);
+          try { await pending.send(); } finally { setBusy(false); }
+        } else {
+          delay = remote ? Math.min(delay * 2, 10000) : 1000;
+          nextPoll = Date.now() + delay;
+        }
       }
     };
-    const timer = setInterval(() => void poll(), 1000);
+    setOwnerCountdown(Math.max(0, Math.ceil((deadline - Date.now()) / 1000)));
+    const timer = setInterval(() => void tick(), 1000);
     onCleanup(() => clearInterval(timer));
   });
   // Budget refreshes replace the object every three seconds. Only an actual
@@ -3239,6 +3288,7 @@ function Composer(props: {
       () => trackKey(props.track),
       () => {
         cancelOwner();
+        setOwnerExpired(false);
         composerRevision++;
         setMode('message');
         setNote(null);
@@ -3283,6 +3333,7 @@ function Composer(props: {
         const p = props.prefill;
         if (!p || p.key !== trackKey(props.track) || room()) return;
         cancelOwner();
+        setOwnerExpired(false);
         composerRevision++;
         setMode(p.mode);
         setNote(null);
@@ -3312,6 +3363,7 @@ function Composer(props: {
         const p = props.payRequest;
         if (!p || room()) return;
         cancelOwner();
+        setOwnerExpired(false);
         composerRevision++;
         setNote(null);
         setMode('pay');
@@ -3341,7 +3393,8 @@ function Composer(props: {
   };
   /** The next tap here is Touch ID for this contact. */
   const needsTouch = () =>
-    touchable() && !budget()?.paused && props.spend?.state !== 'pending' && (!line().open || lacksEnvelope());
+    touchable() && !budget()?.paused && props.spend?.state !== 'pending' &&
+    (!(line().open || ((mode() === 'message' || mode() === 'file') && budget()?.autopay.state === 'open')) || lacksEnvelope());
   /**
    * Messages go through the budget unless the owner opened the ten-minute
    * window by hand with no budget approval, or the host has no budget to show.
@@ -3438,6 +3491,7 @@ function Composer(props: {
   };
 
   const priceProblem = (): string | null => {
+    if (ownerExpired()) return 'Contact approval expired · get a fresh quote';
     if (!room()) {
       if (props.quoteError) return props.quoteError;
       if (!props.quote) return 'price loading…';
@@ -3469,11 +3523,7 @@ function Composer(props: {
       return;
     }
     const receipt = result.value as SendReceipt;
-    const fee = receipt.fee_paid_msat ?? (receipt.max_routing_fee_msat === 0 ? 0 : undefined);
-    const paid = receipt.amount_msat + (receipt.readmission_msat ?? 0) + (fee ?? 0);
-    setPaidLine(fee !== undefined && Number.isSafeInteger(fee) && fee >= 0 && Number.isSafeInteger(paid) && paid >= 0
-      ? `paid ${fmtAmount(paid)}`
-      : 'paid amount unknown · routing fee not reported');
+    setPaidLine(paidAmount(receipt.amount_msat + (receipt.readmission_msat ?? 0), receipt.fee_paid_msat));
   };
   const priceLine = () => {
     if (paidLine()) return paidLine();
@@ -3563,6 +3613,7 @@ function Composer(props: {
         case 'first': return `Send first ${mode() === 'file' ? 'file' : 'message'}${price}`;
         case 'contact_used':
         case 'total_used': return 'Budget used up';
+        case 'grant_limited': return 'Node grant limit';
         default: return `Send${price}`;
       }
     }
@@ -3603,7 +3654,7 @@ function Composer(props: {
    * new price shows on Send, which needs another press.
    */
   const submit = async (shownMsat?: number | null) => {
-    if (props.moneyBlocked || busy() || ownerWait()) return;
+    if (props.moneyBlocked || (spends() && props.budgetStale) || busy() || ownerWait()) return;
     if (mode() === 'message' && priceProblem()) { setNote(priceProblem()); return; }
     setNote(null);
     if (shownMsat !== undefined && (mode() !== 'message' || shown().msat !== shownMsat)) {
@@ -3672,7 +3723,10 @@ function Composer(props: {
           setDraft('');
           setDrafted(false);
         }
-      } else if (!r.ok && unchanged && (isBudgetStop(r.error) || r.error.code === 'owner_only')) setNote(r.error.message);
+      } else if (!r.ok && unchanged && r.error.code === 'owner_contact_expired') {
+        setOwnerExpired(true);
+        setNote(r.error.message);
+      } else if (!r.ok && unchanged && (isBudgetStop(r.error) || ['owner_only', 'owner_contact_unavailable'].includes(r.error.code))) setNote(r.error.message);
       };
       if (first !== undefined && !room()) {
         const request = await props.actions.ownerRequest(submittedPeer, cap, first);
@@ -3769,7 +3823,7 @@ function Composer(props: {
   /** The confirm tap: pays exactly the reviewed amount through the same host command. */
   const confirmPay = async () => {
     const rv = review();
-    if (!rv || props.moneyBlocked || busy() || !line().open) return;
+    if (!rv || props.moneyBlocked || props.budgetStale || busy() || !line().open) return;
     // Consumed at dispatch: a review pays at most once, whatever happens to
     // the draft while the host answers. Paying again needs a new review.
     setReview(null);
@@ -3813,13 +3867,13 @@ function Composer(props: {
   };
 
   // A closed spending window or money going offline withdraws the review.
-  createEffect(() => { if (props.moneyBlocked || !line().open) setReview(null); });
+  createEffect(() => { if (props.moneyBlocked || props.budgetStale || !line().open) setReview(null); });
 
   const disabled = () =>
-    props.moneyBlocked || busy() || !!ownerWait() || (mode() === 'message' && priceProblem() !== null) ||
+    props.moneyBlocked || (spends() && !!props.budgetStale) || busy() || !!ownerWait() || (mode() === 'message' && priceProblem() !== null) ||
     // Touch ID approves the contact, not the draft: no draft needed yet.
     (needsTouch() ? false : viaBudget()
-      ? ['waiting', 'contact_used', 'total_used', 'unknown'].includes(stand().kind) || ((stand().kind === 'first' || stand().kind === 'ok') && !ready())
+      ? ['waiting', 'contact_used', 'total_used', 'grant_limited', 'unknown'].includes(stand().kind) || ((stand().kind === 'first' || stand().kind === 'ok') && !ready())
       : spends() && !line().open
       ? props.spend?.state === 'pending' || props.spend?.state === 'unavailable' || props.spend === null
       : !ready());
@@ -4194,39 +4248,52 @@ function Composer(props: {
       <Show when={note() && note() !== MONEY_NOT_READY}>
         <p class="err-note" data-composer-note>{note()}</p>
       </Show>
+      <Show when={ownerExpired()}>
+        <button type="button" class="link" data-contact-requote onClick={() => {
+          setDoor(null);
+          setOwnerExpired(false);
+          setNote(null);
+          props.refreshPrice();
+        }}>Get a fresh quote</button>
+      </Show>
       <Show when={ownerWait()}>
         {(pending) => <div class="approval" data-contact-approval="pending" data-contact-request={JSON.stringify(pending().approval.request)}>
           <p><strong>Approve this contact at your node.</strong> Run this command once in the owner’s terminal from the node’s data directory, with owner control enabled. The app never receives an owner credential.</p>
           <p>The command approves this contact’s budget and first-message cap. This draft sends after approval. Editing it or pressing Cancel stops the wait.</p>
+          <Show when={pending().approval.approval_window_secs !== undefined}>
+            <p role="status" data-contact-countdown>Waiting for remote approval · {Math.floor(ownerCountdown() / 60)}:{String(ownerCountdown() % 60).padStart(2, '0')} remaining</p>
+          </Show>
           <textarea readonly aria-label="Owner approval command" data-contact-owner-command data-command={pending().approval.owner_command} value={pending().approval.owner_command} />
           <button type="button" class="link" onClick={async () => { try { await navigator.clipboard.writeText(pending().approval.owner_command); } catch { setNote('Select and copy the command above.'); } }}>Copy command</button>
           <button type="button" class="link" data-contact-cancel onClick={cancelOwner}>Cancel</button>
-          <p class="hint">Cancel does not revoke an approval already issued at the node; it expires within two minutes.</p>
+          <p class="hint">Cancel does not revoke an approval already issued at the node; it expires within {pending().approval.approval_window_secs !== undefined ? 'five' : 'two'} minutes.</p>
         </div>}
       </Show>
       <Show when={spends()}>
-        <Show
-          when={viaBudget()}
-          fallback={<SpendBar spend={props.spend} error={props.spendError} now={props.now} actions={props.actions} hasPending={props.hasPending} />}
-        >
-          <BudgetBar
-            stand={stand()}
-            budget={budget()!}
-            spend={props.spend}
-            name={props.name}
-            room={room()}
-            target={target()}
-            priceMsat={shown().msat}
-            door={doorQuote()}
-            preset={presetChosen()}
-            onPreset={(id) => { setPresetPick(id); saveSpendPreset(props.ownId, id); }}
-            firstPick={firstPick()}
-            onFirstPick={setFirstPick}
-            error={props.budgetError}
-            now={props.now}
-            actions={props.actions}
-            hasPending={props.hasPending}
-          />
+        <Show when={!props.budgetStale} fallback={<p class="spend-line" data-budget-stale>Spend grant stale — checking your node. Auto-pay unavailable until confirmed.</p>}>
+          <Show
+            when={viaBudget()}
+            fallback={<SpendBar spend={props.spend} error={props.spendError} now={props.now} actions={props.actions} hasPending={props.hasPending} />}
+          >
+            <BudgetBar
+              stand={stand()}
+              budget={budget()!}
+              spend={props.spend}
+              name={props.name}
+              room={room()}
+              target={target()}
+              priceMsat={shown().msat}
+              door={doorQuote()}
+              preset={presetChosen()}
+              onPreset={(id) => { setPresetPick(id); saveSpendPreset(props.ownId, id); }}
+              firstPick={firstPick()}
+              onFirstPick={setFirstPick}
+              error={props.budgetError}
+              now={props.now}
+              actions={props.actions}
+              hasPending={props.hasPending}
+            />
+          </Show>
         </Show>
       </Show>
     </form>
@@ -4611,12 +4678,17 @@ function BudgetBar(props: {
             </div>
           )}
         </Match>
+        <Match when={props.stand.kind === 'grant_limited'}>
+          <p class="spend-line" data-node-grant-limit>Your node’s spend grant cannot cover this payment. It has {fmtAmount(props.budget.node_grant?.remaining_msat ?? 0)} left and allows at most {fmtAmount(props.budget.node_grant?.per_call_max_msat ?? 0)} per payment. Ask your node’s owner for a new grant.</p>
+        </Match>
         <Match when={props.stand.kind === 'contact_used' && (props.stand as Extract<BudgetStandT, { kind: 'contact_used' }>)}>
           {(st) => (
             <div class="approval budget-used" data-budget-used="contact">
               <p>
                 <strong>Budget for {who()} used up.</strong> {fmtAmount(st().spent)} of {fmtAmount(st().limit)} in the last 24 hours, and this
-                message costs {props.priceMsat === null ? '…' : fmtAmount(props.priceMsat)}. It frees up as older payments pass 24 hours.
+                message costs {props.priceMsat === null ? '…' : fmtAmount(props.priceMsat)}.
+                <Show when={budgetNote(props.budget.rows.find(r => r.target === props.target && r.room === props.room))}>{note => <> {note()}.</>}</Show>
+                {' '}It frees up as older payments pass 24 hours.
               </p>
               <Show
                 when={st().raiseTo}
@@ -4643,7 +4715,7 @@ function BudgetBar(props: {
             <div class="approval budget-used" data-budget-used="total">
               <p>
                 <strong>Your app all-in limit is used up.</strong> {fmtAmount(st().spent)} of {fmtAmount(st().ceiling)} in the last 24 hours. Raising
-                it is a new approval.
+                it is a new approval. {budgetNote(props.budget)}
               </p>
               <Show when={st().raiseTo}>
                 {(to) => (
@@ -4661,7 +4733,9 @@ function BudgetBar(props: {
               <p class="spend-line" data-budget-line>
                 <span class="dot ok" />
                 <span class="line-text">
-                  Pays automatically · {fmtAmount(st().spent)} of {fmtAmount(st().limit)} to {who()} in 24 h · approval ends in{' '}
+                  Pays automatically · {fmtAmount(st().spent)} of {fmtAmount(st().limit)} to {who()} in 24 h
+                  <Show when={budgetNote(props.budget.rows.find(r => r.target === props.target && r.room === props.room))}>{note => <> · {note()}</>}</Show>
+                  {' '}· approval ends in{' '}
                   {hoursLeft(props.budget.autopay.open_until_ms, props.now, props.budget.window_ms)} h ·{' '}
                   <button type="button" class="link" data-pause-all onClick={() => void props.actions.pauseAll()}>Pause app payments</button>
                 </span>
@@ -4724,7 +4798,7 @@ function BudgetPanel(props: {
       <details class="quiet-detail hint" data-budget-scope>
         <summary><strong>App all-in · rolling 24 h</strong> — what it covers</summary>
         <p>
-          Covers automatic and manual-window messages, room sends, files, app invoice payments and keysend, and admission, including their maximum network fees. Conservative allowance, not an exact wallet-debit total.
+          Covers automatic and manual-window messages, room sends, files, app invoice payments and keysend, and admission, including their maximum network fees. Paid totals use reported principal and fees. In-flight ceilings are reserved separately; unreported fees remain unknown.
           Not covered: channel opening/closing, on-chain transfers and fees, owner-direct CLI/API, or background workers.
           G1 is a separate finite node grant; it does not refill daily. Not a wallet-wide limit.
         </p>
@@ -4733,13 +4807,16 @@ function BudgetPanel(props: {
         {(b) => (
           <>
             <div class="tally" data-tally>
-              <span class="label">App all-in payments in the last 24 hours</span>
+              <span class="label">Known paid in the last 24 hours</span>
               <span class="sats big" data-tally-total>
                 {fmtAmount(b().spent_msat)} <span class="unit">/ {fmtAmount(b().ceiling_msat)}</span>
               </span>
               <span class="meter" aria-hidden="true"><span style={{ width: pct(b().spent_msat, b().ceiling_msat) }} /></span>
               <Show when={b().unsettled_msat > 0}>
-                <span class="hint" data-unsettled>Includes {fmtAmount(b().unsettled_msat)} whose outcome is not known yet, counted at their price cap.</span>
+                <span class="hint" data-unsettled>{fmtAmount(b().unsettled_msat)} reserved at send ceilings; outcome not known yet.</span>
+              </Show>
+              <Show when={b().fee_unknown}>
+                <span class="hint" data-fee-unknown>{budgetNote({ ...b(), unsettled_msat: 0, accounted_msat: (b().accounted_msat ?? b().spent_msat) - b().unsettled_msat })}</span>
               </Show>
               <Show when={b().node_grant}>
                 {(g) => (
@@ -4781,6 +4858,7 @@ function BudgetPanel(props: {
                         <span class="unit">{row.limit_msat === null ? ', approved by hand' : `/ ${fmtAmount(row.limit_msat)}`}</span>
                       </span>
                     </div>
+                    <Show when={budgetNote(row)}>{note => <span class="hint">{note()}</span>}</Show>
                     <Show when={row.limit_msat !== null}>
                       <span class="meter" aria-hidden="true"><span style={{ width: pct(row.spent_msat, row.limit_msat!) }} /></span>
                     </Show>

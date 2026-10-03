@@ -2833,7 +2833,7 @@ async fn do_first_contact_request(state: &NodeState, recipient: &str, max_msat: 
     };
     let (auth, _) = plan_message(state, &recipient, false, max_msat, Some(contact_budget_msat))?;
     if state.node_grant.lock().unwrap().is_none() || !node_offers(state, grant::FIRST_CONTACT_CAPABILITY).await {
-        return Ok(None);
+        return if state.remote_mode.load(Ordering::SeqCst) { Err(owner_contact::unavailable()) } else { Ok(None) };
     }
     let fence = approval_fence(state);
     let grant = read_grant(state).await?.ok_or_else(grant::ended)?;
@@ -2852,25 +2852,56 @@ async fn do_first_contact_request(state: &NodeState, recipient: &str, max_msat: 
         .unwrap()
         .as_ref()
         .map(|dir| dir.join("konsensus.toml"));
-    let pending = owner_contact::Pending::new(owner_contact::Request {
+    let request = owner_contact::Request {
         client_id: grant.client_id.clone(), grant_op_id: grant.op_id.clone(),
         recipient, max_total_msat: max_msat, contact_budget_msat,
-    }, fence, now_ms(), &grant, owner_config.as_deref())?;
-    let view = pending.view.clone();
+    };
+    let mut pending = if state.remote_mode.load(Ordering::SeqCst) {
+        owner_contact::Pending::remote(request, fence, now_ms(), &grant)?
+    } else {
+        owner_contact::Pending::new(request, fence, now_ms(), &grant, owner_config.as_deref())?
+    };
+    // Discover availability and the advertised window before presenting a wait.
+    let view = if let Some(path) = pending.remote_path() {
+        let body = read_remote_contact_status(state, &path).await?;
+        check_auth(state, auth)?;
+        pending.remote_discover(&body, &grant, approval_fence(state), now_ms())?
+    } else { pending.view.clone() };
     *state.owner_contact.lock().unwrap() = Some(pending);
     Ok(Some(view))
 }
 
+async fn read_remote_contact_status(state: &NodeState, path: &str) -> Result<String, ActionError> {
+    let (status, body) = call_api(state, reqwest::Method::GET, path, None).await
+        .map_err(|_| ActionError::node("Cannot read remote contact approval. Nothing was sent. Try again when the node is reachable."))?;
+    if status == reqwest::StatusCode::NOT_FOUND { return Err(owner_contact::unavailable()); }
+    if !status.is_success() { return Err(ActionError::node("Cannot read remote contact approval. Nothing was sent.")); }
+    Ok(body)
+}
+
 async fn do_first_contact_status(state: &NodeState, id: &str) -> Result<owner_contact::View, ActionError> {
     let grant = read_grant(state).await?.ok_or_else(grant::ended)?;
-    let fence = approval_fence(state);
-    let pending = state.owner_contact.lock().unwrap();
-    let pending = pending.as_ref().filter(|p| p.view.id == id)
-        .ok_or_else(|| ActionError::new("owner_only", "This contact approval was cancelled."))?;
-    let r = &pending.view.request;
-    let (auth, _) = plan_message(state, &r.recipient, false, r.max_total_msat, Some(r.contact_budget_msat))?;
+    let (request, path) = {
+        let pending = state.owner_contact.lock().unwrap();
+        let pending = pending.as_ref().filter(|p| p.view.id == id)
+            .ok_or_else(|| ActionError::new("owner_only", "This contact approval was cancelled."))?;
+        pending.status(&grant, approval_fence(state), now_ms())?;
+        (pending.view.request.clone(), pending.remote_path())
+    };
+    let (auth, _) = plan_message(state, &request.recipient, false, request.max_total_msat, Some(request.contact_budget_msat))?;
+    let body = match path {
+        Some(path) => Some(read_remote_contact_status(state, &path).await?),
+        None => None,
+    };
     check_auth(state, auth)?;
-    pending.status(&grant, fence, now_ms())
+    let fence = approval_fence(state);
+    let mut pending = state.owner_contact.lock().unwrap();
+    let pending = pending.as_mut().filter(|p| p.view.id == id)
+        .ok_or_else(|| ActionError::new("owner_only", "This contact approval was cancelled."))?;
+    match body {
+        Some(body) => pending.remote_status(&body, &grant, fence, now_ms()),
+        None => pending.status(&grant, fence, now_ms()),
+    }
 }
 
 fn do_first_contact_cancel(state: &NodeState, id: &str) {
@@ -2882,7 +2913,7 @@ fn do_first_contact_cancel(state: &NodeState, id: &str) {
 /// and consumes the actual single-use grant, under the reviewed budget.
 async fn confirm_first_contact(state: &NodeState, recipient: &str, max_msat: u64, contact_budget_msat: u64) -> Result<(), ActionError> {
     if state.node_grant.lock().unwrap().is_none() || !node_offers(state, grant::FIRST_CONTACT_CAPABILITY).await {
-        return Ok(());
+        return if state.remote_mode.load(Ordering::SeqCst) { Err(owner_contact::unavailable()) } else { Ok(()) };
     }
     let id = state.owner_contact.lock().unwrap().as_ref().filter(|p| {
         let r = &p.view.request;
@@ -3148,6 +3179,10 @@ fn reserve(state: &NodeState, auth: Auth, charge: &Charge, id: &str, max_msat: u
 
 /// Settle or release durably; callers must retain the journal on I/O failure.
 fn close_charge(state: &NodeState, id: &str, paid: Option<u64>, target: Option<&Target>) -> Result<(), ActionError> {
+    let (dir, _) = budget_dir(state)?;
+    let evidence = spend_journal::read_pending(&dir)?
+        .filter(|p| p.charge_id() == id && p.accounting_msat == paid)
+        .and_then(|p| p.paid);
     with_book(state, true, |book| {
         match paid {
             Some(msat) => {
@@ -3167,8 +3202,41 @@ fn close_charge(state: &NodeState, id: &str, paid: Option<u64>, target: Option<&
             }
             None => book.release(id),
         }
+        if paid.is_some() {
+            if let Some(entry) = book.ledger.iter_mut().rev().find(|e| e.id == id) {
+                // A duplicate canonical payment settles this attempt at zero.
+                entry.paid = if entry.msat == 0 && paid.is_some_and(|amount| amount > 0) { Some(budget::Paid { msat: 0, fee_unknown: false }) } else { evidence };
+            }
+        }
         Ok(())
     }).map_err(spend_journal::unknown)
+}
+
+/// A delivery-only retry can reveal the fee of its original payment. Update that
+/// row, never charge the retry again. Only refine an exact principal match.
+fn refine_retry_fee(state: &NodeState, pending: &spend_journal::Pending, reply: &act::SendReply) -> Result<bool, ActionError> {
+    let (Some(original), Some(fee), Some(previous)) =
+        (pending.rollback_charge_id.as_deref(), reply.fee_paid_msat, pending.undelivered.as_ref()) else { return Ok(false) };
+    if reply.payment_hash.is_none() || reply.payment_hash != previous.payment_hash { return Ok(false); }
+    let principal = reply.amount_msat.checked_add(reply.readmission_msat.unwrap_or(0))
+        .ok_or_else(|| spend_journal::unknown("The reported principal overflows."))?;
+    let total = principal.checked_add(fee)
+        .ok_or_else(|| spend_journal::unknown("The reported paid total overflows."))?;
+    with_book(state, true, |book| {
+        // Repeated delivery-only attempts have zero rows. The journal also
+        // retains the original request row until this operation is finished.
+        let original = if book.ledger.iter().rev().find(|e| e.id == original).is_some_and(|e| e.msat == 0) {
+            pending.request_hash.as_str()
+        } else { original };
+        let Some(entry) = book.ledger.iter_mut().rev().find(|e| e.id == original) else { return Ok(false) };
+        if !entry.paid.is_some_and(|p| p.fee_unknown && p.msat == principal) { return Ok(false); }
+        // Leave the original bound intact until the caller durably fences a
+        // contradiction. A crash here must not turn the excess into a new cap.
+        if total > entry.msat { return Ok(true); }
+        entry.msat = total;
+        entry.paid = Some(budget::Paid { msat: total, fee_unknown: false });
+        Ok(false)
+    })
 }
 
 /// No automatic HTTP retry on a money path. Journal before dispatch, and retain
@@ -3265,6 +3333,7 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
             next.charge_id = Some(format!("{}-retry-{}", p.request_hash, u.attempts));
             next.rollback_charge_id = Some(p.charge_id().to_string());
             next.accounting_msat = None;
+            next.paid = None;
             next.max_msat = max_msat;
             next.target = None;
             journal.save(&next)?;
@@ -3344,6 +3413,7 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
                 pending.resumable = true;
                 pending.budgeted = false;
                 pending.accounting_msat = None;
+                pending.paid = None;
                 pending.target = None;
                 journal.save(&pending)?;
             } else {
@@ -3384,6 +3454,7 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
         // for a legacy success reply. A no-pay probe adds no new allowance.
         let accounted = if incomplete.amount_msat == 0 { 0 } else { reserve_msat.max(incomplete.amount_msat) };
         pending.accounting_msat = Some(accounted);
+        pending.paid = Some(budget::Paid { msat: incomplete.amount_msat, fee_unknown: incomplete.amount_msat > 0 });
         // The node holds this operation paid: a retry with its id re-sends, never re-pays.
         let op_retry = op_error.as_ref().is_some_and(|e| e.retry_allowed
             && matches!(spend_journal::outcome(e.state.as_deref().unwrap_or_default()), spend_journal::Outcome::Paid | spend_journal::Outcome::Sent));
@@ -3417,6 +3488,7 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
     // cap (the node's grant bounds it), but it counts against the contact.
     let mut readmission = 0;
     let mut payment_failed = false;
+    let mut prior_over_budget = false;
     let (amount, complete) = if path == "/payments/pay" {
         let receipt: act::PayReply = serde_json::from_value(value.clone()).map_err(spend_journal::unknown)?;
         (receipt.amount_msat, !receipt.preimage.is_empty())
@@ -3437,6 +3509,7 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
         readmission = receipt.readmission_msat.unwrap_or(0);
         let mut amount = receipt.amount_msat;
         if let (Some(u), Some(_)) = (retry, &operation_id) {
+            prior_over_budget = refine_retry_fee(state, &pending, &receipt)?;
             // An operation reply reports the whole operation. The same settled
             // payment means this call paid nothing new; otherwise only the increase.
             amount = if receipt.payment_hash.is_some() && receipt.payment_hash == u.payment_hash { 0 }
@@ -3444,7 +3517,10 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
             readmission = 0;
             value["amount_msat"] = serde_json::json!(amount);
             value["readmission_msat"] = serde_json::Value::Null;
-            if amount == 0 { value["max_routing_fee_msat"] = serde_json::json!(0); }
+            if amount == 0 {
+                value["max_routing_fee_msat"] = serde_json::json!(0);
+                value["fee_paid_msat"] = serde_json::json!(0);
+            }
         }
         (amount, complete)
     };
@@ -3458,21 +3534,26 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
     // A canonical room message proves only one member. It must NEVER reconcile
     // missing/unknown members; current node API has no aggregate lookup.
     if is_room { pending.target = None; }
-    // Missing is not zero. Preserve the full approved allowance for legacy
-    // replies and show that ceiling instead of inventing a zero network fee.
+    // Ceilings enforce limits; only node-reported fees are payment evidence.
     let principal = amount.checked_add(readmission)
         .ok_or_else(|| spend_journal::unknown("The reported principal overflows."))?;
     let reported_fee = value.get("max_routing_fee_msat").and_then(|v| v.as_u64());
     let fee = reported_fee.unwrap_or_else(|| reserve_msat.saturating_sub(principal));
     value["max_routing_fee_msat"] = serde_json::json!(fee);
-    let paid = if payment_failed { 0 } else {
+    let fee_paid = value.get("fee_paid_msat").and_then(|v| v.as_u64());
+    let proven = if payment_failed { 0 } else {
+        principal.checked_add(fee_paid.unwrap_or(0))
+            .ok_or_else(|| spend_journal::unknown("The reported paid total overflows."))?
+    };
+    pending.paid = Some(budget::Paid { msat: proven, fee_unknown: !payment_failed && fee_paid.is_none() });
+    let paid = if payment_failed || fee_paid.is_some() { proven } else {
         principal.checked_add(fee)
             .ok_or_else(|| spend_journal::unknown("The reported total overflows; the reservation stays held."))?
     };
     // A retained legacy allowance is not evidence that those fees were paid.
     let observed = principal.checked_add(reported_fee.unwrap_or(0))
         .ok_or_else(|| spend_journal::unknown("The reported total overflows."))?;
-    pending.over_budget = amount > max_msat || ((all_in_caps || readmission == 0) && observed > max_msat) || paid > reserve_msat;
+    pending.over_budget = prior_over_budget || amount > max_msat || ((all_in_caps || readmission == 0) && observed > max_msat) || paid > reserve_msat;
     // Save the aggregate before touching the book. A crash or failed book
     // write is recoverable without another payment or message-only history.
     // Delivered: saved with its accounting below, the record is no longer an
@@ -3562,15 +3643,20 @@ async fn do_spend_reconcile(state: &NodeState) -> Result<String, ActionError> {
             if pending.budgeted && matches!(pending.target, Some(Target::Payment { .. })) {
                 let paid = if status == "failed" { 0 } else {
                     let principal = row["amount_msat"].as_u64().ok_or_else(|| spend_journal::unknown("The payment record has no principal."))?;
-                    if pending.all_in {
-                        // History exposes principal, not the charged routing ceiling.
-                        // Keep the approved all-in allowance instead of inventing a fee.
-                        pending.max_msat.max(principal)
-                    } else { principal }
+                    let fee = row["fee_paid_msat"].as_u64();
+                    let proven = principal.checked_add(fee.unwrap_or(0))
+                        .ok_or_else(|| spend_journal::unknown("The reported paid total overflows."))?;
+                    pending.paid = Some(budget::Paid { msat: proven, fee_unknown: fee.is_none() });
+                    if fee.is_some() || !pending.all_in { proven } else { pending.max_msat.max(principal) }
                 };
+                if status == "failed" { pending.paid = Some(budget::Paid { msat: 0, fee_unknown: false }); }
+                pending.over_budget = paid > pending.max_msat;
                 pending.accounting_msat = Some(paid);
                 journal.save(&pending)?;
                 close_charge(state, &pending.request_hash, Some(paid), pending.target.as_ref())?;
+                if pending.over_budget {
+                    return Err(spend_journal::unknown("The node reports payment beyond the confirmed bound. Funds may already have moved; do not retry."));
+                }
             }
             journal.clear()?;
             Ok(format!("Previous action {status}. Nothing was dispatched again."))
@@ -3621,6 +3707,7 @@ async fn reconcile_operation(state: &NodeState, journal: &Journal, mut pending: 
             pending.resumable = true;
             pending.budgeted = false;
             pending.accounting_msat = None;
+            pending.paid = None;
             pending.target = None;
             journal.save(&pending)?;
             return Ok(NOTHING_PAID.into());
@@ -3628,6 +3715,7 @@ async fn reconcile_operation(state: &NodeState, journal: &Journal, mut pending: 
         (_, Some(reply)) => reply,
         (_, None) => unreachable!("only NothingPaid lacks a reply"),
     };
+    let prior_over_budget = refine_retry_fee(state, &pending, &reply)?;
     // The reply covers the whole operation; a retry accounts only what it added.
     let whole = reply.amount_msat.checked_add(reply.readmission_msat.unwrap_or(0))
         .ok_or_else(|| spend_journal::unknown("The reported principal overflows."))?;
@@ -3636,19 +3724,27 @@ async fn reconcile_operation(state: &NodeState, journal: &Journal, mut pending: 
         Some(u) => whole.saturating_sub(u.paid_msat),
         None => whole,
     };
-    let paid = if principal == 0 { 0 } else {
-        principal.checked_add(reply.max_routing_fee_msat)
+    let proven = if principal == 0 { 0 } else {
+        principal.checked_add(reply.fee_paid_msat.unwrap_or(0))
+            .ok_or_else(|| spend_journal::unknown("The reported paid total overflows."))?
+    };
+    pending.paid = Some(budget::Paid { msat: proven, fee_unknown: principal > 0 && reply.fee_paid_msat.is_none() });
+    let reported_ceiling = serde_json::from_str::<serde_json::Value>(&text).ok()
+        .and_then(|v| v["max_routing_fee_msat"].as_u64());
+    let reserved = with_book(state, false, |book| Ok(book.ledger.iter().rev()
+        .find(|e| e.id == pending.charge_id()).map_or(pending.max_msat, |e| e.msat)))?;
+    let paid = if principal == 0 || reply.fee_paid_msat.is_some() { proven } else {
+        principal.checked_add(reported_ceiling.unwrap_or_else(|| reserved.saturating_sub(principal)))
             .ok_or_else(|| spend_journal::unknown("The reported total overflows."))?
     };
     let message_msat = if retry.is_some() { principal } else { reply.amount_msat };
-    if message_msat > pending.max_msat {
-        pending.over_budget = true;
-        journal.save(&pending)?;
-        return Err(spend_journal::unknown(format!("The node reports {message_msat} msat, beyond the confirmed cap ({}). Funds may already have moved; do not retry.", pending.max_msat)));
-    }
+    pending.over_budget = prior_over_budget || message_msat > pending.max_msat || paid > reserved;
     pending.accounting_msat = Some(paid);
     journal.save(&pending)?;
     if pending.budgeted { close_charge(state, pending.charge_id(), Some(paid), pending.target.as_ref())?; }
+    if pending.over_budget {
+        return Err(spend_journal::unknown("The node reports payment beyond the confirmed bound. Funds may already have moved; do not retry."));
+    }
     match outcome {
         Outcome::Accepted | Outcome::Sent => {
             journal.clear()?;
@@ -4661,6 +4757,20 @@ async fn do_call_signal(
         (quote.signal_msat, quote.signal_max_routing_fee_msat)
     };
     ceiling(principal + fee, max_msat)?;
+    if kind == act::KIND_CALL_OFFER {
+        // Admission plus one hangup: check the ceiling shown for the whole
+        // call, not just this offer. money_post still rechecks the paid step.
+        let total = quote.call_total_msat.expect("an offer has a call total");
+        check_node_grant(state, "/messages/compose", &body, total).await.map_err(|mut error| {
+            if matches!(error.code, "grant_per_call" | "grant_exhausted") {
+                error.message = format!(
+                    "This call needs up to {}. {} The owner would need to approve at least {} per call and enough remaining budget for that ceiling. Nothing was sent or paid.",
+                    bitsov_app::format::amount(total), error.message, bitsov_app::format::amount(total),
+                );
+            }
+            error
+        })?;
+    }
     body["max_total_msat"] = serde_json::json!(max_msat);
     body["max_routing_fee_msat"] = serde_json::json!(fee);
     let charge = Charge {
@@ -4812,6 +4922,7 @@ async fn porch_post(state: &NodeState, auth: Auth, body: serde_json::Value, max_
                     return Err(spend_journal::unknown(format!("The node reports {paid_msat} msat paid, beyond the confirmed ceiling ({max_msat}). Funds may already have moved; do not retry.")));
                 }
                 pending.accounting_msat = Some(max_msat);
+                pending.paid = Some(budget::Paid { msat: paid_msat, fee_unknown: true });
                 journal.save(&pending)?;
                 close_charge(state, &charge_id, Some(max_msat), None)?;
                 journal.clear()?;
@@ -4835,6 +4946,7 @@ async fn porch_post(state: &NodeState, auth: Auth, body: serde_json::Value, max_
         return Err(spend_journal::unknown(format!("The node reports {principal} msat for this read, beyond the confirmed ceiling ({max_msat}). Funds may already have moved; do not retry.")));
     }
     pending.accounting_msat = Some(max_msat);
+    pending.paid = Some(budget::Paid { msat: principal, fee_unknown: true });
     journal.save(&pending)?;
     close_charge(state, &charge_id, Some(max_msat), None)?;
     journal.clear()?;
@@ -4907,6 +5019,8 @@ async fn do_file_send(
     let reply: act::SendReply = decode_act("/files/send", &text)?;
     let total_msat = reply.total_msat()?;
     Ok(act::FileReceipt {
+        readmission_msat: reply.readmission_msat,
+        fee_paid_msat: reply.fee_paid_msat,
         total_msat,
         message_id: reply.message_id,
         recipient,
@@ -5509,6 +5623,52 @@ async fn do_budget_resume(state: &NodeState) -> Result<budget::BudgetView, Actio
     budget_view(state)
 }
 
+/// Reconcile from node authority, never from a saved local approval. Serialize
+/// with payments so a disappearing grant cannot remove their pre-send check.
+async fn do_budget_status(state: &NodeState) -> Result<budget::BudgetView, ActionError> {
+    let _money = state.money.lock().await;
+    if !matches!(&*state.auth.lock().unwrap(), AuthMode::Paired(_)) {
+        return budget_view(state);
+    }
+    let fence = approval_fence(state);
+    if !node_has_g1(state).await? {
+        // Losing the grant capability is not evidence that an existing grant
+        // became unlimited. Keep its pre-send check and report an unknown read.
+        if state.node_grant.lock().unwrap().is_some() { return Err(grant::unreadable()); }
+        return budget_view(state);
+    }
+    let node = read_grant(state).await?.filter(|g| g.live(now_ms()));
+    let book = with_book(state, false, |b| Ok(b.clone()))?;
+    let mut spend = state.spend.lock().unwrap();
+    let mut autopay = state.autopay.lock().unwrap();
+    if (spend.generation(), autopay.generation()) != fence { return Err(fence_broken()); }
+    let mut known = state.node_grant.lock().unwrap();
+    match node {
+        Some(g) => {
+            // Only pristine process state can restore an approval. Lock/pause,
+            // expiry, and a revoked grant must never be undone by a late read.
+            if fence == (0, 0) && !book.paused && spend.pending().is_none()
+                && g.remaining_msat > 0 && g.per_call_max_msat > 0 {
+                arm_want(&mut spend, &mut autopay, Want::Budget(book.ceiling_msat), act::SpendBasis::NodeGrant, Some(&g));
+            }
+            autopay.restrict(g.expires_at_ms(), g.budget_msat);
+            *known = Some(g);
+        }
+        None => {
+            if known.is_some() {
+                autopay.lock();
+                spend.lock();
+                *state.wants.lock().unwrap() = Wants::default();
+            }
+            *known = None;
+        }
+    }
+    drop(known);
+    drop(autopay);
+    drop(spend);
+    budget_view(state)
+}
+
 /// Budgets, the running 24-hour tally, and whether automatic payment is on.
 #[tauri::command(rename_all = "snake_case")]
 async fn budget_status(
@@ -5517,8 +5677,7 @@ async fn budget_status(
 ) -> Result<budget::BudgetView, ActionError> {
     reject_sealed_window(&window)?;
     drop(window);
-    // `spend_status` polls a pending elevation; a budget grant lands there.
-    budget_view(state.inner())
+    do_budget_status(state.inner()).await
 }
 
 /// The owner's one approval: messages pay automatically up to this daily total.
@@ -6073,62 +6232,20 @@ fn live_link(
 /// with backoff, and stops once the app is quitting.
 async fn live_bridge(app: AppHandle) {
     let state = app.state::<NodeState>();
-    let mut attempt = 0u32;
-    loop {
-        if state.quitting.load(Ordering::SeqCst) {
-            return;
-        }
-        if state.remote_mode.load(Ordering::SeqCst) && state.remote_retry.is_retrying() {
-            let _ = reconnect_remote(&state).await;
-        }
-        let ready = *state.ready.lock().unwrap();
-        if !ready {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            continue;
-        }
-        ensure_fresh_token(&state).await;
-        let token = state.token.lock().unwrap().clone();
-        let Some(token) = token else {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            continue;
-        };
-        let url = match control::ws_url(&state.api_base, &token) {
-            Ok(url) => url,
-            Err(detail) => {
-                emit_live(&app, control::LiveEvent::Link {
-                    state: control::LinkState::Closed,
-                    detail: Some(detail),
-                });
-                return;
+    control::run_live_feed(
+        || async {
+            if state.remote_mode.load(Ordering::SeqCst) && state.remote_retry.is_retrying() {
+                let _ = reconnect_remote(&state).await;
             }
-        };
-        emit_live(&app, control::LiveEvent::Link {
-            state: control::LinkState::Connecting,
-            detail: None,
-        });
-        let emit = |event| emit_live(&app, event);
-        let detail = match control::run_ws_session(
-            &url,
-            Some(&state.remote_proxy_auth),
-            &emit,
-        )
-        .await
-        {
-            Ok(()) => {
-                attempt = 0;
-                None
-            }
-            Err(detail) => {
-                attempt = attempt.saturating_add(1);
-                Some(detail)
-            }
-        };
-        emit_live(&app, control::LiveEvent::Link {
-            state: control::LinkState::Closed,
-            detail,
-        });
-        tokio::time::sleep(control::backoff(attempt)).await;
-    }
+            if !*state.ready.lock().unwrap() { return Ok(None); }
+            ensure_fresh_token(&state).await;
+            let Some(token) = state.token.lock().unwrap().clone() else { return Ok(None); };
+            let url = control::ws_url(&state.api_base, &token)?;
+            Ok(Some((url, state.remote_proxy_auth.to_string())))
+        },
+        &|event| emit_live(&app, event),
+        &|| state.quitting.load(Ordering::SeqCst),
+    ).await;
 }
 
 /// What a stop attempt actually did. Returned so the REAL adapter can be asserted
@@ -8385,33 +8502,64 @@ mod control_act_tests {
 
     #[tokio::test]
     async fn psi_paired_approved_retry_renews_the_consumed_contact_authorization() {
-        let (node, _dir, g1) = g1_node(&["read", "receive"]);
-        *g1.quote.lock().unwrap() = Some(serde_json::json!({"recipient": A,
-            "admission_msat": 2000, "message_msat": 2000, "max_routing_fee_msat": 10000,
-            "total_msat": 14000, "expires_at": now_unix() + 60}));
-        *g1.first_contact.lock().unwrap() = Some((200, serde_json::json!({
-            "recipient": A, "max_total_msat": 14000, "expires_at": now_unix() + 120,
-        })));
-        g1_approved(&node, 500_000).await;
-        owner_approves_contact(&node, A, 14000, Some(100000)).await;
-        let (status, reply) = psi_502(2000, 0, 2000, PSI_TIMEOUT);
-        *g1.compose.lock().unwrap() = Some((status, serde_json::from_str(&reply).unwrap()));
-        assert_eq!(do_message_send_with(&node.state, A, false, "gm", 14000, None, Some(100000)).await.unwrap_err().code, "payment_settled_undelivered");
-        let original = pending(&node).unwrap();
-        assert!(node.state.owner_contact.lock().unwrap().is_none());
-        let (status, reply) = delivered("renewed", 2000);
-        *g1.compose.lock().unwrap() = Some((status, serde_json::from_str(&reply).unwrap()));
-        assert_eq!(do_message_retry(&node.state, A, "gm", Some(14000)).await.unwrap_err().code, "owner_only");
-        assert_eq!(compose_bodies(&node).len(), 1, "no compose without renewed owner approval");
-        assert_eq!(pending(&node).unwrap().id, original.id);
-        g1.grant.lock().unwrap()["per_recipient_msat"][A] = serde_json::json!(100000);
-        let renewed = owner_approves_contact(&node, A, 14000, None).await;
-        assert_eq!(renewed.request.contact_budget_msat, 100000);
-        assert_eq!(renewed.request.max_total_msat, 14000);
-        do_message_retry(&node.state, A, "gm", Some(14000)).await.unwrap();
-        assert!(node.state.owner_contact.lock().unwrap().is_none());
-        assert_eq!(compose_bodies(&node)[1]["max_total_msat"], 14000);
-        assert!(pending(&node).is_none());
+        for remote in [false, true] {
+            let response = Arc::new(Mutex::new(serde_json::json!({
+                "grant_op_id": "ab12", "recipient": A, "state": "approved", "approval_window_secs": 300,
+                "approval": {"recipient": A, "max_total_msat": 14000, "expires_at": now_unix() + 300},
+            })));
+            let reply = response.clone();
+            let route: Routes = Arc::new(move |m, p, _| {
+                if p == format!("/pair/first-contact-grant/ab12?recipient={A}") {
+                    assert_eq!(m, "GET");
+                    return (200, reply.lock().unwrap().to_string());
+                }
+                (0, String::new())
+            });
+            let (node, _dir, g1) = g1_node_with(&["read", "receive"], Some(route));
+            *g1.quote.lock().unwrap() = Some(serde_json::json!({"recipient": A,
+                "admission_msat": 2000, "message_msat": 2000, "max_routing_fee_msat": 10000,
+                "total_msat": 14000, "expires_at": now_unix() + 60}));
+            *g1.first_contact.lock().unwrap() = Some((200, serde_json::json!({
+                "recipient": A, "max_total_msat": 14000, "expires_at": now_unix() + 120,
+            })));
+            g1_approved(&node, 500_000).await;
+            node.state.remote_mode.store(remote, Ordering::SeqCst);
+            if remote {
+                assert!(do_first_contact_request(&node.state, A, 14000, Some(100000)).await.unwrap().unwrap().ready);
+            } else {
+                owner_approves_contact(&node, A, 14000, Some(100000)).await;
+            }
+            let (status, reply) = psi_502(2000, 0, 2000, PSI_TIMEOUT);
+            *g1.compose.lock().unwrap() = Some((status, serde_json::from_str(&reply).unwrap()));
+            assert_eq!(do_message_send_with(&node.state, A, false, "gm", 14000, None, Some(100000)).await.unwrap_err().code, "payment_settled_undelivered");
+            let original = pending(&node).unwrap();
+            assert!(node.state.owner_contact.lock().unwrap().is_none());
+            let (status, reply) = delivered("renewed", 2000);
+            *g1.compose.lock().unwrap() = Some((status, serde_json::from_str(&reply).unwrap()));
+            assert_eq!(do_message_retry(&node.state, A, "gm", Some(14000)).await.unwrap_err().code, "owner_only");
+            assert_eq!(compose_bodies(&node).len(), 1, "no compose without renewed owner approval");
+            assert_eq!(pending(&node).unwrap().id, original.id);
+            g1.grant.lock().unwrap()["per_recipient_msat"][A] = serde_json::json!(100000);
+            let renewed = if remote {
+                response.lock().unwrap()["state"] = "consumed".into();
+                let renewed = do_first_contact_request(&node.state, A, 14000, None).await.unwrap().unwrap();
+                assert!(!renewed.ready);
+                assert!(!do_first_contact_status(&node.state, &renewed.id).await.unwrap().ready);
+                assert_eq!(do_message_retry(&node.state, A, "gm", Some(14000)).await.unwrap_err().code, "owner_only");
+                assert_eq!(compose_bodies(&node).len(), 1);
+                assert_eq!(pending(&node).unwrap().id, original.id);
+                assert_eq!(pending(&node).unwrap().undelivered, original.undelivered);
+                response.lock().unwrap()["state"] = "approved".into();
+                renewed
+            } else { owner_approves_contact(&node, A, 14000, None).await };
+            assert_eq!(renewed.request.contact_budget_msat, 100000);
+            assert_eq!(renewed.request.max_total_msat, 14000);
+            do_message_retry(&node.state, A, "gm", Some(14000)).await.unwrap();
+            assert!(node.state.owner_contact.lock().unwrap().is_none());
+            assert_eq!(compose_bodies(&node)[1]["max_total_msat"], 14000);
+            assert!(pending(&node).is_none());
+            assert_eq!(compose_bodies(&node)[0]["plaintext"], compose_bodies(&node)[1]["plaintext"]);
+        }
     }
 
     #[tokio::test]
@@ -8516,7 +8664,7 @@ mod control_act_tests {
         let after = reopen(&node);
         assert_eq!(do_spend_reconcile(&after).await.unwrap_err().code, "undelivered_pending");
         do_spend_dismiss_undelivered(&after, &record.id).unwrap();
-        assert_eq!(budget_now(&after).spent_msat, 14000, "stopping retries does not release unknown fees");
+        assert_eq!(budget_now(&after).accounted_msat, 14000, "stopping retries does not release unknown fees");
         assert!(pending(&node).is_none());
         assert_eq!(compose_bodies(&node).len(), 2, "reconcile and dismissal do not dispatch");
     }
@@ -9122,6 +9270,73 @@ mod control_act_tests {
     const OFFER: &str = r#"{"v":1,"call_id":"0123456789abcdef0123456789abcdef","media":"audio","sdp":"v=0"}"#;
 
     #[tokio::test]
+    async fn call_grant_checks_the_full_ceiling_before_posting() {
+        let routes = call_routes(Some(10_000));
+        let first: Routes = Arc::new(move |m, p, b| {
+            if p.contains("/call") || p == "/payments/price/401" || p == "/messages/compose" {
+                routes(m, p, b)
+            } else { (0, String::new()) }
+        });
+        let (node, _dir, g1) = g1_node_with(&["read", "receive"], Some(first));
+        g1_approved(&node, 500_000).await;
+        with_book(&node.state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
+        // The 15-sat offer fits, but the 21-sat call does not.
+        for (cap, left, code) in [(20_000, 400_000, "grant_per_call"), (400_000, 20_000, "grant_exhausted")] {
+            let mut grant = g1_grant(3600, 400_000, left);
+            grant["per_call_max_msat"] = cap.into();
+            *g1.grant.lock().unwrap() = grant.clone();
+            let error = do_call_signal(&node.state, A, 400, OFFER, 15_000).await.unwrap_err();
+            assert_eq!(error.code, code);
+            assert!(error.message.contains("21 sats") && error.message.contains("owner") && error.message.contains("approve"), "{}", error.message);
+            assert_eq!(composes(&node), 0);
+            assert_eq!(*g1.grant.lock().unwrap(), grant, "never raise the grant");
+            assert!(spend_journal(&node.state).unwrap().pending().unwrap().is_none());
+            assert_eq!(budget_now(&node.state).spent_msat, 0);
+        }
+        let mut grant = g1_grant(3600, 400_000, 21_000);
+        grant["per_call_max_msat"] = 21_000.into();
+        *g1.grant.lock().unwrap() = grant;
+        let receipt = do_call_signal(&node.state, A, 400, OFFER, 15_000).await.unwrap();
+        assert_eq!(receipt.total_msat, 15_000);
+        assert_eq!(composes(&node), 1);
+    }
+
+    #[tokio::test]
+    async fn call_node_error_surfaces_and_keeps_an_uncertain_payment_pending() {
+        let inner = call_routes(Some(10_000));
+        let node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
+            if p == "/messages/compose" { (500, r#"{"error":"call routing unavailable"}"#.into()) }
+            else { inner(m, p, b) }
+        }));
+        do_budget_approve(&node.state, 500_000, budget::PresetId::Careful).await.unwrap();
+        with_book(&node.state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
+        let error = do_call_signal(&node.state, A, 400, OFFER, 15_000).await.unwrap_err();
+        assert_eq!(error.code, "spend_unknown");
+        assert!(error.message.contains("call routing unavailable"));
+        assert_eq!(composes(&node), 1);
+        assert!(spend_journal(&node.state).unwrap().pending().unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn call_node_timeout_is_bounded_and_keeps_the_payment_pending() {
+        let inner = call_routes(Some(10_000));
+        let mut node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
+            if p == "/messages/compose" { std::thread::sleep(Duration::from_millis(500)); }
+            inner(m, p, b)
+        }));
+        node.state.spend_timeout = Duration::from_millis(150);
+        do_budget_approve(&node.state, 500_000, budget::PresetId::Careful).await.unwrap();
+        with_book(&node.state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
+        let error = tokio::time::timeout(Duration::from_secs(2), do_call_signal(&node.state, A, 400, OFFER, 15_000))
+            .await.expect("bounded call request").unwrap_err();
+        assert_eq!(error.code, "spend_unknown");
+        assert!(error.message.contains("node"));
+        assert_eq!(composes(&node), 1);
+        assert!(spend_journal(&node.state).unwrap().pending().unwrap().is_some());
+        assert_eq!(budget_now(&node.state).unsettled_msat, 15_000);
+    }
+
+    #[tokio::test]
     async fn a_refused_call_returns_without_payment_and_releases_its_reservation() {
         let inner = call_routes(Some(10_000));
         let node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
@@ -9156,7 +9371,8 @@ mod control_act_tests {
         assert_eq!((body["kind"].as_u64(), body["is_room"].as_bool()), (Some(400), Some(false)));
         assert_eq!((body["max_total_msat"].as_u64(), body["max_routing_fee_msat"].as_u64()), (Some(15_000), Some(5_000)));
         assert_eq!(body["plaintext"], OFFER);
-        assert_eq!(budget_now(s).spent_msat, 15_000);
+        assert_eq!(budget_now(s).accounted_msat, 15_000);
+        assert_eq!(budget_now(s).spent_msat, 10_000);
     }
 
     #[tokio::test]
@@ -9272,7 +9488,8 @@ mod control_act_tests {
         let shown = read.card.unwrap();
         assert_eq!((shown.view.profile.display_name.as_str(), shown.view.seq, shown.cached), ("Maya", 2, false));
         assert_eq!(fetches(&node), [serde_json::json!({"node_id": peer, "path": "/front-door.json", "max_total_msat": 6000, "max_routing_fee_msat": 5000})]);
-        assert_eq!(budget_now(&node.state).spent_msat, 6_000);
+        assert_eq!(budget_now(&node.state).accounted_msat, 6_000);
+        assert_eq!(budget_now(&node.state).spent_msat, 1_000);
         assert!(spend_journal(&node.state).unwrap().pending().unwrap().is_none());
     }
 
@@ -9330,7 +9547,8 @@ mod control_act_tests {
         let err = do_porch_read(&node.state, &peer, "/index.md", 6_000).await.unwrap_err();
         assert_eq!(err.code, "porch_timeout");
         assert!(err.message.starts_with("Paid 1 sat"), "{}", err.message);
-        assert_eq!(budget_now(&node.state).spent_msat, 6_000);
+        assert_eq!(budget_now(&node.state).accounted_msat, 6_000);
+        assert_eq!(budget_now(&node.state).spent_msat, 1_000);
         assert!(spend_journal(&node.state).unwrap().pending().unwrap().is_none(), "known money: nothing left to reconcile");
 
         let (node, peer, _) = porch_node(Arc::new(|_, _, _| (500, r#"{"error":"boom","code":500}"#.into())));
@@ -9891,6 +10109,100 @@ mod control_act_tests {
     }
 
     #[tokio::test]
+    async fn paid_recovery_counts_reported_fees_and_keeps_excess_fenced() {
+        for fee in [375, 9000] {
+            for operation in [false, true] {
+                let (inner, ops) = ops_node();
+                ops.lock().unwrap().script = vec![("acked", true)];
+                let routes: Routes = Arc::new(move |m, p, b| {
+                    if p == "/payments/pay" {
+                        return (200, serde_json::json!({"payment_hash": OP_HASH, "amount_msat": 1000,
+                            "max_routing_fee_msat": 5000, "preimage": ""}).to_string());
+                    }
+                    if p == "/payments?limit=100" {
+                        return (200, serde_json::json!([{"payment_hash": OP_HASH, "amount_msat":1000,
+                            "fee_paid_msat":fee, "direction":"outgoing", "status":"settled"}]).to_string());
+                    }
+                    let (status, text) = inner(m, p, b);
+                    if p.starts_with("/messages/operations/") {
+                        let mut value: serde_json::Value = serde_json::from_str(&text).unwrap();
+                        value["fee_paid_msat"] = serde_json::json!(fee);
+                        return (status, value.to_string());
+                    }
+                    (status, text)
+                });
+                let mut node = fake(AuthMode::Local, routes);
+                node.state.spend_timeout = Duration::from_millis(60);
+                spend_advance(&node.state, true).await.unwrap();
+                if operation {
+                    assert!(do_message_send(&node.state, A, false, "gm", 7000, None).await.is_err());
+                } else {
+                    do_payment_pay(&node.state, act::TEST_INVOICE_1000, 1000, 6000).await.unwrap();
+                }
+                let restarted = reopen(&node);
+                let result = do_spend_reconcile(&restarted).await;
+                assert_eq!(result.is_ok(), fee == 375, "{result:?}");
+                let budget = budget_now(&restarted);
+                assert_eq!(budget.spent_msat, if operation { 2000 + fee } else { 1000 + fee });
+                assert!(!budget.fee_unknown);
+                assert_eq!(budget.unsettled_msat, 0);
+                assert_eq!(pending(&node).is_some_and(|p| p.over_budget), fee == 9000);
+                assert_eq!(node.posts().len(), 1, "recovery never dispatches again");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn paid_fee_reported_on_delivery_retry_updates_original_payment_once() {
+        let (inner, ops) = ops_node();
+        { let mut o = ops.lock().unwrap(); o.script = vec![("paid", false)]; o.settled_incomplete = true; }
+        let first_retry = std::sync::atomic::AtomicBool::new(true);
+        let routes: Routes = Arc::new(move |m, p, b| {
+            let (status, text) = inner(m, p, b);
+            if status == 200 && (p == "/messages/compose" || p.starts_with("/messages/operations/")) {
+                let mut v: serde_json::Value = serde_json::from_str(&text).unwrap();
+                if p == "/messages/compose" && first_retry.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                    return (502, serde_json::json!({"code":"payment_settled_send_incomplete",
+                        "error":"payment settled but send did not complete", "amount_msat":0,
+                        "operation_id":v["operation_id"], "state":"paid", "payment_hash":OP_HASH,
+                        "retry_allowed":true}).to_string());
+                }
+                v["fee_paid_msat"] = serde_json::json!(375);
+                return (status, v.to_string());
+            }
+            (status, text)
+        });
+        let node = fake(AuthMode::Local, routes);
+        spend_advance(&node.state, true).await.unwrap();
+        assert_eq!(do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap_err().code, "payment_settled_undelivered");
+        assert_eq!(do_message_retry(&node.state, A, "gm", None).await.unwrap_err().code, "payment_settled_undelivered");
+        do_message_retry(&node.state, A, "gm", None).await.unwrap();
+        let view = budget_now(&reopen(&node));
+        assert_eq!(view.spent_msat, 2375);
+        assert_eq!(view.accounted_msat, 2375);
+        assert!(!view.fee_unknown);
+        assert_eq!(ops.lock().unwrap().pays, 1);
+    }
+
+    #[tokio::test]
+    async fn paid_file_receipt_preserves_readmission_and_reported_fee() {
+        let routes: Routes = Arc::new(|m, p, b| {
+            if p == format!("/files/{FILE_ID}/send") {
+                return (200, serde_json::json!({"message_id":"file", "delivered":true,
+                    "amount_msat":3000, "readmission_msat":1000,
+                    "max_routing_fee_msat":5000, "fee_paid_msat":375}).to_string());
+            }
+            happy()(m, p, b)
+        });
+        let node = fake(AuthMode::Local, routes);
+        spend_advance(&node.state, true).await.unwrap();
+        let receipt = serde_json::to_value(do_file_send(&node.state, A, "hi.txt", "text/plain", "aGk=", 9000, None).await.unwrap()).unwrap();
+        assert_eq!(receipt["readmission_msat"], 1000);
+        assert_eq!(receipt["fee_paid_msat"], 375);
+        assert_eq!(budget_now(&node.state).spent_msat, 4375);
+    }
+
+    #[tokio::test]
     async fn paid_fee_survives_host_receipts_without_defaulting_missing_to_zero() {
         for (fee, ceiling) in [(Some(375), Some(5000)), (Some(0), Some(5000)), (None, Some(5000)), (None, None)] {
             for action in ["send", "invoice", "keysend"] {
@@ -9918,6 +10230,11 @@ mod control_act_tests {
                 assert_eq!(receipt.get("fee_paid_msat"), fee.map(|v| serde_json::json!(v)).as_ref(), "{action}: fee {fee:?}");
                 assert_eq!(receipt["max_routing_fee_msat"], 5000, "the allowance stays separate");
                 if action == "send" { assert_eq!(receipt["readmission_msat"], 1000); }
+                let budget = serde_json::to_value(budget_now(&node.state)).unwrap();
+                let principal = match action { "send" => 3000, "invoice" => 1000, _ => 5000 };
+                assert_eq!(budget["spent_msat"], principal + fee.unwrap_or(0), "{action}: fee {fee:?}");
+                assert_eq!(budget["fee_unknown"], fee.is_none());
+                assert_eq!(budget["unsettled_msat"], 0);
             }
         }
     }
@@ -9932,7 +10249,8 @@ mod control_act_tests {
         let node = fake(AuthMode::Local, routes);
         spend_advance(&node.state, true).await.unwrap();
         let receipt = do_payment_pay(&node.state, act::TEST_INVOICE_1000, 1000, 6000).await.unwrap();
-        assert_eq!(budget_now(&node.state).spent_msat, 6000);
+        assert_eq!(budget_now(&node.state).accounted_msat, 6000);
+        assert_eq!(budget_now(&node.state).spent_msat, 1000);
         assert_eq!(receipt.max_routing_fee_msat, 5000);
     }
 
@@ -9946,7 +10264,8 @@ mod control_act_tests {
         with_book(&node.state, true, |book| book.set_limit(A, false, 50000)).unwrap();
         let receipt = do_message_send(&node.state, A, false, "hi", 7000, None).await.unwrap();
         assert_eq!(receipt.total_msat, 50000);
-        assert_eq!(budget_now(&node.state).spent_msat, 50000);
+        assert_eq!(budget_now(&node.state).accounted_msat, 50000);
+        assert_eq!(budget_now(&node.state).spent_msat, 2000);
         assert!(spend_journal(&node.state).unwrap().pending().unwrap().is_none());
     }
 
@@ -9995,7 +10314,8 @@ mod control_act_tests {
         let node = fake(AuthMode::Local, routes);
         spend_advance(&node.state, true).await.unwrap();
         let receipt = do_message_send(&node.state, A, false, "hi", 17000, None).await.unwrap();
-        assert_eq!(budget_now(&node.state).spent_msat, 17000);
+        assert_eq!(budget_now(&node.state).accounted_msat, 17000);
+        assert_eq!(budget_now(&node.state).spent_msat, 7000);
         assert_eq!(serde_json::to_value(receipt).unwrap()["total_msat"], 17000);
     }
 
@@ -10012,7 +10332,8 @@ mod control_act_tests {
         spend_advance(&node.state, true).await.unwrap();
         for _ in 0..2 {
             do_payment_pay(&node.state, act::TEST_INVOICE_1000, 1000, 6000).await.unwrap();
-            assert_eq!(budget_now(&node.state).spent_msat, 6000);
+            assert_eq!(budget_now(&node.state).accounted_msat, 6000);
+            assert_eq!(budget_now(&node.state).spent_msat, 1000);
         }
         assert_eq!(node.posts()[0].1["max_routing_fee_msat"], 5000);
     }
@@ -10058,7 +10379,8 @@ mod control_act_tests {
         spend_advance(&node.state, true).await.unwrap();
         do_payment_pay(&node.state, act::TEST_INVOICE_1000, 1000, 6000).await.unwrap();
         do_spend_reconcile(&reopen(&node)).await.unwrap();
-        assert_eq!(budget_now(&node.state).spent_msat, 6000);
+        assert_eq!(budget_now(&node.state).accounted_msat, 6000);
+        assert_eq!(budget_now(&node.state).spent_msat, 1000);
         assert_eq!(budget_now(&node.state).unsettled_msat, 0);
         assert_eq!(node.posts().len(), 1);
     }
@@ -10105,7 +10427,7 @@ mod control_act_tests {
         do_payment_pay(&node.state, act::TEST_INVOICE_1000, 1000, 7000).await.unwrap();
         pending_reply.store(true, std::sync::atomic::Ordering::SeqCst);
         do_payment_pay(&node.state, act::TEST_INVOICE_1000, 1000, 7000).await.unwrap();
-        assert_eq!(budget_now(&node.state).spent_msat, 8000, "unknown replay keeps its full reservation");
+        assert_eq!(budget_now(&node.state).accounted_msat, 8000, "unknown replay keeps its full reservation");
         assert_eq!(budget_now(&node.state).unsettled_msat, 7000);
         let after = reopen(&node);
         let mut pending = spend_journal(&after).unwrap().pending().unwrap().unwrap();
@@ -10156,7 +10478,7 @@ mod control_act_tests {
         do_payment_pay(&node.state, act::TEST_INVOICE_1000, 1000, 7000).await.unwrap();
         with_book(&node.state, true, |b| {
             b.ledger.extend((0..budget::LEDGER_MAX).map(|i| budget::Entry {
-                id: format!("other-{i}"), at_ms: now_ms(), target: A.into(), room: false, msat: 1, settled: true,
+                id: format!("other-{i}"), at_ms: now_ms(), target: A.into(), room: false, msat: 1, settled: true, paid: Some(budget::Paid { msat: 1, fee_unknown: false }),
             }));
             b.prune(now_ms());
             assert_eq!(b.ledger.len(), 2, "settled rows compacted by target");
@@ -10214,7 +10536,8 @@ mod control_act_tests {
             let after = reopen(&node);
             do_spend_reconcile(&after).await.unwrap();
             let b = budget_now(&after);
-            assert_eq!(b.spent_msat, if status == "settled" { 7000 } else { 0 });
+            assert_eq!(b.accounted_msat, if status == "settled" { 7000 } else { 0 });
+            assert_eq!(b.spent_msat, if status == "settled" { 1000 } else { 0 });
             assert_eq!(b.unsettled_msat, 0);
             assert!(spend_journal(&after).unwrap().pending().unwrap().is_none());
             assert_eq!(node.posts().iter().filter(|(p, _)| p == "/payments/pay").count(), 1);
@@ -10263,7 +10586,7 @@ mod control_act_tests {
         let mut pending = spend_journal(&after).unwrap().pending().unwrap().unwrap();
         do_spend_reconcile(&after).await.unwrap();
         assert_eq!(budget_now(&after).unsettled_msat, 0);
-        assert_eq!(budget_now(&after).spent_msat, 7000, "aged liability is conservatively dated at reconciliation");
+        assert_eq!(budget_now(&after).accounted_msat, 7000, "aged liability is conservatively dated at reconciliation");
         assert!(spend_journal(&after).unwrap().pending().unwrap().is_none());
         // Crash after durable settlement but before removing the journal.
         pending.accounting_msat = Some(1000);
@@ -10320,7 +10643,7 @@ mod control_act_tests {
         }
         let v = budget_now(s);
         assert_eq!((v.spent_msat, v.unsettled_msat), (4000, 0));
-        assert_eq!(v.rows, [budget::Row { target: A.into(), room: false, limit_msat: Some(50_000), spent_msat: 4000 }]);
+        assert_eq!(v.rows, [budget::Row { target: A.into(), room: false, limit_msat: Some(50_000), spent_msat: 4000, accounted_msat: 4000, unsettled_msat: 0, fee_unknown: true }]);
         // Pay still needs the ten-minute window; files share the message budget route.
         assert_eq!(do_payment_pay(s, act::TEST_INVOICE_1000, 1000, 6000).await.unwrap_err().code, "spend_locked");
         do_file_send(s, A, "note.txt", "text/plain", "aGk=", 8000, None).await.unwrap();
@@ -10437,7 +10760,7 @@ mod control_act_tests {
         assert_eq!(budget_now(s).rows[0].limit_msat, Some(50_000), "the owner's OK still stands");
         assert_eq!(do_message_send(s, A, false, "gm", 7000, None).await.unwrap_err().code, "spend_unknown");
         let v = budget_now(s);
-        assert_eq!((v.spent_msat, v.unsettled_msat), (7000, 7000));
+        assert_eq!((v.spent_msat, v.unsettled_msat), (0, 7000));
         assert_eq!(budget_now(&reopen(&node)).unsettled_msat, 7000, "and it survives a restart");
     }
 
@@ -10491,6 +10814,83 @@ mod control_act_tests {
     }
 
     // ---- G1: budget-scoped node grants -----------------------------------------
+
+    #[tokio::test]
+    async fn relaunch_reads_live_grant_without_requesting_or_spending() {
+        let (node, _dir, g1) = g1_node(&["read", "receive", "spend"]);
+        *g1.grant.lock().unwrap() = g1_grant(3600, 5_000_000, 4_995_000);
+        let view = do_budget_status(&node.state).await.unwrap();
+        assert_eq!(view.autopay.state, budget::AutopayState::Open);
+        assert_eq!(view.node_grant.unwrap().remaining_msat, 4_995_000);
+        assert!(view.autopay.ceiling_msat.unwrap() <= 5_000_000);
+        assert_eq!(view.autopay.open_until_ms, Some(g1.grant.lock().unwrap()["expires_at"].as_u64().unwrap() * 1000));
+        assert_eq!(node.posts().len(), 0);
+        // A later read must observe exhaustion, and the send must still re-read.
+        *g1.grant.lock().unwrap() = g1_grant(3600, 5_000_000, 500);
+        assert_eq!(do_budget_status(&node.state).await.unwrap().node_grant.unwrap().remaining_msat, 500);
+        assert_eq!(check_node_grant(&node.state, "/messages/compose", &serde_json::json!({"recipient": A}), 1000).await.unwrap_err().code, "grant_exhausted");
+    }
+
+    #[tokio::test]
+    async fn relaunch_unknown_absent_expired_and_paused_grants_never_open() {
+        let (node, _dir, g1) = g1_node(&["read", "receive", "spend"]);
+        *g1.grant_status.lock().unwrap() = 500;
+        assert_eq!(do_budget_status(&node.state).await.unwrap_err().code, "grant_unknown");
+        assert_eq!(budget_now(&node.state).autopay.state, budget::AutopayState::Off);
+        *g1.grant_status.lock().unwrap() = 200;
+        for grant in [serde_json::Value::Null, g1_grant(-1, 5000, 5000)] {
+            *g1.grant.lock().unwrap() = grant;
+            assert_ne!(do_budget_status(&node.state).await.unwrap().autopay.state, budget::AutopayState::Open);
+        }
+        *g1.grant.lock().unwrap() = g1_grant(3600, 5000, 5000);
+        do_budget_pause(&node.state).unwrap();
+        assert_ne!(do_budget_status(&node.state).await.unwrap().autopay.state, budget::AutopayState::Open);
+        assert!(node.posts().is_empty());
+    }
+
+    #[tokio::test]
+    async fn relaunch_late_grant_read_cannot_undo_pause() {
+        let entered = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+        let (e, r) = (entered.clone(), release.clone());
+        let first: Routes = Arc::new(move |_, path, _| {
+            if path != "/pair/grant" { return (0, String::new()); }
+            e.store(true, Ordering::SeqCst);
+            while !r.load(Ordering::SeqCst) { std::thread::sleep(Duration::from_millis(1)); }
+            (200, serde_json::json!({"grant": g1_grant(3600, 5_000_000, 4_995_000)}).to_string())
+        });
+        let (node, _dir, _) = g1_node_with(&["read", "receive", "spend"], Some(first));
+        let pause = async {
+            while !entered.load(Ordering::SeqCst) { tokio::time::sleep(Duration::from_millis(1)).await; }
+            do_budget_pause(&node.state).unwrap();
+            release.store(true, Ordering::SeqCst);
+        };
+        let (read, ()) = tokio::join!(do_budget_status(&node.state), pause);
+        assert_eq!(read.unwrap_err().code, "budget_needed");
+        assert_eq!(do_budget_status(&node.state).await.unwrap().autopay.state, budget::AutopayState::Off);
+        assert!(node.posts().is_empty());
+    }
+
+    #[tokio::test]
+    async fn relaunch_retry_reads_current_grant_and_revocation_closes_it() {
+        let (node, _dir, g1) = g1_node(&["read", "receive", "spend"]);
+        *g1.grant_status.lock().unwrap() = 500;
+        assert!(do_budget_status(&node.state).await.is_err());
+        *g1.grant_status.lock().unwrap() = 200;
+        assert_eq!(do_budget_status(&node.state).await.unwrap().autopay.state, budget::AutopayState::Open);
+        *g1.grant.lock().unwrap() = g1_grant(60, 50_000, 30_000);
+        let narrowed = do_budget_status(&node.state).await.unwrap();
+        assert_eq!(narrowed.autopay.ceiling_msat, Some(50_000));
+        assert_eq!(narrowed.autopay.open_until_ms, Some(g1.grant.lock().unwrap()["expires_at"].as_u64().unwrap() * 1000));
+        *g1.grant_status.lock().unwrap() = 500;
+        assert!(do_budget_status(&node.state).await.is_err());
+        assert_eq!(check_node_grant(&node.state, "/messages/compose", &serde_json::json!({}), 1000).await.unwrap_err().code, "grant_unknown");
+        *g1.grant_status.lock().unwrap() = 200;
+        *g1.grant.lock().unwrap() = serde_json::Value::Null;
+        let revoked = do_budget_status(&node.state).await.unwrap();
+        assert_eq!((revoked.autopay.state, revoked.node_grant), (budget::AutopayState::Off, None));
+        assert!(node.posts().is_empty());
+    }
 
     /// A G1 node: advertises `spend_budget_grant_v1`, grants on the second poll,
     /// and answers `GET /pair/grant` with whatever `grant` holds. `compose`
@@ -10958,6 +11358,66 @@ mod control_act_tests {
         assert_eq!(t[compose - 1], "GET /pair/grant");
     }
 
+    #[tokio::test]
+    async fn remote_contact_polls_bound_operation_and_never_sends_before_approval() {
+        let reply = Arc::new(Mutex::new((200, serde_json::json!({
+            "grant_op_id": "ab12", "recipient": C, "state": "pending",
+            "approval_window_secs": 300, "approval": null,
+        }))));
+        let response = reply.clone();
+        let route: Routes = Arc::new(move |m, p, _| {
+            if p.starts_with("/pair/first-contact-grant/") {
+                assert_eq!(m, "GET");
+                assert_eq!(p, format!("/pair/first-contact-grant/ab12?recipient={C}"));
+                let r = response.lock().unwrap();
+                return (r.0, r.1.to_string());
+            }
+            (0, String::new())
+        });
+        let (node, _dir, g1) = g1_node_with(&["read", "receive"], Some(route));
+        *g1.first_contact.lock().unwrap() = Some((200, serde_json::json!({})));
+        g1_approved(&node, 500_000).await;
+        node.state.remote_mode.store(true, Ordering::SeqCst);
+        let mut view = do_first_contact_request(&node.state, C, 10000, Some(50_000)).await.unwrap().unwrap();
+        assert!(!view.owner_command.contains("receipt"), "remote commands cannot write an app-local receipt");
+        assert!(view.expires_at_ms > now_ms() + 290_000);
+        assert!(!do_first_contact_status(&node.state, &view.id).await.unwrap().ready);
+        assert!(do_message_send_with(&node.state, C, false, "hello", 10000, None, Some(50_000)).await.is_err());
+        assert!(compose_bodies(&node).is_empty());
+        for state in ["expired", "consumed", "approved"] {
+            reply.lock().unwrap().1["state"] = state.into();
+            // Even approved without its matching approval must fail closed.
+            assert!(do_first_contact_status(&node.state, &view.id).await.is_err());
+        }
+        // Requoting must expose a replacement command while the old expired
+        // marker is still held by the node. Waiting still cannot compose.
+        reply.lock().unwrap().1["state"] = "expired".into();
+        view = do_first_contact_request(&node.state, C, 10000, Some(50_000)).await.unwrap().unwrap();
+        assert!(!view.ready);
+        assert!(!do_first_contact_status(&node.state, &view.id).await.unwrap().ready);
+        assert!(do_message_send_with(&node.state, C, false, "hello", 10000, None, Some(50_000)).await.is_err());
+        // A cancelled handoff may also leave an approval for a different cap.
+        reply.lock().unwrap().1["state"] = "approved".into();
+        reply.lock().unwrap().1["approval"] = serde_json::json!({
+            "recipient": C, "max_total_msat": 9000, "expires_at": now_unix() + 300,
+        });
+        view = do_first_contact_request(&node.state, C, 10000, Some(50_000)).await.unwrap().unwrap();
+        assert!(!view.ready);
+        assert!(!do_first_contact_status(&node.state, &view.id).await.unwrap().ready);
+        assert!(compose_bodies(&node).is_empty());
+        reply.lock().unwrap().1["approval"]["max_total_msat"] = 10000.into();
+        assert!(do_first_contact_status(&node.state, &view.id).await.unwrap().ready);
+        do_message_send_with(&node.state, C, false, "hello", 10000, None, Some(50_000)).await.unwrap();
+        assert_eq!(compose_bodies(&node).len(), 1);
+        assert!(node.seen.lock().unwrap().iter().filter(|(_, p, _, _)| p.contains("/first-contact-grant/"))
+            .all(|(m, _, token, _)| m == "GET" && token.as_deref() == Some("tok.spend")));
+        // An unavailable route is not pending and must not fall back to a receipt.
+        *reply.lock().unwrap() = (404, serde_json::json!({}));
+        let err = do_first_contact_request(&node.state, C, 10000, Some(50_000)).await.unwrap_err();
+        assert_eq!(err.code, "owner_contact_unavailable");
+        assert!(err.message.contains("older node") && err.message.contains("owner control"));
+    }
+
     async fn owner_approves_contact(node: &Fake, recipient: &str, cap: u64, budget: Option<u64>) -> owner_contact::View {
         let view = do_first_contact_request(&node.state, recipient, cap, budget).await.unwrap().unwrap();
         assert!(!do_first_contact_status(&node.state, &view.id).await.unwrap().ready);
@@ -11139,8 +11599,8 @@ mod control_act_tests {
         assert!(live.spent_msat >= 22_000 || pending.is_some(),
             "22,000 paid but live={}, restored={}, pending={pending:?}, result={sent:?}", live.spent_msat, restored.spent_msat);
         assert_eq!(sent.unwrap_err().code, "spend_unknown");
-        assert_eq!(live.spent_msat, 50_000, "the full enforceable allowance stays reserved");
-        assert_eq!(restored.spent_msat, 50_000);
+        assert_eq!(live.accounted_msat, 50_000, "the full enforceable allowance stays reserved");
+        assert_eq!(restored.accounted_msat, 50_000);
         let pending = pending.unwrap();
         assert_eq!(pending.accounting_msat, Some(22_000));
         let after = reopen(&node);

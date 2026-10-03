@@ -421,7 +421,7 @@ export type ActionError = {
     | 'spend_locked'
     | 'spend_expired'
     | 'spend_refused'
-    | 'owner_only'
+    | 'owner_only' | 'owner_contact_expired' | 'owner_contact_unavailable'
     | 'sponsor_owner_approval_required'
     | 'budget_paused' | 'budget_exhausted' | 'ceiling_exhausted' | 'first_contact' | 'budget_needed' | 'budget_unreadable'
     // G1 node grants: refused before any payment (see src-tauri/src/grant.rs).
@@ -484,6 +484,8 @@ export type OwnerContactApproval = {
   id: string;
   request: { client_id: string; grant_op_id: string; recipient: string; max_total_msat: number; contact_budget_msat: number };
   owner_command: string;
+  /** Present for remote status polling; absent for the local receipt path. */
+  approval_window_secs?: number;
   ready: boolean;
   expires_at_ms: number;
 };
@@ -538,10 +540,18 @@ export type SpendView = {
 export type PresetId = 'careful' | 'everyday' | 'generous';
 export type BudgetPreset = { id: PresetId; contact_msat: number; room_msat: number; ceiling_msat: number };
 export type AutopayState = 'off' | 'open' | 'expired';
-export type BudgetRow = { target: string; room: boolean; limit_msat: number | null; spent_msat: number };
+export type BudgetAccounting = {
+  spent_msat: number;
+  /** In-flight ceilings, separate from paid amounts. */
+  unsettled_msat?: number;
+  /** Includes reservations and holds for unreported fees; used for enforcement. */
+  accounted_msat?: number;
+  fee_unknown?: boolean;
+};
+export type BudgetRow = BudgetAccounting & { target: string; room: boolean; limit_msat: number | null };
 
 /** `budget_status` and every budget command. Spends are a rolling 24 hours. */
-export type BudgetView = {
+export type BudgetView = BudgetAccounting & {
   paused: boolean;
   autopay: { state: AutopayState; open_until_ms: number | null; ceiling_msat: number | null; basis: SpendBasis | null };
   /** A budget approval is waiting for the owner at the node. */
@@ -550,7 +560,7 @@ export type BudgetView = {
   /** The daily total last approved. */
   ceiling_msat: number;
   spent_msat: number;
-  /** Reserved at the price cap because the outcome is not known yet; included in `spent_msat`. */
+  /** Reserved at the price cap because the outcome is not known yet; separate from `spent_msat`. */
   unsettled_msat: number;
   rows: BudgetRow[];
   presets: BudgetPreset[];
@@ -635,6 +645,8 @@ export type PaymentReceipt = {
 export type InviteView = { invite_id: string; invite_link: string; invitee: string; expires_at_ms: number };
 export type RedeemView = { inviter_pubkey: string; addr: string };
 export type FileReceipt = {
+  readmission_msat?: number;
+  fee_paid_msat?: number;
   total_msat?: number;
   max_routing_fee_msat?: number;
   message_id: string;

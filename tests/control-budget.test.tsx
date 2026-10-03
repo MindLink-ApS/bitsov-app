@@ -118,7 +118,11 @@ function stubHost(start: BudgetView, overrides: Record<string, Reply> = {}) {
   });
   vi.stubGlobal('__TAURI_EVENT_PLUGIN_INTERNALS__', { unregisterListener: () => {} });
   const used = (cmd: string) => calls.filter((c) => c.cmd === cmd);
-  return { calls, state, used };
+  const emit = (state: string) => {
+    const listener = calls.find(c => c.cmd === 'plugin:event|listen' && c.args?.event === 'node-live');
+    callbacks.get(listener?.args?.handler as number)?.({ event: 'node-live', id: 1, payload: { type: 'link', state, detail: null } });
+  };
+  return { calls, state, used, emit };
 }
 
 describe('invisible payments in the composer and the context panel', () => {
@@ -157,6 +161,96 @@ describe('invisible payments in the composer and the context panel', () => {
     await vi.waitFor(() => expect($('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('2000'));
   }
 
+  it('relaunch displays node-confirmed auto-pay and rechecks immediately after feed recovery', async () => {
+    const host = stubHost(open([{ target: MAYA, room: false, limit_msat: 50_000, spent_msat: 0 }], {
+      node_grant: { budget_msat: 5_000_000, remaining_msat: 4_995_000, per_call_max_msat: 50_000, expires_at_ms: Date.now() + DAY, envelopes: null },
+    }));
+    await openShell();
+    type('[data-composer] textarea', 'hello');
+    await vi.waitFor(() => expect($('[data-budget="ok"]')).not.toBeNull());
+    expect($('[data-composer]')?.textContent).not.toContain('Approval needed');
+    expect(host.used('budget_approve')).toHaveLength(0);
+    host.emit('closed');
+    await vi.waitFor(() => expect(mount.textContent).toContain('live feed reconnecting'));
+    host.state.budget = budgetView(); // Node revoked the grant during its restart.
+    host.emit('open');
+    await vi.waitFor(() => expect($('[data-budget-setup]')).not.toBeNull(), { timeout: 500 });
+    expect(mount.textContent).not.toContain('live feed reconnecting');
+    expect(host.used('message_send')).toHaveLength(0);
+  });
+
+  it('shows stale grant state while a reconnect read is unavailable, then recovers', async () => {
+    let unavailable = false;
+    const live = open([{ target: MAYA, room: false, limit_msat: 50_000, spent_msat: 0 }]);
+    const host = stubHost(live, { budget_status: () => {
+      if (unavailable) throw { code: 'grant_unknown', message: 'Node grant unavailable' };
+      return live;
+    } });
+    await openShell();
+    type('[data-composer] textarea', 'hello');
+    await vi.waitFor(() => expect($('[data-budget="ok"]')).not.toBeNull());
+    unavailable = true;
+    host.emit('closed'); host.emit('open');
+    await vi.waitFor(() => expect($('[data-budget-stale]')).not.toBeNull(), { timeout: 500 });
+    expect($('[data-budget="ok"]')).toBeNull();
+    expect($<HTMLButtonElement>('[data-send]')!.disabled).toBe(true);
+    $<HTMLTextAreaElement>('[data-composer] textarea')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(host.used('message_send')).toHaveLength(0);
+    unavailable = false;
+    host.emit('closed'); host.emit('open');
+    await vi.waitFor(() => expect($('[data-budget="ok"]')).not.toBeNull(), { timeout: 500 });
+    expect(host.used('message_send')).toHaveLength(0);
+  });
+
+  it('ignores a grant read from before a newer reconnect', async () => {
+    const live = open([{ target: MAYA, room: false, limit_msat: 50_000, spent_msat: 0 }]);
+    let held: ((value: BudgetView) => void) | undefined;
+    let holdNext = false;
+    let current = live;
+    const host = stubHost(live, { budget_status: () => {
+      if (holdNext) { holdNext = false; return new Promise<BudgetView>(resolve => { held = resolve; }); }
+      return current;
+    } });
+    await openShell();
+    type('[data-composer] textarea', 'hello');
+    holdNext = true;
+    host.emit('closed'); host.emit('open');
+    await vi.waitFor(() => expect(held).toBeDefined());
+    current = budgetView();
+    host.emit('closed'); host.emit('open');
+    await vi.waitFor(() => expect($('[data-budget-setup]')).not.toBeNull());
+    held!(live);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect($('[data-budget-setup]')).not.toBeNull();
+    expect($('[data-budget="ok"]')).toBeNull();
+  });
+
+  it('uses restored auto-pay for a registered device without opening manual payments', async () => {
+    stubHost(open([{ target: MAYA, room: false, limit_msat: 50_000, spent_msat: 0 }], {
+      node_grant: { budget_msat: 5_000_000, remaining_msat: 4_995_000, per_call_max_msat: 50_000, expires_at_ms: Date.now() + DAY, envelopes: { [MAYA]: Date.now() + DAY } },
+    }), { device_key_status: () => ({ available: true, state: 'registered', fingerprint: 'fixture', owner_action: null, expires_at_ms: null }) });
+    await openShell();
+    type('[data-composer] textarea', 'hello');
+    expect($('[data-send]')?.textContent).not.toContain('Touch ID');
+    expect($('[data-budget="ok"]')).not.toBeNull();
+    $<HTMLButtonElement>('[data-composer-mode="pay"]')!.click();
+    expect($('[data-send]')?.textContent).toContain('Touch ID');
+  });
+
+  it.each([[0, 50_000], [1000, 50_000], [5_000_000, 1000]])('shows node grant limits: remaining %s msat, per-call %s msat', async (remaining, perCall) => {
+    const host = stubHost(open([{ target: MAYA, room: false, limit_msat: 50_000, spent_msat: 0 }], {
+      node_grant: { budget_msat: 5_000_000, remaining_msat: remaining, per_call_max_msat: perCall, expires_at_ms: Date.now() + DAY, envelopes: null },
+    }));
+    await openShell();
+    type('[data-composer] textarea', 'hello');
+    expect($('[data-budget="grant_limited"]')).not.toBeNull();
+    expect($<HTMLButtonElement>('[data-send]')!.disabled).toBe(true);
+    $<HTMLTextAreaElement>('[data-composer] textarea')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(host.used('message_send')).toHaveLength(0);
+  });
+
   it('keeps the selected Everyday preset after remount without requesting a grant', async () => {
     const host = stubHost(budgetView());
     await openShell();
@@ -192,7 +286,7 @@ describe('invisible payments in the composer and the context panel', () => {
     await openShell();
     $<HTMLButtonElement>('[data-tab="budget"]')!.click();
     await vi.waitFor(() => expect($('[data-budget-scope]')).not.toBeNull());
-    expect(text('[data-budget-scope]').replace(/\s+/g, ' ').trim()).toMatchInlineSnapshot(`"App all-in · rolling 24 h — what it coversCovers automatic and manual-window messages, room sends, files, app invoice payments and keysend, and admission, including their maximum network fees. Conservative allowance, not an exact wallet-debit total. Not covered: channel opening/closing, on-chain transfers and fees, owner-direct CLI/API, or background workers. G1 is a separate finite node grant; it does not refill daily. Not a wallet-wide limit."`);
+    expect(text('[data-budget-scope]').replace(/\s+/g, ' ').trim()).toMatchInlineSnapshot(`"App all-in · rolling 24 h — what it coversCovers automatic and manual-window messages, room sends, files, app invoice payments and keysend, and admission, including their maximum network fees. Paid totals use reported principal and fees. In-flight ceilings are reserved separately; unreported fees remain unknown. Not covered: channel opening/closing, on-chain transfers and fees, owner-direct CLI/API, or background workers. G1 is a separate finite node grant; it does not refill daily. Not a wallet-wide limit."`);
     $<HTMLButtonElement>('[data-composer-mode="pay"]')!.click();
     expect(text('[data-budget-payment]')).toContain('reserve principal plus the network fee ceiling');
     $<HTMLButtonElement>('[data-composer-mode="file"]')!.click();
@@ -1126,6 +1220,30 @@ describe('invisible payments in the composer and the context panel', () => {
     await vi.waitFor(() => expect(text('[data-send]')).toBe('Send'));
     expect($('[data-budget]')).toBeNull();
   });
+  it('shows paid amounts and reservations separately without freeing reserved budget', async () => {
+    const row = { target: MAYA, room: false, limit_msat: 50_000, spent_msat: 1000,
+      unsettled_msat: 6000, accounted_msat: 7000, fee_unknown: false };
+    const budget = open([row], { spent_msat: 1000, unsettled_msat: 6000, accounted_msat: 7000 });
+    stubHost(budget);
+    await openShell();
+    type('[data-composer] textarea', 'next');
+    await vi.waitFor(() => expect(text('[data-budget-line]')).toContain('1 sat of 50 sats'));
+    expect(text('[data-budget-line]')).toContain('6 sats reserved');
+    $<HTMLButtonElement>('[data-tab="budget"]')!.click();
+    expect(text('[data-tally-total]')).toBe('1 sat / 500 sats');
+    expect(text('[data-unsettled]')).toContain('6 sats reserved');
+    expect(text(`[data-budget-row="${MAYA}"]`)).toContain('6 sats reserved');
+    expect(budgetStand(budget, MAYA, false, 44_000).kind).toBe('contact_used');
+  });
+  it('labels a settled legacy fee unknown while counting only proven principal', async () => {
+    stubHost(open([{ target: MAYA, room: false, limit_msat: 50_000, spent_msat: 1000,
+      accounted_msat: 6000, fee_unknown: true }], { spent_msat: 1000, accounted_msat: 6000, fee_unknown: true }));
+    await openShell();
+    $<HTMLButtonElement>('[data-tab="budget"]')!.click();
+    expect(text('[data-tally-total]')).toBe('1 sat / 500 sats');
+    expect(text('[data-fee-unknown]')).toContain('fee unknown');
+    expect(text(`[data-budget-row="${MAYA}"]`)).toContain('fee unknown');
+  });
 });
 
 describe('budget rules', () => {
@@ -1152,6 +1270,7 @@ describe('budget rules', () => {
     expect(messagesWorth(1000, 2000)).toBe('0 messages');
     expect(T).toBeGreaterThan(0);
   });
+
 });
 
 describe('sample source budgets', () => {
@@ -1234,4 +1353,6 @@ describe('sample source budgets', () => {
     await expect(s.budgetSet(maya, false, 600_000)).rejects.toMatchObject({ code: 'invalid' });
     expect((await s.budgetResume()).paused).toBe(false);
   });
+
+
 });
