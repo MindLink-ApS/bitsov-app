@@ -58,6 +58,7 @@ import {
   applyDelivery,
   applyLive,
   asActionError,
+  peerNotReadyMessage,
   admissionCopy,
   undeliveredCopy,
   budgetStand,
@@ -246,8 +247,8 @@ export function ControlCenter(props: Props) {
     try {
       const q = await source.priceQuote((t as { id: string }).id);
       if (read === quoteRead && track() && trackKey(track()!) === trackKey(t)) setQuote(q);
-    } catch {
-      if (read === quoteRead && track() && trackKey(track()!) === trackKey(t)) setQuoteError('price unavailable · could not read peer price');
+    } catch (error) {
+      if (read === quoteRead && track() && trackKey(track()!) === trackKey(t)) setQuoteError(peerNotReadyMessage(error, t.kind === 'peer' ? nameOf(t.id) : 'This peer') ?? 'price unavailable · could not read peer price');
     }
   };
   const [roomQuote, setRoomQuote] = createSignal<RoomQuote | null>(null);
@@ -928,7 +929,7 @@ export function ControlCenter(props: Props) {
       }
       void loadSpend();
     },
-    doorQuote: (peer) => source.firstContactQuote(peer).catch(() => null),
+    doorQuote: (peer) => source.firstContactQuote(peer),
     ownerRequest: (peer, cap, budget) => act(() => source.firstContactRequest(peer, cap, budget)),
     ownerStatus: (id) => act(() => source.firstContactStatus(id)),
     ownerCancel: (id) => source.firstContactCancel(id).catch(() => {}),
@@ -3383,6 +3384,8 @@ function Composer(props: {
     setDoor(request);
     void props.actions.doorQuote(peer).then((quote) => {
       if (untrack(door) === request) setDoor({ peer, quote });
+    }).catch((error) => {
+      if (untrack(door) === request) setDoor({ peer, quote: null, error });
     });
   });
   const presetChosen = () => {
@@ -3424,7 +3427,7 @@ function Composer(props: {
   // to a stranger, read the stranger's own signed quote once. Its total is the
   // cap the owner confirms; the node pays that very invoice. A missing or
   // expired first-contact quote disables Send and offers a read-only retry.
-  const [door, setDoor] = createSignal<{ peer: string; quote: FirstContactQuote | null; loading?: boolean } | null>(null);
+  const [door, setDoor] = createSignal<{ peer: string; quote: FirstContactQuote | null; loading?: boolean; error?: unknown } | null>(null);
   const doorQuote = (): FirstContactQuote | null => {
     const d = door();
     return d && !room() && d.peer === target() ? d.quote : null;
@@ -3434,14 +3437,14 @@ function Composer(props: {
     if (!room()) {
       if (props.quoteError) return props.quoteError;
       if (!props.quote) return 'price loading…';
-      if (props.quote.send_unavailable) return `price unavailable · ${props.quote.send_unavailable}`;
+      if (props.quote.send_unavailable) return peerNotReadyMessage(props.quote.send_unavailable, props.name) ?? `price unavailable · ${props.quote.send_unavailable}`;
     }
     if (readmitPrice()) return Number.isSafeInteger(readmitPrice()!.total_msat) && readmitPrice()!.total_msat > 0 ? null : 'price unavailable · invalid price';
     if (room()) return props.cost ? null : 'price loading…';
     if (doorWanted() && door()) {
       const d = door()!;
       if (d.loading) return 'price loading…';
-      if (!d.quote) return 'price unavailable · first-contact quote unavailable';
+      if (!d.quote) return peerNotReadyMessage(d.error, props.name) ?? 'price unavailable · first-contact quote unavailable';
       if (!Number.isSafeInteger(d.quote.total_msat) || d.quote.total_msat <= 0) return 'price unavailable · invalid price';
       if (d.quote.expires_at * 1000 <= props.now) return 'price unavailable · first-contact quote expired';
       return null;
@@ -4102,7 +4105,7 @@ function Composer(props: {
       <Show when={mode() === 'message'}>
         <div class="send-price">
           <span data-send-price aria-live="polite">{priceLine()}</span>
-          <Show when={priceProblem()?.startsWith('price unavailable')}>
+          <Show when={priceProblem() && priceProblem() !== 'price loading…'}>
             {' '}<button type="button" class="link" data-price-retry disabled={busy()} onClick={() => {
               if (doorWanted() && door()) setDoor(null);
               props.refreshPrice();

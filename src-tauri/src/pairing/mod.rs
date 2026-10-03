@@ -361,7 +361,11 @@ pub async fn establish_remote(
             "remote transport authenticated but no paired client record was saved".into(),
         )
     })?;
-    let issued = client.token(key, &record.client_id).await?;
+    let issued = crate::connection_retry::while_connecting(
+        || client.token(key, &record.client_id),
+        |error| matches!(error, PairError::Transport { .. }),
+        || PairError::Transport { step: "/pair/challenge", detail: "timed out connecting to your node after 30 seconds".into() },
+    ).await?;
     Ok(Established::Paired {
         session: PairedSession {
             client_id: record.client_id,

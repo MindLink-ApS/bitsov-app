@@ -231,6 +231,12 @@ fn decode<T: for<'de> Deserialize<'de>>(
     body: &str,
 ) -> Result<T, PairError> {
     if !(200..300).contains(&status) {
+        // These are process-local proxy states, not a refusal by the node.
+        if status == 503 && serde_json::from_str::<serde_json::Value>(body).ok()
+            .is_some_and(|v| matches!(v["code"].as_str(),
+                Some("remote_handshake_unavailable" | "remote_proxy_busy" | "remote_proxy_auth_busy"))) {
+            return Err(PairError::Transport { step, detail: "connecting to your node".into() });
+        }
         let reason = serde_json::from_str::<serde_json::Value>(body)
             .ok()
             .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_owned))
@@ -245,4 +251,21 @@ fn decode<T: for<'de> Deserialize<'de>>(
         step,
         detail: e.to_string(),
     })
+}
+
+#[cfg(test)]
+mod resilience_tests {
+    use super::*;
+
+    #[test]
+    fn only_typed_proxy_unavailability_is_retryable_transport() {
+        for code in ["remote_handshake_unavailable", "remote_proxy_busy"] {
+            let body = serde_json::json!({ "code": code, "message": "connecting" }).to_string();
+            assert!(matches!(decode::<serde_json::Value>("/pair/challenge", 503, &body), Err(PairError::Transport { .. })));
+        }
+        for status in [401, 403, 404, 503] {
+            assert!(matches!(decode::<serde_json::Value>("/pair/challenge", status,
+                r#"{"code":"pairing_refused","error":"no"}"#), Err(PairError::Refused { .. })));
+        }
+    }
 }

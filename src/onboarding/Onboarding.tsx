@@ -199,17 +199,19 @@ export function Onboarding(props: {
                 </svg>
               </div>
               <div>
-                <h2>Pairing this app with your node…</h2>
+                <h2>{props.pairing().remote ? 'Connecting to your node…' : 'Pairing this app with your node…'}</h2>
                 <p>Establishing an authenticated pairing between this app and your node.</p>
                 <Show when={isEnrolled()}>
                   <p class="hint">Touch ID approvals are already set up on this Mac; pairing does not create that key.</p>
                 </Show>
               </div>
             </div>
-            <p class="hint">
-              The app proves it can read your node’s data folder by signing a one-time
-              challenge the node wrote there.
-            </p>
+            <Show when={!props.pairing().remote} fallback={<p class="hint">Waiting for the encrypted connection to your node.</p>}>
+              <p class="hint">
+                The app proves it can read your node’s data folder by signing a one-time
+                challenge the node wrote there.
+              </p>
+            </Show>
           </div>
         </Match>
 

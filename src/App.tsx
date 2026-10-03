@@ -146,7 +146,7 @@ export default function App() {
               <Show when={starting()}>
                 <div class="state">
                   <DelayedSpinner />
-                  Starting your node…
+                  {pairing().remote ? 'Connecting to your node…' : 'Starting your node…'}
                 </div>
               </Show>
             }
