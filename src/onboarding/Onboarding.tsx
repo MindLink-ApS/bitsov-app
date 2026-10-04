@@ -107,7 +107,12 @@ export function Onboarding(props: {
         fallback={
           <header class="ob-head" data-ob-head="trust">
             <h1>Before you add sats</h1>
-            <p class="lede">Read how your node is trusted. If you already have a BitSov identity, restore it now, before any sats arrive.</p>
+            <Show
+              when={!props.pairing().bootstrap}
+              fallback={<p class="lede">Read how your node is trusted. Creating or restoring an identity from this app is not available on this node yet.</p>}
+            >
+              <p class="lede">Read how your node is trusted. If you already have a BitSov identity, restore it now, before any sats arrive.</p>
+            </Show>
           </header>
         }
       >
@@ -286,6 +291,10 @@ export function Onboarding(props: {
               </div>
             </div>
 
+            <p class="pairing-access">
+              Access: <strong>{scopeList(props.pairing().scopes)}</strong>
+            </p>
+
             <Show when={props.pairing().bootstrap}>
               <p class="hint" data-identity-free>
                 Your node is identity-free (fresh install). Creating or restoring an identity
@@ -298,9 +307,6 @@ export function Onboarding(props: {
             <details class="pairing-details">
               <summary>Pairing verification & security details</summary>
               <div class="pairing-details-body">
-                <p>
-                  Access: <strong>{scopeList(props.pairing().scopes)}</strong>
-                </p>
                 <Show when={props.pairing().short_code}>
                   <p class="short-code" data-short-code>
                     Pairing code <code>{props.pairing().short_code}</code>

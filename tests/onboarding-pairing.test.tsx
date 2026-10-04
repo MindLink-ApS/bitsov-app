@@ -387,5 +387,19 @@ describe('pairing panel', () => {
     // Still a real choice once compact.
     expect(later.querySelectorAll('[role="radio"]').length).toBe(3);
   });
+  it('never offers restore on an identity-free node, and keeps the access scopes in view', () => {
+    const el = show({ ...paired, bootstrap: 'identity-free' }, ready);
+    const head = el.querySelector('[data-ob-head="trust"]')!;
+    expect(head.textContent).not.toContain('restore it now');
+    expect(head.textContent).toContain('not available on this node yet');
+    const access = el.querySelector('[data-pairing="paired"] .pairing-access')!;
+    expect(access.textContent).toContain('read + receive');
+    expect(access.closest('details')).toBeNull();
+    dispose?.();
+    mount?.remove();
+
+    const normal = show(paired, ready);
+    expect(normal.querySelector('[data-ob-head="trust"]')!.textContent).toContain('restore it now');
+  });
 });
 

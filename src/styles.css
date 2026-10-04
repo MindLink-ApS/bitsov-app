@@ -167,7 +167,7 @@ h1, h2, h3 { font-family: var(--font-sans); font-weight: 600; letter-spacing: -0
 p { margin: 0; }
 code, .mono { font-family: var(--font-mono); font-size: 0.92em; }
 
-/* sats and ids: mono, tabular, never wrapped mid-number */
+/* sats: tabular figures, never wrapped mid-number; ids: mono */
 .sats { font-family: var(--font-sans); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .sats .unit { color: var(--muted); margin-left: 0.3em; font-size: 0.85em; }
 .id { font-family: var(--font-mono); font-size: var(--t-sm); color: var(--muted); letter-spacing: 0.02em; }
@@ -527,9 +527,9 @@ select { font: inherit; font-size: var(--t-sm); background: var(--sunk); color: 
 .fresh-line.stale { color: var(--warn); }
 
 /* first run, inside the shell ------------------------------------------- */
-.first-run { position: relative; isolation: isolate; flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; padding: clamp(var(--s-8), 9vh, 88px) var(--s-6) var(--s-10); display: flex; flex-direction: column; align-items: center; gap: var(--s-5); }
+.first-run { position: relative; isolation: isolate; flex: 1; min-height: 0; overflow-y: auto; padding: clamp(var(--s-8), 9vh, 88px) var(--s-6) var(--s-10); display: flex; flex-direction: column; align-items: center; gap: var(--s-5); }
 /* The one ambient touch: a faint ember glow behind the first-run column. */
-.first-run::before { content: ''; position: absolute; z-index: -1; top: -120px; left: calc(50% + 120px); width: 420px; height: 420px; border-radius: 50%; background: radial-gradient(circle, color-mix(in srgb, var(--money) 16%, transparent), transparent 68%); pointer-events: none; }
+.first-run::before { content: ''; position: absolute; z-index: -1; top: -120px; right: 0; width: min(420px, 45%); height: 420px; border-radius: 50%; background: radial-gradient(circle, color-mix(in srgb, var(--money) 16%, transparent), transparent 68%); pointer-events: none; }
 .first-run > * { width: 100%; max-width: 560px; }
 /* Onboarding's own actions are neutral: orange stays for sats. */
 .first-run .primary { background: var(--action-bg); color: var(--action-ink); }
@@ -563,7 +563,10 @@ select { font: inherit; font-size: var(--t-sm); background: var(--sunk); color: 
 .node-target-section.compact .node-target-grid { flex-direction: row; flex-wrap: wrap; gap: var(--s-1); }
 .node-target-section.compact .node-target-card { padding: 6px 12px; border-radius: var(--r-chip); align-items: center; gap: var(--s-2); }
 .node-target-section.compact .node-target-card:hover { transform: none; }
-.node-target-section.compact .target-icon, .node-target-section.compact .target-info p, .node-target-section.compact .target-head .row { display: none; }
+.node-target-section.compact .target-icon, .node-target-section.compact .target-info p, .node-target-section.compact .target-radio-indicator { display: none; }
+/* Compact pills keep the custody badge on the chosen location only. */
+.node-target-section.compact .node-target-card:not(.selected) .target-head .row { display: none; }
+.node-target-section.compact .target-head { flex-wrap: nowrap; }
 .node-target-section.compact .target-head strong { font-size: var(--t-sm); font-weight: 500; }
 .connect-line { font-size: var(--t-xs); }
 .target-info { flex: 1; display: flex; flex-direction: column; gap: 3px; min-width: 0; }
@@ -624,6 +627,8 @@ select { font: inherit; font-size: var(--t-sm); background: var(--sunk); color: 
 .step-optional { color: var(--faint); }
 .ob-head { display: flex; flex-direction: column; gap: var(--s-3); animation: arrive var(--d-slow) var(--ease-out); }
 .ob-head h1 { font-family: var(--font-display); font-weight: 400; font-size: var(--t-display); letter-spacing: -0.015em; line-height: 1.08; text-wrap: balance; }
+@media (prefers-reduced-motion: reduce) { .node-target-card:hover { transform: none; } }
+.pairing-access { font-size: var(--t-sm); color: var(--muted); }
 .ob-head .lede { color: var(--muted); font-size: var(--t-lg); line-height: 1.5; max-width: 52ch; }
 .remote-form { animation: arrive var(--d-mid) var(--ease-out); }
 .first-run .state.ready { animation: arrive var(--d-slow) var(--ease-out); }
