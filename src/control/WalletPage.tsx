@@ -261,7 +261,7 @@ export function WalletPage(props: {
           </p>
           <div class="wallet-actions">
             <button type="button" class="primary soft money" data-wallet-go="receive" onClick={() => props.onTab('receive')}>Receive</button>
-            <button type="button" class="primary soft" data-wallet-go="send" onClick={() => props.onTab('send')}>Send</button>
+            <button type="button" class="primary soft money" data-wallet-go="send" onClick={() => props.onTab('send')}>Send</button>
           </div>
         </section>
 

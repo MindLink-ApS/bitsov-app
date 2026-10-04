@@ -5400,7 +5400,7 @@ function NewTrack(props: {
                 }}
                 aria-label="Starter bitcoin request"
               />
-              <button type="submit" class="primary" disabled={!request().trim() || requestLocked()}>
+              <button type="submit" class="primary" classList={{ money: !open() }} data-starter-request-submit disabled={!request().trim() || requestLocked()}>
                 {open() ? 'Review request' : 'Approve first'}
               </button>
               <Show when={cand()}>
@@ -5634,7 +5634,7 @@ function NewTrack(props: {
                 <option value={168}>7 days</option>
               </select>
             </label>
-            <button type="submit" class="primary" disabled={props.moneyBlocked || busy() || (open() ? !invitee() || !addr() : waiting())}>
+            <button type="submit" class="primary" classList={{ money: !open() }} data-invite-create-submit disabled={props.moneyBlocked || busy() || (open() ? !invitee() || !addr() : waiting())}>
               {button('Create invite')}
             </button>
             <Show when={made()}>
@@ -5666,7 +5666,7 @@ function NewTrack(props: {
             <h2>Accept an invite</h2>
             <p class="hint">Paste a bitsov://invite link someone sent you. Your node connects to theirs.</p>
             <textarea data-invite-token rows={3} placeholder="bitsov://invite/…" value={token()} onInput={(e) => setToken(e.currentTarget.value)} aria-label="Invite link" />
-            <button type="submit" class="primary" disabled={props.moneyBlocked || busy() || (open() ? !token().trim() : waiting())}>
+            <button type="submit" class="primary" classList={{ money: !open() }} data-invite-accept-submit disabled={props.moneyBlocked || busy() || (open() ? !token().trim() : waiting())}>
               {button('Accept invite')}
             </button>
             <Show when={redeemed()}>

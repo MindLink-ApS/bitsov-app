@@ -41,7 +41,8 @@ const MONEY: [string, string][] = [
   ['control/Shell.tsx', 'data-meeting-join'], ['control/Shell.tsx', 'data-budget-raise'], ['control/Shell.tsx', 'data-budget-raise-total'],
   ['control/Shell.tsx', 'data-resume'], ['control/Shell.tsx', 'data-starter-approve'],
   ['control/Porch.tsx', 'data-porch-confirm'], ['control/RoomPanel.tsx', 'data-room-confirm'], ['control/RoomPanel.tsx', 'data-send'],
-  ['control/WalletPage.tsx', 'data-wallet-go="receive"'], ['control/WalletPage.tsx', 'data-receive-create'],
+  ['control/WalletPage.tsx', 'data-wallet-go="receive"'], ['control/WalletPage.tsx', 'data-wallet-go="send"'],
+  ['control/WalletPage.tsx', 'data-receive-create'], ['App.tsx', 'data-fund-start'],
   ['control/WalletPage.tsx', 'data-send-review'], ['control/WalletPage.tsx', 'data-wallet-confirm'],
 ];
 const NEUTRAL: [string, string][] = [
@@ -49,10 +50,21 @@ const NEUTRAL: [string, string][] = [
   ['control/RoomPanel.tsx', 'data-room-create'], ['control/RoomPanel.tsx', 'data-room-leave-yes'],
   ['control/Discover.tsx', 'data-discover-knock'], ['control/Discover.tsx', 'data-fd-publish'],
   ['control/ContactPanel.tsx', 'data-contact-verify-start'], ['control/AiTrack.tsx', 'data-ai-prefill'],
-  ['control/BodyPanel.tsx', 'data-info-close'],
+  ['control/BodyPanel.tsx', 'data-info-close'], ['control/AiTrack.tsx', 'data-ai-send'],
+  ['control/Shell.tsx', 'data-door-continue'],
 ];
 
+// Dual-purpose submits: while spending is not approved their label is
+// 'Approve first' (actions.approve()), which authorises spend, so they are
+// money exactly then.
+const APPROVE_FIRST = ['data-starter-request-submit', 'data-invite-create-submit', 'data-invite-accept-submit'];
+
 describe('money buttons', () => {
+  it.each(APPROVE_FIRST)('Shell %s is money while it reads Approve first', (hook) => {
+    for (const tag of tagWith('control/Shell.tsx', hook)) expect(tag).toContain('classList={{ money: !open() }}');
+    const shell = read('control/Shell.tsx');
+    expect(shell).toMatch(/const button = \(what: string\) =>\s*open\(\) \? what : [^;]*'Approve first'/);
+  });
   it.each(MONEY)('%s %s is a money action', (file, hook) => {
     for (const tag of tagWith(file, hook)) expect(classes(tag), tag.slice(0, 120)).toContain('money');
   });
