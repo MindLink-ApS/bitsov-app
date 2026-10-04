@@ -255,6 +255,28 @@ describe('the Wallet page', () => {
     await vi.waitFor(() => expect(text('[data-avatar-balance]')).toBe('480,000 sats'));
   });
 
+  it('labels custody under the balance only when the node reports it, and marks unknown amounts as unknown', async () => {
+    stubHost();
+    await openWallet();
+    await vi.waitFor(() => expect($('[data-balance-total]')).not.toBeNull());
+    // The overview above reports no custody_mode: no label, no guess.
+    expect($('[data-wallet-balance] [data-custody]')).toBeNull();
+    for (const category of ['spendable', 'reserved', 'closing']) {
+      expect($(`[data-balance-${category}] .split-amount`)?.classList.contains('unknown')).toBe(true);
+    }
+    dispose?.(); mount.remove();
+    localStorage.clear(); // a fresh mount shows the trust gate again
+
+    const reported = stubHost({
+      node_overview: () => ({ node_id: OWN, status: 'ok', version: 'api v2', connected_peers: 2, e2ee_sessions: 2, pending_deliveries: 0,
+        lightning_available: true, block_height: 1, uptime_secs: 1, lightning_backend: 'ldk', chain_backend: 'esplora', read_at: Date.now(), capabilities: [],
+        custody_mode: 'hosted_custody' }),
+    });
+    void reported;
+    await openWallet();
+    await vi.waitFor(() => expect($('[data-wallet-balance] [data-custody]')?.textContent).toBe('Hosted custody'));
+  });
+
   it('does not invent reserve or closing amounts from a wallet with active and closing channels', async () => {
     // The public API loses the underlying reserve/closing breakdown. A 25k-sat
     // reserve and 80k-sat closing balance cannot be recovered from this reply.

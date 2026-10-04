@@ -15,7 +15,8 @@ import { copyPlainText } from '../assistant/copy';
 import { amount as fmtAmount, allIn, clock, day, routingFee, sats, satUnit, shortId } from './format';
 import { amountText, inPaymentBounds, MAX_PAYMENT_MSAT, MIN_PAYMENT_MSAT, parseAmount } from './amountInput';
 import { denom } from './prefs';
-import type { FundingAddress, InvoiceAmount, InvoiceStatus, InvoiceView, Message, SpendView, WalletOverview } from './types';
+import type { CustodyMode, FundingAddress, InvoiceAmount, InvoiceStatus, InvoiceView, Message, SpendView, WalletOverview } from './types';
+import { CustodyBadgeView } from './custody';
 import { spendLine } from './state';
 import {
   activityTotals, bitcoinUri, channelWords, filterActivity, loggedActivity, mergeActivity, messageActivity, openInvoices, readRecipient,
@@ -139,6 +140,8 @@ export function WalletPage(props: {
   reads: WalletReads;
   onRefresh: () => void;
   onReconnect?: () => void | Promise<void>;
+  /** Where the seed lives, as the node reports it; absent when not reported. */
+  custody?: CustodyMode | null;
 }) {
   const split = () => (props.wallet ? splitBalance(props.wallet) : null);
 
@@ -186,6 +189,7 @@ export function WalletPage(props: {
                 <span class="wallet-total" data-balance-total={s().total}>
                   {sats(s().total)}<span class="unit">{satUnit(s().total)}</span>
                 </span>
+                <CustodyBadgeView mode={props.custody} />
                 <span class="hint" data-balance-pending={s().pending ?? 'unknown'}>
                   {s().pending === null ? 'Pending on-chain: Unknown' : `${fmtAmount(s().pending!)} pending`}
                 </span>
@@ -193,17 +197,17 @@ export function WalletPage(props: {
                   <div class="wallet-split">
                     <div class="split" data-balance-spendable="unknown">
                       <span class="split-name">Spendable</span>
-                      <span class="split-amount">Unknown</span>
+                      <span class="split-amount unknown">Unknown</span>
                       <span class="hint">Funds available to spend, excluding reserves and locked funds.</span>
                     </div>
                     <div class="split" data-balance-reserved="unknown">
                       <span class="split-name">Reserved (channel fee reserve)</span>
-                      <span class="split-amount">Unknown</span>
+                      <span class="split-amount unknown">Unknown</span>
                       <span class="hint">Held back for channel closing fees; unavailable to spend.</span>
                     </div>
                     <div class="split" data-balance-closing="unknown">
                       <span class="split-name">Closing/locked</span>
-                      <span class="split-amount">Unknown</span>
+                      <span class="split-amount unknown">Unknown</span>
                       <span class="hint">Waiting for a channel closure or time lock; unavailable to spend.</span>
                     </div>
                   </div>
@@ -214,27 +218,27 @@ export function WalletPage(props: {
                   <div class="wallet-split">
                     <div class="split" data-balance-lightning={s().lightning ?? 'unknown'}>
                       <span class="split-name">Lightning spendable (outbound capacity)</span>
-                      <span class="split-amount">{s().lightning === null ? 'Unknown' : fmtAmount(s().lightning!)}</span>
+                      <span class="split-amount" classList={{ unknown: s().lightning === null }}>{s().lightning === null ? 'Unknown' : fmtAmount(s().lightning!)}</span>
                       <span class="hint">Outbound capacity, not a guarantee a payment of this size will route: routing fees, per-HTLC limits and remote liquidity still apply.</span>
                     </div>
                     <div class="split" data-balance-onchain-total={s().onchainTotal ?? 'unknown'}>
                       <span class="split-name">On-chain total</span>
-                      <span class="split-amount">{s().onchainTotal === null ? 'Unknown' : fmtAmount(s().onchainTotal!)}</span>
+                      <span class="split-amount" classList={{ unknown: s().onchainTotal === null }}>{s().onchainTotal === null ? 'Unknown' : fmtAmount(s().onchainTotal!)}</span>
                       <span class="hint">Total on-chain wallet funds, including unconfirmed funds and the anchor reserve.</span>
                     </div>
                     <div class="split" data-balance-onchain={s().onchain ?? 'unknown'}>
                       <span class="split-name">On-chain spendable</span>
-                      <span class="split-amount">{s().onchain === null ? 'Unknown' : fmtAmount(s().onchain!)}</span>
+                      <span class="split-amount" classList={{ unknown: s().onchain === null }}>{s().onchain === null ? 'Unknown' : fmtAmount(s().onchain!)}</span>
                       <span class="hint">Spendable after confirmation requirements and the anchor reserve.</span>
                     </div>
                     <div class="split" data-balance-reserved={s().reserved ?? 'unknown'}>
                       <span class="split-name">Reserved (anchor closing fees)</span>
-                      <span class="split-amount">{s().reserved === null ? 'Unknown' : fmtAmount(s().reserved!)}</span>
+                      <span class="split-amount" classList={{ unknown: s().reserved === null }}>{s().reserved === null ? 'Unknown' : fmtAmount(s().reserved!)}</span>
                       <span class="hint">On-chain funds held for anchor-channel closing fees; already included in the on-chain total.</span>
                     </div>
                     <div class="split" data-balance-closing={s().closing ?? 'unknown'}>
                       <span class="split-name">Closing (closures and sweeps)</span>
-                      <span class="split-amount">{s().closing === null ? 'Unknown' : fmtAmount(s().closing!)}</span>
+                      <span class="split-amount" classList={{ unknown: s().closing === null }}>{s().closing === null ? 'Unknown' : fmtAmount(s().closing!)}</span>
                       <span class="hint">Tracked closures, time locks and sweeps; some proceeds may already be spendable on-chain.</span>
                     </div>
                     <Show when={(s().contested ?? 0) > 0}>

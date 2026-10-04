@@ -1493,6 +1493,7 @@ export function ControlCenter(props: Props) {
             reads={{ fundingAddress: () => source.fundingAddress(), invoiceStatus: (b) => source.invoiceStatus(b), messages: (id) => source.messages(id) }}
             onRefresh={() => void loadWallet()}
             onReconnect={async () => { await props.onReconnect?.(); await loadWallet(); }}
+            custody={overview()?.custody_mode}
           />
         )}
       </Show>
