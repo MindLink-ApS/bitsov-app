@@ -32,7 +32,8 @@ export default function App() {
   const sample = sampleRequest(window.location.search, inHost(), import.meta.env.DEV);
   // `?sample&organism=v2` shows the organism view against a node with N1/N2.
   const organism = new URLSearchParams(window.location.search).get('organism') === 'v2' ? 'v2' : 'v1';
-  const [source, setSource] = createSignal<Source>(sample ? sampleSource({ organism }) : hostSource);
+  const noPeers = new URLSearchParams(window.location.search).get('peers') === '0';
+  const [source, setSource] = createSignal<Source>(sample ? sampleSource({ organism, noPeers }) : hostSource);
   const [status, setStatus] = createSignal<NodeStatus>({ ready: false, node_id: null, error: null });
   // Gate G6: the funds UI stays behind an explicit trust disclosure.
   const [sessionTrust, setSessionTrust] = createSignal<string | null>(null);
@@ -106,7 +107,7 @@ export default function App() {
     }
   };
   const useSample = (start: SampleStart) => {
-    setSource(sampleSource({ organism }));
+    setSource(sampleSource({ organism, noPeers }));
     setSessionTrust(start === 'shell' ? 'sample' : null);
     void poll();
   };

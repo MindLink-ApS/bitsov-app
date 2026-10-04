@@ -15,6 +15,7 @@ const steps = [
   ['01-onboarding-first-run', '?sample=first-run', async () => {}],
   ['02-onboarding-scrolled', '?sample=first-run', async (p) => { await p.locator('.track').first().evaluate((e) => e.scrollTo(0, 99999)); }],
   ['03-onboarding-cloud-choice', '?sample=first-run', async (p) => { await text(p, 'A cloud node'); }],
+  ['05-welcome-home', '?sample&peers=0', async () => {}],
   ['10-chat-maya', '?sample', async () => {}],
   ['11-chat-emoji', '?sample', async (p) => { await role(p, 'button', 'Emoji'); }],
   ['12-chat-more-menu', '?sample', async (p) => { await role(p, 'button', 'More: attach, pay, request'); }],
