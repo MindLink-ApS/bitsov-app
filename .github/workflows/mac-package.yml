@@ -8,22 +8,28 @@ name: Mac Package
 # Build workflow's `sidecar` job it depends on network and on the genome's
 # published rc7 release, not only on this repo's source.
 #
-# CI cost rule: macOS runners bill at 10x Linux, so this does NOT run on every
-# PR push. It runs on push to main, on workflow_dispatch, when a PR is opened
-# non-draft or marked ready_for_review, and when the `full-ci` label is added
-# to any PR (draft or non-draft). Carrying the label does not enable runs on
-# synchronize/reopened; remove and re-add it to request another run.
+# CI cost rule (app #131): macOS runners bill at 10x Linux, so this runs once per
+# change: on push to main (after merge) and on workflow_dispatch. On a PR it runs
+# only when the `full-ci` label is added; carrying the label does not enable runs
+# on later pushes, so remove and re-add it to request another run. It no longer
+# runs on PR opened / ready_for_review (that billed every change twice).
 # Required gates (Authority Check, Build) are unaffected.
 on:
   pull_request:
     branches: [main]
-    types: [opened, synchronize, reopened, ready_for_review, labeled]
+    types: [labeled]
   push:
     branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Label-triggered: adding any other label (e.g. merge-ready) starts a run that
+  # the job `if` skips, so never cancel an in-flight run here.
+  cancel-in-progress: false
 
 jobs:
   mac-package:
@@ -32,9 +38,7 @@ jobs:
     # See the CI cost rule at the top of this file.
     if: >-
       github.event_name != 'pull_request' ||
-      (github.event.action == 'labeled' && github.event.label.name == 'full-ci') ||
-      github.event.action == 'ready_for_review' ||
-      (github.event.action == 'opened' && !github.event.pull_request.draft)
+      github.event.label.name == 'full-ci'
     timeout-minutes: 45
     env:
       # scripts/fetch-node-sidecar.sh reads the pinned public release with gh.

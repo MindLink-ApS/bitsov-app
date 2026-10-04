@@ -170,14 +170,13 @@ tested support claim. No macOS version has runtime evidence yet.
 
 ## CI artifact
 
-`.github/workflows/mac-package.yml` ("Mac Package") runs on pushes to `main`,
-on `workflow_dispatch`, when a PR is opened non-draft or marked ready for
-review, and when the `full-ci` label is added to a PR (draft or non-draft).
-The label triggers a run only on the `labeled` event itself; keeping it on
-a PR does not enable runs on subsequent pushes (`synchronize`) or `reopened`
-events. Remove and re-add `full-ci` to request another run. Windows Compile
-uses the same trigger policy. Draft PRs skip these jobs unless marked ready
-for review or explicitly labeled `full-ci` (macOS minutes cost 10x Linux):
+`.github/workflows/mac-package.yml` ("Mac Package") runs once per change: on
+pushes to `main` and on `workflow_dispatch` (app #131). On a PR it runs only
+when the `full-ci` label is added; the label triggers a run only on the
+`labeled` event itself, so remove and re-add it to request another run. It no
+longer runs when a PR is opened or marked ready for review. Windows Compile
+runs only on `workflow_dispatch` or the `full-ci` label until its Unix-only
+code is platform-gated (app #132). macOS minutes cost 10x Linux:
 
 - Runner: `macos-14` (arm64). Toolchain: Node 22 and stable Rust. Permissions:
   `contents: read`. It uses `github.token` read-only for `gh release download`.
