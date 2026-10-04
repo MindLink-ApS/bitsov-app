@@ -5721,7 +5721,7 @@ function NodePanel(props: { overview: NodeOverview | null; link: LinkState | nul
           <div class="row" style={{ 'justify-content': 'space-between', 'font-size': 'var(--t-sm)' }}>
             <span class="row" style={{ gap: 'var(--s-2)', 'min-width': 0 }}>
               <span class={`dot ${p.connected ? 'ok' : ''}`} />
-              <span style={{ 'font-family': 'var(--font-serif)' }}>{peerName(p, p.node_id)}</span>
+              <span style={{ 'font-family': 'var(--font-sans)' }}>{peerName(p, p.node_id)}</span>
             </span>
             <span class="id">{p.fingerprint ?? shortId(p.node_id)}</span>
           </div>

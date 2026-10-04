@@ -1,5 +1,15 @@
 # BitSov design choice board
 
+> **Decided 2026-10-04 (Rasmus):**
+> - Direction: **F blend**
+> - Type: **Instrument Serif headings + Inter**. He first picked Inter only, then chose to keep the serif after
+>   seeing the F onboarding. Machine strings stay in system mono; there is no JetBrains Mono.
+> - Colour: **warm dark-first**
+> - Motion: **purposeful**
+> - Onboarding: **3 focused steps**
+>
+> Implementation is on `feat/design-ember`.
+
 Rasmus: pick one option per decision (the AskUserQuestion buttons mirror this page). Every screenshot is
 in `design/mocks/shots/`, and the clickable mock is `design/mocks/mock.html?d=<A–F>&s=<onboarding|chat|wallet>&t=<light|dark>`.
 Typing in a mock composer and pressing Send shows that direction's motion: a sending state, then the settled

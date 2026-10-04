@@ -5,7 +5,7 @@
 const path = require('node:path');
 const { chromium } = require(process.env.PLAYWRIGHT_DIR || 'playwright');
 const BASE = process.env.BASE || 'http://localhost:1420';
-const OUT = path.join(__dirname, '..', '..', 'design', 'inventory');
+const OUT = process.env.OUT || path.join(__dirname, '..', '..', 'design', 'inventory');
 
 const click = (page, sel) => page.locator(sel).first().click({ timeout: 3000 });
 const text = (page, t) => page.getByText(t, { exact: false }).first().click({ timeout: 3000 });
