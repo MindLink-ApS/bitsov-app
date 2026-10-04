@@ -113,7 +113,11 @@ it('keeps failed refresh counts visibly stale without advancing their window or 
   const app = await start(snapshot(), NOW - 120_000);
   expect(select('[data-refusals-fresh]')!.dataset.refusalsFresh).toBe('stale');
   app.fail();
-  await vi.advanceTimersByTimeAsync(61 * 60_000);
+  // Jump the wall clock past the hour, then run one poll window: the failed
+  // re-read must not advance the hour window. (Ticking through 61 minutes of
+  // polls one by one is what made this test slow and flaky.)
+  vi.setSystemTime(Date.now() + 61 * 60_000);
+  await vi.advanceTimersByTimeAsync(30_000);
   expect(select('[data-refusals-fresh]')!.textContent).toContain('could not re-read');
   expect(select('[data-refusals-fresh]')!.dataset.refusalsFresh).toBe('stale');
   expect(select('[data-refusal-reason="session_before_payment"] [data-refusals-hour]')!.textContent).toBe('1');

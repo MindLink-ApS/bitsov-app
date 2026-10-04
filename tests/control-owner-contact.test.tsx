@@ -72,12 +72,16 @@ it.each(['cancel', 'edit', 'switch'] as const)('ignores a late approval after %s
 });
 
 it('keeps approval pending across unchanged budget refreshes', async () => {
+  // Fake clock: four status polls in bounded steps, not a race against wall time.
+  vi.useFakeTimers();
   const { source } = await start();
-  await vi.waitFor(() => expect(source.firstContactStatus).toHaveBeenCalledTimes(4), { timeout: 4800 });
+  const polls = () => vi.mocked(source.firstContactStatus).mock.calls.length;
+  for (let step = 0; step < 40 && polls() < 4; step++) await vi.advanceTimersByTimeAsync(250);
+  expect(source.firstContactStatus).toHaveBeenCalledTimes(4);
   expect(element('[data-contact-approval]')).not.toBeNull();
   expect(source.firstContactCancel).not.toHaveBeenCalled();
   expect(source.send).not.toHaveBeenCalled();
-}, 6000);
+});
 
 it('discards a late owner request after the contact budget changes', async () => {
   let finish!: (value: OwnerContactApproval) => void;
