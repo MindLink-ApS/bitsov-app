@@ -2175,7 +2175,7 @@ function RequestCard(props: { inv: InvoiceAmount; peer: string; name: string; bl
         fallback={
           <>
             <span class="hint">Expires at {clock(props.inv.expires_at_ms)}. Nothing is paid until you confirm.</span>
-            <button type="button" class="primary" data-request-pay disabled={props.blocked} onClick={() => props.onPay(props.inv.bolt11)}>
+            <button type="button" class="primary money" data-request-pay disabled={props.blocked} onClick={() => props.onPay(props.inv.bolt11)}>
               Pay
             </button>
           </>
@@ -2423,7 +2423,7 @@ function CallPanel(props: {
         <div class="call-actions">
           <Switch>
             <Match when={v().phase === 'incoming'}>
-              <button type="button" class="primary soft" data-call-accept onClick={() => props.accept()}>Accept{price(answer())}</button>
+              <button type="button" class="primary soft money" data-call-accept onClick={() => props.accept()}>Accept{price(answer())}</button>
               <button type="button" class="soft" data-call-decline onClick={() => props.decline()}>Decline{price(answer())}</button>
             </Match>
             <Match when={v().phase === 'ended'}>
@@ -2539,7 +2539,7 @@ function MeetingPanel(props: {
           <Show when={props.blocked}><p class="hint" data-meeting-blocked>Payments are not ready yet, so nobody can be invited.</p></Show>
           <p class="hint" data-meeting-note>You ring each person you pick (their call price, once each). Picked contacts who are not each other’s contacts will not hear each other. Media goes directly between you; it is not billed.</p>
           <div class="call-actions">
-            <button type="button" class="primary soft" data-meeting-invite disabled={planCost() === null} onClick={() => props.invite(props.plan!, 'audio', shown(props.plan!))}
+            <button type="button" class="primary soft money" data-meeting-invite disabled={planCost() === null} onClick={() => props.invite(props.plan!, 'audio', shown(props.plan!))}
               aria-label={`Invite${planCost() !== null ? `, up to ${fmtAmount(planCost()!)}` : ''}`}>
               Invite{price(planCost())}
             </button>
@@ -2581,7 +2581,7 @@ function MeetingPanel(props: {
           <div class="call-actions">
             <Switch>
               <Match when={v().phase === 'invited'}>
-                <button type="button" class="primary soft" data-meeting-join disabled={joinPrice() === null} onClick={() => props.join(shown(v().roster))}
+                <button type="button" class="primary soft money" data-meeting-join disabled={joinPrice() === null} onClick={() => props.join(shown(v().roster))}
                   aria-label={`Join${joinPrice() !== null ? `, up to ${fmtAmount(joinPrice()!)}` : ''}`}>
                   Join{price(joinPrice())}
                 </button>
@@ -3943,7 +3943,7 @@ function Composer(props: {
                 </button>
                 <span class="hint">Up to 1.4 MB · pays like a message</span>
               </div>
-              <button type="submit" class="primary soft" disabled={disabled()} data-send>
+              <button type="submit" class="primary soft money" disabled={disabled()} data-send>
                 {label()}
               </button>
             </div>
@@ -3989,7 +3989,7 @@ function Composer(props: {
                     </Show>
                     <span class="basis" title={shown().basis}>{shown().basis}</span>
                   </div>
-                  <button type="submit" class="primary soft" disabled={disabled()} data-send>
+                  <button type="submit" class="primary soft money" disabled={disabled()} data-send>
                     {label()}
                   </button>
                 </div>
@@ -4026,7 +4026,7 @@ function Composer(props: {
                   <div class="composer-bar">
                     <button type="button" class="link" data-pay-back disabled={busy()} onClick={() => setReview(null)}>Back</button>
                     <span class="basis">You pay the real fee, never above this.</span>
-                    <button type="button" class="primary soft" data-pay-confirm disabled={busy() || props.moneyBlocked} onClick={() => void confirmPay()}>
+                    <button type="button" class="primary soft money" data-pay-confirm disabled={busy() || props.moneyBlocked} onClick={() => void confirmPay()}>
                       Confirm and pay
                     </button>
                   </div>
@@ -4047,7 +4047,7 @@ function Composer(props: {
               <div class="cost" data-cost>
                 <span class="basis" data-request-hint>Makes an invoice and QR here. Send it in chat so {props.name} can pay it. Receiving is free.</span>
               </div>
-              <button type="submit" class="primary soft" disabled={disabled()} data-send>
+              <button type="submit" class="primary soft money" disabled={disabled()} data-send>
                 {label()}
               </button>
             </div>
@@ -4057,7 +4057,7 @@ function Composer(props: {
                   <span class="basis">
                     Invoice for {fmtAmount(inv().amount_msat)} is ready. Send it to {props.name} as a chat message; it pays like any message.
                   </span>
-                  <button type="button" class="primary soft" data-send-in-chat disabled={props.moneyBlocked || busy() || !!ownerWait()} onClick={() => void sendInChat()}>
+                  <button type="button" class="primary soft money" data-send-in-chat disabled={props.moneyBlocked || busy() || !!ownerWait()} onClick={() => void sendInChat()}>
                     Send in chat{chatPrice()}
                   </button>
                 </div>
@@ -4156,7 +4156,7 @@ function Composer(props: {
         <Show when={mode() === 'message'}>
           <button
             type="submit"
-            class="primary soft send-btn"
+            class="primary soft send-btn money"
             disabled={disabled()}
             data-send
             onClick={(e) => { if (e.detail > 1) e.preventDefault(); }}
@@ -4729,7 +4729,7 @@ function BudgetBar(props: {
                 }
               >
                 {(to) => (
-                  <button type="button" class="primary small" data-budget-raise onClick={() => void props.actions.setBudget(props.target, props.room, to())}>
+                  <button type="button" class="primary small money" data-budget-raise onClick={() => void props.actions.setBudget(props.target, props.room, to())}>
                     Raise to {fmtAmount(to())} a day
                   </button>
                 )}
@@ -4746,7 +4746,7 @@ function BudgetBar(props: {
               </p>
               <Show when={st().raiseTo}>
                 {(to) => (
-                  <button type="button" class="primary small" data-budget-raise-total onClick={() => void props.actions.approveBudget(to(), props.budget.preset)}>
+                  <button type="button" class="primary small money" data-budget-raise-total onClick={() => void props.actions.approveBudget(to(), props.budget.preset)}>
                     Approve {fmtAmount(to())} a day
                   </button>
                 )}
@@ -4868,7 +4868,7 @@ function BudgetPanel(props: {
                 </button>
               }
             >
-              <button type="button" class="primary" data-resume onClick={() => void props.actions.resume()}>
+              <button type="button" class="primary money" data-resume onClick={() => void props.actions.resume()}>
                 Resume payments
               </button>
             </Show>
@@ -5428,7 +5428,7 @@ function NewTrack(props: {
                     <span class="row" style={{ gap: 'var(--s-2)' }}>
                       <button
                         type="button"
-                        class="primary"
+                        class="primary money"
                         data-starter-approve
                         disabled={requestLocked() || theirCode().length !== 6}
                         onClick={() => void prepareGift()}

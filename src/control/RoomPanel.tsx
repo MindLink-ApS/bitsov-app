@@ -300,7 +300,7 @@ export function RoomThread(props: {
                   </Show>
                   <span class="basis">Each member’s own price and its network fee ceiling, added up</span>
                 </div>
-                <button type="submit" class="primary soft" data-send disabled={!ready()}>Send</button>
+                <button type="submit" class="primary soft money" data-send disabled={!ready()}>Send</button>
               </div>
             </>
           }
@@ -326,7 +326,7 @@ export function RoomThread(props: {
               <div class="composer-bar">
                 <button type="button" class="link" data-room-back disabled={busy()} onClick={() => setReview(null)}>Back</button>
                 <span class="basis">One member at a time, each at most the price above. A member whose price went up is not sent to.</span>
-                <button type="button" class="primary soft" data-room-confirm disabled={busy() || props.moneyBlocked || !props.canSpend} onClick={() => void confirm()}>
+                <button type="button" class="primary soft money" data-room-confirm disabled={busy() || props.moneyBlocked || !props.canSpend} onClick={() => void confirm()}>
                   Confirm and send
                 </button>
               </div>
