@@ -18,6 +18,17 @@ const STATUS_TEXT = {
 
 export type NodeTarget = 'local' | 'network' | 'cloud';
 
+/** Three stages the owner sees; the four host steps map onto them. */
+export type Stage = 'node' | 'identity' | 'fund';
+const STEP_LABEL = { node: 'Your node', pair: 'Pair this app', identity: 'Your identity', fund: 'Add sats' } as const;
+
+export function onboardingStage(steps: { id: string; status: string }[]): Stage {
+  const by = (id: string) => steps.find((s) => s.id === id)?.status;
+  const settled = (st?: string) => st === 'done' || st === 'skipped';
+  if (!settled(by('node')) || !settled(by('pair'))) return 'node';
+  return by('identity') === 'done' ? 'fund' : 'identity';
+}
+
 export function Onboarding(props: {
   status: () => NodeStatus;
   pairing: () => PairingView;
@@ -33,6 +44,7 @@ export function Onboarding(props: {
   }>;
 }) {
   const steps = () => onboardingSteps(props.status(), props.pairing(), props.trustAck());
+  const stage = () => onboardingStage(steps());
   const [internalTarget, setInternalTarget] = createSignal<NodeTarget>('local');
   const target = () => props.selectedTarget ?? internalTarget();
   const setTarget = (t: NodeTarget) => {
@@ -70,19 +82,44 @@ export function Onboarding(props: {
   };
 
   return (
-    <section class="onboarding" aria-label="First-run setup">
-      {/* Node location selection: 3 honest choices */}
-      <div class="node-target-section">
-        <h2 class="node-target-title">Where does your node live?</h2>
-        <Show
-          when={isEnrolled()}
-          fallback={<p class="hint">{props.pairing().remote
-            ? 'The app connects to your remote node.'
-            : 'Select where your node runs. The app connects to your sovereign node on this Mac.'}</p>}
-        >
-          <p class="hint">Select where your node runs. Touch ID on this Mac can approve a contact or budget.</p>
-        </Show>
+    <section class="onboarding" aria-label="First-run setup" data-stage={stage()}>
+      <ol class="steps stepper" aria-label="Setup progress">
+        <For each={steps()}>
+          {(step) => (
+            <li class={`step ${step.status}`} classList={{ joined: step.id === 'pair' }} data-step={step.id} data-status={step.status}>
+              <span class="pip" aria-hidden="true" />
+              {/* Node and pair read as one stage: two pips, one label after both. */}
+              <span class="step-label" classList={{ 'sr-only': step.id === 'node' }}>
+                <Show when={step.id === 'pair'}><span class="sr-only">{STEP_LABEL.pair}: </span></Show>
+                {step.id === 'pair' ? STEP_LABEL.node : step.id === 'node' ? 'Start node' : STEP_LABEL[step.id]}
+                <Show when={step.id === 'fund'}><span class="step-optional"> (optional)</span></Show>
+              </span>
+              <Show when={STATUS_TEXT[step.status]}>
+                <span class="step-status sr-only">{STATUS_TEXT[step.status]}</span>
+              </Show>
+            </li>
+          )}
+        </For>
+      </ol>
 
+      <Show
+        when={stage() === 'node'}
+        fallback={
+          <header class="ob-head" data-ob-head="trust">
+            <h1>Before you add sats</h1>
+            <p class="lede">Read how your node is trusted. If you already have a BitSov identity, restore it now, before any sats arrive.</p>
+          </header>
+        }
+      >
+        <header class="ob-head" data-ob-head="node">
+          <h1>Where should your node run?</h1>
+          <p class="lede">Every message you send is a small bitcoin payment to the person you are writing to. Your node makes those payments, so it needs a home first.</p>
+        </header>
+      </Show>
+
+      {/* Node location: 3 honest choices; compact once the node is up */}
+      <div class="node-target-section" classList={{ compact: stage() !== 'node' }}>
+        <h2 class="node-target-title" classList={{ 'sr-only': stage() === 'node' }}>Where your node runs</h2>
         <div class="node-target-grid" role="radiogroup" aria-label="Choose node location">
           {/* Option 1: This computer (local node) */}
           <button
@@ -103,13 +140,13 @@ export function Onboarding(props: {
             </div>
             <div class="target-info">
               <div class="target-head">
-                <strong>This computer</strong>
+                <strong>This Mac</strong>
                 <div class="row" style={{ width: 'auto', gap: '8px' }}>
-                  <span class="target-badge ok">Local · Recommended</span>
+                  <span class="target-badge ok">Keys on this Mac</span>
                   <span class="target-radio-indicator" aria-hidden="true">✓</span>
                 </div>
               </div>
-              <p>Run your sovereign node directly on this Mac. Keys on this Mac; nothing to trust but your own machine.</p>
+              <p>BitSov runs your node on this Mac. Your keys stay on this Mac. Recommended.</p>
             </div>
           </button>
 
@@ -133,13 +170,13 @@ export function Onboarding(props: {
             </div>
             <div class="target-info">
               <div class="target-head">
-                <strong>A node on my network</strong>
+                <strong>A computer at home</strong>
                 <div class="row" style={{ width: 'auto', gap: '8px' }}>
-                  <span class="target-badge ok">Remote pairing</span>
+                  <span class="target-badge">Pairing link</span>
                   <span class="target-radio-indicator" aria-hidden="true">✓</span>
                 </div>
               </div>
-              <p>Connect to a home server on your local network with a remote pairing link. Paste the link below to save it for the next start.</p>
+              <p>A home server on your network that runs a BitSov node. Paste its pairing link; it is saved for the next start.</p>
             </div>
           </button>
 
@@ -160,30 +197,22 @@ export function Onboarding(props: {
             </div>
             <div class="target-info">
               <div class="target-head">
-                <strong>A cloud node</strong>
+                <strong>A cloud server</strong>
                 <div class="row" style={{ width: 'auto', gap: '8px' }}>
-                  <span class="target-badge ok">Remote pairing</span>
+                  <span class="target-badge">Pairing link</span>
                   <span class="target-radio-indicator" aria-hidden="true">✓</span>
                 </div>
               </div>
-              <p>Connect to a remotely hosted node with a remote pairing link. Paste the link below to save it for the next start.</p>
+              <p>A server you rent that runs a BitSov node. Its keys live on that server, so whoever runs the host can reach them. Paste its pairing link; it is saved for the next start.</p>
             </div>
           </button>
         </div>
+        <p class="hint connect-line">
+          {props.pairing().remote ? 'This app connects to your remote node.' : 'This app connects to the node on this Mac.'}
+          <Show when={!props.pairing().remote && target() !== 'local'}> A saved pairing link takes effect at the next start.</Show>
+          <Show when={isEnrolled()}> Touch ID on this Mac can approve a contact or budget.</Show>
+        </p>
       </div>
-
-      <ol class="steps">
-        <For each={steps()}>
-          {(step) => (
-            <li class={`step ${step.status}`} data-step={step.id} data-status={step.status}>
-              <span class="step-label">{step.label}</span>
-              <Show when={STATUS_TEXT[step.status]}>
-                <span class="step-status">{STATUS_TEXT[step.status]}</span>
-              </Show>
-            </li>
-          )}
-        </For>
-      </ol>
 
       <Switch>
         <Match when={props.pairing().state === 'pending'}>
@@ -257,10 +286,6 @@ export function Onboarding(props: {
               </div>
             </div>
 
-            <p>
-              Access: <strong>{scopeList(props.pairing().scopes)}</strong>
-            </p>
-
             <Show when={props.pairing().bootstrap}>
               <p class="hint" data-identity-free>
                 Your node is identity-free (fresh install). Creating or restoring an identity
@@ -273,6 +298,9 @@ export function Onboarding(props: {
             <details class="pairing-details">
               <summary>Pairing verification & security details</summary>
               <div class="pairing-details-body">
+                <p>
+                  Access: <strong>{scopeList(props.pairing().scopes)}</strong>
+                </p>
                 <Show when={props.pairing().short_code}>
                   <p class="short-code" data-short-code>
                     Pairing code <code>{props.pairing().short_code}</code>
@@ -317,8 +345,9 @@ export function Onboarding(props: {
         </Match>
       </Switch>
 
-      <form class="panel pairing" data-remote-access onSubmit={importRemote}>
-        <h2>Connect to a remote node</h2>
+      <Show when={target() !== 'local'}>
+      <form class="panel pairing remote-form" data-remote-access onSubmit={importRemote}>
+        <h2>Paste the pairing link</h2>
         <label for="remote-pairing-link">Pairing link</label>
         <input
           id="remote-pairing-link"
@@ -332,7 +361,7 @@ export function Onboarding(props: {
           onInput={(event) => setRemoteLink(event.currentTarget.value)}
           placeholder="bitsov://pair/…"
         />
-        <button type="submit" class="quiet" disabled={importing()}>
+        <button type="submit" class="primary" disabled={importing()}>
           {importing() ? 'Saving…' : 'Use remote node'}
         </button>
         <p class="hint">The link is verified and stored for the next app start.</p>
@@ -343,6 +372,7 @@ export function Onboarding(props: {
           <SoftError message={importError()!} />
         </Show>
       </form>
+      </Show>
     </section>
   );
 }

@@ -110,7 +110,7 @@ describe('app shell pairing wiring', () => {
       expect(mount.querySelector('[data-gate="g6-local-trust"]')).toBeNull();
       expect(mount.querySelector('[data-step="identity"]')?.getAttribute('data-status')).toBe('done');
       expect(mount.querySelector('[data-step="fund"]')?.getAttribute('data-status')).toBe('active');
-      expect(mount.textContent).not.toContain('The app connects to your sovereign node on this Mac.');
+      expect(mount.textContent).not.toContain('This app connects to the node on this Mac.');
     } else {
       expect(panel.textContent).toContain('Loopback authenticated. Ordinary pairing is file-backed on this Mac.');
       expect(gate.textContent).toContain('This node trusts every program on this computer.');

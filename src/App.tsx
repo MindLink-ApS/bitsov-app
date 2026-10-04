@@ -121,13 +121,6 @@ export default function App() {
 
   const firstRun = (
     <div class="first-run" data-first-run>
-      <div class="intro">
-        <h1>Your node, your seat</h1>
-        <p class="hint">
-          Welcome to BitSov. Sovereign private messaging and bitcoin payments, powered by your own node.
-        </p>
-      </div>
-
       <Show when={status().retry_after_secs}>
         <div class="state" role="status" aria-live="polite" data-remote-retry>
           Remote connection unavailable · waiting {status().retry_after_secs} s before retrying.
