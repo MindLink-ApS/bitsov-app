@@ -4168,7 +4168,7 @@ function Composer(props: {
       </div>
       <div class="composer-meta">
       <Show when={mode() === 'message'}>
-        <div class="send-price" classList={{ priced: !priceProblem() }}>
+        <div class="send-price" classList={{ priced: !priceProblem() && (paidLine() !== null || messageShown().msat !== null) }}>
           <span data-send-price aria-live="polite">{priceLine()}</span>
           <Show when={priceProblem() && priceProblem() !== 'price loading…'}>
             {' '}<button type="button" class="link" data-price-retry disabled={busy()} onClick={() => {
@@ -4193,7 +4193,7 @@ function Composer(props: {
               </dl>
               <p class="hint price-note">
                 A ceiling, not a charge: the amount actually paid shows under the message.
-                <Show when={b().routingMsat >= b().priceMsat}> On this path routing can cost more than the message itself.</Show>
+                <Show when={b().routingMsat >= b().priceMsat}> Routing can cost more than the message itself.</Show>
               </p>
             </>
           )}

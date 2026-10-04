@@ -282,7 +282,7 @@ label.field input {
 .msg.out .bubble a, .msg.out .bubble .voice-play { color: var(--bubble-out-ink); }
 .msg.fresh .bubble { animation: msg-send var(--d-mid) var(--ease-out); }
 /* Sending → settled: the paid amount lands with a brief ember wash (new messages only). */
-.msg.fresh .stamp .sats { animation: settle 900ms var(--ease) both; border-radius: 4px; padding: 0 3px; margin: 0 -3px; }
+.msg.fresh .stamp .sats { animation: settle var(--d-slow) var(--ease) both; border-radius: 4px; padding: 0 3px; margin: 0 -3px; }
 @keyframes settle { 0% { background: var(--money-bg); box-shadow: 0 0 0 3px var(--money-bg); } 100% { background: transparent; box-shadow: 0 0 0 3px transparent; } }
 @keyframes msg-send {
   0% { opacity: 0; transform: translateY(10px) scale(0.97); }

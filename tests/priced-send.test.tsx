@@ -216,8 +216,10 @@ it('breaks the ceiling into peer price and routing allowance, and only when they
   const rows = [...mount.querySelectorAll('[data-price-breakdown] dd')].map((d) => d.textContent);
   expect(rows).toEqual(['2.25 sats', '7.5 sats', '9.75 sats']);
   expect($('[data-composer-info]').textContent).toContain('A ceiling, not a charge');
-  // 7.5 routing on a 2.25 price: said plainly, without alarm.
-  expect($('[data-composer-info]').textContent).toContain('routing can cost more than the message itself');
+  // 7.5 routing on a 2.25 price: said plainly, without alarm or a claim about the route.
+  expect($('[data-composer-info]').textContent).toContain('Routing can cost more than the message itself');
+  expect($('[data-composer-info]').textContent).not.toContain('On this path');
+  expect($('.send-price').classList.contains('priced')).toBe(true);
   // After a send the line reports what was paid; the ceiling breakdown goes away.
   $<HTMLButtonElement>('[data-send]').click();
   await vi.waitFor(() => expect(line()).toBe('paid 2.25 sats'));
@@ -230,6 +232,7 @@ it('shows no breakdown when the peer price is unknown or stale', async () => {
     await open(source);
     await vi.waitFor(() => expect(line()).toMatch(/price unavailable/));
     expect(mount.querySelector('[data-price-breakdown]')).toBeNull();
+    expect($('.send-price').classList.contains('priced')).toBe(false);
     dispose?.(); mount.remove();
   }
 });
