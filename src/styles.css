@@ -625,6 +625,8 @@ select { font: inherit; font-size: var(--t-sm); background: var(--sunk); color: 
 .stepper .step.active, .stepper .step.failed { color: var(--ink); }
 .stepper .step.done { color: var(--muted); }
 .step-optional { color: var(--faint); }
+.stepper .step-status:not(.sr-only) { font-size: var(--t-xs); color: var(--muted); }
+.stepper .step.failed .step-status { color: var(--err); }
 .ob-head { display: flex; flex-direction: column; gap: var(--s-3); animation: arrive var(--d-slow) var(--ease-out); }
 .ob-head h1 { font-family: var(--font-display); font-weight: 400; font-size: var(--t-display); letter-spacing: -0.015em; line-height: 1.08; text-wrap: balance; }
 @media (prefers-reduced-motion: reduce) { .node-target-card:hover { transform: none; } }

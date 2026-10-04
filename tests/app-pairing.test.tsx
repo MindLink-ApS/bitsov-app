@@ -78,6 +78,37 @@ describe('app shell pairing wiring', () => {
     await vi.waitFor(() => expect(mount!.querySelector(`[data-gate="g6-${remote ? 'remote' : 'local'}-trust"]`)).not.toBeNull());
   });
 
+  it.each([
+    ['identity-free', true],
+    ['with an identity', false],
+] as const)('the first-run surface offers restore only when it can happen (%s)', async (_, bootstrap) => {
+    vi.stubGlobal('__TAURI_INTERNALS__', {
+      invoke: (cmd: string) => {
+        if (cmd === 'node_status') return Promise.resolve({ ready: true, node_id: 'ab'.repeat(33), error: null });
+        if (cmd === 'pairing_status') return Promise.resolve({ ...paired, bootstrap: bootstrap ? 'identity-free' : null });
+        return Promise.reject(new Error(`unexpected ${cmd}`));
+      },
+    });
+    mount = document.createElement('div');
+    document.body.appendChild(mount);
+    dispose = render(() => <App />, mount);
+    // The whole first-run surface: stage header, pairing panel and the G6 IdentityGate.
+    await vi.waitFor(() => expect(mount!.querySelector('[data-gate="g6-local-trust"]')).not.toBeNull());
+    expect(mount.querySelector('[data-ob-head="trust"]')).not.toBeNull();
+    const text = mount.textContent ?? '';
+    if (bootstrap) {
+      expect(mount.querySelector('[data-restore-open]')).toBeNull();
+      expect(text).not.toContain('Restore an existing identity');
+      expect(text).not.toContain('restore it now');
+      expect(text).toContain('not available on this node yet');
+      // The blocked stage says so in words, not only as a pip.
+      expect(mount.querySelector('[data-step="identity"] .step-status:not(.sr-only)')?.textContent).toBe('waiting on a genome release');
+    } else {
+      expect(mount.querySelector('[data-restore-open]')?.textContent).toContain('Restore an existing identity');
+      expect(text).toContain('restore it now');
+    }
+  });
+
   it.each([false, true])('renders the actual connection and trust boundary (remote=%s)', async (remote) => {
     const calls: string[] = [];
     vi.stubGlobal('__TAURI_INTERNALS__', {

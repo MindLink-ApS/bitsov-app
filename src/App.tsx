@@ -168,6 +168,7 @@ export default function App() {
             source={source()}
             nodeId={() => status().node_id}
             remote={pairing().remote}
+            canRestore={!pairing().bootstrap}
             onContinue={acceptTrust}
             onRestoring={setRestoring}
             restoreError={restoreError}
@@ -213,6 +214,8 @@ function IdentityGate(props: {
   source: Source;
   nodeId: () => string | null;
   remote: boolean;
+  /** False on an identity-free (bootstrap) node: restore waits on the genome release. */
+  canRestore: boolean;
   onContinue: () => void;
   onRestoring: (value: boolean) => void;
   restoreError: () => string | null;
@@ -312,10 +315,11 @@ function IdentityGate(props: {
         <p class="ok-note">Identity restored. Your node now runs as {short(restored()!)}.</p>
       </Show>
 
+      <Show when={props.canRestore}>
       <Show
         when={showRestore()}
         fallback={
-          <button class="link" onClick={() => setShowRestore(true)}>
+          <button class="link" data-restore-open onClick={() => setShowRestore(true)}>
             Restore an existing identity
           </button>
         }
@@ -355,6 +359,7 @@ function IdentityGate(props: {
             </button>
           </div>
         </form>
+      </Show>
       </Show>
 
       <Show when={displayError()}>

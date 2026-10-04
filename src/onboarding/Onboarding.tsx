@@ -95,7 +95,8 @@ export function Onboarding(props: {
                 <Show when={step.id === 'fund'}><span class="step-optional"> (optional)</span></Show>
               </span>
               <Show when={STATUS_TEXT[step.status]}>
-                <span class="step-status sr-only">{STATUS_TEXT[step.status]}</span>
+                {/* Progress pips say now/done; waiting and failure are said in words. */}
+                <span class="step-status" classList={{ 'sr-only': !['failed', 'blocked', 'skipped'].includes(step.status) }}>{STATUS_TEXT[step.status]}</span>
               </Show>
             </li>
           )}
@@ -181,7 +182,7 @@ export function Onboarding(props: {
                   <span class="target-radio-indicator" aria-hidden="true">✓</span>
                 </div>
               </div>
-              <p>A home server on your network that runs a BitSov node. Paste its pairing link; it is saved for the next start.</p>
+              <p>A home server on your network that runs a BitSov node. Its keys live on that computer. Paste its pairing link; it is saved for the next start.</p>
             </div>
           </button>
 
