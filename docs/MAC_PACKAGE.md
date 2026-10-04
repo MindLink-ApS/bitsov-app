@@ -175,8 +175,9 @@ pushes to `main` and on `workflow_dispatch` (app #131). On a PR it runs only
 when the `full-ci` label is added; the label triggers a run only on the
 `labeled` event itself, so remove and re-add it to request another run. It no
 longer runs when a PR is opened or marked ready for review. Windows Compile
-runs only on `workflow_dispatch` or the `full-ci` label until its Unix-only
-code is platform-gated (app #132). macOS minutes cost 10x Linux:
+runs on pushes to `main`, `workflow_dispatch`, or the `full-ci` label to catch
+platform-gating regressions (app #132); Windows remains compile-only and is
+not a supported runtime or merge gate. macOS minutes cost 10x Linux:
 
 - Runner: `macos-14` (arm64). Toolchain: Node 22 and stable Rust. Permissions:
   `contents: read`. It uses `github.token` read-only for `gh release download`.

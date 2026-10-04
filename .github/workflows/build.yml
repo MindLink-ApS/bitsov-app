@@ -7,8 +7,8 @@ name: Build
 #
 # CI cost rule (app #131): this workflow runs on every PR push. A newer push to
 # the same PR cancels the older run; runs on main are never cancelled. The
-# Windows compile check lives in windows-compile.yml (dispatch / `full-ci`
-# label only). The `sidecar` job stays here (ubuntu-latest, Linux price).
+# Windows compile check lives in windows-compile.yml (push to main, dispatch,
+# or `full-ci` label). The `sidecar` job stays here (ubuntu-latest, Linux price).
 on:
   pull_request:
     branches: [main]

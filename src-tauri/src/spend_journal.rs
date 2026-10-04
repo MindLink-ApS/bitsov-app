@@ -4,7 +4,10 @@
 //! retry of that send. A lost reply without it remains unknown. Absence from a
 //! paged history is never proof that a payment did not happen.
 
-use std::fs::{File, OpenOptions};
+use std::fs::File;
+#[cfg(unix)]
+use std::fs::OpenOptions;
+#[cfg(unix)]
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
@@ -185,6 +188,12 @@ impl Drop for Journal {
 }
 
 impl Journal {
+    #[cfg(not(unix))]
+    pub fn open(_dir: &Path) -> Result<Self, ActionError> {
+        Err(unknown("private spend journal storage is not supported on this platform"))
+    }
+
+    #[cfg(unix)]
     pub fn open(dir: &Path) -> Result<Self, ActionError> {
         std::fs::create_dir_all(dir).map_err(unknown)?;
         let mut options = OpenOptions::new();
@@ -230,6 +239,12 @@ impl Journal {
         Ok(pending)
     }
 
+    #[cfg(not(unix))]
+    pub fn save(&self, _pending: &Pending) -> Result<(), ActionError> {
+        Err(unknown("private spend journal storage is not supported on this platform"))
+    }
+
+    #[cfg(unix)]
     pub fn save(&self, pending: &Pending) -> Result<(), ActionError> {
         let mut options = OpenOptions::new();
         options.write(true).create(true).truncate(true);

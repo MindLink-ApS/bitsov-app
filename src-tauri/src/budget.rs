@@ -27,7 +27,9 @@
 
 use crate::format::amount;
 use std::collections::BTreeMap;
+#[cfg(unix)]
 use std::fs::OpenOptions;
+#[cfg(unix)]
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -542,6 +544,7 @@ pub fn load(dir: &Path, node_id: &str) -> Result<Book, ActionError> {
 }
 
 /// Write-then-rename so a crash leaves the old book or the new one, never half.
+#[cfg(unix)]
 pub fn save(dir: &Path, book: &Book) -> Result<(), ActionError> {
     std::fs::create_dir_all(dir).map_err(unreadable)?;
     let path = book_path(dir, &book.node_id);
@@ -558,6 +561,11 @@ pub fn save(dir: &Path, book: &Book) -> Result<(), ActionError> {
     file.sync_all().map_err(unreadable)?;
     std::fs::rename(&tmp, &path).map_err(unreadable)?;
     Ok(())
+}
+
+#[cfg(not(unix))]
+pub fn save(_dir: &Path, _book: &Book) -> Result<(), ActionError> {
+    Err(unreadable("private budget storage is not supported on this platform"))
 }
 
 // ---- what the renderer sees ---------------------------------------------------

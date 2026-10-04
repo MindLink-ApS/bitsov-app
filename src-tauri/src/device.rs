@@ -13,6 +13,7 @@
 //! the owner's finger, and a signature is only the terms it covers.
 
 use bitsov_app::format::amount;
+#[cfg(unix)]
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -249,6 +250,7 @@ pub fn default_per_act(quoted_msat: Option<u64>, budget_msat: u64) -> u64 {
 // ---- private files -----------------------------------------------------------
 
 /// Write-then-rename, 0600, never through a symlink.
+#[cfg(unix)]
 pub fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
@@ -272,6 +274,7 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 }
 
 /// Read a private file; a symlink or a group/world-readable file is refused.
+#[cfg(unix)]
 pub fn read_private(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
     let meta = match std::fs::symlink_metadata(path) {
         Ok(m) => m,
@@ -289,6 +292,19 @@ pub fn read_private(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
         }
     }
     std::fs::read(path).map(Some)
+}
+
+// Unix file modes and no-follow semantics have no implemented equivalent here.
+#[cfg(not(unix))]
+pub fn write_private(_path: &Path, _bytes: &[u8]) -> std::io::Result<()> {
+    Err(std::io::Error::new(std::io::ErrorKind::Unsupported,
+        "private device storage is not supported on this platform"))
+}
+
+#[cfg(not(unix))]
+pub fn read_private(_path: &Path) -> std::io::Result<Option<Vec<u8>>> {
+    Err(std::io::Error::new(std::io::ErrorKind::Unsupported,
+        "private device storage is not supported on this platform"))
 }
 
 pub fn load_record(store: &Path) -> Option<Record> {
@@ -470,5 +486,22 @@ mod node_off_tests {
         // A Mac without an enclave stays "unavailable", whatever the node says.
         let none = DeviceView::of(false, None, false, 0).with_node_approvals(Some("seed_not_encrypted"));
         assert_eq!(none.state, DeviceState::Unavailable);
+    }
+}
+
+#[cfg(all(test, not(unix)))]
+mod unsupported_platform_tests {
+    use super::*;
+
+    #[test]
+    fn private_files_are_refused_without_touching_disk() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("private/key");
+        let error = write_private(&path, b"secret").unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+        assert!(error.to_string().contains("not supported on this platform"));
+        let error = read_private(&path).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+        assert!(!path.parent().unwrap().exists());
     }
 }
