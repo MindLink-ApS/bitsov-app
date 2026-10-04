@@ -167,7 +167,7 @@ h1, h2, h3 { font-family: var(--font-sans); font-weight: 600; letter-spacing: -0
 p { margin: 0; }
 code, .mono { font-family: var(--font-mono); font-size: 0.92em; }
 
-/* sats and ids: mono, tabular, never wrapped mid-number */
+/* sats: tabular figures, never wrapped mid-number; ids: mono */
 .sats { font-family: var(--font-sans); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .sats .unit { color: var(--muted); margin-left: 0.3em; font-size: 0.85em; }
 .id { font-family: var(--font-mono); font-size: var(--t-sm); color: var(--muted); letter-spacing: 0.02em; }
@@ -527,10 +527,13 @@ select { font: inherit; font-size: var(--t-sm); background: var(--sunk); color: 
 .fresh-line.stale { color: var(--warn); }
 
 /* first run, inside the shell ------------------------------------------- */
-.first-run { flex: 1; min-height: 0; overflow-y: auto; padding: var(--s-8) var(--s-6); display: flex; flex-direction: column; align-items: center; gap: var(--s-5); }
-.first-run > * { width: 100%; max-width: 440px; }
-.first-run .intro { display: flex; flex-direction: column; gap: var(--s-2); }
-.first-run .intro h1 { font-family: var(--font-display); font-weight: 400; font-size: var(--t-display); letter-spacing: -0.015em; }
+.first-run { position: relative; isolation: isolate; flex: 1; min-height: 0; overflow-y: auto; padding: clamp(var(--s-8), 9vh, 88px) var(--s-6) var(--s-10); display: flex; flex-direction: column; align-items: center; gap: var(--s-5); }
+/* The one ambient touch: a faint ember glow behind the first-run column. */
+.first-run::before { content: ''; position: absolute; z-index: -1; top: -120px; right: 0; width: min(420px, 45%); height: 420px; border-radius: 50%; background: radial-gradient(circle, color-mix(in srgb, var(--money) 16%, transparent), transparent 68%); pointer-events: none; }
+.first-run > * { width: 100%; max-width: 560px; }
+/* Onboarding's own actions are neutral: orange stays for sats. */
+.first-run .primary { background: var(--action-bg); color: var(--action-ink); }
+.first-run .primary:hover:not(:disabled) { background: var(--action-bg); opacity: 0.9; }
 .state { display: flex; flex-direction: column; align-items: center; gap: var(--s-3); color: var(--muted); }
 .state.ready { color: var(--ink); align-items: stretch; }
 .state.error { color: var(--err); }
@@ -539,8 +542,8 @@ select { font: inherit; font-size: var(--t-sm); background: var(--sunk); color: 
 .running { display: flex; align-items: center; gap: var(--s-2); }
 
 /* Gate G6: the local-trust disclosure shown before any funding UI. */
-.disclosure { border-color: var(--ember-line); background: var(--ember); }
-.disclosure h2 { color: var(--accent); font-size: var(--t-lg); }
+.disclosure { border: 1px solid var(--line); border-left: 3px solid var(--money); background: var(--surface); }
+.disclosure h2 { color: var(--ink); font-size: var(--t-lg); }
 .disclosure p { font-size: var(--t-sm); color: var(--muted); }
 .disclosure code { color: var(--ink); }
 .restore input { font-family: var(--font-mono); letter-spacing: 0.08em; }
@@ -549,17 +552,28 @@ select { font: inherit; font-size: var(--t-sm); background: var(--sunk); color: 
 
 /* onboarding: 3 choices for node location */
 .node-target-section { width: 100%; display: flex; flex-direction: column; gap: var(--s-2); }
-.node-target-title { font-family: var(--font-sans); font-size: var(--t-md); font-weight: 600; color: var(--ink); margin: 0; }
-.node-target-grid { display: flex; flex-direction: column; gap: var(--s-2); margin-top: var(--s-2); }
-.node-target-card { display: flex; align-items: flex-start; gap: var(--s-3); padding: var(--s-3) var(--s-4); border: 1px solid var(--line); border-radius: var(--r-panel); background: var(--surface); color: inherit; text-align: left; cursor: pointer; transition: border-color var(--d-fast) var(--ease), background var(--d-fast) var(--ease), box-shadow var(--d-fast) var(--ease); }
-.node-target-card:hover { background: var(--raised); border-color: var(--line-strong); }
-.node-target-card.selected { background: var(--raised); border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent), 0 4px 14px rgba(0,0,0,0.12); }
-.target-icon { width: 38px; height: 38px; border-radius: 10px; background: var(--sunk); color: var(--accent); display: grid; place-items: center; flex: none; margin-top: 2px; }
+.node-target-title { font-family: var(--font-sans); font-size: var(--t-sm); font-weight: 500; color: var(--muted); margin: 0; }
+.node-target-grid { display: flex; flex-direction: column; gap: var(--s-2); }
+.node-target-card { display: flex; align-items: flex-start; gap: var(--s-3); padding: var(--s-4); border: 1px solid var(--line); border-radius: var(--r-panel); background: var(--surface); color: inherit; text-align: left; cursor: pointer; transition: border-color var(--d-fast) var(--ease), background var(--d-fast) var(--ease), box-shadow var(--d-fast) var(--ease), transform var(--d-fast) var(--ease); }
+.node-target-card:hover { border-color: var(--line-strong); transform: translateY(-1px); }
+.node-target-card.selected { border-color: var(--money); box-shadow: 0 0 0 1px var(--money); }
+.target-icon { width: 38px; height: 38px; border-radius: 10px; background: var(--raised); color: var(--muted); display: grid; place-items: center; flex: none; margin-top: 2px; transition: color var(--d-fast) var(--ease); }
+.node-target-card.selected .target-icon { color: var(--money); }
+/* Once the node is up the choice shrinks to one row of pills. */
+.node-target-section.compact .node-target-grid { flex-direction: row; flex-wrap: wrap; gap: var(--s-1); }
+.node-target-section.compact .node-target-card { padding: 6px 12px; border-radius: var(--r-chip); align-items: center; gap: var(--s-2); }
+.node-target-section.compact .node-target-card:hover { transform: none; }
+.node-target-section.compact .target-icon, .node-target-section.compact .target-info p, .node-target-section.compact .target-radio-indicator { display: none; }
+/* Compact pills keep the custody badge on the chosen location only. */
+.node-target-section.compact .node-target-card:not(.selected) .target-head .row { display: none; }
+.node-target-section.compact .target-head { flex-wrap: nowrap; }
+.node-target-section.compact .target-head strong { font-size: var(--t-sm); font-weight: 500; }
+.connect-line { font-size: var(--t-xs); }
 .target-info { flex: 1; display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .target-head { display: flex; align-items: center; justify-content: space-between; gap: var(--s-2); flex-wrap: wrap; }
 .target-head strong { font-size: var(--t-md); font-weight: 600; color: var(--ink); }
 .target-radio-indicator { width: 20px; height: 20px; border-radius: 50%; border: 1.5px solid var(--line-strong); display: grid; place-items: center; font-size: 11px; font-weight: 700; color: transparent; flex: none; transition: all var(--d-fast) var(--ease); }
-.node-target-card.selected .target-radio-indicator { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.node-target-card.selected .target-radio-indicator { background: var(--money); border-color: var(--money); color: var(--accent-ink); }
 .target-badge { font-size: var(--t-xs); font-weight: 500; padding: 2px 8px; border-radius: var(--r-chip); background: var(--sunk); color: var(--muted); }
 .target-badge.ok { background: color-mix(in srgb, var(--ok) 14%, transparent); color: var(--ok); }
 .target-badge.honest { background: color-mix(in srgb, var(--warn) 14%, transparent); color: var(--warn); }
@@ -599,18 +613,27 @@ select { font: inherit; font-size: var(--t-sm); background: var(--sunk); color: 
 .touchid-status-pill { font-size: var(--t-xs); font-weight: 500; color: var(--ok); background: color-mix(in srgb, var(--ok) 12%, transparent); padding: 2px 8px; border-radius: var(--r-chip); display: inline-block; margin-top: 2px; }
 
 /* onboarding steps: a real sequence, so it is numbered */
-.onboarding { display: flex; flex-direction: column; gap: var(--s-3); }
-.steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; counter-reset: step; }
-.step { display: flex; align-items: baseline; gap: var(--s-3); color: var(--faint); font-size: var(--t-md); padding: 4px 0; counter-increment: step; }
-.step::before { content: counter(step); font-family: var(--font-mono); font-size: var(--t-xs); width: 18px; height: 18px; border-radius: 50%; border: 1px solid var(--line-strong); display: inline-grid; place-items: center; flex: none; }
-.step .step-label { flex: 1; }
-.step.active { color: var(--ink); }
-.step.active::before { border-color: var(--accent); color: var(--accent); }
-.step.done { color: var(--muted); }
-.step.done::before { background: var(--ok); border-color: var(--ok); color: var(--accent-ink); }
-.step.failed { color: var(--err); }
-.step.failed::before { border-color: var(--err); }
-.step-status { font-size: var(--t-xs); }
+.onboarding { display: flex; flex-direction: column; gap: var(--s-5); }
+/* Stepper: three stages; "pair" is a joined pip of "your node". */
+.stepper { list-style: none; margin: 0; padding: 0; display: flex; align-items: center; gap: var(--s-3); flex-wrap: wrap; }
+.stepper .step { display: flex; align-items: center; gap: var(--s-2); color: var(--faint); font-size: var(--t-sm); }
+.stepper .step.joined { margin-left: calc(4px - var(--s-3)); }
+.stepper .pip { width: 24px; height: 4px; border-radius: 2px; background: var(--line-strong); transition: background var(--d-mid) var(--ease); }
+.stepper .step.done .pip { background: var(--muted); }
+.stepper .step.active .pip { background: var(--money); }
+.stepper .step.failed .pip { background: var(--err); }
+.stepper .step.active, .stepper .step.failed { color: var(--ink); }
+.stepper .step.done { color: var(--muted); }
+.step-optional { color: var(--faint); }
+.stepper .step-status:not(.sr-only) { font-size: var(--t-xs); color: var(--muted); }
+.stepper .step.failed .step-status { color: var(--err); }
+.ob-head { display: flex; flex-direction: column; gap: var(--s-3); animation: arrive var(--d-slow) var(--ease-out); }
+.ob-head h1 { font-family: var(--font-display); font-weight: 400; font-size: var(--t-display); letter-spacing: -0.015em; line-height: 1.08; text-wrap: balance; }
+@media (prefers-reduced-motion: reduce) { .node-target-card:hover { transform: none; } }
+.pairing-access { font-size: var(--t-sm); color: var(--muted); }
+.ob-head .lede { color: var(--muted); font-size: var(--t-lg); line-height: 1.5; max-width: 52ch; }
+.remote-form { animation: arrive var(--d-mid) var(--ease-out); }
+.first-run .state.ready { animation: arrive var(--d-slow) var(--ease-out); }
 .pairing.error code, .short-code code { overflow-wrap: anywhere; }
 
 /* funding */

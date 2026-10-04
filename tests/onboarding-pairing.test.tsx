@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'solid-js/web';
-import { Onboarding } from '../src/onboarding/Onboarding';
+import { Onboarding, onboardingStage } from '../src/onboarding/Onboarding';
 import { onboardingSteps, type NodeStatus, type PairingView } from '../src/onboarding/pairing';
 import type { DeviceView } from '../src/control/types';
 
@@ -93,6 +93,18 @@ describe('onboarding steps', () => {
   it('a node start error fails the first step', () => {
     const steps = onboardingSteps({ ...booting, error: 'node did not become healthy' }, starting, false);
     expect(steps[0].status).toBe('failed');
+  });
+});
+
+describe('onboarding stages (3 focused steps)', () => {
+  it('maps the four host steps onto node, identity and fund', () => {
+    expect(onboardingStage(onboardingSteps(booting, starting, false))).toBe('node');
+    expect(onboardingStage(onboardingSteps(booting, pending, false))).toBe('node');
+    expect(onboardingStage(onboardingSteps(ready, failed, false))).toBe('node');
+    expect(onboardingStage(onboardingSteps(ready, paired, false))).toBe('identity');
+    expect(onboardingStage(onboardingSteps(ready, fallback, false))).toBe('identity');
+    expect(onboardingStage(onboardingSteps(ready, { ...paired, bootstrap: 'identity-free' }, false))).toBe('identity');
+    expect(onboardingStage(onboardingSteps(ready, paired, true))).toBe('fund');
   });
 });
 
@@ -220,28 +232,29 @@ describe('pairing panel', () => {
 
     expect(local.disabled).toBe(false);
     expect(local.classList.contains('selected')).toBe(true);
-    expect(local.textContent).toContain('This computer');
-    expect(local.textContent).toContain('Run your sovereign node directly on this Mac');
+    expect(local.textContent).toContain('This Mac');
+    expect(local.textContent).toContain('Your keys stay on this Mac');
 
     expect(network.disabled).toBe(false);
     expect(network.getAttribute('aria-disabled')).toBeNull();
-    expect(network.textContent).toContain('A node on my network');
+    expect(network.textContent).toContain('A computer at home');
     expect(network.textContent).not.toContain('Coming soon');
-    expect(network.textContent).toContain(
-      'Connect to a home server on your local network with a remote pairing link',
-    );
+    expect(network.textContent).toContain('Paste its pairing link');
 
     expect(cloud.disabled).toBe(false);
     expect(cloud.getAttribute('aria-disabled')).toBeNull();
-    expect(cloud.textContent).toContain('A cloud node');
+    expect(cloud.textContent).toContain('A cloud server');
     expect(cloud.textContent).not.toContain('Coming soon');
-    expect(cloud.textContent).toContain(
-      'Connect to a remotely hosted node with a remote pairing link',
-    );
+    expect(cloud.textContent).toContain('Paste its pairing link');
+    // Hosted keys are labelled as reachable by whoever runs the host.
+    expect(cloud.textContent).toContain('whoever runs the host can reach them');
 
     // No fake scan spinners; remote pairing uses a password input, not a text address field
     expect(el.querySelector('.spinner')).toBeNull();
     expect(el.querySelector('input[type="text"]')).toBeNull();
+    // The pairing-link form belongs to a remote choice only.
+    expect(el.querySelector('[data-remote-access]')).toBeNull();
+    network.click();
     expect(el.querySelector('[data-remote-access]')).not.toBeNull();
   });
 
@@ -260,7 +273,7 @@ describe('pairing panel', () => {
     expect(panel.textContent).not.toContain('Secure Enclave');
     expect(panel.textContent).not.toContain('Touch ID approves every payment');
     expect(panel.textContent).toContain('Loopback authenticated. Ordinary pairing is file-backed on this Mac.');
-    expect(el.textContent).toContain('The app connects to your sovereign node on this Mac.');
+    expect(el.textContent).toContain('This app connects to the node on this Mac.');
     expect(el.textContent).not.toContain('Touch ID on this Mac can approve a contact or budget.');
   });
 
@@ -337,6 +350,7 @@ describe('pairing panel', () => {
           pairing={() => starting}
           trustAck={() => false}
           onRetry={() => {}}
+          selectedTarget="network"
           onImportRemote={onImportRemote}
         />
       ),
@@ -354,6 +368,38 @@ describe('pairing panel', () => {
     expect(onImportRemote).toHaveBeenCalledWith(link);
     expect(input.value).toBe('');
     expect(mount.textContent).not.toContain(link);
+  });
+  it('shows one decision per stage and keeps every host step addressable', () => {
+    const first = show(starting, booting);
+    expect(first.querySelector('[data-ob-head="node"] h1')?.textContent).toBe('Where should your node run?');
+    expect(first.querySelector('.node-target-section.compact')).toBeNull();
+    expect([...first.querySelectorAll('[data-step]')].map((s) => s.getAttribute('data-step'))).toEqual(['node', 'pair', 'identity', 'fund']);
+    // Three visible stage labels; pairing is announced but not a separate stage.
+    const visible = [...first.querySelectorAll('.stepper .step-label:not(.sr-only)')].map((s) =>
+      [...s.childNodes].filter((n) => !(n instanceof HTMLElement && n.classList.contains('sr-only'))).map((n) => n.textContent).join(''));
+    expect(visible).toEqual(['Your node', 'Your identity', 'Add sats (optional)']);
+    dispose?.();
+    mount?.remove();
+
+    const later = show(paired, ready);
+    expect(later.querySelector('[data-ob-head="trust"] h1')?.textContent).toBe('Before you add sats');
+    expect(later.querySelector('.node-target-section.compact')).not.toBeNull();
+    // Still a real choice once compact.
+    expect(later.querySelectorAll('[role="radio"]').length).toBe(3);
+  });
+  it('never offers restore on an identity-free node, and keeps the access scopes in view', () => {
+    const el = show({ ...paired, bootstrap: 'identity-free' }, ready);
+    const head = el.querySelector('[data-ob-head="trust"]')!;
+    expect(head.textContent).not.toContain('restore it now');
+    expect(head.textContent).toContain('not available on this node yet');
+    const access = el.querySelector('[data-pairing="paired"] .pairing-access')!;
+    expect(access.textContent).toContain('read + receive');
+    expect(access.closest('details')).toBeNull();
+    dispose?.();
+    mount?.remove();
+
+    const normal = show(paired, ready);
+    expect(normal.querySelector('[data-ob-head="trust"]')!.textContent).toContain('restore it now');
   });
 });
 
