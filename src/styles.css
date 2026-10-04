@@ -1094,6 +1094,7 @@ button.danger { background: var(--err); color: #fff; border: none; }
 .welcome-cards .primary { background: var(--action-bg); color: var(--action-ink); }
 .welcome-cards .primary:hover:not(:disabled) { background: var(--action-bg); opacity: 0.9; }
 .welcome-cards .primary.money { background: var(--money); color: var(--accent-ink); }
+.welcome-cards .primary.money:hover:not(:disabled) { background: var(--accent-hi); opacity: 1; }
 .soft-error .quiet-detail p { white-space: pre-wrap; overflow-wrap: anywhere; }
 .spinner { display: inline-block; flex-shrink: 0; }
 
