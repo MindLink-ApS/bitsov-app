@@ -110,12 +110,6 @@ export const MIN_PAYMENT_MSAT = 1000;
 export const ADMISSION_MAX_MSAT = 100_000;
 
 /**
- * What one text message on this track costs before it is sent. The recipient
- * sets the price; when the node has not cached the peer's table the figure is
- * this node's own price, labelled as an estimate — never passed off as theirs.
- * A room costs the sum of each member's own price, from `room_quote`.
- */
-/**
  * The parts of a peer message ceiling, for display only. Returned only when the
  * peer's own fresh price plus the routing allowance is exactly the ceiling the
  * composer shows; any other case (estimate, stale table, door or readmission
@@ -134,6 +128,12 @@ export function priceBreakdown(
   return { priceMsat: price, routingMsat: routing, ceilingMsat };
 }
 
+/**
+ * What one text message on this track costs before it is sent. The recipient
+ * sets the price; when the node has not cached the peer's table the figure is
+ * this node's own price, labelled as an estimate — never passed off as theirs.
+ * A room costs the sum of each member's own price, from `room_quote`.
+ */
 export function costToSend(
   track: TrackRef,
   quote: PriceQuote | null,
