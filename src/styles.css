@@ -1164,3 +1164,16 @@ button.danger.soft { border-radius: var(--r-chip); padding: 7px 14px; font-weigh
 input[type='checkbox'], input[type='radio'] { width: auto; flex: none; padding: 0; margin: 0; accent-color: var(--ink); }
 .meeting-panel .meeting-legs label { justify-content: flex-start; text-align: left; }
 .call-actions button { white-space: nowrap; }
+
+/* ---- Ember 2.0 motion: answers an action, never ambient ---- */
+/* Menus and pickers open from where they were asked for. */
+@keyframes pop-in { from { opacity: 0; transform: translateY(4px) scale(0.98); } }
+.composer-menu:not([hidden]), .emoji-picker, .avatar-menu, .meeting-panel[data-meeting-panel='planning'] { animation: pop-in var(--d-fast) var(--ease-out); transform-origin: bottom right; }
+.avatar-menu { transform-origin: bottom left; }
+.quiet-detail[open] > :not(summary), .pairing-details[open] > :not(summary), .node-details[open] > :not(summary) { animation: arrive var(--d-mid) var(--ease-out); }
+/* Selection moves the ring, not the layout. */
+.node-target-card, .tabs button, .modes button, .track-link { transition-property: background, color, border-color, box-shadow, transform; }
+@media (prefers-reduced-motion: reduce) {
+  /* Nothing travels: hover lifts and press squeezes stay put; state changes still show. */
+  .node-target-card:hover, .send-btn:active, .ai-ask-btn:active, .ai-plus-btn.active { transform: none !important; }
+}
