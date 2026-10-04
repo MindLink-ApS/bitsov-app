@@ -6631,12 +6631,15 @@ mod verified_local_socket_tests {
     /// endpoint and a real connect must attribute the socket to the decoy.
     #[test]
     fn decoy_ipv4_listener_is_not_the_supervised_ipv6_sibling() {
-        use std::io::BufRead;
+        use std::time::{Duration, Instant};
         let supervised = TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).expect("bind ::1");
         let port = supervised.local_addr().unwrap().port();
         let supervised_pid = std::process::id();
 
-        let mut decoy = Command::new("python3")
+        // A file lets readiness polling honor its deadline even if the child
+        // never writes anything; a blocking pipe read could wait indefinitely.
+        let ready = tempfile::NamedTempFile::new().expect("decoy readiness file");
+        let decoy = Command::new("python3")
             .args([
                 "-u",
                 "-c",
@@ -6645,14 +6648,9 @@ mod verified_local_socket_tests {
                  print('ready',flush=True); time.sleep(60)",
                 &port.to_string(),
             ])
-            .stdout(Stdio::piped())
+            .stdout(Stdio::from(ready.reopen().expect("open decoy readiness output")))
             .spawn()
             .expect("python decoy");
-        let mut line = String::new();
-        std::io::BufReader::new(decoy.stdout.take().unwrap())
-            .read_line(&mut line)
-            .unwrap();
-        assert_eq!(line.trim(), "ready");
         let decoy_pid = decoy.id();
 
         struct Kill(std::process::Child);
@@ -6662,7 +6660,22 @@ mod verified_local_socket_tests {
                 let _ = self.0.wait();
             }
         }
-        let _keepalive = Kill(decoy);
+        let mut keepalive = Kill(decoy);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let output = std::fs::read_to_string(ready.path()).expect("read decoy readiness");
+            if output.trim() == "ready" {
+                break;
+            }
+            if let Some(status) = keepalive.0.try_wait().expect("check decoy status") {
+                panic!("IPv4 decoy exited before readiness: {status}; output: {output:?}");
+            }
+            assert!(
+                Instant::now() < deadline,
+                "IPv4 decoy did not report 'ready' within 5 seconds; output: {output:?}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
 
         let port_wide = loopback_listener_pids(port);
         assert!(
