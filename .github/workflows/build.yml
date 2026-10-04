@@ -5,10 +5,10 @@ name: Build
 # Tauri crate. Make it a REQUIRED status on main so review happens on a compiled SHA, not
 # on greps.
 #
-# CI cost rule: this workflow runs on every PR push, unchanged. The Windows
-# compile check moved to windows-compile.yml, which runs only on push to main,
-# ready-for-review, or the `full-ci` label. The `sidecar` job stays here
-# (ubuntu-latest, Linux price).
+# CI cost rule (app #131): this workflow runs on every PR push. A newer push to
+# the same PR cancels the older run; runs on main are never cancelled. The
+# Windows compile check lives in windows-compile.yml (dispatch / `full-ci`
+# label only). The `sidecar` job stays here (ubuntu-latest, Linux price).
 on:
   pull_request:
     branches: [main]
@@ -18,10 +18,17 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Supersede stale PR runs; never cancel a run on main.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   build:
     name: Build (tsc + vite + cargo check)
     runs-on: ubuntu-latest
+    # A Build job hung for 6 h on 30 Sep (app #131); a normal run is well under this.
+    timeout-minutes: 30
     # Smaller debug info: the Tauri test binaries link several GB of objects, and
     # ld died with SIGBUS (signal 7, disk full on the runner) on 1 Oct.
     env:

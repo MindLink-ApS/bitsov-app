@@ -3,22 +3,27 @@ name: Windows Compile
 # Split out of build.yml (job id, name and steps unchanged) so its triggers can
 # differ from the Build merge gate without adding events to Build.
 #
-# CI cost rule: Windows runners bill at 2x Linux, so this does NOT run on every
-# PR push. It runs on push to main, on workflow_dispatch, when a PR is opened
-# non-draft or marked ready_for_review, and when the `full-ci` label is added
-# to any PR (draft or non-draft). Carrying the label does not enable runs on
-# synchronize/reopened; remove and re-add it to request another run.
+# CI cost rule (app #131): Windows runners bill at 2x Linux, and this job has
+# failed 39 of 40 runs since 1 Oct on E0433 (about 70 Unix-only `libc` uses:
+# posix_spawn, waitid, O_NOFOLLOW file modes, getuid). Until that is
+# platform-gated (app #132), it runs ONLY on workflow_dispatch or when the
+# `full-ci` label is added to a PR. It no longer runs on push to main or on
+# PR opened / ready_for_review.
 # Required gates (Authority Check, Build) are unaffected.
 on:
   pull_request:
     branches: [main]
-    types: [opened, synchronize, reopened, ready_for_review, labeled]
-  push:
-    branches: [main]
+    types: [labeled]
   workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Label-triggered: adding any other label (e.g. merge-ready) starts a run that
+  # the job `if` skips, so never cancel an in-flight run here.
+  cancel-in-progress: false
 
 jobs:
   windows-compile:
@@ -36,12 +41,21 @@ jobs:
     # See the CI cost rule at the top of this file.
     if: >-
       github.event_name != 'pull_request' ||
-      (github.event.action == 'labeled' && github.event.label.name == 'full-ci') ||
-      github.event.action == 'ready_for_review' ||
-      (github.event.action == 'opened' && !github.event.pull_request.draft)
+      github.event.label.name == 'full-ci'
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            src-tauri/target/
+          key: ${{ runner.os }}-cargo-check-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-check-
       - name: Placeholders for the tauri_build checks (sidecar + Windows icon)
         shell: bash
         run: |

@@ -9,10 +9,16 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Supersede stale PR runs; never cancel a run on main.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   authority-check:
     name: Authority Check
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
