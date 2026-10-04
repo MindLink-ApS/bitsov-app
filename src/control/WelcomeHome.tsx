@@ -38,7 +38,7 @@ export function WelcomeHome(props: {
         <article>
           <h2>Add sats</h2>
           <p class="hint" id={`${id}-fund`}>{fundReason()}</p>
-          <button type="button" class="primary soft" disabled={!canFund()} aria-describedby={`${id}-fund`} onClick={props.onAddSats}>Add sats</button>
+          <button type="button" class="primary soft money" disabled={!canFund()} aria-describedby={`${id}-fund`} onClick={props.onAddSats}>Add sats</button>
         </article>
       </div>
     </section>

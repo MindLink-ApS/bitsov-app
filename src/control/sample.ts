@@ -587,7 +587,7 @@ const SAMPLE_PAYEE = `02${'5a'.repeat(32)}`;
 const sampleBolt11 = (msat: number) =>
   msat % 100 === 0 ? `lntbs${msat / 100}n1samplenotpayable0donotpay` : `lntbs${msat * 10}p1samplenotpayable0donotpay`;
 
-export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number; organism?: 'v1' | 'v2' } = {}): Source {
+export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number; organism?: 'v1' | 'v2'; noPeers?: boolean } = {}): Source {
   // Demo convenience: sample peers carry remote labels; mirror them into local
   // petnames once so the rail shows owner names without treating labels as truth.
   for (const p of SAMPLE_PEERS) {
@@ -829,7 +829,8 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
             read_at: Date.now(),
           } satisfies MembraneRead)
         : Promise.reject('not found: this node has no membrane read (N2)'),
-    peers: () => ok(SAMPLE_PEERS),
+    // `?sample&peers=0`: a node with no contacts yet (shows Welcome home).
+    peers: () => ok(opts.noPeers ? [] : SAMPLE_PEERS),
     rooms: () => ok(SAMPLE_ROOMS),
     roomMembers: (id) => ok(ROOM_MEMBERS[id.toLowerCase()] ?? []),
     roomThread: () => ok([]),
