@@ -1,0 +1,499 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>BitSov direction mock</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&family=Inter:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&family=Fraunces:opsz,wght@9..144,400;9..144,600&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<script src="directions.js"></script>
+<style>
+  /* ---------- shared skeleton; every value comes from direction tokens ---------- */
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body { background: var(--bg); color: var(--ink); font-family: var(--f-ui); font-size: var(--fs); line-height: 1.5; -webkit-font-smoothing: antialiased; }
+  button { font: inherit; color: inherit; cursor: pointer; }
+  .num { font-family: var(--f-mono); font-variant-numeric: tabular-nums; }
+  .frame { display: grid; grid-template-columns: 248px 1fr; height: 100vh; min-height: 640px; }
+  .frame.solo { grid-template-columns: 1fr; }
+  .rail { background: var(--rail); border-right: 1px solid var(--line); padding: 18px 14px; display: flex; flex-direction: column; gap: 18px; overflow: hidden; }
+  .mark { font-family: var(--f-display); font-size: 22px; letter-spacing: -0.01em; font-weight: 600; }
+  .d-F .mark, .d-B .mark { font-weight: 400; font-size: 26px; }
+  .nodeline { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--muted); }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); flex: none; }
+  .dot.unknown { background: transparent; border: 1.5px dashed var(--faint); }
+  .group h3 { margin: 0 0 6px; font-size: 12px; font-weight: 500; color: var(--faint); }
+  .peer { display: flex; align-items: center; gap: 10px; padding: 7px 8px; border-radius: var(--r); font-size: 13.5px; }
+  .peer.on { background: var(--surface); box-shadow: 0 0 0 1px var(--line); }
+  .peer .av { width: 26px; height: 26px; border-radius: 50%; background: var(--raised); display: grid; place-items: center; font-size: 11px; font-weight: 600; color: var(--muted); flex: none; }
+  .peer { white-space: nowrap; }
+  .peer .price { margin-left: auto; overflow: hidden; text-overflow: ellipsis; font-size: 11.5px; color: var(--faint); }
+  .peer .badge { margin-left: auto; min-width: 18px; height: 18px; border-radius: 9px; background: var(--money); color: var(--bg); font-size: 11px; display: grid; place-items: center; padding: 0 5px; }
+  .railfoot { margin-top: auto; display: flex; flex-direction: column; gap: 8px; }
+  .purse { display: flex; justify-content: space-between; align-items: baseline; padding: 10px 12px; border-radius: var(--r); background: var(--surface); box-shadow: 0 0 0 1px var(--line); font-size: 13px; }
+  .purse .num { color: var(--ink); }
+  .note-quiet { font-size: 12px; color: var(--faint); }
+
+  .main { display: flex; flex-direction: column; min-width: 0; height: 100vh; }
+  .head { display: flex; align-items: center; gap: 12px; padding: 14px 24px; border-bottom: 1px solid var(--line); }
+  .head h2 { margin: 0; font-size: 16px; font-weight: 600; }
+  .head .sub { font-size: 12.5px; color: var(--muted); }
+  .head .tools { margin-left: auto; display: flex; gap: 6px; }
+  .icon { width: 32px; height: 32px; border-radius: var(--r); border: 1px solid transparent; background: transparent; display: grid; place-items: center; color: var(--muted); }
+  .icon svg { width: 17px; height: 17px; }
+  .icon:hover { background: var(--raised); }
+
+  .log { flex: 1; overflow: auto; padding: 22px 24px 8px; display: flex; flex-direction: column; gap: 14px; }
+  .col { width: min(680px, 100%); margin: 0 auto; display: flex; flex-direction: column; gap: 14px; }
+  .day { align-self: center; font-size: 12px; color: var(--faint); }
+  .msg { display: flex; flex-direction: column; max-width: 72%; gap: 4px; }
+  .msg.in { align-self: flex-start; }
+  .msg.out { align-self: flex-end; align-items: flex-end; }
+  .bubble { padding: 9px 14px; border-radius: var(--br); background: var(--bubble-in); color: var(--bubble-in-ink); font-size: calc(var(--fs) + 0.5px); }
+  .msg.out .bubble { background: var(--bubble-out); color: var(--bubble-out-ink); }
+  .meta { font-size: 11.5px; color: var(--faint); display: flex; gap: 8px; align-items: center; }
+  .meta .amt { color: var(--muted); }
+  .msg.sending .bubble { opacity: .78; }
+  .msg.sending .amt { color: var(--money); }
+  .fresh { animation: enter var(--dur) cubic-bezier(.2,0,0,1) both; }
+  @keyframes enter { from { opacity: 0; transform: translateY(6px); } }
+  .settle { animation: settle 900ms ease-out both; }
+  @keyframes settle { 0% { background: var(--money-bg); color: var(--money); } 100% { background: transparent; } }
+
+  .dock { padding: 8px 24px 18px; }
+  .composer { width: min(680px, 100%); margin: 0 auto; display: flex; flex-direction: column; gap: 8px; }
+  .field { display: flex; align-items: center; gap: 8px; padding: 6px 6px 6px 14px; background: var(--surface); border: 1px solid var(--line); border-radius: calc(var(--r-lg)); }
+  .field input { flex: 1; border: 0; background: transparent; color: var(--ink); font: inherit; font-size: calc(var(--fs) + 0.5px); outline: none; padding: 6px 0; }
+  .field input::placeholder { color: var(--faint); }
+  .send { border: 0; border-radius: var(--r); background: var(--accent); color: var(--accent-ink); padding: 8px 16px; font-weight: 600; font-size: 13.5px; white-space: nowrap; }
+  .pricechip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; background: var(--money-bg); color: var(--money); font-size: 12px; font-family: var(--f-mono); border: 0; }
+  .breakdown { font-size: 12.5px; color: var(--muted); background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg); padding: 10px 14px; display: grid; grid-template-columns: 1fr auto; gap: 4px 24px; }
+  .breakdown .num { text-align: right; color: var(--ink); }
+  .breakdown .total { border-top: 1px solid var(--line); padding-top: 6px; margin-top: 2px; color: var(--ink); font-weight: 500; }
+  .breakdown .hint { grid-column: 1 / -1; color: var(--faint); font-size: 12px; }
+  .approve { display: flex; align-items: center; gap: 12px; font-size: 12.5px; color: var(--muted); }
+  .approve .link { margin-left: auto; background: none; border: 0; color: var(--ink); text-decoration: underline; text-underline-offset: 3px; padding: 0; font-size: 12.5px; }
+
+  /* onboarding shared */
+  .ob { height: 100vh; overflow: auto; display: grid; place-items: center; padding: 40px 24px; }
+  .ob-card { width: min(560px, 100%); display: flex; flex-direction: column; gap: 20px; }
+  .steps { display: flex; gap: 8px; align-items: center; font-size: 12.5px; color: var(--faint); }
+  .steps .s { display: flex; align-items: center; gap: 6px; }
+  .steps .s.now { color: var(--ink); }
+  .steps .pip { width: 22px; height: 4px; border-radius: 2px; background: var(--line); }
+  .steps .s.now .pip { background: var(--ink); }
+  .ob h1 { font-family: var(--f-display); font-weight: 600; font-size: 30px; line-height: 1.15; margin: 0; letter-spacing: -0.015em; }
+  .d-F .ob h1, .d-B .ob h1 { font-weight: 400; font-size: 40px; }
+  .ob .lede { color: var(--muted); margin: 0; font-size: calc(var(--fs) + 1px); max-width: 52ch; }
+  .opts { display: flex; flex-direction: column; gap: 10px; }
+  .opt { text-align: left; display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; padding: 16px 18px; border-radius: var(--r-lg); border: 1px solid var(--line); background: var(--surface); transition: border-color var(--dur), box-shadow var(--dur), transform var(--dur); }
+  .opt:hover { transform: translateY(-1px); }
+  .opt.sel { border-color: var(--ink); box-shadow: 0 0 0 1px var(--ink); }
+  .opt b { font-weight: 600; font-size: 15px; }
+  .opt p { grid-column: 1 / -1; margin: 0; color: var(--muted); font-size: 13px; }
+  .chip { width: fit-content; display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; padding: 2px 9px; border-radius: 999px; background: var(--raised); color: var(--muted); white-space: nowrap; height: fit-content; }
+  .chip.custody::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--ok); }
+  .row { display: flex; gap: 12px; align-items: center; }
+  .primary { border: 0; border-radius: var(--r); background: var(--accent); color: var(--accent-ink); padding: 11px 20px; font-weight: 600; font-size: 14px; }
+  .ghost { border: 0; background: none; color: var(--muted); padding: 11px 6px; font-size: 13.5px; text-decoration: underline; text-underline-offset: 3px; }
+
+  /* wallet shared */
+  .wallet { flex: 1; overflow: auto; padding: 28px 24px; }
+  .wcol { width: min(720px, 100%); margin: 0 auto; display: flex; flex-direction: column; gap: 22px; }
+  .bal { display: flex; flex-direction: column; gap: 6px; }
+  .bal .label { font-size: 12.5px; color: var(--muted); }
+  .bal .big { font-family: var(--f-display); font-size: 52px; font-weight: 600; letter-spacing: -0.02em; line-height: 1; font-variant-numeric: tabular-nums; }
+  .d-A .bal .big { font-weight: 500; font-size: 48px; font-feature-settings: 'tnum'; }
+  .d-F .bal .big, .d-B .bal .big { font-weight: 400; font-size: 64px; }
+  .bal .unit { font-size: 16px; color: var(--muted); font-family: var(--f-ui); font-weight: 400; margin-left: 6px; letter-spacing: 0; }
+  .split { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: var(--r-lg); overflow: hidden; }
+  .split > div { background: var(--surface); padding: 12px 14px; font-size: 12.5px; color: var(--muted); }
+  .split .v { display: block; font-size: 15px; color: var(--ink); margin-top: 2px; }
+  .split .v.unknown { color: var(--faint); }
+  .acts { display: flex; gap: 10px; }
+  .acts .primary { padding: 10px 22px; }
+  .acts .second { border: 1px solid var(--line); background: var(--surface); border-radius: var(--r); padding: 10px 22px; font-weight: 600; font-size: 14px; }
+  .tx { display: flex; flex-direction: column; }
+  .tx h4 { margin: 0 0 4px; font-size: 12px; font-weight: 500; color: var(--faint); }
+  .tx .r { display: grid; grid-template-columns: 1fr auto; gap: 2px 16px; padding: 11px 0; border-bottom: 1px solid var(--line); font-size: 13.5px; }
+  .tx .r .what { color: var(--ink); }
+  .tx .r .why { font-size: 12px; color: var(--faint); }
+  .tx .r .num { text-align: right; }
+  .tx .r .num.minus { color: var(--ink); }
+  .tx .r .num.plus { color: var(--ok); }
+  .tx .r .num.pending { color: var(--faint); }
+
+  /* ---------- direction-specific variations ---------- */
+  /* A: hairline instrument, money ink only */
+  .d-A .bubble { box-shadow: 0 0 0 1px var(--line); }
+  .d-A .msg.out .bubble { box-shadow: none; }
+  .d-A .send { background: var(--ink); }
+
+  /* B: ledger paper, ruled lines, serif headings, receipts */
+  .d-B .log { background-image: repeating-linear-gradient(to bottom, transparent 0 31px, color-mix(in srgb, var(--line) 55%, transparent) 31px 32px); }
+  .d-B .bubble { box-shadow: 0 1px 0 var(--line); }
+  .d-B .receipt { font-family: var(--f-mono); font-size: 11px; color: var(--faint); border-top: 1px dashed var(--line); padding-top: 3px; }
+  .d-B .pricenote { font-family: var(--f-display); font-style: italic; color: var(--muted); font-size: 13.5px; }
+  .d-B .pricenote .num { font-style: normal; color: var(--money); }
+  .d-B .tx .r { font-family: var(--f-ui); }
+  .d-B .ledger-head { display: grid; grid-template-columns: 90px 1fr 110px; font-size: 12px; color: var(--faint); border-bottom: 2px solid var(--ink); padding-bottom: 6px; }
+  .d-B .ledger .r { grid-template-columns: 90px 1fr 110px; }
+  .d-B .ob { place-items: stretch; padding: 0; }
+  .letter { display: grid; grid-template-columns: 1fr 300px; min-height: 100vh; }
+  .letter .page { padding: 72px 72px 48px; display: flex; flex-direction: column; gap: 22px; max-width: 720px; }
+  .letter aside { background: var(--rail); border-left: 1px solid var(--line); padding: 72px 28px; font-size: 13.5px; color: var(--muted); display: flex; flex-direction: column; gap: 16px; }
+  .letter aside h4 { font-family: var(--f-display); color: var(--ink); font-size: 18px; margin: 0; font-weight: 400; }
+
+  /* C: wallet-native, pills, review row */
+  .d-C .send, .d-C .primary { border-radius: 999px; }
+  .d-C .review { display: flex; gap: 0; border: 1px solid var(--line); border-radius: 14px; overflow: hidden; font-size: 12.5px; }
+  .d-C .review > div { flex: 1; padding: 8px 12px; background: var(--surface); color: var(--muted); }
+  .d-C .review > div + div { border-left: 1px solid var(--line); }
+  .d-C .review .num { display: block; color: var(--ink); font-weight: 600; font-size: 14px; }
+  .d-C .review .max .num { color: var(--money); }
+  .d-C .bal { align-items: center; text-align: center; padding: 20px 0 8px; }
+  .d-C .bal .big { font-size: 60px; font-weight: 700; }
+  .d-C .acts { justify-content: center; }
+  .d-C .acts .primary, .d-C .acts .second { border-radius: 999px; min-width: 150px; }
+  .d-C .split { border-radius: 18px; }
+  .unit-toggle { display: inline-flex; gap: 2px; padding: 3px; border-radius: 999px; background: var(--surface); border: 1px solid var(--line); font-size: 12px; }
+  .unit-toggle span { padding: 3px 10px; border-radius: 999px; color: var(--muted); }
+  .unit-toggle span.on { background: var(--raised); color: var(--ink); }
+  .liq { height: 8px; border-radius: 4px; background: var(--raised); overflow: hidden; display: flex; }
+  .liq i { background: var(--accent); }
+  .ob-steps-c { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .ob-steps-c div { padding: 10px 12px; border-radius: 12px; background: var(--surface); font-size: 12.5px; color: var(--faint); }
+  .ob-steps-c div.now { background: var(--money-bg); color: var(--ink); }
+  .ob-steps-c b { display: block; font-size: 13.5px; color: inherit; }
+
+  /* D: friendly messenger */
+  .d-D .head { padding: 12px 20px; }
+  .d-D .head .av { width: 36px; height: 36px; border-radius: 50%; background: #ffd9bf; color: #8a3a00; display: grid; place-items: center; font-weight: 700; }
+  .d-D .bubble { padding: 10px 16px; }
+  .d-D .msg.in + .msg.in .bubble { border-top-left-radius: 6px; }
+  .d-D .msg.out + .msg.out .bubble { border-top-right-radius: 6px; }
+  .d-D .field { border-radius: 26px; padding-left: 18px; }
+  .d-D .send { border-radius: 20px; padding: 9px 18px; }
+  .d-D .send small { font-weight: 500; opacity: .85; margin-left: 4px; }
+  .chatty { width: min(600px, 100%); display: flex; flex-direction: column; gap: 14px; }
+  .chatty .say { align-self: flex-start; max-width: 85%; padding: 12px 18px; border-radius: 20px; background: var(--bubble-in); font-size: 15px; }
+  .chatty .say.small { font-size: 13.5px; color: var(--muted); }
+  .chatty .pick { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 6px; }
+  .chatty .pick .opt { border-radius: 20px; grid-template-columns: 1fr; align-content: start; }
+  .chatty .what { font-size: 13px; color: var(--money); background: none; border: 0; padding: 0; text-decoration: underline; text-underline-offset: 3px; }
+  .wcard { border-radius: 24px; padding: 24px; background: linear-gradient(135deg, var(--accent), color-mix(in srgb, var(--accent) 70%, #000)); color: var(--accent-ink); display: flex; flex-direction: column; gap: 6px; }
+  .wcard .big { font-size: 44px; font-weight: 700; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+  .wcard .chip { background: rgba(255,255,255,.2); color: inherit; width: fit-content; }
+  .wcard .chip.custody::before { background: currentColor; }
+  .wcard .acts { margin-top: 12px; }
+  .wcard .acts button { border: 0; border-radius: 999px; padding: 9px 20px; font-weight: 600; background: rgba(255,255,255,.95); color: #14171c; }
+  .wcard .acts button + button { background: rgba(255,255,255,.2); color: inherit; }
+
+  /* E: command deck */
+  .d-E { font-size: 13px; }
+  .d-E .frame { grid-template-columns: 232px 1fr; }
+  .d-E .rail { padding: 12px 10px; gap: 12px; }
+  .d-E .peer { padding: 4px 8px; font-size: 12.5px; }
+  .d-E .peer .av { display: none; }
+  .d-E .log { padding: 12px 16px; gap: 2px; }
+  .d-E .col { width: 100%; gap: 2px; }
+  .d-E .msg { max-width: none; width: 100%; flex-direction: row; align-items: baseline; gap: 12px; padding: 3px 6px; border-radius: 4px; }
+  .d-E .msg:hover { background: var(--surface); }
+  .d-E .msg.out { align-items: baseline; }
+  .d-E .bubble { padding: 0; flex: 1; font-size: 13px; }
+  .d-E .msg .who { width: 52px; color: var(--muted); font-size: 12px; flex: none; }
+  .d-E .msg.out .who { color: var(--accent); }
+  .d-E .meta { order: 3; font-family: var(--f-mono); font-size: 11.5px; min-width: 160px; justify-content: flex-end; }
+  .d-E .msg .t { order: -1; font-family: var(--f-mono); font-size: 11.5px; color: var(--faint); width: 40px; }
+  .d-E .day { align-self: flex-start; font-family: var(--f-mono); padding: 8px 6px 4px; }
+  .d-E .dock { padding: 0; border-top: 1px solid var(--line); }
+  .d-E .composer { width: 100%; gap: 0; }
+  .d-E .field { border: 0; border-radius: 0; background: transparent; padding: 10px 16px; }
+  .d-E .send { border-radius: 4px; padding: 5px 10px; font-size: 12px; }
+  .kbd { font-family: var(--f-mono); font-size: 11px; padding: 1px 5px; border-radius: 3px; border: 1px solid var(--line); color: var(--muted); background: var(--surface); }
+  .statusbar { display: flex; gap: 0; font-family: var(--f-mono); font-size: 11.5px; color: var(--muted); background: var(--rail); border-top: 1px solid var(--line); }
+  .statusbar span { padding: 5px 12px; border-right: 1px solid var(--line); }
+  .statusbar .m { color: var(--money); }
+  .statusbar .right { margin-left: auto; border-right: 0; border-left: 1px solid var(--line); }
+  .checklist { display: flex; flex-direction: column; gap: 2px; font-size: 12.5px; }
+  .checklist div { display: flex; gap: 8px; padding: 5px 8px; border-radius: 4px; color: var(--muted); }
+  .checklist div.now { background: var(--surface); color: var(--ink); }
+  .checklist div { white-space: nowrap; }
+  .checklist .box { font-family: var(--f-mono); width: 24px; flex: none; color: var(--faint); }
+  .checklist div.done .box { color: var(--ok); }
+  .palette { width: min(620px, 100%); background: var(--surface); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 24px 48px rgba(0,0,0,.35); overflow: hidden; }
+  .palette input { width: 100%; border: 0; border-bottom: 1px solid var(--line); background: transparent; color: var(--ink); font: inherit; font-size: 15px; padding: 14px 16px; outline: none; }
+  .palette .it { display: grid; grid-template-columns: 1fr auto; gap: 2px 12px; padding: 9px 16px; font-size: 13px; }
+  .palette .it.sel { background: var(--raised); }
+  .palette .it small { grid-column: 1; color: var(--faint); font-size: 12px; }
+  .palette .grp { padding: 8px 16px 4px; font-size: 11.5px; color: var(--faint); }
+  .tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  .tbl th { text-align: left; font-weight: 500; color: var(--faint); padding: 6px 8px; border-bottom: 1px solid var(--line); }
+  .tbl td { padding: 6px 8px; border-bottom: 1px solid var(--line); }
+  .tbl td.num, .tbl th.num { text-align: right; }
+  .kv { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  .kv div { background: var(--surface); padding: 10px 12px; font-size: 12px; color: var(--faint); }
+  .kv b { display: block; font-family: var(--f-mono); font-weight: 500; font-size: 16px; color: var(--ink); }
+
+  /* F: ember */
+  .d-F .msg.out .bubble { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--money) 22%, transparent); }
+  .d-F .send { background: var(--money); color: #1a0f05; }
+  .d-F[data-theme='light'] .send { color: #fff; }
+  .d-F .opt.sel { border-color: var(--money); box-shadow: 0 0 0 1px var(--money); }
+  .d-F .steps .s.now .pip { background: var(--money); }
+  .d-F .ember { position: relative; isolation: isolate; }
+  .d-F .ember::after { content: ''; position: absolute; inset: -120px -160px auto auto; width: 360px; height: 360px; z-index: -1; border-radius: 50%; background: radial-gradient(circle, color-mix(in srgb, var(--money) 22%, transparent), transparent 70%); pointer-events: none; }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: 1ms !important; transition-duration: 1ms !important; }
+    .opt:hover { transform: none; }
+  }
+  @media (max-width: 760px) {
+    .frame { grid-template-columns: 1fr; } .rail { display: none; }
+    .letter { grid-template-columns: 1fr; } .letter .page { padding: 40px 20px; }
+  }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script>
+const q = new URLSearchParams(location.search);
+const id = (q.get('d') || 'F').toUpperCase();
+const D = window.DIRECTIONS[id];
+const screen = q.get('s') || 'chat';
+const theme = q.get('t') || D.primary;
+const T = D[theme];
+const root = document.documentElement;
+document.body.className = 'd-' + id;
+document.body.dataset.theme = theme;
+document.title = `BitSov · ${D.name}`;
+const map = { bg: 'bg', rail: 'rail', surface: 'surface', raised: 'raised', line: 'line', ink: 'ink', muted: 'muted', faint: 'faint', accent: 'accent', accentInk: 'accent-ink', money: 'money', moneyBg: 'money-bg', ok: 'ok', bubbleIn: 'bubble-in', bubbleInInk: 'bubble-in-ink', bubbleOut: 'bubble-out', bubbleOutInk: 'bubble-out-ink' };
+for (const [k, v] of Object.entries(map)) root.style.setProperty('--' + v, T[k]);
+root.style.setProperty('--f-ui', D.fonts.ui);
+root.style.setProperty('--f-display', D.fonts.display);
+root.style.setProperty('--f-mono', D.fonts.mono);
+root.style.setProperty('--r', D.radius === '999px' ? '12px' : D.radius);
+root.style.setProperty('--r-lg', D.radiusLg);
+root.style.setProperty('--br', D.bubbleRadius);
+root.style.setProperty('--dur', D.dur);
+root.style.setProperty('--fs', { dense: '13px', compact: '13.5px', medium: '14px', roomy: '14.5px', airy: '15px' }[D.density]);
+root.style.colorScheme = theme;
+
+const fmt = (n) => new Intl.NumberFormat('en-US').format(n);
+const ico = {
+  call: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4h4l2 5-2.5 1.5a11 11 0 0 0 5 5L15 13l5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2"/></svg>',
+  video: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m16 13 5 3V8l-5 3z"/><rect x="2" y="6" width="14" height="12" rx="2"/></svg>',
+  people: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M16 4.5a3.5 3.5 0 0 1 0 7M18 14.5a6.5 6.5 0 0 1 3.5 5.5"/></svg>',
+  more: '<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg>',
+  plus: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>',
+};
+
+// ---------- shared content (honest sample copy) ----------
+const peers = [
+  { n: 'Maya', i: 'M', p: '2 sats', on: true },
+  { n: 'Josh', i: 'J', p: '1 sat', badge: 1 },
+  { n: 'Gamma VM', i: 'G', p: '1 sat' },
+  { n: 'New contact', i: '?', p: 'price unknown' },
+];
+const messages = [
+  { day: 'Sunday 27 September' },
+  { dir: 'in', t: '10:12', text: 'Morning. My node came back up on the new VM.', amt: '+1 sat', receipt: 'received 1 sat' },
+  { dir: 'out', t: '10:15', text: 'Seeing you. The channel looks healthy from here.', amt: '3 sats', detail: '2 + 1 routing', receipt: 'paid 2 sats + 1 routing = 3 sats' },
+  { dir: 'in', t: '10:17', text: 'Raised my price to 2 sats a message. The spam test last night was loud.', amt: '+1 sat', receipt: 'received 1 sat' },
+  { dir: 'out', t: '10:21', text: 'Fair. Two sats is still nothing for a real conversation.', amt: '2 sats', detail: '2 + 0 routing', receipt: 'paid 2 sats + 0 routing = 2 sats' },
+  { day: 'Today' },
+  { dir: 'out', t: '09:02', text: 'Sending the deck over now.', sending: true, amt: 'up to 7 sats', receipt: 'routing… ceiling 7 sats' },
+];
+
+function rail(active) {
+  const nodeLine = id === 'E'
+    ? `<div class="nodeline"><span class="dot"></span> node <span class="num">this-mac</span> · running</div>`
+    : `<div class="nodeline"><span class="dot"></span> Your node is running on this Mac</div>`;
+  return `<aside class="rail">
+    <div class="mark">BitSov</div>
+    ${nodeLine}
+    <div class="group"><h3>${id === 'E' ? 'peers <span class="kbd">⌘1</span>' : 'People'}</h3>
+      ${peers.map((p) => `<div class="peer ${active === 'chat' && p.on ? 'on' : ''}"><span class="av">${p.i}</span>${p.n}${p.badge ? `<span class="badge">${p.badge}</span>` : `<span class="price ${id === 'E' ? 'num' : ''}">${p.p}</span>`}</div>`).join('')}
+    </div>
+    <div class="group"><h3>${id === 'E' ? 'rooms <span class="kbd">⌘2</span>' : 'Rooms'}</h3><div class="note-quiet">Your node doesn’t support rooms yet.</div></div>
+    <div class="railfoot">
+      <div class="purse" style="${active === 'wallet' ? 'box-shadow:0 0 0 1.5px var(--ink)' : ''}"><span>Wallet</span><span class="num">${fmt(482500)} sats</span></div>
+      ${id === 'E' ? `<div class="note-quiet"><span class="kbd">⌘K</span> anything · <span class="kbd">⌘N</span> new contact</div>` : ''}
+    </div>
+  </aside>`;
+}
+
+function msgHTML(m, i) {
+  if (m.day) return `<div class="day">${m.day}</div>`;
+  const cls = `msg ${m.dir} ${m.sending ? 'sending' : ''}`;
+  if (id === 'E') {
+    return `<div class="${cls}"><span class="t">${m.t}</span><span class="who">${m.dir === 'in' ? 'maya' : 'you'}</span><div class="bubble">${m.text}</div><div class="meta"><span class="amt">${m.sending ? '⟳ ≤7 sat' : m.amt.replace('sats', 'sat')}</span>${m.detail ? `<span>${m.detail.replace(' routing', 'r')}</span>` : ''}</div></div>`;
+  }
+  let meta;
+  if (id === 'B') meta = `<div class="receipt">${m.t} · ${m.receipt}</div>`;
+  else if (m.sending) meta = `<div class="meta"><span class="amt">Sending · ${m.amt}</span></div>`;
+  else meta = `<div class="meta"><span>${m.t}</span><span class="amt ${id === 'A' ? 'num' : ''}">${m.amt}</span>${m.detail && id !== 'D' ? `<span>${m.detail}</span>` : ''}</div>`;
+  return `<div class="${cls}"><div class="bubble">${m.text}</div>${meta}</div>`;
+}
+
+function priceBlock() {
+  const v = D.variants.price;
+  const breakdown = `<div class="breakdown">
+      <span>Maya’s price</span><span class="num">2 sats</span>
+      <span>Routing fee, at most</span><span class="num">5 sats</span>
+      <span class="total">You pay at most</span><span class="num total">7 sats</span>
+      <span class="hint">A ceiling, not a charge. You pay what the route actually costs. On this path routing can cost more than the message itself.</span>
+    </div>`;
+  const approve = `<div class="approve"><span>Messages ask before paying until you set a daily limit.</span><button class="link">Allow up to 2,000 sats a day</button></div>`;
+  if (v === 'chip') return { inField: `<button class="pricechip" aria-expanded="true">up to 7 sats</button>`, below: breakdown + approve, send: 'Send' };
+  if (v === 'note') return { inField: '', below: `<div class="pricenote">This message costs up to <span class="num">7 sats</span>: Maya’s 2 sats plus at most 5 for routing. You pay what the route actually costs.</div>` + approve, send: 'Send' };
+  if (v === 'review') return { inField: '', below: `<div class="review"><div>Message<span class="num">2 sats</span></div><div>Routing fee<span class="num">≤ 5 sats</span></div><div class="max">Most you pay<span class="num">7 sats</span></div></div><div class="approve"><span>Routing may cost more than the message on this path. You pay the actual route cost.</span></div>` + approve, send: 'Send' };
+  if (v === 'button') return { inField: '', below: `<div class="approve"><span>Up to 7 sats: Maya’s 2-sat price plus at most 5 in routing.</span><button class="link">Allow 2,000 sats a day</button></div>`, send: 'Send <small>up to 7 sats</small>' };
+  if (v === 'statusbar') return { inField: `<span class="kbd">↵</span>`, below: '', send: 'send', status: `<div class="statusbar"><span>maya</span><span>price 2 sat</span><span>routing ≤5 sat</span><span class="m">ceiling 7 sat</span><span>daily limit not set · <u>⌘B</u></span><span class="right">node this-mac · block 860,124</span></div>` };
+}
+
+function chat() {
+  const p = priceBlock();
+  const head = id === 'D'
+    ? `<div class="head"><span class="av">M</span><div><h2>Maya</h2><div class="sub">2 sats a message · last paid message 10:21</div></div><div class="tools"><button class="icon" title="Call, up to 21 sats">${ico.call}</button><button class="icon" title="Video call">${ico.video}</button><button class="icon">${ico.more}</button></div></div>`
+    : `<div class="head"><div><h2>Maya</h2><div class="sub">${id === 'E' ? '<span class="num">02a1c4…9f3e</span> · price 2 sat/msg · last settled 10:21' : 'Reaching Maya costs 2 sats a message'}</div></div><div class="tools"><button class="icon" title="Call">${ico.call}</button><button class="icon" title="Video">${ico.video}</button><button class="icon" title="Meeting">${ico.people}</button></div></div>`;
+  return `<div class="frame">${rail('chat')}<main class="main">${head}
+    <div class="log"><div class="col">${messages.map(msgHTML).join('')}</div></div>
+    <div class="dock"><form class="composer" onsubmit="return send(event)">
+      <div class="field">${id === 'E' ? '<span class="kbd">›</span>' : `<button type="button" class="icon" title="Attach, pay, request">${ico.plus}</button>`}
+        <input id="draft" value="Want to go over it before the call?" placeholder="Message Maya" />${p.inField}<button class="send">${p.send}</button></div>
+      ${p.below}
+    </form></div>${p.status || ''}
+  </main></div>`;
+}
+
+function onboarding() {
+  const v = D.variants.onboarding;
+  const optLocal = { t: 'This Mac', d: 'BitSov starts a node on this Mac. It runs while the Mac is awake. Your keys stay on this Mac.', c: 'Self-custody, this Mac' };
+  const optRemote = { t: 'A computer you control', d: 'A home server or a cloud VM that already runs a BitSov node. Paste its pairing link. Keys stay on that machine.', c: 'Self-custody, your server' };
+  const opt = (o, sel) => `<button class="opt ${sel ? 'sel' : ''}" onclick="pick(this)"><b>${o.t}</b><span class="chip custody">${o.c}</span><p>${o.d}</p></button>`;
+  const stepsBar = `<div class="steps"><span class="s now"><span class="pip"></span>Your node</span><span class="s"><span class="pip"></span>Your identity</span><span class="s"><span class="pip"></span>Add sats (optional)</span></div>`;
+  if (v === 'card') return `<div class="frame solo"><div class="ob"><div class="ob-card ember">
+      <div class="mark">BitSov</div>${stepsBar}
+      <h1>Where should your node run?</h1>
+      <p class="lede">Every message you send is a small bitcoin payment to the person you’re writing to. Your node makes those payments, so it needs a home first.</p>
+      <div class="opts">${opt(optLocal, true)}${opt(optRemote, false)}</div>
+      <div class="row"><button class="primary">Start node on this Mac</button><button class="ghost">Restore from a recovery phrase</button></div>
+    </div></div></div>`;
+  if (v === 'letter') return `<div class="frame solo"><div class="ob"><div class="letter"><div class="page">
+      <div class="mark">BitSov</div>
+      <div class="steps"><span class="s now">Page 1 of 3</span></div>
+      <h1>Your messages travel as tiny payments.</h1>
+      <p class="lede">When you write to someone, your node pays them a few sats, the price they set. No account, no company in between. First, choose where your node will live.</p>
+      <div class="opts">${opt(optLocal, true)}${opt(optRemote, false)}</div>
+      <div class="row"><button class="primary">Continue with this Mac</button><button class="ghost">I have a recovery phrase</button></div>
+    </div><aside>
+      <h4>What’s a node?</h4><p>The part of BitSov that holds your sats and makes payments. It runs on your Mac or on a server you rent.</p>
+      <h4>Who holds the keys?</h4><p>Whoever runs the node. In both options above, that’s you, so a backup of your recovery phrase matters.</p>
+      <h4>Can I change this later?</h4><p>Yes. You can pair this app with a different node from settings.</p>
+    </aside></div></div></div>`;
+  if (v === 'wallet') return `<div class="frame solo"><div class="ob"><div class="ob-card">
+      <div class="mark">BitSov</div>
+      <div class="ob-steps-c"><div class="now"><b>1. Start your node</b>Where it runs</div><div><b>2. Add sats</b>Optional, any time</div><div><b>3. First contact</b>Pay to say hello</div></div>
+      <h1>Start your node</h1>
+      <p class="lede">BitSov is a Lightning wallet that talks. Each message is a payment, and your node makes them.</p>
+      <div class="opts">${opt(optLocal, true)}${opt(optRemote, false)}</div>
+      <div class="row"><button class="primary">Start node on this Mac</button><button class="ghost">Restore</button></div>
+      <p class="note-quiet">After you add sats, we’ll remind you to save your recovery phrase. Opening your first channel has a one-time on-chain fee; you’ll see it before you approve.</p>
+    </div></div></div>`;
+  if (v === 'chatty') return `<div class="frame solo"><div class="ob"><div class="chatty">
+      <div class="mark">BitSov</div>
+      <div class="say">Hi. In BitSov, every message is a tiny bitcoin payment to the person you’re talking to.</div>
+      <div class="say">That needs a node, a small program that holds your sats and pays for you. Where should it run?</div>
+      <div class="pick">${opt(optLocal, true)}${opt(optRemote, false)}</div>
+      <button class="what">What’s the difference?</button>
+      <div class="row"><button class="primary">Start on this Mac</button><button class="ghost">Restore from a recovery phrase</button></div>
+      <div class="say small">Step 1 of 3. Next: your identity, then sats if you want them now.</div>
+    </div></div></div>`;
+  if (v === 'checklist') return `<div class="frame"><aside class="rail"><div class="mark">BitSov</div>
+      <div class="nodeline"><span class="dot unknown"></span> node · not started</div>
+      <div class="group"><h3>setup</h3><div class="checklist">
+        <div class="now"><span class="box">[ ]</span>Choose where the node runs</div>
+        <div><span class="box">[ ]</span>Create or restore identity</div>
+        <div><span class="box">[ ]</span>Add sats <span class="note-quiet">optional</span></div>
+        <div><span class="box">[ ]</span>First contact</div>
+      </div></div>
+      <div class="railfoot"><div class="note-quiet"><span class="kbd">⌘K</span> to search every action</div></div></aside>
+    <main class="main"><div class="ob"><div class="palette">
+      <input value="node" />
+      <div class="grp">Node location</div>
+      <div class="it sel"><span>Start node on this Mac</span><span class="kbd">↵</span><small>Self-custody. Keys stay on this Mac.</small></div>
+      <div class="it"><span>Pair a node on another computer…</span><span class="kbd">⌘P</span><small>Self-custody. Paste a pairing link from your server or VM.</small></div>
+      <div class="it"><span>Restore identity from recovery phrase…</span><span class="kbd">⌘R</span><small>Masked input. The phrase goes straight to your node.</small></div>
+      <div class="grp">Help</div>
+      <div class="it"><span>What does a node do?</span><span class="kbd">?</span></div>
+    </div></div></main></div>`;
+}
+
+function wallet() {
+  const v = D.variants.wallet;
+  const custody = `<span class="chip custody">Self-custody, keys on this Mac</span>`;
+  const split = `<div class="split"><div>Spendable<span class="v unknown">Not reported</span></div><div>Reserved for channel fees<span class="v unknown">Not reported</span></div><div>Closing<span class="v unknown">Not reported</span></div></div>`;
+  const rows = [
+    ['Today', [['Message to Maya', '2 sats + 1 routing', '−3', 'minus'], ['Message from Josh', 'their price paid to you', '+1', 'plus'], ['On-chain deposit', 'waiting for confirmations', '+100,000', 'pending']]],
+    ['Sunday 27 September', [['Message to Maya', '2 sats + 0 routing', '−2', 'minus'], ['Message from Maya', 'their price paid to you', '+1', 'plus'], ['Invoice paid: coffee', 'Lightning payment', '−4,200', 'minus']]],
+  ];
+  const txHTML = rows.map(([d, rs]) => `<div class="tx"><h4>${d}</h4>${rs.map(([w, y, n, c]) => `<div class="r"><span class="what">${w}</span><span class="num ${c}">${n}</span><span class="why">${y}</span></div>`).join('')}</div>`).join('');
+  const head = `<div class="head"><h2>Wallet</h2><div class="tools"><button class="icon" title="Refresh">${ico.more}</button></div></div>`;
+  let body;
+  if (v === 'hero') body = `<div class="wcol">
+      <div class="bal"><span class="label">Total reported by your node</span><span class="big">${fmt(482500)}<span class="unit">sats</span></span>${id === 'C' ? `<div style="margin-top:10px" class="row"><span class="unit-toggle"><span class="on">sats</span><span>₿</span><span>hide</span></span>${custody}</div><div class="note-quiet">No exchange rate available, so no fiat value is shown.</div>` : `<div style="margin-top:8px">${custody}</div>`}</div>
+      ${split}
+      <div class="acts"><button class="primary">Receive</button><button class="second">Send</button></div>
+      ${id === 'C' ? `<div><div class="row" style="justify-content:space-between;font-size:12.5px;color:var(--muted);margin-bottom:6px"><span>Can send 400,000</span><span>Can receive 450,000</span></div><div class="liq"><i style="width:47%"></i></div></div>` : ''}
+      ${txHTML}</div>`;
+  if (v === 'ledger') body = `<div class="wcol">
+      <div class="bal"><span class="label">Balance, as your node reports it</span><span class="big">${fmt(482500)}<span class="unit">sats</span></span><div style="margin-top:8px">${custody}</div></div>
+      ${split}
+      <div class="acts"><button class="primary">Receive</button><button class="second">Send</button></div>
+      <div class="tx ledger"><div class="ledger-head"><span>Date</span><span>Entry</span><span style="text-align:right">Sats</span></div>
+      ${rows.flatMap(([d, rs]) => rs.map(([w, y, n, c]) => `<div class="r"><span class="why">${d === 'Today' ? 'Today' : '27 Sep'}</span><span class="what">${w}<br><span class="why">${y}</span></span><span class="num ${c}">${n}</span></div>`)).join('')}</div></div>`;
+  if (v === 'card') body = `<div class="wcol">
+      <div class="wcard"><span style="opacity:.85;font-size:13px">Your node reports</span><span class="big">${fmt(482500)} sats</span><span class="chip custody">Self-custody, keys on this Mac</span><div class="acts"><button>Receive</button><button>Send</button></div></div>
+      <div class="note-quiet">Spendable, reserved and closing amounts are not reported by this node yet.</div>
+      ${txHTML}</div>`;
+  if (v === 'table') body = `<div class="wcol" style="width:100%;max-width:980px">
+      <div class="kv"><div>total (node-reported)<b>482,500</b></div><div>spendable<b style="color:var(--faint)">—</b></div><div>can send / receive<b>400k / 450k</b></div><div>custody<b style="font-size:13px">self · this-mac</b></div></div>
+      <table class="tbl"><thead><tr><th>time</th><th>kind</th><th>peer</th><th class="num">amount</th><th class="num">routing</th><th>state</th></tr></thead><tbody>
+        <tr><td class="num">09:02</td><td>msg out</td><td>maya</td><td class="num">−2</td><td class="num">≤5</td><td style="color:var(--money)">routing</td></tr>
+        <tr><td class="num">08:40</td><td>msg in</td><td>josh</td><td class="num">+1</td><td class="num">—</td><td>settled</td></tr>
+        <tr><td class="num">08:12</td><td>deposit</td><td>on-chain</td><td class="num">+100,000</td><td class="num">—</td><td>0/3 conf</td></tr>
+        <tr><td class="num">Sep 27</td><td>msg out</td><td>maya</td><td class="num">−2</td><td class="num">0</td><td>settled</td></tr>
+        <tr><td class="num">Sep 27</td><td>invoice</td><td>coffee</td><td class="num">−4,200</td><td class="num">3</td><td>settled</td></tr>
+      </tbody></table>
+      <div class="note-quiet">— = not reported by your node. <span class="kbd">R</span> receive <span class="kbd">S</span> send <span class="kbd">⌘E</span> export</div></div>`;
+  return `<div class="frame">${rail('wallet')}<main class="main">${head}<div class="wallet">${body}</div>${id === 'E' ? `<div class="statusbar"><span>wallet</span><span class="m">self-custody</span><span class="right">node this-mac · block 860,124</span></div>` : ''}</main></div>`;
+}
+
+document.getElementById('app').innerHTML = screen === 'onboarding' ? onboarding() : screen === 'wallet' ? wallet() : chat();
+
+// ---------- tiny interactions (motion demo) ----------
+window.pick = (el) => { el.parentElement.querySelectorAll('.opt').forEach((o) => o.classList.toggle('sel', o === el)); };
+window.send = (e) => {
+  e.preventDefault();
+  const input = document.getElementById('draft');
+  if (!input.value.trim()) return false;
+  const col = document.querySelector('.log .col');
+  const wrap = document.createElement('div');
+  wrap.innerHTML = msgHTML({ dir: 'out', t: 'now', text: input.value, sending: true, amt: 'up to 7 sats', receipt: 'routing… ceiling 7 sats' });
+  const el = wrap.firstElementChild; el.classList.add('fresh'); col.appendChild(el);
+  input.value = '';
+  el.scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+  setTimeout(() => {
+    el.classList.remove('sending');
+    const settled = msgHTML({ dir: 'out', t: 'now', text: el.querySelector('.bubble').textContent, amt: '3 sats', detail: '2 + 1 routing', receipt: 'paid 2 sats + 1 routing = 3 sats' });
+    const w2 = document.createElement('div'); w2.innerHTML = settled;
+    const meta = el.querySelector('.meta, .receipt'); const next = w2.firstElementChild.querySelector('.meta, .receipt');
+    next.classList.add('settle'); meta.replaceWith(next);
+  }, 1400);
+  return false;
+};
+</script>
+</body>
+</html>
