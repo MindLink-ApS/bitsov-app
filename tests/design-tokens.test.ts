@@ -66,3 +66,13 @@ describe('design tokens', () => {
     for (const t of Object.values(themes)) expect(t['--bubble-out-bg']).not.toBe(t['--accent']);
   });
 });
+
+describe('G6 disclosure edge', () => {
+  it('no later panel rule overrides the trust disclosure border', () => {
+    const plain = css.replace(/\/\*[\s\S]*?\*\//g, '');
+    expect(plain).toMatch(/\.disclosure\s*\{[^}]*border-left:\s*3px solid var\(--money\)/);
+    // A bare `.panel { border… }` after the disclosure rule would win the cascade.
+    const after = plain.slice(plain.search(/\.disclosure\s*\{/));
+    expect(after).not.toMatch(/(^|\n)\.panel\s*\{[^}]*\bborder\s*:/);
+  });
+});
