@@ -115,6 +115,25 @@ export const ADMISSION_MAX_MSAT = 100_000;
  * this node's own price, labelled as an estimate — never passed off as theirs.
  * A room costs the sum of each member's own price, from `room_quote`.
  */
+/**
+ * The parts of a peer message ceiling, for display only. Returned only when the
+ * peer's own fresh price plus the routing allowance is exactly the ceiling the
+ * composer shows; any other case (estimate, stale table, door or readmission
+ * price, rooms) has no breakdown, so nothing is shown rather than a guess.
+ */
+export function priceBreakdown(
+  quote: PriceQuote | null,
+  ceilingMsat: number | null,
+): { priceMsat: number; routingMsat: number; ceilingMsat: number } | null {
+  if (!quote || ceilingMsat === null || quote.peer_msat === null || quote.peer_stale) return null;
+  const routing = quote.max_routing_fee_msat;
+  if (!Number.isSafeInteger(quote.peer_msat) || quote.peer_msat < 0) return null;
+  if (routing === undefined || !Number.isSafeInteger(routing) || routing < 0) return null;
+  const price = Math.max(quote.peer_msat, MIN_PAYMENT_MSAT);
+  if (price + routing !== ceilingMsat) return null;
+  return { priceMsat: price, routingMsat: routing, ceilingMsat };
+}
+
 export function costToSend(
   track: TrackRef,
   quote: PriceQuote | null,

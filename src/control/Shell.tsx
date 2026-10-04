@@ -81,6 +81,7 @@ import {
   type Deliveries,
   type Threads,
   type Unread,
+  priceBreakdown,
 } from './state';
 import type {
   CallQuote,
@@ -3525,6 +3526,11 @@ function Composer(props: {
     const receipt = result.value as SendReceipt;
     setPaidLine(paidAmount(receipt.amount_msat + (receipt.readmission_msat ?? 0), receipt.fee_paid_msat));
   };
+  // Display only: the parts of the ceiling when they provably add up to it.
+  const breakdown = () =>
+    mode() !== 'message' || room() || doorWanted() || readmitPrice() || paidLine() || priceProblem()
+      ? null
+      : priceBreakdown(props.quote, messageShown().msat);
   const priceLine = () => {
     if (paidLine()) return paidLine();
     if (priceProblem()) return priceProblem();
@@ -4160,8 +4166,9 @@ function Composer(props: {
           </button>
         </Show>
       </div>
+      <div class="composer-meta">
       <Show when={mode() === 'message'}>
-        <div class="send-price">
+        <div class="send-price" classList={{ priced: !priceProblem() }}>
           <span data-send-price aria-live="polite">{priceLine()}</span>
           <Show when={priceProblem() && priceProblem() !== 'price loading…'}>
             {' '}<button type="button" class="link" data-price-retry disabled={busy()} onClick={() => {
@@ -4171,6 +4178,49 @@ function Composer(props: {
           </Show>
         </div>
       </Show>
+      <details class="composer-info" data-composer-info>
+        <summary aria-label="Cost and rules" title="Cost and rules"><span aria-hidden="true">ⓘ</span></summary>
+        <Show when={breakdown()}>
+          {(b) => (
+            <>
+              <dl class="price-breakdown" data-price-breakdown>
+                <dt>{props.name}’s price</dt>
+                <dd>{fmtAmount(b().priceMsat)}</dd>
+                <dt>Routing fee, at most</dt>
+                <dd>{fmtAmount(b().routingMsat)}</dd>
+                <dt class="total">You pay at most</dt>
+                <dd class="total">{fmtAmount(b().ceilingMsat)}</dd>
+              </dl>
+              <p class="hint price-note">
+                A ceiling, not a charge: the amount actually paid shows under the message.
+                <Show when={b().routingMsat >= b().priceMsat}> On this path routing can cost more than the message itself.</Show>
+              </p>
+            </>
+          )}
+        </Show>
+        <Show when={mode() === 'message' || mode() === 'file'}>
+          <div class="composer-bar cost-only">
+            <div class="cost" data-cost>
+              <span class="label">Cost to send</span>
+              <Show when={shown().msat !== null} fallback={<span class="sats">…</span>}>
+                <span class="sats" data-cost-msat={shown().msat!}>
+                  {shown().estimate ? '≈ ' : ''}
+                  {sats(shown().msat!)}
+                  <span class="unit">{satUnit(shown().msat!)}</span>
+                </span>
+              </Show>
+              <span class="basis" title={shown().basis}>{shown().basis}</span>
+            </div>
+          </div>
+        </Show>
+        <Show when={mode() === 'pay'}>
+          <p data-budget-payment><strong>Payment rules.</strong> App invoice payments and keysend reserve principal plus the network fee ceiling against the app daily all-in limit; any finite node grant still applies.</p>
+        </Show>
+        <Show when={mode() === 'file'}>
+          <p data-budget-file><strong>File spend rules.</strong> Files reserve principal plus the network fee ceiling against the same app all-in limit and contact budget, including during the ten-minute window.</p>
+        </Show>
+      </details>
+      </div>
       <Show when={emojiOpen()}>
         <div class="emoji-picker" data-emoji-picker role="listbox" aria-label="Emoji">
           <For each={[...EMOJIS]}>
@@ -4213,30 +4263,6 @@ function Composer(props: {
           </>
         )}
       </Show>
-      <details class="composer-info" data-composer-info>
-        <summary aria-label="Cost and rules" title="Cost and rules">ⓘ</summary>
-        <Show when={mode() === 'message' || mode() === 'file'}>
-          <div class="composer-bar cost-only">
-            <div class="cost" data-cost>
-              <span class="label">Cost to send</span>
-              <Show when={shown().msat !== null} fallback={<span class="sats">…</span>}>
-                <span class="sats" data-cost-msat={shown().msat!}>
-                  {shown().estimate ? '≈ ' : ''}
-                  {sats(shown().msat!)}
-                  <span class="unit">{satUnit(shown().msat!)}</span>
-                </span>
-              </Show>
-              <span class="basis" title={shown().basis}>{shown().basis}</span>
-            </div>
-          </div>
-        </Show>
-        <Show when={mode() === 'pay'}>
-          <p data-budget-payment><strong>Payment rules.</strong> App invoice payments and keysend reserve principal plus the network fee ceiling against the app daily all-in limit; any finite node grant still applies.</p>
-        </Show>
-        <Show when={mode() === 'file'}>
-          <p data-budget-file><strong>File spend rules.</strong> Files reserve principal plus the network fee ceiling against the same app all-in limit and contact budget, including during the ten-minute window.</p>
-        </Show>
-      </details>
       <Show when={drafted()}>
         <p class="drafted" data-drafted>
           Drafted in the AI track. Check it and the cost, then {mode() === 'request' ? 'create the invoice' : 'send it'} yourself.
