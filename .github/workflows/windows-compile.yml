@@ -3,14 +3,15 @@ name: Windows Compile
 # Split out of build.yml (job id, name and steps unchanged) so its triggers can
 # differ from the Build merge gate without adding events to Build.
 #
-# CI cost rule (app #131): Windows runners bill at 2x Linux, and this job has
-# failed 39 of 40 runs since 1 Oct on E0433 (about 70 Unix-only `libc` uses:
-# posix_spawn, waitid, O_NOFOLLOW file modes, getuid). Until that is
-# platform-gated (app #132), it runs ONLY on workflow_dispatch or when the
-# `full-ci` label is added to a PR. It no longer runs on push to main or on
-# PR opened / ready_for_review.
+# Platform-gating regression check (app #132): Windows is compile-only, not a
+# supported runtime. Unix security checks stay intact; unsupported operations
+# fail closed. Run on push to main, workflow_dispatch, or when the `full-ci`
+# label is added to a PR. To limit CI cost (app #131), do not run on every PR
+# push, opened, or ready_for_review event.
 # Required gates (Authority Check, Build) are unaffected.
 on:
+  push:
+    branches: [main]
   pull_request:
     branches: [main]
     types: [labeled]
@@ -38,7 +39,7 @@ jobs:
     # promise Windows support. Keep it out of branch protection.
     name: Windows compile check (not a merge gate)
     runs-on: windows-latest
-    # See the CI cost rule at the top of this file.
+    # See the trigger policy at the top of this file.
     if: >-
       github.event_name != 'pull_request' ||
       github.event.label.name == 'full-ci'

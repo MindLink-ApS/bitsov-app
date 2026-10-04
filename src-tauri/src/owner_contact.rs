@@ -73,6 +73,19 @@ impl Pending {
     /// app already knows the node's `konsensus.toml`. Production and ordinary
     /// supervised runs leave it unset; the owner runs from the data dir or adds
     /// `--config` themselves.
+    #[cfg(not(unix))]
+    pub fn new(
+        _request: Request,
+        _fence: (u64, u64),
+        _now: u64,
+        _grant: &NodeGrant,
+        _owner_config: Option<&Path>,
+    ) -> Result<Self, ActionError> {
+        Err(ActionError::new("owner_contact_unavailable",
+            "private owner approval receipts are not supported on this platform"))
+    }
+
+    #[cfg(unix)]
     pub fn new(
         request: Request,
         fence: (u64, u64),

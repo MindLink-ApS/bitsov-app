@@ -1003,6 +1003,12 @@ async fn attach_remote(
 
 /// Ensure a node config exists (first run), then start + supervise the node,
 /// wait for /health, pair (or fall back to /auth/local on rc7), and read /identity.
+#[cfg(not(unix))]
+async fn bootstrap_node(app: AppHandle) {
+    set_error(&app.state::<NodeState>(), "BitSov is not supported on this platform");
+}
+
+#[cfg(unix)]
 async fn bootstrap_node(app: AppHandle) {
     let state = app.state::<NodeState>();
     let app_data_dir: PathBuf = match app.path().app_data_dir() {
@@ -1921,6 +1927,13 @@ async fn read_node_overview(state: &NodeState) -> Result<control::NodeOverview, 
 /// data directory. An SSH forward or reverse proxy on loopback fails this check:
 /// there is no supervised child, the child's PID is not the owner, or ownership
 /// is ambiguous. Fail closed when evidence is missing.
+#[cfg(not(unix))]
+fn verified_local_node(_state: &NodeState) -> bool {
+    // No peer-uid proof is implemented here; never claim local custody.
+    false
+}
+
+#[cfg(unix)]
 fn verified_local_node(state: &NodeState) -> bool {
     let Some(port) = loopback_api_port(&state.api_base) else {
         return false;
@@ -6607,7 +6620,7 @@ mod api_base_tests {
 
 /// Custody provenance must bind the IPv4 endpoint the app dials, not any
 /// listener that shares its port (Codex app95 delta1).
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod verified_local_socket_tests {
     use super::{
         connected_api_peer_owner, ipv4_api_listen_owners, listen_name_serves_ipv4_loopback,
