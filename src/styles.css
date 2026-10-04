@@ -1013,7 +1013,7 @@ button.danger { background: var(--err); color: #fff; border: none; }
 .wallet-split .split { display: flex; flex-direction: column; gap: 2px; padding: var(--s-3) var(--s-4); background: var(--surface); text-align: left; }
 .wallet-split .split-name { display: flex; align-items: center; gap: 6px; font-size: var(--t-sm); color: var(--muted); }
 .wallet-split .split-amount { font-size: var(--t-xl); font-weight: 600; font-variant-numeric: tabular-nums; }
-.wallet-split .split-amount.unknown { font-size: var(--t-md); font-weight: 500; color: var(--unknown-ink); }
+.wallet-split .split-amount.unknown { font-size: var(--t-md); font-weight: 500; color: var(--muted); }
 .wallet-split .hint { font-size: var(--t-xs); }
 .wallet-basis { max-width: 520px; font-size: var(--t-xs); color: var(--faint); margin: 0; }
 .wallet-actions { display: flex; gap: var(--s-3); margin-top: var(--s-3); }

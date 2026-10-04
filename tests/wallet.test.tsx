@@ -385,6 +385,13 @@ describe('the Wallet page', () => {
     expect(text('[data-balance-closing] .split-amount')).toBe('closing_sats' in fields ? '42 sats' : 'Unknown');
     expect($('[data-balance-contested]')).toBeNull();
     expect(text('[data-wallet-basis]')).toMatch(/overlap/);
+    // Unreported categories are marked unknown; reported ones are not.
+    const unknown = (sel: string) => $(`${sel} .split-amount`)!.classList.contains('unknown');
+    expect(unknown('[data-balance-lightning]')).toBe(true);
+    expect(unknown('[data-balance-onchain]')).toBe(true);
+    expect(unknown('[data-balance-reserved]')).toBe(true);
+    expect(unknown('[data-balance-closing]')).toBe(!('closing_sats' in fields));
+    expect(unknown('[data-balance-onchain-total]')).toBe(!('onchain_total_sats' in fields));
   });
 
   it.each([undefined, null])('preserves the entire old-node view for absent categories (%s)', async (missing) => {
