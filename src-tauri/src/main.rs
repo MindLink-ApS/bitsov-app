@@ -4002,6 +4002,14 @@ async fn spend_advance(state: &NodeState, ask: bool) -> Result<act::SpendView, A
 /// approval. On a paired node without `spend`, both go through one elevation
 /// request, and a grant opens only what was asked.
 async fn spend_advance_for(state: &NodeState, want: Option<Want>) -> Result<act::SpendView, ActionError> {
+    // The shell polls spend before budget at startup. Read current authority
+    // before a saved request changes the pristine approval generations. The
+    // request may already have been granted, with a much longer grant expiry.
+    // A failed read leaves restoration retryable and the saved request intact.
+    if want.is_none() && !state.approvals_restored.load(Ordering::SeqCst)
+        && matches!(&*state.auth.lock().unwrap(), AuthMode::Paired(_)) {
+        do_budget_status(state).await?;
+    }
     restore_spend_pending(state);
     let out = spend_advance_for_inner(state, want).await;
     save_spend_pending(state);
@@ -4030,6 +4038,11 @@ fn restore_spend_pending(state: &NodeState) {
         return;
     }
     if state.approvals_restored.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    // The node's current grant supersedes a saved elevation request. Do not
+    // restore stale pending state over the budget just reconciled from it.
+    if state.node_grant.lock().unwrap().as_ref().is_some_and(|g| g.live(now_ms())) {
         return;
     }
     let Some(path) = approvals_file(state) else { return };
@@ -5704,7 +5717,17 @@ async fn do_budget_status(state: &NodeState) -> Result<budget::BudgetView, Actio
         if state.node_grant.lock().unwrap().is_some() { return Err(grant::unreadable()); }
         return budget_view(state);
     }
-    let node = read_grant(state).await?.filter(|g| g.live(now_ms()));
+    let mut node = read_grant(state).await?.filter(|g| g.live(now_ms()));
+    if node.is_some() && matches!(&*state.auth.lock().unwrap(), AuthMode::Paired(s) if !s.scopes.iter().any(|s| s == "spend")) {
+        // A grant written while the app was away may postdate this token. The
+        // read endpoint works with read scope; spending needs a reissued token.
+        refresh_paired(state).await.map_err(|_| grant::unreadable())?;
+        // Refresh is an await: the grant may have expired or been revoked.
+        node = read_grant(state).await?.filter(|g| g.live(now_ms()));
+        if node.is_some() && !matches!(&*state.auth.lock().unwrap(), AuthMode::Paired(s) if s.scopes.iter().any(|s| s == "spend")) {
+            return Err(grant::unreadable());
+        }
+    }
     let book = with_book(state, false, |b| Ok(b.clone()))?;
     let mut spend = state.spend.lock().unwrap();
     let mut autopay = state.autopay.lock().unwrap();
@@ -11046,6 +11069,106 @@ mod control_act_tests {
     }
 
     // ---- G1: budget-scoped node grants -----------------------------------------
+
+    /// Simulate the approval file left when the app quits before observing the
+    /// owner's console grant. Tokens and gates are freshly created on relaunch.
+    fn save_relaunch_pending(state: &NodeState) {
+        device::save_pending(&approvals_file(state).unwrap(), Some(&act::Elevation {
+            op_id: "ab12".into(),
+            expires_at_ms: now_ms() + 300_000,
+            owner_action: "konsensus grant --op ab12".into(),
+            owner_can_grant: true,
+        })).unwrap();
+    }
+
+    #[tokio::test]
+    async fn relaunch_reads_live_grant_before_restoring_a_saved_elevation() {
+        for scopes in [vec!["read", "receive", "spend"], vec!["read", "receive"]] {
+            let (node, _dir, g1) = g1_node(&scopes);
+            *g1.grant.lock().unwrap() = g1_grant(3600, 5_000_000, 4_995_000);
+            save_relaunch_pending(&node.state);
+
+            // The shell reads spend status BEFORE budget status on startup.
+            let spend = spend_advance(&node.state, false).await.unwrap();
+            let view = do_budget_status(&node.state).await.unwrap();
+            assert_eq!(view.autopay.state, budget::AutopayState::Open);
+            assert_eq!(view.node_grant.unwrap().remaining_msat, 4_995_000);
+            assert!(view.autopay.ceiling_msat.unwrap() <= 5_000_000);
+            assert_eq!(view.autopay.open_until_ms, Some(g1.grant.lock().unwrap()["expires_at"].as_u64().unwrap() * 1000));
+            assert_eq!(spend.state, act::SpendState::Locked, "the payment window stays closed");
+            assert!(spend.pending.is_none());
+            assert!(!approvals_file(&node.state).unwrap().exists());
+            assert!(matches!(&*node.state.auth.lock().unwrap(), AuthMode::Paired(s) if s.scopes.iter().any(|s| s == "spend")));
+            assert!(node.posts().iter().all(|(p, _)| p == "/pair/token"), "only token refresh may POST");
+            assert!(!node.targets().contains(&"GET /pair/elevation/ab12".into()), "the request's status is not current grant authority");
+        }
+    }
+
+    #[tokio::test]
+    async fn relaunch_with_saved_elevation_and_expired_or_revoked_grant_stays_closed() {
+        for current in [g1_grant(-1, 5_000_000, 4_995_000), serde_json::Value::Null] {
+            let (node, _dir, g1) = g1_node(&["read", "receive", "spend"]);
+            *g1.grant.lock().unwrap() = current;
+            save_relaunch_pending(&node.state);
+            spend_advance(&node.state, false).await.unwrap();
+            let view = do_budget_status(&node.state).await.unwrap();
+            assert_eq!(view.autopay.state, budget::AutopayState::Off);
+            assert!(view.node_grant.is_none());
+            assert!(do_message_send(&node.state, A, false, "gm", 1000, None).await.is_err());
+            assert!(node.posts().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn relaunch_unreadable_grant_preserves_pending_file_and_retries() {
+        let (node, _dir, g1) = g1_node(&["read", "receive", "spend"]);
+        save_relaunch_pending(&node.state);
+        *g1.grant_status.lock().unwrap() = 500;
+        assert_eq!(spend_advance(&node.state, false).await.unwrap_err().code, "grant_unknown");
+        assert_eq!(budget_now(&node.state).autopay.state, budget::AutopayState::Off);
+        assert!(approvals_file(&node.state).unwrap().exists());
+        *g1.grant_status.lock().unwrap() = 200;
+        *g1.grant.lock().unwrap() = serde_json::json!({"expires_at": "unreadable"});
+        assert_eq!(spend_advance(&node.state, false).await.unwrap_err().code, "grant_unknown");
+        assert_eq!(budget_now(&node.state).autopay.state, budget::AutopayState::Off);
+        assert!(approvals_file(&node.state).unwrap().exists());
+        *g1.grant.lock().unwrap() = g1_grant(3600, 5_000_000, 4_995_000);
+        spend_advance(&node.state, false).await.unwrap();
+        assert_eq!(do_budget_status(&node.state).await.unwrap().autopay.state, budget::AutopayState::Open);
+        assert!(node.posts().is_empty());
+    }
+
+    #[tokio::test]
+    async fn relaunch_token_refresh_must_confirm_spend_and_a_still_live_grant() {
+        for token_status in [200, 500] {
+            let first: Routes = Arc::new(move |_, path, _| {
+                if path == "/pair/token" {
+                    return (token_status, serde_json::json!({"token": "tok.read", "expires_at": now_unix() + 600,
+                        "scopes": ["read", "receive"]}).to_string());
+                }
+                (0, String::new())
+            });
+            let (node, _dir, _) = g1_node_with(&["read", "receive"], Some(first));
+            save_relaunch_pending(&node.state);
+            assert_eq!(spend_advance(&node.state, false).await.unwrap_err().code, "grant_unknown");
+            assert_eq!(budget_now(&node.state).autopay.state, budget::AutopayState::Off);
+            assert!(approvals_file(&node.state).unwrap().exists());
+            assert!(node.posts().iter().all(|(p, _)| p == "/pair/token"));
+        }
+
+        let reads = AtomicUsize::new(0);
+        let first: Routes = Arc::new(move |_, path, _| {
+            if path == "/pair/grant" && reads.fetch_add(1, Ordering::SeqCst) > 0 {
+                return (200, r#"{"grant":null}"#.into());
+            }
+            (0, String::new())
+        });
+        let (node, _dir, _) = g1_node_with(&["read", "receive"], Some(first));
+        let view = do_budget_status(&node.state).await.unwrap();
+        assert_eq!(view.autopay.state, budget::AutopayState::Off, "revoked during token refresh");
+        assert!(view.node_grant.is_none());
+        assert!(node.posts().iter().all(|(p, _)| p == "/pair/token"));
+    }
 
     #[tokio::test]
     async fn relaunch_reads_live_grant_without_requesting_or_spending() {

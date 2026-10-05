@@ -76,6 +76,14 @@ invoice or payment.
   grant. The budget approval and the window then end at the grant's
   `expires_at`, and the approval's ceiling is `min(asked, budget_msat)`. The
   book's own numbers still apply on top: narrowest wins.
+- **Relaunch reads current authority before restoring a pending request.**
+  Startup polls spend status before budget status. That first poll reads
+  `/status` and `/pair/grant` before a saved elevation can change the approval
+  generations. A live grant restores the message budget within its terms and
+  the saved daily ceiling; the ten-minute payment window stays closed. A
+  token without `spend` is refreshed and the grant read again before opening.
+  An unreadable response leaves startup restoration retryable. An old
+  `/pair/elevation/{op_id}` result alone is never spend authority.
 - **Re-read before every paid request.** While approvals rest on a G1 grant,
   `money_post` reads `GET /pair/grant` again before journaling anything and
   refuses what the node would refuse: `per_call_max_msat`, `remaining_msat`
