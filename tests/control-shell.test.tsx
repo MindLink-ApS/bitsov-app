@@ -125,6 +125,56 @@ describe('control center shell', () => {
   };
   const click = (sel: string) => mount.querySelector<HTMLElement>(sel)!.click();
 
+  async function openChat() {
+    start();
+    await vi.waitFor(() => expect([...mount.querySelectorAll('button')].some((b) => b.textContent?.includes('I understand'))).toBe(true));
+    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
+    await vi.waitFor(() => expect(mount.querySelector('[data-message="m1"]')).not.toBeNull());
+  }
+
+  it.each([false, true])('animates new ids once, keeping rows through echoes, refreshes and navigation (reduced motion: %s)', async (reduced) => {
+    vi.stubGlobal('matchMedia', (query: string) => ({ matches: reduced && query === '(prefers-reduced-motion: reduce)' }));
+    const { emitLive } = stubHost();
+    await openChat();
+    const history = mount.querySelector('[data-message="m1"]')!;
+    expect(history.classList.contains('fresh')).toBe(false);
+    const message = { id: 'new', kind: 0, sender: A, recipient: OWN, timestamp: Date.now(), plaintext: 'just arrived', payment_amount_msat: 2000 };
+    emitLive({ type: 'message', room_id: null, message });
+    await vi.waitFor(() => expect(mount.querySelector('[data-message="new"]')).not.toBeNull());
+    const row = mount.querySelector('[data-message="new"]')!;
+    expect(row.classList.contains('fresh')).toBe(!reduced);
+    row.querySelector('.bubble')!.dispatchEvent(new Event('animationend', { bubbles: true }));
+    expect(row.classList.contains('fresh')).toBe(false);
+    emitLive({ type: 'message', room_id: null, message: { ...message, plaintext: 'updated echo' } });
+    expect(mount.querySelector('[data-message="new"]')).toBe(row);
+    expect(row.textContent).toContain('updated echo');
+    expect(mount.querySelector('[data-message="m1"]')).toBe(history);
+    emitLive({ type: 'message', room_id: null, message: { ...message, id: 'm1', timestamp: 1_725_000_000_000 } });
+    expect(history.classList.contains('fresh')).toBe(false);
+    click(`[data-track="peer:${B}"]`);
+    click(`[data-track="peer:${A}"]`);
+    await vi.waitFor(() => expect(mount.querySelector('[data-message="new"]')).not.toBeNull());
+    expect(mount.querySelector('[data-message="new"]')!.classList.contains('fresh')).toBe(false);
+  });
+
+  it('keeps Porch request, response and manifest history and live events out of chat and unread counts', async () => {
+    const chat = { id: 'm1', kind: 0, sender: A, recipient: OWN, timestamp: 1, plaintext: '{"kind":500,"text":"ordinary chat"}', payment_amount_msat: 2000 };
+    const porch = [500, 501, 510].flatMap((kind) => [
+      { ...chat, id: `in-${kind}`, kind, plaintext: `private-porch-${kind}` },
+      { ...chat, id: `out-${kind}`, kind, sender: OWN, recipient: A, plaintext: `private-porch-${kind}` },
+    ]);
+    const { emitLive } = stubHost({ messages_list: () => [chat, ...porch, { ...chat, id: 'file', kind: 200, plaintext: 'photo.png' }] });
+    await openChat();
+    expect(mount.querySelector('[data-stream]')!.textContent).toContain('ordinary chat');
+    expect(mount.querySelector('[data-message="file"]')).not.toBeNull();
+    expect(mount.querySelector('[data-stream]')!.textContent).not.toContain('private-porch');
+    for (const m of porch) emitLive({ type: 'message', room_id: null, message: { ...m, id: `live-${m.id}` } });
+    expect(mount.querySelector('[data-stream]')!.textContent).not.toContain('private-porch');
+    click(`[data-track="peer:${B}"]`);
+    for (const m of porch) emitLive({ type: 'message', room_id: null, message: { ...m, id: `unread-${m.id}` } });
+    expect(mount.querySelector(`[data-track="peer:${A}"] .badge`)).toBeNull();
+  });
+
   it('pauses warm polling during cooldown without restarting subscriptions or bursting on resume', async () => {
     vi.useFakeTimers();
     let retry: number | null = null;

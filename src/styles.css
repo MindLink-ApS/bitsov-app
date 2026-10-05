@@ -140,6 +140,8 @@ html[data-theme='light'] {
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
   }
+  .msg.fresh .bubble,
+  .msg.fresh .stamp .sats,
   .dot.live,
   .spinner,
   .touchid-badge-pulse,

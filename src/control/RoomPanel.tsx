@@ -13,6 +13,7 @@ import {
   MAX_MEMBERS, newMsgId, planLegs, planTotal, roomChatText, roomRefusalWords, roomThread,
   type LegOutcome, type LegPlan, type LocalRoom, type MemberInfo, type RoomEntry,
 } from './room';
+import { createMessageEntrance } from './messageEntrance';
 import type { Delivery, Message, PriceQuote } from './types';
 
 export type RoomContact = { id: string; name: string } & MemberInfo;
@@ -102,6 +103,7 @@ export function RoomThread(props: {
   onEarlier: () => void;
   sends: RoomSend[];
   fresh: Record<string, true>;
+  seenEntrances: Set<string>;
   info: (peer: string) => MemberInfo | undefined;
   /** Read-only: the member's chat price. Never pays. */
   quote: (peer: string) => Promise<PriceQuote | null>;
@@ -170,12 +172,13 @@ export function RoomThread(props: {
     }
   };
 
-  type Item = { at: number; entry?: RoomEntry; send?: RoomSend };
+  type Item = { key: string; at: number; entry?: RoomEntry; send?: RoomSend };
   const items = createMemo<Item[]>(() =>
     [
-      ...roomThread(props.messages, props.ownId).map((e) => ({ at: e.timestamp, entry: e })),
-      ...props.sends.map((s) => ({ at: s.at + 1, send: s })),
+      ...roomThread(props.messages, props.ownId).map((e) => ({ key: `message:${e.key}`, at: e.timestamp, entry: e })),
+      ...props.sends.map((s, i) => ({ key: `send:${i}`, at: s.at + 1, send: s })),
     ].sort((a, b) => a.at - b.at));
+  const keyedItems = createMemo(() => new Map(items().map((item) => [item.key, item])));
   let stream: HTMLDivElement | undefined;
   createEffect(on(() => items().length, () => queueMicrotask(() => stream?.scrollTo?.({ top: stream.scrollHeight }))));
 
@@ -209,16 +212,18 @@ export function RoomThread(props: {
               {props.loadingEarlier ? 'Loading…' : 'Show earlier messages'}
             </button>
           </Show>
-          <For each={items()} fallback={<div class="empty-track"><h2>Nothing here yet</h2><p class="hint">Your first message pays each member their own price.</p></div>}>
-            {(item, i) => {
+          <For each={[...keyedItems().keys()]} fallback={<div class="empty-track"><h2>Nothing here yet</h2><p class="hint">Your first message pays each member their own price.</p></div>}>
+            {(key, i) => {
+              const item = () => keyedItems().get(key)!;
               const prev = () => items()[i() - 1];
-              const newDay = () => !prev() || day(prev()!.at) !== day(item.at);
+              const newDay = () => !prev() || day(prev()!.at) !== day(item().at);
               return (
                 <>
-                  <Show when={newDay()}><p class="day">{day(item.at)}</p></Show>
+                  <Show when={newDay()}><p class="day">{day(item().at)}</p></Show>
                   <Switch>
-                    <Match when={item.entry}>
+                    <Match when={item().entry}>
                       {(e) => {
+                        const entrance = createMessageEntrance(`${props.room.id}:${e().key}`, e().ids.some((id) => props.fresh[id]), props.seenEntrances);
                         const out = () => e().sender === own();
                         // A member's node refused our paid copy: said plainly, per member.
                         const refusals = () => e().copies.flatMap((c) => {
@@ -226,7 +231,7 @@ export function RoomThread(props: {
                           return d?.status === 'rejected' ? [{ peer: c.recipient, words: roomRefusalWords(d.reason) ?? 'Their node refused it.' }] : [];
                         });
                         return (
-                          <article class={`msg ${out() ? 'out' : 'in'}`} classList={{ fresh: e().ids.some((id) => props.fresh[id]) }}
+                          <article class={`msg ${out() ? 'out' : 'in'}`} classList={{ fresh: entrance.fresh() }} onAnimationEnd={entrance.finish}
                             data-message={e().ids[0]} data-room-msg={e().msg} data-room-copies={out() ? e().copies.length : undefined}>
                             <Show when={!out()}><span class="who">{props.nameOf(e().sender)}</span></Show>
                             <div class="bubble" data-kind={0}>{e().text}</div>
@@ -247,17 +252,19 @@ export function RoomThread(props: {
                         );
                       }}
                     </Match>
-                    <Match when={item.send}>
+                    <Match when={item().send}>
                       {(s) => (
                         <div class="artifact room-send" data-room-send>
                           <span class="kind" data-room-send-msat={s().outcomes.reduce((t, o) => t + o.paidMsat, 0)}>
-                            Room message · up to {fmtAmount(s().outcomes.reduce((t, o) => t + o.paidMsat, 0))} in all
+                            {s().outcomes.every((o) => o.state === 'sent')
+                              ? roomCostCopy(s().outcomes.map((o) => o.paidMsat), 'paid')
+                              : `Your room message · up to ${fmtAmount(s().outcomes.reduce((t, o) => t + o.paidMsat, 0))} in all`}
                           </span>
                           <ul class="room-legs">
                             <For each={s().outcomes}>
                               {(o) => (
                                 <li data-room-leg={o.peer} data-leg-state={o.state}>
-                                  <strong>{props.nameOf(o.peer)}</strong>{' '}
+                                  <strong>To {props.nameOf(o.peer)}:</strong>{' '}
                                   <span class="hint" data-room-leg-note>{legOutcome(o)}</span>
                                 </li>
                               )}
@@ -290,7 +297,13 @@ export function RoomThread(props: {
               </ul>
               <div class="composer-main">
                 <textarea rows={1} data-room-draft placeholder={`Message ${title()}`} value={draft()} onInput={(e) => setDraft(e.currentTarget.value)}
-                  aria-label="Room message" disabled={props.moneyBlocked} />
+                  aria-label="Room message" disabled={props.moneyBlocked}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+                      e.preventDefault();
+                      if (!e.repeat) openReview();
+                    }
+                  }} />
               </div>
               <div class="composer-bar">
                 <div class="cost" data-cost>
@@ -298,7 +311,11 @@ export function RoomThread(props: {
                   <Show when={total() !== null} fallback={<span class="sats">…</span>}>
                     <span class="sats" data-cost-msat={total()!}>{estimate() ? '≈ ' : ''}{sats(total()!)}<span class="unit">{satUnit(total()!)}</span></span>
                   </Show>
-                  <span class="basis">Each member’s own price and its network fee ceiling, added up</span>
+                  <span class="basis">{legs().some((l) => l.state === 'reading')
+                    ? 'Reading member prices…'
+                    : total() === null
+                      ? 'No members can receive this message right now'
+                      : roomCostCopy(legs().flatMap((l) => l.state === 'pay' ? [l.msat] : []), 'pay', legs().every((l) => l.state === 'pay'))}</span>
                 </div>
                 <button type="submit" class="primary soft money" data-send disabled={!ready()}>Send</button>
               </div>
@@ -308,6 +325,7 @@ export function RoomThread(props: {
           {(rv) => (
             <div class="pay-review" data-room-review data-review-msat={rv().total}>
               <p class="pay-review-title">Send to {rv().legs.filter((l) => l.state === 'pay').length} of {rv().legs.length}</p>
+              <p>{roomCostCopy(rv().legs.flatMap((l) => l.state === 'pay' ? [l.msat] : []), 'pay', rv().legs.every((l) => l.state === 'pay'))}</p>
               <blockquote class="pay-review-text" data-review-text>{rv().text}</blockquote>
               <dl>
                 <For each={rv().legs}>
@@ -347,6 +365,15 @@ export function RoomThread(props: {
 function legOutcome(o: LegOutcome): string {
   if (o.state === 'failed' && o.paidMsat === 0 && o.note) return o.note;
   const reached = o.principalMsat !== undefined ? ` (${fmtAmount(o.principalMsat)} to them, plus a network fee)` : '';
-  const paid = o.paidMsat > 0 ? ` · up to ${fmtAmount(o.paidMsat)}${reached}` : ' · not charged';
+  const paid = o.paidMsat > 0 ? ` · ${o.state === 'unknown' ? 'possibly paid' : 'you paid'} up to ${fmtAmount(o.paidMsat)}${reached}` : ' · not charged';
   return `${OUTCOME[o.state]}${paid}${o.note && o.state !== 'sent' ? ` · ${o.note}` : ''}`;
+}
+
+/** Only say “each member” when everyone has the same ceiling and nobody is skipped. */
+function roomCostCopy(amounts: number[], verb: 'pay' | 'paid', allMembers = true): string {
+  const total = fmtAmount(amounts.reduce((sum, n) => sum + n, 0));
+  if (allMembers && amounts.length > 0 && amounts.every((n) => n === amounts[0])) {
+    return `You ${verb} up to ${fmtAmount(amounts[0])} to each member (${total} in all)`;
+  }
+  return `You ${verb} up to ${total} in all, at each recipient’s own price`;
 }
