@@ -4077,7 +4077,13 @@ async fn spend_advance_for_inner(state: &NodeState, want: Option<Want>) -> Resul
     // A token that already claims `spend` opens only over a live G1 grant; with
     // none left on the node, ask again as if it had no `spend`.
     let mut held: Option<NodeGrant> = None;
+    let pending = state.spend.lock().unwrap().pending()
+        .is_some_and(|p| p.expires_at_ms > now_ms());
     let mode = match (mode, want) {
+        // Token refresh can add spend before this poll observes the console
+        // approval. Finish the pending request, including its original wants,
+        // regardless of token scope.
+        (Mode::Paired { .. }, _) if pending => Mode::Paired { spend: false },
         (Mode::Paired { spend: true }, Some(_)) => match grant_for_open(state).await {
             Ok(g) => {
                 held = g;
@@ -5718,7 +5724,10 @@ async fn do_budget_status(state: &NodeState) -> Result<budget::BudgetView, Actio
         return budget_view(state);
     }
     let mut node = read_grant(state).await?.filter(|g| g.live(now_ms()));
-    if node.is_some() && matches!(&*state.auth.lock().unwrap(), AuthMode::Paired(s) if !s.scopes.iter().any(|s| s == "spend")) {
+    if !state.approvals_restored.load(Ordering::SeqCst) && node.is_some()
+        && matches!(&*state.auth.lock().unwrap(), AuthMode::Paired(s) if !s.scopes.iter().any(|s| s == "spend")) {
+        // Only startup restoration reissues a token here. During a session,
+        // elevation polling observes the grant and opens the requested gates.
         // A grant written while the app was away may postdate this token. The
         // read endpoint works with read scope; spending needs a reissued token.
         refresh_paired(state).await.map_err(|_| grant::unreadable())?;
@@ -11079,6 +11088,80 @@ mod control_act_tests {
             owner_action: "konsensus grant --op ab12".into(),
             owner_can_grant: true,
         })).unwrap();
+    }
+
+    #[tokio::test]
+    async fn budget_poll_between_console_grant_and_spend_poll_opens_approval() {
+        for want in [Want::Window, Want::Budget(500_000)] {
+            let (node, _dir, g1) = g1_node(&["read", "receive"]);
+            *g1.grant.lock().unwrap() = serde_json::Value::Null;
+            assert_eq!(spend_advance_for(&node.state, Some(want)).await.unwrap().state, act::SpendState::Pending);
+            assert_eq!(spend_advance(&node.state, false).await.unwrap().state, act::SpendState::Pending);
+
+            // The console grants between ticks; budget status lands first.
+            *g1.grant.lock().unwrap() = g1_grant(3600, 400_000, 400_000);
+            assert_ne!(do_budget_status(&node.state).await.unwrap().autopay.state, budget::AutopayState::Open);
+            let spend = spend_advance(&node.state, false).await.unwrap();
+            assert!(spend.pending.is_none(), "the spend poll must observe the console grant");
+            match want {
+                Want::Window => assert_eq!(spend.state, act::SpendState::Open),
+                Want::Budget(_) => assert_eq!(budget_now(&node.state).autopay.state, budget::AutopayState::Open),
+            }
+            let targets = node.targets();
+            let poll = targets.iter().rposition(|p| p == "GET /pair/elevation/ab12").unwrap();
+            let refresh = targets.iter().position(|p| p == "POST /pair/token").unwrap();
+            assert!(poll < refresh, "normal budget status must leave token refresh to elevation polling");
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_approval_reopens_expired_window_without_an_intervening_status_poll() {
+        for paired in [false, true] {
+            let (node, _dir, _) = g1_node(&["read", "receive", "spend"]);
+            if !paired { *node.state.auth.lock().unwrap() = AuthMode::Local; }
+            spend_advance(&node.state, false).await.unwrap();
+            node.state.spend.lock().unwrap().arm_until(0, 1, act::SpendBasis::AppLock);
+            assert_eq!(spend_advance(&node.state, true).await.unwrap().state, act::SpendState::Open);
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_elevation_is_polled_even_after_token_gains_spend() {
+        for want in [Want::Window, Want::Budget(500_000)] {
+            let (node, _dir, g1) = g1_node(&["read", "receive"]);
+            *g1.grant.lock().unwrap() = serde_json::Value::Null;
+            assert_eq!(spend_advance_for(&node.state, Some(want)).await.unwrap().state, act::SpendState::Pending);
+            assert_eq!(spend_advance(&node.state, false).await.unwrap().state, act::SpendState::Pending);
+            *g1.grant.lock().unwrap() = g1_grant(3600, 400_000, 400_000);
+            // Any other API call can reissue the token before the spend tick.
+            refresh_paired(&node.state).await.unwrap();
+            let spend = spend_advance(&node.state, false).await.unwrap();
+            assert!(spend.pending.is_none());
+            match want {
+                Want::Window => assert_eq!(spend.state, act::SpendState::Open),
+                Want::Budget(_) => assert_eq!(budget_now(&node.state).autopay.state, budget::AutopayState::Open),
+            }
+            assert_eq!(node.targets().iter().filter(|p| *p == "GET /pair/elevation/ab12").count(), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn relaunch_without_grant_restores_and_polls_saved_pending_elevation() {
+        for scopes in [vec!["read", "receive"], vec!["read", "receive", "spend"]] {
+            let (node, _dir, g1) = g1_node(&scopes);
+            *g1.grant.lock().unwrap() = serde_json::Value::Null;
+            save_relaunch_pending(&node.state);
+
+            let spend = spend_advance(&node.state, false).await.unwrap();
+            assert_eq!(spend.state, act::SpendState::Pending);
+            assert_eq!(spend.pending.unwrap().op_id, "ab12");
+            assert!(node.targets().contains(&"GET /pair/elevation/ab12".into()));
+            let view = do_budget_status(&node.state).await.unwrap();
+            assert_eq!(view.autopay.state, budget::AutopayState::Off);
+            assert!(view.node_grant.is_none());
+            assert!(device::load_pending(&approvals_file(&node.state).unwrap(), now_ms()).is_some());
+            assert!(node.posts().is_empty(), "restoring a pending request must neither re-request nor refresh");
+        }
     }
 
     #[tokio::test]

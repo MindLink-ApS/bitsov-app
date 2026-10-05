@@ -83,7 +83,11 @@ invoice or payment.
   the saved daily ceiling; the ten-minute payment window stays closed. A
   token without `spend` is refreshed and the grant read again before opening.
   An unreadable response leaves startup restoration retryable. An old
-  `/pair/elevation/{op_id}` result alone is never spend authority.
+  `/pair/elevation/{op_id}` result alone is never spend authority. Without a
+  live grant, a saved pending request is restored and polled; autopay stays
+  closed. The budget-status token refresh is limited to startup restoration.
+  During a session, spend status polls any pending elevation regardless of
+  token scope, so a token refreshed before that tick cannot strand approval.
 - **Re-read before every paid request.** While approvals rest on a G1 grant,
   `money_post` reads `GET /pair/grant` again before journaling anything and
   refuses what the node would refuse: `per_call_max_msat`, `remaining_msat`
