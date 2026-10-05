@@ -24,6 +24,25 @@ describe('remote read queue', () => {
     queue.close();
   });
 
+  it('drains old-generation reads on stop, allowing a fresh read after resume', async () => {
+    const source = sampleSource();
+    let live = false;
+    let calls = 0;
+    const wallet = source.wallet;
+    source.wallet = () => { calls++; return wallet(); };
+    const queue = pollingSource(() => source, () => live);
+    const old = queue.source.wallet();
+    const cancelled = expect(old).rejects.toThrow('Shell stopped');
+    queue.stop();
+    await cancelled;
+    live = true;
+    queue.resume();
+    expect(calls).toBe(0);
+    await queue.source.wallet();
+    expect(calls).toBe(1);
+    queue.close();
+  });
+
   it('holds queued reads during a cooldown and bounds quotes as well as panels', async () => {
     const source = sampleSource();
     const wallet = await source.wallet();

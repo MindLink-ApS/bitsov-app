@@ -333,7 +333,8 @@ impl NodeState {
             last_remint: Mutex::new(None),
             sidecar_terminated: AtomicBool::new(false),
             live_link: control::LiveLink::default(),
-            // Bounded so a hung loopback /health or /auth/local cannot pin restoring().
+            // Remote requests may take 15 s; loopback health/auth use a short
+            // per-request timeout so they cannot pin restoring().
             http: remote_access::http_client_builder()
                 .default_headers(default_headers)
                 .build()
@@ -553,6 +554,7 @@ async fn health_ok(state: &NodeState) -> bool {
     state
         .http
         .get(format!("{}/health", state.api_base))
+        .timeout(Duration::from_secs(5))
         .send()
         .await
         .map(|r| r.status().is_success())
@@ -1313,6 +1315,7 @@ async fn mint_token(state: &NodeState) -> Result<(), String> {
     let token = state
         .http
         .post(format!("{}/auth/local", state.api_base))
+        .timeout(Duration::from_secs(5))
         .send()
         .await
         .map_err(|e| format!("auth/local request failed: {e}"))?
@@ -3083,6 +3086,14 @@ enum Auth {
     Budget(u64),
 }
 
+/// A cooldown is a proven pre-dispatch refusal, before journal or reservation I/O.
+fn refuse_if_connection_waiting(state: &NodeState) -> Result<(), ActionError> {
+    if state.remote_retry.remaining().is_some() {
+        return Err(ActionError::new("not_ready", "Waiting for the connection. Your node will retry automatically."));
+    }
+    Ok(())
+}
+
 fn check_auth(state: &NodeState, auth: Auth) -> Result<(), ActionError> {
     match auth {
         Auth::Window(g) => state.spend.lock().unwrap().check_generation(g, now_ms()),
@@ -3291,6 +3302,7 @@ async fn money_post(state: &NodeState, auth: Auth, path: &str, body: serde_json:
 /// Holds `NodeState::money` throughout: a reconcile waits for this POST.
 async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: serde_json::Value, max_msat: u64, charge: Option<Charge>, retry: Option<&spend_journal::Undelivered>) -> Result<String, ActionError> {
     let _money = state.money.lock().await;
+    refuse_if_connection_waiting(state)?;
     let journal = spend_journal(state)?;
     let prior = journal.pending()?;
     ensure_fresh_token(state).await;
@@ -3395,7 +3407,9 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
         None => Ok(()),
     };
     // Journal I/O can take time. Recheck immediately before issuing the request.
-    if let Err(e) = refuse_if_paused(state).and_then(|()| check_auth(state, auth)) {
+    if let Err(e) = refuse_if_connection_waiting(state)
+        .and_then(|()| refuse_if_paused(state))
+        .and_then(|()| check_auth(state, auth)) {
         release(state)?;
         abandon(&journal)?;
         return Err(e);
@@ -4886,6 +4900,7 @@ async fn do_porch_read(state: &NodeState, peer: &str, path: &str, max_msat: u64)
 /// reports no routing fee for a read).
 async fn porch_post(state: &NodeState, auth: Auth, body: serde_json::Value, max_msat: u64, charge: Charge) -> Result<(String, u64), ActionError> {
     let _money = state.money.lock().await;
+    refuse_if_connection_waiting(state)?;
     let journal = spend_journal(state)?;
     let prior = journal.pending()?;
     ensure_fresh_token(state).await;
@@ -4913,7 +4928,9 @@ async fn porch_post(state: &NodeState, auth: Auth, body: serde_json::Value, max_
     pending.budgeted = true;
     journal.save(&pending)?;
     let release = |state: &NodeState| close_charge(state, &charge_id, None, None);
-    if let Err(e) = refuse_if_paused(state).and_then(|()| check_auth(state, auth)) {
+    if let Err(e) = refuse_if_connection_waiting(state)
+        .and_then(|()| refuse_if_paused(state))
+        .and_then(|()| check_auth(state, auth)) {
         release(state)?;
         abandon(&journal)?;
         return Err(e);
@@ -7493,6 +7510,42 @@ mod control_act_tests {
         assert!(node.posts().is_empty());
     }
     #[tokio::test]
+    async fn retry_cooldown_refuses_money_before_journal_or_dispatch() {
+        let node = fake(AuthMode::Local, happy());
+        spend_advance(&node.state, true).await.unwrap();
+        node.state.remote_retry.failed(&remote_access::RemoteError::RateLimited(60));
+        let err = do_message_send(&node.state, A, false, "hi", 7000, None).await.unwrap_err();
+        assert_eq!(err.code, "not_ready");
+        assert!(node.posts().is_empty());
+        assert!(!journal_file(&node).exists(), "cooldown must not touch the journal");
+        assert!(book(&node).is_empty(), "no reservation during cooldown");
+        // Even an unreadable journal must not be opened during cooldown.
+        std::fs::write(journal_file(&node), b"not a journal").unwrap();
+        let err = money_post_with(&node.state, Auth::Window(0), "/messages/compose", serde_json::json!({}), 7000, None, None).await.unwrap_err();
+        assert_eq!(err.code, "not_ready");
+        assert_eq!(std::fs::read(journal_file(&node)).unwrap(), b"not a journal");
+    }
+
+    #[tokio::test]
+    async fn proxy_pre_forward_refusals_release_journal_without_unknown() {
+        for code in ["remote_retry_wait", "remote_handshake_unavailable", "remote_proxy_busy"] {
+            let routes: Routes = Arc::new(move |m,p,b| {
+                if p == "/messages/compose" {
+                    return (503, serde_json::json!({"code":code,"message":"waiting for connection"}).to_string());
+                }
+                happy()(m,p,b)
+            });
+            let node = fake(AuthMode::Local, routes);
+            spend_advance(&node.state, true).await.unwrap();
+            let err = do_message_send(&node.state, A, false, "hi", 7000, None).await.unwrap_err();
+            assert_eq!(err.code, "not_dispatched", "{code}");
+            assert!(book(&node).is_empty(), "release the reservation");
+            assert!(spend_journal(&node.state).unwrap().pending().unwrap().is_none());
+            assert_eq!(node.posts().len(), 1, "no automatic retry");
+        }
+    }
+
+    #[tokio::test]
     async fn readiness_refusal_clears_journal_and_allows_later_manual_send() {
         let ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let route_ready = ready.clone();
@@ -7540,6 +7593,35 @@ mod control_act_tests {
             for body in &bodies[1..] { assert_eq!(body["max_total_msat"], approved.unwrap_or(0)); }
             assert_eq!(book(&node), [(record.request_hash.clone(), 14000, true),
                 (format!("{}-retry-1", record.request_hash), 0, true)]);
+        }
+    }
+
+    #[tokio::test]
+    async fn proxy_pre_forward_refusal_preserves_paid_retry_record() {
+        for code in ["remote_retry_wait", "remote_handshake_unavailable", "remote_proxy_busy"] {
+            let node = fake(AuthMode::Local, compose_script(vec![
+                psi_502(2000, 0, 2000, PSI_TIMEOUT),
+                (503, serde_json::json!({"code":code}).to_string()),
+            ]));
+            let record = psi_first(&node).await;
+            let accounted = book(&node);
+            assert_eq!(do_message_retry(&node.state, A, "gm", None).await.unwrap_err().code, "not_dispatched");
+            assert_eq!(serde_json::to_value(pending(&node).unwrap()).unwrap(), serde_json::to_value(record).unwrap());
+            assert_eq!(book(&node), accounted);
+        }
+    }
+
+    #[test]
+    fn proxy_not_dispatched_mapping_requires_exact_status_and_code() {
+        for code in ["remote_retry_wait", "remote_handshake_unavailable", "remote_proxy_busy"] {
+            let body = serde_json::json!({"code":code}).to_string();
+            assert!(act::not_dispatched_refusal(503, &body));
+            for status in [400, 500, 502, 504] {
+                assert!(!act::not_dispatched_refusal(status, &body));
+            }
+        }
+        for body in [r#"{"code":"remote_transport_failed"}"#, r#"{"message":"remote_retry_wait"}"#, "unavailable"] {
+            assert!(!act::not_dispatched_refusal(503, body));
         }
     }
 
@@ -9566,6 +9648,17 @@ mod control_act_tests {
 
     fn fetches(node: &Fake) -> Vec<serde_json::Value> {
         node.posts().into_iter().filter(|(p, _)| p == porch::ROUTE).map(|(_, b)| b).collect()
+    }
+
+    #[tokio::test]
+    async fn porch_cooldown_refuses_before_journal_or_payment() {
+        let (node, peer, _) = porch_node(Arc::new(|_, _, _| (503, "unexpected fetch".into())));
+        porch_budget(&node, &peer).await;
+        node.state.remote_retry.failed(&remote_access::RemoteError::RateLimited(60));
+        assert_eq!(do_porch_read(&node.state, &peer, porch::CARD_PATH, 6000).await.unwrap_err().code, "not_ready");
+        assert!(!journal_file(&node).exists());
+        assert!(book(&node).is_empty());
+        assert!(fetches(&node).is_empty());
     }
 
     #[tokio::test]

@@ -13,7 +13,7 @@ const reads = new Set<keyof Source>([
 export function pollingSource(get: () => Source, live: () => boolean, enabled: () => boolean = () => true) {
   let running = 0;
   let closed = false;
-  const waiting: { run: () => void; cancel: () => void }[] = [];
+  const waiting: { run: () => void; cancel: (reason: string) => void }[] = [];
   const pending = new Map<string, Promise<unknown>>();
   const pump = () => untrack(() => {
     while (!closed && live() && running < 2 && waiting.length) waiting.shift()!.run();
@@ -31,7 +31,7 @@ export function pollingSource(get: () => Source, live: () => boolean, enabled: (
         if (closed) return Promise.reject(new Error('Shell closed'));
         const result = new Promise<unknown>((resolve, reject) => {
           waiting.push({
-            cancel: () => reject(new Error('Shell closed')),
+            cancel: (reason) => reject(new Error(reason)),
             run: () => {
               // A refresh after a mutation must not reuse an in-flight snapshot.
               // Only calls still waiting to start can share the same read.
@@ -53,9 +53,14 @@ export function pollingSource(get: () => Source, live: () => boolean, enabled: (
       };
     },
   });
+  const drain = (reason: string) => {
+    pending.clear();
+    waiting.splice(0).forEach(job => job.cancel(reason));
+  };
   return {
     source,
     resume: pump,
-    close: () => { closed = true; waiting.splice(0).forEach(job => job.cancel()); },
+    stop: () => drain('Shell stopped'),
+    close: () => { closed = true; drain('Shell closed'); },
   };
 }

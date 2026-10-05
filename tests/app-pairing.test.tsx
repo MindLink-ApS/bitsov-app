@@ -49,6 +49,19 @@ describe('app shell pairing wiring', () => {
     await vi.waitFor(() => expect(mount!.querySelector('[data-gate="g6-remote-trust"]')).not.toBeNull());
   });
 
+  it('shows the retry banner on a cold start without a node identity', async () => {
+    vi.stubGlobal('__TAURI_INTERNALS__', { invoke: (cmd: string) => {
+      if (cmd === 'node_status') return Promise.resolve({ ready: false, node_id: null, error: 'remote unavailable', retry_after_secs: 42 });
+      if (cmd === 'pairing_status') return Promise.resolve({ ...paired, remote: true });
+      return Promise.reject(new Error('not available'));
+    } });
+    mount = document.createElement('div'); document.body.appendChild(mount);
+    dispose = render(() => <App />, mount);
+    await vi.waitFor(() => expect(mount!.querySelector('[data-first-run]')?.textContent).toContain('42'));
+    expect(mount.textContent).not.toContain('Node stopped');
+    expect(mount.querySelector('[data-composer-bar]')).toBeNull();
+  });
+
   it('keeps a warm remote composer mounted throughout retry hints and recovery', async () => {
     vi.useFakeTimers();
     const nodeId = 'ef'.repeat(32);

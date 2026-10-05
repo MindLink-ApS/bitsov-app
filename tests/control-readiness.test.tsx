@@ -1,5 +1,6 @@
 import { readinessSource } from '../src/control/readiness';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createSignal } from 'solid-js';
 import { render } from 'solid-js/web';
 import { ControlCenter, setShowLegacyRoomsUi } from '../src/control/Shell';
 import { sampleSource, SAMPLE_OWN_ID, SAMPLE_OPEN_ROOM_ID, SAMPLE_PEERS } from '../src/control/sample';
@@ -26,6 +27,57 @@ async function start(ready: boolean | undefined, setup?: (s: ReturnType<typeof s
 }
 
 describe('node money readiness', () => {
+  it('disables a warm composer during retry cooldown and recovers without sending', async () => {
+    const source = sampleSource({ firstLiveMs: 1e9 });
+    const send = vi.spyOn(source, 'send');
+    const budgetSet = vi.spyOn(source, 'budgetSet');
+    const [retry, setRetry] = createSignal<number | null>(null);
+    mount = document.createElement('div'); document.body.appendChild(mount);
+    dispose = render(() => <ControlCenter source={source} active ready retryAfterSecs={retry()} error={null} ownId={SAMPLE_OWN_ID} firstRun={<span />} />, mount);
+    await vi.waitFor(() => expect(mount.querySelector<HTMLButtonElement>('[data-send]')?.disabled).toBe(false));
+    const composer = mount.querySelector('[data-composer-bar]');
+    mount.querySelector<HTMLButtonElement>('[data-tab="budget"]')!.click();
+    mount.querySelector<HTMLButtonElement>('[data-budget-edit]')!.click();
+    setRetry(42);
+    expect(mount.querySelector<HTMLButtonElement>('[data-budget-save]')!.disabled).toBe(true);
+    expect(budgetSet).not.toHaveBeenCalled();
+    expect(mount.querySelector<HTMLButtonElement>('[data-send]')!.disabled).toBe(true);
+    expect(mount.querySelector('[data-money-notice]')?.textContent).toContain('Waiting for the connection');
+    for (const mode of ['pay', 'request', 'file']) {
+      mount.querySelector<HTMLButtonElement>(`[data-composer-mode="${mode}"]`)!.click();
+      expect(mount.querySelector<HTMLButtonElement>('[data-send]')!.disabled).toBe(true);
+    }
+    setRetry(null);
+    mount.querySelector<HTMLButtonElement>('[data-composer-close]')!.click();
+    expect(mount.querySelector('[data-composer-bar]')).toBe(composer);
+    expect(mount.querySelector<HTMLButtonElement>('[data-send]')!.disabled).toBe(false);
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it('does not enqueue an old generation budget read after a late spend read', async () => {
+    vi.useFakeTimers();
+    const source = sampleSource({ firstLiveMs: 1e9 });
+    source.onLive = async () => () => {};
+    const spend = await source.spendStatus();
+    let finish!: (value: typeof spend) => void;
+    const old = new Promise<typeof spend>(resolve => { finish = resolve; });
+    let reads = 0;
+    source.spendStatus = () => ++reads === 1 ? old : Promise.resolve(spend);
+    const budget = vi.spyOn(source, 'budgetStatus');
+    const [active, setActive] = createSignal(true);
+    mount = document.createElement('div'); document.body.appendChild(mount);
+    dispose = render(() => <ControlCenter source={source} active={active()} remote ready error={null} ownId={SAMPLE_OWN_ID} firstRun={<span />} />, mount);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(reads).toBe(1);
+    setActive(false);
+    setActive(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(budget).toHaveBeenCalledTimes(1);
+    finish(spend);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(budget).toHaveBeenCalledTimes(1);
+  });
+
   it.each([true, undefined])('preserves enabled actions with ready=%s', async (ready) => {
     await start(ready);
     expect((mount.querySelector('[data-send]') as HTMLButtonElement).disabled).toBe(false);
@@ -112,7 +164,7 @@ describe('node money readiness', () => {
 });
 
 describe('shared money guard', () => {
-  it.each(['retry', 'send', 'pay', 'keysend', 'fileSend', 'invoiceCreate', 'firstContactQuote', 'firstContactRequest', 'sponsorOffer', 'sponsorCandidate', 'sponsorOwnerApproval', 'sponsorRequest', 'inviteCreate', 'inviteRedeem', 'fundStart', 'fundingAddress'] as const)('stops %s before reaching the host and permits it after recovery', async (method) => {
+  it.each(['retry', 'send', 'pay', 'keysend', 'fileSend', 'invoiceCreate', 'firstContactQuote', 'firstContactRequest', 'sponsorOffer', 'sponsorCandidate', 'sponsorOwnerApproval', 'sponsorRequest', 'inviteCreate', 'inviteRedeem', 'fundStart', 'fundingAddress', 'callSignal', 'spendRequest', 'relationApprove', 'budgetApprove', 'budgetResume', 'budgetSet', 'porchRead'] as const)('stops %s before reaching the host and permits it after recovery', async (method) => {
     const source = sampleSource();
     const call = vi.fn().mockResolvedValue('host reply');
     Object.assign(source, { [method]: call });

@@ -505,6 +505,19 @@ describe('meetings in the shell', () => {
     await vi.waitFor(() => expect(host.used('call_signal').map((c) => c.args!.kind)).toEqual([400, 400, 403, 403]));
   });
 
+  it('disables a priced incoming meeting during a connection cooldown', async () => {
+    let retry: number | null = null;
+    const host = stubHost({ node_status: () => ({ ready: true, node_id: OWN, error: null, retry_after_secs: retry }) });
+    await openShell();
+    host.emitLive({ type: 'message', room_id: null, message: offer(A, cid(0xa1), [A, OWN, B]) });
+    await vi.waitFor(() => expect(text('[data-meeting-join]')).toBe('Join · 33 sats'));
+    retry = 42;
+    await vi.waitFor(() => expect(text('.node-pill')).toContain('waiting 42 s'), { timeout: 2500 });
+    expect($<HTMLButtonElement>('[data-meeting-join]')!.disabled).toBe(true);
+    expect($<HTMLButtonElement>('[data-meeting-decline]')!.disabled).toBe(true);
+    expect(host.used('call_signal')).toHaveLength(0);
+  });
+
   it('an invite shows who is in it and the join price; joining answers the host and rings the later one', async () => {
     const host = stubHost();
     await openShell();

@@ -154,6 +154,7 @@ export type OrganismProps = {
   onSetpoints: () => void;
   onPauseAll: () => void;
   onResume: () => void;
+  resumeBlocked?: boolean;
 };
 
 /**
@@ -533,7 +534,7 @@ function SetpointsOrgan(props: OrganismProps) {
         <Match when={h().state === 'paused'}>
           <p class="organ-line" data-setpoint-paused>
             Paused. New app payments are blocked; in-flight payments, owner commands and background workers can still spend.{' '}
-            <button type="button" class="link" onClick={() => props.onResume()}>Resume</button>
+            <button type="button" class="link" disabled={props.resumeBlocked} onClick={() => props.onResume()}>Resume</button>
           </p>
         </Match>
         <Match when={h().state === 'waiting'}>

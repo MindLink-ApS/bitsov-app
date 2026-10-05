@@ -160,6 +160,7 @@ type Outcome<T> = { ok: true; value: T } | { ok: false; error: ActionError };
  * other spending call is refused by the host outside the ten-minute window.
  */
 export type Actions = {
+  moneyBlocked: () => boolean;
   approve: () => Promise<void>;
   lock: () => Promise<void>;
   /** Withdraw the pending request at the node. */
@@ -223,7 +224,7 @@ export function ControlCenter(props: Props) {
   const [now, setNow] = createSignal(Date.now());
   const [overview, setOverview] = createSignal<NodeOverview | null>(null);
   const [readinessRefused, setReadinessRefused] = createSignal(false);
-  const moneyBlocked = () => readinessRefused() || overview()?.money_ready === false;
+  const moneyBlocked = () => !live() || readinessRefused() || overview()?.money_ready === false;
   // The node's own STUN responder, if `/status` reports one (offered in Settings).
   const ownStun = createMemo<OwnStun | null>(() => {
     const o = overview();
@@ -453,7 +454,7 @@ export function ControlCenter(props: Props) {
     const revision = ++overviewRevision;
     return attempt('overview', () => source.nodeOverview(), (value) => {
       if (revision !== overviewRevision) return;
-      const recovering = moneyBlocked() && value.money_ready !== false;
+      const recovering = (readinessRefused() || overview()?.money_ready === false) && value.money_ready !== false;
       setOverview(value);
       setReadinessRefused(false);
       if (recovering) {
@@ -571,6 +572,7 @@ export function ControlCenter(props: Props) {
   let generation = 0;
   const stop = () => {
     generation += 1;
+    polling.stop();
     budgetRevision += 1;
     setBudgetConfirmed(false);
     timers.forEach(clearTimeout);
@@ -593,7 +595,7 @@ export function ControlCenter(props: Props) {
         void loadPeers();
         void loadRooms();
         void loadWallet();
-        void loadSpend().then(loadBudget);
+        void loadSpend().then(() => { if (mine === generation && live()) return loadBudget(); });
         void loadDevice();
         // Keep timer phases through cooldowns. Skip ticks while paused rather
         // than restarting the initial load sequence when the link recovers.
@@ -602,7 +604,7 @@ export function ControlCenter(props: Props) {
           [loadPeers, REFRESH_MS.peers], [loadWallet, REFRESH_MS.wallet],
           [loadRooms, REFRESH_MS.rooms], [loadDoor, REFRESH_MS.door],
           [loadEnergy, REFRESH_MS.energy], [loadMembrane, REFRESH_MS.membrane],
-          [() => loadSpend().then(() => { if (live()) return loadBudget(); }), REFRESH_MS.spend],
+          [() => loadSpend().then(() => { if (mine === generation && live()) return loadBudget(); }), REFRESH_MS.spend],
         ];
         polls.forEach(([read, period], index) => {
           let reading = false;
@@ -622,7 +624,7 @@ export function ControlCenter(props: Props) {
               if (mine !== generation) return;
               setLink(event.state);
               if (event.state !== 'open') { budgetRevision += 1; setBudgetConfirmed(false); }
-              else if (live()) void loadSpend().then(loadBudget);
+              else if (live()) void loadSpend().then(() => { if (mine === generation && live()) return loadBudget(); });
               // Back after a gap: re-read the open track so nothing is missed.
               if (event.state === 'open' && live() && track()) loadThread(track()!);
               if (event.state === 'open' && live() && caps().membrane) void loadMembrane();
@@ -874,8 +876,9 @@ export function ControlCenter(props: Props) {
   const voiceUrls = new Map<string, Promise<string>>();
   onCleanup(() => voiceUrls.forEach((u) => void u.then(URL.revokeObjectURL, () => undefined)));
   const actions: Actions = {
+    moneyBlocked,
     callQuote: (peer) => act(() => source.callQuote(peer)),
-    placeCall: (peer, media, quote) => void calls.place(peer, media, quote),
+    placeCall: (peer, media, quote) => { if (!moneyBlocked()) void calls.place(peer, media, quote); },
     callActive: () => !['idle', 'ended'].includes(callView().phase) || meetingOn(),
     // Opens the planner; the contact is pre-picked only if their node takes meetings.
     planMeeting: (peer) => {
@@ -1213,7 +1216,7 @@ export function ControlCenter(props: Props) {
       <Show when={props.active} fallback={<section class="track">{props.firstRun}</section>}>
         <section class="track" aria-label="Track" inert={walletTab() !== null}>
           <Show when={moneyBlocked()}>
-            <p class="hint money-notice" data-money-notice role="status">{MONEY_NOT_READY} Sending, paying, first contact, files, rooms, channels and gifts will be available when it is ready.</p>
+            <p class="hint money-notice" data-money-notice role="status">{!live() ? 'Waiting for the connection. Your node will retry automatically.' : MONEY_NOT_READY} Sending, paying, calls, first contact, files, rooms, channels and gifts will be available when it is ready.</p>
           </Show>
           <Show when={introNotice()}>
             {(n) => (
@@ -1431,6 +1434,7 @@ export function ControlCenter(props: Props) {
               nameOf={nameOf}
               onSetpoints={() => setTab('budget')}
               onPauseAll={() => void actions.pauseAll()}
+              resumeBlocked={moneyBlocked()}
               onResume={() => void actions.resume()}
             />
           </Match>
@@ -1456,11 +1460,12 @@ export function ControlCenter(props: Props) {
         </Switch>
       </aside>
       <CallPanel
+        blocked={moneyBlocked()}
         view={callView()}
         streams={callStreams()}
         nameOf={nameOf}
         quote={actions.callQuote}
-        accept={() => void calls.accept()}
+        accept={() => { if (!moneyBlocked()) void calls.accept(); }}
         decline={() => void calls.decline()}
         hangup={() => void calls.hangup()}
         mute={() => calls.toggleMute()}
@@ -2385,6 +2390,7 @@ function MediaView(props: { stream: MediaStream | null; video: boolean; muted: b
 
 /** The call card: incoming (accept/decline with price), ringing, live (mute, camera, duration, hang up), ended. */
 function CallPanel(props: {
+  blocked: boolean;
   view: CallView;
   streams: { local: MediaStream | null; remote: MediaStream | null };
   nameOf: (id: string) => string;
@@ -2439,8 +2445,8 @@ function CallPanel(props: {
         <div class="call-actions">
           <Switch>
             <Match when={v().phase === 'incoming'}>
-              <button type="button" class="primary soft money" data-call-accept onClick={() => props.accept()}>Accept{price(answer())}</button>
-              <button type="button" class="soft" data-call-decline onClick={() => props.decline()}>Decline{price(answer())}</button>
+              <button type="button" class="primary soft money" data-call-accept disabled={props.blocked} onClick={() => props.accept()}>Accept{price(answer())}</button>
+              <button type="button" class="soft" data-call-decline disabled={props.blocked} onClick={() => props.decline()}>Decline{price(answer())}</button>
             </Match>
             <Match when={v().phase === 'ended'}>
               <button type="button" class="soft" data-call-dismiss onClick={() => props.dismiss()}>Close</button>
@@ -2597,11 +2603,11 @@ function MeetingPanel(props: {
           <div class="call-actions">
             <Switch>
               <Match when={v().phase === 'invited'}>
-                <button type="button" class="primary soft money" data-meeting-join disabled={joinPrice() === null} onClick={() => props.join(shown(v().roster))}
+                <button type="button" class="primary soft money" data-meeting-join disabled={props.blocked || joinPrice() === null} onClick={() => props.join(shown(v().roster))}
                   aria-label={`Join${joinPrice() !== null ? `, up to ${fmtAmount(joinPrice()!)}` : ''}`}>
                   Join{price(joinPrice())}
                 </button>
-                <button type="button" class="soft" data-meeting-decline disabled={declinePrice() === null} onClick={() => props.decline(shown(v().roster))}
+                <button type="button" class="soft" data-meeting-decline disabled={props.blocked || declinePrice() === null} onClick={() => props.decline(shown(v().roster))}
                   aria-label={`Decline${declinePrice() !== null ? `, up to ${fmtAmount(declinePrice()!)}` : ''}`}>
                   Decline{declinePrice() !== null ? ` · up to ${sats(declinePrice()!)} ${satUnit(declinePrice()!)}` : ''}
                 </button>
@@ -4353,7 +4359,7 @@ function SpendBar(props: { spend: SpendView | null; error: string | undefined; n
   // One Ask again at a time: a double click must not print two requests at the node.
   const [asking, setAsking] = createSignal(false);
   const askAgain = async () => {
-    if (asking()) return;
+    if (props.actions.moneyBlocked() || asking()) return;
     setAsking(true);
     try {
       await props.actions.approve();
@@ -4415,7 +4421,7 @@ function SpendBar(props: { spend: SpendView | null; error: string | undefined; n
               {lapse() === 'lost'
                 ? 'Your node can no longer approve that request (for example, it restarted).'
                 : 'That request lapsed before it was approved.'}{' '}
-              <button type="button" class="link" data-spend-ask-again disabled={asking()} onClick={() => void askAgain()}>
+              <button type="button" class="link" data-spend-ask-again disabled={props.actions.moneyBlocked() || asking()} onClick={() => void askAgain()}>
                 Ask again
               </button>
             </p>
@@ -4738,14 +4744,14 @@ function BudgetBar(props: {
                 fallback={
                   <p class="hint">
                     This budget already equals your app all-in limit.{' '}
-                    <button type="button" class="link" data-budget-raise-total onClick={() => void props.actions.approveBudget(Math.min(props.budget.ceiling_msat * 2, props.budget.max_daily_msat), props.budget.preset)}>
+                    <button type="button" class="link" data-budget-raise-total disabled={props.actions.moneyBlocked()} onClick={() => void props.actions.approveBudget(Math.min(props.budget.ceiling_msat * 2, props.budget.max_daily_msat), props.budget.preset)}>
                       Raise the app all-in limit to {fmtAmount(Math.min(props.budget.ceiling_msat * 2, props.budget.max_daily_msat))}
                     </button>
                   </p>
                 }
               >
                 {(to) => (
-                  <button type="button" class="primary small money" data-budget-raise onClick={() => void props.actions.setBudget(props.target, props.room, to())}>
+                  <button type="button" class="primary small money" data-budget-raise disabled={props.actions.moneyBlocked()} onClick={() => void props.actions.setBudget(props.target, props.room, to())}>
                     Raise to {fmtAmount(to())} a day
                   </button>
                 )}
@@ -4762,7 +4768,7 @@ function BudgetBar(props: {
               </p>
               <Show when={st().raiseTo}>
                 {(to) => (
-                  <button type="button" class="primary small money" data-budget-raise-total onClick={() => void props.actions.approveBudget(to(), props.budget.preset)}>
+                  <button type="button" class="primary small money" data-budget-raise-total disabled={props.actions.moneyBlocked()} onClick={() => void props.actions.approveBudget(to(), props.budget.preset)}>
                     Approve {fmtAmount(to())} a day
                   </button>
                 )}
@@ -4884,7 +4890,7 @@ function BudgetPanel(props: {
                 </button>
               }
             >
-              <button type="button" class="primary money" data-resume onClick={() => void props.actions.resume()}>
+              <button type="button" class="primary money" data-resume disabled={props.actions.moneyBlocked()} onClick={() => void props.actions.resume()}>
                 Resume payments
               </button>
             </Show>
@@ -4916,7 +4922,7 @@ function BudgetPanel(props: {
                       >
                         <form class="row" onSubmit={(e) => { e.preventDefault(); void save(row); }}>
                           <input inputmode="numeric" value={value()} onInput={(e) => setValue(e.currentTarget.value)} aria-label={`Sats a day for ${props.nameOf(row.target, row.room)}`} data-budget-input />
-                          <button type="submit" class="small" data-budget-save>Save</button>
+                          <button type="submit" class="small" data-budget-save disabled={props.actions.moneyBlocked()}>Save</button>
                           <button type="button" class="link" onClick={() => setEditing(null)}>Cancel</button>
                         </form>
                       </Show>

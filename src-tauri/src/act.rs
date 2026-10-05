@@ -162,14 +162,14 @@ pub fn readiness_refusal(status: u16, body: &str) -> bool {
         .is_some_and(|v| v["code"] == "not_ready" && v["money_ready"] == false)
 }
 
-/// Genome #115: HTTP 400 with `code: "not_dispatched"` means the node proved
-/// no payment left the wallet. Only that exact code may clear the spend journal;
-/// any other 400 stays unknown.
+/// The node's #115 refusal and the local proxy's pre-forward failures prove
+/// non-dispatch. Generic 503s, transport failures and malformed replies stay unknown.
 pub fn not_dispatched_refusal(status: u16, body: &str) -> bool {
-    status == 400
-        && serde_json::from_str::<serde_json::Value>(body)
-            .ok()
-            .is_some_and(|v| v["code"] == "not_dispatched")
+    serde_json::from_str::<serde_json::Value>(body).ok().is_some_and(|v| {
+        (status == 400 && v["code"] == "not_dispatched")
+            || (status == 503 && matches!(v["code"].as_str(),
+                Some("remote_retry_wait" | "remote_handshake_unavailable" | "remote_proxy_busy")))
+    })
 }
 
 /// Genome `readmit_then_pay` (compose.rs): after a reconnect or restart the
