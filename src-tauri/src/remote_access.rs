@@ -2291,12 +2291,12 @@ mod tests {
         let auth: Arc<str> = Arc::from("b".repeat(64));
         let retry = Arc::new(RemoteRetry::default());
         let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let local_base = format!("http://{}/api/v1", probe.local_addr().unwrap());
+        let local_base = format!("http://127.0.0.1:{}/api/v1", probe.local_addr().unwrap().port());
         drop(probe);
         let proxy = start_proxy(&local_base, app_dir.path(), descriptor,
             key, "polling test", store.path().to_path_buf(), auth.clone(), retry.clone()).await.unwrap();
         let client = http_client_builder().build().unwrap();
-        let url = format!("http://{}/api/v1/status", proxy.local_addr());
+        let url = format!("http://127.0.0.1:{}/api/v1/status", proxy.local_addr().port());
         let read = || async {
             let response = client.get(&url).header(LOCAL_AUTH_HEADER, auth.as_ref()).send().await.unwrap();
             assert_eq!(response.status(), 200);
