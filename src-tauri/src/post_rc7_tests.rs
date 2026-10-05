@@ -6,7 +6,7 @@ fn responses(
     replies: Vec<(&'static str, u16, serde_json::Value)>,
 ) -> (NodeState, std::thread::JoinHandle<()>) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let base = format!("http://{}/api/v1", listener.local_addr().unwrap());
+    let base = format!("http://127.0.0.1:{}/api/v1", listener.local_addr().unwrap().port());
     let thread = std::thread::spawn(move || {
         for (expected, status, body) in replies {
             let (stream, _) = listener.accept().unwrap();
