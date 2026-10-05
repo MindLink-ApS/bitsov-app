@@ -234,7 +234,7 @@ async fn fixture_lifecycle(root: &Path, dir: &Path) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     drop(listener);
-    let state = NodeState::for_api(format!("http://{address}/api/v1"));
+    let state = NodeState::for_api(format!("http://127.0.0.1:{}/api/v1", address.port()));
     state.owner.active.store(true, Ordering::SeqCst);
     *state.token.lock().unwrap() = Some("test".into());
     let mut command = Command::new(std::env::current_exe().unwrap());
@@ -359,7 +359,7 @@ async fn real_lifecycle(root: &Path, dir: &Path, config: &Path, binary: &Path) {
         .insert("listen_addr".into(), address.to_string().into());
     std::fs::write(config, toml::to_string(&value).unwrap()).unwrap();
     drop(listener);
-    let state = NodeState::for_api(format!("http://{address}/api/v1"));
+    let state = NodeState::for_api(format!("http://127.0.0.1:{}/api/v1", address.port()));
     state.owner.active.store(true, Ordering::SeqCst);
     *state.config.lock().unwrap() = Some(config.to_path_buf());
     let mut node = start(binary, config, root, &state, 0);

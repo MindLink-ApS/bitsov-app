@@ -14,8 +14,10 @@ mod tests {
         replies: Vec<(&'static str, u16, String)>,
     ) -> (NodeState, std::thread::JoinHandle<()>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let state =
-            NodeState::for_api(&format!("http://{}/api/v1", listener.local_addr().unwrap()));
+        let state = NodeState::for_api(&format!(
+            "http://127.0.0.1:{}/api/v1",
+            listener.local_addr().unwrap().port()
+        ));
         state.owner.active.store(true, Ordering::SeqCst);
         *state.auth.lock().unwrap() = AuthMode::Paired(PairedSession {
             client_id: "client".into(),
