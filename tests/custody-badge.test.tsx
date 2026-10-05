@@ -23,8 +23,7 @@ describe('custody badge (node REMOTE-SIGNER.md §2)', () => {
     expect(hosted).toMatchObject({ label: 'Hosted custody', tone: 'warn' });
     expect(hosted.title).toContain('Seed on another computer or server, or this connection is not proven local.');
     expect(hosted.title).toContain('Whoever can reach that machine can spend its bitcoin and read its messages.');
-    expect(hosted.title).toContain('For remote connections');
-    expect(hosted.title).toContain('Use this Mac instead');
+    expect(hosted.title).not.toContain('Use this Mac instead');
     const money = custodyBadge('money_signer')!;
     expect(money).toMatchObject({ label: 'Money on your device', tone: 'warn' });
     expect(money.title).toContain('NodeId chat-identity private key stays on the server');

@@ -25,7 +25,7 @@ export function custodyBadge(mode: CustodyMode | null | undefined): CustodyBadge
       return {
         label: 'Hosted custody',
         tone: 'warn',
-        title: 'Seed on another computer or server, or this connection is not proven local. Whoever can reach that machine can spend its bitcoin and read its messages. For remote connections, use “Use this Mac instead” in Node, then restart BitSov.',
+        title: 'Seed on another computer or server, or this connection is not proven local. Whoever can reach that machine can spend its bitcoin and read its messages.',
       };
     case 'money_signer':
       return {

@@ -24,6 +24,7 @@ export function LocalNodeSwitch(props: { onForget: () => Promise<void>; disabled
     <button type="button" class="quiet" data-use-local disabled={busy() || forgotten() || props.disabled} onClick={() => void forget()}>
       {busy() ? 'Forgetting remote link…' : 'Use this Mac instead'}
     </button>
+    <p class="hint">This Mac’s node is a separate wallet. Funds and contacts stay on the remote node.</p>
     <Show when={forgotten()}>
       <p class="hint" role="status">Saved remote link forgotten. Restart BitSov to use this Mac. Your current connection stays unchanged until you quit.</p>
     </Show>
