@@ -1,3 +1,4 @@
+import { createMessageEntrance } from './messageEntrance';
 import { LocalNodeSwitch } from '../onboarding/LocalNodeSwitch';
 import { pollingSource } from './polling';
 import { readSpendPreset, saveSpendPreset } from './prefs';
@@ -70,6 +71,7 @@ import {
   freshness,
   isBudgetStop,
   isOutgoing,
+  isPorchKind,
   mergeMessages,
   messagesWorth,
   needsApproval,
@@ -248,6 +250,7 @@ export function ControlCenter(props: Props) {
   const [members, setMembers] = createStore<Record<string, string[]>>({});
   const [wallet, setWallet] = createSignal<WalletOverview | null>(null);
   const [link, setLink] = createSignal<LinkState | null>(null);
+  const seenEntrances = new Set<string>();
   const [threads, setThreads] = createStore<{ t: Threads; unread: Unread; fresh: Record<string, true> }>({ t: {}, unread: {}, fresh: {} });
   const [track, setTrack] = createSignal<TrackRef | null>(null);
   const [quote, setQuote] = createSignal<PriceQuote | null>(null);
@@ -637,6 +640,7 @@ export function ControlCenter(props: Props) {
               if (event.event.verdict === 'admitted') energyAfterEvent();
               return;
             }
+            if (event.type === 'message' && isPorchKind(event.message.kind)) return;
             // Call signals ring or steer the call; they are not chat.
             if (event.type === 'message' && isCallKind(event.message.kind)) {
               // Each engine takes only its own: meeting legs carry a roster.
@@ -663,8 +667,8 @@ export function ControlCenter(props: Props) {
               const m = event.message;
               const peer = (isOutgoing(m, ownId()) ? m.recipient : m.sender).toLowerCase();
               setThreads('t', trackKey({ kind: 'peer', id: peer }), (old) => mergeMessages(old ?? [], [m]));
-              foldRooms([m], true);
               setThreads('fresh', m.id, true);
+              foldRooms([m], true);
               return;
             }
             const next = applyLive(threads.t, threads.unread, openKey(), event, ownId());
@@ -766,9 +770,9 @@ export function ControlCenter(props: Props) {
     });
     if (!deliveries[receipt.message_id]) setDeliveries(receipt.message_id, deliveryFromReceipt(receipt));
     const sent = sentMessage(receipt, ownId(), text);
+    setThreads('fresh', receipt.message_id, true);
     setThreads('t', trackKey(t), (old) => mergeMessages(old ?? [], [sent]));
     foldRooms([sent], false);
-    setThreads('fresh', receipt.message_id, true);
   };
 
   /**
@@ -1130,8 +1134,8 @@ export function ControlCenter(props: Props) {
         setPaid(r.value.message_id, r.value.amount_msat);
         setAllowances(r.value.message_id, { total_msat: r.value.total_msat ?? r.value.amount_msat + (r.value.max_routing_fee_msat ?? 0), max_routing_fee_msat: r.value.max_routing_fee_msat ?? 0, fee_paid_msat: r.value.fee_paid_msat, readmission_msat: r.value.readmission_msat });
         if (!deliveries[r.value.message_id]) setDeliveries(r.value.message_id, deliveryFromReceipt(r.value));
-        setThreads('t', trackKey(t), (old) => mergeMessages(old ?? [], [sentFileMessage(r.value, ownId())]));
         setThreads('fresh', r.value.message_id, true);
+        setThreads('t', trackKey(t), (old) => mergeMessages(old ?? [], [sentFileMessage(r.value, ownId())]));
       }
       return recordFailure(t, 'File not sent', r);
     },
@@ -1310,6 +1314,7 @@ export function ControlCenter(props: Props) {
                       onEarlier={() => loadRoomPage(room().id, roomPages[room().id]?.before ?? null)}
                       sends={roomSends[room().id] ?? []}
                       fresh={threads.fresh}
+                    seenEntrances={seenEntrances}
                       info={(peer) => roomContacts().find((c) => c.id === peer)}
                       quote={(peer) => source.priceQuote(peer).catch(() => null)}
                       budgetSkip={roomBudgetSkip}
@@ -1351,6 +1356,7 @@ export function ControlCenter(props: Props) {
                     messages={threads.t[trackKey(t())] ?? []}
                     artifacts={artifacts[trackKey(t())] ?? []}
                     fresh={threads.fresh}
+                    seenEntrances={seenEntrances}
                     deliveries={deliveries}
                     paid={paid}
                     allowances={allowances}
@@ -1930,6 +1936,7 @@ function Conversation(props: {
   messages: Message[];
   artifacts: Artifact[];
   fresh: Record<string, true>;
+  seenEntrances: Set<string>;
   deliveries: Deliveries;
   paid: Record<string, number>;
   allowances: Record<string, { total_msat: number; max_routing_fee_msat: number; fee_paid_msat?: number; readmission_msat?: number }>;
@@ -1985,8 +1992,12 @@ function Conversation(props: {
       room: props.roomQuote,
       nowMs: props.now,
     });
-  // Room chats show in their room, not as raw text here.
-  const items = () => streamItems(props.messages.filter((m) => !isCallKind(m.kind) && !(props.track.kind === 'peer' && roomOf(m, props.ownId))), props.artifacts);
+  // Protocol payloads belong to their own views, not the chat stream.
+  const items = createMemo(() => streamItems(props.messages.filter((m) => !isCallKind(m.kind) && !isPorchKind(m.kind) && !(props.track.kind === 'peer' && roomOf(m, props.ownId))), props.artifacts));
+  // Solid's For keys by identity. Primitive ids keep rows mounted when reads replace objects.
+  const keyedItems = createMemo(() => new Map(items().map((item) => [
+    item.type === 'message' ? `message:${item.message.id}` : `artifact:${item.artifact.id}`, item,
+  ])));
 
   createEffect(
     on(
@@ -2058,7 +2069,7 @@ function Conversation(props: {
           </p>
         </Show>
         <For
-          each={items()}
+          each={[...keyedItems().keys()]}
           fallback={
             <div class="empty-track">
               <h2>Nothing here yet</h2>
@@ -2070,22 +2081,26 @@ function Conversation(props: {
             </div>
           }
         >
-          {(item, i) => {
+          {(key, i) => {
+            const item = () => keyedItems().get(key)!;
+            const message = () => { const row = item(); return row.type === 'message' ? row.message : null; };
+            const artifact = () => { const row = item(); return row.type === 'artifact' ? row.artifact : null; };
             const prev = () => items()[i() - 1];
-            const newDay = () => !prev() || day(prev()!.at) !== day(item.at);
+            const newDay = () => !prev() || day(prev()!.at) !== day(item().at);
             return (
               <>
                 <Show when={newDay()}>
-                  <p class="day">{day(item.at)}</p>
+                  <p class="day">{day(item().at)}</p>
                 </Show>
                 <Switch>
-                  <Match when={item.type === 'message' && item.message}>
+                  <Match when={message()}>
                     {(m) => (
                       <MessageView
                         m={m()}
                         out={isOutgoing(m(), props.ownId)}
                         room={props.track.kind === 'room'}
                         fresh={!!props.fresh[m().id]}
+                        seenEntrances={props.seenEntrances}
                         delivery={props.deliveries[m().id]}
                         paid={props.paid[m().id]}
                         allowance={props.allowances[m().id]}
@@ -2102,7 +2117,7 @@ function Conversation(props: {
                       />
                     )}
                   </Match>
-                  <Match when={item.type === 'artifact' && item.artifact}>
+                  <Match when={artifact()}>
                     {(a) => <ArtifactView moneyBlocked={props.moneyBlocked} a={a()} nameOf={props.nameOf} delivery={a().type === 'file' ? props.deliveries[(a() as { receipt: { message_id: string } }).receipt.message_id] : undefined} onRetry={(id, approved) => props.actions.retryDelivery(props.track, id, approved)} onStop={(pendingId) => props.actions.stopRetrying(props.track, pendingId)} />}
                   </Match>
                 </Switch>
@@ -2220,6 +2235,7 @@ function MessageView(props: {
   out: boolean;
   room: boolean;
   fresh: boolean;
+  seenEntrances: Set<string>;
   delivery: Delivery | undefined;
   paid: number | undefined;
   allowance?: { total_msat: number; max_routing_fee_msat: number; fee_paid_msat?: number; readmission_msat?: number };
@@ -2237,6 +2253,7 @@ function MessageView(props: {
   fileFetch?: (messageId: string) => Promise<VoiceBlob>;
   fileSave?: (messageId: string) => Promise<FileSaveResult>;
 }) {
+  const entrance = createMessageEntrance(props.m.id, props.fresh, props.seenEntrances);
   const amount = () => (props.paid ?? props.m.payment_amount_msat ?? 0) + (props.allowance?.readmission_msat ?? 0);
   const paidLabel = () => paidAmount(amount(), props.allowance?.fee_paid_msat);
   // Only a received chat message in a peer thread can be a request card.
@@ -2273,7 +2290,7 @@ function MessageView(props: {
     return v && !v.ok ? v.reason : null;
   };
   return (
-    <article class={`msg ${props.out ? 'out' : 'in'}`} classList={{ fresh: props.fresh }} data-message={props.m.id}>
+    <article class={`msg ${props.out ? 'out' : 'in'}`} classList={{ fresh: entrance.fresh() }} onAnimationEnd={entrance.finish} data-message={props.m.id}>
       <Show when={!props.out && props.room}>
         <span class="who">{props.nameOf(props.m.sender)}</span>
       </Show>
