@@ -7053,7 +7053,7 @@ mod pairing_wiring_tests {
             f.state.remote_mode.store(true, Ordering::SeqCst);
             let ctx = f.state.pairing.lock().unwrap().clone().unwrap();
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let base = format!("http://{}/api/v1", listener.local_addr().unwrap());
+            let base = format!("http://127.0.0.1:{}/api/v1", listener.local_addr().unwrap().port());
             let server = tokio::spawn(async move {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let mut request = vec![0; 4096];
@@ -7082,7 +7082,7 @@ mod pairing_wiring_tests {
         let ctx = f.state.pairing.lock().unwrap().clone().unwrap();
         // An unreachable endpoint is a transient transport failure, not revocation.
         let dead = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base = format!("http://{}/api/v1", dead.local_addr().unwrap());
+        let base = format!("http://127.0.0.1:{}/api/v1", dead.local_addr().unwrap().port());
         drop(dead);
         *f.state.pairing.lock().unwrap() = Some(Arc::new(PairingCtx {
             client: PairingClient::new(f.state.http.clone(), base),
