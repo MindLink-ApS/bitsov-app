@@ -1,3 +1,4 @@
+import { LocalNodeSwitch } from './LocalNodeSwitch';
 import { SoftError } from '../control/SoftError';
 import { createSignal, For, Match, Show, Switch } from 'solid-js';
 import { onboardingSteps, scopeList, type NodeStatus, type PairingView } from './pairing';
@@ -37,12 +38,17 @@ export function Onboarding(props: {
   selectedTarget?: NodeTarget;
   onTargetChange?: (target: NodeTarget) => void;
   device?: () => DeviceView | null;
+  onForgetRemote?: () => Promise<void>;
   onImportRemote?: (link: string) => Promise<{
     endpoint: string;
     node_id_fingerprint: string;
     restart_required: boolean;
   }>;
 }) {
+  // Runtime, opt-in only. This changes presentation, never node authority.
+  const testNodes = (() => {
+    try { return localStorage.getItem('bitsov.test-nodes') === '1'; } catch { return false; }
+  })();
   const steps = () => onboardingSteps(props.status(), props.pairing(), props.trustAck());
   const stage = () => onboardingStage(steps());
   const [internalTarget, setInternalTarget] = createSignal<NodeTarget>('local');
@@ -54,11 +60,15 @@ export function Onboarding(props: {
   const isEnrolled = () => props.device?.()?.state === 'registered';
   const [remoteLink, setRemoteLink] = createSignal('');
   const [importing, setImporting] = createSignal(false);
+  const [forgetting, setForgetting] = createSignal(false);
+  const [remoteRevision, setRemoteRevision] = createSignal(0);
+  const [remoteChoiceEdited, setRemoteChoiceEdited] = createSignal(false);
   const [importResult, setImportResult] = createSignal<string | null>(null);
   const [importError, setImportError] = createSignal<string | null>(null);
 
   const importRemote = async (event: Event) => {
     event.preventDefault();
+    if (importing() || forgetting()) return;
     const link = remoteLink().trim();
     setRemoteLink('');
     if (!link) {
@@ -71,6 +81,8 @@ export function Onboarding(props: {
     try {
       if (!props.onImportRemote) throw new Error('Remote access import is unavailable.');
       const result = await props.onImportRemote(link);
+      setRemoteRevision(n => n + 1);
+      setRemoteChoiceEdited(true);
       setImportResult(
         `Remote node ${result.endpoint} saved. Node ID fingerprint: ${result.node_id_fingerprint}. Restart BitSov to connect.`,
       );
@@ -79,6 +91,16 @@ export function Onboarding(props: {
     } finally {
       setImporting(false);
     }
+  };
+
+  const forgetRemote = async () => {
+    setForgetting(true);
+    try {
+      await props.onForgetRemote!();
+      setRemoteChoiceEdited(true);
+      setImportResult(null);
+      setImportError(null);
+    } finally { setForgetting(false); }
   };
 
   return (
@@ -123,7 +145,7 @@ export function Onboarding(props: {
         </header>
       </Show>
 
-      {/* Node location: 3 honest choices; compact once the node is up */}
+      {/* Node location: this Mac first; compact once the node is up */}
       <div class="node-target-section" classList={{ compact: stage() !== 'node' }}>
         <h2 class="node-target-title" classList={{ 'sr-only': stage() === 'node' }}>Where your node runs</h2>
         <div class="node-target-grid" role="radiogroup" aria-label="Choose node location">
@@ -152,11 +174,13 @@ export function Onboarding(props: {
                   <span class="target-radio-indicator" aria-hidden="true">✓</span>
                 </div>
               </div>
-              <p>BitSov runs your node on this Mac. Your keys stay on this Mac. Recommended.</p>
+              <p>BitSov runs your node on this Mac. Your keys stay here. To receive messages and payments, this Mac must stay awake and BitSov must stay open.</p>
             </div>
           </button>
 
-          {/* Option 2: A node on my network (remote pairing link) */}
+          <details class="node-target-advanced" open={target() !== 'local'}>
+            <summary>Advanced: use a node you already run at home</summary>
+          {/* A home node uses a remote pairing link. */}
           <button
             type="button"
             class="node-target-card"
@@ -176,17 +200,20 @@ export function Onboarding(props: {
             </div>
             <div class="target-info">
               <div class="target-head">
-                <strong>A computer at home</strong>
+                <strong>Your computer at home</strong>
                 <div class="row" style={{ width: 'auto', gap: '8px' }}>
                   <span class="target-badge">Pairing link</span>
                   <span class="target-radio-indicator" aria-hidden="true">✓</span>
                 </div>
               </div>
-              <p>A home server on your network that runs a BitSov node. Its keys live on that computer. Paste its pairing link; it is saved for the next start.</p>
+              <p>A computer you keep running at home can receive while this Mac is off. Its keys live on that computer. Paste its pairing link; it is saved for the next start.</p>
             </div>
           </button>
 
-          {/* Option 3: A cloud / remotely hosted node (remote pairing link) */}
+          </details>
+
+          <Show when={testNodes}>
+          {/* Internal testing only; not a product path. */}
           <button
             type="button"
             class="node-target-card"
@@ -203,15 +230,16 @@ export function Onboarding(props: {
             </div>
             <div class="target-info">
               <div class="target-head">
-                <strong>A cloud server</strong>
+                <strong>Test node someone else runs (internal)</strong>
                 <div class="row" style={{ width: 'auto', gap: '8px' }}>
                   <span class="target-badge">Pairing link</span>
                   <span class="target-radio-indicator" aria-hidden="true">✓</span>
                 </div>
               </div>
-              <p>A server you rent that runs a BitSov node. Its keys live on that server, so whoever runs the host can reach them. Paste its pairing link; it is saved for the next start.</p>
+              <p>Not your keys. Whoever runs this machine can spend its bitcoin and read its messages. For internal testing only.</p>
             </div>
           </button>
+          </Show>
         </div>
         <p class="hint connect-line">
           {props.pairing().remote ? 'This app connects to your remote node.' : 'This app connects to the node on this Mac.'}
@@ -219,6 +247,10 @@ export function Onboarding(props: {
           <Show when={isEnrolled()}> Touch ID on this Mac can approve a contact or budget.</Show>
         </p>
       </div>
+
+      <Show when={props.onForgetRemote && (props.pairing().remote || target() !== 'local' || remoteChoiceEdited())}>
+        <LocalNodeSwitch onForget={forgetRemote} disabled={importing() || forgetting()} remoteRevision={remoteRevision()} />
+      </Show>
 
       <Switch>
         <Match when={props.pairing().state === 'pending'}>
@@ -363,12 +395,12 @@ export function Onboarding(props: {
           autocapitalize="none"
           autocorrect="off"
           spellcheck={false}
-          disabled={importing()}
+          disabled={importing() || forgetting()}
           value={remoteLink()}
           onInput={(event) => setRemoteLink(event.currentTarget.value)}
           placeholder="bitsov://pair/…"
         />
-        <button type="submit" class="primary" disabled={importing()}>
+        <button type="submit" class="primary" disabled={importing() || forgetting()}>
           {importing() ? 'Saving…' : 'Use remote node'}
         </button>
         <p class="hint">The link is verified and stored for the next app start.</p>

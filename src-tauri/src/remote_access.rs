@@ -31,6 +31,10 @@ pub const CLIENT_TRANSPORT_KDF_CONTEXT: &str = "bitsov remote access client x255
 
 pub const REMOTE_CONFIG_DIR: &str = "remote-access";
 pub const REMOTE_CONFIG_FILE: &str = "descriptor.json";
+// Serialize import/forget with authentication's durable update. A handshake
+// already in flight must not resurrect a link the user has just forgotten.
+static REMOTE_CONFIG_LOCK: Mutex<()> = Mutex::new(());
+const LOCAL_PAIRING_RESET: &str = "local-pairing-reset";
 pub const MAX_NOISE_PLAINTEXT: usize = 16 * 1024;
 pub const MAX_TRANSPORT_FRAME: usize = MAX_NOISE_PLAINTEXT + 2 + 16;
 pub const MAX_HANDSHAKE_FRAME: usize = 65_535;
@@ -438,12 +442,57 @@ pub fn import_pairing_link(
     link: &str,
 ) -> Result<RemoteImportView, RemoteError> {
     let descriptor = parse_pairing_link(link)?;
+    let _config = REMOTE_CONFIG_LOCK.lock().unwrap();
     persist_at(&config_path(app_data_dir), &descriptor)?;
     Ok(RemoteImportView {
         endpoint: descriptor.endpoint.clone(),
         node_id_fingerprint: node_id_fingerprint(&descriptor.node_id),
         restart_required: true,
     })
+}
+
+/// Forget only the startup link. Local keys, identity and live transport are untouched.
+pub fn forget_persisted(app_data_dir: &Path) -> Result<(), RemoteError> {
+    let _config = REMOTE_CONFIG_LOCK.lock().unwrap();
+    let descriptor = config_path(app_data_dir);
+    if descriptor.exists() {
+        let dir = app_data_dir.join(REMOTE_CONFIG_DIR);
+        pairing::key::restrict_dir(&dir).map_err(|e| RemoteError::Local(e.to_string()))?;
+        let reset = dir.join(LOCAL_PAIRING_RESET);
+        if reset.exists() {
+            pairing::key::check_owner_only(&reset, "local pairing reset")
+                .map_err(|e| RemoteError::Local(e.to_string()))?;
+        } else {
+            pairing::key::create_new_protected(&reset)
+                .and_then(|file| file.sync_all())
+                .map_err(|e| RemoteError::Local(format!("cannot schedule local pairing reset: {e}")))?;
+        }
+    }
+    match std::fs::remove_file(descriptor) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(RemoteError::Local(format!("cannot forget remote descriptor: {error}"))),
+    }
+}
+
+/// Called only at startup, before attaching a local node. Remote and local
+/// sessions historically share the pairing record, so discard the old remote
+/// record here, after the previous process and its live session have exited.
+pub fn prepare_local_pairing(app_data_dir: &Path, pairing_store: &Path) -> Result<(), RemoteError> {
+    let _config = REMOTE_CONFIG_LOCK.lock().unwrap();
+    let reset = app_data_dir.join(REMOTE_CONFIG_DIR).join(LOCAL_PAIRING_RESET);
+    if config_path(app_data_dir).exists() || !reset.exists() {
+        return Ok(());
+    }
+    pairing::key::check_owner_only(&reset, "local pairing reset")
+        .map_err(|e| RemoteError::Local(e.to_string()))?;
+    match std::fs::remove_file(pairing_store.join(pairing::RECORD_FILE)) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(RemoteError::Local(format!("cannot reset remote pairing record: {error}"))),
+    }
+    std::fs::remove_file(reset)
+        .map_err(|error| RemoteError::Local(format!("cannot finish local pairing reset: {error}")))
 }
 
 pub fn load_persisted(app_data_dir: &Path) -> Result<Option<RemoteDescriptor>, RemoteError> {
@@ -1182,6 +1231,19 @@ fn finalize_authenticated_pairing(
         .lock()
         .map_err(|_| RemoteError::Local("remote descriptor lock is poisoned".into()))?;
     if current.code.is_some() {
+        let _config = REMOTE_CONFIG_LOCK.lock().unwrap();
+        // Only update the descriptor this handshake started with. Import or
+        // forget may have changed the next startup while the network awaited.
+        let stored = std::fs::read(config_path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<RemoteDescriptor>(&bytes).ok());
+        if !stored.is_some_and(|saved| saved.node_id == current.node_id
+            && saved.endpoint == current.endpoint
+            && saved.transport_pubkey == current.transport_pubkey
+            && saved.code == current.code)
+        {
+            return Err(RemoteError::Local("remote pairing link was forgotten or replaced; restart BitSov".into()));
+        }
         current.code = None;
         if let Err(error) = persist_at(config_path, &current) {
             // Fail closed: never leave a confirmed one-time code available
@@ -1589,6 +1651,71 @@ mod tests {
         ))
         .is_err());
         assert!(parse_pairing_link("https://node.example/pair").is_err());
+    }
+
+    #[test]
+    fn forgetting_remote_is_idempotent_and_preserves_local_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = SigningKey::from_bytes(&[11u8; 32]);
+        let transport = X25519PublicKey::from(&StaticSecret::from([12u8; 32])).to_bytes();
+        import_pairing_link(dir.path(), &signed_link("127.0.0.1:4242".into(), &node, transport, &test_code(2))).unwrap();
+        let local = dir.path().join("mnemonic.txt");
+        std::fs::write(&local, "local identity untouched").unwrap();
+        forget_persisted(dir.path()).unwrap();
+        assert!(load_persisted(dir.path()).unwrap().is_none());
+        forget_persisted(dir.path()).unwrap();
+        assert_eq!(std::fs::read_to_string(local).unwrap(), "local identity untouched");
+    }
+
+    #[test]
+    fn forgetting_remote_reports_removal_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(config_path(dir.path())).unwrap();
+        assert!(forget_persisted(dir.path()).is_err());
+    }
+
+    #[test]
+    fn local_reset_waits_for_local_startup_and_preserves_the_client_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = SigningKey::from_bytes(&[11u8; 32]);
+        let transport = X25519PublicKey::from(&StaticSecret::from([12u8; 32])).to_bytes();
+        let link = signed_link("127.0.0.1:4242".into(), &node, transport, &test_code(2));
+        let store = dir.path().join("app-client");
+        let key = ClientKey::load_or_create(&store).unwrap();
+        let key_bytes = std::fs::read(store.join(pairing::KEY_FILE)).unwrap();
+        pairing::save_remote_record(&store, &key,
+            "0123456789abcdef0123456789abcdef".into(), vec!["read".into()]).unwrap();
+        let record = store.join(pairing::RECORD_FILE);
+        prepare_local_pairing(dir.path(), &store).unwrap();
+        assert!(record.exists(), "normal startup preserves its pairing");
+        import_pairing_link(dir.path(), &link).unwrap();
+        forget_persisted(dir.path()).unwrap();
+        assert!(record.exists(), "live session keeps its record");
+        import_pairing_link(dir.path(), &link).unwrap();
+        prepare_local_pairing(dir.path(), &store).unwrap();
+        assert!(record.exists(), "a newer remote choice takes precedence");
+        forget_persisted(dir.path()).unwrap();
+        prepare_local_pairing(dir.path(), &store).unwrap();
+        assert!(!record.exists());
+        assert_eq!(std::fs::read(store.join(pairing::KEY_FILE)).unwrap(), key_bytes);
+        // Consuming the marker is one-time: a later local pairing survives.
+        std::fs::write(&record, "new local record").unwrap();
+        prepare_local_pairing(dir.path(), &store).unwrap();
+        assert_eq!(std::fs::read_to_string(record).unwrap(), "new local record");
+    }
+
+    #[test]
+    fn in_flight_auth_cannot_restore_a_forgotten_descriptor() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = SigningKey::from_bytes(&[11u8; 32]);
+        let transport = X25519PublicKey::from(&StaticSecret::from([12u8; 32])).to_bytes();
+        import_pairing_link(dir.path(), &signed_link("127.0.0.1:4242".into(), &node, transport, &test_code(2))).unwrap();
+        let descriptor = Mutex::new(load_persisted(dir.path()).unwrap().unwrap());
+        let store = dir.path().join("pairing-client");
+        let key = ClientKey::load_or_create(&store).unwrap();
+        forget_persisted(dir.path()).unwrap();
+        finalize_authenticated_pairing(&descriptor, &config_path(dir.path()), &store, &key, "client".into(), vec!["read".into()]).unwrap_err();
+        assert!(load_persisted(dir.path()).unwrap().is_none());
     }
 
     #[test]
@@ -2293,6 +2420,7 @@ mod tests {
         let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let local_base = format!("http://127.0.0.1:{}/api/v1", probe.local_addr().unwrap().port());
         drop(probe);
+        persist_at(&config_path(app_dir.path()), &descriptor).unwrap();
         let proxy = start_proxy(&local_base, app_dir.path(), descriptor,
             key, "polling test", store.path().to_path_buf(), auth.clone(), retry.clone()).await.unwrap();
         let client = http_client_builder().build().unwrap();

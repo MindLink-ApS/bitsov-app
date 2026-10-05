@@ -73,6 +73,7 @@ export interface Source {
   nodeStatus(): Promise<NodeStatus>;
   pairingStatus(): Promise<PairingView>;
   pairingRetry(): Promise<PairingView>;
+  remoteAccessForget(): Promise<void>;
   remoteAccessImport(link: string): Promise<RemoteImportView>;
   identityRestore(mnemonic: string): Promise<RestoreOutcome>;
   fundState(): Promise<FundState | null>;
@@ -222,6 +223,7 @@ export const hostSource: Source = {
   nodeStatus: () => invoke<NodeStatus>('node_status'),
   pairingStatus: () => invoke<PairingView>('pairing_status'),
   pairingRetry: () => invoke<PairingView>('pairing_retry'),
+  remoteAccessForget: () => invoke<void>('remote_access_forget'),
   remoteAccessImport: (link) => invoke<RemoteImportView>('remote_access_import', { link }),
   identityRestore: (mnemonic) => invoke<RestoreOutcome>('identity_restore', { mnemonic }),
   fundState: () => invoke<FundState | null>('fund_state'),

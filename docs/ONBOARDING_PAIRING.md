@@ -26,6 +26,27 @@ Bumping the pin means cutting a genome tag that contains #77, running
 `scripts/fetch-node-sidecar.sh` against it, and re-running the CS-1/CS-2
 smokes. That is a HUMAN step. This change does not do it.
 
+## Node choices
+
+This Mac is the default. Receiving requires the Mac to stay awake with BitSov
+open. A node on the user's own home computer is under the collapsed Advanced
+disclosure. Remote connections are shown as home/network connections; their
+custody label remains **Hosted custody**, because the app cannot verify where
+that node's keys live or who has access.
+
+The internal test-node card is off by default. To enable it at runtime, set
+`localStorage.setItem('bitsov.test-nodes', '1')` in the main webview, then reload.
+Remove that key and reload to hide it again. This flag changes UI visibility
+only; it grants no node authority and does not change the default selection.
+
+**Use this Mac instead** forgets the saved remote descriptor and takes
+effect on the next app start. At that startup it clears the old remote pairing
+record, preserving the client key, so local pairing can start normally. It does not delete an identity or revoke a device
+at the remote node. The current connection and trust disclosure remain remote
+until restart. The action is available in onboarding and the connected Node
+panel. Local nodes show the device-approval off reason, when provided, but no
+at-the-node Touch ID registration or CLI approval ceremony.
+
 ## Flow
 
 First run, as the onboarding screen shows it:

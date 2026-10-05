@@ -1,3 +1,4 @@
+import { LocalNodeSwitch } from '../onboarding/LocalNodeSwitch';
 import { pollingSource } from './polling';
 import { readSpendPreset, saveSpendPreset } from './prefs';
 import { WelcomeHome } from './WelcomeHome';
@@ -160,6 +161,7 @@ type Outcome<T> = { ok: true; value: T } | { ok: false; error: ActionError };
  * other spending call is refused by the host outside the ten-minute window.
  */
 export type Actions = {
+  remote?: () => boolean;
   moneyBlocked: () => boolean;
   approve: () => Promise<void>;
   lock: () => Promise<void>;
@@ -876,6 +878,7 @@ export function ControlCenter(props: Props) {
   const voiceUrls = new Map<string, Promise<string>>();
   onCleanup(() => voiceUrls.forEach((u) => void u.then(URL.revokeObjectURL, () => undefined)));
   const actions: Actions = {
+    remote: () => props.remote === true,
     moneyBlocked,
     callQuote: (peer) => act(() => source.callQuote(peer)),
     placeCall: (peer, media, quote) => { if (!moneyBlocked()) void calls.place(peer, media, quote); },
@@ -1439,7 +1442,7 @@ export function ControlCenter(props: Props) {
             />
           </Match>
           <Match when={tab() === 'node'}>
-            <NodePanel overview={overview()} link={link()} peers={peers()} now={now()} error={props.error ?? errors.overview ?? errors.peers} onReconnect={async () => { await props.onReconnect?.(); await loadOverview(); await loadPeers(); }} />
+            <NodePanel onForgetRemote={props.remote ? () => source.remoteAccessForget() : undefined} overview={overview()} link={link()} peers={peers()} now={now()} error={props.error ?? errors.overview ?? errors.peers} onReconnect={async () => { await props.onReconnect?.(); await loadOverview(); await loadPeers(); }} />
           </Match>
           <Match when={tab() === 'wallet'}>
             <button type="button" class="primary soft" data-open-wallet-page onClick={() => openWallet()}>Open Wallet</button>
@@ -4436,7 +4439,9 @@ function SpendBar(props: { spend: SpendView | null; error: string | undefined; n
           </p>
         </Match>
       </Switch>
-      <DeviceSetup device={props.actions.device()} now={props.now} actions={props.actions} />
+      <Show when={props.actions.remote?.() || props.actions.device()?.state === 'off'}>
+        <DeviceSetup device={props.actions.device()} now={props.now} actions={props.actions} />
+      </Show>
       <Reconcile actions={props.actions} hasPending={props.hasPending} />
       <Show when={props.error}>
         <p class="err-note">{props.error}</p>
@@ -5714,13 +5719,14 @@ function NewTrack(props: {
 
 // ---- context panels ---------------------------------------------------------
 
-function NodePanel(props: { overview: NodeOverview | null; link: LinkState | null; peers: Peer[]; now: number; error?: string; onReconnect: () => Promise<void> }) {
+function NodePanel(props: { onForgetRemote?: () => Promise<void>; overview: NodeOverview | null; link: LinkState | null; peers: Peer[]; now: number; error?: string; onReconnect: () => Promise<void> }) {
   const fresh = () => freshness(props.overview?.read_at ?? null, props.now);
   const linkText = () =>
     props.link === 'open' ? 'Live' : props.link === 'connecting' ? 'Connecting' : props.link === 'closed' ? 'Reconnecting' : 'Waiting';
   return (
     <div class="panel" data-panel="node">
       <h2>Your node</h2>
+      <Show when={props.onForgetRemote}><LocalNodeSwitch onForget={() => props.onForgetRemote!()} /></Show>
       <Show when={props.overview} fallback={<Show when={!props.error}><DelayedSpinner /></Show>}>
         {(o) => (
           <dl class="facts">

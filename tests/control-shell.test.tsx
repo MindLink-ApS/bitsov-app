@@ -344,9 +344,21 @@ describe('control center shell', () => {
     expect(mount.querySelector('[data-touch-approval]')).toBeNull();
   });
 
+  it.each(['none', 'pending', 'lapsed'])('hides at-node device setup on a local node (%s)', async (state) => {
+    stubHost({ device_key_status: () => ({ available: true, state, fingerprint: '3F9A', owner_action: 'konsensus device approve --op dd01', expires_at_ms: Date.now() + 600_000 }) });
+    start();
+    await vi.waitFor(() => expect(mount.querySelector('[data-gate]')).not.toBeNull());
+    [...mount.querySelectorAll<HTMLButtonElement>('button')].find(b => b.textContent?.includes('I understand'))!.click();
+    await vi.waitFor(() => expect(mount.querySelector('[data-spend]')).not.toBeNull());
+    expect(mount.querySelector('[data-device-owner-action]')).toBeNull();
+    expect(mount.querySelector('[data-device-register]')).toBeNull();
+    expect(mount.textContent).not.toContain('Approve this Mac once at your node');
+  });
+
   it('shows the one-time owner command for this Mac, and a pending request can be cancelled', async () => {
     const cmd = 'konsensus device approve --op dd01 --config /Users/owner/node/konsensus.toml';
     const { calls } = stubHost({
+      pairing_status: () => ({ ...paired, remote: true }),
       device_key_status: () => ({ available: true, state: 'pending', fingerprint: '3F9A-12C4', owner_action: cmd, expires_at_ms: Date.now() + 600_000 }),
       device_key_cancel: () => ({ available: true, state: 'none', fingerprint: null, owner_action: null, expires_at_ms: null }),
       spend_status: () => ({ state: 'pending', lapse: null, basis: null, open_until_ms: null, window_ms: 600_000,

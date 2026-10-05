@@ -1018,6 +1018,9 @@ async fn bootstrap_node(app: AppHandle) {
         Ok(None) => {}
         Err(error) => return set_error(&state, error.to_string()),
     }
+    if let Err(error) = remote_access::prepare_local_pairing(&app_data_dir, &app_data_dir.join(PAIRING_STORE_DIR)) {
+        return set_error(&state, error.to_string());
+    }
     // Release builds: always `Ok(None)` (see `dev_node`).
     match dev_node::resolve_external(&app_data_dir) {
         Ok(Some(node)) => return attach_external(&app, &app_data_dir, node).await,
@@ -1713,6 +1716,21 @@ fn remote_access_import(
         .map_err(|error| format!("no app data dir: {error}"))?;
     remote_access::import_pairing_link(&app_data_dir, link.trim())
         .map_err(|error| error.to_string())
+}
+
+/// Forget the saved remote link for the next startup. Do not switch a live
+/// connection (or its trust boundary) in place.
+#[tauri::command]
+fn remote_access_forget(
+    window: WebviewWindow<impl tauri::Runtime>,
+    app: AppHandle<impl tauri::Runtime>,
+) -> Result<(), String> {
+    reject_sealed_window(&window)?;
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("no app data dir: {error}"))?;
+    remote_access::forget_persisted(&app_data_dir).map_err(|error| error.to_string())
 }
 
 /// Reconnect the remote transport even if pairing already succeeded. Local
@@ -6493,6 +6511,7 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             pairing_status,
             pairing_retry,
             remote_access_import,
+            remote_access_forget,
             node_overview,
             live_link,
             peers_list,
@@ -7128,6 +7147,28 @@ mod pairing_wiring_tests {
             record_before
         );
         assert_eq!(f.node.calls("/api/v1/auth/local"), 0);
+    }
+
+    #[tokio::test]
+    async fn forgotten_remote_restarts_on_rc7_without_reusing_remote_pairing() {
+        let f = fixture(PairRoutes::Absent);
+        let store = f.data_dir.path().join(PAIRING_STORE_DIR);
+        let key = ClientKey::load_or_create(&store).unwrap();
+        let original_key = std::fs::read(store.join(pairing::KEY_FILE)).unwrap();
+        pairing::save_remote_record(&store, &key,
+            "0123456789abcdef0123456789abcdef".into(), vec!["read".into(), "receive".into()]).unwrap();
+        let remote_dir = f.data_dir.path().join(remote_access::REMOTE_CONFIG_DIR);
+        std::fs::create_dir(&remote_dir).unwrap();
+        std::fs::write(remote_dir.join(remote_access::REMOTE_CONFIG_FILE), "saved remote descriptor").unwrap();
+        remote_access::forget_persisted(f.data_dir.path()).unwrap();
+        // Forgetting leaves the live remote session's record available.
+        assert!(store.join(pairing::RECORD_FILE).exists());
+        remote_access::prepare_local_pairing(f.data_dir.path(), &store).unwrap();
+        authenticate(&f.state, f.data_dir.path()).await.expect("local fallback after restart");
+        assert_eq!(f.state.pairing_view.lock().unwrap().state, "fallback");
+        assert_eq!(f.node.calls("/api/v1/pair/challenge"), 0);
+        assert_eq!(f.node.calls("/api/v1/auth/local"), 1);
+        assert_eq!(std::fs::read(store.join(pairing::KEY_FILE)).unwrap(), original_key);
     }
 
     #[tokio::test]
@@ -13450,6 +13491,7 @@ mod assistant_acl_tests {
                 "pairing_status",
                 "pairing_retry",
                 "remote_access_import",
+                "remote_access_forget",
                 // Control center reads (main window only, ACL + reject_sealed_window).
                 "node_overview",
                 "live_link",
@@ -14107,6 +14149,7 @@ mod assistant_acl_tests {
                 super::pairing_status,
                 super::pairing_retry,
                 super::remote_access_import,
+                super::remote_access_forget,
             ])
             // `test = true` skips the macOS Info.plist embed. A second plain
             // generate_context!() defines `_EMBED_INFO_PLIST` again and cargo
@@ -14199,7 +14242,9 @@ mod assistant_acl_tests {
             ),
             "invalid remote pairing link",
         );
-        for cmd in ["pairing_status", "pairing_retry", "remote_access_import"] {
+        // Do not invoke forget against the user's real app-data directory in
+        // this mock app. The persistence tests use isolated temporary folders.
+        for cmd in ["pairing_status", "pairing_retry", "remote_access_import", "remote_access_forget"] {
             assert_acl_denied(invoke(&assistant, cmd, serde_json::json!({})), cmd);
         }
     }
