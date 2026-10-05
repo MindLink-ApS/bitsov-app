@@ -3,6 +3,9 @@
 use super::*;
 use zeroize::Zeroizing;
 
+#[cfg(all(test, unix, feature = "local-owner-ceremony"))]
+mod process_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -641,6 +644,64 @@ pub fn start_args(config: &Path, dev: bool, owner: bool) -> Vec<std::ffi::OsStri
     }
     args
 }
+/// Prepare owner startup while the directory is still observably fresh.
+pub fn prepare_launch(
+    config: &Path,
+    load: impl FnOnce(&Path, bool) -> Result<Zeroizing<Vec<u8>>, String>,
+) -> Result<Zeroizing<Vec<u8>>, String> {
+    let dir = config.parent().ok_or("node data directory is unknown")?;
+    let fresh = may_create_password(dir)?;
+    // Save/read Keychain first: writing config makes this an existing installation.
+    let password = load(dir, fresh)?;
+    if !config
+        .try_exists()
+        .map_err(|_| "Cannot inspect the node config")?
+    {
+        if !fresh {
+            return Err("The existing node directory has no config. Restore its config before starting; owner setup will not replace existing node state.".into());
+        }
+        write_bootstrap_config(config).map_err(|_| {
+            "Could not durably write the bootstrap config; the node was not started."
+        })?;
+    }
+    Ok(password)
+}
+
+/// #237 has no config-only CLI. Match prepare_start's default_for_tier(Full),
+/// relying on node serde defaults except where the constructor differs. No seed,
+/// marker, database or identity directory is created. Keep in sync with the node
+/// when promoting the gated sidecar pin (see docs/LOCAL_OWNER_CEREMONY.md).
+fn write_bootstrap_config(config: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Write;
+    let dir = std::fs::canonicalize(config.parent().ok_or("missing config directory")?)?;
+    let value = serde_json::json!({
+        "tier": "full",
+        "identity": {"mnemonic_file": dir.join("identity/mnemonic.txt")},
+        "network": {"listen_addr": "0.0.0.0:9736", "tier": "T2"},
+        "lightning": {
+            "backend": "ldk", "network": "bitcoin",
+            "esplora_url": "https://blockstream.info/api",
+            "esplora_url_fallback": "https://mempool.space/api",
+            "listening_address": "0.0.0.0:9735"
+        },
+        "chain": {
+            "backend": "esplora", "api_url": "https://blockstream.info",
+            "esplora_url_fallback": "https://mempool.space"
+        },
+        "payment_gate": {"verify_lightning_settlement": true},
+        "storage": {"backend": "sqlite", "path": dir.join("konsensus.db")},
+        "backup": {"scb_dir": dir.join("backups")},
+        "api": {"audit_log_path": dir.join("audit.jsonl"), "operator_probes_enabled": false}
+    });
+    let text = toml::to_string_pretty(&value)?;
+    let mut tmp = tempfile::NamedTempFile::new_in(&dir)?;
+    tmp.write_all(text.as_bytes())?;
+    tmp.as_file().sync_all()?;
+    tmp.persist_noclobber(config)?;
+    std::fs::File::open(&dir)?.sync_all()?;
+    Ok(())
+}
+
 pub fn may_create_password(dir: &Path) -> Result<bool, String> {
     // Only an empty node directory is eligible for a NEW password. The app's
     // pairing directory is not node state. The node still makes the authoritative
@@ -660,6 +721,50 @@ pub fn may_create_password(dir: &Path) -> Result<bool, String> {
 #[cfg(test)]
 mod lifecycle_tests {
     use super::*;
+    #[test]
+    fn fresh_owner_launch_persists_only_config_after_password() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("quoted \" node");
+        std::fs::create_dir(&dir).unwrap();
+        let dir = std::fs::canonicalize(dir).unwrap();
+        let config = dir.join("konsensus.toml");
+        prepare_launch(&config, |_, fresh| {
+            assert!(fresh);
+            assert!(!config.exists(), "password must be durable before config");
+            Ok(Zeroizing::new(b"test-password".to_vec()))
+        })
+        .unwrap();
+        let text = std::fs::read_to_string(&config).expect("bootstrap config must exist");
+        let value: toml::Value = toml::from_str(&text).unwrap();
+        assert_eq!(value["tier"].as_str(), Some("full"));
+        assert_eq!(
+            value["identity"]["mnemonic_file"].as_str(),
+            dir.join("identity/mnemonic.txt").to_str()
+        );
+        assert_eq!(value["lightning"]["backend"].as_str(), Some("ldk"));
+        assert_eq!(value["network"]["tier"].as_str(), Some("T2"));
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        prepare_launch(&config, |_, fresh| {
+            assert!(!fresh);
+            Ok(Zeroizing::new(b"test-password".to_vec()))
+        })
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(&config).unwrap(), text);
+    }
+    #[test]
+    fn password_failure_and_nonempty_directory_never_get_bootstrap_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("konsensus.toml");
+        assert!(prepare_launch(&config, |_, _| Err("Keychain unavailable".into())).is_err());
+        assert!(!config.exists());
+        std::fs::create_dir(dir.path().join("identity")).unwrap();
+        assert!(prepare_launch(&config, |_, fresh| {
+            assert!(!fresh);
+            Ok(Zeroizing::new(vec![1]))
+        })
+        .is_err());
+        assert!(!config.exists());
+    }
     #[tokio::test]
     async fn legacy_device_mutations_cannot_replace_the_first_run_key() {
         let state = NodeState::for_api("http://127.0.0.1:1/api/v1");

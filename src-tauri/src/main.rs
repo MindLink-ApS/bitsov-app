@@ -526,9 +526,6 @@ async fn init_node(
     }
 }
 
-/// Start + supervise `konsensus start`. Never re-inits: the caller guarantees the
-/// config (and therefore the identity) already exists. The config is started exactly
-/// as `init` wrote it — this host never edits it.
 /// Resolve the bundled sidecar exactly as `tauri-plugin-shell` does, so the path is
 /// identical in dev and in a bundle: next to the current executable, stepping out of
 /// `deps/` when running under a test harness.
@@ -570,9 +567,7 @@ fn spawn_node(app: &AppHandle<impl tauri::Runtime>, config: &Path) -> Result<(),
     };
     let local_owner = state.owner.active.load(Ordering::SeqCst);
     let password = if local_owner {
-        let data_dir = config.parent().ok_or("node data directory is unknown")?;
-        let fresh = local_owner::may_create_password(data_dir)?;
-        Some(owner_password::load(data_dir, fresh)?)
+        Some(local_owner::prepare_launch(config, owner_password::load)?)
     } else { None };
     let mut cmd = std::process::Command::new(&program);
     cmd.args(local_owner::start_args(config, dev, local_owner))
@@ -620,7 +615,7 @@ fn spawn_node(app: &AppHandle<impl tauri::Runtime>, config: &Path) -> Result<(),
                     if label == "err" && initialization_refusal(&line) {
                         refused.store(true, Ordering::SeqCst);
                     }
-                    if !local_owner { eprintln!("[node/{label}] {line}"); }
+                    log_node_line(label, &line, local_owner);
                 }
             }));
         }
@@ -660,6 +655,14 @@ fn node_start_args(config: &Path, dev_node: bool) -> Vec<std::ffi::OsString> {
         args.push("--owner-control".into());
     }
     args
+}
+
+/// Owner-mode node output may contain sensitive diagnostics; never copy it to
+/// the host log. Pairing/refusal parsing above remains available to supervision.
+fn log_node_line(label: &str, line: &str, local_owner: bool) {
+    if !local_owner {
+        eprintln!("[node/{label}] {line}");
+    }
 }
 
 enum PipeKind {

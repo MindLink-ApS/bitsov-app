@@ -57,3 +57,45 @@ codes, orphan/lost responses, scope-safe cancellation, unchanged default argumen
 Keychain adapter failures and missing-item preservation, and pipe EOF delivery.
 Real signed-bundle Keychain ACL and interactive Touch ID lifecycle remain release
 acceptance checks; automated tests do not claim to prove those OS protections.
+
+Owner startup persists the Keychain password **before** atomically writing a
+bootstrap-only `konsensus.toml`, then passes the password through stdin. Node
+#237 has no config-only CLI. The app therefore mirrors
+`NodeConfig::default_for_tier(Full)` from `cli/owner.rs::prepare_start`: it writes
+the required sections, absolute identity/storage/backup/audit paths, full-tier
+network and LDK settings, fresh Esplora primary/fallback providers, and payment
+verification. Remaining values use the node's matching serde defaults. No identity,
+marker or database is created. Keep these defaults aligned when updating the pin.
+Existing config is never overwritten, and a nonempty directory missing config is
+refused. Finalize's node-owned alignment changes the mnemonic path to `.enc`.
+
+Contract §5 A is exercised in a host subprocess with a separate HTTP/descriptor
+fixture process. It captures node stdout/stderr and host stdout/stderr, exercises
+host create/finalize and durable receipts, and scans every generated regular file.
+The forbidden set contains the password (byte substring) and **every** phrase word
+(alphabetic tokens, so `act` inside `active` is not a leak). A scanner control
+checks each canary, and synthetic secret-bearing diagnostics exercise the host's
+owner-mode log suppression. Failures never dump captured secret-bearing output.
+
+An additional real-node subprocess test discovers
+`../pa-ownerB/{target-review-node,target}/debug/konsensus`, or uses an explicit
+`BITSOV_OWNER_TEST_BINARY`. It skips with a diagnostic only when no binary was
+configured or found; an explicit missing/broken binary fails. It uses the app's
+bootstrap config, descriptor handoff, pairing, create and finalize code; verifies
+`.enc` alignment and the marker; restarts with `--local-owner-device`; then checks
+the live identity and enabled device listing. It scans the same surfaces for the
+password and complete random phrase before finalize and after restart. Individual
+random words can coincide with public config/log tokens such as `network` or
+`true`; strict every-word coverage belongs to the deterministic host fixture.
+Only the live restart substitutes mock chain
+and wallet backends and an ephemeral P2P port to avoid external services. Its
+software P-256 enrollment proof does not test Touch ID or Keychain ACLs.
+
+Run with the ceremony and development features on, preserving the app identifier
+and capabilities and overriding only the sidecar bundle list:
+
+```sh
+npx tsc --noEmit
+npm test
+TAURI_CONFIG='{"bundle":{"externalBin":[]}}' cargo test --manifest-path src-tauri/Cargo.toml --features dev-node,local-owner-ceremony
+```
