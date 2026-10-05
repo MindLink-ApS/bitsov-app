@@ -26,11 +26,12 @@
 // sidecar. A pairing refusal is shown as an error, never downgraded.
 //
 // KEYS (charter invariant A.3): the node is the identity anchor. This host never
-// holds, derives, or displays node key material. It holds one key of its own: the
+// derives node signing keys. The gated local-owner ceremony displays a new phrase
+// once and supplies a Keychain password by pipe. Otherwise it holds only the
 // pairing client key (0600 under the app data dir), which proves nothing beyond
 // read access to that dir. The loopback JWT lives in `NodeState` and is attached
 // to requests here — it is never returned to the renderer, and no command response
-// type carries a token, a mnemonic, or a private key.
+// type carries a token or private key. Only local_owner_create carries a mnemonic.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -69,8 +70,10 @@ mod model_launch;
 // DEV ONLY: run a locally built genome-`main` node instead of the verified sidecar.
 // Compiled out of release builds (compile error with the feature). See the module.
 mod dev_node;
-// Secure Enclave device key bridge (the only FFI `unsafe`; lib crate forbids it).
+// Secure Enclave device-key and Keychain FFI bridges (lib crate forbids unsafe).
 mod device_key;
+mod local_owner;
+mod owner_password;
 // This Mac as a paired device: registration, signed envelopes, persisted approvals.
 mod device;
 mod owner_contact;
@@ -125,6 +128,7 @@ struct PairingCtx {
 }
 
 struct NodeState {
+    owner: local_owner::OwnerState,
     ready: Mutex<bool>,
     node_id: Mutex<Option<String>>,
     error: Mutex<Option<String>>,
@@ -274,6 +278,8 @@ impl NodeState {
         let retrying = self.remote_retry.is_retrying();
         let retry_after_secs = if retrying { self.remote_retry.remaining() } else { None };
         Status {
+            local_owner: self.owner.active.load(Ordering::SeqCst),
+            owner_warning: self.owner.warning.lock().unwrap().clone(),
             initialization_repair: *self.initialization_repair.lock().unwrap(),
             retry_after_secs,
             // A transport cooldown pauses reads; it does not revoke pairing.
@@ -313,6 +319,7 @@ impl NodeState {
             owner_contact: Mutex::new(None),
             front_door_ask: Mutex::new(None),
             device_policy: Mutex::new(device_key::Policy::Biometry),
+            owner: local_owner::OwnerState::default(),
             device_lapsed: AtomicBool::new(false),
             device_lifecycle: Mutex::new(()),
             approvals_restored: AtomicBool::new(false),
@@ -351,6 +358,8 @@ impl NodeState {
 
 #[derive(Serialize, Clone)]
 struct Status {
+    local_owner: bool,
+    owner_warning: Option<String>,
     initialization_repair: InitializationRepair,
     retry_after_secs: Option<u64>,
     ready: bool,
@@ -559,16 +568,30 @@ fn spawn_node(app: &AppHandle<impl tauri::Runtime>, config: &Path) -> Result<(),
         Some(program) => program,
         None => sidecar_path(SIDECAR_BIN)?,
     };
+    let local_owner = state.owner.active.load(Ordering::SeqCst);
+    let password = if local_owner {
+        let data_dir = config.parent().ok_or("node data directory is unknown")?;
+        let fresh = local_owner::may_create_password(data_dir)?;
+        Some(owner_password::load(data_dir, fresh)?)
+    } else { None };
     let mut cmd = std::process::Command::new(&program);
-    cmd.args(node_start_args(config, dev))
+    cmd.args(local_owner::start_args(config, dev, local_owner))
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
+
+    if local_owner { cmd.stdin(std::process::Stdio::piped()); }
 
     *state.all_in_caps_node.lock().unwrap() = None;
     *state.readmission_ask.lock().unwrap() = None;
     let routing_policy = configured_routing_policy(config);
     let network = configured_network(config);
     let child = state.spawn_child(&mut cmd)?;
+    if let Some(password) = password {
+        if owner_password::deliver(child.take_stdin(), password).is_err() {
+            stop_supervised_node(&child, Duration::from_secs(1));
+            return Err("The seed password pipe failed; the node was stopped.".into());
+        }
+    }
     *state.room_routing_policy.lock().unwrap() = routing_policy;
     *state.configured_network.lock().unwrap() = network;
 
@@ -597,7 +620,7 @@ fn spawn_node(app: &AppHandle<impl tauri::Runtime>, config: &Path) -> Result<(),
                     if label == "err" && initialization_refusal(&line) {
                         refused.store(true, Ordering::SeqCst);
                     }
-                    eprintln!("[node/{label}] {line}");
+                    if !local_owner { eprintln!("[node/{label}] {line}"); }
                 }
             }));
         }
@@ -1156,7 +1179,9 @@ async fn bootstrap_node(app: AppHandle) {
     let _ = std::fs::create_dir_all(&data_dir);
     let config = data_dir.join("konsensus.toml");
 
-    if !config.exists() {
+    let owner_enabled = local_owner::enabled(dev_sidecar.is_some());
+    state.owner.active.store(owner_enabled, Ordering::SeqCst);
+    if !owner_enabled && !config.exists() {
         if let Err(e) = init_node(&app, &data_dir, dev_sidecar.as_deref()).await {
             return set_error(&state, e);
         }
@@ -1207,6 +1232,9 @@ async fn finish_auth(state: &NodeState, data_dir: &Path) {
             *state.node_id.lock().unwrap() = Some(node_id);
             *state.error.lock().unwrap() = None;
             *state.ready.lock().unwrap() = true;
+            if state.owner.active.load(Ordering::SeqCst) {
+                *state.owner.warning.lock().unwrap() = local_owner::verify_device(state).await.err();
+            }
         }
         Err(e) => set_error(state, e),
     }
@@ -1795,6 +1823,31 @@ fn node_status(
     Ok(state.status_snapshot())
 }
 
+#[tauri::command]
+async fn local_owner_create(window: WebviewWindow<impl tauri::Runtime>, state: State<'_, NodeState>) -> Result<local_owner::Pending, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    local_owner::create(state.inner()).await
+}
+#[tauri::command(rename_all = "snake_case")]
+async fn local_owner_cancel(window: WebviewWindow<impl tauri::Runtime>, state: State<'_, NodeState>, ceremony_id: Option<String>) -> Result<(), String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    local_owner::cancel(state.inner(), ceremony_id.as_deref()).await
+}
+#[tauri::command(rename_all = "snake_case")]
+async fn local_owner_finalize(window: WebviewWindow<impl tauri::Runtime>, app: AppHandle<impl tauri::Runtime>, state: State<'_, NodeState>, backup_words: [zeroize::Zeroizing<String>; 3]) -> Result<(), String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    local_owner::finalize(&app, state.inner(), backup_words).await
+}
+#[tauri::command]
+async fn local_owner_reconcile(window: WebviewWindow<impl tauri::Runtime>, app: AppHandle<impl tauri::Runtime>, state: State<'_, NodeState>) -> Result<(), String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    local_owner::reconcile(&app, state.inner()).await
+}
+
 /// The only initialization-repair entry point; no startup/polling path calls it.
 #[tauri::command]
 async fn node_repair_initialized(
@@ -2025,6 +2078,9 @@ async fn request_identity_restore(
     state: &NodeState,
     phrase: &str,
 ) -> Result<RestoreResponse, String> {
+    if state.owner.active.load(Ordering::SeqCst) {
+        return Err("Use the local owner ceremony for a new identity. Restoring an existing owner identity requires the owner console.".into());
+    }
     match bootstrap_restore_available(state).await? {
         Some(false) => {
             return Err("This bootstrap node is not accepting an identity restore.".into())
@@ -5584,6 +5640,7 @@ fn save_device_record_if(
 /// node with one Touch ID signature, and wait for the owner's one-time
 /// approval at the node. This app cannot approve it.
 async fn do_device_key_register(state: &NodeState) -> Result<device::DeviceView, ActionError> {
+    local_owner::allow_legacy_device_change(state)?;
     if !device_available(state) {
         return Err(device_error(device_key::DeviceKeyError::BiometryUnavailable));
     }
@@ -5645,6 +5702,7 @@ async fn do_device_key_register(state: &NodeState) -> Result<device::DeviceView,
 
 /// Withdraw a registration still waiting for the owner.
 async fn do_device_key_cancel(state: &NodeState) -> Result<device::DeviceView, ActionError> {
+    local_owner::allow_legacy_device_change(state)?;
     let store = device_store(state)?;
     let Some(mut record) = device::load_record(&store) else { return Ok(device_view(state, None)) };
     if let Some(p) = record.pending.clone() {
@@ -6731,6 +6789,10 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
         .manage(AiState::default())
         .invoke_handler(tauri::generate_handler![
             node_status,
+            local_owner_create,
+            local_owner_cancel,
+            local_owner_finalize,
+            local_owner_reconcile,
             node_repair_initialized,
             fund_state,
             fund_start,
@@ -13886,6 +13948,10 @@ mod assistant_acl_tests {
             handler_commands(&source),
             [
                 "node_status",
+                "local_owner_create",
+                "local_owner_cancel",
+                "local_owner_finalize",
+                "local_owner_reconcile",
                 "node_repair_initialized",
                 "fund_state",
                 "fund_start",

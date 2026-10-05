@@ -1,3 +1,4 @@
+import { LocalOwnerCeremony } from './onboarding/LocalOwnerCeremony';
 import { InitializationRepair } from './onboarding/InitializationRepair';
 import { SoftError } from './control/SoftError';
 import { DelayedSpinner } from './control/DelayedSpinner';
@@ -19,9 +20,9 @@ import type { DeviceView, FundingAddress, FundState } from './control/types';
 // node, pairs with it (or, on a node without pairing routes, mints via
 // /auth/local), and exposes every node call as a Tauri command. This renderer
 // only reflects that state: it never talks to the node directly, never touches a
-// non-loopback host (Gate G2), and never holds a credential — no mnemonic,
-// private key, JWT or node token is read or displayed here. The one secret it
-// accepts is the recovery phrase, which is write-only: masked on entry, passed
+// non-loopback host (Gate G2), and never holds a JWT or private key. The gated
+// LocalOwnerCeremony displays a new phrase once. Restore accepts a recovery
+// phrase as a write-only input: masked on entry, passed
 // straight to the host, and cleared the moment it is submitted.
 
 const DEFAULT_FUNDING_SATS = 50_000;
@@ -193,7 +194,8 @@ export default function App() {
             }
           >
             <Show when={!trustAck()}>
-              <IdentityGate
+              <Show when={status().local_owner && pairing().bootstrap === 'bootstrap' && !pairing().remote}
+                fallback={<IdentityGate
                 source={source()}
                 nodeId={() => status().node_id}
                 remote={pairing().remote}
@@ -203,7 +205,9 @@ export default function App() {
                 onRestoring={setRestoring}
                 restoreError={restoreError}
                 setRestoreError={setRestoreError}
-              />
+              />}>
+                <LocalOwnerCeremony onComplete={() => void poll()} />
+              </Show>
             </Show>
           </Show>
         </>}
@@ -220,6 +224,10 @@ export default function App() {
   // disclosure is accepted; before that it may call node_status and
   // pairing_status, nothing else.
   return (
+    <>
+    <Show when={status().local_owner && status().owner_warning}>
+      <aside role="alert" class="panel" data-owner-warning>{status().owner_warning}</aside>
+    </Show>
     <Show
       when={trustAck()}
       fallback={
@@ -240,6 +248,7 @@ export default function App() {
         fund={(guarded, blocked) => <Fund source={guarded} moneyBlocked={blocked} ready={live} />}
       />
     </Show>
+    </>
   );
 }
 

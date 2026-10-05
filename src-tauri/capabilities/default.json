@@ -12,6 +12,10 @@
       ]
     },
     "allow-node-status",
+    "allow-local-owner-create",
+    "allow-local-owner-cancel",
+    "allow-local-owner-finalize",
+    "allow-local-owner-reconcile",
     "allow-node-repair-initialized",
     "allow-fund-state",
     "allow-fund-start",
