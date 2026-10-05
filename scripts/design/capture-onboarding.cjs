@@ -13,7 +13,7 @@ const pairing = (state, extra = {}) => ({ remote: false, state, scopes: state ==
 const stages = {
   'ob-1-starting': { status: { ready: false, node_id: null, error: null }, pairing: pairing('starting') },
   'ob-2-pairing': { status: { ready: true, node_id: 'ab'.repeat(33), error: null }, pairing: pairing('pending') },
-  'ob-3-remote-choice': { status: { ready: false, node_id: null, error: null }, pairing: pairing('starting'), click: '[data-target="cloud"]' },
+  'ob-3-remote-choice': { status: { ready: false, node_id: null, error: null }, pairing: pairing('starting'), click: '[data-target="network"]' },
   'ob-4-trust': { status: { ready: true, node_id: 'ab'.repeat(33), error: null }, pairing: pairing('paired', { short_code: 'ABCD-EFGH', code_from_node: true }) },
   'ob-6-remote-retry': { status: { ready: false, node_id: null, error: null, retry_after_secs: 12 }, pairing: pairing('starting', { remote: true }) },
   'ob-5-failed': { status: { ready: true, node_id: 'ab'.repeat(33), error: null }, pairing: pairing('failed', { reason: 'the node refused /pair/request (409): pairing is closed' }) },
@@ -39,7 +39,7 @@ const stages = {
       const page = await ctx.newPage();
       await page.goto(BASE + '/', { waitUntil: 'networkidle' });
       await page.waitForTimeout(900);
-      if (st.click) { await page.click(st.click); await page.waitForTimeout(400); }
+      if (st.click) { await page.click('.node-target-advanced summary'); await page.click(st.click); await page.waitForTimeout(400); }
       await page.screenshot({ path: path.join(OUT, `${name}-${theme}.png`) });
       await ctx.close();
     }

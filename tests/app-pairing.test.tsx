@@ -34,6 +34,26 @@ describe('app shell pairing wiring', () => {
     vi.useRealTimers();
   });
 
+  it.each([false, true])('forgetting a remote link requires restart and preserves actual trust (failure=%s)', async (fails) => {
+    const calls: string[] = [];
+    vi.stubGlobal('__TAURI_INTERNALS__', { invoke: (cmd: string) => {
+      calls.push(cmd);
+      if (cmd === 'node_status') return Promise.resolve({ ready: true, node_id: 'fa'.repeat(32), error: null });
+      if (cmd === 'pairing_status') return Promise.resolve({ ...paired, remote: true });
+      if (cmd === 'remote_access_forget') return fails ? Promise.reject(new Error('cannot forget remote descriptor')) : Promise.resolve();
+      return Promise.reject(new Error('not available'));
+    } });
+    mount = document.createElement('div'); document.body.appendChild(mount);
+    dispose = render(() => <App />, mount);
+    await vi.waitFor(() => expect(mount!.querySelector('[data-use-local]')).not.toBeNull());
+    mount.querySelector<HTMLButtonElement>('[data-use-local]')!.click();
+    await vi.waitFor(() => expect(mount!.textContent).toContain(fails ? 'cannot forget remote descriptor' : 'Restart BitSov to use this Mac'));
+    expect(calls.filter(c => c === 'remote_access_forget')).toHaveLength(1);
+    expect(mount.querySelector('[data-gate="g6-remote-trust"]')).not.toBeNull();
+    expect(mount.querySelector('[data-gate="g6-local-trust"]')).toBeNull();
+    expect(calls).not.toContain('fund_state');
+  });
+
   it('Reconnect recovers an already-paired remote connection instead of polling only', async () => {
     let recovered = false;
     vi.stubGlobal('__TAURI_INTERNALS__', { invoke: (cmd: string) => {
@@ -184,7 +204,7 @@ describe('app shell pairing wiring', () => {
     await vi.waitFor(() => expect(mount!.querySelector('[data-pairing="paired"]')).not.toBeNull());
 
     const selected = mount.querySelector('[role="radio"][aria-checked="true"]');
-    expect(selected?.getAttribute('data-target')).toBe(remote ? 'cloud' : 'local');
+    expect(selected?.getAttribute('data-target')).toBe(remote ? 'network' : 'local');
     const panel = mount.querySelector('[data-pairing="paired"]')!;
     const gate = mount.querySelector(`[data-gate="g6-${remote ? 'remote' : 'local'}-trust"]`)!;
     expect(gate).not.toBeNull();
@@ -194,7 +214,7 @@ describe('app shell pairing wiring', () => {
       expect(panel.textContent).not.toContain('Loopback authenticated');
       expect(panel.textContent).not.toContain('file-backed on this Mac');
       expect(gate.textContent).toContain('keys live on the remote machine');
-      expect(gate.textContent).toContain('VM host');
+      expect(gate.textContent).toContain('whoever can log in to that computer');
       expect(gate.textContent).toContain('can spend what you deposit');
       expect(gate.textContent).toContain('Only fund a node whose host you trust');
       expect(mount.querySelector('[data-gate="g6-local-trust"]')).toBeNull();

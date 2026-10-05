@@ -92,7 +92,7 @@ export default function App() {
   const live = () => shellOpen() && status().ready && !status().retry_after_secs;
   const [selectedTarget, setSelectedTarget] = createSignal<NodeTarget>('local');
   const remote = createMemo(() => pairing().remote);
-  createEffect(() => setSelectedTarget(remote() ? 'cloud' : 'local'));
+  createEffect(() => setSelectedTarget(remote() ? 'network' : 'local'));
   const [device, setDevice] = createSignal<DeviceView | null>(null);
   // Once pairing has an outcome, the start spinner no longer describes the state.
   const starting = () => pairing().state === 'starting' || pairing().state === 'pending';
@@ -159,6 +159,7 @@ export default function App() {
         trustAck={trustAck}
         onRetry={() => void retryPairing()}
         device={device}
+        onForgetRemote={() => source().remoteAccessForget()}
         onImportRemote={(link) => source().remoteAccessImport(link)}
       />
 
@@ -307,6 +308,7 @@ function IdentityGate(props: {
         fallback={
           <section class="panel disclosure" data-gate="g6-local-trust">
             <h2>Local trust — read this before you deposit</h2>
+            <p>Your node is only reachable while this Mac is awake and BitSov is open.</p>
             <p>
               This node trusts every program on this computer. Anything running under your user
               account can ask it for full access over <code>127.0.0.1</code> — enough to spend what
@@ -322,8 +324,8 @@ function IdentityGate(props: {
         <section class="panel disclosure" data-gate="g6-remote-trust">
           <h2>Remote trust — read this before you deposit</h2>
           <p>
-            This node’s keys live on the remote machine. Whoever operates that machine
-            (for example, the VM host) can spend what you deposit. Only fund a node whose host you trust.
+            This node’s keys live on the remote machine. Anyone with access —
+            whoever can log in to that computer — can spend what you deposit. Only fund a node whose host you trust.
           </p>
           <p>
             Your keys stay in the node. BitSov never shows you your recovery phrase and never

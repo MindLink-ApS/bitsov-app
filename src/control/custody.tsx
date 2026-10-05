@@ -25,7 +25,7 @@ export function custodyBadge(mode: CustodyMode | null | undefined): CustodyBadge
       return {
         label: 'Hosted custody',
         tone: 'warn',
-        title: 'The seed for this node is on a server (or this connection is not proven local). Whoever runs that server can spend its bitcoin and read its messages. Move it home to hold your own keys.',
+        title: 'Seed on another computer or server, or this connection is not proven local. Whoever can reach that machine can spend its bitcoin and read its messages.',
       };
     case 'money_signer':
       return {

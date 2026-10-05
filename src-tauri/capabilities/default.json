@@ -20,6 +20,7 @@
     "allow-pairing-status",
     "allow-pairing-retry",
     "allow-remote-access-import",
+    "allow-remote-access-forget",
     "allow-node-overview",
     "allow-live-link",
     "allow-peers-list",
