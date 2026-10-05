@@ -188,7 +188,7 @@ export function PorchPanel(props: Props) {
             <div class="composer-bar">
               <button type="button" class="link" data-porch-back disabled={busy()} onClick={() => setReview(null)}>Back</button>
               <span class="basis">You pay the real fee, never above this.</span>
-              <button type="button" class="primary soft" data-porch-confirm disabled={busy() || props.moneyBlocked} onClick={() => void confirm()}>
+              <button type="button" class="primary soft money" data-porch-confirm disabled={busy() || props.moneyBlocked} onClick={() => void confirm()}>
                 Confirm and pay
               </button>
             </div>

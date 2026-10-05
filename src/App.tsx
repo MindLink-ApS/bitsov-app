@@ -478,7 +478,7 @@ function Fund(props: { source: Source; ready: () => boolean; moneyBlocked?: () =
                 />
                 <span class="unit">sats</span>
               </div>
-              <button type="submit" class="primary" disabled={busy() || props.moneyBlocked?.()}>
+              <button type="submit" class="primary money" data-fund-start disabled={busy() || props.moneyBlocked?.()}>
                 {busy() ? 'Starting…' : 'Get a deposit address'}
               </button>
             </form>

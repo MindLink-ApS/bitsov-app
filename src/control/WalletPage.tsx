@@ -260,8 +260,8 @@ export function WalletPage(props: {
             Your home node must stay online to monitor and protect your Lightning channels; there is no watchtower yet.
           </p>
           <div class="wallet-actions">
-            <button type="button" class="primary soft" data-wallet-go="receive" onClick={() => props.onTab('receive')}>Receive</button>
-            <button type="button" class="primary soft" data-wallet-go="send" onClick={() => props.onTab('send')}>Send</button>
+            <button type="button" class="primary soft money" data-wallet-go="receive" onClick={() => props.onTab('receive')}>Receive</button>
+            <button type="button" class="primary soft money" data-wallet-go="send" onClick={() => props.onTab('send')}>Send</button>
           </div>
         </section>
 
@@ -534,7 +534,7 @@ function ReceiveView(props: { moneyBlocked: boolean; actions: WalletActions; rea
         <form class="wallet-form" onSubmit={create}>
           <input data-receive-memo placeholder="What for? (optional)" value={note()} onInput={(e) => setNote(e.currentTarget.value)} aria-label="What it is for" />
           <Show when={!invoice()}>
-            <button type="submit" class="primary soft" data-receive-create disabled={props.moneyBlocked || busy() || msat() === null}>
+            <button type="submit" class="primary soft money" data-receive-create disabled={props.moneyBlocked || busy() || msat() === null}>
               {busy() ? 'Creating…' : 'Create invoice'}
             </button>
             <p class="hint" data-receive-hint>Your node needs an amount for a Lightning invoice. Receiving is free.</p>
@@ -700,7 +700,7 @@ function SendView(props: { moneyBlocked: boolean; spend: SpendView | null; spend
                 </Show>
                 <span class="basis">The amount and a network fee of at most {fmtAmount(routingFee(msat() ?? 0))}</span>
               </div>
-              <button type="submit" class="primary soft" data-send-review disabled={!ready() && !approvable()}>{buttonLabel()}</button>
+              <button type="submit" class="primary soft money" data-send-review disabled={!ready() && !approvable()}>{buttonLabel()}</button>
             </div>
             <Show when={props.moneyBlocked}><p class="hint" data-send-blocked>Payments are not ready yet.</p></Show>
             <Show when={!props.moneyBlocked && !line().open}>
@@ -731,7 +731,7 @@ function SendView(props: { moneyBlocked: boolean; spend: SpendView | null; spend
             <div class="composer-bar">
               <button type="button" class="link" data-review-back disabled={busy()} onClick={() => setReview(null)}>Back</button>
               <span class="basis">You pay the real fee, never above this.</span>
-              <button type="button" class="primary soft" data-wallet-confirm disabled={busy() || props.moneyBlocked || !line().open} onClick={() => void confirm()}>
+              <button type="button" class="primary soft money" data-wallet-confirm disabled={busy() || props.moneyBlocked || !line().open} onClick={() => void confirm()}>
                 Confirm and pay
               </button>
             </div>
