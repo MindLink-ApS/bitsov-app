@@ -12,6 +12,7 @@
       ]
     },
     "allow-node-status",
+    "allow-node-repair-initialized",
     "allow-fund-state",
     "allow-fund-start",
     "allow-funding-address",

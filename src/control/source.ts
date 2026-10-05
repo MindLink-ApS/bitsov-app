@@ -71,6 +71,7 @@ export interface Source {
   readonly mode: 'node' | 'sample';
   // first run
   nodeStatus(): Promise<NodeStatus>;
+  nodeRepairInitialized(confirmed: boolean): Promise<void>;
   pairingStatus(): Promise<PairingView>;
   pairingRetry(): Promise<PairingView>;
   remoteAccessForget(): Promise<void>;
@@ -225,6 +226,7 @@ export const hostSource: Source = {
   pairingRetry: () => invoke<PairingView>('pairing_retry'),
   remoteAccessForget: () => invoke<void>('remote_access_forget'),
   remoteAccessImport: (link) => invoke<RemoteImportView>('remote_access_import', { link }),
+  nodeRepairInitialized: (confirmed) => invoke<void>('node_repair_initialized', { confirmed }),
   identityRestore: (mnemonic) => invoke<RestoreOutcome>('identity_restore', { mnemonic }),
   fundState: () => invoke<FundState | null>('fund_state'),
   fundStart: (sats) => invoke<FundState>('fund_start', { funding_amount_sats: sats }),

@@ -14,7 +14,7 @@ const STATUS_TEXT = {
   done: 'done',
   failed: 'failed',
   skipped: 'not available on this node',
-  blocked: 'waiting on a genome release',
+  blocked: 'not available here',
 } as const;
 
 export type NodeTarget = 'local' | 'network' | 'cloud';
@@ -132,7 +132,7 @@ export function Onboarding(props: {
             <h1>Before you add sats</h1>
             <Show
               when={!props.pairing().bootstrap}
-              fallback={<p class="lede">Read how your node is trusted. Creating or restoring an identity from this app is not available on this node yet.</p>}
+              fallback={<p class="lede">Your node has no identity yet. {props.pairing().remote ? "Restore it at your node before adding sats." : "Restore your existing identity on this Mac before adding sats."} Creating a new identity from this screen is not available yet.</p>}
             >
               <p class="lede">Read how your node is trusted. If you already have a BitSov identity, restore it now, before any sats arrive.</p>
             </Show>
@@ -330,9 +330,7 @@ export function Onboarding(props: {
 
             <Show when={props.pairing().bootstrap}>
               <p class="hint" data-identity-free>
-                Your node is identity-free (fresh install). Creating or restoring an identity
-                from this app arrives with the next genome release; nothing has been created
-                yet.
+                Your node is identity-free (fresh install). {props.pairing().remote ? "Restore your identity at your node." : "You can restore an existing identity on this Mac."} Nothing has been created yet.
               </p>
             </Show>
 

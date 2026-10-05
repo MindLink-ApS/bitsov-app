@@ -164,7 +164,7 @@ describe('app shell pairing wiring', () => {
     vi.stubGlobal('__TAURI_INTERNALS__', {
       invoke: (cmd: string) => {
         if (cmd === 'node_status') return Promise.resolve({ ready: true, node_id: 'ab'.repeat(33), error: null });
-        if (cmd === 'pairing_status') return Promise.resolve({ ...paired, bootstrap: bootstrap ? 'identity-free' : null });
+        if (cmd === 'pairing_status') return Promise.resolve({ ...paired, bootstrap: bootstrap ? 'bootstrap' : null });
         return Promise.reject(new Error(`unexpected ${cmd}`));
       },
     });
@@ -176,12 +176,12 @@ describe('app shell pairing wiring', () => {
     expect(mount.querySelector('[data-ob-head="trust"]')).not.toBeNull();
     const text = mount.textContent ?? '';
     if (bootstrap) {
-      expect(mount.querySelector('[data-restore-open]')).toBeNull();
-      expect(text).not.toContain('Restore an existing identity');
+      expect(mount.querySelector('[data-restore-open]')).not.toBeNull();
+      expect(text).toContain('Restore an existing identity');
       expect(text).not.toContain('restore it now');
-      expect(text).toContain('not available on this node yet');
-      // The blocked stage says so in words, not only as a pip.
-      expect(mount.querySelector('[data-step="identity"] .step-status:not(.sr-only)')?.textContent).toBe('waiting on a genome release');
+      expect(text).toContain('Restore your existing identity on this Mac');
+      expect(text).not.toContain('waiting on a genome release');
+      expect(text).not.toContain('I understand — continue to funding');
     } else {
       expect(mount.querySelector('[data-restore-open]')?.textContent).toContain('Restore an existing identity');
       expect(text).toContain('restore it now');

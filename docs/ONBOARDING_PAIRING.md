@@ -7,7 +7,7 @@ the app copy, or in release notes may be quoted as saying more.
 
 ## Status: mock-verified only
 
-The app pins genome `v0.3.0-rc7` (`958e399`). #77 is **not in any tag**, so the
+The app pins genome `v0.3.0-rc7` (`958e399`), which predates #77, so the
 sidecar this app bundles has no `/pair/*` routes. Everything below is verified
 against `src-tauri/crates/mock-node` using #77's route shapes. It is not yet
 verified against a real node.
@@ -20,7 +20,9 @@ verified against a real node.
 | 404 on `/pair/request` → `/auth/local`, unchanged | yes (rc7-shaped mock) | — (this is today's product path) |
 | Refusal / bad proof / revoked / unreachable → error, **no fallback** | yes | real error texts |
 | Identity-free bootstrap detected (`/bootstrap/state`) | yes | real bootstrap router |
-| First-run identity create/restore on a bootstrap node | **not implemented** | genome tag, then a follow-up ticket |
+| Restore on a local bootstrap node, with rc7 live fallback | yes (scripted HTTP responses) | real restore/restart run |
+| Missing initialization marker: refusal → explicit consent → repair → restart | yes (mock sidecar and HTTP) | real rc7 data-directory upgrade |
+| First-run identity creation over HTTP | **not implemented** | separate onboarding work |
 
 Bumping the pin means cutting a genome tag that contains #77, running
 `scripts/fetch-node-sidecar.sh` against it, and re-running the CS-1/CS-2
@@ -74,8 +76,12 @@ First run, as the onboarding screen shows it:
      {client_id, challenge, signature}` → `{token, expires_at, scopes}`.
 3. **Create or restore identity.** On an rc7 node, `konsensus init` already
    created the identity, and the existing restore form is unchanged. On an
-   identity-free #77 node the step shows as waiting on a genome release. The
-   app creates nothing there.
+   local identity-free node, the restore form is available after pairing.
+   The host probes `/bootstrap/state`: a bootstrap response uses the paired
+   bootstrap router; only a 404 selects the rc7 live fallback. Both routers
+   use `/api/v1/identity/restore`. Probe failures do not send the phrase.
+   After restart, the live identity must match the restore response before
+   setup can continue. Creating a new identity over HTTP remains unavailable.
 4. **Fund.** Unchanged (CS-2), behind the G6 local-trust gate.
 
 After first run, the stored pairing is reused. Each start mints a token with
@@ -131,10 +137,35 @@ an OS keychain with a per-application ACL, or hardware-backed keys. Both are
 out of scope, and nothing weaker stands in for them. The G6 local-trust
 disclosure stays as written.
 
+## Compatibility with nodes after rc7
+
+For an existing local data directory, the host recognizes only the node's
+`identity_without_marker` and `identity_and_state_without_marker` startup
+refusals. It waits for the failed start to finish, then shows the one-time
+initialization consent screen. **No repair runs automatically.** “Not now”
+leaves the node stopped. The main-window command requires explicit consent,
+a pending refusal, and a stopped supervised local node; remote and externally
+managed nodes are excluded.
+
+On agreement, the same sidecar runs
+`repair mark-initialized --config <the existing config> --confirm`, then the
+app starts and authenticates normally. The node writes its marker; the app
+never manufactures it or edits the config. Failure stays visible for an explicit
+retry. The successful marker removes the need for the prompt on later starts.
+The screen advises keeping a backup because normal startup can apply newer
+database migrations.
+
+This does not change the pinned sidecar or the existing first-run `init` flow.
+Restore readiness applies when the managed node is already in bootstrap mode;
+it does not turn an initialized live node back into bootstrap. A live node that
+no longer exposes restore produces an explanatory error. Compatibility is
+mock-verified in `post_rc7_tests.rs` and `post-rc7-readiness.test.tsx`; a real rc7
+upgrade and new-release restore smoke remain release checks.
+
 ## Non-goals (this change)
 
 Pin bump or sidecar fetch; granting spend or touching `control.sock` (the app only *asks*: see `docs/CONTROL_CENTER_ACT.md`); OS keychain or
-Touch ID; identity create/restore over HTTP; packaging; assistant broker
+Touch ID; identity creation over HTTP; packaging; assistant broker
 changes.
 
 ## Isolation
