@@ -15,6 +15,7 @@ const stages = {
   'ob-2-pairing': { status: { ready: true, node_id: 'ab'.repeat(33), error: null }, pairing: pairing('pending') },
   'ob-3-remote-choice': { status: { ready: false, node_id: null, error: null }, pairing: pairing('starting'), click: '[data-target="cloud"]' },
   'ob-4-trust': { status: { ready: true, node_id: 'ab'.repeat(33), error: null }, pairing: pairing('paired', { short_code: 'ABCD-EFGH', code_from_node: true }) },
+  'ob-6-remote-retry': { status: { ready: false, node_id: null, error: null, retry_after_secs: 12 }, pairing: pairing('starting', { remote: true }) },
   'ob-5-failed': { status: { ready: true, node_id: 'ab'.repeat(33), error: null }, pairing: pairing('failed', { reason: 'the node refused /pair/request (409): pairing is closed' }) },
 };
 
