@@ -69,6 +69,40 @@ marker or database is created. Keep these defaults aligned when updating the pin
 Existing config is never overwritten, and a nonempty directory missing config is
 refused. Finalize's node-owned alignment changes the mnemonic path to `.enc`.
 
+`local_owner::config_tests::bootstrap_config_matches_node_init` guards this mirror
+against the node binary itself. It shares discovery with the real lifecycle test
+below, runs `init --tier full --non-interactive --dir <scratch>`, and compares parsed
+TOML with the production bootstrap writer. Both scratch directories are removed
+afterward; init's disposable mnemonic and stdout/stderr never enter test logs.
+The test explicitly lists every permitted difference: absolute scratch roots,
+`mnemonic.txt` versus the owner's `identity/mnemonic.txt`, and the exact serde
+defaults intentionally omitted by the app (including the empty identity
+passphrase). It checks path suffixes and omitted default values before normalizing;
+unknown fields and changed values fail. Older pins may omit listed defaults too.
+The list permits two reviewed sets of inherited web defaults: rc7's 50 msat
+content/page price and 4 MiB page limit, and the owner node's 1000 msat and 256 KiB.
+Other values or mixtures fail; neither set is written by the app.
+
+The Build workflow's **Sidecar** job fetches and verifies the pin in
+`scripts/fetch-node-sidecar.sh`, then runs this exact test with
+`BITSOV_OWNER_TEST_BINARY` pointing to that verified binary and the ceremony/dev
+features enabled. This runs on every PR and main push, so every bundled pin
+change is covered; the explicit path prevents an absent binary from skipping CI.
+It runs before the live-network CS-1 smoke and needs only `init`, not the owner
+API. The existing Sidecar job remains outside required merge checks because it
+depends on release downloads; inspect its config-drift step before promoting a
+pin. Review any failure against the new node defaults and update the writer or
+the explicit intentional-difference list rather than broadly ignoring sections.
+
+To run only the guard locally against a particular binary:
+
+```sh
+BITSOV_OWNER_TEST_BINARY=/absolute/path/to/konsensus \
+TAURI_CONFIG='{"bundle":{"externalBin":[]}}' \
+cargo test --manifest-path src-tauri/Cargo.toml --features dev-node,local-owner-ceremony \
+  --bin bitsov-app local_owner::config_tests::bootstrap_config_matches_node_init -- --exact --nocapture
+```
+
 Contract §5 A is exercised in a host subprocess with a separate HTTP/descriptor
 fixture process. It captures node stdout/stderr and host stdout/stderr, exercises
 host create/finalize and durable receipts, and scans every generated regular file.
@@ -97,5 +131,6 @@ and capabilities and overriding only the sidecar bundle list:
 ```sh
 npx tsc --noEmit
 npm test
+scripts/authority-check.sh
 TAURI_CONFIG='{"bundle":{"externalBin":[]}}' cargo test --manifest-path src-tauri/Cargo.toml --features dev-node,local-owner-ceremony
 ```

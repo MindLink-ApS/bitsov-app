@@ -6,6 +6,9 @@ use zeroize::Zeroizing;
 #[cfg(all(test, unix, feature = "local-owner-ceremony"))]
 mod process_tests;
 
+#[cfg(all(test, unix, feature = "local-owner-ceremony"))]
+mod config_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
