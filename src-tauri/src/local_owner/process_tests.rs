@@ -97,6 +97,13 @@ fn contract_a_host_process_leaks_no_password_or_mnemonic_word() {
 
 #[test]
 fn real_node_create_finalize_restart_lists_device() {
+    let Some(binary) = real_node_binary() else {
+        return;
+    };
+    run_host(Some(&binary));
+}
+
+pub(super) fn real_node_binary() -> Option<PathBuf> {
     let explicit = std::env::var_os("BITSOV_OWNER_TEST_BINARY").map(PathBuf::from);
     let binary = explicit.clone().or_else(|| {
         ["target-review-node", "target"]
@@ -110,11 +117,11 @@ fn real_node_create_finalize_restart_lists_device() {
             .find(|p| p.is_file())
     });
     let Some(binary) = binary else {
-        eprintln!("SKIP real owner lifecycle: build pa-ownerB or set BITSOV_OWNER_TEST_BINARY");
-        return;
+        eprintln!("SKIP real owner node test: build pa-ownerB or set BITSOV_OWNER_TEST_BINARY");
+        return None;
     };
     assert!(binary.is_file(), "explicit real-node binary is missing");
-    run_host(Some(&binary));
+    Some(binary)
 }
 
 struct Node {
