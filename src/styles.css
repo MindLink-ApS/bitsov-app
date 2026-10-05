@@ -32,8 +32,8 @@
   --line: #2e2924;
   --line-strong: #423a32;
   --ink: #efebe5;
-  --muted: #b5afa6;
-  --faint: #8a8278;
+  --muted: #c2bcb3;
+  --faint: #948c82;
   /* colour — money (orange is sats moving, never decoration) */
   --accent: #f4913a;
   --accent-hi: #ffa75c;
@@ -111,8 +111,8 @@ html[data-theme='light'] {
   --line: #e4e1db;
   --line-strong: #d0ccc4;
   --ink: #21201c;
-  --muted: #5f5d57;
-  --faint: #76736b;
+  --muted: #52504a;
+  --faint: #6e6b63;
   --accent: #b04200;
   --accent-hi: #963800;
   --accent-ink: #ffffff;

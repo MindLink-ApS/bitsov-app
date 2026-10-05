@@ -38,10 +38,12 @@ describe('design tokens', () => {
       for (const text of ['--ink', '--muted', '--accent']) {
         expect(contrast(t[text], t[surface]), `${text} on ${surface}`).toBeGreaterThanOrEqual(4.5);
       }
-      // Faint is for timestamps and hints next to stronger text: AA large.
-      expect(contrast(t['--faint'], t[surface]), `--faint on ${surface}`).toBeGreaterThanOrEqual(3);
+      // Faint carries small text (timestamps, hints at 11.5–12.5 px): full AA too.
+      expect(contrast(t['--faint'], t[surface]), `--faint on ${surface}`).toBeGreaterThanOrEqual(4.5);
     }
     expect(contrast(t['--accent-ink'], t['--accent']), 'ink on the send button').toBeGreaterThanOrEqual(4.5);
+    // Faint stays visibly quieter than muted, so the hierarchy survives the AA lift.
+    expect(contrast(t['--faint'], t['--bg'])).toBeLessThan(contrast(t['--muted'], t['--bg']) - 1);
     expect(contrast(t['--bubble-in-ink'], t['--bubble-in-bg']), 'incoming bubble').toBeGreaterThanOrEqual(4.5);
     expect(contrast(t['--bubble-out-ink'], t['--bubble-out-bg']), 'outgoing bubble').toBeGreaterThanOrEqual(4.5);
     expect(contrast(t['--accent'], t['--ember']), 'price on its ember tint').toBeGreaterThanOrEqual(4.5);
