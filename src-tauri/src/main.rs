@@ -161,6 +161,8 @@ struct NodeState {
     last_remint: Mutex<Option<Instant>>,
     /// Set by the wait thread when the supervised node exits.
     sidecar_terminated: AtomicBool,
+    initialization_refused: AtomicBool,
+    initialization_repair: Mutex<InitializationRepair>,
     /// The `/ws` link as the bridge's socket last reported it (`live_link`).
     live_link: control::LiveLink,
     http: reqwest::Client,
@@ -272,6 +274,7 @@ impl NodeState {
         let retrying = self.remote_retry.is_retrying();
         let retry_after_secs = if retrying { self.remote_retry.remaining() } else { None };
         Status {
+            initialization_repair: *self.initialization_repair.lock().unwrap(),
             retry_after_secs,
             // A transport cooldown pauses reads; it does not revoke pairing.
             ready: *self.ready.lock().unwrap(),
@@ -332,6 +335,8 @@ impl NodeState {
             app_dir: Mutex::new(None),
             last_remint: Mutex::new(None),
             sidecar_terminated: AtomicBool::new(false),
+            initialization_refused: AtomicBool::new(false),
+            initialization_repair: Mutex::new(InitializationRepair::None),
             live_link: control::LiveLink::default(),
             // Remote requests may take 15 s; loopback health/auth use a short
             // per-request timeout so they cannot pin restoring().
@@ -346,6 +351,7 @@ impl NodeState {
 
 #[derive(Serialize, Clone)]
 struct Status {
+    initialization_repair: InitializationRepair,
     retry_after_secs: Option<u64>,
     ready: bool,
     node_id: Option<String>,
@@ -399,6 +405,82 @@ struct RestoreOutcome {
 
 fn set_error(state: &NodeState, msg: impl Into<String>) {
     *state.error.lock().unwrap() = Some(msg.into());
+}
+
+/// A missing marker is repaired only through an explicit main-window command.
+/// The node's marker, rather than an app preference, makes this a one-time step.
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum InitializationRepair {
+    #[default]
+    None,
+    Required,
+    Repairing,
+}
+
+fn initialization_refusal(line: &str) -> bool {
+    // These are the node's two repair-mark-initialized reasons. Never offer this
+    // repair for a deleted identity, a corrupt store, or an arbitrary failure.
+    line.contains("(identity_without_marker)")
+        || line.contains("(identity_and_state_without_marker)")
+}
+
+/// Run the node-owned repair; no filesystem marker or config is written here.
+async fn repair_initialized_files(state: &NodeState, confirmed: bool) -> Result<PathBuf, String> {
+    refuse_external(state)?;
+    if state.remote_mode.load(Ordering::SeqCst) {
+        return Err(
+            "Initialization repair is only available for the local supervised node.".into(),
+        );
+    }
+    if !confirmed {
+        return Err("Initialization repair requires your explicit agreement.".into());
+    }
+    let config = state
+        .config
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("node config path is unknown")?;
+    let program = match state.dev_sidecar.lock().unwrap().clone() {
+        Some(program) => program,
+        None => sidecar_path(SIDECAR_BIN)?,
+    };
+    {
+        let mut repair = state.initialization_repair.lock().unwrap();
+        if *repair != InitializationRepair::Required
+            || !state.sidecar_terminated.load(Ordering::SeqCst)
+        {
+            return Err("No stopped local node is awaiting initialization repair.".into());
+        }
+        *repair = InitializationRepair::Repairing;
+    }
+    let result = async {
+        // The old start attempt has exited and its output readers have drained.
+        // Register the repair process too, so quit still owns every child.
+        state.stop_for_restart(NODE_SHUTDOWN_BUDGET);
+        let mut cmd = std::process::Command::new(program);
+        cmd.arg("repair").arg("mark-initialized").arg("--config").arg(&config).arg("--confirm")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let child = state.spawn_child(&mut cmd)?;
+        let status = tokio::task::spawn_blocking(move || child.wait()).await
+            .map_err(|e| format!("initialization repair wait failed: {e}"))?
+            .map_err(|e| format!("initialization repair wait failed: {e}"))?;
+        if !status.success() {
+            return Err("Initialization repair failed; your node remains stopped. Check your node data and backup before trying again.".into());
+        }
+        state.stop_for_restart(NODE_SHUTDOWN_BUDGET);
+        Ok(config)
+    }.await;
+    state.sidecar_terminated.store(true, Ordering::SeqCst);
+    *state.initialization_repair.lock().unwrap() = if result.is_ok() {
+        InitializationRepair::None
+    } else {
+        InitializationRepair::Required
+    };
+    result
 }
 
 // ---- node supervision -----------------------------------------------------
@@ -482,7 +564,6 @@ fn spawn_node(app: &AppHandle<impl tauri::Runtime>, config: &Path) -> Result<(),
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
-    state.sidecar_terminated.store(false, Ordering::SeqCst);
     *state.all_in_caps_node.lock().unwrap() = None;
     *state.readmission_ask.lock().unwrap() = None;
     let routing_policy = configured_routing_policy(config);
@@ -492,15 +573,18 @@ fn spawn_node(app: &AppHandle<impl tauri::Runtime>, config: &Path) -> Result<(),
     *state.configured_network.lock().unwrap() = network;
 
     // Drain node output to the app log — never render node plaintext in the UI.
-    // The one exception is parsed, not rendered: the pairing short code the node
-    // prints to stdout, kept for the tripwire comparison.
+    // Parse only the pairing short code (for its tripwire comparison) and the
+    // recognized initialization refusal reasons (for explicit repair consent).
+    let refused = Arc::new(AtomicBool::new(false));
+    let mut readers = Vec::new();
     for (label, pipe) in [
         ("out", child.take_stdout().map(PipeKind::Out)),
         ("err", child.take_stderr().map(PipeKind::Err)),
     ] {
         if let Some(pipe) = pipe {
             let codes = (label == "out").then(|| state.printed_codes.clone());
-            std::thread::spawn(move || {
+            let refused = refused.clone();
+            readers.push(std::thread::spawn(move || {
                 let reader: Box<dyn std::io::Read + Send> = match pipe {
                     PipeKind::Out(p) => Box::new(p),
                     PipeKind::Err(p) => Box::new(p),
@@ -510,9 +594,12 @@ fn spawn_node(app: &AppHandle<impl tauri::Runtime>, config: &Path) -> Result<(),
                     if let Some(codes) = &codes {
                         codes.record_line(&line);
                     }
+                    if label == "err" && initialization_refusal(&line) {
+                        refused.store(true, Ordering::SeqCst);
+                    }
                     eprintln!("[node/{label}] {line}");
                 }
-            });
+            }));
         }
     }
 
@@ -522,11 +609,18 @@ fn spawn_node(app: &AppHandle<impl tauri::Runtime>, config: &Path) -> Result<(),
     let waiter = child.clone();
     std::thread::spawn(move || {
         let status = waiter.wait();
+        // The refusal often arrives immediately before exit. Drain stderr before
+        // publishing termination, otherwise startup can miss the consent state.
+        for reader in readers {
+            let _ = reader.join();
+        }
+        // A previous child's waiter may finish after a restart. Publish only
+        // for the child still registered, under the same lock as spawn/reset.
+        handle.state::<NodeState>().record_node_exit(
+            &waiter,
+            status.as_ref().is_ok_and(|status| !status.success()) && refused.load(Ordering::SeqCst),
+        );
         eprintln!("[node] terminated: {status:?}");
-        handle
-            .state::<NodeState>()
-            .sidecar_terminated
-            .store(true, Ordering::SeqCst);
     });
     Ok(())
 }
@@ -563,11 +657,18 @@ async fn health_ok(state: &NodeState) -> bool {
 
 async fn wait_for_health(state: &NodeState) -> Result<(), String> {
     for _ in 0..60 {
-        if health_ok(state).await {
-            return Ok(());
-        }
         if state.sidecar_terminated.load(Ordering::SeqCst) {
+            // Offer consent only as this startup attempt returns failure. It
+            // must not resume into authentication alongside the repair retry.
+            if state.initialization_refused.load(Ordering::SeqCst) {
+                *state.initialization_repair.lock().unwrap() = InitializationRepair::Required;
+            }
             return Err("node sidecar terminated before becoming healthy".into());
+        }
+        let responding = health_ok(state).await
+            || bootstrap_restore_available(state).await.ok().flatten().is_some();
+        if responding && !state.sidecar_terminated.load(Ordering::SeqCst) {
+            return Ok(());
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
@@ -808,6 +909,15 @@ async fn adopt_matching_identity(
         return Ok(false);
     }
     *state.node_id.lock().unwrap() = Some(live);
+    // The restored node is live. Reflect the refreshed token's scopes in the
+    // view and leave bootstrap, otherwise the renderer can never finish setup.
+    {
+        let mut view = state.pairing_view.lock().unwrap();
+        view.bootstrap = None;
+        if let AuthMode::Paired(session) = &*state.auth.lock().unwrap() {
+            view.scopes = session.scopes.clone();
+        }
+    }
     *state.error.lock().unwrap() = None;
     *state.ready.lock().unwrap() = true;
     Ok(true)
@@ -1069,8 +1179,8 @@ async fn finish_auth(state: &NodeState, data_dir: &Path) {
     if authenticate(state, data_dir).await.is_err() {
         return;
     }
-    // An identity-free #77 node has no /identity route; first-run create/restore
-    // waits on a genome tag (docs/ONBOARDING_PAIRING.md).
+    // An identity-free node has no live /identity route. Keep it paired so
+    // the user can restore through the bootstrap router.
     if state.pairing_view.lock().unwrap().bootstrap.is_some() {
         return;
     }
@@ -1685,6 +1795,35 @@ fn node_status(
     Ok(state.status_snapshot())
 }
 
+/// The only initialization-repair entry point; no startup/polling path calls it.
+#[tauri::command]
+async fn node_repair_initialized(
+    window: WebviewWindow<impl tauri::Runtime>,
+    app: AppHandle<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    confirmed: bool,
+) -> Result<(), String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    let config = repair_initialized_files(state.inner(), confirmed).await?;
+    *state.error.lock().unwrap() = None;
+    let result = async {
+        spawn_node(&app, &config)?;
+        wait_for_health(state.inner()).await?;
+        finish_auth(
+            state.inner(),
+            config.parent().ok_or("node data directory is unknown")?,
+        )
+        .await;
+        Ok(())
+    }
+    .await;
+    if let Err(error) = &result {
+        set_error(state.inner(), error);
+    }
+    result
+}
+
 /// Pairing state for the onboarding screen. Carries no token and no key.
 #[tauri::command]
 fn pairing_status(
@@ -1852,6 +1991,60 @@ async fn payments_balance(
     decode("/payments/balance", status, &body)
 }
 
+/// Bootstrap and rc7 expose the same restore URL on different routers. A 404
+/// on this probe alone selects the legacy live route; other failures stay errors.
+async fn bootstrap_restore_available(state: &NodeState) -> Result<Option<bool>, String> {
+    let response = state
+        .http
+        .get(format!("{}/bootstrap/state", state.api_base))
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .map_err(|e| format!("bootstrap state request failed: {e}"))?;
+    let status = response.status();
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    let body = response
+        .text()
+        .await
+        .map_err(|e| format!("bootstrap state response failed: {e}"))?;
+    #[derive(Deserialize)]
+    struct Bootstrap {
+        state: String,
+        can_restore: bool,
+    }
+    let bootstrap: Bootstrap = decode("/bootstrap/state", status, &body)?;
+    if bootstrap.state != "bootstrap" {
+        return Err("node returned an unknown bootstrap state".into());
+    }
+    Ok(Some(bootstrap.can_restore))
+}
+
+async fn request_identity_restore(
+    state: &NodeState,
+    phrase: &str,
+) -> Result<RestoreResponse, String> {
+    match bootstrap_restore_available(state).await? {
+        Some(false) => {
+            return Err("This bootstrap node is not accepting an identity restore.".into())
+        }
+        Some(true) => {} // Use the paired bootstrap token already held by the host.
+        None => {}       // rc7: the live router exposes /identity/restore.
+    }
+    let (status, body) = call_api(
+        state,
+        reqwest::Method::POST,
+        "/identity/restore",
+        Some(serde_json::json!({ "mnemonic": phrase })),
+    )
+    .await?;
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return Err("This node only supports restoring into an identity-free data directory in bootstrap mode.".into());
+    }
+    decode("/identity/restore", status, &body)
+}
+
 /// `POST /identity/restore` — hand a recovery phrase to the node, then restart it.
 ///
 /// The phrase is a write-only input: it is passed straight through to the node
@@ -1873,14 +2066,7 @@ async fn identity_restore(
     if words != 12 && words != 24 {
         return Err("a recovery phrase is 12 or 24 words".into());
     }
-    let (status, body) = call_api(
-        state.inner(),
-        reqwest::Method::POST,
-        "/identity/restore",
-        Some(serde_json::json!({ "mnemonic": phrase })),
-    )
-    .await?;
-    let restored: RestoreResponse = decode("/identity/restore", status, &body)?;
+    let restored = request_identity_restore(state.inner(), phrase).await?;
 
     // The node writes the phrase to its data dir and reports restart_required; the
     // restored identity only takes effect on the next start. Restart whoever answers
@@ -6433,8 +6619,18 @@ impl NodeState {
         }
         let child =
             Arc::new(SharedChild::spawn(cmd).map_err(|e| format!("node start failed: {e}"))?);
+        self.sidecar_terminated.store(false, Ordering::SeqCst);
+        self.initialization_refused.store(false, Ordering::SeqCst);
         *slot = Some(child.clone());
         Ok(child)
+    }
+
+    fn record_node_exit(&self, child: &Arc<SharedChild>, initialization_refused: bool) {
+        let slot = self.child.lock().unwrap();
+        if slot.as_ref().is_some_and(|current| Arc::ptr_eq(current, child)) {
+            self.initialization_refused.store(initialization_refused, Ordering::SeqCst);
+            self.sidecar_terminated.store(true, Ordering::SeqCst);
+        }
     }
 
     /// Stop the registered node ahead of a restart. It stays registered for the whole
@@ -6535,6 +6731,7 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
         .manage(AiState::default())
         .invoke_handler(tauri::generate_handler![
             node_status,
+            node_repair_initialized,
             fund_state,
             fund_start,
             funding_address,
@@ -13689,6 +13886,7 @@ mod assistant_acl_tests {
             handler_commands(&source),
             [
                 "node_status",
+                "node_repair_initialized",
                 "fund_state",
                 "fund_start",
                 "funding_address",
@@ -14347,6 +14545,7 @@ mod assistant_acl_tests {
             .manage(super::NodeState::default())
             .invoke_handler(tauri::generate_handler![
                 super::node_status,
+                super::node_repair_initialized,
                 super::fund_state,
                 super::fund_start,
                 super::funding_address,
@@ -14423,6 +14622,15 @@ mod assistant_acl_tests {
         for cmd in ["fund_state", "funding_address", "payments_balance"] {
             assert_acl_denied(invoke(&assistant, cmd, serde_json::json!({})), cmd);
         }
+
+        assert_handler_ran(
+            invoke(&main, "node_repair_initialized", serde_json::json!({ "confirmed": false })),
+            "explicit agreement",
+        );
+        assert_acl_denied(
+            invoke(&assistant, "node_repair_initialized", serde_json::json!({ "confirmed": true })),
+            "node_repair_initialized",
+        );
 
         // Pairing: main reaches the handlers, the assistant is stopped by the ACL.
         match invoke(&main, "pairing_status", serde_json::json!({}))
@@ -14525,3 +14733,6 @@ mod peer_readiness_tests {
         assert!(ordinary.starts_with("/price failed (500)"));
     }
 }
+
+#[cfg(test)]
+mod post_rc7_tests;

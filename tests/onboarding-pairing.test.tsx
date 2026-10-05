@@ -85,9 +85,9 @@ describe('onboarding steps', () => {
     expect(steps[2].status).toBe('active');
   });
 
-  it('an identity-free node blocks the identity step on the genome tag', () => {
+  it('a local bootstrap node opens the identity step for restore', () => {
     const steps = onboardingSteps(booting, { ...paired, bootstrap: 'bootstrap' }, false);
-    expect(steps[2].status).toBe('blocked');
+    expect(steps[2].status).toBe('active');
   });
 
   it('a node start error fails the first step', () => {
@@ -212,12 +212,12 @@ describe('pairing panel', () => {
     expect(el.querySelector('[data-short-code]')).toBeNull();
   });
 
-  it('identity-free node says create/restore waits on the genome tag', () => {
+  it('identity-free node describes local restore', () => {
     const el = show({ ...paired, scopes: ['read', 'receive', 'identity'], bootstrap: 'bootstrap' });
     const panel = el.querySelector('[data-pairing="paired"]')!;
     expect(panel.textContent).toContain('read + receive + identity');
     expect(el.textContent).toContain('identity-free');
-    expect(el.textContent).toContain('genome release');
+    expect(el.textContent).toContain('restore an existing identity');
   });
 
   it('defaults to This Mac, keeps home under collapsed Advanced, and hides test nodes', () => {
@@ -403,11 +403,11 @@ describe('pairing panel', () => {
     // Still a real choice once compact.
     expect(later.querySelectorAll('[role="radio"]').length).toBe(2);
   });
-  it('never offers restore on an identity-free node, and keeps the access scopes in view', () => {
+  it('describes bootstrap restore and keeps the access scopes in view', () => {
     const el = show({ ...paired, bootstrap: 'identity-free' }, ready);
     const head = el.querySelector('[data-ob-head="trust"]')!;
     expect(head.textContent).not.toContain('restore it now');
-    expect(head.textContent).toContain('not available on this node yet');
+    expect(head.textContent).toContain('Restore your existing identity on this Mac');
     const access = el.querySelector('[data-pairing="paired"] .pairing-access')!;
     expect(access.textContent).toContain('read + receive');
     expect(access.closest('details')).toBeNull();

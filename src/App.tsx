@@ -1,3 +1,4 @@
+import { InitializationRepair } from './onboarding/InitializationRepair';
 import { SoftError } from './control/SoftError';
 import { DelayedSpinner } from './control/DelayedSpinner';
 import { isMoneyNotReady } from './control/readiness';
@@ -78,7 +79,7 @@ export default function App() {
   // A ready node can arrive before its pairing reply. Startup snapshots do not
   // establish the final mode, so wait for authentication before offering trust.
   const showIdentityGate = () =>
-    (status().ready && (pairing().state === 'paired' || pairing().state === 'fallback')) ||
+    ((status().ready || (pairing().bootstrap === 'bootstrap' && !pairing().remote)) && (pairing().state === 'paired' || pairing().state === 'fallback')) ||
     restoring() || restoreError() !== null;
   createEffect(() => {
     if (source().mode === 'node' && trustAck() && trustKey()) setSessionTrust(trustKey());
@@ -151,55 +152,66 @@ export default function App() {
         </div>
       </Show>
 
-      <Onboarding
-        status={status}
-        pairing={pairing}
-        selectedTarget={selectedTarget()}
-        onTargetChange={setSelectedTarget}
-        trustAck={trustAck}
-        onRetry={() => void retryPairing()}
-        device={device}
-        onForgetRemote={() => source().remoteAccessForget()}
-        onImportRemote={(link) => source().remoteAccessImport(link)}
-      />
-
       <Show
-        when={showIdentityGate()}
-        fallback={
+        when={status().initialization_repair === 'required' || status().initialization_repair === 'repairing'}
+        fallback={<>
+          <Onboarding
+            status={status}
+            pairing={pairing}
+            selectedTarget={selectedTarget()}
+            onTargetChange={setSelectedTarget}
+            trustAck={trustAck}
+            onRetry={() => void retryPairing()}
+            device={device}
+            onForgetRemote={() => source().remoteAccessForget()}
+            onImportRemote={(link) => source().remoteAccessImport(link)}
+          />
+
           <Show
-            when={status().error && pairing().state !== 'failed'}
+            when={showIdentityGate()}
             fallback={
-              <Show when={starting()}>
-                <div class="state">
-                  <DelayedSpinner />
-                  {pairing().remote ? 'Connecting to your node…' : 'Starting your node…'}
+              <Show
+                when={status().error && pairing().state !== 'failed'}
+                fallback={
+                  <Show when={starting()}>
+                    <div class="state">
+                      <DelayedSpinner />
+                      {pairing().remote ? 'Connecting to your node…' : 'Starting your node…'}
+                    </div>
+                  </Show>
+                }
+              >
+                <div class="state error">
+                  <SoftError message={status().error!} summary="Your node is unavailable." onReconnect={retryPairing} />
+                  <Show when={import.meta.env.DEV && source().mode === 'node'}>
+                    <button class="quiet" data-use-sample onClick={() => useSample('shell')}>
+                      Explore with sample data
+                    </button>
+                  </Show>
                 </div>
               </Show>
             }
           >
-            <div class="state error">
-              <SoftError message={status().error!} summary="Your node is unavailable." onReconnect={retryPairing} />
-              <Show when={import.meta.env.DEV && source().mode === 'node'}>
-                <button class="quiet" data-use-sample onClick={() => useSample('shell')}>
-                  Explore with sample data
-                </button>
-              </Show>
-            </div>
+            <Show when={!trustAck()}>
+              <IdentityGate
+                source={source()}
+                nodeId={() => status().node_id}
+                remote={pairing().remote}
+                canRestore={!pairing().bootstrap || (!pairing().remote && pairing().bootstrap === 'bootstrap')}
+                bootstrap={!!pairing().bootstrap}
+                onContinue={acceptTrust}
+                onRestoring={setRestoring}
+                restoreError={restoreError}
+                setRestoreError={setRestoreError}
+              />
+            </Show>
           </Show>
-        }
+        </>}
       >
-        <Show when={!trustAck()}>
-          <IdentityGate
-            source={source()}
-            nodeId={() => status().node_id}
-            remote={pairing().remote}
-            canRestore={!pairing().bootstrap}
-            onContinue={acceptTrust}
-            onRestoring={setRestoring}
-            restoreError={restoreError}
-            setRestoreError={setRestoreError}
-          />
-        </Show>
+        <InitializationRepair
+          repairing={status().initialization_repair === 'repairing'}
+          onConfirm={async () => { try { await source().nodeRepairInitialized(true); } finally { await poll(); } }}
+        />
       </Show>
     </div>
   );
@@ -240,8 +252,9 @@ function IdentityGate(props: {
   source: Source;
   nodeId: () => string | null;
   remote: boolean;
-  /** False on an identity-free (bootstrap) node: restore waits on the genome release. */
+  /** Restore is local; the host checks the node router before submitting. */
   canRestore: boolean;
+  bootstrap: boolean;
   onContinue: () => void;
   onRestoring: (value: boolean) => void;
   restoreError: () => string | null;
@@ -334,9 +347,11 @@ function IdentityGate(props: {
         </section>
       </Show>
 
+      <Show when={!props.bootstrap}>
       <button class="primary" onClick={props.onContinue}>
         I understand — continue to funding
       </button>
+      </Show>
 
       <Show when={restored()}>
         <p class="ok-note">Identity restored. Your node now runs as {short(restored()!)}.</p>

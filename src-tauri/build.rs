@@ -17,6 +17,7 @@ fn main() {
     let manifest = tauri_build::AppManifest::new()
         .commands(&[
             "node_status",
+            "node_repair_initialized",
             "fund_state",
             "fund_start",
             "funding_address",
