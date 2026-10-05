@@ -21,8 +21,10 @@ describe('custody badge (node REMOTE-SIGNER.md §2)', () => {
     expect(custodyBadge('encrypted_seed')).toMatchObject({ label: 'Encrypted seed', tone: 'ok' });
     const hosted = custodyBadge('hosted_custody')!;
     expect(hosted).toMatchObject({ label: 'Hosted custody', tone: 'warn' });
-    expect(hosted.title).toContain('Keys on your other computer · not verified by this app');
-    expect(hosted.title).toContain('Whoever can log in to that computer can spend');
+    expect(hosted.title).toContain('Seed on another computer or server, or this connection is not proven local.');
+    expect(hosted.title).toContain('Whoever can reach that machine can spend its bitcoin and read its messages.');
+    expect(hosted.title).toContain('For remote connections');
+    expect(hosted.title).toContain('Use this Mac instead');
     const money = custodyBadge('money_signer')!;
     expect(money).toMatchObject({ label: 'Money on your device', tone: 'warn' });
     expect(money.title).toContain('NodeId chat-identity private key stays on the server');
@@ -54,6 +56,23 @@ describe('custody badge (node REMOTE-SIGNER.md §2)', () => {
     const badge = mount.querySelector('[data-panel="node"] [data-custody]')!;
     expect(badge.textContent).toBe(label);
     expect(badge.getAttribute('data-custody')).toBe(mode);
+  });
+
+  it.each([true, false, undefined])('the Node panel offers Use this Mac instead only for remote connections (remote=%s)', async (remote) => {
+    const source = sampleSource({ firstLiveMs: 1e9 });
+    const base = await source.nodeOverview();
+    source.nodeOverview = async () => ({ ...base, custody_mode: 'hosted_custody', read_at: Date.now() });
+    dispose = render(() => <ControlCenter source={source} active ready remote={remote} error={null} ownId={SAMPLE_OWN_ID} firstRun={<span />} />, mountIn());
+    await vi.waitFor(() => expect(mount.querySelector('[data-tab="node"]')).not.toBeNull());
+    (mount.querySelector('[data-tab="node"]') as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(mount.querySelector('[data-panel="node"] [data-custody]')).not.toBeNull());
+    const control = mount.querySelector('[data-panel="node"] [data-use-local]');
+    if (remote) {
+      expect(control).not.toBeNull();
+      expect(control!.textContent).toBe('Use this Mac instead');
+    } else {
+      expect(control).toBeNull();
+    }
   });
 
   it('the Node panel has no Keys row when the node does not say', async () => {
