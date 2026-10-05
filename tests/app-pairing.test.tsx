@@ -31,6 +31,7 @@ describe('app shell pairing wiring', () => {
     dispose = undefined;
     mount?.remove();
     vi.unstubAllGlobals();
+    vi.useRealTimers();
   });
 
   it('Reconnect recovers an already-paired remote connection instead of polling only', async () => {
@@ -48,19 +49,64 @@ describe('app shell pairing wiring', () => {
     await vi.waitFor(() => expect(mount!.querySelector('[data-gate="g6-remote-trust"]')).not.toBeNull());
   });
 
-  it('shows the host retry countdown without claiming the remote node stopped', async () => {
-    let remaining = 42;
+  it('keeps a warm remote composer mounted throughout retry hints and recovery', async () => {
+    vi.useFakeTimers();
+    const nodeId = 'ef'.repeat(32);
+    const peer = 'ab'.repeat(32);
+    let status = { ready: true, node_id: nodeId, error: null as string | null, retry_after_secs: null as number | null };
+    localStorage.setItem(`bitsov.trust.v1.remote.${nodeId}`, 'accepted');
     vi.stubGlobal('__TAURI_INTERNALS__', { invoke: (cmd: string) => {
-      if (cmd === 'node_status') return Promise.resolve({ ready: false, node_id: null, error: 'remote handshake limit or endpoint unavailable', retry_after_secs: remaining });
+      if (cmd === 'node_status') return Promise.resolve(status);
       if (cmd === 'pairing_status') return Promise.resolve({ ...paired, remote: true });
+      if (cmd === 'peers_list') return Promise.resolve([{ node_id: peer, addr: null, label: 'Peer', connected: true, fingerprint: peer }]);
+      if (cmd === 'messages_list') return Promise.resolve([]);
       return Promise.reject(new Error('not available'));
     } });
     mount = document.createElement('div'); document.body.appendChild(mount);
     dispose = render(() => <App />, mount);
-    await vi.waitFor(() => expect(mount!.textContent).toMatch(/waiting 42 s/i));
-    expect(mount.textContent).not.toContain('Node stopped');
-    remaining = 40;
-    await vi.waitFor(() => expect(mount!.textContent).toMatch(/waiting 40 s/i), { timeout: 2000 });
+    await vi.advanceTimersByTimeAsync(500);
+    const composer = mount.querySelector('[data-composer-bar]');
+    expect(composer).not.toBeNull();
+    let onboardingMounted = false;
+    const observer = new MutationObserver(() => { onboardingMounted ||= !!mount!.querySelector('[data-ob-head]'); });
+    observer.observe(mount, { childList: true, subtree: true });
+    try {
+      for (const remaining of [42, 40, null]) {
+        status = { ...status, ready: remaining === null, retry_after_secs: remaining, error: remaining ? 'remote handshake limit or endpoint unavailable' : null };
+        await vi.advanceTimersByTimeAsync(1500);
+        expect(mount.querySelector('[data-composer-bar]')).toBe(composer);
+        expect(mount.querySelector('[data-ob-head]')).toBeNull();
+        expect(mount.textContent).not.toContain('Node stopped');
+        if (remaining) expect(mount.textContent).toContain(`waiting ${remaining} s`);
+      }
+      expect(onboardingMounted).toBe(false);
+    } finally { observer.disconnect(); }
+  });
+
+  it.each(['revoked', 'identity changed', 'setup reset', 'trust reset'] as const)('returns a warm shell to onboarding when %s', async (change) => {
+    vi.useFakeTimers();
+    let nodeId = 'ef'.repeat(32);
+    let view = { ...paired, remote: true };
+    localStorage.setItem(`bitsov.trust.v1.remote.${nodeId}`, 'accepted');
+    vi.stubGlobal('__TAURI_INTERNALS__', { invoke: (cmd: string) => {
+      if (cmd === 'node_status') return Promise.resolve({ ready: true, node_id: nodeId, error: null });
+      if (cmd === 'pairing_status') return Promise.resolve(view);
+      return Promise.reject(new Error('not available'));
+    } });
+    mount = document.createElement('div'); document.body.appendChild(mount);
+    dispose = render(() => <App />, mount);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(mount.querySelector('[data-first-run]')).toBeNull();
+    if (change === 'revoked') view = { ...view, state: 'failed', reason: 'pairing revoked' };
+    if (change === 'identity changed') {
+      nodeId = 'cd'.repeat(32);
+      localStorage.setItem(`bitsov.trust.v1.remote.${nodeId}`, 'accepted');
+    }
+    if (change === 'setup reset') view = { ...view, bootstrap: 'identity-free' };
+    if (change === 'trust reset') localStorage.clear();
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(mount.querySelector('[data-ob-head]')).not.toBeNull();
+    if (change === 'revoked') expect(mount.querySelector('[data-pairing="failed"]')).not.toBeNull();
   });
 
   it.each([

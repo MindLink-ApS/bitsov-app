@@ -1,3 +1,4 @@
+import { pollingSource } from './polling';
 import { readSpendPreset, saveSpendPreset } from './prefs';
 import { WelcomeHome } from './WelcomeHome';
 import { DelayedSpinner } from './DelayedSpinner';
@@ -129,8 +130,10 @@ type Props = {
   retryAfterSecs?: number | null;
   onReconnect?: () => Promise<void>;
   source: Source;
-  /** Node running and the local-trust disclosure accepted: the shell may read. */
+  /** Setup completed for this trust boundary: keep the shell mounted. */
   active: boolean;
+  /** Transient connection readiness, independent of shell visibility. */
+  live?: boolean;
   ready: boolean;
   error: string | null;
   ownId: string | null;
@@ -227,7 +230,11 @@ export function ControlCenter(props: Props) {
     return o?.stun_port ? { port: o.stun_port, url: o.stun_url ?? null } : null;
   }, null, { equals: (a, b) => a?.port === b?.port && a?.url === b?.url });
   let overviewRevision = 0;
-  const source = readinessSource(() => props.source, moneyBlocked, () => {
+  const live = () => props.active && (props.live ?? (props.ready && !props.retryAfterSecs));
+  const polling = pollingSource(() => props.source, live, () => props.remote === true);
+  createEffect(() => { if (live()) polling.resume(); });
+  onCleanup(polling.close);
+  const source = readinessSource(() => polling.source, moneyBlocked, () => {
     overviewRevision += 1;
     setReadinessRefused(true);
     setOverview((old) => old ? { ...old, money_ready: false, readiness: null } : old);
@@ -558,7 +565,7 @@ export function ControlCenter(props: Props) {
   };
 
   const clockTimer = setInterval(() => setNow(Date.now()), REFRESH_MS.clock);
-  let timers: ReturnType<typeof setInterval>[] = [];
+  let timers: ReturnType<typeof setTimeout>[] = [];
   let unlisten: (() => void) | undefined;
   // Bumped on every stop so a subscription that resolves late is closed at once.
   let generation = 0;
@@ -566,7 +573,7 @@ export function ControlCenter(props: Props) {
     generation += 1;
     budgetRevision += 1;
     setBudgetConfirmed(false);
-    timers.forEach(clearInterval);
+    timers.forEach(clearTimeout);
     timers = [];
     unlisten?.();
     unlisten = undefined;
@@ -588,28 +595,37 @@ export function ControlCenter(props: Props) {
         void loadWallet();
         void loadSpend().then(loadBudget);
         void loadDevice();
-        timers.push(
-          setInterval(() => void loadDevice(), REFRESH_MS.peers),
-          setInterval(() => void loadOverview(), REFRESH_MS.overview),
-          setInterval(() => void loadPeers(), REFRESH_MS.peers),
-          setInterval(() => void loadWallet(), REFRESH_MS.wallet),
-          setInterval(() => void loadRooms(), REFRESH_MS.rooms),
-          setInterval(() => void loadDoor(), REFRESH_MS.door),
-          setInterval(() => void loadEnergy(), REFRESH_MS.energy),
-          setInterval(() => void loadMembrane(), REFRESH_MS.membrane),
-          // Poll pending approvals, then reconcile the current node grant.
-          setInterval(() => void loadSpend().then(loadBudget), REFRESH_MS.spend),
-        );
+        // Keep timer phases through cooldowns. Skip ticks while paused rather
+        // than restarting the initial load sequence when the link recovers.
+        const polls: [() => Promise<unknown>, number][] = [
+          [loadDevice, REFRESH_MS.peers], [loadOverview, REFRESH_MS.overview],
+          [loadPeers, REFRESH_MS.peers], [loadWallet, REFRESH_MS.wallet],
+          [loadRooms, REFRESH_MS.rooms], [loadDoor, REFRESH_MS.door],
+          [loadEnergy, REFRESH_MS.energy], [loadMembrane, REFRESH_MS.membrane],
+          [() => loadSpend().then(() => { if (live()) return loadBudget(); }), REFRESH_MS.spend],
+        ];
+        polls.forEach(([read, period], index) => {
+          let reading = false;
+          const tick = () => {
+            if (mine !== generation) return;
+            if (live() && !reading) {
+              reading = true;
+              void read().finally(() => { reading = false; });
+            }
+            timers[index] = setTimeout(tick, period);
+          };
+          timers[index] = setTimeout(tick, period - index * 175);
+        });
         source
           .onLive((event) => {
             if (event.type === 'link') {
               if (mine !== generation) return;
               setLink(event.state);
               if (event.state !== 'open') { budgetRevision += 1; setBudgetConfirmed(false); }
-              else void loadSpend().then(loadBudget);
+              else if (live()) void loadSpend().then(loadBudget);
               // Back after a gap: re-read the open track so nothing is missed.
-              if (event.state === 'open' && track()) loadThread(track()!);
-              if (event.state === 'open' && caps().membrane) void loadMembrane();
+              if (event.state === 'open' && live() && track()) loadThread(track()!);
+              if (event.state === 'open' && live() && caps().membrane) void loadMembrane();
               return;
             }
             if (event.type === 'membrane') {

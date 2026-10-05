@@ -115,6 +115,7 @@ describe('control center shell', () => {
     dispose = undefined;
     mount?.remove();
     vi.unstubAllGlobals();
+    vi.useRealTimers();
   });
 
   const start = () => {
@@ -123,6 +124,47 @@ describe('control center shell', () => {
     dispose = render(() => <App />, mount);
   };
   const click = (sel: string) => mount.querySelector<HTMLElement>(sel)!.click();
+
+  it('pauses warm polling during cooldown without restarting subscriptions or bursting on resume', async () => {
+    vi.useFakeTimers();
+    let retry: number | null = null;
+    let running = 0;
+    let peak = 0;
+    const reads = ['node_overview', 'peers_list', 'rooms_list', 'payments_overview', 'price_quote', 'spend_status', 'budget_status', 'energy_read', 'membrane_read', 'file_price', 'room_quote', 'device_key_status'];
+    const { calls } = stubHost({
+      node_status: () => ({ ready: true, node_id: OWN, error: null, retry_after_secs: retry }),
+      pairing_status: () => ({ ...paired, remote: true }),
+    });
+    const host = (window as unknown as { __TAURI_INTERNALS__: unknown }).__TAURI_INTERNALS__ as unknown as { invoke: (cmd: string, args?: Record<string, unknown>) => Promise<unknown> };
+    const invoke = host.invoke;
+    host.invoke = async (cmd, args) => {
+      if (!reads.includes(cmd)) return invoke(cmd, args);
+      running++; peak = Math.max(peak, running);
+      try {
+        await new Promise(resolve => setTimeout(resolve, 20));
+        return await invoke(cmd, args);
+      } finally { running--; }
+    };
+    localStorage.setItem(`bitsov.trust.v1.remote.${OWN}`, 'accepted');
+    start();
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(peak).toBeLessThanOrEqual(2);
+    retry = 42;
+    await vi.advanceTimersByTimeAsync(1600);
+    const count = () => calls.filter(c => reads.includes(c.cmd)).length;
+    const before = count();
+    await vi.advanceTimersByTimeAsync(35_000);
+    expect(count()).toBe(before);
+    expect(calls.filter(c => c.cmd === 'plugin:event|listen')).toHaveLength(1);
+    retry = null;
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(count() - before).toBeLessThanOrEqual(2);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(count()).toBeGreaterThan(before);
+    expect(peak).toBeLessThanOrEqual(2);
+    expect(calls.filter(c => c.cmd === 'plugin:event|listen')).toHaveLength(1);
+    expect(calls.filter(c => c.cmd === 'plugin:event|unlisten')).toHaveLength(0);
+  });
 
   it('keeps first run in the centre track and reads nothing before the trust gate', async () => {
     const { calls } = stubHost();

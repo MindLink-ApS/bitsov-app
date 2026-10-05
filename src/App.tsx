@@ -37,22 +37,35 @@ export default function App() {
   const [status, setStatus] = createSignal<NodeStatus>({ ready: false, node_id: null, error: null });
   // Gate G6: the funds UI stays behind an explicit trust disclosure.
   const [sessionTrust, setSessionTrust] = createSignal<string | null>(null);
+  let persistedTrust: string | null = null;
   const trustKey = () => status().node_id ? `bitsov.trust.v1.${pairing().remote ? 'remote' : 'local'}.${status().node_id!.toLowerCase()}` : null;
   const trustAck = () => {
     if (source().mode === 'sample') return sessionTrust() === 'sample' || sample === 'shell';
+    if (pairing().state === 'failed' || pairing().bootstrap) return false;
     const key = trustKey();
-    // A transient read failure is not a new trust boundary. Keep the shell
-    // mounted; active/ready still stops its node reads and money actions.
-    if (sessionTrust() && (sessionTrust() === key || !status().node_id) && !pairing().bootstrap) return true;
+    // A missing identity is a transient read failure; a different identity is
+    // a new trust boundary, even if that node was accepted in an older session.
+    if (sessionTrust()) {
+      if (key && sessionTrust() !== key) return false;
+      if (persistedTrust === sessionTrust()) {
+        try { if (localStorage.getItem(persistedTrust!) !== 'accepted') return false; }
+        catch { /* session acceptance survives unavailable storage */ }
+      }
+      return true;
+    }
     if (!status().ready || !['paired', 'fallback'].includes(pairing().state) || pairing().bootstrap) return false;
     if (!key) return false;
-    try { return localStorage.getItem(key) === 'accepted'; } catch { return false; }
+    try {
+      if (localStorage.getItem(key) !== 'accepted') return false;
+      persistedTrust = key;
+      return true;
+    } catch { return false; }
   };
   const acceptTrust = () => {
     const key = source().mode === 'sample' ? 'sample' : trustKey();
     if (!key) return;
     if (key !== 'sample') {
-      try { localStorage.setItem(key, 'accepted'); } catch { /* session acceptance still works */ }
+      try { localStorage.setItem(key, 'accepted'); persistedTrust = key; } catch { /* session acceptance still works */ }
     }
     setSessionTrust(key);
   };
@@ -70,6 +83,13 @@ export default function App() {
   createEffect(() => {
     if (source().mode === 'node' && trustAck() && trustKey()) setSessionTrust(trustKey());
   });
+  // Readiness describes this connection attempt. Opening the shell records that
+  // setup completed for this trust boundary; a cooldown is not a new first run.
+  const shellOpen = createMemo<boolean>((wasOpen) => {
+    if (!trustAck()) return false;
+    return status().ready || wasOpen;
+  }, false);
+  const live = () => shellOpen() && status().ready && !status().retry_after_secs;
   const [selectedTarget, setSelectedTarget] = createSignal<NodeTarget>('local');
   const remote = createMemo(() => pairing().remote);
   createEffect(() => setSelectedTarget(remote() ? 'cloud' : 'local'));
@@ -89,6 +109,9 @@ export default function App() {
     } catch {
       /* keep the last known pairing state; node_status carries host errors */
     }
+    // This command reads /pair/device-keys remotely. Once setup is complete,
+    // the shell owns its paced refresh; the status poll must not duplicate it.
+    if (shellOpen() || status().retry_after_secs) return;
     try {
       setDevice(await source().deviceKeyStatus());
     } catch {
@@ -195,12 +218,13 @@ export default function App() {
         retryAfterSecs={status().retry_after_secs}
         onReconnect={retryPairing}
         source={source()}
-        active={status().ready}
+        active={shellOpen()}
+        live={live()}
         ready={status().ready}
         error={status().error}
         ownId={status().node_id}
         firstRun={firstRun}
-        fund={(guarded, blocked) => <Fund source={guarded} moneyBlocked={blocked} ready={() => status().ready} />}
+        fund={(guarded, blocked) => <Fund source={guarded} moneyBlocked={blocked} ready={live} />}
       />
     </Show>
   );

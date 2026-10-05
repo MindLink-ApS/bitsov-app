@@ -273,9 +273,8 @@ impl NodeState {
         let retry_after_secs = if retrying { self.remote_retry.remaining() } else { None };
         Status {
             retry_after_secs,
-            // A surviving WebSocket may keep the bridge occupied. Resume HTTP
-            // polling after cooldown so it can recover independently of /ws.
-            ready: *self.ready.lock().unwrap() && retry_after_secs.is_none(),
+            // A transport cooldown pauses reads; it does not revoke pairing.
+            ready: *self.ready.lock().unwrap(),
             node_id: self.node_id.lock().unwrap().clone(),
             error: self.error.lock().unwrap().clone(),
         }
@@ -335,13 +334,7 @@ impl NodeState {
             sidecar_terminated: AtomicBool::new(false),
             live_link: control::LiveLink::default(),
             // Bounded so a hung loopback /health or /auth/local cannot pin restoring().
-            http: reqwest::Client::builder()
-                .connect_timeout(Duration::from_secs(2))
-                .pool_max_idle_per_host(2)
-                .pool_idle_timeout(Duration::from_secs(30))
-                .timeout(Duration::from_secs(5))
-                .no_proxy()
-                .redirect(reqwest::redirect::Policy::none())
+            http: remote_access::http_client_builder()
                 .default_headers(default_headers)
                 .build()
                 .expect("reqwest client"),
@@ -1086,6 +1079,11 @@ async fn finish_auth(state: &NodeState, data_dir: &Path) {
                 .is_some_and(|expected| expected != &node_id)
             {
                 *state.token.lock().unwrap() = None;
+                *state.auth.lock().unwrap() = AuthMode::Unauthenticated;
+                *state.ready.lock().unwrap() = false;
+                *state.pairing_view.lock().unwrap() = PairingView::from_outcome(&Err(
+                    PairError::Local("remote node identity does not match the signed pairing descriptor".into()),
+                ));
                 return set_error(
                     state,
                     "remote node identity does not match the signed pairing descriptor",
@@ -1111,13 +1109,11 @@ async fn finish_remote_auth(state: &NodeState, data_dir: &Path) {
             continue;
         }
         let revision = state.remote_retry.failure_revision();
-        *state.ready.lock().unwrap() = false;
         finish_auth(state, data_dir).await;
         // A retained HTTP tunnel can finish auth without opening a handshake.
         // Only a new transport failure warrants another recovery iteration;
         // an old retry flag must not spin token requests or hard refusals.
-        if *state.ready.lock().unwrap()
-            || !state.remote_retry.is_retrying()
+        if !state.remote_retry.is_retrying()
             || state.remote_retry.failure_revision() == revision
         {
             state.remote_retry.clear_expired();
@@ -1188,9 +1184,15 @@ fn pairing_ctx(state: &NodeState, data_dir: &Path) -> Result<Arc<PairingCtx>, Pa
 /// Pair with the node, reuse a stored pairing, or — only when `/pair/request`
 /// is 404 — mint via `/auth/local`. Records the outcome in the pairing view.
 async fn authenticate(state: &NodeState, data_dir: &Path) -> Result<(), String> {
-    *state.pairing_view.lock().unwrap() = PairingView::pending();
-    *state.auth.lock().unwrap() = AuthMode::Unauthenticated;
-    *state.token.lock().unwrap() = None;
+    let established_remote = state.remote_mode.load(Ordering::SeqCst)
+        && matches!(*state.auth.lock().unwrap(), AuthMode::Paired(_));
+    // Keep a warm session usable while reauthenticating. A transport failure is
+    // not evidence that its credentials or the owner's trust were revoked.
+    if !established_remote {
+        *state.pairing_view.lock().unwrap() = PairingView::pending();
+        *state.auth.lock().unwrap() = AuthMode::Unauthenticated;
+        *state.token.lock().unwrap() = None;
+    }
     let outcome = match pairing_ctx(state, data_dir) {
         Ok(ctx) if state.remote_mode.load(Ordering::SeqCst) => {
             pairing::establish_remote(&ctx.client, &ctx.key, &ctx.store).await
@@ -1226,6 +1228,23 @@ async fn authenticate(state: &NodeState, data_dir: &Path) -> Result<(), String> 
             Ok(())
         }
         Err(e) => {
+            let transient = match &e {
+                PairError::Transport { .. } => true,
+                PairError::Refused { status: 429 | 500..=599, reason, .. } => {
+                    // The loopback proxy uses 502 for failed pin/protocol
+                    // validation. That is a hard trust failure, not an outage.
+                    !serde_json::from_str::<serde_json::Value>(reason).ok()
+                        .is_some_and(|v| v["code"] == "remote_transport_refused")
+                }
+                _ => false,
+            };
+            if established_remote && transient {
+                set_error(state, e.to_string());
+                return Err(e.to_string());
+            }
+            *state.ready.lock().unwrap() = false;
+            *state.auth.lock().unwrap() = AuthMode::Unauthenticated;
+            *state.token.lock().unwrap() = None;
             let unknown_client = matches!(
                 e,
                 PairError::Refused { step: "/pair/challenge" | "/pair/token", status: 404, .. }
@@ -6738,7 +6757,7 @@ mod remote_onboarding_tests {
     use super::*;
 
     #[tokio::test(start_paused = true)]
-    async fn healthy_handshakes_do_not_report_a_cooldown_or_disable_the_shell() {
+    async fn established_pairing_stays_ready_during_rate_limited_cooldown() {
         let state = NodeState::for_api("http://127.0.0.1:1/api/v1");
         *state.ready.lock().unwrap() = true;
         state
@@ -6754,7 +6773,7 @@ mod remote_onboarding_tests {
             .remote_retry
             .run(|| async { Err(remote_access::RemoteError::RateLimited(60)) })
             .await;
-        assert!(!state.status_snapshot().ready);
+        assert!(state.status_snapshot().ready);
         assert!(state.status_snapshot().retry_after_secs.unwrap() >= 60);
         // The existing WebSocket may still be open, so its bridge cannot drive
         // recovery. Expired retry debt must not leave HTTP polling disabled.
@@ -7009,12 +7028,65 @@ mod pairing_wiring_tests {
     }
 
     #[tokio::test]
+    async fn warm_remote_reauthentication_distinguishes_upstream_outage_from_pin_refusal() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for (code, stays_ready) in [("remote_retry_wait", true), ("remote_transport_refused", false)] {
+            let f = fixture(PairRoutes::Live);
+            finish_auth(&f.state, f.data_dir.path()).await;
+            f.state.remote_mode.store(true, Ordering::SeqCst);
+            let ctx = f.state.pairing.lock().unwrap().clone().unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}/api/v1", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = vec![0; 4096];
+                stream.read(&mut request).await.unwrap();
+                let body = format!(r#"{{"code":"{code}","message":"remote unavailable"}}"#);
+                stream.write_all(format!("HTTP/1.1 502 Bad Gateway\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            });
+            *f.state.pairing.lock().unwrap() = Some(Arc::new(PairingCtx {
+                client: PairingClient::new(f.state.http.clone(), base),
+                key: ctx.key.clone(), store: ctx.store.clone(), data_dir: ctx.data_dir.clone(),
+            }));
+            finish_remote_auth(&f.state, f.data_dir.path()).await;
+            server.await.unwrap();
+            assert_eq!(f.state.status_snapshot().ready, stays_ready, "{code}");
+            assert_eq!(f.state.pairing_snapshot().state, if stays_ready { "paired" } else { "failed" });
+            assert_eq!(f.state.token.lock().unwrap().is_some(), stays_ready);
+        }
+    }
+
+    #[tokio::test]
+    async fn warm_remote_reauthentication_keeps_readiness_and_session_during_transport_loss() {
+        let f = fixture(PairRoutes::Live);
+        finish_auth(&f.state, f.data_dir.path()).await;
+        f.state.remote_mode.store(true, Ordering::SeqCst);
+        let token = f.state.token.lock().unwrap().clone();
+        let ctx = f.state.pairing.lock().unwrap().clone().unwrap();
+        // An unreachable endpoint is a transient transport failure, not revocation.
+        let dead = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/api/v1", dead.local_addr().unwrap());
+        drop(dead);
+        *f.state.pairing.lock().unwrap() = Some(Arc::new(PairingCtx {
+            client: PairingClient::new(f.state.http.clone(), base),
+            key: ctx.key.clone(), store: ctx.store.clone(), data_dir: ctx.data_dir.clone(),
+        }));
+        finish_remote_auth(&f.state, f.data_dir.path()).await;
+        assert!(f.state.status_snapshot().ready);
+        assert_eq!(f.state.pairing_snapshot().state, "paired");
+        assert_eq!(*f.state.token.lock().unwrap(), token);
+        assert!(matches!(*f.state.auth.lock().unwrap(), AuthMode::Paired(_)));
+        assert!(f.state.status_snapshot().error.is_some());
+    }
+
+    #[tokio::test]
     async fn remote_reauthentication_stops_on_refusal_even_with_old_retry_debt() {
         let f = fixture(PairRoutes::Live);
         authenticate(&f.state, f.data_dir.path()).await.unwrap();
         f.state.remote_mode.store(true, Ordering::SeqCst);
         let ctx = f.state.pairing.lock().unwrap().clone().unwrap();
         let record_before = std::fs::read(ctx.store.join(pairing::RECORD_FILE)).unwrap();
+        *f.state.ready.lock().unwrap() = true;
         f.node.revoke_all();
         let before = f.node.calls("/api/v1/pair/challenge");
         f.state
