@@ -54,6 +54,17 @@ const PHRASE: &str =
     "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 
 #[tokio::test]
+async fn restore_refuses_remote_before_any_request() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let state = NodeState::for_api(format!("http://127.0.0.1:{}/api/v1", listener.local_addr().unwrap().port()));
+    state.remote_mode.store(true, Ordering::SeqCst);
+    let result = tokio::time::timeout(Duration::from_millis(200), request_identity_restore(&state, PHRASE)).await;
+    assert!(matches!(result, Ok(Err(ref e)) if e == "Identity restore is only available for the local supervised node."));
+    assert!(matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock), "no probe or phrase may reach the remote node");
+}
+
+#[tokio::test]
 async fn restore_uses_bootstrap_router_or_rc7_live_fallback() {
     for bootstrap in [true, false] {
         let probe = if bootstrap {

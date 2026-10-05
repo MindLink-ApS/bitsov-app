@@ -207,7 +207,7 @@ export type NodeOverview = {
   uptime_secs: number;
   lightning_backend: string | null;
   chain_backend: string | null;
-  /** Known node capabilities (`energy_v1`, `membrane_v1`, `call_meeting_v1`, `room_binding_v1`, `porch_read_v1`, `front_door_v1`); absent or empty on rc7. */
+  /** Known node capabilities (`energy_v1`, `membrane_v1`, `call_meeting_v1`, `room_binding_v1`, `porch_read_v1`, `porch_quote_v1`, `front_door_v1`); absent or empty on rc7. */
   capabilities?: string[];
   /** UDP port of the node's own STUN responder (`[calls] stun_listen`); absent when off. */
   stun_port?: number | null;
@@ -445,6 +445,7 @@ export type ActionError = {
     | 'readmission_quoted'
     // Porch reads (src-tauri/src/porch.rs). Refused before paying:
     | 'porch_knock_first' | 'porch_unreachable' | 'porch_busy' | 'porch_own_node' | 'porch_path_invalid'
+    | 'porch_not_found' | 'porch_quote_unavailable' | 'porch_quote_invalid' | 'porch_room'
     | 'porch_unsupported' | 'porch_unavailable' | 'porch_needs_contact' | 'porch_readmission'
     // Paid, with no usable answer; never retried:
     | 'porch_timeout' | 'porch_reply_invalid' | 'porch_card_mismatch'
