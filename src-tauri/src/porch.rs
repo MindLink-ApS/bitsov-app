@@ -11,7 +11,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::act::ActionError;
+use crate::act::{ActionError, PaymentQuote};
 use crate::control::PeerPrice;
 use crate::front_door::{Card, FrontDoor};
 
@@ -20,6 +20,9 @@ pub const CAPABILITY: &str = "porch_read_v1";
 /// How a connected peer's node lists the same advert (federation Hello,
 /// `Capability::Custom`, rendered with `{:?}`). Only such a peer answers a read.
 pub const PEER_CAPABILITY: &str = r#"Custom("porch_read_v1")"#;
+pub const QUOTE_CAPABILITY: &str = "porch_quote_v1";
+pub const PEER_QUOTE_CAPABILITY: &str = r#"Custom("porch_quote_v1")"#;
+pub const QUOTE_ROUTE: &str = "/browse/quote";
 pub const ROUTE: &str = "/browse/fetch";
 pub const CARDS_ROUTE: &str = "/browse/cards";
 /// The owner's published card, served even when their site is off.
@@ -70,6 +73,37 @@ pub fn read_price(table: Option<&PeerPrice>, own_msat: u64) -> u64 {
         .max(MIN_READ_MSAT)
 }
 
+/// Free path-specific metadata. Bind it to the requested peer and path and
+/// keep recipient principal separate from the node's maximum routing fee.
+pub fn quote(text: &str, peer: &str, path: &str) -> Result<PaymentQuote, ActionError> {
+    #[derive(Deserialize)]
+    struct QuoteReply {
+        node_id: String,
+        path: String,
+        status: String,
+        amount_msat: Option<u64>,
+        max_routing_fee_msat: u64,
+        max_total_msat: u64,
+    }
+    let invalid = || refused("porch_quote_invalid");
+    let reply: QuoteReply = serde_json::from_str(text).map_err(|_| invalid())?;
+    if !reply.node_id.eq_ignore_ascii_case(peer) || reply.path != path {
+        return Err(invalid());
+    }
+    if reply.status != "Ok" {
+        if reply.amount_msat.is_some() || reply.max_total_msat != 0 || reply.max_routing_fee_msat != 0 {
+            return Err(invalid());
+        }
+        return Err(refused(if reply.status == "NotFound" { "porch_not_found" } else { "porch_unavailable" }));
+    }
+    let principal_msat = reply.amount_msat.filter(|n| *n >= MIN_READ_MSAT).ok_or_else(invalid)?;
+    if principal_msat.checked_add(reply.max_routing_fee_msat) != Some(reply.max_total_msat)
+        || reply.max_total_msat > 9_007_199_254_740_991 { // renderer's exact integer range
+        return Err(invalid());
+    }
+    Ok(PaymentQuote { principal_msat, max_routing_fee_msat: reply.max_routing_fee_msat, total_msat: reply.max_total_msat })
+}
+
 /// The `/browse/fetch` body (genome `FetchRequest`, `deny_unknown_fields`).
 pub fn fetch_body(node_id: &str, path: &str, max_total_msat: u64, max_routing_fee_msat: u64) -> serde_json::Value {
     serde_json::json!({
@@ -101,7 +135,11 @@ pub fn refused(code: &'static str) -> ActionError {
         "porch_own_node" => "That is your own node. Your own profile is under Profile in Settings.",
         "porch_path_invalid" => "A porch serves its profile card and flat .md or .txt pages only, like /index.md.",
         "porch_unsupported" => "Their node does not offer porch reads (it does not advertise porch_read_v1).",
-        "porch_unavailable" => "Your node cannot read porches yet: it does not offer porch_read_v1.",
+        "porch_unavailable" => "This card or page is unavailable right now.",
+        "porch_not_found" => "Not found or empty: their node has no content at this path.",
+        "porch_quote_unavailable" => "Their node could not provide a quote. It may need upgrading or may be offline. Try checking again later.",
+        "porch_quote_invalid" => "Their node returned an invalid availability or price quote.",
+        "porch_room" => "Porch reads are only available for individual contacts, not rooms.",
         "porch_needs_contact" => "Porch reads go to contacts you have already paid. Knock or send them a message first.",
         "porch_readmission" => "Their node asks yours to pay admission again (after a reconnect or a restart), and a porch read never pays admission. Send them a message first, then read.",
         _ => "Your node refused this read.",
@@ -134,8 +172,16 @@ pub enum Answer {
 pub fn answer(status: u16, body: &str) -> Option<Answer> {
     let v: serde_json::Value = serde_json::from_str(body).ok()?;
     let reason = v.get("reason")?.as_str()?;
-    if matches!(status, 400 | 409) {
-        let code = REFUSALS.iter().find(|c| **c == reason)?;
+    let prepayment = match (status, reason) {
+        (404, "porch_not_found") => Some("porch_not_found"),
+        (409, "porch_unavailable") => Some("porch_unavailable"),
+        (409, "porch_quote_unavailable") => Some("porch_quote_unavailable"),
+        (409, "porch_quote_invalid") => Some("porch_quote_invalid"),
+        (400, "porch_room") => Some("porch_room"),
+        (400 | 409, _) => REFUSALS.iter().find(|c| **c == reason).copied(),
+        _ => None,
+    };
+    if let Some(code) = prepayment {
         return Some(Answer::Refused(refused(code)));
     }
     if status == 502 {
@@ -338,6 +384,26 @@ mod tests {
             "body": body, "amount_msat": 1000, "message_id": "ab".repeat(32), "card": card,
         })
         .to_string()
+    }
+
+    #[test]
+    fn quote_keeps_msat_units_and_refuses_unbound_or_invalid_metadata() {
+        let valid = serde_json::json!({
+            "node_id": "a", "path": "/notes.txt", "status": "Ok", "amount_msat": 1000,
+            "max_routing_fee_msat": 1250, "max_total_msat": 2250,
+        });
+        let shown = quote(&valid.to_string(), "a", "/notes.txt").unwrap();
+        assert_eq!((shown.principal_msat, shown.max_routing_fee_msat, shown.total_msat), (1000, 1250, 2250));
+        for (field, value) in [
+            ("node_id", serde_json::json!("b")), ("path", serde_json::json!("/other.txt")),
+            ("amount_msat", serde_json::json!(null)), ("amount_msat", serde_json::json!(999)),
+            ("max_routing_fee_msat", serde_json::json!(-1)), ("max_total_msat", serde_json::json!(2251)),
+            ("status", serde_json::json!("NotFound")),
+        ] {
+            let mut bad = valid.clone();
+            bad[field] = value;
+            assert_eq!(quote(&bad.to_string(), "a", "/notes.txt").unwrap_err().code, "porch_quote_invalid", "{field}");
+        }
     }
 
     #[test]

@@ -14,7 +14,7 @@ type Props = {
   source: Source;
   now: number;
   peers: Peer[];
-  /** This node answers and makes porch reads (`porch_read_v1`). */
+  /** This node answers and makes porch reads (`porch_quote_v1`, or legacy `porch_read_v1`). */
   nodeReads: boolean;
   moneyBlocked: boolean;
   spend: SpendView | null;
@@ -36,6 +36,8 @@ export function PorchPanel(props: Props) {
   const [error, setError] = createSignal<string | null>(null);
   const [other, setOther] = createSignal('');
 
+  const quoteKey = (peer: string, path: string) => `${peer.toLowerCase()}:${path}`;
+
   const loadHeld = async () => {
     try {
       setHeld(await props.source.porchCards());
@@ -49,9 +51,9 @@ export function PorchPanel(props: Props) {
       () => (props.nodeReads ? readable().map((p) => p.node_id.toLowerCase()) : []),
       (ids) => {
         for (const id of ids) {
-          if (quotes()[id]) continue;
-          props.source.porchQuote(id).then(
-            (q) => setQuotes((all) => ({ ...all, [id]: q })),
+          if (quotes()[quoteKey(id, PORCH_CARD_PATH)]) continue;
+          props.source.porchQuote(id, PORCH_CARD_PATH).then(
+            (q) => setQuotes((all) => ({ ...all, [quoteKey(id, PORCH_CARD_PATH)]: q })),
             () => {},
           );
         }
@@ -64,8 +66,8 @@ export function PorchPanel(props: Props) {
     if (rv && (props.moneyBlocked || !offers(rv.peer))) setReview(null);
   });
 
-  const cost = (peer: string) => {
-    const q = quotes()[peer.toLowerCase()];
+  const cost = (peer: string, path = PORCH_CARD_PATH) => {
+    const q = quotes()[quoteKey(peer, path)];
     return q ? fmtAmount(q.principal_msat) : '…';
   };
   const heldFor = (peer: string) => held().find((c) => c.node_id.toLowerCase() === peer.toLowerCase()) ?? null;
@@ -76,8 +78,8 @@ export function PorchPanel(props: Props) {
     setReview(null);
     setBusy(true);
     try {
-      const quote = await props.source.porchQuote(peer);
-      setQuotes((all) => ({ ...all, [peer.toLowerCase()]: quote }));
+      const quote = await props.source.porchQuote(peer, path);
+      setQuotes((all) => ({ ...all, [quoteKey(peer, path)]: quote }));
       setReview({ peer: peer.toLowerCase(), path, quote });
     } catch (e) {
       setError(asActionError(e).message);
@@ -135,7 +137,7 @@ export function PorchPanel(props: Props) {
           fallback={
             <p class="hint" data-porch-none>
               No connected contact offers porch reads right now. Contacts appear here when their node is
-              connected and advertises porch_read_v1.
+              connected and advertises porch_quote_v1 (or legacy porch_read_v1).
             </p>
           }
         >
@@ -230,7 +232,7 @@ export function PorchPanel(props: Props) {
                 <For each={pagesOf(s().card)}>
                   {(path) => (
                     <button type="button" class="link" data-porch-page-read={path} disabled={busy() || props.moneyBlocked} onClick={() => void ask(s().peer, path)}>
-                      Read {path} · {cost(s().peer)}
+                      Read {path} · {cost(s().peer, path)}
                     </button>
                   )}
                 </For>
@@ -244,7 +246,7 @@ export function PorchPanel(props: Props) {
                 >
                   <input data-porch-path placeholder="Another page, e.g. notes.md" value={other()} onInput={(e) => setOther(e.currentTarget.value)} aria-label="Page" />
                   <button type="submit" class="link" data-porch-path-read disabled={busy() || props.moneyBlocked || otherPath() === null}>
-                    Read · {cost(s().peer)}
+                    Read · {cost(s().peer, otherPath() ?? '')}
                   </button>
                 </form>
                 <Show when={other().trim() && otherPath() === null}>

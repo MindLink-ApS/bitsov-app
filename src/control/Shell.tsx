@@ -1336,7 +1336,7 @@ export function ControlCenter(props: Props) {
                     source={source}
                     now={now()}
                     peers={peers()}
-                    nodeReads={overview()?.capabilities?.includes('porch_read_v1') === true}
+                    nodeReads={overview()?.capabilities?.some((c) => c === 'porch_quote_v1' || c === 'porch_read_v1') === true}
                     moneyBlocked={moneyBlocked()}
                     spend={spend()}
                     spendGate={<SpendBar spend={spend()} error={errors.spend ?? errors.spendPoll} now={now()} actions={actions} />}

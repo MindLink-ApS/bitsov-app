@@ -59,7 +59,7 @@ pub struct Peer {
     #[serde(default, skip_deserializing)]
     pub session: bool,
     /// Their node answers porch reads: connected now and advertising
-    /// `porch_read_v1`. Derived by [`with_porch_support`], never read from the node.
+    /// `porch_quote_v1` (or legacy `porch_read_v1`). Derived by [`with_porch_support`], never read from the node.
     #[serde(default, skip_deserializing)]
     pub porch: bool,
 }
@@ -106,7 +106,7 @@ pub fn with_sessions(mut peers: Vec<Peer>, sessions: Option<&[Session]>) -> Vec<
 pub fn with_porch_support(mut peers: Vec<Peer>) -> Vec<Peer> {
     for p in &mut peers {
         p.porch = p.connected
-            && p.capabilities.as_ref().is_some_and(|c| c.iter().any(|x| x == crate::porch::PEER_CAPABILITY));
+            && p.capabilities.as_ref().is_some_and(|c| c.iter().any(|x| x == crate::porch::PEER_QUOTE_CAPABILITY || x == crate::porch::PEER_CAPABILITY));
     }
     peers
 }
@@ -249,7 +249,7 @@ pub struct NodeStatusResponse {
 // signatures are not in these node shapes and are not accepted if they appear.
 
 /// Capabilities the renderer may act on. Anything else the node lists is dropped.
-pub const KNOWN_CAPABILITIES: &[&str] = &["energy_v1", "membrane_v1", "call_meeting_v1", "room_binding_v1", "porch_read_v1", "front_door_v1"];
+pub const KNOWN_CAPABILITIES: &[&str] = &["energy_v1", "membrane_v1", "call_meeting_v1", "room_binding_v1", "porch_read_v1", "porch_quote_v1", "front_door_v1"];
 
 pub fn known_capabilities(listed: &[String]) -> Vec<String> {
     KNOWN_CAPABILITIES
@@ -1217,10 +1217,10 @@ mod tests {
     fn overview_preserves_advertised_front_door_and_filters_unknown_capabilities() {
         let status = serde_json::from_value(serde_json::json!({
             "status": "ok", "node_id": "x",
-            "api_capabilities": ["unknown_future_v1", "front_door_v1", "front_door_v1"]
+            "api_capabilities": ["unknown_future_v1", "front_door_v1", "front_door_v1", "porch_quote_v1"]
         })).unwrap();
         let projected = serde_json::to_value(NodeOverview::from_status(status, 123)).unwrap();
-        assert_eq!(projected["capabilities"], serde_json::json!(["front_door_v1"]));
+        assert_eq!(projected["capabilities"], serde_json::json!(["porch_quote_v1", "front_door_v1"]));
 
         let status = serde_json::from_value(serde_json::json!({
             "status": "ok", "node_id": "x", "api_capabilities": ["unknown_future_v1"]
@@ -1505,11 +1505,14 @@ mod tests {
             {"node_id":"b","connected":true,"capabilities":["X3dh","Custom(\"call_meeting_v1\")"]},
             {"node_id":"c","connected":false,"capabilities":["Custom(\"porch_read_v1\")"]},
             {"node_id":"d","connected":true,"capabilities":["porch_read_v1","Custom(\"porch_read_v1x\")"]},
-            {"node_id":"e","connected":true,"porch":true}
+            {"node_id":"e","connected":true,"porch":true},
+            {"node_id":"f","connected":true,"capabilities":["Custom(\"porch_quote_v1\")"]},
+            {"node_id":"g","connected":false,"capabilities":["Custom(\"porch_quote_v1\")"]},
+            {"node_id":"h","connected":true,"capabilities":["porch_quote_v1","Custom(\"porch_quote_v1x\")"]}
         ]"#).unwrap();
         let peers = with_porch_support(with_meeting_support(peers));
-        assert_eq!(peers.iter().map(|p| p.porch).collect::<Vec<_>>(), [true, false, false, false, false]);
-        assert_eq!(peers.iter().map(|p| p.meetings).collect::<Vec<_>>(), [false, true, false, false, false]);
+        assert_eq!(peers.iter().map(|p| p.porch).collect::<Vec<_>>(), [true, false, false, false, false, true, false, false]);
+        assert_eq!(peers.iter().map(|p| p.meetings).collect::<Vec<_>>(), [false, true, false, false, false, false, false, false]);
         assert_eq!(serde_json::to_value(&peers[0]).unwrap()["porch"], true);
     }
 

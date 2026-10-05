@@ -36,14 +36,14 @@ function page(path: string, kind: PorchRead['kind'], body: string, status: Porch
   return { node_id: MAYA, path, status, kind, body, card: null, amount_msat: 1000, total_msat: 6000, message_id: 'm1' };
 }
 
-type Stub = { source: Source; quotes: string[]; reads: [string, string, number][] };
+type Stub = { source: Source; quotes: [string, string][]; reads: [string, string, number][] };
 
 function stub(read: (peer: string, path: string) => PorchRead | ActionError, held: PorchCard[] = []): Stub {
-  const quotes: string[] = [];
+  const quotes: [string, string][] = [];
   const reads: [string, string, number][] = [];
   const source = {
-    porchQuote: async (peer: string) => {
-      quotes.push(peer);
+    porchQuote: async (peer: string, path: string) => {
+      quotes.push([peer, path]);
       return QUOTE;
     },
     porchRead: async (peer: string, path: string, maxMsat: number) => {
@@ -175,6 +175,52 @@ describe('PorchPanel', () => {
     expect($('[data-porch-none]')!.textContent).toContain('porch_read_v1');
   });
 
+  it('quotes each chosen path before offering payment, and keeps sub-sat fees separate', async () => {
+    const s = stub(() => page('/notes.txt', 'text', 'hello'), [card(MAYA, true)]);
+    s.source.porchQuote = async (peer, path) => {
+      s.quotes.push([peer, path]);
+      return path === '/notes.txt'
+        ? { principal_msat: 1000, max_routing_fee_msat: 1250, total_msat: 2250 }
+        : QUOTE;
+    };
+    mount(s);
+    await tick();
+    click('[data-porch-held-open]');
+    const input = $<HTMLInputElement>('[data-porch-path]')!;
+    input.value = 'notes.txt';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    click('[data-porch-path-read]');
+    await tick();
+    expect(s.quotes[s.quotes.length - 1]).toEqual([MAYA, '/notes.txt']);
+    expect(s.reads).toEqual([]);
+    expect($('[data-review-amount]')?.textContent).toBe('1 sat');
+    expect($('[data-review-fee]')?.textContent).toBe('up to 1.25 sats');
+    expect($('[data-review-total]')?.textContent).toBe('2.25 sats');
+    click('[data-porch-confirm]');
+    await tick();
+    expect(s.reads).toEqual([[MAYA, '/notes.txt', 2250]]);
+  });
+
+  it('shows a missing or empty path without a payment review or read', async () => {
+    const s = stub(() => page('/empty.txt', 'text', ''), [card(MAYA, true)]);
+    s.source.porchQuote = async (peer, path) => {
+      s.quotes.push([peer, path]);
+      if (path === '/empty.txt') throw { code: 'porch_not_found', message: 'Not found or empty. Nothing was paid.' };
+      return QUOTE;
+    };
+    mount(s);
+    await tick();
+    click('[data-porch-held-open]');
+    const input = $<HTMLInputElement>('[data-porch-path]')!;
+    input.value = 'empty.txt';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    click('[data-porch-path-read]');
+    await tick();
+    expect($('[data-porch-review]')).toBeNull();
+    expect($('[data-soft-error="porch-error"]')?.textContent).toContain('Not found or empty. Nothing was paid.');
+    expect(s.reads).toEqual([]);
+  });
+
   it('shows the 1 sat cost before a read and pays it after one confirm, once', async () => {
     const s = stub(() => ({ ...page('/front-door.json', 'card', ''), card: card(MAYA, false) }));
     mount(s);
@@ -192,6 +238,7 @@ describe('PorchPanel', () => {
     confirm.click();
     confirm.click();
     await tick();
+    expect(s.quotes).toContainEqual([MAYA, '/front-door.json']);
     expect(s.reads).toEqual([[MAYA, '/front-door.json', 6000]]);
     expect($('[data-porch-review]')).toBeNull();
     expect($('[data-fd-name]')!.textContent).toBe('Maya');
@@ -271,6 +318,7 @@ describe('PorchPanel', () => {
     expect($('[data-review-total]')!.textContent).toBe('6 sats');
     click('[data-porch-confirm]');
     await tick();
+    expect(s.quotes).toContainEqual([MAYA, '/front-door.json']);
     expect(s.reads).toEqual([[MAYA, '/front-door.json', 6000]]);
     expect($('[data-porch-cached]')).toBeNull();
   });
