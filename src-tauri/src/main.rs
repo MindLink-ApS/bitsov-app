@@ -273,9 +273,8 @@ impl NodeState {
         let retry_after_secs = if retrying { self.remote_retry.remaining() } else { None };
         Status {
             retry_after_secs,
-            // A surviving WebSocket may keep the bridge occupied. Resume HTTP
-            // polling after cooldown so it can recover independently of /ws.
-            ready: *self.ready.lock().unwrap() && retry_after_secs.is_none(),
+            // A transport cooldown pauses reads; it does not revoke pairing.
+            ready: *self.ready.lock().unwrap(),
             node_id: self.node_id.lock().unwrap().clone(),
             error: self.error.lock().unwrap().clone(),
         }
@@ -334,14 +333,9 @@ impl NodeState {
             last_remint: Mutex::new(None),
             sidecar_terminated: AtomicBool::new(false),
             live_link: control::LiveLink::default(),
-            // Bounded so a hung loopback /health or /auth/local cannot pin restoring().
-            http: reqwest::Client::builder()
-                .connect_timeout(Duration::from_secs(2))
-                .pool_max_idle_per_host(2)
-                .pool_idle_timeout(Duration::from_secs(30))
-                .timeout(Duration::from_secs(5))
-                .no_proxy()
-                .redirect(reqwest::redirect::Policy::none())
+            // Remote requests may take 15 s; loopback health/auth use a short
+            // per-request timeout so they cannot pin restoring().
+            http: remote_access::http_client_builder()
                 .default_headers(default_headers)
                 .build()
                 .expect("reqwest client"),
@@ -560,6 +554,7 @@ async fn health_ok(state: &NodeState) -> bool {
     state
         .http
         .get(format!("{}/health", state.api_base))
+        .timeout(Duration::from_secs(5))
         .send()
         .await
         .map(|r| r.status().is_success())
@@ -1086,6 +1081,11 @@ async fn finish_auth(state: &NodeState, data_dir: &Path) {
                 .is_some_and(|expected| expected != &node_id)
             {
                 *state.token.lock().unwrap() = None;
+                *state.auth.lock().unwrap() = AuthMode::Unauthenticated;
+                *state.ready.lock().unwrap() = false;
+                *state.pairing_view.lock().unwrap() = PairingView::from_outcome(&Err(
+                    PairError::Local("remote node identity does not match the signed pairing descriptor".into()),
+                ));
                 return set_error(
                     state,
                     "remote node identity does not match the signed pairing descriptor",
@@ -1111,13 +1111,11 @@ async fn finish_remote_auth(state: &NodeState, data_dir: &Path) {
             continue;
         }
         let revision = state.remote_retry.failure_revision();
-        *state.ready.lock().unwrap() = false;
         finish_auth(state, data_dir).await;
         // A retained HTTP tunnel can finish auth without opening a handshake.
         // Only a new transport failure warrants another recovery iteration;
         // an old retry flag must not spin token requests or hard refusals.
-        if *state.ready.lock().unwrap()
-            || !state.remote_retry.is_retrying()
+        if !state.remote_retry.is_retrying()
             || state.remote_retry.failure_revision() == revision
         {
             state.remote_retry.clear_expired();
@@ -1188,9 +1186,15 @@ fn pairing_ctx(state: &NodeState, data_dir: &Path) -> Result<Arc<PairingCtx>, Pa
 /// Pair with the node, reuse a stored pairing, or — only when `/pair/request`
 /// is 404 — mint via `/auth/local`. Records the outcome in the pairing view.
 async fn authenticate(state: &NodeState, data_dir: &Path) -> Result<(), String> {
-    *state.pairing_view.lock().unwrap() = PairingView::pending();
-    *state.auth.lock().unwrap() = AuthMode::Unauthenticated;
-    *state.token.lock().unwrap() = None;
+    let established_remote = state.remote_mode.load(Ordering::SeqCst)
+        && matches!(*state.auth.lock().unwrap(), AuthMode::Paired(_));
+    // Keep a warm session usable while reauthenticating. A transport failure is
+    // not evidence that its credentials or the owner's trust were revoked.
+    if !established_remote {
+        *state.pairing_view.lock().unwrap() = PairingView::pending();
+        *state.auth.lock().unwrap() = AuthMode::Unauthenticated;
+        *state.token.lock().unwrap() = None;
+    }
     let outcome = match pairing_ctx(state, data_dir) {
         Ok(ctx) if state.remote_mode.load(Ordering::SeqCst) => {
             pairing::establish_remote(&ctx.client, &ctx.key, &ctx.store).await
@@ -1226,6 +1230,23 @@ async fn authenticate(state: &NodeState, data_dir: &Path) -> Result<(), String> 
             Ok(())
         }
         Err(e) => {
+            let transient = match &e {
+                PairError::Transport { .. } => true,
+                PairError::Refused { status: 429 | 500..=599, reason, .. } => {
+                    // The loopback proxy uses 502 for failed pin/protocol
+                    // validation. That is a hard trust failure, not an outage.
+                    !serde_json::from_str::<serde_json::Value>(reason).ok()
+                        .is_some_and(|v| v["code"] == "remote_transport_refused")
+                }
+                _ => false,
+            };
+            if established_remote && transient {
+                set_error(state, e.to_string());
+                return Err(e.to_string());
+            }
+            *state.ready.lock().unwrap() = false;
+            *state.auth.lock().unwrap() = AuthMode::Unauthenticated;
+            *state.token.lock().unwrap() = None;
             let unknown_client = matches!(
                 e,
                 PairError::Refused { step: "/pair/challenge" | "/pair/token", status: 404, .. }
@@ -1294,6 +1315,7 @@ async fn mint_token(state: &NodeState) -> Result<(), String> {
     let token = state
         .http
         .post(format!("{}/auth/local", state.api_base))
+        .timeout(Duration::from_secs(5))
         .send()
         .await
         .map_err(|e| format!("auth/local request failed: {e}"))?
@@ -3064,6 +3086,14 @@ enum Auth {
     Budget(u64),
 }
 
+/// A cooldown is a proven pre-dispatch refusal, before journal or reservation I/O.
+fn refuse_if_connection_waiting(state: &NodeState) -> Result<(), ActionError> {
+    if state.remote_retry.remaining().is_some() {
+        return Err(ActionError::new("not_ready", "Waiting for the connection. Your node will retry automatically."));
+    }
+    Ok(())
+}
+
 fn check_auth(state: &NodeState, auth: Auth) -> Result<(), ActionError> {
     match auth {
         Auth::Window(g) => state.spend.lock().unwrap().check_generation(g, now_ms()),
@@ -3272,6 +3302,7 @@ async fn money_post(state: &NodeState, auth: Auth, path: &str, body: serde_json:
 /// Holds `NodeState::money` throughout: a reconcile waits for this POST.
 async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: serde_json::Value, max_msat: u64, charge: Option<Charge>, retry: Option<&spend_journal::Undelivered>) -> Result<String, ActionError> {
     let _money = state.money.lock().await;
+    refuse_if_connection_waiting(state)?;
     let journal = spend_journal(state)?;
     let prior = journal.pending()?;
     ensure_fresh_token(state).await;
@@ -3376,7 +3407,9 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
         None => Ok(()),
     };
     // Journal I/O can take time. Recheck immediately before issuing the request.
-    if let Err(e) = refuse_if_paused(state).and_then(|()| check_auth(state, auth)) {
+    if let Err(e) = refuse_if_connection_waiting(state)
+        .and_then(|()| refuse_if_paused(state))
+        .and_then(|()| check_auth(state, auth)) {
         release(state)?;
         abandon(&journal)?;
         return Err(e);
@@ -4867,6 +4900,7 @@ async fn do_porch_read(state: &NodeState, peer: &str, path: &str, max_msat: u64)
 /// reports no routing fee for a read).
 async fn porch_post(state: &NodeState, auth: Auth, body: serde_json::Value, max_msat: u64, charge: Charge) -> Result<(String, u64), ActionError> {
     let _money = state.money.lock().await;
+    refuse_if_connection_waiting(state)?;
     let journal = spend_journal(state)?;
     let prior = journal.pending()?;
     ensure_fresh_token(state).await;
@@ -4894,7 +4928,9 @@ async fn porch_post(state: &NodeState, auth: Auth, body: serde_json::Value, max_
     pending.budgeted = true;
     journal.save(&pending)?;
     let release = |state: &NodeState| close_charge(state, &charge_id, None, None);
-    if let Err(e) = refuse_if_paused(state).and_then(|()| check_auth(state, auth)) {
+    if let Err(e) = refuse_if_connection_waiting(state)
+        .and_then(|()| refuse_if_paused(state))
+        .and_then(|()| check_auth(state, auth)) {
         release(state)?;
         abandon(&journal)?;
         return Err(e);
@@ -6738,7 +6774,7 @@ mod remote_onboarding_tests {
     use super::*;
 
     #[tokio::test(start_paused = true)]
-    async fn healthy_handshakes_do_not_report_a_cooldown_or_disable_the_shell() {
+    async fn established_pairing_stays_ready_during_rate_limited_cooldown() {
         let state = NodeState::for_api("http://127.0.0.1:1/api/v1");
         *state.ready.lock().unwrap() = true;
         state
@@ -6754,7 +6790,7 @@ mod remote_onboarding_tests {
             .remote_retry
             .run(|| async { Err(remote_access::RemoteError::RateLimited(60)) })
             .await;
-        assert!(!state.status_snapshot().ready);
+        assert!(state.status_snapshot().ready);
         assert!(state.status_snapshot().retry_after_secs.unwrap() >= 60);
         // The existing WebSocket may still be open, so its bridge cannot drive
         // recovery. Expired retry debt must not leave HTTP polling disabled.
@@ -7009,12 +7045,65 @@ mod pairing_wiring_tests {
     }
 
     #[tokio::test]
+    async fn warm_remote_reauthentication_distinguishes_upstream_outage_from_pin_refusal() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for (code, stays_ready) in [("remote_retry_wait", true), ("remote_transport_refused", false)] {
+            let f = fixture(PairRoutes::Live);
+            finish_auth(&f.state, f.data_dir.path()).await;
+            f.state.remote_mode.store(true, Ordering::SeqCst);
+            let ctx = f.state.pairing.lock().unwrap().clone().unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://127.0.0.1:{}/api/v1", listener.local_addr().unwrap().port());
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = vec![0; 4096];
+                stream.read(&mut request).await.unwrap();
+                let body = format!(r#"{{"code":"{code}","message":"remote unavailable"}}"#);
+                stream.write_all(format!("HTTP/1.1 502 Bad Gateway\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            });
+            *f.state.pairing.lock().unwrap() = Some(Arc::new(PairingCtx {
+                client: PairingClient::new(f.state.http.clone(), base),
+                key: ctx.key.clone(), store: ctx.store.clone(), data_dir: ctx.data_dir.clone(),
+            }));
+            finish_remote_auth(&f.state, f.data_dir.path()).await;
+            server.await.unwrap();
+            assert_eq!(f.state.status_snapshot().ready, stays_ready, "{code}");
+            assert_eq!(f.state.pairing_snapshot().state, if stays_ready { "paired" } else { "failed" });
+            assert_eq!(f.state.token.lock().unwrap().is_some(), stays_ready);
+        }
+    }
+
+    #[tokio::test]
+    async fn warm_remote_reauthentication_keeps_readiness_and_session_during_transport_loss() {
+        let f = fixture(PairRoutes::Live);
+        finish_auth(&f.state, f.data_dir.path()).await;
+        f.state.remote_mode.store(true, Ordering::SeqCst);
+        let token = f.state.token.lock().unwrap().clone();
+        let ctx = f.state.pairing.lock().unwrap().clone().unwrap();
+        // An unreachable endpoint is a transient transport failure, not revocation.
+        let dead = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://127.0.0.1:{}/api/v1", dead.local_addr().unwrap().port());
+        drop(dead);
+        *f.state.pairing.lock().unwrap() = Some(Arc::new(PairingCtx {
+            client: PairingClient::new(f.state.http.clone(), base),
+            key: ctx.key.clone(), store: ctx.store.clone(), data_dir: ctx.data_dir.clone(),
+        }));
+        finish_remote_auth(&f.state, f.data_dir.path()).await;
+        assert!(f.state.status_snapshot().ready);
+        assert_eq!(f.state.pairing_snapshot().state, "paired");
+        assert_eq!(*f.state.token.lock().unwrap(), token);
+        assert!(matches!(*f.state.auth.lock().unwrap(), AuthMode::Paired(_)));
+        assert!(f.state.status_snapshot().error.is_some());
+    }
+
+    #[tokio::test]
     async fn remote_reauthentication_stops_on_refusal_even_with_old_retry_debt() {
         let f = fixture(PairRoutes::Live);
         authenticate(&f.state, f.data_dir.path()).await.unwrap();
         f.state.remote_mode.store(true, Ordering::SeqCst);
         let ctx = f.state.pairing.lock().unwrap().clone().unwrap();
         let record_before = std::fs::read(ctx.store.join(pairing::RECORD_FILE)).unwrap();
+        *f.state.ready.lock().unwrap() = true;
         f.node.revoke_all();
         let before = f.node.calls("/api/v1/pair/challenge");
         f.state
@@ -7421,6 +7510,42 @@ mod control_act_tests {
         assert!(node.posts().is_empty());
     }
     #[tokio::test]
+    async fn retry_cooldown_refuses_money_before_journal_or_dispatch() {
+        let node = fake(AuthMode::Local, happy());
+        spend_advance(&node.state, true).await.unwrap();
+        node.state.remote_retry.failed(&remote_access::RemoteError::RateLimited(60));
+        let err = do_message_send(&node.state, A, false, "hi", 7000, None).await.unwrap_err();
+        assert_eq!(err.code, "not_ready");
+        assert!(node.posts().is_empty());
+        assert!(!journal_file(&node).exists(), "cooldown must not touch the journal");
+        assert!(book(&node).is_empty(), "no reservation during cooldown");
+        // Even an unreadable journal must not be opened during cooldown.
+        std::fs::write(journal_file(&node), b"not a journal").unwrap();
+        let err = money_post_with(&node.state, Auth::Window(0), "/messages/compose", serde_json::json!({}), 7000, None, None).await.unwrap_err();
+        assert_eq!(err.code, "not_ready");
+        assert_eq!(std::fs::read(journal_file(&node)).unwrap(), b"not a journal");
+    }
+
+    #[tokio::test]
+    async fn proxy_pre_forward_refusals_release_journal_without_unknown() {
+        for code in ["remote_retry_wait", "remote_handshake_unavailable", "remote_proxy_busy"] {
+            let routes: Routes = Arc::new(move |m,p,b| {
+                if p == "/messages/compose" {
+                    return (503, serde_json::json!({"code":code,"message":"waiting for connection"}).to_string());
+                }
+                happy()(m,p,b)
+            });
+            let node = fake(AuthMode::Local, routes);
+            spend_advance(&node.state, true).await.unwrap();
+            let err = do_message_send(&node.state, A, false, "hi", 7000, None).await.unwrap_err();
+            assert_eq!(err.code, "not_dispatched", "{code}");
+            assert!(book(&node).is_empty(), "release the reservation");
+            assert!(spend_journal(&node.state).unwrap().pending().unwrap().is_none());
+            assert_eq!(node.posts().len(), 1, "no automatic retry");
+        }
+    }
+
+    #[tokio::test]
     async fn readiness_refusal_clears_journal_and_allows_later_manual_send() {
         let ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let route_ready = ready.clone();
@@ -7468,6 +7593,35 @@ mod control_act_tests {
             for body in &bodies[1..] { assert_eq!(body["max_total_msat"], approved.unwrap_or(0)); }
             assert_eq!(book(&node), [(record.request_hash.clone(), 14000, true),
                 (format!("{}-retry-1", record.request_hash), 0, true)]);
+        }
+    }
+
+    #[tokio::test]
+    async fn proxy_pre_forward_refusal_preserves_paid_retry_record() {
+        for code in ["remote_retry_wait", "remote_handshake_unavailable", "remote_proxy_busy"] {
+            let node = fake(AuthMode::Local, compose_script(vec![
+                psi_502(2000, 0, 2000, PSI_TIMEOUT),
+                (503, serde_json::json!({"code":code}).to_string()),
+            ]));
+            let record = psi_first(&node).await;
+            let accounted = book(&node);
+            assert_eq!(do_message_retry(&node.state, A, "gm", None).await.unwrap_err().code, "not_dispatched");
+            assert_eq!(serde_json::to_value(pending(&node).unwrap()).unwrap(), serde_json::to_value(record).unwrap());
+            assert_eq!(book(&node), accounted);
+        }
+    }
+
+    #[test]
+    fn proxy_not_dispatched_mapping_requires_exact_status_and_code() {
+        for code in ["remote_retry_wait", "remote_handshake_unavailable", "remote_proxy_busy"] {
+            let body = serde_json::json!({"code":code}).to_string();
+            assert!(act::not_dispatched_refusal(503, &body));
+            for status in [400, 500, 502, 504] {
+                assert!(!act::not_dispatched_refusal(status, &body));
+            }
+        }
+        for body in [r#"{"code":"remote_transport_failed"}"#, r#"{"message":"remote_retry_wait"}"#, "unavailable"] {
+            assert!(!act::not_dispatched_refusal(503, body));
         }
     }
 
@@ -9494,6 +9648,17 @@ mod control_act_tests {
 
     fn fetches(node: &Fake) -> Vec<serde_json::Value> {
         node.posts().into_iter().filter(|(p, _)| p == porch::ROUTE).map(|(_, b)| b).collect()
+    }
+
+    #[tokio::test]
+    async fn porch_cooldown_refuses_before_journal_or_payment() {
+        let (node, peer, _) = porch_node(Arc::new(|_, _, _| (503, "unexpected fetch".into())));
+        porch_budget(&node, &peer).await;
+        node.state.remote_retry.failed(&remote_access::RemoteError::RateLimited(60));
+        assert_eq!(do_porch_read(&node.state, &peer, porch::CARD_PATH, 6000).await.unwrap_err().code, "not_ready");
+        assert!(!journal_file(&node).exists());
+        assert!(book(&node).is_empty());
+        assert!(fetches(&node).is_empty());
     }
 
     #[tokio::test]

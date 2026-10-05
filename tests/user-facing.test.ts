@@ -25,3 +25,11 @@ describe('softenError', () => {
     });
   });
 });
+
+ it.each([
+   'remote_retry_wait: Remote connection unavailable; waiting 3 s',
+   '/status failed (503): remote_retry_wait: Remote connection unavailable; waiting 3 s',
+   'rate_limited: Remote connection unavailable; waiting 3 s',
+ ])('keeps the remote retry countdown readable: %s', (raw) => {
+   expect(softenError(raw)).toEqual({ summary: 'Remote connection unavailable · waiting 3 s', detail: raw });
+ });

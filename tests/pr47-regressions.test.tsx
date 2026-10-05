@@ -96,7 +96,7 @@ describe('PR47 independent frontend regressions', () => {
   });
 
   it('finding 6: an old door price whose re-read fails is shown stale, not as current', async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ['setInterval', 'clearInterval', 'Date'] });
+    vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ['setInterval', 'clearInterval', 'setTimeout', 'clearTimeout', 'Date'] });
     try {
       const source = sampleSource({ firstLiveMs: 1e9, organism: 'v2' });
       let fail = false;

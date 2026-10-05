@@ -1350,6 +1350,19 @@ pub fn loopback_addr(api_base: &str) -> Result<SocketAddr, RemoteError> {
     Ok(address)
 }
 
+/// Each HTTP connection occupies a Noise tunnel. Retain a bounded warm pool,
+/// leaving the proxy's eighth slot for the live WebSocket. Local connect stays
+/// bounded, while WAN requests have time to complete without losing the tunnel.
+pub fn http_client_builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(2))
+        .pool_max_idle_per_host(MAX_LOCAL_CONNECTIONS - 1)
+        .pool_idle_timeout(Duration::from_secs(55))
+        .timeout(Duration::from_secs(15))
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+}
+
 pub async fn start_proxy(
     api_base: &str,
     app_data_dir: &Path,
@@ -2204,6 +2217,124 @@ mod tests {
         let encrypted = encode_transport(&mut noise, &response)?;
         write_frame(&mut stream, &encrypted).await?;
         Ok(request)
+    }
+
+    // A real Noise/auth responder with HTTP keep-alive inside each tunnel.
+    // Count socket handshakes, not requests, so losing pooling fails this test.
+    async fn polling_responder(mut stream: TcpStream, secret: [u8; 32]) -> Result<(), RemoteError> {
+        let mut noise = Builder::new(NOISE_PROTOCOL.parse().unwrap())
+            .local_private_key(&secret).build_responder().unwrap();
+        let mut output = vec![0u8; MAX_HANDSHAKE_FRAME];
+        let message = read_frame(&mut stream, MAX_HANDSHAKE_FRAME).await?;
+        noise.read_message(&message, &mut output).unwrap();
+        let length = noise.write_message(&[], &mut output).unwrap();
+        write_frame(&mut stream, &output[..length]).await?;
+        let message = read_frame(&mut stream, MAX_HANDSHAKE_FRAME).await?;
+        noise.read_message(&message, &mut output).unwrap();
+        let mut noise = noise.into_transport_mode().unwrap();
+        let encrypted = read_frame(&mut stream, MAX_TRANSPORT_FRAME).await?;
+        let auth = decode_transport(&mut noise, &encrypted, MAX_AUTH_PLAINTEXT)?;
+        let _: RemoteAuthRequest = serde_json::from_slice(&auth).unwrap();
+        let response = serde_json::to_vec(&RemoteAuthResponse::Ok {
+            v: 1, client_id: "0123456789abcdef0123456789abcdef".into(),
+            scopes: vec!["read".into(), "receive".into()],
+        }).unwrap();
+        let encrypted = encode_transport(&mut noise, &response)?;
+        write_frame(&mut stream, &encrypted).await?;
+        let mut request = Vec::new();
+        loop {
+            let encrypted = read_frame(&mut stream, MAX_TRANSPORT_FRAME).await?;
+            request.extend(decode_transport(&mut noise, &encrypted, MAX_NOISE_PLAINTEXT)?);
+            while let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                request.drain(..end + 4);
+                let response = encode_transport(&mut noise, b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}")?;
+                write_frame(&mut stream, &response).await?;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn normal_polling_reuses_at_most_eight_handshakes_over_two_simulated_minutes() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let secret = [28u8; 32];
+        let node = SigningKey::from_bytes(&[27u8; 32]);
+        let public = X25519PublicKey::from(&StaticSecret::from(secret)).to_bytes();
+        let descriptor = parse_pairing_link(&signed_link(
+            listener.local_addr().unwrap().to_string(), &node, public, &test_code(11),
+        )).unwrap();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let refuse = Arc::new(AtomicBool::new(false));
+        let server = tokio::spawn({
+            let attempts = attempts.clone();
+            let refuse = refuse.clone();
+            async move {
+                let mut sessions = tokio::task::JoinSet::new();
+                loop {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    attempts.fetch_add(1, Ordering::SeqCst);
+                    let reject = refuse.swap(false, Ordering::SeqCst);
+                    sessions.spawn(async move {
+                        if reject {
+                            let _ = read_frame(&mut stream, MAX_HANDSHAKE_FRAME).await;
+                            write_frame(&mut stream, br#"{"v":1,"code":"rate_limited","retry_after_secs":1}"#).await.unwrap();
+                        } else {
+                            let _ = polling_responder(stream, secret).await;
+                        }
+                    });
+                }
+            }
+        });
+        let app_dir = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        let key = Arc::new(ClientKey::load_or_create(store.path()).unwrap());
+        let auth: Arc<str> = Arc::from("b".repeat(64));
+        let retry = Arc::new(RemoteRetry::default());
+        let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let local_base = format!("http://127.0.0.1:{}/api/v1", probe.local_addr().unwrap().port());
+        drop(probe);
+        let proxy = start_proxy(&local_base, app_dir.path(), descriptor,
+            key, "polling test", store.path().to_path_buf(), auth.clone(), retry.clone()).await.unwrap();
+        let client = http_client_builder().build().unwrap();
+        let url = format!("http://127.0.0.1:{}/api/v1/status", proxy.local_addr().port());
+        let read = || async {
+            let response = client.get(&url).header(LOCAL_AUTH_HEADER, auth.as_ref()).send().await.unwrap();
+            assert_eq!(response.status(), 200);
+            assert_eq!(response.text().await.unwrap(), "{}");
+        };
+        // The initial seven loads use the same two slots as periodic reads.
+        for _ in 0..4 { tokio::join!(read(), read()); }
+        let warm = attempts.load(Ordering::SeqCst);
+        assert!((1..=2).contains(&warm));
+        let mut requests = 8;
+        // Shell cadence, with panel offsets. Two sequential spend/budget reads
+        // every three seconds keep the pool warm between less frequent panels.
+        for tick in 1..=480 {
+            tokio::time::pause();
+            tokio::time::advance(Duration::from_millis(250)).await;
+            tokio::time::resume(); // real loopback IO must not auto-advance timers
+            let mut due = usize::from(tick % 12 == 0) * 2;
+            for (period, offset) in [(40, 1), (60, 2), (60, 3), (80, 4), (120, 5), (120, 6), (120, 7), (120, 8)] {
+                due += usize::from(tick % period == offset);
+            }
+            while due >= 2 { tokio::join!(read(), read()); due -= 2; requests += 2; }
+            if due == 1 { read().await; requests += 1; }
+        }
+        assert!(requests >= 130, "exercise the whole polling workload: {requests}");
+        assert!(attempts.load(Ordering::SeqCst) <= 8, "handshakes: {}", attempts.load(Ordering::SeqCst));
+        assert_eq!(attempts.load(Ordering::SeqCst), warm, "no handshake churn after warm-up");
+
+        // Refusing one new tunnel must leave established tunnels usable.
+        refuse.store(true, Ordering::SeqCst);
+        let extra = reqwest::Client::builder().no_proxy().build().unwrap();
+        let response = extra.get(&url).header(LOCAL_AUTH_HEADER, auth.as_ref()).send().await.unwrap();
+        assert_eq!(response.status(), 503);
+        assert!(response.text().await.unwrap().contains("waiting 1 s"));
+        assert!(retry.remaining().is_some());
+        tokio::join!(read(), read());
+        assert_eq!(attempts.load(Ordering::SeqCst), warm + 1);
+        drop(proxy);
+        server.abort();
     }
 
     #[tokio::test]

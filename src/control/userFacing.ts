@@ -23,6 +23,11 @@ export function softenError(raw: unknown): SoftenedError {
     return { summary: m.replace(/\b(payment_refused|spend_unknown|payment_unknown|payment_settled_undelivered)\b/g, code => code.replace(/_/g, ' ')), detail: null, money: true };
   }
 
+  // The proxy wraps this advice in a 503, sometimes with an endpoint prefix.
+  // Extract only the countdown, never an arbitrary technical response body.
+  const retry = /\b(?:remote_retry_wait|rate_limited)\b.*?waiting (\d+) s\b/i.exec(m);
+  if (retry) return { summary: `Remote connection unavailable · waiting ${retry[1]} s`, detail: m };
+
   if (
     /introduction_unavailable/i.test(m) ||
     /no[ _]dialable[ _]peer[ _]endpoint/i.test(m) ||
