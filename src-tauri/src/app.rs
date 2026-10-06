@@ -5828,6 +5828,18 @@ fn device_available(state: &NodeState) -> bool {
     }
 }
 
+#[cfg(target_os = "android")]
+fn device_error(e: device_key::DeviceKeyError) -> ActionError {
+    match e {
+        device_key::DeviceKeyError::Cancelled => ActionError::new("device_cancelled", "Biometric approval was cancelled. Nothing was approved."),
+        device_key::DeviceKeyError::Unavailable => ActionError::new("device_unavailable", "This phone has no hardware-backed Android Keystore key the app can use. Approve at the node instead."),
+        device_key::DeviceKeyError::BiometryUnavailable => ActionError::new("device_biometry", "Strong biometric approval is not available on this phone right now (none enrolled, unavailable, or locked out). Nothing was approved. Approve at the node instead, with the konsensus grant command."),
+        device_key::DeviceKeyError::Invalid => ActionError::new("device_invalid", "This phone's approval key no longer works (for example, biometric enrollment changed). Set up biometric approvals again."),
+        device_key::DeviceKeyError::Other(code) => ActionError::new("device_key", format!("Android Keystore refused ({code}). Nothing was approved.")),
+    }
+}
+
+#[cfg(not(target_os = "android"))]
 fn device_error(e: device_key::DeviceKeyError) -> ActionError {
     match e {
         device_key::DeviceKeyError::Cancelled => ActionError::new("device_cancelled", "Touch ID was cancelled. Nothing was approved."),
@@ -5842,7 +5854,11 @@ fn device_error(e: device_key::DeviceKeyError) -> ActionError {
 async fn device_sign(blob: Vec<u8>, message: String, reason: String) -> Result<String, ActionError> {
     tokio::task::spawn_blocking(move || device_key::sign(&blob, message.as_bytes(), &reason))
         .await
-        .map_err(|_| ActionError::new("device_key", "The Touch ID request stopped unexpectedly."))?
+        .map_err(|_| ActionError::new("device_key", if cfg!(target_os = "android") {
+            "The biometric request stopped unexpectedly."
+        } else {
+            "The Touch ID request stopped unexpectedly."
+        }))?
         .map(hex::encode)
         .map_err(device_error)
 }
@@ -6043,8 +6059,13 @@ async fn do_device_key_register(state: &NodeState) -> Result<device::DeviceView,
         return Err(device::node_off_error(reason));
     }
     let message = device::registration_message(&binding.node, &binding.client_id, &record.public_key);
-    let proof = device_sign(blob, message, "register this Mac with your BitSov node, so it can approve payments with Touch ID".into()).await?;
-    let body = serde_json::json!({"public_key": record.public_key, "name": "BitSov app on this Mac", "proof": proof});
+    let (reason, name) = if cfg!(target_os = "android") {
+        ("register this phone with your BitSov node, so it can approve payments with biometrics", "BitSov app on Android")
+    } else {
+        ("register this Mac with your BitSov node, so it can approve payments with Touch ID", "BitSov app on this Mac")
+    };
+    let proof = device_sign(blob, message, reason.into()).await?;
+    let body = serde_json::json!({"public_key": record.public_key, "name": name, "proof": proof});
     let (status, text) = call_api(state, reqwest::Method::POST, "/pair/device-key", Some(body)).await.map_err(ActionError::node)?;
     if !status.is_success() {
         if let Some(reason) = device::node_off_reason(&text) {
@@ -6113,9 +6134,20 @@ async fn do_relation_approve(
     let fence = approval_fence(state);
     let store = device_store(state)?;
     let Some((blob, record)) = local_key(&store).filter(|(_, r)| r.registered) else {
-        return Err(ActionError::new("device_not_registered", "Set up Touch ID approvals first."));
+        return Err(ActionError::new("device_not_registered", if cfg!(target_os = "android") {
+            "Set up biometric approvals first."
+        } else {
+            "Set up Touch ID approvals first."
+        }));
     };
-    let key_id = record.key_id.clone().ok_or_else(|| ActionError::new("device_not_registered", "Set up Touch ID approvals first."))?;
+    let key_id = record.key_id.clone().ok_or_else(|| ActionError::new(
+        "device_not_registered",
+        if cfg!(target_os = "android") {
+            "Set up biometric approvals first."
+        } else {
+            "Set up Touch ID approvals first."
+        },
+    ))?;
     let intent = device::Intent::contact(&key_id, peer, budget_msat, per_act_max_msat, now_unix())?;
     let binding = device_binding(state).await?;
     if let Some(reason) = binding.device_approvals.as_deref().filter(|r| *r != "enabled") {
@@ -7176,6 +7208,10 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             _ => tauri::webview::PermissionResponse::Default,
         })
         .plugin(tauri_plugin_shell::init());
+    #[cfg(target_os = "android")]
+    let builder = builder
+        .plugin(device_key::init())
+        .plugin(tauri_plugin_barcode_scanner::init());
     builder
         .manage(NodeState::default())
         .manage(AiState::default())

@@ -55,6 +55,9 @@ shared_child = "1.1"
 tauri-plugin-shell = "2"
 rfd = "0.15"
 
+[target.'cfg(target_os = "android")'.dependencies]
+tauri-plugin-barcode-scanner = "=2.5.0"
+
 [features]
 default = []
 # Lets the host toolchain compile the pure-client cfg path before mobile SDKs

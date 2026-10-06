@@ -387,6 +387,41 @@ describe('pairing panel', () => {
     expect(mount.textContent).not.toContain(link);
   });
 
+  it('imports a scanned QR link through the same pairing-link handler', async () => {
+    const link = 'bitsov://pair/scanned-secret-material';
+    const onImportRemote = vi.fn().mockResolvedValue({
+      endpoint: 'home.example:4242',
+      node_id_fingerprint: 'fedcba98…76543210',
+      restart_required: true,
+    });
+    const onScanRemote = vi.fn().mockResolvedValue(link);
+    mount = document.createElement('div');
+    document.body.appendChild(mount);
+    dispose = render(
+      () => (
+        <Onboarding
+          status={() => booting}
+          pairing={() => starting}
+          trustAck={() => false}
+          onRetry={() => {}}
+          selectedTarget="network"
+          onImportRemote={onImportRemote}
+          onScanRemote={onScanRemote}
+        />
+      ),
+      mount,
+    );
+
+    mount.querySelector<HTMLButtonElement>('[data-scan-pairing-qr]')!.click();
+
+    await vi.waitFor(() => {
+      expect(mount!.textContent).toContain('Remote node home.example:4242 saved.');
+    });
+    expect(onScanRemote).toHaveBeenCalledTimes(1);
+    expect(onImportRemote).toHaveBeenCalledWith(link);
+    expect(mount.textContent).not.toContain(link);
+  });
+
   const importWith = async (result: () => Promise<unknown>, pairing: PairingView = starting) => {
     mount = document.createElement('div');
     document.body.appendChild(mount);

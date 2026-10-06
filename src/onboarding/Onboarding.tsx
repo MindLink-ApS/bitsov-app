@@ -41,6 +41,7 @@ export function Onboarding(props: {
   device?: () => DeviceView | null;
   onForgetRemote?: () => Promise<void>;
   onImportRemote?: (link: string) => Promise<RemoteImportView>;
+  onScanRemote?: () => Promise<string>;
 }) {
   // Runtime, opt-in only. This changes presentation, never node authority.
   const testNodes = (() => {
@@ -55,6 +56,7 @@ export function Onboarding(props: {
     props.onTargetChange?.(t);
   };
   const isEnrolled = () => props.device?.()?.state === 'registered';
+  const mobileBiometrics = () => props.onScanRemote !== undefined;
   const [remoteLink, setRemoteLink] = createSignal('');
   const [importing, setImporting] = createSignal(false);
   const [forgetting, setForgetting] = createSignal(false);
@@ -69,19 +71,18 @@ export function Onboarding(props: {
     return saved !== undefined ? saved : props.pairing().hosted_by ?? null;
   };
 
-  const importRemote = async (event: Event) => {
-    event.preventDefault();
+  const importRemoteLink = async (
+    readLink: () => string | Promise<string>,
+    emptyMessage: string,
+  ) => {
     if (importing() || forgetting()) return;
-    const link = remoteLink().trim();
-    setRemoteLink('');
-    if (!link) {
-      setImportError('Paste a remote pairing link.');
-      return;
-    }
     setImporting(true);
     setImportError(null);
     setImportResult(null);
     try {
+      const link = (await readLink()).trim();
+      setRemoteLink('');
+      if (!link) throw new Error(emptyMessage);
       if (!props.onImportRemote) throw new Error('Remote access import is unavailable.');
       const result = await props.onImportRemote(link);
       setRemoteRevision(n => n + 1);
@@ -93,6 +94,21 @@ export function Onboarding(props: {
     } finally {
       setImporting(false);
     }
+  };
+
+  const importRemote = async (event: Event) => {
+    event.preventDefault();
+    await importRemoteLink(() => remoteLink(), 'Paste a remote pairing link.');
+  };
+
+  const scanRemote = async () => {
+    await importRemoteLink(
+      async () => {
+        if (!props.onScanRemote) throw new Error('QR scanning is unavailable.');
+        return props.onScanRemote();
+      },
+      'The scanned QR code was empty.',
+    );
   };
 
   const forgetRemote = async () => {
@@ -253,7 +269,11 @@ export function Onboarding(props: {
         <p class="hint connect-line">
           {props.pairing().remote ? 'This app connects to your remote node.' : 'This app connects to the node on this Mac.'}
           <Show when={!props.pairing().remote && target() !== 'local'}> A saved pairing link takes effect at the next start.</Show>
-          <Show when={isEnrolled()}> Touch ID on this Mac can approve a contact or budget.</Show>
+          <Show when={isEnrolled()}>
+            {mobileBiometrics()
+              ? ' Biometrics on this phone can approve a contact or budget.'
+              : ' Touch ID on this Mac can approve a contact or budget.'}
+          </Show>
         </p>
       </div>
 
@@ -278,7 +298,11 @@ export function Onboarding(props: {
                 <h2>{props.pairing().remote ? 'Connecting to your node…' : 'Pairing this app with your node…'}</h2>
                 <p>Establishing an authenticated pairing between this app and your node.</p>
                 <Show when={isEnrolled()}>
-                  <p class="hint">Touch ID approvals are already set up on this Mac; pairing does not create that key.</p>
+                  <p class="hint">
+                    {mobileBiometrics()
+                      ? 'Biometric approvals are already set up on this phone; pairing does not create that key.'
+                      : 'Touch ID approvals are already set up on this Mac; pairing does not create that key.'}
+                  </p>
                 </Show>
               </div>
             </div>
@@ -310,7 +334,11 @@ export function Onboarding(props: {
                   when={isEnrolled()}
                   fallback={<span class="touchid-status-pill" data-device-badge="none">{props.status().local_owner && !props.pairing().bootstrap ? "Owner device not enrolled" : "App paired"}</span>}
                 >
-                  <span class="touchid-status-pill" data-device-badge="registered">Touch ID Enrolled · Secure Enclave</span>
+                  <span class="touchid-status-pill" data-device-badge="registered">
+                    {mobileBiometrics()
+                      ? 'Biometrics Enrolled · Android Keystore'
+                      : 'Touch ID Enrolled · Secure Enclave'}
+                  </span>
                 </Show>
                 <Show
                   when={props.pairing().remote}
@@ -393,7 +421,18 @@ export function Onboarding(props: {
       <Show when={target() !== 'local'}>
       <p class="hint">After a power cut, open the app once. Your password is never stored on the box.</p>
       <form class="panel pairing remote-form" data-remote-access onSubmit={importRemote}>
-        <h2>Paste the pairing link</h2>
+        <h2>{props.onScanRemote ? 'Scan or paste the pairing link' : 'Paste the pairing link'}</h2>
+        <Show when={props.onScanRemote}>
+          <button
+            type="button"
+            class="quiet"
+            data-scan-pairing-qr
+            disabled={importing() || forgetting()}
+            onClick={() => void scanRemote()}
+          >
+            {importing() ? 'Scanning…' : 'Scan pairing QR'}
+          </button>
+        </Show>
         <label for="remote-pairing-link">Pairing link</label>
         <input
           id="remote-pairing-link"
