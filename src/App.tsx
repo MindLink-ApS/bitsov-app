@@ -242,7 +242,7 @@ export default function App() {
     <Show when={status().local_owner && status().owner_warning}>
       <aside role="alert" class="panel" data-owner-warning>{status().owner_warning}</aside>
     </Show>
-    <Show when={!status().locked} fallback={<LockedNode hostError={status().error} onUnlock={async () => { await source().nodeUnlock(); await poll(); }} />}>
+    <Show when={!status().locked} fallback={<LockedNode mobile={canScanPairingQr} hostError={status().error} onUnlock={async () => { await source().nodeUnlock(); await poll(); }} />}>
     <Show
       when={trustAck()}
       fallback={

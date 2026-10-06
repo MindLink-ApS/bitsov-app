@@ -7,7 +7,7 @@ use zeroize::Zeroizing;
 
 pub fn load(data_dir: &Path, allow_create: bool) -> Result<Zeroizing<Vec<u8>>, String> {
     if let Some(node) = bound_node(data_dir)? {
-        return super::home_keychain::password(&node)
+        return super::home_keychain::password(&node, None)
             .map(|password| Zeroizing::new(password.as_bytes().to_vec()));
     }
     let account = account(data_dir);
@@ -37,14 +37,14 @@ pub fn bind_to_node(data_dir: &Path, node: &str) -> Result<(), String> {
         // Re-verify and sync before retiring a legacy copy on a retry.
         let Some(legacy) = read(&account(data_dir))? else { return Ok(()); };
         return migrate(&legacy, || Ok(()),
-            || super::home_keychain::password(node).map(|s| Zeroizing::new(s.as_bytes().to_vec())),
+            || super::home_keychain::password(node, None).map(|s| Zeroizing::new(s.as_bytes().to_vec())),
             || sync_binding(data_dir), || remove(&account(data_dir)));
     }
     let password = load(data_dir, false)?;
     migrate(
         &password,
         || super::home_keychain::save_password(node, &password),
-        || super::home_keychain::password(node).map(|s| Zeroizing::new(s.as_bytes().to_vec())),
+        || super::home_keychain::password(node, None).map(|s| Zeroizing::new(s.as_bytes().to_vec())),
         || {
             let bytes = serde_json::to_vec(node).map_err(|_| "Cannot encode seed-password binding.")?;
             super::device::write_private(&data_dir.join(BINDING_FILE), &bytes)

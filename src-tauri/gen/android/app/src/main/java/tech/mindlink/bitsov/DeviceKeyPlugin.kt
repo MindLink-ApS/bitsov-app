@@ -1,6 +1,7 @@
 package tech.mindlink.bitsov
 
 import android.app.Activity
+import android.content.Context
 import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyInfo
@@ -19,6 +20,7 @@ import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
 import java.math.BigInteger
+import java.security.Key
 import java.security.KeyFactory
 import java.security.KeyPair
 import java.security.KeyPairGenerator
@@ -31,9 +33,18 @@ import java.security.interfaces.ECPublicKey
 import java.security.spec.ECGenParameterSpec
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
+import javax.crypto.Cipher
+import javax.crypto.KeyGenerator
+import javax.crypto.SecretKey
+import javax.crypto.SecretKeyFactory
+import javax.crypto.spec.GCMParameterSpec
 
 private const val KEYSTORE = "AndroidKeyStore"
 private const val ALIAS_PREFIX = "bitsov-device-v1:"
+private const val HOME_KEY_ALIAS_PREFIX = "bitsov-home-unlock-v1:"
+private const val HOME_PREFERENCES = "bitsov-home-node-v1"
+private const val HOME_CIPHER_VERSION: Byte = 1
+private const val GCM_IV_BYTES = 12
 private const val ERROR_UNAVAILABLE = -1
 private const val ERROR_CANCELLED = -2
 private const val ERROR_INVALID = -3
@@ -57,9 +68,26 @@ class SignArgs {
     var reason: String = ""
 }
 
+@InvokeArg
+class StoreHomeItemArgs {
+    var blob: String? = null
+    var node: String = ""
+    var suffix: String = ""
+    var value: String = ""
+    var secret: Boolean = false
+}
+
+@InvokeArg
+class ReadHomeItemArgs {
+    var blob: String? = null
+    var node: String = ""
+    var suffix: String = ""
+    var secret: Boolean = false
+}
+
 @TauriPlugin
 class DeviceKeyPlugin(private val activity: Activity) : Plugin(activity) {
-    private val signing = AtomicBoolean(false)
+    private val biometricOperation = AtomicBoolean(false)
     @Volatile private var hardwareBacked: Boolean? = null
 
     private fun keyStore(): KeyStore =
@@ -122,9 +150,16 @@ class DeviceKeyPlugin(private val activity: Activity) : Plugin(activity) {
         return generate(alias, false)
     }
 
-    private fun isHardwareBacked(privateKey: PrivateKey): Boolean {
-        val keyInfo = KeyFactory.getInstance(privateKey.algorithm, KEYSTORE)
-            .getKeySpec(privateKey, KeyInfo::class.java)
+    private fun keyInfo(key: Key): KeyInfo = when (key) {
+        is PrivateKey -> KeyFactory.getInstance(key.algorithm, KEYSTORE)
+            .getKeySpec(key, KeyInfo::class.java)
+        is SecretKey -> SecretKeyFactory.getInstance(key.algorithm, KEYSTORE)
+            .getKeySpec(key, KeyInfo::class.java) as KeyInfo
+        else -> throw IllegalArgumentException("unsupported Android Keystore key")
+    }
+
+    private fun isHardwareBacked(key: Key): Boolean {
+        val keyInfo = keyInfo(key)
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             keyInfo.securityLevel == KeyProperties.SECURITY_LEVEL_STRONGBOX ||
                 keyInfo.securityLevel == KeyProperties.SECURITY_LEVEL_TRUSTED_ENVIRONMENT
@@ -132,6 +167,54 @@ class DeviceKeyPlugin(private val activity: Activity) : Plugin(activity) {
             @Suppress("DEPRECATION")
             keyInfo.isInsideSecureHardware
         }
+    }
+
+    private fun homeKeySpec(alias: String, strongBox: Boolean): KeyGenParameterSpec {
+        val builder = KeyGenParameterSpec.Builder(
+            alias,
+            KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
+        )
+            .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+            .setRandomizedEncryptionRequired(true)
+            .setUserAuthenticationRequired(true)
+            .setInvalidatedByBiometricEnrollment(true)
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            builder.setUserAuthenticationParameters(
+                0,
+                KeyProperties.AUTH_BIOMETRIC_STRONG,
+            )
+        } else {
+            @Suppress("DEPRECATION")
+            builder.setUserAuthenticationValidityDurationSeconds(-1)
+        }
+        if (strongBox && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            builder.setIsStrongBoxBacked(true)
+        }
+        return builder.build()
+    }
+
+    private fun generateHomeKey(alias: String, strongBox: Boolean): SecretKey =
+        KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE).run {
+            init(homeKeySpec(alias, strongBox))
+            generateKey()
+        }
+
+    private fun generatePreferredHomeKey(alias: String): SecretKey {
+        val hasStrongBox =
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
+                activity.packageManager.hasSystemFeature("android.hardware.strongbox_keystore")
+        if (hasStrongBox) {
+            try {
+                return generateHomeKey(alias, true)
+            } catch (_: StrongBoxUnavailableException) {
+                // Match the signing-key policy: a hardware TEE remains acceptable.
+            } catch (_: ProviderException) {
+                // A temporarily unavailable StrongBox must not disable a valid TEE.
+            }
+        }
+        return generateHomeKey(alias, false)
     }
 
     @Synchronized
@@ -194,6 +277,65 @@ class DeviceKeyPlugin(private val activity: Activity) : Plugin(activity) {
     private fun privateKey(alias: String): PrivateKey =
         keyStore().getKey(alias, null) as? PrivateKey
             ?: throw UnrecoverableKeyException("missing Android Keystore private key")
+
+    private fun homeAlias(deviceAlias: String): String =
+        "$HOME_KEY_ALIAS_PREFIX${deviceAlias.removePrefix(ALIAS_PREFIX)}"
+
+    private fun homeItem(node: String, suffix: String): String? {
+        val validNode =
+            node.length == 64 &&
+                node.all { char -> char.isDigit() || char in 'a'..'f' }
+        val validSuffix =
+            suffix == "box-transport" ||
+                suffix == "unlock-binding" ||
+                suffix == "seed-password"
+        return if (validNode && validSuffix) "bitsov.node.$node.$suffix" else null
+    }
+
+    private fun decodedValue(value: String): ByteArray? = try {
+        Base64.decode(value, Base64.DEFAULT)
+    } catch (_: IllegalArgumentException) {
+        null
+    }
+
+    private fun deviceAlias(blob: String?): String? =
+        blob?.let(::alias)
+
+    private fun verifiedDeviceKey(deviceAlias: String): PrivateKey {
+        val key = privateKey(deviceAlias)
+        if (!isHardwareBacked(key)) {
+            throw UnrecoverableKeyException("device key is not hardware backed")
+        }
+        return key
+    }
+
+    private fun homeKey(deviceAlias: String, create: Boolean): SecretKey {
+        // The companion alias is derived from the exact enrolled signing-key
+        // alias. Refuse an orphaned ciphertext if that signing key disappeared.
+        verifiedDeviceKey(deviceAlias)
+        val alias = homeAlias(deviceAlias)
+        val existing = keyStore().getKey(alias, null) as? SecretKey
+        val key = existing ?: if (create) {
+            generatePreferredHomeKey(alias)
+        } else {
+            throw UnrecoverableKeyException("missing home unlock key")
+        }
+        if (!isHardwareBacked(key)) {
+            throw UnrecoverableKeyException("home unlock key is not hardware backed")
+        }
+        return key
+    }
+
+    private fun preferences() =
+        activity.getSharedPreferences(HOME_PREFERENCES, Context.MODE_PRIVATE)
+
+    private fun promptInfo(reason: String): BiometricPrompt.PromptInfo =
+        BiometricPrompt.PromptInfo.Builder()
+            .setTitle("Approve with BitSov")
+            .setDescription(reason.take(300))
+            .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
+            .setNegativeButtonText("Cancel")
+            .build()
 
     @Command
     fun availability(invoke: Invoke) {
@@ -298,7 +440,7 @@ class DeviceKeyPlugin(private val activity: Activity) : Plugin(activity) {
             invoke.resolve(result(ERROR_UNAVAILABLE))
             return
         }
-        if (!signing.compareAndSet(false, true)) {
+        if (!biometricOperation.compareAndSet(false, true)) {
             invoke.resolve(result(ERROR_OTHER))
             return
         }
@@ -307,7 +449,7 @@ class DeviceKeyPlugin(private val activity: Activity) : Plugin(activity) {
             val signature = Signature.getInstance("SHA256withECDSA")
             val private = privateKey(alias)
             if (!isHardwareBacked(private)) {
-                signing.set(false)
+                biometricOperation.set(false)
                 invoke.resolve(result(ERROR_UNAVAILABLE))
                 return
             }
@@ -319,52 +461,302 @@ class DeviceKeyPlugin(private val activity: Activity) : Plugin(activity) {
                 executor,
                 object : BiometricPrompt.AuthenticationCallback() {
                     override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
-                        signing.set(false)
+                        biometricOperation.set(false)
                         invoke.resolve(result(biometricError(errorCode)))
                     }
 
                     override fun onAuthenticationSucceeded(
                         authenticationResult: BiometricPrompt.AuthenticationResult,
                     ) {
-                        try {
+                        val response = try {
                             val authenticated =
                                 authenticationResult.cryptoObject?.signature
                                     ?: throw IllegalStateException("missing authenticated signature")
                             authenticated.update(message)
                             val der = authenticated.sign()
-                            invoke.resolve(result {
+                            result {
                                 put(
                                     "signature",
                                     Base64.encodeToString(der, Base64.NO_WRAP),
                                 )
-                            })
+                            }
                         } catch (_: KeyPermanentlyInvalidatedException) {
-                            invoke.resolve(result(ERROR_INVALID))
+                            result(ERROR_INVALID)
                         } catch (_: Exception) {
-                            invoke.resolve(result(ERROR_OTHER))
-                        } finally {
-                            signing.set(false)
+                            result(ERROR_OTHER)
                         }
+                        message.fill(0)
+                        biometricOperation.set(false)
+                        invoke.resolve(response)
                     }
                 },
             )
-            val promptInfo = BiometricPrompt.PromptInfo.Builder()
-                .setTitle("Approve with BitSov")
-                .setDescription(args.reason.take(300))
-                .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
-                .setNegativeButtonText("Cancel")
-                .build()
             activity.runOnUiThread {
-                prompt.authenticate(promptInfo, BiometricPrompt.CryptoObject(signature))
+                prompt.authenticate(
+                    promptInfo(args.reason),
+                    BiometricPrompt.CryptoObject(signature),
+                )
             }
         } catch (_: KeyPermanentlyInvalidatedException) {
-            signing.set(false)
+            biometricOperation.set(false)
             invoke.resolve(result(ERROR_INVALID))
         } catch (_: UnrecoverableKeyException) {
-            signing.set(false)
+            biometricOperation.set(false)
             invoke.resolve(result(ERROR_INVALID))
         } catch (_: Exception) {
-            signing.set(false)
+            biometricOperation.set(false)
+            invoke.resolve(result(ERROR_OTHER))
+        }
+    }
+
+    @Command
+    fun storeHomeItem(invoke: Invoke) {
+        val args = invoke.parseArgs(StoreHomeItemArgs::class.java)
+        val item = homeItem(args.node, args.suffix)
+        val value = decodedValue(args.value)
+        if (
+            item == null ||
+            value == null ||
+            value.size > 16_384 ||
+            (args.secret && value.size !in 1..4096) ||
+            args.secret != (args.suffix == "seed-password")
+        ) {
+            value?.fill(0)
+            invoke.resolve(result(ERROR_INVALID))
+            return
+        }
+        if (!args.secret) {
+            val saved = preferences().edit().putString(item, args.value).commit()
+            value.fill(0)
+            invoke.resolve(result(if (saved) null else ERROR_OTHER))
+            return
+        }
+        if (args.suffix != "seed-password") {
+            value.fill(0)
+            invoke.resolve(result(ERROR_INVALID))
+            return
+        }
+        val deviceAlias = deviceAlias(args.blob)
+        if (deviceAlias == null || !biometricAvailable()) {
+            value.fill(0)
+            invoke.resolve(
+                result(
+                    if (deviceAlias == null) ERROR_INVALID else ERROR_BIOMETRY_UNAVAILABLE,
+                ),
+            )
+            return
+        }
+        val fragmentActivity = activity as? FragmentActivity
+        if (fragmentActivity == null) {
+            value.fill(0)
+            invoke.resolve(result(ERROR_UNAVAILABLE))
+            return
+        }
+        if (!biometricOperation.compareAndSet(false, true)) {
+            value.fill(0)
+            invoke.resolve(result(ERROR_OTHER))
+            return
+        }
+
+        try {
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.ENCRYPT_MODE, homeKey(deviceAlias, true))
+            cipher.updateAAD(item.toByteArray(Charsets.UTF_8))
+            val executor = ContextCompat.getMainExecutor(activity)
+            val prompt = BiometricPrompt(
+                fragmentActivity,
+                executor,
+                object : BiometricPrompt.AuthenticationCallback() {
+                    override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+                        value.fill(0)
+                        biometricOperation.set(false)
+                        invoke.resolve(result(biometricError(errorCode)))
+                    }
+
+                    override fun onAuthenticationSucceeded(
+                        authenticationResult: BiometricPrompt.AuthenticationResult,
+                    ) {
+                        val response = try {
+                            val authenticated =
+                                authenticationResult.cryptoObject?.cipher
+                                    ?: throw IllegalStateException("missing authenticated cipher")
+                            val ciphertext = authenticated.doFinal(value)
+                            if (authenticated.iv.size != GCM_IV_BYTES) {
+                                ciphertext.fill(0)
+                                throw IllegalStateException("invalid Android Keystore GCM IV")
+                            }
+                            val encoded = ByteArray(1 + GCM_IV_BYTES + ciphertext.size)
+                            encoded[0] = HOME_CIPHER_VERSION
+                            authenticated.iv.copyInto(encoded, destinationOffset = 1)
+                            ciphertext.copyInto(encoded, destinationOffset = 1 + GCM_IV_BYTES)
+                            ciphertext.fill(0)
+                            val saved = preferences().edit()
+                                .putString(item, Base64.encodeToString(encoded, Base64.NO_WRAP))
+                                .commit()
+                            encoded.fill(0)
+                            result(if (saved) null else ERROR_OTHER)
+                        } catch (_: KeyPermanentlyInvalidatedException) {
+                            result(ERROR_INVALID)
+                        } catch (_: Exception) {
+                            result(ERROR_OTHER)
+                        }
+                        value.fill(0)
+                        biometricOperation.set(false)
+                        invoke.resolve(response)
+                    }
+                },
+            )
+            activity.runOnUiThread {
+                prompt.authenticate(
+                    promptInfo("Protect your BitSov home node password"),
+                    BiometricPrompt.CryptoObject(cipher),
+                )
+            }
+        } catch (_: KeyPermanentlyInvalidatedException) {
+            value.fill(0)
+            biometricOperation.set(false)
+            invoke.resolve(result(ERROR_INVALID))
+        } catch (_: UnrecoverableKeyException) {
+            value.fill(0)
+            biometricOperation.set(false)
+            invoke.resolve(result(ERROR_INVALID))
+        } catch (_: Exception) {
+            value.fill(0)
+            biometricOperation.set(false)
+            invoke.resolve(result(ERROR_OTHER))
+        }
+    }
+
+    @Command
+    fun readHomeItem(invoke: Invoke) {
+        val args = invoke.parseArgs(ReadHomeItemArgs::class.java)
+        val item = homeItem(args.node, args.suffix)
+        if (item == null || args.secret != (args.suffix == "seed-password")) {
+            invoke.resolve(result(ERROR_INVALID))
+            return
+        }
+        val stored = preferences().getString(item, null)
+        if (stored == null) {
+            invoke.resolve(result {
+                put("found", false)
+            })
+            return
+        }
+        if (stored.length > 32_768) {
+            invoke.resolve(result(ERROR_INVALID))
+            return
+        }
+        if (!args.secret) {
+            invoke.resolve(result {
+                put("found", true)
+                put("value", stored)
+            })
+            return
+        }
+        if (args.suffix != "seed-password") {
+            invoke.resolve(result(ERROR_INVALID))
+            return
+        }
+        val encoded = decodedValue(stored)
+        if (
+            encoded == null ||
+            encoded.size <= 1 + GCM_IV_BYTES + 16 ||
+            encoded[0] != HOME_CIPHER_VERSION
+        ) {
+            encoded?.fill(0)
+            invoke.resolve(result(ERROR_INVALID))
+            return
+        }
+        val deviceAlias = deviceAlias(args.blob)
+        if (deviceAlias == null || !biometricAvailable()) {
+            encoded.fill(0)
+            invoke.resolve(
+                result(
+                    if (deviceAlias == null) ERROR_INVALID else ERROR_BIOMETRY_UNAVAILABLE,
+                ),
+            )
+            return
+        }
+        val fragmentActivity = activity as? FragmentActivity
+        if (fragmentActivity == null) {
+            encoded.fill(0)
+            invoke.resolve(result(ERROR_UNAVAILABLE))
+            return
+        }
+        if (!biometricOperation.compareAndSet(false, true)) {
+            encoded.fill(0)
+            invoke.resolve(result(ERROR_OTHER))
+            return
+        }
+
+        try {
+            val iv = encoded.copyOfRange(1, 1 + GCM_IV_BYTES)
+            val ciphertext = encoded.copyOfRange(1 + GCM_IV_BYTES, encoded.size)
+            encoded.fill(0)
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(
+                Cipher.DECRYPT_MODE,
+                homeKey(deviceAlias, false),
+                GCMParameterSpec(128, iv),
+            )
+            iv.fill(0)
+            cipher.updateAAD(item.toByteArray(Charsets.UTF_8))
+            val executor = ContextCompat.getMainExecutor(activity)
+            val prompt = BiometricPrompt(
+                fragmentActivity,
+                executor,
+                object : BiometricPrompt.AuthenticationCallback() {
+                    override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+                        ciphertext.fill(0)
+                        biometricOperation.set(false)
+                        invoke.resolve(result(biometricError(errorCode)))
+                    }
+
+                    override fun onAuthenticationSucceeded(
+                        authenticationResult: BiometricPrompt.AuthenticationResult,
+                    ) {
+                        val response = try {
+                            val authenticated =
+                                authenticationResult.cryptoObject?.cipher
+                                    ?: throw IllegalStateException("missing authenticated cipher")
+                            val plaintext = authenticated.doFinal(ciphertext)
+                            // Known limit: the Base64 String and the JSObject handed to the
+                            // Tauri bridge are immutable JVM copies that cannot be wiped; they
+                            // live until garbage collection. Only `plaintext` is cleared here.
+                            val resolved = result {
+                                put("found", true)
+                                put("value", Base64.encodeToString(plaintext, Base64.NO_WRAP))
+                            }
+                            plaintext.fill(0)
+                            resolved
+                        } catch (_: KeyPermanentlyInvalidatedException) {
+                            result(ERROR_INVALID)
+                        } catch (_: Exception) {
+                            result(ERROR_OTHER)
+                        }
+                        ciphertext.fill(0)
+                        biometricOperation.set(false)
+                        invoke.resolve(response)
+                    }
+                },
+            )
+            activity.runOnUiThread {
+                prompt.authenticate(
+                    promptInfo("Unlock your BitSov home node"),
+                    BiometricPrompt.CryptoObject(cipher),
+                )
+            }
+        } catch (_: KeyPermanentlyInvalidatedException) {
+            encoded.fill(0)
+            biometricOperation.set(false)
+            invoke.resolve(result(ERROR_INVALID))
+        } catch (_: UnrecoverableKeyException) {
+            encoded.fill(0)
+            biometricOperation.set(false)
+            invoke.resolve(result(ERROR_INVALID))
+        } catch (_: Exception) {
+            encoded.fill(0)
+            biometricOperation.set(false)
             invoke.resolve(result(ERROR_OTHER))
         }
     }
