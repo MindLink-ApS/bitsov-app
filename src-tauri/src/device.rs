@@ -101,6 +101,13 @@ pub const NODE_OFF_REASONS: [&str; 3] = ["seed_not_encrypted", "seed_password_no
 /// What the owner is told for a reason code; `None` for a code this app does
 /// not know (shown as generic "off").
 pub fn node_off_message(reason: &str) -> &'static str {
+    #[cfg(target_os = "android")]
+    return match reason {
+        "seed_not_encrypted" => "Encrypt your recovery phrase to enable biometric approvals. On the node's computer: stop the node, run `konsensus seed encrypt --config <path>` once, then start it again and type the password.",
+        "seed_password_not_typed" => "Restart your node and type its recovery-phrase password at start to enable biometric approvals (a password file or flag leaves them off).",
+        _ => "Biometric approvals are off on your node. Approve at the node instead.",
+    };
+    #[cfg(not(target_os = "android"))]
     match reason {
         "seed_not_encrypted" => "Encrypt your recovery phrase to enable Touch ID approvals. On the node's computer: stop the node, run `konsensus seed encrypt --config <path>` once, then start it again and type the password.",
         "seed_password_not_typed" => "Restart your node and type its recovery-phrase password at start to enable Touch ID approvals (a password file or flag leaves them off).",

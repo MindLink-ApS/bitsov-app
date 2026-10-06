@@ -20,6 +20,7 @@ import { ContactPanel } from './ContactPanel';
 import { custodyBadge, CustodyBadgeView } from './custody';
 import { WalletPage, type WalletActions, type WalletTab } from './WalletPage';
 import { artifactActivity, logActivity, type LoggedActivity } from './wallet';
+import { androidQrScannerAvailable } from '../pairingScanner';
 import { callCost, createCallEngine, IDLE as CALL_IDLE, isCallKind, signalCost, stunServer, type CallMedia, type CallView } from './call';
 import { createMeetingEngine, declineCost, inviteCost, joinCost, MAX_PARTICIPANTS, MEETING_IDLE, type LegState, type MeetingView, type ShownQuotes } from './meeting';
 import { admitRoom, leaveRoom, localRoom, localRooms, newRoom, rememberRoom, ROOM_CAPABILITY, ROOM_PAGE, roomOf, sameRoom, sendRoom, type LegPlan, type LocalRoom } from './room';
@@ -3651,7 +3652,9 @@ function Composer(props: {
   const label = () => {
     if (paying()) return 'Paying…';
     if (ownerWait()) return 'Waiting for contact approval';
-    if (needsTouch()) return 'Approve with Touch ID';
+    if (needsTouch()) {
+      return androidQrScannerAvailable() ? 'Approve with biometrics' : 'Approve with Touch ID';
+    }
     if (viaBudget()) {
       const s = shown();
       const price = s.msat === null ? '' : ` · ${s.estimate ? '≈ ' : ''}${sats(s.msat)} ${satUnit(s.msat)}`;
@@ -3676,7 +3679,9 @@ function Composer(props: {
     return { message: 'Send', pay: 'Pay', request: 'Create invoice', file: 'Send file' }[mode()] + (mode() === 'request' ? '' : price);
   };
 
-  const sendTitle = () => needsTouch() ? 'Approve with Touch ID' : 'Send';
+  const sendTitle = () => needsTouch()
+    ? (androidQrScannerAvailable() ? 'Approve with biometrics' : 'Approve with Touch ID')
+    : 'Send';
   /** Pay / Request / File panels close back to the single message bar. */
   const closePanel = () => {
     composerRevision++;
@@ -4478,6 +4483,7 @@ export const envelopePerAct = (priceMsat: number | null) =>
  */
 function DeviceSetup(props: { device: DeviceView | null; now: number; actions: Actions }) {
   const [busy, setBusy] = createSignal(false);
+  const android = androidQrScannerAvailable();
   const run = async (action: () => Promise<void>) => {
     if (busy()) return;
     setBusy(true);
@@ -4493,16 +4499,20 @@ function DeviceSetup(props: { device: DeviceView | null; now: number; actions: A
       <Match when={props.device?.state === 'off' && props.device}>
         {(d) => (
           <p class="hint" data-device-off={d().off_reason ?? 'off'}>
-            <strong>Touch ID approvals are off.</strong> {d().off_message}
+            <strong>{android ? 'Biometric approvals are off.' : 'Touch ID approvals are off.'}</strong> {d().off_message}
           </p>
         )}
       </Match>
       <Match when={props.device?.state === 'none' || props.device?.state === 'lapsed'}>
         <p class="hint" data-device-setup={props.device?.state}>
-          {props.device?.state === 'lapsed' ? 'Your last Touch ID setup request lapsed. ' : ''}
-          Approve payments per contact with Touch ID on this Mac instead of at the node.{' '}
+          {props.device?.state === 'lapsed'
+            ? (android ? 'Your last biometric setup request lapsed. ' : 'Your last Touch ID setup request lapsed. ')
+            : ''}
+          {android
+            ? 'Approve payments per contact with biometrics on this phone instead of at the node. '
+            : 'Approve payments per contact with Touch ID on this Mac instead of at the node. '}
           <button type="button" class="link" data-device-register disabled={busy()} onClick={() => void run(props.actions.registerDevice)}>
-            Set up Touch ID approvals
+            {android ? 'Set up biometric approvals' : 'Set up Touch ID approvals'}
           </button>
         </p>
       </Match>
@@ -4510,7 +4520,8 @@ function DeviceSetup(props: { device: DeviceView | null; now: number; actions: A
         {(d) => (
           <div class="approval" data-device="pending">
             <p>
-              <strong>Approve this Mac once at your node.</strong> Run this on the node’s computer. It shows this Mac’s key
+              <strong>{android ? 'Approve this phone once at your node.' : 'Approve this Mac once at your node.'}</strong>{' '}
+              Run this on the node’s computer. It shows {android ? 'this phone’s' : 'this Mac’s'} key
               fingerprint <code data-device-fingerprint>{d().fingerprint}</code>; check that it matches, then type the short
               code your node’s terminal shows:
             </p>
@@ -4536,13 +4547,16 @@ function DeviceSetup(props: { device: DeviceView | null; now: number; actions: A
  */
 export function TouchApproval(props: { peer: string; name: string; priceMsat: number | null; actions: Actions }) {
   const perAct = () => envelopePerAct(props.priceMsat);
+  const android = androidQrScannerAvailable();
   return (
     <div class="spend touch-line" data-touch-approval>
       <p class="spend-line">
         <span class="dot" />{' '}
         <span class="line-text">
           {/* The petname is local; Touch ID names the same key, never a name. */}
-          <strong>Approve {props.name} (node <code data-touch-peer>{shortId(props.peer)}</code>) with Touch ID.</strong> Up
+          <strong>
+            Approve {props.name} (node <code data-touch-peer>{shortId(props.peer)}</code>) with {android ? 'biometrics' : 'Touch ID'}.
+          </strong> Up
           to <span data-touch-budget>{fmtAmount(ENVELOPE_BUDGET_MSAT)}</span> a day, at most{' '}
           <span data-touch-per-act>{fmtAmount(perAct())}</span> per message, for 24 hours.
         </span>
@@ -4550,7 +4564,7 @@ export function TouchApproval(props: { peer: string; name: string; priceMsat: nu
       <details class="quiet-detail" data-touch-detail>
         <summary>Details</summary>
         <p>
-          Touch ID shows the same amounts for node {shortId(props.peer)}. Your node checks every payment against them;
+          {android ? 'The biometric prompt' : 'Touch ID'} shows the same amounts for node {shortId(props.peer)}. Your node checks every payment against them;
           nothing else can be paid under this approval.
         </p>
       </details>

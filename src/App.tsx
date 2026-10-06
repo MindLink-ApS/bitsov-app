@@ -13,6 +13,7 @@ import { ControlCenter } from './control/Shell';
 import { hostSource, inHost, sampleRequest, type SampleStart, type Source } from './control/source';
 import { sampleSource } from './control/sample';
 import type { DeviceView, FundingAddress, FundState } from './control/types';
+import { androidQrScannerAvailable, scanPairingLink } from './pairingScanner';
 
 // The control center. First run (Start node → Pair this app → Create/restore
 // identity → Fund) is the shell's first state, shown in the centre track until
@@ -33,6 +34,7 @@ const short = (id: string) => (id.length > 20 ? `${id.slice(0, 8)}…${id.slice(
 export default function App() {
   // Dev mode: sample data with no node (a plain browser tab, or `?sample`).
   const sample = sampleRequest(window.location.search, inHost(), import.meta.env.DEV);
+  const canScanPairingQr = androidQrScannerAvailable();
   // `?sample&organism=v2` shows the organism view against a node with N1/N2.
   const organism = new URLSearchParams(window.location.search).get('organism') === 'v2' ? 'v2' : 'v1';
   const noPeers = new URLSearchParams(window.location.search).get('peers') === '0';
@@ -93,9 +95,11 @@ export default function App() {
     return status().ready || wasOpen;
   }, false);
   const live = () => shellOpen() && !status().locked && status().ready && !status().retry_after_secs;
-  const [selectedTarget, setSelectedTarget] = createSignal<NodeTarget>('local');
+  const [selectedTarget, setSelectedTarget] = createSignal<NodeTarget>(
+    canScanPairingQr ? 'network' : 'local',
+  );
   const remote = createMemo(() => pairing().remote);
-  createEffect(() => setSelectedTarget(remote() ? 'network' : 'local'));
+  createEffect(() => setSelectedTarget(remote() || canScanPairingQr ? 'network' : 'local'));
   const [device, setDevice] = createSignal<DeviceView | null>(null);
   // Once pairing has an outcome, the start spinner no longer describes the state.
   const starting = () => pairing().state === 'starting' || pairing().state === 'pending';
@@ -167,6 +171,7 @@ export default function App() {
             device={device}
             onForgetRemote={() => source().remoteAccessForget()}
             onImportRemote={(link) => source().remoteAccessImport(link)}
+            onScanRemote={canScanPairingQr ? scanPairingLink : undefined}
           />
 
           <Show
