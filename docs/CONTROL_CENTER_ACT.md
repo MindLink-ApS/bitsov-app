@@ -1,14 +1,14 @@
 # Control center: acting from the track (slice B)
 
 Code: `src-tauri/src/act.rs` (rules), the action commands in `src-tauri/src/main.rs`,
-and `src/control/Shell.tsx` (composer, approval, receipts). Node contract: rc7 `958e399`
+and `src/control/Shell.tsx` (composer, approval, receipts). Bundled node: rc9 `cd75c69`; retained rc7 compatibility
 for the action routes; #76/#77 (`56c0ee0`) for pairing and elevation.
 
 ## Spend authority: the app can only narrow it
 
 | Node | What the app token can do | What the owner's one tap does |
 |---|---|---|
-| **rc7 sidecar** (bundled today) | Everything. rc7 tokens carry no scopes. | Opens the app's own 10-minute spend window. Nothing on the node enforces it. The UI says so. |
+| **rc7 fallback** (older nodes) | Everything. rc7 tokens carry no scopes. | Opens the app's own 10-minute spend window. Nothing on the node enforces it. The UI says so. |
 | **#77, paired, owner-run** (`--owner-control`) | `read + receive` | `POST /pair/elevation-request {scopes:["spend"]}`. The UI shows the node's `owner_action` verbatim (`konsensus grant --op …`). The owner types the phrase printed at the node's terminal. Once `/pair/elevation/:op` says `granted`, the host re-issues the token, and the window opens only if that token now carries `spend`. |
 | **#77, paired, sidecar** | `read + receive`, and never more | The request is created, but the node says it cannot be granted in this deployment. The UI shows that and keeps sending off. Receiving still works. |
 
@@ -25,7 +25,7 @@ for the action routes; #76/#77 (`56c0ee0`) for pairing and elevation.
 Every message and file send requires the node's authenticated `/status` to
 advertise `paid_send_caps_v1`; rooms also require `room_terminal_outcomes_v1`.
 A missing, malformed, or unreadable capability list fails closed with
-`price_cap_unavailable`, before a message POST or file upload. The bundled rc7
+`price_cap_unavailable`, before a message POST or file upload. An older rc7
 node lacks these capabilities, so variable-price actions remain unavailable
 until the node is upgraded; opening the app's owner window cannot bypass this.
 

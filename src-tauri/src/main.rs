@@ -22,7 +22,7 @@
 // normal debug startup are unchanged.
 //
 // AUTH: the host pairs with the node (#77 ceremony, `bitsov_app::pairing`) and
-// falls back to `/auth/local` ONLY when `/pair/request` is 404 — the pinned rc7
+// falls back to `/auth/local` ONLY when `/pair/request` is 404 — an older rc7
 // sidecar. A pairing refusal is shown as an error, never downgraded.
 //
 // KEYS (charter invariant A.3): the node is the identity anchor. This host never
@@ -86,7 +86,7 @@ mod owner_contact;
 /// this; only a debug `dev-node` build may move the port (`dev_node::api_base`).
 const API_BASE: &str = "http://127.0.0.1:3141/api/v1";
 
-/// Pinned onboarding contract (BitSov-bitsov `v0.3.0-rc7` / `958e399`): the funding
+/// Pinned onboarding contract (BitSov-bitsov `v0.3.0-rc9` / `cd75c69`): the funding
 /// state machine moves to this step once the node has observed the required deposit
 /// in its own wallet. Kept host-side so the renderer never re-implements the contract.
 const FUNDING_SEEN: &str = "funding-seen";
@@ -1225,7 +1225,12 @@ async fn bootstrap_node(app: AppHandle) {
     let _ = std::fs::create_dir_all(&data_dir);
     let config = data_dir.join("konsensus.toml");
 
-    let owner_enabled = local_owner::enabled(dev_sidecar.is_some());
+    let owner_enabled = match local_owner::launch_enabled(
+        local_owner::enabled(dev_sidecar.is_some()), &config,
+    ) {
+        Ok(enabled) => enabled,
+        Err(error) => return set_error(&state, error),
+    };
     state.owner.active.store(owner_enabled, Ordering::SeqCst);
     if !owner_enabled && !config.exists() {
         if let Err(e) = init_node(&app, &data_dir, dev_sidecar.as_deref()).await {

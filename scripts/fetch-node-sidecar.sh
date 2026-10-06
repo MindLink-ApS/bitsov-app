@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Fetch + VERIFY the pinned, signed BitSov node binary and place it as the Tauri
 # sidecar for this host. The node binary is NEVER committed (Gate G1: bundled binary,
-# fetched + verified, not vendored). v0.3.0-rc7 publishes Linux, macOS and Windows node
+# fetched + verified, not vendored). v0.3.0-rc9 publishes Linux, macOS and Windows node
 # binaries, so all three hosts can produce a sidecar. Release assets carry no .exe suffix
 # on any host; only the installed Windows sidecar is renamed to .exe (Tauri's resolver).
-# rc7 is a PUBLISHED pre-release: `gh release download` reaches it with any gh, a CI
-# repo-scoped GITHUB_TOKEN included. Nothing here publishes anything.
+# CI needs rc9 published with SHA256SUMS and SHA256SUMS.asc attached. A public
+# release is reachable with the repo-scoped GITHUB_TOKEN. Nothing here publishes it.
 #
 # Verification is fail-closed, in two steps:
 #   1. SHA256SUMS.asc must be ACCEPTED by verify_release_signature (below): gpg exits 0, a
@@ -28,7 +28,7 @@
 # verify_release_signature against local test keys, including every refusal class above.
 set -euo pipefail
 
-TAG="v0.3.0-rc7"
+TAG="v0.3.0-rc9"
 REPO="MindLink-ApS/BitSov-bitsov"
 KEY_FPR="B299274C200301714DC6F51A7C2D6F8AC842EF6E"
 

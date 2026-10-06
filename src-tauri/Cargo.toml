@@ -53,7 +53,7 @@ libc = "0.2"
 
 [features]
 default = []
-# Off until the bundled node contains #237; see local_owner::enabled.
+# Opt-in on macOS with BITSOV_LOCAL_OWNER_CEREMONY=1; bundled rc9 supports #237.
 local-owner-ceremony = []
 # Mock-only SIT reader example. Pulls in `mock-node`; not part of the app binary.
 sit-mock = ["dep:mock-node"]

@@ -5,9 +5,13 @@ Dated ticket rows. Each row: id | opened | evidence | state.
 
 ## Active (this cycle)
 
+Current change: rc9 pin (`cd75c69`) and bundled local-owner capability; tests and
+upgrade details in [NODE_RC9_UPGRADE.md](docs/NODE_RC9_UPGRADE.md). Release asset
+verification awaits CI. The September workflow rows below are historical.
+
 | id | opened | evidence | state |
 |---|---|---|---|
-| F1 pairing onboarding | 2026-09-27 | #32 `factory/pairing-onboarding` head `90a154bd`; mock-only, genome #77 shapes; #77 in no tag | draft, in Codex review |
+| F1 pairing onboarding | 2026-09-27 | #32 `factory/pairing-onboarding` head `90a154bd`; genome #77 shapes; now included in rc9 | draft, in Codex review |
 | F2 assistant local broker | 2026-09-27 | `factory/assistant-local-broker`, stacked on #32; deny-by-default, no cloud | underway |
 | F3 Mac packaging assessment | 2026-09-27 | revive vs replace #13; cloud agent on `docs/mac-package-plan` | underway |
 
@@ -29,9 +33,9 @@ Dated ticket rows. Each row: id | opened | evidence | state.
 
 | id | opened | evidence | state |
 |---|---|---|---|
-| Genome tag + pin bump | 2026-09-27 | genome #77 merged at `56c0ee0`, in no tag; app pins rc7 | human |
+| rc9 release verification | 2026-10-06 | app pins rc9 (`cd75c69`); signed checksum attachment/publication and Sidecar/Mac Package checks pending | human / CI |
 | #25 / #13 / #23 | — | J0 model eval spike (draft); Mac package spike (CONFLICTING); Windows icon | open, Rasmus's call |
-| Publish | — | human-only; genome rc7 published; app unpublished; package-time sidecar verification and platform release gates remain open | hold |
+| Publish | — | human-only; rc9 draft needs CI-accessible signed checksums; app unpublished; package-time sidecar verification and platform release gates remain open | hold |
 | PriceOpen | — | out of lane | hold |
 | Live relay | — | out of lane | hold |
 | Cloud/seed | — | out of lane | hold |

@@ -37,6 +37,24 @@ forward_to_private_channels = false
 enabled = false
 providers = []
 
+# rc9 node #233: the entire service uses serde defaults. Keep bootstrap minimal
+# and check every serialized default, including tariffs for the disabled service.
+[lightning.lsps2_service]
+enabled = false
+channel_opening_fee_ppm = 10000
+channel_over_provisioning_ppm = 1000000
+min_channel_opening_fee_msat = 1000000
+min_channel_lifetime = 144
+max_client_to_self_delay = 2016
+min_payment_size_msat = 10000000
+max_payment_size_msat = 1000000000
+funding_priority = "normal"
+max_funding_fee_sats = 10000
+max_concurrent_jit_opens = 4
+max_jit_capital_sats = 10000000
+forwarding_fee_ppm = 500
+forwarding_fee_base_msat = 1000
+
 [pricing]
 mode = "static"
 fee_target_blocks = 6
@@ -163,6 +181,35 @@ fn normalize_paths(config: &mut toml::Value, root: &Path, mnemonic: &str) {
             relative.into()
         };
     }
+}
+
+#[test]
+#[should_panic(expected = "node default drifted: lightning.lsps2_service.enabled")]
+fn lsps2_enabled_drift_is_rejected() {
+    let mut node = toml::from_str("[lightning.lsps2_service]\nenabled = true").unwrap();
+    remove_documented_defaults(&mut node, toml::from_str(OMITTED_DEFAULTS).unwrap(), "");
+}
+
+#[test]
+#[should_panic(expected = "node default drifted: lightning.lsps2_service.channel_opening_fee_ppm")]
+fn lsps2_tariff_drift_is_rejected() {
+    let mut node =
+        toml::from_str("[lightning.lsps2_service]\nchannel_opening_fee_ppm = 10001").unwrap();
+    remove_documented_defaults(&mut node, toml::from_str(OMITTED_DEFAULTS).unwrap(), "");
+}
+
+#[test]
+fn unknown_lsps2_fields_remain_for_the_drift_comparison() {
+    let mut node =
+        toml::from_str("[lightning.lsps2_service]\nenabled = false\nunreviewed_tariff = 123")
+            .unwrap();
+    remove_documented_defaults(&mut node, toml::from_str(OMITTED_DEFAULTS).unwrap(), "");
+    let remaining: toml::Table =
+        toml::from_str("[lightning.lsps2_service]\nunreviewed_tariff = 123").unwrap();
+    assert_eq!(
+        node, remaining,
+        "unknown fields must not be silently omitted"
+    );
 }
 
 #[test]

@@ -9,10 +9,10 @@
 #
 # Checks, in charter terms:
 #   - the fund flow is host-mediated: renderer -> Tauri command -> loopback API (G2)
-#   - no node credential can reach the renderer (invariant A.3)
+#   - no bearer token can reach the renderer (owner phrase UI is tested separately)
 #   - the funds UI sits behind an explicit local-trust disclosure (G6)
 #   - the recovery-phrase input is write-only and cleared on submit
-#   - the pinned onboarding contract (v0.3.0-rc7 / 958e399) is what the host calls
+#   - the pinned onboarding contract (v0.3.0-rc9 / cd75c69) is what the host calls
 #   - the host starts konsensus.toml as `init` wrote it: no rc4/rc5 port or migrations splints
 #
 # Runs on any OS. Does not touch funding at runtime, rooms, messaging, mobile, calls,
@@ -73,10 +73,11 @@ renderer_code() { cat "$APP" src/qr.ts | grep -vE '^[[:space:]]*(//|\*|/\*)'; }
 no_credential_in_renderer_code() {
   ! renderer_code | grep -Eqi '\b(jwt|bearer|auth/local)\b'
 }
-# The phrase may be written to the host exactly once, and never read back.
+# Legacy restore remains write-only. The opt-in owner screen separately receives
+# a one-shot phrase, covered by local-owner-ceremony.test.tsx.
 mnemonic_is_write_only() {
-  [ "$(renderer_code | grep -c 'mnemonic')" = "1" ] &&
-    renderer_code | grep 'mnemonic' | grep -q "invoke<RestoreOutcome>"
+  has 'identityRestore\(value\)' "$APP" &&
+    has "identityRestore:.*invoke<RestoreOutcome>\('identity_restore', \{ mnemonic \}\)" src/control/source.ts
 }
 
 # The command names the renderer is actually allowed to reach.
@@ -128,17 +129,17 @@ http_timeouts_on_health_auth() {
 }
 wait_for_health_fails_on_terminated() {
   host_fn wait_for_health | grep -q 'sidecar_terminated' &&
-    host_fn spawn_node | grep -q 'CommandEvent::Terminated' &&
-    host_fn spawn_node | grep -q 'sidecar_terminated'
+    host_fn spawn_node | grep -q 'record_node_exit' &&
+    grep -q 'self.sidecar_terminated.store(true' "$HOST"
 }
 # IdentityGate restore retry/error is NOT gated on ready.
 restore_error_not_gated_on_ready() {
   grep -q 'showIdentityGate' "$APP" &&
     grep -q 'restoreError' "$APP" &&
     grep -q 'setRestoreError' "$APP" &&
-    grep -q 'status().ready || restoring() || restoreError()' "$APP" &&
+    grep -q 'restoring() || restoreError() !== null' "$APP" &&
     grep -q 'when={trustAck()}' "$APP" &&
-    grep -q 'Keep IdentityGate visible while ready is false' "$APP"
+    grep -q 'must still show restore errors if ready is false' "$APP"
 }
 # A restart re-uses the identity that was just restored: init stays on the first-run path.
 restore_path_never_inits() {
@@ -157,7 +158,7 @@ chk "tier is \"full\" (fund-your-own-node)" \
   has '"tier":\s*"full"' "$HOST"
 chk "GET /onboarding/state polled for the funding step" \
   has '/onboarding/state' "$HOST"
-chk "pinned step literal funding-seen (v0.3.0-rc7 / 958e399)" \
+chk "pinned step literal funding-seen (v0.3.0-rc9 / cd75c69)" \
   has 'funding-seen' "$HOST"
 chk "GET /payments/funding-address" \
   has '/payments/funding-address' "$HOST"
@@ -180,7 +181,7 @@ chk "wait_for_health fails when the sidecar Terminated" \
 chk "restore retry/error path is not gated on ready" \
   restore_error_not_gated_on_ready
 chk "restart kills the supervised child before replacing 3141" \
-  has 'state\.child\.lock\(\)\.unwrap\(\)\.take\(\)' "$HOST"
+  has 'state.stop_for_restart\(NODE_SHUTDOWN_BUDGET\)' "$HOST"
 chk "host starts konsensus.toml as init wrote it (no rc4/rc5 port or migrations splints)" \
   lacks 'KONSENSUS_SQLITE_MIGRATIONS_DIR|dodge_rc4_port_collision|resource_dir' "$HOST"
 chk "restore never re-runs init_node" \
@@ -195,18 +196,28 @@ chk "no renderer-side response type carries a credential" \
   no_credential_in_renderer_types
 chk "renderer code never handles a token/JWT" \
   no_credential_in_renderer_code
-chk "recovery phrase is written to the host once, never read back" \
+chk "legacy restore phrase is submitted through the host" \
   mnemonic_is_write_only
 
 echo "== renderer is host-mediated only (G2) =="
 chk "no direct network calls from the renderer" \
   lacks 'fetch\(|new WebSocket|XMLHttpRequest' src/
-chk "no URL of any kind in the renderer" \
-  lacks 'https?://' src/
+chk "no node URL outside sample fixtures in the renderer" \
+  test -z "$(grep -REn 'https?://' src/ | grep -v '^src/control/sample.ts:' || true)"
 chk "renderer reaches the node only through invoke()" \
-  has "invoke<" "$APP"
+  has "invoke<" src/control/source.ts
+# ERE has no lookahead: list URLs on non-comment lines, then drop loopback and
+# RFC 2606 test domains (*.example), which can never be a control plane.
+non_loopback_urls() {
+  grep -En 'https?://' "$HOST" | grep -vE '^[0-9]+:[[:space:]]*//' |
+    grep -oE 'https?://[^"/ )}`]+' |
+    grep -vE '^https?://(127\.0\.0\.1|localhost)(:|$)' |
+    grep -vE '^https?://([a-z0-9-]+\.)*example(:|$)' || true
+  # userinfo (http://127.0.0.1@evil.host) would hide the real host: never allowed.
+  grep -En 'https?://[^/" ]*@' "$HOST" | grep -vE '^[0-9]+:[[:space:]]*//' || true
+}
 chk "control plane is loopback-only" \
-  lacks 'https?://(?!127\.0\.0\.1|localhost)' "$HOST"
+  test -z "$(non_loopback_urls)"
 
 echo "== G6: local-trust disclosure gates the funds UI =="
 chk "disclosure element is present and marked" \
@@ -232,13 +243,13 @@ chk "deposit address is rendered as a QR" \
 chk "received/required progress is shown while funding" \
   has 'funding_amount_sats_received' "$APP"
 chk "balance is shown from balance_msat" \
-  has 'balance_msat' "$APP"
+  has 'balance_msat' src/control/
 chk "QR encoder is in-tree, not a third-party dependency" \
   lacks '"(qrcode|qr-code|qrcode-generator|react-qr)' package.json
 
 echo
 if [ "$fail" -eq 0 ]; then
-  echo "SMOKE: PASS - CS-2 fund flow is host-mediated, key-free, and G6-gated."
+  echo "SMOKE: PASS - CS-2 fund flow is host-mediated, token-free, and G6-gated."
 else
   echo "SMOKE: FAIL - see the failing checks above." >&2
 fi

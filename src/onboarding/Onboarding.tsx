@@ -374,9 +374,8 @@ export function Onboarding(props: {
           <div class="panel pairing" data-pairing="fallback">
             <h2>Pairing not available on this node</h2>
             <p class="hint">
-              The bundled node (v0.3.0-rc7) predates pairing, so this app signs in with the
-              local loopback token (/auth/local) as before. Pairing turns on once a node
-              release that supports it is bundled.
+              This older node has no pairing routes, so this app signs in with the
+              local loopback token (/auth/local). Upgrade the node to use pairing.
             </p>
           </div>
         </Match>

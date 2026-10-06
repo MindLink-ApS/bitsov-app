@@ -96,12 +96,13 @@ Must-fix before next ship: <list>
 - **NO-GO** on any A violation or an unmet gate for the thing being shipped.
 
 ## G. Executable checks (run these — don't eyeball it)
-Pinned protocol: **release `v0.3.0-rc7`, source-ref `958e3997f9969497c1d270f557282b9bb591fe85`, repo `MindLink-ApS/BitSov-bitsov`**
-(published 2026-09-15; five signed CLI targets — linux x86_64/aarch64, darwin aarch64/x86_64,
-windows x86_64 — `SHA256SUMS` signed by release key `B299…EF6E`; Darwin/Windows binaries are not
-notarized / Authenticode-signed). rc7 fixes the startup fee-data probe (#66) and updates
-rustls/event-listener; old operator configurations are not rewritten. The app remains unpublished.
-Re-pin here when the app upgrades the bundled node. Exact route contract: `bitsov-app/docs/API_READINESS.md`.
+Pinned protocol: **release `v0.3.0-rc9`, source-ref `cd75c69ed17eeb812d45bdc666b381ca7da1b697`, repo `MindLink-ApS/BitSov-bitsov`**.
+Five CLI targets: Linux x86_64/aarch64, Darwin aarch64/x86_64 and Windows x86_64.
+The fetcher requires `SHA256SUMS.asc` signed by release key `B299…EF6E`; a signed
+tag alone does not verify release bytes. CI fetching and packaging require the
+checksum assets to be attached and the release accessible. The app remains
+unpublished. See [rc9 upgrade checks](docs/NODE_RC9_UPGRADE.md) and
+[API contract](docs/API_READINESS.md). Existing operator identities are preserved.
 Machine form of these checks: `scripts/authority-check.sh` (CI "Authority Check"; the "Build" job
 is the compile gate, PR #9). Run from the app repo root; adjust the Website path to your checkout.
 **Any FAIL = that gate FAILs.**

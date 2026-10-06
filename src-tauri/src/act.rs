@@ -5,7 +5,7 @@
 //!
 //! The node decides what a token may do; this app can only narrow it.
 //!
-//! - **rc7 (`958e399`, the bundled sidecar):** tokens carry no scopes. The
+//! - **rc7 (`958e399`, retained compatibility):** tokens carry no scopes. The
 //!   `/auth/local` token the app holds can already spend. Nothing on the node
 //!   stops a send, so the only lock is this app's own [`SpendGate`].
 //! - **#77 nodes (pairing):** a paired token is `read + receive`. `spend` arrives

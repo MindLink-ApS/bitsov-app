@@ -2,7 +2,7 @@
 //!
 //! Shapes follow BitSov-bitsov `56c0ee0` (#77, not in any tag):
 //! `crates/konsensus-api/src/handlers/pairing_routes.rs`, `bootstrap.rs` and
-//! `pairing.rs`. The pinned `v0.3.0-rc7` sidecar has none of these routes;
+//! `pairing.rs`. The historical `v0.3.0-rc7` node has none of these routes;
 //! [`PairRoutes::Absent`] models that node.
 //!
 //! No socket and no crypto dependency: callers pass request parts to

@@ -1,24 +1,26 @@
 # API_READINESS — the node contract CS-1..CS-6 build against
 
-**Pinned protocol:** release **`v0.3.0-rc7`**, source-ref **`958e3997f9969497c1d270f557282b9bb591fe85`**,
-repo `MindLink-ApS/BitSov-bitsov`. All paths below were verified **present in this source**
-(route grep at `958e399`, 2026-09-17; API/onboarding source unchanged from rc6).
-Re-verify on every node upgrade and re-pin this header.
-rc7 validates fee-estimate payloads and writes a primary/fallback pair on fresh init;
-existing configurations retain their chosen/default providers. This is startup selection,
-not continuous failover.
-rc6 fixed at the root the two rc5 boot defects the app had splinted around (#56 P2P/Lightning
-port collision, #57 unshipped SQLite migrations; PR #61): `konsensus start` boots the `init`
-config with zero edits and needs no `KONSENSUS_SQLITE_MIGRATIONS_DIR`.
+**Pinned protocol:** release **`v0.3.0-rc9`**, source-ref
+**`cd75c69ed17eeb812d45bdc666b381ca7da1b697`**, repo `MindLink-ApS/BitSov-bitsov`.
+The signed tag and rc9 `docs/UPGRADING.md`, identity/auth and onboarding source were
+reviewed on 2026-10-06 through `gh api`. Release binary verification and live
+CS-1 remain CI checks after the signed checksum assets are available.
+
+rc9 includes pairing, scoped tokens, freshness headers and the opt-in local owner
+ceremony. The app retains rc7 fallback and fixture coverage. The table below is
+the historical CS route inventory, with the changed auth/restore boundaries
+called out; route presence does not grant spending or live identity authority.
+See [rc9 upgrade and release checks](NODE_RC9_UPGRADE.md).
+
 Base URL: `http://127.0.0.1:$PORT/api/v1` (loopback only — Gate G2). Auth: `Authorization: Bearer <jwt>`
 on REST; `bitsov.v1` + `bitsov.jwt.<token>` subprotocols on `/ws`.
 
-## MVP contract — "fund your node and start talking" (all VERIFIED PRESENT at 958e399)
+## MVP contract — "fund your node and start talking" (rc9 pin; rc7 compatibility retained)
 | MVP step | Method | Path | Purpose | Static |
 |---|---|---|---|---|
-| Boot/auth | POST | `/auth/local` | mint JWT for the loopback (desktop) app | ✅ |
+| Boot/auth | POST | `/pair/request`, `/pair/confirm`, `/pair/token` | app pairing; `/auth/local` is only the rc7 404 fallback (rc9 smoke may use read/receive) | ✅ |
 | Identity | GET | `/identity` | node_id + x25519/secp256k1 pubkeys | ✅ |
-| Recovery | POST | `/identity/verify-mnemonic`, `/identity/restore` | BIP-39 verify → restore | ✅ |
+| Recovery | POST | `/identity/verify-mnemonic`, `/identity/restore` | verify needs identity scope; restore exists only on bootstrap in rc9 | ✅ |
 | Fund | POST | `/onboarding/start` | first-run funding state machine (tier full → funding_address) | ✅ |
 | Fund | GET | `/onboarding/state` | poll until `funding-seen` | ✅ |
 | Fund | GET | `/payments/balance`, `/payments/funding-address` | balance + deposit address (QR) | ✅ |
@@ -41,13 +43,12 @@ on REST; `bitsov.v1` + `bitsov.jwt.<token>` subprotocols on `/ws`.
 - **No participant-profile endpoint.** The UI joins member node-ids to `KIND_PROFILE` display
   names/avatars itself.
 - **Calls (kinds 400–499) deferred/unimplemented** — OUT of the MVP contract (Gate G3).
-- **No device pairing / mobile push / remote transport confidentiality** — gates all mobile/paired
-  work (Gate G2, milestone M5).
+- Pairing and pinned Noise remote transport are supported; mobile push remains outside this contract.
 
 ## Verification
 **Static (no running node) — re-pin check:**
 ```bash
-git -C <BitSov-bitsov checkout> checkout 958e3997f9969497c1d270f557282b9bb591fe85
+git -C <BitSov-bitsov checkout> checkout cd75c69ed17eeb812d45bdc666b381ca7da1b697
 grep -rhoE '"/api/v1/[^"]+"' crates/konsensus-api/src | tr -d '"' | sort -u
 # every path in the MVP table above must appear. String-literal grep on purpose: the
 # room-member routes are declared across lines, which a single-line `.route("…")` grep misses.
@@ -61,15 +62,15 @@ curl -s -H "Authorization: Bearer $JWT" http://127.0.0.1:$PORT/api/v1/health
 ```
 
 ## CS-1 gate
-**CS-1 may proceed:** every MVP-contract route is present in the pinned release; the desktop
-API-consumer path (bundle node → `/auth/local` → drive over loopback) is real today. **Do not**
-build against calls, mobile, pairing, hosted, relay, or AI endpoints — they are gated (see the
-goal file §6/§7 and `CODEX_APP_AUTHORITY.md` §B/§G).
+CS-1 exercises fresh ordinary `init`, read-scoped loopback authentication and durable
+identity across two starts. It does not qualify a funded-wallet migration, owner
+Touch ID/Keychain behavior or paid operations. The app normally pairs; its rc7
+`/auth/local` fallback remains restricted to a 404 on `/pair/request`.
 
 ## Offline money readiness (genome PR #107)
 
 App readiness support targets `feat/boot-offline` at
-`b984d514e9c25b8925f4daaf65db1b2baf18f3bb` without changing the bundled release.
+`b984d514e9c25b8925f4daaf65db1b2baf18f3bb` and is included in the rc9 pin.
 The authenticated `GET /status` adds optional top-level `money_ready` and
 `readiness`: `{ money_ready, state, retry_attempt, retry_after_secs, events }`.
 Events contain `{ sequence, timestamp, state, money_ready }`; timestamps are

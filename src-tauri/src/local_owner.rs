@@ -85,13 +85,14 @@ mod tests {
         serde_json::json!({"ceremony_id":"a".repeat(32), "node_id":"b".repeat(64), "mnemonic":"abandon ability able about above absent absorb abstract absurd abuse access accident", "backup_check":[0,4,9], "expires_at":9999999999i64}).to_string()
     }
     #[test]
-    fn release_pin_and_runtime_gate_are_closed() {
-        assert!(!BUNDLED_NODE_SUPPORTS_LOCAL_OWNER);
-        assert!(!gate(true, true, false, true)); // rc7 bundled
-        assert!(!gate(true, true, true, false)); // release
-        assert!(!gate(false, true, true, true));
-        assert!(!gate(true, false, true, true));
-        assert!(gate(true, true, true, true));
+    fn bundled_rc9_requires_both_build_and_runtime_opt_in() {
+        for debug in [false, true] {
+            for dev in [false, true] {
+                assert!(gate(true, true, dev, debug));
+                assert!(!gate(false, true, dev, debug));
+                assert!(!gate(true, false, dev, debug));
+            }
+        }
     }
     #[tokio::test]
     async fn orphan_is_cancelled_before_a_new_phrase_and_only_metadata_is_retained() {
@@ -177,7 +178,7 @@ mod tests {
 }
 
 // Deliberate release lock. Update only together with the verified sidecar pin.
-pub const BUNDLED_NODE_SUPPORTS_LOCAL_OWNER: bool = false;
+pub const BUNDLED_NODE_SUPPORTS_LOCAL_OWNER: bool = true;
 fn gate(build: bool, runtime: bool, dev_sidecar: bool, debug: bool) -> bool {
     build && runtime && (BUNDLED_NODE_SUPPORTS_LOCAL_OWNER || (debug && dev_sidecar))
 }
@@ -649,6 +650,31 @@ pub fn start_args(config: &Path, dev: bool, owner: bool) -> Vec<std::ffi::OsStri
     }
     args
 }
+/// Retained plaintext identities need ordinary startup so the node can report
+/// marker/price refusals. They are never enrolled or encrypted by a pin bump.
+/// Fresh bootstrap and encrypted restarts keep the Keychain/descriptor path.
+pub fn launch_enabled(enabled: bool, config: &Path) -> Result<bool, String> {
+    if !enabled || !config.try_exists().map_err(|_| "Cannot inspect the node config")? {
+        return Ok(enabled);
+    }
+    let text = std::fs::read_to_string(config).map_err(|_| "Cannot read the node config")?;
+    let value: toml::Value = toml::from_str(&text).map_err(|_| "Cannot parse the node config")?;
+    let mnemonic = value.get("identity").and_then(|v| v.get("mnemonic_file"))
+        .and_then(|v| v.as_str()).ok_or("Node config has no identity mnemonic path")?;
+    let path = Path::new(mnemonic);
+    // Retained configs may name a seed relative to their own directory. Checking
+    // the app's cwd would mistake an existing plaintext identity for a fresh one.
+    let path = if path.is_relative() {
+        config.parent().ok_or("node config directory is unknown")?.join(path)
+    } else {
+        path.to_path_buf()
+    };
+    if path.extension().is_some_and(|ext| ext == "enc") {
+        return Ok(true);
+    }
+    Ok(!path.try_exists().map_err(|_| "Cannot inspect the existing identity")?)
+}
+
 /// Prepare owner startup while the directory is still observably fresh.
 pub fn prepare_launch(
     config: &Path,
@@ -726,6 +752,29 @@ pub fn may_create_password(dir: &Path) -> Result<bool, String> {
 #[cfg(test)]
 mod lifecycle_tests {
     use super::*;
+    #[test]
+    fn retained_plaintext_skips_owner_password_but_fresh_and_encrypted_keep_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("konsensus.toml");
+        assert!(launch_enabled(true, &config).unwrap());
+        assert!(!launch_enabled(false, &config).unwrap());
+        let seed = dir.path().join("mnemonic.txt");
+        std::fs::write(&seed, "retained-identity").unwrap();
+        let original = format!("[identity]\nmnemonic_file = {:?}\n", seed);
+        std::fs::write(&config, &original).unwrap();
+        assert!(!launch_enabled(true, &config).unwrap());
+        std::fs::write(dir.path().join("NODE_INITIALIZED"), "marker").unwrap();
+        assert!(!launch_enabled(true, &config).unwrap());
+        assert_eq!(std::fs::read_to_string(&config).unwrap(), original);
+        assert_eq!(std::fs::read_to_string(&seed).unwrap(), "retained-identity");
+        // An encrypted installation must never fall back to passwordless startup,
+        // even if its encrypted seed or Keychain password is missing.
+        std::fs::write(&config, format!("[identity]\nmnemonic_file = {:?}\n", dir.path().join("identity/mnemonic.enc"))).unwrap();
+        assert!(launch_enabled(true, &config).unwrap());
+        std::fs::write(&config, "invalid config").unwrap();
+        assert!(launch_enabled(true, &config).is_err());
+        assert!(!launch_enabled(false, &config).unwrap());
+    }
     #[test]
     fn fresh_owner_launch_persists_only_config_after_password() {
         let root = tempfile::tempdir().unwrap();

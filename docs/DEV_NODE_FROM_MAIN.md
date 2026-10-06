@@ -9,8 +9,8 @@
 To use a node you already run, without the app starting one, see
 [DEV_EXTERNAL_NODE.md](DEV_EXTERNAL_NODE.md).
 
-Why it exists: the pinned rc7 sidecar has no pairing (#77), so the control center
-(#42/#43) can't be tried against a real node. Genome `main` has pairing.
+Use this path to test node changes beyond the bundled rc9 pin. Pairing and
+local owner bootstrap are now present in the pinned release too.
 
 ## What it is
 

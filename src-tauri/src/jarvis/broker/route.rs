@@ -1,6 +1,6 @@
 //! Closed set of node routes the broker may read.
 //!
-//! Paths are the pinned BitSov-bitsov `v0.3.0-rc7` (`958e399`) GET routes.
+//! Allowlisted GET routes on rc9, retaining rc7 (`958e399`) response compatibility.
 //! `RequestTarget::method` is fixed to GET. The only query keys are `limit`
 //! and, on `/messages` only, `peer`, whose value is a [`PeerKey`]: 32 bytes
 //! written as 64 lowercase hex, so nothing caller-shaped reaches a path.
