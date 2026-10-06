@@ -545,6 +545,176 @@ fn android_typed_unlock_keeps_only_a_node_accepted_password_in_memory() {
     }
 }
 
+fn in_order(haystack: &str, steps: &[&str]) {
+    let found: Vec<_> = steps
+        .iter()
+        .map(|step| haystack.find(step).unwrap_or_else(|| panic!("missing {step}")))
+        .collect();
+    assert!(found.windows(2).all(|pair| pair[0] < pair[1]), "out of order: {steps:?}");
+}
+
+#[test]
+fn android_client_seed_is_kept_only_as_keystore_ciphertext() {
+    let key = project_file("src/pairing/key.rs");
+    let flat = normalized(&key);
+    assert!(flat.contains(
+        "match at_rest::installed(){Some(sealer)=>Self::load_or_create_sealed(dir,sealer),\
+         None=>Self::load_or_create_plain(dir),}"
+    ));
+    let sealed = normalized(block_after(&key, "pub(crate) fn load_or_create_sealed("));
+    in_order(
+        &sealed,
+        &[
+            "if sealed.exists(){None}",
+            "plain_seed(&plain)?",
+            ".seal(at_rest::CLIENT_SEED_PURPOSE,&seed[..])",
+            "write_replacing(&sealed,&ciphertext)",
+            "let seed=sealed_seed(&sealed,sealer)?;",
+            "if written.is_some_and(|written|*written!=*seed){return Err(",
+            "if plain.exists(){discard(&plain)?;}",
+        ],
+    );
+    for forbidden in ["hex::encode", "write_all", "create_new_protected"] {
+        assert!(
+            !sealed.contains(forbidden),
+            "the sealed key path must not write a plain seed: {forbidden}"
+        );
+    }
+    assert!(normalized(block_after(&key, "\nfn sealed_seed("))
+        .contains("sealer.open(at_rest::CLIENT_SEED_PURPOSE,&ciphertext)"));
+    let discard = normalized(block_after(&key, "\nfn discard("));
+    in_order(&discard, &["file.write_all(&zeros)", "std::fs::remove_file(path)"]);
+
+    let at_rest = project_file("src/at_rest.rs");
+    assert!(at_rest.contains("pub const CLIENT_SEED_PURPOSE: &str = \"client-ed25519-seed-v1\";"));
+    assert!(at_rest.contains("format!(\"pairing-code-v1:{node_id}\")"));
+}
+
+#[test]
+fn android_descriptor_keeps_only_public_pins_and_a_sealed_code() {
+    let remote = project_file("src/remote_access.rs");
+    let flat = normalized(&remote);
+    assert!(flat.contains(
+        "fn persist_at(path:&Path,descriptor:&RemoteDescriptor)->Result<(),RemoteError>{\
+         persist_with(path,descriptor,at_rest::installed())}"
+    ));
+    let stored = normalized(block_after(&remote, "\nfn stored_bytes("));
+    assert!(
+        stored.starts_with("{let Some(sealer)=sealer else{return serde_json::to_vec(descriptor)"),
+        "desktop keeps writing the descriptor unchanged"
+    );
+    for required in [
+        ".seal(&at_rest::pairing_code_purpose(&descriptor.node_id),code.as_bytes())",
+        "transport_pubkey:descriptor.transport_pubkey.clone(),",
+        "code:None,sealed_code,",
+    ] {
+        assert!(stored.contains(required), "stored_bytes lost {required}");
+    }
+    assert_eq!(
+        remote.matches("serde_json::to_vec(descriptor)").count(),
+        1,
+        "only the no-sealer branch may serialize the plaintext code"
+    );
+    assert!(flat.contains(
+        "#[serde(default,skip_serializing_if=\"Option::is_none\")]sealed_code:Option<String>,"
+    ));
+
+    let load = normalized(block_after(&remote, "pub fn load_persisted("));
+    assert!(load.contains("let sealer=at_rest::installed();"));
+    assert!(load.contains("sealer.map(|_|REMOTE_CONFIG_LOCK.lock().unwrap())"));
+    let load_with = normalized(block_after(&remote, "\nfn load_with("));
+    in_order(
+        &load_with,
+        &[
+            "let(persisted,migrate)=open_sealed_code(persisted,sealer)?;",
+            "let descriptor=validate_descriptor(persisted)?;",
+            "if migrate{",
+            "persist_with(path,&descriptor,sealer)?;}Ok(Some(descriptor))}",
+        ],
+    );
+    let open = normalized(block_after(&remote, "\nfn open_sealed_code("));
+    for required in [
+        "let migrate=sealer.is_some()&&stored.code.is_some();",
+        "let Some(sealer)=sealer else{return Err(",
+        "if stored.code.is_some(){return Err(",
+        ".open(&at_rest::pairing_code_purpose(&stored.node_id),&bytes)",
+    ] {
+        assert!(open.contains(required), "open_sealed_code lost {required}");
+    }
+    assert!(normalized(block_after(&remote, "\nfn saved_descriptor("))
+        .starts_with("{let Some(sealer)=at_rest::installed()else{\
+                      return serde_json::from_slice::<RemoteDescriptor>(bytes).ok();};"));
+}
+
+#[test]
+fn android_at_rest_key_is_hardware_bound_and_opening_never_creates_it() {
+    let source = project_file(PLUGIN);
+    let spec = normalized(kotlin_fn(&source, "atRestKeySpec"));
+    for required in [
+        "KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT",
+        ".setKeySize(256)",
+        ".setBlockModes(KeyProperties.BLOCK_MODE_GCM)",
+        ".setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)",
+        ".setRandomizedEncryptionRequired(true)",
+        "if(strongBox&&Build.VERSION.SDK_INT>=Build.VERSION_CODES.P){builder.setIsStrongBoxBacked(true)}",
+    ] {
+        assert!(spec.contains(required), "atRestKeySpec lost {required}");
+    }
+    for forbidden in ["setUserAuthentication", "setInvalidatedByBiometricEnrollment"] {
+        assert!(
+            !spec.contains(forbidden),
+            "the client seed must survive fingerprint changes and open without a prompt: {forbidden}"
+        );
+    }
+    let preferred = normalized(kotlin_fn(&source, "generatePreferredAtRestKey"));
+    assert!(preferred.contains("if(hasStrongBox){try{return generateAtRestKey(true)}"));
+    let key = normalized(kotlin_fn(&source, "atRestKey"));
+    for required in [
+        "throw UnrecoverableKeyException(\"missing at-rest key\")",
+        "if(!isHardwareBacked(key)){throw",
+    ] {
+        assert!(key.contains(required), "atRestKey lost {required}");
+    }
+    let purpose = normalized(kotlin_fn(&source, "atRestPurpose"));
+    for required in [
+        "purpose==\"client-ed25519-seed-v1\"",
+        "node!=purpose&&node.length==64&&",
+        "\"bitsov.at-rest.$purpose\"",
+    ] {
+        assert!(purpose.contains(required), "atRestPurpose lost {required}");
+    }
+
+    let seal = normalized(kotlin_fn(&source, "seal"));
+    let unseal = normalized(kotlin_fn(&source, "unseal"));
+    for body in [&seal, &unseal] {
+        assert!(body.contains("val aad=atRestPurpose(args.purpose)"));
+        assert!(body.contains("if(aad==null||"));
+        assert!(body.contains("cipher.updateAAD(aad)"));
+    }
+    assert!(seal.contains("cipher.init(Cipher.ENCRYPT_MODE,atRestKey(true))"));
+    assert!(seal.contains("value.fill(0)invoke.resolve(response)}"));
+    assert!(unseal.contains("atRestKey(false)"));
+    assert!(unseal.contains("catch(_:AEADBadTagException){result(ERROR_INVALID)}"));
+    assert_eq!(source.matches("atRestKey(true)").count(), 1, "only seal creates the key");
+    assert!(!source.contains("deleteEntry(AT_REST_KEY_ALIAS"));
+
+    let mobile = project_file("src/device_key_mobile.rs");
+    let android = normalized(block_after(&mobile, "mod android"));
+    for required in [
+        "struct SealPayload<'a>{purpose:&'a str,value:Zeroizing<String>,}",
+        "decode(checked(response)?.value).map(Zeroizing::new)",
+        "impl bitsov_app::at_rest::Sealer for KeystoreSealer{",
+    ] {
+        assert!(android.contains(required), "the Keystore sealer bridge lost {required}");
+    }
+
+    let app = project_file("src/app.rs");
+    let install = "#[cfg(target_os = \"android\")]\n            \
+                   bitsov_app::at_rest::install(Arc::new(device_key::KeystoreSealer))?;";
+    assert_eq!(app.matches("at_rest::install(").count(), 1);
+    in_order(&app, &[install, "tauri::async_runtime::spawn(bootstrap_node(handle));"]);
+}
+
 #[test]
 fn macos_keychain_home_path_keeps_its_keychain_calls() {
     let keychain = project_file("src/home_keychain.rs");
