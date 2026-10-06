@@ -18,6 +18,7 @@ pub mod ai;
 pub mod spend_journal;
 pub mod control;
 pub mod jarvis;
+pub mod at_rest;
 pub mod pairing;
 pub mod remote_access;
 
