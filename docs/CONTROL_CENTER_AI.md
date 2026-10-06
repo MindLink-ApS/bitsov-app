@@ -2,7 +2,7 @@
 
 Code: `src-tauri/src/ai.rs` (host rules), the `ai_*` commands in `src-tauri/src/main.rs`,
 the `payments` tool in `src-tauri/src/jarvis/broker/`, and `src/control/ai.ts` +
-`src/control/AiTrack.tsx` (track). Node contract: rc7 `958e399` routes, plus the #78
+`src/control/AiTrack.tsx` (track). Bundled node: rc9 `cd75c69`; retained rc7 compatibility routes, plus the #78
 `BitSov-Data-As-Of` / `BitSov-Data-Stale` headers when the node sends them.
 
 ## The app is the broker
@@ -13,7 +13,7 @@ main window ──ai_read(topic)──▶ host ──closed read broker (GET onl
      └── projection + freshness ◀─┘        node never talks to a model
 ```
 
-- **Reads.** A question becomes one of six topics: balance, channels, node, inbox, prices, payments. The host reads the topic through `jarvis::broker` with the **paired token only**. The rc7 `/auth/local` token is never used for these reads, the same rule the sealed window follows. On the bundled rc7 sidecar the track therefore says it cannot read, and it guesses nothing.
+- **Reads.** A question becomes one of six topics: balance, channels, node, inbox, prices, payments. The host reads the topic through `jarvis::broker` with the **paired token only**. The rc7 `/auth/local` token is never used for these reads, the same rule the sealed window follows. On an older rc7 node the track therefore says it cannot read, and it guesses nothing.
 - **What comes back.** Only the broker's allowlisted projection. It never carries message bodies, ciphertext, hashes, labels or addresses. Canary tests cover every topic and every preset.
 - **Local answers (default).** The answer text and cards (node, balance/channels, payments list) are composed in the window from that projection. Nothing leaves the machine.
 - **Source and freshness.** Each answer names the routes read, and its age comes from the node's As-Of clock. Without an As-Of from the node on every route read, the answer is **unknown**, never fresh (main #41). The age keeps counting while the answer is on screen. An answer turns stale past the route's own bound (180 s for wallet, 60 s for the rest), or at once when the node sends `Data-Stale: 1`.

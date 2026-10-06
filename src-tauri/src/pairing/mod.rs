@@ -1,5 +1,4 @@
-//! App pairing client for the #77 ceremony (BitSov-bitsov `56c0ee0`, not in
-//! any tag). **Less exposure, not solved local security.**
+//! App pairing client for the #77 ceremony (BitSov-bitsov `56c0ee0`, included in rc9). **Less exposure, not solved local security.**
 //!
 //! Flow: `POST /pair/request` → read the `0600` challenge file the node named →
 //! sign `pair_id || client_pubkey || challenge` → `POST /pair/confirm` →
@@ -7,7 +6,7 @@
 //! before expiry.
 //!
 //! Capability detection is one rule: a **404 on `/pair/request`** means the
-//! node has no pairing routes (the pinned `v0.3.0-rc7` sidecar), and only then
+//! node has no pairing routes (an older `v0.3.0-rc7` node), and only then
 //! does the app use `/auth/local`. Any other failure — a refusal, a bad proof,
 //! a revoked pairing, an unreachable node, a tripped short code — is an error
 //! the user sees. It is never downgraded to `/auth/local`.

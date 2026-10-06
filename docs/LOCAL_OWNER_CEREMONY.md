@@ -1,11 +1,17 @@
-# Local owner ceremony (development only)
+# Local owner ceremony (opt-in)
 
-The rc7 pin does not contain node #237. `local-owner-ceremony` is a non-default
-Cargo feature, additionally requiring `BITSOV_LOCAL_OWNER_CEREMONY=1`. While
-`BUNDLED_NODE_SUPPORTS_LOCAL_OWNER` is false it only runs with the debug `dev-node`
-sidecar override. Release/bundled rc7, external nodes and remote nodes retain their
-existing behavior. Do not enable bundled support until a release containing #237
-is pinned and its lifecycle has been tested with a signed, hardened Mac bundle.
+The bundled `v0.3.0-rc9` node (`cd75c69`) contains #237, so
+`BUNDLED_NODE_SUPPORTS_LOCAL_OWNER` is true. This is still opt-in on macOS:
+`local-owner-ceremony` remains a non-default Cargo feature and
+`BITSOV_LOCAL_OWNER_CEREMONY=1` remains required. External and remote nodes
+cannot use the ceremony. No default feature or runtime setting is changed.
+
+Fresh local directories use the encrypted two-phase flow. Retained plaintext
+identities use ordinary startup, bypassing Keychain password lookup, so marker
+repair and then price-floor consent remain reachable. They never receive a new
+password or first-device enrollment on upgrade. Encrypted ceremony installs
+continue to use the existing Keychain item on restart. See
+[rc7 → rc9 upgrade checks](NODE_RC9_UPGRADE.md).
 
 Implementation plan:
 1. Add a native, narrowly scoped Keychain adapter and descriptor-only launch.
@@ -40,9 +46,10 @@ Development activation uses a node binary built with #237 and a fresh private
 `BITSOV_LOCAL_OWNER_CEREMONY=1`, Cargo features `dev-node,local-owner-ceremony`, and
 `src-tauri/tauri.dev-node.conf.json`. The normal dev launcher supplies only
 `dev-node`; it does not turn on this ceremony. Enabling the runtime variable alone
-has no effect. No release pin or release configuration changes in this patch.
+has no effect. The bundled rc9 path needs only `local-owner-ceremony` and the runtime opt-in;
+`dev-node` is only for an unverified development override.
 
-The node determines emptiness and authority. Existing installations with no
+The node determines emptiness and authority. Encrypted ceremony installations with no
 matching Keychain item stop with an explanation, never a replacement password.
 Cancel does not delete that item. Orphan recovery uses `pending/current`; a screen
 that received its handle cancels that specific ceremony, preventing a late reply
@@ -88,8 +95,8 @@ The Build workflow's **Sidecar** job fetches and verifies the pin in
 `BITSOV_OWNER_TEST_BINARY` pointing to that verified binary and the ceremony/dev
 features enabled. This runs on every PR and main push, so every bundled pin
 change is covered; the explicit path prevents an absent binary from skipping CI.
-It runs before the live-network CS-1 smoke and needs only `init`, not the owner
-API. The existing Sidecar job remains outside required merge checks because it
+The job also runs the real create/finalize/restart lifecycle against the same
+verified rc9 binary, before the live-network CS-1 smoke. The existing Sidecar job remains outside required merge checks because it
 depends on release downloads; inspect its config-drift step before promoting a
 pin. Review any failure against the new node defaults and update the writer or
 the explicit intentional-difference list rather than broadly ignoring sections.

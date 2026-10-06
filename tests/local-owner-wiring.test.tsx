@@ -33,4 +33,5 @@ it.each([false, true])('shows owner enrollment warning while ready, including af
   mount(true, false, true, trusted);
   await vi.waitFor(() => expect(document.querySelector('[data-owner-warning]')?.textContent).toContain('Owner device not enrolled'));
   expect(document.body.textContent).toContain('owner console');
+  expect(document.querySelector('[data-local-owner]')).toBeNull();
 });

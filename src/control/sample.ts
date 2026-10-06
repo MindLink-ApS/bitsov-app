@@ -593,7 +593,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
   for (const p of SAMPLE_PEERS) {
     if (p.label) seedPetnameIfEmpty(p.node_id, p.label);
   }
-  // v1 (default) is today's rc7 node: no energy read, no membrane events.
+  // v1 (default) models a historical rc7 node: no energy read, no membrane events.
   const v2 = opts.organism === 'v2';
   let knocks = v2 ? sampleKnocks() : [];
   // v2 sample: Maya raises her price just before your first send to her, so the

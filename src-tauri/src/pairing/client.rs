@@ -99,7 +99,7 @@ impl PairingClient {
     }
 
     /// `POST /pair/request`. `Ok(None)` means the node has no pairing routes
-    /// (404 — the `v0.3.0-rc7` sidecar). Every other non-2xx is a refusal.
+    /// (404 — an older `v0.3.0-rc7` node). Every other non-2xx is a refusal.
     pub(crate) async fn request(
         &self,
         key: &ClientKey,

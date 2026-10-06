@@ -206,7 +206,8 @@ describe('pairing panel', () => {
   it('fallback explains the rc7 node and does not claim pairing scopes', () => {
     const el = show(fallback, ready);
     const panel = el.querySelector('[data-pairing="fallback"]')!;
-    expect(panel.textContent).toContain('v0.3.0-rc7');
+    expect(panel.textContent).toContain('older node');
+    expect(panel.textContent).not.toContain('bundled node');
     expect(panel.textContent).toContain('/auth/local');
     expect(panel.textContent).not.toContain('read + receive');
     expect(el.querySelector('[data-short-code]')).toBeNull();

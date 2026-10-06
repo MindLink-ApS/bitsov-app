@@ -4,7 +4,7 @@
 //! monotonic [`Instant`] (and the wall clock) once the body is read. Ages are
 //! measured on the host's monotonic clock from that stamp.
 //!
-//! Genome #78 (not in the pinned rc7) adds two headers on 200s from the five
+//! Genome #78 (included in the rc9 pin) adds two headers on 200s from the five
 //! pinned routes. `LocalNodeRead` parses them into [`NodeMarks`]:
 //!
 //! - `BitSov-Data-As-Of`: when the node's data was last known current. RFC

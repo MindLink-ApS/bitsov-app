@@ -1,6 +1,6 @@
 // Shapes the host's read commands return. Each mirrors a `bitsov_app::control`
 // struct (src-tauri/src/control.rs), which mirrors the pinned node route
-// (v0.3.0-rc7). No token, key, preimage or ciphertext is in any of them.
+// (rc9, with rc7 compatibility). No token, key, preimage or ciphertext is in any of them.
 
 /** `peers_list` — `GET /peers`. Contacts are private local knowledge, not an allow-list. */
 export type Peer = {

@@ -6,7 +6,7 @@
 #   Run 1: init --tier full + start -> /health -> /auth/local -> /identity -> node_id A. Stop.
 #   Run 2: start from the SAME dir (no re-init; config already exists) -> node_id B. Stop.
 # PASS only if A == B and both are non-empty (identity survived the restart). This mirrors the
-# app (src-tauri/src/main.rs): init once into the Tauri app_data_dir, skip re-init when
+# ordinary app path (ceremony opt-in off): init once into the Tauri app_data_dir, skip re-init when
 # konsensus.toml already exists.
 #
 # Runs on Linux and macOS (signed node sidecars ship for both since v0.3.0-rc5; the Darwin
@@ -17,12 +17,12 @@
 # edits. The node's init defaults are non-colliding and its migrations are embedded since
 # v0.3.0-rc6 (BitSov-bitsov #56/#57, fixed in #61).
 #
-# rc7 fixes #66 at the node. This smoke tests fresh init defaults without the
+# rc9 retains the #66 fix. This smoke tests fresh init defaults without the
 # old rc6 endpoint overrides; existing operator data/config is never used.
 set -euo pipefail
 
 if [ -n "${CS1_SMOKE_ESPLORA_PRIMARY:-}${CS1_SMOKE_ESPLORA_FALLBACK:-}" ]; then
-  echo "SMOKE: FAIL - rc6 endpoint overrides are retired; unset CS1_SMOKE_ESPLORA_PRIMARY and CS1_SMOKE_ESPLORA_FALLBACK to test rc7 defaults." >&2
+  echo "SMOKE: FAIL - rc6 endpoint overrides are retired; unset CS1_SMOKE_ESPLORA_PRIMARY and CS1_SMOKE_ESPLORA_FALLBACK to test rc9 defaults." >&2
   exit 1
 fi
 
@@ -91,8 +91,8 @@ ensure_init() {
   fi
   echo "SMOKE: init sidecar node in $DATA_DIR"
   "$SIDECAR" init --dir "$DATA_DIR" --non-interactive --tier full >"$LOG_FILE" 2>&1
-  if [ ! -s "$CONFIG" ]; then
-    echo "SMOKE: FAIL - node init did not create $CONFIG" >&2
+  if [ ! -s "$CONFIG" ] || [ ! -f "$DATA_DIR/NODE_INITIALIZED" ]; then
+    echo "SMOKE: FAIL - rc9 init did not create config and NODE_INITIALIZED" >&2
     sed -n '1,120p' "$LOG_FILE" >&2
     exit 1
   fi

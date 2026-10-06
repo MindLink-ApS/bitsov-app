@@ -438,8 +438,11 @@ async fn retained_node_requires_two_separate_consents_then_authenticates_normall
     let marker = dir.path().join("mock-marker");
     let calls = dir.path().join("calls");
     let program = dir.path().join("mock-node");
-    let original = include_str!("../tests/fixtures/rc7-pricing.toml");
-    std::fs::write(&config, original).unwrap();
+    let seed = dir.path().join("mnemonic.txt");
+    std::fs::write(&seed, "existing-identity").unwrap();
+    let original = include_str!("../tests/fixtures/rc7-pricing.toml")
+        .replace("identity/mnemonic", seed.to_str().unwrap());
+    std::fs::write(&config, &original).unwrap();
     std::fs::write(&program, format!(r#"#!/bin/sh
 printf '%s\n' "$1" >> '{}'
 if [ "$1" = repair ]; then touch '{}'; exit 0; fi
@@ -504,6 +507,8 @@ exec sleep 30
             if done { break; }
         }
     });
+    state.owner.active.store(local_owner::launch_enabled(true, &config).unwrap(), Ordering::SeqCst);
+    assert!(!state.status_snapshot().local_owner, "upgrade must not request a new seed password");
     *state.config.lock().unwrap() = Some(config.clone());
     *state.dev_sidecar.lock().unwrap() = Some(program);
     let app = tauri::test::mock_builder().manage(state)
@@ -526,6 +531,8 @@ exec sleep 30
     assert_eq!(std::fs::read_to_string(&calls).unwrap(), "start\nrepair\nstart\nstart\n");
     assert_eq!(std::fs::read_to_string(config.with_extension("toml.bak")).unwrap(), original);
     assert!(state.status_snapshot().ready);
+    assert!(!state.status_snapshot().local_owner, "retained identity cannot reopen ceremony");
+    assert_eq!(std::fs::read_to_string(seed).unwrap(), "existing-identity");
     assert_eq!(state.status_snapshot().node_id.as_deref(), Some("existing"));
     assert_eq!(state.status_snapshot().initialization_repair, InitializationRepair::None);
     state.stop_for_restart(Duration::from_secs(2));

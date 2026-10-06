@@ -5,28 +5,15 @@ discipline for this feature, taken verbatim from the genome's
 `docs/security/pairing.md` (BitSov-bitsov `56c0ee0`, PR #77). Nothing here, in
 the app copy, or in release notes may be quoted as saying more.
 
-## Status: mock-verified only
+## Status: rc9 pinned; release-binary CI pending
 
-The app pins genome `v0.3.0-rc7` (`958e399`), which predates #77, so the
-sidecar this app bundles has no `/pair/*` routes. Everything below is verified
-against `src-tauri/crates/mock-node` using #77's route shapes. It is not yet
-verified against a real node.
-
-| Behaviour | Mock-verified here | Needs a HUMAN genome tag + pin bump |
-|---|---|---|
-| Ceremony: request → read `0600` challenge → sign → confirm → token | yes | real-node run |
-| Short code read from node stdout, matched against the challenge file | yes (mock stdout lines) | real sidecar stdout format |
-| 10-minute tokens refreshed before expiry | yes | real JWT expiry |
-| 404 on `/pair/request` → `/auth/local`, unchanged | yes (rc7-shaped mock) | — (this is today's product path) |
-| Refusal / bad proof / revoked / unreachable → error, **no fallback** | yes | real error texts |
-| Identity-free bootstrap detected (`/bootstrap/state`) | yes | real bootstrap router |
-| Restore on a local bootstrap node, with rc7 live fallback | yes (scripted HTTP responses) | real restore/restart run |
-| Missing initialization marker: refusal → explicit consent → repair → restart | yes (mock sidecar and HTTP) | real rc7 data-directory upgrade |
-| First-run identity creation over HTTP | **not implemented** | separate onboarding work |
-
-Bumping the pin means cutting a genome tag that contains #77, running
-`scripts/fetch-node-sidecar.sh` against it, and re-running the CS-1/CS-2
-smokes. That is a HUMAN step. This change does not do it.
+The app pins `v0.3.0-rc9` (`cd75c69`), which includes pairing and local owner
+bootstrap. Mock tests cover pairing, token refresh, restore refusal, explicit
+marker repair followed by separate price consent, and owner ceremony UI.
+The old rc7 404 fallback remains tested. Release-binary fetch, config drift,
+owner lifecycle and CS-1 need the attached signed checksums and an accessible
+release; a signed/hardened Mac interactive run remains separate acceptance.
+See [upgrade checks](NODE_RC9_UPGRADE.md) and [local owner ceremony](LOCAL_OWNER_CEREMONY.md).
 
 ## Node choices
 
@@ -92,7 +79,7 @@ the host refreshes any paired token with less than 120 s left (tokens live
 ## Fallback and fail-closed
 
 There is exactly one fallback rule. **A 404 on `POST /pair/request` means the
-node has no pairing routes (the rc7 sidecar), and only then does the host use
+node has no pairing routes (for example an older rc7 node), and only then does the host use
 `/auth/local`.** It then uses `/auth/local` exactly as before, and later 401s
 re-mint there, as before.
 
@@ -125,7 +112,7 @@ gated by the challenge file and the node's own pairing window.
   cannot replace a live identity. Spending needs the user's own node plus the
   owner CLI (`konsensus grant` over `<data_dir>/control.sock`). This change
   requests no elevation.
-- **Fallback:** the screen says the bundled node (rc7) predates pairing and
+- **Fallback:** the screen says the connected older node has no pairing routes and
   that the app signs in with `/auth/local`. It does not show paired scopes in
   that case.
 
@@ -149,13 +136,17 @@ managed nodes are excluded.
 
 On agreement, the same sidecar runs
 `repair mark-initialized --config <the existing config> --confirm`, then the
-app starts and authenticates normally. The node writes its marker; the app
-never manufactures it or edits the config. Failure stays visible for an explicit
+app restarts. A retained 50 msat page price then triggers a separate consent
+screen before changing only that value to 1000 msat (with a config backup).
+Authentication resumes after successful startup. The node writes its marker;
+the app never manufactures it. Failure stays visible for an explicit
 retry. The successful marker removes the need for the prompt on later starts.
 The screen advises keeping a backup because normal startup can apply newer
 database migrations.
 
-This does not change the pinned sidecar or the existing first-run `init` flow.
+The rc9 pin uses the existing first-run `init` flow when owner opt-in is off.
+With opt-in enabled, fresh installs use the two-phase owner ceremony; retained
+plaintext identities use ordinary startup and never enter that ceremony.
 Restore readiness applies when the managed node is already in bootstrap mode;
 it does not turn an initialized live node back into bootstrap. A live node that
 no longer exposes restore produces an explanatory error. Compatibility is

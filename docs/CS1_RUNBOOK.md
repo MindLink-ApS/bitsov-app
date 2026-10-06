@@ -24,13 +24,15 @@ both lockfiles (`package-lock.json`, `src-tauri/Cargo.lock`) are committed.
 ## What it does
 1. Rust host runs `konsensus init` on first run, then `konsensus start --config …` as a
    **supervised sidecar** (killed on exit; init exit status + stderr are checked).
-2. Polls `http://127.0.0.1:3141/api/v1/health`, then `POST /auth/local` → JWT, `GET /identity`.
+2. Polls health, pairs with rc9, then reads identity. Only a 404 on pair/request
+   selects the retained rc7 auth/local fallback. The smoke uses rc9 read-scoped
+   auth/local directly; it is not a pairing or owner-device test.
 3. SolidJS UI reflects state; it never talks to the node directly and holds no shell/kill authority.
 
 ## Boundary (do not break)
 Node = bundled binary, no `konsensus-*` crate dep (G1). Control plane loopback-only (G2).
 Shell capability is scoped to the `konsensus` sidecar only; CSP is set (not null). Node CLI +
-API paths pinned to BitSov-bitsov `v0.3.0-rc7 / 958e399`. `scripts/authority-check.sh` checks the app-source boundary;
+API paths pinned to BitSov-bitsov `v0.3.0-rc9 / cd75c69`. `scripts/authority-check.sh` checks the app-source boundary;
 `fetch-node-sidecar.sh` verifies sidecar authenticity and integrity.
 
 ## Local pass/fail smoke
@@ -66,8 +68,10 @@ Two splints carried since CS-1.5.1 are gone: the node fixed both at the root in 
   override the app does not set) — the fetch, `bundle.resources`, the env wiring and the CI
   placeholder that existed only for `resources` are **deleted**.
 
-`konsensus start` now runs `konsensus.toml` exactly as `init` wrote it; the host never edits it.
-Acceptance: `npm run smoke:cs1` must boot rc7 with zero config edits; the non-gating `sidecar` CI job
+`konsensus start` uses fresh init defaults unchanged. On a retained rc7 upgrade,
+the host can repair the page price only after separate consent; see
+[NODE_RC9_UPGRADE.md](NODE_RC9_UPGRADE.md).
+Acceptance: `npm run smoke:cs1` must boot rc9 with zero config edits; the non-gating `sidecar` CI job
 runs the same smoke against the published release on every PR.
 
 rc7 fixes #66: fresh init writes a primary/fallback pair, and startup validates
