@@ -154,7 +154,7 @@ export function PorchPanel(props: Props) {
                     disabled={busy() || props.moneyBlocked}
                     onClick={() => void ask(p.node_id, PORCH_CARD_PATH)}
                   >
-                    Open profile card · {cost(p.node_id)}
+                    Open profile card · page price {cost(p.node_id)}
                   </button>
                 </li>
               )}
@@ -221,7 +221,7 @@ export function PorchPanel(props: Props) {
                   <FrontDoorCardView card={card()} now={props.now} />
                   <Show when={card().cached && offers(s().peer)}>
                     <button type="button" class="link" data-porch-refresh disabled={busy() || props.moneyBlocked} onClick={() => void ask(s().peer, PORCH_CARD_PATH)}>
-                      Refresh · {cost(s().peer)}
+                      Refresh · page price {cost(s().peer)}
                     </button>
                   </Show>
                 </>
@@ -232,7 +232,7 @@ export function PorchPanel(props: Props) {
                 <For each={pagesOf(s().card)}>
                   {(path) => (
                     <button type="button" class="link" data-porch-page-read={path} disabled={busy() || props.moneyBlocked} onClick={() => void ask(s().peer, path)}>
-                      Read {path} · {cost(s().peer, path)}
+                      Read {path} · page price {cost(s().peer, path)}
                     </button>
                   )}
                 </For>
@@ -246,7 +246,7 @@ export function PorchPanel(props: Props) {
                 >
                   <input data-porch-path placeholder="Another page, e.g. notes.md" value={other()} onInput={(e) => setOther(e.currentTarget.value)} aria-label="Page" />
                   <button type="submit" class="link" data-porch-path-read disabled={busy() || props.moneyBlocked || otherPath() === null}>
-                    Read · {cost(s().peer, otherPath() ?? '')}
+                    Read · page price {cost(s().peer, otherPath() ?? '')}
                   </button>
                 </form>
                 <Show when={other().trim() && otherPath() === null}>
@@ -273,7 +273,7 @@ export function PorchPanel(props: Props) {
                   </button>
                   <Show when={offers(c.node_id)}>
                     <button type="button" class="link" data-porch-held-refresh disabled={busy() || props.moneyBlocked} onClick={() => void ask(c.node_id, PORCH_CARD_PATH)}>
-                      Refresh · {cost(c.node_id)}
+                      Refresh · page price {cost(c.node_id)}
                     </button>
                   </Show>
                 </li>

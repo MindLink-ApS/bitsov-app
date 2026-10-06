@@ -221,11 +221,32 @@ describe('PorchPanel', () => {
     expect(s.reads).toEqual([]);
   });
 
+  it('points a refused quote to the existing knock flow without offering payment or reading', async () => {
+    const s = stub(() => page('/front-door.json', 'card', ''));
+    s.source.porchQuote = async () => {
+      throw {
+        code: 'porch_knock_first',
+        message: 'Knock first. You have no session with this node yet: Knock from their profile link (it pays their admission once), then read their porch. Nothing was paid.',
+      };
+    };
+    mount(s);
+    await tick();
+    click('[data-porch-open-card]');
+    await tick();
+    const hint = $('[data-soft-error="porch-error"]')?.textContent;
+    expect(hint).toContain('Knock first');
+    expect(hint).toContain('profile link');
+    expect(hint).toContain('Nothing was paid.');
+    expect($('[data-porch-review]')).toBeNull();
+    expect($('[data-porch-confirm]')).toBeNull();
+    expect(s.reads).toEqual([]);
+  });
+
   it('shows the 1 sat cost before a read and pays it after one confirm, once', async () => {
     const s = stub(() => ({ ...page('/front-door.json', 'card', ''), card: card(MAYA, false) }));
     mount(s);
     await tick();
-    expect($('[data-porch-open-card]')!.textContent).toBe('Open profile card · 1 sat');
+    expect($('[data-porch-open-card]')!.textContent).toBe('Open profile card · page price 1 sat');
 
     click('[data-porch-open-card]');
     await tick();
@@ -310,7 +331,7 @@ describe('PorchPanel', () => {
     await tick();
     expect(s.reads).toEqual([]);
     expect($('[data-porch-cached]')!.textContent).toContain('Cached');
-    expect($('[data-porch-refresh]')!.textContent).toBe('Refresh · 1 sat');
+    expect($('[data-porch-refresh]')!.textContent).toBe('Refresh · page price 1 sat');
 
     click('[data-porch-refresh]');
     await tick();
