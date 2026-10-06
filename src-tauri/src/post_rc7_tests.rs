@@ -477,6 +477,8 @@ exec sleep 30
                 }
                 Err(e) => panic!("{e}"),
             };
+            // macOS accepted sockets inherit the listener's O_NONBLOCK.
+            stream.set_nonblocking(false).unwrap();
             stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
             let mut reader = std::io::BufReader::new(stream);
             let mut request = String::new();
