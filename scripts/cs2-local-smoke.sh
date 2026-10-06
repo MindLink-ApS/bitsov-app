@@ -213,6 +213,8 @@ non_loopback_urls() {
     grep -oE 'https?://[^"/ )}`]+' |
     grep -vE '^https?://(127\.0\.0\.1|localhost)(:|$)' |
     grep -vE '^https?://([a-z0-9-]+\.)*example(:|$)' || true
+  # userinfo (http://127.0.0.1@evil.host) would hide the real host: never allowed.
+  grep -En 'https?://[^/" ]*@' "$HOST" | grep -vE '^[0-9]+:[[:space:]]*//' || true
 }
 chk "control plane is loopback-only" \
   test -z "$(non_loopback_urls)"
