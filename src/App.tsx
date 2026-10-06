@@ -154,7 +154,7 @@ export default function App() {
       </Show>
 
       <Show
-        when={status().initialization_repair === 'required' || status().initialization_repair === 'repairing'}
+        when={status().initialization_repair && status().initialization_repair !== 'none'}
         fallback={<>
           <Onboarding
             status={status}
@@ -212,10 +212,18 @@ export default function App() {
           </Show>
         </>}
       >
-        <InitializationRepair
-          repairing={status().initialization_repair === 'repairing'}
-          onConfirm={async () => { try { await source().nodeRepairInitialized(true); } finally { await poll(); } }}
-        />
+        <Show keyed when={status().initialization_repair?.startsWith('price_floor') ? 'price' : 'marker'}>{(kind) =>
+          <InitializationRepair
+            priceFloor={kind === 'price'}
+            repairing={status().initialization_repair === 'repairing' || status().initialization_repair === 'price_floor_repairing'}
+            onConfirm={async () => {
+              try {
+                if (kind === 'price') await source().nodeRepairPriceFloor(true);
+                else await source().nodeRepairInitialized(true);
+              } finally { await poll(); }
+            }}
+          />
+        }</Show>
       </Show>
     </div>
   );

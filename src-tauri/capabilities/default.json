@@ -17,6 +17,7 @@
     "allow-local-owner-finalize",
     "allow-local-owner-reconcile",
     "allow-node-repair-initialized",
+    "allow-node-repair-price-floor",
     "allow-fund-state",
     "allow-fund-start",
     "allow-funding-address",

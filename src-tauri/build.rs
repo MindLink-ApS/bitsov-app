@@ -22,6 +22,7 @@ fn main() {
             "local_owner_finalize",
             "local_owner_reconcile",
             "node_repair_initialized",
+            "node_repair_price_floor",
             "fund_state",
             "fund_start",
             "funding_address",
