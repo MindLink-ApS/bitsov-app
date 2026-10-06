@@ -7417,56 +7417,93 @@ mod verified_local_socket_tests {
         assert!(!listen_name_serves_ipv4_loopback("192.168.1.5:3141", 3141));
     }
 
-    /// Supervised analogue on `[::1]`, decoy forward on `127.0.0.1` — same port.
-    /// Port-wide PID membership would accept the supervised child; the IPv4
-    /// endpoint and a real connect must attribute the socket to the decoy.
-    #[test]
-    fn decoy_ipv4_listener_is_not_the_supervised_ipv6_sibling() {
-        use std::time::{Duration, Instant};
-        let supervised = TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).expect("bind ::1");
-        let port = supervised.local_addr().unwrap().port();
-        let supervised_pid = std::process::id();
+    /// Exit code the decoy uses when `127.0.0.1:<port>` is already taken.
+    const DECOY_PORT_BUSY: i32 = 3;
 
-        // A file lets readiness polling honor its deadline even if the child
+    /// Binds `127.0.0.1:<port>`, prints `ready`, then idles. EADDRINUSE is a
+    /// distinct exit so the caller can pick a fresh port; any other failure
+    /// keeps its traceback on stderr.
+    const DECOY_SCRIPT: &str = r#"import errno, socket, sys, time
+s = socket.socket()
+try:
+    s.bind(('127.0.0.1', int(sys.argv[1])))
+except OSError as e:
+    if e.errno == errno.EADDRINUSE:
+        sys.exit(3)
+    raise
+s.listen()
+print('ready', flush=True)
+time.sleep(60)
+"#;
+
+    struct Kill(std::process::Child);
+    impl Drop for Kill {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    /// Starts the IPv4 decoy on `port`. `None` means the IPv4 port was already
+    /// taken by some other process; every other failure panics with stderr.
+    fn spawn_ipv4_decoy(port: u16) -> Option<Kill> {
+        use std::time::{Duration, Instant};
+        // Files let readiness polling honor its deadline even if the child
         // never writes anything; a blocking pipe read could wait indefinitely.
         let ready = tempfile::NamedTempFile::new().expect("decoy readiness file");
+        let stderr = tempfile::NamedTempFile::new().expect("decoy stderr file");
         let decoy = Command::new("python3")
-            .args([
-                "-u",
-                "-c",
-                "import socket,sys,time; s=socket.socket(); \
-                 s.bind(('127.0.0.1',int(sys.argv[1]))); s.listen(); \
-                 print('ready',flush=True); time.sleep(60)",
-                &port.to_string(),
-            ])
+            .args(["-u", "-c", DECOY_SCRIPT, &port.to_string()])
             .stdout(Stdio::from(ready.reopen().expect("open decoy readiness output")))
+            .stderr(Stdio::from(stderr.reopen().expect("open decoy stderr output")))
             .spawn()
             .expect("python decoy");
-        let decoy_pid = decoy.id();
-
-        struct Kill(std::process::Child);
-        impl Drop for Kill {
-            fn drop(&mut self) {
-                let _ = self.0.kill();
-                let _ = self.0.wait();
-            }
-        }
         let mut keepalive = Kill(decoy);
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             let output = std::fs::read_to_string(ready.path()).expect("read decoy readiness");
             if output.trim() == "ready" {
-                break;
+                return Some(keepalive);
             }
             if let Some(status) = keepalive.0.try_wait().expect("check decoy status") {
-                panic!("IPv4 decoy exited before readiness: {status}; output: {output:?}");
+                if status.code() == Some(DECOY_PORT_BUSY) {
+                    return None;
+                }
+                let err = std::fs::read_to_string(stderr.path()).unwrap_or_default();
+                panic!(
+                    "IPv4 decoy exited before readiness: {status}; output: {output:?}; stderr: {err:?}"
+                );
             }
-            assert!(
-                Instant::now() < deadline,
-                "IPv4 decoy did not report 'ready' within 5 seconds; output: {output:?}"
-            );
+            if Instant::now() >= deadline {
+                let err = std::fs::read_to_string(stderr.path()).unwrap_or_default();
+                panic!(
+                    "IPv4 decoy did not report 'ready' within 5 seconds; output: {output:?}; stderr: {err:?}"
+                );
+            }
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    /// Supervised analogue on `[::1]`, decoy forward on `127.0.0.1` — same port.
+    /// Port-wide PID membership would accept the supervised child; the IPv4
+    /// endpoint and a real connect must attribute the socket to the decoy.
+    #[test]
+    fn decoy_ipv4_listener_is_not_the_supervised_ipv6_sibling() {
+        // The kernel picks a free `[::1]` port, but the same number on
+        // `127.0.0.1` can belong to another process or parallel test (e.g. an
+        // outgoing connection's local port). Retry with a fresh pair then.
+        const ATTEMPTS: usize = 20;
+        let (supervised, port, keepalive) = (0..ATTEMPTS)
+            .find_map(|_| {
+                let supervised = TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).expect("bind ::1");
+                let port = supervised.local_addr().unwrap().port();
+                spawn_ipv4_decoy(port).map(|decoy| (supervised, port, decoy))
+            })
+            .unwrap_or_else(|| {
+                panic!("127.0.0.1 was busy for {ATTEMPTS} fresh [::1] ports in a row")
+            });
+        let supervised_pid = std::process::id();
+        let decoy_pid = keepalive.0.id();
 
         let port_wide = loopback_listener_pids(port);
         assert!(
