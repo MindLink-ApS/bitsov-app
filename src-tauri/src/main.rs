@@ -5087,6 +5087,11 @@ async fn read_porch_quote(state: &NodeState, peer: &str, path: &str) -> Result<a
         let (status, text) = call_api(state, reqwest::Method::POST, porch::QUOTE_ROUTE,
             Some(serde_json::json!({"node_id": peer, "path": path}))).await.map_err(ActionError::node)?;
         if !status.is_success() {
+            if matches!(status.as_u16(), 403 | 409)
+                && serde_json::from_str::<serde_json::Value>(&text).ok()
+                    .is_some_and(|v| v["reason"] == "admission_required") {
+                return Err(porch::refused("porch_knock_first"));
+            }
             if act::readmission_capped_refusal(status.as_u16(), &text) {
                 return Err(porch::refused("porch_readmission"));
             }
@@ -5098,7 +5103,8 @@ async fn read_porch_quote(state: &NodeState, peer: &str, path: &str) -> Result<a
         return porch::quote(&text, &peer, &path);
     }
     if !offers(porch::CAPABILITY) {
-        return Err(porch::refused("porch_unavailable"));
+        return Err(ActionError::new("porch_unavailable",
+            "Your node cannot read porches yet. Update it to read contacts’ cards and pages. Nothing was paid."));
     }
     let peers: Vec<control::Peer> = get_json(state, "/peers").await.map_err(ActionError::node)?;
     match control::with_porch_support(peers).into_iter().find(|p| p.node_id.eq_ignore_ascii_case(&peer)) {
@@ -9997,7 +10003,11 @@ mod control_act_tests {
     async fn porch_missing_or_failed_preflight_never_reserves_or_falls_back() {
         for (status, reply, expected) in [
             (200, serde_json::json!({"status": "NotFound", "amount_msat": null, "max_routing_fee_msat": 0, "max_total_msat": 0}), "porch_not_found"),
-            (200, serde_json::json!({"status": "Forbidden", "amount_msat": null, "max_routing_fee_msat": 0, "max_total_msat": 0}), "porch_unavailable"),
+            (200, serde_json::json!({"status": "Forbidden", "amount_msat": null, "max_routing_fee_msat": 0, "max_total_msat": 0}), "porch_knock_first"),
+            (200, serde_json::json!({"status": "Forbidden", "reason": "admission_required", "amount_msat": null, "max_routing_fee_msat": 0, "max_total_msat": 0}), "porch_knock_first"),
+            (403, serde_json::json!({"reason": "admission_required"}), "porch_knock_first"),
+            (409, serde_json::json!({"reason": "admission_required"}), "porch_knock_first"),
+            (200, serde_json::json!({"status": "Unavailable", "amount_msat": null, "max_routing_fee_msat": 0, "max_total_msat": 0}), "porch_unavailable"),
             (409, serde_json::json!({"reason": "porch_quote_unavailable"}), "porch_quote_unavailable"),
             (409, serde_json::json!({"code": "price_cap_exceeded", "reason": "readmission_required"}), "porch_readmission"),
             (404, serde_json::json!({"error": "no route"}), "node"),
@@ -10014,6 +10024,11 @@ mod control_act_tests {
             porch_budget(&node, &peer).await;
             let error = do_porch_read(&node.state, &peer, "/empty.txt", 6000).await.unwrap_err();
             assert_eq!(error.code, expected);
+            if expected == "porch_knock_first" {
+                assert!(error.message.contains("Knock first"));
+                assert!(error.message.contains("profile link"));
+                assert!(error.message.ends_with("Nothing was paid."));
+            }
             assert!(fetches(&node).is_empty());
             assert!(!journal_file(&node).exists());
             assert_eq!(budget_now(&node.state).unsettled_msat, 0);

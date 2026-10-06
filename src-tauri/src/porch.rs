@@ -94,7 +94,11 @@ pub fn quote(text: &str, peer: &str, path: &str) -> Result<PaymentQuote, ActionE
         if reply.amount_msat.is_some() || reply.max_total_msat != 0 || reply.max_routing_fee_msat != 0 {
             return Err(invalid());
         }
-        return Err(refused(if reply.status == "NotFound" { "porch_not_found" } else { "porch_unavailable" }));
+        return Err(refused(match reply.status.as_str() {
+            "NotFound" => "porch_not_found",
+            "Forbidden" => "porch_knock_first",
+            _ => "porch_unavailable",
+        }));
     }
     let principal_msat = reply.amount_msat.filter(|n| *n >= MIN_READ_MSAT).ok_or_else(invalid)?;
     if principal_msat.checked_add(reply.max_routing_fee_msat) != Some(reply.max_total_msat)
@@ -134,7 +138,7 @@ pub fn refused(code: &'static str) -> ActionError {
         "porch_busy" => "A read from this node is already in progress. Wait for it to finish.",
         "porch_own_node" => "That is your own node. Your own profile is under Profile in Settings.",
         "porch_path_invalid" => "A porch serves its profile card and flat .md or .txt pages only, like /index.md.",
-        "porch_unsupported" => "Their node does not offer porch reads (it does not advertise porch_read_v1).",
+        "porch_unsupported" => "Their node does not offer porch reads (it does not advertise porch_quote_v1 or legacy porch_read_v1).",
         "porch_unavailable" => "This card or page is unavailable right now.",
         "porch_not_found" => "Not found or empty: their node has no content at this path.",
         "porch_quote_unavailable" => "Their node could not provide a quote. It may need upgrading or may be offline. Try checking again later.",
