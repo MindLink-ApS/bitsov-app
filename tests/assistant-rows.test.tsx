@@ -121,7 +121,7 @@ describe('sealed assistant rows', () => {
   it('uses the global name the Rust host defines', () => {
     const sitMock = readFileSync(resolve(rootDir, 'src-tauri/src/jarvis/sit_mock.rs'), 'utf8');
     expect(sitMock).toContain(`ASSISTANT_ROWS_GLOBAL: &str = "${ROWS_GLOBAL}"`);
-    const main = readFileSync(resolve(rootDir, 'src-tauri/src/main.rs'), 'utf8');
+    const main = readFileSync(resolve(rootDir, 'src-tauri/src/app.rs'), 'utf8');
     expect(main).toContain(`'${ROWS_GLOBAL}'`);
     expect(main).toContain('.initialization_script(assistant_rows_script())');
   });

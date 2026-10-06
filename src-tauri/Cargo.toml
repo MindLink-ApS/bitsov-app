@@ -5,17 +5,15 @@ edition = "2021"
 description = "BitSov — the sovereign conversational client (desktop shell)"
 default-run = "bitsov-app"
 
+[lib]
+name = "bitsov_app"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-# app #16: own the node process through the same primitive tauri-plugin-shell uses
-# internally. SharedChild waits with POSIX waitid, which reaps WITHOUT freeing the
-# pid for reuse, so `send_signal` is safe against the pid-reuse race that a
-# check-then-`kill(2)` adapter cannot close.
-shared_child = "1.1"
 tauri = { version = "2", features = [] }
-tauri-plugin-shell = "2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -38,7 +36,6 @@ base64 = "0.22"
 zeroize = { version = "1", features = ["serde"] }
 snow = "0.9"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
-rfd = "0.15"
 # Decode BOLT 11 invoices exactly as the node's payment path does (genome
 # dac01c8 locks lightning-invoice 0.34.1 via ldk-node 0.7.0). Keep in lockstep.
 lightning-invoice = "=0.34.1"
@@ -51,8 +48,18 @@ lightning-invoice = "=0.34.1"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# Desktop-only process supervision, sidecar launch, and native file dialog.
+[target.'cfg(not(any(target_os = "ios", target_os = "android")))'.dependencies]
+bitsov-ffi = { path = "ffi" }
+shared_child = "1.1"
+tauri-plugin-shell = "2"
+rfd = "0.15"
+
 [features]
 default = []
+# Lets the host toolchain compile the pure-client cfg path before mobile SDKs
+# are installed. Tauri mobile targets select the same path through `cfg(mobile)`.
+mobile = ["bitsov-ffi/mobile"]
 # Opt-in on macOS with BITSOV_LOCAL_OWNER_CEREMONY=1; bundled rc9 supports #237.
 local-owner-ceremony = []
 # Mock-only SIT reader example. Pulls in `mock-node`; not part of the app binary.
@@ -73,8 +80,7 @@ tokio = { version = "1", features = ["test-util"] }
 tauri = { version = "2", features = ["test"] }
 # In-process stand-in for broker tests. The app binary does not link this.
 mock-node = { path = "crates/mock-node" }
-# Verifies Secure Enclave P-256 signatures in device_key tests. Already in the
-# lock (via rustls), so this adds no new crate.
+# Verifies P-256 signatures in app-level device approval tests.
 ring = "0.17"
 
 [[example]]
@@ -84,6 +90,6 @@ required-features = ["sit-mock"]
 # Jarvis Phase 1 test bed. The app binary does not link it. `cargo test`
 # in this directory builds it, and the broker tests above use it in-process.
 [workspace]
-members = [".", "crates/mock-node"]
-default-members = [".", "crates/mock-node"]
+members = [".", "crates/mock-node", "ffi"]
+default-members = [".", "crates/mock-node", "ffi"]
 resolver = "2"

@@ -36,7 +36,7 @@ PLIST="$APP/Contents/Info.plist"
 
 # Strings that exist only in assistant.html, its Vite chunk, or
 # jarvis/fixtures/questions.json. "/assistant.html" itself is NOT a marker:
-# main.rs compiles that navigation literal into every build. Tauri stores asset
+# app.rs compiles that navigation literal into every build. Tauri stores asset
 # keys uncompressed but brotli-compresses asset bodies, so the asset key and the
 # fixture (include_str!, uncompressed) are the reliable binary markers; the CSP
 # line catches an uncompressed embed. The dist check below is the primary gate

@@ -14,37 +14,12 @@ fn service(node: &str, suffix: &str) -> Result<String, String> {
     Ok(format!("bitsov.node.{node}.{suffix}"))
 }
 
-#[cfg(target_os = "macos")]
-extern "C" {
-    fn bitsov_home_store(
-        service: *const std::ffi::c_char,
-        bytes: *const u8,
-        count: usize,
-        secret: i32,
-    ) -> i32;
-    fn bitsov_home_read(
-        service: *const std::ffi::c_char,
-        output: *mut u8,
-        capacity: usize,
-        length: *mut usize,
-    ) -> i32;
-}
-
 fn store(node: &str, suffix: &str, bytes: &[u8], secret: bool) -> Result<(), String> {
     let name = service(node, suffix)?;
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", desktop, not(feature = "mobile")))]
     {
-        let name = std::ffi::CString::new(name).map_err(|_| "Invalid Keychain item.")?;
-        // SAFETY: all input buffers are live for this synchronous call; Swift copies
-        // at most bytes.len(), retains no pointers, and creates the ACL itself.
-        let status = unsafe {
-            bitsov_home_store(
-                name.as_ptr(),
-                bytes.as_ptr(),
-                bytes.len(),
-                i32::from(secret),
-            )
-        };
+        let status = bitsov_ffi::home_keychain::store(&name, bytes, secret)
+            .map_err(|_| "Invalid Keychain item.")?;
         if status == 0 {
             Ok(())
         } else {
@@ -53,7 +28,7 @@ fn store(node: &str, suffix: &str, bytes: &[u8], secret: bool) -> Result<(), Str
             ))
         }
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(all(target_os = "macos", desktop, not(feature = "mobile"))))]
     {
         let _ = (name, bytes, secret);
         Err("Home-node unlock requires macOS Keychain.".into())
@@ -61,16 +36,10 @@ fn store(node: &str, suffix: &str, bytes: &[u8], secret: bool) -> Result<(), Str
 }
 fn read(node: &str, suffix: &str) -> Result<Option<Zeroizing<Vec<u8>>>, String> {
     let name = service(node, suffix)?;
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", desktop, not(feature = "mobile")))]
     {
-        let name = std::ffi::CString::new(name).map_err(|_| "Invalid Keychain item.")?;
-        let mut bytes = Zeroizing::new(vec![0; 16384]);
-        let mut length = 0;
-        // SAFETY: output is a live writable buffer of capacity bytes.len(). The
-        // Swift bridge enforces capacity and does not retain pointers.
-        let status = unsafe {
-            bitsov_home_read(name.as_ptr(), bytes.as_mut_ptr(), bytes.len(), &mut length)
-        };
+        let (status, length, mut bytes) =
+            bitsov_ffi::home_keychain::read(&name, 16384).map_err(|_| "Invalid Keychain item.")?;
         if status == -25300 {
             return Ok(None);
         }
@@ -82,7 +51,7 @@ fn read(node: &str, suffix: &str) -> Result<Option<Zeroizing<Vec<u8>>>, String> 
         bytes.truncate(length);
         Ok(Some(bytes))
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(all(target_os = "macos", desktop, not(feature = "mobile"))))]
     {
         let _ = name;
         Err("Home-node unlock requires macOS Keychain.".into())
@@ -125,6 +94,7 @@ pub fn binding(node: &str) -> Result<UnlockBinding, String> {
 
 /// Called by the existing owner ceremony (or a future approved device enrollment),
 /// never by a command accepting a typed password from the renderer.
+#[allow(dead_code)]
 pub fn save_password(node: &str, password: &[u8]) -> Result<(), String> {
     if password.is_empty() || password.len() > 4096 {
         return Err("Invalid seed password length.".into());

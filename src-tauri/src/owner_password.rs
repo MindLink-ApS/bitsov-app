@@ -7,7 +7,8 @@ use zeroize::Zeroizing;
 
 pub fn load(data_dir: &Path, allow_create: bool) -> Result<Zeroizing<Vec<u8>>, String> {
     if let Some(node) = bound_node(data_dir)? {
-        return crate::home_keychain::password(&node).map(|password| Zeroizing::new(password.as_bytes().to_vec()));
+        return super::home_keychain::password(&node)
+            .map(|password| Zeroizing::new(password.as_bytes().to_vec()));
     }
     let account = account(data_dir);
     load_from(
@@ -22,7 +23,8 @@ fn account(data_dir: &Path) -> String {
     blake3::hash(data_dir.as_os_str().as_encoded_bytes()).to_hex().to_string()
 }
 fn bound_node(data_dir: &Path) -> Result<Option<String>, String> {
-    let bytes = crate::device::read_private(&data_dir.join(BINDING_FILE)).map_err(|_| "Cannot read the seed-password binding.")?;
+    let bytes = super::device::read_private(&data_dir.join(BINDING_FILE))
+        .map_err(|_| "Cannot read the seed-password binding.")?;
     bytes.map(|bytes| serde_json::from_slice::<String>(&bytes).map_err(|_| "Invalid seed-password binding.".into())).transpose()
 }
 
@@ -35,17 +37,18 @@ pub fn bind_to_node(data_dir: &Path, node: &str) -> Result<(), String> {
         // Re-verify and sync before retiring a legacy copy on a retry.
         let Some(legacy) = read(&account(data_dir))? else { return Ok(()); };
         return migrate(&legacy, || Ok(()),
-            || crate::home_keychain::password(node).map(|s| Zeroizing::new(s.as_bytes().to_vec())),
+            || super::home_keychain::password(node).map(|s| Zeroizing::new(s.as_bytes().to_vec())),
             || sync_binding(data_dir), || remove(&account(data_dir)));
     }
     let password = load(data_dir, false)?;
     migrate(
         &password,
-        || crate::home_keychain::save_password(node, &password),
-        || crate::home_keychain::password(node).map(|s| Zeroizing::new(s.as_bytes().to_vec())),
+        || super::home_keychain::save_password(node, &password),
+        || super::home_keychain::password(node).map(|s| Zeroizing::new(s.as_bytes().to_vec())),
         || {
             let bytes = serde_json::to_vec(node).map_err(|_| "Cannot encode seed-password binding.")?;
-            crate::device::write_private(&data_dir.join(BINDING_FILE), &bytes).map_err(|_| "Cannot save seed-password binding.")?;
+            super::device::write_private(&data_dir.join(BINDING_FILE), &bytes)
+                .map_err(|_| "Cannot save seed-password binding.")?;
             sync_binding(data_dir)
         },
         || remove(&account(data_dir)),
@@ -100,112 +103,7 @@ pub fn deliver(
 }
 
 #[cfg(target_os = "macos")]
-mod native {
-    use super::*;
-    use std::ffi::c_void;
-    // Default Keychain ACL restricts the item to the creating application. Signing
-    // and hardened runtime remain release requirements; unsigned dev is weaker.
-    const SERVICE: &[u8] = b"tech.mindlink.bitsov.local-owner.seed-password.v1";
-    #[link(name = "Security", kind = "framework")]
-    extern "C" {
-        fn SecKeychainFindGenericPassword(
-            keychain: *const c_void,
-            service_len: u32,
-            service: *const u8,
-            account_len: u32,
-            account: *const u8,
-            len: *mut u32,
-            data: *mut *mut c_void,
-            item: *mut *mut c_void,
-        ) -> i32;
-        fn SecKeychainAddGenericPassword(
-            keychain: *const c_void,
-            service_len: u32,
-            service: *const u8,
-            account_len: u32,
-            account: *const u8,
-            len: u32,
-            data: *const u8,
-            item: *mut *mut c_void,
-        ) -> i32;
-        fn SecKeychainItemDelete(item: *const c_void) -> i32;
-        fn CFRelease(item: *const c_void);
-        fn SecKeychainItemFreeContent(attrs: *mut c_void, data: *mut c_void) -> i32;
-    }
-    pub fn read(account: &str) -> Result<Option<Zeroizing<Vec<u8>>>, String> {
-        let mut len = 0;
-        let mut ptr = std::ptr::null_mut();
-        let status = unsafe {
-            SecKeychainFindGenericPassword(
-                std::ptr::null(),
-                SERVICE.len() as u32,
-                SERVICE.as_ptr(),
-                account.len() as u32,
-                account.as_ptr(),
-                &mut len,
-                &mut ptr,
-                std::ptr::null_mut(),
-            )
-        };
-        if status == -25300 {
-            return Ok(None);
-        } // errSecItemNotFound only
-        if status != 0 {
-            return Err(format!(
-                "Keychain refused access to this app's seed password ({status})."
-            ));
-        }
-        let password = if ptr.is_null() || len != 44 {
-            None
-        } else {
-            Some(Zeroizing::new(
-                unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) }.to_vec(),
-            ))
-        };
-        if !ptr.is_null() {
-            // Erase the Security framework's returned allocation before freeing.
-            unsafe {
-                use zeroize::Zeroize;
-                std::slice::from_raw_parts_mut(ptr as *mut u8, len as usize).zeroize();
-                SecKeychainItemFreeContent(std::ptr::null_mut(), ptr);
-            }
-        }
-        password.map(Some).ok_or_else(|| {
-            "This app's Keychain seed password is invalid; it was not replaced.".into()
-        })
-    }
-    pub fn remove(account: &str) -> Result<(), String> {
-        let mut item = std::ptr::null_mut();
-        // Query the one exact app-owned legacy item, without requesting its data.
-        let status = unsafe { SecKeychainFindGenericPassword(std::ptr::null(), SERVICE.len() as u32,
-            SERVICE.as_ptr(), account.len() as u32, account.as_ptr(), std::ptr::null_mut(), std::ptr::null_mut(), &mut item) };
-        if status == -25300 { return Ok(()); }
-        if status != 0 || item.is_null() { return Err("Cannot retire the legacy launcher password.".into()); }
-        let status = unsafe { let status = SecKeychainItemDelete(item); CFRelease(item); status };
-        if status == 0 { Ok(()) } else { Err("Cannot retire the legacy launcher password.".into()) }
-    }
-    pub fn add(account: &str, password: &[u8]) -> Result<(), String> {
-        let status = unsafe {
-            SecKeychainAddGenericPassword(
-                std::ptr::null(),
-                SERVICE.len() as u32,
-                SERVICE.as_ptr(),
-                account.len() as u32,
-                account.as_ptr(),
-                password.len() as u32,
-                password.as_ptr(),
-                std::ptr::null_mut(),
-            )
-        };
-        if status == 0 {
-            Ok(())
-        } else {
-            Err(format!("Keychain could not store this app's seed password ({status}); the node was not started."))
-        }
-    }
-}
-#[cfg(target_os = "macos")]
-use native::{add, read, remove};
+use bitsov_ffi::owner_password::{add, read, remove};
 #[cfg(not(target_os = "macos"))]
 fn read(_: &str) -> Result<Option<Zeroizing<Vec<u8>>>, String> {
     Err("Local owner setup requires macOS Keychain.".into())
@@ -260,7 +158,7 @@ mod tests {
     #[test]
     fn invalid_node_binding_never_falls_back_to_unprotected_keychain() {
         let dir = tempfile::tempdir().unwrap();
-        crate::device::write_private(&dir.path().join(BINDING_FILE), b"not json").unwrap();
+        super::super::device::write_private(&dir.path().join(BINDING_FILE), b"not json").unwrap();
         assert!(load(dir.path(), true).unwrap_err().contains("binding"));
     }
     #[test]

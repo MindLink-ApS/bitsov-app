@@ -433,6 +433,7 @@ name = "bitsov-app"
 version = "0.0.1"
 dependencies = [
  "base64 0.22.1",
+ "bitsov-ffi",
  "blake3",
  "ed25519-dalek",
  "futures-util",
@@ -456,6 +457,15 @@ dependencies = [
  "tokio-tungstenite",
  "toml 1.1.4+spec-1.1.0",
  "x25519-dalek",
+ "zeroize",
+]
+
+[[package]]
+name = "bitsov-ffi"
+version = "0.0.1"
+dependencies = [
+ "libc",
+ "ring",
  "zeroize",
 ]
 

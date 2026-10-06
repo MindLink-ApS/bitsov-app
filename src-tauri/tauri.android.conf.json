@@ -1,0 +1,8 @@
+{
+  "build": {
+    "beforeBundleCommand": null
+  },
+  "bundle": {
+    "externalBin": []
+  }
+}

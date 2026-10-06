@@ -20,7 +20,7 @@
 set -uo pipefail
 
 APP="src/App.tsx"
-HOST="src-tauri/src/main.rs"
+HOST="src-tauri/src/app.rs"
 fail=0
 
 chk() {
