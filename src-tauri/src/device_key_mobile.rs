@@ -99,6 +99,7 @@ mod android {
         suffix: &'a str,
         value: Zeroizing<String>,
         secret: bool,
+        reenroll: bool,
     }
 
     #[derive(Serialize)]
@@ -231,18 +232,25 @@ mod android {
 
     /// Store an exact node-scoped home-node record in the Android app sandbox.
     /// Secret records require the device-key blob and are encrypted with its
-    /// biometric-bound companion key by the native plugin.
+    /// biometric-bound companion key by the native plugin. `reenroll` lets the
+    /// plugin replace that companion key only if Keystore reports it
+    /// permanently invalidated; it is set only from the owner's explicit
+    /// "Remember on this phone" choice.
     pub fn store_home_item(
         device_blob: Option<&[u8]>,
         node: &str,
         suffix: &str,
         value: &[u8],
         secret: bool,
+        reenroll: bool,
     ) -> Result<(), DeviceKeyError> {
         if secret != (suffix == "seed-password") {
             return Err(DeviceKeyError::Invalid);
         }
         if secret && device_blob.map_or(true, |blob| blob.is_empty()) {
+            return Err(DeviceKeyError::Invalid);
+        }
+        if reenroll && !secret {
             return Err(DeviceKeyError::Invalid);
         }
         let response: CommandResponse = run(
@@ -253,6 +261,7 @@ mod android {
                 suffix,
                 value: Zeroizing::new(STANDARD.encode(value)),
                 secret,
+                reenroll,
             },
         )?;
         checked(response).map(|_| ())
@@ -326,6 +335,7 @@ pub fn store_home_item(
     _suffix: &str,
     _value: &[u8],
     _secret: bool,
+    _reenroll: bool,
 ) -> Result<(), DeviceKeyError> {
     Err(DeviceKeyError::Unavailable)
 }

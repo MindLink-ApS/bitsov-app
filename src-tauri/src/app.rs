@@ -218,6 +218,10 @@ struct NodeState {
     remote_mode: AtomicBool,
     home_locked: AtomicBool,
     home_last_probe: Mutex<Option<Instant>>,
+    /// A typed password the node just accepted, held for the owner's
+    /// "Remember on this phone" choice. Memory only, single use.
+    #[cfg(target_os = "android")]
+    home_remember: Mutex<Option<home_unlock::RememberOffer>>,
     remote_descriptor: Mutex<Option<remote_access::RemoteDescriptor>>,
     remote_retry: Arc<bitsov_app::connection_retry::RemoteRetry>,
     remote_recovery: tokio::sync::Mutex<()>,
@@ -364,6 +368,8 @@ impl NodeState {
             remote_mode: AtomicBool::new(false),
             home_locked: AtomicBool::new(false),
             home_last_probe: Mutex::new(None),
+            #[cfg(target_os = "android")]
+            home_remember: Mutex::new(None),
             remote_descriptor: Mutex::new(None),
             remote_retry: Arc::new(bitsov_app::connection_retry::RemoteRetry::default()),
             remote_recovery: tokio::sync::Mutex::new(()),
@@ -2035,6 +2041,49 @@ async fn node_unlock(window: WebviewWindow<impl tauri::Runtime>, state: State<'_
     reject_sealed_window(&window)?;
     drop(window);
     home_unlock::unlock(state.inner()).await
+}
+
+/// Android only: unlock with the node password the owner typed on this phone.
+/// The node checks it. It is never returned, logged or written here; only
+/// `node_unlock_remember` can save it, under the biometric-bound home key.
+#[tauri::command]
+#[cfg(target_os = "android")]
+async fn node_unlock_password(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    password: zeroize::Zeroizing<String>,
+) -> Result<(), String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    home_unlock::unlock_typed(state.inner(), password).await
+}
+
+/// Android only: the owner's answer to "Remember on this phone (fingerprint)".
+/// Takes no password; it uses the one the node accepted moments ago.
+#[tauri::command]
+#[cfg(target_os = "android")]
+async fn node_unlock_remember(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    remember: bool,
+) -> Result<(), String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    home_unlock::remember(state.inner(), remember).await
+}
+
+#[tauri::command]
+#[cfg(not(target_os = "android"))]
+async fn node_unlock_password(window: WebviewWindow<impl tauri::Runtime>) -> Result<(), String> {
+    reject_sealed_window(&window)?;
+    Err("Typing the node password to unlock is only available on Android.".into())
+}
+
+#[tauri::command]
+#[cfg(not(target_os = "android"))]
+async fn node_unlock_remember(window: WebviewWindow<impl tauri::Runtime>) -> Result<(), String> {
+    reject_sealed_window(&window)?;
+    Err("Remembering a typed node password is only available on Android.".into())
 }
 
 #[tauri::command]
@@ -7218,6 +7267,8 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
         .invoke_handler(tauri::generate_handler![
             node_status,
             node_unlock,
+            node_unlock_password,
+            node_unlock_remember,
             local_owner_create,
             local_owner_cancel,
             local_owner_finalize,
@@ -14540,6 +14591,8 @@ mod assistant_acl_tests {
             [
                 "node_status",
                 "node_unlock",
+                "node_unlock_password",
+                "node_unlock_remember",
                 "local_owner_create",
                 "local_owner_cancel",
                 "local_owner_finalize",

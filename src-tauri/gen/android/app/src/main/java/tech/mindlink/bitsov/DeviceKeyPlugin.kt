@@ -75,6 +75,7 @@ class StoreHomeItemArgs {
     var suffix: String = ""
     var value: String = ""
     var secret: Boolean = false
+    var reenroll: Boolean = false
 }
 
 @InvokeArg
@@ -326,6 +327,28 @@ class DeviceKeyPlugin(private val activity: Activity) : Plugin(activity) {
         return key
     }
 
+    private fun homeEncryptCipher(deviceAlias: String, reenroll: Boolean): Cipher {
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        try {
+            cipher.init(Cipher.ENCRYPT_MODE, homeKey(deviceAlias, true))
+        } catch (invalidated: KeyPermanentlyInvalidatedException) {
+            if (!reenroll) {
+                throw invalidated
+            }
+            reenrollHomeKey(deviceAlias)
+            cipher.init(Cipher.ENCRYPT_MODE, homeKey(deviceAlias, true))
+        }
+        return cipher
+    }
+
+    // Reached only when the owner chose to remember a password the node just
+    // accepted, and Keystore reports this companion key permanently invalidated:
+    // nothing it encrypted can be opened again. Every other alias is untouched.
+    private fun reenrollHomeKey(deviceAlias: String) {
+        verifiedDeviceKey(deviceAlias)
+        keyStore().deleteEntry(homeAlias(deviceAlias))
+    }
+
     private fun preferences() =
         activity.getSharedPreferences(HOME_PREFERENCES, Context.MODE_PRIVATE)
 
@@ -559,8 +582,7 @@ class DeviceKeyPlugin(private val activity: Activity) : Plugin(activity) {
         }
 
         try {
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(Cipher.ENCRYPT_MODE, homeKey(deviceAlias, true))
+            val cipher = homeEncryptCipher(deviceAlias, args.reenroll)
             cipher.updateAAD(item.toByteArray(Charsets.UTF_8))
             val executor = ContextCompat.getMainExecutor(activity)
             val prompt = BiometricPrompt(

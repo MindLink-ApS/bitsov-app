@@ -38,9 +38,7 @@ fn store(
     #[cfg(target_os = "android")]
     {
         let _ = name;
-        super::device_key::store_home_item(device_blob, node, suffix, bytes, secret).map_err(
-            |error| format!("Android encrypted storage refused the home-node item: {error}"),
-        )
+        android_store(device_blob, node, suffix, bytes, secret, false)
     }
     #[cfg(not(any(
         target_os = "android",
@@ -50,6 +48,18 @@ fn store(
         let _ = (name, bytes, secret, device_blob);
         Err("Home-node unlock requires protected device storage.".into())
     }
+}
+#[cfg(target_os = "android")]
+fn android_store(
+    device_blob: Option<&[u8]>,
+    node: &str,
+    suffix: &str,
+    bytes: &[u8],
+    secret: bool,
+    reenroll: bool,
+) -> Result<(), String> {
+    super::device_key::store_home_item(device_blob, node, suffix, bytes, secret, reenroll)
+        .map_err(|error| format!("Android encrypted storage refused the home-node item: {error}"))
 }
 fn read(
     node: &str,
@@ -148,19 +158,22 @@ pub fn save_password(node: &str, password: &[u8]) -> Result<(), String> {
 }
 
 /// Save a password under the Android device key's biometric-bound companion
-/// key. This is host-only plumbing for remote first-run/password transfer; it
-/// must never be exposed as a password-bearing renderer command.
+/// key. Called only by `home_unlock::remember` with a password the node has
+/// just accepted; it must never be exposed as a password-bearing renderer
+/// command. `reenroll` is the owner's explicit choice to replace a companion
+/// key Keystore has permanently invalidated.
 #[cfg(target_os = "android")]
-#[allow(dead_code)]
 pub fn save_password_for_device(
     node: &str,
     password: &[u8],
     device_blob: &[u8],
+    reenroll: bool,
 ) -> Result<(), String> {
     if password.is_empty() || password.len() > 4096 {
         return Err("Invalid seed password length.".into());
     }
-    store(node, "seed-password", password, true, Some(device_blob))
+    service(node, "seed-password")?;
+    android_store(Some(device_blob), node, "seed-password", password, true, reenroll)
 }
 
 pub fn password(node: &str, device_blob: Option<&[u8]>) -> Result<Zeroizing<String>, String> {
