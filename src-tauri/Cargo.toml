@@ -14,6 +14,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+tauri-plugin-barcode-scanner = { version = "=2.5.0", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -62,7 +63,7 @@ tauri-plugin-barcode-scanner = "=2.5.0"
 default = []
 # Lets the host toolchain compile the pure-client cfg path before mobile SDKs
 # are installed. Tauri mobile targets select the same path through `cfg(mobile)`.
-mobile = ["bitsov-ffi/mobile"]
+mobile = ["bitsov-ffi/mobile", "dep:tauri-plugin-barcode-scanner"]
 # Opt-in on macOS with BITSOV_LOCAL_OWNER_CEREMONY=1; bundled rc9 supports #237.
 local-owner-ceremony = []
 # Mock-only SIT reader example. Pulls in `mock-node`; not part of the app binary.
