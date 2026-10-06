@@ -7,7 +7,8 @@ use zeroize::Zeroizing;
 
 pub fn load(data_dir: &Path, allow_create: bool) -> Result<Zeroizing<Vec<u8>>, String> {
     if let Some(node) = bound_node(data_dir)? {
-        return crate::home_keychain::password(&node).map(|password| Zeroizing::new(password.as_bytes().to_vec()));
+        return super::home_keychain::password(&node)
+            .map(|password| Zeroizing::new(password.as_bytes().to_vec()));
     }
     let account = account(data_dir);
     load_from(
@@ -22,7 +23,8 @@ fn account(data_dir: &Path) -> String {
     blake3::hash(data_dir.as_os_str().as_encoded_bytes()).to_hex().to_string()
 }
 fn bound_node(data_dir: &Path) -> Result<Option<String>, String> {
-    let bytes = crate::device::read_private(&data_dir.join(BINDING_FILE)).map_err(|_| "Cannot read the seed-password binding.")?;
+    let bytes = super::device::read_private(&data_dir.join(BINDING_FILE))
+        .map_err(|_| "Cannot read the seed-password binding.")?;
     bytes.map(|bytes| serde_json::from_slice::<String>(&bytes).map_err(|_| "Invalid seed-password binding.".into())).transpose()
 }
 
@@ -35,17 +37,18 @@ pub fn bind_to_node(data_dir: &Path, node: &str) -> Result<(), String> {
         // Re-verify and sync before retiring a legacy copy on a retry.
         let Some(legacy) = read(&account(data_dir))? else { return Ok(()); };
         return migrate(&legacy, || Ok(()),
-            || crate::home_keychain::password(node).map(|s| Zeroizing::new(s.as_bytes().to_vec())),
+            || super::home_keychain::password(node).map(|s| Zeroizing::new(s.as_bytes().to_vec())),
             || sync_binding(data_dir), || remove(&account(data_dir)));
     }
     let password = load(data_dir, false)?;
     migrate(
         &password,
-        || crate::home_keychain::save_password(node, &password),
-        || crate::home_keychain::password(node).map(|s| Zeroizing::new(s.as_bytes().to_vec())),
+        || super::home_keychain::save_password(node, &password),
+        || super::home_keychain::password(node).map(|s| Zeroizing::new(s.as_bytes().to_vec())),
         || {
             let bytes = serde_json::to_vec(node).map_err(|_| "Cannot encode seed-password binding.")?;
-            crate::device::write_private(&data_dir.join(BINDING_FILE), &bytes).map_err(|_| "Cannot save seed-password binding.")?;
+            super::device::write_private(&data_dir.join(BINDING_FILE), &bytes)
+                .map_err(|_| "Cannot save seed-password binding.")?;
             sync_binding(data_dir)
         },
         || remove(&account(data_dir)),
@@ -260,7 +263,7 @@ mod tests {
     #[test]
     fn invalid_node_binding_never_falls_back_to_unprotected_keychain() {
         let dir = tempfile::tempdir().unwrap();
-        crate::device::write_private(&dir.path().join(BINDING_FILE), b"not json").unwrap();
+        super::super::device::write_private(&dir.path().join(BINDING_FILE), b"not json").unwrap();
         assert!(load(dir.path(), true).unwrap_err().contains("binding"));
     }
     #[test]

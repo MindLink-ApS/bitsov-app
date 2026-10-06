@@ -1,9 +1,13 @@
 fn main() {
     println!("cargo:rerun-if-changed=capabilities");
+    println!("cargo:rerun-if-changed=mobile-capabilities");
 
-    // Secure Enclave device key bridge (src/device_key.rs). macOS targets only;
-    // other targets compile a Rust stub that reports "unavailable".
-    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let mobile_feature = std::env::var_os("CARGO_FEATURE_MOBILE").is_some();
+
+    // Secure Enclave device key bridge (src/device_key.rs). Desktop macOS only;
+    // mobile builds compile a platform placeholder and never invoke swiftc.
+    if target_os == "macos" && !mobile_feature {
         build_device_key_swift();
     }
 
@@ -115,7 +119,9 @@ fn main() {
     // created in release, and a window with no capability has no grants. Debug
     // and test builds still compile capabilities/assistant.json so the ACL test
     // can resolve that label.
-    if std::env::var("PROFILE").as_deref() == Ok("release") {
+    if matches!(target_os.as_str(), "ios" | "android") || mobile_feature {
+        attributes = attributes.capabilities_path_pattern("./mobile-capabilities/default.json");
+    } else if std::env::var("PROFILE").as_deref() == Ok("release") {
         attributes = attributes.capabilities_path_pattern("./capabilities/default.json");
     }
 

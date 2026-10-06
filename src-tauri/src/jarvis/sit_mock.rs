@@ -609,8 +609,8 @@ mod tests {
             "mock-node gained a dependency"
         );
 
-        // The window wiring in main.rs: the rows helper and the window builder.
-        let main = std::fs::read_to_string(root.join("src/main.rs")).expect("main.rs");
+        // The window wiring in app.rs: the rows helper and the window builder.
+        let main = std::fs::read_to_string(root.join("src/app.rs")).expect("app.rs");
         let section = main
             .split("// ---- sealed assistant window")
             .nth(1)

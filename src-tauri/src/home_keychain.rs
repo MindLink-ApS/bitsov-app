@@ -14,7 +14,7 @@ fn service(node: &str, suffix: &str) -> Result<String, String> {
     Ok(format!("bitsov.node.{node}.{suffix}"))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", desktop, not(feature = "mobile")))]
 extern "C" {
     fn bitsov_home_store(
         service: *const std::ffi::c_char,
@@ -32,7 +32,7 @@ extern "C" {
 
 fn store(node: &str, suffix: &str, bytes: &[u8], secret: bool) -> Result<(), String> {
     let name = service(node, suffix)?;
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", desktop, not(feature = "mobile")))]
     {
         let name = std::ffi::CString::new(name).map_err(|_| "Invalid Keychain item.")?;
         // SAFETY: all input buffers are live for this synchronous call; Swift copies
@@ -53,7 +53,7 @@ fn store(node: &str, suffix: &str, bytes: &[u8], secret: bool) -> Result<(), Str
             ))
         }
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(all(target_os = "macos", desktop, not(feature = "mobile"))))]
     {
         let _ = (name, bytes, secret);
         Err("Home-node unlock requires macOS Keychain.".into())
@@ -61,7 +61,7 @@ fn store(node: &str, suffix: &str, bytes: &[u8], secret: bool) -> Result<(), Str
 }
 fn read(node: &str, suffix: &str) -> Result<Option<Zeroizing<Vec<u8>>>, String> {
     let name = service(node, suffix)?;
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", desktop, not(feature = "mobile")))]
     {
         let name = std::ffi::CString::new(name).map_err(|_| "Invalid Keychain item.")?;
         let mut bytes = Zeroizing::new(vec![0; 16384]);
@@ -82,7 +82,7 @@ fn read(node: &str, suffix: &str) -> Result<Option<Zeroizing<Vec<u8>>>, String> 
         bytes.truncate(length);
         Ok(Some(bytes))
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(all(target_os = "macos", desktop, not(feature = "mobile"))))]
     {
         let _ = name;
         Err("Home-node unlock requires macOS Keychain.".into())
@@ -125,6 +125,7 @@ pub fn binding(node: &str) -> Result<UnlockBinding, String> {
 
 /// Called by the existing owner ceremony (or a future approved device enrollment),
 /// never by a command accepting a typed password from the renderer.
+#[allow(dead_code)]
 pub fn save_password(node: &str, password: &[u8]) -> Result<(), String> {
     if password.is_empty() || password.len() > 4096 {
         return Err("Invalid seed password length.".into());
