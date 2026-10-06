@@ -86,6 +86,10 @@ The test explicitly lists every permitted difference: absolute scratch roots,
 defaults intentionally omitted by the app (including the empty identity
 passphrase). It checks path suffixes and omitted default values before normalizing;
 unknown fields and changed values fail. Older pins may omit listed defaults too.
+The rc9 `lightning.lsps2_service` block (node #233) is intentionally omitted from
+bootstrap because the node supplies it through serde defaults. The guard checks
+`enabled = false` and every tariff/resource default individually; it does not
+ignore the section, so changed values and additional fields still fail.
 The list permits two reviewed sets of inherited web defaults: rc7's 50 msat
 content/page price and 4 MiB page limit, and the owner node's 1000 msat and 256 KiB.
 Other values or mixtures fail; neither set is written by the app.

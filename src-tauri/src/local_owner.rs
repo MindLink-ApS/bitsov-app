@@ -662,7 +662,13 @@ pub fn launch_enabled(enabled: bool, config: &Path) -> Result<bool, String> {
     let mnemonic = value.get("identity").and_then(|v| v.get("mnemonic_file"))
         .and_then(|v| v.as_str()).ok_or("Node config has no identity mnemonic path")?;
     let path = Path::new(mnemonic);
-    // Match the node: mnemonic_file is used as configured (including relative paths).
+    // Retained configs may name a seed relative to their own directory. Checking
+    // the app's cwd would mistake an existing plaintext identity for a fresh one.
+    let path = if path.is_relative() {
+        config.parent().ok_or("node config directory is unknown")?.join(path)
+    } else {
+        path.to_path_buf()
+    };
     if path.extension().is_some_and(|ext| ext == "enc") {
         return Ok(true);
     }
