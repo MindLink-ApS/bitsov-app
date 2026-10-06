@@ -83,7 +83,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# init-if-needed -- mirrors main.rs `if !config.exists()`: run 1 inits, run 2 reuses.
+# init-if-needed -- mirrors app.rs `if !config.exists()`: run 1 inits, run 2 reuses.
 ensure_init() {
   if [ -s "$CONFIG" ]; then
     echo "SMOKE: config exists — skipping init, reusing $DATA_DIR (durable-identity restart)"

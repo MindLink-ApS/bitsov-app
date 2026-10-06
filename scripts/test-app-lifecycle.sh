@@ -18,17 +18,17 @@ no(){ fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 sk(){ skip=$((skip+1)); printf '  SKIP  %s\n' "$1"; }
 
 # ---- 1. source guard -------------------------------------------------------------
-MAIN=src-tauri/src/main.rs
+APP=src-tauri/src/app.rs
 # Function bodies are captured first: `awk | grep -q` under pipefail fails spuriously
 # (SIGPIPE) once a body outgrows awk's 4 KiB output buffer.
-body() { awk "$1" "$MAIN"; }
+body() { awk "$1" "$APP"; }
 grep_in() { local b; b=$(body "$1"); shift; grep "$@" <<<"$b"; }
-if grep -q 'RunEvent::ExitRequested { .. } | RunEvent::Exit' "$MAIN"; then
+if grep -q 'RunEvent::ExitRequested { .. } | RunEvent::Exit' "$APP"; then
   ok "run loop handles both ExitRequested and Exit (Cmd-Q path)"
 else
   no "run loop must match BOTH RunEvent::ExitRequested and RunEvent::Exit — Cmd-Q emits Exit"
 fi
-if grep -q 'fn stop_supervised_node' "$MAIN"; then ok "teardown goes through stop_supervised_node"
+if grep -q 'fn stop_supervised_node' "$APP"; then ok "teardown goes through stop_supervised_node"
 else no "stop_supervised_node missing"; fi
 # The teardown must never hunt by port: that would kill a node the app does not own.
 if grep_in '/fn stop_supervised_node/,/^}/' -qE 'lsof|-iTCP|3141'; then
@@ -44,7 +44,7 @@ if grep_in '/fn stop_supervised_node/,/^}/' -q 'send_signal'; then
 else
   no "stop_supervised_node must signal via SharedChild::send_signal, not a raw pid"
 fi
-if grep -qE 'child: Mutex<Option<Arc<SharedChild>>>' "$MAIN"; then
+if grep -qE 'child: Mutex<Option<Arc<SharedChild>>>' "$APP"; then
   ok "the node handle is owned as SharedChild, not a bare pid holder"
 else
   no "the supervised child must be held as Arc<SharedChild> for safe signalling"
@@ -71,7 +71,7 @@ if grep_in '/^fn spawn_node/,/^}/' -q 'spawn_child' \
 else
   no "spawn_node must spawn via NodeState::spawn_child so quit can refuse a replacement"
 fi
-if grep -q 'stop_for_quit(NODE_SHUTDOWN_BUDGET)' "$MAIN"; then
+if grep -q 'stop_for_quit(NODE_SHUTDOWN_BUDGET)' "$APP"; then
   ok "the exit handler stops the node through stop_for_quit"
 else
   no "the exit handler must call stop_for_quit"
