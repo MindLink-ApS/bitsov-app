@@ -110,6 +110,12 @@ mod android {
         secret: bool,
     }
 
+    #[derive(Serialize)]
+    struct SealPayload<'a> {
+        purpose: &'a str,
+        value: Zeroizing<String>,
+    }
+
     pub fn init() -> TauriPlugin<Wry> {
         Builder::new("device-key")
             .setup(|_app, api| {
@@ -296,11 +302,50 @@ mod android {
         }
         decode(response.value).map(Some)
     }
+
+    /// Encrypt `value` under the app's non-exportable at-rest key, with
+    /// `purpose` as associated data. No prompt: see `atRestKeySpec`.
+    pub fn seal(purpose: &str, value: &[u8]) -> Result<Vec<u8>, DeviceKeyError> {
+        let response: CommandResponse = run(
+            "seal",
+            SealPayload {
+                purpose,
+                value: Zeroizing::new(STANDARD.encode(value)),
+            },
+        )?;
+        decode(checked(response)?.value)
+    }
+
+    /// Open a `seal` result. A missing key or wrong purpose is `Invalid`.
+    pub fn unseal(purpose: &str, sealed: &[u8]) -> Result<Zeroizing<Vec<u8>>, DeviceKeyError> {
+        let response: CommandResponse = run(
+            "unseal",
+            SealPayload {
+                purpose,
+                value: Zeroizing::new(STANDARD.encode(sealed)),
+            },
+        )?;
+        decode(checked(response)?.value).map(Zeroizing::new)
+    }
+
+    /// The Android Keystore behind `bitsov_app::at_rest`.
+    pub struct KeystoreSealer;
+
+    impl bitsov_app::at_rest::Sealer for KeystoreSealer {
+        fn seal(&self, purpose: &str, plaintext: &[u8]) -> Result<Vec<u8>, String> {
+            seal(purpose, plaintext).map_err(|error| error.to_string())
+        }
+
+        fn open(&self, purpose: &str, sealed: &[u8]) -> Result<Zeroizing<Vec<u8>>, String> {
+            unseal(purpose, sealed).map_err(|error| error.to_string())
+        }
+    }
 }
 
 #[cfg(target_os = "android")]
 pub use android::{
     available, create, enclave_available, init, public_key, read_home_item, sign, store_home_item,
+    KeystoreSealer,
 };
 
 #[cfg(not(target_os = "android"))]

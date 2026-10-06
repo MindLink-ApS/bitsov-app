@@ -33,6 +33,7 @@ import java.security.interfaces.ECPublicKey
 import java.security.spec.ECGenParameterSpec
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
+import javax.crypto.AEADBadTagException
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -44,6 +45,8 @@ private const val ALIAS_PREFIX = "bitsov-device-v1:"
 private const val HOME_KEY_ALIAS_PREFIX = "bitsov-home-unlock-v1:"
 private const val HOME_PREFERENCES = "bitsov-home-node-v1"
 private const val HOME_CIPHER_VERSION: Byte = 1
+private const val AT_REST_KEY_ALIAS = "bitsov-at-rest-v1"
+private const val AT_REST_VERSION: Byte = 1
 private const val GCM_IV_BYTES = 12
 private const val ERROR_UNAVAILABLE = -1
 private const val ERROR_CANCELLED = -2
@@ -84,6 +87,12 @@ class ReadHomeItemArgs {
     var node: String = ""
     var suffix: String = ""
     var secret: Boolean = false
+}
+
+@InvokeArg
+class SealArgs {
+    var purpose: String = ""
+    var value: String = ""
 }
 
 @TauriPlugin
@@ -216,6 +225,70 @@ class DeviceKeyPlugin(private val activity: Activity) : Plugin(activity) {
             }
         }
         return generateHomeKey(alias, false)
+    }
+
+    // No user authentication: the client key behind this seal answers every
+    // silent reconnect. The key itself still never leaves secure hardware.
+    private fun atRestKeySpec(strongBox: Boolean): KeyGenParameterSpec {
+        val builder = KeyGenParameterSpec.Builder(
+            AT_REST_KEY_ALIAS,
+            KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
+        )
+            .setKeySize(256)
+            .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+            .setRandomizedEncryptionRequired(true)
+        if (strongBox && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            builder.setIsStrongBoxBacked(true)
+        }
+        return builder.build()
+    }
+
+    private fun generateAtRestKey(strongBox: Boolean): SecretKey =
+        KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE).run {
+            init(atRestKeySpec(strongBox))
+            generateKey()
+        }
+
+    private fun generatePreferredAtRestKey(): SecretKey {
+        val hasStrongBox =
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
+                activity.packageManager.hasSystemFeature("android.hardware.strongbox_keystore")
+        if (hasStrongBox) {
+            try {
+                return generateAtRestKey(true)
+            } catch (_: StrongBoxUnavailableException) {
+                // Match the signing-key policy: a hardware TEE remains acceptable.
+            } catch (_: ProviderException) {
+                // A temporarily unavailable StrongBox must not disable a valid TEE.
+            }
+        }
+        return generateAtRestKey(false)
+    }
+
+    // Opening never creates a key: a new key cannot open old ciphertext.
+    @Synchronized
+    private fun atRestKey(create: Boolean): SecretKey {
+        val existing = keyStore().getKey(AT_REST_KEY_ALIAS, null) as? SecretKey
+        val key = existing ?: if (create) {
+            generatePreferredAtRestKey()
+        } else {
+            throw UnrecoverableKeyException("missing at-rest key")
+        }
+        if (!isHardwareBacked(key)) {
+            throw UnrecoverableKeyException("at-rest key is not hardware backed")
+        }
+        return key
+    }
+
+    private fun atRestPurpose(purpose: String): ByteArray? {
+        val node = purpose.removePrefix("pairing-code-v1:")
+        val validCode =
+            node != purpose &&
+                node.length == 64 &&
+                node.all { char -> char.isDigit() || char in 'a'..'f' }
+        val valid = purpose == "client-ed25519-seed-v1" || validCode
+        return if (valid) "bitsov.at-rest.$purpose".toByteArray(Charsets.UTF_8) else null
     }
 
     @Synchronized
@@ -781,5 +854,78 @@ class DeviceKeyPlugin(private val activity: Activity) : Plugin(activity) {
             biometricOperation.set(false)
             invoke.resolve(result(ERROR_OTHER))
         }
+    }
+
+    @Command
+    fun seal(invoke: Invoke) {
+        val args = invoke.parseArgs(SealArgs::class.java)
+        val aad = atRestPurpose(args.purpose)
+        val value = decodedValue(args.value)
+        if (aad == null || value == null || value.size !in 1..4096) {
+            value?.fill(0)
+            invoke.resolve(result(ERROR_INVALID))
+            return
+        }
+        val response = try {
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.ENCRYPT_MODE, atRestKey(true))
+            cipher.updateAAD(aad)
+            val ciphertext = cipher.doFinal(value)
+            if (cipher.iv.size != GCM_IV_BYTES) {
+                throw IllegalStateException("invalid Android Keystore GCM IV")
+            }
+            val sealed = ByteArray(1 + GCM_IV_BYTES + ciphertext.size)
+            sealed[0] = AT_REST_VERSION
+            cipher.iv.copyInto(sealed, destinationOffset = 1)
+            ciphertext.copyInto(sealed, destinationOffset = 1 + GCM_IV_BYTES)
+            result {
+                put("value", Base64.encodeToString(sealed, Base64.NO_WRAP))
+            }
+        } catch (_: Exception) {
+            result(ERROR_UNAVAILABLE)
+        }
+        value.fill(0)
+        invoke.resolve(response)
+    }
+
+    @Command
+    fun unseal(invoke: Invoke) {
+        val args = invoke.parseArgs(SealArgs::class.java)
+        val aad = atRestPurpose(args.purpose)
+        val sealed = decodedValue(args.value)
+        if (
+            aad == null ||
+            sealed == null ||
+            sealed.size <= 1 + GCM_IV_BYTES + 16 ||
+            sealed.size > 8192 ||
+            sealed[0] != AT_REST_VERSION
+        ) {
+            invoke.resolve(result(ERROR_INVALID))
+            return
+        }
+        val response = try {
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(
+                Cipher.DECRYPT_MODE,
+                atRestKey(false),
+                GCMParameterSpec(128, sealed, 1, GCM_IV_BYTES),
+            )
+            cipher.updateAAD(aad)
+            val plaintext = cipher.doFinal(sealed, 1 + GCM_IV_BYTES, sealed.size - 1 - GCM_IV_BYTES)
+            // Same known limit as readHomeItem: the Base64 String and JSObject
+            // are immutable JVM copies; only `plaintext` is cleared here.
+            val resolved = result {
+                put("value", Base64.encodeToString(plaintext, Base64.NO_WRAP))
+            }
+            plaintext.fill(0)
+            resolved
+        } catch (_: UnrecoverableKeyException) {
+            result(ERROR_INVALID)
+        } catch (_: AEADBadTagException) {
+            result(ERROR_INVALID)
+        } catch (_: Exception) {
+            result(ERROR_UNAVAILABLE)
+        }
+        invoke.resolve(response)
     }
 }

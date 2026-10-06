@@ -7364,6 +7364,9 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             if assistant_dev_enabled() || assistant_node_enabled() {
                 install_assistant_menu(app)?;
             }
+            // Before bootstrap_node: no pairing secret may be read or written unsealed.
+            #[cfg(target_os = "android")]
+            bitsov_app::at_rest::install(Arc::new(device_key::KeystoreSealer))?;
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(bootstrap_node(handle));
             tauri::async_runtime::spawn(live_bridge(app.handle().clone()));
