@@ -47,6 +47,7 @@ mod android {
         plugin::{Builder, PluginHandle, TauriPlugin},
         Wry,
     };
+    use zeroize::Zeroizing;
 
     const PLUGIN_IDENTIFIER: &str = "tech.mindlink.bitsov";
     const PLUGIN_TRANSPORT_ERROR: i32 = -100;
@@ -67,7 +68,7 @@ mod android {
         blob: Option<String>,
         public_key: Option<String>,
         signature: Option<String>,
-        value: Option<String>,
+        value: Option<Zeroizing<String>>,
         found: Option<bool>,
     }
 
@@ -93,7 +94,7 @@ mod android {
         blob: Option<String>,
         node: &'a str,
         suffix: &'a str,
-        value: String,
+        value: Zeroizing<String>,
         secret: bool,
     }
 
@@ -150,7 +151,7 @@ mod android {
         }
     }
 
-    fn decode(value: Option<String>) -> Result<Vec<u8>, DeviceKeyError> {
+    fn decode(value: Option<impl AsRef<[u8]>>) -> Result<Vec<u8>, DeviceKeyError> {
         let value = value.ok_or(DeviceKeyError::Other(PLUGIN_TRANSPORT_ERROR))?;
         STANDARD
             .decode(value)
@@ -247,7 +248,7 @@ mod android {
                 blob: device_blob.map(|blob| STANDARD.encode(blob)),
                 node,
                 suffix,
-                value: STANDARD.encode(value),
+                value: Zeroizing::new(STANDARD.encode(value)),
                 secret,
             },
         )?;

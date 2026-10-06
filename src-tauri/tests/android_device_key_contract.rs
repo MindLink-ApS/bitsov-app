@@ -5,6 +5,66 @@ fn project_file(path: &str) -> String {
     fs::read_to_string(root.join(path)).unwrap_or_else(|error| panic!("{path}: {error}"))
 }
 
+const PLUGIN: &str = "gen/android/app/src/main/java/tech/mindlink/bitsov/DeviceKeyPlugin.kt";
+const MACOS_KEYCHAIN_CFG: &str =
+    "#[cfg(all(target_os = \"macos\", desktop, not(feature = \"mobile\")))]";
+
+/// The brace-balanced block after the first `{` following each `marker`.
+fn blocks_after<'a>(source: &'a str, marker: &str) -> Vec<&'a str> {
+    source
+        .match_indices(marker)
+        .map(|(start, _)| {
+            let open = start
+                + source[start..]
+                    .find('{')
+                    .unwrap_or_else(|| panic!("no block after {marker}"));
+            let mut depth = 0;
+            for (offset, char) in source[open..].char_indices() {
+                match char {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return &source[open..=open + offset];
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            panic!("unbalanced block after {marker}")
+        })
+        .collect()
+}
+
+fn block_after<'a>(source: &'a str, marker: &str) -> &'a str {
+    let blocks = blocks_after(source, marker);
+    assert_eq!(blocks.len(), 1, "expected exactly one {marker}");
+    blocks[0]
+}
+
+fn kotlin_fn<'a>(source: &'a str, name: &str) -> &'a str {
+    block_after(source, &format!("fun {name}("))
+}
+
+/// Drop formatting whitespace, keeping one space only between two word characters.
+fn normalized(code: &str) -> String {
+    let word = |char: char| char.is_alphanumeric() || char == '_';
+    let mut out = String::new();
+    let mut spaced = false;
+    for char in code.chars() {
+        if char.is_whitespace() {
+            spaced = true;
+            continue;
+        }
+        if spaced && out.chars().last().is_some_and(word) && word(char) {
+            out.push(' ');
+        }
+        spaced = false;
+        out.push(char);
+    }
+    out
+}
+
 #[test]
 fn android_device_keys_are_hardware_backed_p256_and_biometric_per_signature() {
     let source =
@@ -84,6 +144,279 @@ fn android_home_unlock_reuses_shared_flow_and_has_no_password_ipc() {
         !app.contains("seed_password: String"),
         "a seed password must not be accepted from renderer IPC"
     );
+}
+
+#[test]
+fn android_home_key_spec_prefers_strongbox_and_requires_biometrics_per_use() {
+    let source = project_file(PLUGIN);
+    let spec = normalized(kotlin_fn(&source, "homeKeySpec"));
+    for required in [
+        "KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT",
+        ".setUserAuthenticationRequired(true)",
+        ".setInvalidatedByBiometricEnrollment(true)",
+        "builder.setUserAuthenticationParameters(0,KeyProperties.AUTH_BIOMETRIC_STRONG",
+        "builder.setUserAuthenticationValidityDurationSeconds(-1)",
+        "if(strongBox&&Build.VERSION.SDK_INT>=Build.VERSION_CODES.P){builder.setIsStrongBoxBacked(true)}",
+    ] {
+        assert!(
+            spec.contains(required),
+            "homeKeySpec lost an invariant: {required}"
+        );
+    }
+    for single in [
+        "setUserAuthenticationParameters(",
+        "setUserAuthenticationValidityDurationSeconds(",
+    ] {
+        assert_eq!(
+            spec.matches(single).count(),
+            1,
+            "homeKeySpec must not override its per-use authentication: {single}"
+        );
+    }
+    for forbidden in ["(false)", "AUTH_DEVICE_CREDENTIAL"] {
+        assert!(
+            !spec.contains(forbidden),
+            "homeKeySpec must not weaken the home unlock key: {forbidden}"
+        );
+    }
+
+    let preferred = normalized(kotlin_fn(&source, "generatePreferredHomeKey"));
+    for required in [
+        "hasSystemFeature(\"android.hardware.strongbox_keystore\")",
+        "if(hasStrongBox){try{return generateHomeKey(alias,true)}",
+        "return generateHomeKey(alias,false)}",
+    ] {
+        assert!(
+            preferred.contains(required),
+            "home unlock keys must request StrongBox when available: {required}"
+        );
+    }
+    assert!(normalized(kotlin_fn(&source, "generateHomeKey"))
+        .contains("init(homeKeySpec(alias,strongBox))"));
+    assert!(normalized(kotlin_fn(&source, "homeKey")).contains("generatePreferredHomeKey(alias)"));
+}
+
+#[test]
+fn android_home_unlock_failures_never_delete_keys_or_records() {
+    let source = project_file(PLUGIN);
+    let probe = normalized(kotlin_fn(&source, "hardwareAvailable"));
+    let create = normalized(kotlin_fn(&source, "create"));
+    assert!(probe.contains("val alias=\"${ALIAS_PREFIX}probe-${UUID.randomUUID()}\""));
+    assert!(create.contains("val alias=\"$ALIAS_PREFIX${UUID.randomUUID()}\""));
+    assert_eq!(
+        source.matches("deleteEntry(").count(),
+        probe.matches("deleteEntry(alias)").count() + create.matches("deleteEntry(alias)").count(),
+        "only the signing-key probe and a failed signing-key create may delete Keystore entries"
+    );
+    for forbidden in [".remove(", ".clear()", "deleteSharedPreferences"] {
+        assert!(
+            !source.contains(forbidden),
+            "home-node records must never be erased on Android: {forbidden}"
+        );
+    }
+
+    let read = kotlin_fn(&source, "readHomeItem");
+    let store = kotlin_fn(&source, "storeHomeItem");
+    let read_flat = normalized(read);
+    assert!(
+        !read_flat.contains("edit()"),
+        "reading a home-node record must never rewrite app storage"
+    );
+    assert!(read_flat.contains("homeKey(deviceAlias,false)"));
+    assert!(!read_flat.contains("homeKey(deviceAlias,true)"));
+    assert!(normalized(kotlin_fn(&source, "homeKey"))
+        .contains("throw UnrecoverableKeyException(\"missing home unlock key\")"));
+
+    for (body, buffer) in [(read, "ciphertext"), (store, "value")] {
+        assert_eq!(
+            normalized(block_after(body, "override fun onAuthenticationError")),
+            format!(
+                "{{{buffer}.fill(0)biometricOperation.set(false)\
+                 invoke.resolve(result(biometricError(errorCode)))}}"
+            ),
+            "a cancelled or locked-out home prompt must only report its error"
+        );
+    }
+    for body in [read, store] {
+        for exception in [
+            "catch (_: KeyPermanentlyInvalidatedException)",
+            "catch (_: UnrecoverableKeyException)",
+        ] {
+            for block in blocks_after(body, exception) {
+                assert!(
+                    block.contains("result(ERROR_INVALID)"),
+                    "an invalidated or missing home key must fail closed: {block}"
+                );
+            }
+        }
+    }
+    let errors = normalized(kotlin_fn(&source, "biometricError"));
+    assert!(errors.contains("BiometricPrompt.ERROR_USER_CANCELED,->ERROR_CANCELLED"));
+    assert!(errors.contains(
+        "BiometricPrompt.ERROR_LOCKOUT,BiometricPrompt.ERROR_LOCKOUT_PERMANENT,\
+         BiometricPrompt.ERROR_NO_BIOMETRICS,->ERROR_BIOMETRY_UNAVAILABLE"
+    ));
+
+    for path in ["src/home_keychain.rs", "src/device_key_mobile.rs"] {
+        let rust = project_file(path);
+        for forbidden in ["delete", "remove"] {
+            assert!(
+                !rust.contains(forbidden),
+                "{path} must not erase home-node records: {forbidden}"
+            );
+        }
+    }
+}
+
+#[test]
+fn android_home_secrets_are_cleared_in_kotlin_and_zeroized_in_rust() {
+    let source = project_file(PLUGIN);
+    let store = kotlin_fn(&source, "storeHomeItem");
+    let decoded = store
+        .find("val value = decodedValue(args.value)")
+        .expect("storeHomeItem decodes the plaintext value");
+    let mut previous = decoded;
+    for (resolve, _) in store.match_indices("invoke.resolve(") {
+        if resolve < decoded {
+            continue;
+        }
+        let path = &store[previous..resolve];
+        assert!(
+            path.contains("value.fill(0)") || path.contains("value?.fill(0)"),
+            "storeHomeItem resolves without clearing the plaintext: {path}"
+        );
+        previous = resolve;
+    }
+    let stored = normalized(block_after(store, "override fun onAuthenticationSucceeded"));
+    for required in ["ciphertext.fill(0)", "encoded.fill(0)"] {
+        assert!(
+            stored.contains(required),
+            "storeHomeItem no longer clears: {required}"
+        );
+    }
+
+    let read = kotlin_fn(&source, "readHomeItem");
+    let unlocked = normalized(block_after(read, "override fun onAuthenticationSucceeded"));
+    let order: Vec<_> = [
+        "Base64.encodeToString(plaintext,",
+        "plaintext.fill(0)",
+        "ciphertext.fill(0)",
+        "invoke.resolve(response)",
+    ]
+    .iter()
+    .map(|step| {
+        unlocked
+            .find(step)
+            .unwrap_or_else(|| panic!("readHomeItem lost {step}"))
+    })
+    .collect();
+    assert!(
+        order.windows(2).all(|pair| pair[0] < pair[1]),
+        "readHomeItem must clear the decrypted password before resolving"
+    );
+    let read_flat = normalized(read);
+    for required in ["encoded.fill(0)", "iv.fill(0)"] {
+        assert!(
+            read_flat.contains(required),
+            "readHomeItem no longer clears: {required}"
+        );
+    }
+
+    let keychain = project_file("src/home_keychain.rs");
+    for required in [
+        "pub fn password(node: &str, device_blob: Option<&[u8]>) -> Result<Zeroizing<String>, String>",
+        ") -> Result<Option<Zeroizing<Vec<u8>>>, String> {",
+        ".map(|value| value.map(Zeroizing::new))",
+        "Ok(Zeroizing::new(value.to_owned()))",
+    ] {
+        assert!(
+            keychain.contains(required),
+            "the home password must stay Zeroizing: {required}"
+        );
+    }
+    assert!(project_file("src/home_node.rs").contains("pub password: zeroize::Zeroizing<String>,"));
+
+    let mobile = project_file("src/device_key_mobile.rs");
+    let android = block_after(&mobile, "mod android");
+    for required in [
+        "value: Option<Zeroizing<String>>,",
+        "value: Zeroizing<String>,",
+        "value: Zeroizing::new(STANDARD.encode(value)),",
+    ] {
+        assert!(
+            android.contains(required),
+            "base64 home-item values must be Zeroizing: {required}"
+        );
+    }
+    for forbidden in [
+        "value: String",
+        "value: Option<String>",
+        "value: STANDARD.encode(",
+    ] {
+        assert!(
+            !android.contains(forbidden),
+            "base64 home-item values must not be plain Strings: {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn macos_keychain_home_path_keeps_its_keychain_calls() {
+    let keychain = project_file("src/home_keychain.rs");
+    assert_eq!(keychain.matches(MACOS_KEYCHAIN_CFG).count(), 2);
+
+    let store = normalized(block_after(
+        block_after(&keychain, "\nfn store("),
+        MACOS_KEYCHAIN_CFG,
+    ));
+    for required in [
+        "let _=device_blob;",
+        "bitsov_ffi::home_keychain::store(&name,bytes,secret)",
+        "if status==0{Ok(())}else{Err(",
+    ] {
+        assert!(
+            store.contains(required),
+            "macOS Keychain store changed: {required}"
+        );
+    }
+
+    let read = normalized(block_after(
+        block_after(&keychain, "\nfn read("),
+        MACOS_KEYCHAIN_CFG,
+    ));
+    for required in [
+        "let _=(secret,device_blob);",
+        "bitsov_ffi::home_keychain::read(&name,16384)",
+        "if status==-25300{return Ok(None);}",
+        "if status!=0||length>bytes.len(){return Err(",
+        "bytes.truncate(length);Ok(Some(bytes))",
+    ] {
+        assert!(
+            read.contains(required),
+            "macOS Keychain read changed: {required}"
+        );
+    }
+    for block in [&store, &read] {
+        assert!(
+            !block.contains("device_key"),
+            "the macOS Keychain path must not route through the Android plugin"
+        );
+    }
+
+    let flat = normalized(&keychain);
+    for required in [
+        "#[cfg(not(target_os=\"android\"))]#[allow(dead_code)]pub fn save_password(",
+        "store(node,\"seed-password\",password,true,None)",
+        "read(node,\"seed-password\",true,device_blob)",
+        "read(node,\"box-transport\",false,None)",
+        "store(&pin.node_id,\"box-transport\",&bytes,false,None)",
+        "read(node,\"unlock-binding\",false,None)",
+    ] {
+        assert!(
+            flat.contains(required),
+            "macOS Keychain callers changed: {required}"
+        );
+    }
 }
 
 #[test]
