@@ -7302,12 +7302,12 @@ fn assistant_mock_builder() -> tauri::Builder<tauri::Wry> {
 }
 
 /// Loopback mock harness shared with `tests/pairing.rs` (ephemeral port, test keys).
-#[cfg(test)]
+#[cfg(all(test, desktop, not(feature = "mobile")))]
 #[allow(dead_code)]
 #[path = "../tests/support/mod.rs"]
 mod test_support;
 
-#[cfg(test)]
+#[cfg(all(test, desktop, not(feature = "mobile")))]
 mod node_start_args_tests {
     use super::node_start_args;
     use std::path::Path;
@@ -7323,7 +7323,7 @@ mod node_start_args_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, desktop, not(feature = "mobile")))]
 mod api_base_tests {
     use super::{loopback_api_port, API_BASE};
 
@@ -7355,7 +7355,7 @@ mod api_base_tests {
 
 /// Custody provenance must bind the IPv4 endpoint the app dials, not any
 /// listener that shares its port (Codex app95 delta1).
-#[cfg(all(test, unix))]
+#[cfg(all(test, desktop, not(feature = "mobile"), unix))]
 mod verified_local_socket_tests {
     use super::{
         connected_api_peer_owner, ipv4_api_listen_owners, listen_name_serves_ipv4_loopback,
@@ -7468,7 +7468,7 @@ mod verified_local_socket_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, desktop, not(feature = "mobile")))]
 mod remote_onboarding_tests {
     use super::*;
 
@@ -7609,7 +7609,7 @@ mod remote_onboarding_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, desktop, not(feature = "mobile")))]
 mod pairing_wiring_tests {
     //! The host's auth wiring against mock-node's #77 shapes: which path mints
     //! the token, and that a paired session never re-mints via `/auth/local`.
@@ -7954,7 +7954,7 @@ mod pairing_wiring_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, desktop, not(feature = "mobile")))]
 mod ai_track_tests {
     //! The AI track's host wiring: it reads only through the broker with the
     //! paired token, and a send takes an id, never a body.
@@ -8006,7 +8006,7 @@ mod ai_track_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, desktop, not(feature = "mobile")))]
 mod control_read_tests {
     //! The control-center read commands against a loopback fake node on an
     //! ephemeral port: which routes they hit, that the bearer rides along, how
@@ -8192,7 +8192,7 @@ mod control_read_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, desktop, not(feature = "mobile")))]
 mod control_act_tests {
     //! Slice B actions against a loopback fake node on an ephemeral port: the
     //! spend window is checked before any request, bodies are exact, a node
@@ -13958,7 +13958,7 @@ mod control_act_tests {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, desktop, not(feature = "mobile"), unix))]
 mod stop_adapter_tests {
     //! Tests the REAL adapter against disposable subprocesses (app #16 review).
     //! Policy tests with injected effects could not prove the adapter avoids pid
@@ -14214,7 +14214,7 @@ mod stop_adapter_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, desktop, not(feature = "mobile")))]
 mod assistant_acl_tests {
     use super::{
         assistant_dev_enabled_from, assistant_document_allowed, assistant_node_enabled_from,
@@ -15276,7 +15276,7 @@ mod assistant_acl_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, desktop, not(feature = "mobile")))]
 mod peer_readiness_tests {
     use super::*;
     #[test]
@@ -15295,6 +15295,6 @@ mod peer_readiness_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, desktop, not(feature = "mobile")))]
 #[path = "post_rc7_tests.rs"]
 mod post_rc7_tests;
