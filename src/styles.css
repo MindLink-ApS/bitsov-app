@@ -582,6 +582,7 @@ select { font: inherit; font-size: var(--t-sm); background: var(--sunk); color: 
 .target-badge { font-size: var(--t-xs); font-weight: 500; padding: 2px 8px; border-radius: var(--r-chip); background: var(--sunk); color: var(--muted); }
 .target-badge.ok { background: color-mix(in srgb, var(--ok) 14%, transparent); color: var(--ok); }
 .target-badge.honest { background: color-mix(in srgb, var(--warn) 14%, transparent); color: var(--warn); }
+.target-badge.hosted-by { max-width: 24ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .target-badge.coming-soon { background: var(--sunk); color: var(--muted); border: 1px solid var(--line); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
 .node-target-card:disabled, .node-target-card.disabled { opacity: 0.55; cursor: not-allowed; }
 .node-target-card:disabled:hover, .node-target-card.disabled:hover { background: var(--surface); border-color: var(--line); }
@@ -1175,3 +1176,19 @@ input[type='checkbox'], input[type='radio'] { width: auto; flex: none; padding: 
   /* Nothing travels: hover lifts and press squeezes stay put; state changes still show. */
   .node-target-card:hover, .send-btn:active, .ai-ask-btn:active, .ai-plus-btn.active { transform: none !important; }
 }
+
+/* What the hub can and can't do: headed cards that stack on narrow screens. */
+.locked-node { display: flex; flex-direction: column; gap: var(--s-3); }
+.hub-trust-info { display: flex; flex-direction: column; align-items: flex-start; gap: var(--s-2); min-width: 0; }
+.hub-trust-toggle { display: inline-flex; align-items: baseline; gap: var(--s-2); text-align: left; white-space: normal; }
+.hub-trust-info > div { width: 100%; }
+.hub-trust { min-width: 0; }
+.hub-trust-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--s-2); }
+.hub-trust .hub-trust-title { margin: 0; font-family: var(--font-sans); font-size: var(--t-md); font-weight: 600; color: var(--ink); }
+.hub-trust-cards { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr)); gap: var(--s-2); }
+.hub-trust-card { display: flex; flex-direction: column; gap: var(--s-1); min-width: 0; padding: var(--s-3); border: 1px solid var(--line); border-radius: var(--r-control); background: var(--bg); overflow-wrap: break-word; }
+.hub-trust-card .hub-trust-card-title { margin: 0; font-family: var(--font-sans); font-size: var(--t-sm); font-weight: 600; color: var(--ink); }
+.hub-trust-card p { margin: 0; font-size: var(--t-sm); line-height: var(--lh-body); color: var(--muted); }
+.hub-channel-confirm { display: flex; flex-direction: column; gap: var(--s-3); }
+.hub-channel-confirm:focus { outline: none; }
+.hub-channel-confirm .row { flex-wrap: wrap; }

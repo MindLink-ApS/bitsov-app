@@ -1,5 +1,6 @@
 import { createMessageEntrance } from './messageEntrance';
 import { LocalNodeSwitch } from '../onboarding/LocalNodeSwitch';
+import { HubTrustInfo } from './HubTrust';
 import { pollingSource } from './polling';
 import { readSpendPreset, saveSpendPreset } from './prefs';
 import { WelcomeHome } from './WelcomeHome';
@@ -5758,6 +5759,7 @@ function NodePanel(props: { onForgetRemote?: () => Promise<void>; overview: Node
     <div class="panel" data-panel="node">
       <h2>Your node</h2>
       <Show when={props.onForgetRemote}><LocalNodeSwitch onForget={() => props.onForgetRemote!()} /></Show>
+      <HubTrustInfo level={3} />
       <Show when={props.overview} fallback={<Show when={!props.error}><DelayedSpinner /></Show>}>
         {(o) => (
           <dl class="facts">

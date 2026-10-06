@@ -52,16 +52,39 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 pub const HANDSHAKE_UNAVAILABLE: &str = "remote handshake limit or endpoint unavailable";
 
+/// Longest `hosted_by` label shown, in characters (the node's own limit).
+pub const HOSTED_BY_MAX_CHARS: usize = 64;
+
 /// Pairing-link JSON carried as unpadded base64url after `bitsov://pair/`.
-#[derive(Clone, Serialize, Deserialize)]
+/// Node `PairLink` (BitSov-bitsov #252); fields after `code` are optional so
+/// links from older nodes still parse.
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PairingLinkV1 {
     pub v: u8,
     pub endpoint: String,
+    /// Empty only in a ticket issued before the node had an identity.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub node_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub transport_pubkey: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub transport_signature: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub box_transport_pubkey: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub box_transport_signature: Option<String>,
     pub code: String,
+    /// Unix seconds; zero marks a legacy link without an expiry.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub expires_at: i64,
+    /// Operator-chosen, unsigned and display only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hosted_by: Option<String>,
+}
+
+fn is_zero(value: &i64) -> bool {
+    *value == 0
 }
 
 impl fmt::Debug for PairingLinkV1 {
@@ -72,7 +95,10 @@ impl fmt::Debug for PairingLinkV1 {
             .field("node_id", &self.node_id)
             .field("transport_pubkey", &self.transport_pubkey)
             .field("transport_signature", &self.transport_signature)
+            .field("box_transport_pubkey", &self.box_transport_pubkey)
             .field("has_code", &true)
+            .field("expires_at", &self.expires_at)
+            .field("hosted_by", &self.hosted_by)
             .finish()
     }
 }
@@ -88,6 +114,8 @@ pub struct RemoteDescriptor {
     transport_signature: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hosted_by: Option<String>,
     #[serde(skip)]
     transport_pubkey_bytes: [u8; 32],
     #[serde(skip)]
@@ -132,6 +160,11 @@ impl RemoteDescriptor {
     pub fn has_code(&self) -> bool {
         self.code.is_some()
     }
+
+    /// Display-safe label from the pairing link; never an authority input.
+    pub fn hosted_by(&self) -> Option<&str> {
+        self.hosted_by.as_deref()
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -144,6 +177,8 @@ struct StoredDescriptor {
     transport_signature: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hosted_by: Option<String>,
 }
 
 /// First encrypted application message after the pinned XX handshake.
@@ -185,6 +220,7 @@ pub enum RemoteAuthResponse {
 pub struct RemoteImportView {
     pub endpoint: String,
     pub node_id_fingerprint: String,
+    pub hosted_by: Option<String>,
     pub restart_required: bool,
 }
 
@@ -197,12 +233,28 @@ pub enum RemoteError {
     HandshakeUnavailable,
     RateLimited(u64),
     Waiting(u64),
+    /// Seconds since the pairing ticket expired.
+    Expired(u64),
+}
+
+fn elapsed_text(seconds: u64) -> String {
+    match seconds {
+        0..=119 => format!("{seconds} s"),
+        120..=7199 => format!("{} min", seconds / 60),
+        7200..=172_799 => format!("{} h", seconds / 3600),
+        _ => format!("{} days", seconds / 86_400),
+    }
 }
 
 impl fmt::Display for RemoteError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Invalid(message) => write!(f, "invalid remote pairing link: {message}"),
+            Self::Expired(seconds) => write!(
+                f,
+                "This pairing link expired {} ago. Run konsensus pair-ticket on your node for a new one, and check that this Mac's clock is right.",
+                elapsed_text(*seconds)
+            ),
             Self::Local(message) => f.write_str(message),
             Self::Transport(message) => write!(f, "remote transport failed: {message}"),
             Self::Refused(message) => write!(f, "remote node refused pairing: {message}"),
@@ -389,23 +441,90 @@ fn validate_descriptor(stored: StoredDescriptor) -> Result<RemoteDescriptor, Rem
         transport_pubkey: stored.transport_pubkey,
         transport_signature: stored.transport_signature,
         code: stored.code,
+        hosted_by: display_label(stored.hosted_by.as_deref()),
         transport_pubkey_bytes,
         pin_store: None,
     })
 }
 
-fn validate_link(link: PairingLinkV1) -> Result<RemoteDescriptor, RemoteError> {
-    validate_descriptor(StoredDescriptor {
+/// Same invisible set the node refuses in `[node].hosted_by`.
+fn is_invisible_format(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00AD}'
+            | '\u{061C}'
+            | '\u{180E}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{2028}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{FEFF}'
+            | '\u{FFF9}'..='\u{FFFB}'
+    )
+}
+
+/// The label is unsigned, so it is shown only as plain text beside the node
+/// fingerprint: trimmed, capped, and dropped whole if any character could
+/// reorder or hide text.
+fn display_label(label: Option<&str>) -> Option<String> {
+    let label = label?.trim();
+    if label.is_empty() || label.chars().any(|c| c.is_control() || is_invisible_format(c)) {
+        return None;
+    }
+    if label.chars().count() <= HOSTED_BY_MAX_CHARS {
+        return Some(label.to_string());
+    }
+    let mut capped: String = label.chars().take(HOSTED_BY_MAX_CHARS - 1).collect();
+    capped.truncate(capped.trim_end().len());
+    capped.push('…');
+    Some(capped)
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs() as i64)
+}
+
+fn validate_link(link: PairingLinkV1, now: i64) -> Result<RemoteDescriptor, RemoteError> {
+    if link.node_id.is_empty() {
+        return Err(RemoteError::Invalid(
+            "this ticket was issued before the node had an identity; start the node unlocked once, then run konsensus pair-ticket again".into(),
+        ));
+    }
+    if link.expires_at < 0 {
+        return Err(RemoteError::Invalid("ticket expiry is invalid".into()));
+    }
+    if link.expires_at != 0 && link.expires_at <= now {
+        return Err(RemoteError::Expired((now - link.expires_at) as u64));
+    }
+    let descriptor = validate_descriptor(StoredDescriptor {
         v: link.v,
         endpoint: link.endpoint,
         node_id: link.node_id,
         transport_pubkey: link.transport_pubkey,
         transport_signature: link.transport_signature,
         code: Some(link.code),
-    })
+        hosted_by: link.hosted_by,
+    })?;
+    // The box key is pinned only from an authenticated session; a proof in
+    // the link is checked so a corrupted link fails here, not later.
+    if let Some(signature) = &link.box_transport_signature {
+        BoxPin::verify(
+            &descriptor.node_id,
+            &descriptor.endpoint,
+            &link.box_transport_pubkey,
+            signature,
+        )?;
+    }
+    Ok(descriptor)
 }
 
 pub fn parse_pairing_link(link: &str) -> Result<RemoteDescriptor, RemoteError> {
+    parse_pairing_link_at(link, unix_now())
+}
+
+fn parse_pairing_link_at(link: &str, now: i64) -> Result<RemoteDescriptor, RemoteError> {
     let encoded = link
         .strip_prefix("bitsov://pair/")
         .ok_or_else(|| RemoteError::Invalid("expected bitsov://pair/<base64url-json>".into()))?;
@@ -423,7 +542,7 @@ pub fn parse_pairing_link(link: &str) -> Result<RemoteDescriptor, RemoteError> {
     }
     let link: PairingLinkV1 = serde_json::from_slice(&json)
         .map_err(|_| RemoteError::Invalid("descriptor JSON has the wrong shape".into()))?;
-    validate_link(link)
+    validate_link(link, now)
 }
 
 fn config_path(app_data_dir: &Path) -> PathBuf {
@@ -469,6 +588,7 @@ pub fn import_pairing_link(
     Ok(RemoteImportView {
         endpoint: descriptor.endpoint.clone(),
         node_id_fingerprint: node_id_fingerprint(&descriptor.node_id),
+        hosted_by: descriptor.hosted_by.clone(),
         restart_required: true,
     })
 }
@@ -1749,6 +1869,7 @@ mod tests {
             transport_signature: base64::engine::general_purpose::URL_SAFE_NO_PAD
                 .encode(signature.to_bytes()),
             code: code.to_string(),
+            ..Default::default()
         };
         let json = serde_json::to_vec(&payload).unwrap();
         format!(
@@ -1794,6 +1915,170 @@ mod tests {
         ))
         .is_err());
         assert!(parse_pairing_link("https://node.example/pair").is_err());
+    }
+
+    const NOW: i64 = 1_800_000_000;
+
+    /// A `konsensus pair-ticket` link (BitSov-bitsov #252): the legacy fields
+    /// plus `extra`, which may also override or null a field.
+    fn node_ticket(node: &SigningKey, extra: serde_json::Value) -> String {
+        let transport = X25519PublicKey::from(&StaticSecret::from([9u8; 32])).to_bytes();
+        let link = signed_link("node.example:4242".into(), node, transport, &test_code(3));
+        let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let mut json: serde_json::Value =
+            serde_json::from_slice(&engine.decode(link.strip_prefix("bitsov://pair/").unwrap()).unwrap()).unwrap();
+        for (key, value) in extra.as_object().unwrap() {
+            json[key] = value.clone();
+        }
+        format!("bitsov://pair/{}", engine.encode(serde_json::to_vec(&json).unwrap()))
+    }
+
+    fn box_proof(node: &SigningKey) -> (String, String) {
+        let node_id = hex::encode(node.verifying_key().as_bytes());
+        let key = hex::encode([0x33u8; 32]);
+        let signature = node.sign(format!("bitsov-box-transport-v1:{node_id}:{key}").as_bytes());
+        (key, base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature.to_bytes()))
+    }
+
+    #[test]
+    fn old_link_without_ticket_fields_still_imports() {
+        let node = SigningKey::from_bytes(&[7u8; 32]);
+        let link = node_ticket(&node, serde_json::json!({}));
+        let json = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(link.strip_prefix("bitsov://pair/").unwrap())
+            .unwrap();
+        let mut keys: Vec<String> = serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&json)
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        keys.sort();
+        assert_eq!(keys, ["code", "endpoint", "node_id", "transport_pubkey", "transport_signature", "v"]);
+
+        let descriptor = parse_pairing_link_at(&link, NOW).unwrap();
+        assert!(descriptor.has_code());
+        assert_eq!(descriptor.hosted_by(), None);
+
+        let data = tempfile::tempdir().unwrap();
+        let view = import_pairing_link(data.path(), &link).unwrap();
+        assert_eq!(view.hosted_by, None);
+        let stored = std::fs::read_to_string(config_path(data.path())).unwrap();
+        assert!(!stored.contains("hosted_by"), "{stored}");
+        assert!(load_persisted(data.path()).unwrap().unwrap().has_code());
+    }
+
+    #[test]
+    fn node_ticket_with_expiry_label_and_box_proof_imports() {
+        let node = SigningKey::from_bytes(&[7u8; 32]);
+        let (box_key, box_signature) = box_proof(&node);
+        let ticket = |extra: serde_json::Value| {
+            let mut fields = serde_json::json!({
+                "box_transport_pubkey": box_key,
+                "box_transport_signature": box_signature,
+                "expires_at": NOW + 86_400,
+                "hosted_by": "Rasmus's Pi",
+            });
+            for (key, value) in extra.as_object().unwrap() {
+                fields[key] = value.clone();
+            }
+            node_ticket(&node, fields)
+        };
+
+        let descriptor = parse_pairing_link_at(&ticket(serde_json::json!({})), NOW).unwrap();
+        assert_eq!(descriptor.hosted_by(), Some("Rasmus's Pi"));
+        assert!(descriptor.has_code());
+        // The node writes `null` when `[node].hosted_by` is unset.
+        let unlabeled = parse_pairing_link_at(&ticket(serde_json::json!({ "hosted_by": null })), NOW).unwrap();
+        assert_eq!(unlabeled.hosted_by(), None);
+
+        // Fields the node does not send are still refused.
+        let unknown = ticket(serde_json::json!({ "ticket_version": 2 }));
+        assert!(matches!(parse_pairing_link_at(&unknown, NOW), Err(RemoteError::Invalid(_))));
+        let other = SigningKey::from_bytes(&[8u8; 32]);
+        let (_, foreign_signature) = box_proof(&other);
+        let forged = ticket(serde_json::json!({ "box_transport_signature": foreign_signature }));
+        assert!(matches!(parse_pairing_link_at(&forged, NOW), Err(RemoteError::Invalid(_))));
+        let identityless = identityless_link(&node_ticket(&node, serde_json::json!({
+            "node_id": null, "transport_pubkey": null, "transport_signature": null,
+            "box_transport_pubkey": box_key, "expires_at": NOW + 60,
+        })));
+        let error = parse_pairing_link_at(&identityless, NOW).unwrap_err().to_string();
+        assert!(error.contains("start the node unlocked once"), "{error}");
+
+        let data = tempfile::tempdir().unwrap();
+        let live = ticket(serde_json::json!({ "expires_at": unix_now() + 86_400 }));
+        let view = import_pairing_link(data.path(), &live).unwrap();
+        assert_eq!(view.hosted_by.as_deref(), Some("Rasmus's Pi"));
+        let reloaded = load_persisted(data.path()).unwrap().unwrap();
+        assert_eq!(reloaded.hosted_by(), Some("Rasmus's Pi"));
+        assert!(reloaded.has_code());
+    }
+
+    /// Drop the identity fields entirely, as `pair-ticket` does before first unlock.
+    fn identityless_link(link: &str) -> String {
+        let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let mut json: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_slice(&engine.decode(link.strip_prefix("bitsov://pair/").unwrap()).unwrap()).unwrap();
+        json.retain(|_, value| !value.is_null());
+        format!("bitsov://pair/{}", engine.encode(serde_json::to_vec(&json).unwrap()))
+    }
+
+    #[test]
+    fn expired_ticket_is_refused_with_a_clear_message() {
+        let node = SigningKey::from_bytes(&[7u8; 32]);
+        let at = |expires_at: i64| node_ticket(&node, serde_json::json!({ "expires_at": expires_at }));
+
+        let error = parse_pairing_link_at(&at(NOW - 7_200), NOW).unwrap_err();
+        assert!(matches!(error, RemoteError::Expired(7_200)));
+        let message = error.to_string();
+        assert!(message.starts_with("This pairing link expired 2 h ago."), "{message}");
+        assert!(message.contains("konsensus pair-ticket"), "{message}");
+        assert!(matches!(parse_pairing_link_at(&at(NOW), NOW), Err(RemoteError::Expired(0))));
+        assert!(matches!(parse_pairing_link_at(&at(-1), NOW), Err(RemoteError::Invalid(_))));
+        assert!(parse_pairing_link_at(&at(NOW + 1), NOW).is_ok());
+        // Zero is the node's marker for a legacy link without an expiry.
+        assert!(parse_pairing_link_at(&at(0), NOW).is_ok());
+
+        let data = tempfile::tempdir().unwrap();
+        assert!(matches!(import_pairing_link(data.path(), &at(unix_now() - 1)), Err(RemoteError::Expired(_))));
+        assert!(!config_path(data.path()).exists());
+    }
+
+    #[test]
+    fn hosted_by_label_is_capped_and_odd_labels_are_not_shown() {
+        let node = SigningKey::from_bytes(&[7u8; 32]);
+        let label = |hosted_by: &str| {
+            parse_pairing_link_at(&node_ticket(&node, serde_json::json!({ "hosted_by": hosted_by })), NOW)
+                .unwrap()
+                .hosted_by()
+                .map(str::to_owned)
+        };
+
+        let long = label(&"x".repeat(500)).unwrap();
+        assert_eq!(long.chars().count(), HOSTED_BY_MAX_CHARS);
+        assert!(long.ends_with('…'));
+        assert_eq!(label(&format!("{} tail", "y".repeat(62))).unwrap(), format!("{}…", "y".repeat(62)));
+        // The node's own longest label is kept whole.
+        assert_eq!(label(&"𝔅".repeat(64)).as_deref(), Some("𝔅".repeat(64).as_str()));
+        assert_eq!(label("  My Pi  ").as_deref(), Some("My Pi"));
+        // Markup stays literal; the renderer shows it as text.
+        assert_eq!(label("<img src=x onerror=alert(1)>").as_deref(), Some("<img src=x onerror=alert(1)>"));
+        for odd in ["Pi\u{202E}kcab", "Rasmus\u{7}Pi", "line\nbreak", "zero\u{200B}width", "\u{2066}Pi", "   ", ""] {
+            assert_eq!(label(odd), None, "{odd:?}");
+        }
+
+        // A hand-edited descriptor gets the same treatment on load.
+        let data = tempfile::tempdir().unwrap();
+        import_pairing_link(data.path(), &node_ticket(&node, serde_json::json!({}))).unwrap();
+        let path = config_path(data.path());
+        let mut stored: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        stored["hosted_by"] = "Pi\u{202E}kcab".into();
+        std::fs::write(&path, serde_json::to_vec(&stored).unwrap()).unwrap();
+        assert_eq!(load_persisted(data.path()).unwrap().unwrap().hosted_by(), None);
+        stored["hosted_by"] = "z".repeat(100).into();
+        std::fs::write(&path, serde_json::to_vec(&stored).unwrap()).unwrap();
+        let reloaded = load_persisted(data.path()).unwrap().unwrap();
+        assert_eq!(reloaded.hosted_by().unwrap().chars().count(), HOSTED_BY_MAX_CHARS);
     }
 
     #[test]

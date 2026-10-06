@@ -64,6 +64,7 @@ import type {
 export type RemoteImportView = {
   endpoint: string;
   node_id_fingerprint: string;
+  hosted_by?: string | null;
   restart_required: boolean;
 };
 
