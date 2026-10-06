@@ -68,6 +68,9 @@ mod android {
         blob: Option<String>,
         public_key: Option<String>,
         signature: Option<String>,
+        // Zeroizing covers only our copy. Known limit: Tauri's run_mobile_plugin
+        // passes the payload as JSON through buffers we do not own, and the
+        // Kotlin side's Base64 String is immutable, so those copies are not wiped.
         value: Option<Zeroizing<String>>,
         found: Option<bool>,
     }

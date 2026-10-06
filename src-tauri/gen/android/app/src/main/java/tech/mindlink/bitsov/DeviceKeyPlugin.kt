@@ -720,6 +720,9 @@ class DeviceKeyPlugin(private val activity: Activity) : Plugin(activity) {
                                 authenticationResult.cryptoObject?.cipher
                                     ?: throw IllegalStateException("missing authenticated cipher")
                             val plaintext = authenticated.doFinal(ciphertext)
+                            // Known limit: the Base64 String and the JSObject handed to the
+                            // Tauri bridge are immutable JVM copies that cannot be wiped; they
+                            // live until garbage collection. Only `plaintext` is cleared here.
                             val resolved = result {
                                 put("found", true)
                                 put("value", Base64.encodeToString(plaintext, Base64.NO_WRAP))
