@@ -29,7 +29,7 @@ export const HUB_TRUST_CARDS: readonly { heading: string; lines: readonly string
   },
   {
     heading: 'While your box is locked',
-    lines: ["While your home box is locked (for example after a power cut), it isn't watching your channels. If the hub broadcast an old channel state then, you could lose funds unless you unlock within about a day. That's why a locked box only opens channels to the hub until a watchtower exists, and why you should unlock soon after a restart."],
+    lines: ["While your home box is locked (for example after a power cut), it isn't watching your channels. If the hub broadcast an old channel state then, you could lose funds unless you unlock within about a day. That's why, until a watchtower exists, a home box that can be locked should only have channels to the hub, and you should unlock it soon after a restart."],
   },
   {
     heading: 'Fees',

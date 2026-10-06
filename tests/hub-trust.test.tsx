@@ -12,7 +12,7 @@ const COPY = [
   "It never holds your keys or your seed, and it can't spend your money.",
   "It does see the payments it routes for you: amount, time and the next hop. It doesn't see what they were for.",
   "It can refuse to route your payments. If it does, your money is still yours, and you can close the channel and move to another provider.",
-  "While your home box is locked (for example after a power cut), it isn't watching your channels. If the hub broadcast an old channel state then, you could lose funds unless you unlock within about a day. That's why a locked box only opens channels to the hub until a watchtower exists, and why you should unlock soon after a restart.",
+  "While your home box is locked (for example after a power cut), it isn't watching your channels. If the hub broadcast an old channel state then, you could lose funds unless you unlock within about a day. That's why, until a watchtower exists, a home box that can be locked should only have channels to the hub, and you should unlock it soon after a restart.",
   "Fees: routing costs a small fee per payment, shown before you pay.",
 ];
 
