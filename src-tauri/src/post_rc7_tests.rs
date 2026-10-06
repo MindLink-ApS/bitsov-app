@@ -342,7 +342,7 @@ fn a_delayed_exit_report_cannot_terminate_or_offer_repair_for_the_replacement() 
     let new = state
         .spawn_child(std::process::Command::new("/bin/sleep").arg("30"))
         .unwrap();
-    state.record_node_exit(&old, true);
+    state.record_node_exit(&old, true, true);
     assert!(!state.sidecar_terminated.load(Ordering::SeqCst));
     assert!(!state.initialization_refused.load(Ordering::SeqCst));
     assert_eq!(
@@ -351,7 +351,183 @@ fn a_delayed_exit_report_cannot_terminate_or_offer_repair_for_the_replacement() 
     );
     new.kill().unwrap();
     new.wait().unwrap();
-    state.record_node_exit(&new, false);
+    state.record_node_exit(&new, false, false);
     assert!(state.sidecar_terminated.load(Ordering::SeqCst));
     state.stop_for_restart(Duration::from_secs(1));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn price_floor_refusal_is_only_offered_after_failed_stderr_exit() {
+    use std::os::unix::fs::PermissionsExt;
+    for (diagnostic, output, exit, offered) in [
+        ("pricing.web_content_msat must be at least 1000 msat (1 sat): porch read floor (BROWSE.md §3)", "&2", 1, true),
+        ("pricing.web_content_msat must be at least 1000 msat (1 sat): porch read floor (BROWSE.md §3)", "&1", 1, false),
+        ("pricing.web_content_msat must be at least 1000 msat (1 sat): porch read floor (BROWSE.md §3)", "&2", 0, false),
+        ("pricing.web_content_msat must be at least 10000", "&2", 1, false),
+        ("pricing.message_msat must be at least 1000", "&2", 1, false),
+        ("rc7 ordinary startup", "&2", 0, false),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("mock-node");
+        let config = dir.path().join("konsensus.toml");
+        let original = include_str!("../tests/fixtures/rc7-pricing.toml");
+        std::fs::write(&config, original).unwrap();
+        std::fs::write(&program, format!("#!/bin/sh\nprintf '%s\\n' '{diagnostic}' >{output}\nexit {exit}\n")).unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let state = NodeState::default();
+        *state.config.lock().unwrap() = Some(config.clone());
+        *state.dev_sidecar.lock().unwrap() = Some(program);
+        let app = tauri::test::mock_builder().manage(state)
+            .build(tauri::test::mock_context(tauri::test::noop_assets())).unwrap();
+        let state = app.state::<NodeState>();
+        spawn_node(app.handle(), &config).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !state.sidecar_terminated.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.unwrap();
+        assert_eq!(serde_json::to_value(state.status_snapshot().initialization_repair).unwrap(), "none");
+        assert!(wait_for_health(&state).await.is_err());
+        assert_eq!(serde_json::to_value(state.status_snapshot().initialization_repair).unwrap(),
+            if offered { "price_floor_required" } else { "none" });
+        assert_eq!(std::fs::read_to_string(&config).unwrap(), original);
+        assert!(!config.with_extension("toml.bak").exists());
+        state.stop_for_restart(Duration::from_secs(1));
+    }
+}
+
+#[tokio::test]
+async fn price_floor_repair_requires_its_own_local_stopped_consent() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("konsensus.toml");
+    let original = include_str!("../tests/fixtures/rc7-pricing.toml");
+    std::fs::write(&config, original).unwrap();
+    let state = NodeState::default();
+    *state.config.lock().unwrap() = Some(config.clone());
+    for (pending, stopped, confirmed, remote, external) in [
+        (InitializationRepair::None, true, true, false, false),
+        (InitializationRepair::Required, true, true, false, false),
+        (InitializationRepair::PriceFloorRequired, false, true, false, false),
+        (InitializationRepair::PriceFloorRequired, true, false, false, false),
+        (InitializationRepair::PriceFloorRequired, true, true, true, false),
+        (InitializationRepair::PriceFloorRequired, true, true, false, true),
+    ] {
+        *state.initialization_repair.lock().unwrap() = pending;
+        state.sidecar_terminated.store(stopped, Ordering::SeqCst);
+        state.remote_mode.store(remote, Ordering::SeqCst);
+        *state.external_node.lock().unwrap() = external.then(|| dir.path().into());
+        assert!(repair_price_floor_files(&state, confirmed).is_err());
+        assert_eq!(std::fs::read_to_string(&config).unwrap(), original);
+        assert!(!config.with_extension("toml.bak").exists());
+    }
+    state.remote_mode.store(false, Ordering::SeqCst);
+    *state.external_node.lock().unwrap() = None;
+    assert!(repair_price_floor_files(&state, true).is_ok());
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), original.replacen("=  50 #", "=  1000 #", 1));
+    assert_eq!(std::fs::read_to_string(config.with_extension("toml.bak")).unwrap(), original);
+    assert!(repair_price_floor_files(&state, true).is_err());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn retained_node_requires_two_separate_consents_then_authenticates_normally() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("konsensus.toml");
+    let marker = dir.path().join("mock-marker");
+    let calls = dir.path().join("calls");
+    let program = dir.path().join("mock-node");
+    let original = include_str!("../tests/fixtures/rc7-pricing.toml");
+    std::fs::write(&config, original).unwrap();
+    std::fs::write(&program, format!(r#"#!/bin/sh
+printf '%s\n' "$1" >> '{}'
+if [ "$1" = repair ]; then touch '{}'; exit 0; fi
+if [ ! -f '{}' ]; then
+  printf '%s\n' 'Error: refusing to start (identity_without_marker)' >&2
+  exit 1
+fi
+if grep -q '=  50 #' "$3"; then
+  printf '%s\n' 'Error: pricing.web_content_msat must be at least 1000 msat (1 sat): porch read floor (BROWSE.md §3)' >&2
+  exit 1
+fi
+exec sleep 30
+"#, calls.display(), marker.display(), marker.display())).unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    // Health remains unavailable until both repairs have happened. This also
+    // covers the health request racing stderr/exit on the intermediate start.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let state = NodeState::for_api(format!("http://127.0.0.1:{}/api/v1", listener.local_addr().unwrap().port()));
+    let server_config = config.clone();
+    let server = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut authenticated = false;
+        loop {
+            assert!(Instant::now() < deadline, "node never finished authentication");
+            let (stream, _) = match listener.accept() {
+                Ok(pair) => pair,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(5)); continue;
+                }
+                Err(e) => panic!("{e}"),
+            };
+            stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            let mut reader = std::io::BufReader::new(stream);
+            let mut request = String::new();
+            reader.read_line(&mut request).unwrap();
+            let mut length = 0;
+            loop {
+                let mut header = String::new();
+                reader.read_line(&mut header).unwrap();
+                if header == "\r\n" || header.is_empty() { break; }
+                if let Some(value) = header.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = value.trim().parse::<usize>().unwrap();
+                }
+            }
+            reader.read_exact(&mut vec![0; length]).unwrap();
+            let repaired = std::fs::read_to_string(&server_config).unwrap().contains("=  1000 #");
+            let (status, body, done) = if request.starts_with("GET /api/v1/health ") {
+                (if repaired { 200 } else { 503 }, "{}", false)
+            } else if request.starts_with("GET /api/v1/bootstrap/state ") || request.starts_with("POST /api/v1/pair/request ") {
+                (404, "{}", false)
+            } else if request.starts_with("POST /api/v1/auth/local ") {
+                assert!(repaired, "must not authenticate before price consent");
+                authenticated = true;
+                (200, r#"{"token":"test-token"}"#, false)
+            } else {
+                assert!(request.starts_with("GET /api/v1/identity "), "{request}");
+                assert!(authenticated);
+                (200, r#"{"node_id":"existing"}"#, true)
+            };
+            write!(reader.get_mut(), "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            if done { break; }
+        }
+    });
+    *state.config.lock().unwrap() = Some(config.clone());
+    *state.dev_sidecar.lock().unwrap() = Some(program);
+    let app = tauri::test::mock_builder().manage(state)
+        .build(tauri::test::mock_context(tauri::test::noop_assets())).unwrap();
+    let state = app.state::<NodeState>();
+    let window = tauri::WebviewWindowBuilder::new(&app, "main", tauri::WebviewUrl::default()).build().unwrap();
+    spawn_node(app.handle(), &config).unwrap();
+    assert!(wait_for_health(&state).await.is_err());
+    assert_eq!(state.status_snapshot().initialization_repair, InitializationRepair::Required);
+    assert!(node_repair_price_floor(window.clone(), app.handle().clone(), app.state(), true).await.is_err());
+    assert!(node_repair_initialized(window.clone(), app.handle().clone(), app.state(), true).await.is_err());
+    assert!(marker.exists());
+    assert_eq!(state.status_snapshot().initialization_repair, InitializationRepair::PriceFloorRequired);
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), original);
+    assert!(!config.with_extension("toml.bak").exists());
+    assert!(node_repair_initialized(window.clone(), app.handle().clone(), app.state(), true).await.is_err());
+    assert!(node_repair_price_floor(window.clone(), app.handle().clone(), app.state(), false).await.is_err());
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), original);
+    node_repair_price_floor(window, app.handle().clone(), app.state(), true).await.unwrap();
+    assert_eq!(std::fs::read_to_string(&calls).unwrap(), "start\nrepair\nstart\nstart\n");
+    assert_eq!(std::fs::read_to_string(config.with_extension("toml.bak")).unwrap(), original);
+    assert!(state.status_snapshot().ready);
+    assert_eq!(state.status_snapshot().node_id.as_deref(), Some("existing"));
+    assert_eq!(state.status_snapshot().initialization_repair, InitializationRepair::None);
+    state.stop_for_restart(Duration::from_secs(2));
+    server.join().unwrap();
 }

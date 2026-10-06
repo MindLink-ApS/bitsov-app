@@ -67,3 +67,29 @@ it.each([false, true])('offers restore with mocked rc7/bootstrap status (bootstr
   expect(input.value).toBe('');
   if (bootstrap) expect(mount.textContent).not.toContain('I understand — continue to funding');
 });
+
+it('asks separately for the page price after marker repair, and sends no price consent on decline', async () => {
+  let repair = 'required';
+  const invoke = vi.fn(async (cmd: string, _args?: unknown) => {
+    if (cmd === 'node_status') return { ready: repair === 'none', node_id: null, error: null, initialization_repair: repair };
+    if (cmd === 'pairing_status') return INITIAL_PAIRING;
+    if (cmd === 'node_repair_initialized') { repair = 'price_floor_required'; throw new Error('node sidecar terminated before becoming healthy'); }
+    if (cmd === 'node_repair_price_floor') { repair = 'none'; return; }
+    throw new Error('unavailable');
+  });
+  show(invoke);
+  await vi.waitFor(() => expect(mount.querySelector('[data-repair-consent]')).not.toBeNull());
+  mount.querySelector<HTMLButtonElement>('[data-repair-consent]')!.click();
+  await vi.waitFor(() => expect(mount.textContent).toContain('at least 1 sat per page read'));
+  expect(mount.textContent).toContain('0.05 sat');
+  expect(mount.textContent).not.toContain('NODE_INITIALIZED');
+  expect(mount.textContent).not.toContain('node sidecar terminated');
+  expect(invoke.mock.calls.filter(([cmd]) => cmd === 'node_repair_price_floor')).toHaveLength(0);
+  mount.querySelector<HTMLButtonElement>('[data-repair-decline]')!.click();
+  expect(mount.textContent).toContain('Your node remains stopped');
+  expect(invoke.mock.calls.filter(([cmd]) => cmd === 'node_repair_price_floor')).toHaveLength(0);
+  mount.querySelector<HTMLButtonElement>('[data-repair-review]')!.click();
+  mount.querySelector<HTMLButtonElement>('[data-repair-consent]')!.click();
+  await vi.waitFor(() => expect(mount.querySelector('[data-initialization-repair]')).toBeNull());
+  expect(invoke.mock.calls.filter(([cmd]) => cmd === 'node_repair_price_floor').map(([cmd, args]) => [cmd, args])).toEqual([['node_repair_price_floor', { confirmed: true }]]);
+});

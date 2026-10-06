@@ -35,6 +35,8 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod price_floor;
+
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -166,6 +168,7 @@ struct NodeState {
     /// Set by the wait thread when the supervised node exits.
     sidecar_terminated: AtomicBool,
     initialization_refused: AtomicBool,
+    price_floor_refused: AtomicBool,
     initialization_repair: Mutex<InitializationRepair>,
     /// The `/ws` link as the bridge's socket last reported it (`live_link`).
     live_link: control::LiveLink,
@@ -343,6 +346,7 @@ impl NodeState {
             last_remint: Mutex::new(None),
             sidecar_terminated: AtomicBool::new(false),
             initialization_refused: AtomicBool::new(false),
+            price_floor_refused: AtomicBool::new(false),
             initialization_repair: Mutex::new(InitializationRepair::None),
             live_link: control::LiveLink::default(),
             // Remote requests may take 15 s; loopback health/auth use a short
@@ -425,6 +429,8 @@ enum InitializationRepair {
     None,
     Required,
     Repairing,
+    PriceFloorRequired,
+    PriceFloorRepairing,
 }
 
 fn initialization_refusal(line: &str) -> bool {
@@ -490,6 +496,35 @@ async fn repair_initialized_files(state: &NodeState, confirmed: bool) -> Result<
         InitializationRepair::Required
     };
     result
+}
+
+/// Separate consent from marker repair: an old marker approval cannot raise a price.
+fn repair_price_floor_files(state: &NodeState, confirmed: bool) -> Result<PathBuf, String> {
+    refuse_external(state)?;
+    if state.remote_mode.load(Ordering::SeqCst) {
+        return Err("Page-price repair is only available for the local supervised node.".into());
+    }
+    if !confirmed {
+        return Err("Page-price repair requires your explicit agreement.".into());
+    }
+    let config = state.config.lock().unwrap().clone().ok_or("node config path is unknown")?;
+    {
+        let mut repair = state.initialization_repair.lock().unwrap();
+        if *repair != InitializationRepair::PriceFloorRequired
+            || !state.sidecar_terminated.load(Ordering::SeqCst)
+            || state.quitting.load(Ordering::SeqCst)
+        {
+            return Err("No stopped local node is awaiting page-price repair.".into());
+        }
+        *repair = InitializationRepair::PriceFloorRepairing;
+    }
+    let result = price_floor::repair(&config);
+    *state.initialization_repair.lock().unwrap() = if result.is_ok() {
+        InitializationRepair::None
+    } else {
+        InitializationRepair::PriceFloorRequired
+    };
+    result.map(|()| config)
 }
 
 // ---- node supervision -----------------------------------------------------
@@ -594,6 +629,7 @@ fn spawn_node(app: &AppHandle<impl tauri::Runtime>, config: &Path) -> Result<(),
     // Parse only the pairing short code (for its tripwire comparison) and the
     // recognized initialization refusal reasons (for explicit repair consent).
     let refused = Arc::new(AtomicBool::new(false));
+    let price_refused = Arc::new(AtomicBool::new(false));
     let mut readers = Vec::new();
     for (label, pipe) in [
         ("out", child.take_stdout().map(PipeKind::Out)),
@@ -602,6 +638,7 @@ fn spawn_node(app: &AppHandle<impl tauri::Runtime>, config: &Path) -> Result<(),
         if let Some(pipe) = pipe {
             let codes = (label == "out").then(|| state.printed_codes.clone());
             let refused = refused.clone();
+            let price_refused = price_refused.clone();
             readers.push(std::thread::spawn(move || {
                 let reader: Box<dyn std::io::Read + Send> = match pipe {
                     PipeKind::Out(p) => Box::new(p),
@@ -614,6 +651,9 @@ fn spawn_node(app: &AppHandle<impl tauri::Runtime>, config: &Path) -> Result<(),
                     }
                     if label == "err" && initialization_refusal(&line) {
                         refused.store(true, Ordering::SeqCst);
+                    }
+                    if label == "err" && price_floor::refusal(&line) {
+                        price_refused.store(true, Ordering::SeqCst);
                     }
                     log_node_line(label, &line, local_owner);
                 }
@@ -637,6 +677,7 @@ fn spawn_node(app: &AppHandle<impl tauri::Runtime>, config: &Path) -> Result<(),
         handle.state::<NodeState>().record_node_exit(
             &waiter,
             status.as_ref().is_ok_and(|status| !status.success()) && refused.load(Ordering::SeqCst),
+            status.as_ref().is_ok_and(|status| !status.success()) && price_refused.load(Ordering::SeqCst),
         );
         eprintln!("[node] terminated: {status:?}");
     });
@@ -688,6 +729,8 @@ async fn wait_for_health(state: &NodeState) -> Result<(), String> {
             // must not resume into authentication alongside the repair retry.
             if state.initialization_refused.load(Ordering::SeqCst) {
                 *state.initialization_repair.lock().unwrap() = InitializationRepair::Required;
+            } else if state.price_floor_refused.load(Ordering::SeqCst) {
+                *state.initialization_repair.lock().unwrap() = InitializationRepair::PriceFloorRequired;
             }
             return Err("node sidecar terminated before becoming healthy".into());
         }
@@ -1862,12 +1905,31 @@ async fn node_repair_initialized(
     reject_sealed_window(&window)?;
     drop(window);
     let config = repair_initialized_files(state.inner(), confirmed).await?;
+    start_after_repair(&app, state.inner(), &config).await
+}
+
+#[tauri::command]
+async fn node_repair_price_floor(
+    window: WebviewWindow<impl tauri::Runtime>,
+    app: AppHandle<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    confirmed: bool,
+) -> Result<(), String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    let config = repair_price_floor_files(state.inner(), confirmed)?;
+    start_after_repair(&app, state.inner(), &config).await
+}
+
+async fn start_after_repair(
+    app: &AppHandle<impl tauri::Runtime>, state: &NodeState, config: &Path,
+) -> Result<(), String> {
     *state.error.lock().unwrap() = None;
     let result = async {
-        spawn_node(&app, &config)?;
-        wait_for_health(state.inner()).await?;
+        spawn_node(app, config)?;
+        wait_for_health(state).await?;
         finish_auth(
-            state.inner(),
+            state,
             config.parent().ok_or("node data directory is unknown")?,
         )
         .await;
@@ -1875,7 +1937,7 @@ async fn node_repair_initialized(
     }
     .await;
     if let Err(error) = &result {
-        set_error(state.inner(), error);
+        set_error(state, error);
     }
     result
 }
@@ -6714,14 +6776,16 @@ impl NodeState {
             Arc::new(SharedChild::spawn(cmd).map_err(|e| format!("node start failed: {e}"))?);
         self.sidecar_terminated.store(false, Ordering::SeqCst);
         self.initialization_refused.store(false, Ordering::SeqCst);
+        self.price_floor_refused.store(false, Ordering::SeqCst);
         *slot = Some(child.clone());
         Ok(child)
     }
 
-    fn record_node_exit(&self, child: &Arc<SharedChild>, initialization_refused: bool) {
+    fn record_node_exit(&self, child: &Arc<SharedChild>, initialization_refused: bool, price_floor_refused: bool) {
         let slot = self.child.lock().unwrap();
         if slot.as_ref().is_some_and(|current| Arc::ptr_eq(current, child)) {
             self.initialization_refused.store(initialization_refused, Ordering::SeqCst);
+            self.price_floor_refused.store(price_floor_refused, Ordering::SeqCst);
             self.sidecar_terminated.store(true, Ordering::SeqCst);
         }
     }
@@ -6829,6 +6893,7 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             local_owner_finalize,
             local_owner_reconcile,
             node_repair_initialized,
+            node_repair_price_floor,
             fund_state,
             fund_start,
             funding_address,
@@ -14080,6 +14145,7 @@ mod assistant_acl_tests {
                 "local_owner_finalize",
                 "local_owner_reconcile",
                 "node_repair_initialized",
+                "node_repair_price_floor",
                 "fund_state",
                 "fund_start",
                 "funding_address",
@@ -14739,6 +14805,7 @@ mod assistant_acl_tests {
             .invoke_handler(tauri::generate_handler![
                 super::node_status,
                 super::node_repair_initialized,
+                super::node_repair_price_floor,
                 super::fund_state,
                 super::fund_start,
                 super::funding_address,
@@ -14823,6 +14890,15 @@ mod assistant_acl_tests {
         assert_acl_denied(
             invoke(&assistant, "node_repair_initialized", serde_json::json!({ "confirmed": true })),
             "node_repair_initialized",
+        );
+
+        assert_handler_ran(
+            invoke(&main, "node_repair_price_floor", serde_json::json!({ "confirmed": false })),
+            "explicit agreement",
+        );
+        assert_acl_denied(
+            invoke(&assistant, "node_repair_price_floor", serde_json::json!({ "confirmed": true })),
+            "node_repair_price_floor",
         );
 
         // Pairing: main reaches the handlers, the assistant is stopped by the ACL.

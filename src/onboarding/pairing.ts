@@ -5,7 +5,7 @@
 export type NodeStatus = {
   local_owner?: boolean;
   owner_warning?: string | null;
-  initialization_repair?: 'none' | 'required' | 'repairing';
+  initialization_repair?: 'none' | 'required' | 'repairing' | 'price_floor_required' | 'price_floor_repairing';
   retry_after_secs?: number | null;
   ready: boolean;
   node_id: string | null;

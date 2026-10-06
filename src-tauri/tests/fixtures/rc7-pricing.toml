@@ -1,0 +1,13 @@
+# Retained rc7 node: preserve comments, ordering and other prices.
+[identity]
+mnemonic_file = "identity/mnemonic"
+
+[pricing] # operator settings
+message_msat = 2300
+web_content_msat  =  50 # rc7 page price
+file_per_mb_msat = 4567
+
+[web]
+enabled = false
+# web_content_msat = 50 is only a comment here
+label = "web_content_msat = 50"
