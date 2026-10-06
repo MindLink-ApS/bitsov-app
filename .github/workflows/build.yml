@@ -101,6 +101,10 @@ jobs:
         working-directory: src-tauri
         run: cargo check --locked
 
+      - name: Rust — host mobile check (src-tauri)
+        working-directory: src-tauri
+        run: cargo check --locked --features mobile --tests
+
       # app #16. Behavioural coverage of the node-shutdown policy: signal ordering,
       # the timeout escalation, and the two cases that must never signal at all
       # (an already-reaped child, and a pid that is no longer ours). Lives here
