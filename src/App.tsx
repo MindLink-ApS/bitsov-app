@@ -1,4 +1,4 @@
-import { LockedNode } from './onboarding/LockedNode';
+import { LockedNode, RememberUnlock } from './onboarding/LockedNode';
 import { LocalOwnerCeremony } from './onboarding/LocalOwnerCeremony';
 import { InitializationRepair } from './onboarding/InitializationRepair';
 import { SoftError } from './control/SoftError';
@@ -101,6 +101,8 @@ export default function App() {
   const remote = createMemo(() => pairing().remote);
   createEffect(() => setSelectedTarget(remote() || canScanPairingQr ? 'network' : 'local'));
   const [device, setDevice] = createSignal<DeviceView | null>(null);
+  // Android: the node accepted a typed password; the host holds it for one yes/no.
+  const [rememberOffer, setRememberOffer] = createSignal(false);
   // Once pairing has an outcome, the start spinner no longer describes the state.
   const starting = () => pairing().state === 'starting' || pairing().state === 'pending';
 
@@ -242,7 +244,19 @@ export default function App() {
     <Show when={status().local_owner && status().owner_warning}>
       <aside role="alert" class="panel" data-owner-warning>{status().owner_warning}</aside>
     </Show>
-    <Show when={!status().locked} fallback={<LockedNode mobile={canScanPairingQr} hostError={status().error} onUnlock={async () => { await source().nodeUnlock(); await poll(); }} />}>
+    <Show when={rememberOffer()}>
+      <RememberUnlock onChoose={(remember) => source().nodeUnlockRemember(remember)} onDone={() => setRememberOffer(false)} />
+    </Show>
+    <Show when={!status().locked} fallback={<LockedNode
+      mobile={canScanPairingQr}
+      hostError={status().error}
+      onUnlock={async () => { await source().nodeUnlock(); await poll(); }}
+      onUnlockWithPassword={canScanPairingQr ? async (password) => {
+        await source().nodeUnlockPassword(password);
+        setRememberOffer(true);
+        await poll();
+      } : undefined}
+    />}>
     <Show
       when={trustAck()}
       fallback={

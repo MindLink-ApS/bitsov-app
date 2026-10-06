@@ -782,6 +782,8 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
     mode: 'sample',
     nodeStatus: () => ok(status),
     nodeUnlock: () => Promise.reject('Unlock is not available with sample data.'),
+    nodeUnlockPassword: () => Promise.reject('Unlock is not available with sample data.'),
+    nodeUnlockRemember: () => Promise.reject('Unlock is not available with sample data.'),
     pairingStatus: () => ok(pairing),
     pairingRetry: () => ok(pairing),
     remoteAccessForget: () => Promise.reject('Remote access is not available with sample data.'),
