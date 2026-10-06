@@ -386,6 +386,68 @@ describe('pairing panel', () => {
     expect(input.value).toBe('');
     expect(mount.textContent).not.toContain(link);
   });
+
+  const importWith = async (result: () => Promise<unknown>, pairing: PairingView = starting) => {
+    mount = document.createElement('div');
+    document.body.appendChild(mount);
+    dispose = render(() => <Onboarding status={() => booting} pairing={() => pairing}
+      trustAck={() => false} onRetry={() => {}} selectedTarget="network"
+      onForgetRemote={async () => {}} onImportRemote={result as never} />, mount);
+    const input = mount.querySelector<HTMLInputElement>('#remote-pairing-link')!;
+    input.value = 'bitsov://pair/ticket';
+    input.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    mount.querySelector<HTMLFormElement>('[data-remote-access]')!.requestSubmit();
+    return mount;
+  };
+  const badge = () => mount!.querySelector('.node-target-card[data-target="network"] .target-badge')!;
+
+  it('old link without a label: confirmation and home-node badge stay as before', async () => {
+    const el = await importWith(async () => ({ endpoint: 'home:4242', node_id_fingerprint: 'ab…cd', restart_required: true }));
+    await vi.waitFor(() => expect(el.querySelector('[data-import-result]')).not.toBeNull());
+    expect(el.querySelector('[data-import-result]')!.textContent).toBe(
+      'Remote node home:4242 saved. Node ID fingerprint: ab…cd. Restart BitSov to connect.',
+    );
+    expect(el.querySelector('[data-hosted-by]')).toBeNull();
+    expect(badge().textContent).toBe('Pairing link');
+  });
+
+  it('new ticket: shows "hosted by" in the confirmation and the home-node badge, then forget clears it', async () => {
+    const el = await importWith(async () => ({ endpoint: 'home:4242', node_id_fingerprint: 'ab…cd', hosted_by: "Rasmus's Pi", restart_required: true }));
+    await vi.waitFor(() => expect(el.querySelector('[data-import-result]')).not.toBeNull());
+    expect(el.querySelector('[data-import-result]')!.textContent).toBe(
+      "Remote node home:4242 (hosted by Rasmus's Pi) saved. Node ID fingerprint: ab…cd. Restart BitSov to connect.",
+    );
+    expect(badge().textContent).toBe("Hosted by Rasmus's Pi");
+    expect(badge().getAttribute('title')).toBe("Hosted by Rasmus's Pi");
+    el.querySelector<HTMLButtonElement>('[data-use-local]')!.click();
+    await vi.waitFor(() => expect(badge().textContent).toBe('Pairing link'));
+  });
+
+  it('shows the running remote node label on the home-node badge', () => {
+    mount = document.createElement('div');
+    document.body.appendChild(mount);
+    dispose = render(() => <Onboarding status={() => booting} pairing={() => ({ ...pending, remote: true, hosted_by: 'Basement box' })}
+      trustAck={() => false} onRetry={() => {}} />, mount);
+    expect(badge().textContent).toBe('Hosted by Basement box');
+  });
+
+  it('renders an odd, maximum-length label as escaped text inside a bidi isolate', async () => {
+    const label = '<img src=x onerror="alert(1)">' + '𝔅'.repeat(33) + '…';
+    const el = await importWith(async () => ({ endpoint: 'home:4242', node_id_fingerprint: 'ab…cd', hosted_by: label, restart_required: true }));
+    await vi.waitFor(() => expect(el.querySelector('[data-import-result]')).not.toBeNull());
+    expect(el.querySelector('img')).toBeNull();
+    expect(el.querySelector('[data-import-result] bdi[data-hosted-by]')!.textContent).toBe(label);
+    expect(badge().querySelector('bdi')!.textContent).toBe(label);
+    expect(badge().classList.contains('hosted-by')).toBe(true);
+  });
+
+  it('shows the host refusal for an expired ticket and saves nothing', async () => {
+    const message = "This pairing link expired 2 h ago. Run konsensus pair-ticket on your node for a new one, and check that this Mac's clock is right.";
+    const el = await importWith(() => Promise.reject(message));
+    await vi.waitFor(() => expect(el.querySelector('[data-soft-summary]')?.textContent).toBe(message));
+    expect(el.querySelector('[data-import-result]')).toBeNull();
+    expect(badge().textContent).toBe('Pairing link');
+  });
   it('shows one decision per stage and keeps every host step addressable', () => {
     const first = show(starting, booting);
     expect(first.querySelector('[data-ob-head="node"] h1')?.textContent).toBe('Where should your node run?');

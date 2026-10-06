@@ -424,6 +424,8 @@ pub struct PairingView {
     pub reason: Option<String>,
     /// `bootstrap` on an identity-free node, else `None`.
     pub bootstrap: Option<String>,
+    /// Display-only label from the remote pairing link.
+    pub hosted_by: Option<String>,
 }
 
 impl PairingView {
@@ -436,6 +438,7 @@ impl PairingView {
             code_from_node: false,
             reason: None,
             bootstrap: None,
+            hosted_by: None,
         }
     }
 

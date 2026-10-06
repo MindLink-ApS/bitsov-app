@@ -25,6 +25,8 @@ export type PairingView = {
   reason: string | null;
   /** `bootstrap` on an identity-free node. */
   bootstrap: string | null;
+  /** Display-only label from the saved remote pairing link; capped by the host. */
+  hosted_by?: string | null;
 };
 
 export type StepStatus = 'todo' | 'active' | 'done' | 'failed' | 'skipped' | 'blocked';

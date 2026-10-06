@@ -582,6 +582,7 @@ select { font: inherit; font-size: var(--t-sm); background: var(--sunk); color: 
 .target-badge { font-size: var(--t-xs); font-weight: 500; padding: 2px 8px; border-radius: var(--r-chip); background: var(--sunk); color: var(--muted); }
 .target-badge.ok { background: color-mix(in srgb, var(--ok) 14%, transparent); color: var(--ok); }
 .target-badge.honest { background: color-mix(in srgb, var(--warn) 14%, transparent); color: var(--warn); }
+.target-badge.hosted-by { max-width: 24ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .target-badge.coming-soon { background: var(--sunk); color: var(--muted); border: 1px solid var(--line); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
 .node-target-card:disabled, .node-target-card.disabled { opacity: 0.55; cursor: not-allowed; }
 .node-target-card:disabled:hover, .node-target-card.disabled:hover { background: var(--surface); border-color: var(--line); }
