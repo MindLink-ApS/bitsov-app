@@ -50,7 +50,9 @@ jobs:
       # Proves revoked / expired keys, expired or bad signatures and missing keys are refused
       # even though GnuPG still emits VALIDSIG for several of them.
       - name: Unit test — fetch script signature predicate (no network)
-        run: bash scripts/test-fetch-verify.sh
+        run: |
+          bash scripts/test-fetch-verify.sh
+          python3 scripts/test-verify-sidecars.py
 
       - uses: actions/setup-node@v4
         with:

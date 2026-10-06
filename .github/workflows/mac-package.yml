@@ -46,9 +46,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: GnuPG for the sidecar signature check
+        run: command -v gpg || brew install gnupg
+
       - name: Unit test — bundle checker (no network)
         run: |
           bash scripts/test-check-mac-bundle.sh
+          python3 scripts/test-verify-sidecars.py
           python3 scripts/test-package-mac.py
 
       - uses: actions/setup-node@v4
@@ -69,17 +73,21 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-cargo-release-
 
-      - name: GnuPG for the sidecar signature check
-        run: command -v gpg || brew install gnupg
+      - name: Fetch and re-verify every sidecar against the pinned release (G1)
+        run: |
+          bash scripts/fetch-node-sidecar.sh
+          bash scripts/fetch-node-sidecar.sh --verify-only
 
-      # Removes any stale sidecar, fetches + verifies rc7 (fail-closed, throwaway
-      # keyring), builds with --no-sign, then runs scripts/check-mac-bundle.sh.
+      # Existing files are re-verified by both the package script and Tauri's
+      # beforeBundleCommand; this flag skips only the binary download.
       - name: Package (unsigned) and check
-        run: bash scripts/package-mac.sh --dmg
+        run: bash scripts/package-mac.sh --dmg --use-existing-sidecar
 
       - name: Zip the .app
         run: |
           set -euo pipefail
+          bash scripts/fetch-node-sidecar.sh --verify-only
+          bash scripts/check-mac-bundle.sh
           mkdir -p "$RUNNER_TEMP/out"
           ditto -c -k --keepParent src-tauri/target/release/bundle/macos/BitSov.app \
             "$RUNNER_TEMP/out/BitSov-unsigned-macos-arm64.app.zip"

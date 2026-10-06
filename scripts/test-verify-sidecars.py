@@ -1,0 +1,139 @@
+#!/usr/bin/env python3
+"""G1 pre-bundle regression tests; no network, no build, no sidecar execution."""
+import hashlib
+import json
+from pathlib import Path
+import subprocess
+import tempfile
+import unittest
+
+from sidecar_test_support import ASSETS, PAYLOAD, PAYLOADS, ROOT, ReleaseFixture
+
+
+class SidecarTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.fixture = ReleaseFixture()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.fixture.close()
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="verify sidecars ")
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.env = self.fixture.prepare(self.root)
+        self.bin = self.root / "src-tauri/bin"
+        self.bin.mkdir(parents=True)
+        self.sidecar = self.bin / "konsensus-aarch64-apple-darwin"
+        self.sidecar.write_bytes(PAYLOAD)
+        self.sidecar.chmod(0o755)
+
+    def run_verify(self, command=None):
+        return subprocess.run(command or ["bash", "scripts/fetch-node-sidecar.sh", "--verify-only"],
+                              cwd=self.root, env=self.env, text=True,
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+
+    def assert_refused(self, result):
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("REFUSED", result.stdout)
+
+    def test_mismatched_binary_refused_with_expected_and_actual_hash(self):
+        self.sidecar.write_bytes(b"stray binary")
+        result = self.run_verify()
+        self.assert_refused(result)
+        self.assertIn(hashlib.sha256(PAYLOAD).hexdigest(), result.stdout)
+        self.assertIn(hashlib.sha256(b"stray binary").hexdigest(), result.stdout)
+        self.assertIn(self.sidecar.name, result.stdout)
+        self.assertEqual(self.sidecar.read_bytes(), b"stray binary")  # never silently repair
+
+    def test_verified_binaries_for_every_published_target_pass(self):
+        for triple, asset in ASSETS.items():
+            target = self.bin / f"konsensus-{triple}"
+            target.write_bytes(PAYLOADS[asset])
+            target.chmod(0o755)
+        result = self.run_verify()
+        self.assertEqual(result.returncode, 0, result.stdout)
+        for triple in ASSETS:
+            self.assertIn(f"konsensus-{triple}", result.stdout)
+
+    def test_extra_mismatched_target_also_refused(self):
+        (self.bin / "konsensus-x86_64-apple-darwin").write_bytes(b"stray")
+        self.assert_refused(self.run_verify())
+
+    def test_unknown_target_refused_even_with_matching_bytes(self):
+        (self.bin / "konsensus-unpublished").write_bytes(PAYLOAD)
+        result = self.run_verify()
+        self.assert_refused(result)
+        self.assertIn("konsensus-unpublished", result.stdout)
+        self.assertIn("expected sha256", result.stdout)
+        self.assertIn(hashlib.sha256(PAYLOAD).hexdigest(), result.stdout)
+
+    def test_missing_sidecars_refused(self):
+        self.sidecar.unlink()
+        self.assert_refused(self.run_verify())
+
+    def test_symlink_directory_and_dangling_symlink_refused(self):
+        self.sidecar.unlink()
+        self.sidecar.symlink_to(self.root / "release/bitsov-darwin-aarch64")
+        self.assert_refused(self.run_verify())
+        self.sidecar.unlink()
+        self.sidecar.symlink_to(self.root / "missing")
+        self.assert_refused(self.run_verify())
+        self.sidecar.unlink()
+        self.sidecar.mkdir()
+        self.assert_refused(self.run_verify())
+
+    def test_fetch_still_installs_verified_bytes_and_refuses_tampering(self):
+        uname = self.root / "fakebin/uname"
+        uname.write_text('#!/bin/sh\nif [ "$1" = -s ]; then echo Darwin; else echo arm64; fi\n')
+        uname.chmod(0o755)
+        self.sidecar.unlink()
+        result = self.run_verify(["bash", "scripts/fetch-node-sidecar.sh"])
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(self.sidecar.read_bytes(), PAYLOAD)
+        self.sidecar.unlink()
+        (self.root / "release/bitsov-darwin-aarch64").write_bytes(b"bad download")
+        self.assert_refused(self.run_verify(["bash", "scripts/fetch-node-sidecar.sh"]))
+        self.assertFalse(self.sidecar.exists())
+
+    def test_missing_duplicate_or_malformed_manifest_entry_refused(self):
+        sums = self.root / "release/SHA256SUMS"
+        original = sums.read_text()
+        for manifest in ("", original + original, "bad-hash  bitsov-darwin-aarch64\n"):
+            with self.subTest(manifest=manifest):
+                sums.write_text(manifest)
+                self.fixture.sign(sums.parent)
+                result = self.run_verify()
+                self.assert_refused(result)
+                self.assertIn("expected sha256", result.stdout)
+                self.assertIn(hashlib.sha256(PAYLOAD).hexdigest(), result.stdout)
+
+    def test_tampered_or_missing_signature_refused(self):
+        sums = self.root / "release/SHA256SUMS"
+        sums.write_text(sums.read_text() + "tampered\n")
+        self.assert_refused(self.run_verify())
+        (sums.parent / "SHA256SUMS.asc").unlink()
+        self.assertNotEqual(self.run_verify().returncode, 0)
+
+    def test_throwaway_key_import_path_passes(self):
+        empty = self.root / "empty-keyring"
+        empty.mkdir(mode=0o700)
+        self.env["GNUPGHOME"] = str(empty)
+        result = self.run_verify()
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertFalse((empty / "private-keys-v1.d").exists())
+
+    def test_tauri_hook_refuses_mismatch_and_accepts_verified_binary(self):
+        config = json.loads((ROOT / "src-tauri/tauri.conf.json").read_text())
+        hook = config["build"].get("beforeBundleCommand")
+        self.assertIsInstance(hook, str, "Tauri must run the G1 pre-bundle gate")
+        result = self.run_verify(["bash", "-c", hook])
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.sidecar.write_bytes(b"stray binary")
+        self.assert_refused(self.run_verify(["bash", "-c", hook]))
+
+
+if __name__ == "__main__":
+    unittest.main()

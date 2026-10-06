@@ -24,17 +24,21 @@ What the script does:
 
 1. **Sidecar.** Deletes every `src-tauri/bin/konsensus-*`. Then it runs
    `scripts/fetch-node-sidecar.sh` with a throwaway `GNUPGHOME`. That script
-   fetches the pinned rc7 release and checks its signature fail-closed. It is
-   unchanged here.
+   fetches the pinned rc7 release and checks its signature and hash fail-closed.
    For local dev, `--use-existing-sidecar` (or
    `BITSOV_USE_EXISTING_SIDECAR=1`) keeps an existing
    `src-tauri/bin/konsensus-aarch64-apple-darwin` and skips the fetch. The
-   script does not re-verify that file, so use it only with a file the fetch
-   script installed.
+   script then runs `bash scripts/fetch-node-sidecar.sh --verify-only` to
+   re-verify **every** existing sidecar against freshly downloaded, signed
+   SHA256SUMS from the pinned release. Neither the flag nor the environment
+   variable bypasses verification. Unknown targets or mismatched hashes stop
+   packaging with expected/actual sha256 diagnostics.
 2. **Build.** Runs `npm ci --ignore-scripts --no-audit --no-fund`. It deletes
    `src-tauri/target/release/bundle` so a stale bundle cannot be checked or
    uploaded. Then it runs
    `npm run tauri -- build --bundles app[,dmg] --no-sign --ci -- --locked`.
+   Tauri's `beforeBundleCommand` runs the same verification again immediately
+   before bundling, including when invoked directly outside this script.
    The command receives `CI=true TAURI_BUNDLER_DMG_IGNORE_CI=false` to skip
    Finder layout even when the caller's environment says otherwise. `--ci`
    alone only disables CLI prompts. Build output is retained in
@@ -44,7 +48,7 @@ What the script does:
    `minos`, and `codesign -dvv`. With `--dmg` it also runs `hdiutil verify`,
    which checks the image checksum without mounting it.
 5. **DMG recovery.** If Tauri reports `error running bundle_dmg.sh`, the script
-   first requires the fresh app to pass the static checks. It then discards
+   re-verifies the sidecars and requires the fresh app to pass the static checks. It then discards
    partial DMGs and falls back to `hdiutil create -srcfolder BitSov.app
    -volname BitSov -format UDZO` (using the full app and output paths).
    This plain image has no Finder layout or Applications shortcut. It must
@@ -98,7 +102,7 @@ reads files only. Any failure means exit 1 and `MAC BUNDLE CHECK: FAIL`.
 | Check | Why |
 |---|---|
 | `Contents/MacOS/bitsov-app` and `Contents/MacOS/konsensus` are executable | The app and the bundled node exist |
-| `cmp` of the bundled `konsensus` against the verified sidecar | The bundler does not re-verify a sidecar that is already on disk |
+| `cmp` of the bundled `konsensus` against the verified sidecar | The output must contain the exact bytes accepted by the pre-bundle release check |
 | `Contents/Resources/icon.icns` is non-empty | Icon packaging (spike blocker) |
 | `Info.plist` lints (`plutil -lint`, or `plistlib` off macOS) | Well-formed bundle |
 | `LSMinimumSystemVersion` is `11.0` | Matches the sidecar's Mach-O minimum |
@@ -181,9 +185,10 @@ not a supported runtime or merge gate. macOS minutes cost 10x Linux:
 
 - Runner: `macos-14` (arm64). Toolchain: Node 22 and stable Rust. Permissions:
   `contents: read`. It uses `github.token` read-only for `gh release download`.
-- Runs the checker tests, then `scripts/package-mac.sh --dmg`. The sidecar goes
-  through the same fetch-and-verify path as the Build workflow's `sidecar`
-  job.
+- Runs the offline checker and verifier tests, fetches the pinned sidecar, and
+  explicitly re-verifies all sidecars before `scripts/package-mac.sh --dmg
+  --use-existing-sidecar`. The package script and Tauri hook re-check them too.
+  Before zipping, CI re-verifies and compares the bundled node to the source.
 - Uploads the artifact `bitsov-unsigned-macos-arm64-<sha>`:
   `BitSov-unsigned-macos-arm64.app.zip` (`ditto -c -k --keepParent`) and the
   `.dmg`. The artifact is kept for 7 days.
@@ -194,6 +199,9 @@ No secrets, signing, notarization, releases, tags, or `gh release` are used.
 Mac Package is **not a merge gate**. Like the `sidecar` job, it depends on
 network access and on the genome's published release. Keep it out of branch
 protection.
+
+Follow [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md) for G1 verification evidence
+and the remaining release requirements.
 
 ## Install the unsigned app (internal testers)
 
