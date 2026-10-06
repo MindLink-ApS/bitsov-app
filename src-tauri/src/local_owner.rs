@@ -4,9 +4,11 @@ use super::*;
 use zeroize::Zeroizing;
 
 #[cfg(all(test, unix, feature = "local-owner-ceremony"))]
+#[path = "local_owner/process_tests.rs"]
 mod process_tests;
 
 #[cfg(all(test, unix, feature = "local-owner-ceremony"))]
+#[path = "local_owner/config_tests.rs"]
 mod config_tests;
 
 #[cfg(test)]
