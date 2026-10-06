@@ -67,6 +67,8 @@ mod android {
         blob: Option<String>,
         public_key: Option<String>,
         signature: Option<String>,
+        value: Option<String>,
+        found: Option<bool>,
     }
 
     #[derive(Serialize)]
@@ -86,11 +88,27 @@ mod android {
         reason: &'a str,
     }
 
+    #[derive(Serialize)]
+    struct StoreItemPayload<'a> {
+        blob: Option<String>,
+        node: &'a str,
+        suffix: &'a str,
+        value: String,
+        secret: bool,
+    }
+
+    #[derive(Serialize)]
+    struct ReadItemPayload<'a> {
+        blob: Option<String>,
+        node: &'a str,
+        suffix: &'a str,
+        secret: bool,
+    }
+
     pub fn init() -> TauriPlugin<Wry> {
         Builder::new("device-key")
             .setup(|_app, api| {
-                let handle =
-                    api.register_android_plugin(PLUGIN_IDENTIFIER, "DeviceKeyPlugin")?;
+                let handle = api.register_android_plugin(PLUGIN_IDENTIFIER, "DeviceKeyPlugin")?;
                 HANDLE.set(handle).map_err(|_| {
                     io::Error::new(
                         io::ErrorKind::AlreadyExists,
@@ -144,18 +162,14 @@ mod android {
     }
 
     pub fn available() -> bool {
-        availability().is_some_and(|status| {
-            status.hardware_backed && status.biometrics_available
-        })
+        availability().is_some_and(|status| status.hardware_backed && status.biometrics_available)
     }
 
     pub fn enclave_available() -> bool {
         availability().is_some_and(|status| status.hardware_backed)
     }
 
-    pub fn create(
-        policy: Policy,
-    ) -> Result<(Vec<u8>, [u8; PUBLIC_KEY_LEN]), DeviceKeyError> {
+    pub fn create(policy: Policy) -> Result<(Vec<u8>, [u8; PUBLIC_KEY_LEN]), DeviceKeyError> {
         let policy = match policy {
             Policy::Biometry => "biometry",
             Policy::NoPromptForTests => return Err(DeviceKeyError::Unavailable),
@@ -192,11 +206,7 @@ mod android {
         Ok(public)
     }
 
-    pub fn sign(
-        blob: &[u8],
-        message: &[u8],
-        reason: &str,
-    ) -> Result<Vec<u8>, DeviceKeyError> {
+    pub fn sign(blob: &[u8], message: &[u8], reason: &str) -> Result<Vec<u8>, DeviceKeyError> {
         if blob.is_empty() {
             return Err(DeviceKeyError::Invalid);
         }
@@ -214,10 +224,71 @@ mod android {
         }
         Ok(signature)
     }
+
+    /// Store an exact node-scoped home-node record in the Android app sandbox.
+    /// Secret records require the device-key blob and are encrypted with its
+    /// biometric-bound companion key by the native plugin.
+    pub fn store_home_item(
+        device_blob: Option<&[u8]>,
+        node: &str,
+        suffix: &str,
+        value: &[u8],
+        secret: bool,
+    ) -> Result<(), DeviceKeyError> {
+        if secret != (suffix == "seed-password") {
+            return Err(DeviceKeyError::Invalid);
+        }
+        if secret && device_blob.map_or(true, |blob| blob.is_empty()) {
+            return Err(DeviceKeyError::Invalid);
+        }
+        let response: CommandResponse = run(
+            "storeHomeItem",
+            StoreItemPayload {
+                blob: device_blob.map(|blob| STANDARD.encode(blob)),
+                node,
+                suffix,
+                value: STANDARD.encode(value),
+                secret,
+            },
+        )?;
+        checked(response).map(|_| ())
+    }
+
+    /// Read an exact node-scoped home-node record. Missing records are not
+    /// invented; secret reads require biometric approval in the native plugin.
+    pub fn read_home_item(
+        device_blob: Option<&[u8]>,
+        node: &str,
+        suffix: &str,
+        secret: bool,
+    ) -> Result<Option<Vec<u8>>, DeviceKeyError> {
+        if secret != (suffix == "seed-password") {
+            return Err(DeviceKeyError::Invalid);
+        }
+        if secret && device_blob.map_or(true, |blob| blob.is_empty()) {
+            return Err(DeviceKeyError::Invalid);
+        }
+        let response: CommandResponse = run(
+            "readHomeItem",
+            ReadItemPayload {
+                blob: device_blob.map(|blob| STANDARD.encode(blob)),
+                node,
+                suffix,
+                secret,
+            },
+        )?;
+        let response = checked(response)?;
+        if response.found != Some(true) {
+            return Ok(None);
+        }
+        decode(response.value).map(Some)
+    }
 }
 
 #[cfg(target_os = "android")]
-pub use android::{available, create, enclave_available, init, public_key, sign};
+pub use android::{
+    available, create, enclave_available, init, public_key, read_home_item, sign, store_home_item,
+};
 
 #[cfg(not(target_os = "android"))]
 pub fn available() -> bool {
@@ -235,15 +306,32 @@ pub fn create(_policy: Policy) -> Result<(Vec<u8>, [u8; PUBLIC_KEY_LEN]), Device
 }
 
 #[cfg(not(target_os = "android"))]
-pub fn sign(
-    _blob: &[u8],
-    _message: &[u8],
-    _reason: &str,
-) -> Result<Vec<u8>, DeviceKeyError> {
+pub fn sign(_blob: &[u8], _message: &[u8], _reason: &str) -> Result<Vec<u8>, DeviceKeyError> {
     Err(DeviceKeyError::Unavailable)
 }
 
 #[cfg(not(target_os = "android"))]
 pub fn public_key(_blob: &[u8]) -> Result<[u8; PUBLIC_KEY_LEN], DeviceKeyError> {
+    Err(DeviceKeyError::Unavailable)
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn store_home_item(
+    _device_blob: Option<&[u8]>,
+    _node: &str,
+    _suffix: &str,
+    _value: &[u8],
+    _secret: bool,
+) -> Result<(), DeviceKeyError> {
+    Err(DeviceKeyError::Unavailable)
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn read_home_item(
+    _device_blob: Option<&[u8]>,
+    _node: &str,
+    _suffix: &str,
+    _secret: bool,
+) -> Result<Option<Vec<u8>>, DeviceKeyError> {
     Err(DeviceKeyError::Unavailable)
 }

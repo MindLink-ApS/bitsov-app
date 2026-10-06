@@ -7,9 +7,8 @@ fn project_file(path: &str) -> String {
 
 #[test]
 fn android_device_keys_are_hardware_backed_p256_and_biometric_per_signature() {
-    let source = project_file(
-        "gen/android/app/src/main/java/tech/mindlink/bitsov/DeviceKeyPlugin.kt",
-    );
+    let source =
+        project_file("gen/android/app/src/main/java/tech/mindlink/bitsov/DeviceKeyPlugin.kt");
 
     for required in [
         "AndroidKeyStore",
@@ -25,7 +24,10 @@ fn android_device_keys_are_hardware_backed_p256_and_biometric_per_signature() {
         "BiometricPrompt.CryptoObject",
         "SHA256withECDSA",
     ] {
-        assert!(source.contains(required), "missing Android key invariant: {required}");
+        assert!(
+            source.contains(required),
+            "missing Android key invariant: {required}"
+        );
     }
     assert!(
         !source.contains(".encoded"),
@@ -34,8 +36,63 @@ fn android_device_keys_are_hardware_backed_p256_and_biometric_per_signature() {
 }
 
 #[test]
+fn android_home_password_is_hardware_encrypted_and_biometric_bound() {
+    let source =
+        project_file("gen/android/app/src/main/java/tech/mindlink/bitsov/DeviceKeyPlugin.kt");
+    for required in [
+        "HOME_KEY_ALIAS_PREFIX",
+        "KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT",
+        "KeyProperties.BLOCK_MODE_GCM",
+        "KeyProperties.ENCRYPTION_PADDING_NONE",
+        "setUserAuthenticationRequired(true)",
+        "setInvalidatedByBiometricEnrollment(true)",
+        "KeyProperties.AUTH_BIOMETRIC_STRONG",
+        "BiometricPrompt.CryptoObject(cipher)",
+        "cipher.updateAAD(item.toByteArray(Charsets.UTF_8))",
+        "args.secret != (args.suffix == \"seed-password\")",
+        "args.suffix != \"seed-password\"",
+        "verifiedDeviceKey(deviceAlias)",
+        "fun storeHomeItem",
+        "fun readHomeItem",
+    ] {
+        assert!(
+            source.contains(required),
+            "missing Android home-unlock storage invariant: {required}"
+        );
+    }
+    for forbidden in ["android.util.Log", "Log.", "println(", "printStackTrace"] {
+        assert!(
+            !source.contains(forbidden),
+            "home unlock secrets must never reach Android logs: {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn android_home_unlock_reuses_shared_flow_and_has_no_password_ipc() {
+    let keychain = project_file("src/home_keychain.rs");
+    let unlock = project_file("src/home_unlock.rs");
+    let app = project_file("src/app.rs");
+
+    assert!(keychain.contains("#[cfg(target_os = \"android\")]"));
+    assert!(keychain.contains("store_home_item"));
+    assert!(keychain.contains("read_home_item"));
+    assert!(unlock.contains("LockedConnection::connect"));
+    assert!(unlock.contains("challenge.message"));
+    assert!(unlock.contains("home_keychain::password(&node, Some(&blob))"));
+    assert!(
+        !app.contains("seed_password: String"),
+        "a seed password must not be accepted from renderer IPC"
+    );
+}
+
+#[test]
 fn android_manifest_adds_only_camera_and_biometric_permissions() {
     let manifest = project_file("gen/android/app/src/main/AndroidManifest.xml");
+    assert!(
+        manifest.contains("android:allowBackup=\"false\""),
+        "device-bound home-node records must not enter Android backup"
+    );
     let declared: BTreeSet<_> = manifest
         .lines()
         .filter(|line| line.contains("<uses-permission "))
@@ -58,9 +115,7 @@ fn android_manifest_adds_only_camera_and_biometric_permissions() {
         "android.permission.VIBRATE",
     ] {
         assert!(
-            manifest.contains(&format!(
-                "android:name=\"{removed}\" tools:node=\"remove\""
-            )),
+            manifest.contains(&format!("android:name=\"{removed}\" tools:node=\"remove\"")),
             "remove the scanner dependency's unused {removed} permission during manifest merge"
         );
     }

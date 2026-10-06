@@ -130,20 +130,36 @@ pub async fn unlock(state: &NodeState) -> Result<(), String> {
     if binding.client_id != connection.client_id || binding.fingerprint != status.fingerprint {
         return Err("This device's saved unlock binding does not match the node.".into());
     }
-    let (blob, record) = local_key(&ctx.store)
-        .ok_or("This Mac has no enrolled Secure Enclave key for this node.")?;
+    let (blob, record) = local_key(&ctx.store).ok_or_else(|| {
+        if cfg!(target_os = "android") {
+            "This phone has no enrolled Android Keystore key for this node."
+        } else {
+            "This Mac has no enrolled Secure Enclave key for this node."
+        }
+    })?;
     if !record.registered {
-        return Err("This Mac's device key has not been approved.".into());
+        return Err(if cfg!(target_os = "android") {
+            "This phone's device key has not been approved."
+        } else {
+            "This Mac's device key has not been approved."
+        }
+        .into());
     }
     let key_id = record.key_id.ok_or("No enrolled device key id.")?;
     let challenge = connection.challenge().await.map_err(|e| e.to_string())?;
     let message = challenge.message(&binding, &key_id, &connection.pin.public_key, now_unix())?;
-    let signature = device_sign(blob, message, "Unlock your BitSov home node".into())
+    let signature = device_sign(blob.clone(), message, "Unlock your BitSov home node".into())
         .await
         .map_err(|e| e.message)?;
-    let password = tokio::task::spawn_blocking(move || home_keychain::password(&node))
+    let password = tokio::task::spawn_blocking(move || home_keychain::password(&node, Some(&blob)))
         .await
-        .map_err(|_| "The Keychain unlock request stopped.")??;
+        .map_err(|_| {
+            if cfg!(target_os = "android") {
+                "The biometric password request stopped."
+            } else {
+                "The Keychain unlock request stopped."
+            }
+        })??;
     // Both biometric operations may take time; the node enforces challenge expiry.
     challenge.message(&binding, &key_id, &connection.pin.public_key, now_unix())?;
     let body = UnlockBody {

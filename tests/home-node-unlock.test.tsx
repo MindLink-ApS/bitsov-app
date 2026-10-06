@@ -1,6 +1,7 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { render } from 'solid-js/web';
 import App from '../src/App';
+import { LockedNode } from '../src/onboarding/LockedNode';
 
 let dispose: (() => void) | undefined;
 afterEach(() => { dispose?.(); document.body.innerHTML = ''; vi.unstubAllGlobals(); });
@@ -39,4 +40,14 @@ it('shows passive host failures on a locked node without requesting credentials'
   dispose = render(() => <App />, mount);
   await vi.waitFor(() => expect(mount.querySelector('[role="alert"]')?.textContent).toContain('still starting'));
   expect(calls).not.toContain('node_unlock');
+});
+
+it('shows the locked badge and biometric unlock action on mobile', () => {
+  const mount = document.createElement('div'); document.body.appendChild(mount);
+  dispose = render(() => <LockedNode mobile onUnlock={async () => {}} />, mount);
+  expect(mount.querySelector('[data-locked-badge]')?.textContent).toBe('Node locked');
+  expect([...mount.querySelectorAll('button')].some(
+    button => button.textContent === 'Unlock with biometrics',
+  )).toBe(true);
+  expect(mount.querySelector('input[type="password"]')).toBeNull();
 });
