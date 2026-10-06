@@ -616,8 +616,11 @@ async fn restart_and_verify(
         *state.owner.warning.lock().unwrap() = Some(error.clone());
         return Err(error);
     }
-    home_unlock::migrate_local_password(state, expected).await?;
-    *state.owner.warning.lock().unwrap() = None;
+    // Like finish_auth: a Mac without Touch ID (or an unsigned build) can't save
+    // the biometric unlock item. The ceremony is already committed, so warn and
+    // go live; only remote unlock of a home node stays unavailable.
+    let warning = home_unlock::migrate_local_password(state, expected).await.err();
+    *state.owner.warning.lock().unwrap() = warning;
     mark_live(state, expected);
     Ok(())
 }

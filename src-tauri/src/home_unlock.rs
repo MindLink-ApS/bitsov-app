@@ -56,17 +56,20 @@ pub async fn refresh(state: &NodeState) {
     {
         return;
     }
-    // A live, ready tunnel needs no probe: a reboot drops the tunnel and clears
-    // `ready`, which brings the probe back. Avoids a handshake every 10 s.
-    if !state.home_locked.load(Ordering::SeqCst) && *state.ready.lock().unwrap() {
-        return;
-    }
+    // Nothing clears `ready` when a home node reboots into locked mode (proxied
+    // calls just get 503 node_locked), so keep probing while live, but every
+    // 60 s instead of 10 s to spare the node's handshake limiter.
+    let interval = if !state.home_locked.load(Ordering::SeqCst) && *state.ready.lock().unwrap() {
+        Duration::from_secs(60)
+    } else {
+        Duration::from_secs(10)
+    };
     let Ok(_operation) = state.remote_recovery.try_lock() else {
         return;
     };
     {
         let mut last = state.home_last_probe.lock().unwrap();
-        if last.is_some_and(|at| at.elapsed() < Duration::from_secs(10)) {
+        if last.is_some_and(|at| at.elapsed() < interval) {
             return;
         }
         *last = Some(Instant::now());
@@ -141,7 +144,7 @@ pub async fn unlock(state: &NodeState) -> Result<(), String> {
     let password = tokio::task::spawn_blocking(move || home_keychain::password(&node))
         .await
         .map_err(|_| "The Keychain unlock request stopped.")??;
-    // Both biometric operations may take time. Never submit an expired challenge.
+    // Both biometric operations may take time; the node enforces challenge expiry.
     challenge.message(&binding, &key_id, &connection.pin.public_key, now_unix())?;
     let body = UnlockBody {
         challenge: challenge.challenge,
