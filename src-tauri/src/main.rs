@@ -279,6 +279,13 @@ impl NodeState {
     fn pairing_snapshot(&self) -> PairingView {
         let mut view = self.pairing_view.lock().unwrap().clone();
         view.remote = self.remote_mode.load(Ordering::SeqCst);
+        view.hosted_by = self
+            .remote_descriptor
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|_| view.remote)
+            .and_then(|descriptor| descriptor.hosted_by().map(str::to_owned));
         view
     }
 
@@ -7298,6 +7305,7 @@ mod remote_onboarding_tests {
             transport_signature: base64::engine::general_purpose::URL_SAFE_NO_PAD
                 .encode(signature.to_bytes()),
             code: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([44; 32]),
+            ..Default::default()
         };
         let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(serde_json::to_vec(&link).unwrap());
@@ -7354,11 +7362,40 @@ mod remote_onboarding_tests {
                 let json = serde_json::to_value(state.pairing_snapshot()).unwrap();
                 assert_eq!(json["remote"], remote);
                 assert_eq!(json["state"], phase);
-                assert_eq!(json.as_object().unwrap().len(), 7);
+                assert_eq!(json.as_object().unwrap().len(), 8);
+                assert!(json["hosted_by"].is_null());
                 assert!(json.get("token").is_none());
                 assert!(json.get("key").is_none());
             }
         }
+
+        use base64::Engine as _;
+        use ed25519_dalek::{Signer, SigningKey};
+        let node = SigningKey::from_bytes(&[42; 32]);
+        let node_id = hex::encode(node.verifying_key().to_bytes());
+        let transport_pubkey = hex::encode([43; 32]);
+        let signature = node.sign(
+            remote_access::descriptor_signature_message(&node_id, &transport_pubkey).as_bytes(),
+        );
+        let link = remote_access::PairingLinkV1 {
+            v: 1,
+            endpoint: "home.example:4242".into(),
+            node_id,
+            transport_pubkey,
+            transport_signature: base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(signature.to_bytes()),
+            code: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([44; 32]),
+            hosted_by: Some("Rasmus's Pi".into()),
+            ..Default::default()
+        };
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&link).unwrap());
+        *state.remote_descriptor.lock().unwrap() =
+            Some(remote_access::parse_pairing_link(&format!("bitsov://pair/{encoded}")).unwrap());
+        state.remote_mode.store(true, Ordering::SeqCst);
+        assert_eq!(serde_json::to_value(state.pairing_snapshot()).unwrap()["hosted_by"], "Rasmus's Pi");
+        state.remote_mode.store(false, Ordering::SeqCst);
+        assert!(serde_json::to_value(state.pairing_snapshot()).unwrap()["hosted_by"].is_null());
     }
 }
 

@@ -3,6 +3,7 @@ import { SoftError } from '../control/SoftError';
 import { createSignal, For, Match, Show, Switch } from 'solid-js';
 import { onboardingSteps, scopeList, type NodeStatus, type PairingView } from './pairing';
 import type { DeviceView } from '../control/types';
+import type { RemoteImportView } from '../control/source';
 
 // Claim discipline (BitSov-bitsov docs/security/pairing.md): less exposure, not solved
 // local security. The short code is a tripwire, never described as what protects the
@@ -39,11 +40,7 @@ export function Onboarding(props: {
   onTargetChange?: (target: NodeTarget) => void;
   device?: () => DeviceView | null;
   onForgetRemote?: () => Promise<void>;
-  onImportRemote?: (link: string) => Promise<{
-    endpoint: string;
-    node_id_fingerprint: string;
-    restart_required: boolean;
-  }>;
+  onImportRemote?: (link: string) => Promise<RemoteImportView>;
 }) {
   // Runtime, opt-in only. This changes presentation, never node authority.
   const testNodes = (() => {
@@ -63,8 +60,14 @@ export function Onboarding(props: {
   const [forgetting, setForgetting] = createSignal(false);
   const [remoteRevision, setRemoteRevision] = createSignal(0);
   const [remoteChoiceEdited, setRemoteChoiceEdited] = createSignal(false);
-  const [importResult, setImportResult] = createSignal<string | null>(null);
+  const [importResult, setImportResult] = createSignal<RemoteImportView | null>(null);
   const [importError, setImportError] = createSignal<string | null>(null);
+  // A link saved this session wins over the running node's; forgetting reverts.
+  const [savedHostedBy, setSavedHostedBy] = createSignal<string | null | undefined>(undefined);
+  const hostedBy = () => {
+    const saved = savedHostedBy();
+    return saved !== undefined ? saved : props.pairing().hosted_by ?? null;
+  };
 
   const importRemote = async (event: Event) => {
     event.preventDefault();
@@ -83,9 +86,8 @@ export function Onboarding(props: {
       const result = await props.onImportRemote(link);
       setRemoteRevision(n => n + 1);
       setRemoteChoiceEdited(true);
-      setImportResult(
-        `Remote node ${result.endpoint} saved. Node ID fingerprint: ${result.node_id_fingerprint}. Restart BitSov to connect.`,
-      );
+      setSavedHostedBy(result.hosted_by ?? null);
+      setImportResult(result);
     } catch (error) {
       setImportError(String(error));
     } finally {
@@ -98,6 +100,7 @@ export function Onboarding(props: {
     try {
       await props.onForgetRemote!();
       setRemoteChoiceEdited(true);
+      setSavedHostedBy(undefined);
       setImportResult(null);
       setImportError(null);
     } finally { setForgetting(false); }
@@ -202,7 +205,13 @@ export function Onboarding(props: {
               <div class="target-head">
                 <strong>Your computer at home</strong>
                 <div class="row" style={{ width: 'auto', gap: '8px' }}>
-                  <span class="target-badge">Pairing link</span>
+                  <Show when={hostedBy()} fallback={<span class="target-badge">Pairing link</span>}>
+                    {(label) => (
+                      <span class="target-badge hosted-by" data-hosted-by title={`Hosted by ${label()}`}>
+                        Hosted by <bdi>{label()}</bdi>
+                      </span>
+                    )}
+                  </Show>
                   <span class="target-radio-indicator" aria-hidden="true">✓</span>
                 </div>
               </div>
@@ -403,7 +412,15 @@ export function Onboarding(props: {
         </button>
         <p class="hint">The link is verified and stored for the next app start.</p>
         <Show when={importResult()}>
-          <p class="ok-note">{importResult()}</p>
+          {(result) => (
+            <p class="ok-note" data-import-result>
+              Remote node {result().endpoint}
+              <Show when={result().hosted_by}>
+                {(label) => <> (hosted by <bdi data-hosted-by>{label()}</bdi>)</>}
+              </Show>
+              {' '}saved. Node ID fingerprint: {result().node_id_fingerprint}. Restart BitSov to connect.
+            </p>
+          )}
         </Show>
         <Show when={importError()}>
           <SoftError message={importError()!} />

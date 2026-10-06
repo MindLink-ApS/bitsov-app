@@ -35,6 +35,7 @@ fn setup(endpoint: String, pinned: bool) -> (RemoteDescriptor, Arc<Pins>) {
         transport_signature: base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(signature.to_bytes()),
         code: None,
+        hosted_by: None,
     })
     .unwrap();
     let pins = Arc::new(Pins::default());
