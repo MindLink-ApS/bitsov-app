@@ -471,10 +471,16 @@ pub async fn finalize(
     let config = state.config.lock().unwrap().clone().ok_or("The sidecar config is unavailable.")?;
     let dir = config.parent().ok_or("The sidecar directory is unavailable.")?.to_path_buf();
     let node = pending.node_id.clone();
-    tokio::task::spawn_blocking(move || {
+    // Best effort: a Mac without Touch ID (or an unsigned build) must still be
+    // able to finish the owner ceremony. It just can't remote-unlock a home node
+    // until the item is saved; the legacy-item migration retries later.
+    let saved = tokio::task::spawn_blocking(move || {
         let password = owner_password::load(&dir, false)?;
         home_keychain::save_password(&node, &password)
-    }).await.map_err(|_| "Saving the biometric unlock password stopped.")??;
+    }).await;
+    if !matches!(saved, Ok(Ok(()))) {
+        eprintln!("[local-owner] biometric unlock password not saved; remote unlock stays unavailable on this Mac");
+    }
     submit(state, &store, &mut pending, &record, &proof, &words).await?;
     drop(words);
     restart_and_verify(app, state, &pending.node_id).await

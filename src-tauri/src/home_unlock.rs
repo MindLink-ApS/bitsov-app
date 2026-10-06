@@ -56,6 +56,11 @@ pub async fn refresh(state: &NodeState) {
     {
         return;
     }
+    // A live, ready tunnel needs no probe: a reboot drops the tunnel and clears
+    // `ready`, which brings the probe back. Avoids a handshake every 10 s.
+    if !state.home_locked.load(Ordering::SeqCst) && *state.ready.lock().unwrap() {
+        return;
+    }
     let Ok(_operation) = state.remote_recovery.try_lock() else {
         return;
     };

@@ -261,8 +261,14 @@ public func bitsov_home_store(_ service: UnsafePointer<CChar>?, _ bytes: UnsafeP
         }
         let status = SecItemAdd(query as CFDictionary, nil)
         if status == errSecDuplicateItem {
-            // Never replace an existing seed password or relax its ACL.
-            if secret == 1 { return errSecSuccess }
+            if secret == 1 {
+                // Replace a stale seed password (e.g. restored mnemonic, new launcher
+                // password) by delete + add with the same strict ACL; never update in
+                // place, which could keep a weaker ACL.
+                let deleted = SecItemDelete(homeQuery(name) as CFDictionary)
+                guard deleted == errSecSuccess || deleted == errSecItemNotFound else { return deleted }
+                return SecItemAdd(query as CFDictionary, nil)
+            }
             return SecItemUpdate(homeQuery(name) as CFDictionary, [kSecValueData: data] as CFDictionary)
         }
         return status

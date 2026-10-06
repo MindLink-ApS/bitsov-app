@@ -134,11 +134,13 @@ impl UnlockChallenge {
         binding: &UnlockBinding,
         key: &str,
         box_key: &str,
-        now: i64,
+        _now: i64,
     ) -> Result<String, String> {
-        if self.expires_at <= now
-            || self.expires_at > now.saturating_add(120)
-            || self.challenge.len() != 64
+        // Expiry is the node's job: it issued the challenge, consumes it on first use
+        // and enforces its own 120 s TTL. A Pi has no RTC, so after a power cut its
+        // clock can be far from the Mac's; comparing clocks here would reject every
+        // challenge without adding safety.
+        if self.challenge.len() != 64
             || !self
                 .challenge
                 .bytes()
@@ -217,7 +219,7 @@ mod tests {
         assert!(BoxPin::verify(node, "node.example:4242", key, &format!("{sig}=")).is_err());
     }
     #[test]
-    fn unlock_signature_binds_every_field_and_rejects_expired_or_unknown_keys() {
+    fn unlock_signature_binds_every_field_and_rejects_unknown_keys() {
         let binding = UnlockBinding {
             client_id: "client".into(),
             epoch: 7,
@@ -230,7 +232,9 @@ mod tests {
         };
         assert_eq!(c.message(&binding, "key", "box", 1).unwrap(), format!("bitsov-node-unlock-v1\nnode:fp\nclient:client\nepoch:7\nkey:key\nchallenge:{}\nbox_transport:box", "aa".repeat(32)));
         assert!(c.message(&binding, "other", "box", 1).is_err());
-        assert!(c.message(&binding, "key", "box", 120).is_err());
+        // Box clock skew (RTC-less Pi after a power cut) must not block unlock.
+        assert!(c.message(&binding, "key", "box", 120).is_ok());
+        assert!(c.message(&binding, "key", "box", -100_000).is_ok());
         let mut invalid = c;
         invalid.challenge = "bad\nchallenge".into();
         assert!(invalid.message(&binding, "key", "box", 1).is_err());
