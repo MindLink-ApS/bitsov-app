@@ -466,6 +466,21 @@ pub async fn finalize(
         let _guard = state.device_lifecycle.lock().unwrap();
         device::save_record(&store, &record).map_err(|e| e.message)?;
     }
+    // Bind the #237 launcher password to the committed node identity before
+    // finalize. The new item is device-only and protected by current biometry.
+    let config = state.config.lock().unwrap().clone().ok_or("The sidecar config is unavailable.")?;
+    let dir = config.parent().ok_or("The sidecar directory is unavailable.")?.to_path_buf();
+    let node = pending.node_id.clone();
+    // Best effort: a Mac without Touch ID (or an unsigned build) must still be
+    // able to finish the owner ceremony. It just can't remote-unlock a home node
+    // until the item is saved; the legacy-item migration retries later.
+    let saved = tokio::task::spawn_blocking(move || {
+        let password = owner_password::load(&dir, false)?;
+        home_keychain::save_password(&node, &password)
+    }).await;
+    if !matches!(saved, Ok(Ok(()))) {
+        eprintln!("[local-owner] biometric unlock password not saved; remote unlock stays unavailable on this Mac");
+    }
     submit(state, &store, &mut pending, &record, &proof, &words).await?;
     drop(words);
     restart_and_verify(app, state, &pending.node_id).await
@@ -601,7 +616,11 @@ async fn restart_and_verify(
         *state.owner.warning.lock().unwrap() = Some(error.clone());
         return Err(error);
     }
-    *state.owner.warning.lock().unwrap() = None;
+    // Like finish_auth: a Mac without Touch ID (or an unsigned build) can't save
+    // the biometric unlock item. The ceremony is already committed, so warn and
+    // go live; only remote unlock of a home node stays unavailable.
+    let warning = home_unlock::migrate_local_password(state, expected).await.err();
+    *state.owner.warning.lock().unwrap() = warning;
     mark_live(state, expected);
     Ok(())
 }

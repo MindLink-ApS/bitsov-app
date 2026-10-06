@@ -382,6 +382,7 @@ export function Onboarding(props: {
       </Switch>
 
       <Show when={target() !== 'local'}>
+      <p class="hint">After a power cut, open the app once. Your password is never stored on the box.</p>
       <form class="panel pairing remote-form" data-remote-access onSubmit={importRemote}>
         <h2>Paste the pairing link</h2>
         <label for="remote-pairing-link">Pairing link</label>

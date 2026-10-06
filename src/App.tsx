@@ -1,3 +1,4 @@
+import { LockedNode } from './onboarding/LockedNode';
 import { LocalOwnerCeremony } from './onboarding/LocalOwnerCeremony';
 import { InitializationRepair } from './onboarding/InitializationRepair';
 import { SoftError } from './control/SoftError';
@@ -91,7 +92,7 @@ export default function App() {
     if (!trustAck()) return false;
     return status().ready || wasOpen;
   }, false);
-  const live = () => shellOpen() && status().ready && !status().retry_after_secs;
+  const live = () => shellOpen() && !status().locked && status().ready && !status().retry_after_secs;
   const [selectedTarget, setSelectedTarget] = createSignal<NodeTarget>('local');
   const remote = createMemo(() => pairing().remote);
   createEffect(() => setSelectedTarget(remote() ? 'network' : 'local'));
@@ -113,7 +114,7 @@ export default function App() {
     }
     // This command reads /pair/device-keys remotely. Once setup is complete,
     // the shell owns its paced refresh; the status poll must not duplicate it.
-    if (shellOpen() || status().retry_after_secs) return;
+    if (status().locked || shellOpen() || status().retry_after_secs) return;
     try {
       setDevice(await source().deviceKeyStatus());
     } catch {
@@ -236,6 +237,7 @@ export default function App() {
     <Show when={status().local_owner && status().owner_warning}>
       <aside role="alert" class="panel" data-owner-warning>{status().owner_warning}</aside>
     </Show>
+    <Show when={!status().locked} fallback={<LockedNode hostError={status().error} onUnlock={async () => { await source().nodeUnlock(); await poll(); }} />}>
     <Show
       when={trustAck()}
       fallback={
@@ -255,6 +257,7 @@ export default function App() {
         firstRun={firstRun}
         fund={(guarded, blocked) => <Fund source={guarded} moneyBlocked={blocked} ready={live} />}
       />
+    </Show>
     </Show>
     </>
   );

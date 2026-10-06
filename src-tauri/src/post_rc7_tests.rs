@@ -480,7 +480,15 @@ exec sleep 30
             stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
             let mut reader = std::io::BufReader::new(stream);
             let mut request = String::new();
-            reader.read_line(&mut request).unwrap();
+            // Health probes race sidecar exit and can be cancelled after TCP
+            // connect but before sending HTTP. Retire that idle fixture socket;
+            // the overall deadline still requires real authentication to finish.
+            match reader.read_line(&mut request) {
+                Ok(0) => continue,
+                Ok(_) => {},
+                Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => continue,
+                Err(e) => panic!("{e}"),
+            }
             let mut length = 0;
             loop {
                 let mut header = String::new();

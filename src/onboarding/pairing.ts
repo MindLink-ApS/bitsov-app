@@ -3,6 +3,7 @@
 // step logic is testable without a window. The host never sends a token or key here.
 
 export type NodeStatus = {
+  locked?: boolean;
   local_owner?: boolean;
   owner_warning?: string | null;
   initialization_repair?: 'none' | 'required' | 'repairing' | 'price_floor_required' | 'price_floor_repairing';

@@ -20,6 +20,7 @@ use tokio::sync::{mpsc, watch, Semaphore};
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 
 use crate::pairing::{self, ClientKey};
+use crate::home_node::{BoxPin, BoxPinStore};
 use crate::connection_retry::RemoteRetry;
 
 /// Exact Noise protocol used by both app and node ingress.
@@ -89,6 +90,8 @@ pub struct RemoteDescriptor {
     code: Option<String>,
     #[serde(skip)]
     transport_pubkey_bytes: [u8; 32],
+    #[serde(skip)]
+    pin_store: Option<Arc<dyn BoxPinStore>>,
 }
 
 impl fmt::Debug for RemoteDescriptor {
@@ -104,6 +107,20 @@ impl fmt::Debug for RemoteDescriptor {
 }
 
 impl RemoteDescriptor {
+    pub fn with_pin_store(mut self, store: Arc<dyn BoxPinStore>) -> Self {
+        self.pin_store = Some(store);
+        self
+    }
+
+    pub fn box_pin(&self) -> Result<Option<BoxPin>, RemoteError> {
+        let Some(store) = &self.pin_store else { return Ok(None); };
+        let Some(pin) = store.read(&self.node_id)? else { return Ok(None); };
+        if pin.node_id != self.node_id || pin.endpoint != self.endpoint {
+            return Err(RemoteError::Invalid("box pin belongs to another node or endpoint".into()));
+        }
+        BoxPin::verify(&self.node_id, &self.endpoint, &pin.public_key, &pin.signature).map(Some)
+    }
+
     pub fn endpoint(&self) -> &str {
         &self.endpoint
     }
@@ -152,6 +169,10 @@ pub enum RemoteAuthResponse {
         v: u8,
         client_id: String,
         scopes: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        box_transport_pubkey: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        box_transport_signature: Option<String>,
     },
     Error {
         v: u8,
@@ -369,6 +390,7 @@ fn validate_descriptor(stored: StoredDescriptor) -> Result<RemoteDescriptor, Rem
         transport_signature: stored.transport_signature,
         code: stored.code,
         transport_pubkey_bytes,
+        pin_store: None,
     })
 }
 
@@ -725,7 +747,8 @@ async fn pinned_handshake<S: AsyncRead + AsyncWrite + Unpin>(
         let responder = noise.get_remote_static().ok_or_else(|| {
             RemoteError::Transport("Noise responder did not present a static key".into())
         })?;
-        if responder != descriptor.transport_pubkey_bytes {
+        if responder != descriptor.transport_pubkey_bytes
+            && !(descriptor.code.is_none() && descriptor.box_pin()?.as_ref().is_some_and(|pin| pin.matches(responder))) {
             return Err(RemoteError::Transport(
                 "Noise responder static key does not match the pairing link".into(),
             ));
@@ -768,6 +791,8 @@ async fn encrypted_auth<S: AsyncRead + AsyncWrite + Unpin>(
                 v,
                 client_id,
                 scopes,
+                box_transport_pubkey,
+                box_transport_signature,
             } => {
                 if v != 1 {
                     return Err(RemoteError::Transport(
@@ -782,6 +807,19 @@ async fn encrypted_auth<S: AsyncRead + AsyncWrite + Unpin>(
                     return Err(RemoteError::Transport(
                         "authentication reply has an invalid client id".into(),
                     ));
+                }
+                match (box_transport_pubkey, box_transport_signature) {
+                    (Some(public), Some(signature)) => {
+                        let pin = BoxPin::verify(&descriptor.node_id, &descriptor.endpoint, &public, &signature)?;
+                        if noise.get_remote_static() == Some(&descriptor.transport_pubkey_bytes[..]) {
+                            // Only the seed-backed identity session may learn or rotate a box pin.
+                            if let Some(store) = &descriptor.pin_store { store.save(&pin)?; }
+                        } else if !descriptor.box_pin()?.is_some_and(|saved| saved.public_key == public && saved.matches(noise.get_remote_static().unwrap_or(&[]))) {
+                            return Err(RemoteError::Invalid("locked node cannot replace its box pin".into()));
+                        }
+                    }
+                    (None, None) if noise.get_remote_static() == Some(&descriptor.transport_pubkey_bytes[..]) => {},
+                    _ => return Err(RemoteError::Invalid("missing box transport proof".into())),
                 }
                 Ok((client_id, scopes))
             }
@@ -1280,6 +1318,100 @@ async fn connect_authenticated(
     Ok((remote, noise, client_id, scopes))
 }
 
+/// Dedicated host-only HTTP channel. Unlock passwords never enter the loopback proxy.
+/// A connection can be constructed only after an existing box pin matched Noise.
+pub struct LockedConnection {
+    remote: TcpStream,
+    noise: TransportState,
+    pub client_id: String,
+    pub pin: BoxPin,
+}
+impl LockedConnection {
+    pub async fn connect(descriptor: &RemoteDescriptor, key: &ClientKey, name: &str) -> Result<Option<Self>, RemoteError> {
+        if descriptor.has_code() { return Ok(None); }
+        let Some(pin) = descriptor.box_pin()? else { return Ok(None); };
+        let (remote, noise, client_id, _) = connect_authenticated(descriptor, key, name).await?;
+        if noise.get_remote_static() == Some(&descriptor.transport_pubkey_bytes[..]) { return Ok(None); }
+        if !pin.matches(noise.get_remote_static().unwrap_or(&[])) {
+            return Err(RemoteError::Invalid("unlock requires the pinned box static".into()));
+        }
+        Ok(Some(Self { remote, noise, client_id, pin }))
+    }
+
+    pub async fn status(&mut self) -> Result<crate::home_node::LockStatus, RemoteError> {
+        let (status, body) = self.request("GET", "/api/v1/node/lock", b"").await?;
+        if status != 200 { return Err(RemoteError::Refused("lock status unavailable".into())); }
+        let lock: crate::home_node::LockStatus = serde_json::from_slice(&body)
+            .map_err(|_| RemoteError::Invalid("invalid lock status".into()))?;
+        if lock.state != "locked" || lock.node_id != self.pin.node_id
+            || lock.fingerprint != crate::home_node::identity_fingerprint(&self.pin.node_id) {
+            return Err(RemoteError::Invalid("locked identity does not match the box pin".into()));
+        }
+        Ok(lock)
+    }
+
+    pub async fn challenge(&mut self) -> Result<crate::home_node::UnlockChallenge, RemoteError> {
+        let (status, body) = self.request("POST", "/api/v1/node/unlock/challenge", b"{}").await?;
+        unlock_status(status, 200)?;
+        serde_json::from_slice(&body).map_err(|_| RemoteError::Invalid("invalid unlock challenge".into()))
+    }
+
+    pub async fn unlock(&mut self, body: &crate::home_node::UnlockBody) -> Result<(), RemoteError> {
+        let bytes = zeroize::Zeroizing::new(serde_json::to_vec(body)
+            .map_err(|_| RemoteError::Local("cannot encode unlock request".into()))?);
+        let (status, _) = self.request("POST", "/api/v1/node/unlock", &bytes).await?;
+        unlock_status(status, 204)
+    }
+
+    async fn request(&mut self, method: &str, path: &str, body: &[u8]) -> Result<(u16, zeroize::Zeroizing<Vec<u8>>), RemoteError> {
+        tokio::time::timeout(Duration::from_secs(15), async {
+            let mut request = zeroize::Zeroizing::new(format!("{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n", body.len()).into_bytes());
+            request.extend_from_slice(body);
+            for chunk in request.chunks(MAX_NOISE_PLAINTEXT) {
+                let encrypted = encode_transport(&mut self.noise, chunk)?;
+                write_frame(&mut self.remote, &encrypted).await?;
+            }
+            // Axum's fixed JSON/empty replies have Content-Length (204 may omit it).
+            // Do not follow redirects or forward server text, which could echo a secret.
+            let mut response = zeroize::Zeroizing::new(Vec::new());
+            loop {
+                let encrypted = read_frame(&mut self.remote, MAX_TRANSPORT_FRAME).await?;
+                let plaintext = zeroize::Zeroizing::new(decode_transport(&mut self.noise, &encrypted, MAX_NOISE_PLAINTEXT)?);
+                response.extend_from_slice(&plaintext);
+                if response.len() > 32 * 1024 { return Err(RemoteError::Invalid("unlock reply too large".into())); }
+                if let Some(end) = response.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let header = std::str::from_utf8(&response[..end]).map_err(|_| RemoteError::Invalid("invalid unlock HTTP reply".into()))?;
+                    let status = header.lines().next().and_then(|l| l.split_whitespace().nth(1)).and_then(|v| v.parse::<u16>().ok())
+                        .ok_or_else(|| RemoteError::Invalid("invalid unlock HTTP status".into()))?;
+                    let mut length = None;
+                    for line in header.lines().skip(1) {
+                        let (name, value) = line.split_once(':').ok_or_else(|| RemoteError::Invalid("invalid unlock header".into()))?;
+                        if name.eq_ignore_ascii_case("transfer-encoding") { return Err(RemoteError::Invalid("unsupported unlock framing".into())); }
+                        if name.eq_ignore_ascii_case("content-length") {
+                            if length.is_some() { return Err(RemoteError::Invalid("duplicate unlock length".into())); }
+                            length = Some(value.trim().parse::<usize>().map_err(|_| RemoteError::Invalid("invalid unlock length".into()))?);
+                        }
+                    }
+                    let length = length.or((status == 204).then_some(0)).filter(|n| *n <= 16 * 1024)
+                        .ok_or_else(|| RemoteError::Invalid("missing or oversized unlock length".into()))?;
+                    if response.len() >= end + 4 + length { return Ok((status, zeroize::Zeroizing::new(response[end+4..end+4+length].to_vec()))); }
+                }
+            }
+        }).await.map_err(|_| RemoteError::Transport("unlock request timed out; check the node before retrying".into()))?
+    }
+}
+
+fn unlock_status(status: u16, expected: u16) -> Result<(), RemoteError> {
+    if status == expected { return Ok(()); }
+    Err(RemoteError::Refused(match status {
+        401 => "Unlock failed. No password was retained by the app.",
+        403 => "This device is not approved to unlock this node.",
+        409 => "Your node is already unlocking. Wait a few seconds.",
+        429 => "Unlock is rate limited. Wait before trying again.",
+        _ => "The node did not confirm unlock.",
+    }.into()))
+}
+
 /// Complete the pinned Noise authentication before any paired HTTP token flow.
 ///
 /// A fresh import has no pairing record yet, so `establish_remote` cannot be
@@ -1347,6 +1479,10 @@ async fn serve_connection(
         }
     };
 
+    if noise.get_remote_static() != Some(&snapshot.transport_pubkey_bytes[..]) {
+        write_proxy_error(&mut local, "503 Service Unavailable", "node_locked", "Node is locked after restart").await;
+        return Ok(());
+    }
     finalize_authenticated_pairing(
         &descriptor,
         &config_path,
@@ -1583,6 +1719,13 @@ mod tests {
     use ed25519_dalek::{Signer, SigningKey};
     use std::net::IpAddr;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn u1_auth_fixture_is_accepted() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!("../tests/fixtures/home-node.json")).unwrap();
+        let response = serde_json::from_value::<RemoteAuthResponse>(fixture["auth"].clone());
+        assert!(response.is_ok(), "U1 auth response rejected: {response:?}");
+    }
 
     fn test_code(byte: u8) -> String {
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([byte; 32])
@@ -2339,6 +2482,7 @@ mod tests {
             v: 1,
             client_id: "0123456789abcdef0123456789abcdef".into(),
             scopes: vec!["read".into(), "receive".into()],
+            box_transport_pubkey: None, box_transport_signature: None,
         })
         .unwrap();
         let encrypted = encode_transport(&mut noise, &response)?;
@@ -2365,6 +2509,7 @@ mod tests {
         let response = serde_json::to_vec(&RemoteAuthResponse::Ok {
             v: 1, client_id: "0123456789abcdef0123456789abcdef".into(),
             scopes: vec!["read".into(), "receive".into()],
+            box_transport_pubkey: None, box_transport_signature: None,
         }).unwrap();
         let encrypted = encode_transport(&mut noise, &response)?;
         write_frame(&mut stream, &encrypted).await?;
@@ -2811,3 +2956,7 @@ mod tests {
         assert!(loopback_addr("https://127.0.0.1:3141/not-api-v1").is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "remote_access/home_tests.rs"]
+mod home_tests;
