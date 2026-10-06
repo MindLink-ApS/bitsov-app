@@ -9,7 +9,14 @@ LANE: BitSov app factory (`MindLink-ApS/bitsov-app`)
 
 ## QUEUE-HEAD
 
-**End-user app: pairing, local assistant, Mac packaging** (2026-09-27). Main is `7fc9294`. It pins `v0.3.0-rc7`, and the Jarvis J1–J5 mock/sandbox stack is merged.
+**rc9 pin and local owner opt-in** (2026-10-06). This branch pins
+`v0.3.0-rc9` at `cd75c69ed17eeb812d45bdc666b381ca7da1b697`. The bundled owner
+capability is enabled; Cargo/runtime/macOS gates remain. Retained rc7 plaintext
+identities use consent-based marker and price repairs, never a fresh ceremony.
+Release fetching and packaging await signed checksum assets and CI accessibility.
+See [the upgrade and validation checklist](docs/NODE_RC9_UPGRADE.md).
+
+The September factory entries below are historical context, not current PR status:
 
 - **F1 — #32 `factory/pairing-onboarding`** (draft, in Codex review, head `90a154bd`). App pairing client and first-run pairing UX. Mock-only, using genome #77 shapes. Falls back to `/auth/local` only on the rc7 sidecar (404 on `/pair/request`).
 - **F2 — `factory/assistant-local-broker`** (underway, stacked on #32, not yet pushed). The assistant reads the local node through the broker. Deny-by-default, no cloud.
@@ -22,8 +29,8 @@ Runs on Linux + macOS since `v0.3.0-rc5` (Darwin SKIP retired, PR #9). Publish s
 | What | SHA / ref |
 |---|---|
 | Main baseline | `7fc9294` (2026-09-27) |
-| Protocol pin | `v0.3.0-rc7`, source `958e3997`, on main since #14 (`ec13f2a`). rc7 is the newest genome tag |
-| Genome #77 | BitSov-bitsov #77 (pairing, identity-free bootstrap, owner CLI) merged at `56c0ee0` on 2026-09-26. It is 3 commits ahead of `v0.3.0-rc7` and **in no tag**. The app cannot pin it yet |
+| Protocol pin | `v0.3.0-rc9`, source `cd75c69`; expected Darwin arm64 SHA-256 recorded in the rc9 checklist. No local release download |
+| Genome #77 | BitSov-bitsov #77 (pairing, identity-free bootstrap, owner CLI) merged at `56c0ee0` on 2026-09-26. Included in the rc9 pin |
 | App quit stops node | #17 `0190baa` (fixes #16) |
 | Jarvis J1–J4 | #21 `8cc34eb` J1 mock node + 50-question fixture; #22 `3543229` J2 broker with metadata allowlist; #20 `61dd969` J3 sealed assistant window + command ACL; #26 `dbd3d9e` J4 broker over the mock node, e2e; #27 `32c49bc` J4 review fixes |
 | J0 macOS isolation | #24 `612b330` Phase 0.5 spike (mock-only) |
@@ -35,15 +42,15 @@ Runs on Linux + macOS since `v0.3.0-rc5` (Darwin SKIP retired, PR #9). Publish s
 
 ## BLOCKED
 
-- **Pairing on a real node.** #77 is in no genome tag, so the app stays on rc7 and pairing (#32) is verified against the mock only. Unblocking it needs a new genome tag and an app pin bump (HUMAN).
+- **rc9 release verification.** Attach signed checksum assets and make the release accessible to CI, then inspect Sidecar and Mac Package results.
 - **Darwin / Windows notarization.** Signed macOS/Windows node sidecars have shipped since `v0.3.0-rc5` (B10 landed; Darwin SKIP retired, PR #9). They are GPG-signed only, not notarized or Authenticode-signed, so Gatekeeper and SmartScreen block them by default. No Mac/Win app build ships without a verified signed node sidecar. Publish stays human.
-- **Publish** is human-only. Genome rc7 is published. The app itself is unpublished (`/bitsov/app` stays a waitlist, G5). Package-time sidecar verification must be enforced before public downloads.
+- **Publish** is human-only. The rc9 tag exists; its draft assets still need CI-accessible signed checksums. The app itself is unpublished (`/bitsov/app` stays a waitlist, G5). Package-time sidecar verification must be enforced before public downloads.
 
 ## HUMAN
 
 Publish stays human. No PriceOpen. No live relay. No cloud/seed.
 
-- Genome: cut a new tag that includes #77 (`56c0ee0`), then bump the app pin from rc7.
+- Genome: attach rc9 signed checksum assets and publish when approved; no release publishing occurs in this app change.
 - Tag, GPG signing, publish, seed.
 - macOS notarization / Windows Authenticode.
 - Rasmus decides on the open PRs: #25 (J0 local model eval spike, draft) and #13 (Mac package spike, CONFLICTING). #23 (Windows icon) is also open.
@@ -52,10 +59,10 @@ Publish stays human. No PriceOpen. No live relay. No cloud/seed.
 
 | Owner | Loop | Next reversible action |
 |---|---|---|
-| Codex | F1 pairing onboarding (#32) | Finish review of head `90a154bd`; stays draft and mock-only until #77 is tagged |
+| Codex | F1 pairing onboarding (#32) | Finish review of head `90a154bd`; historical entry; rc9 now includes #77 |
 | Factory agent | F2 assistant local broker | Build on #32; deny-by-default broker to the local node, no cloud |
 | Cloud agent | F3 Mac packaging assessment | Write up revive vs replace #13 on `docs/mac-package-plan` |
-| Human | Genome tag + pin bump | Tag a genome release containing #77; the app pin bump follows |
+| Human / CI | rc9 release verification | Attach signed checksum assets; run the Sidecar and Mac Package checks |
 | Human | #25 / #13 / #23 | Merge, close, or keep open; Rasmus's call |
 
 ## HUDDLE

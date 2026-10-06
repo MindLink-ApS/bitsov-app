@@ -85,9 +85,9 @@ describe('onboarding steps', () => {
     expect(steps[2].status).toBe('active');
   });
 
-  it('an identity-free node blocks the identity step on the genome tag', () => {
+  it('a local bootstrap node opens the identity step for restore', () => {
     const steps = onboardingSteps(booting, { ...paired, bootstrap: 'bootstrap' }, false);
-    expect(steps[2].status).toBe('blocked');
+    expect(steps[2].status).toBe('active');
   });
 
   it('a node start error fails the first step', () => {
@@ -206,56 +206,47 @@ describe('pairing panel', () => {
   it('fallback explains the rc7 node and does not claim pairing scopes', () => {
     const el = show(fallback, ready);
     const panel = el.querySelector('[data-pairing="fallback"]')!;
-    expect(panel.textContent).toContain('v0.3.0-rc7');
+    expect(panel.textContent).toContain('older node');
+    expect(panel.textContent).not.toContain('bundled node');
     expect(panel.textContent).toContain('/auth/local');
     expect(panel.textContent).not.toContain('read + receive');
     expect(el.querySelector('[data-short-code]')).toBeNull();
   });
 
-  it('identity-free node says create/restore waits on the genome tag', () => {
+  it('identity-free node describes local restore', () => {
     const el = show({ ...paired, scopes: ['read', 'receive', 'identity'], bootstrap: 'bootstrap' });
     const panel = el.querySelector('[data-pairing="paired"]')!;
     expect(panel.textContent).toContain('read + receive + identity');
     expect(el.textContent).toContain('identity-free');
-    expect(el.textContent).toContain('genome release');
+    expect(el.textContent).toContain('restore an existing identity');
   });
 
-  it('renders 3 honest node location choices: local default, network and cloud enabled for remote pairing', () => {
+  it('defaults to This Mac, keeps home under collapsed Advanced, and hides test nodes', () => {
     const el = show(starting, booting);
     const local = el.querySelector<HTMLButtonElement>('[data-target="local"]')!;
-    const network = el.querySelector<HTMLButtonElement>('[data-target="network"]')!;
-    const cloud = el.querySelector<HTMLButtonElement>('[data-target="cloud"]')!;
-
-    expect(local).not.toBeNull();
-    expect(network).not.toBeNull();
-    expect(cloud).not.toBeNull();
-
-    expect(local.disabled).toBe(false);
-    expect(local.classList.contains('selected')).toBe(true);
-    expect(local.textContent).toContain('This Mac');
-    expect(local.textContent).toContain('Your keys stay on this Mac');
-
-    expect(network.disabled).toBe(false);
-    expect(network.getAttribute('aria-disabled')).toBeNull();
-    expect(network.textContent).toContain('A computer at home');
-    expect(network.textContent).not.toContain('Coming soon');
-    expect(network.textContent).toContain('Paste its pairing link');
-
-    expect(cloud.disabled).toBe(false);
-    expect(cloud.getAttribute('aria-disabled')).toBeNull();
-    expect(cloud.textContent).toContain('A cloud server');
-    expect(cloud.textContent).not.toContain('Coming soon');
-    expect(cloud.textContent).toContain('Paste its pairing link');
-    // Hosted keys are labelled as reachable by whoever runs the host.
-    expect(cloud.textContent).toContain('whoever runs the host can reach them');
-
-    // No fake scan spinners; remote pairing uses a password input, not a text address field
-    expect(el.querySelector('.spinner')).toBeNull();
-    expect(el.querySelector('input[type="text"]')).toBeNull();
-    // The pairing-link form belongs to a remote choice only.
+    expect(local.getAttribute('aria-checked')).toBe('true');
+    expect(local.textContent).toContain('awake and BitSov must stay open');
+    const advanced = el.querySelector<HTMLDetailsElement>('details.node-target-advanced')!;
+    expect(advanced).not.toBeNull();
+    expect(advanced.open).toBe(false);
+    expect(advanced.querySelector('[data-target="network"]')).not.toBeNull();
+    expect(el.querySelector('[data-target="cloud"]')).toBeNull();
     expect(el.querySelector('[data-remote-access]')).toBeNull();
-    network.click();
+    advanced.open = true;
+    advanced.querySelector<HTMLButtonElement>('[data-target="network"]')!.click();
     expect(el.querySelector('[data-remote-access]')).not.toBeNull();
+  });
+
+  it('enables the internal test node only with the explicit runtime flag', () => {
+    localStorage.setItem('bitsov.test-nodes', '1');
+    try {
+      const el = show(starting, booting);
+      const cloud = el.querySelector<HTMLButtonElement>('[data-target="cloud"]')!;
+      expect(cloud.textContent).toContain('Test node someone else runs (internal)');
+      expect(cloud.textContent).toContain('Not your keys');
+      cloud.click();
+      expect(el.querySelector('[data-remote-access]')).not.toBeNull();
+    } finally { localStorage.removeItem('bitsov.test-nodes'); }
   });
 
   it('describes pairing honestly without Touch ID / Secure Enclave claims when device key is not registered', () => {
@@ -334,6 +325,32 @@ describe('pairing panel', () => {
     expect(enrolledPanel.textContent).not.toContain('Registering Secure Enclave');
   });
 
+  it('keeps restart guidance current across save, forget, and save again', async () => {
+    let finishForget!: () => void;
+    mount = document.createElement('div'); document.body.appendChild(mount);
+    dispose = render(() => <Onboarding status={() => booting} pairing={() => starting}
+      trustAck={() => false} onRetry={() => {}} selectedTarget="network"
+      onForgetRemote={() => new Promise<void>(resolve => { finishForget = resolve; })}
+      onImportRemote={async () => ({ endpoint: 'home:4242', node_id_fingerprint: 'ab…cd', restart_required: true })} />, mount);
+    const save = () => {
+      const input = mount!.querySelector<HTMLInputElement>('input')!;
+      input.value = 'bitsov://pair/example';
+      input.dispatchEvent(new InputEvent('input', { bubbles: true }));
+      mount!.querySelector<HTMLFormElement>('form')!.requestSubmit();
+    };
+    save();
+    await vi.waitFor(() => expect(mount!.textContent).toContain('Restart BitSov to connect'));
+    mount.querySelector<HTMLButtonElement>('[data-use-local]')!.click();
+    expect(mount.querySelector<HTMLButtonElement>('button[type="submit"]')!.disabled).toBe(true);
+    finishForget();
+    await vi.waitFor(() => expect(mount!.textContent).toContain('Restart BitSov to use this Mac'));
+    expect(mount.textContent).not.toContain('Restart BitSov to connect');
+    save();
+    await vi.waitFor(() => expect(mount!.textContent).toContain('Restart BitSov to connect'));
+    expect(mount.textContent).not.toContain('Restart BitSov to use this Mac');
+    expect(mount.querySelector<HTMLButtonElement>('[data-use-local]')!.disabled).toBe(false);
+  });
+
   it('shows the remote Node ID short fingerprint without echoing the pairing link', async () => {
     const link = 'bitsov://pair/secret-pairing-material';
     const onImportRemote = vi.fn().mockResolvedValue({
@@ -369,6 +386,103 @@ describe('pairing panel', () => {
     expect(input.value).toBe('');
     expect(mount.textContent).not.toContain(link);
   });
+
+  it('imports a scanned QR link through the same pairing-link handler', async () => {
+    const link = 'bitsov://pair/scanned-secret-material';
+    const onImportRemote = vi.fn().mockResolvedValue({
+      endpoint: 'home.example:4242',
+      node_id_fingerprint: 'fedcba98…76543210',
+      restart_required: true,
+    });
+    const onScanRemote = vi.fn().mockResolvedValue(link);
+    mount = document.createElement('div');
+    document.body.appendChild(mount);
+    dispose = render(
+      () => (
+        <Onboarding
+          status={() => booting}
+          pairing={() => starting}
+          trustAck={() => false}
+          onRetry={() => {}}
+          selectedTarget="network"
+          onImportRemote={onImportRemote}
+          onScanRemote={onScanRemote}
+        />
+      ),
+      mount,
+    );
+
+    mount.querySelector<HTMLButtonElement>('[data-scan-pairing-qr]')!.click();
+
+    await vi.waitFor(() => {
+      expect(mount!.textContent).toContain('Remote node home.example:4242 saved.');
+    });
+    expect(onScanRemote).toHaveBeenCalledTimes(1);
+    expect(onImportRemote).toHaveBeenCalledWith(link);
+    expect(mount.textContent).not.toContain(link);
+  });
+
+  const importWith = async (result: () => Promise<unknown>, pairing: PairingView = starting) => {
+    mount = document.createElement('div');
+    document.body.appendChild(mount);
+    dispose = render(() => <Onboarding status={() => booting} pairing={() => pairing}
+      trustAck={() => false} onRetry={() => {}} selectedTarget="network"
+      onForgetRemote={async () => {}} onImportRemote={result as never} />, mount);
+    const input = mount.querySelector<HTMLInputElement>('#remote-pairing-link')!;
+    input.value = 'bitsov://pair/ticket';
+    input.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    mount.querySelector<HTMLFormElement>('[data-remote-access]')!.requestSubmit();
+    return mount;
+  };
+  const badge = () => mount!.querySelector('.node-target-card[data-target="network"] .target-badge')!;
+
+  it('old link without a label: confirmation and home-node badge stay as before', async () => {
+    const el = await importWith(async () => ({ endpoint: 'home:4242', node_id_fingerprint: 'ab…cd', restart_required: true }));
+    await vi.waitFor(() => expect(el.querySelector('[data-import-result]')).not.toBeNull());
+    expect(el.querySelector('[data-import-result]')!.textContent).toBe(
+      'Remote node home:4242 saved. Node ID fingerprint: ab…cd. Restart BitSov to connect.',
+    );
+    expect(el.querySelector('[data-hosted-by]')).toBeNull();
+    expect(badge().textContent).toBe('Pairing link');
+  });
+
+  it('new ticket: shows "hosted by" in the confirmation and the home-node badge, then forget clears it', async () => {
+    const el = await importWith(async () => ({ endpoint: 'home:4242', node_id_fingerprint: 'ab…cd', hosted_by: "Rasmus's Pi", restart_required: true }));
+    await vi.waitFor(() => expect(el.querySelector('[data-import-result]')).not.toBeNull());
+    expect(el.querySelector('[data-import-result]')!.textContent).toBe(
+      "Remote node home:4242 (hosted by Rasmus's Pi) saved. Node ID fingerprint: ab…cd. Restart BitSov to connect.",
+    );
+    expect(badge().textContent).toBe("Hosted by Rasmus's Pi");
+    expect(badge().getAttribute('title')).toBe("Hosted by Rasmus's Pi");
+    el.querySelector<HTMLButtonElement>('[data-use-local]')!.click();
+    await vi.waitFor(() => expect(badge().textContent).toBe('Pairing link'));
+  });
+
+  it('shows the running remote node label on the home-node badge', () => {
+    mount = document.createElement('div');
+    document.body.appendChild(mount);
+    dispose = render(() => <Onboarding status={() => booting} pairing={() => ({ ...pending, remote: true, hosted_by: 'Basement box' })}
+      trustAck={() => false} onRetry={() => {}} />, mount);
+    expect(badge().textContent).toBe('Hosted by Basement box');
+  });
+
+  it('renders an odd, maximum-length label as escaped text inside a bidi isolate', async () => {
+    const label = '<img src=x onerror="alert(1)">' + '𝔅'.repeat(33) + '…';
+    const el = await importWith(async () => ({ endpoint: 'home:4242', node_id_fingerprint: 'ab…cd', hosted_by: label, restart_required: true }));
+    await vi.waitFor(() => expect(el.querySelector('[data-import-result]')).not.toBeNull());
+    expect(el.querySelector('img')).toBeNull();
+    expect(el.querySelector('[data-import-result] bdi[data-hosted-by]')!.textContent).toBe(label);
+    expect(badge().querySelector('bdi')!.textContent).toBe(label);
+    expect(badge().classList.contains('hosted-by')).toBe(true);
+  });
+
+  it('shows the host refusal for an expired ticket and saves nothing', async () => {
+    const message = "This pairing link expired 2 h ago. Run konsensus pair-ticket on your node for a new one, and check that this Mac's clock is right.";
+    const el = await importWith(() => Promise.reject(message));
+    await vi.waitFor(() => expect(el.querySelector('[data-soft-summary]')?.textContent).toBe(message));
+    expect(el.querySelector('[data-import-result]')).toBeNull();
+    expect(badge().textContent).toBe('Pairing link');
+  });
   it('shows one decision per stage and keeps every host step addressable', () => {
     const first = show(starting, booting);
     expect(first.querySelector('[data-ob-head="node"] h1')?.textContent).toBe('Where should your node run?');
@@ -385,13 +499,13 @@ describe('pairing panel', () => {
     expect(later.querySelector('[data-ob-head="trust"] h1')?.textContent).toBe('Before you add sats');
     expect(later.querySelector('.node-target-section.compact')).not.toBeNull();
     // Still a real choice once compact.
-    expect(later.querySelectorAll('[role="radio"]').length).toBe(3);
+    expect(later.querySelectorAll('[role="radio"]').length).toBe(2);
   });
-  it('never offers restore on an identity-free node, and keeps the access scopes in view', () => {
+  it('describes bootstrap restore and keeps the access scopes in view', () => {
     const el = show({ ...paired, bootstrap: 'identity-free' }, ready);
     const head = el.querySelector('[data-ob-head="trust"]')!;
     expect(head.textContent).not.toContain('restore it now');
-    expect(head.textContent).toContain('not available on this node yet');
+    expect(head.textContent).toContain('Restore your existing identity on this Mac');
     const access = el.querySelector('[data-pairing="paired"] .pairing-access')!;
     expect(access.textContent).toContain('read + receive');
     expect(access.closest('details')).toBeNull();

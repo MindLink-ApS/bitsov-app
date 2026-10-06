@@ -31,7 +31,7 @@ EOF
 }
 
 # good_tree <dir>: a bundle the checker must accept. The app binary carries the
-# legitimate "/assistant.html" navigation literal that main.rs compiles into
+# legitimate "/assistant.html" navigation literal that app.rs compiles into
 # every build; only the page's own markers are refused.
 good_tree() {
   local d="$1" app="$1/BitSov.app"
@@ -78,7 +78,7 @@ noop() { :; }
 append() { printf '%s' "$2" >> "$1"; }
 default_min_plist() { plist 10.13 > BitSov.app/Contents/Info.plist; }
 
-expect pass 'good bundle tree' 'MAC BUNDLE CHECK: PASS' noop
+expect pass 'good bundle tree with rc9 expectation' '(node v0.3.0-rc9)' noop
 expect fail 'bundled sidecar missing' 'FAIL  bundled sidecar is executable' \
   rm BitSov.app/Contents/MacOS/konsensus
 expect fail 'bundled sidecar differs from the verified one' 'FAIL  bundled sidecar matches the verified sidecar' \

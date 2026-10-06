@@ -18,16 +18,20 @@ no(){ fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 sk(){ skip=$((skip+1)); printf '  SKIP  %s\n' "$1"; }
 
 # ---- 1. source guard -------------------------------------------------------------
-MAIN=src-tauri/src/main.rs
-if grep -q 'RunEvent::ExitRequested { .. } | RunEvent::Exit' "$MAIN"; then
+APP=src-tauri/src/app.rs
+# Function bodies are captured first: `awk | grep -q` under pipefail fails spuriously
+# (SIGPIPE) once a body outgrows awk's 4 KiB output buffer.
+body() { awk "$1" "$APP"; }
+grep_in() { local b; b=$(body "$1"); shift; grep "$@" <<<"$b"; }
+if grep -q 'RunEvent::ExitRequested { .. } | RunEvent::Exit' "$APP"; then
   ok "run loop handles both ExitRequested and Exit (Cmd-Q path)"
 else
   no "run loop must match BOTH RunEvent::ExitRequested and RunEvent::Exit — Cmd-Q emits Exit"
 fi
-if grep -q 'fn stop_supervised_node' "$MAIN"; then ok "teardown goes through stop_supervised_node"
+if grep -q 'fn stop_supervised_node' "$APP"; then ok "teardown goes through stop_supervised_node"
 else no "stop_supervised_node missing"; fi
 # The teardown must never hunt by port: that would kill a node the app does not own.
-if awk '/fn stop_supervised_node/,/^}/' "$MAIN" | grep -qE 'lsof|-iTCP|3141'; then
+if grep_in '/fn stop_supervised_node/,/^}/' -qE 'lsof|-iTCP|3141'; then
   no "stop_supervised_node must not target a port — only the owned child handle"
 else
   ok "teardown targets the owned child only, never a port holder"
@@ -35,18 +39,18 @@ fi
 # Signal ordering and escalation are proven behaviourally by stop_adapter_tests
 # against real subprocesses. These guards cover what those tests cannot: that the
 # adapter keeps using the ownership-safe primitive rather than a raw pid.
-if awk '/fn stop_supervised_node/,/^}/' "$MAIN" | grep -q 'send_signal'; then
+if grep_in '/fn stop_supervised_node/,/^}/' -q 'send_signal'; then
   ok "teardown signals through SharedChild (waitid — pid is never freed for reuse)"
 else
   no "stop_supervised_node must signal via SharedChild::send_signal, not a raw pid"
 fi
-if grep -qE 'child: Mutex<Option<Arc<SharedChild>>>' "$MAIN"; then
+if grep -qE 'child: Mutex<Option<Arc<SharedChild>>>' "$APP"; then
   ok "the node handle is owned as SharedChild, not a bare pid holder"
 else
   no "the supervised child must be held as Arc<SharedChild> for safe signalling"
 fi
 # A raw kill(1) on a stored pid is the exact race this ticket removed.
-if awk '/fn stop_supervised_node/,/^}/' "$MAIN" | grep -qE '"kill"|kill -TERM'; then
+if grep_in '/fn stop_supervised_node/,/^}/' -qE '"kill"|kill -TERM'; then
   no "teardown must not shell out to kill(1) on a pid — that reintroduces the reuse race"
 else
   ok "no raw kill(1) on a pid in the teardown path"
@@ -55,19 +59,19 @@ fi
 # methods; these guards prove the real call sites still go through them. A restore
 # that takes the child out of the slot itself hides it from quit; a spawn that bypasses
 # spawn_child can start a node after quit has looked.
-if awk '/^async fn restart_node/,/^}/' "$MAIN" | grep -q 'stop_for_restart' \
-  && ! awk '/^async fn restart_node/,/^}/' "$MAIN" | grep -q 'child\.lock'; then
+if grep_in '/^async fn restart_node/,/^}/' -q 'stop_for_restart' \
+  && ! grep_in '/^async fn restart_node/,/^}/' -q 'child\.lock'; then
   ok "a restore stops the old node through stop_for_restart (stays registered until gone)"
 else
   no "restart_node must stop the old node via stop_for_restart, never touch the child slot itself"
 fi
-if awk '/^fn spawn_node/,/^}/' "$MAIN" | grep -q 'spawn_child' \
-  && ! awk '/^fn spawn_node/,/^}/' "$MAIN" | grep -q 'SharedChild::spawn'; then
+if grep_in '/^fn spawn_node/,/^}/' -q 'spawn_child' \
+  && ! grep_in '/^fn spawn_node/,/^}/' -q 'SharedChild::spawn'; then
   ok "the node is spawned through spawn_child (refused once quit has begun)"
 else
   no "spawn_node must spawn via NodeState::spawn_child so quit can refuse a replacement"
 fi
-if grep -q 'stop_for_quit(NODE_SHUTDOWN_BUDGET)' "$MAIN"; then
+if grep -q 'stop_for_quit(NODE_SHUTDOWN_BUDGET)' "$APP"; then
   ok "the exit handler stops the node through stop_for_quit"
 else
   no "the exit handler must call stop_for_quit"

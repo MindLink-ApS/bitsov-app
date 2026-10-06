@@ -4,7 +4,7 @@
 //! and get the JSON a loopback `GET` would return. The app binary does not
 //! depend on this crate.
 //!
-//! Protocol pin: `v0.3.0-rc7`, source `958e3997f9969497c1d270f557282b9bb591fe85`.
+//! Historical fixture protocol (not the bundled sidecar pin): `v0.3.0-rc7`, source `958e3997f9969497c1d270f557282b9bb591fe85`.
 
 mod answer;
 mod canary;

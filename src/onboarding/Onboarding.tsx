@@ -1,7 +1,9 @@
+import { LocalNodeSwitch } from './LocalNodeSwitch';
 import { SoftError } from '../control/SoftError';
 import { createSignal, For, Match, Show, Switch } from 'solid-js';
 import { onboardingSteps, scopeList, type NodeStatus, type PairingView } from './pairing';
 import type { DeviceView } from '../control/types';
+import type { RemoteImportView } from '../control/source';
 
 // Claim discipline (BitSov-bitsov docs/security/pairing.md): less exposure, not solved
 // local security. The short code is a tripwire, never described as what protects the
@@ -13,7 +15,7 @@ const STATUS_TEXT = {
   done: 'done',
   failed: 'failed',
   skipped: 'not available on this node',
-  blocked: 'waiting on a genome release',
+  blocked: 'not available here',
 } as const;
 
 export type NodeTarget = 'local' | 'network' | 'cloud';
@@ -37,12 +39,14 @@ export function Onboarding(props: {
   selectedTarget?: NodeTarget;
   onTargetChange?: (target: NodeTarget) => void;
   device?: () => DeviceView | null;
-  onImportRemote?: (link: string) => Promise<{
-    endpoint: string;
-    node_id_fingerprint: string;
-    restart_required: boolean;
-  }>;
+  onForgetRemote?: () => Promise<void>;
+  onImportRemote?: (link: string) => Promise<RemoteImportView>;
+  onScanRemote?: () => Promise<string>;
 }) {
+  // Runtime, opt-in only. This changes presentation, never node authority.
+  const testNodes = (() => {
+    try { return localStorage.getItem('bitsov.test-nodes') === '1'; } catch { return false; }
+  })();
   const steps = () => onboardingSteps(props.status(), props.pairing(), props.trustAck());
   const stage = () => onboardingStage(steps());
   const [internalTarget, setInternalTarget] = createSignal<NodeTarget>('local');
@@ -52,33 +56,70 @@ export function Onboarding(props: {
     props.onTargetChange?.(t);
   };
   const isEnrolled = () => props.device?.()?.state === 'registered';
+  const mobileBiometrics = () => props.onScanRemote !== undefined;
   const [remoteLink, setRemoteLink] = createSignal('');
   const [importing, setImporting] = createSignal(false);
-  const [importResult, setImportResult] = createSignal<string | null>(null);
+  const [forgetting, setForgetting] = createSignal(false);
+  const [remoteRevision, setRemoteRevision] = createSignal(0);
+  const [remoteChoiceEdited, setRemoteChoiceEdited] = createSignal(false);
+  const [importResult, setImportResult] = createSignal<RemoteImportView | null>(null);
   const [importError, setImportError] = createSignal<string | null>(null);
+  // A link saved this session wins over the running node's; forgetting reverts.
+  const [savedHostedBy, setSavedHostedBy] = createSignal<string | null | undefined>(undefined);
+  const hostedBy = () => {
+    const saved = savedHostedBy();
+    return saved !== undefined ? saved : props.pairing().hosted_by ?? null;
+  };
 
-  const importRemote = async (event: Event) => {
-    event.preventDefault();
-    const link = remoteLink().trim();
-    setRemoteLink('');
-    if (!link) {
-      setImportError('Paste a remote pairing link.');
-      return;
-    }
+  const importRemoteLink = async (
+    readLink: () => string | Promise<string>,
+    emptyMessage: string,
+  ) => {
+    if (importing() || forgetting()) return;
     setImporting(true);
     setImportError(null);
     setImportResult(null);
     try {
+      const link = (await readLink()).trim();
+      setRemoteLink('');
+      if (!link) throw new Error(emptyMessage);
       if (!props.onImportRemote) throw new Error('Remote access import is unavailable.');
       const result = await props.onImportRemote(link);
-      setImportResult(
-        `Remote node ${result.endpoint} saved. Node ID fingerprint: ${result.node_id_fingerprint}. Restart BitSov to connect.`,
-      );
+      setRemoteRevision(n => n + 1);
+      setRemoteChoiceEdited(true);
+      setSavedHostedBy(result.hosted_by ?? null);
+      setImportResult(result);
     } catch (error) {
       setImportError(String(error));
     } finally {
       setImporting(false);
     }
+  };
+
+  const importRemote = async (event: Event) => {
+    event.preventDefault();
+    await importRemoteLink(() => remoteLink(), 'Paste a remote pairing link.');
+  };
+
+  const scanRemote = async () => {
+    await importRemoteLink(
+      async () => {
+        if (!props.onScanRemote) throw new Error('QR scanning is unavailable.');
+        return props.onScanRemote();
+      },
+      'The scanned QR code was empty.',
+    );
+  };
+
+  const forgetRemote = async () => {
+    setForgetting(true);
+    try {
+      await props.onForgetRemote!();
+      setRemoteChoiceEdited(true);
+      setSavedHostedBy(undefined);
+      setImportResult(null);
+      setImportError(null);
+    } finally { setForgetting(false); }
   };
 
   return (
@@ -110,7 +151,7 @@ export function Onboarding(props: {
             <h1>Before you add sats</h1>
             <Show
               when={!props.pairing().bootstrap}
-              fallback={<p class="lede">Read how your node is trusted. Creating or restoring an identity from this app is not available on this node yet.</p>}
+              fallback={<Show when={props.status().local_owner && !props.pairing().remote} fallback={<p class="lede">Your node has no identity yet. {props.pairing().remote ? "Restore it at your node before adding sats." : "Restore your existing identity on this Mac before adding sats."} Creating a new identity from this screen is not available yet.</p>}><p class="lede">Create your identity below, write down its recovery phrase, and confirm this Mac with Touch ID before adding sats.</p></Show>}
             >
               <p class="lede">Read how your node is trusted. If you already have a BitSov identity, restore it now, before any sats arrive.</p>
             </Show>
@@ -123,7 +164,7 @@ export function Onboarding(props: {
         </header>
       </Show>
 
-      {/* Node location: 3 honest choices; compact once the node is up */}
+      {/* Node location: this Mac first; compact once the node is up */}
       <div class="node-target-section" classList={{ compact: stage() !== 'node' }}>
         <h2 class="node-target-title" classList={{ 'sr-only': stage() === 'node' }}>Where your node runs</h2>
         <div class="node-target-grid" role="radiogroup" aria-label="Choose node location">
@@ -152,11 +193,13 @@ export function Onboarding(props: {
                   <span class="target-radio-indicator" aria-hidden="true">✓</span>
                 </div>
               </div>
-              <p>BitSov runs your node on this Mac. Your keys stay on this Mac. Recommended.</p>
+              <p>BitSov runs your node on this Mac. Your keys stay here. To receive messages and payments, this Mac must stay awake and BitSov must stay open.</p>
             </div>
           </button>
 
-          {/* Option 2: A node on my network (remote pairing link) */}
+          <details class="node-target-advanced" open={target() !== 'local'}>
+            <summary>Advanced: use a node you already run at home</summary>
+          {/* A home node uses a remote pairing link. */}
           <button
             type="button"
             class="node-target-card"
@@ -176,17 +219,26 @@ export function Onboarding(props: {
             </div>
             <div class="target-info">
               <div class="target-head">
-                <strong>A computer at home</strong>
+                <strong>Your computer at home</strong>
                 <div class="row" style={{ width: 'auto', gap: '8px' }}>
-                  <span class="target-badge">Pairing link</span>
+                  <Show when={hostedBy()} fallback={<span class="target-badge">Pairing link</span>}>
+                    {(label) => (
+                      <span class="target-badge hosted-by" data-hosted-by title={`Hosted by ${label()}`}>
+                        Hosted by <bdi>{label()}</bdi>
+                      </span>
+                    )}
+                  </Show>
                   <span class="target-radio-indicator" aria-hidden="true">✓</span>
                 </div>
               </div>
-              <p>A home server on your network that runs a BitSov node. Its keys live on that computer. Paste its pairing link; it is saved for the next start.</p>
+              <p>A computer you keep running at home can receive while this Mac is off. Its keys live on that computer. Paste its pairing link; it is saved for the next start.</p>
             </div>
           </button>
 
-          {/* Option 3: A cloud / remotely hosted node (remote pairing link) */}
+          </details>
+
+          <Show when={testNodes}>
+          {/* Internal testing only; not a product path. */}
           <button
             type="button"
             class="node-target-card"
@@ -203,22 +255,31 @@ export function Onboarding(props: {
             </div>
             <div class="target-info">
               <div class="target-head">
-                <strong>A cloud server</strong>
+                <strong>Test node someone else runs (internal)</strong>
                 <div class="row" style={{ width: 'auto', gap: '8px' }}>
                   <span class="target-badge">Pairing link</span>
                   <span class="target-radio-indicator" aria-hidden="true">✓</span>
                 </div>
               </div>
-              <p>A server you rent that runs a BitSov node. Its keys live on that server, so whoever runs the host can reach them. Paste its pairing link; it is saved for the next start.</p>
+              <p>Not your keys. Whoever runs this machine can spend its bitcoin and read its messages. For internal testing only.</p>
             </div>
           </button>
+          </Show>
         </div>
         <p class="hint connect-line">
           {props.pairing().remote ? 'This app connects to your remote node.' : 'This app connects to the node on this Mac.'}
           <Show when={!props.pairing().remote && target() !== 'local'}> A saved pairing link takes effect at the next start.</Show>
-          <Show when={isEnrolled()}> Touch ID on this Mac can approve a contact or budget.</Show>
+          <Show when={isEnrolled()}>
+            {mobileBiometrics()
+              ? ' Biometrics on this phone can approve a contact or budget.'
+              : ' Touch ID on this Mac can approve a contact or budget.'}
+          </Show>
         </p>
       </div>
+
+      <Show when={props.onForgetRemote && (props.pairing().remote || target() !== 'local' || remoteChoiceEdited())}>
+        <LocalNodeSwitch onForget={forgetRemote} disabled={importing() || forgetting()} remoteRevision={remoteRevision()} />
+      </Show>
 
       <Switch>
         <Match when={props.pairing().state === 'pending'}>
@@ -237,7 +298,11 @@ export function Onboarding(props: {
                 <h2>{props.pairing().remote ? 'Connecting to your node…' : 'Pairing this app with your node…'}</h2>
                 <p>Establishing an authenticated pairing between this app and your node.</p>
                 <Show when={isEnrolled()}>
-                  <p class="hint">Touch ID approvals are already set up on this Mac; pairing does not create that key.</p>
+                  <p class="hint">
+                    {mobileBiometrics()
+                      ? 'Biometric approvals are already set up on this phone; pairing does not create that key.'
+                      : 'Touch ID approvals are already set up on this Mac; pairing does not create that key.'}
+                  </p>
                 </Show>
               </div>
             </div>
@@ -267,9 +332,13 @@ export function Onboarding(props: {
                 <h2>This app is paired</h2>
                 <Show
                   when={isEnrolled()}
-                  fallback={<span class="touchid-status-pill" data-device-badge="none">App paired</span>}
+                  fallback={<span class="touchid-status-pill" data-device-badge="none">{props.status().local_owner && !props.pairing().bootstrap ? "Owner device not enrolled" : "App paired"}</span>}
                 >
-                  <span class="touchid-status-pill" data-device-badge="registered">Touch ID Enrolled · Secure Enclave</span>
+                  <span class="touchid-status-pill" data-device-badge="registered">
+                    {mobileBiometrics()
+                      ? 'Biometrics Enrolled · Android Keystore'
+                      : 'Touch ID Enrolled · Secure Enclave'}
+                  </span>
                 </Show>
                 <Show
                   when={props.pairing().remote}
@@ -298,9 +367,7 @@ export function Onboarding(props: {
 
             <Show when={props.pairing().bootstrap}>
               <p class="hint" data-identity-free>
-                Your node is identity-free (fresh install). Creating or restoring an identity
-                from this app arrives with the next genome release; nothing has been created
-                yet.
+                Your node is identity-free (fresh install). {props.status().local_owner && !props.pairing().remote ? "Create your identity with the owner setup below." : props.pairing().remote ? "Restore your identity at your node." : "You can restore an existing identity on this Mac."} Nothing has been created yet.
               </p>
             </Show>
 
@@ -344,17 +411,28 @@ export function Onboarding(props: {
           <div class="panel pairing" data-pairing="fallback">
             <h2>Pairing not available on this node</h2>
             <p class="hint">
-              The bundled node (v0.3.0-rc7) predates pairing, so this app signs in with the
-              local loopback token (/auth/local) as before. Pairing turns on once a node
-              release that supports it is bundled.
+              This older node has no pairing routes, so this app signs in with the
+              local loopback token (/auth/local). Upgrade the node to use pairing.
             </p>
           </div>
         </Match>
       </Switch>
 
       <Show when={target() !== 'local'}>
+      <p class="hint">After a power cut, open the app once. Your password is never stored on the box.</p>
       <form class="panel pairing remote-form" data-remote-access onSubmit={importRemote}>
-        <h2>Paste the pairing link</h2>
+        <h2>{props.onScanRemote ? 'Scan or paste the pairing link' : 'Paste the pairing link'}</h2>
+        <Show when={props.onScanRemote}>
+          <button
+            type="button"
+            class="quiet"
+            data-scan-pairing-qr
+            disabled={importing() || forgetting()}
+            onClick={() => void scanRemote()}
+          >
+            {importing() ? 'Scanning…' : 'Scan pairing QR'}
+          </button>
+        </Show>
         <label for="remote-pairing-link">Pairing link</label>
         <input
           id="remote-pairing-link"
@@ -363,17 +441,25 @@ export function Onboarding(props: {
           autocapitalize="none"
           autocorrect="off"
           spellcheck={false}
-          disabled={importing()}
+          disabled={importing() || forgetting()}
           value={remoteLink()}
           onInput={(event) => setRemoteLink(event.currentTarget.value)}
           placeholder="bitsov://pair/…"
         />
-        <button type="submit" class="primary" disabled={importing()}>
+        <button type="submit" class="primary" disabled={importing() || forgetting()}>
           {importing() ? 'Saving…' : 'Use remote node'}
         </button>
         <p class="hint">The link is verified and stored for the next app start.</p>
         <Show when={importResult()}>
-          <p class="ok-note">{importResult()}</p>
+          {(result) => (
+            <p class="ok-note" data-import-result>
+              Remote node {result().endpoint}
+              <Show when={result().hosted_by}>
+                {(label) => <> (hosted by <bdi data-hosted-by>{label()}</bdi>)</>}
+              </Show>
+              {' '}saved. Node ID fingerprint: {result().node_id_fingerprint}. Restart BitSov to connect.
+            </p>
+          )}
         </Show>
         <Show when={importError()}>
           <SoftError message={importError()!} />

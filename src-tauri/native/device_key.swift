@@ -1,8 +1,8 @@
 // Secure Enclave device key bridge for the BitSov desktop app (macOS only).
 //
-// build.rs compiles this file into a static library (module BitsovDeviceKey) and
-// links it into the app binary. The Rust side is src/device_key.rs; it is the
-// only caller. The ABI is plain C: pointers + lengths in, status code out.
+// ffi/build.rs compiles this file into a static library (module BitsovDeviceKey)
+// and links it into the app binary. Safe Rust wrappers live in ffi/src; the ABI
+// is plain C: pointers + lengths in, status code out.
 //
 // The key is a CryptoKit Secure Enclave P-256 signing key. Its private half
 // never leaves the enclave. `dataRepresentation` is an opaque blob that is only
@@ -230,4 +230,69 @@ private func statusForSigningError(_ error: Error) -> Int32 {
         return errCancelled
     }
     return errOther
+}
+
+// Home-node records are separate from the launcher item. Password reads require
+// the current biometric enrollment; public pins/bindings never prompt.
+private func homeQuery(_ service: String) -> [CFString: Any] {
+    [kSecClass: kSecClassGenericPassword, kSecAttrService: service,
+     kSecAttrAccount: "BitSov", kSecUseDataProtectionKeychain: true]
+}
+
+@_cdecl("bitsov_home_store")
+public func bitsov_home_store(_ service: UnsafePointer<CChar>?, _ bytes: UnsafePointer<UInt8>?,
+                              _ count: Int, _ secret: Int32) -> Int32 {
+    guard let service = service, let bytes = bytes, count > 0, count <= 16384 else { return errBadArgument }
+    return autoreleasepool {
+        let name = String(cString: service)
+        var query = homeQuery(name)
+        var data = Data(bytes: bytes, count: count)
+        defer { data.resetBytes(in: 0..<data.count) }
+        query[kSecValueData] = data
+        if secret == 1 {
+            var error: Unmanaged<CFError>?
+            guard let acl = SecAccessControlCreateWithFlags(nil,
+                kSecAttrAccessibleWhenUnlockedThisDeviceOnly, .biometryCurrentSet, &error) else {
+                return errOther
+            }
+            query[kSecAttrAccessControl] = acl
+        } else {
+            query[kSecAttrAccessible] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        }
+        let status = SecItemAdd(query as CFDictionary, nil)
+        if status == errSecDuplicateItem {
+            if secret == 1 {
+                // Replace a stale seed password (e.g. restored mnemonic, new launcher
+                // password) by delete + add with the same strict ACL; never update in
+                // place, which could keep a weaker ACL.
+                let deleted = SecItemDelete(homeQuery(name) as CFDictionary)
+                guard deleted == errSecSuccess || deleted == errSecItemNotFound else { return deleted }
+                return SecItemAdd(query as CFDictionary, nil)
+            }
+            return SecItemUpdate(homeQuery(name) as CFDictionary, [kSecValueData: data] as CFDictionary)
+        }
+        return status
+    }
+}
+
+@_cdecl("bitsov_home_read")
+public func bitsov_home_read(_ service: UnsafePointer<CChar>?, _ output: UnsafeMutablePointer<UInt8>?,
+                             _ capacity: Int, _ length: UnsafeMutablePointer<Int>?) -> Int32 {
+    guard let service = service, let output = output, let length = length else { return errBadArgument }
+    return autoreleasepool {
+        var query = homeQuery(String(cString: service))
+        query[kSecReturnData] = true
+        query[kSecMatchLimit] = kSecMatchLimitOne
+        let context = LAContext()
+        context.localizedReason = "Unlock your BitSov home node"
+        query[kSecUseAuthenticationContext] = context
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        guard status == errSecSuccess else { return status }
+        guard var data = result as? Data, data.count <= capacity else { return errBufferTooSmall }
+        defer { data.resetBytes(in: 0..<data.count) }
+        length.pointee = data.count
+        data.copyBytes(to: output, count: data.count)
+        return errSecSuccess
+    }
 }

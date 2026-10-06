@@ -64,6 +64,7 @@ import type {
 export type RemoteImportView = {
   endpoint: string;
   node_id_fingerprint: string;
+  hosted_by?: string | null;
   restart_required: boolean;
 };
 
@@ -71,8 +72,12 @@ export interface Source {
   readonly mode: 'node' | 'sample';
   // first run
   nodeStatus(): Promise<NodeStatus>;
+  nodeUnlock(): Promise<void>;
+  nodeRepairInitialized(confirmed: boolean): Promise<void>;
+  nodeRepairPriceFloor(confirmed: boolean): Promise<void>;
   pairingStatus(): Promise<PairingView>;
   pairingRetry(): Promise<PairingView>;
+  remoteAccessForget(): Promise<void>;
   remoteAccessImport(link: string): Promise<RemoteImportView>;
   identityRestore(mnemonic: string): Promise<RestoreOutcome>;
   fundState(): Promise<FundState | null>;
@@ -105,8 +110,8 @@ export interface Source {
   frontDoorPublish(fields: FrontDoorPublish): Promise<FrontDoor>;
   /** Front door: blake3-hex of base64 bytes (avatar/media/CV prep). */
   frontDoorHashBytes(bytesB64: string): Promise<string>;
-  /** Porch (`porch_read_v1`): what one read of this contact costs. Pays nothing. */
-  porchQuote(peer: string): Promise<PaymentQuote>;
+  /** Free path availability and price (`porch_quote_v1`); legacy nodes estimate. */
+  porchQuote(peer: string, path: string): Promise<PaymentQuote>;
   /** One paid read of the card (`/front-door.json`) or a flat page, under `maxMsat`. Never retried. */
   porchRead(peer: string, path: string, maxMsat: number): Promise<PorchRead>;
   /** Cards this node holds from earlier reads, verified again. Pays nothing. */
@@ -220,9 +225,13 @@ export const LIVE_EVENT = 'node-live';
 export const hostSource: Source = {
   mode: 'node',
   nodeStatus: () => invoke<NodeStatus>('node_status'),
+  nodeUnlock: () => invoke<void>('node_unlock'),
   pairingStatus: () => invoke<PairingView>('pairing_status'),
   pairingRetry: () => invoke<PairingView>('pairing_retry'),
+  remoteAccessForget: () => invoke<void>('remote_access_forget'),
   remoteAccessImport: (link) => invoke<RemoteImportView>('remote_access_import', { link }),
+  nodeRepairInitialized: (confirmed) => invoke<void>('node_repair_initialized', { confirmed }),
+  nodeRepairPriceFloor: (confirmed) => invoke<void>('node_repair_price_floor', { confirmed }),
   identityRestore: (mnemonic) => invoke<RestoreOutcome>('identity_restore', { mnemonic }),
   fundState: () => invoke<FundState | null>('fund_state'),
   fundStart: (sats) => invoke<FundState>('fund_start', { funding_amount_sats: sats }),
@@ -258,7 +267,7 @@ export const hostSource: Source = {
       },
     }),
   frontDoorHashBytes: (bytesB64) => invoke<string>('front_door_hash_bytes', { bytes_b64: bytesB64 }),
-  porchQuote: (peer) => invoke<PaymentQuote>('porch_quote', { peer }),
+  porchQuote: (peer, path) => invoke<PaymentQuote>('porch_quote', { peer, path }),
   porchRead: (peer, path, maxMsat) => invoke<PorchRead>('porch_read', { peer, path, max_msat: maxMsat }),
   porchCards: () => invoke<PorchCard[]>('porch_cards'),
   sponsorStatus: () => invoke<SponsorStatus>('sponsor_status'),

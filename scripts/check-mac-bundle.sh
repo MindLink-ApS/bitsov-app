@@ -15,6 +15,9 @@
 # shellcheck disable=SC2329
 set -euo pipefail
 
+# shellcheck source=scripts/fetch-node-sidecar.sh disable=SC1091
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fetch-node-sidecar.sh"
+
 APP="src-tauri/target/release/bundle/macos/BitSov.app"
 SIDECAR="src-tauri/bin/konsensus-aarch64-apple-darwin"
 DIST="dist"
@@ -33,7 +36,7 @@ PLIST="$APP/Contents/Info.plist"
 
 # Strings that exist only in assistant.html, its Vite chunk, or
 # jarvis/fixtures/questions.json. "/assistant.html" itself is NOT a marker:
-# main.rs compiles that navigation literal into every build. Tauri stores asset
+# app.rs compiles that navigation literal into every build. Tauri stores asset
 # keys uncompressed but brotli-compresses asset bodies, so the asset key and the
 # fixture (include_str!, uncompressed) are the reliable binary markers; the CSP
 # line catches an uncompressed embed. The dist check below is the primary gate
@@ -88,7 +91,7 @@ binary_clean() {
   [ "$hit" -eq 0 ]
 }
 
-echo "== mac bundle: $APP =="
+echo "== mac bundle: $APP (node $TAG) =="
 chk "app executable is executable" test -f "$MACOS/bitsov-app" -a -x "$MACOS/bitsov-app"
 chk "bundled sidecar is executable" test -f "$MACOS/konsensus" -a -x "$MACOS/konsensus"
 chk "bundled sidecar matches the verified sidecar ($SIDECAR)" sidecar_matches

@@ -1,3 +1,6 @@
+import { LockedNode } from './onboarding/LockedNode';
+import { LocalOwnerCeremony } from './onboarding/LocalOwnerCeremony';
+import { InitializationRepair } from './onboarding/InitializationRepair';
 import { SoftError } from './control/SoftError';
 import { DelayedSpinner } from './control/DelayedSpinner';
 import { isMoneyNotReady } from './control/readiness';
@@ -10,6 +13,7 @@ import { ControlCenter } from './control/Shell';
 import { hostSource, inHost, sampleRequest, type SampleStart, type Source } from './control/source';
 import { sampleSource } from './control/sample';
 import type { DeviceView, FundingAddress, FundState } from './control/types';
+import { androidQrScannerAvailable, scanPairingLink } from './pairingScanner';
 
 // The control center. First run (Start node → Pair this app → Create/restore
 // identity → Fund) is the shell's first state, shown in the centre track until
@@ -18,9 +22,9 @@ import type { DeviceView, FundingAddress, FundState } from './control/types';
 // node, pairs with it (or, on a node without pairing routes, mints via
 // /auth/local), and exposes every node call as a Tauri command. This renderer
 // only reflects that state: it never talks to the node directly, never touches a
-// non-loopback host (Gate G2), and never holds a credential — no mnemonic,
-// private key, JWT or node token is read or displayed here. The one secret it
-// accepts is the recovery phrase, which is write-only: masked on entry, passed
+// non-loopback host (Gate G2), and never holds a JWT or private key. The gated
+// LocalOwnerCeremony displays a new phrase once. Restore accepts a recovery
+// phrase as a write-only input: masked on entry, passed
 // straight to the host, and cleared the moment it is submitted.
 
 const DEFAULT_FUNDING_SATS = 50_000;
@@ -30,6 +34,7 @@ const short = (id: string) => (id.length > 20 ? `${id.slice(0, 8)}…${id.slice(
 export default function App() {
   // Dev mode: sample data with no node (a plain browser tab, or `?sample`).
   const sample = sampleRequest(window.location.search, inHost(), import.meta.env.DEV);
+  const canScanPairingQr = androidQrScannerAvailable();
   // `?sample&organism=v2` shows the organism view against a node with N1/N2.
   const organism = new URLSearchParams(window.location.search).get('organism') === 'v2' ? 'v2' : 'v1';
   const noPeers = new URLSearchParams(window.location.search).get('peers') === '0';
@@ -78,7 +83,7 @@ export default function App() {
   // A ready node can arrive before its pairing reply. Startup snapshots do not
   // establish the final mode, so wait for authentication before offering trust.
   const showIdentityGate = () =>
-    (status().ready && (pairing().state === 'paired' || pairing().state === 'fallback')) ||
+    ((status().ready || (pairing().bootstrap === 'bootstrap' && !pairing().remote)) && (pairing().state === 'paired' || pairing().state === 'fallback')) ||
     restoring() || restoreError() !== null;
   createEffect(() => {
     if (source().mode === 'node' && trustAck() && trustKey()) setSessionTrust(trustKey());
@@ -89,10 +94,12 @@ export default function App() {
     if (!trustAck()) return false;
     return status().ready || wasOpen;
   }, false);
-  const live = () => shellOpen() && status().ready && !status().retry_after_secs;
-  const [selectedTarget, setSelectedTarget] = createSignal<NodeTarget>('local');
+  const live = () => shellOpen() && !status().locked && status().ready && !status().retry_after_secs;
+  const [selectedTarget, setSelectedTarget] = createSignal<NodeTarget>(
+    canScanPairingQr ? 'network' : 'local',
+  );
   const remote = createMemo(() => pairing().remote);
-  createEffect(() => setSelectedTarget(remote() ? 'cloud' : 'local'));
+  createEffect(() => setSelectedTarget(remote() || canScanPairingQr ? 'network' : 'local'));
   const [device, setDevice] = createSignal<DeviceView | null>(null);
   // Once pairing has an outcome, the start spinner no longer describes the state.
   const starting = () => pairing().state === 'starting' || pairing().state === 'pending';
@@ -111,7 +118,7 @@ export default function App() {
     }
     // This command reads /pair/device-keys remotely. Once setup is complete,
     // the shell owns its paced refresh; the status poll must not duplicate it.
-    if (shellOpen() || status().retry_after_secs) return;
+    if (status().locked || shellOpen() || status().retry_after_secs) return;
     try {
       setDevice(await source().deviceKeyStatus());
     } catch {
@@ -151,54 +158,78 @@ export default function App() {
         </div>
       </Show>
 
-      <Onboarding
-        status={status}
-        pairing={pairing}
-        selectedTarget={selectedTarget()}
-        onTargetChange={setSelectedTarget}
-        trustAck={trustAck}
-        onRetry={() => void retryPairing()}
-        device={device}
-        onImportRemote={(link) => source().remoteAccessImport(link)}
-      />
-
       <Show
-        when={showIdentityGate()}
-        fallback={
+        when={status().initialization_repair && status().initialization_repair !== 'none'}
+        fallback={<>
+          <Onboarding
+            status={status}
+            pairing={pairing}
+            selectedTarget={selectedTarget()}
+            onTargetChange={setSelectedTarget}
+            trustAck={trustAck}
+            onRetry={() => void retryPairing()}
+            device={device}
+            onForgetRemote={() => source().remoteAccessForget()}
+            onImportRemote={(link) => source().remoteAccessImport(link)}
+            onScanRemote={canScanPairingQr ? scanPairingLink : undefined}
+          />
+
           <Show
-            when={status().error && pairing().state !== 'failed'}
+            when={showIdentityGate()}
             fallback={
-              <Show when={starting()}>
-                <div class="state">
-                  <DelayedSpinner />
-                  {pairing().remote ? 'Connecting to your node…' : 'Starting your node…'}
+              <Show
+                when={status().error && pairing().state !== 'failed'}
+                fallback={
+                  <Show when={starting()}>
+                    <div class="state">
+                      <DelayedSpinner />
+                      {pairing().remote ? 'Connecting to your node…' : 'Starting your node…'}
+                    </div>
+                  </Show>
+                }
+              >
+                <div class="state error">
+                  <SoftError message={status().error!} summary="Your node is unavailable." onReconnect={retryPairing} />
+                  <Show when={import.meta.env.DEV && source().mode === 'node'}>
+                    <button class="quiet" data-use-sample onClick={() => useSample('shell')}>
+                      Explore with sample data
+                    </button>
+                  </Show>
                 </div>
               </Show>
             }
           >
-            <div class="state error">
-              <SoftError message={status().error!} summary="Your node is unavailable." onReconnect={retryPairing} />
-              <Show when={import.meta.env.DEV && source().mode === 'node'}>
-                <button class="quiet" data-use-sample onClick={() => useSample('shell')}>
-                  Explore with sample data
-                </button>
+            <Show when={!trustAck()}>
+              <Show when={status().local_owner && pairing().bootstrap === 'bootstrap' && !pairing().remote}
+                fallback={<IdentityGate
+                source={source()}
+                nodeId={() => status().node_id}
+                remote={pairing().remote}
+                canRestore={!pairing().bootstrap || (!pairing().remote && pairing().bootstrap === 'bootstrap')}
+                bootstrap={!!pairing().bootstrap}
+                onContinue={acceptTrust}
+                onRestoring={setRestoring}
+                restoreError={restoreError}
+                setRestoreError={setRestoreError}
+              />}>
+                <LocalOwnerCeremony onComplete={() => void poll()} />
               </Show>
-            </div>
+            </Show>
           </Show>
-        }
+        </>}
       >
-        <Show when={!trustAck()}>
-          <IdentityGate
-            source={source()}
-            nodeId={() => status().node_id}
-            remote={pairing().remote}
-            canRestore={!pairing().bootstrap}
-            onContinue={acceptTrust}
-            onRestoring={setRestoring}
-            restoreError={restoreError}
-            setRestoreError={setRestoreError}
+        <Show keyed when={status().initialization_repair?.startsWith('price_floor') ? 'price' : 'marker'}>{(kind) =>
+          <InitializationRepair
+            priceFloor={kind === 'price'}
+            repairing={status().initialization_repair === 'repairing' || status().initialization_repair === 'price_floor_repairing'}
+            onConfirm={async () => {
+              try {
+                if (kind === 'price') await source().nodeRepairPriceFloor(true);
+                else await source().nodeRepairInitialized(true);
+              } finally { await poll(); }
+            }}
           />
-        </Show>
+        }</Show>
       </Show>
     </div>
   );
@@ -207,6 +238,11 @@ export default function App() {
   // disclosure is accepted; before that it may call node_status and
   // pairing_status, nothing else.
   return (
+    <>
+    <Show when={status().local_owner && status().owner_warning}>
+      <aside role="alert" class="panel" data-owner-warning>{status().owner_warning}</aside>
+    </Show>
+    <Show when={!status().locked} fallback={<LockedNode hostError={status().error} onUnlock={async () => { await source().nodeUnlock(); await poll(); }} />}>
     <Show
       when={trustAck()}
       fallback={
@@ -227,6 +263,8 @@ export default function App() {
         fund={(guarded, blocked) => <Fund source={guarded} moneyBlocked={blocked} ready={live} />}
       />
     </Show>
+    </Show>
+    </>
   );
 }
 
@@ -239,8 +277,9 @@ function IdentityGate(props: {
   source: Source;
   nodeId: () => string | null;
   remote: boolean;
-  /** False on an identity-free (bootstrap) node: restore waits on the genome release. */
+  /** Restore is local; the host checks the node router before submitting. */
   canRestore: boolean;
+  bootstrap: boolean;
   onContinue: () => void;
   onRestoring: (value: boolean) => void;
   restoreError: () => string | null;
@@ -307,6 +346,7 @@ function IdentityGate(props: {
         fallback={
           <section class="panel disclosure" data-gate="g6-local-trust">
             <h2>Local trust — read this before you deposit</h2>
+            <p>Your node is only reachable while this Mac is awake and BitSov is open.</p>
             <p>
               This node trusts every program on this computer. Anything running under your user
               account can ask it for full access over <code>127.0.0.1</code> — enough to spend what
@@ -322,8 +362,8 @@ function IdentityGate(props: {
         <section class="panel disclosure" data-gate="g6-remote-trust">
           <h2>Remote trust — read this before you deposit</h2>
           <p>
-            This node’s keys live on the remote machine. Whoever operates that machine
-            (for example, the VM host) can spend what you deposit. Only fund a node whose host you trust.
+            This node’s keys live on the remote machine. Anyone with access —
+            whoever can log in to that computer — can spend what you deposit. Only fund a node whose host you trust.
           </p>
           <p>
             Your keys stay in the node. BitSov never shows you your recovery phrase and never
@@ -332,9 +372,11 @@ function IdentityGate(props: {
         </section>
       </Show>
 
+      <Show when={!props.bootstrap}>
       <button class="primary" onClick={props.onContinue}>
         I understand — continue to funding
       </button>
+      </Show>
 
       <Show when={restored()}>
         <p class="ok-note">Identity restored. Your node now runs as {short(restored()!)}.</p>

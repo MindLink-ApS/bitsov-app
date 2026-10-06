@@ -1,0 +1,16 @@
+{
+  "node_id": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
+  "box_secret": "0909090909090909090909090909090909090909090909090909090909090909",
+  "proof_message": "bitsov-box-transport-v1:ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c:57db4b359f23ae5e146e4e2512056704722506348c150c14753d0c933d04d421",
+  "auth": {
+    "status": "ok",
+    "v": 1,
+    "client_id": "0123456789abcdef0123456789abcdef",
+    "scopes": [
+      "read",
+      "receive"
+    ],
+    "box_transport_pubkey": "57db4b359f23ae5e146e4e2512056704722506348c150c14753d0c933d04d421",
+    "box_transport_signature": "vhBM9U6_pMGqR4R7YX-5VE44JMdCD8bVLrnSBQ7EiJXzSQMcKn_xnOS88q5nkojSvs7jOoVG97WpF5LCtpfFBQ"
+  }
+}

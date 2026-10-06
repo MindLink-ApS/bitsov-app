@@ -1,0 +1,21 @@
+[package]
+name = "bitsov-ffi"
+version = "0.0.1"
+edition = "2021"
+description = "Safe wrappers around BitSov desktop native interfaces"
+publish = false
+
+[features]
+default = []
+# Forwarded by bitsov-app's host-toolchain mobile check. This keeps that check
+# independent of Xcode even though Cargo is targeting the macOS host.
+mobile = []
+
+[dependencies]
+zeroize = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+ring = "0.17"

@@ -1,7 +1,7 @@
 # Mac package plan
 
 Assessment only. No `.app` was built, signed, notarized, or published for this
-document. The protocol pin stays `v0.3.0-rc7`. Windows packaging (PR #23) is
+document. The protocol pin stays `v0.3.0-rc9`. Windows packaging (PR #23) is
 out of scope. PR #13's branch `factory/mac-package-spike` was compared and
 left unchanged.
 
@@ -93,7 +93,7 @@ procedure stops at static inspection.
 
 The node binary is not committed. Remove any existing
 `src-tauri/bin/konsensus-*` before fetching, so a stale file cannot be the one
-Tauri bundles. `scripts/fetch-node-sidecar.sh` pins `v0.3.0-rc7` from
+Tauri bundles. `scripts/fetch-node-sidecar.sh` pins `v0.3.0-rc9` from
 `MindLink-ApS/BitSov-bitsov` and installs nothing unless both checks pass.
 
 1. Download `bitsov-darwin-aarch64`, `SHA256SUMS`, and `SHA256SUMS.asc`.
@@ -240,7 +240,7 @@ a signing identity, an Apple submission, or a download URL.
 | Notarization | Submit and staple. Gatekeeper acceptance on a clean machine is a separate result from a successful unsigned bundle. |
 | Publish | The app stays unpublished. `/bitsov/app` stays a waitlist. No app artifact is added to website release metadata, and no app release is cut, until a real signed binary exists. |
 | Close PR #13 | After `factory/mac-package-v2` exists, a human closes #13. This document only recommends that. |
-| Pin | Stay on `v0.3.0-rc7` until a separate re-pin ticket. |
+| Pin | `v0.3.0-rc9` (`cd75c69`); fetch and verify signed checksums before packaging. |
 | Windows | PR #23 and the Windows sidecar target are outside this package. |
 
 Historical unsigned-package evidence for rc6 and rc7 remains in

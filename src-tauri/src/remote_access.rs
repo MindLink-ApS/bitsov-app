@@ -20,6 +20,7 @@ use tokio::sync::{mpsc, watch, Semaphore};
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 
 use crate::pairing::{self, ClientKey};
+use crate::home_node::{BoxPin, BoxPinStore};
 use crate::connection_retry::RemoteRetry;
 
 /// Exact Noise protocol used by both app and node ingress.
@@ -31,6 +32,10 @@ pub const CLIENT_TRANSPORT_KDF_CONTEXT: &str = "bitsov remote access client x255
 
 pub const REMOTE_CONFIG_DIR: &str = "remote-access";
 pub const REMOTE_CONFIG_FILE: &str = "descriptor.json";
+// Serialize import/forget with authentication's durable update. A handshake
+// already in flight must not resurrect a link the user has just forgotten.
+static REMOTE_CONFIG_LOCK: Mutex<()> = Mutex::new(());
+const LOCAL_PAIRING_RESET: &str = "local-pairing-reset";
 pub const MAX_NOISE_PLAINTEXT: usize = 16 * 1024;
 pub const MAX_TRANSPORT_FRAME: usize = MAX_NOISE_PLAINTEXT + 2 + 16;
 pub const MAX_HANDSHAKE_FRAME: usize = 65_535;
@@ -47,16 +52,39 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 pub const HANDSHAKE_UNAVAILABLE: &str = "remote handshake limit or endpoint unavailable";
 
+/// Longest `hosted_by` label shown, in characters (the node's own limit).
+pub const HOSTED_BY_MAX_CHARS: usize = 64;
+
 /// Pairing-link JSON carried as unpadded base64url after `bitsov://pair/`.
-#[derive(Clone, Serialize, Deserialize)]
+/// Node `PairLink` (BitSov-bitsov #252); fields after `code` are optional so
+/// links from older nodes still parse.
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PairingLinkV1 {
     pub v: u8,
     pub endpoint: String,
+    /// Empty only in a ticket issued before the node had an identity.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub node_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub transport_pubkey: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub transport_signature: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub box_transport_pubkey: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub box_transport_signature: Option<String>,
     pub code: String,
+    /// Unix seconds; zero marks a legacy link without an expiry.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub expires_at: i64,
+    /// Operator-chosen, unsigned and display only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hosted_by: Option<String>,
+}
+
+fn is_zero(value: &i64) -> bool {
+    *value == 0
 }
 
 impl fmt::Debug for PairingLinkV1 {
@@ -67,7 +95,10 @@ impl fmt::Debug for PairingLinkV1 {
             .field("node_id", &self.node_id)
             .field("transport_pubkey", &self.transport_pubkey)
             .field("transport_signature", &self.transport_signature)
+            .field("box_transport_pubkey", &self.box_transport_pubkey)
             .field("has_code", &true)
+            .field("expires_at", &self.expires_at)
+            .field("hosted_by", &self.hosted_by)
             .finish()
     }
 }
@@ -83,8 +114,12 @@ pub struct RemoteDescriptor {
     transport_signature: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hosted_by: Option<String>,
     #[serde(skip)]
     transport_pubkey_bytes: [u8; 32],
+    #[serde(skip)]
+    pin_store: Option<Arc<dyn BoxPinStore>>,
 }
 
 impl fmt::Debug for RemoteDescriptor {
@@ -100,6 +135,20 @@ impl fmt::Debug for RemoteDescriptor {
 }
 
 impl RemoteDescriptor {
+    pub fn with_pin_store(mut self, store: Arc<dyn BoxPinStore>) -> Self {
+        self.pin_store = Some(store);
+        self
+    }
+
+    pub fn box_pin(&self) -> Result<Option<BoxPin>, RemoteError> {
+        let Some(store) = &self.pin_store else { return Ok(None); };
+        let Some(pin) = store.read(&self.node_id)? else { return Ok(None); };
+        if pin.node_id != self.node_id || pin.endpoint != self.endpoint {
+            return Err(RemoteError::Invalid("box pin belongs to another node or endpoint".into()));
+        }
+        BoxPin::verify(&self.node_id, &self.endpoint, &pin.public_key, &pin.signature).map(Some)
+    }
+
     pub fn endpoint(&self) -> &str {
         &self.endpoint
     }
@@ -110,6 +159,11 @@ impl RemoteDescriptor {
 
     pub fn has_code(&self) -> bool {
         self.code.is_some()
+    }
+
+    /// Display-safe label from the pairing link; never an authority input.
+    pub fn hosted_by(&self) -> Option<&str> {
+        self.hosted_by.as_deref()
     }
 }
 
@@ -123,6 +177,8 @@ struct StoredDescriptor {
     transport_signature: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hosted_by: Option<String>,
 }
 
 /// First encrypted application message after the pinned XX handshake.
@@ -148,6 +204,10 @@ pub enum RemoteAuthResponse {
         v: u8,
         client_id: String,
         scopes: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        box_transport_pubkey: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        box_transport_signature: Option<String>,
     },
     Error {
         v: u8,
@@ -160,6 +220,7 @@ pub enum RemoteAuthResponse {
 pub struct RemoteImportView {
     pub endpoint: String,
     pub node_id_fingerprint: String,
+    pub hosted_by: Option<String>,
     pub restart_required: bool,
 }
 
@@ -172,12 +233,28 @@ pub enum RemoteError {
     HandshakeUnavailable,
     RateLimited(u64),
     Waiting(u64),
+    /// Seconds since the pairing ticket expired.
+    Expired(u64),
+}
+
+fn elapsed_text(seconds: u64) -> String {
+    match seconds {
+        0..=119 => format!("{seconds} s"),
+        120..=7199 => format!("{} min", seconds / 60),
+        7200..=172_799 => format!("{} h", seconds / 3600),
+        _ => format!("{} days", seconds / 86_400),
+    }
 }
 
 impl fmt::Display for RemoteError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Invalid(message) => write!(f, "invalid remote pairing link: {message}"),
+            Self::Expired(seconds) => write!(
+                f,
+                "This pairing link expired {} ago. Run konsensus pair-ticket on your node for a new one, and check that this Mac's clock is right.",
+                elapsed_text(*seconds)
+            ),
             Self::Local(message) => f.write_str(message),
             Self::Transport(message) => write!(f, "remote transport failed: {message}"),
             Self::Refused(message) => write!(f, "remote node refused pairing: {message}"),
@@ -364,22 +441,90 @@ fn validate_descriptor(stored: StoredDescriptor) -> Result<RemoteDescriptor, Rem
         transport_pubkey: stored.transport_pubkey,
         transport_signature: stored.transport_signature,
         code: stored.code,
+        hosted_by: display_label(stored.hosted_by.as_deref()),
         transport_pubkey_bytes,
+        pin_store: None,
     })
 }
 
-fn validate_link(link: PairingLinkV1) -> Result<RemoteDescriptor, RemoteError> {
-    validate_descriptor(StoredDescriptor {
+/// Same invisible set the node refuses in `[node].hosted_by`.
+fn is_invisible_format(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00AD}'
+            | '\u{061C}'
+            | '\u{180E}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{2028}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{FEFF}'
+            | '\u{FFF9}'..='\u{FFFB}'
+    )
+}
+
+/// The label is unsigned, so it is shown only as plain text beside the node
+/// fingerprint: trimmed, capped, and dropped whole if any character could
+/// reorder or hide text.
+fn display_label(label: Option<&str>) -> Option<String> {
+    let label = label?.trim();
+    if label.is_empty() || label.chars().any(|c| c.is_control() || is_invisible_format(c)) {
+        return None;
+    }
+    if label.chars().count() <= HOSTED_BY_MAX_CHARS {
+        return Some(label.to_string());
+    }
+    let mut capped: String = label.chars().take(HOSTED_BY_MAX_CHARS - 1).collect();
+    capped.truncate(capped.trim_end().len());
+    capped.push('…');
+    Some(capped)
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs() as i64)
+}
+
+fn validate_link(link: PairingLinkV1, now: i64) -> Result<RemoteDescriptor, RemoteError> {
+    if link.node_id.is_empty() {
+        return Err(RemoteError::Invalid(
+            "this ticket was issued before the node had an identity; start the node unlocked once, then run konsensus pair-ticket again".into(),
+        ));
+    }
+    if link.expires_at < 0 {
+        return Err(RemoteError::Invalid("ticket expiry is invalid".into()));
+    }
+    if link.expires_at != 0 && link.expires_at <= now {
+        return Err(RemoteError::Expired((now - link.expires_at) as u64));
+    }
+    let descriptor = validate_descriptor(StoredDescriptor {
         v: link.v,
         endpoint: link.endpoint,
         node_id: link.node_id,
         transport_pubkey: link.transport_pubkey,
         transport_signature: link.transport_signature,
         code: Some(link.code),
-    })
+        hosted_by: link.hosted_by,
+    })?;
+    // The box key is pinned only from an authenticated session; a proof in
+    // the link is checked so a corrupted link fails here, not later.
+    if let Some(signature) = &link.box_transport_signature {
+        BoxPin::verify(
+            &descriptor.node_id,
+            &descriptor.endpoint,
+            &link.box_transport_pubkey,
+            signature,
+        )?;
+    }
+    Ok(descriptor)
 }
 
 pub fn parse_pairing_link(link: &str) -> Result<RemoteDescriptor, RemoteError> {
+    parse_pairing_link_at(link, unix_now())
+}
+
+fn parse_pairing_link_at(link: &str, now: i64) -> Result<RemoteDescriptor, RemoteError> {
     let encoded = link
         .strip_prefix("bitsov://pair/")
         .ok_or_else(|| RemoteError::Invalid("expected bitsov://pair/<base64url-json>".into()))?;
@@ -397,7 +542,7 @@ pub fn parse_pairing_link(link: &str) -> Result<RemoteDescriptor, RemoteError> {
     }
     let link: PairingLinkV1 = serde_json::from_slice(&json)
         .map_err(|_| RemoteError::Invalid("descriptor JSON has the wrong shape".into()))?;
-    validate_link(link)
+    validate_link(link, now)
 }
 
 fn config_path(app_data_dir: &Path) -> PathBuf {
@@ -438,12 +583,58 @@ pub fn import_pairing_link(
     link: &str,
 ) -> Result<RemoteImportView, RemoteError> {
     let descriptor = parse_pairing_link(link)?;
+    let _config = REMOTE_CONFIG_LOCK.lock().unwrap();
     persist_at(&config_path(app_data_dir), &descriptor)?;
     Ok(RemoteImportView {
         endpoint: descriptor.endpoint.clone(),
         node_id_fingerprint: node_id_fingerprint(&descriptor.node_id),
+        hosted_by: descriptor.hosted_by.clone(),
         restart_required: true,
     })
+}
+
+/// Forget only the startup link. Local keys, identity and live transport are untouched.
+pub fn forget_persisted(app_data_dir: &Path) -> Result<(), RemoteError> {
+    let _config = REMOTE_CONFIG_LOCK.lock().unwrap();
+    let descriptor = config_path(app_data_dir);
+    if descriptor.exists() {
+        let dir = app_data_dir.join(REMOTE_CONFIG_DIR);
+        pairing::key::restrict_dir(&dir).map_err(|e| RemoteError::Local(e.to_string()))?;
+        let reset = dir.join(LOCAL_PAIRING_RESET);
+        if reset.exists() {
+            pairing::key::check_owner_only(&reset, "local pairing reset")
+                .map_err(|e| RemoteError::Local(e.to_string()))?;
+        } else {
+            pairing::key::create_new_protected(&reset)
+                .and_then(|file| file.sync_all())
+                .map_err(|e| RemoteError::Local(format!("cannot schedule local pairing reset: {e}")))?;
+        }
+    }
+    match std::fs::remove_file(descriptor) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(RemoteError::Local(format!("cannot forget remote descriptor: {error}"))),
+    }
+}
+
+/// Called only at startup, before attaching a local node. Remote and local
+/// sessions historically share the pairing record, so discard the old remote
+/// record here, after the previous process and its live session have exited.
+pub fn prepare_local_pairing(app_data_dir: &Path, pairing_store: &Path) -> Result<(), RemoteError> {
+    let _config = REMOTE_CONFIG_LOCK.lock().unwrap();
+    let reset = app_data_dir.join(REMOTE_CONFIG_DIR).join(LOCAL_PAIRING_RESET);
+    if config_path(app_data_dir).exists() || !reset.exists() {
+        return Ok(());
+    }
+    pairing::key::check_owner_only(&reset, "local pairing reset")
+        .map_err(|e| RemoteError::Local(e.to_string()))?;
+    match std::fs::remove_file(pairing_store.join(pairing::RECORD_FILE)) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(RemoteError::Local(format!("cannot reset remote pairing record: {error}"))),
+    }
+    std::fs::remove_file(reset)
+        .map_err(|error| RemoteError::Local(format!("cannot finish local pairing reset: {error}")))
 }
 
 pub fn load_persisted(app_data_dir: &Path) -> Result<Option<RemoteDescriptor>, RemoteError> {
@@ -676,7 +867,8 @@ async fn pinned_handshake<S: AsyncRead + AsyncWrite + Unpin>(
         let responder = noise.get_remote_static().ok_or_else(|| {
             RemoteError::Transport("Noise responder did not present a static key".into())
         })?;
-        if responder != descriptor.transport_pubkey_bytes {
+        if responder != descriptor.transport_pubkey_bytes
+            && !(descriptor.code.is_none() && descriptor.box_pin()?.as_ref().is_some_and(|pin| pin.matches(responder))) {
             return Err(RemoteError::Transport(
                 "Noise responder static key does not match the pairing link".into(),
             ));
@@ -719,6 +911,8 @@ async fn encrypted_auth<S: AsyncRead + AsyncWrite + Unpin>(
                 v,
                 client_id,
                 scopes,
+                box_transport_pubkey,
+                box_transport_signature,
             } => {
                 if v != 1 {
                     return Err(RemoteError::Transport(
@@ -733,6 +927,19 @@ async fn encrypted_auth<S: AsyncRead + AsyncWrite + Unpin>(
                     return Err(RemoteError::Transport(
                         "authentication reply has an invalid client id".into(),
                     ));
+                }
+                match (box_transport_pubkey, box_transport_signature) {
+                    (Some(public), Some(signature)) => {
+                        let pin = BoxPin::verify(&descriptor.node_id, &descriptor.endpoint, &public, &signature)?;
+                        if noise.get_remote_static() == Some(&descriptor.transport_pubkey_bytes[..]) {
+                            // Only the seed-backed identity session may learn or rotate a box pin.
+                            if let Some(store) = &descriptor.pin_store { store.save(&pin)?; }
+                        } else if !descriptor.box_pin()?.is_some_and(|saved| saved.public_key == public && saved.matches(noise.get_remote_static().unwrap_or(&[]))) {
+                            return Err(RemoteError::Invalid("locked node cannot replace its box pin".into()));
+                        }
+                    }
+                    (None, None) if noise.get_remote_static() == Some(&descriptor.transport_pubkey_bytes[..]) => {},
+                    _ => return Err(RemoteError::Invalid("missing box transport proof".into())),
                 }
                 Ok((client_id, scopes))
             }
@@ -1182,6 +1389,19 @@ fn finalize_authenticated_pairing(
         .lock()
         .map_err(|_| RemoteError::Local("remote descriptor lock is poisoned".into()))?;
     if current.code.is_some() {
+        let _config = REMOTE_CONFIG_LOCK.lock().unwrap();
+        // Only update the descriptor this handshake started with. Import or
+        // forget may have changed the next startup while the network awaited.
+        let stored = std::fs::read(config_path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<RemoteDescriptor>(&bytes).ok());
+        if !stored.is_some_and(|saved| saved.node_id == current.node_id
+            && saved.endpoint == current.endpoint
+            && saved.transport_pubkey == current.transport_pubkey
+            && saved.code == current.code)
+        {
+            return Err(RemoteError::Local("remote pairing link was forgotten or replaced; restart BitSov".into()));
+        }
         current.code = None;
         if let Err(error) = persist_at(config_path, &current) {
             // Fail closed: never leave a confirmed one-time code available
@@ -1216,6 +1436,100 @@ async fn connect_authenticated(
         .await
         .map_err(map_pre_auth_failure)?;
     Ok((remote, noise, client_id, scopes))
+}
+
+/// Dedicated host-only HTTP channel. Unlock passwords never enter the loopback proxy.
+/// A connection can be constructed only after an existing box pin matched Noise.
+pub struct LockedConnection {
+    remote: TcpStream,
+    noise: TransportState,
+    pub client_id: String,
+    pub pin: BoxPin,
+}
+impl LockedConnection {
+    pub async fn connect(descriptor: &RemoteDescriptor, key: &ClientKey, name: &str) -> Result<Option<Self>, RemoteError> {
+        if descriptor.has_code() { return Ok(None); }
+        let Some(pin) = descriptor.box_pin()? else { return Ok(None); };
+        let (remote, noise, client_id, _) = connect_authenticated(descriptor, key, name).await?;
+        if noise.get_remote_static() == Some(&descriptor.transport_pubkey_bytes[..]) { return Ok(None); }
+        if !pin.matches(noise.get_remote_static().unwrap_or(&[])) {
+            return Err(RemoteError::Invalid("unlock requires the pinned box static".into()));
+        }
+        Ok(Some(Self { remote, noise, client_id, pin }))
+    }
+
+    pub async fn status(&mut self) -> Result<crate::home_node::LockStatus, RemoteError> {
+        let (status, body) = self.request("GET", "/api/v1/node/lock", b"").await?;
+        if status != 200 { return Err(RemoteError::Refused("lock status unavailable".into())); }
+        let lock: crate::home_node::LockStatus = serde_json::from_slice(&body)
+            .map_err(|_| RemoteError::Invalid("invalid lock status".into()))?;
+        if lock.state != "locked" || lock.node_id != self.pin.node_id
+            || lock.fingerprint != crate::home_node::identity_fingerprint(&self.pin.node_id) {
+            return Err(RemoteError::Invalid("locked identity does not match the box pin".into()));
+        }
+        Ok(lock)
+    }
+
+    pub async fn challenge(&mut self) -> Result<crate::home_node::UnlockChallenge, RemoteError> {
+        let (status, body) = self.request("POST", "/api/v1/node/unlock/challenge", b"{}").await?;
+        unlock_status(status, 200)?;
+        serde_json::from_slice(&body).map_err(|_| RemoteError::Invalid("invalid unlock challenge".into()))
+    }
+
+    pub async fn unlock(&mut self, body: &crate::home_node::UnlockBody) -> Result<(), RemoteError> {
+        let bytes = zeroize::Zeroizing::new(serde_json::to_vec(body)
+            .map_err(|_| RemoteError::Local("cannot encode unlock request".into()))?);
+        let (status, _) = self.request("POST", "/api/v1/node/unlock", &bytes).await?;
+        unlock_status(status, 204)
+    }
+
+    async fn request(&mut self, method: &str, path: &str, body: &[u8]) -> Result<(u16, zeroize::Zeroizing<Vec<u8>>), RemoteError> {
+        tokio::time::timeout(Duration::from_secs(15), async {
+            let mut request = zeroize::Zeroizing::new(format!("{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n", body.len()).into_bytes());
+            request.extend_from_slice(body);
+            for chunk in request.chunks(MAX_NOISE_PLAINTEXT) {
+                let encrypted = encode_transport(&mut self.noise, chunk)?;
+                write_frame(&mut self.remote, &encrypted).await?;
+            }
+            // Axum's fixed JSON/empty replies have Content-Length (204 may omit it).
+            // Do not follow redirects or forward server text, which could echo a secret.
+            let mut response = zeroize::Zeroizing::new(Vec::new());
+            loop {
+                let encrypted = read_frame(&mut self.remote, MAX_TRANSPORT_FRAME).await?;
+                let plaintext = zeroize::Zeroizing::new(decode_transport(&mut self.noise, &encrypted, MAX_NOISE_PLAINTEXT)?);
+                response.extend_from_slice(&plaintext);
+                if response.len() > 32 * 1024 { return Err(RemoteError::Invalid("unlock reply too large".into())); }
+                if let Some(end) = response.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let header = std::str::from_utf8(&response[..end]).map_err(|_| RemoteError::Invalid("invalid unlock HTTP reply".into()))?;
+                    let status = header.lines().next().and_then(|l| l.split_whitespace().nth(1)).and_then(|v| v.parse::<u16>().ok())
+                        .ok_or_else(|| RemoteError::Invalid("invalid unlock HTTP status".into()))?;
+                    let mut length = None;
+                    for line in header.lines().skip(1) {
+                        let (name, value) = line.split_once(':').ok_or_else(|| RemoteError::Invalid("invalid unlock header".into()))?;
+                        if name.eq_ignore_ascii_case("transfer-encoding") { return Err(RemoteError::Invalid("unsupported unlock framing".into())); }
+                        if name.eq_ignore_ascii_case("content-length") {
+                            if length.is_some() { return Err(RemoteError::Invalid("duplicate unlock length".into())); }
+                            length = Some(value.trim().parse::<usize>().map_err(|_| RemoteError::Invalid("invalid unlock length".into()))?);
+                        }
+                    }
+                    let length = length.or((status == 204).then_some(0)).filter(|n| *n <= 16 * 1024)
+                        .ok_or_else(|| RemoteError::Invalid("missing or oversized unlock length".into()))?;
+                    if response.len() >= end + 4 + length { return Ok((status, zeroize::Zeroizing::new(response[end+4..end+4+length].to_vec()))); }
+                }
+            }
+        }).await.map_err(|_| RemoteError::Transport("unlock request timed out; check the node before retrying".into()))?
+    }
+}
+
+fn unlock_status(status: u16, expected: u16) -> Result<(), RemoteError> {
+    if status == expected { return Ok(()); }
+    Err(RemoteError::Refused(match status {
+        401 => "Unlock failed. No password was retained by the app.",
+        403 => "This device is not approved to unlock this node.",
+        409 => "Your node is already unlocking. Wait a few seconds.",
+        429 => "Unlock is rate limited. Wait before trying again.",
+        _ => "The node did not confirm unlock.",
+    }.into()))
 }
 
 /// Complete the pinned Noise authentication before any paired HTTP token flow.
@@ -1285,6 +1599,10 @@ async fn serve_connection(
         }
     };
 
+    if noise.get_remote_static() != Some(&snapshot.transport_pubkey_bytes[..]) {
+        write_proxy_error(&mut local, "503 Service Unavailable", "node_locked", "Node is locked after restart").await;
+        return Ok(());
+    }
     finalize_authenticated_pairing(
         &descriptor,
         &config_path,
@@ -1522,6 +1840,13 @@ mod tests {
     use std::net::IpAddr;
     use std::os::unix::fs::PermissionsExt;
 
+    #[test]
+    fn u1_auth_fixture_is_accepted() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!("../tests/fixtures/home-node.json")).unwrap();
+        let response = serde_json::from_value::<RemoteAuthResponse>(fixture["auth"].clone());
+        assert!(response.is_ok(), "U1 auth response rejected: {response:?}");
+    }
+
     fn test_code(byte: u8) -> String {
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([byte; 32])
     }
@@ -1544,6 +1869,7 @@ mod tests {
             transport_signature: base64::engine::general_purpose::URL_SAFE_NO_PAD
                 .encode(signature.to_bytes()),
             code: code.to_string(),
+            ..Default::default()
         };
         let json = serde_json::to_vec(&payload).unwrap();
         format!(
@@ -1589,6 +1915,235 @@ mod tests {
         ))
         .is_err());
         assert!(parse_pairing_link("https://node.example/pair").is_err());
+    }
+
+    const NOW: i64 = 1_800_000_000;
+
+    /// A `konsensus pair-ticket` link (BitSov-bitsov #252): the legacy fields
+    /// plus `extra`, which may also override or null a field.
+    fn node_ticket(node: &SigningKey, extra: serde_json::Value) -> String {
+        let transport = X25519PublicKey::from(&StaticSecret::from([9u8; 32])).to_bytes();
+        let link = signed_link("node.example:4242".into(), node, transport, &test_code(3));
+        let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let mut json: serde_json::Value =
+            serde_json::from_slice(&engine.decode(link.strip_prefix("bitsov://pair/").unwrap()).unwrap()).unwrap();
+        for (key, value) in extra.as_object().unwrap() {
+            json[key] = value.clone();
+        }
+        format!("bitsov://pair/{}", engine.encode(serde_json::to_vec(&json).unwrap()))
+    }
+
+    fn box_proof(node: &SigningKey) -> (String, String) {
+        let node_id = hex::encode(node.verifying_key().as_bytes());
+        let key = hex::encode([0x33u8; 32]);
+        let signature = node.sign(format!("bitsov-box-transport-v1:{node_id}:{key}").as_bytes());
+        (key, base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature.to_bytes()))
+    }
+
+    #[test]
+    fn old_link_without_ticket_fields_still_imports() {
+        let node = SigningKey::from_bytes(&[7u8; 32]);
+        let link = node_ticket(&node, serde_json::json!({}));
+        let json = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(link.strip_prefix("bitsov://pair/").unwrap())
+            .unwrap();
+        let mut keys: Vec<String> = serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&json)
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        keys.sort();
+        assert_eq!(keys, ["code", "endpoint", "node_id", "transport_pubkey", "transport_signature", "v"]);
+
+        let descriptor = parse_pairing_link_at(&link, NOW).unwrap();
+        assert!(descriptor.has_code());
+        assert_eq!(descriptor.hosted_by(), None);
+
+        let data = tempfile::tempdir().unwrap();
+        let view = import_pairing_link(data.path(), &link).unwrap();
+        assert_eq!(view.hosted_by, None);
+        let stored = std::fs::read_to_string(config_path(data.path())).unwrap();
+        assert!(!stored.contains("hosted_by"), "{stored}");
+        assert!(load_persisted(data.path()).unwrap().unwrap().has_code());
+    }
+
+    #[test]
+    fn node_ticket_with_expiry_label_and_box_proof_imports() {
+        let node = SigningKey::from_bytes(&[7u8; 32]);
+        let (box_key, box_signature) = box_proof(&node);
+        let ticket = |extra: serde_json::Value| {
+            let mut fields = serde_json::json!({
+                "box_transport_pubkey": box_key,
+                "box_transport_signature": box_signature,
+                "expires_at": NOW + 86_400,
+                "hosted_by": "Rasmus's Pi",
+            });
+            for (key, value) in extra.as_object().unwrap() {
+                fields[key] = value.clone();
+            }
+            node_ticket(&node, fields)
+        };
+
+        let descriptor = parse_pairing_link_at(&ticket(serde_json::json!({})), NOW).unwrap();
+        assert_eq!(descriptor.hosted_by(), Some("Rasmus's Pi"));
+        assert!(descriptor.has_code());
+        // The node writes `null` when `[node].hosted_by` is unset.
+        let unlabeled = parse_pairing_link_at(&ticket(serde_json::json!({ "hosted_by": null })), NOW).unwrap();
+        assert_eq!(unlabeled.hosted_by(), None);
+
+        // Fields the node does not send are still refused.
+        let unknown = ticket(serde_json::json!({ "ticket_version": 2 }));
+        assert!(matches!(parse_pairing_link_at(&unknown, NOW), Err(RemoteError::Invalid(_))));
+        let other = SigningKey::from_bytes(&[8u8; 32]);
+        let (_, foreign_signature) = box_proof(&other);
+        let forged = ticket(serde_json::json!({ "box_transport_signature": foreign_signature }));
+        assert!(matches!(parse_pairing_link_at(&forged, NOW), Err(RemoteError::Invalid(_))));
+        let identityless = identityless_link(&node_ticket(&node, serde_json::json!({
+            "node_id": null, "transport_pubkey": null, "transport_signature": null,
+            "box_transport_pubkey": box_key, "expires_at": NOW + 60,
+        })));
+        let error = parse_pairing_link_at(&identityless, NOW).unwrap_err().to_string();
+        assert!(error.contains("start the node unlocked once"), "{error}");
+
+        let data = tempfile::tempdir().unwrap();
+        let live = ticket(serde_json::json!({ "expires_at": unix_now() + 86_400 }));
+        let view = import_pairing_link(data.path(), &live).unwrap();
+        assert_eq!(view.hosted_by.as_deref(), Some("Rasmus's Pi"));
+        let reloaded = load_persisted(data.path()).unwrap().unwrap();
+        assert_eq!(reloaded.hosted_by(), Some("Rasmus's Pi"));
+        assert!(reloaded.has_code());
+    }
+
+    /// Drop the identity fields entirely, as `pair-ticket` does before first unlock.
+    fn identityless_link(link: &str) -> String {
+        let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let mut json: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_slice(&engine.decode(link.strip_prefix("bitsov://pair/").unwrap()).unwrap()).unwrap();
+        json.retain(|_, value| !value.is_null());
+        format!("bitsov://pair/{}", engine.encode(serde_json::to_vec(&json).unwrap()))
+    }
+
+    #[test]
+    fn expired_ticket_is_refused_with_a_clear_message() {
+        let node = SigningKey::from_bytes(&[7u8; 32]);
+        let at = |expires_at: i64| node_ticket(&node, serde_json::json!({ "expires_at": expires_at }));
+
+        let error = parse_pairing_link_at(&at(NOW - 7_200), NOW).unwrap_err();
+        assert!(matches!(error, RemoteError::Expired(7_200)));
+        let message = error.to_string();
+        assert!(message.starts_with("This pairing link expired 2 h ago."), "{message}");
+        assert!(message.contains("konsensus pair-ticket"), "{message}");
+        assert!(matches!(parse_pairing_link_at(&at(NOW), NOW), Err(RemoteError::Expired(0))));
+        assert!(matches!(parse_pairing_link_at(&at(-1), NOW), Err(RemoteError::Invalid(_))));
+        assert!(parse_pairing_link_at(&at(NOW + 1), NOW).is_ok());
+        // Zero is the node's marker for a legacy link without an expiry.
+        assert!(parse_pairing_link_at(&at(0), NOW).is_ok());
+
+        let data = tempfile::tempdir().unwrap();
+        assert!(matches!(import_pairing_link(data.path(), &at(unix_now() - 1)), Err(RemoteError::Expired(_))));
+        assert!(!config_path(data.path()).exists());
+    }
+
+    #[test]
+    fn hosted_by_label_is_capped_and_odd_labels_are_not_shown() {
+        let node = SigningKey::from_bytes(&[7u8; 32]);
+        let label = |hosted_by: &str| {
+            parse_pairing_link_at(&node_ticket(&node, serde_json::json!({ "hosted_by": hosted_by })), NOW)
+                .unwrap()
+                .hosted_by()
+                .map(str::to_owned)
+        };
+
+        let long = label(&"x".repeat(500)).unwrap();
+        assert_eq!(long.chars().count(), HOSTED_BY_MAX_CHARS);
+        assert!(long.ends_with('…'));
+        assert_eq!(label(&format!("{} tail", "y".repeat(62))).unwrap(), format!("{}…", "y".repeat(62)));
+        // The node's own longest label is kept whole.
+        assert_eq!(label(&"𝔅".repeat(64)).as_deref(), Some("𝔅".repeat(64).as_str()));
+        assert_eq!(label("  My Pi  ").as_deref(), Some("My Pi"));
+        // Markup stays literal; the renderer shows it as text.
+        assert_eq!(label("<img src=x onerror=alert(1)>").as_deref(), Some("<img src=x onerror=alert(1)>"));
+        for odd in ["Pi\u{202E}kcab", "Rasmus\u{7}Pi", "line\nbreak", "zero\u{200B}width", "\u{2066}Pi", "   ", ""] {
+            assert_eq!(label(odd), None, "{odd:?}");
+        }
+
+        // A hand-edited descriptor gets the same treatment on load.
+        let data = tempfile::tempdir().unwrap();
+        import_pairing_link(data.path(), &node_ticket(&node, serde_json::json!({}))).unwrap();
+        let path = config_path(data.path());
+        let mut stored: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        stored["hosted_by"] = "Pi\u{202E}kcab".into();
+        std::fs::write(&path, serde_json::to_vec(&stored).unwrap()).unwrap();
+        assert_eq!(load_persisted(data.path()).unwrap().unwrap().hosted_by(), None);
+        stored["hosted_by"] = "z".repeat(100).into();
+        std::fs::write(&path, serde_json::to_vec(&stored).unwrap()).unwrap();
+        let reloaded = load_persisted(data.path()).unwrap().unwrap();
+        assert_eq!(reloaded.hosted_by().unwrap().chars().count(), HOSTED_BY_MAX_CHARS);
+    }
+
+    #[test]
+    fn forgetting_remote_is_idempotent_and_preserves_local_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = SigningKey::from_bytes(&[11u8; 32]);
+        let transport = X25519PublicKey::from(&StaticSecret::from([12u8; 32])).to_bytes();
+        import_pairing_link(dir.path(), &signed_link("127.0.0.1:4242".into(), &node, transport, &test_code(2))).unwrap();
+        let local = dir.path().join("mnemonic.txt");
+        std::fs::write(&local, "local identity untouched").unwrap();
+        forget_persisted(dir.path()).unwrap();
+        assert!(load_persisted(dir.path()).unwrap().is_none());
+        forget_persisted(dir.path()).unwrap();
+        assert_eq!(std::fs::read_to_string(local).unwrap(), "local identity untouched");
+    }
+
+    #[test]
+    fn forgetting_remote_reports_removal_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(config_path(dir.path())).unwrap();
+        assert!(forget_persisted(dir.path()).is_err());
+    }
+
+    #[test]
+    fn local_reset_waits_for_local_startup_and_preserves_the_client_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = SigningKey::from_bytes(&[11u8; 32]);
+        let transport = X25519PublicKey::from(&StaticSecret::from([12u8; 32])).to_bytes();
+        let link = signed_link("127.0.0.1:4242".into(), &node, transport, &test_code(2));
+        let store = dir.path().join("app-client");
+        let key = ClientKey::load_or_create(&store).unwrap();
+        let key_bytes = std::fs::read(store.join(pairing::KEY_FILE)).unwrap();
+        pairing::save_remote_record(&store, &key,
+            "0123456789abcdef0123456789abcdef".into(), vec!["read".into()]).unwrap();
+        let record = store.join(pairing::RECORD_FILE);
+        prepare_local_pairing(dir.path(), &store).unwrap();
+        assert!(record.exists(), "normal startup preserves its pairing");
+        import_pairing_link(dir.path(), &link).unwrap();
+        forget_persisted(dir.path()).unwrap();
+        assert!(record.exists(), "live session keeps its record");
+        import_pairing_link(dir.path(), &link).unwrap();
+        prepare_local_pairing(dir.path(), &store).unwrap();
+        assert!(record.exists(), "a newer remote choice takes precedence");
+        forget_persisted(dir.path()).unwrap();
+        prepare_local_pairing(dir.path(), &store).unwrap();
+        assert!(!record.exists());
+        assert_eq!(std::fs::read(store.join(pairing::KEY_FILE)).unwrap(), key_bytes);
+        // Consuming the marker is one-time: a later local pairing survives.
+        std::fs::write(&record, "new local record").unwrap();
+        prepare_local_pairing(dir.path(), &store).unwrap();
+        assert_eq!(std::fs::read_to_string(record).unwrap(), "new local record");
+    }
+
+    #[test]
+    fn in_flight_auth_cannot_restore_a_forgotten_descriptor() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = SigningKey::from_bytes(&[11u8; 32]);
+        let transport = X25519PublicKey::from(&StaticSecret::from([12u8; 32])).to_bytes();
+        import_pairing_link(dir.path(), &signed_link("127.0.0.1:4242".into(), &node, transport, &test_code(2))).unwrap();
+        let descriptor = Mutex::new(load_persisted(dir.path()).unwrap().unwrap());
+        let store = dir.path().join("pairing-client");
+        let key = ClientKey::load_or_create(&store).unwrap();
+        forget_persisted(dir.path()).unwrap();
+        finalize_authenticated_pairing(&descriptor, &config_path(dir.path()), &store, &key, "client".into(), vec!["read".into()]).unwrap_err();
+        assert!(load_persisted(dir.path()).unwrap().is_none());
     }
 
     #[test]
@@ -2212,6 +2767,7 @@ mod tests {
             v: 1,
             client_id: "0123456789abcdef0123456789abcdef".into(),
             scopes: vec!["read".into(), "receive".into()],
+            box_transport_pubkey: None, box_transport_signature: None,
         })
         .unwrap();
         let encrypted = encode_transport(&mut noise, &response)?;
@@ -2238,6 +2794,7 @@ mod tests {
         let response = serde_json::to_vec(&RemoteAuthResponse::Ok {
             v: 1, client_id: "0123456789abcdef0123456789abcdef".into(),
             scopes: vec!["read".into(), "receive".into()],
+            box_transport_pubkey: None, box_transport_signature: None,
         }).unwrap();
         let encrypted = encode_transport(&mut noise, &response)?;
         write_frame(&mut stream, &encrypted).await?;
@@ -2293,6 +2850,7 @@ mod tests {
         let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let local_base = format!("http://127.0.0.1:{}/api/v1", probe.local_addr().unwrap().port());
         drop(probe);
+        persist_at(&config_path(app_dir.path()), &descriptor).unwrap();
         let proxy = start_proxy(&local_base, app_dir.path(), descriptor,
             key, "polling test", store.path().to_path_buf(), auth.clone(), retry.clone()).await.unwrap();
         let client = http_client_builder().build().unwrap();
@@ -2683,3 +3241,7 @@ mod tests {
         assert!(loopback_addr("https://127.0.0.1:3141/not-api-v1").is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "remote_access/home_tests.rs"]
+mod home_tests;

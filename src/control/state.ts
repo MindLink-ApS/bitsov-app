@@ -58,8 +58,12 @@ export function mergeMessages(existing: Message[], incoming: Message[]): Message
   return [...byId.values()].sort((a, b) => a.timestamp - b.timestamp || a.id.localeCompare(b.id));
 }
 
-/** The track a live message belongs to. Broadcasts have no track. */
+/** Porch protocol payloads belong to the page reader, never to a conversation. */
+export const isPorchKind = (kind: number): boolean => kind === 500 || kind === 501 || kind === 510;
+
+/** The track a live message belongs to. Broadcasts and Porch traffic have no chat track. */
 export function trackOf(message: Message, roomId: string | null, ownId: string): TrackRef | null {
+  if (isPorchKind(message.kind)) return null;
   if (roomId) return { kind: 'room', id: roomId.toLowerCase() };
   if (message.recipient === 'broadcast') return null;
   const own = ownId.toLowerCase();

@@ -2,7 +2,16 @@
 // Pure functions over what the host reports (`node_status`, `pairing_status`), so the
 // step logic is testable without a window. The host never sends a token or key here.
 
-export type NodeStatus = { retry_after_secs?: number | null; ready: boolean; node_id: string | null; error: string | null };
+export type NodeStatus = {
+  locked?: boolean;
+  local_owner?: boolean;
+  owner_warning?: string | null;
+  initialization_repair?: 'none' | 'required' | 'repairing' | 'price_floor_required' | 'price_floor_repairing';
+  retry_after_secs?: number | null;
+  ready: boolean;
+  node_id: string | null;
+  error: string | null;
+};
 
 /** Mirrors `bitsov_app::pairing::PairingView`. */
 export type PairingView = {
@@ -16,6 +25,8 @@ export type PairingView = {
   reason: string | null;
   /** `bootstrap` on an identity-free node. */
   bootstrap: string | null;
+  /** Display-only label from the saved remote pairing link; capped by the host. */
+  hosted_by?: string | null;
 };
 
 export type StepStatus = 'todo' | 'active' | 'done' | 'failed' | 'skipped' | 'blocked';
@@ -49,7 +60,7 @@ export function onboardingSteps(status: NodeStatus, pairing: PairingView, trustA
   const identity: StepStatus = !authed
     ? 'todo'
     : pairing.bootstrap
-      ? 'blocked'
+      ? (pairing.bootstrap === 'bootstrap' && !pairing.remote ? 'active' : 'blocked')
       : !status.ready
         ? 'todo'
         : trustAck || (pairing.remote && !!status.node_id)

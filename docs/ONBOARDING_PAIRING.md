@@ -5,26 +5,36 @@ discipline for this feature, taken verbatim from the genome's
 `docs/security/pairing.md` (BitSov-bitsov `56c0ee0`, PR #77). Nothing here, in
 the app copy, or in release notes may be quoted as saying more.
 
-## Status: mock-verified only
+## Status: rc9 pinned; release-binary CI pending
 
-The app pins genome `v0.3.0-rc7` (`958e399`). #77 is **not in any tag**, so the
-sidecar this app bundles has no `/pair/*` routes. Everything below is verified
-against `src-tauri/crates/mock-node` using #77's route shapes. It is not yet
-verified against a real node.
+The app pins `v0.3.0-rc9` (`cd75c69`), which includes pairing and local owner
+bootstrap. Mock tests cover pairing, token refresh, restore refusal, explicit
+marker repair followed by separate price consent, and owner ceremony UI.
+The old rc7 404 fallback remains tested. Release-binary fetch, config drift,
+owner lifecycle and CS-1 need the attached signed checksums and an accessible
+release; a signed/hardened Mac interactive run remains separate acceptance.
+See [upgrade checks](NODE_RC9_UPGRADE.md) and [local owner ceremony](LOCAL_OWNER_CEREMONY.md).
 
-| Behaviour | Mock-verified here | Needs a HUMAN genome tag + pin bump |
-|---|---|---|
-| Ceremony: request → read `0600` challenge → sign → confirm → token | yes | real-node run |
-| Short code read from node stdout, matched against the challenge file | yes (mock stdout lines) | real sidecar stdout format |
-| 10-minute tokens refreshed before expiry | yes | real JWT expiry |
-| 404 on `/pair/request` → `/auth/local`, unchanged | yes (rc7-shaped mock) | — (this is today's product path) |
-| Refusal / bad proof / revoked / unreachable → error, **no fallback** | yes | real error texts |
-| Identity-free bootstrap detected (`/bootstrap/state`) | yes | real bootstrap router |
-| First-run identity create/restore on a bootstrap node | **not implemented** | genome tag, then a follow-up ticket |
+## Node choices
 
-Bumping the pin means cutting a genome tag that contains #77, running
-`scripts/fetch-node-sidecar.sh` against it, and re-running the CS-1/CS-2
-smokes. That is a HUMAN step. This change does not do it.
+This Mac is the default. Receiving requires the Mac to stay awake with BitSov
+open. A node on the user's own home computer is under the collapsed Advanced
+disclosure. Remote connections are shown as home/network connections; their
+custody label remains **Hosted custody**, because the app cannot verify where
+that node's keys live or who has access.
+
+The internal test-node card is off by default. To enable it at runtime, set
+`localStorage.setItem('bitsov.test-nodes', '1')` in the main webview, then reload.
+Remove that key and reload to hide it again. This flag changes UI visibility
+only; it grants no node authority and does not change the default selection.
+
+**Use this Mac instead** forgets the saved remote descriptor and takes
+effect on the next app start. At that startup it clears the old remote pairing
+record, preserving the client key, so local pairing can start normally. It does not delete an identity or revoke a device
+at the remote node. The current connection and trust disclosure remain remote
+until restart. The action is available in onboarding and the connected Node
+panel. Local nodes show the device-approval off reason, when provided, but no
+at-the-node Touch ID registration or CLI approval ceremony.
 
 ## Flow
 
@@ -53,8 +63,12 @@ First run, as the onboarding screen shows it:
      {client_id, challenge, signature}` → `{token, expires_at, scopes}`.
 3. **Create or restore identity.** On an rc7 node, `konsensus init` already
    created the identity, and the existing restore form is unchanged. On an
-   identity-free #77 node the step shows as waiting on a genome release. The
-   app creates nothing there.
+   local identity-free node, the restore form is available after pairing.
+   The host probes `/bootstrap/state`: a bootstrap response uses the paired
+   bootstrap router; only a 404 selects the rc7 live fallback. Both routers
+   use `/api/v1/identity/restore`. Probe failures do not send the phrase.
+   After restart, the live identity must match the restore response before
+   setup can continue. Creating a new identity over HTTP remains unavailable.
 4. **Fund.** Unchanged (CS-2), behind the G6 local-trust gate.
 
 After first run, the stored pairing is reused. Each start mints a token with
@@ -65,7 +79,7 @@ the host refreshes any paired token with less than 120 s left (tokens live
 ## Fallback and fail-closed
 
 There is exactly one fallback rule. **A 404 on `POST /pair/request` means the
-node has no pairing routes (the rc7 sidecar), and only then does the host use
+node has no pairing routes (for example an older rc7 node), and only then does the host use
 `/auth/local`.** It then uses `/auth/local` exactly as before, and later 401s
 re-mint there, as before.
 
@@ -98,7 +112,7 @@ gated by the challenge file and the node's own pairing window.
   cannot replace a live identity. Spending needs the user's own node plus the
   owner CLI (`konsensus grant` over `<data_dir>/control.sock`). This change
   requests no elevation.
-- **Fallback:** the screen says the bundled node (rc7) predates pairing and
+- **Fallback:** the screen says the connected older node has no pairing routes and
   that the app signs in with `/auth/local`. It does not show paired scopes in
   that case.
 
@@ -110,10 +124,39 @@ an OS keychain with a per-application ACL, or hardware-backed keys. Both are
 out of scope, and nothing weaker stands in for them. The G6 local-trust
 disclosure stays as written.
 
+## Compatibility with nodes after rc7
+
+For an existing local data directory, the host recognizes only the node's
+`identity_without_marker` and `identity_and_state_without_marker` startup
+refusals. It waits for the failed start to finish, then shows the one-time
+initialization consent screen. **No repair runs automatically.** “Not now”
+leaves the node stopped. The main-window command requires explicit consent,
+a pending refusal, and a stopped supervised local node; remote and externally
+managed nodes are excluded.
+
+On agreement, the same sidecar runs
+`repair mark-initialized --config <the existing config> --confirm`, then the
+app restarts. A retained 50 msat page price then triggers a separate consent
+screen before changing only that value to 1000 msat (with a config backup).
+Authentication resumes after successful startup. The node writes its marker;
+the app never manufactures it. Failure stays visible for an explicit
+retry. The successful marker removes the need for the prompt on later starts.
+The screen advises keeping a backup because normal startup can apply newer
+database migrations.
+
+The rc9 pin uses the existing first-run `init` flow when owner opt-in is off.
+With opt-in enabled, fresh installs use the two-phase owner ceremony; retained
+plaintext identities use ordinary startup and never enter that ceremony.
+Restore readiness applies when the managed node is already in bootstrap mode;
+it does not turn an initialized live node back into bootstrap. A live node that
+no longer exposes restore produces an explanatory error. Compatibility is
+mock-verified in `post_rc7_tests.rs` and `post-rc7-readiness.test.tsx`; a real rc7
+upgrade and new-release restore smoke remain release checks.
+
 ## Non-goals (this change)
 
 Pin bump or sidecar fetch; granting spend or touching `control.sock` (the app only *asks*: see `docs/CONTROL_CENTER_ACT.md`); OS keychain or
-Touch ID; identity create/restore over HTTP; packaging; assistant broker
+Touch ID; identity creation over HTTP; packaging; assistant broker
 changes.
 
 ## Isolation

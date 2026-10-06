@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Fetch + VERIFY the pinned, signed BitSov node binary and place it as the Tauri
 # sidecar for this host. The node binary is NEVER committed (Gate G1: bundled binary,
-# fetched + verified, not vendored). v0.3.0-rc7 publishes Linux, macOS and Windows node
+# fetched + verified, not vendored). v0.3.0-rc9 publishes Linux, macOS and Windows node
 # binaries, so all three hosts can produce a sidecar. Release assets carry no .exe suffix
 # on any host; only the installed Windows sidecar is renamed to .exe (Tauri's resolver).
-# rc7 is a PUBLISHED pre-release: `gh release download` reaches it with any gh, a CI
-# repo-scoped GITHUB_TOKEN included. Nothing here publishes anything.
+# CI needs rc9 published with SHA256SUMS and SHA256SUMS.asc attached. A public
+# release is reachable with the repo-scoped GITHUB_TOKEN. Nothing here publishes it.
 #
 # Verification is fail-closed, in two steps:
 #   1. SHA256SUMS.asc must be ACCEPTED by verify_release_signature (below): gpg exits 0, a
@@ -17,19 +17,22 @@
 #      If the pinned key is not in the caller's keyring, RELEASE_KEY.asc is fetched from the
 #      genome's main into a THROWAWAY keyring (under $TMP, removed on exit) and its
 #      fingerprint must equal the pin. The caller's keyring is never written to.
-#   2. The downloaded binary must match its line in the signed SHA256SUMS.
+#   2. Each binary must match exactly one valid entry in the signed SHA256SUMS.
+#
+# Usage: bash scripts/fetch-node-sidecar.sh [--verify-only]
+# --verify-only never installs or repairs binaries: it re-downloads the pinned trust
+# bundle and verifies EVERY src-tauri/bin/konsensus-* before packaging (Gate G1).
 #
 # Sourceable: `source scripts/fetch-node-sidecar.sh` defines the functions and fetches
 # nothing (main is guarded on BASH_SOURCE). scripts/test-fetch-verify.sh uses that to run
 # verify_release_signature against local test keys, including every refusal class above.
 set -euo pipefail
 
-TAG="v0.3.0-rc7"
+TAG="v0.3.0-rc9"
 REPO="MindLink-ApS/BitSov-bitsov"
 KEY_FPR="B299274C200301714DC6F51A7C2D6F8AC842EF6E"
 
 # GNU coreutils on Linux, perl shasum on macOS; same check either way.
-sha256_check() { if command -v sha256sum >/dev/null 2>&1; then sha256sum -c -; else shasum -a 256 -c -; fi; }
 sha256_of()    { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1"; else shasum -a 256 "$1"; fi | awk '{print $1}'; }
 
 # verify_release_signature <detached.asc> <file> <pinned-fingerprint>
@@ -73,34 +76,21 @@ verify_release_signature() {
   return 0
 }
 
-main() {
-  local OS ARCH EXT ASSET TRIPLE SIDECAR imported
-  OS="$(uname -s)"; ARCH="$(uname -m)"
-  EXT=""   # sidecar filename suffix; Windows only
-  case "$OS/$ARCH" in
-    Linux/x86_64)    ASSET="bitsov-linux-x86_64";   TRIPLE="x86_64-unknown-linux-gnu"  ;;
-    Linux/aarch64)   ASSET="bitsov-linux-aarch64";  TRIPLE="aarch64-unknown-linux-gnu" ;;
-    Darwin/arm64|Darwin/aarch64) ASSET="bitsov-darwin-aarch64"; TRIPLE="aarch64-apple-darwin" ;;
-    Darwin/x86_64)   ASSET="bitsov-darwin-x86_64";  TRIPLE="x86_64-apple-darwin" ;;
-    MINGW*/x86_64|MSYS*/x86_64|CYGWIN*/x86_64|Windows_NT/x86_64)
-                     ASSET="bitsov-windows-x86_64"; TRIPLE="x86_64-pc-windows-msvc"; EXT=".exe" ;;
-    *) echo "No signed node binary is published for $OS/$ARCH at $TAG." >&2
-       echo "Published hosts: Linux x86_64/aarch64, macOS arm64/x86_64, Windows x86_64." >&2
-       exit 2 ;;
-  esac
-  SIDECAR="src-tauri/bin/konsensus-$TRIPLE$EXT"
-
-  TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT   # TMP stays global: the trap runs after main returns
-  echo "→ downloading $ASSET + trust bundle from $REPO@$TAG"
-  gh release download "$TAG" --repo "$REPO" -p "$ASSET" -p "SHA256SUMS" -p "SHA256SUMS.asc" --dir "$TMP" --clobber
-
+# Shared by fetch and pre-bundle verification. A subshell confines GNUPGHOME
+# changes to this check; neither path imports into the caller's keyring.
+download_verified_checksums() (
+  local dir="$1" imported
+  echo "→ downloading trust bundle from $REPO@$TAG"
+  gh release download "$TAG" --repo "$REPO" -p "SHA256SUMS" -p "SHA256SUMS.asc" --dir "$dir" --clobber \
+    || { echo "  REFUSED: cannot obtain $REPO@$TAG signed SHA256SUMS" >&2; return 1; }
   echo "→ verifying GPG signature (pinned release key $KEY_FPR)"
   if ! gpg --batch --list-keys "$KEY_FPR" >/dev/null 2>&1; then
     echo "  pinned key not in the local keyring; importing RELEASE_KEY.asc from $REPO@main into a throwaway keyring"
-    export GNUPGHOME="$TMP/gnupg"
-    mkdir -m 0700 "$GNUPGHOME"
-    gh api "repos/$REPO/contents/RELEASE_KEY.asc?ref=main" -H "Accept: application/vnd.github.raw" > "$TMP/RELEASE_KEY.asc"
-    gpg --batch --import "$TMP/RELEASE_KEY.asc" >/dev/null 2>&1 \
+    export GNUPGHOME="$dir/gnupg"
+    mkdir -m 0700 "$GNUPGHOME" || return 1
+    gh api "repos/$REPO/contents/RELEASE_KEY.asc?ref=main" -H "Accept: application/vnd.github.raw" > "$dir/RELEASE_KEY.asc" \
+      || { echo "  REFUSED: cannot obtain RELEASE_KEY.asc from $REPO@main" >&2; return 1; }
+    gpg --batch --import "$dir/RELEASE_KEY.asc" >/dev/null 2>&1 \
       || { echo "  FAIL: could not import RELEASE_KEY.asc from $REPO@main" >&2; exit 1; }
     imported="$(gpg --batch --with-colons --list-keys 2>/dev/null || true)"
     if ! grep -q "^fpr:.*:${KEY_FPR}:\$" <<<"$imported"; then
@@ -108,12 +98,111 @@ main() {
       exit 1
     fi
   fi
-  verify_release_signature "$TMP/SHA256SUMS.asc" "$TMP/SHA256SUMS" "$KEY_FPR" \
-    || { echo "  FAIL: SHA256SUMS.asc was not accepted; nothing installed" >&2; exit 1; }
+  verify_release_signature "$dir/SHA256SUMS.asc" "$dir/SHA256SUMS" "$KEY_FPR" \
+    || { echo "  FAIL: SHA256SUMS.asc was not accepted; no sidecar accepted" >&2; exit 1; }
   echo "  ✓ SHA256SUMS is signed by $KEY_FPR"
+)
 
-  echo "→ verifying sha256 of $ASSET against the signed SHA256SUMS"
-  ( cd "$TMP" && grep " $ASSET\$" SHA256SUMS | sha256_check )
+# Exact mapping, including Windows' installed-only .exe suffix. Unknown names
+# must never be treated as a host default or silently ignored.
+sidecar_asset() {
+  case "${1##*/}" in
+    konsensus-x86_64-unknown-linux-gnu) echo bitsov-linux-x86_64 ;;
+    konsensus-aarch64-unknown-linux-gnu) echo bitsov-linux-aarch64 ;;
+    konsensus-aarch64-apple-darwin) echo bitsov-darwin-aarch64 ;;
+    konsensus-x86_64-apple-darwin) echo bitsov-darwin-x86_64 ;;
+    konsensus-x86_64-pc-windows-msvc.exe) echo bitsov-windows-x86_64 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Checks bytes without executing the binary. A missing/duplicate/malformed entry
+# is not evidence of membership in the pinned release, even in a signed manifest.
+verify_asset_checksum() {
+  local file="$1" asset="$2" sums="$3" expected actual
+  actual="$(sha256_of "$file")" || return 1
+  expected="$(awk -v asset="$asset" '
+    $2 == asset || $2 == "*" asset {
+      count++; hash = $1; if (NF != 2) malformed = 1
+    }
+    END {
+      if (count != 1 || malformed || length(hash) != 64 || hash ~ /[^0-9a-fA-F]/) exit 1
+      print tolower(hash)
+    }' "$sums")" || {
+      echo "  REFUSED: $file is not identified by $REPO@$TAG SHA256SUMS ($asset)" >&2
+      echo "    expected sha256: unavailable (missing, duplicate or malformed release entry)" >&2
+      echo "    actual sha256:   $actual" >&2
+      return 1
+    }
+  if [ "$actual" != "$expected" ]; then
+    echo "  REFUSED: $file does not match $REPO@$TAG ($asset)" >&2
+    echo "    expected sha256: $expected" >&2
+    echo "    actual sha256:   $actual" >&2
+    echo "    Re-fetch with: bash scripts/fetch-node-sidecar.sh" >&2
+    return 1
+  fi
+  echo "  ✓ $file: sha256 $actual ($REPO@$TAG)"
+}
+
+verify_installed_sidecars() {
+  local file asset actual found=0
+  for file in src-tauri/bin/konsensus-*; do
+    # A dangling symlink counts as an entry and must be refused too.
+    if [ ! -e "$file" ] && [ ! -L "$file" ]; then continue; fi
+    found=1
+    if [ ! -f "$file" ] || [ -L "$file" ]; then
+      echo "  REFUSED: $file must be a regular, non-symlink release binary" >&2
+      return 1
+    fi
+    asset="$(sidecar_asset "$file")" || {
+      actual="$(sha256_of "$file")" || return 1
+      echo "  REFUSED: $file has no published target in $REPO@$TAG" >&2
+      echo "    expected sha256: unavailable (no pinned release asset)" >&2
+      echo "    actual sha256:   $actual" >&2
+      return 1
+    }
+    verify_asset_checksum "$file" "$asset" "$TMP/SHA256SUMS" || return 1
+  done
+  if [ "$found" -eq 0 ]; then
+    echo "  REFUSED: no src-tauri/bin/konsensus-* sidecars; run bash scripts/fetch-node-sidecar.sh" >&2
+    return 1
+  fi
+  return 0
+}
+
+main() {
+  local OS ARCH EXT ASSET TRIPLE SIDECAR
+  if [ "$#" -gt 1 ] || { [ "$#" -eq 1 ] && [ "$1" != --verify-only ]; }; then
+    echo "Usage: $0 [--verify-only]" >&2
+    return 2
+  fi
+  cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT   # TMP stays global for the trap
+  if [ "${1:-}" = --verify-only ]; then
+    download_verified_checksums "$TMP" || return 1
+    verify_installed_sidecars
+    return $?
+  fi
+
+  OS="$(uname -s)"; ARCH="$(uname -m)"
+  EXT=""
+  case "$OS/$ARCH" in
+    Linux/x86_64)    TRIPLE="x86_64-unknown-linux-gnu" ;;
+    Linux/aarch64)   TRIPLE="aarch64-unknown-linux-gnu" ;;
+    Darwin/arm64|Darwin/aarch64) TRIPLE="aarch64-apple-darwin" ;;
+    Darwin/x86_64)   TRIPLE="x86_64-apple-darwin" ;;
+    MINGW*/x86_64|MSYS*/x86_64|CYGWIN*/x86_64|Windows_NT/x86_64)
+                     TRIPLE="x86_64-pc-windows-msvc"; EXT=".exe" ;;
+    *) echo "No signed node binary is published for $OS/$ARCH at $TAG." >&2
+       echo "Published hosts: Linux x86_64/aarch64, macOS arm64/x86_64, Windows x86_64." >&2
+       return 2 ;;
+  esac
+  SIDECAR="src-tauri/bin/konsensus-$TRIPLE$EXT"
+  ASSET="$(sidecar_asset "$SIDECAR")"
+  download_verified_checksums "$TMP" || return 1
+  echo "→ downloading $ASSET from $REPO@$TAG"
+  gh release download "$TAG" --repo "$REPO" -p "$ASSET" --dir "$TMP" --clobber
+  verify_asset_checksum "$TMP/$ASSET" "$ASSET" "$TMP/SHA256SUMS" || return 1
 
   mkdir -p src-tauri/bin
   install -m 0755 "$TMP/$ASSET" "$SIDECAR"

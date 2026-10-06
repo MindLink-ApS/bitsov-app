@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Exercise the real packaging script without builds, downloads, mounts or ports."""
 import json
-import os
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import unittest
 
+from sidecar_test_support import PAYLOAD, ReleaseFixture
 
 ROOT = Path(__file__).resolve().parents[1]
 APP = Path("src-tauri/target/release/bundle/macos/BitSov.app")
@@ -92,17 +92,28 @@ elif name not in ("file", "otool", "codesign"):
 
 
 class PackagingTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.fixture = ReleaseFixture()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.fixture.close()
+
     def run_package(self, scenario, dmg=True):
         with tempfile.TemporaryDirectory(prefix="package mac test ") as tmp:
             root = Path(tmp)
             (root / "scripts").mkdir()
             for name in ("package-mac.sh", "check-mac-bundle.sh"):
                 shutil.copy2(ROOT / "scripts" / name, root / "scripts" / name)
+            fixture_env = self.fixture.prepare(root)
             (root / "src-tauri/bin").mkdir(parents=True)
             shutil.copy2(ROOT / "src-tauri/tauri.conf.json", root / "src-tauri/tauri.conf.json")
             sidecar = root / "src-tauri/bin/konsensus-aarch64-apple-darwin"
-            sidecar.write_text('#!/bin/sh\necho NODE_LAUNCHED >> "$TRACE"\nexit 99\n')
+            sidecar.write_bytes(b"stray binary" if scenario == "bad-sidecar" else PAYLOAD)
             sidecar.chmod(0o755)
+            if scenario == "extra-sidecar":
+                (sidecar.parent / "konsensus-x86_64-apple-darwin").write_bytes(b"stray binary")
             # Stale outputs must never let an unsuccessful build pass.
             (root / APP).mkdir(parents=True)
             (root / DMG).parent.mkdir(parents=True)
@@ -110,14 +121,13 @@ class PackagingTests(unittest.TestCase):
             if scenario == "logging-fail":
                 (root / "src-tauri/target/package-mac.log").mkdir()
             fakebin = root / "fakebin"
-            fakebin.mkdir()
             for name in ("uname", "npm", "hdiutil", "plutil", "file", "otool", "codesign",
                          "open", "osascript", "vite", "curl", "cargo"):
                 tool = fakebin / name
                 tool.write_text(STUB)
                 tool.chmod(0o755)
             trace = root / "trace.jsonl"
-            env = dict(os.environ, PATH=f"{fakebin}:{os.environ['PATH']}", TRACE=str(trace),
+            env = dict(fixture_env, TRACE=str(trace),
                        SCENARIO=scenario, CI="false", TAURI_BUNDLER_DMG_IGNORE_CI="true")
             result = subprocess.run(
                 ["bash", "scripts/package-mac.sh", "--use-existing-sidecar"] + (["--dmg"] if dmg else []),
@@ -128,6 +138,15 @@ class PackagingTests(unittest.TestCase):
                                 for e in events), events)
             image = (root / DMG).read_text() if (root / DMG).exists() else None
             return result, events, image
+
+    def test_unverified_sidecars_stop_before_build_or_package(self):
+        for scenario in ("bad-sidecar", "extra-sidecar"):
+            with self.subTest(scenario=scenario):
+                result, events, _ = self.run_package(scenario)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn("expected sha256", result.stdout)
+                self.assertIn("actual sha256", result.stdout)
+                self.assertFalse(any(e[0] in ("npm", "hdiutil") for e in events))
 
     def test_fallback_recovers_dmg_script_failure(self):
         result, events, image = self.run_package("fallback")

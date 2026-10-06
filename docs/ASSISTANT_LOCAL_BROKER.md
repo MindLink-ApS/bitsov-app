@@ -5,14 +5,14 @@ local node**, not only from the in-process mock. The host decides which, and
 the window says which it got. Stacked on F1 pairing
 (`docs/ONBOARDING_PAIRING.md`): the broker reads with F1's paired token.
 
-## Status: mock-verified only
+## Status: rc9 pin, retained rc7 fixtures
 
-The app pins genome `v0.3.0-rc7` (`958e399`). That sidecar has no `/pair/*`
-routes, so F1 falls back to `/auth/local`. **The assistant does not read with
-that token.** With the bundled node the window therefore always shows mock
-rows labelled *rc7 fallback*. The live path is verified here against a
-test-only loopback server that serves mock-node's rc7 bodies. It has not run
-against a real node.
+The app pins `v0.3.0-rc9` (`cd75c69`), which includes pairing and freshness
+headers. The broker reads only with a paired token. An older rc7 node still
+uses mock rows: its `/auth/local` token never enters the broker. Historical
+rc7 route bodies and fixtures below remain compatibility evidence, not the
+current binary pin. Release-binary runtime checks remain listed in
+[the rc9 checklist](NODE_RC9_UPGRADE.md).
 
 ## Live vs mock
 
@@ -50,7 +50,7 @@ Without `sit-mock` there is no live reader; the window stays mock.
 `LocalNodeRead` (`src-tauri/src/jarvis/broker/local_read.rs`) is the only
 code that reads the node for the assistant. It is deny-by-default:
 
-- **Routes.** Only the pinned rc7 GET routes in `route.rs`:
+- **Routes.** Only the allowlisted GET routes (retaining rc7 compatibility) in `route.rs`:
   `/api/v1/health`, `/api/v1/payments/balance`, `/api/v1/payments/channels`,
   `/api/v1/messages?limit=N`, `/api/v1/pricing`. Exact byte match, no path
   normalisation. The one query key is `limit`, on `/messages` only.
@@ -148,7 +148,7 @@ Precedence, per route:
    wall clock): *unknown*, regardless of time since the app read.
 4. No host stamp, or a non-2xx read → *unknown*.
 
-Node-side times on the pinned rc7 (`958e399`) routes:
+Historical node-side times in the retained rc7 (`958e399`) fixtures:
 
 | Route | rc7 body | Time field | Used for |
 |---|---|---|---|
@@ -168,7 +168,7 @@ the fetch time.
 
 ### Node data time: `BitSov-Data-As-Of` / `BitSov-Data-Stale` (F5)
 
-Genome PR BitSov-bitsov#78 (merged, **not** in the pinned `v0.3.0-rc7`) adds
+Genome PR BitSov-bitsov#78 (included in the rc9 pin) adds
 two headers on `200` responses from the five pinned read routes. The app
 reads them host-side in `LocalNodeRead` (`broker/local_read.rs`,
 `broker/freshness.rs`). Until a genome pin includes #78, missing headers
@@ -269,7 +269,7 @@ choose the backend or cause a read.
   with its cached figure, and `LocalNodeRead` cannot tell. The test server
   carries mock-node's stale flag as a `503` so the fixture's stale rows stay
   `Unavailable`. Genome #78's `BitSov-Data-Stale` / `-As-Of` headers are
-  read (see above) but only take effect once the pin includes #78.
+  read (see above) but are available on the rc9 pin.
 - **Wallet sync vs. the bound.** Balance and channels allow 180 s for the
   80 s default on-chain wallet sync. A node configured with a much slower
   sync will read *Stale* between syncs; the node's own `Stale: 1` (LDK sync
@@ -279,15 +279,11 @@ choose the backend or cause a read.
   open and says *Stale* once a route passes its bound (60 s, or 180 s for
   balance and channels).
 
-## Waits on HUMAN
+## Release acceptance still pending
 
-1. A genome tag that contains #77 pairing (BitSov-bitsov `56c0ee0` is in no
-   tag), then a pin bump from `v0.3.0-rc7` with
-   `scripts/fetch-node-sidecar.sh` and the CS-1/CS-2 smokes. Until then the
-   bundled node is always *rc7 fallback* and the window is always mock.
-2. A real-node run of the live path after that bump.
-3. Merge and tag BitSov-bitsov#78 (freshness headers), then a pin bump,
-   before the F5 as-of / stale handling is live.
+CI must fetch and verify rc9 after the signed checksum assets are attached and
+the release is accessible. Run the paired live-reader and freshness checks
+against that binary; retained rc7 mocks alone do not establish runtime evidence.
 
 ## Tests
 

@@ -318,6 +318,42 @@ describe('rooms in the shell', () => {
     t.dispatchEvent(new InputEvent('input', { bubbles: true }));
   };
 
+  it('Enter opens the same confirmation as Send; Shift, composition and repeats never dispatch', async () => {
+    const host = stubHost({ price_quote: () => quote(5500) });
+    await openShell();
+    await openRoom(A, B);
+    await vi.waitFor(() => expect($('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('12000'));
+    typeDraft('hello with Enter');
+    const draft = $<HTMLTextAreaElement>('[data-room-draft]')!;
+    for (const init of [{ shiftKey: true }, { isComposing: true }, { repeat: true }]) {
+      draft.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true, ...init }));
+      expect($('[data-room-review]')).toBeNull();
+    }
+    const enter = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true });
+    draft.dispatchEvent(enter);
+    expect(enter.defaultPrevented).toBe(true);
+    expect($('[data-room-review]')).not.toBeNull();
+    expect(text('[data-room-review]')).toContain('You pay up to 6 sats to each member (12 sats in all)');
+    expect(host.used('message_send')).toHaveLength(0);
+    click('[data-room-confirm]');
+    await vi.waitFor(() => expect(host.used('message_send')).toHaveLength(2));
+    await vi.waitFor(() => expect(text('[data-room-send]')).toContain('You paid up to 6 sats to each member (12 sats in all)'));
+    expect(text(`[data-room-leg="${A}"]`)).toContain('To Maya');
+    expect(host.used('message_send').map((c) => c.args!.max_msat)).toEqual([6000, 6000]);
+    const row = $('[data-room-msg]')!;
+    expect(row.classList.contains('fresh')).toBe(true);
+    row.querySelector('.bubble')!.dispatchEvent(new Event('animationend', { bubbles: true }));
+    expect(row.classList.contains('fresh')).toBe(false);
+    const sent = host.used('message_send')[0].args!;
+    host.emitLive({ type: 'message', room_id: null, message: { id: 'r1', kind: 0, sender: OWN, recipient: A, timestamp: Date.now(), plaintext: sent.plaintext as string, payment_amount_msat: 5500 } });
+    await vi.waitFor(() => expect($('[data-room-msg]')).toBe(row));
+    expect(row.classList.contains('fresh')).toBe(false);
+    click(`[data-track="peer:${A}"]`);
+    click(`[data-track="bound:${localRooms()[0].id}"]`);
+    await vi.waitFor(() => expect($('[data-room-msg]')).not.toBeNull());
+    expect($('[data-room-msg]')!.classList.contains('fresh')).toBe(false);
+  });
+
   it.each([true, false])('Start and sidebar describe the node rooms capability (%s)', async (supported) => {
     stubHost({ node_overview: () => overview(supported ? ['room_binding_v1'] : []) });
     await openShell();
@@ -441,6 +477,20 @@ describe('rooms in the shell', () => {
     expect(host.used('message_send')).toHaveLength(0);
   });
 
+  it('shows no available recipients, not a loading price, when every member is skipped', async () => {
+    const host = stubHost({ peers_list: () => [peer(A, 'Maya', { session: false }), peer(B, 'Jon', { connected: false })] });
+    await openShell();
+    rememberRoom(AB);
+    click(`[data-track="bound:${AB.id}"]`);
+    await vi.waitFor(() => expect($('[data-room-cost-leg]')).not.toBeNull());
+    expect(text('[data-cost]')).toContain('No members can receive this message right now');
+    expect(text('[data-cost]')).not.toContain('Reading');
+    typeDraft('not payable');
+    $('[data-room-draft]')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    expect($('[data-room-review]')).toBeNull();
+    expect(host.used('message_send')).toHaveLength(0);
+  });
+
   it('with spending closed (a paused budget, no window) Send is off and the one-tap gate shows; nothing is paid', async () => {
     const host = stubHost({ budget_status: () => budget({ paused: true }) });
     await openShell();
@@ -452,6 +502,7 @@ describe('rooms in the shell', () => {
     expect($<HTMLButtonElement>('[data-send]')!.disabled).toBe(true);
     expect($('[data-room-composer] [data-spend]')).not.toBeNull();
     click('[data-send]');
+    $('[data-room-draft]')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
     expect($('[data-room-review]')).toBeNull();
     expect(host.used('message_send')).toHaveLength(0);
   });

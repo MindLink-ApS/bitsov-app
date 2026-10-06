@@ -1,3 +1,6 @@
+import { createMessageEntrance } from './messageEntrance';
+import { LocalNodeSwitch } from '../onboarding/LocalNodeSwitch';
+import { HubTrustInfo } from './HubTrust';
 import { pollingSource } from './polling';
 import { readSpendPreset, saveSpendPreset } from './prefs';
 import { WelcomeHome } from './WelcomeHome';
@@ -18,6 +21,7 @@ import { ContactPanel } from './ContactPanel';
 import { custodyBadge, CustodyBadgeView } from './custody';
 import { WalletPage, type WalletActions, type WalletTab } from './WalletPage';
 import { artifactActivity, logActivity, type LoggedActivity } from './wallet';
+import { androidQrScannerAvailable } from '../pairingScanner';
 import { callCost, createCallEngine, IDLE as CALL_IDLE, isCallKind, signalCost, stunServer, type CallMedia, type CallView } from './call';
 import { createMeetingEngine, declineCost, inviteCost, joinCost, MAX_PARTICIPANTS, MEETING_IDLE, type LegState, type MeetingView, type ShownQuotes } from './meeting';
 import { admitRoom, leaveRoom, localRoom, localRooms, newRoom, rememberRoom, ROOM_CAPABILITY, ROOM_PAGE, roomOf, sameRoom, sendRoom, type LegPlan, type LocalRoom } from './room';
@@ -69,6 +73,7 @@ import {
   freshness,
   isBudgetStop,
   isOutgoing,
+  isPorchKind,
   mergeMessages,
   messagesWorth,
   needsApproval,
@@ -160,6 +165,7 @@ type Outcome<T> = { ok: true; value: T } | { ok: false; error: ActionError };
  * other spending call is refused by the host outside the ten-minute window.
  */
 export type Actions = {
+  remote?: () => boolean;
   moneyBlocked: () => boolean;
   approve: () => Promise<void>;
   lock: () => Promise<void>;
@@ -246,6 +252,7 @@ export function ControlCenter(props: Props) {
   const [members, setMembers] = createStore<Record<string, string[]>>({});
   const [wallet, setWallet] = createSignal<WalletOverview | null>(null);
   const [link, setLink] = createSignal<LinkState | null>(null);
+  const seenEntrances = new Set<string>();
   const [threads, setThreads] = createStore<{ t: Threads; unread: Unread; fresh: Record<string, true> }>({ t: {}, unread: {}, fresh: {} });
   const [track, setTrack] = createSignal<TrackRef | null>(null);
   const [quote, setQuote] = createSignal<PriceQuote | null>(null);
@@ -635,6 +642,7 @@ export function ControlCenter(props: Props) {
               if (event.event.verdict === 'admitted') energyAfterEvent();
               return;
             }
+            if (event.type === 'message' && isPorchKind(event.message.kind)) return;
             // Call signals ring or steer the call; they are not chat.
             if (event.type === 'message' && isCallKind(event.message.kind)) {
               // Each engine takes only its own: meeting legs carry a roster.
@@ -661,8 +669,8 @@ export function ControlCenter(props: Props) {
               const m = event.message;
               const peer = (isOutgoing(m, ownId()) ? m.recipient : m.sender).toLowerCase();
               setThreads('t', trackKey({ kind: 'peer', id: peer }), (old) => mergeMessages(old ?? [], [m]));
-              foldRooms([m], true);
               setThreads('fresh', m.id, true);
+              foldRooms([m], true);
               return;
             }
             const next = applyLive(threads.t, threads.unread, openKey(), event, ownId());
@@ -764,9 +772,9 @@ export function ControlCenter(props: Props) {
     });
     if (!deliveries[receipt.message_id]) setDeliveries(receipt.message_id, deliveryFromReceipt(receipt));
     const sent = sentMessage(receipt, ownId(), text);
+    setThreads('fresh', receipt.message_id, true);
     setThreads('t', trackKey(t), (old) => mergeMessages(old ?? [], [sent]));
     foldRooms([sent], false);
-    setThreads('fresh', receipt.message_id, true);
   };
 
   /**
@@ -876,6 +884,7 @@ export function ControlCenter(props: Props) {
   const voiceUrls = new Map<string, Promise<string>>();
   onCleanup(() => voiceUrls.forEach((u) => void u.then(URL.revokeObjectURL, () => undefined)));
   const actions: Actions = {
+    remote: () => props.remote === true,
     moneyBlocked,
     callQuote: (peer) => act(() => source.callQuote(peer)),
     placeCall: (peer, media, quote) => { if (!moneyBlocked()) void calls.place(peer, media, quote); },
@@ -1127,8 +1136,8 @@ export function ControlCenter(props: Props) {
         setPaid(r.value.message_id, r.value.amount_msat);
         setAllowances(r.value.message_id, { total_msat: r.value.total_msat ?? r.value.amount_msat + (r.value.max_routing_fee_msat ?? 0), max_routing_fee_msat: r.value.max_routing_fee_msat ?? 0, fee_paid_msat: r.value.fee_paid_msat, readmission_msat: r.value.readmission_msat });
         if (!deliveries[r.value.message_id]) setDeliveries(r.value.message_id, deliveryFromReceipt(r.value));
-        setThreads('t', trackKey(t), (old) => mergeMessages(old ?? [], [sentFileMessage(r.value, ownId())]));
         setThreads('fresh', r.value.message_id, true);
+        setThreads('t', trackKey(t), (old) => mergeMessages(old ?? [], [sentFileMessage(r.value, ownId())]));
       }
       return recordFailure(t, 'File not sent', r);
     },
@@ -1307,6 +1316,7 @@ export function ControlCenter(props: Props) {
                       onEarlier={() => loadRoomPage(room().id, roomPages[room().id]?.before ?? null)}
                       sends={roomSends[room().id] ?? []}
                       fresh={threads.fresh}
+                    seenEntrances={seenEntrances}
                       info={(peer) => roomContacts().find((c) => c.id === peer)}
                       quote={(peer) => source.priceQuote(peer).catch(() => null)}
                       budgetSkip={roomBudgetSkip}
@@ -1328,7 +1338,7 @@ export function ControlCenter(props: Props) {
                     source={source}
                     now={now()}
                     peers={peers()}
-                    nodeReads={overview()?.capabilities?.includes('porch_read_v1') === true}
+                    nodeReads={overview()?.capabilities?.some((c) => c === 'porch_quote_v1' || c === 'porch_read_v1') === true}
                     moneyBlocked={moneyBlocked()}
                     spend={spend()}
                     spendGate={<SpendBar spend={spend()} error={errors.spend ?? errors.spendPoll} now={now()} actions={actions} />}
@@ -1348,6 +1358,7 @@ export function ControlCenter(props: Props) {
                     messages={threads.t[trackKey(t())] ?? []}
                     artifacts={artifacts[trackKey(t())] ?? []}
                     fresh={threads.fresh}
+                    seenEntrances={seenEntrances}
                     deliveries={deliveries}
                     paid={paid}
                     allowances={allowances}
@@ -1439,7 +1450,7 @@ export function ControlCenter(props: Props) {
             />
           </Match>
           <Match when={tab() === 'node'}>
-            <NodePanel overview={overview()} link={link()} peers={peers()} now={now()} error={props.error ?? errors.overview ?? errors.peers} onReconnect={async () => { await props.onReconnect?.(); await loadOverview(); await loadPeers(); }} />
+            <NodePanel onForgetRemote={props.remote ? () => source.remoteAccessForget() : undefined} overview={overview()} link={link()} peers={peers()} now={now()} error={props.error ?? errors.overview ?? errors.peers} onReconnect={async () => { await props.onReconnect?.(); await loadOverview(); await loadPeers(); }} />
           </Match>
           <Match when={tab() === 'wallet'}>
             <button type="button" class="primary soft" data-open-wallet-page onClick={() => openWallet()}>Open Wallet</button>
@@ -1927,6 +1938,7 @@ function Conversation(props: {
   messages: Message[];
   artifacts: Artifact[];
   fresh: Record<string, true>;
+  seenEntrances: Set<string>;
   deliveries: Deliveries;
   paid: Record<string, number>;
   allowances: Record<string, { total_msat: number; max_routing_fee_msat: number; fee_paid_msat?: number; readmission_msat?: number }>;
@@ -1982,8 +1994,12 @@ function Conversation(props: {
       room: props.roomQuote,
       nowMs: props.now,
     });
-  // Room chats show in their room, not as raw text here.
-  const items = () => streamItems(props.messages.filter((m) => !isCallKind(m.kind) && !(props.track.kind === 'peer' && roomOf(m, props.ownId))), props.artifacts);
+  // Protocol payloads belong to their own views, not the chat stream.
+  const items = createMemo(() => streamItems(props.messages.filter((m) => !isCallKind(m.kind) && !isPorchKind(m.kind) && !(props.track.kind === 'peer' && roomOf(m, props.ownId))), props.artifacts));
+  // Solid's For keys by identity. Primitive ids keep rows mounted when reads replace objects.
+  const keyedItems = createMemo(() => new Map(items().map((item) => [
+    item.type === 'message' ? `message:${item.message.id}` : `artifact:${item.artifact.id}`, item,
+  ])));
 
   createEffect(
     on(
@@ -2055,7 +2071,7 @@ function Conversation(props: {
           </p>
         </Show>
         <For
-          each={items()}
+          each={[...keyedItems().keys()]}
           fallback={
             <div class="empty-track">
               <h2>Nothing here yet</h2>
@@ -2067,22 +2083,26 @@ function Conversation(props: {
             </div>
           }
         >
-          {(item, i) => {
+          {(key, i) => {
+            const item = () => keyedItems().get(key)!;
+            const message = () => { const row = item(); return row.type === 'message' ? row.message : null; };
+            const artifact = () => { const row = item(); return row.type === 'artifact' ? row.artifact : null; };
             const prev = () => items()[i() - 1];
-            const newDay = () => !prev() || day(prev()!.at) !== day(item.at);
+            const newDay = () => !prev() || day(prev()!.at) !== day(item().at);
             return (
               <>
                 <Show when={newDay()}>
-                  <p class="day">{day(item.at)}</p>
+                  <p class="day">{day(item().at)}</p>
                 </Show>
                 <Switch>
-                  <Match when={item.type === 'message' && item.message}>
+                  <Match when={message()}>
                     {(m) => (
                       <MessageView
                         m={m()}
                         out={isOutgoing(m(), props.ownId)}
                         room={props.track.kind === 'room'}
                         fresh={!!props.fresh[m().id]}
+                        seenEntrances={props.seenEntrances}
                         delivery={props.deliveries[m().id]}
                         paid={props.paid[m().id]}
                         allowance={props.allowances[m().id]}
@@ -2099,7 +2119,7 @@ function Conversation(props: {
                       />
                     )}
                   </Match>
-                  <Match when={item.type === 'artifact' && item.artifact}>
+                  <Match when={artifact()}>
                     {(a) => <ArtifactView moneyBlocked={props.moneyBlocked} a={a()} nameOf={props.nameOf} delivery={a().type === 'file' ? props.deliveries[(a() as { receipt: { message_id: string } }).receipt.message_id] : undefined} onRetry={(id, approved) => props.actions.retryDelivery(props.track, id, approved)} onStop={(pendingId) => props.actions.stopRetrying(props.track, pendingId)} />}
                   </Match>
                 </Switch>
@@ -2217,6 +2237,7 @@ function MessageView(props: {
   out: boolean;
   room: boolean;
   fresh: boolean;
+  seenEntrances: Set<string>;
   delivery: Delivery | undefined;
   paid: number | undefined;
   allowance?: { total_msat: number; max_routing_fee_msat: number; fee_paid_msat?: number; readmission_msat?: number };
@@ -2234,6 +2255,7 @@ function MessageView(props: {
   fileFetch?: (messageId: string) => Promise<VoiceBlob>;
   fileSave?: (messageId: string) => Promise<FileSaveResult>;
 }) {
+  const entrance = createMessageEntrance(props.m.id, props.fresh, props.seenEntrances);
   const amount = () => (props.paid ?? props.m.payment_amount_msat ?? 0) + (props.allowance?.readmission_msat ?? 0);
   const paidLabel = () => paidAmount(amount(), props.allowance?.fee_paid_msat);
   // Only a received chat message in a peer thread can be a request card.
@@ -2270,7 +2292,7 @@ function MessageView(props: {
     return v && !v.ok ? v.reason : null;
   };
   return (
-    <article class={`msg ${props.out ? 'out' : 'in'}`} classList={{ fresh: props.fresh }} data-message={props.m.id}>
+    <article class={`msg ${props.out ? 'out' : 'in'}`} classList={{ fresh: entrance.fresh() }} onAnimationEnd={entrance.finish} data-message={props.m.id}>
       <Show when={!props.out && props.room}>
         <span class="who">{props.nameOf(props.m.sender)}</span>
       </Show>
@@ -3631,7 +3653,9 @@ function Composer(props: {
   const label = () => {
     if (paying()) return 'Paying…';
     if (ownerWait()) return 'Waiting for contact approval';
-    if (needsTouch()) return 'Approve with Touch ID';
+    if (needsTouch()) {
+      return androidQrScannerAvailable() ? 'Approve with biometrics' : 'Approve with Touch ID';
+    }
     if (viaBudget()) {
       const s = shown();
       const price = s.msat === null ? '' : ` · ${s.estimate ? '≈ ' : ''}${sats(s.msat)} ${satUnit(s.msat)}`;
@@ -3656,7 +3680,9 @@ function Composer(props: {
     return { message: 'Send', pay: 'Pay', request: 'Create invoice', file: 'Send file' }[mode()] + (mode() === 'request' ? '' : price);
   };
 
-  const sendTitle = () => needsTouch() ? 'Approve with Touch ID' : 'Send';
+  const sendTitle = () => needsTouch()
+    ? (androidQrScannerAvailable() ? 'Approve with biometrics' : 'Approve with Touch ID')
+    : 'Send';
   /** Pay / Request / File panels close back to the single message bar. */
   const closePanel = () => {
     composerRevision++;
@@ -4436,7 +4462,9 @@ function SpendBar(props: { spend: SpendView | null; error: string | undefined; n
           </p>
         </Match>
       </Switch>
-      <DeviceSetup device={props.actions.device()} now={props.now} actions={props.actions} />
+      <Show when={props.actions.remote?.() || props.actions.device()?.state === 'off'}>
+        <DeviceSetup device={props.actions.device()} now={props.now} actions={props.actions} />
+      </Show>
       <Reconcile actions={props.actions} hasPending={props.hasPending} />
       <Show when={props.error}>
         <p class="err-note">{props.error}</p>
@@ -4456,6 +4484,7 @@ export const envelopePerAct = (priceMsat: number | null) =>
  */
 function DeviceSetup(props: { device: DeviceView | null; now: number; actions: Actions }) {
   const [busy, setBusy] = createSignal(false);
+  const android = androidQrScannerAvailable();
   const run = async (action: () => Promise<void>) => {
     if (busy()) return;
     setBusy(true);
@@ -4471,16 +4500,20 @@ function DeviceSetup(props: { device: DeviceView | null; now: number; actions: A
       <Match when={props.device?.state === 'off' && props.device}>
         {(d) => (
           <p class="hint" data-device-off={d().off_reason ?? 'off'}>
-            <strong>Touch ID approvals are off.</strong> {d().off_message}
+            <strong>{android ? 'Biometric approvals are off.' : 'Touch ID approvals are off.'}</strong> {d().off_message}
           </p>
         )}
       </Match>
       <Match when={props.device?.state === 'none' || props.device?.state === 'lapsed'}>
         <p class="hint" data-device-setup={props.device?.state}>
-          {props.device?.state === 'lapsed' ? 'Your last Touch ID setup request lapsed. ' : ''}
-          Approve payments per contact with Touch ID on this Mac instead of at the node.{' '}
+          {props.device?.state === 'lapsed'
+            ? (android ? 'Your last biometric setup request lapsed. ' : 'Your last Touch ID setup request lapsed. ')
+            : ''}
+          {android
+            ? 'Approve payments per contact with biometrics on this phone instead of at the node. '
+            : 'Approve payments per contact with Touch ID on this Mac instead of at the node. '}
           <button type="button" class="link" data-device-register disabled={busy()} onClick={() => void run(props.actions.registerDevice)}>
-            Set up Touch ID approvals
+            {android ? 'Set up biometric approvals' : 'Set up Touch ID approvals'}
           </button>
         </p>
       </Match>
@@ -4488,7 +4521,8 @@ function DeviceSetup(props: { device: DeviceView | null; now: number; actions: A
         {(d) => (
           <div class="approval" data-device="pending">
             <p>
-              <strong>Approve this Mac once at your node.</strong> Run this on the node’s computer. It shows this Mac’s key
+              <strong>{android ? 'Approve this phone once at your node.' : 'Approve this Mac once at your node.'}</strong>{' '}
+              Run this on the node’s computer. It shows {android ? 'this phone’s' : 'this Mac’s'} key
               fingerprint <code data-device-fingerprint>{d().fingerprint}</code>; check that it matches, then type the short
               code your node’s terminal shows:
             </p>
@@ -4514,13 +4548,16 @@ function DeviceSetup(props: { device: DeviceView | null; now: number; actions: A
  */
 export function TouchApproval(props: { peer: string; name: string; priceMsat: number | null; actions: Actions }) {
   const perAct = () => envelopePerAct(props.priceMsat);
+  const android = androidQrScannerAvailable();
   return (
     <div class="spend touch-line" data-touch-approval>
       <p class="spend-line">
         <span class="dot" />{' '}
         <span class="line-text">
           {/* The petname is local; Touch ID names the same key, never a name. */}
-          <strong>Approve {props.name} (node <code data-touch-peer>{shortId(props.peer)}</code>) with Touch ID.</strong> Up
+          <strong>
+            Approve {props.name} (node <code data-touch-peer>{shortId(props.peer)}</code>) with {android ? 'biometrics' : 'Touch ID'}.
+          </strong> Up
           to <span data-touch-budget>{fmtAmount(ENVELOPE_BUDGET_MSAT)}</span> a day, at most{' '}
           <span data-touch-per-act>{fmtAmount(perAct())}</span> per message, for 24 hours.
         </span>
@@ -4528,7 +4565,7 @@ export function TouchApproval(props: { peer: string; name: string; priceMsat: nu
       <details class="quiet-detail" data-touch-detail>
         <summary>Details</summary>
         <p>
-          Touch ID shows the same amounts for node {shortId(props.peer)}. Your node checks every payment against them;
+          {android ? 'The biometric prompt' : 'Touch ID'} shows the same amounts for node {shortId(props.peer)}. Your node checks every payment against them;
           nothing else can be paid under this approval.
         </p>
       </details>
@@ -5714,13 +5751,15 @@ function NewTrack(props: {
 
 // ---- context panels ---------------------------------------------------------
 
-function NodePanel(props: { overview: NodeOverview | null; link: LinkState | null; peers: Peer[]; now: number; error?: string; onReconnect: () => Promise<void> }) {
+function NodePanel(props: { onForgetRemote?: () => Promise<void>; overview: NodeOverview | null; link: LinkState | null; peers: Peer[]; now: number; error?: string; onReconnect: () => Promise<void> }) {
   const fresh = () => freshness(props.overview?.read_at ?? null, props.now);
   const linkText = () =>
     props.link === 'open' ? 'Live' : props.link === 'connecting' ? 'Connecting' : props.link === 'closed' ? 'Reconnecting' : 'Waiting';
   return (
     <div class="panel" data-panel="node">
       <h2>Your node</h2>
+      <Show when={props.onForgetRemote}><LocalNodeSwitch onForget={() => props.onForgetRemote!()} /></Show>
+      <HubTrustInfo level={3} />
       <Show when={props.overview} fallback={<Show when={!props.error}><DelayedSpinner /></Show>}>
         {(o) => (
           <dl class="facts">
