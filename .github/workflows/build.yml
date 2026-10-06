@@ -129,15 +129,19 @@ jobs:
   # genome's published release and on network, not on this repo's source. It exercises the
   # REAL sidecar path end to end against the pinned release: download, fail-closed signature
   # verification (RELEASE_KEY.asc from the genome's main, imported into a throwaway keyring,
-  # fingerprint pinned), sha256 check against the signed SHA256SUMS, then the CS-1 smoke boots
+  # fingerprint pinned), sha256 check against the signed SHA256SUMS, a bootstrap config
+  # drift guard, then the CS-1 smoke boots
   # the fetched node exactly as `init` configured it — zero port or migrations edits — and
   # proves the identity is durable across a restart.
   sidecar:
-    name: Sidecar (fetch + verify rc7, CS-1 smoke) — not a merge gate
+    name: Sidecar (fetch + verify, config drift, CS-1 smoke) — not a merge gate
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     env:
       GH_TOKEN: ${{ github.token }}
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@v4
 
@@ -150,6 +154,45 @@ jobs:
           SIDECAR="src-tauri/bin/konsensus-x86_64-unknown-linux-gnu"   # ubuntu-latest is x86_64
           test -x "$SIDECAR"
           "$SIDECAR" --version
+
+      # The drift guard links the same large Tauri test binary as the Build job.
+      - name: Free disk space before restoring the Rust cache
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
+
+      - name: Tauri Linux prerequisites for the config drift guard
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
+            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            src-tauri/target/
+          key: ${{ runner.os }}-cargo-config-drift-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-config-drift-
+            ${{ runner.os }}-cargo-check-
+
+      # Runs on every PR/main push, including edits to fetch-node-sidecar.sh's TAG.
+      # Explicit discovery makes a missing verified binary FAIL rather than SKIP.
+      # Only init is needed: the current pin need not support the owner API yet.
+      - name: Bootstrap config matches the pinned node's full-tier init
+        working-directory: src-tauri
+        env:
+          BITSOV_OWNER_TEST_BINARY: ${{ github.workspace }}/src-tauri/bin/konsensus-x86_64-unknown-linux-gnu
+          TAURI_CONFIG: '{"bundle":{"externalBin":[]}}'
+        run: >-
+          cargo test --locked --features dev-node,local-owner-ceremony --bin bitsov-app
+          local_owner::config_tests::bootstrap_config_matches_node_init -- --exact --nocapture
 
       # Evidence for BitSov-bitsov #66, never a gate: show what THIS runner gets from the two
       # public fee-estimate endpoints (status, headers, first bytes) so a boot failure below can
