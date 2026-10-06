@@ -931,14 +931,19 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
       }
       return Promise.reject('That is not a front-door card.');
     },
-    porchQuote: (peer) =>
-      SAMPLE_PEERS.some((p) => p.porch && p.node_id === peer.toLowerCase())
-        ? ok({ principal_msat: PORCH_READ_MSAT, max_routing_fee_msat: routingFee(PORCH_READ_MSAT), total_msat: allIn(PORCH_READ_MSAT) })
-        : refuse('porch_unsupported', 'Their node does not offer porch reads (it does not advertise porch_read_v1). Nothing was paid.'),
+    porchQuote: (peer, path) => {
+      if (!SAMPLE_PEERS.some((p) => p.porch && p.node_id === peer.toLowerCase())) {
+        return refuse('porch_unsupported', 'Their node does not offer porch reads (it does not advertise porch_quote_v1 or legacy porch_read_v1). Nothing was paid.');
+      }
+      if (path !== '/front-door.json' && !SAMPLE_PORCH_PAGES[path]) {
+        return refuse('porch_not_found', 'Not found or empty: their node has no content at this path. Nothing was paid.');
+      }
+      return ok({ principal_msat: PORCH_READ_MSAT, max_routing_fee_msat: routingFee(PORCH_READ_MSAT), total_msat: allIn(PORCH_READ_MSAT) });
+    },
     porchRead: async (peer, path, maxMsat) => {
       const target = peer.toLowerCase();
       if (!SAMPLE_PEERS.some((p) => p.porch && p.node_id === target)) {
-        return refuse('porch_unsupported', 'Their node does not offer porch reads (it does not advertise porch_read_v1). Nothing was paid.');
+        return refuse('porch_unsupported', 'Their node does not offer porch reads (it does not advertise porch_quote_v1 or legacy porch_read_v1). Nothing was paid.');
       }
       if (allIn(PORCH_READ_MSAT) > maxMsat) return refuse('price_changed', 'Price above confirmed ceiling.');
       if (await planSend(target, false, maxMsat, undefined) !== null) {

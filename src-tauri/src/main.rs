@@ -2081,6 +2081,9 @@ async fn request_identity_restore(
     state: &NodeState,
     phrase: &str,
 ) -> Result<RestoreResponse, String> {
+    if state.remote_mode.load(Ordering::SeqCst) {
+        return Err("Identity restore is only available for the local supervised node.".into());
+    }
     if state.owner.active.load(Ordering::SeqCst) {
         return Err("Use the local owner ceremony for a new identity. Restoring an existing owner identity requires the owner console.".into());
     }
@@ -5129,12 +5132,38 @@ async fn do_call_signal(
 // `/browse/fetch`. Same authority as a 1:1 message (the budget or the window),
 // one journaled spend at a time, and never a retry: reading again pays again.
 
-/// What one read costs this peer, before anything is paid. Refused when either
-/// node lacks the porch, so a read is never offered where it goes unanswered.
-async fn read_porch_quote(state: &NodeState, peer: &str) -> Result<act::PaymentQuote, ActionError> {
+/// Free availability and recipient price for this path. Only nodes without
+/// `porch_quote_v1` use the legacy read-capability and price-table checks.
+async fn read_porch_quote(state: &NodeState, peer: &str, path: &str) -> Result<act::PaymentQuote, ActionError> {
     let peer = control::node_id(peer).map_err(ActionError::invalid)?;
-    if !node_offers(state, porch::CAPABILITY).await {
-        return Err(porch::refused("porch_unavailable"));
+    let path = porch::porch_path(path)?;
+    // Only the dedicated quote capability selects the new protocol. A failed
+    // quote never falls back to cached/own prices or a legacy paid read.
+    let status: serde_json::Value = get_json(state, "/status").await.map_err(ActionError::node)?;
+    let offers = |cap: &str| status["api_capabilities"].as_array()
+        .is_some_and(|caps| caps.iter().any(|v| v.as_str() == Some(cap)));
+    if offers(porch::QUOTE_CAPABILITY) {
+        let (status, text) = call_api(state, reqwest::Method::POST, porch::QUOTE_ROUTE,
+            Some(serde_json::json!({"node_id": peer, "path": path}))).await.map_err(ActionError::node)?;
+        if !status.is_success() {
+            if matches!(status.as_u16(), 403 | 409)
+                && serde_json::from_str::<serde_json::Value>(&text).ok()
+                    .is_some_and(|v| v["reason"] == "admission_required") {
+                return Err(porch::refused("porch_knock_first"));
+            }
+            if act::readmission_capped_refusal(status.as_u16(), &text) {
+                return Err(porch::refused("porch_readmission"));
+            }
+            if let Some(porch::Answer::Refused(error)) = porch::answer(status.as_u16(), &text) {
+                return Err(error);
+            }
+            return Err(ActionError::node(api_error(porch::QUOTE_ROUTE, status, &text)));
+        }
+        return porch::quote(&text, &peer, &path);
+    }
+    if !offers(porch::CAPABILITY) {
+        return Err(ActionError::new("porch_unavailable",
+            "Your node cannot read porches yet. Update it to read contacts’ cards and pages. Nothing was paid."));
     }
     let peers: Vec<control::Peer> = get_json(state, "/peers").await.map_err(ActionError::node)?;
     match control::with_porch_support(peers).into_iter().find(|p| p.node_id.eq_ignore_ascii_case(&peer)) {
@@ -5157,7 +5186,7 @@ async fn do_porch_read(state: &NodeState, peer: &str, path: &str, max_msat: u64)
         return Err(porch::refused("porch_needs_contact"));
     }
     no_pending_spend(state)?;
-    let quote = read_porch_quote(state, &target).await?;
+    let quote = read_porch_quote(state, &target, &path).await?;
     ceiling(quote.total_msat, max_msat)?;
     let body = porch::fetch_body(&target, &path, max_msat, quote.max_routing_fee_msat);
     let charge = Charge {
@@ -5285,7 +5314,9 @@ async fn porch_post(state: &NodeState, auth: Auth, body: serde_json::Value, max_
 }
 
 async fn read_porch_cards(state: &NodeState) -> Result<Vec<porch::PorchCard>, String> {
-    if !node_offers(state, porch::CAPABILITY).await {
+    let status: serde_json::Value = get_json(state, "/status").await?;
+    if !status["api_capabilities"].as_array().is_some_and(|caps| caps.iter()
+        .any(|v| v.as_str() == Some(porch::QUOTE_CAPABILITY) || v.as_str() == Some(porch::CAPABILITY))) {
         return Ok(Vec::new());
     }
     let (status, text) = call_api(state, reqwest::Method::GET, porch::CARDS_ROUTE, None).await?;
@@ -6227,10 +6258,11 @@ async fn porch_quote(
     window: WebviewWindow<impl tauri::Runtime>,
     state: State<'_, NodeState>,
     peer: String,
+    path: String,
 ) -> Result<act::PaymentQuote, ActionError> {
     reject_sealed_window(&window)?;
     drop(window);
-    read_porch_quote(state.inner(), &peer).await
+    read_porch_quote(state.inner(), &peer, &path).await
 }
 
 /// `POST /browse/fetch`: one paid read of a contact's card or page.
@@ -9986,6 +10018,89 @@ mod control_act_tests {
     }
 
     #[tokio::test]
+    async fn porch_preflight_uses_only_quote_capability_and_recipient_path_price() {
+        let key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let peer = hex::encode(key.verifying_key().to_bytes());
+        let quoted_peer = peer.clone();
+        let inner = happy();
+        let node = fake(AuthMode::Local, Arc::new(move |m, p, b| match p {
+            "/status" => (200, serde_json::json!({"api_capabilities": ["porch_quote_v1"]}).to_string()),
+            "/browse/quote" => (200, serde_json::json!({
+                "node_id": quoted_peer, "path": "/notes.txt", "status": "Ok", "amount_msat": 1000,
+                "max_routing_fee_msat": 5000, "max_total_msat": 6000
+            }).to_string()),
+            "/browse/fetch" => (200, serde_json::json!({
+                "node_id": quoted_peer, "path": "/notes.txt", "status": "Ok", "content_type": "text/plain",
+                "body": "hello", "amount_msat": 1000, "message_id": "read"
+            }).to_string()),
+            // Neither old capability nor cached/own pricing is needed.
+            "/peers" | "/pricing/peers" | "/payments/price/500" => (500, "must not use legacy prices".into()),
+            _ => inner(m, p, b),
+        }));
+        let preview = read_porch_quote(&node.state, &peer, "notes.txt").await.unwrap();
+        assert_eq!((preview.principal_msat, preview.max_routing_fee_msat, preview.total_msat), (1000, 5000, 6000));
+        assert!(fetches(&node).is_empty());
+        assert!(!journal_file(&node).exists(), "a preview needs no spend authority or reservation");
+        porch_budget(&node, &peer).await;
+        let result = do_porch_read(&node.state, &peer, "notes.txt", 6000).await.unwrap();
+        assert_eq!((result.body.as_str(), result.amount_msat), ("hello", 1000));
+        let quote = node.posts().into_iter().find(|(p, _)| p == "/browse/quote").unwrap().1;
+        assert_eq!(quote, serde_json::json!({"node_id": peer, "path": "/notes.txt"}));
+        assert_eq!(fetches(&node)[0]["max_routing_fee_msat"], 5000);
+        assert!(!node.targets().iter().any(|p| p.contains("/pricing/") || p.contains("/payments/price/")));
+    }
+
+    #[tokio::test]
+    async fn porch_status_failure_does_not_select_the_legacy_fallback() {
+        let key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let peer = hex::encode(key.verifying_key().to_bytes());
+        let routes = porch_routes(peer.clone(), &["porch_read_v1"], Arc::new(|_, _, _| (500, "unexpected fetch".into())));
+        let failed = AtomicBool::new(false);
+        let node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
+            if p == "/status" && !failed.swap(true, Ordering::SeqCst) { (500, "unavailable".into()) }
+            else { routes(m, p, b) }
+        }));
+        assert!(read_porch_quote(&node.state, &peer, "/notes.txt").await.is_err());
+        assert_eq!(node.targets(), ["GET /status"]);
+    }
+
+    #[tokio::test]
+    async fn porch_missing_or_failed_preflight_never_reserves_or_falls_back() {
+        for (status, reply, expected) in [
+            (200, serde_json::json!({"status": "NotFound", "amount_msat": null, "max_routing_fee_msat": 0, "max_total_msat": 0}), "porch_not_found"),
+            (200, serde_json::json!({"status": "Forbidden", "amount_msat": null, "max_routing_fee_msat": 0, "max_total_msat": 0}), "porch_knock_first"),
+            (200, serde_json::json!({"status": "Forbidden", "reason": "admission_required", "amount_msat": null, "max_routing_fee_msat": 0, "max_total_msat": 0}), "porch_knock_first"),
+            (403, serde_json::json!({"reason": "admission_required"}), "porch_knock_first"),
+            (409, serde_json::json!({"reason": "admission_required"}), "porch_knock_first"),
+            (200, serde_json::json!({"status": "Unavailable", "amount_msat": null, "max_routing_fee_msat": 0, "max_total_msat": 0}), "porch_unavailable"),
+            (409, serde_json::json!({"reason": "porch_quote_unavailable"}), "porch_quote_unavailable"),
+            (409, serde_json::json!({"code": "price_cap_exceeded", "reason": "readmission_required"}), "porch_readmission"),
+            (404, serde_json::json!({"error": "no route"}), "node"),
+        ] {
+            let key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+            let peer = hex::encode(key.verifying_key().to_bytes());
+            let mut reply = reply;
+            reply["node_id"] = serde_json::json!(peer);
+            reply["path"] = serde_json::json!("/empty.txt");
+            let routes = porch_routes(peer.clone(), &["porch_read_v1", "porch_quote_v1"], Arc::new(|_, _, _| (500, "unexpected fetch".into())));
+            let node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
+                if p == "/browse/quote" { (status, reply.to_string()) } else { routes(m, p, b) }
+            }));
+            porch_budget(&node, &peer).await;
+            let error = do_porch_read(&node.state, &peer, "/empty.txt", 6000).await.unwrap_err();
+            assert_eq!(error.code, expected);
+            if expected == "porch_knock_first" {
+                assert!(error.message.contains("Knock first"));
+                assert!(error.message.contains("profile link"));
+                assert!(error.message.ends_with("Nothing was paid."));
+            }
+            assert!(fetches(&node).is_empty());
+            assert!(!journal_file(&node).exists());
+            assert_eq!(budget_now(&node.state).unsettled_msat, 0);
+        }
+    }
+
+    #[tokio::test]
     async fn porch_cooldown_refuses_before_journal_or_payment() {
         let (node, peer, _) = porch_node(Arc::new(|_, _, _| (503, "unexpected fetch".into())));
         porch_budget(&node, &peer).await;
@@ -10007,8 +10122,9 @@ mod control_act_tests {
         }).to_string();
         let (node, peer, _) = porch_node(Arc::new(move |_, _, _| (200, reply.clone())));
         porch_budget(&node, &peer).await;
-        let quote = read_porch_quote(&node.state, &peer).await.unwrap();
+        let quote = read_porch_quote(&node.state, &peer, porch::CARD_PATH).await.unwrap();
         assert_eq!((quote.principal_msat, quote.max_routing_fee_msat, quote.total_msat), (1_000, 5_000, 6_000));
+        assert!(node.posts().is_empty(), "older nodes keep the legacy read-only estimate");
         let read = do_porch_read(&node.state, &peer, porch::CARD_PATH, quote.total_msat).await.unwrap();
         assert_eq!((read.status, read.kind, read.amount_msat, read.total_msat), ("ok", "card", 1_000, 6_000));
         let shown = read.card.unwrap();
@@ -10052,7 +10168,11 @@ mod control_act_tests {
 
     #[tokio::test]
     async fn the_node_refusing_a_read_before_paying_releases_the_budget_and_the_journal() {
-        for (status, reason) in [(409, "porch_knock_first"), (409, "porch_unreachable"), (409, "porch_busy")] {
+        for (status, reason) in [
+            (409, "porch_knock_first"), (409, "porch_unreachable"), (409, "porch_busy"),
+            (404, "porch_not_found"), (409, "porch_unavailable"),
+            (409, "porch_quote_unavailable"), (409, "porch_quote_invalid"), (400, "porch_room"),
+        ] {
             let body = serde_json::json!({"error": format!("{reason}: detail"), "code": status, "reason": reason}).to_string();
             let (node, peer, _) = porch_node(Arc::new(move |_, _, _| (status, body.clone())));
             porch_budget(&node, &peer).await;
@@ -10060,7 +10180,7 @@ mod control_act_tests {
             assert_eq!(err.code, reason);
             assert!(err.message.ends_with("Nothing was paid."), "{}", err.message);
             assert_eq!(fetches(&node).len(), 1);
-            assert_eq!(budget_now(&node.state).spent_msat, 0, "{reason}");
+            assert_eq!((budget_now(&node.state).spent_msat, budget_now(&node.state).unsettled_msat), (0, 0), "{reason}");
             assert!(spend_journal(&node.state).unwrap().pending().unwrap().is_none(), "{reason}");
         }
     }
@@ -10090,12 +10210,16 @@ mod control_act_tests {
         let key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
         let card = porch_card(&key, 4);
         let cards = serde_json::json!({"cards": [{"card": card, "link": card.to_link().unwrap(), "fresh": true}]}).to_string();
-        let (node, _, _) = porch_node(Arc::new(move |m, p, _| if m == "GET" && p == porch::CARDS_ROUTE { (200, cards.clone()) } else { (404, "{}".into()) }));
-        let held = read_porch_cards(&node.state).await.unwrap();
-        assert_eq!(held.len(), 1);
-        assert!(held[0].cached);
-        assert_eq!(held[0].view.seq, 4);
-        assert!(node.posts().is_empty());
+        for caps in [&["porch_read_v1"][..], &["porch_quote_v1"][..]] {
+            let cards = cards.clone();
+            let node = fake(AuthMode::Local, porch_routes(card.node_id.clone(), caps,
+                Arc::new(move |m, p, _| if m == "GET" && p == porch::CARDS_ROUTE { (200, cards.clone()) } else { (404, "{}".into()) })));
+            let held = read_porch_cards(&node.state).await.unwrap();
+            assert_eq!(held.len(), 1);
+            assert!(held[0].cached);
+            assert_eq!(held[0].view.seq, 4);
+            assert!(node.posts().is_empty());
+        }
     }
 
     #[tokio::test]

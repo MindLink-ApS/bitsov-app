@@ -107,8 +107,8 @@ export interface Source {
   frontDoorPublish(fields: FrontDoorPublish): Promise<FrontDoor>;
   /** Front door: blake3-hex of base64 bytes (avatar/media/CV prep). */
   frontDoorHashBytes(bytesB64: string): Promise<string>;
-  /** Porch (`porch_read_v1`): what one read of this contact costs. Pays nothing. */
-  porchQuote(peer: string): Promise<PaymentQuote>;
+  /** Free path availability and price (`porch_quote_v1`); legacy nodes estimate. */
+  porchQuote(peer: string, path: string): Promise<PaymentQuote>;
   /** One paid read of the card (`/front-door.json`) or a flat page, under `maxMsat`. Never retried. */
   porchRead(peer: string, path: string, maxMsat: number): Promise<PorchRead>;
   /** Cards this node holds from earlier reads, verified again. Pays nothing. */
@@ -262,7 +262,7 @@ export const hostSource: Source = {
       },
     }),
   frontDoorHashBytes: (bytesB64) => invoke<string>('front_door_hash_bytes', { bytes_b64: bytesB64 }),
-  porchQuote: (peer) => invoke<PaymentQuote>('porch_quote', { peer }),
+  porchQuote: (peer, path) => invoke<PaymentQuote>('porch_quote', { peer, path }),
   porchRead: (peer, path, maxMsat) => invoke<PorchRead>('porch_read', { peer, path, max_msat: maxMsat }),
   porchCards: () => invoke<PorchCard[]>('porch_cards'),
   sponsorStatus: () => invoke<SponsorStatus>('sponsor_status'),
