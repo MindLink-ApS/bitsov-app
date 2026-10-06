@@ -18,7 +18,6 @@ android {
     compileSdk = 37
     namespace = "tech.mindlink.bitsov"
     defaultConfig {
-        manifestPlaceholders["usesCleartextTraffic"] = "false"
         applicationId = "tech.mindlink.bitsov"
         minSdk = 24
         targetSdk = 37
@@ -27,7 +26,6 @@ android {
     }
     buildTypes {
         getByName("debug") {
-            manifestPlaceholders["usesCleartextTraffic"] = "true"
             isDebuggable = true
             isJniDebuggable = true
             isMinifyEnabled = false
