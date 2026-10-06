@@ -31,7 +31,7 @@ EOF
 }
 
 # good_tree <dir>: a bundle the checker must accept. The app binary carries the
-# legitimate "/assistant.html" navigation literal that main.rs compiles into
+# legitimate "/assistant.html" navigation literal that app.rs compiles into
 # every build; only the page's own markers are refused.
 good_tree() {
   local d="$1" app="$1/BitSov.app"

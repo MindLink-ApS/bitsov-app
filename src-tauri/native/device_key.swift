@@ -1,8 +1,8 @@
 // Secure Enclave device key bridge for the BitSov desktop app (macOS only).
 //
-// build.rs compiles this file into a static library (module BitsovDeviceKey) and
-// links it into the app binary. The Rust side is src/device_key.rs; it is the
-// only caller. The ABI is plain C: pointers + lengths in, status code out.
+// ffi/build.rs compiles this file into a static library (module BitsovDeviceKey)
+// and links it into the app binary. Safe Rust wrappers live in ffi/src; the ABI
+// is plain C: pointers + lengths in, status code out.
 //
 // The key is a CryptoKit Secure Enclave P-256 signing key. Its private half
 // never leaves the enclave. `dataRepresentation` is an opaque blob that is only

@@ -170,6 +170,7 @@ pub async fn unlock(state: &NodeState) -> Result<(), String> {
 }
 
 /// Existing local owner installations migrate too, after the node proves its id.
+#[cfg(all(desktop, not(feature = "mobile")))]
 pub async fn migrate_local_password(state: &NodeState, node: &str) -> Result<(), String> {
     let config = state
         .config
