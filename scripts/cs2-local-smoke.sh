@@ -206,8 +206,16 @@ chk "no node URL outside sample fixtures in the renderer" \
   test -z "$(grep -REn 'https?://' src/ | grep -v '^src/control/sample.ts:' || true)"
 chk "renderer reaches the node only through invoke()" \
   has "invoke<" src/control/source.ts
+# ERE has no lookahead: list URLs on non-comment lines, then drop loopback and
+# RFC 2606 test domains (*.example), which can never be a control plane.
+non_loopback_urls() {
+  grep -En 'https?://' "$HOST" | grep -vE '^[0-9]+:[[:space:]]*//' |
+    grep -oE 'https?://[^"/ )}`]+' |
+    grep -vE '^https?://(127\.0\.0\.1|localhost)(:|$)' |
+    grep -vE '^https?://([a-z0-9-]+\.)*example(:|$)' || true
+}
 chk "control plane is loopback-only" \
-  lacks 'https?://(?!127\.0\.0\.1|localhost)' "$HOST"
+  test -z "$(non_loopback_urls)"
 
 echo "== G6: local-trust disclosure gates the funds UI =="
 chk "disclosure element is present and marked" \

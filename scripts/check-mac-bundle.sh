@@ -15,6 +15,7 @@
 # shellcheck disable=SC2329
 set -euo pipefail
 
+# shellcheck source=scripts/fetch-node-sidecar.sh disable=SC1091
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fetch-node-sidecar.sh"
 
 APP="src-tauri/target/release/bundle/macos/BitSov.app"
