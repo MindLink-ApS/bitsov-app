@@ -17,6 +17,10 @@ fn main() {
     let manifest = tauri_build::AppManifest::new()
         .commands(&[
             "node_status",
+            "local_owner_create",
+            "local_owner_cancel",
+            "local_owner_finalize",
+            "local_owner_reconcile",
             "node_repair_initialized",
             "fund_state",
             "fund_start",

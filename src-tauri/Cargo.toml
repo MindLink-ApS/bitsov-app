@@ -35,6 +35,7 @@ getrandom = "0.2"
 hex = "0.4"
 tempfile = "3"
 base64 = "0.22"
+zeroize = { version = "1", features = ["serde"] }
 snow = "0.9"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 rfd = "0.15"
@@ -52,6 +53,8 @@ libc = "0.2"
 
 [features]
 default = []
+# Off until the bundled node contains #237; see local_owner::enabled.
+local-owner-ceremony = []
 # Mock-only SIT reader example. Pulls in `mock-node`; not part of the app binary.
 sit-mock = ["dep:mock-node"]
 # DEV ONLY (src/dev_node.rs, docs/DEV_NODE_FROM_MAIN.md): run an UNVERIFIED local
