@@ -231,3 +231,62 @@ private func statusForSigningError(_ error: Error) -> Int32 {
     }
     return errOther
 }
+
+// Home-node records are separate from the launcher item. Password reads require
+// the current biometric enrollment; public pins/bindings never prompt.
+private func homeQuery(_ service: String) -> [CFString: Any] {
+    [kSecClass: kSecClassGenericPassword, kSecAttrService: service,
+     kSecAttrAccount: "BitSov", kSecUseDataProtectionKeychain: true]
+}
+
+@_cdecl("bitsov_home_store")
+public func bitsov_home_store(_ service: UnsafePointer<CChar>?, _ bytes: UnsafePointer<UInt8>?,
+                              _ count: Int, _ secret: Int32) -> Int32 {
+    guard let service = service, let bytes = bytes, count > 0, count <= 16384 else { return errBadArgument }
+    return autoreleasepool {
+        let name = String(cString: service)
+        var query = homeQuery(name)
+        var data = Data(bytes: bytes, count: count)
+        defer { data.resetBytes(in: 0..<data.count) }
+        query[kSecValueData] = data
+        if secret == 1 {
+            var error: Unmanaged<CFError>?
+            guard let acl = SecAccessControlCreateWithFlags(nil,
+                kSecAttrAccessibleWhenUnlockedThisDeviceOnly, .biometryCurrentSet, &error) else {
+                return errOther
+            }
+            query[kSecAttrAccessControl] = acl
+        } else {
+            query[kSecAttrAccessible] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        }
+        let status = SecItemAdd(query as CFDictionary, nil)
+        if status == errSecDuplicateItem {
+            // Never replace an existing seed password or relax its ACL.
+            if secret == 1 { return errSecSuccess }
+            return SecItemUpdate(homeQuery(name) as CFDictionary, [kSecValueData: data] as CFDictionary)
+        }
+        return status
+    }
+}
+
+@_cdecl("bitsov_home_read")
+public func bitsov_home_read(_ service: UnsafePointer<CChar>?, _ output: UnsafeMutablePointer<UInt8>?,
+                             _ capacity: Int, _ length: UnsafeMutablePointer<Int>?) -> Int32 {
+    guard let service = service, let output = output, let length = length else { return errBadArgument }
+    return autoreleasepool {
+        var query = homeQuery(String(cString: service))
+        query[kSecReturnData] = true
+        query[kSecMatchLimit] = kSecMatchLimitOne
+        let context = LAContext()
+        context.localizedReason = "Unlock your BitSov home node"
+        query[kSecUseAuthenticationContext] = context
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        guard status == errSecSuccess else { return status }
+        guard var data = result as? Data, data.count <= capacity else { return errBufferTooSmall }
+        defer { data.resetBytes(in: 0..<data.count) }
+        length.pointee = data.count
+        data.copyBytes(to: output, count: data.count)
+        return errSecSuccess
+    }
+}

@@ -71,6 +71,7 @@ export interface Source {
   readonly mode: 'node' | 'sample';
   // first run
   nodeStatus(): Promise<NodeStatus>;
+  nodeUnlock(): Promise<void>;
   nodeRepairInitialized(confirmed: boolean): Promise<void>;
   nodeRepairPriceFloor(confirmed: boolean): Promise<void>;
   pairingStatus(): Promise<PairingView>;
@@ -223,6 +224,7 @@ export const LIVE_EVENT = 'node-live';
 export const hostSource: Source = {
   mode: 'node',
   nodeStatus: () => invoke<NodeStatus>('node_status'),
+  nodeUnlock: () => invoke<void>('node_unlock'),
   pairingStatus: () => invoke<PairingView>('pairing_status'),
   pairingRetry: () => invoke<PairingView>('pairing_retry'),
   remoteAccessForget: () => invoke<void>('remote_access_forget'),

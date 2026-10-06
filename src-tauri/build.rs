@@ -17,6 +17,7 @@ fn main() {
     let manifest = tauri_build::AppManifest::new()
         .commands(&[
             "node_status",
+            "node_unlock",
             "local_owner_create",
             "local_owner_cancel",
             "local_owner_finalize",

@@ -76,6 +76,8 @@ mod dev_node;
 mod device_key;
 mod local_owner;
 mod owner_password;
+mod home_keychain;
+mod home_unlock;
 // This Mac as a paired device: registration, signed envelopes, persisted approvals.
 mod device;
 mod owner_contact;
@@ -185,6 +187,9 @@ struct NodeState {
     /// tunnel. Its drop/stop signal closes the process-local listener.
     remote_proxy: Mutex<Option<RemoteProxy>>,
     remote_mode: AtomicBool,
+    home_locked: AtomicBool,
+    home_last_probe: Mutex<Option<Instant>>,
+    remote_descriptor: Mutex<Option<remote_access::RemoteDescriptor>>,
     remote_retry: Arc<bitsov_app::connection_retry::RemoteRetry>,
     remote_recovery: tokio::sync::Mutex<()>,
     expected_remote_node_id: Mutex<Option<String>>,
@@ -281,6 +286,7 @@ impl NodeState {
         let retrying = self.remote_retry.is_retrying();
         let retry_after_secs = if retrying { self.remote_retry.remaining() } else { None };
         Status {
+            locked: self.home_locked.load(Ordering::SeqCst),
             local_owner: self.owner.active.load(Ordering::SeqCst),
             owner_warning: self.owner.warning.lock().unwrap().clone(),
             initialization_repair: *self.initialization_repair.lock().unwrap(),
@@ -310,6 +316,9 @@ impl NodeState {
             pairing_view: Mutex::new(PairingView::starting()),
             remote_proxy: Mutex::new(None),
             remote_mode: AtomicBool::new(false),
+            home_locked: AtomicBool::new(false),
+            home_last_probe: Mutex::new(None),
+            remote_descriptor: Mutex::new(None),
             remote_retry: Arc::new(bitsov_app::connection_retry::RemoteRetry::default()),
             remote_recovery: tokio::sync::Mutex::new(()),
             expected_remote_node_id: Mutex::new(None),
@@ -362,6 +371,7 @@ impl NodeState {
 
 #[derive(Serialize, Clone)]
 struct Status {
+    locked: bool,
     local_owner: bool,
     owner_warning: Option<String>,
     initialization_repair: InitializationRepair,
@@ -1107,6 +1117,7 @@ async fn attach_remote(
     app_data_dir: &Path,
     descriptor: remote_access::RemoteDescriptor,
 ) {
+    let descriptor = descriptor.with_pin_store(Arc::new(home_keychain::MacBoxPins));
     let store = app_data_dir.join(PAIRING_STORE_DIR);
     let key = match ClientKey::load_or_create(&store) {
         Ok(key) => Arc::new(key),
@@ -1154,6 +1165,7 @@ async fn attach_remote(
             Err(error) => return failed(error),
         }
     };
+    *state.remote_descriptor.lock().unwrap() = Some(descriptor.clone());
     let proxy = match remote_access::start_proxy(
         &state.api_base,
         app_data_dir,
@@ -1280,11 +1292,20 @@ async fn finish_auth(state: &NodeState, data_dir: &Path) {
                     "remote node identity does not match the signed pairing descriptor",
                 );
             }
-            *state.node_id.lock().unwrap() = Some(node_id);
+            if let Err(error) = home_unlock::remember_binding(state, &node_id) {
+                *state.ready.lock().unwrap() = false;
+                return set_error(state, error);
+            }
+            state.home_locked.store(false, Ordering::SeqCst);
+            *state.node_id.lock().unwrap() = Some(node_id.clone());
             *state.error.lock().unwrap() = None;
             *state.ready.lock().unwrap() = true;
             if state.owner.active.load(Ordering::SeqCst) {
-                *state.owner.warning.lock().unwrap() = local_owner::verify_device(state).await.err();
+                let warning = match local_owner::verify_device(state).await {
+                    Ok(()) => home_unlock::migrate_local_password(state, &node_id).await.err(),
+                    Err(error) => Some(error),
+                };
+                *state.owner.warning.lock().unwrap() = warning;
             }
         }
         Err(e) => set_error(state, e),
@@ -1303,7 +1324,11 @@ async fn finish_remote_auth(state: &NodeState, data_dir: &Path) {
             continue;
         }
         let revision = state.remote_retry.failure_revision();
-        finish_auth(state, data_dir).await;
+        match home_unlock::probe(state).await {
+            Ok(true) => return,
+            Ok(false) => finish_auth(state, data_dir).await,
+            Err(error) => { *state.ready.lock().unwrap() = false; set_error(state, error); }
+        }
         // A retained HTTP tunnel can finish auth without opening a handshake.
         // Only a new transport failure warrants another recovery iteration;
         // an old retry flag must not spin token requests or hard refusals.
@@ -1468,6 +1493,8 @@ async fn refresh_paired(state: &NodeState) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     *state.token.lock().unwrap() = Some(session.token.clone());
     *state.auth.lock().unwrap() = AuthMode::Paired(session);
+    let node = state.node_id.lock().unwrap().clone();
+    if let Some(node) = node { home_unlock::remember_binding(state, &node)?; }
     Ok(())
 }
 
@@ -1863,15 +1890,24 @@ fn install_assistant_menu(app: &tauri::App) -> tauri::Result<()> {
 
 // ---- commands -------------------------------------------------------------
 
-/// Frontend reads node state here (identity screen). Synchronous — the async
-/// bootstrap task populates the state; the command just reflects it.
+/// Read node state and periodically probe a remote node's pinned transport.
+/// Passive probes never access the seed password or invoke Touch ID.
 #[tauri::command]
-fn node_status(
+async fn node_status(
     window: WebviewWindow<impl tauri::Runtime>,
     state: State<'_, NodeState>,
 ) -> Result<Status, String> {
     reject_sealed_window(&window)?;
+    drop(window);
+    home_unlock::refresh(state.inner()).await;
     Ok(state.status_snapshot())
+}
+
+#[tauri::command]
+async fn node_unlock(window: WebviewWindow<impl tauri::Runtime>, state: State<'_, NodeState>) -> Result<(), String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    home_unlock::unlock(state.inner()).await
 }
 
 #[tauri::command]
@@ -6893,6 +6929,7 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
         .manage(AiState::default())
         .invoke_handler(tauri::generate_handler![
             node_status,
+            node_unlock,
             local_owner_create,
             local_owner_cancel,
             local_owner_finalize,
@@ -14145,6 +14182,7 @@ mod assistant_acl_tests {
             handler_commands(&source),
             [
                 "node_status",
+                "node_unlock",
                 "local_owner_create",
                 "local_owner_cancel",
                 "local_owner_finalize",
@@ -14809,6 +14847,7 @@ mod assistant_acl_tests {
             .manage(super::NodeState::default())
             .invoke_handler(tauri::generate_handler![
                 super::node_status,
+                super::node_unlock,
                 super::node_repair_initialized,
                 super::node_repair_price_floor,
                 super::fund_state,
@@ -14932,7 +14971,8 @@ mod assistant_acl_tests {
         );
         // Do not invoke forget against the user's real app-data directory in
         // this mock app. The persistence tests use isolated temporary folders.
-        for cmd in ["pairing_status", "pairing_retry", "remote_access_import", "remote_access_forget"] {
+        assert_handler_ran(invoke(&main, "node_unlock", serde_json::json!({})), "not locked");
+        for cmd in ["node_unlock", "pairing_status", "pairing_retry", "remote_access_import", "remote_access_forget"] {
             assert_acl_denied(invoke(&assistant, cmd, serde_json::json!({})), cmd);
         }
     }

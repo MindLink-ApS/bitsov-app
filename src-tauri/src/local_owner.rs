@@ -466,6 +466,15 @@ pub async fn finalize(
         let _guard = state.device_lifecycle.lock().unwrap();
         device::save_record(&store, &record).map_err(|e| e.message)?;
     }
+    // Bind the #237 launcher password to the committed node identity before
+    // finalize. The new item is device-only and protected by current biometry.
+    let config = state.config.lock().unwrap().clone().ok_or("The sidecar config is unavailable.")?;
+    let dir = config.parent().ok_or("The sidecar directory is unavailable.")?.to_path_buf();
+    let node = pending.node_id.clone();
+    tokio::task::spawn_blocking(move || {
+        let password = owner_password::load(&dir, false)?;
+        home_keychain::save_password(&node, &password)
+    }).await.map_err(|_| "Saving the biometric unlock password stopped.")??;
     submit(state, &store, &mut pending, &record, &proof, &words).await?;
     drop(words);
     restart_and_verify(app, state, &pending.node_id).await
@@ -601,6 +610,7 @@ async fn restart_and_verify(
         *state.owner.warning.lock().unwrap() = Some(error.clone());
         return Err(error);
     }
+    home_unlock::migrate_local_password(state, expected).await?;
     *state.owner.warning.lock().unwrap() = None;
     mark_live(state, expected);
     Ok(())

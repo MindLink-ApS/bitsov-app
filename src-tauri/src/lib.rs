@@ -21,3 +21,5 @@ pub mod pairing;
 pub mod remote_access;
 
 pub mod connection_retry;
+
+pub mod home_node;
