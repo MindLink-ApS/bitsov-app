@@ -9,10 +9,10 @@
 # Usage: scripts/package-mac.sh [--dmg] [--use-existing-sidecar]
 #   --dmg                   also build the .dmg (CI=true skips Finder layout;
 #                           falls back to a plain image if bundle_dmg.sh fails)
-#   --use-existing-sidecar  local dev only: bundle the sidecar already at
+#   --use-existing-sidecar  bundle the sidecar already at
 #                           src-tauri/bin/konsensus-aarch64-apple-darwin instead
-#                           of fetching. This script does NOT re-verify it; use
-#                           only a file scripts/fetch-node-sidecar.sh installed.
+#                           of fetching. Every sidecar is still re-verified
+#                           against the pinned release before packaging.
 #                           Same as BITSOV_USE_EXISTING_SIDECAR=1.
 # Default: remove every src-tauri/bin/konsensus-* and fetch the pinned release
 # with scripts/fetch-node-sidecar.sh (fail-closed signature + sha256 check) into
@@ -48,11 +48,7 @@ if [ "$USE_EXISTING" = 1 ]; then
     echo "--use-existing-sidecar: $SIDECAR is missing or not executable" >&2
     exit 1
   fi
-  for f in src-tauri/bin/konsensus-*; do
-    if [ "$f" != "$SIDECAR" ]; then rm -f "$f"; fi
-  done
-  echo "→ using existing $SIDECAR (local dev; not re-verified by this script)"
-  echo "  sha256: $(shasum -a 256 "$SIDECAR" | awk '{print $1}')"
+  echo "→ using existing $SIDECAR (subject to pinned-release verification)"
 else
   rm -f src-tauri/bin/konsensus-*
   GPG_TMP="$(mktemp -d)"
@@ -60,6 +56,8 @@ else
   GNUPGHOME="$GPG_TMP" bash scripts/fetch-node-sidecar.sh
 fi
 test -x "$SIDECAR"
+# No existing-sidecar bypass: verify every entry, including other targets.
+bash scripts/fetch-node-sidecar.sh --verify-only
 
 echo "== 2. unsigned bundle build =="
 npm ci --ignore-scripts --no-audit --no-fund
@@ -110,6 +108,9 @@ du -sh "$APP"
 if [ "$WANT_DMG" = 1 ]; then
   echo "== 5. dmg =="
   if [ "$DMG_FALLBACK" = 1 ]; then
+    # This manual package step runs outside Tauri's beforeBundleCommand.
+    bash scripts/fetch-node-sidecar.sh --verify-only
+    bash scripts/check-mac-bundle.sh --app "$APP" --sidecar "$SIDECAR" --dist dist
     VERSION="$(node -p 'require("./src-tauri/tauri.conf.json").version')"
     DMG="$DMG_DIR/BitSov_${VERSION}_aarch64.dmg"
     # Discard partial images from the failed bundler. Use only the checked app

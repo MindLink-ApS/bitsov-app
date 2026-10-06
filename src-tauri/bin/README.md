@@ -2,8 +2,8 @@
 
 The app runs the **released** BitSov node as a **sidecar binary**; it does not link the
 protocol crates, and the binary is **never committed**. Run the fetch/verify step immediately
-before a package build (see `scripts/fetch-node-sidecar.sh`). The bundler itself does not yet
-re-verify a pre-existing sidecar; closing that gap is required before public distribution.
+before a package build (see `scripts/fetch-node-sidecar.sh`). Every package build now
+re-verifies existing sidecars against the pinned release before bundling (see below).
 Sidecars are named with the Rust target triple
 Tauri's resolver expects: `bin/konsensus-<target-triple>[.exe]`.
 
@@ -35,6 +35,36 @@ the pin; your keyring is never written). rc7 is a published pre-release, so any 
 and nothing here publishes anything. Record the sha256 in the authority
 ledger; `scripts/authority-check.sh` checks source/configuration, not sidecar integrity. The
 released artifact is the `konsensus` binary (CLI `konsensus init` / `konsensus start`).
+
+## Mandatory pre-bundle verification
+```bash
+bash scripts/fetch-node-sidecar.sh --verify-only
+```
+This mode downloads fresh `SHA256SUMS` and `SHA256SUMS.asc` from the **same pinned
+repository/tag** as fetch, using the same pinned-key import and fail-closed GPG
+signature predicate. It hashes **every** `src-tauri/bin/konsensus-*`, maps its exact
+target filename to the release asset above, and requires exactly one valid SHA256
+entry in the signed manifest. It never executes, replaces, or repairs a sidecar.
+
+`scripts/package-mac.sh`, Tauri's `beforeBundleCommand` (including direct Tauri
+bundling), and the Mac Package CI job enforce this check. `--use-existing-sidecar`
+and `BITSOV_USE_EXISTING_SIDECAR=1` skip the binary download only; they cannot skip
+verification. Other targets in `bin/` are checked too. The manual DMG fallback
+and CI zip step re-verify and compare the bundled node to the verified source.
+
+A mismatch stops packaging and names the file, pinned release, **expected sha256**
+and **actual sha256**. An unknown target or absent/duplicate/malformed checksum
+entry is refused with the actual hash and an unavailable expected hash. Missing
+sidecars, symlinks, unavailable release metadata, and unaccepted signatures also
+fail closed. `gh`, `gpg`, and access to the pinned release are required even when
+the binary is already on disk; there is no offline or dev packaging bypass.
+Re-fetch the pinned binary (and remove unintended target files) before retrying.
+
+Offline regression coverage: `python3 scripts/test-verify-sidecars.py` and
+`python3 scripts/test-package-mac.py` use local test keys, real GPG signatures and
+real hashes with fixture-only GitHub downloads. `bash scripts/test-fetch-verify.sh`
+covers the signature refusal classes. See the
+[release checklist](../../docs/RELEASE_CHECKLIST.md) before shipping artifacts.
 
 ## Dev only: a node built from genome `main`
 `npm run tauri:dev:mainnode` runs an **unverified** local `konsensus` instead of this sidecar.
