@@ -16,27 +16,17 @@
 #[cfg(target_os = "macos")]
 #[allow(dead_code)]
 mod macos {
-    use std::ffi::{CString, OsStr, OsString};
+    use std::ffi::{OsStr, OsString};
     use std::fs::{self, File};
     use std::io;
-    use std::os::fd::{AsRawFd, FromRawFd};
-    use std::os::unix::ffi::OsStrExt;
     use std::path::{Component, Path, PathBuf};
-    use std::thread;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use bitsov_app::jarvis::sandbox::{
         default_keychain_dirs, render_profile, ProfileError, SandboxPaths,
     };
 
     const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
-
-    extern "C" {
-        fn posix_spawn_file_actions_addchdir_np(
-            actions: *mut libc::posix_spawn_file_actions_t,
-            path: *const libc::c_char,
-        ) -> libc::c_int;
-    }
 
     /// What to run, and the directories the profile allows or denies.
     ///
@@ -104,174 +94,31 @@ mod macos {
     /// leader stays unreaped until that signal: once it has been reaped and
     /// no member remains, its pgid can be reused, and `kill(-pgid)` would
     /// hit an unrelated group.
-    pub struct ModelChild {
-        pid: libc::pid_t,
-        stdin: File,
-        stdout: File,
-        stderr: File,
-        exit: Option<i32>,
-    }
+    pub struct ModelChild(bitsov_ffi::model_launch::Child);
 
     impl ModelChild {
         pub fn id(&self) -> u32 {
-            self.pid as u32
+            self.0.id()
         }
 
         pub fn stdin(&mut self) -> &mut File {
-            &mut self.stdin
+            self.0.stdin()
         }
 
         pub fn stdout(&mut self) -> &mut File {
-            &mut self.stdout
+            self.0.stdout()
         }
 
         pub fn stderr(&mut self) -> &mut File {
-            &mut self.stderr
+            self.0.stderr()
         }
 
         pub fn wait(&mut self) -> Result<i32, LaunchError> {
-            self.wait_blocking()
+            self.0.wait().map_err(LaunchError::Io)
         }
 
         pub fn wait_timeout(&mut self, limit: Duration) -> Result<i32, LaunchError> {
-            let start = Instant::now();
-            loop {
-                if let Some(code) = self.poll()? {
-                    return Ok(code);
-                }
-                if start.elapsed() >= limit {
-                    self.kill_group();
-                    return self.wait_blocking();
-                }
-                thread::sleep(Duration::from_millis(20));
-            }
-        }
-
-        fn poll(&mut self) -> Result<Option<i32>, LaunchError> {
-            if let Some(code) = self.exit {
-                return Ok(Some(code));
-            }
-            self.observe(true)
-        }
-
-        fn wait_blocking(&mut self) -> Result<i32, LaunchError> {
-            if let Some(code) = self.exit {
-                return Ok(code);
-            }
-            match self.observe(false)? {
-                Some(code) => Ok(code),
-                None => Err(LaunchError::Io(io::Error::other(
-                    "waitid returned no status",
-                ))),
-            }
-        }
-
-        /// Exit status without reaping. `WNOWAIT` leaves the leader a zombie
-        /// so its pid, which is also the process group id, cannot be reused.
-        fn observe(&mut self, nonblocking: bool) -> Result<Option<i32>, LaunchError> {
-            if self.pid <= 0 {
-                return Err(LaunchError::Io(io::Error::other(
-                    "model process is not running",
-                )));
-            }
-            let mut flags = libc::WEXITED | libc::WNOWAIT;
-            if nonblocking {
-                flags |= libc::WNOHANG;
-            }
-            loop {
-                // Darwin leaves siginfo untouched when WNOHANG finds no status.
-                // A zeroed si_signo is the portable "still running" check.
-                let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
-                let rc = unsafe {
-                    libc::waitid(
-                        libc::P_PID,
-                        self.pid as libc::id_t,
-                        info.as_mut_ptr(),
-                        flags,
-                    )
-                };
-                if rc == 0 {
-                    let info = unsafe { info.assume_init() };
-                    if info.si_signo == libc::SIGCHLD {
-                        let code = decode_siginfo(&info);
-                        self.exit = Some(code);
-                        return Ok(Some(code));
-                    }
-                    if info.si_signo == 0 {
-                        return if nonblocking {
-                            Ok(None)
-                        } else {
-                            Err(LaunchError::Io(io::Error::other(
-                                "waitid returned no status",
-                            )))
-                        };
-                    }
-                    return Err(LaunchError::Io(io::Error::other(format!(
-                        "unexpected si_signo from waitid: {}",
-                        info.si_signo
-                    ))));
-                }
-                let err = io::Error::last_os_error();
-                if err.raw_os_error() == Some(libc::EINTR) {
-                    continue;
-                }
-                if err.raw_os_error() == Some(libc::ECHILD) {
-                    // Not our child. The pgid is not owned.
-                    self.pid = 0;
-                }
-                return Err(LaunchError::Io(err));
-            }
-        }
-
-        /// SIGKILL every member of the leader's process group.
-        ///
-        /// Spawn used `POSIX_SPAWN_SETPGROUP`, so the group id equals the
-        /// leader pid. Call only while that leader has not been reaped
-        /// (`pid > 0`). `reap_leader` clears it; signalling afterwards can
-        /// hit a reused pgid.
-        fn kill_group(&self) {
-            if self.pid > 0 {
-                unsafe {
-                    libc::kill(-self.pid, libc::SIGKILL);
-                }
-            }
-        }
-
-        fn reap_leader(&mut self) {
-            if self.pid <= 0 {
-                return;
-            }
-            let leader = self.pid;
-            let mut status = 0;
-            loop {
-                let pid = unsafe { libc::waitpid(leader, &mut status, 0) };
-                if pid == leader {
-                    if self.exit.is_none() {
-                        self.exit = Some(decode(status));
-                    }
-                    self.pid = 0;
-                    return;
-                }
-                if pid < 0 {
-                    let err = io::Error::last_os_error();
-                    if err.raw_os_error() == Some(libc::EINTR) {
-                        continue;
-                    }
-                    self.pid = 0;
-                    return;
-                }
-            }
-        }
-    }
-
-    impl Drop for ModelChild {
-        fn drop(&mut self) {
-            if self.pid <= 0 {
-                return;
-            }
-            // Leader is live or an unreaped zombie, so this pgid is still ours.
-            self.kill_group();
-            self.reap_leader();
+            self.0.wait_timeout(limit).map_err(LaunchError::Io)
         }
     }
 
@@ -355,216 +202,49 @@ mod macos {
     }
 
     fn spawn(prepared: &Prepared) -> Result<ModelChild, LaunchError> {
-        let (stdin_r, stdin_w) = anon_pipe()?;
-        let (stdout_r, stdout_w) = anon_pipe()?;
-        let (stderr_r, stderr_w) = anon_pipe()?;
-
-        let mut state = SpawnState::new();
-        cvt(unsafe { libc::posix_spawnattr_init(state.attr.as_mut_ptr()) })?;
-        state.attr_ok = true;
-        cvt(unsafe { libc::posix_spawn_file_actions_init(state.actions.as_mut_ptr()) })?;
-        state.actions_ok = true;
-
-        let mut default_set = std::mem::MaybeUninit::<libc::sigset_t>::uninit();
-        if unsafe { libc::sigemptyset(default_set.as_mut_ptr()) } != 0 {
-            return Err(LaunchError::Io(io::Error::last_os_error()));
-        }
-        if unsafe { libc::sigaddset(default_set.as_mut_ptr(), libc::SIGPIPE) } != 0 {
-            return Err(LaunchError::Io(io::Error::last_os_error()));
-        }
-        cvt(unsafe {
-            libc::posix_spawnattr_setsigdefault(state.attr.as_mut_ptr(), default_set.as_ptr())
-        })?;
-        cvt(unsafe { libc::posix_spawnattr_setpgroup(state.attr.as_mut_ptr(), 0) })?;
-        let flags = (libc::POSIX_SPAWN_SETPGROUP
-            | libc::POSIX_SPAWN_SETSIGDEF
-            | libc::POSIX_SPAWN_CLOEXEC_DEFAULT) as libc::c_short;
-        cvt(unsafe { libc::posix_spawnattr_setflags(state.attr.as_mut_ptr(), flags) })?;
-
-        map_fd(
-            state.actions.as_mut_ptr(),
-            stdin_r.as_raw_fd(),
-            libc::STDIN_FILENO,
-        )?;
-        map_fd(
-            state.actions.as_mut_ptr(),
-            stdout_w.as_raw_fd(),
-            libc::STDOUT_FILENO,
-        )?;
-        map_fd(
-            state.actions.as_mut_ptr(),
-            stderr_w.as_raw_fd(),
-            libc::STDERR_FILENO,
-        )?;
-        let cwd = c_os(prepared.scratch_dir.as_os_str())?;
-        cvt(unsafe {
-            posix_spawn_file_actions_addchdir_np(state.actions.as_mut_ptr(), cwd.as_ptr())
-        })?;
-
         // Pass the profile as an argument (`-p`) so it never lands in a
         // directory the confined child can overwrite between write and open.
-        let mut owned = vec![
-            c_os(OsStr::new(SANDBOX_EXEC))?,
-            c_os(OsStr::new("-p"))?,
-            c_os(OsStr::new(&prepared.profile))?,
-            c_os(prepared.program.as_os_str())?,
+        let mut arguments = vec![
+            OsString::from("-p"),
+            OsString::from(&prepared.profile),
+            prepared.program.as_os_str().to_owned(),
         ];
-        for arg in &prepared.args {
-            owned.push(c_os(arg)?);
-        }
-        let mut argv: Vec<*mut libc::c_char> = owned.iter().map(|s| s.as_ptr() as *mut _).collect();
-        argv.push(std::ptr::null_mut());
-
-        let env_owned = [
-            env_pair("PATH", OsStr::new("/usr/bin:/bin"))?,
-            env_pair("HOME", prepared.home_dir.as_os_str())?,
-            env_pair("TMPDIR", prepared.scratch_dir.as_os_str())?,
-            env_pair("LANG", OsStr::new("C"))?,
+        arguments.extend(prepared.args.iter().cloned());
+        let environment = [
+            env_pair("PATH", OsStr::new("/usr/bin:/bin")),
+            env_pair("HOME", prepared.home_dir.as_os_str()),
+            env_pair("TMPDIR", prepared.scratch_dir.as_os_str()),
+            env_pair("LANG", OsStr::new("C")),
         ];
-        let mut envp: Vec<*mut libc::c_char> =
-            env_owned.iter().map(|s| s.as_ptr() as *mut _).collect();
-        envp.push(std::ptr::null_mut());
-
-        let sandbox_exe = c_os(OsStr::new(SANDBOX_EXEC))?;
-        let mut pid: libc::pid_t = 0;
-        let rc = unsafe {
-            libc::posix_spawn(
-                &mut pid,
-                sandbox_exe.as_ptr(),
-                state.actions.as_ptr(),
-                state.attr.as_ptr(),
-                argv.as_ptr(),
-                envp.as_ptr(),
-            )
-        };
-        if rc != 0 {
-            return Err(LaunchError::Io(io::Error::from_raw_os_error(rc)));
-        }
-        if pid <= 0 {
-            return Err(LaunchError::Io(io::Error::other(
-                "posix_spawn returned no pid",
-            )));
-        }
-        drop(stdin_r);
-        drop(stdout_w);
-        drop(stderr_w);
-        Ok(ModelChild {
-            pid,
-            stdin: stdin_w,
-            stdout: stdout_r,
-            stderr: stderr_r,
-            exit: None,
+        bitsov_ffi::model_launch::spawn(
+            OsStr::new(SANDBOX_EXEC),
+            &arguments,
+            &prepared.scratch_dir,
+            &environment,
+        )
+        .map(ModelChild)
+        .map_err(|error| match error {
+            bitsov_ffi::model_launch::SpawnError::Argument => LaunchError::Argument,
+            bitsov_ffi::model_launch::SpawnError::Io(error) => LaunchError::Io(error),
         })
     }
 
-    struct SpawnState {
-        attr: std::mem::MaybeUninit<libc::posix_spawnattr_t>,
-        actions: std::mem::MaybeUninit<libc::posix_spawn_file_actions_t>,
-        attr_ok: bool,
-        actions_ok: bool,
-    }
-
-    impl SpawnState {
-        fn new() -> Self {
-            Self {
-                attr: std::mem::MaybeUninit::uninit(),
-                actions: std::mem::MaybeUninit::uninit(),
-                attr_ok: false,
-                actions_ok: false,
-            }
-        }
-    }
-
-    impl Drop for SpawnState {
-        fn drop(&mut self) {
-            unsafe {
-                if self.attr_ok {
-                    libc::posix_spawnattr_destroy(self.attr.as_mut_ptr());
-                }
-                if self.actions_ok {
-                    libc::posix_spawn_file_actions_destroy(self.actions.as_mut_ptr());
-                }
-            }
-        }
-    }
-
-    fn map_fd(
-        actions: *mut libc::posix_spawn_file_actions_t,
-        src: libc::c_int,
-        dst: libc::c_int,
-    ) -> Result<(), LaunchError> {
-        cvt(unsafe { libc::posix_spawn_file_actions_adddup2(actions, src, dst) })?;
-        if src != dst {
-            cvt(unsafe { libc::posix_spawn_file_actions_addclose(actions, src) })?;
-        }
-        Ok(())
-    }
-
-    fn anon_pipe() -> Result<(File, File), LaunchError> {
-        let mut fds = [-1; 2];
-        if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
-            return Err(LaunchError::Io(io::Error::last_os_error()));
-        }
-        for fd in fds {
-            if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } == -1 {
-                let err = io::Error::last_os_error();
-                unsafe {
-                    libc::close(fds[0]);
-                    libc::close(fds[1]);
-                }
-                return Err(LaunchError::Io(err));
-            }
-        }
-        let read = unsafe { File::from_raw_fd(fds[0]) };
-        let write = unsafe { File::from_raw_fd(fds[1]) };
-        Ok((read, write))
-    }
-
-    fn cvt(rc: libc::c_int) -> Result<(), LaunchError> {
-        if rc == 0 {
-            Ok(())
-        } else {
-            Err(LaunchError::Io(io::Error::from_raw_os_error(rc)))
-        }
-    }
-
-    fn c_os(text: &OsStr) -> Result<CString, LaunchError> {
-        CString::new(text.as_bytes()).map_err(|_| LaunchError::Argument)
-    }
-
-    fn env_pair(key: &str, value: &OsStr) -> Result<CString, LaunchError> {
-        let mut bytes = Vec::from(key.as_bytes());
-        bytes.push(b'=');
-        bytes.extend_from_slice(value.as_bytes());
-        CString::new(bytes).map_err(|_| LaunchError::Argument)
-    }
-
-    fn decode(status: libc::c_int) -> i32 {
-        if libc::WIFEXITED(status) {
-            libc::WEXITSTATUS(status)
-        } else if libc::WIFSIGNALED(status) {
-            128 + libc::WTERMSIG(status)
-        } else {
-            125
-        }
-    }
-
-    fn decode_siginfo(info: &libc::siginfo_t) -> i32 {
-        if info.si_code == libc::CLD_EXITED {
-            info.si_status
-        } else if info.si_code == libc::CLD_KILLED || info.si_code == libc::CLD_DUMPED {
-            128 + info.si_status
-        } else {
-            125
-        }
+    fn env_pair(key: &str, value: &OsStr) -> OsString {
+        let mut pair = OsString::from(key);
+        pair.push("=");
+        pair.push(value);
+        pair
     }
 
     #[cfg(test)]
     mod tests {
         use super::*;
         use std::io::{Read, Write};
+        use std::os::fd::AsRawFd;
         use std::process::{Command, Stdio};
         use std::sync::OnceLock;
+        use std::thread;
+        use std::time::Instant;
 
         struct StubBin {
             _root: tempfile::TempDir,
@@ -742,7 +422,9 @@ mod macos {
         fn launch_passes_the_profile_as_an_argument() {
             let fix = fixture();
             let prepared = prepare(&fix.request(&["echo"])).expect("prepare");
-            assert!(prepared.profile.starts_with("(version 1)\n(deny default)\n"));
+            assert!(prepared
+                .profile
+                .starts_with("(version 1)\n(deny default)\n"));
             // Regression: the profile must stay in argv (`-p`), never a temp
             // path under a child-writable tree such as scratch or TMPDIR.
             let mut child = spawn(&prepared).expect("spawn with -p profile");
@@ -845,19 +527,20 @@ mod macos {
             let marker = fix.scratch.join("planted");
             fs::write(&marker, b"not-for-the-child").unwrap();
             let file = File::open(&marker).unwrap();
-            let planted = unsafe { libc::dup(file.as_raw_fd()) };
-            assert!(planted > 2, "planted fd {planted}");
+            let planted = bitsov_ffi::model_launch::duplicate_inheritable(&file).unwrap();
+            let planted_fd = planted.as_raw_fd();
+            assert!(planted_fd > 2, "planted fd {planted_fd}");
             let baseline = listed_fds(&line(&fix, false, &["fds"]));
             assert!(
-                baseline.contains(&planted),
-                "unconfined fds {baseline:?} did not include {planted}"
+                baseline.contains(&planted_fd),
+                "unconfined fds {baseline:?} did not include {planted_fd}"
             );
             assert_eq!(listed_fds(&line(&fix, true, &["fds"])), vec![0, 1, 2]);
-            unsafe { libc::close(planted) };
+            drop(planted);
         }
 
-        fn pid_exists(pid: libc::pid_t) -> bool {
-            unsafe { libc::kill(pid, 0) == 0 }
+        fn pid_exists(pid: i32) -> bool {
+            bitsov_ffi::model_launch::process_exists(pid)
         }
 
         /// Leader exit is cached while a forked worker is still alive. Drop
@@ -878,7 +561,7 @@ mod macos {
             if let Some(expected) = expect_out {
                 assert_eq!(out.trim(), expected);
             }
-            let worker_pid: libc::pid_t = fs::read_to_string(&worker_pid_path)
+            let worker_pid: i32 = fs::read_to_string(&worker_pid_path)
                 .unwrap_or_else(|e| panic!("worker.pid missing ({e}); stdout={out} stderr={err}"))
                 .trim()
                 .parse()
@@ -915,7 +598,11 @@ mod macos {
         /// group is signalled, so the pgid is still ours.
         #[test]
         fn drop_reaps_descendant_after_leader_signaled() {
-            assert_drop_reaps_lingering_worker("fork-signal", 128 + libc::SIGKILL, None);
+            assert_drop_reaps_lingering_worker(
+                "fork-signal",
+                128 + bitsov_ffi::model_launch::SIGKILL,
+                None,
+            );
         }
     }
 }

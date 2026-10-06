@@ -1,6 +1,6 @@
 //! Library surface and Tauri entry point for the BitSov app.
 
-#![deny(unsafe_code)]
+#![forbid(unsafe_code)]
 
 // Keep existing absolute paths (`bitsov_app::…`) valid now that the former
 // binary implementation is compiled as part of this library.

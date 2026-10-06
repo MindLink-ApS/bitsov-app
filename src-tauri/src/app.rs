@@ -73,7 +73,6 @@ use tauri_plugin_shell::ShellExt;
 // module is always parsed so a syntax error still fails the Linux Build job.
 #[cfg(all(desktop, not(feature = "mobile")))]
 #[allow(dead_code)]
-#[allow(unsafe_code)]
 #[path = "model_launch.rs"]
 mod model_launch;
 
@@ -82,10 +81,8 @@ mod model_launch;
 #[cfg(all(desktop, not(feature = "mobile")))]
 #[path = "dev_node.rs"]
 mod dev_node;
-// Secure Enclave device-key and Keychain FFI bridges (the library denies unsafe
-// outside these reviewed desktop bridge modules).
+// Safe desktop native wrappers. Their unsafe implementations live in bitsov-ffi.
 #[cfg(all(desktop, not(feature = "mobile")))]
-#[allow(unsafe_code)]
 #[path = "device_key.rs"]
 mod device_key;
 #[cfg(any(mobile, feature = "mobile"))]
@@ -95,10 +92,8 @@ mod device_key;
 #[path = "local_owner.rs"]
 mod local_owner;
 #[cfg(all(desktop, not(feature = "mobile")))]
-#[allow(unsafe_code)]
 #[path = "owner_password.rs"]
 mod owner_password;
-#[allow(unsafe_code)]
 #[path = "home_keychain.rs"]
 mod home_keychain;
 #[path = "home_unlock.rs"]
@@ -2533,7 +2528,6 @@ fn verified_local_node(_state: &NodeState) -> bool {
 }
 
 #[cfg(all(desktop, not(feature = "mobile"), unix))]
-#[allow(unsafe_code)]
 fn verified_local_node(state: &NodeState) -> bool {
     let Some(port) = loopback_api_port(&state.api_base) else {
         return false;
@@ -2549,7 +2543,7 @@ fn verified_local_node(state: &NodeState) -> bool {
         return false;
     }
     let child_pid = child.id();
-    let our_uid = unsafe { libc::getuid() } as u32;
+    let our_uid = bitsov_ffi::effective_uid();
 
     // Unique IPv4 LISTEN owner for this port (excludes [::1]).
     let listeners = ipv4_api_listen_owners(port);
@@ -7362,7 +7356,6 @@ mod api_base_tests {
 /// Custody provenance must bind the IPv4 endpoint the app dials, not any
 /// listener that shares its port (Codex app95 delta1).
 #[cfg(all(test, unix))]
-#[allow(unsafe_code)]
 mod verified_local_socket_tests {
     use super::{
         connected_api_peer_owner, ipv4_api_listen_owners, listen_name_serves_ipv4_loopback,
@@ -7460,7 +7453,7 @@ mod verified_local_socket_tests {
         assert_eq!(owners[0].pid, std::process::id());
         let peer = connected_api_peer_owner(port).expect("peer");
         assert_eq!(peer.pid, std::process::id());
-        assert_eq!(peer.uid, unsafe { libc::getuid() } as u32);
+        assert_eq!(peer.uid, bitsov_ffi::effective_uid());
         drop(listener);
     }
 
