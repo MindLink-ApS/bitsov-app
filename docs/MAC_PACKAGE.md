@@ -10,6 +10,23 @@ It deviates from §3; see [Deviation](#deviation-release-excludes-the-assistant-
 The earlier rc6/rc7 spike evidence is in
 [MAC_PACKAGE_SPIKE.md](MAC_PACKAGE_SPIKE.md).
 
+## Keychain and Touch ID
+
+The same unsigned artifact supports remote pairing: Keychain writes try data
+protection first and retry the local login keychain **only** for missing
+entitlement (`-34018`), preserving service/account. Reads prefer data protection;
+only not-found/missing-entitlement searches legacy. Signed builds retain data
+protection and existing signed items remain readable. The legacy login keychain
+uses its unlocked state and application ACL; it has no exact `ThisDeviceOnly`
+class and is not synchronized.
+
+“Remember on this Mac” stores an encrypted envelope in either keychain. Its
+Secure Enclave agreement key requires the current Touch ID enrollment to decrypt,
+so unsigned builds do not depend on data-protection entitlements for biometric
+gating. Enrollment changes invalidate the saved copy: type the password and
+Remember again (restore approval first if the signing key also invalidated).
+See [HOME_NODE_UNLOCK.md](HOME_NODE_UNLOCK.md) for wrapping and migration details.
+
 ## Build locally
 
 Needs macOS arm64, Node 22, Rust, Apple command-line tools, `gh`, and `gpg`.

@@ -232,67 +232,258 @@ private func statusForSigningError(_ error: Error) -> Int32 {
     return errOther
 }
 
-// Home-node records are separate from the launcher item. Password reads require
-// the current biometric enrollment; public pins/bindings never prompt.
-private func homeQuery(_ service: String) -> [CFString: Any] {
-    [kSecClass: kSecClassGenericPassword, kSecAttrService: service,
-     kSecAttrAccount: "BitSov", kSecUseDataProtectionKeychain: true]
+// Shared storage policy for home records and the bootstrap launcher password.
+// An authentication refusal must never select a weaker store.
+private func missingEntitlement(_ status: OSStatus) -> Bool {
+    status == errSecMissingEntitlement // -34018, and no other write error
+}
+
+private func writeWithFallback(_ operation: (Bool) -> OSStatus) -> OSStatus {
+    let status = operation(true)
+    return missingEntitlement(status) ? operation(false) : status
+}
+
+private func readWithFallback(_ operation: (Bool) -> OSStatus) -> OSStatus {
+    let status = operation(true)
+    return status == errSecItemNotFound || missingEntitlement(status) ? operation(false) : status
+}
+
+private func itemQuery(_ service: String, _ account: String, _ dataProtection: Bool,
+                       _ adding: Bool, _ operation: ([CFString: Any]) -> OSStatus) -> OSStatus {
+    var query: [CFString: Any] = [kSecClass: kSecClassGenericPassword,
+        kSecAttrService: service, kSecAttrAccount: account,
+        kSecUseDataProtectionKeychain: dataProtection]
+    if dataProtection {
+        if adding { query[kSecAttrAccessible] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly }
+    } else {
+        // Legacy has no ThisDeviceOnly accessibility class. Explicitly target
+        // the local login keychain (unlocked-keychain protection and app ACL),
+        // never a synchronizable item or an arbitrary search-list keychain.
+        var keychain: SecKeychain?
+        let path = NSHomeDirectory() + "/Library/Keychains/login.keychain-db"
+        let status = SecKeychainOpen(path, &keychain)
+        guard status == errSecSuccess, let keychain = keychain else { return status }
+        if adding { query[kSecUseKeychain] = keychain }
+        else { query[kSecMatchSearchList] = [keychain] }
+    }
+    return operation(query)
+}
+
+private func storeItem(_ service: String, _ account: String, _ data: Data,
+                       replace: Bool = true) -> OSStatus {
+    writeWithFallback { dp in
+        let status = itemQuery(service, account, dp, true) { base in
+            var query = base
+            query[kSecValueData] = data
+            return SecItemAdd(query as CFDictionary, nil)
+        }
+        guard status == errSecDuplicateItem, replace else { return status }
+        return itemQuery(service, account, dp, false) { query in
+            SecItemUpdate(query as CFDictionary, [kSecValueData: data] as CFDictionary)
+        }
+    }
+}
+
+private func readItem(_ service: String, _ account: String, _ dp: Bool,
+                      _ data: inout Data) -> OSStatus {
+    itemQuery(service, account, dp, false) { base in
+        var query = base
+        query[kSecReturnData] = true
+        query[kSecMatchLimit] = kSecMatchLimitOne
+        if dp {
+            let context = LAContext()
+            context.localizedReason = "Unlock your BitSov home node"
+            query[kSecUseAuthenticationContext] = context
+        }
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        guard status == errSecSuccess else { return status }
+        guard let bytes = result as? Data, bytes.count <= 16384 else { return errBufferTooSmall }
+        data = bytes
+        return errSecSuccess
+    }
+}
+
+private func deleteItems(_ service: String, _ account: String) -> OSStatus {
+    // Retirement removes both exact copies. A DP refusal other than missing
+    // entitlement/not-found stops the operation before touching legacy.
+    for dp in [true, false] {
+        let status = itemQuery(service, account, dp, false) { query in
+            SecItemDelete(query as CFDictionary)
+        }
+        if status == errSecSuccess || status == errSecItemNotFound { continue }
+        if dp && missingEntitlement(status) { continue }
+        return status
+    }
+    return errSecSuccess
+}
+
+private let passwordPurpose = Data("bitsov.home-seed-password.wrap.v1".utf8)
+private struct WrappedPassword: Codable {
+    let version: Int
+    let enclaveKey: Data
+    let ephemeralPublicKey: Data
+    let ciphertext: Data // AES-GCM combined nonce, ciphertext, tag
+}
+
+private func passwordNode(_ service: String) -> String? {
+    let prefix = "bitsov.node."
+    let suffix = ".seed-password"
+    guard service.hasPrefix(prefix), service.hasSuffix(suffix) else { return nil }
+    let node = String(service.dropFirst(prefix.count).dropLast(suffix.count))
+    guard node.utf8.count == 64,
+          node.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else { return nil }
+    return node
+}
+
+private func wrappedService(_ service: String) -> String { service + ".wrapped-v1" }
+
+private func passwordAgreementKey() throws -> SecureEnclave.P256.KeyAgreement.PrivateKey {
+    var error: Unmanaged<CFError>?
+    guard let access = SecAccessControlCreateWithFlags(nil,
+        kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+        [.privateKeyUsage, .biometryCurrentSet], &error) else {
+        error?.release()
+        throw NSError(domain: NSOSStatusErrorDomain, code: Int(errOther))
+    }
+    return try SecureEnclave.P256.KeyAgreement.PrivateKey(accessControl: access)
+}
+
+// Encryption uses the enclave PUBLIC key, so Remember needs no biometric
+// prompt. The only decrypt path performs ECDH with its biometric PRIVATE key.
+private func wrapPassword(_ plaintext: Data, node: String,
+                          key: SecureEnclave.P256.KeyAgreement.PrivateKey) throws -> Data {
+    let ephemeral = P256.KeyAgreement.PrivateKey()
+    let shared = try ephemeral.sharedSecretFromKeyAgreement(with: key.publicKey)
+    let symmetric = shared.hkdfDerivedSymmetricKey(using: SHA256.self,
+        salt: Data(node.utf8), sharedInfo: passwordPurpose, outputByteCount: 32)
+    let sealed = try AES.GCM.seal(plaintext, using: symmetric, authenticating: Data(node.utf8))
+    guard let ciphertext = sealed.combined else { throw CryptoKitError.incorrectParameterSize }
+    return try JSONEncoder().encode(WrappedPassword(version: 1,
+        enclaveKey: key.dataRepresentation,
+        ephemeralPublicKey: ephemeral.publicKey.x963Representation, ciphertext: ciphertext))
+}
+
+private func unwrapPassword(_ envelope: Data, node: String) throws -> Data {
+    let wrapped = try JSONDecoder().decode(WrappedPassword.self, from: envelope)
+    guard wrapped.version == 1, wrapped.ephemeralPublicKey.count == 65,
+          !wrapped.enclaveKey.isEmpty, wrapped.enclaveKey.count <= 8192,
+          (29...4124).contains(wrapped.ciphertext.count) else {
+        throw CryptoKitError.incorrectParameterSize
+    }
+    let context = LAContext()
+    context.localizedReason = "Unlock your BitSov home node"
+    let key = try SecureEnclave.P256.KeyAgreement.PrivateKey(
+        dataRepresentation: wrapped.enclaveKey, authenticationContext: context)
+    let ephemeral = try P256.KeyAgreement.PublicKey(x963Representation: wrapped.ephemeralPublicKey)
+    let shared = try key.sharedSecretFromKeyAgreement(with: ephemeral)
+    let symmetric = shared.hkdfDerivedSymmetricKey(using: SHA256.self,
+        salt: Data(node.utf8), sharedInfo: passwordPurpose, outputByteCount: 32)
+    return try AES.GCM.open(AES.GCM.SealedBox(combined: wrapped.ciphertext),
+        using: symmetric, authenticating: Data(node.utf8))
 }
 
 @_cdecl("bitsov_home_store")
 public func bitsov_home_store(_ service: UnsafePointer<CChar>?, _ bytes: UnsafePointer<UInt8>?,
                               _ count: Int, _ secret: Int32) -> Int32 {
-    guard let service = service, let bytes = bytes, count > 0, count <= 16384 else { return errBadArgument }
+    guard let service = service, let bytes = bytes, count > 0, count <= 16384,
+          secret == 0 || secret == 1 else { return errBadArgument }
     return autoreleasepool {
         let name = String(cString: service)
-        var query = homeQuery(name)
-        var data = Data(bytes: bytes, count: count)
-        defer { data.resetBytes(in: 0..<data.count) }
-        query[kSecValueData] = data
+        var plaintext = Data(bytes: bytes, count: count)
+        defer { plaintext.resetBytes(in: 0..<plaintext.count) }
         if secret == 1 {
-            var error: Unmanaged<CFError>?
-            guard let acl = SecAccessControlCreateWithFlags(nil,
-                kSecAttrAccessibleWhenUnlockedThisDeviceOnly, .biometryCurrentSet, &error) else {
-                return errOther
-            }
-            query[kSecAttrAccessControl] = acl
-        } else {
-            query[kSecAttrAccessible] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+            guard let node = passwordNode(name), count <= 4096 else { return errBadArgument }
+            do {
+                let envelope = try wrapPassword(plaintext, node: node, key: passwordAgreementKey())
+                let destination = wrappedService(name)
+                return storeItem(destination, "BitSov", envelope)
+            } catch { return statusForSigningError(error) }
         }
-        let status = SecItemAdd(query as CFDictionary, nil)
-        if status == errSecDuplicateItem {
-            if secret == 1 {
-                // Replace a stale seed password (e.g. restored mnemonic, new launcher
-                // password) by delete + add with the same strict ACL; never update in
-                // place, which could keep a weaker ACL.
-                let deleted = SecItemDelete(homeQuery(name) as CFDictionary)
-                guard deleted == errSecSuccess || deleted == errSecItemNotFound else { return deleted }
-                return SecItemAdd(query as CFDictionary, nil)
-            }
-            return SecItemUpdate(homeQuery(name) as CFDictionary, [kSecValueData: data] as CFDictionary)
-        }
-        return status
+        // The raw password service is never writable without wrapping.
+        guard passwordNode(name) == nil else { return errBadArgument }
+        return storeItem(name, "BitSov", plaintext)
     }
 }
 
 @_cdecl("bitsov_home_read")
 public func bitsov_home_read(_ service: UnsafePointer<CChar>?, _ output: UnsafeMutablePointer<UInt8>?,
                              _ capacity: Int, _ length: UnsafeMutablePointer<Int>?) -> Int32 {
-    guard let service = service, let output = output, let length = length else { return errBadArgument }
+    guard let service = service, let output = output, let length = length,
+          capacity >= 0 else { return errBadArgument }
+    length.pointee = 0
     return autoreleasepool {
-        var query = homeQuery(String(cString: service))
-        query[kSecReturnData] = true
-        query[kSecMatchLimit] = kSecMatchLimitOne
-        let context = LAContext()
-        context.localizedReason = "Unlock your BitSov home node"
-        query[kSecUseAuthenticationContext] = context
-        var result: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        guard status == errSecSuccess else { return status }
-        guard var data = result as? Data, data.count <= capacity else { return errBufferTooSmall }
+        let name = String(cString: service)
+        var data = Data()
         defer { data.resetBytes(in: 0..<data.count) }
-        length.pointee = data.count
-        data.copyBytes(to: output, count: data.count)
-        return errSecSuccess
+        if let node = passwordNode(name) {
+            let status = readWithFallback { readItem(wrappedService(name), "BitSov", $0, &data) }
+            if status == errSecSuccess {
+                do {
+                    var plaintext = try unwrapPassword(data, node: node)
+                    defer { plaintext.resetBytes(in: 0..<plaintext.count) }
+                    return copyOutput(plaintext, output, capacity, length)
+                } catch {
+                    // Invalidation/cancellation/corruption is authoritative. Never
+                    // resurrect an older password after envelope decryption fails.
+                    return statusForSigningError(error)
+                }
+            }
+            if status != errSecItemNotFound { return status }
+            // Old signed builds: biometric DP item only, never legacy plaintext.
+            let legacy = readItem(name, "BitSov", true, &data)
+            guard legacy == errSecSuccess else {
+                return missingEntitlement(legacy) ? errSecItemNotFound : legacy
+            }
+        } else {
+            let status = readWithFallback { readItem(name, "BitSov", $0, &data) }
+            guard status == errSecSuccess else { return status }
+        }
+        return copyOutput(data, output, capacity, length)
     }
+}
+
+private func copyOutput(_ data: Data, _ output: UnsafeMutablePointer<UInt8>,
+                        _ capacity: Int, _ length: UnsafeMutablePointer<Int>) -> Int32 {
+    guard data.count <= capacity else { return errBufferTooSmall }
+    data.copyBytes(to: output, count: data.count)
+    length.pointee = data.count
+    return errSecSuccess
+}
+
+// Bootstrap launcher item uses the same exact service/account in both stores.
+@_cdecl("bitsov_item_add")
+public func bitsov_item_add(_ service: UnsafePointer<CChar>?, _ account: UnsafePointer<CChar>?,
+                            _ bytes: UnsafePointer<UInt8>?, _ count: Int) -> Int32 {
+    guard let service = service, let account = account, let bytes = bytes,
+          count > 0, count <= 16384 else { return errBadArgument }
+    return autoreleasepool {
+        var data = Data(bytes: bytes, count: count)
+        defer { data.resetBytes(in: 0..<data.count) }
+        return storeItem(String(cString: service), String(cString: account), data, replace: false)
+    }
+}
+
+@_cdecl("bitsov_item_read")
+public func bitsov_item_read(_ service: UnsafePointer<CChar>?, _ account: UnsafePointer<CChar>?,
+                             _ output: UnsafeMutablePointer<UInt8>?, _ capacity: Int,
+                             _ length: UnsafeMutablePointer<Int>?) -> Int32 {
+    guard let service = service, let account = account, let output = output,
+          let length = length, capacity >= 0 else { return errBadArgument }
+    length.pointee = 0
+    return autoreleasepool {
+        var data = Data()
+        defer { data.resetBytes(in: 0..<data.count) }
+        let status = readWithFallback {
+            readItem(String(cString: service), String(cString: account), $0, &data)
+        }
+        guard status == errSecSuccess else { return status }
+        return copyOutput(data, output, capacity, length)
+    }
+}
+
+@_cdecl("bitsov_item_delete")
+public func bitsov_item_delete(_ service: UnsafePointer<CChar>?, _ account: UnsafePointer<CChar>?) -> Int32 {
+    guard let service = service, let account = account else { return errBadArgument }
+    return autoreleasepool { deleteItems(String(cString: service), String(cString: account)) }
 }

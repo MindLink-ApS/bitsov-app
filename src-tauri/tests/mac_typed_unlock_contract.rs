@@ -10,7 +10,7 @@ fn ordered(source: &str, markers: &[&str]) {
     }
 }
 #[test]
-fn mac_remember_requires_204_then_opt_in_and_preserves_strict_acl() {
+fn mac_remember_requires_204_then_opt_in_and_preserves_biometric_wrapping() {
     let unlock = read("src/home_unlock.rs");
     let shared = unlock.split("async fn unlock_with(").nth(1).unwrap();
     ordered(shared, &["connection.unlock(&body).await", "result.map_err(|e| e.to_string())?", "Some(RememberOffer {"]);
@@ -21,7 +21,7 @@ fn mac_remember_requires_204_then_opt_in_and_preserves_strict_acl() {
     assert!(transport.contains("unlock_status(status, 204)"));
     let swift = read("native/device_key.swift");
     let store = swift.split("public func bitsov_home_store").nth(1).unwrap().split("public func bitsov_home_read").next().unwrap();
-    ordered(store, &["kSecAttrAccessibleWhenUnlockedThisDeviceOnly, .biometryCurrentSet", "SecItemDelete(homeQuery(name)", "return SecItemAdd(query"]);
+    ordered(store, &["if secret == 1", "wrapPassword", "wrappedService(name)", "storeItem"]);
 }
 #[test]
 fn unlock_commands_are_write_only_and_capability_is_host_reported() {
