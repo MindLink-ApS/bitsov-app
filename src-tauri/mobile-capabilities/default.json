@@ -26,6 +26,7 @@
     "allow-pairing-status",
     "allow-pairing-retry",
     "allow-remote-access-import",
+    "allow-pairing-link-take",
     "allow-remote-access-forget",
     "allow-node-overview",
     "allow-live-link",

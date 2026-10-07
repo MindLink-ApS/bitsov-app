@@ -1,7 +1,7 @@
 import { LocalNodeSwitch } from './LocalNodeSwitch';
 import { SoftError } from '../control/SoftError';
-import { createSignal, For, Match, Show, Switch } from 'solid-js';
-import { onboardingSteps, scopeList, type NodeStatus, type PairingView } from './pairing';
+import { createSignal, For, Match, onMount, Show, Switch } from 'solid-js';
+import { normalizePairingLink, onboardingSteps, scopeList, type NodeStatus, type PairingView } from './pairing';
 import type { DeviceView } from '../control/types';
 import type { RemoteImportView } from '../control/source';
 
@@ -42,6 +42,7 @@ export function Onboarding(props: {
   onForgetRemote?: () => Promise<void>;
   onImportRemote?: (link: string) => Promise<RemoteImportView>;
   onScanRemote?: () => Promise<string>;
+  initialPairingLink?: string;
 }) {
   // Runtime, opt-in only. This changes presentation, never node authority.
   const testNodes = (() => {
@@ -59,11 +60,22 @@ export function Onboarding(props: {
   const mobileBiometrics = () => props.onScanRemote !== undefined;
   const [remoteLink, setRemoteLink] = createSignal('');
   const [importing, setImporting] = createSignal(false);
+  const [scanning, setScanning] = createSignal(false);
   const [forgetting, setForgetting] = createSignal(false);
   const [remoteRevision, setRemoteRevision] = createSignal(0);
   const [remoteChoiceEdited, setRemoteChoiceEdited] = createSignal(false);
   const [importResult, setImportResult] = createSignal<RemoteImportView | null>(null);
   const [importError, setImportError] = createSignal<string | null>(null);
+  const prefill = (link: string) => {
+    setImportResult(null);
+    setRemoteLink('');
+    setImportError(null);
+    try { setRemoteLink(normalizePairingLink(link)); }
+    catch (error) { setImportError(String(error)); }
+  };
+  onMount(() => {
+    if (props.initialPairingLink !== undefined) prefill(props.initialPairingLink);
+  });
   // A link saved this session wins over the running node's; forgetting reverts.
   const [savedHostedBy, setSavedHostedBy] = createSignal<string | null | undefined>(undefined);
   const hostedBy = () => {
@@ -75,7 +87,7 @@ export function Onboarding(props: {
     readLink: () => string | Promise<string>,
     emptyMessage: string,
   ) => {
-    if (importing() || forgetting()) return;
+    if (importing() || scanning() || forgetting()) return;
     setImporting(true);
     setImportError(null);
     setImportResult(null);
@@ -84,7 +96,7 @@ export function Onboarding(props: {
       setRemoteLink('');
       if (!link) throw new Error(emptyMessage);
       if (!props.onImportRemote) throw new Error('Remote access import is unavailable.');
-      const result = await props.onImportRemote(link);
+      const result = await props.onImportRemote(normalizePairingLink(link));
       setRemoteRevision(n => n + 1);
       setRemoteChoiceEdited(true);
       setSavedHostedBy(result.hosted_by ?? null);
@@ -102,13 +114,16 @@ export function Onboarding(props: {
   };
 
   const scanRemote = async () => {
-    await importRemoteLink(
-      async () => {
-        if (!props.onScanRemote) throw new Error('QR scanning is unavailable.');
-        return props.onScanRemote();
-      },
-      'The scanned QR code was empty.',
-    );
+    if (importing() || scanning() || forgetting() || !props.onScanRemote) return;
+    setScanning(true);
+    setRemoteLink('');
+    setImportResult(null);
+    setImportError(null);
+    try { prefill(await props.onScanRemote()); }
+    catch {
+      // Native errors may contain scanner input. Never display or log them.
+      setImportError('Scanning did not complete. Allow camera access to scan a pairing QR code, or paste the link instead.');
+    } finally { setScanning(false); }
   };
 
   const forgetRemote = async () => {
@@ -278,7 +293,7 @@ export function Onboarding(props: {
       </div>
 
       <Show when={props.onForgetRemote && (props.pairing().remote || target() !== 'local' || remoteChoiceEdited())}>
-        <LocalNodeSwitch onForget={forgetRemote} disabled={importing() || forgetting()} remoteRevision={remoteRevision()} />
+        <LocalNodeSwitch onForget={forgetRemote} disabled={importing() || scanning() || forgetting()} remoteRevision={remoteRevision()} />
       </Show>
 
       <Switch>
@@ -423,14 +438,15 @@ export function Onboarding(props: {
       <form class="panel pairing remote-form" data-remote-access onSubmit={importRemote}>
         <h2>{props.onScanRemote ? 'Scan or paste the pairing link' : 'Paste the pairing link'}</h2>
         <Show when={props.onScanRemote}>
+          <p class="hint">BitSov uses the camera to read your node’s pairing QR code. You can paste instead. Nothing is saved until you choose Use remote node.</p>
           <button
             type="button"
             class="quiet"
             data-scan-pairing-qr
-            disabled={importing() || forgetting()}
+            disabled={importing() || scanning() || forgetting()}
             onClick={() => void scanRemote()}
           >
-            {importing() ? 'Scanning…' : 'Scan pairing QR'}
+            {scanning() ? 'Scanning…' : 'Scan pairing QR'}
           </button>
         </Show>
         <label for="remote-pairing-link">Pairing link</label>
@@ -441,12 +457,12 @@ export function Onboarding(props: {
           autocapitalize="none"
           autocorrect="off"
           spellcheck={false}
-          disabled={importing() || forgetting()}
+          disabled={importing() || scanning() || forgetting()}
           value={remoteLink()}
           onInput={(event) => setRemoteLink(event.currentTarget.value)}
           placeholder="bitsov://pair/…"
         />
-        <button type="submit" class="primary" disabled={importing() || forgetting()}>
+        <button type="submit" class="primary" disabled={importing() || scanning() || forgetting()}>
           {importing() ? 'Saving…' : 'Use remote node'}
         </button>
         <p class="hint">The link is verified and stored for the next app start.</p>

@@ -2,6 +2,18 @@
 // Pure functions over what the host reports (`node_status`, `pairing_status`), so the
 // step logic is testable without a window. The host never sends a token or key here.
 
+/** Envelope only. The existing Rust parser remains authoritative for the ticket,
+ * signed keys, expiry and endpoint, and runs before anything is persisted. */
+export function normalizePairingLink(input: string): string {
+  const link = input.trim();
+  const prefix = 'bitsov://pair/';
+  if (!link.startsWith(prefix) || link.length > prefix.length + 16384 ||
+      !/^[A-Za-z0-9_-]+$/.test(link.slice(prefix.length))) {
+    throw new Error('Use a bitsov://pair/ pairing ticket from your node.');
+  }
+  return link;
+}
+
 export type NodeStatus = {
   locked?: boolean;
   local_owner?: boolean;

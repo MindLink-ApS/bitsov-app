@@ -32,6 +32,7 @@ fn main() {
             "pairing_status",
             "pairing_retry",
             "remote_access_import",
+            "pairing_link_take",
             "remote_access_forget",
             "node_overview",
             "live_link",
