@@ -56,7 +56,8 @@ command_response_fields() {
   ' "$HOST"
 }
 no_credential_in_responses() {
-  ! command_response_fields | grep -Eqi "$CREDENTIAL"
+  local out; out=$(command_response_fields)
+  ! grep -Eqi "$CREDENTIAL" <<<"$out"
 }
 
 # The renderer's own model of every host response.
@@ -64,14 +65,16 @@ renderer_response_types() {
   awk '/^type /{inside=1} inside{print} inside && /};[[:space:]]*$/{inside=0}' "$APP"
 }
 no_credential_in_renderer_types() {
-  ! renderer_response_types | grep -Eqi "$CREDENTIAL"
+  local out; out=$(renderer_response_types)
+  ! grep -Eqi "$CREDENTIAL" <<<"$out"
 }
 
 # Renderer source minus comment-only lines, so architecture notes that *describe* the
 # JWT seam are not mistaken for code that handles one.
 renderer_code() { cat "$APP" src/qr.ts | grep -vE '^[[:space:]]*(//|\*|/\*)'; }
 no_credential_in_renderer_code() {
-  ! renderer_code | grep -Eqi '\b(jwt|bearer|auth/local)\b'
+  local out; out=$(renderer_code)
+  ! grep -Eqi '\b(jwt|bearer|auth/local)\b' <<<"$out"
 }
 # Legacy restore remains write-only. The opt-in owner screen separately receives
 # a one-shot phrase, covered by local-owner-ceremony.test.tsx.
@@ -101,8 +104,9 @@ host_fn() {
     inside && /^}/                       { exit }
   ' "$HOST"
 }
-# Capture the body first: `host_fn | grep -q` under pipefail fails spuriously (SIGPIPE)
-# once a body outgrows awk's 4 KiB output buffer (same fix as test-app-lifecycle.sh).
+# Capture output first: `producer | grep -q` under pipefail fails spuriously (SIGPIPE) once
+# the producer writes past its pipe buffer. Under `!` that would even turn a match into a
+# false PASS. Same fix as test-app-lifecycle.sh.
 in_fn() { local b; b=$(host_fn "$1"); shift; grep -q "$@" <<<"$b"; }
 
 # CS-2.1: adopt the 3141 listener only when GET /identity matches RestoreResponse.node_id.
@@ -113,12 +117,12 @@ in_fn() { local b; b=$(host_fn "$1"); shift; grep -q "$@" <<<"$b"; }
 adopt_only_matching_identity() {
   in_fn adopt_matching_identity 'fetch_node_id' &&
     in_fn adopt_matching_identity 'expected_node_id' &&
-    host_fn adopt_matching_identity | grep -Fq 'live != expected_node_id' &&
+    in_fn adopt_matching_identity -F 'live != expected_node_id' &&
     in_fn restart_node 'adopt_matching_identity' &&
     in_fn restart_node 'stop_loopback_listener' &&
     in_fn restart_node 'expected_node_id' &&
     in_fn identity_restore 'restart_node(&app, &restored.node_id)' &&
-    host_fn identity_restore | grep -Fq 'restarted,' &&
+    in_fn identity_restore -F 'restarted,' &&
     ! in_fn identity_restore 'restarted: restored.restart_required'
 }
 # A random healthy loopback process is never adopted.
