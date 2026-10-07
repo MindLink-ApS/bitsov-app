@@ -621,6 +621,8 @@ fn config_arg(path: &std::path::Path) -> Option<String> {
 /// `GET /pair/elevation/:op_id` → `status`.
 #[derive(Deserialize, Debug)]
 pub struct ElevationStatusReply {
+    #[serde(default)]
+    pub delegation_message: Option<String>,
     pub status: String,
 }
 

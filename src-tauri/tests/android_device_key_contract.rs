@@ -466,10 +466,10 @@ fn android_reenroll_replaces_only_an_invalidated_home_key_after_the_owner_asks()
         .expect("Remember saves");
     assert!(take < declined && declined < save);
     for required in [
-        "if offer.offered.elapsed()>REMEMBER_WINDOW{",
+        "if offer.offered.elapsed()>=REMEMBER_WINDOW{",
         "!=Some(offer.node.as_str()){",
         "if!record.registered{",
-        "if saved.is_err(){state.home_remember.lock().unwrap().get_or_insert(offer);}",
+        "if saved.is_err()&&offer.offered.elapsed()<REMEMBER_WINDOW{state.home_remember.lock().unwrap().get_or_insert(offer);}",
     ] {
         assert!(remember.contains(required), "remember lost {required}");
     }
@@ -487,14 +487,14 @@ fn android_typed_unlock_keeps_only_a_node_accepted_password_in_memory() {
     let app = project_file("src/app.rs");
     let normal = normalized(&app);
     assert!(normal.contains(
-        "#[tauri::command]#[cfg(target_os=\"android\")]async fn node_unlock_password(\
+        "#[tauri::command]#[cfg(any(target_os=\"android\",all(target_os=\"macos\",desktop,not(feature=\"mobile\"))))]async fn node_unlock_password(\
          window:WebviewWindow<impl tauri::Runtime>,state:State<'_,NodeState>,\
          password:zeroize::Zeroizing<String>,)->Result<(),String>{\
          reject_sealed_window(&window)?;drop(window);\
          home_unlock::unlock_typed(state.inner(),password).await}"
     ));
     assert!(normal.contains(
-        "#[tauri::command]#[cfg(target_os=\"android\")]async fn node_unlock_remember(\
+        "#[tauri::command]#[cfg(any(target_os=\"android\",all(target_os=\"macos\",desktop,not(feature=\"mobile\"))))]async fn node_unlock_remember(\
          window:WebviewWindow<impl tauri::Runtime>,state:State<'_,NodeState>,remember:bool,\
          )->Result<(),String>{reject_sealed_window(&window)?;drop(window);\
          home_unlock::remember(state.inner(),remember).await}"
@@ -502,11 +502,11 @@ fn android_typed_unlock_keeps_only_a_node_accepted_password_in_memory() {
     for stub in ["node_unlock_password", "node_unlock_remember"] {
         assert!(
             normal.contains(&format!(
-                "#[tauri::command]#[cfg(not(target_os=\"android\"))]async fn {stub}(\
+                "#[tauri::command]#[cfg(not(any(target_os=\"android\",all(target_os=\"macos\",desktop,not(feature=\"mobile\")))))]async fn {stub}(\
                  window:WebviewWindow<impl tauri::Runtime>)->Result<(),String>{{\
                  reject_sealed_window(&window)?;Err("
             )),
-            "{stub} must take no input and do nothing off Android"
+            "{stub} must take no input and do nothing on unsupported platforms"
         );
     }
     assert_eq!(
@@ -516,12 +516,12 @@ fn android_typed_unlock_keeps_only_a_node_accepted_password_in_memory() {
     );
     assert!(!app.contains("seed_password: String"));
     assert!(normal
-        .contains("#[cfg(target_os=\"android\")]home_remember:Mutex<Option<home_unlock::RememberOffer>>,"));
+        .contains("#[cfg(any(target_os=\"android\",all(target_os=\"macos\",desktop,not(feature=\"mobile\"))))]home_remember:Arc<Mutex<Option<home_unlock::RememberOffer>>>,"));
 
     let unlock = project_file("src/home_unlock.rs");
     let flat = normalized(&unlock);
     assert!(flat.contains(
-        "#[cfg(target_os=\"android\")]pub struct RememberOffer{node:String,\
+        "#[cfg(any(target_os=\"android\",all(target_os=\"macos\",desktop,not(feature=\"mobile\"))))]pub struct RememberOffer{node:String,\
          password:zeroize::Zeroizing<String>,offered:Instant,}"
     ));
     assert!(flat.contains("pub async fn unlock(state:&NodeState)->Result<(),String>{unlock_with(state,None).await}"));
@@ -760,7 +760,7 @@ fn macos_keychain_home_path_keeps_its_keychain_calls() {
 
     let flat = normalized(&keychain);
     for required in [
-        "#[cfg(not(target_os=\"android\"))]#[allow(dead_code)]pub fn save_password(",
+        "#[cfg(not(target_os=\"android\"))]pub fn save_password(",
         "store(node,\"seed-password\",password,true,None)",
         "read(node,\"seed-password\",true,device_blob)",
         "read(node,\"box-transport\",false,None)",

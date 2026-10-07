@@ -117,6 +117,8 @@ impl UnlockBinding {
 
 #[derive(Deserialize)]
 pub struct LockStatus {
+    #[serde(default)]
+    pub attempts_left: Option<u32>,
     pub state: String,
     pub node_id: String,
     pub fingerprint: String,

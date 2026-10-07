@@ -125,17 +125,22 @@ function AppScreen() {
   const remote = createMemo(() => pairing().remote);
   createEffect(() => setSelectedTarget(remote() || canScanPairingQr ? 'network' : 'local'));
   const [device, setDevice] = createSignal<DeviceView | null>(null);
-  // Android: the node accepted a typed password; the host holds it for one yes/no.
+  // The node accepted a typed password; the host holds it for one yes/no.
   const [rememberOffer, setRememberOffer] = createSignal(false);
+  const [rememberChoosing, setRememberChoosing] = createSignal(false);
+  const [rememberSaved, setRememberSaved] = createSignal(false);
+  const showRemember = () => rememberOffer() || rememberChoosing() || rememberSaved();
   // Once pairing has an outcome, the start spinner no longer describes the state.
-  usePairingActivity(() => rememberOffer() || restoring() ||
+  usePairingActivity(() => showRemember() || restoring() ||
     (!!status().initialization_repair && status().initialization_repair !== 'none'));
   const starting = () => pairing().state === 'starting' || pairing().state === 'pending';
 
   let timer: number | undefined;
   const poll = async () => {
     try {
-      setStatus(await source().nodeStatus());
+      const next = await source().nodeStatus();
+      setStatus(next);
+      setRememberOffer(!!next.remember_offer);
     } catch (e) {
       setStatus({ ready: false, node_id: null, error: String(e) });
     }
@@ -295,17 +300,31 @@ function AppScreen() {
     <Show when={status().local_owner && status().owner_warning}>
       <aside role="alert" class="panel" data-owner-warning>{status().owner_warning}</aside>
     </Show>
-    <Show when={rememberOffer()}>
-      <RememberUnlock onChoose={(remember) => source().nodeUnlockRemember(remember)} onDone={() => setRememberOffer(false)} />
+    <Show when={showRemember()}>
+      <RememberUnlock mobile={canScanPairingQr} onChoose={async (remember) => {
+        // The host consumes the offer during storage. Keep this dialog mounted
+        // across polls so a slow save retains its busy state and any refusal.
+        setRememberChoosing(true);
+        try {
+          await source().nodeUnlockRemember(remember);
+          if (remember) setRememberSaved(true);
+        } finally {
+          await poll();
+          setRememberChoosing(false);
+        }
+      }} onDone={() => { setRememberOffer(false); setRememberSaved(false); }} />
     </Show>
     <Show when={!status().locked} fallback={<LockedNode
       mobile={canScanPairingQr}
+      typedUnlockSupported={status().typed_unlock_supported}
+      state={status().unlock_state}
+      pending={status().pending_device}
+      attemptsLeft={status().attempts_left}
+      onCancel={async () => { await source().deviceKeyCancel(); await poll(); }}
       hostError={status().error}
-      onUnlock={async () => { await source().nodeUnlock(); await poll(); }}
-      onUnlockWithPassword={canScanPairingQr ? async (password) => {
-        await source().nodeUnlockPassword(password);
-        setRememberOffer(true);
-        await poll();
+      onUnlock={async () => { try { await source().nodeUnlock(); } finally { await poll(); } }}
+      onUnlockWithPassword={status().typed_unlock_supported ? async (password) => {
+        try { await source().nodeUnlockPassword(password); } finally { await poll(); }
       } : undefined}
     />}>
     <Show

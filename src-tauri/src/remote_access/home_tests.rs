@@ -153,7 +153,7 @@ async fn locked_fixture_accepts_existing_auth_and_never_replaces_pin() {
 
 #[tokio::test]
 async fn password_crosses_only_the_pinned_noise_session_and_errors_never_echo_it() {
-    for status in [204, 401, 403, 409, 429] {
+    for status in [200, 202, 204, 401, 403, 409, 429, 500] {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let (descriptor, _) = setup(listener.local_addr().unwrap().to_string(), true);
         let server = tokio::spawn(async move {
@@ -232,4 +232,32 @@ async fn identity_pinned_session_can_repair_a_stale_box_endpoint() {
         descriptor.endpoint()
     );
     server.await.unwrap().unwrap();
+}
+
+
+#[tokio::test]
+async fn locked_status_preserves_optional_attempt_budget_without_echoing_other_fields() {
+    for attempts in [None, Some(0), Some(17)] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (descriptor, _) = setup(listener.local_addr().unwrap().to_string(), true);
+        let server = tokio::spawn(async move {
+            let (mut stream, mut noise, _) = responder(listener, 9, fixture()["auth"].clone()).await.unwrap();
+            let encrypted = read_frame(&mut stream, MAX_TRANSPORT_FRAME).await.unwrap();
+            let request = decode_transport(&mut noise, &encrypted, MAX_NOISE_PLAINTEXT).unwrap();
+            assert!(request.starts_with(b"GET /api/v1/node/lock HTTP/1.1"));
+            let node = fixture()["node_id"].as_str().unwrap().to_owned();
+            let mut body = json!({"state":"locked", "node_id":node,
+                "fingerprint":crate::home_node::identity_fingerprint(&node)});
+            if let Some(attempts) = attempts { body["attempts_left"] = json!(attempts); }
+            let body = body.to_string();
+            let reply = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+            let encrypted = encode_transport(&mut noise, reply.as_bytes()).unwrap();
+            write_frame(&mut stream, &encrypted).await.unwrap();
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let key = ClientKey::load_or_create(dir.path()).unwrap();
+        let mut connection = LockedConnection::connect(&descriptor, &key, "fixture").await.unwrap().unwrap();
+        assert_eq!(connection.status().await.unwrap().attempts_left, attempts);
+        server.await.unwrap();
+    }
 }

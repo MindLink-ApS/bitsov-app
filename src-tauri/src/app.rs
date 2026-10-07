@@ -218,10 +218,12 @@ struct NodeState {
     remote_mode: AtomicBool,
     home_locked: AtomicBool,
     home_last_probe: Mutex<Option<Instant>>,
+    home_unlock_state: Mutex<&'static str>,
+    home_attempts_left: Mutex<Option<u32>>,
     /// A typed password the node just accepted, held for the owner's
-    /// "Remember on this phone" choice. Memory only, single use.
-    #[cfg(target_os = "android")]
-    home_remember: Mutex<Option<home_unlock::RememberOffer>>,
+    /// "Remember on this device" choice. Memory only, single use.
+    #[cfg(any(target_os = "android", all(target_os = "macos", desktop, not(feature = "mobile"))))]
+    home_remember: Arc<Mutex<Option<home_unlock::RememberOffer>>>,
     remote_descriptor: Mutex<Option<remote_access::RemoteDescriptor>>,
     remote_retry: Arc<bitsov_app::connection_retry::RemoteRetry>,
     remote_recovery: tokio::sync::Mutex<()>,
@@ -335,7 +337,13 @@ impl NodeState {
         );
         #[cfg(any(mobile, feature = "mobile"))]
         let (local_owner, owner_warning) = (false, None);
+        let (unlock_state, pending_device) = home_unlock::locked_view(self);
         Status {
+            typed_unlock_supported: cfg!(any(target_os = "android", all(target_os = "macos", desktop, not(feature = "mobile")))),
+            unlock_state,
+            pending_device,
+            attempts_left: *self.home_attempts_left.lock().unwrap(),
+            remember_offer: home_unlock::remember_available(self),
             locked: self.home_locked.load(Ordering::SeqCst),
             local_owner,
             owner_warning,
@@ -368,8 +376,10 @@ impl NodeState {
             remote_mode: AtomicBool::new(false),
             home_locked: AtomicBool::new(false),
             home_last_probe: Mutex::new(None),
-            #[cfg(target_os = "android")]
-            home_remember: Mutex::new(None),
+            home_unlock_state: Mutex::new("ready"),
+            home_attempts_left: Mutex::new(None),
+            #[cfg(any(target_os = "android", all(target_os = "macos", desktop, not(feature = "mobile"))))]
+            home_remember: Arc::new(Mutex::new(None)),
             remote_descriptor: Mutex::new(None),
             remote_retry: Arc::new(bitsov_app::connection_retry::RemoteRetry::default()),
             remote_recovery: tokio::sync::Mutex::new(()),
@@ -428,6 +438,11 @@ impl NodeState {
 
 #[derive(Serialize, Clone)]
 struct Status {
+    typed_unlock_supported: bool,
+    unlock_state: &'static str,
+    pending_device: Option<device::DeviceView>,
+    attempts_left: Option<u32>,
+    remember_offer: bool,
     locked: bool,
     local_owner: bool,
     owner_warning: Option<String>,
@@ -1404,6 +1419,8 @@ async fn finish_auth(state: &NodeState, data_dir: &Path) {
                 *state.ready.lock().unwrap() = false;
                 return set_error(state, error);
             }
+            *state.home_unlock_state.lock().unwrap() = "ready";
+            *state.home_attempts_left.lock().unwrap() = None;
             state.home_locked.store(false, Ordering::SeqCst);
             *state.node_id.lock().unwrap() = Some(node_id.clone());
             *state.error.lock().unwrap() = None;
@@ -2043,11 +2060,11 @@ async fn node_unlock(window: WebviewWindow<impl tauri::Runtime>, state: State<'_
     home_unlock::unlock(state.inner()).await
 }
 
-/// Android only: unlock with the node password the owner typed on this phone.
+/// Android and macOS: unlock with the node password the owner typed on this device.
 /// The node checks it. It is never returned, logged or written here; only
 /// `node_unlock_remember` can save it, under the biometric-bound home key.
 #[tauri::command]
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", all(target_os = "macos", desktop, not(feature = "mobile"))))]
 async fn node_unlock_password(
     window: WebviewWindow<impl tauri::Runtime>,
     state: State<'_, NodeState>,
@@ -2058,10 +2075,10 @@ async fn node_unlock_password(
     home_unlock::unlock_typed(state.inner(), password).await
 }
 
-/// Android only: the owner's answer to "Remember on this phone (fingerprint)".
+/// Android and macOS: the owner's answer to the biometric Remember offer.
 /// Takes no password; it uses the one the node accepted moments ago.
 #[tauri::command]
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", all(target_os = "macos", desktop, not(feature = "mobile"))))]
 async fn node_unlock_remember(
     window: WebviewWindow<impl tauri::Runtime>,
     state: State<'_, NodeState>,
@@ -2073,17 +2090,17 @@ async fn node_unlock_remember(
 }
 
 #[tauri::command]
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", all(target_os = "macos", desktop, not(feature = "mobile")))))]
 async fn node_unlock_password(window: WebviewWindow<impl tauri::Runtime>) -> Result<(), String> {
     reject_sealed_window(&window)?;
-    Err("Typing the node password to unlock is only available on Android.".into())
+    Err("Typing the node password to unlock is unavailable on this platform.".into())
 }
 
 #[tauri::command]
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", all(target_os = "macos", desktop, not(feature = "mobile")))))]
 async fn node_unlock_remember(window: WebviewWindow<impl tauri::Runtime>) -> Result<(), String> {
     reject_sealed_window(&window)?;
-    Err("Remembering a typed node password is only available on Android.".into())
+    Err("Remembering a typed node password is unavailable on this platform.".into())
 }
 
 #[tauri::command]
@@ -5974,6 +5991,8 @@ fn device_view(state: &NodeState, record: Option<&device::Record>) -> device::De
 
 #[derive(Deserialize)]
 struct DeviceKeyReply {
+    #[serde(default)]
+    delegation_message: Option<String>,
     op_id: String,
     key_id: String,
     fingerprint: String,
@@ -6025,6 +6044,11 @@ async fn do_device_key_status_local(state: &NodeState) -> Result<device::DeviceV
         } else if let Ok((code, body)) = call_api(state, reqwest::Method::GET, &path, None).await {
             if code.is_success() {
                 let reply: act::ElevationStatusReply = decode_act("/pair/device-key", &body)?;
+                if let Some(pending) = updated.pending.as_mut() {
+                    if reply.delegation_message.is_some() {
+                        pending.delegation_message = reply.delegation_message;
+                    }
+                }
                 lapsed = apply_device_status(&mut updated, &reply.status);
             }
         }
@@ -6155,6 +6179,7 @@ async fn do_device_key_register(state: &NodeState) -> Result<device::DeviceView,
     record.key_id = Some(reply.key_id);
     record.fingerprint = Some(reply.fingerprint.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').take(24).collect());
     record.pending = Some(device::PendingRegistration {
+        delegation_message: reply.delegation_message,
         op_id: reply.op_id,
         owner_action: reply.owner_action.chars().take(600).collect(),
         expires_at_ms: (reply.expires_at.max(0) as u64).saturating_mul(1000),
@@ -12392,9 +12417,9 @@ mod control_act_tests {
                     }
                     *public.lock().unwrap() = Some(pk);
                     serde_json::json!({"op_id": "dd01", "key_id": "k1", "fingerprint": "K1K1-0000", "expires_at": far,
-                        "owner_action": "konsensus device approve --op dd01 --config /n/konsensus.toml"})
+                        "owner_action": "konsensus device approve --op dd01 --config /n/konsensus.toml", "delegation_message": "delegation-from-post"})
                 }
-                ("GET", "/pair/device-key/dd01") => serde_json::json!({"status": if registered.load(Ordering::SeqCst) { "registered" } else { "pending" }}),
+                ("GET", "/pair/device-key/dd01") => serde_json::json!({"delegation_message": "delegation-from-get", "status": if registered.load(Ordering::SeqCst) { "registered" } else { "pending" }}),
                 ("DELETE", _) => serde_json::json!({"status": "cancelled"}),
                 ("POST", "/pair/relation-intent") => {
                     let i = &body["intent"];
@@ -12475,6 +12500,7 @@ mod control_act_tests {
             fingerprint: Some("K1K1-0000".into()),
             registered: false,
             pending: Some(device::PendingRegistration {
+                delegation_message: None,
                 op_id: op.into(),
                 owner_action: format!("konsensus device approve --op {op}"),
                 expires_at_ms: u64::MAX,
@@ -12543,7 +12569,10 @@ mod control_act_tests {
         assert_eq!(view.state, device::DeviceState::Pending);
         assert_eq!(view.owner_action.as_deref(), Some("konsensus device approve --op dd01 --config /n/konsensus.toml"));
         assert_eq!(view.fingerprint.as_deref(), Some("K1K1-0000"));
+        let pending = || device::load_record(&device_store(s).unwrap()).unwrap().pending.unwrap();
+        assert_eq!(pending().delegation_message.as_deref(), Some("delegation-from-post"));
         assert_eq!(do_device_key_status(s).await.unwrap().state, device::DeviceState::Pending);
+        assert_eq!(pending().delegation_message.as_deref(), Some("delegation-from-get"));
         dn.registered.store(true, Ordering::SeqCst);
         assert_eq!(do_device_key_status(s).await.unwrap().state, device::DeviceState::Registered);
         // Nothing but the public key and the proof left this app.

@@ -120,13 +120,14 @@ describe('app shell pairing wiring', () => {
     expect(mount.querySelector('[data-pairing-link-screen]')).toBeNull();
   });
 
-  it.each(['paste', 'restore', 'unlock'] as const)('queues an incoming link until the current %s review closes', async (kind) => {
+  it.each(['paste', 'restore', 'unlock', 'unlock-no-password'] as const)('queues an incoming link until the current %s review closes', async (kind) => {
     vi.useFakeTimers();
     vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Android');
     let pending: string | null = null;
+    const locked = kind === 'unlock' || kind === 'unlock-no-password';
     vi.stubGlobal('__TAURI_INTERNALS__', { invoke: (cmd: string) => {
       if (cmd === 'pairing_link_take') { const link = pending; pending = null; return Promise.resolve(link); }
-      if (cmd === 'node_status') return Promise.resolve({ ready: kind !== 'unlock', locked: kind === 'unlock', node_id: 'fa'.repeat(32), error: null });
+      if (cmd === 'node_status') return Promise.resolve({ ready: !locked, locked, typed_unlock_supported: true, unlock_state: kind === 'unlock-no-password' ? 'no-password' : 'ready', node_id: 'fa'.repeat(32), error: null });
       if (cmd === 'pairing_status') return Promise.resolve(paired);
       if (cmd === 'remote_access_preview') return Promise.resolve({ endpoint: 'original:4242', node_id_fingerprint: 'aa…bb' });
       return Promise.reject(new Error('not available'));

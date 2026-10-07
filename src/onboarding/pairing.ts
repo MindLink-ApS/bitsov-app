@@ -16,6 +16,11 @@ export function normalizePairingLink(input: string): string {
 
 export type NodeStatus = {
   locked?: boolean;
+  typed_unlock_supported?: boolean;
+  unlock_state?: 'ready' | 'no-password' | 'not-enrolled' | 'pending-approval';
+  pending_device?: { fingerprint: string | null; owner_action: string | null } | null;
+  attempts_left?: number | null;
+  remember_offer?: boolean;
   local_owner?: boolean;
   owner_warning?: string | null;
   initialization_repair?: 'none' | 'required' | 'repairing' | 'price_floor_required' | 'price_floor_repairing';

@@ -55,6 +55,8 @@ pub struct Record {
 /// A registration the owner has not approved yet.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct PendingRegistration {
+    #[serde(default)]
+    pub delegation_message: Option<String>,
     pub op_id: String,
     /// The node's own words: `konsensus device approve --op … --config …`.
     pub owner_action: String,
@@ -369,6 +371,19 @@ pub fn load_pending(path: &Path, now_ms: u64) -> Option<Elevation> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn legacy_pending_registration_loads_and_delegation_message_survives_storage() {
+        let mut record: Record = serde_json::from_value(serde_json::json!({
+            "public_key": "04",
+            "pending": {"op_id": "ab", "owner_action": "approve", "expires_at_ms": 100}
+        })).unwrap();
+        assert!(record.pending.as_ref().unwrap().delegation_message.is_none());
+        record.pending.as_mut().unwrap().delegation_message = Some("delegation-message".into());
+        let dir = tempfile::tempdir().unwrap();
+        save_record(dir.path(), &record).unwrap();
+        assert_eq!(load_record(dir.path()), Some(record));
+    }
+
     const PEER: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
     #[test]
@@ -418,7 +433,7 @@ mod tests {
     fn the_view_never_shows_an_expired_command() {
         let r = Record {
             public_key: "04".into(), fingerprint: Some("AAAA-BBBB".into()),
-            pending: Some(PendingRegistration { op_id: "ab".into(), owner_action: "konsensus device approve --op ab".into(), expires_at_ms: 100 }),
+            pending: Some(PendingRegistration { delegation_message: None, op_id: "ab".into(), owner_action: "konsensus device approve --op ab".into(), expires_at_ms: 100 }),
             ..Default::default()
         };
         assert_eq!(DeviceView::of(true, Some(&r), false, 50).state, DeviceState::Pending);
