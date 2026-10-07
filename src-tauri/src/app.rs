@@ -15103,6 +15103,10 @@ mod assistant_acl_tests {
         );
         for cap in &caps {
             let ids = permission_identifiers(cap);
+            assert!(
+                ids.iter().all(|id| !id.starts_with("shell:")),
+                "Rust owns sidecar execution; webviews must have no shell permissions"
+            );
             for command in &commands {
                 assert!(
                     !ids.iter().any(|id| id == &deny_perm(command)),
@@ -15141,21 +15145,6 @@ mod assistant_acl_tests {
                 "main is denied {command}"
             );
         }
-        let shell = main
-            .get("permissions")
-            .and_then(|v| v.as_array())
-            .and_then(|items| {
-                items.iter().find(|entry| {
-                    entry.get("identifier").and_then(|v| v.as_str()) == Some("shell:allow-execute")
-                })
-            })
-            .expect("main keeps the sidecar execute permission");
-        let allow = shell.get("allow").and_then(|v| v.as_array()).expect("shell allow");
-        assert_eq!(allow.len(), 1);
-        assert_eq!(allow[0].get("name").and_then(|v| v.as_str()), Some("bin/konsensus"));
-        assert_eq!(allow[0].get("sidecar").and_then(|v| v.as_bool()), Some(true));
-        assert!(main_perms.iter().all(|id| id != "shell:allow-spawn" && id != "shell:allow-kill"));
-
         let conf: serde_json::Value = serde_json::from_str(
             &fs::read_to_string(manifest_dir().join("tauri.conf.json")).expect("tauri.conf"),
         )
