@@ -44,3 +44,20 @@ fn remembered_password_is_wrapped_and_never_plaintext_in_legacy_keychain() {
     assert!(unlock.contains("*state.home_unlock_state.lock().unwrap() = \"no-password\""));
     assert!(read("ffi/src/home_keychain.rs").contains("Zeroizing::new(vec![0; capacity])"));
 }
+
+#[test]
+fn launcher_password_uses_the_same_policy_and_preserves_its_item_identity() {
+    let owner = read("ffi/src/owner_password.rs");
+    assert!(owner.contains("tech.mindlink.bitsov.local-owner.seed-password.v1"));
+    assert!(!owner.contains("SecKeychainAddGenericPassword"));
+    assert!(!owner.contains("unsafe extern"));
+    assert!(owner.contains("home_keychain::add_item(SERVICE, account, password)"));
+    assert!(owner.contains("home_keychain::read_item(SERVICE, account, 44)"));
+    assert!(owner.contains("home_keychain::delete_items(SERVICE, account)"));
+    let swift = read("native/device_key.swift");
+    assert!(swift.contains("data, replace: false)"));
+    let ffi = read("ffi/src/home_keychain.rs");
+    for marker in ["bitsov_item_add", "bitsov_item_read", "bitsov_item_delete", "CString::new(account)?"] {
+        assert!(ffi.contains(marker));
+    }
+}

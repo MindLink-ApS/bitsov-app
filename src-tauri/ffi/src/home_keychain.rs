@@ -4,6 +4,11 @@ use std::ffi::{CString, NulError};
 use zeroize::Zeroizing;
 
 unsafe extern "C" {
+    fn bitsov_item_add(service: *const std::ffi::c_char, account: *const std::ffi::c_char,
+        bytes: *const u8, count: usize) -> i32;
+    fn bitsov_item_read(service: *const std::ffi::c_char, account: *const std::ffi::c_char,
+        output: *mut u8, capacity: usize, length: *mut usize) -> i32;
+    fn bitsov_item_delete(service: *const std::ffi::c_char, account: *const std::ffi::c_char) -> i32;
     fn bitsov_home_store(
         service: *const std::ffi::c_char,
         bytes: *const u8,
@@ -49,4 +54,47 @@ pub fn read(service: &str, capacity: usize) -> Result<(i32, usize, Zeroizing<Vec
         )
     };
     Ok((status, length, bytes))
+}
+
+/// Add-only: an existing launcher password must never be overwritten.
+pub fn add_item(service: &str, account: &str, bytes: &[u8]) -> Result<i32, NulError> {
+    let service = CString::new(service)?;
+    let account = CString::new(account)?;
+    // SAFETY: all buffers remain live for this synchronous call; Swift retains none.
+    Ok(unsafe { bitsov_item_add(service.as_ptr(), account.as_ptr(), bytes.as_ptr(), bytes.len()) })
+}
+
+pub fn read_item(service: &str, account: &str, capacity: usize)
+    -> Result<(i32, usize, Zeroizing<Vec<u8>>), NulError>
+{
+    let service = CString::new(service)?;
+    let account = CString::new(account)?;
+    let mut bytes = Zeroizing::new(vec![0; capacity]);
+    let mut length = 0;
+    // SAFETY: output has capacity bytes, length is writable, inputs remain live.
+    let status = unsafe { bitsov_item_read(service.as_ptr(), account.as_ptr(),
+        bytes.as_mut_ptr(), bytes.len(), &mut length) };
+    Ok((status, length, bytes))
+}
+
+pub fn delete_items(service: &str, account: &str) -> Result<i32, NulError> {
+    let service = CString::new(service)?;
+    let account = CString::new(account)?;
+    // SAFETY: both exact-item identifiers remain live for the synchronous call.
+    Ok(unsafe { bitsov_item_delete(service.as_ptr(), account.as_ptr()) })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Invalid names return before any Security API or UI can be reached.
+    #[test]
+    fn rejects_truncated_service_and_account_names_before_native_calls() {
+        assert!(store("bad\0service", b"secret", false).is_err());
+        assert!(read("bad\0service", 16).is_err());
+        assert!(add_item("service", "bad\0account", b"secret").is_err());
+        assert!(read_item("service", "bad\0account", 16).is_err());
+        assert!(delete_items("service", "bad\0account").is_err());
+    }
 }

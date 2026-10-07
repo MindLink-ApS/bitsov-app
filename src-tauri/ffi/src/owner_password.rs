@@ -1,139 +1,59 @@
-//! Safe wrapper for the legacy launcher-password Keychain item.
+//! Bootstrap launcher password; shares the DP-first policy with home records.
+use super::home_keychain;
+use zeroize::Zeroizing;
 
-use std::ffi::c_void;
-use zeroize::{Zeroize, Zeroizing};
-
-const SERVICE: &[u8] = b"tech.mindlink.bitsov.local-owner.seed-password.v1";
-
-#[link(name = "Security", kind = "framework")]
-unsafe extern "C" {
-    fn SecKeychainFindGenericPassword(
-        keychain: *const c_void,
-        service_len: u32,
-        service: *const u8,
-        account_len: u32,
-        account: *const u8,
-        len: *mut u32,
-        data: *mut *mut c_void,
-        item: *mut *mut c_void,
-    ) -> i32;
-    fn SecKeychainAddGenericPassword(
-        keychain: *const c_void,
-        service_len: u32,
-        service: *const u8,
-        account_len: u32,
-        account: *const u8,
-        len: u32,
-        data: *const u8,
-        item: *mut *mut c_void,
-    ) -> i32;
-    fn SecKeychainItemDelete(item: *const c_void) -> i32;
-    fn CFRelease(item: *const c_void);
-    fn SecKeychainItemFreeContent(attrs: *mut c_void, data: *mut c_void) -> i32;
-}
+const SERVICE: &str = "tech.mindlink.bitsov.local-owner.seed-password.v1";
 
 pub fn read(account: &str) -> Result<Option<Zeroizing<Vec<u8>>>, String> {
-    let mut len = 0;
-    let mut ptr = std::ptr::null_mut();
-    // SAFETY: all input slices outlive the synchronous call. `len` and `ptr`
-    // are valid out-pointers, and no item handle is requested.
-    let status = unsafe {
-        SecKeychainFindGenericPassword(
-            std::ptr::null(),
-            SERVICE.len() as u32,
-            SERVICE.as_ptr(),
-            account.len() as u32,
-            account.as_ptr(),
-            &mut len,
-            &mut ptr,
-            std::ptr::null_mut(),
-        )
-    };
-    if status == -25300 {
-        return Ok(None);
-    }
+    let (status, length, bytes) = home_keychain::read_item(SERVICE, account, 44)
+        .map_err(|_| "Invalid launcher Keychain account.")?;
+    decode_password(status, length, bytes)
+}
+
+fn decode_password(status: i32, length: usize, mut bytes: Zeroizing<Vec<u8>>)
+    -> Result<Option<Zeroizing<Vec<u8>>>, String>
+{
+    if status == -25300 { return Ok(None); }
     if status != 0 {
-        return Err(format!(
-            "Keychain refused access to this app's seed password ({status})."
-        ));
+        return Err(format!("Keychain refused access to this app's seed password ({status})."));
     }
-    let password = if ptr.is_null() || len != 44 {
-        None
-    } else {
-        // SAFETY: Security returned a readable `len`-byte allocation on success.
-        Some(Zeroizing::new(
-            unsafe { std::slice::from_raw_parts(ptr.cast::<u8>(), len as usize) }.to_vec(),
-        ))
-    };
-    if !ptr.is_null() {
-        // SAFETY: the allocation is writable for its reported length and must
-        // be released exactly once with SecKeychainItemFreeContent.
-        unsafe {
-            std::slice::from_raw_parts_mut(ptr.cast::<u8>(), len as usize).zeroize();
-            SecKeychainItemFreeContent(std::ptr::null_mut(), ptr);
-        }
+    if length != 44 || length > bytes.len() {
+        return Err("This app's Keychain seed password is invalid; it was not replaced.".into());
     }
-    password
-        .map(Some)
-        .ok_or_else(|| "This app's Keychain seed password is invalid; it was not replaced.".into())
+    bytes.truncate(length);
+    Ok(Some(bytes))
 }
 
 pub fn remove(account: &str) -> Result<(), String> {
-    let mut item = std::ptr::null_mut();
-    // SAFETY: all input slices outlive the synchronous exact-item query and
-    // `item` is a valid out-pointer.
-    let status = unsafe {
-        SecKeychainFindGenericPassword(
-            std::ptr::null(),
-            SERVICE.len() as u32,
-            SERVICE.as_ptr(),
-            account.len() as u32,
-            account.as_ptr(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            &mut item,
-        )
-    };
-    if status == -25300 {
-        return Ok(());
-    }
-    if status != 0 || item.is_null() {
-        return Err("Cannot retire the legacy launcher password.".into());
-    }
-    // SAFETY: the query returned one owned item reference. Delete it, then
-    // release that reference exactly once.
-    let status = unsafe {
-        let status = SecKeychainItemDelete(item);
-        CFRelease(item);
-        status
-    };
-    if status == 0 {
-        Ok(())
-    } else {
-        Err("Cannot retire the legacy launcher password.".into())
-    }
+    let status = home_keychain::delete_items(SERVICE, account)
+        .map_err(|_| "Invalid launcher Keychain account.")?;
+    if status == 0 { Ok(()) }
+    else { Err(format!("Cannot retire the launcher password ({status}).")) }
 }
 
 pub fn add(account: &str, password: &[u8]) -> Result<(), String> {
-    // SAFETY: the account and password slices outlive the synchronous call.
-    // No item handle is requested and Security copies the inputs.
-    let status = unsafe {
-        SecKeychainAddGenericPassword(
-            std::ptr::null(),
-            SERVICE.len() as u32,
-            SERVICE.as_ptr(),
-            account.len() as u32,
-            account.as_ptr(),
-            password.len() as u32,
-            password.as_ptr(),
-            std::ptr::null_mut(),
-        )
-    };
-    if status == 0 {
-        Ok(())
-    } else {
-        Err(format!(
-            "Keychain could not store this app's seed password ({status}); the node was not started."
-        ))
+    let status = home_keychain::add_item(SERVICE, account, password)
+        .map_err(|_| "Invalid launcher Keychain account.")?;
+    if status == 0 { Ok(()) }
+    else {
+        Err(format!("Keychain could not store this app's seed password ({status}); the node was not started."))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_is_distinct_from_refusal_and_invalid_lengths() {
+        for status in [-34018, -25293, -128, -50] {
+            assert!(decode_password(status, 44, Zeroizing::new(vec![1; 44])).is_err());
+        }
+        assert!(decode_password(-25300, 0, Zeroizing::new(vec![0; 44])).unwrap().is_none());
+        for length in [0, 43, 45, usize::MAX] {
+            assert!(decode_password(0, length, Zeroizing::new(vec![1; 44])).is_err());
+        }
+        assert!(decode_password(0, 44, Zeroizing::new(vec![1; 43])).is_err());
+        assert_eq!(*decode_password(0, 44, Zeroizing::new(vec![1; 44])).unwrap().unwrap(), vec![1; 44]);
     }
 }
