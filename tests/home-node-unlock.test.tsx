@@ -168,7 +168,7 @@ it.each(['saved', 'cancelled'])('keeps Remember mounted across a status poll whi
   let tick: (() => void) | undefined;
   vi.spyOn(window, 'setInterval').mockImplementation((handler) => {
     tick = handler as () => void;
-    return 1;
+    return 1 as unknown as ReturnType<typeof setInterval>;
   });
   let finishSave!: () => void;
   const save = new Promise<void>((resolve, reject) => {
@@ -205,7 +205,7 @@ it.each(['saved', 'cancelled'])('keeps Remember mounted across a status poll whi
 it('dismisses an idle Remember offer when the host expires it', async () => {
   let hostOffer = true;
   let tick: (() => void) | undefined;
-  vi.spyOn(window, 'setInterval').mockImplementation((handler) => { tick = handler as () => void; return 1; });
+  vi.spyOn(window, 'setInterval').mockImplementation((handler) => { tick = handler as () => void; return 1 as unknown as ReturnType<typeof setInterval>; });
   vi.stubGlobal('__TAURI_INTERNALS__', { invoke: (cmd: string) => {
     if (cmd === 'node_status') return Promise.resolve({ ready: true, node_id: 'ab'.repeat(32), error: null, remember_offer: hostOffer });
     if (cmd === 'pairing_status') return Promise.resolve({ state: 'paired', remote: true, scopes: ['read'], bootstrap: null });
