@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
-mkdir -p "$TMP/scripts" "$TMP/src-tauri/"{bin,src,icons,capabilities}
+mkdir -p "$TMP/scripts" "$TMP/src-tauri/"{bin,src,icons,capabilities,mobile-capabilities}
 cp -R "$ROOT/src" "$TMP/src"
 cp "$ROOT/package-lock.json" "$TMP/"
 cp "$ROOT/scripts/authority-check.sh" "$ROOT/scripts/fetch-node-sidecar.sh" "$TMP/scripts/"
@@ -12,6 +12,7 @@ cp "$ROOT/src-tauri/Cargo.toml" "$ROOT/src-tauri/Cargo.lock" "$ROOT/src-tauri/ta
 cp "$ROOT/src-tauri/src/main.rs" "$ROOT/src-tauri/src/app.rs" "$TMP/src-tauri/src/"
 cp "$ROOT/src-tauri/icons/"*.png "$TMP/src-tauri/icons/"
 cp "$ROOT/src-tauri/capabilities/default.json" "$TMP/src-tauri/capabilities/"
+cp "$ROOT/src-tauri/mobile-capabilities/default.json" "$TMP/src-tauri/mobile-capabilities/"
 cd "$TMP"
 
 expect_gate() {
@@ -23,7 +24,7 @@ expect_gate() {
     exit 1
   fi
   if [ "$expected" -eq 1 ]; then
-    grep -q 'FAIL  G2: no non-loopback control-plane URL' result.log
+    grep -q "FAIL  ${3:-G2: no non-loopback control-plane URL}" result.log
   else
     grep -q '^AUTHORITY: PASS$' result.log
   fi
@@ -31,6 +32,13 @@ expect_gate() {
 }
 
 expect_gate 0 'clean source'
+for capability_dir in capabilities mobile-capabilities; do
+  cat > "src-tauri/$capability_dir/unsafe.json" <<'JSON'
+{"identifier":"unsafe","windows":["main"],"permissions":[{"identifier":"shell:allow-execute","allow":[{"name":"bin/konsensus","sidecar":true,"args":true}]}]}
+JSON
+  expect_gate 1 "unrestricted shell execute in $capability_dir is rejected" 'shell capability:'
+  rm "src-tauri/$capability_dir/unsafe.json"
+done
 # Embedded public protocol URL, not an app control-plane connection.
 printf '\0https://example.com/api/v1\0' > src-tauri/bin/konsensus-aarch64-apple-darwin
 expect_gate 0 'downloaded binary is outside the app source gate'
