@@ -317,6 +317,11 @@ impl NodeState {
     /// Export the running mode even before authentication, or after it fails.
     fn pairing_snapshot(&self) -> PairingView {
         let mut view = self.pairing_view.lock().unwrap().clone();
+        // Elevation refreshes the token without rebuilding the pairing ceremony view.
+        // Preflight readers need the current token scopes, not the original pair scopes.
+        if let AuthMode::Paired(session) = &*self.auth.lock().unwrap() {
+            view.scopes = session.scopes.clone();
+        }
         view.remote = self.remote_mode.load(Ordering::SeqCst);
         view.hosted_by = self
             .remote_descriptor
@@ -11219,6 +11224,7 @@ mod control_act_tests {
         let view = spend_advance(&node.state, false).await.unwrap();
         assert_eq!((view.state, view.basis), (act::SpendState::Open, Some(act::SpendBasis::NodeGrant)));
         assert_eq!(node.state.token.lock().unwrap().as_deref(), Some("tok.spend"));
+        assert!(node.state.pairing_snapshot().scopes.iter().any(|scope| scope == "spend"), "call preflight must see the refreshed token scope");
 
         do_message_send(&node.state, A, false, "gm", 7000, None).await.unwrap();
         let last = node.seen.lock().unwrap().last().cloned().unwrap();

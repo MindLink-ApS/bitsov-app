@@ -1024,6 +1024,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
       settleSpend();
       if (spend.state === 'pending' && ++spendPolls >= GRANT_AFTER_POLLS) {
         // The owner's grant opens only what was asked for.
+        pairing.scopes = ['read', 'receive', 'spend'];
         if (wants.window) openWindow();
         else spend = { state: 'locked', basis: null, open_until_ms: null, pending: null, window_ms: WINDOW_MS };
         if (wants.budget !== null) {
