@@ -13,6 +13,8 @@
     },
     "allow-node-status",
     "allow-node-unlock",
+    "allow-node-unlock-password",
+    "allow-node-unlock-remember",
     "allow-local-owner-create",
     "allow-local-owner-cancel",
     "allow-local-owner-finalize",

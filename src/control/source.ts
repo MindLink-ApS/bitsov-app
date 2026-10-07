@@ -73,6 +73,10 @@ export interface Source {
   // first run
   nodeStatus(): Promise<NodeStatus>;
   nodeUnlock(): Promise<void>;
+  /** Android: unlock with the node password the owner typed. The host keeps it only for nodeUnlockRemember. */
+  nodeUnlockPassword(password: string): Promise<void>;
+  /** Android: save (fingerprint-protected) or discard the password the node just accepted. */
+  nodeUnlockRemember(remember: boolean): Promise<void>;
   nodeRepairInitialized(confirmed: boolean): Promise<void>;
   nodeRepairPriceFloor(confirmed: boolean): Promise<void>;
   pairingStatus(): Promise<PairingView>;
@@ -226,6 +230,8 @@ export const hostSource: Source = {
   mode: 'node',
   nodeStatus: () => invoke<NodeStatus>('node_status'),
   nodeUnlock: () => invoke<void>('node_unlock'),
+  nodeUnlockPassword: (password) => invoke<void>('node_unlock_password', { password }),
+  nodeUnlockRemember: (remember) => invoke<void>('node_unlock_remember', { remember }),
   pairingStatus: () => invoke<PairingView>('pairing_status'),
   pairingRetry: () => invoke<PairingView>('pairing_retry'),
   remoteAccessForget: () => invoke<void>('remote_access_forget'),

@@ -1,0 +1,64 @@
+//! Hardware-wrapped storage for the secrets the app keeps on disk.
+//!
+//! Desktop installs nothing and keeps its owner-only files unchanged. Android
+//! installs an Android Keystore sealer at startup, before any pairing file is
+//! read, so the Ed25519 client seed and a pending one-time pairing code are
+//! written only as ciphertext under a non-exportable key. Public pins (node
+//! id, transport keys and their signatures) stay readable: their integrity
+//! comes from the node's signature, not from secrecy.
+
+use std::sync::{Arc, OnceLock};
+
+use zeroize::Zeroizing;
+
+/// Authenticated encryption bound to `purpose` (its associated data).
+pub trait Sealer: Send + Sync {
+    fn seal(&self, purpose: &str, plaintext: &[u8]) -> Result<Vec<u8>, String>;
+    fn open(&self, purpose: &str, sealed: &[u8]) -> Result<Zeroizing<Vec<u8>>, String>;
+}
+
+/// The client Ed25519 seed (`pairing::key`).
+pub const CLIENT_SEED_PURPOSE: &str = "client-ed25519-seed-v1";
+
+/// A remote descriptor's one-time pairing code, bound to its node identity.
+pub fn pairing_code_purpose(node_id: &str) -> String {
+    format!("pairing-code-v1:{node_id}")
+}
+
+static SEALER: OnceLock<Arc<dyn Sealer>> = OnceLock::new();
+
+/// Install the platform sealer once, before the first pairing file is read.
+pub fn install(sealer: Arc<dyn Sealer>) -> Result<(), String> {
+    SEALER
+        .set(sealer)
+        .map_err(|_| "protected secret storage was installed twice".to_string())
+}
+
+pub(crate) fn installed() -> Option<&'static dyn Sealer> {
+    SEALER.get().map(|sealer| sealer.as_ref())
+}
+
+#[cfg(test)]
+pub(crate) mod test_sealer {
+    use super::Sealer;
+    use zeroize::Zeroizing;
+
+    /// Reversible, purpose-bound stand-in for the Keystore. Not encryption.
+    pub struct MemorySealer;
+
+    impl Sealer for MemorySealer {
+        fn seal(&self, purpose: &str, plaintext: &[u8]) -> Result<Vec<u8>, String> {
+            let mut sealed = format!("sealed:{purpose}:").into_bytes();
+            sealed.extend(plaintext.iter().map(|byte| byte ^ 0xa5));
+            Ok(sealed)
+        }
+
+        fn open(&self, purpose: &str, sealed: &[u8]) -> Result<Zeroizing<Vec<u8>>, String> {
+            let prefix = format!("sealed:{purpose}:");
+            let body = sealed
+                .strip_prefix(prefix.as_bytes())
+                .ok_or("sealed for another purpose")?;
+            Ok(Zeroizing::new(body.iter().map(|byte| byte ^ 0xa5).collect()))
+        }
+    }
+}

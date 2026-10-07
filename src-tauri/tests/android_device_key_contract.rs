@@ -129,7 +129,7 @@ fn android_home_password_is_hardware_encrypted_and_biometric_bound() {
 }
 
 #[test]
-fn android_home_unlock_reuses_shared_flow_and_has_no_password_ipc() {
+fn android_home_unlock_reuses_shared_flow_and_has_no_seed_password_ipc() {
     let keychain = project_file("src/home_keychain.rs");
     let unlock = project_file("src/home_unlock.rs");
     let app = project_file("src/app.rs");
@@ -201,13 +201,18 @@ fn android_home_unlock_failures_never_delete_keys_or_records() {
     let source = project_file(PLUGIN);
     let probe = normalized(kotlin_fn(&source, "hardwareAvailable"));
     let create = normalized(kotlin_fn(&source, "create"));
+    let reenroll = normalized(kotlin_fn(&source, "reenrollHomeKey"));
     assert!(probe.contains("val alias=\"${ALIAS_PREFIX}probe-${UUID.randomUUID()}\""));
     assert!(create.contains("val alias=\"$ALIAS_PREFIX${UUID.randomUUID()}\""));
     assert_eq!(
         source.matches("deleteEntry(").count(),
-        probe.matches("deleteEntry(alias)").count() + create.matches("deleteEntry(alias)").count(),
-        "only the signing-key probe and a failed signing-key create may delete Keystore entries"
+        probe.matches("deleteEntry(alias)").count()
+            + create.matches("deleteEntry(alias)").count()
+            + reenroll.matches("deleteEntry(homeAlias(deviceAlias))").count(),
+        "only the signing-key probe, a failed signing-key create and an owner-requested \
+         re-enroll of an invalidated home key may delete Keystore entries"
     );
+    assert_eq!(reenroll.matches("deleteEntry(").count(), 1);
     for forbidden in [".remove(", ".clear()", "deleteSharedPreferences"] {
         assert!(
             !source.contains(forbidden),
@@ -221,6 +226,10 @@ fn android_home_unlock_failures_never_delete_keys_or_records() {
     assert!(
         !read_flat.contains("edit()"),
         "reading a home-node record must never rewrite app storage"
+    );
+    assert!(
+        !read_flat.contains("reenroll"),
+        "a failed read must never re-enroll the home key"
     );
     assert!(read_flat.contains("homeKey(deviceAlias,false)"));
     assert!(!read_flat.contains("homeKey(deviceAlias,true)"));
@@ -358,6 +367,352 @@ fn android_home_secrets_are_cleared_in_kotlin_and_zeroized_in_rust() {
             "base64 home-item values must not be plain Strings: {forbidden}"
         );
     }
+}
+
+#[test]
+fn android_remember_writes_through_store_home_item_under_the_read_side_key_spec() {
+    let source = project_file(PLUGIN);
+    let store = normalized(kotlin_fn(&source, "storeHomeItem"));
+    for required in [
+        "val cipher=homeEncryptCipher(deviceAlias,args.reenroll)",
+        "cipher.updateAAD(item.toByteArray(Charsets.UTF_8))",
+        "BiometricPrompt.CryptoObject(cipher)",
+        "val deviceAlias=deviceAlias(args.blob)",
+    ] {
+        assert!(store.contains(required), "storeHomeItem lost {required}");
+    }
+    assert!(
+        !store.contains("Cipher.getInstance("),
+        "storeHomeItem must get its cipher only from homeEncryptCipher"
+    );
+    let encrypt = normalized(kotlin_fn(&source, "homeEncryptCipher"));
+    assert!(encrypt.starts_with(
+        "{val cipher=Cipher.getInstance(\"AES/GCM/NoPadding\")\
+         try{cipher.init(Cipher.ENCRYPT_MODE,homeKey(deviceAlias,true))}"
+    ));
+    assert_eq!(
+        encrypt.matches("homeKey(deviceAlias,true)").count(),
+        2,
+        "the write path must use homeKey, the single source of the read-side key spec"
+    );
+    assert!(normalized(&source).contains(
+        "class StoreHomeItemArgs{var blob:String?=null var node:String=\"\"\
+         var suffix:String=\"\"var value:String=\"\"var secret:Boolean=false \
+         var reenroll:Boolean=false}"
+    ));
+
+    let keychain = normalized(&project_file("src/home_keychain.rs"));
+    for required in [
+        "#[cfg(target_os=\"android\")]pub fn save_password_for_device(node:&str,password:&[u8],\
+         device_blob:&[u8],reenroll:bool,)->Result<(),String>{",
+        "service(node,\"seed-password\")?;android_store(Some(device_blob),node,\
+         \"seed-password\",password,true,reenroll)",
+        "let _=name;android_store(device_blob,node,suffix,bytes,secret,false)",
+        "super::device_key::store_home_item(device_blob,node,suffix,bytes,secret,reenroll)",
+    ] {
+        assert!(
+            keychain.contains(required),
+            "the Android write path changed: {required}"
+        );
+    }
+
+    let mobile = project_file("src/device_key_mobile.rs");
+    let android = normalized(block_after(&mobile, "mod android"));
+    for required in [
+        "if reenroll&&!secret{return Err(DeviceKeyError::Invalid);}",
+        "value:Zeroizing::new(STANDARD.encode(value)),secret,reenroll,",
+    ] {
+        assert!(android.contains(required), "store_home_item lost {required}");
+    }
+}
+
+#[test]
+fn android_reenroll_replaces_only_an_invalidated_home_key_after_the_owner_asks() {
+    let source = project_file(PLUGIN);
+    assert_eq!(
+        normalized(kotlin_fn(&source, "reenrollHomeKey")),
+        "{verifiedDeviceKey(deviceAlias)keyStore().deleteEntry(homeAlias(deviceAlias))}",
+        "re-enroll deletes exactly this device key's companion alias"
+    );
+    assert_eq!(
+        source.matches("reenrollHomeKey(").count(),
+        2,
+        "re-enroll has one definition and one caller"
+    );
+    let encrypt = normalized(kotlin_fn(&source, "homeEncryptCipher"));
+    assert!(
+        encrypt.contains(
+            "catch(invalidated:KeyPermanentlyInvalidatedException){if(!reenroll){throw invalidated}\
+             reenrollHomeKey(deviceAlias)cipher.init(Cipher.ENCRYPT_MODE,homeKey(deviceAlias,true))}"
+        ),
+        "only a Keystore-reported permanent invalidation, with reenroll set, replaces the key"
+    );
+    assert_eq!(encrypt.matches("catch(").count(), 1);
+
+    let unlock = project_file("src/home_unlock.rs");
+    let remember = normalized(block_after(&unlock, "pub async fn remember("));
+    assert!(
+        remember.contains(
+            "home_keychain::save_password_for_device(&offer.node,offer.password.as_bytes(),&blob,true,)"
+        ),
+        "re-enroll is requested only from the owner's Remember choice"
+    );
+    let take = remember.find(".take()").expect("the offer is single use");
+    let declined = remember
+        .find("if!remember{return Ok(());}")
+        .expect("Not now saves nothing");
+    let save = remember
+        .find("save_password_for_device(")
+        .expect("Remember saves");
+    assert!(take < declined && declined < save);
+    for required in [
+        "if offer.offered.elapsed()>REMEMBER_WINDOW{",
+        "!=Some(offer.node.as_str()){",
+        "if!record.registered{",
+        "if saved.is_err(){state.home_remember.lock().unwrap().get_or_insert(offer);}",
+    ] {
+        assert!(remember.contains(required), "remember lost {required}");
+    }
+    for path in ["src/app.rs", "src/home_keychain.rs", "src/device_key_mobile.rs"] {
+        assert!(
+            !project_file(path).contains("save_password_for_device(&"),
+            "{path} must not save a password outside home_unlock::remember"
+        );
+    }
+    assert_eq!(unlock.matches("save_password_for_device(").count(), 1);
+}
+
+#[test]
+fn android_typed_unlock_keeps_only_a_node_accepted_password_in_memory() {
+    let app = project_file("src/app.rs");
+    let normal = normalized(&app);
+    assert!(normal.contains(
+        "#[tauri::command]#[cfg(target_os=\"android\")]async fn node_unlock_password(\
+         window:WebviewWindow<impl tauri::Runtime>,state:State<'_,NodeState>,\
+         password:zeroize::Zeroizing<String>,)->Result<(),String>{\
+         reject_sealed_window(&window)?;drop(window);\
+         home_unlock::unlock_typed(state.inner(),password).await}"
+    ));
+    assert!(normal.contains(
+        "#[tauri::command]#[cfg(target_os=\"android\")]async fn node_unlock_remember(\
+         window:WebviewWindow<impl tauri::Runtime>,state:State<'_,NodeState>,remember:bool,\
+         )->Result<(),String>{reject_sealed_window(&window)?;drop(window);\
+         home_unlock::remember(state.inner(),remember).await}"
+    ));
+    for stub in ["node_unlock_password", "node_unlock_remember"] {
+        assert!(
+            normal.contains(&format!(
+                "#[tauri::command]#[cfg(not(target_os=\"android\"))]async fn {stub}(\
+                 window:WebviewWindow<impl tauri::Runtime>)->Result<(),String>{{\
+                 reject_sealed_window(&window)?;Err("
+            )),
+            "{stub} must take no input and do nothing off Android"
+        );
+    }
+    assert_eq!(
+        app.matches("password: zeroize::Zeroizing<String>").count(),
+        1,
+        "node_unlock_password is the only password-bearing command"
+    );
+    assert!(!app.contains("seed_password: String"));
+    assert!(normal
+        .contains("#[cfg(target_os=\"android\")]home_remember:Mutex<Option<home_unlock::RememberOffer>>,"));
+
+    let unlock = project_file("src/home_unlock.rs");
+    let flat = normalized(&unlock);
+    assert!(flat.contains(
+        "#[cfg(target_os=\"android\")]pub struct RememberOffer{node:String,\
+         password:zeroize::Zeroizing<String>,offered:Instant,}"
+    ));
+    assert!(flat.contains("pub async fn unlock(state:&NodeState)->Result<(),String>{unlock_with(state,None).await}"));
+    let typed = normalized(block_after(&unlock, "pub async fn unlock_typed("));
+    assert!(typed.starts_with("{*state.home_remember.lock().unwrap()=None;"));
+    assert!(typed.contains("if password.is_empty()||password.len()>4096{"));
+    let shared = block_after(&unlock, "async fn unlock_with(");
+    let accepted = shared
+        .find("result.map_err(|e| e.to_string())?;")
+        .expect("the node's answer is checked");
+    let offered = shared
+        .find("Some(RememberOffer {")
+        .expect("an accepted typed password is offered");
+    assert!(
+        accepted < offered,
+        "only a password the node accepted may be offered for saving"
+    );
+    assert!(shared.contains("home_keychain::password(&node, Some(&blob))"));
+    for forbidden in ["println!", "eprintln!", "log::", "tracing::", "format!(\"{password"] {
+        assert!(!unlock.contains(forbidden), "home_unlock must not log: {forbidden}");
+    }
+}
+
+fn in_order(haystack: &str, steps: &[&str]) {
+    let found: Vec<_> = steps
+        .iter()
+        .map(|step| haystack.find(step).unwrap_or_else(|| panic!("missing {step}")))
+        .collect();
+    assert!(found.windows(2).all(|pair| pair[0] < pair[1]), "out of order: {steps:?}");
+}
+
+#[test]
+fn android_client_seed_is_kept_only_as_keystore_ciphertext() {
+    let key = project_file("src/pairing/key.rs");
+    let flat = normalized(&key);
+    assert!(flat.contains(
+        "match at_rest::installed(){Some(sealer)=>Self::load_or_create_sealed(dir,sealer),\
+         None=>Self::load_or_create_plain(dir),}"
+    ));
+    let sealed = normalized(block_after(&key, "pub(crate) fn load_or_create_sealed("));
+    in_order(
+        &sealed,
+        &[
+            "if sealed.exists(){None}",
+            "plain_seed(&plain)?",
+            ".seal(at_rest::CLIENT_SEED_PURPOSE,&seed[..])",
+            "write_replacing(&sealed,&ciphertext)",
+            "let seed=sealed_seed(&sealed,sealer)?;",
+            "if written.is_some_and(|written|*written!=*seed){return Err(",
+            "if plain.exists(){discard(&plain)?;}",
+        ],
+    );
+    for forbidden in ["hex::encode", "write_all", "create_new_protected"] {
+        assert!(
+            !sealed.contains(forbidden),
+            "the sealed key path must not write a plain seed: {forbidden}"
+        );
+    }
+    assert!(normalized(block_after(&key, "\nfn sealed_seed("))
+        .contains("sealer.open(at_rest::CLIENT_SEED_PURPOSE,&ciphertext)"));
+    let discard = normalized(block_after(&key, "\nfn discard("));
+    in_order(&discard, &["file.write_all(&zeros)", "std::fs::remove_file(path)"]);
+
+    let at_rest = project_file("src/at_rest.rs");
+    assert!(at_rest.contains("pub const CLIENT_SEED_PURPOSE: &str = \"client-ed25519-seed-v1\";"));
+    assert!(at_rest.contains("format!(\"pairing-code-v1:{node_id}\")"));
+}
+
+#[test]
+fn android_descriptor_keeps_only_public_pins_and_a_sealed_code() {
+    let remote = project_file("src/remote_access.rs");
+    let flat = normalized(&remote);
+    assert!(flat.contains(
+        "fn persist_at(path:&Path,descriptor:&RemoteDescriptor)->Result<(),RemoteError>{\
+         persist_with(path,descriptor,at_rest::installed())}"
+    ));
+    let stored = normalized(block_after(&remote, "\nfn stored_bytes("));
+    assert!(
+        stored.starts_with("{let Some(sealer)=sealer else{return serde_json::to_vec(descriptor)"),
+        "desktop keeps writing the descriptor unchanged"
+    );
+    for required in [
+        ".seal(&at_rest::pairing_code_purpose(&descriptor.node_id),code.as_bytes())",
+        "transport_pubkey:descriptor.transport_pubkey.clone(),",
+        "code:None,sealed_code,",
+    ] {
+        assert!(stored.contains(required), "stored_bytes lost {required}");
+    }
+    assert_eq!(
+        remote.matches("serde_json::to_vec(descriptor)").count(),
+        1,
+        "only the no-sealer branch may serialize the plaintext code"
+    );
+    assert!(flat.contains(
+        "#[serde(default,skip_serializing_if=\"Option::is_none\")]sealed_code:Option<String>,"
+    ));
+
+    let load = normalized(block_after(&remote, "pub fn load_persisted("));
+    assert!(load.contains("let sealer=at_rest::installed();"));
+    assert!(load.contains("sealer.map(|_|REMOTE_CONFIG_LOCK.lock().unwrap())"));
+    let load_with = normalized(block_after(&remote, "\nfn load_with("));
+    in_order(
+        &load_with,
+        &[
+            "let(persisted,migrate)=open_sealed_code(persisted,sealer)?;",
+            "let descriptor=validate_descriptor(persisted)?;",
+            "if migrate{",
+            "persist_with(path,&descriptor,sealer)?;}Ok(Some(descriptor))}",
+        ],
+    );
+    let open = normalized(block_after(&remote, "\nfn open_sealed_code("));
+    for required in [
+        "let migrate=sealer.is_some()&&stored.code.is_some();",
+        "let Some(sealer)=sealer else{return Err(",
+        "if stored.code.is_some(){return Err(",
+        ".open(&at_rest::pairing_code_purpose(&stored.node_id),&bytes)",
+    ] {
+        assert!(open.contains(required), "open_sealed_code lost {required}");
+    }
+    assert!(normalized(block_after(&remote, "\nfn saved_descriptor("))
+        .starts_with("{let Some(sealer)=at_rest::installed()else{\
+                      return serde_json::from_slice::<RemoteDescriptor>(bytes).ok();};"));
+}
+
+#[test]
+fn android_at_rest_key_is_hardware_bound_and_opening_never_creates_it() {
+    let source = project_file(PLUGIN);
+    let spec = normalized(kotlin_fn(&source, "atRestKeySpec"));
+    for required in [
+        "KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT",
+        ".setKeySize(256)",
+        ".setBlockModes(KeyProperties.BLOCK_MODE_GCM)",
+        ".setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)",
+        ".setRandomizedEncryptionRequired(true)",
+        "if(strongBox&&Build.VERSION.SDK_INT>=Build.VERSION_CODES.P){builder.setIsStrongBoxBacked(true)}",
+    ] {
+        assert!(spec.contains(required), "atRestKeySpec lost {required}");
+    }
+    for forbidden in ["setUserAuthentication", "setInvalidatedByBiometricEnrollment"] {
+        assert!(
+            !spec.contains(forbidden),
+            "the client seed must survive fingerprint changes and open without a prompt: {forbidden}"
+        );
+    }
+    let preferred = normalized(kotlin_fn(&source, "generatePreferredAtRestKey"));
+    assert!(preferred.contains("if(hasStrongBox){try{return generateAtRestKey(true)}"));
+    let key = normalized(kotlin_fn(&source, "atRestKey"));
+    for required in [
+        "throw UnrecoverableKeyException(\"missing at-rest key\")",
+        "if(!isHardwareBacked(key)){throw",
+    ] {
+        assert!(key.contains(required), "atRestKey lost {required}");
+    }
+    let purpose = normalized(kotlin_fn(&source, "atRestPurpose"));
+    for required in [
+        "purpose==\"client-ed25519-seed-v1\"",
+        "node!=purpose&&node.length==64&&",
+        "\"bitsov.at-rest.$purpose\"",
+    ] {
+        assert!(purpose.contains(required), "atRestPurpose lost {required}");
+    }
+
+    let seal = normalized(kotlin_fn(&source, "seal"));
+    let unseal = normalized(kotlin_fn(&source, "unseal"));
+    for body in [&seal, &unseal] {
+        assert!(body.contains("val aad=atRestPurpose(args.purpose)"));
+        assert!(body.contains("if(aad==null||"));
+        assert!(body.contains("cipher.updateAAD(aad)"));
+    }
+    assert!(seal.contains("cipher.init(Cipher.ENCRYPT_MODE,atRestKey(true))"));
+    assert!(seal.contains("value.fill(0)invoke.resolve(response)}"));
+    assert!(unseal.contains("atRestKey(false)"));
+    assert!(unseal.contains("catch(_:AEADBadTagException){result(ERROR_INVALID)}"));
+    assert_eq!(source.matches("atRestKey(true)").count(), 1, "only seal creates the key");
+    assert!(!source.contains("deleteEntry(AT_REST_KEY_ALIAS"));
+
+    let mobile = project_file("src/device_key_mobile.rs");
+    let android = normalized(block_after(&mobile, "mod android"));
+    for required in [
+        "struct SealPayload<'a>{purpose:&'a str,value:Zeroizing<String>,}",
+        "decode(checked(response)?.value).map(Zeroizing::new)",
+        "impl bitsov_app::at_rest::Sealer for KeystoreSealer{",
+    ] {
+        assert!(android.contains(required), "the Keystore sealer bridge lost {required}");
+    }
+
+    let app = project_file("src/app.rs");
+    let install = "#[cfg(target_os = \"android\")]\n            \
+                   bitsov_app::at_rest::install(Arc::new(device_key::KeystoreSealer))?;";
+    assert_eq!(app.matches("at_rest::install(").count(), 1);
+    in_order(&app, &[install, "tauri::async_runtime::spawn(bootstrap_node(handle));"]);
 }
 
 #[test]

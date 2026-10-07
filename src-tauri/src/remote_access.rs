@@ -19,6 +19,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, watch, Semaphore};
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 
+use crate::at_rest::{self, Sealer};
 use crate::pairing::{self, ClientKey};
 use crate::home_node::{BoxPin, BoxPinStore};
 use crate::connection_retry::RemoteRetry;
@@ -177,6 +178,10 @@ struct StoredDescriptor {
     transport_signature: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     code: Option<String>,
+    /// The one-time code as [`at_rest::Sealer`] ciphertext (unpadded
+    /// base64url). Written instead of `code` whenever a sealer is installed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sealed_code: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     hosted_by: Option<String>,
 }
@@ -505,6 +510,7 @@ fn validate_link(link: PairingLinkV1, now: i64) -> Result<RemoteDescriptor, Remo
         transport_pubkey: link.transport_pubkey,
         transport_signature: link.transport_signature,
         code: Some(link.code),
+        sealed_code: None,
         hosted_by: link.hosted_by,
     })?;
     // The box key is pinned only from an authenticated session; a proof in
@@ -552,6 +558,81 @@ fn config_path(app_data_dir: &Path) -> PathBuf {
 }
 
 fn persist_at(path: &Path, descriptor: &RemoteDescriptor) -> Result<(), RemoteError> {
+    persist_with(path, descriptor, at_rest::installed())
+}
+
+/// Without a sealer this is the descriptor's own JSON, exactly as before.
+/// With one, the file holds only public fields plus the sealed code.
+fn stored_bytes(
+    descriptor: &RemoteDescriptor,
+    sealer: Option<&dyn Sealer>,
+) -> Result<Vec<u8>, RemoteError> {
+    let Some(sealer) = sealer else {
+        return serde_json::to_vec(descriptor)
+            .map_err(|_| RemoteError::Local("cannot serialize remote descriptor".into()));
+    };
+    let sealed_code = descriptor
+        .code
+        .as_deref()
+        .map(|code| {
+            sealer
+                .seal(&at_rest::pairing_code_purpose(&descriptor.node_id), code.as_bytes())
+                .map(|sealed| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sealed))
+                .map_err(|e| RemoteError::Local(format!("cannot protect the pairing code: {e}")))
+        })
+        .transpose()?;
+    serde_json::to_vec(&StoredDescriptor {
+        v: descriptor.v,
+        endpoint: descriptor.endpoint.clone(),
+        node_id: descriptor.node_id.clone(),
+        transport_pubkey: descriptor.transport_pubkey.clone(),
+        transport_signature: descriptor.transport_signature.clone(),
+        code: None,
+        sealed_code,
+        hosted_by: descriptor.hosted_by.clone(),
+    })
+    .map_err(|_| RemoteError::Local("cannot serialize remote descriptor".into()))
+}
+
+/// Restore the plaintext code from `sealed_code`. Returns whether the file
+/// still carried a plaintext code that must be migrated under `sealer`.
+fn open_sealed_code(
+    mut stored: StoredDescriptor,
+    sealer: Option<&dyn Sealer>,
+) -> Result<(StoredDescriptor, bool), RemoteError> {
+    let Some(sealed) = stored.sealed_code.take() else {
+        let migrate = sealer.is_some() && stored.code.is_some();
+        return Ok((stored, migrate));
+    };
+    let Some(sealer) = sealer else {
+        return Err(RemoteError::Local(
+            "this pairing link is protected by another device's keystore; import it again".into(),
+        ));
+    };
+    if stored.code.is_some() {
+        return Err(RemoteError::Local("the remote access descriptor is corrupt".into()));
+    }
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(&sealed)
+        .map_err(|_| RemoteError::Local("the remote access descriptor is corrupt".into()))?;
+    let code = sealer
+        .open(&at_rest::pairing_code_purpose(&stored.node_id), &bytes)
+        .map_err(|e| {
+            RemoteError::Local(format!(
+                "this phone cannot open its saved pairing code ({e}); import the pairing link again"
+            ))
+        })?;
+    let code = std::str::from_utf8(&code)
+        .map_err(|_| RemoteError::Local("the remote access descriptor is corrupt".into()))?;
+    stored.code = Some(code.to_owned());
+    Ok((stored, false))
+}
+
+fn persist_with(
+    path: &Path,
+    descriptor: &RemoteDescriptor,
+    sealer: Option<&dyn Sealer>,
+) -> Result<(), RemoteError> {
     let dir = path
         .parent()
         .ok_or_else(|| RemoteError::Local("remote config has no parent directory".into()))?;
@@ -564,8 +645,14 @@ fn persist_at(path: &Path, descriptor: &RemoteDescriptor) -> Result<(), RemoteEr
     let _ = std::fs::remove_file(&tmp);
     let mut file = pairing::key::create_new_protected(&tmp)
         .map_err(|e| RemoteError::Local(format!("cannot create remote descriptor: {e}")))?;
-    let bytes = serde_json::to_vec(descriptor)
-        .map_err(|_| RemoteError::Local("cannot serialize remote descriptor".into()))?;
+    let bytes = match stored_bytes(descriptor, sealer) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            drop(file);
+            let _ = std::fs::remove_file(&tmp);
+            return Err(error);
+        }
+    };
     let result = std::io::Write::write_all(&mut file, &bytes)
         .and_then(|()| file.sync_all())
         .and_then(|()| std::fs::rename(&tmp, path));
@@ -638,13 +725,22 @@ pub fn prepare_local_pairing(app_data_dir: &Path, pairing_store: &Path) -> Resul
 }
 
 pub fn load_persisted(app_data_dir: &Path) -> Result<Option<RemoteDescriptor>, RemoteError> {
-    let path = config_path(app_data_dir);
+    let sealer = at_rest::installed();
+    // A one-time migration rewrites the file; never race an import or forget.
+    let _config = sealer.map(|_| REMOTE_CONFIG_LOCK.lock().unwrap());
+    load_with(&config_path(app_data_dir), sealer)
+}
+
+fn load_with(
+    path: &Path,
+    sealer: Option<&dyn Sealer>,
+) -> Result<Option<RemoteDescriptor>, RemoteError> {
     if !path.exists() {
         return Ok(None);
     }
-    pairing::key::check_owner_only(&path, "remote access descriptor")
+    pairing::key::check_owner_only(path, "remote access descriptor")
         .map_err(|e| RemoteError::Local(e.to_string()))?;
-    let bytes = std::fs::read(&path)
+    let bytes = std::fs::read(path)
         .map_err(|e| RemoteError::Local(format!("cannot read remote descriptor: {e}")))?;
     if bytes.len() > MAX_LINK_BYTES {
         return Err(RemoteError::Local(
@@ -653,7 +749,24 @@ pub fn load_persisted(app_data_dir: &Path) -> Result<Option<RemoteDescriptor>, R
     }
     let persisted: StoredDescriptor = serde_json::from_slice(&bytes)
         .map_err(|_| RemoteError::Local("the remote access descriptor is corrupt".into()))?;
-    validate_descriptor(persisted).map(Some)
+    let (persisted, migrate) = open_sealed_code(persisted, sealer)?;
+    let descriptor = validate_descriptor(persisted)?;
+    if migrate {
+        // The atomic replacement unlinks the file that held the plaintext code.
+        persist_with(path, &descriptor, sealer)?;
+    }
+    Ok(Some(descriptor))
+}
+
+/// The descriptor currently on disk, as `finalize_authenticated_pairing`
+/// compares it. Unchanged without a sealer.
+fn saved_descriptor(bytes: &[u8]) -> Option<RemoteDescriptor> {
+    let Some(sealer) = at_rest::installed() else {
+        return serde_json::from_slice::<RemoteDescriptor>(bytes).ok();
+    };
+    let stored = serde_json::from_slice::<StoredDescriptor>(bytes).ok()?;
+    let (stored, _) = open_sealed_code(stored, Some(sealer)).ok()?;
+    validate_descriptor(stored).ok()
 }
 
 fn derived_transport_key(key: &ClientKey) -> ([u8; 32], [u8; 32]) {
@@ -1394,7 +1507,7 @@ fn finalize_authenticated_pairing(
         // forget may have changed the next startup while the network awaited.
         let stored = std::fs::read(config_path)
             .ok()
-            .and_then(|bytes| serde_json::from_slice::<RemoteDescriptor>(&bytes).ok());
+            .and_then(|bytes| saved_descriptor(&bytes));
         if !stored.is_some_and(|saved| saved.node_id == current.node_id
             && saved.endpoint == current.endpoint
             && saved.transport_pubkey == current.transport_pubkey
@@ -2166,6 +2279,68 @@ mod tests {
         let text = std::fs::read_to_string(path).unwrap();
         assert!(!text.contains(&code));
         assert!(!text.contains("\"code\""));
+    }
+
+    fn sealed_fixture(seed: u8) -> (tempfile::TempDir, PathBuf, RemoteDescriptor, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let node = SigningKey::from_bytes(&[seed; 32]);
+        let transport = X25519PublicKey::from(&StaticSecret::from([seed + 1; 32])).to_bytes();
+        let code = test_code(seed);
+        let link = signed_link("127.0.0.1:4242".into(), &node, transport, &code);
+        let path = config_path(dir.path());
+        (dir, path, parse_pairing_link(&link).unwrap(), code)
+    }
+
+    #[test]
+    fn a_sealer_keeps_the_pairing_code_out_of_the_descriptor_file() {
+        use crate::at_rest::test_sealer::MemorySealer;
+        let (_dir, path, descriptor, code) = sealed_fixture(31);
+        persist_with(&path, &descriptor, Some(&MemorySealer)).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains(&code), "{text}");
+        assert!(!text.contains("\"code\""), "{text}");
+        assert!(text.contains("\"sealed_code\""), "{text}");
+        assert!(text.contains(&descriptor.transport_pubkey), "public pins stay readable");
+
+        let loaded = load_with(&path, Some(&MemorySealer)).unwrap().unwrap();
+        assert_eq!(loaded.code.as_deref(), Some(code.as_str()));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text, "no rewrite once sealed");
+        assert!(
+            load_with(&path, None).is_err(),
+            "a sealed code never falls back to a plaintext read"
+        );
+
+        let mut stripped = loaded;
+        stripped.code = None;
+        persist_with(&path, &stripped, Some(&MemorySealer)).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("\"code\"") && !text.contains("sealed_code"), "{text}");
+    }
+
+    #[test]
+    fn a_plaintext_pending_code_is_sealed_once_on_load() {
+        use crate::at_rest::test_sealer::MemorySealer;
+        let (_dir, path, descriptor, code) = sealed_fixture(41);
+        persist_with(&path, &descriptor, None).unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().contains(&code));
+
+        let loaded = load_with(&path, Some(&MemorySealer)).unwrap().unwrap();
+        assert_eq!(loaded.code.as_deref(), Some(code.as_str()));
+        let migrated = std::fs::read_to_string(&path).unwrap();
+        assert!(!migrated.contains(&code), "{migrated}");
+        assert!(migrated.contains("\"sealed_code\""), "{migrated}");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let names: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, [REMOTE_CONFIG_FILE], "only the migrated descriptor remains");
+
+        load_with(&path, Some(&MemorySealer)).unwrap().unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), migrated, "migration runs once");
     }
 
     #[test]

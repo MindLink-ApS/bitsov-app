@@ -99,6 +99,87 @@ async fn finish_probe(state: &NodeState, result: Result<bool, String>) {
 }
 
 pub async fn unlock(state: &NodeState) -> Result<(), String> {
+    unlock_with(state, None).await
+}
+
+/// How long a password the node accepted waits for the owner's
+/// "Remember on this phone" choice. Memory only.
+#[cfg(target_os = "android")]
+const REMEMBER_WINDOW: Duration = Duration::from_secs(120);
+
+#[cfg(target_os = "android")]
+pub struct RememberOffer {
+    node: String,
+    password: zeroize::Zeroizing<String>,
+    offered: Instant,
+}
+
+/// Android only: the owner typed the node password because this phone has no
+/// saved copy, or its saved copy no longer opens. The node checks it; only a
+/// password it accepted is kept, in memory, for [`remember`].
+#[cfg(target_os = "android")]
+pub async fn unlock_typed(
+    state: &NodeState,
+    password: zeroize::Zeroizing<String>,
+) -> Result<(), String> {
+    *state.home_remember.lock().unwrap() = None;
+    if password.is_empty() || password.len() > 4096 {
+        return Err("Type the password you chose for your home node.".into());
+    }
+    unlock_with(state, Some(password)).await
+}
+
+/// Answer the offer made by the last typed unlock. Saving needs a biometric
+/// approval; a cancelled or failed save keeps the offer until it expires.
+#[cfg(target_os = "android")]
+pub async fn remember(state: &NodeState, remember: bool) -> Result<(), String> {
+    let offer = state
+        .home_remember
+        .lock()
+        .unwrap()
+        .take()
+        .ok_or("There is no typed password to remember. Unlock with your node password first.")?;
+    if !remember {
+        return Ok(());
+    }
+    if offer.offered.elapsed() > REMEMBER_WINDOW {
+        return Err("This offer expired. The next time you unlock with your password, choose Remember again.".into());
+    }
+    if state.node_id.lock().unwrap().as_deref() != Some(offer.node.as_str()) {
+        return Err("This phone is no longer connected to the node that accepted the password.".into());
+    }
+    let ctx = state
+        .pairing
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("Pairing is unavailable.")?;
+    let (blob, record) = local_key(&ctx.store)
+        .ok_or("This phone has no enrolled Android Keystore key for this node.")?;
+    if !record.registered {
+        return Err("This phone's device key has not been approved.".into());
+    }
+    let (offer, saved) = tokio::task::spawn_blocking(move || {
+        let saved = home_keychain::save_password_for_device(
+            &offer.node,
+            offer.password.as_bytes(),
+            &blob,
+            true,
+        );
+        (offer, saved)
+    })
+    .await
+    .map_err(|_| "The biometric save request stopped.")?;
+    if saved.is_err() {
+        state.home_remember.lock().unwrap().get_or_insert(offer);
+    }
+    saved
+}
+
+async fn unlock_with(
+    state: &NodeState,
+    typed: Option<zeroize::Zeroizing<String>>,
+) -> Result<(), String> {
     let _operation = state
         .remote_recovery
         .try_lock()
@@ -151,15 +232,25 @@ pub async fn unlock(state: &NodeState) -> Result<(), String> {
     let signature = device_sign(blob.clone(), message, "Unlock your BitSov home node".into())
         .await
         .map_err(|e| e.message)?;
-    let password = tokio::task::spawn_blocking(move || home_keychain::password(&node, Some(&blob)))
-        .await
-        .map_err(|_| {
-            if cfg!(target_os = "android") {
-                "The biometric password request stopped."
-            } else {
-                "The Keychain unlock request stopped."
-            }
-        })??;
+    #[cfg(target_os = "android")]
+    let accepted = typed
+        .as_ref()
+        .map(|password| zeroize::Zeroizing::new(password.as_str().to_owned()));
+    let password = match typed {
+        Some(password) => password,
+        None => {
+            let node = node.clone();
+            tokio::task::spawn_blocking(move || home_keychain::password(&node, Some(&blob)))
+                .await
+                .map_err(|_| {
+                    if cfg!(target_os = "android") {
+                        "The biometric password request stopped."
+                    } else {
+                        "The Keychain unlock request stopped."
+                    }
+                })??
+        }
+    };
     // Both biometric operations may take time; the node enforces challenge expiry.
     challenge.message(&binding, &key_id, &connection.pin.public_key, now_unix())?;
     let body = UnlockBody {
@@ -172,6 +263,14 @@ pub async fn unlock(state: &NodeState) -> Result<(), String> {
     drop(body);
     drop(connection);
     result.map_err(|e| e.to_string())?;
+    #[cfg(target_os = "android")]
+    if let Some(password) = accepted {
+        *state.home_remember.lock().unwrap() = Some(RememberOffer {
+            node,
+            password,
+            offered: Instant::now(),
+        });
+    }
     // The node closes the locked listener within 250 ms, then restarts its live
     // services. Retry only connection/authentication, never the unlock body.
     tokio::time::sleep(Duration::from_millis(300)).await;
