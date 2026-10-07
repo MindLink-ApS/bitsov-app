@@ -838,11 +838,26 @@ export function ControlCenter(props: Props) {
   // Calls: media is peer to peer in this webview; each signal is one paid send.
   const [callView, setCallView] = createSignal<CallView>(CALL_IDLE);
   const [callStreams, setCallStreams] = createSignal<{ local: MediaStream | null; remote: MediaStream | null }>({ local: null, remote: null });
+  const [callApproval, setCallApproval] = createSignal(false);
+  const [callApproving, setCallApproving] = createSignal(false);
   const calls = createCallEngine({
+    authorize: async () => {
+      const pairing = await act(() => source.pairingStatus());
+      if (!pairing.ok) {
+        setErrors('spend', pairing.error.message);
+        setCallApproval(true);
+        return false;
+      }
+      const allowed = (pairing.value.state === 'fallback' ||
+        (pairing.value.state === 'paired' && pairing.value.scopes.includes('spend'))) && roomCanSpend();
+      setCallApproval(!allowed);
+      return allowed;
+    },
     grant: () => budget()?.node_grant ?? null,
     quote: (peer) => act(() => source.callQuote(peer)),
     signal: async (peer, kind, plaintext, maxMsat) => {
       const r = await act(() => source.callSignal(peer, kind, plaintext, maxMsat));
+      if (!r.ok && (needsApproval(r.error) || r.error.code === 'spend_refused' || /token lacks.*spend|403/i.test(r.error.message))) setCallApproval(true);
       void loadBudget();
       void loadWallet();
       return r;
@@ -1477,6 +1492,21 @@ export function ControlCenter(props: Props) {
         </Switch>
       </aside>
       <CallPanel
+        approvalOpen={callApproval()}
+        approval={<Show when={callApproval()}>
+          <div data-call-approval>
+            <strong>Approve spending before calling</strong>
+            <p class="hint">Spending needs approval. After approval, press Call or Accept again.</p>
+            <SpendBar spend={spend()} error={errors.spend ?? errors.spendPoll} now={now()} actions={actions} />
+            <Show when={spend()?.state !== 'pending' && spend()?.state !== 'unavailable'}>
+              <button type="button" class="soft" data-call-approve disabled={moneyBlocked() || callApproving()} onClick={async () => {
+                setCallApproving(true);
+                try { await actions.approve(); } finally { setCallApproving(false); }
+              }}>Approve spending</button>
+            </Show>
+            <button type="button" class="soft" onClick={() => setCallApproval(false)}>Close</button>
+          </div>
+        </Show>}
         blocked={moneyBlocked()}
         view={callView()}
         streams={callStreams()}
@@ -1487,7 +1517,7 @@ export function ControlCenter(props: Props) {
         hangup={() => void calls.hangup()}
         mute={() => calls.toggleMute()}
         camera={() => void calls.toggleCamera()}
-        dismiss={() => calls.dismiss()}
+        dismiss={() => { setCallApproval(false); calls.dismiss(); }}
       />
       <MeetingPanel
         view={meetingView()}
@@ -2418,6 +2448,8 @@ function MediaView(props: { stream: MediaStream | null; video: boolean; muted: b
 
 /** The call card: incoming (accept/decline with price), ringing, live (mute, camera, duration, hang up), ended. */
 function CallPanel(props: {
+  approvalOpen: boolean;
+  approval: JSX.Element;
   blocked: boolean;
   view: CallView;
   streams: { local: MediaStream | null; remote: MediaStream | null };
@@ -2445,8 +2477,8 @@ function CallPanel(props: {
   const who = () => (v().peer ? props.nameOf(v().peer!) : '');
   const price = (m: number | null) => (m === null ? '' : ` · ${sats(m)} ${satUnit(m)}`);
   return (
-    <Show when={v().phase !== 'idle'}>
-      <aside class="call-panel" data-call-panel={v().phase} role="dialog" aria-label={`${CALL_TITLE[v().phase]} ${who()}`}>
+    <Show when={v().phase !== 'idle' || props.approvalOpen}>
+      <aside class="call-panel" data-call-panel={v().phase} role="dialog" aria-label={props.approvalOpen ? 'Call spending approval' : `${CALL_TITLE[v().phase]} ${who()}`}>
         <header>
           <strong data-call-title>{CALL_TITLE[v().phase]}{v().media === 'video' ? ' (video)' : ''}</strong>
           <span class="who">{who()}</span>
@@ -2454,6 +2486,7 @@ function CallPanel(props: {
             <span class="duration" data-call-duration>{duration(Math.max(0, tick() - v().liveAt!))}</span>
           </Show>
         </header>
+        {props.approval}
         <CallNetworkNote />
         <Show when={v().media === 'video' && (v().phase === 'live' || v().phase === 'connecting')}>
           <div class="call-videos">
@@ -2465,10 +2498,16 @@ function CallPanel(props: {
           <MediaView stream={props.streams.remote} video={false} muted={false} kind="remote" />
         </Show>
         <Show when={v().paidMsat > 0}>
-          <p class="hint" data-call-paid>Paid {fmtAmount(v().paidMsat)} for this call’s signals. Media is direct and not billed.</p>
+          <p class="hint" data-call-paid>Signal cost cap: {fmtAmount(v().paidMsat)} (includes maximum routing fees; settled amount may be lower). Media is direct and not billed.</p>
+        </Show>
+        <Show when={v().connection}>
+          {(connection) => <p class="hint" data-call-connection>Connection: {connection().local === 'srflx' ? 'srflx(STUN)' : connection().local} (local) / {connection().remote === 'srflx' ? 'srflx(STUN)' : connection().remote} (remote)</p>}
         </Show>
         <Show when={v().phase === 'ended'}>
           <p class="hint" data-call-ended>{v().error ?? END_REASON[v().reason ?? 'hangup']}</p>
+        </Show>
+        <Show when={v().phase !== 'ended' && v().error}>
+          <p class="hint" data-call-error>{v().error}</p>
         </Show>
         <div class="call-actions">
           <Switch>
@@ -2479,7 +2518,7 @@ function CallPanel(props: {
             <Match when={v().phase === 'ended'}>
               <button type="button" class="soft" data-call-dismiss onClick={() => props.dismiss()}>Close</button>
             </Match>
-            <Match when={true}>
+            <Match when={v().phase !== 'idle'}>
               <Show when={v().phase === 'live' || v().phase === 'connecting'}>
                 <button type="button" class="soft" data-call-mute aria-pressed={v().muted} onClick={() => props.mute()}>Mute</button>
                 <Show when={v().media === 'video'}>
