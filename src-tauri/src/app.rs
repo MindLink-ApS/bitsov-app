@@ -5974,6 +5974,8 @@ fn device_view(state: &NodeState, record: Option<&device::Record>) -> device::De
 
 #[derive(Deserialize)]
 struct DeviceKeyReply {
+    #[serde(default)]
+    delegation_message: Option<String>,
     op_id: String,
     key_id: String,
     fingerprint: String,
@@ -6025,6 +6027,11 @@ async fn do_device_key_status_local(state: &NodeState) -> Result<device::DeviceV
         } else if let Ok((code, body)) = call_api(state, reqwest::Method::GET, &path, None).await {
             if code.is_success() {
                 let reply: act::ElevationStatusReply = decode_act("/pair/device-key", &body)?;
+                if let Some(pending) = updated.pending.as_mut() {
+                    if reply.delegation_message.is_some() {
+                        pending.delegation_message = reply.delegation_message;
+                    }
+                }
                 lapsed = apply_device_status(&mut updated, &reply.status);
             }
         }
@@ -6155,6 +6162,7 @@ async fn do_device_key_register(state: &NodeState) -> Result<device::DeviceView,
     record.key_id = Some(reply.key_id);
     record.fingerprint = Some(reply.fingerprint.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').take(24).collect());
     record.pending = Some(device::PendingRegistration {
+        delegation_message: reply.delegation_message,
         op_id: reply.op_id,
         owner_action: reply.owner_action.chars().take(600).collect(),
         expires_at_ms: (reply.expires_at.max(0) as u64).saturating_mul(1000),
@@ -12392,9 +12400,9 @@ mod control_act_tests {
                     }
                     *public.lock().unwrap() = Some(pk);
                     serde_json::json!({"op_id": "dd01", "key_id": "k1", "fingerprint": "K1K1-0000", "expires_at": far,
-                        "owner_action": "konsensus device approve --op dd01 --config /n/konsensus.toml"})
+                        "owner_action": "konsensus device approve --op dd01 --config /n/konsensus.toml", "delegation_message": "delegation-from-post"})
                 }
-                ("GET", "/pair/device-key/dd01") => serde_json::json!({"status": if registered.load(Ordering::SeqCst) { "registered" } else { "pending" }}),
+                ("GET", "/pair/device-key/dd01") => serde_json::json!({"delegation_message": "delegation-from-get", "status": if registered.load(Ordering::SeqCst) { "registered" } else { "pending" }}),
                 ("DELETE", _) => serde_json::json!({"status": "cancelled"}),
                 ("POST", "/pair/relation-intent") => {
                     let i = &body["intent"];
@@ -12475,6 +12483,7 @@ mod control_act_tests {
             fingerprint: Some("K1K1-0000".into()),
             registered: false,
             pending: Some(device::PendingRegistration {
+                delegation_message: None,
                 op_id: op.into(),
                 owner_action: format!("konsensus device approve --op {op}"),
                 expires_at_ms: u64::MAX,
@@ -12543,7 +12552,10 @@ mod control_act_tests {
         assert_eq!(view.state, device::DeviceState::Pending);
         assert_eq!(view.owner_action.as_deref(), Some("konsensus device approve --op dd01 --config /n/konsensus.toml"));
         assert_eq!(view.fingerprint.as_deref(), Some("K1K1-0000"));
+        let pending = || device::load_record(&device_store(s).unwrap()).unwrap().pending.unwrap();
+        assert_eq!(pending().delegation_message.as_deref(), Some("delegation-from-post"));
         assert_eq!(do_device_key_status(s).await.unwrap().state, device::DeviceState::Pending);
+        assert_eq!(pending().delegation_message.as_deref(), Some("delegation-from-get"));
         dn.registered.store(true, Ordering::SeqCst);
         assert_eq!(do_device_key_status(s).await.unwrap().state, device::DeviceState::Registered);
         // Nothing but the public key and the proof left this app.
