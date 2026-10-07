@@ -1,4 +1,4 @@
-import type { AiTopic } from './types';
+import type { AiTopic, TopicRead } from './types';
 
 export type AssistantId = 'node' | 'wallet' | 'inbox';
 export const ASSISTANTS: Record<AssistantId, { name: string; role: string; topics: AiTopic[]; suggestions: string[] }> = {
@@ -12,3 +12,20 @@ export const ASSISTANTS: Record<AssistantId, { name: string; role: string; topic
 export type AssistantTurn = { at: number; question: string; answer: string };
 export type AssistantThread = { revision: string; turns: AssistantTurn[] };
 export type ThreadRequest = { action: 'load' } | { action: 'forget' } | { action: 'append'; revision: string; turn: AssistantTurn };
+
+/** Host-validated model data. Never accepted by the action/composer dispatcher. */
+export type ModelProposal =
+  | { kind: 'pay'; peer: string; sats: number }
+  | { kind: 'request'; peer: string; sats: number; note: string }
+  | { kind: 'message'; recipient: string; draft_text: string };
+export type LocalTurn = {
+  output: { kind: 'answer'; text: string; topics: AiTopic[] } | { kind: 'proposal'; proposal: ModelProposal };
+  reads: TopicRead[];
+};
+export function modelProposalText(p: ModelProposal): string {
+  switch (p.kind) {
+    case 'pay': return `Payment draft to ${p.peer}: ${p.sats} sats`;
+    case 'request': return `Request draft to ${p.peer}: ${p.sats} sats\n${p.note}`;
+    case 'message': return `Message draft to ${p.recipient}:\n${p.draft_text}`;
+  }
+}

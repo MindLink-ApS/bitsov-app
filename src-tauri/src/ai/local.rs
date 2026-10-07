@@ -125,6 +125,26 @@ fn http_client(timeout: Duration) -> Result<reqwest::Client, String> {
         .map_err(|_| "Could not start the request.".to_string())
 }
 
+/// A3 accepts only a host-resolved loopback choice, never a model/window URL.
+/// No process is launched here; host-launched models still belong to model_launch.
+pub async fn tool_completion(choice: &LocalChoice, mut body: serde_json::Value) -> Result<serde_json::Value, String> {
+    body["model"] = serde_json::json!(choice.model);
+    let client = http_client(super::REMOTE_TIMEOUT)?;
+    let mut response = client.post(choice.endpoint()).json(&body).send().await
+        .map_err(|_| "The local model did not answer.".to_string())?;
+    if !response.status().is_success() { return Err("The local model refused the request.".into()); }
+    let bytes = read_bounded(&mut response).await?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|_| "The local model returned an invalid response.".to_string())?;
+    let choices = value["choices"].as_array().filter(|c| c.len() == 1)
+        .ok_or("The local model returned an invalid response.")?;
+    if !matches!(choices[0]["finish_reason"].as_str(), Some("stop" | "tool_calls")) {
+        return Err("The local model did not finish its answer.".into());
+    }
+    choices[0].get("message").filter(|v| v.is_object()).cloned()
+        .ok_or_else(|| "The local model returned an invalid response.".into())
+}
+
 /// Bound a body the same way remote send does.
 async fn read_bounded(response: &mut reqwest::Response) -> Result<Vec<u8>, String> {
     if response
@@ -396,6 +416,43 @@ mod tests {
             .build()
             .unwrap()
             .block_on(future)
+    }
+
+    #[test]
+    fn tool_transport_keeps_loopback_and_rejects_bad_envelopes() {
+        for kind in [LocalKind::Ollama, LocalKind::OpenAiCompat] {
+            let message = json!({"role":"assistant","content":"{\"kind\":\"answer\",\"text\":\"Unknown\",\"topics\":[]}"});
+            let reply = json!({"choices":[{"finish_reason":"stop","message":message}]}).to_string();
+            let (port, seen) = serve(vec![("/v1/chat/completions".into(), reply)]);
+            let choice = LocalChoice { port, model: "tiny".into(), kind };
+            assert!(choice.endpoint().starts_with("http://127.0.0.1:"));
+            assert_eq!(block_on(tool_completion(&choice, json!({"messages":[]}))).unwrap(), message);
+            assert_eq!(seen.recv_timeout(Duration::from_secs(2)).unwrap(), "/v1/chat/completions");
+        }
+        for reply in ["invalid".to_owned(), "{}".to_owned(),
+            json!({"choices":[{"finish_reason":"length","message":{"content":"{}"}}]}).to_string(),
+            json!({"choices":[{"finish_reason":"stop","message":{}},{"finish_reason":"stop","message":{}}]}).to_string(),
+            "x".repeat(MAX_REMOTE_BYTES + 1)] {
+            let (port, _) = serve(vec![("/v1/chat/completions".into(), reply)]);
+            let choice = LocalChoice { port, model: "tiny".into(), kind: LocalKind::Ollama };
+            assert!(block_on(tool_completion(&choice, json!({"messages":[]}))).is_err());
+        }
+    }
+
+    #[test]
+    fn tool_transport_refuses_redirects() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut buf = [0u8; 8192];
+            let _ = socket.read(&mut buf).unwrap();
+            socket.write_all(b"HTTP/1.1 302 Found\r\nLocation: https://example.invalid/model\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+        });
+        let choice = LocalChoice { port, model: "tiny".into(), kind: LocalKind::Ollama };
+        assert_eq!(block_on(tool_completion(&choice, json!({"messages":[]}))).unwrap_err(), "The local model refused the request.");
+        server.join().unwrap();
     }
 
     #[test]

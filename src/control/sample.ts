@@ -1258,6 +1258,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
       const result: FileSaveResult = { saved: true, filename: file.filename, mime_type: file.mime_type, size_bytes: file.size_bytes };
       return result;
     },
+    aiLocalTurn: async () => { throw new Error('Choose a running local model in the desktop app.'); },
     aiThread: async (assistant, request) => {
       const current = assistantThreads[assistant] ??= { revision: '0', turns: [] };
       if (request.action === 'forget') current.turns = [];

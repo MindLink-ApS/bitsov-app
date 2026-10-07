@@ -1,4 +1,4 @@
-//! Fixed A2 assistants. No action tools, model-selected tools, or network clients.
+//! Fixed assistant read allowlists. No action tools or network clients.
 use super::{ProviderKind, Topic};
 use serde::{Deserialize, Serialize};
 

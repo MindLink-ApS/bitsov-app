@@ -3,7 +3,6 @@ import { render } from 'solid-js/web';
 import { AiTrack, createAiSession } from '../src/control/AiTrack';
 import { sampleSource } from '../src/control/sample';
 import type { Source } from '../src/control/source';
-import type { Disclosure } from '../src/control/types';
 
 let dispose: (() => void) | undefined;
 let mount: HTMLDivElement;
@@ -32,23 +31,37 @@ it('unknown questions describe only the named assistant’s shipped read-only ro
   expect($('[data-ai-text]').textContent).not.toContain('I can draft');
 });
 
-it('cancels a local preview that finishes after leaving the assistant', async () => {
+it('renders local model proposals as inert drafts and sends no action', async () => {
   const source = sampleSource();
-  let finish!: (d: Disclosure) => void;
-  const cancelled: string[] = [];
   const own = { kind: 'local' as const, label: 'On this computer', enabled: true, host: '127.0.0.1:11434', model: 'local', note: null, pays: { to: null, rail: 'none' as const }, data_leaves: null };
   source.aiProviders = async () => [own];
-  source.aiDisclose = async (_provider, _topic, _since, _preset, _question, assistant) => {
-    expect(assistant).toBe('inbox');
-    return new Promise(resolve => { finish = resolve; });
-  };
-  source.aiCancel = async id => { cancelled.push(id); return true; };
+  source.aiLocalTurn = vi.fn(async () => ({ output: { kind: 'proposal' as const, proposal: { kind: 'message' as const, recipient: '11'.repeat(32), draft_text: 'hello' } }, reads: [] }));
+  source.aiDisclose = vi.fn();
+  source.aiSend = vi.fn();
   await open(source);
-  await ask('who messaged me?');
-  await vi.waitFor(() => expect(finish).toBeTypeOf('function'));
-  dispose!(); dispose = undefined;
-  finish({ id: 'late', provider: 'local', label: 'Own', host: '127.0.0.1:11434', model: 'local', preset: 'counts', body: '{}', bytes: 2, key_env: null, expires_in_ms: 300000 });
-  await vi.waitFor(() => expect(cancelled).toEqual(['late']));
+  expect($('[data-ai-ask]').getAttribute('aria-label')).toBe('Ask');
+  expect($('[data-ai-policy]').textContent).toContain('display-only');
+  expect($('.ai-hero').textContent).not.toContain('preview each request');
+  await ask('draft a message');
+  await vi.waitFor(() => expect($('[data-model-proposal]')).not.toBeNull());
+  expect($('[data-model-proposal]').textContent).toContain('hello');
+  expect($('[data-model-proposal]').textContent).toContain('11'.repeat(32));
+  expect($('[data-ai-prefill]')).toBeNull();
+  expect(source.aiLocalTurn).toHaveBeenCalledWith('inbox', 'draft a message', '');
+  expect(source.aiDisclose).not.toHaveBeenCalled();
+  expect(source.aiSend).not.toHaveBeenCalled();
+  await vi.waitFor(async () => expect((await source.aiThread('inbox', { action: 'load' })).turns[0].answer).toContain('hello'));
+});
+
+it('shows a host loop failure without falling back to prose or dispatch', async () => {
+  const source = sampleSource();
+  source.aiProviders = async () => [{ kind: 'local', label: 'Own', enabled: true, host: '127.0.0.1:11434', model: 'local', note: null, pays: { to: null, rail: 'none' }, data_leaves: null }];
+  source.aiLocalTurn = async () => { throw new Error('The local model returned an invalid answer. Nothing was done.'); };
+  await open(source);
+  await ask('anything outside the rules parser');
+  await vi.waitFor(() => expect($('[data-ai-answer="error"]')).not.toBeNull());
+  expect($('[data-model-proposal]')).toBeNull();
+  expect($('[data-ai-prefill]')).toBeNull();
 });
 
 it.each(['old-first', 'new-first'])('saves both answers when reopening during a read: %s', async order => {
@@ -72,4 +85,17 @@ it.each(['old-first', 'new-first'])('saves both answers when reopening during a 
   await vi.waitFor(async () => expect((await source.aiThread('inbox', { action: 'load' })).turns).toHaveLength(2));
   expect($('[data-assistant-error]')).toBeNull();
   expect($('[data-assistant-ready]')).not.toBeNull();
+});
+
+it('passes separately entered message text verbatim to the local host', async () => {
+  const source = sampleSource();
+  source.aiProviders = async () => [{ kind: 'local', label: 'Own', enabled: true, host: '127.0.0.1:11434', model: 'local', note: null, pays: { to: null, rail: 'none' }, data_leaves: null }];
+  source.aiLocalTurn = vi.fn(async () => ({ output: { kind: 'answer' as const, text: 'Draft unavailable', topics: [] }, reads: [] }));
+  await open(source);
+  await vi.waitFor(() => expect($('[data-ai-draft-text]')).not.toBeNull());
+  const input = $<HTMLTextAreaElement>('[data-ai-draft-text]');
+  input.value = 'Hello, exactly this.\nThank you.';
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  await ask('draft this message');
+  await vi.waitFor(() => expect(source.aiLocalTurn).toHaveBeenCalledWith('inbox', 'draft this message', 'Hello, exactly this.\nThank you.'));
 });
