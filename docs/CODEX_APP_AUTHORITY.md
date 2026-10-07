@@ -96,12 +96,13 @@ Must-fix before next ship: <list>
 - **NO-GO** on any A violation or an unmet gate for the thing being shipped.
 
 ## G. Executable checks (run these — don't eyeball it)
-Pinned protocol: **release `v0.3.0-rc9`, source-ref `cd75c69ed17eeb812d45bdc666b381ca7da1b697`, repo `MindLink-ApS/BitSov-bitsov`**.
+Pinned protocol: **release `v0.3.0-rc11`, source-ref `834968b955eaa3d402b87cd0d6835456473115df`, repo `MindLink-ApS/BitSov-bitsov`**.
 Five CLI targets: Linux x86_64/aarch64, Darwin aarch64/x86_64 and Windows x86_64.
 The fetcher requires `SHA256SUMS.asc` signed by release key `B299…EF6E`; a signed
-tag alone does not verify release bytes. CI fetching and packaging require the
-checksum assets to be attached and the release accessible. The app remains
-unpublished. See [rc9 upgrade checks](NODE_RC9_UPGRADE.md) and
+tag alone does not verify release bytes. rc11 is a published pre-release with
+signed checksums; its manifest and Darwin arm64 sidecar were verified locally.
+Other platform bytes and package/runtime acceptance remain CI gates. The app remains
+unpublished. See [rc11 upgrade checks](NODE_RC11_UPGRADE.md) and
 [API contract](API_READINESS.md). Existing operator identities are preserved.
 Machine form of these checks: `scripts/authority-check.sh` (CI "Authority Check"; the "Build" job
 is the compile gate, PR #9). Run from the app repo root; adjust the Website path to your checkout.

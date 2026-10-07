@@ -3,7 +3,7 @@
 Internal build of `BitSov.app` for Apple Silicon. It is unsigned and not
 notarized, and it is not published. It is for internal testers who accept a
 Gatekeeper warning. It is not a public download. The protocol pin stays
-`v0.3.0-rc9`. Windows packaging is out of scope.
+`v0.3.0-rc11`. Windows packaging is out of scope.
 
 This follows [MAC_PACKAGE_PLAN.md](MAC_PACKAGE_PLAN.md) §1, §2, §4 and §5.
 It deviates from §3; see [Deviation](#deviation-release-excludes-the-assistant-page).
@@ -24,7 +24,7 @@ What the script does:
 
 1. **Sidecar.** Deletes every `src-tauri/bin/konsensus-*`. Then it runs
    `scripts/fetch-node-sidecar.sh` with a throwaway `GNUPGHOME`. That script
-   fetches the pinned rc9 release and checks its signature and hash fail-closed.
+   fetches the pinned rc11 release and checks its signature and hash fail-closed.
    For local dev, `--use-existing-sidecar` (or
    `BITSOV_USE_EXISTING_SIDECAR=1`) keeps an existing
    `src-tauri/bin/konsensus-aarch64-apple-darwin` and skips the fetch. The
@@ -170,8 +170,8 @@ gates together and removes the matching checks.
 was 10.13, while the rc7 arm64 sidecar's Mach-O minimum is 11.0 (spike,
 2026-09-14). JSON has no comments, so this note is the record.
 `package-mac.sh` prints the sidecar `minos`. 11.0 is the build floor, not a
-tested support claim. Recheck the rc9 sidecar minos in CI after its signed assets
-are available; the historical rc7 inspection is not rc9 binary evidence. No macOS version has runtime evidence yet.
+tested support claim. Recheck the rc11 sidecar minos in CI using its published
+signed assets; the historical rc7 inspection is not rc11 binary evidence. No macOS version has runtime evidence yet.
 
 ## CI artifact
 
@@ -239,4 +239,4 @@ None of these are done by this repository or its CI.
 | Gatekeeper on a clean machine | `spctl -a -vv` and a first launch on a machine that has never seen the app, with no existing node or wallet |
 | Publishing | No release, tag, website download, or release metadata until a signed and notarized build exists. `/bitsov/app` stays a waitlist. |
 | PR #13 | `factory/mac-package-spike` stays open. A human decides whether to close it. |
-| Pin | `v0.3.0-rc9` (`cd75c69`); fetch and verify signed checksums before packaging. |
+| Pin | `v0.3.0-rc11` (`834968b`); fetch and verify signed checksums before packaging. |

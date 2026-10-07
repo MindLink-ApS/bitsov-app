@@ -5,9 +5,12 @@ Dated ticket rows. Each row: id | opened | evidence | state.
 
 ## Active (this cycle)
 
-Current change: rc9 pin (`cd75c69`) and bundled local-owner capability; tests and
-upgrade details in [NODE_RC9_UPGRADE.md](docs/NODE_RC9_UPGRADE.md). Release asset
-verification awaits CI. The September workflow rows below are historical.
+Current change: rc11 pin (`834968b`), skipping unpublished rc10. The release
+manifest signature and Darwin arm64 sidecar hash were verified locally without
+execution. Source contract findings and checks are in
+[NODE_RC11_UPGRADE.md](docs/NODE_RC11_UPGRADE.md): remote first run is unsupported
+by the app; its label filter lags rc11; the pinned delay default is 144, not 2016. The September workflow
+rows below are historical.
 
 | id | opened | evidence | state |
 |---|---|---|---|
@@ -23,6 +26,7 @@ verification awaits CI. The September workflow rows below are historical.
 | Jarvis SIT mock | 2026-09-26 | #29 `91f20c8` SIT reader; #30 `66c57bf` mock rows in the assistant window | landed |
 | Jarvis J1–J4 + J0 isolation | 2026-09-25 | #21 `8cc34eb` J1; #22 `3543229` J2; #20 `61dd969` J3; #26 `dbd3d9e` J4; #27 `32c49bc` J4 review; #24 `612b330` J0 macOS isolation spike | landed |
 | APP-16 quit stops node | 2026-09-18 | #17 `0190baa` (fixes #16) | landed |
+| APP-RC9 | 2026-10-06 | #160 `fb2ce6f`; rc9 pin (`cd75c69`) and gated bundled local owner ceremony | landed |
 | APP-RC7 | 2026-09-17 | #14 `ec13f2a` rc7 pin (`958e3997`); untouched-init CI smoke; internal Mac package evidence in `docs/MAC_PACKAGE_SPIKE.md` | landed |
 | Q4-APP-RC6 / Q5b | 2026-09-13 | #10 rc6 re-pin + signature hardening; #11 docs reconciliation; included in main `93c56e0a` | landed |
 | Darwin (B10) | 2026-09-03 | genome `v0.3.0-rc5` ships signed macOS/Windows node sidecars (not notarized / Authenticode-signed); PR #4 mac/win hosts, PR #9 Darwin SKIP retired — CS-1 smoke runs on Linux + macOS | landed |
@@ -33,9 +37,9 @@ verification awaits CI. The September workflow rows below are historical.
 
 | id | opened | evidence | state |
 |---|---|---|---|
-| rc9 release verification | 2026-10-06 | app pins rc9 (`cd75c69`); signed checksum attachment/publication and Sidecar/Mac Package checks pending | human / CI |
+| rc11 acceptance | 2026-10-07 | published pre-release; signed manifest and Darwin arm64 bytes verified; Sidecar/Mac Package and runtime acceptance pending | human / CI |
 | #25 / #13 / #23 | — | J0 model eval spike (draft); Mac package spike (CONFLICTING); Windows icon | open, Rasmus's call |
-| Publish | — | human-only; rc9 draft needs CI-accessible signed checksums; app unpublished; package-time sidecar verification and platform release gates remain open | hold |
+| Publish | — | human-only; rc11 signed pre-release is available; app unpublished; package-time sidecar verification and platform release gates remain open | hold |
 | PriceOpen | — | out of lane | hold |
 | Live relay | — | out of lane | hold |
 | Cloud/seed | — | out of lane | hold |
