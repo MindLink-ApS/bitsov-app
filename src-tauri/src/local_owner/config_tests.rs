@@ -16,7 +16,27 @@ const OMITTED_DEFAULTS: &str = r#"
 disk_free_floor_bytes = 2147483648
 peers = []
 admission_mode = "whitelist"
-cookie_mode = "disabled"
+cookie_mode = "adaptive"
+
+# rc11 #250: peer doorway limits are inherited by the bootstrap config.
+[dos_edge]
+connections_per_second = 10.0
+connection_burst = 40
+handshakes_per_second = 2.0
+handshake_burst = 8
+max_pending = 128
+max_handshakes = 64
+max_per_ip = 4
+max_per_subnet = 8
+cookie_threshold = 32
+max_tracked_sources = 4096
+cookie_timeout_secs = 3
+handshake_timeout_secs = 10
+
+# rc11: no display label or local watchtower staging by default.
+[node]
+
+[tower.clients]
 
 [logging]
 max_file_size_bytes = 10485760

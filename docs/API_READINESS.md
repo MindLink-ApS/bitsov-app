@@ -1,26 +1,26 @@
 # API_READINESS — the node contract CS-1..CS-6 build against
 
-**Pinned protocol:** release **`v0.3.0-rc9`**, source-ref
-**`cd75c69ed17eeb812d45bdc666b381ca7da1b697`**, repo `MindLink-ApS/BitSov-bitsov`.
-The signed tag and rc9 `docs/UPGRADING.md`, identity/auth and onboarding source were
-reviewed on 2026-10-06 through `gh api`. Release binary verification and live
-CS-1 remain CI checks after the signed checksum assets are available.
+**Pinned protocol:** release **`v0.3.0-rc11`**, source-ref
+**`834968b955eaa3d402b87cd0d6835456473115df`**, repo `MindLink-ApS/BitSov-bitsov`.
+The exact rc11 source was inspected on 2026-10-07 through `gh api`. Its published
+pre-release manifest signature and Darwin arm64 binary hash verified locally;
+live CS-1 and other runtime/package acceptance remain CI/operator checks.
 
-rc9 includes pairing, scoped tokens, freshness headers and the opt-in local owner
+rc11 includes pairing, scoped tokens, freshness headers and the opt-in local owner
 ceremony. The app retains rc7 fallback and fixture coverage. The table below is
 the historical CS route inventory, with the changed auth/restore boundaries
 called out; route presence does not grant spending or live identity authority.
-See [rc9 upgrade and release checks](NODE_RC9_UPGRADE.md).
+See [rc11 upgrade and release checks](NODE_RC11_UPGRADE.md).
 
 Base URL: `http://127.0.0.1:$PORT/api/v1` (loopback only — Gate G2). Auth: `Authorization: Bearer <jwt>`
 on REST; `bitsov.v1` + `bitsov.jwt.<token>` subprotocols on `/ws`.
 
-## MVP contract — "fund your node and start talking" (rc9 pin; rc7 compatibility retained)
+## MVP contract — "fund your node and start talking" (rc11 pin; rc7 compatibility retained)
 | MVP step | Method | Path | Purpose | Static |
 |---|---|---|---|---|
-| Boot/auth | POST | `/pair/request`, `/pair/confirm`, `/pair/token` | app pairing; `/auth/local` is only the rc7 404 fallback (rc9 smoke may use read/receive) | ✅ |
+| Boot/auth | POST | `/pair/request`, `/pair/confirm`, `/pair/token` | app pairing; `/auth/local` is only the rc7 404 fallback (rc11 smoke may use read/receive) | ✅ |
 | Identity | GET | `/identity` | node_id + x25519/secp256k1 pubkeys | ✅ |
-| Recovery | POST | `/identity/verify-mnemonic`, `/identity/restore` | verify needs identity scope; restore exists only on bootstrap in rc9 | ✅ |
+| Recovery | POST | `/identity/verify-mnemonic`, `/identity/restore` | verify needs identity scope; restore exists only on bootstrap in rc11 | ✅ |
 | Fund | POST | `/onboarding/start` | first-run funding state machine (tier full → funding_address) | ✅ |
 | Fund | GET | `/onboarding/state` | poll until `funding-seen` | ✅ |
 | Fund | GET | `/payments/balance`, `/payments/funding-address` | balance + deposit address (QR) | ✅ |
@@ -48,7 +48,7 @@ on REST; `bitsov.v1` + `bitsov.jwt.<token>` subprotocols on `/ws`.
 ## Verification
 **Static (no running node) — re-pin check:**
 ```bash
-git -C <BitSov-bitsov checkout> checkout cd75c69ed17eeb812d45bdc666b381ca7da1b697
+git -C <BitSov-bitsov checkout> checkout 834968b955eaa3d402b87cd0d6835456473115df
 grep -rhoE '"/api/v1/[^"]+"' crates/konsensus-api/src | tr -d '"' | sort -u
 # every path in the MVP table above must appear. String-literal grep on purpose: the
 # room-member routes are declared across lines, which a single-line `.route("…")` grep misses.

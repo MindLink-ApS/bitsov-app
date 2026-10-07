@@ -9,7 +9,7 @@
 To use a node you already run, without the app starting one, see
 [DEV_EXTERNAL_NODE.md](DEV_EXTERNAL_NODE.md).
 
-Use this path to test node changes beyond the bundled rc9 pin. Pairing and
+Use this path to test node changes beyond the bundled rc11 pin. Pairing and
 local owner bootstrap are now present in the pinned release too.
 
 ## What it is

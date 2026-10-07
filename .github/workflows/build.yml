@@ -190,7 +190,7 @@ jobs:
 
       # Runs on every PR/main push, including edits to fetch-node-sidecar.sh's TAG.
       # Explicit discovery makes a missing verified binary FAIL rather than SKIP.
-      # rc9 supplies both init and the two-phase owner API.
+      # rc11 supplies both init and the two-phase owner API.
       - name: Bootstrap config matches the pinned node's full-tier init
         working-directory: src-tauri
         env:
@@ -204,7 +204,7 @@ jobs:
             app::local_owner::config_tests::bootstrap_config_matches_node_init -- --exact --nocapture 2>&1 | tee /tmp/owner-test.log
           grep -q "running 1 test" /tmp/owner-test.log || { echo "::error::expected exactly 1 test to run"; exit 1; }
 
-      - name: rc9 owner create, finalize and restart lifecycle (verified sidecar)
+      - name: rc11 owner create, finalize and restart lifecycle (verified sidecar)
         working-directory: src-tauri
         env:
           BITSOV_OWNER_TEST_BINARY: ${{ github.workspace }}/src-tauri/bin/konsensus-x86_64-unknown-linux-gnu
@@ -230,8 +230,8 @@ jobs:
 
       # rc7 fixes #66 at the node: fresh init writes the provider pair and the
       # probe validates fee data. Test those defaults with NO endpoint override.
-      - name: CS-1 smoke — boot rc9 from untouched init defaults, durable identity
+      - name: CS-1 smoke — boot rc11 from untouched init defaults, durable identity
         run: bash scripts/cs1-local-smoke.sh
 
-      - name: CS-2 smoke — rc9 host bindings
+      - name: CS-2 smoke — rc11 host bindings
         run: bash scripts/cs2-local-smoke.sh
