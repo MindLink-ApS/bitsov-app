@@ -1,4 +1,5 @@
 import { createSignal, For, onCleanup, Show } from 'solid-js';
+import { usePairingActivity } from '../pairingActivity';
 import { invoke } from '@tauri-apps/api/core';
 export interface PendingOwner {
   ceremony_id: string; node_id: string; mnemonic: string;
@@ -20,6 +21,7 @@ export const ownerApi: OwnerApi = {
 /** The only renderer surface allowed to receive a newly generated phrase.
  * No persistence, logging or clipboard. JS/IPC copies cannot be physically zeroized. */
 export function LocalOwnerCeremony(props: { api?: OwnerApi; onComplete: () => void }) {
+  usePairingActivity(() => true);
   const api = props.api ?? ownerApi;
   const [step, setStep] = createSignal<'start' | 'phrase' | 'backup' | 'uncertain' | 'done'>('start');
   const [phrase, setPhrase] = createSignal('');

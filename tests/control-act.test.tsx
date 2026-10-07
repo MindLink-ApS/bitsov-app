@@ -109,6 +109,7 @@ describe('acting from the track', () => {
     dispose = undefined;
     mount?.remove();
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
   });
 
   const $ = <T extends Element = HTMLElement>(sel: string) => mount.querySelector<T>(sel);
@@ -393,7 +394,9 @@ describe('acting from the track', () => {
   });
 
   it('pays an invoice only after showing what it asks for', async () => {
-    const host = stubHost();
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Android');
+    let incoming: string | null = null;
+    const host = stubHost({ pairing_link_take: () => { const link = incoming; incoming = null; return link; } });
     host.spend.v = openView();
     await openShell();
     $<HTMLButtonElement>('[data-composer-mode="pay"]')!.click();
@@ -410,6 +413,12 @@ describe('acting from the track', () => {
     expect(text('[data-review-amount]')).toBe('1 sat');
     expect(text('[data-review-fee]')).toBe('up to 5 sats');
     expect(text('[data-review-total]')).toBe('6 sats');
+    const review = $('[data-pay-review]');
+    incoming = 'bitsov://pair/hostile';
+    await vi.waitFor(() => expect($('[data-pairing-link-banner]')).not.toBeNull(), { timeout: 2000 });
+    expect($<HTMLButtonElement>('[data-review-pairing]')!.disabled).toBe(true);
+    expect($('[data-pay-review]')).toBe(review);
+    expect($('[data-pairing-link-screen]')).toBeNull();
     await confirmPay();
     await vi.waitFor(() => expect(host.used('payment_pay')[0]?.args).toEqual({ bolt11: 'lntb10n1abc', amount_msat: 1000, max_msat: 6000 }));
     await vi.waitFor(() => expect($('[data-artifact="payment"]')?.getAttribute('data-status')).toBe('settled'));

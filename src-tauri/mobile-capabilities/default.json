@@ -25,6 +25,7 @@
     "allow-identity-restore",
     "allow-pairing-status",
     "allow-pairing-retry",
+    "allow-remote-access-preview",
     "allow-remote-access-import",
     "allow-pairing-link-take",
     "allow-remote-access-forget",

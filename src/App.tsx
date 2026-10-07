@@ -4,7 +4,7 @@ import { InitializationRepair } from './onboarding/InitializationRepair';
 import { SoftError } from './control/SoftError';
 import { DelayedSpinner } from './control/DelayedSpinner';
 import { isMoneyNotReady } from './control/readiness';
-import { createEffect, createMemo, createSignal, onCleanup, onMount, Show } from 'solid-js';
+import { createEffect, createMemo, createSignal, onCleanup, onMount, Show, type ParentProps } from 'solid-js';
 import { qrSvg } from './qr';
 import { Onboarding, type NodeTarget } from './onboarding/Onboarding';
 import { INITIAL_PAIRING, type NodeStatus, type PairingView } from './onboarding/pairing';
@@ -14,6 +14,7 @@ import { hostSource, inHost, sampleRequest, type SampleStart, type Source } from
 import { sampleSource } from './control/sample';
 import type { DeviceView, FundingAddress, FundState } from './control/types';
 import { androidQrScannerAvailable, scanPairingLink } from './pairingScanner';
+import { PairingActivityProvider, usePairingActivity, usePairingBlocked } from './pairingActivity';
 import { watchPairingLinks } from './pairingDeepLink';
 
 // The control center. First run (Start node → Pair this app → Create/restore
@@ -33,13 +34,29 @@ const DEFAULT_FUNDING_SATS = 50_000;
 const short = (id: string) => (id.length > 20 ? `${id.slice(0, 8)}…${id.slice(-8)}` : id);
 
 export default function App() {
+  return <PairingActivityProvider><AppScreen /></PairingActivityProvider>;
+}
+
+function AppScreen() {
   // Dev mode: sample data with no node (a plain browser tab, or `?sample`).
   const sample = sampleRequest(window.location.search, inHost(), import.meta.env.DEV);
   const canScanPairingQr = androidQrScannerAvailable();
   const [pairingRequest, setPairingRequest] = createSignal<{ link: string } | null>(null);
+  const [queuedPairing, setQueuedPairing] = createSignal<{ link: string } | null>(null);
+  const [pairingBusy, setPairingBusy] = createSignal(false);
+  const activityBlocked = usePairingBlocked();
+  const pairingBlocked = () => pairingRequest() !== null || activityBlocked();
+  const closePairing = () => { if (!pairingBusy()) setPairingRequest(null); };
+  const reviewPairing = () => {
+    if (pairingBlocked()) return;
+    const queued = queuedPairing();
+    if (!queued) return;
+    setPairingRequest(queued);
+    setQueuedPairing(null);
+  };
   let stopPairingLinks: (() => void) | undefined;
   onMount(() => {
-    if (canScanPairingQr) stopPairingLinks = watchPairingLinks(link => setPairingRequest({ link }));
+    if (canScanPairingQr) stopPairingLinks = watchPairingLinks(link => setQueuedPairing({ link }));
   });
   onCleanup(() => stopPairingLinks?.());
   // `?sample&organism=v2` shows the organism view against a node with N1/N2.
@@ -111,6 +128,8 @@ export default function App() {
   // Android: the node accepted a typed password; the host holds it for one yes/no.
   const [rememberOffer, setRememberOffer] = createSignal(false);
   // Once pairing has an outcome, the start spinner no longer describes the state.
+  usePairingActivity(() => rememberOffer() || restoring() ||
+    (!!status().initialization_repair && status().initialization_repair !== 'none'));
   const starting = () => pairing().state === 'starting' || pairing().state === 'pending';
 
   let timer: number | undefined;
@@ -179,6 +198,7 @@ export default function App() {
             onRetry={() => void retryPairing()}
             device={device}
             onForgetRemote={() => source().remoteAccessForget()}
+            onPreviewRemote={(link) => source().remoteAccessPreview(link)}
             onImportRemote={(link) => source().remoteAccessImport(link)}
             onScanRemote={canScanPairingQr ? scanPairingLink : undefined}
           />
@@ -248,19 +268,30 @@ export default function App() {
   // pairing_status, nothing else.
   return (
     <>
-    <Show keyed when={pairingRequest()}>{request => (
-      <div class="first-run" data-pairing-link-screen>
+    <div class="pairing-link-layer" classList={{ reviewing: pairingRequest() !== null }}>
+    <Show when={queuedPairing()}>
+      <aside class="panel pairing-link-banner" data-pairing-link-banner role="status">
+        <p>{pairingBlocked() ? 'New pairing link queued. Finish or close the current pairing review or ceremony first. Only the newest incoming link is kept.' : 'A pairing link is waiting. Review it when you are ready.'}</p>
+        <button type="button" data-review-pairing disabled={pairingBlocked()} onClick={reviewPairing}>Review incoming link</button>
+        <button type="button" class="quiet" onClick={() => setQueuedPairing(null)}>Dismiss link</button>
+      </aside>
+    </Show>
+    <Show when={pairingRequest()}>{request => (
+      <PairingLinkOverlay onClose={closePairing}>
         <h1>Pair this phone with your node</h1>
-        <p>Review the pairing link and choose Use remote node to confirm. Opening a link does not pair this phone.</p>
+        <p>Review the endpoint and node fingerprint before choosing Use remote node. Opening a link does not pair this phone.</p>
         <Onboarding status={() => ({ ready: false, node_id: null, error: null })}
           pairing={() => INITIAL_PAIRING} trustAck={() => false} onRetry={() => {}}
-          selectedTarget="network" initialPairingLink={request.link}
+          selectedTarget="network" initialPairingLink={request().link} pairingInputId="incoming-pairing-link"
+          onPreviewRemote={link => source().remoteAccessPreview(link)}
           onImportRemote={link => source().remoteAccessImport(link)}
+          onBusyChange={setPairingBusy}
           onScanRemote={scanPairingLink} />
-        <button type="button" class="quiet" data-close-pairing onClick={() => setPairingRequest(null)}>Close pairing</button>
-      </div>
+        <button type="button" class="quiet" data-close-pairing disabled={pairingBusy()} onClick={closePairing}>Close pairing</button>
+      </PairingLinkOverlay>
     )}</Show>
-    <Show when={!pairingRequest()}>
+    </div>
+    <div data-app-screen inert={pairingRequest() !== null} style={{ display: 'contents' }}>
     <Show when={status().local_owner && status().owner_warning}>
       <aside role="alert" class="panel" data-owner-warning>{status().owner_warning}</aside>
     </Show>
@@ -298,9 +329,38 @@ export default function App() {
       />
     </Show>
     </Show>
-    </Show>
+    </div>
     </>
   );
+}
+
+function PairingLinkOverlay(props: ParentProps<{ onClose: () => void }>) {
+  let dialog!: HTMLDivElement;
+  const previousFocus = document.activeElement as HTMLElement | null;
+  onMount(() => dialog.focus());
+  onCleanup(() => queueMicrotask(() => {
+    if (previousFocus?.isConnected) previousFocus.focus();
+  }));
+  const onKeyDown = (event: KeyboardEvent) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      props.onClose();
+    }
+    if (event.key !== 'Tab') return;
+    const controls = [...dialog.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), summary, a[href]')];
+    const first = controls[0];
+    const last = controls[controls.length - 1];
+    if (!first || !last) { event.preventDefault(); dialog.focus(); return; }
+    if (event.shiftKey && (document.activeElement === first || document.activeElement === dialog)) {
+      event.preventDefault(); last.focus();
+    } else if (!event.shiftKey && (document.activeElement === last || document.activeElement === dialog)) {
+      event.preventDefault(); first.focus();
+    }
+  };
+  return <div ref={dialog} class="pairing-link-overlay" role="dialog" aria-modal="true"
+    aria-label="Pair this phone with your node" data-pairing-link-screen tabindex="-1" onKeyDown={onKeyDown}>
+    {props.children}
+  </div>;
 }
 
 /**
@@ -325,6 +385,7 @@ function IdentityGate(props: {
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
   const [restored, setRestored] = createSignal<string | null>(null);
+  usePairingActivity(() => showRestore() || busy());
 
   const submitRestore = async (event: Event) => {
     event.preventDefault();

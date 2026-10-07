@@ -6,6 +6,12 @@ describe('shared paste, QR and deep-link envelope validation', () => {
     expect(normalizePairingLink('  bitsov://pair/eyJ2IjoxfQ\n')).toBe('bitsov://pair/eyJ2IjoxfQ');
   });
 
+  it('accepts the full 14 + 16384 character native envelope', () => {
+    const link = 'bitsov://pair/' + 'a'.repeat(16384);
+    expect(link.length).toBe(16398);
+    expect(normalizePairingLink(link)).toBe(link);
+  });
+
   it.each([
     '', 'ticket', 'https://pair/abc', 'bitsov://other/abc', 'bitsov://pair/',
     'bitsov://pair/abc?x=1', 'bitsov://pair/abc#fragment', 'bitsov://pair/abc=',

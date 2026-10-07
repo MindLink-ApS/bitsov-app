@@ -2,6 +2,8 @@ package tech.mindlink.bitsov
 
 import android.app.Activity
 import android.content.Intent
+import android.content.Context
+import java.security.MessageDigest
 import android.webkit.WebView
 import app.tauri.annotation.Command
 import app.tauri.annotation.TauriPlugin
@@ -13,7 +15,15 @@ import app.tauri.plugin.Plugin
  * pairing command, called only after the owner confirms in the webview. */
 @TauriPlugin
 class PairingLinkPlugin(private val activity: Activity) : Plugin(activity) {
+    companion object {
+        private const val PAIRING_PREFIX = "bitsov://pair/"
+    }
+    // Only digests survive process death. Never persist bearer tickets. Keep
+    // earlier receipts too: Android can redeliver the original launch intent.
+    private val preferences = activity.getSharedPreferences("pairing_link_inbox", Context.MODE_PRIVATE)
+    private var takenHashes: Set<String> = preferences.getStringSet("taken_hashes", emptySet())!!.toSet()
     private var pendingLink: String? = null
+    private var pendingHash: String? = null
 
     override fun load(webView: WebView) {
         super.load(webView)
@@ -29,17 +39,32 @@ class PairingLinkPlugin(private val activity: Activity) : Plugin(activity) {
         val link = intent.dataString ?: return
         // Do not retain the ticket in the Activity's launch Intent.
         intent.data = null
+        val hash = MessageDigest.getInstance("SHA-256")
+            .digest(link.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
+        if (hash in takenHashes) return
+        pendingHash = hash
         // Preserve the exact URI, without URL decoding or accepting new formats.
         // An oversized intent still opens the screen with a validation error.
-        pendingLink = if (link.length <= 16397) link else ""
+        pendingLink = if (link.length <= PAIRING_PREFIX.length + 16384) link else ""
     }
 
     @Command
     fun takePendingLink(invoke: Invoke) {
         activity.runOnUiThread {
+            // Commit before handing the link to the renderer: a redelivered VIEW
+            // after process death must not become a fresh confirmation prompt.
+            if (pendingHash != null) {
+                val receipts = takenHashes + pendingHash!!
+                if (!preferences.edit().putStringSet("taken_hashes", receipts).commit()) {
+                    invoke.reject("Cannot record pairing link receipt")
+                    return@runOnUiThread
+                }
+                takenHashes = receipts
+            }
             val response = JSObject()
             response.put("link", pendingLink)
             pendingLink = null
+            pendingHash = null
             invoke.resolve(response)
         }
     }

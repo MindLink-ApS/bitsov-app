@@ -221,6 +221,14 @@ pub enum RemoteAuthResponse {
     },
 }
 
+/// Public ticket identity only; contains no pairing code or other authority.
+#[derive(Debug, Clone, Serialize)]
+pub struct RemotePreviewView {
+    pub endpoint: String,
+    pub node_id_fingerprint: String,
+    pub hosted_by: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct RemoteImportView {
     pub endpoint: String,
@@ -663,6 +671,16 @@ fn persist_with(
         )));
     }
     Ok(())
+}
+
+/// Validate with the same parser as import, without storage or network access.
+pub fn preview_pairing_link(link: &str) -> Result<RemotePreviewView, RemoteError> {
+    let descriptor = parse_pairing_link(link)?;
+    Ok(RemotePreviewView {
+        endpoint: descriptor.endpoint.clone(),
+        node_id_fingerprint: node_id_fingerprint(&descriptor.node_id),
+        hosted_by: descriptor.hosted_by.clone(),
+    })
 }
 
 pub fn import_pairing_link(

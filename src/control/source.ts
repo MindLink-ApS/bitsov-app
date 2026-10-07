@@ -61,6 +61,12 @@ import type {
   WalletOverview,
 } from './types';
 
+export type RemotePreviewView = {
+  endpoint: string;
+  node_id_fingerprint: string;
+  hosted_by?: string | null;
+};
+
 export type RemoteImportView = {
   endpoint: string;
   node_id_fingerprint: string;
@@ -82,6 +88,7 @@ export interface Source {
   pairingStatus(): Promise<PairingView>;
   pairingRetry(): Promise<PairingView>;
   remoteAccessForget(): Promise<void>;
+  remoteAccessPreview(link: string): Promise<RemotePreviewView>;
   remoteAccessImport(link: string): Promise<RemoteImportView>;
   identityRestore(mnemonic: string): Promise<RestoreOutcome>;
   fundState(): Promise<FundState | null>;
@@ -235,6 +242,7 @@ export const hostSource: Source = {
   pairingStatus: () => invoke<PairingView>('pairing_status'),
   pairingRetry: () => invoke<PairingView>('pairing_retry'),
   remoteAccessForget: () => invoke<void>('remote_access_forget'),
+  remoteAccessPreview: (link) => invoke<RemotePreviewView>('remote_access_preview', { link }),
   remoteAccessImport: (link) => invoke<RemoteImportView>('remote_access_import', { link }),
   nodeRepairInitialized: (confirmed) => invoke<void>('node_repair_initialized', { confirmed }),
   nodeRepairPriceFloor: (confirmed) => invoke<void>('node_repair_price_floor', { confirmed }),

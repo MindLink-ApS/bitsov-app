@@ -1192,3 +1192,39 @@ input[type='checkbox'], input[type='radio'] { width: auto; flex: none; padding: 
 .hub-channel-confirm { display: flex; flex-direction: column; gap: var(--s-3); }
 .hub-channel-confirm:focus { outline: none; }
 .hub-channel-confirm .row { flex-wrap: wrap; }
+
+/* Incoming intents never replace the current screen. */
+.pairing-link-banner {
+  position: fixed;
+  z-index: 210;
+  top: env(safe-area-inset-top, 0px);
+  left: 12px;
+  right: 12px;
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  box-shadow: 0 8px 32px #0006;
+}
+.pairing-link-layer { display: contents; }
+.pairing-link-layer.reviewing {
+  position: fixed;
+  z-index: 200;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+.reviewing .pairing-link-banner {
+  position: static;
+  flex-shrink: 0;
+  margin: max(12px, env(safe-area-inset-top)) 12px 0;
+}
+.pairing-link-overlay {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  padding: max(24px, env(safe-area-inset-top)) 24px max(24px, env(safe-area-inset-bottom));
+  overflow-y: auto;
+  background: var(--bg);
+}
+.pairing-link-overlay > * { max-width: 720px; margin-left: auto; margin-right: auto; }
+[data-pairing-preview] { overflow-wrap: anywhere; }

@@ -35,34 +35,129 @@ describe('app shell pairing wiring', () => {
     vi.restoreAllMocks();
   });
 
-  it.each([false, true])('opens a deep link for confirmation even when locked=%s, and handles a later link', async (locked) => {
+  it.each([false, true])('queues deep links without unmounting the screen or replacing a review/import (locked=%s)', async (locked) => {
+    vi.useFakeTimers();
     vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Android');
     let pending: string | null = 'bitsov://pair/first-ticket';
     const imports: string[] = [];
+    let finishImport!: (value: unknown) => void;
     vi.stubGlobal('__TAURI_INTERNALS__', { invoke: (cmd: string, args?: { link: string }) => {
       if (cmd === 'pairing_link_take') { const link = pending; pending = null; return Promise.resolve(link); }
       if (cmd === 'node_status') return Promise.resolve({ ready: !locked, locked, node_id: 'fa'.repeat(32), error: null });
       if (cmd === 'pairing_status') return Promise.resolve({ ...paired, remote: true });
+      if (cmd === 'remote_access_preview') return Promise.resolve({ endpoint: 'home:4242', node_id_fingerprint: 'ab…cd' });
       if (cmd === 'remote_access_import') {
         imports.push(args!.link);
-        return Promise.resolve({ endpoint: 'home:4242', node_id_fingerprint: 'ab…cd', restart_required: true });
+        return new Promise(resolve => { finishImport = resolve; });
       }
       return Promise.reject(new Error('not available'));
     } });
     mount = document.createElement('div'); document.body.appendChild(mount);
     dispose = render(() => <App />, mount);
-    const input = () => mount!.querySelector<HTMLInputElement>('[data-pairing-link-screen] #remote-pairing-link');
-    await vi.waitFor(() => expect(input()?.value).toBe('bitsov://pair/first-ticket'));
+    await vi.advanceTimersByTimeAsync(100);
+    const screen = mount.querySelector('[data-app-screen]');
+    expect(screen).not.toBeNull();
+    expect(mount.querySelector('[data-pairing-link-banner]')).not.toBeNull();
+    const review = () => mount!.querySelector<HTMLButtonElement>('[data-review-pairing]')!;
+    review().click();
+    await vi.advanceTimersByTimeAsync(1);
+    const dialog = mount.querySelector<HTMLElement>('[data-pairing-link-screen]')!;
+    expect(dialog.contains(document.activeElement)).toBe(true);
+    const input = dialog.querySelector<HTMLInputElement>('input')!;
+    expect(mount.querySelectorAll(`[id="${input.id}"]`)).toHaveLength(1);
+    expect(input.value).toBe('bitsov://pair/first-ticket');
+    const form = mount.querySelector<HTMLFormElement>('[data-pairing-link-screen] form')!;
+    form.requestSubmit();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(mount.querySelector('[data-pairing-preview]')?.textContent).toContain('home:4242');
     expect(imports).toEqual([]);
-    expect(mount.textContent).not.toContain('first-ticket');
-    mount.querySelector<HTMLFormElement>('[data-pairing-link-screen] form')!.requestSubmit();
-    await vi.waitFor(() => expect(imports).toEqual(['bitsov://pair/first-ticket']));
     pending = 'bitsov://pair/second-ticket';
-    await vi.waitFor(() => expect(input()?.value).toBe('bitsov://pair/second-ticket'), { timeout: 2500 });
-    expect(imports).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(750);
+    expect(mount.textContent).toContain('queued');
+    expect(input.value).toBe('bitsov://pair/first-ticket');
+    expect(review().disabled).toBe(true);
+    form.requestSubmit();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(imports).toEqual(['bitsov://pair/first-ticket']);
+    expect(mount.querySelector<HTMLButtonElement>('[data-close-pairing]')!.disabled).toBe(true);
+    pending = 'bitsov://pair/newest-ticket';
+    await vi.advanceTimersByTimeAsync(750);
+    finishImport({ endpoint: 'home:4242', node_id_fingerprint: 'ab…cd', restart_required: true });
+    await vi.advanceTimersByTimeAsync(1);
+    expect(mount.querySelector('[data-import-result]')?.textContent).toContain('home:4242');
+    expect(mount.querySelector('[data-app-screen]')).toBe(screen);
+    expect(mount.querySelector('[data-pairing-link-screen] input')).toBe(input);
     mount.querySelector<HTMLButtonElement>('[data-close-pairing]')!.click();
-    expect(mount.querySelector('[data-pairing-link-screen]')).toBeNull();
+    review().click();
+    expect(mount.querySelector<HTMLInputElement>('[data-pairing-link-screen] input')!.value).toBe('bitsov://pair/newest-ticket');
     expect(imports).toHaveLength(1);
+  });
+
+  it('keeps a mounted owner ceremony and its phrase while a hostile link is queued', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Android');
+    let pending: string | null = null;
+    vi.stubGlobal('__TAURI_INTERNALS__', { invoke: (cmd: string) => {
+      if (cmd === 'pairing_link_take') { const link = pending; pending = null; return Promise.resolve(link); }
+      if (cmd === 'node_status') return Promise.resolve({ ready: false, local_owner: true, node_id: null, error: null });
+      if (cmd === 'pairing_status') return Promise.resolve({ ...paired, bootstrap: 'bootstrap' });
+      if (cmd === 'local_owner_create') return Promise.resolve({ ceremony_id: 'owner', node_id: 'ab', mnemonic: 'private recovery phrase', backup_check: [0, 1, 2], expires_at: Date.now() / 1000 + 600 });
+      return Promise.reject(new Error('not available'));
+    } });
+    mount = document.createElement('div'); document.body.appendChild(mount);
+    dispose = render(() => <App />, mount);
+    await vi.advanceTimersByTimeAsync(100);
+    const ceremony = mount.querySelector('[data-local-owner]')!;
+    expect(ceremony).not.toBeNull();
+    ceremony.querySelector<HTMLButtonElement>('button')!.click();
+    await vi.advanceTimersByTimeAsync(1);
+    pending = 'bitsov://pair/hostile';
+    await vi.advanceTimersByTimeAsync(750);
+    expect(mount.querySelector('[data-local-owner]')).toBe(ceremony);
+    expect(ceremony.textContent).toContain('private recovery phrase');
+    expect(mount.textContent).toContain('queued');
+    expect(mount.querySelector<HTMLButtonElement>('[data-review-pairing]')!.disabled).toBe(true);
+    expect(mount.querySelector('[data-pairing-link-screen]')).toBeNull();
+  });
+
+  it.each(['paste', 'restore', 'unlock'] as const)('queues an incoming link until the current %s review closes', async (kind) => {
+    vi.useFakeTimers();
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Android');
+    let pending: string | null = null;
+    vi.stubGlobal('__TAURI_INTERNALS__', { invoke: (cmd: string) => {
+      if (cmd === 'pairing_link_take') { const link = pending; pending = null; return Promise.resolve(link); }
+      if (cmd === 'node_status') return Promise.resolve({ ready: kind !== 'unlock', locked: kind === 'unlock', node_id: 'fa'.repeat(32), error: null });
+      if (cmd === 'pairing_status') return Promise.resolve(paired);
+      if (cmd === 'remote_access_preview') return Promise.resolve({ endpoint: 'original:4242', node_id_fingerprint: 'aa…bb' });
+      return Promise.reject(new Error('not available'));
+    } });
+    mount = document.createElement('div'); document.body.appendChild(mount);
+    dispose = render(() => <App />, mount);
+    await vi.advanceTimersByTimeAsync(100);
+    if (kind === 'restore') mount.querySelector<HTMLButtonElement>('[data-restore-open]')!.click();
+    if (kind === 'unlock') mount.querySelector<HTMLButtonElement>('[data-unlock-type-open]')!.click();
+    const input = mount.querySelector<HTMLInputElement>(kind === 'paste' ? '#remote-pairing-link' : kind === 'restore' ? '#restore-phrase' : '#node-unlock-password')!;
+    input.value = kind === 'paste' ? 'bitsov://pair/original' : 'private input';
+    input.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    if (kind === 'paste') {
+      input.closest('form')!.requestSubmit();
+      await vi.advanceTimersByTimeAsync(1);
+    }
+    pending = 'bitsov://pair/hostile';
+    await vi.advanceTimersByTimeAsync(750);
+    expect(mount.textContent).toContain('queued');
+    expect(input.isConnected).toBe(true);
+    expect(input.value).toBe(kind === 'paste' ? 'bitsov://pair/original' : 'private input');
+    const review = () => mount!.querySelector<HTMLButtonElement>('[data-review-pairing]')!;
+    expect(review().disabled).toBe(true);
+    expect(mount.querySelector('[data-pairing-link-screen]')).toBeNull();
+    const cancel = kind === 'paste'
+      ? mount.querySelector<HTMLButtonElement>('[data-cancel-pairing-review]')!
+      : [...input.closest('form')!.querySelectorAll('button')].find(button => button.textContent === 'Cancel')!;
+    cancel.click();
+    expect(review().disabled).toBe(false);
+    review().click();
+    expect(mount.querySelector<HTMLInputElement>('[data-pairing-link-screen] input')!.value).toBe('bitsov://pair/hostile');
   });
 
   it.each([false, true])('forgetting a remote link requires restart and preserves actual trust (failure=%s)', async (fails) => {
@@ -115,11 +210,14 @@ describe('app shell pairing wiring', () => {
 
   it('keeps a warm remote composer mounted throughout retry hints and recovery', async () => {
     vi.useFakeTimers();
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Android');
+    let pendingLink: string | null = null;
     const nodeId = 'ef'.repeat(32);
     const peer = 'ab'.repeat(32);
     let status = { ready: true, node_id: nodeId, error: null as string | null, retry_after_secs: null as number | null };
     localStorage.setItem(`bitsov.trust.v1.remote.${nodeId}`, 'accepted');
     vi.stubGlobal('__TAURI_INTERNALS__', { invoke: (cmd: string) => {
+      if (cmd === 'pairing_link_take') { const link = pendingLink; pendingLink = null; return Promise.resolve(link); }
       if (cmd === 'node_status') return Promise.resolve(status);
       if (cmd === 'pairing_status') return Promise.resolve({ ...paired, remote: true });
       if (cmd === 'peers_list') return Promise.resolve([{ node_id: peer, addr: null, label: 'Peer', connected: true, fingerprint: peer }]);
@@ -131,6 +229,13 @@ describe('app shell pairing wiring', () => {
     await vi.advanceTimersByTimeAsync(500);
     const composer = mount.querySelector('[data-composer-bar]');
     expect(composer).not.toBeNull();
+    pendingLink = 'bitsov://pair/incoming';
+    await vi.advanceTimersByTimeAsync(750);
+    mount.querySelector<HTMLButtonElement>('[data-review-pairing]')!.click();
+    expect(mount.querySelector('[data-pairing-link-screen]')).not.toBeNull();
+    expect(mount.querySelector('[data-composer-bar]')).toBe(composer);
+    mount.querySelector<HTMLButtonElement>('[data-close-pairing]')!.click();
+    expect(mount.querySelector('[data-composer-bar]')).toBe(composer);
     let onboardingMounted = false;
     const observer = new MutationObserver(() => { onboardingMounted ||= !!mount!.querySelector('[data-ob-head]'); });
     observer.observe(mount, { childList: true, subtree: true });

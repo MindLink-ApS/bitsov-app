@@ -787,6 +787,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
     pairingStatus: () => ok(pairing),
     pairingRetry: () => ok(pairing),
     remoteAccessForget: () => Promise.reject('Remote access is not available with sample data.'),
+    remoteAccessPreview: () => Promise.reject('Remote access is not available with sample data.'),
     remoteAccessImport: () => Promise.reject('Remote access is not available with sample data.'),
     nodeRepairInitialized: async () => {},
     nodeRepairPriceFloor: async () => {},

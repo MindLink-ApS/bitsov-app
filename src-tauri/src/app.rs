@@ -2254,6 +2254,16 @@ async fn pairing_link_take(
     Ok(None)
 }
 
+/// Parse a ticket for owner review. No app state, storage or network access.
+#[tauri::command(rename_all = "snake_case")]
+fn remote_access_preview(
+    window: WebviewWindow<impl tauri::Runtime>,
+    link: String,
+) -> Result<remote_access::RemotePreviewView, String> {
+    reject_sealed_window(&window)?;
+    remote_access::preview_pairing_link(link.trim()).map_err(|error| error.to_string())
+}
+
 /// Validate and persist a pasted, scanned or deep-linked ticket after confirmation. The running mode is
 /// never changed in place; bootstrap selects it on the next app start.
 #[tauri::command(rename_all = "snake_case")]
@@ -7299,6 +7309,7 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             identity_restore,
             pairing_status,
             pairing_retry,
+            remote_access_preview,
             remote_access_import,
             pairing_link_take,
             remote_access_forget,
@@ -14627,6 +14638,7 @@ mod assistant_acl_tests {
                 "identity_restore",
                 "pairing_status",
                 "pairing_retry",
+                "remote_access_preview",
                 "remote_access_import",
                 "pairing_link_take",
                 "remote_access_forget",
@@ -15296,6 +15308,7 @@ mod assistant_acl_tests {
                 super::identity_restore,
                 super::pairing_status,
                 super::pairing_retry,
+                super::remote_access_preview,
                 super::remote_access_import,
                 super::remote_access_forget,
             ])
@@ -15400,18 +15413,16 @@ mod assistant_acl_tests {
             invoke(&main, "pairing_retry", serde_json::json!({})),
             "the node has not started",
         );
-        assert_handler_ran(
-            invoke(
-                &main,
-                "remote_access_import",
-                serde_json::json!({ "link": "not-a-link" }),
-            ),
-            "invalid remote pairing link",
-        );
+        for command in ["remote_access_preview", "remote_access_import"] {
+            assert_handler_ran(
+                invoke(&main, command, serde_json::json!({ "link": "not-a-link" })),
+                "invalid remote pairing link",
+            );
+        }
         // Do not invoke forget against the user's real app-data directory in
         // this mock app. The persistence tests use isolated temporary folders.
         assert_handler_ran(invoke(&main, "node_unlock", serde_json::json!({})), "not locked");
-        for cmd in ["node_unlock", "pairing_status", "pairing_retry", "remote_access_import", "remote_access_forget"] {
+        for cmd in ["node_unlock", "pairing_status", "pairing_retry", "remote_access_preview", "remote_access_import", "remote_access_forget"] {
             assert_acl_denied(invoke(&assistant, cmd, serde_json::json!({})), cmd);
         }
     }

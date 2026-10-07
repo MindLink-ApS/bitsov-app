@@ -1,3 +1,4 @@
+import { usePairingActivity } from '../pairingActivity';
 import { createMessageEntrance } from './messageEntrance';
 import { LocalNodeSwitch } from '../onboarding/LocalNodeSwitch';
 import { HubTrustInfo } from './HubTrust';
@@ -751,15 +752,19 @@ export function ControlCenter(props: Props) {
     untrack(() => logActivity(entries));
   });
 
+  const [pairingBlockingActions, setPairingBlockingActions] = createSignal(0);
+  usePairingActivity(() => pairingBlockingActions() > 0 || contextOpen() || walletTab() !== null ||
+    spend()?.state === 'pending' || device()?.state === 'pending' || !!budget()?.waiting_for_owner);
   /** Run one action. An approval error re-reads the window; the caller shows the rest. */
   const act = async <T,>(run: () => Promise<T>): Promise<Outcome<T>> => {
+    setPairingBlockingActions(n => n + 1);
     try {
       return { ok: true, value: await run() };
     } catch (e) {
       const error = asActionError(e);
       if (needsApproval(error) || error.code === 'spend_refused' || error.code === 'grant_ended') void loadSpend();
       return { ok: false, error };
-    }
+    } finally { setPairingBlockingActions(n => n - 1); }
   };
   /** A message the node took: show it in the thread with what it paid. */
   const sentOne = (t: TrackRef, receipt: SendReceipt, text: string) => {
@@ -2998,6 +3003,7 @@ function UndeliveredView(props: {
   onStop?: (pendingId: string | null) => Promise<unknown>;
 }) {
   const [busy, setBusy] = createSignal(false);
+  usePairingActivity(() => busy() || !!props.a.ownerApproval);
   const copy = () => undeliveredCopy(props.a.paid);
   const run = async (f: () => Promise<unknown>) => {
     if (busy()) return;
@@ -3267,6 +3273,7 @@ function Composer(props: {
   // belonging to an operation that already reached the host and succeeds.
   let approvalRevision = 0;
   const [ownerWait, setOwnerWait] = createSignal<{ approval: OwnerContactApproval; revision: number; send: () => Promise<void> } | null>(null);
+  usePairingActivity(() => busy() || paying() || review() !== null || ownerWait() !== null);
   const cancelOwner = () => {
     const pending = untrack(ownerWait);
     setOwnerWait(null);
@@ -4384,6 +4391,7 @@ function SpendBar(props: { spend: SpendView | null; error: string | undefined; n
   const minutes = (ms: number) => Math.max(1, Math.ceil((ms - props.now) / 60_000));
   // One Ask again at a time: a double click must not print two requests at the node.
   const [asking, setAsking] = createSignal(false);
+  usePairingActivity(asking);
   const askAgain = async () => {
     if (props.actions.moneyBlocked() || asking()) return;
     setAsking(true);
@@ -4484,6 +4492,7 @@ export const envelopePerAct = (priceMsat: number | null) =>
  */
 function DeviceSetup(props: { device: DeviceView | null; now: number; actions: Actions }) {
   const [busy, setBusy] = createSignal(false);
+  usePairingActivity(busy);
   const android = androidQrScannerAvailable();
   const run = async (action: () => Promise<void>) => {
     if (busy()) return;
@@ -5124,6 +5133,7 @@ function NewTrack(props: {
   const [giving, setGiving] = createSignal(false);
   const [cancelling, setCancelling] = createSignal(false);
   const [cancelUnconfirmed, setCancelUnconfirmed] = createSignal(false);
+  usePairingActivity(() => giving() || cancelling() || ownerWait() !== null || gift() !== null || cancelUnconfirmed());
   const giftPending = () => gift()?.state === 'paying' || gift()?.state === 'unknown';
   const requestLocked = () => props.moneyBlocked || giving() || !!ownerWait() || !!gift() || cancelUnconfirmed();
   let giftRevision = 0;
@@ -5306,6 +5316,7 @@ function NewTrack(props: {
   const [errs, setErrs] = createStore<{ create?: string; redeem?: string }>({});
   const [busy, setBusy] = createSignal(false);
 
+  usePairingActivity(busy);
   /** Invites change the node: outside the window the button is the approval. */
   const run = async (which: 'create' | 'redeem', action: () => Promise<void>) => {
     setErrs(which, undefined);

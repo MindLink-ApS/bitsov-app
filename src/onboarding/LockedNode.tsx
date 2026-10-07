@@ -1,3 +1,4 @@
+import { usePairingActivity } from '../pairingActivity';
 import { createSignal, Show } from 'solid-js';
 import { hideLockedHubTrust, HubTrustInfo, lockedHubTrustHidden } from '../control/HubTrust';
 
@@ -12,6 +13,7 @@ export function LockedNode(props: {
   const [error, setError] = createSignal<string | null>(null);
   const [typing, setTyping] = createSignal(false);
   const [password, setPassword] = createSignal('');
+  usePairingActivity(() => busy() || typing());
   const canType = () => !!props.mobile && !!props.onUnlockWithPassword;
   const unlock = async () => {
     if (busy()) return;
