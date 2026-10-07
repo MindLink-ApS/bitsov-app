@@ -32,6 +32,37 @@ describe('app shell pairing wiring', () => {
     mount?.remove();
     vi.unstubAllGlobals();
     vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it.each([false, true])('opens a deep link for confirmation even when locked=%s, and handles a later link', async (locked) => {
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Android');
+    let pending: string | null = 'bitsov://pair/first-ticket';
+    const imports: string[] = [];
+    vi.stubGlobal('__TAURI_INTERNALS__', { invoke: (cmd: string, args?: { link: string }) => {
+      if (cmd === 'pairing_link_take') { const link = pending; pending = null; return Promise.resolve(link); }
+      if (cmd === 'node_status') return Promise.resolve({ ready: !locked, locked, node_id: 'fa'.repeat(32), error: null });
+      if (cmd === 'pairing_status') return Promise.resolve({ ...paired, remote: true });
+      if (cmd === 'remote_access_import') {
+        imports.push(args!.link);
+        return Promise.resolve({ endpoint: 'home:4242', node_id_fingerprint: 'ab…cd', restart_required: true });
+      }
+      return Promise.reject(new Error('not available'));
+    } });
+    mount = document.createElement('div'); document.body.appendChild(mount);
+    dispose = render(() => <App />, mount);
+    const input = () => mount!.querySelector<HTMLInputElement>('[data-pairing-link-screen] #remote-pairing-link');
+    await vi.waitFor(() => expect(input()?.value).toBe('bitsov://pair/first-ticket'));
+    expect(imports).toEqual([]);
+    expect(mount.textContent).not.toContain('first-ticket');
+    mount.querySelector<HTMLFormElement>('[data-pairing-link-screen] form')!.requestSubmit();
+    await vi.waitFor(() => expect(imports).toEqual(['bitsov://pair/first-ticket']));
+    pending = 'bitsov://pair/second-ticket';
+    await vi.waitFor(() => expect(input()?.value).toBe('bitsov://pair/second-ticket'), { timeout: 2500 });
+    expect(imports).toHaveLength(1);
+    mount.querySelector<HTMLButtonElement>('[data-close-pairing]')!.click();
+    expect(mount.querySelector('[data-pairing-link-screen]')).toBeNull();
+    expect(imports).toHaveLength(1);
   });
 
   it.each([false, true])('forgetting a remote link requires restart and preserves actual trust (failure=%s)', async (fails) => {

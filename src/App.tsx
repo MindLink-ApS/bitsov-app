@@ -14,6 +14,7 @@ import { hostSource, inHost, sampleRequest, type SampleStart, type Source } from
 import { sampleSource } from './control/sample';
 import type { DeviceView, FundingAddress, FundState } from './control/types';
 import { androidQrScannerAvailable, scanPairingLink } from './pairingScanner';
+import { watchPairingLinks } from './pairingDeepLink';
 
 // The control center. First run (Start node → Pair this app → Create/restore
 // identity → Fund) is the shell's first state, shown in the centre track until
@@ -35,6 +36,12 @@ export default function App() {
   // Dev mode: sample data with no node (a plain browser tab, or `?sample`).
   const sample = sampleRequest(window.location.search, inHost(), import.meta.env.DEV);
   const canScanPairingQr = androidQrScannerAvailable();
+  const [pairingRequest, setPairingRequest] = createSignal<{ link: string } | null>(null);
+  let stopPairingLinks: (() => void) | undefined;
+  onMount(() => {
+    if (canScanPairingQr) stopPairingLinks = watchPairingLinks(link => setPairingRequest({ link }));
+  });
+  onCleanup(() => stopPairingLinks?.());
   // `?sample&organism=v2` shows the organism view against a node with N1/N2.
   const organism = new URLSearchParams(window.location.search).get('organism') === 'v2' ? 'v2' : 'v1';
   const noPeers = new URLSearchParams(window.location.search).get('peers') === '0';
@@ -241,6 +248,19 @@ export default function App() {
   // pairing_status, nothing else.
   return (
     <>
+    <Show keyed when={pairingRequest()}>{request => (
+      <div class="first-run" data-pairing-link-screen>
+        <h1>Pair this phone with your node</h1>
+        <p>Review the pairing link and choose Use remote node to confirm. Opening a link does not pair this phone.</p>
+        <Onboarding status={() => ({ ready: false, node_id: null, error: null })}
+          pairing={() => INITIAL_PAIRING} trustAck={() => false} onRetry={() => {}}
+          selectedTarget="network" initialPairingLink={request.link}
+          onImportRemote={link => source().remoteAccessImport(link)}
+          onScanRemote={scanPairingLink} />
+        <button type="button" class="quiet" data-close-pairing onClick={() => setPairingRequest(null)}>Close pairing</button>
+      </div>
+    )}</Show>
+    <Show when={!pairingRequest()}>
     <Show when={status().local_owner && status().owner_warning}>
       <aside role="alert" class="panel" data-owner-warning>{status().owner_warning}</aside>
     </Show>
@@ -276,6 +296,7 @@ export default function App() {
         firstRun={firstRun}
         fund={(guarded, blocked) => <Fund source={guarded} moneyBlocked={blocked} ready={live} />}
       />
+    </Show>
     </Show>
     </Show>
     </>

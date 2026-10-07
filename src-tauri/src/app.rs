@@ -2238,7 +2238,23 @@ fn pairing_status(
     Ok(state.pairing_snapshot())
 }
 
-/// Validate and persist a pasted remote pairing link. The running mode is
+/// Read the Android launch/warm intent once. This never imports a ticket.
+#[tauri::command]
+async fn pairing_link_take(
+    window: WebviewWindow<impl tauri::Runtime>,
+) -> Result<Option<String>, String> {
+    reject_sealed_window(&window)?;
+    #[cfg(target_os = "android")]
+    {
+        tauri::async_runtime::spawn_blocking(crate::pairing_link_mobile::take)
+            .await
+            .map_err(|_| "could not read pairing link inbox".to_string())?
+    }
+    #[cfg(not(target_os = "android"))]
+    Ok(None)
+}
+
+/// Validate and persist a pasted, scanned or deep-linked ticket after confirmation. The running mode is
 /// never changed in place; bootstrap selects it on the next app start.
 #[tauri::command(rename_all = "snake_case")]
 fn remote_access_import(
@@ -7260,6 +7276,7 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
     #[cfg(target_os = "android")]
     let builder = builder
         .plugin(device_key::init())
+        .plugin(crate::pairing_link_mobile::init())
         .plugin(tauri_plugin_barcode_scanner::init());
     builder
         .manage(NodeState::default())
@@ -7283,6 +7300,7 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             pairing_status,
             pairing_retry,
             remote_access_import,
+            pairing_link_take,
             remote_access_forget,
             node_overview,
             live_link,
@@ -14610,6 +14628,7 @@ mod assistant_acl_tests {
                 "pairing_status",
                 "pairing_retry",
                 "remote_access_import",
+                "pairing_link_take",
                 "remote_access_forget",
                 // Control center reads (main window only, ACL + reject_sealed_window).
                 "node_overview",
@@ -14992,6 +15011,13 @@ mod assistant_acl_tests {
         let main_perms = permission_identifiers(main);
         assert!(main_perms.iter().any(|id| id == "core:default"));
         for command in &commands {
+            if command == "pairing_link_take" {
+                assert!(
+                    !main_perms.iter().any(|id| id == &allow_perm(command)),
+                    "the Android intent inbox must not be granted on desktop"
+                );
+                continue;
+            }
             assert!(
                 main_perms.iter().any(|id| id == &allow_perm(command)),
                 "main lost {command}"

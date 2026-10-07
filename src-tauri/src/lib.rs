@@ -28,6 +28,9 @@ pub mod home_node;
 
 mod app;
 
+#[cfg(target_os = "android")]
+mod pairing_link_mobile;
+
 /// Start the desktop shell or mobile client.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {

@@ -3,6 +3,9 @@
     xmlns:tools="http://schemas.android.com/tools">
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.CAMERA" />
+    <!-- Pairing QR scanning is optional; owners can always paste a ticket. -->
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
     <uses-permission android:name="android.permission.USE_BIOMETRIC" />
     <!-- Scanner dependencies declare these, but BitSov neither uses nor grants them. -->
     <uses-permission android:name="android.permission.VIBRATE" tools:node="remove" />
@@ -29,6 +32,12 @@
                 <category android:name="android.intent.category.LAUNCHER" />
                 <!-- AndroidTV support -->
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="bitsov" android:host="pair" android:pathPrefix="/" />
             </intent-filter>
         </activity>
 
