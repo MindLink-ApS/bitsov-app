@@ -436,6 +436,47 @@ describe('the AI track', () => {
     await vi.waitFor(() => expect($('[data-provider="shared"]')).not.toBeNull());
   }
 
+  it('keeps named assistants read-only, separate, reloadable and forgettable', async () => {
+    const threads: Record<string, { revision: number; turns: unknown[] }> = {};
+    const host = stubHost({ ai_read: (args) => {
+      const id = args?.assistant as string;
+      const op = args?.thread as { action: string; turn?: unknown } | undefined;
+      if (!op) return sampleRead(args!.topic as 'node', null);
+      const saved = threads[id] ??= { revision: 0, turns: [] };
+      if (op.action === 'append') saved.turns.push(op.turn);
+      if (op.action === 'forget') { saved.turns = []; saved.revision++; }
+      return structuredClone(saved);
+    } });
+    await openAi();
+    expect(text('[data-assistants]')).toContain('Node');
+    expect(text('[data-assistants]')).toContain('Wallet');
+    expect(text('[data-assistants]')).toContain('Inbox');
+    click('[data-track="assistant:wallet"]');
+    await vi.waitFor(() => expect($('[data-assistant-ready]')).not.toBeNull());
+    expect(text('[data-assistant-role]')).toContain('Balance');
+    expect($('[data-ai-draft-text]')).toBeNull();
+    expect($<HTMLButtonElement>('[data-provider="shared"]')?.disabled).toBe(true);
+    ask('Pay Josh 500 sats');
+    await vi.waitFor(() => expect(text('[data-ai-text]')).toContain('read-only'));
+    expect($('[data-ai-prefill]')).toBeNull();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-assistant-forget]')?.disabled).toBe(false));
+    ask('How much is in my wallet?');
+    await vi.waitFor(() => expect(threads.wallet.turns).toHaveLength(2));
+    expect(host.used('ai_read').some(c => c.args?.assistant === 'wallet' && c.args?.topic === 'balance')).toBe(true);
+    click('[data-track="assistant:inbox"]');
+    await vi.waitFor(() => expect($('[data-assistant-ready]')).not.toBeNull());
+    expect(text('[data-ai-track]')).not.toContain('Pay Josh');
+    click('[data-track="assistant:wallet"]');
+    await vi.waitFor(() => expect(text('[data-ai-track]')).toContain('Pay Josh'));
+    expect(text('[data-ai-track]')).toContain('Saved answer');
+    click('[data-assistant-forget]');
+    await vi.waitFor(() => expect(text('[data-ai-track]')).not.toContain('Pay Josh'));
+    expect(threads.wallet.turns).toEqual([]);
+    for (const cmd of ['payment_pay', 'payment_keysend', 'spend_request', 'message_compose', 'channel_open']) {
+      expect(host.used(cmd)).toHaveLength(0);
+    }
+  });
+
   it('offers no payment prefill for mixed label and id recipients', async () => {
     const host = stubHost();
     await openAi();

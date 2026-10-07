@@ -22,6 +22,9 @@
 //! `rounded` coarsens amounts and days and withholds node ids, and `counts`
 //! keeps counts only. Each is a function of the broker output alone.
 
+pub mod assistants;
+pub mod threads;
+
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};

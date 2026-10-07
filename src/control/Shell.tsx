@@ -1,3 +1,4 @@
+import { ASSISTANTS, type AssistantId } from './assistants';
 import { PendingApproval } from '../onboarding/LockedNode';
 import { usePairingActivity } from '../pairingActivity';
 import { createMessageEntrance } from './messageEntrance';
@@ -1157,6 +1158,7 @@ export function ControlCenter(props: Props) {
     if (t.kind === 'room') return rooms().find((r) => r.id.toLowerCase() === t.id)?.name ?? 'Room';
     if (t.kind === 'bound') return boundName(t.id);
     if (t.kind === 'ai') return 'AI';
+    if (t.kind === 'assistant') return ASSISTANTS[t.id].name;
     if (t.kind === 'discover') return 'Browse';
     if (t.kind === 'porch') return 'Porch';
     return 'Start something';
@@ -1267,6 +1269,20 @@ export function ControlCenter(props: Props) {
                     onContext={() => setContextOpen(true)}
                     head={(title, sub) => <TrackHead title={title} sub={sub} onContext={() => setContextOpen(true)} />}
                   />
+                </Match>
+                <Match when={t().kind === 'assistant'}>
+                  <Show when={t().kind === 'assistant' ? (t() as { id: AssistantId }).id : undefined} keyed>
+                    {(id) => <AiTrack
+                      source={source}
+                      session={createAiSession()}
+                      assistant={id}
+                      peers={peers()}
+                      now={now()}
+                      onPrefill={() => {}}
+                      onContext={() => setContextOpen(true)}
+                      head={(title, sub) => <TrackHead title={title} sub={sub} onContext={() => setContextOpen(true)} />}
+                    />}
+                  </Show>
                 </Match>
                 <Match when={t().kind === 'new'}>
                   <NewTrack
@@ -1796,8 +1812,13 @@ function Rail(props: {
         </div>
       </Show>
 
-      <div class="track-group">
-        <h2>AI</h2>
+      <div class="track-group" data-assistants>
+        <h2>Assistants</h2>
+        <Show when={props.active}>
+          <For each={Object.entries(ASSISTANTS) as [AssistantId, typeof ASSISTANTS[AssistantId]][]}>
+            {([id, assistant]) => item({ kind: 'assistant', id }, assistant.name, <span class="meta">read-only</span>)}
+          </For>
+        </Show>
         <Show when={props.active}>{item({ kind: 'ai' }, 'Ask your node', <span class="meta">local</span>)}</Show>
       </div>
 

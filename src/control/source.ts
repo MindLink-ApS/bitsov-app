@@ -1,3 +1,4 @@
+import type { AssistantId, AssistantThread, ThreadRequest } from './assistants';
 // Where the shell's data comes from: the Rust host (Tauri commands + the
 // `node-live` event), or sample data in dev mode. The renderer never talks to
 // the node directly — no socket, no HTTP, no token (Gate G2). Every node call
@@ -216,10 +217,11 @@ export interface Source {
   /** One paid call signal (kinds 400-403) under the message budget rules. */
   callSignal(peer: string, kind: number, plaintext: string, maxMsat: number): Promise<CallReceipt>;
   // AI track: the host reads through its broker; a remote model gets only a body the owner saw
-  aiRead(topic: AiTopic, sinceMs: number | null): Promise<TopicRead>;
+  aiRead(topic: AiTopic, sinceMs: number | null, assistant?: AssistantId): Promise<TopicRead>;
+  aiThread(assistant: AssistantId, thread: ThreadRequest): Promise<AssistantThread>;
   aiProviders(): Promise<ProviderView[]>;
   /** Prepare, never send. */
-  aiDisclose(provider: ProviderKind, topic: AiTopic, sinceMs: number | null, preset: Preset, question: string): Promise<Disclosure>;
+  aiDisclose(provider: ProviderKind, topic: AiTopic, sinceMs: number | null, preset: Preset, question: string, assistant?: AssistantId): Promise<Disclosure>;
   /** Send the prepared body, once. Takes the id only. */
   aiSend(disclosureId: string): Promise<RemoteAnswer>;
   aiCancel(disclosureId: string): Promise<boolean>;
@@ -336,10 +338,11 @@ export const hostSource: Source = {
   fileSave: (messageId) => invoke<FileSaveResult>('file_save', { message_id: messageId }),
   callQuote: (peer) => invoke<CallQuote>('call_quote', { peer }),
   callSignal: (peer, kind, plaintext, maxMsat) => invoke<CallReceipt>('call_signal', { peer, kind, plaintext, max_msat: maxMsat }),
-  aiRead: (topic, sinceMs) => invoke<TopicRead>('ai_read', { topic, since_ms: sinceMs }),
+  aiRead: (topic, sinceMs, assistant) => invoke<TopicRead>('ai_read', { topic, since_ms: sinceMs, ...(assistant ? { assistant } : {}) }),
+  aiThread: (assistant, thread) => invoke<AssistantThread>('ai_read', { assistant, thread }),
   aiProviders: () => invoke<ProviderView[]>('ai_providers'),
-  aiDisclose: (provider, topic, sinceMs, preset, question) =>
-    invoke<Disclosure>('ai_disclose', { provider, topic, since_ms: sinceMs, preset, question }),
+  aiDisclose: (provider, topic, sinceMs, preset, question, assistant) =>
+    invoke<Disclosure>('ai_disclose', { provider, topic, since_ms: sinceMs, preset, question, ...(assistant ? { assistant } : {}) }),
   aiSend: (disclosureId) => invoke<RemoteAnswer>('ai_send', { disclosure_id: disclosureId }),
   aiCancel: (disclosureId) => invoke<boolean>('ai_cancel', { disclosure_id: disclosureId }),
   aiLocalStatus: (port) => invoke<LocalStatus>('ai_local_status', { port: port ?? null }),

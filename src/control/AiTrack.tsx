@@ -1,3 +1,4 @@
+import { ASSISTANTS, type AssistantId, type AssistantThread } from './assistants';
 import { SoftError } from './SoftError';
 import { DelayedSpinner } from './DelayedSpinner';
 // "Ask your node": the AI track in the main window.
@@ -50,6 +51,7 @@ import type {
 
 type Turn = {
   id: number;
+  saved?: boolean;
   at: number;
   question: string;
   provider: ProviderKind;
@@ -82,6 +84,7 @@ let turnSeq = 0;
 
 export function AiTrack(props: {
   source: Source;
+  assistant?: AssistantId;
   session: ReturnType<typeof createAiSession>;
   peers: Peer[];
   now: number;
@@ -98,6 +101,56 @@ export function AiTrack(props: {
   const [localError, setLocalError] = createSignal<string | null>(null);
   const [portDraft, setPortDraft] = createSignal('');
   let stream: HTMLDivElement | undefined;
+  const assistant = props.assistant ? ASSISTANTS[props.assistant] : null;
+  const suggestions = assistant?.suggestions ?? SUGGESTIONS;
+  const [threadReady, setThreadReady] = createSignal(!assistant);
+  const [threadBusy, setThreadBusy] = createSignal(!!assistant);
+  const [threadError, setThreadError] = createSignal<string | null>(null);
+  let revision = '';
+  let closed = false;
+  const restore = (thread: AssistantThread) => {
+    revision = thread.revision;
+    setSession('turns', thread.turns.map(t => ({ id: turnSeq++, at: t.at, question: t.question,
+      state: 'answered' as const, provider: 'local' as const, saved: true,
+      answer: { text: t.answer, cards: [] } })));
+    setThreadReady(true);
+  };
+  if (props.assistant) {
+    void props.source.aiThread(props.assistant, { action: 'load' })
+      .then(thread => { if (!closed) restore(thread); })
+      .catch(e => { if (!closed) setThreadError(asActionError(e).message); })
+      .finally(() => setThreadBusy(false));
+  }
+  const persistTurn = async (id: number) => {
+    if (!props.assistant) return;
+    const t = session.turns.find(t => t.id === id);
+    if (!t || t.saved || ['reading', 'preview', 'sending'].includes(t.state)) return;
+    const answer = t.remote?.text ?? (t.answer
+      ? [t.answer.text, ...t.answer.cards.map(c => cardText(c, nameOf))].join('\n')
+      : t.noRead ? noReadText(t.noRead) : t.error ?? 'Nothing was sent.');
+    setThreadBusy(true);
+    try {
+      const thread = await props.source.aiThread(props.assistant, { action: 'append', revision,
+        turn: { at: t.at, question: t.question.slice(0, 500), answer: Array.from(answer).slice(0, 16_000).join('') } });
+      revision = thread.revision;
+    } catch (e) {
+      setThreadError(`This answer was not saved. ${asActionError(e).message}`);
+      setThreadReady(false);
+    } finally { setThreadBusy(false); }
+  };
+  const forget = async () => {
+    if (!props.assistant || threadBusy()) return;
+    setThreadBusy(true);
+    try {
+      await Promise.all(session.turns.filter(t => t.state === 'preview' && t.disclosure)
+        .map(t => props.source.aiCancel(t.disclosure!.id)));
+      const thread = await props.source.aiThread(props.assistant, { action: 'forget' });
+      restore(thread);
+      setDraft('');
+      setThreadError(null);
+    } catch (e) { setThreadError(asActionError(e).message); }
+    finally { setThreadBusy(false); }
+  };
 
   const refreshLocal = (port?: number | null) => {
     setLocalBusy(true);
@@ -163,7 +216,7 @@ export function AiTrack(props: {
   /** Own tier with a picked loopback model: same disclose/send as remotes. */
   const ownModel = () => session.provider === 'local' && !!provider()?.model;
   const needsDisclose = () => remote() || ownModel();
-  const busy = () => session.turns.some((t) => t.state === 'reading' || t.state === 'sending') || localBusy();
+  const busy = () => session.turns.some((t) => t.state === 'reading' || t.state === 'sending') || localBusy() || threadBusy() || !threadReady();
   /** Who answers is fixed while a preview waits for Send: Send or Don't send it first. */
   const locked = () => busy() || pending().length > 0;
 
@@ -203,6 +256,7 @@ export function AiTrack(props: {
 
   // A preview left on screen is dropped host-side when the track closes.
   onCleanup(() => {
+    closed = true;
     for (const t of session.turns) {
       if (t.state !== 'preview' || !t.disclosure) continue;
       void props.source.aiCancel(t.disclosure.id).catch(() => {});
@@ -218,8 +272,11 @@ export function AiTrack(props: {
     if (t.disclosure) void props.source.aiCancel(t.disclosure.id).catch(() => {});
     update(id, { state: 'reading', disclosure: undefined, error: undefined });
     try {
-      const d = await props.source.aiDisclose(t.provider, t.topic, t.sinceMs ?? null, preset, t.question);
-      update(id, { state: 'preview', disclosure: d });
+      const d = await props.source.aiDisclose(t.provider, t.topic, t.sinceMs ?? null, preset, t.question, props.assistant);
+      if (closed) {
+        await props.source.aiCancel(d.id);
+        update(id, { state: 'not-sent' });
+      } else update(id, { state: 'preview', disclosure: d });
     } catch (e) {
       update(id, { state: 'error', error: asActionError(e).message });
     }
@@ -228,7 +285,7 @@ export function AiTrack(props: {
 
   const ask = async (text: string) => {
     const question = text.trim();
-    if (!question || busy()) return;
+    if (!question || busy() || (assistant && pending().length > 0)) return;
     setDraft('');
     const id = turnSeq++;
     const now = Date.now();
@@ -237,34 +294,41 @@ export function AiTrack(props: {
     setSession('turns', (list) => [...list, base]);
     scroll();
 
-    if (intent.kind === 'act') {
-      setDraftText('');
-      update(id, { state: 'answered', provider: 'local', proposal: intent.proposal, answer: { text: proposalText(intent.proposal), cards: [] } });
-      return scroll();
-    }
-    if (intent.kind === 'no-peer' || intent.kind === 'unknown') {
-      const text = intent.kind === 'unknown' ? unknownText() : noPeerText(intent.what);
-      update(id, { state: 'answered', provider: 'local', answer: { text, cards: [] } });
-      return scroll();
-    }
-    if (needsDisclose()) {
-      update(id, { topic: intent.topic, sinceMs: intent.sinceMs, window: intent.window });
-      return disclose(id, provider()?.data_leaves ?? 'counts');
-    }
     try {
-      const read = await props.source.aiRead(intent.topic, intent.sinceMs);
-      if (read.state === 'unavailable') update(id, { state: 'no-read', noRead: read.reason });
-      else {
-        update(id, {
-          state: 'answered',
-          answer: answerFrom(read, intent, nameOf),
-          source: { routes: read.routes, freshness: read.freshness, receivedAt: Date.now() },
-        });
+      if (assistant && (intent.kind === 'act' || intent.kind === 'no-peer')) {
+        update(id, { state: 'answered', answer: { text: 'This assistant is read-only. It cannot send, spend or prepare drafts.', cards: [] } });
+        return scroll();
       }
-    } catch (e) {
-      update(id, { state: 'error', error: asActionError(e).message });
-    }
-    scroll();
+      if (intent.kind === 'act') {
+        setDraftText('');
+        update(id, { state: 'answered', provider: 'local', proposal: intent.proposal, answer: { text: proposalText(intent.proposal), cards: [] } });
+        return scroll();
+      }
+      if (intent.kind === 'no-peer' || intent.kind === 'unknown') {
+        const text = assistant ? `${assistant.role} This assistant is read-only. Try one of the suggestions.`
+          : intent.kind === 'unknown' ? unknownText() : noPeerText(intent.what);
+        update(id, { state: 'answered', provider: 'local', answer: { text, cards: [] } });
+        return scroll();
+      }
+      if (needsDisclose()) {
+        update(id, { topic: intent.topic, sinceMs: intent.sinceMs, window: intent.window });
+        return await disclose(id, provider()?.data_leaves ?? 'counts');
+      }
+      try {
+        const read = await props.source.aiRead(intent.topic, intent.sinceMs, props.assistant);
+        if (read.state === 'unavailable') update(id, { state: 'no-read', noRead: read.reason });
+        else {
+          update(id, {
+            state: 'answered',
+            answer: answerFrom(read, intent, nameOf),
+            source: { routes: read.routes, freshness: read.freshness, receivedAt: Date.now() },
+          });
+        }
+      } catch (e) {
+        update(id, { state: 'error', error: asActionError(e).message });
+      }
+      scroll();
+    } finally { await persistTurn(id); }
   };
 
   const send = async (id: number) => {
@@ -278,12 +342,14 @@ export function AiTrack(props: {
       update(id, { state: 'error', error: asActionError(e).message });
     }
     scroll();
+    await persistTurn(id);
   };
 
   const dontSend = (id: number) => {
     const t = session.turns.find((x) => x.id === id);
     if (t?.disclosure) void props.source.aiCancel(t.disclosure.id).catch(() => {});
     update(id, { state: 'not-sent' });
+    void persistTurn(id);
   };
 
   // The persistent endpoint badge: which endpoint answers, who gets paid and
@@ -292,7 +358,16 @@ export function AiTrack(props: {
 
   return (
     <>
-      {props.head('Ask your node', sub())}
+      {props.head(assistant ? `${assistant.name} assistant` : 'Ask your node', sub())}
+      <Show when={assistant}>
+        <div class="ai-providers-bar" data-assistant-ready={threadReady() ? '' : undefined}>
+          <p data-assistant-role>{assistant!.role} Questions and answers stay sealed on this Mac. Keeps the latest 100 turns.</p>
+          <button type="button" class="soft" data-assistant-forget
+            disabled={threadBusy() || session.turns.some(t => t.state === 'reading' || t.state === 'sending')}
+            onClick={() => void forget()}>Forget</button>
+        </div>
+        <Show when={threadError()}><p role="alert" data-assistant-error>{threadError()}</p></Show>
+      </Show>
       <div class="ai-providers-bar">
         <div class="ai-providers" role="radiogroup" aria-label="Who answers" data-ai-providers>
           <For each={session.providers ?? []}>
@@ -303,9 +378,9 @@ export function AiTrack(props: {
                 class="ai-provider"
                 classList={{ current: session.provider === p.kind }}
                 aria-checked={session.provider === p.kind}
-                disabled={!p.enabled || locked()}
+                disabled={!p.enabled || locked() || (!!assistant && p.kind !== 'local')}
                 title={
-                  p.note ??
+                  (assistant && p.kind !== 'local' ? 'Remote models are off for named assistants.' : p.note) ??
                   (locked() && session.provider !== p.kind
                     ? 'Send or don’t send the preview first'
                     : p.host
@@ -322,7 +397,7 @@ export function AiTrack(props: {
                     ? p.model
                       ? p.model
                       : 'nothing leaves'
-                    : p.enabled
+                    : p.enabled && !assistant
                       ? p.host
                       : 'off'}
                 </span>
@@ -437,12 +512,10 @@ export function AiTrack(props: {
               </div>
               <h2>Ask about your own node</h2>
               <p class="hint">
-                This app reads your node through a closed list of read-only routes and answers here. Your node never talks
-                to a model. If you turn on a remote model, each question shows exactly what would leave this computer, and
-                nothing is sent until you press Send.
+                {assistant ? 'Ask about the topics in this assistant’s role. Rules answer here, or choose a local model and preview each request before sending it to loopback.' : 'This app reads your node through a closed list of read-only routes and answers here. Your node never talks to a model. If you turn on a remote model, each question shows exactly what would leave this computer, and nothing is sent until you press Send.'}
               </p>
               <div class="ai-hero-suggestions" aria-label="Suggestions">
-                <For each={SUGGESTIONS}>
+                <For each={suggestions}>
                   {(s) => (
                     <button type="button" class="ai-hero-card" disabled={busy()} onClick={() => void ask(s)} data-suggestion>
                       <span class="ai-hero-card-arrow" aria-hidden="true">↳</span>
@@ -489,7 +562,7 @@ export function AiTrack(props: {
       >
         <Show when={session.turns.length > 0}>
           <div class="ai-suggest" aria-label="Suggestions">
-            <For each={SUGGESTIONS}>
+            <For each={suggestions}>
               {(s) => (
                 <button type="button" class="chip" disabled={busy()} onClick={() => void ask(s)} data-suggestion>
                   {s}
@@ -499,6 +572,7 @@ export function AiTrack(props: {
           </div>
         </Show>
 
+        <Show when={!assistant}>
         <div
           class="ai-composer-extras"
           classList={{ 'is-open': showExtras() || Boolean(draftText()) }}
@@ -533,8 +607,9 @@ export function AiTrack(props: {
           </div>
         </div>
 
+        </Show>
         <div class="composer-main ai-composer-main">
-          <button
+          <Show when={!assistant}><button
             type="button"
             class="attach soft ai-plus-btn"
             classList={{ active: showExtras() || Boolean(draftText()) }}
@@ -546,7 +621,7 @@ export function AiTrack(props: {
               <line x1="12" y1="5" x2="12" y2="19" />
               <line x1="5" y1="12" x2="19" y2="12" />
             </svg>
-          </button>
+          </button></Show>
           <textarea
             rows={1}
             placeholder="Ask your node…"
@@ -591,7 +666,9 @@ export function AiTrack(props: {
         <p class="send-next ai-policy" data-ai-policy>
           <span class="ai-policy-lock" aria-hidden="true">🔒</span>
           <span>
-            {remote()
+            {assistant
+              ? 'Read-only assistant. No payments, messages or drafts. Rules and local models stay on this computer.'
+              : remote()
               ? `Each question shows the exact request for ${provider()?.label ?? 'the remote model'} first. Nothing is approved ahead of time.`
               : ownModel()
                 ? `Each question shows the exact request for ${provider()?.model} on this computer first. Nobody is paid; the preview never leaves this machine.`
@@ -644,7 +721,7 @@ function TurnView(props: {
             {(s) => <SourceStamp routes={s().routes} line={sourceLine(s().freshness, s().receivedAt, props.now)} />}
           </Show>
           <Show when={!t().source && !t().proposal}>
-            <p class="ai-source" data-ai-source="none">Nothing was read from your node for this.</p>
+            <p class="ai-source" data-ai-source="none">{t().saved ? 'Saved answer — historical, not a fresh node read. Model answers are not checked by your node.' : 'Nothing was read from your node for this.'}</p>
           </Show>
         </div>
       </Match>
