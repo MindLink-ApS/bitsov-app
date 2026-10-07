@@ -281,6 +281,23 @@ describe('pairing panel', () => {
     expect(el.querySelector('[data-remote-access]')).not.toBeNull();
   });
 
+  it('once the node is up, both locations are one row of pills and the pairing actions sit side by side', () => {
+    const el = show(paired, ready);
+    const section = el.querySelector('.node-target-section')!;
+    expect(section.classList.contains('compact')).toBe(true);
+    // Compact: no fold to open, both choices are real radios in the same row.
+    const advanced = el.querySelector<HTMLDetailsElement>('details.node-target-advanced')!;
+    expect(advanced.open).toBe(true);
+    expect([...section.querySelectorAll('[role="radio"]')].map((r) => r.getAttribute('data-target'))).toEqual(['local', 'network']);
+    el.querySelector<HTMLButtonElement>('[data-target="network"]')!.click();
+    const form = el.querySelector('[data-remote-access]')!;
+    expect(form.querySelector('.form-actions > button[type="submit"]')).not.toBeNull();
+    const input = form.querySelector<HTMLInputElement>('input')!;
+    input.value = 'bitsov://pair/abc';
+    input.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    expect(form.querySelector('.form-actions > [data-cancel-pairing-review]')).not.toBeNull();
+  });
+
   it('enables the internal test node only with the explicit runtime flag', () => {
     localStorage.setItem('bitsov.test-nodes', '1');
     try {

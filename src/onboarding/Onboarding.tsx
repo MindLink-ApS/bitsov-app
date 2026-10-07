@@ -239,7 +239,8 @@ export function Onboarding(props: {
             </div>
           </button>
 
-          <details class="node-target-advanced" open={target() !== 'local'}>
+          {/* Once the node is up the choice is compact: both locations show as pills, no fold. */}
+          <details class="node-target-advanced" open={target() !== 'local' || stage() !== 'node'}>
             <summary>Advanced: use a node you already run at home</summary>
           {/* A home node uses a remote pairing link. */}
           <button
@@ -461,9 +462,9 @@ export function Onboarding(props: {
       </Switch>
 
       <Show when={target() !== 'local'}>
-      <p class="hint">After a power cut, open the app once. Your password is never stored on the box.</p>
       <form class="panel pairing remote-form" data-remote-access onSubmit={importRemote}>
         <h2>{props.onScanRemote ? 'Scan or paste the pairing link' : 'Paste the pairing link'}</h2>
+        <p class="hint">After a power cut, open the app once. Your password is never stored on the box.</p>
         <Show when={props.onScanRemote}>
           <p class="hint">BitSov uses the camera to read your node’s pairing QR code. You can paste instead. Nothing is saved until you choose Use remote node.</p>
           <button
@@ -497,12 +498,14 @@ export function Onboarding(props: {
             <p>Compare these details with your node before confirming.</p>
           </div>
         )}</Show>
-        <button type="submit" class="primary" disabled={busy()}>
-          {importing() ? 'Saving…' : previewing() ? 'Checking ticket…' : preview() ? 'Use remote node' : 'Review pairing ticket'}
-        </button>
-        <Show when={remoteLink() || preview() || importResult()}>
-          <button type="button" class="quiet" data-cancel-pairing-review disabled={busy()} onClick={() => editLink('')}>Close ticket review</button>
-        </Show>
+        <div class="form-actions">
+          <button type="submit" class="primary" disabled={busy()}>
+            {importing() ? 'Saving…' : previewing() ? 'Checking ticket…' : preview() ? 'Use remote node' : 'Review pairing ticket'}
+          </button>
+          <Show when={remoteLink() || preview() || importResult()}>
+            <button type="button" class="quiet" data-cancel-pairing-review disabled={busy()} onClick={() => editLink('')}>Close ticket review</button>
+          </Show>
+        </div>
         <p class="hint">The link is verified and stored for the next app start.</p>
         <Show when={importResult()}>
           {(result) => (
