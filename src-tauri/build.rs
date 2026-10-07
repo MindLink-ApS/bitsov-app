@@ -31,6 +31,7 @@ fn main() {
             "identity_restore",
             "pairing_status",
             "pairing_retry",
+            "remote_access_preview",
             "remote_access_import",
             "pairing_link_take",
             "remote_access_forget",

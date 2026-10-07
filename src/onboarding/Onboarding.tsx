@@ -1,9 +1,10 @@
 import { LocalNodeSwitch } from './LocalNodeSwitch';
 import { SoftError } from '../control/SoftError';
-import { createSignal, For, Match, onMount, Show, Switch } from 'solid-js';
+import { createEffect, createSignal, For, Match, onMount, Show, Switch } from 'solid-js';
 import { normalizePairingLink, onboardingSteps, scopeList, type NodeStatus, type PairingView } from './pairing';
 import type { DeviceView } from '../control/types';
-import type { RemoteImportView } from '../control/source';
+import type { RemoteImportView, RemotePreviewView } from '../control/source';
+import { usePairingActivity } from '../pairingActivity';
 
 // Claim discipline (BitSov-bitsov docs/security/pairing.md): less exposure, not solved
 // local security. The short code is a tripwire, never described as what protects the
@@ -40,9 +41,12 @@ export function Onboarding(props: {
   onTargetChange?: (target: NodeTarget) => void;
   device?: () => DeviceView | null;
   onForgetRemote?: () => Promise<void>;
+  onPreviewRemote?: (link: string) => Promise<RemotePreviewView>;
+  onBusyChange?: (busy: boolean) => void;
   onImportRemote?: (link: string) => Promise<RemoteImportView>;
   onScanRemote?: () => Promise<string>;
   initialPairingLink?: string;
+  pairingInputId?: string;
 }) {
   // Runtime, opt-in only. This changes presentation, never node authority.
   const testNodes = (() => {
@@ -59,6 +63,8 @@ export function Onboarding(props: {
   const isEnrolled = () => props.device?.()?.state === 'registered';
   const mobileBiometrics = () => props.onScanRemote !== undefined;
   const [remoteLink, setRemoteLink] = createSignal('');
+  const [previewing, setPreviewing] = createSignal(false);
+  const [preview, setPreview] = createSignal<{ link: string; view: RemotePreviewView } | null>(null);
   const [importing, setImporting] = createSignal(false);
   const [scanning, setScanning] = createSignal(false);
   const [forgetting, setForgetting] = createSignal(false);
@@ -66,7 +72,17 @@ export function Onboarding(props: {
   const [remoteChoiceEdited, setRemoteChoiceEdited] = createSignal(false);
   const [importResult, setImportResult] = createSignal<RemoteImportView | null>(null);
   const [importError, setImportError] = createSignal<string | null>(null);
+  const busy = () => importing() || previewing() || scanning() || forgetting();
+  usePairingActivity(() => busy() || remoteLink().length > 0 || preview() !== null || importResult() !== null);
+  createEffect(() => props.onBusyChange?.(busy()));
+  const editLink = (link: string) => {
+    if (busy()) return;
+    setPreview(null);
+    setImportResult(null);
+    setRemoteLink(link);
+  };
   const prefill = (link: string) => {
+    setPreview(null);
     setImportResult(null);
     setRemoteLink('');
     setImportError(null);
@@ -83,38 +99,46 @@ export function Onboarding(props: {
     return saved !== undefined ? saved : props.pairing().hosted_by ?? null;
   };
 
-  const importRemoteLink = async (
-    readLink: () => string | Promise<string>,
-    emptyMessage: string,
-  ) => {
-    if (importing() || scanning() || forgetting()) return;
-    setImporting(true);
+  const importRemote = async (event: Event) => {
+    event.preventDefault();
+    if (busy()) return;
+    const reviewed = preview();
     setImportError(null);
     setImportResult(null);
+    if (!reviewed || reviewed.link !== remoteLink()) {
+      setPreview(null);
+      setPreviewing(true);
+      try {
+        const link = normalizePairingLink(remoteLink());
+        if (!props.onPreviewRemote) throw new Error('Pairing preview is unavailable. Nothing was saved.');
+        const view = await props.onPreviewRemote(link);
+        // Keep the normalized, parsed ticket as the sole confirmation authority.
+        setRemoteLink(link);
+        setPreview({ link, view });
+      } catch (error) {
+        setRemoteLink('');
+        setImportError(String(error));
+      } finally { setPreviewing(false); }
+      return;
+    }
+    setImporting(true);
+    setRemoteLink('');
+    setPreview(null);
     try {
-      const link = (await readLink()).trim();
-      setRemoteLink('');
-      if (!link) throw new Error(emptyMessage);
       if (!props.onImportRemote) throw new Error('Remote access import is unavailable.');
-      const result = await props.onImportRemote(normalizePairingLink(link));
+      const result = await props.onImportRemote(reviewed.link);
       setRemoteRevision(n => n + 1);
       setRemoteChoiceEdited(true);
       setSavedHostedBy(result.hosted_by ?? null);
       setImportResult(result);
     } catch (error) {
       setImportError(String(error));
-    } finally {
-      setImporting(false);
-    }
-  };
-
-  const importRemote = async (event: Event) => {
-    event.preventDefault();
-    await importRemoteLink(() => remoteLink(), 'Paste a remote pairing link.');
+    } finally { setImporting(false); }
   };
 
   const scanRemote = async () => {
-    if (importing() || scanning() || forgetting() || !props.onScanRemote) return;
+    if (busy() || !props.onScanRemote) return;
+    setPreview(null);
     setScanning(true);
     setRemoteLink('');
     setImportResult(null);
@@ -127,6 +151,9 @@ export function Onboarding(props: {
   };
 
   const forgetRemote = async () => {
+    if (busy()) return;
+    setPreview(null);
+    setRemoteLink('');
     setForgetting(true);
     try {
       await props.onForgetRemote!();
@@ -293,7 +320,7 @@ export function Onboarding(props: {
       </div>
 
       <Show when={props.onForgetRemote && (props.pairing().remote || target() !== 'local' || remoteChoiceEdited())}>
-        <LocalNodeSwitch onForget={forgetRemote} disabled={importing() || scanning() || forgetting()} remoteRevision={remoteRevision()} />
+        <LocalNodeSwitch onForget={forgetRemote} disabled={busy()} remoteRevision={remoteRevision()} />
       </Show>
 
       <Switch>
@@ -443,28 +470,39 @@ export function Onboarding(props: {
             type="button"
             class="quiet"
             data-scan-pairing-qr
-            disabled={importing() || scanning() || forgetting()}
+            disabled={busy()}
             onClick={() => void scanRemote()}
           >
             {scanning() ? 'Scanning…' : 'Scan pairing QR'}
           </button>
         </Show>
-        <label for="remote-pairing-link">Pairing link</label>
+        <label for={props.pairingInputId ?? 'remote-pairing-link'}>Pairing link</label>
         <input
-          id="remote-pairing-link"
+          id={props.pairingInputId ?? 'remote-pairing-link'}
           type="password"
           autocomplete="off"
           autocapitalize="none"
           autocorrect="off"
           spellcheck={false}
-          disabled={importing() || scanning() || forgetting()}
+          disabled={busy()}
           value={remoteLink()}
-          onInput={(event) => setRemoteLink(event.currentTarget.value)}
+          onInput={(event) => editLink(event.currentTarget.value)}
           placeholder="bitsov://pair/…"
         />
-        <button type="submit" class="primary" disabled={importing() || scanning() || forgetting()}>
-          {importing() ? 'Saving…' : 'Use remote node'}
+        <Show when={preview()}>{review => (
+          <div class="panel" data-pairing-preview role="status">
+            <p>Pair with endpoint: <bdi>{review().view.endpoint}</bdi></p>
+            <p>Node ID fingerprint: <bdi>{review().view.node_id_fingerprint}</bdi></p>
+            <Show when={review().view.hosted_by}>{label => <p>Hosted by <bdi>{label()}</bdi></p>}</Show>
+            <p>Compare these details with your node before confirming.</p>
+          </div>
+        )}</Show>
+        <button type="submit" class="primary" disabled={busy()}>
+          {importing() ? 'Saving…' : previewing() ? 'Checking ticket…' : preview() ? 'Use remote node' : 'Review pairing ticket'}
         </button>
+        <Show when={remoteLink() || preview() || importResult()}>
+          <button type="button" class="quiet" data-cancel-pairing-review disabled={busy()} onClick={() => editLink('')}>Close ticket review</button>
+        </Show>
         <p class="hint">The link is verified and stored for the next app start.</p>
         <Show when={importResult()}>
           {(result) => (

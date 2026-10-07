@@ -138,6 +138,7 @@ describe('invisible payments in the composer and the context panel', () => {
     dispose = undefined;
     mount?.remove();
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
     setShowLegacyIntroductionUi(false);
     setShowLegacyRoomsUi(false);
   });
@@ -160,6 +161,20 @@ describe('invisible payments in the composer and the context panel', () => {
     await vi.waitFor(() => expect($(`[data-track="peer:${MAYA}"]`)?.getAttribute('aria-current')).toBe('true'));
     await vi.waitFor(() => expect($('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('2000'));
   }
+
+  it('queues incoming pairing while the budget awaits its owner even before spend refresh', async () => {
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Android');
+    let incoming: string | null = null;
+    stubHost(budgetView({ waiting_for_owner: true }), {
+      pairing_link_take: () => { const link = incoming; incoming = null; return link; },
+    });
+    await openShell();
+    await vi.waitFor(() => expect($('[data-budget="waiting"]')).not.toBeNull());
+    incoming = 'bitsov://pair/hostile';
+    await vi.waitFor(() => expect($('[data-pairing-link-banner]')).not.toBeNull(), { timeout: 2000 });
+    expect($<HTMLButtonElement>('[data-review-pairing]')!.disabled).toBe(true);
+    expect($('[data-pairing-link-screen]')).toBeNull();
+  });
 
   it('relaunch displays node-confirmed auto-pay and rechecks immediately after feed recovery', async () => {
     const host = stubHost(open([{ target: MAYA, room: false, limit_msat: 50_000, spent_msat: 0 }], {
@@ -1173,6 +1188,7 @@ describe('invisible payments in the composer and the context panel', () => {
       dispose = undefined;
       mount.remove();
       vi.unstubAllGlobals();
+    vi.restoreAllMocks();
     }
   });
 

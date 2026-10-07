@@ -112,6 +112,50 @@ describe('pairing panel', () => {
   let dispose: (() => void) | undefined;
   let mount: HTMLElement | undefined;
 
+  it('previews the exact ticket before confirmation and invalidates the preview after editing', async () => {
+    const preview = vi.fn().mockResolvedValue({ endpoint: 'review.example:4242', node_id_fingerprint: '12345678…abcdef12' });
+    const save = vi.fn().mockResolvedValue({ endpoint: 'review.example:4242', node_id_fingerprint: '12345678…abcdef12', restart_required: true });
+    mount = document.createElement('div'); document.body.appendChild(mount);
+    dispose = render(() => <Onboarding status={() => booting} pairing={() => starting}
+      trustAck={() => false} onRetry={() => {}} selectedTarget="network"
+      onPreviewRemote={preview} onImportRemote={save} />, mount);
+    const input = mount.querySelector<HTMLInputElement>('input')!;
+    const form = mount.querySelector<HTMLFormElement>('form')!;
+    const type = (link: string) => { input.value = link; input.dispatchEvent(new InputEvent('input', { bubbles: true })); };
+    type('bitsov://pair/reviewed');
+    form.requestSubmit();
+    await vi.waitFor(() => expect(mount!.querySelector('[data-pairing-preview]')?.textContent).toContain('review.example:4242'));
+    expect(mount.textContent).toContain('12345678…abcdef12');
+    expect(save).not.toHaveBeenCalled();
+    type('bitsov://pair/edited');
+    expect(mount.querySelector('[data-pairing-preview]')).toBeNull();
+    form.requestSubmit();
+    await vi.waitFor(() => expect(preview).toHaveBeenLastCalledWith('bitsov://pair/edited'));
+    expect(save).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(mount!.querySelector('[data-pairing-preview]')).not.toBeNull());
+    form.requestSubmit();
+    await vi.waitFor(() => expect(save).toHaveBeenCalledExactlyOnceWith('bitsov://pair/edited'));
+  });
+
+  it('fails closed on a refused preview without importing', async () => {
+    const save = vi.fn();
+    mount = document.createElement('div'); document.body.appendChild(mount);
+    dispose = render(() => <Onboarding status={() => booting} pairing={() => starting}
+      trustAck={() => false} onRetry={() => {}} selectedTarget="network"
+      initialPairingLink="bitsov://pair/expired"
+      onPreviewRemote={async () => { throw new Error('This pairing link expired.'); }} onImportRemote={save} />, mount);
+    mount.querySelector<HTMLFormElement>('form')!.requestSubmit();
+    await vi.waitFor(() => expect(mount!.textContent).toContain('This pairing link expired.'));
+    expect(mount.querySelector('[data-pairing-preview]')).toBeNull();
+    expect(save).not.toHaveBeenCalled();
+  });
+
+  const submitReview = async (form: HTMLFormElement) => {
+    form.requestSubmit();
+    await vi.waitFor(() => expect(form.querySelector('[data-pairing-preview], [data-soft-summary]')).not.toBeNull());
+    if (form.querySelector('[data-pairing-preview]')) form.requestSubmit();
+  };
+
   afterEach(() => {
     dispose?.();
     dispose = undefined;
@@ -129,7 +173,7 @@ describe('pairing panel', () => {
     document.body.appendChild(mount);
     dispose = render(
       () => (
-        <Onboarding
+        <Onboarding onPreviewRemote={async () => ({ endpoint: 'home:4242', node_id_fingerprint: 'ab…cd' })}
           status={() => status}
           pairing={() => pairing}
           trustAck={() => false}
@@ -328,24 +372,24 @@ describe('pairing panel', () => {
   it('keeps restart guidance current across save, forget, and save again', async () => {
     let finishForget!: () => void;
     mount = document.createElement('div'); document.body.appendChild(mount);
-    dispose = render(() => <Onboarding status={() => booting} pairing={() => starting}
+    dispose = render(() => <Onboarding onPreviewRemote={async () => ({ endpoint: 'home:4242', node_id_fingerprint: 'ab…cd' })} status={() => booting} pairing={() => starting}
       trustAck={() => false} onRetry={() => {}} selectedTarget="network"
       onForgetRemote={() => new Promise<void>(resolve => { finishForget = resolve; })}
       onImportRemote={async () => ({ endpoint: 'home:4242', node_id_fingerprint: 'ab…cd', restart_required: true })} />, mount);
-    const save = () => {
+    const save = async () => {
       const input = mount!.querySelector<HTMLInputElement>('input')!;
       input.value = 'bitsov://pair/example';
       input.dispatchEvent(new InputEvent('input', { bubbles: true }));
-      mount!.querySelector<HTMLFormElement>('form')!.requestSubmit();
+      await submitReview(mount!.querySelector<HTMLFormElement>('form')!);
     };
-    save();
+    await save();
     await vi.waitFor(() => expect(mount!.textContent).toContain('Restart BitSov to connect'));
     mount.querySelector<HTMLButtonElement>('[data-use-local]')!.click();
     expect(mount.querySelector<HTMLButtonElement>('button[type="submit"]')!.disabled).toBe(true);
     finishForget();
     await vi.waitFor(() => expect(mount!.textContent).toContain('Restart BitSov to use this Mac'));
     expect(mount.textContent).not.toContain('Restart BitSov to connect');
-    save();
+    await save();
     await vi.waitFor(() => expect(mount!.textContent).toContain('Restart BitSov to connect'));
     expect(mount.textContent).not.toContain('Restart BitSov to use this Mac');
     expect(mount.querySelector<HTMLButtonElement>('[data-use-local]')!.disabled).toBe(false);
@@ -362,7 +406,7 @@ describe('pairing panel', () => {
     document.body.appendChild(mount);
     dispose = render(
       () => (
-        <Onboarding
+        <Onboarding onPreviewRemote={async () => ({ endpoint: 'home:4242', node_id_fingerprint: 'ab…cd' })}
           status={() => booting}
           pairing={() => starting}
           trustAck={() => false}
@@ -377,7 +421,7 @@ describe('pairing panel', () => {
     const input = mount.querySelector<HTMLInputElement>('#remote-pairing-link')!;
     input.value = link;
     input.dispatchEvent(new InputEvent('input', { bubbles: true }));
-    mount.querySelector<HTMLFormElement>('[data-remote-access]')!.requestSubmit();
+    await submitReview(mount.querySelector<HTMLFormElement>('[data-remote-access]')!);
 
     await vi.waitFor(() => {
       expect(mount!.textContent).toContain('Node ID fingerprint: 01234567…89abcdef');
@@ -399,7 +443,7 @@ describe('pairing panel', () => {
     document.body.appendChild(mount);
     dispose = render(
       () => (
-        <Onboarding
+        <Onboarding onPreviewRemote={async () => ({ endpoint: 'home:4242', node_id_fingerprint: 'ab…cd' })}
           status={() => booting}
           pairing={() => starting}
           trustAck={() => false}
@@ -418,7 +462,7 @@ describe('pairing panel', () => {
     await vi.waitFor(() => expect(input.value).toBe(link));
     expect(onImportRemote).not.toHaveBeenCalled();
     expect(mount.textContent).toContain('camera');
-    mount.querySelector<HTMLFormElement>('[data-remote-access]')!.requestSubmit();
+    await submitReview(mount.querySelector<HTMLFormElement>('[data-remote-access]')!);
     await vi.waitFor(() => expect(mount!.textContent).toContain('Remote node home.example:4242 saved.'));
     expect(onScanRemote).toHaveBeenCalledTimes(1);
     expect(onImportRemote).toHaveBeenCalledWith(link);
@@ -429,7 +473,7 @@ describe('pairing panel', () => {
     const link = 'https://unrelated.example/private-ticket';
     const onImportRemote = vi.fn();
     mount = document.createElement('div'); document.body.appendChild(mount);
-    dispose = render(() => <Onboarding status={() => booting} pairing={() => starting}
+    dispose = render(() => <Onboarding onPreviewRemote={async () => ({ endpoint: 'home:4242', node_id_fingerprint: 'ab…cd' })} status={() => booting} pairing={() => starting}
       trustAck={() => false} onRetry={() => {}} selectedTarget="network"
       initialPairingLink={path === 'deep link' ? link : undefined}
       onScanRemote={async () => link} onImportRemote={onImportRemote} />, mount);
@@ -437,7 +481,7 @@ describe('pairing panel', () => {
       const input = mount.querySelector<HTMLInputElement>('#remote-pairing-link')!;
       input.value = link;
       input.dispatchEvent(new InputEvent('input', { bubbles: true }));
-      mount.querySelector<HTMLFormElement>('[data-remote-access]')!.requestSubmit();
+      await submitReview(mount.querySelector<HTMLFormElement>('[data-remote-access]')!);
     } else if (path === 'scan') {
       mount.querySelector<HTMLButtonElement>('[data-scan-pairing-qr]')!.click();
     }
@@ -451,7 +495,7 @@ describe('pairing panel', () => {
     const link = 'bitsov://pair/eyJ2IjoxfQ';
     const onImportRemote = vi.fn().mockRejectedValue(new Error('This pairing link expired. Request a new ticket from your node.'));
     mount = document.createElement('div'); document.body.appendChild(mount);
-    dispose = render(() => <Onboarding status={() => booting} pairing={() => starting}
+    dispose = render(() => <Onboarding onPreviewRemote={async () => ({ endpoint: 'home:4242', node_id_fingerprint: 'ab…cd' })} status={() => booting} pairing={() => starting}
       trustAck={() => false} onRetry={() => {}} selectedTarget="network"
       initialPairingLink={path === 'deep link' ? link : undefined}
       onScanRemote={async () => link} onImportRemote={onImportRemote} />, mount);
@@ -464,7 +508,7 @@ describe('pairing panel', () => {
     }
     await vi.waitFor(() => expect(input.value).toBe(link));
     expect(onImportRemote).not.toHaveBeenCalled();
-    mount.querySelector<HTMLFormElement>('[data-remote-access]')!.requestSubmit();
+    await submitReview(mount.querySelector<HTMLFormElement>('[data-remote-access]')!);
     await vi.waitFor(() => expect(mount!.textContent).toContain('This pairing link expired.'));
     expect(onImportRemote).toHaveBeenCalledExactlyOnceWith(link);
     expect(mount.querySelector('[data-import-result]')).toBeNull();
@@ -474,7 +518,7 @@ describe('pairing panel', () => {
   it('keeps paste usable after scan cancellation without exposing native errors', async () => {
     const onImportRemote = vi.fn().mockResolvedValue({ endpoint: 'home:4242', node_id_fingerprint: 'ab…cd', restart_required: true });
     mount = document.createElement('div'); document.body.appendChild(mount);
-    dispose = render(() => <Onboarding status={() => booting} pairing={() => starting}
+    dispose = render(() => <Onboarding onPreviewRemote={async () => ({ endpoint: 'home:4242', node_id_fingerprint: 'ab…cd' })} status={() => booting} pairing={() => starting}
       trustAck={() => false} onRetry={() => {}} selectedTarget="network"
       onScanRemote={async () => { throw new Error('cancelled: bitsov://pair/private-ticket'); }}
       onImportRemote={onImportRemote} />, mount);
@@ -485,20 +529,20 @@ describe('pairing panel', () => {
     expect(input.disabled).toBe(false);
     input.value = 'bitsov://pair/pasted-ticket';
     input.dispatchEvent(new InputEvent('input', { bubbles: true }));
-    mount.querySelector<HTMLFormElement>('[data-remote-access]')!.requestSubmit();
+    await submitReview(mount.querySelector<HTMLFormElement>('[data-remote-access]')!);
     await vi.waitFor(() => expect(mount!.textContent).toContain('Remote node home:4242 saved.'));
   });
 
   const importWith = async (result: () => Promise<unknown>, pairing: PairingView = starting) => {
     mount = document.createElement('div');
     document.body.appendChild(mount);
-    dispose = render(() => <Onboarding status={() => booting} pairing={() => pairing}
+    dispose = render(() => <Onboarding onPreviewRemote={async () => ({ endpoint: 'home:4242', node_id_fingerprint: 'ab…cd' })} status={() => booting} pairing={() => pairing}
       trustAck={() => false} onRetry={() => {}} selectedTarget="network"
       onForgetRemote={async () => {}} onImportRemote={result as never} />, mount);
     const input = mount.querySelector<HTMLInputElement>('#remote-pairing-link')!;
     input.value = 'bitsov://pair/ticket';
     input.dispatchEvent(new InputEvent('input', { bubbles: true }));
-    mount.querySelector<HTMLFormElement>('[data-remote-access]')!.requestSubmit();
+    await submitReview(mount.querySelector<HTMLFormElement>('[data-remote-access]')!);
     return mount;
   };
   const badge = () => mount!.querySelector('.node-target-card[data-target="network"] .target-badge')!;
@@ -528,7 +572,7 @@ describe('pairing panel', () => {
   it('shows the running remote node label on the home-node badge', () => {
     mount = document.createElement('div');
     document.body.appendChild(mount);
-    dispose = render(() => <Onboarding status={() => booting} pairing={() => ({ ...pending, remote: true, hosted_by: 'Basement box' })}
+    dispose = render(() => <Onboarding onPreviewRemote={async () => ({ endpoint: 'home:4242', node_id_fingerprint: 'ab…cd' })} status={() => booting} pairing={() => ({ ...pending, remote: true, hosted_by: 'Basement box' })}
       trustAck={() => false} onRetry={() => {}} />, mount);
     expect(badge().textContent).toBe('Hosted by Basement box');
   });
