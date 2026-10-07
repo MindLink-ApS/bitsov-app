@@ -136,7 +136,8 @@ describe('app shell pairing wiring', () => {
     dispose = render(() => <App />, mount);
     await vi.advanceTimersByTimeAsync(100);
     if (kind === 'restore') mount.querySelector<HTMLButtonElement>('[data-restore-open]')!.click();
-    if (kind === 'unlock') mount.querySelector<HTMLButtonElement>('[data-unlock-type-open]')!.click();
+    // Typed password is the default until one is remembered; open it only if collapsed.
+    if (kind === 'unlock') mount.querySelector<HTMLButtonElement>('[data-unlock-type-open]')?.click();
     const input = mount.querySelector<HTMLInputElement>(kind === 'paste' ? '#remote-pairing-link' : kind === 'restore' ? '#restore-phrase' : '#node-unlock-password')!;
     input.value = kind === 'paste' ? 'bitsov://pair/original' : 'private input';
     input.dispatchEvent(new InputEvent('input', { bubbles: true }));

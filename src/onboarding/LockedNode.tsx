@@ -1,5 +1,6 @@
 import { usePairingActivity } from '../pairingActivity';
 import { createEffect, createSignal, Show } from 'solid-js';
+import { setUnlockRemembered, unlockRemembered } from './unlockMemory';
 import { hideLockedHubTrust, HubTrustInfo, lockedHubTrustHidden } from '../control/HubTrust';
 
 export function LockedNode(props: {
@@ -18,8 +19,15 @@ export function LockedNode(props: {
   const [error, setError] = createSignal<string | null>(null);
   const [typing, setTyping] = createSignal(false);
   const [password, setPassword] = createSignal('');
+  // Typed password first until this device has a password remembered behind
+  // Touch ID: offering Touch ID before that only ends in "no password saved".
+  const [remembered, setRemembered] = createSignal(unlockRemembered());
   createEffect(() => {
-    if (props.state === 'no-password') setTyping(true);
+    if (props.state === 'no-password') {
+      setUnlockRemembered(false);
+      setRemembered(false);
+      setTyping(true);
+    }
     if (props.state === 'not-enrolled' || props.state === 'pending-approval') {
       setTyping(false);
       setPassword('');
@@ -27,10 +35,16 @@ export function LockedNode(props: {
   });
   usePairingActivity(() => busy() || typing());
   const canType = () => !!props.typedUnlockSupported && !!props.onUnlockWithPassword;
+  const typedFirst = () => canType() && !remembered();
+  createEffect(() => { if (typedFirst() && props.state !== 'not-enrolled' && props.state !== 'pending-approval') setTyping(true); });
   const unlock = async () => {
     if (busy()) return;
     setBusy(true); setError(null);
-    try { await props.onUnlock(); }
+    try {
+      await props.onUnlock();
+      // A biometric unlock that worked used a remembered password.
+      setUnlockRemembered(true);
+    }
     catch (e) {
       setError(typeof e === 'string' ? e : `Unlock did not complete. Try again when ${props.mobile ? 'biometrics are' : 'Touch ID is'} available.`);
       if (canType()) setTyping(true);
@@ -64,8 +78,10 @@ export function LockedNode(props: {
         <p class="hint">Setup becomes available in Settings when the node is unlocked.</p>
       </Show>
       <Show when={props.state !== 'not-enrolled' && props.state !== 'pending-approval'}>
-      <p>Your node restarted (for example after a power cut). It cannot read your keys until you unlock it from this device. Tap Unlock - it takes a few seconds.</p>
-      <button disabled={busy()} onClick={() => void unlock()}>{busy() ? 'Unlocking…' : props.mobile ? 'Unlock with biometrics' : 'Unlock with Touch ID'}</button>
+      <p>Your node restarted (for example after a power cut). It cannot read your keys until you unlock it from this device. {typedFirst() ? 'Type the password you chose for your node - it takes a few seconds.' : 'Tap Unlock - it takes a few seconds.'}</p>
+      <Show when={!typedFirst()}>
+        <button disabled={busy()} onClick={() => void unlock()}>{busy() ? 'Unlocking…' : props.mobile ? 'Unlock with biometrics' : 'Unlock with Touch ID'}</button>
+      </Show>
       <Show when={canType()}>
         <Show
           when={typing()}
@@ -91,6 +107,12 @@ export function LockedNode(props: {
             </div>
           </form>
         </Show>
+      </Show>
+      <Show when={typedFirst()}>
+        <p class="hint unlock-saved" data-unlock-saved-path>
+          Chose Remember on this {props.mobile ? 'phone' : 'Mac'} before?{' '}
+          <button type="button" class="link" disabled={busy()} onClick={() => void unlock()}>{busy() ? 'Unlocking…' : props.mobile ? 'Unlock with biometrics' : 'Unlock with Touch ID'}</button>
+        </p>
       </Show>
       </Show>
       <Show when={error() && props.attemptsLeft != null}>
@@ -121,7 +143,7 @@ export function RememberUnlock(props: {
     setBusy(true); setError(null);
     try {
       await props.onChoose(remember);
-      if (remember) setSaved(true);
+      if (remember) { setUnlockRemembered(true); setSaved(true); }
       else props.onDone();
     } catch (e) {
       setError(typeof e === 'string' ? e : 'The password was not saved.');
