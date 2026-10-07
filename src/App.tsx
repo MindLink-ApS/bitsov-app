@@ -206,6 +206,8 @@ function AppScreen() {
             onPreviewRemote={(link) => source().remoteAccessPreview(link)}
             onImportRemote={(link) => source().remoteAccessImport(link)}
             onScanRemote={canScanPairingQr ? scanPairingLink : undefined}
+            onRegisterDevice={async () => setDevice(await source().deviceKeyRegister())}
+            onCancelDevice={async () => setDevice(await source().deviceKeyCancel())}
           />
 
           <Show
