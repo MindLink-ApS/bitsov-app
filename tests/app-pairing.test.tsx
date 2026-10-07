@@ -35,6 +35,34 @@ describe('app shell pairing wiring', () => {
     vi.restoreAllMocks();
   });
 
+  it.each(['ready', 'locked', 'offline'] as const)('keeps status-driven watches alive from %s startup and stops on app disposal', async initial => {
+    vi.useFakeTimers();
+    const nodeId = 'ab'.repeat(32);
+    localStorage.setItem(`bitsov.trust.v1.local.${nodeId}`, 'accepted');
+    let locked = initial === 'locked';
+    const observed: { assistant: string; watch: { sample: { locked?: boolean; offline?: boolean }; revision: string | null } }[] = [];
+    vi.stubGlobal('__TAURI_INTERNALS__', { invoke: (cmd: string, args: any) => {
+      if (cmd === 'node_status') return Promise.resolve({ ready: !locked && initial !== 'offline', locked, node_id: nodeId, error: null });
+      if (cmd === 'pairing_status') return Promise.resolve(paired);
+      if (cmd === 'ai_read' && args.watch) {
+        observed.push(args);
+        return Promise.resolve({ revision: 'one', notices: [] });
+      }
+      return Promise.reject(new Error('Unavailable in this fixture'));
+    } });
+    mount = document.createElement('div'); document.body.appendChild(mount);
+    dispose = render(() => <App />, mount);
+    await vi.advanceTimersByTimeAsync(3100);
+    expect(observed.some(x => x.assistant === 'node' && x.watch.sample.locked === locked && x.watch.sample.offline === (initial === 'offline'))).toBe(true);
+    locked = true;
+    await vi.advanceTimersByTimeAsync(3100);
+    expect(observed.some(x => x.assistant === 'node' && x.watch.sample.locked === true)).toBe(true);
+    dispose(); dispose = undefined;
+    const count = observed.length;
+    await vi.advanceTimersByTimeAsync(310_000);
+    expect(observed).toHaveLength(count);
+  });
+
   it.each([false, true])('queues deep links without unmounting the screen or replacing a review/import (locked=%s)', async (locked) => {
     vi.useFakeTimers();
     vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Android');

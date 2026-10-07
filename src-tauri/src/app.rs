@@ -6822,7 +6822,9 @@ async fn file_send(
 /// Pending disclosures. Host memory only; dropped on quit.
 #[derive(Default)]
 struct AiState {
-    threads: Mutex<()>,
+    // Lock also serializes preferences and notice persistence with Forget/Append.
+    threads: Mutex<std::collections::HashMap<&'static str, ai::threads::Thread>>,
+    watches: Mutex<ai::watches::Engine>,
     disclosures: ai::Disclosures,
 }
 
@@ -6905,8 +6907,31 @@ async fn ai_read(
     assistant: Option<ai::assistants::Assistant>,
     thread: Option<ai::threads::Request>,
     local_turn: Option<ai::tool_loop::Request>,
+    watch: Option<ai::watches::Poll>,
 ) -> Result<serde_json::Value, String> {
     reject_sealed_window(&window)?;
+    if let Some(poll) = watch {
+        if topic.is_some() || since_ms.is_some() || thread.is_some() || local_turn.is_some() {
+            return Err("Choose a watch poll, a local model turn, a topic read, or a thread operation.".into());
+        }
+        let assistant = assistant.ok_or("Choose an assistant first.")?;
+        // No timer or spawned task. Closed/hidden windows and quitting cannot evaluate,
+        // persist, or catch up watches, even if an IPC was already queued.
+        if state.quitting.load(Ordering::SeqCst) || !window.is_visible().unwrap_or(false) {
+            ai_state.watches.lock().map_err(|_| "Watches are unavailable.")?.reset(assistant);
+            return Ok(serde_json::Value::Null);
+        }
+        let mut settings = ai_state.threads.lock().map_err(|_| "Thread storage is unavailable.")?;
+        let mut engine = ai_state.watches.lock().map_err(|_| "Watches are unavailable.")?;
+        let dir = ai_config_dir(window.app_handle())?.join("ai-threads");
+        #[cfg(all(target_os = "macos", not(feature = "mobile")))]
+        let sealer: &dyn bitsov_app::at_rest::Sealer = &ai::threads::MacSealer;
+        #[cfg(not(all(target_os = "macos", not(feature = "mobile"))))]
+        let sealer = bitsov_app::at_rest::installed().ok_or("Sealed thread storage is unavailable on this platform.")?;
+        let update = ai::threads::poll_watches(&dir, assistant, poll.revision.as_deref(), &poll.sample,
+            &mut settings, &mut engine, true, now_ms(), sealer)?;
+        return serde_json::to_value(update).map_err(|_| "Could not encode watch notices.".into());
+    }
     if let Some(request) = local_turn {
         if topic.is_some() || since_ms.is_some() || thread.is_some() {
             return Err("Choose a local model turn, a topic read, or a thread operation.".into());
@@ -6930,14 +6955,17 @@ async fn ai_read(
     if let Some(request) = thread {
         if topic.is_some() { return Err("Choose a topic read or a thread operation.".into()); }
         let assistant = assistant.ok_or("Choose an assistant first.")?;
-        let _guard = ai_state.threads.lock().map_err(|_| "Thread storage is unavailable.")?;
+        let mut settings = ai_state.threads.lock().map_err(|_| "Thread storage is unavailable.")?;
         let dir = ai_config_dir(window.app_handle())?.join("ai-threads");
         #[cfg(all(target_os = "macos", not(feature = "mobile")))]
         let sealer: &dyn bitsov_app::at_rest::Sealer = &ai::threads::MacSealer;
         #[cfg(not(all(target_os = "macos", not(feature = "mobile"))))]
         let sealer = bitsov_app::at_rest::installed().ok_or("Sealed thread storage is unavailable on this platform.")?;
-        return serde_json::to_value(ai::threads::apply(&dir, assistant, request, sealer)?)
-            .map_err(|_| "Could not read the assistant thread.".into());
+        let changed_rule = match &request { ai::threads::Request::SetWatch { rule, .. } => Some(*rule), _ => None };
+        let saved = ai::threads::apply(&dir, assistant, request, sealer)?;
+        settings.insert(assistant.id(), saved.clone());
+        if let Some(rule) = changed_rule { ai_state.watches.lock().map_err(|_| "Watches are unavailable.")?.reset_rule(rule); }
+        return serde_json::to_value(saved).map_err(|_| "Could not read the assistant thread.".into());
     }
     let topic = topic.ok_or("Choose a read topic.")?;
     if let Some(assistant) = assistant { assistant.authorize(topic)?; }

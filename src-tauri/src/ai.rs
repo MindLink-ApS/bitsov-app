@@ -23,6 +23,7 @@
 //! keeps counts only. Each is a function of the broker output alone.
 
 pub mod assistants;
+pub mod watches;
 pub mod tool_loop;
 pub mod threads;
 

@@ -664,6 +664,11 @@ select { font: inherit; font-size: var(--t-sm); background: var(--sunk); color: 
  * Where an answer came from is always printed under it. Orange stays for sats
  * and the one action; a preview of what would leave is plain mono on ink. */
 .ai-providers-bar { width: 100%; display: flex; justify-content: center; padding: var(--s-2) var(--s-4); background: var(--bg); border-bottom: 1px solid var(--line); flex: none; z-index: 2; }
+.ai-watches { display: block; }
+.ai-watches summary { cursor: pointer; }
+.ai-watch-notices { display: block; max-height: 12rem; overflow-y: auto; }
+.ai-watch-notices p { margin: var(--s-2) 0; }
+
 .ai-providers { display: inline-flex; align-items: center; background: var(--surface); border: 1px solid var(--line); border-radius: 9999px; padding: 3px; gap: 4px; max-width: 100%; overflow-x: auto; }
 .ai-provider { display: inline-flex; align-items: baseline; gap: var(--s-2); background: transparent; border: 1px solid transparent; border-radius: 9999px; padding: 4px 12px; font-size: var(--t-xs); font-weight: 500; color: var(--muted); cursor: pointer; transition: all var(--d-fast) var(--ease); white-space: nowrap; }
 .ai-provider .meta { font-family: var(--font-mono); font-size: 11px; color: var(--faint); }

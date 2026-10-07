@@ -534,7 +534,7 @@ describe('the AI track', () => {
     expect(text('[data-ai-policy]')).toContain('Nothing leaves this computer');
     ask('What did I spend this week?');
     await vi.waitFor(() => expect(text('[data-ai-answer="answered"] [data-ai-text]')).toContain('you spent 3 sats'));
-    const read = host.used('ai_read')[0].args!;
+    const read = host.used('ai_read').find(call => call.args?.topic === 'payments')!.args!;
     expect(read.topic).toBe('payments');
     expect(Math.abs((read.since_ms as number) - (Date.now() - WEEK_MS))).toBeLessThan(5000);
     expect(text('[data-ai-source="node"]')).toContain('GET /api/v1/peers');

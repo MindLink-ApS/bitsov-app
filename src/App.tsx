@@ -1,3 +1,5 @@
+import { pollWatchBatch, statusWatchSamples, watchPoller, type WatchSamples, type WatchUpdates } from './control/watches';
+import type { AssistantId } from './control/assistants';
 import { LockedNode, RememberUnlock } from './onboarding/LockedNode';
 import { LocalOwnerCeremony } from './onboarding/LocalOwnerCeremony';
 import { InitializationRepair } from './onboarding/InitializationRepair';
@@ -135,6 +137,24 @@ function AppScreen() {
     (!!status().initialization_repair && status().initialization_repair !== 'none'));
   const starting = () => pairing().state === 'starting' || pairing().state === 'pending';
 
+  let readWatchSamples: (() => WatchSamples) | null = null;
+  const watchRevisions: Partial<Record<AssistantId, string>> = {};
+  const [watchUpdates, setWatchUpdates] = createSignal<WatchUpdates>({});
+  const [watchError, setWatchError] = createSignal<string | null>(null);
+  const watchesAllowed = () => {
+    if (shellOpen()) return true;
+    // An accepted node may start locked/offline. Preserve the first-run trust
+    // gate without requiring a fresh ready state to observe its status.
+    if (pairing().bootstrap || !['paired', 'fallback'].includes(pairing().state)) return false;
+    const key = trustKey();
+    try { return key !== null && localStorage.getItem(key) === 'accepted'; }
+    catch { return false; }
+  };
+  const watches = watchPoller(samples => pollWatchBatch(source(), samples, watchRevisions), result => {
+    setWatchUpdates(old => ({ ...old, ...result.updates }));
+    setWatchError(result.failed ? 'Some watch notices could not be saved. The next status poll will retry.' : null);
+  });
+  onCleanup(watches.close);
   let timer: number | undefined;
   const poll = async () => {
     try {
@@ -144,6 +164,7 @@ function AppScreen() {
     } catch (e) {
       setStatus({ ready: false, node_id: null, error: String(e) });
     }
+    void watches.tick(watchesAllowed(), statusWatchSamples(status().ready, status().locked === true, readWatchSamples?.() ?? {}));
     try {
       setPairing(await source().pairingStatus());
     } catch {
@@ -339,6 +360,9 @@ function AppScreen() {
         onReconnect={retryPairing}
         source={source()}
         active={shellOpen()}
+        onWatchSamples={read => { readWatchSamples = read; }}
+        watchUpdates={watchUpdates()}
+        watchError={watchError()}
         live={live()}
         ready={status().ready}
         error={status().error}

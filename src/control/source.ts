@@ -1,3 +1,4 @@
+import type { WatchSample, WatchUpdate } from './watches';
 import type { AssistantId, AssistantThread, ThreadRequest, LocalTurn } from './assistants';
 // Where the shell's data comes from: the Rust host (Tauri commands + the
 // `node-live` event), or sample data in dev mode. The renderer never talks to
@@ -219,6 +220,7 @@ export interface Source {
   // AI track: the host reads through its broker; a remote model gets only a body the owner saw
   aiRead(topic: AiTopic, sinceMs: number | null, assistant?: AssistantId): Promise<TopicRead>;
   aiLocalTurn(assistant: AssistantId, question: string, draftText: string): Promise<LocalTurn>;
+  aiWatchPoll(assistant: AssistantId, watch: WatchSample, revision: string | null): Promise<WatchUpdate | null>;
   aiThread(assistant: AssistantId, thread: ThreadRequest): Promise<AssistantThread>;
   aiProviders(): Promise<ProviderView[]>;
   /** Prepare, never send. */
@@ -341,6 +343,7 @@ export const hostSource: Source = {
   callSignal: (peer, kind, plaintext, maxMsat) => invoke<CallReceipt>('call_signal', { peer, kind, plaintext, max_msat: maxMsat }),
   aiRead: (topic, sinceMs, assistant) => invoke<TopicRead>('ai_read', { topic, since_ms: sinceMs, ...(assistant ? { assistant } : {}) }),
   aiLocalTurn: (assistant, question, draftText) => invoke<LocalTurn>('ai_read', { assistant, local_turn: { question, draft_text: draftText } }),
+  aiWatchPoll: (assistant, sample, revision) => invoke<WatchUpdate | null>('ai_read', { assistant, watch: { sample, revision } }),
   aiThread: (assistant, thread) => invoke<AssistantThread>('ai_read', { assistant, thread }),
   aiProviders: () => invoke<ProviderView[]>('ai_providers'),
   aiDisclose: (provider, topic, sinceMs, preset, question, assistant) =>

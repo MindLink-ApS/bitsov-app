@@ -1,3 +1,4 @@
+import { WATCHES, type WatchNotice, type WatchRule, type WatchUpdate } from './watches';
 import { ASSISTANTS, modelProposalText, type ModelProposal, type LocalTurn, type AssistantId, type AssistantThread } from './assistants';
 import { SoftError } from './SoftError';
 import { DelayedSpinner } from './DelayedSpinner';
@@ -10,7 +11,7 @@ import { DelayedSpinner } from './DelayedSpinner';
 // gets only the body shown in the preview, and only after the owner presses
 // Send for that one question. Proposed actions only prefill a composer.
 
-import { createSignal, For, Match, onCleanup, Show, Switch, type JSX } from 'solid-js';
+import { createEffect, createSignal, For, Match, onCleanup, Show, Switch, type JSX } from 'solid-js';
 import { createStore, produce } from 'solid-js/store';
 import { copyPlainText } from '../assistant/copy';
 import { EndpointBadge } from '../assistant/EndpointBadge';
@@ -86,6 +87,8 @@ let turnSeq = 0;
 export function AiTrack(props: {
   source: Source;
   assistant?: AssistantId;
+  watchUpdate?: WatchUpdate;
+  watchError?: string | null;
   session: ReturnType<typeof createAiSession>;
   peers: Peer[];
   now: number;
@@ -108,13 +111,36 @@ export function AiTrack(props: {
   const [threadBusy, setThreadBusy] = createSignal(!!assistant);
   const [threadError, setThreadError] = createSignal<string | null>(null);
   let revision = '';
+  const [watchNotices, setWatchNotices] = createSignal<WatchNotice[]>([]);
+  const [disabledWatches, setDisabledWatches] = createSignal<WatchRule[]>([]);
   let closed = false;
   const restore = (thread: AssistantThread) => {
     revision = thread.revision;
+    setWatchNotices(thread.notices ?? []);
+    setDisabledWatches(thread.disabled_watches ?? []);
     setSession('turns', thread.turns.map(t => ({ id: turnSeq++, at: t.at, question: t.question,
       state: 'answered' as const, provider: 'local' as const, saved: true,
       answer: { text: t.answer, cards: [] } })));
     setThreadReady(true);
+  };
+  createEffect(() => {
+    const update = props.watchUpdate;
+    if (threadReady() && update?.revision === revision && update.notices) {
+      setWatchNotices(old => {
+        const merged = new Map(old.map(n => [`${n.at}:${n.rule}`, n]));
+        for (const n of update.notices!) merged.set(`${n.at}:${n.rule}`, n);
+        return [...merged.values()].sort((a, b) => a.at - b.at).slice(-100);
+      });
+    }
+  });
+  const setWatch = async (rule: WatchRule, enabled: boolean) => {
+    if (!props.assistant || threadBusy()) return;
+    setThreadBusy(true);
+    try {
+      const thread = await props.source.aiThread(props.assistant, { action: 'set_watch', rule, enabled });
+      if (!closed) { setDisabledWatches(thread.disabled_watches ?? []); setThreadError(null); }
+    } catch (e) { if (!closed) setThreadError(asActionError(e).message); }
+    finally { if (!closed) setThreadBusy(false); }
   };
   if (props.assistant) {
     void props.source.aiThread(props.assistant, { action: 'load' })
@@ -379,6 +405,27 @@ export function AiTrack(props: {
             onClick={() => void forget()}>Forget</button>
         </div>
         <Show when={threadError()}><p role="alert" data-assistant-error>{threadError()}</p></Show>
+        <details class="ai-providers-bar ai-watches" data-assistant-watches>
+          <summary>Watches · while this app is open</summary>
+          <p>Local rules use existing status and counts. No model, extra network reads, drafts or actions. Keeps the latest 100 notices.</p>
+          <For each={WATCHES[props.assistant!]}>{watch => <label style={{ display: 'block' }}>
+            <input type="checkbox" data-watch={watch.rule} checked={!disabledWatches().includes(watch.rule)}
+              disabled={threadBusy() || !threadReady()} onChange={e => {
+                const enabled = e.currentTarget.checked;
+                e.currentTarget.checked = !disabledWatches().includes(watch.rule);
+                void setWatch(watch.rule, enabled);
+              }} /> {watch.label}
+          </label>}</For>
+        </details>
+        <Show when={props.watchError}><p role="status">{props.watchError}</p></Show>
+        <Show when={watchNotices().length}>
+          <section class="ai-providers-bar ai-watch-notices" aria-label="Watch notices">
+            <For each={watchNotices()}>{notice => <p data-watch-notice>
+              <span class="ai-source">Watch · {new Date(notice.at).toLocaleString()} · saved observation</span><br />
+              {notice.text}
+            </p>}</For>
+          </section>
+        </Show>
       </Show>
       <div class="ai-providers-bar">
         <div class="ai-providers" role="radiogroup" aria-label="Who answers" data-ai-providers>

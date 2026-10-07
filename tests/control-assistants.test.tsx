@@ -99,3 +99,28 @@ it('passes separately entered message text verbatim to the local host', async ()
   await ask('draft this message');
   await vi.waitFor(() => expect(source.aiLocalTurn).toHaveBeenCalledWith('inbox', 'draft this message', 'Hello, exactly this.\nThank you.'));
 });
+
+it('offers scoped watch switches, persists off, and Forget leaves the switch off', async () => {
+  const source = sampleSource();
+  await open(source);
+  const box = $<HTMLInputElement>('[data-watch="unread"]');
+  expect(box).not.toBeNull();
+  expect(box.checked).toBe(true);
+  expect($('[data-watch="balance_drop"]')).toBeNull();
+  box.click();
+  await vi.waitFor(async () => expect((await source.aiThread('inbox', { action: 'load' })).disabled_watches).toEqual(['unread']));
+  $<HTMLButtonElement>('[data-assistant-forget]').click();
+  await vi.waitFor(() => expect(box.disabled).toBe(false));
+  expect(box.checked).toBe(false);
+});
+
+it('renders sealed watch notices as text with no draft or action control', async () => {
+  const source = sampleSource();
+  const thread = source.aiThread;
+  source.aiThread = async (a, r) => ({ ...await thread(a, r), notices: [{ at: 42, rule: 'unread', text: 'Unread count rose from 1 to 2.' }] });
+  await open(source);
+  expect($('[data-watch-notice]')?.textContent).toContain('Unread count rose');
+  expect($('[data-watch-notice]')?.querySelector('button')).toBeNull();
+  expect($('[data-ai-prefill]')).toBeNull();
+  expect($('[data-model-proposal]')).toBeNull();
+});

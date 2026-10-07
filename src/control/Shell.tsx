@@ -1,3 +1,4 @@
+import { watchSamples, type WatchSamples, type WatchUpdates } from './watches';
 import { ASSISTANTS, type AssistantId } from './assistants';
 import { PendingApproval } from '../onboarding/LockedNode';
 import { usePairingActivity } from '../pairingActivity';
@@ -134,6 +135,9 @@ import type {
 const REFRESH_MS = { overview: 10_000, peers: 15_000, wallet: 20_000, rooms: 30_000, door: 30_000, energy: 30_000, membrane: 30_000, clock: 5_000, spend: 3_000 } as const;
 
 type Props = {
+  onWatchSamples?: (read: (() => WatchSamples) | null) => void;
+  watchUpdates?: WatchUpdates;
+  watchError?: string | null;
   remote?: boolean;
   retryAfterSecs?: number | null;
   onReconnect?: () => Promise<void>;
@@ -253,10 +257,21 @@ export function ControlCenter(props: Props) {
   const [peersLoaded, setPeersLoaded] = createSignal(false);
   const [rooms, setRooms] = createSignal<Room[]>([]);
   const [members, setMembers] = createStore<Record<string, string[]>>({});
+  let watchOverviewAt = 0;
+  let watchWalletAt = 0;
+  let paymentFailures = 0;
   const [wallet, setWallet] = createSignal<WalletOverview | null>(null);
   const [link, setLink] = createSignal<LinkState | null>(null);
   const seenEntrances = new Set<string>();
   const [threads, setThreads] = createStore<{ t: Threads; unread: Unread; fresh: Record<string, true> }>({ t: {}, unread: {}, fresh: {} });
+  props.onWatchSamples?.(() => {
+    const at = Date.now();
+    return watchSamples({ ready: props.ready, locked: false,
+      overview: at - watchOverviewAt <= 30_000 ? overview() : null,
+      wallet: at - watchWalletAt <= 45_000 ? wallet() : null,
+      unread: threads.unread, paymentFailures });
+  });
+  onCleanup(() => props.onWatchSamples?.(null));
   const [track, setTrack] = createSignal<TrackRef | null>(null);
   const [quote, setQuote] = createSignal<PriceQuote | null>(null);
   const [quoteError, setQuoteError] = createSignal<string | undefined>();
@@ -465,6 +480,7 @@ export function ControlCenter(props: Props) {
     return attempt('overview', () => source.nodeOverview(), (value) => {
       if (revision !== overviewRevision) return;
       const recovering = (readinessRefused() || overview()?.money_ready === false) && value.money_ready !== false;
+      watchOverviewAt = Date.now();
       setOverview(value);
       setReadinessRefused(false);
       if (recovering) {
@@ -485,7 +501,7 @@ export function ControlCenter(props: Props) {
     }
   });
   const loadRooms = () => attempt('rooms', () => source.rooms(), setRooms);
-  const loadWallet = () => attempt('wallet', () => source.wallet(), setWallet);
+  const loadWallet = () => attempt('wallet', () => source.wallet(), value => { watchWalletAt = Date.now(); setWallet(value); });
   const loadSpend = () => attempt('spendPoll', () => source.spendStatus(), (value) => {
     const resolved = spend()?.state !== 'open' && value.state === 'open';
     setSpend(value);
@@ -1119,6 +1135,7 @@ export function ControlCenter(props: Props) {
         addArtifact(t, { type: 'payment', receipt: r.value, invoice: bolt11, at: r.value.paid_at_ms });
         void loadWallet();
       }
+      if (r.ok && r.value.status === 'failed') paymentFailures++;
       return recordFailure(t, 'Payment not sent', r);
     },
     keysend: async (t, pubkey, msat, memo) => {
@@ -1128,6 +1145,7 @@ export function ControlCenter(props: Props) {
         addArtifact(t, { type: 'payment', receipt: r.value, at: r.value.paid_at_ms });
         void loadWallet();
       }
+      if (r.ok && r.value.status === 'failed') paymentFailures++;
       return recordFailure(t, 'Payment not sent', r);
     },
     file: async (t, file, maxMsat, firstContactMsat) => {
@@ -1276,6 +1294,8 @@ export function ControlCenter(props: Props) {
                       source={source}
                       session={createAiSession()}
                       assistant={id}
+                      watchUpdate={props.watchUpdates?.[id]}
+                      watchError={props.watchError}
                       peers={peers()}
                       now={now()}
                       onPrefill={() => {}}
