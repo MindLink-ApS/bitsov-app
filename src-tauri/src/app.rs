@@ -268,6 +268,7 @@ struct NodeState {
     /// Serializes every write of the device record (status, register, cancel).
     /// Held only around a load-compare-save, never across an await.
     device_lifecycle: Mutex<()>,
+    trust_write: Mutex<()>,
     /// A pending console approval saved by an earlier run was loaded once.
     approvals_restored: AtomicBool,
 }
@@ -324,7 +325,28 @@ impl NodeState {
             .as_ref()
             .filter(|_| view.remote)
             .and_then(|descriptor| descriptor.hosted_by().map(str::to_owned));
+        let node_id = self.node_id.lock().unwrap().clone();
+        view.trust_acknowledged_node_id = node_id.filter(|id| {
+            app_files_dir(self).is_some_and(|dir|
+                bitsov_app::trust::acknowledged(&dir.join(PAIRING_STORE_DIR), id, view.remote).unwrap_or(false))
+        });
         view
+    }
+
+    fn acknowledge_trust(&self, node_id: &str, remote: bool, legacy: bool) -> Result<bool, String> {
+        let _write = self.trust_write.lock().unwrap();
+        let view = self.pairing_snapshot();
+        let current_id = self.node_id.lock().unwrap().clone();
+        if !*self.ready.lock().unwrap()
+            || !matches!(view.state, "paired" | "fallback")
+            || view.bootstrap.is_some()
+            || remote != view.remote
+            || !current_id.as_deref().is_some_and(|id| id.eq_ignore_ascii_case(node_id))
+        {
+            return Err("Trust acknowledgement requires the current paired node.".into());
+        }
+        let dir = app_files_dir(self).ok_or("The app data directory is not ready.")?;
+        bitsov_app::trust::acknowledge(&dir.join(PAIRING_STORE_DIR), node_id, remote, legacy)
     }
 
     fn status_snapshot(&self) -> Status {
@@ -397,6 +419,7 @@ impl NodeState {
             owner: local_owner::OwnerState::default(),
             device_lapsed: AtomicBool::new(false),
             device_lifecycle: Mutex::new(()),
+            trust_write: Mutex::new(()),
             approvals_restored: AtomicBool::new(false),
             node_grant: Mutex::new(None),
             all_in_caps_node: Mutex::new(None),
@@ -2253,6 +2276,19 @@ fn pairing_status(
 ) -> Result<PairingView, String> {
     reject_sealed_window(&window)?;
     Ok(state.pairing_snapshot())
+}
+
+/// Persist explicit consent (or the one-time legacy flag) for the current node.
+#[tauri::command(rename_all = "snake_case")]
+fn trust_acknowledge(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    node_id: String,
+    remote: bool,
+    legacy: bool,
+) -> Result<bool, String> {
+    reject_sealed_window(&window)?;
+    state.acknowledge_trust(&node_id, remote, legacy)
 }
 
 /// Read the Android launch/warm intent once. This never imports a ticket.
@@ -7333,6 +7369,7 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             payments_balance,
             identity_restore,
             pairing_status,
+            trust_acknowledge,
             pairing_retry,
             remote_access_preview,
             remote_access_import,
@@ -7457,6 +7494,39 @@ fn assistant_mock_builder() -> tauri::Builder<tauri::Wry> {
 #[allow(dead_code)]
 #[path = "../tests/support/mod.rs"]
 mod test_support;
+
+#[cfg(test)]
+mod trust_tests {
+    use super::*;
+
+    #[test]
+    fn trust_is_bound_to_the_ready_authenticated_node_and_survives_reopening() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = NodeState::for_api("http://127.0.0.1:1/api/v1");
+        *state.app_dir.lock().unwrap() = Some(dir.path().to_path_buf());
+        *state.node_id.lock().unwrap() = Some("abcd".into());
+        state.remote_mode.store(true, Ordering::SeqCst);
+        assert!(state.acknowledge_trust("abcd", true, false).is_err());
+        *state.ready.lock().unwrap() = true;
+        state.pairing_view.lock().unwrap().state = "paired";
+        assert!(state.pairing_snapshot().trust_acknowledged_node_id.is_none());
+        assert!(state.acknowledge_trust("cdef", true, false).is_err());
+        assert!(state.acknowledge_trust("abcd", false, false).is_err());
+        state.pairing_view.lock().unwrap().bootstrap = Some("bootstrap".into());
+        assert!(state.acknowledge_trust("abcd", true, false).is_err());
+        state.pairing_view.lock().unwrap().bootstrap = None;
+        assert!(state.acknowledge_trust("ABCD", true, false).unwrap());
+        drop(state);
+
+        let reopened = NodeState::for_api("http://127.0.0.1:1/api/v1");
+        *reopened.app_dir.lock().unwrap() = Some(dir.path().to_path_buf());
+        *reopened.node_id.lock().unwrap() = Some("abcd".into());
+        reopened.remote_mode.store(true, Ordering::SeqCst);
+        assert_eq!(reopened.pairing_snapshot().trust_acknowledged_node_id.as_deref(), Some("abcd"));
+        *reopened.node_id.lock().unwrap() = Some("cdef".into());
+        assert!(reopened.pairing_snapshot().trust_acknowledged_node_id.is_none());
+    }
+}
 
 #[cfg(all(test, desktop, not(feature = "mobile")))]
 mod node_start_args_tests {
@@ -7790,7 +7860,8 @@ mod remote_onboarding_tests {
                 let json = serde_json::to_value(state.pairing_snapshot()).unwrap();
                 assert_eq!(json["remote"], remote);
                 assert_eq!(json["state"], phase);
-                assert_eq!(json.as_object().unwrap().len(), 8);
+                assert_eq!(json.as_object().unwrap().len(), 9);
+                assert!(json["trust_acknowledged_node_id"].is_null());
                 assert!(json["hosted_by"].is_null());
                 assert!(json.get("token").is_none());
                 assert!(json.get("key").is_none());
@@ -14666,6 +14737,7 @@ mod assistant_acl_tests {
                 "payments_balance",
                 "identity_restore",
                 "pairing_status",
+                "trust_acknowledge",
                 "pairing_retry",
                 "remote_access_preview",
                 "remote_access_import",
@@ -14987,6 +15059,7 @@ mod assistant_acl_tests {
             "payments_balance",
             "identity_restore",
             "pairing_status",
+            "trust_acknowledge",
             "pairing_retry",
         ];
         for name in required {
@@ -15187,6 +15260,7 @@ mod assistant_acl_tests {
             "payments_balance",
             "identity_restore",
             "pairing_status",
+            "trust_acknowledge",
             "pairing_retry",
             "pairing::",
             "generate_context",
@@ -15233,6 +15307,7 @@ mod assistant_acl_tests {
             "payments_balance",
             "identity_restore",
             "pairing_status",
+            "trust_acknowledge",
             "pairing_retry",
         ] {
             assert!(app.contains(cmd), "app_builder lost {cmd}");
@@ -15336,6 +15411,7 @@ mod assistant_acl_tests {
                 super::payments_balance,
                 super::identity_restore,
                 super::pairing_status,
+                super::trust_acknowledge,
                 super::pairing_retry,
                 super::remote_access_preview,
                 super::remote_access_import,
@@ -15426,6 +15502,15 @@ mod assistant_acl_tests {
             "node_repair_price_floor",
         );
 
+        assert_handler_ran(
+            invoke(&main, "trust_acknowledge", serde_json::json!({ "node_id": "abcd", "remote": true, "legacy": false })),
+            "current paired node",
+        );
+        assert_acl_denied(
+            invoke(&assistant, "trust_acknowledge", serde_json::json!({ "node_id": "abcd", "remote": true, "legacy": false })),
+            "trust_acknowledge",
+        );
+
         // Pairing: main reaches the handlers, the assistant is stopped by the ACL.
         match invoke(&main, "pairing_status", serde_json::json!({}))
             .expect("main pairing_status is granted")
@@ -15451,7 +15536,7 @@ mod assistant_acl_tests {
         // Do not invoke forget against the user's real app-data directory in
         // this mock app. The persistence tests use isolated temporary folders.
         assert_handler_ran(invoke(&main, "node_unlock", serde_json::json!({})), "not locked");
-        for cmd in ["node_unlock", "pairing_status", "pairing_retry", "remote_access_preview", "remote_access_import", "remote_access_forget"] {
+        for cmd in ["node_unlock", "pairing_status", "trust_acknowledge", "pairing_retry", "remote_access_preview", "remote_access_import", "remote_access_forget"] {
             assert_acl_denied(invoke(&assistant, cmd, serde_json::json!({})), cmd);
         }
     }

@@ -147,6 +147,7 @@ function stubHost(overrides: Record<string, Reply> = {}) {
   const callbacks = new Map<number, (e: unknown) => void>();
   const REPLIES: Record<string, Reply> = {
     node_status: () => ({ ready: true, node_id: OWN, error: null }),
+    trust_acknowledge: () => true,
     pairing_status: () => paired,
     node_overview: () => ({ node_id: OWN, status: 'ok', version: 'api v2', connected_peers: 2, e2ee_sessions: 2, pending_deliveries: 0,
       lightning_available: true, block_height: 1, uptime_secs: 1, lightning_backend: 'ldk', chain_backend: 'esplora', read_at: Date.now(), capabilities: [] }),

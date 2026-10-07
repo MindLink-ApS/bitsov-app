@@ -27,6 +27,7 @@
     "allow-payments-balance",
     "allow-identity-restore",
     "allow-pairing-status",
+    "allow-trust-acknowledge",
     "allow-pairing-retry",
     "allow-remote-access-preview",
     "allow-remote-access-import",

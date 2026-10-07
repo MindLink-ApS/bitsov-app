@@ -5,13 +5,12 @@ let dispose: (() => void) | undefined;
 afterEach(() => { dispose?.(); document.body.innerHTML = ''; vi.unstubAllGlobals(); });
 function mount(local: boolean, remote = false, ready = false, trusted = false) {
   const id = 'ab'.repeat(32);
-  if (trusted) localStorage.setItem(`bitsov.trust.v1.local.${id}`, 'accepted');
   const calls: string[] = [];
   vi.stubGlobal('__TAURI_INTERNALS__', { invoke: (command: string) => {
     calls.push(command);
     if (command === 'node_status') return Promise.resolve({ ready, node_id: ready ? id : null, error: null, local_owner: local,
       owner_warning: ready ? 'Owner device not enrolled. Enroll through the owner console.' : null });
-    if (command === 'pairing_status') return Promise.resolve({ state: 'paired', remote, scopes: ready ? ['read','receive'] : ['identity'], bootstrap: ready ? null : 'bootstrap', short_code: null, reason: null });
+    if (command === 'pairing_status') return Promise.resolve({ state: 'paired', remote, trust_acknowledged_node_id: trusted ? id : null, scopes: ready ? ['read','receive'] : ['identity'], bootstrap: ready ? null : 'bootstrap', short_code: null, reason: null });
     return Promise.reject('unavailable');
   } });
   dispose = render(() => <App />, document.body);
