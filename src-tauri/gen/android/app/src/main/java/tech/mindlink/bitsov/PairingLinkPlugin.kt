@@ -17,11 +17,14 @@ import app.tauri.plugin.Plugin
 class PairingLinkPlugin(private val activity: Activity) : Plugin(activity) {
     companion object {
         private const val PAIRING_PREFIX = "bitsov://pair/"
+        // Bounded: a hostile app firing random links can only evict old receipts.
+        private const val MAX_RECEIPTS = 32
     }
     // Only digests survive process death. Never persist bearer tickets. Keep
     // earlier receipts too: Android can redeliver the original launch intent.
     private val preferences = activity.getSharedPreferences("pairing_link_inbox", Context.MODE_PRIVATE)
-    private var takenHashes: Set<String> = preferences.getStringSet("taken_hashes", emptySet())!!.toSet()
+    private var takenHashes: List<String> =
+        (preferences.getString("taken_hashes_v2", "") ?: "").split(',').filter { it.length == 64 }.takeLast(MAX_RECEIPTS)
     private var pendingLink: String? = null
     private var pendingHash: String? = null
 
@@ -54,8 +57,8 @@ class PairingLinkPlugin(private val activity: Activity) : Plugin(activity) {
             // Commit before handing the link to the renderer: a redelivered VIEW
             // after process death must not become a fresh confirmation prompt.
             if (pendingHash != null) {
-                val receipts = takenHashes + pendingHash!!
-                if (!preferences.edit().putStringSet("taken_hashes", receipts).commit()) {
+                val receipts = (takenHashes - pendingHash!! + pendingHash!!).takeLast(MAX_RECEIPTS)
+                if (!preferences.edit().remove("taken_hashes").putString("taken_hashes_v2", receipts.joinToString(",")).commit()) {
                     invoke.reject("Cannot record pairing link receipt")
                     return@runOnUiThread
                 }

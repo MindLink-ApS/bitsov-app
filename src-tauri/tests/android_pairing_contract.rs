@@ -44,11 +44,13 @@ fn native_cap_matches_the_typescript_envelope_and_taken_marker_survives_process_
     assert!(kotlin.contains("const val PAIRING_PREFIX = \"bitsov://pair/\""));
     assert!(kotlin.contains("MessageDigest.getInstance(\"SHA-256\")"));
     assert!(kotlin.contains("getSharedPreferences("));
-    assert!(kotlin.contains("getStringSet(\"taken_hashes\", emptySet())"));
+    assert!(kotlin.contains("getString(\"taken_hashes_v2\", \"\")"));
     assert!(kotlin.contains("if (hash in takenHashes) return"));
     let take = kotlin.split("fun takePendingLink").nth(1).unwrap();
-    assert!(take.contains("val receipts = takenHashes + pendingHash!!"));
-    assert!(take.contains("putStringSet(\"taken_hashes\", receipts).commit()"));
+    assert!(take.contains("val receipts = (takenHashes - pendingHash!! + pendingHash!!).takeLast(MAX_RECEIPTS)"));
+    assert!(take.contains("putString(\"taken_hashes_v2\", receipts.joinToString(\",\")).commit()"));
+    assert!(kotlin.contains("private const val MAX_RECEIPTS = 32"));
+    assert!(kotlin.contains("split(',').filter { it.length == 64 }.takeLast(MAX_RECEIPTS)"));
     assert!(take.find(".commit()").unwrap() < take.find("response.put(\"link\"").unwrap());
     assert!(!kotlin.contains("putString(\"ticket\""));
 }
