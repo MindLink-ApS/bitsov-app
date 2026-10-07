@@ -1,4 +1,4 @@
-//! Exact, node-scoped Keychain items. No renderer-supplied password or item name.
+//! Exact, node-scoped Keychain items. Typed secrets are saved only after acceptance and opt-in.
 use bitsov_app::home_node::{BoxPin, BoxPinStore, UnlockBinding};
 use bitsov_app::remote_access::RemoteError;
 use zeroize::Zeroizing;
@@ -146,10 +146,8 @@ pub fn binding(node: &str) -> Result<UnlockBinding, String> {
     serde_json::from_slice(&bytes).map_err(|_| "Invalid saved unlock binding.".into())
 }
 
-/// Called by the existing owner ceremony (or a future approved device enrollment),
-/// never by a command accepting a typed password from the renderer.
+/// Called by the owner ceremony or Remember after a node-accepted typed unlock.
 #[cfg(not(target_os = "android"))]
-#[allow(dead_code)]
 pub fn save_password(node: &str, password: &[u8]) -> Result<(), String> {
     if password.is_empty() || password.len() > 4096 {
         return Err("Invalid seed password length.".into());
@@ -201,6 +199,8 @@ mod tests {
             service(&"ab".repeat(32), "seed-password").unwrap(),
             format!("bitsov.node.{}.seed-password", "ab".repeat(32))
         );
+        assert_ne!(service(&"ab".repeat(32), "seed-password").unwrap(),
+            service(&"cd".repeat(32), "seed-password").unwrap());
         for node in ["", "../another", "ab\0cd", &"AB".repeat(32)] {
             assert!(service(node, "seed-password").is_err());
         }

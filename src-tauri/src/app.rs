@@ -218,10 +218,12 @@ struct NodeState {
     remote_mode: AtomicBool,
     home_locked: AtomicBool,
     home_last_probe: Mutex<Option<Instant>>,
+    home_unlock_state: Mutex<&'static str>,
+    home_attempts_left: Mutex<Option<u32>>,
     /// A typed password the node just accepted, held for the owner's
-    /// "Remember on this phone" choice. Memory only, single use.
-    #[cfg(target_os = "android")]
-    home_remember: Mutex<Option<home_unlock::RememberOffer>>,
+    /// "Remember on this device" choice. Memory only, single use.
+    #[cfg(any(target_os = "android", all(target_os = "macos", desktop, not(feature = "mobile"))))]
+    home_remember: Arc<Mutex<Option<home_unlock::RememberOffer>>>,
     remote_descriptor: Mutex<Option<remote_access::RemoteDescriptor>>,
     remote_retry: Arc<bitsov_app::connection_retry::RemoteRetry>,
     remote_recovery: tokio::sync::Mutex<()>,
@@ -335,7 +337,13 @@ impl NodeState {
         );
         #[cfg(any(mobile, feature = "mobile"))]
         let (local_owner, owner_warning) = (false, None);
+        let (unlock_state, pending_device) = home_unlock::locked_view(self);
         Status {
+            typed_unlock_supported: cfg!(any(target_os = "android", all(target_os = "macos", desktop, not(feature = "mobile")))),
+            unlock_state,
+            pending_device,
+            attempts_left: *self.home_attempts_left.lock().unwrap(),
+            remember_offer: home_unlock::remember_available(self),
             locked: self.home_locked.load(Ordering::SeqCst),
             local_owner,
             owner_warning,
@@ -368,8 +376,10 @@ impl NodeState {
             remote_mode: AtomicBool::new(false),
             home_locked: AtomicBool::new(false),
             home_last_probe: Mutex::new(None),
-            #[cfg(target_os = "android")]
-            home_remember: Mutex::new(None),
+            home_unlock_state: Mutex::new("ready"),
+            home_attempts_left: Mutex::new(None),
+            #[cfg(any(target_os = "android", all(target_os = "macos", desktop, not(feature = "mobile"))))]
+            home_remember: Arc::new(Mutex::new(None)),
             remote_descriptor: Mutex::new(None),
             remote_retry: Arc::new(bitsov_app::connection_retry::RemoteRetry::default()),
             remote_recovery: tokio::sync::Mutex::new(()),
@@ -428,6 +438,11 @@ impl NodeState {
 
 #[derive(Serialize, Clone)]
 struct Status {
+    typed_unlock_supported: bool,
+    unlock_state: &'static str,
+    pending_device: Option<device::DeviceView>,
+    attempts_left: Option<u32>,
+    remember_offer: bool,
     locked: bool,
     local_owner: bool,
     owner_warning: Option<String>,
@@ -1404,6 +1419,8 @@ async fn finish_auth(state: &NodeState, data_dir: &Path) {
                 *state.ready.lock().unwrap() = false;
                 return set_error(state, error);
             }
+            *state.home_unlock_state.lock().unwrap() = "ready";
+            *state.home_attempts_left.lock().unwrap() = None;
             state.home_locked.store(false, Ordering::SeqCst);
             *state.node_id.lock().unwrap() = Some(node_id.clone());
             *state.error.lock().unwrap() = None;
@@ -2043,11 +2060,11 @@ async fn node_unlock(window: WebviewWindow<impl tauri::Runtime>, state: State<'_
     home_unlock::unlock(state.inner()).await
 }
 
-/// Android only: unlock with the node password the owner typed on this phone.
+/// Android and macOS: unlock with the node password the owner typed on this device.
 /// The node checks it. It is never returned, logged or written here; only
 /// `node_unlock_remember` can save it, under the biometric-bound home key.
 #[tauri::command]
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", all(target_os = "macos", desktop, not(feature = "mobile"))))]
 async fn node_unlock_password(
     window: WebviewWindow<impl tauri::Runtime>,
     state: State<'_, NodeState>,
@@ -2058,10 +2075,10 @@ async fn node_unlock_password(
     home_unlock::unlock_typed(state.inner(), password).await
 }
 
-/// Android only: the owner's answer to "Remember on this phone (fingerprint)".
+/// Android and macOS: the owner's answer to the biometric Remember offer.
 /// Takes no password; it uses the one the node accepted moments ago.
 #[tauri::command]
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", all(target_os = "macos", desktop, not(feature = "mobile"))))]
 async fn node_unlock_remember(
     window: WebviewWindow<impl tauri::Runtime>,
     state: State<'_, NodeState>,
@@ -2073,17 +2090,17 @@ async fn node_unlock_remember(
 }
 
 #[tauri::command]
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", all(target_os = "macos", desktop, not(feature = "mobile")))))]
 async fn node_unlock_password(window: WebviewWindow<impl tauri::Runtime>) -> Result<(), String> {
     reject_sealed_window(&window)?;
-    Err("Typing the node password to unlock is only available on Android.".into())
+    Err("Typing the node password to unlock is unavailable on this platform.".into())
 }
 
 #[tauri::command]
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", all(target_os = "macos", desktop, not(feature = "mobile")))))]
 async fn node_unlock_remember(window: WebviewWindow<impl tauri::Runtime>) -> Result<(), String> {
     reject_sealed_window(&window)?;
-    Err("Remembering a typed node password is only available on Android.".into())
+    Err("Remembering a typed node password is unavailable on this platform.".into())
 }
 
 #[tauri::command]
