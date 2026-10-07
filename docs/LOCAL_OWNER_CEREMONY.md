@@ -1,6 +1,6 @@
 # Local owner ceremony (opt-in)
 
-The bundled `v0.3.0-rc11` node (`834968b`) contains #237, so
+The bundled `v0.3.0-rc12` node (`41b9e78`) contains #237, so
 `BUNDLED_NODE_SUPPORTS_LOCAL_OWNER` is true. This is still opt-in on macOS:
 `local-owner-ceremony` remains a non-default Cargo feature and
 `BITSOV_LOCAL_OWNER_CEREMONY=1` remains required. External and remote nodes
@@ -12,7 +12,7 @@ repair and then price-floor consent remain reachable. They never receive a new
 password or first-device enrollment on upgrade. Encrypted ceremony installs
 continue to use the existing Keychain item on restart. See
 [rc7 → rc9 upgrade checks](NODE_RC9_UPGRADE.md) and
-[current rc11 changes and compatibility gaps](NODE_RC11_UPGRADE.md).
+[current rc12 changes and compatibility gaps](NODE_RC12_UPGRADE.md).
 
 Implementation plan:
 1. Add a native, narrowly scoped Keychain adapter and descriptor-only launch.
@@ -47,7 +47,7 @@ Development activation uses a node binary built with #237 and a fresh private
 `BITSOV_LOCAL_OWNER_CEREMONY=1`, Cargo features `dev-node,local-owner-ceremony`, and
 `src-tauri/tauri.dev-node.conf.json`. The normal dev launcher supplies only
 `dev-node`; it does not turn on this ceremony. Enabling the runtime variable alone
-has no effect. The bundled rc11 path needs only `local-owner-ceremony` and the runtime opt-in;
+has no effect. The bundled rc12 path needs only `local-owner-ceremony` and the runtime opt-in;
 `dev-node` is only for an unverified development override.
 
 The node determines emptiness and authority. Encrypted ceremony installations with no
@@ -90,10 +90,14 @@ unknown fields and changed values fail. Older pins may omit listed defaults too.
 The rc9 `lightning.lsps2_service` block (node #233) is intentionally omitted from
 bootstrap because the node supplies it through serde defaults. The guard checks
 `enabled = false` and every tariff/resource default individually; it does not
-ignore the section, so changed values and additional fields still fail. rc11
+ignore the section, so changed values and additional fields still fail. Since rc11, the node
 also inherits `cookie_mode = "adaptive"`, the twelve reviewed `[dos_edge]`
 limits, and empty `[node]` / `[tower.clients]`; these are explicitly listed in
-the guard. The optional Lightning delay remains omitted (144 blocks).
+the guard. rc12 adds no config fields or serialized init defaults, so the guard
+needs no new allowances. The optional Lightning delay remains omitted in init;
+rc12 applies 2016 blocks at home-profile startup (`--local-owner-device` or
+`--remote-unlock`, embedded LDK, service disabled), with a 288-block floor for
+explicit values. Ordinary starts retain 144; existing channels are unchanged.
 The list permits two reviewed sets of inherited web defaults: rc7's 50 msat
 content/page price and 4 MiB page limit, and the owner node's 1000 msat and 256 KiB.
 Other values or mixtures fail; neither set is written by the app.
@@ -104,7 +108,7 @@ The Build workflow's **Sidecar** job fetches and verifies the pin in
 features enabled. This runs on every PR and main push, so every bundled pin
 change is covered; the explicit path prevents an absent binary from skipping CI.
 The job also runs the real create/finalize/restart lifecycle against the same
-verified rc11 binary, before the live-network CS-1 smoke. The existing Sidecar job remains outside required merge checks because it
+verified rc12 binary, before the live-network CS-1 smoke. The existing Sidecar job remains outside required merge checks because it
 depends on release downloads; inspect its config-drift step before promoting a
 pin. Review any failure against the new node defaults and update the writer or
 the explicit intentional-difference list rather than broadly ignoring sections.

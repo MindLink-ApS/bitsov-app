@@ -7,9 +7,8 @@ re-verifies existing sidecars against the pinned release before bundling (see be
 Sidecars are named with the Rust target triple
 Tauri's resolver expects: `bin/konsensus-<target-triple>[.exe]`.
 
-## Hosts published at `v0.3.0-rc11`
-`v0.3.0-rc11` publishes Linux, macOS and Windows node binaries, so all three hosts can
-produce a sidecar:
+## Hosts targeted by `v0.3.0-rc12`
+The rc12 pin targets Linux, macOS and Windows node binaries:
 
 | host | release asset | installed sidecar |
 | --- | --- | --- |
@@ -28,11 +27,12 @@ runs on Linux and macOS (the Darwin `SKIP` was retired with `v0.3.0-rc5`) and st
 ```bash
 ./scripts/fetch-node-sidecar.sh     # downloads the pinned binary for this host, verifies GPG + sha256, installs it
 ```
-The script pins `v0.3.0-rc11` and verifies, fail-closed, that `SHA256SUMS.asc` is a valid
+The script pins `v0.3.0-rc12` and verifies, fail-closed, that `SHA256SUMS.asc` is a valid
 signature by the pinned release key `B299274C…`; if that key is not in your keyring it imports
 `RELEASE_KEY.asc` from BitSov-bitsov `main` into a throwaway keyring (fingerprint checked against
-the pin; your keyring is never written). rc11 and its signed checksums are published; any authenticated `gh` can reach it,
-and nothing here publishes anything. Record the sha256 in the authority
+the pin; your keyring is never written). GitHub listed rc12 as a draft pre-release
+on 2026-10-07; fetching requires release access and signed assets and fails closed
+if either is unavailable. Nothing here publishes anything. Record the sha256 in the authority
 ledger; `scripts/authority-check.sh` checks source/configuration, not sidecar integrity. The
 released artifact is the `konsensus` binary (CLI `konsensus init` / `konsensus start`).
 
