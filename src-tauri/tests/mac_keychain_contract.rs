@@ -61,3 +61,29 @@ fn launcher_password_uses_the_same_policy_and_preserves_its_item_identity() {
         assert!(ffi.contains(marker));
     }
 }
+
+/// The body of one top-level Swift function, from its `func NAME(` line to the
+/// first column-0 closing brace, so a marker elsewhere in the file can't satisfy it.
+fn swift_fn<'a>(swift: &'a str, name: &str) -> &'a str {
+    let start = swift
+        .find(&format!("func {name}("))
+        .unwrap_or_else(|| panic!("missing func {name}"));
+    let end = swift[start..]
+        .find("\n}\n")
+        .unwrap_or_else(|| panic!("unterminated func {name}"));
+    &swift[start..start + end]
+}
+
+#[test]
+fn remember_key_store_and_read_are_pinned_inside_their_own_functions() {
+    let swift = read("native/device_key.swift");
+    let key = swift_fn(&swift, "passwordAgreementKey");
+    assert!(key.contains("[.privateKeyUsage, .biometryCurrentSet], &error)"));
+    assert!(!key.contains("biometryAny"));
+    assert!(!key.contains(".userPresence"));
+    let store = swift_fn(&swift, "bitsov_home_store");
+    assert!(store.contains("return storeItem(destination, \"BitSov\", envelope)"));
+    assert!(!store.contains("storeItem(destination, \"BitSov\", plaintext)"));
+    let read_fn = swift_fn(&swift, "bitsov_home_read");
+    assert!(read_fn.contains("let legacy = readItem(name, \"BitSov\", true, &data)"));
+}
