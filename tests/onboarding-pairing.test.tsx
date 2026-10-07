@@ -387,7 +387,7 @@ describe('pairing panel', () => {
     expect(mount.textContent).not.toContain(link);
   });
 
-  it('imports a scanned QR link through the same pairing-link handler', async () => {
+  it('prefills a scanned QR link and waits for confirmation before importing', async () => {
     const link = 'bitsov://pair/scanned-secret-material';
     const onImportRemote = vi.fn().mockResolvedValue({
       endpoint: 'home.example:4242',
@@ -414,12 +414,79 @@ describe('pairing panel', () => {
 
     mount.querySelector<HTMLButtonElement>('[data-scan-pairing-qr]')!.click();
 
-    await vi.waitFor(() => {
-      expect(mount!.textContent).toContain('Remote node home.example:4242 saved.');
-    });
+    const input = mount.querySelector<HTMLInputElement>('#remote-pairing-link')!;
+    await vi.waitFor(() => expect(input.value).toBe(link));
+    expect(onImportRemote).not.toHaveBeenCalled();
+    expect(mount.textContent).toContain('camera');
+    mount.querySelector<HTMLFormElement>('[data-remote-access]')!.requestSubmit();
+    await vi.waitFor(() => expect(mount!.textContent).toContain('Remote node home.example:4242 saved.'));
     expect(onScanRemote).toHaveBeenCalledTimes(1);
     expect(onImportRemote).toHaveBeenCalledWith(link);
     expect(mount.textContent).not.toContain(link);
+  });
+
+  it.each(['paste', 'scan', 'deep link'])('rejects unrelated input from %s without importing or displaying it', async (path) => {
+    const link = 'https://unrelated.example/private-ticket';
+    const onImportRemote = vi.fn();
+    mount = document.createElement('div'); document.body.appendChild(mount);
+    dispose = render(() => <Onboarding status={() => booting} pairing={() => starting}
+      trustAck={() => false} onRetry={() => {}} selectedTarget="network"
+      initialPairingLink={path === 'deep link' ? link : undefined}
+      onScanRemote={async () => link} onImportRemote={onImportRemote} />, mount);
+    if (path === 'paste') {
+      const input = mount.querySelector<HTMLInputElement>('#remote-pairing-link')!;
+      input.value = link;
+      input.dispatchEvent(new InputEvent('input', { bubbles: true }));
+      mount.querySelector<HTMLFormElement>('[data-remote-access]')!.requestSubmit();
+    } else if (path === 'scan') {
+      mount.querySelector<HTMLButtonElement>('[data-scan-pairing-qr]')!.click();
+    }
+    await vi.waitFor(() => expect(mount!.textContent).toContain('Use a bitsov://pair/ pairing ticket from your node.'));
+    expect(onImportRemote).not.toHaveBeenCalled();
+    expect(mount.textContent).not.toContain(link);
+    expect(mount.querySelector<HTMLInputElement>('#remote-pairing-link')!.value).toBe('');
+  });
+
+  it.each(['paste', 'scan', 'deep link'])('surfaces the authoritative host ticket refusal after confirming %s', async (path) => {
+    const link = 'bitsov://pair/eyJ2IjoxfQ';
+    const onImportRemote = vi.fn().mockRejectedValue(new Error('This pairing link expired. Request a new ticket from your node.'));
+    mount = document.createElement('div'); document.body.appendChild(mount);
+    dispose = render(() => <Onboarding status={() => booting} pairing={() => starting}
+      trustAck={() => false} onRetry={() => {}} selectedTarget="network"
+      initialPairingLink={path === 'deep link' ? link : undefined}
+      onScanRemote={async () => link} onImportRemote={onImportRemote} />, mount);
+    const input = mount.querySelector<HTMLInputElement>('#remote-pairing-link')!;
+    if (path === 'paste') {
+      input.value = link;
+      input.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    } else if (path === 'scan') {
+      mount.querySelector<HTMLButtonElement>('[data-scan-pairing-qr]')!.click();
+    }
+    await vi.waitFor(() => expect(input.value).toBe(link));
+    expect(onImportRemote).not.toHaveBeenCalled();
+    mount.querySelector<HTMLFormElement>('[data-remote-access]')!.requestSubmit();
+    await vi.waitFor(() => expect(mount!.textContent).toContain('This pairing link expired.'));
+    expect(onImportRemote).toHaveBeenCalledExactlyOnceWith(link);
+    expect(mount.querySelector('[data-import-result]')).toBeNull();
+    expect(input.value).toBe('');
+  });
+
+  it('keeps paste usable after scan cancellation without exposing native errors', async () => {
+    const onImportRemote = vi.fn().mockResolvedValue({ endpoint: 'home:4242', node_id_fingerprint: 'ab…cd', restart_required: true });
+    mount = document.createElement('div'); document.body.appendChild(mount);
+    dispose = render(() => <Onboarding status={() => booting} pairing={() => starting}
+      trustAck={() => false} onRetry={() => {}} selectedTarget="network"
+      onScanRemote={async () => { throw new Error('cancelled: bitsov://pair/private-ticket'); }}
+      onImportRemote={onImportRemote} />, mount);
+    mount.querySelector<HTMLButtonElement>('[data-scan-pairing-qr]')!.click();
+    await vi.waitFor(() => expect(mount!.textContent).toContain('paste the link instead'));
+    expect(mount.textContent).not.toContain('private-ticket');
+    const input = mount.querySelector<HTMLInputElement>('#remote-pairing-link')!;
+    expect(input.disabled).toBe(false);
+    input.value = 'bitsov://pair/pasted-ticket';
+    input.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    mount.querySelector<HTMLFormElement>('[data-remote-access]')!.requestSubmit();
+    await vi.waitFor(() => expect(mount!.textContent).toContain('Remote node home:4242 saved.'));
   });
 
   const importWith = async (result: () => Promise<unknown>, pairing: PairingView = starting) => {
@@ -516,4 +583,3 @@ describe('pairing panel', () => {
     expect(normal.querySelector('[data-ob-head="trust"]')!.textContent).toContain('restore it now');
   });
 });
-
