@@ -558,6 +558,11 @@ select { font: inherit; font-size: var(--t-sm); background: var(--sunk); color: 
 .node-target-title { font-family: var(--font-sans); font-size: var(--t-sm); font-weight: 500; color: var(--muted); margin: 0; }
 .node-target-grid { display: flex; flex-direction: column; gap: var(--s-2); }
 .node-target-advanced summary { cursor: pointer; color: var(--muted); padding: var(--s-2) 0; }
+/* Compact (node is up): one row of equal pills; the Advanced fold is already decided. */
+.node-target-section.compact .node-target-grid { align-items: center; }
+.node-target-section.compact .node-target-advanced > summary { display: none; }
+.node-target-section.compact .node-target-advanced .node-target-card { width: auto; margin-top: 0; }
+.node-target-section.compact .node-target-card { min-height: 34px; }
 .node-target-advanced .node-target-card { width: 100%; margin-top: var(--s-2); }
 .node-target-card { display: flex; align-items: flex-start; gap: var(--s-3); padding: var(--s-4); border: 1px solid var(--line); border-radius: var(--r-panel); background: var(--surface); color: inherit; text-align: left; cursor: pointer; transition: border-color var(--d-fast) var(--ease), background var(--d-fast) var(--ease), box-shadow var(--d-fast) var(--ease), transform var(--d-fast) var(--ease); }
 .node-target-card:hover { border-color: var(--line-strong); transform: translateY(-1px); }
@@ -1228,3 +1233,13 @@ input[type='checkbox'], input[type='radio'] { width: auto; flex: none; padding: 
 }
 .pairing-link-overlay > * { max-width: 720px; margin-left: auto; margin-right: auto; }
 [data-pairing-preview] { overflow-wrap: anywhere; }
+
+/* "Use this Mac instead": the explanation on the left, its action on the right. */
+.local-node-switch { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2) var(--s-4); padding: var(--s-3) var(--s-4); border: 1px solid var(--line); border-radius: var(--r-panel); background: var(--surface); }
+.local-node-switch > .hint { flex: 1 1 260px; margin: 0; order: 0; }
+.local-node-switch > [data-use-local] { order: 1; flex: none; color: var(--ink); border: 1px solid var(--line-strong); border-radius: var(--r-chip); padding: 7px 14px; font-size: var(--t-sm); font-weight: 500; }
+.local-node-switch > [role='status'], .local-node-switch > .soft-error { order: 2; flex-basis: 100%; }
+/* Form actions sit side by side at their own width, never as a full-width bar. */
+.form-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); }
+.form-actions > .primary { flex: none; }
+.form-actions > .quiet { flex: none; }
