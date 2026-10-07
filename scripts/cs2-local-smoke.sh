@@ -56,7 +56,8 @@ command_response_fields() {
   ' "$HOST"
 }
 no_credential_in_responses() {
-  ! command_response_fields | grep -Eqi "$CREDENTIAL"
+  local out; out=$(command_response_fields)
+  ! grep -Eqi "$CREDENTIAL" <<<"$out"
 }
 
 # The renderer's own model of every host response.
@@ -64,14 +65,16 @@ renderer_response_types() {
   awk '/^type /{inside=1} inside{print} inside && /};[[:space:]]*$/{inside=0}' "$APP"
 }
 no_credential_in_renderer_types() {
-  ! renderer_response_types | grep -Eqi "$CREDENTIAL"
+  local out; out=$(renderer_response_types)
+  ! grep -Eqi "$CREDENTIAL" <<<"$out"
 }
 
 # Renderer source minus comment-only lines, so architecture notes that *describe* the
 # JWT seam are not mistaken for code that handles one.
 renderer_code() { cat "$APP" src/qr.ts | grep -vE '^[[:space:]]*(//|\*|/\*)'; }
 no_credential_in_renderer_code() {
-  ! renderer_code | grep -Eqi '\b(jwt|bearer|auth/local)\b'
+  local out; out=$(renderer_code)
+  ! grep -Eqi '\b(jwt|bearer|auth/local)\b' <<<"$out"
 }
 # Legacy restore remains write-only. The opt-in owner screen separately receives
 # a one-shot phrase, covered by local-owner-ceremony.test.tsx.
@@ -85,9 +88,10 @@ registered_commands() {
   awk '/generate_handler!\[/{inside=1} inside{print} inside && /\]/{inside=0}' "$HOST"
 }
 registers_cs2_commands() {
-  local name
+  local name cmds
+  cmds=$(registered_commands)
   for name in node_status fund_state fund_start funding_address payments_balance identity_restore; do
-    registered_commands | grep -q "\b${name}\b" || return 1
+    grep -q "\b${name}\b" <<<"$cmds" || return 1
   done
 }
 
@@ -100,6 +104,10 @@ host_fn() {
     inside && /^}/                       { exit }
   ' "$HOST"
 }
+# Capture output first: `producer | grep -q` under pipefail fails spuriously (SIGPIPE) once
+# the producer writes past its pipe buffer. Under `!` that would even turn a match into a
+# false PASS. Same fix as test-app-lifecycle.sh.
+in_fn() { local b; b=$(host_fn "$1"); shift; grep -q "$@" <<<"$b"; }
 
 # CS-2.1: adopt the 3141 listener only when GET /identity matches RestoreResponse.node_id.
 # RestoreOutcome.restarted stays false unless that listener restarted onto the restored id.
@@ -107,29 +115,29 @@ host_fn() {
 # replaced. Otherwise actually restart the listener that holds 3141. RestoreOutcome.restarted
 # is true only after the process answering 3141 restarted onto the restored identity.
 adopt_only_matching_identity() {
-  host_fn adopt_matching_identity | grep -q 'fetch_node_id' &&
-    host_fn adopt_matching_identity | grep -q 'expected_node_id' &&
-    host_fn adopt_matching_identity | grep -Fq 'live != expected_node_id' &&
-    host_fn restart_node | grep -q 'adopt_matching_identity' &&
-    host_fn restart_node | grep -q 'stop_loopback_listener' &&
-    host_fn restart_node | grep -q 'expected_node_id' &&
-    host_fn identity_restore | grep -q 'restart_node(&app, &restored.node_id)' &&
-    host_fn identity_restore | grep -Fq 'restarted,' &&
-    ! host_fn identity_restore | grep -q 'restarted: restored.restart_required'
+  in_fn adopt_matching_identity 'fetch_node_id' &&
+    in_fn adopt_matching_identity 'expected_node_id' &&
+    in_fn adopt_matching_identity -F 'live != expected_node_id' &&
+    in_fn restart_node 'adopt_matching_identity' &&
+    in_fn restart_node 'stop_loopback_listener' &&
+    in_fn restart_node 'expected_node_id' &&
+    in_fn identity_restore 'restart_node(&app, &restored.node_id)' &&
+    in_fn identity_restore -F 'restarted,' &&
+    ! in_fn identity_restore 'restarted: restored.restart_required'
 }
 # A random healthy loopback process is never adopted.
 never_adopt_random_healthy() {
   ! grep -q 'adopt_healthy_loopback' "$HOST" &&
     grep -q 'A random healthy loopback process is never adopted' "$HOST" &&
-    host_fn adopt_matching_identity | grep -q 'live != expected_node_id'
+    in_fn adopt_matching_identity 'live != expected_node_id'
 }
 http_timeouts_on_health_auth() {
   grep -q 'connect_timeout' "$HOST" &&
     grep -q '\.timeout(' "$HOST"
 }
 wait_for_health_fails_on_terminated() {
-  host_fn wait_for_health | grep -q 'sidecar_terminated' &&
-    host_fn spawn_node | grep -q 'record_node_exit' &&
+  in_fn wait_for_health 'sidecar_terminated' &&
+    in_fn spawn_node 'record_node_exit' &&
     grep -q 'self.sidecar_terminated.store(true' "$HOST"
 }
 # IdentityGate restore retry/error is NOT gated on ready.
@@ -143,10 +151,10 @@ restore_error_not_gated_on_ready() {
 }
 # A restart re-uses the identity that was just restored: init stays on the first-run path.
 restore_path_never_inits() {
-  ! host_fn restart_node | grep -q 'init_node' &&
-    ! host_fn adopt_matching_identity | grep -q 'init_node' &&
-    ! host_fn identity_restore | grep -q 'init_node' &&
-    ! host_fn stop_loopback_listener | grep -q 'init_node'
+  ! in_fn restart_node 'init_node' &&
+    ! in_fn adopt_matching_identity 'init_node' &&
+    ! in_fn identity_restore 'init_node' &&
+    ! in_fn stop_loopback_listener 'init_node'
 }
 
 echo "== host: fund commands over the loopback control plane =="
