@@ -13,7 +13,8 @@
 > gated behind their blockers (§7)** and are never marketed as shipped before they
 > exist. A sovereign, federated network — a person can hold.
 
-**Status:** charter (2026-08-12). Protocol is PUBLIC (source-first developer debut,
+**Status:** charter (2026-08-12); G4 re-scoped by the owner for v1 AI (2026-10-07).
+Protocol is PUBLIC (source-first developer debut,
 `MindLink-ApS/BitSov-bitsov`). This is the *consumer* build that turns the protocol
 into a product. Grounded by a 5-agent discovery + adversarial charter audit
 (QUALIFIED GO — see the 6 gates below and `CODEX_APP_AUTHORITY.md`).
@@ -78,10 +79,12 @@ fork or vendor protocol logic. "Must remain optional" per `PUBLIC_REPO_DECISION.
 - **Participants inline.** Humans are `node_id` participants today. Every participant carries
   their **own node / bank / (later) AI** into the room — the room owns no accounts; it's a
   convenience view over node-to-node relationships, each member individually payment-gated.
-- **AI deferred (Gate G4).** Build the participant model **AI-ready** (a `node_id` may later
-  be an AI agent that joins inline **only when explicitly invoked** — never ambient/always-
-  listening), but **ship humans-only**. MindLink is not yet an on-prem AI-model company; no
-  agent runtime in the MVP. AI slots in later as just-another-node over the same paid lanes.
+- **Named assistants (Gate G4).** v1 AI starts as a client of the user's own node,
+  brokered by the app. Named assistants may run when the user invokes them or while
+  the app is open; **no unattended agent runtime**. Room participants remain `node_id`s;
+  an AI with its own peer/`node_id` is **later (M11)**. The node never talks to cloud AI.
+  User-facing copy says **"assistant", not "agent"**, and describes only shipped abilities.
+  See [AI assistants](AI-ASSISTANTS.md) for the spend, privacy and sequencing rules.
 
 ## 4. Custody tiers — sequenced by what the charter permits today
 | Tier | When | Sovereignty | Note |
@@ -91,7 +94,7 @@ fork or vendor protocol logic. "Must remain optional" per `PUBLIC_REPO_DECISION.
 | **T-HOSTED** | M10 | **reachability convenience, NOT custody** | "MindLink-hosted" means **only** a **ciphertext relay** (keys, funds and the node stay on the user's device; the relay holds ciphertext — disclose what a relay operator can see) or **NaaS** (the user's seed on a box the user controls). **Never a key-holding hosted node**; never "MindLink funds/opens your channels". Matches the genome charter line. |
 | **T-PHONE-NATIVE** | M8 | reduced-sovereign | "node in your pocket," reachable via relay+push. **BLOCKED on #216 relay (B1)** — never claim before it's live. |
 
-## 5. MVP — desktop-first, humans-only ("fund your node and start talking")
+## 5. Conversation MVP — desktop-first, human participants ("fund your node and start talking")
 Ships **now** against the existing protocol surface. Nine-call client contract, keys+invoices
 fully hidden: `auth/local` → `identity` (create/restore mnemonic) → `onboarding/start`
 (funding-address QR, poll `onboarding/state`) → `payments/open-channel` (liquidity) → `peers`
@@ -118,7 +121,7 @@ phase does not start until its entry gate passes. M-numbers are stable IDs (not 
 | 4 | M9 | Multi-party meet (MLS 960–962 + relay/SFU fan-out) | bitsov-app | M7 | — |
 | **gated track** | M4 | 1:1 VoIP, directly-reachable peers only (kinds 400–403 → WebRTC) — **do NOT market as calling** | bitsov-app | M2 | **G3** |
 | gated track | M10 | Hosted convenience tier (ciphertext relay or NaaS only — no key-holding hosted node; disclose relay-operator visibility) | Website/services | M7 | — |
-| gated track | M11 | Sovereign AI participant (node_id-as-agent, invoked inline only) | BitSov-bitsov | M6 | **G4** |
+| later gated track | M11 | AI as its own peer/`node_id`, invoked inline only; follows v1 assistants as clients of the user's own node | BitSov-bitsov | M6 + v1 own-node assistant track | **G4** |
 
 ## 7. Blockers
 - **B1 [critical]** — Ciphertext relay #216 not live (`relay.rs` is R3 SEAM-A engine only, dead_code, default-off). Gates phone-native reachability, offline store-and-forward, push-wake. *The* gating blocker for the phone vision.
@@ -129,7 +132,7 @@ phase does not start until its entry gate passes. M-numbers are stable IDs (not 
 - **B6 [medium]** — Greenfield: no app repo/code exists; shell + node-embed + first-run funding is the critical path.
 - **B7 [medium]** — Payment-UX vs charter: funding is mandatory friction; hide Lightning, never remove the gate.
 - **B8 [medium]** — Group-crypto maturity: MLS 960–962 scaffolded; verify production-ready before multi-party meet / large rooms.
-- **B9 [low]** — AI-deferral discipline: keep participants as node_ids; do NOT build an agent runtime now.
+- **B9 [low]** — AI sequencing: own-node client assistants first; own-peer AI stays later (M11). No unattended agent runtime. A node-grant payee allowlist must land before any AI pay path; see [AI assistants](AI-ASSISTANTS.md).
 - **B10 [landed — `v0.3.0-rc5`, 2026-09-03]** — rc4 published only Linux node binaries (`bitsov-linux-x86_64/aarch64`), so CS-1 shipped Linux-only. rc5 (and rc6, 2026-09-13) publish five signed CLI targets — linux x86_64/aarch64, darwin aarch64/x86_64, windows x86_64 — with `SHA256SUMS` signed by release key `B299…EF6E`; the app fetches macOS/Windows sidecars (PR #4) and the CS-1 smoke runs on Linux + macOS (Darwin SKIP retired, PR #9). **Residual:** Darwin/Windows binaries are not notarized / Authenticode-signed (Gatekeeper/SmartScreen block by default), and the standing rule holds — the app must never ship a Mac/Windows build without a verified signed node sidecar.
 
 ## 8. Coding sessions (hand to a builder)
@@ -146,7 +149,17 @@ remote transport confidentiality (G2) · `/auth/local` hardening (G6).
 - **G1 — API-consumer boundary.** App consumes the public node API over loopback; **no forked/vendored protocol logic, no in-process crate linking.** Decide + document before CS-1.
 - **G2 — Remote transport confidentiality.** Build TLS/Noise channel confidentiality **and** per-device delegated auth **before any paired/mobile/hosted client touches a non-loopback node.** `/ws` carries decrypted plaintext and `/auth/local` has no TLS — signing is auth, not encryption. Non-negotiable for zero-plaintext.
 - **G3 — Don't market calls.** VoIP (M4/CS-7) is directly-reachable only; **remove "call/meet" from launch copy** until NAT traversal (relay) lands or the direct-only scope is stated plainly.
-- **G4 — AI genuinely deferred.** Participants stay node_ids; AI-ready seam only; no agent runtime; no user/website copy implying an AI participant before M11.
+- **G4 — Bounded v1 assistants.** Named assistants run only on user invocation or while
+  the app is open; **no unattended agent runtime**. User-facing copy says **"assistant",
+  not "agent"**. AI-as-a-client of the user's own node comes first; own-peer/`node_id` AI
+  stays later (M11). The app brokers; **the node never talks to cloud AI**. Every paid AI
+  call is capped at **55 sats all-in**, including fees. Each paid AI has a **separate
+  pairing and its own small spend grant**, revocable without touching the owner's.
+  A **payee allowlist on the node grant must land before any AI pay path**. v1 inbox
+  access is **counts only**; message bodies require the user to turn access on **per
+  conversation**. Assistants never send payments themselves: they produce drafts the
+  user sends through the existing budget/approval. These are shipping requirements,
+  not claims of implementation; see [AI assistants](AI-ASSISTANTS.md).
 - **G5 — Website stays inert.** `/bitsov/app` is a waitlist only; **never** add an app artifact to `website-release-metadata.json` until a real signed app binary exists (the fail-closed gate must flip on real artifacts, never placeholder copy).
 - **G6 — Harden `/auth/local`.** App-binding or explicit local-trust disclosure before the funds-holding "your bank" framing ships (any loopback process can currently mint a full node JWT).
 - **Also:** room membership is local-only bookkeeping — fix admit/notify/join **or** scope the first ship to 1:1 + already-peered members so "add participant" can't silently fail.

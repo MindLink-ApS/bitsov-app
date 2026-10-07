@@ -5,6 +5,12 @@ the `payments` tool in `src-tauri/src/jarvis/broker/`, and `src/control/ai.ts` +
 `src/control/AiTrack.tsx` (track). Bundled node: rc12 `41b9e78`; retained rc7 compatibility routes, plus the #78
 `BitSov-Data-As-Of` / `BitSov-Data-Stale` headers when the node sends them.
 
+**v1 policy:** [AI assistants](AI-ASSISTANTS.md) records the owner's 2026-10-07 G4
+re-scope. This page describes the existing slice, not implementation of those new
+gates. Before any v1 paid AI path, including an API-key-billed call, the 55-sat
+all-in cap, separate paid-AI pairing/grant and node-grant payee allowlist must hold.
+The provider configuration and badges below do not establish that enforcement.
+
 ## The app is the broker
 
 ```
@@ -119,8 +125,8 @@ Payment and invoice drafts accept whole positive sats only (including correctly 
 |---|---|
 | G1 | Unchanged. |
 | G2 | Unchanged: node reads stay on loopback. The only non-loopback request is the owner-approved model call, which is TLS-only. |
-| G4 | **This slice is the operator's re-scope of the AI seam (ticket C, 27 Sep).** There is no agent runtime, no ambient listening, and no AI participant or `node_id`. It is a question-and-answer track. A remote call happens only per explicit send. The copy never says "AI assistant" or "agent". |
-| Authority check | `scripts/authority-check.sh` passes. |
+| G4 | This question-and-answer slice has no unattended runtime or AI peer/`node_id`; remote calls happen only per explicit send. The owner's v1 re-scope allows named assistants on invocation or while the app is open, with **"assistant", not "agent"** in user-facing copy. Own-peer AI stays later (M11). The [v1 rules](AI-ASSISTANTS.md) govern paid calls and per-conversation body access; this slice's broker still excludes bodies. |
+| Authority check | The existing static check is `scripts/authority-check.sh`; a pass does not establish the new G4 runtime, privacy or spending controls. |
 
 ## Screens (sample data, `docs/control-center/`)
 
