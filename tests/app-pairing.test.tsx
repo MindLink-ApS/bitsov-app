@@ -216,11 +216,10 @@ describe('app shell pairing wiring', () => {
     const nodeId = 'ef'.repeat(32);
     const peer = 'ab'.repeat(32);
     let status = { ready: true, node_id: nodeId, error: null as string | null, retry_after_secs: null as number | null };
-    localStorage.setItem(`bitsov.trust.v1.remote.${nodeId}`, 'accepted');
     vi.stubGlobal('__TAURI_INTERNALS__', { invoke: (cmd: string) => {
       if (cmd === 'pairing_link_take') { const link = pendingLink; pendingLink = null; return Promise.resolve(link); }
       if (cmd === 'node_status') return Promise.resolve(status);
-      if (cmd === 'pairing_status') return Promise.resolve({ ...paired, remote: true });
+      if (cmd === 'pairing_status') return Promise.resolve({ ...paired, remote: true, trust_acknowledged_node_id: nodeId });
       if (cmd === 'peers_list') return Promise.resolve([{ node_id: peer, addr: null, label: 'Peer', connected: true, fingerprint: peer }]);
       if (cmd === 'messages_list') return Promise.resolve([]);
       return Promise.reject(new Error('not available'));
@@ -253,11 +252,10 @@ describe('app shell pairing wiring', () => {
     } finally { observer.disconnect(); }
   });
 
-  it.each(['revoked', 'identity changed', 'setup reset', 'trust reset'] as const)('returns a warm shell to onboarding when %s', async (change) => {
+  it.each(['revoked', 'identity changed', 'setup reset'] as const)('returns a warm shell to onboarding when %s', async (change) => {
     vi.useFakeTimers();
     let nodeId = 'ef'.repeat(32);
-    let view = { ...paired, remote: true };
-    localStorage.setItem(`bitsov.trust.v1.remote.${nodeId}`, 'accepted');
+    let view = { ...paired, remote: true, trust_acknowledged_node_id: nodeId };
     vi.stubGlobal('__TAURI_INTERNALS__', { invoke: (cmd: string) => {
       if (cmd === 'node_status') return Promise.resolve({ ready: true, node_id: nodeId, error: null });
       if (cmd === 'pairing_status') return Promise.resolve(view);
@@ -273,7 +271,6 @@ describe('app shell pairing wiring', () => {
       localStorage.setItem(`bitsov.trust.v1.remote.${nodeId}`, 'accepted');
     }
     if (change === 'setup reset') view = { ...view, bootstrap: 'identity-free' };
-    if (change === 'trust reset') localStorage.clear();
     await vi.advanceTimersByTimeAsync(1500);
     expect(mount.querySelector('[data-ob-head]')).not.toBeNull();
     if (change === 'revoked') expect(mount.querySelector('[data-pairing="failed"]')).not.toBeNull();

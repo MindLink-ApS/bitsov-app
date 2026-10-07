@@ -66,35 +66,25 @@ function AppScreen() {
   const [status, setStatus] = createSignal<NodeStatus>({ ready: false, node_id: null, error: null });
   // Gate G6: the funds UI stays behind an explicit trust disclosure.
   const [sessionTrust, setSessionTrust] = createSignal<string | null>(null);
-  let persistedTrust: string | null = null;
   const trustKey = () => status().node_id ? `bitsov.trust.v1.${pairing().remote ? 'remote' : 'local'}.${status().node_id!.toLowerCase()}` : null;
   const trustAck = () => {
     if (source().mode === 'sample') return sessionTrust() === 'sample' || sample === 'shell';
     if (pairing().state === 'failed' || pairing().bootstrap) return false;
     const key = trustKey();
-    // A missing identity is a transient read failure; a different identity is
-    // a new trust boundary, even if that node was accepted in an older session.
-    if (sessionTrust()) {
-      if (key && sessionTrust() !== key) return false;
-      if (persistedTrust === sessionTrust()) {
-        try { if (localStorage.getItem(persistedTrust!) !== 'accepted') return false; }
-        catch { /* session acceptance survives unavailable storage */ }
-      }
-      return true;
-    }
-    if (!status().ready || !['paired', 'fallback'].includes(pairing().state) || pairing().bootstrap) return false;
-    if (!key) return false;
-    try {
-      if (localStorage.getItem(key) !== 'accepted') return false;
-      persistedTrust = key;
-      return true;
-    } catch { return false; }
+    // A transient missing identity does not close a warm shell. A different
+    // identity or connection mode is a new trust boundary.
+    if (sessionTrust()) return !key || sessionTrust() === key;
+    if (!status().ready || !['paired', 'fallback'].includes(pairing().state) || !key) return false;
+    return pairing().trust_acknowledged_node_id?.toLowerCase() === status().node_id?.toLowerCase();
   };
-  const acceptTrust = () => {
+  const acceptTrust = async () => {
     const key = source().mode === 'sample' ? 'sample' : trustKey();
     if (!key) return;
     if (key !== 'sample') {
-      try { localStorage.setItem(key, 'accepted'); persistedTrust = key; } catch { /* session acceptance still works */ }
+      const accepted = await source().trustAcknowledge(status().node_id!, pairing().remote, false);
+      if (!accepted) throw new Error('Could not save trust acknowledgement.');
+      // An IPC response for the previous node must never accept its replacement.
+      if (trustKey() !== key) return;
     }
     setSessionTrust(key);
   };
@@ -111,6 +101,25 @@ function AppScreen() {
     restoring() || restoreError() !== null;
   createEffect(() => {
     if (source().mode === 'node' && trustAck() && trustKey()) setSessionTrust(trustKey());
+  });
+  let migratingTrust = false;
+  let migrationBoundary: string | null = null;
+  createEffect(() => {
+    const key = trustKey();
+    if (source().mode !== 'node' || sessionTrust() || !status().ready ||
+        !['paired', 'fallback'].includes(pairing().state) || pairing().bootstrap || !key) return;
+    // Only the first authenticated boundary may import a legacy flag this run.
+    migrationBoundary ??= key;
+    if (migrationBoundary !== key || migratingTrust) return;
+    try { if (localStorage.getItem(key) !== 'accepted') return; }
+    catch { return; }
+    migratingTrust = true;
+    void source().trustAcknowledge(status().node_id!, pairing().remote, true).then(accepted => {
+      try { localStorage.removeItem(key); } catch { /* the host also makes migration idempotent */ }
+      if (accepted && trustKey() === key) setSessionTrust(key);
+    }).catch(() => {
+      // Keep the legacy flag for a later retry; failed persistence is not consent.
+    }).finally(() => { migratingTrust = false; });
   });
   // Readiness describes this connection attempt. Opening the shell records that
   // setup completed for this trust boundary; a cooldown is not a new first run.
@@ -394,7 +403,7 @@ function IdentityGate(props: {
   /** Restore is local; the host checks the node router before submitting. */
   canRestore: boolean;
   bootstrap: boolean;
-  onContinue: () => void;
+  onContinue: () => Promise<void>;
   onRestoring: (value: boolean) => void;
   restoreError: () => string | null;
   setRestoreError: (value: string | null) => void;
@@ -402,9 +411,10 @@ function IdentityGate(props: {
   const [showRestore, setShowRestore] = createSignal(false);
   const [phrase, setPhrase] = createSignal('');
   const [busy, setBusy] = createSignal(false);
+  const [savingTrust, setSavingTrust] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
   const [restored, setRestored] = createSignal<string | null>(null);
-  usePairingActivity(() => showRestore() || busy());
+  usePairingActivity(() => showRestore() || busy() || savingTrust());
 
   const submitRestore = async (event: Event) => {
     event.preventDefault();
@@ -488,7 +498,13 @@ function IdentityGate(props: {
       </Show>
 
       <Show when={!props.bootstrap}>
-      <button class="primary" onClick={props.onContinue}>
+      <button class="primary" disabled={busy() || savingTrust()} onClick={async () => {
+        setSavingTrust(true);
+        setError(null);
+        try { await props.onContinue(); }
+        catch (e) { setError(String(e)); }
+        finally { setSavingTrust(false); }
+      }}>
         I understand — continue to funding
       </button>
       </Show>

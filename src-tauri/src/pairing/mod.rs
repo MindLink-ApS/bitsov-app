@@ -426,6 +426,8 @@ pub struct PairingView {
     pub bootstrap: Option<String>,
     /// Display-only label from the remote pairing link.
     pub hosted_by: Option<String>,
+    /// Durable disclosure acknowledgement for this node and connection mode.
+    pub trust_acknowledged_node_id: Option<String>,
 }
 
 impl PairingView {
@@ -439,6 +441,7 @@ impl PairingView {
             reason: None,
             bootstrap: None,
             hosted_by: None,
+            trust_acknowledged_node_id: None,
         }
     }
 

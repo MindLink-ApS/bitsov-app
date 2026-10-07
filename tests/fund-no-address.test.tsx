@@ -12,6 +12,7 @@ const REASON = 'Funding address not available — this endpoint requires an embe
 function stubHost(address?: string, money?: { ready: boolean; starts: number }) {
   const replies: Record<string, () => unknown> = {
     node_status: () => ({ ready: true, node_id: OWN, error: null }),
+    trust_acknowledge: () => true,
     pairing_status: () => ({
       state: 'paired', scopes: ['read', 'receive'], short_code: 'ABCD-EFGH',
       code_from_node: true, reason: null, remote: false, bootstrap: null,
@@ -65,6 +66,7 @@ describe('deposit panel without a deposit address', () => {
     dispose = render(() => <App />, mount);
     await vi.waitFor(() => expect([...mount.querySelectorAll('button')].some((b) => b.textContent?.includes('I understand'))).toBe(true));
     [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
+    await vi.waitFor(() => expect(mount.querySelector('[data-first-run]')).toBeNull());
     await vi.waitFor(() => expect(mount.querySelector('[data-tab="wallet"]')).not.toBeNull());
     (mount.querySelector('[data-tab="wallet"]') as HTMLButtonElement).click();
     const button = () => [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent === 'Get a deposit address');
@@ -87,6 +89,7 @@ describe('deposit panel without a deposit address', () => {
       expect([...mount.querySelectorAll('button')].some((b) => b.textContent?.includes('I understand'))).toBe(true),
     );
     [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
+    await vi.waitFor(() => expect(mount.querySelector('[data-first-run]')).toBeNull());
     const walletTab = () => [...mount.querySelectorAll<HTMLElement>('[role="tab"]')].find((t) => t.textContent === 'Wallet');
     await vi.waitFor(() => expect(walletTab()).toBeDefined());
     walletTab()!.click();
@@ -104,6 +107,7 @@ describe('deposit panel without a deposit address', () => {
       expect([...mount.querySelectorAll('button')].some((b) => b.textContent?.includes('I understand'))).toBe(true),
     );
     [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
+    await vi.waitFor(() => expect(mount.querySelector('[data-first-run]')).toBeNull());
     const walletTab = () => [...mount.querySelectorAll<HTMLElement>('[role="tab"]')].find((t) => t.textContent === 'Wallet');
     await vi.waitFor(() => expect(walletTab()).toBeDefined());
     walletTab()!.click();

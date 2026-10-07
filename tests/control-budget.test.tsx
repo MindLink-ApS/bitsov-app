@@ -54,11 +54,13 @@ function stubHost(start: BudgetView, overrides: Record<string, Reply> = {}) {
   setPetname(MAYA, 'Maya');
   setPetname(NEW, 'Nadia');
   const calls: Call[] = [];
+  let trustedNode: string | null = null;
   const callbacks = new Map<number, (e: unknown) => void>();
   const state = { budget: start, spend: locked };
   const REPLIES: Record<string, Reply> = {
     node_status: () => ({ ready: true, node_id: OWN, error: null }),
-    pairing_status: () => paired,
+    trust_acknowledge: (args) => { trustedNode = args!.node_id as string; return true; },
+    pairing_status: () => ({ ...paired, trust_acknowledged_node_id: trustedNode }),
     node_overview: () => ({
       node_id: OWN, status: 'ok', version: 'api v2', connected_peers: 2, e2ee_sessions: 1, pending_deliveries: 0,
       lightning_available: true, block_height: 1, uptime_secs: 1, lightning_backend: 'ldk', chain_backend: 'esplora', read_at: Date.now(),
