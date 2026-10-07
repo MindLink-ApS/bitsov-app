@@ -1,3 +1,4 @@
+import { PendingApproval } from '../onboarding/LockedNode';
 import { usePairingActivity } from '../pairingActivity';
 import { createMessageEntrance } from './messageEntrance';
 import { LocalNodeSwitch } from '../onboarding/LocalNodeSwitch';
@@ -4528,22 +4529,7 @@ function DeviceSetup(props: { device: DeviceView | null; now: number; actions: A
       </Match>
       <Match when={props.device?.state === 'pending' && props.device}>
         {(d) => (
-          <div class="approval" data-device="pending">
-            <p>
-              <strong>{android ? 'Approve this phone once at your node.' : 'Approve this Mac once at your node.'}</strong>{' '}
-              Run this on the node’s computer. It shows {android ? 'this phone’s' : 'this Mac’s'} key
-              fingerprint <code data-device-fingerprint>{d().fingerprint}</code>; check that it matches, then type the short
-              code your node’s terminal shows:
-            </p>
-            <code class="address" data-device-owner-action>{d().owner_action}</code>
-            <p class="hint">
-              This app cannot approve it for you.
-              {d().expires_at_ms ? ` The request lapses in ${minutes(d().expires_at_ms!)} min.` : ''}{' '}
-              <button type="button" class="link" data-device-cancel disabled={busy()} onClick={() => void run(props.actions.cancelDevice)}>
-                Cancel
-              </button>
-            </p>
-          </div>
+          <PendingApproval pending={d()} mobile={android} onCancel={async () => { await run(props.actions.cancelDevice); }} />
         )}
       </Match>
     </Switch>

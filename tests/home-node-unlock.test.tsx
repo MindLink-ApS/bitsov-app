@@ -18,7 +18,7 @@ it('shows a locked node without onboarding or money controls, and unlocks only o
   const calls: string[] = [];
   vi.stubGlobal('__TAURI_INTERNALS__', { invoke: (cmd: string) => {
     calls.push(cmd);
-    if (cmd === 'node_status') return Promise.resolve({ ready: !locked, node_id: 'ab'.repeat(32), error: null, locked });
+    if (cmd === 'node_status') return Promise.resolve({ ready: !locked, node_id: 'ab'.repeat(32), error: null, locked, typed_unlock_supported: true, remember_offer: !locked });
     if (cmd === 'pairing_status') return Promise.resolve({ state: 'paired', remote: true, scopes: ['read'], bootstrap: null });
     if (cmd === 'node_unlock') { locked = false; return Promise.resolve(); }
     return Promise.reject('unavailable');
@@ -52,7 +52,7 @@ it('shows passive host failures on a locked node without requesting credentials'
 
 it('shows the locked badge and biometric unlock action on mobile', () => {
   const mount = document.createElement('div'); document.body.appendChild(mount);
-  dispose = render(() => <LockedNode mobile onUnlock={async () => {}} />, mount);
+  dispose = render(() => <LockedNode mobile typedUnlockSupported onUnlock={async () => {}} />, mount);
   expect(mount.querySelector('[data-locked-badge]')?.textContent).toBe('Node locked');
   expect([...mount.querySelectorAll('button')].some(
     button => button.textContent === 'Unlock with biometrics',
@@ -60,7 +60,7 @@ it('shows the locked badge and biometric unlock action on mobile', () => {
   expect(mount.querySelector('input[type="password"]')).toBeNull();
 });
 
-it('never offers a typed password on desktop', () => {
+it('does not offer typing without the host capability', () => {
   const mount = document.createElement('div'); document.body.appendChild(mount);
   dispose = render(() => <LockedNode onUnlock={async () => {}} onUnlockWithPassword={async () => {}} />, mount);
   expect(buttonNamed(mount, 'Type your node password instead')).toBeUndefined();
@@ -71,7 +71,7 @@ it('never offers a typed password on desktop', () => {
 it('lets an Android owner type the node password, then clears the field', async () => {
   const typed: string[] = [];
   const mount = document.createElement('div'); document.body.appendChild(mount);
-  dispose = render(() => <LockedNode mobile onUnlock={async () => {}} onUnlockWithPassword={async (password) => { typed.push(password); }} />, mount);
+  dispose = render(() => <LockedNode mobile typedUnlockSupported onUnlock={async () => {}} onUnlockWithPassword={async (password) => { typed.push(password); }} />, mount);
   expect(mount.querySelector('input[type="password"]')).toBeNull();
   buttonNamed(mount, 'Type your node password instead')!.click();
   const input = typePassword(mount, 'correct horse');
@@ -85,7 +85,7 @@ it('lets an Android owner type the node password, then clears the field', async 
 it('refuses an empty typed password without calling the host', async () => {
   const onUnlockWithPassword = vi.fn(async () => {});
   const mount = document.createElement('div'); document.body.appendChild(mount);
-  dispose = render(() => <LockedNode mobile onUnlock={async () => {}} onUnlockWithPassword={onUnlockWithPassword} />, mount);
+  dispose = render(() => <LockedNode mobile typedUnlockSupported onUnlock={async () => {}} onUnlockWithPassword={onUnlockWithPassword} />, mount);
   buttonNamed(mount, 'Type your node password instead')!.click();
   buttonNamed(mount, 'Unlock with password')!.click();
   await vi.waitFor(() => expect(mount.querySelector('[role="alert"]')?.textContent).toBe('Type the password you chose for your home node.'));
@@ -94,7 +94,7 @@ it('refuses an empty typed password without calling the host', async () => {
 
 it('opens the typed password form after a failed biometric unlock on Android', async () => {
   const mount = document.createElement('div'); document.body.appendChild(mount);
-  dispose = render(() => <LockedNode mobile onUnlock={() => Promise.reject('Android encrypted storage refused the home-node item: device key is not valid on this device')} onUnlockWithPassword={async () => {}} />, mount);
+  dispose = render(() => <LockedNode mobile typedUnlockSupported onUnlock={() => Promise.reject('Android encrypted storage refused the home-node item: device key is not valid on this device')} onUnlockWithPassword={async () => {}} />, mount);
   buttonNamed(mount, 'Unlock with biometrics')!.click();
   await vi.waitFor(() => expect(mount.querySelector('#node-unlock-password')).not.toBeNull());
   expect(mount.querySelector('[role="alert"]')?.textContent).toContain('device key is not valid');
@@ -104,7 +104,7 @@ it('offers to remember the accepted password behind a fingerprint, once', async 
   const choices: boolean[] = [];
   const onDone = vi.fn();
   const mount = document.createElement('div'); document.body.appendChild(mount);
-  dispose = render(() => <RememberUnlock onChoose={async (remember) => { choices.push(remember); }} onDone={onDone} />, mount);
+  dispose = render(() => <RememberUnlock mobile onChoose={async (remember) => { choices.push(remember); }} onDone={onDone} />, mount);
   expect(mount.textContent).toContain('Unlocked. Remember the password on this phone?');
   expect(mount.textContent).toContain('only opens with your fingerprint');
   expect(mount.textContent).toContain('If the fingerprints on this phone change, the saved copy stops opening. Type the password once more and choose Remember to replace it.');
@@ -121,7 +121,7 @@ it('keeps the offer after a cancelled fingerprint and closes on Not now', async 
   const choices: boolean[] = [];
   const onDone = vi.fn();
   const mount = document.createElement('div'); document.body.appendChild(mount);
-  dispose = render(() => <RememberUnlock onChoose={async (remember) => {
+  dispose = render(() => <RememberUnlock mobile onChoose={async (remember) => {
     choices.push(remember);
     if (remember) throw 'Android encrypted storage refused the home-node item: device key approval was cancelled';
   }} onDone={onDone} />, mount);
@@ -133,13 +133,14 @@ it('keeps the offer after a cancelled fingerprint and closes on Not now', async 
   expect(choices).toEqual([true, false]);
 });
 
-it('on Android, unlocks with a typed password and asks to remember it after the node unlocks', async () => {
-  vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (Linux; Android 15)');
+it.each(['Android', 'Mac'])('on %s, unlocks with a typed password and asks to remember it after the node unlocks', async (platform) => {
+  const mobile = platform === 'Android';
+  vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(mobile ? 'Mozilla/5.0 (Linux; Android 15)' : 'Mozilla/5.0 (Macintosh)');
   let locked = true;
   const calls: Array<[string, unknown]> = [];
   vi.stubGlobal('__TAURI_INTERNALS__', { invoke: (cmd: string, args?: unknown) => {
     calls.push([cmd, args]);
-    if (cmd === 'node_status') return Promise.resolve({ ready: !locked, node_id: 'ab'.repeat(32), error: null, locked });
+    if (cmd === 'node_status') return Promise.resolve({ ready: !locked, node_id: 'ab'.repeat(32), error: null, locked, typed_unlock_supported: true, remember_offer: !locked });
     if (cmd === 'pairing_status') return Promise.resolve({ state: 'paired', remote: true, scopes: ['read'], bootstrap: null });
     if (cmd === 'node_unlock_password') { locked = false; return Promise.resolve(); }
     if (cmd === 'node_unlock_remember') return Promise.resolve();
@@ -147,7 +148,7 @@ it('on Android, unlocks with a typed password and asks to remember it after the 
   }});
   const mount = document.createElement('div'); document.body.appendChild(mount);
   dispose = render(() => <App />, mount);
-  await vi.waitFor(() => expect(buttonNamed(mount, 'Unlock with biometrics')).toBeDefined());
+  await vi.waitFor(() => expect(buttonNamed(mount, mobile ? 'Unlock with biometrics' : 'Unlock with Touch ID')).toBeDefined());
   buttonNamed(mount, 'Type your node password instead')!.click();
   typePassword(mount, 'correct horse');
   buttonNamed(mount, 'Unlock with password')!.click();
@@ -155,9 +156,132 @@ it('on Android, unlocks with a typed password and asks to remember it after the 
   expect(calls.filter(([cmd]) => cmd === 'node_unlock_password').map(([, args]) => args)).toEqual([{ password: 'correct horse' }]);
   expect(calls.map(([cmd]) => cmd)).not.toContain('node_unlock');
   expect(calls.map(([cmd]) => cmd)).not.toContain('node_unlock_remember');
-  buttonNamed(mount, 'Remember on this phone (fingerprint)')!.click();
+  buttonNamed(mount, mobile ? 'Remember on this phone (fingerprint)' : 'Remember on this Mac (Touch ID)')!.click();
   await vi.waitFor(() => expect(mount.querySelector('[data-remember-saved]')).not.toBeNull());
   const remembered = calls.filter(([cmd]) => cmd === 'node_unlock_remember').map(([, args]) => args);
   expect(remembered).toEqual([{ remember: true }]);
   expect(JSON.stringify(remembered)).not.toContain('correct horse');
+});
+
+it.each(['saved', 'cancelled'])('keeps Remember mounted across a status poll while a save is pending and then %s', async (outcome) => {
+  let hostOffer = true;
+  let tick: (() => void) | undefined;
+  vi.spyOn(window, 'setInterval').mockImplementation((handler) => {
+    tick = handler as () => void;
+    return 1;
+  });
+  let finishSave!: () => void;
+  const save = new Promise<void>((resolve, reject) => {
+    finishSave = () => {
+      if (outcome === 'saved') resolve();
+      else { hostOffer = true; reject('Touch ID was cancelled.'); }
+    };
+  });
+  vi.stubGlobal('__TAURI_INTERNALS__', { invoke: (cmd: string) => {
+    if (cmd === 'node_status') return Promise.resolve({ ready: true, node_id: 'ab'.repeat(32), error: null, remember_offer: hostOffer });
+    if (cmd === 'pairing_status') return Promise.resolve({ state: 'paired', remote: true, scopes: ['read'], bootstrap: null });
+    if (cmd === 'node_unlock_remember') { hostOffer = false; return save; }
+    return Promise.reject('unavailable');
+  }});
+  const mount = document.createElement('div'); document.body.appendChild(mount);
+  dispose = render(() => <App />, mount);
+  await vi.waitFor(() => expect(buttonNamed(mount, 'Remember on this Mac (Touch ID)')).toBeDefined());
+  const dialog = mount.querySelector('[data-remember-unlock]');
+  buttonNamed(mount, 'Remember on this Mac (Touch ID)')!.click();
+  tick!();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  expect(mount.querySelector('[data-remember-unlock]')).toBe(dialog);
+  finishSave();
+  await vi.waitFor(() => expect(mount.textContent).toContain(outcome === 'saved' ? 'Saved on this Mac' : 'Touch ID was cancelled.'));
+  tick!();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  expect(mount.querySelector('[data-remember-unlock]')).toBe(dialog);
+  if (outcome === 'saved') {
+    buttonNamed(mount, 'Close')!.click();
+    expect(mount.querySelector('[data-remember-unlock]')).toBeNull();
+  }
+});
+
+it('dismisses an idle Remember offer when the host expires it', async () => {
+  let hostOffer = true;
+  let tick: (() => void) | undefined;
+  vi.spyOn(window, 'setInterval').mockImplementation((handler) => { tick = handler as () => void; return 1; });
+  vi.stubGlobal('__TAURI_INTERNALS__', { invoke: (cmd: string) => {
+    if (cmd === 'node_status') return Promise.resolve({ ready: true, node_id: 'ab'.repeat(32), error: null, remember_offer: hostOffer });
+    if (cmd === 'pairing_status') return Promise.resolve({ state: 'paired', remote: true, scopes: ['read'], bootstrap: null });
+    return Promise.reject('unavailable');
+  }});
+  const mount = document.createElement('div'); document.body.appendChild(mount);
+  dispose = render(() => <App />, mount);
+  await vi.waitFor(() => expect(mount.querySelector('[data-remember-unlock]')).not.toBeNull());
+  hostOffer = false;
+  tick!();
+  await vi.waitFor(() => expect(mount.querySelector('[data-remember-unlock]')).toBeNull());
+});
+
+
+it('offers typed unlock on a capable Mac, clears a wrong password and shows the reported budget', async () => {
+  const mount = document.createElement('div'); document.body.appendChild(mount);
+  dispose = render(() => <LockedNode typedUnlockSupported state="no-password" attemptsLeft={17}
+    onUnlock={async () => {}} onUnlockWithPassword={async () => { throw 'Unlock failed.'; }} />, mount);
+  const input = typePassword(mount, 'wrong password');
+  buttonNamed(mount, 'Unlock with password')!.click();
+  await vi.waitFor(() => expect(mount.querySelector('[role="alert"]')?.textContent).toContain('Unlock failed'));
+  expect(input.value).toBe('');
+  expect(mount.textContent).toContain('17 attempts left');
+  expect(mount.textContent).toContain('only in memory');
+  expect(mount.textContent).not.toContain('phone');
+});
+
+it('can cancel the automatically opened no-password form', async () => {
+  const mount = document.createElement('div'); document.body.appendChild(mount);
+  dispose = render(() => <LockedNode typedUnlockSupported state="no-password" onUnlock={async () => {}} onUnlockWithPassword={async () => {}} />, mount);
+  typePassword(mount, 'clear on cancel');
+  buttonNamed(mount, 'Cancel')!.click();
+  expect(mount.querySelector('input[type="password"]')).toBeNull();
+  buttonNamed(mount, 'Type your node password instead')!.click();
+  expect(mount.querySelector<HTMLInputElement>('input')!.value).toBe('');
+});
+
+it('opens the Mac password form after a missing or invalidated Keychain item', async () => {
+  const mount = document.createElement('div'); document.body.appendChild(mount);
+  dispose = render(() => <LockedNode typedUnlockSupported state="ready" onUnlock={async () => { throw 'Keychain access was cancelled or unavailable (-25300).'; }} onUnlockWithPassword={async () => {}} />, mount);
+  buttonNamed(mount, 'Unlock with Touch ID')!.click();
+  await vi.waitFor(() => expect(mount.querySelector('#node-unlock-password')).not.toBeNull());
+  expect(mount.textContent).not.toContain('attempts left');
+});
+
+it('explains enrollment before unlock without offering a password bypass', () => {
+  const mount = document.createElement('div'); document.body.appendChild(mount);
+  dispose = render(() => <LockedNode typedUnlockSupported state="not-enrolled" onUnlock={async () => {}} onUnlockWithPassword={async () => {}} />, mount);
+  expect(mount.textContent).toContain('This Mac is not an approved owner device yet');
+  expect(mount.textContent).toContain('another approved owner device');
+  expect(mount.textContent).toContain('--owner-control');
+  expect(buttonNamed(mount, 'Set up Touch ID approvals')?.disabled).toBe(true);
+  expect(buttonNamed(mount, 'Unlock with Touch ID')).toBeUndefined();
+  expect(mount.querySelector('input')).toBeNull();
+});
+
+it('shows the pending fingerprint, both finish paths, and Cancel', async () => {
+  const cancel = vi.fn(async () => {});
+  const mount = document.createElement('div'); document.body.appendChild(mount);
+  dispose = render(() => <LockedNode state="pending-approval" pending={{ fingerprint: 'AB-CD', owner_action: 'konsensus device approve --op ab12' }} onCancel={cancel} onUnlock={async () => {}} />, mount);
+  expect(mount.textContent).toContain('AB-CD');
+  expect(mount.textContent).toContain('At the box');
+  expect(mount.textContent).toContain('konsensus device approve --op ab12');
+  expect(mount.textContent).toContain('From another owner device');
+  expect(mount.textContent).toContain('unlocked');
+  buttonNamed(mount, 'Cancel')!.click();
+  await vi.waitFor(() => expect(cancel).toHaveBeenCalledOnce());
+});
+
+it('offers Remember on this Mac only as an explicit choice', async () => {
+  const choices: boolean[] = [];
+  const mount = document.createElement('div'); document.body.appendChild(mount);
+  dispose = render(() => <RememberUnlock onChoose={async choice => { choices.push(choice); }} onDone={() => {}} />, mount);
+  expect(choices).toEqual([]);
+  expect(mount.textContent).not.toContain('phone');
+  buttonNamed(mount, 'Remember on this Mac (Touch ID)')!.click();
+  await vi.waitFor(() => expect(choices).toEqual([true]));
+  expect(mount.querySelector('[data-remember-saved]')?.textContent).toContain('Saved on this Mac');
 });
