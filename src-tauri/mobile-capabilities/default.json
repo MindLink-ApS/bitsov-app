@@ -12,6 +12,7 @@
     "allow-node-unlock",
     "allow-node-unlock-password",
     "allow-node-unlock-remember",
+    "allow-remote-owner-setup",
     "allow-local-owner-create",
     "allow-local-owner-cancel",
     "allow-local-owner-finalize",

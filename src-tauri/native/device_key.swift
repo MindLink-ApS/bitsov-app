@@ -169,7 +169,8 @@ private func signMessage(
     _ reason: UnsafePointer<CChar>?,
     _ outSig: UnsafeMutablePointer<UInt8>?,
     _ sigCap: Int,
-    _ outSigLen: UnsafeMutablePointer<Int>?
+    _ outSigLen: UnsafeMutablePointer<Int>?,
+    _ context: LAContext = LAContext()
 ) -> Int32 {
     guard let blob = blob, let reason = reason, let outSig = outSig, let outSigLen = outSigLen,
           blobLen > 0, msgLen >= 0, sigCap >= 0 else {
@@ -186,7 +187,6 @@ private func signMessage(
     let blobData = Data(bytes: blob, count: blobLen)
     let msgData = msgLen > 0 ? Data(bytes: msg!, count: msgLen) : Data()
 
-    let context = LAContext()
     context.localizedReason = reasonText
 
     let key: SecureEnclave.P256.Signing.PrivateKey
@@ -486,4 +486,66 @@ public func bitsov_item_read(_ service: UnsafePointer<CChar>?, _ account: Unsafe
 public func bitsov_item_delete(_ service: UnsafePointer<CChar>?, _ account: UnsafePointer<CChar>?) -> Int32 {
     guard let service = service, let account = account else { return errBadArgument }
     return autoreleasepool { deleteItems(String(cString: service), String(cString: account)) }
+}
+
+// Onboarding only: registration authorization may sign one first-unlock
+// challenge for the same key/node/client. General device signing never uses it.
+private struct SetupApproval {
+    let blob: Data
+    let node: String
+    let client: String
+    let context: LAContext
+    let deadline: TimeInterval
+}
+private let setupApprovalLock = NSLock()
+private var setupApproval: SetupApproval?
+
+@_cdecl("bitsov_dk_sign_setup")
+public func bitsov_dk_sign_setup(
+    _ blob: UnsafePointer<UInt8>?, _ blobLen: Int,
+    _ msg: UnsafePointer<UInt8>?, _ msgLen: Int,
+    _ reason: UnsafePointer<CChar>?, _ finish: Int32,
+    _ outSig: UnsafeMutablePointer<UInt8>?, _ sigCap: Int,
+    _ outSigLen: UnsafeMutablePointer<Int>?
+) -> Int32 {
+    return autoreleasepool {
+        guard let blob = blob, let msg = msg, blobLen > 0, msgLen > 0,
+              finish == 0 || finish == 1,
+              let message = String(data: Data(bytes: msg, count: msgLen), encoding: .utf8) else { return errBadArgument }
+        let fields = message.components(separatedBy: "\n")
+        let names = finish == 0 ? ["node:", "client:", "public_key:", "sas_digest:"]
+                               : ["node:", "client:", "epoch:", "key:", "challenge:", "box_transport:"]
+        let domain = finish == 0 ? "bitsov-device-register-v2" : "bitsov-node-unlock-v1"
+        guard fields.count == names.count + 1, fields[0] == domain,
+              zip(fields.dropFirst(), names).allSatisfy({ $0.0.hasPrefix($0.1) && $0.0.count > $0.1.count }) else { return errBadArgument }
+        let blobData = Data(bytes: blob, count: blobLen)
+        setupApprovalLock.lock()
+        let previous = setupApproval
+        setupApproval = nil
+        setupApprovalLock.unlock()
+        let context: LAContext
+        if finish == 1 {
+            guard let prior = previous else { return errCancelled }
+            guard prior.blob == blobData, prior.node == fields[1], prior.client == fields[2],
+                  ProcessInfo.processInfo.systemUptime < prior.deadline else {
+                prior.context.invalidate()
+                return errCancelled
+            }
+            context = prior.context
+            // Reuse must never show another prompt. The owner can explicitly
+            // unlock through the ordinary flow if this context became invalid.
+            context.interactionNotAllowed = true
+        } else {
+            previous?.context.invalidate()
+            context = LAContext()
+        }
+        let status = signMessage(blob, blobLen, msg, msgLen, reason, outSig, sigCap, outSigLen, context)
+        if finish == 0 && status == okStatus {
+            setupApprovalLock.lock()
+            setupApproval = SetupApproval(blob: blobData, node: fields[1], client: fields[2],
+                context: context, deadline: ProcessInfo.processInfo.systemUptime + 120)
+            setupApprovalLock.unlock()
+        } else { context.invalidate() }
+        return status
+    }
 }

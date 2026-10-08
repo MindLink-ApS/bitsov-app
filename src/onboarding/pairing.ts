@@ -79,7 +79,7 @@ export function onboardingSteps(status: NodeStatus, pairing: PairingView, trustA
   const identity: StepStatus = !authed
     ? 'todo'
     : pairing.bootstrap
-      ? (pairing.bootstrap === 'bootstrap' && !pairing.remote ? 'active' : 'blocked')
+      ? (pairing.bootstrap === 'bootstrap' ? 'active' : 'blocked')
       : !status.ready
         ? 'todo'
         : trustAck || (pairing.remote && !!status.node_id)

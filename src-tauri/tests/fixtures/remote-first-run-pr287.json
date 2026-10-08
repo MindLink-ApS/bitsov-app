@@ -1,0 +1,28 @@
+{
+  "source": "Node PR #287 remote_bootstrap_tests.rs and pairing.md: exact UTF-8 domains, no newline; deterministic Ed25519 seed 07*32, box X25519 secret 09*32, live secret 0c*32. Independently generated with Python cryptography.",
+  "live_proof_message": "bitsov-remote-transport-v1:ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c:97c3b10b4d6c133a78ea5dcc1cf6421d3f81ae37b1f628ce14ca6fce7730f333",
+  "finalize": {
+    "node_id": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
+    "client_id": "0123456789abcdef0123456789abcdef",
+    "epoch": 7,
+    "restart_required": true,
+    "device_key_id": "device-key-id",
+    "box_transport_pubkey": "57db4b359f23ae5e146e4e2512056704722506348c150c14753d0c933d04d421",
+    "box_transport_signature": "vhBM9U6_pMGqR4R7YX-5VE44JMdCD8bVLrnSBQ7EiJXzSQMcKn_xnOS88q5nkojSvs7jOoVG97WpF5LCtpfFBQ",
+    "transport_pubkey": "97c3b10b4d6c133a78ea5dcc1cf6421d3f81ae37b1f628ce14ca6fce7730f333",
+    "transport_signature": "iRZi3IXOmPBg0ROqLcOK0UKrKxTMAhJNjRd-9wOOacH076MK_KdVXK8qkX1_7Ty0EmkFnDPHShcDN5jU3TDDBA"
+  },
+  "locked_auth": {
+    "status": "ok",
+    "v": 1,
+    "client_id": "0123456789abcdef0123456789abcdef",
+    "scopes": [
+      "read",
+      "receive"
+    ],
+    "box_transport_pubkey": "57db4b359f23ae5e146e4e2512056704722506348c150c14753d0c933d04d421",
+    "box_transport_signature": "vhBM9U6_pMGqR4R7YX-5VE44JMdCD8bVLrnSBQ7EiJXzSQMcKn_xnOS88q5nkojSvs7jOoVG97WpF5LCtpfFBQ",
+    "transport_pubkey": "97c3b10b4d6c133a78ea5dcc1cf6421d3f81ae37b1f628ce14ca6fce7730f333",
+    "transport_signature": "iRZi3IXOmPBg0ROqLcOK0UKrKxTMAhJNjRd-9wOOacH076MK_KdVXK8qkX1_7Ty0EmkFnDPHShcDN5jU3TDDBA"
+  }
+}
