@@ -1,4 +1,5 @@
 import { LocalNodeSwitch } from './LocalNodeSwitch';
+import { DeviceApprovals } from './DeviceApprovals';
 import { SoftError } from '../control/SoftError';
 import { createEffect, createSignal, For, Match, onMount, Show, Switch } from 'solid-js';
 import { normalizePairingLink, onboardingSteps, scopeList, type NodeStatus, type PairingView } from './pairing';
@@ -45,6 +46,9 @@ export function Onboarding(props: {
   onBusyChange?: (busy: boolean) => void;
   onImportRemote?: (link: string) => Promise<RemoteImportView>;
   onScanRemote?: () => Promise<string>;
+  /** Touch ID approvals setup, offered once the app is paired (Settings → Node has the same). */
+  onRegisterDevice?: () => Promise<unknown>;
+  onCancelDevice?: () => Promise<unknown>;
   initialPairingLink?: string;
   pairingInputId?: string;
 }) {
@@ -62,6 +66,7 @@ export function Onboarding(props: {
   };
   const isEnrolled = () => props.device?.()?.state === 'registered';
   const mobileBiometrics = () => props.onScanRemote !== undefined;
+  const [approvalsSkipped, setApprovalsSkipped] = createSignal(false);
   const [remoteLink, setRemoteLink] = createSignal('');
   const [previewing, setPreviewing] = createSignal(false);
   const [preview, setPreview] = createSignal<{ link: string; view: RemotePreviewView } | null>(null);
@@ -460,6 +465,18 @@ export function Onboarding(props: {
           </div>
         </Match>
       </Switch>
+
+      {/* Touch ID approvals belong to setup, right after pairing (they used to live only in + New). */}
+      <Show when={props.onRegisterDevice && props.onCancelDevice && props.pairing().state === 'paired' && stage() !== 'node' && !approvalsSkipped()}>
+        <DeviceApprovals
+          device={props.device?.() ?? null}
+          remote={props.pairing().remote}
+          mobile={mobileBiometrics()}
+          onRegister={props.onRegisterDevice!}
+          onCancel={props.onCancelDevice!}
+          onSkip={() => setApprovalsSkipped(true)}
+        />
+      </Show>
 
       <Show when={target() !== 'local'}>
       <form class="panel pairing remote-form" data-remote-access onSubmit={importRemote}>

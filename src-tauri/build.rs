@@ -30,6 +30,7 @@ fn main() {
             "payments_balance",
             "identity_restore",
             "pairing_status",
+            "trust_acknowledge",
             "pairing_retry",
             "remote_access_preview",
             "remote_access_import",

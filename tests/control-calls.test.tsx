@@ -1,3 +1,4 @@
+import { sampleSource } from '../src/control/sample';
 import { setStunPref, setDenom } from '../src/control/prefs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'solid-js/web';
@@ -15,6 +16,8 @@ const QUOTE: CallQuote = { offer_msat: 10_000, offer_max_routing_fee_msat: 5_000
 /** A stand-in RTCPeerConnection: records what the engine asks of it. */
 class FakePc {
   static made: FakePc[] = [];
+  stats = new Map<string, Record<string, unknown>>();
+  async getStats() { return this.stats; }
   iceGatheringState = 'complete';
   connectionState = 'new';
   localDescription: { type: string; sdp: string } | null = null;
@@ -120,11 +123,23 @@ describe('call refusal recovery', () => {
 
   it.each(['token lacks required scope: spend', { code: 'spend_refused', message: 'Owner grant required' }])('ends and releases media when signalling rejects: %s', async (error) => {
     const local = stream();
-    const { e } = engine({ getUserMedia: async () => local, signal: async () => { throw error; } });
+    const { e } = engine({ authorize: async () => true, getUserMedia: async () => local, signal: async () => { throw error; } });
     await e.place(A, 'audio', QUOTE);
     expect(e.view()).toMatchObject({ phase: 'ended', error: typeof error === 'string' ? error : error.message });
     expect(local.getTracks().every((t) => vi.mocked(t.stop).mock.calls.length === 1)).toBe(true);
     expect(FakePc.made[FakePc.made.length - 1]?.closed).toBe(true);
+  });
+});
+
+describe('call permission snapshots', () => {
+  it.each(['window', 'budget'] as const)('sample %s approval updates the scopes read by call preflight', async (kind) => {
+    const source = sampleSource();
+    expect((await source.pairingStatus()).scopes).not.toContain('spend');
+    if (kind === 'window') await source.spendRequest();
+    else await source.budgetApprove(500_000, 'careful');
+    await source.spendStatus();
+    await source.spendStatus();
+    expect((await source.pairingStatus()).scopes).toContain('spend');
   });
 });
 
@@ -145,6 +160,90 @@ describe('call signals', () => {
 describe('call engine', () => {
   beforeEach(() => { FakePc.made = []; });
   afterEach(() => { vi.useRealTimers(); });
+
+  it('does not capture or pay when the shell closes during spend preflight', async () => {
+    let authorize!: (allowed: boolean) => void;
+    const { e, sent, media } = engine({ authorize: () => new Promise((resolve) => { authorize = resolve; }) });
+    const placing = e.place(A, 'audio', QUOTE);
+    e.endLocal();
+    authorize(true);
+    await placing;
+    expect(media).toEqual([]);
+    expect(sent).toEqual([]);
+  });
+
+  it('a late capture from a cancelled call cannot disturb a newer incoming call', async () => {
+    let release!: (s: MediaStream) => void;
+    const { e, sent } = engine({ getUserMedia: () => new Promise((resolve) => { release = resolve; }) });
+    const placing = e.place(A, 'audio', QUOTE);
+    await vi.waitFor(() => expect(release).toBeDefined());
+    await e.hangup();
+    await placing;
+    await e.receive(msg(400, { call_id: 'f'.repeat(32), media: 'audio', sdp: 'new offer' }), OWN);
+    const late = stream();
+    release(late);
+    await vi.waitFor(() => expect(late.getTracks()[0].stop).toHaveBeenCalledOnce());
+    expect(e.view()).toMatchObject({ phase: 'incoming', callId: 'f'.repeat(32), error: null });
+    expect(sent).toEqual([]);
+    e.endLocal();
+  });
+
+  it('bounds camera re-acquisition without ending a live call or keeping late video', async () => {
+    vi.useFakeTimers();
+    let release!: (s: MediaStream) => void;
+    const { e, sent } = engine({ getUserMedia: async (c) => c.audio ? stream(true) : new Promise((resolve) => { release = resolve; }) });
+    await e.place(A, 'video', QUOTE);
+    FakePc.made[0].connect();
+    await e.toggleCamera();
+    const enabling = e.toggleCamera();
+    await vi.advanceTimersByTimeAsync(15_000);
+    await enabling;
+    expect(e.view()).toMatchObject({ phase: 'live', camera: false, error: expect.stringContaining('System Settings → Privacy') });
+    const late = stream(true, false);
+    release(late);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(late.getVideoTracks()[0].stop).toHaveBeenCalledOnce();
+    expect(sent.map((s) => s.kind)).toEqual([400]);
+    e.endLocal();
+  });
+
+  it.each(['outgoing', 'incoming'] as const)('bounds hung %s capture and stops a late stream without paying', async (direction) => {
+    vi.useFakeTimers();
+    let release!: (s: MediaStream) => void;
+    const { e, sent } = engine({ getUserMedia: () => new Promise((resolve) => { release = resolve; }) });
+    if (direction === 'incoming') await e.receive(msg(400, { media: 'video', sdp: 'offer' }), OWN);
+    const pending = direction === 'outgoing' ? e.place(A, 'video', QUOTE) : e.accept();
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(e.view()).toMatchObject({ phase: 'ended', paidMsat: 0, error: expect.stringContaining('Camera/microphone not available — check System Settings → Privacy') });
+    await pending;
+    const late = stream(true);
+    release(late);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(late.getTracks().every((t) => vi.mocked(t.stop).mock.calls.length === 1)).toBe(true);
+    expect(sent).toEqual([]);
+    expect(FakePc.made).toEqual([]);
+    // The timed-out action must release the action lock.
+    e.dismiss();
+    expect(e.view().phase).toBe('idle');
+  });
+
+  it.each(['host', 'srflx', 'relay'])('reports the selected %s pair, not an unselected candidate', async (kind) => {
+    const { e } = engine();
+    await e.place(A, 'audio', QUOTE);
+    const pc = FakePc.made[0];
+    pc.stats = new Map([
+      ['transport', { type: 'transport', selectedCandidatePairId: 'chosen' }],
+      ['other', { type: 'candidate-pair', state: 'succeeded', localCandidateId: 'other-local' }],
+      ['other-local', { type: 'local-candidate', candidateType: 'relay' }],
+      ['chosen', { type: 'candidate-pair', localCandidateId: 'local', remoteCandidateId: 'remote' }],
+      ['local', { type: 'local-candidate', candidateType: kind }],
+      ['remote', { type: 'remote-candidate', candidateType: 'host' }],
+    ]);
+    pc.connect();
+    await vi.waitFor(() => expect(e.view()).toHaveProperty('connection', { local: kind, remote: 'host' }));
+    await e.hangup();
+    expect(e.view()).toHaveProperty('connection', { local: kind, remote: 'host' });
+  });
 
   it('places one paid offer at the quoted all-in, with STUN only, then goes live and hangs up once', async () => {
     const { e, sent, media, last } = engine();
@@ -343,7 +442,7 @@ describe('call engine: review #74 fixes', () => {
 
 // ---- the shell: price before calling, ring card, thread stays chat-only ----
 
-const paired: PairingView = { state: 'paired', scopes: ['read', 'receive'], short_code: 'ABCD-EFGH', code_from_node: true, reason: null, remote: false, bootstrap: null };
+const paired: PairingView = { state: 'paired', scopes: ['read', 'receive', 'spend'], short_code: 'ABCD-EFGH', code_from_node: true, reason: null, remote: false, bootstrap: null };
 const openBudget = (): BudgetView => ({
   paused: false, waiting_for_owner: false, ceiling_msat: 500_000, max_daily_msat: 100_000_000, spent_msat: 0, unsettled_msat: 0,
   preset: 'careful', presets: [{ id: 'careful', contact_msat: 50_000, room_msat: 100_000, ceiling_msat: 500_000 }],
@@ -361,6 +460,7 @@ function stubHost(overrides: Record<string, Reply> = {}) {
   const spend: SpendView = { state: 'locked', basis: null, open_until_ms: null, pending: null, window_ms: 600_000 };
   const REPLIES: Record<string, Reply> = {
     node_status: () => ({ ready: true, node_id: OWN, error: null }),
+    trust_acknowledge: () => true,
     pairing_status: () => paired,
     node_overview: () => ({ node_id: OWN, status: 'ok', version: 'api v2', connected_peers: 1, e2ee_sessions: 1, pending_deliveries: 0,
       lightning_available: true, block_height: 1, uptime_secs: 1, lightning_backend: 'ldk', chain_backend: 'esplora', read_at: Date.now() }),
@@ -430,6 +530,82 @@ describe('calls in the shell', () => {
     [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
     await vi.waitFor(() => expect($(`[data-track="peer:${A}"]`)?.getAttribute('aria-current')).toBe('true'));
   }
+
+  it('shows approval before dialling when the paired token lacks spend, and permits an explicit retry after approval', async () => {
+    const capture = vi.spyOn(navigator.mediaDevices, 'getUserMedia');
+    let approved = false;
+    const host = stubHost({
+      pairing_status: () => ({ ...paired, scopes: approved ? paired.scopes : ['read', 'receive'] }),
+      spend_request: () => {
+        approved = true;
+        return { state: 'open', basis: 'node_grant', open_until_ms: Date.now() + 600_000, pending: null, window_ms: 600_000 };
+      },
+    });
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-approval]')).not.toBeNull());
+    expect($('[data-call-panel="calling"]')).toBeNull();
+    expect(capture).not.toHaveBeenCalled();
+    expect(host.used('call_signal')).toHaveLength(0);
+    $<HTMLButtonElement>('[data-call-approve]')!.click();
+    await vi.waitFor(() => expect(host.used('spend_request')).toHaveLength(1));
+    expect(host.used('call_signal')).toHaveLength(0);
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
+    expect(host.used('call_signal')).toHaveLength(1);
+  });
+
+  it('shows the permission timeout on the call card and never submits an offer', async () => {
+    const host = stubHost();
+    vi.spyOn(navigator.mediaDevices, 'getUserMedia').mockImplementation(() => new Promise(() => {}));
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="video"]')!.disabled).toBe(false));
+    vi.useFakeTimers();
+    try {
+      $<HTMLButtonElement>('[data-call="video"]')!.click();
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(text('[data-call-ended]')).toContain('Camera/microphone not available — check System Settings → Privacy');
+      expect(host.used('call_signal')).toEqual([]);
+      expect($('[data-call-panel="calling"]')).toBeNull();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it.each(['token lacks spend scope', { code: 'spend_refused', message: '403: token lacks required scope: spend' }])('shows approval when permission preflight refuses: %s', async (error) => {
+    let refuse = false;
+    const capture = vi.spyOn(navigator.mediaDevices, 'getUserMedia');
+    const host = stubHost({ pairing_status: () => { if (refuse) throw error; return paired; } });
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    refuse = true;
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-approval]')).not.toBeNull());
+    expect(text('[data-call-approval]')).toContain(typeof error === 'string' ? error : error.message);
+    expect(capture).not.toHaveBeenCalled();
+    expect(host.used('call_signal')).toEqual([]);
+  });
+
+  it('labels a six-sat maximum as a cap and retains the selected ICE route', async () => {
+    stubHost({ call_signal: (args) => ({ message_id: 'sig', kind: args!.kind, amount_msat: 1000, total_msat: 6000, max_routing_fee_msat: 5000, delivered: true, accepted: true, sent_at_ms: Date.now() }) });
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
+    const pc = FakePc.made[0];
+    pc.stats = new Map([
+      ['transport', { type: 'transport', selectedCandidatePairId: 'pair' }],
+      ['pair', { type: 'candidate-pair', localCandidateId: 'local', remoteCandidateId: 'remote' }],
+      ['local', { type: 'local-candidate', candidateType: 'srflx' }],
+      ['remote', { type: 'remote-candidate', candidateType: 'host' }],
+    ]);
+    pc.connect();
+    await vi.waitFor(() => expect(text('[data-call-connection]')).toContain('srflx(STUN)'));
+    pc.state('failed');
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    expect(text('[data-call-paid]')).toMatch(/cap.*6 sats/i);
+    expect(text('[data-call-paid]')).not.toMatch(/Paid 6/);
+    expect(text('[data-call-connection]')).toContain('host');
+  });
 
   it.each([
     ['per-call cap', 500_000, 50_000_000],
@@ -518,7 +694,7 @@ describe('calls in the shell', () => {
     const args = host.used('call_signal')[0].args!;
     expect(args).toMatchObject({ peer: A, kind: 400, max_msat: 15_000 });
     expect(JSON.parse(args.plaintext as string)).toMatchObject({ v: 1, media: 'audio', sdp: 'v=0 offer' });
-    expect(text('[data-call-paid]')).toMatch(/Paid 15 sats/);
+    expect(text('[data-call-paid]')).toMatch(/cap.*15 sats/i);
   });
 
   it.each(['', 'stun:owner.example:3478'])('shows a visible cross-network note only without configured STUN (%s)', async (stun) => {

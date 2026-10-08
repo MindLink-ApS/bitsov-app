@@ -788,6 +788,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
     nodeUnlockPassword: () => Promise.reject('Unlock is not available with sample data.'),
     nodeUnlockRemember: () => Promise.reject('Unlock is not available with sample data.'),
     pairingStatus: () => ok(pairing),
+    trustAcknowledge: () => ok(true),
     pairingRetry: () => ok(pairing),
     remoteAccessForget: () => Promise.reject('Remote access is not available with sample data.'),
     remoteAccessPreview: () => Promise.reject('Remote access is not available with sample data.'),
@@ -1026,6 +1027,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
       settleSpend();
       if (spend.state === 'pending' && ++spendPolls >= GRANT_AFTER_POLLS) {
         // The owner's grant opens only what was asked for.
+        pairing.scopes = ['read', 'receive', 'spend'];
         if (wants.window) openWindow();
         else spend = { state: 'locked', basis: null, open_until_ms: null, pending: null, window_ms: WINDOW_MS };
         if (wants.budget !== null) {

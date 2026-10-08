@@ -28,13 +28,15 @@ function stubHost(overrides: Record<string, (args?: Record<string, unknown>) => 
   resetContactsForTests();
   setPetname(A, 'Maya');
   const calls: Call[] = [];
+  let trustedNode: string | null = null;
   const callbacks = new Map<number, (e: unknown) => void>();
   // The host's socket state (`live_link`). Opening it here emits nothing, like a
   // bridge that connected before the shell subscribed.
   const host = { link: null as 'connecting' | 'open' | 'closed' | null };
   const REPLIES: Record<string, (args?: Record<string, unknown>) => unknown> = {
     node_status: () => ({ ready: true, node_id: OWN, error: null }),
-    pairing_status: () => paired,
+    trust_acknowledge: (args) => { trustedNode = args!.node_id as string; return true; },
+    pairing_status: () => ({ ...paired, trust_acknowledged_node_id: trustedNode }),
     node_overview: () => ({
       node_id: OWN, status: 'ok', version: 'api v2', connected_peers: 1, e2ee_sessions: 2,
       pending_deliveries: 0, lightning_available: true, block_height: 860123, uptime_secs: 60,
@@ -183,7 +185,7 @@ describe('control center shell', () => {
     const reads = ['node_overview', 'peers_list', 'rooms_list', 'payments_overview', 'price_quote', 'spend_status', 'budget_status', 'energy_read', 'membrane_read', 'file_price', 'room_quote', 'device_key_status'];
     const { calls } = stubHost({
       node_status: () => ({ ready: true, node_id: OWN, error: null, retry_after_secs: retry }),
-      pairing_status: () => ({ ...paired, remote: true }),
+      pairing_status: () => ({ ...paired, remote: true, trust_acknowledged_node_id: OWN }),
     });
     const host = (window as unknown as { __TAURI_INTERNALS__: unknown }).__TAURI_INTERNALS__ as unknown as { invoke: (cmd: string, args?: Record<string, unknown>) => Promise<unknown> };
     const invoke = host.invoke;
@@ -195,7 +197,6 @@ describe('control center shell', () => {
         return await invoke(cmd, args);
       } finally { running--; }
     };
-    localStorage.setItem(`bitsov.trust.v1.remote.${OWN}`, 'accepted');
     start();
     await vi.advanceTimersByTimeAsync(2000);
     expect(peak).toBeLessThanOrEqual(2);
@@ -388,7 +389,10 @@ describe('control center shell', () => {
     await vi.waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
     [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
 
-    await vi.waitFor(() => expect(mount.querySelector('[data-device-off="seed_not_encrypted"]')).not.toBeNull());
+    // The spend bar only points to Settings → Node, where the reason is spelled out.
+    await vi.waitFor(() => expect(mount.querySelector('[data-device-settings-hint="off"]')?.textContent).toContain('Touch ID approvals are off.'));
+    click('[data-device-settings-link]');
+    await vi.waitFor(() => expect(mount.querySelector('[data-panel="node"] [data-device-off="seed_not_encrypted"]')).not.toBeNull());
     expect(mount.querySelector('[data-device-off]')?.textContent).toContain('Encrypt your recovery phrase to enable Touch ID approvals');
     expect(mount.querySelector('[data-device-register]')).toBeNull();
     expect(mount.querySelector('[data-touch-approval]')).toBeNull();
@@ -419,7 +423,11 @@ describe('control center shell', () => {
     await vi.waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
     [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
 
-    await vi.waitFor(() => expect(mount.querySelector('[data-device-owner-action]')?.textContent).toBe(cmd));
+    // The spend bar says it is waiting and links to Settings → Node, where the owner step lives.
+    await vi.waitFor(() => expect(mount.querySelector('[data-device-settings-hint="pending"]')).not.toBeNull());
+    expect(mount.querySelector('[data-spend] [data-device-owner-action]')).toBeNull();
+    click('[data-device-settings-link]');
+    await vi.waitFor(() => expect(mount.querySelector('[data-panel="node"] [data-device-owner-action]')?.textContent).toBe(cmd));
     expect(mount.querySelector('[data-device-fingerprint]')?.textContent).toBe('3F9A-12C4');
     click('[data-device-cancel]');
     await vi.waitFor(() => expect(calls.some((c) => c.cmd === 'device_key_cancel')).toBe(true));
@@ -476,7 +484,7 @@ describe('control center shell', () => {
         }
         continue;
       }
-      expect(cmd).toMatch(/^(node_status|pairing_status|node_overview|peers_list|rooms_list|room_members|messages_list|price_quote|payments_overview|fund_state|spend_status|device_key_status|budget_status|file_price|call_quote|room_quote|live_link|plugin:event\|(un)?listen)$/);
+      expect(cmd).toMatch(/^(node_status|pairing_status|trust_acknowledge|node_overview|peers_list|rooms_list|room_members|messages_list|price_quote|payments_overview|fund_state|spend_status|device_key_status|budget_status|file_price|call_quote|room_quote|live_link|plugin:event\|(un)?listen)$/);
     }
     expect(calls.find((c) => c.cmd === 'plugin:event|listen')?.args?.event).toBe('node-live');
 

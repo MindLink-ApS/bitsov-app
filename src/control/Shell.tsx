@@ -4,6 +4,7 @@ import { PendingApproval } from '../onboarding/LockedNode';
 import { usePairingActivity } from '../pairingActivity';
 import { createMessageEntrance } from './messageEntrance';
 import { LocalNodeSwitch } from '../onboarding/LocalNodeSwitch';
+import { DeviceApprovals } from '../onboarding/DeviceApprovals';
 import { HubTrustInfo } from './HubTrust';
 import { pollingSource } from './polling';
 import { readSpendPreset, saveSpendPreset } from './prefs';
@@ -181,6 +182,8 @@ export type Actions = {
   /** This Mac's Touch ID approvals, as last read. */
   device: () => DeviceView | null;
   registerDevice: () => Promise<void>;
+  /** Touch ID approvals live in Settings → Node; other places link there. */
+  openNodeSettings?: () => void;
   cancelDevice: () => Promise<void>;
   /** One contact's envelope, signed with Touch ID. */
   approveContact: (peer: string, perActMsat: number | null) => Promise<void>;
@@ -855,11 +858,26 @@ export function ControlCenter(props: Props) {
   // Calls: media is peer to peer in this webview; each signal is one paid send.
   const [callView, setCallView] = createSignal<CallView>(CALL_IDLE);
   const [callStreams, setCallStreams] = createSignal<{ local: MediaStream | null; remote: MediaStream | null }>({ local: null, remote: null });
+  const [callApproval, setCallApproval] = createSignal(false);
+  const [callApproving, setCallApproving] = createSignal(false);
   const calls = createCallEngine({
+    authorize: async () => {
+      const pairing = await act(() => source.pairingStatus());
+      if (!pairing.ok) {
+        setErrors('spend', pairing.error.message);
+        setCallApproval(true);
+        return false;
+      }
+      const allowed = (pairing.value.state === 'fallback' ||
+        (pairing.value.state === 'paired' && pairing.value.scopes.includes('spend'))) && roomCanSpend();
+      setCallApproval(!allowed);
+      return allowed;
+    },
     grant: () => budget()?.node_grant ?? null,
     quote: (peer) => act(() => source.callQuote(peer)),
     signal: async (peer, kind, plaintext, maxMsat) => {
       const r = await act(() => source.callSignal(peer, kind, plaintext, maxMsat));
+      if (!r.ok && (needsApproval(r.error) || r.error.code === 'spend_refused' || /token lacks.*spend|403/i.test(r.error.message))) setCallApproval(true);
       void loadBudget();
       void loadWallet();
       return r;
@@ -948,6 +966,10 @@ export function ControlCenter(props: Props) {
       void loadBudget();
     },
     device,
+    openNodeSettings: () => {
+      setTab('node');
+      setContextOpen(true);
+    },
     registerDevice: async () => {
       setErrors('spend', undefined);
       const r = await act(() => source.deviceKeyRegister());
@@ -1243,6 +1265,10 @@ export function ControlCenter(props: Props) {
           setTab('body');
           setContextOpen(true);
         }}
+        onNode={() => {
+          setTab('node');
+          setContextOpen(true);
+        }}
         onWallet={() => openWallet()}
         balanceMsat={wallet()?.balance_msat ?? null}
         behind={walletTab() !== null}
@@ -1492,7 +1518,16 @@ export function ControlCenter(props: Props) {
             />
           </Match>
           <Match when={tab() === 'node'}>
-            <NodePanel onForgetRemote={props.remote ? () => source.remoteAccessForget() : undefined} overview={overview()} link={link()} peers={peers()} now={now()} error={props.error ?? errors.overview ?? errors.peers} onReconnect={async () => { await props.onReconnect?.(); await loadOverview(); await loadPeers(); }} />
+            <NodePanel deviceApprovals={
+              <DeviceApprovals
+                device={actions.device()}
+                remote={props.remote === true}
+                mobile={androidQrScannerAvailable()}
+                showRegistered
+                onRegister={async () => { const r = await act(() => source.deviceKeyRegister()); if (r.ok) setDevice(r.value); else throw r.error.message; }}
+                onCancel={async () => { const r = await act(() => source.deviceKeyCancel()); if (r.ok) setDevice(r.value); else throw r.error.message; }}
+              />
+            } onForgetRemote={props.remote ? () => source.remoteAccessForget() : undefined} overview={overview()} link={link()} peers={peers()} now={now()} error={props.error ?? errors.overview ?? errors.peers} onReconnect={async () => { await props.onReconnect?.(); await loadOverview(); await loadPeers(); }} />
           </Match>
           <Match when={tab() === 'wallet'}>
             <button type="button" class="primary soft" data-open-wallet-page onClick={() => openWallet()}>Open Wallet</button>
@@ -1513,6 +1548,21 @@ export function ControlCenter(props: Props) {
         </Switch>
       </aside>
       <CallPanel
+        approvalOpen={callApproval()}
+        approval={<Show when={callApproval()}>
+          <div data-call-approval>
+            <strong>Approve spending before calling</strong>
+            <p class="hint">Spending needs approval. After approval, press Call or Accept again.</p>
+            <SpendBar spend={spend()} error={errors.spend ?? errors.spendPoll} now={now()} actions={actions} />
+            <Show when={spend()?.state !== 'pending' && spend()?.state !== 'unavailable'}>
+              <button type="button" class="soft" data-call-approve disabled={moneyBlocked() || callApproving()} onClick={async () => {
+                setCallApproving(true);
+                try { await actions.approve(); } finally { setCallApproving(false); }
+              }}>Approve spending</button>
+            </Show>
+            <button type="button" class="soft" onClick={() => setCallApproval(false)}>Close</button>
+          </div>
+        </Show>}
         blocked={moneyBlocked()}
         view={callView()}
         streams={callStreams()}
@@ -1523,7 +1573,7 @@ export function ControlCenter(props: Props) {
         hangup={() => void calls.hangup()}
         mute={() => calls.toggleMute()}
         camera={() => void calls.toggleCamera()}
-        dismiss={() => calls.dismiss()}
+        dismiss={() => { setCallApproval(false); calls.dismiss(); }}
       />
       <MeetingPanel
         view={meetingView()}
@@ -1723,6 +1773,8 @@ function Rail(props: {
   openKey: string | null;
   ownId: string | null;
   onOpen: (t: TrackRef) => void;
+  /** The status pill opens Settings → Node. */
+  onNode?: () => void;
   onProfile: () => void;
   onWallet: () => void;
   balanceMsat: number | null;
@@ -1767,11 +1819,13 @@ function Rail(props: {
       <div class="mark">
         Bit<span>Sov</span>
       </div>
-      <button class="node-pill" title={props.pill.text} data-pill={props.pill.tone} onClick={() => props.onProfile()} disabled={!props.active}>
+      <button class="node-pill" title={`${props.pill.text} · open node settings`} aria-haspopup="dialog" data-pill={props.pill.tone} onClick={() => (props.onNode ?? props.onProfile)()} disabled={!props.active}>
         <span class={`dot ${props.pill.tone}`} classList={{ live: props.pill.live }} />
         <span class="what">{props.pill.text}</span>
         <Show when={props.active}>
           <span class="peers" title="Connected peers">{props.peers.filter((p) => p.connected).length}/{props.peers.length}</span>
+          {/* Says "this opens something" without adding words to the status. */}
+          <svg class="pill-chevron" viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>
         </Show>
       </button>
 
@@ -2459,6 +2513,8 @@ function MediaView(props: { stream: MediaStream | null; video: boolean; muted: b
 
 /** The call card: incoming (accept/decline with price), ringing, live (mute, camera, duration, hang up), ended. */
 function CallPanel(props: {
+  approvalOpen: boolean;
+  approval: JSX.Element;
   blocked: boolean;
   view: CallView;
   streams: { local: MediaStream | null; remote: MediaStream | null };
@@ -2486,8 +2542,8 @@ function CallPanel(props: {
   const who = () => (v().peer ? props.nameOf(v().peer!) : '');
   const price = (m: number | null) => (m === null ? '' : ` · ${sats(m)} ${satUnit(m)}`);
   return (
-    <Show when={v().phase !== 'idle'}>
-      <aside class="call-panel" data-call-panel={v().phase} role="dialog" aria-label={`${CALL_TITLE[v().phase]} ${who()}`}>
+    <Show when={v().phase !== 'idle' || props.approvalOpen}>
+      <aside class="call-panel" data-call-panel={v().phase} role="dialog" aria-label={props.approvalOpen ? 'Call spending approval' : `${CALL_TITLE[v().phase]} ${who()}`}>
         <header>
           <strong data-call-title>{CALL_TITLE[v().phase]}{v().media === 'video' ? ' (video)' : ''}</strong>
           <span class="who">{who()}</span>
@@ -2495,6 +2551,7 @@ function CallPanel(props: {
             <span class="duration" data-call-duration>{duration(Math.max(0, tick() - v().liveAt!))}</span>
           </Show>
         </header>
+        {props.approval}
         <CallNetworkNote />
         <Show when={v().media === 'video' && (v().phase === 'live' || v().phase === 'connecting')}>
           <div class="call-videos">
@@ -2506,10 +2563,16 @@ function CallPanel(props: {
           <MediaView stream={props.streams.remote} video={false} muted={false} kind="remote" />
         </Show>
         <Show when={v().paidMsat > 0}>
-          <p class="hint" data-call-paid>Paid {fmtAmount(v().paidMsat)} for this call’s signals. Media is direct and not billed.</p>
+          <p class="hint" data-call-paid>Signal cost cap: {fmtAmount(v().paidMsat)} (includes maximum routing fees; settled amount may be lower). Media is direct and not billed.</p>
+        </Show>
+        <Show when={v().connection}>
+          {(connection) => <p class="hint" data-call-connection>Connection: {connection().local === 'srflx' ? 'srflx(STUN)' : connection().local} (local) / {connection().remote === 'srflx' ? 'srflx(STUN)' : connection().remote} (remote)</p>}
         </Show>
         <Show when={v().phase === 'ended'}>
           <p class="hint" data-call-ended>{v().error ?? END_REASON[v().reason ?? 'hangup']}</p>
+        </Show>
+        <Show when={v().phase !== 'ended' && v().error}>
+          <p class="hint" data-call-error>{v().error}</p>
         </Show>
         <div class="call-actions">
           <Switch>
@@ -2520,7 +2583,7 @@ function CallPanel(props: {
             <Match when={v().phase === 'ended'}>
               <button type="button" class="soft" data-call-dismiss onClick={() => props.dismiss()}>Close</button>
             </Match>
-            <Match when={true}>
+            <Match when={v().phase !== 'idle'}>
               <Show when={v().phase === 'live' || v().phase === 'connecting'}>
                 <button type="button" class="soft" data-call-mute aria-pressed={v().muted} onClick={() => props.mute()}>Mute</button>
                 <Show when={v().media === 'video'}>
@@ -4533,47 +4596,27 @@ export const envelopePerAct = (priceMsat: number | null) =>
  * then one tap opens a contact's envelope. The console path stays for recovery.
  */
 function DeviceSetup(props: { device: DeviceView | null; now: number; actions: Actions }) {
-  const [busy, setBusy] = createSignal(false);
-  usePairingActivity(busy);
+  // One home for Touch ID approvals (Settings → Node, and onboarding after
+  // pairing); the spend bar only points there instead of repeating it.
   const android = androidQrScannerAvailable();
-  const run = async (action: () => Promise<void>) => {
-    if (busy()) return;
-    setBusy(true);
-    try {
-      await action();
-    } finally {
-      setBusy(false);
+  const what = () => (android ? 'Biometric approvals' : 'Touch ID approvals');
+  const note = () => {
+    switch (props.device?.state) {
+      case 'off': return `${what()} are off.`;
+      case 'pending': return `${what()} are waiting for your node’s owner.`;
+      case 'none': case 'lapsed': return `${what()} are not set up.`;
+      default: return null;
     }
   };
-  const minutes = (ms: number) => Math.max(1, Math.ceil((ms - props.now) / 60_000));
   return (
-    <Switch>
-      <Match when={props.device?.state === 'off' && props.device}>
-        {(d) => (
-          <p class="hint" data-device-off={d().off_reason ?? 'off'}>
-            <strong>{android ? 'Biometric approvals are off.' : 'Touch ID approvals are off.'}</strong> {d().off_message}
-          </p>
-        )}
-      </Match>
-      <Match when={props.device?.state === 'none' || props.device?.state === 'lapsed'}>
-        <p class="hint" data-device-setup={props.device?.state}>
-          {props.device?.state === 'lapsed'
-            ? (android ? 'Your last biometric setup request lapsed. ' : 'Your last Touch ID setup request lapsed. ')
-            : ''}
-          {android
-            ? 'Approve payments per contact with biometrics on this phone instead of at the node. '
-            : 'Approve payments per contact with Touch ID on this Mac instead of at the node. '}
-          <button type="button" class="link" data-device-register disabled={busy()} onClick={() => void run(props.actions.registerDevice)}>
-            {android ? 'Set up biometric approvals' : 'Set up Touch ID approvals'}
-          </button>
-        </p>
-      </Match>
-      <Match when={props.device?.state === 'pending' && props.device}>
-        {(d) => (
-          <PendingApproval pending={d()} mobile={android} onCancel={async () => { await run(props.actions.cancelDevice); }} />
-        )}
-      </Match>
-    </Switch>
+    <Show when={note()}>
+      <p class="hint" data-device-settings-hint={props.device?.state}>
+        {note()}{' '}
+        <button type="button" class="link" data-device-settings-link onClick={() => props.actions.openNodeSettings?.()}>
+          Settings → Node
+        </button>
+      </p>
+    </Show>
   );
 }
 
@@ -5789,13 +5832,14 @@ function NewTrack(props: {
 
 // ---- context panels ---------------------------------------------------------
 
-function NodePanel(props: { onForgetRemote?: () => Promise<void>; overview: NodeOverview | null; link: LinkState | null; peers: Peer[]; now: number; error?: string; onReconnect: () => Promise<void> }) {
+function NodePanel(props: { deviceApprovals?: JSX.Element; onForgetRemote?: () => Promise<void>; overview: NodeOverview | null; link: LinkState | null; peers: Peer[]; now: number; error?: string; onReconnect: () => Promise<void> }) {
   const fresh = () => freshness(props.overview?.read_at ?? null, props.now);
   const linkText = () =>
     props.link === 'open' ? 'Live' : props.link === 'connecting' ? 'Connecting' : props.link === 'closed' ? 'Reconnecting' : 'Waiting';
   return (
     <div class="panel" data-panel="node">
       <h2>Your node</h2>
+      {props.deviceApprovals}
       <Show when={props.onForgetRemote}><LocalNodeSwitch onForget={() => props.onForgetRemote!()} /></Show>
       <HubTrustInfo level={3} />
       <Show when={props.overview} fallback={<Show when={!props.error}><DelayedSpinner /></Show>}>
