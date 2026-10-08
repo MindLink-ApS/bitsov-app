@@ -7,8 +7,8 @@ re-verifies existing sidecars against the pinned release before bundling (see be
 Sidecars are named with the Rust target triple
 Tauri's resolver expects: `bin/konsensus-<target-triple>[.exe]`.
 
-## Hosts targeted by `v0.3.0-rc12`
-The rc12 pin targets Linux, macOS and Windows node binaries:
+## Hosts published at `v0.3.0-rc13`
+The rc13 release publishes Linux, macOS and Windows node binaries:
 
 | host | release asset | installed sidecar |
 | --- | --- | --- |
@@ -27,12 +27,14 @@ runs on Linux and macOS (the Darwin `SKIP` was retired with `v0.3.0-rc5`) and st
 ```bash
 ./scripts/fetch-node-sidecar.sh     # downloads the pinned binary for this host, verifies GPG + sha256, installs it
 ```
-The script pins `v0.3.0-rc12` and verifies, fail-closed, that `SHA256SUMS.asc` is a valid
+The script pins `v0.3.0-rc13` and verifies, fail-closed, that `SHA256SUMS.asc` is a valid
 signature by the pinned release key `B299274C…`; if that key is not in your keyring it imports
 `RELEASE_KEY.asc` from BitSov-bitsov `main` into a throwaway keyring (fingerprint checked against
-the pin; your keyring is never written). GitHub listed rc12 as a draft pre-release
-on 2026-10-07; fetching requires release access and signed assets and fails closed
-if either is unavailable. Nothing here publishes anything. Record the sha256 in the authority
+the pin; your keyring is never written). rc13 is published and GPG-signed per the
+release facts supplied for this pin; its manifest and binary hashes are recorded in
+[the upgrade note](../../docs/NODE_RC13_UPGRADE.md), without local download or
+release-signature verification. Fetching fails closed if release access or signed
+assets are unavailable. Nothing here publishes anything. Record the sha256 in the authority
 ledger; `scripts/authority-check.sh` checks source/configuration, not sidecar integrity. The
 released artifact is the `konsensus` binary (CLI `konsensus init` / `konsensus start`).
 

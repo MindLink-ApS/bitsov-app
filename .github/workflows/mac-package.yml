@@ -6,7 +6,7 @@ name: Mac Package
 #
 # NOT a merge gate: keep this job OUT of the required status checks. Like the
 # Build workflow's `sidecar` job it depends on network and on the genome's
-# published rc12 release, not only on this repo's source.
+# published rc13 release, not only on this repo's source.
 #
 # CI cost rule (app #131): macOS runners bill at 10x Linux, so this runs once per
 # change: on push to main (after merge) and on workflow_dispatch. On a PR it runs
@@ -73,7 +73,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-cargo-release-
 
-      - name: Fetch and re-verify every sidecar against rc12 (G1)
+      - name: Fetch and re-verify every sidecar against rc13 (G1)
         run: |
           bash scripts/fetch-node-sidecar.sh
           bash scripts/fetch-node-sidecar.sh --verify-only

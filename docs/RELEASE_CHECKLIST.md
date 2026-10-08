@@ -3,7 +3,7 @@
 ## G1: only the pinned, verified node may be bundled
 
 - [ ] Confirm the pin in `scripts/fetch-node-sidecar.sh` (currently
-  `MindLink-ApS/BitSov-bitsov@v0.3.0-rc12`) and the release-key fingerprint.
+  `MindLink-ApS/BitSov-bitsov@v0.3.0-rc13`) and the release-key fingerprint.
   A pin change requires its own review; a locally built node is not a release asset.
 - [ ] Fetch via `bash scripts/fetch-node-sidecar.sh`, then run
   `bash scripts/fetch-node-sidecar.sh --verify-only`. This downloads the pinned
