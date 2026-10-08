@@ -21,6 +21,7 @@ unsafe extern "C" {
         capacity: usize,
         length: *mut usize,
     ) -> i32;
+    fn bitsov_home_exists(service: *const std::ffi::c_char) -> i32;
 }
 
 pub fn store(service: &str, bytes: &[u8], secret: bool) -> Result<i32, NulError> {
@@ -54,6 +55,14 @@ pub fn read(service: &str, capacity: usize) -> Result<(i32, usize, Zeroizing<Vec
         )
     };
     Ok((status, length, bytes))
+}
+
+/// Native status of a prompt-free existence query for a remembered password
+/// service. No buffer: the item's value never crosses this boundary.
+pub fn exists(service: &str) -> Result<i32, NulError> {
+    let service = CString::new(service)?;
+    // SAFETY: the service name is live for the synchronous call; Swift retains none.
+    Ok(unsafe { bitsov_home_exists(service.as_ptr()) })
 }
 
 /// Add-only: an existing launcher password must never be overwritten.
@@ -93,6 +102,7 @@ mod tests {
     fn rejects_truncated_service_and_account_names_before_native_calls() {
         assert!(store("bad\0service", b"secret", false).is_err());
         assert!(read("bad\0service", 16).is_err());
+        assert!(exists("bad\0service").is_err());
         assert!(add_item("service", "bad\0account", b"secret").is_err());
         assert!(read_item("service", "bad\0account", 16).is_err());
         assert!(delete_items("service", "bad\0account").is_err());

@@ -4,6 +4,10 @@
  * which unlock path is offered first, never whether one works (the host and the
  * node decide that). Set when Remember succeeds or a biometric unlock succeeds;
  * cleared when the host reports `no-password`. Holds no secret.
+ *
+ * Fallback only: when `node_status.password_remembered` is a boolean (the
+ * host's prompt-free Keychain / Keystore check), LockedNode follows the host
+ * and mirrors its answer here.
  */
 const KEY = 'bitsov.unlock.remembered.v1';
 

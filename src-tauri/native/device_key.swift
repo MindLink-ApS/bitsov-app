@@ -304,6 +304,24 @@ private func readItem(_ service: String, _ account: String, _ dp: Bool,
     }
 }
 
+// Existence only: requests no data or attributes, and forbids any
+// authentication UI. A DP item that would need Touch ID reports
+// errSecInteractionNotAllowed (unknown), never a sheet.
+private func itemExists(_ service: String, _ account: String, _ dp: Bool) -> OSStatus {
+    itemQuery(service, account, dp, false) { base in
+        var query = base
+        query[kSecMatchLimit] = kSecMatchLimitOne
+        if dp {
+            let context = LAContext()
+            context.interactionNotAllowed = true
+            query[kSecUseAuthenticationContext] = context
+        } else {
+            query[kSecUseAuthenticationUI] = kSecUseAuthenticationUIFail
+        }
+        return SecItemCopyMatching(query as CFDictionary, nil)
+    }
+}
+
 private func deleteItems(_ service: String, _ account: String) -> OSStatus {
     // Retirement removes both exact copies. A DP refusal other than missing
     // entitlement/not-found stops the operation before touching legacy.
@@ -440,6 +458,24 @@ public func bitsov_home_read(_ service: UnsafePointer<CChar>?, _ output: UnsafeM
             guard status == errSecSuccess else { return status }
         }
         return copyOutput(data, output, capacity, length)
+    }
+}
+
+// Whether a remembered password item exists for this node, searched in the
+// same order as bitsov_home_read but without reading or unwrapping it, so no
+// Touch ID prompt is possible. errSecSuccess: present. errSecItemNotFound:
+// absent. Any other status: unknown.
+@_cdecl("bitsov_home_exists")
+public func bitsov_home_exists(_ service: UnsafePointer<CChar>?) -> Int32 {
+    guard let service = service else { return errBadArgument }
+    return autoreleasepool {
+        let name = String(cString: service)
+        guard passwordNode(name) != nil else { return errBadArgument }
+        let status = readWithFallback { itemExists(wrappedService(name), "BitSov", $0) }
+        if status != errSecItemNotFound { return status }
+        // Old signed builds: biometric DP item only, never legacy plaintext.
+        let legacy = itemExists(name, "BitSov", true)
+        return missingEntitlement(legacy) ? errSecItemNotFound : legacy
     }
 }
 

@@ -11,6 +11,8 @@ export function LockedNode(props: {
   mobile?: boolean;
   typedUnlockSupported?: boolean;
   state?: 'ready' | 'no-password' | 'not-enrolled' | 'pending-approval';
+  /** The host's prompt-free check. A boolean outranks the renderer hint; null/absent = unknown. */
+  passwordRemembered?: boolean | null;
   pending?: { fingerprint: string | null; owner_action: string | null } | null;
   onCancel?: () => Promise<void>;
   attemptsLeft?: number | null;
@@ -21,11 +23,16 @@ export function LockedNode(props: {
   const [password, setPassword] = createSignal('');
   // Typed password first until this device has a password remembered behind
   // Touch ID: offering Touch ID before that only ends in "no password saved".
-  const [remembered, setRemembered] = createSignal(unlockRemembered());
+  // The host's answer wins; the renderer hint covers hosts that cannot say.
+  const [hint, setHint] = createSignal(unlockRemembered());
+  const hostKnows = () => typeof props.passwordRemembered === 'boolean';
+  const remembered = () => hostKnows() ? !!props.passwordRemembered : hint();
+  createEffect(() => {
+    if (hostKnows()) { setUnlockRemembered(!!props.passwordRemembered); setHint(!!props.passwordRemembered); }
+  });
   createEffect(() => {
     if (props.state === 'no-password') {
-      setUnlockRemembered(false);
-      setRemembered(false);
+      if (!hostKnows()) { setUnlockRemembered(false); setHint(false); }
       setTyping(true);
     }
     if (props.state === 'not-enrolled' || props.state === 'pending-approval') {

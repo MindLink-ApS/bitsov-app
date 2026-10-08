@@ -338,3 +338,48 @@ it('an older host without typed unlock keeps the single Touch ID button', () => 
   expect(buttonNamed(mount, 'Unlock with Touch ID')).toBeDefined();
   expect(mount.querySelector('[data-unlock-saved-path]')).toBeNull();
 });
+
+it('follows the host when it knows: a remembered item puts Touch ID first without a hint', () => {
+  const mount = document.createElement('div'); document.body.appendChild(mount);
+  dispose = render(() => <LockedNode typedUnlockSupported state="ready" passwordRemembered onUnlock={async () => {}} onUnlockWithPassword={async () => {}} />, mount);
+  expect(mount.querySelector('#node-unlock-password')).toBeNull();
+  expect(buttonNamed(mount, 'Unlock with Touch ID')).toBeDefined();
+  expect(localStorage.getItem(REMEMBERED)).toBe('1');
+});
+
+it('follows the host when it knows: no item means typed first even with a stale hint', () => {
+  rememberedDevice();
+  const mount = document.createElement('div'); document.body.appendChild(mount);
+  dispose = render(() => <LockedNode typedUnlockSupported state="ready" passwordRemembered={false} onUnlock={async () => {}} onUnlockWithPassword={async () => {}} />, mount);
+  expect(mount.querySelector('#node-unlock-password')).not.toBeNull();
+  expect(mount.querySelector('[data-unlock-saved-path]')).not.toBeNull();
+  expect(localStorage.getItem(REMEMBERED)).toBeNull();
+});
+
+it('keeps Touch ID offered after a failed read when the host still sees the item', () => {
+  const mount = document.createElement('div'); document.body.appendChild(mount);
+  dispose = render(() => <LockedNode typedUnlockSupported state="no-password" passwordRemembered onUnlock={async () => {}} onUnlockWithPassword={async () => {}} />, mount);
+  expect(mount.querySelector('#node-unlock-password')).not.toBeNull();
+  expect(buttonNamed(mount, 'Unlock with Touch ID')).toBeDefined();
+  expect(localStorage.getItem(REMEMBERED)).toBe('1');
+});
+
+it('falls back to the renderer hint when the host cannot tell', () => {
+  rememberedDevice();
+  const mount = document.createElement('div'); document.body.appendChild(mount);
+  dispose = render(() => <LockedNode typedUnlockSupported state="ready" passwordRemembered={null} onUnlock={async () => {}} onUnlockWithPassword={async () => {}} />, mount);
+  expect(mount.querySelector('#node-unlock-password')).toBeNull();
+  expect(localStorage.getItem(REMEMBERED)).toBe('1');
+});
+
+it('passes the host password_remembered field from node_status to the locked screen', async () => {
+  vi.stubGlobal('__TAURI_INTERNALS__', { invoke: (cmd: string) => {
+    if (cmd === 'node_status') return Promise.resolve({ ready: false, node_id: 'ab'.repeat(32), error: null, locked: true, typed_unlock_supported: true, unlock_state: 'ready', password_remembered: true });
+    if (cmd === 'pairing_status') return Promise.resolve({ state: 'paired', remote: true, scopes: ['read'], bootstrap: null });
+    return Promise.reject('unavailable');
+  }});
+  const mount = document.createElement('div'); document.body.appendChild(mount);
+  dispose = render(() => <App />, mount);
+  await vi.waitFor(() => expect(buttonNamed(mount, 'Unlock with Touch ID')).toBeDefined());
+  expect(mount.querySelector('#node-unlock-password')).toBeNull();
+});

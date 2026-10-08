@@ -213,6 +213,20 @@ pub fn locked_view(state: &NodeState) -> (&'static str, Option<device::DeviceVie
     (*state.home_unlock_state.lock().unwrap(), None)
 }
 
+/// Whether this device has a remembered password for the locked node, from a
+/// prompt-free existence query. Never reads the password. `None` is unknown:
+/// not locked, not enrolled, no node id yet, or the store could not answer.
+pub async fn password_remembered(state: &NodeState, unlock_state: &str) -> Option<bool> {
+    if !state.home_locked.load(Ordering::SeqCst) || !matches!(unlock_state, "ready" | "no-password") {
+        return None;
+    }
+    let node = state.node_id.lock().unwrap().clone()?;
+    tokio::task::spawn_blocking(move || home_keychain::password_remembered(&node))
+        .await
+        .ok()
+        .flatten()
+}
+
 async fn unlock_with(
     state: &NodeState,
     typed: Option<zeroize::Zeroizing<String>>,

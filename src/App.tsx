@@ -350,6 +350,7 @@ function AppScreen() {
       mobile={canScanPairingQr}
       typedUnlockSupported={status().typed_unlock_supported}
       state={status().unlock_state}
+      passwordRemembered={status().password_remembered}
       pending={status().pending_device}
       attemptsLeft={status().attempts_left}
       onCancel={async () => { await source().deviceKeyCancel(); await poll(); }}

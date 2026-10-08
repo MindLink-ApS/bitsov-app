@@ -111,6 +111,12 @@ mod android {
     }
 
     #[derive(Serialize)]
+    struct HasItemPayload<'a> {
+        node: &'a str,
+        suffix: &'a str,
+    }
+
+    #[derive(Serialize)]
     struct SealPayload<'a> {
         purpose: &'a str,
         value: Zeroizing<String>,
@@ -303,6 +309,18 @@ mod android {
         decode(response.value).map(Some)
     }
 
+    /// Whether an exact remembered-password record exists. Existence only: the
+    /// plugin neither returns nor decrypts it, so no biometric prompt appears.
+    pub fn has_home_item(node: &str, suffix: &str) -> Result<bool, DeviceKeyError> {
+        if suffix != "seed-password" {
+            return Err(DeviceKeyError::Invalid);
+        }
+        let response: CommandResponse = run("hasHomeItem", HasItemPayload { node, suffix })?;
+        checked(response)?
+            .found
+            .ok_or(DeviceKeyError::Other(PLUGIN_TRANSPORT_ERROR))
+    }
+
     /// Encrypt `value` under the app's non-exportable at-rest key, with
     /// `purpose` as associated data. No prompt: see `atRestKeySpec`.
     pub fn seal(purpose: &str, value: &[u8]) -> Result<Vec<u8>, DeviceKeyError> {
@@ -344,8 +362,8 @@ mod android {
 
 #[cfg(target_os = "android")]
 pub use android::{
-    available, create, enclave_available, init, public_key, read_home_item, sign, store_home_item,
-    KeystoreSealer,
+    available, create, enclave_available, has_home_item, init, public_key, read_home_item, sign,
+    store_home_item, KeystoreSealer,
 };
 
 #[cfg(not(target_os = "android"))]
@@ -382,6 +400,11 @@ pub fn store_home_item(
     _secret: bool,
     _reenroll: bool,
 ) -> Result<(), DeviceKeyError> {
+    Err(DeviceKeyError::Unavailable)
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn has_home_item(_node: &str, _suffix: &str) -> Result<bool, DeviceKeyError> {
     Err(DeviceKeyError::Unavailable)
 }
 

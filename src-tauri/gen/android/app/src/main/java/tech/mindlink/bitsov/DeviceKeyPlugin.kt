@@ -90,6 +90,12 @@ class ReadHomeItemArgs {
 }
 
 @InvokeArg
+class HasHomeItemArgs {
+    var node: String = ""
+    var suffix: String = ""
+}
+
+@InvokeArg
 class SealArgs {
     var purpose: String = ""
     var value: String = ""
@@ -720,6 +726,20 @@ class DeviceKeyPlugin(private val activity: Activity) : Plugin(activity) {
             biometricOperation.set(false)
             invoke.resolve(result(ERROR_OTHER))
         }
+    }
+
+    /** Existence only: never reads, decrypts or prompts for the remembered password. */
+    @Command
+    fun hasHomeItem(invoke: Invoke) {
+        val args = invoke.parseArgs(HasHomeItemArgs::class.java)
+        val item = homeItem(args.node, args.suffix)
+        if (item == null || args.suffix != "seed-password") {
+            invoke.resolve(result(ERROR_INVALID))
+            return
+        }
+        invoke.resolve(result {
+            put("found", preferences().contains(item))
+        })
     }
 
     @Command

@@ -371,6 +371,7 @@ impl NodeState {
             pending_device,
             attempts_left: *self.home_attempts_left.lock().unwrap(),
             remember_offer: home_unlock::remember_available(self),
+            password_remembered: None,
             locked: self.home_locked.load(Ordering::SeqCst),
             local_owner,
             owner_warning,
@@ -471,6 +472,9 @@ struct Status {
     pending_device: Option<device::DeviceView>,
     attempts_left: Option<u32>,
     remember_offer: bool,
+    /// A remembered password item exists on this device for the locked node.
+    /// Existence only, from a prompt-free query; `None` is unknown.
+    password_remembered: Option<bool>,
     locked: bool,
     local_owner: bool,
     owner_warning: Option<String>,
@@ -2078,7 +2082,10 @@ async fn node_status(
     reject_sealed_window(&window)?;
     drop(window);
     home_unlock::refresh(state.inner()).await;
-    Ok(state.status_snapshot())
+    let mut status = state.status_snapshot();
+    status.password_remembered =
+        home_unlock::password_remembered(state.inner(), status.unlock_state).await;
+    Ok(status)
 }
 
 #[tauri::command]

@@ -190,6 +190,35 @@ pub fn password(node: &str, device_blob: Option<&[u8]>) -> Result<Zeroizing<Stri
     Ok(Zeroizing::new(value.to_owned()))
 }
 
+/// Whether this device holds a remembered password for `node`. Existence only:
+/// the password is never read, unwrapped or decrypted, so no Touch ID or
+/// fingerprint prompt can appear. `None` is unknown. `Some(true)` does not
+/// promise the copy still opens (enrolled fingerprints may have changed).
+pub fn password_remembered(node: &str) -> Option<bool> {
+    let name = service(node, "seed-password").ok()?;
+    #[cfg(all(target_os = "macos", desktop, not(feature = "mobile")))]
+    {
+        match bitsov_ffi::home_keychain::exists(&name).ok()? {
+            0 => Some(true),
+            -25300 => Some(false),
+            _ => None,
+        }
+    }
+    #[cfg(target_os = "android")]
+    {
+        let _ = name;
+        super::device_key::has_home_item(node, "seed-password").ok()
+    }
+    #[cfg(not(any(
+        target_os = "android",
+        all(target_os = "macos", desktop, not(feature = "mobile"))
+    )))]
+    {
+        let _ = name;
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

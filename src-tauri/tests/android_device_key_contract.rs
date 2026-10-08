@@ -718,7 +718,8 @@ fn android_at_rest_key_is_hardware_bound_and_opening_never_creates_it() {
 #[test]
 fn macos_keychain_home_path_keeps_its_keychain_calls() {
     let keychain = project_file("src/home_keychain.rs");
-    assert_eq!(keychain.matches(MACOS_KEYCHAIN_CFG).count(), 2);
+    // store, read and the prompt-free password_remembered existence query.
+    assert_eq!(keychain.matches(MACOS_KEYCHAIN_CFG).count(), 3);
 
     let store = normalized(block_after(
         block_after(&keychain, "\nfn store("),
@@ -751,7 +752,16 @@ fn macos_keychain_home_path_keeps_its_keychain_calls() {
             "macOS Keychain read changed: {required}"
         );
     }
-    for block in [&store, &read] {
+    let remembered = normalized(block_after(
+        block_after(&keychain, "\npub fn password_remembered("),
+        MACOS_KEYCHAIN_CFG,
+    ));
+    assert_eq!(
+        remembered,
+        "{match bitsov_ffi::home_keychain::exists(&name).ok()?{0=>Some(true),-25300=>Some(false),_=>None,}}",
+        "macOS remembered-password existence query changed"
+    );
+    for block in [&store, &read, &remembered] {
         assert!(
             !block.contains("device_key"),
             "the macOS Keychain path must not route through the Android plugin"
@@ -822,4 +832,34 @@ fn android_plugins_are_registered_without_enabling_them_on_desktop() {
     assert!(mobile_capability.contains("\"barcode-scanner:allow-scan\""));
     assert!(mobile_capability.contains("\"barcode-scanner:allow-check-permissions\""));
     assert!(mobile_capability.contains("\"barcode-scanner:allow-request-permissions\""));
+}
+
+#[test]
+fn android_remembered_password_existence_check_never_reads_or_prompts() {
+    let source = project_file(PLUGIN);
+    let has = normalized(kotlin_fn(&source, "hasHomeItem"));
+    for required in [
+        "val item=homeItem(args.node,args.suffix)",
+        "if(item==null||args.suffix!=\"seed-password\"){invoke.resolve(result(ERROR_INVALID))return}",
+        "put(\"found\",preferences().contains(item))",
+    ] {
+        assert!(has.contains(required), "hasHomeItem lost {required}");
+    }
+    for forbidden in [
+        "getString",
+        "decodedValue",
+        "BiometricPrompt",
+        "Cipher",
+        "homeKey",
+        "biometricOperation",
+        "edit()",
+        "\"value\"",
+    ] {
+        assert!(!has.contains(forbidden), "hasHomeItem must not use {forbidden}");
+    }
+    let mobile = normalized(&project_file("src/device_key_mobile.rs"));
+    assert!(mobile.contains("run(\"hasHomeItem\",HasItemPayload{node,suffix})"));
+    assert!(mobile.contains(
+        "struct HasItemPayload<'a>{node:&'a str,suffix:&'a str,}"
+    ));
 }

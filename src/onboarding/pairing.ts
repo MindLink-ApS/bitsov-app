@@ -21,6 +21,8 @@ export type NodeStatus = {
   pending_device?: { fingerprint: string | null; owner_action: string | null } | null;
   attempts_left?: number | null;
   remember_offer?: boolean;
+  /** Host, prompt-free: a remembered password exists for the locked node. null = unknown. */
+  password_remembered?: boolean | null;
   local_owner?: boolean;
   owner_warning?: string | null;
   initialization_repair?: 'none' | 'required' | 'repairing' | 'price_floor_required' | 'price_floor_repairing';

@@ -87,3 +87,71 @@ fn remember_key_store_and_read_are_pinned_inside_their_own_functions() {
     let read_fn = swift_fn(&swift, "bitsov_home_read");
     assert!(read_fn.contains("let legacy = readItem(name, \"BitSov\", true, &data)"));
 }
+
+/// The body of one top-level Rust function, from `fn NAME(` to the first
+/// column-0 closing brace.
+fn rust_fn<'a>(source: &'a str, name: &str) -> &'a str {
+    let start = source
+        .find(&format!("fn {name}("))
+        .unwrap_or_else(|| panic!("missing fn {name}"));
+    let end = source[start..]
+        .find("\n}\n")
+        .unwrap_or_else(|| panic!("unterminated fn {name}"));
+    &source[start..start + end]
+}
+
+#[test]
+fn remembered_password_existence_query_never_reads_or_prompts() {
+    let swift = read("native/device_key.swift");
+    let exists = swift_fn(&swift, "itemExists");
+    for marker in [
+        "context.interactionNotAllowed = true",
+        "query[kSecUseAuthenticationContext] = context",
+        "query[kSecUseAuthenticationUI] = kSecUseAuthenticationUIFail",
+        "SecItemCopyMatching(query as CFDictionary, nil)",
+    ] {
+        assert!(exists.contains(marker), "itemExists lost {marker}");
+    }
+    for forbidden in ["kSecReturnData", "kSecReturnAttributes", "kSecReturnRef", "localizedReason"] {
+        assert!(!exists.contains(forbidden), "itemExists must not use {forbidden}");
+    }
+    let home = swift_fn(&swift, "bitsov_home_exists");
+    // Same search order as bitsov_home_read: wrapped item in both stores, then
+    // the old biometric DP item only, never legacy plaintext.
+    assert!(home.contains("guard passwordNode(name) != nil else { return errBadArgument }"));
+    assert!(home.contains("readWithFallback { itemExists(wrappedService(name), \"BitSov\", $0) }"));
+    assert!(home.contains("let legacy = itemExists(name, \"BitSov\", true)"));
+    for forbidden in ["readItem(", "unwrapPassword", "copyOutput", "LAContext()", "output"] {
+        assert!(!home.contains(forbidden), "bitsov_home_exists must not use {forbidden}");
+    }
+
+    // No output buffer crosses the FFI boundary.
+    let ffi = read("ffi/src/home_keychain.rs");
+    assert!(ffi.contains("fn bitsov_home_exists(service: *const std::ffi::c_char) -> i32;"));
+    let ffi_exists = rust_fn(&ffi, "exists");
+    assert!(!ffi_exists.contains("capacity") && !ffi_exists.contains("Zeroizing"));
+
+    let keychain = read("src/home_keychain.rs");
+    let remembered = rust_fn(&keychain, "password_remembered");
+    for marker in [
+        "service(node, \"seed-password\").ok()?",
+        "bitsov_ffi::home_keychain::exists(&name).ok()?",
+        "0 => Some(true)",
+        "-25300 => Some(false)",
+        "_ => None",
+        "super::device_key::has_home_item(node, \"seed-password\").ok()",
+    ] {
+        assert!(remembered.contains(marker), "password_remembered lost {marker}");
+    }
+    for forbidden in ["read(", "password(", "read_home_item"] {
+        assert!(!remembered.contains(forbidden), "password_remembered must not call {forbidden}");
+    }
+
+    let unlock = read("src/home_unlock.rs");
+    let status = rust_fn(&unlock, "password_remembered");
+    assert!(status.contains("home_keychain::password_remembered(&node)"));
+    assert!(!status.contains("home_keychain::password("));
+    assert!(!status.contains("device_sign"));
+    let app = read("src/app.rs");
+    assert!(app.contains("home_unlock::password_remembered(state.inner(), status.unlock_state).await"));
+}
