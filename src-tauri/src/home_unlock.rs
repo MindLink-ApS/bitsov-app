@@ -8,6 +8,10 @@ pub async fn probe(state: &NodeState) -> Result<bool, String> {
     let Some(descriptor) = descriptor else {
         return Ok(false);
     };
+    #[cfg(all(desktop, not(feature = "mobile")))]
+    let descriptor = if descriptor.bootstrap_box_key().is_some() {
+        remote_owner::recovery::recover(state, &descriptor).await?
+    } else { descriptor };
     let ctx = state
         .pairing
         .lock()
@@ -47,7 +51,12 @@ pub fn remember_binding(state: &NodeState, node: &str) -> Result<(), String> {
         _ => return Err("No paired unlock binding is available.".into()),
     };
     let binding = UnlockBinding::from_session(node, &session.client_id, &session.token)?;
-    home_keychain::save_binding(node, &binding)
+    #[cfg(all(desktop, not(feature = "mobile")))]
+    remote_owner::recovery::verify_fresh_binding(state, node, &binding)?;
+    home_keychain::save_binding(node, &binding)?;
+    #[cfg(all(desktop, not(feature = "mobile")))]
+    remote_owner::recovery::finish(state)?;
+    Ok(())
 }
 
 /// Passive status refresh never reads the biometric password or signs anything.
@@ -294,7 +303,14 @@ async fn unlock_with(
         Some(password) => password,
         None => {
             let node = node.clone();
-            tokio::task::spawn_blocking(move || home_keychain::password(&node, Some(&blob)))
+            #[cfg(all(desktop, not(feature = "mobile")))]
+            let store = ctx.store.clone();
+            tokio::task::spawn_blocking(move || {
+                #[cfg(all(desktop, not(feature = "mobile")))]
+                { remote_owner::recovery::password(&store, &node, &blob) }
+                #[cfg(not(all(desktop, not(feature = "mobile"))))]
+                { home_keychain::password(&node, Some(&blob)) }
+            })
                 .await
                 .map_err(|_| {
                     if cfg!(target_os = "android") {

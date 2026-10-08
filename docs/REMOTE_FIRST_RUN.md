@@ -26,30 +26,60 @@ provisional envelope is removed. Password memory expires separately from long
 network or biometric operations. Reconnection retains the original fallback
 routing hints without claiming they gained an identity signature.
 
-## Protocol dependencies still requiring node confirmation
+## Protocol dependencies
 
-The supplied N3/N4 reference documents specify only `box_transport_pubkey` and
-`box_transport_signature` in the finalize response. The unlocked listener uses a
-different, seed-derived static key. The documented response therefore cannot
-provide the live pin needed to reach the home screen after the first unlock.
-The app accepts optional identity-signed `transport_pubkey` and
-`transport_signature` in that receipt, validates both, and otherwise refuses an
-unknown live responder. It reports that an identity-signed link from the
-unlocked node is required. There is no TOFU fallback.
+Node PR #287 supplies the complete finalize receipt for the new SAS path:
+`node_id`, `client_id`, `epoch` (u64), the enrolled `device_key_id`, and both
+`box_transport_pubkey` / `box_transport_signature` and
+`transport_pubkey` / `transport_signature`. The app requires all these fields,
+checks the receipt against the confirmed ceremony, device and bootstrap pairing,
+and verifies both Ed25519 signatures under the trusted committed `node_id`.
+Keys are canonical lowercase 32-byte hex; signatures are canonical base64url
+without padding. The exact live proof is these UTF-8 bytes, with no newline:
 
-The first-unlock binding currently retains the epoch from the authenticated
-bootstrap token. The node references do not establish whether fingerprint
-rebinding preserves that epoch. Confirm this against the actual node source or
-provide an authenticated postcommit binding before claiming end-to-end
-interoperability. A dedicated Secure Enclave path retains the Match biometric context for one
-first-unlock signature, bound to the same key, node and client, for 120 seconds.
-It cannot silently authorize general device operations. An expired context
-requires an explicit normal Touch ID unlock.
+```text
+bitsov-remote-transport-v1:<node_id>:<transport_pubkey>
+```
 
-A lost finalize receipt or app exit during local receipt persistence requires
-checking the box and importing a fresh verified descriptor; no silent replay or
-unverified identity adoption is attempted. The provisional encrypted password
-remains protected in Keychain if it could not be migrated.
+The box proof retains the `bitsov-box-transport-v1` domain. Bootstrap and LOCKED
+must present the already pinned box Noise static; UNLOCKED must present the
+verified seed-derived live static. An absent, partial, malformed or invalid
+live proof cannot install a pin. There is no TOFU fallback.
+
+The receipt's `client_id` and `epoch` describe the pairing and are not part of
+that identity-scoped signature. The node preserves the epoch across commit;
+the app checks it against the authenticated bootstrap token, persists the
+receipt binding, discards that token, and obtains a fresh token after unlock.
+Before saving its binding or marking the node ready, the app checks the fresh
+`cid`, `epc`, and identity fingerprint against the saved first-run context. A
+mismatch clears authentication and leaves the saved binding intact.
+
+Before sending finalize, the host writes private recovery context containing
+the SAS-confirmed identity, pinned box, client/epoch and device public key.
+It contains no password, mnemonic, token or device signature. If the reply is
+lost, continuation never replays finalize: it authenticates through Noise with
+the already pinned box static and validates the locked-mode auth reply's two
+transport proofs under the saved identity, its client id, and locked status.
+This recovers the signed live pin without importing another descriptor and also
+resumes after app exit or interrupted local persistence. Definite precommit
+refusals clear recovery context. A pinned, authenticated box still reporting
+bootstrap may return to setup/cancellation without adopting any identity or
+live pin; uncertain recovery context remains until cancellation or completion.
+Older locked replies
+may omit both live fields; they provide no new pin and recovery fails closed.
+
+Ordinary completion retains the Match biometric context for one first-unlock
+signature bound to the same key, node and client for 120 seconds. An expired
+context or recovered lost receipt requires an explicit Touch ID unlock. Passive
+recovery never reads the provisional password; explicit unlock can migrate its
+protected box-scoped envelope to the verified node identity. Recovery context
+is cleared after password migration and successful fresh-token verification.
+
+The offline PR #287 fixtures use its exact response shapes and proof domains,
+with deterministic test keys and signatures independently generated using
+Python cryptography. Tests cover both signature domains, missing and malformed
+fields, changed client/epoch, journal restoration, and real in-process Noise
+recovery including rejection before auth to an unknown live responder.
 
 Validation is offline: TypeScript typecheck, Vitest, and Cargo check/tests with
 `TAURI_CONFIG='{"bundle":{"externalBin":[]}}'`. Rust transport tests need local

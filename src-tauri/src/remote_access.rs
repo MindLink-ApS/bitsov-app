@@ -246,6 +246,10 @@ pub enum RemoteAuthResponse {
         box_transport_pubkey: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         box_transport_signature: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transport_pubkey: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transport_signature: Option<String>,
     },
     Error {
         v: u8,
@@ -465,20 +469,27 @@ fn validate_descriptor(stored: StoredDescriptor) -> Result<RemoteDescriptor, Rem
         && stored.box_transport_signature.is_some() && stored.v == 1 {
         return Ok(descriptor_from_stored(stored, [0; 32]));
     }
-    let node_id_bytes = decode_hex::<32>(&stored.node_id, "node_id")?;
-    let transport_pubkey_bytes = decode_hex::<32>(&stored.transport_pubkey, "transport_pubkey")?;
+    let transport_pubkey_bytes = verify_transport_proof(&stored.node_id, &stored.transport_pubkey, &stored.transport_signature)?;
+    Ok(descriptor_from_stored(stored, transport_pubkey_bytes))
+}
+
+/// PR #287 / PairLink proof: exact UTF-8 domain, lowercase hex, unpadded base64url.
+pub fn verify_transport_proof(node_id: &str, transport_pubkey: &str, transport_signature: &str)
+    -> Result<[u8; 32], RemoteError> {
+    let node_id_bytes = decode_hex::<32>(node_id, "node_id")?;
+    let transport_pubkey_bytes = decode_hex::<32>(transport_pubkey, "transport_pubkey")?;
     if transport_pubkey_bytes.iter().all(|byte| *byte == 0) {
         return Err(RemoteError::Invalid(
             "transport_pubkey cannot be all zero".into(),
         ));
     }
     let signature_vec = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(&stored.transport_signature)
+        .decode(transport_signature)
         .map_err(|_| {
             RemoteError::Invalid("transport_signature must be unpadded base64url".into())
         })?;
     if base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&signature_vec)
-        != stored.transport_signature
+        != transport_signature
     {
         return Err(RemoteError::Invalid(
             "transport_signature must use canonical unpadded base64url".into(),
@@ -491,7 +502,7 @@ fn validate_descriptor(stored: StoredDescriptor) -> Result<RemoteDescriptor, Rem
         .map_err(|_| RemoteError::Invalid("node_id is not an Ed25519 public key".into()))?;
     identity
         .verify_strict(
-            descriptor_signature_message(&stored.node_id, &stored.transport_pubkey).as_bytes(),
+            descriptor_signature_message(node_id, transport_pubkey).as_bytes(),
             &Signature::from_bytes(&signature_bytes),
         )
         .map_err(|_| {
@@ -500,7 +511,7 @@ fn validate_descriptor(stored: StoredDescriptor) -> Result<RemoteDescriptor, Rem
             )
         })?;
 
-    Ok(descriptor_from_stored(stored, transport_pubkey_bytes))
+    Ok(transport_pubkey_bytes)
 }
 
 fn descriptor_from_stored(stored: StoredDescriptor, transport_pubkey_bytes: [u8; 32]) -> RemoteDescriptor {
@@ -1136,7 +1147,8 @@ async fn encrypted_auth<S: AsyncRead + AsyncWrite + Unpin>(
     descriptor: &RemoteDescriptor,
     key: &ClientKey,
     client_name: &str,
-) -> Result<(String, Vec<String>), RemoteError> {
+    recovery_node: Option<&str>,
+) -> Result<(String, Vec<String>, Option<TransportProofs>), RemoteError> {
     tokio::time::timeout(CONNECT_TIMEOUT, async {
         let request = serde_json::to_vec(&auth_request(descriptor, key, client_name))
             .map_err(|_| RemoteError::Local("cannot serialize remote authentication".into()))?;
@@ -1159,6 +1171,8 @@ async fn encrypted_auth<S: AsyncRead + AsyncWrite + Unpin>(
                 scopes,
                 box_transport_pubkey,
                 box_transport_signature,
+                transport_pubkey,
+                transport_signature,
             } => {
                 if v != 1 {
                     return Err(RemoteError::Transport(
@@ -1174,20 +1188,39 @@ async fn encrypted_auth<S: AsyncRead + AsyncWrite + Unpin>(
                         "authentication reply has an invalid client id".into(),
                     ));
                 }
+                let node = recovery_node.unwrap_or(&descriptor.node_id);
+                let live = match (transport_pubkey, transport_signature) {
+                    (Some(public), Some(signature)) => {
+                        verify_transport_proof(node, &public, &signature)?;
+                        Some((public, signature))
+                    }
+                    (None, None) => None,
+                    _ => return Err(RemoteError::Invalid("incomplete live transport proof".into())),
+                };
+                let mut proofs = None;
                 match (box_transport_pubkey, box_transport_signature) {
                     (Some(public), Some(signature)) => {
-                        let pin = BoxPin::verify(&descriptor.node_id, &descriptor.endpoint, &public, &signature)?;
-                        if noise.get_remote_static() == Some(&descriptor.transport_pubkey_bytes[..]) {
-                            // Only the seed-backed identity session may learn or rotate a box pin.
+                        let pin = BoxPin::verify(node, &descriptor.endpoint, &public, &signature)?;
+                        if recovery_node.is_some() {
+                            // The identity comes from the saved SAS confirmation, never this reply.
+                            if descriptor.bootstrap_box_key() != Some(public.as_str())
+                                || !pin.matches(noise.get_remote_static().unwrap_or(&[])) {
+                                return Err(RemoteError::Invalid("recovery changed the pinned box static".into()));
+                            }
+                        } else if noise.get_remote_static() == Some(&descriptor.transport_pubkey_bytes[..]) {
                             if let Some(store) = &descriptor.pin_store { store.save(&pin)?; }
                         } else if !descriptor.box_pin()?.is_some_and(|saved| saved.public_key == public && saved.matches(noise.get_remote_static().unwrap_or(&[]))) {
                             return Err(RemoteError::Invalid("locked node cannot replace its box pin".into()));
                         }
+                        if let Some((transport_pubkey, transport_signature)) = live {
+                            proofs = Some(TransportProofs { pin, transport_pubkey, transport_signature });
+                        }
                     }
-                    (None, None) if noise.get_remote_static() == Some(&descriptor.transport_pubkey_bytes[..]) => {},
+                    (None, None) if noise.get_remote_static() == Some(&descriptor.transport_pubkey_bytes[..])
+                        && (recovery_node.is_none() || live.is_none()) => {},
                     _ => return Err(RemoteError::Invalid("missing box transport proof".into())),
                 }
-                Ok((client_id, scopes))
+                Ok((client_id, scopes, proofs))
             }
             RemoteAuthResponse::Error { v, code, message } => {
                 if v != 1 {
@@ -1670,13 +1703,13 @@ async fn connect_authenticated(
     key: &ClientKey,
     client_name: &str,
 ) -> Result<(TcpStream, TransportState, String, Vec<String>), RemoteError> {
-    let (remote, noise, _, client_id, scopes) = connect_bound(descriptor, key, client_name).await?;
+    let (remote, noise, _, client_id, scopes, _) = connect_bound(descriptor, key, client_name, None).await?;
     Ok((remote, noise, client_id, scopes))
 }
 
 async fn connect_bound(
-    descriptor: &RemoteDescriptor, key: &ClientKey, name: &str,
-) -> Result<(TcpStream, TransportState, [u8; 32], String, Vec<String>), RemoteError> {
+    descriptor: &RemoteDescriptor, key: &ClientKey, name: &str, recovery_node: Option<&str>,
+) -> Result<(TcpStream, TransportState, [u8; 32], String, Vec<String>, Option<TransportProofs>), RemoteError> {
     let routes = if descriptor.endpoints.is_empty() { &descriptor.bootstrap_routes } else { &descriptor.endpoints };
     let endpoints = if routes.is_empty() { vec![descriptor.endpoint.as_str()] }
         else { routes.iter().map(String::as_str).collect() };
@@ -1691,8 +1724,8 @@ async fn connect_bound(
         }.await;
         match attempt {
             Ok((mut remote, mut noise, hash)) => {
-                let (client, scopes) = encrypted_auth(&mut remote, &mut noise, descriptor, key, name).await?;
-                return Ok((remote, noise, hash, client, scopes));
+                let (client, scopes, proofs) = encrypted_auth(&mut remote, &mut noise, descriptor, key, name, recovery_node).await?;
+                return Ok((remote, noise, hash, client, scopes, proofs));
             }
             Err(error @ RemoteError::RateLimited(_)) => return Err(error),
             Err(error) => last = map_pre_auth_failure(error),
@@ -1701,12 +1734,11 @@ async fn connect_bound(
     Err(last)
 }
 
-/// Re-pin only a verified finalize receipt for the box already used by SAS.
-/// A box-only descriptor is sufficient for locked unlock; it cannot authorize
-/// an unknown live responder key.
+/// Re-pin a verified finalize receipt (or pinned LOCKED recovery) for the SAS box.
 pub fn commit_bootstrap(app_dir: &Path, previous: &RemoteDescriptor,
     node: &str, box_key: &str, box_signature: &str, live_key: &str, live_signature: &str,
 ) -> Result<RemoteDescriptor, RemoteError> {
+    verify_transport_proof(node, live_key, live_signature)?;
     let _config = REMOTE_CONFIG_LOCK.lock().unwrap();
     let stored = std::fs::read(config_path(app_dir)).ok().and_then(|bytes| saved_descriptor(&bytes));
     if !stored.is_some_and(|saved| saved.node_id == previous.node_id
@@ -1715,18 +1747,54 @@ pub fn commit_bootstrap(app_dir: &Path, previous: &RemoteDescriptor,
         && saved.code == previous.code) {
         return Err(RemoteError::Local("the pairing link changed during setup; its replacement was not overwritten".into()));
     }
-    if !previous.node_id.is_empty() || previous.box_transport_pubkey != box_key {
+    if (!previous.node_id.is_empty() && previous.node_id != node) || previous.box_transport_pubkey != box_key {
         return Err(RemoteError::Invalid("finalize changed the bootstrap box pin".into()));
     }
     let descriptor = validate_descriptor(StoredDescriptor {
         v: 1, endpoint: previous.endpoint.clone(), endpoints: vec![], endpoints_signature: None,
-        bootstrap_routes: previous.endpoints.clone(),
+        bootstrap_routes: if previous.endpoints.is_empty() { previous.bootstrap_routes.clone() } else { previous.endpoints.clone() },
         node_id: node.into(), transport_pubkey: live_key.into(), transport_signature: live_signature.into(),
         box_transport_pubkey: box_key.into(), box_transport_signature: Some(box_signature.into()),
         code: None, sealed_code: None, hosted_by: previous.hosted_by.clone(),
     })?.with_pin_store(previous.pin_store.clone().ok_or_else(|| RemoteError::Local("missing protected pin store".into()))?);
     persist_at(&config_path(app_dir), &descriptor)?;
     Ok(descriptor)
+}
+
+/// Identity proofs obtained inside an authenticated, already pinned session.
+pub struct TransportProofs {
+    pub pin: BoxPin,
+    pub transport_pubkey: String,
+    pub transport_signature: String,
+}
+
+pub async fn recover_bootstrap(
+    descriptor: &RemoteDescriptor, key: &ClientKey, name: &str,
+    trusted_node: &str, expected_client: &str,
+) -> Result<Option<TransportProofs>, RemoteError> {
+    if descriptor.bootstrap_box_key().is_none() || descriptor.has_code() {
+        return Err(RemoteError::Invalid("recovery requires the already paired bootstrap box".into()));
+    }
+    let (mut remote, mut noise, _, client_id, scopes, proofs) =
+        connect_bound(descriptor, key, name, Some(trusted_node)).await?;
+    if client_id != expected_client {
+        return Err(RemoteError::Invalid("recovery client binding changed".into()));
+    }
+    let Some(proofs) = proofs else {
+        // A crash just before send, or a definite precommit refusal, can leave
+        // the same pinned box in SETUP. Keep the saved identity context, allow
+        // bootstrap UI/cancellation, and never infer a new live pin.
+        if scopes.iter().any(|s| s == "identity") {
+            let (status, body) = noise_http_request(&mut remote, &mut noise,
+                "GET", "/api/v1/bootstrap/state", b"", None).await?;
+            let state: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+            if status == 200 && state["state"] == "bootstrap" { return Ok(None); }
+        }
+        return Err(RemoteError::Invalid("locked node omitted its signed live transport proof; no new pin was saved".into()));
+    };
+    let mut connection = LockedConnection { remote, noise, client_id, pin: proofs.pin.clone() };
+    connection.status().await?;
+    Ok(Some(proofs))
 }
 
 /// Dedicated host-only HTTP channel. Unlock passwords never enter the loopback proxy.
@@ -1835,7 +1903,7 @@ impl BootstrapConnection {
         if !descriptor.node_id.is_empty() || descriptor.has_code() {
             return Err(RemoteError::Invalid("a paired empty box is required".into()));
         }
-        let (remote, noise, handshake_hash, client_id, scopes) = connect_bound(descriptor, key, name).await?;
+        let (remote, noise, handshake_hash, client_id, scopes, _) = connect_bound(descriptor, key, name, None).await?;
         if !scopes.iter().any(|s| s == "identity") {
             return Err(RemoteError::Refused("box setup is closed".into()));
         }
@@ -2869,7 +2937,7 @@ mod tests {
         assert!(matches!(result, Ok(Err(_))), "a silent handshake must release its connection slot");
         let (mut app, _silent_node) = tokio::io::duplex(65536);
         let (mut noise, _) = transport_pair();
-        let result = tokio::time::timeout(Duration::from_secs(6), encrypted_auth(&mut app, &mut noise, &descriptor, &key, "test")).await;
+        let result = tokio::time::timeout(Duration::from_secs(6), encrypted_auth(&mut app, &mut noise, &descriptor, &key, "test", None)).await;
         assert!(matches!(result, Ok(Err(_))), "silent encrypted auth must also be bounded");
     }
 
@@ -3201,6 +3269,7 @@ mod tests {
             client_id: "0123456789abcdef0123456789abcdef".into(),
             scopes: vec!["read".into(), "receive".into()],
             box_transport_pubkey: None, box_transport_signature: None,
+            transport_pubkey: None, transport_signature: None,
         })
         .unwrap();
         let encrypted = encode_transport(&mut noise, &response)?;
@@ -3228,6 +3297,7 @@ mod tests {
             v: 1, client_id: "0123456789abcdef0123456789abcdef".into(),
             scopes: vec!["read".into(), "receive".into()],
             box_transport_pubkey: None, box_transport_signature: None,
+            transport_pubkey: None, transport_signature: None,
         }).unwrap();
         let encrypted = encode_transport(&mut noise, &response)?;
         write_frame(&mut stream, &encrypted).await?;

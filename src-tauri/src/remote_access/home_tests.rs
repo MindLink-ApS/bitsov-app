@@ -343,6 +343,7 @@ fn finalize_preserves_fallback_routes_and_rejects_changed_or_unsigned_pins() {
     let box_sig=sign(format!("bitsov-box-transport-v1:{id}:{box_key}"));let live_sig=sign(descriptor_signature_message(&id,&live));
     assert!(commit_bootstrap(dir.path(),&previous,&id,&"33".repeat(32),&box_sig,&live,&live_sig).is_err());
     assert!(commit_bootstrap(dir.path(),&previous,&id,&box_key,"forged",&live,&live_sig).is_err());
+    assert!(commit_bootstrap(dir.path(),&previous,&id,&box_key,&box_sig,"","").is_err());
     let committed=commit_bootstrap(dir.path(),&previous,&id,&box_key,&box_sig,&live,&live_sig).unwrap();
     let proxy=RemoteProxy {descriptor:Arc::new(Mutex::new(previous.clone())),local_addr:"127.0.0.1:1".parse().unwrap(),
         shutdown:watch::channel(false).0,last_error:Arc::new(Mutex::new(None))};
@@ -367,4 +368,122 @@ fn bootstrap_preview_and_import_use_box_fingerprint_without_an_identity() {
     assert_eq!(preview_pairing_link(&uri).unwrap().node_id_fingerprint,"22222222…22222222");
     let dir=tempfile::tempdir().unwrap();
     assert_eq!(import_pairing_link(dir.path(),&uri).unwrap().node_id_fingerprint,"22222222…22222222");
+}
+
+// PR #287 locked AuthResponse additions, using the exact proof domain/encoding
+// from remote_bootstrap_tests.rs and the deterministic identity in home-node.json.
+fn pr287_auth() -> Value {
+    serde_json::from_str::<Value>(include_str!("../../tests/fixtures/remote-first-run-pr287.json"))
+        .unwrap()["locked_auth"].clone()
+}
+
+#[tokio::test]
+async fn pr287_locked_auth_accepts_valid_live_proof_and_rejects_tampering() {
+    for case in ["valid", "missing-key", "missing-signature", "wrong-key", "wrong-domain", "padded"] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (descriptor, _) = setup(listener.local_addr().unwrap().to_string(), true);
+        let mut auth = pr287_auth();
+        match case {
+            "missing-key" => { auth.as_object_mut().unwrap().remove("transport_pubkey"); }
+            "missing-signature" => { auth.as_object_mut().unwrap().remove("transport_signature"); }
+            "wrong-key" => auth["transport_pubkey"] = "2a".repeat(32).into(),
+            "wrong-domain" => auth["transport_signature"] = auth["box_transport_signature"].clone(),
+            "padded" => auth["transport_signature"] = format!("{}=", auth["transport_signature"].as_str().unwrap()).into(),
+            _ => {}
+        }
+        let server = tokio::spawn(responder(listener, 9, auth));
+        let dir = tempfile::tempdir().unwrap();
+        let key = ClientKey::load_or_create(dir.path()).unwrap();
+        let result = LockedConnection::connect(&descriptor, &key, "fixture").await;
+        assert_eq!(result.is_ok(), case == "valid", "{case}");
+        server.await.unwrap().unwrap();
+    }
+}
+
+#[tokio::test]
+async fn pr287_lost_receipt_recovers_only_through_pinned_locked_auth() {
+    for case in ["valid", "absent", "wrong-static", "wrong-node", "wrong-client", "wrong-box-proof", "not-locked"] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = listener.local_addr().unwrap().to_string();
+        let mut auth = pr287_auth();
+        let node = fixture()["node_id"].as_str().unwrap().to_owned();
+        let box_key = auth["box_transport_pubkey"].as_str().unwrap().to_owned();
+        let descriptor = validate_descriptor(StoredDescriptor {
+            v: 1, endpoint, endpoints: vec![], bootstrap_routes: vec![], endpoints_signature: None,
+            node_id: String::new(), transport_pubkey: String::new(), transport_signature: String::new(),
+            box_transport_pubkey: box_key, box_transport_signature: None,
+            code: None, sealed_code: None, hosted_by: None,
+        }).unwrap();
+        let expected_client = auth["client_id"].as_str().unwrap().to_owned();
+        if case == "absent" {
+            auth.as_object_mut().unwrap().remove("transport_pubkey");
+            auth.as_object_mut().unwrap().remove("transport_signature");
+        }
+        if case == "wrong-client" { auth["client_id"] = "b".repeat(32).into(); }
+        if case == "wrong-box-proof" { auth["box_transport_signature"] = auth["transport_signature"].clone(); }
+        let server_node = node.clone();
+        let server = tokio::spawn(async move {
+            let result = responder(listener, if case == "wrong-static" { 12 } else { 9 }, auth).await;
+            if case == "wrong-static" { assert!(result.is_err(), "auth reached unknown live responder"); return; }
+            let (mut stream, mut noise, request) = result.unwrap();
+            assert!(request.code.is_none() && request.signature.is_none());
+            if case == "valid" || case == "not-locked" {
+                let encrypted = read_frame(&mut stream, MAX_TRANSPORT_FRAME).await.unwrap();
+                let request = decode_transport(&mut noise, &encrypted, MAX_NOISE_PLAINTEXT).unwrap();
+                assert!(request.starts_with(b"GET /api/v1/node/lock HTTP/1.1"));
+                let body = json!({"state": if case == "not-locked" { "unlocked" } else { "locked" },
+                    "node_id":server_node,"fingerprint":crate::home_node::identity_fingerprint(&server_node)}).to_string();
+                let response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+                let encrypted = encode_transport(&mut noise, response.as_bytes()).unwrap();
+                write_frame(&mut stream, &encrypted).await.unwrap();
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let key = ClientKey::load_or_create(dir.path()).unwrap();
+        let trusted_node = if case == "wrong-node" { "ab".repeat(32) } else { node };
+        let result = recover_bootstrap(&descriptor, &key, "fixture", &trusted_node, &expected_client).await;
+        assert_eq!(result.is_ok(), case == "valid", "{case}");
+        if let Ok(Some(proofs)) = result {
+            assert_eq!(proofs.transport_pubkey, pr287_auth()["transport_pubkey"]);
+            assert_eq!(proofs.transport_signature, pr287_auth()["transport_signature"]);
+            assert_eq!(proofs.pin.node_id, trusted_node);
+        }
+        assert!(!descriptor.has_live_pin(), "recovery must not mutate pins before full verification");
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn pr287_precommit_recovery_keeps_bootstrap_available_without_adopting_a_pin() {
+    for state in ["bootstrap", "locked"] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let node = fixture()["node_id"].as_str().unwrap().to_owned();
+        let box_key = fixture()["auth"]["box_transport_pubkey"].as_str().unwrap().to_owned();
+        let descriptor = validate_descriptor(StoredDescriptor {
+            v: 1, endpoint: listener.local_addr().unwrap().to_string(), endpoints: vec![],
+            bootstrap_routes: vec![], endpoints_signature: None, node_id: String::new(),
+            transport_pubkey: String::new(), transport_signature: String::new(),
+            box_transport_pubkey: box_key, box_transport_signature: None,
+            code: None, sealed_code: None, hosted_by: None,
+        }).unwrap();
+        let server = tokio::spawn(async move {
+            let auth = json!({"status":"ok","v":1,"client_id":"a".repeat(32),"scopes":["read","receive","identity"]});
+            let (mut stream, mut noise, _) = responder(listener, 9, auth).await.unwrap();
+            let encrypted = read_frame(&mut stream, MAX_TRANSPORT_FRAME).await.unwrap();
+            let request = decode_transport(&mut noise, &encrypted, MAX_NOISE_PLAINTEXT).unwrap();
+            assert!(request.starts_with(b"GET /api/v1/bootstrap/state HTTP/1.1"));
+            let body = json!({"state":state}).to_string();
+            let reply = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+            let encrypted = encode_transport(&mut noise, reply.as_bytes()).unwrap();
+            write_frame(&mut stream, &encrypted).await.unwrap();
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let key = ClientKey::load_or_create(dir.path()).unwrap();
+        let result = recover_bootstrap(&descriptor, &key, "fixture", &node, &"a".repeat(32)).await;
+        if state == "bootstrap" { assert!(matches!(result, Ok(None))); }
+        else { assert!(result.is_err()); }
+        assert!(!descriptor.has_live_pin());
+        assert!(descriptor.node_id().is_empty());
+        server.await.unwrap();
+    }
 }

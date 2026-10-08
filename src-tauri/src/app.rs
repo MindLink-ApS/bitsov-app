@@ -1275,6 +1275,11 @@ async fn attach_remote(
         *state.pairing_view.lock().unwrap() =
             PairingView::from_outcome(&Err(PairError::Local(error.to_string())));
     };
+    #[cfg(all(desktop, not(feature = "mobile")))]
+    let descriptor = match remote_owner::recovery::recover(state, &descriptor).await {
+        Ok(descriptor) => descriptor,
+        Err(error) => return failed(remote_access::RemoteError::Local(error)),
+    };
     let descriptor = loop {
         if state.quitting.load(Ordering::SeqCst) {
             return;
@@ -1451,6 +1456,8 @@ async fn finish_auth(state: &NodeState, data_dir: &Path) {
                 );
             }
             if let Err(error) = home_unlock::remember_binding(state, &node_id) {
+                *state.token.lock().unwrap() = None;
+                *state.auth.lock().unwrap() = AuthMode::Unauthenticated;
                 *state.ready.lock().unwrap() = false;
                 return set_error(state, error);
             }
@@ -1561,6 +1568,22 @@ fn pairing_ctx(state: &NodeState, data_dir: &Path) -> Result<Arc<PairingCtx>, Pa
     Ok(ctx)
 }
 
+/// First-run continuity is checked before a fresh credential is published to
+/// concurrent API callers, including ordinary refresh outside finish_auth.
+fn check_first_run_session(state: &NodeState, session: &PairedSession) -> Result<(), String> {
+    #[cfg(all(desktop, not(feature = "mobile")))]
+    if let Err(error) = remote_owner::recovery::verify_session(state, session) {
+        *state.token.lock().unwrap() = None;
+        *state.auth.lock().unwrap() = AuthMode::Unauthenticated;
+        *state.ready.lock().unwrap() = false;
+        set_error(state, error.clone());
+        return Err(error);
+    }
+    #[cfg(not(all(desktop, not(feature = "mobile"))))]
+    let _ = (state, session);
+    Ok(())
+}
+
 /// Pair with the node, reuse a stored pairing, or — only when `/pair/request`
 /// is 404 — mint via `/auth/local`. Records the outcome in the pairing view.
 async fn authenticate(state: &NodeState, data_dir: &Path) -> Result<(), String> {
@@ -1592,6 +1615,7 @@ async fn authenticate(state: &NodeState, data_dir: &Path) -> Result<(), String> 
     let mut view = PairingView::from_outcome(&outcome);
     match outcome {
         Ok(Established::Paired { session, .. }) => {
+            check_first_run_session(state, &session)?;
             *state.token.lock().unwrap() = Some(session.token.clone());
             *state.auth.lock().unwrap() = AuthMode::Paired(session);
             let ctx = state.pairing.lock().unwrap().clone();
@@ -1652,6 +1676,7 @@ async fn refresh_paired(state: &NodeState) -> Result<(), String> {
     pairing::refresh(&mut session, &ctx.client, &ctx.key)
         .await
         .map_err(|e| e.to_string())?;
+    check_first_run_session(state, &session)?;
     *state.token.lock().unwrap() = Some(session.token.clone());
     *state.auth.lock().unwrap() = AuthMode::Paired(session);
     let node = state.node_id.lock().unwrap().clone();

@@ -8,6 +8,9 @@ use remote_access::BootstrapConnection;
 use zeroize::Zeroizing;
 #[path = "remote_owner/password_store.rs"]
 mod password_store;
+#[path = "remote_owner/recovery.rs"]
+pub mod recovery;
+use recovery::Recovery;
 
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
@@ -91,6 +94,7 @@ struct Attempt {
     record: device::Record,
     proof: Option<String>,
     backup: Option<[Zeroizing<String>; 3]>,
+    finalize_uncertain: bool,
     deadline: Instant,
 }
 #[derive(Default)]
@@ -171,6 +175,25 @@ pub async fn run(state: &NodeState, input: Input) -> Result<View, String> {
             Input::Poll {} => resume(state, completion).await,
             _ => Err("Your identity was saved. Continue starting the box; setup can no longer be cancelled.".into()),
         };
+    }
+    let recover_lost = setup.attempt.as_ref().is_some_and(|a| a.finalize_uncertain)
+        || (setup.attempt.is_none() && matches!(input, Input::Poll {}));
+    if recover_lost {
+        if !matches!(input, Input::Poll {}) {
+            return Err("Setup may already be committed. Check the box and continue recovery.".into());
+        }
+        let descriptor = state.remote_descriptor.lock().unwrap().clone().ok_or("Missing box descriptor.")?;
+        let ctx = state.pairing.lock().unwrap().clone().ok_or("Pairing is unavailable.")?;
+        if Recovery::load(&ctx.store)?.is_none() {
+            return Err("No confirmed setup is waiting for recovery.".into());
+        }
+        let recovered = recovery::recover(state, &descriptor).await?;
+        setup.attempt = None;
+        if recovered.bootstrap_box_key().is_some() {
+            return Err("The box is still in setup. Cancel this pending setup before starting again.".into());
+        }
+        home_unlock::probe(state).await?;
+        return Ok(View::Done);
     }
     match input {
         Input::Create {
@@ -277,6 +300,7 @@ pub async fn run(state: &NodeState, input: Input) -> Result<View, String> {
                 record,
                 proof: None,
                 backup: None,
+                finalize_uncertain: false,
                 deadline,
             });
             // Memory-only secrets expire even if the webview disappears.
@@ -335,6 +359,9 @@ pub async fn run(state: &NodeState, input: Input) -> Result<View, String> {
                 .and_then(|d| d.bootstrap_box_key())
             {
                 password_store::forget(key)?;
+            }
+            if let Some(ctx) = state.pairing.lock().unwrap().as_ref() {
+                Recovery::clear(&ctx.store)?;
             }
             Ok(View::WordsDiffer)
         }
@@ -454,14 +481,36 @@ async fn submit(state: &NodeState, setup: &mut Setup) -> Result<View, String> {
         })
         .map_err(|_| "Could not encode setup confirmation.")?,
     );
+    let ctx = state.pairing.lock().unwrap().clone().ok_or("Pairing is unavailable.")?;
+    let descriptor = state.remote_descriptor.lock().unwrap().clone().ok_or("Missing box descriptor.")?;
+    let public = hex::decode(&attempt.record.public_key).map_err(|_| "Invalid device key.")?;
+    Recovery {
+        node_id: attempt.pending.node_id.clone(),
+        box_key: hex::encode(attempt.connection.binding.box_public_key),
+        endpoint: descriptor.endpoint().into(),
+        client_public_key: ctx.key.public_hex().into(),
+        binding: bootstrap_binding(&token, &attempt.connection.client_id, &attempt.pending.node_id)?,
+        device_public_key: attempt.record.public_key.clone(),
+        device_key_id: hex::encode(&blake3::hash(&public).as_bytes()[..16]),
+        password_saved: false,
+    }.save(&ctx.store)?;
+    // Write-ahead context is durable before the node can commit. A lost reply
+    // must never cause a passive poll to submit the password/finalize again.
+    attempt.finalize_uncertain = true;
     let (status, bytes) =
-        request(attempt, &token, "POST", "/api/v1/identity/finalize", &body).await?;
+        request(attempt, &token, "POST", "/api/v1/identity/finalize", &body).await
+            .map_err(|_| "The finalize reply was lost. Check the box and continue to recover over its pinned locked connection.")?;
     drop(body);
     drop(password);
     if status == 409 && safe_error(status, &bytes) == "box_approval_pending" {
+        attempt.finalize_uncertain = false;
+        Recovery::clear(&ctx.store)?;
         return Ok(View::WaitingForBoxApproval);
     }
     if !(200..300).contains(&status) {
+        // A server error may follow commit. Keep recovery-only behavior for 5xx.
+        attempt.finalize_uncertain = status >= 500;
+        if !attempt.finalize_uncertain { Recovery::clear(&ctx.store)?; }
         let error = safe_error(status, &bytes);
         // A failed backup must never be resubmitted by passive polling.
         attempt.backup = None;
@@ -476,7 +525,7 @@ async fn submit(state: &NodeState, setup: &mut Setup) -> Result<View, String> {
         "Setup may have completed, but its receipt was invalid. Check the box before retrying."
     })?;
     receipt.verify(attempt)?;
-    let binding = bootstrap_binding(&token, &attempt.connection.client_id, &receipt.node_id)?;
+    let binding = receipt.binding(&token)?;
     let attempt = setup.attempt.take().ok_or("Missing setup attempt.")?;
     setup.completion = Some(Completion {
         receipt,
@@ -500,22 +549,28 @@ async fn submit(state: &NodeState, setup: &mut Setup) -> Result<View, String> {
 #[derive(Deserialize)]
 struct Receipt {
     node_id: String,
+    client_id: String,
+    epoch: u64,
     restart_required: bool,
     device_key_id: String,
     box_transport_pubkey: String,
     box_transport_signature: String,
-    #[serde(default)]
     transport_pubkey: String,
-    #[serde(default)]
     transport_signature: String,
 }
 impl Receipt {
     fn verify(&self, attempt: &Attempt) -> Result<(), String> {
-        let public = hex::decode(&attempt.record.public_key).map_err(|_| "Invalid device key.")?;
-        if self.node_id != attempt.pending.node_id
+        self.verify_context(&attempt.pending.node_id, &attempt.connection.client_id,
+            &attempt.record.public_key, &hex::encode(attempt.connection.binding.box_public_key))
+    }
+
+    fn verify_context(&self, node: &str, client: &str, device_public: &str, box_key: &str) -> Result<(), String> {
+        let public = hex::decode(device_public).map_err(|_| "Invalid device key.")?;
+        if self.node_id != node
+            || self.client_id != client
             || !self.restart_required
             || self.device_key_id != hex::encode(&blake3::hash(&public).as_bytes()[..16])
-            || self.box_transport_pubkey != hex::encode(attempt.connection.binding.box_public_key)
+            || self.box_transport_pubkey != box_key
         {
             return Err(
                 "Setup receipt did not match this box and device. Nothing was re-pinned.".into(),
@@ -528,7 +583,17 @@ impl Receipt {
             &self.box_transport_signature,
         )
         .map_err(|_| "The box's setup receipt had an invalid identity signature.".to_string())?;
+        remote_access::verify_transport_proof(&self.node_id, &self.transport_pubkey, &self.transport_signature)
+            .map_err(|_| "The setup receipt had an invalid live transport signature.".to_string())?;
         Ok(())
+    }
+
+    fn binding(&self, token: &str) -> Result<UnlockBinding, String> {
+        let binding = bootstrap_binding(token, &self.client_id, &self.node_id)?;
+        if binding.epoch != self.epoch {
+            return Err("The setup receipt changed the pairing epoch.".into());
+        }
+        Ok(UnlockBinding { client_id: self.client_id.clone(), epoch: self.epoch, fingerprint: binding.fingerprint })
     }
 }
 
@@ -597,6 +662,10 @@ async fn resume(state: &NodeState, completion: &mut Completion) -> Result<View, 
         })
         .await
         .map_err(|_| "Saving the node password stopped; continue setup to retry.")??;
+        let mut recovery = Recovery::load(&ctx.store)?.ok_or("Missing first-run recovery context.")?;
+        recovery.verify_binding(&completion.receipt.node_id, &completion.binding)?;
+        recovery.password_saved = true;
+        recovery.save(&ctx.store)?;
         completion.record.key_id = Some(completion.receipt.device_key_id.clone());
         completion.record.registered = true;
         completion.record.pending = None;
@@ -666,6 +735,9 @@ async fn resume(state: &NodeState, completion: &mut Completion) -> Result<View, 
                 ),
             },
         };
+        if connection.client_id != completion.binding.client_id {
+            return Err("The locked node changed the setup client binding.".into());
+        }
         let challenge = connection.challenge().await.map_err(|e| e.to_string())?;
         let pin = &connection.pin;
         let key_id = completion
@@ -714,7 +786,7 @@ async fn resume(state: &NodeState, completion: &mut Completion) -> Result<View, 
     }
     if completion.stage == CompletionStage::Reconnect {
         if !descriptor.has_live_pin() {
-            return Err("Your box is set up, but this node version did not return its signed live transport key. Import a new identity-signed pairing link from the unlocked box to reconnect. Your password is saved behind Touch ID.".into());
+            return Err("The box has not provided its signed live transport key. Reconnect while it is locked to recover the proof.".into());
         }
         // Use bounded authenticated connection attempts; UI polling drives retries.
         if state.remote_proxy.lock().unwrap().is_none() {
@@ -765,6 +837,7 @@ fn bootstrap_binding(token: &str, client_id: &str, node: &str) -> Result<UnlockB
         cid: String,
         epc: u64,
     }
+    if token.split('.').count() != 3 { return Err("Invalid bootstrap pairing binding.".into()); }
     let claims: Claims = token
         .split('.')
         .nth(1)
@@ -788,6 +861,53 @@ fn bootstrap_binding(token: &str, client_id: &str, node: &str) -> Result<UnlockB
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn pr287_sas_receipt_requires_live_proof_and_pairing_binding() {
+        let value = serde_json::json!({"node_id":"ab".repeat(32),"restart_required":true,
+            "device_key_id":"key","box_transport_pubkey":"22".repeat(32),
+            "box_transport_signature":"box-proof","transport_pubkey":"33".repeat(32),
+            "transport_signature":"live-proof","client_id":"a".repeat(32),"epoch":7});
+        for field in ["transport_pubkey", "transport_signature", "client_id", "epoch"] {
+            let mut missing = value.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<Receipt>(missing).is_err(), "accepted missing {field}");
+        }
+        assert!(serde_json::from_value::<Receipt>(value).is_ok());
+    }
+
+    #[test]
+    fn pr287_receipt_verifies_both_domains_and_preserved_binding() {
+        use base64::Engine;
+        let fixture: serde_json::Value = serde_json::from_str(include_str!("../tests/fixtures/remote-first-run-pr287.json")).unwrap();
+        let public = [4u8; 65];
+        let mut value = fixture["finalize"].clone();
+        value["device_key_id"] = hex::encode(&blake3::hash(&public).as_bytes()[..16]).into();
+        let node = value["node_id"].as_str().unwrap();
+        let client = value["client_id"].as_str().unwrap();
+        let box_key = value["box_transport_pubkey"].as_str().unwrap();
+        let verify = |v: serde_json::Value| serde_json::from_value::<Receipt>(v).unwrap()
+            .verify_context(node, client, &hex::encode(public), box_key);
+        verify(value.clone()).unwrap();
+        for field in ["node_id", "client_id", "device_key_id", "box_transport_pubkey", "box_transport_signature",
+            "transport_pubkey", "transport_signature"] {
+            let mut bad = value.clone(); bad[field] = "invalid".into();
+            assert!(verify(bad).is_err(), "{field}");
+        }
+        let mut wrong_domain = value.clone();
+        wrong_domain["transport_signature"] = value["box_transport_signature"].clone();
+        assert!(verify(wrong_domain).is_err());
+        let receipt: Receipt = serde_json::from_value(value.clone()).unwrap();
+        let token = |cid: &str, epoch: u64| format!("h.{}.s", base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&serde_json::json!({"cid":cid,"epc":epoch})).unwrap()));
+        assert_eq!(receipt.binding(&token(client, 7)).unwrap().epoch, 7);
+        assert!(receipt.binding(&token(client, 8)).is_err());
+        assert!(receipt.binding(&token("other", 7)).is_err());
+        for bad in [serde_json::json!(-1), serde_json::json!(1.5), serde_json::json!("7"), serde_json::Value::Null] {
+            let mut malformed = value.clone(); malformed["epoch"] = bad;
+            assert!(serde_json::from_value::<Receipt>(malformed).is_err());
+        }
+    }
+
     #[test]
     fn pending_rejects_missing_sas_downgrade_malformed_nonce_and_bad_backup() {
         let value = serde_json::json!({"ceremony_id":"a".repeat(32), "node_id":"b".repeat(64),
@@ -884,6 +1004,8 @@ mod tests {
         state.remote_owner.lock().await.completion = Some(Completion {
             receipt: Receipt {
                 node_id: "ab".repeat(32),
+                client_id: "client".into(),
+                epoch: 0,
                 restart_required: true,
                 device_key_id: "key".into(),
                 box_transport_pubkey: "22".repeat(32),

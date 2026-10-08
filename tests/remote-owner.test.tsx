@@ -84,3 +84,24 @@ it('asks for corrected backup words instead of polling the same failed check', a
   await vi.advanceTimersByTimeAsync(6000);
   expect(calls).toEqual(['create','match','finalize']);
 });
+
+it('recovers a lost finalize reply through an explicit poll without replaying confirmation', async () => {
+  vi.useFakeTimers();
+  const calls: string[] = [];
+  const root = mount(async input => {
+    calls.push(input.action);
+    if (input.action === 'create') return { state: 'compare', words: ['a','b','c','d'], expires_at: Date.now()/1000+600 };
+    if (input.action === 'match') return { state: 'backup', mnemonic: 'one two three four five six seven eight nine ten eleven twelve', backup_check: [0,4,9], expires_at: Date.now()/1000+600 };
+    if (input.action === 'finalize') throw new Error('The finalize reply was lost. Check the box and continue.');
+    return { state: 'done' };
+  });
+  await start(root); click(root, 'Match'); await flush();
+  click(root, 'I wrote it down'); click(root, 'Confirm backup'); await flush();
+  expect(root.textContent).toContain('finalize reply was lost');
+  expect(root.querySelectorAll('[data-backup]')).toHaveLength(0);
+  await vi.advanceTimersByTimeAsync(6000);
+  expect(calls).toEqual(['create', 'match', 'finalize']);
+  click(root, 'Check box and continue'); await flush();
+  expect(calls).toEqual(['create', 'match', 'finalize', 'poll']);
+  expect(root.textContent).toContain('ready');
+});

@@ -19,6 +19,10 @@ pub fn save(box_key: &str, password: &[u8]) -> Result<(), String> {
     home_keychain::save_password(&escrow_id(box_key)?, password)
 }
 
+pub fn password(box_key: &str, blob: &[u8]) -> Result<zeroize::Zeroizing<String>, String> {
+    home_keychain::password(&escrow_id(box_key)?, Some(blob))
+}
+
 #[cfg(target_os = "macos")]
 pub fn forget(box_key: &str) -> Result<(), String> {
     let name = format!(
