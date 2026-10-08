@@ -1,3 +1,4 @@
+import type { WatchNotice, WatchRule } from './watches';
 import type { AiTopic, TopicRead } from './types';
 
 export type AssistantId = 'node' | 'wallet' | 'inbox';
@@ -10,8 +11,8 @@ export const ASSISTANTS: Record<AssistantId, { name: string; role: string; topic
     suggestions: ['Who messaged me?'] },
 };
 export type AssistantTurn = { at: number; question: string; answer: string };
-export type AssistantThread = { revision: string; turns: AssistantTurn[] };
-export type ThreadRequest = { action: 'load' } | { action: 'forget' } | { action: 'append'; revision: string; turn: AssistantTurn };
+export type AssistantThread = { revision: string; turns: AssistantTurn[]; notices?: WatchNotice[]; disabled_watches?: WatchRule[] };
+export type ThreadRequest = { action: 'load' } | { action: 'forget' } | { action: 'set_watch'; rule: WatchRule; enabled: boolean } | { action: 'append'; revision: string; turn: AssistantTurn };
 
 /** Host-validated model data. Never accepted by the action/composer dispatcher. */
 export type ModelProposal =

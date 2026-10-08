@@ -1,6 +1,9 @@
 //! Sealed, bounded text transcripts. Never persist broker JSON or disclosure bodies.
 //! A revision rejects a late answer after Forget (including across track switches).
-use super::assistants::Assistant;
+use super::{
+    assistants::Assistant,
+    watches::{Notice, Rule},
+};
 use crate::at_rest::Sealer;
 use serde::{Deserialize, Serialize};
 use std::{io::Write, path::Path};
@@ -22,6 +25,10 @@ pub struct Turn {
 pub struct Thread {
     pub revision: String,
     pub turns: Vec<Turn>,
+    #[serde(default)]
+    pub notices: Vec<Notice>,
+    #[serde(default)]
+    pub disabled_watches: Vec<Rule>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
@@ -29,6 +36,7 @@ pub enum Request {
     Load,
     Append { revision: String, turn: Turn },
     Forget,
+    SetWatch { rule: Rule, enabled: bool },
 }
 
 fn revision() -> Result<String, String> {
@@ -37,7 +45,9 @@ fn revision() -> Result<String, String> {
     Ok(hex::encode(bytes))
 }
 fn check(thread: &Thread) -> Result<(), String> {
-    if thread.turns.len() > MAX_TURNS
+    if thread.notices.len() > MAX_TURNS
+        || thread.notices.iter().any(|n| n.text.chars().count() > 500)
+        || thread.turns.len() > MAX_TURNS
         || thread.turns.iter().any(|t| {
             t.question.chars().count() > super::MAX_QUESTION_CHARS
                 || t.answer.chars().count() > 16_000
@@ -56,6 +66,89 @@ pub fn apply(
     request: Request,
     sealer: &dyn Sealer,
 ) -> Result<Thread, String> {
+    apply_inner(dir, assistant, request, sealer, &[])
+}
+
+/// Host-only append: notice text comes from deterministic rules, never model output.
+pub fn append_notices(
+    dir: &Path,
+    assistant: Assistant,
+    notices: &[Notice],
+    sealer: &dyn Sealer,
+) -> Result<Thread, String> {
+    if notices.iter().any(|n| n.rule.assistant() != assistant) {
+        return Err("Wrong notice thread.".into());
+    }
+    apply_inner(dir, assistant, Request::Load, sealer, notices)
+}
+#[derive(Debug, Serialize)]
+pub struct WatchUpdate {
+    pub revision: String,
+    pub notices: Option<Vec<Notice>>,
+}
+#[allow(clippy::too_many_arguments)]
+pub fn poll_watches(
+    dir: &Path,
+    assistant: Assistant,
+    revision: Option<&str>,
+    sample: &super::watches::Sample,
+    cache: &mut std::collections::HashMap<&'static str, Thread>,
+    engine: &mut super::watches::Engine,
+    open: bool,
+    now: u64,
+    sealer: &dyn Sealer,
+) -> Result<WatchUpdate, String> {
+    if !open {
+        engine.reset(assistant);
+        return Ok(WatchUpdate {
+            revision: String::new(),
+            notices: None,
+        });
+    }
+    // Validate role boundaries before storage, even on the generation handshake.
+    let mut validated = engine.clone();
+    validated.poll(true, now, assistant, sample, &[])?;
+    if !cache.contains_key(assistant.id()) {
+        cache.insert(
+            assistant.id(),
+            apply(dir, assistant, Request::Load, sealer)?,
+        );
+    }
+    let saved = &cache[assistant.id()];
+    if revision != Some(saved.revision.as_str()) {
+        return Ok(WatchUpdate {
+            revision: saved.revision.clone(),
+            notices: Some(saved.notices.clone()),
+        });
+    }
+    let mut next = engine.clone();
+    let notices = next.poll(true, now, assistant, sample, &saved.disabled_watches)?;
+    let update = if notices.is_empty() {
+        WatchUpdate {
+            revision: saved.revision.clone(),
+            notices: None,
+        }
+    } else {
+        let saved = append_notices(dir, assistant, &notices, sealer)?;
+        let update = WatchUpdate {
+            revision: saved.revision.clone(),
+            notices: Some(saved.notices.clone()),
+        };
+        cache.insert(assistant.id(), saved);
+        update
+    };
+    // Only consume dedupe state after the notice is durably saved.
+    *engine = next;
+    Ok(update)
+}
+
+fn apply_inner(
+    dir: &Path,
+    assistant: Assistant,
+    request: Request,
+    sealer: &dyn Sealer,
+    notices: &[Notice],
+) -> Result<Thread, String> {
     let path = dir.join(format!("{}.sealed", assistant.id()));
     let purpose = format!("ai-thread-v1:{}", assistant.id());
     // Forget must not read/decrypt the old file, including oversized/corrupt files.
@@ -63,6 +156,8 @@ pub fn apply(
         Thread {
             revision: revision()?,
             turns: vec![],
+            notices: vec![],
+            disabled_watches: vec![],
         }
     } else {
         match std::fs::metadata(&path) {
@@ -81,14 +176,28 @@ pub fn apply(
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Thread {
                 revision: revision()?,
                 turns: vec![],
+                notices: vec![],
+                disabled_watches: vec![],
             },
             Err(_) => return Err("Could not read the assistant thread.".into()),
         }
     };
+    // Separate preferences survive Forget, even if the transcript is corrupt.
+    thread.disabled_watches = watch_settings(dir, assistant, None, sealer)?;
+    thread.notices.extend_from_slice(notices);
+    if thread.notices.len() > MAX_TURNS {
+        thread.notices.drain(..thread.notices.len() - MAX_TURNS);
+    }
     match request {
-        Request::Load if path.exists() => return Ok(thread),
+        Request::Load if path.exists() && notices.is_empty() => return Ok(thread),
         Request::Load => {}
+        Request::SetWatch { rule, enabled } => {
+            thread.disabled_watches =
+                watch_settings(dir, assistant, Some((rule, enabled)), sealer)?;
+            return Ok(thread);
+        }
         Request::Forget => {
+            thread.notices.clear();
             thread.turns.clear();
             thread.revision = revision()?;
         }
@@ -115,6 +224,11 @@ pub fn apply(
     if ciphertext.len() as u64 > MAX_FILE_BYTES {
         return Err("The assistant thread is too large.".into());
     }
+    write_sealed(dir, &path, &ciphertext)?;
+    Ok(thread)
+}
+
+fn write_sealed(dir: &Path, path: &Path, ciphertext: &[u8]) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|_| "Could not create the assistant folder.")?;
     #[cfg(unix)]
     {
@@ -129,7 +243,43 @@ pub fn apply(
         .map_err(|_| "Could not save the assistant thread.")?;
     temp.persist(&path)
         .map_err(|_| "Could not save the assistant thread.")?;
-    Ok(thread)
+    Ok(())
+}
+
+/// No transcript read is needed to preserve an off switch during Forget.
+pub fn watch_settings(
+    dir: &Path,
+    assistant: Assistant,
+    change: Option<(Rule, bool)>,
+    sealer: &dyn Sealer,
+) -> Result<Vec<Rule>, String> {
+    let path = dir.join(format!("{}-watches.sealed", assistant.id()));
+    let purpose = format!("ai-watch-settings-v1:{}", assistant.id());
+    let mut disabled: Vec<Rule> = match std::fs::metadata(&path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => vec![],
+        Ok(meta) if meta.len() <= 4096 => {
+            let bytes = std::fs::read(&path).map_err(|_| "Could not read watch settings.")?;
+            serde_json::from_slice(&sealer.open(&purpose, &bytes)?)
+                .map_err(|_| "Invalid watch settings.")?
+        }
+        _ => return Err("Could not read watch settings.".into()),
+    };
+    if disabled.len() > 7 || disabled.iter().any(|r| r.assistant() != assistant) {
+        return Err("Invalid watch settings.".into());
+    }
+    if let Some((rule, enabled)) = change {
+        if rule.assistant() != assistant {
+            return Err("That watch belongs to another assistant.".into());
+        }
+        disabled.retain(|r| *r != rule);
+        if !enabled {
+            disabled.push(rule);
+        }
+        let plain =
+            Zeroizing::new(serde_json::to_vec(&disabled).map_err(|_| "Invalid watch settings.")?);
+        write_sealed(dir, &path, &sealer.seal(&purpose, &plain)?)?;
+    }
+    Ok(disabled)
 }
 
 /// Mac implementation of the existing Sealer interface. Uses the app's native
@@ -223,6 +373,233 @@ mod tests {
         fn open(&self, p: &str, b: &[u8]) -> Result<Zeroizing<Vec<u8>>, String> {
             decrypt(&[42; 32], p, b)
         }
+    }
+    #[test]
+    fn queued_watch_sample_cannot_restore_a_forgotten_notice() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cache = std::collections::HashMap::new();
+        let mut engine = super::super::watches::Engine::default();
+        let sample = super::super::watches::Sample {
+            money_ready: Some(false),
+            ..Default::default()
+        };
+        let first = poll_watches(
+            dir.path(),
+            Assistant::Node,
+            None,
+            &sample,
+            &mut cache,
+            &mut engine,
+            true,
+            0,
+            &TestSealer,
+        )
+        .unwrap();
+        let old_revision = first.revision;
+        let notice = poll_watches(
+            dir.path(),
+            Assistant::Node,
+            Some(&old_revision),
+            &sample,
+            &mut cache,
+            &mut engine,
+            true,
+            1000,
+            &TestSealer,
+        )
+        .unwrap();
+        assert_eq!(notice.notices.unwrap().len(), 1);
+        let forgotten = apply(dir.path(), Assistant::Node, Request::Forget, &TestSealer).unwrap();
+        cache.insert("node", forgotten.clone());
+        let late = poll_watches(
+            dir.path(),
+            Assistant::Node,
+            Some(&old_revision),
+            &sample,
+            &mut cache,
+            &mut engine,
+            true,
+            1500,
+            &TestSealer,
+        )
+        .unwrap();
+        assert_eq!(late.revision, forgotten.revision);
+        assert!(late.notices.unwrap().is_empty());
+        assert!(
+            apply(dir.path(), Assistant::Node, Request::Load, &TestSealer)
+                .unwrap()
+                .notices
+                .is_empty()
+        );
+    }
+    #[test]
+    fn failed_notice_save_is_retried_without_losing_dedupe_state() {
+        struct FailsSeal;
+        impl Sealer for FailsSeal {
+            fn seal(&self, _: &str, _: &[u8]) -> Result<Vec<u8>, String> {
+                Err("disk full".into())
+            }
+            fn open(&self, p: &str, b: &[u8]) -> Result<Zeroizing<Vec<u8>>, String> {
+                TestSealer.open(p, b)
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut cache = std::collections::HashMap::new();
+        let mut engine = super::super::watches::Engine::default();
+        let sample = super::super::watches::Sample {
+            money_ready: Some(false),
+            ..Default::default()
+        };
+        let initial = poll_watches(
+            dir.path(),
+            Assistant::Node,
+            None,
+            &sample,
+            &mut cache,
+            &mut engine,
+            true,
+            0,
+            &TestSealer,
+        )
+        .unwrap();
+        assert!(poll_watches(
+            dir.path(),
+            Assistant::Node,
+            Some(&initial.revision),
+            &sample,
+            &mut cache,
+            &mut engine,
+            true,
+            1500,
+            &FailsSeal
+        )
+        .is_err());
+        assert_eq!(
+            poll_watches(
+                dir.path(),
+                Assistant::Node,
+                Some(&initial.revision),
+                &sample,
+                &mut cache,
+                &mut engine,
+                true,
+                3000,
+                &TestSealer
+            )
+            .unwrap()
+            .notices
+            .unwrap()
+            .len(),
+            1
+        );
+        assert!(poll_watches(
+            dir.path(),
+            Assistant::Node,
+            Some(&initial.revision),
+            &sample,
+            &mut cache,
+            &mut engine,
+            true,
+            4500,
+            &TestSealer
+        )
+        .unwrap()
+        .notices
+        .is_none());
+    }
+    #[test]
+    fn closed_watch_poll_does_not_even_access_storage() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cache = std::collections::HashMap::new();
+        let mut engine = super::super::watches::Engine::default();
+        let sample = super::super::watches::Sample {
+            money_ready: Some(false),
+            ..Default::default()
+        };
+        let update = poll_watches(
+            dir.path(),
+            Assistant::Node,
+            None,
+            &sample,
+            &mut cache,
+            &mut engine,
+            false,
+            900_000,
+            &TestSealer,
+        )
+        .unwrap();
+        assert!(update.notices.is_none());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+        assert!(cache.is_empty());
+    }
+    #[test]
+    fn notices_are_bounded_sealed_plain_data_and_forget_clears_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let notices: Vec<_> = (0..105)
+            .map(|at| Notice {
+                at,
+                rule: Rule::Unread,
+                text: "Unread count rose.".into(),
+            })
+            .collect();
+        let saved = append_notices(dir.path(), Assistant::Inbox, &notices, &TestSealer).unwrap();
+        assert_eq!(saved.notices.len(), 100);
+        assert_eq!(saved.notices[0].at, 5);
+        assert!(saved.turns.is_empty());
+        let value = serde_json::to_value(&saved.notices[0]).unwrap();
+        assert_eq!(value.as_object().unwrap().len(), 3);
+        assert!(
+            !String::from_utf8_lossy(&std::fs::read(dir.path().join("inbox.sealed")).unwrap())
+                .contains("Unread")
+        );
+        assert!(append_notices(dir.path(), Assistant::Wallet, &notices, &TestSealer).is_err());
+        assert!(
+            apply(dir.path(), Assistant::Inbox, Request::Forget, &TestSealer)
+                .unwrap()
+                .notices
+                .is_empty()
+        );
+    }
+    #[test]
+    fn watch_switch_is_sealed_scoped_and_survives_forget() {
+        let dir = tempfile::tempdir().unwrap();
+        let request = serde_json::from_value(
+            serde_json::json!({"action":"set_watch", "rule":"unread", "enabled":false}),
+        )
+        .unwrap();
+        let saved = apply(dir.path(), Assistant::Inbox, request, &TestSealer).unwrap();
+        assert_eq!(
+            serde_json::to_value(saved).unwrap()["disabled_watches"],
+            serde_json::json!(["unread"])
+        );
+        let forgotten = apply(dir.path(), Assistant::Inbox, Request::Forget, &TestSealer).unwrap();
+        assert_eq!(
+            serde_json::to_value(forgotten).unwrap()["disabled_watches"],
+            serde_json::json!(["unread"])
+        );
+        let invalid = serde_json::from_value(
+            serde_json::json!({"action":"set_watch", "rule":"balance_drop", "enabled":false}),
+        )
+        .unwrap();
+        assert!(apply(dir.path(), Assistant::Inbox, invalid, &TestSealer).is_err());
+        assert!(
+            !String::from_utf8_lossy(&std::fs::read(dir.path().join("inbox.sealed")).unwrap())
+                .contains("unread")
+        );
+    }
+    #[test]
+    fn old_thread_without_watch_fields_remains_readable() {
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = TestSealer
+            .seal("ai-thread-v1:node", br#"{"revision":"old","turns":[]}"#)
+            .unwrap();
+        std::fs::write(dir.path().join("node.sealed"), bytes).unwrap();
+        let loaded = serde_json::to_value(
+            apply(dir.path(), Assistant::Node, Request::Load, &TestSealer).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(loaded["notices"], serde_json::json!([]));
+        assert_eq!(loaded["disabled_watches"], serde_json::json!([]));
     }
     #[test]
     fn threads_are_sealed_separate_and_forget_rejects_late_answers() {
@@ -327,6 +704,8 @@ mod tests {
         let purpose = "ai-thread-v1:node";
         let thread = Thread {
             revision: revision().unwrap(),
+            notices: vec![],
+            disabled_watches: vec![],
             turns: (0..100)
                 .map(|_| Turn {
                     at: 1,

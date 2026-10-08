@@ -1,3 +1,4 @@
+import { WATCHES } from './watches';
 import { ASSISTANTS, type AssistantId, type AssistantThread } from './assistants';
 import { amount as fmtAmount, allIn, routingFee } from './format';
 // Dev-mode sample data: the whole shell clickable with no node running. Nothing
@@ -1261,9 +1262,15 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
       return result;
     },
     aiLocalTurn: async () => { throw new Error('Choose a running local model in the desktop app.'); },
+    aiWatchPoll: async () => null,
     aiThread: async (assistant, request) => {
       const current = assistantThreads[assistant] ??= { revision: '0', turns: [] };
-      if (request.action === 'forget') current.turns = [];
+      if (request.action === 'forget') { current.turns = []; current.notices = []; }
+      if (request.action === 'set_watch') {
+        if (!WATCHES[assistant].some(w => w.rule === request.rule)) throw new Error('That watch belongs to another assistant.');
+        current.disabled_watches = (current.disabled_watches ?? []).filter(r => r !== request.rule);
+        if (!request.enabled) current.disabled_watches.push(request.rule);
+      }
       if (request.action === 'append') {
         if (request.revision !== current.revision) throw new Error('This thread was changed or forgotten.');
         current.turns.push(request.turn);

@@ -121,3 +121,46 @@ composer separately. Neither a valid Proposal nor a model answer sends, spends,
 requests an invoice, or changes channels. The rules-only named path remains as in
 A2. Sealed history stores display text only and is never added to the model's
 context; raw tool messages and broker objects remain transient.
+
+## A4 — watches while the Mac app is open
+
+The existing app status poll drives deterministic Rust rules through `ai_read`.
+There is no watch timer, model call, network read, process, or background runtime.
+After the existing trust disclosure is accepted, polling continues on the locked
+screen, including a locked/offline startup that identifies that accepted node.
+First-run setup retains its existing read limits; closing the app stops watches. The host refuses watch evaluation for hidden/closed
+windows or during quit. A poll gap over 10 seconds resets baselines and elapsed
+conditions, so sleep or time with the app closed cannot trigger catch-up notices.
+
+Watches use only scalar observations already available to the app. Rust checks
+these against the same assistant topic allowlists as A2/A3. They do not receive
+message bodies, contacts, IDs, payment secrets, or broker/model payloads. The
+renderer supplies these observations as data; notices are observations, not
+independent node attestations.
+
+All seven watches default on, with a separate saved switch under each assistant:
+
+| Assistant | Rule | Default behavior |
+|---|---|---|
+| Node | Locked / offline | Notice after more than five continuously observed minutes, once until recovery |
+| Node | Channel count | Compare counts from existing wallet/channel reads; baseline first |
+| Node | Money readiness | One notice for `money_ready: false`, rearmed only by a known `true` |
+| Wallet | Balance drop | Reported aggregate balance falls by more than 1,000 sats since the previous check; baseline first |
+| Wallet | Payment failed | Count increases for explicitly failed payment receipts from the owner's existing pay/keysend flow |
+| Inbox | Unread increase | App-session unread count rises; baseline first, counts only |
+
+Unknown/pending payment outcomes and budget refusals are not called failed
+payments. Payment failure and unread watches reflect this app session, not a new
+history scan. Missing/expired balance or channel observations establish no
+change; cached status/balance observations expire after 30/45 seconds. Returning
+observations establish a new baseline. Repeated samples do not repeat notices;
+disabled change watches establish a new baseline when enabled again.
+
+Notices contain only time, rule and plain text, with no proposal, draft, action,
+or composer callback. They appear in the relevant thread, remain sealed on this
+Mac, and are bounded to the latest 100 notices alongside the existing 100 turns.
+Switches are sealed separately and survive **Forget**. Forget clears notices as
+well as turns and changes the thread generation; a queued watch poll from an old
+generation cannot restore forgotten content. Baselines and dedupe state remain
+in host memory only. A failed notice save leaves its dedupe state unconsumed, and
+one assistant's storage failure does not suppress the others' saved notices.

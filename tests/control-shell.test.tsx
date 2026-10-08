@@ -477,6 +477,13 @@ describe('control center shell', () => {
     // Only reads and the spend-window status were used; nothing that spends or edits.
     const used = new Set(calls.map((c) => c.cmd));
     for (const cmd of used) {
+      if (cmd === 'ai_read') {
+        for (const call of calls.filter(c => c.cmd === cmd)) {
+          expect(Object.keys(call.args!).sort()).toEqual(['assistant', 'watch']);
+          expect(Object.keys(call.args!.watch as object).sort()).toEqual(['revision', 'sample']);
+        }
+        continue;
+      }
       expect(cmd).toMatch(/^(node_status|pairing_status|trust_acknowledge|node_overview|peers_list|rooms_list|room_members|messages_list|price_quote|payments_overview|fund_state|spend_status|device_key_status|budget_status|file_price|call_quote|room_quote|live_link|plugin:event\|(un)?listen)$/);
     }
     expect(calls.find((c) => c.cmd === 'plugin:event|listen')?.args?.event).toBe('node-live');
