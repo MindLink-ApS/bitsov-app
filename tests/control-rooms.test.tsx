@@ -226,6 +226,7 @@ function stubHost(overrides: Record<string, Reply> = {}) {
   let n = 0;
   const REPLIES: Record<string, Reply> = {
     node_status: () => ({ ready: true, node_id: OWN, error: null }),
+    trust_acknowledge: () => true,
     pairing_status: () => paired,
     node_overview: () => overview(['room_binding_v1']),
     peers_list: () => [

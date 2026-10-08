@@ -4,7 +4,10 @@ import App from '../src/App';
 import { LockedNode, RememberUnlock } from '../src/onboarding/LockedNode';
 
 let dispose: (() => void) | undefined;
-afterEach(() => { dispose?.(); document.body.innerHTML = ''; vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+afterEach(() => { dispose?.(); document.body.innerHTML = ''; vi.unstubAllGlobals(); vi.restoreAllMocks(); localStorage.removeItem(REMEMBERED); });
+// The Touch ID-first layout is for a device that has a password remembered.
+const REMEMBERED = 'bitsov.unlock.remembered.v1';
+const rememberedDevice = () => localStorage.setItem(REMEMBERED, '1');
 const buttonNamed = (root: ParentNode, text: string) =>
   [...root.querySelectorAll('button')].find(b => b.textContent === text);
 const typePassword = (root: ParentNode, value: string) => {
@@ -14,6 +17,7 @@ const typePassword = (root: ParentNode, value: string) => {
   return input;
 };
 it('shows a locked node without onboarding or money controls, and unlocks only on a click', async () => {
+  rememberedDevice();
   let locked = true;
   const calls: string[] = [];
   vi.stubGlobal('__TAURI_INTERNALS__', { invoke: (cmd: string) => {
@@ -69,6 +73,7 @@ it('does not offer typing without the host capability', () => {
 });
 
 it('lets an Android owner type the node password, then clears the field', async () => {
+  rememberedDevice();
   const typed: string[] = [];
   const mount = document.createElement('div'); document.body.appendChild(mount);
   dispose = render(() => <LockedNode mobile typedUnlockSupported onUnlock={async () => {}} onUnlockWithPassword={async (password) => { typed.push(password); }} />, mount);
@@ -83,6 +88,7 @@ it('lets an Android owner type the node password, then clears the field', async 
 });
 
 it('refuses an empty typed password without calling the host', async () => {
+  rememberedDevice();
   const onUnlockWithPassword = vi.fn(async () => {});
   const mount = document.createElement('div'); document.body.appendChild(mount);
   dispose = render(() => <LockedNode mobile typedUnlockSupported onUnlock={async () => {}} onUnlockWithPassword={onUnlockWithPassword} />, mount);
@@ -134,6 +140,7 @@ it('keeps the offer after a cancelled fingerprint and closes on Not now', async 
 });
 
 it.each(['Android', 'Mac'])('on %s, unlocks with a typed password and asks to remember it after the node unlocks', async (platform) => {
+  rememberedDevice();
   const mobile = platform === 'Android';
   vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(mobile ? 'Mozilla/5.0 (Linux; Android 15)' : 'Mozilla/5.0 (Macintosh)');
   let locked = true;
@@ -284,4 +291,50 @@ it('offers Remember on this Mac only as an explicit choice', async () => {
   buttonNamed(mount, 'Remember on this Mac (Touch ID)')!.click();
   await vi.waitFor(() => expect(choices).toEqual([true]));
   expect(mount.querySelector('[data-remember-saved]')?.textContent).toContain('Saved on this Mac');
+});
+
+it('defaults to the typed password until a password is remembered on this device', () => {
+  const mount = document.createElement('div'); document.body.appendChild(mount);
+  dispose = render(() => <LockedNode typedUnlockSupported state="ready" onUnlock={async () => {}} onUnlockWithPassword={async () => {}} />, mount);
+  // The form is open and is the primary path; Touch ID is only a secondary link.
+  expect(mount.querySelector('#node-unlock-password')).not.toBeNull();
+  expect(buttonNamed(mount, 'Unlock with password')?.className).toContain('primary');
+  const saved = mount.querySelector('[data-unlock-saved-path]')!;
+  expect(saved.textContent).toContain('Chose Remember on this Mac before?');
+  expect(saved.querySelector('button')?.className).toBe('link');
+  expect([...mount.querySelectorAll('button')].filter((b) => b.textContent === 'Unlock with Touch ID')).toHaveLength(1);
+});
+
+it('keeps Touch ID first only on a device with a remembered password', () => {
+  rememberedDevice();
+  const mount = document.createElement('div'); document.body.appendChild(mount);
+  dispose = render(() => <LockedNode typedUnlockSupported state="ready" onUnlock={async () => {}} onUnlockWithPassword={async () => {}} />, mount);
+  expect(mount.querySelector('#node-unlock-password')).toBeNull();
+  expect(mount.querySelector('[data-unlock-saved-path]')).toBeNull();
+  expect(buttonNamed(mount, 'Unlock with Touch ID')).toBeDefined();
+});
+
+it('learns: Remember or a working Touch ID unlock marks the device, no-password clears it', async () => {
+  const mount = document.createElement('div'); document.body.appendChild(mount);
+  dispose = render(() => <RememberUnlock onChoose={async () => {}} onDone={() => {}} />, mount);
+  buttonNamed(mount, 'Remember on this Mac (Touch ID)')!.click();
+  await vi.waitFor(() => expect(localStorage.getItem(REMEMBERED)).toBe('1'));
+  dispose?.(); mount.remove();
+
+  const locked = document.createElement('div'); document.body.appendChild(locked);
+  dispose = render(() => <LockedNode typedUnlockSupported state="no-password" onUnlock={async () => {}} onUnlockWithPassword={async () => {}} />, locked);
+  expect(localStorage.getItem(REMEMBERED)).toBeNull();
+  dispose?.(); locked.remove();
+
+  const again = document.createElement('div'); document.body.appendChild(again);
+  dispose = render(() => <LockedNode typedUnlockSupported state="ready" onUnlock={async () => {}} onUnlockWithPassword={async () => {}} />, again);
+  again.querySelector<HTMLButtonElement>('[data-unlock-saved-path] button')!.click();
+  await vi.waitFor(() => expect(localStorage.getItem(REMEMBERED)).toBe('1'));
+});
+
+it('an older host without typed unlock keeps the single Touch ID button', () => {
+  const mount = document.createElement('div'); document.body.appendChild(mount);
+  dispose = render(() => <LockedNode onUnlock={async () => {}} />, mount);
+  expect(buttonNamed(mount, 'Unlock with Touch ID')).toBeDefined();
+  expect(mount.querySelector('[data-unlock-saved-path]')).toBeNull();
 });

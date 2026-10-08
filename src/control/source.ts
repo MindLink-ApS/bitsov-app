@@ -87,6 +87,7 @@ export interface Source {
   nodeRepairInitialized(confirmed: boolean): Promise<void>;
   nodeRepairPriceFloor(confirmed: boolean): Promise<void>;
   pairingStatus(): Promise<PairingView>;
+  trustAcknowledge(nodeId: string, remote: boolean, legacy: boolean): Promise<boolean>;
   pairingRetry(): Promise<PairingView>;
   remoteAccessForget(): Promise<void>;
   remoteAccessPreview(link: string): Promise<RemotePreviewView>;
@@ -242,6 +243,7 @@ export const hostSource: Source = {
   nodeUnlockPassword: (password) => invoke<void>('node_unlock_password', { password }),
   nodeUnlockRemember: (remember) => invoke<void>('node_unlock_remember', { remember }),
   pairingStatus: () => invoke<PairingView>('pairing_status'),
+  trustAcknowledge: (node_id, remote, legacy) => invoke<boolean>('trust_acknowledge', { node_id, remote, legacy }),
   pairingRetry: () => invoke<PairingView>('pairing_retry'),
   remoteAccessForget: () => invoke<void>('remote_access_forget'),
   remoteAccessPreview: (link) => invoke<RemotePreviewView>('remote_access_preview', { link }),

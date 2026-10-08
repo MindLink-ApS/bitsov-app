@@ -25,6 +25,9 @@ export const RING_MS = 60_000;
 export const SIGNAL_TIMEOUT_MS = 30_000;
 /** How long to wait for ICE gathering before sending what we have. */
 export const GATHER_MS = 3_000;
+/** A permission prompt may never settle; release the call after this wait. */
+export const MEDIA_TIMEOUT_MS = 15_000;
+const MEDIA_ERROR = 'Camera/microphone not available — check System Settings → Privacy';
 /** How long a dropped connection may take to come back before the call ends. */
 export const DISCONNECT_GRACE_MS = 10_000;
 /** How long an accepted call may stay 'connecting' before it ends. */
@@ -103,8 +106,10 @@ export type CallView = {
   liveAt: number | null;
   muted: boolean;
   camera: boolean;
-  /** msat this side paid for this call's signals, all-in as reported. */
+  /** Sum of receipt ceilings (the host does not expose settled call fees). */
   paidMsat: number;
+  /** Candidate types only: never expose addresses from the stats report. */
+  connection: { local: string; remote: string } | null;
   reason: HangupReason | null;
   /** A refusal to show (nothing was paid for the refused step). */
   error: string | null;
@@ -112,12 +117,14 @@ export type CallView = {
 
 export const IDLE: CallView = {
   phase: 'idle', peer: null, callId: null, media: 'audio', outgoing: false,
-  liveAt: null, muted: false, camera: false, paidMsat: 0, reason: null, error: null,
+  liveAt: null, muted: false, camera: false, paidMsat: 0, connection: null, reason: null, error: null,
 };
 
 type Outcome<T> = { ok: true; value: T } | { ok: false; error: ActionError };
 
 export type CallDeps = {
+  /** Check current spend permission and show the shell’s approval path before capture. */
+  authorize?: () => Promise<boolean>;
   quote: (peer: string) => Promise<Outcome<CallQuote>>;
   /** Latest grant read by the shell; the host rechecks it before paying. */
   grant?: () => NodeGrantSummary | null;
@@ -160,6 +167,9 @@ export function createCallEngine(deps: CallDeps) {
   let offerSdp: string | null = null;
   let ringTimer: ReturnType<typeof setTimeout> | undefined;
   let dropTimer: ReturnType<typeof setTimeout> | undefined;
+  let diagnosticTimer: ReturnType<typeof setInterval> | undefined;
+  let mediaGeneration = 0;
+  const captures = new Set<() => void>();
   let videoSender: RTCRtpSender | null = null;
   /** The call the owner cancelled while its offer was being prepared or paid. */
   let cancelled: string | null = null;
@@ -173,13 +183,18 @@ export function createCallEngine(deps: CallDeps) {
   const active = () => view.phase !== 'idle' && view.phase !== 'ended';
 
   const teardown = () => {
+    mediaGeneration++;
+    captures.forEach((cancel) => cancel());
+    clearInterval(diagnosticTimer);
+    diagnosticTimer = undefined;
     clearTimeout(ringTimer);
     ringTimer = undefined;
     clearTimeout(dropTimer);
     dropTimer = undefined;
     videoSender = null;
-    pc?.close();
+    const oldPc = pc;
     pc = null;
+    oldPc?.close();
     local?.getTracks().forEach((t) => t.stop());
     local = null;
     remote = null;
@@ -191,8 +206,51 @@ export function createCallEngine(deps: CallDeps) {
     set({ phase: 'ended', reason, error });
   };
 
+  const acquireMedia = (constraints: MediaStreamConstraints): Promise<MediaStream> => new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = () => {
+      settled = true;
+      clearTimeout(timer);
+      captures.delete(cancel);
+    };
+    const cancel = () => { finish(); reject(new Error(MEDIA_ERROR)); };
+    const timer = setTimeout(cancel, MEDIA_TIMEOUT_MS);
+    captures.add(cancel);
+    // getUserMedia cannot be aborted. Stop any stream delivered after timeout/cancel.
+    Promise.resolve().then(() => deps.getUserMedia(constraints)).then((stream) => {
+      if (settled) { stream.getTracks().forEach((t) => t.stop()); return; }
+      finish();
+      resolve(stream);
+    }, (error) => { if (!settled) { finish(); reject(error); } });
+  });
+
+  const readConnection = async (conn: RTCPeerConnection) => {
+    try {
+      const stats = await conn.getStats();
+      if (pc !== conn) return;
+      let pair: RTCIceCandidatePairStats | undefined;
+      stats.forEach((stat) => {
+        if (stat.type === 'transport' && stat.selectedCandidatePairId) pair = stats.get(stat.selectedCandidatePairId);
+      });
+      // Older WebKit reports the selected/nominated pair without a transport row.
+      if (!pair) stats.forEach((stat) => {
+        if (stat.type === 'candidate-pair' && (stat.selected || (stat.nominated && stat.state === 'succeeded'))) pair = stat;
+      });
+      if (!pair) return;
+      const localType = stats.get(pair.localCandidateId)?.candidateType;
+      const remoteType = stats.get(pair.remoteCandidateId)?.candidateType;
+      const types = ['host', 'srflx', 'prflx', 'relay'];
+      set({ connection: { local: types.includes(localType) ? localType : 'unknown', remote: types.includes(remoteType) ? remoteType : 'unknown' } });
+    } catch { /* Diagnostics must never affect a call on webviews without stats. */ }
+  };
+
   const open = async (media: CallMedia) => {
-    const stream = await deps.getUserMedia({ audio: true, video: media === 'video' });
+    const generation = mediaGeneration;
+    const stream = await acquireMedia({ audio: true, video: media === 'video' });
+    if (generation !== mediaGeneration) {
+      stream.getTracks().forEach((t) => t.stop());
+      throw new Error(MEDIA_ERROR);
+    }
     local = stream;
     const conn = deps.peerConnection({ iceServers: deps.iceServers?.() ?? [] });
     pc = conn;
@@ -208,6 +266,9 @@ export function createCallEngine(deps: CallDeps) {
       if (pc !== conn) return;
       const state = conn.connectionState;
       if (state === 'connected') {
+        void readConnection(conn);
+        clearInterval(diagnosticTimer);
+        diagnosticTimer = setInterval(() => { void readConnection(conn); }, 2_000);
         clearTimeout(dropTimer);
         dropTimer = undefined;
         if (view.phase !== 'live') {
@@ -251,14 +312,12 @@ export function createCallEngine(deps: CallDeps) {
     }, CONNECT_TIMEOUT_MS);
   };
 
-  const guarded = async (run: () => Promise<void>) => {
+  const guarded = async (run: (claim: (id: string | null) => void) => Promise<void>) => {
     if (busy) return;
     busy = true;
     let callId = view.callId;
     try {
-      const running = run();
-      callId = view.callId;
-      await running;
+      await run((id) => { callId = id; });
     } catch (error) {
       if (view.callId === callId && active()) end(null, asActionError(error).message);
     } finally {
@@ -270,7 +329,8 @@ export function createCallEngine(deps: CallDeps) {
     view: () => view,
 
     /** Place a call. The price was shown before this is called. */
-    place: (peer: string, media: CallMedia, q: CallQuote) => guarded(async () => {
+    place: (peer: string, media: CallMedia, q: CallQuote) => guarded(async (claim) => {
+      const generation = mediaGeneration;
       if (active() || deps.busy?.()) return;
       if (q.offer_msat === null || q.call_total_msat === null) {
         set({ ...IDLE, phase: 'ended', peer, error: 'Their node does not take calls yet. Nothing was paid.' });
@@ -282,23 +342,26 @@ export function createCallEngine(deps: CallDeps) {
           `This call needs up to ${amount(q.call_total_msat)}. Your node grant allows ${amount(grant.per_call_max_msat)} per call and has ${amount(grant.remaining_msat)} remaining. The owner would need to approve at least ${amount(q.call_total_msat)} per call and enough remaining budget for that ceiling. Nothing was sent or paid.` });
         return;
       }
+      if (deps.authorize && !await deps.authorize()) return;
+      if (generation !== mediaGeneration || active() || deps.busy?.()) return;
       quote = q;
       const callId = (deps.newCallId ?? newCallId)();
       cancelled = null;
+      claim(callId);
       set({ ...IDLE, phase: 'calling', peer, callId, media, outgoing: true, camera: media === 'video' });
       let conn: RTCPeerConnection;
       try {
         conn = await open(media);
-        if (cancelled === callId) { teardown(); return; }
+        if (cancelled === callId || view.callId !== callId || !active()) return;
         await conn.setLocalDescription(await conn.createOffer());
         await gathered(conn, GATHER_MS);
       } catch {
-        if (cancelled === callId) { teardown(); return; }
-        end(null, media === 'video' ? 'Camera or microphone not available. Nothing was paid.' : 'Microphone not available. Nothing was paid.');
+        if (cancelled === callId || view.callId !== callId || !active()) return;
+        end(null, `${MEDIA_ERROR}. Nothing was paid.`);
         return;
       }
       // Cancelled before the offer went out: nothing is paid.
-      if (cancelled === callId || view.callId !== callId) { teardown(); return; }
+      if (cancelled === callId || view.callId !== callId || !active()) return;
       const r = await pay(CALL_OFFER, { media, sdp: conn.localDescription!.sdp }, q.offer_msat + q.offer_max_routing_fee_msat);
       // Cancelled while the offer was in flight: the mic is already off; send nothing more.
       if (cancelled === callId || view.callId !== callId) return;
@@ -315,8 +378,12 @@ export function createCallEngine(deps: CallDeps) {
     accept: () => guarded(async () => {
       if (view.phase !== 'incoming' || !offerSdp) return;
       const callId = view.callId;
+      if (deps.authorize && !await deps.authorize()) return;
+      if (view.callId !== callId || view.phase !== 'incoming') return;
+      clearTimeout(ringTimer);
       set({ phase: 'connecting' });
       const q = await deps.quote(view.peer!);
+      if (view.callId !== callId || !active()) return;
       if (!q.ok) { end(null, q.error.message); return; }
       quote = q.value;
       let conn: RTCPeerConnection;
@@ -326,10 +393,11 @@ export function createCallEngine(deps: CallDeps) {
         await conn.setLocalDescription(await conn.createAnswer());
         await gathered(conn, GATHER_MS);
       } catch {
-        end(null, 'Microphone not available. Nothing was paid.');
+        if (view.callId !== callId || !active()) return;
+        end(null, `${MEDIA_ERROR}. Nothing was paid.`);
         return;
       }
-      if (view.callId !== callId) return;
+      if (view.callId !== callId || !active()) return;
       const r = await pay(CALL_ANSWER, { sdp: conn.localDescription!.sdp }, signalCost(quote));
       if (!r.ok) end(null, r.error.message);
       else if ((view.phase as Phase) === 'connecting') awaitConnect(callId!);
@@ -364,7 +432,8 @@ export function createCallEngine(deps: CallDeps) {
 
     /** End without paying anything (the window is closing). The peer's side times out. */
     endLocal: () => {
-      if (!active()) return;
+      // Also invalidate a preflight that has not entered Calling yet.
+      if (!active()) { teardown(); return; }
       if (view.phase === 'calling') cancelled = view.callId;
       end('hangup');
     },
@@ -392,9 +461,9 @@ export function createCallEngine(deps: CallDeps) {
       }
       let fresh: MediaStream;
       try {
-        fresh = await deps.getUserMedia({ video: true });
+        fresh = await acquireMedia({ video: true });
       } catch {
-        set({ error: 'Camera not available.' });
+        if (local === stream) set({ error: MEDIA_ERROR });
         return;
       }
       const track = fresh.getVideoTracks()[0];

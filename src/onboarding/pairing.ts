@@ -44,6 +44,8 @@ export type PairingView = {
   bootstrap: string | null;
   /** Display-only label from the saved remote pairing link; capped by the host. */
   hosted_by?: string | null;
+  /** Durable acknowledgement from the host, bound to this connection mode. */
+  trust_acknowledged_node_id?: string | null;
 };
 
 export type StepStatus = 'todo' | 'active' | 'done' | 'failed' | 'skipped' | 'blocked';

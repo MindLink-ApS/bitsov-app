@@ -1,16 +1,10 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "CS-1: the app may run ONLY the bundled konsensus node sidecar. No general shell access; no shell API exposed to the renderer beyond this scoped sidecar. Custom commands are granted to the main window only.",
+  "description": "CS-1: Rust owns bundled konsensus sidecar execution. No shell API is exposed to the renderer. Custom commands are granted to the main window only.",
   "windows": ["main"],
   "permissions": [
     "core:default",
-    {
-      "identifier": "shell:allow-execute",
-      "allow": [
-        { "name": "bin/konsensus", "sidecar": true, "args": true }
-      ]
-    },
     "allow-node-status",
     "allow-node-unlock",
     "allow-node-unlock-password",
@@ -27,6 +21,7 @@
     "allow-payments-balance",
     "allow-identity-restore",
     "allow-pairing-status",
+    "allow-trust-acknowledge",
     "allow-pairing-retry",
     "allow-remote-access-preview",
     "allow-remote-access-import",
