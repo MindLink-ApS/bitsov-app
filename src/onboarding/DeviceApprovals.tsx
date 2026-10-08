@@ -8,6 +8,8 @@ import { usePairingActivity } from '../pairingActivity';
  * onboarding after pairing and in Settings → Node. Registering asks the node for
  * an owner approval; nothing is approved here. Shows nothing when this device
  * has no Secure Enclave / Keystore or the host has not reported a state yet.
+ * A local node gets no at-the-node registration or CLI approval ceremony
+ * (docs/ONBOARDING_PAIRING.md): it only shows the off reason, when given.
  */
 export function DeviceApprovals(props: {
   device: DeviceView | null;
@@ -18,6 +20,8 @@ export function DeviceApprovals(props: {
   onSkip?: () => void;
   /** Settings shows the on state; onboarding hides once registered. */
   showRegistered?: boolean;
+  /** Registration exists only for a remote node. */
+  remote: boolean;
 }) {
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
@@ -31,7 +35,11 @@ export function DeviceApprovals(props: {
     catch (e) { setError(typeof e === 'string' ? e : `Could not start ${what()} setup. Try again when your node is unlocked.`); }
     finally { setBusy(false); }
   };
-  const state = () => (props.device?.available ? props.device.state : null);
+  const state = () => {
+    const s = props.device?.available ? props.device.state : null;
+    // Local node: nothing to register; only an off reason is worth saying.
+    return props.remote || s === 'off' ? s : null;
+  };
   return (
     <Show when={state() && state() !== 'unavailable' && (state() !== 'registered' || props.showRegistered)}>
       <section class="panel device-approvals" data-device-approvals={state()!}>
