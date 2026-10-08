@@ -96,6 +96,9 @@ mod local_owner;
 mod owner_password;
 #[path = "home_keychain.rs"]
 mod home_keychain;
+#[cfg(all(desktop, not(feature = "mobile")))]
+#[path = "remote_owner.rs"]
+mod remote_owner;
 #[path = "home_unlock.rs"]
 mod home_unlock;
 // This Mac as a paired device: registration, signed envelopes, persisted approvals.
@@ -227,6 +230,8 @@ struct NodeState {
     remote_descriptor: Mutex<Option<remote_access::RemoteDescriptor>>,
     remote_retry: Arc<bitsov_app::connection_retry::RemoteRetry>,
     remote_recovery: tokio::sync::Mutex<()>,
+    #[cfg(all(desktop, not(feature = "mobile")))]
+    remote_owner: Arc<tokio::sync::Mutex<remote_owner::Setup>>,
     expected_remote_node_id: Mutex<Option<String>>,
     /// Short codes the node printed to its stdout (the tripwire).
     printed_codes: PrintedCodes,
@@ -410,6 +415,8 @@ impl NodeState {
             remote_descriptor: Mutex::new(None),
             remote_retry: Arc::new(bitsov_app::connection_retry::RemoteRetry::default()),
             remote_recovery: tokio::sync::Mutex::new(()),
+            #[cfg(all(desktop, not(feature = "mobile")))]
+            remote_owner: Arc::new(tokio::sync::Mutex::new(remote_owner::Setup::default())),
             expected_remote_node_id: Mutex::new(None),
             printed_codes: PrintedCodes::default(),
             stale_pairing: AtomicBool::new(false),
@@ -2129,6 +2136,21 @@ async fn node_unlock_password(window: WebviewWindow<impl tauri::Runtime>) -> Res
 async fn node_unlock_remember(window: WebviewWindow<impl tauri::Runtime>) -> Result<(), String> {
     reject_sealed_window(&window)?;
     Err("Remembering a typed node password is unavailable on this platform.".into())
+}
+
+#[tauri::command]
+#[cfg(all(desktop, not(feature = "mobile")))]
+async fn remote_owner_setup(window: WebviewWindow<impl tauri::Runtime>, state: State<'_, NodeState>, input: remote_owner::Input) -> Result<remote_owner::View, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    remote_owner::run(state.inner(), input).await
+}
+
+#[tauri::command]
+#[cfg(not(all(desktop, not(feature = "mobile"))))]
+async fn remote_owner_setup(window: WebviewWindow<impl tauri::Runtime>) -> Result<(), String> {
+    reject_sealed_window(&window)?;
+    Err("Remote first-run setup is currently available on Mac.".into())
 }
 
 #[tauri::command]
@@ -7432,6 +7454,7 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             node_unlock,
             node_unlock_password,
             node_unlock_remember,
+            remote_owner_setup,
             local_owner_create,
             local_owner_cancel,
             local_owner_finalize,
@@ -14801,6 +14824,7 @@ mod assistant_acl_tests {
                 "node_unlock",
                 "node_unlock_password",
                 "node_unlock_remember",
+                "remote_owner_setup",
                 "local_owner_create",
                 "local_owner_cancel",
                 "local_owner_finalize",

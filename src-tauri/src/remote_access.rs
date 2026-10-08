@@ -64,6 +64,10 @@ pub const HOSTED_BY_MAX_CHARS: usize = 64;
 pub struct PairingLinkV1 {
     pub v: u8,
     pub endpoint: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub endpoints: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoints_signature: Option<String>,
     /// Empty only in a ticket issued before the node had an identity.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub node_id: String,
@@ -110,6 +114,16 @@ impl fmt::Debug for PairingLinkV1 {
 pub struct RemoteDescriptor {
     v: u8,
     endpoint: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    endpoints: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    bootstrap_routes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    endpoints_signature: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    box_transport_pubkey: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    box_transport_signature: Option<String>,
     node_id: String,
     transport_pubkey: String,
     transport_signature: String,
@@ -142,6 +156,10 @@ impl RemoteDescriptor {
     }
 
     pub fn box_pin(&self) -> Result<Option<BoxPin>, RemoteError> {
+        if self.node_id.is_empty() { return Ok(None); }
+        if let Some(signature) = &self.box_transport_signature {
+            return BoxPin::verify(&self.node_id, &self.endpoint, &self.box_transport_pubkey, signature).map(Some);
+        }
         let Some(store) = &self.pin_store else { return Ok(None); };
         let Some(pin) = store.read(&self.node_id)? else { return Ok(None); };
         if pin.node_id != self.node_id || pin.endpoint != self.endpoint {
@@ -158,6 +176,11 @@ impl RemoteDescriptor {
         &self.node_id
     }
 
+    pub fn bootstrap_box_key(&self) -> Option<&str> {
+        self.node_id.is_empty().then_some(self.box_transport_pubkey.as_str())
+    }
+    pub fn has_live_pin(&self) -> bool { !self.transport_pubkey.is_empty() }
+
     pub fn has_code(&self) -> bool {
         self.code.is_some()
     }
@@ -173,6 +196,16 @@ impl RemoteDescriptor {
 struct StoredDescriptor {
     v: u8,
     endpoint: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    endpoints: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    bootstrap_routes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    endpoints_signature: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    box_transport_pubkey: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    box_transport_signature: Option<String>,
     node_id: String,
     transport_pubkey: String,
     transport_signature: String,
@@ -405,13 +438,33 @@ fn endpoint_parts(endpoint: &str) -> Result<(&str, u16), RemoteError> {
 }
 
 fn validate_descriptor(stored: StoredDescriptor) -> Result<RemoteDescriptor, RemoteError> {
-    if stored.v != 1 {
+    if ![1, 2].contains(&stored.v) {
         return Err(RemoteError::Invalid(
             "unsupported descriptor version".into(),
         ));
     }
     endpoint_parts(&stored.endpoint)?;
     validate_code(stored.code.as_deref())?;
+    validate_endpoints(&stored)?;
+    if stored.node_id.is_empty() {
+        if !stored.transport_pubkey.is_empty() || !stored.transport_signature.is_empty()
+            || stored.box_transport_signature.is_some() || stored.endpoints_signature.is_some() {
+            return Err(RemoteError::Invalid("bootstrap ticket cannot claim identity proofs".into()));
+        }
+        let pin = decode_hex::<32>(&stored.box_transport_pubkey, "box_transport_pubkey")?;
+        if pin == [0; 32] { return Err(RemoteError::Invalid("empty box pin".into())); }
+        return Ok(descriptor_from_stored(stored, pin));
+    }
+    if let Some(signature) = &stored.box_transport_signature {
+        BoxPin::verify(&stored.node_id, &stored.endpoint, &stored.box_transport_pubkey, signature)?;
+    } else if !stored.box_transport_pubkey.is_empty() {
+        return Err(RemoteError::Invalid("missing box transport signature".into()));
+    }
+    // A finalize receipt can initially pin only the box's locked transport.
+    if stored.transport_pubkey.is_empty() && stored.transport_signature.is_empty()
+        && stored.box_transport_signature.is_some() && stored.v == 1 {
+        return Ok(descriptor_from_stored(stored, [0; 32]));
+    }
     let node_id_bytes = decode_hex::<32>(&stored.node_id, "node_id")?;
     let transport_pubkey_bytes = decode_hex::<32>(&stored.transport_pubkey, "transport_pubkey")?;
     if transport_pubkey_bytes.iter().all(|byte| *byte == 0) {
@@ -447,20 +500,61 @@ fn validate_descriptor(stored: StoredDescriptor) -> Result<RemoteDescriptor, Rem
             )
         })?;
 
-    Ok(RemoteDescriptor {
-        v: stored.v,
-        endpoint: stored.endpoint,
-        node_id: stored.node_id,
-        transport_pubkey: stored.transport_pubkey,
-        transport_signature: stored.transport_signature,
-        code: stored.code,
-        hosted_by: display_label(stored.hosted_by.as_deref()),
-        transport_pubkey_bytes,
-        pin_store: None,
-    })
+    Ok(descriptor_from_stored(stored, transport_pubkey_bytes))
 }
 
-/// Same invisible set the node refuses in `[node].hosted_by`.
+fn descriptor_from_stored(stored: StoredDescriptor, transport_pubkey_bytes: [u8; 32]) -> RemoteDescriptor {
+    RemoteDescriptor {
+        v: stored.v, endpoint: stored.endpoint, endpoints: stored.endpoints,
+        endpoints_signature: stored.endpoints_signature, bootstrap_routes: stored.bootstrap_routes,
+        box_transport_pubkey: stored.box_transport_pubkey,
+        box_transport_signature: stored.box_transport_signature,
+        node_id: stored.node_id, transport_pubkey: stored.transport_pubkey,
+        transport_signature: stored.transport_signature, code: stored.code,
+        hosted_by: display_label(stored.hosted_by.as_deref()),
+        transport_pubkey_bytes, pin_store: None,
+    }
+}
+
+fn validate_endpoints(stored: &StoredDescriptor) -> Result<(), RemoteError> {
+    if !stored.bootstrap_routes.is_empty() {
+        if stored.v != 1 || stored.node_id.is_empty() || stored.box_transport_signature.is_none()
+            || stored.code.is_some() || stored.bootstrap_routes.len() > 64 {
+            return Err(RemoteError::Invalid("invalid bootstrap routing hints".into()));
+        }
+        for endpoint in &stored.bootstrap_routes { endpoint_parts(endpoint)?; }
+    }
+    if stored.v == 1 {
+        if !stored.endpoints.is_empty() || stored.endpoints_signature.is_some() {
+            return Err(RemoteError::Invalid("v1 cannot carry v2 endpoint fields".into()));
+        }
+        return Ok(());
+    }
+    if stored.endpoints.is_empty() || stored.endpoints.len() > 64
+        || stored.endpoints.first() != Some(&stored.endpoint) {
+        return Err(RemoteError::Invalid("invalid ordered endpoints".into()));
+    }
+    for endpoint in &stored.endpoints { endpoint_parts(endpoint)?; }
+    if stored.node_id.is_empty() { return Ok(()); }
+    let message = serde_json::to_vec(&(
+        "bitsov-endpoints-v2", 2, &stored.node_id, &stored.transport_pubkey,
+        &stored.box_transport_pubkey, &stored.endpoint, &stored.endpoints,
+    )).map_err(|_| RemoteError::Invalid("invalid endpoints descriptor".into()))?;
+    let encoded = stored.endpoints_signature.as_ref()
+        .ok_or_else(|| RemoteError::Invalid("missing endpoints signature".into()))?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(encoded)
+        .map_err(|_| RemoteError::Invalid("invalid endpoints signature".into()))?;
+    if base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&bytes) != *encoded {
+        return Err(RemoteError::Invalid("noncanonical endpoints signature".into()));
+    }
+    let signature = Signature::from_slice(&bytes)
+        .map_err(|_| RemoteError::Invalid("invalid endpoints signature".into()))?;
+    VerifyingKey::from_bytes(&decode_hex::<32>(&stored.node_id, "node_id")?)
+        .map_err(|_| RemoteError::Invalid("invalid node identity".into()))?
+        .verify_strict(&message, &signature)
+        .map_err(|_| RemoteError::Invalid("endpoints signature does not bind this ordered list and pins".into()))
+}
+
 fn is_invisible_format(c: char) -> bool {
     matches!(
         c,
@@ -500,11 +594,6 @@ fn unix_now() -> i64 {
 }
 
 fn validate_link(link: PairingLinkV1, now: i64) -> Result<RemoteDescriptor, RemoteError> {
-    if link.node_id.is_empty() {
-        return Err(RemoteError::Invalid(
-            "this ticket was issued before the node had an identity; start the node unlocked once, then run konsensus pair-ticket again".into(),
-        ));
-    }
     if link.expires_at < 0 {
         return Err(RemoteError::Invalid("ticket expiry is invalid".into()));
     }
@@ -512,6 +601,11 @@ fn validate_link(link: PairingLinkV1, now: i64) -> Result<RemoteDescriptor, Remo
         return Err(RemoteError::Expired((now - link.expires_at) as u64));
     }
     let descriptor = validate_descriptor(StoredDescriptor {
+        bootstrap_routes: vec![],
+        endpoints: link.endpoints,
+        endpoints_signature: link.endpoints_signature,
+        box_transport_pubkey: link.box_transport_pubkey.clone(),
+        box_transport_signature: link.box_transport_signature.clone(),
         v: link.v,
         endpoint: link.endpoint,
         node_id: link.node_id,
@@ -554,6 +648,13 @@ fn parse_pairing_link_at(link: &str, now: i64) -> Result<RemoteDescriptor, Remot
     if json.len() > MAX_LINK_BYTES {
         return Err(RemoteError::Invalid("descriptor JSON is oversized".into()));
     }
+    // Preserve strict legacy schema even for explicitly empty/null v2 fields.
+    let fields: serde_json::Value = serde_json::from_slice(&json)
+        .map_err(|_| RemoteError::Invalid("descriptor JSON has the wrong shape".into()))?;
+    if fields.get("v").and_then(|v| v.as_u64()) == Some(1)
+        && (fields.get("endpoints").is_some() || fields.get("endpoints_signature").is_some()) {
+        return Err(RemoteError::Invalid("v1 cannot carry v2 endpoint fields".into()));
+    }
     let link: PairingLinkV1 = serde_json::from_slice(&json)
         .map_err(|_| RemoteError::Invalid("descriptor JSON has the wrong shape".into()))?;
     validate_link(link, now)
@@ -590,6 +691,11 @@ fn stored_bytes(
         })
         .transpose()?;
     serde_json::to_vec(&StoredDescriptor {
+        bootstrap_routes: descriptor.bootstrap_routes.clone(),
+        endpoints: descriptor.endpoints.clone(),
+        endpoints_signature: descriptor.endpoints_signature.clone(),
+        box_transport_pubkey: descriptor.box_transport_pubkey.clone(),
+        box_transport_signature: descriptor.box_transport_signature.clone(),
         v: descriptor.v,
         endpoint: descriptor.endpoint.clone(),
         node_id: descriptor.node_id.clone(),
@@ -678,7 +784,7 @@ pub fn preview_pairing_link(link: &str) -> Result<RemotePreviewView, RemoteError
     let descriptor = parse_pairing_link(link)?;
     Ok(RemotePreviewView {
         endpoint: descriptor.endpoint.clone(),
-        node_id_fingerprint: node_id_fingerprint(&descriptor.node_id),
+        node_id_fingerprint: node_id_fingerprint(descriptor.bootstrap_box_key().unwrap_or(&descriptor.node_id)),
         hosted_by: descriptor.hosted_by.clone(),
     })
 }
@@ -692,7 +798,7 @@ pub fn import_pairing_link(
     persist_at(&config_path(app_data_dir), &descriptor)?;
     Ok(RemoteImportView {
         endpoint: descriptor.endpoint.clone(),
-        node_id_fingerprint: node_id_fingerprint(&descriptor.node_id),
+        node_id_fingerprint: node_id_fingerprint(descriptor.bootstrap_box_key().unwrap_or(&descriptor.node_id)),
         hosted_by: descriptor.hosted_by.clone(),
         restart_required: true,
     })
@@ -966,11 +1072,18 @@ fn retry_hint(message: &[u8]) -> Option<u64> {
         .then_some(hint.retry_after_secs)
 }
 
+#[cfg(test)]
 async fn pinned_handshake<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S, descriptor: &RemoteDescriptor, key: &ClientKey,
+) -> Result<TransportState, RemoteError> {
+    pinned_handshake_bound(stream, descriptor, key).await.map(|(noise, _)| noise)
+}
+
+async fn pinned_handshake_bound<S: AsyncRead + AsyncWrite + Unpin>(
     stream: &mut S,
     descriptor: &RemoteDescriptor,
     key: &ClientKey,
-) -> Result<TransportState, RemoteError> {
+) -> Result<(TransportState, [u8;32]), RemoteError> {
     tokio::time::timeout(CONNECT_TIMEOUT, async {
         let (secret, _) = derived_transport_key(key);
         let params = NOISE_PROTOCOL
@@ -1009,8 +1122,10 @@ async fn pinned_handshake<S: AsyncRead + AsyncWrite + Unpin>(
             .write_message(&[], &mut output)
             .map_err(|e| RemoteError::Transport(format!("Noise message 3 failed: {e}")))?;
         write_frame(stream, &output[..length]).await?;
+        let hash: [u8;32] = noise.get_handshake_hash().try_into()
+            .map_err(|_| RemoteError::Invalid("invalid Noise transcript".into()))?;
         noise
-            .into_transport_mode()
+            .into_transport_mode().map(|noise| (noise, hash))
             .map_err(|e| RemoteError::Transport(format!("Noise transport transition failed: {e}")))
     }).await.map_err(|_| RemoteError::HandshakeUnavailable)?
 }
@@ -1555,18 +1670,63 @@ async fn connect_authenticated(
     key: &ClientKey,
     client_name: &str,
 ) -> Result<(TcpStream, TransportState, String, Vec<String>), RemoteError> {
-    let mut remote =
-        tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(descriptor.endpoint()))
-            .await
-            .map_err(|_| RemoteError::HandshakeUnavailable)?
-            .map_err(|_| RemoteError::HandshakeUnavailable)?;
-    let mut noise = pinned_handshake(&mut remote, descriptor, key)
-        .await
-        .map_err(map_pre_auth_failure)?;
-    let (client_id, scopes) = encrypted_auth(&mut remote, &mut noise, descriptor, key, client_name)
-        .await
-        .map_err(map_pre_auth_failure)?;
+    let (remote, noise, _, client_id, scopes) = connect_bound(descriptor, key, client_name).await?;
     Ok((remote, noise, client_id, scopes))
+}
+
+async fn connect_bound(
+    descriptor: &RemoteDescriptor, key: &ClientKey, name: &str,
+) -> Result<(TcpStream, TransportState, [u8; 32], String, Vec<String>), RemoteError> {
+    let routes = if descriptor.endpoints.is_empty() { &descriptor.bootstrap_routes } else { &descriptor.endpoints };
+    let endpoints = if routes.is_empty() { vec![descriptor.endpoint.as_str()] }
+        else { routes.iter().map(String::as_str).collect() };
+    let mut last = RemoteError::HandshakeUnavailable;
+    for endpoint in endpoints {
+        let attempt = async {
+            let mut stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(endpoint))
+                .await.map_err(|_| RemoteError::HandshakeUnavailable)?
+                .map_err(|_| RemoteError::HandshakeUnavailable)?;
+            let (noise, hash) = pinned_handshake_bound(&mut stream, descriptor, key).await?;
+            Ok::<_, RemoteError>((stream, noise, hash))
+        }.await;
+        match attempt {
+            Ok((mut remote, mut noise, hash)) => {
+                let (client, scopes) = encrypted_auth(&mut remote, &mut noise, descriptor, key, name).await?;
+                return Ok((remote, noise, hash, client, scopes));
+            }
+            Err(error @ RemoteError::RateLimited(_)) => return Err(error),
+            Err(error) => last = map_pre_auth_failure(error),
+        }
+    }
+    Err(last)
+}
+
+/// Re-pin only a verified finalize receipt for the box already used by SAS.
+/// A box-only descriptor is sufficient for locked unlock; it cannot authorize
+/// an unknown live responder key.
+pub fn commit_bootstrap(app_dir: &Path, previous: &RemoteDescriptor,
+    node: &str, box_key: &str, box_signature: &str, live_key: &str, live_signature: &str,
+) -> Result<RemoteDescriptor, RemoteError> {
+    let _config = REMOTE_CONFIG_LOCK.lock().unwrap();
+    let stored = std::fs::read(config_path(app_dir)).ok().and_then(|bytes| saved_descriptor(&bytes));
+    if !stored.is_some_and(|saved| saved.node_id == previous.node_id
+        && saved.box_transport_pubkey == previous.box_transport_pubkey
+        && saved.endpoint == previous.endpoint && saved.endpoints == previous.endpoints
+        && saved.code == previous.code) {
+        return Err(RemoteError::Local("the pairing link changed during setup; its replacement was not overwritten".into()));
+    }
+    if !previous.node_id.is_empty() || previous.box_transport_pubkey != box_key {
+        return Err(RemoteError::Invalid("finalize changed the bootstrap box pin".into()));
+    }
+    let descriptor = validate_descriptor(StoredDescriptor {
+        v: 1, endpoint: previous.endpoint.clone(), endpoints: vec![], endpoints_signature: None,
+        bootstrap_routes: previous.endpoints.clone(),
+        node_id: node.into(), transport_pubkey: live_key.into(), transport_signature: live_signature.into(),
+        box_transport_pubkey: box_key.into(), box_transport_signature: Some(box_signature.into()),
+        code: None, sealed_code: None, hosted_by: previous.hosted_by.clone(),
+    })?.with_pin_store(previous.pin_store.clone().ok_or_else(|| RemoteError::Local("missing protected pin store".into()))?);
+    persist_at(&config_path(app_dir), &descriptor)?;
+    Ok(descriptor)
 }
 
 /// Dedicated host-only HTTP channel. Unlock passwords never enter the loopback proxy.
@@ -1615,19 +1775,31 @@ impl LockedConnection {
     }
 
     async fn request(&mut self, method: &str, path: &str, body: &[u8]) -> Result<(u16, zeroize::Zeroizing<Vec<u8>>), RemoteError> {
+        noise_http_request(&mut self.remote, &mut self.noise, method, path, body, None).await
+    }
+}
+
+async fn noise_http_request(remote: &mut TcpStream, noise: &mut TransportState,
+    method: &str, path: &str, body: &[u8], token: Option<&str>,
+) -> Result<(u16, zeroize::Zeroizing<Vec<u8>>), RemoteError> {
+    if token.is_some_and(|t| t.bytes().any(|b| b <= 32 || b >= 127)) {
+        return Err(RemoteError::Invalid("invalid bearer token".into()));
+    }
+    let authorization = zeroize::Zeroizing::new(token.map(|t| format!("Authorization: Bearer {t}\r\n")).unwrap_or_default());
+        let authorization = authorization.as_str();
         tokio::time::timeout(Duration::from_secs(15), async {
-            let mut request = zeroize::Zeroizing::new(format!("{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n", body.len()).into_bytes());
+            let mut request = zeroize::Zeroizing::new(format!("{method} {path} HTTP/1.1\r\nHost: localhost\r\n{authorization}Content-Type: application/json\r\nContent-Length: {}\r\n\r\n", body.len()).into_bytes());
             request.extend_from_slice(body);
             for chunk in request.chunks(MAX_NOISE_PLAINTEXT) {
-                let encrypted = encode_transport(&mut self.noise, chunk)?;
-                write_frame(&mut self.remote, &encrypted).await?;
+                let encrypted = encode_transport(noise, chunk)?;
+                write_frame(remote, &encrypted).await?;
             }
             // Axum's fixed JSON/empty replies have Content-Length (204 may omit it).
             // Do not follow redirects or forward server text, which could echo a secret.
             let mut response = zeroize::Zeroizing::new(Vec::new());
             loop {
-                let encrypted = read_frame(&mut self.remote, MAX_TRANSPORT_FRAME).await?;
-                let plaintext = zeroize::Zeroizing::new(decode_transport(&mut self.noise, &encrypted, MAX_NOISE_PLAINTEXT)?);
+                let encrypted = read_frame(remote, MAX_TRANSPORT_FRAME).await?;
+                let plaintext = zeroize::Zeroizing::new(decode_transport(noise, &encrypted, MAX_NOISE_PLAINTEXT)?);
                 response.extend_from_slice(&plaintext);
                 if response.len() > 32 * 1024 { return Err(RemoteError::Invalid("unlock reply too large".into())); }
                 if let Some(end) = response.windows(4).position(|w| w == b"\r\n\r\n") {
@@ -1649,6 +1821,32 @@ impl LockedConnection {
                 }
             }
         }).await.map_err(|_| RemoteError::Transport("unlock request timed out; check the node before retrying".into()))?
+}
+
+/// One Noise connection for the entire SAS ceremony. Never reconnects on errors.
+pub struct BootstrapConnection {
+    remote: TcpStream,
+    noise: TransportState,
+    pub client_id: String,
+    pub binding: crate::sas::NoiseBinding,
+}
+impl BootstrapConnection {
+    pub async fn connect(descriptor: &RemoteDescriptor, key: &ClientKey, name: &str) -> Result<Self, RemoteError> {
+        if !descriptor.node_id.is_empty() || descriptor.has_code() {
+            return Err(RemoteError::Invalid("a paired empty box is required".into()));
+        }
+        let (remote, noise, handshake_hash, client_id, scopes) = connect_bound(descriptor, key, name).await?;
+        if !scopes.iter().any(|s| s == "identity") {
+            return Err(RemoteError::Refused("box setup is closed".into()));
+        }
+        Ok(Self { remote, noise, client_id, binding: crate::sas::NoiseBinding {
+            handshake_hash, box_public_key: decode_hex(&descriptor.box_transport_pubkey, "box pin")?,
+            client_static: client_transport_public_key(key),
+        }})
+    }
+    pub async fn request(&mut self, method: &str, path: &str, body: &[u8], token: &str)
+        -> Result<(u16, zeroize::Zeroizing<Vec<u8>>), RemoteError> {
+        noise_http_request(&mut self.remote, &mut self.noise, method, path, body, Some(token)).await
     }
 }
 
@@ -1753,12 +1951,26 @@ async fn serve_connection(
 /// generated by this app process. Dropping or stopping the proxy closes the
 /// listener and asks all accepted connection tasks to close.
 pub struct RemoteProxy {
+    descriptor: Arc<Mutex<RemoteDescriptor>>,
     local_addr: SocketAddr,
     shutdown: watch::Sender<bool>,
     last_error: Arc<Mutex<Option<String>>>,
 }
 
 impl RemoteProxy {
+    /// Keep the listener and app credential while replacing the verified
+    /// bootstrap pins after finalize. Existing tunnels die with the old node.
+    pub fn finish_bootstrap(&self, descriptor: RemoteDescriptor) -> Result<(), RemoteError> {
+        let mut current = self.descriptor.lock().unwrap();
+        if current.box_transport_pubkey != descriptor.box_transport_pubkey
+            || (!current.node_id.is_empty() && current.node_id != descriptor.node_id)
+            || descriptor.node_id.is_empty() || descriptor.box_pin()?.is_none() {
+            return Err(RemoteError::Invalid("cannot replace another box's proxy pins".into()));
+        }
+        *current = descriptor;
+        Ok(())
+    }
+
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
     }
@@ -1958,6 +2170,7 @@ pub async fn start_proxy(
     });
 
     Ok(RemoteProxy {
+        descriptor,
         local_addr: actual_addr,
         shutdown,
         last_error,
@@ -2007,6 +2220,34 @@ mod tests {
             "bitsov://pair/{}",
             base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json)
         )
+    }
+
+    #[test]
+    fn accepts_box_pinned_bootstrap_and_ordered_v2_descriptor() {
+        let bootstrap = serde_json::json!({"v":2,"endpoint":"box.local:9737",
+            "endpoints":["box.local:9737","192.168.1.2:9737"],
+            "box_transport_pubkey":"22".repeat(32),"code":test_code(1)});
+        let uri = |v: &serde_json::Value| format!("bitsov://pair/{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(v).unwrap()));
+        assert!(parse_pairing_link(&uri(&bootstrap)).is_ok());
+        let node = SigningKey::from_bytes(&[7;32]);
+        let legacy = signed_link("box.local:9737".into(), &node, [9;32], &test_code(1));
+        let mut value: serde_json::Value = serde_json::from_slice(&base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(legacy.strip_prefix("bitsov://pair/").unwrap()).unwrap()).unwrap();
+        value["v"] = 2.into();
+        value["endpoints"] = bootstrap["endpoints"].clone();
+        value["box_transport_pubkey"] = "22".repeat(32).into();
+        let node_id = hex::encode(node.verifying_key().as_bytes());
+        value["box_transport_signature"] = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(node.sign(format!("bitsov-box-transport-v1:{node_id}:{}", "22".repeat(32)).as_bytes()).to_bytes()).into();
+        let message = serde_json::to_vec(&serde_json::json!(["bitsov-endpoints-v2",2,node_id,"09".repeat(32),"22".repeat(32),"box.local:9737",["box.local:9737","192.168.1.2:9737"]])).unwrap();
+        value["endpoints_signature"] = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(node.sign(&message).to_bytes()).into();
+        assert!(parse_pairing_link(&uri(&value)).is_ok());
+        for field in ["endpoint", "transport_pubkey", "box_transport_pubkey", "node_id"] {
+            let mut bad = value.clone(); bad[field] = "changed".into();
+            assert!(parse_pairing_link(&uri(&bad)).is_err(), "{field}");
+        }
+        let mut bad = value.clone(); bad["endpoints"][1] = "attacker:9737".into();
+        assert!(parse_pairing_link(&uri(&bad)).is_err());
+        bad = value.clone(); bad["v"] = 1.into();
+        assert!(parse_pairing_link(&uri(&bad)).is_err());
     }
 
     #[test]
@@ -2133,8 +2374,7 @@ mod tests {
             "node_id": null, "transport_pubkey": null, "transport_signature": null,
             "box_transport_pubkey": box_key, "expires_at": NOW + 60,
         })));
-        let error = parse_pairing_link_at(&identityless, NOW).unwrap_err().to_string();
-        assert!(error.contains("start the node unlocked once"), "{error}");
+        assert!(parse_pairing_link_at(&identityless, NOW).is_ok());
 
         let data = tempfile::tempdir().unwrap();
         let live = ticket(serde_json::json!({ "expires_at": unix_now() + 86_400 }));

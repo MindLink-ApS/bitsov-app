@@ -66,7 +66,7 @@ describe('onboarding steps', () => {
     expect(onboardingSteps(ready, remote, false).map((s) => s.status)).toEqual(['done', 'done', 'done', 'active']);
     expect(onboardingSteps({ ...ready, node_id: null }, remote, false)[2].status).toBe('active');
     expect(onboardingSteps(booting, remote, false)[2].status).toBe('todo');
-    expect(onboardingSteps(ready, { ...remote, bootstrap: 'bootstrap' }, false)[2].status).toBe('blocked');
+    expect(onboardingSteps(ready, { ...remote, bootstrap: 'bootstrap' }, false)[2].status).toBe('active');
     expect(onboardingSteps(ready, { ...remote, state: 'failed' }, false)[2].status).toBe('todo');
   });
 

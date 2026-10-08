@@ -68,6 +68,12 @@ pub async fn refresh(state: &NodeState) {
     let Ok(_operation) = state.remote_recovery.try_lock() else {
         return;
     };
+    // The ceremony owns the first restart/unlock. A passive status probe must
+    // not replace that screen with LockedNode and cancel its continuation.
+    #[cfg(all(desktop, not(feature = "mobile")))]
+    if state.remote_owner.try_lock().map(|setup| setup.is_active()).unwrap_or(true) {
+        return;
+    }
     {
         let mut last = state.home_last_probe.lock().unwrap();
         if last.is_some_and(|at| at.elapsed() < interval) {

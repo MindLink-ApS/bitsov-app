@@ -22,6 +22,7 @@ pub mod at_rest;
 pub mod pairing;
 mod trust;
 pub mod remote_access;
+pub mod sas;
 
 pub mod connection_retry;
 

@@ -415,7 +415,7 @@ export function Onboarding(props: {
 
             <Show when={props.pairing().bootstrap}>
               <p class="hint" data-identity-free>
-                Your node is identity-free (fresh install). {props.status().local_owner && !props.pairing().remote ? "Create your identity with the owner setup below." : props.pairing().remote ? "Restore your identity at your node." : "You can restore an existing identity on this Mac."} Nothing has been created yet.
+                Your node is identity-free (fresh install). {props.status().local_owner && !props.pairing().remote ? "Create your identity with the owner setup below." : props.pairing().remote ? "Set up your box with the owner setup below." : "You can restore an existing identity on this Mac."} Nothing has been created yet.
               </p>
             </Show>
 

@@ -28,6 +28,7 @@ fn setup(endpoint: String, pinned: bool) -> (RemoteDescriptor, Arc<Pins>) {
     let node_id = f["node_id"].as_str().unwrap().to_owned();
     let signature = node.sign(descriptor_signature_message(&node_id, &transport).as_bytes());
     let descriptor = validate_descriptor(StoredDescriptor {
+        bootstrap_routes: vec![], endpoints: vec![], endpoints_signature: None, box_transport_pubkey: String::new(), box_transport_signature: None,
         v: 1,
         endpoint: endpoint.clone(),
         node_id: node_id.clone(),
@@ -260,4 +261,110 @@ async fn locked_status_preserves_optional_attempt_budget_without_echoing_other_f
         assert_eq!(connection.status().await.unwrap().attempts_left, attempts);
         server.await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn bootstrap_sas_preserves_one_completed_session_across_requests_and_fallbacks() {
+    let live = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let dead = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let first = dead.local_addr().unwrap().to_string(); drop(dead);
+    let second = live.local_addr().unwrap().to_string();
+    let box_key = hex::encode(X25519PublicKey::from(&StaticSecret::from([9;32])).to_bytes());
+    let descriptor = validate_descriptor(StoredDescriptor {
+        v:2, endpoint:first.clone(), endpoints:vec![first, second], bootstrap_routes:vec![], endpoints_signature:None,
+        node_id:String::new(), transport_pubkey:String::new(), transport_signature:String::new(),
+        box_transport_pubkey:box_key.clone(), box_transport_signature:None, code:None,sealed_code:None,hosted_by:None,
+    }).unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = live.accept().await.unwrap();
+        let secret = [9;32];
+        let mut hs = Builder::new(NOISE_PROTOCOL.parse().unwrap()).local_private_key(&secret).build_responder().unwrap();
+        let mut out = vec![0;MAX_HANDSHAKE_FRAME];
+        let message = read_frame(&mut stream, MAX_HANDSHAKE_FRAME).await.unwrap(); hs.read_message(&message, &mut out).unwrap();
+        let n = hs.write_message(&[], &mut out).unwrap(); write_frame(&mut stream, &out[..n]).await.unwrap();
+        let message = read_frame(&mut stream, MAX_HANDSHAKE_FRAME).await.unwrap(); hs.read_message(&message, &mut out).unwrap();
+        let hash = hs.get_handshake_hash().to_vec();
+        let client_static = hs.get_remote_static().unwrap().to_vec();
+        let mut noise = hs.into_transport_mode().unwrap();
+        let message = read_frame(&mut stream, MAX_TRANSPORT_FRAME).await.unwrap();
+        let auth: RemoteAuthRequest = serde_json::from_slice(&decode_transport(&mut noise, &message, MAX_AUTH_PLAINTEXT).unwrap()).unwrap();
+        assert_eq!(auth.v, 1); assert!(auth.code.is_none());
+        let reply = json!({"status":"ok","v":1,"client_id":"a".repeat(32),"scopes":["read","receive","identity"]});
+        let frame = encode_transport(&mut noise, &serde_json::to_vec(&reply).unwrap()).unwrap(); write_frame(&mut stream, &frame).await.unwrap();
+        for (path, body) in [("/api/v1/identity/create-pending", "commitment"), ("/api/v1/identity/finalize", "chosen password")] {
+            let message = read_frame(&mut stream, MAX_TRANSPORT_FRAME).await.unwrap();
+            let request = decode_transport(&mut noise, &message, MAX_NOISE_PLAINTEXT).unwrap();
+            let text = std::str::from_utf8(&request).unwrap();
+            assert!(text.starts_with(&format!("POST {path} HTTP/1.1\r\n")));
+            assert!(text.contains("Authorization: Bearer bst-token\r\n"));
+            assert!(text.ends_with(body));
+            let frame = encode_transport(&mut noise, b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}").unwrap();
+            write_frame(&mut stream, &frame).await.unwrap();
+        }
+        (hash, client_static)
+    });
+    let dir = tempfile::tempdir().unwrap(); let key = ClientKey::load_or_create(dir.path()).unwrap();
+    let mut connection = BootstrapConnection::connect(&descriptor,&key,"fixture").await.unwrap();
+    let binding = connection.binding;
+    for (path, body) in [("/api/v1/identity/create-pending", "commitment"), ("/api/v1/identity/finalize", "chosen password")] {
+        let (status, _) = connection.request("POST",path,body.as_bytes(),"bst-token").await.unwrap(); assert_eq!(status,200);
+    }
+    let (hash, client_static) = server.await.unwrap();
+    assert_eq!(&binding.handshake_hash[..], &hash); assert_eq!(&binding.client_static[..], &client_static);
+    assert_eq!(hex::encode(binding.box_public_key),box_key);
+}
+
+#[test]
+fn v1_refuses_even_empty_v2_wire_fields() {
+    let node = SigningKey::from_bytes(&[7;32]);
+    let live = [12;32];
+    let node_id = hex::encode(node.verifying_key().as_bytes());
+    let public = hex::encode(live);
+    let value = json!({"v":1,"endpoint":"box.local:9737","node_id":node_id,
+        "transport_pubkey":public,"transport_signature":base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(node.sign(descriptor_signature_message(&node_id,&public).as_bytes()).to_bytes()),
+        "code":base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([3;32]), "endpoints":[]});
+    let uri = format!("bitsov://pair/{}",base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(&value).unwrap()));
+    assert!(parse_pairing_link(&uri).is_err());
+}
+
+#[test]
+fn finalize_preserves_fallback_routes_and_rejects_changed_or_unsigned_pins() {
+    let dir=tempfile::tempdir().unwrap();
+    let pins=Arc::new(Pins::default());
+    let box_key="22".repeat(32);
+    let previous=validate_descriptor(StoredDescriptor {
+        v:2,endpoint:"dead.local:9737".into(),endpoints:vec!["dead.local:9737".into(),"192.168.1.2:9737".into()],bootstrap_routes:vec![],endpoints_signature:None,
+        node_id:String::new(),transport_pubkey:String::new(),transport_signature:String::new(),box_transport_pubkey:box_key.clone(),box_transport_signature:None,
+        code:None,sealed_code:None,hosted_by:None,
+    }).unwrap().with_pin_store(pins);
+    persist_at(&config_path(dir.path()), &previous).unwrap();
+    let node=SigningKey::from_bytes(&[7;32]);let id=hex::encode(node.verifying_key().as_bytes());let live="09".repeat(32);
+    let sign=|text:String|base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(node.sign(text.as_bytes()).to_bytes());
+    let box_sig=sign(format!("bitsov-box-transport-v1:{id}:{box_key}"));let live_sig=sign(descriptor_signature_message(&id,&live));
+    assert!(commit_bootstrap(dir.path(),&previous,&id,&"33".repeat(32),&box_sig,&live,&live_sig).is_err());
+    assert!(commit_bootstrap(dir.path(),&previous,&id,&box_key,"forged",&live,&live_sig).is_err());
+    let committed=commit_bootstrap(dir.path(),&previous,&id,&box_key,&box_sig,&live,&live_sig).unwrap();
+    let proxy=RemoteProxy {descriptor:Arc::new(Mutex::new(previous.clone())),local_addr:"127.0.0.1:1".parse().unwrap(),
+        shutdown:watch::channel(false).0,last_error:Arc::new(Mutex::new(None))};
+    proxy.finish_bootstrap(committed.clone()).unwrap();
+    assert_eq!(proxy.descriptor.lock().unwrap().node_id,id);
+    let (unrelated, _) = setup("other:9737".into(), false);
+    assert!(proxy.finish_bootstrap(unrelated).is_err());
+    assert_eq!(proxy.descriptor.lock().unwrap().node_id,id);
+    assert_eq!(committed.bootstrap_routes,previous.endpoints);
+    assert_eq!(committed.box_pin().unwrap().unwrap().public_key,box_key);
+    let restored=load_persisted(dir.path()).unwrap().unwrap();
+    assert_eq!(restored.bootstrap_routes,previous.endpoints);
+    assert_eq!(restored.transport_pubkey,live);
+    assert!(commit_bootstrap(dir.path(),&previous,&id,&box_key,&box_sig,&live,"forged").is_err());
+}
+
+#[test]
+fn bootstrap_preview_and_import_use_box_fingerprint_without_an_identity() {
+    let link = json!({"v":2,"endpoint":"box.local:9737","endpoints":["box.local:9737"],
+        "box_transport_pubkey":"22".repeat(32),"code":base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([3;32])});
+    let uri = format!("bitsov://pair/{}",base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(&link).unwrap()));
+    assert_eq!(preview_pairing_link(&uri).unwrap().node_id_fingerprint,"22222222…22222222");
+    let dir=tempfile::tempdir().unwrap();
+    assert_eq!(import_pairing_link(dir.path(),&uri).unwrap().node_id_fingerprint,"22222222…22222222");
 }
