@@ -18,6 +18,7 @@ fn main() {
             "node_unlock",
             "node_unlock_password",
             "node_unlock_remember",
+            "remote_owner_setup",
             "local_owner_create",
             "local_owner_cancel",
             "local_owner_finalize",

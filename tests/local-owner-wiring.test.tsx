@@ -34,3 +34,10 @@ it.each([false, true])('shows owner enrollment warning while ready, including af
   expect(document.body.textContent).toContain('owner console');
   expect(document.querySelector('[data-local-owner]')).toBeNull();
 });
+it('opens remote setup on an identity-free box before live readiness', async () => {
+  const calls = mount(false, true);
+  await vi.waitFor(() => expect(document.querySelector('[data-remote-owner]')).not.toBeNull());
+  expect(document.querySelector('[data-local-owner]')).toBeNull();
+  expect(document.querySelector('[data-restore-open]')).toBeNull();
+  expect(calls).not.toContain('remote_owner_setup');
+});

@@ -91,6 +91,17 @@ mod ffi {
             sig_cap: usize,
             out_sig_len: *mut usize,
         ) -> i32;
+        pub fn bitsov_dk_sign_setup(
+            blob: *const u8,
+            blob_len: usize,
+            msg: *const u8,
+            msg_len: usize,
+            reason: *const std::ffi::c_char,
+            finish: i32,
+            out_sig: *mut u8,
+            sig_cap: usize,
+            out_sig_len: *mut usize,
+        ) -> i32;
     }
 }
 
@@ -165,6 +176,45 @@ pub fn sign(blob: &[u8], message: &[u8], reason: &str) -> Result<Vec<u8>, Device
     Ok(signature)
 }
 
+/// One SAS approval followed by one matching first-unlock signature.
+#[cfg(target_os = "macos")]
+pub fn sign_setup(blob: &[u8], message: &[u8], reason: &str, finish: bool) -> Result<Vec<u8>, DeviceKeyError> {
+    if blob.is_empty() || blob.len() > BLOB_CAP {
+        return Err(DeviceKeyError::Invalid);
+    }
+    let reason = std::ffi::CString::new(reason).map_err(|_| DeviceKeyError::Other(-5))?;
+    let mut signature = vec![0u8; SIG_CAP];
+    let mut signature_len = 0;
+    // SAFETY: input slices and the C string outlive the synchronous call. The
+    // output buffer is live and passed with its exact capacity.
+    let status = unsafe {
+        ffi::bitsov_dk_sign_setup(
+            blob.as_ptr(),
+            blob.len(),
+            message.as_ptr(),
+            message.len(),
+            reason.as_ptr(),
+            i32::from(finish),
+            signature.as_mut_ptr(),
+            SIG_CAP,
+            &mut signature_len,
+        )
+    };
+    if status != OK {
+        return Err(status_error(status));
+    }
+    if signature_len == 0 || signature_len > SIG_CAP {
+        return Err(DeviceKeyError::Other(status));
+    }
+    signature.truncate(signature_len);
+    Ok(signature)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn sign_setup(_: &[u8], _: &[u8], _: &str, _: bool) -> Result<Vec<u8>, DeviceKeyError> {
+    Err(DeviceKeyError::Unavailable)
+}
+
 #[cfg(target_os = "macos")]
 pub fn public_key(blob: &[u8]) -> Result<[u8; PUBLIC_KEY_LEN], DeviceKeyError> {
     if blob.is_empty() || blob.len() > BLOB_CAP {
@@ -230,6 +280,26 @@ mod tests {
         );
         assert_eq!(public.len(), PUBLIC_KEY_LEN);
         assert_eq!(public[0], 0x04);
+    }
+
+    #[test]
+    fn setup_authorization_is_one_use_and_bound_to_key_node_and_client() {
+        let (blob, public) = create(Policy::NoPromptForTests).unwrap();
+        let register = b"bitsov-device-register-v2\nnode:fp\nclient:client\npublic_key:04ab\nsas_digest:55";
+        let unlock = b"bitsov-node-unlock-v1\nnode:fp\nclient:client\nepoch:0\nkey:key\nchallenge:nonce\nbox_transport:box";
+        assert!(sign_setup(&blob, unlock, "Test first unlock", true).is_err());
+        assert!(sign_setup(&blob, b"arbitrary message", "Test setup", false).is_err());
+        let signature = sign_setup(&blob, register, "Test setup", false).unwrap();
+        assert!(verify(&public, register, &signature));
+        let wrong = b"bitsov-node-unlock-v1\nnode:other\nclient:client\nepoch:0\nkey:key\nchallenge:nonce\nbox_transport:box";
+        assert!(sign_setup(&blob, wrong, "Test first unlock", true).is_err());
+        sign_setup(&blob, register, "Test setup", false).unwrap();
+        let signature = sign_setup(&blob, unlock, "Test first unlock", true).unwrap();
+        assert!(verify(&public, unlock, &signature));
+        assert!(sign_setup(&blob, unlock, "Test first unlock", true).is_err());
+        sign_setup(&blob, register, "Test setup", false).unwrap();
+        let (other_blob, _) = create(Policy::NoPromptForTests).unwrap();
+        assert!(sign_setup(&other_blob, unlock, "Test first unlock", true).is_err());
     }
 
     #[test]

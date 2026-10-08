@@ -1,6 +1,7 @@
 import { pollWatchBatch, statusWatchSamples, watchPoller, type WatchSamples, type WatchUpdates } from './control/watches';
 import type { AssistantId } from './control/assistants';
 import { LockedNode, RememberUnlock } from './onboarding/LockedNode';
+import { RemoteOwnerCeremony } from './onboarding/RemoteOwnerCeremony';
 import { LocalOwnerCeremony } from './onboarding/LocalOwnerCeremony';
 import { InitializationRepair } from './onboarding/InitializationRepair';
 import { SoftError } from './control/SoftError';
@@ -99,7 +100,7 @@ function AppScreen() {
   // A ready node can arrive before its pairing reply. Startup snapshots do not
   // establish the final mode, so wait for authentication before offering trust.
   const showIdentityGate = () =>
-    ((status().ready || (pairing().bootstrap === 'bootstrap' && !pairing().remote)) && (pairing().state === 'paired' || pairing().state === 'fallback')) ||
+    ((status().ready || pairing().bootstrap === 'bootstrap') && (pairing().state === 'paired' || pairing().state === 'fallback')) ||
     restoring() || restoreError() !== null;
   createEffect(() => {
     if (source().mode === 'node' && trustAck() && trustKey()) setSessionTrust(trustKey());
@@ -266,19 +267,23 @@ function AppScreen() {
             }
           >
             <Show when={!trustAck()}>
-              <Show when={status().local_owner && pairing().bootstrap === 'bootstrap' && !pairing().remote}
-                fallback={<IdentityGate
-                source={source()}
-                nodeId={() => status().node_id}
-                remote={pairing().remote}
-                canRestore={!pairing().bootstrap || (!pairing().remote && pairing().bootstrap === 'bootstrap')}
-                bootstrap={!!pairing().bootstrap}
-                onContinue={acceptTrust}
-                onRestoring={setRestoring}
-                restoreError={restoreError}
-                setRestoreError={setRestoreError}
-              />}>
-                <LocalOwnerCeremony onComplete={() => void poll()} />
+              <Show when={pairing().remote && pairing().bootstrap === 'bootstrap'} fallback={
+                <Show when={status().local_owner && pairing().bootstrap === 'bootstrap' && !pairing().remote}
+                  fallback={<IdentityGate
+                  source={source()}
+                  nodeId={() => status().node_id}
+                  remote={pairing().remote}
+                  canRestore={!pairing().bootstrap || (!pairing().remote && pairing().bootstrap === 'bootstrap')}
+                  bootstrap={!!pairing().bootstrap}
+                  onContinue={acceptTrust}
+                  onRestoring={setRestoring}
+                  restoreError={restoreError}
+                  setRestoreError={setRestoreError}
+                />}>
+                  <LocalOwnerCeremony onComplete={() => void poll()} />
+                </Show>
+              }>
+                <RemoteOwnerCeremony onComplete={() => void poll()} />
               </Show>
             </Show>
           </Show>
