@@ -356,11 +356,12 @@ it('follows the host when it knows: no item means typed first even with a stale 
   expect(localStorage.getItem(REMEMBERED)).toBeNull();
 });
 
-it('keeps Touch ID offered after a failed read when the host still sees the item', () => {
+it('puts typed first after a failed read, keeping Touch ID as a link while the host still sees the item', () => {
   const mount = document.createElement('div'); document.body.appendChild(mount);
   dispose = render(() => <LockedNode typedUnlockSupported state="no-password" passwordRemembered onUnlock={async () => {}} onUnlockWithPassword={async () => {}} />, mount);
   expect(mount.querySelector('#node-unlock-password')).not.toBeNull();
-  expect(buttonNamed(mount, 'Unlock with Touch ID')).toBeDefined();
+  expect(buttonNamed(mount, 'Unlock with password')?.className).toContain('primary');
+  expect(mount.querySelector('[data-unlock-saved-path] button')?.textContent).toBe('Unlock with Touch ID');
   expect(localStorage.getItem(REMEMBERED)).toBe('1');
 });
 

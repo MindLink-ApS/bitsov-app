@@ -112,7 +112,7 @@ fn remembered_password_existence_query_never_reads_or_prompts() {
     ] {
         assert!(exists.contains(marker), "itemExists lost {marker}");
     }
-    for forbidden in ["kSecReturnData", "kSecReturnAttributes", "kSecReturnRef", "localizedReason"] {
+    for forbidden in ["kSecReturn", "kSecValueData", "localizedReason"] {
         assert!(!exists.contains(forbidden), "itemExists must not use {forbidden}");
     }
     let home = swift_fn(&swift, "bitsov_home_exists");
@@ -121,6 +121,10 @@ fn remembered_password_existence_query_never_reads_or_prompts() {
     assert!(home.contains("guard passwordNode(name) != nil else { return errBadArgument }"));
     assert!(home.contains("readWithFallback { itemExists(wrappedService(name), \"BitSov\", $0) }"));
     assert!(home.contains("let legacy = itemExists(name, \"BitSov\", true)"));
+    assert!(
+        !home.contains("itemExists(name, \"BitSov\", false)"),
+        "never search legacy plaintext"
+    );
     for forbidden in ["readItem(", "unwrapPassword", "copyOutput", "LAContext()", "output"] {
         assert!(!home.contains(forbidden), "bitsov_home_exists must not use {forbidden}");
     }
@@ -150,6 +154,11 @@ fn remembered_password_existence_query_never_reads_or_prompts() {
     let unlock = read("src/home_unlock.rs");
     let status = rust_fn(&unlock, "password_remembered");
     assert!(status.contains("home_keychain::password_remembered(&node)"));
+    // Only a locked, enrolled device with a known node id is queried.
+    assert!(status.contains(
+        "if !state.home_locked.load(Ordering::SeqCst) || !matches!(unlock_state, \"ready\" | \"no-password\") {"
+    ));
+    assert!(status.contains("let node = state.node_id.lock().unwrap().clone()?;"));
     assert!(!status.contains("home_keychain::password("));
     assert!(!status.contains("device_sign"));
     let app = read("src/app.rs");

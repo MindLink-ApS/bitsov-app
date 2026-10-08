@@ -26,9 +26,12 @@ export function LockedNode(props: {
   // The host's answer wins; the renderer hint covers hosts that cannot say.
   const [hint, setHint] = createSignal(unlockRemembered());
   const hostKnows = () => typeof props.passwordRemembered === 'boolean';
-  const remembered = () => hostKnows() ? !!props.passwordRemembered : hint();
+  // After a failed read (`no-password`) the item may exist but no longer open
+  // (fingerprints changed), so typed stays first; Touch ID remains a link.
+  const remembered = () => props.state !== 'no-password' && (hostKnows() ? !!props.passwordRemembered : hint());
   createEffect(() => {
-    if (hostKnows()) { setUnlockRemembered(!!props.passwordRemembered); setHint(!!props.passwordRemembered); }
+    const host = props.passwordRemembered;
+    if (typeof host === 'boolean' && host !== hint()) { setUnlockRemembered(host); setHint(host); }
   });
   createEffect(() => {
     if (props.state === 'no-password') {
