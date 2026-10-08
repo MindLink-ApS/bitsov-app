@@ -15,8 +15,8 @@ the supplied release facts; its checksums are recorded but release signature/byt
 remain unverified here.
 Config drift, owner lifecycle and CS-1 remain CI checks; a signed/hardened Mac
 interactive run remains separate
-acceptance. The node now supports remote first run, but app PR #192 is not
-merged yet; remote first run is not supported by this app pin alone.
+acceptance. Remote first run is implemented on main (app #192 + node rc13);
+runtime acceptance on real hardware (Touch ID + a fresh Pi) is still pending.
 See [upgrade checks](NODE_RC13_UPGRADE.md) and [local owner ceremony](LOCAL_OWNER_CEREMONY.md).
 
 ## Node choices

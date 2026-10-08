@@ -9,8 +9,9 @@ Current change: rc13 pin (`d625e85`) from rc12 (`41b9e78`, app #178).
 The supplied release facts identify rc13 as published and GPG-signed. Manifest
 and binary hashes are recorded without fetching or local release verification.
 [NODE_RC13_UPGRADE.md](docs/NODE_RC13_UPGRADE.md) records the node additions and
-app integration limits. Remote first run is supported by the node; app PR #192
-is not merged yet. The September workflow rows below are historical.
+app integration limits. Remote first run is implemented on main (app #192 +
+node rc13); runtime acceptance on real hardware (Touch ID + a fresh Pi) is still
+pending. The September workflow rows below are historical.
 
 | id | opened | evidence | state |
 |---|---|---|---|

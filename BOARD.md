@@ -16,8 +16,9 @@ binary hashes are recorded; no release assets were fetched or verified locally.
 Node additions include channel caps / hub-only owner status, `--home` / systemd,
 signed endpoint lists, claim-code / four-word SAS enrolment, LAN box setup with
 box approval, identity-signed live transport pins, grant payee allowlists / dedupe,
-and a copied-state fence. Remote first run is supported by the node; app PR #192
-is not merged yet. Local owner opt-in and retained-identity consent gates remain.
+and a copied-state fence. Remote first run is implemented on main (app #192 +
+node rc13); runtime acceptance on real hardware (Touch ID + a fresh Pi) is still
+pending. Local owner opt-in and retained-identity consent gates remain.
 See [the upgrade and validation checklist](docs/NODE_RC13_UPGRADE.md).
 
 The September factory entries below are historical context, not current PR status:
@@ -46,7 +47,7 @@ Runs on Linux + macOS since `v0.3.0-rc5` (Darwin SKIP retired, PR #9). Publish s
 
 ## BLOCKED
 
-- **rc13 acceptance.** Inspect Sidecar and Mac Package CI; runtime/packaging checks were not run locally. Remote first run is supported by the node; app PR #192 is not merged yet. No runtime acceptance is claimed.
+- **rc13 acceptance.** Inspect Sidecar and Mac Package CI; runtime/packaging checks were not run locally. Remote first run is implemented on main (app #192 + node rc13); runtime acceptance on real hardware (Touch ID + a fresh Pi) is still pending.
 - **Darwin / Windows notarization.** Signed macOS/Windows node sidecars have shipped since `v0.3.0-rc5` (B10 landed; Darwin SKIP retired, PR #9). They are GPG-signed only, not notarized or Authenticode-signed, so Gatekeeper and SmartScreen block them by default. No Mac/Win app build ships without a verified signed node sidecar. Publish stays human.
 - **Publish** is human-only. rc13 is published and GPG-signed per supplied facts; signed-byte verification remains a gate. The app itself is unpublished (`/bitsov/app` stays a waitlist, G5). Package-time sidecar verification must be enforced before public downloads.
 
