@@ -44,10 +44,17 @@ charter, the build is wrong.
   any mobile/paired/hosted PR that predates this. Signing ≠ encryption.
 - **G3 — Calls not marketed.** VoIP is directly-reachable-only until NAT traversal lands.
   **FAIL** any launch/website/app copy that presents "call/meet" as a working feature.
-- **G4 — AI genuinely deferred.** Participants are `node_id`s; the AI seam is reserve-only
-  (a node_id may *later* be an agent, invoked inline only on explicit request — never ambient).
-  **FAIL** any shipped agent runtime, any always-listening bot, or any copy implying an AI
-  participant exists before M11.
+- **G4 — Bounded v1 assistants (owner re-scope, 2026-10-07).** Named assistants may run
+  on user invocation or while the app is open; **FAIL** unattended agent runtime.
+  User-facing copy says **"assistant", not "agent"**, and must match shipped abilities.
+  AI-as-a-client of the user's own node comes first; own-peer/`node_id` AI stays later
+  (M11). The app brokers; **FAIL** any node-to-cloud-AI connection. **FAIL** any paid AI
+  call above **55 sats all-in** (including fees), any paid AI without its **own separate
+  pairing and small spend grant revocable without touching the owner's**, or **any AI
+  pay path before a payee allowlist on the node grant lands**. v1 inbox access is counts
+  only; **FAIL** message-body access without user opt-in per conversation. Assistants
+  produce drafts; **FAIL** assistant-initiated payments or a bypass of the user's send
+  through the existing budget/approval. See [AI assistants](docs/AI-ASSISTANTS.md).
 - **G5 — Website inert until real artifacts.** `/bitsov/app` is a waitlist. **FAIL** any
   `website-release-metadata.json` change that adds an app artifact, sets `public_repositories.app`,
   or flips `public_downloads_enabled` for the app before a real **signed** app binary exists. The
@@ -76,8 +83,10 @@ charter, the build is wrong.
   (M5/CS-8)** land — pairing is auth, transport is confidentiality; **both** required.
 - No "phone-native / node in your pocket" code or copy before **relay #216 (M7)** is live.
 - No multi-party meet before **group-crypto (MLS 960–962)** is verified production-ready.
-- AI participant (M11/CS-14) stays seam-only until the operator explicitly re-scopes MindLink
-  toward an on-prem AI-model posture.
+- Follow [AI assistants](docs/AI-ASSISTANTS.md): own-node client assistants first; separate
+  paid-AI pairing/grant and a node-grant payee allowlist before any AI pay path, with
+  the 55-sat all-in cap and existing budget/approval enforced. Own-peer AI (M11/CS-14)
+  stays later; the v1 re-scope does not authorize an unattended runtime.
 
 ## E. Verdict format (emit each pass)
 ```
@@ -92,7 +101,8 @@ Must-fix before next ship: <list>
 ```
 - **GO** only when A holds, every applicable B/C gate passes, and D is respected for what's shipping.
 - **QUALIFIED-GO** approves a safe subset (e.g. desktop T-SELF) while explicitly blocking the rest
-  (mobile/paired/hosted/calls/AI) — the current expected state until G2 + relay land.
+  (mobile/paired/hosted/calls/AI) according to each feature's applicable gates. v1
+  own-node assistants use G4's rules; they do not require M11 or the relay.
 - **NO-GO** on any A violation or an unmet gate for the thing being shipped.
 
 ## G. Executable checks (run these — don't eyeball it)
@@ -125,9 +135,15 @@ if grep -REoh 'https?://[^"'"'"' )]*/api/v1' src/ src-tauri/ 2>/dev/null | grep 
 ```
 **G3 / G4 / honesty ceiling — copy-claims scan (must return NOTHING)**
 ```bash
-grep -REin 'download now|app store|google play|replaces (slack|zoom|workspace)|surveillance-proof|unhackable|node in your pocket|always-on node|call (anyone|any phone)|\bAI (agent|participant|assistant)\b' \
+grep -REin 'download now|app store|google play|replaces (slack|zoom|workspace)|surveillance-proof|unhackable|node in your pocket|always-on node|call (anyone|any phone)|\bAI (agent|participant)\b' \
   src/ ../Website/src/pages/BitSovRelease/ 2>/dev/null
 ```
+Named "assistant" / "AI assistant" copy is allowed when it accurately describes shipped
+abilities. Review user-facing uses of "agent" manually; technical identifiers are not
+product copy. This scan does not verify runtime, privacy or spending controls: review
+all G4 conditions above separately. `scripts/authority-check.sh` checks existing static
+claims only; a pass does not establish compliance with the re-scoped G4.
+
 **G5 — website download gate stays closed until a real signed app binary**
 ```bash
 jq -e '.public_downloads_enabled==false and .public_repositories.app=="" and (.artifacts|length)==0' \

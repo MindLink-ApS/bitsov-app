@@ -670,7 +670,7 @@ export type CallQuote = {
   signal_max_routing_fee_msat: number;
   call_total_msat: number | null;
 };
-/** `call_signal`: one paid call signal. */
+/** `call_signal`: one paid call signal. `total_msat` is a ceiling, not a settled amount. */
 export type CallReceipt = {
   message_id: string;
   kind: number;

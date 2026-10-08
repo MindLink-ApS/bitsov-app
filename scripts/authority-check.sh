@@ -72,8 +72,8 @@ chk "G2: renderer holds no node credential and makes no direct node call" \
   'renderer_no_direct_node_ok'
 chk "G2: no hard-coded STUN/TURN server (calls contact only an owner-set STUN)" \
   '! grep -REqin "(stuns?|turns?):(//)?[a-z0-9-]+\.[a-z0-9.-]+" src/ 2>/dev/null'
-chk "shell capability: no broad spawn/kill, sidecar-scoped only" \
-  '! grep -Eq "\"shell:allow-(spawn|kill)\"" src-tauri/capabilities/default.json && grep -q "\"sidecar\": true" src-tauri/capabilities/default.json'
+chk "shell capability: Rust owns execution; no renderer shell permissions" \
+  '! grep -REq "\"shell:" src-tauri/capabilities/ src-tauri/mobile-capabilities/ src-tauri/tauri*.conf.json'
 chk "CSP is set (not null)" \
   'grep -Eq "\"csp\"[[:space:]]*:[[:space:]]*\"" src-tauri/tauri.conf.json'
 

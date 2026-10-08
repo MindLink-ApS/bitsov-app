@@ -20,6 +20,7 @@ pub mod control;
 pub mod jarvis;
 pub mod at_rest;
 pub mod pairing;
+mod trust;
 pub mod remote_access;
 
 pub mod connection_retry;

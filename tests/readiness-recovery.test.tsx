@@ -63,6 +63,7 @@ it.each([false, true])('funding-address refusal joins the shared readiness notic
   const own = '1'.repeat(64);
   const replies: Record<string, () => unknown> = {
     node_status: () => ({ ready: true, node_id: own, error: null }),
+    trust_acknowledge: () => true,
     pairing_status: () => ({ state: 'paired', scopes: ['read', 'receive'], short_code: null, code_from_node: true, reason: null, remote: false, bootstrap: null }),
     node_overview: () => ({ money_ready: ready, node_id: own, status: 'ok', version: 'api v2', connected_peers: 0, e2ee_sessions: 0, pending_deliveries: 0, lightning_available: lastReady, block_height: null, uptime_secs: 1, lightning_backend: 'ldk', chain_backend: 'esplora', read_at: Date.now() }),
     peers_list: () => [], rooms_list: () => [],
@@ -90,6 +91,7 @@ it.each([false, true])('funding-address refusal joins the shared readiness notic
   dispose = render(() => <App />, mount);
   await vi.waitFor(() => expect([...mount.querySelectorAll('button')].some((b) => b.textContent?.includes('I understand'))).toBe(true));
   [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
+  await vi.waitFor(() => expect(mount.querySelector('[data-first-run]')).toBeNull());
   await vi.waitFor(() => expect(mount.querySelector('[data-tab="wallet"]')).not.toBeNull());
   mount.querySelector<HTMLButtonElement>('[data-tab="wallet"]')!.click();
   await vi.advanceTimersByTimeAsync(0);
