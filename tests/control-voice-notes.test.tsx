@@ -156,6 +156,7 @@ function stubHost(overrides: Record<string, Reply> = {}) {
   const spend: SpendView = { state: 'locked', basis: null, open_until_ms: null, pending: null, window_ms: 600_000 };
   const REPLIES: Record<string, Reply> = {
     node_status: () => ({ ready: true, node_id: OWN, error: null }),
+    trust_acknowledge: () => true,
     pairing_status: () => paired,
     node_overview: () => ({
       node_id: OWN, status: 'ok', version: 'api v2', connected_peers: 1, e2ee_sessions: 1, pending_deliveries: 0,
