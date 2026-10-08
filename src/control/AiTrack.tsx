@@ -1,4 +1,4 @@
-import { ASSISTANTS, type AssistantId, type AssistantThread } from './assistants';
+import { ASSISTANTS, modelProposalText, type ModelProposal, type LocalTurn, type AssistantId, type AssistantThread } from './assistants';
 import { SoftError } from './SoftError';
 import { DelayedSpinner } from './DelayedSpinner';
 // "Ask your node": the AI track in the main window.
@@ -59,6 +59,7 @@ type Turn = {
   answer?: Answer;
   source?: { routes: string[]; freshness: AiFreshness; receivedAt: number };
   proposal?: Proposal;
+  modelTurn?: LocalTurn;
   noRead?: NoRead;
   error?: string;
   // remote
@@ -125,7 +126,7 @@ export function AiTrack(props: {
     if (!props.assistant) return;
     const t = session.turns.find(t => t.id === id);
     if (!t || t.saved || ['reading', 'preview', 'sending'].includes(t.state)) return;
-    const answer = t.remote?.text ?? (t.answer
+    const answer = t.modelTurn?.output.kind === 'proposal' ? modelProposalText(t.modelTurn.output.proposal) : t.remote?.text ?? (t.answer
       ? [t.answer.text, ...t.answer.cards.map(c => cardText(c, nameOf))].join('\n')
       : t.noRead ? noReadText(t.noRead) : t.error ?? 'Nothing was sent.');
     setThreadBusy(true);
@@ -213,9 +214,9 @@ export function AiTrack(props: {
     return widestExposure(candidates);
   };
   const remote = () => session.provider !== 'local';
-  /** Own tier with a picked loopback model: same disclose/send as remotes. */
+  /** Named Own assistants use the host loop; original Ask keeps disclose/send. */
   const ownModel = () => session.provider === 'local' && !!provider()?.model;
-  const needsDisclose = () => remote() || ownModel();
+  const needsDisclose = () => remote() || (!assistant && ownModel());
   const busy = () => session.turns.some((t) => t.state === 'reading' || t.state === 'sending') || localBusy() || threadBusy() || !threadReady();
   /** Who answers is fixed while a preview waits for Send: Send or Don't send it first. */
   const locked = () => busy() || pending().length > 0;
@@ -295,6 +296,17 @@ export function AiTrack(props: {
     scroll();
 
     try {
+      if (props.assistant && ownModel()) {
+        try {
+          const result = await props.source.aiLocalTurn(props.assistant, question, draftText());
+          update(id, { state: 'answered', modelTurn: result, answer: {
+            text: result.output.kind === 'answer' ? result.output.text : 'Draft only — nothing was sent or changed.',
+            cards: result.reads.flatMap(read => read.state === 'live'
+              ? answerFrom(read, { kind: 'read', topic: read.topic, sinceMs: null, window: null }, nameOf).cards : []),
+          } });
+        } catch (e) { update(id, { state: 'error', error: asActionError(e).message }); }
+        return scroll();
+      }
       if (assistant && (intent.kind === 'act' || intent.kind === 'no-peer')) {
         update(id, { state: 'answered', answer: { text: 'This assistant is read-only. It cannot send, spend or prepare drafts.', cards: [] } });
         return scroll();
@@ -512,7 +524,7 @@ export function AiTrack(props: {
               </div>
               <h2>Ask about your own node</h2>
               <p class="hint">
-                {assistant ? 'Ask about the topics in this assistant’s role. Rules answer here, or choose a local model and preview each request before sending it to loopback.' : 'This app reads your node through a closed list of read-only routes and answers here. Your node never talks to a model. If you turn on a remote model, each question shows exactly what would leave this computer, and nothing is sent until you press Send.'}
+                {assistant ? 'Ask about the topics in this assistant’s role. Rules answer here. With a local model selected, Ask lets it read up to three topics on this computer and return an answer or a display-only draft.' : 'This app reads your node through a closed list of read-only routes and answers here. Your node never talks to a model. If you turn on a remote model, each question shows exactly what would leave this computer, and nothing is sent until you press Send.'}
               </p>
               <div class="ai-hero-suggestions" aria-label="Suggestions">
                 <For each={suggestions}>
@@ -572,7 +584,7 @@ export function AiTrack(props: {
           </div>
         </Show>
 
-        <Show when={!assistant}>
+        <Show when={!assistant || (props.assistant === 'inbox' && ownModel())}>
         <div
           class="ai-composer-extras"
           classList={{ 'is-open': showExtras() || Boolean(draftText()) }}
@@ -609,7 +621,7 @@ export function AiTrack(props: {
 
         </Show>
         <div class="composer-main ai-composer-main">
-          <Show when={!assistant}><button
+          <Show when={!assistant || (props.assistant === 'inbox' && ownModel())}><button
             type="button"
             class="attach soft ai-plus-btn"
             classList={{ active: showExtras() || Boolean(draftText()) }}
@@ -667,7 +679,9 @@ export function AiTrack(props: {
           <span class="ai-policy-lock" aria-hidden="true">🔒</span>
           <span>
             {assistant
-              ? 'Read-only assistant. No payments, messages or drafts. Rules and local models stay on this computer.'
+              ? ownModel()
+                ? 'Read-only assistant. Up to three reads per question; drafts are display-only. Nothing is sent or spent. The model stays on this computer.'
+                : 'Read-only assistant. No payments, messages or drafts. Rules stay on this computer.'
               : remote()
               ? `Each question shows the exact request for ${provider()?.label ?? 'the remote model'} first. Nothing is approved ahead of time.`
               : ownModel()
@@ -716,11 +730,22 @@ function TurnView(props: {
         <div class="ai-answer" data-ai-answer="answered">
           <div class="bubble" data-ai-text>{t().answer!.text}</div>
           <For each={t().answer!.cards}>{(c) => <CardView card={c} nameOf={props.nameOf} now={props.now} />}</For>
+          <Show when={t().modelTurn}>
+            {(turn) => <>
+              <Show when={turn().output.kind === 'proposal' && (turn().output as Extract<LocalTurn['output'], { kind: 'proposal' }>).proposal}>
+                {(p) => <ModelProposalCard p={p()} />}
+              </Show>
+              <p class="ai-source" data-ai-model-warning>Your node did not check this model answer. Drafts are never executed.</p>
+              <For each={turn().reads}>{read => read.state === 'live'
+                ? <SourceStamp routes={read.routes} line={sourceLine(read.freshness, t().at, props.now)} />
+                : <p class="ai-source">{read.topic}: {noReadText(read.reason)}</p>}</For>
+            </>}
+          </Show>
           <Show when={t().proposal}>{(p) => <ProposalCard p={p()} onPrefill={props.onPrefill} />}</Show>
           <Show when={t().source}>
             {(s) => <SourceStamp routes={s().routes} line={sourceLine(s().freshness, s().receivedAt, props.now)} />}
           </Show>
-          <Show when={!t().source && !t().proposal}>
+          <Show when={!t().source && !t().proposal && !t().modelTurn}>
             <p class="ai-source" data-ai-source="none">{t().saved ? 'Saved answer — historical, not a fresh node read. Model answers are not checked by your node.' : 'Nothing was read from your node for this.'}</p>
           </Show>
         </div>
@@ -935,6 +960,14 @@ function CardView(props: { card: Card; nameOf: (id: string) => string; now: numb
       </Match>
     </Switch>
   );
+}
+
+function ModelProposalCard(props: { p: ModelProposal }) {
+  return <div class="artifact ai-card proposal" data-model-proposal={props.p.kind}>
+    <span class="kind">Draft · display only</span>
+    <div class="bubble quote">{modelProposalText(props.p)}</div>
+    <span class="hint">Review this draft. To send anything, open the contact’s composer yourself.</span>
+  </div>;
 }
 
 function ProposalCard(props: { p: Proposal; onPrefill: (p: Proposal) => void }) {

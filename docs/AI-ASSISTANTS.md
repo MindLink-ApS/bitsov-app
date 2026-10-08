@@ -77,3 +77,47 @@ capability or network destination is added; the sealed development assistant
 window still has no IPC grants. Named assistants keep remote models disabled
 pending the paid-AI gates above. A2 does not add paid calls, watches, a tool
 loop, body access, or an unattended runtime.
+
+## A3 — invoked Own-model read loop
+
+With a running, selected Own model, named assistants send the owner's question
+through `ai_read`'s `local_turn` operation. Rust supplies JSON-schema function tools
+with exactly the assistant's A2 topics and rechecks that allowlist before every
+broker call. It accepts at most three topic reads per invocation (including a
+batch), then allows only a final answer. This counts broker topic reads, not the
+internal GETs needed to project a topic. Tool arguments cannot select a URL or
+route; only payments accepts an optional integer `since_ms`.
+
+The model transport uses the existing host-resolved Ollama/llama.cpp choice at
+`127.0.0.1`, without proxies or redirects. Responses are bounded to 256 KiB and
+each completion has a 60-second timeout; there are at most four completions.
+This path connects to an already running server and launches no process. The
+existing `model_launch` sandbox remains the boundary for host-launched models.
+Remote models remain disabled for named assistants. The original Ask track and
+its explicit disclosure/send flow are unchanged; Own assistant turns run on the
+owner's Ask tap, without a remote disclosure preview.
+
+Broker results remain in tool-role messages, JSON-wrapped as `untrusted_data`.
+The fixed system prompt treats all their contents as data, never instructions.
+The host ignores model prose alongside tool calls and accepts only a strict
+JSON final output: an `answer` with text and the topics read, or a `proposal`
+containing a typed draft. Unknown fields, action variants, invalid tool arguments,
+missing read citations, or malformed/truncated model output fail closed. These
+controls bound authority; they do not establish the truth of model prose. The UI
+marks model answers unchecked and displays the broker cards and freshness.
+
+Wallet can propose pay/request drafts; Inbox can propose message drafts; Node
+cannot propose drafts. Rust validates whole positive sats within the UI's safe
+integer range, a full hex recipient present in the host-local contact budget
+book, and field lengths. Message text must exactly match the owner's separately
+entered `draft_text`; tool results and model prose cannot supply it. The contact
+book is checked locally after generation, never exposed as a new model tool.
+An unknown recipient must be clarified by the owner; the model has no contact
+lookup tool. Contacts not yet in that local book cannot receive a model draft.
+
+**A3 proposals are display-only cards**, with full recipient IDs, amounts and
+text, and no dispatch or composer-prefill callback. The owner must open a contact's
+composer separately. Neither a valid Proposal nor a model answer sends, spends,
+requests an invoice, or changes channels. The rules-only named path remains as in
+A2. Sealed history stores display text only and is never added to the model's
+context; raw tool messages and broker objects remain transient.

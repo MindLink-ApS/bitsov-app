@@ -6945,8 +6945,28 @@ async fn ai_read(
     since_ms: Option<u64>,
     assistant: Option<ai::assistants::Assistant>,
     thread: Option<ai::threads::Request>,
+    local_turn: Option<ai::tool_loop::Request>,
 ) -> Result<serde_json::Value, String> {
     reject_sealed_window(&window)?;
+    if let Some(request) = local_turn {
+        if topic.is_some() || since_ms.is_some() || thread.is_some() {
+            return Err("Choose a local model turn, a topic read, or a thread operation.".into());
+        }
+        let assistant = assistant.ok_or("Choose an assistant first.")?;
+        let path = ai_local_path(window.app_handle())?;
+        drop(window);
+        let saved = ai::local::load_local_file(&path).ok_or(ai::local::HOWTO)?;
+        let choice = ai::local::resolve_saved(Some(&saved)).await.ok_or(ai::local::HOWTO)?;
+        let turn = ai::tool_loop::run(assistant, &request.question, &request.draft_text,
+            |body| ai::local::tool_completion(&choice, body),
+            |topic, since| ai_read_topic(state.inner(), topic, since)).await?;
+        if matches!(&turn.output, ai::tool_loop::Output::Proposal { .. }) {
+            let contacts = with_book(state.inner(), false, |book| Ok(book.contacts.keys().cloned().collect::<Vec<_>>()))
+                .map_err(|_| "Could not validate the draft against your local contact book.".to_string())?;
+            turn.validate_contacts(&contacts)?;
+        }
+        return serde_json::to_value(turn).map_err(|_| "Could not encode the local answer.".into());
+    }
     // Transcript operations reuse Ask's existing guarded command. No new ACL.
     if let Some(request) = thread {
         if topic.is_some() { return Err("Choose a topic read or a thread operation.".into()); }
@@ -15423,6 +15443,14 @@ mod assistant_acl_tests {
             .build(tauri::generate_context!(test = true)).unwrap();
         let main = tauri::WebviewWindowBuilder::new(&app, "main", Default::default()).build().unwrap();
         let sealed = tauri::WebviewWindowBuilder::new(&app, "assistant", Default::default()).build().unwrap();
+        let local = serde_json::json!({"assistant":"wallet","local_turn":{"question":"balance"}});
+        assert_acl_denied(invoke(&sealed, "ai_read", local), "ai_read");
+        assert_handler_ran(invoke(&main, "ai_read", serde_json::json!({"local_turn":{"question":"balance"}})), "Choose an assistant");
+        for extra in [serde_json::json!({"topic":"balance"}), serde_json::json!({"thread":{"action":"load"}})] {
+            let mut request = serde_json::json!({"assistant":"wallet","local_turn":{"question":"balance"}});
+            request.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            assert_handler_ran(invoke(&main, "ai_read", request), "Choose a local model turn");
+        }
         for (assistant, topic) in [("wallet", "inbox"), ("inbox", "balance"), ("node", "payments")] {
             let read = serde_json::json!({"assistant": assistant, "topic": topic});
             assert_handler_ran(invoke(&main, "ai_read", read.clone()), "cannot read that topic");
