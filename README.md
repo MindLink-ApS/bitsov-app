@@ -30,6 +30,13 @@ The Rust host spawns/supervises the node binary and authenticates over `127.0.0.
 
 ## CS-1 local run
 
+The bundled node is pinned to `MindLink-ApS/BitSov-bitsov@v0.3.0-rc13`
+(`d625e85a04886ac81f76f77a6ae41651dbb3e157`). The release is published and
+GPG-signed per the supplied release facts; [the upgrade note](docs/NODE_RC13_UPGRADE.md)
+records the manifest and binary hashes, with local release verification still pending.
+The release-key fingerprint pin is unchanged. The node now supports remote first
+run; app PR #192 is not merged yet, so this pin alone does not enable that flow.
+
 ```bash
 npm ci
 ./scripts/fetch-node-sidecar.sh

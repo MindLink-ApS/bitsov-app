@@ -728,10 +728,13 @@ fn write_bootstrap_config(config: &Path) -> Result<(), Box<dyn std::error::Error
     let dir = std::fs::canonicalize(config.parent().ok_or("missing config directory")?)?;
     let value = serde_json::json!({
         "tier": "full",
+        "setup_page": {"port": 8080},
         "identity": {"mnemonic_file": dir.join("identity/mnemonic.txt")},
         "network": {"listen_addr": "0.0.0.0:9736", "tier": "T2"},
         "lightning": {
             "backend": "ldk", "network": "bitcoin",
+            "max_channel_capacity_sats": 1_000_000,
+            "max_total_channel_capacity_sats": 2_000_000,
             "esplora_url": "https://blockstream.info/api",
             "esplora_url_fallback": "https://mempool.space/api",
             "listening_address": "0.0.0.0:9735"
