@@ -1241,6 +1241,10 @@ export function ControlCenter(props: Props) {
           setTab('body');
           setContextOpen(true);
         }}
+        onNode={() => {
+          setTab('node');
+          setContextOpen(true);
+        }}
         onWallet={() => openWallet()}
         balanceMsat={wallet()?.balance_msat ?? null}
         behind={walletTab() !== null}
@@ -1742,6 +1746,8 @@ function Rail(props: {
   openKey: string | null;
   ownId: string | null;
   onOpen: (t: TrackRef) => void;
+  /** The status pill opens Settings → Node. */
+  onNode?: () => void;
   onProfile: () => void;
   onWallet: () => void;
   balanceMsat: number | null;
@@ -1786,11 +1792,13 @@ function Rail(props: {
       <div class="mark">
         Bit<span>Sov</span>
       </div>
-      <button class="node-pill" title={props.pill.text} data-pill={props.pill.tone} onClick={() => props.onProfile()} disabled={!props.active}>
+      <button class="node-pill" title={`${props.pill.text} · open node settings`} aria-haspopup="dialog" data-pill={props.pill.tone} onClick={() => (props.onNode ?? props.onProfile)()} disabled={!props.active}>
         <span class={`dot ${props.pill.tone}`} classList={{ live: props.pill.live }} />
         <span class="what">{props.pill.text}</span>
         <Show when={props.active}>
           <span class="peers" title="Connected peers">{props.peers.filter((p) => p.connected).length}/{props.peers.length}</span>
+          {/* Says "this opens something" without adding words to the status. */}
+          <svg class="pill-chevron" viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>
         </Show>
       </button>
 

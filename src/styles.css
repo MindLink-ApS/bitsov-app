@@ -215,8 +215,11 @@ input:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: 
 .rail { display: flex; flex-direction: column; gap: var(--s-4); padding: var(--s-5) var(--s-3) var(--s-4); background: var(--sunk); border-right: 1px solid var(--line); min-height: 0; overflow-y: auto; }
 .mark { font-family: var(--font-display); font-size: var(--t-2xl); font-weight: 400; letter-spacing: -0.01em; padding: 0 var(--s-2); }
 .mark span { color: var(--accent); }
-.node-pill { display: flex; align-items: center; gap: var(--s-2); width: 100%; text-align: left; background: var(--surface); border: 1px solid transparent; border-radius: var(--r-chip); padding: 6px 12px; font-size: var(--t-sm); }
-.node-pill:hover { background: var(--raised); }
+.node-pill { display: flex; align-items: center; gap: var(--s-2); width: 100%; text-align: left; background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-chip); padding: 6px 10px 6px 12px; font-size: var(--t-sm); cursor: pointer; transition: background var(--d-fast) var(--ease), border-color var(--d-fast) var(--ease); }
+.node-pill:hover:not(:disabled) { background: var(--raised); border-color: var(--line-strong); }
+.node-pill:disabled { border-color: transparent; cursor: default; }
+.node-pill .pill-chevron { flex: none; color: var(--faint); transition: color var(--d-fast) var(--ease); }
+.node-pill:hover:not(:disabled) .pill-chevron { color: var(--ink); }
 .node-pill .what { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .node-pill .peers { font-family: var(--font-mono); color: var(--muted); }
 .track-group { display: flex; flex-direction: column; gap: 2px; }
@@ -511,9 +514,10 @@ select { font: inherit; font-size: var(--t-sm); background: var(--sunk); color: 
 .settings-head { position: sticky; top: 0; background: var(--sunk); padding-bottom: var(--s-3); z-index: 10; border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; }
 .settings-display h3 { margin-top: var(--s-2); }
 .tabs { display: flex; gap: var(--s-1); background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-chip); padding: 3px; flex-wrap: wrap; align-self: flex-start; }
-.tabs button { flex: none; border: none; background: none; border-radius: var(--r-chip); padding: 6px 14px; font-size: var(--t-sm); font-weight: 500; color: var(--muted); transition: background var(--d-fast) var(--ease), color var(--d-fast) var(--ease); }
-.tabs button:hover:not([aria-selected='true']) { color: var(--ink); }
-.tabs button[aria-selected='true'] { background: var(--raised); color: var(--ink); box-shadow: 0 1px 3px rgba(0,0,0,0.18); }
+/* Tabs read as tabs: every one has a hover fill, the selected one a clear fill and weight. */
+.tabs button { flex: none; border: none; background: none; border-radius: var(--r-chip); padding: 6px 14px; font-size: var(--t-sm); font-weight: 500; color: var(--muted); cursor: pointer; transition: background var(--d-fast) var(--ease), color var(--d-fast) var(--ease); }
+.tabs button:hover:not([aria-selected='true']) { color: var(--ink); background: var(--raised); }
+.tabs button[aria-selected='true'] { background: var(--line-strong); color: var(--ink); font-weight: 600; box-shadow: 0 1px 3px rgba(0,0,0,0.18); }
 .panel { background: var(--surface); border: 1px solid transparent; border-radius: var(--r-panel); padding: var(--s-4); display: flex; flex-direction: column; gap: var(--s-3); }
 .panel h2 { font-size: var(--t-lg); }
 .panel h3 { font-family: var(--font-sans); font-size: var(--t-sm); font-weight: 600; color: var(--muted); }
