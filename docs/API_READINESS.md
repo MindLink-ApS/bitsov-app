@@ -15,9 +15,9 @@ See [rc13 upgrade and release checks](NODE_RC13_UPGRADE.md) for the supplied
 node changes and app integration limits. The rc12 enrolment source review remains
 [historical evidence](NODE_RC12_UPGRADE.md), not an rc13 wire-contract review.
 rc13 adds claim-code / four-word SAS enrolment (`sas_version: 1`) and box approval.
-The node now supports remote first run; app PR #192 is not merged yet, so this
-pin alone does not enable it in the app. The existing app does not display the
-node's `offline_safety` diagnostics.
+Remote first run is implemented on main (app #192 + node rc13); runtime
+acceptance on real hardware (Touch ID + a fresh Pi) is still pending. The
+existing app does not display the node's `offline_safety` diagnostics.
 
 Base URL: `http://127.0.0.1:$PORT/api/v1` (loopback only — Gate G2). Auth: `Authorization: Bearer <jwt>`
 on REST; `bitsov.v1` + `bitsov.jwt.<token>` subprotocols on `/ws`.

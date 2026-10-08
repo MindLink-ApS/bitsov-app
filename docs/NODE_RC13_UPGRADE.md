@@ -46,11 +46,11 @@ new app flows or establish their runtime compatibility.
 
 ## App compatibility and remote first run
 
-**Remote first run is now supported by the node. The app implementation is
-PR #192, which is not merged yet.** Updating the bundled node alone does not
-make that flow available in this app. PairLink v2, claim-code / SAS enrolment,
-box approval and identity-signed live transport pin handling require the app
-integration and its own acceptance checks.
+**Remote first run is implemented on main (app #192 + node rc13).** Runtime
+acceptance on real hardware (Touch ID + a fresh Pi) is still pending. PairLink
+v2, claim-code / SAS enrolment, box approval and identity-signed live transport
+pin handling land with that app integration; they still need their own
+acceptance checks.
 
 The local owner ceremony remains opt-in through the existing Cargo feature and
 runtime setting; this change does not alter its authority or retained-identity
@@ -119,6 +119,7 @@ Sidecar CI must fetch and verify rc13, then run config drift, local owner
 lifecycle and durable-identity CS-1 smoke checks. Mac Package CI must re-verify
 before bundling and compare bundle bytes. Retained-state behavior, remote
 enrolment, transport pin verification, remote unlock and signed/hardened Mac
-biometric acceptance remain separate checks. Remote first-run app acceptance
-also depends on PR #192. No release fetch, real node execution, package build
+biometric acceptance remain separate checks. Remote first run is implemented on
+main (app #192 + node rc13); runtime acceptance on real hardware (Touch ID + a
+fresh Pi) is still pending. No release fetch, real node execution, package build
 or live-network smoke is part of this offline pin change.
