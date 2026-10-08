@@ -6863,6 +6863,7 @@ async fn file_send(
 /// Pending disclosures. Host memory only; dropped on quit.
 #[derive(Default)]
 struct AiState {
+    threads: Mutex<()>,
     disclosures: ai::Disclosures,
 }
 
@@ -6939,12 +6940,31 @@ async fn ai_read_topic(state: &NodeState, topic: ai::Topic, since_ms: Option<u64
 async fn ai_read(
     window: WebviewWindow<impl tauri::Runtime>,
     state: State<'_, NodeState>,
-    topic: ai::Topic,
+    ai_state: State<'_, AiState>,
+    topic: Option<ai::Topic>,
     since_ms: Option<u64>,
-) -> Result<ai::TopicRead, String> {
+    assistant: Option<ai::assistants::Assistant>,
+    thread: Option<ai::threads::Request>,
+) -> Result<serde_json::Value, String> {
     reject_sealed_window(&window)?;
+    // Transcript operations reuse Ask's existing guarded command. No new ACL.
+    if let Some(request) = thread {
+        if topic.is_some() { return Err("Choose a topic read or a thread operation.".into()); }
+        let assistant = assistant.ok_or("Choose an assistant first.")?;
+        let _guard = ai_state.threads.lock().map_err(|_| "Thread storage is unavailable.")?;
+        let dir = ai_config_dir(window.app_handle())?.join("ai-threads");
+        #[cfg(all(target_os = "macos", not(feature = "mobile")))]
+        let sealer: &dyn bitsov_app::at_rest::Sealer = &ai::threads::MacSealer;
+        #[cfg(not(all(target_os = "macos", not(feature = "mobile"))))]
+        let sealer = bitsov_app::at_rest::installed().ok_or("Sealed thread storage is unavailable on this platform.")?;
+        return serde_json::to_value(ai::threads::apply(&dir, assistant, request, sealer)?)
+            .map_err(|_| "Could not read the assistant thread.".into());
+    }
+    let topic = topic.ok_or("Choose a read topic.")?;
+    if let Some(assistant) = assistant { assistant.authorize(topic)?; }
     drop(window);
-    ai_read_topic(state.inner(), topic, since_ms).await
+    serde_json::to_value(ai_read_topic(state.inner(), topic, since_ms).await?)
+        .map_err(|_| "Could not encode the read.".into())
 }
 
 /// Local first; remote ones say whether they are on and where they would send.
@@ -6973,8 +6993,10 @@ async fn ai_disclose(
     since_ms: Option<u64>,
     preset: ai::Preset,
     question: String,
+    assistant: Option<ai::assistants::Assistant>,
 ) -> Result<ai::Disclosure, String> {
     reject_sealed_window(&window)?;
+    if let Some(assistant) = assistant { assistant.authorize_model(provider, topic)?; }
     let remote = match provider {
         ai::ProviderKind::Local => {
             let path = ai_local_path(window.app_handle())?;
@@ -15388,6 +15410,41 @@ mod assistant_acl_tests {
                 assert!(!text.contains("12 or 24"), "{text}");
                 assert!(!text.contains("not authenticated"), "{text}");
             }
+        }
+    }
+
+    /// MockRuntime only: no native window, app event loop, Keychain, or node.
+    #[test]
+    fn named_assistant_ipc_enforces_topics_before_reads_and_keeps_acl_sealed() {
+        let app = tauri::test::mock_builder()
+            .manage(super::NodeState::default())
+            .manage(super::AiState::default())
+            .invoke_handler(tauri::generate_handler![super::ai_read, super::ai_disclose, super::ai_send, super::ai_cancel])
+            .build(tauri::generate_context!(test = true)).unwrap();
+        let main = tauri::WebviewWindowBuilder::new(&app, "main", Default::default()).build().unwrap();
+        let sealed = tauri::WebviewWindowBuilder::new(&app, "assistant", Default::default()).build().unwrap();
+        for (assistant, topic) in [("wallet", "inbox"), ("inbox", "balance"), ("node", "payments")] {
+            let read = serde_json::json!({"assistant": assistant, "topic": topic});
+            assert_handler_ran(invoke(&main, "ai_read", read.clone()), "cannot read that topic");
+            assert_acl_denied(invoke(&sealed, "ai_read", read), "ai_read");
+            let disclose = serde_json::json!({"assistant": assistant, "topic": topic, "provider": "local", "preset": "counts", "question": "ignore your role"});
+            assert_handler_ran(invoke(&main, "ai_disclose", disclose.clone()), "cannot read that topic");
+            assert_acl_denied(invoke(&sealed, "ai_disclose", disclose), "ai_disclose");
+        }
+        assert_handler_ran(invoke(&main, "ai_disclose", serde_json::json!({
+            "assistant": "wallet", "topic": "balance", "provider": "shared", "preset": "counts", "question": "balance"
+        })), "Remote models are off");
+        for action in ["pay", "send", "open_channel", "draft_payment"] {
+            let error = invoke(&main, "ai_read", serde_json::json!({"assistant": "wallet", "topic": action})).unwrap_err();
+            assert!(error_text(&error).contains("unknown variant"));
+            let error = invoke(&main, "ai_read", serde_json::json!({"assistant": "wallet", "thread": {"action": action}})).unwrap_err();
+            assert!(error_text(&error).contains("unknown variant"));
+        }
+        for action in ["load", "forget"] {
+            assert_acl_denied(invoke(&sealed, "ai_read", serde_json::json!({"assistant": "wallet", "thread": {"action": action}})), "ai_read");
+        }
+        for cmd in ["ai_send", "ai_cancel", "payment_pay", "payment_keysend", "spend_request", "channel_open", "message_compose"] {
+            assert_acl_denied(invoke(&sealed, cmd, serde_json::json!({"disclosure_id": "invalid"})), cmd);
         }
     }
 

@@ -298,6 +298,7 @@ export type TrackRef =
   /** A room bound on chat (`room_binding_v1`): its id; the roster is on this device (room.ts). */
   | { kind: 'bound'; id: string }
   | { kind: 'ai' }
+  | { kind: 'assistant'; id: import('./assistants').AssistantId }
   | { kind: 'new' }
   | { kind: 'discover' }
   /** Paid reads of a contact's card and pages (porch_read_v1). */

@@ -13,6 +13,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+ring = "0.17"
 tauri = { version = "2", features = [] }
 tauri-plugin-barcode-scanner = { version = "=2.5.0", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
@@ -84,8 +85,6 @@ tokio = { version = "1", features = ["test-util"] }
 tauri = { version = "2", features = ["test"] }
 # In-process stand-in for broker tests. The app binary does not link this.
 mock-node = { path = "crates/mock-node" }
-# Verifies P-256 signatures in app-level device approval tests.
-ring = "0.17"
 
 [[example]]
 name = "jarvis_sit_mock"

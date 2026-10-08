@@ -1,3 +1,4 @@
+import { ASSISTANTS, type AssistantId, type AssistantThread } from './assistants';
 import { amount as fmtAmount, allIn, routingFee } from './format';
 // Dev-mode sample data: the whole shell clickable with no node running. Nothing
 // here reaches a network or the host. The sample deposit address is not valid
@@ -588,6 +589,7 @@ const sampleBolt11 = (msat: number) =>
   msat % 100 === 0 ? `lntbs${msat / 100}n1samplenotpayable0donotpay` : `lntbs${msat * 10}p1samplenotpayable0donotpay`;
 
 export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number; organism?: 'v1' | 'v2'; noPeers?: boolean } = {}): Source {
+  const assistantThreads: Partial<Record<AssistantId, AssistantThread>> = {};
   // Demo convenience: sample peers carry remote labels; mirror them into local
   // petnames once so the rail shows owner names without treating labels as truth.
   for (const p of SAMPLE_PEERS) {
@@ -1258,12 +1260,25 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
       const result: FileSaveResult = { saved: true, filename: file.filename, mime_type: file.mime_type, size_bytes: file.size_bytes };
       return result;
     },
-    aiRead: async (topic, sinceMs) => {
+    aiThread: async (assistant, request) => {
+      const current = assistantThreads[assistant] ??= { revision: '0', turns: [] };
+      if (request.action === 'forget') current.turns = [];
+      if (request.action === 'append') {
+        if (request.revision !== current.revision) throw new Error('This thread was changed or forgotten.');
+        current.turns.push(request.turn);
+        current.turns = current.turns.slice(-100);
+      }
+      if (request.action === 'forget') current.revision = String(Number(current.revision) + 1);
+      return structuredClone(current);
+    },
+    aiRead: async (topic, sinceMs, assistant) => {
+      if (assistant && !ASSISTANTS[assistant].topics.includes(topic)) throw new Error('This assistant cannot read that topic.');
       await new Promise((r) => setTimeout(r, 350));
       return sampleRead(topic, sinceMs);
     },
     aiProviders: () => ok(SAMPLE_PROVIDERS),
-    aiDisclose: async (provider, topic, sinceMs, preset, question) => {
+    aiDisclose: async (provider, topic, sinceMs, preset, question, assistant) => {
+      if (assistant && (provider !== 'local' || !ASSISTANTS[assistant].topics.includes(topic))) throw new Error('This assistant cannot use that model or topic.');
       const remote = SAMPLE_PROVIDERS.find((p) => p.kind === provider && p.enabled && p.host);
       if (!remote) return refuse('invalid', 'That model is off on this computer. Nothing was prepared.');
       const read = sampleRead(topic, sinceMs);

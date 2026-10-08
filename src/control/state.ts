@@ -31,7 +31,7 @@ export type Threads = Record<string, Message[]>;
 export type Unread = Record<string, number>;
 
 export const trackKey = (t: TrackRef): string =>
-  t.kind === 'peer' || t.kind === 'room' || t.kind === 'bound' ? `${t.kind}:${t.id.toLowerCase()}` : t.kind;
+  t.kind === 'peer' || t.kind === 'room' || t.kind === 'bound' || t.kind === 'assistant' ? `${t.kind}:${t.id.toLowerCase()}` : t.kind;
 
 /**
  * Display name for a contact: the owner's local petname, else Unnamed contact plus a short id.

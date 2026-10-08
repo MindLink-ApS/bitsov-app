@@ -52,3 +52,28 @@ gate remain in force.
    paid calls. Verify these controls rather than treating a static copy scan as proof.
 3. Only later consider **M11**, AI as its own peer/`node_id`. v1 assistants do not
    depend on M11 and do not authorize an unattended runtime.
+
+## A2 — read-only Mac shell
+
+The sidebar offers **Node** (node, channels, prices), **Wallet** (balance,
+payments, prices) and **Inbox** (inbox counts only). These fixed assistants
+reuse Ask's GET broker and rules or the existing 127.0.0.1 model path. Rust
+checks the assistant's topic before a read or model disclosure. They cannot
+prepare drafts, send messages or payments, or open channels. The original
+Ask track remains available.
+
+Each assistant keeps up to 100 question/answer turns in the app config folder,
+sealed with authenticated encryption through the app's `at_rest::Sealer`
+interface. On Mac, its key is held by the existing native Keychain bridge.
+Only transcript text is saved, never broker objects, model request bodies or
+credentials. Saved answers are marked historical; they are not fresh reads
+and are not automatically included in model requests. **Forget** clears that
+assistant's transcript and invalidates saves still in flight. It leaves an
+empty sealed generation record so late responses cannot restore forgotten
+content. This is logical deletion, not a promise to erase filesystem backups.
+
+Thread operations use the existing guarded `ai_read` command. No command,
+capability or network destination is added; the sealed development assistant
+window still has no IPC grants. Named assistants keep remote models disabled
+pending the paid-AI gates above. A2 does not add paid calls, watches, a tool
+loop, body access, or an unattended runtime.
