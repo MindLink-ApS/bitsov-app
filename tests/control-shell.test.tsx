@@ -389,7 +389,10 @@ describe('control center shell', () => {
     await vi.waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
     [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
 
-    await vi.waitFor(() => expect(mount.querySelector('[data-device-off="seed_not_encrypted"]')).not.toBeNull());
+    // The spend bar only points to Settings → Node, where the reason is spelled out.
+    await vi.waitFor(() => expect(mount.querySelector('[data-device-settings-hint="off"]')?.textContent).toContain('Touch ID approvals are off.'));
+    click('[data-device-settings-link]');
+    await vi.waitFor(() => expect(mount.querySelector('[data-panel="node"] [data-device-off="seed_not_encrypted"]')).not.toBeNull());
     expect(mount.querySelector('[data-device-off]')?.textContent).toContain('Encrypt your recovery phrase to enable Touch ID approvals');
     expect(mount.querySelector('[data-device-register]')).toBeNull();
     expect(mount.querySelector('[data-touch-approval]')).toBeNull();
@@ -420,7 +423,11 @@ describe('control center shell', () => {
     await vi.waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
     [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
 
-    await vi.waitFor(() => expect(mount.querySelector('[data-device-owner-action]')?.textContent).toBe(cmd));
+    // The spend bar says it is waiting and links to Settings → Node, where the owner step lives.
+    await vi.waitFor(() => expect(mount.querySelector('[data-device-settings-hint="pending"]')).not.toBeNull());
+    expect(mount.querySelector('[data-spend] [data-device-owner-action]')).toBeNull();
+    click('[data-device-settings-link]');
+    await vi.waitFor(() => expect(mount.querySelector('[data-panel="node"] [data-device-owner-action]')?.textContent).toBe(cmd));
     expect(mount.querySelector('[data-device-fingerprint]')?.textContent).toBe('3F9A-12C4');
     click('[data-device-cancel]');
     await vi.waitFor(() => expect(calls.some((c) => c.cmd === 'device_key_cancel')).toBe(true));

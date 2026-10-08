@@ -178,6 +178,8 @@ export type Actions = {
   /** This Mac's Touch ID approvals, as last read. */
   device: () => DeviceView | null;
   registerDevice: () => Promise<void>;
+  /** Touch ID approvals live in Settings → Node; other places link there. */
+  openNodeSettings?: () => void;
   cancelDevice: () => Promise<void>;
   /** One contact's envelope, signed with Touch ID. */
   approveContact: (peer: string, perActMsat: number | null) => Promise<void>;
@@ -948,6 +950,10 @@ export function ControlCenter(props: Props) {
       void loadBudget();
     },
     device,
+    openNodeSettings: () => {
+      setTab('node');
+      setContextOpen(true);
+    },
     registerDevice: async () => {
       setErrors('spend', undefined);
       const r = await act(() => source.deviceKeyRegister());
@@ -1241,6 +1247,10 @@ export function ControlCenter(props: Props) {
           setTab('body');
           setContextOpen(true);
         }}
+        onNode={() => {
+          setTab('node');
+          setContextOpen(true);
+        }}
         onWallet={() => openWallet()}
         balanceMsat={wallet()?.balance_msat ?? null}
         behind={walletTab() !== null}
@@ -1491,6 +1501,7 @@ export function ControlCenter(props: Props) {
             <NodePanel deviceApprovals={
               <DeviceApprovals
                 device={actions.device()}
+                remote={props.remote === true}
                 mobile={androidQrScannerAvailable()}
                 showRegistered
                 onRegister={async () => { const r = await act(() => source.deviceKeyRegister()); if (r.ok) setDevice(r.value); else throw r.error.message; }}
@@ -1742,6 +1753,8 @@ function Rail(props: {
   openKey: string | null;
   ownId: string | null;
   onOpen: (t: TrackRef) => void;
+  /** The status pill opens Settings → Node. */
+  onNode?: () => void;
   onProfile: () => void;
   onWallet: () => void;
   balanceMsat: number | null;
@@ -1786,11 +1799,13 @@ function Rail(props: {
       <div class="mark">
         Bit<span>Sov</span>
       </div>
-      <button class="node-pill" title={props.pill.text} data-pill={props.pill.tone} onClick={() => props.onProfile()} disabled={!props.active}>
+      <button class="node-pill" title={`${props.pill.text} · open node settings`} aria-haspopup="dialog" data-pill={props.pill.tone} onClick={() => (props.onNode ?? props.onProfile)()} disabled={!props.active}>
         <span class={`dot ${props.pill.tone}`} classList={{ live: props.pill.live }} />
         <span class="what">{props.pill.text}</span>
         <Show when={props.active}>
           <span class="peers" title="Connected peers">{props.peers.filter((p) => p.connected).length}/{props.peers.length}</span>
+          {/* Says "this opens something" without adding words to the status. */}
+          <svg class="pill-chevron" viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>
         </Show>
       </button>
 
@@ -4561,47 +4576,27 @@ export const envelopePerAct = (priceMsat: number | null) =>
  * then one tap opens a contact's envelope. The console path stays for recovery.
  */
 function DeviceSetup(props: { device: DeviceView | null; now: number; actions: Actions }) {
-  const [busy, setBusy] = createSignal(false);
-  usePairingActivity(busy);
+  // One home for Touch ID approvals (Settings → Node, and onboarding after
+  // pairing); the spend bar only points there instead of repeating it.
   const android = androidQrScannerAvailable();
-  const run = async (action: () => Promise<void>) => {
-    if (busy()) return;
-    setBusy(true);
-    try {
-      await action();
-    } finally {
-      setBusy(false);
+  const what = () => (android ? 'Biometric approvals' : 'Touch ID approvals');
+  const note = () => {
+    switch (props.device?.state) {
+      case 'off': return `${what()} are off.`;
+      case 'pending': return `${what()} are waiting for your node’s owner.`;
+      case 'none': case 'lapsed': return `${what()} are not set up.`;
+      default: return null;
     }
   };
-  const minutes = (ms: number) => Math.max(1, Math.ceil((ms - props.now) / 60_000));
   return (
-    <Switch>
-      <Match when={props.device?.state === 'off' && props.device}>
-        {(d) => (
-          <p class="hint" data-device-off={d().off_reason ?? 'off'}>
-            <strong>{android ? 'Biometric approvals are off.' : 'Touch ID approvals are off.'}</strong> {d().off_message}
-          </p>
-        )}
-      </Match>
-      <Match when={props.device?.state === 'none' || props.device?.state === 'lapsed'}>
-        <p class="hint" data-device-setup={props.device?.state}>
-          {props.device?.state === 'lapsed'
-            ? (android ? 'Your last biometric setup request lapsed. ' : 'Your last Touch ID setup request lapsed. ')
-            : ''}
-          {android
-            ? 'Approve payments per contact with biometrics on this phone instead of at the node. '
-            : 'Approve payments per contact with Touch ID on this Mac instead of at the node. '}
-          <button type="button" class="link" data-device-register disabled={busy()} onClick={() => void run(props.actions.registerDevice)}>
-            {android ? 'Set up biometric approvals' : 'Set up Touch ID approvals'}
-          </button>
-        </p>
-      </Match>
-      <Match when={props.device?.state === 'pending' && props.device}>
-        {(d) => (
-          <PendingApproval pending={d()} mobile={android} onCancel={async () => { await run(props.actions.cancelDevice); }} />
-        )}
-      </Match>
-    </Switch>
+    <Show when={note()}>
+      <p class="hint" data-device-settings-hint={props.device?.state}>
+        {note()}{' '}
+        <button type="button" class="link" data-device-settings-link onClick={() => props.actions.openNodeSettings?.()}>
+          Settings → Node
+        </button>
+      </p>
+    </Show>
   );
 }
 

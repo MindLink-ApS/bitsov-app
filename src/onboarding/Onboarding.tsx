@@ -470,6 +470,7 @@ export function Onboarding(props: {
       <Show when={props.onRegisterDevice && props.onCancelDevice && props.pairing().state === 'paired' && stage() !== 'node' && !approvalsSkipped()}>
         <DeviceApprovals
           device={props.device?.() ?? null}
+          remote={props.pairing().remote}
           mobile={mobileBiometrics()}
           onRegister={props.onRegisterDevice!}
           onCancel={props.onCancelDevice!}
