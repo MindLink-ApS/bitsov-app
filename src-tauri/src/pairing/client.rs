@@ -98,6 +98,22 @@ impl PairingClient {
         format!("{}{path}", self.base)
     }
 
+    /// Closed AI authority-management routes. No generic path, owner token,
+    /// payment, admin, or device registration is available to this client.
+    pub(crate) async fn ai_grant(&self, token: &str) -> Result<(u16, String), PairError> {
+        self.send("/pair/grant", self.http.get(self.url("/pair/grant")).bearer_auth(token)).await
+    }
+
+    pub(crate) async fn ai_elevation(&self, token: &str, budget: serde_json::Value) -> Result<(u16, String), PairError> {
+        self.send("/pair/elevation-request", self.http.post(self.url("/pair/elevation-request"))
+            .bearer_auth(token).json(&json!({"scopes": ["spend"], "budget": budget}))).await
+    }
+
+    pub(crate) async fn ai_elevation_status(&self, token: &str, op_id: &str) -> Result<(u16, String), PairError> {
+        let path = crate::act::elevation_status_path(op_id).map_err(|_| PairError::Local("Invalid AI operation id.".into()))?;
+        self.send("/pair/elevation", self.http.get(self.url(&path)).bearer_auth(token)).await
+    }
+
     /// `POST /pair/request`. `Ok(None)` means the node has no pairing routes
     /// (404 — an older `v0.3.0-rc7` node). Every other non-2xx is a refusal.
     pub(crate) async fn request(

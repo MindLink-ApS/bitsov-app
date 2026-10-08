@@ -1,3 +1,4 @@
+import { AiPairingPanel } from './AiPairingPanel';
 import { watchSamples, type WatchSamples, type WatchUpdates } from './watches';
 import { ASSISTANTS, type AssistantId } from './assistants';
 import { PendingApproval } from '../onboarding/LockedNode';
@@ -1518,7 +1519,7 @@ export function ControlCenter(props: Props) {
             />
           </Match>
           <Match when={tab() === 'node'}>
-            <NodePanel deviceApprovals={
+            <NodePanel aiPairing={<AiPairingPanel request={r => source.aiPairing(r)} />} deviceApprovals={
               <DeviceApprovals
                 device={actions.device()}
                 remote={props.remote === true}
@@ -5832,7 +5833,7 @@ function NewTrack(props: {
 
 // ---- context panels ---------------------------------------------------------
 
-function NodePanel(props: { deviceApprovals?: JSX.Element; onForgetRemote?: () => Promise<void>; overview: NodeOverview | null; link: LinkState | null; peers: Peer[]; now: number; error?: string; onReconnect: () => Promise<void> }) {
+function NodePanel(props: { aiPairing?: JSX.Element; deviceApprovals?: JSX.Element; onForgetRemote?: () => Promise<void>; overview: NodeOverview | null; link: LinkState | null; peers: Peer[]; now: number; error?: string; onReconnect: () => Promise<void> }) {
   const fresh = () => freshness(props.overview?.read_at ?? null, props.now);
   const linkText = () =>
     props.link === 'open' ? 'Live' : props.link === 'connecting' ? 'Connecting' : props.link === 'closed' ? 'Reconnecting' : 'Waiting';
@@ -5840,6 +5841,7 @@ function NodePanel(props: { deviceApprovals?: JSX.Element; onForgetRemote?: () =
     <div class="panel" data-panel="node">
       <h2>Your node</h2>
       {props.deviceApprovals}
+      {props.aiPairing}
       <Show when={props.onForgetRemote}><LocalNodeSwitch onForget={() => props.onForgetRemote!()} /></Show>
       <HubTrustInfo level={3} />
       <Show when={props.overview} fallback={<Show when={!props.error}><DelayedSpinner /></Show>}>

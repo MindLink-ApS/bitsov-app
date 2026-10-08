@@ -1263,6 +1263,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
     },
     aiLocalTurn: async () => { throw new Error('Choose a running local model in the desktop app.'); },
     aiWatchPoll: async () => null,
+    aiPairing: async () => { throw new Error('AI pairing is available when connected to your local node.'); },
     aiThread: async (assistant, request) => {
       const current = assistantThreads[assistant] ??= { revision: '0', turns: [] };
       if (request.action === 'forget') { current.turns = []; current.notices = []; }

@@ -164,3 +164,43 @@ well as turns and changes the thread generation; a queued watch poll from an old
 generation cannot restore forgotten content. Baselines and dedupe state remain
 in host memory only. A failed notice save leaves its dedupe state unconsumed, and
 one assistant's storage failure does not suppress the others' saved notices.
+
+## A5 — separate AI pairing, console approval and revocation
+
+Settings → Node offers one **AI pairing** for the assistants' future paid-model
+book. The owner first opens the existing five-minute console pairing window
+(`konsensus pair-window`), then requests the AI identity in the app. The host
+uses an independent client key and pairing record, in a node-identity-bound
+`ai-pairing` directory. It never substitutes this token for the main app token,
+uses the owner's grant, or falls back to `/auth/local`. Keys use the existing
+pairing-key protection; tokens stay transient in Rust and never reach the UI
+or a model. Additional owner/identity/admin scopes on an AI token are refused.
+
+A grant request requires full hexadecimal payee IDs. It proposes 1,000 sats
+for at most 24 hours, **55 sats all-in per call**, a nonempty exclusive
+`payee_allowlist`, and no liquidity-fee authority. This is a finite grant, not
+a daily refill. The node's #290 breakers apply: 10 payments/minute, 60/hour,
+pause after five consecutive failures, and 1,000 sats reserved per ten minutes.
+The exact `konsensus grant --op …` command pins those limits and payees. The
+owner still reviews and enters the code through the existing console flow.
+Overrides wider than these bounds, missing allowlists/breakers, or grants for
+another client are never reported as an available AI grant.
+
+The panel displays the AI client id, its live remaining grant and expiry, and
+copyable `konsensus grant-revoke --client-id …` and
+`konsensus pair-revoke --client-id …` commands. Both name only the AI client.
+There is no self-revoke API, owner-token escalation, or `--all` command. The
+panel reissues the AI token and reads its grant every five seconds while open,
+so console revocation is reflected without changing the main pairing, grant,
+or spend window. Unknown/offline reads clear the displayed live status. A
+revoked identity stays revoked until an explicit new pairing request. Pending
+approval commands are held in app memory; after restart, a live grant is
+recovered from the node, or the owner can request a new approval.
+
+This local Mac ceremony needs the node's local challenge file. Remote setup is
+explicitly unavailable; the app does not reuse remote owner credentials or add
+a destination to work around that boundary. `ai_pairing` is a guarded main-window
+management command, not a model tool; the sealed assistant window has no grant.
+**A5 executes no payments and adds no sats-paid provider.** A6 must separately
+implement the quote/disclose/owner-confirmed paid-model path and revalidate the
+AI identity, allowlist, all-in cap and live grant before any payment.

@@ -27,11 +27,21 @@ impl PairCrypto for NodeCrypto {
     }
 
     fn verify(&self, pubkey_hex: &str, message: &[u8], signature_hex: &str) -> bool {
-        let Ok(pk) = hex::decode(pubkey_hex) else { return false };
-        let Ok(pk) = <[u8; 32]>::try_from(pk.as_slice()) else { return false };
-        let Ok(key) = ed25519_dalek::VerifyingKey::from_bytes(&pk) else { return false };
-        let Ok(sig) = hex::decode(signature_hex) else { return false };
-        let Ok(sig) = ed25519_dalek::Signature::from_slice(&sig) else { return false };
+        let Ok(pk) = hex::decode(pubkey_hex) else {
+            return false;
+        };
+        let Ok(pk) = <[u8; 32]>::try_from(pk.as_slice()) else {
+            return false;
+        };
+        let Ok(key) = ed25519_dalek::VerifyingKey::from_bytes(&pk) else {
+            return false;
+        };
+        let Ok(sig) = hex::decode(signature_hex) else {
+            return false;
+        };
+        let Ok(sig) = ed25519_dalek::Signature::from_slice(&sig) else {
+            return false;
+        };
         key.verify_strict(message, &sig).is_ok()
     }
 
@@ -39,7 +49,10 @@ impl PairCrypto for NodeCrypto {
     /// cross-checked rather than compared with itself.
     fn short_code(&self, challenge: &[u8]) -> String {
         const ALPHABET: &[u8] = b"23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
-        let digest = blake3::keyed_hash(blake3::hash(b"bitsov-pair-shortcode-v1").as_bytes(), challenge);
+        let digest = blake3::keyed_hash(
+            blake3::hash(b"bitsov-pair-shortcode-v1").as_bytes(),
+            challenge,
+        );
         let mut out = String::new();
         for (i, b) in digest.as_bytes().iter().take(8).enumerate() {
             if i == 4 {
@@ -125,6 +138,10 @@ pub struct Server {
     stop: Arc<AtomicBool>,
 }
 
+#[allow(dead_code)]
+pub type Handler =
+    Arc<dyn Fn(&str, &str, Option<&str>, &[u8]) -> Option<(u16, String)> + Send + Sync>;
+
 impl Server {
     pub fn start(node: Arc<PairingMock>, codes: PrintedCodes) -> Self {
         Self::start_with_reads(node, codes, None)
@@ -139,9 +156,31 @@ impl Server {
         codes: PrintedCodes,
         reads: Option<Reads>,
     ) -> Self {
+        Self::start_inner(node, codes, reads, None)
+    }
+
+    #[allow(dead_code)]
+    pub fn start_with_handler(
+        node: Arc<PairingMock>,
+        codes: PrintedCodes,
+        handler: Handler,
+    ) -> Self {
+        Self::start_inner(node, codes, None, Some(handler))
+    }
+
+    fn start_inner(
+        node: Arc<PairingMock>,
+        codes: PrintedCodes,
+        reads: Option<Reads>,
+        handler: Option<Handler>,
+    ) -> Self {
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind ephemeral loopback port");
         let addr = listener.local_addr().expect("addr");
-        assert_ne!(addr.port(), NODE_PORT, "tests must never hold the node port");
+        assert_ne!(
+            addr.port(),
+            NODE_PORT,
+            "tests must never hold the node port"
+        );
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
         std::thread::spawn(move || {
@@ -151,7 +190,7 @@ impl Server {
                     break;
                 }
                 let Ok(stream) = stream else { continue };
-                serve_one(&node, reads.as_ref(), stream);
+                serve_one(&node, reads.as_ref(), handler.as_ref(), stream);
                 let lines = node.stdout_lines();
                 for line in &lines[forwarded..] {
                     codes.record_line(line);
@@ -175,7 +214,12 @@ impl Drop for Server {
     }
 }
 
-fn serve_one(node: &PairingMock, reads: Option<&Reads>, stream: TcpStream) {
+fn serve_one(
+    node: &PairingMock,
+    reads: Option<&Reads>,
+    handler: Option<&Handler>,
+    stream: TcpStream,
+) {
     let mut reader = BufReader::new(stream.try_clone().expect("clone"));
     let mut line = String::new();
     if reader.read_line(&mut line).is_err() || line.is_empty() {
@@ -203,28 +247,33 @@ fn serve_one(node: &PairingMock, reads: Option<&Reads>, stream: TcpStream) {
     let _ = reader.read_exact(&mut body);
     let path = target.split('?').next().unwrap_or("");
     let mut extra = String::new();
-    let (status, text) = match reads {
-        Some(reads) if method == "GET" && READ_PATHS.contains(&path) => {
-            let (auth, _) = node.handle("GET", "/api/v1/identity", bearer.as_deref(), &[]);
-            if auth != 200 {
-                (
-                    401,
-                    r#"{"error":"invalid or expired token","code":401}"#.to_string(),
-                )
-            } else {
-                let exchange = reads.node.serve(&target);
-                if exchange.timed_out {
-                    return;
+    let (status, text) =
+        if let Some(reply) = handler.and_then(|h| h(&method, &target, bearer.as_deref(), &body)) {
+            reply
+        } else {
+            match reads {
+                Some(reads) if method == "GET" && READ_PATHS.contains(&path) => {
+                    let (auth, _) = node.handle("GET", "/api/v1/identity", bearer.as_deref(), &[]);
+                    if auth != 200 {
+                        (
+                            401,
+                            r#"{"error":"invalid or expired token","code":401}"#.to_string(),
+                        )
+                    } else {
+                        let exchange = reads.node.serve(&target);
+                        if exchange.timed_out {
+                            return;
+                        }
+                        for (name, value) in &reads.headers {
+                            extra.push_str(&format!("{name}: {value}\r\n"));
+                        }
+                        let body = exchange.body.map(|v| v.to_string()).unwrap_or_default();
+                        (exchange.status, body)
+                    }
                 }
-                for (name, value) in &reads.headers {
-                    extra.push_str(&format!("{name}: {value}\r\n"));
-                }
-                let body = exchange.body.map(|v| v.to_string()).unwrap_or_default();
-                (exchange.status, body)
+                _ => node.handle(&method, &target, bearer.as_deref(), &body),
             }
-        }
-        _ => node.handle(&method, &target, bearer.as_deref(), &body),
-    };
+        };
     let reason = match status {
         200 => "OK",
         400 => "Bad Request",

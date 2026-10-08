@@ -80,6 +80,7 @@ struct Inner {
     calls: HashMap<String, usize>,
     stdout: Vec<String>,
     tokens_issued: usize,
+    window_until: i64,
 }
 
 /// The mock node.
@@ -182,6 +183,12 @@ impl PairingMock {
         inner.tokens.clear();
     }
 
+    /// Owner-console pairing window; used by multi-client ceremony tests.
+    pub fn open_pairing_window(&self, seconds: i64) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.window_until = inner.now.saturating_add(seconds.max(0));
+    }
+
     fn pairing_dir(&self) -> PathBuf {
         self.config.data_dir.join("pairing")
     }
@@ -257,7 +264,7 @@ impl PairingMock {
 
         let mut inner = self.inner.lock().unwrap();
         // Without a window, pairing is accepted only while no client is paired.
-        if !inner.clients.is_empty() {
+        if !inner.clients.is_empty() && inner.window_until <= inner.now {
             return err(409, "pairing is closed: a client is already paired and no pairing window is open");
         }
         let expires_at = inner.now + PENDING_TTL_SECS;

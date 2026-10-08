@@ -223,6 +223,10 @@ fn load_record(store: &Path, key: &ClientKey) -> Result<Option<Record>, PairErro
     Ok(Some(record))
 }
 
+pub(crate) fn stored_client_id(store: &Path, key: &ClientKey) -> Result<Option<String>, PairError> {
+    Ok(load_record(store, key)?.map(|r| r.client_id))
+}
+
 fn save_record(store: &Path, record: &Record) -> Result<(), PairError> {
     let path = store.join(RECORD_FILE);
     let tmp = store.join(format!("{RECORD_FILE}.tmp"));
@@ -291,6 +295,20 @@ pub async fn establish(
     client_name: &str,
     codes: &PrintedCodes,
 ) -> Result<Established, PairError> {
+    establish_inner(client, key, store, client_name, codes, true).await
+}
+
+/// Dedicated AI identity: no legacy local-owner fallback on any response.
+pub(crate) async fn establish_ai(
+    client: &PairingClient, key: &ClientKey, store: &Path, codes: &PrintedCodes,
+) -> Result<Established, PairError> {
+    establish_inner(client, key, store, "AI", codes, false).await
+}
+
+async fn establish_inner(
+    client: &PairingClient, key: &ClientKey, store: &Path, client_name: &str,
+    codes: &PrintedCodes, allow_local: bool,
+) -> Result<Established, PairError> {
     if let Some(record) = load_record(store, key)? {
         let issued = client.token(key, &record.client_id).await?;
         return Ok(Established::Paired {
@@ -305,6 +323,9 @@ pub async fn establish(
     }
 
     let Some(request) = client.request(key, client_name).await? else {
+        if !allow_local {
+            return Err(PairError::Local("AI pairing requires node pairing support.".into()));
+        }
         let token = client.auth_local().await?;
         return Ok(Established::LocalFallback { token });
     };

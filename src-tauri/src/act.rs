@@ -603,7 +603,7 @@ impl ElevationReply {
 /// overlong path, or one with characters no owner should be asked to paste. A
 /// quote or backslash is refused rather than escaped: no escape is safe in
 /// every shell (fish reads `\'` inside single quotes).
-fn config_arg(path: &std::path::Path) -> Option<String> {
+pub(crate) fn config_arg(path: &std::path::Path) -> Option<String> {
     let text = path.to_str()?;
     if !path.is_absolute()
         || text.len() > 400

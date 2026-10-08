@@ -6914,6 +6914,27 @@ struct AiState {
     threads: Mutex<std::collections::HashMap<&'static str, ai::threads::Thread>>,
     watches: Mutex<ai::watches::Engine>,
     disclosures: ai::Disclosures,
+    pairing: tokio::sync::Mutex<std::collections::HashMap<String, bitsov_app::ai_pairing::AiPairing>>,
+}
+
+/// Owner-facing AI authority setup; never callable as a model tool.
+#[tauri::command(rename_all = "snake_case")]
+async fn ai_pairing(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>, ai_state: State<'_, AiState>,
+    request: bitsov_app::ai_pairing::Request,
+) -> Result<bitsov_app::ai_pairing::View, String> {
+    reject_sealed_window(&window)?;
+    if state.remote_mode.load(Ordering::SeqCst) {
+        return Err("AI pairing setup currently requires this Mac's local node. Remote owner authority cannot be reused.".into());
+    }
+    let owner = state.pairing.lock().unwrap().clone().ok_or("Pair your node first.")?;
+    let node_id = state.node_id.lock().unwrap().clone().ok_or("Your node identity is unavailable.")?;
+    // Node-bound namespace, isolated from the main client-key and pairing.json.
+    let store = owner.data_dir.join("ai-pairing").join(blake3::hash(node_id.as_bytes()).to_hex().as_str());
+    let config = owner_config(&state);
+    ai_state.pairing.lock().await.entry(node_id).or_default().update(request, &owner.client, &store,
+        &state.printed_codes, config.as_deref(), now_unix()).await
 }
 
 fn ai_config_dir(app: &AppHandle<impl tauri::Runtime>) -> Result<std::path::PathBuf, String> {
@@ -7564,6 +7585,7 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             porch_quote,
             porch_read,
             porch_cards,
+            ai_pairing,
             ai_read,
             ai_providers,
             ai_disclose,
@@ -14938,6 +14960,7 @@ mod assistant_acl_tests {
                 "porch_read",
                 "porch_cards",
                 // AI track: main window only, reads through the broker.
+                "ai_pairing",
                 "ai_read",
                 "ai_providers",
                 "ai_disclose",
@@ -15516,10 +15539,16 @@ mod assistant_acl_tests {
         let app = tauri::test::mock_builder()
             .manage(super::NodeState::default())
             .manage(super::AiState::default())
-            .invoke_handler(tauri::generate_handler![super::ai_read, super::ai_disclose, super::ai_send, super::ai_cancel])
+            .invoke_handler(tauri::generate_handler![super::ai_pairing, super::ai_read, super::ai_disclose, super::ai_send, super::ai_cancel])
             .build(tauri::generate_context!(test = true)).unwrap();
         let main = tauri::WebviewWindowBuilder::new(&app, "main", Default::default()).build().unwrap();
         let sealed = tauri::WebviewWindowBuilder::new(&app, "assistant", Default::default()).build().unwrap();
+        let pairing = serde_json::json!({"request":{"action":"status"}});
+        assert_acl_denied(invoke(&sealed, "ai_pairing", pairing.clone()), "ai_pairing");
+        assert_handler_ran(invoke(&main, "ai_pairing", pairing), "Pair your node first");
+        for action in ["payment_pay", "revoke", "owner", "send"] {
+            assert!(invoke(&main, "ai_pairing", serde_json::json!({"request":{"action":action}})).is_err());
+        }
         let local = serde_json::json!({"assistant":"wallet","local_turn":{"question":"balance"}});
         assert_acl_denied(invoke(&sealed, "ai_read", local), "ai_read");
         assert_handler_ran(invoke(&main, "ai_read", serde_json::json!({"local_turn":{"question":"balance"}})), "Choose an assistant");

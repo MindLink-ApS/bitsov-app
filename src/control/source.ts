@@ -1,3 +1,4 @@
+import type { AiPairingRequest, AiPairingView } from './AiPairingPanel';
 import type { WatchSample, WatchUpdate } from './watches';
 import type { AssistantId, AssistantThread, ThreadRequest, LocalTurn } from './assistants';
 // Where the shell's data comes from: the Rust host (Tauri commands + the
@@ -78,6 +79,7 @@ export type RemoteImportView = {
 
 export interface Source {
   readonly mode: 'node' | 'sample';
+  aiPairing(request: AiPairingRequest): Promise<AiPairingView>;
   // first run
   nodeStatus(): Promise<NodeStatus>;
   nodeUnlock(): Promise<void>;
@@ -343,6 +345,7 @@ export const hostSource: Source = {
   fileSave: (messageId) => invoke<FileSaveResult>('file_save', { message_id: messageId }),
   callQuote: (peer) => invoke<CallQuote>('call_quote', { peer }),
   callSignal: (peer, kind, plaintext, maxMsat) => invoke<CallReceipt>('call_signal', { peer, kind, plaintext, max_msat: maxMsat }),
+  aiPairing: (request) => invoke<AiPairingView>('ai_pairing', { request }),
   aiRead: (topic, sinceMs, assistant) => invoke<TopicRead>('ai_read', { topic, since_ms: sinceMs, ...(assistant ? { assistant } : {}) }),
   aiLocalTurn: (assistant, question, draftText) => invoke<LocalTurn>('ai_read', { assistant, local_turn: { question, draft_text: draftText } }),
   aiWatchPoll: (assistant, sample, revision) => invoke<WatchUpdate | null>('ai_read', { assistant, watch: { sample, revision } }),

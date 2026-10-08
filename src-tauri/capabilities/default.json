@@ -93,6 +93,7 @@
     "allow-porch-quote",
     "allow-porch-read",
     "allow-porch-cards",
+    "allow-ai-pairing",
     "allow-ai-read",
     "allow-ai-providers",
     "allow-ai-disclose",

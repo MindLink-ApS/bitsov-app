@@ -103,6 +103,7 @@ fn main() {
             "porch_quote",
             "porch_read",
             "porch_cards",
+            "ai_pairing",
             "ai_read",
             "ai_providers",
             "ai_disclose",

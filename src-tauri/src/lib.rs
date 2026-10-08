@@ -15,6 +15,7 @@ pub mod front_door;
 pub mod porch;
 pub mod sponsor;
 pub mod ai;
+pub mod ai_pairing;
 pub mod spend_journal;
 pub mod control;
 pub mod jarvis;
