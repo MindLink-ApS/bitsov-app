@@ -29,6 +29,7 @@ export function RemoteOwnerCeremony(props: {
   let root!: HTMLElement;
   let alive = true;
   let pending = false;
+  let approvalPollDelay = 2000;
   let poll: ReturnType<typeof setTimeout> | undefined;
   let expiry: ReturnType<typeof setTimeout> | undefined;
   const clearInputs = () => root?.querySelectorAll('input').forEach(input => { input.value = ''; });
@@ -47,6 +48,7 @@ export function RemoteOwnerCeremony(props: {
   }
   async function run(input: SetupInput) {
     if (busy()) return;
+    if (input.action !== 'poll') approvalPollDelay = 2000;
     setBusy(true); setError('');
     // Invoke serializes synchronously; drop DOM values before waiting on the host.
     const request = api(input);
@@ -69,15 +71,19 @@ export function RemoteOwnerCeremony(props: {
           setError('The backup words did not match. Check your written backup and enter them again.'); break;
         case 'waiting_for_box_approval':
         case 'starting':
-          if (reply.state === 'starting') clearTimeout(expiry);
+          if (reply.state === 'starting') { clearTimeout(expiry); approvalPollDelay = 2000; }
           clear(); setStep(reply.state);
-          poll = setTimeout(() => { void run({ action: 'poll' }); }, 2000); break;
+          // The node exposes approval via finalize's 409 box_approval_pending.
+          // Back off those retries; restart/reconnect keeps its shorter cadence.
+          poll = setTimeout(() => { void run({ action: 'poll' }); }, approvalPollDelay);
+          if (reply.state === 'waiting_for_box_approval') approvalPollDelay = Math.min(approvalPollDelay * 2, 10000);
+          break;
         case 'done': pending = false; stopTimers(); clear(); setStep('done'); props.onComplete(); break;
         case 'words_differ': pending = false; stopTimers(); clear(); setStep('words_differ'); break;
       }
     } catch (e) {
       if (alive) { clearTimeout(poll); setError(String(e));
-        if (input.action !== 'match') { clear(); setStep('uncertain'); }
+        clear(); setStep('uncertain');
       }
     } finally { if (alive) setBusy(false); }
   }

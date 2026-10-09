@@ -464,10 +464,9 @@ fn validate_descriptor(stored: StoredDescriptor) -> Result<RemoteDescriptor, Rem
     } else if !stored.box_transport_pubkey.is_empty() {
         return Err(RemoteError::Invalid("missing box transport signature".into()));
     }
-    // A finalize receipt can initially pin only the box's locked transport.
-    if stored.transport_pubkey.is_empty() && stored.transport_signature.is_empty()
-        && stored.box_transport_signature.is_some() && stored.v == 1 {
-        return Ok(descriptor_from_stored(stored, [0; 32]));
+    // Identity-bearing links and persisted receipts require both signed pins.
+    if stored.transport_pubkey.is_empty() || stored.transport_signature.is_empty() {
+        return Err(RemoteError::Invalid("missing live transport proof".into()));
     }
     let transport_pubkey_bytes = verify_transport_proof(&stored.node_id, &stored.transport_pubkey, &stored.transport_signature)?;
     Ok(descriptor_from_stored(stored, transport_pubkey_bytes))
@@ -2288,6 +2287,33 @@ mod tests {
             "bitsov://pair/{}",
             base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json)
         )
+    }
+
+    #[test]
+    fn v1_identity_with_only_a_signed_box_pin_is_refused() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/remote-first-run-pr287.json"
+        )).unwrap();
+        let receipt = &fixture["finalize"];
+        let mut value = serde_json::json!({
+            "v": 1, "endpoint": "box.local:9737", "code": test_code(1),
+            "node_id": receipt["node_id"],
+            "box_transport_pubkey": receipt["box_transport_pubkey"],
+            "box_transport_signature": receipt["box_transport_signature"],
+        });
+        let uri = |v: &serde_json::Value| format!("bitsov://pair/{}",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(v).unwrap()));
+        for empty in [false, true] {
+            if empty {
+                value["transport_pubkey"] = "".into();
+                value["transport_signature"] = "".into();
+            }
+            let error = parse_pairing_link(&uri(&value)).unwrap_err();
+            assert!(error.to_string().contains("missing live transport proof"), "{error}");
+        }
+        value["transport_pubkey"] = receipt["transport_pubkey"].clone();
+        value["transport_signature"] = receipt["transport_signature"].clone();
+        assert!(parse_pairing_link(&uri(&value)).is_ok());
     }
 
     #[test]

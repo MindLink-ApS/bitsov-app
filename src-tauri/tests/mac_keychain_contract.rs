@@ -87,3 +87,71 @@ fn remember_key_store_and_read_are_pinned_inside_their_own_functions() {
     let read_fn = swift_fn(&swift, "bitsov_home_read");
     assert!(read_fn.contains("let legacy = readItem(name, \"BitSov\", true, &data)"));
 }
+
+fn setup_signing_contract(swift: &str) {
+    let setup = swift_fn(swift, "bitsov_dk_sign_setup");
+    for marker in [
+        "finish == 0 || finish == 1",
+        "[\"node:\", \"client:\", \"public_key:\", \"sas_digest:\"]",
+        "[\"node:\", \"client:\", \"epoch:\", \"key:\", \"challenge:\", \"box_transport:\"]",
+        "finish == 0 ? \"bitsov-device-register-v2\" : \"bitsov-node-unlock-v1\"",
+        "guard fields.count == names.count + 1, fields[0] == domain,",
+        "zip(fields.dropFirst(), names).allSatisfy({ $0.0.hasPrefix($0.1) && $0.0.count > $0.1.count }) else { return errBadArgument }",
+        "setupApprovalLock.lock()\n        let previous = setupApproval\n        setupApproval = nil\n        setupApprovalLock.unlock()",
+        "if finish == 1 {\n            guard let prior = previous else { return errCancelled }",
+        "guard prior.blob == blobData, prior.node == fields[1], prior.client == fields[2],",
+        "ProcessInfo.processInfo.systemUptime < prior.deadline else {\n                prior.context.invalidate()\n                return errCancelled",
+        "context = prior.context",
+        "context.interactionNotAllowed = true",
+        "previous?.context.invalidate()\n            context = LAContext()",
+        "signMessage(blob, blobLen, msg, msgLen, reason, outSig, sigCap, outSigLen, context)",
+        "if finish == 0 && status == okStatus {",
+        "setupApproval = SetupApproval(blob: blobData, node: fields[1], client: fields[2],",
+        "context: context, deadline: ProcessInfo.processInfo.systemUptime + 120)",
+        "} else { context.invalidate() }",
+    ] {
+        assert!(setup.contains(marker), "setup signing lost {marker}");
+    }
+    assert_eq!(setup.matches("setupApproval = SetupApproval(").count(), 1);
+    let sign = swift_fn(swift, "signMessage");
+    assert!(sign.contains("_ context: LAContext = LAContext()"));
+    assert!(sign.contains("dataRepresentation: blobData, authenticationContext: context"));
+    let ordinary = swift_fn(swift, "bitsov_dk_sign");
+    assert!(ordinary.contains("signMessage(blob, blobLen, msg, msgLen, reason, outSig, sigCap, outSigLen)"));
+    assert!(!ordinary.contains("setupApproval"));
+    let create = swift_fn(swift, "createKey");
+    assert!(create.contains("case 1: flags = [.privateKeyUsage, .biometryCurrentSet]"));
+    assert!(create.contains("nil, kSecAttrAccessibleWhenUnlockedThisDeviceOnly, flags, &cfError"));
+    assert!(create.contains("SecureEnclave.P256.Signing.PrivateKey(accessControl: access)"));
+    assert!(!create.contains(".biometryAny"));
+    assert!(!create.contains(".userPresence"));
+}
+
+#[test]
+fn setup_signing_is_bound_biometric_expiring_and_single_use() {
+    setup_signing_contract(&read("native/device_key.swift"));
+}
+
+#[test]
+fn setup_signing_pins_detect_security_mutations_in_the_relevant_slice() {
+    let swift = read("native/device_key.swift");
+    for (function, from, to) in [
+        ("bitsov_dk_sign_setup", "setupApproval = nil", "// setupApproval = nil"),
+        ("bitsov_dk_sign_setup", "context.interactionNotAllowed = true", "context.interactionNotAllowed = false"),
+        ("bitsov_dk_sign_setup", "systemUptime + 120", "systemUptime + 1200"),
+        ("bitsov_dk_sign_setup", "prior.blob == blobData, ", ""),
+        ("bitsov_dk_sign_setup", "prior.node == fields[1], ", ""),
+        ("bitsov_dk_sign_setup", "prior.client == fields[2],", "true,"),
+        ("bitsov_dk_sign_setup", "if finish == 0 && status == okStatus", "if status == okStatus"),
+        ("bitsov_dk_sign_setup", "fields[0] == domain", "true"),
+        ("signMessage", "authenticationContext: context", "authenticationContext: LAContext()"),
+        ("createKey", ".biometryCurrentSet", ".biometryAny"),
+        ("createKey", "kSecAttrAccessibleWhenUnlockedThisDeviceOnly", "kSecAttrAccessibleAfterFirstUnlock"),
+    ] {
+        let slice = swift_fn(&swift, function);
+        assert!(slice.contains(from));
+        let mutated = swift.replacen(slice, &slice.replacen(from, to, 1), 1);
+        assert!(std::panic::catch_unwind(|| setup_signing_contract(&mutated)).is_err(),
+            "undetected {function} mutation: {from}");
+    }
+}

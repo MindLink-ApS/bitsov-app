@@ -95,6 +95,7 @@ struct Attempt {
     proof: Option<String>,
     backup: Option<[Zeroizing<String>; 3]>,
     finalize_uncertain: bool,
+    escrow: password_store::Escrow,
     deadline: Instant,
 }
 #[derive(Default)]
@@ -141,24 +142,41 @@ async fn token(state: &NodeState) -> Result<String, String> {
         .clone()
         .ok_or_else(|| "Pair with the box before setup.".into())
 }
-async fn request(
+async fn request_finalize(
     attempt: &mut Attempt,
     token: &str,
-    method: &str,
-    path: &str,
     body: &[u8],
 ) -> Result<(u16, Zeroizing<Vec<u8>>), String> {
     if Instant::now() >= attempt.deadline {
         return Err("Setup expired. Cancel this attempt and restart setup on the box page.".into());
     }
+    attempt.finalize_uncertain = true;
+    attempt.escrow.retain_for_recovery();
     attempt
         .connection
-        .request(method, path, body, token)
+        .request("POST", "/api/v1/identity/finalize", body, token)
         .await
         .map_err(|_| {
             "The box restarted or the setup connection was lost. Cancel and open a new setup link."
                 .into()
         })
+}
+
+// Own the cleanup guard while parsing and validating every create response.
+fn accept_pending(
+    response: Result<(u16, Zeroizing<Vec<u8>>), remote_access::RemoteError>,
+    escrow: password_store::Escrow,
+) -> Result<(Pending, [u8; 16], password_store::Escrow), String> {
+    let (status, bytes) = response.map_err(|_| {
+        "The setup connection was lost. Cancel the pending setup before trying again."
+    })?;
+    if !(200..300).contains(&status) {
+        return Err(safe_error(status, &bytes));
+    }
+    let pending: Pending = serde_json::from_slice(&bytes)
+        .map_err(|_| "Invalid setup response. Cancel this attempt.")?;
+    let nonce = pending.validate()?;
+    Ok((pending, nonce, escrow))
 }
 
 pub async fn run(state: &NodeState, input: Input) -> Result<View, String> {
@@ -168,6 +186,9 @@ pub async fn run(state: &NodeState, input: Input) -> Result<View, String> {
     let _recovery = state.remote_recovery.lock().await;
     let mut setup = state.remote_owner.lock().await;
     if !state.remote_mode.load(Ordering::SeqCst) {
+        if let Some(attempt) = setup.attempt.take() {
+            *attempt.password.lock().unwrap() = None;
+        }
         return Err("Connect to your remote box before setup.".into());
     }
     if let Some(completion) = setup.completion.as_mut() {
@@ -195,6 +216,17 @@ pub async fn run(state: &NodeState, input: Input) -> Result<View, String> {
         home_unlock::probe(state).await?;
         return Ok(View::Done);
     }
+    let result = run_pending(state, &mut setup, input).await;
+    if result.is_err() && !setup.attempt.as_ref().is_some_and(|a| a.finalize_uncertain) {
+        // A failed precommit step is an abort, even if the user never cancels.
+        if let Some(attempt) = setup.attempt.take() {
+            *attempt.password.lock().unwrap() = None;
+        }
+    }
+    result
+}
+
+async fn run_pending(state: &NodeState, setup: &mut Setup, input: Input) -> Result<View, String> {
     match input {
         Input::Create {
             password,
@@ -258,26 +290,18 @@ pub async fn run(state: &NodeState, input: Input) -> Result<View, String> {
                 .ok_or("This box is already initialized.")?
                 .to_owned();
             let (password, saved) = tokio::task::spawn_blocking(move || {
-                let result = password_store::save(&box_key, password.as_bytes());
+                let result = password_store::Escrow::save(box_key, password.as_bytes());
                 (password, result)
             })
             .await
             .map_err(|_| "Saving the protected setup password stopped.")?;
-            saved?;
+            let escrow = saved?;
             let body = serde_json::to_vec(&serde_json::json!({"password_commitment":blake3::hash(password.as_bytes()).to_hex().to_string(),
                 "sas_version":1,"device":{"public_key":record.public_key,"name":NAME}})).unwrap();
-            let (status, bytes) = connection
-                .request("POST", "/api/v1/identity/create-pending", &body, &token)
-                .await
-                .map_err(|_| {
-                    "The setup connection was lost. Cancel the pending setup before trying again."
-                })?;
-            if !(200..300).contains(&status) {
-                return Err(safe_error(status, &bytes));
-            }
-            let pending: Pending = serde_json::from_slice(&bytes)
-                .map_err(|_| "Invalid setup response. Cancel this attempt.")?;
-            let nonce = pending.validate()?;
+            let (pending, nonce, escrow) = accept_pending(
+                connection.request("POST", "/api/v1/identity/create-pending", &body, &token).await,
+                escrow,
+            )?;
             let public: [u8; 65] = hex::decode(&record.public_key)
                 .ok()
                 .and_then(|b| b.try_into().ok())
@@ -301,9 +325,10 @@ pub async fn run(state: &NodeState, input: Input) -> Result<View, String> {
                 proof: None,
                 backup: None,
                 finalize_uncertain: false,
+                escrow,
                 deadline,
             });
-            // Memory-only secrets expire even if the webview disappears.
+            // Provisional escrow and memory secrets expire even if the webview disappears.
             let state_slot = Arc::clone(&state.remote_owner);
             tokio::spawn(async move {
                 tokio::time::sleep_until(deadline.into()).await;
@@ -321,13 +346,15 @@ pub async fn run(state: &NodeState, input: Input) -> Result<View, String> {
         }
         Input::Cancel {} => {
             // Dropping the password is unconditional, including network failure.
-            let attempt = setup.attempt.take();
+            let mut attempt = setup.attempt.take();
+            if let Some(attempt) = attempt.as_mut() {
+                *attempt.password.lock().unwrap() = None;
+                attempt.escrow.clear()?;
+            }
+            // Local cleanup precedes every fallible token/network operation.
             let token = token(state).await?;
             let mut connection = match attempt {
-                Some(attempt) => {
-                    *attempt.password.lock().unwrap() = None;
-                    attempt.connection
-                }
+                Some(attempt) => attempt.connection,
                 None => {
                     let descriptor = state
                         .remote_descriptor
@@ -351,18 +378,7 @@ pub async fn run(state: &NodeState, input: Input) -> Result<View, String> {
             if !(200..300).contains(&status) {
                 return Err(safe_error(status, &bytes));
             }
-            if let Some(key) = state
-                .remote_descriptor
-                .lock()
-                .unwrap()
-                .as_ref()
-                .and_then(|d| d.bootstrap_box_key())
-            {
-                password_store::forget(key)?;
-            }
-            if let Some(ctx) = state.pairing.lock().unwrap().as_ref() {
-                Recovery::clear(&ctx.store)?;
-            }
+            finish_cancel(state)?;
             Ok(View::WordsDiffer)
         }
         Input::Match {} => {
@@ -422,7 +438,7 @@ pub async fn run(state: &NodeState, input: Input) -> Result<View, String> {
                 return Err("Confirmation already submitted. Wait for the box page.".into());
             }
             attempt.backup = Some(backup_words);
-            submit(state, &mut setup).await
+            submit(state, setup).await
         }
         Input::Poll {} => {
             if setup
@@ -430,12 +446,30 @@ pub async fn run(state: &NodeState, input: Input) -> Result<View, String> {
                 .as_ref()
                 .is_some_and(|a| a.backup.is_some() && a.proof.is_some())
             {
-                submit(state, &mut setup).await
+                submit(state, setup).await
             } else {
                 Err("No confirmed setup is waiting for box approval.".into())
             }
         }
     }
+}
+
+// Called only after the box confirms cancellation. A recovered/restarted
+// attempt may no longer have an in-memory escrow owner.
+fn finish_cancel(state: &NodeState) -> Result<(), String> {
+    if let Some(key) = state
+        .remote_descriptor
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|d| d.bootstrap_box_key())
+    {
+        password_store::forget(key)?;
+    }
+    if let Some(ctx) = state.pairing.lock().unwrap().as_ref() {
+        Recovery::clear(&ctx.store)?;
+    }
+    Ok(())
 }
 
 async fn submit(state: &NodeState, setup: &mut Setup) -> Result<View, String> {
@@ -496,21 +530,24 @@ async fn submit(state: &NodeState, setup: &mut Setup) -> Result<View, String> {
     }.save(&ctx.store)?;
     // Write-ahead context is durable before the node can commit. A lost reply
     // must never cause a passive poll to submit the password/finalize again.
-    attempt.finalize_uncertain = true;
     let (status, bytes) =
-        request(attempt, &token, "POST", "/api/v1/identity/finalize", &body).await
+        request_finalize(attempt, &token, &body).await
             .map_err(|_| "The finalize reply was lost. Check the box and continue to recover over its pinned locked connection.")?;
     drop(body);
     drop(password);
     if status == 409 && safe_error(status, &bytes) == "box_approval_pending" {
         attempt.finalize_uncertain = false;
+        attempt.escrow.resume_cleanup();
         Recovery::clear(&ctx.store)?;
         return Ok(View::WaitingForBoxApproval);
     }
     if !(200..300).contains(&status) {
         // A server error may follow commit. Keep recovery-only behavior for 5xx.
         attempt.finalize_uncertain = status >= 500;
-        if !attempt.finalize_uncertain { Recovery::clear(&ctx.store)?; }
+        if !attempt.finalize_uncertain {
+            attempt.escrow.resume_cleanup();
+            Recovery::clear(&ctx.store)?;
+        }
         let error = safe_error(status, &bytes);
         // A failed backup must never be resubmitted by passive polling.
         attempt.backup = None;
@@ -861,6 +898,71 @@ fn bootstrap_binding(token: &str, client_id: &str, node: &str) -> Result<UnlockB
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn confirmed_cancel_cleans_retained_escrow_after_attempt_was_lost() {
+        use base64::Engine;
+        let key = password_store::test_store::key();
+        let state = NodeState::for_api("http://127.0.0.1:1/api/v1");
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("pairing");
+        *state.pairing.lock().unwrap() = Some(Arc::new(PairingCtx {
+            client: PairingClient::new(state.http.clone(), state.api_base.clone()),
+            key: Arc::new(ClientKey::load_or_create(&store).unwrap()),
+            store: store.clone(), data_dir: dir.path().to_path_buf(),
+        }));
+        let value = serde_json::json!({"v":1,"endpoint":"box.local:9737",
+            "box_transport_pubkey":key,"code":base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([3;32])});
+        let link = format!("bitsov://pair/{}", base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&value).unwrap()));
+        *state.remote_descriptor.lock().unwrap() = Some(remote_access::parse_pairing_link(&link).unwrap());
+        let saved = Recovery {
+            node_id: "ab".repeat(32), box_key: key.clone(), endpoint: "box.local:9737".into(),
+            client_public_key: "33".repeat(32), device_public_key: "04".repeat(65),
+            device_key_id: "key".into(), password_saved: false,
+            binding: UnlockBinding { client_id: "client".into(), epoch: 7, fingerprint: "fp".into() },
+        };
+        saved.save(&store).unwrap();
+        let mut escrow = password_store::Escrow::save(key.clone(), b"password").unwrap();
+        escrow.retain_for_recovery();
+        // Lost finalize -> recovery finds SETUP, or the app restarts/expires.
+        // The attempt is gone, but its escrow and journal remain recoverable.
+        drop(escrow);
+        assert!(password_store::test_store::contains(&key));
+        assert!(state.remote_owner.try_lock().unwrap().attempt.is_none());
+        finish_cancel(&state).unwrap();
+        assert!(!password_store::test_store::contains(&key));
+        assert!(Recovery::load(&store).unwrap().is_none());
+    }
+
+    #[test]
+    fn create_failures_release_escrow_without_cancel() {
+        let valid = serde_json::json!({"ceremony_id":"a".repeat(32), "node_id":"b".repeat(64),
+            "mnemonic":"abandon ability able about above absent absorb abstract absurd abuse access accident",
+            "backup_check":[0,4,9],"expires_at":1,"sas_version":1,"box_nonce":"55".repeat(16)});
+        let mut invalid = valid.clone();
+        invalid["box_nonce"] = "invalid".into();
+        for response in [
+            Err(remote_access::RemoteError::HandshakeUnavailable),
+            Ok((409, Zeroizing::new(br#"{"code":"ceremony_in_progress"}"#.to_vec()))),
+            Ok((500, Zeroizing::new(b"{}".to_vec()))),
+            Ok((200, Zeroizing::new(b"not json".to_vec()))),
+            Ok((200, Zeroizing::new(b"{}".to_vec()))),
+            Ok((200, Zeroizing::new(serde_json::to_vec(&invalid).unwrap()))),
+        ] {
+            let key = password_store::test_store::key();
+            let escrow = password_store::Escrow::save(key.clone(), b"password").unwrap();
+            assert!(accept_pending(response, escrow).is_err());
+            assert!(!password_store::test_store::contains(&key));
+        }
+        let key = password_store::test_store::key();
+        let escrow = password_store::Escrow::save(key.clone(), b"password").unwrap();
+        let pending = accept_pending(Ok((200, Zeroizing::new(serde_json::to_vec(&valid).unwrap()))), escrow).unwrap();
+        assert!(password_store::test_store::contains(&key));
+        // An abort after validation (e.g. invalid local public key) still cleans up.
+        drop(pending);
+        assert!(!password_store::test_store::contains(&key));
+    }
+
     #[test]
     fn pr287_sas_receipt_requires_live_proof_and_pairing_binding() {
         let value = serde_json::json!({"node_id":"ab".repeat(32),"restart_required":true,
