@@ -105,3 +105,48 @@ it('recovers a lost finalize reply through an explicit poll without replaying co
   expect(calls).toEqual(['create', 'match', 'finalize', 'poll']);
   expect(root.textContent).toContain('ready');
 });
+
+it('backs approval polling off to ten seconds and stops once finalized', async () => {
+  vi.useFakeTimers();
+  const calls: string[] = [];
+  let approved = false;
+  const root = mount(async input => {
+    calls.push(input.action);
+    if (input.action === 'create') return { state: 'compare', words: ['a','b','c','d'], expires_at: Date.now()/1000+600 };
+    if (input.action === 'match') return { state: 'backup', mnemonic: 'one two three four five six seven eight nine ten eleven twelve', backup_check: [0,4,9], expires_at: Date.now()/1000+600 };
+    return { state: approved ? 'done' : 'waiting_for_box_approval' };
+  });
+  await start(root); click(root, 'Match'); await flush();
+  click(root, 'I wrote it down'); click(root, 'Confirm backup'); await flush();
+  for (const delay of [2000, 4000, 8000, 10000, 10000]) {
+    const before = calls.length;
+    await vi.advanceTimersByTimeAsync(delay - 1);
+    expect(calls).toHaveLength(before);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(calls).toHaveLength(before + 1);
+    expect(calls[calls.length - 1]).toBe('poll');
+  }
+  approved = true;
+  await vi.advanceTimersByTimeAsync(10000);
+  expect(root.textContent).toContain('ready');
+  const finished = calls.length;
+  await vi.advanceTimersByTimeAsync(30000);
+  expect(calls).toHaveLength(finished);
+  expect(calls.filter(action => action === 'finalize')).toHaveLength(1);
+});
+
+it('clears comparison and offers cancellation when Match aborts the host attempt', async () => {
+  const calls: string[] = [];
+  const root = mount(async input => {
+    calls.push(input.action);
+    if (input.action === 'create') return { state: 'compare', words: ['noodle','gallery','demand','science'], expires_at: Date.now()/1000+600 };
+    if (input.action === 'match') throw new Error('Touch ID cancelled.');
+    return { state: 'words_differ' };
+  });
+  await start(root); click(root, 'Match'); await flush();
+  expect(root.textContent).toContain('Touch ID cancelled');
+  expect(root.textContent).not.toContain('noodle');
+  expect(root.textContent).not.toContain('Match (Touch ID)');
+  click(root, 'Cancel setup'); await flush();
+  expect(calls).toEqual(['create', 'match', 'cancel']);
+});
