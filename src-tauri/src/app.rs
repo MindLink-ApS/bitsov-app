@@ -38,7 +38,7 @@
 mod price_floor;
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -251,6 +251,11 @@ struct NodeState {
     node_grant: Mutex<Option<NodeGrant>>,
     /// This run observed the fee-aware quote contract for this node identity.
     all_in_caps_node: Mutex<Option<String>>,
+    /// Capability evidence belongs to a connection, never a process-wide TTL.
+    connection_epoch: AtomicU64,
+    send_capabilities: tokio::sync::Mutex<Option<(ConnectionEpoch, serde_json::Value)>>,
+    /// Parallel preflight readers share a proactive token refresh.
+    token_refresh: tokio::sync::Mutex<()>,
     /// The contact's re-admission quote the owner was last asked about
     /// (`readmission_quoted`), for this node identity. Memory only.
     readmission_ask: Mutex<Option<ReadmissionAsk>>,
@@ -276,6 +281,56 @@ struct NodeState {
     trust_write: Mutex<()>,
     /// A pending console approval saved by an earlier run was loaded once.
     approvals_restored: AtomicBool,
+}
+
+/// Refreshing a token does not change the paired client or connection epoch.
+#[derive(Clone, PartialEq, Eq)]
+struct ConnectionEpoch {
+    api_base: String,
+    connection: u64,
+    remote_failure: u64,
+    node_id: Option<String>,
+    client_id: Option<String>,
+}
+
+impl NodeState {
+    fn invalidate_send_capabilities(&self) {
+        self.connection_epoch.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn connection_epoch(&self) -> ConnectionEpoch {
+        let node_id = self.node_id.lock().unwrap().clone();
+        let client_id = match &*self.auth.lock().unwrap() {
+            AuthMode::Paired(session) => Some(format!("paired:{}", session.client_id)),
+            AuthMode::Local => Some("local".into()),
+            AuthMode::Unauthenticated => None,
+        };
+        ConnectionEpoch {
+            api_base: self.api_base.clone(),
+            connection: self.connection_epoch.load(Ordering::SeqCst),
+            remote_failure: self.remote_retry.failure_revision(),
+            node_id,
+            client_id,
+        }
+    }
+}
+
+/// Single-flight capability reads. Never cache a failed or malformed response,
+/// or accept an answer from a connection that changed while it was in flight.
+async fn send_capabilities(state: &NodeState) -> Result<serde_json::Value, String> {
+    let mut cached = state.send_capabilities.lock().await;
+    let epoch = state.connection_epoch();
+    if let Some((previous, caps)) = &*cached {
+        if *previous == epoch { return Ok(caps.clone()); }
+    }
+    *cached = None;
+    let status: serde_json::Value = get_json(state, "/status").await?;
+    if state.connection_epoch() != epoch {
+        return Err("The node connection changed while reading capabilities. Try again.".into());
+    }
+    let caps = status["api_capabilities"].clone();
+    if caps.is_array() { *cached = Some((epoch, caps.clone())); }
+    Ok(caps)
 }
 
 /// The owner asked for these while an elevation request is pending.
@@ -435,6 +490,9 @@ impl NodeState {
             approvals_restored: AtomicBool::new(false),
             node_grant: Mutex::new(None),
             all_in_caps_node: Mutex::new(None),
+            connection_epoch: AtomicU64::new(0),
+            send_capabilities: tokio::sync::Mutex::new(None),
+            token_refresh: tokio::sync::Mutex::new(()),
             readmission_ask: Mutex::new(None),
             budget_io: Mutex::new(()),
             money: tokio::sync::Mutex::new(()),
@@ -736,6 +794,7 @@ fn spawn_node(app: &AppHandle<impl tauri::Runtime>, config: &Path) -> Result<(),
 
     if local_owner { cmd.stdin(std::process::Stdio::piped()); }
 
+    state.invalidate_send_capabilities();
     *state.all_in_caps_node.lock().unwrap() = None;
     *state.readmission_ask.lock().unwrap() = None;
     let routing_policy = configured_routing_policy(config);
@@ -1149,6 +1208,7 @@ async fn restart_node(
     refuse_external(&state)?;
     *state.ready.lock().unwrap() = false;
     *state.node_id.lock().unwrap() = None;
+    state.invalidate_send_capabilities();
     *state.all_in_caps_node.lock().unwrap() = None;
     *state.readmission_ask.lock().unwrap() = None;
     *state.token.lock().unwrap() = None;
@@ -1587,6 +1647,7 @@ fn check_first_run_session(state: &NodeState, session: &PairedSession) -> Result
 /// Pair with the node, reuse a stored pairing, or — only when `/pair/request`
 /// is 404 — mint via `/auth/local`. Records the outcome in the pairing view.
 async fn authenticate(state: &NodeState, data_dir: &Path) -> Result<(), String> {
+    state.invalidate_send_capabilities();
     let established_remote = state.remote_mode.load(Ordering::SeqCst)
         && matches!(*state.auth.lock().unwrap(), AuthMode::Paired(_));
     // Keep a warm session usable while reauthenticating. A transport failure is
@@ -1618,6 +1679,7 @@ async fn authenticate(state: &NodeState, data_dir: &Path) -> Result<(), String> 
             check_first_run_session(state, &session)?;
             *state.token.lock().unwrap() = Some(session.token.clone());
             *state.auth.lock().unwrap() = AuthMode::Paired(session);
+            state.invalidate_send_capabilities();
             let ctx = state.pairing.lock().unwrap().clone();
             if let Some(ctx) = ctx {
                 view.bootstrap = pairing::bootstrap_state(&ctx.client).await.ok().flatten();
@@ -1628,6 +1690,7 @@ async fn authenticate(state: &NodeState, data_dir: &Path) -> Result<(), String> 
         Ok(Established::LocalFallback { token }) => {
             *state.token.lock().unwrap() = Some(token);
             *state.auth.lock().unwrap() = AuthMode::Local;
+            state.invalidate_send_capabilities();
             *state.pairing_view.lock().unwrap() = view;
             Ok(())
         }
@@ -1686,6 +1749,7 @@ async fn refresh_paired(state: &NodeState) -> Result<(), String> {
 
 /// Before a call: refresh a paired token that is inside the refresh margin.
 async fn ensure_fresh_token(state: &NodeState) {
+    let _refresh = state.token_refresh.lock().await;
     let due = matches!(
         &*state.auth.lock().unwrap(),
         AuthMode::Paired(session) if session.needs_refresh(now_unix())
@@ -2778,12 +2842,20 @@ async fn read_messages(
 
 async fn read_price_quote(state: &NodeState, peer: Option<&str>) -> Result<control::PriceQuote, String> {
     let peer = peer.map(control::node_id).transpose()?;
-    let own: control::KindPrice = get_json(state, &control::price_path(control::KIND_CHAT)).await?;
-    let tables: Vec<control::PeerPrice> = match peer {
-        // An empty table is normal; a failed read is not a usable quote.
-        Some(_) => get_json(state, "/pricing/peers").await?,
-        None => Vec::new(),
-    };
+    let own_path = control::price_path(control::KIND_CHAT);
+    let (own, tables) = tokio::join!(
+        get_json::<control::KindPrice>(state, &own_path),
+        async {
+            // An empty table is normal; a failed read is not a usable quote.
+            match peer {
+                Some(_) => get_json::<Vec<control::PeerPrice>>(state, "/pricing/peers").await,
+                None => Ok(Vec::new()),
+            }
+        },
+    );
+    // Preserve own-price then peer-price error precedence regardless of arrival.
+    let own = own?;
+    let tables = tables?;
     Ok(control::price_quote(own, &tables, peer.as_deref()))
 }
 
@@ -2931,8 +3003,8 @@ async fn first_contact_quote(
 
 async fn read_first_contact_quote(state: &NodeState, peer: &str) -> Result<control::FirstContactQuote, String> {
     let peer = control::node_id(peer)?;
-    let status: serde_json::Value = get_json(state, "/status").await?;
-    if !status["api_capabilities"].as_array().is_some_and(|caps|
+    let capabilities = send_capabilities(state).await?;
+    if !capabilities.as_array().is_some_and(|caps|
         caps.iter().any(|v| v.as_str() == Some(grant::FIRST_CONTACT_CAPABILITY))) {
         return Err("This node cannot quote a first contact before paying.".into());
     }
@@ -4059,8 +4131,28 @@ async fn money_post(state: &NodeState, auth: Auth, path: &str, body: serde_json:
 /// once per id and answers 409 if the text changed.
 ///
 /// Holds `NodeState::money` throughout: a reconcile waits for this POST.
-async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: serde_json::Value, max_msat: u64, charge: Option<Charge>, retry: Option<&spend_journal::Undelivered>) -> Result<String, ActionError> {
-    let _money = state.money.lock().await;
+async fn money_post_with(state: &NodeState, auth: Auth, path: &str, body: serde_json::Value, max_msat: u64, charge: Option<Charge>, retry: Option<&spend_journal::Undelivered>) -> Result<String, ActionError> {
+    money_post_preflight(state, auth, path, body, max_msat, charge, retry, None).await
+}
+
+/// Raw grant I/O only: no grant decisions or mutations occur before pricing.
+/// Holding the money lock keeps another spend from aging this read in a queue.
+struct SendPreflight<'a> {
+    money: tokio::sync::MutexGuard<'a, ()>,
+    epoch: ConnectionEpoch,
+    grant: Option<Result<Option<NodeGrant>, ActionError>>,
+}
+
+async fn money_post_preflight(state: &NodeState, auth: Auth, path: &str, mut body: serde_json::Value, max_msat: u64, charge: Option<Charge>, retry: Option<&spend_journal::Undelivered>, preflight: Option<SendPreflight<'_>>) -> Result<String, ActionError> {
+    let (_money, prefetched_grant, epoch) = match preflight {
+        Some(p) => (p.money, p.grant, Some(p.epoch)),
+        None => (state.money.lock().await, None, None),
+    };
+    let check_connection = || {
+        if epoch.as_ref().is_some_and(|e| *e != state.connection_epoch()) {
+            Err(ActionError::new("not_ready", "The node connection changed while preparing this send. Nothing was sent; try again."))
+        } else { Ok(()) }
+    };
     refuse_if_connection_waiting(state)?;
     let journal = spend_journal(state)?;
     let prior = journal.pending()?;
@@ -4093,7 +4185,11 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
         if let Some(peer) = peer { let _ = read_first_contact_quote(state, &peer).await; }
     }
     let all_in_caps = has_all_in_caps(state);
-    let node_grant = check_node_grant(state, path, &body, max_msat).await?;
+    check_connection()?;
+    let node_grant = match prefetched_grant {
+        Some(result) => check_read_grant(state, path, &body, max_msat, result?),
+        None => check_node_grant(state, path, &body, max_msat).await,
+    }?;
     let reserve_msat = match (&charge, &node_grant) {
         // A zero cap: the node pays nothing, re-admission included.
         _ if max_msat == 0 => 0,
@@ -4167,6 +4263,7 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
     };
     // Journal I/O can take time. Recheck immediately before issuing the request.
     if let Err(e) = refuse_if_connection_waiting(state)
+        .and_then(|()| check_connection())
         .and_then(|()| refuse_if_paused(state))
         .and_then(|()| check_auth(state, auth)) {
         release(state)?;
@@ -4704,8 +4801,14 @@ async fn check_node_grant(state: &NodeState, path: &str, body: &serde_json::Valu
     if state.node_grant.lock().unwrap().is_none() {
         return Ok(None);
     }
+    let grant = read_grant(state).await?;
+    check_read_grant(state, path, body, max_msat, grant)
+}
+
+/// Apply the original grant decisions at dispatch, including a fresh expiry check.
+fn check_read_grant(state: &NodeState, path: &str, body: &serde_json::Value, max_msat: u64, grant: Option<NodeGrant>) -> Result<Option<NodeGrant>, ActionError> {
     let now = now_ms();
-    let Some(g) = read_grant(state).await?.filter(|g| g.live(now)) else {
+    let Some(g) = grant.filter(|g| g.live(now)) else {
         drop_grant(state);
         return Err(grant::ended());
     };
@@ -5035,9 +5138,9 @@ struct SendCaps {
 
 async fn require_price_caps(state: &NodeState, room: bool) -> Result<SendCaps, ActionError> {
     let unavailable = || ActionError::new("price_cap_unavailable", "This node cannot enforce your confirmed spending ceiling. Upgrade the node before sending messages or files.");
-    let status: serde_json::Value = get_json(state, "/status").await.map_err(|reason|
+    let capabilities = send_capabilities(state).await.map_err(|reason|
         ActionError::new("price_quote_unavailable", format!("Node capabilities unavailable: {reason}")))?;
-    let capabilities = status["api_capabilities"].as_array().ok_or_else(unavailable)?;
+    let capabilities = capabilities.as_array().ok_or_else(unavailable)?;
     let has = |cap: &str| capabilities.iter().any(|v| v.as_str() == Some(cap));
     if !has("paid_send_caps_v1") || (room && !has("room_terminal_outcomes_v1")) {
         return Err(unavailable());
@@ -5131,6 +5234,7 @@ async fn do_message_send_with(
     }
     let (auth, plan) = plan_message(state, &target, is_room, max_msat, first_contact_msat)?;
     no_pending_spend(state)?;
+    let epoch = state.connection_epoch();
     let caps = require_price_caps(state, is_room).await?;
     let readmission_possible = caps.readmission_possible;
     let mut body = act::compose_body(recipient, is_room, plaintext)?;
@@ -5140,6 +5244,7 @@ async fn do_message_send_with(
         body["max_recipient_msat"] = serde_json::json!(caps);
     }
     let node_ok = if is_room { None } else { plan.confirm.or(first_contact_msat) };
+    let mut preflight = None;
     let price = if is_room {
         let quote = read_room_quote(state, recipient).await?;
         act::room_sendable(&quote)?;
@@ -5159,7 +5264,14 @@ async fn do_message_send_with(
         // fees. A stale table or our ordinary fee estimate cannot replace it.
         max_msat
     } else {
-        let quote = read_price_quote(state, Some(recipient)).await?;
+        let money = state.money.lock().await;
+        let needs_grant = state.node_grant.lock().unwrap().is_some();
+        let (quote, grant) = tokio::join!(
+            read_price_quote(state, Some(recipient)),
+            async { if needs_grant { Some(read_grant(state).await) } else { None } },
+        );
+        preflight = Some(SendPreflight { money, epoch, grant });
+        let quote = quote?;
         body["max_routing_fee_msat"] = serde_json::json!(quote.max_routing_fee_msat);
         (if quote.peer_stale { quote.own_msat } else { quote.peer_msat.unwrap_or(quote.own_msat) })
             .max(act::MIN_PAYMENT_MSAT).checked_add(quote.max_routing_fee_msat)
@@ -5182,7 +5294,7 @@ async fn do_message_send_with(
         }
     }
     let charge = Charge { target: target.clone(), room: is_room, confirm: plan.confirm, readmission_possible, confirmed: node_ok.is_some(), operation: caps.operations && !is_room };
-    let sent = money_post(state, auth, "/messages/compose", body.clone(), max_msat, Some(charge)).await;
+    let sent = money_post_preflight(state, auth, "/messages/compose", body.clone(), max_msat, Some(charge), None, preflight).await;
     let sent = match sent {
         // After a reconnect or restart the contact asks for admission again,
         // and the node kept its signed quote for this connection.
@@ -7207,7 +7319,11 @@ const LIVE_EVENT: &str = "node-live";
 /// node traffic, which carries decrypted plaintext. Link transitions are
 /// recorded on the way, so `live_link` can replay them to a late subscriber.
 fn emit_live<R: tauri::Runtime>(app: &AppHandle<R>, event: control::LiveEvent) {
-    app.state::<NodeState>().live_link.publish(event, |event| {
+    let state = app.state::<NodeState>();
+    if matches!(event, control::LiveEvent::Link { .. }) {
+        state.invalidate_send_capabilities();
+    }
+    state.live_link.publish(event, |event| {
         let _ = app.emit_to(MAIN_WINDOW_LABEL, LIVE_EVENT, event);
     });
 }
@@ -8609,6 +8725,10 @@ mod control_act_tests {
     //! Slice B actions against a loopback fake node on an ephemeral port: the
     //! spend window is checked before any request, bodies are exact, a node
     //! refusal locks the window, and the owner-grant path on a paired node.
+    mod send_preflight_tests {
+        include!("send_preflight_tests.rs");
+    }
+
     #[tokio::test]
     async fn rc7_and_malformed_capabilities_refuse_all_variable_sends() {
         for status in [
@@ -12946,11 +13066,12 @@ mod control_act_tests {
         assert_eq!((node_view.budget_msat, node_view.remaining_msat, node_view.expires_at_ms), (400_000, 400_000, expires));
         assert_eq!(spend_advance(&node.state, false).await.unwrap().state, act::SpendState::Locked, "a budget ask opens no window");
 
+        let before_send = node.targets().len();
         do_message_send(&node.state, A, false, "gm", 7000, None).await.unwrap();
-        // The grant was read again right before the paid request.
+        // The grant was freshly read during preflight before the paid request.
         let t = node.targets();
         let compose = t.iter().position(|x| x == "POST /messages/compose").unwrap();
-        assert_eq!(t[compose - 1], "GET /pair/grant");
+        assert_eq!(t[before_send..compose].iter().filter(|p| *p == "GET /pair/grant").count(), 1);
     }
 
     #[tokio::test]
