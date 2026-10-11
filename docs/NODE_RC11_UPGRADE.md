@@ -1,7 +1,7 @@
 # Bundled node rc11: upgrade from rc9
 
 Historical rc11 pin (app #174). The current pin and its changes are documented
-in [NODE_RC13_UPGRADE.md](NODE_RC13_UPGRADE.md).
+in [NODE_RC14_UPGRADE.md](NODE_RC14_UPGRADE.md).
 
 The app pinned `MindLink-ApS/BitSov-bitsov@v0.3.0-rc11`, targeting
 `834968b955eaa3d402b87cd0d6835456473115df`. Upgrade directly from rc9

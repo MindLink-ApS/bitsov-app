@@ -2,7 +2,7 @@
 
 Code: `src-tauri/src/ai.rs` (host rules), the `ai_*` commands in `src-tauri/src/main.rs`,
 the `payments` tool in `src-tauri/src/jarvis/broker/`, and `src/control/ai.ts` +
-`src/control/AiTrack.tsx` (track). Bundled node: rc13 `d625e85`; retained rc7 compatibility routes, plus the #78
+`src/control/AiTrack.tsx` (track). Bundled node: rc14 `d55a88e`; retained rc7 compatibility routes, plus the #78
 `BitSov-Data-As-Of` / `BitSov-Data-Stale` headers when the node sends them.
 
 **v1 policy:** [AI assistants](AI-ASSISTANTS.md) records the owner's 2026-10-07 G4
