@@ -260,6 +260,155 @@ describe('call restart negotiation', () => {
     expect(pc.tracks[0].stop).toHaveBeenCalledOnce();
   });
 
+  it.each(['authorization', 'remaining grant', 'per-call grant'] as const)('keeps a connected caller live when recovery is refused by %s', async (refusal) => {
+    let recovering = false;
+    const { e, sent, views } = engine({
+      authorize: async () => !recovering || refusal !== 'authorization',
+      grant: () => recovering ? {
+        expires_at_ms: 3_600_000, budget_msat: 21_000,
+        remaining_msat: refusal === 'remaining grant' ? 0 : 21_000,
+        per_call_max_msat: refusal === 'per-call grant' ? 0 : 21_000,
+      } : null,
+    });
+    await e.place(A, 'audio', QUOTE);
+    await e.receive(msg(401, { sdp: 'answer' }), OWN);
+    const pc = FakePc.made[0]; pc.connect();
+    recovering = true;
+    await e.receive(msg(402, { candidate: '', sdp_mid: 'bitsov-restart-v1' }), OWN);
+    expect(views.some(v => v.phase === 'reconnecting')).toBe(true);
+    expect(e.view()).toMatchObject({ phase: 'live', liveAt: 1000, error: expect.stringMatching(/approval|grant/) });
+    expect(pc.restartIce).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(RECONNECT_GRACE_MS + 1);
+    expect(e.view().phase).toBe('live');
+    expect(pc.closed).toBe(false);
+    expect(pc.tracks[0].stop).not.toHaveBeenCalled();
+    await e.hangup();
+    expect(sent.filter(s => s.kind === 403).map(s => s.body.call_id)).toEqual([ID]);
+  });
+
+  it('keeps a connected callee live when authorization refuses a restart offer', async () => {
+    let allowed = true;
+    const { e } = engine({ authorize: async () => allowed });
+    await e.receive(msg(400, { media: 'audio', sdp: 'offer' }), OWN);
+    await e.accept();
+    const pc = FakePc.made[0]; pc.connect();
+    allowed = false;
+    await e.receive(msg(400, { call_id: 'e'.repeat(32), media: 'audio', sdp: `restart\r\na=x-bitsov-restart-of:${ID}\r\n` }), OWN);
+    expect(e.view()).toMatchObject({ phase: 'live', liveAt: 1000, error: 'Call recovery needs spending approval.' });
+    await vi.advanceTimersByTimeAsync(RECONNECT_GRACE_MS + 1);
+    expect(e.view().phase).toBe('live');
+    expect(pc.closed).toBe(false);
+    e.endLocal();
+  });
+
+  it.each([true, false])('rechecks connectivity at grace expiry after refusal (healed: %s)', async (healed) => {
+    let allowed = true;
+    const { e } = engine({ authorize: async () => allowed });
+    await e.place(A, 'audio', QUOTE);
+    await e.receive(msg(401, { sdp: 'answer' }), OWN);
+    const pc = FakePc.made[0]; pc.connect();
+    allowed = false;
+    pc.state('failed');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(e.view().phase).toBe('reconnecting');
+    await vi.advanceTimersByTimeAsync(RECONNECT_GRACE_MS - 1);
+    // The transport heals without dispatching another state-change event.
+    if (healed) pc.connectionState = 'connected';
+    await vi.advanceTimersByTimeAsync(1);
+    expect(e.view()).toMatchObject({ phase: healed ? 'live' : 'ended', liveAt: 1000 });
+    expect(pc.closed).toBe(!healed);
+    expect(pc.tracks[0].stop).toHaveBeenCalledTimes(healed ? 0 : 1);
+    e.endLocal();
+  });
+
+  it.each(['refused', 'rejected'] as const)('does not hang up an unpaid recovery admission when payment is %s', async (outcome) => {
+    const sent: { kind: number; body: Record<string, unknown> }[] = [];
+    const { e } = engine({ signal: async (_peer, kind, plaintext) => {
+      const body = JSON.parse(plaintext);
+      sent.push({ kind, body });
+      if (kind === 400 && body.call_id !== ID) {
+        if (outcome === 'rejected') throw new Error('Recovery refused.');
+        return { ok: false, error: { code: 'spend_refused', message: 'Recovery refused.' } };
+      }
+      return { ok: true, value: { total_msat: 1 } as CallReceipt };
+    } });
+    await e.place(A, 'audio', QUOTE);
+    await e.receive(msg(401, { sdp: 'answer' }), OWN);
+    const pc = FakePc.made[0]; pc.connect();
+    await e.receive(msg(402, { candidate: '', sdp_mid: 'bitsov-restart-v1' }), OWN);
+    expect(sent.filter(s => s.kind === 400).map(s => s.body.call_id)).toEqual([ID, 'e'.repeat(32)]);
+    expect(e.view()).toMatchObject({ phase: 'live', liveAt: 1000, error: expect.stringContaining('Recovery refused.') });
+    await vi.advanceTimersByTimeAsync(RECONNECT_GRACE_MS + 1);
+    expect(e.view().phase).toBe('live');
+    expect(pc.closed).toBe(false);
+    expect(pc.tracks[0].stop).not.toHaveBeenCalled();
+    await e.hangup();
+    expect(sent.filter(s => s.kind === 403).map(s => s.body.call_id)).toEqual([ID]);
+  });
+
+  it.each([true, false])('handles an early recovery answer and only hangs up paid admissions (paid: %s)', async (paid) => {
+    let finish!: (r: Awaited<ReturnType<CallDeps['signal']>>) => void;
+    const hangups: string[] = [];
+    const { e } = engine({ signal: async (_peer, kind, plaintext) => {
+      const body = JSON.parse(plaintext);
+      if (kind === 400 && body.call_id !== ID) return new Promise(resolve => { finish = resolve; });
+      if (kind === 403) hangups.push(body.call_id);
+      return { ok: true, value: { total_msat: 1 } as CallReceipt };
+    } });
+    await e.place(A, 'audio', QUOTE);
+    await e.receive(msg(401, { sdp: 'answer' }), OWN);
+    const pc = FakePc.made[0]; pc.connect(); pc.state('failed');
+    await vi.advanceTimersByTimeAsync(0);
+    await e.receive(msg(401, { call_id: 'e'.repeat(32), sdp: 'restart answer' }), OWN);
+    expect(pc.remote).toEqual({ type: 'answer', sdp: 'restart answer' });
+    if (paid) {
+      finish({ ok: true, value: { total_msat: 15000 } as CallReceipt });
+      await vi.advanceTimersByTimeAsync(0);
+    }
+    await e.hangup();
+    expect(hangups).toEqual(paid ? ['e'.repeat(32), ID] : [ID]);
+    if (!paid) {
+      finish({ ok: true, value: { total_msat: 15000 } as CallReceipt });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(e.view().phase).toBe('ended');
+      expect(hangups).toEqual([ID]);
+    }
+  });
+
+  it('does not treat stale aggregate connectivity as healed while ICE is failed', async () => {
+    let allowed = true;
+    const { e } = engine({ authorize: async () => allowed });
+    await e.place(A, 'audio', QUOTE);
+    await e.receive(msg(401, { sdp: 'answer' }), OWN);
+    const pc = FakePc.made[0]; pc.connect();
+    allowed = false;
+    pc.iceConnectionState = 'failed'; pc.oniceconnectionstatechange?.();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(e.view().phase).toBe('reconnecting');
+    await vi.advanceTimersByTimeAsync(RECONNECT_GRACE_MS);
+    expect(e.view().phase).toBe('ended');
+    expect(pc.closed).toBe(true);
+  });
+
+  it('honors a peer hangup on the recovery id before the offer receipt arrives', async () => {
+    let finish!: (r: Awaited<ReturnType<CallDeps['signal']>>) => void;
+    const { e } = engine({ signal: async (_peer, kind, plaintext) => {
+      if (kind === 400 && JSON.parse(plaintext).call_id !== ID) return new Promise(resolve => { finish = resolve; });
+      return { ok: true, value: { total_msat: 1 } as CallReceipt };
+    } });
+    await e.place(A, 'audio', QUOTE);
+    await e.receive(msg(401, { sdp: 'answer' }), OWN);
+    const pc = FakePc.made[0]; pc.connect(); pc.state('failed');
+    await vi.advanceTimersByTimeAsync(0);
+    await e.receive(msg(403, { call_id: 'e'.repeat(32), reason: 'hangup' }), OWN);
+    expect(e.view()).toMatchObject({ phase: 'ended', reason: 'hangup' });
+    expect(pc.closed).toBe(true);
+    expect(pc.tracks[0].stop).toHaveBeenCalledOnce();
+    finish({ ok: true, value: { total_msat: 15000 } as CallReceipt });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(e.view().phase).toBe('ended');
+  });
+
   it('bounds a failed restart without replaying an unknown paid operation or reviving late', async () => {
     let n = 0;
     const { e, sent } = engine({ newCallId: () => n++ === 0 ? ID : 'e'.repeat(32) });

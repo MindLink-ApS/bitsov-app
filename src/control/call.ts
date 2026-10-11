@@ -192,6 +192,8 @@ export function createCallEngine(deps: CallDeps) {
   let offerSdp: string | null = null;
   // Public callId stays stable; each admission has its own node registry id.
   let wireId: string | null = null;
+  // Route early answers without treating an in-flight offer as a paid admission.
+  let pendingRestartId: string | null = null;
   const admissions = new Set<string>();
   let negotiated = false;
   let answerInFlight = false;
@@ -224,6 +226,7 @@ export function createCallEngine(deps: CallDeps) {
     busy = false;
     cameraBusy = false;
     wireId = null;
+    pendingRestartId = null;
     admissions.clear();
     negotiated = false;
     answerInFlight = false;
@@ -301,6 +304,37 @@ export function createCallEngine(deps: CallDeps) {
     } catch { /* Diagnostics must never affect a call on webviews without stats. */ }
   };
 
+  const connected = (conn: RTCPeerConnection) => {
+    if (pc !== conn || !active()) return;
+    void readConnection(conn);
+    clearInterval(diagnosticTimer);
+    diagnosticTimer = setInterval(() => { void readConnection(conn); }, 2_000);
+    clearTimeout(dropTimer);
+    dropTimer = undefined;
+    clearTimeout(restartTimer);
+    restartTimer = undefined;
+    if (view.phase !== 'live') {
+      clearTimeout(ringTimer);
+      set({ phase: 'live', liveAt: view.liveAt ?? deps.now() });
+    }
+  };
+
+  const reconcileConnection = (conn: RTCPeerConnection) => {
+    // ICE can fail before WebKit updates the aggregate connection state.
+    if (pc !== conn || conn.connectionState !== 'connected' ||
+        ['failed', 'disconnected', 'closed'].includes(conn.iceConnectionState)) return false;
+    connected(conn);
+    return true;
+  };
+
+  const recoveryRefused = (conn: RTCPeerConnection, error: string) => {
+    if (pc !== conn) return;
+    set({ error });
+    // A peer can request recovery after our transport has already healed;
+    // refusing it will not trigger another connection-state event.
+    reconcileConnection(conn);
+  };
+
   const open = async (media: CallMedia) => {
     const generation = mediaGeneration;
     const stream = await acquireMedia({ audio: true, video: media === 'video' });
@@ -323,17 +357,7 @@ export function createCallEngine(deps: CallDeps) {
     const connectionChanged = (state: string) => {
       if (pc !== conn) return;
       if (state === 'connected') {
-        void readConnection(conn);
-        clearInterval(diagnosticTimer);
-        diagnosticTimer = setInterval(() => { void readConnection(conn); }, 2_000);
-        clearTimeout(dropTimer);
-        dropTimer = undefined;
-        clearTimeout(restartTimer);
-        restartTimer = undefined;
-        if (view.phase !== 'live') {
-          clearTimeout(ringTimer);
-          set({ phase: 'live', liveAt: view.liveAt ?? deps.now() });
-        }
+        connected(conn);
       } else if (state === 'disconnected' || state === 'failed') {
         reconnect(conn);
         if (state === 'failed') void restart(conn);
@@ -377,7 +401,7 @@ export function createCallEngine(deps: CallDeps) {
     clearTimeout(ringTimer);
     set({ phase: 'reconnecting' });
     if (dropTimer === undefined) dropTimer = setTimeout(() => {
-      if (pc === conn) end('failed', view.error ?? 'The connection was lost. Check that both apps have a reachable STUN server in Settings; some networks cannot connect without a relay.');
+      if (pc === conn && !reconcileConnection(conn)) end('failed', view.error ?? 'The connection was lost. Check that both apps have a reachable STUN server in Settings; some networks cannot connect without a relay.');
     }, RECONNECT_GRACE_MS);
   };
 
@@ -390,19 +414,19 @@ export function createCallEngine(deps: CallDeps) {
     else restartAttempted = true;
     try {
       if (deps.authorize && !await deps.authorize()) {
-        if (pc === conn) set({ error: 'Call recovery needs spending approval.' });
+        recoveryRefused(conn, 'Call recovery needs spending approval.');
         return;
       }
       if (pc !== conn) return;
       if (!view.outgoing) {
         const r = await pay(CALL_ICE, { candidate: '', sdp_mid: RESTART_REQUEST_MID }, signalCost(q));
-        if (pc === conn && !r.ok) set({ error: r.error.message });
+        if (!r.ok) recoveryRefused(conn, r.error.message);
         return;
       }
-      if (q.offer_msat === null) return;
+      if (q.offer_msat === null) { reconcileConnection(conn); return; }
       const grant = deps.grant?.();
       if (grant && q.call_total_msat !== null && (q.call_total_msat > grant.remaining_msat || q.call_total_msat > grant.per_call_max_msat)) {
-        set({ error: 'The remaining node grant cannot cover call recovery. Ask the owner to increase the budget.' });
+        recoveryRefused(conn, 'The remaining node grant cannot cover call recovery. Ask the owner to increase the budget.');
         return;
       }
       const id = (deps.newCallId ?? newCallId)();
@@ -414,14 +438,23 @@ export function createCallEngine(deps: CallDeps) {
       if (pc !== conn) return;
       await gathered(conn, GATHER_MS);
       if (pc !== conn) return;
-      wireId = id;
-      admissions.add(id);
+      pendingRestartId = id;
       restartAnswerPending = true;
       const sdp = `${conn.localDescription!.sdp.trimEnd()}\r\n${RESTART_ATTRIBUTE}${view.callId}\r\n`;
-      const r = await pay(CALL_OFFER, { media: view.media, sdp }, q.offer_msat + q.offer_max_routing_fee_msat);
-      if (pc === conn && !r.ok) set({ error: r.error.message });
+      const r = await pay(CALL_OFFER, { media: view.media, sdp }, q.offer_msat + q.offer_max_routing_fee_msat, id);
+      if (pc !== conn) return;
+      if (r.ok) {
+        wireId = id;
+        admissions.add(id);
+      } else {
+        restartAnswerPending = false;
+        recoveryRefused(conn, r.error.message);
+      }
     } catch (error) {
-      if (pc === conn) set({ error: `Call recovery failed: ${asActionError(error).message}` });
+      if (pc === conn) restartAnswerPending = false;
+      recoveryRefused(conn, `Call recovery failed: ${asActionError(error).message}`);
+    } finally {
+      if (pc === conn) pendingRestartId = null;
     }
   };
 
@@ -433,7 +466,7 @@ export function createCallEngine(deps: CallDeps) {
     reconnect(conn);
     try {
       if (deps.authorize && !await deps.authorize()) {
-        if (pc === conn) set({ error: 'Call recovery needs spending approval.' });
+        recoveryRefused(conn, 'Call recovery needs spending approval.');
         return;
       }
       if (pc !== conn) return;
@@ -448,9 +481,9 @@ export function createCallEngine(deps: CallDeps) {
       await gathered(conn, GATHER_MS);
       if (pc !== conn) return;
       const r = await pay(CALL_ANSWER, { sdp: conn.localDescription!.sdp }, signalCost(quote));
-      if (pc === conn && !r.ok) set({ error: r.error.message });
+      if (!r.ok) recoveryRefused(conn, r.error.message);
     } catch (error) {
-      if (pc === conn) set({ error: `Call recovery failed: ${asActionError(error).message}` });
+      recoveryRefused(conn, `Call recovery failed: ${asActionError(error).message}`);
     }
   };
 
@@ -670,7 +703,7 @@ export function createCallEngine(deps: CallDeps) {
       const s = parseSignal(m.kind, m.plaintext);
       if (!s) return;
       const peer = m.sender.toLowerCase();
-      const ours = wireId === s.call_id && view.peer === peer;
+      const ours = (pendingRestartId ?? wireId) === s.call_id && view.peer === peer;
       switch (m.kind) {
         case CALL_OFFER:
           if (!s.meeting && view.peer === peer && restartParent(s.sdp!) === view.callId) {
@@ -718,7 +751,7 @@ export function createCallEngine(deps: CallDeps) {
           if (ours && pc) await pc.addIceCandidate({ candidate: s.candidate!, sdpMid: s.sdp_mid ?? null, sdpMLineIndex: s.sdp_mline_index ?? null }).catch(() => undefined);
           return;
         default:
-          if (view.peer === peer && admissions.has(s.call_id) && active()) end(s.reason ?? 'hangup');
+          if (view.peer === peer && (admissions.has(s.call_id) || pendingRestartId === s.call_id) && active()) end(s.reason ?? 'hangup');
       }
     },
   };
