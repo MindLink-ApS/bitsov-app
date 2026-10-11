@@ -64,6 +64,35 @@ all. Even a 1 s send feels broken if nothing moves.
    unmeasured step 7 becomes measured. The app shows nothing new; this is diagnostics only.
 5. **Send stays one tap after the first approval.** See the scenarios below that send the user to the console.
 
+## 1b. "Call / video call" (second deep dive, traced)
+
+### Path (`src/control/call.ts`, host `do_call_signal`)
+
+1. **Click Call.** The button already shows the read-only quote. The panel goes to **Calling…** at once, which is
+   good immediate feedback.
+2. **Media and offer, before anything is paid.**
+   - `getUserMedia`: the first time, macOS shows its permission prompt (timeout 15 s).
+   - `createOffer`, then vanilla ICE gather, waiting **up to 3 s** (`GATHER_MS`) before the offer is sent.
+3. **The offer is a paid signal (`call_signal`).** The host does `GET /status`, reads the call quote, reads the
+   grant, then `POST /messages/compose`. That is **≈ 3–4 sequential RTTs plus payment and delivery**, the same
+   pattern as a message. When it settles the panel shows **Ringing**.
+4. **The callee taps Accept.** That is the same path again for the answer: media, gather (≤ 3 s), then a paid
+   signal of ≈ 3–4 RTT plus payment.
+5. **ICE connectivity.** With **no ICE servers (the default), only host candidates exist.**
+   - On one LAN or VPN it connects.
+   - **Across networks (Rasmus in Mexico ↔ Maya) it cannot connect at all.** "Calls may not connect across
+     networks yet" is accurate.
+
+### Findings
+
+| # | Finding | Kind | Fix |
+|---|---|---|---|
+| C1 | Calls across networks **cannot connect**: no STUN/TURN by design (the app contacts no third party) | reachability, not latency | **Product decision.** STUN (and later TURN) served by **the user's own node** keeps the "no third party" rule. Needs a node issue (STUN on the node's public endpoint; TURN for symmetric NAT). The app then defaults to the paired node's STUN when remote. |
+| C2 | The "No STUN server is set" note shows on **every chat** (track header), not only around calls | noise | Show it only in the call panel and next to the call buttons when a call is started. Small renderer PR. |
+| C3 | Each paid signal repeats the message pre-flight (`/status`, quote, grant) | latency, ≈ 3–4 RTT per signal, × 2 per call setup | Same host fixes as send (#2–#3 in the top list): cache capabilities, parallel reads |
+| C4 | Vanilla ICE waits up to 3 s for gathering before sending the offer | latency on slow or blocked STUN | Fine with host-only; with STUN, consider trickle ICE later (one more paid signal per batch, so a cost/latency trade-off to decide) |
+| C5 | Callee sees an incoming card only after the offer's payment settles | inherent to "payment is the connection" | Keep; make sure the caller sees **Ringing** only after settle (it does) |
+
 ## 2. Scenario inventory
 
 | Scenario | Feedback | Done | Leaves app? | Main friction found | Status |
@@ -80,7 +109,7 @@ all. Even a 1 s send feels broken if nothing moves.
 | Rooms | quote → confirm | per leg sends | no | each leg is a full send (sequential) | to measure |
 | Wallet receive | invoice/QR | payer side | no | unmeasured | to measure |
 | Wallet send | review → confirm | pay | no | same pre-flight pattern as send (to check) | to measure |
-| Call / video | "Calling…" | ICE + paid signals | no | "No STUN server is set" note on every chat; no STUN default | **next deep dive** |
+| Call / video | "Calling…" at once | offer paid → Ringing → answer paid → ICE | no | **cannot connect across networks (C1)**; note on every chat (C2); 3–4 RTT pre-flight per signal (C3) | **traced, fixes C1–C3** |
 | Meeting | planner → invite | per invitee | no | invitees ringed one by one | to measure |
 | Offline / reconnect | offline screen (#198) | reconnect | no | — | to measure |
 | Settings | instant | instant | no | Display repeated on every tab (inspiration doc §6) | planned |
@@ -105,6 +134,7 @@ all. Even a 1 s send feels broken if nothing moves.
 
 ## 4. Log
 
+- **2026-10-11:** Calls traced: cross-network calls cannot connect without STUN/TURN (C1, needs a node issue and a product decision); the STUN note shows on every chat (C2); each paid signal repeats the send pre-flight (C3).
 - **2026-10-11:** Optimistic send built on `feat/optimistic-send`: bubble at 2–3 ms, paid at 1209 ms (real settlement). A second Send while one is in flight queues in order instead of being ignored.
 - **2026-10-11:** UI side measured with the stubbed host (1.2 s send): bubble at 1218 ms, paid at 1218 ms.
 - **2026-10-11:** Scorecard started. Send path traced: 5–6 sequential pre-flight RTTs plus compose, with no visual
