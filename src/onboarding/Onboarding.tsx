@@ -1,3 +1,4 @@
+import { BoxIllustration } from './BoxIllustration';
 import { LocalNodeSwitch } from './LocalNodeSwitch';
 import { DeviceApprovals } from './DeviceApprovals';
 import { SoftError } from '../control/SoftError';
@@ -206,6 +207,7 @@ export function Onboarding(props: {
         }
       >
         <header class="ob-head" data-ob-head="node">
+          <Show when={target() !== 'local'}><BoxIllustration /></Show>
           <h1>Where should your node run?</h1>
           <p class="lede">Every message you send is a small bitcoin payment to the person you are writing to. Your node makes those payments, so it needs a home first.</p>
         </header>
@@ -366,18 +368,20 @@ export function Onboarding(props: {
         <Match when={props.pairing().state === 'paired'}>
           <div class="panel pairing" data-pairing="paired">
             <div class="touchid-hero paired">
-              <div class="touchid-badge ok">
-                <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                  <path d="M12 12c0-3 2.5-5 5-5" />
-                  <path d="M12 12c0 3-2.5 5-5 5" />
-                  <path d="M7 12c0-2.8 2.2-5 5-5s5 2.2 5 5-2.2 5-5 5" />
-                  <path d="M12 2a10 10 0 0 0-10 10c0 4.4 2.9 8.2 7 9.5" />
-                  <path d="M21.2 15c.5-1 .8-2 .8-3a10 10 0 0 0-10-10" />
-                </svg>
-                <span class="touchid-check">✓</span>
-              </div>
+              <Show when={props.pairing().remote} fallback={
+                <div class="touchid-badge ok">
+                  <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M12 12c0-3 2.5-5 5-5" />
+                    <path d="M12 12c0 3-2.5 5-5 5" />
+                    <path d="M7 12c0-2.8 2.2-5 5-5s5 2.2 5 5-2.2 5-5 5" />
+                    <path d="M12 2a10 10 0 0 0-10 10c0 4.4 2.9 8.2 7 9.5" />
+                    <path d="M21.2 15c.5-1 .8-2 .8-3a10 10 0 0 0-10-10" />
+                  </svg>
+                  <span class="touchid-check">✓</span>
+                </div>
+              }><BoxIllustration paired /></Show>
               <div class="touchid-text">
-                <h2>This app is paired</h2>
+                <h2>{props.pairing().remote ? 'Paired with your box' : 'This app is paired'}</h2>
                 <Show
                   when={isEnrolled()}
                   fallback={<span class="touchid-status-pill" data-device-badge="none">{props.status().local_owner && !props.pairing().bootstrap ? "Owner device not enrolled" : "App paired"}</span>}

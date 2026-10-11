@@ -4,6 +4,8 @@ import { LockedNode, RememberUnlock } from './onboarding/LockedNode';
 import { RemoteOwnerCeremony } from './onboarding/RemoteOwnerCeremony';
 import { LocalOwnerCeremony } from './onboarding/LocalOwnerCeremony';
 import { InitializationRepair } from './onboarding/InitializationRepair';
+import { OfflineNode } from './control/OfflineNode';
+import { softenError } from './control/userFacing';
 import { SoftError } from './control/SoftError';
 import { DelayedSpinner } from './control/DelayedSpinner';
 import { isMoneyNotReady } from './control/readiness';
@@ -165,11 +167,19 @@ function AppScreen() {
     setWatchError(result.failed ? 'Some watch notices could not be saved. The next status poll will retry.' : null);
   });
   onCleanup(watches.close);
+  const [lastSeen, setLastSeen] = createSignal<{ nodeId: string; at: number } | null>(null);
+  const offline = () => !status().locked && (!!status().retry_after_secs ||
+    (!status().ready && !!status().error && !softenError(status().error).money &&
+      /connection[ _](refused|lost|closed)|ECONN|network[ _]error|failed to fetch|timed?[ _]out|unreachable|remote unavailable|remote handshake limit or endpoint unavailable|remote_handshake_unavailable/i.test(status().error!)));
+  const offlineScreen = () => <Show when={offline()}><OfflineNode remote={pairing().remote}
+    lastSeen={!status().node_id || status().node_id === lastSeen()?.nodeId ? lastSeen()?.at : null}
+    retryAfterSecs={status().retry_after_secs} onRetry={retryPairing} /></Show>;
   let timer: number | undefined;
   const poll = async () => {
     try {
       const next = await source().nodeStatus();
       setStatus(next);
+      if (next.ready && !next.retry_after_secs && next.node_id) setLastSeen({ nodeId: next.node_id, at: Date.now() });
       setRememberOffer(!!next.remember_offer);
     } catch (e) {
       setStatus({ ready: false, node_id: null, error: String(e) });
@@ -216,11 +226,7 @@ function AppScreen() {
 
   const firstRun = (
     <div class="first-run" data-first-run>
-      <Show when={status().retry_after_secs}>
-        <div class="state" role="status" aria-live="polite" data-remote-retry>
-          Remote connection unavailable · waiting {status().retry_after_secs} s before retrying.
-        </div>
-      </Show>
+      {offlineScreen()}
 
       <Show
         when={status().initialization_repair && status().initialization_repair !== 'none'}
@@ -245,7 +251,7 @@ function AppScreen() {
             when={showIdentityGate()}
             fallback={
               <Show
-                when={status().error && pairing().state !== 'failed'}
+                when={status().error && pairing().state !== 'failed' && !offline()}
                 fallback={
                   <Show when={starting()}>
                     <div class="state">
@@ -372,6 +378,7 @@ function AppScreen() {
     >
       <ControlCenter
         remote={pairing().remote}
+        offline={offlineScreen()}
         retryAfterSecs={status().retry_after_secs}
         onReconnect={retryPairing}
         source={source()}

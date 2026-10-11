@@ -1252,3 +1252,43 @@ input[type='checkbox'], input[type='radio'] { width: auto; flex: none; padding: 
 .form-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); }
 .form-actions > .primary { flex: none; }
 .form-actions > .quiet { flex: none; }
+
+/* Network and settlement feedback: Ember 2.0, one state change per animation. */
+.on-call-pill { display: inline-flex; align-items: center; justify-content: center; gap: var(--s-2); flex: none; min-height: 44px; padding: var(--s-2) var(--s-3); border: 1px solid var(--accent); border-radius: var(--r-chip); background: var(--surface); color: var(--accent); font-size: var(--t-sm); font-variant-numeric: tabular-nums; white-space: nowrap; cursor: pointer; }
+.on-call-pill .dot { background: currentColor; }
+.on-call-pill:hover { background: var(--raised); }
+.on-call-pill:focus-visible, .call-panel:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.box-illustration { display: block; width: 160px; max-width: 100%; height: auto; flex: none; color: var(--accent); }
+.box-case { fill: var(--surface); }
+.box-sticker { fill: var(--ember); }
+.box-illustration.offline { color: var(--muted); }
+.box-illustration.offline .box-sticker { fill: var(--sunk); }
+.box-illustration.paired { width: 104px; animation: box-paired 640ms var(--ease-out) 1; }
+.box-illustration.paired + .touchid-text { animation: state-fade var(--d-mid) var(--ease) 160ms both; }
+@keyframes box-paired { 0%, 100% { filter: drop-shadow(0 0 0 transparent); } 45% { filter: drop-shadow(0 0 10px var(--accent)); } }
+@keyframes state-fade { from { opacity: 0; } to { opacity: 1; } }
+.pair-words { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--s-3); list-style: none; padding: 0; margin: var(--s-3) 0; }
+.pair-words li { min-width: 0; padding: var(--s-4) var(--s-2); border: 1px solid var(--line-strong); border-radius: var(--r-control); background: var(--sunk); color: var(--ink); font-size: clamp(18px, 4vw, 24px); font-weight: 600; text-align: center; overflow-wrap: anywhere; }
+.node-offline { display: flex; flex-direction: column; align-items: center; gap: var(--s-3); margin: 0 auto; padding: var(--s-6) var(--s-4); width: min(100%, 520px); min-width: 0; color: var(--ink); text-align: center; overflow-wrap: anywhere; }
+.node-offline h2 { font-family: var(--font-display); font-size: var(--t-3xl); font-weight: 400; }
+.node-offline p { margin: 0; }
+.node-offline ul { text-align: left; padding-left: var(--s-5); margin: 0; color: var(--muted); }
+.node-offline li + li { margin-top: var(--s-2); }
+.node-offline button { min-height: 44px; }
+.track > .node-offline { flex: none; max-height: 65vh; overflow-y: auto; border-bottom: 1px solid var(--line); }
+.wallet-settled { display: flex; flex-direction: column; align-items: center; gap: var(--s-3); padding: var(--s-5); color: var(--accent); text-align: center; overflow-wrap: anywhere; }
+.wallet-settled svg { flex: none; }
+.settled-ring { stroke: var(--line-strong); }
+.settled-check { stroke-dasharray: 1; stroke-dashoffset: 0; animation: settled-draw 320ms var(--ease) 1; }
+.settled-amount { display: block; font-size: var(--t-2xl); font-variant-numeric: tabular-nums; animation: state-fade var(--d-mid) var(--ease) 320ms both; }
+@keyframes settled-draw { from { stroke-dashoffset: 1; } to { stroke-dashoffset: 0; } }
+@media (max-width: 680px) {
+  .rail .on-call-pill { order: -1; }
+  .touchid-hero:has(.box-illustration) { flex-wrap: wrap; }
+  .node-offline { padding: var(--s-4); }
+  .node-offline .box-illustration { width: 112px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .box-illustration.paired { animation: state-fade 0.01ms; filter: none; }
+  .settled-check, .settled-amount, .box-illustration.paired + .touchid-text { animation: none; }
+}
