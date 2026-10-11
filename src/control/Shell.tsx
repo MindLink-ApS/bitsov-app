@@ -3957,6 +3957,8 @@ function Composer(props: {
         setOwnerExpired(true);
         setNote(r.error.message);
       } else if (!r.ok && unchanged && (isBudgetStop(r.error) || ['owner_only', 'owner_contact_unavailable'].includes(r.error.code))) setNote(r.error.message);
+      // A clear state with a way on: the text is back, Send is the retry.
+      if (restore && draft() === submittedText && !note()) setNote('Not sent. Your message is back in the box; press Send to try again.');
       };
       if (first !== undefined && !room()) {
         const request = await props.actions.ownerRequest(submittedPeer, cap, first);
@@ -4048,6 +4050,8 @@ function Composer(props: {
           if (!r.ok && r.error.code === 'readmission_quoted' && r.error.admission) setReadmitQuote({ peer, price: r.error.admission });
           if (restore && draft() !== text && text.trim()) setNote(`Not sent: “${text.length > 80 ? `${text.slice(0, 80)}…` : text}”. It is not back in the box because you started a new message.`);
           if (!r.ok && unchanged() && isBudgetStop(r.error)) setNote(r.error.message);
+          // A clear state with a way on: the text is back, Send is the retry.
+          if (restore && draft() === text && !note()) setNote('Not sent. Your message is back in the box; press Send to try again.');
         };
         const run = sendChain.then(go);
         sendChain = run.catch(() => {});

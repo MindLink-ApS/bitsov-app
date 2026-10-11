@@ -62,6 +62,18 @@ describe('optimistic send', () => {
     expect(area().value).toBe('price moved');
   });
 
+  it('says plainly that it was not sent and how to try again', async () => {
+    const { source, pending } = deferredSource();
+    await open(source);
+    await press('network hiccup');
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    pending[0].fail({ code: 'node', message: 'Your node did not answer.' });
+    await vi.waitFor(() => expect($('[data-composer-note]')?.textContent).toBe('Not sent. Your message is back in the box; press Send to try again.'));
+    expect(area().value).toBe('network hiccup');
+    // Never a delivered or paid claim for it.
+    expect(mount.textContent).not.toMatch(/network hiccup[\s\S]*paid/);
+  });
+
   it('a paid but undelivered message becomes its retry card, not a draft', async () => {
     const { source, pending } = deferredSource();
     await open(source);
