@@ -1,6 +1,24 @@
 //! Strict, host-side validation of the node #301 signing contract.
 use serde::Deserialize;
 
+// Node #301: pairing/device.rs::op_bytes, ticket.rs::TTL and
+// pairing.rs::ELEVATION_TTL_SECS. See tests/fixtures/node301-protocol.md.
+pub const OP_ID_BYTES: usize = 12;
+pub const TICKET_TTL_SECS: i64 = 300;
+pub const ENROLLMENT_TTL_SECS: i64 = 900;
+pub const CLOCK_SKEW_SECS: i64 = 30;
+
+/// Local sanity check only; the node remains authoritative for expiry.
+pub fn valid_expiry(expires_at: i64, now: i64, ttl: i64) -> bool {
+    expires_at > 0
+        && expires_at > now.saturating_sub(CLOCK_SKEW_SECS)
+        && expires_at <= now.saturating_add(ttl).saturating_add(CLOCK_SKEW_SECS)
+}
+
+pub fn expiry_deadline(expires_at: i64) -> i64 {
+    expires_at.saturating_add(CLOCK_SKEW_SECS)
+}
+
 pub fn canonical_hex(value: &str, bytes: usize) -> bool {
     value.len() == bytes * 2
         && value
@@ -33,14 +51,14 @@ impl PendingDevice {
     pub fn validate(&self, node: &str, owner_client: &str, now: i64) -> Result<&str, &'static str> {
         let bad = "Invalid device comparison. Nothing was signed; start again.";
         if !canonical_hex(node, 16)
-            || !canonical_hex(&self.op_id, 16)
+            || !canonical_hex(&self.op_id, OP_ID_BYTES)
             || !canonical_hex(&self.public_key, 65)
             || !self.public_key.starts_with("04")
             || !canonical_hex(&self.box_nonce, 16)
             || self.sas_version != 1
             || self.client_id.is_empty()
             || self.client_id == owner_client
-            || self.expires_at <= now
+            || !valid_expiry(self.expires_at, now, ENROLLMENT_TTL_SECS)
         {
             return Err(bad);
         }

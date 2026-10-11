@@ -611,7 +611,14 @@ fn validate_link(link: PairingLinkV1, now: i64) -> Result<RemoteDescriptor, Remo
     if link.expires_at < 0 {
         return Err(RemoteError::Invalid("ticket expiry is invalid".into()));
     }
-    if link.expires_at != 0 && link.expires_at <= now {
+    // Owner tickets cross device clocks; match the enrollment UI's bounded
+    // allowance. The node still enforces the ticket's original deadline.
+    let deadline = if link.code.starts_with("owner_") {
+        crate::delegation::expiry_deadline(link.expires_at)
+    } else {
+        link.expires_at
+    };
+    if link.expires_at != 0 && deadline <= now {
         return Err(RemoteError::Expired((now - link.expires_at) as u64));
     }
     let descriptor = validate_descriptor(StoredDescriptor {
@@ -2528,6 +2535,20 @@ mod tests {
         let data = tempfile::tempdir().unwrap();
         assert!(matches!(import_pairing_link(data.path(), &at(unix_now() - 1)), Err(RemoteError::Expired(_))));
         assert!(!config_path(data.path()).exists());
+    }
+
+    #[test]
+    fn owner_ticket_import_allows_only_thirty_seconds_of_clock_skew() {
+        let node = SigningKey::from_bytes(&[7u8; 32]);
+        let at = |expires_at| node_ticket(&node, serde_json::json!({
+            "code": format!("owner_{}", "ab".repeat(32)), "expires_at": expires_at
+        }));
+        for (expiry, accepted) in [(NOW - 30, false), (NOW - 29, true),
+            (NOW, true), (NOW + 300, true)] {
+            assert_eq!(parse_pairing_link_at(&at(expiry), NOW).is_ok(), accepted, "{expiry}");
+        }
+        let data = tempfile::tempdir().unwrap();
+        assert!(import_pairing_link(data.path(), &at(unix_now() - 20)).is_ok());
     }
 
     #[test]

@@ -19,7 +19,7 @@ async fn add_device_non_owner_cannot_mint_or_approve_even_with_renderer_input() 
     for input in [
         add_device::Input::Mint,
         add_device::Input::Approve {
-            op_id: "aa".repeat(16),
+            op_id: "aa".repeat(12),
         },
     ] {
         let error = add_device::run(&node.state, input).await.err().unwrap();
@@ -64,13 +64,16 @@ fn delegation_node() -> DelegationNode {
         base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(serde_json::to_vec(&value).unwrap())
     );
-    // Independent fixture: node's v2 bytes, not the app's message constructor.
-    let message = format!("bitsov-owner-delegation-v2\nnode:{fp}\nclient_pubkey:{}\nepoch:1\ndevice_key:04{}\nop_id:{}\nnonce:{}\nsas_digest:{}", "22".repeat(32),"44".repeat(64),"aa".repeat(16),"33".repeat(16),"00".repeat(32));
-    let pending = Arc::new(Mutex::new(
-        serde_json::json!({"op_id":"aa".repeat(16),"client_id":"new-client","name":"My phone",
-        "public_key":format!("04{}","44".repeat(64)),"expires_at":now_unix()+900,"sas_version":1,"box_nonce":"55".repeat(16),
-        "sas_words":["abandon","abandon","abandon","abandon"],"delegation_message":message}),
-    ));
+    // Frozen node #301 layout and SAS vector, shared with the contract tests.
+    let mut fixture: serde_json::Value =
+        serde_json::from_str(include_str!("../tests/fixtures/node301-pending.json")).unwrap();
+    fixture["expires_at"] = (now_unix() + 900).into();
+    fixture["delegation_message"] = fixture["delegation_message"]
+        .as_str()
+        .unwrap()
+        .replace(&format!("node:{}", "11".repeat(16)), &format!("node:{fp}"))
+        .into();
+    let pending = Arc::new(Mutex::new(fixture));
     let enrolled = Arc::new(AtomicBool::new(true));
     let challenge_valid = Arc::new(AtomicBool::new(true));
     let (p, en, cv) = (pending.clone(), enrolled.clone(), challenge_valid.clone());
@@ -157,7 +160,7 @@ async fn add_device_mints_then_delegates_exact_v2_bytes_using_owner_token() {
         add_device::run(
             s,
             add_device::Input::Approve {
-                op_id: "aa".repeat(16)
+                op_id: "aa".repeat(12)
             }
         )
         .await
@@ -168,14 +171,14 @@ async fn add_device_mints_then_delegates_exact_v2_bytes_using_owner_token() {
         serde_json::to_value(add_device::run(s, add_device::Input::Poll).await.unwrap()).unwrap();
     assert_eq!(
         view["pending"][0]["words"],
-        serde_json::json!(["abandon", "abandon", "abandon", "abandon"])
+        serde_json::json!(["noodle", "gallery", "demand", "science"])
     );
     assert_eq!(view["uri"], "", "discard ticket after a confirmed join");
     assert!(matches!(
         add_device::run(
             s,
             add_device::Input::Approve {
-                op_id: "aa".repeat(16)
+                op_id: "aa".repeat(12)
             }
         )
         .await
@@ -185,7 +188,7 @@ async fn add_device_mints_then_delegates_exact_v2_bytes_using_owner_token() {
     assert!(add_device::run(
         s,
         add_device::Input::Approve {
-            op_id: "aa".repeat(16)
+            op_id: "aa".repeat(12)
         }
     )
     .await
@@ -223,7 +226,7 @@ async fn add_device_refuses_changed_comparison_revocation_and_wrong_node_challen
         assert!(add_device::run(
             s,
             add_device::Input::Approve {
-                op_id: "aa".repeat(16)
+                op_id: "aa".repeat(12)
             }
         )
         .await
@@ -255,4 +258,93 @@ async fn add_device_detection_does_not_mistake_legacy_operation_status_for_pendi
     }));
     node.state.remote_mode.store(true, Ordering::SeqCst);
     assert!(!add_device::supported(&node.state).await.unwrap());
+}
+
+// No enclave, UI runtime, or app launch: exercise reply persistence and the real cancel command.
+#[tokio::test]
+async fn add_device_invalid_reply_retains_operation_for_cancellation() {
+    for (field, value) in [
+        ("box_nonce", serde_json::json!("55".repeat(15))),
+        ("key_id", serde_json::json!("66".repeat(17))),
+        ("sas_version", serde_json::json!(2)),
+        ("expires_at", serde_json::json!(-1)),
+        ("expires_at", serde_json::json!(i64::MAX)),
+        ("box_nonce", serde_json::Value::Null),
+        ("op_id", serde_json::json!("aa".repeat(16))),
+    ] {
+        let (node, _dir) = paired_fake(Arc::new(|method, path, _| {
+            assert_eq!(method, "DELETE");
+            assert!(path.starts_with("/pair/device-key/"));
+            (200, "{}".into())
+        }));
+        node.state.remote_mode.store(true, Ordering::SeqCst);
+        let store = device_store(&node.state).unwrap();
+        let mut record = device::Record::default();
+        let mut reply = node_enrollment_reply();
+        reply[field] = value;
+        assert!(
+            add_device::accept_enrollment_reply(
+                &node.state,
+                &store,
+                &mut record,
+                &serde_json::to_vec(&reply).unwrap(),
+                1000
+            )
+            .is_err(),
+            "{field}"
+        );
+        assert_eq!(
+            device::load_record(&store).unwrap().pending.unwrap().op_id,
+            reply["op_id"]
+        );
+        add_device::join(&node.state, add_device::JoinInput::Cancel)
+            .await
+            .unwrap();
+        assert!(device::load_record(&store).unwrap().pending.is_none());
+        let seen = node.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(
+            seen[0].1,
+            format!(
+                "/api/v1/pair/device-key/{}",
+                reply["op_id"].as_str().unwrap()
+            )
+        );
+    }
+}
+fn node_enrollment_reply() -> serde_json::Value {
+    let p: serde_json::Value =
+        serde_json::from_str(include_str!("../tests/fixtures/node301-pending.json")).unwrap();
+    serde_json::json!({"op_id":p["op_id"], "key_id":"66".repeat(16),
+        "fingerprint":"6666-6666-6666-6666", "expires_at":1900,
+        "sas_version":p["sas_version"], "box_nonce":p["box_nonce"]})
+}
+#[test]
+fn add_device_enrollment_accepts_node_shape_and_bounded_clock_skew() {
+    let state = NodeState::default();
+    let dir = tempfile::tempdir().unwrap();
+    for (expiry, accepted) in [
+        (970, false),
+        (971, true),
+        (1000, true),
+        (1900, true),
+        (1930, true),
+        (1931, false),
+    ] {
+        let mut reply = node_enrollment_reply();
+        reply["expires_at"] = expiry.into();
+        let mut record = device::Record::default();
+        assert_eq!(
+            add_device::accept_enrollment_reply(
+                &state,
+                dir.path(),
+                &mut record,
+                &serde_json::to_vec(&reply).unwrap(),
+                1000
+            )
+            .is_ok(),
+            accepted,
+            "{expiry}"
+        );
+    }
 }

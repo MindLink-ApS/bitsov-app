@@ -1,7 +1,10 @@
 //! Owner delegation and joining-device enrollment. Signing keys and claim validation stay in the host.
 use super::*;
 use bitsov_app::{
-    delegation::{canonical_hex, ticket_message, PendingDevice},
+    delegation::{
+        canonical_hex, expiry_deadline, ticket_message, valid_expiry, PendingDevice,
+        ENROLLMENT_TTL_SECS, OP_ID_BYTES, TICKET_TTL_SECS,
+    },
     sas,
 };
 use zeroize::Zeroizing;
@@ -200,12 +203,13 @@ async fn pending(state: &NodeState, owner: &Owner) -> Result<Vec<PendingDevice>,
 }
 fn ticket_view(t: &Ticket) -> View {
     View::Ticket {
-        uri: if t.expires_at > now_unix() && t.pending.is_empty() {
+        uri: if expiry_deadline(t.expires_at) > now_unix() && t.pending.is_empty() {
             t.uri.to_string()
         } else {
             String::new()
         },
-        expires_at: t.expires_at,
+        // The renderer must use the same local deadline as host validation.
+        expires_at: expiry_deadline(t.expires_at),
         pending: t
             .pending
             .iter()
@@ -218,7 +222,7 @@ fn ticket_view(t: &Ticket) -> View {
                     .take(80)
                     .collect(),
                 words: p.sas_words.clone(),
-                expires_at: p.expires_at,
+                expires_at: expiry_deadline(p.expires_at),
             })
             .collect(),
     }
@@ -288,8 +292,7 @@ pub async fn run(state: &NodeState, input: Input) -> Result<View, ActionError> {
             let descriptor = remote_access::parse_pairing_link(&issued.uri)
                 .map_err(|_| invalid("The node returned an invalid pairing ticket."))?;
             if Some(descriptor.node_id()) != state.node_id.lock().unwrap().as_deref()
-                || issued.expires_at <= now_unix()
-                || issued.expires_at > now_unix() + 300
+                || !valid_expiry(issued.expires_at, now_unix(), TICKET_TTL_SECS)
             {
                 return Err(invalid(
                     "The node returned a ticket for a different node or with an invalid expiry.",
@@ -313,7 +316,7 @@ pub async fn run(state: &NodeState, input: Input) -> Result<View, ActionError> {
                 .as_mut()
                 .ok_or_else(|| invalid("Create a ticket first."))?;
             t.pending = pending(state, &owner).await?;
-            if !t.pending.is_empty() || t.expires_at <= now_unix() {
+            if !t.pending.is_empty() || expiry_deadline(t.expires_at) <= now_unix() {
                 t.uri.clear();
             }
             Ok(ticket_view(t))
@@ -420,7 +423,7 @@ impl Joining {
     fn view(&self) -> JoinView {
         JoinView::Waiting {
             words: self.words,
-            expires_at: self.expires_at,
+            expires_at: expiry_deadline(self.expires_at),
         }
     }
 }
@@ -461,6 +464,77 @@ async fn bound_request(
     }
     Ok(reply)
 }
+#[derive(Deserialize)]
+pub(super) struct Enrollment {
+    op_id: String,
+    key_id: String,
+    fingerprint: String,
+    expires_at: i64,
+    sas_version: u8,
+    box_nonce: String,
+}
+pub(super) fn accept_enrollment_reply(
+    state: &NodeState,
+    store: &Path,
+    record: &mut device::Record,
+    bytes: &[u8],
+    now: i64,
+) -> Result<Enrollment, ActionError> {
+    // Decode only the cancellation handle first. Other fields may be missing,
+    // malformed, or from a newer protocol; none may strand a created operation.
+    #[derive(Deserialize)]
+    struct Operation {
+        op_id: String,
+    }
+    let operation: Operation = serde_json::from_slice(bytes).map_err(|_| enrollment_lost(false))?;
+    record.pending = Some(device::PendingRegistration {
+        delegation_message: None,
+        op_id: operation.op_id,
+        owner_action: String::new(),
+        // Not yet validated, so never present this record as approvable.
+        expires_at_ms: 0,
+    });
+    {
+        let _guard = state.device_lifecycle.lock().unwrap();
+        device::save_record(store, record)?;
+        state.device_lapsed.store(false, Ordering::SeqCst);
+    }
+    let pending: Enrollment = serde_json::from_slice(bytes).map_err(|_| {
+        invalid("Invalid device enrollment reply. Cancel pending setup before trying again.")
+    })?;
+    if !canonical_hex(&pending.op_id, OP_ID_BYTES)
+        || !canonical_hex(&pending.box_nonce, 16)
+        || pending.sas_version != 1
+        || !canonical_hex(&pending.key_id, 16)
+        || !valid_expiry(pending.expires_at, now, ENROLLMENT_TTL_SECS)
+    {
+        return Err(invalid(
+            "Invalid or expired device enrollment reply. Cancel pending setup before trying again.",
+        ));
+    }
+    record.key_id = Some(pending.key_id.clone());
+    record.fingerprint = Some(
+        pending
+            .fingerprint
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+            .take(24)
+            .collect(),
+    );
+    record.pending = Some(device::PendingRegistration {
+        delegation_message: None,
+        op_id: pending.op_id.clone(),
+        owner_action: String::new(),
+        expires_at_ms: (expiry_deadline(pending.expires_at).max(0) as u64).saturating_mul(1000),
+    });
+    {
+        let _guard = state.device_lifecycle.lock().unwrap();
+        device::save_record(store, record)?;
+        state.device_lapsed.store(false, Ordering::SeqCst);
+    }
+    Ok(pending)
+}
+
 pub async fn join(state: &NodeState, input: JoinInput) -> Result<JoinView, ActionError> {
     let _connection = state.remote_recovery.lock().await;
     let mut setup = state.add_device.lock().await;
@@ -484,7 +558,7 @@ pub async fn join(state: &NodeState, input: JoinInput) -> Result<JoinView, Actio
         });
         if store != j.store
             || !same_record
-            || now_unix() >= j.expires_at
+            || now_unix() >= expiry_deadline(j.expires_at)
             || Instant::now() >= j.deadline
         {
             setup.join = None;
@@ -581,15 +655,6 @@ pub async fn join(state: &NodeState, input: JoinInput) -> Result<JoinView, Actio
     if connection.client_id != binding.client_id {
         return Err(invalid("The pairing changed. Start again."));
     }
-    #[derive(Deserialize)]
-    struct Enrollment {
-        op_id: String,
-        key_id: String,
-        fingerprint: String,
-        expires_at: i64,
-        sas_version: u8,
-        box_nonce: String,
-    }
     let bytes = bound_request(
         &mut connection,
         &token,
@@ -599,16 +664,7 @@ pub async fn join(state: &NodeState, input: JoinInput) -> Result<JoinView, Actio
         }),
     )
     .await?;
-    let pending: Enrollment = serde_json::from_slice(&bytes).map_err(|_| enrollment_lost(false))?;
-    if !canonical_hex(&pending.op_id, 16)
-        || !canonical_hex(&pending.box_nonce, 16)
-        || pending.sas_version != 1
-        || !canonical_hex(&pending.key_id, 16)
-        || pending.expires_at <= now_unix()
-        || pending.expires_at > now_unix() + 900
-    {
-        return Err(invalid("Invalid or expired device enrollment reply."));
-    }
+    let pending = accept_enrollment_reply(state, &store, &mut record, &bytes, now_unix())?;
     let public: [u8; 65] = hex::decode(&record.public_key)
         .map_err(|_| invalid("Invalid device key."))?
         .try_into()
@@ -619,26 +675,6 @@ pub async fn join(state: &NodeState, input: JoinInput) -> Result<JoinView, Actio
         .map_err(|_| invalid("Invalid comparison nonce."))?;
     let digest = sas::digest(&connection.binding, &public, &nonce, &claim);
     drop(claim);
-    record.key_id = Some(pending.key_id);
-    record.fingerprint = Some(
-        pending
-            .fingerprint
-            .chars()
-            .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
-            .take(24)
-            .collect(),
-    );
-    record.pending = Some(device::PendingRegistration {
-        delegation_message: None,
-        op_id: pending.op_id.clone(),
-        owner_action: String::new(),
-        expires_at_ms: pending.expires_at as u64 * 1000,
-    });
-    {
-        let _guard = state.device_lifecycle.lock().unwrap();
-        device::save_record(&store, &record)?;
-        state.device_lapsed.store(false, Ordering::SeqCst);
-    }
     // Persist the operation BEFORE prompting, so a cancelled prompt or a lost
     // reply can be withdrawn. Neither the claim code nor SAS digest is persisted.
     let proof = device_sign(
@@ -668,7 +704,7 @@ pub async fn join(state: &NodeState, input: JoinInput) -> Result<JoinView, Actio
         words: sas::words(&digest),
         expires_at: pending.expires_at,
         deadline: Instant::now()
-            + Duration::from_secs((pending.expires_at - now_unix()).max(0) as u64),
+            + Duration::from_secs((expiry_deadline(pending.expires_at) - now_unix()).max(0) as u64),
     };
     let view = j.view();
     setup.join = Some(j);
@@ -678,6 +714,32 @@ pub async fn join(state: &NodeState, input: JoinInput) -> Result<JoinView, Actio
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn renderer_expiry_preserves_the_host_clock_skew_allowance() {
+        let now = now_unix();
+        let mut ticket = Ticket {
+            uri: Zeroizing::new("node-issued-ticket".into()),
+            expires_at: now - 20,
+            node: String::new(),
+            client: String::new(),
+            key_id: String::new(),
+            pending: vec![],
+        };
+        let view = serde_json::to_value(ticket_view(&ticket)).unwrap();
+        assert_eq!(view["uri"], "node-issued-ticket");
+        assert_eq!(view["expires_at"], now + 10);
+        let mut pending: PendingDevice =
+            serde_json::from_str(include_str!("../tests/fixtures/node301-pending.json")).unwrap();
+        pending.expires_at = now - 20;
+        ticket.pending.push(pending);
+        let view = serde_json::to_value(ticket_view(&ticket)).unwrap();
+        assert_eq!(view["pending"][0]["expires_at"], now + 10);
+        ticket.expires_at = now - 30;
+        ticket.pending.clear();
+        let view = serde_json::to_value(ticket_view(&ticket)).unwrap();
+        assert_eq!(view["uri"], "");
+    }
+
     #[test]
     fn joining_errors_distinguish_claim_mismatch_busy_ceremony_and_unknown_creation() {
         assert!(enrollment_refusal(403, true).message.contains("claim code"));

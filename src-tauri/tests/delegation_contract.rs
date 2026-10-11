@@ -1,14 +1,7 @@
 use bitsov_app::delegation::{ticket_message, PendingDevice};
 
 fn pending() -> PendingDevice {
-    serde_json::from_value(serde_json::json!({
-        "op_id": "aa".repeat(16), "client_id": "new-client", "name": "My phone",
-        "public_key": format!("04{}", "44".repeat(64)), "expires_at": 2000,
-        "sas_version": 1, "box_nonce": "55".repeat(16),
-        "sas_words": ["abandon", "abandon", "abandon", "abandon"],
-        "delegation_message": format!("bitsov-owner-delegation-v2\nnode:{}\nclient_pubkey:{}\nepoch:1\ndevice_key:04{}\nop_id:{}\nnonce:{}\nsas_digest:{}",
-            "11".repeat(16), "22".repeat(32), "44".repeat(64), "aa".repeat(16), "33".repeat(16), "00".repeat(32))
-    })).unwrap()
+    serde_json::from_str(include_str!("fixtures/node301-pending.json")).unwrap()
 }
 #[test]
 fn validates_the_node_tuple_and_displayed_words_before_signing() {
@@ -16,7 +9,7 @@ fn validates_the_node_tuple_and_displayed_words_before_signing() {
     assert!(p.validate(&"11".repeat(16), "owner-client", 1000).is_ok());
     assert!(p.validate(&"99".repeat(16), "owner-client", 1000).is_err());
     assert!(p.validate(&"11".repeat(16), "new-client", 1000).is_err());
-    assert!(p.validate(&"11".repeat(16), "owner-client", 2000).is_err());
+    assert!(p.validate(&"11".repeat(16), "owner-client", 1930).is_err());
     let mut changed = p.clone();
     changed.sas_words[0] = "zoo".into();
     assert!(changed
@@ -81,5 +74,90 @@ fn owner_ticket_codes_accept_only_the_nodes_exact_opaque_format() {
         format!("owner_{}x", "ab".repeat(32)),
     ] {
         assert!(bitsov_app::remote_access::parse_pairing_link(&link(invalid)).is_err());
+    }
+}
+
+#[test]
+fn pending_expiry_allows_only_thirty_seconds_of_clock_skew() {
+    let mut p = pending();
+    for (expiry, accepted) in [
+        (970, false),
+        (971, true),
+        (1000, true),
+        (1900, true),
+        (1930, true),
+        (1931, false),
+        (i64::MAX, false),
+    ] {
+        p.expires_at = expiry;
+        assert_eq!(
+            p.validate(&"11".repeat(16), "owner-client", 1000).is_ok(),
+            accepted,
+            "{expiry}"
+        );
+    }
+}
+
+#[test]
+fn rejects_wrong_lengths_and_noncanonical_hex_in_the_node_contract() {
+    let node = "11".repeat(16);
+    for bytes in [11, 13, 16] {
+        let mut p = pending();
+        p.delegation_message = p
+            .delegation_message
+            .map(|s| s.replace(&p.op_id, &"aa".repeat(bytes)));
+        p.op_id = "aa".repeat(bytes);
+        assert!(p.validate(&node, "owner-client", 1000).is_err());
+    }
+    for nonce in ["55".repeat(15), "55".repeat(17), "AB".repeat(16)] {
+        let mut p = pending();
+        p.box_nonce = nonce;
+        assert!(p.validate(&node, "owner-client", 1000).is_err());
+    }
+    for (field, value) in [
+        ("client_pubkey", "22".repeat(31)),
+        ("nonce", "33".repeat(15)),
+        ("nonce", "33".repeat(17)),
+        ("sas_digest", "00".repeat(31)),
+        ("epoch", "18446744073709551616".into()),
+    ] {
+        let mut p = pending();
+        p.delegation_message = p.delegation_message.map(|s| {
+            s.lines()
+                .map(|line| {
+                    if line.starts_with(&format!("{field}:")) {
+                        format!("{field}:{value}")
+                    } else {
+                        line.to_owned()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        });
+        assert!(p.validate(&node, "owner-client", 1000).is_err(), "{field}");
+    }
+    for nonce in ["22".repeat(31), "22".repeat(33)] {
+        assert!(ticket_message(&node, &nonce).is_err());
+    }
+}
+
+#[test]
+fn ticket_expiry_allows_only_thirty_seconds_of_clock_skew() {
+    use bitsov_app::delegation::{valid_expiry, TICKET_TTL_SECS};
+    for (expiry, accepted) in [
+        (970, false),
+        (971, true),
+        (1000, true),
+        (1300, true),
+        (1330, true),
+        (1331, false),
+        (i64::MAX, false),
+        (0, false),
+    ] {
+        assert_eq!(
+            valid_expiry(expiry, 1000, TICKET_TTL_SECS),
+            accepted,
+            "{expiry}"
+        );
     }
 }

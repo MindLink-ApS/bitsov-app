@@ -198,14 +198,18 @@ changes.
 
 ### Add another owner device (node #301)
 
-On an enrolled owner device connected to a home node, open **Settings → Devices →
-Add a device**. Approve ticket creation with Touch ID (biometrics on Android).
+In the main control-center window, open **Settings** (the gear button), then
+the **Devices** tab. On an enrolled owner device connected to a home node, the
+**Devices** panel at the top of that tab offers **Add a device**. Approve ticket
+creation with Touch ID (biometrics on Android).
 The screen shows a one-use QR/link valid for five minutes. Older nodes do not
 show the action; an ordinary pairing cannot issue tickets or delegate ownership.
 
 On a fresh install, choose the home-node path and scan or paste that ticket.
 Review the node and choose **Use remote node**, then reopen the app as directed
-by the existing remote-pairing flow. Enter the physical claim code from the box
+by the existing remote-pairing flow. The **Add this device** panel appears in
+the device-approvals onboarding step, and later under **Settings → Devices**
+(also in **Settings → Node**). Enter the physical claim code from the box
 sticker or trusted console. The ticket does not replace that code. Device-key
 creation and possession proofs use the existing hardware-backed approval path.
 Place the devices together, compare all four words in order, and approve on the
@@ -219,6 +223,10 @@ its signature. No legacy delegation fallback is used. Expiry, revocation and
 single use remain node-enforced. An enrollment can last up to 15 minutes after
 ticket consumption. If its initial reply is lost, the app cannot recover the
 unknown operation id: wait for that request to expire before starting again.
+Once a reply contains an operation id, the app saves it before validating the
+remaining reply, so **Cancel pending setup** works even after validation fails.
+Local expiry checks allow 30 seconds of clock skew; the node still enforces its
+own deadlines.
 
 Keep another owner device, including a Mac or another non-phone device.
 Enrollment does not transfer the node's unlock password. This flow uses two
