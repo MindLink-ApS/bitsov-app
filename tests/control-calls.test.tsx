@@ -6,7 +6,7 @@ import App from '../src/App';
 import type { PairingView } from '../src/onboarding/pairing';
 import { resetContactsForTests, setPetname } from '../src/control/petnames';
 import type { BudgetView, CallQuote, CallReceipt, LiveEvent, Message, SpendView } from '../src/control/types';
-import { CONNECT_TIMEOUT_MS, createCallEngine, DISCONNECT_GRACE_MS, isCallKind, newCallId, parseSignal, RING_MS, stunServer, type CallDeps, type CallView } from '../src/control/call';
+import { CONNECT_TIMEOUT_MS, createCallEngine, RECONNECT_GRACE_MS, isCallKind, newCallId, parseSignal, RING_MS, stunServer, type CallDeps, type CallView } from '../src/control/call';
 
 const OWN = '1'.repeat(64);
 const A = 'a'.repeat(64);
@@ -20,6 +20,10 @@ class FakePc {
   async getStats() { return this.stats; }
   iceGatheringState = 'complete';
   connectionState = 'new';
+  iceConnectionState = 'new';
+  oniceconnectionstatechange: (() => void) | null = null;
+  offers: RTCOfferOptions[] = [];
+  restartIce = vi.fn();
   localDescription: { type: string; sdp: string } | null = null;
   remote: { type: string; sdp: string } | null = null;
   tracks: MediaStreamTrack[] = [];
@@ -36,7 +40,7 @@ class FakePc {
     return sender;
   }
   state(s: string) { this.connectionState = s; this.onconnectionstatechange?.(); }
-  async createOffer() { return { type: 'offer', sdp: 'v=0 offer' }; }
+  async createOffer(options: RTCOfferOptions = {}) { this.offers.push(options); return { type: 'offer', sdp: 'v=0 offer' }; }
   async createAnswer() { return { type: 'answer', sdp: 'v=0 answer' }; }
   async setLocalDescription(d: { type: string; sdp: string }) { this.localDescription = d; }
   async setRemoteDescription(d: { type: string; sdp: string }) { this.remote = d; }
@@ -68,6 +72,7 @@ function engine(over: Partial<CallDeps> = {}) {
   const views: CallView[] = [];
   const media: MediaStreamConstraints[] = [];
   let n = 0;
+  let ids = 0;
   const e = createCallEngine({
     quote: async () => ({ ok: true, value: QUOTE }),
     signal: async (peer, kind, plaintext, max) => {
@@ -79,7 +84,7 @@ function engine(over: Partial<CallDeps> = {}) {
     now: () => 1_000,
     onView: (v) => views.push(v),
     onStreams: () => {},
-    newCallId: () => ID,
+    newCallId: () => ids++ === 0 ? ID : 'e'.repeat(32),
     ...over,
   });
   return { e, sent, views, media, last: () => views[views.length - 1] };
@@ -128,6 +133,316 @@ describe('call refusal recovery', () => {
     expect(e.view()).toMatchObject({ phase: 'ended', error: typeof error === 'string' ? error : error.message });
     expect(local.getTracks().every((t) => vi.mocked(t.stop).mock.calls.length === 1)).toBe(true);
     expect(FakePc.made[FakePc.made.length - 1]?.closed).toBe(true);
+  });
+});
+
+describe('call restart negotiation', () => {
+  beforeEach(() => { FakePc.made = []; vi.useFakeTimers(); });
+  afterEach(() => vi.useRealTimers());
+
+  it('restarts over a fresh paid admission, answers automatically, and retains media and duration', async () => {
+    const restartId = 'e'.repeat(32);
+    let n = 0;
+    const caller = engine({ newCallId: () => n++ === 0 ? ID : restartId });
+    const callee = engine();
+    const deliver = async (target: ReturnType<typeof engine>, signal: Sent, sender: string, own: string) =>
+      target.e.receive(msg(signal.kind, signal.body, sender), own);
+    await caller.e.place(A, 'video', QUOTE);
+    await deliver(callee, caller.sent[0], OWN, A);
+    await callee.e.accept();
+    await deliver(caller, callee.sent[0], A, OWN);
+    const [a, b] = FakePc.made;
+    a.connect(); b.connect();
+    a.state('failed');
+    a.state('failed');
+    b.iceConnectionState = 'failed'; b.oniceconnectionstatechange?.();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(caller.e.view()).toMatchObject({ state: 'reconnecting', liveAt: 1000, callId: ID });
+    expect(a.restartIce).toHaveBeenCalledOnce();
+    expect(a.offers[1]).toEqual({ iceRestart: true });
+    const restart = caller.sent.find(s => s.kind === 400 && s.body.call_id === restartId)!;
+    expect(restart).toBeDefined();
+    expect(restart.max).toBe(15000);
+    expect(restart.body.sdp).toContain(`a=x-bitsov-restart-of:${ID}`);
+    await deliver(callee, restart, OWN, A);
+    const answer = callee.sent.find(s => s.kind === 401 && s.body.call_id === restartId)!;
+    expect(answer).toBeDefined();
+    await deliver(caller, answer, A, OWN);
+    a.connect(); b.connect();
+    await vi.advanceTimersByTimeAsync(RECONNECT_GRACE_MS);
+    expect(caller.e.view()).toMatchObject({ state: 'live', liveAt: 1000, callId: ID });
+    expect(callee.e.view()).toMatchObject({ state: 'live', liveAt: 1000, callId: ID });
+    expect(FakePc.made).toHaveLength(2);
+    expect(a.tracks.concat(b.tracks).every(t => vi.mocked(t.stop).mock.calls.length === 0)).toBe(true);
+    // A replay cannot charge for a second answer or re-enter negotiation.
+    const paidAnswers = callee.sent.filter(s => s.kind === 401).length;
+    await deliver(callee, restart, OWN, A);
+    expect(callee.sent.filter(s => s.kind === 401)).toHaveLength(paidAnswers);
+    await caller.e.hangup();
+    for (const signal of caller.sent.filter(s => s.kind === 403)) await deliver(callee, signal, OWN, A);
+    expect(callee.e.view().state).toBe('ended');
+  });
+
+  it('a callee-only failure requests one restart and caller ignores duplicate requests', async () => {
+    const incoming = engine();
+    await incoming.e.receive(msg(400, { media: 'audio', sdp: 'offer' }), OWN);
+    await incoming.e.accept();
+    const pc = FakePc.made[0]; pc.connect(); pc.state('failed'); pc.state('failed');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(incoming.sent.filter(s => s.kind === 402)).toHaveLength(1);
+    expect(incoming.sent[1].body).toMatchObject({ candidate: '', sdp_mid: 'bitsov-restart-v1' });
+    incoming.e.endLocal();
+
+    let n = 0;
+    const caller = engine({ newCallId: () => n++ === 0 ? ID : 'e'.repeat(32) });
+    await caller.e.place(A, 'audio', QUOTE);
+    await caller.e.receive(msg(401, { sdp: 'answer' }), OWN);
+    FakePc.made[1].connect();
+    const request = msg(402, { candidate: '', sdp_mid: 'bitsov-restart-v1' });
+    await Promise.all([caller.e.receive(request, OWN), caller.e.receive(request, OWN)]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(caller.sent.filter(s => s.kind === 400)).toHaveLength(2);
+    caller.e.endLocal();
+  });
+
+  it('accepts a restart offer while the original answer receipt is still pending', async () => {
+    let finish!: (r: Awaited<ReturnType<CallDeps['signal']>>) => void;
+    let answers = 0;
+    const { e } = engine({ signal: async (_peer, kind) => {
+      if (kind === 401 && ++answers === 1) return new Promise(resolve => { finish = resolve; });
+      return { ok: true, value: { total_msat: 6000 } as CallReceipt };
+    } });
+    await e.receive(msg(400, { media: 'audio', sdp: 'offer' }), OWN);
+    const accepting = e.accept();
+    await vi.advanceTimersByTimeAsync(0);
+    FakePc.made[0].connect();
+    await e.receive(msg(400, { call_id: 'e'.repeat(32), media: 'audio', sdp: `restart\r\na=x-bitsov-restart-of:${ID}\r\n` }), OWN);
+    expect(answers).toBe(2);
+    finish({ ok: true, value: { total_msat: 6000 } as CallReceipt });
+    await accepting;
+    expect(e.view().state).toBe('reconnecting');
+    e.endLocal();
+  });
+
+  it('retains a callee restart request while the initial answer is still being applied', async () => {
+    const { e, sent } = engine();
+    await e.place(A, 'audio', QUOTE);
+    const pc = FakePc.made[0];
+    let applied!: () => void;
+    pc.setRemoteDescription = async () => new Promise<void>(resolve => { applied = resolve; });
+    const answering = e.receive(msg(401, { sdp: 'answer' }), OWN);
+    await e.receive(msg(402, { candidate: '', sdp_mid: 'bitsov-restart-v1' }), OWN);
+    expect(e.view().state).toBe('reconnecting');
+    expect(sent.filter(s => s.kind === 400)).toHaveLength(1);
+    applied();
+    await answering;
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sent.filter(s => s.kind === 400)).toHaveLength(2);
+    e.endLocal();
+  });
+
+  it('does not retry a refused recovery payment and retains media for the grace window', async () => {
+    let offers = 0;
+    const { e } = engine({ signal: async (_peer, kind) => {
+      if (kind === 400 && ++offers === 2) return { ok: false, error: { code: 'spend_unknown', message: 'Payment outcome unknown.' } };
+      return { ok: true, value: { total_msat: 1 } as CallReceipt };
+    } });
+    await e.place(A, 'audio', QUOTE);
+    await e.receive(msg(401, { sdp: 'answer' }), OWN);
+    const pc = FakePc.made[0]; pc.connect(); pc.state('failed');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(e.view()).toMatchObject({ state: 'reconnecting', error: 'Payment outcome unknown.' });
+    expect(pc.tracks[0].stop).not.toHaveBeenCalled();
+    pc.state('failed');
+    await vi.advanceTimersByTimeAsync(RECONNECT_GRACE_MS);
+    expect(e.view()).toMatchObject({ state: 'ended', error: 'Payment outcome unknown.' });
+    expect(offers).toBe(2);
+    expect(pc.tracks[0].stop).toHaveBeenCalledOnce();
+  });
+
+  it('bounds a failed restart without replaying an unknown paid operation or reviving late', async () => {
+    let n = 0;
+    const { e, sent } = engine({ newCallId: () => n++ === 0 ? ID : 'e'.repeat(32) });
+    await e.place(A, 'audio', QUOTE);
+    await e.receive(msg(401, { sdp: 'answer' }), OWN);
+    const pc = FakePc.made[0]; pc.connect(); pc.state('failed');
+    await vi.advanceTimersByTimeAsync(RECONNECT_GRACE_MS);
+    expect(e.view()).toMatchObject({ state: 'ended', reason: 'failed' });
+    expect(pc.closed).toBe(true);
+    expect(sent.filter(s => s.kind === 400)).toHaveLength(2);
+    await e.receive(msg(401, { call_id: 'e'.repeat(32), sdp: 'late' }), OWN);
+    pc.connect();
+    expect(e.view().state).toBe('ended');
+  });
+});
+
+describe('call lifecycle hardening', () => {
+  beforeEach(() => { FakePc.made = []; vi.useFakeTimers(); });
+  afterEach(() => vi.useRealTimers());
+
+  it.each(['outgoing', 'incoming'] as const)('explains denied or absent devices for %s capture without signalling', async (direction) => {
+    for (const [name, message] of [['NotAllowedError', /permission.*denied/i], ['NotFoundError', /no.*microphone.*camera/i], ['NotReadableError', /in use|busy/i]]) {
+      const { e, sent } = engine({ getUserMedia: async () => { throw new DOMException('capture failed', String(name)); } });
+      if (direction === 'incoming') await e.receive(msg(400, { media: 'video', sdp: 'offer' }), OWN);
+      await (direction === 'incoming' ? e.accept() : e.place(A, 'video', QUOTE));
+      expect(e.view()).toMatchObject({ phase: 'ended', state: 'ended', error: expect.stringMatching(message) });
+      expect(sent).toEqual([]);
+      e.dismiss();
+      expect(e.view()).toMatchObject({ phase: 'idle', state: 'idle' });
+    }
+  });
+
+  it('releases all media immediately even if hangup signalling never settles', async () => {
+    const local = stream(true);
+    const next = engine({ getUserMedia: async () => local, signal: async (_peer, kind) => {
+      if (kind === 403) return new Promise(() => {});
+      return { ok: true, value: { total_msat: 1 } as CallReceipt };
+    } });
+    await next.e.place(A, 'video', QUOTE);
+    FakePc.made[0].connect();
+    const ending = next.e.hangup();
+    expect(next.e.view()).toMatchObject({ phase: 'ended', state: 'ended' });
+    expect(local.getTracks().every(t => vi.mocked(t.stop).mock.calls.length === 1)).toBe(true);
+    expect(FakePc.made[0].closed).toBe(true);
+    await vi.advanceTimersByTimeAsync(30_001);
+    await ending;
+  });
+
+  it('hangup cancels an incoming permission prompt and releases its late stream', async () => {
+    let release!: (s: MediaStream) => void;
+    const { e, sent } = engine({ getUserMedia: () => new Promise(resolve => { release = resolve; }) });
+    await e.receive(msg(400, { media: 'video', sdp: 'offer' }), OWN);
+    const accepting = e.accept();
+    await vi.advanceTimersByTimeAsync(0);
+    const ending = e.hangup();
+    expect(e.view().phase).toBe('ended');
+    const late = stream(true);
+    release(late);
+    await accepting;
+    await ending;
+    expect(late.getTracks().every(t => vi.mocked(t.stop).mock.calls.length === 1)).toBe(true);
+    expect(sent.some(s => s.kind === 401)).toBe(false);
+  });
+
+  it('exposes reconnecting during a blip without extending the grace on repeated events', async () => {
+    const { e } = engine();
+    expect(e.view()).toHaveProperty('state', 'idle');
+    await e.place(A, 'audio', QUOTE);
+    expect(e.view()).toHaveProperty('state', 'ringing');
+    await e.receive(msg(401, { sdp: 'answer' }), OWN);
+    expect(e.view()).toHaveProperty('state', 'connecting');
+    const pc = FakePc.made[0];
+    pc.connect();
+    pc.state('disconnected');
+    expect(e.view()).toMatchObject({ phase: 'reconnecting', state: 'reconnecting', liveAt: 1000 });
+    expect(pc.closed).toBe(false);
+    await vi.advanceTimersByTimeAsync(RECONNECT_GRACE_MS - 1);
+    pc.state('disconnected');
+    await vi.advanceTimersByTimeAsync(1);
+    expect(e.view()).toMatchObject({ phase: 'ended', state: 'ended' });
+  });
+
+  it('does not regress a live call when the original offer receipt arrives after the answer', async () => {
+    let finish!: (r: Awaited<ReturnType<CallDeps['signal']>>) => void;
+    const { e } = engine({ signal: () => new Promise(resolve => { finish = resolve; }) });
+    const placing = e.place(A, 'audio', QUOTE);
+    await vi.advanceTimersByTimeAsync(0);
+    await e.receive(msg(401, { sdp: 'answer' }), OWN);
+    FakePc.made[0].connect();
+    finish({ ok: true, value: { total_msat: 15000 } as CallReceipt });
+    await placing;
+    expect(e.view()).toMatchObject({ state: 'live', liveAt: 1000 });
+    await vi.advanceTimersByTimeAsync(RING_MS);
+    expect(e.view().state).toBe('live');
+    e.endLocal();
+  });
+
+  it('a stale decline quote cannot pay against or end a new incoming call', async () => {
+    let quoted!: (r: Awaited<ReturnType<CallDeps['quote']>>) => void;
+    const { e, sent } = engine({ quote: () => new Promise(resolve => { quoted = resolve; }) });
+    await e.receive(msg(400, { media: 'audio', sdp: 'offer' }), OWN);
+    const declining = e.decline();
+    e.endLocal();
+    await e.receive(msg(400, { call_id: 'f'.repeat(32), media: 'audio', sdp: 'new' }, 'b'.repeat(64)), OWN);
+    quoted({ ok: true, value: QUOTE });
+    await declining;
+    expect(sent).toEqual([]);
+    expect(e.view()).toMatchObject({ state: 'ringing', peer: 'b'.repeat(64), callId: 'f'.repeat(32) });
+    e.endLocal();
+  });
+
+  it('bounds a hung incoming quote and ignores its late success', async () => {
+    let quoted!: (r: Awaited<ReturnType<CallDeps['quote']>>) => void;
+    const { e, sent, media } = engine({ quote: () => new Promise(resolve => { quoted = resolve; }) });
+    await e.receive(msg(400, { media: 'audio', sdp: 'offer' }), OWN);
+    const accepting = e.accept();
+    await vi.advanceTimersByTimeAsync(CONNECT_TIMEOUT_MS);
+    expect(e.view().state).toBe('ended');
+    quoted({ ok: true, value: QUOTE });
+    await accepting;
+    expect(sent).toEqual([]);
+    expect(media).toEqual([]);
+  });
+
+  it('does not open a permission prompt if capture is cancelled before it starts', async () => {
+    const { e, media } = engine();
+    const placing = e.place(A, 'audio', QUOTE);
+    await e.hangup();
+    await placing;
+    expect(media).toEqual([]);
+  });
+
+  it('camera enable failures stop the new track and keep the audio call usable', async () => {
+    const local = stream(true);
+    const fresh = stream(true, false);
+    const { e } = engine({ getUserMedia: async c => c.audio ? local : fresh });
+    await e.place(A, 'video', QUOTE);
+    const pc = FakePc.made[0]; pc.connect();
+    await e.toggleCamera();
+    pc.senders[1].replaceTrack = async () => { throw new Error('sender failed'); };
+    await e.toggleCamera();
+    expect(fresh.getVideoTracks()[0].stop).toHaveBeenCalled();
+    expect(e.view()).toMatchObject({ state: 'live', camera: false, error: expect.any(String) });
+    expect(local.getAudioTracks()[0].stop).not.toHaveBeenCalled();
+    e.endLocal();
+  });
+
+  it('serializes camera acquisition and does not revive its state after hangup', async () => {
+    const local = stream(true);
+    const fresh = stream(true, false);
+    let release!: (s: MediaStream) => void;
+    let captures = 0;
+    const { e } = engine({ getUserMedia: async c => {
+      captures++;
+      return c.audio ? local : new Promise(resolve => { release = resolve; });
+    } });
+    await e.place(A, 'video', QUOTE);
+    FakePc.made[0].connect();
+    await e.toggleCamera();
+    const enabling = e.toggleCamera();
+    const duplicate = e.toggleCamera();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(captures).toBe(2);
+    await e.hangup();
+    release(fresh);
+    await Promise.all([enabling, duplicate]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(e.view()).toMatchObject({ state: 'ended', camera: false });
+    expect(fresh.getVideoTracks()[0].stop).toHaveBeenCalled();
+  });
+
+  it('ignores late answer payment failures after hangup and a new incoming call', async () => {
+    let finish!: (r: Awaited<ReturnType<CallDeps['signal']>>) => void;
+    const { e } = engine({ signal: (_p, kind) => kind === 401 ? new Promise(resolve => { finish = resolve; }) : Promise.resolve({ ok: true, value: { total_msat: 1 } as CallReceipt }) });
+    await e.receive(msg(400, { media: 'audio', sdp: 'offer' }), OWN);
+    const accepting = e.accept();
+    await vi.advanceTimersByTimeAsync(0);
+    await e.hangup();
+    await e.receive(msg(400, { call_id: 'f'.repeat(32), media: 'audio', sdp: 'new' }), OWN);
+    finish({ ok: false, error: { code: 'node', message: 'old failure' } });
+    await accepting;
+    expect(e.view()).toMatchObject({ phase: 'incoming', state: 'ringing', callId: 'f'.repeat(32), error: null, paidMsat: 0 });
+    e.endLocal();
   });
 });
 
@@ -409,13 +724,13 @@ describe('call engine: review #74 fixes', () => {
     const pc = FakePc.made[0];
     pc.connect();
     pc.state('disconnected');
-    vi.advanceTimersByTime(DISCONNECT_GRACE_MS - 1);
+    vi.advanceTimersByTime(1_999);
     pc.state('connected');
-    vi.advanceTimersByTime(DISCONNECT_GRACE_MS);
+    vi.advanceTimersByTime(RECONNECT_GRACE_MS);
     expect(last().phase).toBe('live');
     pc.state('disconnected');
-    vi.advanceTimersByTime(DISCONNECT_GRACE_MS);
-    expect(last()).toMatchObject({ phase: 'ended', reason: 'failed', error: 'The connection was lost.' });
+    vi.advanceTimersByTime(RECONNECT_GRACE_MS);
+    expect(last()).toMatchObject({ phase: 'ended', reason: 'failed', error: expect.stringContaining('The connection was lost.') });
     expect(pc.closed && (pc.tracks[0].stop as unknown as { mock: { calls: unknown[] } }).mock.calls.length > 0).toBe(true);
     expect(sent.map((x) => x.kind)).toEqual([400]);
   });
@@ -518,6 +833,7 @@ describe('calls in the shell', () => {
     dispose?.();
     dispose = undefined;
     mount?.remove();
+    vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
   const $ = <T extends Element = HTMLElement>(sel: string) => mount.querySelector<T>(sel);
@@ -600,7 +916,7 @@ describe('calls in the shell', () => {
     ]);
     pc.connect();
     await vi.waitFor(() => expect(text('[data-call-connection]')).toContain('srflx(STUN)'));
-    pc.state('failed');
+    pc.state('closed');
     await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
     expect(text('[data-call-paid]')).toMatch(/cap.*6 sats/i);
     expect(text('[data-call-paid]')).not.toMatch(/Paid 6/);
@@ -669,7 +985,7 @@ describe('calls in the shell', () => {
     expect(FakePc.made[0].closed).toBe(true);
   });
 
-  it.each([['sats', '21.381 sats'], ['btc', '0.00000021381 BTC']] as const)('uses the %s denomination for a fractional call quote', async (denomination, shown) => {
+  it.each([['sats', '42.762 sats'], ['btc', '0.00000042762 BTC']] as const)('uses the %s denomination for a fractional call quote', async (denomination, shown) => {
     setDenom(denomination);
     stubHost({ call_quote: () => ({ ...QUOTE, call_total_msat: 21_381 }) });
     await openShell();
@@ -681,7 +997,7 @@ describe('calls in the shell', () => {
     const host = stubHost();
     await openShell();
     // Icon buttons: no price text on the button; the price rides in the label and title.
-    await vi.waitFor(() => expect($('[data-call="audio"]')!.getAttribute('aria-label')).toBe('Call Maya, up to 21 sats'));
+    await vi.waitFor(() => expect($('[data-call="audio"]')!.getAttribute('aria-label')).toBe('Call Maya, up to 42 sats'));
     expect(text('[data-call="audio"]')).toBe('');
     expect($('[data-call="audio"]')!.getAttribute('title')).toMatch(/Media goes directly between you/);
     // Call signals from history are not chat bubbles.
@@ -729,6 +1045,39 @@ describe('calls in the shell', () => {
     expect(host.used('call_signal').map((c) => c.args!.kind)).toEqual([401, 403]);
   });
 
+  it('shows Reconnecting… and keeps video and controls mounted through a network blip', async () => {
+    // Media playback is a browser boundary; these streams are track-owning fakes.
+    vi.spyOn(HTMLMediaElement.prototype, 'srcObject', 'set').mockImplementation(() => {});
+    const host = stubHost({ messages_list: () => [] });
+    await openShell();
+    host.emitLive({ type: 'message', room_id: null, message: { ...msg(400, { media: 'video', sdp: 'offer' }), timestamp: Date.now() } });
+    await vi.waitFor(() => expect($('[data-call-accept]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-call-accept]')!.click();
+    await vi.waitFor(() => expect({ sent: host.used('call_signal').length, ended: text('[data-call-ended]') }).toEqual({ sent: 1, ended: '' }));
+    const pc = FakePc.made[0]; pc.connect();
+    await vi.waitFor(() => expect($('[data-call-panel="live"]')).not.toBeNull());
+    const video = $('[data-call-media="local"]');
+    pc.state('disconnected');
+    await vi.waitFor(() => expect(text('[data-call-title]')).toContain('Reconnecting…'));
+    expect($('[data-call-media="local"]')).toBe(video);
+    expect($('[data-call-mute]')).not.toBeNull();
+    expect($('[data-call-hangup]')).not.toBeNull();
+    pc.connect();
+    await vi.waitFor(() => expect($('[data-call-panel="live"]')).not.toBeNull());
+    expect(host.used('call_signal').map(c => c.args!.kind)).toEqual([401]);
+  });
+
+  it.each([['NotAllowedError', /permission.*denied/i], ['NotFoundError', /no.*microphone/i]])('shows a clear %s capture error and enables another call', async (name, message) => {
+    const host = stubHost();
+    Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: async () => { throw new DOMException('capture failed', name as string); } } });
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect(text('[data-call-ended]')).toMatch(message as RegExp));
+    expect(host.used('call_signal')).toHaveLength(0);
+    expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false);
+  });
+
   it('a contact whose node does not take calls cannot be rung', async () => {
     const host = stubHost({ call_quote: () => ({ ...QUOTE, offer_msat: null, offer_max_routing_fee_msat: 0, call_total_msat: null }) });
     await openShell();
@@ -741,8 +1090,8 @@ describe('calls in the shell', () => {
     const host = stubHost();
     Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: () => new Promise<MediaStream>(() => {}) } });
     await openShell();
-    await vi.waitFor(() => expect($('[data-call="audio"]')!.getAttribute('aria-label')).toBe('Call Maya, up to 21 sats'));
-    expect($('[data-call="video"]')!.getAttribute('aria-label')).toBe('Video call Maya, up to 21 sats');
+    await vi.waitFor(() => expect($('[data-call="audio"]')!.getAttribute('aria-label')).toBe('Call Maya, up to 42 sats'));
+    expect($('[data-call="video"]')!.getAttribute('aria-label')).toBe('Video call Maya, up to 42 sats');
     expect($('[data-call="audio"]')!.getAttribute('title')).toMatch(/No STUN server is set/);
     $<HTMLButtonElement>('[data-call="audio"]')!.click();
     await vi.waitFor(() => expect($('[data-call-panel="calling"]')).not.toBeNull());
