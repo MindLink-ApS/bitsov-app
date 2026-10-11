@@ -1292,3 +1292,6 @@ input[type='checkbox'], input[type='radio'] { width: auto; flex: none; padding: 
   .box-illustration.paired { animation: state-fade 0.01ms; filter: none; }
   .settled-check, .settled-amount, .box-illustration.paired + .touchid-text { animation: none; }
 }
+
+/* The call card sits under the header, never over the composer. */
+.call-panel { top: 72px; bottom: auto; }

@@ -1167,9 +1167,13 @@ describe('calls in the shell', () => {
     stubHost();
     await openShell();
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
-    const note = $('[data-call-network-note]');
+    // Never a permanent strip in the chat: only inside the call, where it matters.
+    expect($('[data-call-network-note]')).toBeNull();
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel]')).not.toBeNull());
+    const note = $('[data-call-panel] [data-call-network-note]');
     if (stun) expect(note).toBeNull();
-    else expect(note?.textContent).toMatch(/calls may not connect across networks/i);
+    else await vi.waitFor(() => expect(note?.textContent ?? $('[data-call-panel] [data-call-network-note]')?.textContent).toMatch(/calls may not connect across networks/i));
   });
 
   it('rings on a live offer with the answer price, and never adds call signals to the thread', async () => {
@@ -1347,5 +1351,66 @@ describe('calls in the shell', () => {
     await vi.waitFor(() => expect($('[data-call-settings]')).not.toBeNull());
     expect($('[data-stun-own]')).toBeNull();
     expect($('[data-stun-own-hint]')).toBeNull();
+  });
+
+  describe('one clear state at a time', () => {
+    it('a call refused before ringing says it never started, with nothing paid', async () => {
+      stubHost({
+        call_quote: () => ({ ...QUOTE, call_total_msat: 21_205_000 }),
+        budget_status: () => ({ ...openBudget(), node_grant: { expires_at_ms: Date.now() + 3600_000, budget_msat: 50_000_000, remaining_msat: 50_000_000, per_call_max_msat: 500_000 } }),
+      });
+      await openShell();
+      await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+      $<HTMLButtonElement>('[data-call="audio"]')!.click();
+      await vi.waitFor(() => expect(text('[data-call-title]')).toBe('Couldn’t start the call'));
+      expect($('[data-call-recovery-note]')).toBeNull();
+      expect($('[data-call-network-note]')).toBeNull();
+      expect($('[data-call-dismiss]')).not.toBeNull();
+    });
+
+    it('a call nobody answered offers Set up calls when no STUN server is set', async () => {
+      setStunPref('');
+      stubHost();
+      await openShell();
+      await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+      vi.useFakeTimers();
+      try {
+        $<HTMLButtonElement>('[data-call="audio"]')!.click();
+        await vi.advanceTimersByTimeAsync(10);
+        await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
+        // While it rings: the network line is in the call, once.
+        expect(mount.querySelectorAll('[data-call-network-note]')).toHaveLength(1);
+        await vi.advanceTimersByTimeAsync(RING_MS + 10);
+        expect(text('[data-call-ended]')).toBe('No answer');
+        expect(text('[data-call-title]')).toBe('Call ended');
+        expect($('[data-call-retry]')).toBeNull();
+        $<HTMLButtonElement>('[data-call-setup]')!.click();
+        expect($('[data-call-panel]')).toBeNull();
+        expect($('[data-settings]')?.classList.contains('open')).toBe(true);
+      } finally { vi.useRealTimers(); }
+    });
+
+    it('with a STUN server set, an unanswered call offers Try again, which redials with a fresh quote', async () => {
+      setStunPref('stun:owner.example:3478');
+      const host = stubHost();
+      await openShell();
+      await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+      vi.useFakeTimers();
+      try {
+        $<HTMLButtonElement>('[data-call="audio"]')!.click();
+        await vi.advanceTimersByTimeAsync(10);
+        await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
+        await vi.advanceTimersByTimeAsync(RING_MS + 10);
+        expect($('[data-call-setup]')).toBeNull();
+        const quotes = host.used('call_quote').length;
+        $<HTMLButtonElement>('[data-call-retry]')!.click();
+        await vi.advanceTimersByTimeAsync(10);
+        await vi.waitFor(() => expect(host.used('call_quote').length).toBeGreaterThan(quotes));
+        // ICE gathering may take its bounded wait before the new offer goes out.
+        await vi.advanceTimersByTimeAsync(3_100);
+        // The unanswered offer (no paid hangup after a ring timeout), then the new offer.
+        await vi.waitFor(() => expect(host.used('call_signal').map((c) => (c.args as { kind: number }).kind)).toEqual([400, 400]));
+      } finally { vi.useRealTimers(); setStunPref(''); }
+    });
   });
 });

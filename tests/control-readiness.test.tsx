@@ -153,6 +153,22 @@ describe('node money readiness', () => {
     expect(source.invoiceCreate).toHaveBeenCalledTimes(1);
   });
 
+  it('re-checks the node about 2 s after a passing refusal instead of waiting for the 10 s poll', async () => {
+    vi.useFakeTimers();
+    await start(true, (source) => {
+      source.invoiceCreate = vi.fn().mockRejectedValue({ code: 'not_ready', message: 'backend offline' });
+    });
+    (mount.querySelector('[data-composer-mode="request"]') as HTMLButtonElement).click();
+    const amount = mount.querySelector('[data-request-amount]') as HTMLInputElement;
+    amount.value = '10'; amount.dispatchEvent(new Event('input', { bubbles: true }));
+    (mount.querySelector('[data-send]') as HTMLButtonElement).click();
+    await vi.advanceTimersByTimeAsync(0);
+    // Said once, right away, so the owner knows why nothing happened.
+    expect(mount.querySelectorAll('[data-money-notice]')).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(2_100);
+    expect(mount.querySelector('[data-money-notice]')).toBeNull();
+  });
+
   it('maps the node refusal to the common calm message', () => {
     expect(asActionError({ code: 'not_ready', message: 'backend unavailable' }).message).toBe('Money is not ready yet. Your node will retry automatically.');
   });

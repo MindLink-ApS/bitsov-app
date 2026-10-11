@@ -259,7 +259,17 @@ export function ControlCenter(props: Props) {
     overviewRevision += 1;
     setReadinessRefused(true);
     setOverview((old) => old ? { ...old, money_ready: false, readiness: null } : old);
+    // A refusal is one reading, not a state: re-read the node shortly (not a
+    // whole 10 s poll later), so a passing refusal clears fast. The notice
+    // stays up meanwhile, so the owner sees why nothing happened.
+    recheckReadiness();
   });
+  let recheckTimer: ReturnType<typeof setTimeout> | undefined;
+  function recheckReadiness() {
+    clearTimeout(recheckTimer);
+    recheckTimer = setTimeout(() => { if (live() && (readinessRefused() || overview()?.money_ready === false)) void loadOverview(); }, 2_000);
+  }
+  onCleanup(() => clearTimeout(recheckTimer));
   const [peers, setPeers] = createSignal<Peer[]>([]);
   const [peersLoaded, setPeersLoaded] = createSignal(false);
   const [rooms, setRooms] = createSignal<Room[]>([]);
@@ -1567,15 +1577,25 @@ export function ControlCenter(props: Props) {
         approval={<Show when={callApproval()}>
           <div data-call-approval>
             <strong>Approve spending before calling</strong>
-            <p class="hint">Spending needs approval. After approval, press Call or Accept again.</p>
-            <SpendBar spend={spend()} error={errors.spend ?? errors.spendPoll} now={now()} actions={actions} />
-            <Show when={spend()?.state !== 'pending' && spend()?.state !== 'unavailable'}>
-              <button type="button" class="soft" data-call-approve disabled={moneyBlocked() || callApproving()} onClick={async () => {
-                setCallApproving(true);
-                try { await actions.approve(); } finally { setCallApproving(false); }
-              }}>Approve spending</button>
+            {/* One line and one action; the full spend bar only while an owner step is pending. */}
+            <Show
+              when={spend()?.state === 'pending' || spend()?.state === 'unavailable'}
+              fallback={<p class="hint">One approval covers the next ten minutes. Then press Call or Accept again.</p>}
+            >
+              <SpendBar spend={spend()} error={errors.spend ?? errors.spendPoll} now={now()} actions={actions} />
             </Show>
-            <button type="button" class="soft" onClick={() => setCallApproval(false)}>Close</button>
+            <div class="form-actions">
+              <Show when={spend()?.state !== 'pending' && spend()?.state !== 'unavailable'}>
+                <button type="button" class="primary soft money" data-call-approve disabled={moneyBlocked() || callApproving()} onClick={async () => {
+                  setCallApproving(true);
+                  try { await actions.approve(); } finally { setCallApproving(false); }
+                }}>Approve spending</button>
+              </Show>
+              <button type="button" class="soft" onClick={() => setCallApproval(false)}>Close</button>
+            </div>
+            <Show when={errors.spend && spend()?.state !== 'pending'}>
+              <p class="err-note" role="alert">{errors.spend}</p>
+            </Show>
           </div>
         </Show>}
         blocked={moneyBlocked()}
@@ -1589,6 +1609,11 @@ export function ControlCenter(props: Props) {
         mute={() => calls.toggleMute()}
         camera={() => void calls.toggleCamera()}
         dismiss={() => { setCallApproval(false); calls.dismiss(); }}
+        retry={(peer, media) => {
+          calls.dismiss();
+          void actions.callQuote(peer).then((r) => { if (r.ok) actions.placeCall(peer, media, r.value); });
+        }}
+        setUpCalls={() => { calls.dismiss(); setTab('body'); setContextOpen(true); }}
       />
       <MeetingPanel
         view={meetingView()}
@@ -2154,7 +2179,6 @@ function Conversation(props: {
         verified={peerVerify().verified}
         keyChanged={peerVerify().keyChanged}
       />
-      <Show when={props.track.kind === 'peer' && props.peer}><CallNetworkNote /></Show>
       <Show when={props.track.kind === 'peer' && props.peer ? props.peer : null}>
         {(p) => (
           <ContactPanel
@@ -2545,6 +2569,10 @@ function CallPanel(props: {
   mute: () => void;
   camera: () => void;
   dismiss: () => void;
+  /** Ended or not started: place the same call again (fresh quote first). */
+  retry: (peer: string, media: CallMedia) => void;
+  /** Open Settings, where Calls (STUN) lives. */
+  setUpCalls: () => void;
 }) {
   const [tick, setTick] = createSignal(Date.now());
   const [answer, setAnswer] = createSignal<number | null>(null);
@@ -2559,20 +2587,34 @@ function CallPanel(props: {
   }));
   const v = () => props.view;
   const who = () => (v().peer ? props.nameOf(v().peer!) : '');
+  // One state at a time: a call that never rang (nothing paid, refused before
+  // the offer) is not a "Call ended"; it never started.
+  const notStarted = () => v().phase === 'ended' && v().paidMsat === 0 && v().liveAt === null && v().error !== null;
+  const noStun = () => !stunPref();
+  // Across networks a call needs a STUN server; say so only where it matters.
+  const networkHint = () => noStun() && (['calling', 'ringing', 'connecting'].includes(v().phase) || (v().phase === 'ended' && (v().reason === 'failed' || v().reason === 'timeout')));
+  const endedLine = () => {
+    const e = v().error;
+    if (e === MONEY_NOT_READY) return 'Your node isn’t ready to pay yet, so nothing was sent. Try again in a moment.';
+    return e ?? END_REASON[v().reason ?? 'hangup'];
+  };
+  const setUpFirst = () => v().phase === 'ended' && noStun() && (v().reason === 'failed' || v().reason === 'timeout');
   const price = (m: number | null) => (m === null ? '' : ` · ${sats(m)} ${satUnit(m)}`);
   return (
     <Show when={v().phase !== 'idle' || props.approvalOpen}>
       <aside ref={props.panelRef} tabindex="-1" class="call-panel" data-call-panel={v().phase} role="dialog" aria-label={props.approvalOpen ? 'Call spending approval' : `${CALL_TITLE[v().phase]} ${who()}`}>
         <header>
-          <strong data-call-title aria-live="polite">{CALL_TITLE[v().phase]}{v().media === 'video' ? ' (video)' : ''}</strong>
+          <strong data-call-title aria-live="polite">{notStarted() ? 'Couldn’t start the call' : CALL_TITLE[v().phase]}{v().media === 'video' && !notStarted() ? ' (video)' : ''}</strong>
           <span class="who">{who()}</span>
           <Show when={(v().phase === 'live' || v().phase === 'reconnecting') && v().liveAt !== null}>
             <span class="duration" data-call-duration>{duration(Math.max(0, tick() - v().liveAt!))}</span>
           </Show>
         </header>
         {props.approval}
-        <CallNetworkNote />
-        <p class="hint" data-call-recovery-note>A network interruption may trigger one paid recovery attempt within your budget. Recovery uses another call admission and signalling fees.</p>
+        <Show when={networkHint()}><CallNetworkNote /></Show>
+        <Show when={v().phase === 'live' || v().phase === 'reconnecting'}>
+          <p class="hint" data-call-recovery-note>A network interruption may trigger one paid recovery attempt within your budget. Recovery uses another call admission and signalling fees.</p>
+        </Show>
         <Show when={v().media === 'video' && (v().phase === 'live' || v().phase === 'connecting' || v().phase === 'reconnecting')}>
           <div class="call-videos">
             <MediaView stream={props.streams.remote} video muted={false} kind="remote" />
@@ -2589,7 +2631,7 @@ function CallPanel(props: {
           {(connection) => <p class="hint" data-call-connection>Connection: {connection().local === 'srflx' ? 'srflx(STUN)' : connection().local} (local) / {connection().remote === 'srflx' ? 'srflx(STUN)' : connection().remote} (remote)</p>}
         </Show>
         <Show when={v().phase === 'ended'}>
-          <p class="hint" data-call-ended>{v().error ?? END_REASON[v().reason ?? 'hangup']}</p>
+          <p class="hint" data-call-ended>{endedLine()}</p>
         </Show>
         <Show when={v().phase !== 'ended' && v().error}>
           <p class="hint" data-call-error>{v().error}</p>
@@ -2601,6 +2643,17 @@ function CallPanel(props: {
               <button type="button" class="soft" data-call-decline disabled={props.blocked} onClick={() => props.decline()}>Decline{price(answer())}</button>
             </Match>
             <Match when={v().phase === 'ended'}>
+              {/* One primary way on, then Close. */}
+              <Show
+                when={setUpFirst()}
+                fallback={
+                  <Show when={v().outgoing && v().peer}>
+                    <button type="button" class="primary soft" data-call-retry disabled={props.blocked} onClick={() => props.retry(v().peer!, v().media)}>Try again</button>
+                  </Show>
+                }
+              >
+                <button type="button" class="primary soft" data-call-setup onClick={() => props.setUpCalls()}>Set up calls</button>
+              </Show>
               <button type="button" class="soft" data-call-dismiss onClick={() => props.dismiss()}>Close</button>
             </Match>
             <Match when={v().phase !== 'idle'}>
