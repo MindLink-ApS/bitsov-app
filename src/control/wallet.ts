@@ -262,7 +262,7 @@ export function updateInvoice(id: string, status: InvoiceStatus) {
   const i = items.findIndex((a) => a.id === id);
   if (i < 0 || status.state === 'unknown' || items[i].status === status.state) return;
   const next = [...items];
-  next[i] = { ...items[i], status: status.state, msat: status.amount_msat ?? items[i].msat };
+  next[i] = { ...items[i], status: status.state, msat: status.state === 'paid' ? status.amount_msat : status.amount_msat ?? items[i].msat };
   saveLog(next);
 }
 

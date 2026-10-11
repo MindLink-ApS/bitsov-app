@@ -28,7 +28,8 @@ it('clears submitted secrets and never matches or finalizes automatically', asyn
   expect(calls).toEqual(['create']);
   expect(sent).toEqual({ action: 'create', password: '', claim_code: '' });
   expect(root.textContent).toContain('Do these match the box page?');
-  expect(root.textContent).toContain('noodle');
+  expect([...root.querySelectorAll('[data-pair-word]')].map(el => el.textContent)).toEqual(['noodle', 'gallery', 'demand', 'science']);
+  expect(root.querySelector('[data-box-illustration]')).not.toBeNull();
   expect(root.querySelector('#box-password')).toBeNull();
   await flush(); expect(calls).toEqual(['create']);
 });

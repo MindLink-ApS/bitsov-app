@@ -721,12 +721,20 @@ describe('calls in the shell', () => {
     FakePc.made[0].connect();
     await vi.waitFor(() => expect($('[data-call-panel="live"]')).not.toBeNull());
     expect(text('[data-call-duration]')).toMatch(/^0:0\d$/);
+    const pill = $<HTMLButtonElement>('[data-on-call]')!;
+    expect(pill?.textContent).toMatch(/On call · 00:0\d/);
+    $<HTMLButtonElement>('[data-track="discover"]')!.click();
+    pill.click();
+    await vi.waitFor(() => expect(document.activeElement).toBe($('[data-call-panel="live"]')));
+    expect($('[data-track="peer:' + A + '"]')?.getAttribute('aria-current')).toBe('true');
+
     $<HTMLButtonElement>('[data-call-mute]')!.click();
     await vi.waitFor(() => expect($('[data-call-mute]')!.getAttribute('aria-pressed')).toBe('true'));
     expect(text('[data-call-mute]')).toBe('Mute');
     $<HTMLButtonElement>('[data-call-hangup]')!.click();
     await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
     expect(host.used('call_signal').map((c) => c.args!.kind)).toEqual([401, 403]);
+    expect($('[data-on-call]')).toBeNull();
   });
 
   it('a contact whose node does not take calls cannot be rung', async () => {

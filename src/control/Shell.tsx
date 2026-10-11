@@ -1,3 +1,4 @@
+import { OnCallPill } from './OnCallPill';
 import { watchSamples, type WatchSamples, type WatchUpdates } from './watches';
 import { ASSISTANTS, type AssistantId } from './assistants';
 import { PendingApproval } from '../onboarding/LockedNode';
@@ -35,7 +36,7 @@ import { blobUrl, duration, FILE_MAX_BYTES, fileNameOf, isVoiceNote, type Record
 import { EMOJIS, insertEmoji } from './emoji';
 import { cleanPurpose, hostReadProblem, invoicePaymentHash, NOT_PAYABLE_NOTE, type NotPayable, payeeView, readChatInvoice } from './bolt11';
 import { safeImageMime, looksLikeSafeImageName, dataImageUrl } from './frontDoorMedia';
-import type { FileSaveResult, InvoiceAmount, InvoiceView, VoiceBlob } from './types';
+import type { PaymentReceipt, FileSaveResult, InvoiceAmount, InvoiceView, VoiceBlob } from './types';
 import {
   doorCard,
   gateWords,
@@ -141,6 +142,7 @@ type Props = {
   watchError?: string | null;
   remote?: boolean;
   retryAfterSecs?: number | null;
+  offline?: JSX.Element;
   onReconnect?: () => Promise<void>;
   source: Source;
   /** Setup completed for this trust boundary: keep the shell mounted. */
@@ -213,8 +215,8 @@ export type Actions = {
   invoice: (t: TrackRef, msat: number, note: string) => Promise<Outcome<unknown>>;
   /** The host's read-only decode of an invoice: the only payee and amount shown. */
   readInvoice: (bolt11: string) => Promise<Outcome<InvoiceAmount>>;
-  pay: (t: TrackRef, bolt11: string, msat: number) => Promise<Outcome<unknown>>;
-  keysend: (t: TrackRef, pubkey: string, msat: number, memo: string) => Promise<Outcome<unknown>>;
+  pay: (t: TrackRef, bolt11: string, msat: number) => Promise<Outcome<PaymentReceipt>>;
+  keysend: (t: TrackRef, pubkey: string, msat: number, memo: string) => Promise<Outcome<PaymentReceipt>>;
   file: (t: TrackRef, file: File, maxMsat: number, firstContactMsat?: number) => Promise<Outcome<unknown>>;
   /** Read-only: a playable URL for a voice note in the thread. Never pays. */
   voiceUrl: (messageId: string) => Promise<string>;
@@ -237,6 +239,7 @@ let artifactSeq = 0;
 type NewArtifact = Artifact extends infer A ? (A extends Artifact ? Omit<A, 'id' | 'at'> & { at?: number } : never) : never;
 
 export function ControlCenter(props: Props) {
+  let callPanel: HTMLElement | undefined;
   const [now, setNow] = createSignal(Date.now());
   const [overview, setOverview] = createSignal<NodeOverview | null>(null);
   const [readinessRefused, setReadinessRefused] = createSignal(false);
@@ -845,7 +848,7 @@ export function ControlCenter(props: Props) {
     if (room) setTrack({ kind: 'bound', id: room.id });
   };
   /** A failed action that is not an approval or budget question stays in the track as a record. */
-  const recordFailure = (t: TrackRef, action: string, outcome: Outcome<unknown>) => {
+  const recordFailure = <T,>(t: TrackRef, action: string, outcome: Outcome<T>): Outcome<T> => {
     // A send that did not cross (price, setpoint) is also a membrane reading. A
     // price refusal stands at their door in the track instead of a failure row.
     if (!outcome.ok) foldMembrane((log) => membraneRefused(log, outcome.error, trackKey(t), Date.now()));
@@ -1246,6 +1249,14 @@ export function ControlCenter(props: Props) {
   return (
     <div class="cc" classList={{ 'no-context': !props.active }} data-mode={source.mode}>
       <Rail
+        callView={callView()}
+        onReturnToCall={() => {
+          const peer = callView().peer;
+          setWalletTab(null);
+          setContextOpen(false);
+          if (peer) setTrack({ kind: 'peer', id: peer.toLowerCase() });
+          queueMicrotask(() => callPanel?.focus());
+        }}
         pill={pill()}
         active={props.active}
         sample={source.mode === 'sample'}
@@ -1276,6 +1287,7 @@ export function ControlCenter(props: Props) {
 
       <Show when={props.active} fallback={<section class="track">{props.firstRun}</section>}>
         <section class="track" aria-label="Track" inert={walletTab() !== null}>
+          {props.offline}
           <Show when={moneyBlocked()}>
             <p class="hint money-notice" data-money-notice role="status">{!live() ? 'Waiting for the connection. Your node will retry automatically.' : MONEY_NOT_READY} Sending, paying, calls, first contact, files, rooms, channels and gifts will be available when it is ready.</p>
           </Show>
@@ -1548,6 +1560,7 @@ export function ControlCenter(props: Props) {
         </Switch>
       </aside>
       <CallPanel
+        panelRef={el => { callPanel = el; }}
         approvalOpen={callApproval()}
         approval={<Show when={callApproval()}>
           <div data-call-approval>
@@ -1756,6 +1769,8 @@ function SettingsDisplay(props: { own: OwnStun | null }) {
 // ---- rail -----------------------------------------------------------------
 
 function Rail(props: {
+  callView: CallView;
+  onReturnToCall: () => void;
   pill: ReturnType<typeof nodePill>;
   active: boolean;
   sample: boolean;
@@ -1819,6 +1834,7 @@ function Rail(props: {
       <div class="mark">
         Bit<span>Sov</span>
       </div>
+      <OnCallPill view={props.callView} onReturn={props.onReturnToCall} />
       <button class="node-pill" title={`${props.pill.text} · open node settings`} aria-haspopup="dialog" data-pill={props.pill.tone} onClick={() => (props.onNode ?? props.onProfile)()} disabled={!props.active}>
         <span class={`dot ${props.pill.tone}`} classList={{ live: props.pill.live }} />
         <span class="what">{props.pill.text}</span>
@@ -2513,6 +2529,7 @@ function MediaView(props: { stream: MediaStream | null; video: boolean; muted: b
 
 /** The call card: incoming (accept/decline with price), ringing, live (mute, camera, duration, hang up), ended. */
 function CallPanel(props: {
+  panelRef: (el: HTMLElement) => void;
   approvalOpen: boolean;
   approval: JSX.Element;
   blocked: boolean;
@@ -2543,7 +2560,7 @@ function CallPanel(props: {
   const price = (m: number | null) => (m === null ? '' : ` · ${sats(m)} ${satUnit(m)}`);
   return (
     <Show when={v().phase !== 'idle' || props.approvalOpen}>
-      <aside class="call-panel" data-call-panel={v().phase} role="dialog" aria-label={props.approvalOpen ? 'Call spending approval' : `${CALL_TITLE[v().phase]} ${who()}`}>
+      <aside ref={props.panelRef} tabindex="-1" class="call-panel" data-call-panel={v().phase} role="dialog" aria-label={props.approvalOpen ? 'Call spending approval' : `${CALL_TITLE[v().phase]} ${who()}`}>
         <header>
           <strong data-call-title>{CALL_TITLE[v().phase]}{v().media === 'video' ? ' (video)' : ''}</strong>
           <span class="who">{who()}</span>

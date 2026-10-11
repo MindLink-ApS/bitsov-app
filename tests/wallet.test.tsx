@@ -457,14 +457,28 @@ describe('the Wallet page', () => {
     expect($('[data-receive-invoice] [data-wallet-qr]')).not.toBeNull();
     expect(text('[data-receive-invoice] [data-bolt11]')).toBe('lntb25u1walletreceive');
     await vi.waitFor(() => expect(text('[data-receive-state]')).toBe('Waiting to be paid'));
+    expect($('[data-wallet-settled]')).toBeNull();
     paid = true;
     await vi.waitFor(() => expect(text('[data-receive-state]')).toBe('Received'), { timeout: 6000 });
+    expect(text('[data-wallet-settled]')).toContain('2,500 sats');
+    expect($('[data-receive-invoice] [data-wallet-qr]')).toBeNull();
     expect(host.used('invoice_status').every((c) => c.args!.bolt11 === 'lntb25u1walletreceive')).toBe(true);
     expect(moneyCalls(host)).toHaveLength(0);
     click('[data-wallet-tab="activity"]');
     await vi.waitFor(() => expect($('[data-activity="invoice"]')).not.toBeNull());
     expect(text('[data-activity="invoice"]')).toMatch(/Invoice · lunch.*Received.*\+2,500 sats/);
   }, 10_000);
+
+  it.each([1500, null])('Receive shows only the node-reported settled amount: %s', async reported => {
+    stubHost({ invoice_status: () => ({ state: 'paid', amount_msat: reported }) });
+    await openWallet('receive');
+    type('[data-receive-amount]', '2');
+    click('[data-receive-create]');
+    await vi.waitFor(() => expect($('[data-wallet-settled]')).not.toBeNull());
+    expect(text('[data-wallet-settled]')).toContain(reported === null ? 'Amount unknown' : '1.5 sats');
+    expect(text('[data-wallet-settled]')).not.toContain('2 sats');
+    expect($('[data-receive-invoice] [data-wallet-qr]')).toBeNull();
+  });
 
   it('Receive over Lightning: an invoice the node reports Expired reads as not paid', async () => {
     const host = stubHost({ invoice_status: () => nodePayment('Expired', 2_500_000) });
@@ -542,6 +556,9 @@ describe('the Wallet page', () => {
     await vi.waitFor(() => expect($('[data-send-result="ok"]')).not.toBeNull());
     expect(host.used('payment_pay').map((c) => c.args)).toEqual([{ bolt11: INVOICE, amount_msat: 2000, max_msat: 7000 }]);
     expect(text('[data-send-result]')).toMatch(/Paid 2 sats/);
+    expect(text('[data-send-result]')).toContain('Network fee: unknown');
+    expect(text('[data-wallet-settled]')).toContain('2 sats');
+    expect(text('[data-wallet-settled]')).not.toContain('7 sats');
     click('[data-wallet-tab="activity"]');
     await vi.waitFor(() => expect($('[data-activity="payment"]')).not.toBeNull());
     expect(text('[data-activity="payment"]')).toMatch(/Paid an invoice.*Paid.*−2 sats/);
@@ -583,6 +600,31 @@ describe('the Wallet page', () => {
     await vi.waitFor(() => expect($('[data-send-result="failed"]')).not.toBeNull());
     expect(text('[data-send-result]')).toMatch(/limit is used up/);
     expect(host.used('payment_pay')).toHaveLength(1);
+  });
+
+  it.each(['pending', 'inflight', 'failed'] as const)('does not celebrate a %s receipt', async status => {
+    stubHost({ spend_status: () => open(), payment_keysend: () => ({ method: 'keysend', amount_msat: 2000, status, paid_at_ms: Date.now() }) });
+    await openWallet('send');
+    type('[data-send-amount]', '2');
+    type('[data-send-to]', PAYEE);
+    click('[data-send-review]');
+    click('[data-wallet-confirm]');
+    await vi.waitFor(() => expect($('[data-send-result]')).not.toBeNull());
+    expect($('[data-wallet-settled]')).toBeNull();
+    expect(text('[data-send-result]')).not.toContain('Paid');
+  });
+
+  it('shows the settled receipt amount and proven fee, never the requested amount or ceiling', async () => {
+    stubHost({ spend_status: () => open(), payment_keysend: () => ({ method: 'keysend', amount_msat: 1500, fee_paid_msat: 125, max_routing_fee_msat: 5000, status: 'settled', paid_at_ms: Date.now() }) });
+    await openWallet('send');
+    type('[data-send-amount]', '2');
+    type('[data-send-to]', PAYEE);
+    click('[data-send-review]');
+    click('[data-wallet-confirm]');
+    await vi.waitFor(() => expect($('[data-wallet-settled]')).not.toBeNull());
+    expect(text('[data-wallet-settled]')).toContain('1.5 sats');
+    expect(text('[data-send-result]')).toContain('0.125 sats');
+    expect(text('[data-send-result]')).not.toContain('7 sats');
   });
 
   it('Activity: paid messages and calls from each contact’s history, filtered by kind and direction', async () => {

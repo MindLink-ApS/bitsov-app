@@ -1,3 +1,5 @@
+import { BoxIllustration } from './BoxIllustration';
+import { PairWords } from './PairWords';
 import { createSignal, For, onCleanup, Show } from 'solid-js';
 import { invoke } from '@tauri-apps/api/core';
 import { usePairingActivity } from '../pairingActivity';
@@ -93,6 +95,7 @@ export function RemoteOwnerCeremony(props: {
     void run({ action: 'finalize', backup_words });
   };
   return <section ref={root} class="panel" aria-label="Set up your BitSov box" data-remote-owner>
+    <BoxIllustration />
     <h2>Set up your BitSov box</h2>
     <Show when={step() === 'start'}>
       <p>Choose a password once. This Mac will keep it protected by Touch ID so you can unlock your box after a restart.</p>
@@ -107,7 +110,7 @@ export function RemoteOwnerCeremony(props: {
       })}>Set up this box</button>
     </Show>
     <Show when={step() === 'compare'}>
-      <p class="sas-words" aria-label="Comparison words">{sas().join(' · ')}</p>
+      <PairWords words={sas()} />
       <h3>Do these match the box page?</h3>
       <p>Compare all four words, then tap Approve on the box page. These are comparison words, not your recovery phrase.</p>
       <button disabled={busy()} onClick={() => void run({ action: 'match' })}>Match (Touch ID)</button>

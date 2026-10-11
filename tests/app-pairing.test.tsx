@@ -210,19 +210,32 @@ describe('app shell pairing wiring', () => {
     expect(calls).not.toContain('fund_state');
   });
 
-  it('Reconnect recovers an already-paired remote connection instead of polling only', async () => {
+  it.each(['remote handshake limit or endpoint unavailable', 'remote_handshake_unavailable'])('Retry now recovers an already-paired remote connection: %s', async error => {
     let recovered = false;
     vi.stubGlobal('__TAURI_INTERNALS__', { invoke: (cmd: string) => {
-      if (cmd === 'node_status') return Promise.resolve({ ready: recovered, node_id: 'ef'.repeat(32), error: recovered ? null : 'remote handshake limit or endpoint unavailable' });
+      if (cmd === 'node_status') return Promise.resolve({ ready: recovered, node_id: 'ef'.repeat(32), error: recovered ? null : error });
       if (cmd === 'pairing_status') return Promise.resolve({ ...paired, remote: true });
       if (cmd === 'pairing_retry') { recovered = true; return Promise.resolve({ ...paired, remote: true }); }
       return Promise.reject(new Error('not available'));
     } });
     mount = document.createElement('div'); document.body.appendChild(mount);
     dispose = render(() => <App />, mount);
-    await vi.waitFor(() => expect(mount!.textContent).toContain('Reconnect'));
-    Array.from(mount.querySelectorAll('button')).find(b => b.textContent === 'Reconnect')!.click();
+    await vi.waitFor(() => expect(mount!.querySelector('[data-node-offline]')).not.toBeNull());
+    mount.querySelector<HTMLButtonElement>('[data-node-offline] button')!.click();
     await vi.waitFor(() => expect(mount!.querySelector('[data-gate="g6-remote-trust"]')).not.toBeNull());
+    expect(mount.querySelector('[data-node-offline]')).toBeNull();
+  });
+
+  it.each(['payment outcome unknown: connection lost', 'pairing proof did not verify'])('preserves a non-transport warning: %s', async error => {
+    vi.stubGlobal('__TAURI_INTERNALS__', { invoke: (cmd: string) => {
+      if (cmd === 'node_status') return Promise.resolve({ ready: false, node_id: null, error });
+      if (cmd === 'pairing_status') return Promise.resolve({ ...paired, remote: true });
+      return Promise.reject(new Error('not available'));
+    } });
+    mount = document.createElement('div'); document.body.appendChild(mount);
+    dispose = render(() => <App />, mount);
+    await vi.waitFor(() => expect(mount!.textContent).toContain(error));
+    expect(mount.querySelector('[data-node-offline]')).toBeNull();
   });
 
   it('shows the retry banner on a cold start without a node identity', async () => {
@@ -234,6 +247,9 @@ describe('app shell pairing wiring', () => {
     mount = document.createElement('div'); document.body.appendChild(mount);
     dispose = render(() => <App />, mount);
     await vi.waitFor(() => expect(mount!.querySelector('[data-first-run]')?.textContent).toContain('42'));
+    expect(mount.querySelector('[data-node-offline]')?.textContent).toContain('Your box is offline');
+    expect(mount.querySelector('[data-node-offline]')?.textContent).toContain('Last seen: unknown');
+    expect(mount.querySelector('[data-node-offline] button')?.textContent).toBe('Retry now');
     expect(mount.textContent).not.toContain('Node stopped');
     expect(mount.querySelector('[data-composer-bar]')).toBeNull();
   });
@@ -275,7 +291,10 @@ describe('app shell pairing wiring', () => {
         expect(mount.querySelector('[data-composer-bar]')).toBe(composer);
         expect(mount.querySelector('[data-ob-head]')).toBeNull();
         expect(mount.textContent).not.toContain('Node stopped');
-        if (remaining) expect(mount.textContent).toContain(`waiting ${remaining} s`);
+        if (remaining) {
+          expect(mount.textContent).toContain(`waiting ${remaining} s`);
+          expect(mount.querySelector('[data-node-offline] time')).not.toBeNull();
+        } else expect(mount.querySelector('[data-node-offline]')).toBeNull();
       }
       expect(onboardingMounted).toBe(false);
     } finally { observer.disconnect(); }

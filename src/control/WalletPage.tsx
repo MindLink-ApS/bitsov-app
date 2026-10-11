@@ -1,3 +1,4 @@
+import { SettledPayment } from './SettledPayment';
 import { SoftError } from './SoftError';
 import { DelayedSpinner } from './DelayedSpinner';
 /**
@@ -15,7 +16,7 @@ import { copyPlainText } from '../assistant/copy';
 import { amount as fmtAmount, allIn, clock, day, routingFee, sats, satUnit, shortId } from './format';
 import { amountText, inPaymentBounds, MAX_PAYMENT_MSAT, MIN_PAYMENT_MSAT, parseAmount } from './amountInput';
 import { denom } from './prefs';
-import type { CustodyMode, FundingAddress, InvoiceAmount, InvoiceStatus, InvoiceView, Message, SpendView, WalletOverview } from './types';
+import type { CustodyMode, FundingAddress, InvoiceAmount, InvoiceStatus, InvoiceView, Message, PaymentReceipt, SpendView, WalletOverview } from './types';
 import { CustodyBadgeView } from './custody';
 import { spendLine } from './state';
 import {
@@ -31,8 +32,8 @@ export type WalletTab = 'activity' | 'channels' | 'receive' | 'send';
 /** The composer's own money actions, bound to the Wallet's receipts. */
 export type WalletActions = {
   readInvoice: (bolt11: string) => Promise<Outcome<InvoiceAmount>>;
-  pay: (bolt11: string, msat: number) => Promise<Outcome<unknown>>;
-  keysend: (pubkey: string, msat: number, memo: string) => Promise<Outcome<unknown>>;
+  pay: (bolt11: string, msat: number) => Promise<Outcome<PaymentReceipt>>;
+  keysend: (pubkey: string, msat: number, memo: string) => Promise<Outcome<PaymentReceipt>>;
   invoice: (msat: number, note: string) => Promise<Outcome<unknown>>;
   /** The one tap that asks the node to open the ten-minute window. Pays nothing. */
   approve: () => Promise<void>;
@@ -477,10 +478,11 @@ function ReceiveView(props: { moneyBlocked: boolean; actions: WalletActions; rea
     if (r.ok) setInvoice(r.value as InvoiceView);
     else setError(r.error.message);
   };
+  const received = () => loggedActivity().find(a => a.kind === 'invoice' && a.bolt11 === invoice()?.bolt11);
   const status = () => {
     const inv = invoice();
     if (!inv) return null;
-    const logged = loggedActivity().find((a) => a.kind === 'invoice' && a.bolt11 === inv.bolt11);
+    const logged = received();
     return logged ? statusWords(logged, props.now) : 'Waiting to be paid';
   };
   const uri = () => {
@@ -543,8 +545,12 @@ function ReceiveView(props: { moneyBlocked: boolean; actions: WalletActions; rea
         <Show when={invoice()}>
           {(inv) => (
             <div class="wallet-request" data-receive-invoice data-receive-status={status() ?? ''}>
-              <QR value={inv().bolt11.toUpperCase()} label="Lightning invoice as a QR code" />
-              <span class="wallet-request-amount">{fmtAmount(inv().amount_msat)}</span>
+              <Show when={received()?.status === 'paid'} fallback={<>
+                <QR value={inv().bolt11.toUpperCase()} label="Lightning invoice as a QR code" />
+                <span class="wallet-request-amount">{fmtAmount(inv().amount_msat)}</span>
+              </>}>
+                <SettledPayment direction="received" msat={received()?.msat ?? null} />
+              </Show>
               <span class="wallet-status" classList={{ ok: status() === 'Received' }} data-receive-state>{status()}</span>
               <code class="address" data-bolt11>{inv().bolt11}</code>
               <div class="row wallet-request-actions">
@@ -575,7 +581,7 @@ function SendView(props: { moneyBlocked: boolean; spend: SpendView | null; spend
   const [readError, setReadError] = createSignal<string | null>(null);
   const [review, setReview] = createSignal<Review | null>(null);
   const [busy, setBusy] = createSignal(false);
-  const [result, setResult] = createSignal<{ ok: boolean; text: string } | null>(null);
+  const [result, setResult] = createSignal<{ ok: boolean; text: string; settledMsat?: number } | null>(null);
   const line = () => spendLine(props.spend, props.now);
   const recipient = () => readRecipient(to());
   const msat = () => typedMsat(amount());
@@ -649,7 +655,13 @@ function SendView(props: { moneyBlocked: boolean; spend: SpendView | null; spend
       setMemo('');
       setAmount('');
       // After the edits above, which clear any earlier result.
-      setResult({ ok: true, text: `Paid ${fmtAmount(rv.msat)}. The network fee was at most ${fmtAmount(routingFee(rv.msat))}.` });
+      const receipt = r.value;
+      if (receipt.status === 'settled') {
+        const knownFee = receipt.fee_paid_msat !== undefined && Number.isSafeInteger(receipt.fee_paid_msat) && receipt.fee_paid_msat >= 0;
+        setResult({ ok: true, settledMsat: receipt.amount_msat, text: knownFee ? `Network fee: ${fmtAmount(receipt.fee_paid_msat!)}.` : 'Network fee: unknown.' });
+      } else {
+        setResult({ ok: receipt.status !== 'failed', text: receipt.status === 'failed' ? 'Payment failed.' : 'Payment in progress. Settlement is not confirmed yet.' });
+      }
     } else {
       setResult({ ok: false, text: r.error.message });
     }
@@ -740,7 +752,10 @@ function SendView(props: { moneyBlocked: boolean; spend: SpendView | null; spend
       </Show>
       <Show when={busy()}><p class="hint" data-send-paying>Paying…</p></Show>
       <Show when={result()}>
-        {(r) => <p class={r().ok ? 'ok-note' : 'err-note'} data-send-result={r().ok ? 'ok' : 'failed'}>{r().text}</p>}
+        {(r) => <div data-send-result={r().ok ? 'ok' : 'failed'}>
+          <Show when={r().settledMsat !== undefined}><SettledPayment direction="sent" msat={r().settledMsat!} /></Show>
+          <p class={r().ok ? 'hint' : 'err-note'} role="status">{r().text}</p>
+        </div>}
       </Show>
     </section>
   );
