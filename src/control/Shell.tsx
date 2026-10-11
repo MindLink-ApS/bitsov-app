@@ -229,6 +229,7 @@ export type Actions = {
   /** Place a call after the price was shown. */
   placeCall: (peer: string, media: CallMedia, quote: CallQuote) => void;
   callActive: () => boolean;
+  callView?: () => CallView;
   /** Open the meeting planner with this contact picked. Pays nothing. */
   planMeeting: (peer: string) => void;
 };
@@ -932,6 +933,7 @@ export function ControlCenter(props: Props) {
     moneyBlocked,
     callQuote: (peer) => act(() => source.callQuote(peer)),
     placeCall: (peer, media, quote) => { if (!moneyBlocked()) void calls.place(peer, media, quote); },
+    callView,
     callActive: () => !['idle', 'ended'].includes(callView().phase) || meetingOn(),
     // Opens the planner; the contact is pre-picked only if their node takes meetings.
     planMeeting: (peer) => {
@@ -2473,7 +2475,7 @@ function CallNetworkNote() {
 
 /**
  * Call and video buttons. The price is read (never paid) first and shown on
- * the button: the offer to this contact plus one hangup, all-in.
+ * the button: offer + hangup, with room for one fresh admission on recovery.
  */
 function CallButtons(props: { peer: string; name: string; blocked: boolean; actions: Actions }) {
   const [quote, setQuote] = createSignal<CallQuote | null>(null);
@@ -2489,12 +2491,12 @@ function CallButtons(props: { peer: string; name: string; blocked: boolean; acti
   }));
   const cost = () => {
     const q = quote();
-    return q && callCost(q) !== null ? callCost(q)! : null;
+    return q && callCost(q) !== null ? 2 * callCost(q)! : null;
   };
   const off = () => props.blocked || cost() === null || props.actions.callActive();
   const title = () =>
     why() ?? (quote() && cost() === null ? `${props.name}’s node does not take calls yet` : cost() !== null
-      ? `Up to ${fmtAmount(cost()!)}: ${fmtAmount(quote()!.offer_msat! + quote()!.offer_max_routing_fee_msat)} to ring (their call price plus ${feeCeiling(quote()!.offer_max_routing_fee_msat)}), then ${fmtAmount(signalCost(quote()!))} to hang up. Media goes directly between you; it is not billed. ${stunPref() ? `Uses your STUN server ${stunPref()} to find a route.` : 'No STUN server is set, so calls connect only on the same network (Settings).'}`
+      ? `Up to ${fmtAmount(cost()!)}: ${fmtAmount(quote()!.offer_msat! + quote()!.offer_max_routing_fee_msat)} to ring (their call price plus ${feeCeiling(quote()!.offer_max_routing_fee_msat)}), then ${fmtAmount(signalCost(quote()!))} to hang up. Includes up to ${fmtAmount(callCost(quote()!)!)} more for one automatic recovery (another admission and hangup). Media goes directly between you; it is not billed. ${stunPref() ? `Uses your STUN server ${stunPref()} to find a route.` : 'No STUN server is set, so calls connect only on the same network (Settings).'}`
       : 'Reading their call price…');
   const place = (media: CallMedia) => { const q = quote(); if (q && !off()) props.actions.placeCall(props.peer, media, q); };
   return (
@@ -2513,7 +2515,7 @@ function CallButtons(props: { peer: string; name: string; blocked: boolean; acti
 }
 
 const CALL_TITLE: Record<CallView['phase'], string> = {
-  idle: '', calling: 'Calling', ringing: 'Ringing', incoming: 'Incoming call', connecting: 'Connecting', live: 'On call', ended: 'Call ended',
+  idle: '', calling: 'Calling', ringing: 'Ringing', incoming: 'Incoming call', connecting: 'Connecting', live: 'On call', reconnecting: 'Reconnecting…', ended: 'Call ended',
 };
 const END_REASON: Record<string, string> = {
   hangup: 'Hung up', declined: 'Declined', busy: 'Busy', timeout: 'No answer', failed: 'Connection failed',
@@ -2547,7 +2549,7 @@ function CallPanel(props: {
   const [tick, setTick] = createSignal(Date.now());
   const [answer, setAnswer] = createSignal<number | null>(null);
   createEffect(() => {
-    if (props.view.phase !== 'live') return;
+    if (!['live', 'reconnecting'].includes(props.view.phase)) return;
     const t = setInterval(() => setTick(Date.now()), 1000);
     onCleanup(() => clearInterval(t));
   });
@@ -2562,15 +2564,16 @@ function CallPanel(props: {
     <Show when={v().phase !== 'idle' || props.approvalOpen}>
       <aside ref={props.panelRef} tabindex="-1" class="call-panel" data-call-panel={v().phase} role="dialog" aria-label={props.approvalOpen ? 'Call spending approval' : `${CALL_TITLE[v().phase]} ${who()}`}>
         <header>
-          <strong data-call-title>{CALL_TITLE[v().phase]}{v().media === 'video' ? ' (video)' : ''}</strong>
+          <strong data-call-title aria-live="polite">{CALL_TITLE[v().phase]}{v().media === 'video' ? ' (video)' : ''}</strong>
           <span class="who">{who()}</span>
-          <Show when={v().phase === 'live' && v().liveAt}>
+          <Show when={(v().phase === 'live' || v().phase === 'reconnecting') && v().liveAt !== null}>
             <span class="duration" data-call-duration>{duration(Math.max(0, tick() - v().liveAt!))}</span>
           </Show>
         </header>
         {props.approval}
         <CallNetworkNote />
-        <Show when={v().media === 'video' && (v().phase === 'live' || v().phase === 'connecting')}>
+        <p class="hint" data-call-recovery-note>A network interruption may trigger one paid recovery attempt within your budget. Recovery uses another call admission and signalling fees.</p>
+        <Show when={v().media === 'video' && (v().phase === 'live' || v().phase === 'connecting' || v().phase === 'reconnecting')}>
           <div class="call-videos">
             <MediaView stream={props.streams.remote} video muted={false} kind="remote" />
             <MediaView stream={props.streams.local} video muted kind="local" />
@@ -2601,7 +2604,7 @@ function CallPanel(props: {
               <button type="button" class="soft" data-call-dismiss onClick={() => props.dismiss()}>Close</button>
             </Match>
             <Match when={v().phase !== 'idle'}>
-              <Show when={v().phase === 'live' || v().phase === 'connecting'}>
+              <Show when={v().phase === 'live' || v().phase === 'connecting' || v().phase === 'reconnecting'}>
                 <button type="button" class="soft" data-call-mute aria-pressed={v().muted} onClick={() => props.mute()}>Mute</button>
                 <Show when={v().media === 'video'}>
                   <button type="button" class="soft" data-call-camera aria-pressed={v().camera} onClick={() => props.camera()}>Camera</button>
