@@ -372,7 +372,10 @@ export function streamItems(messages: Message[], artifacts: Artifact[]): StreamI
     ...messages.map((message) => ({ type: 'message' as const, at: message.timestamp, key: message.timestamp, message })),
     ...artifacts.map((artifact) => ({ type: 'artifact' as const, at: artifact.at, key: sortAt(artifact), artifact })),
   ];
-  return items.sort((a, b) => a.key - b.key).map(({ key: _key, ...item }) => item as StreamItem);
+  // Messages still sending stay last, in the order pressed, until they settle:
+  // a settled message never jumps behind a later pending one.
+  const pending = (i: StreamItem) => i.type === 'artifact' && i.artifact.type === 'sending';
+  return items.sort((a, b) => Number(pending(a)) - Number(pending(b)) || a.key - b.key).map(({ key: _key, ...item }) => item as StreamItem);
 }
 
 /** The composer's spend line. */

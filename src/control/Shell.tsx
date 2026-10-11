@@ -3049,7 +3049,7 @@ function ArtifactView(props: { moneyBlocked: boolean; a: Artifact; delivery?: De
         {(a) => {
           const m = () => a() as Extract<Artifact, { type: 'sending' }>;
           return (
-            <article class="msg out sending fresh" data-sending aria-busy="true">
+            <article class="msg out sending" data-sending aria-busy="true">
               <div class="bubble">{m().text}</div>
               <div class="stamp">
                 <span class="sats" data-sending-cap={m().capMsat}>Sending · up to {fmtAmount(m().capMsat)}</span>
@@ -3214,6 +3214,8 @@ function UndeliveredView(props: {
 
 /** The draft was paid for: it now lives on the undelivered card, not in the composer. */
 const paidUndelivered = (r: Outcome<unknown>) => !r.ok && r.error.code === 'payment_settled_undelivered';
+/** Outcomes where sats may have moved or the result is not known: never "try again". */
+const UNSETTLED = new Set(['spend_unknown', 'payment_unknown', 'failed_paid', 'payment_settled_undelivered', 'room_partial']);
 
 const kb = (bytes: number) => (bytes < 1024 ? `${bytes} B` : `${(bytes / 1024).toFixed(bytes < 10_240 ? 1 : 0)} KB`);
 
@@ -3428,6 +3430,24 @@ function Composer(props: {
   // second Send while the first is in flight queues behind it instead of
   // being ignored. Each keeps the ceiling it was pressed on.
   let sendChain: Promise<void> = Promise.resolve();
+  // What one settled send means for the text the owner typed. Only a
+  // confirmed-unpaid refusal gives the text back with "try again"; an unknown
+  // or (partly) paid outcome never does: no new double-send path.
+  const [sendLive, setSendLive] = createSignal('');
+  const giveBack = (r: Outcome<unknown>, text: string): 'restored' | 'quoted' | 'unknown' | 'paid' | null => {
+    if (r.ok) return null;
+    if (UNSETTLED.has(r.error.code)) return paidUndelivered(r) ? 'paid' : 'unknown';
+    // Never drop text: back into an empty box, else quoted in the note.
+    if (!draft()) { setDraft(text); return 'restored'; }
+    return draft() === text ? 'restored' : 'quoted';
+  };
+  const tellSettled = (r: Outcome<unknown>, text: string, outcome: ReturnType<typeof giveBack>) => {
+    const q = `“${text.length > 80 ? `${text.slice(0, 80)}…` : text}”`;
+    if (outcome === 'restored' && !note()) setNote('Not sent. Your message is back in the box; press Send to try again.');
+    if (outcome === 'quoted') setNote(`Not sent: ${q}. It is not back in the box because you started a new message.${note() ? ` ${note()}` : ''}`);
+    if (outcome === 'unknown') setNote(`The payment result for ${q} is not known yet. Check pending result before sending it again.`);
+    setSendLive(r.ok ? 'Message sent.' : outcome === 'paid' ? 'Paid, not delivered.' : outcome === 'unknown' ? 'Message payment result unknown.' : 'Message not sent.');
+  };
   // Going offline invalidates undispatched approvals, not unchanged inputs
   // belonging to an operation that already reached the host and succeeds.
   let approvalRevision = 0;
@@ -3928,8 +3948,7 @@ function Composer(props: {
       const unchanged = composerRevision === submittedRevision;
       // Text back first: editing the draft clears the paid line, and an
       // unknown payment result must stay on screen.
-      const restore = submittedMode === 'message' && !r.ok && !paidUndelivered(r);
-      if (restore && unchanged && !draft()) setDraft(submittedText);
+      const outcome = submittedMode === 'message' ? giveBack(r, submittedText) : null;
       if (unchanged && submittedMode === 'message') {
         paymentResult(r);
         if (!r.ok && ['price_changed', 'price_cap_exceeded'].includes(r.error.code)) { setRaisedFrom(cap); setReadmitQuote(null); }
@@ -3944,7 +3963,6 @@ function Composer(props: {
         if (target() === submittedPeer) setDoor(null);
         setReadmitFor(submittedPeer);
       }
-      if (restore && draft() !== submittedText && submittedText.trim()) setNote(`Not sent: “${submittedText.length > 80 ? `${submittedText.slice(0, 80)}…` : submittedText}”. It is not back in the box because you started a new message.`);
       if ((r.ok || paidUndelivered(r)) && composerRevision === submittedRevision) {
         if (submittedMode === 'file') {
           setFile(null);
@@ -3958,7 +3976,7 @@ function Composer(props: {
         setNote(r.error.message);
       } else if (!r.ok && unchanged && (isBudgetStop(r.error) || ['owner_only', 'owner_contact_unavailable'].includes(r.error.code))) setNote(r.error.message);
       // A clear state with a way on: the text is back, Send is the retry.
-      if (restore && draft() === submittedText && !note()) setNote('Not sent. Your message is back in the box; press Send to try again.');
+      if (submittedMode === 'message') tellSettled(r, submittedText, outcome);
       };
       if (first !== undefined && !room()) {
         const request = await props.actions.ownerRequest(submittedPeer, cap, first);
@@ -4040,18 +4058,16 @@ function Composer(props: {
           const r = await props.actions.send(t, text, cap, undefined, bubble);
           // Text back first: editing the draft clears the paid line, and an
           // unknown payment result must stay on screen.
-          const restore = !r.ok && !paidUndelivered(r);
-          if (restore && unchanged() && !draft()) setDraft(text);
+          const outcome = giveBack(r, text);
           if (unchanged()) {
             paymentResult(r);
             if (!r.ok && ['price_changed', 'price_cap_exceeded'].includes(r.error.code)) { setRaisedFrom(cap); setReadmitQuote(null); }
           }
           if (r.ok && readmitQuote()?.peer === peer) setReadmitQuote(null);
           if (!r.ok && r.error.code === 'readmission_quoted' && r.error.admission) setReadmitQuote({ peer, price: r.error.admission });
-          if (restore && draft() !== text && text.trim()) setNote(`Not sent: “${text.length > 80 ? `${text.slice(0, 80)}…` : text}”. It is not back in the box because you started a new message.`);
           if (!r.ok && unchanged() && isBudgetStop(r.error)) setNote(r.error.message);
           // A clear state with a way on: the text is back, Send is the retry.
-          if (restore && draft() === text && !note()) setNote('Not sent. Your message is back in the box; press Send to try again.');
+          tellSettled(r, text, outcome);
         };
         const run = sendChain.then(go);
         sendChain = run.catch(() => {});
@@ -4423,6 +4439,7 @@ function Composer(props: {
       <Show when={mode() === 'message'}>
         <div class="send-price" classList={{ priced: !priceProblem() && (paidLine() !== null || messageShown().msat !== null) }}>
           <span data-send-price aria-live="polite">{priceLine()}</span>
+          <span class="sr-only" role="status" aria-live="polite" data-send-live>{sendLive()}</span>
           <Show when={priceProblem() && priceProblem() !== 'price loading…'}>
             {' '}<button type="button" class="link" data-price-retry disabled={busy()} onClick={() => {
               if (doorWanted() && door()) setDoor(null);

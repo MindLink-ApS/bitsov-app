@@ -113,4 +113,67 @@ describe('optimistic send', () => {
     pending[1].settle(receipt('m2', A));
     await vi.waitFor(() => expect(sending()).toHaveLength(0));
   });
+
+  it.each(['payment_unknown', 'spend_unknown', 'failed_paid', 'room_partial'])('never gives the text back or says try again after %s', async (code) => {
+    const { source, pending } = deferredSource();
+    await open(source);
+    await press('maybe paid');
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    pending[0].fail({ code, message: 'Outcome unknown.' });
+    await vi.waitFor(() => expect(sending()).toHaveLength(0));
+    expect(area().value).toBe('');
+    await vi.waitFor(() => expect($('[data-composer-note]')?.textContent).toContain('Check pending result before sending it again'));
+    expect(mount.textContent).not.toMatch(/press Send to try again/);
+    expect($('[data-send-live]')?.textContent).toBe('Message payment result unknown.');
+  });
+
+  it('never drops text: a queued second message plus a cheap failure of the first quotes the first', async () => {
+    const { source, pending } = deferredSource();
+    await open(source);
+    await press('first text');
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    await press('second text');
+    type('third, still typing');
+    pending[0].fail({ code: 'price_changed', message: 'The price changed. Nothing was sent.' });
+    await vi.waitFor(() => expect($('[data-composer-note]')?.textContent).toContain('Not sent: “first text”'));
+    expect(area().value).toBe('third, still typing');
+  });
+
+  it('a cheap failure while the box is empty puts the text back even after a queued send', async () => {
+    const { source, pending } = deferredSource();
+    await open(source);
+    await press('alpha');
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    await press('beta');
+    // The box is empty again (beta went into the queue): alpha comes back.
+    pending[0].fail({ code: 'price_changed', message: 'Nothing was sent.' });
+    await vi.waitFor(() => expect(area().value).toBe('alpha'));
+    expect($('[data-send-live]')?.textContent).toBe('Message not sent.');
+  });
+
+  it('keeps pending messages last, in the order pressed, while an earlier one settles', async () => {
+    const { source, pending } = deferredSource();
+    await open(source);
+    await press('one');
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    await press('two');
+    // Settle 'one' with a later clock than 'two' was pressed at.
+    pending[0].settle({ ...receipt('m1', A), sent_at_ms: Date.now() + 60_000 });
+    await vi.waitFor(() => expect(pending).toHaveLength(2));
+    const order = () => [...mount.querySelectorAll('.msg.out .bubble')].map((b) => b.textContent).filter((t) => t === 'one' || t === 'two');
+    await vi.waitFor(() => expect(order()).toEqual(['one', 'two']));
+    expect(sending().map((b) => b.querySelector('.bubble')?.textContent)).toEqual(['two']);
+  });
+
+  it('plays no settle flash on a pending bubble and announces the outcome politely', async () => {
+    const { source, pending } = deferredSource();
+    await open(source);
+    await press('quiet');
+    await vi.waitFor(() => expect(sending()).toHaveLength(1));
+    expect(sending()[0].classList.contains('fresh')).toBe(false);
+    const live = $('[data-send-live]')!;
+    expect(live.getAttribute('aria-live')).toBe('polite');
+    pending[0].settle(receipt('m1', A));
+    await vi.waitFor(() => expect(live.textContent).toBe('Message sent.'));
+  });
 });
