@@ -195,3 +195,31 @@ changes.
   paired token) and `tests/onboarding-assistant-e2e.test.tsx` (window: steps
   through pending → paired, then the first answer with its freshness label).
   See `docs/ASSISTANT_LOCAL_BROKER.md` → Tests.
+
+### Add another owner device (node #301)
+
+On an enrolled owner device connected to a home node, open **Settings → Devices →
+Add a device**. Approve ticket creation with Touch ID (biometrics on Android).
+The screen shows a one-use QR/link valid for five minutes. Older nodes do not
+show the action; an ordinary pairing cannot issue tickets or delegate ownership.
+
+On a fresh install, choose the home-node path and scan or paste that ticket.
+Review the node and choose **Use remote node**, then reopen the app as directed
+by the existing remote-pairing flow. Enter the physical claim code from the box
+sticker or trusted console. The ticket does not replace that code. Device-key
+creation and possession proofs use the existing hardware-backed approval path.
+Place the devices together, compare all four words in order, and approve on the
+existing owner device. If they differ, close the ticket and cancel enrollment
+on the new device. Closing a ticket screen does not revoke an unconsumed ticket;
+it expires at the node after five minutes.
+
+Enrollment uses one pinned Noise transcript through SAS finalization. The owner
+host validates and re-reads the exact SAS-bound v2 delegation before asking for
+its signature. No legacy delegation fallback is used. Expiry, revocation and
+single use remain node-enforced. An enrollment can last up to 15 minutes after
+ticket consumption. If its initial reply is lost, the app cannot recover the
+unknown operation id: wait for that request to expire before starting again.
+
+Keep another owner device, including a Mac or another non-phone device.
+Enrollment does not transfer the node's unlock password. This flow uses two
+main-window-only host commands; assistant windows cannot issue or approve tickets.

@@ -1055,6 +1055,8 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
       wants.budget = null;
       return ok(spend);
     },
+    addDevice: () => ok({state:'unsupported'} as const),
+    joinDevice: () => ok({state:'idle'} as const),
     deviceKeyStatus: () => {
       if (device.state === 'pending' && ++devicePolls >= GRANT_AFTER_POLLS) {
         device = { ...device, state: 'registered', owner_action: null, expires_at_ms: null };
