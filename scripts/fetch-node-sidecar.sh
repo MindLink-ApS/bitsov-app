@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Fetch + VERIFY the pinned, signed BitSov node binary and place it as the Tauri
 # sidecar for this host. The node binary is NEVER committed (Gate G1: bundled binary,
-# fetched + verified, not vendored). v0.3.0-rc13 publishes Linux, macOS and Windows node
+# fetched + verified, not vendored). v0.3.0-rc14 publishes Linux, macOS and Windows node
 # binaries, so all three hosts can produce a sidecar. Release assets carry no .exe suffix
 # on any host; only the installed Windows sidecar is renamed to .exe (Tauri's resolver).
-# rc13 is published with GPG-signed checksums. Fetch requires release access and
+# rc14 is published with GPG-signed checksums. Fetch requires release access and
 # both SHA256SUMS and SHA256SUMS.asc; missing assets fail closed. Nothing here publishes it.
 #
 # Verification is fail-closed, in two steps:
@@ -28,9 +28,17 @@
 # verify_release_signature against local test keys, including every refusal class above.
 set -euo pipefail
 
-TAG="v0.3.0-rc13"
+TAG="v0.3.0-rc14"
 REPO="MindLink-ApS/BitSov-bitsov"
 KEY_FPR="B299274C200301714DC6F51A7C2D6F8AC842EF6E"
+
+# Expected rc14 SHA256SUMS entries supplied for this pin (not locally verified).
+# Runtime verification below still authenticates the signed release manifest.
+# 1b8fdecb87a308aff657a476eb92c5b100496c64076e90a45e3bee0fb2301305  bitsov-darwin-aarch64
+# f75bb56fca4b5e7bad998cfab1b4b775a863108c0520710b006a9ea78ff64f63  bitsov-darwin-x86_64
+# 6d11b992b939ca0c6ee058e0b82c26ab8dc1ab96b1f61d1e049bef6685fb310c  bitsov-linux-aarch64
+# 07b0ace79c362c5d30431b47856e7ca3bb9515b73aa37a0c342988dd70849e78  bitsov-linux-x86_64
+# 5f8e80990b603e334e574a585217edeb23de70873b2ea4701317fa533ca33a19  bitsov-windows-x86_64
 
 # GNU coreutils on Linux, perl shasum on macOS; same check either way.
 sha256_of()    { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1"; else shasum -a 256 "$1"; fi | awk '{print $1}'; }

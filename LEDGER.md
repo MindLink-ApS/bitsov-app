@@ -5,13 +5,14 @@ Dated ticket rows. Each row: id | opened | evidence | state.
 
 ## Active (this cycle)
 
-Current change: rc13 pin (`d625e85`) from rc12 (`41b9e78`, app #178).
-The supplied release facts identify rc13 as published and GPG-signed. Manifest
-and binary hashes are recorded without fetching or local release verification.
-[NODE_RC13_UPGRADE.md](docs/NODE_RC13_UPGRADE.md) records the node additions and
-app integration limits. Remote first run is implemented on main (app #192 +
-node rc13); runtime acceptance on real hardware (Touch ID + a fresh Pi) is still
-pending. The September workflow rows below are historical.
+Current change: rc14 pin (`d55a88e`) from rc13 (`d625e85`, app #193).
+The supplied release facts identify rc14 as published and GPG-signed. All five
+binary hashes are recorded without fetching or local release verification.
+[NODE_RC14_UPGRADE.md](docs/NODE_RC14_UPGRADE.md) records pairing v6, grant
+breakers, console recovery, LAN limits and CLN's receive/read-only preview.
+Tagged node source confirms unchanged full-tier LDK bootstrap defaults. Remote
+first run is implemented on main (app #192 + node rc13); runtime acceptance on
+real hardware remains pending. The September workflow rows below are historical.
 
 | id | opened | evidence | state |
 |---|---|---|---|
@@ -27,6 +28,7 @@ pending. The September workflow rows below are historical.
 | Jarvis SIT mock | 2026-09-26 | #29 `91f20c8` SIT reader; #30 `66c57bf` mock rows in the assistant window | landed |
 | Jarvis J1–J4 + J0 isolation | 2026-09-25 | #21 `8cc34eb` J1; #22 `3543229` J2; #20 `61dd969` J3; #26 `dbd3d9e` J4; #27 `32c49bc` J4 review; #24 `612b330` J0 macOS isolation spike | landed |
 | APP-16 quit stops node | 2026-09-18 | #17 `0190baa` (fixes #16) | landed |
+| APP-RC13 | 2026-10-08 | #193 `9f10373`; rc13 pin (`d625e85`), supplied hashes and bootstrap defaults aligned | landed |
 | APP-RC12 | 2026-10-07 | #178 `a20bf2c`; rc12 pin (`41b9e78`), expected hashes and source review recorded in that change | landed |
 | APP-RC11 | 2026-10-07 | #174 `81ee030`; rc11 pin (`834968b`), signed manifest and Darwin arm64 bytes verified in that change | landed |
 | APP-RC9 | 2026-10-06 | #160 `fb2ce6f`; rc9 pin (`cd75c69`) and gated bundled local owner ceremony | landed |
@@ -40,9 +42,9 @@ pending. The September workflow rows below are historical.
 
 | id | opened | evidence | state |
 |---|---|---|---|
-| rc13 acceptance | 2026-10-08 | published and GPG-signed per supplied facts; signature/bytes, Sidecar/Mac Package and runtime acceptance pending | human / CI |
+| rc14 acceptance | 2026-10-11 | published and GPG-signed per supplied facts; signature/bytes, Sidecar/Mac Package and runtime acceptance pending | human / CI |
 | #25 / #13 / #23 | — | J0 model eval spike (draft); Mac package spike (CONFLICTING); Windows icon | open, Rasmus's call |
-| Publish | — | human-only; rc13 release is published and GPG-signed per supplied facts; app unpublished; package-time sidecar verification and platform release gates remain open | hold |
+| Publish | — | human-only; rc14 release is published and GPG-signed per supplied facts; app unpublished; package-time sidecar verification and platform release gates remain open | hold |
 | PriceOpen | — | out of lane | hold |
 | Live relay | — | out of lane | hold |
 | Cloud/seed | — | out of lane | hold |
