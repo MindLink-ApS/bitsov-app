@@ -706,7 +706,13 @@ export type Artifact =
    * record this card is about.
    */
   | { id: string; at: number; type: 'undelivered'; ownerApproval?: OwnerContactApproval | null; text: string; paid: Undelivered; note: string | null; admission: AdmissionPrice | null; pendingId: string | null }
-  | { id: string; at: number; type: 'door'; door: DoorCard };
+  | { id: string; at: number; type: 'door'; door: DoorCard }
+  /**
+   * A message on its way: shown the moment Send is pressed, replaced by the
+   * real message when the send settles (or by its failure card). `capMsat` is
+   * the ceiling the owner pressed Send on, never a paid amount.
+   */
+  | { id: string; at: number; type: 'sending'; text: string; capMsat: number };
 
 /**
  * The membrane in the stream: a first contact admitted at your door, a verified

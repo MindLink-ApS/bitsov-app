@@ -1292,3 +1292,8 @@ input[type='checkbox'], input[type='radio'] { width: auto; flex: none; padding: 
   .box-illustration.paired { animation: state-fade 0.01ms; filter: none; }
   .settled-check, .settled-amount, .box-illustration.paired + .touchid-text { animation: none; }
 }
+
+/* Optimistic send: the message is in the stream at once; the ceiling is
+   shown until it settles (never as paid). */
+.msg.sending .bubble { opacity: 0.72; }
+.msg.sending .stamp .sats { color: var(--muted); }

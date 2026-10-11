@@ -12,7 +12,7 @@ import { readSpendPreset, saveSpendPreset } from './prefs';
 import { WelcomeHome } from './WelcomeHome';
 import { DelayedSpinner } from './DelayedSpinner';
 import { MONEY_NOT_READY, readinessLine, readinessSource } from './readiness';
-import { createEffect, createMemo, createResource, createSignal, For, type JSX, Match, on, onCleanup, onMount, Show, Switch, untrack } from 'solid-js';
+import { batch, createEffect, createMemo, createResource, createSignal, For, type JSX, Match, on, onCleanup, onMount, Show, Switch, untrack } from 'solid-js';
 import { createStore, produce, reconcile } from 'solid-js/store';
 import { qrSvg } from '../qr';
 import type { Proposal } from './ai';
@@ -198,7 +198,9 @@ export type Actions = {
   setBudget: (target: string, room: boolean, limitMsat: number) => Promise<Outcome<unknown>>;
   pauseAll: () => Promise<void>;
   resume: () => Promise<void>;
-  send: (t: TrackRef, text: string, maxMsat: number, firstContactMsat?: number) => Promise<Outcome<unknown>>;
+  send: (t: TrackRef, text: string, maxMsat: number, firstContactMsat?: number, sendingId?: string) => Promise<Outcome<unknown>>;
+  /** Puts a message in the stream as "Sending · up to N" before its send runs; `send` replaces it. */
+  beginSending: (t: TrackRef, text: string, capMsat: number) => string;
   /**
    * Retry a paid, undelivered message through its own journal record. With
    * `approvedMsat`, the owner approved that price because admission may be due again.
@@ -763,7 +765,10 @@ export function ControlCenter(props: Props) {
     const key = trackKey(t);
     const full = { id: `local-${artifactSeq++}`, at: artifact.at ?? Date.now(), ...artifact } as Artifact;
     setArtifacts(key, (old) => [...(old ?? []), full]);
+    return full.id;
   };
+  const dropArtifact = (t: TrackRef, id: string) =>
+    setArtifacts(trackKey(t), (old) => (old ?? []).filter((x) => x.id !== id));
   // The Wallet's history of payments and invoices made here (the node lists neither).
   createEffect(() => {
     const entries: LoggedActivity[] = [];
@@ -1041,16 +1046,25 @@ export function ControlCenter(props: Props) {
     ownerRequest: (peer, cap, budget) => act(() => source.firstContactRequest(peer, cap, budget)),
     ownerStatus: (id) => act(() => source.firstContactStatus(id)),
     ownerCancel: (id) => source.firstContactCancel(id).catch(() => {}),
-    send: async (t, text, maxMsat, firstContactMsat) => {
+    beginSending: (t, text, capMsat) => addArtifact(t, { type: 'sending', text, capMsat }),
+    send: async (t, text, maxMsat, firstContactMsat, pendingBubble) => {
       if (t.kind !== 'peer' && t.kind !== 'room') return { ok: false, error: { code: 'invalid', message: 'nothing to send to' } };
-      const r = await act(() => source.send(t.id, t.kind === 'room', text, maxMsat, t.kind === 'room' ? Object.fromEntries((roomQuote()?.members ?? []).map((m) => [m.node_id, m.msat])) : undefined, firstContactMsat));
+      // Optimistic: the message shows at once as "Sending · up to N"; the
+      // settled message (or its failure card) replaces it below.
+      const sendingId = pendingBubble ?? addArtifact(t, { type: 'sending', text, capMsat: maxMsat });
+      const settled = await act(() => source.send(t.id, t.kind === 'room', text, maxMsat, t.kind === 'room' ? Object.fromEntries((roomQuote()?.members ?? []).map((m) => [m.node_id, m.msat])) : undefined, firstContactMsat));
+      const r = settled;
       // The tally moved, or a budget rule stopped the send: either way, re-read it.
       if (r.ok || isBudgetStop(r.error) || ['spend_unknown', 'payment_unknown', 'failed_paid', 'payment_settled_undelivered'].includes(r.error.code)) void loadBudget();
       // Approved another contact with Touch ID, not this one: offer the tap here.
       if (!r.ok && r.error.code === 'grant_no_envelope' && t.kind === 'peer') setNoEnvelopeFor(t.id);
       if (!r.ok && r.error.code === 'payment_settled_undelivered' && r.error.undelivered) {
         // Paid, not delivered: the draft moves here, with the only safe way to resend it.
-        addArtifact(t, { type: 'undelivered', text, paid: r.error.undelivered, note: null, admission: null, pendingId: r.error.pending_id ?? null });
+        const undelivered = r.error.undelivered;
+        batch(() => {
+          dropArtifact(t, sendingId);
+          addArtifact(t, { type: 'undelivered', text, paid: undelivered, note: null, admission: null, pendingId: r.error.pending_id ?? null });
+        });
         return r;
       }
       if (!r.ok && ['price_changed', 'price_cap_exceeded'].includes(r.error.code)) {
@@ -1059,8 +1073,11 @@ export function ControlCenter(props: Props) {
           if (track() && trackKey(track()!) === trackKey(t)) setRoomQuote(q);
         });
       }
-      if (r.ok) sentOne(t, r.value, text);
-      return recordFailure(t, !r.ok && r.error.code === 'room_partial' ? 'Room send incomplete' : 'Message not sent', r);
+      return batch(() => {
+        dropArtifact(t, sendingId);
+        if (r.ok) sentOne(t, r.value, text);
+        return recordFailure(t, !r.ok && r.error.code === 'room_partial' ? 'Room send incomplete' : 'Message not sent', r);
+      });
     },
     retryDelivery: async (t, artifactId, approvedMsat) => {
       if (moneyBlocked()) return { ok: false, error: { code: 'not_ready', message: MONEY_NOT_READY } };
@@ -3028,6 +3045,19 @@ function DoorView(props: { card: DoorCard; at: number; nameOf: (id: string) => s
 function ArtifactView(props: { moneyBlocked: boolean; a: Artifact; delivery?: Delivery; nameOf: (id: string) => string; onRetry?: (id: string, approvedMsat?: number) => Promise<unknown>; onStop?: (pendingId: string | null) => Promise<unknown> }) {
   return (
     <Switch>
+      <Match when={props.a.type === 'sending' && props.a}>
+        {(a) => {
+          const m = () => a() as Extract<Artifact, { type: 'sending' }>;
+          return (
+            <article class="msg out sending fresh" data-sending aria-busy="true">
+              <div class="bubble">{m().text}</div>
+              <div class="stamp">
+                <span class="sats" data-sending-cap={m().capMsat}>Sending · up to {fmtAmount(m().capMsat)}</span>
+              </div>
+            </article>
+          );
+        }}
+      </Match>
       <Match when={props.a.type === 'invoice' && props.a}>
         {(a) => {
           const inv = () => (a() as Extract<Artifact, { type: 'invoice' }>).invoice;
@@ -3394,6 +3424,10 @@ function Composer(props: {
   // Inputs and navigation remain usable during a send. Only the submitted
   // revision may be cleared by its completion (including track A -> B -> A).
   let composerRevision = 0;
+  // Optimistic messages go out one after another, in the order pressed: a
+  // second Send while the first is in flight queues behind it instead of
+  // being ignored. Each keeps the ceiling it was pressed on.
+  let sendChain: Promise<void> = Promise.resolve();
   // Going offline invalidates undispatched approvals, not unchanged inputs
   // belonging to an operation that already reached the host and succeeds.
   let approvalRevision = 0;
@@ -3883,11 +3917,19 @@ function Composer(props: {
       const cap = shown().msat!;
       if (submittedMode === 'message') { setPaidLine(null); setRaisedFrom(null); }
       const first = st.kind === 'first' ? firstPick() ?? st.suggest : undefined;
-      const dispatch = async () => {
+      const dispatch = async (bubble?: string) => {
+      // The message is in the stream as "Sending…" from here on, so the
+      // composer is free at once. It gets the text back whenever the draft
+      // would have stayed before: anything but sent or paid-undelivered.
+      if (submittedMode === 'message' && !bubble) { setDraft(''); setDrafted(false); }
       const r = submittedMode === 'file'
         ? await props.actions.file(submittedTrack, submittedFile!, cap, first)
-        : await props.actions.send(submittedTrack, submittedText, cap, first);
+        : await props.actions.send(submittedTrack, submittedText, cap, first, bubble);
       const unchanged = composerRevision === submittedRevision;
+      // Text back first: editing the draft clears the paid line, and an
+      // unknown payment result must stay on screen.
+      const restore = submittedMode === 'message' && !r.ok && !paidUndelivered(r);
+      if (restore && unchanged && !draft()) setDraft(submittedText);
       if (unchanged && submittedMode === 'message') {
         paymentResult(r);
         if (!r.ok && ['price_changed', 'price_cap_exceeded'].includes(r.error.code)) { setRaisedFrom(cap); setReadmitQuote(null); }
@@ -3902,6 +3944,7 @@ function Composer(props: {
         if (target() === submittedPeer) setDoor(null);
         setReadmitFor(submittedPeer);
       }
+      if (restore && draft() !== submittedText && submittedText.trim()) setNote(`Not sent: “${submittedText.length > 80 ? `${submittedText.slice(0, 80)}…` : submittedText}”. It is not back in the box because you started a new message.`);
       if ((r.ok || paidUndelivered(r)) && composerRevision === submittedRevision) {
         if (submittedMode === 'file') {
           setFile(null);
@@ -3932,6 +3975,18 @@ function Composer(props: {
           setBusy(false);
           return;
         }
+      }
+      if (submittedMode === 'message') {
+        // At the press: the bubble goes into the stream and the composer is
+        // free for the next message; the send itself waits its turn.
+        const bubble = props.actions.beginSending(submittedTrack, submittedText, cap);
+        setDraft('');
+        setDrafted(false);
+        setBusy(false);
+        const run = sendChain.then(() => dispatch(bubble));
+        sendChain = run.catch(() => {});
+        await run;
+        return;
       }
       await dispatch();
       setBusy(false);
@@ -3973,18 +4028,31 @@ function Composer(props: {
         setPaidLine(null);
         setRaisedFrom(null);
         const cap = shown().msat!;
-        r = await props.actions.send(t, draft(), cap);
-        if (unchanged()) {
-          paymentResult(r);
-          if (!r.ok && ['price_changed', 'price_cap_exceeded'].includes(r.error.code)) { setRaisedFrom(cap); setReadmitQuote(null); }
-        }
-        if (r.ok && readmitQuote()?.peer === peer) setReadmitQuote(null);
-        if (!r.ok && r.error.code === 'readmission_quoted' && r.error.admission) setReadmitQuote({ peer, price: r.error.admission });
-        if ((r.ok || paidUndelivered(r)) && unchanged()) {
-          setDraft('');
-          setDrafted(false);
-        } else if (!r.ok && unchanged() && isBudgetStop(r.error)) setNote(r.error.message);
-        break;
+        const text = draft();
+        // Optimistic, as in the budget path: the bubble now, the send in turn.
+        const bubble = props.actions.beginSending(t, text, cap);
+        setDraft('');
+        setDrafted(false);
+        setBusy(false);
+        const go = async () => {
+          const r = await props.actions.send(t, text, cap, undefined, bubble);
+          // Text back first: editing the draft clears the paid line, and an
+          // unknown payment result must stay on screen.
+          const restore = !r.ok && !paidUndelivered(r);
+          if (restore && unchanged() && !draft()) setDraft(text);
+          if (unchanged()) {
+            paymentResult(r);
+            if (!r.ok && ['price_changed', 'price_cap_exceeded'].includes(r.error.code)) { setRaisedFrom(cap); setReadmitQuote(null); }
+          }
+          if (r.ok && readmitQuote()?.peer === peer) setReadmitQuote(null);
+          if (!r.ok && r.error.code === 'readmission_quoted' && r.error.admission) setReadmitQuote({ peer, price: r.error.admission });
+          if (restore && draft() !== text && text.trim()) setNote(`Not sent: “${text.length > 80 ? `${text.slice(0, 80)}…` : text}”. It is not back in the box because you started a new message.`);
+          if (!r.ok && unchanged() && isBudgetStop(r.error)) setNote(r.error.message);
+        };
+        const run = sendChain.then(go);
+        sendChain = run.catch(() => {});
+        await run;
+        return;
       }
       case 'pay':
         return;

@@ -38,7 +38,7 @@ node starts paying.
 
 | | Today (measured) | With fix 1 (target) |
 |---|---|---|
-| Click → bubble visible | **1218 ms** (= the whole send) | ≤ 1 frame |
+| Click → bubble visible | **1218 ms** (= the whole send) | **2–3 ms** (measured on `feat/optimistic-send`) |
 | Click → "paid ✓" | **1218 ms** | unchanged; it is real settlement |
 
 The composer keeps the draft and a disabled Send for the whole time. Nothing on screen says "sending".
@@ -105,6 +105,7 @@ all. Even a 1 s send feels broken if nothing moves.
 
 ## 4. Log
 
+- **2026-10-11:** Optimistic send built on `feat/optimistic-send`: bubble at 2–3 ms, paid at 1209 ms (real settlement). A second Send while one is in flight queues in order instead of being ignored.
 - **2026-10-11:** UI side measured with the stubbed host (1.2 s send): bubble at 1218 ms, paid at 1218 ms.
 - **2026-10-11:** Scorecard started. Send path traced: 5–6 sequential pre-flight RTTs plus compose, with no visual
   feedback until settled. RTT from NOVA to the pilot measured at 74 ms (TCP connect).

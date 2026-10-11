@@ -17,7 +17,7 @@ it('reports click → bubble visible and click → paid for a 1.2 s send', async
   const source = sampleSource({ firstLiveMs: 1e9 });
   source.spendStatus = async () => ({ state: 'open', basis: 'node_grant', open_until_ms: Date.now() + 600000, pending: null, window_ms: 600000 });
   source.priceQuote = async () => quote;
-  source.send = vi.fn((recipient, isRoom) => new Promise((ok) => setTimeout(() => ok({ message_id: 'm-latency', recipient, is_room: isRoom, delivered: true, amount_msat: 2250, fee_paid_msat: 0, max_routing_fee_msat: 7500, total_msat: 9750, sent_at_ms: Date.now() }), SEND_MS)));
+  source.send = vi.fn((recipient, isRoom) => new Promise((ok) => setTimeout(() => ok({ message_id: 'm-latency', recipient, is_room: isRoom, delivered: true, amount_msat: 2250, fee_paid_msat: 0, max_routing_fee_msat: 7500, total_msat: 9750, sent_at_ms: Date.now() }), SEND_MS))) as never;
   mount = document.createElement('div'); document.body.appendChild(mount);
   dispose = render(() => <ControlCenter source={source} active ready error={null} ownId={SAMPLE_OWN_ID} firstRun={<span />} />, mount);
   await vi.waitFor(() => expect($(`[data-track="peer:${A}"]`)?.getAttribute('aria-current')).toBe('true'));
