@@ -238,11 +238,17 @@ describe('app shell pairing wiring', () => {
     // No stepper or setup heading in view under an offline node: it would read as progress.
     const steps = mount.querySelector<HTMLElement>('[data-setup-steps]')!;
     await vi.waitFor(() => expect(steps.hidden).toBe(true));
+    // The offline card is the page: exactly one visible h1, its title.
+    const visibleH1 = () => [...mount!.querySelectorAll('h1')].filter((h) => !h.closest('[hidden]')).map((h) => h.textContent);
+    expect(visibleH1()).toEqual(['Your box is offline']);
     mount.querySelector<HTMLButtonElement>('[data-offline-change]')!.click();
     await vi.waitFor(() => expect(steps.hidden).toBe(false));
     expect(mount.querySelector('[data-ob-head]')).not.toBeNull();
     expect(mount.querySelector('[data-offline-change]')).toBeNull();
     expect(mount.querySelector('[data-node-offline]')).not.toBeNull();
+    // With the setup steps back, the card steps down to h2 under the setup's own h1.
+    await vi.waitFor(() => expect(mount!.querySelector('[data-node-offline] [data-offline-title]')!.tagName).toBe('H2'));
+    expect(visibleH1()).not.toContain('Your box is offline');
   });
 
   it('a box restarting after setup goes offline for a moment: the ceremony stays mounted, keeps polling, sends no cancel, and completes', async () => {

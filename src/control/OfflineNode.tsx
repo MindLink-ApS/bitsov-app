@@ -1,4 +1,5 @@
 import { createSignal, Show } from 'solid-js';
+import { Dynamic } from 'solid-js/web';
 import { BoxIllustration } from '../onboarding/BoxIllustration';
 
 /** Connection recovery only; retry uses the existing host pairing path. */
@@ -7,6 +8,8 @@ export function OfflineNode(props: {
   lastSeen?: number | null;
   retryAfterSecs?: number | null;
   onRetry: () => void | Promise<void>;
+  /** 1 when this card is the page (first run with setup hidden); 2 under another page heading. */
+  level?: 1 | 2;
 }) {
   const [busy, setBusy] = createSignal(false);
   const [failed, setFailed] = createSignal(false);
@@ -20,7 +23,7 @@ export function OfflineNode(props: {
   };
   return <section class="node-offline" data-node-offline aria-label="Node offline">
     <BoxIllustration offline />
-    <h2>{props.remote ? 'Your box is offline' : 'Your node is offline'}</h2>
+    <Dynamic component={props.level === 1 ? 'h1' : 'h2'} data-offline-title>{props.remote ? 'Your box is offline' : 'Your node is offline'}</Dynamic>
     <p>We can’t reach it right now.</p>
     <p class="hint">Last seen: <Show when={props.lastSeen != null} fallback="unknown">
       <time dateTime={new Date(props.lastSeen!).toISOString()}>{new Date(props.lastSeen!).toLocaleString()}</time>
