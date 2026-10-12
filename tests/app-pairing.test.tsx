@@ -235,13 +235,56 @@ describe('app shell pairing wiring', () => {
     mount = document.createElement('div'); document.body.appendChild(mount);
     dispose = render(() => <App />, mount);
     await vi.waitFor(() => expect(mount!.querySelector('[data-node-offline]')).not.toBeNull());
-    // No stepper or setup heading under an offline node: it would read as progress.
-    expect(mount.querySelector('.stepper')).toBeNull();
-    expect(mount.querySelector('[data-ob-head]')).toBeNull();
+    // No stepper or setup heading in view under an offline node: it would read as progress.
+    const steps = mount.querySelector<HTMLElement>('[data-setup-steps]')!;
+    await vi.waitFor(() => expect(steps.hidden).toBe(true));
     mount.querySelector<HTMLButtonElement>('[data-offline-change]')!.click();
-    await vi.waitFor(() => expect(mount!.querySelector('[data-ob-head]')).not.toBeNull());
+    await vi.waitFor(() => expect(steps.hidden).toBe(false));
+    expect(mount.querySelector('[data-ob-head]')).not.toBeNull();
     expect(mount.querySelector('[data-offline-change]')).toBeNull();
     expect(mount.querySelector('[data-node-offline]')).not.toBeNull();
+  });
+
+  it('a transient offline never unmounts setup in progress: it is hidden, then back, the same elements', async () => {
+    let offline = false;
+    const cancels: string[] = [];
+    vi.stubGlobal('__TAURI_INTERNALS__', { invoke: (cmd: string, args?: { input?: { action?: string } }) => {
+      if (cmd === 'node_status') return Promise.resolve(offline
+        ? { ready: false, node_id: null, error: 'remote unavailable', retry_after_secs: 5 }
+        : { ready: false, node_id: null, error: null });
+      if (cmd === 'pairing_status') return Promise.resolve({ ...paired, remote: true });
+      if (args?.input?.action === 'cancel') cancels.push(cmd);
+      return Promise.reject(new Error('not available'));
+    } });
+    mount = document.createElement('div'); document.body.appendChild(mount);
+    dispose = render(() => <App />, mount);
+    await vi.waitFor(() => expect(mount!.querySelector('[data-ob-head]')).not.toBeNull());
+    // The Onboarding component's own root: it lives as long as the component (and any ceremony in it).
+    const root = mount.querySelector('section.onboarding')!;
+    // The box restarts after setup: a transport cooldown.
+    offline = true;
+    await vi.waitFor(() => expect(mount!.querySelector('[data-node-offline]')).not.toBeNull(), { timeout: 5000 });
+    expect(mount.querySelector<HTMLElement>('[data-setup-steps]')!.hidden).toBe(true);
+    expect(root.isConnected).toBe(true);
+    offline = false;
+    await vi.waitFor(() => expect(mount!.querySelector('[data-node-offline]')).toBeNull(), { timeout: 5000 });
+    expect(mount.querySelector<HTMLElement>('[data-setup-steps]')!.hidden).toBe(false);
+    // Never remounted (so no ceremony cleanup ran) and nothing was cancelled.
+    expect(mount.querySelector('section.onboarding')).toBe(root);
+    expect(cancels).toEqual([]);
+  });
+
+  it('offline never hides a repair prompt', async () => {
+    vi.stubGlobal('__TAURI_INTERNALS__', { invoke: (cmd: string) => {
+      if (cmd === 'node_status') return Promise.resolve({ ready: false, node_id: null, error: 'remote unavailable', retry_after_secs: 5, initialization_repair: 'required' });
+      if (cmd === 'pairing_status') return Promise.resolve({ ...paired, remote: true });
+      return Promise.reject(new Error('not available'));
+    } });
+    mount = document.createElement('div'); document.body.appendChild(mount);
+    dispose = render(() => <App />, mount);
+    await vi.waitFor(() => expect(mount!.querySelector('[data-node-offline]')).not.toBeNull());
+    expect(mount.querySelector<HTMLElement>('[data-setup-steps]')!.hidden).toBe(false);
+    expect(mount.querySelector('[data-offline-change]')).toBeNull();
   });
 
   it.each(['payment outcome unknown: connection lost', 'pairing proof did not verify'])('preserves a non-transport warning: %s', async error => {

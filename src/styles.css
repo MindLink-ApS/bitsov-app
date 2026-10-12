@@ -1325,3 +1325,6 @@ input[type='checkbox'], input[type='radio'] { width: auto; flex: none; padding: 
 .locked-node [data-locked-badge] { align-self: flex-start; width: fit-content; }
 /* Offline: one quiet way to point the app at a different node. */
 .first-run > .offline-change { width: auto; align-self: center; min-height: 44px; }
+/* The setup steps keep the first-run column's own spacing; hidden while offline (still mounted). */
+.first-run > .setup-steps { display: contents; }
+.first-run > .setup-steps[hidden] { display: none; }
