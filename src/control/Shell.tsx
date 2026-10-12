@@ -170,6 +170,29 @@ export type Prefill = {
   unsentId?: string;
 };
 
+/**
+ * A composer's message box, as the send queue sees it. The queue gives text
+ * back only into the same composer instance, on the same track, untouched
+ * since the press; anything else becomes an Unsent card on its own track.
+ */
+export type SendBox = { id: number; key: () => string; revision: () => number; draft: () => string; setDraft: (text: string) => void; note: () => string | null; setNote: (text: string) => void };
+/** Where a press was made: the composer instance and its revision then. */
+export type PressedAt = { box: number; revision: number };
+export type SendQueue = {
+  /** One queue for the whole app, in press order, whichever composer pressed. */
+  enqueue: (job: () => Promise<void>) => Promise<void>;
+  /** A queued or approved message must not go out now (an earlier result is open). */
+  held: () => boolean;
+  /** Why a new press must wait (an unknown payment result, until checked), or null. */
+  blocked: () => string | null;
+  /** One settled message send: the hold, the text's way back, the note, the announcement. */
+  settled: (r: Outcome<unknown>, track: TrackRef, text: string, at: PressedAt) => void;
+  /** Its turn came while held: its bubble becomes "Waiting for payment check". */
+  holdBack: (track: TrackRef, bubble: string, text: string) => void;
+  attach: (box: SendBox) => () => void;
+  live: () => { text: string; seq: number };
+};
+
 /** The result of one action: its value, or why it did not happen. */
 type Outcome<T> = { ok: true; value: T } | { ok: false; error: ActionError };
 
@@ -204,15 +227,13 @@ export type Actions = {
   send: (t: TrackRef, text: string, maxMsat: number, firstContactMsat?: number, sendingId?: string) => Promise<Outcome<unknown>>;
   /** Puts a message in the stream as "Sending · up to N" before its send runs; `send` replaces it. */
   beginSending: (t: TrackRef, text: string, capMsat: number) => string;
-  /** A queued message not dispatched (an earlier payment is unresolved): its bubble becomes an Unsent card. */
-  holdSending: (t: TrackRef, bubbleId: string, text: string) => void;
-  /** A refused message (nothing paid) that cannot safely go back in the box: kept whole on its track. */
-  keepUnsent: (t: TrackRef, text: string, reason: string) => void;
   /** An Unsent card's text back into its own track's box (empty box only). */
   restoreUnsent: (t: TrackRef, id: string) => void;
   discardUnsent: (t: TrackRef, id: string) => void;
-  /** Bumps when a pending-result check answers: held sends may go again. */
-  reconciled: () => number;
+  /** The one app-level send queue (it outlives any composer). */
+  queue: SendQueue;
+  /** A message that did not go and paid nothing, kept whole on its track. */
+  keepUnsent: (t: TrackRef, text: string, reason: string) => void;
   /**
    * Retry a paid, undelivered message through its own journal record. With
    * `approvedMsat`, the owner approved that price because admission may be due again.
@@ -607,6 +628,8 @@ export function ControlCenter(props: Props) {
     if (t.kind !== 'peer' && t.kind !== 'room') return;
     const key = trackKey(t);
     void attempt('thread', () => source.messages(t.id), (page) => {
+      // History can already hold a message still sending here: its bubble claims it, as for the live echo.
+      for (const m of page) claimEcho(m, t.kind === 'room' ? t.id : null);
       setThreads('t', key, (old) => mergeMessages(old ?? [], page));
       if (t.kind === 'peer') foldRooms(page, false);
       setEnergyAt(Date.now());
@@ -798,10 +821,70 @@ export function ControlCenter(props: Props) {
     if ((threads.t[key] ?? []).some((x) => x.id === m.id) || (threads.t[trackKey({ kind: 'peer', id: to })] ?? []).some((x) => x.id === m.id)) return false;
     const list = artifacts[key] ?? [];
     if (list.some((a) => a.type === 'sending' && a.echoes?.some((e) => e.id === m.id))) return true;
-    const owner = list.find((a) => a.type === 'sending' && a.text === m.plaintext && !(a.echoes ?? []).some((e) => e.to === to));
+    // Only a message written around or after the press (any node clock skew allowed for).
+    const owner = list.find((a) => a.type === 'sending' && a.text === m.plaintext && m.timestamp >= a.at - ECHO_SKEW_MS && !(a.echoes ?? []).some((e) => e.to === to));
     if (!owner) return false;
     setArtifacts(key, (old) => (old ?? []).map((a) => (a.id === owner.id && a.type === 'sending' ? { ...a, echoes: [...(a.echoes ?? []), { id: m.id, to }] } : a)));
     return true;
+  };
+
+  // The send queue: app-level, so navigation (another chat, Discover,
+  // Settings) never loses a message, a press order or a hold. Composers only
+  // press into it and read from it.
+  let sendChain: Promise<void> = Promise.resolve();
+  let queued = 0;
+  // An unknown result: nothing new goes out until a pending check answers.
+  const [checkFirst, setCheckFirst] = createSignal(false);
+  // Paid but not delivered (or refused for good): the messages already queued
+  // behind it wait; once the queue is empty a new press goes to the host.
+  let queueHold = false;
+  createEffect(on([reconciled, pendingRevision], () => { setCheckFirst(false); queueHold = false; }, { defer: true }));
+  let box: SendBox | null = null;
+  const [sendLive, setSendLive] = createSignal({ text: '', seq: 0 });
+  // Clear, then say it: a repeat of the same words is announced again.
+  const announce = (text: string) => {
+    setSendLive((l) => ({ text: '', seq: l.seq + 1 }));
+    setTimeout(() => setSendLive((l) => ({ ...l, text })), 0);
+  };
+  const queue: SendQueue = {
+    enqueue: (job) => {
+      queued++;
+      const run = sendChain.then(job).finally(() => { if (--queued === 0) queueHold = false; });
+      sendChain = run.catch(() => {});
+      return run;
+    },
+    held: () => untrack(checkFirst) || queueHold,
+    blocked: () => (checkFirst() ? 'A payment result is not known yet. Nothing was sent. Check pending result, then press Send.' : null),
+    settled: (r, t, text, at) => {
+      const outcome = r.ok ? 'sent' : !UNSETTLED.has(r.error.code) ? 'refused' : paidUndelivered(r) || r.error.code === 'failed_paid' ? 'paid' : 'unknown';
+      if (outcome === 'unknown') setCheckFirst(true);
+      if (outcome === 'paid') queueHold = true;
+      const here = box && box.key() === trackKey(t) ? box : null;
+      if (!r.ok && outcome === 'refused') {
+        // Back in the box only where it was typed: the same composer, untouched since the press.
+        if (here && here.id === at.box && here.revision() === at.revision && !here.draft()) {
+          here.setDraft(text);
+          if (!here.note()) here.setNote('Not sent. Your message is back in the box; press Send to try again.');
+        } else {
+          addArtifact(t, { type: 'unsent', text, why: 'refused', reason: r.error.message });
+          if (here && !here.note()) here.setNote('Not sent. Nothing was paid. The message is kept in this chat: put it back in the box to try again.');
+        }
+      }
+      if (here && outcome === 'unknown') here.setNote('The payment result is not known yet. Check pending result before sending it again.');
+      announce(outcome === 'sent' ? 'Message sent.' : outcome === 'paid' ? (paidUndelivered(r) ? 'Paid, not delivered.' : 'Paid, refused by their node.') : outcome === 'unknown' ? 'Message payment result unknown.' : 'Message not sent.');
+    },
+    holdBack: (t, bubble, text) => {
+      batch(() => {
+        dropArtifact(t, bubble);
+        addArtifact(t, { type: 'unsent', text, why: 'held', reason: 'Not sent, nothing paid: an earlier payment’s result is not known yet.' });
+      });
+      announce('Message held: an earlier payment is not checked yet.');
+    },
+    attach: (b) => {
+      box = b;
+      return () => { if (box === b) box = null; };
+    },
+    live: sendLive,
   };
   // The Wallet's history of payments and invoices made here (the node lists neither).
   createEffect(() => {
@@ -1088,10 +1171,6 @@ export function ControlCenter(props: Props) {
       type: 'sending', text, capMsat,
       ...(t.kind === 'room' ? { memberCaps: Object.fromEntries((roomQuote()?.members ?? []).map((m) => [m.node_id, m.msat])) } : {}),
     }),
-    holdSending: (t, bubbleId, text) => batch(() => {
-      dropArtifact(t, bubbleId);
-      addArtifact(t, { type: 'unsent', text, why: 'held', reason: 'Not sent, nothing paid: an earlier payment’s result is not known yet.' });
-    }),
     keepUnsent: (t, text, reason) => { addArtifact(t, { type: 'unsent', text, why: 'refused', reason }); },
     restoreUnsent: (t, id) => {
       const a = (artifacts[trackKey(t)] ?? []).find((x) => x.id === id);
@@ -1099,7 +1178,7 @@ export function ControlCenter(props: Props) {
       setPrefill({ seq: ++prefillSeq, key: trackKey(t), mode: 'message', text: a.text, sats: null, unsentId: id });
     },
     discardUnsent: (t, id) => dropArtifact(t, id),
-    reconciled,
+    queue,
     send: async (t, text, maxMsat, firstContactMsat, pendingBubble) => {
       if (t.kind !== 'peer' && t.kind !== 'room') return { ok: false, error: { code: 'invalid', message: 'nothing to send to' } };
       // Optimistic: the message shows at once as "Sending · up to N"; the
@@ -1647,6 +1726,7 @@ export function ControlCenter(props: Props) {
           </Match>
         </Switch>
       </aside>
+      <span class="sr-only" role="status" aria-live="polite" data-send-live data-send-live-seq={sendLive().seq}>{sendLive().text}</span>
       <CallPanel
         panelRef={el => { callPanel = el; }}
         approvalOpen={callApproval()}
@@ -3224,7 +3304,7 @@ function ArtifactView(props: { moneyBlocked: boolean; a: Artifact; delivery?: De
               <Show when={f().text !== undefined}>
                 {/* The whole message stays readable here; no resend while the payment result is open. */}
                 <blockquote class="failed-text" data-failed-text>{f().text}</blockquote>
-                <Show when={UNSETTLED.has(f().error.code) && f().error.code !== 'payment_settled_undelivered'}>
+                <Show when={UNSETTLED.has(f().error.code) && f().error.code !== 'payment_settled_undelivered' && f().error.code !== 'failed_paid'}>
                   <span class="hint" data-failed-check>Check pending result before sending it again.</span>
                 </Show>
               </Show>
@@ -3308,6 +3388,10 @@ function UndeliveredView(props: {
 /** The draft was paid for: it now lives on the undelivered card, not in the composer. */
 const paidUndelivered = (r: Outcome<unknown>) => !r.ok && r.error.code === 'payment_settled_undelivered';
 /** Outcomes where sats may have moved or the result is not known: never "try again". */
+/** Each composer instance's id: text goes back only into the instance it was typed in. */
+let composerSeq = 0;
+/** How far before a press a node timestamp may be and still be that send's echo (clock skew). */
+const ECHO_SKEW_MS = 120_000;
 const UNSETTLED = new Set(['spend_unknown', 'payment_unknown', 'failed_paid', 'payment_settled_undelivered', 'room_partial']);
 
 const kb = (bytes: number) => (bytes < 1024 ? `${bytes} B` : `${(bytes / 1024).toFixed(bytes < 10_240 ? 1 : 0)} KB`);
@@ -3522,68 +3606,26 @@ function Composer(props: {
   // Optimistic messages go out one after another, in the order pressed: a
   // second Send while the first is in flight queues behind it instead of
   // being ignored. Each keeps the ceiling it was pressed on.
-  let sendChain: Promise<void> = Promise.resolve();
-  // After an unknown or paid-undelivered result, the messages already queued
-  // behind it are not dispatched: each stays whole on its track as "Waiting
-  // for payment check", nothing paid. Once the queue is empty (or a pending
-  // check answers) a new press goes to the host again, which decides.
-  let held = false;
-  let queued = 0;
-  createEffect(on(props.actions.reconciled, () => { held = false; }, { defer: true }));
-  const enqueue = (job: () => Promise<void>) => {
-    queued++;
-    const run = sendChain.then(job).finally(() => { if (--queued === 0) held = false; });
-    sendChain = run.catch(() => {});
-    return run;
-  };
-  // What one settled send means. The text never comes back into the box on
-  // its own (the owner may be on another track by now): a refused message
-  // stays on its own track as an Unsent card; an unknown or (partly) paid
-  // outcome keeps its text on the failure card, with no resend.
-  const [sendLive, setSendLive] = createSignal('');
-  const [sendLiveSeq, setSendLiveSeq] = createSignal(0);
-  // Clear, then say it: a repeat of the same words is announced again.
-  const announce = (text: string) => {
-    setSendLive('');
-    setSendLiveSeq((n) => n + 1);
-    setTimeout(() => setSendLive(text), 0);
-  };
-  const outcomeOf = (r: Outcome<unknown>): 'sent' | 'refused' | 'unknown' | 'paid' =>
-    r.ok ? 'sent' : !UNSETTLED.has(r.error.code) ? 'refused' : paidUndelivered(r) ? 'paid' : 'unknown';
-  const tellSettled = (r: Outcome<unknown>, track: TrackRef, text: string, revision: number) => {
-    const outcome = outcomeOf(r);
-    if (outcome === 'unknown' || outcome === 'paid') held = true;
-    const here = trackKey(props.track) === trackKey(track);
-    if (!r.ok && outcome === 'refused') {
-      // Back in the box only where it was typed, untouched since the press;
-      // otherwise whole on its own track, never in another recipient's box.
-      if (here && composerRevision === revision && !draft()) {
-        setDraft(text);
-        if (!note()) setNote('Not sent. Your message is back in the box; press Send to try again.');
-      } else {
-        props.actions.keepUnsent(track, text, r.error.message);
-        if (here && !note()) setNote('Not sent. Nothing was paid. The message is kept in this chat: put it back in the box to try again.');
-      }
-    }
-    if (here && outcome === 'unknown') setNote('The payment result is not known yet. Check pending result before sending it again.');
-    announce(outcome === 'sent' ? 'Message sent.' : outcome === 'paid' ? 'Paid, not delivered.' : outcome === 'unknown' ? 'Message payment result unknown.' : 'Message not sent.');
-  };
-  /** A queued message whose turn came while an earlier result is unresolved. */
-  const holdBack = (track: TrackRef, bubble: string, text: string) => {
-    props.actions.holdSending(track, bubble, text);
-    announce('Message held: an earlier payment is not checked yet.');
-  };
+  // The app-level queue holds press order, holds and the way back for text;
+  // this composer only presses into it and lends it its box.
+  const queue = props.actions.queue;
+  const boxId = ++composerSeq;
+  onCleanup(queue.attach({ id: boxId, key: () => trackKey(props.track), revision: () => composerRevision, draft, setDraft, note, setNote }));
+  const pressedAt = (revision: number): PressedAt => ({ box: boxId, revision });
   // Going offline invalidates undispatched approvals, not unchanged inputs
   // belonging to an operation that already reached the host and succeeds.
   let approvalRevision = 0;
-  const [ownerWait, setOwnerWait] = createSignal<{ approval: OwnerContactApproval; revision: number; send: () => Promise<void> } | null>(null);
+  const [ownerWait, setOwnerWait] = createSignal<{ approval: OwnerContactApproval; revision: number; send: () => Promise<void>; message?: { track: TrackRef; text: string } } | null>(null);
   usePairingActivity(() => busy() || paying() || review() !== null || ownerWait() !== null);
-  const cancelOwner = () => {
+  /** `leaving`: the owner moved away (another chat, another page); the waiting text is kept on its chat. */
+  const cancelOwner = (leaving = false) => {
     const pending = untrack(ownerWait);
     setOwnerWait(null);
-    if (pending) void props.actions.ownerCancel(pending.approval.id);
+    if (!pending) return;
+    void props.actions.ownerCancel(pending.approval.id);
+    if (leaving && pending.message) props.actions.keepUnsent(pending.message.track, pending.message.text, 'You left before the owner approved this first contact.');
   };
-  onCleanup(cancelOwner);
+  onCleanup(() => cancelOwner(true));
   createEffect(() => { if (props.moneyBlocked) { approvalRevision++; cancelOwner(); } });
   const [ownerCountdown, setOwnerCountdown] = createSignal(0);
   const [ownerExpired, setOwnerExpired] = createSignal(false);
@@ -3645,7 +3687,7 @@ function Composer(props: {
     on(
       () => trackKey(props.track),
       () => {
-        cancelOwner();
+        cancelOwner(true);
         setOwnerExpired(false);
         composerRevision++;
         setMode('message');
@@ -4031,6 +4073,9 @@ function Composer(props: {
   const submit = async (shownMsat?: number | null) => {
     if (props.moneyBlocked || (spends() && props.budgetStale) || busy() || ownerWait()) return;
     if (mode() === 'message' && priceProblem()) { setNote(priceProblem()); return; }
+    // An unknown payment result: the text stays in the box until it is checked.
+    const wait = mode() === 'message' ? queue.blocked() : null;
+    if (wait) { setNote(wait); return; }
     setNote(null);
     if (shownMsat !== undefined && (mode() !== 'message' || shown().msat !== shownMsat)) {
       setNote('The message price changed since you pressed. Nothing was sent. Check the price on Send and press it to send.');
@@ -4074,7 +4119,7 @@ function Composer(props: {
       const dispatch = async (bubble?: string) => {
       // A message is in the stream as "Sending…" (its bubble) by now; the box
       // was freed when it became a send and is never touched from here.
-      if (submittedMode === 'message' && bubble && held) { holdBack(submittedTrack, bubble, submittedText); return; }
+      if (submittedMode === 'message' && bubble && queue.held()) { queue.holdBack(submittedTrack, bubble, submittedText); return; }
       const r = submittedMode === 'file'
         ? await props.actions.file(submittedTrack, submittedFile!, cap, first)
         : await props.actions.send(submittedTrack, submittedText, cap, first, bubble);
@@ -4106,7 +4151,7 @@ function Composer(props: {
         setOwnerExpired(true);
         setNote(r.error.message);
       } else if (!r.ok && unchanged && (isBudgetStop(r.error) || ['owner_only', 'owner_contact_unavailable'].includes(r.error.code))) setNote(r.error.message);
-      if (submittedMode === 'message') tellSettled(r, submittedTrack, submittedText, submittedRevision);
+      if (submittedMode === 'message') queue.settled(r, submittedTrack, submittedText, pressedAt(submittedRevision));
       };
       if (first !== undefined && !room()) {
         const request = await props.actions.ownerRequest(submittedPeer, cap, first);
@@ -4124,14 +4169,17 @@ function Composer(props: {
           setOwnerWait({
             approval: request.value,
             revision: submittedRevision,
+            ...(submittedMode === 'message' ? { message: { track: submittedTrack, text: submittedText } } : {}),
             // The owner approved: the press becomes a send now. The box still
             // holds exactly this text (any edit cancelled the wait).
             send: async () => {
-              if (submittedMode !== 'message') { setBusy(true); try { await enqueue(() => dispatch()); } finally { setBusy(false); } return; }
+              if (submittedMode !== 'message') { setBusy(true); try { await queue.enqueue(() => dispatch()); } finally { setBusy(false); } return; }
               const bubble = props.actions.beginSending(submittedTrack, submittedText, cap);
               setDraft('');
               setDrafted(false);
-              await enqueue(() => dispatch(bubble));
+              // An earlier result is open: approved, but it waits for the check; never sent on its own.
+              if (queue.held()) { queue.holdBack(submittedTrack, bubble, submittedText); return; }
+              await queue.enqueue(() => dispatch(bubble));
             },
           });
           setBusy(false);
@@ -4145,7 +4193,7 @@ function Composer(props: {
         setDraft('');
         setDrafted(false);
         setBusy(false);
-        await enqueue(() => dispatch(bubble));
+        await queue.enqueue(() => dispatch(bubble));
         return;
       }
       await dispatch();
@@ -4195,7 +4243,7 @@ function Composer(props: {
         setDrafted(false);
         setBusy(false);
         const go = async () => {
-          if (held) { holdBack(t, bubble, text); return; }
+          if (queue.held()) { queue.holdBack(t, bubble, text); return; }
           const r = await props.actions.send(t, text, cap, undefined, bubble);
           if (unchanged()) {
             paymentResult(r);
@@ -4204,9 +4252,9 @@ function Composer(props: {
           if (r.ok && readmitQuote()?.peer === peer) setReadmitQuote(null);
           if (!r.ok && r.error.code === 'readmission_quoted' && r.error.admission) setReadmitQuote({ peer, price: r.error.admission });
           if (!r.ok && unchanged() && isBudgetStop(r.error)) setNote(r.error.message);
-          tellSettled(r, t, text, submittedRevision);
+          queue.settled(r, t, text, pressedAt(submittedRevision));
         };
-        await enqueue(go);
+        await queue.enqueue(go);
         return;
       }
       case 'pay':
@@ -4574,7 +4622,6 @@ function Composer(props: {
       <Show when={mode() === 'message'}>
         <div class="send-price" classList={{ priced: !priceProblem() && (paidLine() !== null || messageShown().msat !== null) }}>
           <span data-send-price aria-live="polite">{priceLine()}</span>
-          <span class="sr-only" role="status" aria-live="polite" data-send-live data-send-live-seq={sendLiveSeq()}>{sendLive()}</span>
           <Show when={priceProblem() && priceProblem() !== 'price loading…'}>
             {' '}<button type="button" class="link" data-price-retry disabled={busy()} onClick={() => {
               if (doorWanted() && door()) setDoor(null);
@@ -4696,7 +4743,7 @@ function Composer(props: {
           </Show>
           <textarea readonly aria-label="Owner approval command" data-contact-owner-command data-command={pending().approval.owner_command} value={pending().approval.owner_command} />
           <button type="button" class="link" onClick={async () => { try { await navigator.clipboard.writeText(pending().approval.owner_command); } catch { setNote('Select and copy the command above.'); } }}>Copy command</button>
-          <button type="button" class="link" data-contact-cancel onClick={cancelOwner}>Cancel</button>
+          <button type="button" class="link" data-contact-cancel onClick={() => cancelOwner()}>Cancel</button>
           <p class="hint">Cancel does not revoke an approval already issued at the node; it expires within {pending().approval.approval_window_secs !== undefined ? 'five' : 'two'} minutes.</p>
         </div>}
       </Show>

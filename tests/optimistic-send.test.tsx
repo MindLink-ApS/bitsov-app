@@ -147,7 +147,20 @@ describe('optimistic send', () => {
     await vi.waitFor(() => expect(sending()).toHaveLength(0));
   });
 
-  it.each(['payment_unknown', 'spend_unknown', 'failed_paid', 'room_partial'])('never gives the text back or says try again after %s', async (code) => {
+  it('paid and refused for good: no text back, no resend, the whole text on its card', async () => {
+    const { source, pending } = deferredSource();
+    await open(source);
+    await press('refused for good');
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    pending[0].fail({ code: 'failed_paid', message: 'Paid, and the recipient’s node refused this message for good. Do not send it again.' });
+    await vi.waitFor(() => expect(sending()).toHaveLength(0));
+    expect(area().value).toBe('');
+    expect(mount.textContent).not.toMatch(/press Send to try again/);
+    await vi.waitFor(() => expect($('[data-send-live]')?.textContent).toBe('Paid, refused by their node.'));
+    expect($('[data-failed-text]')?.textContent).toBe('refused for good');
+  });
+
+  it.each(['payment_unknown', 'spend_unknown', 'room_partial'])('never gives the text back or says try again after %s', async (code) => {
     const { source, pending } = deferredSource();
     await open(source);
     await press('maybe paid');
@@ -250,9 +263,17 @@ describe('optimistic send', () => {
     expect(sending()).toHaveLength(0);
     // Never dispatched: the host saw only the first.
     expect(source.send).toHaveBeenCalledTimes(1);
-    // The queue drained: a new press goes to the host again, which decides.
+    // A new press waits for the check: the text stays in the box, nothing goes out.
     await press('fourth');
+    await vi.waitFor(() => expect($('[data-composer-note]')?.textContent).toContain('Check pending result, then press Send'));
+    expect(area().value).toBe('fourth');
+    expect(source.send).toHaveBeenCalledTimes(1);
+    // A pending check that answers lets it go.
+    $<HTMLButtonElement>('[data-spend-reconcile]')!.click();
+    await new Promise((r) => setTimeout(r, 20));
+    $<HTMLButtonElement>('[data-send]')!.click();
     await vi.waitFor(() => expect(pending).toHaveLength(2));
+    expect(pending[1].text).toBe('fourth');
   });
 
   it('a paid-undelivered result holds the queued message too', async () => {
