@@ -92,7 +92,13 @@ invoice or payment.
   `money_post` reads `GET /pair/grant` again before journaling anything and
   refuses what the node would refuse: `per_call_max_msat`, `remaining_msat`
   and, for a peer message, file or keysend, that recipient's budget. No
-  request is made.
+  request is made. For an ordinary peer send, read own-price, then peer-price,
+  then the grant, after any first-contact probe. Never capture the peer price
+  or grant alongside a stalled earlier read. With the all-in contract already
+  established, preflight takes at most four sequential round trips (one
+  capability `/status`, two price reads, one grant); a warm capability cache
+  removes the status round trip. These counts exclude the compose POST and
+  any token refresh.
 - **`409 budget_exceeded`, per reason.** The node reserved and paid nothing,
   so the app releases its reservation and clears the journal (not an unknown
   outcome). `no_grant` → `grant_ended` and every approval closes (window,

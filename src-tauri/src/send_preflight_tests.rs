@@ -1,48 +1,111 @@
 use super::*;
 
-// All three replies are held until all three requests arrive. Serial I/O
-// cannot pass this test, regardless of scheduler speed or the machine's RTT.
-#[tokio::test]
-async fn paid_send_preflight_takes_at_most_two_round_trips() {
+// A read launched beside own-price can return a usable snapshot which becomes
+// invalid while own-price is still held. A sequential reader sees the change.
+async fn stale_preflight_read_refuses(change: &str, expected: &str) {
     let enabled = Arc::new(AtomicBool::new(false));
-    let arrivals = Arc::new((Mutex::new(0usize), std::sync::Condvar::new()));
-    let (active, reads) = (enabled.clone(), arrivals.clone());
+    let changed = Arc::new(AtomicBool::new(false));
+    let grant = Arc::new(Mutex::new(g1_grant(3600, 400_000, 400_000)));
+    grant.lock().unwrap()["per_recipient_msat"] = serde_json::json!({A: 50_000});
+    let (held_tx, held_rx) = tokio::sync::oneshot::channel();
+    let held = Mutex::new(Some(held_tx));
+    let (snapshot_tx, snapshot_rx) = tokio::sync::oneshot::channel();
+    let snapshot = Mutex::new(Some(snapshot_tx));
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let release = Mutex::new(release_rx);
+    let peer_change = change == "peer";
+    let (active, updated, live_grant) = (enabled.clone(), changed.clone(), grant.clone());
     let routes: Routes = Arc::new(move |_, path, _| {
-        if active.load(Ordering::SeqCst)
-            && matches!(path, "/payments/price/0" | "/pricing/peers" | "/pair/grant")
-        {
-            let (lock, wake) = &*reads;
-            let mut count = lock.lock().unwrap();
-            *count += 1;
-            wake.notify_all();
-            let (_guard, timeout) = wake.wait_timeout_while(count, Duration::from_secs(2), |n| *n < 3).unwrap();
-            if timeout.timed_out() { return (503, "preflight reads were serialized".into()); }
+        if !active.load(Ordering::SeqCst) { return (0, String::new()); }
+        if path == "/payments/price/0" {
+            if let Some(tx) = held.lock().unwrap().take() {
+                tx.send(()).unwrap();
+                release.lock().unwrap().recv_timeout(Duration::from_secs(5)).unwrap();
+            }
         }
-        (0, String::new())
+        let reply = match path {
+            "/pricing/peers" if peer_change => serde_json::json!([
+                {"peer_id": A, "prices": {"communication": if updated.load(Ordering::SeqCst) { 9000 } else { 2000 }}, "age_secs": 0, "stale": false}
+            ]).to_string(),
+            "/pair/grant" if !peer_change => serde_json::json!({"grant": *live_grant.lock().unwrap()}).to_string(),
+            _ => return (0, String::new()),
+        };
+        // Capture the response before notifying: changing server state cannot
+        // alter a reply already returned to the host by a concurrent read.
+        if let Some(tx) = snapshot.lock().unwrap().take() { let _ = tx.send(()); }
+        (200, reply)
     });
     let (node, _dir, g1) = g1_node_with(&["read", "receive"], Some(routes));
     with_book(&node.state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
     g1.grant.lock().unwrap()["per_recipient_msat"] = serde_json::json!({A: 50_000});
     g1_approved(&node, 500_000).await;
+    *node.state.all_in_caps_node.lock().unwrap() = Some(OWN.into());
+    enabled.store(true, Ordering::SeqCst);
+    let interrupt = async {
+        held_rx.await.unwrap();
+        // Old code returns the early snapshot. Correct code cannot issue that
+        // read yet; the bounded wait lets us release own-price in either case.
+        let _ = tokio::time::timeout(Duration::from_millis(500), snapshot_rx).await;
+        match change {
+            "revoked" => *grant.lock().unwrap() = serde_json::Value::Null,
+            "exhausted" => {
+                let mut grant = grant.lock().unwrap();
+                grant["used_msat"] = serde_json::json!(400_000);
+                grant["remaining_msat"] = serde_json::json!(0);
+            }
+            "peer" => changed.store(true, Ordering::SeqCst),
+            _ => unreachable!(),
+        }
+        release_tx.send(()).unwrap();
+    };
+    let (result, ()) = tokio::join!(
+        do_conversation_send(&node.state, A, false, "gm", 7000, None, None),
+        interrupt,
+    );
+    assert_eq!(result.unwrap_err().code, expected);
+    assert_eq!(composes(&node), 0);
+    assert_eq!(budget_now(&node.state).spent_msat, 0);
+    assert!(spend_journal(&node.state).unwrap().pending().unwrap().is_none());
+}
+
+#[tokio::test]
+async fn paid_send_preflight_refuses_grant_revoked_during_stalled_own_price() {
+    stale_preflight_read_refuses("revoked", "grant_ended").await;
+}
+
+#[tokio::test]
+async fn paid_send_preflight_refuses_grant_exhausted_during_stalled_own_price() {
+    stale_preflight_read_refuses("exhausted", "grant_exhausted").await;
+}
+
+#[tokio::test]
+async fn paid_send_preflight_refuses_peer_price_raised_during_stalled_own_price() {
+    stale_preflight_read_refuses("peer", "price_changed").await;
+}
+
+// Count serialized pre-compose round trips, excluding the compose POST itself.
+// Capabilities may be reused; prices and authority must be fresh and ordered.
+#[tokio::test]
+async fn paid_send_preflight_takes_at_most_four_round_trips() {
+    let (node, _dir, g1) = g1_node(&["read", "receive"]);
+    with_book(&node.state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
+    g1.grant.lock().unwrap()["per_recipient_msat"] = serde_json::json!({A: 50_000});
+    g1_approved(&node, 500_000).await;
     // The quote shown before Send already established the all-in contract.
     *node.state.all_in_caps_node.lock().unwrap() = Some(OWN.into());
-    node.seen.lock().unwrap().clear();
-    enabled.store(true, Ordering::SeqCst);
 
-    do_conversation_send(&node.state, A, false, "gm", 7000, None, None).await.unwrap();
-    let targets = node.targets();
-    let compose = targets.iter().position(|p| p == "POST /messages/compose").unwrap();
-    let statuses = targets[..compose].iter().filter(|p| *p == "GET /status").count();
-    assert_eq!(*arrivals.0.lock().unwrap(), 3);
-    assert_eq!(compose, statuses + 3, "no extra pre-compose requests: {targets:?}");
-    assert!(statuses + 1 <= 2, "one status RTT plus one concurrent read RTT: {targets:?}");
-
-    // A second send reuses capabilities, but always reads prices and grant.
-    *arrivals.0.lock().unwrap() = 0;
-    node.seen.lock().unwrap().clear();
-    do_conversation_send(&node.state, A, false, "again", 7000, None, None).await.unwrap();
-    assert!(!node.targets().iter().any(|p| p == "GET /status"));
-    assert_eq!(*arrivals.0.lock().unwrap(), 3);
+    for (text, statuses) in [("gm", 1), ("again", 0)] {
+        node.seen.lock().unwrap().clear();
+        do_conversation_send(&node.state, A, false, text, 7000, None, None).await.unwrap();
+        let targets = node.targets();
+        let compose = targets.iter().position(|p| p == "POST /messages/compose").unwrap();
+        assert_eq!(targets[..compose].iter().filter(|p| *p == "GET /status").count(), statuses);
+        assert_eq!(&targets[statuses..compose], [
+            "GET /payments/price/0", "GET /pricing/peers", "GET /pair/grant",
+        ], "prices first, grant last, no duplicate status or extra reads: {targets:?}");
+        assert_eq!(compose, statuses + 3);
+        assert!(compose <= 4, "one status RTT plus three sequential reads: {targets:?}");
+    }
 }
 
 #[tokio::test]
@@ -112,7 +175,7 @@ async fn paid_send_preflight_keeps_price_before_grant_decisions() {
 }
 
 #[tokio::test]
-async fn paid_send_preflight_parallel_readers_refresh_the_token_once() {
+async fn paid_send_preflight_refreshes_the_token_once() {
     let (node, _dir, g1) = g1_node(&["read", "receive"]);
     with_book(&node.state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
     g1.grant.lock().unwrap()["per_recipient_msat"] = serde_json::json!({A: 50_000});

@@ -2843,19 +2843,14 @@ async fn read_messages(
 async fn read_price_quote(state: &NodeState, peer: Option<&str>) -> Result<control::PriceQuote, String> {
     let peer = peer.map(control::node_id).transpose()?;
     let own_path = control::price_path(control::KIND_CHAT);
-    let (own, tables) = tokio::join!(
-        get_json::<control::KindPrice>(state, &own_path),
-        async {
-            // An empty table is normal; a failed read is not a usable quote.
-            match peer {
-                Some(_) => get_json::<Vec<control::PeerPrice>>(state, "/pricing/peers").await,
-                None => Ok(Vec::new()),
-            }
-        },
-    );
-    // Preserve own-price then peer-price error precedence regardless of arrival.
-    let own = own?;
-    let tables = tables?;
+    let own = get_json::<control::KindPrice>(state, &own_path).await?;
+    // The send decision uses the peer price (or own-price as its fallback).
+    // Read it after own-price so a stalled fallback read cannot age a captured
+    // peer price past a ceiling change before we evaluate it.
+    let tables = match peer {
+        Some(_) => get_json::<Vec<control::PeerPrice>>(state, "/pricing/peers").await?,
+        None => Vec::new(),
+    };
     Ok(control::price_quote(own, &tables, peer.as_deref()))
 }
 
@@ -4135,18 +4130,17 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, body: serde_
     money_post_preflight(state, auth, path, body, max_msat, charge, retry, None).await
 }
 
-/// Raw grant I/O only: no grant decisions or mutations occur before pricing.
-/// Holding the money lock keeps another spend from aging this read in a queue.
+/// Hold the money lock from pricing through dispatch so another host spend
+/// cannot age the quote in a queue. The live grant is always read last.
 struct SendPreflight<'a> {
     money: tokio::sync::MutexGuard<'a, ()>,
     epoch: ConnectionEpoch,
-    grant: Option<Result<Option<NodeGrant>, ActionError>>,
 }
 
 async fn money_post_preflight(state: &NodeState, auth: Auth, path: &str, mut body: serde_json::Value, max_msat: u64, charge: Option<Charge>, retry: Option<&spend_journal::Undelivered>, preflight: Option<SendPreflight<'_>>) -> Result<String, ActionError> {
-    let (_money, prefetched_grant, epoch) = match preflight {
-        Some(p) => (p.money, p.grant, Some(p.epoch)),
-        None => (state.money.lock().await, None, None),
+    let (_money, epoch) = match preflight {
+        Some(p) => (p.money, Some(p.epoch)),
+        None => (state.money.lock().await, None),
     };
     let check_connection = || {
         if epoch.as_ref().is_some_and(|e| *e != state.connection_epoch()) {
@@ -4186,10 +4180,9 @@ async fn money_post_preflight(state: &NodeState, auth: Auth, path: &str, mut bod
     }
     let all_in_caps = has_all_in_caps(state);
     check_connection()?;
-    let node_grant = match prefetched_grant {
-        Some(result) => check_read_grant(state, path, &body, max_msat, result?),
-        None => check_node_grant(state, path, &body, max_msat).await,
-    }?;
+    // Last network read before compose, after pricing and any first-contact
+    // probe: revocation or another client's spend during either must refuse.
+    let node_grant = check_node_grant(state, path, &body, max_msat).await?;
     let reserve_msat = match (&charge, &node_grant) {
         // A zero cap: the node pays nothing, re-admission included.
         _ if max_msat == 0 => 0,
@@ -5265,13 +5258,8 @@ async fn do_message_send_with(
         max_msat
     } else {
         let money = state.money.lock().await;
-        let needs_grant = state.node_grant.lock().unwrap().is_some();
-        let (quote, grant) = tokio::join!(
-            read_price_quote(state, Some(recipient)),
-            async { if needs_grant { Some(read_grant(state).await) } else { None } },
-        );
-        preflight = Some(SendPreflight { money, epoch, grant });
-        let quote = quote?;
+        let quote = read_price_quote(state, Some(recipient)).await?;
+        preflight = Some(SendPreflight { money, epoch });
         body["max_routing_fee_msat"] = serde_json::json!(quote.max_routing_fee_msat);
         (if quote.peer_stale { quote.own_msat } else { quote.peer_msat.unwrap_or(quote.own_msat) })
             .max(act::MIN_PAYMENT_MSAT).checked_add(quote.max_routing_fee_msat)
