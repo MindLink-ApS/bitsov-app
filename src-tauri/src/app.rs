@@ -3744,10 +3744,30 @@ async fn first_contact_request(window: WebviewWindow<impl tauri::Runtime>, state
 }
 
 #[tauri::command(rename_all = "snake_case")]
-async fn first_contact_status(window: WebviewWindow<impl tauri::Runtime>, state: State<'_, NodeState>, id: String) -> Result<owner_contact::View, ActionError> {
+async fn first_contact_status(window: WebviewWindow<impl tauri::Runtime>, state: State<'_, NodeState>, id: String, recipient: Option<String>) -> Result<owner_contact::View, ActionError> {
     reject_sealed_window(&window)?;
     drop(window);
-    do_first_contact_status(state.inner(), &id).await
+    do_first_contact_status_for(state.inner(), &id, recipient.as_deref()).await
+}
+
+async fn do_first_contact_status_for(state: &NodeState, id: &str, recipient: Option<&str>) -> Result<owner_contact::View, ActionError> {
+    let Some(recipient) = recipient else { return do_first_contact_status(state, id).await; };
+    // Validate before any network access. This id is the node's budget op,
+    // not the app-local receipt id used by the legacy branch.
+    let (path, recipient) = owner_contact::device_path(id, recipient)?;
+    let fence = approval_fence(state);
+    let body = read_remote_contact_status(state, &path).await?;
+    // Approval may have added a recipient budget, so read it after the status.
+    let grant = read_grant(state).await?.ok_or_else(grant::ended)?;
+    let (pending, view) = owner_contact::Pending::device(&body, id, &recipient, &grant, fence, now_ms())?;
+    if view.ready {
+        let r = &view.request;
+        let (auth, _) = plan_message(state, &recipient, false, r.max_total_msat, Some(r.contact_budget_msat))?;
+        check_auth(state, auth)?;
+    }
+    if approval_fence(state) != fence { return Err(fence_broken()); }
+    if view.ready { *state.owner_contact.lock().unwrap() = Some(pending); }
+    Ok(view)
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -13217,6 +13237,121 @@ mod control_act_tests {
         let t = node.targets();
         let compose = t.iter().position(|x| x == "POST /messages/compose").unwrap();
         assert_eq!(t[compose - 1], "GET /pair/grant");
+    }
+
+    #[tokio::test]
+    async fn first_contact_status_null_keeps_local_receipt_flow() {
+        let (node, _dir, g1) = g1_node(&["read", "receive"]);
+        *g1.first_contact.lock().unwrap() = Some((200, serde_json::json!({})));
+        g1_approved(&node, 500_000).await;
+        let view = do_first_contact_request(&node.state, C, 10000, Some(50_000)).await.unwrap().unwrap();
+        let waiting = do_first_contact_status_for(&node.state, &view.id, None).await.unwrap();
+        assert!(!waiting.ready);
+        assert_eq!(waiting.owner_command, view.owner_command);
+        assert_eq!(waiting.approval_window_secs, None);
+        let until = now_unix() + 120;
+        node.state.owner_contact.lock().unwrap().as_ref().unwrap().write_receipt(C, 10000, until);
+        let ready = do_first_contact_status_for(&node.state, &view.id, None).await.unwrap();
+        assert!(ready.ready);
+        assert_eq!(ready.expires_at_ms, until as u64 * 1000);
+        assert!(!node.targets().iter().any(|p| p.contains("/first-contact-grant/")));
+    }
+
+    #[tokio::test]
+    async fn first_contact_status_recipient_reads_device_grant_and_allows_one_send() {
+        let reply = Arc::new(Mutex::new(serde_json::json!({
+            "grant_op_id": "ab12", "recipient": C, "state": "pending",
+            "approval_window_secs": 300, "approval": null,
+        })));
+        let response = reply.clone();
+        let route: Routes = Arc::new(move |m, p, _| {
+            if p.starts_with("/pair/first-contact-grant/") {
+                assert_eq!(m, "GET");
+                assert_eq!(p, format!("/pair/first-contact-grant/ab12?recipient={C}"));
+                return (200, response.lock().unwrap().to_string());
+            }
+            (0, String::new())
+        });
+        let (node, _dir, g1) = g1_node_with(&["read", "receive"], Some(route));
+        *g1.first_contact.lock().unwrap() = Some((200, serde_json::json!({})));
+        g1.grant.lock().unwrap()["per_recipient_msat"] = serde_json::json!({C: 50_000});
+        g1_approved(&node, 500_000).await;
+        let waiting = do_first_contact_status_for(&node.state, "ab12", Some(C)).await.unwrap();
+        assert!(!waiting.ready);
+        assert_eq!(waiting.id, "ab12");
+        assert_eq!(waiting.approval_window_secs, Some(120));
+        assert!(waiting.expires_at_ms <= now_ms() + 120_000);
+        assert!(waiting.owner_command.is_empty());
+        let until = now_unix() + 120;
+        reply.lock().unwrap()["state"] = "approved".into();
+        reply.lock().unwrap()["approval"] = serde_json::json!({
+            "recipient": C, "max_total_msat": 10000, "expires_at": until,
+            "granted_by": "device:0123456789abcdef0123456789abcdef",
+        });
+        let ready = do_first_contact_status_for(&node.state, "ab12", Some(&C.to_uppercase())).await.unwrap();
+        assert!(ready.ready);
+        assert_eq!(ready.expires_at_ms, until as u64 * 1000);
+        assert_eq!(ready.request, owner_contact::Request {
+            client_id: "c1".into(), grant_op_id: "ab12".into(), recipient: C.into(),
+            max_total_msat: 10000, contact_budget_msat: 50_000,
+        });
+        assert!(compose_bodies(&node).is_empty(), "status is read-only");
+        do_message_send_with(&node.state, C, false, "hello", 10000, None, Some(50_000)).await.unwrap();
+        assert_eq!(compose_bodies(&node).len(), 1);
+        reply.lock().unwrap()["state"] = "consumed".into();
+        assert_eq!(do_first_contact_status_for(&node.state, "ab12", Some(C)).await.unwrap_err().code, "owner_contact_unavailable");
+        assert!(do_message_send_with(&node.state, C, false, "again", 10000, None, Some(50_000)).await.is_err());
+        assert_eq!(compose_bodies(&node).len(), 1);
+        assert!(node.seen.lock().unwrap().iter().filter(|(_, p, _, _)| p.contains("/first-contact-grant/"))
+            .all(|(m, p, token, _)| m == "GET" && p.starts_with("/api/v1/pair/first-contact-grant/") && token.as_deref() == Some("tok.spend")));
+    }
+
+    #[tokio::test]
+    async fn first_contact_status_replacement_cannot_satisfy_an_older_send_check() {
+        let entered = Arc::new(AtomicBool::new(false));
+        let released = Arc::new(AtomicBool::new(false));
+        let (started, release) = (entered.clone(), released.clone());
+        let polls = AtomicUsize::new(0);
+        let until = now_unix() + 120;
+        let route: Routes = Arc::new(move |_, p, _| {
+            if p.starts_with("/pair/first-contact-grant/") {
+                if polls.fetch_add(1, Ordering::SeqCst) == 1 {
+                    started.store(true, Ordering::SeqCst);
+                    while !release.load(Ordering::SeqCst) { std::thread::sleep(Duration::from_millis(1)); }
+                }
+                return (200, serde_json::json!({
+                    "grant_op_id": "ab12", "recipient": C, "state": "approved", "approval_window_secs": 300,
+                    "approval": {"recipient": C, "max_total_msat": 10000, "expires_at": until,
+                        "granted_by": "device:0123456789abcdef0123456789abcdef"},
+                }).to_string());
+            }
+            (0, String::new())
+        });
+        let (node, _dir, g1) = g1_node_with(&["read", "receive"], Some(route));
+        g1.grant.lock().unwrap()["per_recipient_msat"] = serde_json::json!({C: 50_000});
+        g1_approved(&node, 500_000).await;
+        do_first_contact_status_for(&node.state, "ab12", Some(C)).await.unwrap();
+        let replace = async {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while !entered.load(Ordering::SeqCst) { tokio::task::yield_now().await; }
+            }).await.unwrap();
+            let result = do_first_contact_status_for(&node.state, "ab12", Some(C)).await;
+            released.store(true, Ordering::SeqCst);
+            assert!(result.unwrap().ready);
+        };
+        let (old, ()) = tokio::join!(confirm_first_contact(&node.state, C, 10000, 50_000, true), replace);
+        assert_eq!(old.unwrap_err().code, "owner_only");
+        assert!(node.state.owner_contact.lock().unwrap().is_some(), "the replacement remains available");
+    }
+
+    #[tokio::test]
+    async fn first_contact_status_bad_recipient_fails_before_network() {
+        let (node, _dir, _) = g1_node(&["read", "receive"]);
+        for recipient in ["".to_string(), "a".repeat(63), "a".repeat(65), "g".repeat(64), format!("{C}&other=1"), format!(" {C}"), "é".repeat(32)] {
+            let err = do_first_contact_status_for(&node.state, "ab12", Some(&recipient)).await.unwrap_err();
+            assert_eq!(err.code, "invalid", "{recipient}");
+        }
+        assert!(node.targets().is_empty());
     }
 
     #[tokio::test]
