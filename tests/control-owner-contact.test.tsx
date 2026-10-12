@@ -226,3 +226,35 @@ it('offers a fresh quote if approval expires during the host send recheck', asyn
   expect(element<HTMLTextAreaElement>('[data-composer] textarea').value).toBe('hello with an owner approval');
   expect(source.send).toHaveBeenCalledTimes(1);
 });
+
+it('first contact on a remote node without Touch ID: the Touch ID offer leads, the owner command waits under Other ways', async () => {
+  const source = sampleSource({ firstLiveMs: 1e9 });
+  const budget: BudgetView = {
+    paused: false, waiting_for_owner: false, preset: 'careful',
+    autopay: { state: 'open', open_until_ms: Date.now() + 861400000, ceiling_msat: 500000, basis: 'node_grant' },
+    ceiling_msat: 500000, spent_msat: 0, unsettled_msat: 0, rows: [],
+    presets: SAMPLE_PRESETS, window_ms: 861400000, max_daily_msat: 100000000, node_grant: null,
+  };
+  source.budgetStatus = async () => ({ ...budget });
+  source.deviceKeyStatus = async () => ({ available: true, state: 'none', fingerprint: null, owner_action: null, expires_at_ms: null });
+  const approval: OwnerContactApproval = {
+    id: 'request-two', ready: false, expires_at_ms: Date.now() + 60000,
+    request: { client_id: 'c1', grant_op_id: 'ab12', recipient: A, max_total_msat: 14000, contact_budget_msat: 50000 },
+    owner_command: `konsensus approve first-contact --client 'c1' --op 'ab12' --to '${A}' --max-msat '14000' --contact-budget-msat '50000'`,
+  };
+  source.firstContactRequest = vi.fn(async () => approval);
+  source.firstContactStatus = vi.fn(async () => approval);
+  source.firstContactCancel = vi.fn(async () => {});
+  source.send = vi.fn();
+  mount = document.createElement('div'); document.body.appendChild(mount);
+  dispose = render(() => <ControlCenter remote source={source} active ready error={null} ownId={SAMPLE_OWN_ID} firstRun={<span />} />, mount);
+  await vi.waitFor(() => expect(element('[data-door-quote]')?.getAttribute('data-door-quote')).toBe('14000'));
+  type('hello with Touch ID first');
+  element<HTMLButtonElement>('[data-send]').click();
+  await vi.waitFor(() => expect(element('[data-touch-id-first]')).not.toBeNull());
+  const other = element<HTMLDetailsElement>('[data-touch-id-first] details[data-other-ways]');
+  expect(other.open).toBe(false);
+  expect(other.querySelector<HTMLTextAreaElement>('[data-contact-owner-command]')!.value).toBe(approval.owner_command);
+  expect(element<HTMLTextAreaElement>('[data-composer] textarea').value).toBe('hello with Touch ID first');
+  expect(source.send).not.toHaveBeenCalled();
+});

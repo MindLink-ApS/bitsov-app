@@ -409,6 +409,54 @@ describe('control center shell', () => {
     expect(mount.textContent).not.toContain('Approve this Mac once at your node');
   });
 
+  describe('Touch ID first where spending stalls on a node command', () => {
+    const pendingSpend = () => ({ state: 'pending', lapse: null, basis: null, open_until_ms: null, window_ms: 600_000,
+      pending: { op_id: 'ab01', expires_at_ms: Date.now() + 600_000, owner_action: 'konsensus grant --op ab01', owner_can_grant: true } });
+    const none = { available: true, state: 'none', fingerprint: null, owner_action: null, expires_at_ms: null };
+    async function open(remote: boolean, device: object) {
+      const host = stubHost({
+        pairing_status: () => ({ ...paired, remote }),
+        device_key_status: () => device,
+        spend_status: pendingSpend,
+      });
+      start();
+      await vi.waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
+      [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
+      await vi.waitFor(() => expect(mount.querySelector('[data-owner-action]')).not.toBeNull());
+      return host;
+    }
+
+    it('a remote node with Touch ID not set up: the offer leads, the command waits under Other ways, the draft stays', async () => {
+      const { calls } = await open(true, none);
+      const offer = mount.querySelector('[data-touch-id-first]')!;
+      expect(offer).not.toBeNull();
+      expect(offer.textContent).toContain('Approve on this Mac with Touch ID');
+      expect(offer.textContent).toContain('your node’s owner approves this Mac one time');
+      const other = offer.querySelector<HTMLDetailsElement>('details[data-other-ways]')!;
+      expect(other.open).toBe(false);
+      expect(other.querySelector('[data-owner-action]')?.textContent).toBe('konsensus grant --op ab01');
+      // Not said twice in the spend bar.
+      expect(mount.querySelector('[data-device-settings-hint]')).toBeNull();
+      const area = mount.querySelector<HTMLTextAreaElement>('[data-composer] textarea')!;
+      area.value = 'kept draft'; area.dispatchEvent(new Event('input', { bubbles: true }));
+      click('[data-touch-id-setup]');
+      await vi.waitFor(() => expect(mount.querySelector('[data-panel="node"]')).not.toBeNull());
+      expect(mount.querySelector<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('kept draft');
+      expect(calls.some((c) => c.cmd === 'message_send' || c.cmd === 'device_key_register')).toBe(false);
+    });
+
+    it('a local node (no registration there) keeps the command as it was', async () => {
+      await open(false, none);
+      expect(mount.querySelector('[data-touch-id-first]')).toBeNull();
+      expect(mount.querySelector('details[data-other-ways]')).toBeNull();
+    });
+
+    it('a Mac already registered, or one setting up, is not offered it again', async () => {
+      await open(true, { ...none, state: 'registered', fingerprint: '3F9A-12C4' });
+      expect(mount.querySelector('[data-touch-id-first]')).toBeNull();
+    });
+  });
+
   it('shows the one-time owner command for this Mac, and a pending request can be cancelled', async () => {
     const cmd = 'konsensus device approve --op dd01 --config /Users/owner/node/konsensus.toml';
     const { calls } = stubHost({
