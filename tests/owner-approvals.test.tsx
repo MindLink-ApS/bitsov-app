@@ -73,12 +73,28 @@ describe('requester side: waiting for the other owner device', () => {
     expect($('[data-approval-wait-approved]')).not.toBeNull();
   });
 
-  it.each(['approval_unknown', 'approval_expired'])('%s ends the wait with nothing approved', async (code) => {
-    const status = vi.fn(async () => ({ ok: false as const, error: { code: code as never, message: 'x' } }));
+  it('a node that says expired ends the wait: nothing was approved', async () => {
+    const status = vi.fn(async () => ({ ok: false as const, error: { code: 'approval_expired' as never, message: 'x' } }));
     const onApproved = vi.fn();
     show(() => <OwnerApprovalWait view={view()} now={NOW} status={status} onApproved={onApproved} onStop={vi.fn()} pollMs={5} />);
-    await vi.waitFor(() => expect($('[data-approval-wait-expired]')!.textContent).toBe(refusalText(code)));
+    await vi.waitFor(() => expect($('[data-approval-wait-expired]')!.textContent).toBe(refusalText('approval_expired')));
     expect(onApproved).not.toHaveBeenCalled();
+  });
+
+  it.each(['approval_unknown', 'node'])('%s on the status read is uncertain, keeps checking, and a later consumed still approves', async (code) => {
+    let approved = false;
+    const status = vi.fn(async () => (approved
+      ? { ok: true as const, value: view({ status: 'consumed' }) }
+      : { ok: false as const, error: { code: code as never, message: 'x' } }));
+    const onApproved = vi.fn();
+    show(() => <OwnerApprovalWait view={view()} now={NOW} status={status} onApproved={onApproved} onStop={vi.fn()} pollMs={5} />);
+    await vi.waitFor(() => expect(mount.textContent).toContain('Couldn’t check whether it was approved'));
+    expect(mount.textContent).not.toContain('Nothing was approved');
+    expect($('[data-approval-wait-cancel]')).not.toBeNull();
+    // Still checking: the other device approves later, and the wait goes on by itself.
+    await vi.waitFor(() => expect(status.mock.calls.length).toBeGreaterThan(2));
+    approved = true;
+    await vi.waitFor(() => expect(onApproved).toHaveBeenCalledTimes(1));
   });
 
   it('a passing error is said and the wait goes on', async () => {
@@ -148,11 +164,34 @@ describe('round 1 (#216): nothing vanishes, nothing claims more than is known', 
     expect(!!$('[data-approval-approve]')).toBe(approveAgain);
   });
 
-  it.each(['approval_unknown', 'approval_expired'])('a %s wait has a Dismiss that frees the requester', async (code) => {
+  it('an expired wait has a Dismiss that frees the requester', async () => {
     const onStop = vi.fn();
-    show(() => <OwnerApprovalWait view={view()} now={NOW} status={vi.fn(async () => ({ ok: false as const, error: { code: code as never, message: 'x' } }))} onApproved={vi.fn()} onStop={onStop} pollMs={5} />);
+    show(() => <OwnerApprovalWait view={view()} now={NOW} status={vi.fn(async () => ({ ok: false as const, error: { code: 'approval_expired' as never, message: 'x' } }))} onApproved={vi.fn()} onStop={onStop} pollMs={5} />);
     await vi.waitFor(() => expect($('[data-approval-wait-dismiss]')).not.toBeNull());
     $<HTMLButtonElement>('[data-approval-wait-dismiss]')!.click();
     expect(onStop).toHaveBeenCalled();
+  });
+
+  it('an uncertain wait (unknown) is never a dead end: Cancel frees the requester', async () => {
+    const onStop = vi.fn();
+    show(() => <OwnerApprovalWait view={view()} now={NOW} status={vi.fn(async () => ({ ok: false as const, error: { code: 'approval_unknown' as never, message: 'x' } }))} onApproved={vi.fn()} onStop={onStop} pollMs={5} />);
+    await vi.waitFor(() => expect(mount.textContent).toContain('Couldn’t check whether it was approved'));
+    $<HTMLButtonElement>('[data-approval-wait-cancel]')!.click();
+    expect(onStop).toHaveBeenCalled();
+  });
+
+  it('kept outcomes live in the memory the shell owns: closing and reopening the panel keeps them', async () => {
+    const { approvalMemory } = await import('../src/control/OwnerApprovals');
+    const memory = approvalMemory();
+    const approve = vi.fn(async () => ({ ok: false as const, error: { code: 'approval_forbidden' as never, message: 'x' } }));
+    show(() => <OwnerApprovals approvals={[view()]} now={NOW} approve={approve} memory={memory} />);
+    $<HTMLButtonElement>('[data-approval-approve]')!.click();
+    await vi.waitFor(() => expect($('[data-approval-result="refused"]')).not.toBeNull());
+    dispose?.(); mount.remove();
+    // Reopened, and the node no longer lists it: the outcome is still there until Dismiss.
+    show(() => <OwnerApprovals approvals={[]} now={NOW} approve={approve} memory={memory} />);
+    expect($('[data-approval-result="refused"]')!.textContent).toBe(refusalText('approval_forbidden'));
+    $<HTMLButtonElement>('[data-approval-dismiss]')!.click();
+    expect($('[data-owner-approval]')).toBeNull();
   });
 });

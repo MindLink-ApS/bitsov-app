@@ -469,6 +469,50 @@ describe('control center shell', () => {
       expect(mount.querySelector('[data-approvals-badge]')).toBeNull();
     }, 25_000);
 
+    it('the very first discovery read failing in transport is said: "Couldn’t read your node’s approvals list"', async () => {
+      stubHost({
+        pairing_status: () => ({ ...paired, remote: true }),
+        node_overview: overview(['owner_device_approval_v1']),
+        owner_device_keys: () => { throw { code: 'node', message: 'connection lost' }; },
+      });
+      start();
+      await vi.waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
+      [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
+      await vi.waitFor(() => expect(mount.querySelector('[data-profile]')).not.toBeNull());
+      await vi.waitFor(() => expect(mount.querySelector<HTMLButtonElement>('[data-profile]')!.disabled).toBe(false));
+      click('[data-profile]');
+      await vi.waitFor(() => expect(mount.querySelector('[data-open-settings]')).not.toBeNull());
+      click('[data-open-settings]');
+      await vi.waitFor(() => expect(mount.querySelector('[data-tab="node"]')).not.toBeNull());
+      click('[data-tab="node"]');
+      await vi.waitFor(() => expect(mount.querySelector('[data-owner-approvals-error]')?.textContent).toContain('Couldn’t read your node’s approvals list'));
+      expect(mount.querySelector('[data-owner-approvals-error]')!.textContent).not.toContain('Nothing was approved');
+      expect(mount.querySelector('[data-approval-approve]')).toBeNull();
+    });
+
+    it('an outcome survives Node → Body → Node until Dismiss', async () => {
+      stubHost({
+        pairing_status: () => ({ ...paired, remote: true }),
+        node_overview: overview(['owner_device_approval_v1']),
+        owner_device_keys: () => ({ device_approvals: 'enabled', owner_device_count: 2, device_keys: [] }),
+        owner_approvals_pending: () => [pendingView('op-a')],
+        owner_approval_approve: () => { throw { code: 'approval_budget_exceeded', message: 'over', remaining_msat: 2000 }; },
+      });
+      start();
+      await vi.waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
+      [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
+      await vi.waitFor(() => expect(mount.querySelector('[data-approvals-badge]')).not.toBeNull());
+      click('[data-profile]');
+      click('[data-open-approvals]');
+      await vi.waitFor(() => expect(mount.querySelector('[data-approval-approve]')).not.toBeNull());
+      mount.querySelector<HTMLButtonElement>('[data-approval-approve]')!.click();
+      await vi.waitFor(() => expect(mount.querySelector('[data-approval-result="refused"]')?.textContent).toContain('(2 sats left)'));
+      click('[data-tab="body"]');
+      await vi.waitFor(() => expect(mount.querySelector('[data-owner-approvals]')).toBeNull());
+      click('[data-tab="node"]');
+      await vi.waitFor(() => expect(mount.querySelector('[data-approval-result="refused"]')?.textContent).toContain('(2 sats left)'));
+    });
+
     it.each(['read_only_pairing', 'ai_pairing', 'seed_password_not_typed'])('a pairing the node does not let approve (%s) sees no list, badge or Approve', async (reason) => {
       const { calls } = await open({ approvals: reason });
       await vi.waitFor(() => expect(calls.some((c) => c.cmd === 'owner_device_keys')).toBe(true));

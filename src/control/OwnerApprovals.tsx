@@ -4,6 +4,19 @@ import { refusalText, secondsLeft, shortKey, termLines, type ApprovalView } from
 
 type Outcome<T> = { ok: true; value: T } | { ok: false; error: ActionError };
 
+/**
+ * What the owner pressed Approve on, what came of it, and what was dismissed:
+ * it stays until Dismiss, even after the request expires, leaves the node's
+ * list, or the panel is closed and opened again (the shell owns it).
+ */
+export function approvalMemory() {
+  const [hidden, setHidden] = createSignal<Set<string>>(new Set());
+  const [kept, setKept] = createSignal<Record<string, ApprovalView>>({});
+  const [said, setSaid] = createSignal<Record<string, { ok: boolean; text: string }>>({});
+  return { hidden, setHidden, kept, setKept, said, setSaid };
+}
+export type ApprovalMemory = ReturnType<typeof approvalMemory>;
+
 const clock = (secs: number) => `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`;
 
 /**
@@ -25,13 +38,12 @@ export function OwnerApprovals(props: {
   approve: (opId: string, approvalMessage: string) => Promise<Outcome<ApprovalView>>;
   /** After an approve that could not be confirmed: is it still waiting at the node? */
   recheck?: (opId: string) => Promise<'pending' | 'gone' | 'unknown'>;
+  /** Owned by the shell so outcomes survive leaving and reopening this panel; local if absent. */
+  memory?: ApprovalMemory;
 }) {
-  const [hidden, setHidden] = createSignal<Set<string>>(new Set());
+  const memory = props.memory ?? approvalMemory();
+  const { hidden, setHidden, kept, setKept, said, setSaid } = memory;
   const [busy, setBusy] = createSignal<string | null>(null);
-  // What the owner pressed Approve on, and what came of it, stays until dismissed,
-  // even after the request expires or leaves the node's list.
-  const [kept, setKept] = createSignal<Record<string, ApprovalView>>({});
-  const [said, setSaid] = createSignal<Record<string, { ok: boolean; text: string }>>({});
   const tap = () => (props.mobile ? 'your fingerprint' : 'Touch ID');
   const live = (v: ApprovalView) => v.status === 'pending' && secondsLeft(v, props.now) > 0;
   /** Approve is offered only while the node still lists it as waiting. */
@@ -162,11 +174,16 @@ export function OwnerApprovalWait(props: {
         setError(null);
         setView(r.value);
         if (r.value.status === 'consumed') props.onApproved(r.value);
-      } else if (r.error.code === 'approval_unknown' || r.error.code === 'approval_expired') {
+      } else if (r.error.code === 'approval_expired') {
+        // The node says it expired: nothing was approved.
         setView({ ...v, status: 'expired' });
         setError(refusalText(r.error.code));
       } else {
-        setError(refusalText(r.error.code, { reason: r.error.reason, remaining_msat: r.error.remaining_msat }));
+        // Unknown (a 404 after a restart) or unreachable: the other device may already
+        // have approved it. Never "nothing was approved"; keep checking (Cancel stops).
+        setError(r.error.code === 'approval_unknown' || r.error.code === 'node'
+          ? 'Couldn’t check whether it was approved. Still checking; if it was approved, this goes on by itself.'
+          : refusalText(r.error.code, { reason: r.error.reason, remaining_msat: r.error.remaining_msat }));
         setView({ ...v }); // keep polling
       }
     }, props.pollMs ?? 2000);

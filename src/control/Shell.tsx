@@ -7,7 +7,7 @@ import { usePairingActivity } from '../pairingActivity';
 import { createMessageEntrance } from './messageEntrance';
 import { LocalNodeSwitch } from '../onboarding/LocalNodeSwitch';
 import { DeviceApprovals } from '../onboarding/DeviceApprovals';
-import { BreakerCard, breakerReason, OwnerApprovals, OwnerApprovalWait, type BreakerReason } from './OwnerApprovals';
+import { approvalMemory, BreakerCard, breakerReason, OwnerApprovals, OwnerApprovalWait, type BreakerReason } from './OwnerApprovals';
 import { OWNER_DEVICE_APPROVAL, OWNER_DEVICE_BREAKER_RESET, refusalText, type ApprovalRequest, type ApprovalView, type DeviceKeysView } from './ownerApproval';
 import { HubTrustInfo } from './HubTrust';
 import { pollingSource } from './polling';
@@ -536,16 +536,20 @@ export function ControlCenter(props: Props) {
   const canApprove = () => approvalsCapable() && deviceKeys()?.device_approvals === 'enabled';
   // A failed read is said, never shown as "nothing is waiting", and stale entries go.
   const [approvalsError, setApprovalsError] = createSignal<string | null>(null);
+  // Kept outcomes outlive the Settings panel (Node → Body → Node), until Dismiss.
+  const approvalsMemory = approvalMemory();
+  /** A list read that failed in transport says so; a refusal says the node's reason. */
+  const listError = (e: ActionError) => (e.code === 'node' ? 'Couldn’t read your node’s approvals list. It is read again shortly.' : refusalText(e.code, e));
   const loadApprovals = async () => {
     if (!approvalsCapable()) { setDeviceKeys(null); setApprovals([]); setApprovalsError(null); return; }
     const keys = await act(() => source.deviceKeys());
     // A failed discovery keeps what was known, but no entry may be acted on from it.
-    if (!keys.ok) { setApprovals([]); setApprovalsError(refusalText(keys.error.code, keys.error)); return; }
+    if (!keys.ok) { setApprovals([]); setApprovalsError(listError(keys.error)); return; }
     setDeviceKeys(keys.value);
     if (!canApprove()) { setApprovals([]); setApprovalsError(null); return; }
     const pending = await act(() => source.approvalsPending());
     if (pending.ok) { setApprovals(pending.value.filter((v) => v.status === 'pending')); setApprovalsError(null); }
-    else { setApprovals([]); setApprovalsError(refusalText(pending.error.code, pending.error)); }
+    else { setApprovals([]); setApprovalsError(listError(pending.error)); }
   };
   /** After an approve the host could not confirm: is the request still waiting at the node? */
   const recheckApproval = async (opId: string): Promise<'pending' | 'gone' | 'unknown'> => {
@@ -1581,11 +1585,13 @@ export function ControlCenter(props: Props) {
           </Match>
           <Match when={tab() === 'node'}>
             <NodePanel deviceApprovals={<>
-              <Show when={canApprove() || (approvalsCapable() && approvalsError() !== null && deviceKeys() !== null)}>
+              {/* A discovery error shows on its own, even when the very first read failed. */}
+              <Show when={canApprove() || (approvalsCapable() && approvalsError() !== null)}>
                 <OwnerApprovals
                   approvals={approvals()}
                   error={approvalsError()}
                   recheck={recheckApproval}
+                  memory={approvalsMemory}
                   now={now()}
                   mobile={androidQrScannerAvailable()}
                   nameOf={(id) => { const p = peerById().get(id.toLowerCase()); return p ? peerName(p, p.node_id) : null; }}

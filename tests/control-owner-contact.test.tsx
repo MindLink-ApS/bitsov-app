@@ -483,14 +483,15 @@ describe('spend breakers on the requesting app', () => {
     expect(source.send).toHaveBeenCalledTimes(1);
   }, 10_000);
 
-  it('a reset request the node forgets has a Dismiss; the offer comes back', async () => {
+  it('a reset request the node forgets is uncertain, not "nothing approved"; Cancel brings the offer back', async () => {
     const { source } = setup('grant_paused', ALL);
     source.approvalStatus = vi.fn(async () => { throw { code: 'approval_unknown', message: 'gone' }; });
     await sendOnce();
     await vi.waitFor(() => expect(element('[data-breaker-reset]')).not.toBeNull());
     element<HTMLButtonElement>('[data-breaker-reset]').click();
-    await vi.waitFor(() => expect(element('[data-breaker] [data-approval-wait-dismiss]')).not.toBeNull(), { timeout: 4000 });
-    element<HTMLButtonElement>('[data-breaker] [data-approval-wait-dismiss]').click();
+    await vi.waitFor(() => expect(element('[data-breaker]').textContent).toContain('Couldn’t check whether it was approved'), { timeout: 4000 });
+    expect(element('[data-breaker]').textContent).not.toContain('Nothing was approved');
+    element<HTMLButtonElement>('[data-breaker] [data-approval-wait-cancel]').click();
     await vi.waitFor(() => expect(element('[data-breaker-reset]')).not.toBeNull());
   }, 10_000);
 
