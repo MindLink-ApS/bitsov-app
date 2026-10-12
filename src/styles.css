@@ -1271,7 +1271,7 @@ input[type='checkbox'], input[type='radio'] { width: auto; flex: none; padding: 
 .pair-words { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--s-3); list-style: none; padding: 0; margin: var(--s-3) 0; }
 .pair-words li { min-width: 0; padding: var(--s-4) var(--s-2); border: 1px solid var(--line-strong); border-radius: var(--r-control); background: var(--sunk); color: var(--ink); font-size: clamp(18px, 4vw, 24px); font-weight: 600; text-align: center; overflow-wrap: anywhere; }
 .node-offline { display: flex; flex-direction: column; align-items: center; gap: var(--s-3); margin: 0 auto; padding: var(--s-6) var(--s-4); width: min(100%, 520px); min-width: 0; color: var(--ink); text-align: center; overflow-wrap: anywhere; }
-.node-offline h2 { font-family: var(--font-display); font-size: var(--t-3xl); font-weight: 400; }
+.node-offline [data-offline-title] { font-family: var(--font-display); font-size: var(--t-3xl); font-weight: 400; }
 .node-offline p { margin: 0; }
 .node-offline ul { text-align: left; padding-left: var(--s-5); margin: 0; color: var(--muted); }
 .node-offline li + li { margin-top: var(--s-2); }

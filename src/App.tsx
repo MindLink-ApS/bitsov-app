@@ -174,7 +174,7 @@ function AppScreen() {
   const offline = () => !status().locked && (!!status().retry_after_secs ||
     (!status().ready && !!status().error && !softenError(status().error).money &&
       /connection[ _](refused|lost|closed)|ECONN|network[ _]error|failed to fetch|timed?[ _]out|unreachable|remote unavailable|remote handshake limit or endpoint unavailable|remote_handshake_unavailable/i.test(status().error!)));
-  const offlineScreen = () => <Show when={offline()}><OfflineNode remote={pairing().remote}
+  const offlineScreen = (level: () => 1 | 2 = () => 2) => <Show when={offline()}><OfflineNode remote={pairing().remote} level={level()}
     lastSeen={!status().node_id || status().node_id === lastSeen()?.nodeId ? lastSeen()?.at : null}
     retryAfterSecs={status().retry_after_secs} onRetry={retryPairing} /></Show>;
   let timer: number | undefined;
@@ -238,7 +238,8 @@ function AppScreen() {
   const setupHidden = () => offline() && !changeNode() && !repairing();
   const firstRun = (
     <div class="first-run" data-first-run>
-      {offlineScreen()}
+      {/* While the setup steps are hidden, the offline card is the page: its title is the page's h1. */}
+      {offlineScreen(() => (setupHidden() ? 1 : 2))}
       <Show when={setupHidden()}>
         <button type="button" class="quiet offline-change" data-offline-change onClick={() => setChangeNode(true)}>Use a different node</button>
       </Show>
