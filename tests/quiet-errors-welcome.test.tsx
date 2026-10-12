@@ -255,3 +255,24 @@ describe('welcome home', () => {
     expect(mount.querySelector('[data-welcome]')).toBeNull();
   });
 });
+
+describe('onboarding polish', () => {
+  it('Reconnect is a real button, and says it is working while it runs', async () => {
+    let finish!: () => void;
+    start(() => <SoftError message="connection refused" summary="We could not reach your node." onReconnect={() => new Promise<void>((r) => { finish = r; })} />);
+    const reconnect = mount.querySelector<HTMLButtonElement>('[data-soft-reconnect]')!;
+    expect(reconnect.classList.contains('quiet')).toBe(false);
+    expect(reconnect.classList.contains('soft')).toBe(true);
+    reconnect.click();
+    await vi.waitFor(() => expect(reconnect.textContent).toBe('Reconnecting…'));
+    expect(reconnect.disabled).toBe(true);
+    finish();
+    await vi.waitFor(() => expect(reconnect.textContent).toBe('Reconnect'));
+  });
+
+  it('during setup the rail is marked, so its "after setup" placeholders stay hidden', () => {
+    const source = sampleSource({ firstLiveMs: 1e9 });
+    start(() => <ControlCenter source={source} active={false} ready={false} error={null} ownId={SAMPLE_OWN_ID} firstRun={<span />} />);
+    expect(mount.querySelector('.rail')?.classList.contains('rail-setup')).toBe(true);
+  });
+});

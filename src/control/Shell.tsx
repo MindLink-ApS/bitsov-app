@@ -1845,7 +1845,7 @@ function Rail(props: {
   };
 
   return (
-    <nav class="rail" aria-label="Tracks" inert={props.behind}>
+    <nav class="rail" classList={{ 'rail-setup': !props.active }} aria-label="Tracks" inert={props.behind}>
       <div class="mark">
         Bit<span>Sov</span>
       </div>
@@ -2167,7 +2167,6 @@ function Conversation(props: {
         verified={peerVerify().verified}
         keyChanged={peerVerify().keyChanged}
       />
-      <Show when={props.track.kind === 'peer' && props.peer}><CallNetworkNote /></Show>
       <Show when={props.track.kind === 'peer' && props.peer ? props.peer : null}>
         {(p) => (
           <ContactPanel
@@ -2584,7 +2583,10 @@ function CallPanel(props: {
           </Show>
         </header>
         {props.approval}
-        <CallNetworkNote />
+        {/* Across networks a call needs a STUN server: said where it matters, while a call is being set up or has failed to connect. */}
+        <Show when={['calling', 'ringing', 'connecting'].includes(v().phase) || (v().phase === 'ended' && (v().reason === 'failed' || v().reason === 'timeout'))}>
+          <CallNetworkNote />
+        </Show>
         <p class="hint" data-call-recovery-note>A network interruption may trigger one paid recovery attempt within your budget. Recovery uses another call admission and signalling fees.</p>
         <Show when={v().media === 'video' && (v().phase === 'live' || v().phase === 'connecting' || v().phase === 'reconnecting')}>
           <div class="call-videos">
@@ -4134,7 +4136,10 @@ function Composer(props: {
                 <button type="button" class="link" onClick={closePanel}>
                   Remove
                 </button>
-                <span class="hint">Up to 1.4 MB · pays like a message</span>
+                {/* The price shows here in every state, approval pending or not, as it does under the message bar. */}
+                <span class="hint" data-file-price={mode() === 'file' && shown().msat !== null ? shown().msat! : undefined}>
+                  {shown().msat !== null ? `up to ${fmtAmount(shown().msat!)} · includes max routing fee` : shown().basis} · files up to 1.4 MB
+                </span>
               </div>
               <button type="submit" class="primary soft money" disabled={disabled()} data-send>
                 {label()}

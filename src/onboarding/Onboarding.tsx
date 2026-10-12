@@ -200,7 +200,8 @@ export function Onboarding(props: {
         when={stage() === 'node'}
         fallback={
           <header class="ob-head" data-ob-head="trust">
-            <h1>Before you add sats</h1>
+            {/* Named like its step: the stepper above says "Your identity". */}
+            <h1>Your identity</h1>
             <Show
               when={!props.pairing().bootstrap}
               fallback={<Show when={props.status().local_owner && !props.pairing().remote} fallback={<p class="lede">Your node has no identity yet. {props.pairing().remote ? "Restore it at your node before adding sats." : "Restore your existing identity on this Mac before adding sats."} Creating a new identity from this screen is not available yet.</p>}><p class="lede">Create your identity below, write down its recovery phrase, and confirm this Mac with Touch ID before adding sats.</p></Show>}
@@ -396,6 +397,28 @@ export function Onboarding(props: {
                       : 'Touch ID Enrolled · Secure Enclave'}
                   </span>
                 </Show>
+                <p class="hint" style={{ margin: '4px 0 0' }} data-pairing-plain>
+                  {props.pairing().remote ? 'This app reaches your box over an encrypted connection.' : 'This app talks only to the node on this Mac.'}
+                </p>
+              </div>
+            </div>
+
+            {/* What this app may do stays in view (not behind the details). */}
+            <p class="pairing-access">
+              Access: <strong>{scopeList(props.pairing().scopes)}</strong>
+            </p>
+
+
+            <Show when={props.pairing().bootstrap}>
+              <p class="hint" data-identity-free>
+                Your node is identity-free (fresh install). {props.status().local_owner && !props.pairing().remote ? "Create your identity with the owner setup below." : props.pairing().remote ? "Set up your box with the owner setup below." : "You can restore an existing identity on this Mac."} Nothing has been created yet.
+              </p>
+            </Show>
+
+            {/* Progressive disclosure: technical codes & tripwires kept under summary */}
+            <details class="pairing-details">
+              <summary>Pairing verification & security details</summary>
+              <div class="pairing-details-body">
                 <Show
                   when={props.pairing().remote}
                   fallback={
@@ -414,23 +437,6 @@ export function Onboarding(props: {
                     the local proxy only accepts this app’s credential.
                   </p>
                 </Show>
-              </div>
-            </div>
-
-            <p class="pairing-access">
-              Access: <strong>{scopeList(props.pairing().scopes)}</strong>
-            </p>
-
-            <Show when={props.pairing().bootstrap}>
-              <p class="hint" data-identity-free>
-                Your node is identity-free (fresh install). {props.status().local_owner && !props.pairing().remote ? "Create your identity with the owner setup below." : props.pairing().remote ? "Set up your box with the owner setup below." : "You can restore an existing identity on this Mac."} Nothing has been created yet.
-              </p>
-            </Show>
-
-            {/* Progressive disclosure: technical codes & tripwires kept under summary */}
-            <details class="pairing-details">
-              <summary>Pairing verification & security details</summary>
-              <div class="pairing-details-body">
                 <Show when={props.pairing().short_code}>
                   <p class="short-code" data-short-code>
                     Pairing code <code>{props.pairing().short_code}</code>
