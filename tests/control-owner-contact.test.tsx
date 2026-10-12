@@ -415,7 +415,8 @@ describe('owner approval v1: first contact approved on the owner’s other devic
 
   it('a request that expires before approval has a Dismiss; Send is free again', async () => {
     const { source } = setup();
-    source.approvalStatus = vi.fn(async () => { throw { code: 'approval_expired', message: 'expired' }; });
+    // The node's own answer (a successful read) says expired.
+    source.approvalStatus = vi.fn(async () => ({ ...view(), status: 'expired' }) as never);
     await press('waited too long');
     await vi.waitFor(() => expect(element('[data-approval-wait-dismiss]')).not.toBeNull(), { timeout: 4000 });
     expect(element<HTMLButtonElement>('[data-send]').disabled).toBe(true);

@@ -13,7 +13,10 @@ export function approvalMemory() {
   const [hidden, setHidden] = createSignal<Set<string>>(new Set());
   const [kept, setKept] = createSignal<Record<string, ApprovalView>>({});
   const [said, setSaid] = createSignal<Record<string, { ok: boolean; text: string }>>({});
-  return { hidden, setHidden, kept, setKept, said, setSaid };
+  // The approve in flight (by op id): it outlives the panel, so leaving and coming
+  // back never offers a second Approve while the first is unresolved.
+  const [busy, setBusy] = createSignal<string | null>(null);
+  return { hidden, setHidden, kept, setKept, said, setSaid, busy, setBusy };
 }
 export type ApprovalMemory = ReturnType<typeof approvalMemory>;
 
@@ -42,8 +45,10 @@ export function OwnerApprovals(props: {
   memory?: ApprovalMemory;
 }) {
   const memory = props.memory ?? approvalMemory();
-  const { hidden, setHidden, kept, setKept, said, setSaid } = memory;
-  const [busy, setBusy] = createSignal<string | null>(null);
+  const { hidden, setHidden, kept, setKept, said, setSaid, busy, setBusy } = memory;
+  /** An "Approved" is final: nothing later (a stale reply, a second press) overwrites it. */
+  const settle = (opId: string, outcome: { ok: boolean; text: string }) =>
+    setSaid((s) => (s[opId]?.ok ? s : { ...s, [opId]: outcome }));
   const tap = () => (props.mobile ? 'your fingerprint' : 'Touch ID');
   const live = (v: ApprovalView) => v.status === 'pending' && secondsLeft(v, props.now) > 0;
   /** Approve is offered only while the node still lists it as waiting. */
@@ -59,28 +64,28 @@ export function OwnerApprovals(props: {
     setKept((k) => { const { [opId]: _gone, ...rest } = k; return rest; });
   };
   const approve = async (v: ApprovalView) => {
-    if (busy()) return;
+    if (busy() !== null || said()[v.op_id]?.ok) return;
     setBusy(v.op_id);
     setKept((k) => ({ ...k, [v.op_id]: v }));
-    setSaid((s) => { const { [v.op_id]: _old, ...rest } = s; return rest; });
+    setSaid((s) => { if (s[v.op_id]?.ok) return s; const { [v.op_id]: _old, ...rest } = s; return rest; });
     try {
       const r = await props.approve(v.op_id, v.approval_message);
       if (r.ok) {
-        setSaid((s) => ({ ...s, [v.op_id]: { ok: true, text: 'Approved. The app that asked can go on now.' } }));
+        settle(v.op_id, { ok: true, text: 'Approved. The app that asked can go on now.' });
       } else if (r.error.code === 'node') {
         // The request may have reached the node: never say "nothing was approved" here.
-        setSaid((s) => ({ ...s, [v.op_id]: { ok: false, text: 'Couldn’t confirm whether the approval went through. Checking your node…' } }));
+        settle(v.op_id, { ok: false, text: 'Couldn’t confirm whether the approval went through. Checking your node…' });
         const now = await (props.recheck?.(v.op_id) ?? Promise.resolve('unknown' as const));
-        setSaid((s) => ({ ...s, [v.op_id]: {
+        settle(v.op_id, {
           ok: false,
           text: now === 'pending'
             ? 'Couldn’t confirm the approval. Your node still lists this request as waiting, so it was not approved; you can try again.'
             : now === 'gone'
               ? 'Couldn’t confirm the approval. Your node no longer lists this request (it was approved or it expired). Check with the app that asked.'
               : 'Couldn’t confirm whether the approval went through, and your node could not be read. Check with the app that asked.',
-        } }));
+        });
       } else {
-        setSaid((s) => ({ ...s, [v.op_id]: { ok: false, text: refusalText(r.error.code, { reason: r.error.reason, remaining_msat: r.error.remaining_msat }) } }));
+        settle(v.op_id, { ok: false, text: refusalText(r.error.code, { reason: r.error.reason, remaining_msat: r.error.remaining_msat }) });
       }
     } finally { setBusy(null); }
   };
@@ -174,16 +179,11 @@ export function OwnerApprovalWait(props: {
         setError(null);
         setView(r.value);
         if (r.value.status === 'consumed') props.onApproved(r.value);
-      } else if (r.error.code === 'approval_expired') {
-        // The node says it expired: nothing was approved.
-        setView({ ...v, status: 'expired' });
-        setError(refusalText(r.error.code));
       } else {
-        // Unknown (a 404 after a restart) or unreachable: the other device may already
-        // have approved it. Never "nothing was approved"; keep checking (Cancel stops).
-        setError(r.error.code === 'approval_unknown' || r.error.code === 'node'
-          ? 'Couldn’t check whether it was approved. Still checking; if it was approved, this goes on by itself.'
-          : refusalText(r.error.code, { reason: r.error.reason, remaining_msat: r.error.remaining_msat }));
+        // A failed read establishes nothing (404 after a restart, 403, 409, 500,
+        // unreachable): the other device may already have approved it. Only a
+        // successful read's own status counts. Keep checking; Cancel stops.
+        setError('Couldn’t check whether it was approved. Still checking; if it was approved, this goes on by itself.');
         setView({ ...v }); // keep polling
       }
     }, props.pollMs ?? 2000);

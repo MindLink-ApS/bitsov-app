@@ -490,6 +490,35 @@ describe('control center shell', () => {
       expect(mount.querySelector('[data-approval-approve]')).toBeNull();
     });
 
+    it('an approve still in flight survives Node → Body → Node: one call, no second Approve', async () => {
+      let finish!: (v: unknown) => void;
+      const host = stubHost({
+        pairing_status: () => ({ ...paired, remote: true }),
+        node_overview: overview(['owner_device_approval_v1']),
+        owner_device_keys: () => ({ device_approvals: 'enabled', owner_device_count: 2, device_keys: [] }),
+        owner_approvals_pending: () => [pendingView('op-a')],
+        owner_approval_approve: () => new Promise((r) => { finish = r; }),
+      });
+      start();
+      await vi.waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
+      [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
+      await vi.waitFor(() => expect(mount.querySelector('[data-approvals-badge]')).not.toBeNull());
+      click('[data-profile]');
+      click('[data-open-approvals]');
+      await vi.waitFor(() => expect(mount.querySelector('[data-approval-approve]')).not.toBeNull());
+      mount.querySelector<HTMLButtonElement>('[data-approval-approve]')!.click();
+      await vi.waitFor(() => expect(host.calls.filter((c) => c.cmd === 'owner_approval_approve')).toHaveLength(1));
+      click('[data-tab="body"]');
+      await vi.waitFor(() => expect(mount.querySelector('[data-owner-approvals]')).toBeNull());
+      click('[data-tab="node"]');
+      await vi.waitFor(() => expect(mount.querySelector('[data-approval-busy]')).not.toBeNull());
+      expect(mount.querySelector<HTMLButtonElement>('[data-approval-approve]')!.disabled).toBe(true);
+      mount.querySelector<HTMLButtonElement>('[data-approval-approve]')!.click();
+      finish({ ...pendingView('op-a'), status: 'consumed' });
+      await vi.waitFor(() => expect(mount.querySelector('[data-approval-result="ok"]')).not.toBeNull());
+      expect(host.calls.filter((c) => c.cmd === 'owner_approval_approve')).toHaveLength(1);
+    });
+
     it('an outcome survives Node → Body → Node until Dismiss', async () => {
       stubHost({
         pairing_status: () => ({ ...paired, remote: true }),
