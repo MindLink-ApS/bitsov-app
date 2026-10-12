@@ -1313,3 +1313,15 @@ input[type='checkbox'], input[type='radio'] { width: auto; flex: none; padding: 
 .qr-scan-title { margin: 0; font-weight: 600; }
 .qr-scan-video { width: 100%; aspect-ratio: 4 / 3; object-fit: cover; border-radius: 12px; background: #000; }
 .qr-scan-box .quiet { justify-self: end; }
+
+/* First run: the rail shows BitSov and the node's state only; contacts,
+   rooms and the rest appear once setup is done (no "after setup" placeholders). */
+.rail.rail-setup .track-group { display: none; }
+/* Opened from its toggle, the panel's own title is for screen readers; Hide sits at the right. */
+.hub-trust-head:has(.hub-trust-title.sr-only) { justify-content: flex-end; }
+
+/* Unlock after a restart: the same readable column as setup, the badge inline. */
+.locked-node { width: 100%; max-width: 640px; margin: clamp(var(--s-6), 7vh, 72px) auto var(--s-8); padding: 0 var(--s-4); box-sizing: border-box; }
+.locked-node [data-locked-badge] { align-self: flex-start; width: fit-content; }
+/* Offline: one quiet way to point the app at a different node. */
+.first-run > .offline-change { width: auto; align-self: center; min-height: 44px; }

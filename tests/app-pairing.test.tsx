@@ -226,6 +226,24 @@ describe('app shell pairing wiring', () => {
     expect(mount.querySelector('[data-node-offline]')).toBeNull();
   });
 
+  it('offline: the setup steps wait behind one choice; Use a different node shows them', async () => {
+    vi.stubGlobal('__TAURI_INTERNALS__', { invoke: (cmd: string) => {
+      if (cmd === 'node_status') return Promise.resolve({ ready: false, node_id: null, error: 'remote unavailable', retry_after_secs: 20 });
+      if (cmd === 'pairing_status') return Promise.resolve({ ...paired, remote: true });
+      return Promise.reject(new Error('not available'));
+    } });
+    mount = document.createElement('div'); document.body.appendChild(mount);
+    dispose = render(() => <App />, mount);
+    await vi.waitFor(() => expect(mount!.querySelector('[data-node-offline]')).not.toBeNull());
+    // No stepper or setup heading under an offline node: it would read as progress.
+    expect(mount.querySelector('.stepper')).toBeNull();
+    expect(mount.querySelector('[data-ob-head]')).toBeNull();
+    mount.querySelector<HTMLButtonElement>('[data-offline-change]')!.click();
+    await vi.waitFor(() => expect(mount!.querySelector('[data-ob-head]')).not.toBeNull());
+    expect(mount.querySelector('[data-offline-change]')).toBeNull();
+    expect(mount.querySelector('[data-node-offline]')).not.toBeNull();
+  });
+
   it.each(['payment outcome unknown: connection lost', 'pairing proof did not verify'])('preserves a non-transport warning: %s', async error => {
     vi.stubGlobal('__TAURI_INTERNALS__', { invoke: (cmd: string) => {
       if (cmd === 'node_status') return Promise.resolve({ ready: false, node_id: null, error });

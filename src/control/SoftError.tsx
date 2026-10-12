@@ -35,7 +35,8 @@ export function SoftError(props: {
         {summary()}
       </p>
       <Show when={props.onReconnect && !soft().money}>
-        <button type="button" class="quiet" disabled={reconnecting()} onClick={() => void reconnect()}>Reconnect</button>
+        {/* The way forward is a real button, not a quiet link. */}
+        <button type="button" class="soft" data-soft-reconnect disabled={reconnecting()} onClick={() => void reconnect()}>{reconnecting() ? 'Reconnecting…' : 'Reconnect'}</button>
       </Show>
       <Show when={detail()}>
         {(d) => (

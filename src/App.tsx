@@ -227,9 +227,17 @@ function AppScreen() {
     if (timer) window.clearInterval(timer);
   });
 
+  // Offline, the setup steps below would read as progress: they wait behind
+  // one quiet choice, for an owner who wants to point the app elsewhere.
+  const [changeNode, setChangeNode] = createSignal(false);
+  createEffect(() => { if (!offline()) setChangeNode(false); });
   const firstRun = (
     <div class="first-run" data-first-run>
       {offlineScreen()}
+      <Show when={offline() && !changeNode()}>
+        <button type="button" class="quiet offline-change" data-offline-change onClick={() => setChangeNode(true)}>Use a different node</button>
+      </Show>
+      <Show when={!offline() || changeNode()}>
 
       <Show
         when={status().initialization_repair && status().initialization_repair !== 'none'}
@@ -312,6 +320,7 @@ function AppScreen() {
             }}
           />
         }</Show>
+      </Show>
       </Show>
     </div>
   );
