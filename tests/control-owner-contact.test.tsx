@@ -1,4 +1,4 @@
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'solid-js/web';
 import { ControlCenter } from '../src/control/Shell';
 import { sampleSource, SAMPLE_OWN_ID, SAMPLE_PRESETS } from '../src/control/sample';
@@ -323,4 +323,102 @@ it('the budget waiting card (remote, Touch ID not set up) leads with the offer a
   // The spend bar's own "not set up" pointer is not said a second time.
   expect(mount.querySelector('[data-device-settings-hint]')).toBeNull();
   expect(source.send).not.toHaveBeenCalled();
+});
+
+describe('owner approval v1: first contact approved on the owner’s other device', () => {
+  const budget: BudgetView = {
+    paused: false, waiting_for_owner: false, preset: 'careful',
+    autopay: { state: 'open', open_until_ms: Date.now() + 861400000, ceiling_msat: 500000, basis: 'node_grant' },
+    ceiling_msat: 500000, spent_msat: 0, unsettled_msat: 0, rows: [],
+    presets: SAMPLE_PRESETS, window_ms: 861400000, max_daily_msat: 100000000, node_grant: null,
+  };
+  const view = (over: Record<string, unknown> = {}) => ({
+    op_id: 'op-fc', node: 'n', client_id: 'this-mac', client_pubkey: 'ef'.repeat(32), epoch: 1, grant_op: 'g-fc',
+    request: { kind: 'first_contact', terms: { recipient: A, max_total_msat: 14000, budget_msat: 50000 } },
+    nonce: '22'.repeat(16), expires_at: Math.floor(Date.now() / 1000) + 300, approval_message: 'm', status: 'pending', owner_action: 'konsensus approve …', ...over,
+  });
+  function setup(capable = true) {
+    const source = sampleSource({ firstLiveMs: 1e9 });
+    source.budgetStatus = async () => ({ ...budget });
+    const overview = source.nodeOverview.bind(source);
+    source.nodeOverview = async () => ({ ...await overview(), capabilities: capable ? ['owner_device_approval_v1'] : [] });
+    source.firstContactRequest = vi.fn(async () => { throw new Error('the console request must not be used'); });
+    source.firstContactCancel = vi.fn(async () => {});
+    let status: Record<string, unknown> = view();
+    source.approvalRequest = vi.fn(async () => view() as never);
+    source.approvalStatus = vi.fn(async () => status as never);
+    let grantReady = false;
+    source.firstContactStatus = vi.fn(async (id: string) => ({ id, ready: grantReady, expires_at_ms: Date.now() + 120_000, owner_command: '',
+      request: { client_id: 'this-mac', grant_op_id: id, recipient: A, max_total_msat: 14000, contact_budget_msat: 50000 } }) as never);
+    source.send = vi.fn(async (recipient: string) => ({ message_id: 'sent-v1', recipient, is_room: false, delivered: true, amount_msat: 14000, sent_at_ms: Date.now() })) as never;
+    mount = document.createElement('div'); document.body.appendChild(mount);
+    dispose = render(() => <ControlCenter remote source={source} active ready error={null} ownId={SAMPLE_OWN_ID} firstRun={<span />} />, mount);
+    return { source, consume: (over: Record<string, unknown> = {}) => { status = view({ status: 'consumed', ...over }); }, grant: () => { grantReady = true; } };
+  }
+  const press = async (text: string) => {
+    await vi.waitFor(() => expect(element('[data-door-quote]')?.getAttribute('data-door-quote')).toBe('14000'));
+    type(text);
+    element<HTMLButtonElement>('[data-send]').click();
+  };
+
+  it('asks the other device instead of the node console, then checks the grant and sends once', async () => {
+    const { source, consume, grant } = setup();
+    await press('hello via my phone');
+    await vi.waitFor(() => expect(element('[data-owner-approval-wait="pending"]')).not.toBeNull());
+    expect(source.approvalRequest).toHaveBeenCalledWith({ kind: 'first_contact', terms: { recipient: A, max_total_msat: 14000, budget_msat: 50000 } });
+    expect(source.firstContactRequest).not.toHaveBeenCalled();
+    expect(element('[data-owner-approval-wait]').textContent).toContain('Waiting for your approval on your other owner device');
+    expect(element<HTMLButtonElement>('[data-send]').disabled).toBe(true);
+    expect(source.send).not.toHaveBeenCalled();
+    consume();
+    await vi.waitFor(() => expect(element('[data-contact-approval="device-approved"]')).not.toBeNull(), { timeout: 4000 });
+    await vi.waitFor(() => expect(source.firstContactStatus).toHaveBeenCalledWith('g-fc', A));
+    expect(source.send).not.toHaveBeenCalled();
+    grant();
+    await vi.waitFor(() => expect(source.send).toHaveBeenCalledTimes(1), { timeout: 4000 });
+    await vi.waitFor(() => expect(mount.querySelector('[data-message="sent-v1"]')).not.toBeNull());
+    await new Promise((r) => setTimeout(r, 1200));
+    expect(source.send).toHaveBeenCalledTimes(1);
+  }, 15_000);
+
+  it('a refused request is said in plain words and nothing is sent', async () => {
+    const { source } = setup();
+    source.approvalRequest = vi.fn(async () => { throw { code: 'approval_off', message: 'x', reason: 'seed_password_not_typed' }; });
+    await press('not today');
+    await vi.waitFor(() => expect(element('[data-composer-note]')?.textContent).toContain('password is typed at the node'));
+    expect(element<HTMLTextAreaElement>('[data-composer] textarea').value).toBe('not today');
+    expect(source.send).not.toHaveBeenCalled();
+  });
+
+  it('editing the draft while waiting stops the wait here; nothing is sent', async () => {
+    const { source, consume, grant } = setup();
+    await press('changing my mind');
+    await vi.waitFor(() => expect(element('[data-owner-approval-wait="pending"]')).not.toBeNull());
+    type('changing my mind, edited');
+    await vi.waitFor(() => expect(mount.querySelector('[data-owner-approval-wait]')).toBeNull());
+    consume(); grant();
+    await new Promise((r) => setTimeout(r, 2500));
+    expect(source.send).not.toHaveBeenCalled();
+  }, 10_000);
+
+  it('approved but no grant to use: "Contact approval expired… Ask again", nothing sent', async () => {
+    const { source, consume } = setup();
+    await press('too late');
+    await vi.waitFor(() => expect(element('[data-owner-approval-wait="pending"]')).not.toBeNull());
+    consume({ grant_op: null });
+    await vi.waitFor(() => expect(element('[data-composer-note]')?.textContent).toContain('Ask again'), { timeout: 4000 });
+    expect(source.send).not.toHaveBeenCalled();
+  }, 10_000);
+
+  it('a node without owner_device_approval_v1 keeps today’s console request', async () => {
+    const { source } = setup(false);
+    source.firstContactRequest = vi.fn(async () => ({ id: 'old', ready: false, expires_at_ms: Date.now() + 60000, owner_command: 'konsensus approve first-contact …',
+      request: { client_id: 'c1', grant_op_id: 'ab12', recipient: A, max_total_msat: 14000, contact_budget_msat: 50000 } }));
+    source.firstContactStatus = vi.fn(async () => ({ id: 'old', ready: false, expires_at_ms: Date.now() + 60000, owner_command: 'konsensus approve first-contact …',
+      request: { client_id: 'c1', grant_op_id: 'ab12', recipient: A, max_total_msat: 14000, contact_budget_msat: 50000 } }));
+    await press('older node');
+    await vi.waitFor(() => expect(mount.querySelector('[data-contact-owner-command]')).not.toBeNull());
+    expect(source.approvalRequest).not.toHaveBeenCalled();
+    expect(mount.querySelector('[data-owner-approval-wait]')).toBeNull();
+  });
 });

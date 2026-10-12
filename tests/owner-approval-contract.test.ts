@@ -38,3 +38,13 @@ describe('owner approval contract helpers', () => {
     expect(shortKey('ABCDEF')).toBe('abcdef');
   });
 });
+
+import { asActionError } from '../src/control/state';
+describe('host refusals keep only what the screens may use', () => {
+  it('keeps a known approvals-off reason and a real remaining amount, drops anything else', () => {
+    expect(asActionError({ code: 'approval_off', message: 'off', reason: 'seed_password_not_typed' })).toEqual({ code: 'approval_off', message: 'off', reason: 'seed_password_not_typed' });
+    expect(asActionError({ code: 'approval_off', message: 'off', reason: '<b>anything</b>' })).toEqual({ code: 'approval_off', message: 'off' });
+    expect(asActionError({ code: 'approval_budget_exceeded', message: 'over', remaining_msat: 2000 })).toEqual({ code: 'approval_budget_exceeded', message: 'over', remaining_msat: 2000 });
+    expect(asActionError({ code: 'approval_budget_exceeded', message: 'over', remaining_msat: -1 })).toEqual({ code: 'approval_budget_exceeded', message: 'over' });
+  });
+});
