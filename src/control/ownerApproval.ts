@@ -1,0 +1,164 @@
+/**
+ * Owner approval from an enrolled owner device (node owner-approval-v1,
+ * capability `owner_device_approval_v1`, node #303). Renderer contract only:
+ * the host (src-tauri) implements the four commands below against the node's
+ * /api/v1 routes; the renderer never signs, never builds a request body for
+ * the node itself, and never sees a token.
+ *
+ * Host commands (Source methods → Tauri invoke names):
+ *   approvalRequest(request)        → owner_approval_request   POST /pair/approval-request (local or remote router; any pairing)
+ *   approvalStatus(opId)            → owner_approval_status    GET  /pair/approval/{op_id} (only the requester, same epoch)
+ *   approvalsPending()              → owner_approvals_pending  GET  /pair/approvals/pending?approver_key_id=<this device's key> (remote/Noise only)
+ *   approvalApprove(opId, message)  → owner_approval_approve   POST /pair/approval/{op_id}/approve (remote/Noise only)
+ *   deviceKeys()                    → owner_device_keys        GET  /pair/device-keys
+ *
+ * approvalApprove: the host MUST
+ *   1. read the op again over this device's session and refuse (code
+ *      `approval_changed`) unless its approval_message is byte-identical to
+ *      `message` (the terms the owner was shown are the terms signed);
+ *   2. refuse (`approval_self`) if the op's client_id is this pairing's own;
+ *   3. show the Touch ID prompt with `approvalReason(view)` as its reason;
+ *   4. ECDSA P-256/SHA-256 sign the exact UTF-8 bytes of approval_message (no
+ *      trailing newline), DER hex, with this pairing's owner-approved device
+ *      key, and POST {approver_key_id, signature}.
+ *
+ * Host error mapping (ActionError.code; message is the node's error text, sanitized):
+ *   403 + reason seed_not_encrypted | seed_password_not_typed | owner_key_unavailable → approval_off (reason kept)
+ *   403 otherwise (not owner / AI / read-only / revoked / no Noise / self / consumed / bad signature / binding mismatch / no live grant) → approval_forbidden
+ *   409 {code: budget_exceeded, reason, remaining_msat}                     → approval_budget_exceeded (remaining_msat kept)
+ *   409 otherwise                                                           → approval_expired
+ *   404                                                                     → approval_unknown
+ *   429                                                                     → approval_rate_limited
+ *   400                                                                     → approval_invalid
+ *   500 (persistence; the request is still pending)                         → approval_unsaved
+ *   Touch ID / key: the existing device_* codes. Transport: `node`.
+ */
+
+export const OWNER_DEVICE_APPROVAL = 'owner_device_approval_v1';
+/** Node requests expire 300 s after creation; there is no decline or cancel endpoint. */
+export const APPROVAL_LIFETIME_SECS = 300;
+
+export type SpendGrantTerms = {
+  budget_msat: number;
+  per_call_max_msat: number;
+  /** 60..86400 */
+  window_secs: number;
+  /** 64-hex node id; absent means any recipient within the budget. */
+  recipient?: string;
+};
+export type FirstContactTerms = {
+  /** 64-hex node id */
+  recipient: string;
+  /** 1..100000 */
+  max_total_msat: number;
+  budget_msat?: number;
+};
+export type ApprovalRequest =
+  | { kind: 'spend_grant'; terms: SpendGrantTerms }
+  | { kind: 'first_contact'; terms: FirstContactTerms };
+
+/** consumed = approved and used; there is no declined state. */
+export type ApprovalStatus = 'pending' | 'consumed' | 'expired';
+
+/** The node's ApprovalView, as the host passes it through (no field added or reshaped). */
+export type ApprovalView = {
+  op_id: string;
+  node: string;
+  client_id: string;
+  client_pubkey: string;
+  epoch: number;
+  grant_op: string | null;
+  request: ApprovalRequest;
+  nonce: string;
+  /** unix seconds */
+  expires_at: number;
+  /** The exact text the owner device signs; shown verbatim under the terms. */
+  approval_message: string;
+  status: ApprovalStatus;
+  owner_action: string | null;
+};
+
+/** GET /pair/device-keys: whether this pairing can approve, and its owner devices. */
+export type DeviceKeysView = {
+  /** "enabled", or the reason approvals are off */
+  device_approvals: string;
+  owner_device_count: number;
+  device_keys: { key_id: string; fingerprint: string; name: string | null; registered_at: number }[];
+};
+
+export const APPROVAL_ERROR_CODES = [
+  'approval_off', 'approval_forbidden', 'approval_budget_exceeded', 'approval_expired', 'approval_unknown',
+  'approval_rate_limited', 'approval_invalid', 'approval_unsaved', 'approval_changed', 'approval_self',
+] as const;
+export type ApprovalErrorCode = (typeof APPROVAL_ERROR_CODES)[number];
+
+// ---- pure helpers the screens share (and the host uses for the Touch ID reason) ----
+
+const sats = (msat: number) => {
+  const s = msat / 1000;
+  return `${Number.isInteger(s) ? s.toLocaleString('en-US') : s.toLocaleString('en-US', { maximumFractionDigits: 3 })} ${s === 1 ? 'sat' : 'sats'}`;
+};
+const span = (secs: number) =>
+  secs % 3600 === 0 ? `${secs / 3600} h` : secs % 60 === 0 ? `${secs / 60} min` : `${secs} s`;
+
+/** A short, readable fingerprint of a hex key or id (never a name the node did not give). */
+export const shortKey = (hex: string) => {
+  const h = hex.replace(/[^0-9a-f]/gi, '').toLowerCase();
+  return h.length <= 12 ? h : `${h.slice(0, 6)}…${h.slice(-6)}`;
+};
+
+/** The terms as lines, from the node's structured request only (nothing inferred). */
+export function termLines(view: ApprovalView, nameOf?: (id: string) => string | null): string[] {
+  const who = (id: string) => {
+    const n = nameOf?.(id);
+    return n ? `${n} (${shortKey(id)})` : shortKey(id);
+  };
+  if (view.request.kind === 'spend_grant') {
+    const t = view.request.terms;
+    return [
+      'Let this app spend',
+      `Budget: up to ${sats(t.budget_msat)}`,
+      `Each payment: up to ${sats(t.per_call_max_msat)}`,
+      `For: ${span(t.window_secs)}`,
+      t.recipient ? `Only to: ${who(t.recipient)}` : 'To: any contact, within the budget',
+    ];
+  }
+  const t = view.request.terms;
+  return [
+    'Let this app message someone new',
+    `To: ${who(t.recipient)}`,
+    `First message: up to ${sats(t.max_total_msat)}`,
+    ...(t.budget_msat !== undefined ? [`Contact budget: up to ${sats(t.budget_msat)}`] : []),
+  ];
+}
+
+/** The Touch ID reason: the terms in one line, plus the requesting app and expiry. */
+export function approvalReason(view: ApprovalView): string {
+  return `${termLines(view).join(' · ')} · Requested by app ${shortKey(view.client_pubkey)}`;
+}
+
+export const secondsLeft = (view: ApprovalView, nowMs: number) => Math.max(0, Math.floor(view.expires_at - nowMs / 1000));
+
+/** Owner-facing words for each refusal; `node` is the node's own (sanitized) text, kept for detail. */
+export function refusalText(code: string, extra: { reason?: string; remaining_msat?: number } = {}): string {
+  switch (code) {
+    case 'approval_off':
+      return extra.reason === 'seed_password_not_typed'
+        ? 'Approvals from your devices are off until the node’s password is typed at the node after its restart.'
+        : extra.reason === 'seed_not_encrypted'
+          ? 'Approvals from your devices are off: this node’s keys are not password-protected.'
+          : 'Approvals from your devices are off on this node right now.';
+    case 'approval_forbidden': return 'Your node refused this approval. Nothing was approved.';
+    case 'approval_self': return 'This device made the request, so it cannot approve it. Approve it on your other owner device.';
+    case 'approval_changed': return 'The request changed after it was shown. Nothing was signed. Look at it again.';
+    case 'approval_budget_exceeded':
+      return `Your node refused: this is over the remaining budget${extra.remaining_msat !== undefined ? ` (${sats(extra.remaining_msat)} left)` : ''}. Nothing was approved.`;
+    case 'approval_expired': return 'This request expired. Nothing was approved. Ask again from the app that needs it.';
+    case 'approval_unknown': return 'Your node no longer knows this request (it may have restarted). Nothing was approved.';
+    case 'approval_rate_limited': return 'Too many approval requests just now. Wait a little and try again.';
+    case 'approval_invalid': return 'Your node could not read this request. Nothing was approved.';
+    case 'approval_unsaved': return 'Your node could not save the approval; the request is still waiting. Try again.';
+    case 'device_cancelled': return 'Touch ID was cancelled. Nothing was approved.';
+    default: return 'This did not complete. Nothing was approved.';
+  }
+}

@@ -1,6 +1,7 @@
 import type { AddInput, AddView, JoinInput, JoinView } from '../onboarding/AddDevice';
 import type { WatchSample, WatchUpdate } from './watches';
 import type { AssistantId, AssistantThread, ThreadRequest, LocalTurn } from './assistants';
+import type { ApprovalRequest, ApprovalView, DeviceKeysView } from './ownerApproval';
 // Where the shell's data comes from: the Rust host (Tauri commands + the
 // `node-live` event), or sample data in dev mode. The renderer never talks to
 // the node directly — no socket, no HTTP, no token (Gate G2). Every node call
@@ -175,6 +176,18 @@ export interface Source {
   /** Create the enclave key, prove it with Touch ID, ask the owner once. */
   deviceKeyRegister(): Promise<DeviceView>;
   deviceKeyCancel(): Promise<DeviceView>;
+  // Owner approval from an enrolled owner device (owner_device_approval_v1).
+  // Contract, host duties and error mapping: src/control/ownerApproval.ts.
+  /** Ask the node for an owner approval (any pairing). */
+  approvalRequest(request: ApprovalRequest): Promise<ApprovalView>;
+  /** This pairing's own request, as the node sees it now (404 → approval_unknown). */
+  approvalStatus(opId: string): Promise<ApprovalView>;
+  /** Requests this owner device may approve (never its own pairing's). Remote pairings only. */
+  approvalsPending(): Promise<ApprovalView[]>;
+  /** Approve with Touch ID: the host re-reads the op, checks `approvalMessage` is unchanged, signs it, posts it. */
+  approvalApprove(opId: string, approvalMessage: string): Promise<ApprovalView>;
+  /** Whether this pairing can approve, and the node's owner devices. */
+  deviceKeys(): Promise<DeviceKeysView>;
   /** One contact's envelope, signed with Touch ID; null takes the host default. */
   /** The host names the contact in the Touch ID dialog from the node's own peer list. */
   relationApprove(peer: string, budgetMsat: number | null, perActMaxMsat: number | null): Promise<SpendView>;
@@ -319,6 +332,11 @@ export const hostSource: Source = {
   joinDevice: input => invoke<JoinView>('join_device', { input }),
   deviceKeyStatus: () => invoke<DeviceView>('device_key_status'),
   deviceKeyRegister: () => invoke<DeviceView>('device_key_register'),
+  approvalRequest: (request) => invoke<ApprovalView>('owner_approval_request', { request }),
+  approvalStatus: (opId) => invoke<ApprovalView>('owner_approval_status', { opId }),
+  approvalsPending: () => invoke<ApprovalView[]>('owner_approvals_pending'),
+  approvalApprove: (opId, approvalMessage) => invoke<ApprovalView>('owner_approval_approve', { opId, approvalMessage }),
+  deviceKeys: () => invoke<DeviceKeysView>('owner_device_keys'),
   deviceKeyCancel: () => invoke<DeviceView>('device_key_cancel'),
   relationApprove: (peer, budgetMsat, perActMaxMsat) =>
     invoke<SpendView>('relation_approve', { peer, budget_msat: budgetMsat, per_act_max_msat: perActMaxMsat }),

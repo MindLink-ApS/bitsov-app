@@ -1056,6 +1056,12 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
       return ok(spend);
     },
     addDevice: () => ok({state:'unsupported'} as const),
+    // Sample data has no owner devices: owner approval is not offered (the capability is absent too).
+    approvalRequest: () => refuse('approval_off', 'Approvals from your devices are not available in sample data.'),
+    approvalStatus: () => refuse('approval_unknown', 'No such request in sample data.'),
+    approvalsPending: () => ok([]),
+    approvalApprove: () => refuse('approval_off', 'Approvals from your devices are not available in sample data.'),
+    deviceKeys: () => ok({ device_approvals: 'unavailable', owner_device_count: 0, device_keys: [] }),
     joinDevice: () => ok({state:'idle'} as const),
     deviceKeyStatus: () => {
       if (device.state === 'pending' && ++devicePolls >= GRANT_AFTER_POLLS) {

@@ -453,9 +453,16 @@ export type ActionError = {
     | 'not_ready' | 'app_not_ready'
     // Genome #115: the node proved nothing left the wallet (a room leg it could not bind, a fee ceiling).
     | 'not_dispatched'
+    // Owner approval from an enrolled owner device (src/control/ownerApproval.ts has the HTTP mapping).
+    | 'approval_off' | 'approval_forbidden' | 'approval_budget_exceeded' | 'approval_expired' | 'approval_unknown'
+    | 'approval_rate_limited' | 'approval_invalid' | 'approval_unsaved' | 'approval_changed' | 'approval_self'
     | 'invalid'
     | 'node';
   message: string;
+  /** `approval_off`: seed_not_encrypted | seed_password_not_typed | owner_key_unavailable. */
+  reason?: string;
+  /** `approval_budget_exceeded`: what the node says is left. */
+  remaining_msat?: number;
   /** `payment_settled_undelivered` only. */
   undelivered?: Undelivered;
   /** `retry_needs_admission` / `readmission_quoted`: the price to approve, when the node could tell. */
