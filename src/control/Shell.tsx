@@ -165,6 +165,8 @@ export type Prefill = {
   mode: 'message' | 'pay' | 'request';
   text: string;
   sats: number | null;
+  /** Put back from an Unsent card: only into an empty box; the card ends when applied. */
+  unsentId?: string;
 };
 
 /** The result of one action: its value, or why it did not happen. */
@@ -201,6 +203,15 @@ export type Actions = {
   send: (t: TrackRef, text: string, maxMsat: number, firstContactMsat?: number, sendingId?: string) => Promise<Outcome<unknown>>;
   /** Puts a message in the stream as "Sending · up to N" before its send runs; `send` replaces it. */
   beginSending: (t: TrackRef, text: string, capMsat: number) => string;
+  /** A queued message not dispatched (an earlier payment is unresolved): its bubble becomes an Unsent card. */
+  holdSending: (t: TrackRef, bubbleId: string, text: string) => void;
+  /** A refused message (nothing paid) that cannot safely go back in the box: kept whole on its track. */
+  keepUnsent: (t: TrackRef, text: string, reason: string) => void;
+  /** An Unsent card's text back into its own track's box (empty box only). */
+  restoreUnsent: (t: TrackRef, id: string) => void;
+  discardUnsent: (t: TrackRef, id: string) => void;
+  /** Bumps when a pending-result check answers: held sends may go again. */
+  reconciled: () => number;
   /**
    * Retry a paid, undelivered message through its own journal record. With
    * `approvedMsat`, the owner approved that price because admission may be due again.
@@ -313,6 +324,7 @@ export function ControlCenter(props: Props) {
   const [paid, setPaid] = createStore<Record<string, number>>({});
   const [allowances, setAllowances] = createStore<Record<string, { total_msat: number; max_routing_fee_msat: number; fee_paid_msat?: number; readmission_msat?: number }>>({});
   const [pendingRevision, setPendingRevision] = createSignal(0);
+  const [reconciled, setReconciled] = createSignal(0);
   const [artifacts, setArtifacts] = createStore<Record<string, Artifact[]>>({});
   // Rooms (room.ts): what each room send did this session, by room id; the New room picker.
   const [roomSends, setRoomSends] = createStore<Record<string, RoomSend[]>>({});
@@ -797,7 +809,7 @@ export function ControlCenter(props: Props) {
     } finally { setPairingBlockingActions(n => n - 1); }
   };
   /** A message the node took: show it in the thread with what it paid. */
-  const sentOne = (t: TrackRef, receipt: SendReceipt, text: string) => {
+  const sentOne = (t: TrackRef, receipt: SendReceipt, text: string, entrance = true) => {
     setPaid(receipt.message_id, receipt.amount_msat);
     setAllowances(receipt.message_id, {
       total_msat: receipt.total_msat ?? receipt.amount_msat + (receipt.readmission_msat ?? 0) + (receipt.max_routing_fee_msat ?? 0),
@@ -807,7 +819,7 @@ export function ControlCenter(props: Props) {
     });
     if (!deliveries[receipt.message_id]) setDeliveries(receipt.message_id, deliveryFromReceipt(receipt));
     const sent = sentMessage(receipt, ownId(), text);
-    setThreads('fresh', receipt.message_id, true);
+    if (entrance) setThreads('fresh', receipt.message_id, true);
     setThreads('t', trackKey(t), (old) => mergeMessages(old ?? [], [sent]));
     foldRooms([sent], false);
   };
@@ -854,12 +866,12 @@ export function ControlCenter(props: Props) {
     if (room) setTrack({ kind: 'bound', id: room.id });
   };
   /** A failed action that is not an approval or budget question stays in the track as a record. */
-  const recordFailure = <T,>(t: TrackRef, action: string, outcome: Outcome<T>): Outcome<T> => {
+  const recordFailure = <T,>(t: TrackRef, action: string, outcome: Outcome<T>, text?: string): Outcome<T> => {
     // A send that did not cross (price, setpoint) is also a membrane reading. A
     // price refusal stands at their door in the track instead of a failure row.
     if (!outcome.ok) foldMembrane((log) => membraneRefused(log, outcome.error, trackKey(t), Date.now()));
     if (!outcome.ok && outcome.error.code !== 'not_ready' && !needsApproval(outcome.error) && !isBudgetStop(outcome.error) && outboundKind(outcome.error) !== 'price' && outcome.error.code !== 'readmission_capped' && outcome.error.code !== 'readmission_quoted') {
-      addArtifact(t, { type: 'failed', action: FAILURE_LABEL[outcome.error.code] ?? action, error: outcome.error });
+      addArtifact(t, { type: 'failed', action: FAILURE_LABEL[outcome.error.code] ?? action, error: outcome.error, ...(text !== undefined ? { text } : {}) });
     }
     return outcome;
   };
@@ -1007,7 +1019,11 @@ export function ControlCenter(props: Props) {
       void loadBudget();
     },
     pendingRevision,
-    reconcile: () => act(() => source.spendReconcile()),
+    reconcile: async () => {
+      const r = await act(() => source.spendReconcile());
+      if (r.ok) setReconciled((v) => v + 1);
+      return r;
+    },
     approveBudget: async (ceilingMsat, preset) => {
       setErrors('budget', undefined);
       const r = await act(() => source.budgetApprove(ceilingMsat, preset));
@@ -1047,6 +1063,18 @@ export function ControlCenter(props: Props) {
     ownerStatus: (id) => act(() => source.firstContactStatus(id)),
     ownerCancel: (id) => source.firstContactCancel(id).catch(() => {}),
     beginSending: (t, text, capMsat) => addArtifact(t, { type: 'sending', text, capMsat }),
+    holdSending: (t, bubbleId, text) => batch(() => {
+      dropArtifact(t, bubbleId);
+      addArtifact(t, { type: 'unsent', text, why: 'held', reason: 'Not sent, nothing paid: an earlier payment’s result is not known yet.' });
+    }),
+    keepUnsent: (t, text, reason) => { addArtifact(t, { type: 'unsent', text, why: 'refused', reason }); },
+    restoreUnsent: (t, id) => {
+      const a = (artifacts[trackKey(t)] ?? []).find((x) => x.id === id);
+      if (a?.type !== 'unsent') return;
+      setPrefill({ seq: ++prefillSeq, key: trackKey(t), mode: 'message', text: a.text, sats: null, unsentId: id });
+    },
+    discardUnsent: (t, id) => dropArtifact(t, id),
+    reconciled,
     send: async (t, text, maxMsat, firstContactMsat, pendingBubble) => {
       if (t.kind !== 'peer' && t.kind !== 'room') return { ok: false, error: { code: 'invalid', message: 'nothing to send to' } };
       // Optimistic: the message shows at once as "Sending · up to N"; the
@@ -1075,8 +1103,10 @@ export function ControlCenter(props: Props) {
       }
       return batch(() => {
         dropArtifact(t, sendingId);
-        if (r.ok) sentOne(t, r.value, text);
-        return recordFailure(t, !r.ok && r.error.code === 'room_partial' ? 'Room send incomplete' : 'Message not sent', r);
+        // The bubble was already on screen: the settled message takes its place without a second entrance.
+        if (r.ok) sentOne(t, r.value, text, false);
+        // Unknown or partly paid: the failure card keeps the whole text, with no resend.
+        return recordFailure(t, !r.ok && r.error.code === 'room_partial' ? 'Room send incomplete' : 'Message not sent', r, !r.ok && UNSETTLED.has(r.error.code) ? text : undefined);
       });
     },
     retryDelivery: async (t, artifactId, approvedMsat) => {
@@ -2256,7 +2286,7 @@ function Conversation(props: {
                     )}
                   </Match>
                   <Match when={artifact()}>
-                    {(a) => <ArtifactView moneyBlocked={props.moneyBlocked} a={a()} nameOf={props.nameOf} delivery={a().type === 'file' ? props.deliveries[(a() as { receipt: { message_id: string } }).receipt.message_id] : undefined} onRetry={(id, approved) => props.actions.retryDelivery(props.track, id, approved)} onStop={(pendingId) => props.actions.stopRetrying(props.track, pendingId)} />}
+                    {(a) => <ArtifactView moneyBlocked={props.moneyBlocked} a={a()} nameOf={props.nameOf} delivery={a().type === 'file' ? props.deliveries[(a() as { receipt: { message_id: string } }).receipt.message_id] : undefined} onRetry={(id, approved) => props.actions.retryDelivery(props.track, id, approved)} onStop={(pendingId) => props.actions.stopRetrying(props.track, pendingId)} onRestore={(id) => props.actions.restoreUnsent(props.track, id)} onDiscard={(id) => props.actions.discardUnsent(props.track, id)} />}
                   </Match>
                 </Switch>
               </>
@@ -3042,9 +3072,26 @@ function DoorView(props: { card: DoorCard; at: number; nameOf: (id: string) => s
   );
 }
 
-function ArtifactView(props: { moneyBlocked: boolean; a: Artifact; delivery?: Delivery; nameOf: (id: string) => string; onRetry?: (id: string, approvedMsat?: number) => Promise<unknown>; onStop?: (pendingId: string | null) => Promise<unknown> }) {
+function ArtifactView(props: { moneyBlocked: boolean; a: Artifact; delivery?: Delivery; nameOf: (id: string) => string; onRetry?: (id: string, approvedMsat?: number) => Promise<unknown>; onStop?: (pendingId: string | null) => Promise<unknown>; onRestore?: (id: string) => void; onDiscard?: (id: string) => void }) {
   return (
     <Switch>
+      <Match when={props.a.type === 'unsent' && props.a}>
+        {(a) => {
+          const u = () => a() as Extract<Artifact, { type: 'unsent' }>;
+          return (
+            <article class="msg out unsent" data-unsent={u().why}>
+              <div class="bubble">{u().text}</div>
+              <div class="stamp">
+                <span class="sats" data-unsent-reason>{u().why === 'held' ? 'Waiting for payment check · ' : 'Not sent · nothing paid · '}{u().reason}</span>
+              </div>
+              <div class="unsent-actions">
+                <button type="button" class="link" data-unsent-restore onClick={() => props.onRestore?.(u().id)}>Put back in the box</button>
+                <button type="button" class="link" data-unsent-discard onClick={() => props.onDiscard?.(u().id)}>Discard</button>
+              </div>
+            </article>
+          );
+        }}
+      </Match>
       <Match when={props.a.type === 'sending' && props.a}>
         {(a) => {
           const m = () => a() as Extract<Artifact, { type: 'sending' }>;
@@ -3135,6 +3182,13 @@ function ArtifactView(props: { moneyBlocked: boolean; a: Artifact; delivery?: De
             <div class="artifact out failed" data-artifact="failed" data-code={f().error.code}>
               <span class="kind">{f().action}</span>
               <span>{f().error.message}</span>
+              <Show when={f().text !== undefined}>
+                {/* The whole message stays readable here; no resend while the payment result is open. */}
+                <blockquote class="failed-text" data-failed-text>{f().text}</blockquote>
+                <Show when={UNSETTLED.has(f().error.code) && f().error.code !== 'payment_settled_undelivered'}>
+                  <span class="hint" data-failed-check>Check pending result before sending it again.</span>
+                </Show>
+              </Show>
             </div>
           );
         }}
@@ -3430,23 +3484,55 @@ function Composer(props: {
   // second Send while the first is in flight queues behind it instead of
   // being ignored. Each keeps the ceiling it was pressed on.
   let sendChain: Promise<void> = Promise.resolve();
-  // What one settled send means for the text the owner typed. Only a
-  // confirmed-unpaid refusal gives the text back with "try again"; an unknown
-  // or (partly) paid outcome never does: no new double-send path.
-  const [sendLive, setSendLive] = createSignal('');
-  const giveBack = (r: Outcome<unknown>, text: string): 'restored' | 'quoted' | 'unknown' | 'paid' | null => {
-    if (r.ok) return null;
-    if (UNSETTLED.has(r.error.code)) return paidUndelivered(r) ? 'paid' : 'unknown';
-    // Never drop text: back into an empty box, else quoted in the note.
-    if (!draft()) { setDraft(text); return 'restored'; }
-    return draft() === text ? 'restored' : 'quoted';
+  // After an unknown or paid-undelivered result, the messages already queued
+  // behind it are not dispatched: each stays whole on its track as "Waiting
+  // for payment check", nothing paid. Once the queue is empty (or a pending
+  // check answers) a new press goes to the host again, which decides.
+  let held = false;
+  let queued = 0;
+  createEffect(on(props.actions.reconciled, () => { held = false; }, { defer: true }));
+  const enqueue = (job: () => Promise<void>) => {
+    queued++;
+    const run = sendChain.then(job).finally(() => { if (--queued === 0) held = false; });
+    sendChain = run.catch(() => {});
+    return run;
   };
-  const tellSettled = (r: Outcome<unknown>, text: string, outcome: ReturnType<typeof giveBack>) => {
-    const q = `“${text.length > 80 ? `${text.slice(0, 80)}…` : text}”`;
-    if (outcome === 'restored' && !note()) setNote('Not sent. Your message is back in the box; press Send to try again.');
-    if (outcome === 'quoted') setNote(`Not sent: ${q}. It is not back in the box because you started a new message.${note() ? ` ${note()}` : ''}`);
-    if (outcome === 'unknown') setNote(`The payment result for ${q} is not known yet. Check pending result before sending it again.`);
-    setSendLive(r.ok ? 'Message sent.' : outcome === 'paid' ? 'Paid, not delivered.' : outcome === 'unknown' ? 'Message payment result unknown.' : 'Message not sent.');
+  // What one settled send means. The text never comes back into the box on
+  // its own (the owner may be on another track by now): a refused message
+  // stays on its own track as an Unsent card; an unknown or (partly) paid
+  // outcome keeps its text on the failure card, with no resend.
+  const [sendLive, setSendLive] = createSignal('');
+  const [sendLiveSeq, setSendLiveSeq] = createSignal(0);
+  // Clear, then say it: a repeat of the same words is announced again.
+  const announce = (text: string) => {
+    setSendLive('');
+    setSendLiveSeq((n) => n + 1);
+    setTimeout(() => setSendLive(text), 0);
+  };
+  const outcomeOf = (r: Outcome<unknown>): 'sent' | 'refused' | 'unknown' | 'paid' =>
+    r.ok ? 'sent' : !UNSETTLED.has(r.error.code) ? 'refused' : paidUndelivered(r) ? 'paid' : 'unknown';
+  const tellSettled = (r: Outcome<unknown>, track: TrackRef, text: string, revision: number) => {
+    const outcome = outcomeOf(r);
+    if (outcome === 'unknown' || outcome === 'paid') held = true;
+    const here = trackKey(props.track) === trackKey(track);
+    if (!r.ok && outcome === 'refused') {
+      // Back in the box only where it was typed, untouched since the press;
+      // otherwise whole on its own track, never in another recipient's box.
+      if (here && composerRevision === revision && !draft()) {
+        setDraft(text);
+        if (!note()) setNote('Not sent. Your message is back in the box; press Send to try again.');
+      } else {
+        props.actions.keepUnsent(track, text, r.error.message);
+        if (here && !note()) setNote('Not sent. Nothing was paid. The message is kept in this chat: put it back in the box to try again.');
+      }
+    }
+    if (here && outcome === 'unknown') setNote('The payment result is not known yet. Check pending result before sending it again.');
+    announce(outcome === 'sent' ? 'Message sent.' : outcome === 'paid' ? 'Paid, not delivered.' : outcome === 'unknown' ? 'Message payment result unknown.' : 'Message not sent.');
+  };
+  /** A queued message whose turn came while an earlier result is unresolved. */
+  const holdBack = (track: TrackRef, bubble: string, text: string) => {
+    props.actions.holdSending(track, bubble, text);
+    announce('Message held: an earlier payment is not checked yet.');
   };
   // Going offline invalidates undispatched approvals, not unchanged inputs
   // belonging to an operation that already reached the host and succeeds.
@@ -3496,7 +3582,8 @@ function Composer(props: {
         if (result.value.ready) {
           setOwnerWait(null);
           setBusy(true);
-          try { await pending.send(); } finally { setBusy(false); }
+          // In turn with any optimistic sends still queued: order holds.
+          try { await enqueue(pending.send); } finally { setBusy(false); }
         } else {
           delay = remote ? Math.min(delay * 2, 10000) : 1000;
           nextPoll = Date.now() + delay;
@@ -3563,7 +3650,14 @@ function Composer(props: {
       () => [props.prefill?.seq, trackKey(props.track)] as const,
       () => {
         const p = props.prefill;
-        if (!p || p.key !== trackKey(props.track) || room()) return;
+        // AI drafts are for one peer; an Unsent card can be in a room too.
+        if (!p || p.key !== trackKey(props.track) || (room() && !p.unsentId)) return;
+        if (p.unsentId && (draft().trim() || mode() !== 'message')) {
+          // Never over a newer message: the Unsent card stays until the box is free.
+          setNote('Send or clear the message in the box first, then put the unsent one back.');
+          props.onPrefillUsed?.();
+          return;
+        }
         cancelOwner();
         setOwnerExpired(false);
         composerRevision++;
@@ -3581,6 +3675,7 @@ function Composer(props: {
           setMemo(p.text);
         }
         setDrafted(true);
+        if (p.unsentId) props.actions.discardUnsent(props.track, p.unsentId);
         props.onPrefillUsed?.();
       },
     ),
@@ -3942,13 +4037,11 @@ function Composer(props: {
       // composer is free at once. It gets the text back whenever the draft
       // would have stayed before: anything but sent or paid-undelivered.
       if (submittedMode === 'message' && !bubble) { setDraft(''); setDrafted(false); }
+      if (submittedMode === 'message' && bubble && held) { holdBack(submittedTrack, bubble, submittedText); return; }
       const r = submittedMode === 'file'
         ? await props.actions.file(submittedTrack, submittedFile!, cap, first)
         : await props.actions.send(submittedTrack, submittedText, cap, first, bubble);
       const unchanged = composerRevision === submittedRevision;
-      // Text back first: editing the draft clears the paid line, and an
-      // unknown payment result must stay on screen.
-      const outcome = submittedMode === 'message' ? giveBack(r, submittedText) : null;
       if (unchanged && submittedMode === 'message') {
         paymentResult(r);
         if (!r.ok && ['price_changed', 'price_cap_exceeded'].includes(r.error.code)) { setRaisedFrom(cap); setReadmitQuote(null); }
@@ -3963,7 +4056,8 @@ function Composer(props: {
         if (target() === submittedPeer) setDoor(null);
         setReadmitFor(submittedPeer);
       }
-      if ((r.ok || paidUndelivered(r)) && composerRevision === submittedRevision) {
+      // An optimistic message cleared the box at the press; whatever is there now is newer.
+      if ((r.ok || paidUndelivered(r)) && composerRevision === submittedRevision && !bubble) {
         if (submittedMode === 'file') {
           setFile(null);
           if (fileInput) fileInput.value = '';
@@ -3975,8 +4069,7 @@ function Composer(props: {
         setOwnerExpired(true);
         setNote(r.error.message);
       } else if (!r.ok && unchanged && (isBudgetStop(r.error) || ['owner_only', 'owner_contact_unavailable'].includes(r.error.code))) setNote(r.error.message);
-      // A clear state with a way on: the text is back, Send is the retry.
-      if (submittedMode === 'message') tellSettled(r, submittedText, outcome);
+      if (submittedMode === 'message') tellSettled(r, submittedTrack, submittedText, submittedRevision);
       };
       if (first !== undefined && !room()) {
         const request = await props.actions.ownerRequest(submittedPeer, cap, first);
@@ -4003,9 +4096,7 @@ function Composer(props: {
         setDraft('');
         setDrafted(false);
         setBusy(false);
-        const run = sendChain.then(() => dispatch(bubble));
-        sendChain = run.catch(() => {});
-        await run;
+        await enqueue(() => dispatch(bubble));
         return;
       }
       await dispatch();
@@ -4055,10 +4146,8 @@ function Composer(props: {
         setDrafted(false);
         setBusy(false);
         const go = async () => {
+          if (held) { holdBack(t, bubble, text); return; }
           const r = await props.actions.send(t, text, cap, undefined, bubble);
-          // Text back first: editing the draft clears the paid line, and an
-          // unknown payment result must stay on screen.
-          const outcome = giveBack(r, text);
           if (unchanged()) {
             paymentResult(r);
             if (!r.ok && ['price_changed', 'price_cap_exceeded'].includes(r.error.code)) { setRaisedFrom(cap); setReadmitQuote(null); }
@@ -4066,12 +4155,9 @@ function Composer(props: {
           if (r.ok && readmitQuote()?.peer === peer) setReadmitQuote(null);
           if (!r.ok && r.error.code === 'readmission_quoted' && r.error.admission) setReadmitQuote({ peer, price: r.error.admission });
           if (!r.ok && unchanged() && isBudgetStop(r.error)) setNote(r.error.message);
-          // A clear state with a way on: the text is back, Send is the retry.
-          tellSettled(r, text, outcome);
+          tellSettled(r, t, text, submittedRevision);
         };
-        const run = sendChain.then(go);
-        sendChain = run.catch(() => {});
-        await run;
+        await enqueue(go);
         return;
       }
       case 'pay':
@@ -4439,7 +4525,7 @@ function Composer(props: {
       <Show when={mode() === 'message'}>
         <div class="send-price" classList={{ priced: !priceProblem() && (paidLine() !== null || messageShown().msat !== null) }}>
           <span data-send-price aria-live="polite">{priceLine()}</span>
-          <span class="sr-only" role="status" aria-live="polite" data-send-live>{sendLive()}</span>
+          <span class="sr-only" role="status" aria-live="polite" data-send-live data-send-live-seq={sendLiveSeq()}>{sendLive()}</span>
           <Show when={priceProblem() && priceProblem() !== 'price loading…'}>
             {' '}<button type="button" class="link" data-price-retry disabled={busy()} onClick={() => {
               if (doorWanted() && door()) setDoor(null);

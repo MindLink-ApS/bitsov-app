@@ -5,6 +5,7 @@ import { sampleSource, SAMPLE_OWN_ID } from '../src/control/sample';
 import type { Source } from '../src/control/source';
 
 const A = 'a'.repeat(64);
+const B = 'b'.repeat(64);
 let dispose: (() => void) | undefined;
 let mount: HTMLElement;
 afterEach(() => { dispose?.(); mount?.remove(); vi.restoreAllMocks(); });
@@ -29,6 +30,11 @@ async function open(source: Source) {
   await vi.waitFor(() => expect($(`[data-track="peer:${A}"]`)?.getAttribute('aria-current')).toBe('true'));
 }
 const sending = () => [...mount.querySelectorAll('[data-sending]')];
+const unsent = () => [...mount.querySelectorAll('[data-unsent]')];
+const go = async (peer: string) => {
+  $<HTMLElement>(`[data-track="peer:${peer}"]`)!.click();
+  await vi.waitFor(() => expect($(`[data-track="peer:${peer}"]`)?.getAttribute('aria-current')).toBe('true'));
+};
 const press = async (text: string) => {
   type(text);
   await vi.waitFor(() => expect($('[data-send-price]')?.textContent).toMatch(/^up to/));
@@ -86,15 +92,42 @@ describe('optimistic send', () => {
     expect(area().value).toBe('');
   });
 
-  it('keeps a newly typed message and quotes the one that did not go', async () => {
+  it('keeps a newly typed message, and keeps the one that did not go whole in the chat', async () => {
     const { source, pending } = deferredSource();
     await open(source);
-    await press('first try');
+    const long = `first try ${'x'.repeat(200)} end`;
+    await press(long);
     await vi.waitFor(() => expect(pending).toHaveLength(1));
     type('something new');
     pending[0].fail({ code: 'price_changed', message: 'The price changed. Nothing was sent.' });
-    await vi.waitFor(() => expect($('[data-composer-note]')?.textContent).toContain('Not sent: “first try”'));
+    await vi.waitFor(() => expect(unsent()).toHaveLength(1));
+    expect(unsent()[0].getAttribute('data-unsent')).toBe('refused');
+    expect(unsent()[0].querySelector('.bubble')!.textContent).toBe(long);
+    expect(unsent()[0].textContent).toContain('nothing paid');
     expect(area().value).toBe('something new');
+    // Put back refuses to overwrite the newer message; the card stays.
+    unsent()[0].querySelector<HTMLButtonElement>('[data-unsent-restore]')!.click();
+    await vi.waitFor(() => expect($('[data-composer-note]')?.textContent).toContain('Send or clear the message in the box first'));
+    expect(area().value).toBe('something new');
+    expect(unsent()).toHaveLength(1);
+    // With the box free, it goes back whole and the card ends.
+    type('');
+    unsent()[0].querySelector<HTMLButtonElement>('[data-unsent-restore]')!.click();
+    await vi.waitFor(() => expect(area().value).toBe(long));
+    expect(unsent()).toHaveLength(0);
+  });
+
+  it('Discard ends an Unsent card without sending anything', async () => {
+    const { source, pending } = deferredSource();
+    await open(source);
+    await press('drop me');
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    type('newer');
+    pending[0].fail({ code: 'node', message: 'Your node did not answer.' });
+    await vi.waitFor(() => expect(unsent()).toHaveLength(1));
+    unsent()[0].querySelector<HTMLButtonElement>('[data-unsent-discard]')!.click();
+    await vi.waitFor(() => expect(unsent()).toHaveLength(0));
+    expect(source.send).toHaveBeenCalledTimes(1);
   });
 
   it('a second Send while the first is in flight shows at once and goes out after it, in order', async () => {
@@ -124,10 +157,13 @@ describe('optimistic send', () => {
     expect(area().value).toBe('');
     await vi.waitFor(() => expect($('[data-composer-note]')?.textContent).toContain('Check pending result before sending it again'));
     expect(mount.textContent).not.toMatch(/press Send to try again/);
-    expect($('[data-send-live]')?.textContent).toBe('Message payment result unknown.');
+    await vi.waitFor(() => expect($('[data-send-live]')?.textContent).toBe('Message payment result unknown.'));
+    // The whole text stays readable on its failure card, with no resend.
+    expect($('[data-failed-text]')?.textContent).toBe('maybe paid');
+    expect(unsent()).toHaveLength(0);
   });
 
-  it('never drops text: a queued second message plus a cheap failure of the first quotes the first', async () => {
+  it('never drops text: a queued second message plus a cheap failure of the first keeps the first', async () => {
     const { source, pending } = deferredSource();
     await open(source);
     await press('first text');
@@ -135,20 +171,126 @@ describe('optimistic send', () => {
     await press('second text');
     type('third, still typing');
     pending[0].fail({ code: 'price_changed', message: 'The price changed. Nothing was sent.' });
-    await vi.waitFor(() => expect($('[data-composer-note]')?.textContent).toContain('Not sent: “first text”'));
+    await vi.waitFor(() => expect(unsent().map((u) => u.querySelector('.bubble')!.textContent)).toEqual(['first text']));
     expect(area().value).toBe('third, still typing');
   });
 
-  it('a cheap failure while the box is empty puts the text back even after a queued send', async () => {
+  it('alpha fails unpaid, queued beta succeeds: alpha is kept and nothing erases it', async () => {
     const { source, pending } = deferredSource();
     await open(source);
     await press('alpha');
     await vi.waitFor(() => expect(pending).toHaveLength(1));
     await press('beta');
-    // The box is empty again (beta went into the queue): alpha comes back.
+    pending[0].fail({ code: 'price_changed', message: 'Nothing was sent.' });
+    await vi.waitFor(() => expect(unsent()).toHaveLength(1));
+    await vi.waitFor(() => expect(pending).toHaveLength(2));
+    type('gamma, typed meanwhile');
+    pending[1].settle(receipt('m2', A));
+    await vi.waitFor(() => expect(sending()).toHaveLength(0));
+    expect(unsent()[0].querySelector('.bubble')!.textContent).toBe('alpha');
+    expect(area().value).toBe('gamma, typed meanwhile');
+  });
+
+  it('a lone cheap failure on the same chat, box untouched, puts the text back', async () => {
+    const { source, pending } = deferredSource();
+    await open(source);
+    await press('alpha');
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
     pending[0].fail({ code: 'price_changed', message: 'Nothing was sent.' });
     await vi.waitFor(() => expect(area().value).toBe('alpha'));
-    expect($('[data-send-live]')?.textContent).toBe('Message not sent.');
+    expect(unsent()).toHaveLength(0);
+    await vi.waitFor(() => expect($('[data-send-live]')?.textContent).toBe('Message not sent.'));
+  });
+
+  it('send to A, switch to B, A fails: the text never lands in B’s box; it waits on A', async () => {
+    const { source, pending } = deferredSource();
+    await open(source);
+    await press('for Maya only');
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    await go(B);
+    pending[0].fail({ code: 'price_changed', message: 'The price changed. Nothing was sent.' });
+    await vi.waitFor(() => expect($('[data-send-live]')?.textContent).toBe('Message not sent.'));
+    expect(area().value).toBe('');
+    expect(unsent()).toHaveLength(0); // Not in B's chat either.
+    await go(A);
+    await vi.waitFor(() => expect(unsent()).toHaveLength(1));
+    expect(unsent()[0].querySelector('.bubble')!.textContent).toBe('for Maya only');
+    expect(area().value).toBe('');
+    // Put back fills A's own box only.
+    unsent()[0].querySelector<HTMLButtonElement>('[data-unsent-restore]')!.click();
+    await vi.waitFor(() => expect(area().value).toBe('for Maya only'));
+    expect(source.send).toHaveBeenCalledTimes(1);
+  });
+
+  it('A → B → A before the failure still keeps it as a card, not in the box', async () => {
+    const { source, pending } = deferredSource();
+    await open(source);
+    await press('round trip');
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    await go(B);
+    await go(A);
+    pending[0].fail({ code: 'price_changed', message: 'Nothing was sent.' });
+    await vi.waitFor(() => expect(unsent()).toHaveLength(1));
+    expect(area().value).toBe('');
+  });
+
+  it('an unknown result holds the queued messages: not sent, nothing paid, kept as Waiting for payment check', async () => {
+    const { source, pending } = deferredSource();
+    await open(source);
+    await press('first');
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    await press('second');
+    await press('third');
+    await vi.waitFor(() => expect(sending()).toHaveLength(3));
+    pending[0].fail({ code: 'payment_unknown', message: 'Outcome unknown.' });
+    await vi.waitFor(() => expect(unsent()).toHaveLength(2));
+    expect(unsent().map((u) => u.getAttribute('data-unsent'))).toEqual(['held', 'held']);
+    expect(unsent().map((u) => u.querySelector('.bubble')!.textContent)).toEqual(['second', 'third']);
+    expect(unsent()[0].textContent).toContain('Waiting for payment check');
+    expect(sending()).toHaveLength(0);
+    // Never dispatched: the host saw only the first.
+    expect(source.send).toHaveBeenCalledTimes(1);
+    // The queue drained: a new press goes to the host again, which decides.
+    await press('fourth');
+    await vi.waitFor(() => expect(pending).toHaveLength(2));
+  });
+
+  it('a paid-undelivered result holds the queued message too', async () => {
+    const { source, pending } = deferredSource();
+    await open(source);
+    await press('first');
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    await press('second');
+    pending[0].fail({ code: 'payment_settled_undelivered', message: 'Paid, not delivered.', pending_id: 'p1', undelivered: { paid_msat: 2250, retry: true } });
+    await vi.waitFor(() => expect(unsent().map((u) => u.getAttribute('data-unsent'))).toEqual(['held']));
+    expect(source.send).toHaveBeenCalledTimes(1);
+  });
+
+  it('announces each outcome, also the same words twice in a row', async () => {
+    const { source, pending } = deferredSource();
+    await open(source);
+    const live = $('[data-send-live]')!;
+    const seq = () => Number(live.getAttribute('data-send-live-seq'));
+    await press('one');
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    pending[0].settle(receipt('m1', A));
+    await vi.waitFor(() => expect(live.textContent).toBe('Message sent.'));
+    const first = seq();
+    await press('two');
+    await vi.waitFor(() => expect(pending).toHaveLength(2));
+    pending[1].settle(receipt('m2', A));
+    await vi.waitFor(() => expect(seq()).toBe(first + 1));
+    await vi.waitFor(() => expect(live.textContent).toBe('Message sent.'));
+  });
+
+  it('the settled message takes the bubble’s place without a second entrance', async () => {
+    const { source, pending } = deferredSource();
+    await open(source);
+    await press('no replay');
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    pending[0].settle(receipt('m-calm', A));
+    await vi.waitFor(() => expect($('[data-message="m-calm"]')).not.toBeNull());
+    expect($('[data-message="m-calm"]')!.classList.contains('fresh')).toBe(false);
   });
 
   it('keeps pending messages last, in the order pressed, while an earlier one settles', async () => {

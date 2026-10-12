@@ -698,7 +698,7 @@ export type Artifact =
   /** `invoice`: the bolt11 an invoice payment paid, so a request card can show it paid. */
   | { id: string; at: number; type: 'payment'; receipt: PaymentReceipt; invoice?: string }
   | { id: string; at: number; type: 'file'; receipt: FileReceipt }
-  | { id: string; at: number; type: 'failed'; action: string; error: ActionError }
+  | { id: string; at: number; type: 'failed'; action: string; error: ActionError; text?: string }
   /**
    * Paid, not delivered. `text` is the owner's own draft, kept in memory for
    * Retry delivery only. `admission`: Retry delivery paid nothing new and a
@@ -712,7 +712,13 @@ export type Artifact =
    * real message when the send settles (or by its failure card). `capMsat` is
    * the ceiling the owner pressed Send on, never a paid amount.
    */
-  | { id: string; at: number; type: 'sending'; text: string; capMsat: number };
+  | { id: string; at: number; type: 'sending'; text: string; capMsat: number }
+  /**
+   * A message that did not go and paid nothing, kept whole on its own track:
+   * `refused` (the send was refused before paying) or `held` (never dispatched
+   * because an earlier payment's result is not known yet).
+   */
+  | { id: string; at: number; type: 'unsent'; text: string; why: 'refused' | 'held'; reason: string };
 
 /**
  * The membrane in the stream: a first contact admitted at your door, a verified

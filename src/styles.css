@@ -1296,4 +1296,8 @@ input[type='checkbox'], input[type='radio'] { width: auto; flex: none; padding: 
 /* Optimistic send: the message is in the stream at once; the ceiling is
    shown until it settles (never as paid). */
 .msg.sending .bubble { opacity: 0.72; animation: msg-send var(--d-mid) var(--ease-out); }
+/* Unsent: kept whole on its own track, plainly not delivered. */
+.msg.unsent .bubble { opacity: 0.72; border: 1px dashed var(--unknown-ink); background: transparent; }
+.msg.unsent .unsent-actions { display: flex; gap: var(--s-3, 12px); justify-content: flex-end; }
+.artifact.failed .failed-text { margin: 4px 0 0; padding-left: 8px; border-left: 2px solid var(--unknown-ink); white-space: pre-wrap; overflow-wrap: anywhere; }
 .msg.sending .stamp .sats { color: var(--muted); }
