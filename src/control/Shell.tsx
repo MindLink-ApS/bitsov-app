@@ -7,6 +7,8 @@ import { usePairingActivity } from '../pairingActivity';
 import { createMessageEntrance } from './messageEntrance';
 import { LocalNodeSwitch } from '../onboarding/LocalNodeSwitch';
 import { DeviceApprovals } from '../onboarding/DeviceApprovals';
+import { OwnerApprovals } from './OwnerApprovals';
+import { OWNER_DEVICE_APPROVAL, type ApprovalView, type DeviceKeysView } from './ownerApproval';
 import { HubTrustInfo } from './HubTrust';
 import { pollingSource } from './polling';
 import { readSpendPreset, saveSpendPreset } from './prefs';
@@ -519,6 +521,22 @@ export function ControlCenter(props: Props) {
   });
   // Never an error line of its own: without a device key the console path stays.
   const loadDevice = () => source.deviceKeyStatus().then(setDevice, () => setDevice(null));
+  // Owner approval (owner_device_approval_v1): this pairing may approve other
+  // apps' requests when the node says so; never its own (the node excludes them).
+  const [deviceKeys, setDeviceKeys] = createSignal<DeviceKeysView | null>(null);
+  const [approvals, setApprovals] = createSignal<ApprovalView[]>([]);
+  const approvalsCapable = () => props.remote === true && overview()?.capabilities?.includes(OWNER_DEVICE_APPROVAL) === true;
+  const canApprove = () => approvalsCapable() && deviceKeys()?.device_approvals === 'enabled';
+  const loadApprovals = async () => {
+    if (!approvalsCapable()) { setDeviceKeys(null); setApprovals([]); return; }
+    const keys = await act(() => source.deviceKeys());
+    setDeviceKeys(keys.ok ? keys.value : null);
+    if (!canApprove()) { setApprovals([]); return; }
+    const pending = await act(() => source.approvalsPending());
+    if (pending.ok) setApprovals(pending.value.filter((v) => v.status === 'pending'));
+  };
+  createEffect(on(approvalsCapable, (on) => { if (on) void loadApprovals(); else { setDeviceKeys(null); setApprovals([]); } }));
+  const approvalsWaiting = () => (canApprove() ? approvals().filter((v) => v.expires_at * 1000 > now()).length : 0);
   const loadBudget = async () => {
     const revision = ++budgetRevision;
     try {
@@ -636,7 +654,7 @@ export function ControlCenter(props: Props) {
         // Keep timer phases through cooldowns. Skip ticks while paused rather
         // than restarting the initial load sequence when the link recovers.
         const polls: [() => Promise<unknown>, number][] = [
-          [loadDevice, REFRESH_MS.peers], [loadOverview, REFRESH_MS.overview],
+          [loadDevice, REFRESH_MS.peers], [loadOverview, REFRESH_MS.overview], [loadApprovals, REFRESH_MS.overview],
           [loadPeers, REFRESH_MS.peers], [loadWallet, REFRESH_MS.wallet],
           [loadRooms, REFRESH_MS.rooms], [loadDoor, REFRESH_MS.door],
           [loadEnergy, REFRESH_MS.energy], [loadMembrane, REFRESH_MS.membrane],
@@ -1288,6 +1306,8 @@ export function ControlCenter(props: Props) {
         }}
         onWallet={() => openWallet()}
         balanceMsat={wallet()?.balance_msat ?? null}
+        approvalsWaiting={approvalsWaiting()}
+        onApprovals={() => { setTab('node'); setContextOpen(true); }}
         behind={walletTab() !== null}
       />
 
@@ -1537,7 +1557,20 @@ export function ControlCenter(props: Props) {
             />
           </Match>
           <Match when={tab() === 'node'}>
-            <NodePanel deviceApprovals={
+            <NodePanel deviceApprovals={<>
+              <Show when={canApprove()}>
+                <OwnerApprovals
+                  approvals={approvals()}
+                  now={now()}
+                  mobile={androidQrScannerAvailable()}
+                  nameOf={(id) => { const p = peerById().get(id.toLowerCase()); return p ? peerName(p, p.node_id) : null; }}
+                  approve={async (opId, message) => {
+                    const r = await act(() => source.approvalApprove(opId, message));
+                    void loadApprovals();
+                    return r;
+                  }}
+                />
+              </Show>
               <DeviceApprovals
                 device={actions.device()}
                 joinDevice={input => source.joinDevice(input)}
@@ -1547,7 +1580,7 @@ export function ControlCenter(props: Props) {
                 onRegister={async () => { const r = await act(() => source.deviceKeyRegister()); if (r.ok) setDevice(r.value); else throw r.error.message; }}
                 onCancel={async () => { const r = await act(() => source.deviceKeyCancel()); if (r.ok) setDevice(r.value); else throw r.error.message; }}
               />
-            } onForgetRemote={props.remote ? () => source.remoteAccessForget() : undefined} overview={overview()} link={link()} peers={peers()} now={now()} error={props.error ?? errors.overview ?? errors.peers} onReconnect={async () => { await props.onReconnect?.(); await loadOverview(); await loadPeers(); }} />
+            </>} onForgetRemote={props.remote ? () => source.remoteAccessForget() : undefined} overview={overview()} link={link()} peers={peers()} now={now()} error={props.error ?? errors.overview ?? errors.peers} onReconnect={async () => { await props.onReconnect?.(); await loadOverview(); await loadPeers(); }} />
           </Match>
           <Match when={tab() === 'devices'}>
             <AddDevice api={input => source.addDevice(input)} mobile={androidQrScannerAvailable()} />
@@ -1808,6 +1841,9 @@ function Rail(props: {
   onProfile: () => void;
   onWallet: () => void;
   balanceMsat: number | null;
+  /** Owner approvals this device may give, waiting now (0 hides the badge and the menu entry). */
+  approvalsWaiting?: number;
+  onApprovals?: () => void;
   /** Under the full-screen Wallet: out of reach. */
   behind: boolean;
 }) {
@@ -1970,6 +2006,12 @@ function Rail(props: {
                   <span class="meta sats" data-avatar-balance>{fmtAmount(props.balanceMsat!)}</span>
                 </Show>
               </button>
+              <Show when={(props.approvalsWaiting ?? 0) > 0 && props.onApprovals}>
+                <button type="button" role="menuitem" class="avatar-menu-item" data-open-approvals onClick={() => choose(props.onApprovals!)}>
+                  <span class="name">Approvals waiting</span>
+                  <span class="meta" data-approvals-count>{props.approvalsWaiting}</span>
+                </button>
+              </Show>
               <button type="button" role="menuitem" class="avatar-menu-item" data-open-settings onClick={() => choose(props.onProfile)}>
                 <span class="name">Profile and settings</span>
               </button>
@@ -1989,6 +2031,9 @@ function Rail(props: {
           >
             <span class="avatar-mark" aria-hidden="true">BS</span>
             <span class="avatar-label">You</span>
+            <Show when={(props.approvalsWaiting ?? 0) > 0}>
+              <span class="approvals-badge" data-approvals-badge aria-label={`${props.approvalsWaiting} approval${props.approvalsWaiting === 1 ? '' : 's'} waiting`}>{props.approvalsWaiting}</span>
+            </Show>
           </button>
         </div>
       </div>
@@ -4533,8 +4578,6 @@ const touchIdOffer = (actions: Actions) => {
   return actions.remote?.() === true && !!d?.available && (d.state === 'none' || d.state === 'lapsed');
 };
 
-/** Node capability: owner approval (spend windows, first contact) from an enrolled owner device. */
-const OWNER_DEVICE_APPROVAL = 'owner_device_approval_v1';
 
 // How many Touch ID offers are on screen: the spend bar's own "not set up"
 // pointer stays quiet while one is, so it is never said twice.

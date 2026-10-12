@@ -1,0 +1,100 @@
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { render } from 'solid-js/web';
+import { OwnerApprovals, OwnerApprovalWait } from '../src/control/OwnerApprovals';
+import { APPROVAL_ERROR_CODES, refusalText, type ApprovalView } from '../src/control/ownerApproval';
+
+let dispose: (() => void) | undefined;
+let mount: HTMLElement;
+afterEach(() => { dispose?.(); mount?.remove(); vi.useRealTimers(); });
+const A = 'a'.repeat(64);
+const NOW = 1_800_000_000_000;
+const view = (over: Partial<ApprovalView> = {}): ApprovalView => ({
+  op_id: 'op-1', node: 'n', client_id: 'client-phone', client_pubkey: 'cd'.repeat(32), epoch: 4, grant_op: 'g-1',
+  request: { kind: 'first_contact', terms: { recipient: A, max_total_msat: 14_000, budget_msat: 50_000 } },
+  nonce: '11'.repeat(16), expires_at: NOW / 1000 + 200, approval_message: 'bitsov-approval-v1\nkind=first_contact\nrecipient=aaaa…\nmax_total_msat=14000',
+  status: 'pending', owner_action: null, ...over,
+});
+const $ = <T extends HTMLElement = HTMLElement>(s: string) => mount.querySelector<T>(s);
+function show(jsx: () => any) { mount = document.createElement('div'); document.body.appendChild(mount); dispose = render(jsx, mount); }
+
+describe('owner side: approvals waiting for this device', () => {
+  it('shows the node’s terms, the requesting app’s fingerprint, the time left and the exact message', () => {
+    show(() => <OwnerApprovals approvals={[view()]} now={NOW} nameOf={() => 'Maya'} approve={vi.fn()} />);
+    expect([...mount.querySelectorAll('[data-approval-terms] li')].map((l) => l.textContent)).toEqual([
+      'Let this app message someone new', 'To: Maya (aaaaaa…aaaaaa)', 'First message: up to 14 sats', 'Contact budget: up to 50 sats',
+    ]);
+    expect($('[data-approval-client]')!.textContent).toContain('cdcdcd…cdcdcd');
+    expect($('[data-approval-client]')!.textContent).toContain('does not name the app');
+    expect($('[data-approval-expires]')!.textContent).toContain('3:20');
+    expect($('[data-approval-message] pre')!.textContent).toBe(view().approval_message);
+  });
+
+  it('Approve sends exactly the message that was shown (terms shown == terms signed)', async () => {
+    const approve = vi.fn(async () => ({ ok: true as const, value: view({ status: 'consumed' }) }));
+    show(() => <OwnerApprovals approvals={[view()]} now={NOW} approve={approve} />);
+    $<HTMLButtonElement>('[data-approval-approve]')!.click();
+    await vi.waitFor(() => expect($('[data-approval-result="ok"]')).not.toBeNull());
+    expect(approve).toHaveBeenCalledWith('op-1', view().approval_message);
+    expect($('[data-approval-approve]')).toBeNull();
+  });
+
+  it.each([...APPROVAL_ERROR_CODES, 'device_cancelled'])('a %s refusal is said plainly and nothing claims success', async (code) => {
+    const approve = vi.fn(async () => ({ ok: false as const, error: { code: code as never, message: 'node text', reason: 'seed_password_not_typed', remaining_msat: 2000 } }));
+    show(() => <OwnerApprovals approvals={[view()]} now={NOW} approve={approve} />);
+    $<HTMLButtonElement>('[data-approval-approve]')!.click();
+    await vi.waitFor(() => expect($('[data-approval-result="refused"]')).not.toBeNull());
+    expect($('[data-approval-result="refused"]')!.textContent).toBe(refusalText(code, { reason: 'seed_password_not_typed', remaining_msat: 2000 }));
+    expect($('[data-approval-approve]')).not.toBeNull(); // still pending: can try again
+  });
+
+  it('Not now hides it here and sends nothing; expired requests are not offered', () => {
+    const approve = vi.fn();
+    show(() => <OwnerApprovals approvals={[view(), view({ op_id: 'op-old', expires_at: NOW / 1000 - 1 })]} now={NOW} approve={approve} />);
+    expect(mount.querySelectorAll('[data-owner-approval]')).toHaveLength(1);
+    $<HTMLButtonElement>('[data-approval-dismiss]')!.click();
+    expect($('[data-owner-approval]')).toBeNull();
+    expect($('[data-owner-approvals-empty]')).not.toBeNull();
+    expect(approve).not.toHaveBeenCalled();
+  });
+});
+
+describe('requester side: waiting for the other owner device', () => {
+  it('polls, and when the node says consumed it reports approved', async () => {
+    const status = vi.fn().mockResolvedValueOnce({ ok: true, value: view() }).mockResolvedValueOnce({ ok: true, value: view({ status: 'consumed' }) });
+    const onApproved = vi.fn();
+    show(() => <OwnerApprovalWait view={view()} now={NOW} status={status} onApproved={onApproved} onStop={vi.fn()} pollMs={5} fallback="konsensus approve …" />);
+    expect($('[data-owner-approval-wait="pending"]')!.textContent).toContain('Waiting for your approval on your other owner device');
+    expect($('[data-owner-approval-wait]')!.textContent).toContain('this device cannot approve its own request');
+    expect($<HTMLDetailsElement>('details[data-other-ways]')!.open).toBe(false);
+    // No self-approval path: the requesting device is never offered Approve for its own request.
+    expect($('[data-approval-approve]')).toBeNull();
+    expect(mount.textContent).not.toMatch(/Approve with/);
+    await vi.waitFor(() => expect(onApproved).toHaveBeenCalledWith(expect.objectContaining({ status: 'consumed' })));
+    expect($('[data-approval-wait-approved]')).not.toBeNull();
+  });
+
+  it.each(['approval_unknown', 'approval_expired'])('%s ends the wait with nothing approved', async (code) => {
+    const status = vi.fn(async () => ({ ok: false as const, error: { code: code as never, message: 'x' } }));
+    const onApproved = vi.fn();
+    show(() => <OwnerApprovalWait view={view()} now={NOW} status={status} onApproved={onApproved} onStop={vi.fn()} pollMs={5} />);
+    await vi.waitFor(() => expect($('[data-approval-wait-expired]')!.textContent).toBe(refusalText(code)));
+    expect(onApproved).not.toHaveBeenCalled();
+  });
+
+  it('a passing error is said and the wait goes on', async () => {
+    const status = vi.fn().mockResolvedValueOnce({ ok: false, error: { code: 'approval_rate_limited', message: 'x' } })
+      .mockResolvedValueOnce({ ok: true, value: view({ status: 'consumed' }) });
+    const onApproved = vi.fn();
+    show(() => <OwnerApprovalWait view={view()} now={NOW} status={status} onApproved={onApproved} onStop={vi.fn()} pollMs={5} />);
+    await vi.waitFor(() => expect(onApproved).toHaveBeenCalled());
+    expect(status).toHaveBeenCalledTimes(2);
+  });
+
+  it('Cancel stops waiting here (and says the request expires by itself)', () => {
+    const onStop = vi.fn();
+    show(() => <OwnerApprovalWait view={view()} now={NOW} status={vi.fn(() => new Promise<never>(() => {}))} onApproved={vi.fn()} onStop={onStop} />);
+    expect($('[data-approval-wait-expires]')!.textContent).toContain('the request expires by itself');
+    $<HTMLButtonElement>('[data-approval-wait-cancel]')!.click();
+    expect(onStop).toHaveBeenCalled();
+  });
+});
