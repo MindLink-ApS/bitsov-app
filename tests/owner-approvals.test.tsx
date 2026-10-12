@@ -217,14 +217,70 @@ describe('round 3 (#216): one approve in flight, and the first outcome stands', 
     expect($('[data-approval-approve]')).toBeNull();
   });
 
-  it('an "Approved" is never overwritten by a later refusal', async () => {
+  it('an "Approved" reached through a real approve is never overwritten: a stale list and a remount offer no second Approve', async () => {
     const { approvalMemory } = await import('../src/control/OwnerApprovals');
     const memory = approvalMemory();
-    memory.setSaid({ 'op-1': { ok: true, text: 'Approved. The app that asked can go on now.' } });
-    const approve = vi.fn(async () => ({ ok: false as const, error: { code: 'approval_forbidden' as never, message: 'x' } }));
+    // First call approves; any later call would be refused. Only the first may ever happen.
+    const approve = vi.fn()
+      .mockResolvedValueOnce({ ok: true as const, value: view({ status: 'consumed' }) })
+      .mockResolvedValue({ ok: false as const, error: { code: 'approval_forbidden' as never, message: 'x' } });
+    show(() => <OwnerApprovals approvals={[view()]} now={NOW} approve={approve} memory={memory} />);
+    $<HTMLButtonElement>('[data-approval-approve]')!.click();
+    await vi.waitFor(() => expect($('[data-approval-result="ok"]')).not.toBeNull());
+    // The node's list is stale (still says pending) and the panel is reopened.
+    dispose?.(); mount.remove();
     show(() => <OwnerApprovals approvals={[view()]} now={NOW} approve={approve} memory={memory} />);
     expect($('[data-approval-approve]')).toBeNull();
-    expect($('[data-approval-result="ok"]')).not.toBeNull();
-    expect(approve).not.toHaveBeenCalled();
+    expect($('[data-approval-result="ok"]')!.textContent).toBe('Approved. The app that asked can go on now.');
+    expect(approve).toHaveBeenCalledTimes(1);
+  });
+
+  it('settleOutcome: Approved, then a delayed refusal for the same op, keeps Approved (other ops unaffected)', async () => {
+    const { settleOutcome } = await import('../src/control/OwnerApprovals');
+    const approved = { ok: true, text: 'Approved. The app that asked can go on now.' };
+    const refused = { ok: false, text: refusalText('approval_forbidden') };
+    let s = settleOutcome({}, 'op-1', { ok: false, text: 'Couldn’t confirm whether the approval went through. Checking your node…' });
+    s = settleOutcome(s, 'op-1', approved);
+    s = settleOutcome(s, 'op-1', refused);
+    s = settleOutcome(s, 'op-2', refused);
+    expect(s).toEqual({ 'op-1': approved, 'op-2': refused });
+  });
+});
+
+describe('the wait gives up when reads keep failing well past expiry', () => {
+  const failing = () => vi.fn(async () => ({ ok: false as const, error: { code: 'node' as never, message: 'x' } }));
+
+  it('within 60 s of expiry a failed read keeps checking (no give-up)', async () => {
+    const status = failing();
+    // expired 30 s ago by the clock: still within the grace
+    show(() => <OwnerApprovalWait view={view({ expires_at: Date.now() / 1000 - 30 })} now={NOW} status={status} onApproved={vi.fn()} onStop={vi.fn()} pollMs={5} />);
+    await vi.waitFor(() => expect(status.mock.calls.length).toBeGreaterThanOrEqual(3));
+    expect($('[data-approval-wait-unconfirmed]')).toBeNull();
+    expect($('[data-owner-approval-wait="pending"]')).not.toBeNull();
+    expect(mount.textContent).toContain('Couldn’t check whether it was approved');
+  });
+
+  it('past expiry + 60 s a failed read stops checking and says so, with Dismiss', async () => {
+    const status = failing();
+    const onStop = vi.fn();
+    show(() => <OwnerApprovalWait view={view({ expires_at: Date.now() / 1000 - 61 })} now={NOW} status={status} onApproved={vi.fn()} onStop={onStop} pollMs={5} />);
+    await vi.waitFor(() => expect($('[data-approval-wait-unconfirmed]')).not.toBeNull());
+    expect($('[data-approval-wait-unconfirmed]')!.textContent).toBe('Couldn’t confirm whether it was approved. Ask again if needed.');
+    expect($('[data-owner-approval-wait="unconfirmed"]')).not.toBeNull();
+    expect($('[data-approval-wait-cancel]')).toBeNull();
+    const calls = status.mock.calls.length;
+    await new Promise((r) => setTimeout(r, 40));
+    expect(status.mock.calls.length).toBe(calls);
+    $<HTMLButtonElement>('[data-approval-wait-dismiss]')!.click();
+    expect(onStop).toHaveBeenCalled();
+  });
+
+  it('a successful read past the grace still wins (only failed reads give up)', async () => {
+    const onApproved = vi.fn();
+    const status = vi.fn(async () => ({ ok: true as const, value: view({ status: 'consumed', expires_at: Date.now() / 1000 - 120 }) }));
+    show(() => <OwnerApprovalWait view={view({ expires_at: Date.now() / 1000 - 120 })} now={NOW} status={status} onApproved={onApproved} onStop={vi.fn()} pollMs={5} />);
+    await vi.waitFor(() => expect($('[data-approval-wait-approved]')).not.toBeNull());
+    expect(onApproved).toHaveBeenCalledTimes(1);
+    expect($('[data-approval-wait-unconfirmed]')).toBeNull();
   });
 });
