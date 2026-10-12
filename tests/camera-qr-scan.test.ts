@@ -188,6 +188,13 @@ describe('scanning with the camera', () => {
     expect(hide).toHaveBeenCalledTimes(1);
   });
 
+  it('a viewfinder that throws while being built ends the scan at once: camera off', async () => {
+    const { d, cam } = deps({ frames: [blank()], show: vi.fn(() => { throw new Error('no video element'); }) });
+    const scan = scanQrWithCamera(d);
+    await expect(scan).rejects.toThrow('Scanning did not complete.');
+    expect(cam.stopped()).toBe(true);
+  });
+
   it('the default timeout is a minute', () => {
     expect(SCAN_TIMEOUT_MS).toBe(60_000);
   });

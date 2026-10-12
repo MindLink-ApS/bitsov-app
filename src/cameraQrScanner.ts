@@ -91,7 +91,14 @@ export function scanQrWithCamera(deps: ScanDeps): Promise<string> {
     decoder.catch(() => finish(null));
     void Promise.all([decoder, camera]).then(([decode, media]) => {
       if (done || !media) return;
-      hide = deps.show(media, () => finish(null), () => finish(null));
+      // A synchronous throw while building the viewfinder must still end the scan
+      // (and so stop the camera) now, not at the 60 s timeout.
+      try {
+        hide = deps.show(media, () => finish(null), () => finish(null));
+      } catch {
+        finish(null);
+        return;
+      }
       tick = setInterval(() => {
         if (done || !stream) return;
         try {
