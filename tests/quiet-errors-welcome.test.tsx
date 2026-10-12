@@ -256,6 +256,14 @@ describe('welcome home', () => {
   });
 });
 
+describe('rail names', () => {
+  it('+ New is named exactly "New" (the "+" is decoration)', () => {
+    const source = sampleSource({ firstLiveMs: 1e9 });
+    start(() => <ControlCenter source={source} active ready error={null} ownId={SAMPLE_OWN_ID} firstRun={<span />} />);
+    expect(mount.querySelector('[data-track="new"]')?.getAttribute('aria-label')).toBe('New');
+  });
+});
+
 describe('onboarding polish', () => {
   it('Reconnect is a real button, and says it is working while it runs', async () => {
     let finish!: () => void;
