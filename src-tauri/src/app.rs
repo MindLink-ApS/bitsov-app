@@ -3916,6 +3916,8 @@ fn budget_dir(state: &NodeState) -> Result<(PathBuf, String), ActionError> {
 /// Read the book, let `edit` change it, and write it back only if asked.
 fn with_book<T>(state: &NodeState, write: bool, edit: impl FnOnce(&mut Book) -> Result<T, ActionError>) -> Result<T, ActionError> {
     let _io = state.budget_io.lock().unwrap();
+    let existing_operation = pending_operation_id(state).unwrap_or_default();
+    let result = (|| {
     let (dir, node_id) = budget_dir(state)?;
     let mut book = budget::load(&dir, &node_id)?;
     let out = edit(&mut book)?;
@@ -3929,6 +3931,8 @@ fn with_book<T>(state: &NodeState, write: bool, edit: impl FnOnce(&mut Book) -> 
         budget::save(&dir, &book)?;
     }
     Ok(out)
+    })();
+    act::with_op(Fallback(existing_operation.as_deref()), result)
 }
 
 fn refuse_if_paused(state: &NodeState) -> Result<(), ActionError> {
@@ -4478,6 +4482,8 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
 
 /// Read-only H1 projection; the single pending slot remains the spending fence.
 async fn do_op_list(state: &NodeState, peer: Option<&str>) -> Result<spend_journal::OpList, ActionError> {
+    let existing_operation = pending_operation_id(state).unwrap_or_default();
+    let result = async {
     let peer = peer.map(control::node_id).transpose().map_err(ActionError::invalid)?;
     let node_id = state.node_id.lock().unwrap().clone()
         .ok_or_else(|| ActionError::new("app_not_ready", "No node identity."))?;
@@ -4486,6 +4492,8 @@ async fn do_op_list(state: &NodeState, peer: Option<&str>) -> Result<spend_journ
     // locks. Keep directory work off the async executor as well.
     tokio::task::spawn_blocking(move || spend_journal::list_operations(&dir, &node_id, peer.as_deref(), spend_journal::OP_LIST_LIMIT))
         .await.map_err(spend_journal::unknown)?
+    }.await;
+    act::with_op(Fallback(existing_operation.as_deref()), result)
 }
 
 /// Waits for any money POST in flight (`NodeState::money`), then reads its record.
@@ -4717,11 +4725,12 @@ async fn reconcile_operation(state: &NodeState, journal: &Journal, mut pending: 
 /// money is fully known (no retry in flight, within its bound) is released,
 /// after its accounting is written. Nothing is dispatched.
 fn do_spend_dismiss_undelivered(state: &NodeState, pending_id: &str) -> Result<String, ActionError> {
-    let existing_operation = pending_operation_id(state).unwrap_or_default();
+    let mut existing_operation = pending_operation_id(state).unwrap_or_default();
     let result = (|| {
     let Ok(_money) = state.money.try_lock() else {
         return Err(ActionError::new("money_busy", "Another payment action is still running. Nothing was changed; try again in a moment."));
     };
+    existing_operation = pending_operation_id(state).unwrap_or_else(|_| existing_operation.clone());
     let journal = spend_journal(state)?;
     // Only the record the owner chose: a stale card never releases another message.
     let pending = journal.pending()?.filter(|p| p.id == pending_id)
@@ -5874,6 +5883,8 @@ async fn read_porch_quote(state: &NodeState, peer: &str, path: &str) -> Result<a
 }
 
 async fn do_porch_read(state: &NodeState, peer: &str, path: &str, max_msat: u64) -> Result<porch::PorchRead, ActionError> {
+    let existing_operation = pending_operation_id(state).unwrap_or_default();
+    let result = async {
     let target = control::node_id(peer).map_err(ActionError::invalid)?;
     let path = porch::porch_path(path)?;
     let (auth, plan) = plan_message(state, &target, false, max_msat, None)
@@ -5897,6 +5908,8 @@ async fn do_porch_read(state: &NodeState, peer: &str, path: &str, max_msat: u64)
     porch::project(&text, &target, &path, accounted, now_unix().max(0) as u64).map_err(|e| {
         ActionError::new("porch_reply_invalid", format!("Paid {}, but the answer could not be shown: {e}.", porch::amount(accounted)))
     })
+    }.await;
+    act::with_op(Fallback(existing_operation.as_deref()), result)
 }
 
 /// `money_post` for a read: its reply is a page, not a send receipt. A refusal
@@ -5906,10 +5919,15 @@ async fn do_porch_read(state: &NodeState, peer: &str, path: &str, max_msat: u64)
 /// and what it counts against the budget (the all-in ceiling: the node
 /// reports no routing fee for a read).
 async fn porch_post(state: &NodeState, auth: Auth, body: serde_json::Value, max_msat: u64, charge: Charge) -> Result<(String, u64), ActionError> {
+    let mut existing_operation = pending_operation_id(state).unwrap_or_default();
+    let result = async {
     let _money = state.money.lock().await;
+    // The quote and lock wait may have let another command publish a pending ID.
+    existing_operation = pending_operation_id(state).unwrap_or_else(|_| existing_operation.clone());
     refuse_if_connection_waiting(state)?;
     let journal = spend_journal(state)?;
     let prior = journal.pending()?;
+    existing_operation = prior.as_ref().and_then(|p| p.operation_id.clone());
     ensure_fresh_token(state).await;
     let token = state.token.lock().unwrap().clone().ok_or_else(|| ActionError::new("app_not_ready", "Not authenticated."))?;
     let node_id = state.node_id.lock().unwrap().clone().ok_or_else(|| ActionError::new("app_not_ready", "No node identity."))?;
@@ -6007,6 +6025,8 @@ async fn porch_post(state: &NodeState, auth: Auth, body: serde_json::Value, max_
     close_charge(state, &charge_id, Some(max_msat), None)?;
     journal.clear()?;
     Ok((text, max_msat))
+    }.await;
+    act::with_op(Fallback(existing_operation.as_deref()), result)
 }
 
 async fn read_porch_cards(state: &NodeState) -> Result<Vec<porch::PorchCard>, String> {
@@ -10076,13 +10096,18 @@ mod control_act_tests {
 
     #[tokio::test]
     async fn operation_error_context_refreshes_after_waiting_for_money_lock() {
-        for reconcile in [false, true] {
+        for command in ["send", "reconcile", "porch"] {
             for fault in ["none", "open", "pending"] {
                 let (node, _) = ops_fake(|n| { n.script = vec![("paid", false)]; n.settled_incomplete = true; });
                 let mut p = psi_first(&node).await;
                 let lock = node.state.money.lock().await;
                 let mut action = Box::pin(async {
-                    if reconcile { do_spend_reconcile(&node.state).await.map(|_| ()) }
+                    if command == "reconcile" { do_spend_reconcile(&node.state).await.map(|_| ()) }
+                    else if command == "porch" {
+                        porch_post(&node.state, Auth::Window(0), serde_json::json!({}), 6000,
+                            Charge { target: A.into(), room: false, confirm: None,
+                                readmission_possible: false, confirmed: false, operation: false }).await.map(|_| ())
+                    }
                     else { money_post_with(&node.state, Auth::Window(0), "/messages/compose",
                         serde_json::json!({}), 7000, None, None).await.map(|_| ()) }
                 });
@@ -10103,9 +10128,54 @@ mod control_act_tests {
                 if fault == "pending" { std::fs::write(journal_file(&node), "corrupt pending").unwrap(); }
                 drop(lock);
                 let error = action.await.unwrap_err();
-                assert_eq!(error.operation_id.as_deref(), Some(id.as_str()), "reconcile={reconcile}, fault={fault}: {error:?}");
+                assert_eq!(error.operation_id.as_deref(), Some(id.as_str()), "command={command}, fault={fault}: {error:?}");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn porch_quote_racing_a_pending_send_keeps_its_operation_id() {
+        let (routes, ops) = ops_node();
+        { let mut n = ops.lock().unwrap(); n.script = vec![("paid", false)]; n.settled_incomplete = true; }
+        let (arrived_tx, arrived_rx) = tokio::sync::oneshot::channel();
+        let arrived = Mutex::new(Some(arrived_tx));
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let release = Mutex::new(release_rx);
+        let node = fake(AuthMode::Local, Arc::new(move |m, path, body| {
+            match path {
+                "/status" => (200, serde_json::json!({"api_capabilities": [
+                    "paid_send_caps_v1", "room_terminal_outcomes_v1", "message_operations_v1", "porch_quote_v1"
+                ]}).to_string()),
+                "/browse/quote" => {
+                    arrived.lock().unwrap().take().unwrap().send(()).unwrap();
+                    release.lock().unwrap().recv_timeout(Duration::from_secs(5)).unwrap();
+                    (200, serde_json::json!({"node_id": A, "path": "/index.md", "status": "Ok",
+                        "amount_msat": 1000, "max_routing_fee_msat": 5000, "max_total_msat": 6000}).to_string())
+                }
+                _ => routes(m, path, body),
+            }
+        }));
+        porch_budget(&node, A).await;
+        let read = do_porch_read(&node.state, A, "/index.md", 6000);
+        let send = async {
+            tokio::time::timeout(Duration::from_secs(5), arrived_rx).await.unwrap().unwrap();
+            // Preflight passed with no pending record. Dispatch a real send
+            // while the free quote is held, before Porch takes the money lock.
+            let error = do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap_err();
+            assert_eq!(error.code, "payment_settled_undelivered");
+            let record = pending(&node).unwrap();
+            let before = book(&node);
+            release_tx.send(()).unwrap();
+            (record, before)
+        };
+        let (read, (record, before)) = tokio::join!(read, send);
+        let error = read.unwrap_err();
+        assert_eq!(error.code, "spend_unknown");
+        assert_eq!(error.operation_id, record.operation_id);
+        assert_eq!(serde_json::to_value(pending(&node).unwrap()).unwrap(), serde_json::to_value(&record).unwrap());
+        assert_eq!(book(&node), before);
+        assert!(fetches(&node).is_empty(), "the pending send must fence the paid read");
+        assert_eq!(ops.lock().unwrap().pays, 1);
     }
 
     // Removing an operation scope must fail this matrix: preflight, repair,
@@ -10115,9 +10185,9 @@ mod control_act_tests {
     async fn operation_errors_keep_id_across_command_storage_steps() {
         use std::os::unix::fs::PermissionsExt;
         #[derive(Clone, Copy, Debug)]
-        enum Command { Send, Call(u16), Retry, ApprovedRetry, Reconcile, Dismiss, Resume, FreshSend, FreshCall(u16), ReplaceSend, Lookup, Pay, Keysend, File }
+        enum Command { Send, Call(u16), Retry, ApprovedRetry, Reconcile, Dismiss, Resume, FreshSend, FreshCall(u16), ReplaceSend, Lookup, Pay, Keysend, File, Porch, BudgetApprove, BudgetPause, BudgetStatus, BudgetSet, History }
         #[derive(Clone, Copy, Debug)]
-        enum Fault { BookRead, BookWrite, RecordRead, Repair, PendingSave, RecordWrite, Clear, PendingRead, Migration, LedgerCreate, JournalOpen }
+        enum Fault { BookRead, BookWrite, RecordRead, Repair, PendingSave, RecordWrite, Clear, PendingRead, Migration, LedgerCreate, JournalOpen, HistoryRead }
         #[derive(Clone, Copy, Debug, PartialEq)]
         enum Phase { Before, Status, Post, Lookup }
         use Command::*;
@@ -10139,12 +10209,18 @@ mod control_act_tests {
             (Retry, RecordWrite), (ApprovedRetry, RecordWrite), (Dismiss, RecordWrite),
             (Dismiss, Clear),
         ].into_iter().map(|(command, fault)| (command, fault, Phase::Before)).collect();
-        for command in [Pay, Keysend, File] {
+        for command in [Pay, Keysend, File, Porch] {
             for fault in [RecordRead, Repair, Migration, JournalOpen] {
                 cases.push((command, fault, Phase::Before));
             }
         }
         cases.push((File, BookRead, Phase::Before));
+        cases.push((Porch, BookRead, Phase::Before));
+        for command in [BudgetApprove, BudgetPause, BudgetStatus, BudgetSet] {
+            cases.push((command, BookRead, Phase::Before));
+            if !matches!(command, BudgetStatus) { cases.push((command, BookWrite, Phase::Before)); }
+        }
+        cases.push((History, HistoryRead, Phase::Before));
         for command in [Send, Call(400), Call(401), Call(402), Call(403), Retry, ApprovedRetry, Reconcile, Dismiss] {
             cases.push((command, Migration, Phase::Before));
             cases.push((command, JournalOpen, Phase::Before));
@@ -10184,6 +10260,10 @@ mod control_act_tests {
                 Clear => std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o500)).unwrap(),
                 PendingRead => std::fs::write(dir.join("spend-pending.json"), "corrupt pending record").unwrap(),
                 LedgerCreate => std::fs::set_permissions(dir.join("ops"), std::fs::Permissions::from_mode(0o500)).unwrap(),
+                HistoryRead => {
+                    std::fs::rename(dir.join("ops"), dir.join("ops.saved")).unwrap();
+                    std::fs::write(dir.join("ops"), "not a directory").unwrap();
+                }
                 JournalOpen => {
                     std::fs::remove_file(dir.join("spend.lock")).unwrap();
                     std::fs::create_dir(dir.join("spend.lock")).unwrap();
@@ -10254,6 +10334,12 @@ mod control_act_tests {
             let result = match command {
                 Pay => do_payment_pay(&node.state, act::TEST_INVOICE_1000, 1000, 6000).await.map(|_| ()),
                 Keysend => do_payment_keysend(&node.state, &format!("03{}", "cd".repeat(32)), 5000, None, 10000).await.map(|_| ()),
+                BudgetApprove => do_budget_approve(&node.state, 500_000, budget::PresetId::Careful).await.map(|_| ()),
+                BudgetPause => do_budget_pause(&node.state).map(|_| ()),
+                BudgetStatus => do_budget_status(&node.state).await.map(|_| ()),
+                BudgetSet => with_book(&node.state, true, |book| book.set_limit(A, false, 50_000)),
+                History => do_op_list(&node.state, None).await.map(|_| ()),
+                Porch => do_porch_read(&node.state, A, "/index.md", 6000).await.map(|_| ()),
                 File => do_file_send(&node.state, A, "a.txt", "text/plain", "aGk=", 8000, None).await.map(|_| ()),
                 ReplaceSend => do_message_send(&node.state, A, false, "different", 14000, None).await.map(|_| ()),
                 Send | FreshSend => do_message_send(&node.state, A, false, "gm", 14000, None).await.map(|_| ()),
