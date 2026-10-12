@@ -12,6 +12,70 @@ that column says **unmeasured**; it is never guessed.
 - **Done** is the time to the final state.
 - **Leaves app** is any step the user must do outside BitSov.
 
+## 0. Headless walkthrough (2026-10-12, app `main` 69df4c8)
+
+**How it was measured:**
+- **Script:** `scripts/design/walkthrough-headless.cjs`, run in headless Chromium at 1280×820. Each scenario ran 5 times and the table shows the median. Evidence (results.json and one PNG per scenario) is in `design/ux/walkthrough/`.
+- **Modes:** sample mode (`?sample`) for the running app; a stubbed host for first run, offline, unlock and pairing.
+- **No window, no node, no money.** Rasmus chose headless only. The two-mock-node window runner (`scripts/ui-e2e-two-node.sh`) was **not** run, because it opens the real app window on NOVA.
+- **Feedback** is the time from the click to the first DOM change. **Done** is the time from the click to the scenario's end state.
+- **What these numbers leave out:** they measure the **UI only**. Sample mode answers at once, except AI reads, which take a fixed 350 ms. Node, Lightning and peer time are **not** in them. For those, see the traced round trips in §1 and §1b, which stay **unmeasured** end to end until a recorded mock-node or pilot run.
+
+| Scenario | Feedback | Done | |
+|---|---|---|---|
+| First run: app start → setup on screen | — | 74 ms | PASS |
+| Running app: start → chat ready | — | 110 ms | PASS |
+| Send a message (sample; approval card first) | 5 ms | 9 ms | PASS |
+| Approve the daily budget (one tap) | 0 ms | 0 ms | PASS |
+| Open a contact | 1 ms | 1 ms | PASS |
+| Switch to another chat | 11 ms | 11 ms | PASS |
+| Start a call (sample: no peer media) | 2 ms | 8 ms | PASS |
+| Composer: More → Pay | 1 ms | 1 ms | PASS |
+| Request: amount → Create invoice → QR | 2 ms | 17 ms | PASS |
+| Attach a file → price shown | 0 ms | 0 ms | PASS |
+| You → Wallet | 3 ms | 3 ms | PASS |
+| Wallet → Receive tab | 1 ms | 1 ms | PASS |
+| You → Profile and settings | 0 ms | 0 ms | PASS |
+| Settings → Devices (add a device) | 1 ms | 1 ms | PASS |
+| Open Ask your node | 3 ms | 3 ms | PASS |
+| Ask your node: a suggested question → answer | 1 ms | 364 ms | PASS |
+| + New (node id, intro card, starter bitcoin) | 11 ms | 11 ms | PASS |
+| Offline: Retry now → back | 1 ms | 2 ms | PASS |
+| Unlock with typed password | 1 ms | 11 ms | PASS |
+| Paste a pairing link → Review | 1 ms | 14 ms | PASS |
+
+**What this shows:** the renderer itself is not where time goes. Every scenario gives feedback within one or two frames and reaches its UI end state in under 20 ms (Ask your node takes 364 ms, of which 350 ms is the sample read). The felt slowness and friction are elsewhere:
+- steps that leave the app (terminal approvals);
+- sequential host round trips before each payment;
+- payment flows that give no feedback until the node settles.
+
+The ranked list below follows from that.
+
+## 0b. Top 10 friction points (2026-10-12)
+
+Each point is marked by what it needs to move: **UI** (this lane, now), **host ledger** (parked #201, #203 and #207; they re-land on #209/H1), **host** (pre-flight / API) or **node**.
+
+| # | Friction | Evidence | Needs |
+|---|---|---|---|
+| 1 | **The first send leaves the app.** A fresh setup's first Send shows "Confirm at your node… Run `konsensus grant --op …`" on the node's computer. | `send.png`; scenario `send` | **node + host**: owner approval from an enrolled device (Touch ID approvals exist but need device setup first). UI part: offer Touch ID setup right there. |
+| 2 | **No feedback while a paid message goes out.** No bubble until the node settles: the whole pre-flight, payment and delivery (§1). | 1218 ms to the bubble with a 1.2 s stubbed send (§1) | **host ledger** (#201 parked) |
+| 3 | **Approve, then press Send again.** The approval succeeds and nothing is sent. | §3 #1; #207 | **host ledger** (#207 parked) |
+| 4 | **Calls across networks cannot connect.** There is no STUN by default; own-node STUN is built but parked. | §1b C1; beta STUN verified | **host ledger** (#203 parked; the STUN default is part of it) |
+| 5 | **First contact with a stranger needs an owner command** (`konsensus approve first-contact …`). | OWNER_FIRST_CONTACT.md; #207 Codex finding | **node + host** |
+| 6 | **5–6 sequential host round trips before each payment** (≈ 0.4–0.75 s at 74 ms RTT). #204 reuses status within the pre-flight. | §1; #204 merged | **host** (rest of the parallel reads) |
+| 7 | **On a phone, Wallet and Settings were unreachable** and tap targets were 25–38 px. | `capture-phone.cjs` | **UI**: #208, round 2 in review |
+| 8 | **The offline screen sat on top of the setup steps**; unlock spanned the window; jargon in step 2. | `capture-offline.cjs` | **UI**: #211, round 1 fix pushed |
+| 9 | **The "No STUN server" note shows on every chat.** | §1b C2 | **UI**: #210 in review |
+| 10 | **The file composer shows no price on Send while approval is pending.** It says only "pays like a message". | `file.png` | **UI**: not yet built (small) |
+
+**Not measurable headless (stays open):**
+- receive latency (node delivery);
+- rooms ("This node does not support rooms yet" in sample);
+- add a device (disabled without an owner device);
+- any real call media.
+
+These need the recorded mock-node run (with Rasmus's OK) or a hand check on the pilot.
+
 ## 1. "Send a paid message" (first deep dive)
 
 ### What happens today on Send (code path, `main` 2799e5a)
@@ -138,6 +202,8 @@ all. Even a 1 s send feels broken if nothing moves.
    Until then the UI says there is no relay and some networks cannot connect.
 
 ## 4. Log
+
+- **2026-10-12:** Headless walkthrough of 20 scenarios at `main` 69df4c8 (5 runs each; all PASS). The UI responds within frames everywhere, so the friction is approvals, host round trips and the parked payment flows. Top 10 friction points are ranked in §0b. The window runner was not used (Rasmus: headless only).
 
 - **2026-10-11:** Beta's own-node STUN checked from NOVA: a STUN Binding Request to 136.71.194.190:3478 got a
   Binding Success response with a mapped address in **114 ms** (transaction id matched). **Verified by the lead**

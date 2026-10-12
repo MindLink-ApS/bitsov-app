@@ -1,0 +1,188 @@
+{
+  "at": "2026-10-12T14:05:23.773Z",
+  "base": "http://localhost:1420",
+  "runs_each": 5,
+  "viewport": "1280x820",
+  "results": [
+    {
+      "id": "boot-first-run",
+      "label": "First run: app start → setup on screen",
+      "runs": 5,
+      "feedback_ms": null,
+      "done_ms": 74,
+      "ok": true,
+      "error": ""
+    },
+    {
+      "id": "boot-app",
+      "label": "Running app: start → chat ready",
+      "runs": 5,
+      "feedback_ms": null,
+      "done_ms": 110,
+      "ok": true,
+      "error": ""
+    },
+    {
+      "id": "send",
+      "label": "Send a message (sample; approval card first)",
+      "runs": 5,
+      "feedback_ms": 5,
+      "done_ms": 9,
+      "ok": true,
+      "error": ""
+    },
+    {
+      "id": "approve-budget",
+      "label": "Approve the daily budget (one tap)",
+      "runs": 5,
+      "feedback_ms": 0,
+      "done_ms": 0,
+      "ok": true,
+      "error": ""
+    },
+    {
+      "id": "contact",
+      "label": "Open a contact",
+      "runs": 5,
+      "feedback_ms": 1,
+      "done_ms": 1,
+      "ok": true,
+      "error": ""
+    },
+    {
+      "id": "switch-chat",
+      "label": "Switch to another chat",
+      "runs": 5,
+      "feedback_ms": 11,
+      "done_ms": 11,
+      "ok": true,
+      "error": ""
+    },
+    {
+      "id": "call",
+      "label": "Start a call (sample: no peer media)",
+      "runs": 5,
+      "feedback_ms": 2,
+      "done_ms": 8,
+      "ok": true,
+      "error": ""
+    },
+    {
+      "id": "more-pay",
+      "label": "Composer: More → Pay",
+      "runs": 5,
+      "feedback_ms": 1,
+      "done_ms": 1,
+      "ok": true,
+      "error": ""
+    },
+    {
+      "id": "request",
+      "label": "Request: amount → Create invoice → QR",
+      "runs": 5,
+      "feedback_ms": 2,
+      "done_ms": 17,
+      "ok": true,
+      "error": ""
+    },
+    {
+      "id": "file",
+      "label": "Attach a file → price shown",
+      "runs": 5,
+      "feedback_ms": 0,
+      "done_ms": 0,
+      "ok": true,
+      "error": ""
+    },
+    {
+      "id": "wallet",
+      "label": "You → Wallet",
+      "runs": 5,
+      "feedback_ms": 3,
+      "done_ms": 3,
+      "ok": true,
+      "error": ""
+    },
+    {
+      "id": "wallet-receive",
+      "label": "Wallet → Receive tab",
+      "runs": 5,
+      "feedback_ms": 1,
+      "done_ms": 1,
+      "ok": true,
+      "error": ""
+    },
+    {
+      "id": "settings",
+      "label": "You → Profile and settings",
+      "runs": 5,
+      "feedback_ms": 0,
+      "done_ms": 0,
+      "ok": true,
+      "error": ""
+    },
+    {
+      "id": "devices",
+      "label": "Settings → Devices (add a device)",
+      "runs": 5,
+      "feedback_ms": 1,
+      "done_ms": 1,
+      "ok": true,
+      "error": ""
+    },
+    {
+      "id": "ai-open",
+      "label": "Open Ask your node",
+      "runs": 5,
+      "feedback_ms": 3,
+      "done_ms": 3,
+      "ok": true,
+      "error": ""
+    },
+    {
+      "id": "ai-ask",
+      "label": "Ask your node: a suggested question → answer",
+      "runs": 5,
+      "feedback_ms": 1,
+      "done_ms": 364,
+      "ok": true,
+      "error": ""
+    },
+    {
+      "id": "new",
+      "label": "+ New (node id, intro card, starter bitcoin)",
+      "runs": 5,
+      "feedback_ms": 11,
+      "done_ms": 11,
+      "ok": true,
+      "error": ""
+    },
+    {
+      "id": "offline",
+      "label": "Offline: Retry now → back",
+      "runs": 5,
+      "feedback_ms": 1,
+      "done_ms": 2,
+      "ok": true,
+      "error": ""
+    },
+    {
+      "id": "unlock",
+      "label": "Unlock with typed password",
+      "runs": 5,
+      "feedback_ms": 1,
+      "done_ms": 11,
+      "ok": true,
+      "error": ""
+    },
+    {
+      "id": "pair-review",
+      "label": "Paste a pairing link → Review",
+      "runs": 5,
+      "feedback_ms": 1,
+      "done_ms": 14,
+      "ok": true,
+      "error": ""
+    }
+  ]
+}
