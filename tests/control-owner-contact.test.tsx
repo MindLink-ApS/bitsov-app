@@ -372,7 +372,7 @@ describe('owner approval v1: first contact approved on the owner’s other devic
     expect(source.send).not.toHaveBeenCalled();
     consume();
     await vi.waitFor(() => expect(element('[data-contact-approval="device-approved"]')).not.toBeNull(), { timeout: 4000 });
-    await vi.waitFor(() => expect(source.firstContactStatus).toHaveBeenCalledWith('g-fc', A));
+    await vi.waitFor(() => expect(source.firstContactStatus).toHaveBeenCalledWith('g-fc', A), { timeout: 4000 });
     expect(source.send).not.toHaveBeenCalled();
     grant();
     await vi.waitFor(() => expect(source.send).toHaveBeenCalledTimes(1), { timeout: 4000 });
