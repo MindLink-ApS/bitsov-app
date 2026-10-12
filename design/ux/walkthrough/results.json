@@ -87,7 +87,7 @@
     },
     {
       "id": "file",
-      "label": "Attach a file → price shown",
+      "label": "Attach a file → file in the composer",
       "runs": 5,
       "feedback_ms": 0,
       "done_ms": 0,

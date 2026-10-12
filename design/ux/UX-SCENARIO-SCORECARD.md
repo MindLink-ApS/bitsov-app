@@ -32,7 +32,7 @@ that column says **unmeasured**; it is never guessed.
 | Start a call (sample: no peer media) | 2 ms | 8 ms | PASS |
 | Composer: More → Pay | 1 ms | 1 ms | PASS |
 | Request: amount → Create invoice → QR | 2 ms | 17 ms | PASS |
-| Attach a file → price shown | 0 ms | 0 ms | PASS |
+| Attach a file → file in the composer (no price on Send while approval is pending, see #10) | 0 ms | 0 ms | PASS |
 | You → Wallet | 3 ms | 3 ms | PASS |
 | Wallet → Receive tab | 1 ms | 1 ms | PASS |
 | You → Profile and settings | 0 ms | 0 ms | PASS |

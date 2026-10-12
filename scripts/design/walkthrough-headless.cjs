@@ -82,7 +82,7 @@ const scenarios = [
   ['request', 'Request: amount → Create invoice → QR', '?sample',
     async (p) => { await p.click('[aria-label="More: attach, pay, request"]'); await p.click('[data-composer-mode="request"]'); await p.waitForSelector('[data-composer][data-mode="request"]'); await p.fill('[data-request-amount]', '21'); await p.waitForTimeout(200); },
     click('[data-send]'), `!!document.querySelector('[data-artifact="invoice"]')`],
-  ['file', 'Attach a file → price shown', '?sample',
+  ['file', 'Attach a file → file in the composer', '?sample',
     async (p) => { await p.click('[aria-label="More: attach, pay, request"]'); const [chooser] = await Promise.all([p.waitForEvent('filechooser'), p.click('[data-composer-mode="file"]')]); await chooser.setFiles({ name: 'note.txt', mimeType: 'text/plain', buffer: Buffer.from('hello') }); },
     `void 0;`, `!!document.querySelector('[data-composer][data-mode="file"]') && (document.querySelector('[data-composer]')?.textContent || '').includes('note.txt')`],
   ['wallet', 'You → Wallet', '?sample', async (p) => { await p.click('[aria-label="You: wallet, profile and settings"]'); await p.waitForSelector('[data-open-wallet]'); }, click('[data-open-wallet]'), `!!document.querySelector('[data-wallet-page]')`],
