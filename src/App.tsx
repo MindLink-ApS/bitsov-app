@@ -227,9 +227,22 @@ function AppScreen() {
     if (timer) window.clearInterval(timer);
   });
 
+  // Offline, the setup steps below would read as progress: they wait behind
+  // one quiet choice, for an owner who wants to point the app elsewhere.
+  // They are only HIDDEN, never unmounted: an owner ceremony in progress
+  // (for example across the box's restart after setup) keeps its state and
+  // its polling, and continues when the box is back. A repair prompt is never hidden.
+  const [changeNode, setChangeNode] = createSignal(false);
+  createEffect(() => { if (!offline()) setChangeNode(false); });
+  const repairing = () => !!status().initialization_repair && status().initialization_repair !== 'none';
+  const setupHidden = () => offline() && !changeNode() && !repairing();
   const firstRun = (
     <div class="first-run" data-first-run>
       {offlineScreen()}
+      <Show when={setupHidden()}>
+        <button type="button" class="quiet offline-change" data-offline-change onClick={() => setChangeNode(true)}>Use a different node</button>
+      </Show>
+      <div class="setup-steps" data-setup-steps hidden={setupHidden()}>
 
       <Show
         when={status().initialization_repair && status().initialization_repair !== 'none'}
@@ -313,6 +326,7 @@ function AppScreen() {
           />
         }</Show>
       </Show>
+      </div>
     </div>
   );
 

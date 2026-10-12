@@ -624,7 +624,8 @@ describe('pairing panel', () => {
     mount?.remove();
 
     const later = show(paired, ready);
-    expect(later.querySelector('[data-ob-head="trust"] h1')?.textContent).toBe('Before you add sats');
+    // The heading is named like its step.
+    expect(later.querySelector('[data-ob-head="trust"] h1')?.textContent).toBe('Your identity');
     expect(later.querySelector('.node-target-section.compact')).not.toBeNull();
     // Still a real choice once compact.
     expect(later.querySelectorAll('[role="radio"]').length).toBe(2);

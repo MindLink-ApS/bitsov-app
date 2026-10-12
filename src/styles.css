@@ -540,7 +540,8 @@ select { font: inherit; font-size: var(--t-sm); background: var(--sunk); color: 
 .first-run { position: relative; isolation: isolate; flex: 1; min-height: 0; overflow-y: auto; padding: clamp(var(--s-8), 9vh, 88px) var(--s-6) var(--s-10); display: flex; flex-direction: column; align-items: center; gap: var(--s-5); }
 /* The one ambient touch: a faint ember glow behind the first-run column. */
 .first-run::before { content: ''; position: absolute; z-index: -1; top: -120px; right: 0; width: min(420px, 45%); height: 420px; border-radius: 50%; background: radial-gradient(circle, color-mix(in srgb, var(--money) 16%, transparent), transparent 68%); pointer-events: none; }
-.first-run > * { width: 100%; max-width: 560px; }
+/* The column: direct children, and the children of the boxless setup-steps wrapper (same sizing). */
+.first-run > *, .first-run > .setup-steps > * { width: 100%; max-width: 560px; }
 .state { display: flex; flex-direction: column; align-items: center; gap: var(--s-3); color: var(--muted); }
 .state.ready { color: var(--ink); align-items: stretch; }
 .state.error { color: var(--err); }
@@ -1372,3 +1373,18 @@ input[type='checkbox'], input[type='radio'] { width: auto; flex: none; padding: 
 .qr-scan-title { margin: 0; font-weight: 600; }
 .qr-scan-video { width: 100%; aspect-ratio: 4 / 3; object-fit: cover; border-radius: 12px; background: #000; }
 .qr-scan-box .quiet { justify-self: end; }
+
+/* First run: the rail shows BitSov and the node's state only; contacts,
+   rooms and the rest appear once setup is done (no "after setup" placeholders). */
+.rail.rail-setup .track-group { display: none; }
+/* Opened from its toggle, the panel's own title is for screen readers; Hide sits at the right. */
+.hub-trust-head:has(.hub-trust-title.sr-only) { justify-content: flex-end; }
+
+/* Unlock after a restart: the same readable column as setup, the badge inline. */
+.locked-node { width: 100%; max-width: 640px; margin: clamp(var(--s-6), 7vh, 72px) auto var(--s-8); padding: 0 var(--s-4); box-sizing: border-box; }
+.locked-node [data-locked-badge] { align-self: flex-start; width: fit-content; }
+/* Offline: one quiet way to point the app at a different node. */
+.first-run > .offline-change { width: auto; align-self: center; min-height: 44px; }
+/* The setup steps keep the first-run column's own spacing; hidden while offline (still mounted). */
+.first-run > .setup-steps { display: contents; }
+.first-run > .setup-steps[hidden] { display: none; }
