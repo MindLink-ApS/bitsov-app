@@ -883,6 +883,9 @@ export function ControlCenter(props: Props) {
   const [callStreams, setCallStreams] = createSignal<{ local: MediaStream | null; remote: MediaStream | null }>({ local: null, remote: null });
   const [callApproval, setCallApproval] = createSignal(false);
   const [callApproving, setCallApproving] = createSignal(false);
+  // Feedback from the press: the panel says Calling while the engine checks
+  // pairing (and a retry reads a fresh quote). Nothing is paid in this window.
+  const [callStarting, setCallStarting] = createSignal<{ peer: string; media: CallMedia } | null>(null);
   const calls = createCallEngine({
     authorize: async () => {
       const pairing = await act(() => source.pairingStatus());
@@ -916,6 +919,14 @@ export function ControlCenter(props: Props) {
   });
   // Closing the window ends the call here without paying; only Hang up pays.
   onCleanup(() => calls.endLocal());
+  // The engine's own state takes over once it leaves idle, or an approval is asked for.
+  createEffect(() => { if (callView().phase !== 'idle' || callApproval()) setCallStarting(null); });
+  const shownCall = (): CallView => {
+    const start = callStarting();
+    return start && callView().phase === 'idle' && !callApproval()
+      ? { ...CALL_IDLE, phase: 'calling', peer: start.peer, media: start.media, outgoing: true }
+      : callView();
+  };
 
   // Meetings: up to 4 people, one ordinary paid 1:1 call per pair (meeting.ts).
   const [meetingView, setMeetingView] = createSignal<MeetingView>(MEETING_IDLE);
@@ -951,7 +962,12 @@ export function ControlCenter(props: Props) {
     remote: () => props.remote === true,
     moneyBlocked,
     callQuote: (peer) => act(() => source.callQuote(peer)),
-    placeCall: (peer, media, quote) => { if (!moneyBlocked()) void calls.place(peer, media, quote); },
+    placeCall: (peer, media, quote) => {
+      if (moneyBlocked()) return;
+      const start = { peer, media };
+      setCallStarting(start);
+      void calls.place(peer, media, quote).finally(() => { if (callStarting() === start) setCallStarting(null); });
+    },
     callView,
     callActive: () => !['idle', 'ended'].includes(callView().phase) || meetingOn(),
     // Opens the planner; the contact is pre-picked only if their node takes meetings.
@@ -1608,19 +1624,29 @@ export function ControlCenter(props: Props) {
           </div>
         </Show>}
         blocked={moneyBlocked()}
-        view={callView()}
+        view={shownCall()}
         streams={callStreams()}
         nameOf={nameOf}
         quote={actions.callQuote}
         accept={() => { if (!moneyBlocked()) void calls.accept(); }}
         decline={() => void calls.decline()}
-        hangup={() => void calls.hangup()}
+        hangup={() => {
+          // Cancel before the engine entered Calling: nothing went out; stop the preflight.
+          if (callStarting() && callView().phase === 'idle') { setCallStarting(null); calls.endLocal(); return; }
+          void calls.hangup();
+        }}
         mute={() => calls.toggleMute()}
         camera={() => void calls.toggleCamera()}
         dismiss={() => { setCallApproval(false); calls.dismiss(); }}
         retry={(peer, media) => {
           calls.dismiss();
-          void actions.callQuote(peer).then((r) => { if (r.ok) actions.placeCall(peer, media, r.value); });
+          const start = { peer, media };
+          setCallStarting(start);
+          void actions.callQuote(peer).then((r) => {
+            if (callStarting() !== start) return; // Cancelled while the quote was read.
+            if (r.ok) actions.placeCall(peer, media, r.value);
+            else setCallStarting(null);
+          });
         }}
         setUpCalls={() => { calls.dismiss(); setTab('body'); setContextOpen(true); }}
       />
@@ -1725,6 +1751,7 @@ function CallSettings(props: { own: OwnStun | null }) {
             : `Calls ask ${using()} for your public address, so that server sees your IP address each time you place or accept a call.`
           : 'No STUN server: calls contact no third party and connect only on the same network (or a VPN). Calls across routers need a STUN server, for example your own node.'}
       </p>
+      <p class="hint" data-call-relay-limit>There is no relay yet. Some networks (strict or carrier-grade NAT) block direct calls even with STUN; those calls will not connect.</p>
       <Show when={ownUrl() && using() !== ownUrl()}>
         <div class="row">
           <button type="button" class="soft" data-stun-own onClick={() => { setDraft(ownUrl()!); setError(null); }}>
@@ -2624,12 +2651,18 @@ function CallPanel(props: {
         </header>
         {props.approval}
         <Show when={networkHint()}><CallNetworkNote /></Show>
+        <Show when={!noStun() && v().phase === 'ended' && (v().reason === 'failed' || v().reason === 'timeout')}>
+          <p class="hint" data-call-relay-limit>The network may block direct calls. BitSov has no relay yet, so some networks cannot connect.</p>
+        </Show>
         <Show when={v().phase === 'live' || v().phase === 'reconnecting'}>
           <p class="hint" data-call-recovery-note>A network interruption may trigger one paid recovery attempt within your budget. Recovery uses another call admission and signalling fees.</p>
         </Show>
-        <Show when={v().media === 'video' && (v().phase === 'live' || v().phase === 'connecting' || v().phase === 'reconnecting')}>
-          <div class="call-videos">
-            <MediaView stream={props.streams.remote} video muted={false} kind="remote" />
+        <Show when={v().media === 'video' && v().phase !== 'incoming' && v().phase !== 'ended'}>
+          <div class="call-videos" data-call-videos={v().phase}>
+            {/* Before they answer: your own preview only, no empty remote frame. */}
+            <Show when={props.streams.remote || ['live', 'connecting', 'reconnecting'].includes(v().phase)}>
+              <MediaView stream={props.streams.remote} video muted={false} kind="remote" />
+            </Show>
             <MediaView stream={props.streams.local} video muted kind="local" />
           </div>
         </Show>
@@ -2669,10 +2702,11 @@ function CallPanel(props: {
               <button type="button" class="soft" data-call-dismiss onClick={() => props.dismiss()}>Close</button>
             </Match>
             <Match when={v().phase !== 'idle'}>
-              <Show when={v().phase === 'live' || v().phase === 'connecting' || v().phase === 'reconnecting'}>
-                <button type="button" class="soft" data-call-mute aria-pressed={v().muted} onClick={() => props.mute()}>Mute</button>
+              {/* From the first moment: the mic and camera open before the offer, so their controls do too. */}
+              <Show when={v().phase !== 'incoming'}>
+                <button type="button" class="soft" data-call-mute aria-pressed={v().muted} disabled={!props.streams.local} onClick={() => props.mute()}>Mute</button>
                 <Show when={v().media === 'video'}>
-                  <button type="button" class="soft" data-call-camera aria-pressed={v().camera} onClick={() => props.camera()}>Camera</button>
+                  <button type="button" class="soft" data-call-camera aria-pressed={v().camera} disabled={!props.streams.local} onClick={() => props.camera()}>Camera</button>
                 </Show>
               </Show>
               <button type="button" class="danger soft" data-call-hangup onClick={() => props.hangup()}>

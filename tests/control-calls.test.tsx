@@ -1260,8 +1260,42 @@ describe('calls in the shell', () => {
     expect(cancel.disabled).toBe(false);
     expect(cancel.textContent?.trim()).toBe('Cancel');
     cancel.click();
-    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    // Cancelled during the preflight the panel just closes; once Calling began it says ended.
+    await vi.waitFor(() => expect($('[data-call-panel="calling"]')).toBeNull());
+    await new Promise((r) => setTimeout(r, 50));
+    expect($('[data-call-panel="calling"]')).toBeNull();
     expect(host.used('call_signal')).toHaveLength(0);
+  });
+
+  it('says Calling the moment Call is pressed, before the pairing check answers, and Cancel stops it', async () => {
+    let release!: () => void;
+    let hold: Promise<PairingView> | null = null;
+    const host = stubHost({ pairing_status: () => hold ?? paired });
+    await openShell();
+    await vi.waitFor(() => expect($('[data-call="audio"]')!.getAttribute('aria-label')).toBe('Call Maya, up to 42 sats'));
+    hold = new Promise((r) => { release = () => r(paired); });
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    expect($('[data-call-panel="calling"]')).not.toBeNull();
+    expect($('[data-call-title]')!.textContent).toBe('Calling');
+    $<HTMLButtonElement>('[data-call-hangup]')!.click();
+    expect($('[data-call-panel]')).toBeNull();
+    release();
+    await new Promise((r) => setTimeout(r, 50));
+    expect($('[data-call-panel]')).toBeNull();
+    expect(host.used('call_signal')).toHaveLength(0);
+  });
+
+  it('offers Mute and a camera preview while calling, before anyone answers', async () => {
+    stubHost();
+    vi.spyOn(HTMLMediaElement.prototype, 'srcObject', 'set').mockImplementation(() => {});
+    await openShell();
+    await vi.waitFor(() => expect($('[data-call="video"]')!.getAttribute('aria-label')).toBe('Video call Maya, up to 42 sats'));
+    $<HTMLButtonElement>('[data-call="video"]')!.click();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-mute]')?.disabled).toBe(false));
+    expect(['calling', 'ringing']).toContain($('[data-call-panel]')!.getAttribute('data-call-panel'));
+    expect($('[data-call-camera]')).not.toBeNull();
+    expect($('[data-call-media="local"]')).not.toBeNull();
+    expect($('[data-call-media="remote"]')).toBeNull();
   });
 
   it('closing the shell during a call ends it without a paid hangup', async () => {
@@ -1287,6 +1321,7 @@ describe('calls in the shell', () => {
     $<HTMLButtonElement>('[data-open-settings]')!.click();
     await vi.waitFor(() => expect($('[data-call-settings]')).not.toBeNull());
     expect(text('[data-stun-note]')).toMatch(/No STUN server: calls contact no third party/);
+    expect(text('[data-call-relay-limit]')).toMatch(/no relay yet/);
     const input = $<HTMLInputElement>('[data-stun-input]')!;
     input.value = 'turn:relay.example.org';
     input.dispatchEvent(new Event('input', { bubbles: true }));
