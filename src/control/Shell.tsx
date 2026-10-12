@@ -973,7 +973,7 @@ export function ControlCenter(props: Props) {
       // One press per call: a second press during the preflight is ignored.
       if (moneyBlocked() || callStarting() || actions.callActive()) return;
       setPriceUp(null);
-      seenCallCost.set(peer.toLowerCase(), callCost(quote) ?? 0);
+      seenCallCost.set(peer.toLowerCase(), callCeiling(quote));
       const start = { peer, media };
       setCallStarting(start);
       void calls.place(peer, media, quote).finally(() => { if (callStarting() === start) setCallStarting(null); });
@@ -1667,7 +1667,7 @@ export function ControlCenter(props: Props) {
             if (!r.ok) return;
             const was = seenCallCost.get(peer.toLowerCase());
             // Dearer than the price on the button they pressed: show it, and wait for a press.
-            if (was !== undefined && (callCost(r.value) ?? 0) > was) { setPriceUp({ peer, media, quote: r.value, was }); return; }
+            if (was !== undefined && callCeiling(r.value) > was) { setPriceUp({ peer, media, quote: r.value, was }); return; }
             actions.placeCall(peer, media, r.value);
           });
         }}
@@ -2586,7 +2586,7 @@ function CallButtons(props: { peer: string; name: string; blocked: boolean; acti
   }));
   const cost = () => {
     const q = quote();
-    return q && callCost(q) !== null ? 2 * callCost(q)! : null;
+    return q && callCost(q) !== null ? callCeiling(q) : null;
   };
   const off = () => props.blocked || cost() === null || props.actions.callActive();
   const title = () =>
@@ -2608,6 +2608,9 @@ function CallButtons(props: { peer: string; name: string; blocked: boolean; acti
     </div>
   );
 }
+
+/** The whole ceiling a call can spend, as the Call button shows it: the call and one recovery. */
+const callCeiling = (q: CallQuote) => 2 * (callCost(q) ?? 0);
 
 const CALL_TITLE: Record<CallView['phase'], string> = {
   idle: '', calling: 'Calling', ringing: 'Ringing', incoming: 'Incoming call', connecting: 'Connecting', live: 'On call', reconnecting: 'Reconnecting…', ended: 'Call ended',
@@ -2675,7 +2678,7 @@ function CallPanel(props: {
     const e = v().error;
     if (e === MONEY_NOT_READY) {
       // Only a call that never paid anything was "not sent"; a refused later signal is said as such.
-      return v().paidMsat === 0 && v().liveAt === null
+      return v().paidMsat === 0 && v().liveAt === null && !v().unresolved
         ? 'Your node isn’t ready to pay yet, so nothing was sent. Try again in a moment.'
         : `This call was paid (${fmtAmount(v().paidMsat)} cap). Your node wasn’t ready to pay for its next signal (hang-up or reconnect), so that one was not sent.`;
     }
@@ -2699,9 +2702,9 @@ function CallPanel(props: {
     <Show when={props.priceUp && v().phase === 'idle'}>
       <aside class="call-panel" data-call-price-up role="dialog" aria-label="Call price changed">
         <header><strong>The call price went up</strong><span class="who">{props.priceUp ? props.nameOf(props.priceUp.peer) : ''}</span></header>
-        <p class="hint">Now up to {fmtAmount(callCost(props.priceUp!.quote) ?? 0)}; you saw up to {fmtAmount(props.priceUp!.was)}. Nothing was sent.</p>
+        <p class="hint" data-call-price-new={callCeiling(props.priceUp!.quote)}>Now up to {fmtAmount(callCeiling(props.priceUp!.quote))}, with one recovery; you saw up to {fmtAmount(props.priceUp!.was)}. Nothing was sent.</p>
         <div class="call-actions">
-          <button type="button" class="primary soft money" data-call-price-confirm onClick={() => props.confirmPrice()}>Call · up to {fmtAmount(callCost(props.priceUp!.quote) ?? 0)}</button>
+          <button type="button" class="primary soft money" data-call-price-confirm onClick={() => props.confirmPrice()}>Call · up to {fmtAmount(callCeiling(props.priceUp!.quote))}</button>
           <button type="button" class="soft" data-call-price-close onClick={() => props.closePrice()}>Close</button>
         </div>
       </aside>
@@ -2747,6 +2750,15 @@ function CallPanel(props: {
         <Show when={v().phase === 'ended' && checked()}>
           <p class="hint" data-call-checked>{checked()}</p>
         </Show>
+        <Show when={v().phase === 'ended' && v().unresolved}>
+          <p class="hint" data-call-admission={v().unresolved!.state}>
+            {v().unresolved!.state === 'dispatching'
+              ? 'Ending… The call offer had already gone out. It is hung up as soon as its payment settles.'
+              : v().unresolved!.state === 'unknown'
+                ? 'The call offer’s payment result is not known. Check payment; the call may still be open on their side.'
+                : 'That call was paid and is not hung up yet. End it before calling them again.'}
+          </p>
+        </Show>
         <Show when={v().phase !== 'ended' && v().error}>
           <p class="hint" data-call-error>{v().error}</p>
         </Show>
@@ -2756,16 +2768,22 @@ function CallPanel(props: {
               <button type="button" class="primary soft money" data-call-accept disabled={props.blocked} onClick={() => props.accept()}>Accept{price(answer())}</button>
               <button type="button" class="soft" data-call-decline disabled={props.blocked} onClick={() => props.decline()}>Decline{price(answer())}</button>
             </Match>
-            <Match when={v().phase === 'ended' && v().unresolved && !v().unresolved!.checked}>
+            <Match when={v().phase === 'ended' && v().unresolved?.state === 'dispatching'}>
+              {/* The offer is out and its payment not settled: it is ended once it settles. */}
+              <button type="button" class="soft" data-call-dismiss onClick={() => props.dismiss()}>Close</button>
+            </Match>
+            <Match when={v().phase === 'ended' && v().unresolved?.state === 'unknown'}>
               {/* Maybe paid: check first; never "Try again" (that could pay a second admission). */}
               <button type="button" class="primary soft" data-call-check disabled={checking()} onClick={() => void check()}>Check payment</button>
               <button type="button" class="soft" data-call-dismiss onClick={() => props.dismiss()}>Close</button>
             </Match>
+            <Match when={v().phase === 'ended' && v().unresolved?.state === 'open'}>
+              {/* Paid (or checked) and not hung up: end it before any new call to them. */}
+              <button type="button" class="primary soft" data-call-end-unresolved disabled={checking()} onClick={() => void endUnresolved()}>End that call · up to {fmtAmount(v().unresolved!.hangupMsat)}</button>
+              <button type="button" class="soft" data-call-dismiss onClick={() => props.dismiss()}>Close</button>
+            </Match>
             <Match when={v().phase === 'ended'}>
               {/* One primary way on, then Close. */}
-              <Show when={v().unresolved?.checked}>
-                <button type="button" class="soft" data-call-end-unresolved disabled={checking()} onClick={() => void endUnresolved()}>End that call · up to {fmtAmount(v().unresolved!.hangupMsat)}</button>
-              </Show>
               <Show
                 when={setUpFirst()}
                 fallback={

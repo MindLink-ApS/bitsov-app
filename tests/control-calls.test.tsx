@@ -128,14 +128,14 @@ describe('call refusal recovery', () => {
       const placing = e.place(A, 'audio', QUOTE);
       await vi.advanceTimersByTimeAsync(30_001);
       await placing;
-      expect(e.view()).toMatchObject({ phase: 'ended', unresolved: { checked: false, hangupMsat: 6_000 } });
+      expect(e.view()).toMatchObject({ phase: 'ended', unresolved: { state: 'unknown', hangupMsat: 6_000 } });
       // The host settles the offer late: the admission was paid.
       finish({ ok: true, value: { message_id: 'late', kind: 400, amount_msat: 10000, total_msat: 15000, max_routing_fee_msat: 5000, delivered: true, accepted: true, sent_at_ms: 0 } });
       await vi.advanceTimersByTimeAsync(1);
       // Calling again before a check sends nothing.
       e.dismiss();
       await e.place(A, 'audio', QUOTE);
-      expect(e.view()).toMatchObject({ phase: 'ended', error: expect.stringMatching(/Check payment before calling again/) });
+      expect(e.view()).toMatchObject({ phase: 'ended', error: expect.stringMatching(/End it first/) });
       expect(signal).toHaveBeenCalledTimes(1);
       // Checked: the original admission can be hung up, at the hangup price, to its own id.
       e.resolveChecked();
@@ -152,19 +152,42 @@ describe('call refusal recovery', () => {
     } finally { vi.useRealTimers(); }
   });
 
-  it('an unknown offer outcome checked but not hung up: a new call goes out (the check came first)', async () => {
+  it('a check that says paid keeps the admission open: no new offer until End that call', async () => {
     let n = 0;
-    const signal = vi.fn(async (_p: string, kind: number) => (n++ === 0
-      ? { ok: false as const, error: { code: 'payment_unknown' as const, message: 'Outcome unknown.' } }
-      : { ok: true as const, value: { message_id: `m${n}`, kind, amount_msat: 1000, total_msat: 6000, max_routing_fee_msat: 5000, delivered: true, accepted: true, sent_at_ms: 0 } }));
+    const kinds: number[] = [];
+    const signal = vi.fn(async (_p: string, kind: number) => {
+      kinds.push(kind);
+      return n++ === 0
+        ? { ok: false as const, error: { code: 'payment_unknown' as const, message: 'Outcome unknown.' } }
+        : { ok: true as const, value: { message_id: `m${n}`, kind, amount_msat: 1000, total_msat: 6000, max_routing_fee_msat: 5000, delivered: true, accepted: true, sent_at_ms: 0 } };
+    });
     const { e } = engine({ signal });
     await e.place(A, 'audio', QUOTE);
-    expect(e.view().unresolved).toEqual({ checked: false, hangupMsat: 6_000 });
+    expect(e.view().unresolved).toEqual({ state: 'unknown', hangupMsat: 6_000 });
+    // The check answered (it was paid): still open, now endable.
     e.resolveChecked();
+    expect(e.view().unresolved).toEqual({ state: 'open', hangupMsat: 6_000 });
     e.dismiss();
     await e.place(A, 'audio', QUOTE);
-    expect(signal).toHaveBeenCalledTimes(2);
+    expect(kinds).toEqual([400]);
+    await e.hangupUnresolved();
+    expect(kinds).toEqual([400, 403]);
     expect(e.view().unresolved).toBeNull();
+    e.dismiss();
+    await e.place(A, 'audio', QUOTE);
+    await vi.waitFor(() => expect(kinds).toEqual([400, 403, 400]));
+    e.endLocal();
+  });
+
+  it('their hangup closes the admission: a new call is allowed without paying one', async () => {
+    const { e, sent } = engine();
+    await e.place(A, 'audio', QUOTE);
+    await e.receive(msg(403, { reason: 'declined' }), OWN);
+    expect(e.view()).toMatchObject({ phase: 'ended', unresolved: null });
+    e.dismiss();
+    const again = e.place(A, 'audio', QUOTE);
+    await again;
+    expect(sent.map((x) => x.kind)).toEqual([400, 400]);
     e.endLocal();
   });
 
@@ -805,13 +828,15 @@ describe('call engine', () => {
     expect(FakePc.made[0].closed).toBe(true);
   });
 
-  it('an unanswered call stops ringing without paying a hangup', async () => {
+  it('an unanswered call stops ringing and hangs up its paid admission once', async () => {
     vi.useFakeTimers();
-    const { e, sent, last } = engine();
-    await e.place(A, 'audio', QUOTE);
-    vi.advanceTimersByTime(RING_MS);
-    expect(last()).toMatchObject({ phase: 'ended', reason: 'timeout' });
-    expect(sent.map((s) => s.kind)).toEqual([400]);
+    try {
+      const { e, sent, last } = engine();
+      await e.place(A, 'audio', QUOTE);
+      await vi.advanceTimersByTimeAsync(RING_MS);
+      expect(last()).toMatchObject({ phase: 'ended', reason: 'timeout', unresolved: null });
+      expect(sent.map((s) => [s.kind, s.body.call_id])).toEqual([[400, ID], [403, ID]]);
+    } finally { vi.useRealTimers(); }
   });
 
   it('rings on an offer, answers once at the signal price, and ends on their hangup without paying', async () => {
@@ -891,22 +916,47 @@ describe('call engine: review #74 fixes', () => {
     expect(FakePc.made.every((pc) => pc.closed)).toBe(true);
   });
 
-  it('cancel while the offer is in flight stops the mic now and sends nothing more', async () => {
-    let settle!: (v: Awaited<ReturnType<CallDeps['signal']>>) => void;
-    const kinds: number[] = [];
-    const { e, last } = engine({ signal: (_p, kind) => { kinds.push(kind); return new Promise((r) => { settle = r; }); } });
+  it('cancel while the offer is in flight stops the mic now; once its payment settles, exactly one hangup to it, and no new offer before', async () => {
+    const settles: ((v: Awaited<ReturnType<CallDeps['signal']>>) => void)[] = [];
+    const sent: { kind: number; id: string }[] = [];
+    const { e, last } = engine({ signal: (_p, kind, plaintext) => { sent.push({ kind, id: JSON.parse(plaintext).call_id }); return new Promise((r) => { settles.push(r); }); } });
     const placing = e.place(A, 'audio', QUOTE);
-    await vi.waitFor(() => expect(settle).toBeDefined());
+    await vi.waitFor(() => expect(settles).toHaveLength(1));
     await e.hangup();
     expect(FakePc.made[0].closed).toBe(true);
     expect(FakePc.made[0].tracks[0].stop).toHaveBeenCalled();
-    settle({ ok: true, value: { message_id: 'm', kind: 400, amount_msat: 10_000, total_msat: 15_000, max_routing_fee_msat: 5000, delivered: true, accepted: true, sent_at_ms: 0 } });
+    // "Ending…": the offer is out; nothing new may go to them yet.
+    expect(last()).toMatchObject({ phase: 'ended', unresolved: { state: 'dispatching' } });
+    e.dismiss();
+    await e.place(A, 'audio', QUOTE);
+    expect(sent.map((x) => x.kind)).toEqual([400]);
+    // The late receipt says it was paid: its hangup follows, to that id, once.
+    settles[0]({ ok: true, value: { message_id: 'm', kind: 400, amount_msat: 10_000, total_msat: 15_000, max_routing_fee_msat: 5000, delivered: true, accepted: true, sent_at_ms: 0 } });
+    await vi.waitFor(() => expect(sent.map((x) => x.kind)).toEqual([400, 403]));
+    expect(sent[1].id).toBe(sent[0].id);
+    settles[1]({ ok: true, value: { message_id: 'h', kind: 403, amount_msat: 1_000, total_msat: 6_000, max_routing_fee_msat: 5000, delivered: true, accepted: true, sent_at_ms: 0 } });
     await placing;
-    expect(kinds).toEqual([400]);
-    expect(last().phase).toBe('ended');
+    await vi.waitFor(() => expect(last().unresolved).toBeNull());
     // Their answer, if it comes, is ignored.
     await e.receive(msg(401, { sdp: 'v=0 answer' }), OWN);
     expect(last().phase).toBe('ended');
+    expect(sent.map((x) => x.kind)).toEqual([400, 403]);
+  });
+
+  it('cancel before the offer went out sends nothing at all', async () => {
+    const sent: number[] = [];
+    let release!: (s: MediaStream) => void;
+    const { e, last } = engine({
+      getUserMedia: () => new Promise<MediaStream>((r) => { release = r; }),
+      signal: async (_p, kind) => { sent.push(kind); return { ok: true, value: { message_id: 'm', kind, amount_msat: 1, total_msat: 1, max_routing_fee_msat: 0, delivered: true, accepted: true, sent_at_ms: 0 } }; },
+    });
+    const placing = e.place(A, 'audio', QUOTE);
+    await vi.waitFor(() => expect(release).toBeDefined());
+    await e.hangup();
+    release(stream(false));
+    await placing;
+    expect(sent).toEqual([]);
+    expect(last()).toMatchObject({ phase: 'ended', unresolved: null });
   });
 
   it('ending locally (window closing) pays nothing', async () => {
@@ -936,7 +986,9 @@ describe('call engine: review #74 fixes', () => {
     vi.advanceTimersByTime(RECONNECT_GRACE_MS);
     expect(last()).toMatchObject({ phase: 'ended', reason: 'failed', error: expect.stringContaining('The connection was lost.') });
     expect(pc.closed && (pc.tracks[0].stop as unknown as { mock: { calls: unknown[] } }).mock.calls.length > 0).toBe(true);
-    expect(sent.map((x) => x.kind)).toEqual([400]);
+    // The app gave up on the call: its admission is hung up once (inside the shown ceiling).
+    await vi.advanceTimersByTimeAsync(1);
+    expect(sent.map((x) => x.kind)).toEqual([400, 403]);
   });
 
   it('closed ends at once; a call stuck connecting ends after a timeout', async () => {
@@ -1377,11 +1429,21 @@ describe('calls in the shell', () => {
     refuse = false;
     $<HTMLButtonElement>('[data-call-retry]')!.click();
     await vi.waitFor(() => expect($('[data-call-price-up]')).not.toBeNull());
-    expect(text('[data-call-price-up]')).toMatch(/you saw up to/);
+    // The full ceiling, as the Call button shows it (the call and one recovery): 2 × 61 = 122 sats.
+    expect($('[data-call-price-new]')!.getAttribute('data-call-price-new')).toBe('122000');
+    expect(text('[data-call-price-up]')).toMatch(/Now up to 122 sats, with one recovery; you saw up to 42 sats/);
+    expect(text('[data-call-price-confirm]')).toBe('Call · up to 122 sats');
     expect(host.used('call_signal')).toHaveLength(1);
     $<HTMLButtonElement>('[data-call-price-confirm]')!.click();
     await vi.waitFor(() => expect(host.used('call_signal')).toHaveLength(2), { timeout: 5000 });
     expect(host.used('call_signal')[1].args!.max_msat).toBe(55_000);
+    // Hang up: every signal of this call stays inside the confirmed ceiling.
+    await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull(), { timeout: 5000 });
+    $<HTMLButtonElement>('[data-call-hangup]')!.click();
+    await vi.waitFor(() => expect(host.used('call_signal')).toHaveLength(3));
+    const caps = host.used('call_signal').slice(1).map((c) => (c.args as { max_msat: number }).max_msat);
+    expect(caps).toEqual([55_000, 6_000]);
+    expect(caps.reduce((a, b) => a + b, 0)).toBeLessThanOrEqual(122_000);
   });
 
   it('Try again at the same or a lower price goes at once', async () => {
@@ -1529,6 +1591,8 @@ describe('calls in the shell', () => {
       // With a STUN server in place, no cross-network note in the call.
       expect($('[data-call-network-note]')).toBeNull();
       $<HTMLButtonElement>('[data-call-hangup]')!.click();
+      // Its admission is closed (hung up) before the next call to them.
+      await vi.waitFor(() => expect($('[data-call-admission]')).toBeNull());
 
       // Turning it off sticks: the default does not come back by itself.
       $<HTMLButtonElement>('[data-stun-clear]')!.click();
@@ -1640,8 +1704,8 @@ describe('calls in the shell', () => {
         await vi.waitFor(() => expect(host.used('call_quote').length).toBeGreaterThan(quotes));
         // ICE gathering may take its bounded wait before the new offer goes out.
         await vi.advanceTimersByTimeAsync(3_100);
-        // The unanswered offer (no paid hangup after a ring timeout), then the new offer.
-        await vi.waitFor(() => expect(host.used('call_signal').map((c) => (c.args as { kind: number }).kind)).toEqual([400, 400]));
+        // The unanswered offer, its hangup when the ring timed out, then the new offer.
+        await vi.waitFor(() => expect(host.used('call_signal').map((c) => (c.args as { kind: number }).kind)).toEqual([400, 403, 400]));
       } finally { vi.useRealTimers(); setStunPref(''); }
     });
   });

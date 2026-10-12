@@ -114,7 +114,7 @@ export function newCallId(random: (a: Uint8Array) => Uint8Array = (a) => crypto.
 export const callCost = (q: CallQuote) => q.call_total_msat;
 /** Outcomes where a signal may have been paid: never "try again" without a check. */
 export const UNKNOWN_OUTCOME = new Set(['spend_unknown', 'payment_unknown']);
-export const UNRESOLVED_CALL = 'An earlier call’s payment result is not known yet. Check payment before calling again. Nothing was sent.';
+export const UNRESOLVED_CALL = 'An earlier call to this contact is still open (paid or not yet settled, and not hung up). End it first. Nothing was sent.';
 /** What one answer/ICE/hangup costs at most, all-in. */
 export const signalCost = (q: CallQuote) => q.signal_msat + q.signal_max_routing_fee_msat;
 
@@ -142,11 +142,13 @@ export type CallView = {
   /** A refusal to show (nothing was paid for the refused step). */
   error: string | null;
   /**
-   * A call offer whose payment outcome is unknown (an admission may have been
-   * paid). No new offer goes out until the pending result is checked; its
-   * hangup (the price shown) stays available to end that admission.
+   * This contact's admissions not yet closed (the ledger): `dispatching` (an
+   * offer is out, its payment not settled: it is hung up once it settles if
+   * the owner ended the call), `unknown` (its payment outcome is not known:
+   * check first) or `open` (paid, or checked, and not hung up). No new offer
+   * to them goes out while any is open; ending it is one paid hangup each.
    */
-  unresolved: { checked: boolean; hangupMsat: number } | null;
+  unresolved: { state: 'dispatching' | 'unknown' | 'open'; hangupMsat: number } | null;
 };
 
 export const IDLE: CallView = {
@@ -223,10 +225,24 @@ export function createCallEngine(deps: CallDeps) {
   // Serialises user actions: a double click never pays twice.
   let busy = false;
 
-  // An offer admission whose payment outcome is unknown: it outlives the call view.
-  let orphan: { peer: string; id: string; hangupMsat: number; checked: boolean } | null = null;
+  // The admission ledger: every offer (and recovery offer) we pay, from the
+  // moment it is dispatched, keyed by its call id. It outlives the call view.
+  // A record goes only when proven unpaid (refused before paying), when its
+  // hangup is paid, or when the other side hangs it up.
+  type Admission = { peer: string; id: string; hangupMsat: number; state: 'dispatching' | 'paid' | 'unknown'; checked: boolean; endWhenSettled: boolean; closedByPeer?: boolean };
+  const ledger = new Map<string, Admission>();
+  const openFor = (peer: string | null) => (peer ? [...ledger.values()].filter((a) => a.peer === peer.toLowerCase()) : []);
+  const summary = (peer: string | null): CallView['unresolved'] => {
+    const list = openFor(peer);
+    if (!list.length) return null;
+    const hangupMsat = list.filter((a) => a.state !== 'dispatching').reduce((n, a) => n + a.hangupMsat, 0);
+    if (list.some((a) => a.state === 'dispatching')) return { state: 'dispatching', hangupMsat };
+    if (list.some((a) => a.state === 'unknown' && !a.checked)) return { state: 'unknown', hangupMsat };
+    return { state: 'open', hangupMsat };
+  };
   const set = (patch: Partial<CallView>) => {
-    view = { ...view, ...patch, state: callState(patch.phase ?? view.phase), unresolved: orphan ? { checked: orphan.checked, hangupMsat: orphan.hangupMsat } : null };
+    const next = { ...view, ...patch };
+    view = { ...next, state: callState(patch.phase ?? view.phase), unresolved: summary(next.peer) };
     deps.onView(view);
   };
   const active = () => view.phase !== 'idle' && view.phase !== 'ended';
@@ -272,8 +288,16 @@ export function createCallEngine(deps: CallDeps) {
     deps.onStreams(null, null);
   };
   const end = (reason: HangupReason | null, error: string | null = null) => {
+    // The app gave up on this call (no answer, connection failed): it hangs
+    // up its paid admissions, as Hang up would (inside the shown ceiling).
+    const ids = reason === 'timeout' || reason === 'failed' ? [...admissions] : [];
     teardown();
     set({ phase: 'ended', reason, error, camera: false, muted: false });
+    for (const id of ids) {
+      const a = ledger.get(id);
+      if (a?.state === 'dispatching') a.endWhenSettled = true;
+      else if (a?.state === 'paid') void closeAdmission(a);
+    }
   };
 
   const acquireMedia = (constraints: MediaStreamConstraints): Promise<MediaStream> => new Promise((resolve, reject) => {
@@ -404,11 +428,36 @@ export function createCallEngine(deps: CallDeps) {
       r = await Promise.race([deps.signal(peer!, kind, JSON.stringify({ v: 1, call_id: targetId!, ...body }), maxMsat), timeout]);
     } finally { clearTimeout(timer); }
     if (r.ok && view.callId === callId) set({ paidMsat: view.paidMsat + r.value.total_msat });
-    // An offer that may have been paid: remember its admission until checked (never retried).
-    if (!r.ok && kind === CALL_OFFER && UNKNOWN_OUTCOME.has(r.error.code) && peer && targetId) {
-      orphan = { peer, id: targetId, hangupMsat: quote ? signalCost(quote) : 0, checked: false };
-      set({});
-    }
+    return r;
+  };
+
+  /** End one admission: its one paid hangup, to its own id. */
+  const closeAdmission = async (a: Admission) => {
+    if (ledger.get(a.id) !== a || a.state === 'dispatching') return;
+    const r = await pay(CALL_HANGUP, { reason: 'hangup' }, a.hangupMsat, a.id, { peer: a.peer, callId: view.callId });
+    if (r.ok) ledger.delete(a.id);
+    else if (view.peer === a.peer || view.peer?.toLowerCase() === a.peer) set({ error: r.error.message });
+    set({});
+    return r;
+  };
+
+  /**
+   * Pay an offer with its ledger record written first. Refused before paying:
+   * the record goes. Unknown: it stays until checked and hung up. Paid after
+   * the owner already ended the call: its hangup follows at once.
+   */
+  const payOffer = async (peer: string, id: string, body: Omit<Signal, 'v' | 'call_id'>, maxMsat: number, hangupMsat: number) => {
+    const a: Admission = { peer: peer.toLowerCase(), id, hangupMsat, state: 'dispatching', checked: false, endWhenSettled: false };
+    ledger.set(id, a);
+    set({});
+    const r = await pay(CALL_OFFER, body, maxMsat, id, { peer, callId: view.callId });
+    if (r.ok) a.state = 'paid';
+    else if (UNKNOWN_OUTCOME.has(r.error.code)) a.state = 'unknown';
+    else ledger.delete(id);
+    // They already hung it up (their hangup beat our receipt): nothing left to end.
+    if (a.state === 'paid' && a.closedByPeer) ledger.delete(id);
+    set({});
+    if (a.state === 'paid' && a.endWhenSettled) await closeAdmission(a);
     return r;
   };
 
@@ -457,7 +506,7 @@ export function createCallEngine(deps: CallDeps) {
       pendingRestartId = id;
       restartAnswerPending = true;
       const sdp = `${conn.localDescription!.sdp.trimEnd()}\r\n${RESTART_ATTRIBUTE}${view.callId}\r\n`;
-      const r = await pay(CALL_OFFER, { media: view.media, sdp }, q.offer_msat + q.offer_max_routing_fee_msat, id);
+      const r = await payOffer(view.peer!, id, { media: view.media, sdp }, q.offer_msat + q.offer_max_routing_fee_msat, signalCost(q));
       if (pc !== conn) return;
       if (r.ok) {
         wireId = id;
@@ -532,9 +581,8 @@ export function createCallEngine(deps: CallDeps) {
     place: (peer: string, media: CallMedia, q: CallQuote) => guarded(async (claim) => {
       const generation = mediaGeneration;
       if (active() || deps.busy?.()) return;
-      // A possibly paid admission is open: check it before any new offer.
-      if (orphan && !orphan.checked) { set({ ...IDLE, phase: 'ended', peer, media, outgoing: true, error: UNRESOLVED_CALL }); return; }
-      orphan = null;
+      // An earlier admission to them is still open: end it first, never a second one beside it.
+      if (openFor(peer).length) { set({ ...IDLE, phase: 'ended', peer, media, outgoing: true, error: UNRESOLVED_CALL }); return; }
       if (q.offer_msat === null || q.call_total_msat === null) {
         set({ ...IDLE, phase: 'ended', peer, error: 'Their node does not take calls yet. Nothing was paid.' });
         return;
@@ -547,6 +595,7 @@ export function createCallEngine(deps: CallDeps) {
       }
       if (deps.authorize && !await deps.authorize()) return;
       if (generation !== mediaGeneration || active() || deps.busy?.()) return;
+      if (openFor(peer).length) { set({ ...IDLE, phase: 'ended', peer, media, outgoing: true, error: UNRESOLVED_CALL }); return; }
       quote = q;
       const callId = (deps.newCallId ?? newCallId)();
       cancelled = null;
@@ -567,8 +616,8 @@ export function createCallEngine(deps: CallDeps) {
       }
       // Cancelled before the offer went out: nothing is paid.
       if (cancelled === callId || view.callId !== callId || !active()) return;
-      const r = await pay(CALL_OFFER, { media, sdp: conn.localDescription!.sdp }, q.offer_msat + q.offer_max_routing_fee_msat);
-      // Cancelled while the offer was in flight: the mic is already off; send nothing more.
+      const r = await payOffer(peer, callId, { media, sdp: conn.localDescription!.sdp }, q.offer_msat + q.offer_max_routing_fee_msat, signalCost(q));
+      // Ended while the offer was in flight: its ledger record hangs it up once paid.
       if (cancelled === callId || view.callId !== callId || !active()) return;
       if (!r.ok) {
         end(null, r.error.message);
@@ -648,16 +697,22 @@ export function createCallEngine(deps: CallDeps) {
       const notify = view.phase !== 'calling' && view.phase !== 'incoming' && quote;
       const ids = [...admissions].reverse();
       const owner = { peer: view.peer, callId }; // Keep late cleanup bound to this peer.
+      // An offer already out (its payment not settled): hang it up as soon as it is paid.
+      for (const id of ids) { const a = ledger.get(id); if (a?.state === 'dispatching') a.endWhenSettled = true; }
       cancelled = callId;
       end('hangup');
       if (notify) {
         for (const id of ids) {
+          const a = ledger.get(id);
+          if (a?.state === 'dispatching') continue;
           try {
             const r = await pay(CALL_HANGUP, { reason: 'hangup' }, signalCost(notify), id, owner);
-            if (!r.ok && view.callId === callId) set({ error: r.error.message });
+            if (r.ok) ledger.delete(id);
+            else if (view.callId === callId) set({ error: r.error.message });
           } catch (error) {
             if (view.callId === callId) set({ error: asActionError(error).message });
           }
+          set({});
         }
       }
     },
@@ -716,17 +771,17 @@ export function createCallEngine(deps: CallDeps) {
     /** Close the ended card. */
     dismiss: () => { if (view.phase === 'ended') set(IDLE); },
 
-    /** The owner checked the pending result: a new offer may go out again. */
-    resolveChecked: () => { if (orphan) { orphan.checked = true; set({}); } },
+    /** The owner checked the pending result: unknown admissions to this contact may now be ended. They stay open. */
+    resolveChecked: () => { openFor(view.peer).forEach((a) => { if (a.state === 'unknown') a.checked = true; }); set({}); },
 
-    /** End the unresolved admission: one paid hangup to its call id (the price shown). Never automatic. */
+    /** End this contact's open admissions: one paid hangup each, to its own id (the price shown). Never automatic. */
     hangupUnresolved: async () => {
-      const o = orphan;
-      if (!o || active()) return;
-      const r = await pay(CALL_HANGUP, { reason: 'hangup' }, o.hangupMsat, o.id, { peer: o.peer, callId: view.callId });
-      if (orphan !== o) return;
-      if (r.ok) { orphan = null; set({ error: null }); }
-      else set({ error: r.error.message });
+      if (active()) return;
+      for (const a of openFor(view.peer)) {
+        if (a.state === 'dispatching' || (a.state === 'unknown' && !a.checked)) continue;
+        await closeAdmission(a);
+      }
+      if (!openFor(view.peer).length) set({ error: null });
     },
 
     /** A 400-403 the node forwarded (already paid, and admitted by its call registry). */
@@ -782,8 +837,16 @@ export function createCallEngine(deps: CallDeps) {
           }
           if (ours && pc) await pc.addIceCandidate({ candidate: s.candidate!, sdpMid: s.sdp_mid ?? null, sdpMLineIndex: s.sdp_mline_index ?? null }).catch(() => undefined);
           return;
-        default:
+        default: {
+          // They hung up (or declined) that admission: it is closed, whatever our view shows.
+          const a = ledger.get(s.call_id);
+          if (a && a.peer === peer.toLowerCase()) {
+            if (a.state === 'dispatching') a.closedByPeer = true;
+            else ledger.delete(s.call_id);
+            set({});
+          }
           if (view.peer === peer && (admissions.has(s.call_id) || pendingRestartId === s.call_id) && active()) end(s.reason ?? 'hangup');
+        }
       }
     },
   };
