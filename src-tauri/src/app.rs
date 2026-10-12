@@ -4461,25 +4461,6 @@ async fn do_op_list(state: &NodeState, peer: Option<&str>) -> Result<spend_journ
         .await.map_err(spend_journal::unknown)?
 }
 
-/// Retention is independent of spending. Sweep once on startup and hourly;
-/// compaction skips active journals rather than delaying a running money action.
-async fn operation_history_maintenance(app: AppHandle) {
-    loop {
-        let dir = app_files_dir(&app.state::<NodeState>());
-        if let Some(dir) = dir {
-            let _ = tokio::task::spawn_blocking(move || {
-                if spend_journal::compact_operations(&dir.join("app-spend"), spend_journal::timestamp_ms()).is_err() {
-                    eprintln!("spend ledger: history maintenance deferred");
-                }
-            }).await;
-            tokio::time::sleep(Duration::from_secs(60 * 60)).await;
-        } else {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-        if app.state::<NodeState>().quitting.load(Ordering::SeqCst) { return; }
-    }
-}
-
 /// Waits for any money POST in flight (`NodeState::money`), then reads its record.
 async fn do_spend_reconcile(state: &NodeState) -> Result<String, ActionError> {
     let _money = state.money.lock().await;
@@ -4707,6 +4688,8 @@ fn do_spend_dismiss_undelivered(state: &NodeState, pending_id: &str) -> Result<S
     // Only the record the owner chose: a stale card never releases another message.
     let pending = journal.pending()?.filter(|p| p.id == pending_id)
         .ok_or_else(|| ActionError::new("retry_unavailable", "That message is no longer waiting for delivery. Nothing was changed."))?;
+    let operation_id = pending.operation_id.clone();
+    let result = (|| {
     if state.node_id.lock().unwrap().as_deref() != Some(pending.node_id.as_str()) {
         return Err(spend_journal::unknown("The pending action belongs to another identity."));
     }
@@ -4720,6 +4703,8 @@ fn do_spend_dismiss_undelivered(state: &NodeState, pending_id: &str) -> Result<S
     journal.record_outcome(&pending, spend_journal::OperationState::Settled, None)?;
     journal.clear()?;
     Ok(format!("Stopped retrying. {} msat was paid and the message was not delivered; nothing more will be paid for it.", undelivered.paid_msat))
+    })();
+    result.map_err(|e: ActionError| e.for_operation(operation_id.as_deref()))
 }
 
 // ---- G1 node grants -------------------------------------------------------------
@@ -7761,7 +7746,6 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(bootstrap_node(handle));
             tauri::async_runtime::spawn(live_bridge(app.handle().clone()));
-            tauri::async_runtime::spawn(operation_history_maintenance(app.handle().clone()));
             Ok(())
         })
 }
@@ -9646,6 +9630,29 @@ mod control_act_tests {
         assert_ne!(&second, id);
         assert_eq!(ledger_record(&node, &second)["state"], "settled");
         assert_eq!(ledger_record(&node, id), record);
+    }
+
+    #[tokio::test]
+    async fn ledger_dismiss_write_failure_keeps_dispatched_operation_id() {
+        let (node, _) = ops_fake(|n| { n.script = vec![("paid", false)]; n.settled_incomplete = true; });
+        spend_advance(&node.state, true).await.unwrap();
+        let error = do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap_err();
+        assert_eq!(error.code, "payment_settled_undelivered");
+        let p = pending(&node).unwrap();
+        let id = p.operation_id.as_ref().unwrap();
+        let record = ledger_record(&node, id);
+        let next = journal_file(&node).parent().unwrap().join(format!("ops/{id}.next"));
+        std::fs::create_dir(&next).unwrap();
+        let error = do_spend_dismiss_undelivered(&node.state, &p.id).unwrap_err();
+        assert_eq!(error.code, "spend_unknown");
+        assert_eq!(error.operation_id.as_deref(), Some(id.as_str()));
+        assert_eq!(ledger_record(&node, id), record);
+        assert_eq!(pending(&node).unwrap().id, p.id, "failed dismissal retains the fence");
+        assert_eq!(op_ids(&node), [Some(id.clone())], "dismissal never dispatches");
+        std::fs::remove_dir(next).unwrap();
+        do_spend_dismiss_undelivered(&node.state, &p.id).unwrap();
+        assert_eq!(ledger_record(&node, id)["state"], "settled");
+        assert!(pending(&node).is_none());
     }
 
     #[tokio::test]

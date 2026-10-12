@@ -7,8 +7,8 @@
 //! Call parents use a durable identity/peer/call index, repaired from pending
 //! snapshots and imported once from pre-index H1 records before authentication.
 //! The read-only listing returns at most 100 newest rows plus skipped/has_more.
-//! Hourly maintenance archives terminal records older than 30 days; open calls,
-//! uncertain outcomes, damaged files and pending records remain retained.
+//! Operation records stay as per-op files and are never deleted.
+//! TODO: Bounded storage belongs in a separate PR.
 
 use std::fs::File;
 #[cfg(unix)]
@@ -220,8 +220,8 @@ pub fn unknown(detail: impl std::fmt::Display) -> ActionError {
     ActionError::new("spend_unknown", format!("Outcome unknown; another spend is blocked until reconciled. {detail}"))
 }
 
-/// Read the atomic journal snapshot for conservative ledger retention only.
-/// Spending and reconciliation still require the Journal's exclusive OS lock.
+/// Read the atomic journal snapshot for accounting evidence. Spending and
+/// reconciliation still require the Journal's exclusive OS lock.
 pub fn read_pending(dir: &Path) -> Result<Option<Pending>, ActionError> {
     match std::fs::read(dir.join("spend-pending.json")) {
         Ok(bytes) => serde_json::from_slice(&bytes).map(Some).map_err(unknown),
@@ -234,8 +234,7 @@ pub fn read_pending(dir: &Path) -> Result<Option<Pending>, ActionError> {
 /// but leaves the pending record. No approval, token, invoice or plaintext is saved.
 pub struct Journal {
     _lock: File,
-    // Maintenance holds this while compacting a bounded batch of candidates.
-    // Journal sessions keep active and resumable snapshots safe from compaction.
+    // Serialize call-index updates with the one-time history migration.
     _history_lock: File,
     dir: PathBuf,
 }
@@ -328,7 +327,7 @@ impl Journal {
             let parent_op = if let Some(call) = parent_call {
                 self.call_parent(node_id, pending.peer.as_deref().unwrap_or_default(), call)?
             } else { None };
-            let mut record = self.live_operation(id)?.unwrap_or(OperationRecord {
+            let mut record = self.operation_record(id)?.unwrap_or(OperationRecord {
                 op_id: id.clone(), node_id: node_id.into(), kind: kind.into(), peer: pending.peer.clone().unwrap_or_default(),
                 call_id, parent_op, request_hash: pending.request_hash.clone(), cap_msat: max_msat,
                 state: OperationState::Dispatching, paid_msat: None, message_id: None, payment_hash: None,
@@ -378,17 +377,8 @@ impl Journal {
         Ok(self.dir.join("ops").join(format!("{id}.json")))
     }
 
-    // Fresh IDs and the protected pending slot never need archived history.
-    // Keep repair and dispatch independent of unrelated archive size/damage.
-    fn live_operation(&self, id: &str) -> Result<Option<OperationRecord>, ActionError> {
-        read_operation(&self.operation_path(id)?, Some(id))
-    }
-
     pub fn operation_record(&self, id: &str) -> Result<Option<OperationRecord>, ActionError> {
-        match self.live_operation(id)? {
-            Some(record) => Ok(Some(record)),
-            None => archived_operation(&self.dir, id),
-        }
+        read_operation(&self.operation_path(id)?, Some(id))
     }
 
     fn call_parent(&self, node_id: &str, peer: &str, call: &str) -> Result<Option<String>, ActionError> {
@@ -411,7 +401,7 @@ impl Journal {
 
     fn ensure_operation(&self, pending: &Pending) -> Result<(), ActionError> {
         if let Some(id) = &pending.operation_id {
-            if self.live_operation(id)?.is_none() {
+            if self.operation_record(id)?.is_none() {
                 // Older pending journals have no kind/call metadata. Do not guess it.
                 let record = pending.operation_record.clone().unwrap_or(OperationRecord {
                     op_id: id.clone(), node_id: pending.node_id.clone(), kind: "legacy".into(),
@@ -424,7 +414,7 @@ impl Journal {
                 });
                 self.write_operation(&record)?;
             }
-            if let Some(mut record) = self.live_operation(id)? {
+            if let Some(mut record) = self.operation_record(id)? {
                 if let Some(parent) = &record.parent_op {
                     self.operation_record(parent)?.ok_or_else(damaged_record)?;
                 }
@@ -510,7 +500,6 @@ impl Journal {
 
 /// Maximum response size; listing is read-only and never takes either money lock.
 pub const OP_LIST_LIMIT: usize = 100;
-const RETENTION_MS: u64 = 30 * 24 * 60 * 60 * 1000;
 
 #[derive(Debug, Serialize)]
 pub struct OpList {
@@ -537,7 +526,7 @@ fn read_operation(path: &Path, expected_id: Option<&str>) -> Result<Option<Opera
     }
 }
 
-// A stream, not a Vec: both listing and maintenance have bounded working sets.
+// Stream entries so listing keeps a bounded working set.
 fn history_entries(dir: &Path) -> Result<impl Iterator<Item = std::io::Result<std::fs::DirEntry>>, ActionError> {
     match std::fs::read_dir(dir.join("ops")) {
         Ok(entries) => Ok(Some(entries).into_iter().flatten()),
@@ -592,10 +581,6 @@ fn write_call_index(dir: &Path, record: &OperationRecord) -> Result<(), ActionEr
     use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
     if !matches!(record.kind.as_str(), "call_offer" | "call_recovery") { return Ok(()); }
     let Some(call) = record.call_id.as_deref() else { return Ok(()) };
-    if terminal_record(record) {
-        reclaim_call_index(dir, record)?;
-        return sync_call_indexes(dir);
-    }
     let path = call_index_path(dir, &record.node_id, &record.peer, call);
     match std::fs::read(&path) {
         Ok(bytes) => {
@@ -656,201 +641,6 @@ pub fn initialize_history(dir: &Path) -> Result<(), ActionError> {
     std::fs::create_dir_all(dir).map_err(unknown)?;
     File::create(marker).and_then(|f| f.sync_all()).map_err(unknown)?;
     File::open(dir).and_then(|f| f.sync_all()).map_err(unknown)
-}
-
-fn terminal_record(record: &OperationRecord) -> bool {
-    match record.state {
-        OperationState::Unpaid | OperationState::FailedPaid | OperationState::Closed => true,
-        // H1 records successful admissions as settled, but they remain open
-        // until a later slice explicitly closes them. Refused admissions do not.
-        OperationState::Settled => !matches!(record.kind.as_str(), "call_offer" | "call_recovery"),
-        _ => false,
-    }
-}
-
-fn expired_terminal(record: &OperationRecord, now: u64) -> bool {
-    terminal_record(record) && record.settled_ms.is_some_and(|t| now.saturating_sub(t) > RETENTION_MS)
-}
-
-fn reclaim_call_index(dir: &Path, record: &OperationRecord) -> Result<(), ActionError> {
-    if !matches!(record.kind.as_str(), "call_offer" | "call_recovery") { return Ok(()); }
-    let Some(call) = record.call_id.as_deref() else { return Ok(()) };
-    let path = call_index_path(dir, &record.node_id, &record.peer, call);
-    let bytes = match std::fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(_) => return Err(damaged_record()),
-    };
-    // A late terminal outcome must not erase a newer admission's mapping.
-    let reclaim = match serde_json::from_slice::<CallIndex>(&bytes) {
-        Ok(index) => index.op_id == record.op_id,
-        Err(_) => {
-            // Terminal records no longer need a parent mapping. Log no contents.
-            eprintln!("spend ledger: reclaiming invalid terminal call index");
-            true
-        }
-    };
-    if reclaim {
-        std::fs::remove_file(&path).map_err(unknown)?;
-    }
-    Ok(())
-}
-
-// A prior process may have unlinked an index but died before syncing it. Even
-// an already-absent entry requires a directory sync before live history goes.
-fn sync_call_indexes(dir: &Path) -> Result<(), ActionError> {
-    match File::open(dir.join("call-index")) {
-        Ok(directory) => directory.sync_all().map_err(unknown),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(unknown(e)),
-    }
-}
-
-fn archived_operation(dir: &Path, id: &str) -> Result<Option<OperationRecord>, ActionError> {
-    use std::io::BufRead;
-    let entries = match std::fs::read_dir(dir.join("ops-archive")) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(_) => return Err(damaged_record()),
-    };
-    for entry in entries {
-        let path = entry.map_err(|_| damaged_record())?.path();
-        if path.extension().is_none_or(|e| e != "jsonl") { continue; }
-        let file = File::open(path).map_err(|_| damaged_record())?;
-        for line in std::io::BufReader::new(file).lines() {
-            let line = line.map_err(|_| damaged_record())?;
-            let record: OperationRecord = serde_json::from_str(&line).map_err(|_| damaged_record())?;
-            if record.op_id == id { return Ok(Some(record)); }
-        }
-    }
-    Ok(None)
-}
-
-/// Append an immutable JSONL segment, never rewrite an existing archive. A
-/// bounded segment makes the append atomic without copying a growing monthly
-/// file or risking a torn trailing line. Only typed, secret-free ledger fields
-/// are serialized. The caller holds history.lock until live files are removed.
-/// Return ids whose damaged archived copy requires retaining the live record.
-#[cfg(unix)]
-fn archive_records(dir: &Path, records: &[OperationRecord]) -> Result<std::collections::HashSet<String>, ActionError> {
-    use std::io::BufRead;
-    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
-    let archive = dir.join("ops-archive");
-    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&archive).map_err(unknown)?;
-    // Publication can precede a crash or a per-record cleanup failure. Scan
-    // once per bounded batch, retaining only ids still awaiting publication.
-    #[derive(Deserialize)]
-    struct ArchivedId { op_id: String }
-    let mut unarchived: std::collections::HashSet<_> = records.iter().map(|r| r.op_id.as_str()).collect();
-    let mut damaged = std::collections::HashSet::new();
-    for entry in std::fs::read_dir(&archive).map_err(unknown)? {
-        let path = entry.map_err(unknown)?.path();
-        if path.extension().is_none_or(|e| e != "jsonl") { continue; }
-        let file = File::open(path).map_err(unknown)?;
-        for line in std::io::BufReader::new(file).split(b'\n') {
-            let line = line.map_err(unknown)?;
-            match serde_json::from_slice::<OperationRecord>(&line) {
-                Ok(record) => { unarchived.remove(record.op_id.as_str()); }
-                Err(_) => {
-                    if let Ok(record) = serde_json::from_slice::<ArchivedId>(&line) {
-                        if records.iter().any(|r| r.op_id == record.op_id) {
-                            unarchived.remove(record.op_id.as_str());
-                            damaged.insert(record.op_id);
-                        }
-                    }
-                    eprintln!("spend ledger: skipping invalid archive line during retention");
-                }
-            }
-        }
-    }
-    if !unarchived.is_empty() {
-        let path = archive.join(format!("{}-{}.jsonl", timestamp_ms(), new_operation_id()?));
-        let next = path.with_extension("next");
-        let mut file = OpenOptions::new().write(true).create_new(true)
-            .mode(0o600).custom_flags(libc::O_NOFOLLOW).open(&next).map_err(unknown)?;
-        for record in records {
-            if !unarchived.remove(record.op_id.as_str()) { continue; }
-            file.write_all(&serde_json::to_vec(record).map_err(unknown)?).map_err(unknown)?;
-            file.write_all(b"\n").map_err(unknown)?;
-        }
-        file.sync_all().map_err(unknown)?;
-        std::fs::rename(next, path).map_err(unknown)?;
-    }
-    // Also sync a prior publication whose process died before the directory sync.
-    File::open(&archive).and_then(|f| f.sync_all()).map_err(unknown)?;
-    File::open(dir).and_then(|f| f.sync_all()).map_err(unknown)?;
-    Ok(damaged)
-}
-
-#[cfg(not(unix))]
-fn archive_records(_dir: &Path, _records: &[OperationRecord]) -> Result<std::collections::HashSet<String>, ActionError> {
-    Err(unknown("private spend journal storage is not supported on this platform"))
-}
-
-/// Background compaction. Enumeration/initial reads run without money locks.
-/// Publish and fsync an append-only archive segment before unlinking live files.
-/// A crash can leave a live copy, but retries never duplicate archive lines. A
-/// separate lock protects each bounded batch; active journals are skipped.
-/// Open, unknown, damaged and pending records stay live. No money path calls this.
-pub fn compact_operations(dir: &Path, now: u64) -> Result<usize, ActionError> {
-    const BATCH_SIZE: usize = 256;
-    let mut candidates = Vec::with_capacity(BATCH_SIZE);
-    let mut compacted = 0;
-    for entry in history_entries(dir)? {
-        let Ok(entry) = entry else { continue };
-        let path = entry.path();
-        if path.extension().is_none_or(|e| e != "json") { continue; }
-        let id = path.file_stem().and_then(|s| s.to_str());
-        let Ok(Some(record)) = read_operation(&path, id) else { continue };
-        if !expired_terminal(&record, now) { continue; }
-        candidates.push(path);
-        if candidates.len() == BATCH_SIZE {
-            compacted += compact_batch(dir, now, &candidates)?;
-            candidates.clear();
-        }
-    }
-    compacted += compact_batch(dir, now, &candidates)?;
-    Ok(compacted)
-}
-
-fn compact_batch(dir: &Path, now: u64, candidates: &[PathBuf]) -> Result<usize, ActionError> {
-    if candidates.is_empty() { return Ok(0); }
-    let lock = history_lock(dir)?;
-    if lock.try_lock().is_err() { return Ok(0); }
-    let result = (|| {
-        let pending = read_pending(dir)?;
-        let mut records = Vec::new();
-        for path in candidates {
-            let id = path.file_stem().and_then(|s| s.to_str());
-            let Ok(Some(record)) = read_operation(path, id) else { continue };
-            if !expired_terminal(&record, now) { continue; }
-            if pending.as_ref().is_some_and(|p| p.operation_id.as_deref() == Some(record.op_id.as_str())
-                || p.operation_record.as_ref().and_then(|r| r.parent_op.as_deref()) == Some(record.op_id.as_str())) { continue; }
-            records.push(record);
-        }
-        if records.is_empty() { return Ok(0); }
-        let damaged_archive = archive_records(dir, &records)?;
-        // Reclaim and sync indexes first, so a crash cannot strand an index
-        // without a live candidate for the next sweep. Sync once per batch.
-        records.retain(|record| {
-            if damaged_archive.contains(&record.op_id) { return false; }
-            if reclaim_call_index(dir, record).is_ok() { return true; }
-            eprintln!("spend ledger: terminal index cleanup failed; retaining live record for retry");
-            false
-        });
-        sync_call_indexes(dir)?;
-        let mut compacted = 0;
-        for record in &records {
-            match std::fs::remove_file(dir.join("ops").join(format!("{}.json", record.op_id))) {
-                Ok(()) => compacted += 1,
-                Err(_) => eprintln!("spend ledger: archived live record cleanup failed; retaining it for retry"),
-            }
-        }
-        File::open(dir.join("ops")).and_then(|f| f.sync_all()).map_err(unknown)?;
-        Ok(compacted)
-    })();
-    let _ = lock.unlock();
-    result
 }
 
 fn fresh_id() -> Result<String, ActionError> {
@@ -922,228 +712,34 @@ mod tests {
     }
 
     #[test]
-    fn ledger_retention_keeps_open_unknown_recent_and_pending_records() {
+    fn ledger_corrupt_shared_call_index_keeps_parent_lookup_failing_closed() {
         let dir = tempfile::tempdir().unwrap();
-        for (id, state) in [OperationState::Settled, OperationState::Closed, OperationState::FailedPaid,
-            OperationState::Unpaid, OperationState::Unknown, OperationState::Dispatching,
-            OperationState::Paid, OperationState::PaidUndelivered].into_iter().enumerate() {
-            history_fixture(dir.path(), id, state, "message");
-        }
-        history_fixture(dir.path(), 8, OperationState::Settled, "call_offer");
-        history_fixture(dir.path(), 9, OperationState::Settled, "call_recovery");
-        let recent = history_fixture(dir.path(), 10, OperationState::Settled, "message");
-        let mut recent = recent;
-        recent.settled_ms = Some(RETENTION_MS);
-        std::fs::write(dir.path().join(format!("ops/{}.json", recent.op_id)), serde_json::to_vec(&recent).unwrap()).unwrap();
-        std::fs::write(dir.path().join("ops/corrupt.json"), "PRIVATE malformed").unwrap();
         let journal = Journal::open(dir.path()).unwrap();
-        let body = json!({"recipient":"peer", "kind":1, "plaintext":"secret"});
-        let id = new_operation_id().unwrap();
-        let mut pending = journal.begin_operation("node", "/messages/compose", &body, 2000,
-            Some((id.clone(), operation(&body)))).unwrap();
-        journal.record_outcome(&pending, OperationState::Unpaid, None).unwrap();
-        pending.resumable = true;
-        journal.save(&pending).unwrap();
-        let mut old = journal.operation_record(&id).unwrap().unwrap();
-        old.settled_ms = Some(100);
-        journal.write_operation(&old).unwrap();
-        assert_eq!(compact_operations(dir.path(), RETENTION_MS + 101).unwrap(), 0, "active journal is never disturbed");
+        let mut older = history_fixture(dir.path(), 1, OperationState::Dispatching, "call_offer");
+        journal.write_operation(&older).unwrap();
+        let newer = history_fixture(dir.path(), 2, OperationState::PaidUndelivered, "call_recovery");
+        journal.write_operation(&newer).unwrap();
+        let call = older.call_id.as_deref().unwrap();
+        assert_eq!(journal.call_parent("node", "peer", call).unwrap(), Some(newer.op_id));
+        let index = call_index_path(dir.path(), "node", "peer", call);
+        let damaged = "PRIVATE corrupt shared call index";
+        std::fs::write(&index, damaged).unwrap();
+        for state in [OperationState::Unpaid, OperationState::FailedPaid, OperationState::Closed] {
+            older.state = state;
+            let _ = journal.write_operation(&older);
+            assert!(journal.call_parent("node", "peer", call).is_err());
+            assert_eq!(std::fs::read_to_string(&index).unwrap(), damaged);
+        }
         drop(journal);
-        assert_eq!(compact_operations(dir.path(), RETENTION_MS + 101).unwrap(), 4);
-        let page = list_operations(dir.path(), "node", None, 100).unwrap();
-        assert_eq!(page.operations.len(), 8);
-        assert_eq!(page.skipped, 1);
-        assert!(dir.path().join(format!("ops/{id}.json")).exists(), "resumable pending survives");
-        assert_eq!(compact_operations(dir.path(), RETENTION_MS + 101).unwrap(), 0);
+        initialize_history(dir.path()).unwrap();
         let journal = Journal::open(dir.path()).unwrap();
-        for id in 0..4 {
-            let id = format!("00000000-0000-4000-8000-{id:012x}");
-            let archived = journal.operation_record(&id).unwrap().expect("terminal history is never deleted");
-            assert_eq!(archived.cap_msat, 2000);
-            assert_eq!(archived.settled_ms, Some(100));
-            assert!(!dir.path().join(format!("ops/{id}.json")).exists());
-        }
+        assert!(journal.call_parent("node", "peer", call).is_err());
+        assert_eq!(journal.call_parent("node", "other", call).unwrap(), None);
+        assert_eq!(std::fs::read_to_string(index).unwrap(), damaged);
     }
 
     #[test]
-    fn ledger_retention_compacts_ten_thousand_refused_admissions_and_their_indexes() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("call-index")).unwrap();
-        for id in 0..10_000 {
-            let mut record = history_fixture(dir.path(), id, if id % 2 == 0 {
-                OperationState::Unpaid
-            } else { OperationState::FailedPaid }, if id % 3 == 0 { "call_recovery" } else { "call_offer" });
-            record.call_id = Some(format!("{id:032x}"));
-            std::fs::write(dir.path().join(format!("ops/{}.json", record.op_id)), serde_json::to_vec(&record).unwrap()).unwrap();
-            // Model indexes created at dispatch, before the terminal outcome.
-            std::fs::write(call_index_path(dir.path(), "node", "peer", record.call_id.as_deref().unwrap()),
-                serde_json::to_vec(&CallIndex { op_id: record.op_id, created_ms: record.created_ms }).unwrap()).unwrap();
-        }
-        assert_eq!(compact_operations(dir.path(), RETENTION_MS + 101).unwrap(), 10_000);
-        assert_eq!(std::fs::read_dir(dir.path().join("ops")).unwrap().count(), 0);
-        assert_eq!(std::fs::read_dir(dir.path().join("call-index")).unwrap().count(), 0);
-        let segments: Vec<_> = std::fs::read_dir(dir.path().join("ops-archive")).unwrap()
-            .map(|entry| entry.unwrap().path()).collect();
-        assert!(segments.len() <= 40, "archive batches avoid one file per refusal");
-        assert_eq!(segments.iter().map(|path| std::fs::read_to_string(path).unwrap().lines().count()).sum::<usize>(), 10_000);
-        let journal = Journal::open(dir.path()).unwrap();
-        for id in [0, 5000, 9999] {
-            assert!(journal.operation_record(&format!("00000000-0000-4000-8000-{id:012x}")).unwrap().is_some());
-        }
-    }
-
-    #[test]
-    fn ledger_fresh_dispatch_and_pending_repair_do_not_scan_archives() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir(dir.path().join("ops-archive")).unwrap();
-        std::fs::write(dir.path().join("ops-archive/unrelated.jsonl"), "PRIVATE corrupt archive").unwrap();
-        let journal = Journal::open(dir.path()).unwrap();
-        let body = json!({"recipient":"peer", "kind":1, "plaintext":"secret"});
-        let id = new_operation_id().unwrap();
-        let p = journal.begin_operation("node", "/messages/compose", &body, 2000,
-            Some((id.clone(), operation(&body)))).expect("fresh dispatch never scans archives");
-        std::fs::remove_file(dir.path().join(format!("ops/{id}.json"))).unwrap();
-        assert_eq!(journal.pending().unwrap().unwrap().operation_id, p.operation_id);
-        assert_eq!(journal.operation_record(&id).unwrap().unwrap().state, OperationState::Dispatching);
-    }
-
-    #[test]
-    fn ledger_archive_failure_keeps_live_history() {
-        let dir = tempfile::tempdir().unwrap();
-        let record = history_fixture(dir.path(), 1, OperationState::Settled, "message");
-        // Publishing the archive fails before any live-file removal.
-        std::fs::write(dir.path().join("ops-archive"), "not a directory").unwrap();
-        assert!(compact_operations(dir.path(), RETENTION_MS + 101).is_err());
-        let journal = Journal::open(dir.path()).unwrap();
-        assert_eq!(journal.operation_record(&record.op_id).unwrap().unwrap().state, OperationState::Settled);
-        assert!(dir.path().join(format!("ops/{}.json", record.op_id)).exists());
-    }
-
-    #[test]
-    fn ledger_retention_reclaims_corrupt_terminal_index_once_and_continues() {
-        let dir = tempfile::tempdir().unwrap();
-        let first = history_fixture(dir.path(), 1, OperationState::Unpaid, "call_offer");
-        let later = history_fixture(dir.path(), 2, OperationState::Settled, "message");
-        let index = call_index_path(dir.path(), "node", "peer", first.call_id.as_deref().unwrap());
-        std::fs::create_dir_all(index.parent().unwrap()).unwrap();
-        std::fs::write(&index, "PRIVATE malformed index").unwrap();
-        let paths: Vec<_> = [&first, &later].iter()
-            .map(|r| dir.path().join(format!("ops/{}.json", r.op_id))).collect();
-        assert_eq!(compact_batch(dir.path(), RETENTION_MS + 101, &paths).unwrap(), 2);
-        assert!(!index.exists());
-        assert!(paths.iter().all(|p| !p.exists()));
-        assert_eq!(compact_operations(dir.path(), RETENTION_MS + 101).unwrap(), 0);
-        let archived = archived_ids_for_test(dir.path());
-        assert_eq!(archived.iter().filter(|id| **id == first.op_id).count(), 1);
-        assert_eq!(archived.iter().filter(|id| **id == later.op_id).count(), 1);
-    }
-
-    fn archived_ids_for_test(dir: &Path) -> Vec<String> {
-        std::fs::read_dir(dir.join("ops-archive")).unwrap()
-            .map(|entry| entry.unwrap().path()).filter(|p| p.extension().is_some_and(|e| e == "jsonl"))
-            .flat_map(|path| std::fs::read_to_string(path).unwrap().lines()
-                .map(|line| serde_json::from_str::<OperationRecord>(line).unwrap().op_id).collect::<Vec<_>>())
-            .collect()
-    }
-
-    #[test]
-    fn ledger_retention_isolates_malformed_archive_lines_and_deduplicates_by_id() {
-        let dir = tempfile::tempdir().unwrap();
-        let first = history_fixture(dir.path(), 1, OperationState::Unpaid, "message");
-        let later = history_fixture(dir.path(), 2, OperationState::Settled, "message");
-        std::fs::create_dir(dir.path().join("ops-archive")).unwrap();
-        // An invalid line is isolated. A readable id still proves publication
-        // even if other fields in that historical record have been damaged.
-        let original = format!("PRIVATE malformed archive\n{}\n", json!({"op_id": first.op_id, "state": "damaged"}));
-        let path = dir.path().join("ops-archive/old.jsonl");
-        std::fs::write(&path, &original).unwrap();
-        assert_eq!(compact_operations(dir.path(), RETENTION_MS + 101).unwrap(), 1);
-        assert_eq!(compact_operations(dir.path(), RETENTION_MS + 101).unwrap(), 0);
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
-        let ids: Vec<_> = std::fs::read_dir(dir.path().join("ops-archive")).unwrap()
-            .map(|entry| std::fs::read_to_string(entry.unwrap().path()).unwrap())
-            .flat_map(|text| text.lines().filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-                .map(|value| value["op_id"].as_str().unwrap().to_string()).collect::<Vec<_>>()).collect();
-        assert_eq!(ids.iter().filter(|id| **id == first.op_id).count(), 1);
-        assert_eq!(ids.iter().filter(|id| **id == later.op_id).count(), 1);
-        assert_eq!(std::fs::read_dir(dir.path().join("ops")).unwrap().count(), 1);
-        let journal = Journal::open(dir.path()).unwrap();
-        assert_eq!(journal.operation_record(&first.op_id).unwrap().unwrap().state, OperationState::Unpaid,
-            "a damaged archive must not replace the only readable live copy");
-    }
-
-    #[test]
-    fn ledger_retention_isolates_record_failures_and_deduplicates_retries() {
-        let dir = tempfile::tempdir().unwrap();
-        let first = history_fixture(dir.path(), 1, OperationState::Unpaid, "call_offer");
-        let damaged = history_fixture(dir.path(), 2, OperationState::Settled, "message");
-        let later = history_fixture(dir.path(), 3, OperationState::Settled, "message");
-        let paths: Vec<_> = [&first, &damaged, &later].iter()
-            .map(|r| dir.path().join(format!("ops/{}.json", r.op_id))).collect();
-        // Model damage between candidate enumeration and the locked batch read.
-        std::fs::write(&paths[1], "PRIVATE malformed record").unwrap();
-        let index = call_index_path(dir.path(), "node", "peer", first.call_id.as_deref().unwrap());
-        std::fs::create_dir_all(&index).unwrap(); // Cannot read/reclaim this index yet.
-        assert_eq!(compact_batch(dir.path(), RETENTION_MS + 101, &paths).unwrap(), 1);
-        assert!(paths[0].exists());
-        assert!(paths[1].exists());
-        assert!(!paths[2].exists(), "one broken record must not stop later cleanup");
-        std::fs::remove_dir(index).unwrap();
-        assert_eq!(compact_operations(dir.path(), RETENTION_MS + 101).unwrap(), 1);
-        assert_eq!(compact_operations(dir.path(), RETENTION_MS + 101).unwrap(), 0);
-        let archived = archived_ids_for_test(dir.path());
-        assert_eq!(archived.iter().filter(|id| **id == first.op_id).count(), 1);
-        assert_eq!(archived.iter().filter(|id| **id == later.op_id).count(), 1);
-        assert_eq!(archived.len(), 2);
-    }
-
-    #[test]
-    fn ledger_archive_publish_crash_preserves_history_and_retry_is_safe() {
-        const CHILD_DIR: &str = "BITSOV_TEST_ARCHIVE_CRASH_DIR";
-        if let Some(dir) = std::env::var_os(CHILD_DIR) {
-            let dir = PathBuf::from(dir);
-            let record = read_operation(&dir.join("ops/00000000-0000-4000-8000-000000000001.json"), None).unwrap().unwrap();
-            let _lock = Journal::open(&dir).unwrap();
-            archive_records(&dir, &[record]).unwrap();
-            // Process death exactly after durable archive publication, before
-            // any live-file unlink; no destructors or explicit lock release.
-            std::process::exit(73);
-        }
-        let dir = tempfile::tempdir().unwrap();
-        let record = history_fixture(dir.path(), 1, OperationState::Closed, "call_recovery");
-        let path = dir.path().join(format!("ops/{}.json", record.op_id));
-        let mut raw = serde_json::to_value(&record).unwrap();
-        for key in ["invoice", "preimage", "token"] { raw[key] = json!("PRIVATE"); }
-        std::fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
-        let status = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "spend_journal::tests::ledger_archive_publish_crash_preserves_history_and_retry_is_safe"])
-            .env(CHILD_DIR, dir.path()).status().unwrap();
-        assert_eq!(status.code(), Some(73));
-        assert!(path.exists(), "crash leaves both copies");
-        let archived = archived_operation(dir.path(), &record.op_id).unwrap().unwrap();
-        assert_eq!(serde_json::to_value(&archived).unwrap(), serde_json::to_value(&record).unwrap());
-        let archive = std::fs::read_dir(dir.path().join("ops-archive")).unwrap().next().unwrap().unwrap().path();
-        let original = std::fs::read(&archive).unwrap();
-        assert!(!String::from_utf8_lossy(&original).contains("PRIVATE"));
-        assert_eq!(original.last(), Some(&b'\n'));
-        #[cfg(unix)] {
-            use std::os::unix::fs::PermissionsExt;
-            assert_eq!(std::fs::metadata(&archive).unwrap().permissions().mode() & 0o777, 0o600);
-        }
-        // A crash before publication leaves only an ignored incomplete .next.
-        std::fs::write(dir.path().join("ops-archive/interrupted.next"), "{partial").unwrap();
-        assert_eq!(compact_operations(dir.path(), RETENTION_MS + 101).unwrap(), 1);
-        assert!(!path.exists());
-        assert_eq!(compact_operations(dir.path(), RETENTION_MS + 101).unwrap(), 0);
-        assert_eq!(archived_ids_for_test(dir.path()), [record.op_id.clone()], "retry must not duplicate the published archive line");
-        assert_eq!(std::fs::read(archive).unwrap(), original, "archive segments are append-only");
-        let journal = Journal::open(dir.path()).unwrap();
-        assert_eq!(serde_json::to_value(journal.operation_record(&record.op_id).unwrap().unwrap()).unwrap(),
-            serde_json::to_value(&record).unwrap());
-    }
-
-    #[test]
-    fn ledger_terminal_admission_reclaims_only_its_own_index() {
+    fn ledger_terminal_outcomes_preserve_the_latest_call_index() {
         let dir = tempfile::tempdir().unwrap();
         let journal = Journal::open(dir.path()).unwrap();
         let mut older = history_fixture(dir.path(), 1, OperationState::Dispatching, "call_offer");
@@ -1151,18 +747,18 @@ mod tests {
         let call = older.call_id.clone().unwrap();
         older.state = OperationState::Unpaid;
         journal.write_operation(&older).unwrap();
-        assert_eq!(journal.call_parent("node", "peer", &call).unwrap(), None);
+        assert_eq!(journal.call_parent("node", "peer", &call).unwrap(), Some(older.op_id.clone()));
         let mut newer = history_fixture(dir.path(), 2, OperationState::PaidUndelivered, "call_recovery");
         journal.write_operation(&newer).unwrap();
         journal.write_operation(&older).unwrap();
         assert_eq!(journal.call_parent("node", "peer", &call).unwrap(), Some(newer.op_id.clone()));
         newer.state = OperationState::FailedPaid;
         journal.write_operation(&newer).unwrap();
-        assert_eq!(journal.call_parent("node", "peer", &call).unwrap(), None);
+        assert_eq!(journal.call_parent("node", "peer", &call).unwrap(), Some(newer.op_id.clone()));
         drop(journal);
         initialize_history(dir.path()).unwrap();
         let journal = Journal::open(dir.path()).unwrap();
-        assert_eq!(journal.call_parent("node", "peer", &call).unwrap(), None, "migration never resurrects a terminal admission index");
+        assert_eq!(journal.call_parent("node", "peer", &call).unwrap(), Some(newer.op_id));
     }
 
     #[test]
