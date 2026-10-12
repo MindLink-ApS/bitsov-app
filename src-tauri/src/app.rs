@@ -1428,9 +1428,18 @@ async fn bootstrap_node(app: AppHandle) {
     }
 }
 
+async fn prepare_operation_history(data_dir: &Path) -> Result<(), ActionError> {
+    let dir = data_dir.join("app-spend");
+    tokio::task::spawn_blocking(move || spend_journal::initialize_history(&dir))
+        .await.map_err(spend_journal::unknown)?
+}
+
 /// Pair, then read /identity. A pairing failure stays in the pairing view (the
 /// onboarding screen shows it with a retry); it is not a node-start error.
 async fn finish_auth(state: &NodeState, data_dir: &Path) {
+    if let Err(error) = prepare_operation_history(data_dir).await {
+        return set_error(state, error.message);
+    }
     if authenticate(state, data_dir).await.is_err() {
         return;
     }
@@ -1487,6 +1496,9 @@ async fn finish_auth(state: &NodeState, data_dir: &Path) {
 /// Retry transport outages without restarting the proxy or discarding durable
 /// pairing. A long node cooldown outlives the HTTP client's startup timeout.
 async fn finish_remote_auth(state: &NodeState, data_dir: &Path) {
+    if let Err(error) = prepare_operation_history(data_dir).await {
+        return set_error(state, error.message);
+    }
     loop {
         if state.quitting.load(Ordering::SeqCst) {
             return;
@@ -4433,16 +4445,34 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
 }
 
 /// Read-only H1 projection; the single pending slot remains the spending fence.
-async fn do_op_list(state: &NodeState, peer: Option<&str>) -> Result<Vec<spend_journal::OpView>, ActionError> {
+async fn do_op_list(state: &NodeState, peer: Option<&str>) -> Result<spend_journal::OpList, ActionError> {
     let peer = peer.map(control::node_id).transpose().map_err(ActionError::invalid)?;
-    let _money = state.money.lock().await;
     let node_id = state.node_id.lock().unwrap().clone()
         .ok_or_else(|| ActionError::new("app_not_ready", "No node identity."))?;
-    let journal = spend_journal(state)?;
-    journal.pending()?; // Repair an interrupted initial write / migrate a legacy slot.
-    Ok(journal.operations()?.into_iter()
-        .filter(|r| r.node_id == node_id && peer.as_ref().is_none_or(|p| &r.peer == p))
-        .map(Into::into).collect())
+    let dir = app_files_dir(state).ok_or_else(|| ActionError::new("app_not_ready", "No app storage."))?.join("app-spend");
+    // Atomic operation files can be read without the global money/OS journal
+    // locks. Keep directory work off the async executor as well.
+    tokio::task::spawn_blocking(move || spend_journal::list_operations(&dir, &node_id, peer.as_deref(), spend_journal::OP_LIST_LIMIT))
+        .await.map_err(spend_journal::unknown)?
+}
+
+/// Retention is independent of spending. Sweep once on startup and hourly;
+/// pruning skips active journals rather than delaying a running money action.
+async fn operation_history_maintenance(app: AppHandle) {
+    loop {
+        let dir = app_files_dir(&app.state::<NodeState>());
+        if let Some(dir) = dir {
+            let _ = tokio::task::spawn_blocking(move || {
+                if spend_journal::prune_operations(&dir.join("app-spend"), spend_journal::timestamp_ms()).is_err() {
+                    eprintln!("spend ledger: history maintenance deferred");
+                }
+            }).await;
+            tokio::time::sleep(Duration::from_secs(60 * 60)).await;
+        } else {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        if app.state::<NodeState>().quitting.load(Ordering::SeqCst) { return; }
+    }
 }
 
 /// Waits for any money POST in flight (`NodeState::money`), then reads its record.
@@ -6558,7 +6588,7 @@ async fn op_list(
     window: WebviewWindow<impl tauri::Runtime>,
     state: State<'_, NodeState>,
     peer: Option<String>,
-) -> Result<Vec<spend_journal::OpView>, ActionError> {
+) -> Result<spend_journal::OpList, ActionError> {
     reject_sealed_window(&window)?;
     drop(window);
     do_op_list(state.inner(), peer.as_deref()).await
@@ -7726,6 +7756,7 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(bootstrap_node(handle));
             tauri::async_runtime::spawn(live_bridge(app.handle().clone()));
+            tauri::async_runtime::spawn(operation_history_maintenance(app.handle().clone()));
             Ok(())
         })
 }
@@ -9632,6 +9663,67 @@ mod control_act_tests {
         }
     }
 
+    // These use the same host call path and node receipts as the baseline test
+    // above: history must not affect dispatch, caps, paid totals, or the fence.
+    #[tokio::test]
+    async fn ledger_call_history_does_not_change_hangup_or_recovery() {
+        for history in ["large", "corrupt", "unreadable", "corrupt_parent", "missing_parent"] {
+            for kind in [403, 400] {
+                let (ops, paid) = ops_node();
+                let calls = call_routes(Some(10000));
+                let node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
+                    if p == "/status" || p == "/messages/compose" { ops(m, p, b) } else { calls(m, p, b) }
+                }));
+                do_budget_approve(&node.state, 500000, budget::PresetId::Careful).await.unwrap();
+                with_book(&node.state, true, |b| b.set_limit(A, false, 50000)).unwrap();
+                let parent = do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap().operation_id.unwrap();
+                let dir = node._dir.path().join("app-spend/ops");
+                match history {
+                    "large" => {
+                        let mut record = ledger_record(&node, &parent);
+                        record["node_id"] = serde_json::json!(C);
+                        record["peer"] = serde_json::json!(C);
+                        for i in 0..10_000 {
+                            let id = format!("00000000-0000-4000-8000-{i:012x}");
+                            record["op_id"] = serde_json::json!(id);
+                            std::fs::write(dir.join(format!("{id}.json")), record.to_string()).unwrap();
+                        }
+                    }
+                    "corrupt" => std::fs::write(dir.join("unrelated.json"), "PRIVATE broken JSON").unwrap(),
+                    "unreadable" => std::fs::create_dir(dir.join("unrelated.json")).unwrap(),
+                    "corrupt_parent" => std::fs::write(dir.join(format!("{parent}.json")), "PRIVATE broken JSON").unwrap(),
+                    "missing_parent" => std::fs::remove_file(dir.join(format!("{parent}.json"))).unwrap(),
+                    _ => unreachable!(),
+                }
+                let recovery = r#"{"v":1,"call_id":"1123456789abcdef0123456789abcdef","media":"audio","sdp":"v=0\na=x-bitsov-restart-of:0123456789abcdef0123456789abcdef"}"#;
+                let result = do_call_signal(&node.state, A, kind, if kind == 403 { OFFER } else { recovery }, 15000).await;
+                if history.ends_with("parent") {
+                    let error = result.unwrap_err();
+                    assert_eq!(error.code, "spend_unknown", "{history} / {kind}");
+                    assert!(!error.message.contains("PRIVATE"));
+                    assert_eq!(op_ids(&node).len(), 1, "no child POST on damaged parent");
+                    assert_eq!(paid.lock().unwrap().pays, 1);
+                    assert_eq!(budget_now(&node.state).spent_msat, 2000);
+                    assert!(pending(&node).is_none());
+                    do_message_send(&node.state, A, false, "unrelated message", 14000, None).await.unwrap();
+                    assert_eq!(paid.lock().unwrap().pays, 2, "damage stays local to that call");
+                } else {
+                    let receipt = result.unwrap();
+                    let record = ledger_record(&node, receipt.operation_id.as_ref().unwrap());
+                    assert_eq!(record["parent_op"], parent, "{history} / {kind}");
+                    assert_eq!(record["state"], "settled");
+                    assert_eq!(record["cap_msat"], 15000);
+                    assert_eq!(record["paid_msat"], 2000);
+                    assert_eq!(op_ids(&node).len(), 2);
+                    assert_eq!(paid.lock().unwrap().pays, 2);
+                    assert_eq!(budget_now(&node.state).spent_msat, 4000);
+                    assert_eq!(budget_now(&reopen(&node)).spent_msat, 4000);
+                }
+                assert!(pending(&node).is_none());
+            }
+        }
+    }
+
     #[tokio::test]
     async fn ledger_restart_reconciles_every_node_outcome_without_another_post() {
         for (node_state, recorded) in [("acked", "settled"), ("sent", "settled"),
@@ -9677,16 +9769,17 @@ mod control_act_tests {
         spend_advance(&node.state, true).await.unwrap();
         let receipt = do_message_send(&node.state, A, false, "PRIVATE", 14000, None).await.unwrap();
         let rows = do_op_list(&node.state, Some(A)).await.unwrap();
-        assert_eq!(rows.len(), 1);
-        let row = serde_json::to_value(&rows[0]).unwrap();
+        assert_eq!(rows.operations.len(), 1);
+        assert_eq!(rows.skipped, 0);
+        let row = serde_json::to_value(&rows.operations[0]).unwrap();
         assert_eq!(row["op_id"], receipt.operation_id.unwrap());
         assert_eq!(row["state"], "settled");
         for secret in ["payment_hash", "request_hash", "node_id", "PRIVATE"] {
             assert!(!row.to_string().contains(secret));
         }
-        assert!(do_op_list(&node.state, Some(C)).await.unwrap().is_empty());
+        assert!(do_op_list(&node.state, Some(C)).await.unwrap().operations.is_empty());
         *node.state.node_id.lock().unwrap() = Some(C.into());
-        assert!(do_op_list(&node.state, None).await.unwrap().is_empty());
+        assert!(do_op_list(&node.state, None).await.unwrap().operations.is_empty());
         assert_eq!(op_ids(&node).len(), 1, "listing never dispatches");
     }
 

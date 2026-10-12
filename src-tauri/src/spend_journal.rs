@@ -3,6 +3,12 @@
 //! (`operation_id`), written here before the first POST and reused by every
 //! retry of that send. A lost reply without it remains unknown. Absence from a
 //! paged history is never proof that a payment did not happen.
+//!
+//! Call parents use a durable identity/peer/call index, repaired from pending
+//! snapshots and imported once from pre-index H1 records before authentication.
+//! The read-only listing returns at most 100 newest rows plus skipped/has_more.
+//! Hourly maintenance removes terminal records older than 30 days; open calls,
+//! uncertain outcomes, damaged files and pending records remain retained.
 
 use std::fs::File;
 #[cfg(unix)]
@@ -159,7 +165,7 @@ impl From<OperationRecord> for OpView {
     }
 }
 
-fn timestamp_ms() -> u64 {
+pub fn timestamp_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default()
         .as_millis().min(u64::MAX as u128) as u64
 }
@@ -228,12 +234,16 @@ pub fn read_pending(dir: &Path) -> Result<Option<Pending>, ActionError> {
 /// but leaves the pending record. No approval, token, invoice or plaintext is saved.
 pub struct Journal {
     _lock: File,
+    // Maintenance holds this only while rechecking/deleting ONE candidate.
+    // Journal sessions keep active and resumable snapshots safe from pruning.
+    _history_lock: File,
     dir: PathBuf,
 }
 
 impl Drop for Journal {
     fn drop(&mut self) {
         // Closing alone leaves flock held when a subprocess inherited the fd.
+        let _ = self._history_lock.unlock();
         let _ = self._lock.unlock();
     }
 }
@@ -255,7 +265,9 @@ impl Journal {
         }
         let lock = options.open(dir.join("spend.lock")).map_err(unknown)?;
         lock.try_lock().map_err(|_| unknown("An action is still running."))?;
-        Ok(Self { _lock: lock, dir: dir.to_path_buf() })
+        let history_lock = history_lock(dir)?;
+        history_lock.lock().map_err(unknown)?;
+        Ok(Self { _lock: lock, _history_lock: history_lock, dir: dir.to_path_buf() })
     }
 
     pub fn pending(&self) -> Result<Option<Pending>, ActionError> {
@@ -307,9 +319,7 @@ impl Journal {
             };
             let parent_call = if signal_kind == 403 { call_id.as_deref() } else { recovery };
             let parent_op = if let Some(call) = parent_call {
-                self.operations()?.into_iter().filter(|r| r.node_id == node_id && r.peer == pending.peer.as_deref().unwrap_or_default()
-                    && r.call_id.as_deref() == Some(call) && matches!(r.kind.as_str(), "call_offer" | "call_recovery"))
-                    .max_by_key(|r| r.created_ms).map(|r| r.op_id)
+                self.call_parent(node_id, pending.peer.as_deref().unwrap_or_default(), call)?
             } else { None };
             let mut record = self.operation_record(id)?.unwrap_or(OperationRecord {
                 op_id: id.clone(), node_id: node_id.into(), kind: kind.into(), peer: pending.peer.clone().unwrap_or_default(),
@@ -362,11 +372,25 @@ impl Journal {
     }
 
     pub fn operation_record(&self, id: &str) -> Result<Option<OperationRecord>, ActionError> {
-        match std::fs::read(self.operation_path(id)?) {
-            Ok(bytes) => serde_json::from_slice(&bytes).map(Some).map_err(unknown),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(unknown(e)),
+        read_operation(&self.operation_path(id)?, Some(id))
+    }
+
+    fn call_parent(&self, node_id: &str, peer: &str, call: &str) -> Result<Option<String>, ActionError> {
+        let index = call_index_path(&self.dir, node_id, peer, call);
+        let entry: CallIndex = match std::fs::read(index) {
+            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|_| damaged_record())?,
+            // Incoming calls and legacy nodes may have no local offer. Losing
+            // both the mapping and identifiable parent metadata is indistinguishable
+            // from that case; absence alone must not invent an admission fence.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(damaged_record()),
+        };
+        let record = self.operation_record(&entry.op_id)?.ok_or_else(damaged_record)?;
+        if record.node_id != node_id || record.peer != peer || record.call_id.as_deref() != Some(call)
+            || !matches!(record.kind.as_str(), "call_offer" | "call_recovery") {
+            return Err(damaged_record());
         }
+        Ok(Some(record.op_id))
     }
 
     fn ensure_operation(&self, pending: &Pending) -> Result<(), ActionError> {
@@ -385,6 +409,11 @@ impl Journal {
                 self.write_operation(&record)?;
             }
             if let Some(mut record) = self.operation_record(id)? {
+                if let Some(parent) = &record.parent_op {
+                    self.operation_record(parent)?.ok_or_else(damaged_record)?;
+                }
+                // Also repairs a crash after the operation rename but before its index.
+                write_call_index(&self.dir, &record)?;
                 // The slot is written first. Repair a crash before the matching
                 // history update, before any shortcut or resumable replacement.
                 // Completed history wins over older pending snapshots.
@@ -423,30 +452,14 @@ impl Journal {
             .mode(0o600).custom_flags(libc::O_NOFOLLOW).open(&next).map_err(unknown)?;
         file.write_all(&serde_json::to_vec(record).map_err(unknown)?).map_err(unknown)?;
         file.sync_all().map_err(unknown)?;
-        std::fs::rename(next, path).map_err(unknown)?;
-        File::open(dir).and_then(|f| f.sync_all()).map_err(unknown)
+        std::fs::rename(next, &path).map_err(unknown)?;
+        File::open(dir).and_then(|f| f.sync_all()).map_err(unknown)?;
+        write_call_index(&self.dir, record)
     }
 
     #[cfg(not(unix))]
     fn write_operation(&self, _record: &OperationRecord) -> Result<(), ActionError> {
         Err(unknown("private spend journal storage is not supported on this platform"))
-    }
-
-    pub fn operations(&self) -> Result<Vec<OperationRecord>, ActionError> {
-        let entries = match std::fs::read_dir(self.dir.join("ops")) {
-            Ok(entries) => entries,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(e) => return Err(unknown(e)),
-        };
-        let mut records: Vec<OperationRecord> = Vec::new();
-        for entry in entries {
-            let path = entry.map_err(unknown)?.path();
-            if path.extension().is_some_and(|e| e == "json") {
-                records.push(serde_json::from_slice(&std::fs::read(path).map_err(unknown)?).map_err(unknown)?);
-            }
-        }
-        records.sort_by(|a, b| (a.created_ms, &a.op_id).cmp(&(b.created_ms, &b.op_id)));
-        Ok(records)
     }
 
     /// Commit history before releasing/replacing the pending slot. Evidence is
@@ -477,6 +490,192 @@ impl Journal {
         #[cfg(unix)] File::open(&self.dir).and_then(|f| f.sync_all()).map_err(unknown)?;
         Ok(())
     }
+}
+
+/// Maximum response size; listing is read-only and never takes either money lock.
+pub const OP_LIST_LIMIT: usize = 100;
+const RETENTION_MS: u64 = 30 * 24 * 60 * 60 * 1000;
+
+#[derive(Debug, Serialize)]
+pub struct OpList {
+    pub operations: Vec<OpView>,
+    pub skipped: usize,
+    pub has_more: bool,
+}
+
+fn damaged_record() -> ActionError {
+    // Do not log parser errors: they can contain bytes from a damaged record.
+    eprintln!("spend ledger: required operation record or call index is missing, unreadable, or invalid");
+    unknown("Required operation record or call index is missing, unreadable, or invalid.")
+}
+
+fn read_operation(path: &Path, expected_id: Option<&str>) -> Result<Option<OperationRecord>, ActionError> {
+    match std::fs::read(path) {
+        Ok(bytes) => {
+            let record: OperationRecord = serde_json::from_slice(&bytes).map_err(|_| damaged_record())?;
+            if expected_id.is_some_and(|id| id != record.op_id) { return Err(damaged_record()); }
+            Ok(Some(record))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(damaged_record()),
+    }
+}
+
+// A stream, not a Vec: both listing and maintenance have bounded working sets.
+fn history_entries(dir: &Path) -> Result<impl Iterator<Item = std::io::Result<std::fs::DirEntry>>, ActionError> {
+    match std::fs::read_dir(dir.join("ops")) {
+        Ok(entries) => Ok(Some(entries).into_iter().flatten()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None.into_iter().flatten()),
+        Err(e) => Err(unknown(e)),
+    }
+}
+
+pub fn list_operations(dir: &Path, node_id: &str, peer: Option<&str>, limit: usize) -> Result<OpList, ActionError> {
+    let limit = limit.clamp(1, OP_LIST_LIMIT);
+    let mut rows = std::collections::BTreeMap::new();
+    let mut skipped = 0;
+    let mut matched = 0;
+    for entry in history_entries(dir)? {
+        let path = match entry { Ok(e) => e.path(), Err(_) => { skipped += 1; continue; } };
+        if path.extension().is_none_or(|e| e != "json") { continue; }
+        let record = match read_operation(&path, path.file_stem().and_then(|s| s.to_str())) {
+            Ok(Some(record)) => record,
+            _ => { skipped += 1; continue; }
+        };
+        if record.node_id != node_id || peer.is_some_and(|p| p != record.peer) { continue; }
+        matched += 1;
+        rows.insert((record.created_ms, record.op_id.clone()), record);
+        if rows.len() > limit { rows.pop_first(); }
+    }
+    Ok(OpList { operations: rows.into_values().rev().map(Into::into).collect(), skipped, has_more: matched > limit })
+}
+
+#[derive(Serialize, Deserialize)]
+struct CallIndex { op_id: String, created_ms: u64 }
+
+fn call_index_path(dir: &Path, node_id: &str, peer: &str, call: &str) -> PathBuf {
+    let key = serde_json::to_vec(&(node_id, peer, call)).expect("string tuple serializes");
+    dir.join("call-index").join(format!("{}.json", blake3::hash(&key).to_hex()))
+}
+
+#[cfg(unix)]
+fn history_lock(dir: &Path) -> Result<File, ActionError> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::create_dir_all(dir).map_err(unknown)?;
+    OpenOptions::new().read(true).write(true).create(true).truncate(false)
+        .mode(0o600).custom_flags(libc::O_NOFOLLOW).open(dir.join("history.lock")).map_err(unknown)
+}
+
+#[cfg(not(unix))]
+fn history_lock(_dir: &Path) -> Result<File, ActionError> {
+    Err(unknown("private spend journal storage is not supported on this platform"))
+}
+
+#[cfg(unix)]
+fn write_call_index(dir: &Path, record: &OperationRecord) -> Result<(), ActionError> {
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    if !matches!(record.kind.as_str(), "call_offer" | "call_recovery") { return Ok(()); }
+    let Some(call) = record.call_id.as_deref() else { return Ok(()) };
+    let path = call_index_path(dir, &record.node_id, &record.peer, call);
+    match std::fs::read(&path) {
+        Ok(bytes) => {
+            let old: CallIndex = serde_json::from_slice(&bytes).map_err(|_| damaged_record())?;
+            if (old.created_ms, &old.op_id) >= (record.created_ms, &record.op_id) { return Ok(()); }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(damaged_record()),
+    }
+    let parent = path.parent().expect("index directory");
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(parent).map_err(unknown)?;
+    let next = path.with_extension("next");
+    let mut file = OpenOptions::new().write(true).create(true).truncate(true)
+        .mode(0o600).custom_flags(libc::O_NOFOLLOW).open(&next).map_err(unknown)?;
+    let index = CallIndex { op_id: record.op_id.clone(), created_ms: record.created_ms };
+    file.write_all(&serde_json::to_vec(&index).map_err(unknown)?).map_err(unknown)?;
+    file.sync_all().map_err(unknown)?;
+    std::fs::rename(next, &path).map_err(unknown)?;
+    File::open(parent).and_then(|f| f.sync_all()).map_err(unknown)?;
+    File::open(dir).and_then(|f| f.sync_all()).map_err(unknown)
+}
+
+#[cfg(not(unix))]
+fn write_call_index(_dir: &Path, _record: &OperationRecord) -> Result<(), ActionError> {
+    Err(unknown("private spend journal storage is not supported on this platform"))
+}
+
+/// One-time upgrade of pre-index H1 history, before authenticating/enabling money
+/// actions. Never invoked with NodeState::money or spend.lock held. Writers and
+/// migration serialize only a single index update at a time.
+pub fn initialize_history(dir: &Path) -> Result<(), ActionError> {
+    let marker = dir.join("call-index-v1");
+    if marker.exists() { return Ok(()); }
+    for entry in history_entries(dir)? {
+        let Ok(entry) = entry else { continue };
+        let path = entry.path();
+        if path.extension().is_none_or(|e| e != "json") { continue; }
+        let Ok(Some(record)) = read_operation(&path, path.file_stem().and_then(|s| s.to_str())) else { continue };
+        if !matches!(record.kind.as_str(), "call_offer" | "call_recovery") { continue; }
+        let Some(call) = record.call_id.as_deref() else { continue };
+        let lock = history_lock(dir)?;
+        lock.lock().map_err(unknown)?;
+        // Preserve a damaged existing mapping as a fail-closed marker for just
+        // this call. It must not stop migration/authentication for other calls.
+        let damaged = match std::fs::read(call_index_path(dir, &record.node_id, &record.peer, call)) {
+            Ok(bytes) => serde_json::from_slice::<CallIndex>(&bytes).is_err(),
+            Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+        };
+        if damaged {
+            let _ = damaged_record();
+            let _ = lock.unlock();
+            continue;
+        }
+        let result = write_call_index(dir, &record);
+        let _ = lock.unlock();
+        result?;
+    }
+    std::fs::create_dir_all(dir).map_err(unknown)?;
+    File::create(marker).and_then(|f| f.sync_all()).map_err(unknown)?;
+    File::open(dir).and_then(|f| f.sync_all()).map_err(unknown)
+}
+
+fn expired_terminal(record: &OperationRecord, now: u64) -> bool {
+    // A paid offer/recovery can still represent an OPEN call. Retain these
+    // (and their indexes) until a later slice explicitly closes admissions.
+    (!matches!(record.kind.as_str(), "call_offer" | "call_recovery") || record.state == OperationState::Closed)
+        && matches!(record.state, OperationState::Settled | OperationState::Closed | OperationState::FailedPaid | OperationState::Unpaid)
+        && record.settled_ms.is_some_and(|t| now.saturating_sub(t) > RETENTION_MS)
+}
+
+/// Background retention. Enumeration/JSON reads run without either money lock.
+/// A separate lock protects only the final recheck/unlink of one terminal file;
+/// if a spend is active we skip it. Open, unknown, damaged and pending records
+/// are never deleted. No history lookup on the money path calls this function.
+pub fn prune_operations(dir: &Path, now: u64) -> Result<usize, ActionError> {
+    let mut removed = 0;
+    for entry in history_entries(dir)? {
+        let Ok(entry) = entry else { continue };
+        let path = entry.path();
+        if path.extension().is_none_or(|e| e != "json") { continue; }
+        let id = path.file_stem().and_then(|s| s.to_str());
+        let Ok(Some(record)) = read_operation(&path, id) else { continue };
+        if !expired_terminal(&record, now) { continue; }
+        let lock = history_lock(dir)?;
+        if lock.try_lock().is_err() { continue; }
+        let result: Result<(), ActionError> = (|| {
+            let pending = read_pending(dir)?;
+            if pending.as_ref().is_some_and(|p| p.operation_id.as_deref() == Some(record.op_id.as_str())
+                || p.operation_record.as_ref().and_then(|r| r.parent_op.as_deref()) == Some(record.op_id.as_str())) { return Ok(()); }
+            if read_operation(&path, id)?.is_some_and(|r| expired_terminal(&r, now)) {
+                std::fs::remove_file(&path).map_err(unknown)?;
+                File::open(dir.join("ops")).and_then(|f| f.sync_all()).map_err(unknown)?;
+                removed += 1;
+            }
+            Ok(())
+        })();
+        let _ = lock.unlock();
+        result?;
+    }
+    Ok(removed)
 }
 
 fn fresh_id() -> Result<String, ActionError> {
@@ -514,6 +713,136 @@ pub fn terminal(pending: &Pending, rows: &[serde_json::Value]) -> Option<&'stati
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn history_fixture(dir: &Path, id: usize, state: OperationState, kind: &str) -> OperationRecord {
+        let record = OperationRecord {
+            op_id: format!("00000000-0000-4000-8000-{id:012x}"), node_id: "node".into(),
+            kind: kind.into(), peer: "peer".into(), call_id: Some("0123456789abcdef0123456789abcdef".into()),
+            parent_op: None, request_hash: "hash".into(), cap_msat: 2000, state,
+            paid_msat: Some(2000), message_id: None, payment_hash: None,
+            created_ms: id as u64, settled_ms: Some(100),
+        };
+        std::fs::create_dir_all(dir.join("ops")).unwrap();
+        std::fs::write(dir.join("ops").join(format!("{}.json", record.op_id)), serde_json::to_vec(&record).unwrap()).unwrap();
+        record
+    }
+
+    #[test]
+    fn ledger_listing_caps_newest_rows_and_counts_damaged_files() {
+        let dir = tempfile::tempdir().unwrap();
+        for id in 0..125 { history_fixture(dir.path(), id, OperationState::Settled, "message"); }
+        std::fs::write(dir.path().join("ops/corrupt.json"), "PRIVATE malformed").unwrap();
+        std::fs::create_dir(dir.path().join("ops/unreadable.json")).unwrap();
+        std::fs::write(dir.path().join("ops/partial.next"), "partial").unwrap();
+        // Even with an active money journal the listing succeeds; it takes no locks.
+        let _journal = Journal::open(dir.path()).unwrap();
+        let page = list_operations(dir.path(), "node", Some("peer"), usize::MAX).unwrap();
+        assert_eq!(page.operations.len(), 100);
+        assert_eq!(page.skipped, 2);
+        assert!(page.has_more);
+        assert!(page.operations[0].op_id.ends_with("00000000007c"));
+        assert!(page.operations[99].op_id.ends_with("000000000019"));
+        assert!(list_operations(dir.path(), "other", None, 100).unwrap().operations.is_empty());
+        assert!(list_operations(dir.path(), "node", Some("other"), 100).unwrap().operations.is_empty());
+    }
+
+    #[test]
+    fn ledger_retention_keeps_open_unknown_recent_and_pending_records() {
+        let dir = tempfile::tempdir().unwrap();
+        for (id, state) in [OperationState::Settled, OperationState::Closed, OperationState::FailedPaid,
+            OperationState::Unpaid, OperationState::Unknown, OperationState::Dispatching,
+            OperationState::Paid, OperationState::PaidUndelivered].into_iter().enumerate() {
+            history_fixture(dir.path(), id, state, "message");
+        }
+        history_fixture(dir.path(), 8, OperationState::Settled, "call_offer");
+        history_fixture(dir.path(), 9, OperationState::Settled, "call_recovery");
+        let recent = history_fixture(dir.path(), 10, OperationState::Settled, "message");
+        let mut recent = recent;
+        recent.settled_ms = Some(RETENTION_MS);
+        std::fs::write(dir.path().join(format!("ops/{}.json", recent.op_id)), serde_json::to_vec(&recent).unwrap()).unwrap();
+        std::fs::write(dir.path().join("ops/corrupt.json"), "PRIVATE malformed").unwrap();
+        let journal = Journal::open(dir.path()).unwrap();
+        let body = json!({"recipient":"peer", "kind":1, "plaintext":"secret"});
+        let id = new_operation_id().unwrap();
+        let mut pending = journal.begin_operation("node", "/messages/compose", &body, 2000,
+            Some((id.clone(), operation(&body)))).unwrap();
+        journal.record_outcome(&pending, OperationState::Unpaid, None).unwrap();
+        pending.resumable = true;
+        journal.save(&pending).unwrap();
+        let mut old = journal.operation_record(&id).unwrap().unwrap();
+        old.settled_ms = Some(100);
+        journal.write_operation(&old).unwrap();
+        assert_eq!(prune_operations(dir.path(), RETENTION_MS + 101).unwrap(), 0, "active journal is never disturbed");
+        drop(journal);
+        assert_eq!(prune_operations(dir.path(), RETENTION_MS + 101).unwrap(), 4);
+        let page = list_operations(dir.path(), "node", None, 100).unwrap();
+        assert_eq!(page.operations.len(), 8);
+        assert_eq!(page.skipped, 1);
+        assert!(dir.path().join(format!("ops/{id}.json")).exists(), "resumable pending survives");
+        assert_eq!(prune_operations(dir.path(), RETENTION_MS + 101).unwrap(), 0);
+    }
+
+    #[test]
+    fn ledger_migration_keeps_an_unrelated_damaged_index_local_to_its_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let record = history_fixture(dir.path(), 1, OperationState::Settled, "call_offer");
+        let call = record.call_id.as_deref().unwrap();
+        let index = call_index_path(dir.path(), "node", "peer", call);
+        std::fs::create_dir_all(index.parent().unwrap()).unwrap();
+        std::fs::write(&index, "PRIVATE broken index").unwrap();
+        initialize_history(dir.path()).unwrap();
+        let journal = Journal::open(dir.path()).unwrap();
+        assert!(journal.call_parent("node", "peer", call).is_err());
+        assert_eq!(journal.call_parent("node", "other", call).unwrap(), None);
+        let body = json!({"recipient":"other", "kind":1, "plaintext":"secret"});
+        assert!(journal.begin_operation("node", "/messages/compose", &body, 2000,
+            Some((new_operation_id().unwrap(), operation(&body)))).is_ok());
+    }
+
+    #[test]
+    fn ledger_migrates_call_index_once_and_repairs_interrupted_index_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let older = history_fixture(dir.path(), 1, OperationState::Settled, "call_offer");
+        let newer = history_fixture(dir.path(), 2, OperationState::Settled, "call_recovery");
+        std::fs::write(dir.path().join("ops/corrupt.json"), "broken").unwrap();
+        initialize_history(dir.path()).unwrap();
+        let journal = Journal::open(dir.path()).unwrap();
+        let call = newer.call_id.as_deref().unwrap();
+        assert_eq!(journal.call_parent("node", "peer", call).unwrap(), Some(newer.op_id));
+        assert_eq!(journal.call_parent("other", "peer", call).unwrap(), None);
+        assert_eq!(journal.call_parent("node", "other", call).unwrap(), None);
+        // Late evidence for an old operation must not replace the latest index.
+        journal.write_operation(&older).unwrap();
+        assert_ne!(journal.call_parent("node", "peer", call).unwrap(), Some(older.op_id));
+        let body = json!({"recipient":"peer", "kind":400, "plaintext":r#"{"call_id":"1123456789abcdef0123456789abcdef"}"#});
+        let p = journal.begin_operation("node", "/messages/compose", &body, 2000,
+            Some((new_operation_id().unwrap(), operation(&body)))).unwrap();
+        let call = "1123456789abcdef0123456789abcdef";
+        std::fs::remove_file(call_index_path(dir.path(), "node", "peer", call)).unwrap();
+        drop(journal);
+        let journal = Journal::open(dir.path()).unwrap();
+        journal.pending().unwrap();
+        assert_eq!(journal.call_parent("node", "peer", call).unwrap(), p.operation_id);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ledger_parent_lookup_does_not_enumerate_history() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Journal::open(dir.path()).unwrap();
+        let body = json!({"recipient":"peer", "kind":400, "plaintext":r#"{"call_id":"0123456789abcdef0123456789abcdef"}"#});
+        let parent = journal.begin_operation("node", "/messages/compose", &body, 2000,
+            Some((new_operation_id().unwrap(), operation(&body)))).unwrap();
+        journal.record_outcome(&parent, OperationState::Settled, None).unwrap();
+        journal.clear().unwrap();
+        let ops = dir.path().join("ops");
+        // Write/search permissions permit named files; read_dir is forbidden.
+        std::fs::set_permissions(&ops, std::fs::Permissions::from_mode(0o300)).unwrap();
+        let result = journal.call_parent("node", "peer", "0123456789abcdef0123456789abcdef");
+        std::fs::set_permissions(&ops, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(result.unwrap(), parent.operation_id);
+    }
 
     #[test]
     fn ledger_survives_slot_clear_and_restart_without_plaintext() {
@@ -559,7 +888,7 @@ mod tests {
         std::fs::write(dir.path().join("ops").join(format!("{id}.next")), "{broken").unwrap();
         drop(journal);
         let journal = Journal::open(dir.path()).unwrap();
-        assert_eq!(journal.operations().unwrap().len(), 1);
+        assert_eq!(list_operations(dir.path(), "node", None, 100).unwrap().operations.len(), 1);
         assert_eq!(journal.operation_record(&id).unwrap().unwrap().state, OperationState::Dispatching);
         #[cfg(unix)] {
             use std::os::unix::fs::PermissionsExt;
@@ -581,14 +910,14 @@ mod tests {
         let created = journal.operation_record(&id).unwrap().unwrap().created_ms;
         let mut resumed = journal.begin_operation("node", "/messages/compose", &body, 3000,
             Some((id.clone(), operation(&body)))).unwrap();
-        assert_eq!(journal.operations().unwrap().len(), 1);
+        assert_eq!(list_operations(dir.path(), "node", None, 100).unwrap().operations.len(), 1);
         assert_eq!(journal.operation_record(&id).unwrap().unwrap().created_ms, created);
         journal.record_outcome(&resumed, OperationState::Unpaid, None).unwrap();
         resumed.resumable = true;
         journal.save(&resumed).unwrap();
         journal.begin_operation("node", "/messages/compose", &body, 2000,
             Some((new_operation_id().unwrap(), operation(&body)))).unwrap();
-        assert_eq!(journal.operations().unwrap().len(), 2);
+        assert_eq!(list_operations(dir.path(), "node", None, 100).unwrap().operations.len(), 2);
         assert_eq!(journal.operation_record(&id).unwrap().unwrap().state, OperationState::Unpaid);
     }
 
@@ -631,7 +960,7 @@ mod tests {
             assert_eq!(record.state, if undelivered { OperationState::PaidUndelivered } else { OperationState::Unpaid });
             assert_eq!(record.paid_msat, Some(if undelivered { 1000 } else { 0 }));
             journal.clear().unwrap();
-            assert_eq!(journal.operations().unwrap().len(), 1);
+            assert_eq!(list_operations(dir.path(), "node", None, 100).unwrap().operations.len(), 1);
         }
     }
 
