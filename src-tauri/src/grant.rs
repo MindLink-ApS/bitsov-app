@@ -69,6 +69,8 @@ pub struct NodeGrant {
     /// Relation grants: when each envelope ends, unix seconds.
     #[serde(default)]
     pub recipient_expires_at: BTreeMap<String, i64>,
+    /// Optional node breaker state, preserved unchanged for the renderer.
+    pub breakers: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 /// Parse `GET /pair/grant`. Anything but the documented shape is an error: a
@@ -156,11 +158,14 @@ pub struct GrantSummary {
     /// A relation grant: each contact with an envelope, and when it ends (ms).
     /// None for an owner console grant, which pays any contact within it.
     pub envelopes: Option<BTreeMap<String, u64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub breakers: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 impl From<&NodeGrant> for GrantSummary {
     fn from(g: &NodeGrant) -> Self {
         Self {
+            breakers: g.breakers.clone(),
             expires_at_ms: g.expires_at_ms(),
             budget_msat: g.budget_msat,
             remaining_msat: g.remaining_msat,
@@ -243,6 +248,26 @@ impl Refusal {
             "first_contact" => ActionError::new(
                 "grant_first_contact",
                 "Your node needs your OK for this first contact, and it did not get it. Nothing was sent. Confirm the first message again.",
+            ),
+            "grant_paused" => ActionError::new(
+                "grant_paused",
+                "Your node paused spending after failed payments. Nothing was sent.",
+            ),
+            "failure_limit_pending" => ActionError::new(
+                "grant_failures_pending",
+                "Your node is waiting for unresolved payments before allowing more spending. Nothing was sent.",
+            ),
+            "rate_limit_minute" => ActionError::new(
+                "grant_rate_limited",
+                "Too many payments this minute. Nothing was sent. Wait a little before trying again.",
+            ),
+            "rate_limit_hour" => ActionError::new(
+                "grant_rate_limited",
+                "Too many payments this hour. Nothing was sent. Wait before trying again.",
+            ),
+            "velocity_limit" => ActionError::new(
+                "grant_velocity",
+                "Spending is too fast for this grant. Nothing was sent. Wait before trying again.",
             ),
             "ledger" => ActionError::new(
                 "grant_ledger",
@@ -341,6 +366,52 @@ mod tests {
         assert_eq!((g.expires_at_ms(), g.remaining_msat), (2_000_000_000_000, 10));
         for bad in ["", "{}", r#"{"grant":{"expires_at":"soon"}}"#, "[]"] {
             assert_eq!(parse(bad).unwrap_err().code, "grant_unknown", "{bad}");
+        }
+    }
+
+    #[test]
+    fn breaker_state_passes_from_node_grant_to_renderer_unchanged() {
+        let breakers = serde_json::json!({
+            "limits": {"max_payments_per_minute": 2, "max_payments_per_hour": 12,
+                "max_consecutive_failures": 3, "max_msat_per_10_minutes": 9000},
+            "payments_last_minute": 1, "payments_last_hour": 7,
+            "reserved_msat_last_10_minutes": 1234, "consecutive_failures": 3,
+            "unresolved_payments": 2, "paused": true
+        });
+        let mut body = serde_json::json!({"grant": {"expires_at": 2000000000,
+            "budget_msat": 10000, "used_msat": 1234, "remaining_msat": 8766,
+            "per_call_max_msat": 1000, "breakers": breakers}});
+        let g = parse(&body.to_string()).unwrap().unwrap();
+        let wire = serde_json::to_value(GrantSummary::from(&g)).unwrap();
+        assert_eq!(wire["breakers"], breakers);
+        for absent in [false, true] {
+            if absent { body["grant"].as_object_mut().unwrap().remove("breakers"); }
+            else { body["grant"]["breakers"] = serde_json::Value::Null; }
+            let g = parse(&body.to_string()).unwrap().unwrap();
+            let wire = serde_json::to_value(GrantSummary::from(&g)).unwrap();
+            assert!(wire.get("breakers").is_none());
+        }
+    }
+
+    #[test]
+    fn breaker_refusals_map_each_reason_without_ending_the_grant() {
+        for (reason, code, message) in [
+            ("grant_paused", "grant_paused", "Your node paused spending after failed payments. Nothing was sent."),
+            ("failure_limit_pending", "grant_failures_pending", "Your node is waiting for unresolved payments before allowing more spending. Nothing was sent."),
+            ("rate_limit_minute", "grant_rate_limited", "Too many payments this minute. Nothing was sent. Wait a little before trying again."),
+            ("rate_limit_hour", "grant_rate_limited", "Too many payments this hour. Nothing was sent. Wait before trying again."),
+            ("velocity_limit", "grant_velocity", "Spending is too fast for this grant. Nothing was sent. Wait before trying again."),
+        ] {
+            let body = serde_json::json!({"code":"budget_exceeded", "reason":reason}).to_string();
+            let refusal = refusal(409, &body).unwrap();
+            assert!(!refusal.ends_grant(), "{reason}");
+            for known in [None, Some(grant(2000)).as_ref()] {
+                let error = refusal.error(known);
+                assert_eq!(error.code, code, "{reason}");
+                assert_eq!(error.message, message, "{reason}");
+            }
+            assert!(super::refusal(403, &body).is_none());
+            assert!(super::refusal(409, &serde_json::json!({"code":"other", "reason":reason}).to_string()).is_none());
         }
     }
 

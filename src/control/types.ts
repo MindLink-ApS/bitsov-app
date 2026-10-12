@@ -1,3 +1,4 @@
+import type { BreakerStatus } from './ownerApproval';
 // Shapes the host's read commands return. Each mirrors a `bitsov_app::control`
 // struct (src-tauri/src/control.rs), which mirrors the pinned node route
 // (rc9, with rc7 compatibility). No token, key, preimage or ciphertext is in any of them.
@@ -207,7 +208,7 @@ export type NodeOverview = {
   uptime_secs: number;
   lightning_backend: string | null;
   chain_backend: string | null;
-  /** Known node capabilities (`energy_v1`, `membrane_v1`, `call_meeting_v1`, `room_binding_v1`, `porch_read_v1`, `porch_quote_v1`, `front_door_v1`, `owner_device_approval_v1`); absent or empty on rc7. */
+  /** Known node capabilities (`energy_v1`, `membrane_v1`, `call_meeting_v1`, `room_binding_v1`, `porch_read_v1`, `porch_quote_v1`, `front_door_v1`, `owner_device_approval_v1`, `owner_device_approval_breaker_reset_v1`); absent or empty on rc7. */
   capabilities?: string[];
   /** UDP port of the node's own STUN responder (`[calls] stun_listen`); absent when off. */
   stun_port?: number | null;
@@ -428,6 +429,10 @@ export type ActionError = {
     // G1 node grants: refused before any payment (see src-tauri/src/grant.rs).
     | 'grant_ended' | 'grant_exhausted' | 'grant_per_call' | 'grant_recipient' | 'grant_unpriced' | 'grant_ledger' | 'grant_refused' | 'grant_unknown' | 'grant_first_contact' | 'grant_readmission'
     | 'grant_no_envelope'
+    // Spend breakers (node 409 budget_exceeded reasons; the host maps them):
+    // grant_paused needs a reset; failures_pending waits for unresolved payments;
+    // rate_limited (minute/hour) and velocity recover with time on their own.
+    | 'grant_paused' | 'grant_failures_pending' | 'grant_rate_limited' | 'grant_velocity'
     // This Mac's Touch ID approvals (device key).
     | 'device_not_registered' | 'device_biometry' | 'device_cancelled' | 'device_unavailable' | 'device_invalid' | 'device_key' | 'device_unsupported'
     | 'room_unreachable'
@@ -453,9 +458,16 @@ export type ActionError = {
     | 'not_ready' | 'app_not_ready'
     // Genome #115: the node proved nothing left the wallet (a room leg it could not bind, a fee ceiling).
     | 'not_dispatched'
+    // Owner approval from an enrolled owner device (src/control/ownerApproval.ts has the HTTP mapping).
+    | 'approval_off' | 'approval_forbidden' | 'approval_budget_exceeded' | 'approval_expired' | 'approval_unknown'
+    | 'approval_rate_limited' | 'approval_invalid' | 'approval_unsaved' | 'approval_changed' | 'approval_self'
     | 'invalid'
     | 'node';
   message: string;
+  /** `approval_off`: seed_not_encrypted | seed_password_not_typed | owner_key_unavailable. */
+  reason?: string;
+  /** `approval_budget_exceeded`: what the node says is left. */
+  remaining_msat?: number;
   /** `payment_settled_undelivered` only. */
   undelivered?: Undelivered;
   /** `retry_needs_admission` / `readmission_quoted`: the price to approve, when the node could tell. */
@@ -583,6 +595,8 @@ export type NodeGrantSummary = {
   per_call_max_msat: number;
   /** A Touch ID relation grant: each contact with an envelope → when it ends (ms). Absent for a console grant. */
   envelopes?: Record<string, number> | null;
+  /** The node's breaker state for this grant (owner approval v1 node), passed through by the host. */
+  breakers?: BreakerStatus;
 };
 
 /** `message_send`. */

@@ -7,6 +7,8 @@ import { usePairingActivity } from '../pairingActivity';
 import { createMessageEntrance } from './messageEntrance';
 import { LocalNodeSwitch } from '../onboarding/LocalNodeSwitch';
 import { DeviceApprovals } from '../onboarding/DeviceApprovals';
+import { approvalMemory, BreakerCard, breakerReason, OwnerApprovals, OwnerApprovalWait, type BreakerReason } from './OwnerApprovals';
+import { OWNER_DEVICE_APPROVAL, OWNER_DEVICE_BREAKER_RESET, refusalText, type ApprovalRequest, type ApprovalView, type DeviceKeysView } from './ownerApproval';
 import { HubTrustInfo } from './HubTrust';
 import { pollingSource } from './polling';
 import { readSpendPreset, saveSpendPreset } from './prefs';
@@ -212,7 +214,14 @@ export type Actions = {
   /** The door card: a stranger's signed quote, or null when the node cannot give one. */
   doorQuote: (peer: string) => Promise<FirstContactQuote | null>;
   ownerRequest: (peer: string, cap: number, budget: number) => Promise<Outcome<OwnerContactApproval | null>>;
-  ownerStatus: (id: string) => Promise<Outcome<OwnerContactApproval>>;
+  ownerStatus: (id: string, recipient?: string) => Promise<Outcome<OwnerContactApproval>>;
+  /** Owner approval v1 (requester side): ask for an approval on the owner's other device, and read it back. */
+  approvalRequest: (request: ApprovalRequest) => Promise<Outcome<ApprovalView>>;
+  approvalStatus: (opId: string) => Promise<Outcome<ApprovalView>>;
+  /** The node offers device-approved breaker resets (sub-flag) on this remote pairing. */
+  breakerResetOffered?: () => boolean;
+  /** Re-read the budget and its grant (after a reset). */
+  refreshBudget?: () => void;
   ownerCancel: (id: string) => Promise<void>;
   /** Create an invoice for an exact msat amount (never rounded here). */
   invoice: (t: TrackRef, msat: number, note: string) => Promise<Outcome<unknown>>;
@@ -519,6 +528,38 @@ export function ControlCenter(props: Props) {
   });
   // Never an error line of its own: without a device key the console path stays.
   const loadDevice = () => source.deviceKeyStatus().then(setDevice, () => setDevice(null));
+  // Owner approval (owner_device_approval_v1): this pairing may approve other
+  // apps' requests when the node says so; never its own (the node excludes them).
+  const [deviceKeys, setDeviceKeys] = createSignal<DeviceKeysView | null>(null);
+  const [approvals, setApprovals] = createSignal<ApprovalView[]>([]);
+  const approvalsCapable = () => props.remote === true && overview()?.capabilities?.includes(OWNER_DEVICE_APPROVAL) === true;
+  const canApprove = () => approvalsCapable() && deviceKeys()?.device_approvals === 'enabled';
+  // A failed read is said, never shown as "nothing is waiting", and stale entries go.
+  const [approvalsError, setApprovalsError] = createSignal<string | null>(null);
+  // Kept outcomes outlive the Settings panel (Node → Body → Node), until Dismiss.
+  const approvalsMemory = approvalMemory();
+  /** A list read that failed in transport says so; a refusal says the node's reason. */
+  const listError = (e: ActionError) => (e.code === 'node' ? 'Couldn’t read your node’s approvals list. It is read again shortly.' : refusalText(e.code, e));
+  const loadApprovals = async () => {
+    if (!approvalsCapable()) { setDeviceKeys(null); setApprovals([]); setApprovalsError(null); return; }
+    const keys = await act(() => source.deviceKeys());
+    // A failed discovery keeps what was known, but no entry may be acted on from it.
+    if (!keys.ok) { setApprovals([]); setApprovalsError(listError(keys.error)); return; }
+    setDeviceKeys(keys.value);
+    if (!canApprove()) { setApprovals([]); setApprovalsError(null); return; }
+    const pending = await act(() => source.approvalsPending());
+    if (pending.ok) { setApprovals(pending.value.filter((v) => v.status === 'pending')); setApprovalsError(null); }
+    else { setApprovals([]); setApprovalsError(listError(pending.error)); }
+  };
+  /** After an approve the host could not confirm: is the request still waiting at the node? */
+  const recheckApproval = async (opId: string): Promise<'pending' | 'gone' | 'unknown'> => {
+    const pending = await act(() => source.approvalsPending());
+    if (!pending.ok) return 'unknown';
+    setApprovals(pending.value.filter((v) => v.status === 'pending'));
+    return pending.value.some((v) => v.op_id === opId && v.status === 'pending') ? 'pending' : 'gone';
+  };
+  createEffect(on(approvalsCapable, (on) => { if (on) void loadApprovals(); else { setDeviceKeys(null); setApprovals([]); setApprovalsError(null); } }));
+  const approvalsWaiting = () => (canApprove() ? approvals().filter((v) => v.expires_at * 1000 > now()).length : 0);
   const loadBudget = async () => {
     const revision = ++budgetRevision;
     try {
@@ -636,7 +677,7 @@ export function ControlCenter(props: Props) {
         // Keep timer phases through cooldowns. Skip ticks while paused rather
         // than restarting the initial load sequence when the link recovers.
         const polls: [() => Promise<unknown>, number][] = [
-          [loadDevice, REFRESH_MS.peers], [loadOverview, REFRESH_MS.overview],
+          [loadDevice, REFRESH_MS.peers], [loadOverview, REFRESH_MS.overview], [loadApprovals, REFRESH_MS.overview],
           [loadPeers, REFRESH_MS.peers], [loadWallet, REFRESH_MS.wallet],
           [loadRooms, REFRESH_MS.rooms], [loadDoor, REFRESH_MS.door],
           [loadEnergy, REFRESH_MS.energy], [loadMembrane, REFRESH_MS.membrane],
@@ -1043,7 +1084,11 @@ export function ControlCenter(props: Props) {
     },
     doorQuote: (peer) => source.firstContactQuote(peer),
     ownerRequest: (peer, cap, budget) => act(() => source.firstContactRequest(peer, cap, budget)),
-    ownerStatus: (id) => act(() => source.firstContactStatus(id)),
+    ownerStatus: (id, recipient) => act(() => source.firstContactStatus(id, recipient)),
+    approvalRequest: (request) => act(() => source.approvalRequest(request)),
+    approvalStatus: (opId) => act(() => source.approvalStatus(opId)),
+    breakerResetOffered: () => props.remote === true && overview()?.capabilities?.includes(OWNER_DEVICE_BREAKER_RESET) === true,
+    refreshBudget: () => void loadBudget(),
     ownerCancel: (id) => source.firstContactCancel(id).catch(() => {}),
     send: async (t, text, maxMsat, firstContactMsat) => {
       if (t.kind !== 'peer' && t.kind !== 'room') return { ok: false, error: { code: 'invalid', message: 'nothing to send to' } };
@@ -1288,6 +1333,8 @@ export function ControlCenter(props: Props) {
         }}
         onWallet={() => openWallet()}
         balanceMsat={wallet()?.balance_msat ?? null}
+        approvalsWaiting={approvalsWaiting()}
+        onApprovals={() => { setTab('node'); setContextOpen(true); }}
         behind={walletTab() !== null}
       />
 
@@ -1537,7 +1584,24 @@ export function ControlCenter(props: Props) {
             />
           </Match>
           <Match when={tab() === 'node'}>
-            <NodePanel deviceApprovals={
+            <NodePanel deviceApprovals={<>
+              {/* A discovery error shows on its own, even when the very first read failed. */}
+              <Show when={canApprove() || (approvalsCapable() && approvalsError() !== null)}>
+                <OwnerApprovals
+                  approvals={approvals()}
+                  error={approvalsError()}
+                  recheck={recheckApproval}
+                  memory={approvalsMemory}
+                  now={now()}
+                  mobile={androidQrScannerAvailable()}
+                  nameOf={(id) => { const p = peerById().get(id.toLowerCase()); return p ? peerName(p, p.node_id) : null; }}
+                  approve={async (opId, message) => {
+                    const r = await act(() => source.approvalApprove(opId, message));
+                    void loadApprovals();
+                    return r;
+                  }}
+                />
+              </Show>
               <DeviceApprovals
                 device={actions.device()}
                 joinDevice={input => source.joinDevice(input)}
@@ -1547,7 +1611,7 @@ export function ControlCenter(props: Props) {
                 onRegister={async () => { const r = await act(() => source.deviceKeyRegister()); if (r.ok) setDevice(r.value); else throw r.error.message; }}
                 onCancel={async () => { const r = await act(() => source.deviceKeyCancel()); if (r.ok) setDevice(r.value); else throw r.error.message; }}
               />
-            } onForgetRemote={props.remote ? () => source.remoteAccessForget() : undefined} overview={overview()} link={link()} peers={peers()} now={now()} error={props.error ?? errors.overview ?? errors.peers} onReconnect={async () => { await props.onReconnect?.(); await loadOverview(); await loadPeers(); }} />
+            </>} onForgetRemote={props.remote ? () => source.remoteAccessForget() : undefined} overview={overview()} link={link()} peers={peers()} now={now()} error={props.error ?? errors.overview ?? errors.peers} onReconnect={async () => { await props.onReconnect?.(); await loadOverview(); await loadPeers(); }} />
           </Match>
           <Match when={tab() === 'devices'}>
             <AddDevice api={input => source.addDevice(input)} mobile={androidQrScannerAvailable()} />
@@ -1808,6 +1872,9 @@ function Rail(props: {
   onProfile: () => void;
   onWallet: () => void;
   balanceMsat: number | null;
+  /** Owner approvals this device may give, waiting now (0 hides the badge and the menu entry). */
+  approvalsWaiting?: number;
+  onApprovals?: () => void;
   /** Under the full-screen Wallet: out of reach. */
   behind: boolean;
 }) {
@@ -1970,6 +2037,12 @@ function Rail(props: {
                   <span class="meta sats" data-avatar-balance>{fmtAmount(props.balanceMsat!)}</span>
                 </Show>
               </button>
+              <Show when={(props.approvalsWaiting ?? 0) > 0 && props.onApprovals}>
+                <button type="button" role="menuitem" class="avatar-menu-item" data-open-approvals onClick={() => choose(props.onApprovals!)}>
+                  <span class="name">Approvals waiting</span>
+                  <span class="meta" data-approvals-count>{props.approvalsWaiting}</span>
+                </button>
+              </Show>
               <button type="button" role="menuitem" class="avatar-menu-item" data-open-settings onClick={() => choose(props.onProfile)}>
                 <span class="name">Profile and settings</span>
               </button>
@@ -1989,6 +2062,9 @@ function Rail(props: {
           >
             <span class="avatar-mark" aria-hidden="true">BS</span>
             <span class="avatar-label">You</span>
+            <Show when={(props.approvalsWaiting ?? 0) > 0}>
+              <span class="approvals-badge" data-approvals-badge aria-label={`${props.approvalsWaiting} approval${props.approvalsWaiting === 1 ? '' : 's'} waiting`}>{props.approvalsWaiting}</span>
+            </Show>
           </button>
         </div>
       </div>
@@ -3412,12 +3488,45 @@ function Composer(props: {
   // Going offline invalidates undispatched approvals, not unchanged inputs
   // belonging to an operation that already reached the host and succeeds.
   let approvalRevision = 0;
-  const [ownerWait, setOwnerWait] = createSignal<{ approval: OwnerContactApproval; revision: number; send: () => Promise<void> } | null>(null);
-  usePairingActivity(() => busy() || paying() || review() !== null || ownerWait() !== null);
+  // `recipient`: approved on the owner's other device (owner_device_approval_v1);
+  // the wait is for the node's first-contact grant (single use, ≤ 120 s).
+  const [ownerWait, setOwnerWait] = createSignal<{ approval: OwnerContactApproval; revision: number; send: () => Promise<void>; recipient?: string } | null>(null);
+  // Owner approval v1: the request is out; the owner's other device approves it.
+  const [deviceWait, setDeviceWait] = createSignal<{ view: ApprovalView; revision: number; peer: string; cap: number; budget?: number; send: () => Promise<void> } | null>(null);
+  const contactWaiting = () => ownerWait() !== null || deviceWait() !== null;
+  // A tripped spend breaker: from the last refused send, else the grant's standing pause.
+  const [breakerFromSend, setBreakerFromSend] = createSignal<BreakerReason | null>(null);
+  const breaker = (): BreakerReason | null => breakerFromSend() ?? (props.budget?.node_grant?.breakers?.paused ? 'grant_paused' : null);
+  const noteBreaker = (r: Outcome<unknown>) => setBreakerFromSend(r.ok ? null : breakerReason(r.error.code));
+  usePairingActivity(() => busy() || paying() || review() !== null || contactWaiting());
   const cancelOwner = () => {
     const pending = untrack(ownerWait);
     setOwnerWait(null);
-    if (pending) void props.actions.ownerCancel(pending.approval.id);
+    // A device request has no cancel at the node: stop waiting here; it expires by itself.
+    setDeviceWait(null);
+    if (pending && !pending.recipient) void props.actions.ownerCancel(pending.approval.id);
+  };
+  /** Approved on the other device: wait for the node's grant for this recipient, then send at once. */
+  const deviceApproved = (w: NonNullable<ReturnType<typeof deviceWait>>, view: ApprovalView) => {
+    setDeviceWait(null);
+    if (!view.grant_op) {
+      setOwnerExpired(true);
+      setNote('Contact approval expired. Nothing was sent. Ask again.');
+      return;
+    }
+    setOwnerWait({
+      approval: {
+        id: view.grant_op,
+        request: { client_id: view.client_id, grant_op_id: view.grant_op, recipient: w.peer, max_total_msat: w.cap, contact_budget_msat: w.budget ?? 0 },
+        owner_command: '',
+        approval_window_secs: 120,
+        ready: false,
+        expires_at_ms: Date.now() + 120_000,
+      },
+      revision: w.revision,
+      send: w.send,
+      recipient: w.peer,
+    });
   };
   onCleanup(cancelOwner);
   createEffect(() => { if (props.moneyBlocked) { approvalRevision++; cancelOwner(); } });
@@ -3442,7 +3551,7 @@ function Composer(props: {
       if (remote && Date.now() >= deadline) { expire(); return; }
       if (polling || Date.now() < nextPoll) return;
       polling = true;
-      const result = await props.actions.ownerStatus(pending.approval.id);
+      const result = await props.actions.ownerStatus(pending.approval.id, pending.recipient);
       polling = false;
       if (ownerWait() !== pending) return;
       if (composerRevision !== pending.revision) { cancelOwner(); return; }
@@ -3459,7 +3568,8 @@ function Composer(props: {
           setBusy(true);
           try { await pending.send(); } finally { setBusy(false); }
         } else {
-          delay = remote ? Math.min(delay * 2, 10000) : 1000;
+          // A device-approved grant is valid briefly: keep checking every second.
+          delay = remote && !pending.recipient ? Math.min(delay * 2, 10000) : 1000;
           nextPoll = Date.now() + delay;
         }
       }
@@ -3482,6 +3592,7 @@ function Composer(props: {
       () => {
         cancelOwner();
         setOwnerExpired(false);
+        setBreakerFromSend(null);
         composerRevision++;
         setMode('message');
         setNote(null);
@@ -3799,6 +3910,7 @@ function Composer(props: {
 
   const label = () => {
     if (paying()) return 'Paying…';
+    if (deviceWait()) return 'Waiting for your other device';
     if (ownerWait()) return 'Waiting for contact approval';
     if (needsTouch()) {
       return androidQrScannerAvailable() ? 'Approve with biometrics' : 'Approve with Touch ID';
@@ -3856,7 +3968,7 @@ function Composer(props: {
    * new price shows on Send, which needs another press.
    */
   const submit = async (shownMsat?: number | null) => {
-    if (props.moneyBlocked || (spends() && props.budgetStale) || busy() || ownerWait()) return;
+    if (props.moneyBlocked || (spends() && props.budgetStale) || busy() || contactWaiting()) return;
     if (mode() === 'message' && priceProblem()) { setNote(priceProblem()); return; }
     setNote(null);
     if (shownMsat !== undefined && (mode() !== 'message' || shown().msat !== shownMsat)) {
@@ -3903,6 +4015,7 @@ function Composer(props: {
         ? await props.actions.file(submittedTrack, submittedFile!, cap, first)
         : await props.actions.send(submittedTrack, submittedText, cap, first);
       const unchanged = composerRevision === submittedRevision;
+      noteBreaker(r);
       if (unchanged && submittedMode === 'message') {
         paymentResult(r);
         if (!r.ok && ['price_changed', 'price_cap_exceeded'].includes(r.error.code)) { setRaisedFrom(cap); setReadmitQuote(null); }
@@ -3930,6 +4043,25 @@ function Composer(props: {
         setNote(r.error.message);
       } else if (!r.ok && unchanged && (isBudgetStop(r.error) || ['owner_only', 'owner_contact_unavailable'].includes(r.error.code))) setNote(r.error.message);
       };
+      // Capability-gated, not remote-gated, on purpose: the node's local router
+      // mounts request + status, so a pairing on this Mac may ask too (approving
+      // is remote-only and happens on another owner device).
+      if (first !== undefined && !room() && props.actions.ownerDeviceApproval?.()) {
+        // Owner approval v1: the owner approves on their other device instead of at the node.
+        const request = await props.actions.approvalRequest({ kind: 'first_contact', terms: { recipient: submittedPeer, max_total_msat: cap, ...(first ? { budget_msat: first } : {}) } });
+        if (composerRevision !== submittedRevision || approvalRevision !== submittedApprovalRevision || props.moneyBlocked) {
+          setBusy(false);
+          return;
+        }
+        if (!request.ok) {
+          setNote(refusalText(request.error.code, { reason: request.error.reason, remaining_msat: request.error.remaining_msat }));
+          setBusy(false);
+          return;
+        }
+        setDeviceWait({ view: request.value, revision: submittedRevision, peer: submittedPeer, cap, budget: first, send: dispatch });
+        setBusy(false);
+        return;
+      }
       if (first !== undefined && !room()) {
         const request = await props.actions.ownerRequest(submittedPeer, cap, first);
         if (composerRevision !== submittedRevision || approvalRevision !== submittedApprovalRevision || props.moneyBlocked) {
@@ -3989,6 +4121,7 @@ function Composer(props: {
         setRaisedFrom(null);
         const cap = shown().msat!;
         r = await props.actions.send(t, draft(), cap);
+        noteBreaker(r);
         if (unchanged()) {
           paymentResult(r);
           if (!r.ok && ['price_changed', 'price_cap_exceeded'].includes(r.error.code)) { setRaisedFrom(cap); setReadmitQuote(null); }
@@ -4054,7 +4187,7 @@ function Composer(props: {
    */
   const sendInChat = async () => {
     const inv = created();
-    if (!inv || props.moneyBlocked || busy() || ownerWait()) return;
+    if (!inv || props.moneyBlocked || busy() || contactWaiting()) return;
     // The price on the pressed button is the only price this press may pay.
     const pressedMsat = messageShown().msat;
     setMode('message');
@@ -4072,7 +4205,7 @@ function Composer(props: {
   createEffect(() => { if (props.moneyBlocked || props.budgetStale || !line().open) setReview(null); });
 
   const disabled = () =>
-    props.moneyBlocked || (spends() && !!props.budgetStale) || busy() || !!ownerWait() || (mode() === 'message' && priceProblem() !== null) ||
+    props.moneyBlocked || (spends() && !!props.budgetStale) || busy() || contactWaiting() || (mode() === 'message' && priceProblem() !== null) ||
     // Touch ID approves the contact, not the draft: no draft needed yet.
     (needsTouch() ? false : viaBudget()
       ? ['waiting', 'contact_used', 'total_used', 'grant_limited', 'unknown'].includes(stand().kind) || ((stand().kind === 'first' || stand().kind === 'ok') && !ready())
@@ -4255,7 +4388,7 @@ function Composer(props: {
                   <span class="basis">
                     Invoice for {fmtAmount(inv().amount_msat)} is ready. Send it to {props.name} as a chat message; it pays like any message.
                   </span>
-                  <button type="button" class="primary soft money" data-send-in-chat disabled={props.moneyBlocked || busy() || !!ownerWait()} onClick={() => void sendInChat()}>
+                  <button type="button" class="primary soft money" data-send-in-chat disabled={props.moneyBlocked || busy() || contactWaiting()} onClick={() => void sendInChat()}>
                     Send in chat{chatPrice()}
                   </button>
                 </div>
@@ -4481,7 +4614,36 @@ function Composer(props: {
           props.refreshPrice();
         }}>Get a fresh quote</button>
       </Show>
-      <Show when={ownerWait()}>
+      <Show when={breaker()}>
+        {(reason) => <BreakerCard
+          reason={reason()}
+          now={props.now}
+          offerReset={props.actions.breakerResetOffered?.() === true}
+          request={() => props.actions.approvalRequest({ kind: 'breaker_reset', terms: {} })}
+          status={props.actions.approvalStatus}
+          // The card stays to say "reset, press Send again"; the next send (or chat) clears it.
+          onReset={() => props.actions.refreshBudget?.()}
+        />}
+      </Show>
+      <Show when={deviceWait()}>
+        {(w) => <OwnerApprovalWait
+          view={w().view}
+          now={props.now}
+          status={props.actions.approvalStatus}
+          fallback={w().view.owner_action}
+          after="This message sends when approved, exactly as you wrote it."
+          onStop={() => setDeviceWait(null)}
+          onApproved={(v) => deviceApproved(w(), v)}
+        />}
+      </Show>
+      <Show when={ownerWait()?.recipient ? ownerWait() : null}>
+        {/* Approved on the other device: the node's grant is checked, then the message goes at once. */}
+        <div class="approval" data-contact-approval="device-approved">
+          <p class="ok-note" role="status">Approved on your other device. Sending as soon as your node confirms it · {ownerCountdown()} s</p>
+          <button type="button" class="link" data-contact-cancel onClick={() => cancelOwner()}>Cancel</button>
+        </div>
+      </Show>
+      <Show when={ownerWait() && !ownerWait()!.recipient ? ownerWait() : null}>
         {(pending) => <TouchIdFirst actions={props.actions} stays={<p class="hint" data-touch-id-stays-text="first-contact">
             This message sends automatically once your node’s owner approves this contact. Editing it or{' '}
             <button type="button" class="link" data-contact-cancel-visible onClick={() => cancelOwner()}>Cancel</button> stops it.
@@ -4538,8 +4700,6 @@ const touchIdOffer = (actions: Actions) => {
   return actions.remote?.() === true && !!d?.available && (d.state === 'none' || d.state === 'lapsed');
 };
 
-/** Node capability: owner approval (spend windows, first contact) from an enrolled owner device. */
-const OWNER_DEVICE_APPROVAL = 'owner_device_approval_v1';
 
 // How many Touch ID offers are on screen: the spend bar's own "not set up"
 // pointer stays quiet while one is, so it is never said twice.

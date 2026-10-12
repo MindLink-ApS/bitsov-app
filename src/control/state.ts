@@ -195,9 +195,12 @@ export function peerNotReadyMessage(error: unknown, name: string): string | null
 export function asActionError(e: unknown): ActionError {
   if (e === MONEY_NOT_READY) return { code: 'not_ready', message: MONEY_NOT_READY };
   if (e && typeof e === 'object' && 'code' in e && 'message' in e) {
-    const { code, message, undelivered, admission, pending_id } = e as ActionError;
+    const { code, message, undelivered, admission, pending_id, reason, remaining_msat } = e as ActionError;
     const out: ActionError = { code, message: code === 'not_ready' ? MONEY_NOT_READY : String(message) };
     if (typeof pending_id === 'string' && pending_id) out.pending_id = pending_id;
+    // Owner approval refusals: only the node's known reasons, and an amount that is one.
+    if (typeof reason === 'string' && APPROVAL_OFF_REASONS.has(reason)) out.reason = reason;
+    if (msat(remaining_msat)) out.remaining_msat = remaining_msat;
     if (undelivered && msat(undelivered.paid_msat)) out.undelivered = { paid_msat: undelivered.paid_msat, retry: undelivered.retry === true };
     if (admission && msat(admission.admission_msat) && msat(admission.message_msat) && msat(admission.total_msat)
       && msat(admission.max_routing_fee_msat ?? 0)
@@ -210,6 +213,7 @@ export function asActionError(e: unknown): ActionError {
 }
 
 const msat = (n: unknown): n is number => Number.isSafeInteger(n) && (n as number) >= 0;
+const APPROVAL_OFF_REASONS = new Set(['seed_not_encrypted', 'seed_password_not_typed', 'owner_key_unavailable']);
 
 /**
  * Paid, not delivered (node 502 `payment_settled_send_incomplete`). Never "not

@@ -1380,6 +1380,14 @@ input[type='checkbox'], input[type='radio'] { width: auto; flex: none; padding: 
 .other-ways > summary { cursor: pointer; color: var(--muted); font-size: var(--t-sm); }
 .other-ways[open] > summary { margin-bottom: var(--s-2); }
 
+/* Owner approvals: a count on You, the list in Settings → Node. */
+.profile-avatar { position: relative; }
+.approvals-badge { position: absolute; top: 2px; right: 2px; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: var(--money); color: var(--action-ink, #1a1208); font-size: 11px; font-weight: 700; line-height: 18px; text-align: center; }
+.owner-approval-list { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--s-3); }
+.owner-approval { border: 1px solid var(--line); border-radius: var(--r-panel); padding: var(--s-3); display: grid; gap: var(--s-2); }
+.owner-approval-terms { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; font-variant-numeric: tabular-nums; }
+.owner-approval-terms .lead { font-weight: 600; }
+.approval-message { white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--t-xs); margin: var(--s-2) 0 0; }
 /* First run: the rail shows BitSov and the node's state only; contacts,
    rooms and the rest appear once setup is done (no "after setup" placeholders). */
 .rail.rail-setup .track-group { display: none; }

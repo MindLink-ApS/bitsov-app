@@ -129,6 +129,11 @@ pub struct ActionError {
     /// record's id. Stop retrying names it, so it never releases another one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pending_id: Option<String>,
+    /// Owner approval refusal metadata, preserved for the renderer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remaining_msat: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub operation_id: Option<String>,
 }
@@ -297,6 +302,8 @@ impl ActionError {
             undelivered: None,
             admission: None,
             pending_id: None,
+            reason: None,
+            remaining_msat: None,
             operation_id: None,
         }
     }
