@@ -52,6 +52,11 @@ pub struct Record {
     pub pending: Option<PendingRegistration>,
 }
 
+/// Node owner-device id: the first 16 BLAKE3 bytes of the SEC1 public key.
+pub fn key_id(public: &[u8]) -> String {
+    hex::encode(&blake3::hash(public).as_bytes()[..16])
+}
+
 /// A registration the owner has not approved yet.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct PendingRegistration {

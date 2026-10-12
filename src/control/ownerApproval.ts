@@ -134,6 +134,14 @@ const sats = (msat: number) => {
 const span = (secs: number) =>
   secs % 3600 === 0 ? `${secs / 3600} h` : secs % 60 === 0 ? `${secs / 60} min` : `${secs} s`;
 
+// Match the host's Touch ID prompt regardless of locale or timezone.
+const approvalDate = (seconds: number) => {
+  const date = new Date(seconds * 1000);
+  return Number.isFinite(date.getTime())
+    ? date.toISOString().replace('T', ' ').replace('.000Z', ' UTC')
+    : 'unavailable';
+};
+
 /** A short, readable fingerprint of a hex key or id (never a name the node did not give). */
 export const shortKey = (hex: string) => {
   const h = hex.replace(/[^0-9a-f]/gi, '').toLowerCase();
@@ -164,7 +172,7 @@ export function termLines(view: ApprovalView, nameOf?: (id: string) => string | 
       `Tripped: ${snap.tripped.length ? snap.tripped.map(tripText).join(', ') : 'nothing'}`,
       `Budget: up to ${sats(snap.budget_msat)}, ${sats(snap.remaining_msat)} left`,
       `Each payment: up to ${sats(snap.per_call_max_msat)}`,
-      `Grant ends: ${new Date(snap.grant_expires_at * 1000).toLocaleString()}`,
+      `Grant ends: ${approvalDate(snap.grant_expires_at)}`,
       `Device resets in the last day: ${snap.resets_last_day} of 3`,
     ];
   }

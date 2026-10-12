@@ -80,6 +80,21 @@ fn operation_path(op_id: &str) -> Result<String, ActionError> {
 }
 
 pub async fn create(state: &NodeState, body: Value) -> Result<Value, ActionError> {
+    // Keep the renderer body unchanged, but refuse malformed requests locally.
+    serde_json::from_value::<ApprovalRequest>(body.clone()).map_err(|_| {
+        ActionError::new("approval_invalid", "Invalid owner approval request.")
+    })?;
+    // TypeScript's optional fields may be absent, but none of its terms are
+    // nullable. Serde's Option otherwise treats explicit null as omission.
+    if body["terms"]
+        .as_object()
+        .is_some_and(|terms| terms.values().any(Value::is_null))
+    {
+        return Err(ActionError::new(
+            "approval_invalid",
+            "Invalid owner approval request.",
+        ));
+    }
     request(
         state,
         reqwest::Method::POST,
@@ -125,16 +140,20 @@ fn remote_client(state: &NodeState) -> Result<String, ActionError> {
 fn registered_key(state: &NodeState) -> Result<(Vec<u8>, String), ActionError> {
     let (blob, record) = local_key(&device_store(state)?)
         .ok_or_else(|| device_error(device_key::DeviceKeyError::Invalid))?;
-    let key_id = record
-        .key_id
-        .filter(|id| record.registered && bitsov_app::delegation::canonical_hex(id, 16))
-        .ok_or_else(|| {
-            refusal(
-                403,
-                r#"{"error":"This pairing has no enrolled owner device key."}"#,
-            )
-        })?;
-    Ok((blob, key_id))
+    Ok((blob, registered_key_id(&record)?))
+}
+
+fn registered_key_id(record: &device::Record) -> Result<String, ActionError> {
+    let public = hex::decode(&record.public_key)
+        .map_err(|_| device_error(device_key::DeviceKeyError::Invalid))?;
+    let derived = device::key_id(&public);
+    if !record.registered || record.key_id.as_deref() != Some(derived.as_str()) {
+        return Err(refusal(
+            403,
+            r#"{"error":"This pairing has no enrolled owner device key."}"#,
+        ));
+    }
+    Ok(derived)
 }
 
 async fn pending_for(state: &NodeState, key_id: &str) -> Result<Vec<Value>, ActionError> {
@@ -236,7 +255,7 @@ where
 }
 
 #[derive(Deserialize)]
-#[serde(tag = "kind", content = "terms", rename_all = "snake_case")]
+#[serde(tag = "kind", content = "terms", rename_all = "snake_case", deny_unknown_fields)]
 enum ApprovalRequest {
     BreakerReset {},
     SpendGrant {
@@ -279,8 +298,8 @@ fn checked_approval(view: &Value, client: &str, displayed: &str) -> Result<Strin
             "Your node returned no approval requester.",
         ));
     }
-    // Renderer approvalReason / termLines, without petnames. Reset expiry uses
-    // explicitly labelled unix seconds; the renderer localizes that timestamp.
+    // Renderer approvalReason / termLines, without petnames. Both use UTC for
+    // expiry so locale and timezone differences cannot change the prompt.
     let mut lines = match terms.request {
         ApprovalRequest::BreakerReset {} => breaker_lines(view)?,
         ApprovalRequest::SpendGrant {
@@ -357,10 +376,16 @@ fn breaker_lines(view: &Value) -> Result<Vec<String>, ActionError> {
         format!("Tripped: {}", if trips.is_empty() { "nothing".into() } else { trips.join(", ") }),
         format!("Budget: up to {}, {} left", sats(snapshot.budget_msat), sats(snapshot.remaining_msat)),
         format!("Each payment: up to {}", sats(snapshot.per_call_max_msat)),
-        format!("Grant ends: {} (unix seconds)", snapshot.grant_expires_at),
+        format!("Grant ends: {}", approval_date(snapshot.grant_expires_at)?),
         format!("Device resets in the last day: {} of 3", snapshot.resets_last_day),
     ]);
     Ok(lines)
+}
+
+fn approval_date(seconds: i64) -> Result<String, ActionError> {
+    chrono::DateTime::from_timestamp(seconds, 0)
+        .map(|date| date.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+        .ok_or_else(|| ActionError::new("node", "Your node returned an invalid grant expiry."))
 }
 
 fn short_key(key: &str) -> String {
