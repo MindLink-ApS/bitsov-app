@@ -59,6 +59,11 @@ describe('narrow layout (top strip)', () => {
 });
 
 describe('phone layout', () => {
+  it('composer panel Close is a real 44 × 44 button inside the panel (no clipped overhang)', () => {
+    expect(phone).toMatch(/\.composer-panel \.panel-head \.link\s*\{[^}]*min-width:\s*44px[^}]*min-height:\s*44px/);
+    expect(phone).toMatch(/\.composer-panel \.panel-head \.link::after\s*\{[^}]*content:\s*none/);
+  });
+
   it('stacks the budget approval; each choice is 44 px', () => {
     expect(rule(phone, '.approval.slim-approval')).toMatch(/flex-direction:\s*column/);
     expect(rule(phone, '.approval.slim-approval .presets')).toMatch(/flex-direction:\s*column/);

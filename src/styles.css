@@ -1349,6 +1349,10 @@ input[type='checkbox'], input[type='radio'] { width: auto; flex: none; padding: 
      A .link inside a sentence (p, li, a hint) stays a text link. */
   button.link:not(:is(p, li, .hint, .stamp) *) { position: relative; }
   button.link:not(:is(p, li, .hint, .stamp) *)::after { content: ''; position: absolute; left: 50%; top: 50%; width: max(100%, 44px); height: max(100%, 44px); transform: translate(-50%, -50%); }
+  /* The composer panel's Close sits at the panel edge, where an overhanging ::after
+     would be clipped by the panel's overflow: give the button itself a 44 × 44 box. */
+  .composer-panel .panel-head .link { display: inline-flex; align-items: center; justify-content: center; min-width: 44px; min-height: 44px; padding: 0; }
+  .composer-panel .panel-head .link::after { content: none; }
   .context-toggle, .composer .attach, .ai-ask-btn, .info-btn, .icon-btn { min-width: 44px; }
   .send-btn.primary, .primary.soft.send-btn, .send-btn, .composer .attach { height: 44px; min-height: 44px; border-radius: 22px; }
   .node-target-section.compact .node-target-card { min-height: 44px; }
