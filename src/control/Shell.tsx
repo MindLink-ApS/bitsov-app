@@ -4493,7 +4493,7 @@ function Composer(props: {
         <Show when={!props.budgetStale} fallback={<p class="spend-line" data-budget-stale>Spend grant stale — checking your node. Auto-pay unavailable until confirmed.</p>}>
           <Show
             when={viaBudget()}
-            fallback={<SpendBar spend={props.spend} error={props.spendError} now={props.now} actions={props.actions} hasPending={props.hasPending} stays="Your draft is kept. Nothing is sent until you press Send after approval." />}
+            fallback={<SpendBar spend={props.spend} error={props.spendError} now={props.now} actions={props.actions} hasPending={props.hasPending} stays={mode() === 'message' ? 'Your draft is kept. Nothing is sent until you press Send after approval.' : undefined} />}
           >
             <BudgetBar
               stand={stand()}
@@ -5506,7 +5506,7 @@ function NewTrack(props: {
   return (
     <>
       <TrackHead title="Start something" onContext={props.onContext} />
-      <SpendBar spend={props.spend} error={props.spendError} now={props.now} actions={props.actions} stays="Nothing is created or paid until you press Create invite or Accept invite again after approval." />
+      <SpendBar spend={props.spend} error={props.spendError} now={props.now} actions={props.actions} />
       <div class="stream">
         <Show
           when={mineLive()}

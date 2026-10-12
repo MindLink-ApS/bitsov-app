@@ -453,7 +453,15 @@ describe('control center shell', () => {
     it('on the invite page the offer says what is true for invites, not "press Send"', async () => {
       await open(true, none);
       click('[data-track="new"]');
-      await vi.waitFor(() => expect(mount.querySelector('[data-touch-id-stays-text="spend"]')?.textContent).toContain('Create invite or Accept invite again after approval'));
+      // The invite page has several actions (invites, starter bitcoin): the neutral line is true for all.
+      await vi.waitFor(() => expect(mount.querySelector('[data-touch-id-stays-text="spend"]')?.textContent).toContain('Nothing is paid until you press it again after approval'));
+      expect(mount.querySelector('[data-touch-id-stays-text="spend"]')!.textContent).not.toMatch(/press Send|Create invite/);
+    });
+
+    it('in Pay mode the composer does not promise "press Send": the neutral line shows', async () => {
+      await open(true, none);
+      click('[data-composer-mode="pay"]');
+      await vi.waitFor(() => expect(mount.querySelector('[data-touch-id-stays-text="spend"]')?.textContent).toContain('Nothing is paid until you press it again after approval'));
       expect(mount.querySelector('[data-touch-id-stays-text="spend"]')!.textContent).not.toMatch(/press Send/);
     });
 
