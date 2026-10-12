@@ -3870,11 +3870,11 @@ function Composer(props: {
    * the ceiling that was on the button. Any edit, track change or new price
    * drops it; nothing is ever sent at terms the owner did not see.
    */
-  const [continueAfter, setContinueAfter] = createSignal<{ revision: number; key: string; msat: number; until: number } | null>(null);
+  const [continueAfter, setContinueAfter] = createSignal<{ revision: number; key: string; text: string; msat: number; until: number } | null>(null);
   const intendSend = () => {
     const msat = shown().msat;
     if (mode() !== 'message' || !draft().trim() || msat === null) return;
-    setContinueAfter({ revision: draftRevision, key: trackKey(props.track), msat, until: Date.now() + CONTINUE_MS });
+    setContinueAfter({ revision: draftRevision, key: trackKey(props.track), text: draft(), msat, until: Date.now() + CONTINUE_MS });
   };
   // Any change of the price on the button while it waits ends the consent,
   // even if it later comes back (2 → 3 → 2 does not send at 2).
@@ -3889,7 +3889,9 @@ function Composer(props: {
     const c = continueAfter();
     if (!c || busy() || ownerWait() || !approvalCleared()) return;
     setContinueAfter(null);
-    const same = c.revision === draftRevision && c.key === trackKey(props.track) && Date.now() < c.until && mode() === 'message' && draft().trim();
+    // The exact text is part of the consent: any change (typed, emoji, paste,
+    // refill) ends it, whichever path made the change.
+    const same = c.revision === draftRevision && c.text === draft() && c.key === trackKey(props.track) && Date.now() < c.until && mode() === 'message' && draft().trim();
     // Its price is checked again by submit: a new price shows and needs another press.
     if (same) void submit(c.msat);
   });
@@ -4472,6 +4474,8 @@ function Composer(props: {
                   const end = el?.selectionEnd ?? start;
                   const { next, caret } = insertEmoji(draft(), e, start, end);
                   composerRevision++;
+                  draftRevision++;
+                  setContinueAfter(null);
                   setDraft(next);
                   setEmojiOpen(false);
                   queueMicrotask(() => {

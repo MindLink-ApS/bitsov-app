@@ -162,6 +162,23 @@ describe('acting from the track', () => {
     expect(text_('[data-send]')).toBe('Send');
   });
 
+  it('Approve & send: an emoji added while waiting drops the send; the approval sends nothing', async () => {
+    const host = stubHost();
+    await openShell();
+    await pendingApproval(host);
+    $<HTMLButtonElement>('[data-emoji]')!.click();
+    await vi.waitFor(() => expect($('[data-emoji-picker]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-emoji-pick]')!.click();
+    const edited = $<HTMLTextAreaElement>('[data-composer] textarea')!.value;
+    expect(edited).not.toBe('gm Maya');
+    host.spend.v = openView();
+    await vi.waitFor(() => expect($('[data-spend="open"]')).not.toBeNull(), { timeout: 5000 });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(host.used('message_send')).toHaveLength(0);
+    expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe(edited);
+    expect(text_('[data-send]')).toBe('Send');
+  });
+
   it('Approve & send: switching chats while waiting drops the send', async () => {
     const host = stubHost({ peers_list: () => [
       { node_id: A, addr: null, label: 'Maya', connected: true, fingerprint: null },
