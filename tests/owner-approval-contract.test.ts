@@ -48,3 +48,28 @@ describe('host refusals keep only what the screens may use', () => {
     expect(asActionError({ code: 'approval_budget_exceeded', message: 'over', remaining_msat: -1 })).toEqual({ code: 'approval_budget_exceeded', message: 'over' });
   });
 });
+
+import { breakerSnapshot, needsReset } from '../src/control/ownerApproval';
+describe('breaker reset (node #304)', () => {
+  const snap = { tripped: ['grant_paused', 'rate_limit_minute'], budget_msat: 500_000, per_call_max_msat: 10_000, remaining_msat: 120_000,
+    grant_expires_at: 1_900_000_000, resets_last_day: 1, state_digest: 'ab'.repeat(16) };
+  const reset = (request: object): ApvView => ({ ...base({ kind: 'spend_grant', terms: { budget_msat: 1, per_call_max_msat: 1, window_secs: 60 } }), request } as ApvView);
+  type ApvView = ApprovalView;
+  it('shows the node’s snapshot, read from `snapshot` or from `terms`', () => {
+    for (const request of [{ kind: 'breaker_reset', terms: {}, snapshot: snap }, { kind: 'breaker_reset', terms: snap }]) {
+      const lines = termLines(reset(request));
+      expect(lines[0]).toBe('Reset this app’s paused spending');
+      expect(lines[1]).toBe('Tripped: paused after failed payments, too many payments this minute');
+      expect(lines[2]).toBe('Budget: up to 500 sats, 120 sats left');
+      expect(lines[5]).toBe('Device resets in the last day: 1 of 3');
+    }
+  });
+  it('says so when the node sent no snapshot', () => {
+    expect(breakerSnapshot(reset({ kind: 'breaker_reset', terms: {} }))).toBeNull();
+    expect(termLines(reset({ kind: 'breaker_reset', terms: {} }))[1]).toBe('Your node did not include the grant’s state');
+  });
+  it('only a failure pause needs a reset; rate and velocity limits recover with time', () => {
+    expect(needsReset(['grant_paused'])).toBe(true);
+    expect(needsReset(['rate_limit_minute', 'rate_limit_hour', 'velocity_limit'])).toBe(false);
+  });
+});

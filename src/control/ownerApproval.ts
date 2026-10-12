@@ -6,7 +6,8 @@
  * the node itself, and never sees a token.
  *
  * Host commands (Source methods → Tauri invoke names):
- *   approvalRequest(request)        → owner_approval_request   POST /pair/approval-request (local or remote router; any pairing)
+ *   approvalRequest(request)        → owner_approval_request   POST /pair/approval-request (local or remote router; any pairing;
+ *                                     breaker_reset only with OWNER_DEVICE_BREAKER_RESET, terms {}: resets the requester's own grant)
  *   approvalStatus(opId)            → owner_approval_status    GET  /pair/approval/{op_id} (only the requester, same epoch)
  *   approvalsPending()              → owner_approvals_pending  GET  /pair/approvals/pending?approver_key_id=<this device's key> (remote/Noise only)
  *   approvalApprove(opId, message)  → owner_approval_approve   POST /pair/approval/{op_id}/approve (remote/Noise only)
@@ -35,6 +36,8 @@
  */
 
 export const OWNER_DEVICE_APPROVAL = 'owner_device_approval_v1';
+/** Sub-flag (node #304): device-approved resets of this pairing's tripped spend breaker. Offer resets only with it. */
+export const OWNER_DEVICE_BREAKER_RESET = 'owner_device_approval_breaker_reset_v1';
 /** Node requests expire 300 s after creation; there is no decline or cancel endpoint. */
 export const APPROVAL_LIFETIME_SECS = 300;
 
@@ -53,9 +56,30 @@ export type FirstContactTerms = {
   max_total_msat: number;
   budget_msat?: number;
 };
+/** What tripped this pairing's spend grant. Only grant_paused needs a reset; the others recover with time. */
+export type BreakerTrip = 'grant_paused' | 'rate_limit_minute' | 'rate_limit_hour' | 'velocity_limit';
+/** The node's snapshot of the requesting pairing's grant, carried in a breaker_reset request (read-only). */
+export type BreakerSnapshot = {
+  tripped: BreakerTrip[];
+  breakers?: unknown;
+  budget_msat: number;
+  per_call_max_msat: number;
+  remaining_msat: number;
+  /** unix seconds */
+  grant_expires_at: number;
+  /** device resets of this grant in the last 24 h (at most 3) */
+  resets_last_day: number;
+  state_digest: string;
+};
+/** What the app sends. breaker_reset takes no numbers: it resets the requesting pairing's own live grant. */
 export type ApprovalRequest =
   | { kind: 'spend_grant'; terms: SpendGrantTerms }
-  | { kind: 'first_contact'; terms: FirstContactTerms };
+  | { kind: 'first_contact'; terms: FirstContactTerms }
+  | { kind: 'breaker_reset'; terms: Record<string, never> };
+/** What the node shows back: a breaker_reset carries its snapshot (read from `snapshot`, else `terms`). */
+export type ApprovalViewRequest =
+  | Exclude<ApprovalRequest, { kind: 'breaker_reset' }>
+  | { kind: 'breaker_reset'; terms: Record<string, never> | BreakerSnapshot; snapshot?: BreakerSnapshot };
 
 /** consumed = approved and used; there is no declined state. */
 export type ApprovalStatus = 'pending' | 'consumed' | 'expired';
@@ -68,7 +92,7 @@ export type ApprovalView = {
   client_pubkey: string;
   epoch: number;
   grant_op: string | null;
-  request: ApprovalRequest;
+  request: ApprovalViewRequest;
   nonce: string;
   /** unix seconds */
   expires_at: number;
@@ -123,6 +147,18 @@ export function termLines(view: ApprovalView, nameOf?: (id: string) => string | 
       t.recipient ? `Only to: ${who(t.recipient)}` : 'To: any contact, within the budget',
     ];
   }
+  if (view.request.kind === 'breaker_reset') {
+    const snap = breakerSnapshot(view);
+    if (!snap) return ['Reset this app’s paused spending', 'Your node did not include the grant’s state'];
+    return [
+      'Reset this app’s paused spending',
+      `Tripped: ${snap.tripped.length ? snap.tripped.map(tripText).join(', ') : 'nothing'}`,
+      `Budget: up to ${sats(snap.budget_msat)}, ${sats(snap.remaining_msat)} left`,
+      `Each payment: up to ${sats(snap.per_call_max_msat)}`,
+      `Grant ends: ${new Date(snap.grant_expires_at * 1000).toLocaleString()}`,
+      `Device resets in the last day: ${snap.resets_last_day} of 3`,
+    ];
+  }
   const t = view.request.terms;
   return [
     'Let this app message someone new',
@@ -136,6 +172,23 @@ export function termLines(view: ApprovalView, nameOf?: (id: string) => string | 
 export function approvalReason(view: ApprovalView): string {
   return `${termLines(view).join(' · ')} · Requested by app ${shortKey(view.client_pubkey)}`;
 }
+
+/** A breaker_reset view's snapshot, wherever the node put it; null when absent or malformed. */
+export function breakerSnapshot(view: ApprovalView): BreakerSnapshot | null {
+  if (view.request.kind !== 'breaker_reset') return null;
+  const s = (view.request.snapshot ?? view.request.terms) as Partial<BreakerSnapshot>;
+  return s && Array.isArray(s.tripped) && typeof s.remaining_msat === 'number' ? (s as BreakerSnapshot) : null;
+}
+
+const TRIP_TEXT: Record<BreakerTrip, string> = {
+  grant_paused: 'paused after failed payments',
+  rate_limit_minute: 'too many payments this minute',
+  rate_limit_hour: 'too many payments this hour',
+  velocity_limit: 'spending too fast',
+};
+export const tripText = (t: string) => TRIP_TEXT[t as BreakerTrip] ?? t;
+/** Only a failure pause needs a reset; rate and velocity limits recover with time on their own. */
+export const needsReset = (tripped: string[]) => tripped.includes('grant_paused');
 
 export const secondsLeft = (view: ApprovalView, nowMs: number) => Math.max(0, Math.floor(view.expires_at - nowMs / 1000));
 
