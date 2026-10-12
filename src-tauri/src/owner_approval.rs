@@ -81,6 +81,13 @@ fn operation_path(op_id: &str) -> Result<String, ActionError> {
 
 pub async fn create(state: &NodeState, body: Value) -> Result<Value, ActionError> {
     // Keep the renderer body unchanged, but refuse malformed requests locally.
+    // Serde also accepts positional arrays, but the request contract uses objects.
+    if !body.is_object() || !body["terms"].is_object() {
+        return Err(ActionError::new(
+            "approval_invalid",
+            "Invalid owner approval request.",
+        ));
+    }
     serde_json::from_value::<ApprovalRequest>(body.clone()).map_err(|_| {
         ActionError::new("approval_invalid", "Invalid owner approval request.")
     })?;
