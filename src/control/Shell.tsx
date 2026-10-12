@@ -4133,7 +4133,10 @@ function Composer(props: {
                 <button type="button" class="link" onClick={closePanel}>
                   Remove
                 </button>
-                <span class="hint">Up to 1.4 MB · pays like a message</span>
+                {/* The price shows here in every state, approval pending or not, as it does under the message bar. */}
+                <span class="hint" data-file-price={mode() === 'file' && shown().msat !== null ? shown().msat! : undefined}>
+                  {shown().msat !== null ? `up to ${fmtAmount(shown().msat!)} · includes max routing fee` : shown().basis} · files up to 1.4 MB
+                </span>
               </div>
               <button type="submit" class="primary soft money" disabled={disabled()} data-send>
                 {label()}
