@@ -5,8 +5,8 @@ import { render } from 'solid-js/web';
 import App from '../src/App';
 import type { PairingView } from '../src/onboarding/pairing';
 import { resetContactsForTests, setPetname } from '../src/control/petnames';
-import type { BudgetView, CallQuote, CallReceipt, LiveEvent, Message, SpendView } from '../src/control/types';
-import { CONNECT_TIMEOUT_MS, createCallEngine, RECONNECT_GRACE_MS, isCallKind, newCallId, parseSignal, RING_MS, stunServer, type CallDeps, type CallView } from '../src/control/call';
+import type { BudgetView, CallQuote, CallReceipt, LiveEvent, Message, OpView, SpendView } from '../src/control/types';
+import { closeOutcome, CONNECT_TIMEOUT_MS, createCallEngine, RECONNECT_GRACE_MS, isCallKind, newCallId, parseSignal, RING_MS, stunServer, type CallDeps, type CallView } from '../src/control/call';
 
 const OWN = '1'.repeat(64);
 const A = 'a'.repeat(64);
@@ -806,6 +806,218 @@ describe('call engine', () => {
   });
 });
 
+describe('H2: every end of our call asks the host to end its admission (op_end_call), once', () => {
+  beforeEach(() => { FakePc.made = []; });
+  afterEach(() => { vi.useRealTimers(); });
+  const ended = (callId: string, over: Partial<OpView> = {}): OpView => ({ op_id: `end-${callId}`, kind: 'call_hangup', peer: A, call_id: callId, state: 'settled', cap_msat: 6_000, paid_msat: 6_000, message_id: 'h', ...over });
+  const withEnd = (over: Partial<CallDeps> = {}, reply: (id: string) => Awaited<ReturnType<NonNullable<CallDeps['endCall']>>> = (id) => ({ ok: true, value: ended(id) })) => {
+    const endCall = vi.fn(async (id: string) => reply(id));
+    return { ...engine({ endCall, ...over }), endCall };
+  };
+  const live = async (e: ReturnType<typeof engine>['e']) => {
+    await e.place(A, 'audio', QUOTE);
+    await e.receive(msg(401, { sdp: 'v=0 answer' }), OWN);
+    FakePc.made[0].connect();
+  };
+
+  it('our hang-up: the host ends it (no hangup paid here), once, and its cost is counted', async () => {
+    const { e, sent, endCall, last } = withEnd();
+    await live(e);
+    await Promise.all([e.hangup(), e.hangup()]);
+    await vi.waitFor(() => expect(last().close).toEqual({ status: 'closed', message: null }));
+    expect(endCall.mock.calls).toEqual([[ID]]);
+    expect(sent.map((x) => x.kind)).toEqual([400]);
+    expect(last()).toMatchObject({ phase: 'ended', reason: 'hangup', paidMsat: 21_000 });
+  });
+
+  it('their hang-up ends ours at the host, once; a second hangup event changes nothing', async () => {
+    const { e, endCall, last } = withEnd();
+    await live(e);
+    await e.receive(msg(403, { reason: 'hangup' }), OWN);
+    await e.receive(msg(403, { reason: 'hangup' }), OWN);
+    await e.hangup();
+    await vi.waitFor(() => expect(last().close?.status).toBe('closed'));
+    expect(endCall.mock.calls).toEqual([[ID]]);
+  });
+
+  it('ring timeout ends it at the host, once', async () => {
+    vi.useFakeTimers();
+    const { e, endCall, last } = withEnd();
+    await e.place(A, 'audio', QUOTE);
+    await vi.advanceTimersByTimeAsync(RING_MS);
+    expect(last()).toMatchObject({ phase: 'ended', reason: 'timeout' });
+    await e.hangup();
+    expect(endCall.mock.calls).toEqual([[ID]]);
+  });
+
+  it('a failed connection ends it at the host, once', async () => {
+    const { e, endCall, last } = withEnd();
+    await live(e);
+    FakePc.made[0].state('closed');
+    await vi.waitFor(() => expect(last().close?.status).toBe('closed'));
+    expect(last()).toMatchObject({ phase: 'ended', reason: 'failed' });
+    expect(endCall.mock.calls).toEqual([[ID]]);
+  });
+
+  it('cancel while ringing ends it at the host, once (no hangup paid here)', async () => {
+    const { e, sent, endCall } = withEnd();
+    await e.place(A, 'audio', QUOTE);
+    expect(e.view().phase).toBe('ringing');
+    await e.hangup();
+    await vi.waitFor(() => expect(endCall).toHaveBeenCalledTimes(1));
+    expect(endCall).toHaveBeenCalledWith(ID);
+    expect(sent.map((x) => x.kind)).toEqual([400]);
+  });
+
+  it('cancel while the offer is in flight: the host ends it (it waits for that offer), once; the late receipt adds nothing', async () => {
+    let settle!: (v: Awaited<ReturnType<CallDeps['signal']>>) => void;
+    const { e, endCall } = withEnd({ signal: () => new Promise((r) => { settle = r; }) });
+    const placing = e.place(A, 'audio', QUOTE);
+    await vi.waitFor(() => expect(settle).toBeDefined());
+    await e.hangup();
+    await vi.waitFor(() => expect(endCall).toHaveBeenCalledTimes(1));
+    settle({ ok: true, value: { message_id: 'm', kind: 400, amount_msat: 10_000, total_msat: 15_000, max_routing_fee_msat: 5000, delivered: true, accepted: true, sent_at_ms: 0 } });
+    await placing;
+    expect(endCall.mock.calls).toEqual([[ID]]);
+  });
+
+  it('cancel before the offer reached the host asks nothing of it', async () => {
+    let grant!: (s: MediaStream) => void;
+    const { e, endCall } = withEnd({ getUserMedia: () => new Promise((r) => { grant = r; }) });
+    const placing = e.place(A, 'audio', QUOTE);
+    await vi.waitFor(() => expect(grant).toBeDefined());
+    await e.hangup();
+    grant(stream());
+    await placing;
+    expect(endCall).not.toHaveBeenCalled();
+  });
+
+  it('a refused offer is still ended at the host once (it answers "unpaid": nothing owed, nothing paid)', async () => {
+    const { e, endCall, last } = withEnd(
+      { signal: async () => ({ ok: false, error: { code: 'budget_exhausted', message: 'Maya’s budget is used up.' } }) },
+      (id) => ({ ok: true, value: ended(id, { kind: 'call_offer', state: 'unpaid', paid_msat: null }) }));
+    await e.place(A, 'audio', QUOTE);
+    await vi.waitFor(() => expect(last().close?.status).toBe('closed'));
+    expect(endCall.mock.calls).toEqual([[ID]]);
+    expect(last()).toMatchObject({ error: 'Maya’s budget is used up.', paidMsat: 0 });
+  });
+
+  it('as the callee nothing is ours to end: decline and hang-up pay their hangup as before', async () => {
+    const declined = withEnd();
+    await declined.e.receive(msg(400, { media: 'audio', sdp: 'v=0 offer' }), OWN);
+    await declined.e.decline();
+    expect(declined.sent.map((x) => [x.kind, x.body.reason])).toEqual([[403, 'declined']]);
+    expect(declined.endCall).not.toHaveBeenCalled();
+    FakePc.made = [];
+    const answered = withEnd();
+    await answered.e.receive(msg(400, { media: 'audio', sdp: 'v=0 offer' }), OWN);
+    await answered.e.accept();
+    FakePc.made[0].connect();
+    await answered.e.hangup();
+    expect(answered.sent.map((x) => x.kind)).toEqual([401, 403]);
+    expect(answered.endCall).not.toHaveBeenCalled();
+  });
+
+  it('closing the window asks nothing of the host (nothing is paid then)', async () => {
+    const { e, endCall } = withEnd();
+    await live(e);
+    e.endLocal();
+    await new Promise((r) => setTimeout(r, 10));
+    expect(endCall).not.toHaveBeenCalled();
+  });
+
+  it('a recovery admission we placed is ended too: each id once', async () => {
+    vi.useFakeTimers();
+    const restartId = 'e'.repeat(32);
+    let n = 0;
+    const { e, endCall, sent } = withEnd({ newCallId: () => n++ === 0 ? ID : restartId });
+    await e.place(A, 'audio', QUOTE);
+    await e.receive(msg(401, { sdp: 'v=0 answer' }), OWN);
+    const pc = FakePc.made[0];
+    pc.connect();
+    pc.state('failed');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sent.some((x) => x.kind === 400 && x.body.call_id === restartId)).toBe(true);
+    await e.hangup();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(endCall.mock.calls.map((c) => c[0]).sort()).toEqual([ID, restartId].sort());
+    expect(sent.filter((x) => x.kind === 403)).toHaveLength(0);
+  });
+});
+
+describe('H2: what the host says about ending, said honestly', () => {
+  beforeEach(() => { FakePc.made = []; });
+  const err = (code: string, message = 'x') => ({ ok: false as const, error: { code: code as never, message } });
+  const view = (state: OpView['state']): OpView => ({ op_id: 'o', kind: 'call_hangup', peer: A, call_id: ID, state, cap_msat: 6000, paid_msat: null, message_id: null });
+
+  it('closeOutcome: ended, nothing recorded, unknown, price moved, other refusals', () => {
+    expect(closeOutcome({ ok: true, value: view('settled') })).toEqual({ status: 'closed', message: null });
+    expect(closeOutcome({ ok: true, value: view('unpaid') })).toEqual({ status: 'closed', message: null });
+    expect(closeOutcome(err('call_not_found'))).toEqual({ status: 'closed', message: null });
+    for (const unknown of [closeOutcome({ ok: true, value: view('unknown') }), closeOutcome({ ok: true, value: view('dispatching') }), closeOutcome(err('spend_unknown')), closeOutcome(err('payment_unknown'))]) {
+      expect(unknown).toEqual({ status: 'unknown', message: 'Ending the call: the result is not known yet. Check pending result before calling them again.' });
+    }
+    expect(closeOutcome(err('price_changed'))).toMatchObject({ status: 'refused', message: expect.stringContaining('Nothing was paid') });
+    expect(closeOutcome(err('price_cap_exceeded')).status).toBe('refused');
+    expect(closeOutcome(err('not_ready', 'Your node is not ready.'))).toEqual({ status: 'refused', message: 'Couldn’t end the call: Your node is not ready.' });
+  });
+
+  it('a refused end can be asked again by the owner, and only then', async () => {
+    const replies = [err('price_changed'), { ok: true as const, value: view('settled') }];
+    const endCall = vi.fn(async () => replies.shift()!);
+    const { e, last } = engine({ endCall });
+    await e.place(A, 'audio', QUOTE);
+    await e.hangup();
+    await vi.waitFor(() => expect(last().close?.status).toBe('refused'));
+    expect(endCall).toHaveBeenCalledTimes(1);
+    await e.closeAgain();
+    expect(endCall).toHaveBeenCalledTimes(2);
+    expect(last().close).toEqual({ status: 'closed', message: null });
+    await e.closeAgain();
+    expect(endCall).toHaveBeenCalledTimes(2);
+  });
+
+  it('an unknown end stays unknown and offers no "try again"', async () => {
+    const endCall = vi.fn(async () => err('spend_unknown'));
+    const { e, last } = engine({ endCall });
+    await e.place(A, 'audio', QUOTE);
+    await e.hangup();
+    await vi.waitFor(() => expect(last().close?.status).toBe('unknown'));
+    await e.closeAgain();
+    expect(endCall).toHaveBeenCalledTimes(1);
+  });
+
+  it('call_admission_open: said, never a silent block; the owner ends the earlier call, found by its op', async () => {
+    const earlier = 'c'.repeat(32);
+    const endCall = vi.fn(async (id: string) => ({ ok: true as const, value: { ...view('settled'), call_id: id } }));
+    const stuckCall = vi.fn(async () => earlier);
+    const { e, last } = engine({
+      endCall, stuckCall,
+      signal: async () => ({ ok: false, error: { code: 'call_admission_open', message: 'End the existing call before starting another admission. Nothing was paid.', operation_id: 'op-old' } }),
+    });
+    await e.place(A, 'audio', QUOTE);
+    expect(last()).toMatchObject({ phase: 'ended', stuck: { opId: 'op-old' }, paidMsat: 0 });
+    // The refused offer is not an admission: nothing to end for it.
+    expect(endCall).not.toHaveBeenCalled();
+    await e.endStuck();
+    expect(stuckCall).toHaveBeenCalledWith(A, 'op-old');
+    expect(endCall.mock.calls).toEqual([[earlier]]);
+    expect(last()).toMatchObject({ stuck: null, close: { status: 'closed', message: 'The earlier call is ended. You can call them again.' } });
+  });
+
+  it('call_admission_open with no earlier call found: says so, ends nothing', async () => {
+    const endCall = vi.fn();
+    const { e, last } = engine({
+      endCall, stuckCall: async () => null,
+      signal: async () => ({ ok: false, error: { code: 'call_admission_open', message: 'x' } }),
+    });
+    await e.place(A, 'audio', QUOTE);
+    await e.endStuck();
+    expect(endCall).not.toHaveBeenCalled();
+    expect(last().close).toEqual({ status: 'refused', message: 'Couldn’t find the earlier call to end. Check pending result.' });
+  });
+});
+
 describe('call engine: review #74 fixes', () => {
   beforeEach(() => { FakePc.made = []; });
   afterEach(() => { vi.useRealTimers(); });
@@ -944,6 +1156,9 @@ function stubHost(overrides: Record<string, Reply> = {}) {
     budget_status: () => openBudget(),
     call_quote: () => QUOTE,
     call_signal: (args) => ({ message_id: 'sig', kind: args!.kind, amount_msat: 10_000, total_msat: 15_000, max_routing_fee_msat: 5000, delivered: true, accepted: true, sent_at_ms: Date.now() }),
+    // H2: the host ends our admission with one paid hangup.
+    op_end_call: (args) => ({ op_id: `end-${args!.call_id}`, kind: 'call_hangup', peer: A, call_id: args!.call_id, state: 'settled', cap_msat: 6_000, paid_msat: 6_000, message_id: 'hangup' }),
+    op_list: () => ({ operations: [], skipped: 0, has_more: false }),
     live_link: () => null,
     'plugin:event|listen': () => 1,
     'plugin:event|unlisten': () => null,
@@ -1297,6 +1512,68 @@ describe('calls in the shell', () => {
     await new Promise((r) => setTimeout(r, 50));
     expect(host.used('call_signal').map((c) => c.args!.kind)).toEqual([401]);
     expect(FakePc.made[0].closed).toBe(true);
+  });
+
+  it('H2: hanging up a call we placed asks the host to end it once (op_end_call), with no hangup paid by the app', async () => {
+    const host = stubHost();
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-hangup]')).not.toBeNull());
+    await vi.waitFor(() => expect(host.used('call_signal')).toHaveLength(1));
+    $<HTMLButtonElement>('[data-call-hangup]')!.click();
+    await vi.waitFor(() => expect(host.used('op_end_call')).toHaveLength(1));
+    const callId = host.used('call_signal')[0].args!.plaintext as string;
+    expect(host.used('op_end_call')[0].args).toEqual({ call_id: JSON.parse(callId).call_id });
+    expect(host.used('call_signal').map((c) => c.args!.kind)).toEqual([400]);
+    // "Ending the call at your node…" while it runs; nothing more once it is ended.
+    await vi.waitFor(() => expect($('[data-call-close]')).toBeNull());
+    expect(host.used('op_end_call')).toHaveLength(1);
+  });
+
+  it('H2: "a call to Maya is still closing", never a silent block; End that call ends the one the host holds', async () => {
+    const earlier = 'c'.repeat(32);
+    const host = stubHost({
+      call_signal: () => { throw { code: 'call_admission_open', message: 'End the existing call before starting another admission. Nothing was paid.', operation_id: 'op-old' }; },
+      op_list: () => ({ operations: [
+        { op_id: 'op-other', kind: 'message', peer: A, call_id: null, state: 'settled', cap_msat: 1, paid_msat: 1, message_id: 'm' },
+        { op_id: 'op-old', kind: 'call_offer', peer: A, call_id: earlier, state: 'settled', cap_msat: 15_000, paid_msat: 10_000, message_id: 'o' },
+      ], skipped: 0, has_more: false }),
+    });
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect(text('[data-call-ended]')).toBe('A call to Maya is still closing at your node. Nothing was paid for this one. End it to call again.'));
+    expect(host.used('op_end_call')).toHaveLength(0);
+    $<HTMLButtonElement>('[data-call-end-stuck]')!.click();
+    await vi.waitFor(() => expect(text('[data-call-close]')).toBe('The earlier call is ended. You can call them again.'));
+    expect(host.used('op_list').slice(-1)[0].args).toEqual({ peer: A });
+    expect(host.used('op_end_call').map((c) => c.args)).toEqual([{ call_id: earlier }]);
+    expect($('[data-call-end-stuck]')).toBeNull();
+  });
+
+  it('H2: an end the host could not confirm says "check pending result"; a refused one offers to try again', async () => {
+    let reply: () => unknown = () => { throw { code: 'spend_unknown', message: 'Outcome unknown.' }; };
+    const host = stubHost({ op_end_call: () => reply() });
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect(host.used('call_signal')).toHaveLength(1));
+    $<HTMLButtonElement>('[data-call-hangup]')!.click();
+    await vi.waitFor(() => expect($('[data-call-close="unknown"]')).not.toBeNull());
+    expect(text('[data-call-close]')).toContain('Check pending result');
+    expect($('[data-call-close-retry]')).toBeNull();
+    $<HTMLButtonElement>('[data-call-dismiss]')!.click();
+    reply = () => { throw { code: 'price_changed', message: 'Price changed.' }; };
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect(host.used('call_signal')).toHaveLength(2));
+    $<HTMLButtonElement>('[data-call-hangup]')!.click();
+    await vi.waitFor(() => expect($('[data-call-close="refused"]')).not.toBeNull());
+    reply = () => ({ op_id: 'e', kind: 'call_hangup', peer: A, call_id: ID, state: 'settled', cap_msat: 6000, paid_msat: 6000, message_id: 'h' });
+    $<HTMLButtonElement>('[data-call-close-retry]')!.click();
+    await vi.waitFor(() => expect($('[data-call-close]')).toBeNull());
+    expect(host.used('op_end_call')).toHaveLength(3);
   });
 
   it('the STUN server is an owner setting, validated, with a note that it contacts that server', async () => {

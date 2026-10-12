@@ -938,6 +938,19 @@ export function ControlCenter(props: Props) {
     // No STUN unless the owner set one: host candidates only.
     iceServers: () => stunServer(stunPref()),
     busy: () => meetingOn(),
+    // H2: the host ends our admission (one paid hangup, or none if the offer was never paid).
+    endCall: async (callId) => {
+      const r = await act(() => source.opEndCall(callId));
+      void loadBudget();
+      void loadWallet();
+      return r;
+    },
+    stuckCall: async (peer, opId) => {
+      const list = await act(() => source.opList(peer));
+      if (!list.ok) return null;
+      const open = list.value.operations.filter((o) => (o.kind === 'call_offer' || o.kind === 'call_recovery') && o.call_id);
+      return (opId ? open.find((o) => o.op_id === opId) : open[0])?.call_id ?? null;
+    },
   });
   // Closing the window ends the call here without paying; only Hang up pays.
   onCleanup(() => calls.endLocal());
@@ -1666,6 +1679,8 @@ export function ControlCenter(props: Props) {
         mute={() => calls.toggleMute()}
         camera={() => void calls.toggleCamera()}
         dismiss={() => { setCallApproval(false); calls.dismiss(); }}
+        closeAgain={() => void calls.closeAgain()}
+        endStuck={() => void calls.endStuck()}
       />
       <MeetingPanel
         view={meetingView()}
@@ -2633,6 +2648,10 @@ function CallPanel(props: {
   mute: () => void;
   camera: () => void;
   dismiss: () => void;
+  /** H2: ask the host again to end this call's admission. */
+  closeAgain: () => void;
+  /** H2: end the earlier call the host still holds open to this contact. */
+  endStuck: () => void;
 }) {
   const [tick, setTick] = createSignal(Date.now());
   const [answer, setAnswer] = createSignal<number | null>(null);
@@ -2680,7 +2699,16 @@ function CallPanel(props: {
           {(connection) => <p class="hint" data-call-connection>Connection: {connection().local === 'srflx' ? 'srflx(STUN)' : connection().local} (local) / {connection().remote === 'srflx' ? 'srflx(STUN)' : connection().remote} (remote)</p>}
         </Show>
         <Show when={v().phase === 'ended'}>
-          <p class="hint" data-call-ended>{v().error ?? END_REASON[v().reason ?? 'hangup']}</p>
+          <p class="hint" data-call-ended>{v().stuck
+            ? `A call to ${who()} is still closing at your node. Nothing was paid for this one. End it to call again.`
+            : v().error ?? END_REASON[v().reason ?? 'hangup']}</p>
+        </Show>
+        <Show when={v().phase === 'ended' && v().close && (v().close!.status !== 'closed' || !!v().close!.message) ? v().close : null}>
+          {(close) => (
+            <p class={close().status === 'refused' || close().status === 'unknown' ? 'err-note' : 'hint'} role={close().status === 'closing' ? 'status' : 'alert'} data-call-close={close().status}>
+              {close().status === 'closing' ? 'Ending the call at your node…' : close().message}
+            </p>
+          )}
         </Show>
         <Show when={v().phase !== 'ended' && v().error}>
           <p class="hint" data-call-error>{v().error}</p>
@@ -2692,6 +2720,12 @@ function CallPanel(props: {
               <button type="button" class="soft" data-call-decline disabled={props.blocked} onClick={() => props.decline()}>Decline{price(answer())}</button>
             </Match>
             <Match when={v().phase === 'ended'}>
+              <Show when={v().stuck}>
+                <button type="button" class="soft money" data-call-end-stuck onClick={() => props.endStuck()}>End that call</button>
+              </Show>
+              <Show when={v().close?.status === 'refused' && !v().stuck}>
+                <button type="button" class="soft money" data-call-close-retry onClick={() => props.closeAgain()}>Try ending it again</button>
+              </Show>
               <button type="button" class="soft" data-call-dismiss onClick={() => props.dismiss()}>Close</button>
             </Match>
             <Match when={v().phase !== 'idle'}>

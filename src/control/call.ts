@@ -10,10 +10,15 @@
  * approval and journaled exactly-once path as a message. ICE is gathered
  * before the offer/answer is sent (vanilla ICE), so a call normally costs
  * one offer and one hangup for the caller, one answer for the callee.
+ *
+ * Host H2: an outgoing admission (our offer, and each recovery offer we
+ * place) is closed only through `op_end_call`, on every way a call ends. The
+ * host sends the one paid hangup itself (or none, if the offer was never
+ * paid), so the next call to that peer is not refused as still open.
  */
 import { asActionError } from './state';
 import { amount } from './format';
-import type { ActionError, CallQuote, CallReceipt, Message, NodeGrantSummary } from './types';
+import type { ActionError, CallQuote, CallReceipt, Message, NodeGrantSummary, OpView } from './types';
 
 export const CALL_OFFER = 400;
 export const CALL_ANSWER = 401;
@@ -138,11 +143,34 @@ export type CallView = {
   reason: HangupReason | null;
   /** A refusal to show (nothing was paid for the refused step). */
   error: string | null;
+  /** H2: ending this call's own admissions at the host; null when none was ours. */
+  close: CallClose | null;
+  /** H2: an earlier call to this peer is still open at the host (`call_admission_open`). */
+  stuck: { opId: string | null } | null;
 };
+
+/** `closed`: the host ended it (or nothing was owed); `unknown`: check pending result; `refused`: still open. */
+export type CallClose = { status: 'closing' | 'closed' | 'unknown' | 'refused'; message: string | null };
+
+const CLOSE_UNKNOWN = 'Ending the call: the result is not known yet. Check pending result before calling them again.';
+/** What one `op_end_call` answer means for the owner. A failed read never says "ended". */
+export function closeOutcome(r: Outcome<OpView>): CallClose {
+  if (r.ok) return r.value.state === 'dispatching' || r.value.state === 'unknown'
+    ? { status: 'unknown', message: CLOSE_UNKNOWN } : { status: 'closed', message: null };
+  switch (r.error.code) {
+    // Nothing of this call is recorded at the host: nothing is open.
+    case 'call_not_found': return { status: 'closed', message: null };
+    case 'spend_unknown': case 'payment_unknown': return { status: 'unknown', message: CLOSE_UNKNOWN };
+    case 'price_changed': case 'price_cap_exceeded':
+      return { status: 'refused', message: 'Couldn’t end the call: their node now asks more to end it than this call allowed. Nothing was paid. Calling them again waits until it is ended.' };
+    default: return { status: 'refused', message: `Couldn’t end the call: ${r.error.message}` };
+  }
+}
+const CLOSE_RANK = { closed: 0, closing: 1, refused: 2, unknown: 3 } as const;
 
 export const IDLE: CallView = {
   phase: 'idle', state: 'idle', peer: null, callId: null, media: 'audio', outgoing: false,
-  liveAt: null, muted: false, camera: false, paidMsat: 0, connection: null, reason: null, error: null,
+  liveAt: null, muted: false, camera: false, paidMsat: 0, connection: null, reason: null, error: null, close: null, stuck: null,
 };
 
 type Outcome<T> = { ok: true; value: T } | { ok: false; error: ActionError };
@@ -164,6 +192,10 @@ export type CallDeps = {
   iceServers?: () => RTCIceServer[];
   /** Something else (a meeting) holds the mic: an incoming offer rings out. */
   busy?: () => boolean;
+  /** H2 `op_end_call`: end one of our admissions (by its wire call id). Absent: hangups are paid here, as before H2. */
+  endCall?: (callId: string) => Promise<Outcome<OpView>>;
+  /** The call id of the host's open admission `opId` to `peer` (from `op_list`); null if not found. */
+  stuckCall?: (peer: string, opId: string | null) => Promise<string | null>;
 };
 
 /** Wait for ICE gathering to finish, or `ms`, whichever comes first. */
@@ -211,6 +243,12 @@ export function createCallEngine(deps: CallDeps) {
   let videoSender: RTCRtpSender | null = null;
   /** The call the owner cancelled while its offer was being prepared or paid. */
   let cancelled: string | null = null;
+  /** Our admissions in this call (an offer once it went to the host, and each recovery offer). */
+  let own: string[] = [];
+  /** Ids `op_end_call` was asked for: each once, unless the owner asks again. */
+  const closing = new Set<string>();
+  /** Ids whose end was refused: the owner may ask again. */
+  let refusedClose: { callId: string | null; ids: string[] } | null = null;
   // Serialises user actions: a double click never pays twice.
   let busy = false;
 
@@ -260,9 +298,34 @@ export function createCallEngine(deps: CallDeps) {
     offerSdp = null;
     deps.onStreams(null, null);
   };
-  const end = (reason: HangupReason | null, error: string | null = null) => {
+  /** Ask the host to end each admission once; the worst answer is what the card says. */
+  const closeAdmissions = async (ids: string[], callId: string | null) => {
+    const endCall = deps.endCall;
+    const todo = ids.filter((id) => !closing.has(id));
+    if (!endCall || todo.length === 0) return;
+    todo.forEach((id) => closing.add(id));
+    if (view.callId === callId) set({ close: { status: 'closing', message: null } });
+    let worst: CallClose = { status: 'closed', message: null };
+    const refused: string[] = [];
+    for (const id of todo) {
+      let r: Outcome<OpView>;
+      try { r = await endCall(id); } catch (error) { r = { ok: false, error: asActionError(error) }; }
+      const c = closeOutcome(r);
+      if (c.status === 'refused') refused.push(id);
+      if (CLOSE_RANK[c.status] > CLOSE_RANK[worst.status]) worst = c;
+      if (r.ok && r.value.kind === 'call_hangup' && r.value.paid_msat && view.callId === callId) set({ paidMsat: view.paidMsat + r.value.paid_msat });
+    }
+    refusedClose = refused.length ? { callId, ids: refused } : null;
+    if (view.callId === callId) set({ close: worst });
+  };
+  /** `close`: false only when the window closes (nothing is paid then; the next call offers to end it). */
+  const end = (reason: HangupReason | null, error: string | null = null, close = true) => {
+    const ids = own;
+    const callId = view.callId;
+    own = [];
     teardown();
     set({ phase: 'ended', reason, error, camera: false, muted: false });
+    if (close && ids.length) void closeAdmissions(ids, callId);
   };
 
   const acquireMedia = (constraints: MediaStreamConstraints): Promise<MediaStream> => new Promise((resolve, reject) => {
@@ -440,6 +503,7 @@ export function createCallEngine(deps: CallDeps) {
       if (pc !== conn) return;
       pendingRestartId = id;
       restartAnswerPending = true;
+      own.push(id);
       const sdp = `${conn.localDescription!.sdp.trimEnd()}\r\n${RESTART_ATTRIBUTE}${view.callId}\r\n`;
       const r = await pay(CALL_OFFER, { media: view.media, sdp }, q.offer_msat + q.offer_max_routing_fee_msat, id);
       if (pc !== conn) return;
@@ -534,6 +598,7 @@ export function createCallEngine(deps: CallDeps) {
       wireId = callId;
       admissions.add(callId);
       claim(callId);
+      own = [];
       set({ ...IDLE, phase: 'calling', peer, callId, media, outgoing: true, camera: media === 'video' });
       let conn: RTCPeerConnection;
       try {
@@ -548,9 +613,18 @@ export function createCallEngine(deps: CallDeps) {
       }
       // Cancelled before the offer went out: nothing is paid.
       if (cancelled === callId || view.callId !== callId || !active()) return;
+      // From here the host may hold this admission: every end asks it to close it.
+      own.push(callId);
       const r = await pay(CALL_OFFER, { media, sdp: conn.localDescription!.sdp }, q.offer_msat + q.offer_max_routing_fee_msat);
-      // Cancelled while the offer was in flight: the mic is already off; send nothing more.
+      // Cancelled while the offer was in flight: the mic is already off; the host ends it if it was paid.
       if (cancelled === callId || view.callId !== callId || !active()) return;
+      if (!r.ok && r.error.code === 'call_admission_open') {
+        // Refused before paying: an earlier call to them is still open at the host. Say so; never a silent block.
+        own = own.filter((id) => id !== callId);
+        end(null, 'An earlier call to them is still being ended at your node. Nothing was paid for this one.');
+        set({ stuck: { opId: r.error.operation_id ?? null } });
+        return;
+      }
       if (!r.ok) {
         end(null, r.error.message);
         return;
@@ -628,11 +702,14 @@ export function createCallEngine(deps: CallDeps) {
       const callId = view.callId;
       const notify = view.phase !== 'calling' && view.phase !== 'incoming' && quote;
       const ids = [...admissions].reverse();
+      // With H2 our own admissions are ended by the host (op_end_call, in end()); only theirs is paid here.
+      const mine = new Set(deps.endCall ? own : []);
       const owner = { peer: view.peer, callId }; // Keep late cleanup bound to this peer.
       cancelled = callId;
       end('hangup');
       if (notify) {
         for (const id of ids) {
+          if (mine.has(id)) continue;
           try {
             const r = await pay(CALL_HANGUP, { reason: 'hangup' }, signalCost(notify), id, owner);
             if (!r.ok && view.callId === callId) set({ error: r.error.message });
@@ -648,7 +725,35 @@ export function createCallEngine(deps: CallDeps) {
       // Also invalidate a preflight that has not entered Calling yet.
       if (!active()) { teardown(); return; }
       if (view.phase === 'calling') cancelled = view.callId;
-      end('hangup');
+      end('hangup', null, false);
+    },
+
+    /** The owner asks again to end an admission the host refused to end. */
+    closeAgain: async () => {
+      const r = refusedClose;
+      if (!r || view.callId !== r.callId) return;
+      refusedClose = null;
+      r.ids.forEach((id) => closing.delete(id));
+      await closeAdmissions(r.ids, r.callId);
+    },
+
+    /** `call_admission_open`: the owner ends the earlier call the host still holds. */
+    endStuck: async () => {
+      const stuck = view.stuck;
+      const peer = view.peer;
+      const callId = view.callId;
+      if (!stuck || !peer || !deps.endCall || !deps.stuckCall || view.phase !== 'ended') return;
+      set({ stuck: null, close: { status: 'closing', message: null } });
+      let earlier: string | null = null;
+      try { earlier = await deps.stuckCall(peer, stuck.opId); } catch { earlier = null; }
+      if (view.callId !== callId) return;
+      if (!earlier) {
+        set({ close: { status: 'refused', message: 'Couldn’t find the earlier call to end. Check pending result.' } });
+        return;
+      }
+      closing.delete(earlier);
+      await closeAdmissions([earlier], callId);
+      if (view.callId === callId && view.close?.status === 'closed') set({ close: { status: 'closed', message: 'The earlier call is ended. You can call them again.' } });
     },
 
     toggleMute: () => {

@@ -461,6 +461,9 @@ export type ActionError = {
     // Owner approval from an enrolled owner device (src/control/ownerApproval.ts has the HTTP mapping).
     | 'approval_off' | 'approval_forbidden' | 'approval_budget_exceeded' | 'approval_expired' | 'approval_unknown'
     | 'approval_rate_limited' | 'approval_invalid' | 'approval_unsaved' | 'approval_changed' | 'approval_self'
+    // H2 call admissions: a new offer while an earlier one is still open; ending one the host never recorded;
+    // a second hangup; the node refusing a call signal before payment.
+    | 'call_admission_open' | 'call_not_found' | 'hangup_in_flight' | 'call_not_live' | 'call_id_used' | 'call_signal_in_flight' | 'call_identity_changed'
     | 'invalid'
     | 'node';
   message: string;
@@ -477,7 +480,25 @@ export type ActionError = {
    * record. Stop retrying names it, so a stale card never releases another message.
    */
   pending_id?: string;
+  /** H1: the host's id for the operation this error is about (kept whole, never parsed). */
+  operation_id?: string;
 };
+
+/** H1 `op_list`: the host's own record of a paid operation (read only; never a spending authority). */
+export type OperationState = 'dispatching' | 'paid' | 'unpaid' | 'paid_undelivered' | 'failed_paid' | 'unknown' | 'settled' | 'closed';
+export type OpView = {
+  op_id: string;
+  /** `message`, `call_offer`, ...; any other string is shown as nothing. */
+  kind: string;
+  peer: string;
+  call_id: string | null;
+  state: OperationState;
+  cap_msat: number;
+  paid_msat: number | null;
+  message_id: string | null;
+};
+/** Newest first, at most 100; `skipped` damaged records were left out. */
+export type OpList = { operations: OpView[]; skipped: number; has_more: boolean };
 
 /**
  * Retry delivery paid nothing new, and delivering a paid, undelivered message
