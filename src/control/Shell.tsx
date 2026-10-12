@@ -1842,7 +1842,7 @@ function Rail(props: {
   };
 
   return (
-    <nav class="rail" aria-label="Tracks" inert={props.behind}>
+    <nav class="rail" classList={{ 'rail-setup': !props.active }} aria-label="Tracks" inert={props.behind}>
       <div class="mark">
         Bit<span>Sov</span>
       </div>
