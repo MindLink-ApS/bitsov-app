@@ -139,27 +139,104 @@ describe('acting from the track', () => {
     }
   }
 
-  it('asks the owner once, keeps the draft, then sends and shows the receipt and delivery', async () => {
+  // Approve & send never sends at terms the owner did not see.
+  async function pendingApproval(host: ReturnType<typeof stubHost>, text = 'gm Maya') {
+    type('[data-composer] textarea', text);
+    await vi.waitFor(() => expect(text_('[data-send]')).toBe('Approve & send'));
+    submit();
+    await vi.waitFor(() => expect(text_('[data-send]')).toBe('Sends when approved'));
+    expect(host.used('message_send')).toHaveLength(0);
+  }
+  const text_ = (sel: string) => $(sel)?.textContent?.trim() ?? '';
+
+  it('Approve & send: an edit while waiting drops the send; the approval sends nothing', async () => {
+    const host = stubHost();
+    await openShell();
+    await pendingApproval(host);
+    type('[data-composer] textarea', 'gm Maya, edited');
+    host.spend.v = openView();
+    await vi.waitFor(() => expect($('[data-spend="open"]')).not.toBeNull(), { timeout: 5000 });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(host.used('message_send')).toHaveLength(0);
+    expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('gm Maya, edited');
+    expect(text_('[data-send]')).toBe('Send');
+  });
+
+  it('Approve & send: switching chats while waiting drops the send', async () => {
+    const host = stubHost({ peers_list: () => [
+      { node_id: A, addr: null, label: 'Maya', connected: true, fingerprint: null },
+      { node_id: 'b'.repeat(64), addr: null, label: 'Josh', connected: true, fingerprint: null },
+    ] });
+    await openShell();
+    await pendingApproval(host);
+    await vi.waitFor(() => expect($(`[data-track="peer:${'b'.repeat(64)}"]`)).not.toBeNull());
+    $<HTMLButtonElement>(`[data-track="peer:${'b'.repeat(64)}"]`)!.click();
+    await vi.waitFor(() => expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe(''));
+    $<HTMLButtonElement>(`[data-track="peer:${A}"]`)!.click();
+    host.spend.v = openView();
+    await vi.waitFor(() => expect($('[data-spend="open"]')).not.toBeNull(), { timeout: 5000 });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(host.used('message_send')).toHaveLength(0);
+  });
+
+  it('Approve & send: sends exactly once, however many status reads follow', async () => {
+    const host = stubHost();
+    await openShell();
+    await pendingApproval(host);
+    host.spend.v = openView();
+    await vi.waitFor(() => expect(host.used('message_send')).toHaveLength(1), { timeout: 5000 });
+    const reads = host.used('spend_status').length;
+    await vi.waitFor(() => expect(host.used('spend_status').length).toBeGreaterThan(reads + 1), { timeout: 8000 });
+    expect(host.used('message_send')).toHaveLength(1);
+  }, 15_000);
+
+  it('Approve & send: a new price before the approval lands is shown and needs another press', async () => {
+    let ready = true;
+    let peerMsat = 2000;
+    const host = stubHost({
+      price_quote: () => ({ kind: 0, own_msat: 1000, peer_msat: peerMsat, peer_age_secs: 30, max_routing_fee_msat: 0, peer_stale: false }),
+      node_overview: () => ({
+        node_id: OWN, status: 'ok', version: 'api v2', connected_peers: 1, e2ee_sessions: 1, pending_deliveries: 0, money_ready: ready,
+        lightning_available: true, block_height: 1, uptime_secs: 1, lightning_backend: 'ldk', chain_backend: 'esplora', read_at: Date.now(),
+      }),
+    });
+    await openShell();
+    await pendingApproval(host);
+    // The node drops out and comes back; the price is read again, now higher.
+    ready = false;
+    await vi.waitFor(() => expect($('[data-money-notice]')).not.toBeNull(), { timeout: 15_000 });
+    peerMsat = 3000;
+    ready = true;
+    await vi.waitFor(() => expect($('[data-money-notice]')).toBeNull(), { timeout: 15_000 });
+    await vi.waitFor(() => expect(text_('[data-send-price]')).toMatch(/3 sats/), { timeout: 5000 });
+    host.spend.v = openView();
+    await vi.waitFor(() => expect($('[data-spend="open"]')).not.toBeNull(), { timeout: 5000 });
+    await vi.waitFor(() => expect(text_('[data-composer-note]')).toMatch(/price changed since you pressed/));
+    expect(host.used('message_send')).toHaveLength(0);
+    expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('gm Maya');
+  }, 40_000);
+
+  it('Approve & send: asks the owner once, keeps the draft, and sends it once when the owner approves', async () => {
     const host = stubHost();
     await openShell();
     type('[data-composer] textarea', 'gm Maya');
 
-    // Locked: the button is the approval. Pressing it asks; it sends nothing.
-    await vi.waitFor(() => expect(text('[data-send]')).toBe('Send'));
+    // Locked: one press asks; nothing is sent until the owner approves.
+    await vi.waitFor(() => expect(text('[data-send]')).toBe('Approve & send'));
     submit();
     await vi.waitFor(() => expect(text('[data-owner-action]')).toBe('konsensus grant --op ab12'));
     expect(text('[data-approval="pending"]')).toContain('This app cannot approve it for you');
     expect($('[data-approval="pending"]')).not.toBeNull();
     expect($<HTMLButtonElement>('[data-send]')!.disabled).toBe(true);
+    expect(text('[data-send]')).toBe('Sends when approved');
     expect(host.used('message_send')).toHaveLength(0);
     expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('gm Maya');
 
-    // The owner grants at their terminal; the next status poll opens the window.
+    // The owner grants at their terminal; the next status poll opens the window,
+    // and that same message goes, once, at the price that was on the button.
     host.spend.v = openView();
     await vi.waitFor(() => expect($('[data-spend="open"]')).not.toBeNull(), { timeout: 5000 });
     expect(text('[data-spend="open"]')).toContain('ten minutes per approval');
-
-    submit();
     await vi.waitFor(() => expect(host.used('message_send')).toHaveLength(1));
     expect(host.used('message_send')[0].args).toEqual({ recipient: A, is_room: false, plaintext: 'gm Maya', max_msat: 2000, max_recipient_msat: null, first_contact_msat: null });
     await vi.waitFor(() => expect(text('[data-message="sent-1"] .stamp .sats')).toBe('paid 2 sats · fee unknown'));

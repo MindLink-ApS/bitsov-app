@@ -313,25 +313,21 @@ describe('invisible payments in the composer and the context panel', () => {
     expect(text('[data-budget-wallet-warning]')).toContain('outside');
   });
 
-  it('approves a daily total once, then messages go with no prompt and the price still shown', async () => {
+  it('Approve & send: one press approves the daily total and sends that message once; then messages go with no prompt', async () => {
     const host = stubHost(budgetView({ rows: [{ target: MAYA, room: false, limit_msat: 50_000, spent_msat: 0 }] }));
     await openShell();
     type('[data-composer] textarea', 'gm Maya');
-    await vi.waitFor(() => expect(text('[data-send]')).toBe('Send'));
+    await vi.waitFor(() => expect(text('[data-send]')).toBe('Approve & send'));
     expect(text('[data-budget-setup]')).toContain('Someone new always asks first');
 
-    // The owner picks a preset; the tap is the approval. Nothing is sent by it.
+    // The owner picks a preset; the one press approves it, then this message goes, once.
     $<HTMLButtonElement>('[data-preset="everyday"]')!.click();
     submit();
     await vi.waitFor(() => expect(host.used('budget_approve')).toHaveLength(1));
     expect(host.used('budget_approve')[0].args).toEqual({ ceiling_msat: 2_000_000, preset: 'everyday' });
-    expect(host.used('message_send')).toHaveLength(0);
-    expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('gm Maya');
-
-    await vi.waitFor(() => expect($('[data-budget="ok"]')).not.toBeNull());
-    expect(text('[data-budget-line]')).toContain('Pays automatically · 0 sats of 50 sats to Maya in 24 h');
-    submit();
     await vi.waitFor(() => expect(host.used('message_send')).toHaveLength(1));
+    await new Promise((r) => setTimeout(r, 30));
+    expect(host.used('message_send')).toHaveLength(1);
     expect(host.used('message_send')[0].args).toMatchObject({ recipient: MAYA, max_msat: 2000, first_contact_msat: null });
     await vi.waitFor(() => expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe(''));
     // A second message: no approval, no question.

@@ -3192,6 +3192,8 @@ function UndeliveredView(props: {
   );
 }
 
+/** How long an Approve & send press waits for its approval before it needs another press. */
+const CONTINUE_MS = 10 * 60_000;
 /** The draft was paid for: it now lives on the undelivered card, not in the composer. */
 const paidUndelivered = (r: Outcome<unknown>) => !r.ok && r.error.code === 'payment_settled_undelivered';
 
@@ -3796,15 +3798,16 @@ function Composer(props: {
     if (paying()) return 'Paying…';
     if (ownerWait()) return 'Waiting for contact approval';
     if (needsTouch()) {
+      if (mode() === 'message' && draft().trim()) return 'Approve & send';
       return androidQrScannerAvailable() ? 'Approve with biometrics' : 'Approve with Touch ID';
     }
     if (viaBudget()) {
       const s = shown();
       const price = s.msat === null ? '' : ` · ${s.estimate ? '≈ ' : ''}${sats(s.msat)} ${satUnit(s.msat)}`;
       switch (stand().kind) {
-        case 'paused': return 'Resume payments';
-        case 'waiting': return 'Waiting for approval';
-        case 'off': return 'Send';
+        case 'paused': return mode() === 'message' && draft().trim() ? 'Resume & send' : 'Resume payments';
+        case 'waiting': return continueAfter() ? 'Sends when approved' : 'Waiting for approval';
+        case 'off': return mode() === 'message' && draft().trim() ? 'Approve & send' : 'Send';
         case 'first': return `Send first ${mode() === 'file' ? 'file' : 'message'}${price}`;
         case 'contact_used':
         case 'total_used': return 'Budget used up';
@@ -3813,18 +3816,24 @@ function Composer(props: {
       }
     }
     if (spends() && !line().open) {
-      if (props.spend?.state === 'pending') return 'Waiting for approval';
+      if (props.spend?.state === 'pending') return continueAfter() ? 'Sends when approved' : 'Waiting for approval';
       if (props.spend?.state === 'unavailable') return 'Spending unavailable';
-      return 'Send';
+      return mode() === 'message' && draft().trim() ? 'Approve & send' : 'Send';
     }
     const s = shown();
     const price = s.msat === null ? '' : ` · ${s.estimate ? '≈ ' : ''}${sats(s.msat)} ${satUnit(s.msat)}`;
     return { message: 'Send', pay: 'Pay', request: 'Create invoice', file: 'Send file' }[mode()] + (mode() === 'request' ? '' : price);
   };
 
-  const sendTitle = () => needsTouch()
-    ? (androidQrScannerAvailable() ? 'Approve with biometrics' : 'Approve with Touch ID')
-    : 'Send';
+  const sendTitle = () => {
+    if (continueAfter() && !approvalCleared()) return 'Sends when approved';
+    // One press asks for the approval and then sends this message.
+    const asks = needsTouch() || (viaBudget()
+      ? stand().kind === 'paused' || stand().kind === 'off'
+      : spends() && !line().open && props.spend?.state !== 'pending' && props.spend?.state !== 'unavailable');
+    if (asks && draft().trim()) return viaBudget() && stand().kind === 'paused' ? 'Resume & send' : 'Approve & send';
+    return needsTouch() ? (androidQrScannerAvailable() ? 'Approve with biometrics' : 'Approve with Touch ID') : 'Send';
+  };
   /** Pay / Request / File panels close back to the single message bar. */
   const closePanel = () => {
     composerRevision++;
@@ -3850,6 +3859,27 @@ function Composer(props: {
    * (Send in chat). If the price is not that any more, nothing is sent: the
    * new price shows on Send, which needs another press.
    */
+  /**
+   * Approve & send: a press that had to ask for approval first continues once
+   * the approval lands, with the same recipient, the same unedited text and
+   * the ceiling that was on the button. Any edit, track change or new price
+   * drops it; nothing is ever sent at terms the owner did not see.
+   */
+  const [continueAfter, setContinueAfter] = createSignal<{ revision: number; key: string; msat: number; until: number } | null>(null);
+  const intendSend = () => {
+    const msat = shown().msat;
+    if (mode() !== 'message' || !draft().trim() || msat === null) return;
+    setContinueAfter({ revision: composerRevision, key: trackKey(props.track), msat, until: Date.now() + CONTINUE_MS });
+  };
+  const approvalCleared = () => !needsTouch() && (viaBudget() ? stand().kind === 'ok' || stand().kind === 'first' : line().open);
+  createEffect(() => {
+    const c = continueAfter();
+    if (!c || busy() || ownerWait() || !approvalCleared()) return;
+    setContinueAfter(null);
+    const same = c.revision === untrack(() => composerRevision) && c.key === trackKey(props.track) && Date.now() < c.until && mode() === 'message' && draft().trim();
+    // Its price is checked again by submit: a new price shows and needs another press.
+    if (same) void submit(c.msat);
+  });
   const submit = async (shownMsat?: number | null) => {
     if (props.moneyBlocked || (spends() && props.budgetStale) || busy() || ownerWait()) return;
     if (mode() === 'message' && priceProblem()) { setNote(priceProblem()); return; }
@@ -3859,7 +3889,8 @@ function Composer(props: {
       return;
     }
     if (needsTouch()) {
-      // This contact is approved with Touch ID; the draft stays where it is.
+      // This contact is approved with Touch ID; the draft then goes, once.
+      intendSend();
       setBusy(true);
       await props.actions.approveContact(target(), shown().msat);
       setBusy(false);
@@ -3868,7 +3899,8 @@ function Composer(props: {
     if (viaBudget()) {
       const st = stand();
       if (st.kind === 'paused' || st.kind === 'off') {
-        // The one approval (or resume). The draft stays where it is.
+        // The one approval (or resume); the draft then goes, once.
+        intendSend();
         setBusy(true);
         if (st.kind === 'paused') await props.actions.resume();
         else if (presetChosen()) await props.actions.approveBudget(presetChosen()!.ceiling_msat, presetChosen()!.id);
@@ -3948,8 +3980,9 @@ function Composer(props: {
       return;
     }
     if (spends() && !line().open) {
-      // The one tap: the draft stays where it is. With this Mac registered,
-      // a single contact is approved with Touch ID; otherwise at the node.
+      // The one tap: with this Mac registered, a single contact is approved
+      // with Touch ID; otherwise at the node. The draft then goes, once.
+      intendSend();
       setBusy(true);
       await props.actions.approve();
       setBusy(false);
@@ -4080,7 +4113,7 @@ function Composer(props: {
       class="composer"
       data-composer
       data-mode={mode()}
-      onInput={() => { cancelOwner(); composerRevision++; setPaidLine(null); }}
+      onInput={() => { cancelOwner(); composerRevision++; setPaidLine(null); setContinueAfter(null); }}
       onKeyDown={(e) => {
         if (e.key === 'Enter' && e.repeat && !e.shiftKey && !e.isComposing) e.preventDefault();
       }}

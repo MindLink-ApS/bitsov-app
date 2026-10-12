@@ -732,7 +732,8 @@ describe('the AI track', () => {
     await vi.waitFor(() => expect($(`[data-track="peer:${A}"]`)?.getAttribute('aria-current')).toBe('true'));
     await vi.waitFor(() => expect($<HTMLTextAreaElement>('[data-composer] textarea')?.value).toBe('gm, rebalance done'));
     expect(text('[data-drafted]')).toContain('send it yourself');
-    await vi.waitFor(() => expect(text('[data-send]')).toBe('Send'));
+    // Spending is not approved here: the owner's own press would approve and send it.
+    await vi.waitFor(() => expect(text('[data-send]')).toBe('Approve & send'));
     for (const cmd of ['message_send', 'payment_pay', 'payment_keysend', 'spend_request', 'invoice_create']) {
       expect(host.used(cmd)).toHaveLength(0);
     }
