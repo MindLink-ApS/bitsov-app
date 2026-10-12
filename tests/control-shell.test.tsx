@@ -437,12 +437,30 @@ describe('control center shell', () => {
       expect(other.querySelector('[data-owner-action]')?.textContent).toBe('konsensus grant --op ab01');
       // Not said twice in the spend bar.
       expect(mount.querySelector('[data-device-settings-hint]')).toBeNull();
+      // What is true here stays in view: the draft waits for a press, and the request can be cancelled.
+      expect(offer.querySelector('[data-touch-id-stays-text="spend"]')?.textContent).toContain('Nothing is sent until you press Send after approval');
+      expect(offer.querySelector('[data-touch-id-stays] [data-spend-cancel-visible]')).not.toBeNull();
       const area = mount.querySelector<HTMLTextAreaElement>('[data-composer] textarea')!;
       area.value = 'kept draft'; area.dispatchEvent(new Event('input', { bubbles: true }));
       click('[data-touch-id-setup]');
       await vi.waitFor(() => expect(mount.querySelector('[data-panel="node"]')).not.toBeNull());
       expect(mount.querySelector<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('kept draft');
       expect(calls.some((c) => c.cmd === 'message_send' || c.cmd === 'device_key_register')).toBe(false);
+      click('[data-spend-cancel-visible]');
+      await vi.waitFor(() => expect(calls.some((c) => c.cmd === 'spend_cancel')).toBe(true));
+    });
+
+    it('a lapsed setup says "again", not "one time"', async () => {
+      await open(true, { ...none, state: 'lapsed' });
+      const offer = mount.querySelector('[data-touch-id-first]')!;
+      expect(offer.textContent).toContain('Your last setup request lapsed. Set it up again');
+      expect(offer.textContent).not.toContain('one time');
+    });
+
+    it.each(['pending', 'unavailable', 'off'])('a Mac whose setup is %s keeps today’s card', async (state) => {
+      await open(true, { ...none, state, available: state !== 'unavailable' });
+      expect(mount.querySelector('[data-touch-id-first]')).toBeNull();
+      expect(mount.querySelector('details[data-other-ways]')).toBeNull();
     });
 
     it('a local node (no registration there) keeps the command as it was', async () => {

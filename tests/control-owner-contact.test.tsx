@@ -257,4 +257,67 @@ it('first contact on a remote node without Touch ID: the Touch ID offer leads, t
   expect(other.querySelector<HTMLTextAreaElement>('[data-contact-owner-command]')!.value).toBe(approval.owner_command);
   expect(element<HTMLTextAreaElement>('[data-composer] textarea').value).toBe('hello with Touch ID first');
   expect(source.send).not.toHaveBeenCalled();
+  // What is true for a pending first contact stays in view: it sends by itself once approved, and Cancel stops it.
+  const stays = element('[data-touch-id-first] [data-touch-id-stays-text="first-contact"]');
+  expect(stays.textContent).toContain('This message sends automatically once your node’s owner approves this contact');
+  expect(stays.querySelector('[data-contact-cancel-visible]')).not.toBeNull();
+  expect(mount.textContent).not.toContain('press Send when you are ready');
+  // Going to Touch ID setup leaves the wait running; when the owner approves, it sends, as the copy said.
+  element<HTMLButtonElement>('[data-touch-id-setup]').click();
+  source.firstContactStatus = vi.fn(async () => ({ ...approval, ready: true }));
+  await vi.waitFor(() => expect(source.send).toHaveBeenCalledTimes(1), { timeout: 2500 });
+});
+
+it('first contact: Cancel in view stops the wait; nothing is sent', async () => {
+  const source = sampleSource({ firstLiveMs: 1e9 });
+  const budget: BudgetView = {
+    paused: false, waiting_for_owner: false, preset: 'careful',
+    autopay: { state: 'open', open_until_ms: Date.now() + 861400000, ceiling_msat: 500000, basis: 'node_grant' },
+    ceiling_msat: 500000, spent_msat: 0, unsettled_msat: 0, rows: [],
+    presets: SAMPLE_PRESETS, window_ms: 861400000, max_daily_msat: 100000000, node_grant: null,
+  };
+  source.budgetStatus = async () => ({ ...budget });
+  source.deviceKeyStatus = async () => ({ available: true, state: 'none', fingerprint: null, owner_action: null, expires_at_ms: null });
+  const approval: OwnerContactApproval = {
+    id: 'request-three', ready: false, expires_at_ms: Date.now() + 60000,
+    request: { client_id: 'c1', grant_op_id: 'ab12', recipient: A, max_total_msat: 14000, contact_budget_msat: 50000 },
+    owner_command: 'konsensus approve first-contact …',
+  };
+  source.firstContactRequest = vi.fn(async () => approval);
+  source.firstContactStatus = vi.fn(async () => approval);
+  source.firstContactCancel = vi.fn(async () => {});
+  source.send = vi.fn();
+  mount = document.createElement('div'); document.body.appendChild(mount);
+  dispose = render(() => <ControlCenter remote source={source} active ready error={null} ownId={SAMPLE_OWN_ID} firstRun={<span />} />, mount);
+  await vi.waitFor(() => expect(element('[data-door-quote]')?.getAttribute('data-door-quote')).toBe('14000'));
+  type('stop this one');
+  element<HTMLButtonElement>('[data-send]').click();
+  await vi.waitFor(() => expect(element('[data-contact-cancel-visible]')).not.toBeNull());
+  element<HTMLButtonElement>('[data-contact-cancel-visible]').click();
+  await vi.waitFor(() => expect(source.firstContactCancel).toHaveBeenCalledWith('request-three'));
+  expect(mount.querySelector('[data-touch-id-first]')).toBeNull();
+  source.firstContactStatus = vi.fn(async () => ({ ...approval, ready: true }));
+  await new Promise((r) => setTimeout(r, 1500));
+  expect(source.send).not.toHaveBeenCalled();
+});
+
+it('the budget waiting card (remote, Touch ID not set up) leads with the offer and keeps its truth in view', async () => {
+  const source = sampleSource({ firstLiveMs: 1e9 });
+  const budget: BudgetView = {
+    paused: false, waiting_for_owner: true, preset: 'careful',
+    autopay: { state: 'off', open_until_ms: null, ceiling_msat: 500000, basis: 'node_grant' },
+    ceiling_msat: 500000, spent_msat: 0, unsettled_msat: 0, rows: [],
+    presets: SAMPLE_PRESETS, window_ms: 861400000, max_daily_msat: 100000000, node_grant: null,
+  };
+  source.budgetStatus = async () => ({ ...budget });
+  source.deviceKeyStatus = async () => ({ available: true, state: 'none', fingerprint: null, owner_action: null, expires_at_ms: null });
+  source.send = vi.fn();
+  mount = document.createElement('div'); document.body.appendChild(mount);
+  dispose = render(() => <ControlCenter remote source={source} active ready error={null} ownId={SAMPLE_OWN_ID} firstRun={<span />} />, mount);
+  await vi.waitFor(() => expect(element('[data-budget="waiting"] [data-touch-id-first]')).not.toBeNull());
+  expect(element('[data-touch-id-stays-text="budget"]').textContent).toContain('Nothing is sent until you press Send after approval');
+  expect(element<HTMLDetailsElement>('[data-budget="waiting"] details[data-other-ways]').open).toBe(false);
+  // The spend bar's own "not set up" pointer is not said a second time.
+  expect(mount.querySelector('[data-device-settings-hint]')).toBeNull();
+  expect(source.send).not.toHaveBeenCalled();
 });
