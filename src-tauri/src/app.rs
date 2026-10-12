@@ -42,7 +42,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use bitsov_app::act::{self, ActionError};
+use bitsov_app::act::{self, ActionError, OperationContext::{Active, Fallback}};
 use bitsov_app::budget::{self, Book};
 use bitsov_app::grant::{self, NodeGrant};
 use bitsov_app::ai;
@@ -1430,9 +1430,18 @@ async fn bootstrap_node(app: AppHandle) {
     }
 }
 
+async fn prepare_operation_history(data_dir: &Path) -> Result<(), ActionError> {
+    let dir = data_dir.join("app-spend");
+    tokio::task::spawn_blocking(move || spend_journal::initialize_history(&dir))
+        .await.map_err(spend_journal::unknown)?
+}
+
 /// Pair, then read /identity. A pairing failure stays in the pairing view (the
 /// onboarding screen shows it with a retry); it is not a node-start error.
 async fn finish_auth(state: &NodeState, data_dir: &Path) {
+    if let Err(error) = prepare_operation_history(data_dir).await {
+        return set_error(state, error.message);
+    }
     if authenticate(state, data_dir).await.is_err() {
         return;
     }
@@ -1489,6 +1498,9 @@ async fn finish_auth(state: &NodeState, data_dir: &Path) {
 /// Retry transport outages without restarting the proxy or discarding durable
 /// pairing. A long node cooldown outlives the HTTP client's startup timeout.
 async fn finish_remote_auth(state: &NodeState, data_dir: &Path) {
+    if let Err(error) = prepare_operation_history(data_dir).await {
+        return set_error(state, error.message);
+    }
     loop {
         if state.quitting.load(Ordering::SeqCst) {
             return;
@@ -3845,6 +3857,13 @@ fn app_files_dir(state: &NodeState) -> Option<PathBuf> {
     state.config.lock().unwrap().as_deref()?.parent().map(Path::to_path_buf)
 }
 
+/// Snapshot error context before preflight can fail. This read grants no authority
+/// and changes no refusal: the locked journal remains the spending fence.
+fn pending_operation_id(state: &NodeState) -> Result<Option<String>, ActionError> {
+    let Some(dir) = app_files_dir(state) else { return Ok(None) };
+    Ok(spend_journal::read_pending(&dir.join("app-spend"))?.and_then(|p| p.operation_id))
+}
+
 fn spend_journal(state: &NodeState) -> Result<Journal, ActionError> {
     let dir = app_files_dir(state)
         .ok_or_else(|| spend_journal::unknown("The app data directory is not ready."))?;
@@ -3860,8 +3879,8 @@ fn ceiling(price: u64, max_msat: u64) -> Result<(), ActionError> {
 
 fn no_pending_spend(state: &NodeState) -> Result<(), ActionError> {
     // A resumable record holds no payment; the next send may replace it.
-    if spend_journal(state)?.pending()?.is_some_and(|p| !p.resumable) {
-        return Err(spend_journal::unknown("Check the pending result before starting another action."));
+    if let Some(p) = spend_journal(state)?.pending()?.filter(|p| !p.resumable) {
+        return act::with_op(Active(p.operation_id.as_deref()), Err(spend_journal::unknown("Check the pending result before starting another action.")));
     }
     Ok(())
 }
@@ -3919,6 +3938,8 @@ fn budget_dir(state: &NodeState) -> Result<(PathBuf, String), ActionError> {
 /// Read the book, let `edit` change it, and write it back only if asked.
 fn with_book<T>(state: &NodeState, write: bool, edit: impl FnOnce(&mut Book) -> Result<T, ActionError>) -> Result<T, ActionError> {
     let _io = state.budget_io.lock().unwrap();
+    let existing_operation = pending_operation_id(state).unwrap_or_default();
+    let result = (|| {
     let (dir, node_id) = budget_dir(state)?;
     let mut book = budget::load(&dir, &node_id)?;
     let out = edit(&mut book)?;
@@ -3932,6 +3953,8 @@ fn with_book<T>(state: &NodeState, write: bool, edit: impl FnOnce(&mut Book) -> 
         budget::save(&dir, &book)?;
     }
     Ok(out)
+    })();
+    act::with_op(Fallback(existing_operation.as_deref()), result)
 }
 
 fn refuse_if_paused(state: &NodeState) -> Result<(), ActionError> {
@@ -4074,9 +4097,22 @@ fn refine_retry_fee(state: &NodeState, pending: &spend_journal::Pending, reply: 
     })
 }
 
+/// A successful POST retains its context through the caller's receipt decoding.
+#[derive(Debug)]
+struct MoneyReply {
+    text: String,
+    operation_id: Option<String>,
+}
+
+impl MoneyReply {
+    fn decode<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, ActionError> {
+        act::with_op(Active(self.operation_id.as_deref()), decode_act(path, &self.text))
+    }
+}
+
 /// No automatic HTTP retry on a money path. Journal before dispatch, and retain
 /// ambiguity on every transport/5xx/decode failure, even across app restarts.
-async fn money_post(state: &NodeState, auth: Auth, path: &str, body: serde_json::Value, max_msat: u64, charge: Option<Charge>) -> Result<String, ActionError> {
+async fn money_post(state: &NodeState, auth: Auth, path: &str, body: serde_json::Value, max_msat: u64, charge: Option<Charge>) -> Result<MoneyReply, ActionError> {
     money_post_with(state, auth, path, body, max_msat, charge, None).await
 }
 
@@ -4092,11 +4128,16 @@ async fn money_post(state: &NodeState, auth: Auth, path: &str, body: serde_json:
 /// once per id and answers 409 if the text changed.
 ///
 /// Holds `NodeState::money` throughout: a reconcile waits for this POST.
-async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: serde_json::Value, max_msat: u64, charge: Option<Charge>, retry: Option<&spend_journal::Undelivered>) -> Result<String, ActionError> {
+async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: serde_json::Value, max_msat: u64, charge: Option<Charge>, retry: Option<&spend_journal::Undelivered>) -> Result<MoneyReply, ActionError> {
+    let mut existing_operation = pending_operation_id(state).unwrap_or_default();
+    let result = async {
     let _money = state.money.lock().await;
+    // A failed refresh cannot erase an ID already observed before the wait.
+    existing_operation = pending_operation_id(state).unwrap_or_else(|_| existing_operation.clone());
     refuse_if_connection_waiting(state)?;
     let journal = spend_journal(state)?;
     let prior = journal.pending()?;
+    existing_operation = prior.as_ref().and_then(|p| p.operation_id.clone());
     ensure_fresh_token(state).await;
     let token = state.token.lock().unwrap().clone().ok_or_else(|| ActionError::new("app_not_ready", "Not authenticated."))?;
     let node_id = state.node_id.lock().unwrap().clone().ok_or_else(|| ActionError::new("app_not_ready", "No node identity."))?;
@@ -4107,11 +4148,6 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
         (Some(p), Some(u)) if u.retry && !u.in_flight && !p.over_budget && p.node_id == node_id && p.undelivered.as_ref() == Some(u) => {}
         _ => return Err(spend_journal::unknown("Check the pending result before sending again.")),
     }
-    // Nothing was paid: forget this attempt, keeping a replaced record retryable.
-    let abandon = |journal: &Journal| match &prior {
-        Some(p) => journal.save(p),
-        None => journal.clear(),
-    };
     // Pause all binds every money request, whatever window or approval is open.
     refuse_if_paused(state)?;
     check_auth(state, auth)?;
@@ -4157,6 +4193,9 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
         Some(p) if p.op.as_deref() == Some(op.as_str()) && p.operation_id.is_some() => p.operation_id.clone(),
         _ => Some(spend_journal::new_operation_id()?),
     };
+    // Once minted/reused, the id accompanies every failure, including begin,
+    // retry snapshot writes, ledger repair and the outcome error handler itself.
+    let outcome = async {
     let mut pending = match (&prior, retry) {
         (Some(p), Some(_)) => {
             // Settled when the 502 came back; again here in case that write failed.
@@ -4178,6 +4217,23 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
         }
         _ => journal.begin_operation(&node_id, path, &body, max_msat, operation_id.clone().map(|id| (id, op.clone())))?,
     };
+    use spend_journal::OperationState as OpState;
+    journal.record_outcome(&pending, OpState::Dispatching, None)?;
+    let begun = pending.clone();
+    let abandon = |journal: &Journal| -> Result<(), ActionError> {
+        if retry.is_some() {
+            // This attempt paid nothing new; its original payment still exists.
+            journal.record_outcome(&begun, OpState::PaidUndelivered, None)?;
+        } else {
+            journal.record_outcome(&begun, OpState::Unpaid, None)?;
+        }
+        match &prior {
+            Some(p) => journal.save(p),
+            None => journal.clear(),
+        }
+    };
+    // Once pending exists, ambiguous failures also update its ledger outcome.
+    let result = async {
     // Durable above; only now may the id leave the app.
     if let Some(id) = &operation_id { body["operation_id"] = serde_json::json!(id); }
     pending.all_in = true;
@@ -4255,6 +4311,7 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
                 pending.paid = None;
                 pending.target = None;
                 journal.save(&pending)?;
+                journal.record_outcome(&pending, OpState::Unpaid, None)?;
             } else {
                 abandon(&journal)?;
             }
@@ -4273,6 +4330,7 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
             }
             "failed_paid" => {
                 release(state)?;
+                journal.record_outcome(&pending, OpState::FailedPaid, serde_json::from_str(&text).ok().as_ref())?;
                 journal.clear()?;
                 return Err(ActionError::new("failed_paid", act::FAILED_PAID));
             }
@@ -4309,6 +4367,9 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
             payment_hash: op_error.as_ref().and_then(|e| e.payment_hash.clone()).or_else(|| retry.and_then(|u| u.payment_hash.clone())),
         });
         journal.save(&pending)?;
+        journal.record_outcome(&pending, OpState::PaidUndelivered, Some(&serde_json::json!({
+            "amount_msat": paid, "payment_hash": pending.undelivered.as_ref().and_then(|u| u.payment_hash.clone())
+        })))?;
         if pending.over_budget {
             return Err(spend_journal::unknown(format!("The node reports {} msat settled, beyond the reserved total ({reserve_msat}). Funds may already have moved; do not retry.", incomplete.amount_msat)));
         }
@@ -4340,6 +4401,7 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
         if operation_id.is_some() && receipt.operation_id != operation_id {
             return Err(spend_journal::unknown("The node answered for a different operation. Nothing was dispatched again."));
         }
+        journal.record_outcome(&pending, OpState::Paid, Some(&value))?;
         let complete = if is_room {
             let summary = act::room_result(&value, &body, max_msat)?;
             room_refused = summary.1;
@@ -4412,6 +4474,7 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
             return Err(spend_journal::unknown(format!("The node reports {amount} msat for the message and {readmission} msat for admission, beyond the confirmed message cap ({max_msat}) or reserved total ({reserve_msat}). Funds may already have moved; do not retry.")));
         }
     } else {
+        journal.record_outcome(&pending, OpState::Settled, None)?;
         journal.clear()?;
     }
     if is_room && !complete {
@@ -4421,13 +4484,51 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
         return Err(ActionError::new("room_partial", "Room send incomplete: a member was refused or a paid message could not be stored. Do not resend the whole room message."));
     }
     serde_json::to_string(&value).map_err(spend_journal::unknown)
+    }.await;
+    result.map_err(|error: ActionError| {
+        // Explicit evidence above wins; ambiguous exits must not erase known payment.
+        let saved = operation_id.as_deref().map(|id| journal.operation_record(id)).transpose();
+        let update = match saved {
+            Ok(Some(Some(record))) if record.state == OpState::Dispatching =>
+                journal.record_outcome(&pending, OpState::Unknown, None),
+            Err(error) => Err(error),
+            _ => Ok(()),
+        };
+        update.err().unwrap_or(error)
+    })
+    }.await;
+    act::with_op(Active(operation_id.as_deref()), outcome).map(|text| MoneyReply { text, operation_id })
+    }.await;
+    act::with_op(Fallback(existing_operation.as_deref()), result)
+}
+
+/// Read-only H1 projection; the single pending slot remains the spending fence.
+async fn do_op_list(state: &NodeState, peer: Option<&str>) -> Result<spend_journal::OpList, ActionError> {
+    let existing_operation = pending_operation_id(state).unwrap_or_default();
+    let result = async {
+    let peer = peer.map(control::node_id).transpose().map_err(ActionError::invalid)?;
+    let node_id = state.node_id.lock().unwrap().clone()
+        .ok_or_else(|| ActionError::new("app_not_ready", "No node identity."))?;
+    let dir = app_files_dir(state).ok_or_else(|| ActionError::new("app_not_ready", "No app storage."))?.join("app-spend");
+    // Atomic operation files can be read without the global money/OS journal
+    // locks. Keep directory work off the async executor as well.
+    tokio::task::spawn_blocking(move || spend_journal::list_operations(&dir, &node_id, peer.as_deref(), spend_journal::OP_LIST_LIMIT))
+        .await.map_err(spend_journal::unknown)?
+    }.await;
+    act::with_op(Fallback(existing_operation.as_deref()), result)
 }
 
 /// Waits for any money POST in flight (`NodeState::money`), then reads its record.
 async fn do_spend_reconcile(state: &NodeState) -> Result<String, ActionError> {
+    let mut existing_operation = pending_operation_id(state).unwrap_or_default();
+    let result = async {
     let _money = state.money.lock().await;
+    // A failed refresh cannot erase an ID already observed before the wait.
+    existing_operation = pending_operation_id(state).unwrap_or_else(|_| existing_operation.clone());
     let journal = spend_journal(state)?;
     let Some(mut pending) = journal.pending()? else { return Ok("No pending spend.".into()); };
+    let operation_id = pending.operation_id.clone();
+    let result = async {
     if state.node_id.lock().unwrap().as_deref() != Some(pending.node_id.as_str()) {
         return Err(spend_journal::unknown("The pending action belongs to another identity."));
     }
@@ -4457,6 +4558,13 @@ async fn do_spend_reconcile(state: &NodeState) -> Result<String, ActionError> {
             return Err(spend_journal::unknown("The node exceeded its spending bound; inspect the owner node."));
         }
         close_charge(state, pending.charge_id(), Some(paid), pending.target.as_ref())?;
+        // Finishing accounting does not turn a permanent rejection or an
+        // undelivered payment into a successfully settled operation.
+        let recorded = pending.operation_id.as_deref().map(|id| journal.operation_record(id)).transpose()?.flatten();
+        if !recorded.is_some_and(|r| matches!(r.state,
+            spend_journal::OperationState::FailedPaid | spend_journal::OperationState::PaidUndelivered)) {
+            journal.record_outcome(&pending, spend_journal::OperationState::Settled, None)?;
+        }
         journal.clear()?;
         return Ok("Previous action accounted for. Nothing was dispatched again.".into());
     }
@@ -4502,6 +4610,10 @@ async fn do_spend_reconcile(state: &NodeState) -> Result<String, ActionError> {
         }
         None => Err(spend_journal::unknown("No matching terminal record. Missing history does not prove failure.")),
     }
+    }.await;
+    act::with_op(Active(operation_id.as_deref()), result)
+    }.await;
+    act::with_op(Fallback(existing_operation.as_deref()), result)
 }
 
 const NOTHING_PAID: &str = "Not sent - nothing was paid: your node holds no payment for this message. Sending the same message again reuses its operation, so it can never be paid twice.";
@@ -4510,7 +4622,8 @@ const NOTHING_PAID: &str = "Not sent - nothing was paid: your node holds no paym
 /// Never re-sends and never pays: a retry is a separate owner action that
 /// reuses the same id. Unknown or unrecognised states keep the fence.
 async fn reconcile_operation(state: &NodeState, journal: &Journal, mut pending: spend_journal::Pending, id: &str) -> Result<String, ActionError> {
-    use spend_journal::Outcome;
+    let result = async {
+    use spend_journal::{Outcome, OperationState as OpState};
     let path = format!("/messages/operations/{id}");
     let (status, text) = call_api(state, reqwest::Method::GET, &path, None).await
         .map_err(|e| spend_journal::unknown(format!("Your node could not be asked about this send ({e}). Nothing was dispatched again.")))?;
@@ -4536,6 +4649,7 @@ async fn reconcile_operation(state: &NodeState, journal: &Journal, mut pending: 
     let retry = pending.undelivered.clone();
     let reply = match (outcome, reply) {
         (Outcome::PaymentUnknown, _) => {
+            journal.record_outcome(&pending, OpState::Unknown, None)?;
             return Err(ActionError::new("payment_unknown", act::PAYMENT_UNKNOWN).for_pending(&pending.id));
         }
         (Outcome::NothingPaid, _) if retry.is_some() => {
@@ -4549,11 +4663,19 @@ async fn reconcile_operation(state: &NodeState, journal: &Journal, mut pending: 
             pending.paid = None;
             pending.target = None;
             journal.save(&pending)?;
+            journal.record_outcome(&pending, OpState::Unpaid, None)?;
             return Ok(NOTHING_PAID.into());
         }
         (_, Some(reply)) => reply,
         (_, None) => unreachable!("only NothingPaid lacks a reply"),
     };
+    let evidence: serde_json::Value = serde_json::from_str(&text).map_err(spend_journal::unknown)?;
+    let recorded = match outcome {
+        Outcome::Accepted | Outcome::Sent => OpState::Paid,
+        Outcome::FailedPaid => OpState::FailedPaid,
+        _ => OpState::PaidUndelivered,
+    };
+    journal.record_outcome(&pending, recorded, Some(&evidence))?;
     let prior_over_budget = refine_retry_fee(state, &pending, &reply)?;
     // The reply covers the whole operation; a retry accounts only what it added.
     let whole = reply.amount_msat.checked_add(reply.readmission_msat.unwrap_or(0))
@@ -4586,6 +4708,7 @@ async fn reconcile_operation(state: &NodeState, journal: &Journal, mut pending: 
     }
     match outcome {
         Outcome::Accepted | Outcome::Sent => {
+            journal.record_outcome(&pending, OpState::Settled, None)?;
             journal.clear()?;
             Ok(if outcome == Outcome::Accepted {
                 format!("Accepted: the recipient's node stored it ({whole} msat paid). Nothing was dispatched again.")
@@ -4616,19 +4739,26 @@ async fn reconcile_operation(state: &NodeState, journal: &Journal, mut pending: 
             )).for_pending(&pending.id))
         }
     }
+    }.await;
+    act::with_op(Active(Some(id)), result)
 }
 
 /// The owner stops retrying a paid, undelivered message. Only a record whose
 /// money is fully known (no retry in flight, within its bound) is released,
 /// after its accounting is written. Nothing is dispatched.
 fn do_spend_dismiss_undelivered(state: &NodeState, pending_id: &str) -> Result<String, ActionError> {
+    let mut existing_operation = pending_operation_id(state).unwrap_or_default();
+    let result = (|| {
     let Ok(_money) = state.money.try_lock() else {
         return Err(ActionError::new("money_busy", "Another payment action is still running. Nothing was changed; try again in a moment."));
     };
+    existing_operation = pending_operation_id(state).unwrap_or_else(|_| existing_operation.clone());
     let journal = spend_journal(state)?;
     // Only the record the owner chose: a stale card never releases another message.
     let pending = journal.pending()?.filter(|p| p.id == pending_id)
         .ok_or_else(|| ActionError::new("retry_unavailable", "That message is no longer waiting for delivery. Nothing was changed."))?;
+    let operation_id = pending.operation_id.clone();
+    let result = (|| {
     if state.node_id.lock().unwrap().as_deref() != Some(pending.node_id.as_str()) {
         return Err(spend_journal::unknown("The pending action belongs to another identity."));
     }
@@ -4639,8 +4769,13 @@ fn do_spend_dismiss_undelivered(state: &NodeState, pending_id: &str) -> Result<S
     if let Some(paid) = pending.accounting_msat {
         close_charge(state, pending.charge_id(), Some(paid), pending.target.as_ref())?;
     }
+    journal.record_outcome(&pending, spend_journal::OperationState::Settled, None)?;
     journal.clear()?;
     Ok(format!("Stopped retrying. {} msat was paid and the message was not delivered; nothing more will be paid for it.", undelivered.paid_msat))
+    })();
+    act::with_op(Active(operation_id.as_deref()), result)
+    })();
+    act::with_op(Fallback(existing_operation.as_deref()), result)
 }
 
 // ---- G1 node grants -------------------------------------------------------------
@@ -5176,6 +5311,8 @@ async fn do_message_send_inner(
     first_contact_msat: Option<u64>,
     conversation: bool,
 ) -> Result<act::SendReceipt, ActionError> {
+    let existing_operation = pending_operation_id(state).unwrap_or_default();
+    let result = async {
     let target = if is_room { control::room_id(recipient) } else { control::node_id(recipient) }.map_err(ActionError::invalid)?;
     // A room leg (genome `room_binding_v1`) pays at most the owner's confirmed
     // cap for that member, fee included: no first contact, no raised re-admission cap.
@@ -5244,9 +5381,11 @@ async fn do_message_send_inner(
         // After a reconnect or restart the contact asks for admission again,
         // and the node kept its signed quote for this connection.
         Err(e) if e.code == "readmission_capped" && quoted_readmission => {
-            readmit_under_quote(state, &target, body, max_msat, e, caps.readmission_possible).await
+            let operation_id = e.operation_id.clone();
+            act::with_op(Active(operation_id.as_deref()),
+                readmit_under_quote(state, &target, body, max_msat, e, caps.readmission_possible).await)
         }
-        Err(e) if e.code == "readmission_capped" && room_leg => Err(ActionError::new("readmission_capped", act::ROOM_LEG_READMISSION)),
+        Err(e) if e.code == "readmission_capped" && room_leg => Err(ActionError::new("readmission_capped", act::ROOM_LEG_READMISSION).for_operation(e.operation_id.as_deref())),
         other => other,
     };
     let text = match sent {
@@ -5254,12 +5393,12 @@ async fn do_message_send_inner(
         // it from the budget only for a contact its grant budgets; this one it
         // does not, so the owner confirms once, on the door card.
         Err(e) if e.code == "grant_first_contact" && node_ok.is_none() => {
-            return Err(readmission_needs_ok());
+            return Err(readmission_needs_ok().for_operation(e.operation_id.as_deref()));
         }
         other => other?,
     };
-    let reply: act::SendReply = decode_act("/messages/compose", &text)?;
-    let total_msat = reply.total_msat()?;
+    let reply: act::SendReply = text.decode("/messages/compose")?;
+    let total_msat = act::with_op(Active(text.operation_id.as_deref()), reply.total_msat())?;
     Ok(act::SendReceipt {
         total_msat,
         fee_paid_msat: reply.fee_paid_msat,
@@ -5275,6 +5414,8 @@ async fn do_message_send_inner(
         accepted: reply.accepted,
         readmission_msat: reply.readmission_msat.filter(|m| *m > 0),
     })
+    }.await;
+    act::with_op(Fallback(existing_operation.as_deref()), result)
 }
 
 /// Genome `quoted_readmission_v1`: the contact asked for admission again and
@@ -5291,7 +5432,9 @@ async fn readmit_under_quote(
     max_msat: u64,
     refused: ActionError,
     quote_offered: bool,
-) -> Result<String, ActionError> {
+) -> Result<MoneyReply, ActionError> {
+    let operation_id = refused.operation_id.clone();
+    let result = async {
     let recipient = body["recipient"].as_str().unwrap_or_default().to_string();
     let Ok(quote) = read_first_contact_quote_with_cap(state, &recipient, quote_offered).await else { return Err(refused) };
     // A cap that already covered this quote was refused: never loop.
@@ -5311,6 +5454,8 @@ async fn readmit_under_quote(
     check_node_grant(state, "/messages/compose", &body, quote.total_msat).await?;
     remember_readmission_ask(state, &recipient, &quote);
     Err(ActionError::readmission_quoted(view))
+    }.await;
+    act::with_op(Active(operation_id.as_deref()), result)
 }
 
 fn remember_readmission_ask(state: &NodeState, peer: &str, quote: &control::FirstContactQuote) {
@@ -5355,11 +5500,15 @@ fn readmission_needs_ok() -> ActionError {
 /// - `approved_msat: Some(total)`: the owner approved that all-in price under
 ///   the normal approval, as for any send; the node pays at most that.
 async fn do_message_retry(state: &NodeState, recipient: &str, plaintext: &str, approved_msat: Option<u64>) -> Result<act::SendReceipt, ActionError> {
+    let mut existing_operation = pending_operation_id(state).unwrap_or_default();
+    let result = async {
     let target = control::node_id(recipient).map_err(ActionError::invalid)?;
     let mut body = act::compose_body(recipient, false, plaintext)?;
     let op = spend_journal::operation(&body);
     let unavailable = || ActionError::new("retry_unavailable", "There is no paid, undelivered message to retry for this contact. Check the pending result; do not send the message again.");
-    let undelivered = spend_journal(state)?.pending()?
+    let pending = spend_journal(state)?.pending()?;
+    existing_operation = pending.as_ref().and_then(|p| p.operation_id.clone());
+    let undelivered = pending
         .filter(|p| !p.over_budget)
         .and_then(|p| p.undelivered)
         .filter(|u| u.retry && !u.in_flight && u.peer == target && u.op == op)
@@ -5384,23 +5533,23 @@ async fn do_message_retry(state: &NodeState, recipient: &str, plaintext: &str, a
         // The node pays re-admission under a cap that fits the contact's signed
         // quote: Retry delivery (zero cap) asks the owner for that price.
         Err(e) if e.code == "readmission_capped" && caps.quoted_readmission && approved_msat.is_none() => {
-            return Err(needs_admission(state, &target, &undelivered).await);
+            return Err(needs_admission(state, &target, &undelivered).await.for_operation(e.operation_id.as_deref()));
         }
         // Asking the owner to approve a price cannot help: any cap refuses it.
         Err(e) if e.code == "readmission_capped" => {
-            return Err(ActionError::new("readmission_capped", act::READMISSION_CAPPED_RETRY));
+            return Err(ActionError::new("readmission_capped", act::READMISSION_CAPPED_RETRY).for_operation(e.operation_id.as_deref()));
         }
         // Refused before paying anything: a payment is still due.
         Err(e) if approved_msat.is_none() && matches!(e.code, "price_cap_exceeded" | "grant_first_contact" | "grant_readmission") => {
-            return Err(needs_admission(state, &target, &undelivered).await);
+            return Err(needs_admission(state, &target, &undelivered).await.for_operation(e.operation_id.as_deref()));
         }
         Err(e) if e.code == "price_cap_exceeded" => {
-            return Err(ActionError::new("price_cap_exceeded", "Your node refused before paying: delivering it now costs more than the price you approved, or needs an admission the node pays only on a new send. Nothing was paid. Retry delivery for the current price, or stop retrying."));
+            return Err(ActionError::new("price_cap_exceeded", "Your node refused before paying: delivering it now costs more than the price you approved, or needs an admission the node pays only on a new send. Nothing was paid. Retry delivery for the current price, or stop retrying.").for_operation(e.operation_id.as_deref()));
         }
         other => other?,
     };
-    let reply: act::SendReply = decode_act("/messages/compose", &text)?;
-    let total_msat = reply.total_msat()?;
+    let reply: act::SendReply = text.decode("/messages/compose")?;
+    let total_msat = act::with_op(Active(text.operation_id.as_deref()), reply.total_msat())?;
     Ok(act::SendReceipt {
         total_msat,
         fee_paid_msat: reply.fee_paid_msat,
@@ -5416,6 +5565,8 @@ async fn do_message_retry(state: &NodeState, recipient: &str, plaintext: &str, a
         accepted: reply.accepted,
         readmission_msat: reply.readmission_msat.filter(|m| *m > 0),
     })
+    }.await;
+    act::with_op(Fallback(existing_operation.as_deref()), result)
 }
 
 /// `retry_needs_admission`, with the contact's own signed quote when the node
@@ -5466,6 +5617,8 @@ async fn do_invoice_create(
 }
 
 async fn do_payment_pay(state: &NodeState, bolt11: &str, amount_msat: u64, max_msat: u64) -> Result<act::PaymentReceipt, ActionError> {
+    let existing_operation = pending_operation_id(state).unwrap_or_default();
+    let result = async {
     let generation = approval_generation(state)?;
     no_pending_spend(state)?;
     let mut body = act::pay_body(bolt11, amount_msat)?;
@@ -5474,7 +5627,9 @@ async fn do_payment_pay(state: &NodeState, bolt11: &str, amount_msat: u64, max_m
     body["max_routing_fee_msat"] = serde_json::json!(quote.max_routing_fee_msat);
     let charge = plan_manual_charge(state, budget::INVOICE_PAYMENTS, max_msat)?;
     let text = money_post(state, Auth::Window(generation), "/payments/pay", body, max_msat, Some(charge)).await?;
-    Ok(decode_act::<act::PayReply>("/payments/pay", &text)?.receipt(now_ms()))
+    Ok(text.decode::<act::PayReply>("/payments/pay")?.receipt(now_ms()))
+    }.await;
+    act::with_op(Fallback(existing_operation.as_deref()), result)
 }
 
 async fn do_payment_keysend(
@@ -5484,6 +5639,8 @@ async fn do_payment_keysend(
     memo: Option<&str>,
     max_msat: u64,
 ) -> Result<act::PaymentReceipt, ActionError> {
+    let existing_operation = pending_operation_id(state).unwrap_or_default();
+    let result = async {
     let generation = approval_generation(state)?;
     no_pending_spend(state)?;
     let mut body = act::keysend_body(dest_pubkey, amount_msat, memo)?;
@@ -5492,7 +5649,9 @@ async fn do_payment_keysend(
     body["max_routing_fee_msat"] = serde_json::json!(quote.max_routing_fee_msat);
     let charge = plan_manual_charge(state, budget::KEYSEND_PAYMENTS, max_msat)?;
     let text = money_post(state, Auth::Window(generation), "/payments/keysend", body, max_msat, Some(charge)).await?;
-    Ok(decode_act::<act::KeysendReply>("/payments/keysend", &text)?.receipt(now_ms()))
+    Ok(text.decode::<act::KeysendReply>("/payments/keysend")?.receipt(now_ms()))
+    }.await;
+    act::with_op(Fallback(existing_operation.as_deref()), result)
 }
 
 async fn do_invite_create(state: &NodeState, invitee: &str, addr: &str, hours: u64) -> Result<act::InviteView, ActionError> {
@@ -5632,6 +5791,8 @@ async fn do_call_signal(
     plaintext: &str,
     max_msat: u64,
 ) -> Result<act::CallReceipt, ActionError> {
+    let existing_operation = pending_operation_id(state).unwrap_or_default();
+    let result = async {
     let target = control::node_id(peer).map_err(ActionError::invalid)?;
     let mut body = act::call_body(&target, kind, plaintext)?;
     let needs_contact = || ActionError::new("call_needs_contact", "Calls go to contacts you have already paid. Send them a message first. Nothing was paid.");
@@ -5676,9 +5837,10 @@ async fn do_call_signal(
         operation: caps.operations,
     };
     let text = money_post(state, auth, "/messages/compose", body, max_msat, Some(charge)).await?;
-    let reply: act::SendReply = decode_act("/messages/compose", &text)?;
+    let reply: act::SendReply = text.decode("/messages/compose")?;
     Ok(act::CallReceipt {
-        total_msat: reply.total_msat()?,
+        operation_id: reply.operation_id.clone(),
+        total_msat: act::with_op(Active(text.operation_id.as_deref()), reply.total_msat())?,
         message_id: reply.message_id,
         kind,
         amount_msat: reply.amount_msat,
@@ -5687,6 +5849,8 @@ async fn do_call_signal(
         accepted: reply.accepted,
         sent_at_ms: now_ms(),
     })
+    }.await;
+    act::with_op(Fallback(existing_operation.as_deref()), result)
 }
 
 // ---- porch reads (genome BROWSE.md, `porch_read_v1`) ------------------------------
@@ -5741,6 +5905,8 @@ async fn read_porch_quote(state: &NodeState, peer: &str, path: &str) -> Result<a
 }
 
 async fn do_porch_read(state: &NodeState, peer: &str, path: &str, max_msat: u64) -> Result<porch::PorchRead, ActionError> {
+    let existing_operation = pending_operation_id(state).unwrap_or_default();
+    let result = async {
     let target = control::node_id(peer).map_err(ActionError::invalid)?;
     let path = porch::porch_path(path)?;
     let (auth, plan) = plan_message(state, &target, false, max_msat, None)
@@ -5764,6 +5930,8 @@ async fn do_porch_read(state: &NodeState, peer: &str, path: &str, max_msat: u64)
     porch::project(&text, &target, &path, accounted, now_unix().max(0) as u64).map_err(|e| {
         ActionError::new("porch_reply_invalid", format!("Paid {}, but the answer could not be shown: {e}.", porch::amount(accounted)))
     })
+    }.await;
+    act::with_op(Fallback(existing_operation.as_deref()), result)
 }
 
 /// `money_post` for a read: its reply is a page, not a send receipt. A refusal
@@ -5773,10 +5941,15 @@ async fn do_porch_read(state: &NodeState, peer: &str, path: &str, max_msat: u64)
 /// and what it counts against the budget (the all-in ceiling: the node
 /// reports no routing fee for a read).
 async fn porch_post(state: &NodeState, auth: Auth, body: serde_json::Value, max_msat: u64, charge: Charge) -> Result<(String, u64), ActionError> {
+    let mut existing_operation = pending_operation_id(state).unwrap_or_default();
+    let result = async {
     let _money = state.money.lock().await;
+    // The quote and lock wait may have let another command publish a pending ID.
+    existing_operation = pending_operation_id(state).unwrap_or_else(|_| existing_operation.clone());
     refuse_if_connection_waiting(state)?;
     let journal = spend_journal(state)?;
     let prior = journal.pending()?;
+    existing_operation = prior.as_ref().and_then(|p| p.operation_id.clone());
     ensure_fresh_token(state).await;
     let token = state.token.lock().unwrap().clone().ok_or_else(|| ActionError::new("app_not_ready", "Not authenticated."))?;
     let node_id = state.node_id.lock().unwrap().clone().ok_or_else(|| ActionError::new("app_not_ready", "No node identity."))?;
@@ -5874,6 +6047,8 @@ async fn porch_post(state: &NodeState, auth: Auth, body: serde_json::Value, max_
     close_charge(state, &charge_id, Some(max_msat), None)?;
     journal.clear()?;
     Ok((text, max_msat))
+    }.await;
+    act::with_op(Fallback(existing_operation.as_deref()), result)
 }
 
 async fn read_porch_cards(state: &NodeState) -> Result<Vec<porch::PorchCard>, String> {
@@ -5898,6 +6073,8 @@ async fn do_file_send(
     max_msat: u64,
     first_contact_msat: Option<u64>,
 ) -> Result<act::FileReceipt, ActionError> {
+    let existing_operation = pending_operation_id(state).unwrap_or_default();
+    let result = async {
     let recipient = control::node_id(recipient).map_err(ActionError::invalid)?;
     // Same budget / ten-minute window rules as a 1:1 message. Genome's file
     // send has no `operation_id` field (`deny_unknown_fields`), so we keep
@@ -5941,8 +6118,8 @@ async fn do_file_send(
         Some(charge),
     )
     .await?;
-    let reply: act::SendReply = decode_act("/files/send", &text)?;
-    let total_msat = reply.total_msat()?;
+    let reply: act::SendReply = text.decode("/files/send")?;
+    let total_msat = act::with_op(Active(text.operation_id.as_deref()), reply.total_msat())?;
     Ok(act::FileReceipt {
         readmission_msat: reply.readmission_msat,
         fee_paid_msat: reply.fee_paid_msat,
@@ -5959,6 +6136,8 @@ async fn do_file_send(
         state: reply.state,
         accepted: reply.accepted,
     })
+    }.await;
+    act::with_op(Fallback(existing_operation.as_deref()), result)
 }
 
 /// The owner's spend window as it stands; polls a pending elevation request.
@@ -6562,6 +6741,17 @@ async fn relation_approve(
 }
 
 #[tauri::command(rename_all = "snake_case")]
+async fn op_list(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    peer: Option<String>,
+) -> Result<spend_journal::OpList, ActionError> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    do_op_list(state.inner(), peer.as_deref()).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
 async fn spend_reconcile(
     window: WebviewWindow<impl tauri::Runtime>,
     state: State<'_, NodeState>,
@@ -6672,12 +6862,16 @@ fn do_budget_pause(state: &NodeState) -> Result<budget::BudgetView, ActionError>
 
 /// Resume is the owner's tap for the daily total already on the book.
 async fn do_budget_resume(state: &NodeState) -> Result<budget::BudgetView, ActionError> {
+    let existing_operation = pending_operation_id(state).unwrap_or_default();
+    let result = async {
     let ceiling = with_book(state, true, |book| {
         book.paused = false;
         Ok(book.ceiling_msat)
     })?;
     spend_advance_for(state, Some(Want::Budget(ceiling))).await?;
     budget_view(state)
+    }.await;
+    act::with_op(Fallback(existing_operation.as_deref()), result)
 }
 
 /// Reconcile from node authority, never from a saved local approval. Serialize
@@ -7681,6 +7875,7 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             device_key_cancel,
             relation_approve,
             spend_reconcile,
+            op_list,
             budget_status,
             budget_approve,
             budget_set,
@@ -9524,6 +9719,12 @@ mod control_act_tests {
         let watched: Routes = Arc::new(move |m, p, b| {
             if p == "/messages/compose" {
                 let path = j.lock().unwrap().clone().unwrap();
+                let body: serde_json::Value = serde_json::from_str(b).unwrap();
+                let id = body["operation_id"].as_str().unwrap();
+                let record: serde_json::Value = serde_json::from_slice(&std::fs::read(
+                    path.parent().unwrap().join("ops").join(format!("{id}.json"))).unwrap()).unwrap();
+                assert_eq!(record["state"], "dispatching", "ledger durable before POST");
+                assert_eq!(record["op_id"], id);
                 s.lock().unwrap().push(std::fs::read(path).ok().map(|bytes| serde_json::from_slice(&bytes).unwrap()));
             }
             routes(m, p, b)
@@ -9545,6 +9746,276 @@ mod control_act_tests {
         do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap();
         let ids = op_ids(&node);
         assert_ne!(ids[0], ids[1]);
+    }
+
+    fn ledger_record(node: &Fake, id: &str) -> serde_json::Value {
+        let path = journal_file(node).parent().unwrap().join("ops").join(format!("{id}.json"));
+        serde_json::from_slice(&std::fs::read(path).expect("durable operation record")).unwrap()
+    }
+
+    #[tokio::test]
+    async fn ledger_records_existing_outcomes_without_changing_the_fence() {
+        for (status, body, code, state, held) in [
+            (400, r#"{"code":"not_dispatched"}"#, "not_dispatched", "unpaid", false),
+            (401, "{}", "spend_refused", "unpaid", false),
+            (403, "{}", "spend_refused", "unpaid", false),
+            (503, r#"{"code":"not_ready","money_ready":false}"#, "not_ready", "unpaid", false),
+            (409, r#"{"code":"price_cap_exceeded"}"#, "price_cap_exceeded", "unpaid", false),
+            (409, r#"{"code":"operation_mismatch"}"#, "operation_mismatch", "unpaid", false),
+            (409, r#"{"code":"budget_exceeded","reason":"per_call"}"#, "grant_per_call", "unpaid", false),
+            (409, r#"{"code":"failed_paid"}"#, "failed_paid", "failed_paid", false),
+            (409, r#"{"code":"payment_unresolved"}"#, "payment_unknown", "unknown", true),
+            (500, "{}", "spend_unknown", "unknown", true),
+            (200, "broken", "spend_unknown", "unknown", true),
+            // H2 alone changes these call refusals into proven non-dispatch.
+            (400, r#"{"reason":"call_not_live"}"#, "spend_unknown", "unknown", true),
+        ] {
+            let (inner, _) = ops_node();
+            let node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
+                if p == "/messages/compose" { (status, body.into()) } else { inner(m, p, b) }
+            }));
+            spend_advance(&node.state, true).await.unwrap();
+            let err = do_message_send(&node.state, A, false, "PRIVATE", 14000, None).await.unwrap_err();
+            if !matches!(status, 401 | 403) { assert_eq!(err.code, code, "{body}"); }
+            let id = op_ids(&node)[0].clone().unwrap();
+            assert_eq!(serde_json::to_value(&err).unwrap()["operation_id"], id);
+            let record = ledger_record(&node, &id);
+            assert_eq!(record["state"], state, "{body}");
+            assert!(!record.to_string().contains("PRIVATE"));
+            assert_eq!(pending(&node).is_some(), held, "existing single-slot fence: {body}");
+            assert_eq!(ledger_record(&node, &id), record, "record is retained");
+        }
+    }
+
+    #[tokio::test]
+    async fn ledger_success_and_paid_undelivered_are_retained() {
+        let (node, _) = ops_fake(|n| { n.script = vec![("paid", false)]; n.settled_incomplete = true; });
+        spend_advance(&node.state, true).await.unwrap();
+        let err = do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap_err();
+        assert_eq!(err.code, "payment_settled_undelivered");
+        let p = pending(&node).unwrap();
+        let id = p.operation_id.as_ref().unwrap();
+        assert_eq!(ledger_record(&node, id)["state"], "paid_undelivered");
+        do_spend_dismiss_undelivered(&node.state, &p.id).unwrap();
+        let record = ledger_record(&node, id);
+        assert_eq!(record["state"], "settled");
+        assert_eq!(record["paid_msat"], 2000);
+        assert!(pending(&node).is_none());
+        let receipt = do_message_send(&node.state, A, false, "next", 14000, None).await.unwrap();
+        let second = receipt.operation_id.unwrap();
+        assert_ne!(&second, id);
+        assert_eq!(ledger_record(&node, &second)["state"], "settled");
+        assert_eq!(ledger_record(&node, id), record);
+    }
+
+    #[tokio::test]
+    async fn ledger_dismiss_write_failure_keeps_dispatched_operation_id() {
+        let (node, _) = ops_fake(|n| { n.script = vec![("paid", false)]; n.settled_incomplete = true; });
+        spend_advance(&node.state, true).await.unwrap();
+        let error = do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap_err();
+        assert_eq!(error.code, "payment_settled_undelivered");
+        let p = pending(&node).unwrap();
+        let id = p.operation_id.as_ref().unwrap();
+        let record = ledger_record(&node, id);
+        let next = journal_file(&node).parent().unwrap().join(format!("ops/{id}.next"));
+        std::fs::create_dir(&next).unwrap();
+        let error = do_spend_dismiss_undelivered(&node.state, &p.id).unwrap_err();
+        assert_eq!(error.code, "spend_unknown");
+        assert_eq!(error.operation_id.as_deref(), Some(id.as_str()));
+        assert_eq!(ledger_record(&node, id), record);
+        assert_eq!(pending(&node).unwrap().id, p.id, "failed dismissal retains the fence");
+        assert_eq!(op_ids(&node), [Some(id.clone())], "dismissal never dispatches");
+        std::fs::remove_dir(next).unwrap();
+        do_spend_dismiss_undelivered(&node.state, &p.id).unwrap();
+        assert_eq!(ledger_record(&node, id)["state"], "settled");
+        assert!(pending(&node).is_none());
+    }
+
+    #[tokio::test]
+    async fn ledger_call_receipts_carry_the_host_operation_id() {
+        let (ops, _) = ops_node();
+        let calls = call_routes(Some(10000));
+        let node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
+            if p == "/status" || p == "/messages/compose" { ops(m, p, b) } else { calls(m, p, b) }
+        }));
+        do_budget_approve(&node.state, 500000, budget::PresetId::Careful).await.unwrap();
+        with_book(&node.state, true, |b| b.set_limit(A, false, 50000)).unwrap();
+        for (kind, name) in [(400, "call_offer"), (401, "call_answer"), (402, "call_ice"), (403, "call_hangup")] {
+            let receipt = do_call_signal(&node.state, A, kind, OFFER, 15000).await.unwrap();
+            let id = op_ids(&node).last().unwrap().clone().unwrap();
+            assert_eq!(serde_json::to_value(receipt).unwrap()["operation_id"], id);
+            let record = ledger_record(&node, &id);
+            assert_eq!(record["kind"], name);
+            assert_eq!(record["call_id"], "0123456789abcdef0123456789abcdef");
+            assert_eq!(record["state"], "settled");
+        }
+    }
+
+    // These use the same host call path and node receipts as the baseline test
+    // above: history must not affect dispatch, caps, paid totals, or the fence.
+    #[tokio::test]
+    async fn ledger_call_history_does_not_change_hangup_or_recovery() {
+        for history in ["large", "corrupt", "unreadable", "corrupt_parent", "missing_parent"] {
+            for kind in [403, 400] {
+                let (ops, paid) = ops_node();
+                let calls = call_routes(Some(10000));
+                let node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
+                    if p == "/status" || p == "/messages/compose" { ops(m, p, b) } else { calls(m, p, b) }
+                }));
+                do_budget_approve(&node.state, 500000, budget::PresetId::Careful).await.unwrap();
+                with_book(&node.state, true, |b| b.set_limit(A, false, 50000)).unwrap();
+                let parent = do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap().operation_id.unwrap();
+                let dir = node._dir.path().join("app-spend/ops");
+                match history {
+                    "large" => {
+                        let mut record = ledger_record(&node, &parent);
+                        record["node_id"] = serde_json::json!(C);
+                        record["peer"] = serde_json::json!(C);
+                        for i in 0..10_000 {
+                            let id = format!("00000000-0000-4000-8000-{i:012x}");
+                            record["op_id"] = serde_json::json!(id);
+                            std::fs::write(dir.join(format!("{id}.json")), record.to_string()).unwrap();
+                        }
+                    }
+                    "corrupt" => std::fs::write(dir.join("unrelated.json"), "PRIVATE broken JSON").unwrap(),
+                    "unreadable" => std::fs::create_dir(dir.join("unrelated.json")).unwrap(),
+                    "corrupt_parent" => std::fs::write(dir.join(format!("{parent}.json")), "PRIVATE broken JSON").unwrap(),
+                    "missing_parent" => std::fs::remove_file(dir.join(format!("{parent}.json"))).unwrap(),
+                    _ => unreachable!(),
+                }
+                let recovery = r#"{"v":1,"call_id":"1123456789abcdef0123456789abcdef","media":"audio","sdp":"v=0\na=x-bitsov-restart-of:0123456789abcdef0123456789abcdef"}"#;
+                let result = do_call_signal(&node.state, A, kind, if kind == 403 { OFFER } else { recovery }, 15000).await;
+                if history.ends_with("parent") {
+                    let error = result.unwrap_err();
+                    assert_eq!(error.code, "spend_unknown", "{history} / {kind}");
+                    assert!(!error.message.contains("PRIVATE"));
+                    assert_eq!(op_ids(&node).len(), 1, "no child POST on damaged parent");
+                    assert_eq!(paid.lock().unwrap().pays, 1);
+                    assert_eq!(budget_now(&node.state).spent_msat, 2000);
+                    assert!(pending(&node).is_none());
+                    do_message_send(&node.state, A, false, "unrelated message", 14000, None).await.unwrap();
+                    assert_eq!(paid.lock().unwrap().pays, 2, "damage stays local to that call");
+                } else {
+                    let receipt = result.unwrap();
+                    let record = ledger_record(&node, receipt.operation_id.as_ref().unwrap());
+                    assert_eq!(record["parent_op"], parent, "{history} / {kind}");
+                    assert_eq!(record["state"], "settled");
+                    assert_eq!(record["cap_msat"], 15000);
+                    assert_eq!(record["paid_msat"], 2000);
+                    assert_eq!(op_ids(&node).len(), 2);
+                    assert_eq!(paid.lock().unwrap().pays, 2);
+                    assert_eq!(budget_now(&node.state).spent_msat, 4000);
+                    assert_eq!(budget_now(&reopen(&node)).spent_msat, 4000);
+                }
+                assert!(pending(&node).is_none());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn ledger_restart_reconciles_every_node_outcome_without_another_post() {
+        for (node_state, recorded) in [("acked", "settled"), ("sent", "settled"),
+            ("paid", "paid_undelivered"), ("failed_paid", "failed_paid"),
+            ("prepared", "unpaid"), ("released", "unpaid"), ("payment_unknown", "unknown")] {
+            let (node, _) = ops_fake(|n| n.script = vec![(node_state, true)]);
+            spend_advance(&node.state, true).await.unwrap();
+            do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap_err();
+            let id = pending(&node).unwrap().operation_id.unwrap();
+            assert_eq!(ledger_record(&node, &id)["state"], "unknown");
+            let _ = do_spend_reconcile(&reopen(&node)).await;
+            assert_eq!(ledger_record(&node, &id)["state"], recorded, "{node_state}");
+            assert_eq!(op_ids(&node), [Some(id)]);
+        }
+    }
+
+    #[tokio::test]
+    async fn ledger_cancelled_dispatch_stays_dispatching_then_reconciles() {
+        let (mut node, _) = ops_fake(|n| n.script = vec![("acked", true)]);
+        node.state.spend_timeout = Duration::from_secs(5);
+        spend_advance(&node.state, true).await.unwrap();
+        {
+        let send = do_message_send(&node.state, A, false, "gm", 14000, None);
+        tokio::pin!(send);
+        tokio::select! {
+            result = &mut send => panic!("dispatch should still be running: {result:?}"),
+            _ = async {
+                while op_ids(&node).is_empty() { tokio::time::sleep(Duration::from_millis(1)).await; }
+            } => {}
+        }
+        // Dropping the entire future below models process death without its error handler.
+        }
+        let id = pending(&node).unwrap().operation_id.unwrap();
+        assert_eq!(ledger_record(&node, &id)["state"], "dispatching");
+        do_spend_reconcile(&reopen(&node)).await.unwrap();
+        assert_eq!(ledger_record(&node, &id)["state"], "settled");
+        assert_eq!(op_ids(&node), [Some(id)]);
+    }
+
+    #[tokio::test]
+    async fn ledger_reconcile_repair_failure_keeps_dispatched_operation_id() {
+        for missing in [false, true] {
+            let (node, _) = ops_fake(|n| n.drop_next = true);
+            spend_advance(&node.state, true).await.unwrap();
+            do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap_err();
+            let p = pending(&node).unwrap();
+            let id = p.operation_id.unwrap();
+            let path = journal_file(&node).parent().unwrap().join(format!("ops/{id}.json"));
+            if missing {
+                std::fs::remove_file(&path).unwrap();
+                // Missing record repair cannot publish its replacement.
+                std::fs::create_dir(path.with_extension("next")).unwrap();
+            } else {
+                std::fs::write(path, "PRIVATE corrupt ledger").unwrap();
+            }
+            let error = do_spend_reconcile(&reopen(&node)).await.unwrap_err();
+            assert_eq!(error.code, "spend_unknown");
+            assert_eq!(error.operation_id.as_deref(), Some(id.as_str()));
+            assert!(journal_file(&node).exists(), "repair failure retains the spending fence");
+            assert_eq!(op_ids(&node), [Some(id)], "repair failure must not dispatch again");
+        }
+    }
+
+    #[tokio::test]
+    async fn ledger_list_is_identity_scoped_filtered_and_redacted() {
+        let (node, _) = ops_fake(|_| {});
+        spend_advance(&node.state, true).await.unwrap();
+        let receipt = do_message_send(&node.state, A, false, "PRIVATE", 14000, None).await.unwrap();
+        let rows = do_op_list(&node.state, Some(A)).await.unwrap();
+        assert_eq!(rows.operations.len(), 1);
+        assert_eq!(rows.skipped, 0);
+        let row = serde_json::to_value(&rows.operations[0]).unwrap();
+        assert_eq!(row["op_id"], receipt.operation_id.unwrap());
+        assert_eq!(row["state"], "settled");
+        for secret in ["payment_hash", "request_hash", "node_id", "PRIVATE"] {
+            assert!(!row.to_string().contains(secret));
+        }
+        assert!(do_op_list(&node.state, Some(C)).await.unwrap().operations.is_empty());
+        *node.state.node_id.lock().unwrap() = Some(C.into());
+        assert!(do_op_list(&node.state, None).await.unwrap().operations.is_empty());
+        assert_eq!(op_ids(&node).len(), 1, "listing never dispatches");
+    }
+
+    #[tokio::test]
+    async fn ledger_accounting_recovery_preserves_failed_paid_and_undelivered() {
+        for state in [spend_journal::OperationState::FailedPaid, spend_journal::OperationState::PaidUndelivered] {
+            let (node, _) = ops_fake(|n| n.drop_next = true);
+            spend_advance(&node.state, true).await.unwrap();
+            do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap_err();
+            let journal = spend_journal(&node.state).unwrap();
+            let mut p = journal.pending().unwrap().unwrap();
+            // Reconcile wrote the outcome and accounting, then died before clearing
+            // failed_paid or installing the undelivered retry metadata.
+            journal.record_outcome(&p, state.clone(), Some(&serde_json::json!({"amount_msat":2000}))).unwrap();
+            p.accounting_msat = Some(2000);
+            p.paid = Some(budget::Paid { msat: 2000, fee_unknown: false });
+            journal.save(&p).unwrap();
+            drop(journal);
+            do_spend_reconcile(&reopen(&node)).await.unwrap();
+            let record = ledger_record(&node, p.operation_id.as_ref().unwrap());
+            assert_eq!(record["state"], serde_json::to_value(state).unwrap());
+            assert_eq!(record["paid_msat"], 2000);
+            assert!(pending(&node).is_none(), "existing accounting shortcut is unchanged");
+        }
     }
 
     fn uuid_v4(id: &str) -> bool {
@@ -9703,6 +10174,337 @@ mod control_act_tests {
         let ids = op_ids(&node);
         assert_eq!(ids[0], ids[1]);
         assert_eq!(ops.lock().unwrap().pays, 0);
+    }
+
+    #[tokio::test]
+    async fn operation_error_context_refreshes_after_waiting_for_money_lock() {
+        for command in ["send", "reconcile", "porch"] {
+            for fault in ["none", "open", "pending"] {
+                let (node, _) = ops_fake(|n| { n.script = vec![("paid", false)]; n.settled_incomplete = true; });
+                let mut p = psi_first(&node).await;
+                let lock = node.state.money.lock().await;
+                let mut action = Box::pin(async {
+                    if command == "reconcile" { do_spend_reconcile(&node.state).await.map(|_| ()) }
+                    else if command == "porch" {
+                        porch_post(&node.state, Auth::Window(0), serde_json::json!({}), 6000,
+                            Charge { target: A.into(), room: false, confirm: None,
+                                readmission_possible: false, confirmed: false, operation: false }).await.map(|_| ())
+                    }
+                    else { money_post_with(&node.state, Auth::Window(0), "/messages/compose",
+                        serde_json::json!({}), 7000, None, None).await.map(|_| ()) }
+                });
+                std::future::poll_fn(|cx| {
+                    assert!(std::future::Future::poll(action.as_mut(), cx).is_pending());
+                    std::task::Poll::Ready(())
+                }).await;
+                // Simulate the preceding lock owner publishing another operation.
+                let id = if fault == "pending" { p.operation_id.clone().unwrap() } else { spend_journal::new_operation_id().unwrap() };
+                p.operation_id = Some(id.clone());
+                p.operation_record.as_mut().unwrap().op_id = id.clone();
+                spend_journal(&node.state).unwrap().save(&p).unwrap();
+                if fault == "open" {
+                    let path = journal_file(&node).parent().unwrap().join("spend.lock");
+                    std::fs::remove_file(&path).unwrap();
+                    std::fs::create_dir(path).unwrap();
+                }
+                if fault == "pending" { std::fs::write(journal_file(&node), "corrupt pending").unwrap(); }
+                drop(lock);
+                let error = action.await.unwrap_err();
+                assert_eq!(error.operation_id.as_deref(), Some(id.as_str()), "command={command}, fault={fault}: {error:?}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn porch_quote_racing_a_pending_send_keeps_its_operation_id() {
+        let (routes, ops) = ops_node();
+        { let mut n = ops.lock().unwrap(); n.script = vec![("paid", false)]; n.settled_incomplete = true; }
+        let (arrived_tx, arrived_rx) = tokio::sync::oneshot::channel();
+        let arrived = Mutex::new(Some(arrived_tx));
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let release = Mutex::new(release_rx);
+        let node = fake(AuthMode::Local, Arc::new(move |m, path, body| {
+            match path {
+                "/status" => (200, serde_json::json!({"api_capabilities": [
+                    "paid_send_caps_v1", "room_terminal_outcomes_v1", "message_operations_v1", "porch_quote_v1"
+                ]}).to_string()),
+                "/browse/quote" => {
+                    arrived.lock().unwrap().take().unwrap().send(()).unwrap();
+                    release.lock().unwrap().recv_timeout(Duration::from_secs(5)).unwrap();
+                    (200, serde_json::json!({"node_id": A, "path": "/index.md", "status": "Ok",
+                        "amount_msat": 1000, "max_routing_fee_msat": 5000, "max_total_msat": 6000}).to_string())
+                }
+                _ => routes(m, path, body),
+            }
+        }));
+        porch_budget(&node, A).await;
+        let read = do_porch_read(&node.state, A, "/index.md", 6000);
+        let send = async {
+            tokio::time::timeout(Duration::from_secs(5), arrived_rx).await.unwrap().unwrap();
+            // Preflight passed with no pending record. Dispatch a real send
+            // while the free quote is held, before Porch takes the money lock.
+            let error = do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap_err();
+            assert_eq!(error.code, "payment_settled_undelivered");
+            let record = pending(&node).unwrap();
+            let before = book(&node);
+            release_tx.send(()).unwrap();
+            (record, before)
+        };
+        let (read, (record, before)) = tokio::join!(read, send);
+        let error = read.unwrap_err();
+        assert_eq!(error.code, "spend_unknown");
+        assert_eq!(error.operation_id, record.operation_id);
+        assert_eq!(serde_json::to_value(pending(&node).unwrap()).unwrap(), serde_json::to_value(&record).unwrap());
+        assert_eq!(book(&node), before);
+        assert!(fetches(&node).is_empty(), "the pending send must fence the paid read");
+        assert_eq!(ops.lock().unwrap().pays, 1);
+    }
+
+    // Removing an operation scope must fail this matrix: preflight, repair,
+    // accounting and terminal writes all return the same durable identity.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn operation_errors_keep_id_across_command_storage_steps() {
+        use std::os::unix::fs::PermissionsExt;
+        #[derive(Clone, Copy, Debug)]
+        enum Command { Send, Call(u16), Retry, ApprovedRetry, Reconcile, Dismiss, Resume, FreshSend, FreshCall(u16), ReplaceSend, Lookup, Pay, Keysend, File, Porch, BudgetApprove, BudgetPause, BudgetStatus, BudgetSet, History }
+        #[derive(Clone, Copy, Debug)]
+        enum Fault { BookRead, BookWrite, RecordRead, Repair, PendingSave, RecordWrite, Clear, PendingRead, Migration, LedgerCreate, JournalOpen, HistoryRead }
+        #[derive(Clone, Copy, Debug, PartialEq)]
+        enum Phase { Before, Status, Post, Lookup }
+        use Command::*;
+        use Fault::*;
+        let mut cases: Vec<_> = [
+            (Retry, BookRead), (ApprovedRetry, BookRead), (Resume, BookRead),
+            (Send, BookRead), (Call(400), BookRead), (Call(401), BookRead),
+            (Call(402), BookRead), (Call(403), BookRead),
+            (Reconcile, BookRead), (Dismiss, BookRead),
+            (Retry, BookWrite), (ApprovedRetry, BookWrite), (Resume, BookWrite),
+            (Reconcile, BookWrite), (Dismiss, BookWrite),
+            (Send, RecordRead), (Call(400), RecordRead), (Call(401), RecordRead),
+            (Call(402), RecordRead), (Call(403), RecordRead),
+            (Retry, RecordRead), (ApprovedRetry, RecordRead), (Reconcile, RecordRead), (Dismiss, RecordRead),
+            (Send, Repair), (Call(400), Repair), (Call(401), Repair),
+            (Call(402), Repair), (Call(403), Repair),
+            (Retry, Repair), (ApprovedRetry, Repair), (Reconcile, Repair), (Dismiss, Repair),
+            (Retry, PendingSave), (ApprovedRetry, PendingSave),
+            (Retry, RecordWrite), (ApprovedRetry, RecordWrite), (Dismiss, RecordWrite),
+            (Dismiss, Clear),
+        ].into_iter().map(|(command, fault)| (command, fault, Phase::Before)).collect();
+        for command in [Pay, Keysend, File, Porch] {
+            for fault in [RecordRead, Repair, Migration, JournalOpen] {
+                cases.push((command, fault, Phase::Before));
+            }
+        }
+        cases.push((File, BookRead, Phase::Before));
+        cases.push((Porch, BookRead, Phase::Before));
+        for command in [BudgetApprove, BudgetPause, BudgetStatus, BudgetSet] {
+            cases.push((command, BookRead, Phase::Before));
+            if !matches!(command, BudgetStatus) { cases.push((command, BookWrite, Phase::Before)); }
+        }
+        cases.push((History, HistoryRead, Phase::Before));
+        for command in [Send, Call(400), Call(401), Call(402), Call(403), Retry, ApprovedRetry, Reconcile, Dismiss] {
+            cases.push((command, Migration, Phase::Before));
+            cases.push((command, JournalOpen, Phase::Before));
+        }
+        for command in [FreshSend, FreshCall(400), FreshCall(401), FreshCall(402), FreshCall(403)] {
+            for fault in [PendingSave, LedgerCreate] { cases.push((command, fault, Phase::Before)); }
+            for fault in [PendingSave, RecordRead, RecordWrite, BookRead, BookWrite] {
+                cases.push((command, fault, Phase::Post));
+            }
+        }
+        cases.push((ReplaceSend, PendingSave, Phase::Post));
+        for command in [Send, Retry, ApprovedRetry] {
+            for fault in [PendingRead, BookRead, BookWrite] { cases.push((command, fault, Phase::Status)); }
+            for fault in [PendingSave, RecordRead, RecordWrite, BookRead, BookWrite] {
+                cases.push((command, fault, Phase::Post));
+            }
+        }
+        for fault in [PendingRead, PendingSave, RecordRead, RecordWrite, BookRead, BookWrite] {
+            cases.push((Lookup, fault, Phase::Lookup));
+        }
+        fn inject(dir: &Path, fault: Fault) {
+            // Read before damaging storage, so the fault always targets the
+            // operation actually executing (including newly minted IDs).
+            let p = spend_journal::read_pending(dir).unwrap().unwrap();
+            let record = dir.join(format!("ops/{}.json", p.operation_id.unwrap()));
+            let book = budget::book_path(dir, &p.node_id);
+            match fault {
+                BookRead => std::fs::write(&book, "corrupt budget record").unwrap(),
+                BookWrite => std::fs::create_dir(book.with_extension("json.tmp")).unwrap(),
+                RecordRead => std::fs::write(&record, "corrupt operation record").unwrap(),
+                Repair => {
+                    std::fs::remove_file(&record).unwrap();
+                    std::fs::create_dir(record.with_extension("next")).unwrap();
+                }
+                PendingSave | Migration => std::fs::create_dir(dir.join("spend-pending.next")).unwrap(),
+                RecordWrite => std::fs::create_dir(record.with_extension("next")).unwrap(),
+                Clear => std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o500)).unwrap(),
+                PendingRead => std::fs::write(dir.join("spend-pending.json"), "corrupt pending record").unwrap(),
+                LedgerCreate => std::fs::set_permissions(dir.join("ops"), std::fs::Permissions::from_mode(0o500)).unwrap(),
+                HistoryRead => {
+                    std::fs::rename(dir.join("ops"), dir.join("ops.saved")).unwrap();
+                    std::fs::write(dir.join("ops"), "not a directory").unwrap();
+                }
+                JournalOpen => {
+                    std::fs::remove_file(dir.join("spend.lock")).unwrap();
+                    std::fs::create_dir(dir.join("spend.lock")).unwrap();
+                }
+            }
+        }
+        let mut failures = Vec::new();
+        for (command, fault, phase) in cases {
+            let (routes, ops) = ops_node();
+            { let mut n = ops.lock().unwrap(); n.script = vec![("paid", false)]; n.settled_incomplete = true; }
+            let calls = call_routes(Some(10000));
+            let armed = Arc::new(Mutex::new(None::<PathBuf>));
+            let hook = armed.clone();
+            let node = fake(AuthMode::Local, Arc::new(move |m, path, body| {
+                let mut response = if path == "/status" || path.starts_with("/messages/") {
+                    routes(m, path, body)
+                } else { calls(m, path, body) };
+                let trigger = match phase {
+                    Phase::Before => false,
+                    Phase::Status => path == "/status",
+                    Phase::Post => path == "/messages/compose",
+                    Phase::Lookup => path.starts_with("/messages/operations/"),
+                };
+                if trigger {
+                    if let Some(dir) = hook.lock().unwrap().take() {
+                        if matches!(command, ReplaceSend) { response = (401, "{}".into()); }
+                        inject(&dir, fault);
+                    }
+                }
+                response
+            }));
+            spend_advance(&node.state, true).await.unwrap();
+            do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap_err();
+            let mut p = pending(&node).unwrap();
+            let id = p.operation_id.clone().unwrap();
+            let dir = journal_file(&node).parent().unwrap().to_path_buf();
+            if matches!(command, Send | Call(_) | ReplaceSend) {
+                p.resumable = true;
+                p.undelivered = None;
+                p.accounting_msat = None;
+                spend_journal(&node.state).unwrap().save(&p).unwrap();
+            }
+            if matches!(fault, Clear) {
+                p.accounting_msat = None;
+                spend_journal(&node.state).unwrap().save(&p).unwrap();
+            }
+            if matches!(command, Lookup) {
+                p.accounting_msat = None;
+                p.undelivered = None;
+                spend_journal(&node.state).unwrap().save(&p).unwrap();
+            }
+            if matches!(fault, Migration) {
+                p.id.clear();
+                spend_journal(&node.state).unwrap().save(&p).unwrap();
+            }
+            if phase == Phase::Before { inject(&dir, fault); }
+            else { *armed.lock().unwrap() = Some(dir.clone()); }
+            let fresh = matches!(command, FreshSend | FreshCall(_) | ReplaceSend);
+            if matches!(command, FreshSend | FreshCall(_)) { spend_journal(&node.state).unwrap().clear().unwrap(); }
+            if matches!(command, FreshCall(_) | Call(_)) && phase != Phase::Before {
+                with_book(&node.state, true, |b| b.set_limit(A, false, 50000)).unwrap();
+            }
+            if phase == Phase::Post || matches!(command, Lookup) {
+                let mut n = ops.lock().unwrap();
+                n.settled_incomplete = false;
+                if let Some(entry) = n.ops.get_mut(&id) { entry.1 = "acked"; }
+            }
+            let result = match command {
+                Pay => do_payment_pay(&node.state, act::TEST_INVOICE_1000, 1000, 6000).await.map(|_| ()),
+                Keysend => do_payment_keysend(&node.state, &format!("03{}", "cd".repeat(32)), 5000, None, 10000).await.map(|_| ()),
+                BudgetApprove => do_budget_approve(&node.state, 500_000, budget::PresetId::Careful).await.map(|_| ()),
+                BudgetPause => do_budget_pause(&node.state).map(|_| ()),
+                BudgetStatus => do_budget_status(&node.state).await.map(|_| ()),
+                BudgetSet => with_book(&node.state, true, |book| book.set_limit(A, false, 50_000)),
+                History => do_op_list(&node.state, None).await.map(|_| ()),
+                Porch => do_porch_read(&node.state, A, "/index.md", 6000).await.map(|_| ()),
+                File => do_file_send(&node.state, A, "a.txt", "text/plain", "aGk=", 8000, None).await.map(|_| ()),
+                ReplaceSend => do_message_send(&node.state, A, false, "different", 14000, None).await.map(|_| ()),
+                Send | FreshSend => do_message_send(&node.state, A, false, "gm", 14000, None).await.map(|_| ()),
+                Call(kind) | FreshCall(kind) => do_call_signal(&node.state, A, kind, OFFER, 15000).await.map(|_| ()),
+                Retry => do_message_retry(&node.state, A, "gm", None).await.map(|_| ()),
+                ApprovedRetry => do_message_retry(&node.state, A, "gm", Some(14000)).await.map(|_| ()),
+                Reconcile | Lookup => do_spend_reconcile(&node.state).await.map(|_| ()),
+                Dismiss => do_spend_dismiss_undelivered(&node.state, &p.id).map(|_| ()),
+                Resume => do_budget_resume(&node.state).await.map(|_| ()),
+            };
+            if matches!(fault, Clear) {
+                std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            if matches!(fault, LedgerCreate) {
+                std::fs::set_permissions(dir.join("ops"), std::fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            assert!(armed.lock().unwrap().is_none(), "{command:?}/{fault:?}/{phase:?}: injection was not reached");
+            let error = result.expect_err(&format!("{command:?}/{fault:?}/{phase:?} must fail storage"));
+            assert!(matches!(error.code, "spend_unknown" | "budget_unreadable"), "{command:?}/{fault:?}/{phase:?}: {error:?}");
+            let expected = if fresh {
+                // Before the first pending save only the returned ID exists.
+                // After it, assert against the independently persisted/request ID.
+                let saved = spend_journal::read_pending(&dir).unwrap().map(|p| p.operation_id.unwrap());
+                let posted = op_ids(&node).last().cloned().flatten().filter(|op| op != &id);
+                let minted = saved.or(posted).unwrap_or_else(|| error.operation_id.clone().expect("minted ID"));
+                assert_ne!(minted, id, "fresh operation must not inherit the old snapshot");
+                assert_eq!(minted.len(), 36);
+                minted
+            } else { id };
+            if error.operation_id.as_deref() != Some(&expected) {
+                failures.push(format!("{command:?}/{fault:?}/{phase:?}: {error:?}"));
+            }
+        }
+        assert!(failures.is_empty(), "operation context escaped:\n{}", failures.join("\n"));
+    }
+
+    #[tokio::test]
+    async fn ledger_retry_storage_failure_keeps_operation_id() {
+        let (node, ops) = ops_fake(|n| { n.script = vec![("paid", false)]; n.settled_incomplete = true; });
+        spend_advance(&node.state, true).await.unwrap();
+        let error = do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap_err();
+        assert_eq!(error.code, "payment_settled_undelivered");
+        let record = pending(&node).unwrap();
+        let id = record.operation_id.as_deref().unwrap();
+        // A directory makes the atomic replacement unwritable, even as root.
+        std::fs::create_dir(journal_file(&node).with_extension("next")).unwrap();
+        let error = do_message_retry(&node.state, A, "gm", None).await.unwrap_err();
+        assert_eq!(error.code, "spend_unknown");
+        assert_eq!(error.operation_id.as_deref(), Some(id));
+        assert_eq!(serde_json::to_value(pending(&node).unwrap()).unwrap(), serde_json::to_value(&record).unwrap());
+        assert_eq!(op_ids(&node), [Some(id.to_string())], "failed storage must not dispatch a retry");
+        assert_eq!(ops.lock().unwrap().pays, 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ledger_begin_storage_failure_keeps_minted_operation_id() {
+        use std::os::unix::fs::PermissionsExt;
+        for fail_pending in [true, false] {
+            let (node, _) = ops_fake(|_| {});
+            spend_advance(&node.state, true).await.unwrap();
+            let dir = journal_file(&node).parent().unwrap().to_path_buf();
+            std::fs::create_dir_all(&dir).unwrap();
+            if fail_pending {
+                std::fs::create_dir(dir.join("spend-pending.next")).unwrap();
+            } else {
+                // The pending snapshot is saved, but ensure_operation cannot write history.
+                std::fs::create_dir(dir.join("ops")).unwrap();
+                std::fs::set_permissions(dir.join("ops"), std::fs::Permissions::from_mode(0o500)).unwrap();
+            }
+            let error = do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap_err();
+            if !fail_pending {
+                std::fs::set_permissions(dir.join("ops"), std::fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            assert_eq!(error.code, "spend_unknown");
+            let id = error.operation_id.expect("begin failures retain the minted operation id");
+            assert_eq!(id.len(), 36);
+            if !fail_pending {
+                let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(journal_file(&node)).unwrap()).unwrap();
+                assert_eq!(saved["operation_id"], id);
+            }
+            assert!(op_ids(&node).is_empty(), "failed begin must not dispatch");
+        }
     }
 
     #[tokio::test]
@@ -15319,6 +16121,7 @@ mod assistant_acl_tests {
                 "device_key_cancel",
                 "relation_approve",
                 "spend_reconcile",
+                "op_list",
                 "budget_status",
                 "budget_approve",
                 "budget_set",

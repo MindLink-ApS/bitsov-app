@@ -78,6 +78,7 @@
     "allow-device-key-cancel",
     "allow-relation-approve",
     "allow-spend-reconcile",
+    "allow-op-list",
     "allow-budget-status",
     "allow-budget-approve",
     "allow-budget-set",
