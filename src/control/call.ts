@@ -148,6 +148,8 @@ export const IDLE: CallView = {
 type Outcome<T> = { ok: true; value: T } | { ok: false; error: ActionError };
 
 export type CallDeps = {
+  /** Persist a local terminal event against the exact paid admission. No send. */
+  closeAdmission?: (operationId: string, peer: string, callId: string) => Promise<void>;
   /** Check current spend permission and show the shell’s approval path before capture. */
   authorize?: () => Promise<boolean>;
   quote: (peer: string) => Promise<Outcome<CallQuote>>;
@@ -260,9 +262,17 @@ export function createCallEngine(deps: CallDeps) {
     offerSdp = null;
     deps.onStreams(null, null);
   };
-  const end = (reason: HangupReason | null, error: string | null = null) => {
+  const admissionOps = new Map<string, Map<string, string>>();
+  const closeAdmission = (operationId: string, peer: string, callId: string) => {
+    void deps.closeAdmission?.(operationId, peer, callId).catch(() => { /* Host preserves the fence on storage failure. */ });
+  };
+  const end = (reason: HangupReason | null, error: string | null = null, recordClosure = true) => {
+    const peer = view.peer;
+    const operations = [...(view.callId ? admissionOps.get(view.callId) ?? [] : [])];
+    if (view.callId) admissionOps.delete(view.callId);
     teardown();
     set({ phase: 'ended', reason, error, camera: false, muted: false });
+    if (recordClosure && peer) for (const [operationId, wireCallId] of operations) closeAdmission(operationId, peer, wireCallId);
   };
 
   const acquireMedia = (constraints: MediaStreamConstraints): Promise<MediaStream> => new Promise((resolve, reject) => {
@@ -390,7 +400,20 @@ export function createCallEngine(deps: CallDeps) {
     });
     let r: Outcome<CallReceipt>;
     try {
-      r = await Promise.race([deps.signal(peer!, kind, JSON.stringify({ v: 1, call_id: targetId!, ...body }), maxMsat), timeout]);
+      const signal = deps.signal(peer!, kind, JSON.stringify({ v: 1, call_id: targetId!, ...body }), maxMsat).then(result => {
+        const operationId = result.ok ? result.value.operation_id
+          : ['spend_unknown', 'payment_unknown', 'payment_settled_undelivered'].includes(result.error.code) ? result.error.operation_id : undefined;
+        if (kind === CALL_OFFER && operationId) {
+          if (view.callId !== callId || !active()) closeAdmission(operationId, peer!, targetId!);
+          else {
+            const operations = admissionOps.get(callId!) ?? new Map<string, string>();
+            operations.set(operationId, targetId!);
+            admissionOps.set(callId!, operations);
+          }
+        }
+        return result;
+      });
+      r = await Promise.race([signal, timeout]);
     } finally { clearTimeout(timer); }
     if (r.ok && view.callId === callId) set({ paidMsat: view.paidMsat + r.value.total_msat });
     return r;
@@ -630,7 +653,8 @@ export function createCallEngine(deps: CallDeps) {
       const ids = [...admissions].reverse();
       const owner = { peer: view.peer, callId }; // Keep late cleanup bound to this peer.
       cancelled = callId;
-      end('hangup');
+      const operationIds = [...(admissionOps.get(callId!) ?? [])];
+      end('hangup', null, !notify);
       if (notify) {
         for (const id of ids) {
           try {
@@ -640,6 +664,7 @@ export function createCallEngine(deps: CallDeps) {
             if (view.callId === callId) set({ error: asActionError(error).message });
           }
         }
+        for (const [operationId, wireCallId] of operationIds) closeAdmission(operationId, owner.peer!, wireCallId);
       }
     },
 

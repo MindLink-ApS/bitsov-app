@@ -1,3 +1,4 @@
+import { asActionError } from '../src/control/state';
 import { sampleSource } from '../src/control/sample';
 import { setStunPref, setDenom } from '../src/control/prefs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -882,6 +883,53 @@ describe('call engine: review #74 fixes', () => {
     expect(last()).toMatchObject({ phase: 'ended', reason: 'failed', error: expect.stringContaining('The connection was lost.') });
     expect(pc.closed && (pc.tracks[0].stop as unknown as { mock: { calls: unknown[] } }).mock.calls.length > 0).toBe(true);
     expect(sent.map((x) => x.kind)).toEqual([400]);
+  });
+
+  it('closes an answered admission when its offer result is unknown, including late errors', async () => {
+    for (const late of [false, true]) {
+      const closeAdmission = vi.fn(async () => {});
+      let finish!: (r: Awaited<ReturnType<CallDeps['signal']>>) => void;
+      const { e } = engine({ closeAdmission, signal: () => new Promise(resolve => { finish = resolve; }) });
+      const placing = e.place(A, 'audio', QUOTE);
+      await vi.waitFor(() => expect(finish).toBeDefined());
+      await e.receive(msg(401, { sdp: 'v=0 answer' }), OWN);
+      if (late) e.endLocal();
+      finish({ ok: false, error: asActionError({ code: 'spend_unknown', message: 'unknown', operation_id: 'ambiguous-offer' }) });
+      await placing;
+      expect(closeAdmission).toHaveBeenCalledWith('ambiguous-offer', A, ID);
+    }
+  });
+
+  it('records local closure after dispatching the explicit paid hangup', async () => {
+    const actions: string[] = [];
+    const { e } = engine({
+      closeAdmission: async id => { actions.push(id); },
+      signal: async (_peer, kind) => {
+        actions.push(String(kind));
+        return { ok: true, value: { operation_id: kind === 400 ? 'offer-op' : 'hangup-op', total_msat: 1 } as CallReceipt };
+      },
+    });
+    await e.place(A, 'audio', QUOTE);
+    await e.hangup();
+    expect(actions).toEqual(['400', '403', 'offer-op']);
+  });
+
+  it('reports local failure by admission operation id, including a late offer receipt', async () => {
+    const closeAdmission = vi.fn(async (_id: string) => {});
+    const first = engine({ closeAdmission, signal: async () => ({ ok: true, value: { operation_id: 'offer-one', total_msat: 1 } as CallReceipt }) });
+    await first.e.place(A, 'audio', QUOTE);
+    await first.e.receive(msg(401, { sdp: 'v=0 answer' }), OWN);
+    FakePc.made[0].state('closed');
+    expect(closeAdmission).toHaveBeenCalledWith('offer-one', A, ID);
+
+    let finish!: (r: Awaited<ReturnType<CallDeps['signal']>>) => void;
+    const second = engine({ closeAdmission, signal: () => new Promise(resolve => { finish = resolve; }) });
+    const placing = second.e.place(A, 'audio', QUOTE);
+    await vi.waitFor(() => expect(finish).toBeDefined());
+    second.e.endLocal();
+    finish({ ok: true, value: { operation_id: 'offer-two', total_msat: 1 } as CallReceipt });
+    await placing;
+    expect(closeAdmission.mock.calls).toEqual([['offer-one', A, ID], ['offer-two', A, ID]]);
   });
 
   it('closed ends at once; a call stuck connecting ends after a timeout', async () => {

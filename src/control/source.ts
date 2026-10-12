@@ -238,6 +238,7 @@ export interface Source {
   /** Read-only: what calling this contact costs. */
   callQuote(peer: string): Promise<CallQuote>;
   /** One paid call signal (kinds 400-403) under the message budget rules. */
+  closeCallAdmission(operationId: string, peer: string, callId: string): Promise<void>;
   callSignal(peer: string, kind: number, plaintext: string, maxMsat: number): Promise<CallReceipt>;
   // AI track: the host reads through its broker; a remote model gets only a body the owner saw
   aiRead(topic: AiTopic, sinceMs: number | null, assistant?: AssistantId): Promise<TopicRead>;
@@ -370,6 +371,7 @@ export const hostSource: Source = {
   fileFetch: (messageId) => invoke<VoiceBlob>('file_fetch', { message_id: messageId }),
   fileSave: (messageId) => invoke<FileSaveResult>('file_save', { message_id: messageId }),
   callQuote: (peer) => invoke<CallQuote>('call_quote', { peer }),
+  closeCallAdmission: (operationId, peer, callId) => invoke<void>('op_close_call', { operation_id: operationId, peer, call_id: callId }),
   callSignal: (peer, kind, plaintext, maxMsat) => invoke<CallReceipt>('call_signal', { peer, kind, plaintext, max_msat: maxMsat }),
   aiRead: (topic, sinceMs, assistant) => invoke<TopicRead>('ai_read', { topic, since_ms: sinceMs, ...(assistant ? { assistant } : {}) }),
   aiLocalTurn: (assistant, question, draftText) => invoke<LocalTurn>('ai_read', { assistant, local_turn: { question, draft_text: draftText } }),
