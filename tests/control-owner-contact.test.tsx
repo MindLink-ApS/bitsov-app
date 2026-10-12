@@ -422,3 +422,70 @@ describe('owner approval v1: first contact approved on the owner’s other devic
     expect(mount.querySelector('[data-owner-approval-wait]')).toBeNull();
   });
 });
+
+describe('spend breakers on the requesting app', () => {
+  const budget: BudgetView = {
+    paused: false, waiting_for_owner: false, preset: 'careful',
+    autopay: { state: 'open', open_until_ms: Date.now() + 861400000, ceiling_msat: 500000, basis: 'node_grant' },
+    ceiling_msat: 500000, spent_msat: 0, unsettled_msat: 0, rows: [{ target: A, room: false, limit_msat: 50_000, spent_msat: 0 }],
+    presets: SAMPLE_PRESETS, window_ms: 861400000, max_daily_msat: 100000000, node_grant: null,
+  };
+  function setup(code: string, capabilities: string[]) {
+    const source = sampleSource({ firstLiveMs: 1e9 });
+    source.budgetStatus = async () => ({ ...budget });
+    const overview = source.nodeOverview.bind(source);
+    source.nodeOverview = async () => ({ ...await overview(), capabilities });
+    source.send = vi.fn(async () => { throw { code, message: 'Your node refused under its spend grant.' }; }) as never;
+    let consumed = false;
+    const view = { op_id: 'op-br', node: 'n', client_id: 'this-mac', client_pubkey: 'ef'.repeat(32), epoch: 1, grant_op: null,
+      request: { kind: 'breaker_reset', terms: {} }, nonce: '33'.repeat(16), expires_at: Math.floor(Date.now() / 1000) + 300,
+      approval_message: 'kind:breaker_reset', status: 'pending', owner_action: 'konsensus grant reset …' };
+    source.approvalRequest = vi.fn(async () => view as never);
+    source.approvalStatus = vi.fn(async () => ({ ...view, status: consumed ? 'consumed' : 'pending' }) as never);
+    mount = document.createElement('div'); document.body.appendChild(mount);
+    dispose = render(() => <ControlCenter remote source={source} active ready error={null} ownId={SAMPLE_OWN_ID} firstRun={<span />} />, mount);
+    return { source, consume: () => { consumed = true; } };
+  }
+  const sendOnce = async () => {
+    await vi.waitFor(() => expect(mount.querySelector('[data-composer] textarea')).not.toBeNull());
+    type('a message');
+    await vi.waitFor(() => expect(element<HTMLButtonElement>('[data-send]').disabled).toBe(false));
+    element<HTMLButtonElement>('[data-send]').click();
+  };
+  const ALL = ['owner_device_approval_v1', 'owner_device_approval_breaker_reset_v1'];
+
+  it('paused after failures: asks the other device to reset ({kind: breaker_reset, terms: {}}); nothing is sent after', async () => {
+    const { source, consume } = setup('grant_paused', ALL);
+    await sendOnce();
+    await vi.waitFor(() => expect(element('[data-breaker="grant_paused"]')).not.toBeNull());
+    expect(element('[data-breaker="grant_paused"]').textContent).toContain('only this pause needs a reset');
+    element<HTMLButtonElement>('[data-breaker-reset]').click();
+    await vi.waitFor(() => expect(element('[data-breaker] [data-owner-approval-wait="pending"]')).not.toBeNull());
+    expect(source.approvalRequest).toHaveBeenCalledWith({ kind: 'breaker_reset', terms: {} });
+    consume();
+    await vi.waitFor(() => expect(element('[data-breaker-reset-done]')).not.toBeNull(), { timeout: 4000 });
+    expect(element('[data-breaker-reset-done]').textContent).toContain('Nothing was sent; press Send again');
+    expect(source.send).toHaveBeenCalledTimes(1);
+  }, 10_000);
+
+  it('without the breaker-reset sub-flag: no reset offer, the owner resets at the node', async () => {
+    const { source } = setup('grant_paused', ['owner_device_approval_v1']);
+    await sendOnce();
+    await vi.waitFor(() => expect(element('[data-breaker-at-node]')).not.toBeNull());
+    expect(mount.querySelector('[data-breaker-reset]')).toBeNull();
+    expect(source.approvalRequest).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['grant_rate_limited', '[data-breaker-recovers]', 'clears by itself'],
+    ['grant_velocity', '[data-breaker-recovers]', 'clears by itself'],
+    ['grant_failures_pending', '[data-breaker-pending]', 'A reset would not settle them'],
+  ])('%s says what is true and offers no reset', async (code, sel, text) => {
+    const { source } = setup(code, ALL);
+    await sendOnce();
+    await vi.waitFor(() => expect(element(sel)).not.toBeNull());
+    expect(element(sel).textContent).toContain(text);
+    expect(mount.querySelector('[data-breaker-reset]')).toBeNull();
+    expect(source.approvalRequest).not.toHaveBeenCalled();
+  });
+});

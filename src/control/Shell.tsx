@@ -7,8 +7,8 @@ import { usePairingActivity } from '../pairingActivity';
 import { createMessageEntrance } from './messageEntrance';
 import { LocalNodeSwitch } from '../onboarding/LocalNodeSwitch';
 import { DeviceApprovals } from '../onboarding/DeviceApprovals';
-import { OwnerApprovals, OwnerApprovalWait } from './OwnerApprovals';
-import { OWNER_DEVICE_APPROVAL, refusalText, type ApprovalRequest, type ApprovalView, type DeviceKeysView } from './ownerApproval';
+import { BreakerCard, breakerReason, OwnerApprovals, OwnerApprovalWait, type BreakerReason } from './OwnerApprovals';
+import { OWNER_DEVICE_APPROVAL, OWNER_DEVICE_BREAKER_RESET, refusalText, type ApprovalRequest, type ApprovalView, type DeviceKeysView } from './ownerApproval';
 import { HubTrustInfo } from './HubTrust';
 import { pollingSource } from './polling';
 import { readSpendPreset, saveSpendPreset } from './prefs';
@@ -218,6 +218,10 @@ export type Actions = {
   /** Owner approval v1 (requester side): ask for an approval on the owner's other device, and read it back. */
   approvalRequest: (request: ApprovalRequest) => Promise<Outcome<ApprovalView>>;
   approvalStatus: (opId: string) => Promise<Outcome<ApprovalView>>;
+  /** The node offers device-approved breaker resets (sub-flag) on this remote pairing. */
+  breakerResetOffered?: () => boolean;
+  /** Re-read the budget and its grant (after a reset). */
+  refreshBudget?: () => void;
   ownerCancel: (id: string) => Promise<void>;
   /** Create an invoice for an exact msat amount (never rounded here). */
   invoice: (t: TrackRef, msat: number, note: string) => Promise<Outcome<unknown>>;
@@ -1067,6 +1071,8 @@ export function ControlCenter(props: Props) {
     ownerStatus: (id, recipient) => act(() => source.firstContactStatus(id, recipient)),
     approvalRequest: (request) => act(() => source.approvalRequest(request)),
     approvalStatus: (opId) => act(() => source.approvalStatus(opId)),
+    breakerResetOffered: () => props.remote === true && overview()?.capabilities?.includes(OWNER_DEVICE_BREAKER_RESET) === true,
+    refreshBudget: () => void loadBudget(),
     ownerCancel: (id) => source.firstContactCancel(id).catch(() => {}),
     send: async (t, text, maxMsat, firstContactMsat) => {
       if (t.kind !== 'peer' && t.kind !== 'room') return { ok: false, error: { code: 'invalid', message: 'nothing to send to' } };
@@ -3466,6 +3472,10 @@ function Composer(props: {
   // Owner approval v1: the request is out; the owner's other device approves it.
   const [deviceWait, setDeviceWait] = createSignal<{ view: ApprovalView; revision: number; peer: string; cap: number; budget?: number; send: () => Promise<void> } | null>(null);
   const contactWaiting = () => ownerWait() !== null || deviceWait() !== null;
+  // A tripped spend breaker: from the last refused send, else the grant's standing pause.
+  const [breakerFromSend, setBreakerFromSend] = createSignal<BreakerReason | null>(null);
+  const breaker = (): BreakerReason | null => breakerFromSend() ?? (props.budget?.node_grant?.breakers?.paused ? 'grant_paused' : null);
+  const noteBreaker = (r: Outcome<unknown>) => setBreakerFromSend(r.ok ? null : breakerReason(r.error.code));
   usePairingActivity(() => busy() || paying() || review() !== null || contactWaiting());
   const cancelOwner = () => {
     const pending = untrack(ownerWait);
@@ -3560,6 +3570,7 @@ function Composer(props: {
       () => {
         cancelOwner();
         setOwnerExpired(false);
+        setBreakerFromSend(null);
         composerRevision++;
         setMode('message');
         setNote(null);
@@ -3982,6 +3993,7 @@ function Composer(props: {
         ? await props.actions.file(submittedTrack, submittedFile!, cap, first)
         : await props.actions.send(submittedTrack, submittedText, cap, first);
       const unchanged = composerRevision === submittedRevision;
+      noteBreaker(r);
       if (unchanged && submittedMode === 'message') {
         paymentResult(r);
         if (!r.ok && ['price_changed', 'price_cap_exceeded'].includes(r.error.code)) { setRaisedFrom(cap); setReadmitQuote(null); }
@@ -4084,6 +4096,7 @@ function Composer(props: {
         setRaisedFrom(null);
         const cap = shown().msat!;
         r = await props.actions.send(t, draft(), cap);
+        noteBreaker(r);
         if (unchanged()) {
           paymentResult(r);
           if (!r.ok && ['price_changed', 'price_cap_exceeded'].includes(r.error.code)) { setRaisedFrom(cap); setReadmitQuote(null); }
@@ -4572,6 +4585,17 @@ function Composer(props: {
           setNote(null);
           props.refreshPrice();
         }}>Get a fresh quote</button>
+      </Show>
+      <Show when={breaker()}>
+        {(reason) => <BreakerCard
+          reason={reason()}
+          now={props.now}
+          offerReset={props.actions.breakerResetOffered?.() === true}
+          request={() => props.actions.approvalRequest({ kind: 'breaker_reset', terms: {} })}
+          status={props.actions.approvalStatus}
+          // The card stays to say "reset, press Send again"; the next send (or chat) clears it.
+          onReset={() => props.actions.refreshBudget?.()}
+        />}
       </Show>
       <Show when={deviceWait()}>
         {(w) => <OwnerApprovalWait

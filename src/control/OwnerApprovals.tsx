@@ -148,3 +148,73 @@ export function OwnerApprovalWait(props: {
     </div>
   );
 }
+
+/** What a tripped spend breaker means for this app, by the node's reason. */
+export type BreakerReason = 'grant_paused' | 'grant_failures_pending' | 'grant_rate_limited' | 'grant_velocity';
+export const breakerReason = (code: string): BreakerReason | null =>
+  code === 'grant_paused' || code === 'grant_failures_pending' || code === 'grant_rate_limited' || code === 'grant_velocity' ? code : null;
+
+/**
+ * The requester's card when its spend grant is tripped. Only a failure pause
+ * needs a reset, and only that one offers "Ask your other device to reset"
+ * (when the node has the breaker-reset sub-flag). Rate and velocity limits
+ * recover by themselves; unresolved payments must settle first. A reset sends
+ * nothing on its own: press Send again after it.
+ */
+export function BreakerCard(props: {
+  reason: BreakerReason;
+  now: number;
+  /** The node has owner_device_approval_breaker_reset_v1 and this pairing is remote. */
+  offerReset: boolean;
+  request: () => Promise<Outcome<ApprovalView>>;
+  status: (opId: string) => Promise<Outcome<ApprovalView>>;
+  onReset: () => void;
+}) {
+  const [wait, setWait] = createSignal<ApprovalView | null>(null);
+  const [asking, setAsking] = createSignal(false);
+  const [error, setError] = createSignal<string | null>(null);
+  const [done, setDone] = createSignal(false);
+  const ask = async () => {
+    if (asking()) return;
+    setAsking(true); setError(null);
+    try {
+      const r = await props.request();
+      if (r.ok) setWait(r.value);
+      else setError(refusalText(r.error.code, { reason: r.error.reason, remaining_msat: r.error.remaining_msat }));
+    } finally { setAsking(false); }
+  };
+  return (
+    <div class="approval breaker-card" data-breaker={props.reason}>
+      <Show when={props.reason === 'grant_paused'}>
+        <p><strong>Spending is paused after failed payments.</strong> Nothing more is paid until it is reset.</p>
+        <Show when={done()} fallback={
+          <Show when={wait()} fallback={
+            <Show when={props.offerReset} fallback={<p class="hint" data-breaker-at-node>Your node’s owner can reset it at the node.</p>}>
+              <p class="hint">Rate and speed limits clear by themselves; only this pause needs a reset.</p>
+              <div class="form-actions">
+                <button type="button" class="primary soft" data-breaker-reset disabled={asking()} onClick={() => void ask()}>
+                  {asking() ? 'Asking…' : 'Ask your other device to reset'}
+                </button>
+              </div>
+            </Show>
+          }>
+            {(v) => <OwnerApprovalWait view={v()} now={props.now} status={props.status} fallback={v().owner_action}
+              onStop={() => setWait(null)} onApproved={() => { setWait(null); setDone(true); props.onReset(); }} />}
+          </Show>
+        }>
+          <p class="ok-note" role="status" data-breaker-reset-done>Reset on your other device. Nothing was sent; press Send again when you are ready.</p>
+        </Show>
+      </Show>
+      <Show when={props.reason === 'grant_rate_limited'}>
+        <p data-breaker-recovers>Too many payments for now. This clears by itself shortly; there is nothing to approve.</p>
+      </Show>
+      <Show when={props.reason === 'grant_velocity'}>
+        <p data-breaker-recovers>Spending is going faster than this app’s limit allows. It clears by itself shortly; there is nothing to approve.</p>
+      </Show>
+      <Show when={props.reason === 'grant_failures_pending'}>
+        <p data-breaker-pending>Waiting for unresolved payments to settle before more spending. A reset would not settle them; there is nothing to approve.</p>
+      </Show>
+      <Show when={error()}><p class="err-note" role="alert">{error()}</p></Show>
+    </div>
+  );
+}
