@@ -1069,10 +1069,16 @@ describe('invisible payments in the composer and the context panel', () => {
     type('[data-composer] textarea', 'while paused');
     await vi.waitFor(() => expect($('[data-budget-paused]')).not.toBeNull());
     expect(text('[data-budget-paused]')).toContain('New app payments are blocked');
+    // Resume & send: the resume is the one approval, then this message goes, exactly once.
+    await vi.waitFor(() => expect(text('[data-send]')).toBe('Resume & send'));
+    expect(host.used('message_send')).toHaveLength(0);
     submit();
     await vi.waitFor(() => expect(host.used('budget_resume')).toHaveLength(1));
-    expect(host.used('message_send')).toHaveLength(0);
     await vi.waitFor(() => expect($('[data-budget="ok"]')).not.toBeNull());
+    await vi.waitFor(() => expect(host.used('message_send')).toHaveLength(1));
+    expect(host.used('message_send')[0].args).toMatchObject({ plaintext: 'while paused' });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(host.used('message_send')).toHaveLength(1);
   });
 
   it('lowers one contact’s budget from the panel', async () => {

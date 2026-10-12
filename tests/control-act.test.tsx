@@ -190,7 +190,7 @@ describe('acting from the track', () => {
     expect(host.used('message_send')).toHaveLength(1);
   }, 15_000);
 
-  it('Approve & send: a new price before the approval lands is shown and needs another press', async () => {
+  it('Approve & send: a price that changes while waiting ends the consent, even if it comes back (2 → 3 → 2)', async () => {
     let ready = true;
     let peerMsat = 2000;
     const host = stubHost({
@@ -209,12 +209,21 @@ describe('acting from the track', () => {
     ready = true;
     await vi.waitFor(() => expect($('[data-money-notice]')).toBeNull(), { timeout: 15_000 });
     await vi.waitFor(() => expect(text_('[data-send-price]')).toMatch(/3 sats/), { timeout: 5000 });
+    await vi.waitFor(() => expect(text_('[data-composer-note]')).toMatch(/price changed while waiting for approval/));
+    // And back to the price that was on the button: the consent stays ended.
+    ready = false;
+    await vi.waitFor(() => expect($('[data-money-notice]')).not.toBeNull(), { timeout: 15_000 });
+    peerMsat = 2000;
+    ready = true;
+    await vi.waitFor(() => expect($('[data-money-notice]')).toBeNull(), { timeout: 15_000 });
+    await vi.waitFor(() => expect(text_('[data-send-price]')).toMatch(/up to 3 sats|2 sats/), { timeout: 5000 });
     host.spend.v = openView();
     await vi.waitFor(() => expect($('[data-spend="open"]')).not.toBeNull(), { timeout: 5000 });
-    await vi.waitFor(() => expect(text_('[data-composer-note]')).toMatch(/price changed since you pressed/));
+    await new Promise((r) => setTimeout(r, 100));
     expect(host.used('message_send')).toHaveLength(0);
     expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('gm Maya');
-  }, 40_000);
+    expect(text_('[data-send]')).toBe('Send');
+  }, 80_000);
 
   it('Approve & send: asks the owner once, keeps the draft, and sends it once when the owner approves', async () => {
     const host = stubHost();

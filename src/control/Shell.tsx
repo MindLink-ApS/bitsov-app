@@ -3406,6 +3406,10 @@ function Composer(props: {
   // Inputs and navigation remain usable during a send. Only the submitted
   // revision may be cleared by its completion (including track A -> B -> A).
   let composerRevision = 0;
+  // Approve & send consented to the text and the chat: only an edit, a chat
+  // switch or a refill moves this (an approval or resume changing the budget
+  // does not, or the continuation would cancel itself).
+  let draftRevision = 0;
   // Going offline invalidates undispatched approvals, not unchanged inputs
   // belonging to an operation that already reached the host and succeeds.
   let approvalRevision = 0;
@@ -3480,6 +3484,7 @@ function Composer(props: {
         cancelOwner();
         setOwnerExpired(false);
         composerRevision++;
+        draftRevision++;
         setMode('message');
         setNote(null);
         setDraft('');
@@ -3527,7 +3532,7 @@ function Composer(props: {
         composerRevision++;
         setMode(p.mode);
         setNote(null);
-        if (p.mode === 'message') setDraft(p.text);
+        if (p.mode === 'message') { setDraft(p.text); draftRevision++; }
         const draftAmount = p.sats === null ? '' : amountText(Math.round(p.sats * 1000), denom());
         if (p.mode === 'pay') {
           setPayKind('keysend');
@@ -3869,14 +3874,22 @@ function Composer(props: {
   const intendSend = () => {
     const msat = shown().msat;
     if (mode() !== 'message' || !draft().trim() || msat === null) return;
-    setContinueAfter({ revision: composerRevision, key: trackKey(props.track), msat, until: Date.now() + CONTINUE_MS });
+    setContinueAfter({ revision: draftRevision, key: trackKey(props.track), msat, until: Date.now() + CONTINUE_MS });
   };
+  // Any change of the price on the button while it waits ends the consent,
+  // even if it later comes back (2 → 3 → 2 does not send at 2).
+  createEffect(on(() => shown().msat, (msat) => {
+    const c = untrack(continueAfter);
+    if (!c || msat === c.msat) return;
+    setContinueAfter(null);
+    setNote('The price changed while waiting for approval. Nothing was sent. Check the price on Send and press it to send.');
+  }, { defer: true }));
   const approvalCleared = () => !needsTouch() && (viaBudget() ? stand().kind === 'ok' || stand().kind === 'first' : line().open);
   createEffect(() => {
     const c = continueAfter();
     if (!c || busy() || ownerWait() || !approvalCleared()) return;
     setContinueAfter(null);
-    const same = c.revision === untrack(() => composerRevision) && c.key === trackKey(props.track) && Date.now() < c.until && mode() === 'message' && draft().trim();
+    const same = c.revision === draftRevision && c.key === trackKey(props.track) && Date.now() < c.until && mode() === 'message' && draft().trim();
     // Its price is checked again by submit: a new price shows and needs another press.
     if (same) void submit(c.msat);
   });
@@ -4113,7 +4126,7 @@ function Composer(props: {
       class="composer"
       data-composer
       data-mode={mode()}
-      onInput={() => { cancelOwner(); composerRevision++; setPaidLine(null); setContinueAfter(null); }}
+      onInput={() => { cancelOwner(); composerRevision++; draftRevision++; setPaidLine(null); setContinueAfter(null); }}
       onKeyDown={(e) => {
         if (e.key === 'Enter' && e.repeat && !e.shiftKey && !e.isComposing) e.preventDefault();
       }}
