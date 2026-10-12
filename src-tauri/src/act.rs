@@ -269,6 +269,26 @@ fn not_dispatched_fee_limit_reason(reason: &str) -> bool {
         || (lower.contains("fee") && lower.contains("exceed"))
 }
 
+/// An active attempt owns failures even while restoring an older snapshot.
+/// Preflight snapshots are only fallbacks: a nested attempt may mint a new ID.
+pub enum OperationContext<'a> {
+    Active(Option<&'a str>),
+    Fallback(Option<&'a str>),
+}
+
+/// The single error boundary for an operation scope, including every `?`,
+/// early return and nested storage/transport failure within that scope.
+pub fn with_op<T>(context: OperationContext<'_>, result: Result<T, ActionError>) -> Result<T, ActionError> {
+    result.map_err(|mut error| {
+        let id = match context {
+            OperationContext::Active(id) => id.or(error.operation_id.as_deref()),
+            OperationContext::Fallback(id) => error.operation_id.as_deref().or(id),
+        };
+        error.operation_id = id.map(str::to_string);
+        error
+    })
+}
+
 impl ActionError {
     pub fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self {

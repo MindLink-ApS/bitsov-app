@@ -17,7 +17,7 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
-use crate::act::ActionError;
+use crate::act::{ActionError, OperationContext::Active};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Pending {
@@ -283,7 +283,7 @@ impl Journal {
         })();
         // The snapshot already names the dispatched operation, even when its
         // ledger/index cannot be read or repaired. Preserve it on every failure.
-        repair.map_err(|e: ActionError| e.for_operation(operation_id.as_deref()))?;
+        crate::act::with_op(Active(operation_id.as_deref()), repair)?;
         Ok(pending)
     }
 
@@ -295,6 +295,8 @@ impl Journal {
     /// before the caller posts. Only a record that holds no payment
     /// ([`Pending::resumable`]) may be replaced.
     pub fn begin_operation(&self, node_id: &str, path: &str, body: &serde_json::Value, max_msat: u64, operation: Option<(String, String)>) -> Result<Pending, ActionError> {
+        let operation_id = operation.as_ref().map(|(id, _)| id.clone());
+        crate::act::with_op(Active(operation_id.as_deref()), (|| {
         if self.pending()?.is_some_and(|p| !p.resumable) { return Err(unknown("Check the previous action first.")); }
         let (operation_id, op) = operation.map_or((None, None), |(id, op)| (Some(id), Some(op)));
         let mut pending = Pending {
@@ -341,6 +343,7 @@ impl Journal {
         self.save(&pending)?;
         if let Some(record) = &pending.operation_record { self.write_operation(record)?; }
         Ok(pending)
+        })())
     }
 
     #[cfg(not(unix))]
