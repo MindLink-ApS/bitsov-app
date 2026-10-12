@@ -19,6 +19,7 @@ import { hostSource, inHost, sampleRequest, type SampleStart, type Source } from
 import { sampleSource } from './control/sample';
 import type { DeviceView, FundingAddress, FundState } from './control/types';
 import { androidQrScannerAvailable, scanPairingLink } from './pairingScanner';
+import { cameraQrScannerAvailable, scanPairingLinkWithCamera } from './cameraQrScanner';
 import { PairingActivityProvider, usePairingActivity, usePairingBlocked } from './pairingActivity';
 import { watchPairingLinks } from './pairingDeepLink';
 
@@ -46,6 +47,8 @@ function AppScreen() {
   // Dev mode: sample data with no node (a plain browser tab, or `?sample`).
   const sample = sampleRequest(window.location.search, inHost(), import.meta.env.DEV);
   const canScanPairingQr = androidQrScannerAvailable();
+  // A desktop (macOS) webview scans with the camera; jsQR loads only on Scan.
+  const desktopScan = !canScanPairingQr && cameraQrScannerAvailable();
   const [pairingRequest, setPairingRequest] = createSignal<{ link: string } | null>(null);
   const [queuedPairing, setQueuedPairing] = createSignal<{ link: string } | null>(null);
   const [pairingBusy, setPairingBusy] = createSignal(false);
@@ -243,7 +246,8 @@ function AppScreen() {
             onForgetRemote={() => source().remoteAccessForget()}
             onPreviewRemote={(link) => source().remoteAccessPreview(link)}
             onImportRemote={(link) => source().remoteAccessImport(link)}
-            onScanRemote={canScanPairingQr ? scanPairingLink : undefined}
+            onScanRemote={canScanPairingQr ? scanPairingLink : desktopScan ? scanPairingLinkWithCamera : undefined}
+            mobile={canScanPairingQr}
             onRegisterDevice={async () => setDevice(await source().deviceKeyRegister())}
             onCancelDevice={async () => setDevice(await source().deviceKeyCancel())}
           />
@@ -335,7 +339,7 @@ function AppScreen() {
           onPreviewRemote={link => source().remoteAccessPreview(link)}
           onImportRemote={link => source().remoteAccessImport(link)}
           onBusyChange={setPairingBusy}
-          onScanRemote={scanPairingLink} />
+          onScanRemote={scanPairingLink} mobile />
         <button type="button" class="quiet" data-close-pairing disabled={pairingBusy()} onClick={closePairing}>Close pairing</button>
       </PairingLinkOverlay>
     )}</Show>

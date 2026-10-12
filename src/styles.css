@@ -1365,3 +1365,10 @@ input[type='checkbox'], input[type='radio'] { width: auto; flex: none; padding: 
   .composer-info > summary { position: relative; }
   .composer-info > summary::after { content: ''; position: absolute; inset: -11px; }
 }
+
+/* Desktop QR scan: a plain viewfinder over the pairing form; Cancel always visible. */
+.qr-scan-overlay { position: fixed; inset: 0; z-index: 60; display: grid; place-items: center; padding: 16px; background: color-mix(in srgb, var(--bg) 70%, transparent); backdrop-filter: blur(6px); }
+.qr-scan-box { display: grid; gap: 12px; width: min(100%, 420px); padding: 16px; border-radius: 16px; background: var(--surface, var(--bg)); box-shadow: var(--shadow-2, 0 8px 32px rgb(0 0 0 / 0.3)); }
+.qr-scan-title { margin: 0; font-weight: 600; }
+.qr-scan-video { width: 100%; aspect-ratio: 4 / 3; object-fit: cover; border-radius: 12px; background: #000; }
+.qr-scan-box .quiet { justify-self: end; }

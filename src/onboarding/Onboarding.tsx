@@ -49,6 +49,8 @@ export function Onboarding(props: {
   onBusyChange?: (busy: boolean) => void;
   onImportRemote?: (link: string) => Promise<RemoteImportView>;
   onScanRemote?: () => Promise<string>;
+  /** A phone (biometric approvals). Defaults to “has a scanner” for older callers. */
+  mobile?: boolean;
   /** Touch ID approvals setup, offered once the app is paired (Settings → Node has the same). */
   onRegisterDevice?: () => Promise<unknown>;
   onCancelDevice?: () => Promise<unknown>;
@@ -68,7 +70,7 @@ export function Onboarding(props: {
     props.onTargetChange?.(t);
   };
   const isEnrolled = () => props.device?.()?.state === 'registered';
-  const mobileBiometrics = () => props.onScanRemote !== undefined;
+  const mobileBiometrics = () => props.mobile ?? props.onScanRemote !== undefined;
   const [approvalsSkipped, setApprovalsSkipped] = createSignal(false);
   const [remoteLink, setRemoteLink] = createSignal('');
   const [previewing, setPreviewing] = createSignal(false);
