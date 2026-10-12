@@ -891,11 +891,20 @@ export function ControlCenter(props: Props) {
     const owner = (artifacts[key] ?? []).find((a) => a.type === 'sending' && a.text === m.plaintext && m.timestamp >= a.at - ECHO_SKEW_MS && !(a.echoes ?? []).some((e) => e.to === to));
     if (owner) setArtifacts(key, (old) => (old ?? []).map((a) => (a.id === owner.id && a.type === 'sending' ? { ...a, echoes: [...(a.echoes ?? []), { id: m.id, to }] } : a)));
   };
+  /**
+   * The operation a card names. A failed card's id is only *linked*: the host
+   * names the operation an error is about, which may be another one (its
+   * pending fence), so it never identifies, deletes or relabels that card as sent.
+   */
   const opOf = (a: Artifact): string | undefined =>
     a.type === 'failed' ? a.error.operation_id : a.type === 'undelivered' ? a.operationId : a.type === 'restored' ? a.op.op_id : undefined;
-  /** Cards about an operation that just produced its receipt. Undelivered cards keep their own retry flow. */
+  /** Every operation id seen here (receipts, errors, op list reads): one seen before a press is never that press's. */
+  const knownOps = new Set<string>();
+  /** Operations a receipt confirmed: an op list snapshot never brings them back as open. */
+  const confirmedOps = new Set<string>();
+  /** A receipt for an operation: a card restored for that same operation gives way to it. */
   const dropOperation = (t: TrackRef, opId: string) =>
-    setArtifacts(trackKey(t), (old) => (old ?? []).filter((a) => a.type === 'undelivered' || opOf(a) !== opId));
+    setArtifacts(trackKey(t), (old) => (old ?? []).filter((a) => a.type !== 'restored' || a.op.op_id !== opId));
   /**
    * The host's op list for a peer: each card about an operation learns the
    * host's record of it; a message send still open with no card here (the app
@@ -904,7 +913,9 @@ export function ControlCenter(props: Props) {
   const foldOps = (t: TrackRef, list: OpList) => {
     if (t.kind !== 'peer') return;
     const key = trackKey(t);
-    const byId = new Map(list.operations.filter((o) => o.peer.toLowerCase() === t.id.toLowerCase()).map((o) => [o.op_id, o]));
+    for (const o of list.operations) knownOps.add(o.op_id);
+    // A snapshot may predate a receipt: a confirmed operation is never shown as open again.
+    const byId = new Map(list.operations.filter((o) => o.peer.toLowerCase() === t.id.toLowerCase() && !confirmedOps.has(o.op_id)).map((o) => [o.op_id, o]));
     const known = new Set((threads.t[key] ?? []).map((m) => m.id));
     setArtifacts(key, (old) => {
       const cur = old ?? [];
@@ -919,7 +930,7 @@ export function ControlCenter(props: Props) {
       // A bubble still sending here is an op the host has open with no id on our side yet: restore nothing
       // until it settles (its receipt or error then names its op, and a later read sees the rest).
       if (cur.some((a) => a.type === 'sending')) return next;
-      const fresh = [...byId.values()].filter((o) => o.kind === 'message' && OPEN_OP.has(o.state) && !seen.has(o.op_id) && !(o.message_id && known.has(o.message_id)));
+      const fresh = [...byId.values()].filter((o) => o.kind === 'message' && RESTORE_OP.has(o.state) && !seen.has(o.op_id) && !(o.message_id && known.has(o.message_id)));
       // Oldest first, after everything already here: the host keeps no time for them.
       const at = Date.now();
       return [...next, ...fresh.reverse().map((op, i) => ({ id: `op-${op.op_id}`, at: at + i, type: 'restored' as const, op }))];
@@ -927,8 +938,9 @@ export function ControlCenter(props: Props) {
   };
   const loadOps = (t: TrackRef) => {
     if (t.kind !== 'peer') return;
+    // All peers: the host's pending fence is global, so any open op may later name another send's refusal.
     // A failed read establishes nothing: the cards stay as they are.
-    void source.opList(t.id).then((list) => foldOps(t, list), () => {});
+    void source.opList().then((list) => foldOps(t, list), () => {});
   };
 
   // The send queue: app-level, so navigation (another chat, Discover,
@@ -941,7 +953,11 @@ export function ControlCenter(props: Props) {
   // Paid but not delivered (or refused for good): the messages already queued
   // behind it wait; once the queue is empty a new press goes to the host.
   let queueHold = false;
-  createEffect(on([reconciled, pendingRevision], () => { setCheckFirst(false); queueHold = false; }, { defer: true }));
+  // Why the queue holds, said on each message it keeps back.
+  let holdWhy = 'Not sent, nothing paid: an earlier payment’s result is not known yet.';
+  // Only a pending check lifts "check first"; a released undelivered record lifts the paid hold.
+  createEffect(on(reconciled, () => { setCheckFirst(false); queueHold = false; }, { defer: true }));
+  createEffect(on(pendingRevision, () => { queueHold = false; }, { defer: true }));
   let box: SendBox | null = null;
   const [sendLive, setSendLive] = createSignal({ text: '', seq: 0 });
   // Clear, then say it: a repeat of the same words is announced again.
@@ -960,8 +976,13 @@ export function ControlCenter(props: Props) {
     blocked: () => (checkFirst() ? 'A payment result is not known yet. Nothing was sent. Check pending result, then press Send.' : null),
     settled: (r, t, text, at) => {
       const outcome = r.ok ? 'sent' : !UNSETTLED.has(r.error.code) ? 'refused' : paidUndelivered(r) || r.error.code === 'failed_paid' ? 'paid' : 'unknown';
-      if (outcome === 'unknown') setCheckFirst(true);
-      if (outcome === 'paid') queueHold = true;
+      if (outcome === 'unknown') { setCheckFirst(true); holdWhy = 'Not sent, nothing paid: an earlier payment’s result is not known yet.'; }
+      if (outcome === 'paid') {
+        queueHold = true;
+        if (!untrack(checkFirst)) holdWhy = paidUndelivered(r)
+          ? 'Not sent, nothing paid: an earlier message was paid but not delivered. Check pending result first.'
+          : 'Not sent, nothing paid: an earlier message was paid but refused by their node. Check pending result first.';
+      }
       const here = box && box.key() === trackKey(t) ? box : null;
       if (!r.ok && outcome === 'refused') {
         // Back in the box only where it was typed: the same composer, untouched since the press.
@@ -979,9 +1000,9 @@ export function ControlCenter(props: Props) {
     holdBack: (t, bubble, text) => {
       batch(() => {
         dropArtifact(t, bubble);
-        addArtifact(t, { type: 'unsent', text, why: 'held', reason: 'Not sent, nothing paid: an earlier payment’s result is not known yet.' });
+        addArtifact(t, { type: 'unsent', text, why: 'held', reason: untrack(checkFirst) ? 'Not sent, nothing paid: an earlier payment’s result is not known yet.' : holdWhy });
       });
-      announce('Message held: an earlier payment is not checked yet.');
+      announce(untrack(checkFirst) ? 'Message held: an earlier payment is not checked yet.' : 'Message held: an earlier message was paid but not finished.');
     },
     attach: (b) => {
       box = b;
@@ -1300,8 +1321,25 @@ export function ControlCenter(props: Props) {
       const memberCaps = pressed?.type === 'sending' && pressed.memberCaps
         ? pressed.memberCaps
         : Object.fromEntries((roomQuote()?.members ?? []).map((m) => [m.node_id, m.msat]));
+      // Operations known before this send: its own is minted only after dispatch begins.
+      const before = new Set(knownOps);
       const settled = await act(() => source.send(t.id, t.kind === 'room', text, maxMsat, t.kind === 'room' ? memberCaps : undefined, firstContactMsat));
       const r = settled;
+      if (r.ok && r.value.operation_id) { knownOps.add(r.value.operation_id); confirmedOps.add(r.value.operation_id); }
+      if (!r.ok && r.error.operation_id) {
+        if (before.has(r.error.operation_id)) {
+          // The host named an operation that existed before this press: its
+          // pending fence refused this one before minting it. Nothing was sent
+          // or paid for this message; it is kept whole, blocked by that one.
+          batch(() => {
+            dropArtifact(t, sendingId);
+            addArtifact(t, { type: 'unsent', text, why: 'held', reason: 'Not sent, nothing paid: an earlier payment’s result is not known yet. Check pending result first.' });
+          });
+          void loadBudget();
+          return r;
+        }
+        knownOps.add(r.error.operation_id);
+      }
       // The tally moved, or a budget rule stopped the send: either way, re-read it.
       if (r.ok || isBudgetStop(r.error) || ['spend_unknown', 'payment_unknown', 'failed_paid', 'payment_settled_undelivered'].includes(r.error.code)) void loadBudget();
       // Approved another contact with Touch ID, not this one: offer the tap here.
@@ -3460,7 +3498,7 @@ function ArtifactView(props: { moneyBlocked: boolean; a: Artifact; delivery?: De
                 </Show>
               </Show>
               <Show when={f().op && !OPEN_OP.has(f().op!.state) && f().op}>
-                {(op) => <span class="hint" data-failed-op={op().state}>{opStateText(op())}</span>}
+                {(op) => <span class="hint" data-failed-op={op().state}>{opStateText(op(), 'This app’s record of the payment named here')}</span>}
               </Show>
             </div>
           );
@@ -3560,18 +3598,24 @@ let composerSeq = 0;
 const ECHO_SKEW_MS = 120_000;
 /** Op states whose result the host has not established. */
 const OPEN_OP = new Set<OperationState>(['dispatching', 'unknown']);
-/** The host's record of an operation, in the owner's words (`paid_msat` absent: amount not known). */
-export function opStateText(op: OpView): string {
+/** Op states the host still treats as unfinished: restored after a restart, each said as it is. */
+const RESTORE_OP = new Set<OperationState>(['dispatching', 'unknown', 'paid', 'paid_undelivered']);
+/**
+ * The host's record of an operation, in accounting terms only (`paid_msat`
+ * absent: amount not known). `settled` also covers a paid message whose
+ * retries were stopped, so it never says "sent" or "delivered".
+ */
+export function opStateText(op: OpView, subject = 'This app’s record'): string {
   const paid = op.paid_msat === null ? 'an unknown amount' : `${sats(op.paid_msat)} ${satUnit(op.paid_msat)}`;
   switch (op.state) {
-    case 'dispatching': case 'unknown': return 'This app’s record: the result is not known yet. Check pending result before sending it again.';
-    case 'unpaid': return 'This app’s record: not paid. Nothing left your wallet for it.';
-    case 'paid': return `This app’s record: paid ${paid}; delivery not confirmed yet.`;
-    case 'paid_undelivered': return `This app’s record: paid ${paid}, not delivered.`;
-    case 'failed_paid': return `This app’s record: paid ${paid}; their node refused it.`;
-    case 'settled': return `This app’s record: sent, paid ${paid}.`;
-    case 'closed': return 'This app’s record: closed.';
-    default: return 'This app’s record could not be read.';
+    case 'dispatching': case 'unknown': return `${subject}: the result is not known yet. Check pending result before sending it again.`;
+    case 'unpaid': return `${subject}: not paid. Nothing left your wallet for it.`;
+    case 'paid': return `${subject}: paid ${paid}; delivery not confirmed yet. Check pending result.`;
+    case 'paid_undelivered': return `${subject}: paid ${paid}, not delivered. Check pending result to retry delivery or stop retrying.`;
+    case 'failed_paid': return `${subject}: paid ${paid}; their node refused it.`;
+    case 'settled': return `${subject}: paid ${paid}, finished. Delivery is not confirmed here.`;
+    case 'closed': return `${subject}: closed.`;
+    default: return `${subject} could not be read.`;
   }
 }
 const UNSETTLED = new Set(['spend_unknown', 'payment_unknown', 'failed_paid', 'payment_settled_undelivered', 'room_partial']);
@@ -3808,15 +3852,19 @@ function Composer(props: {
   const breaker = (): BreakerReason | null => breakerFromSend() ?? (props.budget?.node_grant?.breakers?.paused ? 'grant_paused' : null);
   const noteBreaker = (r: Outcome<unknown>) => setBreakerFromSend(r.ok ? null : breakerReason(r.error.code));
   usePairingActivity(() => busy() || paying() || review() !== null || contactWaiting());
+  /** A first-contact message whose approval request is still being made (no wait object yet). */
+  let requesting: { track: TrackRef; text: string } | null = null;
   /** `leaving`: the owner moved away (another chat, another page); the waiting text is kept on its chat. */
   const cancelOwner = (leaving = false) => {
     const pending = untrack(ownerWait);
     const device = untrack(deviceWait);
+    const asking = requesting;
+    requesting = null;
     setOwnerWait(null);
     // A device request has no cancel at the node: stop waiting here; it expires by itself.
     setDeviceWait(null);
     if (pending && !pending.recipient) void props.actions.ownerCancel(pending.approval.id);
-    const message = pending?.message ?? device?.message;
+    const message = pending?.message ?? device?.message ?? asking;
     if (leaving && message) props.actions.keepUnsent(message.track, message.text, 'You left before the owner approved this first contact.');
   };
   /** Approved on the other device: wait for the node's grant for this recipient, then send at once. */
@@ -4391,7 +4439,10 @@ function Composer(props: {
       // is remote-only and happens on another owner device).
       if (first !== undefined && !room() && props.actions.ownerDeviceApproval?.()) {
         // Owner approval v1: the owner approves on their other device instead of at the node.
+        // Captured before the await: leaving while the request is out keeps the text on its chat.
+        requesting = waitingText.message ?? null;
         const request = await props.actions.approvalRequest({ kind: 'first_contact', terms: { recipient: submittedPeer, max_total_msat: cap, ...(first ? { budget_msat: first } : {}) } });
+        requesting = null;
         if (composerRevision !== submittedRevision || approvalRevision !== submittedApprovalRevision || props.moneyBlocked) {
           setBusy(false);
           return;
@@ -4406,7 +4457,9 @@ function Composer(props: {
         return;
       }
       if (first !== undefined && !room()) {
+        requesting = waitingText.message ?? null;
         const request = await props.actions.ownerRequest(submittedPeer, cap, first);
+        requesting = null;
         if (composerRevision !== submittedRevision || approvalRevision !== submittedApprovalRevision || props.moneyBlocked) {
           if (request.ok && request.value) void props.actions.ownerCancel(request.value.id);
           setBusy(false);
