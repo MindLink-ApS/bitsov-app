@@ -23,6 +23,7 @@ pub mod pairing;
 mod trust;
 pub mod remote_access;
 pub mod sas;
+pub mod delegation;
 
 pub mod connection_retry;
 

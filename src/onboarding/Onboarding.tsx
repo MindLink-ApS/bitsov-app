@@ -1,3 +1,4 @@
+import type { JoinInput, JoinView } from './AddDevice';
 import { BoxIllustration } from './BoxIllustration';
 import { LocalNodeSwitch } from './LocalNodeSwitch';
 import { DeviceApprovals } from './DeviceApprovals';
@@ -42,6 +43,7 @@ export function Onboarding(props: {
   selectedTarget?: NodeTarget;
   onTargetChange?: (target: NodeTarget) => void;
   device?: () => DeviceView | null;
+  joinDevice?: (input: JoinInput) => Promise<JoinView>;
   onForgetRemote?: () => Promise<void>;
   onPreviewRemote?: (link: string) => Promise<RemotePreviewView>;
   onBusyChange?: (busy: boolean) => void;
@@ -474,6 +476,7 @@ export function Onboarding(props: {
       <Show when={props.onRegisterDevice && props.onCancelDevice && props.pairing().state === 'paired' && stage() !== 'node' && !approvalsSkipped()}>
         <DeviceApprovals
           device={props.device?.() ?? null}
+          joinDevice={props.joinDevice}
           remote={props.pairing().remote}
           mobile={mobileBiometrics()}
           onRegister={props.onRegisterDevice!}
@@ -485,6 +488,7 @@ export function Onboarding(props: {
       <Show when={target() !== 'local'}>
       <form class="panel pairing remote-form" data-remote-access onSubmit={importRemote}>
         <h2>{props.onScanRemote ? 'Scan or paste the pairing link' : 'Paste the pairing link'}</h2>
+        <p class="hint">To join from another owner device, open Settings → Devices → Add a device there, then scan or paste its ticket here.</p>
         <p class="hint">After a power cut, open the app once. Your password is never stored on the box.</p>
         <Show when={props.onScanRemote}>
           <p class="hint">BitSov uses the camera to read your node’s pairing QR code. You can paste instead. Nothing is saved until you choose Use remote node.</p>
