@@ -35,6 +35,7 @@ pub struct Pending {
     dir: Option<tempfile::TempDir>,
     remote_started_at: Option<u64>,
     replaced_approval: Option<RemoteReply>,
+    device_approval: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, Deserialize)]
@@ -66,6 +67,30 @@ fn expired() -> ActionError {
 fn quote(value: &str) -> String { format!("'{}'", value.replace('\'', "'\"'\"'")) }
 fn waiting() -> ActionError {
     ActionError::new("owner_only", "Approve this contact at your node. Nothing was sent.")
+}
+
+/// Encode both untrusted URL components, including UUID-shaped budget ops.
+pub fn device_path(id: &str, recipient: &str) -> Result<(String, String), ActionError> {
+    if recipient.len() != 64 || !recipient.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(ActionError::invalid("expected a 64-character hex node id"));
+    }
+    if id.is_empty() || id.len() > 128 || matches!(id, "." | "..") {
+        return Err(ActionError::invalid("Invalid grant operation id."));
+    }
+    let recipient = recipient.to_ascii_lowercase();
+    let mut url = reqwest::Url::parse("http://localhost/pair/first-contact-grant/").unwrap();
+    url.path_segments_mut().unwrap().pop_if_empty().push(id);
+    url.query_pairs_mut().append_pair("recipient", &recipient);
+    Ok((format!("{}?{}", url.path(), url.query().unwrap()), recipient))
+}
+
+fn device_reply(body: &str) -> Result<RemoteReply, ActionError> {
+    // Device grants carry provenance; the legacy CLI receipt remains strict.
+    let mut reply: serde_json::Value = serde_json::from_str(body).map_err(|_| waiting())?;
+    if let Some(approval) = reply.get_mut("approval").and_then(|a| a.as_object_mut()) {
+        approval.remove("granted_by");
+    }
+    serde_json::from_value(reply).map_err(|_| waiting())
 }
 
 impl Pending {
@@ -161,7 +186,7 @@ impl Pending {
   rm -f "$receipt.part"
 )"#);
         Ok(Self { view: View { id, request, owner_command, ready: false,
-            expires_at_ms: now.saturating_add(15 * 60_000).min(grant.expires_at_ms()), approval_window_secs: None }, fence, dir: Some(dir), remote_started_at: None, replaced_approval: None })
+            expires_at_ms: now.saturating_add(15 * 60_000).min(grant.expires_at_ms()), approval_window_secs: None }, fence, dir: Some(dir), remote_started_at: None, replaced_approval: None, device_approval: false })
     }
 
     pub fn remote(request: Request, fence: (u64, u64), now: u64, grant: &NodeGrant) -> Result<Self, ActionError> {
@@ -180,11 +205,44 @@ impl Pending {
                 request, owner_command, ready: false,
                 expires_at_ms: now.saturating_add(REMOTE_APPROVAL_WINDOW_SECS * 1000).min(grant.expires_at_ms()),
                 approval_window_secs: Some(REMOTE_APPROVAL_WINDOW_SECS) },
-            fence, dir: None, remote_started_at: Some(now), replaced_approval: None,
+            fence, dir: None, remote_started_at: Some(now), replaced_approval: None, device_approval: false,
         })
     }
 
+    /// Observe an owner-device grant without requiring a prior CLI handoff.
+    /// Keep a pending record so compose rechecks and consumes the local guard.
+    pub fn device(body: &str, id: &str, recipient: &str, grant: &NodeGrant, fence: (u64, u64), now: u64) -> Result<(Self, View), ActionError> {
+        let reply = device_reply(body)?;
+        if id != grant.op_id || reply.grant_op_id != id || reply.recipient != recipient {
+            return Err(waiting());
+        }
+        let cap = reply.approval.as_ref().map_or(0, |a| a.max_total_msat);
+        if reply.state == "approved" && (cap == 0 || cap > 100_000) { return Err(waiting()); }
+        let mut pending = Self {
+            view: View {
+                // Compose's replacement guard needs a unique local handoff id:
+                // several device approvals may share the same budget operation.
+                id: crate::remote_access::new_local_auth_token().map_err(|_| waiting())?,
+                request: Request { client_id: grant.client_id.clone(), grant_op_id: id.into(),
+                    recipient: recipient.into(), max_total_msat: cap,
+                    contact_budget_msat: grant.per_recipient_msat.get(recipient).copied().unwrap_or(cap) },
+                owner_command: String::new(), ready: false,
+                expires_at_ms: now.saturating_add(120_000).min(grant.expires_at_ms()),
+                approval_window_secs: Some(120),
+            },
+            fence, dir: None, remote_started_at: Some(now), replaced_approval: None, device_approval: true,
+        };
+        let mut view = pending.remote_status(body, grant, fence, now)?;
+        pending.view.expires_at_ms = view.expires_at_ms;
+        // Device polling uses grant_op + recipient; the local id stays private.
+        view.id = id.into();
+        Ok((pending, view))
+    }
+
     pub fn remote_path(&self) -> Option<String> {
+        if self.device_approval {
+            return device_path(&self.view.request.grant_op_id, &self.view.request.recipient).ok().map(|(path, _)| path);
+        }
         self.remote_started_at.map(|_| format!("/pair/first-contact-grant/{}?recipient={}",
             self.view.request.grant_op_id, self.view.request.recipient))
     }
@@ -204,12 +262,13 @@ impl Pending {
 
     pub fn remote_status(&mut self, body: &str, grant: &NodeGrant, fence: (u64, u64), now: u64) -> Result<View, ActionError> {
         self.status(grant, fence, now)?;
-        let mut reply: RemoteReply = serde_json::from_str(body).map_err(|_| waiting())?;
+        let mut reply: RemoteReply = if self.device_approval { device_reply(body)? }
+            else { serde_json::from_str(body).map_err(|_| waiting())? };
         let r = &self.view.request;
         if reply.grant_op_id != r.grant_op_id || reply.recipient != r.recipient || reply.approval_window_secs == 0 {
             return Err(waiting());
         }
-        let window = reply.approval_window_secs.min(REMOTE_APPROVAL_WINDOW_SECS);
+        let window = reply.approval_window_secs.min(if self.device_approval { 120 } else { REMOTE_APPROVAL_WINDOW_SECS });
         self.view.approval_window_secs = Some(window);
         self.view.expires_at_ms = self.view.expires_at_ms.min(
             self.remote_started_at.unwrap().saturating_add(window * 1000));
@@ -227,7 +286,8 @@ impl Pending {
                 let approval = reply.approval.ok_or_else(waiting)?;
                 let until = u64::try_from(approval.expires_at).unwrap_or(0).saturating_mul(1000);
                 if until <= now { return Err(expired()); }
-                if approval.recipient != r.recipient || approval.max_total_msat != r.max_total_msat || until > grant.expires_at_ms() {
+                if approval.recipient != r.recipient || approval.max_total_msat != r.max_total_msat || until > grant.expires_at_ms()
+                    || (self.device_approval && until > now.saturating_add(120_000)) {
                     return Err(waiting());
                 }
                 view.ready = true;
@@ -317,6 +377,47 @@ mod tests {
             "state": "approved", "approval_window_secs": 300,
             "approval": {"recipient": "a".repeat(64), "max_total_msat": 5000, "expires_at": 310}});
         (pending, grant, reply)
+    }
+
+    #[test]
+    fn device_path_encodes_the_operation_and_canonical_recipient() {
+        let (path, recipient) = device_path("op/a?b&c=#%", &"AB".repeat(32)).unwrap();
+        assert_eq!(recipient, "ab".repeat(32));
+        assert_eq!(path, format!("/pair/first-contact-grant/op%2Fa%3Fb&c=%23%25?recipient={recipient}"));
+        for id in ["", ".", ".."] { assert!(device_path(id, &recipient).is_err()); }
+    }
+
+    #[test]
+    fn device_status_binds_terms_and_enforces_the_two_minute_single_use_window() {
+        let (_, grant, mut reply) = remote_fixture();
+        let recipient = "a".repeat(64);
+        reply["approval"]["expires_at"] = 130.into();
+        reply["approval"]["granted_by"] = "device:0123456789abcdef0123456789abcdef".into();
+        let (mut pending, view) = Pending::device(&reply.to_string(), "ab12", &recipient, &grant, (1, 2), 10_000).unwrap();
+        assert!(view.ready);
+        assert_eq!(view.expires_at_ms, 130_000);
+        assert_eq!(view.approval_window_secs, Some(120));
+        assert_eq!(pending.remote_status(&reply.to_string(), &grant, (1, 2), 130_000).unwrap_err().code, "owner_contact_expired");
+        for change in ["operation", "recipient", "approval_recipient", "too_long", "expired", "consumed", "missing", "zero_window", "zero_cap", "large_cap"] {
+            let mut bad = reply.clone();
+            match change {
+                "operation" => bad["grant_op_id"] = "abcd".into(),
+                "recipient" => bad["recipient"] = "b".repeat(64).into(),
+                "approval_recipient" => bad["approval"]["recipient"] = "b".repeat(64).into(),
+                "too_long" => bad["approval"]["expires_at"] = 131.into(),
+                "expired" => bad["approval"]["expires_at"] = 10.into(),
+                "consumed" => bad["state"] = "consumed".into(),
+                "missing" => bad["approval"] = serde_json::Value::Null,
+                "zero_window" => bad["approval_window_secs"] = 0.into(),
+                "zero_cap" => bad["approval"]["max_total_msat"] = 0.into(),
+                "large_cap" => bad["approval"]["max_total_msat"] = 100_001.into(),
+                _ => unreachable!(),
+            }
+            assert!(Pending::device(&bad.to_string(), "ab12", &recipient, &grant, (1, 2), 10_000).is_err(), "{change}");
+        }
+        let (mut pending, _) = Pending::device(&reply.to_string(), "ab12", &recipient, &grant, (1, 2), 10_000).unwrap();
+        reply["approval"]["max_total_msat"] = 4000.into();
+        assert!(pending.remote_status(&reply.to_string(), &grant, (1, 2), 11_000).is_err(), "compose must reject changed terms");
     }
 
     #[test]
