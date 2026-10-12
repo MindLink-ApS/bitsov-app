@@ -251,7 +251,7 @@ pub struct NodeStatusResponse {
 /// Capabilities the renderer may act on. Anything else the node lists is dropped.
 /// `owner_device_approval_v1`: the node approves spend windows and first contact
 /// from an enrolled owner device (node #303); the renderer only changes copy on it.
-pub const KNOWN_CAPABILITIES: &[&str] = &["energy_v1", "membrane_v1", "call_meeting_v1", "room_binding_v1", "porch_read_v1", "porch_quote_v1", "front_door_v1", "owner_device_approval_v1"];
+pub const KNOWN_CAPABILITIES: &[&str] = &["energy_v1", "membrane_v1", "call_meeting_v1", "room_binding_v1", "porch_read_v1", "porch_quote_v1", "front_door_v1", "owner_device_approval_v1", "owner_device_approval_breaker_reset_v1"];
 
 pub fn known_capabilities(listed: &[String]) -> Vec<String> {
     KNOWN_CAPABILITIES
@@ -1229,6 +1229,23 @@ mod tests {
         })).unwrap();
         let projected = serde_json::to_value(NodeOverview::from_status(status, 123)).unwrap();
         assert_eq!(projected["capabilities"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn overview_only_offers_breaker_reset_for_the_exact_advertised_capability() {
+        for (caps, expected) in [
+            (serde_json::json!(["owner_device_approval_breaker_reset_v1", "owner_device_approval_breaker_reset_v1"]),
+             serde_json::json!(["owner_device_approval_breaker_reset_v1"])),
+            (serde_json::json!(["owner_device_approval_v1", "owner_device_approval_breaker_reset_v2"]),
+             serde_json::json!(["owner_device_approval_v1"])),
+            (serde_json::json!([]), serde_json::json!([])),
+        ] {
+            let status = serde_json::from_value(serde_json::json!({
+                "status": "ok", "node_id": "x", "api_capabilities": caps
+            })).unwrap();
+            let projected = serde_json::to_value(NodeOverview::from_status(status, 123)).unwrap();
+            assert_eq!(projected["capabilities"], expected);
+        }
     }
 
     #[test]

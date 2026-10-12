@@ -157,11 +157,15 @@ async fn existing_device_signer_returns_der_hex_verifiable_with_p256_sha256() {
 
 #[tokio::test]
 async fn requester_commands_keep_node_views_and_map_http_refusals() {
+    check_requester_passthrough(view()).await;
+    check_requester_passthrough(breaker_view()).await;
+}
+
+async fn check_requester_passthrough(expected_view: Value) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let state = NodeState::for_api(format!("http://{}/api/v1", listener.local_addr().unwrap()));
+    let state = NodeState::for_api(format!("http://127.0.0.1:{}/api/v1", listener.local_addr().unwrap().port()));
     *state.token.lock().unwrap() = Some("test-pairing-token".into());
-    let expected_view = view();
     let keys = json!({"device_approvals":"enabled","owner_device_count":1,
         "device_keys":[{"key_id":"ab".repeat(16),"fingerprint":"ABCD","name":null,"registered_at":1}]});
     let replies = vec![
@@ -279,4 +283,38 @@ async fn approval_refusals_never_invoke_the_signer() {
         .await;
         assert_eq!(result.unwrap_err().code, expected);
     }
+}
+
+fn breaker_view() -> Value {
+    let mut v = view();
+    v["request"] = json!({"kind":"breaker_reset", "terms":{}});
+    v["breaker_reset"] = json!({
+        "tripped":["grant_paused", "rate_limit_minute", "rate_limit_hour", "velocity_limit", "future_trip"],
+        "breakers": {"limits":{"max_payments_per_minute":2,"max_payments_per_hour":12,
+            "max_consecutive_failures":3,"max_msat_per_10_minutes":9000},
+            "payments_last_minute":1,"payments_last_hour":7,"reserved_msat_last_10_minutes":1234,
+            "consecutive_failures":3,"unresolved_payments":0,"paused":true},
+        "budget_msat":10000,"remaining_msat":8766,"per_call_max_msat":1000,
+        "grant_expires_at":2000000000,"resets_last_day":2,"state_digest":"ab".repeat(32)
+    });
+    v
+}
+
+#[tokio::test]
+async fn breaker_approval_signs_exact_message_and_reads_top_level_snapshot() {
+    let v = breaker_view();
+    let message = v["approval_message"].as_str().unwrap();
+    let signature = sign_checked(&v, "owner", message, |exact, reason| {
+        assert_eq!(exact.as_bytes(), message.as_bytes());
+        assert_eq!(reason, "Reset this app’s paused spending · Tripped: paused after failed payments, too many payments this minute, too many payments this hour, spending too fast, future_trip · Budget: up to 10 sats, 8.766 sats left · Each payment: up to 1 sat · Grant ends: 2000000000 (unix seconds) · Device resets in the last day: 2 of 3 · Requested by app abcdef…123456");
+        std::future::ready(Ok("signature".into()))
+    }).await.unwrap();
+    assert_eq!(signature, "signature");
+    assert_eq!(checked_approval(&v, "owner", "changed").unwrap_err().code, "approval_changed");
+    assert_eq!(checked_approval(&v, "requester", message).unwrap_err().code, "approval_self");
+
+    let mut missing = v.clone();
+    missing.as_object_mut().unwrap().remove("breaker_reset");
+    assert_eq!(checked_approval(&missing, "owner", message).unwrap(),
+        "Reset this app’s paused spending · Your node did not include the grant’s state · Requested by app abcdef…123456");
 }
