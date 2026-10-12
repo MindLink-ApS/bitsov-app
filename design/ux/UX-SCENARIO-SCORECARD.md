@@ -140,11 +140,11 @@ all. Even a 1 s send feels broken if nothing moves.
 ## 4. Log
 
 - **2026-10-11:** Beta's own-node STUN checked from NOVA: a STUN Binding Request to 136.71.194.190:3478 got a
-  Binding Success response with a mapped address in **114 ms** (transaction id matched). The owner `/status` was not
-  read from here: it answers only with owner auth, which this lane does not hold. Code path checked instead: the host
-  maps `/status` `stun_url` into the overview (`own_stun_url`, plain `stun:host:port` only) and the app uses it as the
-  default from the **first overview read** (test: *By default, calls ask your own node*). End-to-end pickup on a real
-  app paired to beta is **unmeasured** until someone with owner access opens Settings → Calls there.
+  Binding Success response with a mapped address in **114 ms** (transaction id matched). **Verified by the lead**
+  from beta's loopback owner API: `/status` reports `"stun_url":"stun:136.71.194.190:3478"`, `"stun_port":3478`. The
+  host maps `stun_url` into the overview (`own_stun_url`, plain `stun:host:port` only) and the app uses it as the
+  default from the **first overview read** (test: *By default, calls ask your own node*). So the own-node default is
+  real end to end on the node side; a real app paired to beta opening Settings → Calls is still to be seen.
 - **2026-10-11:** Codex second opinion adopted: *Approve & continue* moves to #1; unknown payment results are never a
   retryable draft; calls show *Calling* at the press with preview/mute; TURN later on the node with consent.
 
