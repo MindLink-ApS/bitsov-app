@@ -116,23 +116,37 @@ all. Even a 1 s send feels broken if nothing moves.
 | AI "Ask your node" | thinking line | local model | no | unmeasured | to measure |
 | Device setup (Touch ID approvals) | pending card | **owner runs `konsensus device approve …` at the box** | **yes** | console step by design (owner ceremony) | design question |
 
-## 3. Top 5 fixes (ranked by felt impact ÷ effort)
+## 3. Top fixes (re-ranked 2026-10-11 after the Codex second opinion)
 
-1. **Optimistic send bubble.** Renderer only, small, high impact. Ready to build.
-2. **Parallel pre-flight reads and capabilities caching in `message_send`.** Host, small. About -3 RTT, roughly 0.2 s
-   or more per send at 74 ms.
-3. **Get approvals out of the console.**
-   - Offer Touch ID approvals right where *Approve spending* and *first contact* stall, not only in Settings.
-   - Long term, a node-side owner approval from an enrolled device. Needs a node issue.
-   - Removes the "leave the app" step Rasmus hit.
-4. **Calls: STUN default and copy.**
-   - The "No STUN server is set" line shows on every chat.
-   - Ship a sensible owner-chosen default prompt in Settings → Calls.
-   - Show the warning only when starting a call across networks.
-   - (Calls deep dive is next.)
-5. **Node: compose timing breakdown.** Diagnostics, so step 7 can be measured and owned.
+1. **Approve & continue: one action.** Today a Touch ID approval succeeds and then returns without sending
+   (`Shell.tsx` approve path), and calls say "press Call or Accept again". Make it *Approve & send* /
+   *Approve & call*: keep the recipient, the draft or media choice and the ceiling through authentication, then
+   continue once. Ask again only if the terms change (price, recipient, ceiling). **Biggest simplification.**
+   Renderer PR, queued after calls.
+2. **Optimistic send bubble (#201).** Done, in review. Unknown or paid-not-delivered outcomes are never a
+   retryable draft: the box stays empty and points to *Check pending result* (the host blocks further spending
+   until reconciled).
+3. **Calls: feedback from the press and STUN by default.** On `feat/calls-sequence`: *Calling* shows at the press,
+   Mute/Camera/own preview from the first moment, own-node STUN by default, the network note only in the call panel,
+   the no-relay limit stated plainly.
+4. **Host pre-flight (ATLAS lane, bitsov-app #202).** Parallel reads and capabilities caching across messages and
+   call signals; the fresh grant check stays inside serialised spending. About -3 RTT per send or signal.
+5. **Get approvals out of the console.** Offer Touch ID approvals where *Approve spending* and *first contact*
+   stall, not only in Settings. Long term, owner approval from an enrolled device (node issue).
+6. **Node: compose timing breakdown.** Diagnostics, so step 7 can be measured and owned.
+7. **TURN on the node, later.** An explicitly consented relay on the user's own node (node issue filed by ATLAS).
+   Until then the UI says there is no relay and some networks cannot connect.
 
 ## 4. Log
+
+- **2026-10-11:** Beta's own-node STUN checked from NOVA: a STUN Binding Request to 136.71.194.190:3478 got a
+  Binding Success response with a mapped address in **114 ms** (transaction id matched). The owner `/status` was not
+  read from here: it answers only with owner auth, which this lane does not hold. Code path checked instead: the host
+  maps `/status` `stun_url` into the overview (`own_stun_url`, plain `stun:host:port` only) and the app uses it as the
+  default from the **first overview read** (test: *By default, calls ask your own node*). End-to-end pickup on a real
+  app paired to beta is **unmeasured** until someone with owner access opens Settings → Calls there.
+- **2026-10-11:** Codex second opinion adopted: *Approve & continue* moves to #1; unknown payment results are never a
+  retryable draft; calls show *Calling* at the press with preview/mute; TURN later on the node with consent.
 
 - **2026-10-11:** Calls traced: cross-network calls cannot connect without STUN/TURN (C1, needs a node issue and a product decision); the STUN note shows on every chat (C2); each paid signal repeats the send pre-flight (C3).
 - **2026-10-11:** Optimistic send built on `feat/optimistic-send`: bubble at 2–3 ms, paid at 1209 ms (real settlement). A second Send while one is in flight queues in order instead of being ignored.
