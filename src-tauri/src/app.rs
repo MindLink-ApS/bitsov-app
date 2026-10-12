@@ -106,6 +106,8 @@ mod home_unlock;
 mod device;
 #[path = "add_device.rs"]
 mod add_device;
+#[path = "owner_approval.rs"]
+mod owner_approval;
 #[path = "owner_contact.rs"]
 mod owner_contact;
 
@@ -6421,6 +6423,61 @@ async fn do_relation_approve(
     Ok(state.spend.lock().unwrap().view(now_ms()))
 }
 
+// Owner approval v1 uses the renderer's default camelCase invoke arguments.
+#[tauri::command]
+async fn owner_approval_request(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    request: serde_json::Value,
+) -> Result<serde_json::Value, ActionError> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    owner_approval::create(state.inner(), request).await
+}
+
+#[tauri::command]
+async fn owner_approval_status(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    op_id: String,
+) -> Result<serde_json::Value, ActionError> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    owner_approval::status(state.inner(), &op_id).await
+}
+
+#[tauri::command]
+async fn owner_approvals_pending(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+) -> Result<Vec<serde_json::Value>, ActionError> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    owner_approval::pending(state.inner()).await
+}
+
+#[tauri::command]
+async fn owner_approval_approve(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    op_id: String,
+    approval_message: String,
+) -> Result<serde_json::Value, ActionError> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    owner_approval::approve(state.inner(), &op_id, &approval_message).await
+}
+
+#[tauri::command]
+async fn owner_device_keys(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+) -> Result<serde_json::Value, ActionError> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    owner_approval::device_keys(state.inner()).await
+}
+
 #[tauri::command(rename_all = "snake_case")]
 async fn add_device(window: WebviewWindow<impl tauri::Runtime>, state: State<'_, NodeState>, input: add_device::Input) -> Result<add_device::View, ActionError> {
     reject_sealed_window(&window)?;
@@ -7592,6 +7649,11 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             spend_request,
             spend_lock,
             spend_cancel,
+            owner_approval_request,
+            owner_approval_status,
+            owner_approvals_pending,
+            owner_approval_approve,
+            owner_device_keys,
             add_device,
             join_device,
             device_key_status,
@@ -15110,6 +15172,11 @@ mod assistant_acl_tests {
                 "spend_request",
                 "spend_lock",
                 "spend_cancel",
+                "owner_approval_request",
+                "owner_approval_status",
+                "owner_approvals_pending",
+                "owner_approval_approve",
+                "owner_device_keys",
                 "add_device",
                 "join_device",
                 "device_key_status",
