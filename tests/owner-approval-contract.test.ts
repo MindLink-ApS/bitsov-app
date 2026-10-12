@@ -51,22 +51,24 @@ describe('host refusals keep only what the screens may use', () => {
 
 import { breakerSnapshot, needsReset } from '../src/control/ownerApproval';
 describe('breaker reset (node #304)', () => {
-  const snap = { tripped: ['grant_paused', 'rate_limit_minute'], budget_msat: 500_000, per_call_max_msat: 10_000, remaining_msat: 120_000,
+  const breakers = { limits: { max_payments_per_minute: 10, max_payments_per_hour: 100, max_consecutive_failures: 3, max_msat_per_10_minutes: 200_000 },
+    payments_last_minute: 0, payments_last_hour: 4, reserved_msat_last_10_minutes: 0, consecutive_failures: 3, unresolved_payments: 0, paused: true };
+  const snap = { tripped: ['grant_paused', 'rate_limit_minute'], breakers, budget_msat: 500_000, per_call_max_msat: 10_000, remaining_msat: 120_000,
     grant_expires_at: 1_900_000_000, resets_last_day: 1, state_digest: 'ab'.repeat(16) };
-  const reset = (request: object): ApvView => ({ ...base({ kind: 'spend_grant', terms: { budget_msat: 1, per_call_max_msat: 1, window_secs: 60 } }), request } as ApvView);
-  type ApvView = ApprovalView;
-  it('shows the node’s snapshot, read from `snapshot` or from `terms`', () => {
-    for (const request of [{ kind: 'breaker_reset', terms: {}, snapshot: snap }, { kind: 'breaker_reset', terms: snap }]) {
-      const lines = termLines(reset(request));
-      expect(lines[0]).toBe('Reset this app’s paused spending');
-      expect(lines[1]).toBe('Tripped: paused after failed payments, too many payments this minute');
-      expect(lines[2]).toBe('Budget: up to 500 sats, 120 sats left');
-      expect(lines[5]).toBe('Device resets in the last day: 1 of 3');
-    }
+  const reset = (breaker_reset?: object): ApprovalView =>
+    ({ ...base({ kind: 'breaker_reset', terms: {} }), ...(breaker_reset ? { breaker_reset } : {}) } as ApprovalView);
+  it('shows the node’s snapshot from the top-level breaker_reset; request stays {kind, terms: {}}', () => {
+    const v = reset(snap);
+    expect(v.request).toEqual({ kind: 'breaker_reset', terms: {} });
+    const lines = termLines(v);
+    expect(lines[0]).toBe('Reset this app’s paused spending');
+    expect(lines[1]).toBe('Tripped: paused after failed payments, too many payments this minute');
+    expect(lines[2]).toBe('Budget: up to 500 sats, 120 sats left');
+    expect(lines[5]).toBe('Device resets in the last day: 1 of 3');
   });
-  it('says so when the node sent no snapshot', () => {
-    expect(breakerSnapshot(reset({ kind: 'breaker_reset', terms: {} }))).toBeNull();
-    expect(termLines(reset({ kind: 'breaker_reset', terms: {} }))[1]).toBe('Your node did not include the grant’s state');
+  it('says so when the node sent no snapshot (nothing is read from request.terms)', () => {
+    expect(breakerSnapshot(reset())).toBeNull();
+    expect(termLines(reset())[1]).toBe('Your node did not include the grant’s state');
   });
   it('only a failure pause needs a reset; rate and velocity limits recover with time', () => {
     expect(needsReset(['grant_paused'])).toBe(true);

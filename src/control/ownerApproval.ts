@@ -58,28 +58,35 @@ export type FirstContactTerms = {
 };
 /** What tripped this pairing's spend grant. Only grant_paused needs a reset; the others recover with time. */
 export type BreakerTrip = 'grant_paused' | 'rate_limit_minute' | 'rate_limit_hour' | 'velocity_limit';
-/** The node's snapshot of the requesting pairing's grant, carried in a breaker_reset request (read-only). */
+/** The node's breaker state for a grant (all counts u64; `paused` is the failure pause). */
+export type BreakerStatus = {
+  limits: { max_payments_per_minute: number; max_payments_per_hour: number; max_consecutive_failures: number; max_msat_per_10_minutes: number };
+  payments_last_minute: number;
+  payments_last_hour: number;
+  reserved_msat_last_10_minutes: number;
+  consecutive_failures: number;
+  unresolved_payments: number;
+  paused: boolean;
+};
+/** The node's snapshot of the requesting pairing's grant: ApprovalView.breaker_reset (read-only). */
 export type BreakerSnapshot = {
-  tripped: BreakerTrip[];
-  breakers?: unknown;
+  /** BreakerTrip values; any other string is shown as the node wrote it. */
+  tripped: string[];
+  breakers: BreakerStatus;
   budget_msat: number;
-  per_call_max_msat: number;
   remaining_msat: number;
+  per_call_max_msat: number;
   /** unix seconds */
   grant_expires_at: number;
-  /** device resets of this grant in the last 24 h (at most 3) */
+  /** device resets of this grant in the last 24 h (the node allows 3) */
   resets_last_day: number;
   state_digest: string;
 };
-/** What the app sends. breaker_reset takes no numbers: it resets the requesting pairing's own live grant. */
+/** What the app sends, and what the node shows back in ApprovalView.request (unchanged). breaker_reset takes no numbers. */
 export type ApprovalRequest =
   | { kind: 'spend_grant'; terms: SpendGrantTerms }
   | { kind: 'first_contact'; terms: FirstContactTerms }
   | { kind: 'breaker_reset'; terms: Record<string, never> };
-/** What the node shows back: a breaker_reset carries its snapshot (read from `snapshot`, else `terms`). */
-export type ApprovalViewRequest =
-  | Exclude<ApprovalRequest, { kind: 'breaker_reset' }>
-  | { kind: 'breaker_reset'; terms: Record<string, never> | BreakerSnapshot; snapshot?: BreakerSnapshot };
 
 /** consumed = approved and used; there is no declined state. */
 export type ApprovalStatus = 'pending' | 'consumed' | 'expired';
@@ -92,7 +99,7 @@ export type ApprovalView = {
   client_pubkey: string;
   epoch: number;
   grant_op: string | null;
-  request: ApprovalViewRequest;
+  request: ApprovalRequest;
   nonce: string;
   /** unix seconds */
   expires_at: number;
@@ -100,6 +107,8 @@ export type ApprovalView = {
   approval_message: string;
   status: ApprovalStatus;
   owner_action: string | null;
+  /** breaker_reset only: the node's snapshot of the grant to reset (top level; absent otherwise). */
+  breaker_reset?: BreakerSnapshot;
 };
 
 /** GET /pair/device-keys: whether this pairing can approve, and its owner devices. */
@@ -173,11 +182,11 @@ export function approvalReason(view: ApprovalView): string {
   return `${termLines(view).join(' · ')} · Requested by app ${shortKey(view.client_pubkey)}`;
 }
 
-/** A breaker_reset view's snapshot, wherever the node put it; null when absent or malformed. */
+/** A breaker_reset view's snapshot (ApprovalView.breaker_reset); null when absent or malformed. */
 export function breakerSnapshot(view: ApprovalView): BreakerSnapshot | null {
   if (view.request.kind !== 'breaker_reset') return null;
-  const s = (view.request.snapshot ?? view.request.terms) as Partial<BreakerSnapshot>;
-  return s && Array.isArray(s.tripped) && typeof s.remaining_msat === 'number' ? (s as BreakerSnapshot) : null;
+  const s = view.breaker_reset;
+  return s && Array.isArray(s.tripped) && typeof s.remaining_msat === 'number' ? s : null;
 }
 
 const TRIP_TEXT: Record<BreakerTrip, string> = {
