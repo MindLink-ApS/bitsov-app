@@ -187,6 +187,8 @@ export type Actions = {
   registerDevice: () => Promise<void>;
   /** Touch ID approvals live in Settings → Node; other places link there. */
   openNodeSettings?: () => void;
+  /** The node approves spending and first contact from an enrolled owner device (owner_device_approval_v1). */
+  ownerDeviceApproval?: () => boolean;
   cancelDevice: () => Promise<void>;
   /** One contact's envelope, signed with Touch ID. */
   approveContact: (peer: string, perActMsat: number | null) => Promise<void>;
@@ -972,6 +974,7 @@ export function ControlCenter(props: Props) {
       void loadBudget();
     },
     device,
+    ownerDeviceApproval: () => overview()?.capabilities?.includes(OWNER_DEVICE_APPROVAL) === true,
     openNodeSettings: () => {
       setTab('node');
       setContextOpen(true);
@@ -4535,6 +4538,9 @@ const touchIdOffer = (actions: Actions) => {
   return actions.remote?.() === true && !!d?.available && (d.state === 'none' || d.state === 'lapsed');
 };
 
+/** Node capability: owner approval (spend windows, first contact) from an enrolled owner device. */
+const OWNER_DEVICE_APPROVAL = 'owner_device_approval_v1';
+
 // How many Touch ID offers are on screen: the spend bar's own "not set up"
 // pointer stays quiet while one is, so it is never said twice.
 const [touchIdOffersShown, setTouchIdOffersShown] = createSignal(0);
@@ -4563,7 +4569,10 @@ function TouchIdFirst(props: { actions: Actions; stays: JSX.Element; children: J
           {lapsed()
             ? `Your last setup request lapsed. Set it up again: your node’s owner approves this ${device} once more.`
             : `Set it up once: your node’s owner approves this ${device} one time.`}{' '}
-          After that, one {tap} tap approves a contact here, without a command at the node.
+          {/* Only promised where the node says it does it; otherwise, said as it is today. */}
+          {props.actions.ownerDeviceApproval?.()
+            ? `After that, one ${tap} tap approves a contact here, without a command at the node.`
+            : `Your node does not yet accept ${mobile ? 'fingerprint' : 'Touch ID'} approvals in place of its command, so for now approve as shown under Other ways; once it does, one ${tap} tap will approve a contact here.`}
         </p>
         <div class="form-actions">
           <button type="button" class="primary soft" data-touch-id-setup onClick={() => props.actions.openNodeSettings?.()}>

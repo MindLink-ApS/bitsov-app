@@ -413,11 +413,13 @@ describe('control center shell', () => {
     const pendingSpend = () => ({ state: 'pending', lapse: null, basis: null, open_until_ms: null, window_ms: 600_000,
       pending: { op_id: 'ab01', expires_at_ms: Date.now() + 600_000, owner_action: 'konsensus grant --op ab01', owner_can_grant: true } });
     const none = { available: true, state: 'none', fingerprint: null, owner_action: null, expires_at_ms: null };
-    async function open(remote: boolean, device: object) {
+    async function open(remote: boolean, device: object, capabilities?: string[]) {
       const host = stubHost({
         pairing_status: () => ({ ...paired, remote }),
         device_key_status: () => device,
         spend_status: pendingSpend,
+        ...(capabilities ? { node_overview: () => ({ node_id: OWN, status: 'ok', version: 'api v2', connected_peers: 1, e2ee_sessions: 1, pending_deliveries: 0,
+          lightning_available: true, block_height: 1, uptime_secs: 1, lightning_backend: 'ldk', chain_backend: 'esplora', read_at: Date.now(), capabilities }) } : {}),
       });
       start();
       await vi.waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
@@ -463,6 +465,16 @@ describe('control center shell', () => {
       click('[data-composer-mode="pay"]');
       await vi.waitFor(() => expect(mount.querySelector('[data-touch-id-stays-text="spend"]')?.textContent).toContain('Nothing is paid until you press it again after approval'));
       expect(mount.querySelector('[data-touch-id-stays-text="spend"]')!.textContent).not.toMatch(/press Send/);
+    });
+
+    it('promises no command at the node only when the node says it can (owner_device_approval_v1)', async () => {
+      await open(true, none);
+      const today = mount.querySelector('[data-touch-id-first]')!.textContent!;
+      expect(today).toContain('Your node does not yet accept Touch ID approvals in place of its command');
+      expect(today).not.toContain('without a command at the node');
+      dispose?.(); mount?.remove(); vi.unstubAllGlobals();
+      await open(true, none, ['owner_device_approval_v1']);
+      await vi.waitFor(() => expect(mount.querySelector('[data-touch-id-first]')!.textContent).toContain('one Touch ID tap approves a contact here, without a command at the node'));
     });
 
     it('a lapsed setup says "again", not "one time"', async () => {
