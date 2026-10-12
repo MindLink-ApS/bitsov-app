@@ -1021,6 +1021,23 @@ describe('calls in the shell', () => {
     expect(host.used('call_signal')).toHaveLength(1);
   });
 
+  it('call approval waiting on a node command (remote, Touch ID not set up): the offer says what is true for a call', async () => {
+    const host = stubHost({
+      pairing_status: () => ({ ...paired, remote: true, scopes: ['read', 'receive'] }),
+      device_key_status: () => ({ available: true, state: 'none', fingerprint: null, owner_action: null, expires_at_ms: null }),
+      spend_status: () => ({ state: 'pending', basis: null, open_until_ms: null, window_ms: 600_000,
+        pending: { op_id: 'ab01', expires_at_ms: Date.now() + 600_000, owner_action: 'konsensus grant --op ab01', owner_can_grant: true } }),
+    });
+    await openShell();
+    await vi.waitFor(() => expect($('[data-call="audio"]')!.getAttribute('aria-label')).toMatch(/^Call Maya/));
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-approval] [data-touch-id-first]')).not.toBeNull());
+    const stays = $('[data-call-approval] [data-touch-id-stays-text="spend"]')!;
+    expect(stays.textContent).toContain('Nothing is paid until you press Call or Accept again after approval.');
+    expect($('[data-call-approval]')!.textContent).not.toMatch(/press Send/);
+    expect(host.used('call_signal')).toHaveLength(0);
+  });
+
   it('shows the permission timeout on the call card and never submits an offer', async () => {
     const host = stubHost();
     vi.spyOn(navigator.mediaDevices, 'getUserMedia').mockImplementation(() => new Promise(() => {}));

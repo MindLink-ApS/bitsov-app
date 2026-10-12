@@ -1315,6 +1315,12 @@ input[type='checkbox'], input[type='radio'] { width: auto; flex: none; padding: 
 .qr-scan-video { width: 100%; aspect-ratio: 4 / 3; object-fit: cover; border-radius: 12px; background: #000; }
 .qr-scan-box .quiet { justify-self: end; }
 
+/* Touch ID first: the in-app path, then the node command folded under "Other ways". */
+.touch-id-first { display: flex; flex-direction: column; gap: var(--s-2); }
+.touch-id-first .other-ways .approval { border: none; padding: 0; background: none; }
+.other-ways > summary { cursor: pointer; color: var(--muted); font-size: var(--t-sm); }
+.other-ways[open] > summary { margin-bottom: var(--s-2); }
+
 /* First run: the rail shows BitSov and the node's state only; contacts,
    rooms and the rest appear once setup is done (no "after setup" placeholders). */
 .rail.rail-setup .track-group { display: none; }

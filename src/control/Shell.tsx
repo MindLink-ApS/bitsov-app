@@ -1578,7 +1578,7 @@ export function ControlCenter(props: Props) {
           <div data-call-approval>
             <strong>Approve spending before calling</strong>
             <p class="hint">Spending needs approval. After approval, press Call or Accept again.</p>
-            <SpendBar spend={spend()} error={errors.spend ?? errors.spendPoll} now={now()} actions={actions} />
+            <SpendBar spend={spend()} error={errors.spend ?? errors.spendPoll} now={now()} actions={actions} stays="Nothing is paid until you press Call or Accept again after approval." />
             <Show when={spend()?.state !== 'pending' && spend()?.state !== 'unavailable'}>
               <button type="button" class="soft" data-call-approve disabled={moneyBlocked() || callApproving()} onClick={async () => {
                 setCallApproving(true);
@@ -4479,7 +4479,10 @@ function Composer(props: {
         }}>Get a fresh quote</button>
       </Show>
       <Show when={ownerWait()}>
-        {(pending) => <div class="approval" data-contact-approval="pending" data-contact-request={JSON.stringify(pending().approval.request)}>
+        {(pending) => <TouchIdFirst actions={props.actions} stays={<p class="hint" data-touch-id-stays-text="first-contact">
+            This message sends automatically once your node’s owner approves this contact. Editing it or{' '}
+            <button type="button" class="link" data-contact-cancel-visible onClick={() => cancelOwner()}>Cancel</button> stops it.
+          </p>}><div class="approval" data-contact-approval="pending" data-contact-request={JSON.stringify(pending().approval.request)}>
           <p><strong>Approve this contact at your node.</strong> Run this command once in the owner’s terminal from the node’s data directory, with owner control enabled. The app never receives an owner credential.</p>
           <p>The command approves this contact’s budget and first-message cap. This draft sends after approval. Editing it or pressing Cancel stops the wait.</p>
           <Show when={pending().approval.approval_window_secs !== undefined}>
@@ -4489,13 +4492,13 @@ function Composer(props: {
           <button type="button" class="link" onClick={async () => { try { await navigator.clipboard.writeText(pending().approval.owner_command); } catch { setNote('Select and copy the command above.'); } }}>Copy command</button>
           <button type="button" class="link" data-contact-cancel onClick={cancelOwner}>Cancel</button>
           <p class="hint">Cancel does not revoke an approval already issued at the node; it expires within {pending().approval.approval_window_secs !== undefined ? 'five' : 'two'} minutes.</p>
-        </div>}
+        </div></TouchIdFirst>}
       </Show>
       <Show when={spends()}>
         <Show when={!props.budgetStale} fallback={<p class="spend-line" data-budget-stale>Spend grant stale — checking your node. Auto-pay unavailable until confirmed.</p>}>
           <Show
             when={viaBudget()}
-            fallback={<SpendBar spend={props.spend} error={props.spendError} now={props.now} actions={props.actions} hasPending={props.hasPending} />}
+            fallback={<SpendBar spend={props.spend} error={props.spendError} now={props.now} actions={props.actions} hasPending={props.hasPending} stays={mode() === 'message' ? 'Your draft is kept. Nothing is sent until you press Send after approval.' : undefined} />}
           >
             <BudgetBar
               stand={stand()}
@@ -4526,7 +4529,62 @@ function Composer(props: {
  * The owner's spend window. One tap opens it for ten minutes; it can only
  * narrow what the node allows, never widen it.
  */
-function SpendBar(props: { spend: SpendView | null; error: string | undefined; now: number; actions: Actions; hasPending?: boolean }) {
+/** This Mac can approve with Touch ID but is not set up yet (registration exists for a remote node only). */
+const touchIdOffer = (actions: Actions) => {
+  const d = actions.device();
+  return actions.remote?.() === true && !!d?.available && (d.state === 'none' || d.state === 'lapsed');
+};
+
+// How many Touch ID offers are on screen: the spend bar's own "not set up"
+// pointer stays quiet while one is, so it is never said twice.
+const [touchIdOffersShown, setTouchIdOffersShown] = createSignal(0);
+
+/**
+ * Where a send or first contact stalls on a command at the node, the in-app
+ * path comes first when this Mac could approve with Touch ID but is not set
+ * up: one button to its home (Settings → Node). Setting it up asks the
+ * node's owner to approve this Mac once; after that one Touch ID tap approves
+ * a contact here. The node command stays under "Other ways". `stays` is what
+ * is true for THIS card about the draft (and its Cancel); it always stays in
+ * view. What gets approved and its limits are unchanged.
+ */
+function TouchIdFirst(props: { actions: Actions; stays: JSX.Element; children: JSX.Element }) {
+  const mobile = androidQrScannerAvailable();
+  const device = mobile ? 'phone' : 'Mac';
+  const tap = mobile ? 'fingerprint' : 'Touch ID';
+  const Offer = () => {
+    setTouchIdOffersShown((n) => n + 1);
+    onCleanup(() => setTouchIdOffersShown((n) => n - 1));
+    const lapsed = () => props.actions.device()?.state === 'lapsed';
+    return (
+      <div class="approval touch-id-first" data-touch-id-first>
+        <p>
+          <strong>Approve on this {device} with {mobile ? 'your fingerprint' : 'Touch ID'}.</strong>{' '}
+          {lapsed()
+            ? `Your last setup request lapsed. Set it up again: your node’s owner approves this ${device} once more.`
+            : `Set it up once: your node’s owner approves this ${device} one time.`}{' '}
+          After that, one {tap} tap approves a contact here, without a command at the node.
+        </p>
+        <div class="form-actions">
+          <button type="button" class="primary soft" data-touch-id-setup onClick={() => props.actions.openNodeSettings?.()}>
+            Set up {mobile ? 'biometric' : 'Touch ID'} approvals
+          </button>
+        </div>
+        <div data-touch-id-stays>{props.stays}</div>
+        <details class="other-ways" data-other-ways>
+          <summary>Other ways</summary>
+          {props.children}
+        </details>
+      </div>
+    );
+  };
+  return <Show when={touchIdOffer(props.actions)} fallback={props.children}><Offer /></Show>;
+}
+
+/** What is true while a spend request waits, for whichever action raised it (the default holds for every consumer). */
+const SPEND_WAIT_DEFAULT = 'Nothing is paid until you press it again after approval.';
+
+function SpendBar(props: { spend: SpendView | null; error: string | undefined; now: number; actions: Actions; hasPending?: boolean; stays?: string }) {
   const line = () => spendLine(props.spend, props.now);
   const minutes = (ms: number) => Math.max(1, Math.ceil((ms - props.now) / 60_000));
   // One Ask again at a time: a double click must not print two requests at the node.
@@ -4563,6 +4621,10 @@ function SpendBar(props: { spend: SpendView | null; error: string | undefined; n
         </Match>
         <Match when={props.spend?.state === 'pending' && props.spend.pending}>
           {(p) => (
+            <TouchIdFirst actions={props.actions} stays={<p class="hint" data-touch-id-stays-text="spend">
+              {props.stays ?? SPEND_WAIT_DEFAULT}{' '}
+              <button type="button" class="link" data-spend-cancel-visible onClick={() => void props.actions.cancelSpend()}>Cancel request</button>
+            </p>}>
             <div class="approval" data-approval="pending">
               <p>
                 <strong>Confirm at your node.</strong> Your node asks its owner to approve this app spending. Run this on
@@ -4576,6 +4638,7 @@ function SpendBar(props: { spend: SpendView | null; error: string | undefined; n
                 </button>
               </p>
             </div>
+            </TouchIdFirst>
           )}
         </Match>
         <Match when={props.spend?.state === 'unavailable' && props.spend.pending}>
@@ -4610,7 +4673,8 @@ function SpendBar(props: { spend: SpendView | null; error: string | undefined; n
           </p>
         </Match>
       </Switch>
-      <Show when={props.actions.remote?.() || props.actions.device()?.state === 'off'}>
+      {/* Not said twice: a pending request above already leads with the Touch ID offer. */}
+      <Show when={(props.actions.remote?.() || props.actions.device()?.state === 'off') && touchIdOffersShown() === 0}>
         <DeviceSetup device={props.actions.device()} now={props.now} actions={props.actions} />
       </Show>
       <Reconcile actions={props.actions} hasPending={props.hasPending} />
@@ -4780,6 +4844,9 @@ function BudgetBar(props: {
           </p>
         </Match>
         <Match when={props.stand.kind === 'waiting'}>
+          <TouchIdFirst actions={props.actions} stays={<p class="hint" data-touch-id-stays-text="budget">
+            Your draft is kept. Nothing is sent until you press Send after approval.
+          </p>}>
           <div class="approval" data-approval="pending">
             <p>
               <strong>Confirm at your node.</strong> One approval lets messages pay for the next 24 hours, up to your app all-in payment limit.
@@ -4790,6 +4857,7 @@ function BudgetBar(props: {
             </Show>
             <p class="hint">This app cannot approve it for you. Your draft is kept.</p>
           </div>
+          </TouchIdFirst>
         </Match>
         <Match when={props.stand.kind === 'off'}>
           <Show when={props.room || props.actions.device()?.state !== 'registered'}>
