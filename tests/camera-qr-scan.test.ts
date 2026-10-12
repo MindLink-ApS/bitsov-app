@@ -34,14 +34,15 @@ function deps(over: Partial<ScanDeps> & { frames?: (ImageData | null)[] }, cam =
   let n = 0;
   const hide = vi.fn();
   let cancel: () => void = () => {};
+  let fail: () => void = () => {};
   const d: ScanDeps = {
     getUserMedia: vi.fn(async () => cam.stream),
     loadDecoder: vi.fn(async () => decode),
     grab: () => frames[Math.min(n++, frames.length - 1)] ?? null,
-    show: vi.fn((_s, c) => { cancel = c; return hide; }),
+    show: vi.fn((_s, c, f) => { cancel = c; fail = f; return hide; }),
     ...over,
   };
-  return { d, cam, hide, cancel: () => cancel() };
+  return { d, cam, hide, cancel: () => cancel(), fail: () => fail() };
 }
 
 afterEach(() => { vi.useRealTimers(); });
@@ -121,6 +122,70 @@ describe('scanning with the camera', () => {
     expect(d.loadDecoder).not.toHaveBeenCalled();
     await scanQrWithCamera(d);
     expect(d.loadDecoder).toHaveBeenCalledTimes(1);
+  });
+
+  it('decoder fails before the camera opens: the camera that opens later is stopped at once', async () => {
+    let open!: (s: MediaStream) => void;
+    const cam = fakeCamera();
+    const { d } = deps({
+      getUserMedia: vi.fn(() => new Promise<MediaStream>((r) => { open = r; })),
+      loadDecoder: vi.fn(async () => { throw new Error('chunk failed'); }),
+    }, cam);
+    await expect(scanQrWithCamera(d)).rejects.toThrow('Scanning did not complete.');
+    // The permission prompt is answered only now.
+    open(cam.stream);
+    await vi.waitFor(() => expect(cam.stopped()).toBe(true));
+    expect(d.show).not.toHaveBeenCalled();
+  });
+
+  it('decoder fails after the camera opened: every track stops', async () => {
+    let failDecoder!: (e: Error) => void;
+    const cam = fakeCamera();
+    const { d } = deps({ loadDecoder: vi.fn(() => new Promise<QrDecode>((_, no) => { failDecoder = no; })) }, cam);
+    const scan = scanQrWithCamera(d);
+    await vi.waitFor(() => expect(d.getUserMedia).toHaveBeenCalled());
+    await Promise.resolve();
+    failDecoder(new Error('chunk failed'));
+    await expect(scan).rejects.toThrow('Scanning did not complete.');
+    expect(cam.stopped()).toBe(true);
+  });
+
+  it('a decoder that hangs: its own deadline ends the scan and the camera is off', async () => {
+    vi.useFakeTimers();
+    const cam = fakeCamera();
+    const { d } = deps({ loadDecoder: vi.fn(() => new Promise<QrDecode>(() => {})), decoderTimeoutMs: 2_000, timeoutMs: 60_000 }, cam);
+    const scan = scanQrWithCamera(d);
+    const settled = expect(scan).rejects.toThrow('Scanning did not complete.');
+    await vi.advanceTimersByTimeAsync(2_001);
+    await settled;
+    expect(cam.stopped()).toBe(true);
+  });
+
+  it('a hanging decoder and a slow camera: the overall timeout still turns the late camera off', async () => {
+    vi.useFakeTimers();
+    let open!: (s: MediaStream) => void;
+    const cam = fakeCamera();
+    const { d } = deps({
+      getUserMedia: vi.fn(() => new Promise<MediaStream>((r) => { open = r; })),
+      loadDecoder: vi.fn(() => new Promise<QrDecode>(() => {})),
+      decoderTimeoutMs: 60_000, timeoutMs: 5_000,
+    }, cam);
+    const settled = expect(scanQrWithCamera(d)).rejects.toThrow();
+    await vi.advanceTimersByTimeAsync(5_001);
+    await settled;
+    open(cam.stream);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(cam.stopped()).toBe(true);
+  });
+
+  it('a viewfinder that cannot play ends the scan: camera off, error shown', async () => {
+    const { d, cam, hide, fail } = deps({ frames: [blank()] });
+    const scan = scanQrWithCamera(d);
+    await vi.waitFor(() => expect(d.show).toHaveBeenCalled());
+    fail();
+    await expect(scan).rejects.toThrow('Scanning did not complete.');
+    expect(cam.stopped()).toBe(true);
+    expect(hide).toHaveBeenCalledTimes(1);
   });
 
   it('the default timeout is a minute', () => {

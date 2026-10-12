@@ -10,6 +10,8 @@
 export type QrDecode = (data: Uint8ClampedArray, width: number, height: number, options?: { inversionAttempts?: 'dontInvert' | 'onlyInvert' | 'attemptBoth' | 'invertFirst' }) => { data: string } | null;
 
 export const SCAN_TIMEOUT_MS = 60_000;
+/** jsQR is one local chunk: if it has not loaded in this time, the scan ends. */
+export const DECODER_TIMEOUT_MS = 10_000;
 const FRAME_MS = 150;
 
 /** A desktop webview with a camera API (not Android, which has its own scanner). */
@@ -34,9 +36,10 @@ export type ScanDeps = {
   loadDecoder: () => Promise<QrDecode>;
   /** The current camera frame, or null before the first one. Reused, never kept. */
   grab: (stream: MediaStream) => ImageData | null;
-  /** Shows the viewfinder; returns its teardown. Its Cancel calls `cancel`. */
-  show: (stream: MediaStream, cancel: () => void) => () => void;
+  /** Shows the viewfinder; returns its teardown. Its Cancel calls `cancel`; a viewfinder that cannot play calls `fail`. */
+  show: (stream: MediaStream, cancel: () => void, fail: () => void) => () => void;
   timeoutMs?: number;
+  decoderTimeoutMs?: number;
 };
 
 const SCAN_FAILED = 'Scanning did not complete.';
@@ -53,14 +56,18 @@ export function scanQrWithCamera(deps: ScanDeps): Promise<string> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     let tick: ReturnType<typeof setInterval> | undefined;
     let done = false;
+    const stopAll = (media: MediaStream) => {
+      for (const track of media.getTracks()) {
+        try { track.stop(); } catch { /* Stop the others regardless. */ }
+      }
+    };
+    // The one way out: every path (found, Cancel, timeout, any failure) ends here.
     const finish = (text: string | null) => {
       if (done) return;
       done = true;
       clearTimeout(timer);
       clearInterval(tick);
-      for (const track of stream?.getTracks() ?? []) {
-        try { track.stop(); } catch { /* Stop the others regardless. */ }
-      }
+      if (stream) stopAll(stream);
       stream = null;
       try { hide?.(); } catch { /* The viewfinder is gone either way. */ }
       hide = null;
@@ -68,26 +75,32 @@ export function scanQrWithCamera(deps: ScanDeps): Promise<string> {
       else reject(new Error(SCAN_FAILED));
     };
     timer = setTimeout(() => finish(null), deps.timeoutMs ?? SCAN_TIMEOUT_MS);
-    void (async () => {
-      try {
-        const [decode, media] = await Promise.all([
-          deps.loadDecoder(),
-          deps.getUserMedia({ video: { facingMode: 'environment' }, audio: false }),
-        ]);
-        // Cancelled or timed out while the camera was opening: it stops at once.
-        if (done) { media.getTracks().forEach((t) => t.stop()); return; }
-        stream = media;
-        hide = deps.show(media, () => finish(null));
-        tick = setInterval(() => {
-          if (done || !stream) return;
-          try {
-            const frame = deps.grab(stream);
-            const text = frame ? decodeFrame(decode, frame) : null;
-            if (text) finish(text);
-          } catch { finish(null); }
-        }, FRAME_MS);
-      } catch { finish(null); }
-    })();
+    // The camera is registered for cleanup the moment it opens, whatever the
+    // decoder does; one that opens after the scan ended is stopped at once.
+    const camera = deps.getUserMedia({ video: { facingMode: 'environment' }, audio: false }).then((media) => {
+      if (done) { stopAll(media); return null; }
+      stream = media;
+      return media;
+    });
+    // The decoder has its own deadline: a load that hangs ends the scan.
+    const decoder = Promise.race([
+      deps.loadDecoder(),
+      new Promise<never>((_, no) => setTimeout(() => no(new Error('decoder timeout')), deps.decoderTimeoutMs ?? DECODER_TIMEOUT_MS)),
+    ]);
+    camera.catch(() => finish(null));
+    decoder.catch(() => finish(null));
+    void Promise.all([decoder, camera]).then(([decode, media]) => {
+      if (done || !media) return;
+      hide = deps.show(media, () => finish(null), () => finish(null));
+      tick = setInterval(() => {
+        if (done || !stream) return;
+        try {
+          const frame = deps.grab(stream);
+          const text = frame ? decodeFrame(decode, frame) : null;
+          if (text) finish(text);
+        } catch { finish(null); }
+      }, FRAME_MS);
+    }, () => finish(null));
   });
 }
 
@@ -108,7 +121,7 @@ export function scanPairingLinkWithCamera(): Promise<string> {
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
       return ctx.getImageData(0, 0, canvas.width, canvas.height);
     },
-    show: (stream, cancel) => {
+    show: (stream, cancel, fail) => {
       const overlay = document.createElement('div');
       overlay.className = 'qr-scan-overlay';
       overlay.setAttribute('role', 'dialog');
@@ -140,7 +153,9 @@ export function scanPairingLinkWithCamera(): Promise<string> {
       box.append(title, video, hint, close);
       overlay.append(box);
       document.body.append(overlay);
-      void video.play?.()?.catch?.(() => undefined);
+      // A viewfinder that cannot play ends the scan (camera off, error shown), not a silent capture.
+      const playing = video.play?.();
+      if (playing && typeof playing.catch === 'function') playing.catch(() => fail());
       close.focus();
       return () => {
         document.removeEventListener('keydown', onKey);
