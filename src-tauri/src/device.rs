@@ -3,8 +3,8 @@
 //!
 //! The device key lives in the Secure Enclave ([`crate::device_key`]); the
 //! app keeps only its device-bound blob and public key. The node registers the
-//! public key once, after the owner approves it at the node with
-//! `konsensus device approve` (this app never can). After that, a spend
+//! public key once, after console approval or delegation by another enrolled
+//! owner device. A device never approves its own enrollment. After that, a spend
 //! envelope for one contact is a [`Intent`] the owner signs here with Touch
 //! ID: the node verifies the signature over the exact bytes built by
 //! [`intent_message`] and enforces the terms itself.
@@ -66,6 +66,8 @@ pub struct PendingRegistration {
 /// What the renderer is told. No blob, no key material beyond the fingerprint.
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct DeviceView {
+    pub delegation_supported: bool,
+    pub owner_device_count: Option<u64>,
     /// This Mac has a Secure Enclave the app can use.
     pub available: bool,
     pub state: DeviceState,
@@ -132,6 +134,8 @@ pub fn node_off_reason(body: &str) -> Option<&'static str> {
 impl DeviceView {
     pub fn of(available: bool, record: Option<&Record>, lapsed: bool, now_ms: u64) -> Self {
         let mut view = Self {
+            delegation_supported: false,
+            owner_device_count: None,
             available,
             state: if available { DeviceState::None } else { DeviceState::Unavailable },
             fingerprint: None,

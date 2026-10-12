@@ -508,6 +508,9 @@ export type Elevation = {
 /** This Mac as a paired device (`device_key_status`). */
 export type DeviceState = 'unavailable' | 'none' | 'pending' | 'registered' | 'lapsed' | 'off';
 export type DeviceView = {
+  /** Node #301 SAS enrollment routes, detected without issuing a ticket. */
+  delegation_supported?: boolean;
+  owner_device_count?: number | null;
   /** This Mac has a Secure Enclave the app can use. */
   available: boolean;
   state: DeviceState;

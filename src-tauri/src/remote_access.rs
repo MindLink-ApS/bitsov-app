@@ -302,7 +302,7 @@ impl fmt::Display for RemoteError {
             Self::Invalid(message) => write!(f, "invalid remote pairing link: {message}"),
             Self::Expired(seconds) => write!(
                 f,
-                "This pairing link expired {} ago. Run konsensus pair-ticket on your node for a new one, and check that this Mac's clock is right.",
+                "This pairing link expired {} ago. Ask your owner device for a new ticket, or run konsensus pair-ticket on your node, and check this device's clock.",
                 elapsed_text(*seconds)
             ),
             Self::Local(message) => f.write_str(message),
@@ -368,6 +368,10 @@ fn decode_hex<const N: usize>(value: &str, what: &str) -> Result<[u8; N], Remote
 
 fn validate_code(code: Option<&str>) -> Result<(), RemoteError> {
     if let Some(code) = code {
+        if let Some(secret) = code.strip_prefix("owner_") {
+            return if crate::delegation::canonical_hex(secret, 32) { Ok(()) }
+                else { Err(RemoteError::Invalid("owner ticket code must contain 32 lowercase hex bytes".into())) };
+        }
         let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(code)
             .map_err(|_| {
@@ -607,7 +611,14 @@ fn validate_link(link: PairingLinkV1, now: i64) -> Result<RemoteDescriptor, Remo
     if link.expires_at < 0 {
         return Err(RemoteError::Invalid("ticket expiry is invalid".into()));
     }
-    if link.expires_at != 0 && link.expires_at <= now {
+    // Owner tickets cross device clocks; match the enrollment UI's bounded
+    // allowance. The node still enforces the ticket's original deadline.
+    let deadline = if link.code.starts_with("owner_") {
+        crate::delegation::expiry_deadline(link.expires_at)
+    } else {
+        link.expires_at
+    };
+    if link.expires_at != 0 && deadline <= now {
         return Err(RemoteError::Expired((now - link.expires_at) as u64));
     }
     let descriptor = validate_descriptor(StoredDescriptor {
@@ -1227,7 +1238,10 @@ async fn encrypted_auth<S: AsyncRead + AsyncWrite + Unpin>(
                         "authentication reply has an unsupported version".into(),
                     ));
                 }
-                let reason: String = format!("{code}: {message}").chars().take(160).collect();
+                let reason: String = if code == "authentication_failed"
+                    && descriptor.code.as_deref().is_some_and(|c| c.starts_with("owner_")) {
+                    "This ticket expired, was already used, or its owner was revoked. Ask an enrolled owner device for a new ticket.".into()
+                } else { format!("{code}: {message}").chars().take(160).collect() };
                 Err(RemoteError::Refused(reason))
             }
         }
@@ -1898,6 +1912,20 @@ pub struct BootstrapConnection {
     pub binding: crate::sas::NoiseBinding,
 }
 impl BootstrapConnection {
+    /// A fresh, already-paired device's enrollment uses one authenticated Noise
+    /// transcript through both requests, without replaying its consumed ticket.
+    pub async fn connect_device(descriptor: &RemoteDescriptor, key: &ClientKey, name: &str) -> Result<Self, RemoteError> {
+        if descriptor.node_id.is_empty() || descriptor.has_code() {
+            return Err(RemoteError::Invalid("an initialized, paired home node is required".into()));
+        }
+        let pin = descriptor.box_pin()?.ok_or_else(|| RemoteError::Invalid("missing box pin".into()))?;
+        let (remote, noise, handshake_hash, client_id, scopes, _) = connect_bound(descriptor, key, name, None).await?;
+        if !scopes.iter().any(|s| s == "read") { return Err(RemoteError::Refused("device enrollment requires read scope".into())); }
+        Ok(Self {remote, noise, client_id, binding:crate::sas::NoiseBinding {
+            handshake_hash, box_public_key:decode_hex(&pin.public_key, "box pin")?, client_static:client_transport_public_key(key),
+        }})
+    }
+
     pub async fn connect(descriptor: &RemoteDescriptor, key: &ClientKey, name: &str) -> Result<Self, RemoteError> {
         if !descriptor.node_id.is_empty() || descriptor.has_code() {
             return Err(RemoteError::Invalid("a paired empty box is required".into()));
@@ -2507,6 +2535,20 @@ mod tests {
         let data = tempfile::tempdir().unwrap();
         assert!(matches!(import_pairing_link(data.path(), &at(unix_now() - 1)), Err(RemoteError::Expired(_))));
         assert!(!config_path(data.path()).exists());
+    }
+
+    #[test]
+    fn owner_ticket_import_allows_only_thirty_seconds_of_clock_skew() {
+        let node = SigningKey::from_bytes(&[7u8; 32]);
+        let at = |expires_at| node_ticket(&node, serde_json::json!({
+            "code": format!("owner_{}", "ab".repeat(32)), "expires_at": expires_at
+        }));
+        for (expiry, accepted) in [(NOW - 30, false), (NOW - 29, true),
+            (NOW, true), (NOW + 300, true)] {
+            assert_eq!(parse_pairing_link_at(&at(expiry), NOW).is_ok(), accepted, "{expiry}");
+        }
+        let data = tempfile::tempdir().unwrap();
+        assert!(import_pairing_link(data.path(), &at(unix_now() - 20)).is_ok());
     }
 
     #[test]

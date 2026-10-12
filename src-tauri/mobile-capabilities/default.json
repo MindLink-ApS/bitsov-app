@@ -66,6 +66,8 @@
     "allow-spend-request",
     "allow-spend-lock",
     "allow-spend-cancel",
+    "allow-add-device",
+    "allow-join-device",
     "allow-device-key-status",
     "allow-device-key-register",
     "allow-device-key-cancel",
