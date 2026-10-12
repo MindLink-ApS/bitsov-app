@@ -64,6 +64,9 @@ pub struct Pending {
     /// replaces the record.
     #[serde(default)]
     pub resumable: bool,
+    /// Initial ledger snapshot repairs a crash between the two atomic files.
+    #[serde(default)]
+    pub operation_record: Option<OperationRecord>,
 }
 
 impl Pending {
@@ -111,6 +114,54 @@ pub fn operation(body: &serde_json::Value) -> String {
         "kind": body["kind"], "plaintext": body["plaintext"],
     });
     blake3::hash(op.to_string().as_bytes()).to_hex().to_string()
+}
+
+/// Durable host history. Never used as a spending authority in H1.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationState { Dispatching, Paid, Unpaid, PaidUndelivered, FailedPaid, Unknown, Settled, Closed }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OperationRecord {
+    pub op_id: String,
+    pub node_id: String,
+    pub kind: String,
+    pub peer: String,
+    pub call_id: Option<String>,
+    pub parent_op: Option<String>,
+    pub request_hash: String,
+    pub cap_msat: u64,
+    pub state: OperationState,
+    pub paid_msat: Option<u64>,
+    pub message_id: Option<String>,
+    pub payment_hash: Option<String>,
+    pub created_ms: u64,
+    pub settled_ms: Option<u64>,
+}
+
+/// Renderer projection deliberately omits local identity, request and payment hashes.
+#[derive(Debug, Serialize)]
+pub struct OpView {
+    pub op_id: String,
+    pub kind: String,
+    pub peer: String,
+    pub call_id: Option<String>,
+    pub state: OperationState,
+    pub cap_msat: u64,
+    pub paid_msat: Option<u64>,
+    pub message_id: Option<String>,
+}
+
+impl From<OperationRecord> for OpView {
+    fn from(record: OperationRecord) -> Self {
+        Self { op_id: record.op_id, kind: record.kind, peer: record.peer, call_id: record.call_id,
+            state: record.state, cap_msat: record.cap_msat, paid_msat: record.paid_msat, message_id: record.message_id }
+    }
+}
+
+fn timestamp_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default()
+        .as_millis().min(u64::MAX as u128) as u64
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -214,6 +265,7 @@ impl Journal {
             p.id = fresh_id()?;
             self.save(p)?;
         }
+        if let Some(p) = &pending { self.ensure_operation(p)?; }
         Ok(pending)
     }
 
@@ -227,15 +279,51 @@ impl Journal {
     pub fn begin_operation(&self, node_id: &str, path: &str, body: &serde_json::Value, max_msat: u64, operation: Option<(String, String)>) -> Result<Pending, ActionError> {
         if self.pending()?.is_some_and(|p| !p.resumable) { return Err(unknown("Check the previous action first.")); }
         let (operation_id, op) = operation.map_or((None, None), |(id, op)| (Some(id), Some(op)));
-        let pending = Pending {
+        let mut pending = Pending {
             id: fresh_id()?, rollback_charge_id: None,
             node_id: node_id.to_string(),
             request_hash: blake3::hash(format!("{path}\n{body}").as_bytes()).to_hex().to_string(),
             max_msat, target: None, over_budget: false, accounting_msat: None, paid: None, undelivered: None, charge_id: None, budgeted: false, all_in: false,
             peer: operation_id.as_ref().and(body["recipient"].as_str()).map(str::to_string),
-            operation_id, op, resumable: false,
+            operation_id, op, resumable: false, operation_record: None,
         };
+        if let Some(id) = &pending.operation_id {
+            let signal_kind = body["kind"].as_u64().unwrap_or(0);
+            let payload = if (400..=403).contains(&signal_kind) {
+                body["plaintext"].as_str().and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
+            } else { None };
+            // Persist only protocol identifiers, never arbitrary caller-supplied strings.
+            let valid_call_id = |id: &str| id.len() == 32 && id.bytes().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase());
+            let call_id = payload.as_ref().and_then(|p| p["call_id"].as_str())
+                .filter(|id| valid_call_id(id)).map(str::to_string);
+            let recovery = payload.as_ref().and_then(|p| p["sdp"].as_str())
+                .and_then(|s| s.lines().find_map(|l| l.strip_prefix("a=x-bitsov-restart-of:")))
+                .filter(|id| valid_call_id(id));
+            let kind = match signal_kind {
+                400 if recovery.is_some() => "call_recovery",
+                400 => "call_offer", 401 => "call_answer", 402 => "call_ice", 403 => "call_hangup",
+                _ if body["plaintext"].as_str().is_some_and(crate::act::is_room_chat) => "room_leg",
+                _ => "message",
+            };
+            let parent_call = if signal_kind == 403 { call_id.as_deref() } else { recovery };
+            let parent_op = if let Some(call) = parent_call {
+                self.operations()?.into_iter().filter(|r| r.node_id == node_id && r.peer == pending.peer.as_deref().unwrap_or_default()
+                    && r.call_id.as_deref() == Some(call) && matches!(r.kind.as_str(), "call_offer" | "call_recovery"))
+                    .max_by_key(|r| r.created_ms).map(|r| r.op_id)
+            } else { None };
+            let mut record = self.operation_record(id)?.unwrap_or(OperationRecord {
+                op_id: id.clone(), node_id: node_id.into(), kind: kind.into(), peer: pending.peer.clone().unwrap_or_default(),
+                call_id, parent_op, request_hash: pending.request_hash.clone(), cap_msat: max_msat,
+                state: OperationState::Dispatching, paid_msat: None, message_id: None, payment_hash: None,
+                created_ms: timestamp_ms(), settled_ms: None,
+            });
+            record.state = OperationState::Dispatching;
+            record.cap_msat = max_msat;
+            record.settled_ms = None;
+            pending.operation_record = Some(record);
+        }
         self.save(&pending)?;
+        if let Some(record) = &pending.operation_record { self.write_operation(record)?; }
         Ok(pending)
     }
 
@@ -256,12 +344,133 @@ impl Journal {
         file.write_all(&serde_json::to_vec(pending).map_err(unknown)?).map_err(unknown)?;
         file.sync_all().map_err(unknown)?;
         std::fs::rename(self.dir.join("spend-pending.next"), self.dir.join("spend-pending.json")).map_err(unknown)?;
-        self.sync_dir()
+        self.sync_dir()?;
+        self.ensure_operation(pending)
     }
 
     pub fn clear(&self) -> Result<(), ActionError> {
         std::fs::remove_file(self.dir.join("spend-pending.json")).map_err(unknown)?;
         self.sync_dir()
+    }
+
+    fn operation_path(&self, id: &str) -> Result<PathBuf, ActionError> {
+        // IDs are host minted. Reject unsafe legacy/corrupt journal paths as well.
+        if id.len() != 36 || !id.bytes().all(|c| c.is_ascii_hexdigit() || c == b'-') {
+            return Err(unknown("Invalid operation id in the spend journal."));
+        }
+        Ok(self.dir.join("ops").join(format!("{id}.json")))
+    }
+
+    pub fn operation_record(&self, id: &str) -> Result<Option<OperationRecord>, ActionError> {
+        match std::fs::read(self.operation_path(id)?) {
+            Ok(bytes) => serde_json::from_slice(&bytes).map(Some).map_err(unknown),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(unknown(e)),
+        }
+    }
+
+    fn ensure_operation(&self, pending: &Pending) -> Result<(), ActionError> {
+        if let Some(id) = &pending.operation_id {
+            if self.operation_record(id)?.is_none() {
+                // Older pending journals have no kind/call metadata. Do not guess it.
+                let record = pending.operation_record.clone().unwrap_or(OperationRecord {
+                    op_id: id.clone(), node_id: pending.node_id.clone(), kind: "legacy".into(),
+                    peer: pending.peer.clone().unwrap_or_default(), call_id: None, parent_op: None,
+                    request_hash: pending.request_hash.clone(), cap_msat: pending.max_msat,
+                    state: if pending.resumable { OperationState::Unpaid } else { OperationState::Unknown },
+                    paid_msat: pending.undelivered.as_ref().map(|u| u.paid_msat), message_id: None,
+                    payment_hash: pending.undelivered.as_ref().and_then(|u| u.payment_hash.clone()),
+                    created_ms: timestamp_ms(), settled_ms: None,
+                });
+                self.write_operation(&record)?;
+            }
+            if let Some(mut record) = self.operation_record(id)? {
+                // The slot is written first. Repair a crash before the matching
+                // history update, before any shortcut or resumable replacement.
+                // Completed history wins over older pending snapshots.
+                if !matches!(record.state, OperationState::Settled | OperationState::Closed | OperationState::FailedPaid) {
+                    let mut changed = false;
+                    if let Some(u) = pending.undelivered.as_ref().filter(|u| !u.in_flight) {
+                        if record.state != OperationState::PaidUndelivered || record.paid_msat != Some(u.paid_msat) {
+                            record.state = OperationState::PaidUndelivered;
+                            record.paid_msat = Some(u.paid_msat);
+                            record.payment_hash = u.payment_hash.clone().or(record.payment_hash);
+                            record.settled_ms = None;
+                            changed = true;
+                        }
+                    } else if pending.resumable && record.state != OperationState::Unpaid {
+                        record.state = OperationState::Unpaid;
+                        record.paid_msat = Some(0);
+                        record.settled_ms = Some(timestamp_ms());
+                        changed = true;
+                    }
+                    if changed { self.write_operation(&record)?; }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn write_operation(&self, record: &OperationRecord) -> Result<(), ActionError> {
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+        let path = self.operation_path(&record.op_id)?;
+        let dir = self.dir.join("ops");
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir).map_err(unknown)?;
+        self.sync_dir()?;
+        let next = path.with_extension("next");
+        let mut file = OpenOptions::new().write(true).create(true).truncate(true)
+            .mode(0o600).custom_flags(libc::O_NOFOLLOW).open(&next).map_err(unknown)?;
+        file.write_all(&serde_json::to_vec(record).map_err(unknown)?).map_err(unknown)?;
+        file.sync_all().map_err(unknown)?;
+        std::fs::rename(next, path).map_err(unknown)?;
+        File::open(dir).and_then(|f| f.sync_all()).map_err(unknown)
+    }
+
+    #[cfg(not(unix))]
+    fn write_operation(&self, _record: &OperationRecord) -> Result<(), ActionError> {
+        Err(unknown("private spend journal storage is not supported on this platform"))
+    }
+
+    pub fn operations(&self) -> Result<Vec<OperationRecord>, ActionError> {
+        let entries = match std::fs::read_dir(self.dir.join("ops")) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(unknown(e)),
+        };
+        let mut records: Vec<OperationRecord> = Vec::new();
+        for entry in entries {
+            let path = entry.map_err(unknown)?.path();
+            if path.extension().is_some_and(|e| e == "json") {
+                records.push(serde_json::from_slice(&std::fs::read(path).map_err(unknown)?).map_err(unknown)?);
+            }
+        }
+        records.sort_by(|a, b| (a.created_ms, &a.op_id).cmp(&(b.created_ms, &b.op_id)));
+        Ok(records)
+    }
+
+    /// Commit history before releasing/replacing the pending slot. Evidence is
+    /// whole-operation principal, never a retry's incremental budget charge.
+    pub fn record_outcome(&self, pending: &Pending, state: OperationState, evidence: Option<&serde_json::Value>) -> Result<(), ActionError> {
+        let Some(id) = &pending.operation_id else { return Ok(()) };
+        self.ensure_operation(pending)?;
+        let mut record = self.operation_record(id)?.ok_or_else(|| unknown("Missing operation record."))?;
+        record.state = state;
+        if record.state == OperationState::Dispatching { record.cap_msat = pending.max_msat; }
+        if let Some(value) = evidence {
+            if let Some(amount) = value["amount_msat"].as_u64() {
+                if let Some(whole) = amount.checked_add(value["readmission_msat"].as_u64().unwrap_or(0)) {
+                    record.paid_msat = Some(record.paid_msat.unwrap_or(0).max(whole));
+                }
+            }
+            if let Some(id) = value["message_id"].as_str().filter(|s| !s.is_empty()) { record.message_id = Some(id.into()); }
+            if let Some(hash) = value["payment_hash"].as_str() { record.payment_hash = Some(hash.into()); }
+        }
+        if record.state == OperationState::Unpaid && record.paid_msat.is_none() { record.paid_msat = Some(0); }
+        record.settled_ms = if matches!(record.state, OperationState::Settled | OperationState::Closed | OperationState::Unpaid | OperationState::FailedPaid) {
+            Some(timestamp_ms())
+        } else { None };
+        self.write_operation(&record)
     }
 
     fn sync_dir(&self) -> Result<(), ActionError> {
@@ -305,6 +514,126 @@ pub fn terminal(pending: &Pending, rows: &[serde_json::Value]) -> Option<&'stati
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn ledger_survives_slot_clear_and_restart_without_plaintext() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Journal::open(dir.path()).unwrap();
+        let body = json!({"recipient": "peer", "kind": 400,
+            "plaintext": r#"{"call_id":"0123456789abcdef0123456789abcdef","sdp":"PRIVATE"}"#});
+        let id = new_operation_id().unwrap();
+        let p = journal.begin_operation("node", "/messages/compose", &body, 2000,
+            Some((id.clone(), operation(&body)))).unwrap();
+        let file = dir.path().join("ops").join(format!("{id}.json"));
+        assert!(file.exists(), "operation must exist before dispatch");
+        let record: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        assert_eq!(record["state"], "dispatching");
+        assert_eq!(record["call_id"], "0123456789abcdef0123456789abcdef");
+        assert_eq!(record["kind"], "call_offer");
+        assert!(!record.to_string().contains("PRIVATE"));
+        drop(journal);
+        let journal = Journal::open(dir.path()).unwrap();
+        assert_eq!(journal.pending().unwrap().unwrap().operation_id, p.operation_id);
+        journal.clear().unwrap();
+        assert!(file.exists(), "clearing the single slot must never delete history");
+    }
+
+    #[test]
+    fn ledger_recovers_interrupted_initial_write_and_ignores_partial_next_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Journal::open(dir.path()).unwrap();
+        let body = json!({"recipient": "peer", "kind": 1, "plaintext": "PRIVATE"});
+        let id = new_operation_id().unwrap();
+        journal.begin_operation("node", "/messages/compose", &body, 2000,
+            Some((id.clone(), operation(&body)))).unwrap();
+        // Reproduce the on-disk boundary after the first slot rename but before
+        // the first operation rename; only the complete pending snapshot exists.
+        std::fs::remove_file(dir.path().join("ops").join(format!("{id}.json"))).unwrap();
+        assert!(read_pending(dir.path()).unwrap().is_some());
+        drop(journal);
+        let journal = Journal::open(dir.path()).unwrap();
+        journal.pending().unwrap().unwrap();
+        let initial = journal.operation_record(&id).unwrap().unwrap();
+        assert_eq!(initial.state, OperationState::Dispatching);
+        assert_eq!(initial.kind, "message");
+        std::fs::write(dir.path().join("ops").join(format!("{id}.next")), "{broken").unwrap();
+        drop(journal);
+        let journal = Journal::open(dir.path()).unwrap();
+        assert_eq!(journal.operations().unwrap().len(), 1);
+        assert_eq!(journal.operation_record(&id).unwrap().unwrap().state, OperationState::Dispatching);
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(dir.path().join("ops").join(format!("{id}.json"))).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+    }
+
+    #[test]
+    fn ledger_reuses_identity_and_retains_replaced_unpaid_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Journal::open(dir.path()).unwrap();
+        let body = json!({"recipient": "peer", "kind": 1, "plaintext": "PRIVATE"});
+        let id = new_operation_id().unwrap();
+        let mut first = journal.begin_operation("node", "/messages/compose", &body, 2000,
+            Some((id.clone(), operation(&body)))).unwrap();
+        journal.record_outcome(&first, OperationState::Unpaid, None).unwrap();
+        first.resumable = true;
+        journal.save(&first).unwrap();
+        let created = journal.operation_record(&id).unwrap().unwrap().created_ms;
+        let mut resumed = journal.begin_operation("node", "/messages/compose", &body, 3000,
+            Some((id.clone(), operation(&body)))).unwrap();
+        assert_eq!(journal.operations().unwrap().len(), 1);
+        assert_eq!(journal.operation_record(&id).unwrap().unwrap().created_ms, created);
+        journal.record_outcome(&resumed, OperationState::Unpaid, None).unwrap();
+        resumed.resumable = true;
+        journal.save(&resumed).unwrap();
+        journal.begin_operation("node", "/messages/compose", &body, 2000,
+            Some((new_operation_id().unwrap(), operation(&body)))).unwrap();
+        assert_eq!(journal.operations().unwrap().len(), 2);
+        assert_eq!(journal.operation_record(&id).unwrap().unwrap().state, OperationState::Unpaid);
+    }
+
+    #[test]
+    fn ledger_never_extracts_chat_content_or_invalid_call_ids_as_metadata() {
+        for (kind, payload) in [(1, r#"{"call_id":"PRIVATE CHAT CONTENT"}"#),
+            (1, r#"{"call_id":"0123456789abcdef0123456789abcdef"}"#),
+            (400, r#"{"call_id":"PRIVATE SIGNAL CONTENT"}"#)] {
+            let dir = tempfile::tempdir().unwrap();
+            let journal = Journal::open(dir.path()).unwrap();
+            let body = json!({"recipient":"peer", "kind":kind, "plaintext":payload});
+            let id = new_operation_id().unwrap();
+            journal.begin_operation("node", "/messages/compose", &body, 2000,
+                Some((id.clone(), operation(&body)))).unwrap();
+            let record = journal.operation_record(&id).unwrap().unwrap();
+            assert_eq!(record.call_id, None);
+            assert!(!serde_json::to_string(&record).unwrap().contains("PRIVATE"));
+        }
+    }
+
+    #[test]
+    fn ledger_repairs_known_pending_evidence_after_interrupted_transition() {
+        for undelivered in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let journal = Journal::open(dir.path()).unwrap();
+            let body = json!({"recipient":"peer", "kind":1, "plaintext":"secret"});
+            let id = new_operation_id().unwrap();
+            let mut p = journal.begin_operation("node", "/messages/compose", &body, 2000,
+                Some((id.clone(), operation(&body)))).unwrap();
+            if undelivered {
+                p.undelivered = Some(Undelivered { peer: "peer".into(), paid_msat: 1000, retry: true,
+                    op: operation(&body), admission_msat: 1000, in_flight: false, attempts: 0, payment_hash: Some("hash".into()) });
+            } else { p.resumable = true; }
+            // Crash after the pending snapshot's rename, before the ledger transition.
+            std::fs::write(dir.path().join("spend-pending.json"), serde_json::to_vec(&p).unwrap()).unwrap();
+            drop(journal);
+            let journal = Journal::open(dir.path()).unwrap();
+            journal.pending().unwrap();
+            let record = journal.operation_record(&id).unwrap().unwrap();
+            assert_eq!(record.state, if undelivered { OperationState::PaidUndelivered } else { OperationState::Unpaid });
+            assert_eq!(record.paid_msat, Some(if undelivered { 1000 } else { 0 }));
+            journal.clear().unwrap();
+            assert_eq!(journal.operations().unwrap().len(), 1);
+        }
+    }
 
     #[test]
     fn legacy_identity_is_migrated_once_without_changing_accounting_or_operation() {
@@ -420,7 +749,7 @@ mod tests {
     #[test]
     fn reconciliation_needs_exact_terminal_outgoing_evidence() {
         let p = Pending { id: "attempt".into(), rollback_charge_id: None, node_id:"node".into(), request_hash:"hash".into(), max_msat:2000,
-            target:Some(Target::Payment { hash:"abc".into() }), over_budget:false, accounting_msat: None, paid: None, undelivered: None, charge_id: None, budgeted: false, all_in: false, operation_id: None, op: None, peer: None, resumable: false };
+            target:Some(Target::Payment { hash:"abc".into() }), over_budget:false, accounting_msat: None, paid: None, undelivered: None, charge_id: None, budgeted: false, all_in: false, operation_id: None, op: None, peer: None, resumable: false, operation_record: None };
         assert_eq!(terminal(&p, &[]), None);
         assert_eq!(terminal(&p, &[json!({"payment_hash":"other", "amount_msat":2000, "direction":"outgoing", "status":"settled"})]), None);
         for status in ["pending", "inflight", "expired", "unknown"] {
@@ -436,7 +765,7 @@ mod tests {
     #[test]
     fn message_reconciliation_rejects_other_sender_and_recipient() {
         let p = Pending { id: "attempt".into(), rollback_charge_id: None, node_id:"node".into(), request_hash:"hash".into(), max_msat:2000,
-            target:Some(Target::Message { id:"abc".into(), peer:"peer".into() }), over_budget:false, accounting_msat: None, paid: None, undelivered: None, charge_id: None, budgeted: false, all_in: false, operation_id: None, op: None, peer: None, resumable: false };
+            target:Some(Target::Message { id:"abc".into(), peer:"peer".into() }), over_budget:false, accounting_msat: None, paid: None, undelivered: None, charge_id: None, budgeted: false, all_in: false, operation_id: None, op: None, peer: None, resumable: false, operation_record: None };
         let mut row = json!({"id":"abc", "sender":"other", "recipient":"peer", "payment_amount_msat":2000});
         assert_eq!(terminal(&p, &[row.clone()]), None);
         row["sender"] = json!("node");

@@ -129,6 +129,8 @@ pub struct ActionError {
     /// record's id. Stop retrying names it, so it never releases another one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pending_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
 }
 
 /// Paid, not delivered, as the conversation shows it.
@@ -275,11 +277,15 @@ impl ActionError {
             undelivered: None,
             admission: None,
             pending_id: None,
+            operation_id: None,
         }
     }
     /// Name the durable record this error is about.
     pub fn for_pending(self, id: &str) -> Self {
         Self { pending_id: Some(id.to_string()), ..self }
+    }
+    pub fn for_operation(self, id: Option<&str>) -> Self {
+        Self { operation_id: id.map(str::to_string), ..self }
     }
     /// The node settled payment but the message did not go. Never "not sent".
     pub fn undelivered(paid_msat: u64, retry: bool) -> Self {
@@ -675,6 +681,8 @@ pub fn call_body(recipient: &str, kind: u16, plaintext: &str) -> Result<serde_js
 /// What one paid call signal cost.
 #[derive(Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct CallReceipt {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
     pub message_id: String,
     pub kind: u16,
     pub amount_msat: u64,
