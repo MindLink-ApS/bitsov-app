@@ -4457,13 +4457,13 @@ async fn do_op_list(state: &NodeState, peer: Option<&str>) -> Result<spend_journ
 }
 
 /// Retention is independent of spending. Sweep once on startup and hourly;
-/// pruning skips active journals rather than delaying a running money action.
+/// compaction skips active journals rather than delaying a running money action.
 async fn operation_history_maintenance(app: AppHandle) {
     loop {
         let dir = app_files_dir(&app.state::<NodeState>());
         if let Some(dir) = dir {
             let _ = tokio::task::spawn_blocking(move || {
-                if spend_journal::prune_operations(&dir.join("app-spend"), spend_journal::timestamp_ms()).is_err() {
+                if spend_journal::compact_operations(&dir.join("app-spend"), spend_journal::timestamp_ms()).is_err() {
                     eprintln!("spend ledger: history maintenance deferred");
                 }
             }).await;
@@ -9761,6 +9761,30 @@ mod control_act_tests {
         do_spend_reconcile(&reopen(&node)).await.unwrap();
         assert_eq!(ledger_record(&node, &id)["state"], "settled");
         assert_eq!(op_ids(&node), [Some(id)]);
+    }
+
+    #[tokio::test]
+    async fn ledger_reconcile_repair_failure_keeps_dispatched_operation_id() {
+        for missing in [false, true] {
+            let (node, _) = ops_fake(|n| n.drop_next = true);
+            spend_advance(&node.state, true).await.unwrap();
+            do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap_err();
+            let p = pending(&node).unwrap();
+            let id = p.operation_id.unwrap();
+            let path = journal_file(&node).parent().unwrap().join(format!("ops/{id}.json"));
+            if missing {
+                std::fs::remove_file(&path).unwrap();
+                // Missing record repair cannot publish its replacement.
+                std::fs::create_dir(path.with_extension("next")).unwrap();
+            } else {
+                std::fs::write(path, "PRIVATE corrupt ledger").unwrap();
+            }
+            let error = do_spend_reconcile(&reopen(&node)).await.unwrap_err();
+            assert_eq!(error.code, "spend_unknown");
+            assert_eq!(error.operation_id.as_deref(), Some(id.as_str()));
+            assert!(journal_file(&node).exists(), "repair failure retains the spending fence");
+            assert_eq!(op_ids(&node), [Some(id)], "repair failure must not dispatch again");
+        }
     }
 
     #[tokio::test]
