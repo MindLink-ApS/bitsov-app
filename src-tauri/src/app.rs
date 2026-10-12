@@ -2936,8 +2936,15 @@ async fn first_contact_quote(
 async fn read_first_contact_quote(state: &NodeState, peer: &str) -> Result<control::FirstContactQuote, String> {
     let peer = control::node_id(peer)?;
     let status: serde_json::Value = get_json(state, "/status").await?;
-    if !status["api_capabilities"].as_array().is_some_and(|caps|
-        caps.iter().any(|v| v.as_str() == Some(grant::FIRST_CONTACT_CAPABILITY))) {
+    let offered = status["api_capabilities"].as_array().is_some_and(|caps|
+        caps.iter().any(|v| v.as_str() == Some(grant::FIRST_CONTACT_CAPABILITY)));
+    read_first_contact_quote_with_cap(state, &peer, offered).await
+}
+
+/// `offered` comes from this action's status read, never from a prior send.
+async fn read_first_contact_quote_with_cap(state: &NodeState, peer: &str, offered: bool) -> Result<control::FirstContactQuote, String> {
+    let peer = control::node_id(peer)?;
+    if !offered {
         return Err("This node cannot quote a first contact before paying.".into());
     }
     let path = "/messages/first-contact/quote";
@@ -3709,8 +3716,8 @@ fn do_first_contact_cancel(state: &NodeState, id: &str) {
 
 /// A receipt only lets the app attempt compose; the node independently checks
 /// and consumes the actual single-use grant, under the reviewed budget.
-async fn confirm_first_contact(state: &NodeState, recipient: &str, max_msat: u64, contact_budget_msat: u64) -> Result<(), ActionError> {
-    if state.node_grant.lock().unwrap().is_none() || !node_offers(state, grant::FIRST_CONTACT_CAPABILITY).await {
+async fn confirm_first_contact(state: &NodeState, recipient: &str, max_msat: u64, contact_budget_msat: u64, offered: bool) -> Result<(), ActionError> {
+    if state.node_grant.lock().unwrap().is_none() || !offered {
         return if state.remote_mode.load(Ordering::SeqCst) { Err(owner_contact::unavailable()) } else { Ok(()) };
     }
     let id = state.owner_contact.lock().unwrap().as_ref().filter(|p| {
@@ -4094,7 +4101,8 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
             read_room_members(state, body["recipient"].as_str().unwrap_or_default()).await.ok()
                 .and_then(|members| members.into_iter().find(|id| id != &node_id))
         } else { body["recipient"].as_str().map(str::to_string) };
-        if let Some(peer) = peer { let _ = read_first_contact_quote(state, &peer).await; }
+        // The charge's readmission flag came from this send's fresh status.
+        if let Some(peer) = peer { let _ = read_first_contact_quote_with_cap(state, &peer, true).await; }
     }
     let all_in_caps = has_all_in_caps(state);
     let node_grant = check_node_grant(state, path, &body, max_msat).await?;
@@ -4994,8 +5002,7 @@ fn configured_network(path: &Path) -> Option<String> {
     control::ldk_network_name(&config.lightning.network).map(str::to_owned)
 }
 
-async fn read_room_routing_policy(state: &NodeState) -> Result<act::RoutingFeePolicy, String> {
-    let status: serde_json::Value = get_json(state, "/status").await?;
+fn room_routing_policy(state: &NodeState, status: &serde_json::Value) -> Result<act::RoutingFeePolicy, String> {
     if state.sidecar_terminated.load(Ordering::SeqCst) {
         return Err("The supervised node stopped. Restart it before quoting a room.".into());
     }
@@ -5013,6 +5020,10 @@ async fn read_room_routing_policy(state: &NodeState) -> Result<act::RoutingFeePo
 }
 
 async fn read_room_quote(state: &NodeState, room_id: &str) -> Result<act::RoomQuote, String> {
+    read_room_quote_with_status(state, room_id, None).await
+}
+
+async fn read_room_quote_with_status(state: &NodeState, room_id: &str, status: Option<&serde_json::Value>) -> Result<act::RoomQuote, String> {
     let room = control::room_id(room_id)?;
     let own_id = state.node_id.lock().unwrap().clone().unwrap_or_default();
     let own_id = if own_id.is_empty() { fetch_node_id(state).await? } else { own_id };
@@ -5020,7 +5031,12 @@ async fn read_room_quote(state: &NodeState, room_id: &str) -> Result<act::RoomQu
     let peers: Vec<control::Peer> = get_json(state, "/peers").await?;
     let own: control::KindPrice = get_json(state, &control::price_path(control::KIND_CHAT)).await?;
     let tables: Vec<control::PeerPrice> = get_json(state, "/pricing/peers").await?;
-    let policy = read_room_routing_policy(state).await?;
+    let fresh;
+    let status = match status {
+        Some(status) => status,
+        None => { fresh = get_json(state, "/status").await?; &fresh }
+    };
+    let policy = room_routing_policy(state, status)?;
     act::room_quote(&room, &own_id, own.price_msat, &members, &peers, &tables, policy)
         .map_err(|e| e.message)
 }
@@ -5028,6 +5044,8 @@ async fn read_room_quote(state: &NodeState, room_id: &str) -> Result<act::RoomQu
 /// Only an explicit versioned node contract authorizes variable-price sends.
 /// What a paid send may rely on at this node.
 struct SendCaps {
+    /// This send's status, also used for room routing policy. Never stored.
+    status: serde_json::Value,
     /// Admission may be paid separately from a message cap.
     readmission_possible: bool,
     /// Durable, idempotent 1:1 message operations.
@@ -5050,6 +5068,7 @@ async fn require_price_caps(state: &NodeState, room: bool) -> Result<SendCaps, A
         readmission_possible: has(grant::FIRST_CONTACT_CAPABILITY),
         operations: has(OPERATIONS_CAPABILITY),
         quoted_readmission: has(act::QUOTED_READMISSION_CAPABILITY),
+        status,
     })
 }
 
@@ -5059,23 +5078,26 @@ const OPERATIONS_CAPABILITY: &str = "message_operations_v1";
 /// The visible conversation ceiling includes admission and routing. Older
 /// nodes reuse paid_send_caps_v1 but may admit outside it; their quote cannot
 /// promise this ceiling. Keep legacy accounting for recovery and other flows.
-async fn require_conversation_ceiling(state: &NodeState, peer: &str) -> Result<(), ActionError> {
+async fn require_conversation_ceiling(state: &NodeState, peer: &str, caps: &SendCaps) -> Result<(), ActionError> {
     let peer = control::node_id(peer).map_err(ActionError::invalid)?;
-    let caps = require_price_caps(state, false).await?;
     if has_all_in_caps(state) { return Ok(()); }
     // A successful status read without the quote capability proves this is
     // a legacy node. Do not turn that evidence into a failed quote probe.
     if !caps.readmission_possible {
         return control::conversation_ceiling_evidence(false, Ok(()));
     }
-    let probe = read_first_contact_quote(state, &peer).await.map(|_| ());
+    let probe = read_first_contact_quote_with_cap(state, &peer, caps.readmission_possible).await.map(|_| ());
     control::conversation_ceiling_evidence(has_all_in_caps(state), probe)
 }
 
 async fn read_conversation_quote(state: &NodeState, peer: Option<&str>) -> Result<control::PriceQuote, String> {
     let mut quote = read_price_quote(state, peer).await?;
     if let Some(peer) = peer {
-        quote.send_unavailable = require_conversation_ceiling(state, peer).await.err().map(|e| e.message);
+        let ceiling = match require_price_caps(state, false).await {
+            Ok(caps) => require_conversation_ceiling(state, peer, &caps).await,
+            Err(error) => Err(error),
+        };
+        quote.send_unavailable = ceiling.err().map(|e| e.message);
     }
     Ok(quote)
 }
@@ -5091,14 +5113,7 @@ async fn do_conversation_send(
     max_recipient_msat: Option<std::collections::HashMap<String, u64>>,
     first_contact_msat: Option<u64>,
 ) -> Result<act::SendReceipt, ActionError> {
-    if !is_room && !act::is_room_chat(plaintext) {
-        let target = control::node_id(recipient).map_err(ActionError::invalid)?;
-        // Budget and approval refusals still take precedence, before any quote.
-        plan_message(state, &target, false, max_msat, first_contact_msat)?;
-        no_pending_spend(state)?;
-        require_conversation_ceiling(state, &target).await?;
-    }
-    do_message_send_with(state, recipient, is_room, plaintext, max_msat, max_recipient_msat, first_contact_msat).await
+    do_message_send_inner(state, recipient, is_room, plaintext, max_msat, max_recipient_msat, first_contact_msat, true).await
 }
 
 /// Slice B's call shape: no first-contact confirmation. Tests only.
@@ -5126,6 +5141,19 @@ async fn do_message_send_with(
     max_recipient_msat: Option<std::collections::HashMap<String, u64>>,
     first_contact_msat: Option<u64>,
 ) -> Result<act::SendReceipt, ActionError> {
+    do_message_send_inner(state, recipient, is_room, plaintext, max_msat, max_recipient_msat, first_contact_msat, false).await
+}
+
+async fn do_message_send_inner(
+    state: &NodeState,
+    recipient: &str,
+    is_room: bool,
+    plaintext: &str,
+    max_msat: u64,
+    max_recipient_msat: Option<std::collections::HashMap<String, u64>>,
+    first_contact_msat: Option<u64>,
+    conversation: bool,
+) -> Result<act::SendReceipt, ActionError> {
     let target = if is_room { control::room_id(recipient) } else { control::node_id(recipient) }.map_err(ActionError::invalid)?;
     // A room leg (genome `room_binding_v1`) pays at most the owner's confirmed
     // cap for that member, fee included: no first contact, no raised re-admission cap.
@@ -5136,6 +5164,9 @@ async fn do_message_send_with(
     let (auth, plan) = plan_message(state, &target, is_room, max_msat, first_contact_msat)?;
     no_pending_spend(state)?;
     let caps = require_price_caps(state, is_room).await?;
+    if conversation && !is_room && !room_leg {
+        require_conversation_ceiling(state, &target, &caps).await?;
+    }
     let readmission_possible = caps.readmission_possible;
     let mut body = act::compose_body(recipient, is_room, plaintext)?;
     body["max_total_msat"] = serde_json::json!(max_msat);
@@ -5145,7 +5176,7 @@ async fn do_message_send_with(
     }
     let node_ok = if is_room { None } else { plan.confirm.or(first_contact_msat) };
     let price = if is_room {
-        let quote = read_room_quote(state, recipient).await?;
+        let quote = read_room_quote_with_status(state, recipient, Some(&caps.status)).await?;
         act::room_sendable(&quote)?;
         let caps = max_recipient_msat.as_ref().expect("room caps checked above");
         if caps.len() != quote.members.len() || quote.members.iter().any(|member|
@@ -5175,7 +5206,7 @@ async fn do_message_send_with(
     // with a single-use grant for exactly this contact and this cap. The same
     // OK re-admits a known contact the node's grant does not budget yet.
     if let Some(contact_budget) = node_ok {
-        confirm_first_contact(state, &recipient, max_msat, contact_budget).await?;
+        confirm_first_contact(state, &recipient, max_msat, contact_budget, caps.readmission_possible).await?;
     }
     let quoted_readmission = !is_room && !room_leg && node_ok.is_none() && caps.quoted_readmission;
     // The owner approved the contact's re-admission quote (`readmission_quoted`):
@@ -5191,7 +5222,7 @@ async fn do_message_send_with(
         // After a reconnect or restart the contact asks for admission again,
         // and the node kept its signed quote for this connection.
         Err(e) if e.code == "readmission_capped" && quoted_readmission => {
-            readmit_under_quote(state, &target, body, max_msat, e).await
+            readmit_under_quote(state, &target, body, max_msat, e, caps.readmission_possible).await
         }
         Err(e) if e.code == "readmission_capped" && room_leg => Err(ActionError::new("readmission_capped", act::ROOM_LEG_READMISSION)),
         other => other,
@@ -5237,9 +5268,10 @@ async fn readmit_under_quote(
     body: serde_json::Value,
     max_msat: u64,
     refused: ActionError,
+    quote_offered: bool,
 ) -> Result<String, ActionError> {
     let recipient = body["recipient"].as_str().unwrap_or_default().to_string();
-    let Ok(quote) = read_first_contact_quote(state, &recipient).await else { return Err(refused) };
+    let Ok(quote) = read_first_contact_quote_with_cap(state, &recipient, quote_offered).await else { return Err(refused) };
     // A cap that already covered this quote was refused: never loop.
     if quote.total_msat <= max_msat { return Err(refused); }
     let view = act::AdmissionView {
@@ -5322,7 +5354,7 @@ async fn do_message_retry(state: &NodeState, recipient: &str, plaintext: &str, a
         // A paired first-contact authorization is single-use, including when
         // the previous paid send failed. Renew it for this exact peer and cap.
         let contact_budget = retry_contact_budget(state, &target, cap).await?;
-        confirm_first_contact(state, &target, cap, contact_budget).await?;
+        confirm_first_contact(state, &target, cap, contact_budget, caps.readmission_possible).await?;
     }
     // Nothing can be paid under a zero cap, re-admission included.
     let charge = Charge { target: target.clone(), room: false, confirm: None, readmission_possible: readmission_possible && approved_msat.is_some(), confirmed: approved_msat.is_some(), operation: caps.operations };
@@ -5864,7 +5896,7 @@ async fn do_file_send(
     ceiling(act::payment_quote(principal)?.total_msat, max_msat)?;
     let node_ok = plan.confirm.or(first_contact_msat);
     if let Some(contact_budget) = node_ok {
-        confirm_first_contact(state, &recipient, max_msat, contact_budget).await?;
+        confirm_first_contact(state, &recipient, max_msat, contact_budget, caps.readmission_possible).await?;
     }
     let charge = Charge {
         target: recipient.clone(),
@@ -12957,6 +12989,148 @@ mod control_act_tests {
         spend_advance(&node.state, false).await.unwrap();
         spend_advance(&node.state, false).await.unwrap();
         budget_now(&node.state)
+    }
+
+    // Exercise the public conversation path and call pre-flight over real
+    // loopback HTTP, including the first send's all-in quote probe.
+    async fn send_preflight_node(call: bool, raised: Arc<AtomicBool>) -> (Fake, tempfile::TempDir, G1) {
+        let routes: Routes = Arc::new(move |m, p, b| {
+            let high = raised.load(Ordering::SeqCst);
+            let value = match p {
+                "/pricing/peers" => serde_json::json!([
+                    {"peer_id": A, "prices": {"communication": if high { 9000 } else { 2000 }}, "age_secs": 0, "stale": false}
+                ]),
+                "/payments/price/401" => serde_json::json!({"kind": 401, "price_msat": 50}),
+                r if r == format!("/pricing/peers/{A}/call") => serde_json::json!({
+                    "peer_id": A, "offer_msat": if high { 20000 } else { 10000 }, "signal_msat": 50
+                }),
+                "/messages/compose" if call => return call_routes(Some(10000))(m, p, b),
+                _ => return (0, String::new()),
+            };
+            (200, value.to_string())
+        });
+        let (node, dir, g1) = g1_node_with(&["read", "receive"], Some(routes));
+        *g1.first_contact.lock().unwrap() = Some((200, serde_json::json!({})));
+        *g1.quote.lock().unwrap() = Some(serde_json::json!({
+            "recipient": A, "admission_msat": 1500, "message_msat": 2000,
+            "max_routing_fee_msat": 5000, "total_msat": 8500, "expires_at": now_unix() + 60
+        }));
+        g1.grant.lock().unwrap()["per_recipient_msat"] = serde_json::json!({A: 100000});
+        with_book(&node.state, true, |b| b.set_limit(A, false, 100000)).unwrap();
+        g1_approved(&node, 400000).await;
+        node.seen.lock().unwrap().clear();
+        (node, dir, g1)
+    }
+
+    async fn preflight_send(node: &Fake, call: bool) -> Result<(), ActionError> {
+        if call {
+            do_call_signal(&node.state, A, 400, OFFER, 15000).await.map(|_| ())
+        } else {
+            do_conversation_send(&node.state, A, false, "gm", 7000, None, None).await.map(|_| ())
+        }
+    }
+
+    #[tokio::test]
+    async fn send_preflight_reads_status_once_and_grant_last() {
+        for call in [false, true] {
+            let (node, _dir, _g1) = send_preflight_node(call, Arc::new(AtomicBool::new(false))).await;
+            for _ in 0..2 {
+                node.seen.lock().unwrap().clear();
+                preflight_send(&node, call).await.unwrap();
+                let targets = node.targets();
+                assert_eq!(targets.iter().filter(|p| *p == "GET /status").count(), 1, "{targets:?}");
+                let own = if call { "GET /payments/price/401" } else { "GET /payments/price/0" };
+                let peer = if call { format!("GET /pricing/peers/{A}/call") } else { "GET /pricing/peers".into() };
+                let own = targets.iter().position(|p| p == own).unwrap();
+                let peer = targets.iter().position(|p| p == &peer).unwrap();
+                let grant = targets.iter().position(|p| p == "GET /pair/grant").unwrap();
+                let compose = targets.iter().position(|p| p == "POST /messages/compose").unwrap();
+                assert!(own < peer && peer < grant, "{targets:?}");
+                assert_eq!(targets[compose - 1], "GET /pair/grant", "{targets:?}");
+                assert_eq!(targets.iter().filter(|p| *p == "POST /messages/compose").count(), 1);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn send_preflight_call_reads_status_once_on_cold_probe() {
+        let (node, _dir, _g1) = send_preflight_node(true, Arc::new(AtomicBool::new(false))).await;
+        preflight_send(&node, true).await.unwrap();
+        let targets = node.targets();
+        assert_eq!(targets.iter().filter(|p| *p == "GET /status").count(), 1, "{targets:?}");
+    }
+
+    #[tokio::test]
+    async fn send_preflight_room_reuses_status_for_routing_policy() {
+        let (node, _dir, _g1) = g1_node(&["read", "receive"]);
+        spend_advance(&node.state, true).await.unwrap();
+        spend_advance(&node.state, false).await.unwrap();
+        spend_advance(&node.state, false).await.unwrap();
+        node.seen.lock().unwrap().clear();
+        do_conversation_send(&node.state, ROOM, true, "gm", 13000,
+            Some(std::collections::HashMap::from([(A.into(), 7000), (C.into(), 6000)])), None).await.unwrap();
+        let targets = node.targets();
+        assert_eq!(targets.iter().filter(|p| *p == "GET /status").count(), 1, "{targets:?}");
+        let compose = targets.iter().position(|p| p == "POST /messages/compose").unwrap();
+        assert_eq!(targets[compose - 1], "GET /pair/grant");
+    }
+
+    #[tokio::test]
+    async fn send_preflight_sees_revoked_grant_between_sends() {
+        for call in [false, true] {
+            let (node, _dir, g1) = send_preflight_node(call, Arc::new(AtomicBool::new(false))).await;
+            preflight_send(&node, call).await.unwrap();
+            *g1.grant.lock().unwrap() = serde_json::Value::Null;
+            node.seen.lock().unwrap().clear();
+            assert_eq!(preflight_send(&node, call).await.unwrap_err().code, "grant_ended");
+            assert_eq!(composes(&node), 0);
+            assert_eq!(node.targets().last().unwrap(), "GET /pair/grant");
+            assert!(node.state.node_grant.lock().unwrap().is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn send_preflight_sees_raised_price_before_reading_grant() {
+        for call in [false, true] {
+            let raised = Arc::new(AtomicBool::new(false));
+            let (node, _dir, _g1) = send_preflight_node(call, raised.clone()).await;
+            preflight_send(&node, call).await.unwrap();
+            raised.store(true, Ordering::SeqCst);
+            node.seen.lock().unwrap().clear();
+            assert_eq!(preflight_send(&node, call).await.unwrap_err().code, "price_changed");
+            assert_eq!(composes(&node), 0);
+            assert!(!node.targets().iter().any(|p| p == "GET /pair/grant"));
+        }
+    }
+
+    #[tokio::test]
+    async fn send_preflight_does_not_reuse_capabilities_between_sends() {
+        for call in [false, true] {
+            let downgraded = Arc::new(AtomicBool::new(false));
+            let changed = downgraded.clone();
+            let routes: Routes = Arc::new(move |m, p, b| {
+                if p == "/status" && changed.load(Ordering::SeqCst) {
+                    return (200, serde_json::json!({"api_capabilities": []}).to_string());
+                }
+                if p.contains("/call") || p == "/payments/price/401" || (call && p == "/messages/compose") {
+                    return call_routes(Some(10000))(m, p, b);
+                }
+                (0, String::new())
+            });
+            let (node, _dir, _g1) = g1_node_with(&["read", "receive"], Some(routes));
+            with_book(&node.state, true, |b| b.set_limit(A, false, 100000)).unwrap();
+            g1_approved(&node, 400000).await;
+            for second in [false, true] {
+                downgraded.store(second, Ordering::SeqCst);
+                node.seen.lock().unwrap().clear();
+                let result = if call { preflight_send(&node, true).await }
+                    else { do_message_send(&node.state, A, false, "gm", 7000, None).await.map(|_| ()) };
+                if second {
+                    assert_eq!(result.unwrap_err().code, "price_cap_unavailable");
+                    assert_eq!(node.targets(), ["GET /status"]);
+                } else { result.unwrap(); }
+            }
+        }
     }
 
     #[tokio::test]
