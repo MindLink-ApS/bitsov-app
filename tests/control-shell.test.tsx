@@ -731,7 +731,7 @@ describe('control center shell', () => {
         }
         continue;
       }
-      expect(cmd).toMatch(/^(node_status|pairing_status|trust_acknowledge|node_overview|peers_list|rooms_list|room_members|messages_list|price_quote|payments_overview|fund_state|spend_status|device_key_status|budget_status|file_price|call_quote|room_quote|live_link|plugin:event\|(un)?listen)$/);
+      expect(cmd).toMatch(/^(node_status|pairing_status|trust_acknowledge|node_overview|peers_list|rooms_list|room_members|messages_list|price_quote|payments_overview|fund_state|spend_status|device_key_status|budget_status|file_price|call_quote|room_quote|op_list|live_link|plugin:event\|(un)?listen)$/);
     }
     expect(calls.find((c) => c.cmd === 'plugin:event|listen')?.args?.event).toBe('node-live');
 
