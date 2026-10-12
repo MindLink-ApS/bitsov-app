@@ -255,3 +255,11 @@ describe('welcome home', () => {
     expect(mount.querySelector('[data-welcome]')).toBeNull();
   });
 });
+
+describe('rail names', () => {
+  it('+ New is named exactly "New" (the "+" is decoration)', () => {
+    const source = sampleSource({ firstLiveMs: 1e9 });
+    start(() => <ControlCenter source={source} active ready error={null} ownId={SAMPLE_OWN_ID} firstRun={<span />} />);
+    expect(mount.querySelector('[data-track="new"]')?.getAttribute('aria-label')).toBe('New');
+  });
+});

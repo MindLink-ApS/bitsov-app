@@ -1313,7 +1313,9 @@ input[type='checkbox'], input[type='radio'] { width: auto; flex: none; padding: 
   .rail { min-height: var(--bar-h); gap: var(--s-2); padding: var(--s-2) 0 var(--s-2) var(--s-3); scrollbar-width: none; }
   .rail::-webkit-scrollbar { display: none; }
   /* The strip scrolls; + New (node-id QR, introduction card, starter bitcoin) and You stay pinned at its right edge. */
-  .rail-foot { position: sticky; right: 0; z-index: 2; margin-left: auto; gap: var(--s-1); padding: 0 var(--s-3) 0 var(--s-2); background: var(--sunk); box-shadow: -14px 0 12px -10px var(--sunk); }
+  /* Above the composer and the assistant bar (2) so the open You menu is never painted over;
+     below the wallet page (18) and the settings scrim (20) that must cover it. */
+  .rail-foot { position: sticky; right: 0; z-index: 15; margin-left: auto; gap: var(--s-1); padding: 0 var(--s-3) 0 var(--s-2); background: var(--sunk); box-shadow: -14px 0 12px -10px var(--sunk); }
   .rail-foot .new-track { min-height: 44px; padding: 0 12px; white-space: nowrap; }
   /* On a phone the pinned pair stays small: + New shows as "+" (its name stays "+ New"). */
   .profile-avatar { min-width: 44px; min-height: 44px; justify-content: center; }
@@ -1343,6 +1345,10 @@ input[type='checkbox'], input[type='radio'] { width: auto; flex: none; padding: 
   /* Every control a thumb reaches is at least 44 px tall (inline text links excepted). */
   button:not(.link), summary, [role='tab'], [role='radio'], [role='menuitem'] { min-height: 44px; }
   button:not(.link) { min-width: 44px; }
+  /* A .link that stands alone (Back, Refresh, Close) is an action: a 44 px tap area around it.
+     A .link inside a sentence (p, li, a hint) stays a text link. */
+  button.link:not(:is(p, li, .hint, .stamp) *) { position: relative; }
+  button.link:not(:is(p, li, .hint, .stamp) *)::after { content: ''; position: absolute; left: 50%; top: 50%; width: max(100%, 44px); height: max(100%, 44px); transform: translate(-50%, -50%); }
   .context-toggle, .composer .attach, .ai-ask-btn, .info-btn, .icon-btn { min-width: 44px; }
   .send-btn.primary, .primary.soft.send-btn, .send-btn, .composer .attach { height: 44px; min-height: 44px; border-radius: 22px; }
   .node-target-section.compact .node-target-card { min-height: 44px; }

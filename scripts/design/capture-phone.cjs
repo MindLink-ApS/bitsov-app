@@ -25,6 +25,7 @@ const steps = [
   ['14-contact', '?sample', async (p) => { await role(p, 'button', 'Contact Maya'); }],
   ['15-call-card', '?sample', async (p) => { await role(p, 'button', /^Call Maya/); }],
   ['16-you-menu', '?sample', you],
+  ['17-you-menu-on-ai', '?sample', async (p) => { await p.getByText('Ask your node').first().click({ timeout: 3000 }); await you(p); }],
   ['20-wallet', '?sample', wallet],
   ['21-wallet-channels', '?sample', async (p) => { await wallet(p); await p.locator('[data-wallet-tab]').nth(1).click(); }],
   ['22-wallet-receive', '?sample', async (p) => { await wallet(p); await p.locator('[data-wallet-tab]').nth(2).click(); }],
@@ -53,11 +54,23 @@ const overflow = () => {
   }
   // Tap targets under 44 × 44 px (inline text links excepted), visible on screen.
   const small = [];
-  for (const el of document.querySelectorAll('button, [role="tab"], [role="menuitem"], [role="radio"], a[href], summary')) {
+  // The 44 px rule is the phone's (≤ 480 px); wider sizes check overflow and the menu only.
+  for (const el of vw <= 480 ? document.querySelectorAll('button, [role="tab"], [role="menuitem"], [role="radio"], a[href], summary') : []) {
     const r = el.getBoundingClientRect();
     if (!r.width || r.bottom < 0 || r.top > innerHeight || r.right < 0 || r.left > vw) continue;
-    if (el.classList.contains('link') || el.closest('p, .hint, .stamp, details:not([open]) > :not(summary)')) continue;
-    if (r.height < 43.5 || r.width < 43.5) small.push(`${el.tagName.toLowerCase()}.${String(el.className).trim().split(/\s+/).slice(0, 2).join('.')} "${(el.textContent || el.getAttribute('aria-label') || '').trim().slice(0, 18)}" ${Math.round(r.width)}×${Math.round(r.height)}`);
+    // Text links inside a sentence are exempt; a standalone .link (Back, Refresh, Close) is a control.
+    if (el.closest('p, li, .hint, .stamp, details:not([open]) > :not(summary)')) continue;
+    // A ::after tap area counts (the CSS gives standalone .link buttons one).
+    const after = getComputedStyle(el, '::after');
+    const aw = after.content !== 'none' && after.position === 'absolute' ? parseFloat(after.width) || 0 : 0;
+    const ah = after.content !== 'none' && after.position === 'absolute' ? parseFloat(after.height) || 0 : 0;
+    if (Math.max(r.height, ah) < 43.5 || Math.max(r.width, aw) < 43.5) small.push(`${el.tagName.toLowerCase()}.${String(el.className).trim().split(/\s+/).slice(0, 2).join('.')} "${(el.textContent || el.getAttribute('aria-label') || '').trim().slice(0, 18)}" ${Math.round(r.width)}×${Math.round(r.height)}`);
+  }
+  // An open You menu must be on top: each row's centre hits the menu itself.
+  for (const item of document.querySelectorAll('[data-avatar-menu] [role="menuitem"]')) {
+    const r = item.getBoundingClientRect();
+    const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+    if (!hit || !item.contains(hit)) out.push(`covered menu row "${item.textContent.trim().slice(0, 24)}" by ${hit ? hit.tagName.toLowerCase() + '.' + String(hit.className).split(' ')[0] : 'nothing'}`);
   }
   return { pageScroll: document.scrollingElement.scrollWidth - vw, items: [...new Set(out)].slice(0, 12), small: [...new Set(small)].slice(0, 15) };
 };
@@ -66,11 +79,13 @@ const overflow = () => {
   const only = process.argv[2];
   const browser = await chromium.launch();
   const report = [];
-  for (const width of (process.env.WIDTHS || '360,390').split(',').map(Number)) {
+  // WIDTHS: "360,390" or sizes like "640x360" (a short landscape phone, where the assistant bar meets the You menu).
+  for (const size of (process.env.WIDTHS || '360,390,640x360').split(',')) {
+    const [width, tall] = size.split('x').map(Number);
     for (const theme of ['dark']) {
       for (const [name, query, act] of steps) {
         if (only && !name.startsWith(only)) continue;
-        const ctx = await browser.newContext({ viewport: { width, height: width === 360 ? 740 : 844 }, deviceScaleFactor: 2, colorScheme: theme, isMobile: true, hasTouch: true });
+        const ctx = await browser.newContext({ viewport: { width, height: tall || (width === 360 ? 740 : 844) }, deviceScaleFactor: 2, colorScheme: theme, isMobile: true, hasTouch: true });
         await ctx.addInitScript((t) => { try { localStorage.setItem('bitsov.theme', t); } catch {} }, theme);
         const page = await ctx.newPage();
         let err = '';
@@ -81,8 +96,8 @@ const overflow = () => {
           await page.waitForTimeout(400);
         } catch (e) { err = String(e).split('\n')[0]; }
         const o = await page.evaluate(overflow);
-        await page.screenshot({ path: path.join(OUT, `${name}-${width}.png`) });
-        report.push({ name, width, err, ...o });
+        await page.screenshot({ path: path.join(OUT, `${name}-${size}.png`) });
+        report.push({ name, width: size, err, ...o });
         await ctx.close();
       }
     }

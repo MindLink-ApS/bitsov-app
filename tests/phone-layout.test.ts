@@ -40,6 +40,14 @@ describe('narrow layout (top strip)', () => {
     // + New is never hidden: it is the only way to the node-id QR, the intro card and starter bitcoin.
     expect(css).not.toMatch(/\.new-track\s*\{[^}]*display:\s*none/);
   });
+  it('keeps the pinned foot (and its open menu) above the composer and assistant bar, below the wallet and settings layers', () => {
+    const z = Number(rule(narrow, '.rail-foot').match(/z-index:\s*(\d+)/)?.[1]);
+    const layer = (sel: string) => Number(css.match(new RegExp(`${sel.replace('.', '\\.')}\\s*\\{[^}]*z-index:\\s*(\\d+)`))?.[1]);
+    expect(z).toBeGreaterThanOrEqual(8);
+    expect(z).toBeGreaterThan(layer('.composer') || 2);
+    expect(z).toBeLessThan(layer('.wallet-page'));
+    expect(z).toBeLessThan(layer('.settings-scrim'));
+  });
   it('opens the You menu down from the bar, inside the screen, with 44 px rows', () => {
     const m = rule(narrow, '.avatar-menu');
     expect(m).toMatch(/position:\s*fixed/);
@@ -64,6 +72,11 @@ describe('phone layout', () => {
   it('makes every button, tab and disclosure at least 44 px', () => {
     expect(phone).toMatch(/button:not\(\.link\), summary, \[role='tab'\], \[role='radio'\], \[role='menuitem'\] \{ min-height: 44px; \}/);
     expect(rule(phone, 'button:not(.link)')).toMatch(/min-width:\s*44px/);
+  });
+  it('gives a standalone .link (Back, Refresh, Close) a 44 px tap area; links in a sentence stay text', () => {
+    const after = rule(phone, 'button.link:not(:is(p, li, .hint, .stamp) *)::after');
+    expect(after).toMatch(/width:\s*max\(100%,\s*44px\)/);
+    expect(after).toMatch(/height:\s*max\(100%,\s*44px\)/);
   });
   it('gives the message text its own row', () => {
     expect(rule(phone, '.signal-bar > textarea')).toMatch(/flex:\s*1 1 100%/);
