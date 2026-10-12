@@ -1162,14 +1162,20 @@ describe('calls in the shell', () => {
     expect(text('[data-call-paid]')).toMatch(/cap.*15 sats/i);
   });
 
-  it.each(['', 'stun:owner.example:3478'])('shows a visible cross-network note only without configured STUN (%s)', async (stun) => {
+  it.each(['', 'stun:owner.example:3478'])('says the cross-network note in the call panel only, and only without STUN (%s)', async (stun) => {
     setStunPref(stun);
-    stubHost();
+    stubHost({ call_signal: () => new Promise(() => {}) });
     await openShell();
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
-    const note = $('[data-call-network-note]');
+    // Not on every chat: the chat itself carries no network note.
+    expect($('[data-call-network-note]')).toBeNull();
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="calling"]')).not.toBeNull());
+    const note = $('[data-call-panel] [data-call-network-note]');
     if (stun) expect(note).toBeNull();
     else expect(note?.textContent).toMatch(/calls may not connect across networks/i);
+    expect(mount.querySelectorAll('[data-call-network-note]').length).toBe(stun ? 0 : 1);
+    $<HTMLButtonElement>('[data-call-hangup]')!.click();
   });
 
   it('rings on a live offer with the answer price, and never adds call signals to the thread', async () => {
