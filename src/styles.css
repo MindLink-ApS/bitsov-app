@@ -1307,25 +1307,51 @@ input[type='checkbox'], input[type='radio'] { width: auto; flex: none; padding: 
   .add-device .form-actions > button { flex: 1 1 180px; }
 }
 
-/* Phone (< 480 px): everything reachable without sideways page scroll. */
-@media (max-width: 480px) {
-  /* The top strip scrolls; You (wallet, profile, settings) stays pinned at its right edge. */
-  .rail { gap: var(--s-2); padding: var(--s-2) 0 var(--s-2) var(--s-3); scrollbar-width: none; }
+/* Narrow (rail is a top strip below 680 px): You and + New stay pinned and reachable. */
+@media (max-width: 680px) {
+  :root { --bar-h: 60px; }
+  .rail { min-height: var(--bar-h); gap: var(--s-2); padding: var(--s-2) 0 var(--s-2) var(--s-3); scrollbar-width: none; }
   .rail::-webkit-scrollbar { display: none; }
-  .rail-foot { position: sticky; right: 0; z-index: 2; margin-left: auto; padding: 0 var(--s-3) 0 var(--s-2); background: var(--sunk); box-shadow: -14px 0 12px -10px var(--sunk); }
-  .rail-foot .new-track { display: none; }
+  /* The strip scrolls; + New (node-id QR, introduction card, starter bitcoin) and You stay pinned at its right edge. */
+  .rail-foot { position: sticky; right: 0; z-index: 2; margin-left: auto; gap: var(--s-1); padding: 0 var(--s-3) 0 var(--s-2); background: var(--sunk); box-shadow: -14px 0 12px -10px var(--sunk); }
+  .rail-foot .new-track { min-height: 44px; padding: 0 12px; white-space: nowrap; }
+  /* On a phone the pinned pair stays small: + New shows as "+" (its name stays "+ New"). */
+  .profile-avatar { min-width: 44px; min-height: 44px; justify-content: center; }
   /* Its menu opens down from the bar, inside the screen (a scrolling strip would clip it). */
-  .avatar-menu { position: fixed; top: 60px; right: var(--s-3); left: auto; bottom: auto; min-width: min(260px, calc(100vw - 2 * var(--s-3))); transform-origin: top right; }
+  .avatar-menu { position: fixed; top: calc(var(--bar-h) + env(safe-area-inset-top, 0px)); right: var(--s-3); left: auto; bottom: auto; min-width: min(260px, calc(100vw - 2 * var(--s-3))); transform-origin: top right; }
+  .avatar-menu-item { min-height: 44px; align-items: center; }
+}
+
+/* Phone (< 480 px): everything reachable without sideways page scroll, every tap target at least 44 px. */
+@media (max-width: 480px) {
   /* Chat header: the name and the call buttons; the node id lives in the contact panel. */
   .track-head { gap: var(--s-2); padding: var(--s-3) var(--s-4); }
   .track-head .sub:not(:has(.endpoint-badge)) { display: none; }
   .track-head .call-buttons { margin-left: auto; }
+  .call-button { min-width: 44px; min-height: 44px; }
   /* Budget approval: the sentence, then the choices, each full width. */
   .approval.slim-approval { flex-direction: column; align-items: stretch; }
   .approval.slim-approval .presets { flex-direction: column; }
-  .approval.slim-approval .chip { padding: 8px 12px; font-size: var(--t-sm); text-align: left; }
+  .approval.slim-approval .chip { min-height: 44px; padding: 8px 12px; font-size: var(--t-sm); text-align: left; }
   /* Settings: one row of tabs that scrolls, Close always visible. */
   .settings-head { flex-wrap: nowrap; gap: var(--s-2); }
   .settings-head .tabs { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; min-width: 0; }
   .settings-head .tabs::-webkit-scrollbar { display: none; }
+  .settings-head .tabs button { min-height: 44px; }
+  .rail-foot .new-track { width: 44px; padding: 0; font-size: 0; }
+  .rail-foot .new-track::before { content: '+'; font-size: 20px; line-height: 1; }
+  /* Every control a thumb reaches is at least 44 px tall (inline text links excepted). */
+  button:not(.link), summary, [role='tab'], [role='radio'], [role='menuitem'] { min-height: 44px; }
+  button:not(.link) { min-width: 44px; }
+  .context-toggle, .composer .attach, .ai-ask-btn, .info-btn, .icon-btn { min-width: 44px; }
+  .send-btn.primary, .primary.soft.send-btn, .send-btn, .composer .attach { height: 44px; min-height: 44px; border-radius: 22px; }
+  .node-target-section.compact .node-target-card { min-height: 44px; }
+  .track-title-btn, .composer-info > summary { min-width: 44px; }
+  /* Message bar: the text gets its own full row; emoji, voice, + and Send sit under it. */
+  .signal-bar { flex-wrap: wrap; row-gap: var(--s-2); }
+  .signal-bar > textarea { order: -1; flex: 1 1 100%; }
+  .signal-bar > .send-btn, .signal-bar > [data-send] { margin-left: auto; }
+  /* The cost ⓘ keeps its small look; its tap area grows to 44 px around it. */
+  .composer-info > summary { position: relative; }
+  .composer-info > summary::after { content: ''; position: absolute; inset: -11px; }
 }

@@ -51,14 +51,22 @@ const overflow = () => {
       out.push(`${id} ${Math.round(r.left)}..${Math.round(r.right)}`);
     }
   }
-  return { pageScroll: document.scrollingElement.scrollWidth - vw, items: [...new Set(out)].slice(0, 12) };
+  // Tap targets under 44 × 44 px (inline text links excepted), visible on screen.
+  const small = [];
+  for (const el of document.querySelectorAll('button, [role="tab"], [role="menuitem"], [role="radio"], a[href], summary')) {
+    const r = el.getBoundingClientRect();
+    if (!r.width || r.bottom < 0 || r.top > innerHeight || r.right < 0 || r.left > vw) continue;
+    if (el.classList.contains('link') || el.closest('p, .hint, .stamp, details:not([open]) > :not(summary)')) continue;
+    if (r.height < 43.5 || r.width < 43.5) small.push(`${el.tagName.toLowerCase()}.${String(el.className).trim().split(/\s+/).slice(0, 2).join('.')} "${(el.textContent || el.getAttribute('aria-label') || '').trim().slice(0, 18)}" ${Math.round(r.width)}×${Math.round(r.height)}`);
+  }
+  return { pageScroll: document.scrollingElement.scrollWidth - vw, items: [...new Set(out)].slice(0, 12), small: [...new Set(small)].slice(0, 15) };
 };
 
 (async () => {
   const only = process.argv[2];
   const browser = await chromium.launch();
   const report = [];
-  for (const width of [360, 390]) {
+  for (const width of (process.env.WIDTHS || '360,390').split(',').map(Number)) {
     for (const theme of ['dark']) {
       for (const [name, query, act] of steps) {
         if (only && !name.startsWith(only)) continue;
@@ -80,5 +88,5 @@ const overflow = () => {
     }
   }
   await browser.close();
-  for (const r of report) console.log(`${r.err ? 'FAIL' : r.pageScroll > 0 || r.items.length ? 'OVER' : 'ok  '} ${r.name}@${r.width} scroll=${r.pageScroll}${r.err ? ' ' + r.err : ''}${r.items.length ? '\n     ' + r.items.join('\n     ') : ''}`);
+  for (const r of report) console.log(`${r.err ? 'FAIL' : r.pageScroll > 0 || r.items.length ? 'OVER' : 'ok  '} ${r.name}@${r.width} scroll=${r.pageScroll}${r.err ? ' ' + r.err : ''}${r.items.length ? '\n     ' + r.items.join('\n     ') : ''}${process.env.TAPS && r.small.length ? '\n     small: ' + r.small.join('\n            ') : ''}`);
 })();
