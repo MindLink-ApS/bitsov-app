@@ -1,5 +1,157 @@
 use super::*;
 
+// Abort drops the listener AND its accepted keep-alive sockets. Rebinding the
+// same address below therefore exercises reqwest reconnecting to a new node.
+fn restartable_node(listener: tokio::net::TcpListener, caps: &'static str) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        let mut connections = tokio::task::JoinSet::new();
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            connections.spawn(async move {
+                let mut reader = tokio::io::BufReader::new(stream);
+                loop {
+                    let mut request = String::new();
+                    loop {
+                        let mut line = String::new();
+                        if reader.read_line(&mut line).await.unwrap_or(0) == 0 { return; }
+                        if line == "\r\n" { break; }
+                        request.push_str(&line);
+                    }
+                    let body = if request.starts_with("GET /api/v1/status ") {
+                        format!("{{\"api_capabilities\":{caps}}}")
+                    } else {
+                        assert!(request.starts_with("GET /api/v1/identity "));
+                        serde_json::json!({"node_id": OWN}).to_string()
+                    };
+                    let reply = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+                    if reader.get_mut().write_all(reply.as_bytes()).await.is_err() { return; }
+                }
+            });
+        }
+    })
+}
+
+#[tokio::test]
+async fn paid_send_preflight_local_restart_on_same_port_invalidates_caps() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = restartable_node(listener, r#"["paid_send_caps_v1"]"#);
+    let state = NodeState::for_api(format!("http://{address}/api/v1"));
+    *state.auth.lock().unwrap() = AuthMode::Local;
+    *state.token.lock().unwrap() = Some("tok.1".into());
+    *state.node_id.lock().unwrap() = Some(OWN.into());
+    require_price_caps(&state, false).await.unwrap();
+    server.abort();
+    let _ = server.await;
+    // JoinSet cancellation closes accepted sockets on the next runtime turn.
+    tokio::task::yield_now().await;
+    let listener = tokio::net::TcpListener::bind(address).await.unwrap();
+    let server = restartable_node(listener, "[]");
+    // Ordinary HTTP recovery, with no WebSocket/auth/identity transition.
+    assert_eq!(fetch_node_id(&state).await.unwrap(), OWN);
+    let result = require_price_caps(&state, false).await;
+    server.abort();
+    let _ = server.await;
+    assert_eq!(result.err().unwrap().code, "price_cap_unavailable");
+}
+
+// No WebSocket event or failed handshake: a restarted node can accept the
+// very first reconnect while the live feed is still sleeping in backoff.
+#[tokio::test]
+async fn paid_send_preflight_fresh_remote_handshake_refuses_downgraded_caps() {
+    let downgraded = Arc::new(AtomicBool::new(false));
+    let changed = downgraded.clone();
+    let routes: Routes = Arc::new(move |_, path, _| {
+        if path == "/status" && changed.load(Ordering::SeqCst) {
+            (200, serde_json::json!({"api_capabilities": []}).to_string())
+        } else { (0, String::new()) }
+    });
+    let (node, _dir, g1) = g1_node_with(&["read", "receive"], Some(routes));
+    with_book(&node.state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
+    g1.grant.lock().unwrap()["per_recipient_msat"] = serde_json::json!({A: 50_000});
+    g1_approved(&node, 500_000).await;
+    require_price_caps(&node.state, false).await.unwrap();
+    *node.state.all_in_caps_node.lock().unwrap() = Some(OWN.into());
+    downgraded.store(true, Ordering::SeqCst);
+    // The same admission gate used by serve_connection's fresh Noise handshake.
+    node.state.remote_retry.run(|| async { Ok(()) }).await.unwrap();
+    let error = do_conversation_send(&node.state, A, false, "gm", 7000, None, None).await.unwrap_err();
+    assert_eq!(error.code, "price_cap_unavailable");
+    assert_eq!(composes(&node), 0);
+    assert_eq!(budget_now(&node.state).spent_msat, 0);
+    assert!(spend_journal(&node.state).unwrap().pending().unwrap().is_none());
+}
+
+#[cfg(all(desktop, not(feature = "mobile")))]
+#[tokio::test]
+async fn paid_send_preflight_adopting_same_identity_invalidates_caps() {
+    let downgraded = Arc::new(AtomicBool::new(false));
+    let changed = downgraded.clone();
+    let (arrived_tx, arrived_rx) = tokio::sync::oneshot::channel();
+    let arrived = Mutex::new(Some(arrived_tx));
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let release = Mutex::new(release_rx);
+    let routes: Routes = Arc::new(move |m, path, b| match path {
+        "/health" => (200, "{}".into()),
+        "/auth/local" => (200, serde_json::json!({"token": "tok.1"}).to_string()),
+        "/identity" => {
+            if let Some(tx) = arrived.lock().unwrap().take() {
+                tx.send(()).unwrap();
+                release.lock().unwrap().recv_timeout(Duration::from_secs(5)).unwrap();
+            }
+            (200, serde_json::json!({"node_id": OWN}).to_string())
+        }
+        "/status" if changed.load(Ordering::SeqCst) =>
+            (200, serde_json::json!({"api_capabilities": []}).to_string()),
+        _ => happy()(m, path, b),
+    });
+    let node = fake(AuthMode::Local, routes);
+    require_price_caps(&node.state, false).await.unwrap();
+    let during_adoption = async {
+        arrived_rx.await.unwrap();
+        // Evidence acquired during adoption must also expire when it completes.
+        require_price_caps(&node.state, false).await.unwrap();
+        downgraded.store(true, Ordering::SeqCst);
+        release_tx.send(()).unwrap();
+    };
+    let (adopted, ()) = tokio::join!(adopt_matching_identity(&node.state, OWN), during_adoption);
+    assert!(adopted.unwrap());
+    assert_eq!(require_price_caps(&node.state, false).await.err().unwrap().code, "price_cap_unavailable");
+}
+
+#[tokio::test]
+async fn paid_send_preflight_discards_status_crossing_successful_handshake() {
+    let downgraded = Arc::new(AtomicBool::new(false));
+    let changed = downgraded.clone();
+    let (arrived_tx, arrived_rx) = tokio::sync::oneshot::channel();
+    let arrived = Mutex::new(Some(arrived_tx));
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let release = Mutex::new(release_rx);
+    let routes: Routes = Arc::new(move |m, path, b| {
+        let reply = if path == "/status" && changed.load(Ordering::SeqCst) {
+            (200, serde_json::json!({"api_capabilities": []}).to_string())
+        } else { happy()(m, path, b) };
+        if path == "/status" {
+            if let Some(tx) = arrived.lock().unwrap().take() {
+                tx.send(()).unwrap();
+                release.lock().unwrap().recv_timeout(Duration::from_secs(5)).unwrap();
+            }
+        }
+        reply
+    });
+    let node = fake(AuthMode::Local, routes);
+    let interrupt = async {
+        arrived_rx.await.unwrap();
+        downgraded.store(true, Ordering::SeqCst);
+        node.state.remote_retry.run(|| async { Ok(()) }).await.unwrap();
+        release_tx.send(()).unwrap();
+    };
+    let (result, ()) = tokio::join!(require_price_caps(&node.state, false), interrupt);
+    assert_eq!(result.err().unwrap().code, "price_cap_unavailable");
+    assert_eq!(node.targets(), ["GET /status", "GET /status"]);
+}
+
 // A read launched beside own-price can return a usable snapshot which becomes
 // invalid while own-price is still held. A sequential reader sees the change.
 async fn stale_preflight_read_refuses(change: &str, expected: &str) {
@@ -145,16 +297,16 @@ async fn paid_send_preflight_capabilities_are_shared_but_not_across_connections(
     let node = fake(AuthMode::Local, routes);
     require_price_caps(&node.state, false).await.unwrap();
     require_price_caps(&node.state, true).await.unwrap();
-    assert_eq!(node.targets(), ["GET /status"]);
+    assert_eq!(node.targets(), ["GET /status", "GET /status"]);
     supported.store(false, Ordering::SeqCst);
     // A remote connection failure ends the old connection even at the same id.
     node.state.remote_retry.failed(&remote_access::RemoteError::HandshakeUnavailable);
     assert_eq!(require_price_caps(&node.state, false).await.err().unwrap().code, "price_cap_unavailable");
-    assert_eq!(node.targets(), ["GET /status", "GET /status"]);
+    assert_eq!(node.targets(), ["GET /status", "GET /status", "GET /status"]);
     supported.store(true, Ordering::SeqCst);
     *node.state.node_id.lock().unwrap() = Some(C.into());
     require_price_caps(&node.state, false).await.unwrap();
-    assert_eq!(node.targets().len(), 3);
+    assert_eq!(node.targets().len(), 4);
 }
 
 #[tokio::test]

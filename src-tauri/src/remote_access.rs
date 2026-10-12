@@ -3340,6 +3340,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn successful_proxy_reconnect_advances_epoch_without_observing_failure() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let secret = [28u8; 32];
+        let node = SigningKey::from_bytes(&[27u8; 32]);
+        let public = X25519PublicKey::from(&StaticSecret::from(secret)).to_bytes();
+        let descriptor = parse_pairing_link(&signed_link(
+            address.to_string(), &node, public, &test_code(11),
+        )).unwrap();
+        let app_dir = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        let key = Arc::new(ClientKey::load_or_create(store.path()).unwrap());
+        let auth: Arc<str> = Arc::from("b".repeat(64));
+        let retry = Arc::new(RemoteRetry::default());
+        let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://127.0.0.1:{}/api/v1", probe.local_addr().unwrap().port());
+        drop(probe);
+        persist_at(&config_path(app_dir.path()), &descriptor).unwrap();
+        let proxy = start_proxy(&base, app_dir.path(), descriptor, key, "restart test",
+            store.path().to_path_buf(), auth.clone(), retry.clone()).await.unwrap();
+        let mut listener = Some(listener);
+        for expected in [1, 2] {
+            let listening = match listener.take() {
+                Some(listener) => listener,
+                None => TcpListener::bind(address).await.unwrap(),
+            };
+            let server = tokio::spawn(async move {
+                let (stream, _) = listening.accept().await.unwrap();
+                let _ = polling_responder(stream, secret).await;
+            });
+            let client = http_client_builder().build().unwrap();
+            let response = client.get(format!("{base}/status"))
+                .header(LOCAL_AUTH_HEADER, auth.as_ref()).send().await.unwrap();
+            assert_eq!(response.status(), 200);
+            assert_eq!(response.text().await.unwrap(), "{}");
+            assert_eq!(retry.connection_revision(), expected);
+            assert_eq!(retry.failure_revision(), 0);
+            // Kill the old node and its established Noise stream. The next
+            // accept uses the same address and pins, with no intervening failure.
+            server.abort();
+            let _ = server.await;
+        }
+        drop(proxy);
+    }
+
+    #[tokio::test]
     async fn normal_polling_reuses_at_most_eight_handshakes_over_two_simulated_minutes() {
         use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

@@ -253,6 +253,7 @@ struct NodeState {
     all_in_caps_node: Mutex<Option<String>>,
     /// Capability evidence belongs to a connection, never a process-wide TTL.
     connection_epoch: AtomicU64,
+    http_connection_epoch: Arc<AtomicU64>,
     send_capabilities: tokio::sync::Mutex<Option<(ConnectionEpoch, serde_json::Value)>>,
     /// Parallel preflight readers share a proactive token refresh.
     token_refresh: tokio::sync::Mutex<()>,
@@ -289,8 +290,18 @@ struct ConnectionEpoch {
     api_base: String,
     connection: u64,
     remote_failure: u64,
+    http_connection: u64,
+    remote_connection: u64,
     node_id: Option<String>,
     client_id: Option<String>,
+}
+
+impl ConnectionEpoch {
+    fn same_identity(&self, other: &Self) -> bool {
+        self.api_base == other.api_base && self.connection == other.connection
+            && self.remote_failure == other.remote_failure && self.node_id == other.node_id
+            && self.client_id == other.client_id
+    }
 }
 
 impl NodeState {
@@ -309,6 +320,8 @@ impl NodeState {
             api_base: self.api_base.clone(),
             connection: self.connection_epoch.load(Ordering::SeqCst),
             remote_failure: self.remote_retry.failure_revision(),
+            http_connection: self.http_connection_epoch.load(Ordering::SeqCst),
+            remote_connection: self.remote_retry.connection_revision(),
             node_id,
             client_id,
         }
@@ -317,20 +330,33 @@ impl NodeState {
 
 /// Single-flight capability reads. Never cache a failed or malformed response,
 /// or accept an answer from a connection that changed while it was in flight.
-async fn send_capabilities(state: &NodeState) -> Result<serde_json::Value, String> {
+async fn send_capabilities(state: &NodeState) -> Result<(ConnectionEpoch, serde_json::Value), String> {
     let mut cached = state.send_capabilities.lock().await;
     let epoch = state.connection_epoch();
     if let Some((previous, caps)) = &*cached {
-        if *previous == epoch { return Ok(caps.clone()); }
+        if *previous == epoch { return Ok((previous.clone(), caps.clone())); }
     }
     *cached = None;
-    let status: serde_json::Value = get_json(state, "/status").await?;
-    if state.connection_epoch() != epoch {
-        return Err("The node connection changed while reading capabilities. Try again.".into());
+    let mut epoch = epoch;
+    for attempt in 0..2 {
+        let status: serde_json::Value = get_json(state, "/status").await?;
+        let current = state.connection_epoch();
+        if current == epoch {
+            let caps = status["api_capabilities"].clone();
+            if caps.is_array() { *cached = Some((epoch.clone(), caps.clone())); }
+            return Ok((epoch, caps));
+        }
+        // Opening a cold HTTP socket/tunnel changes the transport generation.
+        // Discard its answer and read once more on the now-established transport;
+        // never relabel an old response with a newer epoch. Identity/auth/live
+        // invalidation must still refuse immediately.
+        if attempt == 0 && epoch.same_identity(&current) {
+            epoch = current;
+            continue;
+        }
+        break;
     }
-    let caps = status["api_capabilities"].clone();
-    if caps.is_array() { *cached = Some((epoch, caps.clone())); }
-    Ok(caps)
+    Err("The node connection changed while reading capabilities. Try again.".into())
 }
 
 /// The owner asked for these while an elevation request is pending.
@@ -444,6 +470,8 @@ impl NodeState {
     }
 
     fn for_api(api_base: impl Into<String>) -> Self {
+        let http_connection_epoch = Arc::new(AtomicU64::new(0));
+        let connected = http_connection_epoch.clone();
         let remote_proxy_auth: Arc<str> = Arc::from(
             remote_access::new_local_auth_token()
                 .expect("operating-system randomness for remote proxy authentication"),
@@ -491,6 +519,7 @@ impl NodeState {
             node_grant: Mutex::new(None),
             all_in_caps_node: Mutex::new(None),
             connection_epoch: AtomicU64::new(0),
+            http_connection_epoch,
             send_capabilities: tokio::sync::Mutex::new(None),
             token_refresh: tokio::sync::Mutex::new(()),
             readmission_ask: Mutex::new(None),
@@ -521,6 +550,12 @@ impl NodeState {
             // Remote requests may take 15 s; loopback health/auth use a short
             // per-request timeout so they cannot pin restoring().
             http: remote_access::http_client_builder()
+                // Observe the actual connector, not HTTP responses or WebSocket
+                // events: a local node may restart on exactly the same port.
+                .connector_layer(tower::util::MapResponseLayer::new(move |connection| {
+                    connected.fetch_add(1, Ordering::SeqCst);
+                    connection
+                }))
                 .default_headers(default_headers)
                 .build()
                 .expect("reqwest client"),
@@ -1169,6 +1204,7 @@ async fn adopt_matching_identity(
     state: &NodeState,
     expected_node_id: &str,
 ) -> Result<bool, String> {
+    state.invalidate_send_capabilities();
     if !health_ok(state).await {
         return Ok(false);
     }
@@ -1178,6 +1214,8 @@ async fn adopt_matching_identity(
         *state.token.lock().unwrap() = None;
         return Ok(false);
     }
+    // A concurrent read during adoption must not survive its successful end.
+    state.invalidate_send_capabilities();
     *state.node_id.lock().unwrap() = Some(live);
     // The restored node is live. Reflect the refreshed token's scopes in the
     // view and leave bootstrap, otherwise the renderer can never finish setup.
@@ -2998,7 +3036,7 @@ async fn first_contact_quote(
 
 async fn read_first_contact_quote(state: &NodeState, peer: &str) -> Result<control::FirstContactQuote, String> {
     let peer = control::node_id(peer)?;
-    let capabilities = send_capabilities(state).await?;
+    let (_, capabilities) = send_capabilities(state).await?;
     if !capabilities.as_array().is_some_and(|caps|
         caps.iter().any(|v| v.as_str() == Some(grant::FIRST_CONTACT_CAPABILITY))) {
         return Err("This node cannot quote a first contact before paying.".into());
@@ -4265,7 +4303,10 @@ async fn money_post_preflight(state: &NodeState, auth: Auth, path: &str, mut bod
     }
     let response = state.http.post(format!("{}{path}", state.api_base))
         .bearer_auth(token).json(&body).timeout(state.spend_timeout).send().await
-        .map_err(|_| spend_journal::unknown("The node did not return a complete response."))?;
+        .map_err(|_| {
+            state.invalidate_send_capabilities();
+            spend_journal::unknown("The node did not return a complete response.")
+        })?;
     let status = response.status();
     // These statuses are rejected by authentication before any handler runs.
     if status == reqwest::StatusCode::FORBIDDEN || status == reqwest::StatusCode::UNAUTHORIZED {
@@ -4275,7 +4316,10 @@ async fn money_post_preflight(state: &NodeState, auth: Auth, path: &str, mut bod
         *state.node_grant.lock().unwrap() = None;
         return Err(state.spend.lock().unwrap().refused());
     }
-    let text = response.text().await.map_err(|_| spend_journal::unknown("The response was interrupted."))?;
+    let text = response.text().await.map_err(|_| {
+        state.invalidate_send_capabilities();
+        spend_journal::unknown("The response was interrupted.")
+    })?;
     if act::readiness_refusal(status.as_u16(), &text) {
         release(state)?;
         abandon(&journal)?;
@@ -5120,6 +5164,7 @@ async fn read_room_quote(state: &NodeState, room_id: &str) -> Result<act::RoomQu
 /// Only an explicit versioned node contract authorizes variable-price sends.
 /// What a paid send may rely on at this node.
 struct SendCaps {
+    epoch: ConnectionEpoch,
     /// Admission may be paid separately from a message cap.
     readmission_possible: bool,
     /// Durable, idempotent 1:1 message operations.
@@ -5131,7 +5176,7 @@ struct SendCaps {
 
 async fn require_price_caps(state: &NodeState, room: bool) -> Result<SendCaps, ActionError> {
     let unavailable = || ActionError::new("price_cap_unavailable", "This node cannot enforce your confirmed spending ceiling. Upgrade the node before sending messages or files.");
-    let capabilities = send_capabilities(state).await.map_err(|reason|
+    let (epoch, capabilities) = send_capabilities(state).await.map_err(|reason|
         ActionError::new("price_quote_unavailable", format!("Node capabilities unavailable: {reason}")))?;
     let capabilities = capabilities.as_array().ok_or_else(unavailable)?;
     let has = |cap: &str| capabilities.iter().any(|v| v.as_str() == Some(cap));
@@ -5139,6 +5184,7 @@ async fn require_price_caps(state: &NodeState, room: bool) -> Result<SendCaps, A
         return Err(unavailable());
     }
     Ok(SendCaps {
+        epoch,
         readmission_possible: has(grant::FIRST_CONTACT_CAPABILITY),
         operations: has(OPERATIONS_CAPABILITY),
         quoted_readmission: has(act::QUOTED_READMISSION_CAPABILITY),
@@ -5227,8 +5273,8 @@ async fn do_message_send_with(
     }
     let (auth, plan) = plan_message(state, &target, is_room, max_msat, first_contact_msat)?;
     no_pending_spend(state)?;
-    let epoch = state.connection_epoch();
     let caps = require_price_caps(state, is_room).await?;
+    let epoch = caps.epoch.clone();
     let readmission_possible = caps.readmission_possible;
     let mut body = act::compose_body(recipient, is_room, plaintext)?;
     body["max_total_msat"] = serde_json::json!(max_msat);
@@ -9128,42 +9174,44 @@ mod control_act_tests {
                 // never blocks another, as on a real node.
                 let (log, routes) = (log.clone(), routes.clone());
                 std::thread::spawn(move || {
-                    let mut reader = BufReader::new(stream.try_clone().unwrap());
-                    let mut line = String::new();
-                    if reader.read_line(&mut line).is_err() {
-                        return;
-                    }
-                    let mut parts = line.split_whitespace();
-                    let method = parts.next().unwrap_or("").to_string();
-                    let target = parts.next().unwrap_or("").to_string();
-                    let (mut bearer, mut length) = (None, 0usize);
+                    let mut reader = BufReader::new(stream);
                     loop {
-                        let mut header = String::new();
-                        if reader.read_line(&mut header).is_err() || header == "\r\n" || header.is_empty() {
-                            break;
+                        let mut line = String::new();
+                        if !matches!(reader.read_line(&mut line), Ok(n) if n > 0) {
+                            return;
                         }
-                        let lower = header.to_ascii_lowercase();
-                        if let Some(v) = lower.strip_prefix("content-length:") {
-                            length = v.trim().parse().unwrap_or(0);
+                        let mut parts = line.split_whitespace();
+                        let method = parts.next().unwrap_or("").to_string();
+                        let target = parts.next().unwrap_or("").to_string();
+                        let (mut bearer, mut length) = (None, 0usize);
+                        loop {
+                            let mut header = String::new();
+                            if reader.read_line(&mut header).is_err() || header == "\r\n" || header.is_empty() {
+                                break;
+                            }
+                            let lower = header.to_ascii_lowercase();
+                            if let Some(v) = lower.strip_prefix("content-length:") {
+                                length = v.trim().parse().unwrap_or(0);
+                            }
+                            if let Some(v) = header.strip_prefix("authorization: Bearer ") {
+                                bearer = Some(v.trim().to_string());
+                            }
                         }
-                        if let Some(v) = header.strip_prefix("authorization: Bearer ") {
-                            bearer = Some(v.trim().to_string());
-                        }
+                        let mut body = vec![0u8; length];
+                        let _ = reader.read_exact(&mut body);
+                        let body = String::from_utf8_lossy(&body).to_string();
+                        log.lock().unwrap().push((method.clone(), target.clone(), bearer.clone(), body.clone()));
+                        let path = target.strip_prefix("/api/v1").unwrap_or(&target).to_string();
+                        let (status, reply) = if path == "/pair/first-contact-grant" && bearer.as_deref() != Some("independent.owner.fixture") {
+                            (403, "independent owner authority required".to_string())
+                        } else { routes(&method, &path, &body) };
+                        let out = reader.get_mut();
+                        let _ = write!(
+                            out,
+                            "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: keep-alive\r\n\r\n{reply}",
+                            reply.len()
+                        );
                     }
-                    let mut body = vec![0u8; length];
-                    let _ = reader.read_exact(&mut body);
-                    let body = String::from_utf8_lossy(&body).to_string();
-                    log.lock().unwrap().push((method.clone(), target.clone(), bearer.clone(), body.clone()));
-                    let path = target.strip_prefix("/api/v1").unwrap_or(&target).to_string();
-                    let (status, reply) = if path == "/pair/first-contact-grant" && bearer.as_deref() != Some("independent.owner.fixture") {
-                        (403, "independent owner authority required".to_string())
-                    } else { routes(&method, &path, &body) };
-                    let mut out = stream;
-                    let _ = write!(
-                        out,
-                        "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{reply}",
-                        reply.len()
-                    );
                 });
             }
         });

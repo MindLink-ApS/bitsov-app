@@ -258,6 +258,7 @@ async fn run_pending(state: &NodeState, setup: &mut Setup, input: Input) -> Resu
             let token = token(state).await?;
             let mut connection = BootstrapConnection::connect(&descriptor, &ctx.key, NAME)
                 .await
+                .inspect(|_| state.invalidate_send_capabilities())
                 .map_err(|_| {
                     "The box restarted or setup is closed. Open a new link from the box page."
                 })?;
@@ -370,6 +371,7 @@ async fn run_pending(state: &NodeState, setup: &mut Setup, input: Input) -> Resu
                         .ok_or("Missing pairing.")?;
                     BootstrapConnection::connect(&descriptor, &ctx.key, NAME)
                         .await
+                        .inspect(|_| state.invalidate_send_capabilities())
                         .map_err(|_| "The box restarted. Open a new setup link.")?
                 }
             };

@@ -36,6 +36,7 @@ pub struct RemoteRetry {
     attempt: tokio::sync::Mutex<()>,
     state: std::sync::Mutex<RemoteRetryState>,
     failure_revision: std::sync::atomic::AtomicU64,
+    connection_revision: std::sync::atomic::AtomicU64,
 }
 
 #[derive(Default)]
@@ -46,6 +47,12 @@ struct RemoteRetryState {
 }
 
 impl RemoteRetry {
+    /// Every successful handshake replaces transport evidence, even when the
+    /// first reconnect succeeds before a live-feed failure is observed.
+    pub fn connection_revision(&self) -> u64 {
+        self.connection_revision.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// Rounded up for UI and scheduling, using a monotonic clock.
     pub fn remaining(&self) -> Option<u64> {
         self.state.lock().unwrap().next.and_then(|next| {
@@ -115,7 +122,10 @@ impl RemoteRetry {
             Some(tokio::time::Instant::now() + Duration::from_secs(1));
         let result = operation().await;
         match &result {
-            Ok(_) => *self.state.lock().unwrap() = RemoteRetryState::default(),
+            Ok(_) => {
+                self.connection_revision.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                *self.state.lock().unwrap() = RemoteRetryState::default();
+            }
             Err(RemoteError::HandshakeUnavailable | RemoteError::RateLimited(_)) => {
                 self.failed(result.as_ref().err().unwrap());
             }
