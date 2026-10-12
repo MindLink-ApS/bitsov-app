@@ -704,12 +704,15 @@ export function ControlCenter(props: Props) {
               if (next !== deliveries) setDeliveries(event.message_id, next[event.message_id]);
               return;
             }
+            // Our own message echoed before its receipt: the bubble still sending
+            // claims it, so one send never shows twice.
+            const echoed = event.type === 'message' && claimEcho(event.message, event.room_id);
             if (event.type === 'message' && roomOf(event.message, ownId())) {
               // A room chat: unread in its room, kept (hidden) in the member's 1:1 history.
               const m = event.message;
               const peer = (isOutgoing(m, ownId()) ? m.recipient : m.sender).toLowerCase();
               setThreads('t', trackKey({ kind: 'peer', id: peer }), (old) => mergeMessages(old ?? [], [m]));
-              setThreads('fresh', m.id, true);
+              if (!echoed) setThreads('fresh', m.id, true);
               foldRooms([m], true);
               return;
             }
@@ -719,7 +722,7 @@ export function ControlCenter(props: Props) {
               produce((s) => {
                 s.t = next.threads;
                 s.unread = next.unread;
-                if (event.type === 'message') s.fresh[event.message.id] = true;
+                if (event.type === 'message' && !echoed) s.fresh[event.message.id] = true;
               }),
             );
           })
@@ -781,6 +784,24 @@ export function ControlCenter(props: Props) {
   };
   const dropArtifact = (t: TrackRef, id: string) =>
     setArtifacts(trackKey(t), (old) => (old ?? []).filter((x) => x.id !== id));
+  /**
+   * An outgoing live message that matches a bubble still sending (same track,
+   * same text, the earliest pressed without a leg to that recipient yet) is that
+   * send's echo. Sends go out strictly in press order, so the earliest is right.
+   * A message already known (a replay) is never claimed.
+   */
+  const claimEcho = (m: Message, roomId: string | null): boolean => {
+    if (!isOutgoing(m, ownId())) return false;
+    const to = m.recipient.toLowerCase();
+    const key = roomId ? trackKey({ kind: 'room', id: roomId.toLowerCase() }) : trackKey({ kind: 'peer', id: to });
+    if ((threads.t[key] ?? []).some((x) => x.id === m.id) || (threads.t[trackKey({ kind: 'peer', id: to })] ?? []).some((x) => x.id === m.id)) return false;
+    const list = artifacts[key] ?? [];
+    if (list.some((a) => a.type === 'sending' && a.echoes?.some((e) => e.id === m.id))) return true;
+    const owner = list.find((a) => a.type === 'sending' && a.text === m.plaintext && !(a.echoes ?? []).some((e) => e.to === to));
+    if (!owner) return false;
+    setArtifacts(key, (old) => (old ?? []).map((a) => (a.id === owner.id && a.type === 'sending' ? { ...a, echoes: [...(a.echoes ?? []), { id: m.id, to }] } : a)));
+    return true;
+  };
   // The Wallet's history of payments and invoices made here (the node lists neither).
   createEffect(() => {
     const entries: LoggedActivity[] = [];
@@ -1062,7 +1083,10 @@ export function ControlCenter(props: Props) {
     ownerRequest: (peer, cap, budget) => act(() => source.firstContactRequest(peer, cap, budget)),
     ownerStatus: (id) => act(() => source.firstContactStatus(id)),
     ownerCancel: (id) => source.firstContactCancel(id).catch(() => {}),
-    beginSending: (t, text, capMsat) => addArtifact(t, { type: 'sending', text, capMsat }),
+    beginSending: (t, text, capMsat) => addArtifact(t, {
+      type: 'sending', text, capMsat,
+      ...(t.kind === 'room' ? { memberCaps: Object.fromEntries((roomQuote()?.members ?? []).map((m) => [m.node_id, m.msat])) } : {}),
+    }),
     holdSending: (t, bubbleId, text) => batch(() => {
       dropArtifact(t, bubbleId);
       addArtifact(t, { type: 'unsent', text, why: 'held', reason: 'Not sent, nothing paid: an earlier payment’s result is not known yet.' });
@@ -1080,7 +1104,12 @@ export function ControlCenter(props: Props) {
       // Optimistic: the message shows at once as "Sending · up to N"; the
       // settled message (or its failure card) replaces it below.
       const sendingId = pendingBubble ?? addArtifact(t, { type: 'sending', text, capMsat: maxMsat });
-      const settled = await act(() => source.send(t.id, t.kind === 'room', text, maxMsat, t.kind === 'room' ? Object.fromEntries((roomQuote()?.members ?? []).map((m) => [m.node_id, m.msat])) : undefined, firstContactMsat));
+      // A room's member caps are the ones quoted at the press, even after a queue wait.
+      const pressed = (artifacts[trackKey(t)] ?? []).find((a) => a.id === sendingId);
+      const memberCaps = pressed?.type === 'sending' && pressed.memberCaps
+        ? pressed.memberCaps
+        : Object.fromEntries((roomQuote()?.members ?? []).map((m) => [m.node_id, m.msat]));
+      const settled = await act(() => source.send(t.id, t.kind === 'room', text, maxMsat, t.kind === 'room' ? memberCaps : undefined, firstContactMsat));
       const r = settled;
       // The tally moved, or a budget rule stopped the send: either way, re-read it.
       if (r.ok || isBudgetStop(r.error) || ['spend_unknown', 'payment_unknown', 'failed_paid', 'payment_settled_undelivered'].includes(r.error.code)) void loadBudget();
@@ -3581,9 +3610,9 @@ function Composer(props: {
         if (remote && Date.now() >= deadline) { expire(); return; }
         if (result.value.ready) {
           setOwnerWait(null);
-          setBusy(true);
-          // In turn with any optimistic sends still queued: order holds.
-          try { await enqueue(pending.send); } finally { setBusy(false); }
+          // Approved: from here it is a queued send like any other (its own
+          // bubble, the box free, the same hold), in turn behind earlier ones.
+          await pending.send();
         } else {
           delay = remote ? Math.min(delay * 2, 10000) : 1000;
           nextPoll = Date.now() + delay;
@@ -4033,10 +4062,8 @@ function Composer(props: {
       if (submittedMode === 'message') { setPaidLine(null); setRaisedFrom(null); }
       const first = st.kind === 'first' ? firstPick() ?? st.suggest : undefined;
       const dispatch = async (bubble?: string) => {
-      // The message is in the stream as "Sending…" from here on, so the
-      // composer is free at once. It gets the text back whenever the draft
-      // would have stayed before: anything but sent or paid-undelivered.
-      if (submittedMode === 'message' && !bubble) { setDraft(''); setDrafted(false); }
+      // A message is in the stream as "Sending…" (its bubble) by now; the box
+      // was freed when it became a send and is never touched from here.
       if (submittedMode === 'message' && bubble && held) { holdBack(submittedTrack, bubble, submittedText); return; }
       const r = submittedMode === 'file'
         ? await props.actions.file(submittedTrack, submittedFile!, cap, first)
@@ -4084,7 +4111,19 @@ function Composer(props: {
           return;
         }
         if (request.value) {
-          setOwnerWait({ approval: request.value, revision: submittedRevision, send: dispatch });
+          setOwnerWait({
+            approval: request.value,
+            revision: submittedRevision,
+            // The owner approved: the press becomes a send now. The box still
+            // holds exactly this text (any edit cancelled the wait).
+            send: async () => {
+              if (submittedMode !== 'message') { setBusy(true); try { await enqueue(() => dispatch()); } finally { setBusy(false); } return; }
+              const bubble = props.actions.beginSending(submittedTrack, submittedText, cap);
+              setDraft('');
+              setDrafted(false);
+              await enqueue(() => dispatch(bubble));
+            },
+          });
           setBusy(false);
           return;
         }

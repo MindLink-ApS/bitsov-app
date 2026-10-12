@@ -712,7 +712,13 @@ export type Artifact =
    * real message when the send settles (or by its failure card). `capMsat` is
    * the ceiling the owner pressed Send on, never a paid amount.
    */
-  | { id: string; at: number; type: 'sending'; text: string; capMsat: number }
+  | {
+      id: string; at: number; type: 'sending'; text: string; capMsat: number;
+      /** A room's member caps as quoted at the press (the send uses these, not a later quote). */
+      memberCaps?: Record<string, number>;
+      /** The node's live echo of this send, if it came before the receipt: hidden while this shows. */
+      echoes?: { id: string; to: string }[];
+    }
   /**
    * A message that did not go and paid nothing, kept whole on its own track:
    * `refused` (the send was refused before paying) or `held` (never dispatched
