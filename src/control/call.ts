@@ -112,6 +112,9 @@ export function newCallId(random: (a: Uint8Array) => Uint8Array = (a) => crypto.
 
 /** Ordinary admission ceiling: offer and one hangup. 1:1 recovery can add one more. */
 export const callCost = (q: CallQuote) => q.call_total_msat;
+/** Outcomes where a signal may have been paid: never "try again" without a check. */
+export const UNKNOWN_OUTCOME = new Set(['spend_unknown', 'payment_unknown']);
+export const UNRESOLVED_CALL = 'An earlier call’s payment result is not known yet. Check payment before calling again. Nothing was sent.';
 /** What one answer/ICE/hangup costs at most, all-in. */
 export const signalCost = (q: CallQuote) => q.signal_msat + q.signal_max_routing_fee_msat;
 
@@ -138,11 +141,17 @@ export type CallView = {
   reason: HangupReason | null;
   /** A refusal to show (nothing was paid for the refused step). */
   error: string | null;
+  /**
+   * A call offer whose payment outcome is unknown (an admission may have been
+   * paid). No new offer goes out until the pending result is checked; its
+   * hangup (the price shown) stays available to end that admission.
+   */
+  unresolved: { checked: boolean; hangupMsat: number } | null;
 };
 
 export const IDLE: CallView = {
   phase: 'idle', state: 'idle', peer: null, callId: null, media: 'audio', outgoing: false,
-  liveAt: null, muted: false, camera: false, paidMsat: 0, connection: null, reason: null, error: null,
+  liveAt: null, muted: false, camera: false, paidMsat: 0, connection: null, reason: null, error: null, unresolved: null,
 };
 
 type Outcome<T> = { ok: true; value: T } | { ok: false; error: ActionError };
@@ -214,8 +223,10 @@ export function createCallEngine(deps: CallDeps) {
   // Serialises user actions: a double click never pays twice.
   let busy = false;
 
+  // An offer admission whose payment outcome is unknown: it outlives the call view.
+  let orphan: { peer: string; id: string; hangupMsat: number; checked: boolean } | null = null;
   const set = (patch: Partial<CallView>) => {
-    view = { ...view, ...patch, state: callState(patch.phase ?? view.phase) };
+    view = { ...view, ...patch, state: callState(patch.phase ?? view.phase), unresolved: orphan ? { checked: orphan.checked, hangupMsat: orphan.hangupMsat } : null };
     deps.onView(view);
   };
   const active = () => view.phase !== 'idle' && view.phase !== 'ended';
@@ -393,6 +404,11 @@ export function createCallEngine(deps: CallDeps) {
       r = await Promise.race([deps.signal(peer!, kind, JSON.stringify({ v: 1, call_id: targetId!, ...body }), maxMsat), timeout]);
     } finally { clearTimeout(timer); }
     if (r.ok && view.callId === callId) set({ paidMsat: view.paidMsat + r.value.total_msat });
+    // An offer that may have been paid: remember its admission until checked (never retried).
+    if (!r.ok && kind === CALL_OFFER && UNKNOWN_OUTCOME.has(r.error.code) && peer && targetId) {
+      orphan = { peer, id: targetId, hangupMsat: quote ? signalCost(quote) : 0, checked: false };
+      set({});
+    }
     return r;
   };
 
@@ -516,6 +532,9 @@ export function createCallEngine(deps: CallDeps) {
     place: (peer: string, media: CallMedia, q: CallQuote) => guarded(async (claim) => {
       const generation = mediaGeneration;
       if (active() || deps.busy?.()) return;
+      // A possibly paid admission is open: check it before any new offer.
+      if (orphan && !orphan.checked) { set({ ...IDLE, phase: 'ended', peer, media, outgoing: true, error: UNRESOLVED_CALL }); return; }
+      orphan = null;
       if (q.offer_msat === null || q.call_total_msat === null) {
         set({ ...IDLE, phase: 'ended', peer, error: 'Their node does not take calls yet. Nothing was paid.' });
         return;
@@ -696,6 +715,19 @@ export function createCallEngine(deps: CallDeps) {
 
     /** Close the ended card. */
     dismiss: () => { if (view.phase === 'ended') set(IDLE); },
+
+    /** The owner checked the pending result: a new offer may go out again. */
+    resolveChecked: () => { if (orphan) { orphan.checked = true; set({}); } },
+
+    /** End the unresolved admission: one paid hangup to its call id (the price shown). Never automatic. */
+    hangupUnresolved: async () => {
+      const o = orphan;
+      if (!o || active()) return;
+      const r = await pay(CALL_HANGUP, { reason: 'hangup' }, o.hangupMsat, o.id, { peer: o.peer, callId: view.callId });
+      if (orphan !== o) return;
+      if (r.ok) { orphan = null; set({ error: null }); }
+      else set({ error: r.error.message });
+    },
 
     /** A 400-403 the node forwarded (already paid, and admitted by its call registry). */
     receive: async (m: Message, ownId: string) => {

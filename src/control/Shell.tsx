@@ -887,9 +887,15 @@ export function ControlCenter(props: Props) {
   // Feedback from the press: the panel says Calling while the engine checks
   // pairing (and a retry reads a fresh quote). Nothing is paid in this window.
   const [callStarting, setCallStarting] = createSignal<{ peer: string; media: CallMedia } | null>(null);
+  // The ceiling the owner last saw for each contact's call: a retry never goes above it unasked.
+  const seenCallCost = new Map<string, number>();
+  const [priceUp, setPriceUp] = createSignal<{ peer: string; media: CallMedia; quote: CallQuote; was: number } | null>(null);
   const calls = createCallEngine({
     authorize: async () => {
+      const start = untrack(callStarting);
       const pairing = await act(() => source.pairingStatus());
+      // Cancelled while the check ran: say nothing, open nothing.
+      if (start && untrack(callStarting) !== start) return false;
       if (!pairing.ok) {
         setErrors('spend', pairing.error.message);
         setCallApproval(true);
@@ -964,13 +970,16 @@ export function ControlCenter(props: Props) {
     moneyBlocked,
     callQuote: (peer) => act(() => source.callQuote(peer)),
     placeCall: (peer, media, quote) => {
-      if (moneyBlocked()) return;
+      // One press per call: a second press during the preflight is ignored.
+      if (moneyBlocked() || callStarting() || actions.callActive()) return;
+      setPriceUp(null);
+      seenCallCost.set(peer.toLowerCase(), callCost(quote) ?? 0);
       const start = { peer, media };
       setCallStarting(start);
       void calls.place(peer, media, quote).finally(() => { if (callStarting() === start) setCallStarting(null); });
     },
     callView,
-    callActive: () => !['idle', 'ended'].includes(callView().phase) || meetingOn(),
+    callActive: () => callStarting() !== null || !['idle', 'ended'].includes(callView().phase) || meetingOn(),
     // Opens the planner; the contact is pre-picked only if their node takes meetings.
     planMeeting: (peer) => {
       if (meetingOn()) return;
@@ -1654,10 +1663,23 @@ export function ControlCenter(props: Props) {
           setCallStarting(start);
           void actions.callQuote(peer).then((r) => {
             if (callStarting() !== start) return; // Cancelled while the quote was read.
-            if (r.ok) actions.placeCall(peer, media, r.value);
-            else setCallStarting(null);
+            setCallStarting(null);
+            if (!r.ok) return;
+            const was = seenCallCost.get(peer.toLowerCase());
+            // Dearer than the price on the button they pressed: show it, and wait for a press.
+            if (was !== undefined && (callCost(r.value) ?? 0) > was) { setPriceUp({ peer, media, quote: r.value, was }); return; }
+            actions.placeCall(peer, media, r.value);
           });
         }}
+        priceUp={priceUp()}
+        confirmPrice={() => { const p = priceUp(); if (p) actions.placeCall(p.peer, p.media, p.quote); }}
+        closePrice={() => setPriceUp(null)}
+        checkPayment={async () => {
+          const r = await actions.reconcile();
+          if (r.ok) calls.resolveChecked();
+          return r.ok ? r.value : r.error.message;
+        }}
+        hangupUnresolved={() => calls.hangupUnresolved()}
         setUpCalls={() => { calls.dismiss(); setTab('body'); setContextOpen(true); }}
       />
       <MeetingPanel
@@ -2622,6 +2644,13 @@ function CallPanel(props: {
   retry: (peer: string, media: CallMedia) => void;
   /** Open Settings, where Calls (STUN) lives. */
   setUpCalls: () => void;
+  /** A retry's fresh quote is above what the owner saw: their press is needed. */
+  priceUp: { peer: string; media: CallMedia; quote: CallQuote; was: number } | null;
+  confirmPrice: () => void;
+  closePrice: () => void;
+  /** An unknown offer outcome: check the pending result (never "try again"). */
+  checkPayment: () => Promise<string>;
+  hangupUnresolved: () => Promise<void>;
 }) {
   const [tick, setTick] = createSignal(Date.now());
   const [answer, setAnswer] = createSignal<number | null>(null);
@@ -2644,12 +2673,39 @@ function CallPanel(props: {
   const networkHint = () => noStun() && (['calling', 'ringing', 'connecting'].includes(v().phase) || (v().phase === 'ended' && (v().reason === 'failed' || v().reason === 'timeout')));
   const endedLine = () => {
     const e = v().error;
-    if (e === MONEY_NOT_READY) return 'Your node isn’t ready to pay yet, so nothing was sent. Try again in a moment.';
+    if (e === MONEY_NOT_READY) {
+      // Only a call that never paid anything was "not sent"; a refused later signal is said as such.
+      return v().paidMsat === 0 && v().liveAt === null
+        ? 'Your node isn’t ready to pay yet, so nothing was sent. Try again in a moment.'
+        : `This call was paid (${fmtAmount(v().paidMsat)} cap). Your node wasn’t ready to pay for its next signal (hang-up or reconnect), so that one was not sent.`;
+    }
     return e ?? END_REASON[v().reason ?? 'hangup'];
   };
   const setUpFirst = () => v().phase === 'ended' && noStun() && (v().reason === 'failed' || v().reason === 'timeout');
+  const [checking, setChecking] = createSignal(false);
+  const [checked, setChecked] = createSignal<string | null>(null);
+  createEffect(on(() => v().callId, () => setChecked(null), { defer: true }));
+  const check = async () => {
+    setChecking(true);
+    try { setChecked(await props.checkPayment()); } finally { setChecking(false); }
+  };
+  const endUnresolved = async () => {
+    setChecking(true);
+    try { await props.hangupUnresolved(); } finally { setChecking(false); }
+  };
   const price = (m: number | null) => (m === null ? '' : ` · ${sats(m)} ${satUnit(m)}`);
   return (
+    <>
+    <Show when={props.priceUp && v().phase === 'idle'}>
+      <aside class="call-panel" data-call-price-up role="dialog" aria-label="Call price changed">
+        <header><strong>The call price went up</strong><span class="who">{props.priceUp ? props.nameOf(props.priceUp.peer) : ''}</span></header>
+        <p class="hint">Now up to {fmtAmount(callCost(props.priceUp!.quote) ?? 0)}; you saw up to {fmtAmount(props.priceUp!.was)}. Nothing was sent.</p>
+        <div class="call-actions">
+          <button type="button" class="primary soft money" data-call-price-confirm onClick={() => props.confirmPrice()}>Call · up to {fmtAmount(callCost(props.priceUp!.quote) ?? 0)}</button>
+          <button type="button" class="soft" data-call-price-close onClick={() => props.closePrice()}>Close</button>
+        </div>
+      </aside>
+    </Show>
     <Show when={v().phase !== 'idle' || props.approvalOpen}>
       <aside ref={props.panelRef} tabindex="-1" class="call-panel" data-call-panel={v().phase} role="dialog" aria-label={props.approvalOpen ? 'Call spending approval' : `${CALL_TITLE[v().phase]} ${who()}`}>
         <header>
@@ -2688,6 +2744,9 @@ function CallPanel(props: {
         <Show when={v().phase === 'ended'}>
           <p class="hint" data-call-ended>{endedLine()}</p>
         </Show>
+        <Show when={v().phase === 'ended' && checked()}>
+          <p class="hint" data-call-checked>{checked()}</p>
+        </Show>
         <Show when={v().phase !== 'ended' && v().error}>
           <p class="hint" data-call-error>{v().error}</p>
         </Show>
@@ -2697,8 +2756,16 @@ function CallPanel(props: {
               <button type="button" class="primary soft money" data-call-accept disabled={props.blocked} onClick={() => props.accept()}>Accept{price(answer())}</button>
               <button type="button" class="soft" data-call-decline disabled={props.blocked} onClick={() => props.decline()}>Decline{price(answer())}</button>
             </Match>
+            <Match when={v().phase === 'ended' && v().unresolved && !v().unresolved!.checked}>
+              {/* Maybe paid: check first; never "Try again" (that could pay a second admission). */}
+              <button type="button" class="primary soft" data-call-check disabled={checking()} onClick={() => void check()}>Check payment</button>
+              <button type="button" class="soft" data-call-dismiss onClick={() => props.dismiss()}>Close</button>
+            </Match>
             <Match when={v().phase === 'ended'}>
               {/* One primary way on, then Close. */}
+              <Show when={v().unresolved?.checked}>
+                <button type="button" class="soft" data-call-end-unresolved disabled={checking()} onClick={() => void endUnresolved()}>End that call · up to {fmtAmount(v().unresolved!.hangupMsat)}</button>
+              </Show>
               <Show
                 when={setUpFirst()}
                 fallback={
@@ -2727,6 +2794,7 @@ function CallPanel(props: {
         </div>
       </aside>
     </Show>
+    </>
   );
 }
 

@@ -113,6 +113,61 @@ describe('call refusal recovery', () => {
     } finally { vi.useRealTimers(); }
   });
 
+  it('30 s unknown offer, then a late settle: no new offer until checked, and its hangup goes to the original id', async () => {
+    vi.useFakeTimers();
+    try {
+      const sent: { kind: number; id: string }[] = [];
+      let finish!: (outcome: { ok: true; value: CallReceipt }) => void;
+      let n = 0;
+      const signal = vi.fn((_p: string, kind: number, plaintext: string) => {
+        sent.push({ kind, id: JSON.parse(plaintext).call_id });
+        if (n++ === 0) return new Promise<{ ok: true; value: CallReceipt }>((resolve) => { finish = resolve; });
+        return Promise.resolve({ ok: true as const, value: { message_id: `m${n}`, kind, amount_msat: 1000, total_msat: 6000, max_routing_fee_msat: 5000, delivered: true, accepted: true, sent_at_ms: 0 } });
+      });
+      const { e } = engine({ signal });
+      const placing = e.place(A, 'audio', QUOTE);
+      await vi.advanceTimersByTimeAsync(30_001);
+      await placing;
+      expect(e.view()).toMatchObject({ phase: 'ended', unresolved: { checked: false, hangupMsat: 6_000 } });
+      // The host settles the offer late: the admission was paid.
+      finish({ ok: true, value: { message_id: 'late', kind: 400, amount_msat: 10000, total_msat: 15000, max_routing_fee_msat: 5000, delivered: true, accepted: true, sent_at_ms: 0 } });
+      await vi.advanceTimersByTimeAsync(1);
+      // Calling again before a check sends nothing.
+      e.dismiss();
+      await e.place(A, 'audio', QUOTE);
+      expect(e.view()).toMatchObject({ phase: 'ended', error: expect.stringMatching(/Check payment before calling again/) });
+      expect(signal).toHaveBeenCalledTimes(1);
+      // Checked: the original admission can be hung up, at the hangup price, to its own id.
+      e.resolveChecked();
+      await e.hangupUnresolved();
+      expect(sent[1]).toEqual({ kind: 403, id: ID });
+      expect(e.view().unresolved).toBeNull();
+      // And a new call may go out.
+      e.dismiss();
+      const again = e.place(A, 'audio', QUOTE);
+      await vi.advanceTimersByTimeAsync(3_100);
+      await again;
+      expect(sent[2].kind).toBe(400);
+      e.endLocal();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('an unknown offer outcome checked but not hung up: a new call goes out (the check came first)', async () => {
+    let n = 0;
+    const signal = vi.fn(async (_p: string, kind: number) => (n++ === 0
+      ? { ok: false as const, error: { code: 'payment_unknown' as const, message: 'Outcome unknown.' } }
+      : { ok: true as const, value: { message_id: `m${n}`, kind, amount_msat: 1000, total_msat: 6000, max_routing_fee_msat: 5000, delivered: true, accepted: true, sent_at_ms: 0 } }));
+    const { e } = engine({ signal });
+    await e.place(A, 'audio', QUOTE);
+    expect(e.view().unresolved).toEqual({ checked: false, hangupMsat: 6_000 });
+    e.resolveChecked();
+    e.dismiss();
+    await e.place(A, 'audio', QUOTE);
+    expect(signal).toHaveBeenCalledTimes(2);
+    expect(e.view().unresolved).toBeNull();
+    e.endLocal();
+  });
+
   it('does not let a cancelled operation rejection end a newer incoming call', async () => {
     let reject!: (error: Error) => void;
     const { e } = engine({ signal: () => new Promise((_, no) => { reject = no; }) });
@@ -1244,6 +1299,120 @@ describe('calls in the shell', () => {
     await openShell();
     await vi.waitFor(() => expect($('[data-call="audio"]')!.getAttribute('title')).toMatch(/does not take calls yet/));
     expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(true);
+    expect(host.used('call_signal')).toHaveLength(0);
+  });
+
+  it('an unknown offer outcome offers Check payment, never Try again; after the check, Try again and End that call', async () => {
+    const host = stubHost({
+      call_signal: () => { throw { code: 'payment_unknown', message: 'The payment outcome is unknown.' }; },
+      spend_reconcile: () => 'The earlier payment settled.',
+    });
+    await openShell();
+    await vi.waitFor(() => expect($('[data-call="audio"]')!.getAttribute('aria-label')).toBe('Call Maya, up to 42 sats'));
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-check]')).not.toBeNull(), { timeout: 5000 });
+    expect($('[data-call-retry]')).toBeNull();
+    expect($('[data-call-setup]')).toBeNull();
+    $<HTMLButtonElement>('[data-call-check]')!.click();
+    await vi.waitFor(() => expect(text('[data-call-checked]')).toBe('The earlier payment settled.'));
+    expect(host.used('spend_reconcile')).toHaveLength(1);
+    expect($('[data-call-end-unresolved]')?.textContent).toMatch(/End that call · up to/);
+    expect($('[data-call-check]')).toBeNull();
+    expect(host.used('call_signal')).toHaveLength(1);
+  });
+
+  it('says a paid call’s refused hangup plainly, never "nothing was sent"', async () => {
+    let n = 0;
+    stubHost({ call_signal: (args) => {
+      if (n++ === 0) return { message_id: 'sig', kind: args!.kind, amount_msat: 10_000, total_msat: 15_000, max_routing_fee_msat: 5000, delivered: true, accepted: true, sent_at_ms: Date.now() };
+      throw { code: 'not_ready', message: 'Your node is not ready to pay yet.' };
+    } });
+    await openShell();
+    await vi.waitFor(() => expect($('[data-call="audio"]')!.getAttribute('aria-label')).toBe('Call Maya, up to 42 sats'));
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull(), { timeout: 5000 });
+    $<HTMLButtonElement>('[data-call-hangup]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    await new Promise((r) => setTimeout(r, 30));
+    expect(text('[data-call-ended]')).toMatch(/This call was paid .* so that one was not sent/);
+    expect(mount.textContent).not.toMatch(/nothing was sent/i);
+  });
+
+  it('a second Call press during the preflight is ignored; the buttons are off until it is done', async () => {
+    let release!: () => void;
+    let hold: Promise<PairingView> | null = null;
+    const host = stubHost({ pairing_status: () => hold ?? paired });
+    await openShell();
+    await vi.waitFor(() => expect($('[data-call="audio"]')!.getAttribute('aria-label')).toBe('Call Maya, up to 42 sats'));
+    hold = new Promise((r) => { release = () => r(paired); });
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    expect($('[data-call-panel="calling"]')).not.toBeNull();
+    expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(true);
+    expect($<HTMLButtonElement>('[data-call="video"]')!.disabled).toBe(true);
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    $<HTMLButtonElement>('[data-call="video"]')!.click();
+    hold = null;
+    release();
+    await vi.waitFor(() => expect(host.used('call_signal')).toHaveLength(1), { timeout: 5000 });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(host.used('call_signal')).toHaveLength(1);
+    expect(host.used('pairing_status').length).toBeGreaterThan(0);
+  });
+
+  it('Try again at a higher price shows the new ceiling and waits for a press', async () => {
+    let quote = QUOTE;
+    let refuse = true;
+    const host = stubHost({
+      call_quote: () => quote,
+      call_signal: (args) => {
+        if (refuse) throw { code: 'peer_refused', message: 'Their node refused the call. Nothing was paid.' };
+        return { message_id: 'sig', kind: args!.kind, amount_msat: 10_000, total_msat: 15_000, max_routing_fee_msat: 5000, delivered: true, accepted: true, sent_at_ms: Date.now() };
+      },
+    });
+    await openShell();
+    await vi.waitFor(() => expect($('[data-call="audio"]')!.getAttribute('aria-label')).toBe('Call Maya, up to 42 sats'));
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-retry]')).not.toBeNull(), { timeout: 5000 });
+    quote = { ...QUOTE, offer_msat: 50_000, call_total_msat: 61_000 };
+    refuse = false;
+    $<HTMLButtonElement>('[data-call-retry]')!.click();
+    await vi.waitFor(() => expect($('[data-call-price-up]')).not.toBeNull());
+    expect(text('[data-call-price-up]')).toMatch(/you saw up to/);
+    expect(host.used('call_signal')).toHaveLength(1);
+    $<HTMLButtonElement>('[data-call-price-confirm]')!.click();
+    await vi.waitFor(() => expect(host.used('call_signal')).toHaveLength(2), { timeout: 5000 });
+    expect(host.used('call_signal')[1].args!.max_msat).toBe(55_000);
+  });
+
+  it('Try again at the same or a lower price goes at once', async () => {
+    let refuse = true;
+    const host = stubHost({ call_signal: (args) => {
+      if (refuse) throw { code: 'peer_refused', message: 'Their node refused the call. Nothing was paid.' };
+      return { message_id: 'sig', kind: args!.kind, amount_msat: 10_000, total_msat: 15_000, max_routing_fee_msat: 5000, delivered: true, accepted: true, sent_at_ms: Date.now() };
+    } });
+    await openShell();
+    await vi.waitFor(() => expect($('[data-call="audio"]')!.getAttribute('aria-label')).toBe('Call Maya, up to 42 sats'));
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-retry]')).not.toBeNull(), { timeout: 5000 });
+    refuse = false;
+    $<HTMLButtonElement>('[data-call-retry]')!.click();
+    await vi.waitFor(() => expect(host.used('call_signal')).toHaveLength(2), { timeout: 5000 });
+    expect($('[data-call-price-up]')).toBeNull();
+  });
+
+  it('a late not-allowed pairing answer after Cancel opens no approval card', async () => {
+    let release!: () => void;
+    let hold: Promise<PairingView> | null = null;
+    const host = stubHost({ pairing_status: () => hold ?? paired });
+    await openShell();
+    await vi.waitFor(() => expect($('[data-call="audio"]')!.getAttribute('aria-label')).toBe('Call Maya, up to 42 sats'));
+    hold = new Promise((r) => { release = () => r({ ...paired, scopes: ['read', 'receive'] }); });
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    $<HTMLButtonElement>('[data-call-hangup]')!.click();
+    release();
+    await new Promise((r) => setTimeout(r, 50));
+    expect($('[data-call-approval]')).toBeNull();
+    expect($('[data-call-panel]')).toBeNull();
     expect(host.used('call_signal')).toHaveLength(0);
   });
 
