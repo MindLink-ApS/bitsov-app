@@ -1,3 +1,4 @@
+import { JoinDevice, type JoinInput, type JoinView } from './AddDevice';
 import { createSignal, Match, Show, Switch } from 'solid-js';
 import type { DeviceView } from '../control/types';
 import { PendingApproval } from './LockedNode';
@@ -13,6 +14,7 @@ import { usePairingActivity } from '../pairingActivity';
  */
 export function DeviceApprovals(props: {
   device: DeviceView | null;
+  joinDevice?: (input: JoinInput) => Promise<JoinView>;
   mobile?: boolean;
   onRegister: () => Promise<unknown>;
   onCancel: () => Promise<unknown>;
@@ -40,7 +42,9 @@ export function DeviceApprovals(props: {
     // Local node: nothing to register; only an off reason is worth saying.
     return props.remote || s === 'off' ? s : null;
   };
+  const joining = () => props.remote && props.device?.delegation_supported && props.joinDevice && ['none','pending','lapsed'].includes(state() ?? '');
   return (
+    <Show when={!joining()} fallback={<JoinDevice api={input => props.joinDevice!(input)} mobile={props.mobile} />}>
     <Show when={state() && state() !== 'unavailable' && (state() !== 'registered' || props.showRegistered)}>
       <section class="panel device-approvals" data-device-approvals={state()!}>
         <h2>{props.mobile ? 'Approve payments with your fingerprint' : 'Approve payments with Touch ID'}</h2>
@@ -49,6 +53,9 @@ export function DeviceApprovals(props: {
             <p class="ok-note" data-device-approvals-on>
               {props.mobile ? 'Biometric approvals are on for this phone.' : 'Touch ID approvals are on for this Mac.'}
             </p>
+            <Show when={props.device?.owner_device_count === 1}>
+              <p class="hint" role="status">This is your only owner device. Add and keep a second one so you can approve devices if this one is lost. A phone should not be your only owner device.</p>
+            </Show>
           </Match>
           <Match when={state() === 'off'}>
             <p class="hint" data-device-off={props.device?.off_reason ?? 'off'}>
@@ -76,6 +83,7 @@ export function DeviceApprovals(props: {
         </Switch>
         <Show when={error()}><p class="err-note" role="alert">{error()}</p></Show>
       </section>
+    </Show>
     </Show>
   );
 }

@@ -72,6 +72,8 @@ fn main() {
             "spend_request",
             "spend_lock",
             "spend_cancel",
+            "add_device",
+            "join_device",
             "device_key_status",
             "device_key_register",
             "device_key_cancel",

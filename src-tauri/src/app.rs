@@ -104,6 +104,8 @@ mod home_unlock;
 // This Mac as a paired device: registration, signed envelopes, persisted approvals.
 #[path = "device.rs"]
 mod device;
+#[path = "add_device.rs"]
+mod add_device;
 #[path = "owner_contact.rs"]
 mod owner_contact;
 
@@ -230,6 +232,7 @@ struct NodeState {
     remote_descriptor: Mutex<Option<remote_access::RemoteDescriptor>>,
     remote_retry: Arc<bitsov_app::connection_retry::RemoteRetry>,
     remote_recovery: tokio::sync::Mutex<()>,
+    add_device: tokio::sync::Mutex<add_device::Setup>,
     #[cfg(all(desktop, not(feature = "mobile")))]
     remote_owner: Arc<tokio::sync::Mutex<remote_owner::Setup>>,
     expected_remote_node_id: Mutex<Option<String>>,
@@ -498,6 +501,7 @@ impl NodeState {
             remote_descriptor: Mutex::new(None),
             remote_retry: Arc::new(bitsov_app::connection_retry::RemoteRetry::default()),
             remote_recovery: tokio::sync::Mutex::new(()),
+            add_device: tokio::sync::Mutex::new(add_device::Setup::default()),
             #[cfg(all(desktop, not(feature = "mobile")))]
             remote_owner: Arc::new(tokio::sync::Mutex::new(remote_owner::Setup::default())),
             expected_remote_node_id: Mutex::new(None),
@@ -6193,6 +6197,8 @@ async fn device_sign(blob: Vec<u8>, message: String, reason: String) -> Result<S
 /// node itself states them (`GET /pair/device-keys`).
 #[derive(Deserialize)]
 struct DeviceBinding {
+    #[serde(default)]
+    owner_device_count: Option<u64>,
     node: String,
     client_id: String,
     #[serde(default)]
@@ -6257,11 +6263,13 @@ fn local_key(store: &Path) -> Option<(Vec<u8>, device::Record)> {
 }
 
 async fn do_device_key_status(state: &NodeState) -> Result<device::DeviceView, ActionError> {
-    let view = do_device_key_status_local(state).await?;
+    let mut view = do_device_key_status_local(state).await?;
+    view.delegation_supported = add_device::supported(state).await.unwrap_or(false);
     // Whether the node takes device approvals at all (e.g. not while its
     // recovery phrase is unencrypted). Unreadable → leave the view as is.
-    let approvals = device_binding(state).await.ok().and_then(|b| b.device_approvals);
-    Ok(view.with_node_approvals(approvals.as_deref()))
+    let binding = device_binding(state).await.ok();
+    view.owner_device_count = binding.as_ref().and_then(|b| b.owner_device_count);
+    Ok(view.with_node_approvals(binding.as_ref().and_then(|b| b.device_approvals.as_deref())))
 }
 
 async fn do_device_key_status_local(state: &NodeState) -> Result<device::DeviceView, ActionError> {
@@ -6528,6 +6536,20 @@ async fn do_relation_approve(
 }
 
 #[tauri::command(rename_all = "snake_case")]
+async fn add_device(window: WebviewWindow<impl tauri::Runtime>, state: State<'_, NodeState>, input: add_device::Input) -> Result<add_device::View, ActionError> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    add_device::run(state.inner(), input).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn join_device(window: WebviewWindow<impl tauri::Runtime>, state: State<'_, NodeState>, input: add_device::JoinInput) -> Result<add_device::JoinView, ActionError> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    add_device::join(state.inner(), input).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
 async fn device_key_status(
     window: WebviewWindow<impl tauri::Runtime>,
     state: State<'_, NodeState>,
@@ -6537,6 +6559,11 @@ async fn device_key_status(
     do_device_key_status(state.inner()).await
 }
 
+async fn legacy_device_change(state: &NodeState, register: bool) -> Result<device::DeviceView, ActionError> {
+    let _lifecycle = state.add_device.lock().await;
+    if register { do_device_key_register(state).await } else { do_device_key_cancel(state).await }
+}
+
 #[tauri::command(rename_all = "snake_case")]
 async fn device_key_register(
     window: WebviewWindow<impl tauri::Runtime>,
@@ -6544,7 +6571,7 @@ async fn device_key_register(
 ) -> Result<device::DeviceView, ActionError> {
     reject_sealed_window(&window)?;
     drop(window);
-    do_device_key_register(state.inner()).await
+    legacy_device_change(state.inner(), true).await
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -6554,7 +6581,7 @@ async fn device_key_cancel(
 ) -> Result<device::DeviceView, ActionError> {
     reject_sealed_window(&window)?;
     drop(window);
-    do_device_key_cancel(state.inner()).await
+    legacy_device_change(state.inner(), false).await
 }
 
 /// The owner's Touch ID approval of one contact's envelope.
@@ -7683,6 +7710,8 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             spend_request,
             spend_lock,
             spend_cancel,
+            add_device,
+            join_device,
             device_key_status,
             device_key_register,
             device_key_cancel,
@@ -8763,6 +8792,7 @@ mod control_act_tests {
         include!("send_preflight_tests.rs");
     }
 
+    include!("add_device_tests.rs");
     #[tokio::test]
     async fn rc7_and_malformed_capabilities_refuse_all_variable_sends() {
         for status in [
@@ -15063,6 +15093,8 @@ mod assistant_acl_tests {
                 "spend_request",
                 "spend_lock",
                 "spend_cancel",
+                "add_device",
+                "join_device",
                 "device_key_status",
                 "device_key_register",
                 "device_key_cancel",

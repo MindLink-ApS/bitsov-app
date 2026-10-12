@@ -1,3 +1,4 @@
+import type { AddInput, AddView, JoinInput, JoinView } from '../onboarding/AddDevice';
 import type { WatchSample, WatchUpdate } from './watches';
 import type { AssistantId, AssistantThread, ThreadRequest, LocalTurn } from './assistants';
 // Where the shell's data comes from: the Rust host (Tauri commands + the
@@ -166,7 +167,10 @@ export interface Source {
   spendLock(): Promise<SpendView>;
   /** Withdraw the pending request at the node, then forget it. */
   spendCancel(): Promise<SpendView>;
-  /** This Mac's Touch ID approvals: where the registration stands. */
+  /** Owner ticket creation, comparison and hardware-signed delegation. */
+  addDevice(input: AddInput): Promise<AddView>;
+  joinDevice(input: JoinInput): Promise<JoinView>;
+  /** This device's hardware approvals: where the registration stands. */
   deviceKeyStatus(): Promise<DeviceView>;
   /** Create the enclave key, prove it with Touch ID, ask the owner once. */
   deviceKeyRegister(): Promise<DeviceView>;
@@ -311,6 +315,8 @@ export const hostSource: Source = {
   spendRequest: () => invoke<SpendView>('spend_request'),
   spendLock: () => invoke<SpendView>('spend_lock'),
   spendCancel: () => invoke<SpendView>('spend_cancel'),
+  addDevice: input => invoke<AddView>('add_device', { input }),
+  joinDevice: input => invoke<JoinView>('join_device', { input }),
   deviceKeyStatus: () => invoke<DeviceView>('device_key_status'),
   deviceKeyRegister: () => invoke<DeviceView>('device_key_register'),
   deviceKeyCancel: () => invoke<DeviceView>('device_key_cancel'),
