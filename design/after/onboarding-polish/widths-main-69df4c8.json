@@ -1,0 +1,10 @@
+{
+ "starting@1280": "section.onboarding=560",
+ "starting@390": "section.onboarding=342",
+ "trust@1280": "section.onboarding=560 div.state=560",
+ "trust@390": "section.onboarding=342 div.state=342",
+ "ceremony@1280": "section.onboarding=560 section.panel[ceremony]=560",
+ "ceremony@390": "section.onboarding=342 section.panel[ceremony]=342",
+ "repair@1280": "section.panel=560",
+ "repair@390": "section.panel=342"
+}

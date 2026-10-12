@@ -245,34 +245,60 @@ describe('app shell pairing wiring', () => {
     expect(mount.querySelector('[data-node-offline]')).not.toBeNull();
   });
 
-  it('a transient offline never unmounts setup in progress: it is hidden, then back, the same elements', async () => {
+  it('a box restarting after setup goes offline for a moment: the ceremony stays mounted, keeps polling, sends no cancel, and completes', async () => {
     let offline = false;
-    const cancels: string[] = [];
-    vi.stubGlobal('__TAURI_INTERNALS__', { invoke: (cmd: string, args?: { input?: { action?: string } }) => {
+    let online = false;
+    const actions: string[] = [];
+    vi.stubGlobal('__TAURI_INTERNALS__', { invoke: (cmd: string, args?: { input?: { action: string } }) => {
       if (cmd === 'node_status') return Promise.resolve(offline
         ? { ready: false, node_id: null, error: 'remote unavailable', retry_after_secs: 5 }
         : { ready: false, node_id: null, error: null });
-      if (cmd === 'pairing_status') return Promise.resolve({ ...paired, remote: true });
-      if (args?.input?.action === 'cancel') cancels.push(cmd);
+      if (cmd === 'pairing_status') return Promise.resolve({ ...paired, remote: true, bootstrap: 'bootstrap' });
+      if (cmd === 'remote_owner_setup') {
+        const action = args!.input!.action;
+        actions.push(action);
+        if (action === 'create') return Promise.resolve({ state: 'compare', words: ['noodle', 'gallery', 'demand', 'science'], expires_at: Date.now() / 1000 + 600 });
+        if (action === 'match') return Promise.resolve({ state: 'backup', mnemonic: 'one two three four five six seven eight nine ten eleven twelve', backup_check: [0, 1, 2], expires_at: Date.now() / 1000 + 600 });
+        if (action === 'finalize') return Promise.resolve({ state: 'starting' });
+        if (action === 'poll') return Promise.resolve({ state: online ? 'done' : 'starting' });
+        return Promise.resolve({ state: 'words_differ' });
+      }
       return Promise.reject(new Error('not available'));
     } });
     mount = document.createElement('div'); document.body.appendChild(mount);
     dispose = render(() => <App />, mount);
-    await vi.waitFor(() => expect(mount!.querySelector('[data-ob-head]')).not.toBeNull());
-    // The Onboarding component's own root: it lives as long as the component (and any ceremony in it).
-    const root = mount.querySelector('section.onboarding')!;
-    // The box restarts after setup: a transport cooldown.
+    const press = (text: string) => [...mount!.querySelectorAll<HTMLButtonElement>('[data-remote-owner] button')].find((b) => b.textContent?.includes(text))!.click();
+    await vi.waitFor(() => expect(mount!.querySelector('[data-remote-owner] #box-password')).not.toBeNull(), { timeout: 5000 });
+    const ceremony = mount.querySelector('[data-remote-owner]')!;
+    mount.querySelector<HTMLInputElement>('#box-password')!.value = 'chosen password';
+    mount.querySelector<HTMLInputElement>('#box-claim')!.value = 'physical claim code';
+    press('Set up this box');
+    await vi.waitFor(() => expect(ceremony.textContent).toContain('Do these match the box page?'));
+    press('Match');
+    await vi.waitFor(() => expect(ceremony.textContent).toContain('Write down your recovery phrase'));
+    press('I wrote it down');
+    await vi.waitFor(() => expect(ceremony.querySelectorAll('[data-backup]')).toHaveLength(3));
+    ceremony.querySelectorAll<HTMLInputElement>('[data-backup]').forEach((input, i) => { input.value = ['one', 'two', 'three'][i]; });
+    press('Confirm backup');
+    // Finalised: the box restarts, and the ceremony polls it.
+    await vi.waitFor(() => expect(ceremony.textContent).toContain('Keep this app open while the box restarts'));
+    // During the restart a transport cooldown: the offline card shows, the steps are hidden.
     offline = true;
     await vi.waitFor(() => expect(mount!.querySelector('[data-node-offline]')).not.toBeNull(), { timeout: 5000 });
     expect(mount.querySelector<HTMLElement>('[data-setup-steps]')!.hidden).toBe(true);
-    expect(root.isConnected).toBe(true);
+    const pollsBefore = actions.filter((a) => a === 'poll').length;
+    // The ceremony itself is still mounted (the same element) and keeps polling.
+    expect(ceremony.isConnected).toBe(true);
+    expect(mount.querySelector('[data-remote-owner]')).toBe(ceremony);
+    await vi.waitFor(() => expect(actions.filter((a) => a === 'poll').length).toBeGreaterThan(pollsBefore), { timeout: 5000 });
+    // Back online: the box answers, the ceremony completes in place.
     offline = false;
+    online = true;
     await vi.waitFor(() => expect(mount!.querySelector('[data-node-offline]')).toBeNull(), { timeout: 5000 });
-    expect(mount.querySelector<HTMLElement>('[data-setup-steps]')!.hidden).toBe(false);
-    // Never remounted (so no ceremony cleanup ran) and nothing was cancelled.
-    expect(mount.querySelector('section.onboarding')).toBe(root);
-    expect(cancels).toEqual([]);
-  });
+    await vi.waitFor(() => expect(ceremony.textContent).toContain('Your box is ready.'), { timeout: 5000 });
+    expect(mount.querySelector('[data-remote-owner]')).toBe(ceremony);
+    expect(actions).not.toContain('cancel');
+  }, 20_000);
 
   it('offline never hides a repair prompt', async () => {
     vi.stubGlobal('__TAURI_INTERNALS__', { invoke: (cmd: string) => {
