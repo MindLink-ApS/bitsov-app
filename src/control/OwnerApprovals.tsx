@@ -20,6 +20,14 @@ export function approvalMemory() {
 }
 export type ApprovalMemory = ReturnType<typeof approvalMemory>;
 
+type Outcomes = Record<string, { ok: boolean; text: string }>;
+/** The first "Approved" for an op is final: a later reply (of any kind) never overwrites it. */
+export const settleOutcome = (prev: Outcomes, opId: string, outcome: { ok: boolean; text: string }): Outcomes =>
+  prev[opId]?.ok ? prev : { ...prev, [opId]: outcome };
+
+/** How long after a request's expiry failed reads keep being retried before the wait gives up. */
+export const WAIT_GRACE_SECS = 60;
+
 const clock = (secs: number) => `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`;
 
 /**
@@ -47,8 +55,7 @@ export function OwnerApprovals(props: {
   const memory = props.memory ?? approvalMemory();
   const { hidden, setHidden, kept, setKept, said, setSaid, busy, setBusy } = memory;
   /** An "Approved" is final: nothing later (a stale reply, a second press) overwrites it. */
-  const settle = (opId: string, outcome: { ok: boolean; text: string }) =>
-    setSaid((s) => (s[opId]?.ok ? s : { ...s, [opId]: outcome }));
+  const settle = (opId: string, outcome: { ok: boolean; text: string }) => setSaid((s) => settleOutcome(s, opId, outcome));
   const tap = () => (props.mobile ? 'your fingerprint' : 'Touch ID');
   const live = (v: ApprovalView) => v.status === 'pending' && secondsLeft(v, props.now) > 0;
   /** Approve is offered only while the node still lists it as waiting. */
@@ -167,6 +174,8 @@ export function OwnerApprovalWait(props: {
 }) {
   const [view, setView] = createSignal(props.view);
   const [error, setError] = createSignal<string | null>(null);
+  // Reads kept failing well past the request's expiry: stop checking, say so, offer Dismiss.
+  const [gaveUp, setGaveUp] = createSignal(false);
   let alive = true;
   onCleanup(() => { alive = false; });
   createEffect(() => {
@@ -183,6 +192,7 @@ export function OwnerApprovalWait(props: {
         // A failed read establishes nothing (404 after a restart, 403, 409, 500,
         // unreachable): the other device may already have approved it. Only a
         // successful read's own status counts. Keep checking; Cancel stops.
+        if (Date.now() / 1000 > v.expires_at + WAIT_GRACE_SECS) { setGaveUp(true); return; }
         setError('Couldn’t check whether it was approved. Still checking; if it was approved, this goes on by itself.');
         setView({ ...v }); // keep polling
       }
@@ -191,8 +201,14 @@ export function OwnerApprovalWait(props: {
   });
   const left = () => secondsLeft(view(), props.now);
   return (
-    <div class="approval owner-approval-wait" data-owner-approval-wait={view().status}>
-      <Show when={view().status === 'pending'} fallback={
+    <div class="approval owner-approval-wait" data-owner-approval-wait={gaveUp() ? 'unconfirmed' : view().status}>
+      <Show when={gaveUp()}>
+        <p class="err-note" role="alert" data-approval-wait-unconfirmed>Couldn’t confirm whether it was approved. Ask again if needed.</p>
+        <div class="form-actions">
+          <button type="button" class="soft" data-approval-wait-dismiss onClick={() => props.onStop()}>Dismiss</button>
+        </div>
+      </Show>
+      <Show when={!gaveUp() && view().status === 'pending'} fallback={<Show when={!gaveUp()}>{
         <Show when={view().status === 'consumed'} fallback={<>
           <p class="err-note" role="alert" data-approval-wait-expired>{error() ?? 'This request expired. Nothing was approved.'}</p>
           {/* A terminal state is never a dead end: dismissing frees Send (and the offer to ask again). */}
@@ -202,7 +218,7 @@ export function OwnerApprovalWait(props: {
         </>}>
           <p class="ok-note" role="status" data-approval-wait-approved>Approved on your other device.</p>
         </Show>
-      }>
+      }</Show>}>
         <p>
           <strong>Waiting for your approval on your other owner device.</strong> Open BitSov there and approve it;
           this device cannot approve its own request.
