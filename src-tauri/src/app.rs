@@ -4142,6 +4142,9 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
         Some(p) if p.op.as_deref() == Some(op.as_str()) && p.operation_id.is_some() => p.operation_id.clone(),
         _ => Some(spend_journal::new_operation_id()?),
     };
+    // Once minted/reused, the id accompanies every failure, including begin,
+    // retry snapshot writes, ledger repair and the outcome error handler itself.
+    let outcome = async {
     let mut pending = match (&prior, retry) {
         (Some(p), Some(_)) => {
             // Settled when the 502 came back; again here in case that write failed.
@@ -4178,7 +4181,7 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
             None => journal.clear(),
         }
     };
-    // All post-begin failures carry the host id, including transport/decode/I/O.
+    // Once pending exists, ambiguous failures also update its ledger outcome.
     let result = async {
     // Durable above; only now may the id leave the app.
     if let Some(id) = &operation_id { body["operation_id"] = serde_json::json!(id); }
@@ -4440,8 +4443,10 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
             Err(error) => Err(error),
             _ => Ok(()),
         };
-        update.err().unwrap_or(error).for_operation(operation_id.as_deref())
+        update.err().unwrap_or(error)
     })
+    }.await;
+    outcome.map_err(|error: ActionError| error.for_operation(operation_id.as_deref()))
 }
 
 /// Read-only H1 projection; the single pending slot remains the spending fence.
@@ -9986,6 +9991,55 @@ mod control_act_tests {
         let ids = op_ids(&node);
         assert_eq!(ids[0], ids[1]);
         assert_eq!(ops.lock().unwrap().pays, 0);
+    }
+
+    #[tokio::test]
+    async fn ledger_retry_storage_failure_keeps_operation_id() {
+        let (node, ops) = ops_fake(|n| { n.script = vec![("paid", false)]; n.settled_incomplete = true; });
+        spend_advance(&node.state, true).await.unwrap();
+        let error = do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap_err();
+        assert_eq!(error.code, "payment_settled_undelivered");
+        let record = pending(&node).unwrap();
+        let id = record.operation_id.as_deref().unwrap();
+        // A directory makes the atomic replacement unwritable, even as root.
+        std::fs::create_dir(journal_file(&node).with_extension("next")).unwrap();
+        let error = do_message_retry(&node.state, A, "gm", None).await.unwrap_err();
+        assert_eq!(error.code, "spend_unknown");
+        assert_eq!(error.operation_id.as_deref(), Some(id));
+        assert_eq!(serde_json::to_value(pending(&node).unwrap()).unwrap(), serde_json::to_value(&record).unwrap());
+        assert_eq!(op_ids(&node), [Some(id.to_string())], "failed storage must not dispatch a retry");
+        assert_eq!(ops.lock().unwrap().pays, 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ledger_begin_storage_failure_keeps_minted_operation_id() {
+        use std::os::unix::fs::PermissionsExt;
+        for fail_pending in [true, false] {
+            let (node, _) = ops_fake(|_| {});
+            spend_advance(&node.state, true).await.unwrap();
+            let dir = journal_file(&node).parent().unwrap().to_path_buf();
+            std::fs::create_dir_all(&dir).unwrap();
+            if fail_pending {
+                std::fs::create_dir(dir.join("spend-pending.next")).unwrap();
+            } else {
+                // The pending snapshot is saved, but ensure_operation cannot write history.
+                std::fs::create_dir(dir.join("ops")).unwrap();
+                std::fs::set_permissions(dir.join("ops"), std::fs::Permissions::from_mode(0o500)).unwrap();
+            }
+            let error = do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap_err();
+            if !fail_pending {
+                std::fs::set_permissions(dir.join("ops"), std::fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            assert_eq!(error.code, "spend_unknown");
+            let id = error.operation_id.expect("begin failures retain the minted operation id");
+            assert_eq!(id.len(), 36);
+            if !fail_pending {
+                let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(journal_file(&node)).unwrap()).unwrap();
+                assert_eq!(saved["operation_id"], id);
+            }
+            assert!(op_ids(&node).is_empty(), "failed begin must not dispatch");
+        }
     }
 
     #[tokio::test]
