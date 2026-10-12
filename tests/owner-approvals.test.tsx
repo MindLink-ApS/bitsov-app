@@ -98,3 +98,61 @@ describe('requester side: waiting for the other owner device', () => {
     expect(onStop).toHaveBeenCalled();
   });
 });
+
+describe('round 1 (#216): nothing vanishes, nothing claims more than is known', () => {
+  it('an op awaiting Touch ID, then refused, stays with its outcome after it leaves the node’s list', async () => {
+    let finish!: (r: unknown) => void;
+    const approve = vi.fn(() => new Promise((r) => { finish = r; })) as never;
+    let list: () => ApprovalView[];
+    const { createSignal } = await import('solid-js');
+    const [approvals, setApprovals] = createSignal([view()]);
+    list = approvals;
+    show(() => <OwnerApprovals approvals={list()} now={NOW} approve={approve} />);
+    $<HTMLButtonElement>('[data-approval-approve]')!.click();
+    await vi.waitFor(() => expect($('[data-approval-busy]')).not.toBeNull());
+    setApprovals([]); // expired / left the list while Touch ID was up
+    expect($('[data-owner-approval="op-1"]')).not.toBeNull();
+    finish({ ok: false, error: { code: 'approval_expired', message: 'x' } });
+    await vi.waitFor(() => expect($('[data-approval-result="refused"]')!.textContent).toBe(refusalText('approval_expired')));
+    expect($('[data-approval-approve]')).toBeNull(); // no stale Approve
+    expect($('[data-approval-expires]')!.textContent).toContain('no longer waiting');
+    $<HTMLButtonElement>('[data-approval-dismiss]')!.click();
+    expect($('[data-owner-approval]')).toBeNull();
+  });
+
+  it('a list that could not be read is said, not shown as "nothing is waiting"', () => {
+    show(() => <OwnerApprovals approvals={[]} error="Your node refused this approval. Nothing was approved." now={NOW} approve={vi.fn()} />);
+    expect($('[data-owner-approvals-error]')!.textContent).toContain('refused');
+    expect($('[data-owner-approvals-empty]')).toBeNull();
+  });
+
+  it.each([
+    ['pending', 'still lists this request as waiting, so it was not approved', true],
+    ['gone', 'no longer lists this request (it was approved or it expired)', false],
+    ['unknown', 'your node could not be read', false],
+  ] as const)('a transport error on approve rechecks the node (%s) and says only what is known', async (now, text, approveAgain) => {
+    const approve = vi.fn(async (_id: string, _message: string) => ({ ok: false as const, error: { code: 'node' as const, message: 'connection lost' } }));
+    const recheck = vi.fn(async () => now);
+    show(() => <OwnerApprovals approvals={now === 'pending' ? [view()] : []} now={NOW} approve={approve} recheck={recheck} />);
+    if (now !== 'pending') {
+      // Rendered from a list that already dropped it: approve from the kept copy path.
+      dispose?.(); mount.remove();
+      const { createSignal } = await import('solid-js');
+      const [list, setList] = createSignal([view()]);
+      show(() => <OwnerApprovals approvals={list()} now={NOW} approve={async (id, message) => { setList([]); return approve(id, message); }} recheck={recheck} />);
+    }
+    $<HTMLButtonElement>('[data-approval-approve]')!.click();
+    await vi.waitFor(() => expect($('[data-approval-result="refused"]')!.textContent).toContain(text));
+    expect(recheck).toHaveBeenCalledWith('op-1');
+    expect($('[data-approval-result="refused"]')!.textContent).not.toContain('Nothing was approved');
+    expect(!!$('[data-approval-approve]')).toBe(approveAgain);
+  });
+
+  it.each(['approval_unknown', 'approval_expired'])('a %s wait has a Dismiss that frees the requester', async (code) => {
+    const onStop = vi.fn();
+    show(() => <OwnerApprovalWait view={view()} now={NOW} status={vi.fn(async () => ({ ok: false as const, error: { code: code as never, message: 'x' } }))} onApproved={vi.fn()} onStop={onStop} pollMs={5} />);
+    await vi.waitFor(() => expect($('[data-approval-wait-dismiss]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-approval-wait-dismiss]')!.click();
+    expect(onStop).toHaveBeenCalled();
+  });
+});

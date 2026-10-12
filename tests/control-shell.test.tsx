@@ -446,6 +446,29 @@ describe('control center shell', () => {
       expect(call.args).toEqual({ opId: 'op-a', approvalMessage: 'bitsov-approval-v1\nop=op-a' });
     });
 
+    it('a list that cannot be read is said, and no stale Approve stays', async () => {
+      let fail = false;
+      const host = stubHost({
+        pairing_status: () => ({ ...paired, remote: true }),
+        node_overview: overview(['owner_device_approval_v1']),
+        owner_device_keys: () => ({ device_approvals: 'enabled', owner_device_count: 2, device_keys: [] }),
+        owner_approvals_pending: () => { if (fail) throw { code: 'approval_forbidden', message: 'revoked' }; return [pendingView('op-a')]; },
+      });
+      void host;
+      start();
+      await vi.waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
+      [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
+      await vi.waitFor(() => expect(mount.querySelector('[data-approvals-badge]')).not.toBeNull());
+      click('[data-profile]');
+      click('[data-open-approvals]');
+      await vi.waitFor(() => expect(mount.querySelector('[data-approval-approve]')).not.toBeNull());
+      fail = true;
+      await vi.waitFor(() => expect(mount.querySelector('[data-owner-approvals-error]')?.textContent).toContain('Your node refused'), { timeout: 15_000 });
+      expect(mount.querySelector('[data-approval-approve]')).toBeNull();
+      expect(mount.querySelector('[data-owner-approvals-empty]')).toBeNull();
+      expect(mount.querySelector('[data-approvals-badge]')).toBeNull();
+    }, 25_000);
+
     it.each(['read_only_pairing', 'ai_pairing', 'seed_password_not_typed'])('a pairing the node does not let approve (%s) sees no list, badge or Approve', async (reason) => {
       const { calls } = await open({ approvals: reason });
       await vi.waitFor(() => expect(calls.some((c) => c.cmd === 'owner_device_keys')).toBe(true));

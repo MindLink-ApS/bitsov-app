@@ -368,6 +368,7 @@ describe('owner approval v1: first contact approved on the owner’s other devic
     expect(source.approvalRequest).toHaveBeenCalledWith({ kind: 'first_contact', terms: { recipient: A, max_total_msat: 14000, budget_msat: 50000 } });
     expect(source.firstContactRequest).not.toHaveBeenCalled();
     expect(element('[data-owner-approval-wait]').textContent).toContain('Waiting for your approval on your other owner device');
+    expect(element('[data-approval-wait-after]').textContent).toBe('This message sends when approved, exactly as you wrote it.');
     expect(element<HTMLButtonElement>('[data-send]').disabled).toBe(true);
     expect(source.send).not.toHaveBeenCalled();
     consume();
@@ -376,6 +377,8 @@ describe('owner approval v1: first contact approved on the owner’s other devic
     expect(source.send).not.toHaveBeenCalled();
     grant();
     await vi.waitFor(() => expect(source.send).toHaveBeenCalledTimes(1), { timeout: 4000 });
+    // Exactly the draft as it was at Send.
+    expect(vi.mocked(source.send).mock.calls[0][2]).toBe('hello via my phone');
     await vi.waitFor(() => expect(mount.querySelector('[data-message="sent-v1"]')).not.toBeNull());
     await new Promise((r) => setTimeout(r, 1200));
     expect(source.send).toHaveBeenCalledTimes(1);
@@ -407,6 +410,18 @@ describe('owner approval v1: first contact approved on the owner’s other devic
     await vi.waitFor(() => expect(element('[data-owner-approval-wait="pending"]')).not.toBeNull());
     consume({ grant_op: null });
     await vi.waitFor(() => expect(element('[data-composer-note]')?.textContent).toContain('Ask again'), { timeout: 4000 });
+    expect(source.send).not.toHaveBeenCalled();
+  }, 10_000);
+
+  it('a request that expires before approval has a Dismiss; Send is free again', async () => {
+    const { source } = setup();
+    source.approvalStatus = vi.fn(async () => { throw { code: 'approval_expired', message: 'expired' }; });
+    await press('waited too long');
+    await vi.waitFor(() => expect(element('[data-approval-wait-dismiss]')).not.toBeNull(), { timeout: 4000 });
+    expect(element<HTMLButtonElement>('[data-send]').disabled).toBe(true);
+    element<HTMLButtonElement>('[data-approval-wait-dismiss]').click();
+    await vi.waitFor(() => expect(element<HTMLButtonElement>('[data-send]').disabled).toBe(false));
+    expect(mount.querySelector('[data-owner-approval-wait]')).toBeNull();
     expect(source.send).not.toHaveBeenCalled();
   }, 10_000);
 
@@ -466,6 +481,17 @@ describe('spend breakers on the requesting app', () => {
     await vi.waitFor(() => expect(element('[data-breaker-reset-done]')).not.toBeNull(), { timeout: 4000 });
     expect(element('[data-breaker-reset-done]').textContent).toContain('Nothing was sent; press Send again');
     expect(source.send).toHaveBeenCalledTimes(1);
+  }, 10_000);
+
+  it('a reset request the node forgets has a Dismiss; the offer comes back', async () => {
+    const { source } = setup('grant_paused', ALL);
+    source.approvalStatus = vi.fn(async () => { throw { code: 'approval_unknown', message: 'gone' }; });
+    await sendOnce();
+    await vi.waitFor(() => expect(element('[data-breaker-reset]')).not.toBeNull());
+    element<HTMLButtonElement>('[data-breaker-reset]').click();
+    await vi.waitFor(() => expect(element('[data-breaker] [data-approval-wait-dismiss]')).not.toBeNull(), { timeout: 4000 });
+    element<HTMLButtonElement>('[data-breaker] [data-approval-wait-dismiss]').click();
+    await vi.waitFor(() => expect(element('[data-breaker-reset]')).not.toBeNull());
   }, 10_000);
 
   it('without the breaker-reset sub-flag: no reset offer, the owner resets at the node', async () => {

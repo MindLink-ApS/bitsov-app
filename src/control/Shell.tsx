@@ -534,15 +534,27 @@ export function ControlCenter(props: Props) {
   const [approvals, setApprovals] = createSignal<ApprovalView[]>([]);
   const approvalsCapable = () => props.remote === true && overview()?.capabilities?.includes(OWNER_DEVICE_APPROVAL) === true;
   const canApprove = () => approvalsCapable() && deviceKeys()?.device_approvals === 'enabled';
+  // A failed read is said, never shown as "nothing is waiting", and stale entries go.
+  const [approvalsError, setApprovalsError] = createSignal<string | null>(null);
   const loadApprovals = async () => {
-    if (!approvalsCapable()) { setDeviceKeys(null); setApprovals([]); return; }
+    if (!approvalsCapable()) { setDeviceKeys(null); setApprovals([]); setApprovalsError(null); return; }
     const keys = await act(() => source.deviceKeys());
-    setDeviceKeys(keys.ok ? keys.value : null);
-    if (!canApprove()) { setApprovals([]); return; }
+    // A failed discovery keeps what was known, but no entry may be acted on from it.
+    if (!keys.ok) { setApprovals([]); setApprovalsError(refusalText(keys.error.code, keys.error)); return; }
+    setDeviceKeys(keys.value);
+    if (!canApprove()) { setApprovals([]); setApprovalsError(null); return; }
     const pending = await act(() => source.approvalsPending());
-    if (pending.ok) setApprovals(pending.value.filter((v) => v.status === 'pending'));
+    if (pending.ok) { setApprovals(pending.value.filter((v) => v.status === 'pending')); setApprovalsError(null); }
+    else { setApprovals([]); setApprovalsError(refusalText(pending.error.code, pending.error)); }
   };
-  createEffect(on(approvalsCapable, (on) => { if (on) void loadApprovals(); else { setDeviceKeys(null); setApprovals([]); } }));
+  /** After an approve the host could not confirm: is the request still waiting at the node? */
+  const recheckApproval = async (opId: string): Promise<'pending' | 'gone' | 'unknown'> => {
+    const pending = await act(() => source.approvalsPending());
+    if (!pending.ok) return 'unknown';
+    setApprovals(pending.value.filter((v) => v.status === 'pending'));
+    return pending.value.some((v) => v.op_id === opId && v.status === 'pending') ? 'pending' : 'gone';
+  };
+  createEffect(on(approvalsCapable, (on) => { if (on) void loadApprovals(); else { setDeviceKeys(null); setApprovals([]); setApprovalsError(null); } }));
   const approvalsWaiting = () => (canApprove() ? approvals().filter((v) => v.expires_at * 1000 > now()).length : 0);
   const loadBudget = async () => {
     const revision = ++budgetRevision;
@@ -1569,9 +1581,11 @@ export function ControlCenter(props: Props) {
           </Match>
           <Match when={tab() === 'node'}>
             <NodePanel deviceApprovals={<>
-              <Show when={canApprove()}>
+              <Show when={canApprove() || (approvalsCapable() && approvalsError() !== null && deviceKeys() !== null)}>
                 <OwnerApprovals
                   approvals={approvals()}
+                  error={approvalsError()}
+                  recheck={recheckApproval}
                   now={now()}
                   mobile={androidQrScannerAvailable()}
                   nameOf={(id) => { const p = peerById().get(id.toLowerCase()); return p ? peerName(p, p.node_id) : null; }}
@@ -4021,6 +4035,9 @@ function Composer(props: {
         setNote(r.error.message);
       } else if (!r.ok && unchanged && (isBudgetStop(r.error) || ['owner_only', 'owner_contact_unavailable'].includes(r.error.code))) setNote(r.error.message);
       };
+      // Capability-gated, not remote-gated, on purpose: the node's local router
+      // mounts request + status, so a pairing on this Mac may ask too (approving
+      // is remote-only and happens on another owner device).
       if (first !== undefined && !room() && props.actions.ownerDeviceApproval?.()) {
         // Owner approval v1: the owner approves on their other device instead of at the node.
         const request = await props.actions.approvalRequest({ kind: 'first_contact', terms: { recipient: submittedPeer, max_total_msat: cap, ...(first ? { budget_msat: first } : {}) } });
@@ -4603,6 +4620,7 @@ function Composer(props: {
           now={props.now}
           status={props.actions.approvalStatus}
           fallback={w().view.owner_action}
+          after="This message sends when approved, exactly as you wrote it."
           onStop={() => setDeviceWait(null)}
           onApproved={(v) => deviceApproved(w(), v)}
         />}

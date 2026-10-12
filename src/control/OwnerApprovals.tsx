@@ -19,28 +19,70 @@ export function OwnerApprovals(props: {
   approvals: ApprovalView[];
   now: number;
   mobile?: boolean;
+  /** A failed read of the list (said instead of "nothing is waiting"). */
+  error?: string | null;
   nameOf?: (id: string) => string | null;
   approve: (opId: string, approvalMessage: string) => Promise<Outcome<ApprovalView>>;
+  /** After an approve that could not be confirmed: is it still waiting at the node? */
+  recheck?: (opId: string) => Promise<'pending' | 'gone' | 'unknown'>;
 }) {
   const [hidden, setHidden] = createSignal<Set<string>>(new Set());
   const [busy, setBusy] = createSignal<string | null>(null);
+  // What the owner pressed Approve on, and what came of it, stays until dismissed,
+  // even after the request expires or leaves the node's list.
+  const [kept, setKept] = createSignal<Record<string, ApprovalView>>({});
   const [said, setSaid] = createSignal<Record<string, { ok: boolean; text: string }>>({});
   const tap = () => (props.mobile ? 'your fingerprint' : 'Touch ID');
-  const shown = () => props.approvals.filter((v) => !hidden().has(v.op_id) && (said()[v.op_id]?.ok || (v.status === 'pending' && secondsLeft(v, props.now) > 0)));
+  const live = (v: ApprovalView) => v.status === 'pending' && secondsLeft(v, props.now) > 0;
+  /** Approve is offered only while the node still lists it as waiting. */
+  const waiting = (opId: string) => props.approvals.some((v) => v.op_id === opId && live(v));
+  const shown = () => {
+    const byId = new Map<string, ApprovalView>();
+    for (const v of props.approvals) if (live(v)) byId.set(v.op_id, v);
+    for (const [id, v] of Object.entries(kept())) if (!byId.has(id)) byId.set(id, v);
+    return [...byId.values()].filter((v) => !hidden().has(v.op_id));
+  };
+  const dismiss = (opId: string) => {
+    setHidden((h) => new Set(h).add(opId));
+    setKept((k) => { const { [opId]: _gone, ...rest } = k; return rest; });
+  };
   const approve = async (v: ApprovalView) => {
     if (busy()) return;
     setBusy(v.op_id);
+    setKept((k) => ({ ...k, [v.op_id]: v }));
+    setSaid((s) => { const { [v.op_id]: _old, ...rest } = s; return rest; });
     try {
       const r = await props.approve(v.op_id, v.approval_message);
-      setSaid((s) => ({ ...s, [v.op_id]: r.ok
-        ? { ok: true, text: 'Approved. The app that asked can go on now.' }
-        : { ok: false, text: refusalText(r.error.code, { reason: r.error.reason, remaining_msat: r.error.remaining_msat }) } }));
+      if (r.ok) {
+        setSaid((s) => ({ ...s, [v.op_id]: { ok: true, text: 'Approved. The app that asked can go on now.' } }));
+      } else if (r.error.code === 'node') {
+        // The request may have reached the node: never say "nothing was approved" here.
+        setSaid((s) => ({ ...s, [v.op_id]: { ok: false, text: 'Couldn’t confirm whether the approval went through. Checking your node…' } }));
+        const now = await (props.recheck?.(v.op_id) ?? Promise.resolve('unknown' as const));
+        setSaid((s) => ({ ...s, [v.op_id]: {
+          ok: false,
+          text: now === 'pending'
+            ? 'Couldn’t confirm the approval. Your node still lists this request as waiting, so it was not approved; you can try again.'
+            : now === 'gone'
+              ? 'Couldn’t confirm the approval. Your node no longer lists this request (it was approved or it expired). Check with the app that asked.'
+              : 'Couldn’t confirm whether the approval went through, and your node could not be read. Check with the app that asked.',
+        } }));
+      } else {
+        setSaid((s) => ({ ...s, [v.op_id]: { ok: false, text: refusalText(r.error.code, { reason: r.error.reason, remaining_msat: r.error.remaining_msat }) } }));
+      }
     } finally { setBusy(null); }
   };
   return (
     <section class="panel owner-approvals" data-owner-approvals aria-labelledby="owner-approvals-title">
       <h2 id="owner-approvals-title">Approvals waiting for you</h2>
-      <Show when={shown().length > 0} fallback={<p class="hint" data-owner-approvals-empty>Nothing is waiting. Requests from your other apps show here; each expires after five minutes.</p>}>
+      <Show when={props.error}>
+        <p class="err-note" role="alert" data-owner-approvals-error>{props.error}</p>
+      </Show>
+      <Show when={shown().length > 0} fallback={
+        <Show when={!props.error}>
+          <p class="hint" data-owner-approvals-empty>Nothing is waiting. Requests from your other apps show here; each expires after five minutes.</p>
+        </Show>
+      }>
         <ul class="owner-approval-list" role="list">
           <For each={shown()}>
             {(v) => (
@@ -52,23 +94,31 @@ export function OwnerApprovals(props: {
                   Requested by app <code>{shortKey(v.client_pubkey)}</code>. Your node does not name the app; compare this with the app that asked.
                 </p>
                 <Show when={!said()[v.op_id]?.ok}>
-                  <p class="hint" data-approval-expires>Expires in {clock(secondsLeft(v, props.now))} unless you approve it.</p>
+                  <p class="hint" data-approval-expires>
+                    {waiting(v.op_id) ? `Expires in ${clock(secondsLeft(v, props.now))} unless you approve it.` : 'This request is no longer waiting at your node.'}
+                  </p>
                 </Show>
                 <details class="quiet-detail" data-approval-message>
                   <summary>Exact message your {props.mobile ? 'phone' : 'Mac'} signs</summary>
                   <pre class="approval-message">{v.approval_message}</pre>
                 </details>
+                <Show when={busy() === v.op_id}>
+                  <p class="hint" role="status" data-approval-busy>Confirm with {tap()}…</p>
+                </Show>
                 <Show when={said()[v.op_id]}>
                   {(s) => <p class={s().ok ? 'ok-note' : 'err-note'} role={s().ok ? 'status' : 'alert'} data-approval-result={s().ok ? 'ok' : 'refused'}>{s().text}</p>}
                 </Show>
-                <Show when={!said()[v.op_id]?.ok}>
-                  <div class="form-actions">
+                <div class="form-actions">
+                  <Show when={!said()[v.op_id]?.ok && waiting(v.op_id)}>
                     <button type="button" class="primary soft money" data-approval-approve disabled={busy() !== null} onClick={() => void approve(v)}>
                       {busy() === v.op_id ? 'Approving…' : `Approve with ${tap()}`}
                     </button>
-                    <button type="button" class="soft" data-approval-dismiss disabled={busy() === v.op_id}
-                      onClick={() => setHidden((h) => new Set(h).add(v.op_id))}>Not now</button>
-                  </div>
+                  </Show>
+                  <button type="button" class="soft" data-approval-dismiss disabled={busy() === v.op_id} onClick={() => dismiss(v.op_id)}>
+                    {said()[v.op_id] || !waiting(v.op_id) ? 'Dismiss' : 'Not now'}
+                  </button>
+                </div>
+                <Show when={!said()[v.op_id] && waiting(v.op_id)}>
                   <p class="hint">Not now only hides it here. Nothing is sent; it expires by itself.</p>
                 </Show>
               </li>
@@ -94,6 +144,8 @@ export function OwnerApprovalWait(props: {
   onStop: () => void;
   /** The node's own command for the same approval, kept under "Other ways". */
   fallback?: string | null;
+  /** What happens once it is approved (e.g. first contact: "This message sends when approved."). */
+  after?: string;
   pollMs?: number;
 }) {
   const [view, setView] = createSignal(props.view);
@@ -124,7 +176,13 @@ export function OwnerApprovalWait(props: {
   return (
     <div class="approval owner-approval-wait" data-owner-approval-wait={view().status}>
       <Show when={view().status === 'pending'} fallback={
-        <Show when={view().status === 'consumed'} fallback={<p class="err-note" role="alert" data-approval-wait-expired>{error() ?? 'This request expired. Nothing was approved.'}</p>}>
+        <Show when={view().status === 'consumed'} fallback={<>
+          <p class="err-note" role="alert" data-approval-wait-expired>{error() ?? 'This request expired. Nothing was approved.'}</p>
+          {/* A terminal state is never a dead end: dismissing frees Send (and the offer to ask again). */}
+          <div class="form-actions">
+            <button type="button" class="soft" data-approval-wait-dismiss onClick={() => props.onStop()}>Dismiss</button>
+          </div>
+        </>}>
           <p class="ok-note" role="status" data-approval-wait-approved>Approved on your other device.</p>
         </Show>
       }>
@@ -133,6 +191,7 @@ export function OwnerApprovalWait(props: {
           this device cannot approve its own request.
         </p>
         <ul class="owner-approval-terms" role="list"><For each={termLines(view())}>{(line, i) => <li classList={{ lead: i() === 0 }}>{line}</li>}</For></ul>
+        <Show when={props.after}><p data-approval-wait-after>{props.after}</p></Show>
         <p class="hint" data-approval-wait-expires>Expires in {clock(left())}. Cancel only stops waiting here; the request expires by itself.</p>
         <Show when={error()}><p class="err-note" role="alert">{error()}</p></Show>
         <div class="form-actions">
