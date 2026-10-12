@@ -245,7 +245,7 @@ it('first contact on a remote node without Touch ID: the Touch ID offer leads, t
   source.firstContactRequest = vi.fn(async () => approval);
   source.firstContactStatus = vi.fn(async () => approval);
   source.firstContactCancel = vi.fn(async () => {});
-  source.send = vi.fn();
+  source.send = vi.fn(async (recipient) => ({ message_id: 'sent-touch-first', recipient, is_room: false, delivered: true, amount_msat: 14000, sent_at_ms: Date.now() }));
   mount = document.createElement('div'); document.body.appendChild(mount);
   dispose = render(() => <ControlCenter remote source={source} active ready error={null} ownId={SAMPLE_OWN_ID} firstRun={<span />} />, mount);
   await vi.waitFor(() => expect(element('[data-door-quote]')?.getAttribute('data-door-quote')).toBe('14000'));
@@ -266,6 +266,9 @@ it('first contact on a remote node without Touch ID: the Touch ID offer leads, t
   element<HTMLButtonElement>('[data-touch-id-setup]').click();
   source.firstContactStatus = vi.fn(async () => ({ ...approval, ready: true }));
   await vi.waitFor(() => expect(source.send).toHaveBeenCalledTimes(1), { timeout: 2500 });
+  // The send completed: the message is in the stream and the box is clear.
+  await vi.waitFor(() => expect(mount.querySelector('[data-message="sent-touch-first"]')).not.toBeNull());
+  await vi.waitFor(() => expect(element<HTMLTextAreaElement>('[data-composer] textarea').value).toBe(''));
 });
 
 it('first contact: Cancel in view stops the wait; nothing is sent', async () => {
@@ -286,7 +289,7 @@ it('first contact: Cancel in view stops the wait; nothing is sent', async () => 
   source.firstContactRequest = vi.fn(async () => approval);
   source.firstContactStatus = vi.fn(async () => approval);
   source.firstContactCancel = vi.fn(async () => {});
-  source.send = vi.fn();
+  source.send = vi.fn(async (recipient) => ({ message_id: 'never', recipient, is_room: false, delivered: true, amount_msat: 14000, sent_at_ms: Date.now() }));
   mount = document.createElement('div'); document.body.appendChild(mount);
   dispose = render(() => <ControlCenter remote source={source} active ready error={null} ownId={SAMPLE_OWN_ID} firstRun={<span />} />, mount);
   await vi.waitFor(() => expect(element('[data-door-quote]')?.getAttribute('data-door-quote')).toBe('14000'));
@@ -311,7 +314,7 @@ it('the budget waiting card (remote, Touch ID not set up) leads with the offer a
   };
   source.budgetStatus = async () => ({ ...budget });
   source.deviceKeyStatus = async () => ({ available: true, state: 'none', fingerprint: null, owner_action: null, expires_at_ms: null });
-  source.send = vi.fn();
+  source.send = vi.fn(async (recipient) => ({ message_id: 'never', recipient, is_room: false, delivered: true, amount_msat: 14000, sent_at_ms: Date.now() }));
   mount = document.createElement('div'); document.body.appendChild(mount);
   dispose = render(() => <ControlCenter remote source={source} active ready error={null} ownId={SAMPLE_OWN_ID} firstRun={<span />} />, mount);
   await vi.waitFor(() => expect(element('[data-budget="waiting"] [data-touch-id-first]')).not.toBeNull());

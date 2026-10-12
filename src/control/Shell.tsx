@@ -1578,7 +1578,7 @@ export function ControlCenter(props: Props) {
           <div data-call-approval>
             <strong>Approve spending before calling</strong>
             <p class="hint">Spending needs approval. After approval, press Call or Accept again.</p>
-            <SpendBar spend={spend()} error={errors.spend ?? errors.spendPoll} now={now()} actions={actions} />
+            <SpendBar spend={spend()} error={errors.spend ?? errors.spendPoll} now={now()} actions={actions} stays="Nothing is paid until you press Call or Accept again after approval." />
             <Show when={spend()?.state !== 'pending' && spend()?.state !== 'unavailable'}>
               <button type="button" class="soft" data-call-approve disabled={moneyBlocked() || callApproving()} onClick={async () => {
                 setCallApproving(true);
@@ -4493,7 +4493,7 @@ function Composer(props: {
         <Show when={!props.budgetStale} fallback={<p class="spend-line" data-budget-stale>Spend grant stale — checking your node. Auto-pay unavailable until confirmed.</p>}>
           <Show
             when={viaBudget()}
-            fallback={<SpendBar spend={props.spend} error={props.spendError} now={props.now} actions={props.actions} hasPending={props.hasPending} />}
+            fallback={<SpendBar spend={props.spend} error={props.spendError} now={props.now} actions={props.actions} hasPending={props.hasPending} stays="Your draft is kept. Nothing is sent until you press Send after approval." />}
           >
             <BudgetBar
               stand={stand()}
@@ -4576,7 +4576,10 @@ function TouchIdFirst(props: { actions: Actions; stays: JSX.Element; children: J
   return <Show when={touchIdOffer(props.actions)} fallback={props.children}><Offer /></Show>;
 }
 
-function SpendBar(props: { spend: SpendView | null; error: string | undefined; now: number; actions: Actions; hasPending?: boolean }) {
+/** What is true while a spend request waits, for whichever action raised it (the default holds for every consumer). */
+const SPEND_WAIT_DEFAULT = 'Nothing is paid until you press it again after approval.';
+
+function SpendBar(props: { spend: SpendView | null; error: string | undefined; now: number; actions: Actions; hasPending?: boolean; stays?: string }) {
   const line = () => spendLine(props.spend, props.now);
   const minutes = (ms: number) => Math.max(1, Math.ceil((ms - props.now) / 60_000));
   // One Ask again at a time: a double click must not print two requests at the node.
@@ -4614,7 +4617,7 @@ function SpendBar(props: { spend: SpendView | null; error: string | undefined; n
         <Match when={props.spend?.state === 'pending' && props.spend.pending}>
           {(p) => (
             <TouchIdFirst actions={props.actions} stays={<p class="hint" data-touch-id-stays-text="spend">
-              Your draft is kept. Nothing is sent until you press Send after approval.{' '}
+              {props.stays ?? SPEND_WAIT_DEFAULT}{' '}
               <button type="button" class="link" data-spend-cancel-visible onClick={() => void props.actions.cancelSpend()}>Cancel request</button>
             </p>}>
             <div class="approval" data-approval="pending">
@@ -5503,7 +5506,7 @@ function NewTrack(props: {
   return (
     <>
       <TrackHead title="Start something" onContext={props.onContext} />
-      <SpendBar spend={props.spend} error={props.spendError} now={props.now} actions={props.actions} />
+      <SpendBar spend={props.spend} error={props.spendError} now={props.now} actions={props.actions} stays="Nothing is created or paid until you press Create invite or Accept invite again after approval." />
       <div class="stream">
         <Show
           when={mineLive()}

@@ -450,6 +450,13 @@ describe('control center shell', () => {
       await vi.waitFor(() => expect(calls.some((c) => c.cmd === 'spend_cancel')).toBe(true));
     });
 
+    it('on the invite page the offer says what is true for invites, not "press Send"', async () => {
+      await open(true, none);
+      click('[data-track="new"]');
+      await vi.waitFor(() => expect(mount.querySelector('[data-touch-id-stays-text="spend"]')?.textContent).toContain('Create invite or Accept invite again after approval'));
+      expect(mount.querySelector('[data-touch-id-stays-text="spend"]')!.textContent).not.toMatch(/press Send/);
+    });
+
     it('a lapsed setup says "again", not "one time"', async () => {
       await open(true, { ...none, state: 'lapsed' });
       const offer = mount.querySelector('[data-touch-id-first]')!;
