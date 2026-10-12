@@ -147,7 +147,11 @@ export interface Source {
   sponsorRequest(text: string): Promise<FundingAsk>;
   sponsorRequestStatus(paymentHash: string): Promise<FundingStatus>;
   firstContactRequest(peer: string, maxMsat: number, budgetMsat?: number): Promise<OwnerContactApproval | null>;
-  firstContactStatus(id: string): Promise<OwnerContactApproval>;
+  /**
+   * `recipient` (owner_device_approval_v1): `id` is the ApprovalView's grant_op and
+   * the host reads /pair/first-contact-grant/{grant_op}?recipient=. Absent: today's id.
+   */
+  firstContactStatus(id: string, recipient?: string): Promise<OwnerContactApproval>;
   firstContactCancel(id: string): Promise<void>;
   wallet(): Promise<WalletOverview>;
   /** Node-wide energy (genome N1). Call only when the overview lists `energy_v1`. */
@@ -317,7 +321,7 @@ export const hostSource: Source = {
   sponsorRequest: (text) => invoke<FundingAsk>('sponsor_request', { text }),
   sponsorRequestStatus: (paymentHash) => invoke<FundingStatus>('sponsor_request_status', { payment_hash: paymentHash }),
   firstContactRequest: (recipient, maxMsat, budgetMsat) => invoke<OwnerContactApproval | null>('first_contact_request', { recipient, max_msat: maxMsat, contact_budget_msat: budgetMsat ?? null }),
-  firstContactStatus: (id) => invoke<OwnerContactApproval>('first_contact_status', { id }),
+  firstContactStatus: (id, recipient) => invoke<OwnerContactApproval>('first_contact_status', { id, recipient: recipient ?? null }),
   firstContactCancel: (id) => invoke<void>('first_contact_cancel', { id }),
   wallet: () => invoke<WalletOverview>('payments_overview'),
   energy: (span) => invoke<EnergyRead>('energy_read', { span }),

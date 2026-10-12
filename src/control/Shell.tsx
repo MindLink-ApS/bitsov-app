@@ -214,7 +214,7 @@ export type Actions = {
   /** The door card: a stranger's signed quote, or null when the node cannot give one. */
   doorQuote: (peer: string) => Promise<FirstContactQuote | null>;
   ownerRequest: (peer: string, cap: number, budget: number) => Promise<Outcome<OwnerContactApproval | null>>;
-  ownerStatus: (id: string) => Promise<Outcome<OwnerContactApproval>>;
+  ownerStatus: (id: string, recipient?: string) => Promise<Outcome<OwnerContactApproval>>;
   ownerCancel: (id: string) => Promise<void>;
   /** Create an invoice for an exact msat amount (never rounded here). */
   invoice: (t: TrackRef, msat: number, note: string) => Promise<Outcome<unknown>>;
@@ -1061,7 +1061,7 @@ export function ControlCenter(props: Props) {
     },
     doorQuote: (peer) => source.firstContactQuote(peer),
     ownerRequest: (peer, cap, budget) => act(() => source.firstContactRequest(peer, cap, budget)),
-    ownerStatus: (id) => act(() => source.firstContactStatus(id)),
+    ownerStatus: (id, recipient) => act(() => source.firstContactStatus(id, recipient)),
     ownerCancel: (id) => source.firstContactCancel(id).catch(() => {}),
     send: async (t, text, maxMsat, firstContactMsat) => {
       if (t.kind !== 'peer' && t.kind !== 'room') return { ok: false, error: { code: 'invalid', message: 'nothing to send to' } };
