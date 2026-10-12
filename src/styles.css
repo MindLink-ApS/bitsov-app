@@ -1308,6 +1308,65 @@ input[type='checkbox'], input[type='radio'] { width: auto; flex: none; padding: 
   .add-device .form-actions > button { flex: 1 1 180px; }
 }
 
+/* Narrow (rail is a top strip below 680 px): You and + New stay pinned and reachable. */
+@media (max-width: 680px) {
+  :root { --bar-h: 60px; }
+  .rail { min-height: var(--bar-h); gap: var(--s-2); padding: var(--s-2) 0 var(--s-2) var(--s-3); scrollbar-width: none; }
+  .rail::-webkit-scrollbar { display: none; }
+  /* The strip scrolls; + New (node-id QR, introduction card, starter bitcoin) and You stay pinned at its right edge. */
+  /* Above the composer and the assistant bar (2) so the open You menu is never painted over;
+     below the wallet page (18) and the settings scrim (20) that must cover it. */
+  .rail-foot { position: sticky; right: 0; z-index: 15; margin-left: auto; gap: var(--s-1); padding: 0 var(--s-3) 0 var(--s-2); background: var(--sunk); box-shadow: -14px 0 12px -10px var(--sunk); }
+  .rail-foot .new-track { min-height: 44px; padding: 0 12px; white-space: nowrap; }
+  /* On a phone the pinned pair stays small: + New shows as "+" (its name stays "+ New"). */
+  .profile-avatar { min-width: 44px; min-height: 44px; justify-content: center; }
+  /* Its menu opens down from the bar, inside the screen (a scrolling strip would clip it). */
+  .avatar-menu { position: fixed; top: calc(var(--bar-h) + env(safe-area-inset-top, 0px)); right: var(--s-3); left: auto; bottom: auto; min-width: min(260px, calc(100vw - 2 * var(--s-3))); transform-origin: top right; }
+  .avatar-menu-item { min-height: 44px; align-items: center; }
+}
+
+/* Phone (< 480 px): everything reachable without sideways page scroll, every tap target at least 44 px. */
+@media (max-width: 480px) {
+  /* Chat header: the name and the call buttons; the node id lives in the contact panel. */
+  .track-head { gap: var(--s-2); padding: var(--s-3) var(--s-4); }
+  .track-head .sub:not(:has(.endpoint-badge)) { display: none; }
+  .track-head .call-buttons { margin-left: auto; }
+  .call-button { min-width: 44px; min-height: 44px; }
+  /* Budget approval: the sentence, then the choices, each full width. */
+  .approval.slim-approval { flex-direction: column; align-items: stretch; }
+  .approval.slim-approval .presets { flex-direction: column; }
+  .approval.slim-approval .chip { min-height: 44px; padding: 8px 12px; font-size: var(--t-sm); text-align: left; }
+  /* Settings: one row of tabs that scrolls, Close always visible. */
+  .settings-head { flex-wrap: nowrap; gap: var(--s-2); }
+  .settings-head .tabs { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; min-width: 0; }
+  .settings-head .tabs::-webkit-scrollbar { display: none; }
+  .settings-head .tabs button { min-height: 44px; }
+  .rail-foot .new-track { width: 44px; padding: 0; font-size: 0; }
+  .rail-foot .new-track::before { content: '+'; font-size: 20px; line-height: 1; }
+  /* Every control a thumb reaches is at least 44 px tall (inline text links excepted). */
+  button:not(.link), summary, [role='tab'], [role='radio'], [role='menuitem'] { min-height: 44px; }
+  button:not(.link) { min-width: 44px; }
+  /* A .link that stands alone (Back, Refresh, Close) is an action: a 44 px tap area around it.
+     A .link inside a sentence (p, li, a hint) stays a text link. */
+  button.link:not(:is(p, li, .hint, .stamp) *) { position: relative; }
+  button.link:not(:is(p, li, .hint, .stamp) *)::after { content: ''; position: absolute; left: 50%; top: 50%; width: max(100%, 44px); height: max(100%, 44px); transform: translate(-50%, -50%); }
+  /* The composer panel's Close sits at the panel edge, where an overhanging ::after
+     would be clipped by the panel's overflow: give the button itself a 44 × 44 box. */
+  .composer-panel .panel-head .link { display: inline-flex; align-items: center; justify-content: center; min-width: 44px; min-height: 44px; padding: 0; }
+  .composer-panel .panel-head .link::after { content: none; }
+  .context-toggle, .composer .attach, .ai-ask-btn, .info-btn, .icon-btn { min-width: 44px; }
+  .send-btn.primary, .primary.soft.send-btn, .send-btn, .composer .attach { height: 44px; min-height: 44px; border-radius: 22px; }
+  .node-target-section.compact .node-target-card { min-height: 44px; }
+  .track-title-btn, .composer-info > summary { min-width: 44px; }
+  /* Message bar: the text gets its own full row; emoji, voice, + and Send sit under it. */
+  .signal-bar { flex-wrap: wrap; row-gap: var(--s-2); }
+  .signal-bar > textarea { order: -1; flex: 1 1 100%; }
+  .signal-bar > .send-btn, .signal-bar > [data-send] { margin-left: auto; }
+  /* The cost ⓘ keeps its small look; its tap area grows to 44 px around it. */
+  .composer-info > summary { position: relative; }
+  .composer-info > summary::after { content: ''; position: absolute; inset: -11px; }
+}
+
 /* Desktop QR scan: a plain viewfinder over the pairing form; Cancel always visible. */
 .qr-scan-overlay { position: fixed; inset: 0; z-index: 60; display: grid; place-items: center; padding: 16px; background: color-mix(in srgb, var(--bg) 70%, transparent); backdrop-filter: blur(6px); }
 .qr-scan-box { display: grid; gap: 12px; width: min(100%, 420px); padding: 16px; border-radius: 16px; background: var(--surface, var(--bg)); box-shadow: var(--shadow-2, 0 8px 32px rgb(0 0 0 / 0.3)); }

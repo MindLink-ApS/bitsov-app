@@ -1950,7 +1950,7 @@ function Rail(props: {
 
       <div class="rail-foot">
         <Show when={props.active}>
-          <button class="track-link new-track" data-track="new" aria-current={props.openKey === 'new'} onClick={() => props.onOpen({ kind: 'new' })}>
+          <button class="track-link new-track" data-track="new" aria-label="New" aria-current={props.openKey === 'new'} onClick={() => props.onOpen({ kind: 'new' })}>
             + New
           </button>
         </Show>
