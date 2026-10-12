@@ -239,6 +239,7 @@ function AppScreen() {
             trustAck={trustAck}
             onRetry={() => void retryPairing()}
             device={device}
+            joinDevice={input => source().joinDevice(input)}
             onForgetRemote={() => source().remoteAccessForget()}
             onPreviewRemote={(link) => source().remoteAccessPreview(link)}
             onImportRemote={(link) => source().remoteAccessImport(link)}

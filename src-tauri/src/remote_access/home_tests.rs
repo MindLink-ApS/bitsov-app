@@ -487,3 +487,61 @@ async fn pr287_precommit_recovery_keeps_bootstrap_available_without_adopting_a_p
         server.await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn joining_sas_uses_one_authenticated_transcript_and_never_replays_ticket() {
+    let live = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (descriptor, _) = setup(live.local_addr().unwrap().to_string(), true);
+    let box_key = fixture()["auth"]["box_transport_pubkey"].as_str().unwrap().to_owned();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = live.accept().await.unwrap();
+        let secret = [12;32];
+        let mut hs = Builder::new(NOISE_PROTOCOL.parse().unwrap()).local_private_key(&secret).build_responder().unwrap();
+        let mut out = vec![0;MAX_HANDSHAKE_FRAME];
+        let message = read_frame(&mut stream, MAX_HANDSHAKE_FRAME).await.unwrap(); hs.read_message(&message, &mut out).unwrap();
+        let n = hs.write_message(&[], &mut out).unwrap(); write_frame(&mut stream, &out[..n]).await.unwrap();
+        let message = read_frame(&mut stream, MAX_HANDSHAKE_FRAME).await.unwrap(); hs.read_message(&message, &mut out).unwrap();
+        let hash = hs.get_handshake_hash().to_vec();
+        let client_static = hs.get_remote_static().unwrap().to_vec();
+        let mut noise = hs.into_transport_mode().unwrap();
+        let message = read_frame(&mut stream, MAX_TRANSPORT_FRAME).await.unwrap();
+        let auth: RemoteAuthRequest = serde_json::from_slice(&decode_transport(&mut noise, &message, MAX_AUTH_PLAINTEXT).unwrap()).unwrap();
+        assert_eq!(auth.v, 1); assert!(auth.code.is_none());
+        let reply = fixture()["auth"].clone();
+        let frame = encode_transport(&mut noise, &serde_json::to_vec(&reply).unwrap()).unwrap(); write_frame(&mut stream, &frame).await.unwrap();
+        for (path, body) in [("/api/v1/pair/device-key", "commitment"), ("/api/v1/pair/device-key/aa/finalize", "SAS-bound possession proof")] {
+            let message = read_frame(&mut stream, MAX_TRANSPORT_FRAME).await.unwrap();
+            let request = decode_transport(&mut noise, &message, MAX_NOISE_PLAINTEXT).unwrap();
+            let text = std::str::from_utf8(&request).unwrap();
+            assert!(text.starts_with(&format!("POST {path} HTTP/1.1\r\n")));
+            assert!(text.contains("Authorization: Bearer bst-token\r\n"));
+            assert!(text.ends_with(body));
+            let frame = encode_transport(&mut noise, b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}").unwrap();
+            write_frame(&mut stream, &frame).await.unwrap();
+        }
+        (hash, client_static)
+    });
+    let dir = tempfile::tempdir().unwrap(); let key = ClientKey::load_or_create(dir.path()).unwrap();
+    let mut connection = BootstrapConnection::connect_device(&descriptor,&key,"fixture").await.unwrap();
+    let binding = connection.binding;
+    for (path, body) in [("/api/v1/pair/device-key", "commitment"), ("/api/v1/pair/device-key/aa/finalize", "SAS-bound possession proof")] {
+        let (status, _) = connection.request("POST",path,body.as_bytes(),"bst-token").await.unwrap(); assert_eq!(status,200);
+    }
+    let (hash, client_static) = server.await.unwrap();
+    assert_eq!(&binding.handshake_hash[..], &hash); assert_eq!(&binding.client_static[..], &client_static);
+    assert_eq!(hex::encode(binding.box_public_key),box_key);
+}
+
+#[tokio::test]
+async fn owner_ticket_auth_refusal_has_expiry_used_and_revocation_guidance_without_echo() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (mut descriptor, _) = setup(listener.local_addr().unwrap().to_string(), true);
+    let code = format!("owner_{}", "ab".repeat(32));
+    descriptor.code = Some(code.clone());
+    let server = tokio::spawn(responder(listener, 12, json!({"status":"error","v":1,"code":"authentication_failed","message":"bad proof"})));
+    let dir=tempfile::tempdir().unwrap(); let key=ClientKey::load_or_create(dir.path()).unwrap();
+    let error=connect_authenticated(&descriptor,&key,"joining device").await.err().unwrap().to_string();
+    assert!(error.contains("expired")); assert!(error.contains("already used")); assert!(error.contains("revoked"));
+    assert!(!error.contains(&code));
+    let (_,_,request)=server.await.unwrap().unwrap(); assert_eq!(request.code.as_deref(),Some(code.as_str()));
+}

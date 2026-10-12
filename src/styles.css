@@ -1295,3 +1295,17 @@ input[type='checkbox'], input[type='radio'] { width: auto; flex: none; padding: 
 
 /* The call card sits under the header, never over the composer. */
 .call-panel { top: 72px; bottom: auto; }
+
+/* Device pairing shares Ember surfaces and the existing word/QR primitives. */
+.add-device { min-width: 0; }
+.add-device .qr { display: block; width: min(100%, 320px); height: auto; margin: 16px auto; }
+.add-device label { display: grid; gap: 8px; margin-block: 12px; }
+.add-device input, .add-device textarea { width: 100%; min-width: 0; box-sizing: border-box; }
+.add-device textarea { min-height: 84px; overflow-wrap: anywhere; resize: vertical; font-size: 12px; }
+.add-device .form-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.add-device .device-comparison { min-width: 0; overflow-wrap: anywhere; }
+@media (max-width: 600px) {
+  .settings-head { flex-wrap: wrap; }
+  .settings-head .tabs { min-width: 0; flex-wrap: wrap; }
+  .add-device .form-actions > button { flex: 1 1 180px; }
+}

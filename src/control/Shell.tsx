@@ -1,3 +1,4 @@
+import { AddDevice } from '../onboarding/AddDevice';
 import { OnCallPill } from './OnCallPill';
 import { watchSamples, type WatchSamples, type WatchUpdates } from './watches';
 import { ASSISTANTS, type AssistantId } from './assistants';
@@ -404,7 +405,7 @@ export function ControlCenter(props: Props) {
     setIntroNotice(null);
     setTrack({ kind: 'peer', id: card.node_id.toLowerCase() });
   };
-  const [tab, setTab] = createSignal<'body' | 'node' | 'wallet' | 'budget' | 'frontdoor'>('body');
+  const [tab, setTab] = createSignal<'body' | 'node' | 'devices' | 'wallet' | 'budget' | 'frontdoor'>('body');
   // Organism view (O1): readings the organs are drawn from, each with its age.
   const [openedAt, setOpenedAt] = createSignal(Date.now());
   const [membrane, setMembrane] = createSignal<MembraneEntry[]>([]);
@@ -1529,6 +1530,7 @@ export function ControlCenter(props: Props) {
           <div class="tabs" role="tablist" style={{ flex: 1 }}>
             <button role="tab" aria-selected={tab() === 'body'} data-tab="body" onClick={() => { setTab('body'); setContextOpen(true); }}>Body</button>
             <button role="tab" aria-selected={tab() === 'node'} data-tab="node" onClick={() => { setTab('node'); setContextOpen(true); }}>Node</button>
+            <button role="tab" aria-selected={tab() === 'devices'} data-tab="devices" onClick={() => { setTab('devices'); setContextOpen(true); }}>Devices</button>
             <button role="tab" aria-selected={tab() === 'wallet'} data-tab="wallet" onClick={() => { setTab('wallet'); setContextOpen(true); }}>Wallet</button>
             <button role="tab" aria-selected={tab() === 'budget'} data-tab="budget" onClick={() => { setTab('budget'); setContextOpen(true); }}>Budget</button>
             <button role="tab" aria-selected={tab() === 'frontdoor'} data-tab="frontdoor" onClick={() => { setTab('frontdoor'); setContextOpen(true); }}>Profile</button>
@@ -1570,6 +1572,7 @@ export function ControlCenter(props: Props) {
             <NodePanel deviceApprovals={
               <DeviceApprovals
                 device={actions.device()}
+                joinDevice={input => source.joinDevice(input)}
                 remote={props.remote === true}
                 mobile={androidQrScannerAvailable()}
                 showRegistered
@@ -1577,6 +1580,13 @@ export function ControlCenter(props: Props) {
                 onCancel={async () => { const r = await act(() => source.deviceKeyCancel()); if (r.ok) setDevice(r.value); else throw r.error.message; }}
               />
             } onForgetRemote={props.remote ? () => source.remoteAccessForget() : undefined} overview={overview()} link={link()} peers={peers()} now={now()} error={props.error ?? errors.overview ?? errors.peers} onReconnect={async () => { await props.onReconnect?.(); await loadOverview(); await loadPeers(); }} />
+          </Match>
+          <Match when={tab() === 'devices'}>
+            <AddDevice api={input => source.addDevice(input)} mobile={androidQrScannerAvailable()} />
+            <DeviceApprovals device={actions.device()} remote={props.remote === true} mobile={androidQrScannerAvailable()} showRegistered
+              joinDevice={input => source.joinDevice(input)}
+              onRegister={async () => setDevice(await source.deviceKeyRegister())}
+              onCancel={async () => setDevice(await source.deviceKeyCancel())} />
           </Match>
           <Match when={tab() === 'wallet'}>
             <button type="button" class="primary soft" data-open-wallet-page onClick={() => openWallet()}>Open Wallet</button>
