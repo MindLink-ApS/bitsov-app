@@ -39,13 +39,14 @@ export const HUB_TRUST_CARDS: readonly { heading: string; lines: readonly string
 
 type Level = 2 | 3;
 
-export function HubTrust(props: { level: Level; titleId?: string; onDismiss?: () => void }) {
+/** `quietTitle`: opened from its ⓘ toggle, which already shows the title; it stays for screen readers only. */
+export function HubTrust(props: { level: Level; titleId?: string; onDismiss?: () => void; quietTitle?: boolean }) {
   const fallbackId = createUniqueId();
   const titleId = () => props.titleId ?? fallbackId;
   return (
     <section class="panel disclosure hub-trust" aria-labelledby={titleId()} data-hub-trust>
       <div class="hub-trust-head">
-        <Dynamic component={`h${props.level}`} id={titleId()} class="hub-trust-title">{HUB_TRUST_TITLE}</Dynamic>
+        <Dynamic component={`h${props.level}`} id={titleId()} class="hub-trust-title" classList={{ 'sr-only': props.quietTitle }}>{HUB_TRUST_TITLE}</Dynamic>
         <Show when={props.onDismiss}>
           <button type="button" class="quiet" data-hub-trust-dismiss aria-label={`Hide: ${HUB_TRUST_TITLE}`} onClick={() => props.onDismiss!()}>Hide</button>
         </Show>
@@ -90,7 +91,7 @@ export function HubTrustInfo(props: { level: Level; initiallyOpen?: boolean; onH
       </button>
       <div id={panelId}>
         <Show when={open()}>
-          <HubTrust level={props.level} onDismiss={hide} />
+          <HubTrust level={props.level} onDismiss={hide} quietTitle />
         </Show>
       </div>
     </div>

@@ -79,6 +79,7 @@ fn main() {
             "device_key_cancel",
             "relation_approve",
             "spend_reconcile",
+            "op_list",
             "budget_status",
             "budget_approve",
             "budget_set",
