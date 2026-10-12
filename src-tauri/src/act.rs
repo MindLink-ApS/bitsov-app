@@ -129,6 +129,8 @@ pub struct ActionError {
     /// record's id. Stop retrying names it, so it never releases another one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pending_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
 }
 
 /// Paid, not delivered, as the conversation shows it.
@@ -267,6 +269,26 @@ fn not_dispatched_fee_limit_reason(reason: &str) -> bool {
         || (lower.contains("fee") && lower.contains("exceed"))
 }
 
+/// An active attempt owns failures even while restoring an older snapshot.
+/// Preflight snapshots are only fallbacks: a nested attempt may mint a new ID.
+pub enum OperationContext<'a> {
+    Active(Option<&'a str>),
+    Fallback(Option<&'a str>),
+}
+
+/// The single error boundary for an operation scope, including every `?`,
+/// early return and nested storage/transport failure within that scope.
+pub fn with_op<T>(context: OperationContext<'_>, result: Result<T, ActionError>) -> Result<T, ActionError> {
+    result.map_err(|mut error| {
+        let id = match context {
+            OperationContext::Active(id) => id.or(error.operation_id.as_deref()),
+            OperationContext::Fallback(id) => error.operation_id.as_deref().or(id),
+        };
+        error.operation_id = id.map(str::to_string);
+        error
+    })
+}
+
 impl ActionError {
     pub fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self {
@@ -275,11 +297,15 @@ impl ActionError {
             undelivered: None,
             admission: None,
             pending_id: None,
+            operation_id: None,
         }
     }
     /// Name the durable record this error is about.
     pub fn for_pending(self, id: &str) -> Self {
         Self { pending_id: Some(id.to_string()), ..self }
+    }
+    pub fn for_operation(self, id: Option<&str>) -> Self {
+        Self { operation_id: id.map(str::to_string), ..self }
     }
     /// The node settled payment but the message did not go. Never "not sent".
     pub fn undelivered(paid_msat: u64, retry: bool) -> Self {
@@ -675,6 +701,8 @@ pub fn call_body(recipient: &str, kind: u16, plaintext: &str) -> Result<serde_js
 /// What one paid call signal cost.
 #[derive(Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct CallReceipt {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
     pub message_id: String,
     pub kind: u16,
     pub amount_msat: u64,
