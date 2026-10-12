@@ -1306,3 +1306,26 @@ input[type='checkbox'], input[type='radio'] { width: auto; flex: none; padding: 
   .settings-head .tabs { min-width: 0; flex-wrap: wrap; }
   .add-device .form-actions > button { flex: 1 1 180px; }
 }
+
+/* Phone (< 480 px): everything reachable without sideways page scroll. */
+@media (max-width: 480px) {
+  /* The top strip scrolls; You (wallet, profile, settings) stays pinned at its right edge. */
+  .rail { gap: var(--s-2); padding: var(--s-2) 0 var(--s-2) var(--s-3); scrollbar-width: none; }
+  .rail::-webkit-scrollbar { display: none; }
+  .rail-foot { position: sticky; right: 0; z-index: 2; margin-left: auto; padding: 0 var(--s-3) 0 var(--s-2); background: var(--sunk); box-shadow: -14px 0 12px -10px var(--sunk); }
+  .rail-foot .new-track { display: none; }
+  /* Its menu opens down from the bar, inside the screen (a scrolling strip would clip it). */
+  .avatar-menu { position: fixed; top: 60px; right: var(--s-3); left: auto; bottom: auto; min-width: min(260px, calc(100vw - 2 * var(--s-3))); transform-origin: top right; }
+  /* Chat header: the name and the call buttons; the node id lives in the contact panel. */
+  .track-head { gap: var(--s-2); padding: var(--s-3) var(--s-4); }
+  .track-head .sub:not(:has(.endpoint-badge)) { display: none; }
+  .track-head .call-buttons { margin-left: auto; }
+  /* Budget approval: the sentence, then the choices, each full width. */
+  .approval.slim-approval { flex-direction: column; align-items: stretch; }
+  .approval.slim-approval .presets { flex-direction: column; }
+  .approval.slim-approval .chip { padding: 8px 12px; font-size: var(--t-sm); text-align: left; }
+  /* Settings: one row of tabs that scrolls, Close always visible. */
+  .settings-head { flex-wrap: nowrap; gap: var(--s-2); }
+  .settings-head .tabs { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; min-width: 0; }
+  .settings-head .tabs::-webkit-scrollbar { display: none; }
+}
