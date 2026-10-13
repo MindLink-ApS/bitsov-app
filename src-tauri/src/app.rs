@@ -5900,6 +5900,10 @@ async fn do_call_signal_for_admission(
     }
     // The locked money path owns call fencing, including a pending receipt.
     let caps = require_price_caps(state, false).await?;
+    if kind == act::KIND_CALL_OFFER && !caps.operations {
+        return Err(ActionError::new("call_needs_node_upgrade",
+            "Upgrade your node before making calls: it cannot track call payments and admission safely. Nothing was paid."));
+    }
     let quote = read_call_quote(state, &target).await.map_err(ActionError::node)?;
     let (principal, fee) = if kind == act::KIND_CALL_OFFER {
         let offer = quote.offer_msat.ok_or_else(|| ActionError::new(
@@ -11804,7 +11808,7 @@ mod control_act_tests {
                     None => (400, r#"{"error":"their node did not answer with a call price; nothing was paid","code":400,"reason":"call_price_unknown"}"#.into()),
                 },
                 "/payments/price/401" => (200, serde_json::json!({"kind": 401, "price_msat": 50}).to_string()),
-                "/messages/compose" => (200, serde_json::json!({"max_routing_fee_msat": 5000, "message_id": "c1", "delivered": true, "amount_msat": 10000, "accepted": true, "state": "acked"}).to_string()),
+                "/messages/compose" => (200, serde_json::json!({"operation_id": serde_json::from_str::<serde_json::Value>(b).unwrap()["operation_id"], "max_routing_fee_msat": 5000, "message_id": "c1", "delivered": true, "amount_msat": 10000, "accepted": true, "state": "acked"}).to_string()),
                 _ => inner(m, p, b),
             }
         })
@@ -12271,6 +12275,61 @@ mod control_act_tests {
     }
 
     #[tokio::test]
+    async fn h2_failed_paid_offer_keeps_admission_until_confirmed_closure() {
+        for closure in ["paid_hangup", "call_not_live", "call_not_found", "peer_end"] {
+            let (routes, paid) = ledger_call_routes();
+            paid.lock().unwrap().script = vec![("failed_paid", true)];
+            let mut node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
+                let body: serde_json::Value = serde_json::from_str(b).unwrap_or_default();
+                if p == "/messages/compose" && body["kind"] == 403
+                    && matches!(closure, "call_not_live" | "call_not_found") {
+                    (400, serde_json::json!({"reason": closure, "error": "call expired"}).to_string())
+                } else { routes(m, p, b) }
+            }));
+            node.state.spend_timeout = Duration::from_millis(60);
+            approve_calls(&node).await;
+            let lost = do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap_err();
+            assert_eq!(lost.code, "spend_unknown");
+            let id = lost.operation_id.unwrap();
+            assert_eq!(do_spend_reconcile(&node.state).await.unwrap_err().code, "failed_paid");
+            assert!(pending(&node).is_none());
+            assert_eq!(ledger_record(&node, &id)["state"], "failed_paid");
+            assert_eq!(budget_now(&node.state).spent_msat, 2000);
+
+            let restarted = reopen(&node);
+            do_budget_approve(&restarted, 500000, budget::PresetId::Careful).await.unwrap();
+            let redial = OFFER.replace(CALL_ID, "1123456789abcdef0123456789abcdef");
+            let blocked = do_call_signal(&restarted, A, 400, &redial, 15000).await.unwrap_err();
+            assert_eq!(blocked.code, "call_admission_open", "{closure}");
+            assert_eq!(blocked.operation_id.as_deref(), Some(id.as_str()));
+            assert_eq!(composes(&node), 1);
+            assert_eq!(paid.lock().unwrap().pays, 1);
+
+            if closure == "peer_end" {
+                observe_call_event(&restarted, &inbound_call_event(403, "hangup")).await;
+            }
+            let end = do_op_end_call(&restarted, CALL_ID).await.unwrap();
+            if closure == "peer_end" {
+                assert_eq!(end.op_id, id);
+            } else {
+                assert_ne!(end.op_id, id);
+                assert_eq!(ledger_record(&node, &end.op_id)["parent_op"], id);
+                assert_eq!(end.state, if closure == "paid_hangup" {
+                    spend_journal::OperationState::Settled
+                } else { spend_journal::OperationState::Unpaid });
+            }
+            assert_eq!(node.posts().iter().filter(|(_, b)| b["kind"] == 403).count(),
+                usize::from(closure != "peer_end"));
+            // Closure and duplicate cleanup remain effective after another restart.
+            let closed = reopen(&node);
+            do_budget_approve(&closed, 500000, budget::PresetId::Careful).await.unwrap();
+            assert_eq!(do_op_end_call(&closed, CALL_ID).await.unwrap().op_id, end.op_id);
+            do_call_signal(&closed, A, 400, &redial, 15000).await.unwrap();
+            assert_eq!(paid.lock().unwrap().pays, if closure == "paid_hangup" { 3 } else { 2 });
+        }
+    }
+
+    #[tokio::test]
     async fn h2_timeout_then_expired_hangup_closes_admission_and_allows_redial() {
         for reason in ["call_not_live", "call_not_found"] {
             let (routes, paid) = ledger_call_routes();
@@ -12333,6 +12392,11 @@ mod control_act_tests {
     async fn call_grant_checks_the_full_ceiling_before_posting() {
         let routes = call_routes(Some(10_000));
         let first: Routes = Arc::new(move |m, p, b| {
+            if p == "/status" {
+                return (200, serde_json::json!({"api_capabilities": [
+                    "paid_send_caps_v1", "room_terminal_outcomes_v1", "spend_budget_grant_v1",
+                    "message_operations_v1"]}).to_string());
+            }
             if p.contains("/call") || p == "/payments/price/401" || p == "/messages/compose" {
                 routes(m, p, b)
             } else { (0, String::new()) }
@@ -12363,7 +12427,7 @@ mod control_act_tests {
 
     #[tokio::test]
     async fn call_node_error_surfaces_and_keeps_an_uncertain_payment_pending() {
-        let inner = call_routes(Some(10_000));
+        let (inner, _) = ledger_call_routes();
         let node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
             if p == "/messages/compose" { (500, r#"{"error":"call routing unavailable"}"#.into()) }
             else { inner(m, p, b) }
@@ -12379,7 +12443,7 @@ mod control_act_tests {
 
     #[tokio::test]
     async fn call_node_timeout_is_bounded_and_keeps_the_payment_pending() {
-        let inner = call_routes(Some(10_000));
+        let (inner, _) = ledger_call_routes();
         let mut node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
             if p == "/messages/compose" { std::thread::sleep(Duration::from_millis(500)); }
             inner(m, p, b)
@@ -12398,7 +12462,7 @@ mod control_act_tests {
 
     #[tokio::test]
     async fn a_refused_call_returns_without_payment_and_releases_its_reservation() {
-        let inner = call_routes(Some(10_000));
+        let (inner, _) = ledger_call_routes();
         let node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
             if p == "/messages/compose" { (403, "token lacks required scope: spend".into()) }
             else { inner(m, p, b) }
@@ -12417,33 +12481,38 @@ mod control_act_tests {
     }
 
     #[tokio::test]
-    async fn a_call_offer_pays_the_callees_call_price_inside_the_contact_budget() {
+    async fn legacy_call_offers_require_node_upgrade_before_dispatch() {
         let node = fake(AuthMode::Local, call_routes(Some(10_000)));
-        let s = &node.state;
-        do_budget_approve(s, 500_000, budget::PresetId::Careful).await.unwrap();
-        with_book(s, true, |b| b.set_limit(A, false, 50_000)).unwrap();
-        let quote = read_call_quote(s, A).await.unwrap();
+        approve_calls(&node).await;
+        let quote = read_call_quote(&node.state, A).await.unwrap();
         assert_eq!((quote.offer_msat, quote.call_total_msat), (Some(10_000), Some(21_000)));
-        let receipt = do_call_signal(s, A, 400, OFFER, 15_000).await.unwrap();
-        assert_eq!((receipt.kind, receipt.amount_msat, receipt.total_msat), (400, 10_000, 15_000));
-        let (path, body) = node.posts().into_iter().find(|(p, _)| p == "/messages/compose").unwrap();
-        assert_eq!(path, "/messages/compose");
-        assert_eq!((body["kind"].as_u64(), body["is_room"].as_bool()), (Some(400), Some(false)));
-        assert_eq!((body["max_total_msat"].as_u64(), body["max_routing_fee_msat"].as_u64()), (Some(15_000), Some(5_000)));
-        assert_eq!(body["plaintext"], OFFER);
-        assert_eq!(budget_now(s).accounted_msat, 15_000);
-        assert_eq!(budget_now(s).spent_msat, 10_000);
+        let redial = OFFER.replace(CALL_ID, "1123456789abcdef0123456789abcdef");
+        for offer in [OFFER, redial.as_str()] {
+            let error = do_call_signal(&node.state, A, 400, offer, 15_000).await.unwrap_err();
+            assert_eq!(error.code, "call_needs_node_upgrade");
+            assert!(error.message.contains("Upgrade") && error.message.contains("Nothing was paid"));
+            assert!(error.operation_id.is_none());
+            assert_eq!(composes(&node), 0);
+            assert!(pending(&node).is_none());
+            assert!(do_op_list(&node.state, None).await.unwrap().operations.is_empty());
+            let budget = budget_now(&node.state);
+            assert_eq!((budget.accounted_msat, budget.spent_msat, budget.unsettled_msat), (0, 0, 0));
+        }
     }
 
     #[tokio::test]
     async fn a_call_is_refused_before_paying_when_it_cannot_be_priced_or_authorised() {
         // Their node advertises no call price: nothing is posted.
-        let node = fake(AuthMode::Local, call_routes(None));
+        let calls = call_routes(None);
+        let (ops, _) = ops_node();
+        let node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
+            if p == "/status" { ops(m, p, b) } else { calls(m, p, b) }
+        }));
         do_budget_approve(&node.state, 500_000, budget::PresetId::Careful).await.unwrap();
         with_book(&node.state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
         assert_eq!(do_call_signal(&node.state, A, 400, OFFER, 15_000).await.unwrap_err().code, "call_unsupported");
         // The ceiling the owner saw is below the price.
-        let node2 = fake(AuthMode::Local, call_routes(Some(10_000)));
+        let node2 = fake(AuthMode::Local, ledger_call_routes().0);
         do_budget_approve(&node2.state, 500_000, budget::PresetId::Careful).await.unwrap();
         with_book(&node2.state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
         assert_eq!(do_call_signal(&node2.state, A, 400, OFFER, 14_999).await.unwrap_err().code, "price_changed");
@@ -14680,6 +14749,11 @@ mod control_act_tests {
     // loopback HTTP, including the first send's all-in quote probe.
     async fn send_preflight_node(call: bool, raised: Arc<AtomicBool>) -> (Fake, tempfile::TempDir, G1) {
         let routes: Routes = Arc::new(move |m, p, b| {
+            if call && p == "/status" {
+                return (200, serde_json::json!({"api_capabilities": [
+                    "paid_send_caps_v1", "room_terminal_outcomes_v1", "spend_budget_grant_v1",
+                    "first_contact_grant_v1", "message_operations_v1"]}).to_string());
+            }
             let high = raised.load(Ordering::SeqCst);
             let value = match p {
                 "/pricing/peers" => serde_json::json!([
@@ -14733,6 +14807,9 @@ mod control_act_tests {
                 assert!(own < peer && peer < grant, "{targets:?}");
                 assert_eq!(targets[compose - 1], "GET /pair/grant", "{targets:?}");
                 assert_eq!(targets.iter().filter(|p| *p == "POST /messages/compose").count(), 1);
+                if call {
+                    observe_call_event(&node.state, &inbound_call_event(403, "hangup")).await;
+                }
             }
         }
     }
@@ -14796,6 +14873,11 @@ mod control_act_tests {
             let routes: Routes = Arc::new(move |m, p, b| {
                 if p == "/status" && changed.load(Ordering::SeqCst) {
                     return (200, serde_json::json!({"api_capabilities": []}).to_string());
+                }
+                if call && p == "/status" {
+                    return (200, serde_json::json!({"api_capabilities": [
+                        "paid_send_caps_v1", "room_terminal_outcomes_v1", "spend_budget_grant_v1",
+                        "message_operations_v1"]}).to_string());
                 }
                 if p.contains("/call") || p == "/payments/price/401" || (call && p == "/messages/compose") {
                     return call_routes(Some(10000))(m, p, b);

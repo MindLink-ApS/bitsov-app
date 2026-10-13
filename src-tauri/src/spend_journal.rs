@@ -683,12 +683,12 @@ pub fn read_completed_call_admission(dir: &Path, node_id: &str, peer: &str, call
     Ok(completed)
 }
 
-/// A paid H1 offer is `settled`; settling its payment does not close admission.
+/// Settling or failing a paid offer does not prove its admission is closed.
 pub fn admission_open(offer: &OperationRecord, records: &[OperationRecord]) -> bool {
     matches!(offer.kind.as_str(), "call_offer" | "call_recovery")
         && !offer.call_closed
         && matches!(offer.state, OperationState::Dispatching | OperationState::Paid |
-            OperationState::PaidUndelivered | OperationState::Unknown | OperationState::Settled)
+            OperationState::PaidUndelivered | OperationState::FailedPaid | OperationState::Unknown | OperationState::Settled)
         && !records.iter().any(|r| hangup_for(r, offer) && hangup_closes(r))
 }
 
