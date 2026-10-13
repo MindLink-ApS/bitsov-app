@@ -4421,7 +4421,7 @@ function Composer(props: {
    * never satisfies it.
    */
   type ApprovalKind = 'touch' | 'preset' | 'resume' | 'grant';
-  type Pressed = { bubble: string; track: TrackRef; text: string; msat: number; until: number; taken: boolean; kind: ApprovalKind; approved: boolean; grantOp: string | null };
+  type Pressed = { bubble: string; track: TrackRef; text: string; msat: number; until: number; taken: boolean; kind: ApprovalKind; approved: boolean; approvalId: string | null };
   const [consent, setConsent] = createSignal<Pressed | null>(null);
   const canContinue = () => mode() === 'message' && !!draft().trim() && shown().msat !== null && consent() === null;
   const startWaiting = (kind: ApprovalKind) => {
@@ -4431,7 +4431,7 @@ function Composer(props: {
     const bubble = props.actions.beginSending(props.track, text, msat, true);
     setDraft('');
     setDrafted(false);
-    setConsent({ bubble, track: props.track, text, msat, until: Date.now() + CONTINUE_MS, taken: false, kind, approved: false, grantOp: null });
+    setConsent({ bubble, track: props.track, text, msat, until: Date.now() + CONTINUE_MS, taken: false, kind, approved: false, approvalId: null });
   };
   const dropConsent = (reason: string) => {
     const c = untrack(consent);
@@ -4450,27 +4450,33 @@ function Composer(props: {
     const c = untrack(consent);
     if (!c) return;
     if (!approved) { dropConsent('It was not approved.'); return; }
-    const sp = untrack(() => props.spend);
-    setConsent({ ...c, approved: true, grantOp: c.kind === 'grant' && sp?.state === 'pending' ? sp.pending?.op_id ?? null : null });
+    // The exact approval it waits on, as observed now (the request's id while it is pending; none when it
+    // is already through). Any other identity observed later, including none → some, ends the consent.
+    setConsent({ ...c, approved: true, approvalId: untrack(approvalIdentity) });
   };
   const LAPSED = 'The approval was cancelled or lapsed before it went through.';
+  /** The request an approval waits on at the node: its id while pending, else none. */
+  const approvalIdentity = (): string | null => (props.spend?.state === 'pending' ? props.spend.pending?.op_id ?? 'pending' : null);
+  /** Touch ID consents whose contact approval was seen in place (its envelope): losing it again ends them. */
+  const touchSeen = new Set<string>();
   // The approval it waits on was cancelled, lapsed or replaced: the consent ends with it.
   createEffect(() => {
     const c = consent();
     if (!c || !c.approved) return;
-    if (c.kind === 'grant') {
-      if (line().open) return;
-      const sp = props.spend;
-      if (sp?.state === 'pending') {
-        const op = sp.pending?.op_id ?? null;
-        if (c.grantOp === null && op) { setConsent({ ...c, grantOp: op }); return; }
-        if (op === c.grantOp) return;
-      }
-      dropConsent(LAPSED);
-    } else if (c.kind === 'preset' || c.kind === 'resume') {
-      const k = stand().kind;
-      if (k === 'off' || k === 'paused') dropConsent(LAPSED);
+    if (c.kind === 'touch') {
+      // Spending locked, or this contact's approval (its envelope) gone again after it was in place.
+      if (!line().open) { dropConsent(LAPSED); return; }
+      if (!needsTouch()) { touchSeen.add(c.bubble); return; }
+      if (touchSeen.has(c.bubble)) dropConsent(LAPSED);
+      return;
     }
+    if (c.kind === 'preset' || c.kind === 'resume') {
+      const k = stand().kind;
+      if (k === 'off' || k === 'paused') { dropConsent(LAPSED); return; }
+    }
+    if (approvalCleared()) return;
+    // Only the exact request it was made for: another one (or one appearing where there was none) never satisfies it.
+    if (approvalIdentity() !== c.approvalId) dropConsent(LAPSED);
   });
   createEffect(on(() => shown().msat, (msat) => {
     const c = untrack(consent);

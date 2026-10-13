@@ -234,6 +234,18 @@ describe('acting from the track', () => {
     expect(host.used('message_send')).toHaveLength(0);
   }, 15_000);
 
+  it('Approve & send r2 (Fable): a request with no id when consent was made, later showing an id, is another approval: it ends', async () => {
+    const host = stubHost({ spend_request: () => view('pending') });
+    await openShell();
+    await pressWaiting(host);
+    host.spend.v = view('pending', { pending: { op_id: 'cd34', expires_at_ms: Date.now() + 900_000, owner_action: 'konsensus grant --op cd34', owner_can_grant: true } });
+    await vi.waitFor(() => expect(unsentReason()).toMatch(/cancelled or lapsed/), { timeout: 5000 });
+    host.spend.v = openView();
+    await vi.waitFor(() => expect($('[data-spend="open"]')).not.toBeNull(), { timeout: 5000 });
+    await new Promise((r) => setTimeout(r, 300));
+    expect(host.used('message_send')).toHaveLength(0);
+  }, 15_000);
+
   it('Approve & send r1 #2: its own approval failing while spending opened another way never sends it', async () => {
     let refuse!: () => void;
     const host = stubHost({ spend_request: () => new Promise((_resolve, reject) => { refuse = () => reject({ code: 'spend_refused', message: 'Refused.' }); }) });

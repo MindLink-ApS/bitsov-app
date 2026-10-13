@@ -313,6 +313,34 @@ describe('invisible payments in the composer and the context panel', () => {
     expect(text('[data-budget-wallet-warning]')).toContain('outside');
   });
 
+  it('#223 r2: a preset approval replaced by another request while waiting never sends the old bubble when the new one is approved', async () => {
+    const pend = (op: string): SpendView => ({ state: 'pending', basis: null, open_until_ms: null, window_ms: 600_000,
+      pending: { op_id: op, expires_at_ms: Date.now() + 900_000, owner_action: `konsensus grant --op ${op}`, owner_can_grant: true } });
+    let hostRef!: ReturnType<typeof stubHost>;
+    const rows = [{ target: MAYA, room: false, limit_msat: 50_000, spent_msat: 0 }];
+    const host = stubHost(budgetView({ rows }), {
+      budget_approve: () => {
+        hostRef.state.spend = pend('op-A');
+        return (hostRef.state.budget = { ...hostRef.state.budget, waiting_for_owner: true });
+      },
+    });
+    hostRef = host;
+    await openShell();
+    type('[data-composer] textarea', 'gm Maya');
+    await vi.waitFor(() => expect(text('[data-send]')).toBe('Approve & send'));
+    submit();
+    await vi.waitFor(() => expect($('[data-sending="waiting"]')).not.toBeNull());
+    await vi.waitFor(() => expect(host.used('budget_approve')).toHaveLength(1));
+    // Request A is replaced by B at the node, then B is approved.
+    hostRef.state.spend = pend('op-B');
+    await vi.waitFor(() => expect(text('[data-unsent] [data-unsent-reason]')).toMatch(/cancelled or lapsed/), { timeout: 8000 });
+    hostRef.state.budget = open(rows);
+    hostRef.state.spend = { state: 'open', basis: 'node_grant', open_until_ms: Date.now() + 600_000, pending: null, window_ms: 600_000 };
+    await vi.waitFor(() => expect($('[data-budget="ok"]')).not.toBeNull(), { timeout: 8000 });
+    await new Promise((r) => setTimeout(r, 300));
+    expect(host.used('message_send')).toHaveLength(0);
+  }, 25_000);
+
   it('approves a daily total once, then messages go with no prompt and the price still shown', async () => {
     // The approval is deferred: nothing may be sent until it clears.
     let release!: () => void;
