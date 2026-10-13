@@ -73,7 +73,7 @@ describe('optimistic send', () => {
     await open(source);
     await press('network hiccup');
     await vi.waitFor(() => expect(pending).toHaveLength(1));
-    pending[0].fail({ code: 'node', message: 'Your node did not answer.' });
+    pending[0].fail({ code: 'not_dispatched', message: 'Your node did not send it. Nothing left the wallet.' });
     await vi.waitFor(() => expect($('[data-composer-note]')?.textContent).toBe('Not sent. Your message is back in the box; press Send to try again.'));
     expect(area().value).toBe('network hiccup');
     // Never a delivered or paid claim for it.
@@ -123,7 +123,7 @@ describe('optimistic send', () => {
     await press('drop me');
     await vi.waitFor(() => expect(pending).toHaveLength(1));
     type('newer');
-    pending[0].fail({ code: 'node', message: 'Your node did not answer.' });
+    pending[0].fail({ code: 'not_dispatched', message: 'Your node did not send it. Nothing left the wallet.' });
     await vi.waitFor(() => expect(unsent()).toHaveLength(1));
     unsent()[0].querySelector<HTMLButtonElement>('[data-unsent-discard]')!.click();
     await vi.waitFor(() => expect(unsent()).toHaveLength(0));

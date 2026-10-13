@@ -476,6 +476,9 @@ export function ControlCenter(props: Props) {
       .map((e) => e.sender);
   });
   const openKey = () => (track() ? trackKey(track()!) : null);
+  // Bumped whenever the owner leaves a chat: a retry approval answered after that never goes on to send.
+  let viewGeneration = 0;
+  createEffect(on(openKey, () => { viewGeneration++; }, { defer: true }));
   // Our own node checks room bindings (genome `room_binding_v1` on /status).
   const nodeRooms = () => overview()?.capabilities?.includes(ROOM_CAPABILITY) === true;
   /**
@@ -905,10 +908,13 @@ export function ControlCenter(props: Props) {
    * delivery, file): remembered as confirmed, and a card restored for that same
    * operation gives way to it. Failed cards are only linked, never removed here.
    */
-  const confirmOperation = (t: TrackRef, opId: string | undefined) => {
+  const confirmOperation = (t: TrackRef, opId: string | undefined, messageId: string) => {
     if (!opId) return;
     confirmedOps.add(opId);
-    setArtifacts(trackKey(t), (old) => (old ?? []).filter((a) => a.type !== 'restored' || a.op.op_id !== opId));
+    setArtifacts(trackKey(t), (old) => (old ?? [])
+      .filter((a) => a.type !== 'restored' || a.op.op_id !== opId)
+      // A failed card linked to it keeps its words; its cached money claim (e.g. "not paid") is superseded by the receipt.
+      .map((a) => (a.type === 'failed' && a.error.operation_id === opId ? { ...a, op: undefined, confirmedBy: messageId } : a)));
   };
   /**
    * The host's op list for a peer: each card about an operation learns the
@@ -927,7 +933,7 @@ export function ControlCenter(props: Props) {
       const next = cur.map((a) => {
         const op = byId.get(opOf(a) ?? '');
         if (!op) return a;
-        if (a.type === 'failed') return { ...a, op };
+        if (a.type === 'failed') return a.confirmedBy ? a : { ...a, op };
         if (a.type === 'restored') return { ...a, op };
         return a;
       });
@@ -979,7 +985,8 @@ export function ControlCenter(props: Props) {
     held: () => untrack(checkFirst) || queueHold,
     blocked: () => (checkFirst() ? 'A payment result is not known yet. Nothing was sent. Check pending result, then press Send.' : null),
     settled: (r, t, text, at) => {
-      const outcome = r.ok ? 'sent' : !UNSETTLED.has(r.error.code) ? 'refused' : paidUndelivered(r) || r.error.code === 'failed_paid' ? 'paid' : 'unknown';
+      // Only a code proven unpaid is "refused" (words back, resend offered); anything else is held as unknown.
+      const outcome = r.ok ? 'sent' : provenUnpaid(r.error.code) ? 'refused' : paidUndelivered(r) || r.error.code === 'failed_paid' ? 'paid' : 'unknown';
       if (outcome === 'unknown') { setCheckFirst(true); holdWhy = 'Not sent, nothing paid: an earlier payment’s result is not known yet.'; }
       if (outcome === 'paid') {
         queueHold = true;
@@ -1043,7 +1050,7 @@ export function ControlCenter(props: Props) {
   };
   /** A message the node took: show it in the thread with what it paid. */
   const sentOne = (t: TrackRef, receipt: SendReceipt, text: string, entrance = true) => {
-    confirmOperation(t, receipt.operation_id);
+    confirmOperation(t, receipt.operation_id, receipt.message_id);
     setPaid(receipt.message_id, receipt.amount_msat);
     setAllowances(receipt.message_id, {
       total_msat: receipt.total_msat ?? receipt.amount_msat + (receipt.readmission_msat ?? 0) + (receipt.max_routing_fee_msat ?? 0),
@@ -1104,7 +1111,9 @@ export function ControlCenter(props: Props) {
     // A send that did not cross (price, setpoint) is also a membrane reading. A
     // price refusal stands at their door in the track instead of a failure row.
     if (!outcome.ok) foldMembrane((log) => membraneRefused(log, outcome.error, trackKey(t), Date.now()));
-    if (!outcome.ok && outcome.error.code !== 'not_ready' && !needsApproval(outcome.error) && !isBudgetStop(outcome.error) && outboundKind(outcome.error) !== 'price' && outcome.error.code !== 'readmission_capped' && outcome.error.code !== 'readmission_quoted') {
+    // A message whose outcome is not proven unpaid always keeps a card with its words (`text`), whatever its code.
+    const keeps = text !== undefined;
+    if (!outcome.ok && (keeps || (outcome.error.code !== 'not_ready' && !needsApproval(outcome.error) && !isBudgetStop(outcome.error) && outboundKind(outcome.error) !== 'price' && outcome.error.code !== 'readmission_capped' && outcome.error.code !== 'readmission_quoted'))) {
       addArtifact(t, { type: 'failed', action: FAILURE_LABEL[outcome.error.code] ?? action, error: outcome.error, ...(text !== undefined ? { text } : {}) });
     }
     return outcome;
@@ -1360,12 +1369,13 @@ export function ControlCenter(props: Props) {
         if (r.ok) sentOne(t, r.value, text, false);
         for (const m of released) reclaimEcho(t, m);
         // Unknown or partly paid: the failure card keeps the whole text, with no resend.
-        return recordFailure(t, !r.ok && r.error.code === 'room_partial' ? 'Room send incomplete' : 'Message not sent', r, !r.ok && UNSETTLED.has(r.error.code) ? text : undefined);
+        return recordFailure(t, !r.ok && r.error.code === 'room_partial' ? 'Room send incomplete' : 'Message not sent', r, !r.ok && !provenUnpaid(r.error.code) ? text : undefined);
       });
     },
     retryDelivery: async (t, artifactId, approvedMsat) => {
       if (moneyBlocked()) return { ok: false, error: { code: 'not_ready', message: MONEY_NOT_READY } };
       const submittedApprovalRevision = retryApprovalRevision;
+      const submittedView = viewGeneration;
       const key = trackKey(t);
       const a = (artifacts[key] ?? []).find((x) => x.id === artifactId);
       if (t.kind !== 'peer' || a?.type !== 'undelivered' || !a.paid.retry) {
@@ -1378,7 +1388,7 @@ export function ControlCenter(props: Props) {
       const text = a.text;
       const update = (next: Partial<Extract<Artifact, { type: 'undelivered' }>> | null) =>
         setArtifacts(key, (old) => (old ?? []).flatMap((x) => (x.id !== artifactId ? [x] : next ? [{ ...x, ...next } as Artifact] : [])));
-      const current = () => !moneyBlocked() && submittedApprovalRevision === retryApprovalRevision && (artifacts[key] ?? []).some((x) => x.id === artifactId && x.type === 'undelivered' && x.pendingId === a.pendingId);
+      const current = () => !moneyBlocked() && submittedApprovalRevision === retryApprovalRevision && submittedView === viewGeneration && (artifacts[key] ?? []).some((x) => x.id === artifactId && x.type === 'undelivered' && x.pendingId === a.pendingId);
       const waiting: Outcome<unknown> = { ok: false, error: { code: 'owner_only', message: 'Approve this retry at your node, then check approval.' } };
       if (approvedMsat !== undefined) {
         const ownerApproval = a.ownerApproval;
@@ -1423,7 +1433,9 @@ export function ControlCenter(props: Props) {
       } else {
         // A refusal before dispatch (approval, price) keeps the retry; anything else ends it.
         // A refused approved price is spent: Retry delivery asks for the current one.
-        const ends = ['retry_unavailable', 'spend_unknown', 'payment_unknown', 'failed_paid'].includes(r.error.code);
+        // Only a code proven unpaid keeps Retry delivery: any other (e.g. budget_unreadable after a paid
+        // retry, app.rs refine_retry_fee) may have paid, so retrying from here could pay again.
+        const ends = r.error.code === 'retry_unavailable' || !provenUnpaid(r.error.code);
         update({ paid: { ...a.paid, retry: !ends }, note: r.error.message, admission: r.error.code === 'price_cap_exceeded' ? null : a.admission });
       }
       return r;
@@ -1485,7 +1497,7 @@ export function ControlCenter(props: Props) {
       void loadWallet();
       if (!r.ok && ['price_changed', 'price_cap_exceeded'].includes(r.error.code)) void attempt('quote', () => source.filePrice(), setFilePrice);
       if (r.ok) {
-        confirmOperation(t, r.value.operation_id);
+        confirmOperation(t, r.value.operation_id, r.value.message_id);
         if (isVoiceNote(200, file.name)) voiceUrls.set(r.value.message_id, Promise.resolve(URL.createObjectURL(file)));
         setPaid(r.value.message_id, r.value.amount_msat);
         setAllowances(r.value.message_id, { total_msat: r.value.total_msat ?? r.value.amount_msat + (r.value.max_routing_fee_msat ?? 0), max_routing_fee_msat: r.value.max_routing_fee_msat ?? 0, fee_paid_msat: r.value.fee_paid_msat, readmission_msat: r.value.readmission_msat });
@@ -3483,12 +3495,15 @@ function ArtifactView(props: { moneyBlocked: boolean; a: Artifact; delivery?: De
               <Show when={f().text !== undefined}>
                 {/* The whole message stays readable here; no resend while the payment result is open. */}
                 <blockquote class="failed-text" data-failed-text>{f().text}</blockquote>
-                <Show when={UNSETTLED.has(f().error.code) && f().error.code !== 'payment_settled_undelivered' && f().error.code !== 'failed_paid' && (!f().op || OPEN_OP.has(f().op!.state))}>
+                <Show when={!provenUnpaid(f().error.code) && f().error.code !== 'payment_settled_undelivered' && f().error.code !== 'failed_paid' && !f().confirmedBy && (!f().op || OPEN_OP.has(f().op!.state))}>
                   <span class="hint" data-failed-check>Check pending result before sending it again.</span>
                 </Show>
               </Show>
-              <Show when={f().op && !OPEN_OP.has(f().op!.state) && f().op}>
+              <Show when={!f().confirmedBy && f().op && !OPEN_OP.has(f().op!.state) && f().op}>
                 {(op) => <span class="hint" data-failed-op={op().state}>{opStateText(op(), 'This app’s record of the payment named here')}</span>}
+              </Show>
+              <Show when={f().confirmedBy}>
+                <span class="hint" data-failed-confirmed={f().confirmedBy}>The payment named here now has a receipt: its message is in this chat. These words are kept here; check the chat before sending them again.</span>
               </Show>
             </div>
           );
@@ -3608,7 +3623,36 @@ export function opStateText(op: OpView, subject = 'This app’s record'): string
     default: return `${subject} could not be read.`;
   }
 }
-const UNSETTLED = new Set(['spend_unknown', 'payment_unknown', 'failed_paid', 'payment_settled_undelivered', 'room_partial']);
+/**
+ * Codes the host returns only when nothing was paid for this send (audited
+ * against src-tauri/src/app.rs on this branch; `message_send`,
+ * `message_retry`, `file_send`, all through money_post_with, POST at 4266).
+ * Before the POST only: owner_*, price_changed, price_cap_unavailable,
+ * price_quote_unavailable, peer_not_ready, room_unreachable, invalid,
+ * retry_unavailable (confirm_first_contact 3735-3745, ceiling 3875,
+ * require_price_caps 5216-5222, room_sendable, compose_body validation,
+ * do_message_retry 5508-5522). After the POST but proven unpaid by the host
+ * (it releases the reservation and abandons the journal): spend_refused
+ * 4272-4277, not_ready 4279-4282, not_dispatched 4285-4289, grant_* node
+ * refusals 4291-4297 ("before reserving or paying anything"),
+ * price_cap_exceeded / readmission_capped 4300-4321, operation_mismatch
+ * 4323-4329, readmission_quoted 5456 and retry_needs_admission 5536-5544
+ * (after a refused POST, no second compose), and the local budget/approval
+ * codes, which are before the POST except in readmit_under_quote 5451-5454,
+ * which itself only runs after a refused POST. Everything else is unresolved:
+ * spend_unknown, payment_unknown, budget_unreadable (raw after a paid retry,
+ * refine_retry_fee 4413), app_not_ready (close_charge 4040 after payment),
+ * node (transport loss can follow dispatch), and any code not listed.
+ */
+const PROVEN_UNPAID = new Set([
+  'owner_only', 'owner_contact_unavailable', 'owner_contact_expired', 'sponsor_owner_approval_required',
+  'price_changed', 'price_cap_unavailable', 'price_quote_unavailable', 'peer_not_ready', 'room_unreachable', 'invalid', 'retry_unavailable',
+  'spend_refused', 'not_ready', 'not_dispatched', 'price_cap_exceeded', 'readmission_capped', 'readmission_quoted', 'operation_mismatch', 'retry_needs_admission',
+  'grant_ended', 'grant_per_call', 'grant_exhausted', 'grant_recipient', 'grant_unpriced', 'grant_paused', 'grant_failures_pending', 'grant_rate_limited',
+  'grant_velocity', 'grant_ledger', 'grant_refused', 'grant_first_contact', 'grant_readmission', 'grant_no_envelope', 'grant_unknown',
+  'spend_locked', 'spend_expired', 'budget_needed', 'budget_paused', 'budget_exhausted', 'ceiling_exhausted', 'budget_ledger_full', 'first_contact',
+]);
+const provenUnpaid = (code: string) => PROVEN_UNPAID.has(code);
 
 const kb = (bytes: number) => (bytes < 1024 ? `${bytes} B` : `${(bytes / 1024).toFixed(bytes < 10_240 ? 1 : 0)} KB`);
 

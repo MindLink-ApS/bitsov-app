@@ -235,6 +235,120 @@ describe('Codex #221 r2 #2: every receipt path confirms its operation', () => {
   });
 });
 
+describe('Codex #221 r3 (exception round)', () => {
+  it.each([
+    ['budget_unreadable', 'Your budget file could not be read.'],
+    ['app_not_ready', 'No app storage.'],
+    ['node', 'connection reset'],
+    ['some_future_code', 'Something new.'],
+  ])('#1 %s is not proven unpaid: the words stay on a "check pending result" card, never back in the box, never resendable, and the next send waits', async (code, message) => {
+    const { source, pending } = deferredSource();
+    await open(source);
+    await press('maybe paid');
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    pending[0].fail({ code, message, operation_id: 'op-x' });
+    await vi.waitFor(() => expect($('[data-artifact="failed"]')).not.toBeNull());
+    expect($('[data-failed-text]')!.textContent).toBe('maybe paid');
+    expect($('[data-failed-check]')).not.toBeNull();
+    expect(unsent()).toHaveLength(0);
+    expect($('[data-unsent-restore]')).toBeNull();
+    expect(area().value).toBe('');
+    expect(mount.textContent).not.toMatch(/nothing (was )?paid/i);
+    // The next press is blocked until a pending check: its words stay in the box, nothing goes out.
+    type('next one');
+    $<HTMLButtonElement>('[data-send]')!.click();
+    await settleTick();
+    expect(pending).toHaveLength(1);
+    expect(sending()).toHaveLength(0);
+    expect(area().value).toBe('next one');
+  });
+
+  it('#1 a proven-unpaid refusal (not_dispatched) still gives the words back to the box', async () => {
+    const { source, pending } = deferredSource();
+    await open(source);
+    await press('not dispatched');
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    pending[0].fail({ code: 'not_dispatched', message: 'Nothing left the wallet.' });
+    await vi.waitFor(() => expect(area().value).toBe('not dispatched'));
+    expect($('[data-artifact="failed"] [data-failed-text]')).toBeNull();
+  });
+
+  it('#1 budget_unreadable after a paid retry (refine_retry_fee) ends Retry delivery: retrying could pay again', async () => {
+    const { source, pending } = deferredSource();
+    source.retry = vi.fn(async () => { throw { code: 'budget_unreadable', message: 'Your budget file could not be read.' }; }) as never;
+    await open(source);
+    await press('paid once');
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    pending[0].fail({ code: 'payment_settled_undelivered', message: 'Paid, not delivered.', undelivered: { paid_msat: 2250, retry: true }, operation_id: 'op-u' });
+    await vi.waitFor(() => expect($('[data-retry-delivery]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-retry-delivery]')!.click();
+    await vi.waitFor(() => expect(source.retry).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect($('[data-retry-delivery]')).toBeNull());
+  });
+
+  it('#2 unknown → op list says unpaid → the same op later gets a receipt: the old card drops its "nothing left your wallet" claim and points at the receipt; a later settled snapshot never brings the claim back', async () => {
+    const { source, pending } = deferredSource();
+    let list = ops([]);
+    source.opList = vi.fn(async () => list) as never;
+    await open(source);
+    await press('same words');
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    pending[0].fail({ code: 'payment_unknown', message: 'Outcome unknown.', operation_id: 'op-1' });
+    await vi.waitFor(() => expect($('[data-artifact="failed"]')).not.toBeNull());
+    list = ops([op({ state: 'unpaid' })]);
+    await go(`peer:${B}`);
+    await go(`peer:${A}`);
+    await vi.waitFor(() => expect($('[data-failed-op="unpaid"]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-spend-reconcile]')!.click();
+    await vi.waitFor(() => expect(source.spendReconcile).toHaveBeenCalled());
+    // The resend reuses op-1 and succeeds.
+    await press('same words');
+    await vi.waitFor(() => expect(pending).toHaveLength(2));
+    pending[1].settle(receipt('m-1', A, { operation_id: 'op-1' }));
+    await vi.waitFor(() => expect($('[data-failed-confirmed="m-1"]')).not.toBeNull());
+    expect($('[data-failed-op]')).toBeNull();
+    expect(mount.textContent).not.toContain('Nothing left your wallet');
+    expect($('[data-failed-check]')).toBeNull();
+    expect($('[data-failed-text]')!.textContent).toBe('same words');
+    // A later snapshot (settled) never restores the stale claim.
+    list = ops([op({ state: 'settled', paid_msat: 2250, message_id: 'm-1' })]);
+    await go(`peer:${B}`);
+    await go(`peer:${A}`);
+    await vi.waitFor(() => expect(vi.mocked(source.opList).mock.calls.length).toBeGreaterThanOrEqual(4));
+    await settleTick();
+    expect($('[data-failed-op]')).toBeNull();
+    expect($('[data-failed-confirmed="m-1"]')).not.toBeNull();
+  });
+
+  it('#3 leaving during a retry approval request: a late null answer never dispatches the retry', async () => {
+    const { source, pending } = deferredSource();
+    const retries: unknown[] = [];
+    source.retry = vi.fn(async (...a: unknown[]) => {
+      retries.push(a);
+      if (retries.length === 1) throw { code: 'retry_needs_admission', message: 'Admission is due again.', admission: { admission_msat: 1000, message_msat: 2250, max_routing_fee_msat: 0, total_msat: 3250, quoted: true } };
+      return receipt('m-r', A);
+    }) as never;
+    let answer!: (v: null) => void;
+    source.firstContactRequest = vi.fn(() => new Promise((r) => { answer = r as never; })) as never;
+    await open(source);
+    await press('paid once');
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    pending[0].fail({ code: 'payment_settled_undelivered', message: 'Paid, not delivered.', undelivered: { paid_msat: 2250, retry: true }, operation_id: 'op-u' });
+    await vi.waitFor(() => expect($('[data-retry-delivery]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-retry-delivery]')!.click();
+    await vi.waitFor(() => expect($('[data-retry-approve]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-retry-approve]')!.click();
+    await vi.waitFor(() => expect(source.firstContactRequest).toHaveBeenCalled());
+    await go('discover');
+    answer(null);
+    await settleTick();
+    await go(`peer:${A}`);
+    await settleTick();
+    expect(retries).toHaveLength(1);
+    expect(visible('m-r')).toBe(false);
+  });
+});
+
 describe('Codex #221 r1 #1: leaving while the first approval request is still being made keeps the words', () => {
   const budget: BudgetView = {
     paused: false, waiting_for_owner: false, preset: 'careful',

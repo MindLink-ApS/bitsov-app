@@ -734,7 +734,9 @@ export type Artifact =
   | { id: string; at: number; type: 'payment'; receipt: PaymentReceipt; invoice?: string }
   | { id: string; at: number; type: 'file'; receipt: FileReceipt }
   /** `op`: the host's record of `error.operation_id`, once read (H1 op_list). */
-  | { id: string; at: number; type: 'failed'; action: string; error: ActionError; text?: string; op?: OpView }
+  | { id: string; at: number; type: 'failed'; action: string; error: ActionError; text?: string; op?: OpView;
+      /** A receipt later confirmed the operation this card names: its message id. Supersedes any `op` money claim. */
+      confirmedBy?: string }
   /**
    * Paid, not delivered. `text` is the owner's own draft, kept in memory for
    * Retry delivery only. `admission`: Retry delivery paid nothing new and a
