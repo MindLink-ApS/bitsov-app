@@ -226,6 +226,22 @@ describe('app shell pairing wiring', () => {
     expect(mount.querySelector('[data-node-offline]')).toBeNull();
   });
 
+  it('a fresh iPhone build opens on "Connect this phone to your node" with the node selected and the scan-or-paste form open', async () => {
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148');
+    vi.stubGlobal('__TAURI_INTERNALS__', { invoke: (cmd: string) => {
+      if (cmd === 'node_status') return Promise.resolve({ ready: false, node_id: null, error: null });
+      if (cmd === 'pairing_status') return Promise.resolve({ ...failed, state: 'starting', reason: null });
+      return Promise.reject(new Error('not available'));
+    } });
+    mount = document.createElement('div'); document.body.appendChild(mount);
+    dispose = render(() => <App />, mount);
+    await vi.waitFor(() => expect(mount!.querySelector('[data-target="network"]')).not.toBeNull());
+    expect(mount.querySelector('[data-target="local"]')).toBeNull();
+    expect(mount.querySelector('[data-target="network"]')!.getAttribute('aria-checked')).toBe('true');
+    expect(mount.querySelector('[data-remote-access]')).not.toBeNull();
+    expect([...mount.querySelectorAll('h1')].map((h) => h.textContent)).toContain('Connect this phone to your node');
+  });
+
   it('offline: the setup steps wait behind one choice; Use a different node shows them', async () => {
     vi.stubGlobal('__TAURI_INTERNALS__', { invoke: (cmd: string) => {
       if (cmd === 'node_status') return Promise.resolve({ ready: false, node_id: null, error: 'remote unavailable', retry_after_secs: 20 });
