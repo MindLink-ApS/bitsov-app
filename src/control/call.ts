@@ -148,7 +148,7 @@ export const IDLE: CallView = {
 type Outcome<T> = { ok: true; value: T } | { ok: false; error: ActionError };
 
 export type CallDeps = {
-  /** Persist a local terminal event against the exact paid admission. No send. */
+  /** Report local teardown by exact admission. Host keeps cleanup pending. No send. */
   closeAdmission?: (operationId: string, peer: string, callId: string) => Promise<void>;
   /** Check current spend permission and show the shell’s approval path before capture. */
   authorize?: () => Promise<boolean>;
@@ -230,6 +230,7 @@ export function createCallEngine(deps: CallDeps) {
     wireId = null;
     pendingRestartId = null;
     admissions.clear();
+    pendingPeerEnds.clear();
     negotiated = false;
     answerInFlight = false;
     restartAttempted = false;
@@ -263,6 +264,7 @@ export function createCallEngine(deps: CallDeps) {
     deps.onStreams(null, null);
   };
   const admissionOps = new Map<string, Map<string, string>>();
+  const pendingPeerEnds = new Map<string, { callId: string; reason: HangupReason }>();
   const closeAdmission = (operationId: string, peer: string, callId: string) => {
     void deps.closeAdmission?.(operationId, peer, callId).catch(() => { /* Host preserves the fence on storage failure. */ });
   };
@@ -409,6 +411,8 @@ export function createCallEngine(deps: CallDeps) {
             const operations = admissionOps.get(callId!) ?? new Map<string, string>();
             operations.set(operationId, targetId!);
             admissionOps.set(callId!, operations);
+            const peerEnd = pendingPeerEnds.get(operationId);
+            if (peerEnd?.callId === targetId) end(peerEnd.reason, null, false);
           }
         }
         return result;
@@ -776,7 +780,20 @@ export function createCallEngine(deps: CallDeps) {
           if (ours && pc) await pc.addIceCandidate({ candidate: s.candidate!, sdpMid: s.sdp_mid ?? null, sdpMLineIndex: s.sdp_mline_index ?? null }).catch(() => undefined);
           return;
         default:
-          if (view.peer === peer && (admissions.has(s.call_id) || pendingRestartId === s.call_id) && active()) end(s.reason ?? 'hangup');
+          if (view.peer === peer && (admissions.has(s.call_id) || pendingRestartId === s.call_id) && active()) {
+            // Incoming calls have no outgoing admission. For our offers, only
+            // the host's exact binding can end this generation of the card.
+            if (view.outgoing) {
+              if (!m.admission_operation_id) return;
+              if (admissionOps.get(view.callId!)?.get(m.admission_operation_id) !== s.call_id) {
+                // The host can finish dispatch before the renderer gets its
+                // receipt. Apply this event only when that exact id arrives.
+                pendingPeerEnds.set(m.admission_operation_id, { callId: s.call_id, reason: s.reason ?? 'hangup' });
+                return;
+              }
+            }
+            end(s.reason ?? 'hangup', null, false);
+          }
       }
     },
   };

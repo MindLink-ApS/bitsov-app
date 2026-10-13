@@ -391,7 +391,7 @@ describe('call restart negotiation', () => {
     expect(pc.closed).toBe(true);
   });
 
-  it('honors a peer hangup on the recovery id before the offer receipt arrives', async () => {
+  it('waits for the exact host-bound recovery receipt before ending on a peer hangup', async () => {
     let finish!: (r: Awaited<ReturnType<CallDeps['signal']>>) => void;
     const { e } = engine({ signal: async (_peer, kind, plaintext) => {
       if (kind === 400 && JSON.parse(plaintext).call_id !== ID) return new Promise(resolve => { finish = resolve; });
@@ -401,12 +401,13 @@ describe('call restart negotiation', () => {
     await e.receive(msg(401, { sdp: 'answer' }), OWN);
     const pc = FakePc.made[0]; pc.connect(); pc.state('failed');
     await vi.advanceTimersByTimeAsync(0);
-    await e.receive(msg(403, { call_id: 'e'.repeat(32), reason: 'hangup' }), OWN);
+    await e.receive({ ...msg(403, { call_id: 'e'.repeat(32), reason: 'hangup' }), admission_operation_id: 'recovery-op' }, OWN);
+    expect(e.view().phase).toBe('reconnecting');
+    finish({ ok: true, value: { operation_id: 'recovery-op', total_msat: 15000 } as CallReceipt });
+    await vi.advanceTimersByTimeAsync(0);
     expect(e.view()).toMatchObject({ phase: 'ended', reason: 'hangup' });
     expect(pc.closed).toBe(true);
     expect(pc.tracks[0].stop).toHaveBeenCalledOnce();
-    finish({ ok: true, value: { total_msat: 15000 } as CallReceipt });
-    await vi.advanceTimersByTimeAsync(0);
     expect(e.view().phase).toBe('ended');
   });
 
@@ -912,6 +913,20 @@ describe('call engine: review #74 fixes', () => {
     await e.place(A, 'audio', QUOTE);
     await e.hangup();
     expect(actions).toEqual(['400', '403', 'offer-op']);
+  });
+
+  it('uses the host-bound hangup operation and never selects a reused admission itself', async () => {
+    const closeAdmission = vi.fn(async () => {});
+    const { e } = engine({ closeAdmission, signal: async () => ({ ok: true, value: { operation_id: 'new-offer', total_msat: 1 } as CallReceipt }) });
+    await e.place(A, 'audio', QUOTE);
+    await e.receive({ ...msg(403, { reason: 'hangup' }), admission_operation_id: 'old-offer' } as Message, OWN);
+    expect(e.view().phase).toBe('ringing');
+    expect(closeAdmission).not.toHaveBeenCalled();
+    await e.receive({ ...msg(403, { reason: 'hangup' }), admission_operation_id: null } as Message, OWN);
+    expect(e.view().phase).toBe('ringing');
+    await e.receive({ ...msg(403, { reason: 'hangup' }), admission_operation_id: 'new-offer' } as Message, OWN);
+    expect(e.view().phase).toBe('ended');
+    expect(closeAdmission).not.toHaveBeenCalled();
   });
 
   it('reports local failure by admission operation id, including a late offer receipt', async () => {
