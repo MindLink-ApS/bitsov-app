@@ -627,6 +627,29 @@ describe('the Wallet page', () => {
     expect(text('[data-send-result]')).not.toContain('7 sats');
   });
 
+  it('Activity with nothing yet says what shows there and offers Receive; a filter that matches nothing says so', async () => {
+    stubHost({ messages_list: () => [] });
+    await openWallet();
+    await vi.waitFor(() => expect($('[data-activity-empty="none"]')).not.toBeNull());
+    expect(text('[data-activity-empty]')).toContain('No payments yet. Payments you send and receive in this app show here.');
+    click('[data-activity-direction="in"]');
+    await vi.waitFor(() => expect($('[data-activity-empty="filtered"]')).not.toBeNull());
+    expect(text('[data-activity-empty]')).toBe('Nothing matches this filter.');
+    click('[data-activity-direction="all"]');
+    await vi.waitFor(() => expect($('[data-activity-receive]')).not.toBeNull());
+    click('[data-activity-receive]');
+    await vi.waitFor(() => expect($('[data-wallet-receive]')).not.toBeNull());
+  });
+
+  it('no channels: one sentence, the same in the Wallet and in Settings → Node, and no funding promise', async () => {
+    stubHost({ payments_overview: () => ({ ...WALLET, channels: [] }) });
+    await openWallet('channels');
+    await vi.waitFor(() => expect($('[data-channels-empty]')).not.toBeNull());
+    const sentence = 'No channels yet. A channel is how your node sends and receives over Lightning; paid messages need one.';
+    expect(text('[data-wallet-page] [data-channels-empty]')).toBe(sentence);
+    expect(text('[data-wallet-page] [data-channels-empty]')).not.toMatch(/fund|deposit/i);
+  });
+
   it('Activity: paid messages and calls from each contact’s history, filtered by kind and direction', async () => {
     stubHost();
     await openWallet();
