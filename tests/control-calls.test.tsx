@@ -1194,6 +1194,19 @@ describe('H2: what the host says about ending, said honestly', () => {
     expect(last()).toMatchObject({ stuck: null, close: { status: 'closed', message: 'The earlier call is ended. You can call them again.' } });
   });
 
+  it('call_needs_node_upgrade (refused before dispatch): says so honestly, nothing paid, nothing to end at the host', async () => {
+    const endCall = vi.fn();
+    const { e, last } = engine({
+      endCall,
+      signal: async () => ({ ok: false, error: { code: 'call_needs_node_upgrade', message: 'Upgrade your node before making calls. Nothing was paid.' } }),
+    });
+    await e.place(A, 'audio', QUOTE);
+    expect(last()).toMatchObject({ phase: 'ended', error: 'Your node needs an update before paid calls work. Nothing was paid.', paidMsat: 0, stuck: null });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(endCall).not.toHaveBeenCalled();
+    expect(FakePc.made[0].closed).toBe(true);
+  });
+
   it('call_admission_open with no earlier call found: says so, ends nothing', async () => {
     const endCall = vi.fn();
     const { e, last } = engine({
@@ -1824,6 +1837,16 @@ describe('calls in the shell', () => {
     $<HTMLButtonElement>('[data-call-close-retry]')!.click();
     await vi.waitFor(() => expect($('[data-call-close]')).toBeNull());
     expect(host.used('op_end_call')).toHaveLength(3);
+  });
+
+  it('H2: a node without call operations refuses the offer up front; the card says an update is needed and nothing was paid', async () => {
+    const host = stubHost({ call_signal: () => { throw { code: 'call_needs_node_upgrade', message: 'Upgrade your node before making calls: it cannot track call payments and admission safely. Nothing was paid.' }; } });
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect(text('[data-call-ended]')).toBe('Your node needs an update before paid calls work. Nothing was paid.'));
+    expect(host.used('op_end_call')).toHaveLength(0);
+    expect($('[data-call-close]')).toBeNull();
   });
 
   it('the STUN server is an owner setting, validated, with a note that it contacts that server', async () => {

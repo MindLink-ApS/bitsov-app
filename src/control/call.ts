@@ -687,6 +687,12 @@ export function createCallEngine(deps: CallDeps) {
       const r = await pay(CALL_OFFER, { media, sdp: conn.localDescription!.sdp }, q.offer_msat + q.offer_max_routing_fee_msat);
       // Cancelled while the offer was in flight: the mic is already off; the host ends it if it was paid.
       if (cancelled === callId || view.callId !== callId || !active()) return;
+      if (!r.ok && r.error.code === 'call_needs_node_upgrade') {
+        // Refused before dispatch (proven unpaid): no admission exists, nothing to end at the host.
+        own = own.filter((id) => id !== callId);
+        end(null, 'Your node needs an update before paid calls work. Nothing was paid.');
+        return;
+      }
       if (!r.ok && r.error.code === 'call_admission_open') {
         // Refused before paying: an earlier call to them is still open at the host. Say so; never a silent block.
         own = own.filter((id) => id !== callId);

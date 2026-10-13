@@ -373,11 +373,17 @@ export function streamItems(messages: Message[], artifacts: Artifact[]): StreamI
     const theirs = messages.filter((m) => m.sender.toLowerCase() === sender && Math.abs(m.timestamp - a.at) <= DOOR_REACH_MS).map((m) => m.timestamp);
     return Math.min(a.at, ...theirs) - 0.5;
   };
+  // A live echo claimed by a message still sending shows once, as that bubble.
+  const claimed = new Set(artifacts.flatMap((a) => (a.type === 'sending' ? (a.echoes ?? []).map((e) => e.id) : [])));
+  if (claimed.size) messages = messages.filter((m) => !claimed.has(m.id));
   const items: (StreamItem & { key: number })[] = [
     ...messages.map((message) => ({ type: 'message' as const, at: message.timestamp, key: message.timestamp, message })),
     ...artifacts.map((artifact) => ({ type: 'artifact' as const, at: artifact.at, key: sortAt(artifact), artifact })),
   ];
-  return items.sort((a, b) => a.key - b.key).map(({ key: _key, ...item }) => item as StreamItem);
+  // Messages still sending stay last, in the order pressed, until they settle:
+  // a settled message never jumps behind a later pending one.
+  const pending = (i: StreamItem) => i.type === 'artifact' && i.artifact.type === 'sending';
+  return items.sort((a, b) => Number(pending(a)) - Number(pending(b)) || a.key - b.key).map(({ key: _key, ...item }) => item as StreamItem);
 }
 
 /** The composer's spend line. */
