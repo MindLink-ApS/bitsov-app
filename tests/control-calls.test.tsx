@@ -1299,11 +1299,25 @@ describe('calls in the shell', () => {
     expect(FakePc.made[0].closed).toBe(true);
   });
 
+  it('the call pane\'s "no STUN server" note opens Settings → General → Calls', async () => {
+    stubHost();
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-network-note]')).not.toBeNull());
+    expect(text('[data-call-network-note]')).toContain('Settings → General → Calls');
+    $<HTMLButtonElement>('[data-call-settings-link]')!.click();
+    await vi.waitFor(() => expect($('[data-settings]')?.classList.contains('open')).toBe(true));
+    expect($('[data-tab="general"]')!.getAttribute('aria-selected')).toBe('true');
+    expect($('[data-stun-input]')).not.toBeNull();
+  });
+
   it('the STUN server is an owner setting, validated, with a note that it contacts that server', async () => {
     stubHost();
     await openShell();
     $<HTMLButtonElement>('[data-profile]')!.click();
     $<HTMLButtonElement>('[data-open-settings]')!.click();
+    $<HTMLButtonElement>('[data-tab="general"]')!.click();
     await vi.waitFor(() => expect($('[data-call-settings]')).not.toBeNull());
     expect(text('[data-stun-note]')).toMatch(/No STUN server: calls contact no third party/);
     const input = $<HTMLInputElement>('[data-stun-input]')!;
@@ -1332,6 +1346,7 @@ describe('calls in the shell', () => {
     await openShell();
     $<HTMLButtonElement>('[data-profile]')!.click();
     $<HTMLButtonElement>('[data-open-settings]')!.click();
+    $<HTMLButtonElement>('[data-tab="general"]')!.click();
     await vi.waitFor(() => expect($('[data-stun-own]')).not.toBeNull());
     expect(text('[data-stun-own]')).toContain(own);
     expect(text('[data-stun-note]')).toMatch(/No STUN server/);
@@ -1357,6 +1372,7 @@ describe('calls in the shell', () => {
     await openShell();
     $<HTMLButtonElement>('[data-profile]')!.click();
     $<HTMLButtonElement>('[data-open-settings]')!.click();
+    $<HTMLButtonElement>('[data-tab="general"]')!.click();
     await vi.waitFor(() => expect($('[data-stun-own-hint]')).not.toBeNull());
     expect($('[data-stun-own]')).toBeNull();
     expect(text('[data-stun-own-hint]')).toMatch(/UDP port 3478, but it has no public address set/);
@@ -1367,6 +1383,7 @@ describe('calls in the shell', () => {
     await openShell();
     $<HTMLButtonElement>('[data-profile]')!.click();
     $<HTMLButtonElement>('[data-open-settings]')!.click();
+    $<HTMLButtonElement>('[data-tab="general"]')!.click();
     await vi.waitFor(() => expect($('[data-call-settings]')).not.toBeNull());
     expect($('[data-stun-own]')).toBeNull();
     expect($('[data-stun-own-hint]')).toBeNull();
