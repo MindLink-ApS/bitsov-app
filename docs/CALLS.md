@@ -13,6 +13,32 @@
 - **Camera off** stops the camera (its light goes off); camera on captures it again.
 - Checks: `scripts/calls/media-check.py` (real WebRTC in Chromium through the app's call engine, loopback only) and `scripts/calls/regtest-demo.sh <genome>` (paid signalling on regtest plus the media check).
 
+## Native media permissions
+
+- **Android:** `src-tauri/gen/android/app/src/main/AndroidManifest.xml` is the
+  committed Android project source (see `.gitignore`), not a build output. It
+  declares `CAMERA`, `RECORD_AUDIO`, and `MODIFY_AUDIO_SETTINGS`. The locked wry
+  0.57.0 `RustWebChromeClient.kt` maps `RESOURCE_AUDIO_CAPTURE` and
+  `RESOURCE_VIDEO_CAPTURE` to those Android permissions. Its
+  `grantPermissionRequest` calls `WryActivity.requestPermissions` first, grants
+  the WebView resources only when the permissions are granted, and denies on
+  refusal. No app-specific WebChromeClient override is needed. Recheck this flow
+  when upgrading wry; do not edit its generated Kotlin files.
+- **macOS:** `src-tauri/Entitlements.plist`, referenced by
+  `bundle.macOS.entitlements`, enables microphone and camera access under the
+  hardened runtime. Usage descriptions remain in `src-tauri/Info.plist`.
+- **iOS:** There is no committed `gen/apple` project or custom Xcode template.
+  The committed source is `src-tauri/Info.plist`, explicitly referenced by
+  `bundle.iOS.infoPlist` in `tauri.ios.conf.json`. Tauri merges it into the iOS
+  Info.plist ([configuration reference](https://v2.tauri.app/reference/config/#iosconfig)),
+  reusing the macOS wording for `NSMicrophoneUsageDescription` and
+  `NSCameraUsageDescription`. When creating the Xcode project, verify both keys
+  appear in the app target's Info settings and resulting Info.plist.
+
+Headless checks validate configuration and compilation, not OS permission prompts
+or real-device capture. Native media acceptance still requires separate device
+testing.
+
 ## Recovery wire conventions
 
 The existing node v1 schema is unchanged. Only the original caller creates a restart offer (`restartIce()` plus `createOffer({ iceRestart: true })`). The SDP carries `a=x-bitsov-restart-of:<original-call-id>` under a fresh 32-hex `call_id`. The callee auto-answers only an active, negotiated call with that original id, the same authenticated peer and media, and no prior accepted restart. The attribute is removed before applying the SDP. Duplicate offers cannot trigger another answer payment. Unmatched restart offers are ignored, including after a call ended.
