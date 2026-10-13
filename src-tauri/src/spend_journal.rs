@@ -348,6 +348,16 @@ impl Journal {
                 hangup_cap_msat: body["host_hangup_cap_msat"].as_u64(),
                 call_closed: false, call_answered: false,
             });
+            // A released operation may be dispatched again with the same id.
+            // Give each call attempt a strictly ordered local generation, even
+            // within one clock tick or after the wall clock moves backwards.
+            if matches!(record.kind.as_str(), "call_offer" | "call_recovery") {
+                let previous = record.call_id.as_deref().map(|call|
+                    read_call_admission(&self.dir, node_id, &record.peer, call)).transpose()?.flatten();
+                record.created_ms = timestamp_ms().max(previous.map_or(0, |r| r.created_ms.saturating_add(1)));
+            }
+            record.call_closed = false;
+            record.call_answered = false;
             record.state = OperationState::Dispatching;
             record.cap_msat = max_msat;
             record.settled_ms = None;
@@ -409,6 +419,8 @@ impl Journal {
             || !matches!(record.kind.as_str(), "call_offer" | "call_recovery") {
             return Err(damaged_record());
         }
+        // The same operation id can name a later, explicitly unpaid resend.
+        if record.created_ms != offer.created_ms { return Ok(()); }
         if ended { record.call_closed = true; } else { record.call_answered = true; }
         self.write_operation(&record)
     }
@@ -541,7 +553,7 @@ impl Journal {
         if record.state == OperationState::Dispatching { record.cap_msat = pending.max_msat; }
         if let Some(value) = evidence {
             if let Some(reason) = value["reason"].as_str().filter(|r| matches!(*r,
-                "call_not_live" | "call_id_used" | "call_signal_in_flight")) {
+                "call_not_live" | "call_not_found" | "call_id_used" | "call_signal_in_flight")) {
                 record.reason = Some(reason.into());
             }
             if let Some(amount) = value["amount_msat"].as_u64() {
@@ -642,6 +654,35 @@ pub fn read_call_admission(dir: &Path, node_id: &str, peer: &str, call: &str) ->
     Ok(Some(record))
 }
 
+/// Snapshot the latest completed dispatch at local receive time. Do not bind
+/// a queued peer signal to an offer that is still being dispatched, and never
+/// use the peer's envelope clock as a host generation clock.
+pub fn read_completed_call_admission(dir: &Path, node_id: &str, peer: &str, call: &str) -> Result<Option<OperationRecord>, ActionError> {
+    let Some(latest) = read_call_admission(dir, node_id, peer, call)? else { return Ok(None) };
+    if latest.state != OperationState::Dispatching { return Ok(Some(latest)); }
+    let directory = call_membership_root(dir, node_id)
+        .join(blake3::hash(peer.as_bytes()).to_hex().as_str())
+        .join(blake3::hash(call.as_bytes()).to_hex().as_str());
+    let mut completed = None::<OperationRecord>;
+    for entry in read_entries(&directory)? {
+        let id = entry.file_name().to_string_lossy().into_owned();
+        if id.len() != 36 || !id.bytes().all(|c| c.is_ascii_hexdigit() || c == b'-') { return Err(damaged_record()); }
+        let record = read_operation(&dir.join("ops").join(format!("{id}.json")), Some(&id))?
+            .ok_or_else(damaged_record)?;
+        if record.node_id != node_id || record.peer != peer || record.call_id.as_deref() != Some(call) {
+            return Err(damaged_record());
+        }
+        // Keep the receive-time upper bound even if dispatch finishes while
+        // reading history. Its later receipt cannot change this binding.
+        if matches!(record.kind.as_str(), "call_offer" | "call_recovery")
+            && record.state != OperationState::Dispatching && record.created_ms < latest.created_ms
+            && completed.as_ref().is_none_or(|r| record.created_ms > r.created_ms) {
+            completed = Some(record);
+        }
+    }
+    Ok(completed)
+}
+
 /// A paid H1 offer is `settled`; settling its payment does not close admission.
 pub fn admission_open(offer: &OperationRecord, records: &[OperationRecord]) -> bool {
     matches!(offer.kind.as_str(), "call_offer" | "call_recovery")
@@ -659,7 +700,7 @@ pub fn hangup_for(record: &OperationRecord, offer: &OperationRecord) -> bool {
 
 pub fn hangup_closes(record: &OperationRecord) -> bool {
     matches!(record.state, OperationState::Paid | OperationState::PaidUndelivered | OperationState::Settled | OperationState::FailedPaid)
-        || (record.state == OperationState::Unpaid && record.reason.as_deref() == Some("call_not_live"))
+        || (record.state == OperationState::Unpaid && matches!(record.reason.as_deref(), Some("call_not_live" | "call_not_found")))
 }
 
 pub fn hangup_blocks(record: &OperationRecord) -> bool {

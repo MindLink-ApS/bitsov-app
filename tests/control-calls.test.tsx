@@ -391,7 +391,7 @@ describe('call restart negotiation', () => {
     expect(pc.closed).toBe(true);
   });
 
-  it('honors a peer hangup on the recovery id before the offer receipt arrives', async () => {
+  it('waits for the exact host-bound recovery receipt before ending on a peer hangup', async () => {
     let finish!: (r: Awaited<ReturnType<CallDeps['signal']>>) => void;
     const { e } = engine({ signal: async (_peer, kind, plaintext) => {
       if (kind === 400 && JSON.parse(plaintext).call_id !== ID) return new Promise(resolve => { finish = resolve; });
@@ -401,12 +401,13 @@ describe('call restart negotiation', () => {
     await e.receive(msg(401, { sdp: 'answer' }), OWN);
     const pc = FakePc.made[0]; pc.connect(); pc.state('failed');
     await vi.advanceTimersByTimeAsync(0);
-    await e.receive(msg(403, { call_id: 'e'.repeat(32), reason: 'hangup' }), OWN);
+    await e.receive({ ...msg(403, { call_id: 'e'.repeat(32), reason: 'hangup' }), admission_operation_id: 'recovery-op' }, OWN);
+    expect(e.view().phase).toBe('reconnecting');
+    finish({ ok: true, value: { operation_id: 'recovery-op', total_msat: 15000 } as CallReceipt });
+    await vi.advanceTimersByTimeAsync(0);
     expect(e.view()).toMatchObject({ phase: 'ended', reason: 'hangup' });
     expect(pc.closed).toBe(true);
     expect(pc.tracks[0].stop).toHaveBeenCalledOnce();
-    finish({ ok: true, value: { total_msat: 15000 } as CallReceipt });
-    await vi.advanceTimersByTimeAsync(0);
     expect(e.view().phase).toBe('ended');
   });
 
@@ -831,11 +832,12 @@ describe('H2: every end of our call asks the host to end its admission (op_end_c
     expect(last()).toMatchObject({ phase: 'ended', reason: 'hangup', paidMsat: 21_000 });
   });
 
-  it('their hang-up ends ours at the host, once; a second hangup event changes nothing', async () => {
+  it('an unbound hangup event never ends our call; our own hang-up then ends it at the host, once', async () => {
     const { e, endCall, last } = withEnd();
     await live(e);
     await e.receive(msg(403, { reason: 'hangup' }), OWN);
     await e.receive(msg(403, { reason: 'hangup' }), OWN);
+    expect(last().phase).toBe('live');
     await e.hangup();
     await vi.waitFor(() => expect(last().close?.status).toBe('closed'));
     expect(endCall.mock.calls).toEqual([[ID]]);
@@ -967,13 +969,44 @@ describe('H2 710f67e × R2: op_close_call records, then op_end_call ends (idempo
     expect(order).toEqual(['record:offer-op', `end:${ID}`]);
   });
 
-  it('their hang-up: recorded, then ended at the host, each once', async () => {
+  it('their hang-up bound by the host to this admission ends the card; the host closes it, so nothing is recorded or ended from here', async () => {
     const { e, order } = both();
     await e.place(A, 'audio', QUOTE);
     await e.receive(msg(401, { sdp: 'v=0 answer' }), OWN);
     FakePc.made[0].connect();
-    await e.receive(msg(403, { reason: 'hangup' }), OWN);
-    await vi.waitFor(() => expect(order).toEqual(['record:offer-op', `end:${ID}`]));
+    await e.receive({ ...msg(403, { reason: 'hangup' }), admission_operation_id: 'offer-op' }, OWN);
+    expect(e.view()).toMatchObject({ phase: 'ended', reason: 'hangup' });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(order).toEqual([]);
+  });
+
+  it('their hang-up with no host binding (or another admission\'s) never ends our call', async () => {
+    const { e, order } = both();
+    await e.place(A, 'audio', QUOTE);
+    await e.receive(msg(401, { sdp: 'v=0 answer' }), OWN);
+    FakePc.made[0].connect();
+    await e.receive({ ...msg(403, { reason: 'hangup' }), admission_operation_id: null }, OWN);
+    expect(e.view().phase).toBe('live');
+    expect(order).toEqual([]);
+  });
+
+  it('their bound hang-up before our offer receipt applies once the receipt brings that op id', async () => {
+    let finish!: (r: Awaited<ReturnType<CallDeps['signal']>>) => void;
+    const order: string[] = [];
+    const { e } = engine({
+      closeAdmission: async (op) => { order.push(`record:${op}`); },
+      endCall: async (id) => { order.push(`end:${id}`); return { ok: true, value: { op_id: 'h', kind: 'call_hangup', peer: A, call_id: id, state: 'settled', cap_msat: 1, paid_msat: null, message_id: null } }; },
+      signal: () => new Promise((r) => { finish = r; }),
+    });
+    const placing = e.place(A, 'audio', QUOTE);
+    await vi.waitFor(() => expect(finish).toBeDefined());
+    await e.receive({ ...msg(403, { reason: 'declined' }), admission_operation_id: 'offer-op' }, OWN);
+    expect(e.view().phase).not.toBe('ended');
+    finish({ ok: true, value: { operation_id: 'offer-op', message_id: 'm', kind: 400, amount_msat: 10_000, total_msat: 15_000, max_routing_fee_msat: 5_000, delivered: true, accepted: true, sent_at_ms: 0 } as CallReceipt });
+    await placing;
+    await vi.waitFor(() => expect(e.view()).toMatchObject({ phase: 'ended', reason: 'declined' }));
+    await new Promise((r) => setTimeout(r, 10));
+    expect(order).toEqual([]);
   });
 
   it('our hang-up while live: not recorded first, so op_end_call sends the one hangup; no app-paid 403', async () => {
@@ -1026,6 +1059,27 @@ describe('H2: what the host says about ending, said honestly', () => {
     expect(last().close).toEqual({ status: 'closed', message: null });
     await e.closeAgain();
     expect(endCall).toHaveBeenCalledTimes(2);
+  });
+
+  it('"Try ending it again" belongs to its own call: a late answer for call A never clears call B\'s', async () => {
+    const second = 'b'.repeat(32);
+    let ids = 0;
+    let releaseA!: (v: unknown) => void;
+    const endCall = vi.fn((id: string) => id === ID
+      ? new Promise((r) => { releaseA = r; }) as never
+      : Promise.resolve(err('price_changed')));
+    const { e, last } = engine({ endCall, newCallId: () => (ids++ === 0 ? ID : second) });
+    await e.place(A, 'audio', QUOTE);
+    await e.hangup(); // call A: its end is still out
+    e.dismiss();
+    await e.place(A, 'audio', QUOTE);
+    await e.hangup(); // call B: refused
+    await vi.waitFor(() => expect(last()).toMatchObject({ callId: second, close: { status: 'refused' } }));
+    releaseA({ ok: true, value: view('settled') }); // A's late success
+    await new Promise((r) => setTimeout(r, 10));
+    expect(last()).toMatchObject({ callId: second, close: { status: 'refused' } });
+    await e.closeAgain();
+    expect(endCall.mock.calls.map((c) => c[0])).toEqual([ID, second, second]);
   });
 
   it('an unknown end stays unknown and offers no "try again"', async () => {
@@ -1174,6 +1228,20 @@ describe('call engine: review #74 fixes', () => {
     await e.place(A, 'audio', QUOTE);
     await e.hangup();
     expect(actions).toEqual(['400', '403', 'offer-op']);
+  });
+
+  it('uses the host-bound hangup operation and never selects a reused admission itself', async () => {
+    const closeAdmission = vi.fn(async () => {});
+    const { e } = engine({ closeAdmission, signal: async () => ({ ok: true, value: { operation_id: 'new-offer', total_msat: 1 } as CallReceipt }) });
+    await e.place(A, 'audio', QUOTE);
+    await e.receive({ ...msg(403, { reason: 'hangup' }), admission_operation_id: 'old-offer' } as Message, OWN);
+    expect(e.view().phase).toBe('ringing');
+    expect(closeAdmission).not.toHaveBeenCalled();
+    await e.receive({ ...msg(403, { reason: 'hangup' }), admission_operation_id: null } as Message, OWN);
+    expect(e.view().phase).toBe('ringing');
+    await e.receive({ ...msg(403, { reason: 'hangup' }), admission_operation_id: 'new-offer' } as Message, OWN);
+    expect(e.view().phase).toBe('ended');
+    expect(closeAdmission).not.toHaveBeenCalled();
   });
 
   it('reports local failure by admission operation id, including a late offer receipt', async () => {

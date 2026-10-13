@@ -43,6 +43,8 @@ export type Message = {
   payment_amount_msat: number | null;
   /** Room thread (`room_thread`) only: our one room message, each member's copy. */
   copies?: RoomCopy[];
+  /** Host-bound admission at live receive time; null means no current binding. */
+  admission_operation_id?: string | null;
 };
 
 /** One member's copy of our own room message (genome `RoomCopy`). */
