@@ -34,7 +34,7 @@ import { androidQrScannerAvailable } from '../pairingScanner';
 import { callCost, createCallEngine, IDLE as CALL_IDLE, isCallKind, signalCost, stunServer, type CallMedia, type CallView } from './call';
 import { createMeetingEngine, declineCost, inviteCost, joinCost, MAX_PARTICIPANTS, MEETING_IDLE, type LegState, type MeetingView, type ShownQuotes } from './meeting';
 import { admitRoom, leaveRoom, localRoom, localRooms, newRoom, rememberRoom, ROOM_CAPABILITY, ROOM_PAGE, roomOf, sameRoom, sendRoom, type LegPlan, type LocalRoom } from './room';
-import { NewRoomPanel, RoomThread, type RoomSend } from './RoomPanel';
+import { NewRoomPanel, RoomThread, type RoomSend, type ThreadRead } from './RoomPanel';
 import { blobUrl, duration, FILE_MAX_BYTES, fileNameOf, isVoiceNote, type Recording, startRecording, VOICE_MAX_MS } from './voice';
 import { EMOJIS, insertEmoji } from './emoji';
 import { cleanPurpose, hostReadProblem, invoicePaymentHash, NOT_PAYABLE_NOTE, type NotPayable, payeeView, readChatInvoice } from './bolt11';
@@ -317,6 +317,38 @@ export function ControlCenter(props: Props) {
   const [link, setLink] = createSignal<LinkState | null>(null);
   const seenEntrances = new Set<string>();
   const [threads, setThreads] = createStore<{ t: Threads; unread: Unread; fresh: Record<string, true> }>({ t: {}, unread: {}, fresh: {} });
+  /**
+   * Each chat's CURRENT history read (the latest attempt only): only a read that
+   * succeeded may say "no messages"; a reopen or reconnect starts pending again.
+   */
+  const [threadRead, setThreadRead] = createStore<Record<string, ThreadRead>>({});
+  const readRevision: Record<string, number> = {};
+  let readSeq = 0;
+  /** Runs one history read for `key`, recording pending → ok | failed for this attempt only. */
+  /** Each chat's read error, for its current read only (never another chat's, never an older read's). */
+  const [threadError, setThreadError] = createStore<Record<string, string | undefined>>({});
+  const readThread = async <T,>(key: string, run: () => Promise<T>, apply: (v: T) => void) => {
+    const rev = ++readSeq;
+    readRevision[key] = rev;
+    setThreadRead(key, 'pending');
+    setThreadError(key, undefined);
+    let value: T;
+    try {
+      value = await run();
+    } catch (e) {
+      // Only the current read may say it failed, and only it sets the error.
+      if (readRevision[key] !== rev) return;
+      const error = asActionError(e);
+      setThreadRead(key, 'failed');
+      setThreadError(key, error.code === 'not_ready' ? undefined : typeof e === 'string' ? e : error.message);
+      return;
+    }
+    // Messages an older read brought are still merged; only the current read sets the state.
+    apply(value);
+    if (readRevision[key] !== rev) return;
+    setThreadRead(key, 'ok');
+    setThreadError(key, undefined);
+  };
   props.onWatchSamples?.(() => {
     const at = Date.now();
     return watchSamples({ ready: props.ready, locked: false,
@@ -517,7 +549,10 @@ export function ControlCenter(props: Props) {
   const loadRoomPage = (id: string, before: number | null) => {
     if (roomPages[id]?.loading) return;
     setRoomPages(id, { before, more: roomPages[id]?.more ?? false, loading: true });
-    void attempt('thread', () => source.roomThread(id, before ?? undefined, ROOM_PAGE), (page) => {
+    // The first page is the room's current read; an earlier page never changes what the room says about being empty.
+    const read = <T,>(run: () => Promise<T>, apply: (v: T) => void) =>
+      before === null ? readThread(trackKey({ kind: 'bound', id }), run, apply) : attempt('thread', run, apply);
+    void read(() => source.roomThread(id, before ?? undefined, ROOM_PAGE), (page) => {
       foldRooms(page, false);
       const oldest = page.length ? Math.min(...page.map((m) => m.timestamp)) : before;
       setRoomPages(id, { before: oldest, more: page.length >= ROOM_PAGE, loading: false });
@@ -673,7 +708,7 @@ export function ControlCenter(props: Props) {
     }
     if (t.kind !== 'peer' && t.kind !== 'room') return;
     const key = trackKey(t);
-    void attempt('thread', () => source.messages(t.id), (page) => {
+    void readThread(key, () => source.messages(t.id), (page) => {
       // History can already hold a message still sending here: its bubble claims it, as for the live echo.
       for (const m of page) claimEcho(m, t.kind === 'room' ? t.id : null);
       setThreads('t', key, (old) => mergeMessages(old ?? [], page));
@@ -1711,6 +1746,8 @@ export function ControlCenter(props: Props) {
                       deliveries={deliveries}
                       earlier={roomPages[room().id]?.more === true}
                       loadingEarlier={roomPages[room().id]?.loading === true}
+                      read={threadRead[trackKey(t())] ?? 'pending'}
+                      error={threadError[trackKey(t())]}
                       onEarlier={() => loadRoomPage(room().id, roomPages[room().id]?.before ?? null)}
                       sends={roomSends[room().id] ?? []}
                       fresh={threads.fresh}
@@ -1775,7 +1812,8 @@ export function ControlCenter(props: Props) {
                     budgetStale={grantUnknown() || (budget() !== null && (!budgetConfirmed() || !!errors.budgetPoll))}
                     actions={actions}
                     now={now()}
-                    error={errors.thread}
+                    error={threadError[trackKey(t())]}
+                    read={threadRead[trackKey(t())] ?? 'pending'}
                     onReconnect={async () => { await props.onReconnect?.(); await loadThread(t()); }}
                     prefill={prefill()}
                     onPrefillUsed={() => setPrefill(null)}
@@ -2437,11 +2475,18 @@ function Conversation(props: {
   actions: Actions;
   now: number;
   error: string | undefined;
+  /** This chat's current history read: only `ok` may say it is empty. */
+  read: ThreadRead;
   onReconnect: () => void;
   prefill: Prefill | null;
   onPrefillUsed: () => void;
   onContext: () => void;
 }) {
+  /** We have a budget line for them: we paid them before. The only contact status said in an empty chat. */
+  const knownContact = () => {
+    const t = props.track;
+    return t.kind === 'peer' && (props.budget?.rows ?? []).some((r) => !r.room && r.target.toLowerCase() === t.id.toLowerCase());
+  };
   let stream: HTMLDivElement | undefined;
   // A request card's Pay: hands the invoice to the composer's Pay review. Never pays.
   const [payRequest, setPayRequest] = createSignal<{ seq: number; bolt11: string } | null>(null);
@@ -2550,14 +2595,23 @@ function Conversation(props: {
         <For
           each={[...keyedItems().keys()]}
           fallback={
-            <div class="empty-track">
-              <h2>Nothing here yet</h2>
-              <p class="hint">
-                {props.track.kind === 'room'
-                  ? `${props.nodeRooms ? 'This is a legacy room. Create a new room to use group chat.' : 'This node does not support rooms yet.'} A message here pays each member separately, and reaches each one when their payment settles.`
-                  : `Your first message to ${props.name} is a paid first contact: it is admitted when the payment settles.`}
-              </p>
-            </div>
+            // Unknown stays unknown: while the history is being read nothing is said, and a failed
+            // read shows only its error (below). Only a read that came back empty says "no messages".
+            <Show when={props.read === 'ok'} fallback={<Show when={props.read === 'pending'}><div class="empty-track" data-thread-loading><DelayedSpinner /></div></Show>}>
+              <div class="empty-track" data-thread-empty={props.track.kind === 'room' ? 'room' : knownContact() ? 'known' : 'unknown'}>
+                <h2>No messages here yet</h2>
+                <Show when={props.track.kind === 'room'}>
+                  <p class="hint">
+                    {props.nodeRooms ? 'This is a legacy room. Create a new room to use group chat.' : 'This node does not support rooms yet.'} A message here pays each member separately, and reaches each one when their payment settles.
+                  </p>
+                </Show>
+                {/* Only a budget line (we have paid them before) is said; whether they would need a first
+                    contact is the node's to say, on the door card, never guessed here. */}
+                <Show when={props.track.kind === 'peer' && knownContact()}>
+                  <p class="hint">Each message to {props.name} pays their price.</p>
+                </Show>
+              </div>
+            </Show>
           }
         >
           {(key, i) => {
