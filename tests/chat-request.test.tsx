@@ -293,10 +293,11 @@ describe('reading a chat invoice', () => {
 const paired = { state: 'paired', scopes: ['read', 'receive'], short_code: 'ABCD-EFGH', code_from_node: true, reason: null, remote: false, bootstrap: null };
 type Call = { cmd: string; args: Record<string, unknown> | undefined };
 type Reply = (args?: Record<string, unknown>) => unknown;
+// A #227 host: an open window names its grant and the request that armed it.
 const view = (state: SpendView['state'], extra: Partial<SpendView> = {}): SpendView => ({
-  state, basis: null, open_until_ms: null, pending: null, window_ms: WINDOW, ...extra,
+  state, basis: null, open_until_ms: null, pending: null, window_ms: WINDOW, granted_op: null, armed_by_request: null, ...extra,
 });
-const openView = () => view('open', { basis: 'node_grant', open_until_ms: Date.now() + WINDOW });
+const openView = () => view('open', { basis: 'node_grant', open_until_ms: Date.now() + WINDOW, granted_op: 'cd34', armed_by_request: 'ab12' });
 const msg = (id: string, plaintext: string, sender = A, kind = 1) =>
   ({ id, kind, sender, recipient: sender === A ? OWN : A, timestamp: Date.now() - 1000, plaintext, payment_amount_msat: 2000 });
 
@@ -324,7 +325,7 @@ function stubHost(overrides: Record<string, Reply> = {}, network: string | null 
     spend_status: () => spend.v,
     spend_request: () => {
       spend.v = view('pending', { pending: { op_id: 'ab12', expires_at_ms: Date.now() + 900_000, owner_action: 'konsensus grant --op ab12', owner_can_grant: true } });
-      return spend.v;
+      return { ...spend.v, request_id: 'ab12' };
     },
     message_send: (args) => ({ message_id: 'sent-1', recipient: args!.recipient, is_room: args!.is_room, delivered: true, amount_msat: 2000, sent_at_ms: Date.now() }),
     invoice_amount: (args) => hostDecode(args!.bolt11 as string),
@@ -413,8 +414,9 @@ describe('a request in chat', () => {
     $<HTMLButtonElement>('[data-send-in-chat]')!.click();
     await vi.waitFor(() => expect(host.used('spend_request')).toHaveLength(1));
     expect(host.used('message_send')).toHaveLength(0);
-    // The invoice waits in the message draft for the owner's Send.
-    expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe(invoice());
+    // Approve & send: the invoice waits in its bubble until the approval lands; nothing is sent before.
+    expect(text('[data-sending="waiting"] .bubble')).toBe(invoice());
+    expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('');
     await vi.waitFor(() => expect($('[data-approval="pending"]')).not.toBeNull());
   });
 

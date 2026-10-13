@@ -19,7 +19,10 @@ const ROOM = '0f8e2b7a-1c3d-4e5f-8a9b-0c1d2e3f4a5b';
 const DAY = 86_400_000;
 
 const paired: PairingView = { state: 'paired', scopes: ['read', 'receive'], short_code: 'ABCD-EFGH', code_from_node: true, reason: null, remote: false, bootstrap: null };
-const locked: SpendView = { state: 'locked', basis: null, open_until_ms: null, pending: null, window_ms: 600_000 };
+// A #227 host: closed views name no grant and no arming request.
+const locked: SpendView = { state: 'locked', basis: null, open_until_ms: null, pending: null, window_ms: 600_000, granted_op: null, armed_by_request: null };
+/** The window an immediate preset/resume armed over the live grant (cd34). */
+const armed: SpendView = { state: 'open', basis: 'node_grant', open_until_ms: Date.now() + 86_400_000, pending: null, window_ms: 600_000, granted_op: 'cd34', armed_by_request: null };
 
 function budgetView(extra: Partial<BudgetView> = {}): BudgetView {
   return {
@@ -313,25 +316,99 @@ describe('invisible payments in the composer and the context panel', () => {
     expect(text('[data-budget-wallet-warning]')).toContain('outside');
   });
 
-  it('approves a daily total once, then messages go with no prompt and the price still shown', async () => {
-    const host = stubHost(budgetView({ rows: [{ target: MAYA, room: false, limit_msat: 50_000, spent_msat: 0 }] }));
+  it('#227: a preset waiting at the node (request op-A) sends once when the window op-A armed opens, and never on a status read alone', async () => {
+    const pend = (op: string): SpendView => ({ state: 'pending', basis: null, open_until_ms: null, window_ms: 600_000, granted_op: null, armed_by_request: null,
+      pending: { op_id: op, expires_at_ms: Date.now() + 900_000, owner_action: `konsensus grant --op ${op}`, owner_can_grant: true } });
+    let hostRef!: ReturnType<typeof stubHost>;
+    const rows = [{ target: MAYA, room: false, limit_msat: 50_000, spent_msat: 0 }];
+    const host = stubHost(budgetView({ rows }), {
+      budget_approve: () => {
+        hostRef.state.spend = pend('op-A');
+        hostRef.state.budget = { ...hostRef.state.budget, waiting_for_owner: true };
+        return { ...hostRef.state.budget, request_id: 'op-A', granted_op: null };
+      },
+    });
+    hostRef = host;
     await openShell();
     type('[data-composer] textarea', 'gm Maya');
-    await vi.waitFor(() => expect(text('[data-send]')).toBe('Send'));
+    await vi.waitFor(() => expect(text('[data-send]')).toBe('Approve & send'));
+    submit();
+    await vi.waitFor(() => expect($('[data-sending="waiting"]')).not.toBeNull());
+    await new Promise((r) => setTimeout(r, 300));
+    expect(host.used('message_send')).toHaveLength(0);
+    // The owner approves op-A at the node: its window opens (grant op cd34, armed by op-A).
+    hostRef.state.budget = open(rows);
+    hostRef.state.spend = { state: 'open', basis: 'node_grant', open_until_ms: Date.now() + 600_000, pending: null, window_ms: 600_000, granted_op: 'cd34', armed_by_request: 'op-A' };
+    await vi.waitFor(() => expect(host.used('message_send')).toHaveLength(1), { timeout: 8000 });
+    await new Promise((r) => setTimeout(r, 300));
+    expect(host.used('message_send')).toHaveLength(1);
+  }, 25_000);
+
+  it('#223 r2: a preset approval replaced by another request while waiting never sends the old bubble when the new one is approved', async () => {
+    const pend = (op: string): SpendView => ({ state: 'pending', basis: null, open_until_ms: null, window_ms: 600_000, granted_op: null, armed_by_request: null,
+      pending: { op_id: op, expires_at_ms: Date.now() + 900_000, owner_action: `konsensus grant --op ${op}`, owner_can_grant: true } });
+    let hostRef!: ReturnType<typeof stubHost>;
+    const rows = [{ target: MAYA, room: false, limit_msat: 50_000, spent_msat: 0 }];
+    const host = stubHost(budgetView({ rows }), {
+      budget_approve: () => {
+        hostRef.state.spend = pend('op-A');
+        hostRef.state.budget = { ...hostRef.state.budget, waiting_for_owner: true };
+        return { ...hostRef.state.budget, request_id: 'op-A', granted_op: null };
+      },
+    });
+    hostRef = host;
+    await openShell();
+    type('[data-composer] textarea', 'gm Maya');
+    await vi.waitFor(() => expect(text('[data-send]')).toBe('Approve & send'));
+    submit();
+    await vi.waitFor(() => expect($('[data-sending="waiting"]')).not.toBeNull());
+    await vi.waitFor(() => expect(host.used('budget_approve')).toHaveLength(1));
+    // Request A is replaced by B at the node, then B is approved.
+    hostRef.state.spend = pend('op-B');
+    await vi.waitFor(() => expect(text('[data-unsent] [data-unsent-reason]')).toMatch(/cancelled or lapsed/), { timeout: 8000 });
+    hostRef.state.budget = open(rows);
+    hostRef.state.spend = { state: 'open', basis: 'node_grant', open_until_ms: Date.now() + 600_000, pending: null, window_ms: 600_000 };
+    await vi.waitFor(() => expect($('[data-budget="ok"]')).not.toBeNull(), { timeout: 8000 });
+    await new Promise((r) => setTimeout(r, 300));
+    expect(host.used('message_send')).toHaveLength(0);
+  }, 25_000);
+
+  it('approves a daily total once, then messages go with no prompt and the price still shown', async () => {
+    // The approval is deferred: nothing may be sent until it clears.
+    let release!: () => void;
+    let hostRef!: ReturnType<typeof stubHost>;
+    const host = stubHost(budgetView({ rows: [{ target: MAYA, room: false, limit_msat: 50_000, spent_msat: 0 }] }), {
+      budget_approve: (args) => new Promise((resolve) => {
+        release = () => {
+          hostRef.state.spend = { ...armed, open_until_ms: Date.now() + 86_400_000 };
+          hostRef.state.budget = open(hostRef.state.budget.rows, { ceiling_msat: args!.ceiling_msat as number });
+          resolve({ ...hostRef.state.budget, request_id: null, granted_op: 'cd34' });
+        };
+      }),
+    });
+    hostRef = host;
+    await openShell();
+    type('[data-composer] textarea', 'gm Maya');
+    // A preset is already chosen: the one press approves it and sends this message.
+    await vi.waitFor(() => expect(text('[data-send]')).toBe('Approve & send'));
     expect(text('[data-budget-setup]')).toContain('Someone new always asks first');
 
-    // The owner picks a preset; the tap is the approval. Nothing is sent by it.
+    // The owner picks a preset; the tap is the approval (Approve & send): this message then goes once.
     $<HTMLButtonElement>('[data-preset="everyday"]')!.click();
     submit();
     await vi.waitFor(() => expect(host.used('budget_approve')).toHaveLength(1));
     expect(host.used('budget_approve')[0].args).toEqual({ ceiling_msat: 2_000_000, preset: 'everyday' });
+    expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('');
+    // Waiting on the approval: nothing is sent before it clears.
+    expect(text('[data-sending="waiting"] .bubble')).toBe('gm Maya');
+    await new Promise((r) => setTimeout(r, 300));
     expect(host.used('message_send')).toHaveLength(0);
-    expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('gm Maya');
+    release();
 
     await vi.waitFor(() => expect($('[data-budget="ok"]')).not.toBeNull());
-    expect(text('[data-budget-line]')).toContain('Pays automatically · 0 sats of 50 sats to Maya in 24 h');
-    submit();
+    // The approved message went at once, through the budget it just approved.
     await vi.waitFor(() => expect(host.used('message_send')).toHaveLength(1));
+    await vi.waitFor(() => expect(text('[data-budget-line]')).toContain('Pays automatically · 2 sats of 50 sats to Maya in 24 h'));
     expect(host.used('message_send')[0].args).toMatchObject({ recipient: MAYA, max_msat: 2000, first_contact_msat: null });
     await vi.waitFor(() => expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe(''));
     // A second message: no approval, no question.
@@ -1058,7 +1135,19 @@ describe('invisible payments in the composer and the context panel', () => {
   });
 
   it('shows the running tally in the context panel and pauses everything in one tap', async () => {
-    const host = stubHost(open([{ target: MAYA, room: false, limit_msat: 50_000, spent_msat: 4000 }, { target: ROOM, room: true, limit_msat: 100_000, spent_msat: 3000 }]));
+    // Resume is deferred: nothing may be sent until it clears.
+    let release!: () => void;
+    let hostRef!: ReturnType<typeof stubHost>;
+    const host = stubHost(open([{ target: MAYA, room: false, limit_msat: 50_000, spent_msat: 4000 }, { target: ROOM, room: true, limit_msat: 100_000, spent_msat: 3000 }]), {
+      budget_resume: () => new Promise((resolve) => {
+        release = () => {
+          hostRef.state.spend = { ...armed, open_until_ms: Date.now() + 86_400_000 };
+          hostRef.state.budget = open(hostRef.state.budget.rows);
+          resolve({ ...hostRef.state.budget, request_id: null, granted_op: 'cd34' });
+        };
+      }),
+    });
+    hostRef = host;
     await openShell();
     $<HTMLButtonElement>('[data-tab="budget"]')!.click();
     await vi.waitFor(() => expect(text('[data-tally-total]')).toBe('7 sats / 500 sats'));
@@ -1073,10 +1162,18 @@ describe('invisible payments in the composer and the context panel', () => {
     type('[data-composer] textarea', 'while paused');
     await vi.waitFor(() => expect($('[data-budget-paused]')).not.toBeNull());
     expect(text('[data-budget-paused]')).toContain('New app payments are blocked');
+    // Resume & send: the one press resumes, then this message goes once.
+    expect(text('[data-send]')).toBe('Resume & send');
     submit();
     await vi.waitFor(() => expect(host.used('budget_resume')).toHaveLength(1));
+    await new Promise((r) => setTimeout(r, 300));
     expect(host.used('message_send')).toHaveLength(0);
+    release();
     await vi.waitFor(() => expect($('[data-budget="ok"]')).not.toBeNull());
+    await vi.waitFor(() => expect(host.used('message_send')).toHaveLength(1));
+    expect(host.used('message_send')[0].args).toMatchObject({ plaintext: 'while paused' });
+    await new Promise((r) => setTimeout(r, 300));
+    expect(host.used('message_send')).toHaveLength(1);
   });
 
   it('lowers one contact’s budget from the panel', async () => {
