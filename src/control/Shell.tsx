@@ -432,7 +432,7 @@ export function ControlCenter(props: Props) {
     setIntroNotice(null);
     setTrack({ kind: 'peer', id: card.node_id.toLowerCase() });
   };
-  const [tab, setTab] = createSignal<'body' | 'node' | 'devices' | 'wallet' | 'budget' | 'frontdoor'>('body');
+  const [tab, setTab] = createSignal<'general' | 'body' | 'node' | 'devices' | 'wallet' | 'budget' | 'frontdoor'>('body');
   // Organism view (O1): readings the organs are drawn from, each with its age.
   const [openedAt, setOpenedAt] = createSignal(Date.now());
   const [membrane, setMembrane] = createSignal<MembraneEntry[]>([]);
@@ -1808,6 +1808,7 @@ export function ControlCenter(props: Props) {
       >
         <div class="row settings-head">
           <div class="tabs" role="tablist" style={{ flex: 1 }}>
+            <button role="tab" aria-selected={tab() === 'general'} data-tab="general" onClick={() => { setTab('general'); setContextOpen(true); }}>General</button>
             <button role="tab" aria-selected={tab() === 'body'} data-tab="body" onClick={() => { setTab('body'); setContextOpen(true); }}>Body</button>
             <button role="tab" aria-selected={tab() === 'node'} data-tab="node" onClick={() => { setTab('node'); setContextOpen(true); }}>Node</button>
             <button role="tab" aria-selected={tab() === 'devices'} data-tab="devices" onClick={() => { setTab('devices'); setContextOpen(true); }}>Devices</button>
@@ -1817,8 +1818,10 @@ export function ControlCenter(props: Props) {
           </div>
           <button class="quiet context-toggle" data-settings-close onClick={() => setContextOpen(false)} aria-label="Close settings">Close</button>
         </div>
-        <SettingsDisplay own={ownStun()} />
         <Switch>
+          <Match when={tab() === 'general'}>
+            <SettingsDisplay own={ownStun()} />
+          </Match>
           <Match when={tab() === 'body'}>
             <Organism
               readiness={readinessLine(overview(), now())}
@@ -1906,6 +1909,7 @@ export function ControlCenter(props: Props) {
       <span class="sr-only" role="status" aria-live="polite" data-send-live data-send-live-seq={sendLive().seq}>{sendLive().text}</span>
       <CallPanel
         panelRef={el => { callPanel = el; }}
+        openCallSettings={() => { setTab('general'); setContextOpen(true); }}
         approvalOpen={callApproval()}
         approval={<Show when={callApproval()}>
           <div data-call-approval>
@@ -2821,9 +2825,14 @@ function MessageView(props: {
   );
 }
 
-function CallNetworkNote() {
+function CallNetworkNote(props: { onOpenSettings?: () => void }) {
   return <Show when={!stunPref()}>
-    <p class="hint call-network-note" data-call-network-note>Calls may not connect across networks yet. No STUN server is set. Choose one in Settings → Calls.</p>
+    <p class="hint call-network-note" data-call-network-note>
+      Calls may not connect across networks yet. No STUN server is set. Choose one in Settings → General → Calls.
+      <Show when={props.onOpenSettings}>
+        {' '}<button type="button" class="link" data-call-settings-link onClick={() => props.onOpenSettings!()}>Open call settings</button>
+      </Show>
+    </p>
   </Show>;
 }
 
@@ -2899,6 +2908,8 @@ function CallPanel(props: {
   mute: () => void;
   camera: () => void;
   dismiss: () => void;
+  /** Opens Settings → General, where the STUN server is chosen. */
+  openCallSettings?: () => void;
 }) {
   const [tick, setTick] = createSignal(Date.now());
   const [answer, setAnswer] = createSignal<number | null>(null);
@@ -2927,7 +2938,7 @@ function CallPanel(props: {
         {props.approval}
         {/* Across networks a call needs a STUN server: said where it matters, while a call is being set up or has failed to connect. */}
         <Show when={['calling', 'ringing', 'connecting'].includes(v().phase) || (v().phase === 'ended' && (v().reason === 'failed' || v().reason === 'timeout'))}>
-          <CallNetworkNote />
+          <CallNetworkNote onOpenSettings={props.openCallSettings} />
         </Show>
         <p class="hint" data-call-recovery-note>A network interruption may trigger one paid recovery attempt within your budget. Recovery uses another call admission and signalling fees.</p>
         <Show when={v().media === 'video' && (v().phase === 'live' || v().phase === 'connecting' || v().phase === 'reconnecting')}>
