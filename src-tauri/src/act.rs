@@ -443,6 +443,8 @@ pub struct SpendView {
     pub request_id: Option<String>,
     /// The node op that granted this open window; null when unknown or closed.
     pub granted_op: Option<String>,
+    /// The pending elevation completed to arm this window; null without one or when closed.
+    pub armed_by_request: Option<String>,
     pub state: SpendState,
     /// Set when the last request ended without a grant: the owner can ask again.
     pub lapse: Option<Lapse>,
@@ -456,6 +458,7 @@ pub struct SpendView {
 #[derive(Default, Debug)]
 pub struct SpendGate {
     granted_op: Option<String>,
+    armed_by_request: Option<String>,
     generation: u64,
     open: Option<(u64, SpendBasis)>,
     pending: Option<Elevation>,
@@ -474,6 +477,7 @@ impl SpendGate {
         self.generation = self.generation.wrapping_add(1);
         self.open = Some(((now_ms + SPEND_WINDOW_MS).min(until_ms), basis));
         self.granted_op = None;
+        self.armed_by_request = None;
         self.pending = None;
         self.expired = false;
         self.lapse = None;
@@ -485,10 +489,20 @@ impl SpendGate {
         self.granted_op = op_id.filter(|id| !id.is_empty()).map(str::to_owned);
     }
 
+    /// Complete the pending elevation after the caller has checked its poll fence.
+    /// Only that pending record can name the request that armed this window.
+    pub fn arm_pending_granted_until(&mut self, now_ms: u64, until_ms: u64, basis: SpendBasis, op_id: Option<&str>) {
+        let request_id = self.pending.as_ref().map(|pending| pending.op_id.clone());
+        self.arm_granted_until(now_ms, until_ms, basis, op_id);
+        self.armed_by_request = request_id;
+    }
+
     /// The owner locked spending, or the app lost its authority.
     pub fn lock(&mut self) {
         self.generation = self.generation.wrapping_add(1);
         self.open = None;
+        self.granted_op = None;
+        self.armed_by_request = None;
         self.pending = None;
         self.expired = false;
         self.lapse = None;
@@ -497,6 +511,8 @@ impl SpendGate {
     pub fn set_pending(&mut self, elevation: Elevation) {
         self.generation = self.generation.wrapping_add(1);
         self.open = None;
+        self.granted_op = None;
+        self.armed_by_request = None;
         self.expired = false;
         self.lapse = None;
         self.pending = Some(elevation);
@@ -548,6 +564,8 @@ impl SpendGate {
             if until <= now_ms {
                 self.generation = self.generation.wrapping_add(1);
                 self.open = None;
+                self.granted_op = None;
+                self.armed_by_request = None;
                 self.expired = true;
                 self.lapse = None;
             }
@@ -602,6 +620,7 @@ impl SpendGate {
         SpendView {
             request_id: None,
             granted_op: self.open.and(self.granted_op.clone()),
+            armed_by_request: self.open.and(self.armed_by_request.clone()),
             state,
             lapse: if state == SpendState::Expired { self.lapse } else { None },
             basis: self.open.map(|(_, b)| b),

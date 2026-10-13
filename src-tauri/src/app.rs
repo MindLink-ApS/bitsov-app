@@ -5185,7 +5185,10 @@ async fn spend_advance_for_inner(state: &NodeState, want: Option<Want>) -> Resul
                         // Open only what the owner asked for with this request.
                         if !wants.window { gate.clear_pending(); }
                         if wants.window {
-                            arm_want(&mut gate, &mut autopay, Want::Window, act::SpendBasis::NodeGrant, node.as_ref());
+                            gate.arm_pending_granted_until(
+                                now_ms(), node.as_ref().map_or(u64::MAX, NodeGrant::expires_at_ms),
+                                act::SpendBasis::NodeGrant, node.as_ref().map(|g| g.op_id.as_str()),
+                            );
                             armed_granted_op = node.as_ref().map(|g| g.op_id.clone()).filter(|id| !id.is_empty());
                         }
                         if let Some(ceiling) = wants.budget {
@@ -14026,6 +14029,7 @@ mod control_act_tests {
         let view = serde_json::to_value(spend_advance(s, false).await.unwrap()).unwrap();
         assert_eq!(view["state"], "open");
         assert_eq!(view.get("granted_op"), Some(&serde_json::Value::Null));
+        assert_eq!(view.get("armed_by_request"), Some(&serde_json::Value::Null));
     }
 
     #[tokio::test]
@@ -14036,6 +14040,7 @@ mod control_act_tests {
         assert_eq!(reply.get("request_id"), Some(&serde_json::Value::Null));
         assert_eq!(reply["state"], "open");
         assert_eq!(reply["granted_op"], "cd34");
+        assert_eq!(reply.get("armed_by_request"), Some(&serde_json::Value::Null));
         assert_eq!(spend_advance(&node.state, false).await.unwrap().granted_op.as_deref(), Some("cd34"));
 
         // A budget-only approval, narrowing, or resume must not claim this window.
@@ -14074,21 +14079,80 @@ mod control_act_tests {
     #[tokio::test]
     async fn approval_ids_open_window_keeps_the_grant_reported_by_the_node() {
         let (node, _dir, g1) = g1_node(&["read", "receive"]);
-        spend_advance(&node.state, true).await.unwrap();
+        let requested = spend_advance(&node.state, true).await.unwrap();
+        assert_eq!(requested.request_id.as_deref(), Some("ab12"));
         spend_advance(&node.state, false).await.unwrap();
         // Do not infer the grant identity from the pending request.
         g1.grant.lock().unwrap()["op_id"] = "cd34".into();
         let view = serde_json::to_value(spend_advance(&node.state, false).await.unwrap()).unwrap();
         assert_eq!(view["state"], "open");
         assert_eq!(view["granted_op"], "cd34");
+        assert_eq!(view["armed_by_request"], "ab12");
+        assert_eq!(view.get("request_id"), Some(&serde_json::Value::Null));
         // A later cache refresh cannot relabel an already-open window.
         g1.grant.lock().unwrap()["op_id"] = "ef56".into();
         do_budget_status(&node.state).await.unwrap();
         let view = serde_json::to_value(spend_advance(&node.state, false).await.unwrap()).unwrap();
         assert_eq!(view["granted_op"], "cd34");
+        assert_eq!(view["armed_by_request"], "ab12");
+        assert_eq!(view.get("request_id"), Some(&serde_json::Value::Null));
         node.state.spend.lock().unwrap().lock();
         let view = serde_json::to_value(spend_advance(&node.state, false).await.unwrap()).unwrap();
         assert_eq!(view.get("granted_op"), Some(&serde_json::Value::Null));
+        assert_eq!(view.get("armed_by_request"), Some(&serde_json::Value::Null));
+    }
+
+    #[tokio::test]
+    async fn approval_ids_expiry_and_rearming_clear_the_completed_request() {
+        for expire in [true, false] {
+            let (node, _dir, g1) = g1_node(&["read", "receive"]);
+            g1.grant.lock().unwrap()["op_id"] = "cd34".into();
+            spend_advance(&node.state, true).await.unwrap();
+            spend_advance(&node.state, false).await.unwrap();
+            let open = serde_json::to_value(spend_advance(&node.state, false).await.unwrap()).unwrap();
+            assert_eq!(open["armed_by_request"], "ab12");
+            let mut gate = node.state.spend.lock().unwrap();
+            let view = if expire {
+                gate.view(open["open_until_ms"].as_u64().unwrap())
+            } else {
+                gate.arm_until(now_ms(), u64::MAX, act::SpendBasis::AppLock);
+                gate.view(now_ms())
+            };
+            let view = serde_json::to_value(view).unwrap();
+            assert_eq!(view["state"], if expire { "expired" } else { "open" });
+            assert_eq!(view.get("granted_op"), Some(&serde_json::Value::Null));
+            assert_eq!(view.get("armed_by_request"), Some(&serde_json::Value::Null));
+        }
+    }
+
+    #[tokio::test]
+    async fn approval_ids_cancelled_request_cannot_name_the_next_window() {
+        let requests = AtomicUsize::new(0);
+        let routes: Routes = Arc::new(move |method, path, _body| {
+            let reply = match (method, path) {
+                ("POST", "/pair/elevation-request") => {
+                    let op = if requests.fetch_add(1, Ordering::SeqCst) == 0 { "aa11" } else { "bb22" };
+                    serde_json::json!({"op_id": op, "expires_at": now_unix() + 900,
+                        "owner_action": format!("konsensus grant --op {op}")})
+                }
+                ("DELETE", "/pair/elevation/aa11") => serde_json::json!({}),
+                ("GET", "/pair/elevation/bb22") => serde_json::json!({"op_id": "bb22", "status": "granted"}),
+                _ => return (0, String::new()),
+            };
+            (200, reply.to_string())
+        });
+        let (node, _dir, g1) = g1_node_with(&["read", "receive"], Some(routes));
+        g1.grant.lock().unwrap()["op_id"] = "cd34".into();
+        assert_eq!(spend_advance(&node.state, true).await.unwrap().request_id.as_deref(), Some("aa11"));
+        let cancelled = serde_json::to_value(do_spend_cancel(&node.state).await.unwrap()).unwrap();
+        assert_eq!(cancelled["state"], "locked");
+        assert_eq!(cancelled.get("armed_by_request"), Some(&serde_json::Value::Null));
+        assert_eq!(spend_advance(&node.state, true).await.unwrap().request_id.as_deref(), Some("bb22"));
+        let view = serde_json::to_value(spend_advance(&node.state, false).await.unwrap()).unwrap();
+        assert_eq!(view["state"], "open");
+        assert_eq!(view["armed_by_request"], "bb22");
+        assert_eq!(view["granted_op"], "cd34");
+        assert_eq!(view.get("request_id"), Some(&serde_json::Value::Null));
     }
 
     #[tokio::test]
