@@ -31,7 +31,7 @@ import { custodyBadge, CustodyBadgeView } from './custody';
 import { NO_CHANNELS, WalletPage, type WalletActions, type WalletTab } from './WalletPage';
 import { artifactActivity, logActivity, type LoggedActivity } from './wallet';
 import { androidQrScannerAvailable } from '../pairingScanner';
-import { callCost, createCallEngine, IDLE as CALL_IDLE, isCallKind, signalCost, stunServer, type CallMedia, type CallView } from './call';
+import { callCost, createCallEngine, NO_MEDIA_DEVICES, IDLE as CALL_IDLE, isCallKind, signalCost, stunServer, type CallMedia, type CallView } from './call';
 import { createMeetingEngine, declineCost, inviteCost, joinCost, MAX_PARTICIPANTS, MEETING_IDLE, type LegState, type MeetingView, type ShownQuotes } from './meeting';
 import { admitRoom, leaveRoom, localRoom, localRooms, newRoom, rememberRoom, ROOM_CAPABILITY, ROOM_PAGE, roomOf, sameRoom, sendRoom, type LegPlan, type LocalRoom } from './room';
 import { NewRoomPanel, RoomThread, type RoomSend, type ThreadRead } from './RoomPanel';
@@ -1191,7 +1191,9 @@ export function ControlCenter(props: Props) {
       void loadWallet();
       return r;
     },
-    getUserMedia: (c) => navigator.mediaDevices.getUserMedia(c),
+    getUserMedia: (c) => navigator.mediaDevices?.getUserMedia
+      ? navigator.mediaDevices.getUserMedia(c)
+      : Promise.reject(Object.assign(new Error('No media devices in this webview'), { name: NO_MEDIA_DEVICES })),
     peerConnection: (config) => new RTCPeerConnection(config),
     now: () => Date.now(),
     onView: setCallView,
@@ -1218,7 +1220,9 @@ export function ControlCenter(props: Props) {
       void loadWallet();
       return r;
     },
-    getUserMedia: (c) => navigator.mediaDevices.getUserMedia(c),
+    getUserMedia: (c) => navigator.mediaDevices?.getUserMedia
+      ? navigator.mediaDevices.getUserMedia(c)
+      : Promise.reject(Object.assign(new Error('No media devices in this webview'), { name: NO_MEDIA_DEVICES })),
     peerConnection: (config) => new RTCPeerConnection(config),
     ownId: () => ownId(),
     canMeet: (peer) => nodeMeets() && peerById().get(peer.toLowerCase())?.meetings === true,
