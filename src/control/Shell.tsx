@@ -4440,7 +4440,8 @@ function Composer(props: {
       switch (stand().kind) {
         case 'paused': return 'Resume payments';
         case 'waiting': return 'Waiting for approval';
-        case 'off': return 'Send';
+        // The press only allows payments (a preset): say so, as the message button does.
+        case 'off': return presetChosen() ? 'Allow payments' : 'Send';
         case 'first': return `Send first ${mode() === 'file' ? 'file' : 'message'}${price}`;
         case 'contact_used':
         case 'total_used': return 'Budget used up';
@@ -4543,7 +4544,9 @@ function Composer(props: {
     if (!approvalPending()) return;
     const k = stand().kind;
     if (k === 'ok' || k === 'first') { setApprovalPending(false); setNote('Approved. Press Send to send it.'); }
-    else if (k === 'off' || k === 'paused') { setApprovalPending(false); setNote(null); }
+    // Completed into a limit (contact or daily total used, node grant limit), or turned off again: the
+    // waiting note ends; the budget line under the composer explains the limit.
+    else if (k !== 'waiting') { setApprovalPending(false); setNote(null); }
   });
   const startWaiting = (kind: ApprovalKind) => {
     if (!untrack(() => canContinue(kind))) return;
@@ -5060,7 +5063,7 @@ function Composer(props: {
                   {shown().msat !== null ? `up to ${fmtAmount(shown().msat!)} · includes max routing fee` : shown().basis} · files up to 1.4 MB
                 </span>
               </div>
-              <button type="submit" class="primary soft money" disabled={disabled()} data-send>
+              <button type="submit" class="primary soft money" disabled={disabled()} data-send title={label()} aria-label={label()}>
                 {label()}
               </button>
             </div>

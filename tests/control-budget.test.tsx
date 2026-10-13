@@ -341,6 +341,45 @@ describe('invisible payments in the composer and the context panel', () => {
     expect(host.used('message_send')).toHaveLength(0);
   }, 20_000);
 
+  it.each([['off', 'Allow payments'], ['paused', 'Resume payments']] as const)('#229: with payments %s and a file selected, the file button says what the press does ("%s"), as text, title and accessible name', async (state, words) => {
+    const rows = [{ target: MAYA, room: false, limit_msat: 50_000, spent_msat: 0 }];
+    const startView = state === 'off' ? budgetView({ rows }) : { ...open(rows), paused: true, autopay: { state: 'off' as const, open_until_ms: null, ceiling_msat: null, basis: null } };
+    const host = stubHost(startView);
+    await openShell();
+    $<HTMLButtonElement>('[data-composer-mode="file"]')!.click();
+    const input = $<HTMLInputElement>('[data-file-input]')!;
+    Object.defineProperty(input, 'files', { value: [new File(['hi'], 'hi.txt', { type: 'text/plain' })] });
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    await vi.waitFor(() => expect(text('[data-send]')).toBe(words));
+    expect($('[data-send]')!.getAttribute('title')).toBe(words);
+    expect($('[data-send]')!.getAttribute('aria-label')).toBe(words);
+    expect(host.used('file_send')).toHaveLength(0);
+  });
+
+  it('#229: a pending approval that completes into a used-up contact budget ends the waiting note; the budget line explains the limit', async () => {
+    let hostRef!: ReturnType<typeof stubHost>;
+    const rows = [{ target: MAYA, room: false, limit_msat: 50_000, spent_msat: 0 }];
+    const host = stubHost(budgetView({ rows }), {
+      budget_approve: () => {
+        hostRef.state.budget = { ...hostRef.state.budget, waiting_for_owner: true };
+        return { ...hostRef.state.budget, request_id: 'op-A', granted_op: null };
+      },
+    });
+    hostRef = host;
+    await openShell();
+    type('[data-composer] textarea', 'gm Maya');
+    await vi.waitFor(() => expect(text('[data-send]')).toBe('Allow payments'));
+    submit();
+    await vi.waitFor(() => expect(text('[data-composer-note]')).toBe('Waiting for your approval at the node…'));
+    // Approved at the node, but Maya's contact budget is already used up.
+    hostRef.state.budget = open([{ target: MAYA, room: false, limit_msat: 50_000, spent_msat: 50_000 }]);
+    await vi.waitFor(() => expect($('[data-budget="contact_used"]')).not.toBeNull(), { timeout: 8000 });
+    await vi.waitFor(() => expect($('[data-composer-note]')).toBeNull());
+    expect(mount.textContent).not.toContain('Waiting for your approval at the node');
+    expect(mount.textContent).not.toContain('Approved. Press Send');
+    expect(host.used('message_send')).toHaveLength(0);
+  }, 20_000);
+
   it('approves a daily total once, then messages go with no prompt and the price still shown', async () => {
     // The approval is deferred: nothing may be sent until it clears.
     let release!: () => void;
