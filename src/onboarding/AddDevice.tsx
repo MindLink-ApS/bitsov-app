@@ -14,7 +14,12 @@ function errorText(error: unknown): string {
   return 'Could not reach your node. Check the connection and try again.';
 }
 
-export function AddDevice(props: { api:(input:AddInput)=>Promise<AddView>; mobile?:boolean }) {
+/**
+ * `local`: this app runs its node on this device (not connected to a remote
+ * node). The host never offers Add a device then, and that is said as it is:
+ * a node only this Mac can use, not a missing update.
+ */
+export function AddDevice(props: { api:(input:AddInput)=>Promise<AddView>; mobile?:boolean; local?:boolean }) {
   const [view, setView] = createSignal<AddView>();
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal('');
@@ -46,7 +51,11 @@ export function AddDevice(props: { api:(input:AddInput)=>Promise<AddView>; mobil
   return <section class="panel add-device" data-add-device>
     <h2>Devices</h2>
     <Switch>
-      <Match when={view()?.state === 'unsupported'}><p>Your node does not support adding devices here yet.</p></Match>
+      <Match when={view()?.state === 'unsupported'}>
+        <Show when={props.local} fallback={<p data-add-device-unsupported="node">Your node does not offer adding devices yet. A newer version of your node adds it.</p>}>
+          <p data-add-device-unsupported="local">This Mac runs its own node, and only this Mac can use it. To use BitSov on your phone as well, run your node on a computer or server that stays on (or one someone runs for you), and connect this Mac and your phone to it.</p>
+        </Show>
+      </Match>
       <Match when={view()?.state === 'ready'}>
         <Show when={(view() as {owner:boolean}).owner} fallback={<p>Use an enrolled owner device to add another device. An ordinary pairing cannot approve it.</p>}>
           <p>Add another device to your home node. Keep this owner device available while you compare the words.</p>

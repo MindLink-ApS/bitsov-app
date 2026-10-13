@@ -641,13 +641,17 @@ describe('the Wallet page', () => {
     await vi.waitFor(() => expect($('[data-wallet-receive]')).not.toBeNull());
   });
 
-  it('no channels: one sentence, the same in the Wallet and in Settings → Node, and no funding promise', async () => {
+  it('no channels: one sentence, the same in Wallet → Channels and in Settings → Wallet, and no funding promise', async () => {
     stubHost({ payments_overview: () => ({ ...WALLET, channels: [] }) });
     await openWallet('channels');
-    await vi.waitFor(() => expect($('[data-channels-empty]')).not.toBeNull());
+    await vi.waitFor(() => expect($('[data-wallet-page] [data-channels-empty]')).not.toBeNull());
     const sentence = 'No channels yet. A channel is how your node sends and receives over Lightning; paid messages need one.';
     expect(text('[data-wallet-page] [data-channels-empty]')).toBe(sentence);
     expect(text('[data-wallet-page] [data-channels-empty]')).not.toMatch(/fund|deposit/i);
+    // The second surface: Settings → Wallet.
+    $<HTMLElement>('[data-settings] [data-tab="wallet"]')!.click();
+    await vi.waitFor(() => expect($('[data-settings] [data-channels-empty]')).not.toBeNull());
+    expect(text('[data-settings] [data-channels-empty]')).toBe(sentence);
   });
 
   it('Activity: paid messages and calls from each contact’s history, filtered by kind and direction', async () => {

@@ -1,3 +1,4 @@
+import { appPlatform } from './platform';
 import {
   checkPermissions,
   Format,
@@ -5,10 +6,11 @@ import {
   scan,
 } from '@tauri-apps/plugin-barcode-scanner';
 
+/** The Android barcode-scanner plugin: Android only (iOS has no scanner wired here). */
 export function androidQrScannerAvailable(
   userAgent = typeof navigator === 'undefined' ? '' : navigator.userAgent,
 ): boolean {
-  return /\bAndroid\b/i.test(userAgent) && '__TAURI_INTERNALS__' in globalThis;
+  return appPlatform(userAgent, 0) === 'android';
 }
 
 export async function scanPairingLink(): Promise<string> {
