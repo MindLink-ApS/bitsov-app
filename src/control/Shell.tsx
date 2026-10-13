@@ -909,6 +909,7 @@ export function ControlCenter(props: Props) {
   const [callApproval, setCallApproval] = createSignal(false);
   const [callApproving, setCallApproving] = createSignal(false);
   const calls = createCallEngine({
+    closeAdmission: (operationId, peer, callId) => source.closeCallAdmission(operationId, peer, callId),
     authorize: async () => {
       const pairing = await act(() => source.pairingStatus());
       if (!pairing.ok) {

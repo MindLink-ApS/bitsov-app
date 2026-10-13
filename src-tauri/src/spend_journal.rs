@@ -147,6 +147,12 @@ pub struct OperationRecord {
     pub reason: Option<String>,
     #[serde(default)]
     pub hangup_cap_msat: Option<u64>,
+    /// Call lifecycle is independent of its payment outcome. Reconciliation
+    /// must never reopen an admission that the host already observed ending.
+    #[serde(default)]
+    pub call_closed: bool,
+    #[serde(default)]
+    pub call_answered: bool,
 }
 
 /// Renderer projection deliberately omits local identity, request and payment hashes.
@@ -331,7 +337,8 @@ impl Journal {
             };
             let parent_call = if signal_kind == 403 { call_id.as_deref() } else { recovery };
             let parent_op = if let Some(call) = parent_call {
-                self.call_parent(node_id, pending.peer.as_deref().unwrap_or_default(), call)?
+                body["host_admission_op"].as_str().map(str::to_string)
+                    .or(self.call_parent(node_id, pending.peer.as_deref().unwrap_or_default(), call)?)
             } else { None };
             let mut record = self.operation_record(id)?.unwrap_or(OperationRecord {
                 op_id: id.clone(), node_id: node_id.into(), kind: kind.into(), peer: pending.peer.clone().unwrap_or_default(),
@@ -339,6 +346,7 @@ impl Journal {
                 state: OperationState::Dispatching, paid_msat: None, message_id: None, payment_hash: None,
                 created_ms: timestamp_ms(), settled_ms: None, reason: None,
                 hangup_cap_msat: body["host_hangup_cap_msat"].as_u64(),
+                call_closed: false, call_answered: false,
             });
             record.state = OperationState::Dispatching;
             record.cap_msat = max_msat;
@@ -390,21 +398,19 @@ impl Journal {
     }
 
     fn call_parent(&self, node_id: &str, peer: &str, call: &str) -> Result<Option<String>, ActionError> {
-        let index = call_index_path(&self.dir, node_id, peer, call);
-        let entry: CallIndex = match std::fs::read(index) {
-            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|_| damaged_record())?,
-            // Incoming calls and legacy nodes may have no local offer. Losing
-            // both the mapping and identifiable parent metadata is indistinguishable
-            // from that case; absence alone must not invent an admission fence.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(_) => return Err(damaged_record()),
-        };
-        let record = self.operation_record(&entry.op_id)?.ok_or_else(damaged_record)?;
-        if record.node_id != node_id || record.peer != peer || record.call_id.as_deref() != Some(call)
+        Ok(read_call_admission(&self.dir, node_id, peer, call)?.map(|r| r.op_id))
+    }
+
+    /// Update exactly the captured admission; never resolve a reused call id
+    /// again after waiting for the money lock. This does not settle payment.
+    pub fn observe_call(&self, offer: &OperationRecord, ended: bool) -> Result<(), ActionError> {
+        let mut record = self.operation_record(&offer.op_id)?.ok_or_else(damaged_record)?;
+        if record.node_id != offer.node_id || record.peer != offer.peer || record.call_id != offer.call_id
             || !matches!(record.kind.as_str(), "call_offer" | "call_recovery") {
             return Err(damaged_record());
         }
-        Ok(Some(record.op_id))
+        if ended { record.call_closed = true; } else { record.call_answered = true; }
+        self.write_operation(&record)
     }
 
     /// Call-only index, scoped to the authenticated node and optionally peer.
@@ -465,7 +471,7 @@ impl Journal {
                     state: if pending.resumable { OperationState::Unpaid } else { OperationState::Unknown },
                     paid_msat: pending.undelivered.as_ref().map(|u| u.paid_msat), message_id: None,
                     payment_hash: pending.undelivered.as_ref().and_then(|u| u.payment_hash.clone()),
-                    created_ms: timestamp_ms(), settled_ms: None, reason: None, hangup_cap_msat: None,
+                    created_ms: timestamp_ms(), settled_ms: None, reason: None, hangup_cap_msat: None, call_closed: false, call_answered: false,
                 });
                 self.write_operation(&record)?;
             }
@@ -616,13 +622,39 @@ pub fn list_operations(dir: &Path, node_id: &str, peer: Option<&str>, limit: usi
     Ok(OpList { operations: rows.into_values().rev().map(Into::into).collect(), skipped, has_more: matched > limit })
 }
 
+/// Read an atomic index/record snapshot when a live signal arrives, before
+/// waiting on a dispatch. The snapshot grants no payment authority.
+pub fn read_call_admission(dir: &Path, node_id: &str, peer: &str, call: &str) -> Result<Option<OperationRecord>, ActionError> {
+    let entry: CallIndex = match std::fs::read(call_index_path(dir, node_id, peer, call)) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|_| damaged_record())?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(damaged_record()),
+    };
+    if entry.op_id.len() != 36 || !entry.op_id.bytes().all(|c| c.is_ascii_hexdigit() || c == b'-') {
+        return Err(damaged_record());
+    }
+    let record = read_operation(&dir.join("ops").join(format!("{}.json", entry.op_id)), Some(&entry.op_id))?
+        .ok_or_else(damaged_record)?;
+    if record.node_id != node_id || record.peer != peer || record.call_id.as_deref() != Some(call)
+        || !matches!(record.kind.as_str(), "call_offer" | "call_recovery") {
+        return Err(damaged_record());
+    }
+    Ok(Some(record))
+}
+
 /// A paid H1 offer is `settled`; settling its payment does not close admission.
 pub fn admission_open(offer: &OperationRecord, records: &[OperationRecord]) -> bool {
     matches!(offer.kind.as_str(), "call_offer" | "call_recovery")
+        && !offer.call_closed
         && matches!(offer.state, OperationState::Dispatching | OperationState::Paid |
             OperationState::PaidUndelivered | OperationState::Unknown | OperationState::Settled)
-        && !records.iter().any(|r| r.kind == "call_hangup" && r.peer == offer.peer && r.call_id == offer.call_id
-            && hangup_closes(r))
+        && !records.iter().any(|r| hangup_for(r, offer) && hangup_closes(r))
+}
+
+pub fn hangup_for(record: &OperationRecord, offer: &OperationRecord) -> bool {
+    record.kind == "call_hangup" && record.node_id == offer.node_id
+        && record.peer == offer.peer && record.call_id == offer.call_id
+        && record.parent_op.as_deref() == Some(offer.op_id.as_str())
 }
 
 pub fn hangup_closes(record: &OperationRecord) -> bool {
@@ -823,7 +855,7 @@ mod tests {
             kind: kind.into(), peer: "peer".into(), call_id: Some("0123456789abcdef0123456789abcdef".into()),
             parent_op: None, request_hash: "hash".into(), cap_msat: 2000, state,
             paid_msat: Some(2000), message_id: None, payment_hash: None,
-            created_ms: id as u64, settled_ms: Some(100), reason: None, hangup_cap_msat: None,
+            created_ms: id as u64, settled_ms: Some(100), reason: None, hangup_cap_msat: None, call_closed: false, call_answered: false,
         };
         std::fs::create_dir_all(dir.join("ops")).unwrap();
         std::fs::write(dir.join("ops").join(format!("{}.json", record.op_id)), serde_json::to_vec(&record).unwrap()).unwrap();

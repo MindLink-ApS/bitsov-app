@@ -176,6 +176,8 @@ export const IDLE: CallView = {
 type Outcome<T> = { ok: true; value: T } | { ok: false; error: ActionError };
 
 export type CallDeps = {
+  /** Persist a local terminal event against the exact paid admission. No send. */
+  closeAdmission?: (operationId: string, peer: string, callId: string) => Promise<void>;
   /** Check current spend permission and show the shell’s approval path before capture. */
   authorize?: () => Promise<boolean>;
   quote: (peer: string) => Promise<Outcome<CallQuote>>;
@@ -318,14 +320,29 @@ export function createCallEngine(deps: CallDeps) {
     refusedClose = refused.length ? { callId, ids: refused } : null;
     if (view.callId === callId) set({ close: worst });
   };
-  /** `close`: false only when the window closes (nothing is paid then; the next call offers to end it). */
-  const end = (reason: HangupReason | null, error: string | null = null, close = true) => {
+  const admissionOps = new Map<string, Map<string, string>>();
+  const closeAdmission = (operationId: string, peer: string, callId: string): Promise<void> =>
+    deps.closeAdmission?.(operationId, peer, callId).catch(() => { /* Host preserves the fence on storage failure. */ }) ?? Promise.resolve();
+  /**
+   * `record` (H2 op_close_call): the host records this end against each paid
+   * admission and sends nothing. `endAtHost` (op_end_call): then the host is
+   * asked to end each of our admissions; on one already recorded closed it
+   * returns that closure and sends nothing more. Our own hang-up does not
+   * record first, so op_end_call sends the one paid hangup. The window
+   * closing records only.
+   */
+  const end = (reason: HangupReason | null, error: string | null = null, opts: { record?: boolean; endAtHost?: boolean } = {}) => {
+    const { record = true, endAtHost = true } = opts;
+    const peer = view.peer;
+    const operations = [...(view.callId ? admissionOps.get(view.callId) ?? [] : [])];
+    if (view.callId) admissionOps.delete(view.callId);
     const ids = own;
     const callId = view.callId;
     own = [];
     teardown();
     set({ phase: 'ended', reason, error, camera: false, muted: false });
-    if (close && ids.length) void closeAdmissions(ids, callId);
+    const recorded = record && peer ? Promise.all(operations.map(([operationId, wireCallId]) => closeAdmission(operationId, peer, wireCallId))) : Promise.resolve();
+    if (endAtHost && ids.length) void recorded.then(() => closeAdmissions(ids, callId));
   };
 
   const acquireMedia = (constraints: MediaStreamConstraints): Promise<MediaStream> => new Promise((resolve, reject) => {
@@ -453,7 +470,20 @@ export function createCallEngine(deps: CallDeps) {
     });
     let r: Outcome<CallReceipt>;
     try {
-      r = await Promise.race([deps.signal(peer!, kind, JSON.stringify({ v: 1, call_id: targetId!, ...body }), maxMsat), timeout]);
+      const signal = deps.signal(peer!, kind, JSON.stringify({ v: 1, call_id: targetId!, ...body }), maxMsat).then(result => {
+        const operationId = result.ok ? result.value.operation_id
+          : ['spend_unknown', 'payment_unknown', 'payment_settled_undelivered'].includes(result.error.code) ? result.error.operation_id : undefined;
+        if (kind === CALL_OFFER && operationId) {
+          if (view.callId !== callId || !active()) closeAdmission(operationId, peer!, targetId!);
+          else {
+            const operations = admissionOps.get(callId!) ?? new Map<string, string>();
+            operations.set(operationId, targetId!);
+            admissionOps.set(callId!, operations);
+          }
+        }
+        return result;
+      });
+      r = await Promise.race([signal, timeout]);
     } finally { clearTimeout(timer); }
     if (r.ok && view.callId === callId) set({ paidMsat: view.paidMsat + r.value.total_msat });
     return r;
@@ -706,7 +736,9 @@ export function createCallEngine(deps: CallDeps) {
       const mine = new Set(deps.endCall ? own : []);
       const owner = { peer: view.peer, callId }; // Keep late cleanup bound to this peer.
       cancelled = callId;
-      end('hangup');
+      const operationIds = [...(admissionOps.get(callId!) ?? [])];
+      // Ringing or live: not recorded first, so op_end_call sends the one paid hangup that stops their side.
+      end('hangup', null, { record: !notify });
       if (notify) {
         for (const id of ids) {
           if (mine.has(id)) continue;
@@ -717,6 +749,8 @@ export function createCallEngine(deps: CallDeps) {
             if (view.callId === callId) set({ error: asActionError(error).message });
           }
         }
+        // Without op_end_call (pre-H2 deps), record the closure after the paid hangup, as H2 does.
+        if (!deps.endCall) for (const [operationId, wireCallId] of operationIds) void closeAdmission(operationId, owner.peer!, wireCallId);
       }
     },
 
@@ -725,7 +759,7 @@ export function createCallEngine(deps: CallDeps) {
       // Also invalidate a preflight that has not entered Calling yet.
       if (!active()) { teardown(); return; }
       if (view.phase === 'calling') cancelled = view.callId;
-      end('hangup', null, false);
+      end('hangup', null, { endAtHost: false });
     },
 
     /** The owner asks again to end an admission the host refused to end. */

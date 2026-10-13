@@ -4158,8 +4158,28 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
                 calls.iter().find(|r| spend_journal::admission_open(r, &calls))
                     .map(|r| (r, "call_admission_open", "End the existing call before starting another admission. Nothing was paid."))
             } else {
-                calls.iter().find(|r| r.call_id.as_deref() == call_id && spend_journal::hangup_blocks(r))
-                    .map(|r| (r, "hangup_in_flight", "This call already has a hangup operation. Nothing was dispatched again."))
+                let offer = calls.iter().filter(|r| r.call_id.as_deref() == call_id
+                    && matches!(r.kind.as_str(), "call_offer" | "call_recovery"))
+                    .max_by_key(|r| (r.created_ms, &r.op_id));
+                let expected = body["host_admission_op"].as_str();
+                // Preflight may have waited on quotes while the peer ended the
+                // call or another admission reused its wire id. Recheck here.
+                if body["host_call_snapshot"].as_bool() == Some(true)
+                    && offer.map(|r| r.op_id.as_str()) != expected {
+                    return act::with_op(Active(expected), Err(ActionError::new(
+                        "call_not_live", "This admission has ended. Nothing was dispatched.")));
+                }
+                let hangup = calls.iter().find(|r| spend_journal::hangup_blocks(r)
+                    && match offer {
+                        Some(offer) => spend_journal::hangup_for(r, offer),
+                        None => r.call_id.as_deref() == call_id && r.parent_op.is_none(),
+                    });
+                if let Some(hangup) = hangup {
+                    Some((hangup, "hangup_in_flight", "This call already has a hangup operation. Nothing was dispatched again."))
+                } else {
+                    offer.filter(|r| !spend_journal::admission_open(r, &calls))
+                        .map(|r| (r, "call_not_live", "This admission has ended. Nothing was dispatched."))
+                }
             };
             if let Some((record, code, message)) = blocked {
                 return act::with_op(Active(Some(&record.op_id)), Err(ActionError::new(code, message)));
@@ -4265,6 +4285,7 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
         body.remove("host_hangup_cap_msat");
         body.remove("host_expected_node_id");
         body.remove("host_admission_op");
+        body.remove("host_call_snapshot");
     }
     pending.all_in = true;
     let charged = match &charge {
@@ -5848,10 +5869,24 @@ async fn do_call_signal_for_admission(
     state: &NodeState, peer: &str, kind: u16, plaintext: &str, max_msat: u64,
     admission: Option<&spend_journal::OperationRecord>,
 ) -> Result<act::CallReceipt, ActionError> {
-    let existing_operation = admission.map(|r| r.op_id.clone()).or_else(|| pending_operation_id(state).unwrap_or_default());
+    let mut existing_operation = admission.map(|r| r.op_id.clone()).or_else(|| pending_operation_id(state).unwrap_or_default());
     let result = async {
     let target = control::node_id(peer).map_err(ActionError::invalid)?;
+    let signal_node_id = state.node_id.lock().unwrap().clone().unwrap_or_default();
+    // Bind ordinary renderer hangups too, before any quote/auth await.
+    let captured = if kind == act::KIND_CALL_HANGUP && admission.is_none() {
+        let payload: serde_json::Value = serde_json::from_str(plaintext).map_err(|_| ActionError::invalid("invalid call signal"))?;
+        let dir = app_files_dir(state).ok_or_else(|| spend_journal::unknown("The app data directory is not ready."))?;
+        spend_journal::read_call_admission(&dir.join("app-spend"), &signal_node_id, &target,
+            payload["call_id"].as_str().unwrap_or_default())?
+    } else { None };
+    let admission = admission.or(captured.as_ref());
+    if let Some(admission) = admission { existing_operation = Some(admission.op_id.clone()); }
     let mut body = act::call_body(&target, kind, plaintext)?;
+    if kind == act::KIND_CALL_HANGUP {
+        body["host_call_snapshot"] = serde_json::json!(true);
+        body["host_expected_node_id"] = serde_json::json!(signal_node_id);
+    }
     if let Some(admission) = admission {
         body["host_expected_node_id"] = serde_json::json!(admission.node_id);
         body["host_admission_op"] = serde_json::json!(admission.op_id);
@@ -5917,6 +5952,21 @@ async fn do_call_signal_for_admission(
     act::with_op(Fallback(existing_operation.as_deref()), result)
 }
 
+/// A local media failure is lifecycle evidence only, never payment evidence.
+/// The renderer must name the exact admission, not a reusable wire call id.
+async fn do_op_close_call(state: &NodeState, operation_id: &str, peer: &str, call_id: &str) -> Result<(), ActionError> {
+    let _money = state.money.lock().await;
+    let journal = spend_journal(state)?;
+    let offer = journal.operation_record(operation_id)?
+        .ok_or_else(|| ActionError::new("call_not_found", "No outgoing admission is recorded."))?;
+    if state.node_id.lock().unwrap().as_deref() != Some(&offer.node_id)
+        || offer.peer != peer || offer.call_id.as_deref() != Some(call_id)
+        || !matches!(offer.kind.as_str(), "call_offer" | "call_recovery") {
+        return Err(ActionError::new("call_not_found", "No outgoing admission is recorded for this identity."));
+    }
+    journal.observe_call(&offer, true)
+}
+
 /// End an outgoing admission using host-owned identity and cap. Waiting for the
 /// money lock joins any offer/hangup receipt already in flight. Only a matching
 /// unknown offer is reconciled; unrelated sends retain their existing fence.
@@ -5941,16 +5991,17 @@ async fn do_op_end_call(state: &NodeState, call_id: &str) -> Result<spend_journa
             if calls.iter().any(|r| r.peer != offer.peer) {
                 return Err(spend_journal::unknown("This call id names more than one peer."));
             }
-            if let Some(hangup) = calls.iter().find(|r| spend_journal::hangup_blocks(r)) {
+            if let Some(hangup) = calls.iter().find(|r| spend_journal::hangup_for(r, offer) && spend_journal::hangup_blocks(r)) {
                 return Ok((**hangup).clone().into());
             }
+            if !spend_journal::admission_open(offer, &records) { return Ok(offer.clone().into()); }
             if let Some(p) = pending.filter(|p| p.operation_id.as_deref() == Some(&offer.op_id) && !p.resumable) {
                 // A lost offer receipt is checked by exact operation id, never
                 // replaced or guessed unpaid just because the renderer timed out.
                 reconcile_operation(state, &journal, p, &offer.op_id).await?;
             }
             let offer = journal.operation_record(&offer.op_id)?.ok_or_else(|| spend_journal::unknown("Missing call offer."))?;
-            if offer.state == spend_journal::OperationState::Unpaid { return Ok(offer.into()); }
+            if !spend_journal::admission_open(&offer, &records) { return Ok(offer.into()); }
             offer
         };
         let cap = match offer.hangup_cap_msat {
@@ -6874,6 +6925,19 @@ async fn op_end_call(
 }
 
 #[tauri::command(rename_all = "snake_case")]
+async fn op_close_call(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    operation_id: String,
+    peer: String,
+    call_id: String,
+) -> Result<(), ActionError> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    do_op_close_call(state.inner(), &operation_id, &peer, &call_id).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
 async fn op_list(
     window: WebviewWindow<impl tauri::Runtime>,
     state: State<'_, NodeState>,
@@ -7663,6 +7727,59 @@ async fn ai_local_clear(
     Ok(ai_provider_views(window.app_handle()).await)
 }
 
+/// Node call admission rings for 60 seconds. The host owns this deadline even
+/// if no renderer is listening; answering cancels it durably.
+const HOST_CALL_RING_MS: u64 = 60_000;
+
+struct CallObservation {
+    offer: spend_journal::OperationRecord,
+    ended: bool,
+}
+
+fn capture_call_observation(state: &NodeState, event: &control::LiveEvent) -> Result<Option<CallObservation>, ActionError> {
+    let control::LiveEvent::Message { message, room_id: None } = event else { return Ok(None) };
+    if !matches!(message.kind, 401 | 403) { return Ok(None); }
+    let Some(node_id) = state.node_id.lock().unwrap().clone() else { return Ok(None) };
+    if message.recipient != node_id || message.sender == node_id { return Ok(None); }
+    let Some(payload) = message.plaintext.as_deref()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok()) else { return Ok(None) };
+    if payload["v"] != 1 { return Ok(None); }
+    let Some(call_id) = payload["call_id"].as_str() else { return Ok(None) };
+    if call_id.len() != 32 || !call_id.bytes().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()) {
+        return Ok(None);
+    }
+    if message.kind == 401 && payload["sdp"].as_str().is_none_or(str::is_empty) { return Ok(None); }
+    let Some(dir) = app_files_dir(state) else { return Ok(None) };
+    let Some(offer) = spend_journal::read_call_admission(&dir.join("app-spend"), &node_id, &message.sender, call_id)?
+        else { return Ok(None) };
+    // A replay predating the current generation cannot close a reused wire id.
+    if message.timestamp < offer.created_ms { return Ok(None); }
+    Ok(Some(CallObservation { offer, ended: message.kind == 403 }))
+}
+
+async fn persist_call_observation(state: &NodeState, observation: &CallObservation) -> Result<(), ActionError> {
+    let _money = state.money.lock().await;
+    if state.node_id.lock().unwrap().as_deref() != Some(&observation.offer.node_id) { return Ok(()); }
+    spend_journal(state)?.observe_call(&observation.offer, observation.ended)
+}
+
+async fn expire_call_admissions(state: &NodeState, now: u64) -> Result<(), ActionError> {
+    // Never queue a timeout behind dispatch while an inbound answer is waiting
+    // in the live queue. Retry on the next tick after queued signals are handled.
+    let Ok(_money) = state.money.try_lock() else { return Ok(()) };
+    let Some(node_id) = state.node_id.lock().unwrap().clone() else { return Ok(()) };
+    let journal = spend_journal(state)?;
+    journal.pending()?;
+    let records = journal.call_operations(&node_id, None)?;
+    for offer in &records {
+        if !offer.call_answered && spend_journal::admission_open(offer, &records)
+            && now.saturating_sub(offer.settled_ms.unwrap_or(offer.created_ms)) >= HOST_CALL_RING_MS {
+            journal.observe_call(offer, true)?;
+        }
+    }
+    Ok(())
+}
+
 /// Tauri event the main window listens on for `/ws` traffic.
 const LIVE_EVENT: &str = "node-live";
 
@@ -7700,7 +7817,16 @@ fn live_link(
 /// with backoff, and stops once the app is quitting.
 async fn live_bridge(app: AppHandle) {
     let state = app.state::<NodeState>();
-    control::run_live_feed(
+    let session_identity = Mutex::new(None::<String>);
+    let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
+    let forward = |event| {
+        // Old socket traffic must not acquire a replacement node's authority.
+        let same_identity = *session_identity.lock().unwrap() == *state.node_id.lock().unwrap();
+        let observation = if same_identity { capture_call_observation(&state, &event) } else { Ok(None) };
+        let _ = events.send((event, observation));
+    };
+    let stopping = || state.quitting.load(Ordering::SeqCst);
+    let feed = control::run_live_feed(
         || async {
             if state.remote_mode.load(Ordering::SeqCst) && state.remote_retry.is_retrying() {
                 let _ = reconnect_remote(&state).await;
@@ -7709,11 +7835,35 @@ async fn live_bridge(app: AppHandle) {
             ensure_fresh_token(&state).await;
             let Some(token) = state.token.lock().unwrap().clone() else { return Ok(None); };
             let url = control::ws_url(&state.api_base, &token)?;
+            *session_identity.lock().unwrap() = state.node_id.lock().unwrap().clone();
             Ok(Some((url, state.remote_proxy_auth.to_string())))
         },
-        &|event| emit_live(&app, event),
-        &|| state.quitting.load(Ordering::SeqCst),
-    ).await;
+        &forward,
+        &stopping,
+    );
+    let process = async {
+        let mut timer = tokio::time::interval(Duration::from_secs(1));
+        loop {
+            tokio::select! {
+                biased;
+                Some((event, observation)) = received.recv() => {
+                    let result = match observation {
+                        Ok(Some(observation)) => persist_call_observation(&state, &observation).await,
+                        Ok(None) => Ok(()),
+                        Err(error) => Err(error),
+                    };
+                    if result.is_err() { eprintln!("call ledger: could not persist live call observation"); }
+                    emit_live(&app, event);
+                }
+                _ = timer.tick() => {
+                    if *state.ready.lock().unwrap() && expire_call_admissions(&state, now_ms()).await.is_err() {
+                        eprintln!("call ledger: could not persist call expiry");
+                    }
+                }
+            }
+        }
+    };
+    tokio::select! { _ = feed => {}, _ = process => {} }
 }
 
 /// What a stop attempt actually did. Returned so the REAL adapter can be asserted
@@ -8010,6 +8160,7 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             spend_reconcile,
             op_list,
             op_end_call,
+            op_close_call,
             budget_status,
             budget_approve,
             budget_set,
@@ -11719,6 +11870,190 @@ mod control_act_tests {
     }
 
     const CALL_ID: &str = "0123456789abcdef0123456789abcdef";
+
+    fn inbound_call_event(kind: u16, reason: &str) -> control::LiveEvent {
+        control::parse_ws_frame(&serde_json::json!({
+            "id": "remote-call-signal", "kind": kind, "sender": A,
+            "recipient": {"Node": OWN}, "timestamp": now_ms(),
+            "plaintext": serde_json::json!({"v": 1, "call_id": CALL_ID,
+                "reason": reason, "sdp": "v=0 answer"}).to_string()
+        }).to_string()).unwrap()
+    }
+
+    async fn observe_call_event(state: &NodeState, event: &control::LiveEvent) {
+        let observation = capture_call_observation(state, event).unwrap().unwrap();
+        persist_call_observation(state, &observation).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn h2_inbound_closure_requires_matching_peer_recipient_and_call() {
+        let (routes, _) = ledger_call_routes();
+        let node = fake(AuthMode::Local, routes);
+        approve_calls(&node).await;
+        let receipt = do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap();
+        for field in ["sender", "recipient", "call", "version", "room", "kind"] {
+            let mut event = inbound_call_event(403, "hangup");
+            if let control::LiveEvent::Message { message, room_id } = &mut event {
+                match field {
+                    "sender" => message.sender = C.into(),
+                    "recipient" => message.recipient = C.into(),
+                    "call" => message.plaintext = Some(OFFER.replace(CALL_ID, "1123456789abcdef0123456789abcdef")),
+                    "version" => message.plaintext = Some(OFFER.replace("\"v\":1", "\"v\":2")),
+                    "room" => *room_id = Some(ROOM.into()),
+                    "kind" => message.kind = 1,
+                    _ => unreachable!(),
+                }
+            }
+            assert!(capture_call_observation(&node.state, &event).unwrap().is_none(), "{field}");
+        }
+        // Normalization precedes the snapshot just as it precedes dispatch.
+        let hangup = do_call_signal(&node.state, &A.to_uppercase(), 403, OFFER, 15000).await.unwrap();
+        assert_eq!(ledger_record(&node, hangup.operation_id.as_ref().unwrap())["parent_op"], receipt.operation_id.unwrap());
+    }
+
+    #[tokio::test]
+    async fn h2_inbound_closure_survives_restart_without_paying_cleanup() {
+        for reason in ["hangup", "declined", "decline", "end", "timeout", "failed", "busy"] {
+            let (routes, paid) = ledger_call_routes();
+            let node = fake(AuthMode::Local, routes);
+            approve_calls(&node).await;
+            let receipt = do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap();
+            let id = receipt.operation_id.unwrap();
+            let before = ledger_record(&node, &id);
+            observe_call_event(&node.state, &inbound_call_event(403, reason)).await;
+            let after = ledger_record(&node, &id);
+            assert_eq!(after["call_closed"], true);
+            assert_eq!(after["paid_msat"], before["paid_msat"]);
+            assert_eq!(after["state"], before["state"], "closure is not payment evidence");
+            let restarted = reopen(&node);
+            assert_eq!(do_op_end_call(&restarted, CALL_ID).await.unwrap().op_id, id);
+            let redial = OFFER.replace(CALL_ID, "1123456789abcdef0123456789abcdef");
+            do_budget_approve(&restarted, 500000, budget::PresetId::Careful).await.unwrap();
+            do_call_signal(&restarted, A, 400, &redial, 15000).await.unwrap();
+            assert_eq!(paid.lock().unwrap().pays, 2);
+            assert_eq!(node.posts().iter().filter(|(_, b)| b["kind"] == 403).count(), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn h2_inbound_closure_races_offer_receipt_and_local_hangup() {
+        for held in [0, 1] {
+            let (routes, paid) = ledger_call_routes();
+            let (routes, hold) = hold_compose(routes, held, None, false);
+            let node = fake(AuthMode::Local, routes);
+            approve_calls(&node).await;
+            if held == 0 {
+                let (offer, ()) = tokio::join!(
+                    do_call_signal(&node.state, A, 400, OFFER, 15000),
+                    during_call(&hold, async { observe_call_event(&node.state, &inbound_call_event(403, "hangup")).await }),
+                );
+                offer.unwrap();
+            } else {
+                do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap();
+                let (end, ()) = tokio::join!(
+                    do_op_end_call(&node.state, CALL_ID),
+                    during_call(&hold, async { observe_call_event(&node.state, &inbound_call_event(403, "hangup")).await }),
+                );
+                end.unwrap();
+            }
+            let restarted = reopen(&node);
+            do_op_end_call(&restarted, CALL_ID).await.unwrap();
+            assert_eq!(paid.lock().unwrap().pays, held + 1);
+            let records = spend_journal(&restarted).unwrap().call_operations(OWN, Some(A)).unwrap();
+            assert!(records.iter().all(|r| !spend_journal::admission_open(r, &records)));
+        }
+    }
+
+    #[tokio::test]
+    async fn h2_captured_closure_and_stale_cleanup_cannot_close_reused_call_id() {
+        let (routes, paid) = ledger_call_routes();
+        let node = fake(AuthMode::Local, routes);
+        approve_calls(&node).await;
+        let first = do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap();
+        let old = spend_journal(&node.state).unwrap().operation_record(first.operation_id.as_ref().unwrap()).unwrap().unwrap();
+        let event = inbound_call_event(403, "hangup");
+        let captured = capture_call_observation(&node.state, &event).unwrap().unwrap();
+        persist_call_observation(&node.state, &captured).await.unwrap();
+        // Models op_end_call's gap between selecting the offer and taking the
+        // dispatch lock: an inbound end already won, so no paid hangup follows.
+        let error = do_call_signal_for_admission(&node.state, A, 403, OFFER, 15000, Some(&old)).await.unwrap_err();
+        assert_eq!(error.code, "call_not_live");
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        let second = do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap();
+        persist_call_observation(&node.state, &captured).await.unwrap();
+        assert!(capture_call_observation(&node.state, &event).unwrap().is_none(), "old wire replay is not a new closure");
+        let error = do_call_signal_for_admission(&node.state, A, 403, OFFER, 15000, Some(&old)).await.unwrap_err();
+        assert_eq!(error.code, "call_not_live");
+        assert_eq!(ledger_record(&node, second.operation_id.as_ref().unwrap())["call_closed"], false);
+        assert_eq!(paid.lock().unwrap().pays, 2);
+        let redial = OFFER.replace(CALL_ID, "1123456789abcdef0123456789abcdef");
+        assert_eq!(do_call_signal(&node.state, A, 400, &redial, 15000).await.unwrap_err().code, "call_admission_open");
+    }
+
+    #[tokio::test]
+    async fn h2_local_failure_closes_exact_admission_without_releasing_unknown_payment() {
+        let (routes, paid) = ledger_call_routes();
+        paid.lock().unwrap().script = vec![("paying", true)];
+        let mut node = fake(AuthMode::Local, routes);
+        node.state.spend_timeout = Duration::from_millis(60);
+        approve_calls(&node).await;
+        let error = do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap_err();
+        let id = error.operation_id.unwrap();
+        let before = pending(&node).unwrap();
+        assert!(do_op_close_call(&node.state, &id, C, CALL_ID).await.is_err());
+        assert!(do_op_close_call(&node.state, &id, A, "1123456789abcdef0123456789abcdef").await.is_err());
+        observe_call_event(&node.state, &inbound_call_event(401, "")).await;
+        do_op_close_call(&node.state, &id, A, CALL_ID).await.unwrap();
+        assert_eq!(pending(&node).unwrap().operation_id, before.operation_id);
+        assert_eq!(ledger_record(&node, &id)["state"], "unknown");
+        assert_eq!(ledger_record(&node, &id)["call_closed"], true);
+        assert_eq!(do_op_end_call(&reopen(&node), CALL_ID).await.unwrap().op_id, id);
+        let redial = OFFER.replace(CALL_ID, "1123456789abcdef0123456789abcdef");
+        assert_eq!(do_call_signal(&node.state, A, 400, &redial, 15000).await.unwrap_err().code, "spend_unknown");
+        assert_eq!(composes(&node), 1);
+        paid.lock().unwrap().ops.get_mut(&id).unwrap().1 = "acked";
+        do_spend_reconcile(&node.state).await.unwrap();
+        assert_eq!(ledger_record(&node, &id)["state"], "settled");
+        assert_eq!(ledger_record(&node, &id)["call_closed"], true);
+        assert!(pending(&node).is_none());
+    }
+
+    #[tokio::test]
+    async fn h2_host_ring_timeout_closes_only_unanswered_admission() {
+        for answered in [false, true] {
+            let (routes, _) = ledger_call_routes();
+            let node = fake(AuthMode::Local, routes);
+            approve_calls(&node).await;
+            let receipt = do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap();
+            if answered { observe_call_event(&node.state, &inbound_call_event(401, "")).await; }
+            let restarted = reopen(&node);
+            expire_call_admissions(&restarted, now_ms() + HOST_CALL_RING_MS + 1).await.unwrap();
+            assert_eq!(ledger_record(&node, receipt.operation_id.as_ref().unwrap())["call_closed"], !answered);
+            observe_call_event(&restarted, &inbound_call_event(401, "")).await;
+            assert_eq!(ledger_record(&node, receipt.operation_id.as_ref().unwrap())["call_closed"], !answered);
+            assert_eq!(composes(&node), 1, "host timeout does not dispatch payment");
+        }
+    }
+
+    #[tokio::test]
+    async fn h2_reused_call_id_does_not_reuse_old_closure_or_cleanup() {
+        let (routes, paid) = ledger_call_routes();
+        let node = fake(AuthMode::Local, routes);
+        approve_calls(&node).await;
+        let first = do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap();
+        let old_end = do_op_end_call(&node.state, CALL_ID).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        let second = do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap();
+        assert_ne!(first.operation_id, second.operation_id);
+        let redial = OFFER.replace(CALL_ID, "1123456789abcdef0123456789abcdef");
+        let error = do_call_signal(&node.state, A, 400, &redial, 15000).await.unwrap_err();
+        assert_eq!(error.code, "call_admission_open");
+        assert_eq!(error.operation_id, second.operation_id);
+        let end = do_op_end_call(&node.state, CALL_ID).await.unwrap();
+        assert_ne!(end.op_id, old_end.op_id);
+        assert_eq!(ledger_record(&node, &end.op_id)["parent_op"], second.operation_id.unwrap());
+        assert_eq!(paid.lock().unwrap().pays, 4);
+    }
 
     #[tokio::test]
     async fn h2_unknown_hangup_is_reused_without_another_payment() {
@@ -16464,6 +16799,7 @@ mod assistant_acl_tests {
                 "spend_reconcile",
                 "op_list",
                 "op_end_call",
+                "op_close_call",
                 "budget_status",
                 "budget_approve",
                 "budget_set",

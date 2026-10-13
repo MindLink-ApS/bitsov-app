@@ -416,6 +416,8 @@ export type RestoreOutcome = { node_id: string; restart_required: boolean; resta
 
 /** A refused or failed action, as the host rejects it. */
 export type ActionError = {
+  /** Host admission identity remains available after an ambiguous receipt. */
+  operation_id?: string;
   // Unknown includes transport loss after dispatch: it must never mean "not sent".
   code:
     | 'spend_unknown'
@@ -480,8 +482,6 @@ export type ActionError = {
    * record. Stop retrying names it, so a stale card never releases another message.
    */
   pending_id?: string;
-  /** H1: the host's id for the operation this error is about (kept whole, never parsed). */
-  operation_id?: string;
 };
 
 /** H1 `op_list`: the host's own record of a paid operation (read only; never a spending authority). */
@@ -711,6 +711,7 @@ export type CallQuote = {
 };
 /** `call_signal`: one paid call signal. `total_msat` is a ceiling, not a settled amount. */
 export type CallReceipt = {
+  operation_id?: string | null;
   message_id: string;
   kind: number;
   amount_msat: number;

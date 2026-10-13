@@ -1,3 +1,4 @@
+import { asActionError } from '../src/control/state';
 import { sampleSource } from '../src/control/sample';
 import { setStunPref, setDenom } from '../src/control/prefs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -945,6 +946,56 @@ describe('H2: every end of our call asks the host to end its admission (op_end_c
   });
 });
 
+describe('H2 710f67e × R2: op_close_call records, then op_end_call ends (idempotent)', () => {
+  beforeEach(() => { FakePc.made = []; });
+  afterEach(() => { vi.useRealTimers(); });
+  const both = () => {
+    const order: string[] = [];
+    const closeAdmission = vi.fn(async (op: string) => { order.push(`record:${op}`); });
+    const endCall = vi.fn(async (id: string) => { order.push(`end:${id}`); return { ok: true as const, value: { op_id: 'h', kind: 'call_offer', peer: A, call_id: id, state: 'settled' as const, cap_msat: 1, paid_msat: null, message_id: null } }; });
+    const kinds: number[] = [];
+    const signal: CallDeps['signal'] = async (_p, kind) => (kinds.push(kind), { ok: true, value: { operation_id: kind === 400 ? 'offer-op' : null, message_id: 'm', kind, amount_msat: 10_000, total_msat: 15_000, max_routing_fee_msat: 5_000, delivered: true, accepted: true, sent_at_ms: 0 } as CallReceipt });
+    return { ...engine({ closeAdmission, endCall, signal }), order, closeAdmission, endCall, kinds };
+  };
+
+  it('ring timeout: the closure is recorded first, then op_end_call (which sends nothing more)', async () => {
+    vi.useFakeTimers();
+    const { e, order } = both();
+    await e.place(A, 'audio', QUOTE);
+    await vi.advanceTimersByTimeAsync(RING_MS);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(order).toEqual(['record:offer-op', `end:${ID}`]);
+  });
+
+  it('their hang-up: recorded, then ended at the host, each once', async () => {
+    const { e, order } = both();
+    await e.place(A, 'audio', QUOTE);
+    await e.receive(msg(401, { sdp: 'v=0 answer' }), OWN);
+    FakePc.made[0].connect();
+    await e.receive(msg(403, { reason: 'hangup' }), OWN);
+    await vi.waitFor(() => expect(order).toEqual(['record:offer-op', `end:${ID}`]));
+  });
+
+  it('our hang-up while live: not recorded first, so op_end_call sends the one hangup; no app-paid 403', async () => {
+    const { e, order, kinds } = both();
+    await e.place(A, 'audio', QUOTE);
+    await e.receive(msg(401, { sdp: 'v=0 answer' }), OWN);
+    FakePc.made[0].connect();
+    await e.hangup();
+    await vi.waitFor(() => expect(order).toEqual([`end:${ID}`]));
+    expect(kinds).toEqual([400]);
+  });
+
+  it('the window closing records the closure and asks nothing more (nothing paid)', async () => {
+    const { e, order } = both();
+    await e.place(A, 'audio', QUOTE);
+    e.endLocal();
+    await vi.waitFor(() => expect(order).toEqual(['record:offer-op']));
+    await new Promise((r) => setTimeout(r, 10));
+    expect(order).toEqual(['record:offer-op']);
+  });
+});
+
 describe('H2: what the host says about ending, said honestly', () => {
   beforeEach(() => { FakePc.made = []; });
   const err = (code: string, message = 'x') => ({ ok: false as const, error: { code: code as never, message } });
@@ -1094,6 +1145,53 @@ describe('call engine: review #74 fixes', () => {
     expect(last()).toMatchObject({ phase: 'ended', reason: 'failed', error: expect.stringContaining('The connection was lost.') });
     expect(pc.closed && (pc.tracks[0].stop as unknown as { mock: { calls: unknown[] } }).mock.calls.length > 0).toBe(true);
     expect(sent.map((x) => x.kind)).toEqual([400]);
+  });
+
+  it('closes an answered admission when its offer result is unknown, including late errors', async () => {
+    for (const late of [false, true]) {
+      const closeAdmission = vi.fn(async () => {});
+      let finish!: (r: Awaited<ReturnType<CallDeps['signal']>>) => void;
+      const { e } = engine({ closeAdmission, signal: () => new Promise(resolve => { finish = resolve; }) });
+      const placing = e.place(A, 'audio', QUOTE);
+      await vi.waitFor(() => expect(finish).toBeDefined());
+      await e.receive(msg(401, { sdp: 'v=0 answer' }), OWN);
+      if (late) e.endLocal();
+      finish({ ok: false, error: asActionError({ code: 'spend_unknown', message: 'unknown', operation_id: 'ambiguous-offer' }) });
+      await placing;
+      expect(closeAdmission).toHaveBeenCalledWith('ambiguous-offer', A, ID);
+    }
+  });
+
+  it('records local closure after dispatching the explicit paid hangup', async () => {
+    const actions: string[] = [];
+    const { e } = engine({
+      closeAdmission: async id => { actions.push(id); },
+      signal: async (_peer, kind) => {
+        actions.push(String(kind));
+        return { ok: true, value: { operation_id: kind === 400 ? 'offer-op' : 'hangup-op', total_msat: 1 } as CallReceipt };
+      },
+    });
+    await e.place(A, 'audio', QUOTE);
+    await e.hangup();
+    expect(actions).toEqual(['400', '403', 'offer-op']);
+  });
+
+  it('reports local failure by admission operation id, including a late offer receipt', async () => {
+    const closeAdmission = vi.fn(async (_id: string) => {});
+    const first = engine({ closeAdmission, signal: async () => ({ ok: true, value: { operation_id: 'offer-one', total_msat: 1 } as CallReceipt }) });
+    await first.e.place(A, 'audio', QUOTE);
+    await first.e.receive(msg(401, { sdp: 'v=0 answer' }), OWN);
+    FakePc.made[0].state('closed');
+    expect(closeAdmission).toHaveBeenCalledWith('offer-one', A, ID);
+
+    let finish!: (r: Awaited<ReturnType<CallDeps['signal']>>) => void;
+    const second = engine({ closeAdmission, signal: () => new Promise(resolve => { finish = resolve; }) });
+    const placing = second.e.place(A, 'audio', QUOTE);
+    await vi.waitFor(() => expect(finish).toBeDefined());
+    second.e.endLocal();
+    finish({ ok: true, value: { operation_id: 'offer-two', total_msat: 1 } as CallReceipt });
+    await placing;
+    expect(closeAdmission.mock.calls).toEqual([['offer-one', A, ID], ['offer-two', A, ID]]);
   });
 
   it('closed ends at once; a call stuck connecting ends after a timeout', async () => {
