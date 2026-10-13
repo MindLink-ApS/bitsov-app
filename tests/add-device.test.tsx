@@ -25,6 +25,9 @@ it('shows the QR, polls for SAS and never approves without an explicit tap', asy
   }} />); await flush(); await click(root, 'Add a device');
   expect(root.querySelector('svg[role="img"]')).not.toBeNull();
   expect(root.querySelector<HTMLTextAreaElement>('textarea')?.value).toBe('bitsov://pair/test');
+  // Where to go on the new device, and the code it will ask for (no box or console jargon).
+  expect(root.querySelector('[data-ticket-where]')!.textContent).toContain('choose to connect to your node (on a computer: “Use a node you already run at home”), then scan or paste this ticket');
+  expect(root.querySelector('[data-ticket-claim-warning]')!.textContent).toBe('The new device then asks for your node’s claim code: the 18-character code your node’s setup printed. Have it ready.');
   await vi.advanceTimersByTimeAsync(2000); await flush();
   expect([...root.querySelectorAll('[data-pair-word]')].map(e => e.textContent)).toEqual(words);
   expect(calls.some(c => c.action === 'approve')).toBe(false);
@@ -54,6 +57,9 @@ it('joining clears the claim code, shows SAS while waiting and polls enrollment'
     return input.action === 'poll' ? {state:'done'} : {state:'idle'};
   }} />); await flush();
   const input = root.querySelector<HTMLInputElement>('[name="claim_code"]')!;
+  expect(root.textContent).toContain('your node’s claim code: the 18-character code your node’s setup printed');
+  expect(root.textContent).not.toMatch(/Box claim code|trusted console/);
+  expect(input.closest('label')!.textContent).toBe('Claim code');
   input.value = 'physical sticker'; await click(root, 'Show comparison words');
   expect(submitted).toBe('physical sticker'); expect(input.value).toBe('');
   expect(root.textContent).toContain('gallery'); expect(root.textContent).toContain('owner device');

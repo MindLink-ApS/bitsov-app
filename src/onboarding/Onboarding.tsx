@@ -251,6 +251,13 @@ export function Onboarding(props: {
             </div>
           </button>
 
+          {/* Joining from another owner device is a first-run path of its own: not hidden behind Advanced. */}
+          <Show when={!props.mobile && stage() === 'node' && target() === 'local'}>
+            <p class="hint" data-join-from-device>
+              Joining from another device?{' '}
+              <button type="button" class="link" data-join-open onClick={() => setTarget('network')}>Scan or paste its ticket</button>
+            </p>
+          </Show>
           {/* Once the node is up the choice is compact: both locations show as pills, no fold. */}
           <details class="node-target-advanced" open={target() !== 'local' || stage() !== 'node'}>
             <summary>Advanced: use a node you already run at home</summary>
