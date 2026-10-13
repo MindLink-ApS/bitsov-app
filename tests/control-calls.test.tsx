@@ -1325,6 +1325,9 @@ describe('calls in the shell', () => {
     input.dispatchEvent(new Event('input', { bubbles: true }));
     $<HTMLButtonElement>('[data-stun-save]')!.click();
     await vi.waitFor(() => expect(text('[data-stun-error]')).toMatch(/TURN relays are not supported/));
+    // A typed turn: entry is refused and changes nothing.
+    expect(localStorage.getItem('bitsov.stun')).toBeNull();
+    expect(text('[data-stun-note]')).toMatch(/No STUN server/);
     input.value = 'stun:own-node.example:3478';
     input.dispatchEvent(new Event('input', { bubbles: true }));
     $<HTMLButtonElement>('[data-stun-save]')!.click();
@@ -1334,37 +1337,53 @@ describe('calls in the shell', () => {
     await vi.waitFor(() => expect(FakePc.made).toHaveLength(1));
     expect(FakePc.made[0].config.iceServers).toEqual([{ urls: 'stun:own-node.example:3478' }]);
     $<HTMLButtonElement>('[data-stun-clear]')!.click();
-    await vi.waitFor(() => expect(text('[data-stun-note]')).toMatch(/No STUN server/));
+    await vi.waitFor(() => expect(text('[data-stun-note]')).toMatch(/STUN is turned off/));
   });
 
   const overviewWith = (extra: Record<string, unknown>) => () => ({ node_id: OWN, status: 'ok', version: 'api v2', connected_peers: 1, e2ee_sessions: 1, pending_deliveries: 0,
     lightning_available: true, block_height: 1, uptime_secs: 1, lightning_backend: 'ldk', chain_backend: 'esplora', read_at: Date.now(), ...extra });
 
-  it('offers the node\'s own STUN responder, used only after the owner saves it', async () => {
+  it('uses the node\'s own STUN responder by default (never a third party); the owner can turn it off and back on', async () => {
     const own = 'stun:mynode.example.org:3478';
     stubHost({ node_overview: overviewWith({ stun_port: 3478, stun_url: own }) });
     await openShell();
     $<HTMLButtonElement>('[data-profile]')!.click();
     $<HTMLButtonElement>('[data-open-settings]')!.click();
     $<HTMLButtonElement>('[data-tab="general"]')!.click();
-    await vi.waitFor(() => expect($('[data-stun-own]')).not.toBeNull());
-    expect(text('[data-stun-own]')).toContain(own);
-    expect(text('[data-stun-note]')).toMatch(/No STUN server/);
-    // Offering changes nothing: a call now still uses no STUN server.
+    await vi.waitFor(() => expect($('[data-stun-note]')?.getAttribute('data-stun-using')).toBe('own'));
+    expect(text('[data-stun-note]')).toMatch(/your own node \(stun:mynode\.example\.org:3478\).*No third party.*This is the default\./);
+    expect(localStorage.getItem('bitsov.stun')).toBeNull();
+    expect($('[data-stun-own]')).toBeNull();
+    // A call uses it with no setting saved.
     $<HTMLButtonElement>('[data-call="audio"]')!.click();
     await vi.waitFor(() => expect(FakePc.made).toHaveLength(1));
-    expect(FakePc.made[0].config.iceServers).toEqual([]);
+    expect(FakePc.made[0].config.iceServers).toEqual([{ urls: own }]);
     $<HTMLButtonElement>('[data-call-hangup]')!.click();
-    // Choosing it only fills the field and asks for Save.
+    // Turn off: no STUN at all, and it stays off.
+    $<HTMLButtonElement>('[data-stun-clear]')!.click();
+    await vi.waitFor(() => expect($('[data-stun-note]')?.getAttribute('data-stun-using')).toBe('off'));
+    $<HTMLButtonElement>('[data-call-dismiss]')?.click();
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect(FakePc.made).toHaveLength(2));
+    expect(FakePc.made[1].config.iceServers).toEqual([]);
+    $<HTMLButtonElement>('[data-call-hangup]')!.click();
+    // Back on: "Use my node" fills the field; Save uses it.
     $<HTMLButtonElement>('[data-stun-own]')!.click();
     await vi.waitFor(() => expect($<HTMLInputElement>('[data-stun-input]')!.value).toBe(own));
-    expect(text('[data-stun-own-confirm]')).toMatch(/Press Save to use your node/);
-    expect(localStorage.getItem('bitsov.stun')).toBeNull();
-    expect(text('[data-stun-note]')).toMatch(/No STUN server/);
     $<HTMLButtonElement>('[data-stun-save]')!.click();
-    await vi.waitFor(() => expect(text('[data-stun-note]')).toMatch(/your own node \(stun:mynode\.example\.org:3478\).*No third party/));
-    expect(localStorage.getItem('bitsov.stun')).toBe(own);
-    expect($('[data-stun-own]')).toBeNull();
+    await vi.waitFor(() => expect($('[data-stun-note]')?.getAttribute('data-stun-using')).toBe('own'));
+  });
+
+  it('a failed call says that some networks need a relay your node does not offer yet (no money claim)', async () => {
+    stubHost();
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect(FakePc.made).toHaveLength(1));
+    FakePc.made[0].state('closed');
+    await vi.waitFor(() => expect($('[data-call-no-relay]')).not.toBeNull());
+    expect(text('[data-call-no-relay]')).toBe('Some networks need a relay to connect a call, and your node does not offer one yet.');
+    expect(text('[data-call-no-relay]')).not.toMatch(/paid/i);
   });
 
   it('never offers a malformed or relay URL, and explains a responder without a public address', async () => {
