@@ -4428,16 +4428,15 @@ function Composer(props: {
     if (deviceWait()) return 'Waiting for your other device';
     if (ownerWait()) return 'Waiting for contact approval';
     if (needsTouch()) {
-      if (canContinue('touch')) return 'Approve & send';
       return androidQrScannerAvailable() ? 'Approve with biometrics' : 'Approve with Touch ID';
     }
     if (viaBudget()) {
       const s = shown();
       const price = s.msat === null ? '' : ` · ${s.estimate ? '≈ ' : ''}${sats(s.msat)} ${satUnit(s.msat)}`;
       switch (stand().kind) {
-        case 'paused': return canContinue('resume') ? 'Resume & send' : 'Resume payments';
+        case 'paused': return 'Resume payments';
         case 'waiting': return 'Waiting for approval';
-        case 'off': return canContinue('preset') && presetChosen() ? 'Approve & send' : 'Send';
+        case 'off': return 'Send';
         case 'first': return `Send first ${mode() === 'file' ? 'file' : 'message'}${price}`;
         case 'contact_used':
         case 'total_used': return 'Budget used up';
@@ -4456,11 +4455,8 @@ function Composer(props: {
   };
 
   const sendTitle = () => {
-    const kind: ApprovalKind | null = needsTouch() ? 'touch'
-      : viaBudget() ? (stand().kind === 'paused' ? 'resume' : stand().kind === 'off' && !!presetChosen() ? 'preset' : null)
-        : spends() && !line().open && props.spend?.state !== 'pending' && props.spend?.state !== 'unavailable' ? 'grant' : null;
-    if (kind && canContinue(kind)) {
-      return viaBudget() && stand().kind === 'paused' ? 'Resume & send' : 'Approve & send';
+    if (!needsTouch() && !viaBudget() && spends() && !line().open && props.spend?.state !== 'pending' && props.spend?.state !== 'unavailable' && canContinue('grant')) {
+      return 'Approve & send';
     }
     return needsTouch() ? (androidQrScannerAvailable() ? 'Approve with biometrics' : 'Approve with Touch ID') : 'Send';
   };
@@ -4512,7 +4508,15 @@ function Composer(props: {
   const [consent, setConsent] = createSignal<Pressed | null>(null);
   /** The host names the grant of an open window (#227): only then can grant, preset and resume continue. */
   const bindable = () => props.spend != null && 'granted_op' in props.spend;
-  const canContinue = (kind: ApprovalKind = 'touch') => mode() === 'message' && !!draft().trim() && shown().msat !== null && consent() === null && (kind === 'touch' || bindable());
+  /**
+   * Approve & send only where a node identity binds the approval to its window:
+   * the spending request (its request id or the grant op its call returned).
+   * Touch ID (no identity) and preset/resume (a budget grant arms autopay, not
+   * the spend window) keep the plain flow: approve, then press Send.
+   */
+  const canContinue = (kind: ApprovalKind) => kind === 'grant' && mode() === 'message' && !!draft().trim() && shown().msat !== null && consent() === null && bindable();
+  /** The plain flow after an approval that does not continue: the draft stays; say what is next. */
+  const approvedPlain = (ok: boolean) => { if (ok && mode() === 'message' && untrack(draft).trim()) setNote('Approved. Press Send to send it.'); };
   const startWaiting = (kind: ApprovalKind) => {
     if (!untrack(() => canContinue(kind))) return;
     const text = draft();
@@ -4557,28 +4561,15 @@ function Composer(props: {
     if (!c) return;
     const ok = typeof r === 'boolean' ? r : r.ok;
     if (!ok) { dropConsent('It was not approved.'); return; }
-    if (typeof r === 'boolean' || c.kind === 'touch') { setConsent({ ...c, approved: true }); return; }
+    if (typeof r === 'boolean') { backToPlain(); return; }
     if (!r.bindable || (r.grantedOp === null && r.requestId === null)) { backToPlain(); return; }
     setConsent({ ...c, approved: true, key: r.grantedOp, requestId: r.requestId });
   };
   const LAPSED = 'The approval was cancelled or lapsed before it went through.';
-  /** Touch ID consents whose contact approval was seen in place (its envelope): losing it again ends them. */
-  const touchSeen = new Set<string>();
   // The approval it waits on was cancelled, lapsed or replaced: the consent ends with it.
   createEffect(() => {
     const c = consent();
     if (!c || !c.approved) return;
-    if (c.kind === 'touch') {
-      // Spending locked, or this contact's approval (its envelope) gone again after it was in place.
-      if (!line().open) { dropConsent(LAPSED); return; }
-      if (!needsTouch()) { touchSeen.add(c.bubble); return; }
-      if (touchSeen.has(c.bubble)) dropConsent(LAPSED);
-      return;
-    }
-    if (c.kind === 'preset' || c.kind === 'resume') {
-      const k = stand().kind;
-      if (k === 'off' || k === 'paused') { dropConsent(LAPSED); return; }
-    }
     const sp = props.spend;
     const open = sp?.state === 'open';
     const granted = open ? sp!.granted_op ?? null : null;
@@ -4627,8 +4618,8 @@ function Composer(props: {
   createEffect(() => {
     const c = consent();
     if (!c || !c.approved || busy() || contactWaiting() || props.budgetStale || props.moneyBlocked || !approvalCleared()) return;
-    // Grant / preset / resume: only the window its own approval armed (its grant op G, or its request R).
-    if (c.kind !== 'touch') {
+    // Only the window its own approval armed (its grant op G, or its request R).
+    {
       const sp = props.spend;
       if (sp?.state !== 'open') return;
       if (c.key !== null ? sp.granted_op !== c.key : !(c.requestId !== null && 'armed_by_request' in sp && sp.armed_by_request === c.requestId)) return;
@@ -4671,27 +4662,24 @@ function Composer(props: {
     }
     if (needsTouch()) {
       if (pressed) { setNote('It needs Touch ID again. Press Send to ask.'); return; }
-      // This contact is approved with Touch ID; a message then goes once (Approve & send).
-      startWaiting('touch');
+      // This contact is approved with Touch ID; the draft stays (no identity binds a continuation).
       setBusy(true);
       const approved = await props.actions.approveContact(target(), shown().msat);
-      afterApproval(approved);
       setBusy(false);
+      approvedPlain(approved);
       return;
     }
     if (viaBudget()) {
       const st = stand();
       if (st.kind === 'paused' || st.kind === 'off') {
         if (pressed) { setNote('Payments need approving again. Press Send to ask.'); return; }
-        // The one approval (or resume); a message then goes once (Approve & send).
-        if (st.kind === 'paused') startWaiting('resume');
-        else if (presetChosen()) startWaiting('preset');
+        // The one approval (or resume); the draft stays (a budget grant arms autopay, not the spend window).
         setBusy(true);
         let approved: ApprovalResult = { ok: false, requestId: null, grantedOp: null, bindable: false };
         if (st.kind === 'paused') approved = await props.actions.resume();
         else if (presetChosen()) approved = await props.actions.approveBudget(presetChosen()!.ceiling_msat, presetChosen()!.id);
-        afterApproval(approved);
         setBusy(false);
+        approvedPlain(approved.ok);
         return;
       }
       if (st.kind !== 'first' && st.kind !== 'ok') return;
