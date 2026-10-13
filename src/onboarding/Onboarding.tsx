@@ -65,7 +65,8 @@ export function Onboarding(props: {
   })();
   const steps = () => onboardingSteps(props.status(), props.pairing(), props.trustAck());
   const stage = () => onboardingStage(steps());
-  const [internalTarget, setInternalTarget] = createSignal<NodeTarget>('local');
+  // On a phone the only target is your node (there is no "This Mac").
+  const [internalTarget, setInternalTarget] = createSignal<NodeTarget>((props.phone ?? props.mobile === true) ? 'network' : 'local');
   const target = () => props.selectedTarget ?? internalTarget();
   const setTarget = (t: NodeTarget) => {
     setInternalTarget(t);

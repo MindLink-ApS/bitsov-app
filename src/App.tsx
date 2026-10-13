@@ -139,11 +139,12 @@ function AppScreen() {
     return status().ready || wasOpen;
   }, false);
   const live = () => shellOpen() && !status().locked && status().ready && !status().retry_after_secs;
+  // A phone (Android or iOS) has no node of its own: its first run is "connect to your node".
   const [selectedTarget, setSelectedTarget] = createSignal<NodeTarget>(
-    canScanPairingQr ? 'network' : 'local',
+    onPhone ? 'network' : 'local',
   );
   const remote = createMemo(() => pairing().remote);
-  createEffect(() => setSelectedTarget(remote() || canScanPairingQr ? 'network' : 'local'));
+  createEffect(() => setSelectedTarget(remote() || onPhone ? 'network' : 'local'));
   const [device, setDevice] = createSignal<DeviceView | null>(null);
   // The node accepted a typed password; the host holds it for one yes/no.
   const [rememberOffer, setRememberOffer] = createSignal(false);

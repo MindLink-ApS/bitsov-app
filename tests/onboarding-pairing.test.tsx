@@ -297,6 +297,18 @@ describe('pairing panel', () => {
     expect(mount.textContent).not.toMatch(/Use this Mac instead|Keys on this Mac/);
   });
 
+  it('on an iPhone with no target given, the node card is selected and the scan-or-paste form is already open', () => {
+    mount = document.createElement('div');
+    document.body.appendChild(mount);
+    dispose = render(() => (
+      <Onboarding onPreviewRemote={async () => ({ endpoint: 'home:4242', node_id_fingerprint: 'ab…cd' })}
+        status={() => booting} pairing={() => starting} trustAck={() => false} onRetry={() => {}} phone />
+    ), mount);
+    expect(mount.querySelector('[data-target="local"]')).toBeNull();
+    expect(mount.querySelector('[data-target="network"]')!.getAttribute('aria-checked')).toBe('true');
+    expect(mount.querySelector('[data-remote-access]')).not.toBeNull();
+  });
+
   it('on a computer nothing changes: This Mac stays the default and home stays under Advanced', () => {
     const el = show(starting, booting);
     expect(el.querySelector('[data-target="local"]')).not.toBeNull();
