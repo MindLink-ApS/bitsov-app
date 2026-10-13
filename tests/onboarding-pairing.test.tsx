@@ -270,6 +270,8 @@ describe('pairing panel', () => {
     const local = el.querySelector<HTMLButtonElement>('[data-target="local"]')!;
     expect(local.getAttribute('aria-checked')).toBe('true');
     expect(local.textContent).toContain('awake and BitSov must stay open');
+    // Said at the fork: a node on this Mac is for this Mac only (no box or sticker assumed).
+    expect(local.querySelector('[data-local-only]')!.textContent).toBe('Only this Mac can use it. To use BitSov on your phone too, choose a node you run on a computer or server that stays on.');
     const advanced = el.querySelector<HTMLDetailsElement>('details.node-target-advanced')!;
     expect(advanced).not.toBeNull();
     expect(advanced.open).toBe(false);

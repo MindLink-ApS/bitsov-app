@@ -1920,7 +1920,8 @@ export function ControlCenter(props: Props) {
             </>} onForgetRemote={props.remote ? () => source.remoteAccessForget() : undefined} overview={overview()} link={link()} peers={peers()} now={now()} error={props.error ?? errors.overview ?? errors.peers} onReconnect={async () => { await props.onReconnect?.(); await loadOverview(); await loadPeers(); }} />
           </Match>
           <Match when={tab() === 'devices'}>
-            <AddDevice api={input => source.addDevice(input)} mobile={androidQrScannerAvailable()} />
+            {/* The host offers Add a device only to a remote node (add_device::supported checks remote mode). */}
+            <AddDevice api={input => source.addDevice(input)} mobile={androidQrScannerAvailable()} local={props.remote !== true} />
             <DeviceApprovals device={actions.device()} remote={props.remote === true} mobile={androidQrScannerAvailable()} showRegistered
               joinDevice={input => source.joinDevice(input)}
               onRegister={async () => setDevice(await source.deviceKeyRegister())}

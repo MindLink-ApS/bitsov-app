@@ -15,6 +15,14 @@ it('hides Add a device on older nodes and explains non-owner pairings', async ()
   expect(root.textContent).toContain('enrolled owner device');
   expect(root.querySelector('button')).toBeNull();
 });
+it('a node on this Mac says why it cannot add a phone; an older remote node says an update adds it', async () => {
+  const root = mount(() => <AddDevice local api={async () => ({state:'unsupported'})} />); await flush();
+  expect(root.querySelector('[data-add-device-unsupported="local"]')!.textContent).toBe('This Mac runs its own node, and only this Mac can use it. To use BitSov on your phone as well, run your node on a computer or server that stays on (or one someone runs for you), and connect this Mac and your phone to it.');
+  expect(root.textContent).not.toMatch(/box|sticker|does not support/);
+  dispose?.();
+  dispose = render(() => <AddDevice api={async () => ({state:'unsupported'})} />, root); await flush();
+  expect(root.querySelector('[data-add-device-unsupported="node"]')!.textContent).toBe('Your node does not offer adding devices yet. A newer version of your node adds it.');
+});
 it('shows the QR, polls for SAS and never approves without an explicit tap', async () => {
   vi.useFakeTimers(); const calls: AddInput[] = [];
   const ticket: AddView = {state:'ticket', uri:'bitsov://pair/test', expires_at:Date.now()/1000+300, pending:[]};

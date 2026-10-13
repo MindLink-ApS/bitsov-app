@@ -248,6 +248,7 @@ export function Onboarding(props: {
                 </div>
               </div>
               <p>BitSov runs your node on this Mac. Your keys stay here. To receive messages and payments, this Mac must stay awake and BitSov must stay open.</p>
+              <p class="hint" data-local-only>Only this Mac can use it. To use BitSov on your phone too, choose a node you run on a computer or server that stays on.</p>
             </div>
           </button>
 
