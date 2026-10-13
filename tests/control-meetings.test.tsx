@@ -506,6 +506,22 @@ describe('meetings in the shell', () => {
     await vi.waitFor(() => expect(host.used('call_signal').map((c) => c.args!.kind)).toEqual([400, 400, 403, 403]));
   });
 
+  it('meeting legs use the same STUN as 1:1 calls: your own node by default', async () => {
+    const own = 'stun:mynode.example.org:3478';
+    stubHost({ node_overview: () => ({ node_id: OWN, status: 'ok', version: 'api v2', connected_peers: 2, e2ee_sessions: 2, pending_deliveries: 0,
+      lightning_available: true, block_height: 1, uptime_secs: 1, lightning_backend: 'ldk', chain_backend: 'esplora', read_at: Date.now(),
+      capabilities: ['call_meeting_v1'], stun_port: 3478, stun_url: own }) });
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="meeting"]')?.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call="meeting"]')!.click();
+    await vi.waitFor(() => expect(text('[data-meeting-invite]')).toBe('Invite · 21 sats'));
+    $<HTMLInputElement>(`[data-meeting-pick="${B}"]`)!.click();
+    await vi.waitFor(() => expect(text('[data-meeting-invite]')).toBe('Invite · 42 sats'));
+    $<HTMLButtonElement>('[data-meeting-invite]')!.click();
+    await vi.waitFor(() => expect(FakePc.made).toHaveLength(2));
+    expect(FakePc.made.map((p) => p.config.iceServers)).toEqual([[{ urls: own }], [{ urls: own }]]);
+  });
+
   it('disables a priced incoming meeting during a connection cooldown', async () => {
     let retry: number | null = null;
     const host = stubHost({ node_status: () => ({ ready: true, node_id: OWN, error: null, retry_after_secs: retry }) });

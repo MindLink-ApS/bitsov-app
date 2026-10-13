@@ -60,6 +60,10 @@ import {
   denom,
   setDenom,
   setStunPref,
+  setStunOff,
+  stunOff,
+  effectiveStun,
+  setNodeStun,
   setThemePref,
   stunPref,
   themePref,
@@ -316,6 +320,12 @@ export function ControlCenter(props: Props) {
     setReadinessRefused(true);
     setOverview((old) => old ? { ...old, money_ready: false, readiness: null } : old);
   });
+  // Calls use your own node's STUN by default when it reports a valid public stun: URL (never a third party).
+  createEffect(() => {
+    const url = ownStun()?.url ?? '';
+    setNodeStun(stunServer(url).length ? url : null);
+  });
+  onCleanup(() => setNodeStun(null));
   const [peers, setPeers] = createSignal<Peer[]>([]);
   const [peersLoaded, setPeersLoaded] = createSignal(false);
   const [rooms, setRooms] = createSignal<Room[]>([]);
@@ -1199,7 +1209,7 @@ export function ControlCenter(props: Props) {
     onView: setCallView,
     onStreams: (local, remote) => setCallStreams({ local, remote }),
     // No STUN unless the owner set one: host candidates only.
-    iceServers: () => stunServer(stunPref()),
+    iceServers: () => stunServer(effectiveStun()),
     busy: () => meetingOn(),
   });
   // Closing the window ends the call here without paying; only Hang up pays.
@@ -1228,7 +1238,7 @@ export function ControlCenter(props: Props) {
     canMeet: (peer) => nodeMeets() && peerById().get(peer.toLowerCase())?.meetings === true,
     onView: setMeetingView,
     onStreams: (local, remote) => setMeetingStreams({ local, remote }),
-    iceServers: () => stunServer(stunPref()),
+    iceServers: () => stunServer(effectiveStun()),
     busy: () => !['idle', 'ended'].includes(callView().phase),
   });
   onCleanup(() => meetings.endLocal());
@@ -2094,19 +2104,25 @@ function CallSettings(props: { own: OwnStun | null }) {
       return;
     }
     setError(null);
+    // Saving an empty field returns to the default (your own node, when it offers STUN).
     setStunPref(v);
   };
+  /** What calls actually use: the owner's choice, else their own node, else none. */
+  const using = () => effectiveStun();
   return (
     <section data-call-settings>
       <h3>Calls</h3>
-      <p class="hint" data-stun-note>
-        {stunPref()
-          ? stunPref() === ownUrl()
-            ? `Calls ask your own node (${stunPref()}) for your public address. No third party is contacted; your node sees your IP address each time you place or accept a call.`
-            : `Calls ask ${stunPref()} for your public address, so that server sees your IP address each time you place or accept a call.`
-          : 'No STUN server: calls contact no third party and connect only on the same network (or a VPN). Calls across routers need a STUN server you choose, for example one run on your own node.'}
+      <p class="hint" data-stun-note data-stun-using={using() ? (using() === ownUrl() ? 'own' : 'other') : stunOff() ? 'off' : 'none'}>
+        {using()
+          ? using() === ownUrl()
+            ? `Calls ask your own node (${using()}) for your public address. No third party is contacted; your node sees your IP address each time you place or accept a call.${stunPref() ? '' : ' This is the default.'}`
+            : `Calls ask ${using()} for your public address, so that server sees your IP address each time you place or accept a call.`
+          : stunOff()
+            ? 'STUN is turned off: calls contact no third party and connect only on the same network (or a VPN).'
+            : 'No STUN server: calls contact no third party and connect only on the same network (or a VPN). Calls across routers need a STUN server, for example one run on your own node.'}
       </p>
-      <Show when={ownUrl() && stunPref() !== ownUrl()}>
+      <p class="hint" data-call-relay-limit>There is no relay yet. Some networks (strict or carrier-grade NAT, often mobile data) block direct calls even with STUN; those calls will not connect.</p>
+      <Show when={ownUrl() && using() !== ownUrl()}>
         <div class="row">
           <button type="button" class="soft" data-stun-own onClick={() => { setDraft(ownUrl()!); setError(null); }}>
             Use my node ({ownUrl()})
@@ -2124,8 +2140,8 @@ function CallSettings(props: { own: OwnStun | null }) {
       <div class="row">
         <input data-stun-input placeholder="stun:host:3478" value={draft()} onInput={(e) => setDraft(e.currentTarget.value)} aria-label="STUN server for calls (optional)" />
         <button type="button" class="soft" data-stun-save onClick={save}>Save</button>
-        <Show when={stunPref()}>
-          <button type="button" class="soft" data-stun-clear onClick={() => { setDraft(''); setStunPref(''); setError(null); }}>Remove</button>
+        <Show when={using()}>
+          <button type="button" class="soft" data-stun-clear onClick={() => { setDraft(''); setStunOff(); setError(null); }}>Turn off</button>
         </Show>
       </div>
       <Show when={error()}>
@@ -2913,9 +2929,9 @@ function MessageView(props: {
 }
 
 function CallNetworkNote(props: { onOpenSettings?: () => void }) {
-  return <Show when={!stunPref()}>
+  return <Show when={!effectiveStun()}>
     <p class="hint call-network-note" data-call-network-note>
-      Calls may not connect across networks yet. No STUN server is set. Choose one in Settings → General → Calls.
+      Calls may not connect across networks yet. {stunOff() ? 'STUN is turned off.' : 'No STUN server is set.'} Choose one in Settings → General → Calls.
       <Show when={props.onOpenSettings}>
         {' '}<button type="button" class="link" data-call-settings-link onClick={() => props.onOpenSettings!()}>Open call settings</button>
       </Show>
@@ -2946,7 +2962,7 @@ function CallButtons(props: { peer: string; name: string; blocked: boolean; acti
   const off = () => props.blocked || cost() === null || props.actions.callActive();
   const title = () =>
     why() ?? (quote() && cost() === null ? `${props.name}’s node does not take calls yet` : cost() !== null
-      ? `Up to ${fmtAmount(cost()!)}: ${fmtAmount(quote()!.offer_msat! + quote()!.offer_max_routing_fee_msat)} to ring (their call price plus ${feeCeiling(quote()!.offer_max_routing_fee_msat)}), then ${fmtAmount(signalCost(quote()!))} to hang up. Includes up to ${fmtAmount(callCost(quote()!)!)} more for one automatic recovery (another admission and hangup). Media goes directly between you; it is not billed. ${stunPref() ? `Uses your STUN server ${stunPref()} to find a route.` : 'No STUN server is set, so calls connect only on the same network (Settings).'}`
+      ? `Up to ${fmtAmount(cost()!)}: ${fmtAmount(quote()!.offer_msat! + quote()!.offer_max_routing_fee_msat)} to ring (their call price plus ${feeCeiling(quote()!.offer_max_routing_fee_msat)}), then ${fmtAmount(signalCost(quote()!))} to hang up. Includes up to ${fmtAmount(callCost(quote()!)!)} more for one automatic recovery (another admission and hangup). Media goes directly between you; it is not billed. ${effectiveStun() ? `Uses the STUN server ${effectiveStun()} to find a route.` : stunOff() ? 'STUN is turned off, so calls connect only on the same network (Settings).' : 'No STUN server is set, so calls connect only on the same network (Settings).'}`
       : 'Reading their call price…');
   const place = (media: CallMedia) => { const q = quote(); if (q && !off()) props.actions.placeCall(props.peer, media, q); };
   return (
@@ -3044,6 +3060,10 @@ function CallPanel(props: {
         </Show>
         <Show when={v().phase === 'ended'}>
           <p class="hint" data-call-ended>{v().error ?? END_REASON[v().reason ?? 'hangup']}</p>
+          <Show when={v().reason === 'failed'}>
+            {/* A connectivity failure only ('failed': the connection closed, was lost, or never connected); no relay exists yet. No money claim here. */}
+            <p class="hint" data-call-no-relay>Some networks need a relay to connect a call, and your node does not offer one yet.</p>
+          </Show>
         </Show>
         <Show when={v().phase !== 'ended' && v().error}>
           <p class="hint" data-call-error>{v().error}</p>
