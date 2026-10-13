@@ -67,7 +67,8 @@ export function AddDevice(props: { api:(input:AddInput)=>Promise<AddView>; mobil
           <Show when={ticket()!.uri && ticket()!.expires_at > now()} fallback={<p role="status">{ticket()!.expires_at <= now()
             ? 'This ticket expired. If it was already scanned, finish enrollment on the new device. Otherwise close this ticket and create a new one.'
             : 'This ticket was used. Check whether the new device was added or its request ended. Close this ticket before starting again.'}</p>}>
-            <p>On the new device, scan or paste this ticket. It works once and expires in five minutes.</p>
+            <p data-ticket-where>On the new device, open BitSov and choose to connect to your node (on a computer: “Use a node you already run at home”), then scan or paste this ticket. It works once and expires in five minutes.</p>
+            <p class="hint" data-ticket-claim-warning>The new device then asks for your node’s 18-character claim code. Have it ready: it is shown at your node’s owner console with <code>konsensus claim-code --show</code>, and a BitSov box also has it on its sticker.</p>
             <Show when={qr()} fallback={<p class="hint">This ticket is too large for a QR code. Copy and paste the pairing ticket below on the new device.</p>}>{q => <svg class="qr" viewBox={`0 0 ${q().extent} ${q().extent}`} shape-rendering="crispEdges" role="img" aria-label="Add a device pairing ticket">
               <rect width={q().extent} height={q().extent} fill="#fff" /><path d={q().path} fill="#000" />
             </svg>}</Show>
@@ -118,9 +119,9 @@ export function JoinDevice(props:{api:(input:JoinInput)=>Promise<JoinView>; mobi
     <h2>Add this device</h2>
     <Switch>
       <Match when={view().state === 'idle'}>
-        <p>After scanning or pasting the ticket, enter the physical claim code from your box’s sticker or trusted console. Keep an enrolled owner device nearby. Keep a Mac or another non-phone owner device enrolled as well.</p>
+        <p>After scanning or pasting the ticket, enter your node’s 18-character claim code: it is shown at your node’s owner console with <code>konsensus claim-code --show</code>, and a BitSov box also has it on its sticker. Keep an enrolled owner device nearby. Keep a Mac or another non-phone owner device enrolled as well.</p>
         <form onSubmit={event => { event.preventDefault(); const value = claim.value; claim.value = ''; void run({action:'start',claim_code:value}); }}>
-          <label>Box claim code<input ref={claim} name="claim_code" type="password" autocomplete="off" spellcheck={false} required disabled={busy()} /></label>
+          <label>Claim code<input ref={claim} name="claim_code" type="password" autocomplete="off" spellcheck={false} required disabled={busy()} /></label>
           <button class="primary" disabled={busy()}>{busy() ? 'Preparing comparison…' : 'Show comparison words'}</button>
         </form>
       </Match>

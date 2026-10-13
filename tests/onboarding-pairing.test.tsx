@@ -265,6 +265,26 @@ describe('pairing panel', () => {
     expect(el.textContent).toContain('restore an existing identity');
   });
 
+  it('a fresh computer shows "Joining from another device?" without opening Advanced; it opens the scan-or-paste form', () => {
+    const el = show(starting, booting);
+    const join = el.querySelector('[data-join-from-device]')!;
+    expect(join.textContent).toBe('Joining from another device? Scan or paste its ticket');
+    expect(el.querySelector('[data-remote-access]')).toBeNull();
+    el.querySelector<HTMLButtonElement>('[data-join-open]')!.click();
+    expect(el.querySelector('[data-remote-access]')).not.toBeNull();
+    expect(el.querySelector('[data-target="network"]')!.getAttribute('aria-checked')).toBe('true');
+  });
+
+  it('a phone never shows the "Joining from another device?" link (its first run is the scan-or-paste path)', () => {
+    mount = document.createElement('div');
+    document.body.appendChild(mount);
+    dispose = render(() => (
+      <Onboarding onPreviewRemote={async () => ({ endpoint: 'home:4242', node_id_fingerprint: 'ab…cd' })}
+        status={() => booting} pairing={() => starting} trustAck={() => false} onRetry={() => {}} mobile />
+    ), mount);
+    expect(mount.querySelector('[data-join-from-device]')).toBeNull();
+  });
+
   it('on a phone (the app\'s mobile signal) there is no This Mac: connect to your node, scan or paste, no "Use this Mac instead"', () => {
     mount = document.createElement('div');
     document.body.appendChild(mount);
