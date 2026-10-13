@@ -64,11 +64,20 @@ describe('breaker reset (node #304)', () => {
     expect(lines[0]).toBe('Reset this app’s paused spending');
     expect(lines[1]).toBe('Tripped: paused after failed payments, too many payments this minute');
     expect(lines[2]).toBe('Budget: up to 500 sats, 120 sats left');
+    expect(lines[4]).toBe('Grant ends: 2030-03-17 17:46:40 UTC');
+    expect(approvalReason(v)).toContain(' · Grant ends: 2030-03-17 17:46:40 UTC · ');
+    expect(v.approval_message).toBe('bitsov-approval-v1\n…');
     expect(lines[5]).toBe('Device resets in the last day: 1 of 3');
   });
   it('says so when the node sent no snapshot (nothing is read from request.terms)', () => {
     expect(breakerSnapshot(reset())).toBeNull();
     expect(termLines(reset())[1]).toBe('Your node did not include the grant’s state');
+  });
+  it('keeps malformed grant expiry from crashing the approval view', () => {
+    for (const grant_expires_at of [undefined, Number.MAX_SAFE_INTEGER]) {
+      const v = reset({ ...snap, grant_expires_at });
+      expect(termLines(v)).toContain('Grant ends: unavailable');
+    }
   });
   it('only a failure pause needs a reset; rate and velocity limits recover with time', () => {
     expect(needsReset(['grant_paused'])).toBe(true);
