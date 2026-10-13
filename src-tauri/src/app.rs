@@ -4905,13 +4905,19 @@ fn budget_proposal(state: &NodeState, want: Want) -> Option<serde_json::Value> {
 /// app's own window; on a paired node it opens a window over an existing grant
 /// or asks the node for one. Without `ask`, only polls a pending request.
 async fn spend_advance(state: &NodeState, ask: bool) -> Result<act::SpendView, ActionError> {
-    spend_advance_for(state, ask.then_some(Want::Window)).await
+    Ok(spend_advance_for(state, ask.then_some(Want::Window)).await?.view)
+}
+
+/// Separate the current view from the window this invocation actually armed.
+struct SpendAdvance {
+    view: act::SpendView,
+    armed_granted_op: Option<String>,
 }
 
 /// Open what the owner asked for (`want`): the ten-minute window or the budget
 /// approval. On a paired node without `spend`, both go through one elevation
 /// request, and a grant opens only what was asked.
-async fn spend_advance_for(state: &NodeState, want: Option<Want>) -> Result<act::SpendView, ActionError> {
+async fn spend_advance_for(state: &NodeState, want: Option<Want>) -> Result<SpendAdvance, ActionError> {
     // The shell polls spend before budget at startup. Read current authority
     // before a saved request changes the pristine approval generations. The
     // request may already have been granted, with a much longer grant expiry.
@@ -4964,13 +4970,14 @@ fn restore_spend_pending(state: &NodeState) {
     }
 }
 
-async fn spend_advance_for_inner(state: &NodeState, want: Option<Want>) -> Result<act::SpendView, ActionError> {
+async fn spend_advance_for_inner(state: &NodeState, want: Option<Want>) -> Result<SpendAdvance, ActionError> {
     if want.is_some() && budget_paused(state)? {
         return Err(ActionError::new("budget_paused", "Payments are paused. Resume them first."));
     }
-    // Immediate approvals have a local request identity. A node request replaces
-    // it below with the exact op we create or poll, even if that poll completes it.
-    let mut request_id = want.map(|_| spend_journal::new_operation_id()).transpose()?;
+    // Only a verified node request supplies an identity, even when this call
+    // completes it. Immediate approvals have no request identity.
+    let mut request_id = None;
+    let mut armed_granted_op = None;
     // Taken before any await: whatever the node answers later opens nothing
     // if the owner paused or locked in the meantime.
     let fence = approval_fence(state);
@@ -5012,7 +5019,12 @@ async fn spend_advance_for_inner(state: &NodeState, want: Option<Want>) -> Resul
             if let Some(want) = want { open_fenced(state, fence, want, act::SpendBasis::AppLock, None)?; }
         }
         Mode::Paired { spend: true } => {
-            if let Some(want) = want { open_fenced(state, fence, want, act::SpendBasis::NodeGrant, held.as_ref())?; }
+            if let Some(want) = want {
+                open_fenced(state, fence, want, act::SpendBasis::NodeGrant, held.as_ref())?;
+                if matches!(want, Want::Window) {
+                    armed_granted_op = held.as_ref().map(|g| g.op_id.clone()).filter(|id| !id.is_empty());
+                }
+            }
         }
         Mode::Paired { spend: false } => {
             let (generation, pending) = {
@@ -5039,7 +5051,7 @@ async fn spend_advance_for_inner(state: &NodeState, want: Option<Want>) -> Resul
                 }
                 let reply: act::ElevationStatusReply = decode_act("/pair/elevation", &body)?;
                 if !state.spend.lock().unwrap().matches_poll(generation, &pending, now_ms()) {
-                    return Ok(act::SpendView { request_id, ..state.spend.lock().unwrap().view(now_ms()) });
+                    return Ok(SpendAdvance { view: act::SpendView { request_id, ..state.spend.lock().unwrap().view(now_ms()) }, armed_granted_op });
                 }
                 match reply.status.as_str() {
                     "granted" => {
@@ -5053,7 +5065,7 @@ async fn spend_advance_for_inner(state: &NodeState, want: Option<Want>) -> Resul
                         let node = if has_spend { Some(grant_for_open(state).await) } else { None };
                         let mut gate = state.spend.lock().unwrap();
                         if !gate.matches_poll(generation, &pending, now_ms()) {
-                            return Ok(act::SpendView { request_id, ..gate.view(now_ms()) });
+                            return Ok(SpendAdvance { view: act::SpendView { request_id, ..gate.view(now_ms()) }, armed_granted_op });
                         }
                         let wants = std::mem::take(&mut *state.wants.lock().unwrap());
                         let node = match node {
@@ -5080,7 +5092,10 @@ async fn spend_advance_for_inner(state: &NodeState, want: Option<Want>) -> Resul
                         }
                         // Open only what the owner asked for with this request.
                         if !wants.window { gate.clear_pending(); }
-                        if wants.window { arm_want(&mut gate, &mut autopay, Want::Window, act::SpendBasis::NodeGrant, node.as_ref()); }
+                        if wants.window {
+                            arm_want(&mut gate, &mut autopay, Want::Window, act::SpendBasis::NodeGrant, node.as_ref());
+                            armed_granted_op = node.as_ref().map(|g| g.op_id.clone()).filter(|id| !id.is_empty());
+                        }
                         if let Some(ceiling) = wants.budget {
                             arm_want(&mut gate, &mut autopay, Want::Budget(ceiling), act::SpendBasis::NodeGrant, node.as_ref());
                         }
@@ -5120,7 +5135,10 @@ async fn spend_advance_for_inner(state: &NodeState, want: Option<Want>) -> Resul
             }
         }
     }
-    Ok(act::SpendView { request_id, ..state.spend.lock().unwrap().view(now_ms()) })
+    Ok(SpendAdvance {
+        view: act::SpendView { request_id, ..state.spend.lock().unwrap().view(now_ms()) },
+        armed_granted_op,
+    })
 }
 
 /// Read only the policy and backend from the SAME config passed to node start.
@@ -6846,12 +6864,13 @@ async fn do_budget_approve(state: &NodeState, ceiling_msat: u64, preset: budget:
             _ => false,
         }
     };
-    let request_id = if narrowed {
-        Some(spend_journal::new_operation_id()?)
+    let (request_id, granted_op) = if narrowed {
+        (None, None)
     } else {
-        spend_advance_for(state, Some(Want::Budget(ceiling_msat))).await?.request_id
+        let result = spend_advance_for(state, Some(Want::Budget(ceiling_msat))).await?;
+        (result.view.request_id, result.armed_granted_op)
     };
-    Ok(budget::BudgetView { request_id, ..budget_view(state)? })
+    Ok(budget::BudgetView { request_id, granted_op, ..budget_view(state)? })
 }
 
 /// Pause-all: every payment stops now, and stays stopped across restarts.
@@ -6875,8 +6894,12 @@ async fn do_budget_resume(state: &NodeState) -> Result<budget::BudgetView, Actio
         book.paused = false;
         Ok(book.ceiling_msat)
     })?;
-    let request_id = spend_advance_for(state, Some(Want::Budget(ceiling))).await?.request_id;
-    Ok(budget::BudgetView { request_id, ..budget_view(state)? })
+    let result = spend_advance_for(state, Some(Want::Budget(ceiling))).await?;
+    Ok(budget::BudgetView {
+        request_id: result.view.request_id,
+        granted_op: result.armed_granted_op,
+        ..budget_view(state)?
+    })
     }.await;
     act::with_op(Fallback(existing_operation.as_deref()), result)
 }
@@ -13201,7 +13224,7 @@ mod control_act_tests {
         for want in [Want::Window, Want::Budget(500_000)] {
             let (node, _dir, g1) = g1_node(&["read", "receive"]);
             *g1.grant.lock().unwrap() = serde_json::Value::Null;
-            assert_eq!(spend_advance_for(&node.state, Some(want)).await.unwrap().state, act::SpendState::Pending);
+            assert_eq!(spend_advance_for(&node.state, Some(want)).await.unwrap().view.state, act::SpendState::Pending);
             assert_eq!(spend_advance(&node.state, false).await.unwrap().state, act::SpendState::Pending);
 
             // The console grants between ticks; budget status lands first.
@@ -13236,7 +13259,7 @@ mod control_act_tests {
         for want in [Want::Window, Want::Budget(500_000)] {
             let (node, _dir, g1) = g1_node(&["read", "receive"]);
             *g1.grant.lock().unwrap() = serde_json::Value::Null;
-            assert_eq!(spend_advance_for(&node.state, Some(want)).await.unwrap().state, act::SpendState::Pending);
+            assert_eq!(spend_advance_for(&node.state, Some(want)).await.unwrap().view.state, act::SpendState::Pending);
             assert_eq!(spend_advance(&node.state, false).await.unwrap().state, act::SpendState::Pending);
             *g1.grant.lock().unwrap() = g1_grant(3600, 400_000, 400_000);
             // Any other API call can reissue the token before the spend tick.
@@ -13539,24 +13562,65 @@ mod control_act_tests {
     }
 
     #[tokio::test]
-    async fn approval_ids_immediate_commands_return_local_request_ids() {
+    async fn approval_ids_immediate_commands_have_no_node_request() {
         let node = fake(AuthMode::Local, happy());
         let s = &node.state;
-        let mut ids = std::collections::HashSet::new();
         for reply in [
             serde_json::to_value(spend_advance(s, true).await.unwrap()).unwrap(),
             serde_json::to_value(do_budget_approve(s, 500_000, budget::PresetId::Careful).await.unwrap()).unwrap(),
-            // Narrowing an existing approval still identifies this command's request.
+            // Narrowing does not create a node request or arm a window.
             serde_json::to_value(do_budget_approve(s, 400_000, budget::PresetId::Careful).await.unwrap()).unwrap(),
             serde_json::to_value(do_budget_resume(s).await.unwrap()).unwrap(),
         ] {
-            let id = reply["request_id"].as_str().expect("immediate approval has a local request id");
-            assert!(!id.is_empty());
-            assert!(ids.insert(id.to_owned()), "different local requests have different identities");
+            assert_eq!(reply.get("request_id"), Some(&serde_json::Value::Null));
+            assert_eq!(reply.get("granted_op"), Some(&serde_json::Value::Null));
         }
         let view = serde_json::to_value(spend_advance(s, false).await.unwrap()).unwrap();
         assert_eq!(view["state"], "open");
         assert_eq!(view.get("granted_op"), Some(&serde_json::Value::Null));
+    }
+
+    #[tokio::test]
+    async fn approval_ids_immediate_live_grant_returns_the_window_op() {
+        let (node, _dir, g1) = g1_node(&["read", "receive", "spend"]);
+        g1.grant.lock().unwrap()["op_id"] = "cd34".into();
+        let reply = serde_json::to_value(spend_advance(&node.state, true).await.unwrap()).unwrap();
+        assert_eq!(reply.get("request_id"), Some(&serde_json::Value::Null));
+        assert_eq!(reply["state"], "open");
+        assert_eq!(reply["granted_op"], "cd34");
+        assert_eq!(spend_advance(&node.state, false).await.unwrap().granted_op.as_deref(), Some("cd34"));
+
+        // A budget-only approval, narrowing, or resume must not claim this window.
+        for reply in [
+            serde_json::to_value(do_budget_approve(&node.state, 400_000, budget::PresetId::Careful).await.unwrap()).unwrap(),
+            serde_json::to_value(do_budget_approve(&node.state, 300_000, budget::PresetId::Careful).await.unwrap()).unwrap(),
+            serde_json::to_value(do_budget_resume(&node.state).await.unwrap()).unwrap(),
+        ] {
+            assert_eq!(reply.get("request_id"), Some(&serde_json::Value::Null));
+            assert_eq!(reply.get("granted_op"), Some(&serde_json::Value::Null));
+        }
+        assert!(node.posts().is_empty());
+    }
+
+    #[tokio::test]
+    async fn approval_ids_budget_completion_returns_only_the_window_it_armed() {
+        for command in ["budget_approve", "budget_resume"] {
+            let (node, _dir, g1) = g1_node(&["read", "receive"]);
+            spend_advance(&node.state, true).await.unwrap();
+            // A different grant op proves the result is read at arming, not inferred.
+            g1.grant.lock().unwrap()["op_id"] = "cd34".into();
+            for granted in [false, true] {
+                let reply = if command == "budget_approve" {
+                    do_budget_approve(&node.state, 500_000, budget::PresetId::Careful).await.unwrap()
+                } else {
+                    do_budget_resume(&node.state).await.unwrap()
+                };
+                let reply = serde_json::to_value(reply).unwrap();
+                assert_eq!(reply["request_id"], "ab12");
+                assert_eq!(reply.get("granted_op"), Some(&if granted { serde_json::json!("cd34") } else { serde_json::Value::Null }));
+            }
+            assert_eq!(spend_advance(&node.state, false).await.unwrap().granted_op.as_deref(), Some("cd34"));
+        }
     }
 
     #[tokio::test]

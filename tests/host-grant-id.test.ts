@@ -6,7 +6,7 @@ const invoke = vi.hoisted(() => vi.fn());
 vi.mock('@tauri-apps/api/core', () => ({ invoke }));
 afterEach(() => vi.resetAllMocks());
 
-it('passes request_id through each approval command without changing the view', async () => {
+it('passes node request and armed window identities through each approval command', async () => {
   const budget = await sampleSource().budgetStatus();
   const spend = await sampleSource().spendStatus();
   const cases = [
@@ -15,10 +15,17 @@ it('passes request_id through each approval command without changing the view', 
     { command: 'budget_resume', args: undefined, call: () => hostSource.budgetResume(), view: budget },
   ];
   for (const { command, args, call, view } of cases) {
-    const reply = { ...view, request_id: 'Ab12' };
-    invoke.mockResolvedValueOnce(reply);
-    expect(await call()).toEqual(reply);
-    expect(invoke).toHaveBeenLastCalledWith(command, ...(args ? [args] : []));
+    for (const identity of [
+      { request_id: 'Ab12', granted_op: null },
+      { request_id: 'Ab12', granted_op: 'Cd34' },
+      { request_id: null, granted_op: 'Cd34' },
+      { request_id: null, granted_op: null },
+    ]) {
+      const reply = { ...view, ...identity };
+      invoke.mockResolvedValueOnce(reply);
+      expect(await call()).toEqual(reply);
+      expect(invoke).toHaveBeenLastCalledWith(command, ...(args ? [args] : []));
+    }
   }
 });
 

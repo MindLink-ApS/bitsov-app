@@ -439,8 +439,7 @@ impl Lapse {
 /// What the renderer is told about spending. No token, no scope list.
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct SpendView {
-    /// Present on a request response: the node's pending op, or a local request id.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// The verified node request this action acts on; null without a node request.
     pub request_id: Option<String>,
     /// The node op that granted this open window; null when unknown or closed.
     pub granted_op: Option<String>,
