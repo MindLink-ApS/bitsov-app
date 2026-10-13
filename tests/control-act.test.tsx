@@ -210,6 +210,73 @@ describe('acting from the track', () => {
     nothingPaidIsTrue(host);
   });
 
+  it('Approve & send r1 #1: the request it waits on is cancelled → Unsent, and a later grant never sends it', async () => {
+    const host = stubHost();
+    await openShell();
+    await pressWaiting(host);
+    host.spend.v = view('locked'); // cancelled at the node
+    await vi.waitFor(() => expect(unsentReason()).toBe('Not sent · nothing paid · The approval was cancelled or lapsed before it went through.'), { timeout: 5000 });
+    host.spend.v = openView();
+    await vi.waitFor(() => expect($('[data-spend="open"]')).not.toBeNull(), { timeout: 5000 });
+    await new Promise((r) => setTimeout(r, 300));
+    expect(host.used('message_send')).toHaveLength(0);
+  }, 15_000);
+
+  it('Approve & send r1 #1: another request replacing the one it waits on never satisfies it', async () => {
+    const host = stubHost();
+    await openShell();
+    await pressWaiting(host);
+    host.spend.v = view('pending', { pending: { op_id: 'cd34', expires_at_ms: Date.now() + 900_000, owner_action: 'konsensus grant --op cd34', owner_can_grant: true } });
+    await vi.waitFor(() => expect(unsentReason()).toMatch(/cancelled or lapsed/), { timeout: 5000 });
+    host.spend.v = openView();
+    await vi.waitFor(() => expect($('[data-spend="open"]')).not.toBeNull(), { timeout: 5000 });
+    await new Promise((r) => setTimeout(r, 300));
+    expect(host.used('message_send')).toHaveLength(0);
+  }, 15_000);
+
+  it('Approve & send r1 #2: its own approval failing while spending opened another way never sends it', async () => {
+    let refuse!: () => void;
+    const host = stubHost({ spend_request: () => new Promise((_resolve, reject) => { refuse = () => reject({ code: 'spend_refused', message: 'Refused.' }); }) });
+    await openShell();
+    type('[data-composer] textarea', 'gm Maya');
+    await vi.waitFor(() => expect(text('[data-send]')).toBe('Approve & send'));
+    submit();
+    await vi.waitFor(() => expect($('[data-sending="waiting"]')).not.toBeNull());
+    await vi.waitFor(() => expect(refuse).toBeDefined());
+    // Spending opens by some other approval while this request is still out ...
+    host.spend.v = openView();
+    await vi.waitFor(() => expect($('[data-spend="open"]')).not.toBeNull(), { timeout: 5000 });
+    // ... then this approval is refused.
+    refuse();
+    await vi.waitFor(() => expect(unsentReason()).toBe('Not sent · nothing paid · It was not approved.'));
+    await new Promise((r) => setTimeout(r, 300));
+    expect(host.used('message_send')).toHaveLength(0);
+  }, 15_000);
+
+  it('Approve & send r1 #3: past its 10 minutes the hand-off ends it unsent (fake clock), and nothing is sent', async () => {
+    const host = stubHost();
+    await openShell();
+    await pressWaiting(host);
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(Date.now() + 10 * 60_000 + 1);
+      host.spend.v = openView();
+      await vi.waitFor(() => expect(unsentReason()).toBe('Not sent · nothing paid · It was not approved within 10 minutes.'), { timeout: 5000 });
+      expect(host.used('message_send')).toHaveLength(0);
+    } finally { vi.useRealTimers(); }
+  }, 15_000);
+
+  it('Approve & send r1 #4: while its bubble waits, the approval copy says it sends when approved', async () => {
+    const host = stubHost({
+      pairing_status: () => ({ ...paired, remote: true }),
+      device_key_status: () => ({ available: true, state: 'none', fingerprint: null, owner_action: null, expires_at_ms: null }),
+    });
+    await openShell();
+    await pressWaiting(host);
+    await vi.waitFor(() => expect(text('[data-touch-id-stays-text="spend"]')).toContain('Your message waits in its bubble and sends once this approval goes through.'));
+    expect(text('[data-touch-id-stays-text="spend"]')).not.toContain('until you press Send');
+  });
+
   it('asks the owner once (Approve & send), then sends that message once the grant lands, and shows the receipt and delivery', async () => {
     const host = stubHost();
     await openShell();

@@ -4413,17 +4413,25 @@ function Composer(props: {
    * (not approved, left, price moved, offline, expired) is a true "not sent,
    * nothing paid" Unsent card with its words.
    */
-  type Pressed = { bubble: string; track: TrackRef; text: string; msat: number; until: number; taken: boolean };
+  /**
+   * `kind`: the one approval this press asked for; `approved`: that approval's
+   * own action succeeded (set before busy clears); `grantOp`: for the node
+   * grant, the pending request it waits on. Consent ends with that approval:
+   * its refusal, cancel, lapse or replacement drops it; another approval
+   * never satisfies it.
+   */
+  type ApprovalKind = 'touch' | 'preset' | 'resume' | 'grant';
+  type Pressed = { bubble: string; track: TrackRef; text: string; msat: number; until: number; taken: boolean; kind: ApprovalKind; approved: boolean; grantOp: string | null };
   const [consent, setConsent] = createSignal<Pressed | null>(null);
   const canContinue = () => mode() === 'message' && !!draft().trim() && shown().msat !== null && consent() === null;
-  const startWaiting = () => {
+  const startWaiting = (kind: ApprovalKind) => {
     if (!untrack(canContinue)) return;
     const text = draft();
     const msat = shown().msat!;
     const bubble = props.actions.beginSending(props.track, text, msat, true);
     setDraft('');
     setDrafted(false);
-    setConsent({ bubble, track: props.track, text, msat, until: Date.now() + CONTINUE_MS, taken: false });
+    setConsent({ bubble, track: props.track, text, msat, until: Date.now() + CONTINUE_MS, taken: false, kind, approved: false, grantOp: null });
   };
   const dropConsent = (reason: string) => {
     const c = untrack(consent);
@@ -4433,11 +4441,37 @@ function Composer(props: {
   };
   const approvalCleared = () => !needsTouch() && (viaBudget() ? stand().kind === 'ok' || stand().kind === 'first' : !spends() || line().open);
   /**
-   * After the approval action answered: only its own refusal ends the wait
-   * (state refreshes, e.g. the contact's envelope, arrive later). An approval
-   * that is taken but never clears ends at the 10-minute expiry.
+   * The approval action answered (called before busy clears, so nothing can
+   * continue on another approval first). Refused: the wait ends. Taken: this
+   * exact approval is now the one the bubble waits on (state refreshes, e.g.
+   * the contact's envelope, arrive later; one that never clears expires).
    */
-  const afterApproval = (approved: boolean) => { if (!approved) dropConsent('It was not approved.'); };
+  const afterApproval = (approved: boolean) => {
+    const c = untrack(consent);
+    if (!c) return;
+    if (!approved) { dropConsent('It was not approved.'); return; }
+    const sp = untrack(() => props.spend);
+    setConsent({ ...c, approved: true, grantOp: c.kind === 'grant' && sp?.state === 'pending' ? sp.pending?.op_id ?? null : null });
+  };
+  const LAPSED = 'The approval was cancelled or lapsed before it went through.';
+  // The approval it waits on was cancelled, lapsed or replaced: the consent ends with it.
+  createEffect(() => {
+    const c = consent();
+    if (!c || !c.approved) return;
+    if (c.kind === 'grant') {
+      if (line().open) return;
+      const sp = props.spend;
+      if (sp?.state === 'pending') {
+        const op = sp.pending?.op_id ?? null;
+        if (c.grantOp === null && op) { setConsent({ ...c, grantOp: op }); return; }
+        if (op === c.grantOp) return;
+      }
+      dropConsent(LAPSED);
+    } else if (c.kind === 'preset' || c.kind === 'resume') {
+      const k = stand().kind;
+      if (k === 'off' || k === 'paused') dropConsent(LAPSED);
+    }
+  });
   createEffect(on(() => shown().msat, (msat) => {
     const c = untrack(consent);
     // Another chat's price is not this message's: leaving is said as leaving (below).
@@ -4451,10 +4485,13 @@ function Composer(props: {
     onCleanup(() => clearTimeout(timer));
   }));
   onCleanup(() => dropConsent('You left before it was approved.'));
-  // The approval cleared: the waiting bubble goes once, through the ordinary path.
+  // Its own approval succeeded and cleared: the waiting bubble goes once, through
+  // the ordinary path. Transient guards (busy, a stale budget read, a contact
+  // wait) keep it waiting rather than ending it.
   createEffect(() => {
     const c = consent();
-    if (!c || busy() || contactWaiting() || !approvalCleared()) return;
+    if (!c || !c.approved || busy() || contactWaiting() || props.budgetStale || props.moneyBlocked || !approvalCleared()) return;
+    if (Date.now() >= c.until) { dropConsent('It was not approved within 10 minutes.'); return; }
     setConsent(null);
     void (async () => {
       await submit(c.msat, c);
@@ -4491,27 +4528,28 @@ function Composer(props: {
       return;
     }
     if (needsTouch()) {
-      if (pressed) return;
+      if (pressed) { setNote('It needs Touch ID again. Press Send to ask.'); return; }
       // This contact is approved with Touch ID; a message then goes once (Approve & send).
-      startWaiting();
+      startWaiting('touch');
       setBusy(true);
       const approved = await props.actions.approveContact(target(), shown().msat);
-      setBusy(false);
       afterApproval(approved);
+      setBusy(false);
       return;
     }
     if (viaBudget()) {
       const st = stand();
       if (st.kind === 'paused' || st.kind === 'off') {
-        if (pressed) return;
+        if (pressed) { setNote('Payments need approving again. Press Send to ask.'); return; }
         // The one approval (or resume); a message then goes once (Approve & send).
-        if (st.kind === 'paused' || presetChosen()) startWaiting();
+        if (st.kind === 'paused') startWaiting('resume');
+        else if (presetChosen()) startWaiting('preset');
         setBusy(true);
         let approved = false;
         if (st.kind === 'paused') approved = await props.actions.resume();
         else if (presetChosen()) approved = await props.actions.approveBudget(presetChosen()!.ceiling_msat, presetChosen()!.id);
-        setBusy(false);
         afterApproval(approved);
+        setBusy(false);
         return;
       }
       if (st.kind !== 'first' && st.kind !== 'ok') return;
@@ -4662,14 +4700,14 @@ function Composer(props: {
       return;
     }
     if (spends() && !line().open) {
-      if (pressed) return;
+      if (pressed) { setNote('Spending needs approving again. Press Send to ask.'); return; }
       // The one tap: with this Mac registered, a single contact is approved
       // with Touch ID; otherwise at the node. A message then goes once (Approve & send).
-      startWaiting();
+      startWaiting('grant');
       setBusy(true);
       const approved = await props.actions.approve();
-      setBusy(false);
       afterApproval(approved);
+      setBusy(false);
       return;
     }
     if (!ready(pressed?.text)) {
@@ -5253,7 +5291,7 @@ function Composer(props: {
         <Show when={!props.budgetStale} fallback={<p class="spend-line" data-budget-stale>Spend grant stale — checking your node. Auto-pay unavailable until confirmed.</p>}>
           <Show
             when={viaBudget()}
-            fallback={<SpendBar spend={props.spend} error={props.spendError} now={props.now} actions={props.actions} hasPending={props.hasPending} stays={mode() === 'message' ? 'Your draft is kept. Nothing is sent until you press Send after approval.' : undefined} />}
+            fallback={<SpendBar spend={props.spend} error={props.spendError} now={props.now} actions={props.actions} hasPending={props.hasPending} stays={mode() === 'message' ? (consent() ? 'Your message waits in its bubble and sends once this approval goes through.' : 'Your draft is kept. Nothing is sent until you press Send after approval.') : undefined} />}
           >
             <BudgetBar
               stand={stand()}
@@ -5272,6 +5310,7 @@ function Composer(props: {
               now={props.now}
               actions={props.actions}
               hasPending={props.hasPending}
+              waitingSend={consent() !== null}
             />
           </Show>
         </Show>
@@ -5572,6 +5611,8 @@ const PRESET_NAME: Record<PresetId, string> = { careful: 'Careful', everyday: 'E
  * The bar says where the budget stands and is the only place that asks.
  */
 function BudgetBar(props: {
+  /** An Approve & send bubble waits on this approval. */
+  waitingSend?: boolean;
   stand: BudgetStandT;
   budget: BudgetView;
   spend: SpendView | null;
@@ -5604,7 +5645,9 @@ function BudgetBar(props: {
         </Match>
         <Match when={props.stand.kind === 'waiting'}>
           <TouchIdFirst actions={props.actions} stays={<p class="hint" data-touch-id-stays-text="budget">
-            Your draft is kept. Nothing is sent until you press Send after approval.
+            {props.waitingSend
+              ? 'Your message waits in its bubble and sends once this approval goes through.'
+              : 'Your draft is kept. Nothing is sent until you press Send after approval.'}
           </p>}>
           <div class="approval" data-approval="pending">
             <p>

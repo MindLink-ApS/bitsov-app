@@ -314,7 +314,15 @@ describe('invisible payments in the composer and the context panel', () => {
   });
 
   it('approves a daily total once, then messages go with no prompt and the price still shown', async () => {
-    const host = stubHost(budgetView({ rows: [{ target: MAYA, room: false, limit_msat: 50_000, spent_msat: 0 }] }));
+    // The approval is deferred: nothing may be sent until it clears.
+    let release!: () => void;
+    let hostRef!: ReturnType<typeof stubHost>;
+    const host = stubHost(budgetView({ rows: [{ target: MAYA, room: false, limit_msat: 50_000, spent_msat: 0 }] }), {
+      budget_approve: (args) => new Promise((resolve) => {
+        release = () => resolve(hostRef.state.budget = open(hostRef.state.budget.rows, { ceiling_msat: args!.ceiling_msat as number }));
+      }),
+    });
+    hostRef = host;
     await openShell();
     type('[data-composer] textarea', 'gm Maya');
     // A preset is already chosen: the one press approves it and sends this message.
@@ -327,6 +335,11 @@ describe('invisible payments in the composer and the context panel', () => {
     await vi.waitFor(() => expect(host.used('budget_approve')).toHaveLength(1));
     expect(host.used('budget_approve')[0].args).toEqual({ ceiling_msat: 2_000_000, preset: 'everyday' });
     expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('');
+    // Waiting on the approval: nothing is sent before it clears.
+    expect(text('[data-sending="waiting"] .bubble')).toBe('gm Maya');
+    await new Promise((r) => setTimeout(r, 300));
+    expect(host.used('message_send')).toHaveLength(0);
+    release();
 
     await vi.waitFor(() => expect($('[data-budget="ok"]')).not.toBeNull());
     // The approved message went at once, through the budget it just approved.
@@ -1058,7 +1071,13 @@ describe('invisible payments in the composer and the context panel', () => {
   });
 
   it('shows the running tally in the context panel and pauses everything in one tap', async () => {
-    const host = stubHost(open([{ target: MAYA, room: false, limit_msat: 50_000, spent_msat: 4000 }, { target: ROOM, room: true, limit_msat: 100_000, spent_msat: 3000 }]));
+    // Resume is deferred: nothing may be sent until it clears.
+    let release!: () => void;
+    let hostRef!: ReturnType<typeof stubHost>;
+    const host = stubHost(open([{ target: MAYA, room: false, limit_msat: 50_000, spent_msat: 4000 }, { target: ROOM, room: true, limit_msat: 100_000, spent_msat: 3000 }]), {
+      budget_resume: () => new Promise((resolve) => { release = () => resolve(hostRef.state.budget = open(hostRef.state.budget.rows)); }),
+    });
+    hostRef = host;
     await openShell();
     $<HTMLButtonElement>('[data-tab="budget"]')!.click();
     await vi.waitFor(() => expect(text('[data-tally-total]')).toBe('7 sats / 500 sats'));
@@ -1077,6 +1096,9 @@ describe('invisible payments in the composer and the context panel', () => {
     expect(text('[data-send]')).toBe('Resume & send');
     submit();
     await vi.waitFor(() => expect(host.used('budget_resume')).toHaveLength(1));
+    await new Promise((r) => setTimeout(r, 300));
+    expect(host.used('message_send')).toHaveLength(0);
+    release();
     await vi.waitFor(() => expect($('[data-budget="ok"]')).not.toBeNull());
     await vi.waitFor(() => expect(host.used('message_send')).toHaveLength(1));
     expect(host.used('message_send')[0].args).toMatchObject({ plaintext: 'while paused' });
