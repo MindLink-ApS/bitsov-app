@@ -1390,7 +1390,20 @@ describe('calls in the shell', () => {
     $<HTMLButtonElement>('[data-stun-clear]')!.click();
     await vi.waitFor(() => expect($('[data-stun-note]')?.getAttribute('data-stun-using')).toBe('off'));
     expect(localStorage.getItem('bitsov.stun')).toBe('off');
-    // Reload: a fresh app reads the stored choice; the node default does not come back.
+    // A real reload: fresh module state reads the stored choice; the node default does not come back.
+    vi.resetModules();
+    const fresh = await import('../src/control/prefs');
+    fresh.setNodeStun(own);
+    expect(fresh.stunOff()).toBe(true);
+    expect(fresh.effectiveStun()).toBe('');
+    // Control: with nothing stored, a fresh module falls back to the node default (so the read above is real).
+    localStorage.removeItem('bitsov.stun');
+    vi.resetModules();
+    const clean = await import('../src/control/prefs');
+    clean.setNodeStun(own);
+    expect(clean.stunOff()).toBe(false);
+    expect(clean.effectiveStun()).toBe(own);
+    localStorage.setItem('bitsov.stun', 'off');
     dispose!(); dispose = undefined; mount.remove();
     await openShell();
     $<HTMLButtonElement>('[data-profile]')!.click();
