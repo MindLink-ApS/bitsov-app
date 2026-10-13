@@ -317,6 +317,8 @@ export function ControlCenter(props: Props) {
   const [link, setLink] = createSignal<LinkState | null>(null);
   const seenEntrances = new Set<string>();
   const [threads, setThreads] = createStore<{ t: Threads; unread: Unread; fresh: Record<string, true> }>({ t: {}, unread: {}, fresh: {} });
+  /** Chats whose history read succeeded at least once: only these may say "no messages". */
+  const [threadLoaded, setThreadLoaded] = createStore<Record<string, true>>({});
   props.onWatchSamples?.(() => {
     const at = Date.now();
     return watchSamples({ ready: props.ready, locked: false,
@@ -677,6 +679,7 @@ export function ControlCenter(props: Props) {
       // History can already hold a message still sending here: its bubble claims it, as for the live echo.
       for (const m of page) claimEcho(m, t.kind === 'room' ? t.id : null);
       setThreads('t', key, (old) => mergeMessages(old ?? [], page));
+      setThreadLoaded(key, true);
       if (t.kind === 'peer') foldRooms(page, false);
       // After the thread, so a restored send whose message is already here is not shown twice.
       loadOps(t);
@@ -1776,6 +1779,7 @@ export function ControlCenter(props: Props) {
                     actions={actions}
                     now={now()}
                     error={errors.thread}
+                    loaded={threadLoaded[trackKey(t())] === true}
                     onReconnect={async () => { await props.onReconnect?.(); await loadThread(t()); }}
                     prefill={prefill()}
                     onPrefillUsed={() => setPrefill(null)}
@@ -2433,11 +2437,18 @@ function Conversation(props: {
   actions: Actions;
   now: number;
   error: string | undefined;
+  /** This chat's history was read: until then (or after a failed read) nothing is said about it being empty. */
+  loaded: boolean;
   onReconnect: () => void;
   prefill: Prefill | null;
   onPrefillUsed: () => void;
   onContext: () => void;
 }) {
+  /** We have a budget line for them: we paid them before. The only contact status said in an empty chat. */
+  const knownContact = () => {
+    const t = props.track;
+    return t.kind === 'peer' && (props.budget?.rows ?? []).some((r) => !r.room && r.target.toLowerCase() === t.id.toLowerCase());
+  };
   let stream: HTMLDivElement | undefined;
   // A request card's Pay: hands the invoice to the composer's Pay review. Never pays.
   const [payRequest, setPayRequest] = createSignal<{ seq: number; bolt11: string } | null>(null);
@@ -2546,14 +2557,23 @@ function Conversation(props: {
         <For
           each={[...keyedItems().keys()]}
           fallback={
-            <div class="empty-track">
-              <h2>Nothing here yet</h2>
-              <p class="hint">
-                {props.track.kind === 'room'
-                  ? `${props.nodeRooms ? 'This is a legacy room. Create a new room to use group chat.' : 'This node does not support rooms yet.'} A message here pays each member separately, and reaches each one when their payment settles.`
-                  : `Your first message to ${props.name} is a paid first contact: it is admitted when the payment settles.`}
-              </p>
-            </div>
+            // Unknown stays unknown: while the history is being read nothing is said, and a failed
+            // read shows only its error (below). Only a read that came back empty says "no messages".
+            <Show when={props.loaded} fallback={<Show when={!props.error}><div class="empty-track" data-thread-loading><DelayedSpinner /></div></Show>}>
+              <div class="empty-track" data-thread-empty={props.track.kind === 'room' ? 'room' : knownContact() ? 'known' : 'unknown'}>
+                <h2>No messages here yet</h2>
+                <Show when={props.track.kind === 'room'}>
+                  <p class="hint">
+                    {props.nodeRooms ? 'This is a legacy room. Create a new room to use group chat.' : 'This node does not support rooms yet.'} A message here pays each member separately, and reaches each one when their payment settles.
+                  </p>
+                </Show>
+                {/* Only a budget line (we have paid them before) is said; whether they would need a first
+                    contact is the node's to say, on the door card, never guessed here. */}
+                <Show when={props.track.kind === 'peer' && knownContact()}>
+                  <p class="hint">Each message to {props.name} pays their price.</p>
+                </Show>
+              </div>
+            </Show>
           }
         >
           {(key, i) => {
