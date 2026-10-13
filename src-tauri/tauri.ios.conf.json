@@ -3,6 +3,9 @@
     "beforeBundleCommand": null
   },
   "bundle": {
-    "externalBin": []
+    "externalBin": [],
+    "iOS": {
+      "infoPlist": "Info.plist"
+    }
   }
 }
