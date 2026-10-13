@@ -1354,6 +1354,9 @@ describe('calls in the shell', () => {
     expect(text('[data-stun-note]')).toMatch(/your own node \(stun:mynode\.example\.org:3478\).*No third party.*This is the default\./);
     expect(localStorage.getItem('bitsov.stun')).toBeNull();
     expect($('[data-stun-own]')).toBeNull();
+    // The Call button's tooltip says the same (no "No STUN server is set").
+    expect($('[data-call="audio"]')!.getAttribute('title')).toContain(`Uses the STUN server ${own} to find a route.`);
+    expect($('[data-call="audio"]')!.getAttribute('title')).not.toContain('No STUN server');
     // A call uses it with no setting saved.
     $<HTMLButtonElement>('[data-call="audio"]')!.click();
     await vi.waitFor(() => expect(FakePc.made).toHaveLength(1));
@@ -1362,6 +1365,8 @@ describe('calls in the shell', () => {
     // Turn off: no STUN at all, and it stays off.
     $<HTMLButtonElement>('[data-stun-clear]')!.click();
     await vi.waitFor(() => expect($('[data-stun-note]')?.getAttribute('data-stun-using')).toBe('off'));
+    expect(localStorage.getItem('bitsov.stun')).toBe('off');
+    expect($('[data-call="audio"]')!.getAttribute('title')).toContain('STUN is turned off');
     $<HTMLButtonElement>('[data-call-dismiss]')?.click();
     $<HTMLButtonElement>('[data-call="audio"]')!.click();
     await vi.waitFor(() => expect(FakePc.made).toHaveLength(2));
@@ -1372,6 +1377,49 @@ describe('calls in the shell', () => {
     await vi.waitFor(() => expect($<HTMLInputElement>('[data-stun-input]')!.value).toBe(own));
     $<HTMLButtonElement>('[data-stun-save]')!.click();
     await vi.waitFor(() => expect($('[data-stun-note]')?.getAttribute('data-stun-using')).toBe('own'));
+  });
+
+  it('Off survives a reload (stored), and the owner\'s own server beats the node default', async () => {
+    const own = 'stun:mynode.example.org:3478';
+    stubHost({ node_overview: overviewWith({ stun_port: 3478, stun_url: own }) });
+    await openShell();
+    $<HTMLButtonElement>('[data-profile]')!.click();
+    $<HTMLButtonElement>('[data-open-settings]')!.click();
+    $<HTMLButtonElement>('[data-tab="general"]')!.click();
+    await vi.waitFor(() => expect($('[data-stun-note]')?.getAttribute('data-stun-using')).toBe('own'));
+    $<HTMLButtonElement>('[data-stun-clear]')!.click();
+    await vi.waitFor(() => expect($('[data-stun-note]')?.getAttribute('data-stun-using')).toBe('off'));
+    expect(localStorage.getItem('bitsov.stun')).toBe('off');
+    // Reload: a fresh app reads the stored choice; the node default does not come back.
+    dispose!(); dispose = undefined; mount.remove();
+    await openShell();
+    $<HTMLButtonElement>('[data-profile]')!.click();
+    $<HTMLButtonElement>('[data-open-settings]')!.click();
+    $<HTMLButtonElement>('[data-tab="general"]')!.click();
+    await vi.waitFor(() => expect($('[data-stun-note]')?.getAttribute('data-stun-using')).toBe('off'));
+    // The owner's own server beats the node default.
+    const input = $<HTMLInputElement>('[data-stun-input]')!;
+    input.value = 'stun:other.example:3478';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    $<HTMLButtonElement>('[data-stun-save]')!.click();
+    await vi.waitFor(() => expect($('[data-stun-note]')?.getAttribute('data-stun-using')).toBe('other'));
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect(FakePc.made).toHaveLength(1));
+    expect(FakePc.made[0].config.iceServers).toEqual([{ urls: 'stun:other.example:3478' }]);
+  });
+
+  it('an unusable answer from their app is not a connectivity failure: no relay advice', async () => {
+    const host = stubHost();
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect(host.used('call_signal')).toHaveLength(1));
+    await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
+    const callId = JSON.parse(host.used('call_signal')[0].args!.plaintext as string).call_id as string;
+    FakePc.made[0].setRemoteDescription = async () => { throw new Error('bad sdp'); };
+    host.emitLive({ type: 'message', room_id: null, message: { id: 'ans', kind: 401, sender: A, recipient: OWN, timestamp: Date.now(), plaintext: JSON.stringify({ v: 1, call_id: callId, sdp: 'v=0 junk' }), payment_amount_msat: 1000 } });
+    await vi.waitFor(() => expect(text('[data-call-ended]')).toBe('Their answer could not be used.'));
+    expect($('[data-call-no-relay]')).toBeNull();
   });
 
   it('a failed call says that some networks need a relay your node does not offer yet (no money claim)', async () => {

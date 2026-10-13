@@ -739,7 +739,8 @@ export function createCallEngine(deps: CallDeps) {
               if (view.phase === 'reconnecting') void restart(conn);
             }
           } catch {
-            if (pc === conn) end('failed', 'Their answer could not be used.');
+            // Not a connectivity failure (no relay would help): no 'failed' reason, only the words.
+            if (pc === conn) end(null, 'Their answer could not be used.');
           }
           return;
         }

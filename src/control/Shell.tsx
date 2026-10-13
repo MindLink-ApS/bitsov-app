@@ -2927,7 +2927,7 @@ function MessageView(props: {
 function CallNetworkNote(props: { onOpenSettings?: () => void }) {
   return <Show when={!effectiveStun()}>
     <p class="hint call-network-note" data-call-network-note>
-      Calls may not connect across networks yet. No STUN server is set. Choose one in Settings → General → Calls.
+      Calls may not connect across networks yet. {stunOff() ? 'STUN is turned off.' : 'No STUN server is set.'} Choose one in Settings → General → Calls.
       <Show when={props.onOpenSettings}>
         {' '}<button type="button" class="link" data-call-settings-link onClick={() => props.onOpenSettings!()}>Open call settings</button>
       </Show>
@@ -2958,7 +2958,7 @@ function CallButtons(props: { peer: string; name: string; blocked: boolean; acti
   const off = () => props.blocked || cost() === null || props.actions.callActive();
   const title = () =>
     why() ?? (quote() && cost() === null ? `${props.name}’s node does not take calls yet` : cost() !== null
-      ? `Up to ${fmtAmount(cost()!)}: ${fmtAmount(quote()!.offer_msat! + quote()!.offer_max_routing_fee_msat)} to ring (their call price plus ${feeCeiling(quote()!.offer_max_routing_fee_msat)}), then ${fmtAmount(signalCost(quote()!))} to hang up. Includes up to ${fmtAmount(callCost(quote()!)!)} more for one automatic recovery (another admission and hangup). Media goes directly between you; it is not billed. ${stunPref() ? `Uses your STUN server ${stunPref()} to find a route.` : 'No STUN server is set, so calls connect only on the same network (Settings).'}`
+      ? `Up to ${fmtAmount(cost()!)}: ${fmtAmount(quote()!.offer_msat! + quote()!.offer_max_routing_fee_msat)} to ring (their call price plus ${feeCeiling(quote()!.offer_max_routing_fee_msat)}), then ${fmtAmount(signalCost(quote()!))} to hang up. Includes up to ${fmtAmount(callCost(quote()!)!)} more for one automatic recovery (another admission and hangup). Media goes directly between you; it is not billed. ${effectiveStun() ? `Uses the STUN server ${effectiveStun()} to find a route.` : stunOff() ? 'STUN is turned off, so calls connect only on the same network (Settings).' : 'No STUN server is set, so calls connect only on the same network (Settings).'}`
       : 'Reading their call price…');
   const place = (media: CallMedia) => { const q = quote(); if (q && !off()) props.actions.placeCall(props.peer, media, q); };
   return (
@@ -3058,7 +3058,7 @@ function CallPanel(props: {
         <Show when={v().phase === 'ended'}>
           <p class="hint" data-call-ended>{v().error ?? END_REASON[v().reason ?? 'hangup']}</p>
           <Show when={v().reason === 'failed'}>
-            {/* No relay exists yet: say why some calls cannot connect (no money claim here). */}
+            {/* A connectivity failure only ('failed': the connection closed, was lost, or never connected); no relay exists yet. No money claim here. */}
             <p class="hint" data-call-no-relay>Some networks need a relay to connect a call, and your node does not offer one yet.</p>
           </Show>
         </Show>
