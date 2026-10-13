@@ -586,6 +586,10 @@ pub struct Row {
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct BudgetView {
+    /// The verified node request this action acts on; null without a node request.
+    pub request_id: Option<String>,
+    /// Node op of the spending window this action armed; null if none or unknown.
+    pub granted_op: Option<String>,
     pub paused: bool,
     pub autopay: AutopayView,
     /// A budget approval is waiting for the owner at the node.
@@ -631,6 +635,8 @@ pub fn view(book: &Book, autopay: AutopayView, waiting_for_owner: bool, now_ms: 
     }
     rows.sort_by(|a, b| b.spent_msat.cmp(&a.spent_msat).then(a.target.cmp(&b.target)));
     BudgetView {
+        request_id: None,
+        granted_op: None,
         paused: book.paused, autopay, waiting_for_owner, preset: book.preset,
         ceiling_msat: book.ceiling_msat,
         spent_msat: rows.iter().map(|r| r.spent_msat).sum(),

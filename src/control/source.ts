@@ -331,6 +331,7 @@ export const hostSource: Source = {
   membrane: (limit) => invoke<MembraneRead>('membrane_read', { limit: limit ?? null }),
   onLive: (handler) => listen<LiveEvent>(LIVE_EVENT, (e) => handler(e.payload)),
   liveLink: () => invoke<LinkState | null>('live_link'),
+  // Keep request_id and granted_op exactly as returned by the host.
   spendStatus: () => invoke<SpendView>('spend_status'),
   spendRequest: () => invoke<SpendView>('spend_request'),
   spendLock: () => invoke<SpendView>('spend_lock'),
@@ -354,6 +355,7 @@ export const hostSource: Source = {
   retry: (recipient, plaintext, approvedMsat) => invoke<SendReceipt>('message_retry', { recipient, plaintext, approved_msat: approvedMsat ?? null }),
   dismissUndelivered: (pendingId) => invoke<string>('spend_dismiss_undelivered', { pending_id: pendingId }),
   budgetStatus: () => invoke<BudgetView>('budget_status'),
+  // Approval responses include request_id; forward the complete view unchanged.
   budgetApprove: (ceilingMsat, preset) => invoke<BudgetView>('budget_approve', { ceiling_msat: ceilingMsat, preset }),
   budgetSet: (target, room, limitMsat) => invoke<BudgetView>('budget_set', { target, room, limit_msat: limitMsat }),
   budgetPause: () => invoke<BudgetView>('budget_pause'),
