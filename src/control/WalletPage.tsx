@@ -316,7 +316,7 @@ const DIRECTION_FILTERS: { id: DirectionFilter; label: string }[] = [
 ];
 const ICON: Record<Activity['kind'], string> = { message: '✉', call: '☎', file: '▤', payment: '⚡', invoice: '⚡' };
 
-/** One sentence for "no channels", wherever it shows (Wallet → Channels, Settings → Node). */
+/** One sentence for "no channels", wherever it shows (Wallet → Channels, Settings → Wallet). */
 export const NO_CHANNELS = 'No channels yet. A channel is how your node sends and receives over Lightning; paid messages need one.';
 
 function ActivityView(props: {
