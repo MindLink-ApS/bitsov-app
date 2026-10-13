@@ -317,21 +317,21 @@ describe('invisible payments in the composer and the context panel', () => {
     const host = stubHost(budgetView({ rows: [{ target: MAYA, room: false, limit_msat: 50_000, spent_msat: 0 }] }));
     await openShell();
     type('[data-composer] textarea', 'gm Maya');
-    await vi.waitFor(() => expect(text('[data-send]')).toBe('Send'));
+    // A preset is already chosen: the one press approves it and sends this message.
+    await vi.waitFor(() => expect(text('[data-send]')).toBe('Approve & send'));
     expect(text('[data-budget-setup]')).toContain('Someone new always asks first');
 
-    // The owner picks a preset; the tap is the approval. Nothing is sent by it.
+    // The owner picks a preset; the tap is the approval (Approve & send): this message then goes once.
     $<HTMLButtonElement>('[data-preset="everyday"]')!.click();
     submit();
     await vi.waitFor(() => expect(host.used('budget_approve')).toHaveLength(1));
     expect(host.used('budget_approve')[0].args).toEqual({ ceiling_msat: 2_000_000, preset: 'everyday' });
-    expect(host.used('message_send')).toHaveLength(0);
-    expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('gm Maya');
+    expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('');
 
     await vi.waitFor(() => expect($('[data-budget="ok"]')).not.toBeNull());
-    expect(text('[data-budget-line]')).toContain('Pays automatically · 0 sats of 50 sats to Maya in 24 h');
-    submit();
+    // The approved message went at once, through the budget it just approved.
     await vi.waitFor(() => expect(host.used('message_send')).toHaveLength(1));
+    await vi.waitFor(() => expect(text('[data-budget-line]')).toContain('Pays automatically · 2 sats of 50 sats to Maya in 24 h'));
     expect(host.used('message_send')[0].args).toMatchObject({ recipient: MAYA, max_msat: 2000, first_contact_msat: null });
     await vi.waitFor(() => expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe(''));
     // A second message: no approval, no question.
@@ -1073,10 +1073,15 @@ describe('invisible payments in the composer and the context panel', () => {
     type('[data-composer] textarea', 'while paused');
     await vi.waitFor(() => expect($('[data-budget-paused]')).not.toBeNull());
     expect(text('[data-budget-paused]')).toContain('New app payments are blocked');
+    // Resume & send: the one press resumes, then this message goes once.
+    expect(text('[data-send]')).toBe('Resume & send');
     submit();
     await vi.waitFor(() => expect(host.used('budget_resume')).toHaveLength(1));
-    expect(host.used('message_send')).toHaveLength(0);
     await vi.waitFor(() => expect($('[data-budget="ok"]')).not.toBeNull());
+    await vi.waitFor(() => expect(host.used('message_send')).toHaveLength(1));
+    expect(host.used('message_send')[0].args).toMatchObject({ plaintext: 'while paused' });
+    await new Promise((r) => setTimeout(r, 300));
+    expect(host.used('message_send')).toHaveLength(1);
   });
 
   it('lowers one contact’s budget from the panel', async () => {

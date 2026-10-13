@@ -205,7 +205,8 @@ type Outcome<T> = { ok: true; value: T } | { ok: false; error: ActionError };
 export type Actions = {
   remote?: () => boolean;
   moneyBlocked: () => boolean;
-  approve: () => Promise<void>;
+  /** true when the request was made (open, or pending at the node). */
+  approve: () => Promise<boolean>;
   lock: () => Promise<void>;
   /** Withdraw the pending request at the node. */
   cancelSpend: () => Promise<void>;
@@ -218,19 +219,27 @@ export type Actions = {
   ownerDeviceApproval?: () => boolean;
   cancelDevice: () => Promise<void>;
   /** One contact's envelope, signed with Touch ID. */
-  approveContact: (peer: string, perActMsat: number | null) => Promise<void>;
+  /** true when Touch ID approved this contact. */
+  approveContact: (peer: string, perActMsat: number | null) => Promise<boolean>;
   /** The contact the node last refused for having no envelope (`grant_no_envelope`). */
   noEnvelopeFor: () => string | null;
   reconcile: () => Promise<Outcome<string>>;
   pendingRevision: () => number;
   /** The owner's one approval for a daily total (B2). */
-  approveBudget: (ceilingMsat: number, preset: PresetId) => Promise<void>;
+  /** true when the host took the approval (open, or waiting at the node). */
+  approveBudget: (ceilingMsat: number, preset: PresetId) => Promise<boolean>;
   setBudget: (target: string, room: boolean, limitMsat: number) => Promise<Outcome<unknown>>;
   pauseAll: () => Promise<void>;
-  resume: () => Promise<void>;
+  /** true when payments resumed. */
+  resume: () => Promise<boolean>;
   send: (t: TrackRef, text: string, maxMsat: number, firstContactMsat?: number, sendingId?: string) => Promise<Outcome<unknown>>;
   /** Puts a message in the stream as "Sending · up to N" before its send runs; `send` replaces it. */
-  beginSending: (t: TrackRef, text: string, capMsat: number) => string;
+  beginSending: (t: TrackRef, text: string, capMsat: number, waiting?: boolean) => string;
+  /**
+   * A waiting bubble: `null` hands it to the send path (it becomes "Sending");
+   * a reason ends it before anything was dispatched, kept whole as Unsent.
+   */
+  settleWaiting: (t: TrackRef, id: string, reason: string | null) => void;
   /** An Unsent card's text back into its own track's box (empty box only). */
   restoreUnsent: (t: TrackRef, id: string) => void;
   discardUnsent: (t: TrackRef, id: string) => void;
@@ -1217,6 +1226,7 @@ export function ControlCenter(props: Props) {
       const r = await act(() => source.spendRequest());
       if (r.ok) setSpend(r.value);
       else setErrors('spend', r.error.message);
+      return r.ok;
     },
     lock: async () => {
       setErrors('spend', undefined);
@@ -1261,6 +1271,7 @@ export function ControlCenter(props: Props) {
         if (r.error.code === 'device_invalid') void loadDevice();
       }
       void loadBudget();
+      return r.ok;
     },
     pendingRevision,
     reconcile: async () => {
@@ -1280,6 +1291,7 @@ export function ControlCenter(props: Props) {
       } else setErrors('budget', r.error.message);
       // A paired node asks its owner: the pending request shows from the spend view.
       void loadSpend();
+      return r.ok;
     },
     setBudget: async (target, room, limitMsat) => {
       const r = await act(() => source.budgetSet(target, room, limitMsat));
@@ -1304,6 +1316,7 @@ export function ControlCenter(props: Props) {
         void loadBudget();
       }
       void loadSpend();
+      return r.ok;
     },
     doorQuote: (peer) => source.firstContactQuote(peer),
     ownerRequest: (peer, cap, budget) => act(() => source.firstContactRequest(peer, cap, budget)),
@@ -1313,11 +1326,24 @@ export function ControlCenter(props: Props) {
     breakerResetOffered: () => props.remote === true && overview()?.capabilities?.includes(OWNER_DEVICE_BREAKER_RESET) === true,
     refreshBudget: () => void loadBudget(),
     ownerCancel: (id) => source.firstContactCancel(id).catch(() => {}),
-    beginSending: (t, text, capMsat) => addArtifact(t, {
-      type: 'sending', text, capMsat,
+    beginSending: (t, text, capMsat, waiting) => addArtifact(t, {
+      type: 'sending', text, capMsat, ...(waiting ? { waiting: true as const } : {}),
       ...(t.kind === 'room' ? { memberCaps: Object.fromEntries((roomQuote()?.members ?? []).map((m) => [m.node_id, m.msat])) } : {}),
     }),
     keepUnsent: (t, text, reason) => { addArtifact(t, { type: 'unsent', text, why: 'refused', reason }); },
+    settleWaiting: (t, id, reason) => {
+      const a = (artifacts[trackKey(t)] ?? []).find((x) => x.id === id);
+      if (a?.type !== 'sending' || !a.waiting) return;
+      if (reason === null) {
+        setArtifacts(trackKey(t), (old) => (old ?? []).map((x) => (x.id === id && x.type === 'sending' ? { ...x, waiting: undefined } : x)));
+        return;
+      }
+      // Never handed to the send path: nothing was dispatched, so "nothing paid" is true here.
+      batch(() => {
+        dropArtifact(t, id);
+        addArtifact(t, { type: 'unsent', text: a.text, why: 'refused', reason });
+      });
+    },
     restoreUnsent: (t, id) => {
       const a = (artifacts[trackKey(t)] ?? []).find((x) => x.id === id);
       if (a?.type !== 'unsent') return;
@@ -1549,7 +1575,7 @@ export function ControlCenter(props: Props) {
     pay: (bolt11, msat) => actions.pay(WALLET, bolt11, msat),
     keysend: (pubkey, msat, memo) => actions.keysend(WALLET, pubkey, msat, memo),
     invoice: (msat, note) => actions.invoice(WALLET, msat, note),
-    approve: () => actions.approve(),
+    approve: async () => { await actions.approve(); },
   };
   const openWallet = (tab: WalletTab = 'activity') => {
     setContextOpen(false);
@@ -3406,10 +3432,10 @@ function ArtifactView(props: { moneyBlocked: boolean; a: Artifact; delivery?: De
         {(a) => {
           const m = () => a() as Extract<Artifact, { type: 'sending' }>;
           return (
-            <article class="msg out sending" data-sending aria-busy="true">
+            <article class="msg out sending" data-sending={m().waiting ? 'waiting' : ''} aria-busy="true">
               <div class="bubble">{m().text}</div>
               <div class="stamp">
-                <span class="sats" data-sending-cap={m().capMsat}>Sending · up to {fmtAmount(m().capMsat)}</span>
+                <span class="sats" data-sending-cap={m().capMsat}>{m().waiting ? 'Sends when approved' : 'Sending'} · up to {fmtAmount(m().capMsat)}</span>
               </div>
             </article>
           );
@@ -3594,6 +3620,8 @@ function UndeliveredView(props: {
   );
 }
 
+/** How long an Approve & send press waits for its approval before it ends unsent. */
+const CONTINUE_MS = 10 * 60_000;
 /** The draft was paid for: it now lives on the undelivered card, not in the composer. */
 const paidUndelivered = (r: Outcome<unknown>) => !r.ok && r.error.code === 'payment_settled_undelivered';
 /** Outcomes where sats may have moved or the result is not known: never "try again". */
@@ -4302,11 +4330,12 @@ function Composer(props: {
     }
   };
 
-  const ready = (): boolean => {
+  /** `text`: an Approve & send continuing with the words in its bubble (the box may be empty or newer). */
+  const ready = (text?: string): boolean => {
     if (blocked()) return false;
     switch (mode()) {
       case 'message':
-        return draft().trim().length > 0 && messageShown().msat !== null;
+        return (text ?? draft()).trim().length > 0 && messageShown().msat !== null;
       case 'pay':
         return payKind() === 'invoice' ? invoiceMsat() !== null : pubkey().trim().length > 0 && amountMsat() !== null;
       case 'request':
@@ -4320,16 +4349,18 @@ function Composer(props: {
     if (paying()) return 'Paying…';
     if (deviceWait()) return 'Waiting for your other device';
     if (ownerWait()) return 'Waiting for contact approval';
+    const continues = canContinue();
     if (needsTouch()) {
+      if (continues) return 'Approve & send';
       return androidQrScannerAvailable() ? 'Approve with biometrics' : 'Approve with Touch ID';
     }
     if (viaBudget()) {
       const s = shown();
       const price = s.msat === null ? '' : ` · ${s.estimate ? '≈ ' : ''}${sats(s.msat)} ${satUnit(s.msat)}`;
       switch (stand().kind) {
-        case 'paused': return 'Resume payments';
+        case 'paused': return continues ? 'Resume & send' : 'Resume payments';
         case 'waiting': return 'Waiting for approval';
-        case 'off': return 'Send';
+        case 'off': return continues && presetChosen() ? 'Approve & send' : 'Send';
         case 'first': return `Send first ${mode() === 'file' ? 'file' : 'message'}${price}`;
         case 'contact_used':
         case 'total_used': return 'Budget used up';
@@ -4340,16 +4371,19 @@ function Composer(props: {
     if (spends() && !line().open) {
       if (props.spend?.state === 'pending') return 'Waiting for approval';
       if (props.spend?.state === 'unavailable') return 'Spending unavailable';
-      return 'Send';
+      return continues ? 'Approve & send' : 'Send';
     }
     const s = shown();
     const price = s.msat === null ? '' : ` · ${s.estimate ? '≈ ' : ''}${sats(s.msat)} ${satUnit(s.msat)}`;
     return { message: 'Send', pay: 'Pay', request: 'Create invoice', file: 'Send file' }[mode()] + (mode() === 'request' ? '' : price);
   };
 
-  const sendTitle = () => needsTouch()
-    ? (androidQrScannerAvailable() ? 'Approve with biometrics' : 'Approve with Touch ID')
-    : 'Send';
+  const sendTitle = () => {
+    if (canContinue() && (needsTouch() || (viaBudget() ? stand().kind === 'paused' || (stand().kind === 'off' && !!presetChosen()) : spends() && !line().open && props.spend?.state !== 'pending' && props.spend?.state !== 'unavailable'))) {
+      return viaBudget() && stand().kind === 'paused' ? 'Resume & send' : 'Approve & send';
+    }
+    return needsTouch() ? (androidQrScannerAvailable() ? 'Approve with biometrics' : 'Approve with Touch ID') : 'Send';
+  };
   /** Pay / Request / File panels close back to the single message bar. */
   const closePanel = () => {
     composerRevision++;
@@ -4371,11 +4405,81 @@ function Composer(props: {
   });
 
   /**
+   * Approve & send: a press that has to ask for an approval first puts the
+   * words in a bubble that waits for it ("Sends when approved · up to N") and
+   * frees the box. When the approval clears, that bubble goes through the
+   * ordinary send path once, at the price on the button that was pressed.
+   * Until it is handed over (`taken`), nothing was dispatched, so any end
+   * (not approved, left, price moved, offline, expired) is a true "not sent,
+   * nothing paid" Unsent card with its words.
+   */
+  type Pressed = { bubble: string; track: TrackRef; text: string; msat: number; until: number; taken: boolean };
+  const [consent, setConsent] = createSignal<Pressed | null>(null);
+  const canContinue = () => mode() === 'message' && !!draft().trim() && shown().msat !== null && consent() === null;
+  const startWaiting = () => {
+    if (!untrack(canContinue)) return;
+    const text = draft();
+    const msat = shown().msat!;
+    const bubble = props.actions.beginSending(props.track, text, msat, true);
+    setDraft('');
+    setDrafted(false);
+    setConsent({ bubble, track: props.track, text, msat, until: Date.now() + CONTINUE_MS, taken: false });
+  };
+  const dropConsent = (reason: string) => {
+    const c = untrack(consent);
+    if (!c) return;
+    setConsent(null);
+    props.actions.settleWaiting(c.track, c.bubble, reason);
+  };
+  const approvalCleared = () => !needsTouch() && (viaBudget() ? stand().kind === 'ok' || stand().kind === 'first' : !spends() || line().open);
+  /**
+   * After the approval action answered: only its own refusal ends the wait
+   * (state refreshes, e.g. the contact's envelope, arrive later). An approval
+   * that is taken but never clears ends at the 10-minute expiry.
+   */
+  const afterApproval = (approved: boolean) => { if (!approved) dropConsent('It was not approved.'); };
+  createEffect(on(() => shown().msat, (msat) => {
+    const c = untrack(consent);
+    // Another chat's price is not this message's: leaving is said as leaving (below).
+    if (c && trackKey(props.track) === trackKey(c.track) && msat !== c.msat) dropConsent('The price changed while it waited for approval.');
+  }, { defer: true }));
+  createEffect(on(() => trackKey(props.track), () => dropConsent('You left this chat before it was approved.'), { defer: true }));
+  createEffect(() => { if (props.moneyBlocked) dropConsent('Your node went offline before it was approved.'); });
+  createEffect(on(consent, (c) => {
+    if (!c) return;
+    const timer = setTimeout(() => { if (untrack(consent) === c) dropConsent('It was not approved within 10 minutes.'); }, Math.max(0, c.until - Date.now()));
+    onCleanup(() => clearTimeout(timer));
+  }));
+  onCleanup(() => dropConsent('You left before it was approved.'));
+  // The approval cleared: the waiting bubble goes once, through the ordinary path.
+  createEffect(() => {
+    const c = consent();
+    if (!c || busy() || contactWaiting() || !approvalCleared()) return;
+    setConsent(null);
+    void (async () => {
+      await submit(c.msat, c);
+      if (!c.taken) props.actions.settleWaiting(c.track, c.bubble, untrack(note) ?? 'It could not be sent after the approval.');
+    })();
+  });
+  /** The bubble a send uses: the waiting one it continues (handed over now), else a new one. */
+  const bubbleFor = (t: TrackRef, text: string, cap: number, pressed: Pressed | null) => {
+    if (!pressed) return props.actions.beginSending(t, text, cap);
+    pressed.taken = true;
+    props.actions.settleWaiting(pressed.track, pressed.bubble, null);
+    return pressed.bubble;
+  };
+
+  /**
    * `shownMsat`: the message price the owner saw on the button they pressed
    * (Send in chat). If the price is not that any more, nothing is sent: the
-   * new price shows on Send, which needs another press.
+   * new price shows on Send, which needs another press. `pressed`: an
+   * Approve & send continuing after its approval (its words are in its bubble).
    */
-  const submit = async (shownMsat?: number | null) => {
+  const submit = async (shownMsat?: number | null, pressed: Pressed | null = null) => {
+    if (!pressed && consent() && mode() === 'message' && !approvalCleared()) {
+      setNote('A message is already waiting for approval in this chat. It sends when approved.');
+      return;
+    }
     if (props.moneyBlocked || (spends() && props.budgetStale) || busy() || contactWaiting()) return;
     if (mode() === 'message' && priceProblem()) { setNote(priceProblem()); return; }
     // An unknown payment result: the text stays in the box until it is checked.
@@ -4387,27 +4491,34 @@ function Composer(props: {
       return;
     }
     if (needsTouch()) {
-      // This contact is approved with Touch ID; the draft stays where it is.
+      if (pressed) return;
+      // This contact is approved with Touch ID; a message then goes once (Approve & send).
+      startWaiting();
       setBusy(true);
-      await props.actions.approveContact(target(), shown().msat);
+      const approved = await props.actions.approveContact(target(), shown().msat);
       setBusy(false);
+      afterApproval(approved);
       return;
     }
     if (viaBudget()) {
       const st = stand();
       if (st.kind === 'paused' || st.kind === 'off') {
-        // The one approval (or resume). The draft stays where it is.
+        if (pressed) return;
+        // The one approval (or resume); a message then goes once (Approve & send).
+        if (st.kind === 'paused' || presetChosen()) startWaiting();
         setBusy(true);
-        if (st.kind === 'paused') await props.actions.resume();
-        else if (presetChosen()) await props.actions.approveBudget(presetChosen()!.ceiling_msat, presetChosen()!.id);
+        let approved = false;
+        if (st.kind === 'paused') approved = await props.actions.resume();
+        else if (presetChosen()) approved = await props.actions.approveBudget(presetChosen()!.ceiling_msat, presetChosen()!.id);
         setBusy(false);
+        afterApproval(approved);
         return;
       }
       if (st.kind !== 'first' && st.kind !== 'ok') return;
-      if (!ready()) {
+      if (!ready(pressed?.text)) {
         // A press before the price is known must not look like a send: the draft
         // stays, and the owner sees why nothing moved (real-window step 10).
-        setNote(draft().trim() ? 'The message price is not ready yet. Nothing was sent. Wait for the cost, then press Send.' : 'Type a message first.');
+        setNote((pressed ? pressed.text : draft()).trim() ? 'The message price is not ready yet. Nothing was sent. Wait for the cost, then press Send.' : 'Type a message first.');
         return;
       }
       setBusy(true);
@@ -4415,7 +4526,7 @@ function Composer(props: {
       const submittedApprovalRevision = approvalRevision;
       const submittedPeer = target();
       const submittedTrack = props.track;
-      const submittedText = draft();
+      const submittedText = pressed ? pressed.text : draft();
       const submittedFile = file();
       const submittedMode = mode();
       const cap = shown().msat!;
@@ -4474,6 +4585,12 @@ function Composer(props: {
       // Capability-gated, not remote-gated, on purpose: the node's local router
       // mounts request + status, so a pairing on this Mac may ask too (approving
       // is remote-only and happens on another owner device).
+      if (pressed && first !== undefined && !room()) {
+        // A first contact needs its own approval: an Approve & send does not chain into a second one.
+        setNote('This first contact needs its own approval. Press Send to ask for it.');
+        setBusy(false);
+        return;
+      }
       if (first !== undefined && !room() && props.actions.ownerDeviceApproval?.()) {
         // Owner approval v1: the owner approves on their other device instead of at the node.
         // Captured before the await: leaving while the request is out keeps the text on its chat.
@@ -4531,9 +4648,11 @@ function Composer(props: {
       if (submittedMode === 'message') {
         // At the press: the bubble goes into the stream and the composer is
         // free for the next message; the send itself waits its turn.
-        const bubble = props.actions.beginSending(submittedTrack, submittedText, cap);
-        setDraft('');
-        setDrafted(false);
+        const bubble = bubbleFor(submittedTrack, submittedText, cap, pressed);
+        if (!pressed) {
+          setDraft('');
+          setDrafted(false);
+        }
         setBusy(false);
         await queue.enqueue(() => dispatch(bubble));
         return;
@@ -4543,16 +4662,19 @@ function Composer(props: {
       return;
     }
     if (spends() && !line().open) {
-      // The one tap: the draft stays where it is. With this Mac registered,
-      // a single contact is approved with Touch ID; otherwise at the node.
+      if (pressed) return;
+      // The one tap: with this Mac registered, a single contact is approved
+      // with Touch ID; otherwise at the node. A message then goes once (Approve & send).
+      startWaiting();
       setBusy(true);
-      await props.actions.approve();
+      const approved = await props.actions.approve();
       setBusy(false);
+      afterApproval(approved);
       return;
     }
-    if (!ready()) {
+    if (!ready(pressed?.text)) {
       setNote(
-        mode() === 'message' && draft().trim()
+        mode() === 'message' && (pressed ? pressed.text : draft()).trim()
           ? 'The message price is not ready yet. Nothing was sent. Wait for the cost, then press Send.'
           : 'Nothing was sent yet — finish the fields first.',
       );
@@ -4578,11 +4700,13 @@ function Composer(props: {
         setPaidLine(null);
         setRaisedFrom(null);
         const cap = shown().msat!;
-        const text = draft();
+        const text = pressed ? pressed.text : draft();
         // Optimistic, as in the budget path: the bubble now, the send in turn.
-        const bubble = props.actions.beginSending(t, text, cap);
-        setDraft('');
-        setDrafted(false);
+        const bubble = bubbleFor(t, text, cap, pressed);
+        if (!pressed) {
+          setDraft('');
+          setDrafted(false);
+        }
         setBusy(false);
         const go = async () => {
           if (queue.held()) { queue.holdBack(t, bubble, text); return; }

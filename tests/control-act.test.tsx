@@ -139,27 +139,99 @@ describe('acting from the track', () => {
     }
   }
 
-  it('asks the owner once, keeps the draft, then sends and shows the receipt and delivery', async () => {
+  // Approve & send (Phase A). The rule under test everywhere: an Unsent
+  // "nothing paid" card appears only when nothing was dispatched for it.
+  const unsentReason = () => text('[data-unsent] [data-unsent-reason]');
+  const nothingPaidIsTrue = (host: ReturnType<typeof stubHost>) => {
+    if (/nothing paid/.test(unsentReason())) expect(host.used('message_send')).toHaveLength(0);
+  };
+  const pressWaiting = async (host: ReturnType<typeof stubHost>) => {
+    type('[data-composer] textarea', 'gm Maya');
+    await vi.waitFor(() => expect(text('[data-send]')).toBe('Approve & send'));
+    submit();
+    await vi.waitFor(() => expect($('[data-sending="waiting"]')).not.toBeNull());
+    await vi.waitFor(() => expect(host.used('spend_request')).toHaveLength(1));
+  };
+
+  it('Approve & send: exactly one send, however many status reads follow the grant', async () => {
+    const host = stubHost();
+    await openShell();
+    await pressWaiting(host);
+    host.spend.v = openView();
+    await vi.waitFor(() => expect(host.used('message_send')).toHaveLength(1), { timeout: 5000 });
+    const reads = host.used('spend_status').length;
+    await vi.waitFor(() => expect(host.used('spend_status').length).toBeGreaterThan(reads + 1), { timeout: 8000 });
+    expect(host.used('message_send')).toHaveLength(1);
+    expect($('[data-sending]')).toBeNull();
+    expect($('[data-unsent]')).toBeNull();
+  }, 20_000);
+
+  it('Approve & send: not approved (the request is refused) → Unsent "not sent, nothing paid", and nothing was dispatched', async () => {
+    const host = stubHost({ spend_request: () => { throw { code: 'spend_refused', message: 'This pairing cannot ask.' }; } });
+    await openShell();
+    type('[data-composer] textarea', 'gm Maya');
+    await vi.waitFor(() => expect(text('[data-send]')).toBe('Approve & send'));
+    submit();
+    await vi.waitFor(() => expect(unsentReason()).toBe('Not sent · nothing paid · It was not approved.'));
+    expect(text('[data-unsent] .bubble')).toBe('gm Maya');
+    expect(host.used('message_send')).toHaveLength(0);
+    expect($('[data-sending]')).toBeNull();
+    // Put back in the box restores the words for another try.
+    $<HTMLButtonElement>('[data-unsent-restore]')!.click();
+    await vi.waitFor(() => expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('gm Maya'));
+  });
+
+  it.each([['another chat', `room:${ROOM}`], ['Discover (the composer unmounts)', 'discover']])('Approve & send: leaving to %s before the grant ends it unsent; a later grant sends nothing', async (_where, key) => {
+    const host = stubHost();
+    await openShell();
+    await pressWaiting(host);
+    $<HTMLElement>(`[data-track="${key}"]`)!.click();
+    await vi.waitFor(() => expect($(`[data-track="${key}"]`)?.getAttribute('aria-current')).toBe('true'));
+    host.spend.v = openView();
+    $<HTMLElement>(`[data-track="peer:${A}"]`)!.click();
+    await vi.waitFor(() => expect(text('[data-unsent] .bubble')).toBe('gm Maya'));
+    expect(unsentReason()).toMatch(/^Not sent · nothing paid · You left/);
+    await new Promise((r) => setTimeout(r, 2500));
+    expect(host.used('message_send')).toHaveLength(0);
+    nothingPaidIsTrue(host);
+  });
+
+  it('Approve & send: the box is free while it waits; a second message waits its turn behind the approval, and only the first goes when approved', async () => {
+    const host = stubHost();
+    await openShell();
+    await pressWaiting(host);
+    type('[data-composer] textarea', 'second thought');
+    expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('second thought');
+    host.spend.v = openView();
+    await vi.waitFor(() => expect(host.used('message_send')).toHaveLength(1), { timeout: 5000 });
+    expect(host.used('message_send')[0].args).toMatchObject({ plaintext: 'gm Maya', max_msat: 2000 });
+    // The newer draft is untouched and was never sent.
+    expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('second thought');
+    nothingPaidIsTrue(host);
+  });
+
+  it('asks the owner once (Approve & send), then sends that message once the grant lands, and shows the receipt and delivery', async () => {
     const host = stubHost();
     await openShell();
     type('[data-composer] textarea', 'gm Maya');
 
-    // Locked: the button is the approval. Pressing it asks; it sends nothing.
-    await vi.waitFor(() => expect(text('[data-send]')).toBe('Send'));
+    // Locked: the button is the approval, and this press also sends the message once it is approved.
+    await vi.waitFor(() => expect(text('[data-send]')).toBe('Approve & send'));
     submit();
     await vi.waitFor(() => expect(text('[data-owner-action]')).toBe('konsensus grant --op ab12'));
     expect(text('[data-approval="pending"]')).toContain('This app cannot approve it for you');
     expect($('[data-approval="pending"]')).not.toBeNull();
-    expect($<HTMLButtonElement>('[data-send]')!.disabled).toBe(true);
     expect(host.used('message_send')).toHaveLength(0);
-    expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('gm Maya');
+    // The words wait in their bubble; the box is free.
+    expect(text('[data-sending="waiting"] .bubble')).toBe('gm Maya');
+    expect(text('[data-sending="waiting"] [data-sending-cap]')).toContain('Sends when approved');
+    expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('');
 
-    // The owner grants at their terminal; the next status poll opens the window.
+    // The owner grants at their terminal; the next status poll opens the window, and it sends once (no second press).
     host.spend.v = openView();
     await vi.waitFor(() => expect($('[data-spend="open"]')).not.toBeNull(), { timeout: 5000 });
     expect(text('[data-spend="open"]')).toContain('ten minutes per approval');
 
-    submit();
     await vi.waitFor(() => expect(host.used('message_send')).toHaveLength(1));
     expect(host.used('message_send')[0].args).toEqual({ recipient: A, is_room: false, plaintext: 'gm Maya', max_msat: 2000, max_recipient_msat: null, first_contact_msat: null });
     await vi.waitFor(() => expect(text('[data-message="sent-1"] .stamp .sats')).toBe('paid 2 sats · fee unknown'));

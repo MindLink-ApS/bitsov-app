@@ -752,6 +752,8 @@ export type Artifact =
    */
   | {
       id: string; at: number; type: 'sending'; text: string; capMsat: number;
+      /** Approve & send: pressed, waiting for its approval. Nothing has been handed to the send path yet. */
+      waiting?: true;
       /** A room's member caps as quoted at the press (the send uses these, not a later quote). */
       memberCaps?: Record<string, number>;
       /** The node's live echo of this send, if it came before the receipt: hidden while this shows. */

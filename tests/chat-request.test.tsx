@@ -413,8 +413,9 @@ describe('a request in chat', () => {
     $<HTMLButtonElement>('[data-send-in-chat]')!.click();
     await vi.waitFor(() => expect(host.used('spend_request')).toHaveLength(1));
     expect(host.used('message_send')).toHaveLength(0);
-    // The invoice waits in the message draft for the owner's Send.
-    expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe(invoice());
+    // Approve & send: the invoice waits in its bubble until the approval lands; nothing is sent before.
+    expect(text('[data-sending="waiting"] .bubble')).toBe(invoice());
+    expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('');
     await vi.waitFor(() => expect($('[data-approval="pending"]')).not.toBeNull());
   });
 

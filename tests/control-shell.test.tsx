@@ -379,6 +379,70 @@ describe('control center shell', () => {
     expect(mount.querySelector('[data-touch-approval]')).toBeNull();
   });
 
+  it('Approve & send with Touch ID: one press approves this contact, then the message goes once', async () => {
+    const open = { state: 'open', lapse: null, basis: 'node_grant', open_until_ms: Date.now() + 600_000, pending: null, window_ms: 600_000 };
+    let envelopes: Record<string, number> = {};
+    const grant = () => ({
+      paused: false, waiting_for_owner: false, ceiling_msat: 500_000, max_daily_msat: 100_000_000, spent_msat: 0, unsettled_msat: 0,
+      preset: 'careful', presets: [{ id: 'careful', contact_msat: 50_000, room_msat: 100_000, ceiling_msat: 500_000 }], rows: [],
+      autopay: { state: 'off', open_until_ms: null, ceiling_msat: null, basis: null }, window_ms: 600_000,
+      node_grant: { expires_at_ms: Date.now() + 86_400_000, budget_msat: 200_000, remaining_msat: 200_000, per_call_max_msat: 200_000, envelopes },
+    });
+    const { calls } = stubHost({
+      device_key_status: () => ({ available: true, state: 'registered', fingerprint: '3F9A-12C4', owner_action: null, expires_at_ms: null }),
+      spend_status: () => open,
+      budget_status: () => grant(),
+      relation_approve: () => {
+        envelopes = { [A]: Date.now() + 86_400_000 };
+        return open;
+      },
+      message_send: (args) => ({ message_id: 'sent-t', recipient: args!.recipient, is_room: false, delivered: true, amount_msat: 2000, sent_at_ms: Date.now() }),
+    });
+    start();
+    await vi.waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
+    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
+    await vi.waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Approve with Touch ID'));
+    const area = mount.querySelector<HTMLTextAreaElement>('[data-composer] textarea')!;
+    area.value = 'hello Maya';
+    area.dispatchEvent(new Event('input', { bubbles: true }));
+    await vi.waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Approve & send'));
+    click('[data-send]');
+    await vi.waitFor(() => expect(calls.filter((c) => c.cmd === 'relation_approve')).toHaveLength(1));
+    await vi.waitFor(() => expect(calls.filter((c) => c.cmd === 'message_send')).toHaveLength(1));
+    expect(calls.find((c) => c.cmd === 'message_send')!.args).toMatchObject({ recipient: A, plaintext: 'hello Maya' });
+    await new Promise((r) => setTimeout(r, 300));
+    expect(calls.filter((c) => c.cmd === 'message_send')).toHaveLength(1);
+    expect(mount.querySelector('[data-unsent]')).toBeNull();
+  });
+
+  it('Approve & send with Touch ID cancelled: the words are kept as "not sent, nothing paid", and nothing was dispatched', async () => {
+    const open = { state: 'open', lapse: null, basis: 'node_grant', open_until_ms: Date.now() + 600_000, pending: null, window_ms: 600_000 };
+    const grant = () => ({
+      paused: false, waiting_for_owner: false, ceiling_msat: 500_000, max_daily_msat: 100_000_000, spent_msat: 0, unsettled_msat: 0,
+      preset: 'careful', presets: [{ id: 'careful', contact_msat: 50_000, room_msat: 100_000, ceiling_msat: 500_000 }], rows: [],
+      autopay: { state: 'off', open_until_ms: null, ceiling_msat: null, basis: null }, window_ms: 600_000,
+      node_grant: { expires_at_ms: Date.now() + 86_400_000, budget_msat: 200_000, remaining_msat: 200_000, per_call_max_msat: 200_000, envelopes: {} },
+    });
+    const { calls } = stubHost({
+      device_key_status: () => ({ available: true, state: 'registered', fingerprint: '3F9A-12C4', owner_action: null, expires_at_ms: null }),
+      spend_status: () => open,
+      budget_status: () => grant(),
+      relation_approve: () => { throw { code: 'device_cancelled', message: 'Touch ID was cancelled.' }; },
+    });
+    start();
+    await vi.waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
+    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
+    await vi.waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Approve with Touch ID'));
+    const area = mount.querySelector<HTMLTextAreaElement>('[data-composer] textarea')!;
+    area.value = 'hello Maya';
+    area.dispatchEvent(new Event('input', { bubbles: true }));
+    await vi.waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Approve & send'));
+    click('[data-send]');
+    await vi.waitFor(() => expect(mount.querySelector('[data-unsent] [data-unsent-reason]')?.textContent).toBe('Not sent · nothing paid · It was not approved.'));
+    expect(mount.querySelector('[data-unsent] .bubble')?.textContent).toBe('hello Maya');
+    expect(calls.some((c) => c.cmd === 'message_send')).toBe(false);
+  });
+
   it('says Touch ID approvals are off, and why, while the node runs from a plaintext recovery phrase', async () => {
     const msg = 'Encrypt your recovery phrase to enable Touch ID approvals. On the node\'s computer: stop the node, run `konsensus seed encrypt --config <path>` once, then start it again and type the password.';
     stubHost({
