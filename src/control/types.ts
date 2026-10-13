@@ -563,6 +563,7 @@ export type SpendView = {
   request_id?: string | null;
   /** Node op that granted the open window; null if closed or unknown. Absent on older hosts. */
   granted_op?: string | null;
+  /** Open windows: the node request whose completion armed this window; null when armed immediately (cx-armedby-1). Absent on older hosts. */
   /** Pending elevation completed to arm the open window; null without one or when closed. Absent on older hosts. */
   armed_by_request?: string | null;
   state: SpendState;
@@ -762,6 +763,8 @@ export type Artifact =
    */
   | {
       id: string; at: number; type: 'sending'; text: string; capMsat: number;
+      /** Approve & send: pressed, waiting for its approval. Nothing has been handed to the send path yet. */
+      waiting?: true;
       /** A room's member caps as quoted at the press (the send uses these, not a later quote). */
       memberCaps?: Record<string, number>;
       /** The node's live echo of this send, if it came before the receipt: hidden while this shows. */
