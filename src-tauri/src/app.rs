@@ -4255,6 +4255,8 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
         Some(id) => close_charge(state, id, None, None),
         None => Ok(()),
     };
+    pending.dispatched_at = Some(spend_journal::timestamp_ms());
+    journal.save(&pending)?;
     // Journal I/O can take time. Recheck immediately before issuing the request.
     if let Err(e) = refuse_if_connection_waiting(state)
         .and_then(|()| refuse_if_paused(state))
@@ -4532,6 +4534,10 @@ async fn do_spend_reconcile(state: &NodeState) -> Result<String, ActionError> {
     if state.node_id.lock().unwrap().as_deref() != Some(pending.node_id.as_str()) {
         return Err(spend_journal::unknown("The pending action belongs to another identity."));
     }
+    if pending.evidence_reservation_msat.is_some() {
+        let id = pending.operation_id.clone().ok_or_else(|| spend_journal::unknown("Payment evidence has no operation identity. Inspect the owner node."))?;
+        return reconcile_operation(state, &journal, pending, &id).await;
+    }
     if let Some(undelivered) = &pending.undelivered {
         // Paid, not delivered. Accounting it resolves the money, not the
         // message: the record stays until a retry delivers it or the owner
@@ -4616,7 +4622,23 @@ async fn do_spend_reconcile(state: &NodeState) -> Result<String, ActionError> {
     act::with_op(Fallback(existing_operation.as_deref()), result)
 }
 
-const NOTHING_PAID: &str = "Not sent - nothing was paid: your node holds no payment for this message. Sending the same message again reuses its operation, so it can never be paid twice.";
+const NOTHING_PAID: &str = "Not sent - nothing was paid: your node reports no payment for this message. Nothing was dispatched again.";
+const RECONCILE_WAIT: &str = "Payment unknown: the original send may still reach your node. Another spend is blocked; check again in a few minutes. Nothing was dispatched again.";
+
+fn unpaid_grace_elapsed(dispatched_at: u64, now: u64, timeout: Duration) -> bool {
+    Duration::from_millis(now.saturating_sub(dispatched_at)) >= timeout.saturating_add(Duration::from_secs(180))
+}
+
+fn operation_reply_outcome(reply: &act::SendReply) -> spend_journal::Outcome {
+    use spend_journal::Outcome;
+    match reply.state.as_deref().unwrap_or_default() {
+        // Admission may have settled even though the message never dispatched.
+        "prepared" | "released" | "abandoned" if reply.amount_msat > 0
+            || reply.readmission_msat.unwrap_or(0) > 0 || reply.payment_hash.is_some() => Outcome::Paid,
+        "abandoned" => Outcome::NothingPaid,
+        state => spend_journal::outcome(state),
+    }
+}
 
 /// Ask the node what became of this send (`GET /messages/operations/{id}`).
 /// Never re-sends and never pays: a retry is a separate owner action that
@@ -4625,28 +4647,81 @@ async fn reconcile_operation(state: &NodeState, journal: &Journal, mut pending: 
     let result = async {
     use spend_journal::{Outcome, OperationState as OpState};
     let path = format!("/messages/operations/{id}");
-    let (status, text) = call_api(state, reqwest::Method::GET, &path, None).await
+    let lookup_started_at = spend_journal::timestamp_ms();
+    let (status, mut text) = call_api(state, reqwest::Method::GET, &path, None).await
         .map_err(|e| spend_journal::unknown(format!("Your node could not be asked about this send ({e}). Nothing was dispatched again.")))?;
-    // The node writes the operation before it pays anything: never recorded is
-    // nothing paid. (A node without the route never accepted the id either.)
-    let reply = if status == reqwest::StatusCode::NOT_FOUND { None } else {
-        if !status.is_success() {
-            return Err(spend_journal::unknown(api_error(&path, status, &text)));
-        }
-        let reply: act::SendReply = serde_json::from_str(&text).map_err(spend_journal::unknown)?;
+    let decode = |text: &str| -> Result<act::SendReply, ActionError> {
+        let reply: act::SendReply = serde_json::from_str(text).map_err(spend_journal::unknown)?;
         if reply.operation_id.as_deref() != Some(id) {
             return Err(spend_journal::unknown("The node answered for a different operation. Nothing was dispatched again."));
         }
-        Some(reply)
+        Ok(reply)
     };
+    let mut reply = if status == reqwest::StatusCode::NOT_FOUND { None } else {
+        if !status.is_success() {
+            return Err(spend_journal::unknown(api_error(&path, status, &text)));
+        }
+        Some(decode(&text)?)
+    };
+    let mut outcome = reply.as_ref().map_or(Outcome::NothingPaid, operation_reply_outcome);
+    if outcome == Outcome::NothingPaid {
+        // History can be ahead of the pending slot after a crash between the
+        // evidence write and save below. Its amount/hash survive Unknown
+        // transitions, so repeated empty lookups cannot erase that evidence.
+        let recorded_evidence = journal.operation_record(id)?.is_some_and(|record|
+            record.paid_msat.is_some_and(|paid| paid > 0) || record.payment_hash.is_some());
+        if pending.evidence_reservation_msat.is_some() || recorded_evidence {
+            outcome = Outcome::PaymentUnknown;
+        }
+    }
+    let retry = pending.undelivered.clone();
+    // A durable tombstone also survives a lost abandon reply or a host crash.
+    let mut abandoned = outcome == Outcome::NothingPaid
+        && reply.as_ref().is_some_and(|r| r.state.as_deref() == Some("abandoned"));
+    if outcome == Outcome::NothingPaid && retry.is_none() && !abandoned {
+        let status: serde_json::Value = get_json(state, "/status").await.map_err(spend_journal::unknown)?;
+        let offers_abandon = status["api_capabilities"].as_array().is_some_and(|caps|
+            caps.iter().any(|cap| cap.as_str() == Some("message_operation_abandon_v1")));
+        if offers_abandon {
+            let path = format!("{path}/abandon");
+            let (status, body) = call_api(state, reqwest::Method::POST, &path, None).await
+                .map_err(spend_journal::unknown)?;
+            match status {
+                reqwest::StatusCode::OK | reqwest::StatusCode::CREATED => abandoned = true,
+                reqwest::StatusCode::CONFLICT => {
+                    reply = Some(decode(&body)?);
+                    text = body;
+                    outcome = operation_reply_outcome(reply.as_ref().unwrap());
+                    abandoned = outcome == Outcome::NothingPaid
+                        && reply.as_ref().unwrap().state.as_deref() == Some("abandoned");
+                    // A refusal is not proof of abandonment, even if its view
+                    // still looks prepared. Never loop or bypass it via grace.
+                    if outcome == Outcome::NothingPaid && !abandoned { outcome = Outcome::PaymentUnknown; }
+                }
+                reqwest::StatusCode::NOT_FOUND => {} // Older node: bounded fallback below.
+                _ => return Err(spend_journal::unknown(api_error(&path, status, &body))),
+            }
+        }
+    }
     // Serialised with every money action; still, never write over a record
     // that another action replaced, or whose retry started or ended, meanwhile.
     let in_flight = |p: &spend_journal::Pending| p.undelivered.as_ref().map(|u| u.in_flight);
     if journal.pending()?.is_none_or(|now| now.id != pending.id || in_flight(&now) != in_flight(&pending)) {
         return Err(spend_journal::unknown("The pending result changed while your node was asked. Nothing was dispatched again; check the pending result again."));
     }
-    let outcome = reply.as_ref().map_or(Outcome::NothingPaid, |r| spend_journal::outcome(r.state.as_deref().unwrap_or_default()));
-    let retry = pending.undelivered.clone();
+    if outcome == Outcome::NothingPaid && retry.is_none() && !abandoned {
+        let now = spend_journal::timestamp_ms();
+        // Old journals have no dispatch time: start a durable, conservative
+        // window now rather than assuming an old or missing GET is final.
+        let dispatched_at = *pending.dispatched_at.get_or_insert(now);
+        journal.save(&pending)?;
+        // A lookup begun before the deadline may already be stale by the time
+        // /status or the unsupported abandon request finishes.
+        if !unpaid_grace_elapsed(dispatched_at, lookup_started_at, state.spend_timeout) {
+            journal.record_outcome(&pending, OpState::Unknown, None)?;
+            return Err(ActionError::new("payment_unknown", RECONCILE_WAIT).for_pending(&pending.id));
+        }
+    }
     let reply = match (outcome, reply) {
         (Outcome::PaymentUnknown, _) => {
             journal.record_outcome(&pending, OpState::Unknown, None)?;
@@ -4662,8 +4737,12 @@ async fn reconcile_operation(state: &NodeState, journal: &Journal, mut pending: 
             pending.accounting_msat = None;
             pending.paid = None;
             pending.target = None;
-            journal.save(&pending)?;
             journal.record_outcome(&pending, OpState::Unpaid, None)?;
+            if abandoned {
+                pending.operation_id = None;
+                pending.operation_record = None;
+            }
+            journal.save(&pending)?;
             return Ok(NOTHING_PAID.into());
         }
         (_, Some(reply)) => reply,
@@ -4692,14 +4771,32 @@ async fn reconcile_operation(state: &NodeState, journal: &Journal, mut pending: 
     pending.paid = Some(budget::Paid { msat: proven, fee_unknown: principal > 0 && reply.fee_paid_msat.is_none() });
     let reported_ceiling = serde_json::from_str::<serde_json::Value>(&text).ok()
         .and_then(|v| v["max_routing_fee_msat"].as_u64());
-    let reserved = with_book(state, false, |book| Ok(book.ledger.iter().rev()
-        .find(|e| e.id == pending.charge_id()).map_or(pending.max_msat, |e| e.msat)))?;
+    let reserved = match pending.evidence_reservation_msat {
+        Some(reserved) => reserved,
+        None => with_book(state, false, |book| Ok(book.ledger.iter().rev()
+            .find(|e| e.id == pending.charge_id()).map_or(pending.max_msat, |e| e.msat)))?,
+    };
     let paid = if principal == 0 || reply.fee_paid_msat.is_some() { proven } else {
         principal.checked_add(reported_ceiling.unwrap_or_else(|| reserved.saturating_sub(principal)))
             .ok_or_else(|| spend_journal::unknown("The reported total overflows."))?
     };
     let message_msat = if retry.is_some() { principal } else { reply.amount_msat };
-    pending.over_budget = prior_over_budget || message_msat > pending.max_msat || paid > reserved;
+    pending.over_budget = pending.over_budget || prior_over_budget || message_msat > pending.max_msat || paid > reserved;
+    let evidence_only = matches!(reply.state.as_deref(), Some("prepared" | "released" | "abandoned"));
+    let paid_msat = retry.as_ref().map_or(whole, |u| u.paid_msat.saturating_add(principal));
+    pending.evidence_reservation_msat = evidence_only.then_some(reserved);
+    if outcome == Outcome::Paid && !evidence_only {
+        pending.undelivered = Some(spend_journal::Undelivered {
+            peer: retry.as_ref().map(|u| u.peer.clone()).or_else(|| pending.peer.clone()).unwrap_or_default(),
+            paid_msat,
+            retry: reply.retry_allowed,
+            op: retry.as_ref().map(|u| u.op.clone()).or_else(|| pending.op.clone()).unwrap_or_default(),
+            admission_msat: retry.as_ref().map_or(0, |u| u.admission_msat),
+            in_flight: false,
+            attempts: retry.as_ref().map_or(0, |u| u.attempts),
+            payment_hash: reply.payment_hash.clone(),
+        });
+    }
     pending.accounting_msat = Some(paid);
     journal.save(&pending)?;
     if pending.budgeted { close_charge(state, pending.charge_id(), Some(paid), pending.target.as_ref())?; }
@@ -4721,19 +4818,11 @@ async fn reconcile_operation(state: &NodeState, journal: &Journal, mut pending: 
             Err(ActionError::new("failed_paid", act::FAILED_PAID))
         }
         _ => {
-            // Paid, not handed over: the same record, retryable with the same id.
-            let paid_msat = retry.as_ref().map_or(whole, |u| u.paid_msat.saturating_add(principal));
-            pending.undelivered = Some(spend_journal::Undelivered {
-                peer: retry.as_ref().map(|u| u.peer.clone()).or_else(|| pending.peer.clone()).unwrap_or_default(),
-                paid_msat,
-                retry: reply.retry_allowed,
-                op: retry.as_ref().map(|u| u.op.clone()).or_else(|| pending.op.clone()).unwrap_or_default(),
-                admission_msat: retry.as_ref().map_or(0, |u| u.admission_msat),
-                in_flight: false,
-                attempts: retry.as_ref().map_or(0, |u| u.attempts),
-                payment_hash: reply.payment_hash.clone(),
-            });
-            journal.save(&pending)?;
+            if evidence_only {
+                return Err(ActionError::new("payment_unknown", format!(
+                    "Accounted: {paid_msat} msat of payment evidence, but the operation's final outcome is unknown. Another spend is blocked; check the pending result again in a few minutes. Nothing was dispatched again."
+                )).for_pending(&pending.id));
+            }
             Err(ActionError::new("undelivered_pending", format!(
                 "Accounted: {paid_msat} msat paid, and the message is not delivered yet. Your node keeps resending it; nothing was dispatched again. Retry delivery from its card (it pays nothing new), or stop retrying it."
             )).for_pending(&pending.id))
@@ -4761,6 +4850,9 @@ fn do_spend_dismiss_undelivered(state: &NodeState, pending_id: &str) -> Result<S
     let result = (|| {
     if state.node_id.lock().unwrap().as_deref() != Some(pending.node_id.as_str()) {
         return Err(spend_journal::unknown("The pending action belongs to another identity."));
+    }
+    if pending.evidence_reservation_msat.is_some() {
+        return Err(spend_journal::unknown("Payment evidence is not a final outcome. Check the pending result; the spending fence stays in place."));
     }
     let undelivered = match &pending.undelivered {
         Some(u) if !u.in_flight && !pending.over_budget => u.clone(),
@@ -9659,9 +9751,10 @@ mod control_act_tests {
     const OP_HASH: &str = "abababababababababababababababababababababababababababababababab";
 
     fn op_reply(id: &str, state: &str) -> String {
-        serde_json::json!({"operation_id": id, "state": state, "accepted": state == "acked", "payment_hash": OP_HASH,
+        let unpaid = matches!(state, "prepared" | "released" | "abandoned");
+        serde_json::json!({"operation_id": id, "state": state, "accepted": state == "acked", "payment_hash": if unpaid { None } else { Some(OP_HASH) },
             "retry_allowed": matches!(state, "prepared" | "released" | "paid" | "sent" | "rejected_retryable"),
-            "max_routing_fee_msat": 0, "message_id": "m1", "delivered": matches!(state, "sent" | "acked"), "amount_msat": 2000}).to_string()
+            "max_routing_fee_msat": 0, "message_id": "m1", "delivered": matches!(state, "sent" | "acked"), "amount_msat": if unpaid { 0 } else { 2000 }}).to_string()
     }
 
     fn ops_node() -> (Routes, Arc<Mutex<OpsNode>>) {
@@ -9706,7 +9799,7 @@ mod control_act_tests {
                 }
                 _ => {
                     let (state, lost) = if node.script.is_empty() { ("acked", false) } else { node.script.remove(0) };
-                    if state != "prepared" { node.pays += 1; }
+                    if !matches!(state, "prepared" | "released") { node.pays += 1; }
                     node.ops.insert(id.clone(), (text, state));
                     if state == "paid" && node.settled_incomplete {
                         return (502, serde_json::json!({"error": "payment settled but send did not complete", "code": "payment_settled_send_incomplete",
@@ -9767,6 +9860,7 @@ mod control_act_tests {
         let id = ids[0].clone().expect("a 1:1 compose carries an operation_id");
         assert!(uuid_v4(&id), "{id}");
         let at_post = seen.lock().unwrap()[0].clone().expect("journal on disk before the POST");
+        assert!(at_post["dispatched_at"].as_u64().is_some_and(|t| t > 0 && t <= spend_journal::timestamp_ms()), "dispatch time is durable before the POST");
         assert_eq!(at_post["operation_id"], id.as_str());
         assert!(!at_post.to_string().contains("\"gm\""), "no plaintext in the journal");
         assert_eq!((receipt.accepted, receipt.state.as_deref(), receipt.operation_id.as_deref()), (true, Some("acked"), Some(id.as_str())));
@@ -9952,6 +10046,7 @@ mod control_act_tests {
             do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap_err();
             let id = pending(&node).unwrap().operation_id.unwrap();
             assert_eq!(ledger_record(&node, &id)["state"], "unknown");
+            dispatch_age(&node, 301_000);
             let _ = do_spend_reconcile(&reopen(&node)).await;
             assert_eq!(ledger_record(&node, &id)["state"], recorded, "{node_state}");
             assert_eq!(op_ids(&node), [Some(id)]);
@@ -10114,6 +10209,355 @@ mod control_act_tests {
         assert_eq!((compose_bodies(&node).len(), ops.lock().unwrap().pays), (1, 1));
     }
 
+    // Set the durable wall-clock dispatch time without sleeping through the grace period.
+    fn dispatch_age(node: &Fake, age_ms: u64) {
+        let path = journal_file(node);
+        let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        value["dispatched_at"] = serde_json::json!(spend_journal::timestamp_ms() - age_ms);
+        std::fs::write(path, value.to_string()).unwrap();
+    }
+
+    fn reconcile_node(advertise: bool, abandon_status: u16, lookup: Option<(&'static str, u64, bool)>, conflict: &'static str) -> Fake {
+        let (inner, _) = ops_node();
+        let routes: Routes = Arc::new(move |m, p, b| {
+            if p == "/status" && advertise {
+                return (200, serde_json::json!({"api_capabilities": ["paid_send_caps_v1", "room_terminal_outcomes_v1",
+                    "message_operations_v1", "message_operation_abandon_v1"]}).to_string());
+            }
+            if let Some(id) = p.strip_prefix("/messages/operations/") {
+                if let Some(id) = id.strip_suffix("/abandon") {
+                    assert_eq!(m, "POST");
+                    if conflict == "malformed" { return (abandon_status, "{}".into()); }
+                    if conflict == "wrong_id" { return (abandon_status, op_reply("other-id", "paid")); }
+                    if conflict == "prepared_unpaid" { return (abandon_status, op_reply(id, "prepared")); }
+                    let mut view: serde_json::Value = serde_json::from_str(&op_reply(id, conflict)).unwrap();
+                    if conflict != "abandoned" {
+                        view["amount_msat"] = serde_json::json!(2000);
+                        view["payment_hash"] = serde_json::json!(OP_HASH);
+                    }
+                    return (abandon_status, view.to_string());
+                }
+                return match lookup {
+                    None => (404, "{}".into()),
+                    Some((state, amount, hash)) => {
+                        let mut v: serde_json::Value = serde_json::from_str(&op_reply(id, state)).unwrap();
+                        v["amount_msat"] = serde_json::json!(amount);
+                        v["payment_hash"] = if hash { serde_json::json!(OP_HASH) } else { serde_json::Value::Null };
+                        (200, v.to_string())
+                    }
+                };
+            }
+            if p == "/messages/compose" && b.contains("gm") { return (500, "{}".into()); }
+            inner(m, p, b)
+        });
+        fake(AuthMode::Local, routes)
+    }
+
+    async fn uncertain_send(node: &Fake) -> String {
+        spend_advance(&node.state, true).await.unwrap();
+        assert_eq!(do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap_err().code, "spend_unknown");
+        pending(node).unwrap().operation_id.unwrap()
+    }
+
+    #[test]
+    fn reconcile_grace_boundary_includes_timeout_and_handles_clock_rollback() {
+        let timeout = Duration::from_secs(120);
+        assert!(!unpaid_grace_elapsed(1_000, 300_999, timeout));
+        assert!(unpaid_grace_elapsed(1_000, 301_000, timeout));
+        assert!(!unpaid_grace_elapsed(1_000, 999, timeout));
+        assert!(!unpaid_grace_elapsed(1_000, 181_059, Duration::from_millis(60)));
+        assert!(unpaid_grace_elapsed(1_000, 181_060, Duration::from_millis(60)));
+    }
+
+    #[tokio::test]
+    async fn reconcile_abandon_conflict_without_usable_proof_stays_fenced() {
+        for conflict in ["prepared_unpaid", "malformed", "wrong_id"] {
+            let node = reconcile_node(true, 409, None, conflict);
+            uncertain_send(&node).await;
+            dispatch_age(&node, 301_000);
+            assert!(do_spend_reconcile(&node.state).await.is_err());
+            assert!(!pending(&node).unwrap().resumable);
+            assert_eq!(node.targets().iter().filter(|p| p.ends_with("/abandon")).count(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn reconcile_recovers_tombstone_after_lost_abandon_reply() {
+        let node = reconcile_node(true, 200, Some(("abandoned", 0, false)), "abandoned");
+        let id = uncertain_send(&node).await;
+        assert!(do_spend_reconcile(&reopen(&node)).await.is_ok());
+        assert!(pending(&node).unwrap().resumable);
+        assert!(pending(&node).unwrap().operation_id.is_none());
+        assert_eq!(ledger_record(&node, &id)["state"], "unpaid");
+        assert_eq!(node.posts().len(), 1, "the tombstone itself proves abandonment");
+    }
+
+    #[tokio::test]
+    async fn reconcile_prepared_payment_evidence_is_accounted_and_fenced() {
+        for state in ["prepared", "released"] {
+            for (amount, hash) in [(2000, false), (0, true), (2000, true)] {
+                let node = reconcile_node(true, 200, Some((state, amount, hash)), "abandoned");
+                let id = uncertain_send(&node).await;
+                let err = do_spend_reconcile(&node.state).await.unwrap_err();
+                assert_eq!(err.code, "payment_unknown");
+                assert!(!err.message.contains("nothing was paid"));
+                assert!(!err.message.contains("keeps resending"), "admission alone does not prove message dispatch");
+                assert_eq!(err.operation_id.as_deref(), Some(id.as_str()));
+                let p = pending(&node).unwrap();
+                assert!(!p.resumable);
+                assert_eq!(p.accounting_msat, Some(amount));
+                assert_eq!(ledger_record(&node, &id)["state"], "paid_undelivered");
+                assert_eq!(ledger_record(&node, &id)["paid_msat"], amount);
+                assert_eq!(settled(&node), [amount]);
+                assert_eq!(do_spend_reconcile(&reopen(&node)).await.unwrap_err().code, "payment_unknown");
+                assert_eq!(do_message_send(&node.state, A, false, "another", 14000, None).await.unwrap_err().code, "spend_unknown");
+                assert_eq!(node.posts().len(), 1, "no abandon and no second compose");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn reconcile_evidence_cannot_be_dismissed_and_later_accounts_the_whole_send() {
+        for amount in [0, 2000] {
+            let (inner, _) = ops_node();
+            let phase = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let current = phase.clone();
+            let node = fake(AuthMode::Local, Arc::new(move |m, path, body| {
+                if path == "/messages/compose" { return (500, "{}".into()); }
+                if let Some(id) = path.strip_prefix("/messages/operations/") {
+                    let phase = current.load(std::sync::atomic::Ordering::SeqCst);
+                    if phase == 1 { return (404, "{}".into()); }
+                    let mut view: serde_json::Value = serde_json::from_str(&op_reply(id, if phase == 0 { "prepared" } else { "acked" })).unwrap();
+                    view["amount_msat"] = serde_json::json!(if phase == 0 { amount } else { 4000 });
+                    view["payment_hash"] = serde_json::json!(OP_HASH);
+                    return (200, view.to_string());
+                }
+                inner(m, path, body)
+            }));
+            let id = uncertain_send(&node).await;
+            do_spend_reconcile(&node.state).await.unwrap_err();
+            let p = pending(&node).unwrap();
+            assert!(do_spend_dismiss_undelivered(&reopen(&node), &p.id).is_err(), "partial evidence cannot release the fence");
+            assert!(do_message_retry(&node.state, A, "gm", None).await.is_err());
+            assert_eq!(do_message_send(&node.state, A, false, "new", 14000, None).await.unwrap_err().code, "spend_unknown");
+            assert_eq!(settled(&node), [amount]);
+            // Even after grace, an absent row cannot erase observed payment evidence.
+            phase.store(1, std::sync::atomic::Ordering::SeqCst);
+            dispatch_age(&node, 301_000);
+            assert_eq!(do_spend_reconcile(&reopen(&node)).await.unwrap_err().code, "payment_unknown");
+            assert_eq!(settled(&node), [amount]);
+            phase.store(2, std::sync::atomic::Ordering::SeqCst);
+            assert!(do_spend_reconcile(&reopen(&node)).await.unwrap().starts_with("Accepted"));
+            assert_eq!(settled(&node), [4000], "update the original charge; do not add or subtract admission twice");
+            assert!(pending(&node).is_none());
+            assert_eq!(ledger_record(&node, &id)["paid_msat"], 4000);
+            assert_eq!(op_ids(&node), [Some(id)], "no retry or fresh dispatch");
+        }
+    }
+
+    #[tokio::test]
+    async fn reconcile_history_evidence_survives_crash_before_pending_save() {
+        for (advertise, lookup) in [
+            (false, None), (false, Some(("prepared", 0, false))),
+            (false, Some(("released", 0, false))), (false, Some(("abandoned", 0, false))),
+            (true, None),
+        ] {
+            for (amount, readmission, hash) in [(2000, 0, false), (0, 2000, false), (0, 0, true)] {
+                let node = reconcile_node(advertise, 200, lookup, "abandoned");
+                let id = uncertain_send(&node).await;
+                dispatch_age(&node, 301_000);
+                let before = book(&node);
+                let journal = spend_journal(&node.state).unwrap();
+                let p = journal.pending().unwrap().unwrap();
+                let mut evidence: serde_json::Value = serde_json::from_str(&op_reply(&id, "prepared")).unwrap();
+                evidence["amount_msat"] = serde_json::json!(amount);
+                evidence["readmission_msat"] = serde_json::json!(readmission);
+                evidence["payment_hash"] = if hash { serde_json::json!(OP_HASH) } else { serde_json::Value::Null };
+                // Exact crash boundary: history is durable, but the pending
+                // slot still has its pre-evidence snapshot and reservation.
+                journal.record_outcome(&p, spend_journal::OperationState::PaidUndelivered, Some(&evidence)).unwrap();
+                assert!(p.evidence_reservation_msat.is_none());
+                assert!(p.accounting_msat.is_none());
+                drop(journal);
+                for _ in 0..2 {
+                    let restarted = reopen(&node);
+                    assert_eq!(do_spend_reconcile(&restarted).await.unwrap_err().code, "payment_unknown");
+                    assert!(!pending(&node).unwrap().resumable);
+                    assert_eq!(book(&node), before, "history evidence must keep the reservation");
+                    let record = ledger_record(&node, &id);
+                    assert_ne!(record["state"], "unpaid");
+                    assert_eq!(record["paid_msat"], amount + readmission);
+                    assert_eq!(record["payment_hash"], evidence["payment_hash"]);
+                    spend_advance(&restarted, true).await.unwrap();
+                    assert_eq!(do_message_send(&restarted, A, false, "new", 14000, None).await.unwrap_err().code, "spend_unknown");
+                }
+                assert_eq!(node.posts().len(), 1, "no abandon or additional compose after evidence");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn reconcile_unpaid_waits_for_timeout_and_grace_on_legacy_nodes() {
+        for lookup in [None, Some(("prepared", 0, false)), Some(("released", 0, false))] {
+            for advertise in [false, true] {
+                let node = reconcile_node(advertise, 404, lookup, "abandoned");
+                let id = uncertain_send(&node).await;
+                let before = book(&node);
+                for age in [0, 179_000, 299_000] {
+                    dispatch_age(&node, age);
+                    let err = do_spend_reconcile(&reopen(&node)).await.unwrap_err();
+                    assert_eq!(err.code, "payment_unknown");
+                    assert!(err.message.to_lowercase().contains("check again in a few minutes"));
+                    assert_eq!(err.operation_id.as_deref(), Some(id.as_str()));
+                    assert!(!pending(&node).unwrap().resumable);
+                    assert_eq!(book(&node), before);
+                }
+                dispatch_age(&node, 301_000);
+                assert_eq!(do_spend_reconcile(&reopen(&node)).await.unwrap(), NOTHING_PAID);
+                assert!(pending(&node).unwrap().resumable);
+                assert_eq!(pending(&node).unwrap().operation_id.as_deref(), Some(id.as_str()));
+                assert!(settled(&node).is_empty());
+                assert_eq!(node.posts().iter().filter(|(p, _)| p.ends_with("/abandon")).count(), if advertise { 4 } else { 0 });
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn reconcile_stale_lookup_cannot_cross_grace_during_status() {
+        for lookup in [None, Some("prepared"), Some("released")] {
+            let (inner, _) = ops_node();
+            let deadline = Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let lookup_at = Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let paid = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let (end, seen, settled) = (deadline.clone(), lookup_at.clone(), paid.clone());
+            let node = fake(AuthMode::Local, Arc::new(move |m, path, body| {
+                use std::sync::atomic::Ordering::SeqCst;
+                if path == "/messages/compose" { return (500, "{}".into()); }
+                if let Some(id) = path.strip_prefix("/messages/operations/") {
+                    if settled.load(SeqCst) { return (200, op_reply(id, "acked")); }
+                    seen.store(spend_journal::timestamp_ms(), SeqCst);
+                    return match lookup {
+                        Some(state) => (200, op_reply(id, state)),
+                        None => (404, "{}".into()),
+                    };
+                }
+                let deadline = end.load(SeqCst);
+                if path == "/status" && deadline != 0 {
+                    // The original POST pays after the empty lookup. Its status
+                    // response completes only once the legacy deadline passes.
+                    settled.store(true, SeqCst);
+                    let wait = deadline.saturating_sub(spend_journal::timestamp_ms());
+                    std::thread::sleep(Duration::from_millis(wait + 20));
+                }
+                inner(m, path, body)
+            }));
+            let id = uncertain_send(&node).await;
+            dispatch_age(&node, 299_000);
+            let end = pending(&node).unwrap().dispatched_at.unwrap() + 300_000;
+            deadline.store(end, std::sync::atomic::Ordering::SeqCst);
+            let before = book(&node);
+            let result = do_spend_reconcile(&reopen(&node)).await;
+            assert!(lookup_at.load(std::sync::atomic::Ordering::SeqCst) < end, "lookup must precede grace");
+            assert!(spend_journal::timestamp_ms() >= end, "deadline passes during reconciliation");
+            assert_eq!(result.unwrap_err().code, "payment_unknown");
+            assert!(!pending(&node).unwrap().resumable);
+            assert_eq!(book(&node), before, "keep the reservation for the late payment");
+            assert_ne!(ledger_record(&node, &id)["state"], "unpaid");
+            assert_eq!(do_message_send(&node.state, A, false, "new", 14000, None).await.unwrap_err().code, "spend_unknown");
+            assert!(do_spend_reconcile(&reopen(&node)).await.unwrap().starts_with("Accepted"));
+            assert_eq!(op_ids(&node), [Some(id)], "reconciliation never resends");
+        }
+    }
+
+    #[tokio::test]
+    async fn reconcile_missing_dispatch_time_starts_a_durable_grace_window() {
+        let node = reconcile_node(false, 404, None, "abandoned");
+        uncertain_send(&node).await;
+        let path = journal_file(&node);
+        let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        value.as_object_mut().unwrap().remove("dispatched_at");
+        std::fs::write(&path, value.to_string()).unwrap();
+        assert_eq!(do_spend_reconcile(&reopen(&node)).await.unwrap_err().code, "payment_unknown");
+        let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(saved["dispatched_at"].as_u64().is_some());
+        assert_eq!(do_spend_reconcile(&reopen(&node)).await.unwrap_err().code, "payment_unknown");
+        let again: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["dispatched_at"], again["dispatched_at"], "restart cannot reset the window");
+        dispatch_age(&node, 301_000);
+        assert!(do_spend_reconcile(&reopen(&node)).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn reconcile_abandon_success_retires_the_id_before_the_next_send() {
+        for status in [200, 201] {
+            for lookup in [None, Some(("prepared", 0, false)), Some(("released", 0, false))] {
+                let node = reconcile_node(true, status, lookup, "abandoned");
+                let id = uncertain_send(&node).await;
+                assert!(do_spend_reconcile(&node.state).await.is_ok());
+                assert_eq!(ledger_record(&node, &id)["state"], "unpaid");
+                assert!(pending(&node).unwrap().operation_id.is_none());
+                assert!(node.targets().contains(&format!("POST /messages/operations/{id}/abandon")));
+                // Same text after restart must also mint a new key, even if its reply is lost.
+                let restarted = reopen(&node);
+                spend_advance(&restarted, true).await.unwrap();
+                do_message_send(&restarted, A, false, "gm", 14000, None).await.unwrap_err();
+                assert_ne!(op_ids(&node)[1].as_deref(), Some(id.as_str()));
+                assert_eq!(ledger_record(&node, &id)["state"], "unpaid");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn reconcile_abandon_conflict_remaps_the_returned_view() {
+        for state in ["paying", "paid", "prepared", "released", "acked"] {
+            let node = reconcile_node(true, 409, None, state);
+            let id = uncertain_send(&node).await;
+            let result = do_spend_reconcile(&node.state).await;
+            match state {
+                "acked" => { assert!(result.unwrap().starts_with("Accepted")); assert!(pending(&node).is_none()); }
+                "paying" => { assert_eq!(result.unwrap_err().code, "payment_unknown"); assert!(!pending(&node).unwrap().resumable); }
+                _ => { assert_eq!(result.unwrap_err().code, if state == "paid" { "undelivered_pending" } else { "payment_unknown" }); assert_eq!(settled(&node), [2000]); assert!(!pending(&node).unwrap().resumable); }
+            }
+            assert_eq!(node.targets().iter().filter(|p| p.ends_with("/abandon")).count(), 1);
+            assert_ne!(ledger_record(&node, &id)["state"], "unpaid");
+        }
+    }
+
+    #[tokio::test]
+    async fn reconcile_abandon_errors_never_release_even_after_grace() {
+        for status in [400, 401, 403, 500] {
+            let node = reconcile_node(true, status, None, "abandoned");
+            uncertain_send(&node).await;
+            dispatch_age(&node, 301_000);
+            assert!(do_spend_reconcile(&node.state).await.is_err());
+            assert!(!pending(&node).unwrap().resumable);
+        }
+    }
+
+    #[tokio::test]
+    async fn reconcile_404_keeps_fence_when_original_post_is_accepted_later() {
+        let (inner, _) = ops_node();
+        let (routes, hold) = hold_compose(inner, 0, None, false);
+        let mut node = fake(AuthMode::Local, routes);
+        node.state.spend_timeout = Duration::from_millis(60);
+        let id = uncertain_send(&node).await;
+        let result = do_spend_reconcile(&node.state).await;
+        let second = do_message_send(&node.state, A, false, "different", 14000, None).await;
+        hold.release.send(()).unwrap();
+        assert_eq!(result.unwrap_err().code, "payment_unknown");
+        assert_eq!(second.unwrap_err().code, "spend_unknown");
+        assert_eq!(op_ids(&node), [Some(id)]);
+        for _ in 0..100 {
+            if let Ok(done) = do_spend_reconcile(&node.state).await {
+                assert!(done.starts_with("Accepted"));
+                assert_eq!(settled(&node), [2000]);
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("late original POST must be reconciled");
+    }
+
     #[tokio::test]
     async fn nothing_paid_resend_reuses_the_same_operation_id() {
         // Never reached the handler (404), or recorded but never paid (prepared).
@@ -10122,6 +10566,7 @@ mod control_act_tests {
             spend_advance(&node.state, true).await.unwrap();
             assert_eq!(do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap_err().code, "spend_unknown");
             let id = pending(&node).unwrap().operation_id.unwrap();
+            dispatch_age(&node, 301_000);
             assert_eq!(do_spend_reconcile(&reopen(&node)).await.unwrap(), NOTHING_PAID);
             let record = pending(&node).unwrap();
             assert!(record.resumable && !record.budgeted);
@@ -10146,6 +10591,7 @@ mod control_act_tests {
         assert_eq!(do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap_err().code, "spend_unknown");
         let id = pending(&node).unwrap().operation_id.unwrap();
         let restarted = reopen(&node);
+        dispatch_age(&node, 301_000);
         assert_eq!(do_spend_reconcile(&restarted).await.unwrap(), NOTHING_PAID);
         ops.lock().unwrap().readmission_capped = true;
         // First refusal carries genome's reason code, the second an older node's wording only.
@@ -10176,6 +10622,7 @@ mod control_act_tests {
         let (node, ops) = ops_fake(|n| n.drop_next = true);
         spend_advance(&node.state, true).await.unwrap();
         do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap_err();
+        dispatch_age(&node, 301_000);
         do_spend_reconcile(&node.state).await.unwrap();
         do_message_send(&node.state, A, false, "something else", 14000, None).await.unwrap();
         let ids = op_ids(&node);
@@ -10188,6 +10635,7 @@ mod control_act_tests {
         let (node, ops) = ops_fake(|n| n.script = vec![("prepared", true)]);
         spend_advance(&node.state, true).await.unwrap();
         do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap_err();
+        dispatch_age(&node, 301_000);
         do_spend_reconcile(&node.state).await.unwrap();
         // The saved fingerprint says this is the same message; the node knows better.
         let journal = spend_journal(&node.state).unwrap();
