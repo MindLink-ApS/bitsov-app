@@ -78,7 +78,7 @@ impl Recovery {
             || (!descriptor.node_id().is_empty() && self.node_id != descriptor.node_id())
             || self.client_public_key != ctx.key.public_hex()
             || self.device_public_key != record.public_key
-            || self.device_key_id != hex::encode(&blake3::hash(&public).as_bytes()[..16])
+            || self.device_key_id != device::key_id(&public)
             || self.binding.fingerprint
                 != bitsov_app::home_node::identity_fingerprint(&self.node_id)
         {

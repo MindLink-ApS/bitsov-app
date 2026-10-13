@@ -418,8 +418,6 @@ export type RestoreOutcome = { node_id: string; restart_required: boolean; resta
 
 /** A refused or failed action, as the host rejects it. */
 export type ActionError = {
-  /** Host admission identity remains available after an ambiguous receipt. */
-  operation_id?: string;
   // Unknown includes transport loss after dispatch: it must never mean "not sent".
   code:
     | 'spend_unknown'
@@ -481,7 +479,25 @@ export type ActionError = {
    * record. Stop retrying names it, so a stale card never releases another message.
    */
   pending_id?: string;
+  /** H1: the host's id for the operation this error is about (kept whole, never parsed). */
+  operation_id?: string;
 };
+
+/** H1 `op_list`: the host's own record of a paid operation (read only; never a spending authority). */
+export type OperationState = 'dispatching' | 'paid' | 'unpaid' | 'paid_undelivered' | 'failed_paid' | 'unknown' | 'settled' | 'closed';
+export type OpView = {
+  op_id: string;
+  /** `message`, `call_offer`, ...; any other string is shown as nothing. */
+  kind: string;
+  peer: string;
+  call_id: string | null;
+  state: OperationState;
+  cap_msat: number;
+  paid_msat: number | null;
+  message_id: string | null;
+};
+/** Newest first, at most 100; `skipped` damaged records were left out. */
+export type OpList = { operations: OpView[]; skipped: number; has_more: boolean };
 
 /**
  * Retry delivery paid nothing new, and delivering a paid, undelivered message
@@ -720,15 +736,42 @@ export type Artifact =
   /** `invoice`: the bolt11 an invoice payment paid, so a request card can show it paid. */
   | { id: string; at: number; type: 'payment'; receipt: PaymentReceipt; invoice?: string }
   | { id: string; at: number; type: 'file'; receipt: FileReceipt }
-  | { id: string; at: number; type: 'failed'; action: string; error: ActionError }
+  /** `op`: the host's record of `error.operation_id`, once read (H1 op_list). */
+  | { id: string; at: number; type: 'failed'; action: string; error: ActionError; text?: string; op?: OpView;
+      /** A receipt later confirmed the operation this card names: its message id. Supersedes any `op` money claim. */
+      confirmedBy?: string }
   /**
    * Paid, not delivered. `text` is the owner's own draft, kept in memory for
    * Retry delivery only. `admission`: Retry delivery paid nothing new and a
    * payment is still due; this is the price to approve. `pendingId`: the host
    * record this card is about.
    */
-  | { id: string; at: number; type: 'undelivered'; ownerApproval?: OwnerContactApproval | null; text: string; paid: Undelivered; note: string | null; admission: AdmissionPrice | null; pendingId: string | null }
-  | { id: string; at: number; type: 'door'; door: DoorCard };
+  | { id: string; at: number; type: 'undelivered'; ownerApproval?: OwnerContactApproval | null; text: string; paid: Undelivered; note: string | null; admission: AdmissionPrice | null; pendingId: string | null; operationId?: string }
+  | { id: string; at: number; type: 'door'; door: DoorCard }
+  /**
+   * A message on its way: shown the moment Send is pressed, replaced by the
+   * real message when the send settles (or by its failure card). `capMsat` is
+   * the ceiling the owner pressed Send on, never a paid amount.
+   */
+  | {
+      id: string; at: number; type: 'sending'; text: string; capMsat: number;
+      /** A room's member caps as quoted at the press (the send uses these, not a later quote). */
+      memberCaps?: Record<string, number>;
+      /** The node's live echo of this send, if it came before the receipt: hidden while this shows. */
+      echoes?: { id: string; to: string }[];
+    }
+  /**
+   * A message that did not go and paid nothing, kept whole on its own track:
+   * `refused` (the send was refused before paying) or `held` (never dispatched
+   * because an earlier payment's result is not known yet).
+   */
+  | { id: string; at: number; type: 'unsent'; text: string; why: 'refused' | 'held'; reason: string }
+  /**
+   * A message this app sent whose result its host never saw (a restart, a lost
+   * reply), restored from the host's op list. The host keeps no text: only
+   * who, the cap and the state. Never a resend.
+   */
+  | { id: string; at: number; type: 'restored'; op: OpView };
 
 /**
  * The membrane in the stream: a first contact admitted at your door, a verified
