@@ -90,4 +90,44 @@ describe('an empty chat says only what is known', () => {
     expect($('[data-thread-loading]')).toBeNull();
     expect(mount.textContent).not.toMatch(/No messages here yet/);
   });
+
+  describe('overlapping reads of one chat: only the newest read decides what is said', () => {
+    type D = { resolve: (v: unknown) => void; reject: (e: unknown) => void };
+    async function overlapping() {
+      const source = sampleSource({ firstLiveMs: 1e9 });
+      const reads: D[] = [];
+      source.messages = vi.fn((peer: string) => (peer.toLowerCase() !== A
+        ? Promise.resolve([])
+        : new Promise((resolve, reject) => { reads.push({ resolve, reject }); }))) as never;
+      await open(source);
+      await vi.waitFor(() => expect(reads.length).toBeGreaterThanOrEqual(1));
+      const before = reads.length;
+      // Reopen while the first read is still out: a newer read starts.
+      $(`[data-track="peer:${B}"]`)!.click();
+      await vi.waitFor(() => expect($(`[data-track="peer:${B}"]`)?.getAttribute('aria-current')).toBe('true'));
+      $(`[data-track="peer:${A}"]`)!.click();
+      await vi.waitFor(() => expect(reads.length).toBeGreaterThan(before));
+      return { newest: reads[reads.length - 1], older: reads.slice(0, -1) };
+    }
+
+    it('newer read succeeds empty, then an older read fails: no stale error beside "no messages"', async () => {
+      const { newest, older } = await overlapping();
+      newest.resolve([]);
+      await vi.waitFor(() => expect($('[data-thread-empty]')).not.toBeNull());
+      for (const r of older) r.reject({ code: 'node', message: 'Old read failed.' });
+      await new Promise((r) => setTimeout(r, 20));
+      expect(mount.textContent).not.toContain('Old read failed.');
+      expect($('[data-thread-empty]')).not.toBeNull();
+    });
+
+    it('newer read fails, then an older read succeeds: the error stays and nothing says "no messages"', async () => {
+      const { newest, older } = await overlapping();
+      newest.reject({ code: 'node', message: 'Your node did not answer.' });
+      await vi.waitFor(() => expect(mount.textContent).toContain('Your node did not answer.'));
+      for (const r of older) r.resolve([]);
+      await new Promise((r) => setTimeout(r, 20));
+      expect(mount.textContent).toContain('Your node did not answer.');
+      expect($('[data-thread-empty]')).toBeNull();
+    });
+  });
 });

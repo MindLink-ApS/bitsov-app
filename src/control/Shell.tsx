@@ -325,16 +325,29 @@ export function ControlCenter(props: Props) {
   const readRevision: Record<string, number> = {};
   let readSeq = 0;
   /** Runs one history read for `key`, recording pending → ok | failed for this attempt only. */
-  const readThread = <T,>(key: string, run: () => Promise<T>, apply: (v: T) => void) => {
+  /** Each chat's read error, for its current read only (never another chat's, never an older read's). */
+  const [threadError, setThreadError] = createStore<Record<string, string | undefined>>({});
+  const readThread = async <T,>(key: string, run: () => Promise<T>, apply: (v: T) => void) => {
     const rev = ++readSeq;
     readRevision[key] = rev;
     setThreadRead(key, 'pending');
-    let ok = false;
-    return attempt('thread', run, (v) => {
-      apply(v);
-      ok = true;
-      if (readRevision[key] === rev) setThreadRead(key, 'ok');
-    }).then(() => { if (!ok && readRevision[key] === rev) setThreadRead(key, 'failed'); });
+    setThreadError(key, undefined);
+    let value: T;
+    try {
+      value = await run();
+    } catch (e) {
+      // Only the current read may say it failed, and only it sets the error.
+      if (readRevision[key] !== rev) return;
+      const error = asActionError(e);
+      setThreadRead(key, 'failed');
+      setThreadError(key, error.code === 'not_ready' ? undefined : typeof e === 'string' ? e : error.message);
+      return;
+    }
+    // Messages an older read brought are still merged; only the current read sets the state.
+    apply(value);
+    if (readRevision[key] !== rev) return;
+    setThreadRead(key, 'ok');
+    setThreadError(key, undefined);
   };
   props.onWatchSamples?.(() => {
     const at = Date.now();
@@ -1734,7 +1747,7 @@ export function ControlCenter(props: Props) {
                       earlier={roomPages[room().id]?.more === true}
                       loadingEarlier={roomPages[room().id]?.loading === true}
                       read={threadRead[trackKey(t())] ?? 'pending'}
-                      error={errors.thread}
+                      error={threadError[trackKey(t())]}
                       onEarlier={() => loadRoomPage(room().id, roomPages[room().id]?.before ?? null)}
                       sends={roomSends[room().id] ?? []}
                       fresh={threads.fresh}
@@ -1799,7 +1812,7 @@ export function ControlCenter(props: Props) {
                     budgetStale={grantUnknown() || (budget() !== null && (!budgetConfirmed() || !!errors.budgetPoll))}
                     actions={actions}
                     now={now()}
-                    error={errors.thread}
+                    error={threadError[trackKey(t())]}
                     read={threadRead[trackKey(t())] ?? 'pending'}
                     onReconnect={async () => { await props.onReconnect?.(); await loadThread(t()); }}
                     prefill={prefill()}
