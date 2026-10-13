@@ -3693,10 +3693,14 @@ function UndeliveredView(props: {
  * very call armed. Only these bind an Approve & send; nothing observed later
  * does. `bindable`: the host reports these ids at all (absent on older hosts).
  */
-export type ApprovalResult = { ok: boolean; requestId: string | null; grantedOp: string | null; bindable: boolean };
+export type ApprovalResult = { ok: boolean; requestId: string | null; grantedOp: string | null; bindable: boolean; waiting: boolean };
 const approvalResult = (r: Outcome<SpendView | BudgetView>): ApprovalResult => r.ok
-  ? { ok: true, requestId: r.value.request_id ?? null, grantedOp: r.value.granted_op ?? null, bindable: 'granted_op' in r.value }
-  : { ok: false, requestId: null, grantedOp: null, bindable: false };
+  ? {
+      ok: true, requestId: r.value.request_id ?? null, grantedOp: r.value.granted_op ?? null, bindable: 'granted_op' in r.value,
+      // Taken, but still waiting for the owner at the node (a budget request, or a pending spend request).
+      waiting: 'waiting_for_owner' in r.value ? r.value.waiting_for_owner === true : (r.value as SpendView).state === 'pending',
+    }
+  : { ok: false, requestId: null, grantedOp: null, bindable: false, waiting: false };
 
 /** How long an Approve & send press waits for its approval before it ends unsent. */
 const CONTINUE_MS = 10 * 60_000;
@@ -4454,11 +4458,19 @@ function Composer(props: {
     return { message: 'Send', pay: 'Pay', request: 'Create invoice', file: 'Send file' }[mode()] + (mode() === 'request' ? '' : price);
   };
 
+  /** The Send button's text, title and accessible name: what this press does. */
   const sendTitle = () => {
     if (!needsTouch() && !viaBudget() && spends() && !line().open && props.spend?.state !== 'pending' && props.spend?.state !== 'unavailable' && canContinue('grant')) {
       return 'Approve & send';
     }
-    return needsTouch() ? (androidQrScannerAvailable() ? 'Approve with biometrics' : 'Approve with Touch ID') : 'Send';
+    if (needsTouch()) return androidQrScannerAvailable() ? 'Approve with biometrics' : 'Approve with Touch ID';
+    // A budget press only approves or resumes; it sends nothing.
+    if (viaBudget() && (mode() === 'message' || mode() === 'file')) {
+      const k = stand().kind;
+      if (k === 'paused') return 'Resume payments';
+      if (k === 'off' && presetChosen()) return 'Allow payments';
+    }
+    return 'Send';
   };
   /** Pay / Request / File panels close back to the single message bar. */
   const closePanel = () => {
@@ -4496,7 +4508,8 @@ function Composer(props: {
    * its refusal, cancel, lapse or replacement drops it; another approval
    * never satisfies it.
    */
-  type ApprovalKind = 'touch' | 'preset' | 'resume' | 'grant';
+  /** Only the spending request continues (see canContinue). */
+  type ApprovalKind = 'grant';
   /**
    * Bound ONLY to what the approval action itself returned. `key`: the grant
    * op G of the window that very call armed (hand-off when the open view's
@@ -4514,9 +4527,24 @@ function Composer(props: {
    * Touch ID (no identity) and preset/resume (a budget grant arms autopay, not
    * the spend window) keep the plain flow: approve, then press Send.
    */
-  const canContinue = (kind: ApprovalKind) => kind === 'grant' && mode() === 'message' && !!draft().trim() && shown().msat !== null && consent() === null && bindable();
-  /** The plain flow after an approval that does not continue: the draft stays; say what is next. */
-  const approvedPlain = (ok: boolean) => { if (ok && mode() === 'message' && untrack(draft).trim()) setNote('Approved. Press Send to send it.'); };
+  const canContinue = (_kind: ApprovalKind) => mode() === 'message' && !!draft().trim() && shown().msat !== null && consent() === null && bindable();
+  /**
+   * The plain flow after an approval that does not continue: the draft stays;
+   * say what is next. Taken but still waiting for the owner at the node: say
+   * so, and "Approved" only once it completes (below).
+   */
+  const [approvalPending, setApprovalPending] = createSignal(false);
+  const approvedPlain = (ok: boolean, waiting = false) => {
+    if (!ok || mode() !== 'message' || !untrack(draft).trim()) return;
+    if (waiting) { setApprovalPending(true); setNote('Waiting for your approval at the node…'); return; }
+    setNote('Approved. Press Send to send it.');
+  };
+  createEffect(() => {
+    if (!approvalPending()) return;
+    const k = stand().kind;
+    if (k === 'ok' || k === 'first') { setApprovalPending(false); setNote('Approved. Press Send to send it.'); }
+    else if (k === 'off' || k === 'paused') { setApprovalPending(false); setNote(null); }
+  });
   const startWaiting = (kind: ApprovalKind) => {
     if (!untrack(() => canContinue(kind))) return;
     const text = draft();
@@ -4675,11 +4703,11 @@ function Composer(props: {
         if (pressed) { setNote('Payments need approving again. Press Send to ask.'); return; }
         // The one approval (or resume); the draft stays (a budget grant arms autopay, not the spend window).
         setBusy(true);
-        let approved: ApprovalResult = { ok: false, requestId: null, grantedOp: null, bindable: false };
+        let approved: ApprovalResult = { ok: false, requestId: null, grantedOp: null, bindable: false, waiting: false };
         if (st.kind === 'paused') approved = await props.actions.resume();
         else if (presetChosen()) approved = await props.actions.approveBudget(presetChosen()!.ceiling_msat, presetChosen()!.id);
         setBusy(false);
-        approvedPlain(approved.ok);
+        approvedPlain(approved.ok, approved.waiting);
         return;
       }
       if (st.kind !== 'first' && st.kind !== 'ok') return;
@@ -4831,8 +4859,8 @@ function Composer(props: {
     }
     if (spends() && !line().open) {
       if (pressed) { setNote('Spending needs approving again. Press Send to ask.'); return; }
-      // The one tap: with this Mac registered, a single contact is approved
-      // with Touch ID; otherwise at the node. A message then goes once (Approve & send).
+      // The one tap asks the node for a spending window. Where the host names the
+      // request or the grant it armed, the message then goes once (Approve & send).
       startWaiting('grant');
       setBusy(true);
       const approved = await props.actions.approve();

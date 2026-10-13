@@ -316,6 +316,31 @@ describe('invisible payments in the composer and the context panel', () => {
     expect(text('[data-budget-wallet-warning]')).toContain('outside');
   });
 
+  it.each([['preset', 'budget_approve'], ['resume', 'budget_resume']] as const)('%s waiting for the owner at the node says so; "Approved. Press Send" only once it completes', async (kind, cmd) => {
+    let hostRef!: ReturnType<typeof stubHost>;
+    const rows = [{ target: MAYA, room: false, limit_msat: 50_000, spent_msat: 0 }];
+    const start = kind === 'preset' ? budgetView({ rows }) : { ...open(rows), paused: true, autopay: { state: 'off' as const, open_until_ms: null, ceiling_msat: null, basis: null } };
+    const host = stubHost(start, {
+      [cmd]: () => {
+        hostRef.state.budget = { ...hostRef.state.budget, paused: false, waiting_for_owner: true };
+        return { ...hostRef.state.budget, request_id: 'op-A', granted_op: null };
+      },
+    });
+    hostRef = host;
+    await openShell();
+    type('[data-composer] textarea', 'gm Maya');
+    await vi.waitFor(() => expect(text('[data-send]')).toBe(kind === 'preset' ? 'Allow payments' : 'Resume payments'));
+    submit();
+    await vi.waitFor(() => expect(host.used(cmd)).toHaveLength(1));
+    await vi.waitFor(() => expect(text('[data-composer-note]')).toBe('Waiting for your approval at the node…'));
+    expect(mount.textContent).not.toContain('Approved. Press Send');
+    // The owner approves at the node: the budget opens.
+    hostRef.state.budget = open(rows);
+    await vi.waitFor(() => expect(text('[data-composer-note]')).toBe('Approved. Press Send to send it.'), { timeout: 8000 });
+    expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('gm Maya');
+    expect(host.used('message_send')).toHaveLength(0);
+  }, 20_000);
+
   it('approves a daily total once, then messages go with no prompt and the price still shown', async () => {
     // The approval is deferred: nothing may be sent until it clears.
     let release!: () => void;
@@ -332,8 +357,10 @@ describe('invisible payments in the composer and the context panel', () => {
     hostRef = host;
     await openShell();
     type('[data-composer] textarea', 'gm Maya');
-    // A budget grant arms autopay, not a spend window bound to this message: the plain flow, no "& send".
-    await vi.waitFor(() => expect(text('[data-send]')).toBe('Send'));
+    // A budget grant arms autopay, not a spend window bound to this message: the press only approves, and says so.
+    await vi.waitFor(() => expect(text('[data-send]')).toBe('Allow payments'));
+    expect($('[data-send]')!.getAttribute('title')).toBe('Allow payments');
+    expect($('[data-send]')!.getAttribute('aria-label')).toBe('Allow payments');
     expect(text('[data-budget-setup]')).toContain('Someone new always asks first');
 
     // The owner picks a preset; the tap is the approval. Nothing is sent by it, and the words stay.
@@ -1106,7 +1133,9 @@ describe('invisible payments in the composer and the context panel', () => {
     await vi.waitFor(() => expect($('[data-budget-paused]')).not.toBeNull());
     expect(text('[data-budget-paused]')).toContain('New app payments are blocked');
     // Resume is the plain flow: it resumes; the message waits in the box for Send.
-    expect(text('[data-send]')).not.toMatch(/& send/);
+    await vi.waitFor(() => expect(text('[data-send]')).toBe('Resume payments'));
+    expect($('[data-send]')!.getAttribute('title')).toBe('Resume payments');
+    expect($('[data-send]')!.getAttribute('aria-label')).toBe('Resume payments');
     submit();
     await vi.waitFor(() => expect(host.used('budget_resume')).toHaveLength(1));
     await new Promise((r) => setTimeout(r, 300));

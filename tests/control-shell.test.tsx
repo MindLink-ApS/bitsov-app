@@ -867,7 +867,8 @@ describe('control center shell', () => {
     await vi.waitFor(() => expect(mount.querySelector('[data-sample]')).not.toBeNull());
     await vi.waitFor(() => expect(mount.querySelector('[data-stream]')?.textContent).toContain('Morning.'));
     expect(mount.querySelector('[data-mode="sample"]')).not.toBeNull();
-    await vi.waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Send'));
+    // Sample budget is off with a preset chosen: the press approves payments, so it says so.
+    await vi.waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Allow payments'));
     click('[data-track="new"]');
     await vi.waitFor(() => expect(mount.querySelector('[data-new-track]')?.textContent).toContain('Share your node id'));
     expect(mount.querySelector('[data-new-track]')?.textContent).toContain('Browse');
