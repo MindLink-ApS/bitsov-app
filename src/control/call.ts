@@ -146,11 +146,17 @@ export type CallView = {
   reason: HangupReason | null;
   /** A refusal to show (nothing was paid for the refused step). */
   error: string | null;
+  /**
+   * The browser reports no network (display only). Never read by the call's
+   * own logic: recovery stays ICE-driven (restart after its delay, or ended
+   * after the grace), whatever this says.
+   */
+  offline: boolean;
 };
 
 export const IDLE: CallView = {
   phase: 'idle', state: 'idle', peer: null, callId: null, media: 'audio', outgoing: false,
-  liveAt: null, muted: false, camera: false, paidMsat: 0, connection: null, reason: null, error: null,
+  liveAt: null, muted: false, camera: false, paidMsat: 0, connection: null, reason: null, error: null, offline: false,
 };
 
 type Outcome<T> = { ok: true; value: T } | { ok: false; error: ActionError };
@@ -173,6 +179,25 @@ export type CallDeps = {
   /** Something else (a meeting) holds the mic: an incoming offer rings out. */
   busy?: () => boolean;
 };
+
+/**
+ * Calls `offline` / `online` on the browser's network events, and the matching
+ * one on a connection type change (navigator.connection, where it exists).
+ * Returns the remover.
+ */
+export function watchNetwork(offline: () => void, online: () => void): () => void {
+  if (typeof window === 'undefined') return () => {};
+  const conn = (navigator as Navigator & { connection?: EventTarget }).connection;
+  const changed = () => { if (navigator.onLine === false) offline(); else online(); };
+  window.addEventListener('offline', offline);
+  window.addEventListener('online', online);
+  conn?.addEventListener?.('change', changed);
+  return () => {
+    window.removeEventListener('offline', offline);
+    window.removeEventListener('online', online);
+    conn?.removeEventListener?.('change', changed);
+  };
+}
 
 /** Wait for ICE gathering to finish, or `ms`, whichever comes first. */
 export function gathered(pc: RTCPeerConnection, ms: number): Promise<void> {
@@ -219,6 +244,8 @@ export function createCallEngine(deps: CallDeps) {
   let videoSender: RTCRtpSender | null = null;
   /** The call the owner cancelled while its offer was being prepared or paid. */
   let cancelled: string | null = null;
+  /** Removes the network listeners of the current connection (display only). */
+  let offNetwork: (() => void) | null = null;
   // Serialises user actions: a double click never pays twice.
   let busy = false;
 
@@ -229,6 +256,8 @@ export function createCallEngine(deps: CallDeps) {
   const active = () => view.phase !== 'idle' && view.phase !== 'ended';
 
   const teardown = () => {
+    offNetwork?.();
+    offNetwork = null;
     mediaGeneration++;
     actionGeneration++;
     busy = false;
@@ -270,7 +299,7 @@ export function createCallEngine(deps: CallDeps) {
   };
   const end = (reason: HangupReason | null, error: string | null = null) => {
     teardown();
-    set({ phase: 'ended', reason, error, camera: false, muted: false });
+    set({ phase: 'ended', reason, error, camera: false, muted: false, offline: false });
   };
 
   const acquireMedia = (constraints: MediaStreamConstraints): Promise<MediaStream> => new Promise((resolve, reject) => {
@@ -383,6 +412,13 @@ export function createCallEngine(deps: CallDeps) {
       if (state === 'failed' || state === 'disconnected' || state === 'closed') connectionChanged(state);
       else if ((state === 'connected' || state === 'completed') && conn.connectionState === 'connected') connectionChanged('connected');
     };
+    // Network events are display only: they set view.offline for the call panel's note, and never
+    // call reconnect()/restart() or touch anything those or the answer path read.
+    offNetwork?.();
+    offNetwork = watchNetwork(
+      () => { if (pc === conn && active()) set({ offline: true }); },
+      () => { if (pc === conn && view.offline) set({ offline: false }); },
+    );
     deps.onStreams(local, null);
     return conn;
   };

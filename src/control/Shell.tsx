@@ -3065,6 +3065,10 @@ function CallPanel(props: {
             <p class="hint" data-call-no-relay>Some networks need a relay to connect a call, and your node does not offer one yet.</p>
           </Show>
         </Show>
+        {/* Display only: the browser reports no network. Recovery itself stays ICE-driven. */}
+        <Show when={v().offline && v().phase !== 'ended' && v().phase !== 'idle'}>
+          <p class="hint" role="status" data-call-offline>You are offline. The call reconnects by itself if your network comes back in time.</p>
+        </Show>
         <Show when={v().phase !== 'ended' && v().error}>
           <p class="hint" data-call-error>{v().error}</p>
         </Show>
