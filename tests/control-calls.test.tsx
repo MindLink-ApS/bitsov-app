@@ -1029,6 +1029,90 @@ describe('H2 710f67e × R2: op_close_call records, then op_end_call ends (idempo
   });
 });
 
+describe('#222 r2: ends racing the offer, and recovery admissions', () => {
+  beforeEach(() => { FakePc.made = []; });
+  afterEach(() => { vi.useRealTimers(); });
+  const offerReceipt = (op: string) => ({ ok: true as const, value: { operation_id: op, message_id: 'm', kind: 400, amount_msat: 10_000, total_msat: 15_000, max_routing_fee_msat: 5_000, delivered: true, accepted: true, sent_at_ms: 0 } as CallReceipt });
+  const hangupView = (id: string): OpView => ({ op_id: `h-${id}`, kind: 'call_hangup', peer: A, call_id: id, state: 'settled', cap_msat: 6000, paid_msat: 6000, message_id: 'h' });
+
+  it('#1 cancel during the offer\'s preflight: "not found" is not "closed"; when the offer\'s receipt lands, op_end_call runs exactly once more', async () => {
+    let finish!: (r: Awaited<ReturnType<CallDeps['signal']>>) => void;
+    const replies: Awaited<ReturnType<NonNullable<CallDeps['endCall']>>>[] = [
+      { ok: false, error: { code: 'call_not_found' as never, message: 'No outgoing admission is recorded for this call.' } },
+      { ok: true, value: hangupView(ID) },
+    ];
+    const endCall = vi.fn(async () => replies.shift()!);
+    const { e, last } = engine({ endCall, signal: () => new Promise((r) => { finish = r; }) });
+    const placing = e.place(A, 'audio', QUOTE);
+    await vi.waitFor(() => expect(finish).toBeDefined());
+    await e.hangup();
+    await vi.waitFor(() => expect(endCall).toHaveBeenCalledTimes(1));
+    await new Promise((r) => setTimeout(r, 10));
+    expect(last().close?.status).toBe('closing');
+    finish(offerReceipt('op-A'));
+    await placing;
+    await vi.waitFor(() => expect(endCall).toHaveBeenCalledTimes(2));
+    expect(endCall.mock.calls).toEqual([[ID], [ID]]);
+    await vi.waitFor(() => expect(last().close).toEqual({ status: 'closed', message: null }));
+    await new Promise((r) => setTimeout(r, 10));
+    expect(endCall).toHaveBeenCalledTimes(2);
+  });
+
+  it('#1 the same race, but the offer is refused with no operation: nothing was admitted, so it is closed and not asked again', async () => {
+    let finish!: (r: Awaited<ReturnType<CallDeps['signal']>>) => void;
+    const endCall = vi.fn(async () => ({ ok: false as const, error: { code: 'call_not_found' as never, message: 'x' } }));
+    const { e, last } = engine({ endCall, signal: () => new Promise((r) => { finish = r; }) });
+    const placing = e.place(A, 'audio', QUOTE);
+    await vi.waitFor(() => expect(finish).toBeDefined());
+    await e.hangup();
+    await vi.waitFor(() => expect(endCall).toHaveBeenCalledTimes(1));
+    finish({ ok: false, error: { code: 'budget_exhausted' as never, message: 'Budget used up.' } });
+    await placing;
+    await vi.waitFor(() => expect(last().close).toEqual({ status: 'closed', message: null }));
+    expect(endCall).toHaveBeenCalledTimes(1);
+  });
+
+  it('#1 an op-bearing unknown offer result also brings the asked end back once', async () => {
+    let finish!: (r: Awaited<ReturnType<CallDeps['signal']>>) => void;
+    const replies: Awaited<ReturnType<NonNullable<CallDeps['endCall']>>>[] = [
+      { ok: false, error: { code: 'call_not_found' as never, message: 'x' } },
+      { ok: true, value: hangupView(ID) },
+    ];
+    const endCall = vi.fn(async () => replies.shift()!);
+    const { e } = engine({ endCall, signal: () => new Promise((r) => { finish = r; }) });
+    const placing = e.place(A, 'audio', QUOTE);
+    await vi.waitFor(() => expect(finish).toBeDefined());
+    await e.hangup();
+    await vi.waitFor(() => expect(endCall).toHaveBeenCalledTimes(1));
+    finish({ ok: false, error: { code: 'spend_unknown' as never, message: 'Outcome unknown.', operation_id: 'op-A' } });
+    await placing;
+    await vi.waitFor(() => expect(endCall).toHaveBeenCalledTimes(2));
+  });
+
+  it('#2 their bound hangup confirms only the original admission: the recovery admission we placed is still ended at the host', async () => {
+    vi.useFakeTimers();
+    const restartId = 'e'.repeat(32);
+    let n = 0;
+    const endCall = vi.fn(async (id: string) => ({ ok: true as const, value: hangupView(id) }));
+    const signal: CallDeps['signal'] = async (_p, kind, plaintext) => {
+      const id = JSON.parse(plaintext).call_id as string;
+      return { ok: true, value: { operation_id: kind === 400 ? (id === ID ? 'op-A' : 'op-B') : null, message_id: 'm', kind, amount_msat: 1, total_msat: 1, max_routing_fee_msat: 0, delivered: true, accepted: true, sent_at_ms: 0 } as CallReceipt };
+    };
+    const { e } = engine({ endCall, signal, newCallId: () => (n++ === 0 ? ID : restartId) });
+    await e.place(A, 'audio', QUOTE);
+    await e.receive(msg(401, { sdp: 'v=0 answer' }), OWN);
+    const pc = FakePc.made[0];
+    pc.connect();
+    pc.state('failed');
+    await vi.advanceTimersByTimeAsync(0);
+    // Their hangup, bound by the host to the original admission (op-A, call id ID).
+    await e.receive({ ...msg(403, { reason: 'hangup' }), admission_operation_id: 'op-A' }, OWN);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(e.view().phase).toBe('ended');
+    expect(endCall.mock.calls).toEqual([[restartId]]);
+  });
+});
+
 describe('H2: what the host says about ending, said honestly', () => {
   beforeEach(() => { FakePc.made = []; });
   const err = (code: string, message = 'x') => ({ ok: false as const, error: { code: code as never, message } });

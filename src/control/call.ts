@@ -168,10 +168,11 @@ export function closeOutcome(r: Outcome<OpView>): CallClose {
 }
 const CLOSE_RANK = { closed: 0, closing: 1, refused: 2, unknown: 3 } as const;
 /**
- * Their hangup, bound by the host to that exact admission: the host closes the
- * admission itself on that evidence, so nothing is recorded or ended from here.
+ * Their hangup, bound by the host to one exact admission (`confirmed`, its
+ * wire call id): the host closes that admission itself on that evidence, so it
+ * is not ended from here. Every other admission of ours is still ended.
  */
-const PEER_END = { record: false, endAtHost: false } as const;
+const peerEnd = (confirmed: string) => ({ record: false, confirmed }) as const;
 
 export const IDLE: CallView = {
   phase: 'idle', state: 'idle', peer: null, callId: null, media: 'audio', outgoing: false,
@@ -254,6 +255,10 @@ export function createCallEngine(deps: CallDeps) {
   let own: string[] = [];
   /** Ids `op_end_call` was asked for: each once, unless the owner asks again. */
   const closing = new Set<string>();
+  /** Offer signals still out (wire call ids): the host may not have recorded that admission yet. */
+  const offersInFlight = new Set<string>();
+  /** Ends asked while that offer was still out and answered "not found": asked again when the offer's result names its op. */
+  const deferredEnds = new Map<string, string | null>();
   /** Per displayed call: ids whose end was refused, which the owner may ask again. Another call's answer never touches it. */
   const refusedClose = new Map<string, string[]>();
   // Serialises user actions: a double click never pays twice.
@@ -318,7 +323,10 @@ export function createCallEngine(deps: CallDeps) {
     for (const id of todo) {
       let r: Outcome<OpView>;
       try { r = await endCall(id); } catch (error) { r = { ok: false, error: asActionError(error) }; }
-      const c = closeOutcome(r);
+      // "Not found" while its offer is still out means "not recorded yet", never "closed": ask again when it lands.
+      const early = !r.ok && r.error.code === 'call_not_found' && offersInFlight.has(id);
+      if (early) deferredEnds.set(id, callId);
+      const c: CallClose = early ? { status: 'closing', message: null } : closeOutcome(r);
       if (c.status === 'refused') refused.push(id);
       if (CLOSE_RANK[c.status] > CLOSE_RANK[worst.status]) worst = c;
       if (r.ok && r.value.kind === 'call_hangup' && r.value.paid_msat && view.callId === callId) set({ paidMsat: view.paidMsat + r.value.paid_msat });
@@ -343,12 +351,13 @@ export function createCallEngine(deps: CallDeps) {
    * record first, so op_end_call sends the one paid hangup. The window
    * closing records only.
    */
-  const end = (reason: HangupReason | null, error: string | null = null, opts: { record?: boolean; endAtHost?: boolean } = {}) => {
-    const { record = true, endAtHost = true } = opts;
+  const end = (reason: HangupReason | null, error: string | null = null, opts: { record?: boolean; endAtHost?: boolean; confirmed?: string } = {}) => {
+    const { record = true, endAtHost = true, confirmed } = opts;
     const peer = view.peer;
     const operations = [...(view.callId ? admissionOps.get(view.callId) ?? [] : [])];
     if (view.callId) admissionOps.delete(view.callId);
-    const ids = own;
+    // The admission the host confirmed closed (their bound hangup) is not ended again; the rest are.
+    const ids = own.filter((id) => id !== confirmed);
     const callId = view.callId;
     own = [];
     teardown();
@@ -482,17 +491,33 @@ export function createCallEngine(deps: CallDeps) {
     });
     let r: Outcome<CallReceipt>;
     try {
+      if (kind === CALL_OFFER) offersInFlight.add(targetId!);
       const signal = deps.signal(peer!, kind, JSON.stringify({ v: 1, call_id: targetId!, ...body }), maxMsat).then(result => {
         const operationId = result.ok ? result.value.operation_id
           : ['spend_unknown', 'payment_unknown', 'payment_settled_undelivered'].includes(result.error.code) ? result.error.operation_id : undefined;
+        if (kind === CALL_OFFER) {
+          offersInFlight.delete(targetId!);
+          // An end asked before the host recorded this offer: now that the offer has a result, ask again (once).
+          if (deferredEnds.has(targetId!)) {
+            const endedCall = deferredEnds.get(targetId!)!;
+            deferredEnds.delete(targetId!);
+            if (operationId) {
+              closing.delete(targetId!);
+              void closeAdmissions([targetId!], endedCall);
+            } else if (view.callId === endedCall && view.close?.status === 'closing') {
+              // The offer was refused with no operation: nothing was admitted, nothing to end.
+              set({ close: { status: 'closed', message: null } });
+            }
+          }
+        }
         if (kind === CALL_OFFER && operationId) {
           if (view.callId !== callId || !active()) closeAdmission(operationId, peer!, targetId!);
           else {
             const operations = admissionOps.get(callId!) ?? new Map<string, string>();
             operations.set(operationId, targetId!);
             admissionOps.set(callId!, operations);
-            const peerEnd = pendingPeerEnds.get(operationId);
-            if (peerEnd?.callId === targetId) end(peerEnd.reason, null, PEER_END);
+            const pendingEnd = pendingPeerEnds.get(operationId);
+            if (pendingEnd?.callId === targetId) end(pendingEnd.reason, null, peerEnd(targetId!));
           }
         }
         return result;
@@ -917,7 +942,7 @@ export function createCallEngine(deps: CallDeps) {
                 return;
               }
             }
-            end(s.reason ?? 'hangup', null, PEER_END);
+            end(s.reason ?? 'hangup', null, peerEnd(s.call_id));
           }
       }
     },
