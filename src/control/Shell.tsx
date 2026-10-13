@@ -1,5 +1,5 @@
 import { AddDevice } from '../onboarding/AddDevice';
-import { OnCallPill } from './OnCallPill';
+import { CALL_STATE_WORD, OnCallPill } from './OnCallPill';
 import { watchSamples, type WatchSamples, type WatchUpdates } from './watches';
 import { ASSISTANTS, type AssistantId } from './assistants';
 import { PendingApproval } from '../onboarding/LockedNode';
@@ -2960,9 +2960,8 @@ function CallButtons(props: { peer: string; name: string; blocked: boolean; acti
   );
 }
 
-const CALL_TITLE: Record<CallView['phase'], string> = {
-  idle: '', calling: 'Calling', ringing: 'Ringing', incoming: 'Incoming call', connecting: 'Connecting', live: 'On call', reconnecting: 'Reconnecting…', ended: 'Call ended',
-};
+/** The call panel's title: the same word as the pill. */
+const CALL_TITLE = CALL_STATE_WORD;
 const END_REASON: Record<string, string> = {
   hangup: 'Hung up', declined: 'Declined', busy: 'Busy', timeout: 'No answer', failed: 'Connection failed',
 };

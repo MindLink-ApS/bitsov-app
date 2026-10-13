@@ -1210,7 +1210,8 @@ describe('calls in the shell', () => {
     await vi.waitFor(() => expect($('[data-call-panel="live"]')).not.toBeNull());
     expect(text('[data-call-duration]')).toMatch(/^0:0\d$/);
     const pill = $<HTMLButtonElement>('[data-on-call]')!;
-    expect(pill?.textContent).toMatch(/On call · 00:0\d/);
+    expect(pill?.textContent).toMatch(/Live · 00:0\d/);
+    expect(text('[data-call-title]')).toBe('Live');
     $<HTMLButtonElement>('[data-track="discover"]')!.click();
     pill.click();
     await vi.waitFor(() => expect(document.activeElement).toBe($('[data-call-panel="live"]')));
@@ -1222,7 +1223,10 @@ describe('calls in the shell', () => {
     $<HTMLButtonElement>('[data-call-hangup]')!.click();
     await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
     expect(host.used('call_signal').map((c) => c.args!.kind)).toEqual([401, 403]);
-    expect($('[data-on-call]')).toBeNull();
+    // The pill says the call ended until the card is closed, then goes.
+    expect($('[data-on-call]')!.textContent).toBe('Call ended');
+    $<HTMLButtonElement>('[data-call-dismiss]')!.click();
+    await vi.waitFor(() => expect($('[data-on-call]')).toBeNull());
   });
 
   it('shows Reconnecting… and keeps video and controls mounted through a network blip', async () => {
