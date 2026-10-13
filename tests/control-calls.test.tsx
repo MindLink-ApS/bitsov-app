@@ -609,39 +609,56 @@ describe('call permission snapshots', () => {
 
 describe('a network change during a call', () => {
   beforeEach(() => { FakePc.made = []; });
-  afterEach(() => { vi.useRealTimers(); });
+  afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
+  /** A fresh call id for every allocation (so a duplicate-id refusal can never stand in for the restart guard). */
+  const freshIds = () => { let n = 0; return () => (n++).toString(16).padStart(32, '0'); };
   const live = async (e: ReturnType<typeof engine>['e']) => {
     await e.place(A, 'audio', QUOTE);
-    await e.receive(msg(401, { sdp: 'v=0 answer' }), OWN);
+    await e.receive(msg(401, { sdp: 'v=0 answer', call_id: e.view().callId! }), OWN);
     FakePc.made[0].connect();
   };
 
   it('offline puts a live call into Reconnecting at once', async () => {
-    const { e, last } = engine();
+    const { e, last } = engine({ newCallId: freshIds() });
     await live(e);
     window.dispatchEvent(new Event('offline'));
     expect(last().phase).toBe('reconnecting');
   });
 
-  it('offline → online → offline → online sends at most the one recovery offer the existing guard allows', async () => {
-    const restartId = 'e'.repeat(32);
-    let n = 0;
-    const { e, sent } = engine({ newCallId: () => (n++ === 0 ? ID : restartId) });
+  it('offline → online → offline → online sends at most the one recovery offer the existing guard allows (fresh ids)', async () => {
+    const { e, sent } = engine({ newCallId: freshIds() });
     await live(e);
     for (let i = 0; i < 2; i++) {
       window.dispatchEvent(new Event('offline'));
       window.dispatchEvent(new Event('online'));
       await new Promise((r) => setTimeout(r, 20));
     }
-    const offers = sent.filter((x) => x.kind === 400);
-    expect(offers.map((o) => o.body.call_id)).toEqual([ID, restartId]);
-    expect(sent.filter((x) => x.kind === 400 && x.body.call_id === restartId)).toHaveLength(1);
+    const offers = sent.filter((x) => x.kind === 400).map((o) => o.body.call_id);
+    expect(offers).toHaveLength(2);
+    expect(new Set(offers).size).toBe(2);
   });
 
-  it('after the call ends, network events change nothing (listeners are removed)', async () => {
-    const { e, sent, last } = engine();
+  it('Codex #238: place → ringing → offline → online → their original answer: exactly one 400 (a ringing call is not moved by network events)', async () => {
+    const { e, sent, last } = engine({ newCallId: freshIds() });
+    await e.place(A, 'audio', QUOTE);
+    expect(last().phase).toBe('ringing');
+    window.dispatchEvent(new Event('offline'));
+    expect(last().phase).toBe('ringing');
+    window.dispatchEvent(new Event('online'));
+    await e.receive(msg(401, { sdp: 'v=0 answer', call_id: e.view().callId! }), OWN);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(sent.filter((x) => x.kind === 400)).toHaveLength(1);
+  });
+
+  it('after the call ends its network listeners are removed (every add has its remove)', async () => {
+    const add = vi.spyOn(window, 'addEventListener');
+    const remove = vi.spyOn(window, 'removeEventListener');
+    const { e, sent, last } = engine({ newCallId: freshIds() });
     await live(e);
+    const added = add.mock.calls.filter(([t]) => t === 'offline' || t === 'online').map(([t, fn]) => [t, fn]);
+    expect(added.map(([t]) => t).sort()).toEqual(['offline', 'online']);
     await e.hangup();
+    for (const [t, fn] of added) expect(remove).toHaveBeenCalledWith(t, fn);
     const before = sent.length;
     window.dispatchEvent(new Event('offline'));
     window.dispatchEvent(new Event('online'));

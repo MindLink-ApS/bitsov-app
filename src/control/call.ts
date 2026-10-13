@@ -403,7 +403,9 @@ export function createCallEngine(deps: CallDeps) {
     // keeps its own one-attempt guard.
     offNetwork?.();
     offNetwork = watchNetwork(
-      () => { if (pc === conn && active() && view.phase !== 'calling' && view.phase !== 'incoming') reconnect(conn); },
+      // Only a call that is connecting or live: calling, ringing and incoming are untouched (an answer
+      // arriving to a 'reconnecting' call that never connected would otherwise start a paid recovery).
+      () => { if (pc === conn && (view.phase === 'live' || view.phase === 'connecting')) reconnect(conn); },
       () => { if (pc === conn && view.phase === 'reconnecting') void restart(conn); },
     );
     deps.onStreams(local, null);
