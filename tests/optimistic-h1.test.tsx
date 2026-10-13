@@ -124,26 +124,24 @@ describe('an error names an operation; it never identifies the card (Codex #221 
     expect($('[data-artifact="failed"] [data-failed-text]')!.textContent).toBe('lost reply');
   });
 
-  it('after a restart with op A open, sending B refused by the host\'s fence (naming A) keeps B whole as not sent; A settling never erases it', async () => {
+  it.each([
+    ['failed_paid', { code: 'failed_paid', message: 'Paid; their node refused it.' }, 'failed'],
+    ['payment_unknown', { code: 'payment_unknown', message: 'Outcome unknown.' }, 'failed'],
+    ['payment_settled_undelivered', { code: 'payment_settled_undelivered', message: 'Paid, not delivered.', undelivered: { paid_msat: 2250, retry: true } }, 'undelivered'],
+  ] as const)('r2 #1: %s on an operation id seen before the press (a resend reusing op-X) is never "not sent, nothing paid", and never offers its words back', async (_code, error, card) => {
     const { source, pending } = deferredSource();
-    let list = ops([op({ op_id: 'op-A', state: 'unknown' })]);
-    source.opList = vi.fn(async () => list) as never;
+    source.opList = vi.fn(async () => ops([op({ op_id: 'op-X', state: 'paid_undelivered', paid_msat: 2250 })])) as never;
     await open(source);
     await vi.waitFor(() => expect($('[data-artifact="restored"]')).not.toBeNull());
-    await press('message B');
+    await press('same words');
     await vi.waitFor(() => expect(pending).toHaveLength(1));
-    pending[0].fail({ code: 'spend_unknown', message: 'Check the pending result before starting another action.', operation_id: 'op-A' });
+    pending[0].fail({ ...error, operation_id: 'op-X' });
     await vi.waitFor(() => expect(sending()).toHaveLength(0));
-    // B: not sent, nothing paid, kept whole; no failed card linked to A.
-    expect(unsent().map((u) => u.querySelector('.bubble')!.textContent)).toEqual(['message B']);
-    expect($('[data-unsent="held"] [data-unsent-reason]')!.textContent).toContain('Not sent, nothing paid');
-    expect($('[data-artifact="failed"]')).toBeNull();
-    // A settles later: its restored card updates; B is untouched.
-    list = ops([op({ op_id: 'op-A', state: 'settled', paid_msat: 2250 })]);
-    await go(`peer:${B}`);
-    await go(`peer:${A}`);
-    await vi.waitFor(() => expect($('[data-artifact="restored"]')!.getAttribute('data-op-state')).toBe('settled'));
-    expect(unsent().map((u) => u.querySelector('.bubble')!.textContent)).toEqual(['message B']);
+    expect(unsent()).toHaveLength(0);
+    expect($('[data-unsent-restore]')).toBeNull();
+    expect(mount.textContent).not.toContain('nothing paid');
+    expect($(`[data-artifact="${card}"]`)).not.toBeNull();
+    expect(area().value).toBe('');
   });
 });
 
@@ -213,6 +211,30 @@ describe('Codex #221 r1: stale snapshots, honest states, nothing vanishes', () =
   });
 });
 
+describe('Codex #221 r2 #2: every receipt path confirms its operation', () => {
+  it('a delivered retry is confirmed: a later paid_undelivered snapshot of it never comes back beside the message', async () => {
+    const { source, pending } = deferredSource();
+    let list = ops([]);
+    source.opList = vi.fn(async () => list) as never;
+    source.retry = vi.fn(async () => receipt('m-retried', A, { operation_id: 'op-u' })) as never;
+    await open(source);
+    await press('paid once');
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    pending[0].fail({ code: 'payment_settled_undelivered', message: 'Paid, not delivered.', undelivered: { paid_msat: 2250, retry: true }, operation_id: 'op-u' });
+    await vi.waitFor(() => expect($('[data-retry-delivery]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-retry-delivery]')!.click();
+    await vi.waitFor(() => expect(visible('m-retried')).toBe(true));
+    // A snapshot from before the retry settled arrives late.
+    list = ops([op({ op_id: 'op-u', state: 'paid_undelivered', paid_msat: 2250 })]);
+    await go(`peer:${B}`);
+    await go(`peer:${A}`);
+    await vi.waitFor(() => expect(vi.mocked(source.opList).mock.calls.length).toBeGreaterThanOrEqual(2));
+    await settleTick();
+    expect($('[data-artifact="restored"]')).toBeNull();
+    expect(visible('m-retried')).toBe(true);
+  });
+});
+
 describe('Codex #221 r1 #1: leaving while the first approval request is still being made keeps the words', () => {
   const budget: BudgetView = {
     paused: false, waiting_for_owner: false, preset: 'careful',
@@ -259,6 +281,27 @@ describe('Codex #221 r1 #1: leaving while the first approval request is still be
     expect(unsent()[0].querySelector('.bubble')!.textContent).toBe('hello stranger');
     expect(source.send).not.toHaveBeenCalled();
     if (!device) await vi.waitFor(() => expect(source.firstContactCancel).toHaveBeenCalledWith('request-one'));
+  });
+
+  it('r2 #3: a null answer (the local host needs no approval) after leaving the chat view never sends: the kept text is the only record', async () => {
+    const { source, answer } = await start(false);
+    source.firstContactRequest = vi.fn(async () => { await new Promise((r) => setTimeout(r, 30)); return null; }) as never;
+    source.send = vi.fn(async () => receipt('m-never', A)) as never;
+    void answer;
+    type('hello stranger');
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-send]')!.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-send]')!.click();
+    await vi.waitFor(() => expect(source.firstContactRequest).toHaveBeenCalled());
+    // Leave the chat view entirely: that composer unmounts while the request is out.
+    await go('discover');
+    expect($('[data-composer]')).toBeNull();
+    await new Promise((r) => setTimeout(r, 60));
+    await go(`peer:${A}`);
+    await vi.waitFor(() => expect(unsent()).toHaveLength(1));
+    await settleTick();
+    expect(source.send).not.toHaveBeenCalled();
+    expect(sending()).toHaveLength(0);
+    expect(visible('m-never')).toBe(false);
   });
 });
 

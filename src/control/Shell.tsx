@@ -898,13 +898,18 @@ export function ControlCenter(props: Props) {
    */
   const opOf = (a: Artifact): string | undefined =>
     a.type === 'failed' ? a.error.operation_id : a.type === 'undelivered' ? a.operationId : a.type === 'restored' ? a.op.op_id : undefined;
-  /** Every operation id seen here (receipts, errors, op list reads): one seen before a press is never that press's. */
-  const knownOps = new Set<string>();
   /** Operations a receipt confirmed: an op list snapshot never brings them back as open. */
   const confirmedOps = new Set<string>();
-  /** A receipt for an operation: a card restored for that same operation gives way to it. */
-  const dropOperation = (t: TrackRef, opId: string) =>
+  /**
+   * The one step every successful receipt takes (send, approved send, retry
+   * delivery, file): remembered as confirmed, and a card restored for that same
+   * operation gives way to it. Failed cards are only linked, never removed here.
+   */
+  const confirmOperation = (t: TrackRef, opId: string | undefined) => {
+    if (!opId) return;
+    confirmedOps.add(opId);
     setArtifacts(trackKey(t), (old) => (old ?? []).filter((a) => a.type !== 'restored' || a.op.op_id !== opId));
+  };
   /**
    * The host's op list for a peer: each card about an operation learns the
    * host's record of it; a message send still open with no card here (the app
@@ -913,7 +918,6 @@ export function ControlCenter(props: Props) {
   const foldOps = (t: TrackRef, list: OpList) => {
     if (t.kind !== 'peer') return;
     const key = trackKey(t);
-    for (const o of list.operations) knownOps.add(o.op_id);
     // A snapshot may predate a receipt: a confirmed operation is never shown as open again.
     const byId = new Map(list.operations.filter((o) => o.peer.toLowerCase() === t.id.toLowerCase() && !confirmedOps.has(o.op_id)).map((o) => [o.op_id, o]));
     const known = new Set((threads.t[key] ?? []).map((m) => m.id));
@@ -1039,6 +1043,7 @@ export function ControlCenter(props: Props) {
   };
   /** A message the node took: show it in the thread with what it paid. */
   const sentOne = (t: TrackRef, receipt: SendReceipt, text: string, entrance = true) => {
+    confirmOperation(t, receipt.operation_id);
     setPaid(receipt.message_id, receipt.amount_msat);
     setAllowances(receipt.message_id, {
       total_msat: receipt.total_msat ?? receipt.amount_msat + (receipt.readmission_msat ?? 0) + (receipt.max_routing_fee_msat ?? 0),
@@ -1321,25 +1326,11 @@ export function ControlCenter(props: Props) {
       const memberCaps = pressed?.type === 'sending' && pressed.memberCaps
         ? pressed.memberCaps
         : Object.fromEntries((roomQuote()?.members ?? []).map((m) => [m.node_id, m.msat]));
-      // Operations known before this send: its own is minted only after dispatch begins.
-      const before = new Set(knownOps);
       const settled = await act(() => source.send(t.id, t.kind === 'room', text, maxMsat, t.kind === 'room' ? memberCaps : undefined, firstContactMsat));
       const r = settled;
-      if (r.ok && r.value.operation_id) { knownOps.add(r.value.operation_id); confirmedOps.add(r.value.operation_id); }
-      if (!r.ok && r.error.operation_id) {
-        if (before.has(r.error.operation_id)) {
-          // The host named an operation that existed before this press: its
-          // pending fence refused this one before minting it. Nothing was sent
-          // or paid for this message; it is kept whole, blocked by that one.
-          batch(() => {
-            dropArtifact(t, sendingId);
-            addArtifact(t, { type: 'unsent', text, why: 'held', reason: 'Not sent, nothing paid: an earlier payment’s result is not known yet. Check pending result first.' });
-          });
-          void loadBudget();
-          return r;
-        }
-        knownOps.add(r.error.operation_id);
-      }
+      // Classified by error code only. An error's operation_id is a link: the
+      // host reuses an id for a resend over a resumable record, and names its
+      // pending fence's op, so an id never proves that nothing was dispatched.
       // The tally moved, or a budget rule stopped the send: either way, re-read it.
       if (r.ok || isBudgetStop(r.error) || ['spend_unknown', 'payment_unknown', 'failed_paid', 'payment_settled_undelivered'].includes(r.error.code)) void loadBudget();
       // Approved another contact with Touch ID, not this one: offer the tap here.
@@ -1365,8 +1356,6 @@ export function ControlCenter(props: Props) {
         // are released (they were someone else's same words).
         const released = r.ok && t.kind === 'peer' ? settleEchoes(t, sendingId, r.value.message_id) : [];
         dropArtifact(t, sendingId);
-        // One operation, one record: an earlier card for this op (a lost reply, a restart) gives way to its receipt.
-        if (r.ok && r.value.operation_id) dropOperation(t, r.value.operation_id);
         // The bubble was already on screen: the settled message takes its place without a second entrance.
         if (r.ok) sentOne(t, r.value, text, false);
         for (const m of released) reclaimEcho(t, m);
@@ -1496,6 +1485,7 @@ export function ControlCenter(props: Props) {
       void loadWallet();
       if (!r.ok && ['price_changed', 'price_cap_exceeded'].includes(r.error.code)) void attempt('quote', () => source.filePrice(), setFilePrice);
       if (r.ok) {
+        confirmOperation(t, r.value.operation_id);
         if (isVoiceNote(200, file.name)) voiceUrls.set(r.value.message_id, Promise.resolve(URL.createObjectURL(file)));
         setPaid(r.value.message_id, r.value.amount_msat);
         setAllowances(r.value.message_id, { total_msat: r.value.total_msat ?? r.value.amount_msat + (r.value.max_routing_fee_msat ?? 0), max_routing_fee_msat: r.value.max_routing_fee_msat ?? 0, fee_paid_msat: r.value.fee_paid_msat, readmission_msat: r.value.readmission_msat });
@@ -3854,8 +3844,11 @@ function Composer(props: {
   usePairingActivity(() => busy() || paying() || review() !== null || contactWaiting());
   /** A first-contact message whose approval request is still being made (no wait object yet). */
   let requesting: { track: TrackRef; text: string } | null = null;
+  /** Bumped when the owner leaves: every approval continuation checks it after each await and stops. */
+  let leaveGeneration = 0;
   /** `leaving`: the owner moved away (another chat, another page); the waiting text is kept on its chat. */
   const cancelOwner = (leaving = false) => {
+    if (leaving) leaveGeneration++;
     const pending = untrack(ownerWait);
     const device = untrack(deviceWait);
     const asking = requesting;
@@ -4441,8 +4434,11 @@ function Composer(props: {
         // Owner approval v1: the owner approves on their other device instead of at the node.
         // Captured before the await: leaving while the request is out keeps the text on its chat.
         requesting = waitingText.message ?? null;
+        const asked = leaveGeneration;
         const request = await props.actions.approvalRequest({ kind: 'first_contact', terms: { recipient: submittedPeer, max_total_msat: cap, ...(first ? { budget_msat: first } : {}) } });
         requesting = null;
+        // Left while it was out: the text is already kept on its chat; nothing goes on from here.
+        if (asked !== leaveGeneration) { setBusy(false); return; }
         if (composerRevision !== submittedRevision || approvalRevision !== submittedApprovalRevision || props.moneyBlocked) {
           setBusy(false);
           return;
@@ -4458,8 +4454,15 @@ function Composer(props: {
       }
       if (first !== undefined && !room()) {
         requesting = waitingText.message ?? null;
+        const asked = leaveGeneration;
         const request = await props.actions.ownerRequest(submittedPeer, cap, first);
         requesting = null;
+        if (asked !== leaveGeneration) {
+          // Left while it was out (the text is kept on its chat): withdraw the request; never send, even on a null answer.
+          if (request.ok && request.value) void props.actions.ownerCancel(request.value.id);
+          setBusy(false);
+          return;
+        }
         if (composerRevision !== submittedRevision || approvalRevision !== submittedApprovalRevision || props.moneyBlocked) {
           if (request.ok && request.value) void props.actions.ownerCancel(request.value.id);
           setBusy(false);
