@@ -11,6 +11,7 @@
  * before the offer/answer is sent (vanilla ICE), so a call normally costs
  * one offer and one hangup for the caller, one answer for the callee.
  */
+import { appPlatform, type AppPlatform } from '../platform';
 import { asActionError } from './state';
 import { amount } from './format';
 import type { ActionError, CallQuote, CallReceipt, Message, NodeGrantSummary } from './types';
@@ -28,16 +29,23 @@ export const GATHER_MS = 3_000;
 /** A permission prompt may never settle; release the call after this wait. */
 export const MEDIA_TIMEOUT_MS = 15_000;
 const MEDIA_ERROR = 'Camera/microphone not available — check System Settings → Privacy';
+/** The webview exposes no navigator.mediaDevices at all (e.g. a build without media access). */
+export const NO_MEDIA_DEVICES = 'MediaDevicesUnavailable';
 
-function mediaError(error: unknown, media: CallMedia): string {
+/** Where this platform's owner allows the microphone and camera. */
+const permissionPlace = (platform: AppPlatform) =>
+  platform === 'ios' ? 'Settings → BitSov' : platform === 'android' ? 'Settings → Apps → BitSov → Permissions' : 'System Settings → Privacy & Security';
+
+export function mediaError(error: unknown, media: CallMedia, platform: AppPlatform = appPlatform()): string {
   const name = error && typeof error === 'object' && 'name' in error ? error.name : '';
   const devices = media === 'video' ? 'microphone or camera' : 'microphone';
+  if (name === NO_MEDIA_DEVICES) return media === 'video' ? 'This build cannot use the microphone or camera yet' : 'This build cannot use the microphone yet';
   if (name === 'NotAllowedError' || name === 'PermissionDeniedError' || name === 'SecurityError') {
-    return `Permission to use the ${devices} was denied — allow access in System Settings → Privacy & Security`;
+    return `Permission to use the ${devices} was denied — allow access in ${permissionPlace(platform)}`;
   }
   if (name === 'NotFoundError' || name === 'DevicesNotFoundError') return `No ${devices} was found — connect a device and try again`;
   if (name === 'NotReadableError' || name === 'TrackStartError') return `The ${devices} is unavailable or in use — close other apps and try again`;
-  return MEDIA_ERROR;
+  return platform === 'desktop' ? MEDIA_ERROR : `Camera/microphone not available — check ${permissionPlace(platform)}`;
 }
 
 /** How long a dropped connection may take to come back before the call ends. */
