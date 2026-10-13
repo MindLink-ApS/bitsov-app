@@ -1,5 +1,5 @@
 import { AddDevice } from '../onboarding/AddDevice';
-import { OnCallPill } from './OnCallPill';
+import { CALL_STATE_WORD, OnCallPill } from './OnCallPill';
 import { watchSamples, type WatchSamples, type WatchUpdates } from './watches';
 import { ASSISTANTS, type AssistantId } from './assistants';
 import { PendingApproval } from '../onboarding/LockedNode';
@@ -31,7 +31,7 @@ import { custodyBadge, CustodyBadgeView } from './custody';
 import { NO_CHANNELS, WalletPage, type WalletActions, type WalletTab } from './WalletPage';
 import { artifactActivity, logActivity, type LoggedActivity } from './wallet';
 import { androidQrScannerAvailable } from '../pairingScanner';
-import { callCost, createCallEngine, IDLE as CALL_IDLE, isCallKind, signalCost, stunServer, type CallMedia, type CallView } from './call';
+import { callCost, createCallEngine, NO_MEDIA_DEVICES, IDLE as CALL_IDLE, isCallKind, signalCost, stunServer, type CallMedia, type CallView } from './call';
 import { createMeetingEngine, declineCost, inviteCost, joinCost, MAX_PARTICIPANTS, MEETING_IDLE, type LegState, type MeetingView, type ShownQuotes } from './meeting';
 import { admitRoom, leaveRoom, localRoom, localRooms, newRoom, rememberRoom, ROOM_CAPABILITY, ROOM_PAGE, roomOf, sameRoom, sendRoom, type LegPlan, type LocalRoom } from './room';
 import { NewRoomPanel, RoomThread, type RoomSend, type ThreadRead } from './RoomPanel';
@@ -1191,7 +1191,9 @@ export function ControlCenter(props: Props) {
       void loadWallet();
       return r;
     },
-    getUserMedia: (c) => navigator.mediaDevices.getUserMedia(c),
+    getUserMedia: (c) => navigator.mediaDevices?.getUserMedia
+      ? navigator.mediaDevices.getUserMedia(c)
+      : Promise.reject(Object.assign(new Error('No media devices in this webview'), { name: NO_MEDIA_DEVICES })),
     peerConnection: (config) => new RTCPeerConnection(config),
     now: () => Date.now(),
     onView: setCallView,
@@ -1218,7 +1220,9 @@ export function ControlCenter(props: Props) {
       void loadWallet();
       return r;
     },
-    getUserMedia: (c) => navigator.mediaDevices.getUserMedia(c),
+    getUserMedia: (c) => navigator.mediaDevices?.getUserMedia
+      ? navigator.mediaDevices.getUserMedia(c)
+      : Promise.reject(Object.assign(new Error('No media devices in this webview'), { name: NO_MEDIA_DEVICES })),
     peerConnection: (config) => new RTCPeerConnection(config),
     ownId: () => ownId(),
     canMeet: (peer) => nodeMeets() && peerById().get(peer.toLowerCase())?.meetings === true,
@@ -2960,9 +2964,8 @@ function CallButtons(props: { peer: string; name: string; blocked: boolean; acti
   );
 }
 
-const CALL_TITLE: Record<CallView['phase'], string> = {
-  idle: '', calling: 'Calling', ringing: 'Ringing', incoming: 'Incoming call', connecting: 'Connecting', live: 'On call', reconnecting: 'Reconnecting…', ended: 'Call ended',
-};
+/** The call panel's title: the same word as the pill. */
+const CALL_TITLE = CALL_STATE_WORD;
 const END_REASON: Record<string, string> = {
   hangup: 'Hung up', declined: 'Declined', busy: 'Busy', timeout: 'No answer', failed: 'Connection failed',
 };
@@ -3046,7 +3049,7 @@ function CallPanel(props: {
         <Show when={v().offline && v().phase !== 'ended' && v().phase !== 'idle'}>
           <p class="hint" role="status" data-call-offline>You are offline. The call reconnects by itself if your network comes back in time.</p>
         </Show>
-                <Show when={v().phase !== 'ended' && v().error}>
+        <Show when={v().phase !== 'ended' && v().error}>
           <p class="hint" data-call-error>{v().error}</p>
         </Show>
         <div class="call-actions">

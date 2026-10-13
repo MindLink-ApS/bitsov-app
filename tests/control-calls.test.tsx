@@ -6,7 +6,7 @@ import App from '../src/App';
 import type { PairingView } from '../src/onboarding/pairing';
 import { resetContactsForTests, setPetname } from '../src/control/petnames';
 import type { BudgetView, CallQuote, CallReceipt, LiveEvent, Message, SpendView } from '../src/control/types';
-import { CONNECT_TIMEOUT_MS, createCallEngine, RECONNECT_GRACE_MS, isCallKind, newCallId, parseSignal, RING_MS, stunServer, type CallDeps, type CallView } from '../src/control/call';
+import { CONNECT_TIMEOUT_MS, createCallEngine, mediaError, NO_MEDIA_DEVICES, RECONNECT_GRACE_MS, isCallKind, newCallId, parseSignal, RING_MS, stunServer, type CallDeps, type CallView } from '../src/control/call';
 
 const OWN = '1'.repeat(64);
 const A = 'a'.repeat(64);
@@ -697,6 +697,23 @@ describe('a network change during a call (display only)', () => {
   });
 });
 
+describe('microphone and camera errors say what is true on this platform', () => {
+  const err = (name: string) => Object.assign(new Error('x'), { name });
+  it('a denied permission points to the right settings on Mac, iPhone and Android', () => {
+    expect(mediaError(err('NotAllowedError'), 'audio', 'desktop')).toBe('Permission to use the microphone was denied — allow access in System Settings → Privacy & Security');
+    expect(mediaError(err('NotAllowedError'), 'video', 'ios')).toBe('Permission to use the microphone or camera was denied — allow access in Settings → BitSov');
+    expect(mediaError(err('NotAllowedError'), 'audio', 'android')).toBe('Permission to use the microphone was denied — allow access in Settings → Apps → BitSov → Permissions');
+  });
+  it('a webview with no media devices says the build cannot use the microphone yet', () => {
+    expect(mediaError(err(NO_MEDIA_DEVICES), 'audio', 'ios')).toBe('This build cannot use the microphone yet');
+    expect(mediaError(err(NO_MEDIA_DEVICES), 'video', 'android')).toBe('This build cannot use the microphone or camera yet');
+  });
+  it('an unknown failure keeps the Mac wording on a Mac and names the phone\'s settings on a phone', () => {
+    expect(mediaError(new Error('?'), 'audio', 'desktop')).toBe('Camera/microphone not available — check System Settings → Privacy');
+    expect(mediaError(new Error('?'), 'audio', 'android')).toBe('Camera/microphone not available — check Settings → Apps → BitSov → Permissions');
+  });
+});
+
 describe('call signals', () => {
   it('parse like the node: right fields per kind, 32-hex ids, v1 only', () => {
     expect(parseSignal(400, JSON.stringify({ v: 1, call_id: ID, media: 'audio', sdp: 'x' }))?.media).toBe('audio');
@@ -1300,7 +1317,8 @@ describe('calls in the shell', () => {
     await vi.waitFor(() => expect($('[data-call-panel="live"]')).not.toBeNull());
     expect(text('[data-call-duration]')).toMatch(/^0:0\d$/);
     const pill = $<HTMLButtonElement>('[data-on-call]')!;
-    expect(pill?.textContent).toMatch(/On call · 00:0\d/);
+    expect(pill?.textContent).toMatch(/Live · 00:0\d/);
+    expect(text('[data-call-title]')).toBe('Live');
     $<HTMLButtonElement>('[data-track="discover"]')!.click();
     pill.click();
     await vi.waitFor(() => expect(document.activeElement).toBe($('[data-call-panel="live"]')));
@@ -1312,7 +1330,10 @@ describe('calls in the shell', () => {
     $<HTMLButtonElement>('[data-call-hangup]')!.click();
     await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
     expect(host.used('call_signal').map((c) => c.args!.kind)).toEqual([401, 403]);
-    expect($('[data-on-call]')).toBeNull();
+    // The pill says the call ended until the card is closed, then goes.
+    expect($('[data-on-call]')!.textContent).toBe('Call ended');
+    $<HTMLButtonElement>('[data-call-dismiss]')!.click();
+    await vi.waitFor(() => expect($('[data-on-call]')).toBeNull());
   });
 
   it('shows Reconnecting… and keeps video and controls mounted through a network blip', async () => {
@@ -1417,6 +1438,16 @@ describe('calls in the shell', () => {
     window.dispatchEvent(new Event('online'));
     await vi.waitFor(() => expect($('[data-call-offline]')).toBeNull());
     expect(host.used('call_signal')).toHaveLength(1);
+  });
+
+  it('a build whose webview has no media devices ends the call with "This build cannot use the microphone yet", nothing paid', async () => {
+    const host = stubHost();
+    Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: undefined });
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect(text('[data-call-ended]')).toBe('This build cannot use the microphone yet. Nothing was paid.'));
+    expect(host.used('call_signal')).toHaveLength(0);
   });
 
   it('the STUN server is an owner setting, validated, with a note that it contacts that server', async () => {

@@ -13,24 +13,32 @@ import { logActivity, loggedActivity, resetActivityLog, updateInvoice } from '..
 let dispose: (() => void) | undefined;
 afterEach(() => { dispose?.(); document.body.innerHTML = ''; vi.useRealTimers(); resetActivityLog(); setDenom('sats'); });
 
-it('ticks only for a live call, tolerates missing timestamps, and cleans up its clock', () => {
+it('says each call state in one word, ticks only while live, tolerates missing timestamps, and cleans up its clock', () => {
   vi.useFakeTimers();
   vi.setSystemTime(200_000);
   const [view, setView] = createSignal<CallView>(IDLE);
   dispose = render(() => <OnCallPill view={view()} onReturn={() => {}} />, document.body);
-  for (const phase of ['idle', 'calling', 'incoming', 'connecting', 'ended'] as const) {
+  // No pill with no call, nor for an incoming call (it has its own ring card).
+  for (const phase of ['idle', 'incoming'] as const) {
     setView({ ...IDLE, phase });
     expect(document.querySelector('[data-on-call]')).toBeNull();
+  }
+  const words = { calling: 'Calling', ringing: 'Ringing', connecting: 'Connecting', reconnecting: 'Reconnecting…', ended: 'Call ended' } as const;
+  for (const [phase, word] of Object.entries(words) as [keyof typeof words, string][]) {
+    setView({ ...IDLE, phase });
+    expect(document.querySelector('[data-on-call]')!.getAttribute('data-on-call')).toBe(phase);
+    expect(document.body.textContent).toBe(word);
+    expect(document.querySelector('[data-on-call]')!.getAttribute('aria-label')).toBe(`${word} · Return to call`);
     expect(vi.getTimerCount()).toBe(0);
   }
   setView({ ...IDLE, phase: 'live', liveAt: 8000 });
-  expect(document.body.textContent).toContain('On call · 03:12');
+  expect(document.body.textContent).toContain('Live · 03:12');
   vi.advanceTimersByTime(1000);
-  expect(document.body.textContent).toContain('On call · 03:13');
+  expect(document.body.textContent).toContain('Live · 03:13');
   setView({ ...IDLE, phase: 'live', liveAt: null });
-  expect(document.body.textContent).toBe('On call');
+  expect(document.body.textContent).toBe('Live');
   setView({ ...IDLE, phase: 'live', liveAt: Date.now() + 1000 });
-  expect(document.body.textContent).toBe('On call · 00:00');
+  expect(document.body.textContent).toBe('Live · 00:00');
   dispose(); dispose = undefined;
   expect(vi.getTimerCount()).toBe(0);
 });
