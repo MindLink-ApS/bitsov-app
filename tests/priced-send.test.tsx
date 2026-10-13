@@ -141,12 +141,15 @@ it('blocks a first-contact quote when the host cannot enforce the total', async 
   expect($<HTMLButtonElement>('[data-send]').disabled).toBe(true);
   enter(); expect(source.send).not.toHaveBeenCalled();
 });
-it('keeps an unknown payment result explicit even while the draft remains', async () => {
+it('keeps an unknown payment result explicit and never offers the text for a resend', async () => {
   const source = sourceForSend();
   source.send = vi.fn(async () => { throw { code: 'spend_unknown', message: 'Payment unresolved' }; });
   await open(source); $<HTMLButtonElement>('[data-send]').click();
   await vi.waitFor(() => expect(line()).toBe('paid amount unknown · check payment result'));
-  expect($<HTMLTextAreaElement>('[data-composer] textarea').value).toBe('gm');
+  // Sats may have moved: the box stays empty and the note points to reconciliation.
+  expect($<HTMLTextAreaElement>('[data-composer] textarea').value).toBe('');
+  expect($('[data-composer-note]')?.textContent).toContain('Check pending result before sending it again');
+  expect($('[data-composer-note]')?.textContent).not.toMatch(/try again/i);
 });
 
 it.each(['No route or channel to this peer yet.', 'Peer offline.', 'Quote unavailable.'])('shows the host quote failure without an upgrade claim: %s', async (reason) => {

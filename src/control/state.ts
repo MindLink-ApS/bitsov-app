@@ -195,9 +195,10 @@ export function peerNotReadyMessage(error: unknown, name: string): string | null
 export function asActionError(e: unknown): ActionError {
   if (e === MONEY_NOT_READY) return { code: 'not_ready', message: MONEY_NOT_READY };
   if (e && typeof e === 'object' && 'code' in e && 'message' in e) {
-    const { code, message, undelivered, admission, pending_id, reason, remaining_msat } = e as ActionError;
+    const { code, message, undelivered, admission, pending_id, reason, remaining_msat, operation_id } = e as ActionError;
     const out: ActionError = { code, message: code === 'not_ready' ? MONEY_NOT_READY : String(message) };
     if (typeof pending_id === 'string' && pending_id) out.pending_id = pending_id;
+    if (typeof operation_id === 'string' && operation_id) out.operation_id = operation_id;
     // Owner approval refusals: only the node's known reasons, and an amount that is one.
     if (typeof reason === 'string' && APPROVAL_OFF_REASONS.has(reason)) out.reason = reason;
     if (msat(remaining_msat)) out.remaining_msat = remaining_msat;
@@ -372,11 +373,17 @@ export function streamItems(messages: Message[], artifacts: Artifact[]): StreamI
     const theirs = messages.filter((m) => m.sender.toLowerCase() === sender && Math.abs(m.timestamp - a.at) <= DOOR_REACH_MS).map((m) => m.timestamp);
     return Math.min(a.at, ...theirs) - 0.5;
   };
+  // A live echo claimed by a message still sending shows once, as that bubble.
+  const claimed = new Set(artifacts.flatMap((a) => (a.type === 'sending' ? (a.echoes ?? []).map((e) => e.id) : [])));
+  if (claimed.size) messages = messages.filter((m) => !claimed.has(m.id));
   const items: (StreamItem & { key: number })[] = [
     ...messages.map((message) => ({ type: 'message' as const, at: message.timestamp, key: message.timestamp, message })),
     ...artifacts.map((artifact) => ({ type: 'artifact' as const, at: artifact.at, key: sortAt(artifact), artifact })),
   ];
-  return items.sort((a, b) => a.key - b.key).map(({ key: _key, ...item }) => item as StreamItem);
+  // Messages still sending stay last, in the order pressed, until they settle:
+  // a settled message never jumps behind a later pending one.
+  const pending = (i: StreamItem) => i.type === 'artifact' && i.artifact.type === 'sending';
+  return items.sort((a, b) => Number(pending(a)) - Number(pending(b)) || a.key - b.key).map(({ key: _key, ...item }) => item as StreamItem);
 }
 
 /** The composer's spend line. */

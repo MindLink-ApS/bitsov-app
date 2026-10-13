@@ -12,6 +12,7 @@ import { listen } from '@tauri-apps/api/event';
 import type { NodeStatus, PairingView } from '../onboarding/pairing';
 import type {
   OwnerContactApproval,
+  OpList,
   FirstContactQuote,
   FundingAsk,
   FundingStatus,
@@ -196,6 +197,8 @@ export interface Source {
   /** The host names the contact in the Touch ID dialog from the node's own peer list. */
   relationApprove(peer: string, budgetMsat: number | null, perActMaxMsat: number | null): Promise<SpendView>;
   spendReconcile(): Promise<string>;
+  /** H1 read-only history of this app's paid operations, optionally for one peer. */
+  opList(peer?: string): Promise<OpList>;
   /**
    * A message pays inside the owner's budget with no prompt. `firstContactMsat`
    * is the owner's one-time OK for someone not yet budgeted, with their budget.
@@ -345,6 +348,7 @@ export const hostSource: Source = {
   relationApprove: (peer, budgetMsat, perActMaxMsat) =>
     invoke<SpendView>('relation_approve', { peer, budget_msat: budgetMsat, per_act_max_msat: perActMaxMsat }),
   spendReconcile: () => invoke<string>('spend_reconcile'),
+  opList: (peer) => invoke<OpList>('op_list', { peer: peer ?? null }),
   send: (recipient, isRoom, plaintext, maxMsat, maxRecipientMsat, firstContactMsat) =>
     invoke<SendReceipt>('message_send', { recipient, is_room: isRoom, plaintext, max_msat: maxMsat, max_recipient_msat: maxRecipientMsat ?? null, first_contact_msat: firstContactMsat ?? null }),
   retry: (recipient, plaintext, approvedMsat) => invoke<SendReceipt>('message_retry', { recipient, plaintext, approved_msat: approvedMsat ?? null }),
