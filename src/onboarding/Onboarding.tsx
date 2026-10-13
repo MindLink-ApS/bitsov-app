@@ -71,6 +71,8 @@ export function Onboarding(props: {
   };
   const isEnrolled = () => props.device?.()?.state === 'registered';
   const mobileBiometrics = () => props.mobile ?? props.onScanRemote !== undefined;
+  /** Running on a phone (the app's Android signal, passed as `mobile`): there is no "This Mac" to choose. */
+  const phone = () => props.mobile === true;
   const [approvalsSkipped, setApprovalsSkipped] = createSignal(false);
   const [remoteLink, setRemoteLink] = createSignal('');
   const [previewing, setPreviewing] = createSignal(false);
@@ -213,8 +215,10 @@ export function Onboarding(props: {
       >
         <header class="ob-head" data-ob-head="node">
           <Show when={target() !== 'local'}><BoxIllustration /></Show>
-          <h1>Where should your node run?</h1>
-          <p class="lede">Every message you send is a small bitcoin payment to the person you are writing to. Your node makes those payments, so it needs a home first.</p>
+          <h1>{phone() ? 'Connect this phone to your node' : 'Where should your node run?'}</h1>
+          <p class="lede">{phone()
+            ? 'Every message you send is a small bitcoin payment to the person you are writing to. Your node makes those payments; this phone connects to it.'
+            : 'Every message you send is a small bitcoin payment to the person you are writing to. Your node makes those payments, so it needs a home first.'}</p>
         </header>
       </Show>
 
@@ -222,7 +226,8 @@ export function Onboarding(props: {
       <div class="node-target-section" classList={{ compact: stage() !== 'node' }}>
         <h2 class="node-target-title" classList={{ 'sr-only': stage() === 'node' }}>Where your node runs</h2>
         <div class="node-target-grid" role="radiogroup" aria-label="Choose node location">
-          {/* Option 1: This computer (local node) */}
+          {/* Option 1: This computer (local node). A phone has no node of its own to run. */}
+          <Show when={!phone()}>
           <button
             type="button"
             class="node-target-card"
@@ -250,10 +255,11 @@ export function Onboarding(props: {
               <p>BitSov runs your node on this Mac. Your keys stay here. To receive messages and payments, this Mac must stay awake and BitSov must stay open.</p>
             </div>
           </button>
+          </Show>
 
           {/* Once the node is up the choice is compact: both locations show as pills, no fold. */}
-          <details class="node-target-advanced" open={target() !== 'local' || stage() !== 'node'}>
-            <summary>Advanced: use a node you already run at home</summary>
+          <details class="node-target-advanced" open={phone() || target() !== 'local' || stage() !== 'node'}>
+            <Show when={!phone()}><summary>Advanced: use a node you already run at home</summary></Show>
           {/* A home node uses a remote pairing link. */}
           <button
             type="button"
@@ -274,7 +280,7 @@ export function Onboarding(props: {
             </div>
             <div class="target-info">
               <div class="target-head">
-                <strong>Your computer at home</strong>
+                <strong>{phone() ? 'Your node' : 'Your computer at home'}</strong>
                 <div class="row" style={{ width: 'auto', gap: '8px' }}>
                   <Show when={hostedBy()} fallback={<span class="target-badge">Pairing link</span>}>
                     {(label) => (
@@ -286,7 +292,9 @@ export function Onboarding(props: {
                   <span class="target-radio-indicator" aria-hidden="true">✓</span>
                 </div>
               </div>
-              <p>A computer you keep running at home can receive while this Mac is off. Its keys live on that computer. Paste its pairing link; it is saved for the next start.</p>
+              <p>{phone()
+                ? 'A computer or server that stays on runs your node; its keys live there. Scan or paste its pairing link to connect this phone.'
+                : 'A computer you keep running at home can receive while this Mac is off. Its keys live on that computer. Paste its pairing link; it is saved for the next start.'}</p>
             </div>
           </button>
 
@@ -322,7 +330,7 @@ export function Onboarding(props: {
           </Show>
         </div>
         <p class="hint connect-line">
-          {props.pairing().remote ? 'This app connects to your remote node.' : 'This app connects to the node on this Mac.'}
+          {props.pairing().remote ? 'This app connects to your remote node.' : phone() ? 'This phone is not connected to a node yet.' : 'This app connects to the node on this Mac.'}
           <Show when={!props.pairing().remote && target() !== 'local'}> A saved pairing link takes effect at the next start.</Show>
           <Show when={isEnrolled()}>
             {mobileBiometrics()
@@ -332,7 +340,8 @@ export function Onboarding(props: {
         </p>
       </div>
 
-      <Show when={props.onForgetRemote && (props.pairing().remote || target() !== 'local' || remoteChoiceEdited())}>
+      {/* "Use this Mac instead" means nothing on a phone. */}
+      <Show when={!phone() && props.onForgetRemote && (props.pairing().remote || target() !== 'local' || remoteChoiceEdited())}>
         <LocalNodeSwitch onForget={forgetRemote} disabled={busy()} remoteRevision={remoteRevision()} />
       </Show>
 

@@ -265,6 +265,32 @@ describe('pairing panel', () => {
     expect(el.textContent).toContain('restore an existing identity');
   });
 
+  it('on a phone (the app\'s mobile signal) there is no This Mac: connect to your node, scan or paste, no "Use this Mac instead"', () => {
+    mount = document.createElement('div');
+    document.body.appendChild(mount);
+    dispose = render(() => (
+      <Onboarding onPreviewRemote={async () => ({ endpoint: 'home:4242', node_id_fingerprint: 'ab…cd' })}
+        status={() => booting} pairing={() => starting} trustAck={() => false} onRetry={() => {}}
+        selectedTarget="network" onForgetRemote={async () => {}} onScanRemote={async () => 'bitsov://pair/x'} mobile />
+    ), mount);
+    expect(mount.querySelector('[data-target="local"]')).toBeNull();
+    expect(mount.querySelector('h1')!.textContent).toBe('Connect this phone to your node');
+    const node = mount.querySelector<HTMLButtonElement>('[data-target="network"]')!;
+    expect(node.textContent).toContain('Your node');
+    expect(node.textContent).toContain('connect this phone');
+    expect(mount.querySelector('details.node-target-advanced summary')).toBeNull();
+    expect(mount.querySelector<HTMLDetailsElement>('details.node-target-advanced')!.open).toBe(true);
+    expect(mount.querySelector('[data-remote-access]')).not.toBeNull();
+    expect(mount.textContent).not.toMatch(/Use this Mac instead|separate wallet|Keys on this Mac|this Mac must stay awake/);
+  });
+
+  it('on a computer nothing changes: This Mac stays the default and home stays under Advanced', () => {
+    const el = show(starting, booting);
+    expect(el.querySelector('[data-target="local"]')).not.toBeNull();
+    expect(el.querySelector('h1')!.textContent).toBe('Where should your node run?');
+    expect(el.querySelector('details.node-target-advanced summary')!.textContent).toBe('Advanced: use a node you already run at home');
+  });
+
   it('defaults to This Mac, keeps home under collapsed Advanced, and hides test nodes', () => {
     const el = show(starting, booting);
     const local = el.querySelector<HTMLButtonElement>('[data-target="local"]')!;
