@@ -166,6 +166,25 @@ export type CallDeps = {
   busy?: () => boolean;
 };
 
+/**
+ * Calls `offline` / `online` on the browser's network events, and `online` on
+ * a connection type change (navigator.connection, where it exists). Returns
+ * the remover.
+ */
+export function watchNetwork(offline: () => void, online: () => void): () => void {
+  if (typeof window === 'undefined') return () => {};
+  const conn = (navigator as Navigator & { connection?: EventTarget }).connection;
+  const changed = () => { if (navigator.onLine === false) offline(); else online(); };
+  window.addEventListener('offline', offline);
+  window.addEventListener('online', online);
+  conn?.addEventListener?.('change', changed);
+  return () => {
+    window.removeEventListener('offline', offline);
+    window.removeEventListener('online', online);
+    conn?.removeEventListener?.('change', changed);
+  };
+}
+
 /** Wait for ICE gathering to finish, or `ms`, whichever comes first. */
 export function gathered(pc: RTCPeerConnection, ms: number): Promise<void> {
   if (pc.iceGatheringState === 'complete') return Promise.resolve();
@@ -211,6 +230,8 @@ export function createCallEngine(deps: CallDeps) {
   let videoSender: RTCRtpSender | null = null;
   /** The call the owner cancelled while its offer was being prepared or paid. */
   let cancelled: string | null = null;
+  /** Removes the network-change listeners of the current connection. */
+  let offNetwork: (() => void) | null = null;
   // Serialises user actions: a double click never pays twice.
   let busy = false;
 
@@ -221,6 +242,8 @@ export function createCallEngine(deps: CallDeps) {
   const active = () => view.phase !== 'idle' && view.phase !== 'ended';
 
   const teardown = () => {
+    offNetwork?.();
+    offNetwork = null;
     mediaGeneration++;
     actionGeneration++;
     busy = false;
@@ -375,6 +398,14 @@ export function createCallEngine(deps: CallDeps) {
       if (state === 'failed' || state === 'disconnected' || state === 'closed') connectionChanged(state);
       else if ((state === 'connected' || state === 'completed') && conn.connectionState === 'connected') connectionChanged('connected');
     };
+    // A network change (Wi-Fi ↔ mobile, offline and back): reconnecting at once, then the
+    // existing single restart attempt when the network is back. No new paid step: restart()
+    // keeps its own one-attempt guard.
+    offNetwork?.();
+    offNetwork = watchNetwork(
+      () => { if (pc === conn && active() && view.phase !== 'calling' && view.phase !== 'incoming') reconnect(conn); },
+      () => { if (pc === conn && view.phase === 'reconnecting') void restart(conn); },
+    );
     deps.onStreams(local, null);
     return conn;
   };

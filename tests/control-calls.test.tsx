@@ -607,6 +607,50 @@ describe('call permission snapshots', () => {
   });
 });
 
+describe('a network change during a call', () => {
+  beforeEach(() => { FakePc.made = []; });
+  afterEach(() => { vi.useRealTimers(); });
+  const live = async (e: ReturnType<typeof engine>['e']) => {
+    await e.place(A, 'audio', QUOTE);
+    await e.receive(msg(401, { sdp: 'v=0 answer' }), OWN);
+    FakePc.made[0].connect();
+  };
+
+  it('offline puts a live call into Reconnecting at once', async () => {
+    const { e, last } = engine();
+    await live(e);
+    window.dispatchEvent(new Event('offline'));
+    expect(last().phase).toBe('reconnecting');
+  });
+
+  it('offline → online → offline → online sends at most the one recovery offer the existing guard allows', async () => {
+    const restartId = 'e'.repeat(32);
+    let n = 0;
+    const { e, sent } = engine({ newCallId: () => (n++ === 0 ? ID : restartId) });
+    await live(e);
+    for (let i = 0; i < 2; i++) {
+      window.dispatchEvent(new Event('offline'));
+      window.dispatchEvent(new Event('online'));
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    const offers = sent.filter((x) => x.kind === 400);
+    expect(offers.map((o) => o.body.call_id)).toEqual([ID, restartId]);
+    expect(sent.filter((x) => x.kind === 400 && x.body.call_id === restartId)).toHaveLength(1);
+  });
+
+  it('after the call ends, network events change nothing (listeners are removed)', async () => {
+    const { e, sent, last } = engine();
+    await live(e);
+    await e.hangup();
+    const before = sent.length;
+    window.dispatchEvent(new Event('offline'));
+    window.dispatchEvent(new Event('online'));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(last().phase).toBe('ended');
+    expect(sent).toHaveLength(before);
+  });
+});
+
 describe('call signals', () => {
   it('parse like the node: right fields per kind, 32-hex ids, v1 only', () => {
     expect(parseSignal(400, JSON.stringify({ v: 1, call_id: ID, media: 'audio', sdp: 'x' }))?.media).toBe('audio');
