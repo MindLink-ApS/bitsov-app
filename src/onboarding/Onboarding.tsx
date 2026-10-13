@@ -51,6 +51,8 @@ export function Onboarding(props: {
   onScanRemote?: () => Promise<string>;
   /** A phone (biometric approvals). Defaults to “has a scanner” for older callers. */
   mobile?: boolean;
+  /** A phone or tablet build (Android or iOS). Defaults to `mobile` (Android). */
+  phone?: boolean;
   /** Touch ID approvals setup, offered once the app is paired (Settings → Node has the same). */
   onRegisterDevice?: () => Promise<unknown>;
   onCancelDevice?: () => Promise<unknown>;
@@ -71,8 +73,8 @@ export function Onboarding(props: {
   };
   const isEnrolled = () => props.device?.()?.state === 'registered';
   const mobileBiometrics = () => props.mobile ?? props.onScanRemote !== undefined;
-  /** Running on a phone (the app's Android signal, passed as `mobile`): there is no "This Mac" to choose. */
-  const phone = () => props.mobile === true;
+  /** Running on a phone or tablet (Android or iOS, from isMobilePlatform): there is no "This Mac" to choose. */
+  const phone = () => props.phone ?? props.mobile === true;
   const [approvalsSkipped, setApprovalsSkipped] = createSignal(false);
   const [remoteLink, setRemoteLink] = createSignal('');
   const [previewing, setPreviewing] = createSignal(false);

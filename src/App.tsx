@@ -1,3 +1,4 @@
+import { isMobilePlatform } from './platform';
 import { pollWatchBatch, statusWatchSamples, watchPoller, type WatchSamples, type WatchUpdates } from './control/watches';
 import type { AssistantId } from './control/assistants';
 import { LockedNode, RememberUnlock } from './onboarding/LockedNode';
@@ -47,6 +48,8 @@ function AppScreen() {
   // Dev mode: sample data with no node (a plain browser tab, or `?sample`).
   const sample = sampleRequest(window.location.search, inHost(), import.meta.env.DEV);
   const canScanPairingQr = androidQrScannerAvailable();
+  // Android or iOS: the first run has no "This Mac" (the scanner gate above stays Android-only).
+  const onPhone = isMobilePlatform();
   // A desktop (macOS) webview scans with the camera; jsQR loads only on Scan.
   const desktopScan = !canScanPairingQr && cameraQrScannerAvailable();
   const [pairingRequest, setPairingRequest] = createSignal<{ link: string } | null>(null);
@@ -262,6 +265,7 @@ function AppScreen() {
             onImportRemote={(link) => source().remoteAccessImport(link)}
             onScanRemote={canScanPairingQr ? scanPairingLink : desktopScan ? scanPairingLinkWithCamera : undefined}
             mobile={canScanPairingQr}
+            phone={onPhone}
             onRegisterDevice={async () => setDevice(await source().deviceKeyRegister())}
             onCancelDevice={async () => setDevice(await source().deviceKeyCancel())}
           />
@@ -354,7 +358,7 @@ function AppScreen() {
           onPreviewRemote={link => source().remoteAccessPreview(link)}
           onImportRemote={link => source().remoteAccessImport(link)}
           onBusyChange={setPairingBusy}
-          onScanRemote={scanPairingLink} mobile />
+          onScanRemote={scanPairingLink} mobile phone />
         <button type="button" class="quiet" data-close-pairing disabled={pairingBusy()} onClick={closePairing}>Close pairing</button>
       </PairingLinkOverlay>
     )}</Show>

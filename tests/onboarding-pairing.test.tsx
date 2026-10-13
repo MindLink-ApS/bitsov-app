@@ -284,6 +284,19 @@ describe('pairing panel', () => {
     expect(mount.textContent).not.toMatch(/Use this Mac instead|separate wallet|Keys on this Mac|this Mac must stay awake/);
   });
 
+  it('on an iPhone (phone set, no Android scanner) there is no This Mac either', () => {
+    mount = document.createElement('div');
+    document.body.appendChild(mount);
+    dispose = render(() => (
+      <Onboarding onPreviewRemote={async () => ({ endpoint: 'home:4242', node_id_fingerprint: 'ab…cd' })}
+        status={() => booting} pairing={() => starting} trustAck={() => false} onRetry={() => {}}
+        selectedTarget="network" onForgetRemote={async () => {}} phone />
+    ), mount);
+    expect(mount.querySelector('[data-target="local"]')).toBeNull();
+    expect(mount.querySelector('h1')!.textContent).toBe('Connect this phone to your node');
+    expect(mount.textContent).not.toMatch(/Use this Mac instead|Keys on this Mac/);
+  });
+
   it('on a computer nothing changes: This Mac stays the default and home stays under Advanced', () => {
     const el = show(starting, booting);
     expect(el.querySelector('[data-target="local"]')).not.toBeNull();
