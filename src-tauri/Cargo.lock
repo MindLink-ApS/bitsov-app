@@ -447,6 +447,7 @@ dependencies = [
  "bip39",
  "bitsov-ffi",
  "blake3",
+ "chrono",
  "ed25519-dalek",
  "futures-util",
  "getrandom 0.2.17",

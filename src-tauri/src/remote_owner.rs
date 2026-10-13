@@ -525,7 +525,7 @@ async fn submit(state: &NodeState, setup: &mut Setup) -> Result<View, String> {
         client_public_key: ctx.key.public_hex().into(),
         binding: bootstrap_binding(&token, &attempt.connection.client_id, &attempt.pending.node_id)?,
         device_public_key: attempt.record.public_key.clone(),
-        device_key_id: hex::encode(&blake3::hash(&public).as_bytes()[..16]),
+        device_key_id: device::key_id(&public),
         password_saved: false,
     }.save(&ctx.store)?;
     // Write-ahead context is durable before the node can commit. A lost reply
@@ -606,7 +606,7 @@ impl Receipt {
         if self.node_id != node
             || self.client_id != client
             || !self.restart_required
-            || self.device_key_id != hex::encode(&blake3::hash(&public).as_bytes()[..16])
+            || self.device_key_id != device::key_id(&public)
             || self.box_transport_pubkey != box_key
         {
             return Err(

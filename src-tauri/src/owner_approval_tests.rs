@@ -159,6 +159,126 @@ async fn existing_device_signer_returns_der_hex_verifiable_with_p256_sha256() {
 async fn requester_commands_keep_node_views_and_map_http_refusals() {
     check_requester_passthrough(view()).await;
     check_requester_passthrough(breaker_view()).await;
+    let mut first_contact = view();
+    first_contact["request"] = json!({"kind":"first_contact", "terms":{"recipient":"ab".repeat(32), "max_total_msat":1000, "budget_msat":2000}});
+    check_requester_passthrough(first_contact).await;
+}
+
+#[tokio::test]
+async fn malformed_requests_are_refused_before_network_access() {
+    let state = NodeState::for_api("http://127.0.0.1:1/api/v1");
+    let mut invalid = vec![
+        Value::Null,
+        json!([]),
+        json!(["breaker_reset", {}]),
+        json!(["spend_grant", {"budget_msat":1000, "per_call_max_msat":1000, "window_secs":60, "recipient":null}]),
+        json!("breaker_reset"),
+        json!(true),
+        json!(1),
+        json!({}),
+        json!({"kind":"unknown", "terms":{}}),
+        json!({"kind":"breaker_reset"}),
+        json!({"kind":"breaker_reset", "terms":null}),
+        json!({"kind":"breaker_reset", "terms":[]}),
+        json!({"kind":"breaker_reset", "terms":"invalid"}),
+        json!({"kind":"breaker_reset", "terms":true}),
+        json!({"kind":"breaker_reset", "terms":1}),
+        json!({"kind":"spend_grant", "terms":[1000,1000,60,null]}),
+        json!({"kind":"first_contact", "terms":{"recipient":"ab", "max_total_msat":1000, "budget_msat":null}}),
+        json!({"kind":"spend_grant", "terms":{"budget_msat":1000, "per_call_max_msat":1000, "window_secs":60, "recipient":null}}),
+        json!({"kind":"breaker_reset", "terms":{"budget_msat":1}}),
+        json!({"kind":"spend_grant", "terms":{}}),
+        json!({"kind":"first_contact", "terms":{"recipient":"ab"}}),
+    ];
+    for mut body in [
+        view()["request"].clone(),
+        json!({"kind":"first_contact", "terms":{"recipient":"ab", "max_total_msat":1000}}),
+        json!({"kind":"breaker_reset", "terms":{}}),
+    ] {
+        body["unexpected"] = json!(true);
+        invalid.push(body.clone());
+        body.as_object_mut().unwrap().remove("unexpected");
+        body["terms"]["unexpected"] = json!(true);
+        invalid.push(body);
+    }
+    for bad_number in [json!("1000"), json!(-1), json!(1.5), Value::Null] {
+        let mut body = view()["request"].clone();
+        body["terms"]["budget_msat"] = bad_number;
+        invalid.push(body);
+    }
+    let mut forwarded = Vec::new();
+    for body in invalid {
+        let error = create(&state, body.clone()).await.unwrap_err();
+        if error.code != "approval_invalid" {
+            forwarded.push((body, error.code));
+        }
+    }
+    assert!(forwarded.is_empty(), "malformed bodies were forwarded: {forwarded:?}");
+}
+
+#[test]
+fn registered_key_id_matches_known_sec1_p256_key() {
+    // P-256's standard generator, uncompressed SEC1 (private scalar = 1).
+    let mut record = device::Record {
+        public_key: concat!(
+            "04",
+            "6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296",
+            "4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5"
+        ).into(),
+        key_id: Some("fbbd51dc2db9576d035086edbf28a328".into()),
+        registered: true,
+        ..Default::default()
+    };
+    assert_eq!(registered_key_id(&record).unwrap(), "fbbd51dc2db9576d035086edbf28a328");
+    for bad_id in [None, Some("00".repeat(16)), Some("FBBD51DC2DB9576D035086EDBF28A328".into())] {
+        record.key_id = bad_id;
+        assert_eq!(registered_key_id(&record).unwrap_err().code, "approval_forbidden");
+    }
+    record.key_id = Some("fbbd51dc2db9576d035086edbf28a328".into());
+    record.registered = false;
+    assert_eq!(registered_key_id(&record).unwrap_err().code, "approval_forbidden");
+}
+
+#[test]
+fn breaker_expiry_formats_calendar_boundaries_and_refuses_out_of_range() {
+    let mut v = breaker_view();
+    let message = v["approval_message"].as_str().unwrap().to_owned();
+    for (timestamp, expected) in [
+        (0, "1970-01-01 00:00:00 UTC"),
+        (951827696, "2000-02-29 12:34:56 UTC"),
+        (1900000000, "2030-03-17 17:46:40 UTC"),
+    ] {
+        v["breaker_reset"]["grant_expires_at"] = json!(timestamp);
+        assert!(checked_approval(&v, "owner", &message).unwrap().contains(&format!("Grant ends: {expected} ·")));
+    }
+    v["breaker_reset"]["grant_expires_at"] = json!(i64::MAX);
+    assert_eq!(checked_approval(&v, "owner", &message).unwrap_err().code, "node");
+}
+
+#[cfg(all(target_os = "macos", not(feature = "mobile")))]
+#[test]
+fn registered_key_refuses_a_record_id_that_does_not_match_its_public_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = NodeState::for_api("http://127.0.0.1:1/api/v1");
+    *state.pairing.lock().unwrap() = Some(Arc::new(PairingCtx {
+        client: PairingClient::new(state.http.clone(), state.api_base.clone()),
+        key: Arc::new(ClientKey::load_or_create(dir.path()).unwrap()),
+        store: dir.path().to_owned(),
+        data_dir: dir.path().to_owned(),
+    }));
+    let (blob, public) = device_key::create(device_key::Policy::NoPromptForTests).unwrap();
+    device::save_blob(dir.path(), &blob).unwrap();
+    let mut record = device::Record {
+        public_key: hex::encode(&public),
+        key_id: Some(hex::encode(&blake3::hash(&public).as_bytes()[..16])),
+        registered: true,
+        ..Default::default()
+    };
+    device::save_record(dir.path(), &record).unwrap();
+    assert_eq!(registered_key(&state).unwrap(), (blob, record.key_id.clone().unwrap()));
+    record.key_id = Some("00".repeat(16));
+    device::save_record(dir.path(), &record).unwrap();
+    assert_eq!(registered_key(&state).unwrap_err().code, "approval_forbidden");
 }
 
 async fn check_requester_passthrough(expected_view: Value) {
@@ -306,7 +426,7 @@ async fn breaker_approval_signs_exact_message_and_reads_top_level_snapshot() {
     let message = v["approval_message"].as_str().unwrap();
     let signature = sign_checked(&v, "owner", message, |exact, reason| {
         assert_eq!(exact.as_bytes(), message.as_bytes());
-        assert_eq!(reason, "Reset this app’s paused spending · Tripped: paused after failed payments, too many payments this minute, too many payments this hour, spending too fast, future_trip · Budget: up to 10 sats, 8.766 sats left · Each payment: up to 1 sat · Grant ends: 2000000000 (unix seconds) · Device resets in the last day: 2 of 3 · Requested by app abcdef…123456");
+        assert_eq!(reason, "Reset this app’s paused spending · Tripped: paused after failed payments, too many payments this minute, too many payments this hour, spending too fast, future_trip · Budget: up to 10 sats, 8.766 sats left · Each payment: up to 1 sat · Grant ends: 2033-05-18 03:33:20 UTC · Device resets in the last day: 2 of 3 · Requested by app abcdef…123456");
         std::future::ready(Ok("signature".into()))
     }).await.unwrap();
     assert_eq!(signature, "signature");
