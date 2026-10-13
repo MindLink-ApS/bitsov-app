@@ -28,7 +28,7 @@ import { DiscoverPanel, FrontDoorEditor } from './Discover';
 import { PorchPanel } from './Porch';
 import { ContactPanel } from './ContactPanel';
 import { custodyBadge, CustodyBadgeView } from './custody';
-import { WalletPage, type WalletActions, type WalletTab } from './WalletPage';
+import { NO_CHANNELS, WalletPage, type WalletActions, type WalletTab } from './WalletPage';
 import { artifactActivity, logActivity, type LoggedActivity } from './wallet';
 import { androidQrScannerAvailable } from '../pairingScanner';
 import { callCost, createCallEngine, IDLE as CALL_IDLE, isCallKind, signalCost, stunServer, type CallMedia, type CallView } from './call';
@@ -6677,7 +6677,7 @@ function WalletPanel(props: { moneyBlocked: boolean; wallet: WalletOverview | nu
                 </dd>
               </dl>
               <h3>Channels</h3>
-              <For each={w().channels} fallback={<p class="hint">No channels yet. A channel is needed before paid messages can be sent.</p>}>
+              <For each={w().channels} fallback={<p class="hint" data-channels-empty>{NO_CHANNELS}</p>}>
                 {(c) => {
                   const share = () => (c.capacity_msat > 0 ? (c.local_balance_msat / c.capacity_msat) * 100 : 0);
                   return (

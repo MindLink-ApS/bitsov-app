@@ -283,6 +283,7 @@ export function WalletPage(props: {
               nameOf={props.nameOf}
               messages={props.reads.messages}
               now={props.now}
+              onReceive={() => props.onTab('receive')}
             />
           </Match>
           <Match when={props.tab === 'channels'}>
@@ -315,7 +316,12 @@ const DIRECTION_FILTERS: { id: DirectionFilter; label: string }[] = [
 ];
 const ICON: Record<Activity['kind'], string> = { message: '✉', call: '☎', file: '▤', payment: '⚡', invoice: '⚡' };
 
+/** One sentence for "no channels", wherever it shows (Wallet → Channels, Settings → Node). */
+export const NO_CHANNELS = 'No channels yet. A channel is how your node sends and receives over Lightning; paid messages need one.';
+
 function ActivityView(props: {
+  /** The Wallet's Receive, offered when nothing has happened yet. */
+  onReceive?: () => void;
   ownId: string;
   histories: string[];
   threadMessages: Message[];
@@ -362,7 +368,18 @@ function ActivityView(props: {
       </p>
       <Show when={!loading() || shown().length > 0} fallback={<DelayedSpinner />}>
         <ul class="wallet-list" data-activity-list>
-          <For each={shown()} fallback={<li class="empty hint" data-activity-empty>Nothing here yet.</li>}>
+          <For each={shown()} fallback={
+            kind() === 'all' && direction() === 'all'
+              ? (
+                <li class="empty hint" data-activity-empty="none">
+                  No payments yet. Payments you send and receive in this app show here.
+                  <Show when={props.onReceive}>
+                    {' '}<button type="button" class="link" data-activity-receive onClick={() => props.onReceive!()}>Receive</button>
+                  </Show>
+                </li>
+              )
+              : <li class="empty hint" data-activity-empty="filtered">Nothing matches this filter.</li>
+          }>
             {(a, i) => {
               const newDay = () => i() === 0 || day(shown()[i() - 1].at) !== day(a.at);
               const status = () => statusWords(a, props.now);
@@ -410,7 +427,7 @@ function ChannelsView(props: { wallet: WalletOverview | null; nameOf: (id: strin
           <span>and receive <strong>{fmtAmount(canReceive())}</strong></span>
         </p>
         <ul class="wallet-channels">
-          <For each={channels()} fallback={<li class="empty hint">No channels yet. A channel is how your node sends and receives over Lightning.</li>}>
+          <For each={channels()} fallback={<li class="empty hint" data-channels-empty>{NO_CHANNELS}</li>}>
             {(c) => {
               const words = () => channelWords(c);
               const out = () => (c.capacity_msat > 0 ? (c.local_balance_msat / c.capacity_msat) * 100 : 0);
