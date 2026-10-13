@@ -73,10 +73,26 @@ describe('settings modal + theme', () => {
     expect(mount.querySelector('.cc')!.className).not.toMatch(/context-w/);
     (mount.querySelector('[data-profile]') as HTMLButtonElement).click();
     (mount.querySelector('[data-open-settings]') as HTMLButtonElement).click();
+    (mount.querySelector('[data-tab="general"]') as HTMLButtonElement).click();
     expect(mount.querySelector('[data-settings]')?.classList.contains('open')).toBe(true);
     expect(mount.querySelector('[data-panel="display"]')).not.toBeNull();
     expect(mount.querySelector('[data-theme-toggle]')).not.toBeNull();
     expect(mount.querySelector('[data-denom-toggle]')).not.toBeNull();
+  });
+
+  it('Display (theme, amounts, calls) lives on General only: every other tab starts with its own content', async () => {
+    start();
+    await vi.waitFor(() => expect(mount.querySelector('[data-profile]')).not.toBeNull());
+    (mount.querySelector('[data-profile]') as HTMLButtonElement).click();
+    (mount.querySelector('[data-open-settings]') as HTMLButtonElement).click();
+    for (const tab of ['body', 'node', 'devices', 'wallet', 'budget', 'frontdoor']) {
+      (mount.querySelector(`[data-tab="${tab}"]`) as HTMLButtonElement).click();
+      expect(mount.querySelector('[data-panel="display"]')).toBeNull();
+    }
+    (mount.querySelector('[data-tab="general"]') as HTMLButtonElement).click();
+    expect(mount.querySelector('[data-panel="display"]')).not.toBeNull();
+    expect(mount.querySelector('[data-tab="general"]')!.getAttribute('aria-selected')).toBe('true');
+    expect(mount.querySelector('.tabs [role="tab"]')!.getAttribute('data-tab')).toBe('general');
   });
 
   it('applies light and dark themes from settings', async () => {
@@ -84,6 +100,7 @@ describe('settings modal + theme', () => {
     await vi.waitFor(() => expect(mount.querySelector('[data-profile]')).not.toBeNull());
     (mount.querySelector('[data-profile]') as HTMLButtonElement).click();
     (mount.querySelector('[data-open-settings]') as HTMLButtonElement).click();
+    (mount.querySelector('[data-tab="general"]') as HTMLButtonElement).click();
     (mount.querySelector('[data-theme-option="light"]') as HTMLButtonElement).click();
     expect(document.documentElement.dataset.theme).toBe('light');
     (mount.querySelector('[data-theme-option="dark"]') as HTMLButtonElement).click();
@@ -126,6 +143,7 @@ describe('settings modal + theme', () => {
     profile.focus();
     profile.click();
     (mount.querySelector('[data-open-settings]') as HTMLButtonElement).click();
+    (mount.querySelector('[data-tab="general"]') as HTMLButtonElement).click();
     const panel = () => mount.querySelector('[data-settings]') as HTMLElement;
     await vi.waitFor(() => expect(panel()?.classList.contains('open')).toBe(true));
     await vi.waitFor(() => expect(document.activeElement).toBe(mount.querySelector('[data-settings-close]')));
@@ -167,6 +185,7 @@ describe('BTC mode never appends sats to a BTC figure', () => {
     // Settings → Budget panel (tally, rows)
     (mount.querySelector('[data-profile]') as HTMLButtonElement).click();
     (mount.querySelector('[data-open-settings]') as HTMLButtonElement).click();
+    (mount.querySelector('[data-tab="general"]') as HTMLButtonElement).click();
     (mount.querySelector('[data-tab="budget"]') as HTMLButtonElement).click();
     await vi.waitFor(() => expect(mount.querySelector('[data-tally-total]')).not.toBeNull());
     expect(mount.querySelector('[data-tally-total]')!.textContent).toMatch(/BTC/);
