@@ -559,6 +559,10 @@ export type SpendLapse = 'expired' | 'lost';
 
 /** `spend_status` / `spend_request` / `spend_lock`. */
 export type SpendView = {
+  /** Request responses: exact pending node op, or a local id for an immediate approval. */
+  request_id?: string;
+  /** Node op that granted the open window; null if closed or unknown. Absent on older hosts. */
+  granted_op?: string | null;
   state: SpendState;
   /** Set with `expired` when a request ended ungranted: offer Ask again. */
   lapse?: SpendLapse | null;
@@ -587,6 +591,8 @@ export type BudgetRow = BudgetAccounting & { target: string; room: boolean; limi
 
 /** `budget_status` and every budget command. Spends are a rolling 24 hours. */
 export type BudgetView = BudgetAccounting & {
+  /** Approve/resume responses: exact pending node op, or a local id for immediate approval. */
+  request_id?: string;
   paused: boolean;
   autopay: { state: AutopayState; open_until_ms: number | null; ceiling_msat: number | null; basis: SpendBasis | null };
   /** A budget approval is waiting for the owner at the node. */

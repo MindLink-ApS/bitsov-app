@@ -439,6 +439,11 @@ impl Lapse {
 /// What the renderer is told about spending. No token, no scope list.
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct SpendView {
+    /// Present on a request response: the node's pending op, or a local request id.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    /// The node op that granted this open window; null when unknown or closed.
+    pub granted_op: Option<String>,
     pub state: SpendState,
     /// Set when the last request ended without a grant: the owner can ask again.
     pub lapse: Option<Lapse>,
@@ -451,6 +456,7 @@ pub struct SpendView {
 /// The owner's short-lived spend window. Host memory only.
 #[derive(Default, Debug)]
 pub struct SpendGate {
+    granted_op: Option<String>,
     generation: u64,
     open: Option<(u64, SpendBasis)>,
     pending: Option<Elevation>,
@@ -468,9 +474,16 @@ impl SpendGate {
     pub fn arm_until(&mut self, now_ms: u64, until_ms: u64, basis: SpendBasis) {
         self.generation = self.generation.wrapping_add(1);
         self.open = Some(((now_ms + SPEND_WINDOW_MS).min(until_ms), basis));
+        self.granted_op = None;
         self.pending = None;
         self.expired = false;
         self.lapse = None;
+    }
+
+    /// Open over the node's reported grant, retaining its identity with the window.
+    pub fn arm_granted_until(&mut self, now_ms: u64, until_ms: u64, basis: SpendBasis, op_id: Option<&str>) {
+        self.arm_until(now_ms, until_ms, basis);
+        self.granted_op = op_id.filter(|id| !id.is_empty()).map(str::to_owned);
     }
 
     /// The owner locked spending, or the app lost its authority.
@@ -588,6 +601,8 @@ impl SpendGate {
             (None, None) => SpendState::Locked,
         };
         SpendView {
+            request_id: None,
+            granted_op: self.open.and(self.granted_op.clone()),
             state,
             lapse: if state == SpendState::Expired { self.lapse } else { None },
             basis: self.open.map(|(_, b)| b),
