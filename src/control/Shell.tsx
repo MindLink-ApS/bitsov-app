@@ -34,7 +34,7 @@ import { androidQrScannerAvailable } from '../pairingScanner';
 import { callCost, createCallEngine, IDLE as CALL_IDLE, isCallKind, signalCost, stunServer, type CallMedia, type CallView } from './call';
 import { createMeetingEngine, declineCost, inviteCost, joinCost, MAX_PARTICIPANTS, MEETING_IDLE, type LegState, type MeetingView, type ShownQuotes } from './meeting';
 import { admitRoom, leaveRoom, localRoom, localRooms, newRoom, rememberRoom, ROOM_CAPABILITY, ROOM_PAGE, roomOf, sameRoom, sendRoom, type LegPlan, type LocalRoom } from './room';
-import { NewRoomPanel, RoomThread, type RoomSend } from './RoomPanel';
+import { NewRoomPanel, RoomThread, type RoomSend, type ThreadRead } from './RoomPanel';
 import { blobUrl, duration, FILE_MAX_BYTES, fileNameOf, isVoiceNote, type Recording, startRecording, VOICE_MAX_MS } from './voice';
 import { EMOJIS, insertEmoji } from './emoji';
 import { cleanPurpose, hostReadProblem, invoicePaymentHash, NOT_PAYABLE_NOTE, type NotPayable, payeeView, readChatInvoice } from './bolt11';
@@ -317,8 +317,25 @@ export function ControlCenter(props: Props) {
   const [link, setLink] = createSignal<LinkState | null>(null);
   const seenEntrances = new Set<string>();
   const [threads, setThreads] = createStore<{ t: Threads; unread: Unread; fresh: Record<string, true> }>({ t: {}, unread: {}, fresh: {} });
-  /** Chats whose history read succeeded at least once: only these may say "no messages". */
-  const [threadLoaded, setThreadLoaded] = createStore<Record<string, true>>({});
+  /**
+   * Each chat's CURRENT history read (the latest attempt only): only a read that
+   * succeeded may say "no messages"; a reopen or reconnect starts pending again.
+   */
+  const [threadRead, setThreadRead] = createStore<Record<string, ThreadRead>>({});
+  const readRevision: Record<string, number> = {};
+  let readSeq = 0;
+  /** Runs one history read for `key`, recording pending → ok | failed for this attempt only. */
+  const readThread = <T,>(key: string, run: () => Promise<T>, apply: (v: T) => void) => {
+    const rev = ++readSeq;
+    readRevision[key] = rev;
+    setThreadRead(key, 'pending');
+    let ok = false;
+    return attempt('thread', run, (v) => {
+      apply(v);
+      ok = true;
+      if (readRevision[key] === rev) setThreadRead(key, 'ok');
+    }).then(() => { if (!ok && readRevision[key] === rev) setThreadRead(key, 'failed'); });
+  };
   props.onWatchSamples?.(() => {
     const at = Date.now();
     return watchSamples({ ready: props.ready, locked: false,
@@ -519,7 +536,10 @@ export function ControlCenter(props: Props) {
   const loadRoomPage = (id: string, before: number | null) => {
     if (roomPages[id]?.loading) return;
     setRoomPages(id, { before, more: roomPages[id]?.more ?? false, loading: true });
-    void attempt('thread', () => source.roomThread(id, before ?? undefined, ROOM_PAGE), (page) => {
+    // The first page is the room's current read; an earlier page never changes what the room says about being empty.
+    const read = <T,>(run: () => Promise<T>, apply: (v: T) => void) =>
+      before === null ? readThread(trackKey({ kind: 'bound', id }), run, apply) : attempt('thread', run, apply);
+    void read(() => source.roomThread(id, before ?? undefined, ROOM_PAGE), (page) => {
       foldRooms(page, false);
       const oldest = page.length ? Math.min(...page.map((m) => m.timestamp)) : before;
       setRoomPages(id, { before: oldest, more: page.length >= ROOM_PAGE, loading: false });
@@ -675,11 +695,10 @@ export function ControlCenter(props: Props) {
     }
     if (t.kind !== 'peer' && t.kind !== 'room') return;
     const key = trackKey(t);
-    void attempt('thread', () => source.messages(t.id), (page) => {
+    void readThread(key, () => source.messages(t.id), (page) => {
       // History can already hold a message still sending here: its bubble claims it, as for the live echo.
       for (const m of page) claimEcho(m, t.kind === 'room' ? t.id : null);
       setThreads('t', key, (old) => mergeMessages(old ?? [], page));
-      setThreadLoaded(key, true);
       if (t.kind === 'peer') foldRooms(page, false);
       // After the thread, so a restored send whose message is already here is not shown twice.
       loadOps(t);
@@ -1714,6 +1733,8 @@ export function ControlCenter(props: Props) {
                       deliveries={deliveries}
                       earlier={roomPages[room().id]?.more === true}
                       loadingEarlier={roomPages[room().id]?.loading === true}
+                      read={threadRead[trackKey(t())] ?? 'pending'}
+                      error={errors.thread}
                       onEarlier={() => loadRoomPage(room().id, roomPages[room().id]?.before ?? null)}
                       sends={roomSends[room().id] ?? []}
                       fresh={threads.fresh}
@@ -1779,7 +1800,7 @@ export function ControlCenter(props: Props) {
                     actions={actions}
                     now={now()}
                     error={errors.thread}
-                    loaded={threadLoaded[trackKey(t())] === true}
+                    read={threadRead[trackKey(t())] ?? 'pending'}
                     onReconnect={async () => { await props.onReconnect?.(); await loadThread(t()); }}
                     prefill={prefill()}
                     onPrefillUsed={() => setPrefill(null)}
@@ -2437,8 +2458,8 @@ function Conversation(props: {
   actions: Actions;
   now: number;
   error: string | undefined;
-  /** This chat's history was read: until then (or after a failed read) nothing is said about it being empty. */
-  loaded: boolean;
+  /** This chat's current history read: only `ok` may say it is empty. */
+  read: ThreadRead;
   onReconnect: () => void;
   prefill: Prefill | null;
   onPrefillUsed: () => void;
@@ -2559,7 +2580,7 @@ function Conversation(props: {
           fallback={
             // Unknown stays unknown: while the history is being read nothing is said, and a failed
             // read shows only its error (below). Only a read that came back empty says "no messages".
-            <Show when={props.loaded} fallback={<Show when={!props.error}><div class="empty-track" data-thread-loading><DelayedSpinner /></div></Show>}>
+            <Show when={props.read === 'ok'} fallback={<Show when={props.read === 'pending'}><div class="empty-track" data-thread-loading><DelayedSpinner /></div></Show>}>
               <div class="empty-track" data-thread-empty={props.track.kind === 'room' ? 'room' : knownContact() ? 'known' : 'unknown'}>
                 <h2>No messages here yet</h2>
                 <Show when={props.track.kind === 'room'}>

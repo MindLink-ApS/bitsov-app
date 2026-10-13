@@ -8,6 +8,7 @@ import { sampleSource, SAMPLE_OWN_ID, SAMPLE_PRESETS } from '../src/control/samp
 import type { BudgetView } from '../src/control/types';
 
 const A = 'a'.repeat(64);
+const B = 'b'.repeat(64);
 let dispose: (() => void) | undefined;
 let mount: HTMLElement;
 afterEach(() => { dispose?.(); mount?.remove(); vi.restoreAllMocks(); });
@@ -62,5 +63,31 @@ describe('an empty chat says only what is known', () => {
     await vi.waitFor(() => expect($('[data-thread-empty]')?.getAttribute('data-thread-empty')).toBe('known'));
     expect($('[data-thread-empty]')!.textContent).toMatch(/^No messages here yetEach message to .+ pays their price\.$/);
     expect($('[data-thread-empty]')!.textContent).not.toMatch(/first contact/);
+  });
+
+  it('re-read: an empty success, then reopening shows loading (not "no messages"), and a failed re-read shows only its error', async () => {
+    const source = sampleSource({ firstLiveMs: 1e9 });
+    let reopened = false;
+    let fail!: () => void;
+    source.messages = vi.fn((peer: string) => {
+      if (peer.toLowerCase() !== A || !reopened) return Promise.resolve([]);
+      return new Promise<never>((_r, reject) => { fail = () => reject({ code: 'node', message: 'Your node did not answer.' }); });
+    }) as never;
+    await open(source);
+    await vi.waitFor(() => expect($('[data-thread-empty]')).not.toBeNull());
+    // Reopen: away and back; this read is still out.
+    reopened = true;
+    $(`[data-track="peer:${B}"]`)!.click();
+    await vi.waitFor(() => expect($(`[data-track="peer:${B}"]`)?.getAttribute('aria-current')).toBe('true'));
+    $(`[data-track="peer:${A}"]`)!.click();
+    await vi.waitFor(() => expect($('[data-thread-loading]')).not.toBeNull());
+    expect($('[data-thread-empty]')).toBeNull();
+    expect(mount.textContent).not.toMatch(/No messages here yet/);
+    await vi.waitFor(() => expect(fail).toBeDefined());
+    fail();
+    await vi.waitFor(() => expect(mount.textContent).toContain('Your node did not answer.'));
+    expect($('[data-thread-empty]')).toBeNull();
+    expect($('[data-thread-loading]')).toBeNull();
+    expect(mount.textContent).not.toMatch(/No messages here yet/);
   });
 });
