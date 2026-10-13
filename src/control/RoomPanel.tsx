@@ -14,6 +14,7 @@ import {
   type LegOutcome, type LegPlan, type LocalRoom, type MemberInfo, type RoomEntry,
 } from './room';
 import { createMessageEntrance } from './messageEntrance';
+import { DelayedSpinner } from './DelayedSpinner';
 import type { Delivery, Message, PriceQuote } from './types';
 
 export type RoomContact = { id: string; name: string } & MemberInfo;
@@ -89,7 +90,14 @@ const OUTCOME: Record<LegOutcome['state'], string> = {
 
 type Review = { legs: LegPlan[]; total: number; text: string };
 
+/** A chat's current history read: only `ok` may say it is empty (unknown stays unknown). */
+export type ThreadRead = 'pending' | 'failed' | 'ok';
+
 export function RoomThread(props: {
+  /** This room's current history read. */
+  read: ThreadRead;
+  /** The read's error, shown instead of any "empty" claim when it failed. */
+  error?: string;
   room: LocalRoom;
   ownId: string;
   nameOf: (id: string) => string;
@@ -212,7 +220,22 @@ export function RoomThread(props: {
               {props.loadingEarlier ? 'Loading…' : 'Show earlier messages'}
             </button>
           </Show>
-          <For each={[...keyedItems().keys()]} fallback={<div class="empty-track"><h2>Nothing here yet</h2><p class="hint">Your first message pays each member their own price.</p></div>}>
+          <For each={[...keyedItems().keys()]} fallback={
+            <Switch>
+              <Match when={props.read === 'ok'}>
+                <div class="empty-track" data-thread-empty="room">
+                  <h2>No messages here yet</h2>
+                  <p class="hint">A message here pays each member their own price.</p>
+                </div>
+              </Match>
+              <Match when={props.read === 'failed'}>
+                <p class="err-note" role="alert" data-thread-error>{props.error ?? 'Could not read this room’s messages.'}</p>
+              </Match>
+              <Match when={props.read === 'pending'}>
+                <div class="empty-track" data-thread-loading><DelayedSpinner /></div>
+              </Match>
+            </Switch>
+          }>
             {(key, i) => {
               const item = () => keyedItems().get(key)!;
               const prev = () => items()[i() - 1];

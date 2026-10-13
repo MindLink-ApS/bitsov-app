@@ -544,6 +544,36 @@ describe('rooms in the shell', () => {
     expect(text('[data-room-stream] .msg.in .who')).toBe('Maya');
   });
 
+  it('a bound room says only what is known: loading while its thread is read, only the error when it fails, "no messages" only after an empty read', async () => {
+    let answer!: (v: unknown) => void;
+    let refuse!: (e: unknown) => void;
+    let n = 0;
+    stubHost({
+      room_thread: () => {
+        n += 1;
+        if (n === 1) return new Promise((resolve) => { answer = resolve; });
+        return new Promise((_r, reject) => { refuse = reject; });
+      },
+    });
+    await openShell();
+    rememberRoom(AB);
+    await vi.waitFor(() => expect($(`[data-track="bound:${AB.id}"]`)).not.toBeNull());
+    click(`[data-track="bound:${AB.id}"]`);
+    await vi.waitFor(() => expect($('[data-room-stream] [data-thread-loading]')).not.toBeNull());
+    expect(text('[data-room-stream]')).not.toMatch(/No messages here yet|Nothing here yet|first message/);
+    answer([]);
+    await vi.waitFor(() => expect($('[data-room-stream] [data-thread-empty="room"]')).not.toBeNull());
+    // Reopen: the new read is pending again, then fails: only its error.
+    click(`[data-track="peer:${A}"]`);
+    click(`[data-track="bound:${AB.id}"]`);
+    await vi.waitFor(() => expect($('[data-room-stream] [data-thread-loading]')).not.toBeNull());
+    expect($('[data-room-stream] [data-thread-empty]')).toBeNull();
+    refuse({ code: 'node', message: 'Your node did not answer.' });
+    await vi.waitFor(() => expect(text('[data-room-stream] [data-thread-error]')).toBe('Your node did not answer.'));
+    expect($('[data-room-stream] [data-thread-empty]')).toBeNull();
+    expect($('[data-room-stream] [data-thread-loading]')).toBeNull();
+  });
+
   it('the thread is the node’s room thread (both directions, our copies as one message), paged by whole messages', async () => {
     const theirs = (i: number): Message => ({ id: `in${i}`, kind: 0, sender: A, recipient: OWN, timestamp: 10_000 + i, plaintext: roomChatText(AB, i.toString(16).padStart(32, '0'), `hi ${i}`), payment_amount_msat: 2000 });
     const ours: Message = {
