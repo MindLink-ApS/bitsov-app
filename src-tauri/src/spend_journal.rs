@@ -35,6 +35,11 @@ pub struct Pending {
     /// Conservative charge awaiting durable accounting; `paid` holds the evidence.
     #[serde(default)]
     pub accounting_msat: Option<u64>,
+    /// Partial payment evidence is accounted, but the operation is unresolved.
+    /// Keep its original bound while checking for later message settlement;
+    /// accounting, dismissal and delivery retry must not release this fence.
+    #[serde(default)]
+    pub evidence_reservation_msat: Option<u64>,
     /// Payment evidence saved atomically with the conservative accounting amount.
     #[serde(default)]
     pub paid: Option<crate::budget::Paid>,
@@ -55,19 +60,23 @@ pub struct Pending {
     pub all_in: bool,
     /// The node's idempotency key for this send (UUIDv4), saved before the
     /// first POST. A retry, a restart or an unknown outcome reuses it and asks
-    /// `GET /messages/operations/{id}`; it is never replaced by a fresh one.
+    /// `GET /messages/operations/{id}`. A confirmed abandonment clears it so
+    /// the next send must mint a fresh id.
     #[serde(default)]
     pub operation_id: Option<String>,
+    /// Unix milliseconds, saved immediately before each money POST. Older
+    /// records start a conservative waiting window on their first reconciliation.
+    #[serde(default)]
+    pub dispatched_at: Option<u64>,
     /// [`operation`] of the send `operation_id` names.
     #[serde(default)]
     pub op: Option<String>,
     /// Its recipient node, for a paid, undelivered record built on reconcile.
     #[serde(default)]
     pub peer: Option<String>,
-    /// The node reported this operation holds no payment (never recorded,
-    /// `prepared` or `released`). Nothing is owed and nothing is fenced: a
-    /// resend of this very message reuses `operation_id`, anything else
-    /// replaces the record.
+    /// No payment evidence, with abandonment confirmed or the legacy grace
+    /// window elapsed. A resend reuses `operation_id` only when the node did
+    /// not abandon it; otherwise the next send creates a new operation.
     #[serde(default)]
     pub resumable: bool,
     /// Initial ledger snapshot repairs a crash between the two atomic files.
@@ -186,7 +195,8 @@ pub enum Outcome {
     /// `paid` / `rejected_retryable`: paid, not handed over. Its node resends;
     /// a retry with the same id pays nothing.
     Paid,
-    /// `prepared` / `released`: no payment is held for it.
+    /// `prepared` / `released`: candidate only; the caller must check payment
+    /// evidence and confirm abandonment or wait out the legacy grace window.
     NothingPaid,
     /// `failed_paid`: paid, and refused for good.
     FailedPaid,
@@ -303,9 +313,9 @@ impl Journal {
             id: fresh_id()?, rollback_charge_id: None,
             node_id: node_id.to_string(),
             request_hash: blake3::hash(format!("{path}\n{body}").as_bytes()).to_hex().to_string(),
-            max_msat, target: None, over_budget: false, accounting_msat: None, paid: None, undelivered: None, charge_id: None, budgeted: false, all_in: false,
+            max_msat, target: None, over_budget: false, accounting_msat: None, evidence_reservation_msat: None, paid: None, undelivered: None, charge_id: None, budgeted: false, all_in: false,
             peer: operation_id.as_ref().and(body["recipient"].as_str()).map(str::to_string),
-            operation_id, op, resumable: false, operation_record: None,
+            operation_id, dispatched_at: None, op, resumable: false, operation_record: None,
         };
         if let Some(id) = &pending.operation_id {
             let signal_kind = body["kind"].as_u64().unwrap_or(0);
@@ -1060,7 +1070,7 @@ mod tests {
     #[test]
     fn reconciliation_needs_exact_terminal_outgoing_evidence() {
         let p = Pending { id: "attempt".into(), rollback_charge_id: None, node_id:"node".into(), request_hash:"hash".into(), max_msat:2000,
-            target:Some(Target::Payment { hash:"abc".into() }), over_budget:false, accounting_msat: None, paid: None, undelivered: None, charge_id: None, budgeted: false, all_in: false, operation_id: None, op: None, peer: None, resumable: false, operation_record: None };
+            target:Some(Target::Payment { hash:"abc".into() }), over_budget:false, accounting_msat: None, evidence_reservation_msat: None, paid: None, undelivered: None, charge_id: None, budgeted: false, all_in: false, operation_id: None, dispatched_at: None, op: None, peer: None, resumable: false, operation_record: None };
         assert_eq!(terminal(&p, &[]), None);
         assert_eq!(terminal(&p, &[json!({"payment_hash":"other", "amount_msat":2000, "direction":"outgoing", "status":"settled"})]), None);
         for status in ["pending", "inflight", "expired", "unknown"] {
@@ -1076,7 +1086,7 @@ mod tests {
     #[test]
     fn message_reconciliation_rejects_other_sender_and_recipient() {
         let p = Pending { id: "attempt".into(), rollback_charge_id: None, node_id:"node".into(), request_hash:"hash".into(), max_msat:2000,
-            target:Some(Target::Message { id:"abc".into(), peer:"peer".into() }), over_budget:false, accounting_msat: None, paid: None, undelivered: None, charge_id: None, budgeted: false, all_in: false, operation_id: None, op: None, peer: None, resumable: false, operation_record: None };
+            target:Some(Target::Message { id:"abc".into(), peer:"peer".into() }), over_budget:false, accounting_msat: None, evidence_reservation_msat: None, paid: None, undelivered: None, charge_id: None, budgeted: false, all_in: false, operation_id: None, dispatched_at: None, op: None, peer: None, resumable: false, operation_record: None };
         let mut row = json!({"id":"abc", "sender":"other", "recipient":"peer", "payment_amount_msat":2000});
         assert_eq!(terminal(&p, &[row.clone()]), None);
         row["sender"] = json!("node");
