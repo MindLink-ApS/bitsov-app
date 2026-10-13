@@ -3042,7 +3042,11 @@ function CallPanel(props: {
         <Show when={v().phase === 'ended'}>
           <p class="hint" data-call-ended>{v().error ?? END_REASON[v().reason ?? 'hangup']}</p>
         </Show>
-        <Show when={v().phase !== 'ended' && v().error}>
+        {/* Display only: the browser reports no network. Recovery itself stays ICE-driven. */}
+        <Show when={v().offline && v().phase !== 'ended' && v().phase !== 'idle'}>
+          <p class="hint" role="status" data-call-offline>You are offline. The call reconnects by itself if your network comes back in time.</p>
+        </Show>
+                <Show when={v().phase !== 'ended' && v().error}>
           <p class="hint" data-call-error>{v().error}</p>
         </Show>
         <div class="call-actions">

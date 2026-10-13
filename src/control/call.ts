@@ -138,11 +138,17 @@ export type CallView = {
   reason: HangupReason | null;
   /** A refusal to show (nothing was paid for the refused step). */
   error: string | null;
+  /**
+   * The browser reports no network (display only). Never read by the call's
+   * own logic: recovery stays ICE-driven (restart after its delay, or ended
+   * after the grace), whatever this says.
+   */
+  offline: boolean;
 };
 
 export const IDLE: CallView = {
   phase: 'idle', state: 'idle', peer: null, callId: null, media: 'audio', outgoing: false,
-  liveAt: null, muted: false, camera: false, paidMsat: 0, connection: null, reason: null, error: null,
+  liveAt: null, muted: false, camera: false, paidMsat: 0, connection: null, reason: null, error: null, offline: false,
 };
 
 type Outcome<T> = { ok: true; value: T } | { ok: false; error: ActionError };
@@ -167,9 +173,9 @@ export type CallDeps = {
 };
 
 /**
- * Calls `offline` / `online` on the browser's network events, and `online` on
- * a connection type change (navigator.connection, where it exists). Returns
- * the remover.
+ * Calls `offline` / `online` on the browser's network events, and the matching
+ * one on a connection type change (navigator.connection, where it exists).
+ * Returns the remover.
  */
 export function watchNetwork(offline: () => void, online: () => void): () => void {
   if (typeof window === 'undefined') return () => {};
@@ -230,7 +236,7 @@ export function createCallEngine(deps: CallDeps) {
   let videoSender: RTCRtpSender | null = null;
   /** The call the owner cancelled while its offer was being prepared or paid. */
   let cancelled: string | null = null;
-  /** Removes the network-change listeners of the current connection. */
+  /** Removes the network listeners of the current connection (display only). */
   let offNetwork: (() => void) | null = null;
   // Serialises user actions: a double click never pays twice.
   let busy = false;
@@ -285,7 +291,7 @@ export function createCallEngine(deps: CallDeps) {
   };
   const end = (reason: HangupReason | null, error: string | null = null) => {
     teardown();
-    set({ phase: 'ended', reason, error, camera: false, muted: false });
+    set({ phase: 'ended', reason, error, camera: false, muted: false, offline: false });
   };
 
   const acquireMedia = (constraints: MediaStreamConstraints): Promise<MediaStream> => new Promise((resolve, reject) => {
@@ -398,15 +404,12 @@ export function createCallEngine(deps: CallDeps) {
       if (state === 'failed' || state === 'disconnected' || state === 'closed') connectionChanged(state);
       else if ((state === 'connected' || state === 'completed') && conn.connectionState === 'connected') connectionChanged('connected');
     };
-    // A network change (Wi-Fi ↔ mobile, offline and back): reconnecting at once, then the
-    // existing single restart attempt when the network is back. No new paid step: restart()
-    // keeps its own one-attempt guard.
+    // Network events are display only: they set view.offline for the pill and panel, and never
+    // call reconnect()/restart() or touch anything those or the answer path read.
     offNetwork?.();
     offNetwork = watchNetwork(
-      // Only a call that is connecting or live: calling, ringing and incoming are untouched (an answer
-      // arriving to a 'reconnecting' call that never connected would otherwise start a paid recovery).
-      () => { if (pc === conn && (view.phase === 'live' || view.phase === 'connecting')) reconnect(conn); },
-      () => { if (pc === conn && view.phase === 'reconnecting') void restart(conn); },
+      () => { if (pc === conn && active()) set({ offline: true }); },
+      () => { if (pc === conn && view.offline) set({ offline: false }); },
     );
     deps.onStreams(local, null);
     return conn;

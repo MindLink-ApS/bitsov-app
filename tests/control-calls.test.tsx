@@ -607,64 +607,93 @@ describe('call permission snapshots', () => {
   });
 });
 
-describe('a network change during a call', () => {
-  beforeEach(() => { FakePc.made = []; });
+describe('a network change during a call (display only)', () => {
+  beforeEach(() => { FakePc.made = []; vi.useFakeTimers(); });
   afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
-  /** A fresh call id for every allocation (so a duplicate-id refusal can never stand in for the restart guard). */
+  /** A fresh call id for every allocation (a duplicate-id refusal can never stand in for the restart guard). */
   const freshIds = () => { let n = 0; return () => (n++).toString(16).padStart(32, '0'); };
-  const live = async (e: ReturnType<typeof engine>['e']) => {
-    await e.place(A, 'audio', QUOTE);
-    await e.receive(msg(401, { sdp: 'v=0 answer', call_id: e.view().callId! }), OWN);
-    FakePc.made[0].connect();
-  };
+  const answer = (e: ReturnType<typeof engine>['e']) => e.receive(msg(401, { sdp: 'v=0 answer', call_id: e.view().callId! }), OWN);
+  const offlineOnline = () => { window.dispatchEvent(new Event('offline')); window.dispatchEvent(new Event('online')); };
+  const offers = (sent: Sent[]) => sent.filter((x) => x.kind === 400).length;
 
-  it('offline puts a live call into Reconnecting at once', async () => {
+  it('offline only sets the display flag: the call phase is unchanged; online clears it', async () => {
     const { e, last } = engine({ newCallId: freshIds() });
-    await live(e);
+    await e.place(A, 'audio', QUOTE);
+    await answer(e);
+    FakePc.made[0].connect();
     window.dispatchEvent(new Event('offline'));
-    expect(last().phase).toBe('reconnecting');
+    expect(last()).toMatchObject({ phase: 'live', offline: true });
+    window.dispatchEvent(new Event('online'));
+    expect(last()).toMatchObject({ phase: 'live', offline: false });
   });
 
-  it('offline → online → offline → online sends at most the one recovery offer the existing guard allows (fresh ids)', async () => {
+  it('Codex #238 (1): offline/online while their answer is still being applied: one 400, as on main', async () => {
     const { e, sent } = engine({ newCallId: freshIds() });
-    await live(e);
-    for (let i = 0; i < 2; i++) {
-      window.dispatchEvent(new Event('offline'));
-      window.dispatchEvent(new Event('online'));
-      await new Promise((r) => setTimeout(r, 20));
-    }
-    const offers = sent.filter((x) => x.kind === 400).map((o) => o.body.call_id);
-    expect(offers).toHaveLength(2);
-    expect(new Set(offers).size).toBe(2);
+    await e.place(A, 'audio', QUOTE);
+    let apply!: () => void;
+    FakePc.made[0].setRemoteDescription = (d) => new Promise<void>((r) => { apply = () => { FakePc.made[0].remote = d; r(); }; });
+    const answered = answer(e);
+    offlineOnline();
+    apply();
+    await answered;
+    FakePc.made[0].connect();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(offers(sent)).toBe(1);
   });
 
-  it('Codex #238: place → ringing → offline → online → their original answer: exactly one 400 (a ringing call is not moved by network events)', async () => {
+  it('Codex #238 (2): live → ICE disconnected → offline → online → ICE back in 100 ms: one 400, as on main', async () => {
+    const { e, sent } = engine({ newCallId: freshIds() });
+    await e.place(A, 'audio', QUOTE);
+    await answer(e);
+    const pc = FakePc.made[0];
+    pc.connect();
+    pc.state('disconnected');
+    offlineOnline();
+    await vi.advanceTimersByTimeAsync(100);
+    pc.connect();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(offers(sent)).toBe(1);
+  });
+
+  it('offline → online → offline → online on a live call: one 400, as on main', async () => {
+    const { e, sent } = engine({ newCallId: freshIds() });
+    await e.place(A, 'audio', QUOTE);
+    await answer(e);
+    FakePc.made[0].connect();
+    offlineOnline();
+    offlineOnline();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(offers(sent)).toBe(1);
+  });
+
+  it('place → ringing → offline → online → their answer: one 400, as on main', async () => {
     const { e, sent, last } = engine({ newCallId: freshIds() });
     await e.place(A, 'audio', QUOTE);
     expect(last().phase).toBe('ringing');
-    window.dispatchEvent(new Event('offline'));
+    offlineOnline();
     expect(last().phase).toBe('ringing');
-    window.dispatchEvent(new Event('online'));
-    await e.receive(msg(401, { sdp: 'v=0 answer', call_id: e.view().callId! }), OWN);
-    await new Promise((r) => setTimeout(r, 20));
-    expect(sent.filter((x) => x.kind === 400)).toHaveLength(1);
+    await answer(e);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(offers(sent)).toBe(1);
   });
 
-  it('after the call ends its network listeners are removed (every add has its remove)', async () => {
+  it('after the call ends its network listeners are removed (every add has its remove) and the flag is cleared', async () => {
     const add = vi.spyOn(window, 'addEventListener');
     const remove = vi.spyOn(window, 'removeEventListener');
     const { e, sent, last } = engine({ newCallId: freshIds() });
-    await live(e);
+    await e.place(A, 'audio', QUOTE);
+    await answer(e);
+    FakePc.made[0].connect();
+    window.dispatchEvent(new Event('offline'));
     const added = add.mock.calls.filter(([t]) => t === 'offline' || t === 'online').map(([t, fn]) => [t, fn]);
     expect(added.map(([t]) => t).sort()).toEqual(['offline', 'online']);
     await e.hangup();
     for (const [t, fn] of added) expect(remove).toHaveBeenCalledWith(t, fn);
+    expect(last()).toMatchObject({ phase: 'ended', offline: false });
     const before = sent.length;
-    window.dispatchEvent(new Event('offline'));
-    window.dispatchEvent(new Event('online'));
-    await new Promise((r) => setTimeout(r, 20));
-    expect(last().phase).toBe('ended');
+    offlineOnline();
     expect(sent).toHaveLength(before);
+    expect(last().offline).toBe(false);
   });
 });
 
@@ -1371,6 +1400,23 @@ describe('calls in the shell', () => {
     await vi.waitFor(() => expect($('[data-settings]')?.classList.contains('open')).toBe(true));
     expect($('[data-tab="general"]')!.getAttribute('aria-selected')).toBe('true');
     expect($('[data-stun-input]')).not.toBeNull();
+  });
+
+  it('offline during a live call shows an offline note in the call panel (display only); online removes it', async () => {
+    const host = stubHost({ messages_list: () => [] });
+    await openShell();
+    host.emitLive({ type: 'message', room_id: null, message: { id: 'o', kind: 400, sender: A, recipient: OWN, timestamp: Date.now(), plaintext: JSON.stringify({ v: 1, call_id: ID, media: 'audio', sdp: 'v=0 offer' }), payment_amount_msat: 10_000 } });
+    await vi.waitFor(() => expect($('[data-call-accept]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-call-accept]')!.click();
+    await vi.waitFor(() => expect(host.used('call_signal')).toHaveLength(1));
+    FakePc.made[0].connect();
+    await vi.waitFor(() => expect($('[data-call-panel="live"]')).not.toBeNull());
+    window.dispatchEvent(new Event('offline'));
+    await vi.waitFor(() => expect(text('[data-call-offline]')).toBe('You are offline. The call reconnects by itself if your network comes back in time.'));
+    expect($('[data-call-panel="live"]')).not.toBeNull();
+    window.dispatchEvent(new Event('online'));
+    await vi.waitFor(() => expect($('[data-call-offline]')).toBeNull());
+    expect(host.used('call_signal')).toHaveLength(1);
   });
 
   it('the STUN server is an owner setting, validated, with a note that it contacts that server', async () => {
