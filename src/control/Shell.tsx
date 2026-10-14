@@ -195,6 +195,8 @@ export type SendQueue = {
   settled: (r: Outcome<unknown>, track: TrackRef, text: string, at: PressedAt) => void;
   /** Its turn came while held: its bubble becomes "Waiting for payment check". */
   holdBack: (track: TrackRef, bubble: string, text: string) => void;
+  /** Its turn came, but what it was approved for no longer holds: its bubble becomes a "Not sent" card with `reason`. */
+  withdraw: (track: TrackRef, bubble: string, text: string, reason: string) => void;
   attach: (box: SendBox) => () => void;
   live: () => { text: string; seq: number };
 };
@@ -1075,6 +1077,14 @@ export function ControlCenter(props: Props) {
         addArtifact(t, { type: 'unsent', text, why: 'held', reason: untrack(checkFirst) ? 'Not sent, nothing paid: an earlier payment’s result is not known yet.' : holdWhy });
       });
       announce(untrack(checkFirst) ? 'Message held: an earlier payment is not checked yet.' : 'Message held: an earlier message was paid but not finished.');
+    },
+    withdraw: (t, bubble, text, reason) => {
+      // Checked before anything was dispatched: nothing was paid.
+      batch(() => {
+        dropArtifact(t, bubble);
+        addArtifact(t, { type: 'unsent', text, why: 'refused', reason });
+      });
+      announce('Message not sent.');
     },
     attach: (b) => {
       box = b;
@@ -4565,7 +4575,7 @@ function Composer(props: {
    * (hand-off when a fresh grant read names E for this contact); `readsFrom`
    * the first budget read that started after it; `keySeen`: E was seen live.
    */
-  type Pressed = { bubble: string; track: TrackRef; text: string; msat: number; until: number; taken: boolean; kind: ApprovalKind; approved: boolean; key: string | null; requestId: string | null; keySeen: boolean; requestSeen: boolean; envelope: string | null; readsFrom: number };
+  type Pressed = { bubble: string; track: TrackRef; text: string; msat: number; until: number; taken: boolean; kind: ApprovalKind; approved: boolean; key: string | null; requestId: string | null; keySeen: boolean; requestSeen: boolean; envelope: string | null; readsFrom: number; cancelled: boolean };
   const [consent, setConsent] = createSignal<Pressed | null>(null);
   /** The host names the grant of an open window (#227): only then can grant, preset and resume continue. */
   const bindable = () => props.spend != null && 'granted_op' in props.spend;
@@ -4609,7 +4619,7 @@ function Composer(props: {
     const bubble = props.actions.beginSending(props.track, text, msat, true);
     setDraft('');
     setDrafted(false);
-    setConsent({ bubble, track: props.track, text, msat, until: Date.now() + CONTINUE_MS, taken: false, kind, approved: false, key: null, requestId: null, keySeen: false, requestSeen: false, envelope: null, readsFrom: 0 });
+    setConsent({ bubble, track: props.track, text, msat, until: Date.now() + CONTINUE_MS, taken: false, kind, approved: false, key: null, requestId: null, keySeen: false, requestSeen: false, envelope: null, readsFrom: 0, cancelled: false });
   };
   const dropConsent = (reason: string) => {
     const c = untrack(consent);
@@ -4664,10 +4674,29 @@ function Composer(props: {
   };
   const LAPSED = 'The approval was cancelled or lapsed before it went through.';
   const TOUCH_AGAIN = 'It needs Touch ID again. Press Send to ask.';
-  /** Does this grant read cover one message at `msat` for `peer`? Per call, the whole grant, and the contact's own remainder when named. */
+  /**
+   * Does this grant read cover one message at `msat` for `peer`? Per call, the
+   * whole grant, and the contact's own remainder when named. The host omits a
+   * contact from recipient_left_msat_by_recipient when the grant sets no
+   * per-recipient cap for it, so a missing entry means no per-recipient limit.
+   */
   const touchCovers = (g: NodeGrantSummary, peer: string, msat: number) => {
     const left = g.recipient_left_msat_by_recipient;
     return g.per_call_max_msat >= msat && g.remaining_msat >= msat && (!left || !(peer in left) || left[peer] >= msat);
+  };
+  /**
+   * The envelope this Touch ID approval returned is live now, on a fresh read:
+   * the grant itself not expired, the contact's id exactly E (lower-cased key),
+   * its envelope not ended, and the price covered. Checked when it is seen, at
+   * hand-off, and again right before a queued send is dispatched.
+   */
+  const touchLive = (p: Pressed) => {
+    if (props.actions.device()?.state !== 'registered' || props.actions.budgetReadApplied() < p.readsFrom) return false;
+    const g = budget()?.node_grant;
+    const peer = (p.track as { id: string }).id.toLowerCase();
+    const now = Date.now();
+    const until = g?.envelopes?.[peer];
+    return !!g && g.expires_at_ms > now && g.envelope_id_by_recipient?.[peer] === p.envelope && !!until && until > now && touchCovers(g, peer, p.msat);
   };
   /**
    * Touch ID consent, on fresh reads only (started after the approval
@@ -4689,7 +4718,8 @@ function Composer(props: {
     if (!ids) { backToPlain(); return; }
     const peer = (c.track as { id: string }).id.toLowerCase();
     const until = g.envelopes?.[peer];
-    if (ids[peer] !== c.envelope || !until || until <= props.now) { dropConsent(c.keySeen ? LAPSED : TOUCH_AGAIN); return; }
+    const now = Math.max(props.now, Date.now());
+    if (g.expires_at_ms <= now || ids[peer] !== c.envelope || !until || until <= now) { dropConsent(c.keySeen ? LAPSED : TOUCH_AGAIN); return; }
     if (!touchCovers(g, peer, c.msat)) { dropConsent(TOUCH_AGAIN); return; }
     if (!c.keySeen) setConsent({ ...c, keySeen: true });
   });
@@ -4731,14 +4761,14 @@ function Composer(props: {
     // Another chat's price is not this message's: leaving is said as leaving (below).
     if (c && trackKey(props.track) === trackKey(c.track) && msat !== c.msat) dropConsent('The price changed while it waited for approval.');
   }, { defer: true }));
-  createEffect(on(() => trackKey(props.track), () => dropConsent('You left this chat before it was approved.'), { defer: true }));
+  createEffect(on(() => trackKey(props.track), () => { cancelHanded(); dropConsent('You left this chat before it was approved.'); }, { defer: true }));
   createEffect(() => { if (props.moneyBlocked) dropConsent('Your node went offline before it was approved.'); });
   createEffect(on(consent, (c) => {
     if (!c) return;
     const timer = setTimeout(() => { if (untrack(consent) === c) dropConsent('It was not approved within 10 minutes.'); }, Math.max(0, c.until - Date.now()));
     onCleanup(() => clearTimeout(timer));
   }));
-  onCleanup(() => dropConsent('You left before it was approved.'));
+  onCleanup(() => { cancelHanded(); dropConsent('You left before it was approved.'); });
   // Its own approval succeeded and cleared: the waiting bubble goes once, through
   // the ordinary path. Transient guards (busy, a stale budget read, a contact
   // wait) keep it waiting rather than ending it.
@@ -4747,11 +4777,8 @@ function Composer(props: {
     if (!c || !c.approved || busy() || contactWaiting() || props.budgetStale || props.moneyBlocked || !approvalCleared()) return;
     if (c.kind === 'touch') {
       // Only the envelope its own Touch ID call returned, live and covering the price, on a fresh read.
-      if (!c.keySeen || props.actions.budgetReadApplied() < c.readsFrom) return;
-      const g = budget()?.node_grant;
-      const peer = (c.track as { id: string }).id.toLowerCase();
-      const until = g?.envelopes?.[peer];
-      if (!g || g.envelope_id_by_recipient?.[peer] !== c.envelope || !until || until <= props.now || !touchCovers(g, peer, c.msat)) return;
+      void props.now;
+      if (!c.keySeen || !touchLive(c)) return;
     } else {
       // Only the window its own approval armed (its grant op G, or its request R).
       const sp = props.spend;
@@ -4765,10 +4792,33 @@ function Composer(props: {
       if (!c.taken) props.actions.settleWaiting(c.track, c.bubble, untrack(note) ?? 'It could not be sent after the approval.');
     })();
   });
+  /**
+   * Approve & send continuations handed to the send queue and not dispatched
+   * yet. The queue outlives this chat, so each re-checks, right before its
+   * turn, what its approval was for (stillBound); leaving the chat cancels it.
+   */
+  const handed = new Set<Pressed>();
+  function cancelHanded() {
+    handed.forEach((p) => { p.cancelled = true; });
+    handed.clear();
+  }
+  /** Why a handed-off approve & send must not go now (it becomes a Not sent card), or null. */
+  const stillBound = (p: Pressed): string | null => untrack(() => {
+    handed.delete(p);
+    if (p.cancelled || trackKey(props.track) !== trackKey(p.track)) return 'You left this chat before it was sent.';
+    if (props.moneyBlocked) return 'Your node went offline before it was sent.';
+    if (Date.now() >= p.until) return 'It was not approved within 10 minutes.';
+    if (p.kind === 'touch') return touchLive(p) ? null : TOUCH_AGAIN;
+    const sp = props.spend;
+    if (sp?.state !== 'open') return LAPSED;
+    const same = p.key !== null ? sp.granted_op === p.key : p.requestId !== null && 'armed_by_request' in sp && sp.armed_by_request === p.requestId;
+    return same ? null : LAPSED;
+  });
   /** The bubble a send uses: the waiting one it continues (handed over now), else a new one. */
   const bubbleFor = (t: TrackRef, text: string, cap: number, pressed: Pressed | null) => {
     if (!pressed) return props.actions.beginSending(t, text, cap);
     pressed.taken = true;
+    handed.add(pressed);
     props.actions.settleWaiting(pressed.track, pressed.bubble, null);
     return pressed.bubble;
   };
@@ -4844,6 +4894,8 @@ function Composer(props: {
       // A message is in the stream as "Sending…" (its bubble) by now; the box
       // was freed when it became a send and is never touched from here.
       if (submittedMode === 'message' && bubble && queue.held()) { queue.holdBack(submittedTrack, bubble, submittedText); return; }
+      const unbound = submittedMode === 'message' && bubble && pressed ? stillBound(pressed) : null;
+      if (unbound) { queue.withdraw(submittedTrack, bubble!, submittedText, unbound); return; }
       const r = submittedMode === 'file'
         ? await props.actions.file(submittedTrack, submittedFile!, cap, first)
         : await props.actions.send(submittedTrack, submittedText, cap, first, bubble);
@@ -5018,6 +5070,8 @@ function Composer(props: {
         setBusy(false);
         const go = async () => {
           if (queue.held()) { queue.holdBack(t, bubble, text); return; }
+          const unbound = pressed ? stillBound(pressed) : null;
+          if (unbound) { queue.withdraw(t, bubble, text, unbound); return; }
           const r = await props.actions.send(t, text, cap, undefined, bubble);
           noteBreaker(r);
           if (unchanged()) {

@@ -456,6 +456,9 @@ describe('control center shell', () => {
     remaining?: number;
     spendOpen?: boolean;
     device?: string;
+    grantUntil?: number;
+    /** While set, each send waits for it (a send still in flight ahead in the queue). */
+    sendGate?: Promise<void> | null;
     approve: () => unknown;
   }) {
     const open = { state: 'open', lapse: null, basis: 'node_grant', open_until_ms: Date.now() + 600_000, pending: null, window_ms: 600_000, granted_op: 'cd34', armed_by_request: null };
@@ -469,14 +472,20 @@ describe('control center shell', () => {
         preset: 'careful', presets: [{ id: 'careful', contact_msat: 50_000, room_msat: 100_000, ceiling_msat: 500_000 }], rows: [],
         autopay: { state: 'off', open_until_ms: null, ceiling_msat: null, basis: null }, window_ms: 600_000,
         node_grant: {
-          expires_at_ms: Date.now() + 86_400_000, budget_msat: 200_000, remaining_msat: st.remaining ?? 200_000, per_call_max_msat: st.perCall ?? 200_000,
+          expires_at_ms: st.grantUntil ?? Date.now() + 86_400_000, budget_msat: 200_000, remaining_msat: st.remaining ?? 200_000, per_call_max_msat: st.perCall ?? 200_000,
           envelopes: st.envelopes,
           ...(st.ids === undefined ? {} : { envelope_id_by_recipient: st.ids }),
           ...(st.left ? { recipient_left_msat_by_recipient: st.left } : {}),
         },
       }),
       relation_approve: () => ({ ...(st.spendOpen === false ? locked : open), ...(st.approve() as object) }),
-      message_send: (args) => { sent.push(args!.plaintext as string); return { message_id: `sent-${sent.length}`, recipient: args!.recipient, is_room: false, delivered: true, amount_msat: 2000, sent_at_ms: Date.now() }; },
+      message_send: async (args) => {
+        sent.push(args!.plaintext as string);
+        const n = sent.length;
+        const gate = st.sendGate;
+        if (gate) await gate;
+        return { message_id: `sent-${n}`, recipient: args!.recipient, is_room: false, delivered: true, amount_msat: 2000, sent_at_ms: Date.now() };
+      },
     });
     return { ...host, sent };
   }
@@ -630,6 +639,66 @@ describe('control center shell', () => {
     await new Promise((r) => setTimeout(r, 3500));
     expect(host.sent).toEqual([]);
   }, 15_000);
+
+  it('Codex cxr-touch-1 #1: approved behind a send still in flight, then leaving the chat: it never sends when its turn comes', async () => {
+    let release!: () => void;
+    const st = {
+      ids: { [A]: 'env-0' } as Record<string, string | null>, envelopes: { [A]: Date.now() + DAY } as Record<string, number>,
+      sendGate: new Promise<void>((r) => { release = r; }) as Promise<void> | null,
+      approve: () => { st.ids = { [A]: 'env-1' }; st.envelopes = { [A]: Date.now() + DAY }; return { envelope_id: 'env-1' }; },
+    };
+    const host = touchHost(st);
+    start();
+    await vi.waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
+    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
+    // Send 1 goes under A's live envelope env-0 and stays in flight.
+    await vi.waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toMatch(/^Send/));
+    const area = () => mount.querySelector<HTMLTextAreaElement>('[data-composer] textarea')!;
+    area().value = 'one';
+    area().dispatchEvent(new Event('input', { bubbles: true }));
+    click('[data-send]');
+    await vi.waitFor(() => expect(host.sent).toEqual(['one']));
+    // env-0 ends: the next message is a Touch ID approve & send.
+    st.envelopes = { [A]: Date.now() - 1000 };
+    await vi.waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Approve with Touch ID'), { timeout: 8000 });
+    area().value = 'two';
+    area().dispatchEvent(new Event('input', { bubbles: true }));
+    click('[data-send]');
+    await vi.waitFor(() => expect(host.calls.filter((c) => c.cmd === 'relation_approve')).toHaveLength(1));
+    // Approved and handed to the queue: its bubble is a plain "Sending", behind send 1.
+    await vi.waitFor(() => expect(mount.querySelectorAll('[data-sending=""]').length).toBe(2));
+    click(`[data-track="peer:${B}"]`);
+    st.sendGate = null;
+    release();
+    await new Promise((r) => setTimeout(r, 500));
+    expect(host.sent).toEqual(['one']);
+    click(`[data-track="peer:${A}"]`);
+    await vi.waitFor(() => expect(unsentReason()).toContain('You left this chat before it was sent.'));
+  }, 20_000);
+
+  it('Codex cxr-touch-1 #2: a node grant that expires after its envelope was seen never sends, even once spending opens', async () => {
+    const st = { ids: {} as Record<string, string | null>, envelopes: {} as Record<string, number>, spendOpen: false, grantUntil: undefined as number | undefined,
+      approve: () => { st.ids = { [A]: 'env-1' }; st.envelopes = { [A]: Date.now() + DAY }; st.grantUntil = Date.now() + 1500; return { envelope_id: 'env-1' }; } };
+    const host = touchHost(st);
+    await pressTouch();
+    await vi.waitFor(() => expect(mount.querySelector('[data-sending="waiting"]')).not.toBeNull());
+    await new Promise((r) => setTimeout(r, 2000));
+    // The grant read now shows an expired grant; spending opens anyway.
+    st.spendOpen = true;
+    await vi.waitFor(() => expect(unsentReason()).toContain('The approval was cancelled or lapsed before it went through.'), { timeout: 10_000 });
+    await new Promise((r) => setTimeout(r, 3500));
+    expect(host.sent).toEqual([]);
+  }, 25_000);
+
+  it('Touch ID: a node grant already expired on the first fresh read is stale: it needs Touch ID again', async () => {
+    const st = { ids: {} as Record<string, string | null>, envelopes: {} as Record<string, number>, grantUntil: undefined as number | undefined,
+      approve: () => { st.ids = { [A]: 'env-1' }; st.envelopes = { [A]: Date.now() + DAY }; st.grantUntil = Date.now() - 1; return { envelope_id: 'env-1' }; } };
+    const host = touchHost(st);
+    await pressTouch();
+    await vi.waitFor(() => expect(unsentReason()).toContain('It needs Touch ID again. Press Send to ask.'));
+    await new Promise((r) => setTimeout(r, 300));
+    expect(host.sent).toEqual([]);
+  });
 
   it('Touch ID cancelled: the words stay in the box, no card, nothing sent', async () => {
     const open = { state: 'open', lapse: null, basis: 'node_grant', open_until_ms: Date.now() + 600_000, pending: null, window_ms: 600_000, granted_op: 'cd34', armed_by_request: null };

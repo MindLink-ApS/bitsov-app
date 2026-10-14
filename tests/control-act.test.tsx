@@ -271,6 +271,39 @@ describe('acting from the track', () => {
     expect(host.used('message_send')).toHaveLength(1);
   }, 15_000);
 
+  it('Approve & send handed to the queue behind a send in flight: leaving the chat before its turn never sends it', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const sent: string[] = [];
+    const host = stubHost({
+      spend_request: () => { host.spend.v = openView(null, 'cd35'); return { ...host.spend.v, request_id: null }; },
+      message_send: async (args) => {
+        sent.push(args!.plaintext as string);
+        if (sent.length === 1) await gate;
+        return { message_id: `sent-${sent.length}`, recipient: args!.recipient, is_room: false, delivered: true, amount_msat: 2000, sent_at_ms: Date.now() };
+      },
+    });
+    host.spend.v = openView(null, 'cd34');
+    await openShell();
+    type('[data-composer] textarea', 'one');
+    await vi.waitFor(() => expect(text('[data-send]')).toMatch(/^Send/));
+    submit();
+    await vi.waitFor(() => expect(sent).toEqual(['one']));
+    // The window closes; the next message is an Approve & send whose own call arms cd35.
+    host.spend.v = view('locked');
+    type('[data-composer] textarea', 'two');
+    await vi.waitFor(() => expect(text('[data-send]')).toBe('Approve & send'), { timeout: 8000 });
+    submit();
+    await vi.waitFor(() => expect(host.used('spend_request')).toHaveLength(1));
+    await vi.waitFor(() => expect(mount.querySelectorAll('[data-sending=""]').length).toBe(2));
+    $<HTMLButtonElement>('[data-track="discover"]')!.click();
+    release();
+    await new Promise((r) => setTimeout(r, 500));
+    expect(sent).toEqual(['one']);
+    $<HTMLButtonElement>(`[data-track="peer:${A}"]`)!.click();
+    await vi.waitFor(() => expect(unsentReason()).toContain('You left this chat before it was sent.'));
+  }, 20_000);
+
   it('#227: an older host that names no grant offers plain Send (no Approve & send, no waiting bubble)', async () => {
     const legacy = (st: SpendView['state'], extra: Partial<SpendView> = {}) => ({ state: st, basis: null, open_until_ms: null, pending: null, window_ms: WINDOW, ...extra });
     const host = stubHost({
