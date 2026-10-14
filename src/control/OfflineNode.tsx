@@ -24,7 +24,7 @@ export function OfflineNode(props: {
   return <section class="node-offline" data-node-offline aria-label="Node offline">
     <BoxIllustration offline />
     <Dynamic component={props.level === 1 ? 'h1' : 'h2'} data-offline-title>Your node is offline</Dynamic>
-    <p>We can’t reach it right now. BitSov keeps trying; nothing is sent or paid while your node is offline.</p>
+    <p>We can’t reach it right now. BitSov keeps trying. New messages can’t be sent until your node is back; ones already sent may still complete.</p>
     <p class="hint">Last seen: <Show when={props.lastSeen != null} fallback="unknown">
       <time dateTime={new Date(props.lastSeen!).toISOString()}>{new Date(props.lastSeen!).toLocaleString()}</time>
     </Show></p>

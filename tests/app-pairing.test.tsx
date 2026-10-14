@@ -360,7 +360,9 @@ describe('app shell pairing wiring', () => {
     // A remote node is not assumed to be a box: any computer or server.
     expect(mount.querySelector('[data-node-offline]')?.textContent).toContain('the computer or server running your node');
     expect(mount.querySelector('[data-node-offline]')?.textContent).not.toMatch(/\bbox\b/i);
-    expect(mount.querySelector('[data-node-offline]')?.textContent).toContain('nothing is sent or paid while your node is offline');
+    // Only what is true from this device: new sends are blocked, earlier ones may still settle, and no "nothing is paid" claim.
+    expect(mount.querySelector('[data-node-offline]')?.textContent).toContain('We can’t reach it right now. BitSov keeps trying. New messages can’t be sent until your node is back; ones already sent may still complete.');
+    expect(mount.querySelector('[data-node-offline]')?.textContent).not.toMatch(/nothing is (sent or )?paid/i);
     expect(mount.querySelector('[data-node-offline]')?.textContent).toContain('Last seen: unknown');
     expect(mount.querySelector('[data-node-offline] button')?.textContent).toBe('Retry now');
     expect(mount.textContent).not.toContain('Node stopped');
