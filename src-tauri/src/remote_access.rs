@@ -741,7 +741,7 @@ fn open_sealed_code(
     };
     let Some(sealer) = sealer else {
         return Err(RemoteError::Local(
-            "this pairing link is protected by another device's keystore; import it again".into(),
+            "protected storage is unavailable for this pairing link; try again on the original device".into(),
         ));
     };
     if stored.code.is_some() {
@@ -754,7 +754,7 @@ fn open_sealed_code(
         .open(&at_rest::pairing_code_purpose(&stored.node_id), &bytes)
         .map_err(|e| {
             RemoteError::Local(format!(
-                "this phone cannot open its saved pairing code ({e}); import the pairing link again"
+                "this device cannot open its saved pairing code: {e}"
             ))
         })?;
     let code = std::str::from_utf8(&code)
@@ -790,6 +790,12 @@ fn persist_with(
     };
     let io_error = |error| RemoteError::Local(format!("cannot persist remote descriptor: {error}"));
     let result = (|| {
+        // Check the actual serialized ciphertext, including base64 expansion.
+        if bytes.len() > MAX_LINK_BYTES {
+            return Err(RemoteError::Local(
+                "the remote access descriptor is oversized".into(),
+            ));
+        }
         std::io::Write::write_all(&mut file, &bytes)
             .and_then(|()| file.sync_all()).map_err(io_error)?;
         if sealer.is_some() && descriptor.code.is_some() {
@@ -2726,6 +2732,32 @@ mod tests {
         persist_with(&path, &stripped, Some(&MemorySealer)).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(!text.contains("\"code\"") && !text.contains("sealed_code"), "{text}");
+    }
+
+    #[test]
+    fn save_enforces_the_load_limit_after_sealing_without_replacing_the_old_file() {
+        use crate::at_rest::test_sealer::MemorySealer;
+        let (_dir, path, mut descriptor, _) = sealed_fixture(39);
+        persist_with(&path, &descriptor, Some(&MemorySealer)).unwrap();
+        let original = std::fs::read(&path).unwrap();
+        // Sealing plus base64 expands a plaintext descriptor that fits at import.
+        let overhead = stored_bytes(&descriptor, Some(&MemorySealer)).unwrap().len();
+        descriptor.hosted_by = Some("x".repeat(8192 - overhead - ",\"hosted_by\":\"\"".len()));
+        assert!(stored_bytes(&descriptor, None).unwrap().len() < 8192);
+        assert_eq!(stored_bytes(&descriptor, Some(&MemorySealer)).unwrap().len(), 8192);
+        persist_with(&path, &descriptor, Some(&MemorySealer)).unwrap();
+        assert!(load_with(&path, Some(&MemorySealer)).is_ok());
+        let boundary = std::fs::read(&path).unwrap();
+        descriptor.hosted_by.as_mut().unwrap().push('x');
+        assert!(stored_bytes(&descriptor, None).unwrap().len() < 8192);
+        let error = persist_with(&path, &descriptor, Some(&MemorySealer)).unwrap_err();
+        assert!(error.to_string().contains("oversized"));
+        assert_eq!(std::fs::read(&path).unwrap(), boundary);
+        assert!(!path.with_file_name(format!("{REMOTE_CONFIG_FILE}.tmp")).exists());
+        std::fs::remove_file(&path).unwrap();
+        assert!(persist_with(&path, &descriptor, Some(&MemorySealer)).is_err());
+        assert!(!path.exists());
+        assert_ne!(original, boundary);
     }
 
     #[test]

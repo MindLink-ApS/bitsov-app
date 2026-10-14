@@ -385,9 +385,30 @@ public func bitsov_pairing_crypt(_ sealing: Int32, _ purpose: UnsafePointer<CCha
             defer { plaintext.resetBytes(in: 0..<plaintext.count) }
             return copyOutput(plaintext, output, capacity, length)
         } catch {
-            return sealing == 1 ? errOther : errInvalidBlob
+            return statusForPairingError(error, sealing: sealing == 1)
         }
     }
+}
+
+private func statusForPairingError(_ error: Error, sealing: Bool) -> Int32 {
+    guard !sealing else { return errOther }
+    // Only malformed envelopes and cryptographic authentication/decryption
+    // failures justify destructive recovery. Keychain/LA authentication errors
+    // can mean a locked or temporarily unavailable key, not a foreign blob.
+    if error is DecodingError { return errInvalidBlob }
+    if let crypto = error as? CryptoKitError {
+        switch crypto {
+        case .authenticationFailure, .incorrectParameterSize:
+            return errInvalidBlob
+        default:
+            return errOther
+        }
+    }
+    let ns = error as NSError
+    if ns.domain == NSOSStatusErrorDomain && ns.code == Int(errSecDecode) {
+        return errInvalidBlob
+    }
+    return errOther
 }
 
 private func passwordNode(_ service: String) -> String? {

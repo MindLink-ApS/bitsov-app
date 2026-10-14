@@ -18,6 +18,13 @@ unsafe extern "C" {
     ) -> i32;
 }
 
+fn storage_error(status: i32) -> String {
+    match status {
+        -3 => "protected blob is invalid or belongs to another Mac; clear <app data dir>/app-client/ and pair again".into(),
+        code => format!("Secure Enclave or Keychain storage is temporarily unavailable ({code}); try again"),
+    }
+}
+
 fn crypt(sealing: bool, purpose: &str, input: &[u8]) -> Result<Zeroizing<Vec<u8>>, String> {
     let limit = if sealing { MAX_PLAIN } else { MAX_SEALED };
     if input.is_empty() || input.len() > limit || purpose.is_empty() || purpose.len() > 256 {
@@ -40,11 +47,7 @@ fn crypt(sealing: bool, purpose: &str, input: &[u8]) -> Result<Zeroizing<Vec<u8>
         )
     };
     if status != 0 {
-        return Err(match status {
-            -1 => "Secure Enclave is unavailable".into(),
-            -3 => "protected blob is invalid or belongs to another Mac".into(),
-            code => format!("Secure Enclave storage failed ({code})"),
-        });
+        return Err(storage_error(status));
     }
     if length == 0 || length > output.len() {
         return Err("invalid protected storage output length".into());
@@ -70,7 +73,7 @@ mod tests {
         let purpose = "client-ed25519-seed-v1";
         let plain = [42; 32];
         if !crate::device_key::enclave_available() {
-            assert_eq!(seal(purpose, &plain).unwrap_err(), "Secure Enclave is unavailable");
+            assert!(seal(purpose, &plain).unwrap_err().contains("try again"));
             return;
         }
         let sealed = seal(purpose, &plain).expect("prompt-free enclave seal");
@@ -88,6 +91,19 @@ mod tests {
         tampered.replace_range(position..position + 1, replacement);
         assert!(open(purpose, tampered.as_bytes()).is_err());
         assert!(open(purpose, b"foreign or corrupt envelope").is_err());
+    }
+
+    #[test]
+    fn only_invalid_blobs_recommend_clearing_the_pairing_folder() {
+        let invalid = storage_error(-3);
+        assert!(invalid.contains("<app data dir>/app-client/"));
+        assert!(invalid.contains("pair again"));
+        for status in [-1, -2, -6, -25308, -25291, -50] {
+            let temporary = storage_error(status);
+            assert!(temporary.contains("try again"), "{temporary}");
+            assert!(!temporary.to_lowercase().contains("clear"), "{temporary}");
+            assert!(!temporary.contains("another Mac"), "{temporary}");
+        }
     }
 
     #[test]

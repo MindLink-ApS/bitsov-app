@@ -52,8 +52,8 @@ impl ClientKey {
     fn load_or_create_plain(dir: &Path) -> Result<Self, PairError> {
         if sealed_file_exists(dir)? {
             return Err(PairError::Local(
-                "this device cannot open its protected client key: protected storage is unavailable. \
-                 Restore access on the original device, or clear BitSov's storage and pair again.".into(),
+                "this device cannot open its protected client key: protected storage is temporarily unavailable. \
+                 Restore access on the original device and try again.".into(),
             ));
         }
         restrict_dir(dir)?;
@@ -126,6 +126,17 @@ impl ClientKey {
             seed
         };
         if plain.exists() {
+            match plain_seed(&plain) {
+                Ok(plain_seed) if *plain_seed == *seed => {}
+                Ok(_) => {
+                    eprintln!("[pairing] plaintext and sealed client identities differ; retaining both files and using the sealed identity");
+                    return Ok(Self::from_seed(*seed));
+                }
+                Err(_) => {
+                    eprintln!("[pairing] cannot verify the leftover plaintext identity; retaining both files and using the sealed identity");
+                    return Ok(Self::from_seed(*seed));
+                }
+            }
             // Also covers retry after publication succeeded but directory sync
             // failed (or the process exited before it reached that sync).
             if let Err(error) = std::fs::File::open(dir).and_then(|file| file.sync_all()) {
@@ -241,8 +252,7 @@ fn sealed_seed(path: &Path, sealer: &dyn Sealer) -> Result<Zeroizing<[u8; 32]>, 
         .open(at_rest::CLIENT_SEED_PURPOSE, &ciphertext)
         .map_err(|e| {
             PairError::Local(format!(
-                "this device cannot open its protected client key ({e}). \
-             Clear BitSov's storage, then pair again."
+                "this device cannot open its protected client key: {e}"
             ))
         })?;
     let seed: [u8; 32] = seed
@@ -399,17 +409,19 @@ mod tests {
     }
 
     #[test]
-    fn a_sealed_seed_wins_over_a_leftover_plain_file() {
+    fn a_sealed_seed_wins_but_preserves_a_different_plain_file() {
         let dir = tempfile::tempdir().unwrap();
         let store = dir.path().join("pairing");
         let sealed = ClientKey::load_or_create_sealed(&store, &MemorySealer).unwrap();
+        let ciphertext = std::fs::read(store.join(SEALED_KEY_FILE)).unwrap();
         let mut leftover = create_new_protected(&store.join(KEY_FILE)).unwrap();
         leftover.write_all("11".repeat(32).as_bytes()).unwrap();
         drop(leftover);
 
         let loaded = ClientKey::load_or_create_sealed(&store, &MemorySealer).unwrap();
         assert_eq!(loaded.public_hex(), sealed.public_hex());
-        assert!(!store.join(KEY_FILE).exists());
+        assert_eq!(std::fs::read_to_string(store.join(KEY_FILE)).unwrap(), "11".repeat(32));
+        assert_eq!(std::fs::read(store.join(SEALED_KEY_FILE)).unwrap(), ciphertext);
     }
 
     #[test]
@@ -442,7 +454,7 @@ mod tests {
         }
 
         fn open(&self, _: &str, _: &[u8]) -> Result<Zeroizing<Vec<u8>>, String> {
-            Err("key belongs to another Mac or Secure Enclave unavailable".into())
+            Err("Secure Enclave temporarily unavailable; try again".into())
         }
     }
 
@@ -472,7 +484,8 @@ mod tests {
         ClientKey::load_or_create_sealed(dir.path(), &MemorySealer).unwrap();
         let bytes = std::fs::read(dir.path().join(SEALED_KEY_FILE)).unwrap();
         let error = ClientKey::load_or_create_plain(dir.path()).unwrap_err();
-        assert!(error.to_string().contains("pair again"));
+        assert!(error.to_string().contains("try again"));
+        assert!(!error.to_string().to_lowercase().contains("clear"));
         assert!(!dir.path().join(KEY_FILE).exists());
         assert_eq!(
             std::fs::read(dir.path().join(SEALED_KEY_FILE)).unwrap(),
@@ -481,7 +494,7 @@ mod tests {
     }
 
     #[test]
-    fn a_foreign_blob_is_preserved_and_never_replaced_even_with_plain_left_over() {
+    fn a_temporary_open_failure_preserves_both_files_without_plaintext_fallback() {
         let dir = tempfile::tempdir().unwrap();
         ClientKey::load_or_create_sealed(dir.path(), &MemorySealer).unwrap();
         let sealed = std::fs::read(dir.path().join(SEALED_KEY_FILE)).unwrap();
@@ -496,7 +509,8 @@ mod tests {
             assert!(error
                 .to_string()
                 .contains("cannot open its protected client key"));
-            assert!(error.to_string().contains("pair again"));
+            assert!(error.to_string().contains("try again"));
+            assert!(!error.to_string().to_lowercase().contains("clear"));
             assert_eq!(
                 std::fs::read(dir.path().join(SEALED_KEY_FILE)).unwrap(),
                 sealed
