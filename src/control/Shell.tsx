@@ -1223,15 +1223,20 @@ export function ControlCenter(props: Props) {
     busy: () => meetingOn(),
   });
   // The latest call and its route (candidate types only), kept after the call for the connection card.
-  // A call counts once it was placed, or answered here; one that never got a selected pair has no route.
+  // A call counts once it was placed, or answered here: whether it went live, and its route once the stats name one.
+  // A call refused before it had an id (their node takes no calls, the grant is too small) is the latest call too.
+  let refusedCalls = 0;
   const [lastCall, setLastCall] = createSignal<(LastCall & { id: string }) | null>(null);
   createEffect(() => {
     const v = callView();
-    if (!v.callId) return;
+    if (!v.callId) {
+      if (v.phase === 'ended' && v.peer) setLastCall({ id: `refused-${++refusedCalls}`, connected: false, route: null });
+      return;
+    }
     setLastCall((prev) => {
       const same = prev?.id === v.callId;
       if (!same && !(v.outgoing || ['connecting', 'live', 'reconnecting'].includes(v.phase))) return prev;
-      return { id: v.callId!, route: v.connection ?? (same ? prev!.route : null) };
+      return { id: v.callId!, connected: (same && prev!.connected) || v.liveAt !== null, route: v.connection ?? (same ? prev!.route : null) };
     });
   });
   const stunSource = (): StunSource => (stunOff() ? 'off' : stunPref() ? 'custom' : nodeStun() ? 'node' : overview() ? 'none' : 'checking');
@@ -1956,7 +1961,7 @@ export function ControlCenter(props: Props) {
           </Match>
           <Match when={tab() === 'node'}>
             <NodePanel connection={<ConnectionCard remote={props.remote === true} link={link()} live={live()} locked={props.nodeLocked} answer={props.nodeAnswer ?? null}
-              stun={stunSource()} lastCall={lastCall() && { route: lastCall()!.route }} onCheck={props.onCheckNode} checking={props.checkingNode} />} deviceApprovals={<>
+              stun={stunSource()} lastCall={lastCall() && { connected: lastCall()!.connected, route: lastCall()!.route }} onCheck={props.onCheckNode} checking={props.checkingNode} />} deviceApprovals={<>
               {/* A discovery error shows on its own, even when the very first read failed. */}
               <Show when={canApprove() || (approvalsCapable() && approvalsError() !== null)}>
                 <OwnerApprovals

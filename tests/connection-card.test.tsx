@@ -7,7 +7,7 @@ afterEach(() => { dispose?.(); dispose = undefined; document.body.innerHTML = ''
 const flush = async () => { for (let i = 0; i < 10; i++) await Promise.resolve(); };
 const at = new Date(2026, 9, 14, 12, 4, 31).getTime();
 const answer: NodeAnswer = { at, ms: 85 };
-const base = { remote: true, link: 'open' as const, live: true, answer, stun: 'node' as const, lastCall: { route: { local: 'srflx', remote: 'host' } } };
+const base = { remote: true, link: 'open' as const, live: true, answer, stun: 'node' as const, lastCall: { connected: true, route: { local: 'srflx', remote: 'host' } } };
 
 describe('the connection card', () => {
   it('says how this device reaches its node, when the node last answered, and what calls use', () => {
@@ -26,7 +26,9 @@ describe('the connection card', () => {
     expect(local[1]).toBe('Live updates: Reconnecting');
     expect(local[3]).toBe('Calls · STUN: off (direct connections only)');
     expect(local[5]).toBe('Last call: no call yet');
-    expect(connectionSummary({ ...base, lastCall: { route: null } })[5]).toBe('Last call: no route (it didn’t connect)');
+    expect(connectionSummary({ ...base, lastCall: { connected: false, route: null } })[5]).toBe('Last call: no route (it didn’t connect)');
+    // It went live, but no stats were read: never said as "didn't connect".
+    expect(connectionSummary({ ...base, lastCall: { connected: true, route: null } })[5]).toBe('Last call: connected, route unavailable');
     expect(connectionSummary({ ...base, stun: 'checking' })[3]).toBe('Calls · STUN: checking…');
     expect(connectionSummary({ ...base, stun: 'custom' })[3]).toBe('Calls · STUN: a server you chose');
     expect(connectionSummary({ ...base, stun: 'none' })[3]).toBe('Calls · STUN: none (your node does not offer one)');

@@ -11,8 +11,8 @@ export type NodeAnswer = { at: number; ms: number };
 export type StunSource = 'node' | 'custom' | 'off' | 'none' | 'checking';
 /** Candidate types of a call's selected pair (never addresses). */
 export type CallRoute = { local: string; remote: string };
-/** The latest call: its route, or null when it never got a selected pair. */
-export type LastCall = { route: CallRoute | null };
+/** The latest call: whether it connected (went live), and its route when the stats named one. */
+export type LastCall = { connected: boolean; route: CallRoute | null };
 
 const STUN_TEXT: Record<StunSource, string> = {
   node: 'your node',
@@ -39,11 +39,12 @@ export function connectionSummary(props: { remote: boolean; link: LinkState | nu
         ? `${clock(props.answer.at)} · ${props.answer.ms} ms (this app ↔ its host)`
         : `your node not answering since ${clock(props.answer.at)}`
       : props.live ? 'not measured yet' : 'no answer yet';
+  // Connected is what the call did; the route is only what the stats could name (they may never have been read).
   const call = !props.lastCall
     ? 'no call yet'
     : props.lastCall.route
       ? `${props.lastCall.route.local} (this device) / ${props.lastCall.route.remote} (theirs)`
-      : 'no route (it didn’t connect)';
+      : props.lastCall.connected ? 'connected, route unavailable' : 'no route (it didn’t connect)';
   return [
     `How this device reaches your node: ${reach}`,
     `Live updates: ${props.link ? LINK_TEXT[props.link] : 'Waiting'}`,

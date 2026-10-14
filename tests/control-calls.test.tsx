@@ -1221,6 +1221,35 @@ describe('calls in the shell', () => {
     expect(await lastCallLine()).toBe('Last call: no route (it didn’t connect)');
   });
 
+  it('a call that went live with no stats read is "connected, route unavailable"; a later call refused before it starts is "didn\'t connect"', async () => {
+    let small = false;
+    stubHost({
+      call_signal: (args) => ({ message_id: 'sig', kind: args!.kind, amount_msat: 1000, total_msat: 6000, max_routing_fee_msat: 5000, delivered: true, accepted: true, sent_at_ms: Date.now() }),
+      // Later, the node grant is too small for a call: place() refuses before the call has an id.
+      budget_status: () => ({ ...openBudget(), ...(small ? { node_grant: { expires_at_ms: Date.now() + 86_400_000, budget_msat: 200_000, remaining_msat: 200_000, per_call_max_msat: 1000 } } : {}) }),
+    });
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
+    // No stats ever name a pair (an empty report), but the call goes live.
+    FakePc.made[0].stats = new Map();
+    FakePc.made[0].connect();
+    await vi.waitFor(() => expect($('[data-call-panel="live"]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-call-hangup]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-dismiss]')!.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call-dismiss]')!.click();
+    expect(await lastCallLine()).toBe('Last call: connected, route unavailable');
+    small = true;
+    await new Promise((r) => setTimeout(r, 3500));
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect(text('[data-call-ended]')).toMatch(/This call needs up to/));
+    expect(FakePc.made).toHaveLength(1);
+    $<HTMLButtonElement>('[data-call-dismiss]')!.click();
+    expect(await lastCallLine()).toBe('Last call: no route (it didn’t connect)');
+  }, 20_000);
+
   it('a first call that never connects is "no route", not "no call yet"', async () => {
     stubHost({ call_signal: () => { throw { code: 'spend_refused', message: 'Owner grant required.' }; } });
     await openShell();
