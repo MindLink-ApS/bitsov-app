@@ -576,21 +576,29 @@ export function createMeetingEngine(deps: MeetingDeps) {
       // most the shown price (a leg without one can never be paid).
       const owed = new Map(ringing.flatMap((l) => (quotes[l.peer] ? [[l, signalCost(quotes[l.peer]!)] as const] : [])));
       owed.forEach((msat, l) => owe(l, msat));
+      // Reservations whose leg has not started: a rejection ends the loop
+      // (as before), and the outer finally releases what never started.
+      const unstarted = new Map(owed);
       finish('Declined');
-      for (const l of ringing) {
-        await serial(async () => {
-          let sent = false;
-          try {
-            const q = await deps.quote(l.peer);
-            const bound = q.ok ? boundQuote(quotes[l.peer], q.value, false) : null;
-            if (bound) {
-              sent = true;
-              await pay(l, CALL_HANGUP, { reason: 'declined' }, signalCost(bound), owed.get(l));
+      try {
+        for (const l of ringing) {
+          await serial(async () => {
+            unstarted.delete(l);
+            let sent = false;
+            try {
+              const q = await deps.quote(l.peer);
+              const bound = q.ok ? boundQuote(quotes[l.peer], q.value, false) : null;
+              if (bound) {
+                sent = true;
+                await pay(l, CALL_HANGUP, { reason: 'declined' }, signalCost(bound), owed.get(l));
+              }
+            } finally {
+              if (!sent && owed.has(l)) release(l, owed.get(l)!);
             }
-          } finally {
-            if (!sent && owed.has(l)) release(l, owed.get(l)!);
-          }
-        });
+          });
+        }
+      } finally {
+        unstarted.forEach((msat, l) => release(l, msat));
       }
       publish();
     }),
@@ -608,19 +616,26 @@ export function createMeetingEngine(deps: MeetingDeps) {
       // through that step, and its hangup counts once it is sent.
       const owed = new Map(known.flatMap((l) => (l.paidMsat > 0 && l.quote && l.callId ? [[l, signalCost(l.quote)] as const] : [])));
       owed.forEach((msat, l) => owe(l, msat));
+      // As in decline: what never started is released in the outer finally.
+      const unstarted = new Map(owed);
       finish();
-      for (const l of known) {
-        await serial(async () => {
-          let sent = false;
-          try {
-            if (l.paidMsat > 0 && l.quote && l.callId) {
-              sent = true;
-              await pay(l, CALL_HANGUP, { reason: 'hangup' }, signalCost(l.quote), owed.get(l));
+      try {
+        for (const l of known) {
+          await serial(async () => {
+            unstarted.delete(l);
+            let sent = false;
+            try {
+              if (l.paidMsat > 0 && l.quote && l.callId) {
+                sent = true;
+                await pay(l, CALL_HANGUP, { reason: 'hangup' }, signalCost(l.quote), owed.get(l));
+              }
+            } finally {
+              if (!sent && owed.has(l)) release(l, owed.get(l)!);
             }
-          } finally {
-            if (!sent && owed.has(l)) release(l, owed.get(l)!);
-          }
-        });
+          });
+        }
+      } finally {
+        unstarted.forEach((msat, l) => release(l, msat));
       }
       publish();
     },

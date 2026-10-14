@@ -375,6 +375,38 @@ describe('meeting engine: the tally (pending, unknown, paid)', () => {
     expect(views.find((v) => v.phase === 'ended')).toMatchObject({ paidMsat: 30_000, pendingCount: 2, pendingMsat: 12_000 });
   });
 
+  const neverNegative = (views: MeetingView[]) => views.every((v) => v.pendingCount >= 0 && v.pendingMsat >= 0);
+
+  it('declining two legs: the first hangup quote rejects, and the second reservation is released, not stranded', async () => {
+    const { e, views, sent, last } = engine({ quote: async () => { throw new Error('quote failed'); } });
+    await e.receive(offer(A, cid(0xa1), [A, B, OWN]), OWN);
+    await e.receive(offer(B, cid(0xb1), [A, B, OWN]), OWN);
+    expect(last().legs.filter((l) => l.state === 'incoming')).toHaveLength(2);
+    await expect(e.decline(SHOWN)).rejects.toThrow('quote failed');
+    expect(sent).toHaveLength(0);
+    expect(views.find((v) => v.phase === 'ended')).toMatchObject({ pendingCount: 2, pendingMsat: 12_000 });
+    expect(last()).toMatchObject({ phase: 'ended', paidMsat: 0, unknownCount: 0, pendingCount: 0, pendingMsat: 0 });
+    expect(neverNegative(views)).toBe(true);
+    e.dismiss();
+    expect(last().phase).toBe('idle');
+  });
+
+  it('leaving two paid legs: the first hangup rejects, it counts as unknown, and the second reservation is released', async () => {
+    const { e, views, sent, last } = engine({ signal: async (peer, kind, plaintext, max) => {
+      sent.push({ peer, kind, body: JSON.parse(plaintext), max });
+      if (kind === 403) throw new Error('connection lost');
+      return receipt(kind, 15_000);
+    } });
+    await e.invite([A, B], 'audio', SHOWN);
+    await expect(e.leave()).rejects.toThrow('connection lost');
+    // Only the first hangup was ever sent; the second never started.
+    expect(sent.map((x) => [x.peer, x.kind])).toEqual([[A, 400], [B, 400], [A, 403]]);
+    expect(last()).toMatchObject({ phase: 'ended', paidMsat: 30_000, unknownCount: 1, unknownMsat: 6_000, pendingCount: 0, pendingMsat: 0 });
+    expect(neverNegative(views)).toBe(true);
+    e.dismiss();
+    expect(last().phase).toBe('idle');
+  });
+
   it('a hangup that rejects after dispatch is unknown at its cap, and the leave still finishes', async () => {
     const { e, last } = engine({ signal: async (_peer, kind) => {
       if (kind === 403) throw new Error('connection lost');
