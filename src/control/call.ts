@@ -158,12 +158,14 @@ export type CallView = {
   recoveryUsed: boolean;
   /** Display only: the one recovery was already used when this drop began, so none is tried this time. */
   recoveryUsedBefore: boolean;
+  /** Display only: why a recovery could not start (recoveryRefused), apart from any other error (a camera, a hangup). */
+  recoveryError: string | null;
 };
 
 export const IDLE: CallView = {
   phase: 'idle', state: 'idle', peer: null, callId: null, media: 'audio', outgoing: false,
   liveAt: null, muted: false, camera: false, paidMsat: 0, connection: null, reason: null, error: null, offline: false,
-  dropAt: null, recoveryUsed: false, recoveryUsedBefore: false,
+  dropAt: null, recoveryUsed: false, recoveryUsedBefore: false, recoveryError: null,
 };
 
 type Outcome<T> = { ok: true; value: T } | { ok: false; error: ActionError };
@@ -306,7 +308,7 @@ export function createCallEngine(deps: CallDeps) {
   };
   const end = (reason: HangupReason | null, error: string | null = null) => {
     teardown();
-    set({ phase: 'ended', reason, error, camera: false, muted: false, offline: false, dropAt: null });
+    set({ phase: 'ended', reason, error, camera: false, muted: false, offline: false, dropAt: null, recoveryError: null });
   };
 
   const acquireMedia = (constraints: MediaStreamConstraints): Promise<MediaStream> => new Promise((resolve, reject) => {
@@ -357,6 +359,7 @@ export function createCallEngine(deps: CallDeps) {
     dropTimer = undefined;
     clearTimeout(restartTimer);
     restartTimer = undefined;
+    if (view.recoveryError !== null) set({ recoveryError: null });
     if (view.phase !== 'live') {
       clearTimeout(ringTimer);
       set({ phase: 'live', liveAt: view.liveAt ?? deps.now(), dropAt: null });
@@ -374,6 +377,7 @@ export function createCallEngine(deps: CallDeps) {
   const recoveryRefused = (conn: RTCPeerConnection, error: string) => {
     if (pc !== conn) return;
     set({ error });
+    set({ recoveryError: error });
     // A peer can request recovery after our transport has already healed;
     // refusing it will not trigger another connection-state event.
     reconcileConnection(conn);

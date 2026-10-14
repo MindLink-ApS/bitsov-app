@@ -3082,8 +3082,8 @@ function CallPanel(props: {
           <p class="hint" role="status" data-call-offline>You are offline. The call reconnects by itself if your network comes back in time.</p>
         </Show>
         <Show when={v().phase !== 'ended' && v().error}>
-          {/* While reconnecting, an error is a recovery that could not start: the call still waits for the connection. */}
-          <p class="hint" data-call-error>{v().phase === 'reconnecting' ? `Recovery could not start: ${v().error} Still waiting for the connection to come back on its own.` : v().error}</p>
+          {/* Only a recovery that could not start is framed as one (the call still waits); any other error (a camera, say) as it is. */}
+          <p class="hint" data-call-error>{v().phase === 'reconnecting' && v().recoveryError !== null ? `Recovery could not start: ${v().recoveryError} Still waiting for the connection to come back on its own.` : v().error}</p>
         </Show>
         <div class="call-actions">
           <Switch>

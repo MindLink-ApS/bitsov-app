@@ -236,6 +236,24 @@ describe('call restart negotiation', () => {
     caller.e.endLocal(); callee.e.endLocal();
   });
 
+  it('a camera error before a drop is not a recovery error: recoveryError stays empty', async () => {
+    const local = stream(true);
+    const fresh = stream(true, false);
+    let n = 0;
+    const caller = engine({ newCallId: () => n++ === 0 ? ID : 'e'.repeat(32), getUserMedia: async c => c.audio ? local : fresh });
+    await caller.e.place(A, 'video', QUOTE);
+    await caller.e.receive(msg(401, { sdp: 'v=0 answer' }), OWN);
+    const pc = FakePc.made[0];
+    pc.connect();
+    await caller.e.toggleCamera();
+    pc.senders[1].replaceTrack = async () => { throw new Error('sender failed'); };
+    await caller.e.toggleCamera();
+    expect(caller.e.view().error).toEqual(expect.any(String));
+    pc.state('disconnected');
+    expect(caller.e.view()).toMatchObject({ phase: 'reconnecting', recoveryUsed: false, recoveryError: null });
+    caller.e.endLocal();
+  });
+
   it('a callee-only failure requests one restart and caller ignores duplicate requests', async () => {
     const incoming = engine();
     await incoming.e.receive(msg(400, { media: 'audio', sdp: 'offer' }), OWN);
@@ -1410,6 +1428,28 @@ describe('calls in the shell', () => {
     await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
     expect($('[data-call-recovery-note]')).toBeNull();
     expect($('[data-call-reconnecting]')).toBeNull();
+  });
+
+  it('Codex: a camera error, then a drop: the camera error is shown as it is, never as a recovery that could not start', async () => {
+    vi.spyOn(HTMLMediaElement.prototype, 'srcObject', 'set').mockImplementation(() => {});
+    const host = stubHost({ messages_list: () => [] });
+    await openShell();
+    host.emitLive({ type: 'message', room_id: null, message: { ...msg(400, { media: 'video', sdp: 'offer' }), timestamp: Date.now() } });
+    await vi.waitFor(() => expect($('[data-call-accept]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-call-accept]')!.click();
+    await vi.waitFor(() => expect(host.used('call_signal')).toHaveLength(1));
+    const pc = FakePc.made[0]; pc.connect();
+    await vi.waitFor(() => expect($('[data-call-panel="live"]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-call-camera]')!.click();
+    await vi.waitFor(() => expect($('[data-call-camera]')!.getAttribute('aria-pressed')).toBe('false'));
+    pc.senders[1].replaceTrack = async () => { throw new Error('sender failed'); };
+    $<HTMLButtonElement>('[data-call-camera]')!.click();
+    await vi.waitFor(() => expect($('[data-call-error]')).not.toBeNull());
+    const cameraError = text('[data-call-error]');
+    pc.state('disconnected');
+    await vi.waitFor(() => expect($('[data-call-panel="reconnecting"]')).not.toBeNull());
+    expect(text('[data-call-error]')).toBe(cameraError);
+    expect(text('[data-call-error]')).not.toMatch(/Recovery could not start/);
   });
 
   it('a recovery that cannot start is said as such while it still waits for the connection', async () => {
