@@ -441,6 +441,21 @@ describe('acting from the track', () => {
     await vi.waitFor(() => expect(reasons().some((r) => r.includes('The message price changed before it was sent.'))).toBe(true));
   }, 30_000);
 
+  it('Approve & send (spending request): a successful Cancel request ends the wait; the window its request later arms never sends it', async () => {
+    const host = stubHost({ spend_cancel: () => view('locked') });
+    await openShell();
+    await pressWaiting(host);
+    await vi.waitFor(() => expect($('[data-spend-cancel]')).not.toBeNull(), { timeout: 6000 });
+    $<HTMLButtonElement>('[data-spend-cancel]')!.click();
+    await vi.waitFor(() => expect(host.used('spend_cancel')).toHaveLength(1));
+    await vi.waitFor(() => expect(unsentReason()).toContain('You cancelled the request. Nothing was sent.'));
+    // A read that overlapped the cancel shows the window ab12 armed anyway.
+    host.spend.v = openView('ab12');
+    const reads = host.used('spend_status').length;
+    await vi.waitFor(() => expect(host.used('spend_status').length).toBeGreaterThan(reads + 1), { timeout: 8000 });
+    expect(host.used('message_send')).toHaveLength(0);
+  }, 20_000);
+
   it('#227: an older host that names no grant offers plain Send (no Approve & send, no waiting bubble)', async () => {
     const legacy = (st: SpendView['state'], extra: Partial<SpendView> = {}) => ({ state: st, basis: null, open_until_ms: null, pending: null, window_ms: WINDOW, ...extra });
     const host = stubHost({
