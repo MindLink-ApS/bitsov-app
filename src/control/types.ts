@@ -482,7 +482,7 @@ export type ActionError = {
 };
 
 /** H1 `op_list`: the host's own record of a paid operation (read only; never a spending authority). */
-export type OperationState = 'dispatching' | 'paid' | 'unpaid' | 'paid_undelivered' | 'failed_paid' | 'unknown' | 'settled' | 'closed';
+export type OperationState = 'dispatching' | 'admission_resumable' | 'paid' | 'unpaid' | 'paid_undelivered' | 'failed_paid' | 'unknown' | 'settled' | 'closed';
 export type OpView = {
   op_id: string;
   /** `message`, `call_offer`, ...; any other string is shown as nothing. */
