@@ -27,6 +27,9 @@ use crate::act::ActionError;
 /// `/status` → `api_capabilities` entry for budget grants.
 pub const CAPABILITY: &str = "spend_budget_grant_v1";
 
+/// Node-owned identity for each accepted relation approval.
+pub const RELATION_ENVELOPE_ID_CAPABILITY: &str = "relation_envelope_id_v1";
+
 /// `/status` → `api_capabilities` entry for one-time first-contact grants:
 /// the stranger's signed quote before paying
 /// (`POST /messages/first-contact/quote`) and the owner's one-time OK for
@@ -69,6 +72,10 @@ pub struct NodeGrant {
     /// Relation grants: when each envelope ends, unix seconds.
     #[serde(default)]
     pub recipient_expires_at: BTreeMap<String, i64>,
+    /// Current node envelope IDs; null without capability support or a map.
+    /// Individual recipients may be null (legacy/unknown identity).
+    #[serde(default)]
+    pub envelope_id_by_recipient: Option<BTreeMap<String, Option<String>>>,
     /// Optional node breaker state, preserved unchanged for the renderer.
     pub breakers: Option<serde_json::Map<String, serde_json::Value>>,
 }
@@ -148,7 +155,7 @@ impl NodeGrant {
     }
 }
 
-/// What the renderer is told about the node grant. Numbers only.
+/// What the renderer is told about the node grant. No credentials or authority.
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct GrantSummary {
     pub expires_at_ms: u64,
@@ -158,6 +165,8 @@ pub struct GrantSummary {
     /// A relation grant: each contact with an envelope, and when it ends (ms).
     /// None for an owner console grant, which pays any contact within it.
     pub envelopes: Option<BTreeMap<String, u64>>,
+    /// Node-owned IDs, preserved as reported; never inferred from grant terms.
+    pub envelope_id_by_recipient: Option<BTreeMap<String, Option<String>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub breakers: Option<serde_json::Map<String, serde_json::Value>>,
 }
@@ -166,6 +175,7 @@ impl From<&NodeGrant> for GrantSummary {
     fn from(g: &NodeGrant) -> Self {
         Self {
             breakers: g.breakers.clone(),
+            envelope_id_by_recipient: g.envelope_id_by_recipient.clone(),
             expires_at_ms: g.expires_at_ms(),
             budget_msat: g.budget_msat,
             remaining_msat: g.remaining_msat,

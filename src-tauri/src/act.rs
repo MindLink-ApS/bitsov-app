@@ -445,6 +445,8 @@ pub struct SpendView {
     pub granted_op: Option<String>,
     /// The pending elevation completed to arm this window; null without one or when closed.
     pub armed_by_request: Option<String>,
+    /// `relation_approve`: the accepted node envelope ID, otherwise null.
+    pub envelope_id: Option<String>,
     pub state: SpendState,
     /// Set when the last request ended without a grant: the owner can ask again.
     pub lapse: Option<Lapse>,
@@ -621,6 +623,7 @@ impl SpendGate {
             request_id: None,
             granted_op: self.open.and(self.granted_op.clone()),
             armed_by_request: self.open.and(self.armed_by_request.clone()),
+            envelope_id: None,
             state,
             lapse: if state == SpendState::Expired { self.lapse } else { None },
             basis: self.open.map(|(_, b)| b),

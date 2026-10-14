@@ -3925,6 +3925,8 @@ struct Charge {
     /// The node keeps durable message operations (`message_operations_v1`):
     /// a 1:1 compose carries a journaled `operation_id`.
     operation: bool,
+    /// Envelope identity support from this send's status; None asks afresh.
+    envelope_ids: Option<bool>,
 }
 
 fn budget_dir(state: &NodeState) -> Result<(PathBuf, String), ActionError> {
@@ -4002,7 +4004,7 @@ fn plan_manual_charge(state: &NodeState, target: &str, max_msat: u64) -> Result<
     }))?;
     Ok(Charge {
         target: target.into(), room: false, confirm: None,
-        readmission_possible: false, confirmed: false, operation: false,
+        readmission_possible: false, confirmed: false, operation: false, envelope_ids: None,
     })
 }
 
@@ -4163,7 +4165,8 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
         if let Some(peer) = peer { let _ = read_first_contact_quote_with_cap(state, &peer, true).await; }
     }
     let all_in_caps = has_all_in_caps(state);
-    let node_grant = check_node_grant(state, path, &body, max_msat).await?;
+    let node_grant = check_node_grant_with_envelope_ids(state, path, &body, max_msat,
+        charge.as_ref().and_then(|c| c.envelope_ids)).await?;
     let reserve_msat = match (&charge, &node_grant) {
         // A zero cap: the node pays nothing, re-admission included.
         _ if max_msat == 0 => 0,
@@ -4883,11 +4886,24 @@ async fn node_has_g1(state: &NodeState) -> Result<bool, ActionError> {
 }
 
 async fn read_grant(state: &NodeState) -> Result<Option<NodeGrant>, ActionError> {
+    // Read capabilities first so the grant remains the freshest authority
+    // check immediately before a paid request.
+    let envelope_ids = node_offers(state, grant::RELATION_ENVELOPE_ID_CAPABILITY).await;
+    read_grant_with_envelope_ids(state, envelope_ids).await
+}
+
+async fn read_grant_with_envelope_ids(state: &NodeState, envelope_ids: bool) -> Result<Option<NodeGrant>, ActionError> {
     let (status, body) = call_api(state, reqwest::Method::GET, "/pair/grant", None).await.map_err(|_| grant::unreadable())?;
     if !status.is_success() {
         return Err(grant::unreadable());
     }
-    grant::parse(&body)
+    let mut grant = grant::parse(&body)?;
+    if let Some(g) = grant.as_mut() {
+        if !envelope_ids {
+            g.envelope_id_by_recipient = None;
+        }
+    }
+    Ok(grant)
 }
 
 /// Before opening anything on a paired node: `Ok(None)` on a pre-G1 node, the
@@ -4962,11 +4978,19 @@ fn drop_grant(state: &NodeState) {
 /// Re-read the node grant immediately before a paid request, and refuse what
 /// it would refuse. Only when this run opened its approvals under one.
 async fn check_node_grant(state: &NodeState, path: &str, body: &serde_json::Value, max_msat: u64) -> Result<Option<NodeGrant>, ActionError> {
+    check_node_grant_with_envelope_ids(state, path, body, max_msat, None).await
+}
+
+async fn check_node_grant_with_envelope_ids(state: &NodeState, path: &str, body: &serde_json::Value, max_msat: u64, envelope_ids: Option<bool>) -> Result<Option<NodeGrant>, ActionError> {
     if state.node_grant.lock().unwrap().is_none() {
         return Ok(None);
     }
     let now = now_ms();
-    let Some(g) = read_grant(state).await?.filter(|g| g.live(now)) else {
+    let grant = match envelope_ids {
+        Some(offered) => read_grant_with_envelope_ids(state, offered).await?,
+        None => read_grant(state).await?,
+    };
+    let Some(g) = grant.filter(|g| g.live(now)) else {
         drop_grant(state);
         return Err(grant::ended());
     };
@@ -5328,6 +5352,7 @@ struct SendCaps {
     /// A capped 1:1 chat may pay a reconnect's re-admission under the
     /// contact's fresh signed quote (genome #111 revived).
     quoted_readmission: bool,
+    envelope_ids: bool,
 }
 
 async fn require_price_caps(state: &NodeState, room: bool) -> Result<SendCaps, ActionError> {
@@ -5343,6 +5368,7 @@ async fn require_price_caps(state: &NodeState, room: bool) -> Result<SendCaps, A
         readmission_possible: has(grant::FIRST_CONTACT_CAPABILITY),
         operations: has(OPERATIONS_CAPABILITY),
         quoted_readmission: has(act::QUOTED_READMISSION_CAPABILITY),
+        envelope_ids: has(grant::RELATION_ENVELOPE_ID_CAPABILITY),
         status,
     })
 }
@@ -5493,7 +5519,7 @@ async fn do_message_send_inner(
             body["max_routing_fee_msat"] = serde_json::json!(ask.max_routing_fee_msat);
         }
     }
-    let charge = Charge { target: target.clone(), room: is_room, confirm: plan.confirm, readmission_possible, confirmed: node_ok.is_some(), operation: caps.operations && !is_room };
+    let charge = Charge { target: target.clone(), room: is_room, confirm: plan.confirm, readmission_possible, confirmed: node_ok.is_some(), operation: caps.operations && !is_room, envelope_ids: Some(caps.envelope_ids) };
     let sent = money_post(state, auth, "/messages/compose", body.clone(), max_msat, Some(charge)).await;
     let sent = match sent {
         // After a reconnect or restart the contact asks for admission again,
@@ -5646,7 +5672,7 @@ async fn do_message_retry(state: &NodeState, recipient: &str, plaintext: &str, a
         confirm_first_contact(state, &target, cap, contact_budget, caps.readmission_possible).await?;
     }
     // Nothing can be paid under a zero cap, re-admission included.
-    let charge = Charge { target: target.clone(), room: false, confirm: None, readmission_possible: readmission_possible && approved_msat.is_some(), confirmed: approved_msat.is_some(), operation: caps.operations };
+    let charge = Charge { target: target.clone(), room: false, confirm: None, readmission_possible: readmission_possible && approved_msat.is_some(), confirmed: approved_msat.is_some(), operation: caps.operations, envelope_ids: Some(caps.envelope_ids) };
     let text = match money_post_with(state, auth, "/messages/compose", body, cap, Some(charge), Some(&undelivered)).await {
         // The node pays re-admission under a cap that fits the contact's signed
         // quote: Retry delivery (zero cap) asks the owner for that price.
@@ -5934,7 +5960,7 @@ async fn do_call_signal(
         // Admission plus one hangup: check the ceiling shown for the whole
         // call, not just this offer. money_post still rechecks the paid step.
         let total = quote.call_total_msat.expect("an offer has a call total");
-        check_node_grant(state, "/messages/compose", &body, total).await.map_err(|mut error| {
+        check_node_grant_with_envelope_ids(state, "/messages/compose", &body, total, Some(caps.envelope_ids)).await.map_err(|mut error| {
             if matches!(error.code, "grant_per_call" | "grant_exhausted") {
                 error.message = format!(
                     "This call needs up to {}. {} The owner would need to approve at least {} per call and enough remaining budget for that ceiling. Nothing was sent or paid.",
@@ -5953,6 +5979,7 @@ async fn do_call_signal(
         readmission_possible: caps.readmission_possible,
         confirmed: false,
         operation: caps.operations,
+        envelope_ids: Some(caps.envelope_ids),
     };
     let text = money_post(state, auth, "/messages/compose", body, max_msat, Some(charge)).await?;
     let reply: act::SendReply = text.decode("/messages/compose")?;
@@ -6043,6 +6070,7 @@ async fn do_porch_read(state: &NodeState, peer: &str, path: &str, max_msat: u64)
         readmission_possible: false,
         confirmed: false,
         operation: false,
+        envelope_ids: None,
     };
     let (text, accounted) = porch_post(state, auth, body, max_msat, charge).await?;
     porch::project(&text, &target, &path, accounted, now_unix().max(0) as u64).map_err(|e| {
@@ -6222,6 +6250,7 @@ async fn do_file_send(
         readmission_possible: caps.readmission_possible,
         confirmed: node_ok.is_some(),
         operation: false,
+        envelope_ids: Some(caps.envelope_ids),
     };
     let text = money_post(
         state,
@@ -6724,6 +6753,14 @@ async fn do_relation_approve(
         }
         return Err(ActionError::node(api_error("/pair/relation-intent", status, &text)));
     }
+    // This approval's ID comes only from its response, never from the later
+    // grant read (another device may already have replaced the envelope).
+    let envelope_id = if node_offers(state, grant::RELATION_ENVELOPE_ID_CAPABILITY).await {
+        serde_json::from_str::<serde_json::Value>(&text).ok()
+            .and_then(|reply| reply["envelope_id"].as_str().map(str::to_owned))
+    } else {
+        None
+    };
     // The grant reaches a token only on re-issue. Open the window over the
     // relation grant and nothing else: never a console elevation request.
     refresh_paired(state).await.map_err(ActionError::node)?;
@@ -6737,7 +6774,7 @@ async fn do_relation_approve(
     };
     open_fenced(state, fence, Want::Window, act::SpendBasis::NodeGrant, Some(&grant))?;
     save_spend_pending(state);
-    Ok(state.spend.lock().unwrap().view(now_ms()))
+    Ok(act::SpendView { envelope_id, ..state.spend.lock().unwrap().view(now_ms()) })
 }
 
 // Owner approval v1 uses the renderer's default camelCase invoke arguments.
@@ -10166,7 +10203,7 @@ mod control_act_tests {
         let mut body = act::compose_body(ROOM, true, "hi").unwrap();
         body["max_total_msat"] = serde_json::json!(13000);
         body["max_recipient_msat"] = serde_json::json!({A: 7000, C: 6000});
-        let charge = Charge { target: ROOM.into(), room: true, confirm: plan.confirm, readmission_possible: false, confirmed: false, operation: true };
+        let charge = Charge { target: ROOM.into(), room: true, confirm: plan.confirm, readmission_possible: false, confirmed: false, operation: true, envelope_ids: None };
         money_post(&ops.state, auth, "/messages/compose", body, 13000, Some(charge)).await.unwrap();
         assert_eq!(op_ids(&node), [None]);
         assert_eq!(op_ids(&ops), [None], "genome refuses operation_id for rooms (slice 4)");
@@ -10669,7 +10706,7 @@ mod control_act_tests {
                     else if command == "porch" {
                         porch_post(&node.state, Auth::Window(0), serde_json::json!({}), 6000,
                             Charge { target: A.into(), room: false, confirm: None,
-                                readmission_possible: false, confirmed: false, operation: false }).await.map(|_| ())
+                                readmission_possible: false, confirmed: false, operation: false, envelope_ids: None }).await.map(|_| ())
                     }
                     else { money_post_with(&node.state, Auth::Window(0), "/messages/compose",
                         serde_json::json!({}), 7000, None, None).await.map(|_| ()) }
@@ -14354,6 +14391,93 @@ mod control_act_tests {
 
     #[cfg(target_os = "macos")]
     #[tokio::test]
+    async fn relation_envelope_identity_approval_passes_only_the_advertised_node_id() {
+        for (advertised, identity) in [
+            (true, serde_json::json!("approval-A/opaque")),
+            (false, serde_json::json!("approval-A/opaque")),
+            (true, serde_json::Value::Null),
+            (false, serde_json::Value::Null),
+        ] {
+            let (dn, device_routes) = device_node();
+            let returned_identity = identity.clone();
+            let routes: Routes = Arc::new(move |m, path, body| {
+                if path == "/status" {
+                    let caps = if advertised {
+                        vec!["spend_budget_grant_v1", "relation_envelope_id_v1"]
+                    } else { vec!["spend_budget_grant_v1"] };
+                    return (200, serde_json::json!({"api_capabilities": caps}).to_string());
+                }
+                let (status, text) = device_routes(m, path, body);
+                if path == "/pair/relation-intent" && status == 200 {
+                    let mut reply: serde_json::Value = serde_json::from_str(&text).unwrap();
+                    // An older node omits the field entirely.
+                    if advertised || !returned_identity.is_null() {
+                        reply["envelope_id"] = returned_identity.clone();
+                    }
+                    return (status, reply.to_string());
+                }
+                (status, text)
+            });
+            let (node, _dir, g1) = g1_node_with(&["read", "receive"], Some(routes));
+            *node.state.device_policy.lock().unwrap() = device_key::Policy::NoPromptForTests;
+            let s = &node.state;
+            do_device_key_register(s).await.unwrap();
+            dn.registered.store(true, Ordering::SeqCst);
+            do_device_key_status(s).await.unwrap();
+            *g1.grant.lock().unwrap() = relation_grant(A, 7000);
+            // A later grant read must not substitute B for the approval's A.
+            g1.grant.lock().unwrap()["envelope_id_by_recipient"] = serde_json::json!({A: "approval-B"});
+            let reply = serde_json::to_value(do_relation_approve(s, A, None, Some(7000)).await.unwrap()).unwrap();
+            let expected = if advertised { identity } else { serde_json::Value::Null };
+            assert_eq!(reply.get("envelope_id"), Some(&expected));
+            assert_eq!(reply["state"], "open");
+        }
+    }
+
+    #[tokio::test]
+    async fn relation_envelope_identity_grant_requires_capability_and_preserves_legacy_null() {
+        for advertised in [false, true] {
+            let routes: Routes = Arc::new(move |_, path, _| {
+                if path == "/status" {
+                    let caps = if advertised {
+                        vec!["spend_budget_grant_v1", "relation_envelope_id_v1"]
+                    } else { vec!["spend_budget_grant_v1"] };
+                    return (200, serde_json::json!({"api_capabilities": caps}).to_string());
+                }
+                (0, String::new())
+            });
+            let (node, _dir, g1) = g1_node_with(&["read", "receive", "spend"], Some(routes));
+            for identities in [serde_json::json!({A: "approval-A", C: null}), serde_json::Value::Null] {
+                g1.grant.lock().unwrap()["envelope_id_by_recipient"] = identities.clone();
+                let reply = serde_json::to_value(do_budget_status(&node.state).await.unwrap()).unwrap();
+                let expected = if advertised { identities } else { serde_json::Value::Null };
+                assert_eq!(reply["node_grant"].get("envelope_id_by_recipient"), Some(&expected));
+            }
+            g1.grant.lock().unwrap().as_object_mut().unwrap().remove("envelope_id_by_recipient");
+            let reply = serde_json::to_value(do_budget_status(&node.state).await.unwrap()).unwrap();
+            assert_eq!(reply["node_grant"].get("envelope_id_by_recipient"), Some(&serde_json::Value::Null));
+        }
+    }
+
+    #[tokio::test]
+    async fn relation_envelope_identity_grant_refresh_reports_replacement_b() {
+        let routes: Routes = Arc::new(|_, path, _| {
+            if path == "/status" {
+                return (200, serde_json::json!({"api_capabilities": ["spend_budget_grant_v1", "relation_envelope_id_v1"]}).to_string());
+            }
+            (0, String::new())
+        });
+        let (node, _dir, g1) = g1_node_with(&["read", "receive", "spend"], Some(routes));
+        // Only the identity changes: same aggregate op, terms and expiry.
+        for identity in ["approval-A", "approval-B"] {
+            g1.grant.lock().unwrap()["envelope_id_by_recipient"] = serde_json::json!({A: identity, C: null});
+            let reply = serde_json::to_value(do_budget_status(&node.state).await.unwrap()).unwrap();
+            assert_eq!(reply["node_grant"]["envelope_id_by_recipient"], serde_json::json!({A: identity, C: null}));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
     async fn register_once_then_a_touch_id_envelope_opens_sending_to_that_contact_only() {
         let (dn, first) = device_node();
         let (node, _dir, g1) = g1_node_with(&["read", "receive"], Some(first));
@@ -14539,6 +14663,8 @@ mod control_act_tests {
         let routes: Routes = Arc::new(move |m, p, b| {
             let high = raised.load(Ordering::SeqCst);
             let value = match p {
+                "/status" => serde_json::json!({"api_capabilities": ["paid_send_caps_v1", "room_terminal_outcomes_v1",
+                    "spend_budget_grant_v1", "first_contact_grant_v1", "relation_envelope_id_v1"]}),
                 "/pricing/peers" => serde_json::json!([
                     {"peer_id": A, "prices": {"communication": if high { 9000 } else { 2000 }}, "age_secs": 0, "stale": false}
                 ]),
@@ -14575,10 +14701,14 @@ mod control_act_tests {
     #[tokio::test]
     async fn send_preflight_reads_status_once_and_grant_last() {
         for call in [false, true] {
-            let (node, _dir, _g1) = send_preflight_node(call, Arc::new(AtomicBool::new(false))).await;
-            for _ in 0..2 {
+            let (node, _dir, g1) = send_preflight_node(call, Arc::new(AtomicBool::new(false))).await;
+            for identity in ["approval-A", "approval-B"] {
+                g1.grant.lock().unwrap()["envelope_id_by_recipient"] = serde_json::json!({A: identity, C: null});
                 node.seen.lock().unwrap().clear();
                 preflight_send(&node, call).await.unwrap();
+                // Sending refreshes the identity too, using this send's one status read.
+                let view = serde_json::to_value(budget_now(&node.state)).unwrap();
+                assert_eq!(view["node_grant"]["envelope_id_by_recipient"], serde_json::json!({A: identity, C: null}));
                 let targets = node.targets();
                 assert_eq!(targets.iter().filter(|p| *p == "GET /status").count(), 1, "{targets:?}");
                 let own = if call { "GET /payments/price/401" } else { "GET /payments/price/0" };

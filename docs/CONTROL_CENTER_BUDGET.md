@@ -76,6 +76,16 @@ invoice or payment.
   grant. The budget approval and the window then end at the grant's
   `expires_at`, and the approval's ceiling is `min(asked, budget_msat)`. The
   book's own numbers still apply on top: narrowest wins.
+- **Relation envelope identity is node-owned.** With `relation_envelope_id_v1`
+  in `/status.api_capabilities`, `relation_approve.envelope_id` passes through
+  the ID returned by `POST /pair/relation-intent`. The grant summary carries
+  `envelope_id_by_recipient` from each fresh `GET /pair/grant`, including null
+  entries for legacy recipients. Without the capability, both fields are null;
+  missing IDs remain null. The approval response keeps its own ID even if the
+  following grant read reports a replacement. No ID is inferred from `op_id`,
+  terms, expiry or the signed nonce, and this adds no renderer behavior.
+  Contract checked against node branch `feat/relation-envelope-identity`,
+  commit `39a1d20b` (not yet released).
 - **Relaunch reads current authority before restoring a pending request.**
   Startup polls spend status before budget status. That first poll reads
   `/status` and `/pair/grant` before a saved elevation can change the approval

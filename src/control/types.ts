@@ -566,6 +566,8 @@ export type SpendView = {
   /** Open windows: the node request whose completion armed this window; null when armed immediately (cx-armedby-1). Absent on older hosts. */
   /** Pending elevation completed to arm the open window; null without one or when closed. Absent on older hosts. */
   armed_by_request?: string | null;
+  /** `relation_approve`: the node's accepted envelope ID; null if unknown or unsupported. Absent on older hosts. */
+  envelope_id?: string | null;
   state: SpendState;
   /** Set with `expired` when a request ended ungranted: offer Ask again. */
   lapse?: SpendLapse | null;
@@ -616,7 +618,7 @@ export type BudgetView = BudgetAccounting & {
   node_grant: NodeGrantSummary | null;
 };
 
-/** What the node reports about its budget grant. Numbers only. */
+/** What the node reports about its budget grant. No credentials or authority. */
 export type NodeGrantSummary = {
   expires_at_ms: number;
   budget_msat: number;
@@ -624,6 +626,8 @@ export type NodeGrantSummary = {
   per_call_max_msat: number;
   /** A Touch ID relation grant: each contact with an envelope → when it ends (ms). Absent for a console grant. */
   envelopes?: Record<string, number> | null;
+  /** Current node envelope IDs; null without capability support. Null entries are legacy/unknown; absent peers are unknown. Absent on older hosts. */
+  envelope_id_by_recipient?: Record<string, string | null> | null;
   /** The node's breaker state for this grant (owner approval v1 node), passed through by the host. */
   breakers?: BreakerStatus;
 };
