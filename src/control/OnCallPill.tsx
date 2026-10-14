@@ -17,7 +17,8 @@ export const CALL_STATE_WORD: Record<CallView['phase'], string> = {
 export function OnCallPill(props: { view: CallView; onReturn: () => void }) {
   const [now, setNow] = createSignal(Date.now());
   createEffect(() => {
-    if (props.view.phase !== 'live') return;
+    // Live: the duration. Reconnecting: the seconds left before the call ends (only when known).
+    if (props.view.phase !== 'live' && !(props.view.phase === 'reconnecting' && props.view.dropAt !== null)) return;
     setNow(Date.now());
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     onCleanup(() => window.clearInterval(timer));
@@ -25,6 +26,7 @@ export function OnCallPill(props: { view: CallView; onReturn: () => void }) {
   const shown = () => props.view.phase !== 'idle' && props.view.phase !== 'incoming';
   const text = () => {
     const word = CALL_STATE_WORD[props.view.phase];
+    if (props.view.phase === 'reconnecting' && props.view.dropAt !== null) return `${word} · ${Math.max(0, Math.ceil((props.view.dropAt - now()) / 1000))} s`;
     return props.view.phase === 'live' && props.view.liveAt !== null
       ? `${word} · ${duration(Math.max(0, now() - props.view.liveAt)).padStart(5, '0')}`
       : word;

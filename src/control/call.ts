@@ -152,11 +152,18 @@ export type CallView = {
    * after the grace), whatever this says.
    */
   offline: boolean;
+  /** Display only: while reconnecting, when the call ends if the connection has not come back. */
+  dropAt: number | null;
+  /** Display only: this call has used its one recovery attempt (a restart offer, or a restart request or answer). */
+  recoveryUsed: boolean;
+  /** Display only: the one recovery was already used when this drop began, so none is tried this time. */
+  recoveryUsedBefore: boolean;
 };
 
 export const IDLE: CallView = {
   phase: 'idle', state: 'idle', peer: null, callId: null, media: 'audio', outgoing: false,
   liveAt: null, muted: false, camera: false, paidMsat: 0, connection: null, reason: null, error: null, offline: false,
+  dropAt: null, recoveryUsed: false, recoveryUsedBefore: false,
 };
 
 type Outcome<T> = { ok: true; value: T } | { ok: false; error: ActionError };
@@ -299,7 +306,7 @@ export function createCallEngine(deps: CallDeps) {
   };
   const end = (reason: HangupReason | null, error: string | null = null) => {
     teardown();
-    set({ phase: 'ended', reason, error, camera: false, muted: false, offline: false });
+    set({ phase: 'ended', reason, error, camera: false, muted: false, offline: false, dropAt: null });
   };
 
   const acquireMedia = (constraints: MediaStreamConstraints): Promise<MediaStream> => new Promise((resolve, reject) => {
@@ -352,7 +359,7 @@ export function createCallEngine(deps: CallDeps) {
     restartTimer = undefined;
     if (view.phase !== 'live') {
       clearTimeout(ringTimer);
-      set({ phase: 'live', liveAt: view.liveAt ?? deps.now() });
+      set({ phase: 'live', liveAt: view.liveAt ?? deps.now(), dropAt: null });
     }
   };
 
@@ -444,6 +451,8 @@ export function createCallEngine(deps: CallDeps) {
     if (pc !== conn || !active()) return;
     clearTimeout(ringTimer);
     set({ phase: 'reconnecting' });
+    // Display only: when this drop ends the call, and whether its one recovery was already spent.
+    if (dropTimer === undefined) set({ dropAt: deps.now() + RECONNECT_GRACE_MS, recoveryUsedBefore: view.recoveryUsed });
     if (dropTimer === undefined) dropTimer = setTimeout(() => {
       if (pc === conn && !reconcileConnection(conn)) end('failed', view.error ?? 'The connection was lost. Check that both apps have a reachable STUN server in Settings; some networks cannot connect without a relay.');
     }, RECONNECT_GRACE_MS);
@@ -456,6 +465,7 @@ export function createCallEngine(deps: CallDeps) {
     // produce glare or two fresh admission charges. The callee can request it.
     if (!view.outgoing) restartRequested = true;
     else restartAttempted = true;
+    set({ recoveryUsed: true });
     try {
       if (deps.authorize && !await deps.authorize()) {
         recoveryRefused(conn, 'Call recovery needs spending approval.');
@@ -508,6 +518,7 @@ export function createCallEngine(deps: CallDeps) {
         restartParent(signal.sdp!) !== view.callId || admissions.has(signal.call_id) || signal.media !== view.media) return;
     restartAttempted = true;
     reconnect(conn);
+    set({ recoveryUsed: true });
     try {
       if (deps.authorize && !await deps.authorize()) {
         recoveryRefused(conn, 'Call recovery needs spending approval.');

@@ -3017,6 +3017,7 @@ function CallPanel(props: {
   const [answer, setAnswer] = createSignal<number | null>(null);
   createEffect(() => {
     if (!['live', 'reconnecting'].includes(props.view.phase)) return;
+    setTick(Date.now());
     const t = setInterval(() => setTick(Date.now()), 1000);
     onCleanup(() => clearInterval(t));
   });
@@ -3042,7 +3043,18 @@ function CallPanel(props: {
         <Show when={['calling', 'ringing', 'connecting'].includes(v().phase) || (v().phase === 'ended' && (v().reason === 'failed' || v().reason === 'timeout'))}>
           <CallNetworkNote onOpenSettings={props.openCallSettings} />
         </Show>
-        <p class="hint" data-call-recovery-note>A network interruption may trigger one paid recovery attempt within your budget. Recovery uses another call admission and signalling fees.</p>
+        {/* Not on the ended card: it promises a recovery that can no longer happen. */}
+        <Show when={v().phase !== 'ended'}>
+          <p class="hint" data-call-recovery-note>A network interruption may trigger one paid recovery attempt within your budget. Recovery uses another call admission and signalling fees.</p>
+        </Show>
+        {/* While reconnecting: what is happening, and when the call ends if it does not come back (display only). */}
+        <Show when={v().phase === 'reconnecting'}>
+          <p class="hint" role="status" data-call-reconnecting>
+            Connection lost. Reconnecting…
+            <Show when={v().dropAt !== null}>{' '}If it isn’t back in <span data-call-drop-in>{Math.max(0, Math.ceil((v().dropAt! - tick()) / 1000))}</span> s, the call ends.</Show>
+            <Show when={v().recoveryUsedBefore}>{' '}This call already used its one recovery; waiting for the connection to come back on its own.</Show>
+          </p>
+        </Show>
         <Show when={v().media === 'video' && (v().phase === 'live' || v().phase === 'connecting' || v().phase === 'reconnecting')}>
           <div class="call-videos">
             <MediaView stream={props.streams.remote} video muted={false} kind="remote" />
@@ -3070,7 +3082,8 @@ function CallPanel(props: {
           <p class="hint" role="status" data-call-offline>You are offline. The call reconnects by itself if your network comes back in time.</p>
         </Show>
         <Show when={v().phase !== 'ended' && v().error}>
-          <p class="hint" data-call-error>{v().error}</p>
+          {/* While reconnecting, an error is a recovery that could not start: the call still waits for the connection. */}
+          <p class="hint" data-call-error>{v().phase === 'reconnecting' ? `Recovery could not start: ${v().error} Still waiting for the connection to come back on its own.` : v().error}</p>
         </Show>
         <div class="call-actions">
           <Switch>
@@ -3100,7 +3113,7 @@ function CallPanel(props: {
 }
 
 const LEG_STATE: Record<LegState, string> = {
-  waiting: 'Waiting', placing: 'Preparing…', ringing: 'Ringing', incoming: 'Ringing you', connecting: 'Connecting', live: 'Live', ended: 'Ended', nolink: 'No link',
+  waiting: 'Waiting', placing: 'Preparing…', ringing: 'Ringing', incoming: 'Ringing you', connecting: 'Connecting', live: 'Live', reconnecting: 'Reconnecting…', ended: 'Ended', nolink: 'No link',
 };
 
 /**
