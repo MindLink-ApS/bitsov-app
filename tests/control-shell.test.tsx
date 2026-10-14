@@ -303,6 +303,52 @@ describe('control center shell', () => {
     expect(calls.filter((c) => c.cmd === 'spend_request')).toHaveLength(1);
   });
 
+  it('the connection card (Settings → Node): Copy details carries no id, address, onion, ticket or token, and Check now reads only the node status', async () => {
+    const TICKET = 'bitsov://pair/SECRETTICKET123';
+    const TOKEN = 'tok_9f8e7d6c5b4a3921';
+    const host = stubHost({
+      // Sensitive values the host knows: none of them may reach the copied text.
+      node_status: () => ({ ready: true, node_id: OWN, error: null, pairing_link: TICKET, token: TOKEN, address: '203.0.113.7:9735' }),
+      node_overview: () => ({
+        node_id: OWN, status: 'ok', version: 'api v2', connected_peers: 1, e2ee_sessions: 2, pending_deliveries: 0, lightning_available: true,
+        block_height: 860123, uptime_secs: 60, lightning_backend: 'ldk', chain_backend: 'esplora', read_at: Date.now(),
+        stun_port: 3478, stun_url: 'stun:mynode.example.org:3478', onion: 'abcdefghijklmnop.onion',
+      }),
+    });
+    let copied = '';
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async (t: string) => { copied = t; } } });
+    start();
+    await vi.waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
+    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
+    await vi.waitFor(() => expect(mount.querySelector<HTMLButtonElement>('[data-profile]')?.disabled).toBe(false));
+    click('[data-profile]');
+    await vi.waitFor(() => expect(mount.querySelector('[data-open-settings]')).not.toBeNull());
+    click('[data-open-settings]');
+    await vi.waitFor(() => expect(mount.querySelector('[data-tab="node"]')).not.toBeNull());
+    click('[data-tab="node"]');
+    await vi.waitFor(() => expect(mount.querySelector('[data-connection-card]')).not.toBeNull());
+    await vi.waitFor(() => expect(mount.querySelector('[data-connection-line="2"]')!.textContent).toMatch(/ms$/));
+    expect(mount.querySelector('[data-connection-line="3"]')!.textContent).toBe('Calls · STUN: your node');
+    click('[data-connection-copy]');
+    await vi.waitFor(() => expect(copied).toContain('BitSov connection'));
+    for (const secret of [OWN, A, B, TICKET, 'SECRETTICKET', TOKEN, '203.0.113.7', '127.0.0.1', '9735', '9736', 'mynode.example.org', '3478', 'abcdefghijklmnop', '.onion']) {
+      expect(copied).not.toContain(secret);
+    }
+    // Patterns: no long hex id, no IPv4, no host:port, no onion, no pairing link, no token-looking string.
+    expect(copied).not.toMatch(/[0-9a-f]{16,}/i);
+    expect(copied).not.toMatch(/\b\d{1,3}(\.\d{1,3}){3}\b/);
+    // host:port (a clock time like 12:04:31 is not one): a dotted host name or localhost, then a port.
+    expect(copied).not.toMatch(/\b(localhost|[a-z][a-z0-9-]*(\.[a-z0-9-]+)+):\d{2,5}\b/i);
+    expect(copied).not.toMatch(/\.onion|bitsov:\/\/|tok_/i);
+    // Check now: one node status read, nothing else.
+    const count = (cmd: string) => host.calls.filter((c) => c.cmd === cmd).length;
+    const before = { status: count('node_status'), pairing: count('pairing_status'), budget: count('budget_status'), spend: count('spend_status') };
+    click('[data-connection-check]');
+    await Promise.resolve(); await Promise.resolve();
+    expect(count('node_status')).toBe(before.status + 1);
+    expect({ pairing: count('pairing_status'), budget: count('budget_status'), spend: count('spend_status') }).toEqual({ pairing: before.pairing, budget: before.budget, spend: before.spend });
+  });
+
   it('with this Mac registered, the composer approves one contact with Touch ID, terms first', async () => {
     const open = { state: 'open', lapse: null, basis: 'node_grant', open_until_ms: Date.now() + 600_000, pending: null, window_ms: 600_000 };
     const { calls } = stubHost({

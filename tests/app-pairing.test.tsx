@@ -409,6 +409,38 @@ describe('app shell pairing wiring', () => {
     } finally { observer.disconnect(); }
   });
 
+  it('the status poll keeps its cadence and its offline transitions (the connection card only times it)', async () => {
+    vi.useFakeTimers();
+    const calls: string[] = [];
+    let reachable = true;
+    vi.stubGlobal('__TAURI_INTERNALS__', { invoke: (cmd: string) => {
+      calls.push(cmd);
+      if (cmd === 'node_status') return Promise.resolve(reachable
+        ? { ready: true, node_id: 'ef'.repeat(32), error: null }
+        : { ready: false, node_id: null, error: 'connection refused' });
+      if (cmd === 'pairing_status') return Promise.resolve({ ...paired, remote: true, trust_acknowledged_node_id: 'ef'.repeat(32) });
+      return Promise.reject(new Error('not available'));
+    } });
+    mount = document.createElement('div'); document.body.appendChild(mount);
+    dispose = render(() => <App />, mount);
+    await vi.advanceTimersByTimeAsync(100);
+    const reads = () => calls.filter((c) => c === 'node_status').length;
+    const pairings = () => calls.filter((c) => c === 'pairing_status').length;
+    const start = { reads: reads(), pairings: pairings() };
+    expect(start.reads).toBe(1);
+    await vi.advanceTimersByTimeAsync(4500);
+    // Exactly one status read (and one pairing read) per 1.5 s tick, as before.
+    expect(reads() - start.reads).toBe(3);
+    expect(pairings() - start.pairings).toBe(3);
+    expect(mount.querySelector('[data-node-offline]')).toBeNull();
+    reachable = false;
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(mount.querySelector('[data-node-offline]')).not.toBeNull();
+    reachable = true;
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(mount.querySelector('[data-node-offline]')).toBeNull();
+  });
+
   it.each(['revoked', 'identity changed', 'setup reset'] as const)('returns a warm shell to onboarding when %s', async (change) => {
     vi.useFakeTimers();
     let nodeId = 'ef'.repeat(32);

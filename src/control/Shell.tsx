@@ -1,5 +1,6 @@
 import { AddDevice } from '../onboarding/AddDevice';
 import { CALL_STATE_WORD, OnCallPill } from './OnCallPill';
+import { ConnectionCard, type CallRoute, type NodeAnswer, type StunSource } from './ConnectionCard';
 import { watchSamples, type WatchSamples, type WatchUpdates } from './watches';
 import { ASSISTANTS, type AssistantId } from './assistants';
 import { PendingApproval } from '../onboarding/LockedNode';
@@ -64,6 +65,7 @@ import {
   stunOff,
   effectiveStun,
   setNodeStun,
+  nodeStun,
   setThemePref,
   stunPref,
   themePref,
@@ -156,6 +158,10 @@ type Props = {
   active: boolean;
   /** Transient connection readiness, independent of shell visibility. */
   live?: boolean;
+  /** When the status read last reached the node, and its round trip (the connection card). */
+  nodeAnswer?: NodeAnswer | null;
+  /** One status read (the connection card's Check now). */
+  onCheckNode?: () => Promise<void>;
   ready: boolean;
   error: string | null;
   ownId: string | null;
@@ -1212,6 +1218,10 @@ export function ControlCenter(props: Props) {
     iceServers: () => stunServer(effectiveStun()),
     busy: () => meetingOn(),
   });
+  // The last call's route (candidate types only), kept after the call for the connection card.
+  const [lastCall, setLastCall] = createSignal<CallRoute | null>(null);
+  createEffect(() => { const c = callView().connection; if (c) setLastCall(c); });
+  const stunSource = (): StunSource => (stunOff() ? 'off' : stunPref() ? 'custom' : nodeStun() ? 'node' : 'none');
   // Closing the window ends the call here without paying; only Hang up pays.
   onCleanup(() => calls.endLocal());
 
@@ -1932,7 +1942,8 @@ export function ControlCenter(props: Props) {
             />
           </Match>
           <Match when={tab() === 'node'}>
-            <NodePanel deviceApprovals={<>
+            <NodePanel connection={<ConnectionCard remote={props.remote === true} link={link()} live={live()} answer={props.nodeAnswer ?? null}
+              stun={stunSource()} lastCall={lastCall()} onCheck={props.onCheckNode} />} deviceApprovals={<>
               {/* A discovery error shows on its own, even when the very first read failed. */}
               <Show when={canApprove() || (approvalsCapable() && approvalsError() !== null)}>
                 <OwnerApprovals
@@ -6926,7 +6937,7 @@ function NewTrack(props: {
 
 // ---- context panels ---------------------------------------------------------
 
-function NodePanel(props: { deviceApprovals?: JSX.Element; onForgetRemote?: () => Promise<void>; overview: NodeOverview | null; link: LinkState | null; peers: Peer[]; now: number; error?: string; onReconnect: () => Promise<void> }) {
+function NodePanel(props: { connection?: JSX.Element; deviceApprovals?: JSX.Element; onForgetRemote?: () => Promise<void>; overview: NodeOverview | null; link: LinkState | null; peers: Peer[]; now: number; error?: string; onReconnect: () => Promise<void> }) {
   const fresh = () => freshness(props.overview?.read_at ?? null, props.now);
   const linkText = () =>
     props.link === 'open' ? 'Live' : props.link === 'connecting' ? 'Connecting' : props.link === 'closed' ? 'Reconnecting' : 'Waiting';
@@ -6936,6 +6947,7 @@ function NodePanel(props: { deviceApprovals?: JSX.Element; onForgetRemote?: () =
       {props.deviceApprovals}
       <Show when={props.onForgetRemote}><LocalNodeSwitch onForget={() => props.onForgetRemote!()} /></Show>
       <HubTrustInfo level={3} />
+      {props.connection}
       <Show when={props.overview} fallback={<Show when={!props.error}><DelayedSpinner /></Show>}>
         {(o) => (
           <dl class="facts">
