@@ -1,6 +1,6 @@
 import { AddDevice } from '../onboarding/AddDevice';
 import { CALL_STATE_WORD, OnCallPill } from './OnCallPill';
-import { ConnectionCard, type CallRoute, type NodeAnswer, type StunSource } from './ConnectionCard';
+import { ConnectionCard, type LastCall, type NodeAnswer, type StunSource } from './ConnectionCard';
 import { watchSamples, type WatchSamples, type WatchUpdates } from './watches';
 import { ASSISTANTS, type AssistantId } from './assistants';
 import { PendingApproval } from '../onboarding/LockedNode';
@@ -160,8 +160,12 @@ type Props = {
   live?: boolean;
   /** When the status read last reached the node, and its round trip (the connection card). */
   nodeAnswer?: NodeAnswer | null;
-  /** One status read (the connection card's Check now). */
+  /** One status read (the connection card's Check now); reuses one in flight. */
   onCheckNode?: () => Promise<void>;
+  /** A Check now read is in flight (held in App). */
+  checkingNode?: boolean;
+  /** The node is locked (for the connection card's wording). */
+  nodeLocked?: boolean;
   ready: boolean;
   error: string | null;
   ownId: string | null;
@@ -1218,10 +1222,19 @@ export function ControlCenter(props: Props) {
     iceServers: () => stunServer(effectiveStun()),
     busy: () => meetingOn(),
   });
-  // The last call's route (candidate types only), kept after the call for the connection card.
-  const [lastCall, setLastCall] = createSignal<CallRoute | null>(null);
-  createEffect(() => { const c = callView().connection; if (c) setLastCall(c); });
-  const stunSource = (): StunSource => (stunOff() ? 'off' : stunPref() ? 'custom' : nodeStun() ? 'node' : 'none');
+  // The latest call and its route (candidate types only), kept after the call for the connection card.
+  // A call counts once it was placed, or answered here; one that never got a selected pair has no route.
+  const [lastCall, setLastCall] = createSignal<(LastCall & { id: string }) | null>(null);
+  createEffect(() => {
+    const v = callView();
+    if (!v.callId) return;
+    setLastCall((prev) => {
+      const same = prev?.id === v.callId;
+      if (!same && !(v.outgoing || ['connecting', 'live', 'reconnecting'].includes(v.phase))) return prev;
+      return { id: v.callId!, route: v.connection ?? (same ? prev!.route : null) };
+    });
+  });
+  const stunSource = (): StunSource => (stunOff() ? 'off' : stunPref() ? 'custom' : nodeStun() ? 'node' : overview() ? 'none' : 'checking');
   // Closing the window ends the call here without paying; only Hang up pays.
   onCleanup(() => calls.endLocal());
 
@@ -1942,8 +1955,8 @@ export function ControlCenter(props: Props) {
             />
           </Match>
           <Match when={tab() === 'node'}>
-            <NodePanel connection={<ConnectionCard remote={props.remote === true} link={link()} live={live()} answer={props.nodeAnswer ?? null}
-              stun={stunSource()} lastCall={lastCall()} onCheck={props.onCheckNode} />} deviceApprovals={<>
+            <NodePanel connection={<ConnectionCard remote={props.remote === true} link={link()} live={live()} locked={props.nodeLocked} answer={props.nodeAnswer ?? null}
+              stun={stunSource()} lastCall={lastCall() && { route: lastCall()!.route }} onCheck={props.onCheckNode} checking={props.checkingNode} />} deviceApprovals={<>
               {/* A discovery error shows on its own, even when the very first read failed. */}
               <Show when={canApprove() || (approvalsCapable() && approvalsError() !== null)}>
                 <OwnerApprovals

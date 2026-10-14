@@ -184,8 +184,29 @@ function AppScreen() {
   let timer: number | undefined;
   // The connection card's facts: when the status read last reached the node, and its round trip (display only).
   const [nodeAnswer, setNodeAnswer] = createSignal<{ at: number; ms: number } | null>(null);
-  /** One status read, as the poll does it (also the card's Check now): nothing else is read. */
-  const readStatus = async () => {
+  /** One status read, as the poll does it: nothing else is read. */
+  let statusRead: Promise<void> | null = null;
+  const readStatus = () => {
+    const read = readStatusOnce();
+    statusRead = read;
+    void read.finally(() => { if (statusRead === read) statusRead = null; });
+    return read;
+  };
+  /**
+   * The connection card's Check now: one status read, or the one already in
+   * flight (a poll's or an earlier check's). Held here, outside the card, so
+   * leaving the page and coming back cannot start a second one.
+   */
+  const [checkingStatus, setCheckingStatus] = createSignal(false);
+  let checkRead: Promise<void> | null = null;
+  const checkStatus = () => {
+    if (checkRead) return checkRead;
+    setCheckingStatus(true);
+    const read = (statusRead ?? readStatus()).finally(() => { checkRead = null; setCheckingStatus(false); });
+    checkRead = read;
+    return read;
+  };
+  const readStatusOnce = async () => {
     const started = performance.now();
     try {
       const next = await source().nodeStatus();
@@ -423,7 +444,9 @@ function AppScreen() {
         watchError={watchError()}
         live={live()}
         nodeAnswer={nodeAnswer()}
-        onCheckNode={readStatus}
+        onCheckNode={checkStatus}
+        checkingNode={checkingStatus()}
+        nodeLocked={status().locked === true}
         ready={status().ready}
         error={status().error}
         ownId={status().node_id}

@@ -1,18 +1,25 @@
 import { createSignal, Show } from 'solid-js';
 import type { LinkState } from './types';
 
-/** The last time this device's status read reached the node, and its round trip. */
+/**
+ * The last good status check: this app asking its own host (which usually
+ * answers from its cached view of the node), and how long that took. Not a
+ * round trip to the node itself.
+ */
 export type NodeAnswer = { at: number; ms: number };
-/** Where calls get their STUN server from (never the address itself). */
-export type StunSource = 'node' | 'custom' | 'off' | 'none';
+/** Where calls get their STUN server from (never the address itself); 'checking' before the node's first overview. */
+export type StunSource = 'node' | 'custom' | 'off' | 'none' | 'checking';
 /** Candidate types of a call's selected pair (never addresses). */
 export type CallRoute = { local: string; remote: string };
+/** The latest call: its route, or null when it never got a selected pair. */
+export type LastCall = { route: CallRoute | null };
 
 const STUN_TEXT: Record<StunSource, string> = {
   node: 'your node',
   custom: 'a server you chose',
   off: 'off (direct connections only)',
   none: 'none (your node does not offer one)',
+  checking: 'checking…',
 };
 const LINK_TEXT: Record<LinkState, string> = { open: 'Live', connecting: 'Connecting', closed: 'Reconnecting' };
 const clock = (ms: number) => new Date(ms).toLocaleTimeString();
@@ -23,20 +30,27 @@ const clock = (ms: number) => new Date(ms).toLocaleTimeString();
  * app already has, and never an id, address, ticket or token. "Check now"
  * runs one status read; "Copy details" copies the same facts as text.
  */
-export function connectionSummary(props: { remote: boolean; link: LinkState | null; live: boolean; answer: NodeAnswer | null; stun: StunSource; lastCall: CallRoute | null }): string[] {
+export function connectionSummary(props: { remote: boolean; link: LinkState | null; live: boolean; locked?: boolean; answer: NodeAnswer | null; stun: StunSource; lastCall: LastCall | null }): string[] {
   const reach = props.remote ? 'over the network (a node you run elsewhere)' : 'on this Mac';
-  const answer = props.answer
-    ? props.live
-      ? `${clock(props.answer.at)} · ${props.answer.ms} ms`
-      : `not answering since ${clock(props.answer.at)}`
-    : props.live ? 'not measured yet' : 'no answer yet';
+  const check = props.locked
+    ? 'your node is locked'
+    : props.answer
+      ? props.live
+        ? `${clock(props.answer.at)} · ${props.answer.ms} ms (this app ↔ its host)`
+        : `your node not answering since ${clock(props.answer.at)}`
+      : props.live ? 'not measured yet' : 'no answer yet';
+  const call = !props.lastCall
+    ? 'no call yet'
+    : props.lastCall.route
+      ? `${props.lastCall.route.local} (this device) / ${props.lastCall.route.remote} (theirs)`
+      : 'no route (it didn’t connect)';
   return [
     `How this device reaches your node: ${reach}`,
     `Live updates: ${props.link ? LINK_TEXT[props.link] : 'Waiting'}`,
-    `Last answer from your node: ${answer}`,
+    `Last status check: ${check}`,
     `Calls · STUN: ${STUN_TEXT[props.stun]}`,
     'Calls · relay (TURN): none yet',
-    `Last call route: ${props.lastCall ? `${props.lastCall.local} (this device) / ${props.lastCall.remote} (theirs)` : 'no call yet'}`,
+    `Last call: ${call}`,
   ];
 }
 
@@ -44,15 +58,19 @@ export function ConnectionCard(props: {
   remote: boolean;
   link: LinkState | null;
   live: boolean;
+  locked?: boolean;
   answer: NodeAnswer | null;
   stun: StunSource;
-  lastCall: CallRoute | null;
-  /** One status read; the card's own button waits for it. */
+  lastCall: LastCall | null;
+  /** One status read; reuses one already in flight. */
   onCheck?: () => Promise<void>;
+  /** A check is in flight (held outside this card, so it survives leaving the page). */
+  checking?: boolean;
   /** Clipboard write (injected for tests). */
   copy?: (text: string) => Promise<void>;
 }) {
-  const [checking, setChecking] = createSignal(false);
+  const [localChecking, setChecking] = createSignal(false);
+  const checking = () => props.checking ?? localChecking();
   const [copied, setCopied] = createSignal<'yes' | 'no' | null>(null);
   const lines = () => connectionSummary(props);
   const check = async () => {

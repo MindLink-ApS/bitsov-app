@@ -303,6 +303,41 @@ describe('control center shell', () => {
     expect(calls.filter((c) => c.cmd === 'spend_request')).toHaveLength(1);
   });
 
+  it('the connection card: a Check now still out stays disabled after leaving the Node page and coming back', async () => {
+    let hold = false;
+    const waiting: (() => void)[] = [];
+    const host = stubHost({
+      node_status: () => {
+        const ok = { ready: true, node_id: OWN, error: null };
+        return hold ? new Promise((r) => { waiting.push(() => r(ok)); }) : ok;
+      },
+    });
+    start();
+    await vi.waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
+    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
+    await vi.waitFor(() => expect(mount.querySelector<HTMLButtonElement>('[data-profile]')?.disabled).toBe(false));
+    click('[data-profile]');
+    await vi.waitFor(() => expect(mount.querySelector('[data-open-settings]')).not.toBeNull());
+    click('[data-open-settings]');
+    await vi.waitFor(() => expect(mount.querySelector('[data-tab="node"]')).not.toBeNull());
+    click('[data-tab="node"]');
+    await vi.waitFor(() => expect(mount.querySelector('[data-connection-check]')).not.toBeNull());
+    hold = true;
+    click('[data-connection-check]');
+    await vi.waitFor(() => expect(mount.querySelector<HTMLButtonElement>('[data-connection-check]')!.disabled).toBe(true));
+    // Node → General → Node: a fresh card, the same check still out.
+    click('[data-tab="general"]');
+    await vi.waitFor(() => expect(mount.querySelector('[data-connection-card]')).toBeNull());
+    click('[data-tab="node"]');
+    await vi.waitFor(() => expect(mount.querySelector('[data-connection-check]')).not.toBeNull());
+    expect(mount.querySelector<HTMLButtonElement>('[data-connection-check]')!.disabled).toBe(true);
+    expect(mount.querySelector('[data-connection-check]')!.textContent).toBe('Checking…');
+    hold = false;
+    waiting.splice(0).forEach((go) => go());
+    await vi.waitFor(() => expect(mount.querySelector<HTMLButtonElement>('[data-connection-check]')!.disabled).toBe(false));
+    expect(host.calls.length).toBeGreaterThan(0);
+  });
+
   it('the connection card (Settings → Node): Copy details carries no id, address, onion, ticket or token, and Check now reads only the node status', async () => {
     const TICKET = 'bitsov://pair/SECRETTICKET123';
     const TOKEN = 'tok_9f8e7d6c5b4a3921';
@@ -327,7 +362,7 @@ describe('control center shell', () => {
     await vi.waitFor(() => expect(mount.querySelector('[data-tab="node"]')).not.toBeNull());
     click('[data-tab="node"]');
     await vi.waitFor(() => expect(mount.querySelector('[data-connection-card]')).not.toBeNull());
-    await vi.waitFor(() => expect(mount.querySelector('[data-connection-line="2"]')!.textContent).toMatch(/ms$/));
+    await vi.waitFor(() => expect(mount.querySelector('[data-connection-line="2"]')!.textContent).toMatch(/^Last status check: .+ · \d+ ms \(this app ↔ its host\)$/));
     expect(mount.querySelector('[data-connection-line="3"]')!.textContent).toBe('Calls · STUN: your node');
     click('[data-connection-copy]');
     await vi.waitFor(() => expect(copied).toContain('BitSov connection'));
@@ -345,7 +380,8 @@ describe('control center shell', () => {
     const before = { status: count('node_status'), pairing: count('pairing_status'), budget: count('budget_status'), spend: count('spend_status') };
     click('[data-connection-check]');
     await Promise.resolve(); await Promise.resolve();
-    expect(count('node_status')).toBe(before.status + 1);
+    // One read, or none when a poll's read is already out (Check now then waits for that one).
+    expect(count('node_status') - before.status).toBeLessThanOrEqual(1);
     expect({ pairing: count('pairing_status'), budget: count('budget_status'), spend: count('spend_status') }).toEqual({ pairing: before.pairing, budget: before.budget, spend: before.spend });
   });
 
