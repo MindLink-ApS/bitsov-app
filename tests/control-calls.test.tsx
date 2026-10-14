@@ -1245,6 +1245,92 @@ describe('calls in the shell', () => {
     expect(host.used('call_signal')).toEqual([]);
   });
 
+  /** Settings → Node → the connection card's "Last call" line, then back to the chat. */
+  async function lastCallLine() {
+    $<HTMLButtonElement>('[data-profile]')!.click();
+    await vi.waitFor(() => expect($('[data-open-settings]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-open-settings]')!.click();
+    await vi.waitFor(() => expect($('[data-tab="node"]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-tab="node"]')!.click();
+    await vi.waitFor(() => expect($('[data-connection-line="5"]')).not.toBeNull());
+    const line = text('[data-connection-line="5"]');
+    $<HTMLButtonElement>('[data-settings-close]')!.click();
+    return line;
+  }
+
+  it('the connection card describes the latest call: its route when it connected, "no route" when a later one did not', async () => {
+    let refuse = false;
+    stubHost({ call_signal: (args) => {
+      if (refuse) throw { code: 'spend_refused', message: 'Owner grant required.' };
+      return { message_id: 'sig', kind: args!.kind, amount_msat: 1000, total_msat: 6000, max_routing_fee_msat: 5000, delivered: true, accepted: true, sent_at_ms: Date.now() };
+    } });
+    await openShell();
+    expect(await lastCallLine()).toBe('Last call: no call yet');
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
+    const pc = FakePc.made[0];
+    pc.stats = new Map([
+      ['transport', { type: 'transport', selectedCandidatePairId: 'pair' }],
+      ['pair', { type: 'candidate-pair', localCandidateId: 'local', remoteCandidateId: 'remote' }],
+      ['local', { type: 'local-candidate', candidateType: 'srflx' }],
+      ['remote', { type: 'remote-candidate', candidateType: 'host' }],
+    ]);
+    pc.connect();
+    await vi.waitFor(() => expect(text('[data-call-connection]')).toContain('srflx(STUN)'));
+    $<HTMLButtonElement>('[data-call-hangup]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-dismiss]')!.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call-dismiss]')!.click();
+    expect(await lastCallLine()).toBe('Last call: srflx (this device) / host (theirs)');
+    // A later call is refused before it connects: the card says so, not the earlier route.
+    refuse = true;
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-call-dismiss]')!.click();
+    expect(await lastCallLine()).toBe('Last call: no route (it didn’t connect)');
+  });
+
+  it('a call that went live with no stats read is "connected, route unavailable"; a later call refused before it starts is "didn\'t connect"', async () => {
+    let small = false;
+    stubHost({
+      call_signal: (args) => ({ message_id: 'sig', kind: args!.kind, amount_msat: 1000, total_msat: 6000, max_routing_fee_msat: 5000, delivered: true, accepted: true, sent_at_ms: Date.now() }),
+      // Later, the node grant is too small for a call: place() refuses before the call has an id.
+      budget_status: () => ({ ...openBudget(), ...(small ? { node_grant: { expires_at_ms: Date.now() + 86_400_000, budget_msat: 200_000, remaining_msat: 200_000, per_call_max_msat: 1000 } } : {}) }),
+    });
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
+    // No stats ever name a pair (an empty report), but the call goes live.
+    FakePc.made[0].stats = new Map();
+    FakePc.made[0].connect();
+    await vi.waitFor(() => expect($('[data-call-panel="live"]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-call-hangup]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-dismiss]')!.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call-dismiss]')!.click();
+    expect(await lastCallLine()).toBe('Last call: connected, route unavailable');
+    small = true;
+    await new Promise((r) => setTimeout(r, 3500));
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect(text('[data-call-ended]')).toMatch(/This call needs up to/));
+    expect(FakePc.made).toHaveLength(1);
+    $<HTMLButtonElement>('[data-call-dismiss]')!.click();
+    expect(await lastCallLine()).toBe('Last call: no route (it didn’t connect)');
+  }, 20_000);
+
+  it('a first call that never connects is "no route", not "no call yet"', async () => {
+    stubHost({ call_signal: () => { throw { code: 'spend_refused', message: 'Owner grant required.' }; } });
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-call-dismiss]')!.click();
+    expect(await lastCallLine()).toBe('Last call: no route (it didn’t connect)');
+  });
+
   it('labels a six-sat maximum as a cap and retains the selected ICE route', async () => {
     stubHost({ call_signal: (args) => ({ message_id: 'sig', kind: args!.kind, amount_msat: 1000, total_msat: 6000, max_routing_fee_msat: 5000, delivered: true, accepted: true, sent_at_ms: Date.now() }) });
     await openShell();

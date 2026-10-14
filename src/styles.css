@@ -1411,3 +1411,8 @@ input[type='checkbox'], input[type='radio'] { width: auto; flex: none; padding: 
 /* The setup steps keep the first-run column's own spacing; hidden while offline (still mounted). */
 .first-run > .setup-steps { display: contents; }
 .first-run > .setup-steps[hidden] { display: none; }
+
+/* Settings → Node: the connection card (read-only facts for a hands-on test). */
+.connection-card { margin: var(--s-3) 0; padding: var(--s-3); border: 1px solid var(--line); border-radius: var(--r-md, 10px); }
+.connection-card h3 { margin: 0 0 var(--s-2); font-size: var(--t-sm); }
+.connection-card .facts-list { list-style: none; padding: 0; margin: 0 0 var(--s-2); display: grid; gap: 4px; font-size: var(--t-sm); color: var(--muted); }
