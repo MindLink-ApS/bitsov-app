@@ -3107,7 +3107,7 @@ function CallPanel(props: {
               <button type="button" class="soft" data-call-decline disabled={props.blocked} onClick={() => props.decline()}>Decline{price(answer())}</button>
             </Match>
             <Match when={v().phase === 'ended'}>
-              <button type="button" class="soft" data-call-dismiss onClick={() => props.dismiss()}>Close</button>
+              <button type="button" class="soft" data-call-dismiss disabled={v().pendingCount > 0} title={v().pendingCount > 0 ? 'Closes once the payment has settled' : undefined} onClick={() => props.dismiss()}>Close</button>
             </Match>
             <Match when={v().phase !== 'idle'}>
               <Show when={v().phase === 'live' || v().phase === 'connecting' || v().phase === 'reconnecting'}>

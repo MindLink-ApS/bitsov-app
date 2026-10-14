@@ -230,6 +230,50 @@ describe('call unknown outcomes', () => {
     expect(last()).toMatchObject({ phase: 'ended', paidMsat: 0, unknownCount: 0, pendingCount: 0, pendingMsat: 0 });
   });
 
+  const zeroEnded = (v: CallView) => v.phase === 'ended' && v.pendingCount === 0 && v.unknownCount === 0 && v.paidMsat === 0;
+
+  it('declining: a quote that never resolves never ends the call; once quoted, the hangup is pending in the first ended view', async () => {
+    const stuck = engine({ quote: () => new Promise(() => {}) });
+    await stuck.e.receive(msg(400, { media: 'audio', sdp: 'offer' }), OWN);
+    void stuck.e.decline();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(stuck.views.some((v) => v.phase === 'ended')).toBe(false);
+
+    const { e, views, sent } = engine({ signal: () => new Promise(() => {}) });
+    await e.receive(msg(400, { media: 'audio', sdp: 'offer' }), OWN);
+    void e.decline();
+    await vi.advanceTimersByTimeAsync(0);
+    const ended = views.filter((v) => v.phase === 'ended');
+    expect(ended.length).toBeGreaterThan(0);
+    expect(ended.some(zeroEnded)).toBe(false);
+    expect(ended[0]).toMatchObject({ reason: 'declined', pendingCount: 1, pendingMsat: 6_000 });
+    expect(sent).toHaveLength(0);
+  });
+
+  it('hanging up: every owed hangup is pending in the first ended view, before it is sent', async () => {
+    const { e, views } = engine({ signal: async (_peer, kind) => kind === 403 ? new Promise(() => {}) : ({ ok: true, value: { message_id: 'm', kind, amount_msat: 10_000, total_msat: 15_000, max_routing_fee_msat: 5_000, delivered: true, accepted: true, sent_at_ms: 0 } }) });
+    await e.place(A, 'audio', QUOTE);
+    await e.receive(msg(401, { sdp: 'v=0 answer' }), OWN);
+    FakePc.made[0].connect();
+    void e.hangup();
+    expect(views.find((v) => v.phase === 'ended')).toMatchObject({ paidMsat: 15_000, pendingCount: 1, pendingMsat: 6_000 });
+  });
+
+  it('closing the ended card waits until nothing is settling', async () => {
+    let land!: (r: Awaited<ReturnType<CallDeps['signal']>>) => void;
+    const { e, last } = engine({ signal: () => new Promise((resolve) => { land = resolve; }) });
+    await e.receive(msg(400, { media: 'audio', sdp: 'offer' }), OWN);
+    const declining = e.decline();
+    await vi.waitFor(() => expect(land).toBeDefined());
+    e.dismiss();
+    expect(last()).toMatchObject({ phase: 'ended', pendingCount: 1 });
+    land({ ok: true, value: { message_id: 'm', kind: 403, amount_msat: 1_000, total_msat: 6_000, max_routing_fee_msat: 5_000, delivered: true, accepted: true, sent_at_ms: 0 } });
+    await declining;
+    expect(last()).toMatchObject({ phase: 'ended', paidMsat: 6_000, pendingCount: 0 });
+    e.dismiss();
+    expect(last().phase).toBe('idle');
+  });
+
   it('an unknown recovery admission is counted as unknown with its cap', async () => {
     let n = 0;
     const restartId = 'e'.repeat(32);
@@ -1399,6 +1443,32 @@ describe('calls in the shell', () => {
     expect(text('[data-call-paid]')).toMatch(/^This call paid up to 15 sats:/);
   });
 
+  it('declining never shows "paid nothing", even for a moment, while its hangup is owed; Close waits for it', async () => {
+    let land!: (r: unknown) => void;
+    const host = stubHost({ messages_list: () => [], call_signal: () => new Promise((resolve) => { land = resolve; }) });
+    await openShell();
+    const seen: string[] = [];
+    // Every paid line ever inserted, even one replaced in the same tick.
+    const watch = new MutationObserver((records) => records.forEach((r) => r.addedNodes.forEach((n) => {
+      if (!(n instanceof Element)) return;
+      [n, ...n.querySelectorAll('[data-call-paid]')].forEach((el) => { if (el.hasAttribute('data-call-paid')) seen.push(el.getAttribute('data-call-paid')!); });
+    })));
+    watch.observe(mount, { subtree: true, childList: true, attributes: true, characterData: true });
+    host.emitLive({ type: 'message', room_id: null, message: { id: 'live-offer', kind: 400, sender: A, recipient: OWN, timestamp: Date.now(), plaintext: JSON.stringify({ v: 1, call_id: ID, media: 'audio', sdp: 'v=0 offer' }), payment_amount_msat: 10_000 } });
+    await vi.waitFor(() => expect($('[data-call-decline]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-call-decline]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    await vi.waitFor(() => expect(land).toBeDefined());
+    expect(text('[data-call-paid]')).toBe('A payment for this call is still settling: up to 6 sats. The total updates when it finishes. Media was not billed.');
+    expect($<HTMLButtonElement>('[data-call-dismiss]')!.disabled).toBe(true);
+    land({ message_id: 'sig', kind: 403, amount_msat: 1_000, total_msat: 6_000, max_routing_fee_msat: 5000, delivered: true, accepted: true, sent_at_ms: Date.now() });
+    await vi.waitFor(() => expect($('[data-call-paid]')?.getAttribute('data-call-paid')).toBe('settled'));
+    expect($<HTMLButtonElement>('[data-call-dismiss]')!.disabled).toBe(false);
+    watch.disconnect();
+    expect(seen).toContain('pending');
+    expect(seen).not.toContain('nothing');
+  });
+
   it('a hangup lost in transport (not proven unpaid) is said as not known, not as paid nothing', async () => {
     stubHost({ call_signal: (args) => {
       if (args!.kind === 403) throw 'connection lost';
@@ -1502,6 +1572,8 @@ describe('calls in the shell', () => {
     expect(host.used('call_signal').map((c) => c.args!.kind)).toEqual([401, 403]);
     // The pill says the call ended until the card is closed, then goes.
     expect($('[data-on-call]')!.textContent).toBe('Call ended');
+    // Close waits until the hangup's payment has settled.
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-dismiss]')!.disabled).toBe(false));
     $<HTMLButtonElement>('[data-call-dismiss]')!.click();
     await vi.waitFor(() => expect($('[data-on-call]')).toBeNull());
   });

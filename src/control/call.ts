@@ -443,7 +443,17 @@ export function createCallEngine(deps: CallDeps) {
     return conn;
   };
 
-  const pay = async (kind: number, body: Omit<Signal, 'v' | 'call_id'>, maxMsat: number, targetId = wireId ?? view.callId, owner = { peer: view.peer, callId: view.callId }) => {
+  /**
+   * The tally only: an owed signal (a hangup the engine has decided to send)
+   * is pending from that moment, before the call ends, so the ended card
+   * never says "paid nothing" while it is owed. Not published here: the
+   * end() that follows publishes it. Its pay() is then passed `owed`.
+   */
+  const owe = (maxMsat: number) => {
+    view = { ...view, pendingCount: view.pendingCount + 1, pendingMsat: view.pendingMsat + maxMsat };
+  };
+
+  const pay = async (kind: number, body: Omit<Signal, 'v' | 'call_id'>, maxMsat: number, targetId = wireId ?? view.callId, owner = { peer: view.peer, callId: view.callId }, owed = false) => {
     const { peer, callId } = owner;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<Outcome<CallReceipt>>((resolve) => {
@@ -458,7 +468,7 @@ export function createCallEngine(deps: CallDeps) {
     // receipt counts at its cap ("up to"); anything else not proven unpaid is
     // unknown (count + cap). Never cleared by ending the call.
     const counted = view.callId === callId;
-    if (counted) set({ pendingCount: view.pendingCount + 1, pendingMsat: view.pendingMsat + maxMsat });
+    if (counted && !owed) set({ pendingCount: view.pendingCount + 1, pendingMsat: view.pendingMsat + maxMsat });
     const tally = (outcome: Outcome<CallReceipt> | null, code: string) => {
       if (!counted || view.callId !== callId) return;
       const next: Partial<CallView> = { pendingCount: view.pendingCount - 1, pendingMsat: view.pendingMsat - maxMsat };
@@ -693,10 +703,11 @@ export function createCallEngine(deps: CallDeps) {
       const generation = mediaGeneration;
       const q = await deps.quote(owner.peer!);
       if (mediaGeneration !== generation || view.callId !== owner.callId || view.phase !== 'incoming') return;
+      if (q.ok) owe(signalCost(q.value));
       end('declined');
       if (q.ok) {
         try {
-          const r = await pay(CALL_HANGUP, { reason: 'declined' }, signalCost(q.value), id, owner);
+          const r = await pay(CALL_HANGUP, { reason: 'declined' }, signalCost(q.value), id, owner, true);
           if (!r.ok && view.callId === owner.callId) set({ error: r.error.message });
         } catch (error) {
           if (view.callId === owner.callId) set({ error: asActionError(error).message });
@@ -717,11 +728,13 @@ export function createCallEngine(deps: CallDeps) {
       const ids = [...admissions].reverse();
       const owner = { peer: view.peer, callId }; // Keep late cleanup bound to this peer.
       cancelled = callId;
+      // Every hangup owed is pending before the call ends, not one by one as each is sent.
+      if (notify) ids.forEach(() => owe(signalCost(notify)));
       end('hangup');
       if (notify) {
         for (const id of ids) {
           try {
-            const r = await pay(CALL_HANGUP, { reason: 'hangup' }, signalCost(notify), id, owner);
+            const r = await pay(CALL_HANGUP, { reason: 'hangup' }, signalCost(notify), id, owner, true);
             if (!r.ok && view.callId === callId) set({ error: r.error.message });
           } catch (error) {
             if (view.callId === callId) set({ error: asActionError(error).message });
@@ -782,7 +795,8 @@ export function createCallEngine(deps: CallDeps) {
     },
 
     /** Close the ended card. */
-    dismiss: () => { if (view.phase === 'ended') set(IDLE); },
+    /** Closing the ended card waits until nothing is still settling: the tally is never dropped unseen. */
+    dismiss: () => { if (view.phase === 'ended' && view.pendingCount === 0) set(IDLE); },
 
     /** A 400-403 the node forwarded (already paid, and admitted by its call registry). */
     receive: async (m: Message, ownId: string) => {
