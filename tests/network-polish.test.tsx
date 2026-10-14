@@ -39,6 +39,9 @@ it('says each call state in one word, ticks only while live, tolerates missing t
   expect(document.body.textContent).toBe('Live');
   setView({ ...IDLE, phase: 'live', liveAt: Date.now() + 1000 });
   expect(document.body.textContent).toBe('Live · 00:00');
+  // Display only: the browser reports no network.
+  setView({ ...IDLE, phase: 'live', liveAt: Date.now() + 1000, offline: true });
+  expect(document.body.textContent).toBe('Live · offline · 00:00');
   dispose(); dispose = undefined;
   expect(vi.getTimerCount()).toBe(0);
 });

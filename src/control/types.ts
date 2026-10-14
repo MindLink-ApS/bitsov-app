@@ -563,8 +563,7 @@ export type SpendView = {
   request_id?: string | null;
   /** Node op that granted the open window; null if closed or unknown. Absent on older hosts. */
   granted_op?: string | null;
-  /** Open windows: the node request whose completion armed this window; null when armed immediately (cx-armedby-1). Absent on older hosts. */
-  /** Pending elevation completed to arm the open window; null without one or when closed. Absent on older hosts. */
+  /** Open windows: the node request (pending elevation) whose completion armed this window; null when armed immediately, without one, or when closed. Absent on older hosts. */
   armed_by_request?: string | null;
   state: SpendState;
   /** Set with `expired` when a request ended ungranted: offer Ask again. */
