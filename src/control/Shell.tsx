@@ -3053,7 +3053,12 @@ function CallPanel(props: {
           <MediaView stream={props.streams.remote} video={false} muted={false} kind="remote" />
         </Show>
         <Show when={v().paidMsat > 0}>
-          <p class="hint" data-call-paid>Signal cost cap: {fmtAmount(v().paidMsat)} (includes maximum routing fees; settled amount may be lower). Media is direct and not billed.</p>
+          {/* The host reports each signal's ceiling, not settled fees: after the call, "up to" is the honest total. */}
+          <Show when={v().phase === 'ended'} fallback={
+            <p class="hint" data-call-paid>Signal cost cap: {fmtAmount(v().paidMsat)} (includes maximum routing fees; settled amount may be lower). Media is direct and not billed.</p>
+          }>
+            <p class="hint" data-call-paid="settled">This call paid up to {fmtAmount(v().paidMsat)}: each signal’s price plus its routing-fee cap; the exact fees are not reported. Media was direct and not billed.</p>
+          </Show>
         </Show>
         <Show when={v().connection}>
           {(connection) => <p class="hint" data-call-connection>Connection: {connection().local === 'srflx' ? 'srflx(STUN)' : connection().local} (local) / {connection().remote === 'srflx' ? 'srflx(STUN)' : connection().remote} (remote)</p>}

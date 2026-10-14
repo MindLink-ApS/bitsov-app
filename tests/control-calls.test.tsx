@@ -1191,8 +1191,10 @@ describe('calls in the shell', () => {
     await vi.waitFor(() => expect(text('[data-call-connection]')).toContain('srflx(STUN)'));
     pc.state('closed');
     await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
-    expect(text('[data-call-paid]')).toMatch(/cap.*6 sats/i);
-    expect(text('[data-call-paid]')).not.toMatch(/Paid 6/);
+    // After the call: what it paid, as an upper bound (fees are not reported), never an exact "paid 6 sats".
+    expect($('[data-call-paid]')!.getAttribute('data-call-paid')).toBe('settled');
+    expect(text('[data-call-paid]')).toMatch(/^This call paid up to 6 sats: each signal’s price plus its routing-fee cap; the exact fees are not reported\./);
+    expect(text('[data-call-paid]')).not.toMatch(/paid 6 sats/i);
     expect(text('[data-call-connection]')).toContain('host');
   });
 
