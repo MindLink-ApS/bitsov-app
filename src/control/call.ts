@@ -245,6 +245,8 @@ export function createCallEngine(deps: CallDeps) {
   let restartTimer: ReturnType<typeof setTimeout> | undefined;
   let ringTimer: ReturnType<typeof setTimeout> | undefined;
   let dropTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Display only: a refused recovery's text that a heal left showing, cleared when the next drop starts. */
+  let healedRefusal: string | null = null;
   let diagnosticTimer: ReturnType<typeof setInterval> | undefined;
   let mediaGeneration = 0;
   const captures = new Set<() => void>();
@@ -308,6 +310,7 @@ export function createCallEngine(deps: CallDeps) {
   };
   const end = (reason: HangupReason | null, error: string | null = null) => {
     teardown();
+    healedRefusal = null;
     set({ phase: 'ended', reason, error, camera: false, muted: false, offline: false, dropAt: null, recoveryError: null });
   };
 
@@ -359,8 +362,8 @@ export function createCallEngine(deps: CallDeps) {
     dropTimer = undefined;
     clearTimeout(restartTimer);
     restartTimer = undefined;
-    // Healed: a refused recovery's words go with it (display only; any other error stays).
-    if (view.recoveryError !== null) set({ recoveryError: null, ...(view.error === view.recoveryError ? { error: null } : {}) });
+    // Healed: the refusal stays said while live; it is remembered so the next drop starts without it.
+    if (view.recoveryError !== null) { healedRefusal = view.recoveryError; set({ recoveryError: null }); }
     if (view.phase !== 'live') {
       clearTimeout(ringTimer);
       set({ phase: 'live', liveAt: view.liveAt ?? deps.now(), dropAt: null });
@@ -457,7 +460,11 @@ export function createCallEngine(deps: CallDeps) {
     clearTimeout(ringTimer);
     set({ phase: 'reconnecting' });
     // Display only: when this drop ends the call, and whether its one recovery was already spent.
-    if (dropTimer === undefined) set({ dropAt: deps.now() + RECONNECT_GRACE_MS, recoveryUsedBefore: view.recoveryUsed });
+    // A new drop: an earlier drop's refused-recovery words (still the error) are not this drop's (display only).
+    if (dropTimer === undefined) {
+      set({ dropAt: deps.now() + RECONNECT_GRACE_MS, recoveryUsedBefore: view.recoveryUsed, ...(healedRefusal !== null && view.error === healedRefusal ? { error: null } : {}) });
+      healedRefusal = null;
+    }
     if (dropTimer === undefined) dropTimer = setTimeout(() => {
       if (pc === conn && !reconcileConnection(conn)) end('failed', view.error ?? 'The connection was lost. Check that both apps have a reachable STUN server in Settings; some networks cannot connect without a relay.');
     }, RECONNECT_GRACE_MS);

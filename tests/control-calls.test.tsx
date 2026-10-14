@@ -254,7 +254,7 @@ describe('call restart negotiation', () => {
     caller.e.endLocal();
   });
 
-  it('a refused recovery\'s words go when the connection heals, so a later drop shows none of them; other errors stay', async () => {
+  it('a refused recovery\'s words stay while live after a heal, and are gone when a later drop starts', async () => {
     let allow = true;
     let n = 0;
     const caller = engine({ newCallId: () => n++ === 0 ? ID : 'e'.repeat(32), authorize: async () => allow });
@@ -266,16 +266,16 @@ describe('call restart negotiation', () => {
     pc.state('failed');
     await vi.advanceTimersByTimeAsync(0);
     expect(caller.e.view()).toMatchObject({ phase: 'reconnecting', error: 'Call recovery needs spending approval.', recoveryError: 'Call recovery needs spending approval.' });
-    // Healed on its own.
+    // Healed on its own: still said while live (the recovery could not happen), no longer framed.
     pc.connect();
-    expect(caller.e.view()).toMatchObject({ phase: 'live', error: null, recoveryError: null });
+    expect(caller.e.view()).toMatchObject({ phase: 'live', error: 'Call recovery needs spending approval.', recoveryError: null });
     // A second drop: no stale refusal text.
     pc.state('disconnected');
     expect(caller.e.view()).toMatchObject({ phase: 'reconnecting', error: null, recoveryError: null });
     caller.e.endLocal();
   });
 
-  it('a heal clears only a refused recovery\'s words: a camera error stays', async () => {
+  it('a new drop clears only a refused recovery\'s words: a camera error stays', async () => {
     const local = stream(true);
     const fresh = stream(true, false);
     let n = 0;
@@ -291,7 +291,8 @@ describe('call restart negotiation', () => {
     expect(cameraError).toEqual(expect.any(String));
     pc.state('disconnected');
     pc.connect();
-    expect(caller.e.view()).toMatchObject({ phase: 'live', error: cameraError });
+    pc.state('disconnected');
+    expect(caller.e.view()).toMatchObject({ phase: 'reconnecting', error: cameraError });
     caller.e.endLocal();
   });
 
