@@ -4575,7 +4575,7 @@ function Composer(props: {
    * (hand-off when a fresh grant read names E for this contact); `readsFrom`
    * the first budget read that started after it; `keySeen`: E was seen live.
    */
-  type Pressed = { bubble: string; track: TrackRef; text: string; msat: number; until: number; taken: boolean; kind: ApprovalKind; approved: boolean; key: string | null; requestId: string | null; keySeen: boolean; requestSeen: boolean; envelope: string | null; readsFrom: number; cancelled: boolean };
+  type Pressed = { bubble: string; track: TrackRef; text: string; msat: number; until: number; taken: boolean; kind: ApprovalKind; approved: boolean; key: string | null; requestId: string | null; keySeen: boolean; requestSeen: boolean; envelope: string | null; readsFrom: number; cancelled: boolean; cancelReason: string | null };
   const [consent, setConsent] = createSignal<Pressed | null>(null);
   /** The host names the grant of an open window (#227): only then can grant, preset and resume continue. */
   const bindable = () => props.spend != null && 'granted_op' in props.spend;
@@ -4619,7 +4619,7 @@ function Composer(props: {
     const bubble = props.actions.beginSending(props.track, text, msat, true);
     setDraft('');
     setDrafted(false);
-    setConsent({ bubble, track: props.track, text, msat, until: Date.now() + CONTINUE_MS, taken: false, kind, approved: false, key: null, requestId: null, keySeen: false, requestSeen: false, envelope: null, readsFrom: 0, cancelled: false });
+    setConsent({ bubble, track: props.track, text, msat, until: Date.now() + CONTINUE_MS, taken: false, kind, approved: false, key: null, requestId: null, keySeen: false, requestSeen: false, envelope: null, readsFrom: 0, cancelled: false, cancelReason: null });
   };
   const dropConsent = (reason: string) => {
     const c = untrack(consent);
@@ -4691,7 +4691,8 @@ function Composer(props: {
    * hand-off, and again right before a queued send is dispatched.
    */
   const touchLive = (p: Pressed) => {
-    if (props.actions.device()?.state !== 'registered' || props.actions.budgetReadApplied() < p.readsFrom) return false;
+    // A read known to be stale (a failed refresh keeps the old grant) proves nothing.
+    if (props.budgetStale || props.actions.device()?.state !== 'registered' || props.actions.budgetReadApplied() < p.readsFrom) return false;
     const g = budget()?.node_grant;
     const peer = (p.track as { id: string }).id.toLowerCase();
     const now = Date.now();
@@ -4794,18 +4795,56 @@ function Composer(props: {
   });
   /**
    * Approve & send continuations handed to the send queue and not dispatched
-   * yet. The queue outlives this chat, so each re-checks, right before its
-   * turn, what its approval was for (stillBound); leaving the chat cancels it.
+   * yet. The queue outlives this chat, so each stays watched until its turn
+   * (below), and re-checks right before it (stillBound). Leaving the chat
+   * cancels it; so does any revocation seen meanwhile, for good.
    */
-  const handed = new Set<Pressed>();
+  const [handed, setHanded] = createSignal<Pressed[]>([]);
+  const cancel = (p: Pressed, reason: string) => {
+    if (p.cancelled) return;
+    p.cancelled = true;
+    p.cancelReason = reason;
+  };
   function cancelHanded() {
-    handed.forEach((p) => { p.cancelled = true; });
-    handed.clear();
+    untrack(handed).forEach((p) => cancel(p, 'You left this chat before it was sent.'));
+    setHanded([]);
   }
+  /**
+   * Sticky: once a handed continuation sees what it was approved for revoked
+   * or lapsed, it is cancelled for good; a later read showing it again does
+   * not revive it. Touch ID: approvals on this Mac stopping, or a fresh, not
+   * stale read whose grant expired or whose contact entry is missing, another
+   * id, or ended. Spending request: its window closing, or another G/R.
+   */
+  createEffect(() => {
+    const list = handed();
+    if (!list.length) return;
+    const now = Math.max(props.now, Date.now());
+    const sp = props.spend;
+    const deviceOn = props.actions.device()?.state === 'registered';
+    const fresh = !props.budgetStale;
+    const g = budget()?.node_grant ?? null;
+    const gone = list.filter((p) => {
+      if (p.cancelled) return true;
+      if (p.kind === 'touch') {
+        if (!deviceOn) { cancel(p, 'Touch ID approvals on this Mac stopped before it went through.'); return true; }
+        if (!fresh || props.actions.budgetReadApplied() < p.readsFrom) return false;
+        const peer = (p.track as { id: string }).id.toLowerCase();
+        const until = g?.envelopes?.[peer];
+        if (!g || g.expires_at_ms <= now || g.envelope_id_by_recipient?.[peer] !== p.envelope || !until || until <= now) { cancel(p, LAPSED); return true; }
+        return false;
+      }
+      const same = sp?.state === 'open' && (p.key !== null ? sp.granted_op === p.key : p.requestId !== null && 'armed_by_request' in sp && sp.armed_by_request === p.requestId);
+      if (!same) { cancel(p, LAPSED); return true; }
+      return false;
+    });
+    if (gone.length) setHanded(list.filter((p) => !gone.includes(p)));
+  });
   /** Why a handed-off approve & send must not go now (it becomes a Not sent card), or null. */
   const stillBound = (p: Pressed): string | null => untrack(() => {
-    handed.delete(p);
-    if (p.cancelled || trackKey(props.track) !== trackKey(p.track)) return 'You left this chat before it was sent.';
+    setHanded((list) => list.filter((x) => x !== p));
+    if (p.cancelled) return p.cancelReason ?? 'You left this chat before it was sent.';
+    if (trackKey(props.track) !== trackKey(p.track)) return 'You left this chat before it was sent.';
     if (props.moneyBlocked) return 'Your node went offline before it was sent.';
     if (Date.now() >= p.until) return 'It was not approved within 10 minutes.';
     if (p.kind === 'touch') return touchLive(p) ? null : TOUCH_AGAIN;
@@ -4818,7 +4857,7 @@ function Composer(props: {
   const bubbleFor = (t: TrackRef, text: string, cap: number, pressed: Pressed | null) => {
     if (!pressed) return props.actions.beginSending(t, text, cap);
     pressed.taken = true;
-    handed.add(pressed);
+    setHanded((list) => [...list, pressed]);
     props.actions.settleWaiting(pressed.track, pressed.bubble, null);
     return pressed.bubble;
   };

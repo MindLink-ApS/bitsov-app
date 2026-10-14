@@ -304,6 +304,45 @@ describe('acting from the track', () => {
     await vi.waitFor(() => expect(unsentReason()).toContain('You left this chat before it was sent.'));
   }, 20_000);
 
+  it('Approve & send queued behind a send in flight: its window closing and the same grant reopening never revives it', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const sent: string[] = [];
+    const host = stubHost({
+      spend_request: () => { host.spend.v = openView(null, 'cd35'); return { ...host.spend.v, request_id: null }; },
+      message_send: async (args) => {
+        sent.push(args!.plaintext as string);
+        if (sent.length === 1) await gate;
+        return { message_id: `sent-${sent.length}`, recipient: args!.recipient, is_room: false, delivered: true, amount_msat: 2000, sent_at_ms: Date.now() };
+      },
+    });
+    host.spend.v = openView(null, 'cd34');
+    await openShell();
+    type('[data-composer] textarea', 'one');
+    await vi.waitFor(() => expect(text('[data-send]')).toMatch(/^Send/));
+    submit();
+    await vi.waitFor(() => expect(sent).toEqual(['one']));
+    host.spend.v = view('locked');
+    type('[data-composer] textarea', 'two');
+    await vi.waitFor(() => expect(text('[data-send]')).toBe('Approve & send'), { timeout: 8000 });
+    submit();
+    await vi.waitFor(() => expect(mount.querySelectorAll('[data-sending=""]').length).toBe(2));
+    const reads = () => host.used('spend_status').length;
+    // The window it was armed for closes on a read, then the same grant cd35 is open again.
+    host.spend.v = view('locked');
+    let n = reads();
+    await vi.waitFor(() => expect(reads()).toBeGreaterThan(n), { timeout: 6000 });
+    await new Promise((r) => setTimeout(r, 100));
+    host.spend.v = openView(null, 'cd35');
+    n = reads();
+    await vi.waitFor(() => expect(reads()).toBeGreaterThan(n), { timeout: 6000 });
+    await new Promise((r) => setTimeout(r, 100));
+    release();
+    await new Promise((r) => setTimeout(r, 500));
+    expect(sent).toEqual(['one']);
+    await vi.waitFor(() => expect(unsentReason()).toContain('The approval was cancelled or lapsed before it went through.'));
+  }, 30_000);
+
   it('#227: an older host that names no grant offers plain Send (no Approve & send, no waiting bubble)', async () => {
     const legacy = (st: SpendView['state'], extra: Partial<SpendView> = {}) => ({ state: st, basis: null, open_until_ms: null, pending: null, window_ms: WINDOW, ...extra });
     const host = stubHost({
