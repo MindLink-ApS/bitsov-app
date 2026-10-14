@@ -1,6 +1,7 @@
 import { createMemo, createSignal, For, Match, onCleanup, onMount, Show, Switch } from 'solid-js';
 import { qrSvg } from '../qr';
 import { PairWords } from './PairWords';
+import { PairSteps } from './PairSteps';
 import { usePairingActivity } from '../pairingActivity';
 
 export type AddInput = {action:'status'|'mint'|'poll'|'cancel'} | {action:'approve'; op_id:string};
@@ -63,6 +64,8 @@ export function AddDevice(props: { api:(input:AddInput)=>Promise<AddView>; mobil
         </Show>
       </Match>
       <Match when={ticket()}><>
+        {/* Owner side: the new device scans the ticket (step 1), then both compare the words (step 3). */}
+        <PairSteps current={ticket()!.pending.length > 0 ? 2 : 0} />
         <Show when={ticket()!.pending.length === 0}>
           <Show when={ticket()!.uri && ticket()!.expires_at > now()} fallback={<p role="status">{ticket()!.expires_at <= now()
             ? 'This ticket expired. If it was already scanned, finish enrollment on the new device. Otherwise close this ticket and create a new one.'
@@ -88,7 +91,7 @@ export function AddDevice(props: { api:(input:AddInput)=>Promise<AddView>; mobil
         </div>}</For>
         <button class="quiet" disabled={busy()} onClick={() => void run({action:'cancel'})}>Close ticket</button>
       </></Match>
-      <Match when={view()?.state === 'done'}><p class="ok-note" role="status">Device added. Keep another owner device available. Enrollment does not transfer your node’s unlock password.</p></Match>
+      <Match when={view()?.state === 'done'}><PairSteps current={3} /><p class="ok-note" role="status">Device added. Keep another owner device available. Enrollment does not transfer your node’s unlock password.</p></Match>
     </Switch>
     <Show when={error()}><p class="err-note" role="alert">{error()}</p><button disabled={busy()} onClick={() => void run({action:ticket() ? 'poll' : 'status'})}>Try again</button></Show>
   </section>;
@@ -119,6 +122,8 @@ export function JoinDevice(props:{api:(input:JoinInput)=>Promise<JoinView>; mobi
     <h2>Add this device</h2>
     <Switch>
       <Match when={view().state === 'idle'}>
+        {/* New device: the ticket was scanned or pasted to get here; next the claim code. */}
+        <PairSteps current={1} />
         <p>After scanning or pasting the ticket, enter your node’s 18-character claim code: it is shown at your node’s owner console with <code>konsensus claim-code --show</code>, and a BitSov box also has it on its sticker. Keep an enrolled owner device nearby. Keep a Mac or another non-phone owner device enrolled as well.</p>
         <form onSubmit={event => { event.preventDefault(); const value = claim.value; claim.value = ''; void run({action:'start',claim_code:value}); }}>
           <label>Claim code<input ref={claim} name="claim_code" type="password" autocomplete="off" spellcheck={false} required disabled={busy()} /></label>
@@ -126,11 +131,12 @@ export function JoinDevice(props:{api:(input:JoinInput)=>Promise<JoinView>; mobi
         </form>
       </Match>
       <Match when={waiting()}>{v => <>
+        <PairSteps current={2} />
         <PairWords words={v().words} />
         <p role="status">Compare these words with your owner device, then approve there with {props.mobile ? 'biometrics or Touch ID' : 'Touch ID'}.</p>
         <button class="quiet" disabled={busy()} onClick={() => void run({action:'cancel'})}>Words differ · Cancel</button>
       </>}</Match>
-      <Match when={view().state === 'done'}><p class="ok-note" role="status">Device added. Your node’s unlock password was not transferred. Keep your other owner device.</p></Match>
+      <Match when={view().state === 'done'}><PairSteps current={3} /><p class="ok-note" role="status">Device added. Your node’s unlock password was not transferred. Keep your other owner device.</p></Match>
     </Switch>
     <Show when={error()}><p class="err-note" role="alert">{error()}</p><button disabled={busy()} onClick={() => void run({action:'status'})}>Check again</button><Show when={!waiting()}><button disabled={busy()} onClick={() => void run({action:'cancel'})}>Cancel pending setup</button></Show></Show>
   </section>;
