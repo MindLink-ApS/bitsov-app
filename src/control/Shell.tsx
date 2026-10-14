@@ -39,7 +39,7 @@ import { blobUrl, duration, FILE_MAX_BYTES, fileNameOf, isVoiceNote, type Record
 import { EMOJIS, insertEmoji } from './emoji';
 import { cleanPurpose, hostReadProblem, invoicePaymentHash, NOT_PAYABLE_NOTE, type NotPayable, payeeView, readChatInvoice } from './bolt11';
 import { safeImageMime, looksLikeSafeImageName, dataImageUrl } from './frontDoorMedia';
-import type { PaymentReceipt, FileSaveResult, InvoiceAmount, InvoiceView, VoiceBlob, OpList, OpView, OperationState } from './types';
+import type { PaymentReceipt, FileSaveResult, InvoiceAmount, InvoiceView, VoiceBlob, OpList, OpView, OperationState, NodeGrantSummary } from './types';
 import {
   doorCard,
   gateWords,
@@ -223,8 +223,9 @@ export type Actions = {
   ownerDeviceApproval?: () => boolean;
   cancelDevice: () => Promise<void>;
   /** One contact's envelope, signed with Touch ID. */
-  /** true when Touch ID approved this contact. */
-  approveContact: (peer: string, perActMsat: number | null) => Promise<boolean>;
+  approveContact: (peer: string, perActMsat: number | null) => Promise<TouchApproval>;
+  /** The newest budget read applied (a stamp taken when the read started); see TouchApproval.readsFrom. */
+  budgetReadApplied: () => number;
   /** The contact the node last refused for having no envelope (`grant_no_envelope`). */
   noEnvelopeFor: () => string | null;
   reconcile: () => Promise<Outcome<string>>;
@@ -400,6 +401,9 @@ export function ControlCenter(props: Props) {
   const [noEnvelopeFor, setNoEnvelopeFor] = createSignal<string | null>(null);
   const [budget, setBudgetValue] = createSignal<BudgetView | null>(null);
   let budgetRevision = 0;
+  // Budget reads in start order; the stamp of the newest one applied (Touch ID approve & send freshness).
+  let budgetReadSeq = 0;
+  const [budgetReadApplied, setBudgetReadApplied] = createSignal(0);
   const setBudget = (value: BudgetView) => {
     budgetRevision += 1;
     setBudgetValue(value);
@@ -655,11 +659,13 @@ export function ControlCenter(props: Props) {
   const approvalsWaiting = () => (canApprove() ? approvals().filter((v) => v.expires_at * 1000 > now()).length : 0);
   const loadBudget = async () => {
     const revision = ++budgetRevision;
+    const stamp = ++budgetReadSeq;
     try {
       const b = await source.budgetStatus();
       if (revision !== budgetRevision) return;
       if (budget()?.autopay.state !== 'open' && b.autopay.state === 'open') setErrors('budget', undefined);
       setBudget(b);
+      setBudgetReadApplied(stamp);
       setBudgetReadAt(Date.now());
       setBudgetConfirmed(true);
       setGrantUnknown(false);
@@ -1320,9 +1326,12 @@ export function ControlCenter(props: Props) {
         setErrors('spend', r.error.message);
         if (r.error.code === 'device_invalid') void loadDevice();
       }
+      // The read started next is the first one after this approval returned.
+      const readsFrom = budgetReadSeq + 1;
       void loadBudget();
-      return r.ok;
+      return { ok: r.ok, envelopeId: r.ok ? r.value.envelope_id ?? null : null, readsFrom };
     },
+    budgetReadApplied,
     pendingRevision,
     reconcile: async () => {
       const r = await act(() => source.spendReconcile());
@@ -3722,6 +3731,13 @@ function UndeliveredView(props: {
  * does. `bindable`: the host reports these ids at all (absent on older hosts).
  */
 export type ApprovalResult = { ok: boolean; requestId: string | null; grantedOp: string | null; bindable: boolean; waiting: boolean };
+/**
+ * A Touch ID contact approval. `envelopeId`: the node envelope the action
+ * itself returned (relation_envelope_id_v1); null without one. `readsFrom`:
+ * only budget reads stamped at or after this started after the approval
+ * returned, so only they can confirm or replace that envelope.
+ */
+export type TouchApproval = { ok: boolean; envelopeId: string | null; readsFrom: number };
 const approvalResult = (r: Outcome<SpendView | BudgetView>): ApprovalResult => r.ok
   ? {
       ok: true, requestId: r.value.request_id ?? null, grantedOp: r.value.granted_op ?? null, bindable: 'granted_op' in r.value,
@@ -4537,26 +4553,36 @@ function Composer(props: {
    * its refusal, cancel, lapse or replacement drops it; another approval
    * never satisfies it.
    */
-  /** Only the spending request continues (see canContinue). */
-  type ApprovalKind = 'grant';
+  /** The spending request ('grant') and a Touch ID contact approval bound to its envelope ('touch') continue (see canContinue). */
+  type ApprovalKind = 'grant' | 'touch';
   /**
    * Bound ONLY to what the approval action itself returned. `key`: the grant
    * op G of the window that very call armed (hand-off when the open view's
    * granted_op === G). `requestId`: the node request R it made or continued
    * (hand-off when the open view's armed_by_request === R; its grant op is an
    * independent node value). `keySeen`: that window was observed open.
+   * Touch ID: `envelope` is the envelope id E its relation_approve returned
+   * (hand-off when a fresh grant read names E for this contact); `readsFrom`
+   * the first budget read that started after it; `keySeen`: E was seen live.
    */
-  type Pressed = { bubble: string; track: TrackRef; text: string; msat: number; until: number; taken: boolean; kind: ApprovalKind; approved: boolean; key: string | null; requestId: string | null; keySeen: boolean; requestSeen: boolean };
+  type Pressed = { bubble: string; track: TrackRef; text: string; msat: number; until: number; taken: boolean; kind: ApprovalKind; approved: boolean; key: string | null; requestId: string | null; keySeen: boolean; requestSeen: boolean; envelope: string | null; readsFrom: number };
   const [consent, setConsent] = createSignal<Pressed | null>(null);
   /** The host names the grant of an open window (#227): only then can grant, preset and resume continue. */
   const bindable = () => props.spend != null && 'granted_op' in props.spend;
   /**
-   * Approve & send only where a node identity binds the approval to its window:
-   * the spending request (its request id or the grant op its call returned).
-   * Touch ID (no identity) and preset/resume (a budget grant arms autopay, not
-   * the spend window) keep the plain flow: approve, then press Send.
+   * Touch ID binds only where the host names each contact's node envelope
+   * (relation_envelope_id_v1): decided before the tap, on a confirmed read.
    */
-  const canContinue = (_kind: ApprovalKind) => mode() === 'message' && !!draft().trim() && shown().msat !== null && consent() === null && bindable();
+  const touchBindable = () => !props.budgetStale && !!budget()?.node_grant?.envelope_id_by_recipient;
+  /**
+   * Approve & send only where a node identity binds the approval: the spending
+   * request (its request id or the grant op its call returned), or a Touch ID
+   * contact approval (the envelope id it returned). Touch ID without envelope
+   * ids, and preset/resume (a budget grant arms autopay, not the spend window),
+   * keep the plain flow: approve, then press Send.
+   */
+  const canContinue = (kind: ApprovalKind) => mode() === 'message' && !!draft().trim() && shown().msat !== null && consent() === null &&
+    (kind === 'touch' ? touchBindable() : bindable());
   /**
    * The plain flow after an approval that does not continue: the draft stays;
    * say what is next. Taken but still waiting for the owner at the node: say
@@ -4583,7 +4609,7 @@ function Composer(props: {
     const bubble = props.actions.beginSending(props.track, text, msat, true);
     setDraft('');
     setDrafted(false);
-    setConsent({ bubble, track: props.track, text, msat, until: Date.now() + CONTINUE_MS, taken: false, kind, approved: false, key: null, requestId: null, keySeen: false, requestSeen: false });
+    setConsent({ bubble, track: props.track, text, msat, until: Date.now() + CONTINUE_MS, taken: false, kind, approved: false, key: null, requestId: null, keySeen: false, requestSeen: false, envelope: null, readsFrom: 0 });
   };
   const dropConsent = (reason: string) => {
     const c = untrack(consent);
@@ -4624,11 +4650,53 @@ function Composer(props: {
     if (!r.bindable || (r.grantedOp === null && r.requestId === null)) { backToPlain(); return; }
     setConsent({ ...c, approved: true, key: r.grantedOp, requestId: r.requestId });
   };
+  /**
+   * The Touch ID action answered (before busy clears). Refused or cancelled:
+   * the wait ends. No envelope id: nothing binds the message, the plain flow
+   * at once. Else bound only to the envelope id E this very call returned.
+   */
+  const afterTouch = (r: TouchApproval) => {
+    const c = untrack(consent);
+    if (!c || c.kind !== 'touch') return;
+    if (!r.ok) { dropConsent('It was not approved.'); return; }
+    if (!r.envelopeId) { backToPlain(); return; }
+    setConsent({ ...c, approved: true, envelope: r.envelopeId, readsFrom: r.readsFrom });
+  };
   const LAPSED = 'The approval was cancelled or lapsed before it went through.';
+  const TOUCH_AGAIN = 'It needs Touch ID again. Press Send to ask.';
+  /** Does this grant read cover one message at `msat` for `peer`? Per call, the whole grant, and the contact's own remainder when named. */
+  const touchCovers = (g: NodeGrantSummary, peer: string, msat: number) => {
+    const left = g.recipient_left_msat_by_recipient;
+    return g.per_call_max_msat >= msat && g.remaining_msat >= msat && (!left || !(peer in left) || left[peer] >= msat);
+  };
+  /**
+   * Touch ID consent, on fresh reads only (started after the approval
+   * returned), with the contact's key looked up lower-cased and exact: its
+   * envelope id is E and live → seen (and it must cover the price). Before E
+   * was seen, another id, a null (legacy/unknown) or no entry at all is stale:
+   * it needs Touch ID again. After E was seen, any read without it live
+   * (another id, none, expired) → lapsed, even if E shows again later. No
+   * envelope ids at all any more: no binding, the plain flow.
+   */
+  createEffect(() => {
+    const c = consent();
+    if (!c || c.kind !== 'touch' || !c.approved) return;
+    if (props.actions.device()?.state !== 'registered') { dropConsent('Touch ID approvals on this Mac stopped before it went through.'); return; }
+    if (props.actions.budgetReadApplied() < c.readsFrom) return;
+    const g = budget()?.node_grant ?? null;
+    if (!g) { dropConsent(c.keySeen ? LAPSED : TOUCH_AGAIN); return; }
+    const ids = g.envelope_id_by_recipient;
+    if (!ids) { backToPlain(); return; }
+    const peer = (c.track as { id: string }).id.toLowerCase();
+    const until = g.envelopes?.[peer];
+    if (ids[peer] !== c.envelope || !until || until <= props.now) { dropConsent(c.keySeen ? LAPSED : TOUCH_AGAIN); return; }
+    if (!touchCovers(g, peer, c.msat)) { dropConsent(TOUCH_AGAIN); return; }
+    if (!c.keySeen) setConsent({ ...c, keySeen: true });
+  });
   // The approval it waits on was cancelled, lapsed or replaced: the consent ends with it.
   createEffect(() => {
     const c = consent();
-    if (!c || !c.approved) return;
+    if (!c || !c.approved || c.kind !== 'grant') return;
     const sp = props.spend;
     const open = sp?.state === 'open';
     const granted = open ? sp!.granted_op ?? null : null;
@@ -4677,8 +4745,15 @@ function Composer(props: {
   createEffect(() => {
     const c = consent();
     if (!c || !c.approved || busy() || contactWaiting() || props.budgetStale || props.moneyBlocked || !approvalCleared()) return;
-    // Only the window its own approval armed (its grant op G, or its request R).
-    {
+    if (c.kind === 'touch') {
+      // Only the envelope its own Touch ID call returned, live and covering the price, on a fresh read.
+      if (!c.keySeen || props.actions.budgetReadApplied() < c.readsFrom) return;
+      const g = budget()?.node_grant;
+      const peer = (c.track as { id: string }).id.toLowerCase();
+      const until = g?.envelopes?.[peer];
+      if (!g || g.envelope_id_by_recipient?.[peer] !== c.envelope || !until || until <= props.now || !touchCovers(g, peer, c.msat)) return;
+    } else {
+      // Only the window its own approval armed (its grant op G, or its request R).
       const sp = props.spend;
       if (sp?.state !== 'open') return;
       if (c.key !== null ? sp.granted_op !== c.key : !(c.requestId !== null && 'armed_by_request' in sp && sp.armed_by_request === c.requestId)) return;
@@ -4720,12 +4795,18 @@ function Composer(props: {
       return;
     }
     if (needsTouch()) {
-      if (pressed) { setNote('It needs Touch ID again. Press Send to ask.'); return; }
-      // This contact is approved with Touch ID; the draft stays (no identity binds a continuation).
+      if (pressed) { setNote(TOUCH_AGAIN); return; }
+      // Where the host names each contact's envelope, the message waits in its
+      // bubble and goes once that very envelope is live (approve & send);
+      // otherwise this contact is approved and the draft stays (plain flow).
+      const msat = shown().msat;
+      const continuing = canContinue('touch');
+      if (continuing) startWaiting('touch');
       setBusy(true);
-      const approved = await props.actions.approveContact(target(), shown().msat);
+      const approved = await props.actions.approveContact(target(), msat);
+      if (continuing) afterTouch(approved);
       setBusy(false);
-      approvedPlain(approved);
+      if (!continuing) approvedPlain(approved.ok);
       return;
     }
     if (viaBudget()) {
