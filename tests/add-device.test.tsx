@@ -149,4 +149,3 @@ it('the new device sees the same steps: the claim code next, then compare, then 
   root.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); await flush();
   expect(steps()).toEqual(['done', 'done', 'current']);
 });
-
