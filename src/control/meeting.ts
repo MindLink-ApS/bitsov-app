@@ -343,14 +343,31 @@ export function createMeetingEngine(deps: MeetingDeps) {
     }, CONNECT_TIMEOUT_MS);
   };
 
-  const pay = async (l: Leg, kind: number, body: Omit<Signal, 'v' | 'call_id'>, maxMsat: number) => {
+  /**
+   * The tally only: a hangup the engine has decided to send is pending from
+   * that moment (before the meeting ends) at a quote-independent bound, the
+   * shown price's cap. Not published here: the finish() that follows does.
+   * Its pay() gets `owedMsat` and replaces the bound with the real cap; if
+   * nothing is sent after all, release() drops it.
+   */
+  const owe = (l: Leg, msat: number) => {
+    l.tally.pendingCount += 1;
+    l.tally.pendingMsat += msat;
+  };
+  const release = (l: Leg, msat: number) => {
+    l.tally.pendingCount -= 1;
+    l.tally.pendingMsat -= msat;
+    if (legs.includes(l)) publish();
+  };
+
+  const pay = async (l: Leg, kind: number, body: Omit<Signal, 'v' | 'call_id'>, maxMsat: number, owedMsat?: number) => {
     // The tally only (display): pending from before the signal until it
     // settles, then paid (receipt, or the cap when paid without one), unknown
     // (anything not proven unpaid), or nothing. A leg of a meeting that is no
     // longer shown is updated but not published.
     const t = l.tally;
-    t.pendingCount += 1;
-    t.pendingMsat += maxMsat;
+    if (owedMsat === undefined) t.pendingCount += 1;
+    t.pendingMsat += maxMsat - (owedMsat ?? 0);
     if (legs.includes(l)) publish();
     const tally = (outcome: SignalOutcome | null, code: string) => {
       t.pendingCount -= 1;
@@ -555,12 +572,24 @@ export function createMeetingEngine(deps: MeetingDeps) {
     decline: (quotes: ShownQuotes) => guarded(async () => {
       if (view.phase !== 'invited') return;
       const ringing = legs.filter((l) => l.state === 'incoming');
+      // Each hangup that may be sent is pending before the meeting ends, at
+      // most the shown price (a leg without one can never be paid).
+      const owed = new Map(ringing.flatMap((l) => (quotes[l.peer] ? [[l, signalCost(quotes[l.peer]!)] as const] : [])));
+      owed.forEach((msat, l) => owe(l, msat));
       finish('Declined');
       for (const l of ringing) {
         await serial(async () => {
-          const q = await deps.quote(l.peer);
-          const bound = q.ok ? boundQuote(quotes[l.peer], q.value, false) : null;
-          if (bound) await pay(l, CALL_HANGUP, { reason: 'declined' }, signalCost(bound));
+          let sent = false;
+          try {
+            const q = await deps.quote(l.peer);
+            const bound = q.ok ? boundQuote(quotes[l.peer], q.value, false) : null;
+            if (bound) {
+              sent = true;
+              await pay(l, CALL_HANGUP, { reason: 'declined' }, signalCost(bound), owed.get(l));
+            }
+          } finally {
+            if (!sent && owed.has(l)) release(l, owed.get(l)!);
+          }
         });
       }
       publish();
@@ -574,10 +603,23 @@ export function createMeetingEngine(deps: MeetingDeps) {
     leave: async () => {
       if (view.phase !== 'active') return;
       const known = legs.filter((l) => !terminal(l) && l.state !== 'placing');
+      // The hangups already owed (the leg paid already) are pending before
+      // the meeting ends; a leg whose paid step is still in flight is pending
+      // through that step, and its hangup counts once it is sent.
+      const owed = new Map(known.flatMap((l) => (l.paidMsat > 0 && l.quote && l.callId ? [[l, signalCost(l.quote)] as const] : [])));
+      owed.forEach((msat, l) => owe(l, msat));
       finish();
       for (const l of known) {
         await serial(async () => {
-          if (l.paidMsat > 0 && l.quote && l.callId) await pay(l, CALL_HANGUP, { reason: 'hangup' }, signalCost(l.quote));
+          let sent = false;
+          try {
+            if (l.paidMsat > 0 && l.quote && l.callId) {
+              sent = true;
+              await pay(l, CALL_HANGUP, { reason: 'hangup' }, signalCost(l.quote), owed.get(l));
+            }
+          } finally {
+            if (!sent && owed.has(l)) release(l, owed.get(l)!);
+          }
         });
       }
       publish();
@@ -588,8 +630,9 @@ export function createMeetingEngine(deps: MeetingDeps) {
       if (active()) finish();
     },
 
+    /** Closing the ended card waits until nothing is still settling: the tally is never dropped unseen. */
     dismiss: () => {
-      if (view.phase === 'ended') {
+      if (view.phase === 'ended' && view.pendingCount === 0) {
         stopAll(local);
         local = null;
         legs.forEach((l) => l.pc?.close());

@@ -3271,7 +3271,7 @@ function MeetingPanel(props: {
                 <button type="button" class="danger soft" data-meeting-leave onClick={() => props.leave()}>Leave</button>
               </Match>
               <Match when={v().phase === 'ended'}>
-                <button type="button" class="soft" data-meeting-dismiss onClick={() => props.dismiss()}>Close</button>
+                <button type="button" class="soft" data-meeting-dismiss disabled={v().pendingCount > 0} title={v().pendingCount > 0 ? 'Closes once the payment has settled' : undefined} onClick={() => props.dismiss()}>Close</button>
               </Match>
             </Switch>
           </div>
