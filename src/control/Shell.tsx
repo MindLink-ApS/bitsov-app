@@ -4816,6 +4816,10 @@ function Composer(props: {
    * stale read whose grant expired or whose contact entry is missing, another
    * id, or ended. Spending request: its window closing, or another G/R.
    */
+  /** The spending window its own approval armed (G or R) is still open, and not past its end. */
+  const windowStill = (p: Pressed, sp: SpendView | null | undefined, now: number) =>
+    sp?.state === 'open' && sp.open_until_ms != null && sp.open_until_ms > now &&
+    (p.key !== null ? sp.granted_op === p.key : p.requestId !== null && 'armed_by_request' in sp && sp.armed_by_request === p.requestId);
   createEffect(() => {
     const list = handed();
     if (!list.length) return;
@@ -4834,8 +4838,7 @@ function Composer(props: {
         if (!g || g.expires_at_ms <= now || g.envelope_id_by_recipient?.[peer] !== p.envelope || !until || until <= now) { cancel(p, LAPSED); return true; }
         return false;
       }
-      const same = sp?.state === 'open' && (p.key !== null ? sp.granted_op === p.key : p.requestId !== null && 'armed_by_request' in sp && sp.armed_by_request === p.requestId);
-      if (!same) { cancel(p, LAPSED); return true; }
+      if (!windowStill(p, sp, now)) { cancel(p, LAPSED); return true; }
       return false;
     });
     if (gone.length) setHanded(list.filter((p) => !gone.includes(p)));
@@ -4847,11 +4850,10 @@ function Composer(props: {
     if (trackKey(props.track) !== trackKey(p.track)) return 'You left this chat before it was sent.';
     if (props.moneyBlocked) return 'Your node went offline before it was sent.';
     if (Date.now() >= p.until) return 'It was not approved within 10 minutes.';
+    // A budget read known to be stale proves nothing, for either kind.
+    if (props.budgetStale) return p.kind === 'touch' ? TOUCH_AGAIN : 'Spending needs approving again. Press Send to ask.';
     if (p.kind === 'touch') return touchLive(p) ? null : TOUCH_AGAIN;
-    const sp = props.spend;
-    if (sp?.state !== 'open') return LAPSED;
-    const same = p.key !== null ? sp.granted_op === p.key : p.requestId !== null && 'armed_by_request' in sp && sp.armed_by_request === p.requestId;
-    return same ? null : LAPSED;
+    return windowStill(p, props.spend, Date.now()) ? null : LAPSED;
   });
   /** The bubble a send uses: the waiting one it continues (handed over now), else a new one. */
   const bubbleFor = (t: TrackRef, text: string, cap: number, pressed: Pressed | null) => {

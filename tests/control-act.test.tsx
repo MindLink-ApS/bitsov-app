@@ -343,6 +343,58 @@ describe('acting from the track', () => {
     await vi.waitFor(() => expect(unsentReason()).toContain('The approval was cancelled or lapsed before it went through.'));
   }, 30_000);
 
+  /** 'one' goes under cd34 and stays in flight; 'two' is an Approve & send whose own call arms `armed`, handed behind it. */
+  async function grantTwoBehindOne(overrides: Record<string, Reply> = {}, armed: () => SpendView = () => openView(null, 'cd35')) {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const sent: string[] = [];
+    const host = stubHost({
+      spend_request: () => { host.spend.v = armed(); return { ...host.spend.v, request_id: null }; },
+      message_send: async (args) => {
+        sent.push(args!.plaintext as string);
+        if (sent.length === 1) await gate;
+        return { message_id: `sent-${sent.length}`, recipient: args!.recipient, is_room: false, delivered: true, amount_msat: 2000, sent_at_ms: Date.now() };
+      },
+      ...overrides,
+    });
+    host.spend.v = openView(null, 'cd34');
+    await openShell();
+    type('[data-composer] textarea', 'one');
+    await vi.waitFor(() => expect(text('[data-send]')).toMatch(/^Send/));
+    submit();
+    await vi.waitFor(() => expect(sent).toEqual(['one']));
+    host.spend.v = view('locked');
+    type('[data-composer] textarea', 'two');
+    await vi.waitFor(() => expect(text('[data-send]')).toBe('Approve & send'), { timeout: 8000 });
+    submit();
+    await vi.waitFor(() => expect(mount.querySelectorAll('[data-sending=""]').length).toBe(2));
+    return { host, sent, release };
+  }
+
+  it('Codex cxr-touch-1 r3 #1: a queued Approve & send never goes while the budget read is known stale (grant_unknown)', async () => {
+    let unknown = false;
+    const { host, sent, release } = await grantTwoBehindOne({
+      budget_status: () => { if (unknown) throw { code: 'grant_unknown', message: 'The node grant could not be read.' }; throw new Error('no budget here'); },
+    });
+    unknown = true;
+    const reads = host.used('budget_status').length;
+    await vi.waitFor(() => expect(host.used('budget_status').length).toBeGreaterThan(reads), { timeout: 6000 });
+    await new Promise((r) => setTimeout(r, 100));
+    release();
+    await new Promise((r) => setTimeout(r, 500));
+    expect(sent).toEqual(['one']);
+    await vi.waitFor(() => expect(unsentReason()).toContain('Spending needs approving again. Press Send to ask.'));
+  }, 30_000);
+
+  it('Codex cxr-touch-1 r3 #2: its spending window running out while queued: never sent, even though the view still says open', async () => {
+    const { sent, release } = await grantTwoBehindOne({}, () => view('open', { basis: 'node_grant', open_until_ms: Date.now() + 1500, granted_op: 'cd35', armed_by_request: null }));
+    await new Promise((r) => setTimeout(r, 2500));
+    release();
+    await new Promise((r) => setTimeout(r, 500));
+    expect(sent).toEqual(['one']);
+    await vi.waitFor(() => expect(unsentReason()).toContain('The approval was cancelled or lapsed before it went through.'));
+  }, 30_000);
+
   it('#227: an older host that names no grant offers plain Send (no Approve & send, no waiting bubble)', async () => {
     const legacy = (st: SpendView['state'], extra: Partial<SpendView> = {}) => ({ state: st, basis: null, open_until_ms: null, pending: null, window_ms: WINDOW, ...extra });
     const host = stubHost({
