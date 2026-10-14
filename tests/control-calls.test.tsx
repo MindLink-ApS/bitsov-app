@@ -158,6 +158,29 @@ describe('call unknown outcomes', () => {
     expect(last()).toMatchObject({ phase: 'ended', paidMsat: 15_000, unknownCount: 1, unknownMsat: 6_000 });
   });
 
+  it('a hangup whose signal rejects after dispatch is counted as unknown, and the rejection still reaches the caller', async () => {
+    const { e, last } = engine({ signal: async (_peer, kind) => {
+      if (kind === 403) throw new Error('connection lost');
+      return { ok: true, value: { message_id: 'm', kind, amount_msat: 10_000, total_msat: 15_000, max_routing_fee_msat: 5_000, delivered: true, accepted: true, sent_at_ms: 0 } };
+    } });
+    await e.place(A, 'audio', QUOTE);
+    await e.receive(msg(401, { sdp: 'v=0 answer' }), OWN);
+    FakePc.made[0].connect();
+    await e.hangup();
+    // hangup's own catch still sees the rejection (unchanged) and shows it.
+    expect(last()).toMatchObject({ phase: 'ended', paidMsat: 15_000, unknownCount: 1, unknownMsat: 6_000, error: 'connection lost' });
+  });
+
+  it.each([
+    ['a rejection proven unpaid', async () => { throw { code: 'spend_refused', message: 'refused' }; }, 0],
+    ['a failure proven unpaid', async () => ({ ok: false as const, error: { code: 'budget_exhausted' as const, message: 'used up' } }), 0],
+    ['a failure not proven unpaid', async () => ({ ok: false as const, error: { code: 'node' as const, message: 'connection lost' } }), 1],
+  ])('with the shell classification, %s on the offer counts %i unknown', async (_name, signal, unknown) => {
+    const { e, last } = engine({ signal, provenUnpaid: (code) => code === 'spend_refused' || code === 'budget_exhausted' });
+    await e.place(A, 'audio', QUOTE);
+    expect(last()).toMatchObject({ phase: 'ended', paidMsat: 0, unknownCount: unknown, unknownMsat: unknown ? 15_000 : 0 });
+  });
+
   it('an unknown recovery admission is counted as unknown with its cap', async () => {
     let n = 0;
     const restartId = 'e'.repeat(32);
@@ -1308,6 +1331,20 @@ describe('calls in the shell', () => {
     // A refused offer paid nothing, and the ended panel says so.
     expect($('[data-call-paid]')!.getAttribute('data-call-paid')).toBe('nothing');
     expect(text('[data-call-paid]')).toBe('This call paid nothing.');
+  });
+
+  it('a hangup lost in transport (not proven unpaid) is said as not known, not as paid nothing', async () => {
+    stubHost({ call_signal: (args) => {
+      if (args!.kind === 403) throw 'connection lost';
+      return { message_id: 'sig', kind: args!.kind, amount_msat: 10_000, total_msat: 15_000, max_routing_fee_msat: 5000, delivered: true, accepted: true, sent_at_ms: Date.now() };
+    } });
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-call-hangup]')!.click();
+    await vi.waitFor(() => expect($('[data-call-paid]')?.getAttribute('data-call-paid')).toBe('unknown'));
+    expect(text('[data-call-paid]')).toMatch(/^This call paid up to 15 sats\. One signal’s result is not known yet/);
   });
 
   it('an ended call with an unknown hangup says so, and never folds it into what was paid', async () => {

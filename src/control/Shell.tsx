@@ -1211,6 +1211,7 @@ export function ControlCenter(props: Props) {
     // No STUN unless the owner set one: host candidates only.
     iceServers: () => stunServer(effectiveStun()),
     busy: () => meetingOn(),
+    provenUnpaid: (code) => provenUnpaid(code),
   });
   // Closing the window ends the call here without paying; only Hang up pays.
   onCleanup(() => calls.endLocal());

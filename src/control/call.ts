@@ -185,6 +185,12 @@ export type CallDeps = {
   iceServers?: () => RTCIceServer[];
   /** Something else (a meeting) holds the mic: an incoming offer rings out. */
   busy?: () => boolean;
+  /**
+   * The shell's proven-unpaid classification, for the tally only. With it,
+   * any failed signal not proven unpaid counts as unknown; without it, only
+   * the explicit unknown codes do (a thrown signal always does).
+   */
+  provenUnpaid?: (code: string) => boolean;
 };
 
 /**
@@ -439,18 +445,27 @@ export function createCallEngine(deps: CallDeps) {
         message: 'The node did not answer in time. The payment outcome is unknown; check the pending result before trying again.',
       } }), SIGNAL_TIMEOUT_MS);
     });
+    // The tally only: what reached this call's paid / unknown totals. Paid for
+    // certain without a receipt counts at its cap ("up to"); anything else not
+    // proven unpaid is unknown (count + cap). Never cleared by ending the call.
+    const tally = (outcome: Outcome<CallReceipt> | null, code: string) => {
+      if (view.callId !== callId) return;
+      if (outcome?.ok) set({ paidMsat: view.paidMsat + outcome.value.total_msat });
+      else if (code === 'payment_settled_undelivered' || code === 'failed_paid') set({ paidMsat: view.paidMsat + maxMsat });
+      else if (outcome === null ? !deps.provenUnpaid?.(code)
+        : deps.provenUnpaid ? !deps.provenUnpaid(code) : code === 'spend_unknown' || code === 'payment_unknown' || code === 'undelivered_pending') {
+        set({ unknownCount: view.unknownCount + 1, unknownMsat: view.unknownMsat + maxMsat });
+      }
+    };
     let r: Outcome<CallReceipt>;
     try {
       r = await Promise.race([deps.signal(peer!, kind, JSON.stringify({ v: 1, call_id: targetId!, ...body }), maxMsat), timeout]);
+    } catch (error) {
+      // A rejection after dispatch may still have paid: counted, then rethrown unchanged.
+      tally(null, asActionError(error).code);
+      throw error;
     } finally { clearTimeout(timer); }
-    if (view.callId === callId) {
-      if (r.ok) set({ paidMsat: view.paidMsat + r.value.total_msat });
-      // Paid for certain, receipt not returned: counted at its cap ("up to").
-      else if (r.error.code === 'payment_settled_undelivered' || r.error.code === 'failed_paid') set({ paidMsat: view.paidMsat + maxMsat });
-      else if (r.error.code === 'spend_unknown' || r.error.code === 'payment_unknown' || r.error.code === 'undelivered_pending') {
-        set({ unknownCount: view.unknownCount + 1, unknownMsat: view.unknownMsat + maxMsat });
-      }
-    }
+    tally(r, r.ok ? '' : r.error.code);
     return r;
   };
 
