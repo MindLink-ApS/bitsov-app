@@ -3060,6 +3060,14 @@ function CallPanel(props: {
           </Show>
         }>
           <Switch>
+            {/* Something is still in flight: never "paid nothing" (or a final total) until it settles. */}
+            <Match when={v().pendingCount > 0}>
+              <p class="hint" data-call-paid="pending">
+                {v().paidMsat > 0 ? `This call paid up to ${fmtAmount(v().paidMsat)} so far. ` : ''}
+                {v().unknownCount > 0 ? `${v().unknownCount === 1 ? 'One signal’s result is not known yet' : `${v().unknownCount} signals’ results are not known yet`}: check pending result. ` : ''}
+                {v().pendingCount === 1 ? 'A payment for this call is still settling' : `${v().pendingCount} payments for this call are still settling`}: up to {fmtAmount(v().pendingMsat)}. The total updates when {v().pendingCount === 1 ? 'it finishes' : 'they finish'}. Media was not billed.
+              </p>
+            </Match>
             <Match when={v().unknownCount > 0}>
               <p class="hint" data-call-paid="unknown">
                 {v().paidMsat > 0 ? `This call paid up to ${fmtAmount(v().paidMsat)}.` : 'No payment from this call is confirmed.'}{' '}

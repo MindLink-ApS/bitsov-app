@@ -148,6 +148,13 @@ export type CallView = {
    */
   unknownCount: number;
   unknownMsat: number;
+  /**
+   * Signals still in flight (sent to the host, not settled yet), and the sum
+   * of their caps. Each moves into paid or unknown (or drops, proven unpaid)
+   * when it settles, even after the call ended.
+   */
+  pendingCount: number;
+  pendingMsat: number;
   /** Candidate types only: never expose addresses from the stats report. */
   connection: { local: string; remote: string } | null;
   reason: HangupReason | null;
@@ -163,7 +170,7 @@ export type CallView = {
 
 export const IDLE: CallView = {
   phase: 'idle', state: 'idle', peer: null, callId: null, media: 'audio', outgoing: false,
-  liveAt: null, muted: false, camera: false, paidMsat: 0, unknownCount: 0, unknownMsat: 0, connection: null, reason: null, error: null, offline: false,
+  liveAt: null, muted: false, camera: false, paidMsat: 0, unknownCount: 0, unknownMsat: 0, pendingCount: 0, pendingMsat: 0, connection: null, reason: null, error: null, offline: false,
 };
 
 type Outcome<T> = { ok: true; value: T } | { ok: false; error: ActionError };
@@ -445,17 +452,24 @@ export function createCallEngine(deps: CallDeps) {
         message: 'The node did not answer in time. The payment outcome is unknown; check the pending result before trying again.',
       } }), SIGNAL_TIMEOUT_MS);
     });
-    // The tally only: what reached this call's paid / unknown totals. Paid for
-    // certain without a receipt counts at its cap ("up to"); anything else not
-    // proven unpaid is unknown (count + cap). Never cleared by ending the call.
+    // The tally only: what reached this call's paid / unknown totals. A signal
+    // is pending from before the race until it settles; then it moves (one
+    // update) into paid, unknown, or nothing. Paid for certain without a
+    // receipt counts at its cap ("up to"); anything else not proven unpaid is
+    // unknown (count + cap). Never cleared by ending the call.
+    const counted = view.callId === callId;
+    if (counted) set({ pendingCount: view.pendingCount + 1, pendingMsat: view.pendingMsat + maxMsat });
     const tally = (outcome: Outcome<CallReceipt> | null, code: string) => {
-      if (view.callId !== callId) return;
-      if (outcome?.ok) set({ paidMsat: view.paidMsat + outcome.value.total_msat });
-      else if (code === 'payment_settled_undelivered' || code === 'failed_paid') set({ paidMsat: view.paidMsat + maxMsat });
+      if (!counted || view.callId !== callId) return;
+      const next: Partial<CallView> = { pendingCount: view.pendingCount - 1, pendingMsat: view.pendingMsat - maxMsat };
+      if (outcome?.ok) next.paidMsat = view.paidMsat + outcome.value.total_msat;
+      else if (code === 'payment_settled_undelivered' || code === 'failed_paid') next.paidMsat = view.paidMsat + maxMsat;
       else if (outcome === null ? !deps.provenUnpaid?.(code)
         : deps.provenUnpaid ? !deps.provenUnpaid(code) : code === 'spend_unknown' || code === 'payment_unknown' || code === 'undelivered_pending') {
-        set({ unknownCount: view.unknownCount + 1, unknownMsat: view.unknownMsat + maxMsat });
+        next.unknownCount = view.unknownCount + 1;
+        next.unknownMsat = view.unknownMsat + maxMsat;
       }
+      set(next);
     };
     let r: Outcome<CallReceipt>;
     try {

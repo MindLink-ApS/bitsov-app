@@ -152,10 +152,10 @@ describe('call unknown outcomes', () => {
     const hanging = e.hangup();
     await vi.advanceTimersByTimeAsync(0);
     expect(pending).toBe(true);
-    expect(last()).toMatchObject({ phase: 'ended', paidMsat: 15_000, unknownCount: 0 });
+    expect(last()).toMatchObject({ phase: 'ended', paidMsat: 15_000, unknownCount: 0, pendingCount: 1, pendingMsat: 6_000 });
     await vi.advanceTimersByTimeAsync(30_001);
     await hanging;
-    expect(last()).toMatchObject({ phase: 'ended', paidMsat: 15_000, unknownCount: 1, unknownMsat: 6_000 });
+    expect(last()).toMatchObject({ phase: 'ended', paidMsat: 15_000, unknownCount: 1, unknownMsat: 6_000, pendingCount: 0, pendingMsat: 0 });
   });
 
   it('a hangup whose signal rejects after dispatch is counted as unknown, and the rejection still reaches the caller', async () => {
@@ -179,6 +179,55 @@ describe('call unknown outcomes', () => {
     const { e, last } = engine({ signal, provenUnpaid: (code) => code === 'spend_refused' || code === 'budget_exhausted' });
     await e.place(A, 'audio', QUOTE);
     expect(last()).toMatchObject({ phase: 'ended', paidMsat: 0, unknownCount: unknown, unknownMsat: unknown ? 15_000 : 0 });
+  });
+
+  type Outcome = Awaited<ReturnType<CallDeps['signal']>>;
+  const receipt = (kind: number, total: number): Outcome => ({ ok: true, value: { message_id: `m${kind}`, kind, amount_msat: total - 5_000, total_msat: total, max_routing_fee_msat: 5_000, delivered: true, accepted: true, sent_at_ms: 0 } });
+
+  it('cancelling while the offer is in flight ends at once with it pending, then counts its receipt', async () => {
+    let land!: (r: Outcome) => void;
+    const { e, last } = engine({ signal: () => new Promise((resolve) => { land = resolve; }) });
+    const placing = e.place(A, 'audio', QUOTE);
+    await vi.waitFor(() => expect(land).toBeDefined());
+    expect(last()).toMatchObject({ phase: 'calling', pendingCount: 1, pendingMsat: 15_000 });
+    await e.hangup();
+    expect(last()).toMatchObject({ phase: 'ended', paidMsat: 0, unknownCount: 0, pendingCount: 1, pendingMsat: 15_000 });
+    land(receipt(400, 15_000));
+    await placing;
+    expect(last()).toMatchObject({ phase: 'ended', paidMsat: 15_000, unknownCount: 0, pendingCount: 0, pendingMsat: 0 });
+  });
+
+  it('hanging up while the answer is in flight keeps it pending until its receipt lands', async () => {
+    let land!: (r: Outcome) => void;
+    const { e, sent, last } = engine({ signal: async (peer, kind, plaintext, max) => {
+      sent.push({ peer, kind, body: JSON.parse(plaintext), max });
+      if (kind === 401) return new Promise((resolve) => { land = resolve; });
+      return receipt(kind, 6_000);
+    } });
+    await e.receive(msg(400, { media: 'audio', sdp: 'offer' }), OWN);
+    const accepting = e.accept();
+    await vi.waitFor(() => expect(land).toBeDefined());
+    await e.hangup();
+    // The paid hangup settled; the answer is still in flight.
+    expect(last()).toMatchObject({ phase: 'ended', paidMsat: 6_000, pendingCount: 1, pendingMsat: 6_000 });
+    land(receipt(401, 6_000));
+    await accepting;
+    expect(last()).toMatchObject({ phase: 'ended', paidMsat: 12_000, pendingCount: 0, pendingMsat: 0 });
+  });
+
+  it('declining with its hangup in flight is pending, and a proven-unpaid refusal then leaves nothing paid', async () => {
+    let land!: (r: Outcome) => void;
+    const { e, last } = engine({
+      signal: () => new Promise((resolve) => { land = resolve; }),
+      provenUnpaid: (code) => code === 'spend_refused',
+    });
+    await e.receive(msg(400, { media: 'audio', sdp: 'offer' }), OWN);
+    const declining = e.decline();
+    await vi.waitFor(() => expect(land).toBeDefined());
+    expect(last()).toMatchObject({ phase: 'ended', reason: 'declined', pendingCount: 1, pendingMsat: 6_000 });
+    land({ ok: false, error: { code: 'spend_refused', message: 'refused' } });
+    await declining;
+    expect(last()).toMatchObject({ phase: 'ended', paidMsat: 0, unknownCount: 0, pendingCount: 0, pendingMsat: 0 });
   });
 
   it('an unknown recovery admission is counted as unknown with its cap', async () => {
@@ -1331,6 +1380,23 @@ describe('calls in the shell', () => {
     // A refused offer paid nothing, and the ended panel says so.
     expect($('[data-call-paid]')!.getAttribute('data-call-paid')).toBe('nothing');
     expect(text('[data-call-paid]')).toBe('This call paid nothing.');
+  });
+
+  it('cancelling while the offer is in flight says it is settling, never "paid nothing", then shows what it paid', async () => {
+    let land!: (r: unknown) => void;
+    stubHost({ call_signal: () => new Promise((resolve) => { land = resolve; }) });
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect(land).toBeDefined());
+    $<HTMLButtonElement>('[data-call-hangup]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    expect($('[data-call-paid]')!.getAttribute('data-call-paid')).toBe('pending');
+    expect(text('[data-call-paid]')).toBe('A payment for this call is still settling: up to 15 sats. The total updates when it finishes. Media was not billed.');
+    expect($('[data-call-paid="nothing"]')).toBeNull();
+    land({ message_id: 'sig', kind: 400, amount_msat: 10_000, total_msat: 15_000, max_routing_fee_msat: 5000, delivered: true, accepted: true, sent_at_ms: Date.now() });
+    await vi.waitFor(() => expect($('[data-call-paid]')!.getAttribute('data-call-paid')).toBe('settled'));
+    expect(text('[data-call-paid]')).toMatch(/^This call paid up to 15 sats:/);
   });
 
   it('a hangup lost in transport (not proven unpaid) is said as not known, not as paid nothing', async () => {
