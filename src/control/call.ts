@@ -359,7 +359,8 @@ export function createCallEngine(deps: CallDeps) {
     dropTimer = undefined;
     clearTimeout(restartTimer);
     restartTimer = undefined;
-    if (view.recoveryError !== null) set({ recoveryError: null });
+    // Healed: a refused recovery's words go with it (display only; any other error stays).
+    if (view.recoveryError !== null) set({ recoveryError: null, ...(view.error === view.recoveryError ? { error: null } : {}) });
     if (view.phase !== 'live') {
       clearTimeout(ringTimer);
       set({ phase: 'live', liveAt: view.liveAt ?? deps.now(), dropAt: null });

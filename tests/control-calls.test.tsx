@@ -254,6 +254,47 @@ describe('call restart negotiation', () => {
     caller.e.endLocal();
   });
 
+  it('a refused recovery\'s words go when the connection heals, so a later drop shows none of them; other errors stay', async () => {
+    let allow = true;
+    let n = 0;
+    const caller = engine({ newCallId: () => n++ === 0 ? ID : 'e'.repeat(32), authorize: async () => allow });
+    await caller.e.place(A, 'audio', QUOTE);
+    await caller.e.receive(msg(401, { sdp: 'v=0 answer' }), OWN);
+    const pc = FakePc.made[0];
+    pc.connect();
+    allow = false;
+    pc.state('failed');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(caller.e.view()).toMatchObject({ phase: 'reconnecting', error: 'Call recovery needs spending approval.', recoveryError: 'Call recovery needs spending approval.' });
+    // Healed on its own.
+    pc.connect();
+    expect(caller.e.view()).toMatchObject({ phase: 'live', error: null, recoveryError: null });
+    // A second drop: no stale refusal text.
+    pc.state('disconnected');
+    expect(caller.e.view()).toMatchObject({ phase: 'reconnecting', error: null, recoveryError: null });
+    caller.e.endLocal();
+  });
+
+  it('a heal clears only a refused recovery\'s words: a camera error stays', async () => {
+    const local = stream(true);
+    const fresh = stream(true, false);
+    let n = 0;
+    const caller = engine({ newCallId: () => n++ === 0 ? ID : 'e'.repeat(32), getUserMedia: async c => c.audio ? local : fresh });
+    await caller.e.place(A, 'video', QUOTE);
+    await caller.e.receive(msg(401, { sdp: 'v=0 answer' }), OWN);
+    const pc = FakePc.made[0];
+    pc.connect();
+    await caller.e.toggleCamera();
+    pc.senders[1].replaceTrack = async () => { throw new Error('sender failed'); };
+    await caller.e.toggleCamera();
+    const cameraError = caller.e.view().error;
+    expect(cameraError).toEqual(expect.any(String));
+    pc.state('disconnected');
+    pc.connect();
+    expect(caller.e.view()).toMatchObject({ phase: 'live', error: cameraError });
+    caller.e.endLocal();
+  });
+
   it('a callee-only failure requests one restart and caller ignores duplicate requests', async () => {
     const incoming = engine();
     await incoming.e.receive(msg(400, { media: 'audio', sdp: 'offer' }), OWN);

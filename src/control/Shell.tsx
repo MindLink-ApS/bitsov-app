@@ -1,6 +1,6 @@
 import { AddDevice } from '../onboarding/AddDevice';
 import { CALL_STATE_WORD, OnCallPill } from './OnCallPill';
-import { ConnectionCard, type LastCall, type NodeAnswer, type StunSource } from './ConnectionCard';
+import { ConnectionCard, nextLastCall, type NodeAnswer, type StunSource, type TrackedCall } from './ConnectionCard';
 import { watchSamples, type WatchSamples, type WatchUpdates } from './watches';
 import { ASSISTANTS, type AssistantId } from './assistants';
 import { PendingApproval } from '../onboarding/LockedNode';
@@ -1225,20 +1225,8 @@ export function ControlCenter(props: Props) {
   // The latest call and its route (candidate types only), kept after the call for the connection card.
   // A call counts once it was placed, or answered here: whether it went live, and its route once the stats name one.
   // A call refused before it had an id (their node takes no calls, the grant is too small) is the latest call too.
-  let refusedCalls = 0;
-  const [lastCall, setLastCall] = createSignal<(LastCall & { id: string }) | null>(null);
-  createEffect(() => {
-    const v = callView();
-    if (!v.callId) {
-      if (v.phase === 'ended' && v.peer) setLastCall({ id: `refused-${++refusedCalls}`, connected: false, route: null });
-      return;
-    }
-    setLastCall((prev) => {
-      const same = prev?.id === v.callId;
-      if (!same && !(v.outgoing || ['connecting', 'live', 'reconnecting'].includes(v.phase))) return prev;
-      return { id: v.callId!, connected: (same && prev!.connected) || v.liveAt !== null, route: v.connection ?? (same ? prev!.route : null) };
-    });
-  });
+  const [lastCall, setLastCall] = createSignal<TrackedCall | null>(null);
+  createEffect(() => { const v = callView(); setLastCall((prev) => nextLastCall(prev, v)); });
   const stunSource = (): StunSource => (stunOff() ? 'off' : stunPref() ? 'custom' : nodeStun() ? 'node' : overview() ? 'none' : 'checking');
   // Closing the window ends the call here without paying; only Hang up pays.
   onCleanup(() => calls.endLocal());

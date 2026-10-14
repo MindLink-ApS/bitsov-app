@@ -1,5 +1,6 @@
 import { createSignal, Show } from 'solid-js';
 import type { LinkState } from './types';
+import type { CallView } from './call';
 
 /**
  * The last good status check: this app asking its own host (which usually
@@ -13,6 +14,20 @@ export type StunSource = 'node' | 'custom' | 'off' | 'none' | 'checking';
 export type CallRoute = { local: string; remote: string };
 /** The latest call: whether it connected (went live), and its route when the stats named one. */
 export type LastCall = { connected: boolean; route: CallRoute | null };
+/** The latest call as tracked: its own call id, or null for a local refusal (no id, so no peer-chosen call_id can match it). */
+export type TrackedCall = LastCall & { id: string | null };
+
+/**
+ * The latest call, from one call view. A call counts once it was placed, or
+ * answered here; a call refused before it had an id (their node takes no
+ * calls, the grant is too small) counts too, as one that did not connect.
+ */
+export function nextLastCall(prev: TrackedCall | null, v: CallView): TrackedCall | null {
+  if (!v.callId) return v.phase === 'ended' && v.peer ? { id: null, connected: false, route: null } : prev;
+  const same = prev?.id != null && prev.id === v.callId;
+  if (!same && !(v.outgoing || ['connecting', 'live', 'reconnecting'].includes(v.phase))) return prev;
+  return { id: v.callId, connected: (same && prev!.connected) || v.liveAt !== null, route: v.connection ?? (same ? prev!.route : null) };
+}
 
 const STUN_TEXT: Record<StunSource, string> = {
   node: 'your node',

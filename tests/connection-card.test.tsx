@@ -1,6 +1,7 @@
 import { render } from 'solid-js/web';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ConnectionCard, connectionSummary, type NodeAnswer } from '../src/control/ConnectionCard';
+import { ConnectionCard, connectionSummary, nextLastCall, type NodeAnswer } from '../src/control/ConnectionCard';
+import { IDLE } from '../src/control/call';
 
 let dispose: (() => void) | undefined;
 afterEach(() => { dispose?.(); dispose = undefined; document.body.innerHTML = ''; });
@@ -78,5 +79,19 @@ describe('the connection card', () => {
     await flush();
     expect(copy).toHaveBeenCalledWith(['BitSov connection', ...connectionSummary(base)].join('\n'));
     expect(document.querySelector('[data-connection-copied]')!.textContent).toBe('Copied.');
+  });
+
+  it('a local refusal is tracked with no id, so a peer-chosen call_id can never claim it', () => {
+    const peer = 'a'.repeat(64);
+    const refused = nextLastCall(null, { ...IDLE, phase: 'ended', peer, error: 'Their node does not take calls yet. Nothing was paid.' });
+    expect(refused).toEqual({ id: null, connected: false, route: null });
+    // A peer's incoming call, whatever call_id it picks, does not touch it while it only rings.
+    for (const callId of ['refused-1', 'local-1', 'null', '']) {
+      const ringing = { ...IDLE, phase: 'incoming' as const, peer, callId, outgoing: false };
+      expect(nextLastCall(refused, ringing)).toBe(refused);
+    }
+    // The next call placed here is the latest call.
+    const placed = nextLastCall(refused, { ...IDLE, phase: 'calling', peer, callId: 'f'.repeat(32), outgoing: true });
+    expect(placed).toEqual({ id: 'f'.repeat(32), connected: false, route: null });
   });
 });
