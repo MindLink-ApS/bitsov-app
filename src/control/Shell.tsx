@@ -216,6 +216,8 @@ export type Actions = {
   lock: () => Promise<void>;
   /** Withdraw the pending request at the node. */
   cancelSpend: () => Promise<void>;
+  /** Bumped each time the owner's Cancel request succeeds: waits bound to a node request end with it. */
+  spendCancels: () => number;
   /** This Mac's Touch ID approvals, as last read. */
   device: () => DeviceView | null;
   registerDevice: () => Promise<void>;
@@ -401,6 +403,7 @@ export function ControlCenter(props: Props) {
   const [spend, setSpend] = createSignal<SpendView | null>(null);
   const [device, setDevice] = createSignal<DeviceView | null>(null);
   const [noEnvelopeFor, setNoEnvelopeFor] = createSignal<string | null>(null);
+  const [spendCancels, setSpendCancels] = createSignal(0);
   const [budget, setBudgetValue] = createSignal<BudgetView | null>(null);
   let budgetRevision = 0;
   // Budget reads in start order; the stamp of the newest one applied (Touch ID approve & send freshness).
@@ -1312,10 +1315,11 @@ export function ControlCenter(props: Props) {
     cancelSpend: async () => {
       setErrors('spend', undefined);
       const r = await act(() => source.spendCancel());
-      if (r.ok) setSpend(r.value);
+      if (r.ok) batch(() => { setSpend(r.value); setSpendCancels((n) => n + 1); });
       else setErrors('spend', r.error.message);
       void loadBudget();
     },
+    spendCancels,
     device,
     ownerDeviceApproval: () => overview()?.capabilities?.includes(OWNER_DEVICE_APPROVAL) === true,
     openNodeSettings: () => {
@@ -4938,6 +4942,22 @@ function Composer(props: {
     });
     if (gone.length) setHanded(list.filter((p) => !gone.includes(p)));
   });
+  /**
+   * The owner cancelled the node request: every wait bound to a node request
+   * (a budget press's R, a spending request's R or G) ends for good, whether
+   * still waiting or handed to the queue; a read that later shows it armed
+   * never sends it. Touch ID waits, and anything already dispatched, are not
+   * touched.
+   */
+  createEffect(on(props.actions.spendCancels, () => {
+    const CANCELLED = 'You cancelled the request. Nothing was sent.';
+    const byRequest = (p: Pressed) => p.kind === 'budget' || p.kind === 'grant';
+    const c = untrack(consent);
+    if (c && byRequest(c)) dropConsent(CANCELLED);
+    const list = untrack(handed);
+    list.filter(byRequest).forEach((p) => cancel(p, CANCELLED));
+    setHanded(list.filter((p) => !byRequest(p)));
+  }, { defer: true }));
   /** Why a handed-off approve & send must not go now (it becomes a Not sent card), or null. */
   const stillBound = (p: Pressed): string | null => untrack(() => {
     setHanded((list) => list.filter((x) => x !== p));

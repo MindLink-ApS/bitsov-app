@@ -1524,7 +1524,7 @@ describe('invisible payments in the composer and the context panel', () => {
    * the owner grants, handed to the queue behind 'one'.
    */
   const ROOM_ROWS = [{ target: ROOM, room: true, limit_msat: 50_000, spent_msat: 0 }];
-  async function budgetTwoBehindOne(armed?: () => BudgetView, stale: () => boolean = () => false, room = false) {
+  async function budgetTwoBehindOne(armed?: () => BudgetView, stale: () => boolean = () => false, room = false, extra: Record<string, Reply> = {}) {
     const rows = room ? ROOM_ROWS : ROWS;
     const armedNow = armed ?? (() => armedBy('op-R', { rows }));
     let release!: () => void;
@@ -1539,6 +1539,7 @@ describe('invisible payments in the composer and the context panel', () => {
         if (stale()) throw { code: 'grant_unknown', message: 'The node grant could not be read.' };
         return host.state.budget;
       },
+      ...extra,
     }, armedBy(null, { rows }));
     await openShell();
     if (room) {
@@ -1645,6 +1646,43 @@ describe('invisible payments in the composer and the context panel', () => {
     await new Promise((r) => setTimeout(r, 500));
     expect(sentTexts(host)).toEqual(['one']);
     await vi.waitFor(() => expect(unsentReason()).toContain('Allowed, but your budget does not cover this message. Nothing was sent.'));
+  }, 30_000);
+
+  /** The owner cancels the pending node request op-R from the spending bar on the wallet's Send tab (the chat stays open behind it). */
+  async function cancelRequest(host: ReturnType<typeof stubHost>) {
+    host.state.spend = { ...locked, state: 'pending', pending: { op_id: 'op-R', expires_at_ms: Date.now() + 900_000, owner_action: 'konsensus grant --op op-R', owner_can_grant: true } };
+    $<HTMLButtonElement>('[data-profile]')!.click();
+    await vi.waitFor(() => expect($('[data-avatar-menu]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-open-wallet]')!.click();
+    await vi.waitFor(() => expect($('[data-wallet-page]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-wallet-tab="send"]')!.click();
+    await vi.waitFor(() => expect($('[data-wallet-send] [data-spend-cancel]')).not.toBeNull(), { timeout: 6000 });
+    $<HTMLButtonElement>('[data-wallet-send] [data-spend-cancel]')!.click();
+    await vi.waitFor(() => expect(host.used('spend_cancel')).toHaveLength(1));
+  }
+  const cancelOk = { spend_cancel: () => locked };
+
+  it('Codex r3: the owner cancels its request while it waits; a read that later shows it armed never sends it', async () => {
+    const host = allowHost('preset', cancelOk);
+    await openShell();
+    await pressAllow('preset');
+    await nextRead(host);
+    await cancelRequest(host);
+    // Overlapping and later reads show payments armed by op-R anyway.
+    host.state.budget = armedBy('op-R');
+    await nextRead(host);
+    await nextRead(host);
+    expect(host.used('message_send')).toHaveLength(0);
+    await vi.waitFor(() => expect(unsentReason()).toContain('You cancelled the request. Nothing was sent.'));
+  }, 30_000);
+
+  it('Codex r3: the owner cancels its request while it is queued behind a send: never sent', async () => {
+    const { host, release } = await budgetTwoBehindOne(undefined, undefined, false, cancelOk);
+    await cancelRequest(host);
+    release();
+    await new Promise((r) => setTimeout(r, 500));
+    expect(sentTexts(host)).toEqual(['one']);
+    await vi.waitFor(() => expect(unsentReason()).toContain('You cancelled the request. Nothing was sent.'));
   }, 30_000);
 
   it('budget approve & send queued: nothing revoked → it goes once after the send ahead', async () => {
