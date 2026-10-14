@@ -1481,23 +1481,52 @@ describe('invisible payments in the composer and the context panel', () => {
     expect(host.used('message_send')).toHaveLength(0);
   }, 25_000);
 
-  it('budget approve & send: allowed, but no budget for this contact yet → its price is not the one pressed, so it is not sent', async () => {
+  it('budget approve & send: allowed, but no budget for this contact yet → the words go back with the first-contact note, nothing sent', async () => {
     const host = allowHost('preset', {}, budgetView({ rows: [], armed_by_request: null }));
     await openShell();
     await pressAllow('preset');
     host.state.budget = { ...armedBy('op-R'), rows: [] };
-    // A first budget for a contact prices the message differently from the press: the #229 price rule ends it.
-    await vi.waitFor(() => expect(unsentReason()).toContain('The price changed while it waited for approval.'), { timeout: 8000 });
+    await vi.waitFor(() => expect(text('[data-composer-note]')).toBe('This first contact needs its own approval. Press Send to ask for it.'), { timeout: 8000 });
+    expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('gm Maya');
+    expect($('[data-sending]')).toBeNull();
     await nextRead(host);
     expect(host.used('message_send')).toHaveLength(0);
-  }, 20_000);
+  }, 25_000);
+
+  it('Codex r2 #2: a budget edit response showing it armed is not a fresh read: it waits for a real read, then sends once', async () => {
+    // Real reads keep showing op-R waiting for the owner; only the edit's own response shows it armed.
+    const host = allowHost('preset', { budget_set: () => armedBy('op-R') });
+    await openShell();
+    await pressAllow('preset');
+    await nextRead(host);
+    expect($('[data-sending="waiting"]')).not.toBeNull();
+    $<HTMLButtonElement>('[data-tab="budget"]')!.click();
+    await vi.waitFor(() => expect($('[data-budget-edit]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-budget-edit]')!.click();
+    type('[data-budget-input]', '60');
+    $<HTMLButtonElement>('[data-budget-save]')!.click();
+    await vi.waitFor(() => expect(host.used('budget_set')).toHaveLength(1));
+    await new Promise((r) => setTimeout(r, 1000));
+    expect(host.used('message_send')).toHaveLength(0);
+    await nextRead(host);
+    expect(host.used('message_send')).toHaveLength(0);
+    expect($('[data-sending="waiting"]')).not.toBeNull();
+    // A real read shows it armed by op-R: exactly one send.
+    host.state.budget = armedBy('op-R');
+    await vi.waitFor(() => expect(sentTexts(host)).toEqual(['gm Maya']), { timeout: 8000 });
+    await nextRead(host);
+    expect(sentTexts(host)).toEqual(['gm Maya']);
+  }, 30_000);
 
   /**
    * 'one' goes under payments already on (armed with no request) and stays in
    * flight; payments are paused; 'two' is a Resume approve & send whose op-R
    * the owner grants, handed to the queue behind 'one'.
    */
-  async function budgetTwoBehindOne(armed: () => BudgetView = () => armedBy('op-R'), stale: () => boolean = () => false) {
+  const ROOM_ROWS = [{ target: ROOM, room: true, limit_msat: 50_000, spent_msat: 0 }];
+  async function budgetTwoBehindOne(armed?: () => BudgetView, stale: () => boolean = () => false, room = false) {
+    const rows = room ? ROOM_ROWS : ROWS;
+    const armedNow = armed ?? (() => armedBy('op-R', { rows }));
     let release!: () => void;
     const gate = new Promise<void>((r) => { release = r; });
     const host = allowHost('resume', {
@@ -1510,15 +1539,19 @@ describe('invisible payments in the composer and the context panel', () => {
         if (stale()) throw { code: 'grant_unknown', message: 'The node grant could not be read.' };
         return host.state.budget;
       },
-    }, armedBy(null));
+    }, armedBy(null, { rows }));
     await openShell();
+    if (room) {
+      $<HTMLButtonElement>(`[data-track="room:${ROOM}"]`)!.click();
+      await vi.waitFor(() => expect($('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('2000'));
+    }
     type('[data-composer] textarea', 'one');
     await vi.waitFor(() => expect($('[data-budget="ok"]')).not.toBeNull());
     submit();
     await vi.waitFor(() => expect(sentTexts(host)).toEqual(['one']));
-    host.state.budget = { ...armedBy(null), paused: true, autopay: OFF };
+    host.state.budget = { ...armedBy(null, { rows }), paused: true, autopay: OFF };
     await pressAllow('resume', 'two');
-    host.state.budget = armed();
+    host.state.budget = armedNow();
     await vi.waitFor(() => expect(mount.querySelectorAll('[data-sending=""]').length).toBe(2), { timeout: 8000 });
     return { host, release };
   }
@@ -1594,6 +1627,25 @@ describe('invisible payments in the composer and the context panel', () => {
     await nextRead(host);
     expect(host.used('message_send')).toHaveLength(0);
   }, 25_000);
+
+  it('Codex r2 #1 (Fable B1): in a room, queued and nothing revoked → it goes once after the send ahead', async () => {
+    const { host, release } = await budgetTwoBehindOne(undefined, undefined, true);
+    release();
+    await vi.waitFor(() => expect(sentTexts(host)).toEqual(['one', 'two']));
+    expect(host.used('message_send').map((c) => c.args!.is_room)).toEqual([true, true]);
+    await nextRead(host);
+    expect(sentTexts(host)).toEqual(['one', 'two']);
+  }, 30_000);
+
+  it('Codex r2 #1: in a room, queued while the room budget is used up → never sent', async () => {
+    const { host, release } = await budgetTwoBehindOne(undefined, undefined, true);
+    host.state.budget = armedBy('op-R', { rows: [{ target: ROOM, room: true, limit_msat: 50_000, spent_msat: 50_000 }] });
+    await nextRead(host);
+    release();
+    await new Promise((r) => setTimeout(r, 500));
+    expect(sentTexts(host)).toEqual(['one']);
+    await vi.waitFor(() => expect(unsentReason()).toContain('Allowed, but your budget does not cover this message. Nothing was sent.'));
+  }, 30_000);
 
   it('budget approve & send queued: nothing revoked → it goes once after the send ahead', async () => {
     const { host, release } = await budgetTwoBehindOne();

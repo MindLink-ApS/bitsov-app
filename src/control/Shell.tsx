@@ -406,9 +406,17 @@ export function ControlCenter(props: Props) {
   // Budget reads in start order; the stamp of the newest one applied (Touch ID approve & send freshness).
   let budgetReadSeq = 0;
   const [budgetReadApplied, setBudgetReadApplied] = createSignal(0);
+  /**
+   * Every budget view that is not a fresh read (an action's own response:
+   * approve, resume, pause, a row edit) clears the freshness stamp, so no
+   * approve & send can be confirmed from it; loadBudget restamps right after.
+   */
   const setBudget = (value: BudgetView) => {
     budgetRevision += 1;
-    setBudgetValue(value);
+    batch(() => {
+      setBudgetValue(value);
+      setBudgetReadApplied(0);
+    });
   };
   const [deliveries, setDeliveries] = createStore<Deliveries>({});
   /** What each send actually paid, by message id: a room echo carries one member's share only. */
@@ -666,8 +674,10 @@ export function ControlCenter(props: Props) {
       const b = await source.budgetStatus();
       if (revision !== budgetRevision) return;
       if (budget()?.autopay.state !== 'open' && b.autopay.state === 'open') setErrors('budget', undefined);
-      setBudget(b);
-      setBudgetReadApplied(stamp);
+      batch(() => {
+        setBudget(b);
+        setBudgetReadApplied(stamp);
+      });
       setBudgetReadAt(Date.now());
       setBudgetConfirmed(true);
       setGrantUnknown(false);
@@ -4683,7 +4693,7 @@ function Composer(props: {
   const BUDGET_SHORT = 'Allowed, but your budget does not cover this message. Nothing was sent.';
   const PRICE_MOVED = 'The message price changed before it was sent. Nothing was sent; check the price and press Send.';
   /** The budget stand for an approved message at the price it was approved at (whatever the composer's mode now). */
-  const standFor = (p: Pressed) => budgetStand(budget(), (p.track as { id: string }).id, false, p.msat, readmit()).kind;
+  const standFor = (p: Pressed) => budgetStand(budget(), (p.track as { id: string }).id, p.track.kind === 'room', p.msat, p.track.kind !== 'room' && readmit()).kind;
   /**
    * Does this grant read cover one message at `msat` for `peer`? Per call, the
    * whole grant, and the contact's own remainder when named. The host omits a
@@ -4820,7 +4830,7 @@ function Composer(props: {
     // still be the one from before the request (a budget approval refreshes spending afterwards): wait.
     if (c.requestSeen) dropConsent(LAPSED);
   });
-  createEffect(on(() => shown().msat, (msat) => {
+  createEffect(on(() => messageShown().msat, (msat) => {
     const c = untrack(consent);
     // Another chat's price is not this message's: leaving is said as leaving (below).
     if (c && trackKey(props.track) === trackKey(c.track) && msat !== c.msat) dropConsent('The price changed while it waited for approval.');
