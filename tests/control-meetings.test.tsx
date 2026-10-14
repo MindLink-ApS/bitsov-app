@@ -500,8 +500,8 @@ describe('meetings in the shell', () => {
     await vi.waitFor(() => expect($('[data-meeting-panel="active"]')).not.toBeNull());
     expect($(`[data-meeting-leg="${A}"]`)!.getAttribute('data-leg-state')).toBe('ringing');
     // A relay pair can be selected, so media is never claimed to be direct.
-    await vi.waitFor(() => expect(text('[data-meeting-paid]')).toMatch(/Media is not billed\.$/));
-    expect(text('[data-meeting-paid]')).not.toMatch(/direct/);
+    // Receipts carry each signal's ceiling, so the total is an upper bound.
+    await vi.waitFor(() => expect(text('[data-meeting-paid]')).toBe('Paid up to 30 sats for this meeting’s signals (each signal’s price plus its routing-fee cap). Media is not billed.'));
     // While in a meeting, 1:1 calls are off.
     expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(true);
     $<HTMLButtonElement>('[data-meeting-leave]')!.click();
