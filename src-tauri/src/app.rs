@@ -5192,7 +5192,11 @@ async fn spend_advance_for_inner(state: &NodeState, want: Option<Want>) -> Resul
                             armed_granted_op = node.as_ref().map(|g| g.op_id.clone()).filter(|id| !id.is_empty());
                         }
                         if let Some(ceiling) = wants.budget {
-                            arm_want(&mut gate, &mut autopay, Want::Budget(ceiling), act::SpendBasis::NodeGrant, node.as_ref());
+                            autopay.arm_pending_until(
+                                now_ms(), node.as_ref().map_or(u64::MAX, NodeGrant::expires_at_ms),
+                                node.as_ref().map_or(ceiling, |g| ceiling.min(g.budget_msat)),
+                                act::SpendBasis::NodeGrant, &pending,
+                            );
                         }
                         *state.node_grant.lock().unwrap() = node.clone();
                     }
@@ -6926,10 +6930,14 @@ async fn spend_dismiss_undelivered(
 
 fn budget_view(state: &NodeState) -> Result<budget::BudgetView, ActionError> {
     let now = now_ms();
-    let autopay = state.autopay.lock().unwrap().view(now);
+    let (autopay, armed_by_request) = {
+        let mut approval = state.autopay.lock().unwrap();
+        let view = approval.view(now);
+        (view, approval.armed_by_request().map(str::to_owned))
+    };
     let waiting = state.wants.lock().unwrap().budget.is_some() && state.spend.lock().unwrap().view(now).pending.is_some();
     let node_grant = state.node_grant.lock().unwrap().as_ref().filter(|g| g.live(now)).map(grant::GrantSummary::from);
-    with_book(state, false, |book| Ok(budget::BudgetView { node_grant, ..budget::view(book, autopay, waiting, now) }))
+    with_book(state, false, |book| Ok(budget::BudgetView { armed_by_request, node_grant, ..budget::view(book, autopay, waiting, now) }))
 }
 
 fn budget_target(target: &str, room: bool) -> Result<String, ActionError> {
@@ -14024,6 +14032,7 @@ mod control_act_tests {
             serde_json::to_value(do_budget_resume(s).await.unwrap()).unwrap(),
         ] {
             assert_eq!(reply.get("request_id"), Some(&serde_json::Value::Null));
+            assert_eq!(reply.get("armed_by_request"), Some(&serde_json::Value::Null));
             assert_eq!(reply.get("granted_op"), Some(&serde_json::Value::Null));
         }
         let view = serde_json::to_value(spend_advance(s, false).await.unwrap()).unwrap();
@@ -14050,6 +14059,7 @@ mod control_act_tests {
             serde_json::to_value(do_budget_resume(&node.state).await.unwrap()).unwrap(),
         ] {
             assert_eq!(reply.get("request_id"), Some(&serde_json::Value::Null));
+            assert_eq!(reply.get("armed_by_request"), Some(&serde_json::Value::Null));
             assert_eq!(reply.get("granted_op"), Some(&serde_json::Value::Null));
         }
         assert!(node.posts().is_empty());
@@ -14074,6 +14084,99 @@ mod control_act_tests {
             }
             assert_eq!(spend_advance(&node.state, false).await.unwrap().granted_op.as_deref(), Some("cd34"));
         }
+    }
+
+    #[tokio::test]
+    async fn approval_ids_budget_keeps_only_the_completed_pending_request() {
+        for command in ["budget_approve", "budget_resume"] {
+            for window in [false, true] {
+                let (node, _dir, g1) = g1_node(&["read", "receive"]);
+                let s = &node.state;
+                if window { spend_advance(s, true).await.unwrap(); }
+                g1.grant.lock().unwrap()["op_id"] = "cd34".into();
+                let calls = if window { 2 } else { 3 };
+                for call in 0..calls {
+                    let reply = if command == "budget_approve" {
+                        do_budget_approve(s, 500_000, budget::PresetId::Careful).await.unwrap()
+                    } else {
+                        do_budget_resume(s).await.unwrap()
+                    };
+                    let reply = serde_json::to_value(reply).unwrap();
+                    assert_eq!(reply["request_id"], "ab12");
+                    assert_eq!(reply.get("armed_by_request"), Some(&if call == calls - 1 {
+                        serde_json::json!("ab12")
+                    } else { serde_json::Value::Null }));
+                }
+                // Budget-only completion clears the shared pending record too.
+                assert!(s.spend.lock().unwrap().pending().is_none());
+                g1.grant.lock().unwrap()["op_id"] = "ef56".into();
+                let view = serde_json::to_value(do_budget_status(s).await.unwrap()).unwrap();
+                assert_eq!(view["autopay"]["state"], "open");
+                assert_eq!(view["armed_by_request"], "ab12");
+                assert_eq!(view.get("request_id"), Some(&serde_json::Value::Null));
+                let narrowed = serde_json::to_value(do_budget_approve(s, 400_000, budget::PresetId::Careful).await.unwrap()).unwrap();
+                assert_eq!(narrowed["armed_by_request"], "ab12", "narrowing preserves the active approval");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn approval_ids_budget_resets_on_pause_lock_expiry_and_replacement() {
+        for reset in ["pause", "lock", "expiry", "local", "immediate"] {
+            let (node, _dir, _g1) = g1_node(&["read", "receive"]);
+            let s = &node.state;
+            do_budget_approve(s, 500_000, budget::PresetId::Careful).await.unwrap();
+            spend_advance(s, false).await.unwrap();
+            spend_advance(s, false).await.unwrap();
+            let open = serde_json::to_value(budget_view(s).unwrap()).unwrap();
+            assert_eq!(open["armed_by_request"], "ab12");
+            match reset {
+                "pause" => { do_budget_pause(s).unwrap(); }
+                "lock" => s.autopay.lock().unwrap().lock(),
+                "expiry" => s.autopay.lock().unwrap().restrict(now_ms(), 500_000),
+                "local" => s.autopay.lock().unwrap().arm(now_ms(), 500_000, act::SpendBasis::AppLock),
+                "immediate" => { do_budget_resume(s).await.unwrap(); }
+                _ => unreachable!(),
+            }
+            let view = serde_json::to_value(budget_view(s).unwrap()).unwrap();
+            assert_eq!(view.get("armed_by_request"), Some(&serde_json::Value::Null), "{reset}");
+            assert_eq!(view["autopay"]["state"], match reset {
+                "expiry" => "expired",
+                "local" | "immediate" => "open",
+                _ => "off",
+            });
+        }
+    }
+
+    #[tokio::test]
+    async fn approval_ids_cancelled_budget_request_cannot_name_the_next_approval() {
+        let requests = AtomicUsize::new(0);
+        let routes: Routes = Arc::new(move |method, path, _body| {
+            let reply = match (method, path) {
+                ("POST", "/pair/elevation-request") => {
+                    let op = if requests.fetch_add(1, Ordering::SeqCst) == 0 { "aa11" } else { "bb22" };
+                    serde_json::json!({"op_id": op, "expires_at": now_unix() + 900,
+                        "owner_action": format!("konsensus grant --op {op}")})
+                }
+                ("DELETE", "/pair/elevation/aa11") => serde_json::json!({}),
+                ("GET", "/pair/elevation/bb22") => serde_json::json!({"op_id": "bb22", "status": "granted"}),
+                _ => return (0, String::new()),
+            };
+            (200, reply.to_string())
+        });
+        let (node, _dir, g1) = g1_node_with(&["read", "receive"], Some(routes));
+        let s = &node.state;
+        g1.grant.lock().unwrap()["op_id"] = "cd34".into();
+        assert_eq!(do_budget_approve(s, 500_000, budget::PresetId::Careful).await.unwrap().request_id.as_deref(), Some("aa11"));
+        do_spend_cancel(s).await.unwrap();
+        let cancelled = serde_json::to_value(budget_view(s).unwrap()).unwrap();
+        assert_eq!(cancelled.get("armed_by_request"), Some(&serde_json::Value::Null));
+        assert_eq!(do_budget_approve(s, 500_000, budget::PresetId::Careful).await.unwrap().request_id.as_deref(), Some("bb22"));
+        spend_advance(s, false).await.unwrap();
+        let view = serde_json::to_value(budget_view(s).unwrap()).unwrap();
+        assert_eq!(view["autopay"]["state"], "open");
+        assert_eq!(view["armed_by_request"], "bb22");
+        assert_eq!(view.get("request_id"), Some(&serde_json::Value::Null));
     }
 
     #[tokio::test]
