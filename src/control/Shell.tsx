@@ -4680,6 +4680,10 @@ function Composer(props: {
   const LAPSED = 'The approval was cancelled or lapsed before it went through.';
   const TOUCH_AGAIN = 'It needs Touch ID again. Press Send to ask.';
   const BUDGET_AGAIN = 'Payments need approving again. Press Send to ask.';
+  const BUDGET_SHORT = 'Allowed, but your budget does not cover this message. Nothing was sent.';
+  const PRICE_MOVED = 'The message price changed before it was sent. Nothing was sent; check the price and press Send.';
+  /** The budget stand for an approved message at the price it was approved at (whatever the composer's mode now). */
+  const standFor = (p: Pressed) => budgetStand(budget(), (p.track as { id: string }).id, false, p.msat, readmit()).kind;
   /**
    * Does this grant read cover one message at `msat` for `peer`? Per call, the
    * whole grant, and the contact's own remainder when named. The host omits a
@@ -4771,7 +4775,7 @@ function Composer(props: {
     if (budgetLive(c, b, now)) {
       // Allowed, but this message is over a limit the budget sets: it is not sent.
       const k = untrack(stand).kind;
-      if (k === 'contact_used' || k === 'total_used' || k === 'grant_limited') { dropConsent('Allowed, but your budget does not cover this message. Nothing was sent.'); return; }
+      if (k === 'contact_used' || k === 'total_used' || k === 'grant_limited') { dropConsent(BUDGET_SHORT); return; }
       if (!c.keySeen) setConsent({ ...c, keySeen: true });
       return;
     }
@@ -4780,7 +4784,8 @@ function Composer(props: {
     const pendingOp = sp?.state === 'pending' ? sp.pending?.op_id ?? null : null;
     if (pendingOp !== null && pendingOp !== c.requestId) { dropConsent(LAPSED); return; }
     if (b.waiting_for_owner || pendingOp === c.requestId) { if (!c.requestSeen) setConsent({ ...c, requestSeen: true }); return; }
-    if (c.requestSeen) dropConsent(LAPSED);
+    // The call returned R, so a fresh read that shows neither R waiting nor R live means it was cancelled or lapsed.
+    dropConsent(LAPSED);
   });
   // The approval it waits on was cancelled, lapsed or replaced: the consent ends with it.
   createEffect(() => {
@@ -4897,8 +4902,12 @@ function Composer(props: {
     const deviceOn = props.actions.device()?.state === 'registered';
     const fresh = !props.budgetStale;
     const g = budget()?.node_grant ?? null;
+    const here = props.track ? trackKey(props.track) : null;
+    const price = messageShown().msat;
     const gone = list.filter((p) => {
       if (p.cancelled) return true;
+      // The price it was approved at is not this contact's price any more: never sent at the old one.
+      if (here === trackKey(p.track) && price !== null && price !== p.msat) { cancel(p, PRICE_MOVED); return true; }
       if (p.kind === 'touch') {
         if (!deviceOn) { cancel(p, 'Touch ID approvals on this Mac stopped before it went through.'); return true; }
         if (!fresh || props.actions.budgetReadApplied() < p.readsFrom) return false;
@@ -4910,6 +4919,8 @@ function Composer(props: {
       if (p.kind === 'budget') {
         if (!fresh || props.actions.budgetReadApplied() < p.readsFrom) return false;
         if (!budgetLive(p, budget(), now)) { cancel(p, LAPSED); return true; }
+        // Allowed by its own R, but this message is over (or waiting on) a budget limit: not sent, even if it recovers later.
+        if (here === trackKey(p.track) && standFor(p) !== 'ok') { cancel(p, BUDGET_SHORT); return true; }
         return false;
       }
       if (!windowStill(p, sp, now)) { cancel(p, LAPSED); return true; }
@@ -4926,8 +4937,10 @@ function Composer(props: {
     if (Date.now() >= p.until) return 'It was not approved within 10 minutes.';
     // A budget read known to be stale proves nothing, for either kind.
     if (props.budgetStale) return p.kind === 'touch' ? TOUCH_AGAIN : p.kind === 'budget' ? BUDGET_AGAIN : 'Spending needs approving again. Press Send to ask.';
+    // Only at the price it was approved at (null: the price is being read again, so it is not confirmed).
+    if (messageShown().msat !== p.msat) return PRICE_MOVED;
     if (p.kind === 'touch') return touchLive(p) ? null : TOUCH_AGAIN;
-    if (p.kind === 'budget') return budgetLive(p, budget(), Date.now()) ? null : LAPSED;
+    if (p.kind === 'budget') return !budgetLive(p, budget(), Date.now()) ? LAPSED : standFor(p) !== 'ok' ? BUDGET_SHORT : null;
     return windowStill(p, props.spend, Date.now()) ? null : LAPSED;
   });
   /** The bubble a send uses: the waiting one it continues (handed over now), else a new one. */

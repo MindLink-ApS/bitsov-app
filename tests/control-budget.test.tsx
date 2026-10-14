@@ -1565,6 +1565,36 @@ describe('invisible payments in the composer and the context panel', () => {
     await vi.waitFor(() => expect(unsentReason()).toContain('You left this chat before it was sent.'));
   }, 30_000);
 
+  it.each([
+    ['the contact budget is used up, then recovers', (h: ReturnType<typeof stubHost>) => armedBy('op-R', { rows: [{ target: MAYA, room: false, limit_msat: 50_000, spent_msat: 50_000 }] }), true],
+    ['the owner has another budget request out', (h: ReturnType<typeof stubHost>) => armedBy('op-R', { waiting_for_owner: true }), false],
+  ])('Codex r1 #1: queued, %s → never sent, even if the budget recovers', async (_name, limited, recovers) => {
+    const { host, release } = await budgetTwoBehindOne();
+    host.state.budget = limited(host);
+    await nextRead(host);
+    if (recovers) {
+      host.state.budget = armedBy('op-R');
+      await nextRead(host);
+    }
+    release();
+    await new Promise((r) => setTimeout(r, 500));
+    expect(sentTexts(host)).toEqual(['one']);
+    await vi.waitFor(() => expect(unsentReason()).toContain('Allowed, but your budget does not cover this message. Nothing was sent.'));
+  }, 30_000);
+
+  it('Codex r1 #3: a fresh read after the press shows its request neither waiting nor live → lapsed, and a later arm by it never sends', async () => {
+    let hostRef!: ReturnType<typeof stubHost>;
+    // The press is taken (op-R, waiting), but the node drops it before any read sees it pending.
+    const host = allowHost('preset', { budget_approve: () => ({ ...hostRef.state.budget, waiting_for_owner: true, request_id: 'op-R', granted_op: null }) });
+    hostRef = host;
+    await openShell();
+    await pressAllow('preset');
+    await vi.waitFor(() => expect(unsentReason()).toContain('The approval was cancelled or lapsed before it went through.'), { timeout: 8000 });
+    host.state.budget = armedBy('op-R');
+    await nextRead(host);
+    expect(host.used('message_send')).toHaveLength(0);
+  }, 25_000);
+
   it('budget approve & send queued: nothing revoked → it goes once after the send ahead', async () => {
     const { host, release } = await budgetTwoBehindOne();
     release();
