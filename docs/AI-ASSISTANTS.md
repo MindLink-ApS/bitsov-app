@@ -64,7 +64,24 @@ Ask track remains available.
 
 Each assistant keeps up to 100 question/answer turns in the app config folder,
 sealed with authenticated encryption through the app's `at_rest::Sealer`
-interface. On Mac, its key is held by the existing native Keychain bridge.
+interface. On Mac, a fresh AES data key for each saved file is wrapped by the
+pairing identity's Secure Enclave sealing bridge. The enclave key is
+`WhenUnlockedThisDeviceOnly`, non-exportable, and never synced; its opaque
+representation travels with the ciphertext. This is prompt-free protection,
+**not a Touch ID/biometry gate**. If enclave sealing or verification is
+unavailable, the app logs it and keeps the existing Keychain AES behavior.
+That fallback is not Secure Enclave-backed; its login-Keychain copy can migrate.
+
+On thread access, under the host thread lock, existing transcripts and watch
+settings are migrated independently. Each replacement is written, synced,
+read back, decrypted and compared with the original before atomic replacement.
+All old Keychain keys remain until every file verifies and directory changes
+are synced. A crash resumes from the mixed formats; corrupt/unreadable files
+stay untouched and block key retirement, while healthy threads remain usable.
+An already device-bound file that cannot be decrypted remains intact and
+returns a retry error; it never becomes an empty thread. Migration failures
+never abort application startup.
+
 Only transcript text is saved, never broker objects, model request bodies or
 credentials. Saved answers are marked historical; they are not fresh reads
 and are not automatically included in model requests. **Forget** clears that
