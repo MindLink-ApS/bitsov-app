@@ -137,7 +137,20 @@ it('the owner sees where adding a device stands: scan the ticket, then compare t
   vi.useRealTimers();
 });
 
+it.each([
+  ['expired', {uri:'bitsov://pair/old', expires_at:Date.now()/1000-1}, 'expired'],
+  ['used', {uri:'', expires_at:Date.now()/1000+300}, 'was used'],
+] as const)('a ticket that is %s, with no device comparing, shows no current step', async (_name, t, says) => {
+  const root = mount(() => <AddDevice api={async input => input.action === 'status' ? {state:'ready', owner:true} : {state:'ticket', ...t, pending:[]}} />);
+  await flush(); await click(root, 'Add a device');
+  expect(root.textContent).toContain(says);
+  expect(root.querySelector('[data-pair-steps]')!.getAttribute('data-pair-steps')).toBe('ended');
+  expect([...root.querySelectorAll('[data-pair-steps] li')].map(li => li.getAttribute('data-step-state'))).toEqual(['todo', 'todo', 'todo']);
+  expect(root.querySelector('[data-pair-steps] [aria-current]')).toBeNull();
+});
+
 it('the new device sees the same steps: the claim code next, then compare, then done', async () => {
+  vi.useFakeTimers();
   let state: 'idle' | 'waiting' | 'done' = 'idle';
   const root = mount(() => <JoinDevice api={async (input: JoinInput) => {
     if (input.action === 'start') state = 'waiting';
@@ -148,4 +161,10 @@ it('the new device sees the same steps: the claim code next, then compare, then 
   root.querySelector<HTMLInputElement>('[name="claim_code"]')!.value = 'ABCD-EFGH-JKLM-NPQR-ST';
   root.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); await flush();
   expect(steps()).toEqual(['done', 'done', 'current']);
+  // The owner approved: the next poll reports done.
+  state = 'done';
+  await vi.advanceTimersByTimeAsync(2000); await flush();
+  expect(root.querySelector('[data-pair-steps]')!.getAttribute('data-pair-steps')).toBe('done');
+  expect(steps()).toEqual(['done', 'done', 'done']);
+  expect(root.textContent).toContain('Device added');
 });

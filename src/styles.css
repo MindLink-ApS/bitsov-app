@@ -1279,6 +1279,7 @@ input[type='checkbox'], input[type='radio'] { width: auto; flex: none; padding: 
 .pair-steps li[data-step-state='current'] { color: var(--ink); font-weight: 600; }
 .pair-steps li[data-step-state='current'] .pair-step-n { background: var(--ink); color: var(--bg); border-color: var(--ink); }
 .pair-steps li[data-step-state='done'] .pair-step-n { background: var(--sunk); color: var(--ink); }
+.pair-steps[data-pair-steps='ended'] { opacity: .6; }
 .pair-words li { min-width: 0; padding: var(--s-4) var(--s-2); border: 1px solid var(--line-strong); border-radius: var(--r-control); background: var(--sunk); color: var(--ink); font-size: clamp(18px, 4vw, 24px); font-weight: 600; text-align: center; overflow-wrap: anywhere; }
 .node-offline { display: flex; flex-direction: column; align-items: center; gap: var(--s-3); margin: 0 auto; padding: var(--s-6) var(--s-4); width: min(100%, 520px); min-width: 0; color: var(--ink); text-align: center; overflow-wrap: anywhere; }
 .node-offline [data-offline-title] { font-family: var(--font-display); font-size: var(--t-3xl); font-weight: 400; }

@@ -65,7 +65,8 @@ export function AddDevice(props: { api:(input:AddInput)=>Promise<AddView>; mobil
       </Match>
       <Match when={ticket()}><>
         {/* Owner side: the new device scans the ticket (step 1), then both compare the words (step 3). */}
-        <PairSteps current={ticket()!.pending.length > 0 ? 2 : 0} />
+        {/* An expired or used ticket with nobody comparing: no step is current (the panel below says why). */}
+        <PairSteps current={ticket()!.pending.length > 0 ? 2 : ticket()!.uri && ticket()!.expires_at > now() ? 0 : null} />
         <Show when={ticket()!.pending.length === 0}>
           <Show when={ticket()!.uri && ticket()!.expires_at > now()} fallback={<p role="status">{ticket()!.expires_at <= now()
             ? 'This ticket expired. If it was already scanned, finish enrollment on the new device. Otherwise close this ticket and create a new one.'
