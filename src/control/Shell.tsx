@@ -1240,6 +1240,7 @@ export function ControlCenter(props: Props) {
     onStreams: (local, remote) => setMeetingStreams({ local, remote }),
     iceServers: () => stunServer(effectiveStun()),
     busy: () => !['idle', 'ended'].includes(callView().phase),
+    provenUnpaid: (code) => provenUnpaid(code),
   });
   onCleanup(() => meetings.endLocal());
 
@@ -3224,9 +3225,29 @@ function MeetingPanel(props: {
           <Show when={v().phase === 'invited'}>
             <p class="hint" data-meeting-ignore>Ignore it: nothing is paid, and the invite ends by itself after a minute.</p>
           </Show>
-          <Show when={v().paidMsat > 0}>
-            <p class="hint" data-meeting-paid>Paid {fmtAmount(v().paidMsat)} for this meeting’s signals. Media is direct and not billed.</p>
-          </Show>
+          {/* Receipts carry each signal's ceiling, not settled fees: "up to" is the honest total. */}
+          <Switch>
+            {/* Something is still in flight: never "paid nothing" (or a final total) until it settles. */}
+            <Match when={v().pendingCount > 0}>
+              <p class="hint" data-meeting-paid="pending">
+                {v().paidMsat > 0 ? `Paid up to ${fmtAmount(v().paidMsat)} so far for this meeting’s signals. ` : ''}
+                {v().unknownCount > 0 ? `${v().unknownCount === 1 ? 'One signal’s result is not known yet' : `${v().unknownCount} signals’ results are not known yet`}: check pending result. ` : ''}
+                {v().pendingCount === 1 ? 'A payment for this meeting is still settling' : `${v().pendingCount} payments for this meeting are still settling`}: up to {fmtAmount(v().pendingMsat)}. The total updates when {v().pendingCount === 1 ? 'it finishes' : 'they finish'}. Media is not billed.
+              </p>
+            </Match>
+            <Match when={v().unknownCount > 0}>
+              <p class="hint" data-meeting-paid="unknown">
+                {v().paidMsat > 0 ? `Paid up to ${fmtAmount(v().paidMsat)} for this meeting’s signals.` : 'No payment for this meeting is confirmed.'}{' '}
+                {v().unknownCount === 1 ? 'One signal’s result is not known yet' : `${v().unknownCount} signals’ results are not known yet`} (up to {fmtAmount(v().paidMsat + v().unknownMsat)} in all if {v().unknownCount === 1 ? 'it' : 'they'} went through): check pending result. Media is not billed.
+              </p>
+            </Match>
+            <Match when={v().paidMsat > 0}>
+              <p class="hint" data-meeting-paid="settled">Paid up to {fmtAmount(v().paidMsat)} for this meeting’s signals (each signal’s price plus its routing-fee cap). Media is not billed.</p>
+            </Match>
+            <Match when={v().phase === 'ended'}>
+              <p class="hint" data-meeting-paid="nothing">This meeting paid nothing.</p>
+            </Match>
+          </Switch>
           <Show when={v().phase === 'ended' && v().error}>
             <p class="hint" data-meeting-ended>{v().error}</p>
           </Show>
