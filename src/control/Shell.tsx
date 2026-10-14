@@ -3225,7 +3225,7 @@ function MeetingPanel(props: {
             <p class="hint" data-meeting-ignore>Ignore it: nothing is paid, and the invite ends by itself after a minute.</p>
           </Show>
           <Show when={v().paidMsat > 0}>
-            <p class="hint" data-meeting-paid>Paid {fmtAmount(v().paidMsat)} for this meeting’s signals. Media is direct and not billed.</p>
+            <p class="hint" data-meeting-paid>Paid {fmtAmount(v().paidMsat)} for this meeting’s signals. Media is not billed.</p>
           </Show>
           <Show when={v().phase === 'ended' && v().error}>
             <p class="hint" data-meeting-ended>{v().error}</p>
