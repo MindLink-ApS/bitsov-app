@@ -46,10 +46,15 @@ First run, as the onboarding screen shows it:
 
 1. **Start node.** The host starts the bundled sidecar and waits for `/health`.
 2. **Pair this app.**
-   - The host loads the app's Ed25519 client key from
-     `<app data dir>/app-client/client-ed25519.key`. On first run it creates
-     the key: a hex seed, mode `0600`, in a `0700` directory. It refuses a key
-     file that group or others can read.
+   - The host loads the app's Ed25519 client key from `<app data dir>/app-client/`.
+     macOS uses Secure Enclave ciphertext in `client-ed25519.sealed`; Android
+     uses its Keystore sealer. An older `client-ed25519.key` hex seed is migrated
+     by writing and reopening a sealed copy, verifying the seed, and making the
+     sealed file durable before wiping and deleting plaintext. Files are `0600`
+     inside a `0700` directory; group/other access is refused. If macOS sealing
+     is unavailable before migration, the app logs it and keeps the plaintext
+     behavior. An existing sealed identity is never replaced on an open error:
+     restore access on the original device, or clear storage and pair again.
    - `POST /api/v1/pair/request {client_name, client_pubkey}` →
      `{pair_id, expires_at, challenge_path}`.
    - The host reads the 32-byte challenge from `challenge_path`. It refuses a
@@ -122,11 +127,14 @@ gated by the challenge file and the node's own pairing window.
 
 ## What this does not buy
 
-Any process running as the same OS user can read `client-ed25519.key` and the
-node's `data_dir`. It can do everything this app can. Closing that gap needs
-an OS keychain with a per-application ACL, or hardware-backed keys. Both are
-out of scope, and nothing weaker stands in for them. The G6 local-trust
-disclosure stays as written.
+On macOS the sealed pairing identity is bound to that Mac's Secure Enclave;
+copying its envelope and the login Keychain to another Mac does not unlock it.
+This does not isolate the app from another process running as the same OS user
+on the original Mac: startup unsealing needs no biometric approval, and the
+seed exists in app memory while signing. The plaintext fallback and old backups
+containing the plaintext seed retain their original exposure. Overwriting a
+file cannot guarantee erasure of old flash blocks or backups. The node's
+`data_dir` and the G6 local-trust disclosure remain separate boundaries.
 
 ## Compatibility with nodes after rc7
 

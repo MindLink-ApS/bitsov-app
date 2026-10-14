@@ -788,14 +788,24 @@ fn persist_with(
             return Err(error);
         }
     };
-    let result = std::io::Write::write_all(&mut file, &bytes)
-        .and_then(|()| file.sync_all())
-        .and_then(|()| std::fs::rename(&tmp, path));
+    let io_error = |error| RemoteError::Local(format!("cannot persist remote descriptor: {error}"));
+    let result = (|| {
+        std::io::Write::write_all(&mut file, &bytes)
+            .and_then(|()| file.sync_all()).map_err(io_error)?;
+        if sealer.is_some() && descriptor.code.is_some() {
+            let readback = std::fs::read(&tmp).map_err(io_error)?;
+            let stored = serde_json::from_slice(&readback)
+                .map_err(|_| RemoteError::Local("cannot verify protected pairing code".into()))?;
+            let (opened, _) = open_sealed_code(stored, sealer)?;
+            if opened.code != descriptor.code {
+                return Err(RemoteError::Local("protected pairing code does not reopen to the same code".into()));
+            }
+        }
+        std::fs::rename(&tmp, path).map_err(io_error)
+    })();
     if let Err(error) = result {
         let _ = std::fs::remove_file(&tmp);
-        return Err(RemoteError::Local(format!(
-            "cannot persist remote descriptor: {error}"
-        )));
+        return Err(error);
     }
     Ok(())
 }
@@ -898,7 +908,14 @@ fn load_with(
     let descriptor = validate_descriptor(persisted)?;
     if migrate {
         // The atomic replacement unlinks the file that held the plaintext code.
-        persist_with(path, &descriptor, sealer)?;
+        if let Err(error) = persist_with(path, &descriptor, sealer) {
+            if !sealer.is_some_and(|sealer| sealer.allows_plaintext_fallback()) {
+                return Err(error);
+            }
+            // `migrate` proves the original descriptor was plaintext. Never
+            // use this fallback for a failed open of an existing sealed code.
+            eprintln!("[pairing] retaining the plaintext pending pairing code: {error}");
+        }
     }
     Ok(Some(descriptor))
 }
@@ -2735,6 +2752,39 @@ mod tests {
 
         load_with(&path, Some(&MemorySealer)).unwrap().unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), migrated, "migration runs once");
+    }
+
+    #[test]
+    fn failed_optional_code_migration_preserves_plaintext_but_never_downgrades_sealed_code() {
+        use crate::at_rest::test_sealer::MemorySealer;
+        struct FailingMigration { fail_seal: bool, fallback: bool }
+        impl Sealer for FailingMigration {
+            fn allows_plaintext_fallback(&self) -> bool { self.fallback }
+            fn seal(&self, purpose: &str, plain: &[u8]) -> Result<Vec<u8>, String> {
+                if self.fail_seal { Err("Secure Enclave unavailable".into()) }
+                else { MemorySealer.seal(purpose, plain) }
+            }
+            fn open(&self, _: &str, _: &[u8]) -> Result<zeroize::Zeroizing<Vec<u8>>, String> {
+                Err("cannot open on this Mac".into())
+            }
+        }
+        for fail_seal in [true, false] {
+            let (_dir, path, descriptor, code) = sealed_fixture(51);
+            persist_with(&path, &descriptor, None).unwrap();
+            let original = std::fs::read(&path).unwrap();
+            let optional = FailingMigration { fail_seal, fallback: true };
+            let loaded = load_with(&path, Some(&optional)).unwrap().unwrap();
+            assert_eq!(loaded.code.as_deref(), Some(code.as_str()));
+            assert_eq!(std::fs::read(&path).unwrap(), original);
+            let strict = FailingMigration { fail_seal, fallback: false };
+            assert!(load_with(&path, Some(&strict)).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), original);
+
+            persist_with(&path, &descriptor, Some(&MemorySealer)).unwrap();
+            let sealed = std::fs::read(&path).unwrap();
+            assert!(load_with(&path, Some(&optional)).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), sealed);
+        }
     }
 
     #[test]

@@ -1,13 +1,10 @@
 //! The app-held Ed25519 client key.
 //!
-//! Desktop: stored as a hex seed in a `0600` file inside a `0700` directory
-//! under the app data dir. No OS keychain in this step: any process running as
-//! the same OS user can read this file. That is the documented limit of the
-//! tier (docs/ONBOARDING_PAIRING.md) — less exposure, not solved local security.
-//!
-//! Android installs an [`at_rest::Sealer`]: the seed is then kept only as
-//! Keystore ciphertext in [`SEALED_KEY_FILE`], and a plain [`KEY_FILE`] left
-//! by an older build is sealed once, verified, and deleted.
+//! macOS (Secure Enclave) and Android (Keystore) install an [`at_rest::Sealer`].
+//! A legacy [`KEY_FILE`] is sealed, read back and verified, then wiped and
+//! deleted. Once [`SEALED_KEY_FILE`] exists it is authoritative, even when
+//! the sealer is unavailable. macOS may retain the legacy `0600` hex file
+//! in its `0700` directory when sealing is unavailable before migration.
 
 use std::io::Write;
 use std::path::Path;
@@ -23,7 +20,7 @@ use crate::at_rest::{self, Sealer};
 pub const KEY_FILE: &str = "client-ed25519.key";
 /// The seed sealed by the installed [`at_rest::Sealer`]. Never plaintext.
 pub const SEALED_KEY_FILE: &str = "client-ed25519.sealed";
-const MAX_SEALED_KEY_BYTES: u64 = 1024;
+const MAX_SEALED_KEY_BYTES: u64 = 16384;
 static SEALED_KEY_LOCK: Mutex<()> = Mutex::new(());
 
 /// The client signing key. `Debug` never prints key material.
@@ -53,24 +50,35 @@ impl ClientKey {
     }
 
     fn load_or_create_plain(dir: &Path) -> Result<Self, PairError> {
+        if sealed_file_exists(dir)? {
+            return Err(PairError::Local(
+                "this device cannot open its protected client key: protected storage is unavailable. \
+                 Restore access on the original device, or clear BitSov's storage and pair again.".into(),
+            ));
+        }
         restrict_dir(dir)?;
         let path = dir.join(KEY_FILE);
         match create_new_protected(&path) {
             Ok(mut file) => {
                 let mut seed = [0u8; 32];
-                getrandom::getrandom(&mut seed)
-                    .map_err(|e| PairError::Local(format!("no randomness for the client key: {e}")))?;
+                getrandom::getrandom(&mut seed).map_err(|e| {
+                    PairError::Local(format!("no randomness for the client key: {e}"))
+                })?;
                 let written = file
                     .write_all(hex::encode(seed).as_bytes())
                     .and_then(|()| file.sync_all());
                 if let Err(e) = written {
                     let _ = std::fs::remove_file(&path);
-                    return Err(PairError::Local(format!("cannot write the client key: {e}")));
+                    return Err(PairError::Local(format!(
+                        "cannot write the client key: {e}"
+                    )));
                 }
                 Ok(Self::from_seed(seed))
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Self::load(&path),
-            Err(e) => Err(PairError::Local(format!("cannot create the client key: {e}"))),
+            Err(e) => Err(PairError::Local(format!(
+                "cannot create the client key: {e}"
+            ))),
         }
     }
 
@@ -78,40 +86,59 @@ impl ClientKey {
         Ok(Self::from_seed(*plain_seed(path)?))
     }
 
-    /// The seed exists on disk only as `sealer` ciphertext. A plain key file is
-    /// migrated once: sealed, reopened and compared, then wiped and deleted.
-    /// Once a sealed file exists it is authoritative.
-    pub(crate) fn load_or_create_sealed(dir: &Path, sealer: &dyn Sealer) -> Result<Self, PairError> {
-        let _sealed_key = SEALED_KEY_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    /// Migrate a plain key only after a durable, verified sealed copy exists.
+    /// A sealer may permit legacy fallback before migration, never afterwards.
+    pub(crate) fn load_or_create_sealed(
+        dir: &Path,
+        sealer: &dyn Sealer,
+    ) -> Result<Self, PairError> {
+        let _sealed_key = SEALED_KEY_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         restrict_dir(dir)?;
         let sealed = dir.join(SEALED_KEY_FILE);
         let plain = dir.join(KEY_FILE);
-        let written = if sealed.exists() {
-            None
+        let seed = if sealed_file_exists(dir)? {
+            sealed_seed(&sealed, sealer)?
         } else {
             let seed = if plain.exists() {
                 plain_seed(&plain)?
             } else {
                 let mut seed = Zeroizing::new([0u8; 32]);
-                getrandom::getrandom(&mut seed[..])
-                    .map_err(|e| PairError::Local(format!("no randomness for the client key: {e}")))?;
+                getrandom::getrandom(&mut seed[..]).map_err(|e| {
+                    PairError::Local(format!("no randomness for the client key: {e}"))
+                })?;
                 seed
             };
-            let ciphertext = sealer
-                .seal(at_rest::CLIENT_SEED_PURPOSE, &seed[..])
-                .map_err(|e| PairError::Local(format!("cannot protect the client key: {e}")))?;
-            write_replacing(&sealed, &ciphertext)
-                .map_err(|e| PairError::Local(format!("cannot write the protected client key: {e}")))?;
-            Some(seed)
+            if let Err(error) = write_verified_seed(&sealed, &seed, sealer) {
+                if !sealer.allows_plaintext_fallback() {
+                    return Err(error);
+                }
+                eprintln!("[pairing] could not seal the client identity; retaining existing storage: {error}");
+                // A published file (including a racing writer's) is always
+                // authoritative. Never downgrade or replace it on an error.
+                return if sealed_file_exists(dir)? {
+                    sealed_seed(&sealed, sealer).map(|seed| Self::from_seed(*seed))
+                } else {
+                    Self::load_or_create_plain(dir)
+                };
+            }
+            seed
         };
-        let seed = sealed_seed(&sealed, sealer)?;
-        if written.is_some_and(|written| *written != *seed) {
-            return Err(PairError::Local(
-                "the protected client key does not reopen to the same key".into(),
-            ));
-        }
         if plain.exists() {
-            discard(&plain)?;
+            // Also covers retry after publication succeeded but directory sync
+            // failed (or the process exited before it reached that sync).
+            if let Err(error) = std::fs::File::open(dir).and_then(|file| file.sync_all()) {
+                eprintln!(
+                    "[pairing] retaining plaintext until the sealed identity is durable: {error}"
+                );
+                return Ok(Self::from_seed(*seed));
+            }
+            if let Err(error) = discard(&plain) {
+                eprintln!(
+                    "[pairing] sealed identity loaded, but plaintext cleanup failed: {error}"
+                );
+            }
         }
         Ok(Self::from_seed(*seed))
     }
@@ -150,6 +177,42 @@ impl ClientKey {
     }
 }
 
+/// Metadata errors and dangling symlinks must not masquerade as a fresh store.
+fn sealed_file_exists(dir: &Path) -> Result<bool, PairError> {
+    match std::fs::symlink_metadata(dir.join(SEALED_KEY_FILE)) {
+        Ok(_) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(PairError::Local(format!(
+            "cannot inspect the protected client key: {e}"
+        ))),
+    }
+}
+
+fn write_verified_seed(path: &Path, seed: &[u8; 32], sealer: &dyn Sealer) -> Result<(), PairError> {
+    let ciphertext = sealer
+        .seal(at_rest::CLIENT_SEED_PURPOSE, seed)
+        .map_err(|e| PairError::Local(format!("cannot protect the client key: {e}")))?;
+    let dir = path.parent().expect("client key has a directory");
+    let io_error = |e| PairError::Local(format!("cannot write the protected client key: {e}"));
+    // NamedTempFile is owner-only. Its RAII cleanup removes failed attempts.
+    let mut temp = tempfile::NamedTempFile::new_in(dir).map_err(io_error)?;
+    temp.write_all(&ciphertext)
+        .and_then(|()| temp.as_file().sync_all())
+        .map_err(io_error)?;
+    let reopened = sealed_seed(temp.path(), sealer)?;
+    if *reopened != *seed {
+        return Err(PairError::Local(
+            "the protected client key does not reopen to the same key".into(),
+        ));
+    }
+    temp.persist_noclobber(path)
+        .map_err(|e| io_error(e.error))?;
+    // Make the sealed directory entry durable before wiping the old identity.
+    std::fs::File::open(dir)
+        .and_then(|file| file.sync_all())
+        .map_err(io_error)
+}
+
 fn plain_seed(path: &Path) -> Result<Zeroizing<[u8; 32]>, PairError> {
     check_owner_only(path, "client key file")?;
     let text = Zeroizing::new(
@@ -168,16 +231,20 @@ fn sealed_seed(path: &Path, sealer: &dyn Sealer) -> Result<Zeroizing<[u8; 32]>, 
         .map_err(|e| PairError::Local(format!("cannot read the protected client key: {e}")))?
         .len();
     if length > MAX_SEALED_KEY_BYTES {
-        return Err(PairError::Local("the protected client key is oversized".into()));
+        return Err(PairError::Local(
+            "the protected client key is oversized".into(),
+        ));
     }
     let ciphertext = std::fs::read(path)
         .map_err(|e| PairError::Local(format!("cannot read the protected client key: {e}")))?;
-    let seed = sealer.open(at_rest::CLIENT_SEED_PURPOSE, &ciphertext).map_err(|e| {
-        PairError::Local(format!(
-            "this device cannot open its protected client key ({e}). \
+    let seed = sealer
+        .open(at_rest::CLIENT_SEED_PURPOSE, &ciphertext)
+        .map_err(|e| {
+            PairError::Local(format!(
+                "this device cannot open its protected client key ({e}). \
              Clear BitSov's storage, then pair again."
-        ))
-    })?;
+            ))
+        })?;
     let seed: [u8; 32] = seed
         .as_slice()
         .try_into()
@@ -186,6 +253,7 @@ fn sealed_seed(path: &Path, sealer: &dyn Sealer) -> Result<Zeroizing<[u8; 32]>, 
 }
 
 /// Atomically replace `path` with an owner-only file holding `bytes`.
+#[cfg(test)]
 fn write_replacing(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let tmp = path.with_extension("sealed.tmp");
     let _ = std::fs::remove_file(&tmp);
@@ -263,18 +331,24 @@ pub(crate) fn check_owner_only(path: &Path, what: &str) -> Result<(), PairError>
 // Refuse before creating directories or files: skipping Unix modes would expose keys.
 #[cfg(not(unix))]
 pub(crate) fn restrict_dir(_dir: &Path) -> Result<(), PairError> {
-    Err(PairError::Local("private pairing storage is not supported on this platform".into()))
+    Err(PairError::Local(
+        "private pairing storage is not supported on this platform".into(),
+    ))
 }
 
 #[cfg(not(unix))]
 pub(crate) fn create_new_protected(_path: &Path) -> std::io::Result<std::fs::File> {
-    Err(std::io::Error::new(std::io::ErrorKind::Unsupported,
-        "private pairing storage is not supported on this platform"))
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "private pairing storage is not supported on this platform",
+    ))
 }
 
 #[cfg(not(unix))]
 pub(crate) fn check_owner_only(_path: &Path, _what: &str) -> Result<(), PairError> {
-    Err(PairError::Local("owner-only file checks are not supported on this platform".into()))
+    Err(PairError::Local(
+        "owner-only file checks are not supported on this platform".into(),
+    ))
 }
 
 #[cfg(all(test, unix))]
@@ -343,10 +417,147 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = dir.path().join("pairing");
         restrict_dir(&store).unwrap();
-        let wrong = MemorySealer.seal("pairing-code-v1:node", &[7u8; 32]).unwrap();
+        let wrong = MemorySealer
+            .seal("pairing-code-v1:node", &[7u8; 32])
+            .unwrap();
         write_replacing(&store.join(SEALED_KEY_FILE), &wrong).unwrap();
         let error = ClientKey::load_or_create_sealed(&store, &MemorySealer).unwrap_err();
-        assert!(error.to_string().contains("cannot open its protected client key"));
-        assert!(store.join(SEALED_KEY_FILE).exists(), "a refused key is never deleted");
+        assert!(error
+            .to_string()
+            .contains("cannot open its protected client key"));
+        assert!(
+            store.join(SEALED_KEY_FILE).exists(),
+            "a refused key is never deleted"
+        );
+    }
+
+    struct Unavailable;
+
+    impl Sealer for Unavailable {
+        fn allows_plaintext_fallback(&self) -> bool {
+            true
+        }
+        fn seal(&self, _: &str, _: &[u8]) -> Result<Vec<u8>, String> {
+            Err("Secure Enclave unavailable".into())
+        }
+
+        fn open(&self, _: &str, _: &[u8]) -> Result<Zeroizing<Vec<u8>>, String> {
+            Err("key belongs to another Mac or Secure Enclave unavailable".into())
+        }
+    }
+
+    #[test]
+    fn an_unavailable_sealer_preserves_the_plain_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = ClientKey::load_or_create_plain(dir.path()).unwrap();
+        let bytes = std::fs::read(dir.path().join(KEY_FILE)).unwrap();
+        let loaded = ClientKey::load_or_create_sealed(dir.path(), &Unavailable).unwrap();
+        assert_eq!(loaded.public_hex(), original.public_hex());
+        assert_eq!(std::fs::read(dir.path().join(KEY_FILE)).unwrap(), bytes);
+        assert!(!dir.path().join(SEALED_KEY_FILE).exists());
+    }
+
+    #[test]
+    fn an_unavailable_sealer_on_first_run_uses_the_plain_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = ClientKey::load_or_create_sealed(dir.path(), &Unavailable).unwrap();
+        let loaded = ClientKey::load_or_create_plain(dir.path()).unwrap();
+        assert_eq!(loaded.public_hex(), key.public_hex());
+        assert!(!dir.path().join(SEALED_KEY_FILE).exists());
+    }
+
+    #[test]
+    fn no_installed_sealer_must_not_replace_a_sealed_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        ClientKey::load_or_create_sealed(dir.path(), &MemorySealer).unwrap();
+        let bytes = std::fs::read(dir.path().join(SEALED_KEY_FILE)).unwrap();
+        let error = ClientKey::load_or_create_plain(dir.path()).unwrap_err();
+        assert!(error.to_string().contains("pair again"));
+        assert!(!dir.path().join(KEY_FILE).exists());
+        assert_eq!(
+            std::fs::read(dir.path().join(SEALED_KEY_FILE)).unwrap(),
+            bytes
+        );
+    }
+
+    #[test]
+    fn a_foreign_blob_is_preserved_and_never_replaced_even_with_plain_left_over() {
+        let dir = tempfile::tempdir().unwrap();
+        ClientKey::load_or_create_sealed(dir.path(), &MemorySealer).unwrap();
+        let sealed = std::fs::read(dir.path().join(SEALED_KEY_FILE)).unwrap();
+        for leftover in [false, true] {
+            if leftover {
+                create_new_protected(&dir.path().join(KEY_FILE))
+                    .unwrap()
+                    .write_all("11".repeat(32).as_bytes())
+                    .unwrap();
+            }
+            let error = ClientKey::load_or_create_sealed(dir.path(), &Unavailable).unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("cannot open its protected client key"));
+            assert!(error.to_string().contains("pair again"));
+            assert_eq!(
+                std::fs::read(dir.path().join(SEALED_KEY_FILE)).unwrap(),
+                sealed
+            );
+            assert_eq!(dir.path().join(KEY_FILE).exists(), leftover);
+            if leftover {
+                assert_eq!(
+                    std::fs::read_to_string(dir.path().join(KEY_FILE)).unwrap(),
+                    "11".repeat(32)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_crash_after_the_sealed_write_resumes_without_changing_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = ClientKey::load_or_create_plain(dir.path()).unwrap();
+        let plain = std::fs::read(dir.path().join(KEY_FILE)).unwrap();
+        // Reproduce the on-disk state at the crash boundary: the verified
+        // sealed copy is committed, but the old plaintext has not been wiped.
+        original.with_seed(|seed| {
+            write_verified_seed(&dir.path().join(SEALED_KEY_FILE), seed, &MemorySealer).unwrap();
+        });
+        assert_eq!(std::fs::read(dir.path().join(KEY_FILE)).unwrap(), plain);
+        let sealed = std::fs::read(dir.path().join(SEALED_KEY_FILE)).unwrap();
+        let loaded = ClientKey::load_or_create_sealed(dir.path(), &MemorySealer).unwrap();
+        assert_eq!(loaded.public_hex(), original.public_hex());
+        assert!(!dir.path().join(KEY_FILE).exists());
+        assert_eq!(
+            std::fs::read(dir.path().join(SEALED_KEY_FILE)).unwrap(),
+            sealed
+        );
+    }
+
+    struct FailedReadback;
+
+    impl Sealer for FailedReadback {
+        fn allows_plaintext_fallback(&self) -> bool {
+            true
+        }
+        fn seal(&self, purpose: &str, seed: &[u8]) -> Result<Vec<u8>, String> {
+            MemorySealer.seal(purpose, seed)
+        }
+
+        fn open(&self, _: &str, _: &[u8]) -> Result<Zeroizing<Vec<u8>>, String> {
+            Err("readback unavailable".into())
+        }
+    }
+
+    #[test]
+    fn a_failed_readback_keeps_the_original_plaintext_and_allows_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = ClientKey::load_or_create_plain(dir.path()).unwrap();
+        let bytes = std::fs::read(dir.path().join(KEY_FILE)).unwrap();
+        let loaded = ClientKey::load_or_create_sealed(dir.path(), &FailedReadback).unwrap();
+        assert_eq!(loaded.public_hex(), original.public_hex());
+        assert_eq!(std::fs::read(dir.path().join(KEY_FILE)).unwrap(), bytes);
+        assert!(!dir.path().join(SEALED_KEY_FILE).exists());
+        let retry = ClientKey::load_or_create_sealed(dir.path(), &MemorySealer).unwrap();
+        assert_eq!(retry.public_hex(), original.public_hex());
+        assert!(!dir.path().join(KEY_FILE).exists());
     }
 }

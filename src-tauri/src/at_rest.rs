@@ -1,7 +1,8 @@
 //! Hardware-wrapped storage for the secrets the app keeps on disk.
 //!
-//! Desktop installs nothing and keeps its owner-only files unchanged. Android
-//! installs an Android Keystore sealer at startup, before any pairing file is
+//! macOS installs a Secure Enclave sealer when available; otherwise existing
+//! owner-only plaintext stores remain usable. Android installs an Android
+//! Keystore sealer at startup, before any pairing file is
 //! read, so the Ed25519 client seed and a pending one-time pairing code are
 //! written only as ciphertext under a non-exportable key. Public pins (node
 //! id, transport keys and their signatures) stay readable: their integrity
@@ -15,7 +16,18 @@ use zeroize::Zeroizing;
 pub trait Sealer: Send + Sync {
     fn seal(&self, purpose: &str, plaintext: &[u8]) -> Result<Vec<u8>, String>;
     fn open(&self, purpose: &str, sealed: &[u8]) -> Result<Zeroizing<Vec<u8>>, String>;
+
+    /// Permit legacy plaintext storage if a new seal cannot be committed.
+    /// Never applies to an already sealed identity. Android remains strict.
+    fn allows_plaintext_fallback(&self) -> bool {
+        false
+    }
 }
+
+#[cfg(all(target_os = "macos", not(feature = "mobile")))]
+mod macos;
+#[cfg(all(target_os = "macos", not(feature = "mobile")))]
+pub use macos::install_macos;
 
 /// The client Ed25519 seed (`pairing::key`).
 pub const CLIENT_SEED_PURPOSE: &str = "client-ed25519-seed-v1";
@@ -58,7 +70,9 @@ pub(crate) mod test_sealer {
             let body = sealed
                 .strip_prefix(prefix.as_bytes())
                 .ok_or("sealed for another purpose")?;
-            Ok(Zeroizing::new(body.iter().map(|byte| byte ^ 0xa5).collect()))
+            Ok(Zeroizing::new(
+                body.iter().map(|byte| byte ^ 0xa5).collect(),
+            ))
         }
     }
 }
