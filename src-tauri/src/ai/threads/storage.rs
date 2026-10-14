@@ -3,12 +3,26 @@
 use super::{
     check, decrypt, encrypt, Assistant, Rule, Sealer, Thread, MAX_FILE_BYTES, MAX_SETTINGS_BYTES,
 };
-use std::{io::Read, path::Path};
+use std::{io::Read, path::Path, sync::OnceLock};
 use zeroize::Zeroizing;
 
 const MAGIC: &[u8] = b"bitsov-ai-se-v2\0";
 const MAX_WRAPPED_KEY: usize = 16384;
 const ASSISTANTS: [Assistant; 3] = [Assistant::Node, Assistant::Wallet, Assistant::Inbox];
+
+// Called under the host thread lock, which also covers the subsequent operation.
+// None = not attempted this launch; false = deferred until the next launch;
+// true = the sweep finished and retired all legacy keys. Cache failures too so
+// a corrupt/unknown file cannot trigger enclave and Keychain work on every read.
+fn prepare_migration(complete: &OnceLock<bool>, sweep: impl FnOnce() -> Result<bool, String>) {
+    complete.get_or_init(|| match sweep() {
+        Ok(retired) => retired,
+        Err(error) => {
+            eprintln!("[ai-threads] Secure Enclave migration incomplete; retaining remaining legacy keys: {error}");
+            false
+        }
+    });
+}
 
 trait LegacySealer: Sealer {
     fn delete_key(&self, purpose: &str) -> Result<(), String>;
@@ -44,10 +58,11 @@ impl ThreadSealer<'_> {
     // operation. No key is retired until every existing file has been read back.
     // Each replacement is independent; after a crash the directory can contain
     // either format. Uncommitted temporary files are ciphertext and are ignored.
-    fn migrate(&self, dir: &Path) -> Result<(), String> {
+    // True means all legacy keys were retired; no files means no retirement.
+    fn migrate(&self, dir: &Path) -> Result<bool, String> {
         let entries = match std::fs::read_dir(dir) {
             Ok(entries) => entries,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             Err(_) => {
                 return Err("Could not inspect assistant storage; retaining legacy keys.".into())
             }
@@ -127,7 +142,7 @@ impl ThreadSealer<'_> {
                 self.legacy.delete_key(purpose)?;
             }
         }
-        Ok(())
+        Ok(found)
     }
 }
 
@@ -235,6 +250,7 @@ mod macos {
     /// Device-only, non-synced Secure Enclave wrapping via the pairing bridge.
     /// Prompt-free, not biometry-gated. Legacy Keychain AES is a logged fallback.
     pub struct MacSealer;
+    static MIGRATION_COMPLETE: OnceLock<bool> = OnceLock::new();
     fn sealer() -> ThreadSealer<'static> {
         ThreadSealer {
             hardware: &Enclave,
@@ -242,12 +258,10 @@ mod macos {
         }
     }
     impl MacSealer {
-        /// Best effort under the host thread lock. Never abort application setup
-        /// or prevent access to a healthy thread because another cannot migrate.
+        /// Best effort, once per process, under the host thread lock. Never abort
+        /// setup or prevent access to a healthy thread because another cannot migrate.
         pub fn prepare(&self, dir: &Path) {
-            if let Err(error) = sealer().migrate(dir) {
-                eprintln!("[ai-threads] Secure Enclave migration incomplete; retaining remaining legacy keys: {error}");
-            }
+            prepare_migration(&MIGRATION_COMPLETE, || sealer().migrate(dir));
         }
     }
     impl Sealer for MacSealer {
@@ -371,6 +385,99 @@ mod tests {
             vec![Rule::Unread]
         );
         store.migrate(dir.path()).unwrap();
+    }
+
+    #[test]
+    fn complete_migration_skips_later_sweeps_in_the_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = Keys::default();
+        let revision = seed(dir.path(), &keys, Assistant::Node);
+        let store = ThreadSealer {
+            hardware: &Hardware,
+            legacy: &keys,
+        };
+        let complete = std::sync::OnceLock::new();
+        let mut sweeps = 0;
+        for _ in 0..3 {
+            prepare_migration(&complete, || {
+                sweeps += 1;
+                store.migrate(dir.path())
+            });
+        }
+        assert_eq!(sweeps, 1);
+        assert_eq!(complete.get(), Some(&true));
+        assert!(keys.0.lock().unwrap().is_empty());
+        assert_thread(dir.path(), Assistant::Node, &revision, &store);
+    }
+
+    #[test]
+    fn incomplete_migration_retries_only_once_per_launch() {
+        for unknown_file in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let keys = Keys::default();
+            let revision = seed(dir.path(), &keys, Assistant::Node);
+            let blocked = dir.path().join(if unknown_file {
+                "unknown.sealed"
+            } else {
+                "wallet.sealed"
+            });
+            std::fs::write(&blocked, b"corrupt ciphertext").unwrap();
+            let store = ThreadSealer {
+                hardware: &Hardware,
+                legacy: &keys,
+            };
+            let mut sweeps = 0;
+            for launch in 1..=2 {
+                // A new process gets a fresh in-memory flag, with the same files/keys.
+                let complete = std::sync::OnceLock::new();
+                for _ in 0..3 {
+                    prepare_migration(&complete, || {
+                        sweeps += 1;
+                        store.migrate(dir.path())
+                    });
+                }
+                assert_eq!(sweeps, launch);
+                assert_eq!(complete.get(), Some(&false));
+                assert_eq!(keys.0.lock().unwrap().len(), 1);
+                assert_eq!(std::fs::read(&blocked).unwrap(), b"corrupt ciphertext");
+                assert_thread(dir.path(), Assistant::Node, &revision, &store);
+            }
+            std::fs::remove_file(blocked).unwrap();
+            let complete = std::sync::OnceLock::new();
+            for _ in 0..3 {
+                prepare_migration(&complete, || {
+                    sweeps += 1;
+                    store.migrate(dir.path())
+                });
+            }
+            assert_eq!(sweeps, 3);
+            assert_eq!(complete.get(), Some(&true));
+            assert!(keys.0.lock().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn no_files_does_not_mark_legacy_keys_retired() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = Keys::default();
+        keys.seal("ai-thread-v1:node", b"old data").unwrap();
+        let store = ThreadSealer {
+            hardware: &Hardware,
+            legacy: &keys,
+        };
+        for path in [dir.path().to_path_buf(), dir.path().join("absent")] {
+            let complete = std::sync::OnceLock::new();
+            let mut sweeps = 0;
+            for _ in 0..2 {
+                prepare_migration(&complete, || {
+                    sweeps += 1;
+                    store.migrate(&path)
+                });
+            }
+            assert_eq!(sweeps, 1);
+            assert_eq!(complete.get(), Some(&false));
+            assert_eq!(keys.0.lock().unwrap().len(), 1);
+        }
     }
 
     #[test]
