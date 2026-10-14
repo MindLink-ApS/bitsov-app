@@ -136,6 +136,53 @@ describe('call refusal recovery', () => {
   });
 });
 
+describe('call unknown outcomes', () => {
+  beforeEach(() => { FakePc.made = []; vi.useFakeTimers(); });
+  afterEach(() => vi.useRealTimers());
+
+  it('a hangup that times out after the call ended stays counted as unknown, not paid', async () => {
+    let pending = false;
+    const { e, last } = engine({ signal: (_peer, kind) => {
+      if (kind === 403) { pending = true; return new Promise(() => {}); }
+      return Promise.resolve({ ok: true as const, value: { message_id: 'm', kind, amount_msat: 10_000, total_msat: 15_000, max_routing_fee_msat: 5_000, delivered: true, accepted: true, sent_at_ms: 0 } });
+    } });
+    await e.place(A, 'audio', QUOTE);
+    await e.receive(msg(401, { sdp: 'v=0 answer' }), OWN);
+    FakePc.made[0].connect();
+    const hanging = e.hangup();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(pending).toBe(true);
+    expect(last()).toMatchObject({ phase: 'ended', paidMsat: 15_000, unknownCount: 0 });
+    await vi.advanceTimersByTimeAsync(30_001);
+    await hanging;
+    expect(last()).toMatchObject({ phase: 'ended', paidMsat: 15_000, unknownCount: 1, unknownMsat: 6_000 });
+  });
+
+  it('an unknown recovery admission is counted as unknown with its cap', async () => {
+    let n = 0;
+    const restartId = 'e'.repeat(32);
+    const { e, sent, last } = engine({
+      newCallId: () => n++ === 0 ? ID : restartId,
+      signal: async (peer, kind, plaintext, max) => {
+        const body = JSON.parse(plaintext);
+        sent.push({ peer, kind, body, max });
+        if (body.call_id === restartId) return { ok: false, error: { code: 'payment_unknown', message: 'The node has not resolved the payment.' } };
+        return { ok: true, value: { message_id: 'm', kind, amount_msat: 10_000, total_msat: 15_000, max_routing_fee_msat: 5_000, delivered: true, accepted: true, sent_at_ms: 0 } };
+      },
+    });
+    await e.place(A, 'audio', QUOTE);
+    await e.receive(msg(401, { sdp: 'v=0 answer' }), OWN);
+    const pc = FakePc.made[0];
+    pc.connect();
+    pc.state('failed'); pc.state('failed');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sent.some((s) => s.kind === 400 && s.body.call_id === restartId)).toBe(true);
+    expect(last()).toMatchObject({ paidMsat: 15_000, unknownCount: 1, unknownMsat: 15_000 });
+    e.endLocal();
+    expect(last()).toMatchObject({ phase: 'ended', paidMsat: 15_000, unknownCount: 1, unknownMsat: 15_000 });
+  });
+});
+
 describe('call restart negotiation', () => {
   beforeEach(() => { FakePc.made = []; vi.useFakeTimers(); });
   afterEach(() => vi.useRealTimers());
@@ -834,7 +881,7 @@ describe('call engine', () => {
     expect(last().muted).toBe(true);
     await Promise.all([e.hangup(), e.hangup()]);
     expect(sent.map((s) => [s.kind, s.body.reason ?? null, s.max])).toEqual([[400, null, 15_000], [403, 'hangup', 6_000]]);
-    expect(last()).toMatchObject({ phase: 'ended', reason: 'hangup', paidMsat: 21_000 });
+    expect(last()).toMatchObject({ phase: 'ended', reason: 'hangup', paidMsat: 21_000, unknownCount: 0, unknownMsat: 0 });
     expect(FakePc.made[0].closed).toBe(true);
     expect(FakePc.made[0].tracks[0].stop).toHaveBeenCalled();
   });
@@ -1193,7 +1240,7 @@ describe('calls in the shell', () => {
     await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
     // After the call: what it paid, as an upper bound (fees are not reported), never an exact "paid 6 sats".
     expect($('[data-call-paid]')!.getAttribute('data-call-paid')).toBe('settled');
-    expect(text('[data-call-paid]')).toMatch(/^This call paid up to 6 sats: each signal’s price plus its routing-fee cap; the exact fees are not reported\./);
+    expect(text('[data-call-paid]')).toBe('This call paid up to 6 sats: each signal’s price plus its routing-fee cap; the exact fees are not reported. Media was not billed.');
     expect(text('[data-call-paid]')).not.toMatch(/paid 6 sats/i);
     expect(text('[data-call-connection]')).toContain('host');
   });
@@ -1258,6 +1305,24 @@ describe('calls in the shell', () => {
     await vi.waitFor(() => expect(text('[data-call-ended]')).toBe('token lacks required scope: spend'));
     expect($('[data-call-panel="calling"]')).toBeNull();
     expect(FakePc.made[0].closed).toBe(true);
+    // A refused offer paid nothing, and the ended panel says so.
+    expect($('[data-call-paid]')!.getAttribute('data-call-paid')).toBe('nothing');
+    expect(text('[data-call-paid]')).toBe('This call paid nothing.');
+  });
+
+  it('an ended call with an unknown hangup says so, and never folds it into what was paid', async () => {
+    stubHost({ call_signal: (args) => {
+      if (args!.kind === 403) throw { code: 'spend_unknown', message: 'The payment outcome is unknown.' };
+      return { message_id: 'sig', kind: args!.kind, amount_msat: 10_000, total_msat: 15_000, max_routing_fee_msat: 5000, delivered: true, accepted: true, sent_at_ms: Date.now() };
+    } });
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-call-hangup]')!.click();
+    await vi.waitFor(() => expect($('[data-call-paid]')?.getAttribute('data-call-paid')).toBe('unknown'));
+    expect(text('[data-call-paid]')).toMatch(/^This call paid up to 15 sats\. One signal’s result is not known yet \(up to \d+ sats in all if it went through\): check pending result\. Media was not billed\.$/);
+    expect(text('[data-call-paid]')).not.toMatch(/direct/);
   });
 
   it.each([['sats', '42.762 sats'], ['btc', '0.00000042762 BTC']] as const)('uses the %s denomination for a fractional call quote', async (denomination, shown) => {

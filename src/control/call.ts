@@ -141,6 +141,13 @@ export type CallView = {
   camera: boolean;
   /** Sum of receipt ceilings (the host does not expose settled call fees). */
   paidMsat: number;
+  /**
+   * Signals whose payment outcome is not known (spend_unknown /
+   * payment_unknown, including a 30 s timeout), and the sum of their caps.
+   * Never cleared by ending the call: the ended panel must say so.
+   */
+  unknownCount: number;
+  unknownMsat: number;
   /** Candidate types only: never expose addresses from the stats report. */
   connection: { local: string; remote: string } | null;
   reason: HangupReason | null;
@@ -156,7 +163,7 @@ export type CallView = {
 
 export const IDLE: CallView = {
   phase: 'idle', state: 'idle', peer: null, callId: null, media: 'audio', outgoing: false,
-  liveAt: null, muted: false, camera: false, paidMsat: 0, connection: null, reason: null, error: null, offline: false,
+  liveAt: null, muted: false, camera: false, paidMsat: 0, unknownCount: 0, unknownMsat: 0, connection: null, reason: null, error: null, offline: false,
 };
 
 type Outcome<T> = { ok: true; value: T } | { ok: false; error: ActionError };
@@ -436,7 +443,14 @@ export function createCallEngine(deps: CallDeps) {
     try {
       r = await Promise.race([deps.signal(peer!, kind, JSON.stringify({ v: 1, call_id: targetId!, ...body }), maxMsat), timeout]);
     } finally { clearTimeout(timer); }
-    if (r.ok && view.callId === callId) set({ paidMsat: view.paidMsat + r.value.total_msat });
+    if (view.callId === callId) {
+      if (r.ok) set({ paidMsat: view.paidMsat + r.value.total_msat });
+      // Paid for certain, receipt not returned: counted at its cap ("up to").
+      else if (r.error.code === 'payment_settled_undelivered' || r.error.code === 'failed_paid') set({ paidMsat: view.paidMsat + maxMsat });
+      else if (r.error.code === 'spend_unknown' || r.error.code === 'payment_unknown' || r.error.code === 'undelivered_pending') {
+        set({ unknownCount: view.unknownCount + 1, unknownMsat: view.unknownMsat + maxMsat });
+      }
+    }
     return r;
   };
 
