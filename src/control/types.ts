@@ -628,6 +628,8 @@ export type NodeGrantSummary = {
   envelopes?: Record<string, number> | null;
   /** Current node envelope IDs; null without capability support. Null entries are legacy/unknown; absent peers are unknown. Absent on older hosts. */
   envelope_id_by_recipient?: Record<string, string | null> | null;
+  /** Remaining msat by lower-case node ID (cap minus used, saturating at zero). Unbudgeted peers are omitted; absent on older hosts. */
+  recipient_left_msat_by_recipient?: Record<string, number>;
   /** The node's breaker state for this grant (owner approval v1 node), passed through by the host. */
   breakers?: BreakerStatus;
 };
