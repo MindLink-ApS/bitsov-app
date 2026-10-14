@@ -461,6 +461,8 @@ describe('control center shell', () => {
     budgetFail?: boolean;
     /** Autopay open with a row for A: messages go through the budget path. */
     budgetPath?: boolean;
+    /** While set, relation_approve waits for it (Touch ID still being answered). */
+    approveGate?: Promise<void> | null;
     /** While set, each send waits for it (a send still in flight ahead in the queue). */
     sendGate?: Promise<void> | null;
     approve: () => unknown;
@@ -489,7 +491,10 @@ describe('control center shell', () => {
         },
         };
       },
-      relation_approve: () => ({ ...(st.spendOpen === false ? locked : open), ...(st.approve() as object) }),
+      relation_approve: async () => {
+        if (st.approveGate) await st.approveGate;
+        return { ...(st.spendOpen === false ? locked : open), ...(st.approve() as object) };
+      },
       message_send: async (args) => {
         sent.push(args!.plaintext as string);
         const n = sent.length;
@@ -778,6 +783,34 @@ describe('control center shell', () => {
     await go();
     await vi.waitFor(() => expect(host.sent).toEqual(['one', 'two']));
   }, 30_000);
+
+  it('Codex cxr-touch-1 r4: approvals on this Mac stop and come back while the Touch ID answer is still out: never sent', async () => {
+    let answer!: () => void;
+    const st: Parameters<typeof touchHost>[0] = {
+      ids: {}, envelopes: {}, device: 'registered',
+      approveGate: new Promise<void>((r) => { answer = r; }),
+      approve: () => { st.ids = { [A]: 'env-1' }; st.envelopes = { [A]: Date.now() + DAY }; return { envelope_id: 'env-1' }; },
+    };
+    const host = touchHost(st);
+    await pressTouch();
+    await vi.waitFor(() => expect(mount.querySelector('[data-sending="waiting"]')).not.toBeNull());
+    const deviceReads = () => host.calls.filter((c) => c.cmd === 'device_key_status').length;
+    st.device = 'none';
+    let reads = deviceReads();
+    await vi.waitFor(() => expect(deviceReads()).toBeGreaterThan(reads), { timeout: 20_000 });
+    await new Promise((r) => setTimeout(r, 100));
+    st.device = 'registered';
+    reads = deviceReads();
+    await vi.waitFor(() => expect(deviceReads()).toBeGreaterThan(reads), { timeout: 20_000 });
+    await new Promise((r) => setTimeout(r, 100));
+    // The delayed Touch ID answer arrives now, with a valid envelope: it must not bind again.
+    st.approveGate = null;
+    answer();
+    await new Promise((r) => setTimeout(r, 3500));
+    expect(host.sent).toEqual([]);
+    expect(unsentReason()).toContain('Touch ID approvals on this Mac stopped before it went through.');
+    expect(mount.querySelector('[data-sending]')).toBeNull();
+  }, 60_000);
 
   it('Codex cxr-touch-1 #2: a node grant that expires after its envelope was seen never sends, even once spending opens', async () => {
     const st = { ids: {} as Record<string, string | null>, envelopes: {} as Record<string, number>, spendOpen: false, grantUntil: undefined as number | undefined,

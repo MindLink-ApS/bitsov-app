@@ -4665,9 +4665,10 @@ function Composer(props: {
    * the wait ends. No envelope id: nothing binds the message, the plain flow
    * at once. Else bound only to the envelope id E this very call returned.
    */
-  const afterTouch = (r: TouchApproval) => {
+  const afterTouch = (r: TouchApproval, started: Pressed | null) => {
     const c = untrack(consent);
-    if (!c || c.kind !== 'touch') return;
+    // Only the wait this tap started: one that already ended is never bound again.
+    if (!c || c !== started) return;
     if (!r.ok) { dropConsent('It was not approved.'); return; }
     if (!r.envelopeId) { backToPlain(); return; }
     setConsent({ ...c, approved: true, envelope: r.envelopeId, readsFrom: r.readsFrom });
@@ -4710,8 +4711,10 @@ function Composer(props: {
    */
   createEffect(() => {
     const c = consent();
-    if (!c || c.kind !== 'touch' || !c.approved) return;
+    if (!c || c.kind !== 'touch') return;
+    // Before the approval answers too: once this Mac's approvals stop, the wait ends for good.
     if (props.actions.device()?.state !== 'registered') { dropConsent('Touch ID approvals on this Mac stopped before it went through.'); return; }
+    if (!c.approved) return;
     if (props.actions.budgetReadApplied() < c.readsFrom) return;
     const g = budget()?.node_grant ?? null;
     if (!g) { dropConsent(c.keySeen ? LAPSED : TOUCH_AGAIN); return; }
@@ -4893,9 +4896,10 @@ function Composer(props: {
       const msat = shown().msat;
       const continuing = canContinue('touch');
       if (continuing) startWaiting('touch');
+      const started = continuing ? untrack(consent) : null;
       setBusy(true);
       const approved = await props.actions.approveContact(target(), msat);
-      if (continuing) afterTouch(approved);
+      if (continuing) afterTouch(approved, started);
       setBusy(false);
       if (!continuing) approvedPlain(approved.ok);
       return;
