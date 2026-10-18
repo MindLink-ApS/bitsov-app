@@ -530,6 +530,8 @@ mod macos {
             let planted = bitsov_ffi::model_launch::duplicate_inheritable(&file).unwrap();
             let planted_fd = planted.as_raw_fd();
             assert!(planted_fd > 2, "planted fd {planted_fd}");
+            // Inventory the whole child table: parallel tests may push this
+            // descriptor above a fixed scan bound even though it is inherited.
             let baseline = listed_fds(&line(&fix, false, &["fds"]));
             assert!(
                 baseline.contains(&planted_fd),

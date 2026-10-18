@@ -271,6 +271,191 @@ describe('acting from the track', () => {
     expect(host.used('message_send')).toHaveLength(1);
   }, 15_000);
 
+  it('Approve & send handed to the queue behind a send in flight: leaving the chat before its turn never sends it', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const sent: string[] = [];
+    const host = stubHost({
+      spend_request: () => { host.spend.v = openView(null, 'cd35'); return { ...host.spend.v, request_id: null }; },
+      message_send: async (args) => {
+        sent.push(args!.plaintext as string);
+        if (sent.length === 1) await gate;
+        return { message_id: `sent-${sent.length}`, recipient: args!.recipient, is_room: false, delivered: true, amount_msat: 2000, sent_at_ms: Date.now() };
+      },
+    });
+    host.spend.v = openView(null, 'cd34');
+    await openShell();
+    type('[data-composer] textarea', 'one');
+    await vi.waitFor(() => expect(text('[data-send]')).toMatch(/^Send/));
+    submit();
+    await vi.waitFor(() => expect(sent).toEqual(['one']));
+    // The window closes; the next message is an Approve & send whose own call arms cd35.
+    host.spend.v = view('locked');
+    type('[data-composer] textarea', 'two');
+    await vi.waitFor(() => expect(text('[data-send]')).toBe('Approve & send'), { timeout: 8000 });
+    submit();
+    await vi.waitFor(() => expect(host.used('spend_request')).toHaveLength(1));
+    await vi.waitFor(() => expect(mount.querySelectorAll('[data-sending=""]').length).toBe(2));
+    $<HTMLButtonElement>('[data-track="discover"]')!.click();
+    release();
+    await new Promise((r) => setTimeout(r, 500));
+    expect(sent).toEqual(['one']);
+    $<HTMLButtonElement>(`[data-track="peer:${A}"]`)!.click();
+    await vi.waitFor(() => expect(unsentReason()).toContain('You left this chat before it was sent.'));
+  }, 20_000);
+
+  it('Approve & send queued behind a send in flight: its window closing and the same grant reopening never revives it', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const sent: string[] = [];
+    const host = stubHost({
+      spend_request: () => { host.spend.v = openView(null, 'cd35'); return { ...host.spend.v, request_id: null }; },
+      message_send: async (args) => {
+        sent.push(args!.plaintext as string);
+        if (sent.length === 1) await gate;
+        return { message_id: `sent-${sent.length}`, recipient: args!.recipient, is_room: false, delivered: true, amount_msat: 2000, sent_at_ms: Date.now() };
+      },
+    });
+    host.spend.v = openView(null, 'cd34');
+    await openShell();
+    type('[data-composer] textarea', 'one');
+    await vi.waitFor(() => expect(text('[data-send]')).toMatch(/^Send/));
+    submit();
+    await vi.waitFor(() => expect(sent).toEqual(['one']));
+    host.spend.v = view('locked');
+    type('[data-composer] textarea', 'two');
+    await vi.waitFor(() => expect(text('[data-send]')).toBe('Approve & send'), { timeout: 8000 });
+    submit();
+    await vi.waitFor(() => expect(mount.querySelectorAll('[data-sending=""]').length).toBe(2));
+    const reads = () => host.used('spend_status').length;
+    // The window it was armed for closes on a read, then the same grant cd35 is open again.
+    host.spend.v = view('locked');
+    let n = reads();
+    await vi.waitFor(() => expect(reads()).toBeGreaterThan(n), { timeout: 6000 });
+    await new Promise((r) => setTimeout(r, 100));
+    host.spend.v = openView(null, 'cd35');
+    n = reads();
+    await vi.waitFor(() => expect(reads()).toBeGreaterThan(n), { timeout: 6000 });
+    await new Promise((r) => setTimeout(r, 100));
+    release();
+    await new Promise((r) => setTimeout(r, 500));
+    expect(sent).toEqual(['one']);
+    await vi.waitFor(() => expect(unsentReason()).toContain('The approval was cancelled or lapsed before it went through.'));
+  }, 30_000);
+
+  /** 'one' goes under cd34 and stays in flight; 'two' is an Approve & send whose own call arms `armed`, handed behind it. */
+  async function grantTwoBehindOne(overrides: Record<string, Reply> = {}, armed: () => SpendView = () => openView(null, 'cd35')) {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const sent: string[] = [];
+    const host = stubHost({
+      spend_request: () => { host.spend.v = armed(); return { ...host.spend.v, request_id: null }; },
+      message_send: async (args) => {
+        sent.push(args!.plaintext as string);
+        if (sent.length === 1) await gate;
+        return { message_id: `sent-${sent.length}`, recipient: args!.recipient, is_room: false, delivered: true, amount_msat: 2000, sent_at_ms: Date.now() };
+      },
+      ...overrides,
+    });
+    host.spend.v = openView(null, 'cd34');
+    await openShell();
+    type('[data-composer] textarea', 'one');
+    await vi.waitFor(() => expect(text('[data-send]')).toMatch(/^Send/));
+    submit();
+    await vi.waitFor(() => expect(sent).toEqual(['one']));
+    host.spend.v = view('locked');
+    type('[data-composer] textarea', 'two');
+    await vi.waitFor(() => expect(text('[data-send]')).toBe('Approve & send'), { timeout: 8000 });
+    submit();
+    await vi.waitFor(() => expect(mount.querySelectorAll('[data-sending=""]').length).toBe(2));
+    return { host, sent, release };
+  }
+
+  it('Codex cxr-touch-1 r3 #1: a queued Approve & send never goes while the budget read is known stale (grant_unknown)', async () => {
+    let unknown = false;
+    const { host, sent, release } = await grantTwoBehindOne({
+      budget_status: () => { if (unknown) throw { code: 'grant_unknown', message: 'The node grant could not be read.' }; throw new Error('no budget here'); },
+    });
+    unknown = true;
+    const reads = host.used('budget_status').length;
+    await vi.waitFor(() => expect(host.used('budget_status').length).toBeGreaterThan(reads), { timeout: 6000 });
+    await new Promise((r) => setTimeout(r, 100));
+    release();
+    await new Promise((r) => setTimeout(r, 500));
+    expect(sent).toEqual(['one']);
+    await vi.waitFor(() => expect(unsentReason()).toContain('Spending needs approving again. Press Send to ask.'));
+  }, 30_000);
+
+  it('Codex cxr-touch-1 r3 #2: its spending window running out while queued: never sent, even though the view still says open', async () => {
+    const { sent, release } = await grantTwoBehindOne({}, () => view('open', { basis: 'node_grant', open_until_ms: Date.now() + 1500, granted_op: 'cd35', armed_by_request: null }));
+    await new Promise((r) => setTimeout(r, 2500));
+    release();
+    await new Promise((r) => setTimeout(r, 500));
+    expect(sent).toEqual(['one']);
+    await vi.waitFor(() => expect(unsentReason()).toContain('The approval was cancelled or lapsed before it went through.'));
+  }, 30_000);
+
+  it('Codex budget r1 #2 (every kind): the price moving while it is queued cancels it for good, even if it moves back', async () => {
+    const gates: (() => void)[] = [];
+    const gate = (i: number) => new Promise<void>((r) => { gates[i] = r; });
+    const waits = [gate(0), gate(1), gate(2)];
+    let price = 2000;
+    const sent: string[] = [];
+    const host = stubHost({
+      price_quote: () => ({ kind: 0, own_msat: 1000, peer_msat: price, peer_age_secs: 30, max_routing_fee_msat: 0, peer_stale: false }),
+      spend_request: () => { host.spend.v = openView(null, 'cd35'); return { ...host.spend.v, request_id: null }; },
+      message_send: async (args) => {
+        sent.push(args!.plaintext as string);
+        const n = sent.length;
+        if (n <= 3) await waits[n - 1];
+        // 'one' and 'mid' are refused for their price (unpaid): each refusal reads the price again.
+        if (n <= 2) throw { code: 'price_changed', message: 'Their price changed. Nothing was paid.' };
+        return { message_id: `sent-${n}`, recipient: args!.recipient, is_room: false, delivered: true, amount_msat: 2000, sent_at_ms: Date.now() };
+      },
+    });
+    host.spend.v = openView(null, 'cd34');
+    await openShell();
+    for (const words of ['one', 'mid', 'mid2']) {
+      type('[data-composer] textarea', words);
+      await vi.waitFor(() => expect(text('[data-send]')).toMatch(/^Send/));
+      submit();
+      await vi.waitFor(() => expect(mount.querySelectorAll('[data-sending=""]').length).toBe(['one', 'mid', 'mid2'].indexOf(words) + 1));
+    }
+    host.spend.v = view('locked');
+    type('[data-composer] textarea', 'two');
+    await vi.waitFor(() => expect(text('[data-send]')).toBe('Approve & send'), { timeout: 8000 });
+    submit();
+    await vi.waitFor(() => expect(mount.querySelectorAll('[data-sending=""]').length).toBe(4));
+    // 'one' is refused: the price is read again at 1 sat while 'two' waits its turn.
+    price = 1000;
+    gates[0]();
+    await vi.waitFor(() => expect($('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('1000'));
+    // 'mid' is refused too: the price is read again, back at the approved 2 sats, before 'two''s turn.
+    price = 2000;
+    gates[1]();
+    await vi.waitFor(() => expect($('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('2000'));
+    gates[2]();
+    await new Promise((r) => setTimeout(r, 500));
+    expect(sent).toEqual(['one', 'mid', 'mid2']);
+    const reasons = () => [...mount.querySelectorAll('[data-unsent] [data-unsent-reason]')].map((e) => e.textContent ?? '');
+    await vi.waitFor(() => expect(reasons().some((r) => r.includes('The message price changed before it was sent.'))).toBe(true));
+  }, 30_000);
+
+  it('Approve & send (spending request): a successful Cancel request ends the wait; the window its request later arms never sends it', async () => {
+    const host = stubHost({ spend_cancel: () => view('locked') });
+    await openShell();
+    await pressWaiting(host);
+    await vi.waitFor(() => expect($('[data-spend-cancel]')).not.toBeNull(), { timeout: 6000 });
+    $<HTMLButtonElement>('[data-spend-cancel]')!.click();
+    await vi.waitFor(() => expect(host.used('spend_cancel')).toHaveLength(1));
+    await vi.waitFor(() => expect(unsentReason()).toContain('You cancelled the request. Nothing was sent.'));
+    // A read that overlapped the cancel shows the window ab12 armed anyway.
+    host.spend.v = openView('ab12');
+    const reads = host.used('spend_status').length;
+    await vi.waitFor(() => expect(host.used('spend_status').length).toBeGreaterThan(reads + 1), { timeout: 8000 });
+    expect(host.used('message_send')).toHaveLength(0);
+  }, 20_000);
+
   it('#227: an older host that names no grant offers plain Send (no Approve & send, no waiting bubble)', async () => {
     const legacy = (st: SpendView['state'], extra: Partial<SpendView> = {}) => ({ state: st, basis: null, open_until_ms: null, pending: null, window_ms: WINDOW, ...extra });
     const host = stubHost({
