@@ -216,6 +216,8 @@ export type Actions = {
   lock: () => Promise<void>;
   /** Withdraw the pending request at the node. */
   cancelSpend: () => Promise<void>;
+  /** Bumped each time the owner's Cancel request succeeds: waits bound to a node request end with it. */
+  spendCancels: () => number;
   /** This Mac's Touch ID approvals, as last read. */
   device: () => DeviceView | null;
   registerDevice: () => Promise<void>;
@@ -241,7 +243,7 @@ export type Actions = {
   resume: () => Promise<ApprovalResult>;
   send: (t: TrackRef, text: string, maxMsat: number, firstContactMsat?: number, sendingId?: string) => Promise<Outcome<unknown>>;
   /** Puts a message in the stream as "Sending · up to N" before its send runs; `send` replaces it. */
-  beginSending: (t: TrackRef, text: string, capMsat: number, waiting?: boolean) => string;
+  beginSending: (t: TrackRef, text: string, capMsat: number, waiting?: boolean | 'allowed') => string;
   /**
    * A waiting bubble: `null` hands it to the send path (it becomes "Sending");
    * a reason ends it before anything was dispatched, kept whole as Unsent;
@@ -401,14 +403,23 @@ export function ControlCenter(props: Props) {
   const [spend, setSpend] = createSignal<SpendView | null>(null);
   const [device, setDevice] = createSignal<DeviceView | null>(null);
   const [noEnvelopeFor, setNoEnvelopeFor] = createSignal<string | null>(null);
+  const [spendCancels, setSpendCancels] = createSignal(0);
   const [budget, setBudgetValue] = createSignal<BudgetView | null>(null);
   let budgetRevision = 0;
   // Budget reads in start order; the stamp of the newest one applied (Touch ID approve & send freshness).
   let budgetReadSeq = 0;
   const [budgetReadApplied, setBudgetReadApplied] = createSignal(0);
+  /**
+   * Every budget view that is not a fresh read (an action's own response:
+   * approve, resume, pause, a row edit) clears the freshness stamp, so no
+   * approve & send can be confirmed from it; loadBudget restamps right after.
+   */
   const setBudget = (value: BudgetView) => {
     budgetRevision += 1;
-    setBudgetValue(value);
+    batch(() => {
+      setBudgetValue(value);
+      setBudgetReadApplied(0);
+    });
   };
   const [deliveries, setDeliveries] = createStore<Deliveries>({});
   /** What each send actually paid, by message id: a room echo carries one member's share only. */
@@ -666,8 +677,10 @@ export function ControlCenter(props: Props) {
       const b = await source.budgetStatus();
       if (revision !== budgetRevision) return;
       if (budget()?.autopay.state !== 'open' && b.autopay.state === 'open') setErrors('budget', undefined);
-      setBudget(b);
-      setBudgetReadApplied(stamp);
+      batch(() => {
+        setBudget(b);
+        setBudgetReadApplied(stamp);
+      });
       setBudgetReadAt(Date.now());
       setBudgetConfirmed(true);
       setGrantUnknown(false);
@@ -1302,10 +1315,11 @@ export function ControlCenter(props: Props) {
     cancelSpend: async () => {
       setErrors('spend', undefined);
       const r = await act(() => source.spendCancel());
-      if (r.ok) setSpend(r.value);
+      if (r.ok) batch(() => { setSpend(r.value); setSpendCancels((n) => n + 1); });
       else setErrors('spend', r.error.message);
       void loadBudget();
     },
+    spendCancels,
     device,
     ownerDeviceApproval: () => overview()?.capabilities?.includes(OWNER_DEVICE_APPROVAL) === true,
     openNodeSettings: () => {
@@ -1360,7 +1374,10 @@ export function ControlCenter(props: Props) {
       } else setErrors('budget', r.error.message);
       // A paired node asks its owner: the pending request shows from the spend view.
       void loadSpend();
-      return approvalResult(r);
+      // The read started next is the first one after this approval returned (approve & send freshness).
+      const readsFrom = budgetReadSeq + 1;
+      void loadBudget();
+      return { ...approvalResult(r), readsFrom };
     },
     setBudget: async (target, room, limitMsat) => {
       const r = await act(() => source.budgetSet(target, room, limitMsat));
@@ -1380,12 +1397,11 @@ export function ControlCenter(props: Props) {
       if (r.ok) {
         setBudget(r.value);
         setErrors('budget', undefined);
-      } else {
-        setErrors('budget', r.error.message);
-        void loadBudget();
-      }
+      } else setErrors('budget', r.error.message);
       void loadSpend();
-      return approvalResult(r);
+      const readsFrom = budgetReadSeq + 1;
+      void loadBudget();
+      return { ...approvalResult(r), readsFrom };
     },
     doorQuote: (peer) => source.firstContactQuote(peer),
     ownerRequest: (peer, cap, budget) => act(() => source.firstContactRequest(peer, cap, budget)),
@@ -1396,7 +1412,7 @@ export function ControlCenter(props: Props) {
     refreshBudget: () => void loadBudget(),
     ownerCancel: (id) => source.firstContactCancel(id).catch(() => {}),
     beginSending: (t, text, capMsat, waiting) => addArtifact(t, {
-      type: 'sending', text, capMsat, ...(waiting ? { waiting: true as const } : {}),
+      type: 'sending', text, capMsat, ...(waiting ? { waiting: true as const } : {}), ...(waiting === 'allowed' ? { waitWord: 'allowed' as const } : {}),
       ...(t.kind === 'room' ? { memberCaps: Object.fromEntries((roomQuote()?.members ?? []).map((m) => [m.node_id, m.msat])) } : {}),
     }),
     keepUnsent: (t, text, reason) => { addArtifact(t, { type: 'unsent', text, why: 'refused', reason }); },
@@ -3549,7 +3565,7 @@ function ArtifactView(props: { moneyBlocked: boolean; a: Artifact; delivery?: De
             <article class="msg out sending" data-sending={m().waiting ? 'waiting' : ''} aria-busy="true">
               <div class="bubble">{m().text}</div>
               <div class="stamp">
-                <span class="sats" data-sending-cap={m().capMsat}>{m().waiting ? 'Sends when approved' : 'Sending'} · up to {fmtAmount(m().capMsat)}</span>
+                <span class="sats" data-sending-cap={m().capMsat}>{m().waiting ? (m().waitWord === 'allowed' ? 'Sends when allowed' : 'Sends when approved') : 'Sending'} · up to {fmtAmount(m().capMsat)}</span>
               </div>
             </article>
           );
@@ -3740,7 +3756,7 @@ function UndeliveredView(props: {
  * very call armed. Only these bind an Approve & send; nothing observed later
  * does. `bindable`: the host reports these ids at all (absent on older hosts).
  */
-export type ApprovalResult = { ok: boolean; requestId: string | null; grantedOp: string | null; bindable: boolean; waiting: boolean };
+export type ApprovalResult = { ok: boolean; requestId: string | null; grantedOp: string | null; bindable: boolean; waiting: boolean; readsFrom?: number };
 /**
  * A Touch ID contact approval. `envelopeId`: the node envelope the action
  * itself returned (relation_envelope_id_v1); null without one. `readsFrom`:
@@ -4564,7 +4580,7 @@ function Composer(props: {
    * never satisfies it.
    */
   /** The spending request ('grant') and a Touch ID contact approval bound to its envelope ('touch') continue (see canContinue). */
-  type ApprovalKind = 'grant' | 'touch';
+  type ApprovalKind = 'grant' | 'touch' | 'budget';
   /**
    * Bound ONLY to what the approval action itself returned. `key`: the grant
    * op G of the window that very call armed (hand-off when the open view's
@@ -4584,6 +4600,8 @@ function Composer(props: {
    * (relation_envelope_id_v1): decided before the tap, on a confirmed read.
    */
   const touchBindable = () => !props.budgetStale && !!budget()?.node_grant?.envelope_id_by_recipient;
+  /** A budget press binds only where the host names the request that armed autopay (armed_by_request): decided before the tap. */
+  const budgetBindable = () => { const b = budget(); return !props.budgetStale && !!b && 'armed_by_request' in b; };
   /**
    * Approve & send only where a node identity binds the approval: the spending
    * request (its request id or the grant op its call returned), or a Touch ID
@@ -4592,7 +4610,7 @@ function Composer(props: {
    * keep the plain flow: approve, then press Send.
    */
   const canContinue = (kind: ApprovalKind) => mode() === 'message' && !!draft().trim() && shown().msat !== null && consent() === null &&
-    (kind === 'touch' ? touchBindable() : bindable());
+    (kind === 'touch' ? touchBindable() : kind === 'budget' ? budgetBindable() : bindable());
   /**
    * The plain flow after an approval that does not continue: the draft stays;
    * say what is next. Taken but still waiting for the owner at the node: say
@@ -4616,7 +4634,7 @@ function Composer(props: {
     if (!untrack(() => canContinue(kind))) return;
     const text = draft();
     const msat = shown().msat!;
-    const bubble = props.actions.beginSending(props.track, text, msat, true);
+    const bubble = props.actions.beginSending(props.track, text, msat, kind === 'budget' ? 'allowed' : true);
     setDraft('');
     setDrafted(false);
     setConsent({ bubble, track: props.track, text, msat, until: Date.now() + CONTINUE_MS, taken: false, kind, approved: false, key: null, requestId: null, keySeen: false, requestSeen: false, envelope: null, readsFrom: 0, cancelled: false, cancelReason: null });
@@ -4675,6 +4693,11 @@ function Composer(props: {
   };
   const LAPSED = 'The approval was cancelled or lapsed before it went through.';
   const TOUCH_AGAIN = 'It needs Touch ID again. Press Send to ask.';
+  const BUDGET_AGAIN = 'Payments need approving again. Press Send to ask.';
+  const BUDGET_SHORT = 'Allowed, but your budget does not cover this message. Nothing was sent.';
+  const PRICE_MOVED = 'The message price changed before it was sent. Nothing was sent; check the price and press Send.';
+  /** The budget stand for an approved message at the price it was approved at (whatever the composer's mode now). */
+  const standFor = (p: Pressed) => budgetStand(budget(), (p.track as { id: string }).id, p.track.kind === 'room', p.msat, p.track.kind !== 'room' && readmit()).kind;
   /**
    * Does this grant read cover one message at `msat` for `peer`? Per call, the
    * whole grant, and the contact's own remainder when named. The host omits a
@@ -4727,6 +4750,57 @@ function Composer(props: {
     if (!touchCovers(g, peer, c.msat)) { dropConsent(TOUCH_AGAIN); return; }
     if (!c.keySeen) setConsent({ ...c, keySeen: true });
   });
+  /**
+   * The budget press answered (before busy clears). Refused: the wait ends.
+   * No node request R: nothing names what will arm autopay (an immediate arm
+   * included), the plain flow at once. Else bound only to R, as this very
+   * call returned it.
+   */
+  const afterBudget = (r: ApprovalResult, started: Pressed | null) => {
+    const c = untrack(consent);
+    if (!c || c !== started) return;
+    if (!r.ok) { dropConsent('It was not approved.'); return; }
+    if (r.requestId === null) { backToPlain(); return; }
+    setConsent({ ...c, approved: true, requestId: r.requestId, readsFrom: r.readsFrom ?? Number.MAX_SAFE_INTEGER });
+  };
+  /**
+   * Autopay is open because R armed it (armed_by_request === R, the one
+   * stable id: the grant op changes under autopay), not past its end, and not
+   * paused, on a fresh read that is not known stale.
+   */
+  const budgetLive = (p: Pressed, b: BudgetView | null, now: number) =>
+    !props.budgetStale && props.actions.budgetReadApplied() >= p.readsFrom && !!b && !b.paused &&
+    b.autopay.state === 'open' && b.armed_by_request === p.requestId && b.autopay.open_until_ms != null && b.autopay.open_until_ms > now;
+  /**
+   * Budget consent, on fresh reads only: autopay armed by R → seen. Open but
+   * armed some other way (another request, an immediate or local arm, none),
+   * paused, or a pending request other than R → lapsed. R pending (or the
+   * owner asked) → waiting; after that, neither → lapsed; so is losing R after
+   * it was seen. No armed_by_request field any more: the plain flow.
+   */
+  createEffect(() => {
+    const c = consent();
+    if (!c || c.kind !== 'budget' || !c.approved) return;
+    if (props.budgetStale || props.actions.budgetReadApplied() < c.readsFrom) return;
+    const b = budget();
+    if (!b) return;
+    if (!('armed_by_request' in b)) { backToPlain(); return; }
+    const now = Math.max(props.now, Date.now());
+    if (budgetLive(c, b, now)) {
+      // Allowed, but this message is over a limit the budget sets: it is not sent.
+      const k = untrack(stand).kind;
+      if (k === 'contact_used' || k === 'total_used' || k === 'grant_limited') { dropConsent(BUDGET_SHORT); return; }
+      if (!c.keySeen) setConsent({ ...c, keySeen: true });
+      return;
+    }
+    if (c.keySeen || b.paused || b.autopay.state === 'open') { dropConsent(LAPSED); return; }
+    const sp = props.spend;
+    const pendingOp = sp?.state === 'pending' ? sp.pending?.op_id ?? null : null;
+    if (pendingOp !== null && pendingOp !== c.requestId) { dropConsent(LAPSED); return; }
+    if (b.waiting_for_owner || pendingOp === c.requestId) { if (!c.requestSeen) setConsent({ ...c, requestSeen: true }); return; }
+    // The call returned R, so a fresh read that shows neither R waiting nor R live means it was cancelled or lapsed.
+    dropConsent(LAPSED);
+  });
   // The approval it waits on was cancelled, lapsed or replaced: the consent ends with it.
   createEffect(() => {
     const c = consent();
@@ -4760,7 +4834,7 @@ function Composer(props: {
     // still be the one from before the request (a budget approval refreshes spending afterwards): wait.
     if (c.requestSeen) dropConsent(LAPSED);
   });
-  createEffect(on(() => shown().msat, (msat) => {
+  createEffect(on(() => messageShown().msat, (msat) => {
     const c = untrack(consent);
     // Another chat's price is not this message's: leaving is said as leaving (below).
     if (c && trackKey(props.track) === trackKey(c.track) && msat !== c.msat) dropConsent('The price changed while it waited for approval.');
@@ -4783,6 +4857,17 @@ function Composer(props: {
       // Only the envelope its own Touch ID call returned, live and covering the price, on a fresh read.
       void props.now;
       if (!c.keySeen || !touchLive(c)) return;
+    } else if (c.kind === 'budget') {
+      // Only autopay armed by its own request R, live on a fresh read; the stand must take this message as it is.
+      if (!c.keySeen || !budgetLive(c, budget(), Math.max(props.now, Date.now()))) return;
+      const k = stand().kind;
+      if (k === 'first') {
+        // A first contact needs its own approval: the words go back to the box, with the reason.
+        backToPlain();
+        setNote('This first contact needs its own approval. Press Send to ask for it.');
+        return;
+      }
+      if (k !== 'ok') { dropConsent(LAPSED); return; }
     } else {
       // Only the window its own approval armed (its grant op G, or its request R).
       const sp = props.spend;
@@ -4831,8 +4916,12 @@ function Composer(props: {
     const deviceOn = props.actions.device()?.state === 'registered';
     const fresh = !props.budgetStale;
     const g = budget()?.node_grant ?? null;
+    const here = props.track ? trackKey(props.track) : null;
+    const price = messageShown().msat;
     const gone = list.filter((p) => {
       if (p.cancelled) return true;
+      // The price it was approved at is not this contact's price any more: never sent at the old one.
+      if (here === trackKey(p.track) && price !== null && price !== p.msat) { cancel(p, PRICE_MOVED); return true; }
       if (p.kind === 'touch') {
         if (!deviceOn) { cancel(p, 'Touch ID approvals on this Mac stopped before it went through.'); return true; }
         if (!fresh || props.actions.budgetReadApplied() < p.readsFrom) return false;
@@ -4841,11 +4930,34 @@ function Composer(props: {
         if (!g || g.expires_at_ms <= now || g.envelope_id_by_recipient?.[peer] !== p.envelope || !until || until <= now) { cancel(p, LAPSED); return true; }
         return false;
       }
+      if (p.kind === 'budget') {
+        if (!fresh || props.actions.budgetReadApplied() < p.readsFrom) return false;
+        if (!budgetLive(p, budget(), now)) { cancel(p, LAPSED); return true; }
+        // Allowed by its own R, but this message is over (or waiting on) a budget limit: not sent, even if it recovers later.
+        if (here === trackKey(p.track) && standFor(p) !== 'ok') { cancel(p, BUDGET_SHORT); return true; }
+        return false;
+      }
       if (!windowStill(p, sp, now)) { cancel(p, LAPSED); return true; }
       return false;
     });
     if (gone.length) setHanded(list.filter((p) => !gone.includes(p)));
   });
+  /**
+   * The owner cancelled the node request: every wait bound to a node request
+   * (a budget press's R, a spending request's R or G) ends for good, whether
+   * still waiting or handed to the queue; a read that later shows it armed
+   * never sends it. Touch ID waits, and anything already dispatched, are not
+   * touched.
+   */
+  createEffect(on(props.actions.spendCancels, () => {
+    const CANCELLED = 'You cancelled the request. Nothing was sent.';
+    const byRequest = (p: Pressed) => p.kind === 'budget' || p.kind === 'grant';
+    const c = untrack(consent);
+    if (c && byRequest(c)) dropConsent(CANCELLED);
+    const list = untrack(handed);
+    list.filter(byRequest).forEach((p) => cancel(p, CANCELLED));
+    setHanded(list.filter((p) => !byRequest(p)));
+  }, { defer: true }));
   /** Why a handed-off approve & send must not go now (it becomes a Not sent card), or null. */
   const stillBound = (p: Pressed): string | null => untrack(() => {
     setHanded((list) => list.filter((x) => x !== p));
@@ -4854,8 +4966,11 @@ function Composer(props: {
     if (props.moneyBlocked) return 'Your node went offline before it was sent.';
     if (Date.now() >= p.until) return 'It was not approved within 10 minutes.';
     // A budget read known to be stale proves nothing, for either kind.
-    if (props.budgetStale) return p.kind === 'touch' ? TOUCH_AGAIN : 'Spending needs approving again. Press Send to ask.';
+    if (props.budgetStale) return p.kind === 'touch' ? TOUCH_AGAIN : p.kind === 'budget' ? BUDGET_AGAIN : 'Spending needs approving again. Press Send to ask.';
+    // Only at the price it was approved at (null: the price is being read again, so it is not confirmed).
+    if (messageShown().msat !== p.msat) return PRICE_MOVED;
     if (p.kind === 'touch') return touchLive(p) ? null : TOUCH_AGAIN;
+    if (p.kind === 'budget') return !budgetLive(p, budget(), Date.now()) ? LAPSED : standFor(p) !== 'ok' ? BUDGET_SHORT : null;
     return windowStill(p, props.spend, Date.now()) ? null : LAPSED;
   });
   /** The bubble a send uses: the waiting one it continues (handed over now), else a new one. */
@@ -4907,14 +5022,21 @@ function Composer(props: {
     if (viaBudget()) {
       const st = stand();
       if (st.kind === 'paused' || st.kind === 'off') {
-        if (pressed) { setNote('Payments need approving again. Press Send to ask.'); return; }
-        // The one approval (or resume); the draft stays (a budget grant arms autopay, not the spend window).
+        if (pressed) { setNote(BUDGET_AGAIN); return; }
+        // The one approval (or resume). Where the host names the request that
+        // arms autopay, the message waits in its bubble and goes once that very
+        // request armed it (approve & send); otherwise the draft stays (plain).
+        const asks = st.kind === 'paused' || presetChosen() !== null;
+        const continuing = asks && canContinue('budget');
+        if (continuing) startWaiting('budget');
+        const started = continuing ? untrack(consent) : null;
         setBusy(true);
         let approved: ApprovalResult = { ok: false, requestId: null, grantedOp: null, bindable: false, waiting: false };
         if (st.kind === 'paused') approved = await props.actions.resume();
         else if (presetChosen()) approved = await props.actions.approveBudget(presetChosen()!.ceiling_msat, presetChosen()!.id);
+        if (continuing) afterBudget(approved, started);
         setBusy(false);
-        approvedPlain(approved.ok, approved.waiting);
+        if (!continuing) approvedPlain(approved.ok, approved.waiting);
         return;
       }
       if (st.kind !== 'first' && st.kind !== 'ok') return;

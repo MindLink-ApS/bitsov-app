@@ -395,6 +395,52 @@ describe('acting from the track', () => {
     await vi.waitFor(() => expect(unsentReason()).toContain('The approval was cancelled or lapsed before it went through.'));
   }, 30_000);
 
+  it('Codex budget r1 #2 (every kind): the price moving while it is queued cancels it for good, even if it moves back', async () => {
+    const gates: (() => void)[] = [];
+    const gate = (i: number) => new Promise<void>((r) => { gates[i] = r; });
+    const waits = [gate(0), gate(1), gate(2)];
+    let price = 2000;
+    const sent: string[] = [];
+    const host = stubHost({
+      price_quote: () => ({ kind: 0, own_msat: 1000, peer_msat: price, peer_age_secs: 30, max_routing_fee_msat: 0, peer_stale: false }),
+      spend_request: () => { host.spend.v = openView(null, 'cd35'); return { ...host.spend.v, request_id: null }; },
+      message_send: async (args) => {
+        sent.push(args!.plaintext as string);
+        const n = sent.length;
+        if (n <= 3) await waits[n - 1];
+        // 'one' and 'mid' are refused for their price (unpaid): each refusal reads the price again.
+        if (n <= 2) throw { code: 'price_changed', message: 'Their price changed. Nothing was paid.' };
+        return { message_id: `sent-${n}`, recipient: args!.recipient, is_room: false, delivered: true, amount_msat: 2000, sent_at_ms: Date.now() };
+      },
+    });
+    host.spend.v = openView(null, 'cd34');
+    await openShell();
+    for (const words of ['one', 'mid', 'mid2']) {
+      type('[data-composer] textarea', words);
+      await vi.waitFor(() => expect(text('[data-send]')).toMatch(/^Send/));
+      submit();
+      await vi.waitFor(() => expect(mount.querySelectorAll('[data-sending=""]').length).toBe(['one', 'mid', 'mid2'].indexOf(words) + 1));
+    }
+    host.spend.v = view('locked');
+    type('[data-composer] textarea', 'two');
+    await vi.waitFor(() => expect(text('[data-send]')).toBe('Approve & send'), { timeout: 8000 });
+    submit();
+    await vi.waitFor(() => expect(mount.querySelectorAll('[data-sending=""]').length).toBe(4));
+    // 'one' is refused: the price is read again at 1 sat while 'two' waits its turn.
+    price = 1000;
+    gates[0]();
+    await vi.waitFor(() => expect($('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('1000'));
+    // 'mid' is refused too: the price is read again, back at the approved 2 sats, before 'two''s turn.
+    price = 2000;
+    gates[1]();
+    await vi.waitFor(() => expect($('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('2000'));
+    gates[2]();
+    await new Promise((r) => setTimeout(r, 500));
+    expect(sent).toEqual(['one', 'mid', 'mid2']);
+    const reasons = () => [...mount.querySelectorAll('[data-unsent] [data-unsent-reason]')].map((e) => e.textContent ?? '');
+    await vi.waitFor(() => expect(reasons().some((r) => r.includes('The message price changed before it was sent.'))).toBe(true));
+  }, 30_000);
+
   it('#227: an older host that names no grant offers plain Send (no Approve & send, no waiting bubble)', async () => {
     const legacy = (st: SpendView['state'], extra: Partial<SpendView> = {}) => ({ state: st, basis: null, open_until_ms: null, pending: null, window_ms: WINDOW, ...extra });
     const host = stubHost({
