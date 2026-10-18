@@ -27,6 +27,9 @@ use crate::act::ActionError;
 /// `/status` → `api_capabilities` entry for budget grants.
 pub const CAPABILITY: &str = "spend_budget_grant_v1";
 
+/// Node-owned identity for each accepted relation approval.
+pub const RELATION_ENVELOPE_ID_CAPABILITY: &str = "relation_envelope_id_v1";
+
 /// `/status` → `api_capabilities` entry for one-time first-contact grants:
 /// the stranger's signed quote before paying
 /// (`POST /messages/first-contact/quote`) and the owner's one-time OK for
@@ -69,6 +72,10 @@ pub struct NodeGrant {
     /// Relation grants: when each envelope ends, unix seconds.
     #[serde(default)]
     pub recipient_expires_at: BTreeMap<String, i64>,
+    /// Current node envelope IDs; null without capability support or a map.
+    /// Individual recipients may be null (legacy/unknown identity).
+    #[serde(default)]
+    pub envelope_id_by_recipient: Option<BTreeMap<String, Option<String>>>,
     /// Optional node breaker state, preserved unchanged for the renderer.
     pub breakers: Option<serde_json::Map<String, serde_json::Value>>,
 }
@@ -148,7 +155,7 @@ impl NodeGrant {
     }
 }
 
-/// What the renderer is told about the node grant. Numbers only.
+/// What the renderer is told about the node grant. No credentials or authority.
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct GrantSummary {
     pub expires_at_ms: u64,
@@ -158,6 +165,10 @@ pub struct GrantSummary {
     /// A relation grant: each contact with an envelope, and when it ends (ms).
     /// None for an owner console grant, which pays any contact within it.
     pub envelopes: Option<BTreeMap<String, u64>>,
+    /// Node-owned IDs, preserved as reported; never inferred from grant terms.
+    pub envelope_id_by_recipient: Option<BTreeMap<String, Option<String>>>,
+    /// Remaining per-recipient budgets, keyed by lower-case node ID; unbudgeted peers are absent.
+    pub recipient_left_msat_by_recipient: BTreeMap<String, u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub breakers: Option<serde_json::Map<String, serde_json::Value>>,
 }
@@ -166,6 +177,10 @@ impl From<&NodeGrant> for GrantSummary {
     fn from(g: &NodeGrant) -> Self {
         Self {
             breakers: g.breakers.clone(),
+            envelope_id_by_recipient: g.envelope_id_by_recipient.clone(),
+            recipient_left_msat_by_recipient: g.per_recipient_msat.keys()
+                .filter_map(|peer| g.recipient_left(peer).map(|left| (peer.to_ascii_lowercase(), left)))
+                .collect(),
             expires_at_ms: g.expires_at_ms(),
             budget_msat: g.budget_msat,
             remaining_msat: g.remaining_msat,
@@ -333,6 +348,43 @@ mod tests {
             used_by_recipient: BTreeMap::from([(A.into(), 4_000)]),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn summary_recipient_left_matches_grant_with_and_without_usage() {
+        for (used, expected) in [(Some(4_000), 1_000), (None, 5_000)] {
+            let mut g = grant(2_000_000_000);
+            g.used_by_recipient = used.map(|v| BTreeMap::from([(A.into(), v)])).unwrap_or_default();
+            let wire = serde_json::to_value(GrantSummary::from(&g)).unwrap();
+            assert_eq!(wire["recipient_left_msat_by_recipient"], serde_json::json!({A: expected}));
+            assert_eq!(g.recipient_left(&A.to_ascii_uppercase()), Some(expected));
+        }
+    }
+
+    #[test]
+    fn summary_recipient_left_saturates_when_usage_exceeds_cap() {
+        let mut g = grant(2_000_000_000);
+        g.used_by_recipient.insert(A.into(), 5_001);
+        let wire = serde_json::to_value(GrantSummary::from(&g)).unwrap();
+        assert_eq!(wire["recipient_left_msat_by_recipient"], serde_json::json!({A: 0}));
+        assert_eq!(g.recipient_left(A), Some(0));
+    }
+
+    #[test]
+    fn summary_recipient_left_omits_recipients_without_a_budget() {
+        const B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let mut g = grant(2_000_000_000);
+        g.used_by_recipient.insert(B.into(), 100);
+        g.recipient_expires_at.insert(B.into(), 2_000_000_000);
+        g.recipients_only = true;
+        let wire = serde_json::to_value(GrantSummary::from(&g)).unwrap();
+        assert_eq!(wire["recipient_left_msat_by_recipient"], serde_json::json!({A: 1_000}));
+        assert!(wire["recipient_left_msat_by_recipient"].get(B).is_none());
+        assert_eq!(g.recipient_left(B), None);
+
+        g.per_recipient_msat.clear();
+        let wire = serde_json::to_value(GrantSummary::from(&g)).unwrap();
+        assert_eq!(wire["recipient_left_msat_by_recipient"], serde_json::json!({}));
     }
 
     #[test]
