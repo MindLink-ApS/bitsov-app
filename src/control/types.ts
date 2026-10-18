@@ -598,6 +598,8 @@ export type BudgetView = BudgetAccounting & {
   request_id?: string | null;
   /** Node op of the spending window this action armed; null if none or unknown. */
   granted_op?: string | null;
+  /** Pending elevation completed to arm autopay; null without one or when closed. Absent on older hosts. */
+  armed_by_request?: string | null;
   paused: boolean;
   autopay: { state: AutopayState; open_until_ms: number | null; ceiling_msat: number | null; basis: SpendBasis | null };
   /** A budget approval is waiting for the owner at the node. */
