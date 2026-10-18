@@ -23,13 +23,13 @@ export function OfflineNode(props: {
   };
   return <section class="node-offline" data-node-offline aria-label="Node offline">
     <BoxIllustration offline />
-    <Dynamic component={props.level === 1 ? 'h1' : 'h2'} data-offline-title>{props.remote ? 'Your box is offline' : 'Your node is offline'}</Dynamic>
-    <p>We can’t reach it right now.</p>
+    <Dynamic component={props.level === 1 ? 'h1' : 'h2'} data-offline-title>Your node is offline</Dynamic>
+    <p>We can’t reach it right now. BitSov keeps trying. New messages can’t be sent until your node is back; ones already sent may still complete.</p>
     <p class="hint">Last seen: <Show when={props.lastSeen != null} fallback="unknown">
       <time dateTime={new Date(props.lastSeen!).toISOString()}>{new Date(props.lastSeen!).toLocaleString()}</time>
     </Show></p>
     <ul>
-      <li>{props.remote ? 'Check that your box has power and is connected to the network.' : 'Check that your node is running on this computer.'}</li>
+      <li>{props.remote ? 'Check that the computer or server running your node is on and connected to the network.' : 'Check that your node is running on this computer.'}</li>
       <li>Check this device’s network connection.</li>
       <li>After a restart, give your node a moment to reconnect.</li>
     </ul>
