@@ -11,15 +11,27 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 extern "C" {
-    fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+    fn proc_pidinfo(
+        pid: i32,
+        flavor: i32,
+        arg: u64,
+        buffer: *mut std::ffi::c_void,
+        size: i32,
+    ) -> i32;
     fn fork() -> i32;
     fn getpid() -> i32;
     fn close(fd: i32) -> i32;
     fn kill(pid: i32, sig: i32) -> i32;
 }
 
-/// `F_GETFD` on macOS.
-const F_GETFD: i32 = 1;
+/// `PROC_PIDLISTFDS` and `struct proc_fdinfo` from macOS `sys/proc_info.h`.
+const PROC_PIDLISTFDS: i32 = 1;
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct ProcFdInfo {
+    fd: i32,
+    fd_type: u32,
+}
 /// `SIGKILL`. Same value `libc::SIGKILL` has on macOS.
 const SIGKILL: i32 = 9;
 
@@ -117,14 +129,36 @@ fn unix_bind(path: &str) -> String {
 }
 
 fn fds() -> String {
-    let mut open = Vec::new();
-    for fd in 0..512 {
-        let rc = unsafe { fcntl(fd, F_GETFD) };
-        if rc >= 0 {
-            open.push(fd.to_string());
+    // Inspect this single-threaded child's complete table. A fixed scan
+    // bound misses high-numbered fds allocated by parallel parent tests.
+    // Grow on a full buffer so a truncated inventory can never pass.
+    let entry_size = std::mem::size_of::<ProcFdInfo>();
+    let mut entries = vec![ProcFdInfo::default(); 32];
+    loop {
+        let size = i32::try_from(entries.len() * entry_size).expect("fd table size");
+        // SAFETY: entries is writable, correctly aligned storage for `size`
+        // bytes of proc_fdinfo records; getpid selects this child only.
+        let bytes = unsafe {
+            proc_pidinfo(
+                getpid(),
+                PROC_PIDLISTFDS,
+                0,
+                entries.as_mut_ptr().cast(),
+                size,
+            )
+        };
+        assert!(bytes > 0, "fd inventory: {}", io::Error::last_os_error());
+        assert!(bytes <= size, "fd inventory exceeds buffer");
+        assert_eq!(bytes as usize % entry_size, 0, "partial fd record");
+        if bytes == size {
+            entries.resize(entries.len() * 2, ProcFdInfo::default());
+            continue;
         }
+        entries.truncate(bytes as usize / entry_size);
+        entries.sort_unstable_by_key(|entry| entry.fd);
+        let open: Vec<_> = entries.iter().map(|entry| entry.fd.to_string()).collect();
+        return format!("fds {}", open.join(","));
     }
-    format!("fds {}", open.join(","))
 }
 
 /// Fork a worker that stays alive after this leader exits normally.
