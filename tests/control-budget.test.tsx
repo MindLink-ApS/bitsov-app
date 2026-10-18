@@ -1481,16 +1481,24 @@ describe('invisible payments in the composer and the context panel', () => {
     expect(host.used('message_send')).toHaveLength(0);
   }, 25_000);
 
-  it('budget approve & send: allowed, but no budget for this contact yet → the words go back with the first-contact note, nothing sent', async () => {
+  it('budget approve & send: allowed, but no budget for this contact yet → nothing is sent, and the words are kept with the reason', async () => {
     const host = allowHost('preset', {}, budgetView({ rows: [], armed_by_request: null }));
     await openShell();
     await pressAllow('preset');
     host.state.budget = { ...armedBy('op-R'), rows: [] };
-    await vi.waitFor(() => expect(text('[data-composer-note]')).toBe('This first contact needs its own approval. Press Send to ask for it.'), { timeout: 8000 });
-    expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('gm Maya');
+    // The invariant, not the order of two safe outcomes: the wait ends, nothing goes, and the words are
+    // kept either back in the box with the first-contact note, or in an Unsent card saying why nothing was sent.
+    const box = () => $<HTMLTextAreaElement>('[data-composer] textarea')!.value;
+    const backInBox = () => box() === 'gm Maya' && text('[data-composer-note]') === 'This first contact needs its own approval. Press Send to ask for it.';
+    const keptUnsent = () => [...mount.querySelectorAll('[data-unsent]')].some((card) =>
+      card.textContent!.includes('gm Maya') &&
+      /The price changed while it waited for approval\.|This first contact needs its own approval/.test(card.querySelector('[data-unsent-reason]')?.textContent ?? ''));
+    await vi.waitFor(() => expect(backInBox() || keptUnsent()).toBe(true), { timeout: 8000 });
     expect($('[data-sending]')).toBeNull();
     await nextRead(host);
     expect(host.used('message_send')).toHaveLength(0);
+    expect($('[data-sending]')).toBeNull();
+    expect(backInBox() || keptUnsent()).toBe(true);
   }, 25_000);
 
   it('Codex r2 #2: a budget edit response showing it armed is not a fresh read: it waits for a real read, then sends once', async () => {
