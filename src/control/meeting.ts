@@ -19,6 +19,9 @@ import {
   type CallDeps, type CallMedia, type Signal,
 } from './call';
 import type { CallQuote, Message } from './types';
+import { asActionError } from './state';
+
+type SignalOutcome = Awaited<ReturnType<CallDeps['signal']>>;
 
 /** Host included. The node refuses a bigger roster. */
 export const MAX_PARTICIPANTS = 4;
@@ -117,8 +120,14 @@ export type MeetingView = {
   media: CallMedia;
   /** One per other participant, in roster order. */
   legs: LegView[];
-  /** msat this side paid for the meeting's signals, all-in as reported. */
+  /** msat this side paid for the meeting's signals: receipt ceilings, plus the cap of any paid without a receipt. */
   paidMsat: number;
+  /** Signals whose payment outcome is not known (not proven unpaid), and the sum of their caps. */
+  unknownCount: number;
+  unknownMsat: number;
+  /** Signals still in flight, and the sum of their caps; each moves into paid or unknown when it settles. */
+  pendingCount: number;
+  pendingMsat: number;
   muted: boolean;
   camera: boolean;
   /** Why it ended, when not a plain leave. */
@@ -126,7 +135,7 @@ export type MeetingView = {
 };
 
 export const MEETING_IDLE: MeetingView = {
-  phase: 'idle', id: null, roster: [], media: 'audio', legs: [], paidMsat: 0, muted: false, camera: false, error: null,
+  phase: 'idle', id: null, roster: [], media: 'audio', legs: [], paidMsat: 0, unknownCount: 0, unknownMsat: 0, pendingCount: 0, pendingMsat: 0, muted: false, camera: false, error: null,
 };
 
 export type MeetingDeps = Pick<CallDeps, 'quote' | 'signal' | 'getUserMedia' | 'peerConnection' | 'newCallId' | 'iceServers'> & {
@@ -142,7 +151,17 @@ export type MeetingDeps = Pick<CallDeps, 'quote' | 'signal' | 'getUserMedia' | '
   /** A 1:1 call holds the mic: a meeting invite rings out. */
   busy?: () => boolean;
   newMeetingId?: () => string;
+  /**
+   * The shell's proven-unpaid classification, for the tally only. With it,
+   * any failed signal not proven unpaid counts as unknown; without it, only
+   * the explicit unknown codes do (a thrown signal always does).
+   */
+  provenUnpaid?: (code: string) => boolean;
 };
+
+/** Display only: what this leg's signals came to. `Leg.paidMsat` (receipts) still decides the leave hangup. */
+type Tally = { paidMsat: number; unknownCount: number; unknownMsat: number; pendingCount: number; pendingMsat: number };
+const NO_TALLY: Tally = { paidMsat: 0, unknownCount: 0, unknownMsat: 0, pendingCount: 0, pendingMsat: 0 };
 
 type Leg = {
   peer: string;
@@ -155,6 +174,7 @@ type Leg = {
   quote: CallQuote | null;
   videoSender: RTCRtpSender | null;
   paidMsat: number;
+  tally: Tally;
   error: string | null;
   timer?: ReturnType<typeof setTimeout>;
   drop?: ReturnType<typeof setTimeout>;
@@ -199,7 +219,11 @@ export function createMeetingEngine(deps: MeetingDeps) {
     view = {
       ...view,
       legs: legs.map((l) => ({ peer: l.peer, state: l.state, outgoing: l.outgoing, paidMsat: l.paidMsat, error: l.error })),
-      paidMsat: legs.reduce((s, l) => s + l.paidMsat, 0),
+      paidMsat: legs.reduce((s, l) => s + l.tally.paidMsat, 0),
+      unknownCount: legs.reduce((s, l) => s + l.tally.unknownCount, 0),
+      unknownMsat: legs.reduce((s, l) => s + l.tally.unknownMsat, 0),
+      pendingCount: legs.reduce((s, l) => s + l.tally.pendingCount, 0),
+      pendingMsat: legs.reduce((s, l) => s + l.tally.pendingMsat, 0),
     };
     deps.onView(view);
   };
@@ -242,7 +266,7 @@ export function createMeetingEngine(deps: MeetingDeps) {
     const own = roster.indexOf(deps.ownId().toLowerCase());
     legs = roster.flatMap((peer, i) => i === own ? [] : [{
       peer, outgoing: i > own, state: 'waiting' as LegState, callId: null, pc: null, remote: null,
-      offerSdp: null, quote: null, videoSender: null, paidMsat: 0, error: null,
+      offerSdp: null, quote: null, videoSender: null, paidMsat: 0, tally: { ...NO_TALLY }, error: null,
     }]);
     joined = host;
     view = { ...MEETING_IDLE, phase: host ? 'active' : 'invited', id, roster, media, camera: media === 'video' };
@@ -319,9 +343,54 @@ export function createMeetingEngine(deps: MeetingDeps) {
     }, CONNECT_TIMEOUT_MS);
   };
 
-  const pay = async (l: Leg, kind: number, body: Omit<Signal, 'v' | 'call_id'>, maxMsat: number) => {
-    const r = await deps.signal(l.peer, kind, JSON.stringify({ v: 1, call_id: l.callId!, ...body }), maxMsat);
+  /**
+   * The tally only: a hangup the engine has decided to send is pending from
+   * that moment (before the meeting ends) at a quote-independent bound, the
+   * shown price's cap. Not published here: the finish() that follows does.
+   * Its pay() gets `owedMsat` and replaces the bound with the real cap; if
+   * nothing is sent after all, release() drops it.
+   */
+  const owe = (l: Leg, msat: number) => {
+    l.tally.pendingCount += 1;
+    l.tally.pendingMsat += msat;
+  };
+  const release = (l: Leg, msat: number) => {
+    l.tally.pendingCount -= 1;
+    l.tally.pendingMsat -= msat;
+    if (legs.includes(l)) publish();
+  };
+
+  const pay = async (l: Leg, kind: number, body: Omit<Signal, 'v' | 'call_id'>, maxMsat: number, owedMsat?: number) => {
+    // The tally only (display): pending from before the signal until it
+    // settles, then paid (receipt, or the cap when paid without one), unknown
+    // (anything not proven unpaid), or nothing. A leg of a meeting that is no
+    // longer shown is updated but not published.
+    const t = l.tally;
+    if (owedMsat === undefined) t.pendingCount += 1;
+    t.pendingMsat += maxMsat - (owedMsat ?? 0);
+    if (legs.includes(l)) publish();
+    const tally = (outcome: SignalOutcome | null, code: string) => {
+      t.pendingCount -= 1;
+      t.pendingMsat -= maxMsat;
+      if (outcome?.ok) t.paidMsat += outcome.value.total_msat;
+      else if (code === 'payment_settled_undelivered' || code === 'failed_paid') t.paidMsat += maxMsat;
+      else if (outcome === null ? !deps.provenUnpaid?.(code)
+        : deps.provenUnpaid ? !deps.provenUnpaid(code) : code === 'spend_unknown' || code === 'payment_unknown' || code === 'undelivered_pending') {
+        t.unknownCount += 1;
+        t.unknownMsat += maxMsat;
+      }
+      if (legs.includes(l)) publish();
+    };
+    let r: SignalOutcome;
+    try {
+      r = await deps.signal(l.peer, kind, JSON.stringify({ v: 1, call_id: l.callId!, ...body }), maxMsat);
+    } catch (error) {
+      // A rejection after dispatch may still have paid: counted, then rethrown unchanged.
+      tally(null, asActionError(error).code);
+      throw error;
+    }
     if (r.ok) l.paidMsat += r.value.total_msat;
+    tally(r, r.ok ? '' : r.error.code);
     return r;
   };
 
@@ -503,13 +572,33 @@ export function createMeetingEngine(deps: MeetingDeps) {
     decline: (quotes: ShownQuotes) => guarded(async () => {
       if (view.phase !== 'invited') return;
       const ringing = legs.filter((l) => l.state === 'incoming');
+      // Each hangup that may be sent is pending before the meeting ends, at
+      // most the shown price (a leg without one can never be paid).
+      const owed = new Map(ringing.flatMap((l) => (quotes[l.peer] ? [[l, signalCost(quotes[l.peer]!)] as const] : [])));
+      owed.forEach((msat, l) => owe(l, msat));
+      // Reservations whose leg has not started: a rejection ends the loop
+      // (as before), and the outer finally releases what never started.
+      const unstarted = new Map(owed);
       finish('Declined');
-      for (const l of ringing) {
-        await serial(async () => {
-          const q = await deps.quote(l.peer);
-          const bound = q.ok ? boundQuote(quotes[l.peer], q.value, false) : null;
-          if (bound) await pay(l, CALL_HANGUP, { reason: 'declined' }, signalCost(bound));
-        });
+      try {
+        for (const l of ringing) {
+          await serial(async () => {
+            unstarted.delete(l);
+            let sent = false;
+            try {
+              const q = await deps.quote(l.peer);
+              const bound = q.ok ? boundQuote(quotes[l.peer], q.value, false) : null;
+              if (bound) {
+                sent = true;
+                await pay(l, CALL_HANGUP, { reason: 'declined' }, signalCost(bound), owed.get(l));
+              }
+            } finally {
+              if (!sent && owed.has(l)) release(l, owed.get(l)!);
+            }
+          });
+        }
+      } finally {
+        unstarted.forEach((msat, l) => release(l, msat));
       }
       publish();
     }),
@@ -522,11 +611,31 @@ export function createMeetingEngine(deps: MeetingDeps) {
     leave: async () => {
       if (view.phase !== 'active') return;
       const known = legs.filter((l) => !terminal(l) && l.state !== 'placing');
+      // The hangups already owed (the leg paid already) are pending before
+      // the meeting ends; a leg whose paid step is still in flight is pending
+      // through that step, and its hangup counts once it is sent.
+      const owed = new Map(known.flatMap((l) => (l.paidMsat > 0 && l.quote && l.callId ? [[l, signalCost(l.quote)] as const] : [])));
+      owed.forEach((msat, l) => owe(l, msat));
+      // As in decline: what never started is released in the outer finally.
+      const unstarted = new Map(owed);
       finish();
-      for (const l of known) {
-        await serial(async () => {
-          if (l.paidMsat > 0 && l.quote && l.callId) await pay(l, CALL_HANGUP, { reason: 'hangup' }, signalCost(l.quote));
-        });
+      try {
+        for (const l of known) {
+          await serial(async () => {
+            unstarted.delete(l);
+            let sent = false;
+            try {
+              if (l.paidMsat > 0 && l.quote && l.callId) {
+                sent = true;
+                await pay(l, CALL_HANGUP, { reason: 'hangup' }, signalCost(l.quote), owed.get(l));
+              }
+            } finally {
+              if (!sent && owed.has(l)) release(l, owed.get(l)!);
+            }
+          });
+        }
+      } finally {
+        unstarted.forEach((msat, l) => release(l, msat));
       }
       publish();
     },
@@ -536,8 +645,9 @@ export function createMeetingEngine(deps: MeetingDeps) {
       if (active()) finish();
     },
 
+    /** Closing the ended card waits until nothing is still settling: the tally is never dropped unseen. */
     dismiss: () => {
-      if (view.phase === 'ended') {
+      if (view.phase === 'ended' && view.pendingCount === 0) {
         stopAll(local);
         local = null;
         legs.forEach((l) => l.pc?.close());
