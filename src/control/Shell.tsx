@@ -1252,6 +1252,7 @@ export function ControlCenter(props: Props) {
     // No STUN unless the owner set one: host candidates only.
     iceServers: () => stunServer(effectiveStun()),
     busy: () => meetingOn(),
+    provenUnpaid: (code) => provenUnpaid(code),
   });
   // Closing the window ends the call here without paying; only Hang up pays.
   onCleanup(() => calls.endLocal());
@@ -3108,8 +3109,35 @@ function CallPanel(props: {
         <Show when={v().media === 'audio'}>
           <MediaView stream={props.streams.remote} video={false} muted={false} kind="remote" />
         </Show>
-        <Show when={v().paidMsat > 0}>
-          <p class="hint" data-call-paid>Signal cost cap: {fmtAmount(v().paidMsat)} (includes maximum routing fees; settled amount may be lower). Media is direct and not billed.</p>
+        {/* The host reports each signal's ceiling, not settled fees: after the call, "up to" is the honest total. */}
+        <Show when={v().phase === 'ended'} fallback={
+          <Show when={v().paidMsat > 0}>
+            <p class="hint" data-call-paid>Signal cost cap: {fmtAmount(v().paidMsat)} (includes maximum routing fees; settled amount may be lower). Media is not billed.</p>
+          </Show>
+        }>
+          <Switch>
+            {/* Something is still in flight: never "paid nothing" (or a final total) until it settles. */}
+            <Match when={v().pendingCount > 0}>
+              <p class="hint" data-call-paid="pending">
+                {v().paidMsat > 0 ? `This call paid up to ${fmtAmount(v().paidMsat)} so far. ` : ''}
+                {v().unknownCount > 0 ? `${v().unknownCount === 1 ? 'One signal’s result is not known yet' : `${v().unknownCount} signals’ results are not known yet`}: check pending result. ` : ''}
+                {v().pendingCount === 1 ? 'A payment for this call is still settling' : `${v().pendingCount} payments for this call are still settling`}: up to {fmtAmount(v().pendingMsat)}. The total updates when {v().pendingCount === 1 ? 'it finishes' : 'they finish'}. Media was not billed.
+              </p>
+            </Match>
+            <Match when={v().unknownCount > 0}>
+              <p class="hint" data-call-paid="unknown">
+                {v().paidMsat > 0 ? `This call paid up to ${fmtAmount(v().paidMsat)}.` : 'No payment from this call is confirmed.'}{' '}
+                {v().unknownCount === 1 ? 'One signal’s result is not known yet' : `${v().unknownCount} signals’ results are not known yet`} (up to {fmtAmount(v().paidMsat + v().unknownMsat)} in all if {v().unknownCount === 1 ? 'it' : 'they'} went through): check pending result. Media was not billed.
+              </p>
+            </Match>
+            <Match when={v().paidMsat > 0}>
+              <p class="hint" data-call-paid="settled">This call paid up to {fmtAmount(v().paidMsat)}: each signal’s price plus its routing-fee cap; the exact fees are not reported. Media was not billed.</p>
+            </Match>
+            {/* A call that started (it has an id) and paid nothing; pre-flight refusals already say "Nothing was paid". */}
+            <Match when={v().callId !== null}>
+              <p class="hint" data-call-paid="nothing">This call paid nothing.</p>
+            </Match>
+          </Switch>
         </Show>
         <Show when={v().connection}>
           {(connection) => <p class="hint" data-call-connection>Connection: {connection().local === 'srflx' ? 'srflx(STUN)' : connection().local} (local) / {connection().remote === 'srflx' ? 'srflx(STUN)' : connection().remote} (remote)</p>}
@@ -3135,7 +3163,7 @@ function CallPanel(props: {
               <button type="button" class="soft" data-call-decline disabled={props.blocked} onClick={() => props.decline()}>Decline{price(answer())}</button>
             </Match>
             <Match when={v().phase === 'ended'}>
-              <button type="button" class="soft" data-call-dismiss onClick={() => props.dismiss()}>Close</button>
+              <button type="button" class="soft" data-call-dismiss disabled={v().pendingCount > 0} title={v().pendingCount > 0 ? 'Closes once the payment has settled' : undefined} onClick={() => props.dismiss()}>Close</button>
             </Match>
             <Match when={v().phase !== 'idle'}>
               <Show when={v().phase === 'live' || v().phase === 'connecting' || v().phase === 'reconnecting'}>
