@@ -336,6 +336,17 @@ describe('pairing panel', () => {
     expect(el.querySelector('details.node-target-advanced summary')!.textContent).toBe('Advanced: use a node you already run at home');
   });
 
+  it('an iPhone (phone set, no Android mobile flag) never shows the "Joining from another device?" link', () => {
+    mount = document.createElement('div');
+    document.body.appendChild(mount);
+    dispose = render(() => (
+      <Onboarding onPreviewRemote={async () => ({ endpoint: 'home:4242', node_id_fingerprint: 'ab…cd' })}
+        status={() => booting} pairing={() => starting} trustAck={() => false} onRetry={() => {}} selectedTarget="local" phone />
+    ), mount);
+    // Even with a local target forced, the phone gate (not the Android-only mobile flag) hides the link.
+    expect(mount.querySelector('[data-join-from-device]')).toBeNull();
+  });
+
   it('defaults to This Mac, keeps home under collapsed Advanced, and hides test nodes', () => {
     const el = show(starting, booting);
     const local = el.querySelector<HTMLButtonElement>('[data-target="local"]')!;

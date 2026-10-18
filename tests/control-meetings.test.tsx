@@ -341,6 +341,145 @@ describe('meeting legs through a drop', () => {
   });
 });
 
+describe('meeting engine: the tally (pending, unknown, paid)', () => {
+  beforeEach(() => { FakePc.made = []; });
+  type Outcome = Awaited<ReturnType<MeetingDeps['signal']>>;
+  const receipt = (kind: number, total: number): Outcome => ({ ok: true, value: { message_id: `m${kind}`, kind, amount_msat: total - 5_000, total_msat: total, max_routing_fee_msat: 5_000, delivered: true, accepted: true, sent_at_ms: 0 } });
+
+  it('leaving while the offer is in flight ends with it pending, then counts its receipt', async () => {
+    let land!: (r: Outcome) => void;
+    const { e, last } = engine({ signal: () => new Promise((resolve) => { land = resolve; }) });
+    const inviting = e.invite([A], 'audio', SHOWN);
+    await vi.waitFor(() => expect(land).toBeDefined());
+    expect(last()).toMatchObject({ phase: 'active', paidMsat: 0, pendingCount: 1, pendingMsat: 15_000 });
+    await e.leave();
+    expect(last()).toMatchObject({ phase: 'ended', paidMsat: 0, unknownCount: 0, pendingCount: 1, pendingMsat: 15_000 });
+    land(receipt(400, 15_000));
+    await inviting;
+    expect(last()).toMatchObject({ phase: 'ended', paidMsat: 15_000, unknownCount: 0, pendingCount: 0, pendingMsat: 0 });
+  });
+
+  it('leaving while the answer is in flight keeps it pending; it lands, then its hangup is paid', async () => {
+    let land!: (r: Outcome) => void;
+    const { e, sent, last } = engine({ signal: async (peer, kind, plaintext, max) => {
+      sent.push({ peer, kind, body: JSON.parse(plaintext), max });
+      if (kind === 401) return new Promise((resolve) => { land = resolve; });
+      return receipt(kind, 6_000);
+    } });
+    await e.receive(offer(A, cid(0xa1), [A, OWN]), OWN);
+    const joining = e.join(SHOWN);
+    await vi.waitFor(() => expect(land).toBeDefined());
+    const leaving = e.leave();
+    expect(last()).toMatchObject({ phase: 'ended', paidMsat: 0, pendingCount: 1, pendingMsat: 6_000 });
+    land(receipt(401, 6_000));
+    await Promise.all([joining, leaving]);
+    expect(sent.map((x) => x.kind)).toEqual([401, 403]);
+    expect(last()).toMatchObject({ phase: 'ended', paidMsat: 12_000, pendingCount: 0, pendingMsat: 0 });
+  });
+
+  it('declining with its hangup in flight is pending, and a proven-unpaid refusal then leaves nothing paid', async () => {
+    let land!: (r: Outcome) => void;
+    const { e, last } = engine({ signal: () => new Promise((resolve) => { land = resolve; }), provenUnpaid: (code) => code === 'spend_refused' });
+    await e.receive(offer(A, cid(0xa1), [A, OWN]), OWN);
+    const declining = e.decline(SHOWN);
+    await vi.waitFor(() => expect(land).toBeDefined());
+    expect(last()).toMatchObject({ phase: 'ended', error: 'Declined', pendingCount: 1, pendingMsat: 6_000 });
+    land({ ok: false, error: { code: 'spend_refused', message: 'refused' } });
+    await declining;
+    expect(last()).toMatchObject({ phase: 'ended', paidMsat: 0, unknownCount: 0, pendingCount: 0, pendingMsat: 0 });
+  });
+
+  const zeroEnded = (v: MeetingView) => v.phase === 'ended' && v.pendingCount === 0 && v.unknownCount === 0 && v.paidMsat === 0;
+
+  it('declining: while the hangup quote never resolves, it is pending at the shown cap and never "paid nothing"', async () => {
+    let quoting = false;
+    const { e, views, sent, last } = engine({ quote: () => { quoting = true; return new Promise(() => {}); } });
+    await e.receive(offer(A, cid(0xa1), [A, OWN]), OWN);
+    void e.decline(SHOWN);
+    await vi.waitFor(() => expect(quoting).toBe(true));
+    expect(views.filter((v) => v.phase === 'ended').some(zeroEnded)).toBe(false);
+    expect(last()).toMatchObject({ phase: 'ended', error: 'Declined', pendingCount: 1, pendingMsat: 6_000 });
+    expect(sent).toHaveLength(0);
+    // Close waits while it is owed.
+    e.dismiss();
+    expect(last().phase).toBe('ended');
+  });
+
+  it('declining: a failed hangup quote sends nothing, and the owed hangup drops to "nothing"', async () => {
+    const { e, sent, last } = engine({ quote: async () => ({ ok: false, error: { code: 'node', message: 'unreachable' } }) });
+    await e.receive(offer(A, cid(0xa1), [A, OWN]), OWN);
+    await e.decline(SHOWN);
+    expect(sent).toHaveLength(0);
+    expect(last()).toMatchObject({ phase: 'ended', paidMsat: 0, unknownCount: 0, pendingCount: 0, pendingMsat: 0 });
+    e.dismiss();
+    expect(last().phase).toBe('idle');
+  });
+
+  it('leaving: each owed hangup is pending in the first ended view, before it is sent', async () => {
+    let hangups = 0;
+    const { e, views } = engine({ signal: async (_peer, kind) => {
+      if (kind === 403) { hangups += 1; return new Promise(() => {}); }
+      return receipt(kind, 15_000);
+    } });
+    await e.invite([A, B], 'audio', SHOWN);
+    void e.leave();
+    expect(hangups).toBe(0);
+    expect(views.find((v) => v.phase === 'ended')).toMatchObject({ paidMsat: 30_000, pendingCount: 2, pendingMsat: 12_000 });
+  });
+
+  const neverNegative = (views: MeetingView[]) => views.every((v) => v.pendingCount >= 0 && v.pendingMsat >= 0);
+
+  it('declining two legs: the first hangup quote rejects, and the second reservation is released, not stranded', async () => {
+    const { e, views, sent, last } = engine({ quote: async () => { throw new Error('quote failed'); } });
+    await e.receive(offer(A, cid(0xa1), [A, B, OWN]), OWN);
+    await e.receive(offer(B, cid(0xb1), [A, B, OWN]), OWN);
+    expect(last().legs.filter((l) => l.state === 'incoming')).toHaveLength(2);
+    await expect(e.decline(SHOWN)).rejects.toThrow('quote failed');
+    expect(sent).toHaveLength(0);
+    expect(views.find((v) => v.phase === 'ended')).toMatchObject({ pendingCount: 2, pendingMsat: 12_000 });
+    expect(last()).toMatchObject({ phase: 'ended', paidMsat: 0, unknownCount: 0, pendingCount: 0, pendingMsat: 0 });
+    expect(neverNegative(views)).toBe(true);
+    e.dismiss();
+    expect(last().phase).toBe('idle');
+  });
+
+  it('leaving two paid legs: the first hangup rejects, it counts as unknown, and the second reservation is released', async () => {
+    const { e, views, sent, last } = engine({ signal: async (peer, kind, plaintext, max) => {
+      sent.push({ peer, kind, body: JSON.parse(plaintext), max });
+      if (kind === 403) throw new Error('connection lost');
+      return receipt(kind, 15_000);
+    } });
+    await e.invite([A, B], 'audio', SHOWN);
+    await expect(e.leave()).rejects.toThrow('connection lost');
+    // Only the first hangup was ever sent; the second never started.
+    expect(sent.map((x) => [x.peer, x.kind])).toEqual([[A, 400], [B, 400], [A, 403]]);
+    expect(last()).toMatchObject({ phase: 'ended', paidMsat: 30_000, unknownCount: 1, unknownMsat: 6_000, pendingCount: 0, pendingMsat: 0 });
+    expect(neverNegative(views)).toBe(true);
+    e.dismiss();
+    expect(last().phase).toBe('idle');
+  });
+
+  it('a hangup that rejects after dispatch is unknown at its cap, and the leave still finishes', async () => {
+    const { e, last } = engine({ signal: async (_peer, kind) => {
+      if (kind === 403) throw new Error('connection lost');
+      return receipt(kind, 15_000);
+    } });
+    await e.invite([A], 'audio', SHOWN);
+    await e.leave().catch(() => undefined);
+    expect(last()).toMatchObject({ phase: 'ended', paidMsat: 15_000, unknownCount: 1, unknownMsat: 6_000, pendingCount: 0 });
+  });
+
+  it.each([
+    ['proven unpaid', { code: 'budget_exhausted' as const, message: 'used up' }, { paidMsat: 0, unknownCount: 0 }],
+    ['not proven unpaid', { code: 'node' as const, message: 'connection lost' }, { paidMsat: 0, unknownCount: 1, unknownMsat: 15_000 }],
+    ['paid without a receipt', { code: 'payment_settled_undelivered' as const, message: 'paid, not delivered' }, { paidMsat: 15_000, unknownCount: 0 }],
+  ])('with the shell classification, a %s offer failure is counted that way', async (_name, error, tally) => {
+    const { e, last } = engine({ signal: async () => ({ ok: false, error }), provenUnpaid: (code) => code === 'budget_exhausted' });
+    await e.invite([A], 'audio', SHOWN);
+    expect(last()).toMatchObject({ phase: 'ended', pendingCount: 0, ...tally });
+  });
+});
+
 describe('meeting engine: review #81 fixes', () => {
   beforeEach(() => { FakePc.made = []; });
 
@@ -551,11 +690,78 @@ describe('meetings in the shell', () => {
     expect(legs).toEqual([[A, 400, 15_000, [OWN, A, B]], [B, 400, 15_000, [OWN, A, B]]]);
     await vi.waitFor(() => expect($('[data-meeting-panel="active"]')).not.toBeNull());
     expect($(`[data-meeting-leg="${A}"]`)!.getAttribute('data-leg-state')).toBe('ringing');
+    // Receipts carry each signal's ceiling, so the total is an upper bound; media is never claimed to be direct.
+    await vi.waitFor(() => expect(text('[data-meeting-paid]')).toBe('Paid up to 30 sats for this meeting’s signals (each signal’s price plus its routing-fee cap). Media is not billed.'));
     // While in a meeting, 1:1 calls are off.
     expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(true);
     $<HTMLButtonElement>('[data-meeting-leave]')!.click();
     await vi.waitFor(() => expect($('[data-meeting-panel="ended"]')).not.toBeNull());
     await vi.waitFor(() => expect(host.used('call_signal').map((c) => c.args!.kind)).toEqual([400, 400, 403, 403]));
+  });
+
+  async function inviteMaya() {
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="meeting"]')?.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call="meeting"]')!.click();
+    await vi.waitFor(() => expect(text('[data-meeting-invite]')).toBe('Invite · 21 sats'));
+    $<HTMLButtonElement>('[data-meeting-invite]')!.click();
+  }
+
+  it('leaving while the offer is in flight says it is settling, never "paid nothing", then shows what it paid', async () => {
+    let land!: (r: unknown) => void;
+    stubHost({ call_signal: () => new Promise((resolve) => { land = resolve; }) });
+    await inviteMaya();
+    await vi.waitFor(() => expect(land).toBeDefined());
+    await vi.waitFor(() => expect($('[data-meeting-paid]')?.getAttribute('data-meeting-paid')).toBe('pending'));
+    $<HTMLButtonElement>('[data-meeting-leave]')!.click();
+    await vi.waitFor(() => expect($('[data-meeting-panel="ended"]')).not.toBeNull());
+    expect(text('[data-meeting-paid]')).toBe('A payment for this meeting is still settling: up to 15 sats. The total updates when it finishes. Media is not billed.');
+    expect($('[data-meeting-paid="nothing"]')).toBeNull();
+    land({ message_id: 'sig', kind: 400, amount_msat: 10_000, total_msat: 15_000, max_routing_fee_msat: 5000, delivered: true, accepted: true, sent_at_ms: Date.now() });
+    await vi.waitFor(() => expect($('[data-meeting-paid]')?.getAttribute('data-meeting-paid')).toBe('settled'));
+    expect(text('[data-meeting-paid]')).toMatch(/^Paid up to 15 sats for this meeting’s signals/);
+  });
+
+  it('declining never shows "paid nothing", even for a moment, while its hangup is owed; Close waits for it', async () => {
+    let hang = false;
+    let land!: (r: unknown) => void;
+    const host = stubHost({
+      // The panel's price reads answer; from the Decline press on, the engine's hangup quote never does.
+      call_quote: () => (hang ? new Promise(() => {}) : QUOTE),
+      call_signal: () => new Promise((resolve) => { land = resolve; }),
+    });
+    await openShell();
+    const seen: string[] = [];
+    const watch = new MutationObserver((records) => records.forEach((r) => r.addedNodes.forEach((n) => {
+      if (!(n instanceof Element)) return;
+      [n, ...n.querySelectorAll('[data-meeting-paid]')].forEach((el) => { if (el.hasAttribute('data-meeting-paid')) seen.push(el.getAttribute('data-meeting-paid')!); });
+    })));
+    watch.observe(mount, { subtree: true, childList: true, attributes: true, characterData: true });
+    host.emitLive({ type: 'message', room_id: null, message: offer(A, cid(0xa1), [A, OWN]) });
+    await vi.waitFor(() => expect(text('[data-meeting-decline]')).toBe('Decline · up to 6 sats'));
+    hang = true;
+    $<HTMLButtonElement>('[data-meeting-decline]')!.click();
+    await vi.waitFor(() => expect($('[data-meeting-panel="ended"]')).not.toBeNull());
+    expect(text('[data-meeting-paid]')).toBe('A payment for this meeting is still settling: up to 6 sats. The total updates when it finishes. Media is not billed.');
+    expect($<HTMLButtonElement>('[data-meeting-dismiss]')!.disabled).toBe(true);
+    expect(land).toBeUndefined();
+    watch.disconnect();
+    expect(seen).toContain('pending');
+    expect(seen).not.toContain('nothing');
+  });
+
+  it('a refused offer ends the meeting with "This meeting paid nothing."; a lost one is "not known yet"', async () => {
+    stubHost({ call_signal: () => { throw { code: 'spend_refused', message: 'token lacks required scope: spend' }; } });
+    await inviteMaya();
+    await vi.waitFor(() => expect($('[data-meeting-panel="ended"]')).not.toBeNull());
+    expect($('[data-meeting-paid]')!.getAttribute('data-meeting-paid')).toBe('nothing');
+    expect(text('[data-meeting-paid]')).toBe('This meeting paid nothing.');
+    dispose?.(); dispose = undefined; mount.remove();
+
+    stubHost({ call_signal: () => { throw 'connection lost'; } });
+    await inviteMaya();
+    await vi.waitFor(() => expect($('[data-meeting-paid]')?.getAttribute('data-meeting-paid')).toBe('unknown'));
+    expect(text('[data-meeting-paid]')).toBe('No payment for this meeting is confirmed. One signal’s result is not known yet (up to 15 sats in all if it went through): check pending result. Media is not billed.');
   });
 
   it('a dropped leg reads "Reconnecting…" on its tile, and "Live" again when it comes back', async () => {

@@ -25,7 +25,8 @@ export function OnCallPill(props: { view: CallView; onReturn: () => void }) {
   });
   const shown = () => props.view.phase !== 'idle' && props.view.phase !== 'incoming';
   const text = () => {
-    const word = CALL_STATE_WORD[props.view.phase];
+    // The browser reports no network (display only, #238): said on the pill too.
+    const word = CALL_STATE_WORD[props.view.phase] + (props.view.offline ? ' · offline' : '');
     if (props.view.phase === 'reconnecting' && props.view.dropAt !== null) return `${word} · ${Math.max(0, Math.ceil((props.view.dropAt - now()) / 1000))} s`;
     return props.view.phase === 'live' && props.view.liveAt !== null
       ? `${word} · ${duration(Math.max(0, now() - props.view.liveAt)).padStart(5, '0')}`

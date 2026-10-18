@@ -141,6 +141,20 @@ export type CallView = {
   camera: boolean;
   /** Sum of receipt ceilings (the host does not expose settled call fees). */
   paidMsat: number;
+  /**
+   * Signals whose payment outcome is not known (spend_unknown /
+   * payment_unknown, including a 30 s timeout), and the sum of their caps.
+   * Never cleared by ending the call: the ended panel must say so.
+   */
+  unknownCount: number;
+  unknownMsat: number;
+  /**
+   * Signals still in flight (sent to the host, not settled yet), and the sum
+   * of their caps. Each moves into paid or unknown (or drops, proven unpaid)
+   * when it settles, even after the call ended.
+   */
+  pendingCount: number;
+  pendingMsat: number;
   /** Candidate types only: never expose addresses from the stats report. */
   connection: { local: string; remote: string } | null;
   reason: HangupReason | null;
@@ -164,7 +178,7 @@ export type CallView = {
 
 export const IDLE: CallView = {
   phase: 'idle', state: 'idle', peer: null, callId: null, media: 'audio', outgoing: false,
-  liveAt: null, muted: false, camera: false, paidMsat: 0, connection: null, reason: null, error: null, offline: false,
+  liveAt: null, muted: false, camera: false, paidMsat: 0, unknownCount: 0, unknownMsat: 0, pendingCount: 0, pendingMsat: 0, connection: null, reason: null, error: null, offline: false,
   dropAt: null, recoveryUsed: false, recoveryUsedBefore: false, recoveryError: null,
 };
 
@@ -187,6 +201,12 @@ export type CallDeps = {
   iceServers?: () => RTCIceServer[];
   /** Something else (a meeting) holds the mic: an incoming offer rings out. */
   busy?: () => boolean;
+  /**
+   * The shell's proven-unpaid classification, for the tally only. With it,
+   * any failed signal not proven unpaid counts as unknown; without it, only
+   * the explicit unknown codes do (a thrown signal always does).
+   */
+  provenUnpaid?: (code: string) => boolean;
 };
 
 /**
@@ -438,7 +458,17 @@ export function createCallEngine(deps: CallDeps) {
     return conn;
   };
 
-  const pay = async (kind: number, body: Omit<Signal, 'v' | 'call_id'>, maxMsat: number, targetId = wireId ?? view.callId, owner = { peer: view.peer, callId: view.callId }) => {
+  /**
+   * The tally only: an owed signal (a hangup the engine has decided to send)
+   * is pending from that moment, before the call ends, so the ended card
+   * never says "paid nothing" while it is owed. Not published here: the
+   * end() that follows publishes it. Its pay() is then passed `owed`.
+   */
+  const owe = (maxMsat: number) => {
+    view = { ...view, pendingCount: view.pendingCount + 1, pendingMsat: view.pendingMsat + maxMsat };
+  };
+
+  const pay = async (kind: number, body: Omit<Signal, 'v' | 'call_id'>, maxMsat: number, targetId = wireId ?? view.callId, owner = { peer: view.peer, callId: view.callId }, owed = false) => {
     const { peer, callId } = owner;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<Outcome<CallReceipt>>((resolve) => {
@@ -447,11 +477,34 @@ export function createCallEngine(deps: CallDeps) {
         message: 'The node did not answer in time. The payment outcome is unknown; check the pending result before trying again.',
       } }), SIGNAL_TIMEOUT_MS);
     });
+    // The tally only: what reached this call's paid / unknown totals. A signal
+    // is pending from before the race until it settles; then it moves (one
+    // update) into paid, unknown, or nothing. Paid for certain without a
+    // receipt counts at its cap ("up to"); anything else not proven unpaid is
+    // unknown (count + cap). Never cleared by ending the call.
+    const counted = view.callId === callId;
+    if (counted && !owed) set({ pendingCount: view.pendingCount + 1, pendingMsat: view.pendingMsat + maxMsat });
+    const tally = (outcome: Outcome<CallReceipt> | null, code: string) => {
+      if (!counted || view.callId !== callId) return;
+      const next: Partial<CallView> = { pendingCount: view.pendingCount - 1, pendingMsat: view.pendingMsat - maxMsat };
+      if (outcome?.ok) next.paidMsat = view.paidMsat + outcome.value.total_msat;
+      else if (code === 'payment_settled_undelivered' || code === 'failed_paid') next.paidMsat = view.paidMsat + maxMsat;
+      else if (outcome === null ? !deps.provenUnpaid?.(code)
+        : deps.provenUnpaid ? !deps.provenUnpaid(code) : code === 'spend_unknown' || code === 'payment_unknown' || code === 'undelivered_pending') {
+        next.unknownCount = view.unknownCount + 1;
+        next.unknownMsat = view.unknownMsat + maxMsat;
+      }
+      set(next);
+    };
     let r: Outcome<CallReceipt>;
     try {
       r = await Promise.race([deps.signal(peer!, kind, JSON.stringify({ v: 1, call_id: targetId!, ...body }), maxMsat), timeout]);
+    } catch (error) {
+      // A rejection after dispatch may still have paid: counted, then rethrown unchanged.
+      tally(null, asActionError(error).code);
+      throw error;
     } finally { clearTimeout(timer); }
-    if (r.ok && view.callId === callId) set({ paidMsat: view.paidMsat + r.value.total_msat });
+    tally(r, r.ok ? '' : r.error.code);
     return r;
   };
 
@@ -673,10 +726,11 @@ export function createCallEngine(deps: CallDeps) {
       const generation = mediaGeneration;
       const q = await deps.quote(owner.peer!);
       if (mediaGeneration !== generation || view.callId !== owner.callId || view.phase !== 'incoming') return;
+      if (q.ok) owe(signalCost(q.value));
       end('declined');
       if (q.ok) {
         try {
-          const r = await pay(CALL_HANGUP, { reason: 'declined' }, signalCost(q.value), id, owner);
+          const r = await pay(CALL_HANGUP, { reason: 'declined' }, signalCost(q.value), id, owner, true);
           if (!r.ok && view.callId === owner.callId) set({ error: r.error.message });
         } catch (error) {
           if (view.callId === owner.callId) set({ error: asActionError(error).message });
@@ -697,11 +751,13 @@ export function createCallEngine(deps: CallDeps) {
       const ids = [...admissions].reverse();
       const owner = { peer: view.peer, callId }; // Keep late cleanup bound to this peer.
       cancelled = callId;
+      // Every hangup owed is pending before the call ends, not one by one as each is sent.
+      if (notify) ids.forEach(() => owe(signalCost(notify)));
       end('hangup');
       if (notify) {
         for (const id of ids) {
           try {
-            const r = await pay(CALL_HANGUP, { reason: 'hangup' }, signalCost(notify), id, owner);
+            const r = await pay(CALL_HANGUP, { reason: 'hangup' }, signalCost(notify), id, owner, true);
             if (!r.ok && view.callId === callId) set({ error: r.error.message });
           } catch (error) {
             if (view.callId === callId) set({ error: asActionError(error).message });
@@ -762,7 +818,8 @@ export function createCallEngine(deps: CallDeps) {
     },
 
     /** Close the ended card. */
-    dismiss: () => { if (view.phase === 'ended') set(IDLE); },
+    /** Closing the ended card waits until nothing is still settling: the tally is never dropped unseen. */
+    dismiss: () => { if (view.phase === 'ended' && view.pendingCount === 0) set(IDLE); },
 
     /** A 400-403 the node forwarded (already paid, and admitted by its call registry). */
     receive: async (m: Message, ownId: string) => {

@@ -528,6 +528,396 @@ describe('control center shell', () => {
     expect(mount.querySelector('[data-sending]')).toBeNull();
   }, 20_000);
 
+  // ---- Touch ID approve & send, bound to the envelope id relation_approve returned ----
+  /** A host whose grant names envelope ids (relation_envelope_id_v1); `st` is the node's state, changed by the test. */
+  function touchHost(st: {
+    ids: Record<string, string | null> | null | undefined;
+    envelopes: Record<string, number>;
+    left?: Record<string, number>;
+    perCall?: number;
+    remaining?: number;
+    spendOpen?: boolean;
+    device?: string;
+    grantUntil?: number;
+    /** The budget read fails (the shell keeps the old grant and marks it stale). */
+    budgetFail?: boolean;
+    /** Autopay open with a row for A: messages go through the budget path. */
+    budgetPath?: boolean;
+    /** While set, relation_approve waits for it (Touch ID still being answered). */
+    approveGate?: Promise<void> | null;
+    /** While set, each send waits for it (a send still in flight ahead in the queue). */
+    sendGate?: Promise<void> | null;
+    approve: () => unknown;
+  }) {
+    const open = { state: 'open', lapse: null, basis: 'node_grant', open_until_ms: Date.now() + 600_000, pending: null, window_ms: 600_000, granted_op: 'cd34', armed_by_request: null };
+    const locked = { state: 'locked', lapse: null, basis: null, open_until_ms: null, pending: null, window_ms: 600_000, granted_op: null, armed_by_request: null };
+    const sent: string[] = [];
+    const host = stubHost({
+      device_key_status: () => ({ available: true, state: st.device ?? 'registered', fingerprint: '3F9A-12C4', owner_action: null, expires_at_ms: null }),
+      spend_status: () => (st.spendOpen === false ? locked : open),
+      budget_status: () => {
+        if (st.budgetFail) throw { code: 'node', message: 'The budget could not be read.' };
+        return {
+        paused: false, waiting_for_owner: false, ceiling_msat: 500_000, max_daily_msat: 100_000_000, spent_msat: 0, unsettled_msat: 0,
+        preset: 'careful', presets: [{ id: 'careful', contact_msat: 50_000, room_msat: 100_000, ceiling_msat: 500_000 }],
+        rows: st.budgetPath ? [{ target: A, room: false, limit_msat: 50_000, spent_msat: 0, unsettled_msat: 0 }] : [],
+        autopay: st.budgetPath
+          ? { state: 'open', open_until_ms: Date.now() + 600_000, ceiling_msat: 500_000, basis: 'node_grant' }
+          : { state: 'off', open_until_ms: null, ceiling_msat: null, basis: null },
+        window_ms: 600_000,
+        node_grant: {
+          expires_at_ms: st.grantUntil ?? Date.now() + 86_400_000, budget_msat: 200_000, remaining_msat: st.remaining ?? 200_000, per_call_max_msat: st.perCall ?? 200_000,
+          envelopes: st.envelopes,
+          ...(st.ids === undefined ? {} : { envelope_id_by_recipient: st.ids }),
+          ...(st.left ? { recipient_left_msat_by_recipient: st.left } : {}),
+        },
+        };
+      },
+      relation_approve: async () => {
+        if (st.approveGate) await st.approveGate;
+        return { ...(st.spendOpen === false ? locked : open), ...(st.approve() as object) };
+      },
+      message_send: async (args) => {
+        sent.push(args!.plaintext as string);
+        const n = sent.length;
+        const gate = st.sendGate;
+        if (gate) await gate;
+        return { message_id: `sent-${n}`, recipient: args!.recipient, is_room: false, delivered: true, amount_msat: 2000, sent_at_ms: Date.now() };
+      },
+    });
+    return { ...host, sent };
+  }
+  const DAY = 86_400_000;
+  async function pressTouch(text = 'hello Maya') {
+    start();
+    await vi.waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
+    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
+    await vi.waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Approve with Touch ID'));
+    const area = mount.querySelector<HTMLTextAreaElement>('[data-composer] textarea')!;
+    area.value = text;
+    area.dispatchEvent(new Event('input', { bubbles: true }));
+    // The label promises only the approval; the message waits in its bubble.
+    await vi.waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Approve with Touch ID'));
+    click('[data-send]');
+  }
+  const unsentReason = () => mount.querySelector('[data-unsent-reason]')?.textContent ?? '';
+
+  it('Touch ID approve & send: sends once, after a fresh read names the envelope its own call returned', async () => {
+    const st = { ids: {} as Record<string, string | null>, envelopes: {} as Record<string, number>,
+      approve: () => { st.ids = { [A]: 'env-1', [B]: 'env-b' }; st.envelopes = { [A]: Date.now() + DAY }; return { envelope_id: 'env-1' }; } };
+    const host = touchHost(st);
+    await pressTouch();
+    await vi.waitFor(() => expect(host.calls.filter((c) => c.cmd === 'relation_approve')).toHaveLength(1));
+    await vi.waitFor(() => expect(host.sent).toEqual(['hello Maya']));
+    expect(mount.querySelector<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('');
+    await new Promise((r) => setTimeout(r, 3500));
+    expect(host.sent).toEqual(['hello Maya']);
+  }, 15_000);
+
+  it.each([
+    ['no capability (null map)', null],
+    ['an older host (no field)', undefined],
+  ])('Touch ID with %s: the plain flow, the words stay, nothing is sent', async (_name, ids) => {
+    const st = { ids, envelopes: {} as Record<string, number>, approve: () => { st.envelopes = { [A]: Date.now() + DAY }; return { envelope_id: 'env-1' }; } };
+    const host = touchHost(st);
+    await pressTouch();
+    await vi.waitFor(() => expect(mount.querySelector('[data-composer-note]')?.textContent).toBe('Approved. Press Send to send it.'));
+    expect(mount.querySelector('[data-sending]')).toBeNull();
+    expect(mount.querySelector<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('hello Maya');
+    await new Promise((r) => setTimeout(r, 300));
+    expect(host.sent).toEqual([]);
+  });
+
+  it('Touch ID returning no envelope id: back to the box at once, nothing sent', async () => {
+    const st = { ids: {} as Record<string, string | null>, envelopes: {} as Record<string, number>,
+      approve: () => { st.ids = { [A]: 'env-1' }; st.envelopes = { [A]: Date.now() + DAY }; return { envelope_id: null }; } };
+    const host = touchHost(st);
+    await pressTouch();
+    await vi.waitFor(() => expect(mount.querySelector('[data-composer-note]')?.textContent).toBe('Approved. Press Send to send it.'));
+    expect(mount.querySelector<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('hello Maya');
+    expect(mount.querySelector('[data-sending]')).toBeNull();
+    await new Promise((r) => setTimeout(r, 300));
+    expect(host.sent).toEqual([]);
+  });
+
+  it.each([
+    ['another id (replaced)', { [A]: 'env-2' }],
+    ['a null entry (legacy/unknown)', { [A]: null }],
+    ['no entry for the contact', { [B]: 'env-b' }],
+    ['a mixed-case key (read exact, lower-cased)', { [A.toUpperCase()]: 'env-1' }],
+  ])('Touch ID: a fresh read with %s is stale: it needs Touch ID again, nothing sent', async (_name, after) => {
+    const st = { ids: {} as Record<string, string | null>, envelopes: {} as Record<string, number>,
+      approve: () => { st.ids = after; st.envelopes = { [A]: Date.now() + DAY }; return { envelope_id: 'env-1' }; } };
+    const host = touchHost(st);
+    await pressTouch();
+    await vi.waitFor(() => expect(unsentReason()).toContain('It needs Touch ID again. Press Send to ask.'));
+    expect(mount.querySelector('[data-sending]')).toBeNull();
+    await new Promise((r) => setTimeout(r, 300));
+    expect(host.sent).toEqual([]);
+  });
+
+  it('Touch ID: a stale read still naming the old envelope does not end it; the fresh read with its own id sends once', async () => {
+    // A's old envelope env-0 has ended (so the tap is Touch ID); the grant still names env-0 until the next read.
+    const st = { ids: { [A]: 'env-0' } as Record<string, string | null>, envelopes: { [A]: Date.now() - 1000 } as Record<string, number>,
+      approve: () => { st.ids = { [A]: 'env-1' }; st.envelopes = { [A]: Date.now() + DAY }; return { envelope_id: 'env-1' }; } };
+    const host = touchHost(st);
+    await pressTouch();
+    await vi.waitFor(() => expect(host.sent).toEqual(['hello Maya']));
+    expect(unsentReason()).toBe('');
+  });
+
+  it.each([
+    ['the contact\'s own remainder is short (the grant would cover)', { left: { [A]: 1000 } }, false],
+    ['the per-call limit is short', { perCall: 1000 }, false],
+    ['the whole grant\'s remainder is short', { remaining: 1000 }, false],
+    ['the remainder map does not name the contact (grant-wide limits decide)', { left: { [B]: 0 } }, true],
+    ['the contact\'s own remainder covers it', { left: { [A]: 2000 } }, true],
+  ])('Touch ID cover: %s', async (_name, limits, sends) => {
+    const st = { ids: {} as Record<string, string | null>, envelopes: {} as Record<string, number>, ...limits,
+      approve: () => { st.ids = { [A]: 'env-1' }; st.envelopes = { [A]: Date.now() + DAY }; return { envelope_id: 'env-1' }; } };
+    const host = touchHost(st);
+    await pressTouch();
+    if (sends) await vi.waitFor(() => expect(host.sent).toEqual(['hello Maya']));
+    else {
+      await vi.waitFor(() => expect(unsentReason()).toContain('It needs Touch ID again. Press Send to ask.'));
+      await new Promise((r) => setTimeout(r, 300));
+      expect(host.sent).toEqual([]);
+    }
+  });
+
+  it('Touch ID cancelled with envelope ids: the waiting message ends, nothing sent', async () => {
+    const st = { ids: {} as Record<string, string | null>, envelopes: {} as Record<string, number>,
+      approve: () => { throw { code: 'device_cancelled', message: 'Touch ID was cancelled.' }; } };
+    const host = touchHost(st);
+    await pressTouch();
+    await vi.waitFor(() => expect(unsentReason()).toContain('It was not approved.'));
+    expect(mount.querySelector('[data-sending]')).toBeNull();
+    expect(host.sent).toEqual([]);
+  });
+
+  it('Touch ID: once seen, a read without the envelope lapses it, even if the same id shows again later', async () => {
+    // The spending window stays shut, so the seen envelope waits instead of sending.
+    const st = { ids: {} as Record<string, string | null>, envelopes: {} as Record<string, number>, spendOpen: false,
+      approve: () => { st.ids = { [A]: 'env-1' }; st.envelopes = { [A]: Date.now() + DAY }; return { envelope_id: 'env-1' }; } };
+    const host = touchHost(st);
+    await pressTouch();
+    await vi.waitFor(() => expect(mount.querySelector('[data-sending="waiting"]')).not.toBeNull());
+    await new Promise((r) => setTimeout(r, 500));
+    expect(mount.querySelector('[data-sending="waiting"]')).not.toBeNull();
+    // A partial read omits A; then A's env-1 is back and the window opens.
+    st.ids = {};
+    await vi.waitFor(() => expect(unsentReason()).toContain('The approval was cancelled or lapsed before it went through.'), { timeout: 8000 });
+    st.ids = { [A]: 'env-1' };
+    st.spendOpen = true;
+    await new Promise((r) => setTimeout(r, 4000));
+    expect(host.sent).toEqual([]);
+  }, 20_000);
+
+  it('Touch ID: approvals on this Mac stopping while it waits ends it, nothing sent', async () => {
+    const st = { ids: {} as Record<string, string | null>, envelopes: {} as Record<string, number>, spendOpen: false, device: 'registered',
+      approve: () => { st.ids = { [A]: 'env-1' }; st.envelopes = { [A]: Date.now() + DAY }; return { envelope_id: 'env-1' }; } };
+    const host = touchHost(st);
+    await pressTouch();
+    await vi.waitFor(() => expect(mount.querySelector('[data-sending="waiting"]')).not.toBeNull());
+    st.device = 'none';
+    await vi.waitFor(() => expect(unsentReason()).toContain('Touch ID approvals on this Mac stopped before it went through.'), { timeout: 20_000 });
+    expect(host.sent).toEqual([]);
+  }, 30_000);
+
+  it('Touch ID: leaving the chat while it waits ends it (the #229 protections hold)', async () => {
+    const st = { ids: {} as Record<string, string | null>, envelopes: {} as Record<string, number>, spendOpen: false,
+      approve: () => { st.ids = { [A]: 'env-1' }; st.envelopes = { [A]: Date.now() + DAY }; return { envelope_id: 'env-1' }; } };
+    const host = touchHost(st);
+    await pressTouch();
+    await vi.waitFor(() => expect(mount.querySelector('[data-sending="waiting"]')).not.toBeNull());
+    click(`[data-track="peer:${B}"]`);
+    st.spendOpen = true;
+    click(`[data-track="peer:${A}"]`);
+    await vi.waitFor(() => expect(unsentReason()).toContain('You left this chat before it was approved.'));
+    await new Promise((r) => setTimeout(r, 3500));
+    expect(host.sent).toEqual([]);
+  }, 15_000);
+
+  it('Codex cxr-touch-1 #1: approved behind a send still in flight, then leaving the chat: it never sends when its turn comes', async () => {
+    let release!: () => void;
+    const st = {
+      ids: { [A]: 'env-0' } as Record<string, string | null>, envelopes: { [A]: Date.now() + DAY } as Record<string, number>,
+      sendGate: new Promise<void>((r) => { release = r; }) as Promise<void> | null,
+      approve: () => { st.ids = { [A]: 'env-1' }; st.envelopes = { [A]: Date.now() + DAY }; return { envelope_id: 'env-1' }; },
+    };
+    const host = touchHost(st);
+    start();
+    await vi.waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
+    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
+    // Send 1 goes under A's live envelope env-0 and stays in flight.
+    await vi.waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toMatch(/^Send/));
+    const area = () => mount.querySelector<HTMLTextAreaElement>('[data-composer] textarea')!;
+    area().value = 'one';
+    area().dispatchEvent(new Event('input', { bubbles: true }));
+    click('[data-send]');
+    await vi.waitFor(() => expect(host.sent).toEqual(['one']));
+    // env-0 ends: the next message is a Touch ID approve & send.
+    st.envelopes = { [A]: Date.now() - 1000 };
+    await vi.waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Approve with Touch ID'), { timeout: 8000 });
+    area().value = 'two';
+    area().dispatchEvent(new Event('input', { bubbles: true }));
+    click('[data-send]');
+    await vi.waitFor(() => expect(host.calls.filter((c) => c.cmd === 'relation_approve')).toHaveLength(1));
+    // Approved and handed to the queue: its bubble is a plain "Sending", behind send 1.
+    await vi.waitFor(() => expect(mount.querySelectorAll('[data-sending=""]').length).toBe(2));
+    click(`[data-track="peer:${B}"]`);
+    st.sendGate = null;
+    release();
+    await new Promise((r) => setTimeout(r, 500));
+    expect(host.sent).toEqual(['one']);
+    click(`[data-track="peer:${A}"]`);
+    await vi.waitFor(() => expect(unsentReason()).toContain('You left this chat before it was sent.'));
+  }, 20_000);
+
+  /**
+   * The Codex repro's opening: 'one' goes under A's live env-0 and stays in
+   * flight; env-0 ends; 'two' is a Touch ID approve & send, approved (env-1)
+   * and handed to the queue behind 'one'. Returns the release for 'one'.
+   */
+  async function twoHandedBehindOne(extra: Partial<Parameters<typeof touchHost>[0]> = {}) {
+    let release!: () => void;
+    const st: Parameters<typeof touchHost>[0] = {
+      ids: { [A]: 'env-0' }, envelopes: { [A]: Date.now() + DAY },
+      sendGate: new Promise<void>((r) => { release = r; }),
+      approve: () => { st.ids = { [A]: 'env-1' }; st.envelopes = { [A]: Date.now() + DAY }; return { envelope_id: 'env-1' }; },
+      ...extra,
+    };
+    const host = touchHost(st);
+    start();
+    await vi.waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
+    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
+    await vi.waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toMatch(/^Send/));
+    const area = () => mount.querySelector<HTMLTextAreaElement>('[data-composer] textarea')!;
+    area().value = 'one';
+    area().dispatchEvent(new Event('input', { bubbles: true }));
+    click('[data-send]');
+    await vi.waitFor(() => expect(host.sent).toEqual(['one']));
+    st.envelopes = { [A]: Date.now() - 1000 };
+    await vi.waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Approve with Touch ID'), { timeout: 8000 });
+    area().value = 'two';
+    area().dispatchEvent(new Event('input', { bubbles: true }));
+    click('[data-send]');
+    await vi.waitFor(() => expect(host.calls.filter((c) => c.cmd === 'relation_approve')).toHaveLength(1));
+    await vi.waitFor(() => expect(mount.querySelectorAll('[data-sending=""]').length).toBe(2));
+    const go = async () => { st.sendGate = null; release(); await new Promise((r) => setTimeout(r, 500)); };
+    return { st, host, go };
+  }
+  const budgetReads = (host: ReturnType<typeof touchHost>) => host.calls.filter((c) => c.cmd === 'budget_status').length;
+
+  it('Codex cxr-touch-1 r2 #1: a queued approve & send never goes from a budget read known to be stale', async () => {
+    const { st, host, go } = await twoHandedBehindOne();
+    st.budgetFail = true;
+    const reads = budgetReads(host);
+    await vi.waitFor(() => expect(budgetReads(host)).toBeGreaterThan(reads), { timeout: 6000 });
+    await new Promise((r) => setTimeout(r, 100));
+    await go();
+    expect(host.sent).toEqual(['one']);
+    await vi.waitFor(() => expect(unsentReason()).toContain('It needs Touch ID again. Press Send to ask.'));
+  }, 30_000);
+
+  it('Codex cxr-touch-1 r2 #2: its envelope removed and then the same one restored while queued: cancelled for good', async () => {
+    const { st, host, go } = await twoHandedBehindOne();
+    st.ids = {};
+    let reads = budgetReads(host);
+    await vi.waitFor(() => expect(budgetReads(host)).toBeGreaterThan(reads), { timeout: 6000 });
+    await new Promise((r) => setTimeout(r, 100));
+    st.ids = { [A]: 'env-1' };
+    reads = budgetReads(host);
+    await vi.waitFor(() => expect(budgetReads(host)).toBeGreaterThan(reads), { timeout: 6000 });
+    await new Promise((r) => setTimeout(r, 100));
+    await go();
+    expect(host.sent).toEqual(['one']);
+    await vi.waitFor(() => expect(unsentReason()).toContain('The approval was cancelled or lapsed before it went through.'));
+  }, 30_000);
+
+  it('Codex cxr-touch-1 r2 #3: Touch ID approvals off and on again on this Mac while queued: cancelled for good', async () => {
+    const { st, host, go } = await twoHandedBehindOne();
+    const deviceReads = () => host.calls.filter((c) => c.cmd === 'device_key_status').length;
+    st.device = 'none';
+    let reads = deviceReads();
+    await vi.waitFor(() => expect(deviceReads()).toBeGreaterThan(reads), { timeout: 20_000 });
+    await new Promise((r) => setTimeout(r, 100));
+    st.device = 'registered';
+    reads = deviceReads();
+    await vi.waitFor(() => expect(deviceReads()).toBeGreaterThan(reads), { timeout: 20_000 });
+    await new Promise((r) => setTimeout(r, 100));
+    await go();
+    expect(host.sent).toEqual(['one']);
+    await vi.waitFor(() => expect(unsentReason()).toContain('Touch ID approvals on this Mac stopped before it went through.'));
+  }, 60_000);
+
+  it('Codex cxr-touch-1 r2: through the budget path (autopay open), leaving the chat before its turn never sends it', async () => {
+    const { host, go } = await twoHandedBehindOne({ budgetPath: true });
+    click(`[data-track="peer:${B}"]`);
+    await go();
+    expect(host.sent).toEqual(['one']);
+    click(`[data-track="peer:${A}"]`);
+    await vi.waitFor(() => expect(unsentReason()).toContain('You left this chat before it was sent.'));
+  }, 30_000);
+
+  it('Codex cxr-touch-1 r2: through the budget path, with nothing revoked, it sends once after the send ahead', async () => {
+    const { host, go } = await twoHandedBehindOne({ budgetPath: true });
+    await go();
+    await vi.waitFor(() => expect(host.sent).toEqual(['one', 'two']));
+  }, 30_000);
+
+  it('Codex cxr-touch-1 r4: approvals on this Mac stop and come back while the Touch ID answer is still out: never sent', async () => {
+    let answer!: () => void;
+    const st: Parameters<typeof touchHost>[0] = {
+      ids: {}, envelopes: {}, device: 'registered',
+      approveGate: new Promise<void>((r) => { answer = r; }),
+      approve: () => { st.ids = { [A]: 'env-1' }; st.envelopes = { [A]: Date.now() + DAY }; return { envelope_id: 'env-1' }; },
+    };
+    const host = touchHost(st);
+    await pressTouch();
+    await vi.waitFor(() => expect(mount.querySelector('[data-sending="waiting"]')).not.toBeNull());
+    const deviceReads = () => host.calls.filter((c) => c.cmd === 'device_key_status').length;
+    st.device = 'none';
+    let reads = deviceReads();
+    await vi.waitFor(() => expect(deviceReads()).toBeGreaterThan(reads), { timeout: 20_000 });
+    await new Promise((r) => setTimeout(r, 100));
+    st.device = 'registered';
+    reads = deviceReads();
+    await vi.waitFor(() => expect(deviceReads()).toBeGreaterThan(reads), { timeout: 20_000 });
+    await new Promise((r) => setTimeout(r, 100));
+    // The delayed Touch ID answer arrives now, with a valid envelope: it must not bind again.
+    st.approveGate = null;
+    answer();
+    await new Promise((r) => setTimeout(r, 3500));
+    expect(host.sent).toEqual([]);
+    expect(unsentReason()).toContain('Touch ID approvals on this Mac stopped before it went through.');
+    expect(mount.querySelector('[data-sending]')).toBeNull();
+  }, 60_000);
+
+  it('Codex cxr-touch-1 #2: a node grant that expires after its envelope was seen never sends, even once spending opens', async () => {
+    const st = { ids: {} as Record<string, string | null>, envelopes: {} as Record<string, number>, spendOpen: false, grantUntil: undefined as number | undefined,
+      approve: () => { st.ids = { [A]: 'env-1' }; st.envelopes = { [A]: Date.now() + DAY }; st.grantUntil = Date.now() + 1500; return { envelope_id: 'env-1' }; } };
+    const host = touchHost(st);
+    await pressTouch();
+    await vi.waitFor(() => expect(mount.querySelector('[data-sending="waiting"]')).not.toBeNull());
+    await new Promise((r) => setTimeout(r, 2000));
+    // The grant read now shows an expired grant; spending opens anyway.
+    st.spendOpen = true;
+    await vi.waitFor(() => expect(unsentReason()).toContain('The approval was cancelled or lapsed before it went through.'), { timeout: 10_000 });
+    await new Promise((r) => setTimeout(r, 3500));
+    expect(host.sent).toEqual([]);
+  }, 25_000);
+
+  it('Touch ID: a node grant already expired on the first fresh read is stale: it needs Touch ID again', async () => {
+    const st = { ids: {} as Record<string, string | null>, envelopes: {} as Record<string, number>, grantUntil: undefined as number | undefined,
+      approve: () => { st.ids = { [A]: 'env-1' }; st.envelopes = { [A]: Date.now() + DAY }; st.grantUntil = Date.now() - 1; return { envelope_id: 'env-1' }; } };
+    const host = touchHost(st);
+    await pressTouch();
+    await vi.waitFor(() => expect(unsentReason()).toContain('It needs Touch ID again. Press Send to ask.'));
+    await new Promise((r) => setTimeout(r, 300));
+    expect(host.sent).toEqual([]);
+  });
+
   it('Touch ID cancelled: the words stay in the box, no card, nothing sent', async () => {
     const open = { state: 'open', lapse: null, basis: 'node_grant', open_until_ms: Date.now() + 600_000, pending: null, window_ms: 600_000, granted_op: 'cd34', armed_by_request: null };
     const envelopes: Record<string, number> = {};

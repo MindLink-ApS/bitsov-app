@@ -327,6 +327,7 @@ pub enum AutopayState {
 /// The owner's budget approval. Host memory only; never written anywhere.
 #[derive(Default, Debug)]
 pub struct Autopay {
+    armed_by_request: Option<String>,
     generation: u64,
     open: Option<(u64, u64, SpendBasis)>,
     expired: bool,
@@ -341,12 +342,26 @@ impl Autopay {
     pub fn arm_until(&mut self, now_ms: u64, until_ms: u64, ceiling_msat: u64, basis: SpendBasis) {
         self.generation = self.generation.wrapping_add(1);
         self.open = Some(((now_ms + BUDGET_WINDOW_MS).min(until_ms), ceiling_msat, basis));
+        self.armed_by_request = None;
         self.expired = false;
+    }
+
+    /// Complete the pending elevation after the caller has checked its poll fence.
+    /// The request identity comes from that record, never from the grant cache.
+    pub fn arm_pending_until(&mut self, now_ms: u64, until_ms: u64, ceiling_msat: u64, basis: SpendBasis, pending: &crate::act::Elevation) {
+        self.arm_until(now_ms, until_ms, ceiling_msat, basis);
+        self.armed_by_request = Some(pending.op_id.clone());
+    }
+
+    /// Read after settling the approval with `view` or `ceiling`.
+    pub fn armed_by_request(&self) -> Option<&str> {
+        self.open.and(self.armed_by_request.as_deref())
     }
 
     pub fn lock(&mut self) {
         self.generation = self.generation.wrapping_add(1);
         self.open = None;
+        self.armed_by_request = None;
         self.expired = false;
     }
 
@@ -374,6 +389,7 @@ impl Autopay {
             if until <= now_ms {
                 self.generation = self.generation.wrapping_add(1);
                 self.open = None;
+                self.armed_by_request = None;
                 self.expired = true;
             }
         }
@@ -590,6 +606,8 @@ pub struct BudgetView {
     pub request_id: Option<String>,
     /// Node op of the spending window this action armed; null if none or unknown.
     pub granted_op: Option<String>,
+    /// The pending elevation completed to arm autopay; null without one or when closed.
+    pub armed_by_request: Option<String>,
     pub paused: bool,
     pub autopay: AutopayView,
     /// A budget approval is waiting for the owner at the node.
@@ -637,6 +655,7 @@ pub fn view(book: &Book, autopay: AutopayView, waiting_for_owner: bool, now_ms: 
     BudgetView {
         request_id: None,
         granted_op: None,
+        armed_by_request: None,
         paused: book.paused, autopay, waiting_for_owner, preset: book.preset,
         ceiling_msat: book.ceiling_msat,
         spent_msat: rows.iter().map(|r| r.spent_msat).sum(),
