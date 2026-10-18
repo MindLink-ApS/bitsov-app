@@ -2772,6 +2772,8 @@ function Conversation(props: {
       </div>
 
       <Composer
+        admissionResume={props.artifacts.flatMap((a) => a.type === 'restored' ? [a.op] : a.type === 'failed' && !a.confirmedBy && a.op ? [a.op] : [])
+          .find((op) => op.state === 'admission_resumable' && props.track.kind === 'peer' && op.peer === props.track.id)}
         ownId={props.ownId}
         moneyBlocked={props.moneyBlocked}
         track={props.track}
@@ -3854,7 +3856,7 @@ const ECHO_SKEW_MS = 120_000;
 /** Op states whose result the host has not established. */
 const OPEN_OP = new Set<OperationState>(['dispatching', 'unknown']);
 /** Op states the host still treats as unfinished: restored after a restart, each said as it is. */
-const RESTORE_OP = new Set<OperationState>(['dispatching', 'unknown', 'paid', 'paid_undelivered']);
+const RESTORE_OP = new Set<OperationState>(['dispatching', 'unknown', 'paid', 'paid_undelivered', 'admission_resumable']);
 /**
  * The host's record of an operation, in accounting terms only (`paid_msat`
  * absent: amount not known). `settled` also covers a paid message whose
@@ -3864,6 +3866,7 @@ export function opStateText(op: OpView, subject = 'This app’s record'): string
   const paid = op.paid_msat === null ? 'an unknown amount' : `${sats(op.paid_msat)} ${satUnit(op.paid_msat)}`;
   switch (op.state) {
     case 'dispatching': case 'unknown': return `${subject}: the result is not known yet. Check pending result before sending it again.`;
+    case 'admission_resumable': return `${subject}: admission paid ${paid}, message not sent. Send the same message with the same cap to resume it.`;
     case 'unpaid': return `${subject}: not paid. Nothing left your wallet for it.`;
     case 'paid': return `${subject}: paid ${paid}; delivery not confirmed yet. Check pending result.`;
     case 'paid_undelivered': return `${subject}: paid ${paid}, not delivered. Check pending result to retry delivery or stop retrying.`;
@@ -3953,6 +3956,7 @@ type PayReview =
   | { kind: 'keysend'; pubkey: string; msat: number; memo: string };
 
 function Composer(props: {
+  admissionResume?: OpView;
   ownId: string;
   moneyBlocked: boolean;
   track: TrackRef;
@@ -4386,14 +4390,17 @@ function Composer(props: {
   // does not open their door for us (merge-gate finding 7). Otherwise, when
   // we have never sent to them. (A cost-free stand: `shown` depends on this.)
   const doorWanted = () => {
-    if (room()) return false;
+    if (room() || props.admissionResume) return false;
     if (readmit()) return true;
     const kind = budgetStand(budget(), target(), false, null).kind;
     if (kind === 'first') return true;
     if (kind === 'ok' || kind === 'contact_used' || kind === 'total_used') return false;
     return props.firstContact;
   };
-  const stand = () => budgetStand(budget(), target(), room(), shown().msat, readmit());
+  // A resume replaces a held charge. Only the host knows its fee allowance,
+  // so let it check the replacement against the book rather than counting
+  // the full cap twice here. Approval, pause and grant gates still apply.
+  const stand = () => budgetStand(budget(), target(), room(), mode() === 'message' && props.admissionResume ? 0 : shown().msat, readmit());
   createEffect(() => {
     if (props.moneyBlocked) { setDoor(null); return; }
     if (room() || !doorWanted() || (mode() !== 'message' && mode() !== 'file') || stand().kind !== 'first') return;
@@ -4453,6 +4460,7 @@ function Composer(props: {
   };
 
   const priceProblem = (): string | null => {
+    if (props.admissionResume && mode() === 'message') return null;
     if (ownerExpired()) return 'Contact approval expired · get a fresh quote';
     if (!room()) {
       if (props.quoteError) return props.quoteError;
@@ -4489,7 +4497,7 @@ function Composer(props: {
   };
   // Display only: the parts of the ceiling when they provably add up to it.
   const breakdown = () =>
-    mode() !== 'message' || room() || doorWanted() || readmitPrice() || paidLine() || priceProblem()
+    mode() !== 'message' || props.admissionResume || room() || doorWanted() || readmitPrice() || paidLine() || priceProblem()
       ? null
       : priceBreakdown(props.quote, messageShown().msat);
   const priceLine = () => {
@@ -4504,6 +4512,8 @@ function Composer(props: {
   /** What this mode costs, shown before the button is pressed. */
   /** What one message costs here, whatever the current mode (Send in chat uses it too). */
   const messageShown = (): { msat: number | null; estimate: boolean; basis: string } => {
+    const resume = props.admissionResume;
+    if (resume) return { msat: resume.cap_msat, estimate: false, basis: 'Original cap, including admission already paid. Only the same message can resume.' };
     const problem = priceProblem();
     if (problem) return { msat: null, estimate: false, basis: problem };
     const again = readmitPrice();

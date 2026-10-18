@@ -79,6 +79,13 @@ pub struct Pending {
     /// not abandon it; otherwise the next send creates a new operation.
     #[serde(default)]
     pub resumable: bool,
+    /// Admission-only prepared: only an exact same-id compose may continue.
+    /// Unlike `resumable`, this never permits replacing or dismissing the slot.
+    #[serde(default)]
+    pub admission_resume: bool,
+    /// Original compose fee cap, preserving omission for first-contact sends.
+    #[serde(default)]
+    pub compose_fee_msat: Option<u64>,
     /// Initial ledger snapshot repairs a crash between the two atomic files.
     #[serde(default)]
     pub operation_record: Option<OperationRecord>,
@@ -134,7 +141,7 @@ pub fn operation(body: &serde_json::Value) -> String {
 /// Durable host history. Never used as a spending authority in H1.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum OperationState { Dispatching, Paid, Unpaid, PaidUndelivered, FailedPaid, Unknown, Settled, Closed }
+pub enum OperationState { Dispatching, AdmissionResumable, Paid, Unpaid, PaidUndelivered, FailedPaid, Unknown, Settled, Closed }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OperationRecord {
@@ -315,7 +322,7 @@ impl Journal {
             request_hash: blake3::hash(format!("{path}\n{body}").as_bytes()).to_hex().to_string(),
             max_msat, target: None, over_budget: false, accounting_msat: None, evidence_reservation_msat: None, paid: None, undelivered: None, charge_id: None, budgeted: false, all_in: false,
             peer: operation_id.as_ref().and(body["recipient"].as_str()).map(str::to_string),
-            operation_id, dispatched_at: None, op, resumable: false, operation_record: None,
+            operation_id, dispatched_at: None, op, resumable: false, admission_resume: false, compose_fee_msat: body["max_routing_fee_msat"].as_u64(), operation_record: None,
         };
         if let Some(id) = &pending.operation_id {
             let signal_kind = body["kind"].as_u64().unwrap_or(0);
@@ -446,6 +453,10 @@ impl Journal {
                             record.settled_ms = None;
                             changed = true;
                         }
+                    } else if pending.admission_resume && record.state != OperationState::AdmissionResumable {
+                        record.state = OperationState::AdmissionResumable;
+                        record.settled_ms = None;
+                        changed = true;
                     } else if pending.resumable && record.state != OperationState::Unpaid {
                         record.state = OperationState::Unpaid;
                         record.paid_msat = Some(0);
@@ -1070,7 +1081,7 @@ mod tests {
     #[test]
     fn reconciliation_needs_exact_terminal_outgoing_evidence() {
         let p = Pending { id: "attempt".into(), rollback_charge_id: None, node_id:"node".into(), request_hash:"hash".into(), max_msat:2000,
-            target:Some(Target::Payment { hash:"abc".into() }), over_budget:false, accounting_msat: None, evidence_reservation_msat: None, paid: None, undelivered: None, charge_id: None, budgeted: false, all_in: false, operation_id: None, dispatched_at: None, op: None, peer: None, resumable: false, operation_record: None };
+            target:Some(Target::Payment { hash:"abc".into() }), over_budget:false, accounting_msat: None, evidence_reservation_msat: None, paid: None, undelivered: None, charge_id: None, budgeted: false, all_in: false, operation_id: None, dispatched_at: None, op: None, peer: None, resumable: false, admission_resume: false, compose_fee_msat: None, operation_record: None };
         assert_eq!(terminal(&p, &[]), None);
         assert_eq!(terminal(&p, &[json!({"payment_hash":"other", "amount_msat":2000, "direction":"outgoing", "status":"settled"})]), None);
         for status in ["pending", "inflight", "expired", "unknown"] {
@@ -1086,7 +1097,7 @@ mod tests {
     #[test]
     fn message_reconciliation_rejects_other_sender_and_recipient() {
         let p = Pending { id: "attempt".into(), rollback_charge_id: None, node_id:"node".into(), request_hash:"hash".into(), max_msat:2000,
-            target:Some(Target::Message { id:"abc".into(), peer:"peer".into() }), over_budget:false, accounting_msat: None, evidence_reservation_msat: None, paid: None, undelivered: None, charge_id: None, budgeted: false, all_in: false, operation_id: None, dispatched_at: None, op: None, peer: None, resumable: false, operation_record: None };
+            target:Some(Target::Message { id:"abc".into(), peer:"peer".into() }), over_budget:false, accounting_msat: None, evidence_reservation_msat: None, paid: None, undelivered: None, charge_id: None, budgeted: false, all_in: false, operation_id: None, dispatched_at: None, op: None, peer: None, resumable: false, admission_resume: false, compose_fee_msat: None, operation_record: None };
         let mut row = json!({"id":"abc", "sender":"other", "recipient":"peer", "payment_amount_msat":2000});
         assert_eq!(terminal(&p, &[row.clone()]), None);
         row["sender"] = json!("node");

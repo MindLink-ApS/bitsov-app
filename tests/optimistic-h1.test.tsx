@@ -420,6 +420,37 @@ describe('Codex #221 r1 #1: leaving while the first approval request is still be
 });
 
 describe('the host op list (H1 op_list, read only)', () => {
+  it('check pending result exposes admission-only resume through the existing card', async () => {
+    const { source, pending } = deferredSource();
+    let list = ops([]);
+    source.opList = vi.fn(async () => list) as never;
+    await open(source);
+    await press('same words');
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    pending[0].fail({ code: 'spend_unknown', message: 'unknown', operation_id: 'op-1' });
+    await vi.waitFor(() => expect($('[data-failed-check]')).not.toBeNull());
+    list = ops([op({ state: 'admission_resumable', paid_msat: 2000, cap_msat: 15000 })]);
+    $<HTMLButtonElement>('[data-spend-reconcile]')!.click();
+    await vi.waitFor(() => expect($('[data-failed-op]')?.textContent).toContain('same message'));
+    expect($('[data-failed-op]')!.textContent).toContain('admission');
+    expect(source.send).toHaveBeenCalledTimes(1);
+    await press('same words');
+    await vi.waitFor(() => expect(pending).toHaveLength(2));
+    expect(pending[1].text).toBe('same words');
+    expect(vi.mocked(source.send).mock.calls[1][3]).toBe(15000);
+  });
+
+  it('a restored admission record keeps its original cap when the current quote differs', async () => {
+    const { source, pending } = deferredSource();
+    source.opList = vi.fn(async () => ops([op({ state: 'admission_resumable', paid_msat: 2000, cap_msat: 15000 })])) as never;
+    await open(source);
+    await vi.waitFor(() => expect($('[data-restored-state]')?.textContent).toContain('same message'));
+    expect(source.send).not.toHaveBeenCalled();
+    await press('same words');
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    expect(vi.mocked(source.send).mock.calls[0][3]).toBe(15000);
+  });
+
   it('an unknown card learns the host\'s record when the chat is read again', async () => {
     const { source, pending } = deferredSource();
     let list = ops([]);
