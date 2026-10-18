@@ -549,6 +549,7 @@ impl SpendGate {
     pub fn clear_pending(&mut self) {
         self.generation = self.generation.wrapping_add(1);
         self.pending = None;
+        self.armed_by_request = None;
         self.expired = false;
         self.lapse = None;
     }
@@ -557,6 +558,7 @@ impl SpendGate {
     pub fn pending_expired(&mut self, lapse: Lapse) {
         self.generation = self.generation.wrapping_add(1);
         self.pending = None;
+        self.armed_by_request = None;
         self.expired = true;
         self.lapse = Some(lapse);
     }
@@ -1700,6 +1702,37 @@ mod tests {
         let hostile = ElevationReply { op_id: "../x".into(), expires_at: 1, owner_action: String::new() };
         assert!(hostile.into_elevation(None).is_err());
         assert!(elevation_status_path("../../payments").is_err());
+    }
+
+    #[test]
+    fn clearing_pending_drops_the_stored_arming_request() {
+        // Seed stale provenance behind the closed-window view mask.
+        let mut gate = SpendGate {
+            armed_by_request: Some("old-request".into()),
+            ..SpendGate::default()
+        };
+        let generation = gate.generation();
+        gate.clear_pending();
+        assert_eq!(gate.armed_by_request, None);
+        assert_eq!(gate.generation(), generation + 1);
+        let view = gate.view(0);
+        assert_eq!((view.state, view.lapse, view.pending), (SpendState::Locked, None, None));
+    }
+
+    #[test]
+    fn expiring_pending_drops_the_stored_arming_request() {
+        for lapse in [Lapse::Expired, Lapse::Lost] {
+            let mut gate = SpendGate {
+                armed_by_request: Some("old-request".into()),
+                ..SpendGate::default()
+            };
+            let generation = gate.generation();
+            gate.pending_expired(lapse);
+            assert_eq!(gate.armed_by_request, None);
+            assert_eq!(gate.generation(), generation + 1);
+            let view = gate.view(0);
+            assert_eq!((view.state, view.lapse, view.pending), (SpendState::Expired, Some(lapse), None));
+        }
     }
 
     #[test]
