@@ -1524,7 +1524,9 @@ describe('invisible payments in the composer and the context panel', () => {
    * the owner grants, handed to the queue behind 'one'.
    */
   const ROOM_ROWS = [{ target: ROOM, room: true, limit_msat: 50_000, spent_msat: 0 }];
-  async function budgetTwoBehindOne(armed?: () => BudgetView, stale: () => boolean = () => false, room = false, extra: Record<string, Reply> = {}) {
+  /** Budget reads the test holds: while `next` is set, every read waits until `land` is called. */
+  type HeldRead = { next: boolean; land: (() => void) | null };
+  async function budgetTwoBehindOne(armed?: () => BudgetView, stale: () => boolean = () => false, room = false, extra: Record<string, Reply> = {}, held?: HeldRead) {
     const rows = room ? ROOM_ROWS : ROWS;
     const armedNow = armed ?? (() => armedBy('op-R', { rows }));
     let release!: () => void;
@@ -1537,6 +1539,12 @@ describe('invisible payments in the composer and the context panel', () => {
       },
       budget_status: () => {
         if (stale()) throw { code: 'grant_unknown', message: 'The node grant could not be read.' };
+        if (held?.next) {
+          return new Promise((r) => {
+            const before = held.land;
+            held.land = () => { held.next = false; before?.(); r(host.state.budget); };
+          });
+        }
         return host.state.budget;
       },
       ...extra,
@@ -1683,6 +1691,26 @@ describe('invisible payments in the composer and the context panel', () => {
     await new Promise((r) => setTimeout(r, 500));
     expect(sentTexts(host)).toEqual(['one']);
     await vi.waitFor(() => expect(unsentReason()).toContain('You cancelled the request. Nothing was sent.'));
+  }, 30_000);
+
+  it('Fable UX: its turn comes right after a budget edit response, while that edit\'s own read is out: it waits for the read, then goes once', async () => {
+    const held: HeldRead = { next: false, land: null };
+    // A row edit: its own response replaces the budget, and the read it starts right after is held.
+    const { host, release } = await budgetTwoBehindOne(undefined, undefined, false, { budget_set: () => { held.next = true; return armedBy('op-R'); } }, held);
+    $<HTMLButtonElement>('[data-tab="budget"]')!.click();
+    await vi.waitFor(() => expect($('[data-budget-edit]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-budget-edit]')!.click();
+    type('[data-budget-input]', '60');
+    $<HTMLButtonElement>('[data-budget-save]')!.click();
+    await vi.waitFor(() => expect(held.land).not.toBeNull());
+    // 'two''s turn comes while that read is out: held, not withdrawn.
+    release();
+    await new Promise((r) => setTimeout(r, 300));
+    expect(sentTexts(host)).toEqual(['one']);
+    expect($('[data-unsent]')).toBeNull();
+    held.land!();
+    await vi.waitFor(() => expect(sentTexts(host)).toEqual(['one', 'two']));
+    expect($('[data-unsent]')).toBeNull();
   }, 30_000);
 
   it('budget approve & send queued: nothing revoked → it goes once after the send ahead', async () => {

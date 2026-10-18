@@ -230,6 +230,8 @@ export type Actions = {
   approveContact: (peer: string, perActMsat: number | null) => Promise<TouchApproval>;
   /** The newest budget read applied (a stamp taken when the read started); see TouchApproval.readsFrom. */
   budgetReadApplied: () => number;
+  /** An action's own response cleared the stamp and the read it started is still out: resolves when that read lands; else null. */
+  followUpRead: () => Promise<void> | null;
   /** The contact the node last refused for having no envelope (`grant_no_envelope`). */
   noEnvelopeFor: () => string | null;
   reconcile: () => Promise<Outcome<string>>;
@@ -409,6 +411,9 @@ export function ControlCenter(props: Props) {
   // Budget reads in start order; the stamp of the newest one applied (Touch ID approve & send freshness).
   let budgetReadSeq = 0;
   const [budgetReadApplied, setBudgetReadApplied] = createSignal(0);
+  // The budget read in flight, and the read count when an action's own response last cleared the stamp.
+  let budgetInFlight: { stamp: number; done: Promise<void> } | null = null;
+  let budgetResetAt = 0;
   /**
    * Every budget view that is not a fresh read (an action's own response:
    * approve, resume, pause, a row edit) clears the freshness stamp, so no
@@ -416,6 +421,7 @@ export function ControlCenter(props: Props) {
    */
   const setBudget = (value: BudgetView) => {
     budgetRevision += 1;
+    budgetResetAt = budgetReadSeq;
     batch(() => {
       setBudgetValue(value);
       setBudgetReadApplied(0);
@@ -670,9 +676,15 @@ export function ControlCenter(props: Props) {
   };
   createEffect(on(approvalsCapable, (on) => { if (on) void loadApprovals(); else { setDeviceKeys(null); setApprovals([]); setApprovalsError(null); } }));
   const approvalsWaiting = () => (canApprove() ? approvals().filter((v) => v.expires_at * 1000 > now()).length : 0);
-  const loadBudget = async () => {
+  const loadBudget = () => {
     const revision = ++budgetRevision;
     const stamp = ++budgetReadSeq;
+    const done = readBudget(revision, stamp);
+    budgetInFlight = { stamp, done };
+    void done.finally(() => { if (budgetInFlight?.done === done) budgetInFlight = null; });
+    return done;
+  };
+  const readBudget = async (revision: number, stamp: number) => {
     try {
       const b = await source.budgetStatus();
       if (revision !== budgetRevision) return;
@@ -1315,7 +1327,11 @@ export function ControlCenter(props: Props) {
     cancelSpend: async () => {
       setErrors('spend', undefined);
       const r = await act(() => source.spendCancel());
-      if (r.ok) batch(() => { setSpend(r.value); setSpendCancels((n) => n + 1); });
+      if (r.ok) {
+        // The cancel first, so the waits it ends say why, then the view.
+        setSpendCancels((n) => n + 1);
+        setSpend(r.value);
+      }
       else setErrors('spend', r.error.message);
       void loadBudget();
     },
@@ -1356,6 +1372,7 @@ export function ControlCenter(props: Props) {
       return { ok: r.ok, envelopeId: r.ok ? r.value.envelope_id ?? null : null, readsFrom };
     },
     budgetReadApplied,
+    followUpRead: () => (budgetReadApplied() === 0 && budgetInFlight && budgetInFlight.stamp > budgetResetAt ? budgetInFlight.done : null),
     pendingRevision,
     reconcile: async () => {
       const r = await act(() => source.spendReconcile());
@@ -1381,7 +1398,11 @@ export function ControlCenter(props: Props) {
     },
     setBudget: async (target, room, limitMsat) => {
       const r = await act(() => source.budgetSet(target, room, limitMsat));
-      if (r.ok) setBudget(r.value);
+      if (r.ok) {
+        setBudget(r.value);
+        // The response is not a fresh read: start one at once (a queued approve & send waits for it).
+        void loadBudget();
+      }
       return r;
     },
     pauseAll: async () => {
@@ -4958,6 +4979,17 @@ function Composer(props: {
     list.filter(byRequest).forEach((p) => cancel(p, CANCELLED));
     setHanded(list.filter((p) => !byRequest(p)));
   }, { defer: true }));
+  /**
+   * Its turn came just after an action's own budget response cleared the
+   * freshness stamp, while the read that action started is still out: hold
+   * the turn until that read lands (at most 10 s), then check as usual. A
+   * stale or failed read still withdraws it (stillBound).
+   */
+  const followUp = async (p: Pressed) => {
+    if (p.kind !== 'touch' && p.kind !== 'budget') return;
+    const read = untrack(props.actions.followUpRead);
+    if (read) await Promise.race([read, new Promise((r) => setTimeout(r, 10_000))]);
+  };
   /** Why a handed-off approve & send must not go now (it becomes a Not sent card), or null. */
   const stillBound = (p: Pressed): string | null => untrack(() => {
     setHanded((list) => list.filter((x) => x !== p));
@@ -5061,6 +5093,7 @@ function Composer(props: {
       // A message is in the stream as "Sending…" (its bubble) by now; the box
       // was freed when it became a send and is never touched from here.
       if (submittedMode === 'message' && bubble && queue.held()) { queue.holdBack(submittedTrack, bubble, submittedText); return; }
+      if (submittedMode === 'message' && bubble && pressed) await followUp(pressed);
       const unbound = submittedMode === 'message' && bubble && pressed ? stillBound(pressed) : null;
       if (unbound) { queue.withdraw(submittedTrack, bubble!, submittedText, unbound); return; }
       const r = submittedMode === 'file'
@@ -5237,6 +5270,7 @@ function Composer(props: {
         setBusy(false);
         const go = async () => {
           if (queue.held()) { queue.holdBack(t, bubble, text); return; }
+          if (pressed) await followUp(pressed);
           const unbound = pressed ? stillBound(pressed) : null;
           if (unbound) { queue.withdraw(t, bubble, text, unbound); return; }
           const r = await props.actions.send(t, text, cap, undefined, bubble);
