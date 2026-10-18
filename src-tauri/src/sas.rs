@@ -51,7 +51,7 @@ pub fn claim_commitment(input: &str) -> Result<[u8; 32], &'static str> {
         || code.len() != 18
         || code.iter().any(|b| !ALPHABET.contains(b))
     {
-        return Err("Enter the 18-character claim code from the box sticker or trusted console.");
+        return Err("Enter the 18-character claim code shown at your node's owner console with `konsensus claim-code --show`, or on a BitSov box's sticker.");
     }
     let checksum = blake3::hash(&code[..16]);
     let hash = checksum.as_bytes();
@@ -127,6 +127,17 @@ mod tests {
 #[cfg(test)]
 mod claim_tests {
     use super::*;
+    #[test]
+    fn malformed_claim_code_refusal_names_the_owner_console_and_box_sticker() {
+        for input in ["", "AAAAAAAAAAAAAAAA00", "AAAAAAAAAAAAAAAA!!", "éAAAAAAAAAAAAAAAAAA"] {
+            let message = claim_commitment(input).unwrap_err();
+            assert!(message.contains("18-character claim code"));
+            assert!(message.contains("your node's owner console"));
+            assert!(message.contains("konsensus claim-code --show"));
+            assert!(message.contains("BitSov box's sticker"));
+        }
+    }
+
     #[test]
     fn physical_code_checksum_rejects_typo_and_normalizes_printed_separators() {
         // Node ClaimCode::checksum, copied to generate a deterministic physical-code fixture.
