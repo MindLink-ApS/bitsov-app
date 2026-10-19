@@ -741,7 +741,7 @@ fn open_sealed_code(
     };
     let Some(sealer) = sealer else {
         return Err(RemoteError::Local(
-            "this pairing link is protected by another device's keystore; import it again".into(),
+            "protected storage is unavailable for this pairing link; try again on the original device".into(),
         ));
     };
     if stored.code.is_some() {
@@ -754,7 +754,7 @@ fn open_sealed_code(
         .open(&at_rest::pairing_code_purpose(&stored.node_id), &bytes)
         .map_err(|e| {
             RemoteError::Local(format!(
-                "this phone cannot open its saved pairing code ({e}); import the pairing link again"
+                "this device cannot open its saved pairing code: {e}"
             ))
         })?;
     let code = std::str::from_utf8(&code)
@@ -788,14 +788,30 @@ fn persist_with(
             return Err(error);
         }
     };
-    let result = std::io::Write::write_all(&mut file, &bytes)
-        .and_then(|()| file.sync_all())
-        .and_then(|()| std::fs::rename(&tmp, path));
+    let io_error = |error| RemoteError::Local(format!("cannot persist remote descriptor: {error}"));
+    let result = (|| {
+        // Check the actual serialized ciphertext, including base64 expansion.
+        if bytes.len() > MAX_LINK_BYTES {
+            return Err(RemoteError::Local(
+                "the remote access descriptor is oversized".into(),
+            ));
+        }
+        std::io::Write::write_all(&mut file, &bytes)
+            .and_then(|()| file.sync_all()).map_err(io_error)?;
+        if sealer.is_some() && descriptor.code.is_some() {
+            let readback = std::fs::read(&tmp).map_err(io_error)?;
+            let stored = serde_json::from_slice(&readback)
+                .map_err(|_| RemoteError::Local("cannot verify protected pairing code".into()))?;
+            let (opened, _) = open_sealed_code(stored, sealer)?;
+            if opened.code != descriptor.code {
+                return Err(RemoteError::Local("protected pairing code does not reopen to the same code".into()));
+            }
+        }
+        std::fs::rename(&tmp, path).map_err(io_error)
+    })();
     if let Err(error) = result {
         let _ = std::fs::remove_file(&tmp);
-        return Err(RemoteError::Local(format!(
-            "cannot persist remote descriptor: {error}"
-        )));
+        return Err(error);
     }
     Ok(())
 }
@@ -898,7 +914,14 @@ fn load_with(
     let descriptor = validate_descriptor(persisted)?;
     if migrate {
         // The atomic replacement unlinks the file that held the plaintext code.
-        persist_with(path, &descriptor, sealer)?;
+        if let Err(error) = persist_with(path, &descriptor, sealer) {
+            if !sealer.is_some_and(|sealer| sealer.allows_plaintext_fallback()) {
+                return Err(error);
+            }
+            // `migrate` proves the original descriptor was plaintext. Never
+            // use this fallback for a failed open of an existing sealed code.
+            eprintln!("[pairing] retaining the plaintext pending pairing code: {error}");
+        }
     }
     Ok(Some(descriptor))
 }
@@ -2712,6 +2735,32 @@ mod tests {
     }
 
     #[test]
+    fn save_enforces_the_load_limit_after_sealing_without_replacing_the_old_file() {
+        use crate::at_rest::test_sealer::MemorySealer;
+        let (_dir, path, mut descriptor, _) = sealed_fixture(39);
+        persist_with(&path, &descriptor, Some(&MemorySealer)).unwrap();
+        let original = std::fs::read(&path).unwrap();
+        // Sealing plus base64 expands a plaintext descriptor that fits at import.
+        let overhead = stored_bytes(&descriptor, Some(&MemorySealer)).unwrap().len();
+        descriptor.hosted_by = Some("x".repeat(8192 - overhead - ",\"hosted_by\":\"\"".len()));
+        assert!(stored_bytes(&descriptor, None).unwrap().len() < 8192);
+        assert_eq!(stored_bytes(&descriptor, Some(&MemorySealer)).unwrap().len(), 8192);
+        persist_with(&path, &descriptor, Some(&MemorySealer)).unwrap();
+        assert!(load_with(&path, Some(&MemorySealer)).is_ok());
+        let boundary = std::fs::read(&path).unwrap();
+        descriptor.hosted_by.as_mut().unwrap().push('x');
+        assert!(stored_bytes(&descriptor, None).unwrap().len() < 8192);
+        let error = persist_with(&path, &descriptor, Some(&MemorySealer)).unwrap_err();
+        assert!(error.to_string().contains("oversized"));
+        assert_eq!(std::fs::read(&path).unwrap(), boundary);
+        assert!(!path.with_file_name(format!("{REMOTE_CONFIG_FILE}.tmp")).exists());
+        std::fs::remove_file(&path).unwrap();
+        assert!(persist_with(&path, &descriptor, Some(&MemorySealer)).is_err());
+        assert!(!path.exists());
+        assert_ne!(original, boundary);
+    }
+
+    #[test]
     fn a_plaintext_pending_code_is_sealed_once_on_load() {
         use crate::at_rest::test_sealer::MemorySealer;
         let (_dir, path, descriptor, code) = sealed_fixture(41);
@@ -2735,6 +2784,39 @@ mod tests {
 
         load_with(&path, Some(&MemorySealer)).unwrap().unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), migrated, "migration runs once");
+    }
+
+    #[test]
+    fn failed_optional_code_migration_preserves_plaintext_but_never_downgrades_sealed_code() {
+        use crate::at_rest::test_sealer::MemorySealer;
+        struct FailingMigration { fail_seal: bool, fallback: bool }
+        impl Sealer for FailingMigration {
+            fn allows_plaintext_fallback(&self) -> bool { self.fallback }
+            fn seal(&self, purpose: &str, plain: &[u8]) -> Result<Vec<u8>, String> {
+                if self.fail_seal { Err("Secure Enclave unavailable".into()) }
+                else { MemorySealer.seal(purpose, plain) }
+            }
+            fn open(&self, _: &str, _: &[u8]) -> Result<zeroize::Zeroizing<Vec<u8>>, String> {
+                Err("cannot open on this Mac".into())
+            }
+        }
+        for fail_seal in [true, false] {
+            let (_dir, path, descriptor, code) = sealed_fixture(51);
+            persist_with(&path, &descriptor, None).unwrap();
+            let original = std::fs::read(&path).unwrap();
+            let optional = FailingMigration { fail_seal, fallback: true };
+            let loaded = load_with(&path, Some(&optional)).unwrap().unwrap();
+            assert_eq!(loaded.code.as_deref(), Some(code.as_str()));
+            assert_eq!(std::fs::read(&path).unwrap(), original);
+            let strict = FailingMigration { fail_seal, fallback: false };
+            assert!(load_with(&path, Some(&strict)).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), original);
+
+            persist_with(&path, &descriptor, Some(&MemorySealer)).unwrap();
+            let sealed = std::fs::read(&path).unwrap();
+            assert!(load_with(&path, Some(&optional)).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), sealed);
+        }
     }
 
     #[test]

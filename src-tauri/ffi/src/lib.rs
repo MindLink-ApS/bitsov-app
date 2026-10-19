@@ -9,6 +9,8 @@ pub mod home_keychain;
 pub mod model_launch;
 #[cfg(target_os = "macos")]
 pub mod owner_password;
+#[cfg(all(target_os = "macos", not(feature = "mobile")))]
+pub mod pairing_sealer;
 
 #[cfg(unix)]
 pub fn effective_uid() -> u32 {

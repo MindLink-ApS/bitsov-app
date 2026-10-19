@@ -565,15 +565,30 @@ fn android_client_seed_is_kept_only_as_keystore_ciphertext() {
     in_order(
         &sealed,
         &[
-            "if sealed.exists(){None}",
+            "let seed=if sealed_file_exists(dir)?{sealed_seed(&sealed,sealer)?}else{",
             "plain_seed(&plain)?",
-            ".seal(at_rest::CLIENT_SEED_PURPOSE,&seed[..])",
-            "write_replacing(&sealed,&ciphertext)",
-            "let seed=sealed_seed(&sealed,sealer)?;",
-            "if written.is_some_and(|written|*written!=*seed){return Err(",
-            "if plain.exists(){discard(&plain)?;}",
+            "if let Err(error)=write_verified_seed(&sealed,&seed,sealer){",
+            "if!sealer.allows_plaintext_fallback(){return Err(error);}",
+            "return if sealed_file_exists(dir)?{sealed_seed(&sealed,sealer).map(|seed|Self::from_seed(*seed))}else{Self::load_or_create_plain(dir)};",
+            "match plain_seed(&plain){Ok(plain_seed)if*plain_seed==*seed=>{}",
+            "if let Err(error)=discard(&plain){",
         ],
     );
+    let write = normalized(block_after(&key, "\nfn write_verified_seed("));
+    in_order(
+        &write,
+        &[
+            ".seal(at_rest::CLIENT_SEED_PURPOSE,seed)",
+            "temp.write_all(&ciphertext)",
+            "temp.as_file().sync_all()",
+            "let reopened=sealed_seed(temp.path(),sealer)?;",
+            "if*reopened!=*seed{return Err(",
+            "temp.persist_noclobber(path)",
+            "std::fs::File::open(dir)",
+        ],
+    );
+    let plain = normalized(block_after(&key, "fn load_or_create_plain("));
+    assert!(plain.starts_with("{if sealed_file_exists(dir)?{return Err("));
     for forbidden in ["hex::encode", "write_all", "create_new_protected"] {
         assert!(
             !sealed.contains(forbidden),
@@ -629,7 +644,23 @@ fn android_descriptor_keeps_only_public_pins_and_a_sealed_code() {
             "let(persisted,migrate)=open_sealed_code(persisted,sealer)?;",
             "let descriptor=validate_descriptor(persisted)?;",
             "if migrate{",
-            "persist_with(path,&descriptor,sealer)?;}Ok(Some(descriptor))}",
+            "if let Err(error)=persist_with(path,&descriptor,sealer){",
+            "if!sealer.is_some_and(|sealer|sealer.allows_plaintext_fallback()){return Err(error);}",
+            "Ok(Some(descriptor))}",
+        ],
+    );
+    let persist = normalized(block_after(&remote, "\nfn persist_with("));
+    in_order(
+        &persist,
+        &[
+            "stored_bytes(descriptor,sealer)",
+            "if bytes.len()>MAX_LINK_BYTES{",
+            "std::io::Write::write_all(&mut file,&bytes)",
+            "file.sync_all()",
+            "let readback=std::fs::read(&tmp)",
+            "let(opened,_)=open_sealed_code(stored,sealer)?;",
+            "if opened.code!=descriptor.code{return Err(",
+            "std::fs::rename(&tmp,path)",
         ],
     );
     let open = normalized(block_after(&remote, "\nfn open_sealed_code("));

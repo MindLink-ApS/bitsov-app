@@ -326,6 +326,91 @@ private struct WrappedPassword: Codable {
     let ciphertext: Data // AES-GCM combined nonce, ciphertext, tag
 }
 
+// Pairing must be readable at startup without UI, but must not survive moving
+// the app directory (or a login Keychain backup) to a different Secure Enclave.
+// Only the enclave-wrapped private key representation is stored in the envelope.
+private let pairingPurpose = Data("bitsov.pairing.at-rest.wrap.v1".utf8)
+
+@_cdecl("bitsov_pairing_crypt")
+public func bitsov_pairing_crypt(_ sealing: Int32, _ purpose: UnsafePointer<CChar>?,
+    _ input: UnsafePointer<UInt8>?, _ count: Int, _ output: UnsafeMutablePointer<UInt8>?,
+    _ capacity: Int, _ length: UnsafeMutablePointer<Int>?) -> Int32 {
+    guard sealing == 0 || sealing == 1, let purpose = purpose, let input = input,
+          let output = output, let length = length, capacity >= 0,
+          count > 0, count <= (sealing == 1 ? 4096 : 16384) else { return errBadArgument }
+    length.pointee = 0
+    return autoreleasepool {
+        guard SecureEnclave.isAvailable else { return errUnavailable }
+        let name = String(cString: purpose)
+        guard !name.isEmpty, name.utf8.count <= 256 else { return errBadArgument }
+        let aad = Data(name.utf8)
+        let context = LAContext()
+        context.interactionNotAllowed = true
+        defer { context.invalidate() }
+        do {
+            if sealing == 1 {
+                var error: Unmanaged<CFError>?
+                guard let access = SecAccessControlCreateWithFlags(nil,
+                    kSecAttrAccessibleWhenUnlockedThisDeviceOnly, [.privateKeyUsage], &error) else {
+                    error?.release()
+                    return errOther
+                }
+                let key = try SecureEnclave.P256.KeyAgreement.PrivateKey(
+                    accessControl: access, authenticationContext: context)
+                let ephemeral = P256.KeyAgreement.PrivateKey()
+                let shared = try ephemeral.sharedSecretFromKeyAgreement(with: key.publicKey)
+                let symmetric = shared.hkdfDerivedSymmetricKey(using: SHA256.self,
+                    salt: aad, sharedInfo: pairingPurpose, outputByteCount: 32)
+                var plaintext = Data(bytes: input, count: count)
+                defer { plaintext.resetBytes(in: 0..<plaintext.count) }
+                let sealed = try AES.GCM.seal(plaintext, using: symmetric, authenticating: aad)
+                guard let ciphertext = sealed.combined else { return errOther }
+                let envelope = try JSONEncoder().encode(WrappedPassword(version: 1,
+                    enclaveKey: key.dataRepresentation,
+                    ephemeralPublicKey: ephemeral.publicKey.x963Representation, ciphertext: ciphertext))
+                return copyOutput(envelope, output, capacity, length)
+            }
+            let wrapped = try JSONDecoder().decode(WrappedPassword.self, from: Data(bytes: input, count: count))
+            guard wrapped.version == 1, wrapped.ephemeralPublicKey.count == 65,
+                  !wrapped.enclaveKey.isEmpty, wrapped.enclaveKey.count <= 8192,
+                  (29...4124).contains(wrapped.ciphertext.count) else { return errInvalidBlob }
+            let key = try SecureEnclave.P256.KeyAgreement.PrivateKey(
+                dataRepresentation: wrapped.enclaveKey, authenticationContext: context)
+            let ephemeral = try P256.KeyAgreement.PublicKey(x963Representation: wrapped.ephemeralPublicKey)
+            let shared = try key.sharedSecretFromKeyAgreement(with: ephemeral)
+            let symmetric = shared.hkdfDerivedSymmetricKey(using: SHA256.self,
+                salt: aad, sharedInfo: pairingPurpose, outputByteCount: 32)
+            var plaintext = try AES.GCM.open(AES.GCM.SealedBox(combined: wrapped.ciphertext),
+                using: symmetric, authenticating: aad)
+            defer { plaintext.resetBytes(in: 0..<plaintext.count) }
+            return copyOutput(plaintext, output, capacity, length)
+        } catch {
+            return statusForPairingError(error, sealing: sealing == 1)
+        }
+    }
+}
+
+private func statusForPairingError(_ error: Error, sealing: Bool) -> Int32 {
+    guard !sealing else { return errOther }
+    // Only malformed envelopes and cryptographic authentication/decryption
+    // failures justify destructive recovery. Keychain/LA authentication errors
+    // can mean a locked or temporarily unavailable key, not a foreign blob.
+    if error is DecodingError { return errInvalidBlob }
+    if let crypto = error as? CryptoKitError {
+        switch crypto {
+        case .authenticationFailure, .incorrectParameterSize:
+            return errInvalidBlob
+        default:
+            return errOther
+        }
+    }
+    let ns = error as NSError
+    if ns.domain == NSOSStatusErrorDomain && ns.code == Int(errSecDecode) {
+        return errInvalidBlob
+    }
+    return errOther
+}
+
 private func passwordNode(_ service: String) -> String? {
     let prefix = "bitsov.node."
     let suffix = ".seed-password"
