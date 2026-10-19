@@ -64,7 +64,37 @@ Ask track remains available.
 
 Each assistant keeps up to 100 question/answer turns in the app config folder,
 sealed with authenticated encryption through the app's `at_rest::Sealer`
-interface. On Mac, its key is held by the existing native Keychain bridge.
+interface. On Mac, a fresh AES data key for each saved file is wrapped through
+the same Secure Enclave sealing bridge used for pairing identity storage. Each
+file sealing creates a fresh enclave key; it does **not reuse the pairing key**.
+The enclave key is `WhenUnlockedThisDeviceOnly`, non-exportable, and never
+synced; its opaque representation travels with the ciphertext. This is **device-bound,
+prompt-free protection**, covering stolen backups and copying the files to
+another Mac, **not a Touch ID/biometry gate**. It does not bind the ciphertext
+to BitSov's app identity: other processes running as the same user on the
+original Mac can likely unwrap it without a prompt. The legacy login-Keychain
+item had a per-app ACL; this sealing bridge does not preserve that boundary.
+Binding access to the app requires a `keychain-access-groups` entitlement,
+which is a signing change for Rasmus to decide.
+
+If enclave sealing or verification is unavailable, the app logs it and keeps
+the existing Keychain AES behavior.
+That fallback is not Secure Enclave-backed; its login-Keychain copy can migrate.
+
+On the first non-Forget thread access or watch-settings load per app launch,
+under the host thread lock, existing transcripts and watch settings are
+migrated independently. The process caches the sweep outcome: migration is
+marked complete only after legacy keys are retired, and later requests skip
+the sweep. An incomplete sweep is retried on the next app launch, at most
+once per launch. Each replacement is written, synced, read back, decrypted
+and compared with the original before atomic replacement.
+All old Keychain keys remain until every file verifies and directory changes
+are synced. A crash resumes from the mixed formats; corrupt/unreadable files
+stay untouched and block key retirement, while healthy threads remain usable.
+An already device-bound file that cannot be decrypted remains intact and
+returns a retry error; it never becomes an empty thread. Migration failures
+never abort application startup.
+
 Only transcript text is saved, never broker objects, model request bodies or
 credentials. Saved answers are marked historical; they are not fresh reads
 and are not automatically included in model requests. **Forget** clears that

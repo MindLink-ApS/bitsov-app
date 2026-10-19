@@ -7632,7 +7632,12 @@ async fn ai_read(
         let mut engine = ai_state.watches.lock().map_err(|_| "Watches are unavailable.")?;
         let dir = ai_config_dir(window.app_handle())?.join("ai-threads");
         #[cfg(all(target_os = "macos", not(feature = "mobile")))]
-        let sealer: &dyn bitsov_app::at_rest::Sealer = &ai::threads::MacSealer;
+        let sealer: &dyn bitsov_app::at_rest::Sealer = {
+            if !settings.contains_key(assistant.id()) {
+                ai::threads::MacSealer.prepare(&dir);
+            }
+            &ai::threads::MacSealer
+        };
         #[cfg(not(all(target_os = "macos", not(feature = "mobile"))))]
         let sealer = bitsov_app::at_rest::installed().ok_or("Sealed thread storage is unavailable on this platform.")?;
         let update = ai::threads::poll_watches(&dir, assistant, poll.revision.as_deref(), &poll.sample,
@@ -7665,7 +7670,13 @@ async fn ai_read(
         let mut settings = ai_state.threads.lock().map_err(|_| "Thread storage is unavailable.")?;
         let dir = ai_config_dir(window.app_handle())?.join("ai-threads");
         #[cfg(all(target_os = "macos", not(feature = "mobile")))]
-        let sealer: &dyn bitsov_app::at_rest::Sealer = &ai::threads::MacSealer;
+        let sealer: &dyn bitsov_app::at_rest::Sealer = {
+            // Forget must remain independent of decrypting the old transcript.
+            if !matches!(&request, ai::threads::Request::Forget) {
+                ai::threads::MacSealer.prepare(&dir);
+            }
+            &ai::threads::MacSealer
+        };
         #[cfg(not(all(target_os = "macos", not(feature = "mobile"))))]
         let sealer = bitsov_app::at_rest::installed().ok_or("Sealed thread storage is unavailable on this platform.")?;
         let changed_rule = match &request { ai::threads::Request::SetWatch { rule, .. } => Some(*rule), _ => None };

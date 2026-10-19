@@ -9,9 +9,17 @@ use serde::{Deserialize, Serialize};
 use std::{io::Write, path::Path};
 use zeroize::Zeroizing;
 
+#[cfg(any(test, all(target_os = "macos", not(feature = "mobile"))))]
+mod storage;
+
 const MAX_TURNS: usize = 100;
 // Covers 100 maximum-length turns even with six-byte JSON escapes.
-const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
+// Reserve room for a bounded Secure Enclave key envelope as well as the text.
+const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024 + 16 * 1024 + 64;
+const MAX_SETTINGS_BYTES: u64 = 4096 + 16 * 1024 + 64;
+
+#[cfg(all(target_os = "macos", not(feature = "mobile")))]
+pub use storage::MacSealer;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -224,11 +232,20 @@ fn apply_inner(
     if ciphertext.len() as u64 > MAX_FILE_BYTES {
         return Err("The assistant thread is too large.".into());
     }
-    write_sealed(dir, &path, &ciphertext)?;
+    write_sealed(dir, &path, &ciphertext, &purpose, &plain, sealer)?;
     Ok(thread)
 }
 
-fn write_sealed(dir: &Path, path: &Path, ciphertext: &[u8]) -> Result<(), String> {
+// Shared by ordinary saves and migration: even a save after a deferred migration
+// must verify its candidate on disk before replacing the old ciphertext.
+fn write_sealed(
+    dir: &Path,
+    path: &Path,
+    ciphertext: &[u8],
+    purpose: &str,
+    plain: &[u8],
+    sealer: &dyn Sealer,
+) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|_| "Could not create the assistant folder.")?;
     #[cfg(unix)]
     {
@@ -241,6 +258,11 @@ fn write_sealed(dir: &Path, path: &Path, ciphertext: &[u8]) -> Result<(), String
     temp.write_all(&ciphertext)
         .and_then(|()| temp.as_file().sync_all())
         .map_err(|_| "Could not save the assistant thread.")?;
+    let readback =
+        std::fs::read(temp.path()).map_err(|_| "Could not read back the assistant thread.")?;
+    if sealer.open(purpose, &readback)?.as_slice() != plain {
+        return Err("The saved assistant thread failed verification.".into());
+    }
     temp.persist(&path)
         .map_err(|_| "Could not save the assistant thread.")?;
     Ok(())
@@ -257,7 +279,7 @@ pub fn watch_settings(
     let purpose = format!("ai-watch-settings-v1:{}", assistant.id());
     let mut disabled: Vec<Rule> = match std::fs::metadata(&path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => vec![],
-        Ok(meta) if meta.len() <= 4096 => {
+        Ok(meta) if meta.len() <= MAX_SETTINGS_BYTES => {
             let bytes = std::fs::read(&path).map_err(|_| "Could not read watch settings.")?;
             serde_json::from_slice(&sealer.open(&purpose, &bytes)?)
                 .map_err(|_| "Invalid watch settings.")?
@@ -277,27 +299,29 @@ pub fn watch_settings(
         }
         let plain =
             Zeroizing::new(serde_json::to_vec(&disabled).map_err(|_| "Invalid watch settings.")?);
-        write_sealed(dir, &path, &sealer.seal(&purpose, &plain)?)?;
+        write_sealed(
+            dir, &path, &sealer.seal(&purpose, &plain)?, &purpose, &plain, sealer,
+        )?;
     }
     Ok(disabled)
 }
 
-/// Mac implementation of the existing Sealer interface. Uses the app's native
-/// Keychain bridge; a random encryption key never enters a renderer or disk file.
+/// Legacy AES keys in Keychain (including the migratable login-Keychain fallback).
+/// This storage is not Secure Enclave-backed or biometry-gated.
 #[cfg(all(target_os = "macos", not(feature = "mobile")))]
-pub struct MacSealer;
+struct LegacyMacSealer;
 #[cfg(all(target_os = "macos", not(feature = "mobile")))]
-impl MacSealer {
+impl LegacyMacSealer {
+    const SERVICE: &'static str = "tech.mindlink.bitsov.ai-threads.v1";
     fn key(purpose: &str, create: bool) -> Result<Zeroizing<Vec<u8>>, String> {
         use bitsov_ffi::home_keychain::{add_item, read_item};
-        const SERVICE: &str = "tech.mindlink.bitsov.ai-threads.v1";
         let read =
-            || read_item(SERVICE, purpose, 32).map_err(|_| "Invalid thread key name.".to_string());
+            || read_item(Self::SERVICE, purpose, 32).map_err(|_| "Invalid thread key name.".to_string());
         let (mut status, mut length, mut bytes) = read()?;
         if status == -25300 && create {
             let mut key = Zeroizing::new(vec![0; 32]);
             getrandom::getrandom(&mut key).map_err(|_| "Could not create the thread key.")?;
-            let added = add_item(SERVICE, purpose, &key).map_err(|_| "Invalid thread key name.")?;
+            let added = add_item(Self::SERVICE, purpose, &key).map_err(|_| "Invalid thread key name.")?;
             if added != 0 && added != -25299 {
                 return Err(format!("Keychain could not save the thread key ({added})."));
             }
@@ -313,7 +337,7 @@ impl MacSealer {
     }
 }
 #[cfg(all(target_os = "macos", not(feature = "mobile")))]
-impl Sealer for MacSealer {
+impl Sealer for LegacyMacSealer {
     fn seal(&self, purpose: &str, plaintext: &[u8]) -> Result<Vec<u8>, String> {
         encrypt(&Self::key(purpose, true)?, purpose, plaintext)
     }
