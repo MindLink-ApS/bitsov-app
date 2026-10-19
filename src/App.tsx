@@ -182,15 +182,46 @@ function AppScreen() {
     lastSeen={!status().node_id || status().node_id === lastSeen()?.nodeId ? lastSeen()?.at : null}
     retryAfterSecs={status().retry_after_secs} onRetry={retryPairing} /></Show>;
   let timer: number | undefined;
-  const poll = async () => {
+  // The connection card's facts: when the status read last reached the node, and its round trip (display only).
+  const [nodeAnswer, setNodeAnswer] = createSignal<{ at: number; ms: number } | null>(null);
+  /** One status read, as the poll does it: nothing else is read. */
+  let statusRead: Promise<void> | null = null;
+  const readStatus = () => {
+    const read = readStatusOnce();
+    statusRead = read;
+    void read.finally(() => { if (statusRead === read) statusRead = null; });
+    return read;
+  };
+  /**
+   * The connection card's Check now: one status read, or the one already in
+   * flight (a poll's or an earlier check's). Held here, outside the card, so
+   * leaving the page and coming back cannot start a second one.
+   */
+  const [checkingStatus, setCheckingStatus] = createSignal(false);
+  let checkRead: Promise<void> | null = null;
+  const checkStatus = () => {
+    if (checkRead) return checkRead;
+    setCheckingStatus(true);
+    const read = (statusRead ?? readStatus()).finally(() => { checkRead = null; setCheckingStatus(false); });
+    checkRead = read;
+    return read;
+  };
+  const readStatusOnce = async () => {
+    const started = performance.now();
     try {
       const next = await source().nodeStatus();
       setStatus(next);
-      if (next.ready && !next.retry_after_secs && next.node_id) setLastSeen({ nodeId: next.node_id, at: Date.now() });
+      if (next.ready && !next.retry_after_secs && next.node_id) {
+        setLastSeen({ nodeId: next.node_id, at: Date.now() });
+        setNodeAnswer({ at: Date.now(), ms: Math.round(performance.now() - started) });
+      }
       setRememberOffer(!!next.remember_offer);
     } catch (e) {
       setStatus({ ready: false, node_id: null, error: String(e) });
     }
+  };
+  const poll = async () => {
+    await readStatus();
     void watches.tick(watchesAllowed(), statusWatchSamples(status().ready, status().locked === true, readWatchSamples?.() ?? {}));
     try {
       setPairing(await source().pairingStatus());
@@ -412,6 +443,10 @@ function AppScreen() {
         watchUpdates={watchUpdates()}
         watchError={watchError()}
         live={live()}
+        nodeAnswer={nodeAnswer()}
+        onCheckNode={checkStatus}
+        checkingNode={checkingStatus()}
+        nodeLocked={status().locked === true}
         ready={status().ready}
         error={status().error}
         ownId={status().node_id}

@@ -1,5 +1,6 @@
 import { AddDevice } from '../onboarding/AddDevice';
 import { CALL_STATE_WORD, OnCallPill } from './OnCallPill';
+import { ConnectionCard, nextLastCall, type NodeAnswer, type StunSource, type TrackedCall } from './ConnectionCard';
 import { watchSamples, type WatchSamples, type WatchUpdates } from './watches';
 import { ASSISTANTS, type AssistantId } from './assistants';
 import { PendingApproval } from '../onboarding/LockedNode';
@@ -64,6 +65,7 @@ import {
   stunOff,
   effectiveStun,
   setNodeStun,
+  nodeStun,
   setThemePref,
   stunPref,
   themePref,
@@ -156,6 +158,14 @@ type Props = {
   active: boolean;
   /** Transient connection readiness, independent of shell visibility. */
   live?: boolean;
+  /** When the status read last reached the node, and its round trip (the connection card). */
+  nodeAnswer?: NodeAnswer | null;
+  /** One status read (the connection card's Check now); reuses one in flight. */
+  onCheckNode?: () => Promise<void>;
+  /** A Check now read is in flight (held in App). */
+  checkingNode?: boolean;
+  /** The node is locked (for the connection card's wording). */
+  nodeLocked?: boolean;
   ready: boolean;
   error: string | null;
   ownId: string | null;
@@ -1254,6 +1264,12 @@ export function ControlCenter(props: Props) {
     busy: () => meetingOn(),
     provenUnpaid: (code) => provenUnpaid(code),
   });
+  // The latest call and its route (candidate types only), kept after the call for the connection card.
+  // A call counts once it was placed, or answered here: whether it went live, and its route once the stats name one.
+  // A call refused before it had an id (their node takes no calls, the grant is too small) is the latest call too.
+  const [lastCall, setLastCall] = createSignal<TrackedCall | null>(null);
+  createEffect(() => { const v = callView(); setLastCall((prev) => nextLastCall(prev, v)); });
+  const stunSource = (): StunSource => (stunOff() ? 'off' : stunPref() ? 'custom' : nodeStun() ? 'node' : overview() ? 'none' : 'checking');
   // Closing the window ends the call here without paying; only Hang up pays.
   onCleanup(() => calls.endLocal());
 
@@ -1990,7 +2006,8 @@ export function ControlCenter(props: Props) {
             />
           </Match>
           <Match when={tab() === 'node'}>
-            <NodePanel deviceApprovals={<>
+            <NodePanel connection={<ConnectionCard remote={props.remote === true} link={link()} live={live()} locked={props.nodeLocked} answer={props.nodeAnswer ?? null}
+              stun={stunSource()} lastCall={lastCall() && { connected: lastCall()!.connected, route: lastCall()!.route }} onCheck={props.onCheckNode} checking={props.checkingNode} />} deviceApprovals={<>
               {/* A discovery error shows on its own, even when the very first read failed. */}
               <Show when={canApprove() || (approvalsCapable() && approvalsError() !== null)}>
                 <OwnerApprovals
@@ -3077,6 +3094,7 @@ function CallPanel(props: {
   const [answer, setAnswer] = createSignal<number | null>(null);
   createEffect(() => {
     if (!['live', 'reconnecting'].includes(props.view.phase)) return;
+    setTick(Date.now());
     const t = setInterval(() => setTick(Date.now()), 1000);
     onCleanup(() => clearInterval(t));
   });
@@ -3102,7 +3120,18 @@ function CallPanel(props: {
         <Show when={['calling', 'ringing', 'connecting'].includes(v().phase) || (v().phase === 'ended' && (v().reason === 'failed' || v().reason === 'timeout'))}>
           <CallNetworkNote onOpenSettings={props.openCallSettings} />
         </Show>
-        <p class="hint" data-call-recovery-note>A network interruption may trigger one paid recovery attempt within your budget. Recovery uses another call admission and signalling fees.</p>
+        {/* Not on the ended card: it promises a recovery that can no longer happen. */}
+        <Show when={v().phase !== 'ended'}>
+          <p class="hint" data-call-recovery-note>A network interruption may trigger one paid recovery attempt within your budget. Recovery uses another call admission and signalling fees.</p>
+        </Show>
+        {/* While reconnecting: what is happening, and when the call ends if it does not come back (display only). */}
+        <Show when={v().phase === 'reconnecting'}>
+          <p class="hint" role="status" data-call-reconnecting>
+            Connection lost. Reconnecting…
+            <Show when={v().dropAt !== null}>{' '}If it isn’t back in <span data-call-drop-in>{Math.max(0, Math.ceil((v().dropAt! - tick()) / 1000))}</span> s, the call ends.</Show>
+            <Show when={v().recoveryUsedBefore}>{' '}This call already used its one recovery; waiting for the connection to come back on its own.</Show>
+          </p>
+        </Show>
         <Show when={v().media === 'video' && (v().phase === 'live' || v().phase === 'connecting' || v().phase === 'reconnecting')}>
           <div class="call-videos">
             <MediaView stream={props.streams.remote} video muted={false} kind="remote" />
@@ -3157,7 +3186,8 @@ function CallPanel(props: {
           <p class="hint" role="status" data-call-offline>You are offline. The call reconnects by itself if your network comes back in time.</p>
         </Show>
         <Show when={v().phase !== 'ended' && v().error}>
-          <p class="hint" data-call-error>{v().error}</p>
+          {/* Only a recovery that could not start is framed as one (the call still waits); any other error (a camera, say) as it is. */}
+          <p class="hint" data-call-error>{v().phase === 'reconnecting' && v().recoveryError !== null ? `Recovery could not start: ${v().recoveryError} Still waiting for the connection to come back on its own.` : v().error}</p>
         </Show>
         <div class="call-actions">
           <Switch>
@@ -3187,7 +3217,7 @@ function CallPanel(props: {
 }
 
 const LEG_STATE: Record<LegState, string> = {
-  waiting: 'Waiting', placing: 'Preparing…', ringing: 'Ringing', incoming: 'Ringing you', connecting: 'Connecting', live: 'Live', ended: 'Ended', nolink: 'No link',
+  waiting: 'Waiting', placing: 'Preparing…', ringing: 'Ringing', incoming: 'Ringing you', connecting: 'Connecting', live: 'Live', reconnecting: 'Reconnecting…', ended: 'Ended', nolink: 'No link',
 };
 
 /**
@@ -7321,7 +7351,7 @@ function NewTrack(props: {
 
 // ---- context panels ---------------------------------------------------------
 
-function NodePanel(props: { deviceApprovals?: JSX.Element; onForgetRemote?: () => Promise<void>; overview: NodeOverview | null; link: LinkState | null; peers: Peer[]; now: number; error?: string; onReconnect: () => Promise<void> }) {
+function NodePanel(props: { connection?: JSX.Element; deviceApprovals?: JSX.Element; onForgetRemote?: () => Promise<void>; overview: NodeOverview | null; link: LinkState | null; peers: Peer[]; now: number; error?: string; onReconnect: () => Promise<void> }) {
   const fresh = () => freshness(props.overview?.read_at ?? null, props.now);
   const linkText = () =>
     props.link === 'open' ? 'Live' : props.link === 'connecting' ? 'Connecting' : props.link === 'closed' ? 'Reconnecting' : 'Waiting';
@@ -7331,6 +7361,7 @@ function NodePanel(props: { deviceApprovals?: JSX.Element; onForgetRemote?: () =
       {props.deviceApprovals}
       <Show when={props.onForgetRemote}><LocalNodeSwitch onForget={() => props.onForgetRemote!()} /></Show>
       <HubTrustInfo level={3} />
+      {props.connection}
       <Show when={props.overview} fallback={<Show when={!props.error}><DelayedSpinner /></Show>}>
         {(o) => (
           <dl class="facts">

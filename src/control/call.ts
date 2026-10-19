@@ -166,11 +166,20 @@ export type CallView = {
    * after the grace), whatever this says.
    */
   offline: boolean;
+  /** Display only: while reconnecting, when the call ends if the connection has not come back. */
+  dropAt: number | null;
+  /** Display only: this call has used its one recovery attempt (a restart offer, or a restart request or answer). */
+  recoveryUsed: boolean;
+  /** Display only: the one recovery was already used when this drop began, so none is tried this time. */
+  recoveryUsedBefore: boolean;
+  /** Display only: why a recovery could not start (recoveryRefused), apart from any other error (a camera, a hangup). */
+  recoveryError: string | null;
 };
 
 export const IDLE: CallView = {
   phase: 'idle', state: 'idle', peer: null, callId: null, media: 'audio', outgoing: false,
   liveAt: null, muted: false, camera: false, paidMsat: 0, unknownCount: 0, unknownMsat: 0, pendingCount: 0, pendingMsat: 0, connection: null, reason: null, error: null, offline: false,
+  dropAt: null, recoveryUsed: false, recoveryUsedBefore: false, recoveryError: null,
 };
 
 type Outcome<T> = { ok: true; value: T } | { ok: false; error: ActionError };
@@ -256,6 +265,8 @@ export function createCallEngine(deps: CallDeps) {
   let restartTimer: ReturnType<typeof setTimeout> | undefined;
   let ringTimer: ReturnType<typeof setTimeout> | undefined;
   let dropTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Display only: a refused recovery's text that a heal left showing, cleared when the next drop starts. */
+  let healedRefusal: string | null = null;
   let diagnosticTimer: ReturnType<typeof setInterval> | undefined;
   let mediaGeneration = 0;
   const captures = new Set<() => void>();
@@ -319,7 +330,8 @@ export function createCallEngine(deps: CallDeps) {
   };
   const end = (reason: HangupReason | null, error: string | null = null) => {
     teardown();
-    set({ phase: 'ended', reason, error, camera: false, muted: false, offline: false });
+    healedRefusal = null;
+    set({ phase: 'ended', reason, error, camera: false, muted: false, offline: false, dropAt: null, recoveryError: null });
   };
 
   const acquireMedia = (constraints: MediaStreamConstraints): Promise<MediaStream> => new Promise((resolve, reject) => {
@@ -370,9 +382,11 @@ export function createCallEngine(deps: CallDeps) {
     dropTimer = undefined;
     clearTimeout(restartTimer);
     restartTimer = undefined;
+    // Healed: the refusal stays said while live; it is remembered so the next drop starts without it.
+    if (view.recoveryError !== null) { healedRefusal = view.recoveryError; set({ recoveryError: null }); }
     if (view.phase !== 'live') {
       clearTimeout(ringTimer);
-      set({ phase: 'live', liveAt: view.liveAt ?? deps.now() });
+      set({ phase: 'live', liveAt: view.liveAt ?? deps.now(), dropAt: null });
     }
   };
 
@@ -387,6 +401,7 @@ export function createCallEngine(deps: CallDeps) {
   const recoveryRefused = (conn: RTCPeerConnection, error: string) => {
     if (pc !== conn) return;
     set({ error });
+    set({ recoveryError: error });
     // A peer can request recovery after our transport has already healed;
     // refusing it will not trigger another connection-state event.
     reconcileConnection(conn);
@@ -497,6 +512,12 @@ export function createCallEngine(deps: CallDeps) {
     if (pc !== conn || !active()) return;
     clearTimeout(ringTimer);
     set({ phase: 'reconnecting' });
+    // Display only: when this drop ends the call, and whether its one recovery was already spent.
+    // A new drop: an earlier drop's refused-recovery words (still the error) are not this drop's (display only).
+    if (dropTimer === undefined) {
+      set({ dropAt: deps.now() + RECONNECT_GRACE_MS, recoveryUsedBefore: view.recoveryUsed, ...(healedRefusal !== null && view.error === healedRefusal ? { error: null } : {}) });
+      healedRefusal = null;
+    }
     if (dropTimer === undefined) dropTimer = setTimeout(() => {
       if (pc === conn && !reconcileConnection(conn)) end('failed', view.error ?? 'The connection was lost. Check that both apps have a reachable STUN server in Settings; some networks cannot connect without a relay.');
     }, RECONNECT_GRACE_MS);
@@ -509,6 +530,7 @@ export function createCallEngine(deps: CallDeps) {
     // produce glare or two fresh admission charges. The callee can request it.
     if (!view.outgoing) restartRequested = true;
     else restartAttempted = true;
+    set({ recoveryUsed: true });
     try {
       if (deps.authorize && !await deps.authorize()) {
         recoveryRefused(conn, 'Call recovery needs spending approval.');
@@ -561,6 +583,7 @@ export function createCallEngine(deps: CallDeps) {
         restartParent(signal.sdp!) !== view.callId || admissions.has(signal.call_id) || signal.media !== view.media) return;
     restartAttempted = true;
     reconnect(conn);
+    set({ recoveryUsed: true });
     try {
       if (deps.authorize && !await deps.authorize()) {
         recoveryRefused(conn, 'Call recovery needs spending approval.');

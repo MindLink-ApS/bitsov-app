@@ -335,6 +335,9 @@ describe('call restart negotiation', () => {
     await vi.advanceTimersByTimeAsync(RECONNECT_GRACE_MS);
     expect(caller.e.view()).toMatchObject({ state: 'live', liveAt: 1000, callId: ID });
     expect(callee.e.view()).toMatchObject({ state: 'live', liveAt: 1000, callId: ID });
+    // Both sides spent their one recovery (the caller's offer, the callee's answer); the drop is over.
+    expect(caller.e.view()).toMatchObject({ recoveryUsed: true, dropAt: null });
+    expect(callee.e.view()).toMatchObject({ recoveryUsed: true, dropAt: null });
     expect(FakePc.made).toHaveLength(2);
     expect(a.tracks.concat(b.tracks).every(t => vi.mocked(t.stop).mock.calls.length === 0)).toBe(true);
     // A replay cannot charge for a second answer or re-enter negotiation.
@@ -344,6 +347,116 @@ describe('call restart negotiation', () => {
     await caller.e.hangup();
     for (const signal of caller.sent.filter(s => s.kind === 403)) await deliver(callee, signal, OWN, A);
     expect(callee.e.view().state).toBe('ended');
+  });
+
+  it('says how long a drop has left and whether its one recovery was already spent; the grace itself is unchanged', async () => {
+    let n = 0;
+    const caller = engine({ newCallId: () => n++ === 0 ? ID : 'e'.repeat(32) });
+    await caller.e.place(A, 'audio', QUOTE);
+    await caller.e.receive(msg(401, { sdp: 'v=0 answer' }), OWN);
+    const pc = FakePc.made[0];
+    pc.connect();
+    pc.state('disconnected');
+    expect(caller.e.view()).toMatchObject({ phase: 'reconnecting', dropAt: 1000 + RECONNECT_GRACE_MS, recoveryUsed: false, recoveryUsedBefore: false });
+    // The one recovery goes after the restart delay.
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(caller.e.view().recoveryUsed).toBe(true);
+    const offers = caller.sent.filter(s => s.kind === 400).length;
+    expect(offers).toBe(2);
+    pc.connect();
+    expect(caller.e.view()).toMatchObject({ phase: 'live', dropAt: null });
+    // A second drop: no recovery is tried, and the view says so.
+    pc.state('disconnected');
+    expect(caller.e.view()).toMatchObject({ phase: 'reconnecting', dropAt: 1000 + RECONNECT_GRACE_MS, recoveryUsedBefore: true });
+    await vi.advanceTimersByTimeAsync(RECONNECT_GRACE_MS - 1);
+    expect(caller.e.view().phase).toBe('reconnecting');
+    expect(caller.sent.filter(s => s.kind === 400)).toHaveLength(offers);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(caller.e.view()).toMatchObject({ phase: 'ended', reason: 'failed', dropAt: null });
+  });
+
+  it('a callee that only answers the caller\'s recovery has spent the call\'s one recovery too', async () => {
+    const restartId = 'e'.repeat(32);
+    let n = 0;
+    const caller = engine({ newCallId: () => n++ === 0 ? ID : restartId });
+    const callee = engine();
+    const deliver = async (target: ReturnType<typeof engine>, signal: Sent, sender: string, own: string) =>
+      target.e.receive(msg(signal.kind, signal.body, sender), own);
+    await caller.e.place(A, 'audio', QUOTE);
+    await deliver(callee, caller.sent[0], OWN, A);
+    await callee.e.accept();
+    await deliver(caller, callee.sent[0], A, OWN);
+    const [a, b] = FakePc.made;
+    a.connect(); b.connect();
+    // Only the caller's side fails; the callee never asks for a recovery itself.
+    a.state('failed');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(callee.e.view().recoveryUsed).toBe(false);
+    const restart = caller.sent.find(s => s.kind === 400 && s.body.call_id === restartId)!;
+    await deliver(callee, restart, OWN, A);
+    expect(callee.sent.some(s => s.kind === 401 && s.body.call_id === restartId)).toBe(true);
+    expect(callee.e.view().recoveryUsed).toBe(true);
+    caller.e.endLocal(); callee.e.endLocal();
+  });
+
+  it('a camera error before a drop is not a recovery error: recoveryError stays empty', async () => {
+    const local = stream(true);
+    const fresh = stream(true, false);
+    let n = 0;
+    const caller = engine({ newCallId: () => n++ === 0 ? ID : 'e'.repeat(32), getUserMedia: async c => c.audio ? local : fresh });
+    await caller.e.place(A, 'video', QUOTE);
+    await caller.e.receive(msg(401, { sdp: 'v=0 answer' }), OWN);
+    const pc = FakePc.made[0];
+    pc.connect();
+    await caller.e.toggleCamera();
+    pc.senders[1].replaceTrack = async () => { throw new Error('sender failed'); };
+    await caller.e.toggleCamera();
+    expect(caller.e.view().error).toEqual(expect.any(String));
+    pc.state('disconnected');
+    expect(caller.e.view()).toMatchObject({ phase: 'reconnecting', recoveryUsed: false, recoveryError: null });
+    caller.e.endLocal();
+  });
+
+  it('a refused recovery\'s words stay while live after a heal, and are gone when a later drop starts', async () => {
+    let allow = true;
+    let n = 0;
+    const caller = engine({ newCallId: () => n++ === 0 ? ID : 'e'.repeat(32), authorize: async () => allow });
+    await caller.e.place(A, 'audio', QUOTE);
+    await caller.e.receive(msg(401, { sdp: 'v=0 answer' }), OWN);
+    const pc = FakePc.made[0];
+    pc.connect();
+    allow = false;
+    pc.state('failed');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(caller.e.view()).toMatchObject({ phase: 'reconnecting', error: 'Call recovery needs spending approval.', recoveryError: 'Call recovery needs spending approval.' });
+    // Healed on its own: still said while live (the recovery could not happen), no longer framed.
+    pc.connect();
+    expect(caller.e.view()).toMatchObject({ phase: 'live', error: 'Call recovery needs spending approval.', recoveryError: null });
+    // A second drop: no stale refusal text.
+    pc.state('disconnected');
+    expect(caller.e.view()).toMatchObject({ phase: 'reconnecting', error: null, recoveryError: null });
+    caller.e.endLocal();
+  });
+
+  it('a new drop clears only a refused recovery\'s words: a camera error stays', async () => {
+    const local = stream(true);
+    const fresh = stream(true, false);
+    let n = 0;
+    const caller = engine({ newCallId: () => n++ === 0 ? ID : 'e'.repeat(32), getUserMedia: async c => c.audio ? local : fresh });
+    await caller.e.place(A, 'video', QUOTE);
+    await caller.e.receive(msg(401, { sdp: 'v=0 answer' }), OWN);
+    const pc = FakePc.made[0];
+    pc.connect();
+    await caller.e.toggleCamera();
+    pc.senders[1].replaceTrack = async () => { throw new Error('sender failed'); };
+    await caller.e.toggleCamera();
+    const cameraError = caller.e.view().error;
+    expect(cameraError).toEqual(expect.any(String));
+    pc.state('disconnected');
+    pc.connect();
+    pc.state('disconnected');
+    expect(caller.e.view()).toMatchObject({ phase: 'reconnecting', error: cameraError });
+    caller.e.endLocal();
   });
 
   it('a callee-only failure requests one restart and caller ignores duplicate requests', async () => {
@@ -1337,6 +1450,92 @@ describe('calls in the shell', () => {
     expect(host.used('call_signal')).toEqual([]);
   });
 
+  /** Settings → Node → the connection card's "Last call" line, then back to the chat. */
+  async function lastCallLine() {
+    $<HTMLButtonElement>('[data-profile]')!.click();
+    await vi.waitFor(() => expect($('[data-open-settings]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-open-settings]')!.click();
+    await vi.waitFor(() => expect($('[data-tab="node"]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-tab="node"]')!.click();
+    await vi.waitFor(() => expect($('[data-connection-line="5"]')).not.toBeNull());
+    const line = text('[data-connection-line="5"]');
+    $<HTMLButtonElement>('[data-settings-close]')!.click();
+    return line;
+  }
+
+  it('the connection card describes the latest call: its route when it connected, "no route" when a later one did not', async () => {
+    let refuse = false;
+    stubHost({ call_signal: (args) => {
+      if (refuse) throw { code: 'spend_refused', message: 'Owner grant required.' };
+      return { message_id: 'sig', kind: args!.kind, amount_msat: 1000, total_msat: 6000, max_routing_fee_msat: 5000, delivered: true, accepted: true, sent_at_ms: Date.now() };
+    } });
+    await openShell();
+    expect(await lastCallLine()).toBe('Last call: no call yet');
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
+    const pc = FakePc.made[0];
+    pc.stats = new Map([
+      ['transport', { type: 'transport', selectedCandidatePairId: 'pair' }],
+      ['pair', { type: 'candidate-pair', localCandidateId: 'local', remoteCandidateId: 'remote' }],
+      ['local', { type: 'local-candidate', candidateType: 'srflx' }],
+      ['remote', { type: 'remote-candidate', candidateType: 'host' }],
+    ]);
+    pc.connect();
+    await vi.waitFor(() => expect(text('[data-call-connection]')).toContain('srflx(STUN)'));
+    $<HTMLButtonElement>('[data-call-hangup]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-dismiss]')!.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call-dismiss]')!.click();
+    expect(await lastCallLine()).toBe('Last call: srflx (this device) / host (theirs)');
+    // A later call is refused before it connects: the card says so, not the earlier route.
+    refuse = true;
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-call-dismiss]')!.click();
+    expect(await lastCallLine()).toBe('Last call: no route (it didn’t connect)');
+  });
+
+  it('a call that went live with no stats read is "connected, route unavailable"; a later call refused before it starts is "didn\'t connect"', async () => {
+    let small = false;
+    stubHost({
+      call_signal: (args) => ({ message_id: 'sig', kind: args!.kind, amount_msat: 1000, total_msat: 6000, max_routing_fee_msat: 5000, delivered: true, accepted: true, sent_at_ms: Date.now() }),
+      // Later, the node grant is too small for a call: place() refuses before the call has an id.
+      budget_status: () => ({ ...openBudget(), ...(small ? { node_grant: { expires_at_ms: Date.now() + 86_400_000, budget_msat: 200_000, remaining_msat: 200_000, per_call_max_msat: 1000 } } : {}) }),
+    });
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
+    // No stats ever name a pair (an empty report), but the call goes live.
+    FakePc.made[0].stats = new Map();
+    FakePc.made[0].connect();
+    await vi.waitFor(() => expect($('[data-call-panel="live"]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-call-hangup]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-dismiss]')!.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call-dismiss]')!.click();
+    expect(await lastCallLine()).toBe('Last call: connected, route unavailable');
+    small = true;
+    await new Promise((r) => setTimeout(r, 3500));
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect(text('[data-call-ended]')).toMatch(/This call needs up to/));
+    expect(FakePc.made).toHaveLength(1);
+    $<HTMLButtonElement>('[data-call-dismiss]')!.click();
+    expect(await lastCallLine()).toBe('Last call: no route (it didn’t connect)');
+  }, 20_000);
+
+  it('a first call that never connects is "no route", not "no call yet"', async () => {
+    stubHost({ call_signal: () => { throw { code: 'spend_refused', message: 'Owner grant required.' }; } });
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-call-dismiss]')!.click();
+    expect(await lastCallLine()).toBe('Last call: no route (it didn’t connect)');
+  });
+
   it('labels a six-sat maximum as a cap and retains the selected ICE route', async () => {
     stubHost({ call_signal: (args) => ({ message_id: 'sig', kind: args!.kind, amount_msat: 1000, total_msat: 6000, max_routing_fee_msat: 5000, delivered: true, accepted: true, sent_at_ms: Date.now() }) });
     await openShell();
@@ -1576,6 +1775,72 @@ describe('calls in the shell', () => {
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-dismiss]')!.disabled).toBe(false));
     $<HTMLButtonElement>('[data-call-dismiss]')!.click();
     await vi.waitFor(() => expect($('[data-on-call]')).toBeNull());
+  });
+
+  it('while reconnecting, says the connection was lost and how many seconds are left, in the panel and the pill; the ended card makes no recovery promise', async () => {
+    const host = stubHost({ messages_list: () => [] });
+    await openShell();
+    host.emitLive({ type: 'message', room_id: null, message: { ...msg(400, { media: 'audio', sdp: 'offer' }), timestamp: Date.now() } });
+    await vi.waitFor(() => expect($('[data-call-accept]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-call-accept]')!.click();
+    await vi.waitFor(() => expect(host.used('call_signal')).toHaveLength(1));
+    const pc = FakePc.made[0]; pc.connect();
+    await vi.waitFor(() => expect($('[data-call-panel="live"]')).not.toBeNull());
+    expect($('[data-call-reconnecting]')).toBeNull();
+    pc.state('disconnected');
+    await vi.waitFor(() => expect($('[data-call-reconnecting]')).not.toBeNull());
+    expect(text('[data-call-reconnecting]')).toMatch(/^Connection lost\. Reconnecting… If it isn’t back in (29|30) s, the call ends\.$/);
+    expect(text('[data-on-call]')).toMatch(/^Reconnecting… · (29|30) s$/);
+    const before = Number(text('[data-call-drop-in]'));
+    await new Promise((r) => setTimeout(r, 1200));
+    expect(Number(text('[data-call-drop-in]'))).toBeLessThan(before);
+    $<HTMLButtonElement>('[data-call-hangup]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    expect($('[data-call-recovery-note]')).toBeNull();
+    expect($('[data-call-reconnecting]')).toBeNull();
+  });
+
+  it('Codex: a camera error, then a drop: the camera error is shown as it is, never as a recovery that could not start', async () => {
+    vi.spyOn(HTMLMediaElement.prototype, 'srcObject', 'set').mockImplementation(() => {});
+    const host = stubHost({ messages_list: () => [] });
+    await openShell();
+    host.emitLive({ type: 'message', room_id: null, message: { ...msg(400, { media: 'video', sdp: 'offer' }), timestamp: Date.now() } });
+    await vi.waitFor(() => expect($('[data-call-accept]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-call-accept]')!.click();
+    await vi.waitFor(() => expect(host.used('call_signal')).toHaveLength(1));
+    const pc = FakePc.made[0]; pc.connect();
+    await vi.waitFor(() => expect($('[data-call-panel="live"]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-call-camera]')!.click();
+    await vi.waitFor(() => expect($('[data-call-camera]')!.getAttribute('aria-pressed')).toBe('false'));
+    pc.senders[1].replaceTrack = async () => { throw new Error('sender failed'); };
+    $<HTMLButtonElement>('[data-call-camera]')!.click();
+    await vi.waitFor(() => expect($('[data-call-error]')).not.toBeNull());
+    const cameraError = text('[data-call-error]');
+    pc.state('disconnected');
+    await vi.waitFor(() => expect($('[data-call-panel="reconnecting"]')).not.toBeNull());
+    expect(text('[data-call-error]')).toBe(cameraError);
+    expect(text('[data-call-error]')).not.toMatch(/Recovery could not start/);
+  });
+
+  it('a recovery that cannot start is said as such while it still waits for the connection', async () => {
+    const host = stubHost({
+      messages_list: () => [],
+      call_signal: (args) => {
+        if (args!.kind === 402) throw { code: 'spend_refused', message: 'Owner grant required.' };
+        return { message_id: 'sig', kind: args!.kind, amount_msat: 1000, total_msat: 6000, max_routing_fee_msat: 5000, delivered: true, accepted: true, sent_at_ms: Date.now() };
+      },
+    });
+    await openShell();
+    host.emitLive({ type: 'message', room_id: null, message: { ...msg(400, { media: 'audio', sdp: 'offer' }), timestamp: Date.now() } });
+    await vi.waitFor(() => expect($('[data-call-accept]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-call-accept]')!.click();
+    await vi.waitFor(() => expect(host.used('call_signal')).toHaveLength(1));
+    const pc = FakePc.made[0]; pc.connect();
+    await vi.waitFor(() => expect($('[data-call-panel="live"]')).not.toBeNull());
+    pc.state('failed');
+    await vi.waitFor(() => expect($('[data-call-error]')).not.toBeNull(), { timeout: 4000 });
+    expect(text('[data-call-error]')).toMatch(/^Recovery could not start: .+ Still waiting for the connection to come back on its own\.$/);
+    expect($('[data-call-panel="reconnecting"]')).not.toBeNull();
   });
 
   it('shows Reconnecting… and keeps video and controls mounted through a network blip', async () => {

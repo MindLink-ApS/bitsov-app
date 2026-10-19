@@ -107,7 +107,7 @@ const RAISED = 'Their call price went up since it was shown. Nothing was paid; s
  * join, or theirs when they join); `nolink`: this pair has no leg (refused,
  * not a contact, no call price); the rest of the meeting goes on.
  */
-export type LegState = 'waiting' | 'placing' | 'ringing' | 'incoming' | 'connecting' | 'live' | 'ended' | 'nolink';
+export type LegState = 'waiting' | 'placing' | 'ringing' | 'incoming' | 'connecting' | 'live' | 'reconnecting' | 'ended' | 'nolink';
 
 export type LegView = { peer: string; state: LegState; outgoing: boolean; paidMsat: number; error: string | null };
 
@@ -306,11 +306,11 @@ export function createMeetingEngine(deps: MeetingDeps) {
       l.remote = e.streams[0] ?? new MediaStream([e.track]);
       streams();
     };
-    conn.onconnectionstatechange = () => {
+    const changed = (state: string) => {
       if (l.pc !== conn) return;
-      const state = conn.connectionState;
       if (state === 'connected') {
         clearTimeout(l.drop);
+        l.drop = undefined;
         clearTimeout(l.timer);
         if (l.state !== 'live') {
           l.state = 'live';
@@ -318,17 +318,31 @@ export function createMeetingEngine(deps: MeetingDeps) {
         }
       } else if (state === 'disconnected') {
         // A blip may come back; a vanished peer ends this leg only (nothing paid).
-        clearTimeout(l.drop);
-        l.drop = setTimeout(() => {
-          if (l.pc === conn) {
-            closeLeg(l, 'ended', 'The connection was lost.');
-            settle();
-          }
-        }, DISCONNECT_GRACE_MS);
+        // Said as it is meanwhile; the one grace is armed once per drop, by whichever signal comes first.
+        if (l.state === 'live') {
+          l.state = 'reconnecting';
+          publish();
+        }
+        if (l.drop === undefined) {
+          l.drop = setTimeout(() => {
+            if (l.pc === conn) {
+              closeLeg(l, 'ended', 'The connection was lost.');
+              settle();
+            }
+          }, DISCONNECT_GRACE_MS);
+        }
       } else if (state === 'failed' || state === 'closed') {
         closeLeg(l, 'ended', 'The direct connection failed.');
         settle();
       }
+    };
+    conn.onconnectionstatechange = () => changed(conn.connectionState);
+    // WKWebView may report ICE failure before the aggregate connection state:
+    // the same path as the aggregate one (no new timer, nothing paid).
+    conn.oniceconnectionstatechange = () => {
+      const state = conn.iceConnectionState;
+      if (state === 'failed' || state === 'disconnected') changed(state);
+      else if ((state === 'connected' || state === 'completed') && conn.connectionState === 'connected') changed('connected');
     };
     return conn;
   };

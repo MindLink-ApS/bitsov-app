@@ -3,7 +3,7 @@ import { render } from 'solid-js/web';
 import App from '../src/App';
 import type { PairingView } from '../src/onboarding/pairing';
 import type { BudgetView, CallQuote, CallReceipt, LiveEvent, Message, SpendView } from '../src/control/types';
-import { createCallEngine, RING_MS } from '../src/control/call';
+import { createCallEngine, DISCONNECT_GRACE_MS, RING_MS } from '../src/control/call';
 import { createMeetingEngine, inviteCost, joinCost, validRoster, type MeetingDeps, type MeetingView } from '../src/control/meeting';
 import { resetContactsForTests, setPetname } from '../src/control/petnames';
 
@@ -36,8 +36,12 @@ class FakePc {
   addEventListener() {}
   removeEventListener() {}
   close() { this.closed = true; }
+  iceConnectionState = 'new';
+  oniceconnectionstatechange: (() => void) | null = null;
   connect() { this.connectionState = 'connected'; this.onconnectionstatechange?.(); }
   state(s: string) { this.connectionState = s; this.onconnectionstatechange?.(); }
+  /** What WKWebView may report first: ICE alone, before the aggregate state. */
+  ice(s: string) { this.iceConnectionState = s; this.oniceconnectionstatechange?.(); }
 }
 
 function track(kind: 'audio' | 'video') {
@@ -286,6 +290,54 @@ describe('meeting engine', () => {
     // A's paid offer gets its hangup; B was never rung and costs nothing.
     expect(sent.map((s) => [s.peer, s.kind])).toEqual([[A, 400], [A, 403]]);
     expect(last().phase).toBe('ended');
+  });
+});
+
+describe('meeting legs through a drop', () => {
+  beforeEach(() => { FakePc.made = []; vi.useFakeTimers(); });
+  afterEach(() => vi.useRealTimers());
+  /** One live leg to A (offer paid, answer in, connected). */
+  async function liveLeg() {
+    const m = engine();
+    await m.e.invite([A], 'audio', SHOWN);
+    await m.e.receive(sig(401, A, cid(1), { sdp: 'v=0 answer' }), OWN);
+    const pc = FakePc.made[FakePc.made.length - 1];
+    pc.connect();
+    expect(legOf(m.last(), A).state).toBe('live');
+    return { ...m, pc };
+  }
+
+  it('a dropped leg says Reconnecting while its grace runs, is live again when it comes back, and ends after the grace when it does not', async () => {
+    const { last, pc } = await liveLeg();
+    pc.state('disconnected');
+    expect(legOf(last(), A).state).toBe('reconnecting');
+    pc.connect();
+    expect(legOf(last(), A).state).toBe('live');
+    pc.state('disconnected');
+    await vi.advanceTimersByTimeAsync(DISCONNECT_GRACE_MS - 1);
+    expect(legOf(last(), A).state).toBe('reconnecting');
+    await vi.advanceTimersByTimeAsync(1);
+    expect(legOf(last(), A)).toMatchObject({ state: 'ended', error: 'The connection was lost.' });
+  });
+
+  it('ICE failure ends a leg through the very same path as the aggregate failure: same leg end, reason and tally', async () => {
+    const aggregate = await liveLeg();
+    aggregate.pc.state('failed');
+    FakePc.made = [];
+    const ice = await liveLeg();
+    ice.pc.ice('failed');
+    const strip = (v: MeetingView) => ({ phase: v.phase, error: v.error, paidMsat: v.paidMsat, leg: legOf(v, A) });
+    expect(strip(ice.last())).toEqual(strip(aggregate.last()));
+    expect(legOf(ice.last(), A)).toMatchObject({ state: 'ended', error: 'The direct connection failed.' });
+  });
+
+  it('ICE and the aggregate state both reporting one drop arm the one grace once: it ends 10 s after the first', async () => {
+    const { last, pc } = await liveLeg();
+    pc.ice('disconnected');
+    await vi.advanceTimersByTimeAsync(5000);
+    pc.state('disconnected');
+    await vi.advanceTimersByTimeAsync(DISCONNECT_GRACE_MS - 5000);
+    expect(legOf(last(), A)).toMatchObject({ state: 'ended', error: 'The connection was lost.' });
   });
 });
 
@@ -710,6 +762,28 @@ describe('meetings in the shell', () => {
     await inviteMaya();
     await vi.waitFor(() => expect($('[data-meeting-paid]')?.getAttribute('data-meeting-paid')).toBe('unknown'));
     expect(text('[data-meeting-paid]')).toBe('No payment for this meeting is confirmed. One signal’s result is not known yet (up to 15 sats in all if it went through): check pending result. Media is not billed.');
+  });
+
+  it('a dropped leg reads "Reconnecting…" on its tile, and "Live" again when it comes back', async () => {
+    const host = stubHost();
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="meeting"]')?.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call="meeting"]')!.click();
+    await vi.waitFor(() => expect(text('[data-meeting-invite]')).toBe('Invite · 21 sats'));
+    $<HTMLButtonElement>('[data-meeting-invite]')!.click();
+    await vi.waitFor(() => expect(host.used('call_signal')).toHaveLength(1));
+    const callId = JSON.parse(host.used('call_signal')[0].args!.plaintext as string).call_id as string;
+    host.emitLive({ type: 'message', room_id: null, message: sig(401, A, callId, { sdp: 'v=0 answer' }) });
+    await vi.waitFor(() => expect($(`[data-meeting-leg="${A}"]`)?.getAttribute('data-leg-state')).toBe('connecting'));
+    const pc = FakePc.made[0];
+    pc.connect();
+    await vi.waitFor(() => expect($(`[data-meeting-leg="${A}"]`)?.getAttribute('data-leg-state')).toBe('live'));
+    pc.state('disconnected');
+    await vi.waitFor(() => expect($(`[data-meeting-leg="${A}"]`)?.getAttribute('data-leg-state')).toBe('reconnecting'));
+    expect(text(`[data-meeting-leg="${A}"] .hint`)).toBe('Reconnecting…');
+    pc.connect();
+    await vi.waitFor(() => expect(text(`[data-meeting-leg="${A}"] .hint`)).toBe('Live'));
+    $<HTMLButtonElement>('[data-meeting-leave]')!.click();
   });
 
   it('meeting legs use the same STUN as 1:1 calls: your own node by default', async () => {
