@@ -3925,6 +3925,8 @@ struct Charge {
     /// The node keeps durable message operations (`message_operations_v1`):
     /// a 1:1 compose carries a journaled `operation_id`.
     operation: bool,
+    /// Envelope identity support from this send's status; None asks afresh.
+    envelope_ids: Option<bool>,
 }
 
 fn budget_dir(state: &NodeState) -> Result<(PathBuf, String), ActionError> {
@@ -4002,7 +4004,7 @@ fn plan_manual_charge(state: &NodeState, target: &str, max_msat: u64) -> Result<
     }))?;
     Ok(Charge {
         target: target.into(), room: false, confirm: None,
-        readmission_possible: false, confirmed: false, operation: false,
+        readmission_possible: false, confirmed: false, operation: false, envelope_ids: None,
     })
 }
 
@@ -4163,7 +4165,8 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
         if let Some(peer) = peer { let _ = read_first_contact_quote_with_cap(state, &peer, true).await; }
     }
     let all_in_caps = has_all_in_caps(state);
-    let node_grant = check_node_grant(state, path, &body, max_msat).await?;
+    let node_grant = check_node_grant_with_envelope_ids(state, path, &body, max_msat,
+        charge.as_ref().and_then(|c| c.envelope_ids)).await?;
     let reserve_msat = match (&charge, &node_grant) {
         // A zero cap: the node pays nothing, re-admission included.
         _ if max_msat == 0 => 0,
@@ -4643,13 +4646,27 @@ fn operation_reply_outcome(reply: &act::SendReply) -> spend_journal::Outcome {
 /// Ask the node what became of this send (`GET /messages/operations/{id}`).
 /// Never re-sends and never pays: a retry is a separate owner action that
 /// reuses the same id. Unknown or unrecognised states keep the fence.
-async fn reconcile_operation(state: &NodeState, journal: &Journal, mut pending: spend_journal::Pending, id: &str) -> Result<String, ActionError> {
+async fn reconcile_operation(state: &NodeState, journal: &Journal, pending: spend_journal::Pending, id: &str) -> Result<String, ActionError> {
+    reconcile_operation_with_reply(state, journal, pending, id, None).await
+}
+
+/// A resume POST's answer uses the same evidence/accounting rules as a lookup.
+async fn reconcile_operation_with_reply(state: &NodeState, journal: &Journal, mut pending: spend_journal::Pending, id: &str, response: Option<(reqwest::StatusCode, String)>) -> Result<String, ActionError> {
     let result = async {
     use spend_journal::{Outcome, OperationState as OpState};
+    // Never retain stale permission after a failed check or a changed state.
+    if pending.admission_resume {
+        pending.admission_resume = false;
+        journal.save(&pending)?;
+        journal.record_outcome(&pending, OpState::Unknown, None)?;
+    }
     let path = format!("/messages/operations/{id}");
     let lookup_started_at = spend_journal::timestamp_ms();
-    let (status, mut text) = call_api(state, reqwest::Method::GET, &path, None).await
-        .map_err(|e| spend_journal::unknown(format!("Your node could not be asked about this send ({e}). Nothing was dispatched again.")))?;
+    let (status, mut text) = match response {
+        Some(reply) => reply,
+        None => call_api(state, reqwest::Method::GET, &path, None).await
+            .map_err(|e| spend_journal::unknown(format!("Your node could not be asked about this send ({e}). Nothing was dispatched again.")))?,
+    };
     let decode = |text: &str| -> Result<act::SendReply, ActionError> {
         let reply: act::SendReply = serde_json::from_str(text).map_err(spend_journal::unknown)?;
         if reply.operation_id.as_deref() != Some(id) {
@@ -4748,6 +4765,17 @@ async fn reconcile_operation(state: &NodeState, journal: &Journal, mut pending: 
         (_, Some(reply)) => reply,
         (_, None) => unreachable!("only NothingPaid lacks a reply"),
     };
+    let history = journal.operation_record(id)?;
+    // Node operations::response includes admission in amount_msat; a prepared
+    // row without a message id/hash has not dispatched the message (§5 of
+    // .plan-abandon.md). No other evidence shape authorizes compose again.
+    let admission_only = reply.state.as_deref() == Some("prepared") && reply.amount_msat > 0
+        && reply.readmission_msat.unwrap_or(0) == 0 && reply.payment_hash.is_none()
+        && reply.message_id.is_empty() && !reply.delivered && !reply.accepted && reply.retry_allowed
+        && retry.is_none() && pending.op.is_some() && pending.peer.is_some()
+        && history.as_ref().is_some_and(|r| r.kind == "message" && r.payment_hash.is_none()
+            && r.message_id.is_none() && r.paid_msat.unwrap_or(0) <= reply.amount_msat
+            && !matches!(r.state, OpState::Paid | OpState::Settled | OpState::Closed | OpState::FailedPaid));
     let evidence: serde_json::Value = serde_json::from_str(&text).map_err(spend_journal::unknown)?;
     let recorded = match outcome {
         Outcome::Accepted | Outcome::Sent => OpState::Paid,
@@ -4798,8 +4826,13 @@ async fn reconcile_operation(state: &NodeState, journal: &Journal, mut pending: 
         });
     }
     pending.accounting_msat = Some(paid);
+    pending.admission_resume = admission_only && !pending.over_budget;
     journal.save(&pending)?;
     if pending.budgeted { close_charge(state, pending.charge_id(), Some(paid), pending.target.as_ref())?; }
+    if pending.admission_resume {
+        journal.record_outcome(&pending, OpState::AdmissionResumable, None)?;
+        return Ok(format!("Admission paid ({paid_msat} msat), message not sent. Send the same message with the same cap to resume its existing operation. Nothing was dispatched again."));
+    }
     if pending.over_budget {
         return Err(spend_journal::unknown("The node reports payment beyond the confirmed bound. Funds may already have moved; do not retry."));
     }
@@ -4883,11 +4916,24 @@ async fn node_has_g1(state: &NodeState) -> Result<bool, ActionError> {
 }
 
 async fn read_grant(state: &NodeState) -> Result<Option<NodeGrant>, ActionError> {
+    // Read capabilities first so the grant remains the freshest authority
+    // check immediately before a paid request.
+    let envelope_ids = node_offers(state, grant::RELATION_ENVELOPE_ID_CAPABILITY).await;
+    read_grant_with_envelope_ids(state, envelope_ids).await
+}
+
+async fn read_grant_with_envelope_ids(state: &NodeState, envelope_ids: bool) -> Result<Option<NodeGrant>, ActionError> {
     let (status, body) = call_api(state, reqwest::Method::GET, "/pair/grant", None).await.map_err(|_| grant::unreadable())?;
     if !status.is_success() {
         return Err(grant::unreadable());
     }
-    grant::parse(&body)
+    let mut grant = grant::parse(&body)?;
+    if let Some(g) = grant.as_mut() {
+        if !envelope_ids {
+            g.envelope_id_by_recipient = None;
+        }
+    }
+    Ok(grant)
 }
 
 /// Before opening anything on a paired node: `Ok(None)` on a pre-G1 node, the
@@ -4962,11 +5008,19 @@ fn drop_grant(state: &NodeState) {
 /// Re-read the node grant immediately before a paid request, and refuse what
 /// it would refuse. Only when this run opened its approvals under one.
 async fn check_node_grant(state: &NodeState, path: &str, body: &serde_json::Value, max_msat: u64) -> Result<Option<NodeGrant>, ActionError> {
+    check_node_grant_with_envelope_ids(state, path, body, max_msat, None).await
+}
+
+async fn check_node_grant_with_envelope_ids(state: &NodeState, path: &str, body: &serde_json::Value, max_msat: u64, envelope_ids: Option<bool>) -> Result<Option<NodeGrant>, ActionError> {
     if state.node_grant.lock().unwrap().is_none() {
         return Ok(None);
     }
     let now = now_ms();
-    let Some(g) = read_grant(state).await?.filter(|g| g.live(now)) else {
+    let grant = match envelope_ids {
+        Some(offered) => read_grant_with_envelope_ids(state, offered).await?,
+        None => read_grant(state).await?,
+    };
+    let Some(g) = grant.filter(|g| g.live(now)) else {
         drop_grant(state);
         return Err(grant::ended());
     };
@@ -5192,7 +5246,11 @@ async fn spend_advance_for_inner(state: &NodeState, want: Option<Want>) -> Resul
                             armed_granted_op = node.as_ref().map(|g| g.op_id.clone()).filter(|id| !id.is_empty());
                         }
                         if let Some(ceiling) = wants.budget {
-                            arm_want(&mut gate, &mut autopay, Want::Budget(ceiling), act::SpendBasis::NodeGrant, node.as_ref());
+                            autopay.arm_pending_until(
+                                now_ms(), node.as_ref().map_or(u64::MAX, NodeGrant::expires_at_ms),
+                                node.as_ref().map_or(ceiling, |g| ceiling.min(g.budget_msat)),
+                                act::SpendBasis::NodeGrant, &pending,
+                            );
                         }
                         *state.node_grant.lock().unwrap() = node.clone();
                     }
@@ -5328,6 +5386,7 @@ struct SendCaps {
     /// A capped 1:1 chat may pay a reconnect's re-admission under the
     /// contact's fresh signed quote (genome #111 revived).
     quoted_readmission: bool,
+    envelope_ids: bool,
 }
 
 async fn require_price_caps(state: &NodeState, room: bool) -> Result<SendCaps, ActionError> {
@@ -5343,6 +5402,7 @@ async fn require_price_caps(state: &NodeState, room: bool) -> Result<SendCaps, A
         readmission_possible: has(grant::FIRST_CONTACT_CAPABILITY),
         operations: has(OPERATIONS_CAPABILITY),
         quoted_readmission: has(act::QUOTED_READMISSION_CAPABILITY),
+        envelope_ids: has(grant::RELATION_ENVELOPE_ID_CAPABILITY),
         status,
     })
 }
@@ -5419,6 +5479,86 @@ async fn do_message_send_with(
     do_message_send_inner(state, recipient, is_room, plaintext, max_msat, max_recipient_msat, first_contact_msat, false).await
 }
 
+/// The only escape from an admission-only fence. Never replaces the slot,
+/// changes the request, raises a cap, or enters the delivery-retry path.
+async fn resume_admission_send(state: &NodeState, pending_id: &str, peer: &str, is_room: bool, plaintext: &str, max_msat: u64) -> Result<MoneyReply, ActionError> {
+    let _money = state.money.lock().await;
+    let journal = spend_journal(state)?;
+    let mut pending = journal.pending()?.filter(|p| p.id == pending_id && p.admission_resume
+        && !p.over_budget && p.evidence_reservation_msat.is_some() && p.undelivered.is_none()
+        && p.max_msat == max_msat && p.peer.as_deref() == Some(peer) && !is_room
+        && state.node_id.lock().unwrap().as_deref() == Some(p.node_id.as_str()))
+        .ok_or_else(|| spend_journal::unknown("Only the same message and cap can resume its paid admission."))?;
+    let id = pending.operation_id.clone().ok_or_else(|| spend_journal::unknown("Missing operation identity."))?;
+    let mut body = act::compose_body(peer, false, plaintext)?;
+    body["max_total_msat"] = serde_json::json!(max_msat);
+    if let Some(fee) = pending.compose_fee_msat { body["max_routing_fee_msat"] = serde_json::json!(fee); }
+    let matches_request = |body: &serde_json::Value| {
+        blake3::hash(format!("/messages/compose\n{body}").as_bytes()).to_hex().as_str() == pending.request_hash
+    };
+    if !matches_request(&body) && pending.compose_fee_msat.is_none()
+        && pending.op.as_deref() == Some(spend_journal::operation(&body).as_str()) {
+        // Older journals lack the fee cap. Use today's quote only if it
+        // reconstructs the exact original hash; never guess or raise a cap.
+        let quote = read_price_quote(state, Some(peer)).await?;
+        body["max_routing_fee_msat"] = serde_json::json!(quote.max_routing_fee_msat);
+    }
+    if !matches_request(&body) {
+        return Err(spend_journal::unknown("Only the same message and request can resume its paid admission."));
+    }
+    refuse_if_connection_waiting(state)?;
+    refuse_if_paused(state)?;
+    ensure_fresh_token(state).await;
+    let token = state.token.lock().unwrap().clone().ok_or_else(|| ActionError::new("app_not_ready", "Not authenticated."))?;
+    check_node_grant(state, "/messages/compose", &body, max_msat).await?;
+    // Restore the original reservation in place. The whole-operation answer
+    // settles this same entry, including its already-paid admission.
+    let reserved = pending.evidence_reservation_msat.unwrap();
+    let window = approval_generation(state);
+    let (ceiling, generation) = {
+        let mut approval = state.autopay.lock().unwrap();
+        (approval.ceiling(now_ms()), approval.generation())
+    };
+    let auth = with_book(state, true, |book| {
+        let index = book.ledger.iter().rposition(|e| e.id == pending.charge_id())
+            .ok_or_else(|| spend_journal::unknown("Missing admission budget entry."))?;
+        // This is a replacement, not a second charge. Exclude only its own
+        // entry while planning; every other liability still counts.
+        let mut projected = book.clone();
+        projected.ledger.remove(index);
+        let plan = budget::plan(&projected, budget::Ask { target: peer, room: false, max_msat: reserved,
+            first_contact_msat: None, autopay: ceiling, window: window.as_ref().map(|_| ()).map_err(Clone::clone), now_ms: now_ms() })?;
+        let auth = match plan.route { budget::Route::Budget => Auth::Budget(generation), budget::Route::Window => Auth::Window(window?) };
+        book.ledger[index].msat = reserved;
+        book.ledger[index].settled = false;
+        Ok(auth)
+    })?;
+    // Consume permission durably before exactly one POST. A lost answer must
+    // be checked again; saved accounting is never authority to resume.
+    pending.admission_resume = false;
+    pending.dispatched_at = Some(spend_journal::timestamp_ms());
+    journal.save(&pending)?;
+    journal.record_outcome(&pending, spend_journal::OperationState::Dispatching, None)?;
+    refuse_if_connection_waiting(state)?;
+    refuse_if_paused(state)?;
+    check_auth(state, auth)?;
+    body["operation_id"] = serde_json::json!(id);
+    let response = state.http.post(format!("{}/messages/compose", state.api_base))
+        .bearer_auth(token).json(&body).timeout(state.spend_timeout).send().await
+        .map_err(|_| spend_journal::unknown("The resume did not return a complete response. Check pending result."))?;
+    let status = response.status();
+    let text = response.text().await.map_err(spend_journal::unknown)?;
+    if !status.is_success() {
+        return Err(spend_journal::unknown("The resume did not complete. Admission remains accounted; check pending result."));
+    }
+    reconcile_operation_with_reply(state, &journal, pending, &id, Some((status, text.clone()))).await?;
+    let reply: act::SendReply = serde_json::from_str(&text).map_err(spend_journal::unknown)?;
+    if !matches!(reply.state.as_deref(), Some("acked" | "sent")) {
+        return Err(spend_journal::unknown("The message is still pending. Check pending result."));
+    }
+    Ok(MoneyReply { text, operation_id: Some(id) })
+}
+
 async fn do_message_send_inner(
     state: &NodeState,
     recipient: &str,
@@ -5437,6 +5577,11 @@ async fn do_message_send_inner(
     let room_leg = !is_room && act::is_room_chat(plaintext);
     if room_leg && first_contact_msat.is_some() {
         return Err(ActionError::invalid("A room never pays a first contact."));
+    }
+    let admission = spend_journal(state)?.pending()?.filter(|p| p.admission_resume);
+    if let Some(pending) = admission {
+        let text = resume_admission_send(state, &pending.id, &target, is_room, plaintext, max_msat).await?;
+        return send_receipt(text, target, is_room);
     }
     let (auth, plan) = plan_message(state, &target, is_room, max_msat, first_contact_msat)?;
     no_pending_spend(state)?;
@@ -5493,7 +5638,7 @@ async fn do_message_send_inner(
             body["max_routing_fee_msat"] = serde_json::json!(ask.max_routing_fee_msat);
         }
     }
-    let charge = Charge { target: target.clone(), room: is_room, confirm: plan.confirm, readmission_possible, confirmed: node_ok.is_some(), operation: caps.operations && !is_room };
+    let charge = Charge { target: target.clone(), room: is_room, confirm: plan.confirm, readmission_possible, confirmed: node_ok.is_some(), operation: caps.operations && !is_room, envelope_ids: Some(caps.envelope_ids) };
     let sent = money_post(state, auth, "/messages/compose", body.clone(), max_msat, Some(charge)).await;
     let sent = match sent {
         // After a reconnect or restart the contact asks for admission again,
@@ -5515,6 +5660,12 @@ async fn do_message_send_inner(
         }
         other => other?,
     };
+    send_receipt(text, recipient, is_room)
+    }.await;
+    act::with_op(Fallback(existing_operation.as_deref()), result)
+}
+
+fn send_receipt(text: MoneyReply, recipient: String, is_room: bool) -> Result<act::SendReceipt, ActionError> {
     let reply: act::SendReply = text.decode("/messages/compose")?;
     let total_msat = act::with_op(Active(text.operation_id.as_deref()), reply.total_msat())?;
     Ok(act::SendReceipt {
@@ -5532,8 +5683,6 @@ async fn do_message_send_inner(
         accepted: reply.accepted,
         readmission_msat: reply.readmission_msat.filter(|m| *m > 0),
     })
-    }.await;
-    act::with_op(Fallback(existing_operation.as_deref()), result)
 }
 
 /// Genome `quoted_readmission_v1`: the contact asked for admission again and
@@ -5646,7 +5795,7 @@ async fn do_message_retry(state: &NodeState, recipient: &str, plaintext: &str, a
         confirm_first_contact(state, &target, cap, contact_budget, caps.readmission_possible).await?;
     }
     // Nothing can be paid under a zero cap, re-admission included.
-    let charge = Charge { target: target.clone(), room: false, confirm: None, readmission_possible: readmission_possible && approved_msat.is_some(), confirmed: approved_msat.is_some(), operation: caps.operations };
+    let charge = Charge { target: target.clone(), room: false, confirm: None, readmission_possible: readmission_possible && approved_msat.is_some(), confirmed: approved_msat.is_some(), operation: caps.operations, envelope_ids: Some(caps.envelope_ids) };
     let text = match money_post_with(state, auth, "/messages/compose", body, cap, Some(charge), Some(&undelivered)).await {
         // The node pays re-admission under a cap that fits the contact's signed
         // quote: Retry delivery (zero cap) asks the owner for that price.
@@ -5934,7 +6083,7 @@ async fn do_call_signal(
         // Admission plus one hangup: check the ceiling shown for the whole
         // call, not just this offer. money_post still rechecks the paid step.
         let total = quote.call_total_msat.expect("an offer has a call total");
-        check_node_grant(state, "/messages/compose", &body, total).await.map_err(|mut error| {
+        check_node_grant_with_envelope_ids(state, "/messages/compose", &body, total, Some(caps.envelope_ids)).await.map_err(|mut error| {
             if matches!(error.code, "grant_per_call" | "grant_exhausted") {
                 error.message = format!(
                     "This call needs up to {}. {} The owner would need to approve at least {} per call and enough remaining budget for that ceiling. Nothing was sent or paid.",
@@ -5953,6 +6102,7 @@ async fn do_call_signal(
         readmission_possible: caps.readmission_possible,
         confirmed: false,
         operation: caps.operations,
+        envelope_ids: Some(caps.envelope_ids),
     };
     let text = money_post(state, auth, "/messages/compose", body, max_msat, Some(charge)).await?;
     let reply: act::SendReply = text.decode("/messages/compose")?;
@@ -6043,6 +6193,7 @@ async fn do_porch_read(state: &NodeState, peer: &str, path: &str, max_msat: u64)
         readmission_possible: false,
         confirmed: false,
         operation: false,
+        envelope_ids: None,
     };
     let (text, accounted) = porch_post(state, auth, body, max_msat, charge).await?;
     porch::project(&text, &target, &path, accounted, now_unix().max(0) as u64).map_err(|e| {
@@ -6222,6 +6373,7 @@ async fn do_file_send(
         readmission_possible: caps.readmission_possible,
         confirmed: node_ok.is_some(),
         operation: false,
+        envelope_ids: Some(caps.envelope_ids),
     };
     let text = money_post(
         state,
@@ -6724,6 +6876,14 @@ async fn do_relation_approve(
         }
         return Err(ActionError::node(api_error("/pair/relation-intent", status, &text)));
     }
+    // This approval's ID comes only from its response, never from the later
+    // grant read (another device may already have replaced the envelope).
+    let envelope_id = if node_offers(state, grant::RELATION_ENVELOPE_ID_CAPABILITY).await {
+        serde_json::from_str::<serde_json::Value>(&text).ok()
+            .and_then(|reply| reply["envelope_id"].as_str().map(str::to_owned))
+    } else {
+        None
+    };
     // The grant reaches a token only on re-issue. Open the window over the
     // relation grant and nothing else: never a console elevation request.
     refresh_paired(state).await.map_err(ActionError::node)?;
@@ -6737,7 +6897,7 @@ async fn do_relation_approve(
     };
     open_fenced(state, fence, Want::Window, act::SpendBasis::NodeGrant, Some(&grant))?;
     save_spend_pending(state);
-    Ok(state.spend.lock().unwrap().view(now_ms()))
+    Ok(act::SpendView { envelope_id, ..state.spend.lock().unwrap().view(now_ms()) })
 }
 
 // Owner approval v1 uses the renderer's default camelCase invoke arguments.
@@ -6926,10 +7086,14 @@ async fn spend_dismiss_undelivered(
 
 fn budget_view(state: &NodeState) -> Result<budget::BudgetView, ActionError> {
     let now = now_ms();
-    let autopay = state.autopay.lock().unwrap().view(now);
+    let (autopay, armed_by_request) = {
+        let mut approval = state.autopay.lock().unwrap();
+        let view = approval.view(now);
+        (view, approval.armed_by_request().map(str::to_owned))
+    };
     let waiting = state.wants.lock().unwrap().budget.is_some() && state.spend.lock().unwrap().view(now).pending.is_some();
     let node_grant = state.node_grant.lock().unwrap().as_ref().filter(|g| g.live(now)).map(grant::GrantSummary::from);
-    with_book(state, false, |book| Ok(budget::BudgetView { node_grant, ..budget::view(book, autopay, waiting, now) }))
+    with_book(state, false, |book| Ok(budget::BudgetView { armed_by_request, node_grant, ..budget::view(book, autopay, waiting, now) }))
 }
 
 fn budget_target(target: &str, room: bool) -> Result<String, ActionError> {
@@ -10168,7 +10332,7 @@ mod control_act_tests {
         let mut body = act::compose_body(ROOM, true, "hi").unwrap();
         body["max_total_msat"] = serde_json::json!(13000);
         body["max_recipient_msat"] = serde_json::json!({A: 7000, C: 6000});
-        let charge = Charge { target: ROOM.into(), room: true, confirm: plan.confirm, readmission_possible: false, confirmed: false, operation: true };
+        let charge = Charge { target: ROOM.into(), room: true, confirm: plan.confirm, readmission_possible: false, confirmed: false, operation: true, envelope_ids: None };
         money_post(&ops.state, auth, "/messages/compose", body, 13000, Some(charge)).await.unwrap();
         assert_eq!(op_ids(&node), [None]);
         assert_eq!(op_ids(&ops), [None], "genome refuses operation_id for rooms (slice 4)");
@@ -10295,6 +10459,136 @@ mod control_act_tests {
         assert!(pending(&node).unwrap().operation_id.is_none());
         assert_eq!(ledger_record(&node, &id)["state"], "unpaid");
         assert_eq!(node.posts().len(), 1, "the tombstone itself proves abandonment");
+    }
+
+    #[tokio::test]
+    async fn admission_only_resume_preserves_request_and_accounts_once() {
+        for (first_contact, legacy) in [(false, false), (true, false), (false, true)] {
+        let (inner, _) = ops_node();
+        let saved = Arc::new(Mutex::new(None::<serde_json::Value>));
+        let request = saved.clone();
+        let node = fake(AuthMode::Local, Arc::new(move |m, path, body| {
+            if path == "/messages/compose" {
+                let body: serde_json::Value = serde_json::from_str(body).unwrap();
+                let mut original = request.lock().unwrap();
+                if let Some(original) = original.as_ref() {
+                    assert_eq!(&body, original, "same id and exact request, including caps");
+                    let mut reply: serde_json::Value = serde_json::from_str(&op_reply(body["operation_id"].as_str().unwrap(), "acked")).unwrap();
+                    reply["amount_msat"] = serde_json::json!(4000);
+                    return (200, reply.to_string());
+                }
+                *original = Some(body);
+                return (500, "{}".into()); // Admission settled, crash before message dispatch.
+            }
+            if let Some(id) = path.strip_prefix("/messages/operations/") {
+                let mut reply: serde_json::Value = serde_json::from_str(&op_reply(id, "prepared")).unwrap();
+                reply["amount_msat"] = serde_json::json!(2000);
+                reply["message_id"] = serde_json::json!("");
+                return (200, reply.to_string());
+            }
+            inner(m, path, body)
+        }));
+        spend_advance(&node.state, true).await.unwrap();
+        assert_eq!(do_message_send_with(&node.state, A, false, "gm", 14000, None,
+            first_contact.then_some(14000)).await.unwrap_err().code, "spend_unknown");
+        let id = pending(&node).unwrap().operation_id.unwrap();
+        if legacy {
+            let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(journal_file(&node)).unwrap()).unwrap();
+            value.as_object_mut().unwrap().remove("compose_fee_msat");
+            value.as_object_mut().unwrap().remove("admission_resume");
+            std::fs::write(journal_file(&node), value.to_string()).unwrap();
+        }
+        let hash = pending(&node).unwrap().request_hash;
+        assert!(do_spend_reconcile(&reopen(&node)).await.unwrap().contains("same message"));
+        assert_eq!(settled(&node), [2000]);
+        assert_eq!(ledger_record(&node, &id)["state"], "admission_resumable");
+        let listed = serde_json::to_value(do_op_list(&node.state, Some(A)).await.unwrap()).unwrap();
+        assert_eq!(listed["operations"][0]["state"], "admission_resumable");
+        let p = pending(&node).unwrap();
+        assert!(do_spend_dismiss_undelivered(&node.state, &p.id).is_err());
+        for (peer, text, cap) in [(A, "different", 14000), ("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "gm", 14000), (A, "gm", 15000)] {
+            assert!(do_message_send(&node.state, peer, false, text, cap, None).await.is_err());
+        }
+        assert_eq!(compose_bodies(&node).len(), 1, "mismatched requests never POST");
+        with_book(&node.state, true, |book| {
+            book.ceiling_msat = 14000;
+            book.set_limit(A, false, 14000)?;
+            Ok(())
+        }).unwrap();
+        let restarted = reopen(&node);
+        spend_advance(&restarted, true).await.unwrap();
+        let receipt = do_message_send(&restarted, A, false, "gm", 14000, None).await.unwrap();
+        assert_eq!(receipt.operation_id.as_deref(), Some(id.as_str()));
+        assert_eq!(op_ids(&node), [Some(id.clone()), Some(id.clone())], "exactly one resume POST");
+        assert_eq!(ledger_record(&node, &id)["request_hash"], hash);
+        assert_eq!(settled(&node), [4000], "one whole-operation charge, admission counted once");
+        assert!(pending(&node).is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn admission_resume_is_revoked_by_any_other_evidence_or_failed_lookup() {
+        for change in ["released", "paying", "payment_unknown", "abandoned", "hash", "readmission", "message", "no_retry", "delivered", "accepted", "empty", "missing", "malformed"] {
+            let (inner, _) = ops_node();
+            let phase = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let changed = phase.clone();
+            let node = fake(AuthMode::Local, Arc::new(move |m, path, body| {
+                if path == "/messages/compose" { return (500, "{}".into()); }
+                if let Some(id) = path.strip_prefix("/messages/operations/") {
+                    let mut reply: serde_json::Value = serde_json::from_str(&op_reply(id, "prepared")).unwrap();
+                    reply["amount_msat"] = serde_json::json!(2000);
+                    reply["message_id"] = serde_json::json!("");
+                    if changed.load(Ordering::SeqCst) {
+                        match change {
+                            "hash" => reply["payment_hash"] = serde_json::json!(OP_HASH),
+                            "readmission" => reply["readmission_msat"] = serde_json::json!(1000),
+                            "message" => reply["message_id"] = serde_json::json!("dispatched"),
+                            "no_retry" => reply["retry_allowed"] = serde_json::json!(false),
+                            "delivered" => reply["delivered"] = serde_json::json!(true),
+                            "accepted" => reply["accepted"] = serde_json::json!(true),
+                            "empty" => reply["amount_msat"] = serde_json::json!(0),
+                            "missing" => return (404, "{}".into()),
+                            "malformed" => return (200, "{}".into()),
+                            state => reply["state"] = serde_json::json!(state),
+                        }
+                    }
+                    return (200, reply.to_string());
+                }
+                inner(m, path, body)
+            }));
+            uncertain_send(&node).await;
+            do_spend_reconcile(&node.state).await.unwrap();
+            phase.store(true, Ordering::SeqCst);
+            assert!(do_spend_reconcile(&node.state).await.is_err(), "{change}");
+            assert!(!pending(&node).unwrap().admission_resume, "{change}");
+            assert!(do_message_send(&node.state, A, false, "gm", 14000, None).await.is_err(), "{change}");
+            assert_eq!(compose_bodies(&node).len(), 1, "{change}: no new POST");
+        }
+    }
+
+    #[tokio::test]
+    async fn admission_resume_lost_answer_requires_another_check() {
+        let (inner, _) = ops_node();
+        let node = fake(AuthMode::Local, Arc::new(move |m, path, body| {
+            if path == "/messages/compose" { return (500, "{}".into()); }
+            if let Some(id) = path.strip_prefix("/messages/operations/") {
+                let mut reply: serde_json::Value = serde_json::from_str(&op_reply(id, "prepared")).unwrap();
+                reply["amount_msat"] = serde_json::json!(2000);
+                reply["message_id"] = serde_json::json!("");
+                return (200, reply.to_string());
+            }
+            inner(m, path, body)
+        }));
+        let id = uncertain_send(&node).await;
+        do_spend_reconcile(&node.state).await.unwrap();
+        assert!(do_message_send(&node.state, A, false, "gm", 14000, None).await.is_err());
+        assert!(!pending(&node).unwrap().admission_resume);
+        assert_eq!(ledger_record(&node, &id)["paid_msat"], 2000);
+        assert!(do_message_send(&node.state, A, false, "gm", 14000, None).await.is_err());
+        assert_eq!(compose_bodies(&node).len(), 2, "no automatic or unchecked third POST");
+        do_spend_reconcile(&reopen(&node)).await.unwrap();
+        assert_eq!(settled(&node), [2000]);
+        assert!(pending(&node).unwrap().admission_resume);
     }
 
     #[tokio::test]
@@ -10671,7 +10965,7 @@ mod control_act_tests {
                     else if command == "porch" {
                         porch_post(&node.state, Auth::Window(0), serde_json::json!({}), 6000,
                             Charge { target: A.into(), room: false, confirm: None,
-                                readmission_possible: false, confirmed: false, operation: false }).await.map(|_| ())
+                                readmission_possible: false, confirmed: false, operation: false, envelope_ids: None }).await.map(|_| ())
                     }
                     else { money_post_with(&node.state, Auth::Window(0), "/messages/compose",
                         serde_json::json!({}), 7000, None, None).await.map(|_| ()) }
@@ -14026,6 +14320,7 @@ mod control_act_tests {
             serde_json::to_value(do_budget_resume(s).await.unwrap()).unwrap(),
         ] {
             assert_eq!(reply.get("request_id"), Some(&serde_json::Value::Null));
+            assert_eq!(reply.get("armed_by_request"), Some(&serde_json::Value::Null));
             assert_eq!(reply.get("granted_op"), Some(&serde_json::Value::Null));
         }
         let view = serde_json::to_value(spend_advance(s, false).await.unwrap()).unwrap();
@@ -14052,6 +14347,7 @@ mod control_act_tests {
             serde_json::to_value(do_budget_resume(&node.state).await.unwrap()).unwrap(),
         ] {
             assert_eq!(reply.get("request_id"), Some(&serde_json::Value::Null));
+            assert_eq!(reply.get("armed_by_request"), Some(&serde_json::Value::Null));
             assert_eq!(reply.get("granted_op"), Some(&serde_json::Value::Null));
         }
         assert!(node.posts().is_empty());
@@ -14076,6 +14372,99 @@ mod control_act_tests {
             }
             assert_eq!(spend_advance(&node.state, false).await.unwrap().granted_op.as_deref(), Some("cd34"));
         }
+    }
+
+    #[tokio::test]
+    async fn approval_ids_budget_keeps_only_the_completed_pending_request() {
+        for command in ["budget_approve", "budget_resume"] {
+            for window in [false, true] {
+                let (node, _dir, g1) = g1_node(&["read", "receive"]);
+                let s = &node.state;
+                if window { spend_advance(s, true).await.unwrap(); }
+                g1.grant.lock().unwrap()["op_id"] = "cd34".into();
+                let calls = if window { 2 } else { 3 };
+                for call in 0..calls {
+                    let reply = if command == "budget_approve" {
+                        do_budget_approve(s, 500_000, budget::PresetId::Careful).await.unwrap()
+                    } else {
+                        do_budget_resume(s).await.unwrap()
+                    };
+                    let reply = serde_json::to_value(reply).unwrap();
+                    assert_eq!(reply["request_id"], "ab12");
+                    assert_eq!(reply.get("armed_by_request"), Some(&if call == calls - 1 {
+                        serde_json::json!("ab12")
+                    } else { serde_json::Value::Null }));
+                }
+                // Budget-only completion clears the shared pending record too.
+                assert!(s.spend.lock().unwrap().pending().is_none());
+                g1.grant.lock().unwrap()["op_id"] = "ef56".into();
+                let view = serde_json::to_value(do_budget_status(s).await.unwrap()).unwrap();
+                assert_eq!(view["autopay"]["state"], "open");
+                assert_eq!(view["armed_by_request"], "ab12");
+                assert_eq!(view.get("request_id"), Some(&serde_json::Value::Null));
+                let narrowed = serde_json::to_value(do_budget_approve(s, 400_000, budget::PresetId::Careful).await.unwrap()).unwrap();
+                assert_eq!(narrowed["armed_by_request"], "ab12", "narrowing preserves the active approval");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn approval_ids_budget_resets_on_pause_lock_expiry_and_replacement() {
+        for reset in ["pause", "lock", "expiry", "local", "immediate"] {
+            let (node, _dir, _g1) = g1_node(&["read", "receive"]);
+            let s = &node.state;
+            do_budget_approve(s, 500_000, budget::PresetId::Careful).await.unwrap();
+            spend_advance(s, false).await.unwrap();
+            spend_advance(s, false).await.unwrap();
+            let open = serde_json::to_value(budget_view(s).unwrap()).unwrap();
+            assert_eq!(open["armed_by_request"], "ab12");
+            match reset {
+                "pause" => { do_budget_pause(s).unwrap(); }
+                "lock" => s.autopay.lock().unwrap().lock(),
+                "expiry" => s.autopay.lock().unwrap().restrict(now_ms(), 500_000),
+                "local" => s.autopay.lock().unwrap().arm(now_ms(), 500_000, act::SpendBasis::AppLock),
+                "immediate" => { do_budget_resume(s).await.unwrap(); }
+                _ => unreachable!(),
+            }
+            let view = serde_json::to_value(budget_view(s).unwrap()).unwrap();
+            assert_eq!(view.get("armed_by_request"), Some(&serde_json::Value::Null), "{reset}");
+            assert_eq!(view["autopay"]["state"], match reset {
+                "expiry" => "expired",
+                "local" | "immediate" => "open",
+                _ => "off",
+            });
+        }
+    }
+
+    #[tokio::test]
+    async fn approval_ids_cancelled_budget_request_cannot_name_the_next_approval() {
+        let requests = AtomicUsize::new(0);
+        let routes: Routes = Arc::new(move |method, path, _body| {
+            let reply = match (method, path) {
+                ("POST", "/pair/elevation-request") => {
+                    let op = if requests.fetch_add(1, Ordering::SeqCst) == 0 { "aa11" } else { "bb22" };
+                    serde_json::json!({"op_id": op, "expires_at": now_unix() + 900,
+                        "owner_action": format!("konsensus grant --op {op}")})
+                }
+                ("DELETE", "/pair/elevation/aa11") => serde_json::json!({}),
+                ("GET", "/pair/elevation/bb22") => serde_json::json!({"op_id": "bb22", "status": "granted"}),
+                _ => return (0, String::new()),
+            };
+            (200, reply.to_string())
+        });
+        let (node, _dir, g1) = g1_node_with(&["read", "receive"], Some(routes));
+        let s = &node.state;
+        g1.grant.lock().unwrap()["op_id"] = "cd34".into();
+        assert_eq!(do_budget_approve(s, 500_000, budget::PresetId::Careful).await.unwrap().request_id.as_deref(), Some("aa11"));
+        do_spend_cancel(s).await.unwrap();
+        let cancelled = serde_json::to_value(budget_view(s).unwrap()).unwrap();
+        assert_eq!(cancelled.get("armed_by_request"), Some(&serde_json::Value::Null));
+        assert_eq!(do_budget_approve(s, 500_000, budget::PresetId::Careful).await.unwrap().request_id.as_deref(), Some("bb22"));
+        spend_advance(s, false).await.unwrap();
+        let view = serde_json::to_value(budget_view(s).unwrap()).unwrap();
+        assert_eq!(view["autopay"]["state"], "open");
+        assert_eq!(view["armed_by_request"], "bb22");
+        assert_eq!(view.get("request_id"), Some(&serde_json::Value::Null));
     }
 
     #[tokio::test]
@@ -14356,6 +14745,93 @@ mod control_act_tests {
 
     #[cfg(target_os = "macos")]
     #[tokio::test]
+    async fn relation_envelope_identity_approval_passes_only_the_advertised_node_id() {
+        for (advertised, identity) in [
+            (true, serde_json::json!("approval-A/opaque")),
+            (false, serde_json::json!("approval-A/opaque")),
+            (true, serde_json::Value::Null),
+            (false, serde_json::Value::Null),
+        ] {
+            let (dn, device_routes) = device_node();
+            let returned_identity = identity.clone();
+            let routes: Routes = Arc::new(move |m, path, body| {
+                if path == "/status" {
+                    let caps = if advertised {
+                        vec!["spend_budget_grant_v1", "relation_envelope_id_v1"]
+                    } else { vec!["spend_budget_grant_v1"] };
+                    return (200, serde_json::json!({"api_capabilities": caps}).to_string());
+                }
+                let (status, text) = device_routes(m, path, body);
+                if path == "/pair/relation-intent" && status == 200 {
+                    let mut reply: serde_json::Value = serde_json::from_str(&text).unwrap();
+                    // An older node omits the field entirely.
+                    if advertised || !returned_identity.is_null() {
+                        reply["envelope_id"] = returned_identity.clone();
+                    }
+                    return (status, reply.to_string());
+                }
+                (status, text)
+            });
+            let (node, _dir, g1) = g1_node_with(&["read", "receive"], Some(routes));
+            *node.state.device_policy.lock().unwrap() = device_key::Policy::NoPromptForTests;
+            let s = &node.state;
+            do_device_key_register(s).await.unwrap();
+            dn.registered.store(true, Ordering::SeqCst);
+            do_device_key_status(s).await.unwrap();
+            *g1.grant.lock().unwrap() = relation_grant(A, 7000);
+            // A later grant read must not substitute B for the approval's A.
+            g1.grant.lock().unwrap()["envelope_id_by_recipient"] = serde_json::json!({A: "approval-B"});
+            let reply = serde_json::to_value(do_relation_approve(s, A, None, Some(7000)).await.unwrap()).unwrap();
+            let expected = if advertised { identity } else { serde_json::Value::Null };
+            assert_eq!(reply.get("envelope_id"), Some(&expected));
+            assert_eq!(reply["state"], "open");
+        }
+    }
+
+    #[tokio::test]
+    async fn relation_envelope_identity_grant_requires_capability_and_preserves_legacy_null() {
+        for advertised in [false, true] {
+            let routes: Routes = Arc::new(move |_, path, _| {
+                if path == "/status" {
+                    let caps = if advertised {
+                        vec!["spend_budget_grant_v1", "relation_envelope_id_v1"]
+                    } else { vec!["spend_budget_grant_v1"] };
+                    return (200, serde_json::json!({"api_capabilities": caps}).to_string());
+                }
+                (0, String::new())
+            });
+            let (node, _dir, g1) = g1_node_with(&["read", "receive", "spend"], Some(routes));
+            for identities in [serde_json::json!({A: "approval-A", C: null}), serde_json::Value::Null] {
+                g1.grant.lock().unwrap()["envelope_id_by_recipient"] = identities.clone();
+                let reply = serde_json::to_value(do_budget_status(&node.state).await.unwrap()).unwrap();
+                let expected = if advertised { identities } else { serde_json::Value::Null };
+                assert_eq!(reply["node_grant"].get("envelope_id_by_recipient"), Some(&expected));
+            }
+            g1.grant.lock().unwrap().as_object_mut().unwrap().remove("envelope_id_by_recipient");
+            let reply = serde_json::to_value(do_budget_status(&node.state).await.unwrap()).unwrap();
+            assert_eq!(reply["node_grant"].get("envelope_id_by_recipient"), Some(&serde_json::Value::Null));
+        }
+    }
+
+    #[tokio::test]
+    async fn relation_envelope_identity_grant_refresh_reports_replacement_b() {
+        let routes: Routes = Arc::new(|_, path, _| {
+            if path == "/status" {
+                return (200, serde_json::json!({"api_capabilities": ["spend_budget_grant_v1", "relation_envelope_id_v1"]}).to_string());
+            }
+            (0, String::new())
+        });
+        let (node, _dir, g1) = g1_node_with(&["read", "receive", "spend"], Some(routes));
+        // Only the identity changes: same aggregate op, terms and expiry.
+        for identity in ["approval-A", "approval-B"] {
+            g1.grant.lock().unwrap()["envelope_id_by_recipient"] = serde_json::json!({A: identity, C: null});
+            let reply = serde_json::to_value(do_budget_status(&node.state).await.unwrap()).unwrap();
+            assert_eq!(reply["node_grant"]["envelope_id_by_recipient"], serde_json::json!({A: identity, C: null}));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
     async fn register_once_then_a_touch_id_envelope_opens_sending_to_that_contact_only() {
         let (dn, first) = device_node();
         let (node, _dir, g1) = g1_node_with(&["read", "receive"], Some(first));
@@ -14541,6 +15017,8 @@ mod control_act_tests {
         let routes: Routes = Arc::new(move |m, p, b| {
             let high = raised.load(Ordering::SeqCst);
             let value = match p {
+                "/status" => serde_json::json!({"api_capabilities": ["paid_send_caps_v1", "room_terminal_outcomes_v1",
+                    "spend_budget_grant_v1", "first_contact_grant_v1", "relation_envelope_id_v1"]}),
                 "/pricing/peers" => serde_json::json!([
                     {"peer_id": A, "prices": {"communication": if high { 9000 } else { 2000 }}, "age_secs": 0, "stale": false}
                 ]),
@@ -14577,10 +15055,14 @@ mod control_act_tests {
     #[tokio::test]
     async fn send_preflight_reads_status_once_and_grant_last() {
         for call in [false, true] {
-            let (node, _dir, _g1) = send_preflight_node(call, Arc::new(AtomicBool::new(false))).await;
-            for _ in 0..2 {
+            let (node, _dir, g1) = send_preflight_node(call, Arc::new(AtomicBool::new(false))).await;
+            for identity in ["approval-A", "approval-B"] {
+                g1.grant.lock().unwrap()["envelope_id_by_recipient"] = serde_json::json!({A: identity, C: null});
                 node.seen.lock().unwrap().clear();
                 preflight_send(&node, call).await.unwrap();
+                // Sending refreshes the identity too, using this send's one status read.
+                let view = serde_json::to_value(budget_now(&node.state)).unwrap();
+                assert_eq!(view["node_grant"]["envelope_id_by_recipient"], serde_json::json!({A: identity, C: null}));
                 let targets = node.targets();
                 assert_eq!(targets.iter().filter(|p| *p == "GET /status").count(), 1, "{targets:?}");
                 let own = if call { "GET /payments/price/401" } else { "GET /payments/price/0" };

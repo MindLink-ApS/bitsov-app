@@ -1268,7 +1268,18 @@ input[type='checkbox'], input[type='radio'] { width: auto; flex: none; padding: 
 .box-illustration.paired + .touchid-text { animation: state-fade var(--d-mid) var(--ease) 160ms both; }
 @keyframes box-paired { 0%, 100% { filter: drop-shadow(0 0 0 transparent); } 45% { filter: drop-shadow(0 0 10px var(--accent)); } }
 @keyframes state-fade { from { opacity: 0; } to { opacity: 1; } }
-.pair-words { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--s-3); list-style: none; padding: 0; margin: var(--s-3) 0; }
+.pair-words { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--s-3); list-style: none; padding: 0; margin: var(--s-3) 0; counter-reset: pair-word; }
+/* The order matters: number each word (outside its text, so the word itself is unchanged). */
+.pair-words li { counter-increment: pair-word; position: relative; }
+.pair-words li::before { content: counter(pair-word); position: absolute; top: 6px; left: 8px; font-size: 12px; font-weight: 600; color: var(--muted); }
+/* Adding a device: the same three steps on both devices. */
+.pair-steps { display: flex; flex-wrap: wrap; gap: var(--s-2) var(--s-4); list-style: none; padding: 0; margin: var(--s-2) 0 var(--s-3); font-size: var(--t-sm); color: var(--muted); }
+.pair-steps li { display: inline-flex; align-items: center; gap: 6px; min-height: 28px; }
+.pair-steps .pair-step-n { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; border: 1px solid var(--line-strong); font-size: 12px; font-weight: 600; }
+.pair-steps li[data-step-state='current'] { color: var(--ink); font-weight: 600; }
+.pair-steps li[data-step-state='current'] .pair-step-n { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+.pair-steps li[data-step-state='done'] .pair-step-n { background: var(--sunk); color: var(--ink); }
+.pair-steps[data-pair-steps='ended'] { opacity: .6; }
 .pair-words li { min-width: 0; padding: var(--s-4) var(--s-2); border: 1px solid var(--line-strong); border-radius: var(--r-control); background: var(--sunk); color: var(--ink); font-size: clamp(18px, 4vw, 24px); font-weight: 600; text-align: center; overflow-wrap: anywhere; }
 .node-offline { display: flex; flex-direction: column; align-items: center; gap: var(--s-3); margin: 0 auto; padding: var(--s-6) var(--s-4); width: min(100%, 520px); min-width: 0; color: var(--ink); text-align: center; overflow-wrap: anywhere; }
 .node-offline [data-offline-title] { font-family: var(--font-display); font-size: var(--t-3xl); font-weight: 400; }
@@ -1411,3 +1422,8 @@ input[type='checkbox'], input[type='radio'] { width: auto; flex: none; padding: 
 /* The setup steps keep the first-run column's own spacing; hidden while offline (still mounted). */
 .first-run > .setup-steps { display: contents; }
 .first-run > .setup-steps[hidden] { display: none; }
+
+/* Settings → Node: the connection card (read-only facts for a hands-on test). */
+.connection-card { margin: var(--s-3) 0; padding: var(--s-3); border: 1px solid var(--line); border-radius: var(--r-md, 10px); }
+.connection-card h3 { margin: 0 0 var(--s-2); font-size: var(--t-sm); }
+.connection-card .facts-list { list-style: none; padding: 0; margin: 0 0 var(--s-2); display: grid; gap: 4px; font-size: var(--t-sm); color: var(--muted); }

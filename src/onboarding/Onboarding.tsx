@@ -262,7 +262,7 @@ export function Onboarding(props: {
           </Show>
 
           {/* Joining from another owner device is a first-run path of its own: not hidden behind Advanced. */}
-          <Show when={!props.mobile && stage() === 'node' && target() === 'local'}>
+          <Show when={!phone() && stage() === 'node' && target() === 'local'}>
             <p class="hint" data-join-from-device>
               Joining from another device?{' '}
               <button type="button" class="link" data-join-open onClick={() => setTarget('network')}>Scan or paste its ticket</button>

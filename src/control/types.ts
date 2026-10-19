@@ -482,7 +482,7 @@ export type ActionError = {
 };
 
 /** H1 `op_list`: the host's own record of a paid operation (read only; never a spending authority). */
-export type OperationState = 'dispatching' | 'paid' | 'unpaid' | 'paid_undelivered' | 'failed_paid' | 'unknown' | 'settled' | 'closed';
+export type OperationState = 'dispatching' | 'admission_resumable' | 'paid' | 'unpaid' | 'paid_undelivered' | 'failed_paid' | 'unknown' | 'settled' | 'closed';
 export type OpView = {
   op_id: string;
   /** `message`, `call_offer`, ...; any other string is shown as nothing. */
@@ -563,9 +563,10 @@ export type SpendView = {
   request_id?: string | null;
   /** Node op that granted the open window; null if closed or unknown. Absent on older hosts. */
   granted_op?: string | null;
-  /** Open windows: the node request whose completion armed this window; null when armed immediately (cx-armedby-1). Absent on older hosts. */
-  /** Pending elevation completed to arm the open window; null without one or when closed. Absent on older hosts. */
+  /** Open windows: the node request (pending elevation) whose completion armed this window; null when armed immediately, without one, or when closed. Absent on older hosts. */
   armed_by_request?: string | null;
+  /** `relation_approve`: the node's accepted envelope ID; null if unknown or unsupported. Absent on older hosts. */
+  envelope_id?: string | null;
   state: SpendState;
   /** Set with `expired` when a request ended ungranted: offer Ask again. */
   lapse?: SpendLapse | null;
@@ -598,6 +599,8 @@ export type BudgetView = BudgetAccounting & {
   request_id?: string | null;
   /** Node op of the spending window this action armed; null if none or unknown. */
   granted_op?: string | null;
+  /** Pending elevation completed to arm autopay; null without one or when closed. Absent on older hosts. */
+  armed_by_request?: string | null;
   paused: boolean;
   autopay: { state: AutopayState; open_until_ms: number | null; ceiling_msat: number | null; basis: SpendBasis | null };
   /** A budget approval is waiting for the owner at the node. */
@@ -616,7 +619,7 @@ export type BudgetView = BudgetAccounting & {
   node_grant: NodeGrantSummary | null;
 };
 
-/** What the node reports about its budget grant. Numbers only. */
+/** What the node reports about its budget grant. No credentials or authority. */
 export type NodeGrantSummary = {
   expires_at_ms: number;
   budget_msat: number;
@@ -624,6 +627,10 @@ export type NodeGrantSummary = {
   per_call_max_msat: number;
   /** A Touch ID relation grant: each contact with an envelope → when it ends (ms). Absent for a console grant. */
   envelopes?: Record<string, number> | null;
+  /** Current node envelope IDs; null without capability support. Null entries are legacy/unknown; absent peers are unknown. Absent on older hosts. */
+  envelope_id_by_recipient?: Record<string, string | null> | null;
+  /** Remaining msat by lower-case node ID (cap minus used, saturating at zero). Unbudgeted peers are omitted; absent on older hosts. */
+  recipient_left_msat_by_recipient?: Record<string, number>;
   /** The node's breaker state for this grant (owner approval v1 node), passed through by the host. */
   breakers?: BreakerStatus;
 };
@@ -765,6 +772,8 @@ export type Artifact =
       id: string; at: number; type: 'sending'; text: string; capMsat: number;
       /** Approve & send: pressed, waiting for its approval. Nothing has been handed to the send path yet. */
       waiting?: true;
+      /** The waiting line's verb: a budget press allows payments ("Sends when allowed"); otherwise approved. */
+      waitWord?: 'allowed';
       /** A room's member caps as quoted at the press (the send uses these, not a later quote). */
       memberCaps?: Record<string, number>;
       /** The node's live echo of this send, if it came before the receipt: hidden while this shows. */

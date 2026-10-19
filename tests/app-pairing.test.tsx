@@ -256,7 +256,7 @@ describe('app shell pairing wiring', () => {
     await vi.waitFor(() => expect(steps.hidden).toBe(true));
     // The offline card is the page: exactly one visible h1, its title.
     const visibleH1 = () => [...mount!.querySelectorAll('h1')].filter((h) => !h.closest('[hidden]')).map((h) => h.textContent);
-    expect(visibleH1()).toEqual(['Your box is offline']);
+    expect(visibleH1()).toEqual(['Your node is offline']);
     mount.querySelector<HTMLButtonElement>('[data-offline-change]')!.click();
     await vi.waitFor(() => expect(steps.hidden).toBe(false));
     expect(mount.querySelector('[data-ob-head]')).not.toBeNull();
@@ -264,7 +264,7 @@ describe('app shell pairing wiring', () => {
     expect(mount.querySelector('[data-node-offline]')).not.toBeNull();
     // With the setup steps back, the card steps down to h2 under the setup's own h1.
     await vi.waitFor(() => expect(mount!.querySelector('[data-node-offline] [data-offline-title]')!.tagName).toBe('H2'));
-    expect(visibleH1()).not.toContain('Your box is offline');
+    expect(visibleH1()).not.toContain('Your node is offline');
   });
 
   it('a box restarting after setup goes offline for a moment: the ceremony stays mounted, keeps polling, sends no cancel, and completes', async () => {
@@ -356,7 +356,13 @@ describe('app shell pairing wiring', () => {
     mount = document.createElement('div'); document.body.appendChild(mount);
     dispose = render(() => <App />, mount);
     await vi.waitFor(() => expect(mount!.querySelector('[data-first-run]')?.textContent).toContain('42'));
-    expect(mount.querySelector('[data-node-offline]')?.textContent).toContain('Your box is offline');
+    expect(mount.querySelector('[data-node-offline]')?.textContent).toContain('Your node is offline');
+    // A remote node is not assumed to be a box: any computer or server.
+    expect(mount.querySelector('[data-node-offline]')?.textContent).toContain('the computer or server running your node');
+    expect(mount.querySelector('[data-node-offline]')?.textContent).not.toMatch(/\bbox\b/i);
+    // Only what is true from this device: new sends are blocked, earlier ones may still settle, and no "nothing is paid" claim.
+    expect(mount.querySelector('[data-node-offline]')?.textContent).toContain('We can’t reach it right now. BitSov keeps trying. New messages can’t be sent until your node is back; ones already sent may still complete.');
+    expect(mount.querySelector('[data-node-offline]')?.textContent).not.toMatch(/nothing is (sent or )?paid/i);
     expect(mount.querySelector('[data-node-offline]')?.textContent).toContain('Last seen: unknown');
     expect(mount.querySelector('[data-node-offline] button')?.textContent).toBe('Retry now');
     expect(mount.textContent).not.toContain('Node stopped');
@@ -407,6 +413,38 @@ describe('app shell pairing wiring', () => {
       }
       expect(onboardingMounted).toBe(false);
     } finally { observer.disconnect(); }
+  });
+
+  it('the status poll keeps its cadence and its offline transitions (the connection card only times it)', async () => {
+    vi.useFakeTimers();
+    const calls: string[] = [];
+    let reachable = true;
+    vi.stubGlobal('__TAURI_INTERNALS__', { invoke: (cmd: string) => {
+      calls.push(cmd);
+      if (cmd === 'node_status') return Promise.resolve(reachable
+        ? { ready: true, node_id: 'ef'.repeat(32), error: null }
+        : { ready: false, node_id: null, error: 'connection refused' });
+      if (cmd === 'pairing_status') return Promise.resolve({ ...paired, remote: true, trust_acknowledged_node_id: 'ef'.repeat(32) });
+      return Promise.reject(new Error('not available'));
+    } });
+    mount = document.createElement('div'); document.body.appendChild(mount);
+    dispose = render(() => <App />, mount);
+    await vi.advanceTimersByTimeAsync(100);
+    const reads = () => calls.filter((c) => c === 'node_status').length;
+    const pairings = () => calls.filter((c) => c === 'pairing_status').length;
+    const start = { reads: reads(), pairings: pairings() };
+    expect(start.reads).toBe(1);
+    await vi.advanceTimersByTimeAsync(4500);
+    // Exactly one status read (and one pairing read) per 1.5 s tick, as before.
+    expect(reads() - start.reads).toBe(3);
+    expect(pairings() - start.pairings).toBe(3);
+    expect(mount.querySelector('[data-node-offline]')).toBeNull();
+    reachable = false;
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(mount.querySelector('[data-node-offline]')).not.toBeNull();
+    reachable = true;
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(mount.querySelector('[data-node-offline]')).toBeNull();
   });
 
   it.each(['revoked', 'identity changed', 'setup reset'] as const)('returns a warm shell to onboarding when %s', async (change) => {
