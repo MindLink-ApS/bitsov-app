@@ -61,11 +61,18 @@ export const INITIAL_PAIRING: PairingView = {
   bootstrap: null,
 };
 
-export function onboardingSteps(status: NodeStatus, pairing: PairingView, trustAck: boolean): Step[] {
+/**
+ * The setup steps. `phone`: an Android or iOS build has no node of its own, so
+ * there is no "Start node" step; until it is paired to a remote node, pairing
+ * is the step in progress (never a local-node failure).
+ */
+export function onboardingSteps(status: NodeStatus, pairing: PairingView, trustAck: boolean, phone = false): Step[] {
   const nodeUp = pairing.state !== 'starting' || status.ready;
   const node: StepStatus = nodeUp ? 'done' : status.error ? 'failed' : 'active';
 
-  const pair: StepStatus = !nodeUp
+  const pair: StepStatus = phone && (!pairing.remote || !nodeUp)
+    ? 'active'
+    : !nodeUp
     ? 'todo'
     : pairing.state === 'pending'
       ? 'active'
@@ -89,7 +96,7 @@ export function onboardingSteps(status: NodeStatus, pairing: PairingView, trustA
   const fund: StepStatus = identity === 'done' ? 'active' : 'todo';
 
   return [
-    { id: 'node', label: 'Start node', status: node },
+    ...(phone ? [] : [{ id: 'node', label: 'Start node', status: node } as Step]),
     { id: 'pair', label: 'Pair this app', status: pair },
     { id: 'identity', label: 'Create or restore identity', status: identity },
     { id: 'fund', label: 'Fund', status: fund },

@@ -418,6 +418,8 @@ export type Pill = { tone: 'ok' | 'warn' | 'err' | 'idle'; text: string; live: b
 /** The rail's node pill: one glance at whether this seat is connected to its node. */
 export function nodePill(input: {
   remote?: boolean;
+  /** A phone has no local node: until it is paired to a remote one it is simply not connected. */
+  phone?: boolean;
   retryAfterSecs?: number | null;
   ready: boolean;
   error: string | null;
@@ -425,6 +427,7 @@ export function nodePill(input: {
   link: LinkState | null;
   nowMs: number;
 }): Pill {
+  if (input.phone && !input.remote) return { tone: 'idle', text: 'Not connected', live: false };
   if (input.retryAfterSecs) return { tone: 'warn', text: `Remote connection · waiting ${input.retryAfterSecs} s`, live: false };
   if (input.remote && input.error) return { tone: 'warn', text: 'Remote connection unavailable', live: false };
   if (input.remote && !input.ready) return { tone: 'idle', text: 'Connecting to remote node', live: false };

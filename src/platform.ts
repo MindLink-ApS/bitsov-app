@@ -21,3 +21,27 @@ export function appPlatform(
 
 /** A phone or tablet build (Android or iOS): there is no "This Mac" to run a node on. */
 export const isMobilePlatform = (platform: AppPlatform = appPlatform()) => platform !== 'desktop';
+
+/**
+ * The words for this device and its biometric, per platform: a Mac keeps
+ * Touch ID and "this Mac"; an iPhone says Face ID or Touch ID; Android says
+ * "this phone" and its fingerprint.
+ */
+export type DeviceWords = {
+  /** "this {device}". */
+  device: 'Mac' | 'iPhone' | 'phone';
+  /** What unlocks or approves here, as a noun: "unlock with {biometric}". */
+  biometric: string;
+  /** "Try again when {available} available." */
+  available: string;
+  /** The unlock button. */
+  unlockButton: string;
+};
+
+export function deviceWords(platform: AppPlatform = appPlatform()): DeviceWords {
+  switch (platform) {
+    case 'ios': return { device: 'iPhone', biometric: 'Face ID or Touch ID', available: 'Face ID or Touch ID is', unlockButton: 'Unlock with Face ID or Touch ID' };
+    case 'android': return { device: 'phone', biometric: 'your fingerprint', available: 'biometrics are', unlockButton: 'Unlock with biometrics' };
+    default: return { device: 'Mac', biometric: 'Touch ID', available: 'Touch ID is', unlockButton: 'Unlock with Touch ID' };
+  }
+}

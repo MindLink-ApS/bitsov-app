@@ -164,6 +164,15 @@ describe('node pill and freshness', () => {
     expect(nodePill({ ...base, ready: false, overview: null }).text).toBe('Starting node');
     expect(nodePill({ ...base, error: 'boom' }).tone).toBe('err');
   });
+
+  it('a phone has no local node: unpaired it is neutral "Not connected", never "Node stopped"', () => {
+    const phone = { phone: true, ready: false, error: 'sidecar not available', overview: null, link: null, nowMs: now };
+    expect(nodePill(phone)).toEqual({ tone: 'idle', text: 'Not connected', live: false });
+    expect(nodePill({ ...phone, error: null }).text).toBe('Not connected');
+    // Paired to a remote node, the remote wording applies as before.
+    expect(nodePill({ ...phone, remote: true }).text).toBe('Remote connection unavailable');
+    expect(nodePill({ ...phone, phone: false }).text).toBe('Node stopped');
+  });
 });
 
 describe('dev sample mode', () => {

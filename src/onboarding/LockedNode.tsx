@@ -2,6 +2,11 @@ import { usePairingActivity } from '../pairingActivity';
 import { createEffect, createSignal, Show } from 'solid-js';
 import { setUnlockRemembered, unlockRemembered } from './unlockMemory';
 import { hideLockedHubTrust, HubTrustInfo, lockedHubTrustHidden } from '../control/HubTrust';
+import { deviceWords, type AppPlatform } from '../platform';
+
+/** The platform's words; without `platform`, `mobile` means Android (older callers). */
+const wordsFor = (props: { platform?: AppPlatform; mobile?: boolean }) =>
+  deviceWords(props.platform ?? (props.mobile ? 'android' : 'desktop'));
 
 export function LockedNode(props: {
   onUnlock: () => Promise<void>;
@@ -9,6 +14,8 @@ export function LockedNode(props: {
   onUnlockWithPassword?: (password: string) => Promise<void>;
   hostError?: string | null;
   mobile?: boolean;
+  /** Which device's words to use (Mac / iPhone / Android phone). */
+  platform?: AppPlatform;
   typedUnlockSupported?: boolean;
   state?: 'ready' | 'no-password' | 'not-enrolled' | 'pending-approval';
   pending?: { fingerprint: string | null; owner_action: string | null } | null;
@@ -46,7 +53,7 @@ export function LockedNode(props: {
       setUnlockRemembered(true);
     }
     catch (e) {
-      setError(typeof e === 'string' ? e : `Unlock did not complete. Try again when ${props.mobile ? 'biometrics are' : 'Touch ID is'} available.`);
+      setError(typeof e === 'string' ? e : `Unlock did not complete. Try again when ${wordsFor(props).available} available.`);
       if (canType()) setTyping(true);
     }
     finally { setBusy(false); }
@@ -68,10 +75,10 @@ export function LockedNode(props: {
       <span class="target-badge honest" data-locked-badge>Node locked</span>
       <h2>Locked after a restart. Unlock to receive.</h2>
       <Show when={props.state === 'pending-approval' && props.pending}>
-        {(pending) => <PendingApproval pending={pending()} mobile={props.mobile} onCancel={props.onCancel} />}
+        {(pending) => <PendingApproval pending={pending()} mobile={props.mobile} platform={props.platform} onCancel={props.onCancel} />}
       </Show>
       <Show when={props.state === 'not-enrolled'}>
-        <p>This {props.mobile ? 'phone' : 'Mac'} is not an approved owner device yet.</p>
+        <p>This {wordsFor(props).device} is not an approved owner device yet.</p>
         <p>Unlock the node first using another approved owner device, or at the box. For the first owner device, stop the locked service, start the node with <code>konsensus start --config &lt;path&gt; --owner-control</code>, and type its password at the box’s terminal.</p>
         <p>Once the node is unlocked, open Settings → {props.mobile ? 'Set up biometric approvals' : 'Set up Touch ID approvals'}. Compare the fingerprint and finish approval at the box, then restart the remote-unlock service.</p>
         <button disabled>{props.mobile ? 'Set up biometric approvals' : 'Set up Touch ID approvals'}</button>
@@ -80,7 +87,7 @@ export function LockedNode(props: {
       <Show when={props.state !== 'not-enrolled' && props.state !== 'pending-approval'}>
       <p>Your node restarted (for example after a power cut). It cannot read your keys until you unlock it from this device. {typedFirst() ? 'Type the password you chose for your node - it takes a few seconds.' : 'Tap Unlock - it takes a few seconds.'}</p>
       <Show when={!typedFirst()}>
-        <button disabled={busy()} onClick={() => void unlock()}>{busy() ? 'Unlocking…' : props.mobile ? 'Unlock with biometrics' : 'Unlock with Touch ID'}</button>
+        <button disabled={busy()} onClick={() => void unlock()}>{busy() ? 'Unlocking…' : wordsFor(props).unlockButton}</button>
       </Show>
       <Show when={canType()}>
         <Show
@@ -100,7 +107,7 @@ export function LockedNode(props: {
               value={password()}
               onInput={(e) => setPassword(e.currentTarget.value)}
             />
-            <p class="hint">Your node checks it. This {props.mobile ? 'phone' : 'Mac'} keeps it only in memory, unless you then choose to remember it here behind {props.mobile ? 'your fingerprint' : 'Touch ID'}.</p>
+            <p class="hint">Your node checks it. This {wordsFor(props).device} keeps it only in memory, unless you then choose to remember it here behind {wordsFor(props).biometric}.</p>
             <div class="row">
               <button type="submit" class="primary" disabled={busy()}>{busy() ? 'Unlocking…' : 'Unlock with password'}</button>
               <button type="button" class="link" disabled={busy()} onClick={() => { setPassword(''); setTyping(false); setError(null); }}>Cancel</button>
@@ -110,8 +117,8 @@ export function LockedNode(props: {
       </Show>
       <Show when={typedFirst()}>
         <p class="hint unlock-saved" data-unlock-saved-path>
-          Chose Remember on this {props.mobile ? 'phone' : 'Mac'} before?{' '}
-          <button type="button" class="link" disabled={busy()} onClick={() => void unlock()}>{busy() ? 'Unlocking…' : props.mobile ? 'Unlock with biometrics' : 'Unlock with Touch ID'}</button>
+          Chose Remember on this {wordsFor(props).device} before?{' '}
+          <button type="button" class="link" disabled={busy()} onClick={() => void unlock()}>{busy() ? 'Unlocking…' : wordsFor(props).unlockButton}</button>
         </p>
       </Show>
       </Show>
@@ -125,6 +132,17 @@ export function LockedNode(props: {
   </div>;
 }
 
+const REMEMBER_TEXT = {
+  phone: 'BitSov encrypts it with a key in this phone’s secure hardware that only opens with your fingerprint. Next time, unlock with your fingerprint instead of typing it.',
+  iPhone: 'BitSov saves it on this iPhone, protected by Face ID or Touch ID. Next time, unlock with Face ID or Touch ID instead of typing it.',
+  Mac: 'BitSov saves it in this Mac’s Keychain, protected by Touch ID. Next time, unlock with Touch ID instead of typing it.',
+} as const;
+const REMEMBER_BUTTON = {
+  phone: 'Remember on this phone (fingerprint)',
+  iPhone: 'Remember on this iPhone (Face ID or Touch ID)',
+  Mac: 'Remember on this Mac (Touch ID)',
+} as const;
+
 /**
  * After a typed-password unlock the node accepted. The host already
  * holds that password; the renderer only answers yes or no. Rendered outside
@@ -132,6 +150,8 @@ export function LockedNode(props: {
  */
 export function RememberUnlock(props: {
   mobile?: boolean;
+  /** Which device's words to use (Mac / iPhone / Android phone). */
+  platform?: AppPlatform;
   onChoose: (remember: boolean) => Promise<void>;
   onDone: () => void;
 }) {
@@ -153,16 +173,16 @@ export function RememberUnlock(props: {
     <Show
       when={!saved()}
       fallback={<>
-        <p data-remember-saved>Saved on this {props.mobile ? 'phone' : 'Mac'}. Next time, unlock with {props.mobile ? 'your fingerprint' : 'Touch ID'}.</p>
+        <p data-remember-saved>Saved on this {wordsFor(props).device}. Next time, unlock with {wordsFor(props).biometric}.</p>
         <button class="link" onClick={() => props.onDone()}>Close</button>
       </>}
     >
-      <h2>Unlocked. Remember the password on this {props.mobile ? 'phone' : 'Mac'}?</h2>
-      <p>{props.mobile ? 'BitSov encrypts it with a key in this phone’s secure hardware that only opens with your fingerprint. Next time, unlock with your fingerprint instead of typing it.' : 'BitSov saves it in this Mac’s Keychain, protected by Touch ID. Next time, unlock with Touch ID instead of typing it.'}</p>
-      <p class="hint">If the fingerprints on this {props.mobile ? 'phone' : 'Mac'} change, the saved copy stops opening. Type the password once more and choose Remember to replace it.</p>
+      <h2>Unlocked. Remember the password on this {wordsFor(props).device}?</h2>
+      <p>{REMEMBER_TEXT[wordsFor(props).device]}</p>
+      <p class="hint">If the {wordsFor(props).device === 'iPhone' ? 'faces or fingerprints' : 'fingerprints'} on this {wordsFor(props).device} change, the saved copy stops opening. Type the password once more and choose Remember to replace it.</p>
       <p class="hint">If your device’s approval key also stops working, another approved owner device or the box must unlock the node first. Then set up {props.mobile ? 'biometric' : 'Touch ID'} approvals again before unlocking from this device.</p>
       <div class="row">
-        <button class="primary" data-remember-yes disabled={busy()} onClick={() => void choose(true)}>{busy() ? 'Saving…' : props.mobile ? 'Remember on this phone (fingerprint)' : 'Remember on this Mac (Touch ID)'}</button>
+        <button class="primary" data-remember-yes disabled={busy()} onClick={() => void choose(true)}>{busy() ? 'Saving…' : REMEMBER_BUTTON[wordsFor(props).device]}</button>
         <button class="link" data-remember-no disabled={busy()} onClick={() => void choose(false)}>Not now</button>
       </div>
       <Show when={error()}><p role="alert">{error()}</p></Show>
@@ -175,6 +195,8 @@ export function RememberUnlock(props: {
 export function PendingApproval(props: {
   pending: { fingerprint: string | null; owner_action: string | null };
   mobile?: boolean;
+  /** Which device's words to use (Mac / iPhone / Android phone). */
+  platform?: AppPlatform;
   onCancel?: () => Promise<void>;
 }) {
   const [busy, setBusy] = createSignal(false);
@@ -187,7 +209,7 @@ export function PendingApproval(props: {
     finally { setBusy(false); }
   };
   return <div class="approval" data-device="pending" data-pending-approval>
-    <p>Compare this {props.mobile ? 'phone’s' : 'Mac’s'} fingerprint: <code data-device-fingerprint>{props.pending.fingerprint}</code></p>
+    <p>Compare this {wordsFor(props).device}’s fingerprint: <code data-device-fingerprint>{props.pending.fingerprint}</code></p>
     <p><strong>At the box</strong>: while the node is unlocked and running with <code>--owner-control</code>, run:</p>
     <code class="address" data-device-owner-action>{props.pending.owner_action}</code>
     <p>Check that the fingerprint matches, then type the short code shown by the node’s terminal. This command cannot approve a device while the node is locked or running in local-owner mode.</p>
