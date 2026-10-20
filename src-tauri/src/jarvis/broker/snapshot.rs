@@ -50,11 +50,7 @@ impl<'a, R: NodeRead> Snapshot<'a, R> {
 
     /// Every route read so far, in order.
     pub fn routes(&self) -> Vec<ReadRoute> {
-        self.reads
-            .borrow()
-            .iter()
-            .map(|(route, _)| *route)
-            .collect()
+        self.reads.borrow().iter().map(|(route, _)| *route).collect()
     }
 
     /// The node refused the token on some read.

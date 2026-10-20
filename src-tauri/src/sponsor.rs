@@ -86,21 +86,13 @@ impl Offer {
         if at != bytes.len() {
             return Err(bad());
         }
-        Ok(Self {
-            network,
-            intro_id,
-            sponsor,
-            gift_msat,
-            expires_at,
-            sig,
-        })
+        Ok(Self { network, intro_id, sponsor, gift_msat, expires_at, sig })
     }
 
     /// Signed by the card's own key, for this card's introduction only, on
     /// its network, within the kit ceiling and its ten-minute life.
     pub fn verify(&self, now_unix: u64, card: &Card) -> Result<(), String> {
-        if hex::encode(self.sponsor) != card.node_id || hex::encode(self.intro_id) != card.intro_id
-        {
+        if hex::encode(self.sponsor) != card.node_id || hex::encode(self.intro_id) != card.intro_id {
             return Err("The starter-bitcoin offer does not belong to this introduction.".into());
         }
         if self.network != card.network {
@@ -126,9 +118,7 @@ pub fn split(text: &str) -> (String, Option<String>) {
         return (text.to_string(), None);
     }
     match text.rsplit_once('.') {
-        Some((card, offer)) if !offer.contains('#') && !offer.is_empty() => {
-            (card.to_string(), Some(offer.to_string()))
-        }
+        Some((card, offer)) if !offer.contains('#') && !offer.is_empty() => (card.to_string(), Some(offer.to_string())),
         _ => (text.to_string(), None),
     }
 }
@@ -157,10 +147,7 @@ pub fn read(text: &str, now_unix: u64) -> Result<(Card, Option<Offer>), String> 
 pub fn door(card: &Card, offer: Option<&Offer>) -> Result<DoorCard, String> {
     let mut door = card.door()?;
     if let Some(o) = offer {
-        door.starter = Some(Starter {
-            gift_msat: o.gift_msat,
-            expires_at: o.expires_at,
-        });
+        door.starter = Some(Starter { gift_msat: o.gift_msat, expires_at: o.expires_at });
         door.offer_link = Some(format!("{}.{}", door.link, o.encode()));
     }
     Ok(door)
@@ -198,13 +185,9 @@ impl Candidate {
     /// Refuse a node answer that could not be what the owner reviews.
     pub fn check(&self) -> Result<(), String> {
         let hex_len = |s: &str, n: usize| s.len() == n && s.bytes().all(|b| b.is_ascii_hexdigit());
-        if !hex_len(&self.intro_id, 32)
-            || !hex_len(&self.newcomer, 64)
-            || !hex_len(&self.payment_hash, 64)
-            || self.code.len() != 6
+        if !hex_len(&self.intro_id, 32) || !hex_len(&self.newcomer, 64) || !hex_len(&self.payment_hash, 64) || self.code.len() != 6
             || !self.code.bytes().all(|b| b.is_ascii_digit())
-            || self.gift_msat == 0
-            || self.gift_msat.saturating_add(self.fee_max_msat) > MAX_KIT_MSAT
+            || self.gift_msat == 0 || self.gift_msat.saturating_add(self.fee_max_msat) > MAX_KIT_MSAT
         {
             return Err("The node's answer about this request is malformed.".into());
         }
@@ -219,11 +202,7 @@ pub struct OwnerApproval {
     pub owner_command: String,
 }
 
-pub fn owner_approval(
-    candidate: &Candidate,
-    code: &str,
-    now: u64,
-) -> Result<OwnerApproval, String> {
+pub fn owner_approval(candidate: &Candidate, code: &str, now: u64) -> Result<OwnerApproval, String> {
     candidate.check()?;
     if candidate.expires_at <= now {
         return Err("This gift request expired. Make a new offer.".into());
@@ -303,13 +282,7 @@ mod tests {
         assert_eq!(read_card, card);
         assert_eq!(read_offer.as_ref(), Some(&offer));
         let door = door(&read_card, read_offer.as_ref()).unwrap();
-        assert_eq!(
-            door.starter,
-            Some(Starter {
-                gift_msat: 20_000_000,
-                expires_at: NOW + 600
-            })
-        );
+        assert_eq!(door.starter, Some(Starter { gift_msat: 20_000_000, expires_at: NOW + 600 }));
         assert_eq!(door.offer_link.as_deref(), Some(link.as_str()));
         // Without an offer the card still reads, with no starter.
         let (plain, none) = read(&card.to_link().unwrap(), NOW).unwrap();
@@ -328,14 +301,10 @@ mod tests {
         const VECTOR: &str = "AQdyZWd0ZXN0CQkJCQkJCQkJCQkJCQkJCe1JKMYo0cLG6ukDOJBZlWEpWSc6XGP5NjbBRhSshzfRAAAAAAExLQAAAAAAarE92I-FHpnHFK0Ny6W-SruDW5v3I8TMFACVAQb8HMKeYUS6U3hb8K1hLRCD783dgdDkieTVeybMhR3dKClLr-7pDQ4";
         let o = Offer::decode(VECTOR).unwrap();
         assert_eq!(o.encode(), VECTOR);
-        assert_eq!(
-            (o.network.as_str(), o.intro_id, o.gift_msat, o.expires_at),
-            ("regtest", [9; 16], 20_000_000, NOW + 600)
-        );
+        assert_eq!((o.network.as_str(), o.intro_id, o.gift_msat, o.expires_at), ("regtest", [9; 16], 20_000_000, NOW + 600));
         let key = ed25519_dalek::SigningKey::from_bytes(&[3; 32]);
         assert_eq!(o.sponsor, key.verifying_key().to_bytes());
-        intro::verify_strict_raw(&o.sponsor, &o.signing_digest(), &o.sig)
-            .expect("genome signature verifies here");
+        intro::verify_strict_raw(&o.sponsor, &o.signing_digest(), &o.sig).expect("genome signature verifies here");
     }
 
     #[test]

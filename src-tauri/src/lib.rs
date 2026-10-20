@@ -7,23 +7,23 @@
 extern crate self as bitsov_app;
 
 pub mod act;
-pub mod ai;
-pub mod at_rest;
-pub mod budget;
-pub mod control;
-pub mod delegation;
 pub mod format;
-pub mod front_door;
+pub mod budget;
 pub mod grant;
 pub mod introduction;
-pub mod jarvis;
-pub mod pairing;
+pub mod front_door;
 pub mod porch;
+pub mod sponsor;
+pub mod ai;
+pub mod spend_journal;
+pub mod control;
+pub mod jarvis;
+pub mod at_rest;
+pub mod pairing;
+mod trust;
 pub mod remote_access;
 pub mod sas;
-pub mod spend_journal;
-pub mod sponsor;
-mod trust;
+pub mod delegation;
 
 pub mod connection_retry;
 

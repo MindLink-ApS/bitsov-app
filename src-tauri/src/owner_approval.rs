@@ -88,8 +88,9 @@ pub async fn create(state: &NodeState, body: Value) -> Result<Value, ActionError
             "Invalid owner approval request.",
         ));
     }
-    serde_json::from_value::<ApprovalRequest>(body.clone())
-        .map_err(|_| ActionError::new("approval_invalid", "Invalid owner approval request."))?;
+    serde_json::from_value::<ApprovalRequest>(body.clone()).map_err(|_| {
+        ActionError::new("approval_invalid", "Invalid owner approval request.")
+    })?;
     // TypeScript's optional fields may be absent, but none of its terms are
     // nullable. Serde's Option otherwise treats explicit null as omission.
     if body["terms"]
@@ -261,12 +262,7 @@ where
 }
 
 #[derive(Deserialize)]
-#[serde(
-    tag = "kind",
-    content = "terms",
-    rename_all = "snake_case",
-    deny_unknown_fields
-)]
+#[serde(tag = "kind", content = "terms", rename_all = "snake_case", deny_unknown_fields)]
 enum ApprovalRequest {
     BreakerReset {},
     SpendGrant {
@@ -374,40 +370,21 @@ fn breaker_lines(view: &Value) -> Result<Vec<String>, ActionError> {
         lines.push("Your node did not include the grant’s state".into());
         return Ok(lines);
     }
-    let snapshot: Snapshot = serde_json::from_value(snapshot.clone()).map_err(|_| {
-        ActionError::new("node", "Your node returned unreadable breaker reset terms.")
-    })?;
-    let trips: Vec<&str> = snapshot
-        .tripped
-        .iter()
-        .map(|trip| match trip.as_str() {
-            "grant_paused" => "paused after failed payments",
-            "rate_limit_minute" => "too many payments this minute",
-            "rate_limit_hour" => "too many payments this hour",
-            "velocity_limit" => "spending too fast",
-            other => other,
-        })
-        .collect();
+    let snapshot: Snapshot = serde_json::from_value(snapshot.clone())
+        .map_err(|_| ActionError::new("node", "Your node returned unreadable breaker reset terms."))?;
+    let trips: Vec<&str> = snapshot.tripped.iter().map(|trip| match trip.as_str() {
+        "grant_paused" => "paused after failed payments",
+        "rate_limit_minute" => "too many payments this minute",
+        "rate_limit_hour" => "too many payments this hour",
+        "velocity_limit" => "spending too fast",
+        other => other,
+    }).collect();
     lines.extend([
-        format!(
-            "Tripped: {}",
-            if trips.is_empty() {
-                "nothing".into()
-            } else {
-                trips.join(", ")
-            }
-        ),
-        format!(
-            "Budget: up to {}, {} left",
-            sats(snapshot.budget_msat),
-            sats(snapshot.remaining_msat)
-        ),
+        format!("Tripped: {}", if trips.is_empty() { "nothing".into() } else { trips.join(", ") }),
+        format!("Budget: up to {}, {} left", sats(snapshot.budget_msat), sats(snapshot.remaining_msat)),
         format!("Each payment: up to {}", sats(snapshot.per_call_max_msat)),
         format!("Grant ends: {}", approval_date(snapshot.grant_expires_at)?),
-        format!(
-            "Device resets in the last day: {} of 3",
-            snapshot.resets_last_day
-        ),
+        format!("Device resets in the last day: {} of 3", snapshot.resets_last_day),
     ]);
     Ok(lines)
 }

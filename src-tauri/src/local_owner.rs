@@ -470,16 +470,8 @@ pub async fn finalize(
     }
     // Bind the #237 launcher password to the committed node identity before
     // finalize. The new item is device-only and protected by current biometry.
-    let config = state
-        .config
-        .lock()
-        .unwrap()
-        .clone()
-        .ok_or("The sidecar config is unavailable.")?;
-    let dir = config
-        .parent()
-        .ok_or("The sidecar directory is unavailable.")?
-        .to_path_buf();
+    let config = state.config.lock().unwrap().clone().ok_or("The sidecar config is unavailable.")?;
+    let dir = config.parent().ok_or("The sidecar directory is unavailable.")?.to_path_buf();
     let node = pending.node_id.clone();
     // Best effort: a Mac without Touch ID (or an unsigned build) must still be
     // able to finish the owner ceremony. It just can't remote-unlock a home node
@@ -487,8 +479,7 @@ pub async fn finalize(
     let saved = tokio::task::spawn_blocking(move || {
         let password = owner_password::load(&dir, false)?;
         home_keychain::save_password(&node, &password)
-    })
-    .await;
+    }).await;
     if !matches!(saved, Ok(Ok(()))) {
         eprintln!("[local-owner] biometric unlock password not saved; remote unlock stays unavailable on this Mac");
     }
@@ -630,9 +621,7 @@ async fn restart_and_verify(
     // Like finish_auth: a Mac without Touch ID (or an unsigned build) can't save
     // the biometric unlock item. The ceremony is already committed, so warn and
     // go live; only remote unlock of a home node stays unavailable.
-    let warning = home_unlock::migrate_local_password(state, expected)
-        .await
-        .err();
+    let warning = home_unlock::migrate_local_password(state, expected).await.err();
     *state.owner.warning.lock().unwrap() = warning;
     mark_live(state, expected);
     Ok(())
@@ -686,37 +675,25 @@ pub fn start_args(config: &Path, dev: bool, owner: bool) -> Vec<std::ffi::OsStri
 /// marker/price refusals. They are never enrolled or encrypted by a pin bump.
 /// Fresh bootstrap and encrypted restarts keep the Keychain/descriptor path.
 pub fn launch_enabled(enabled: bool, config: &Path) -> Result<bool, String> {
-    if !enabled
-        || !config
-            .try_exists()
-            .map_err(|_| "Cannot inspect the node config")?
-    {
+    if !enabled || !config.try_exists().map_err(|_| "Cannot inspect the node config")? {
         return Ok(enabled);
     }
     let text = std::fs::read_to_string(config).map_err(|_| "Cannot read the node config")?;
     let value: toml::Value = toml::from_str(&text).map_err(|_| "Cannot parse the node config")?;
-    let mnemonic = value
-        .get("identity")
-        .and_then(|v| v.get("mnemonic_file"))
-        .and_then(|v| v.as_str())
-        .ok_or("Node config has no identity mnemonic path")?;
+    let mnemonic = value.get("identity").and_then(|v| v.get("mnemonic_file"))
+        .and_then(|v| v.as_str()).ok_or("Node config has no identity mnemonic path")?;
     let path = Path::new(mnemonic);
     // Retained configs may name a seed relative to their own directory. Checking
     // the app's cwd would mistake an existing plaintext identity for a fresh one.
     let path = if path.is_relative() {
-        config
-            .parent()
-            .ok_or("node config directory is unknown")?
-            .join(path)
+        config.parent().ok_or("node config directory is unknown")?.join(path)
     } else {
         path.to_path_buf()
     };
     if path.extension().is_some_and(|ext| ext == "enc") {
         return Ok(true);
     }
-    Ok(!path
-        .try_exists()
-        .map_err(|_| "Cannot inspect the existing identity")?)
+    Ok(!path.try_exists().map_err(|_| "Cannot inspect the existing identity")?)
 }
 
 /// Prepare owner startup while the directory is still observably fresh.
@@ -817,14 +794,7 @@ mod lifecycle_tests {
         assert_eq!(std::fs::read_to_string(&seed).unwrap(), "retained-identity");
         // An encrypted installation must never fall back to passwordless startup,
         // even if its encrypted seed or Keychain password is missing.
-        std::fs::write(
-            &config,
-            format!(
-                "[identity]\nmnemonic_file = {:?}\n",
-                dir.path().join("identity/mnemonic.enc")
-            ),
-        )
-        .unwrap();
+        std::fs::write(&config, format!("[identity]\nmnemonic_file = {:?}\n", dir.path().join("identity/mnemonic.enc"))).unwrap();
         assert!(launch_enabled(true, &config).unwrap());
         std::fs::write(&config, "invalid config").unwrap();
         assert!(launch_enabled(true, &config).is_err());

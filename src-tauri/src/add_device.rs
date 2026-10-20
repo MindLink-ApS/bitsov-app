@@ -747,9 +747,7 @@ mod tests {
         assert!(error.message.contains("your node's owner console"));
         assert!(error.message.contains("konsensus claim-code --show"));
         assert!(error.message.contains("BitSov box's sticker"));
-        assert!(error
-            .message
-            .contains("Cancel the pending setup before trying again."));
+        assert!(error.message.contains("Cancel the pending setup before trying again."));
     }
 
     #[test]

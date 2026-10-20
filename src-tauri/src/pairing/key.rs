@@ -420,14 +420,8 @@ mod tests {
 
         let loaded = ClientKey::load_or_create_sealed(&store, &MemorySealer).unwrap();
         assert_eq!(loaded.public_hex(), sealed.public_hex());
-        assert_eq!(
-            std::fs::read_to_string(store.join(KEY_FILE)).unwrap(),
-            "11".repeat(32)
-        );
-        assert_eq!(
-            std::fs::read(store.join(SEALED_KEY_FILE)).unwrap(),
-            ciphertext
-        );
+        assert_eq!(std::fs::read_to_string(store.join(KEY_FILE)).unwrap(), "11".repeat(32));
+        assert_eq!(std::fs::read(store.join(SEALED_KEY_FILE)).unwrap(), ciphertext);
     }
 
     #[test]

@@ -2,12 +2,12 @@
 //! credential. Local nodes retain the CLI receipt; remote nodes expose a paired
 //! status read. Both are readiness signals, not spend authority: the node still
 //! checks and consumes its actual single-use grant on compose.
-use crate::{act::ActionError, grant::NodeGrant};
-use serde::{Deserialize, Serialize};
 use std::io::Read;
+use std::path::Path;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use serde::{Deserialize, Serialize};
+use crate::{act::ActionError, grant::NodeGrant};
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct Request {
@@ -61,20 +61,12 @@ pub fn unavailable() -> ActionError {
     ActionError::new("owner_contact_unavailable", "Remote contact approval status is not available: this may be an older node, owner control may be off, or the budget operation may have ended. Check the node and request approval again. Nothing was sent.")
 }
 fn expired() -> ActionError {
-    ActionError::new(
-        "owner_contact_expired",
-        "Contact approval expired. Get a fresh quote and request approval again. Nothing was sent.",
-    )
+    ActionError::new("owner_contact_expired", "Contact approval expired. Get a fresh quote and request approval again. Nothing was sent.")
 }
 
-fn quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\"'\"'"))
-}
+fn quote(value: &str) -> String { format!("'{}'", value.replace('\'', "'\"'\"'")) }
 fn waiting() -> ActionError {
-    ActionError::new(
-        "owner_only",
-        "Approve this contact at your node. Nothing was sent.",
-    )
+    ActionError::new("owner_only", "Approve this contact at your node. Nothing was sent.")
 }
 
 /// Encode both untrusted URL components, including UUID-shaped budget ops.
@@ -89,10 +81,7 @@ pub fn device_path(id: &str, recipient: &str) -> Result<(String, String), Action
     let mut url = reqwest::Url::parse("http://localhost/pair/first-contact-grant/").unwrap();
     url.path_segments_mut().unwrap().pop_if_empty().push(id);
     url.query_pairs_mut().append_pair("recipient", &recipient);
-    Ok((
-        format!("{}?{}", url.path(), url.query().unwrap()),
-        recipient,
-    ))
+    Ok((format!("{}?{}", url.path(), url.query().unwrap()), recipient))
 }
 
 fn device_reply(body: &str) -> Result<RemoteReply, ActionError> {
@@ -117,10 +106,8 @@ impl Pending {
         _grant: &NodeGrant,
         _owner_config: Option<&Path>,
     ) -> Result<Self, ActionError> {
-        Err(ActionError::new(
-            "owner_contact_unavailable",
-            "private owner approval receipts are not supported on this platform",
-        ))
+        Err(ActionError::new("owner_contact_unavailable",
+            "private owner approval receipts are not supported on this platform"))
     }
 
     #[cfg(unix)]
@@ -141,15 +128,9 @@ impl Pending {
         // Restrict access in mkdir itself: a later chmod leaves a planting window.
         #[cfg(unix)]
         builder.permissions(std::fs::Permissions::from_mode(0o700));
-        let dir = builder
-            .tempdir()
+        let dir = builder.tempdir()
             .map_err(|_| ActionError::node("Cannot prepare the owner approval receipt."))?;
-        let id = dir
-            .path()
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .into_owned();
+        let id = dir.path().file_name().unwrap().to_string_lossy().into_owned();
         let receipt = quote(&dir.path().join("receipt").to_string_lossy());
         let (dev_hint, config_arg) = match owner_config {
             Some(path) => (
@@ -173,13 +154,10 @@ impl Pending {
         // destination already exists). Use `{ … } > f || { … }` — not
         // `if ! { … } > f` — so bash 3.2 and zsh both take the failure path when
         // the redirect open itself fails.
-        let body = quote(&format!(
-            "{{\"recipient\":\"{}\",\"max_total_msat\":{},\"expires_at\":%s}}\\n",
-            request.recipient, request.max_total_msat
-        ));
+        let body = quote(&format!("{{\"recipient\":\"{}\",\"max_total_msat\":{},\"expires_at\":%s}}\\n",
+            request.recipient, request.max_total_msat));
         let until = quote(&grant.expires_at.to_string());
-        let owner_command = format!(
-            r#"{dev_hint}(
+        let owner_command = format!(r#"{dev_hint}(
   umask 077; set -C
   receipt={receipt}
   if [ -e "$receipt.part" ] || [ -L "$receipt.part" ]; then
@@ -206,31 +184,12 @@ impl Pending {
     exit 1
   }}
   rm -f "$receipt.part"
-)"#
-        );
-        Ok(Self {
-            view: View {
-                id,
-                request,
-                owner_command,
-                ready: false,
-                expires_at_ms: now.saturating_add(15 * 60_000).min(grant.expires_at_ms()),
-                approval_window_secs: None,
-            },
-            fence,
-            dir: Some(dir),
-            remote_started_at: None,
-            replaced_approval: None,
-            device_approval: false,
-        })
+)"#);
+        Ok(Self { view: View { id, request, owner_command, ready: false,
+            expires_at_ms: now.saturating_add(15 * 60_000).min(grant.expires_at_ms()), approval_window_secs: None }, fence, dir: Some(dir), remote_started_at: None, replaced_approval: None, device_approval: false })
     }
 
-    pub fn remote(
-        request: Request,
-        fence: (u64, u64),
-        now: u64,
-        grant: &NodeGrant,
-    ) -> Result<Self, ActionError> {
+    pub fn remote(request: Request, fence: (u64, u64), now: u64, grant: &NodeGrant) -> Result<Self, ActionError> {
         for id in [&request.client_id, &request.grant_op_id] {
             if id.is_empty() || id.len() > 128 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
                 return Err(crate::grant::unreadable());
@@ -242,68 +201,36 @@ impl Pending {
             quote(&request.client_id), quote(&request.grant_op_id), quote(&request.recipient),
             quote(&request.max_total_msat.to_string()), quote(&request.contact_budget_msat.to_string()));
         Ok(Self {
-            view: View {
-                id: crate::remote_access::new_local_auth_token().map_err(|_| waiting())?,
-                request,
-                owner_command,
-                ready: false,
-                expires_at_ms: now
-                    .saturating_add(REMOTE_APPROVAL_WINDOW_SECS * 1000)
-                    .min(grant.expires_at_ms()),
-                approval_window_secs: Some(REMOTE_APPROVAL_WINDOW_SECS),
-            },
-            fence,
-            dir: None,
-            remote_started_at: Some(now),
-            replaced_approval: None,
-            device_approval: false,
+            view: View { id: crate::remote_access::new_local_auth_token().map_err(|_| waiting())?,
+                request, owner_command, ready: false,
+                expires_at_ms: now.saturating_add(REMOTE_APPROVAL_WINDOW_SECS * 1000).min(grant.expires_at_ms()),
+                approval_window_secs: Some(REMOTE_APPROVAL_WINDOW_SECS) },
+            fence, dir: None, remote_started_at: Some(now), replaced_approval: None, device_approval: false,
         })
     }
 
     /// Observe an owner-device grant without requiring a prior CLI handoff.
     /// Keep a pending record so compose rechecks and consumes the local guard.
-    pub fn device(
-        body: &str,
-        id: &str,
-        recipient: &str,
-        grant: &NodeGrant,
-        fence: (u64, u64),
-        now: u64,
-    ) -> Result<(Self, View), ActionError> {
+    pub fn device(body: &str, id: &str, recipient: &str, grant: &NodeGrant, fence: (u64, u64), now: u64) -> Result<(Self, View), ActionError> {
         let reply = device_reply(body)?;
         if id != grant.op_id || reply.grant_op_id != id || reply.recipient != recipient {
             return Err(waiting());
         }
         let cap = reply.approval.as_ref().map_or(0, |a| a.max_total_msat);
-        if reply.state == "approved" && (cap == 0 || cap > 100_000) {
-            return Err(waiting());
-        }
+        if reply.state == "approved" && (cap == 0 || cap > 100_000) { return Err(waiting()); }
         let mut pending = Self {
             view: View {
                 // Compose's replacement guard needs a unique local handoff id:
                 // several device approvals may share the same budget operation.
                 id: crate::remote_access::new_local_auth_token().map_err(|_| waiting())?,
-                request: Request {
-                    client_id: grant.client_id.clone(),
-                    grant_op_id: id.into(),
-                    recipient: recipient.into(),
-                    max_total_msat: cap,
-                    contact_budget_msat: grant
-                        .per_recipient_msat
-                        .get(recipient)
-                        .copied()
-                        .unwrap_or(cap),
-                },
-                owner_command: String::new(),
-                ready: false,
+                request: Request { client_id: grant.client_id.clone(), grant_op_id: id.into(),
+                    recipient: recipient.into(), max_total_msat: cap,
+                    contact_budget_msat: grant.per_recipient_msat.get(recipient).copied().unwrap_or(cap) },
+                owner_command: String::new(), ready: false,
                 expires_at_ms: now.saturating_add(120_000).min(grant.expires_at_ms()),
                 approval_window_secs: Some(120),
             },
-            fence,
-            dir: None,
-            remote_started_at: Some(now),
-            replaced_approval: None,
-            device_approval: true,
+            fence, dir: None, remote_started_at: Some(now), replaced_approval: None, device_approval: true,
         };
         let mut view = pending.remote_status(body, grant, fence, now)?;
         pending.view.expires_at_ms = view.expires_at_ms;
@@ -314,82 +241,44 @@ impl Pending {
 
     pub fn remote_path(&self) -> Option<String> {
         if self.device_approval {
-            return device_path(&self.view.request.grant_op_id, &self.view.request.recipient)
-                .ok()
-                .map(|(path, _)| path);
+            return device_path(&self.view.request.grant_op_id, &self.view.request.recipient).ok().map(|(path, _)| path);
         }
-        self.remote_started_at.map(|_| {
-            format!(
-                "/pair/first-contact-grant/{}?recipient={}",
-                self.view.request.grant_op_id, self.view.request.recipient
-            )
-        })
+        self.remote_started_at.map(|_| format!("/pair/first-contact-grant/{}?recipient={}",
+            self.view.request.grant_op_id, self.view.request.recipient))
     }
 
     /// A fresh handoff can replace an expired/consumed approval or one for an
     /// earlier quoted cap. Paid retries remain gated by the payment journal. Ignore only that exact old observation while the
     /// owner runs the new command; it can never make this request ready.
-    pub fn remote_discover(
-        &mut self,
-        body: &str,
-        grant: &NodeGrant,
-        fence: (u64, u64),
-        now: u64,
-    ) -> Result<View, ActionError> {
+    pub fn remote_discover(&mut self, body: &str, grant: &NodeGrant, fence: (u64, u64), now: u64) -> Result<View, ActionError> {
         let reply: RemoteReply = serde_json::from_str(body).map_err(|_| waiting())?;
-        if matches!(reply.state.as_str(), "expired" | "consumed")
-            || (reply.state == "approved"
-                && reply.approval.as_ref().is_some_and(|a| {
-                    a.recipient == self.view.request.recipient
-                        && (a.max_total_msat != self.view.request.max_total_msat
-                            || a.expires_at <= (now / 1000) as i64)
-                }))
-        {
+        if matches!(reply.state.as_str(), "expired" | "consumed") || (reply.state == "approved" && reply.approval.as_ref().is_some_and(|a|
+            a.recipient == self.view.request.recipient &&
+            (a.max_total_msat != self.view.request.max_total_msat || a.expires_at <= (now / 1000) as i64))) {
             self.replaced_approval = Some(reply);
         }
         self.remote_status(body, grant, fence, now)
     }
 
-    pub fn remote_status(
-        &mut self,
-        body: &str,
-        grant: &NodeGrant,
-        fence: (u64, u64),
-        now: u64,
-    ) -> Result<View, ActionError> {
+    pub fn remote_status(&mut self, body: &str, grant: &NodeGrant, fence: (u64, u64), now: u64) -> Result<View, ActionError> {
         self.status(grant, fence, now)?;
-        let mut reply: RemoteReply = if self.device_approval {
-            device_reply(body)?
-        } else {
-            serde_json::from_str(body).map_err(|_| waiting())?
-        };
+        let mut reply: RemoteReply = if self.device_approval { device_reply(body)? }
+            else { serde_json::from_str(body).map_err(|_| waiting())? };
         let r = &self.view.request;
-        if reply.grant_op_id != r.grant_op_id
-            || reply.recipient != r.recipient
-            || reply.approval_window_secs == 0
-        {
+        if reply.grant_op_id != r.grant_op_id || reply.recipient != r.recipient || reply.approval_window_secs == 0 {
             return Err(waiting());
         }
-        let window = reply.approval_window_secs.min(if self.device_approval {
-            120
-        } else {
-            REMOTE_APPROVAL_WINDOW_SECS
-        });
+        let window = reply.approval_window_secs.min(if self.device_approval { 120 } else { REMOTE_APPROVAL_WINDOW_SECS });
         self.view.approval_window_secs = Some(window);
         self.view.expires_at_ms = self.view.expires_at_ms.min(
-            self.remote_started_at
-                .unwrap()
-                .saturating_add(window * 1000),
-        );
+            self.remote_started_at.unwrap().saturating_add(window * 1000));
         if self.replaced_approval.as_ref() == Some(&reply) {
             reply.state = "pending".into();
             reply.approval = None;
         } else {
             self.replaced_approval = None;
         }
-        if now >= self.view.expires_at_ms || reply.state == "expired" {
-            return Err(expired());
-        }
+        if now >= self.view.expires_at_ms || reply.state == "expired" { return Err(expired()); }
         let mut view = self.view.clone();
         match reply.state.as_str() {
             "pending" if reply.approval.is_none() => Ok(view),
@@ -410,53 +299,30 @@ impl Pending {
         }
     }
 
-    pub fn status(
-        &self,
-        grant: &NodeGrant,
-        fence: (u64, u64),
-        now: u64,
-    ) -> Result<View, ActionError> {
+    pub fn status(&self, grant: &NodeGrant, fence: (u64, u64), now: u64) -> Result<View, ActionError> {
         let r = &self.view.request;
-        if self.remote_started_at.is_some() && self.view.expires_at_ms <= now {
-            return Err(expired());
-        }
-        if self.fence != fence
-            || self.view.expires_at_ms <= now
-            || grant.client_id != r.client_id
-            || grant.op_id != r.grant_op_id
-        {
+        if self.remote_started_at.is_some() && self.view.expires_at_ms <= now { return Err(expired()); }
+        if self.fence != fence || self.view.expires_at_ms <= now ||
+            grant.client_id != r.client_id || grant.op_id != r.grant_op_id {
             return Err(ActionError::new("owner_only", "This owner request ended or the budget grant changed. Cancel and request approval again."));
         }
         grant.check(r.max_total_msat, Some(&r.recipient), now)?;
         let mut view = self.view.clone();
-        if self.remote_started_at.is_some() {
-            return Ok(view);
-        }
+        if self.remote_started_at.is_some() { return Ok(view); }
         let path = self.dir.as_ref().unwrap().path().join("receipt.json");
         let metadata = match std::fs::symlink_metadata(&path) {
             Ok(m) => m,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(view),
             Err(_) => return Err(waiting()),
         };
-        if !metadata.is_file() || metadata.len() > 4096 {
-            return Err(waiting());
-        }
+        if !metadata.is_file() || metadata.len() > 4096 { return Err(waiting()); }
         let mut bytes = Vec::new();
-        std::fs::File::open(path)
-            .map_err(|_| waiting())?
-            .take(4097)
-            .read_to_end(&mut bytes)
-            .map_err(|_| waiting())?;
+        std::fs::File::open(path).map_err(|_| waiting())?.take(4097)
+            .read_to_end(&mut bytes).map_err(|_| waiting())?;
         let receipt: Receipt = serde_json::from_slice(&bytes).map_err(|_| waiting())?;
-        let until = u64::try_from(receipt.expires_at)
-            .unwrap_or(0)
-            .saturating_mul(1000);
-        if receipt.recipient != r.recipient
-            || receipt.max_total_msat != r.max_total_msat
-            || until <= now
-            || until > grant.expires_at_ms()
-            || until > now.saturating_add(120_000)
-        {
+        let until = u64::try_from(receipt.expires_at).unwrap_or(0).saturating_mul(1000);
+        if receipt.recipient != r.recipient || receipt.max_total_msat != r.max_total_msat ||
+            until <= now || until > grant.expires_at_ms() || until > now.saturating_add(120_000) {
             return Err(ActionError::new("owner_only", "The owner approval receipt is expired or does not match this contact and cap. Request approval again."));
         }
         view.ready = true;
@@ -466,14 +332,9 @@ impl Pending {
 
     #[cfg(test)]
     pub fn write_receipt(&self, recipient: &str, cap: u64, expires_at: i64) {
-        std::fs::write(
-            self.dir.as_ref().unwrap().path().join("receipt.json"),
-            serde_json::json!({
-                "recipient": recipient, "max_total_msat": cap, "expires_at": expires_at,
-            })
-            .to_string(),
-        )
-        .unwrap();
+        std::fs::write(self.dir.as_ref().unwrap().path().join("receipt.json"), serde_json::json!({
+            "recipient": recipient, "max_total_msat": cap, "expires_at": expires_at,
+        }).to_string()).unwrap();
     }
 }
 
@@ -483,9 +344,7 @@ mod tests {
     use std::os::unix::fs::{symlink, PermissionsExt};
     use std::process::Command;
 
-    fn pending() -> Pending {
-        pending_with_expiry(120)
-    }
+    fn pending() -> Pending { pending_with_expiry(120) }
 
     fn pending_with_expiry(expires_at: i64) -> Pending {
         pending_with(expires_at, None)
@@ -493,56 +352,27 @@ mod tests {
 
     fn pending_with(expires_at: i64, owner_config: Option<&Path>) -> Pending {
         let grant = NodeGrant {
-            client_id: "c1".into(),
-            op_id: "ab12".into(),
-            expires_at,
-            budget_msat: 50_000,
-            used_msat: 0,
-            remaining_msat: 50_000,
-            per_call_max_msat: 5_000,
-            per_recipient_msat: Default::default(),
-            used_by_recipient: Default::default(),
-            ..Default::default()
+            client_id: "c1".into(), op_id: "ab12".into(), expires_at,
+            budget_msat: 50_000, used_msat: 0, remaining_msat: 50_000,
+            per_call_max_msat: 5_000, per_recipient_msat: Default::default(),
+            used_by_recipient: Default::default(), ..Default::default()
         };
-        Pending::new(
-            Request {
-                client_id: "c1".into(),
-                grant_op_id: "ab12".into(),
-                recipient: "a".repeat(64),
-                max_total_msat: 5_000,
-                contact_budget_msat: 50_000,
-            },
-            (0, 0),
-            0,
-            &grant,
-            owner_config,
-        )
-        .unwrap()
+        Pending::new(Request {
+            client_id: "c1".into(), grant_op_id: "ab12".into(),
+            recipient: "a".repeat(64), max_total_msat: 5_000, contact_budget_msat: 50_000,
+        }, (0, 0), 0, &grant, owner_config).unwrap()
     }
 
     fn remote_fixture() -> (Pending, NodeGrant, serde_json::Value) {
         let grant = NodeGrant {
-            client_id: "c1".into(),
-            op_id: "ab12".into(),
-            expires_at: 1000,
-            budget_msat: 50_000,
-            remaining_msat: 50_000,
-            per_call_max_msat: 5_000,
+            client_id: "c1".into(), op_id: "ab12".into(), expires_at: 1000,
+            budget_msat: 50_000, remaining_msat: 50_000, per_call_max_msat: 5_000,
             ..Default::default()
         };
-        let pending = Pending::remote(
-            Request {
-                client_id: "c1".into(),
-                grant_op_id: "ab12".into(),
-                recipient: "a".repeat(64),
-                max_total_msat: 5000,
-                contact_budget_msat: 50_000,
-            },
-            (1, 2),
-            10_000,
-            &grant,
-        )
-        .unwrap();
+        let pending = Pending::remote(Request {
+            client_id: "c1".into(), grant_op_id: "ab12".into(), recipient: "a".repeat(64),
+            max_total_msat: 5000, contact_budget_msat: 50_000,
+        }, (1, 2), 10_000, &grant).unwrap();
         let reply = serde_json::json!({"grant_op_id": "ab12", "recipient": "a".repeat(64),
             "state": "approved", "approval_window_secs": 300,
             "approval": {"recipient": "a".repeat(64), "max_total_msat": 5000, "expires_at": 310}});
@@ -553,13 +383,8 @@ mod tests {
     fn device_path_encodes_the_operation_and_canonical_recipient() {
         let (path, recipient) = device_path("op/a?b&c=#%", &"AB".repeat(32)).unwrap();
         assert_eq!(recipient, "ab".repeat(32));
-        assert_eq!(
-            path,
-            format!("/pair/first-contact-grant/op%2Fa%3Fb&c=%23%25?recipient={recipient}")
-        );
-        for id in ["", ".", ".."] {
-            assert!(device_path(id, &recipient).is_err());
-        }
+        assert_eq!(path, format!("/pair/first-contact-grant/op%2Fa%3Fb&c=%23%25?recipient={recipient}"));
+        for id in ["", ".", ".."] { assert!(device_path(id, &recipient).is_err()); }
     }
 
     #[test]
@@ -568,37 +393,12 @@ mod tests {
         let recipient = "a".repeat(64);
         reply["approval"]["expires_at"] = 130.into();
         reply["approval"]["granted_by"] = "device:0123456789abcdef0123456789abcdef".into();
-        let (mut pending, view) = Pending::device(
-            &reply.to_string(),
-            "ab12",
-            &recipient,
-            &grant,
-            (1, 2),
-            10_000,
-        )
-        .unwrap();
+        let (mut pending, view) = Pending::device(&reply.to_string(), "ab12", &recipient, &grant, (1, 2), 10_000).unwrap();
         assert!(view.ready);
         assert_eq!(view.expires_at_ms, 130_000);
         assert_eq!(view.approval_window_secs, Some(120));
-        assert_eq!(
-            pending
-                .remote_status(&reply.to_string(), &grant, (1, 2), 130_000)
-                .unwrap_err()
-                .code,
-            "owner_contact_expired"
-        );
-        for change in [
-            "operation",
-            "recipient",
-            "approval_recipient",
-            "too_long",
-            "expired",
-            "consumed",
-            "missing",
-            "zero_window",
-            "zero_cap",
-            "large_cap",
-        ] {
+        assert_eq!(pending.remote_status(&reply.to_string(), &grant, (1, 2), 130_000).unwrap_err().code, "owner_contact_expired");
+        for change in ["operation", "recipient", "approval_recipient", "too_long", "expired", "consumed", "missing", "zero_window", "zero_cap", "large_cap"] {
             let mut bad = reply.clone();
             match change {
                 "operation" => bad["grant_op_id"] = "abcd".into(),
@@ -613,46 +413,16 @@ mod tests {
                 "large_cap" => bad["approval"]["max_total_msat"] = 100_001.into(),
                 _ => unreachable!(),
             }
-            assert!(
-                Pending::device(&bad.to_string(), "ab12", &recipient, &grant, (1, 2), 10_000)
-                    .is_err(),
-                "{change}"
-            );
+            assert!(Pending::device(&bad.to_string(), "ab12", &recipient, &grant, (1, 2), 10_000).is_err(), "{change}");
         }
-        let (mut pending, _) = Pending::device(
-            &reply.to_string(),
-            "ab12",
-            &recipient,
-            &grant,
-            (1, 2),
-            10_000,
-        )
-        .unwrap();
+        let (mut pending, _) = Pending::device(&reply.to_string(), "ab12", &recipient, &grant, (1, 2), 10_000).unwrap();
         reply["approval"]["max_total_msat"] = 4000.into();
-        assert!(
-            pending
-                .remote_status(&reply.to_string(), &grant, (1, 2), 11_000)
-                .is_err(),
-            "compose must reject changed terms"
-        );
+        assert!(pending.remote_status(&reply.to_string(), &grant, (1, 2), 11_000).is_err(), "compose must reject changed terms");
     }
 
     #[test]
     fn remote_status_requires_exact_live_approval_and_current_authority() {
-        for change in [
-            "operation",
-            "recipient",
-            "approval_recipient",
-            "cap",
-            "expired",
-            "missing",
-            "consumed",
-            "unknown",
-            "fence",
-            "grant",
-            "client",
-            "zero_window",
-        ] {
+        for change in ["operation", "recipient", "approval_recipient", "cap", "expired", "missing", "consumed", "unknown", "fence", "grant", "client", "zero_window"] {
             let (mut p, mut grant, mut reply) = remote_fixture();
             let mut fence = (1, 2);
             match change {
@@ -669,22 +439,11 @@ mod tests {
                 "zero_window" => reply["approval_window_secs"] = 0.into(),
                 _ => unreachable!(),
             }
-            assert!(
-                p.remote_status(&reply.to_string(), &grant, fence, 11_000)
-                    .is_err(),
-                "{change}"
-            );
+            assert!(p.remote_status(&reply.to_string(), &grant, fence, 11_000).is_err(), "{change}");
         }
         let (mut p, grant, reply) = remote_fixture();
-        assert!(
-            p.dir.is_none(),
-            "remote approval creates no local receipt directory"
-        );
-        assert!(
-            p.remote_status(&reply.to_string(), &grant, (1, 2), 11_000)
-                .unwrap()
-                .ready
-        );
+        assert!(p.dir.is_none(), "remote approval creates no local receipt directory");
+        assert!(p.remote_status(&reply.to_string(), &grant, (1, 2), 11_000).unwrap().ready);
     }
 
     #[test]
@@ -695,18 +454,11 @@ mod tests {
             reply["approval"] = serde_json::Value::Null;
             reply["approval_window_secs"] = advertised.into();
             for now in [10_000, 26_000, deadline - 1] {
-                let view = p
-                    .remote_status(&reply.to_string(), &grant, (1, 2), now)
-                    .unwrap();
+                let view = p.remote_status(&reply.to_string(), &grant, (1, 2), now).unwrap();
                 assert!(!view.ready);
                 assert_eq!(view.expires_at_ms, deadline);
             }
-            assert_eq!(
-                p.remote_status(&reply.to_string(), &grant, (1, 2), deadline)
-                    .unwrap_err()
-                    .code,
-                "owner_contact_expired"
-            );
+            assert_eq!(p.remote_status(&reply.to_string(), &grant, (1, 2), deadline).unwrap_err().code, "owner_contact_expired");
         }
     }
 
@@ -715,14 +467,7 @@ mod tests {
         // Change umask only in a subprocess, never in the parallel test runner.
         if std::env::var_os("BITSOV_TEST_RECEIPT_UMASK_CHILD").is_some() {
             let p = pending();
-            assert_eq!(
-                std::fs::metadata(p.dir.as_ref().unwrap().path())
-                    .unwrap()
-                    .permissions()
-                    .mode()
-                    & 0o777,
-                0o700
-            );
+            assert_eq!(std::fs::metadata(p.dir.as_ref().unwrap().path()).unwrap().permissions().mode() & 0o777, 0o700);
             return;
         }
         let mut failures = Vec::new();
@@ -734,11 +479,7 @@ mod tests {
                 .env("TMPDIR", "/tmp")
                 .output().unwrap();
             if !output.status.success() {
-                failures.push(format!(
-                    "umask {mask}: {}{}",
-                    String::from_utf8_lossy(&output.stdout),
-                    String::from_utf8_lossy(&output.stderr)
-                ));
+                failures.push(format!("umask {mask}: {}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr)));
             }
         }
         assert!(failures.is_empty(), "{}", failures.join("\n"));
@@ -746,9 +487,7 @@ mod tests {
 
     // A CLI stand-in records the actual POSIX-shell argument boundaries. The
     // real CLI/control socket is exercised by the real-window UI-E2E fixture.
-    struct Fixture {
-        dir: tempfile::TempDir,
-    }
+    struct Fixture { dir: tempfile::TempDir }
     impl Fixture {
         fn new() -> Self {
             let dir = tempfile::tempdir().unwrap();
@@ -764,33 +503,21 @@ mod tests {
         }
     }
     fn run_owner_with(p: &Pending, fixture: &Fixture, exit: &str) -> std::process::Output {
-        Command::new("/bin/sh")
-            .args(["-c", &p.view.owner_command])
-            .env(
-                "PATH",
-                format!("{}:/usr/bin:/bin", fixture.dir.path().display()),
-            )
+        Command::new("/bin/sh").args(["-c", &p.view.owner_command])
+            .env("PATH", format!("{}:/usr/bin:/bin", fixture.dir.path().display()))
             .env("OWNER_TEST_ARGS", fixture.dir.path().join("args"))
             .env("OWNER_TEST_CLOCK", fixture.dir.path().join("clock"))
-            .env("OWNER_TEST_EXIT", exit)
-            .output()
-            .unwrap()
+            .env("OWNER_TEST_EXIT", exit).output().unwrap()
     }
     fn run_owner(p: &Pending, fixture: &Fixture) -> std::process::Output {
         run_owner_with(p, fixture, "0")
     }
     fn run_owner_shell(shell: &str, p: &Pending, fixture: &Fixture) -> std::process::Output {
-        Command::new(shell)
-            .args(["-c", &p.view.owner_command])
-            .env(
-                "PATH",
-                format!("{}:/usr/bin:/bin", fixture.dir.path().display()),
-            )
+        Command::new(shell).args(["-c", &p.view.owner_command])
+            .env("PATH", format!("{}:/usr/bin:/bin", fixture.dir.path().display()))
             .env("OWNER_TEST_ARGS", fixture.dir.path().join("args"))
             .env("OWNER_TEST_CLOCK", fixture.dir.path().join("clock"))
-            .env("OWNER_TEST_EXIT", "0")
-            .output()
-            .unwrap()
+            .env("OWNER_TEST_EXIT", "0").output().unwrap()
     }
 
     #[test]
@@ -800,10 +527,8 @@ mod tests {
         let output = run_owner_with(&p, &fixture, "1");
         assert!(!output.status.success());
         assert!(!p.dir.as_ref().unwrap().path().join("receipt.json").exists());
-        assert!(
-            !p.dir.as_ref().unwrap().path().join("receipt.part").exists(),
-            "failed run must not leave an empty receipt.part that blocks retry"
-        );
+        assert!(!p.dir.as_ref().unwrap().path().join("receipt.part").exists(),
+            "failed run must not leave an empty receipt.part that blocks retry");
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains("owner approval failed"), "{stderr}");
         assert_eq!(std::fs::read_to_string(fixture.dir.path().join("args")).unwrap(),
@@ -816,20 +541,11 @@ mod tests {
             let fixture = Fixture::new();
             let p = pending_with_expiry(grant_expiry);
             let output = run_owner(&p, &fixture);
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
             let receipt: serde_json::Value = serde_json::from_slice(
-                &std::fs::read(p.dir.as_ref().unwrap().path().join("receipt.json")).unwrap(),
-            )
-            .unwrap();
+                &std::fs::read(p.dir.as_ref().unwrap().path().join("receipt.json")).unwrap()).unwrap();
             assert_eq!(receipt["expires_at"], expected);
-            assert_eq!(
-                std::fs::read_to_string(fixture.dir.path().join("clock")).unwrap(),
-                "1050"
-            );
+            assert_eq!(std::fs::read_to_string(fixture.dir.path().join("clock")).unwrap(), "1050");
         }
     }
 
@@ -842,19 +558,13 @@ mod tests {
         let partial = p.dir.as_ref().unwrap().path().join("receipt.part");
         symlink(victim.path(), &partial).unwrap();
         let output = run_owner(&p, &fixture);
-        assert_eq!(
-            std::fs::read_to_string(victim.path()).unwrap(),
-            "ORIGINAL DUMMY CONTENT"
-        );
+        assert_eq!(std::fs::read_to_string(victim.path()).unwrap(), "ORIGINAL DUMMY CONTENT");
         assert!(!output.status.success());
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains("receipt.part already exists"), "{stderr}");
         assert!(partial.is_symlink());
         assert!(!p.dir.as_ref().unwrap().path().join("receipt.json").exists());
-        assert!(
-            !fixture.dir.path().join("args").exists(),
-            "CLI must not run after pre-check refusal"
-        );
+        assert!(!fixture.dir.path().join("args").exists(), "CLI must not run after pre-check refusal");
     }
 
     #[test]
@@ -864,10 +574,7 @@ mod tests {
         let partial = p.dir.as_ref().unwrap().path().join("receipt.part");
         std::fs::write(&partial, "existing partial").unwrap();
         let output = run_owner(&p, &fixture);
-        assert_eq!(
-            std::fs::read_to_string(partial).unwrap(),
-            "existing partial"
-        );
+        assert_eq!(std::fs::read_to_string(partial).unwrap(), "existing partial");
         assert!(!output.status.success());
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains("receipt.part already exists"), "{stderr}");
@@ -895,13 +602,7 @@ mod tests {
         let output = run_owner(&p, &fixture);
         assert!(!output.status.success());
         assert!(partial.is_symlink());
-        assert!(!p
-            .dir
-            .as_ref()
-            .unwrap()
-            .path()
-            .join("receipt.json")
-            .is_symlink());
+        assert!(!p.dir.as_ref().unwrap().path().join("receipt.json").is_symlink());
     }
 
     #[test]
@@ -909,21 +610,13 @@ mod tests {
         let fixture = Fixture::new();
         let p = pending();
         let output = run_owner(&p, &fixture);
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
         let receipt = p.dir.as_ref().unwrap().path().join("receipt.json");
         let metadata = std::fs::symlink_metadata(&receipt).unwrap();
         assert!(metadata.is_file());
         assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
-        let body: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(receipt).unwrap()).unwrap();
-        assert_eq!(
-            body,
-            serde_json::json!({"recipient": "a".repeat(64), "max_total_msat": 5000, "expires_at": 120})
-        );
+        let body: serde_json::Value = serde_json::from_slice(&std::fs::read(receipt).unwrap()).unwrap();
+        assert_eq!(body, serde_json::json!({"recipient": "a".repeat(64), "max_total_msat": 5000, "expires_at": 120}));
         assert!(!p.dir.as_ref().unwrap().path().join("receipt.part").exists());
     }
 
@@ -938,11 +631,7 @@ mod tests {
             let fixture = Fixture::new();
             let p = pending();
             let first = run_owner_shell(shell, &p, &fixture);
-            assert!(
-                first.status.success(),
-                "{shell} first: {}",
-                String::from_utf8_lossy(&first.stderr)
-            );
+            assert!(first.status.success(), "{shell} first: {}", String::from_utf8_lossy(&first.stderr));
             let receipt = p.dir.as_ref().unwrap().path().join("receipt.json");
             let first_body = std::fs::read(&receipt).unwrap();
             assert!(!first_body.is_empty());
@@ -952,24 +641,11 @@ mod tests {
             let second = run_owner_shell(shell, &p, &fixture);
             assert!(!second.status.success(), "{shell} second must refuse");
             let stderr = String::from_utf8_lossy(&second.stderr);
-            assert!(
-                stderr.contains("receipt already published"),
-                "{shell} stderr: {stderr}"
-            );
-            assert!(
-                stderr.contains("Check pending result"),
-                "{shell} stderr: {stderr}"
-            );
-            assert_eq!(
-                std::fs::read(&receipt).unwrap(),
-                first_body,
-                "{shell} must not rewrite receipt"
-            );
-            assert_eq!(
-                std::fs::read_to_string(fixture.dir.path().join("args")).unwrap(),
-                "MUST_NOT_RERUN",
-                "{shell} must not re-run konsensus on the second attempt"
-            );
+            assert!(stderr.contains("receipt already published"), "{shell} stderr: {stderr}");
+            assert!(stderr.contains("Check pending result"), "{shell} stderr: {stderr}");
+            assert_eq!(std::fs::read(&receipt).unwrap(), first_body, "{shell} must not rewrite receipt");
+            assert_eq!(std::fs::read_to_string(fixture.dir.path().join("args")).unwrap(), "MUST_NOT_RERUN",
+                "{shell} must not re-run konsensus on the second attempt");
         }
     }
 
@@ -1000,28 +676,19 @@ mod tests {
             let fixture = Fixture::new();
             let p = pending();
             // Make the receipt directory unwritable so `> receipt.part` fails.
-            let mut perms = std::fs::metadata(p.dir.as_ref().unwrap().path())
-                .unwrap()
-                .permissions();
+            let mut perms = std::fs::metadata(p.dir.as_ref().unwrap().path()).unwrap().permissions();
             perms.set_mode(0o500);
             std::fs::set_permissions(p.dir.as_ref().unwrap().path(), perms).unwrap();
             let output = run_owner_shell(shell, &p, &fixture);
             // Restore so TempDir cleanup succeeds.
-            let mut perms = std::fs::metadata(p.dir.as_ref().unwrap().path())
-                .unwrap()
-                .permissions();
+            let mut perms = std::fs::metadata(p.dir.as_ref().unwrap().path()).unwrap().permissions();
             perms.set_mode(0o700);
             std::fs::set_permissions(p.dir.as_ref().unwrap().path(), perms).unwrap();
             assert!(!output.status.success(), "{shell}");
             let stderr = String::from_utf8_lossy(&output.stderr);
-            assert!(
-                stderr.contains("owner approval failed"),
-                "{shell} stderr: {stderr}"
-            );
-            assert!(
-                !stderr.contains("could not publish receipt.json"),
-                "{shell} must not fall through to mv/ln with a misleading message: {stderr}"
-            );
+            assert!(stderr.contains("owner approval failed"), "{shell} stderr: {stderr}");
+            assert!(!stderr.contains("could not publish receipt.json"),
+                "{shell} must not fall through to mv/ln with a misleading message: {stderr}");
             assert!(!p.dir.as_ref().unwrap().path().join("receipt.json").exists());
         }
     }
@@ -1033,17 +700,10 @@ mod tests {
         assert!(p.view.owner_command.contains(
             "# Dev external node: if konsensus is not on PATH, replace it with its absolute path."
         ));
-        assert!(p
-            .view
-            .owner_command
-            .contains("--config '/tmp/owner-node/konsensus.toml'"));
+        assert!(p.view.owner_command.contains("--config '/tmp/owner-node/konsensus.toml'"));
         let fixture = Fixture::new();
         let output = run_owner(&p, &fixture);
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
         assert_eq!(std::fs::read_to_string(fixture.dir.path().join("args")).unwrap(),
             format!("approve\nfirst-contact\n--client\nc1\n--op\nab12\n--to\n{}\n--max-msat\n5000\n--contact-budget-msat\n50000\n--config\n/tmp/owner-node/konsensus.toml\n", "a".repeat(64)));
     }

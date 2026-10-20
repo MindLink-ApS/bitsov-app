@@ -68,11 +68,7 @@ pub const ROOM_MAX_MEMBERS: usize = 256;
 /// The app's ordinary per-payment routing ceiling. Sent explicitly to the node,
 /// which may tighten it further; it never grants more routing authority.
 pub fn routing_fee(principal: u64) -> u64 {
-    if principal == 0 {
-        0
-    } else {
-        (principal / 100).clamp(5_000, 10_000)
-    }
+    if principal == 0 { 0 } else { (principal / 100).clamp(5_000, 10_000) }
 }
 
 /// The supervised node's ordinary routing policy (genome dac01c8).
@@ -87,21 +83,14 @@ pub struct RoutingFeePolicy {
 
 impl Default for RoutingFeePolicy {
     fn default() -> Self {
-        Self {
-            minimum_msat: 5000,
-            proportional_millionths: 10_000,
-            maximum_msat: 10_000,
-        }
+        Self { minimum_msat: 5000, proportional_millionths: 10_000, maximum_msat: 10_000 }
     }
 }
 
 impl RoutingFeePolicy {
     pub fn ceiling(self, principal: u64) -> u64 {
-        if principal == 0 {
-            return 0;
-        }
-        let proportional = (u128::from(principal) * u128::from(self.proportional_millionths)
-            / 1_000_000)
+        if principal == 0 { return 0; }
+        let proportional = (u128::from(principal) * u128::from(self.proportional_millionths) / 1_000_000)
             .min(u128::from(u64::MAX)) as u64;
         proportional.max(self.minimum_msat).min(self.maximum_msat)
     }
@@ -116,14 +105,9 @@ pub struct PaymentQuote {
 
 pub fn payment_quote(principal_msat: u64) -> Result<PaymentQuote, ActionError> {
     let max_routing_fee_msat = routing_fee(principal_msat);
-    let total_msat = principal_msat
-        .checked_add(max_routing_fee_msat)
+    let total_msat = principal_msat.checked_add(max_routing_fee_msat)
         .ok_or_else(|| ActionError::invalid("The all-in amount overflows."))?;
-    Ok(PaymentQuote {
-        principal_msat,
-        max_routing_fee_msat,
-        total_msat,
-    })
+    Ok(PaymentQuote { principal_msat, max_routing_fee_msat, total_msat })
 }
 
 // ---- errors -------------------------------------------------------------------
@@ -181,29 +165,18 @@ pub const MONEY_NOT_READY: &str = "Money is not ready yet. Your node will retry 
 /// Only this explicit pre-dispatch refusal may release a pending spend.
 /// A generic 503 (or a broken response) still has an unknown outcome.
 pub fn readiness_refusal(status: u16, body: &str) -> bool {
-    status == 503
-        && serde_json::from_str::<serde_json::Value>(body)
-            .ok()
-            .is_some_and(|v| v["code"] == "not_ready" && v["money_ready"] == false)
+    status == 503 && serde_json::from_str::<serde_json::Value>(body).ok()
+        .is_some_and(|v| v["code"] == "not_ready" && v["money_ready"] == false)
 }
 
 /// The node's #115 refusal and the local proxy's pre-forward failures prove
 /// non-dispatch. Generic 503s, transport failures and malformed replies stay unknown.
 pub fn not_dispatched_refusal(status: u16, body: &str) -> bool {
-    serde_json::from_str::<serde_json::Value>(body)
-        .ok()
-        .is_some_and(|v| {
-            (status == 400 && v["code"] == "not_dispatched")
-                || (status == 503
-                    && matches!(
-                        v["code"].as_str(),
-                        Some(
-                            "remote_retry_wait"
-                                | "remote_handshake_unavailable"
-                                | "remote_proxy_busy"
-                        )
-                    ))
-        })
+    serde_json::from_str::<serde_json::Value>(body).ok().is_some_and(|v| {
+        (status == 400 && v["code"] == "not_dispatched")
+            || (status == 503 && matches!(v["code"].as_str(),
+                Some("remote_retry_wait" | "remote_handshake_unavailable" | "remote_proxy_busy")))
+    })
 }
 
 /// Genome `readmit_then_pay` (compose.rs): after a reconnect or restart the
@@ -217,17 +190,13 @@ pub fn not_dispatched_refusal(status: u16, body: &str) -> bool {
 /// fallback.
 pub fn readmission_capped_refusal(status: u16, body: &str) -> bool {
     status == 409
-        && serde_json::from_str::<serde_json::Value>(body)
-            .ok()
-            .is_some_and(|v| {
-                v["code"] == "price_cap_exceeded"
-                    && match v.get("reason") {
-                        Some(reason) => reason == READMISSION_REQUIRED,
-                        None => v["error"].as_str().is_some_and(|e| {
-                            e.contains("requires admission again on a new connection")
-                        }),
-                    }
-            })
+        && serde_json::from_str::<serde_json::Value>(body).ok().is_some_and(|v| {
+            v["code"] == "price_cap_exceeded"
+                && match v.get("reason") {
+                    Some(reason) => reason == READMISSION_REQUIRED,
+                    None => v["error"].as_str().is_some_and(|e| e.contains("requires admission again on a new connection")),
+                }
+        })
 }
 
 /// Genome's stable `reason` for the capped re-admission refusal.
@@ -244,8 +213,7 @@ pub const QUOTED_READMISSION_CAPABILITY: &str = "quoted_readmission_v1";
 /// leading whitespace) with a top-level `room` key is room-bound, valid or not.
 pub fn is_room_chat(plaintext: &str) -> bool {
     plaintext.trim_start().starts_with('{')
-        && serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(plaintext)
-            .is_ok_and(|o| o.contains_key("room"))
+        && serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(plaintext).is_ok_and(|o| o.contains_key("room"))
 }
 
 /// A room leg is capped at what the owner confirmed for that member: a
@@ -265,20 +233,17 @@ const NOT_DISPATCHED_FEE_LIMIT: &str = "Network fee would exceed your limit.";
 /// the network fee limit only when that reason points at a fee/route ceiling.
 pub fn not_dispatched_message(body: &str) -> String {
     let parsed = serde_json::from_str::<serde_json::Value>(body).ok();
-    if let Some(words) = parsed
-        .as_ref()
-        .and_then(|v| v.get("reason")?.as_str())
-        .and_then(room_refusal_words)
-    {
+    if let Some(words) = parsed.as_ref().and_then(|v| v.get("reason")?.as_str()).and_then(room_refusal_words) {
         return format!("{NOT_DISPATCHED_MESSAGE} {words}");
     }
-    let reason = parsed.and_then(|v| {
-        v.get("error")
-            .and_then(|e| e.as_str())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-    });
+    let reason = parsed
+        .and_then(|v| {
+            v.get("error")
+                .and_then(|e| e.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        });
     match reason.as_deref() {
         Some(r) if not_dispatched_fee_limit_reason(r) => {
             format!("{NOT_DISPATCHED_MESSAGE} {NOT_DISPATCHED_FEE_LIMIT} ({r})")
@@ -318,10 +283,7 @@ pub enum OperationContext<'a> {
 
 /// The single error boundary for an operation scope, including every `?`,
 /// early return and nested storage/transport failure within that scope.
-pub fn with_op<T>(
-    context: OperationContext<'_>,
-    result: Result<T, ActionError>,
-) -> Result<T, ActionError> {
+pub fn with_op<T>(context: OperationContext<'_>, result: Result<T, ActionError>) -> Result<T, ActionError> {
     result.map_err(|mut error| {
         let id = match context {
             OperationContext::Active(id) => id.or(error.operation_id.as_deref()),
@@ -347,16 +309,10 @@ impl ActionError {
     }
     /// Name the durable record this error is about.
     pub fn for_pending(self, id: &str) -> Self {
-        Self {
-            pending_id: Some(id.to_string()),
-            ..self
-        }
+        Self { pending_id: Some(id.to_string()), ..self }
     }
     pub fn for_operation(self, id: Option<&str>) -> Self {
-        Self {
-            operation_id: id.map(str::to_string),
-            ..self
-        }
+        Self { operation_id: id.map(str::to_string), ..self }
     }
     /// The node settled payment but the message did not go. Never "not sent".
     pub fn undelivered(paid_msat: u64, retry: bool) -> Self {
@@ -367,12 +323,7 @@ impl ActionError {
         };
         Self {
             undelivered: Some(UndeliveredView { paid_msat, retry }),
-            ..Self::new(
-                "payment_settled_undelivered",
-                format!(
-                    "Payment settled ({paid_msat} msat paid), message not yet delivered. {next}"
-                ),
-            )
+            ..Self::new("payment_settled_undelivered", format!("Payment settled ({paid_msat} msat paid), message not yet delivered. {next}"))
         }
     }
     /// Retry delivery paid nothing new; a payment is still due (the message,
@@ -405,11 +356,8 @@ impl ActionError {
     }
     pub fn node(message: impl Into<String>) -> Self {
         let message = message.into();
-        if message == MONEY_NOT_READY {
-            Self::new("not_ready", message)
-        } else {
-            Self::new("node", message)
-        }
+        if message == MONEY_NOT_READY { Self::new("not_ready", message) }
+        else { Self::new("node", message) }
     }
 }
 
@@ -538,26 +486,14 @@ impl SpendGate {
     }
 
     /// Open over the node's reported grant, retaining its identity with the window.
-    pub fn arm_granted_until(
-        &mut self,
-        now_ms: u64,
-        until_ms: u64,
-        basis: SpendBasis,
-        op_id: Option<&str>,
-    ) {
+    pub fn arm_granted_until(&mut self, now_ms: u64, until_ms: u64, basis: SpendBasis, op_id: Option<&str>) {
         self.arm_until(now_ms, until_ms, basis);
         self.granted_op = op_id.filter(|id| !id.is_empty()).map(str::to_owned);
     }
 
     /// Complete the pending elevation after the caller has checked its poll fence.
     /// Only that pending record can name the request that armed this window.
-    pub fn arm_pending_granted_until(
-        &mut self,
-        now_ms: u64,
-        until_ms: u64,
-        basis: SpendBasis,
-        op_id: Option<&str>,
-    ) {
+    pub fn arm_pending_granted_until(&mut self, now_ms: u64, until_ms: u64, basis: SpendBasis, op_id: Option<&str>) {
         let request_id = self.pending.as_ref().map(|pending| pending.op_id.clone());
         self.arm_granted_until(now_ms, until_ms, basis, op_id);
         self.armed_by_request = request_id;
@@ -603,10 +539,7 @@ impl SpendGate {
     pub fn check_generation(&mut self, generation: u64, now_ms: u64) -> Result<(), ActionError> {
         self.check(now_ms)?;
         if self.generation != generation {
-            return Err(ActionError::new(
-                "spend_locked",
-                "Approval changed while preparing this action. Confirm it again.",
-            ));
+            return Err(ActionError::new("spend_locked", "Approval changed while preparing this action. Confirm it again."));
         }
         Ok(())
     }
@@ -694,11 +627,7 @@ impl SpendGate {
             armed_by_request: self.open.and(self.armed_by_request.clone()),
             envelope_id: None,
             state,
-            lapse: if state == SpendState::Expired {
-                self.lapse
-            } else {
-                None
-            },
+            lapse: if state == SpendState::Expired { self.lapse } else { None },
             basis: self.open.map(|(_, b)| b),
             open_until_ms: self.open.map(|(u, _)| u),
             pending: self.pending.clone(),
@@ -721,22 +650,11 @@ impl ElevationReply {
     /// (the node it launched, or an attached external node). A node that names
     /// no config in its command gets it appended, so the owner can run the
     /// command from any directory.
-    pub fn into_elevation(
-        self,
-        owner_config: Option<&std::path::Path>,
-    ) -> Result<Elevation, ActionError> {
-        if self.op_id.is_empty()
-            || self.op_id.len() > 64
-            || !self.op_id.chars().all(|c| c.is_ascii_hexdigit())
-        {
-            return Err(ActionError::node(
-                "the node returned an unexpected operation id",
-            ));
+    pub fn into_elevation(self, owner_config: Option<&std::path::Path>) -> Result<Elevation, ActionError> {
+        if self.op_id.is_empty() || self.op_id.len() > 64 || !self.op_id.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(ActionError::node("the node returned an unexpected operation id"));
         }
-        let owner_can_grant = self
-            .owner_action
-            .trim_start()
-            .starts_with("konsensus grant");
+        let owner_can_grant = self.owner_action.trim_start().starts_with("konsensus grant");
         let mut owner_action = self.owner_action;
         if owner_action.trim() == format!("konsensus grant --op {}", self.op_id) {
             if let Some(path) = owner_config.and_then(config_arg) {
@@ -791,11 +709,7 @@ pub fn elevation_status_path(op_id: &str) -> Result<String, ActionError> {
 /// `POST /messages/compose` body. The node does E2EE, pricing, payment and,
 /// for an unknown peer, the paid first contact. The app never builds or
 /// delivers an envelope itself (authority invariant A.1).
-pub fn compose_body(
-    recipient: &str,
-    is_room: bool,
-    plaintext: &str,
-) -> Result<serde_json::Value, ActionError> {
+pub fn compose_body(recipient: &str, is_room: bool, plaintext: &str) -> Result<serde_json::Value, ActionError> {
     let recipient = if is_room {
         control::room_id(recipient).map_err(ActionError::invalid)?
     } else {
@@ -817,17 +731,12 @@ pub fn compose_body(
 
 /// `/messages/compose` body for one call signal to one contact. The node
 /// checks the payload and the call state again before paying.
-pub fn call_body(
-    recipient: &str,
-    kind: u16,
-    plaintext: &str,
-) -> Result<serde_json::Value, ActionError> {
+pub fn call_body(recipient: &str, kind: u16, plaintext: &str) -> Result<serde_json::Value, ActionError> {
     let recipient = control::node_id(recipient).map_err(ActionError::invalid)?;
     if !(KIND_CALL_OFFER..=KIND_CALL_HANGUP).contains(&kind) {
         return Err(ActionError::invalid("not a call signal"));
     }
-    let v: serde_json::Value = serde_json::from_str(plaintext)
-        .map_err(|_| ActionError::invalid("the call signal is not JSON"))?;
+    let v: serde_json::Value = serde_json::from_str(plaintext).map_err(|_| ActionError::invalid("the call signal is not JSON"))?;
     if !v.is_object() || plaintext.len() > CALL_SIGNAL_MAX_BYTES {
         return Err(ActionError::invalid("the call signal is too large"));
     }
@@ -903,13 +812,9 @@ pub fn operation_error(body: &str, operation_id: &str) -> Option<OperationError>
 
 /// 409 codes the node answers for an operation before it pays anything in this call.
 pub fn operation_conflict(status: u16, body: &str) -> Option<&'static str> {
-    if status != 409 {
-        return None;
-    }
+    if status != 409 { return None; }
     let v: serde_json::Value = serde_json::from_str(body).ok()?;
-    ["operation_mismatch", "payment_unresolved", "failed_paid"]
-        .into_iter()
-        .find(|c| v["code"] == *c)
+    ["operation_mismatch", "payment_unresolved", "failed_paid"].into_iter().find(|c| v["code"] == *c)
 }
 
 pub const OPERATION_MISMATCH: &str = "Your node refused this retry: its text differs from the message it retries. Nothing was paid. Retry with the original text, or send it as a new message once the earlier one is resolved.";
@@ -931,52 +836,33 @@ pub struct SettledIncomplete {
 
 /// The node's own statements that a retry pays no second admission. Anything
 /// else (a message paid, then not stored) must not be sent again.
-const RETRY_SAFE: [&str; 2] = [
-    "will not pay admission again",
-    "re-send the paid proof, not pay again",
-];
+const RETRY_SAFE: [&str; 2] = ["will not pay admission again", "re-send the paid proof, not pay again"];
 
 pub fn settled_incomplete(status: u16, body: &str) -> Option<SettledIncomplete> {
-    if status != 502 {
-        return None;
-    }
+    if status != 502 { return None; }
     let v: serde_json::Value = serde_json::from_str(body).ok()?;
-    if v["code"] != "payment_settled_send_incomplete" {
-        return None;
-    }
+    if v["code"] != "payment_settled_send_incomplete" { return None; }
     let amount_msat = v["amount_msat"].as_u64()?;
     let reason = v["error"].as_str().unwrap_or_default();
     let prior_admission_msat = msat_after(reason, "prior admission: ");
     let current_call_msat = msat_after(reason, "current call: ");
     let lower = reason.to_ascii_lowercase();
-    let retry_safe = prior_admission_msat.is_some()
-        && current_call_msat == Some(amount_msat)
+    let retry_safe = prior_admission_msat.is_some() && current_call_msat == Some(amount_msat)
         && RETRY_SAFE.iter().any(|s| lower.contains(s));
-    Some(SettledIncomplete {
-        amount_msat,
-        prior_admission_msat,
-        current_call_msat,
-        retry_safe,
-    })
+    Some(SettledIncomplete { amount_msat, prior_admission_msat, current_call_msat, retry_safe })
 }
 
 fn msat_after(reason: &str, key: &str) -> Option<u64> {
     let rest = &reason[reason.find(key)? + key.len()..];
     let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
-    rest[digits..]
-        .starts_with(" msat")
-        .then(|| rest[..digits].parse().ok())
-        .flatten()
+    rest[digits..].starts_with(" msat").then(|| rest[..digits].parse().ok()).flatten()
 }
 
 impl SendReply {
     pub fn total_msat(&self) -> Result<u64, ActionError> {
-        self.amount_msat
-            .checked_add(self.readmission_msat.unwrap_or(0))
+        self.amount_msat.checked_add(self.readmission_msat.unwrap_or(0))
             .and_then(|v| v.checked_add(self.max_routing_fee_msat))
-            .ok_or_else(|| {
-                ActionError::new("spend_unknown", "The reported all-in total overflows.")
-            })
+            .ok_or_else(|| ActionError::new("spend_unknown", "The reported all-in total overflows."))
     }
 }
 
@@ -1011,52 +897,30 @@ pub struct SendReceipt {
 
 /// Validate complete, unique per-member evidence against the confirmed room.
 /// Returns (all terminal, any incomplete message); malformed evidence remains ambiguous.
-pub fn room_result(
-    reply: &serde_json::Value,
-    request: &serde_json::Value,
-    max: u64,
-) -> Result<(bool, bool), ActionError> {
-    let unknown = || {
-        ActionError::new(
-            "spend_unknown",
-            "Room outcome missing or inconsistent; do not retry.",
-        )
-    };
-    let caps = request["max_recipient_msat"]
-        .as_object()
-        .ok_or_else(unknown)?;
+pub fn room_result(reply: &serde_json::Value, request: &serde_json::Value, max: u64) -> Result<(bool, bool), ActionError> {
+    let unknown = || ActionError::new("spend_unknown", "Room outcome missing or inconsistent; do not retry.");
+    let caps = request["max_recipient_msat"].as_object().ok_or_else(unknown)?;
     let rows = reply["member_outcomes"].as_array().ok_or_else(unknown)?;
-    if rows.len() != caps.len() || caps.is_empty() {
-        return Err(unknown());
-    }
+    if rows.len() != caps.len() || caps.is_empty() { return Err(unknown()); }
     let mut seen = std::collections::HashSet::new();
     let (mut total, mut terminal, mut refused) = (0u64, true, false);
     for row in rows {
         let peer = row["recipient"].as_str().ok_or_else(unknown)?;
-        let cap = caps
-            .get(peer)
-            .and_then(|v| v.as_u64())
-            .ok_or_else(unknown)?;
+        let cap = caps.get(peer).and_then(|v| v.as_u64()).ok_or_else(unknown)?;
         let amount = row["amount_msat"].as_u64().ok_or_else(unknown)?;
-        if !seen.insert(peer) || amount > cap {
-            return Err(unknown());
-        }
+        if !seen.insert(peer) || amount > cap { return Err(unknown()); }
         total = total.checked_add(amount).ok_or_else(unknown)?;
         match row["status"].as_str() {
             Some("settled") => {
                 // A terminal payment is not proof that its message was stored.
-                if row["message_id"].as_str().is_none_or(str::is_empty) {
-                    refused = true;
-                }
-            }
+                if row["message_id"].as_str().is_none_or(str::is_empty) { refused = true; }
+            },
             Some("refused") if amount == 0 => refused = true,
             Some("unknown" | "pending") => terminal = false,
             _ => return Err(unknown()),
         }
     }
-    if total > max || reply["amount_msat"].as_u64() != Some(total) {
-        return Err(unknown());
-    }
+    if total > max || reply["amount_msat"].as_u64() != Some(total) { return Err(unknown()); }
     Ok((terminal, refused))
 }
 
@@ -1115,14 +979,11 @@ pub fn room_quote(
             .and_then(|t| t.prices.get(control::CATEGORY_COMMUNICATION).copied());
         let principal = advertised.unwrap_or(own_msat).max(MIN_PAYMENT_MSAT);
         let fee = policy.ceiling(principal);
-        let msat = principal
-            .checked_add(fee)
+        let msat = principal.checked_add(fee)
             .ok_or_else(|| ActionError::invalid("The room all-in quote overflows."))?;
-        total_msat = total_msat
-            .checked_add(msat)
+        total_msat = total_msat.checked_add(msat)
             .ok_or_else(|| ActionError::invalid("The room all-in quote overflows."))?;
-        max_routing_fee_msat = max_routing_fee_msat
-            .checked_add(fee)
+        max_routing_fee_msat = max_routing_fee_msat.checked_add(fee)
             .ok_or_else(|| ActionError::invalid("The room routing fee quote overflows."))?;
         out.push(MemberCost {
             node_id: id,
@@ -1136,11 +997,7 @@ pub fn room_quote(
         room_id: room_id.to_string(),
         max_routing_fee_msat,
         total_msat,
-        unreachable: out
-            .iter()
-            .filter(|m| !m.connected)
-            .map(|m| m.node_id.clone())
-            .collect(),
+        unreachable: out.iter().filter(|m| !m.connected).map(|m| m.node_id.clone()).collect(),
         estimate: out.iter().any(|m| !m.advertised),
         members: out,
     })
@@ -1149,16 +1006,10 @@ pub fn room_quote(
 /// Refuse a room send unless every other member is a connected peer.
 pub fn room_sendable(quote: &RoomQuote) -> Result<(), ActionError> {
     if quote.members.is_empty() {
-        return Err(ActionError::new(
-            "room_unreachable",
-            "This room has no other members yet.",
-        ));
+        return Err(ActionError::new("room_unreachable", "This room has no other members yet."));
     }
     if quote.members.len() > ROOM_MAX_MEMBERS {
-        return Err(ActionError::new(
-            "room_unreachable",
-            "This room has more than 256 members.",
-        ));
+        return Err(ActionError::new("room_unreachable", "This room has more than 256 members."));
     }
     match quote.unreachable.len() {
         0 => Ok(()),
@@ -1199,10 +1050,7 @@ fn decode_bolt11(invoice: &str) -> Result<Bolt11Invoice, ActionError> {
         ));
     }
     // The parser uses the first `n`; more than one is refused, not guessed at.
-    let named = parsed
-        .tagged_fields()
-        .filter(|f| matches!(f, TaggedField::PayeePubKey(_)))
-        .count();
+    let named = parsed.tagged_fields().filter(|f| matches!(f, TaggedField::PayeePubKey(_))).count();
     if named > 1 {
         return Err(bad());
     }
@@ -1278,30 +1126,17 @@ pub fn pay_body(invoice: &str, confirmed_msat: u64) -> Result<serde_json::Value,
 }
 
 /// `POST /payments/keysend` body.
-pub fn keysend_body(
-    dest_pubkey: &str,
-    amount_msat: u64,
-    memo: Option<&str>,
-) -> Result<serde_json::Value, ActionError> {
+pub fn keysend_body(dest_pubkey: &str, amount_msat: u64, memo: Option<&str>) -> Result<serde_json::Value, ActionError> {
     let dest = dest_pubkey.trim().to_ascii_lowercase();
-    if dest.len() != 66
-        || !(dest.starts_with("02") || dest.starts_with("03"))
-        || !dest.chars().all(|c| c.is_ascii_hexdigit())
-    {
-        return Err(ActionError::invalid(
-            "expected a 66-character Lightning node pubkey",
-        ));
+    if dest.len() != 66 || !(dest.starts_with("02") || dest.starts_with("03")) || !dest.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(ActionError::invalid("expected a 66-character Lightning node pubkey"));
     }
     if !(MIN_PAYMENT_MSAT..=MAX_PAYMENT_MSAT).contains(&amount_msat) {
-        return Err(ActionError::invalid(
-            "the amount must be between 1 sat and 1 BTC",
-        ));
+        return Err(ActionError::invalid("the amount must be between 1 sat and 1 BTC"));
     }
     let memo = memo.map(str::trim).filter(|m| !m.is_empty());
     if memo.is_some_and(|m| m.len() > 280 || m.chars().any(char::is_control)) {
-        return Err(ActionError::invalid(
-            "the note is too long or has control characters",
-        ));
+        return Err(ActionError::invalid("the note is too long or has control characters"));
     }
     Ok(json!({ "dest_pubkey": dest, "amount_msat": amount_msat, "memo": memo }))
 }
@@ -1353,12 +1188,7 @@ impl PayReply {
             amount_msat: self.amount_msat,
             // The node returns once the payment resolves; an empty preimage
             // means it has not settled yet.
-            status: if self.preimage.is_empty() {
-                "pending"
-            } else {
-                "settled"
-            }
-            .into(),
+            status: if self.preimage.is_empty() { "pending" } else { "settled" }.into(),
             paid_at_ms: now_ms,
         }
     }
@@ -1382,21 +1212,13 @@ impl KeysendReply {
 }
 
 /// `POST /payments/invoice` body. Receiving needs no spend approval.
-pub fn invoice_body(
-    amount_msat: u64,
-    note: &str,
-    expiry_secs: u32,
-) -> Result<serde_json::Value, ActionError> {
+pub fn invoice_body(amount_msat: u64, note: &str, expiry_secs: u32) -> Result<serde_json::Value, ActionError> {
     if !(MIN_PAYMENT_MSAT..=MAX_PAYMENT_MSAT).contains(&amount_msat) {
-        return Err(ActionError::invalid(
-            "the amount must be between 1 sat and 1 BTC",
-        ));
+        return Err(ActionError::invalid("the amount must be between 1 sat and 1 BTC"));
     }
     let note = note.trim();
     if note.len() > INVOICE_NOTE_MAX_BYTES || note.chars().any(|c| c.is_control() && c != '\n') {
-        return Err(ActionError::invalid(
-            "the note is too long or has control characters",
-        ));
+        return Err(ActionError::invalid("the note is too long or has control characters"));
     }
     let expiry_secs = expiry_secs.clamp(60, 604_800);
     let mut body = json!({ "amount_msat": amount_msat, "expiry_secs": expiry_secs });
@@ -1441,16 +1263,11 @@ struct PaymentStatusReply {
 /// node writes konsensus-core's `PaymentStatus` and `PaymentDirection` by name:
 /// only an `Incoming` payment counts, and only `Settled` is paid.
 pub fn invoice_status(status: u16, body: &str) -> InvoiceStatus {
-    let unknown = InvoiceStatus {
-        state: "unknown",
-        amount_msat: None,
-    };
+    let unknown = InvoiceStatus { state: "unknown", amount_msat: None };
     if !(200..300).contains(&status) {
         return unknown;
     }
-    let Ok(reply) = serde_json::from_str::<PaymentStatusReply>(body) else {
-        return unknown;
-    };
+    let Ok(reply) = serde_json::from_str::<PaymentStatusReply>(body) else { return unknown };
     if !reply.direction.eq_ignore_ascii_case("Incoming") {
         return unknown;
     }
@@ -1460,35 +1277,23 @@ pub fn invoice_status(status: u16, body: &str) -> InvoiceStatus {
         "Failed" | "Expired" => "failed",
         _ => return unknown,
     };
-    InvoiceStatus {
-        state,
-        amount_msat: reply.amount_msat,
-    }
+    InvoiceStatus { state, amount_msat: reply.amount_msat }
 }
 
 // ---- invites ------------------------------------------------------------------
 
 /// `POST /invites` body: an invite bound to one invitee's key.
-pub fn invite_body(
-    invitee: &str,
-    addr: &str,
-    hours: u64,
-    now_unix: u64,
-) -> Result<serde_json::Value, ActionError> {
+pub fn invite_body(invitee: &str, addr: &str, hours: u64, now_unix: u64) -> Result<serde_json::Value, ActionError> {
     let invitee = control::node_id(invitee).map_err(ActionError::invalid)?;
     let addr = addr.trim();
     let port_ok = addr
         .rsplit_once(':')
         .is_some_and(|(host, port)| !host.is_empty() && port.parse::<u16>().is_ok_and(|p| p > 0));
     if !port_ok || addr.len() > 255 || addr.chars().any(|c| c.is_whitespace() || c.is_control()) {
-        return Err(ActionError::invalid(
-            "your address must be host:port, as the invitee will dial it",
-        ));
+        return Err(ActionError::invalid("your address must be host:port, as the invitee will dial it"));
     }
     if !(1..=INVITE_MAX_HOURS).contains(&hours) {
-        return Err(ActionError::invalid(
-            "an invite can last from 1 hour to 30 days",
-        ));
+        return Err(ActionError::invalid("an invite can last from 1 hour to 30 days"));
     }
     Ok(json!({
         "invitee_pubkey": invitee,
@@ -1517,13 +1322,9 @@ pub fn invite_token(input: &str) -> Result<String, ActionError> {
     let token = raw.strip_prefix("bitsov://invite/").unwrap_or(raw);
     if token.is_empty()
         || token.len() > 4096
-        || !token
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        || !token.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     {
-        return Err(ActionError::invalid(
-            "that does not look like a BitSov invite",
-        ));
+        return Err(ActionError::invalid("that does not look like a BitSov invite"));
     }
     Ok(token.to_string())
 }
@@ -1554,11 +1355,7 @@ pub fn base64_decoded_len(data: &str) -> Option<usize> {
 }
 
 /// `POST /files` body.
-pub fn file_upload_body(
-    filename: &str,
-    mime_type: &str,
-    data_b64: &str,
-) -> Result<serde_json::Value, ActionError> {
+pub fn file_upload_body(filename: &str, mime_type: &str, data_b64: &str) -> Result<serde_json::Value, ActionError> {
     let name = filename.trim();
     if name.is_empty()
         || name.len() > 255
@@ -1568,11 +1365,7 @@ pub fn file_upload_body(
         return Err(ActionError::invalid("that file name cannot be sent"));
     }
     let mime = mime_type.trim();
-    let mime = if mime.is_empty() {
-        "application/octet-stream"
-    } else {
-        mime
-    };
+    let mime = if mime.is_empty() { "application/octet-stream" } else { mime };
     if mime.len() > 255 || mime.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return Err(ActionError::invalid("that file type cannot be sent"));
     }
@@ -1639,11 +1432,7 @@ pub enum StoredLookup<'a> {
 /// The stored file a received message carried. The node records the
 /// envelope id as `message_id` when it stores the file.
 pub fn stored_file_for<'a>(rows: &'a [FileRow], message_id: &str) -> StoredLookup<'a> {
-    match rows.iter().find(|r| {
-        r.message_id
-            .as_deref()
-            .is_some_and(|m| m.eq_ignore_ascii_case(message_id))
-    }) {
+    match rows.iter().find(|r| r.message_id.as_deref().is_some_and(|m| m.eq_ignore_ascii_case(message_id))) {
         Some(r) => StoredLookup::Found(r),
         None => StoredLookup::Missing,
     }
@@ -1687,11 +1476,7 @@ pub fn safe_save_name(filename: &str) -> String {
     // Truncate then drop trailing spaces/dots (Windows reserved tails).
     let truncated: String = cleaned.chars().take(SAVE_NAME_MAX).collect();
     let trimmed = truncated.trim_end_matches([' ', '.']).to_string();
-    if trimmed.is_empty() {
-        "file".into()
-    } else {
-        trimmed
-    }
+    if trimmed.is_empty() { "file".into() } else { trimmed }
 }
 
 /// Decode base64 and write exactly to `path` (caller chose it via the save dialog).
@@ -1727,10 +1512,7 @@ pub struct UploadReply {
 pub fn file_send_path(file_id: &str) -> Result<String, ActionError> {
     let unexpected = || ActionError::node("the node returned an unexpected file id");
     let id = match file_id.trim().strip_prefix("stage-") {
-        Some(uuid) => format!(
-            "stage-{}",
-            control::room_id(uuid).map_err(|_| unexpected())?
-        ),
+        Some(uuid) => format!("stage-{}", control::room_id(uuid).map_err(|_| unexpected())?),
         None => control::room_id(file_id).map_err(|_| unexpected())?,
     };
     Ok(format!("/files/{id}/send"))
@@ -1783,14 +1565,10 @@ mod tests {
             body: serde_json::Value,
             want: serde_json::Value,
         }
-        let cases: Vec<Case> = serde_json::from_str(include_str!(
-            "../../tests/fixtures/node-payment-status.json"
-        ))
-        .unwrap();
+        let cases: Vec<Case> = serde_json::from_str(include_str!("../../tests/fixtures/node-payment-status.json")).unwrap();
         assert!(cases.len() >= 9);
         for case in cases {
-            let got =
-                serde_json::to_value(invoice_status(case.http, &case.body.to_string())).unwrap();
+            let got = serde_json::to_value(invoice_status(case.http, &case.body.to_string())).unwrap();
             assert_eq!(got, case.want, "{}", case.body);
         }
         assert_eq!(invoice_status(200, "not json").state, "unknown");
@@ -1802,15 +1580,9 @@ mod tests {
         let coded = r#"{"code":"price_cap_exceeded","reason":"readmission_required","error":"reworded by a later genome"}"#;
         assert!(readmission_capped_refusal(409, coded));
         assert!(!readmission_capped_refusal(400, coded));
-        assert!(!readmission_capped_refusal(
-            409,
-            r#"{"code":"operation_mismatch","reason":"readmission_required"}"#
-        ));
+        assert!(!readmission_capped_refusal(409, r#"{"code":"operation_mismatch","reason":"readmission_required"}"#));
         // A different reason is not this refusal, even with the old wording.
-        assert!(!readmission_capped_refusal(
-            409,
-            r#"{"code":"price_cap_exceeded","reason":"total_exceeds_cap","error":"ab requires admission again on a new connection"}"#
-        ));
+        assert!(!readmission_capped_refusal(409, r#"{"code":"price_cap_exceeded","reason":"total_exceeds_cap","error":"ab requires admission again on a new connection"}"#));
     }
 
     #[test]
@@ -1818,14 +1590,8 @@ mod tests {
         let genome = r#"{"code":"price_cap_exceeded","error":"ab requires admission again on a new connection, and the confirmed cap covers the message only; no invoice was paid."}"#;
         assert!(readmission_capped_refusal(409, genome));
         assert!(!readmission_capped_refusal(400, genome));
-        assert!(!readmission_capped_refusal(
-            409,
-            r#"{"code":"price_cap_exceeded","error":"total exceeds cap"}"#
-        ));
-        assert!(!readmission_capped_refusal(
-            409,
-            r#"{"code":"operation_mismatch","error":"requires admission again on a new connection"}"#
-        ));
+        assert!(!readmission_capped_refusal(409, r#"{"code":"price_cap_exceeded","error":"total exceeds cap"}"#));
+        assert!(!readmission_capped_refusal(409, r#"{"code":"operation_mismatch","error":"requires admission again on a new connection"}"#));
         assert!(!readmission_capped_refusal(409, "not json"));
     }
 
@@ -1834,44 +1600,36 @@ mod tests {
     const C: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
     #[test]
     fn room_evidence_requires_exact_unique_members_and_bounded_amounts() {
-        let request = json!({"max_recipient_msat":{"a":1000,"b":2000}});
-        let good = json!({"amount_msat":1000,"member_outcomes":[{"recipient":"a","status":"settled","amount_msat":1000,"message_id":"m1"},{"recipient":"b","status":"refused","amount_msat":0}]});
-        assert_eq!(room_result(&good, &request, 3000).unwrap(), (true, true));
-        let mut unknown = good.clone();
-        unknown["member_outcomes"][1]["status"] = json!("unknown");
-        assert_eq!(
-            room_result(&unknown, &request, 3000).unwrap(),
-            (false, false)
-        );
+        let request=json!({"max_recipient_msat":{"a":1000,"b":2000}});
+        let good=json!({"amount_msat":1000,"member_outcomes":[{"recipient":"a","status":"settled","amount_msat":1000,"message_id":"m1"},{"recipient":"b","status":"refused","amount_msat":0}]});
+        assert_eq!(room_result(&good,&request,3000).unwrap(),(true,true));
+        let mut unknown=good.clone();
+        unknown["member_outcomes"][1]["status"]=json!("unknown");
+        assert_eq!(room_result(&unknown,&request,3000).unwrap(),(false,false));
         for bad in [
             json!({"amount_msat":0}),
             json!({"amount_msat":1000,"member_outcomes":[good["member_outcomes"][0].clone()]}),
             json!({"amount_msat":2000,"member_outcomes":[good["member_outcomes"][0].clone(),good["member_outcomes"][0].clone()]}),
-        ] {
-            assert_eq!(
-                room_result(&bad, &request, 3000).unwrap_err().code,
-                "spend_unknown"
-            );
-        }
-        let mut excess = good.clone();
-        excess["member_outcomes"][0]["amount_msat"] = json!(1001);
-        excess["amount_msat"] = json!(1001);
-        assert!(room_result(&excess, &request, 3000).is_err());
+        ] { assert_eq!(room_result(&bad,&request,3000).unwrap_err().code,"spend_unknown"); }
+        let mut excess=good.clone();
+        excess["member_outcomes"][0]["amount_msat"]=json!(1001);
+        excess["amount_msat"]=json!(1001);
+        assert!(room_result(&excess,&request,3000).is_err());
     }
 
     #[test]
     fn pending_room_principal_is_bounded_but_not_terminal() {
         let request = json!({"max_recipient_msat":{"a":1000}});
         let reply = json!({"amount_msat":1000,"member_outcomes":[{"recipient":"a","status":"pending","amount_msat":1000,"message_id":null}]});
-        assert_eq!(room_result(&reply, &request, 1000).unwrap(), (false, false));
-        assert!(room_result(&reply, &request, 999).is_err());
+        assert_eq!(room_result(&reply,&request,1000).unwrap(),(false,false));
+        assert!(room_result(&reply,&request,999).is_err());
     }
 
     #[test]
     fn room_settled_without_stored_message_is_incomplete_not_success() {
-        let request = json!({"max_recipient_msat":{"peer":1000}});
-        let reply = json!({"amount_msat":1000,"member_outcomes":[{"recipient":"peer","status":"settled","amount_msat":1000,"message_id":null,"reason":"storage failed"}]});
-        assert_eq!(room_result(&reply, &request, 1000).unwrap(), (true, true));
+        let request=json!({"max_recipient_msat":{"peer":1000}});
+        let reply=json!({"amount_msat":1000,"member_outcomes":[{"recipient":"peer","status":"settled","amount_msat":1000,"message_id":null,"reason":"storage failed"}]});
+        assert_eq!(room_result(&reply,&request,1000).unwrap(),(true,true));
     }
 
     const OWN: &str = "1111111111111111111111111111111111111111111111111111111111111111";
@@ -1880,12 +1638,7 @@ mod tests {
     #[test]
     fn poll_ticket_requires_same_operation_generation_and_unexpired_deadline() {
         let mut gate = SpendGate::default();
-        let pending = Elevation {
-            op_id: "ab12".into(),
-            expires_at_ms: 100,
-            owner_action: "konsensus grant".into(),
-            owner_can_grant: true,
-        };
+        let pending = Elevation { op_id:"ab12".into(), expires_at_ms:100, owner_action:"konsensus grant".into(), owner_can_grant:true };
         gate.set_pending(pending.clone());
         let generation = gate.generation();
         assert!(gate.matches_poll(generation, &pending, 99));
@@ -1906,23 +1659,11 @@ mod tests {
         assert_eq!(gate.check(0).unwrap_err().code, "spend_locked");
         assert_eq!(gate.view(0).state, SpendState::Locked);
         gate.arm(1_000, SpendBasis::AppLock);
-        assert_eq!(
-            gate.check(1_000 + SPEND_WINDOW_MS - 1).unwrap(),
-            SpendBasis::AppLock
-        );
+        assert_eq!(gate.check(1_000 + SPEND_WINDOW_MS - 1).unwrap(), SpendBasis::AppLock);
         let view = gate.view(2_000);
-        assert_eq!(
-            (view.state, view.open_until_ms),
-            (SpendState::Open, Some(1_000 + SPEND_WINDOW_MS))
-        );
-        assert_eq!(
-            gate.check(1_000 + SPEND_WINDOW_MS).unwrap_err().code,
-            "spend_expired"
-        );
-        assert_eq!(
-            gate.view(1_000 + SPEND_WINDOW_MS).state,
-            SpendState::Expired
-        );
+        assert_eq!((view.state, view.open_until_ms), (SpendState::Open, Some(1_000 + SPEND_WINDOW_MS)));
+        assert_eq!(gate.check(1_000 + SPEND_WINDOW_MS).unwrap_err().code, "spend_expired");
+        assert_eq!(gate.view(1_000 + SPEND_WINDOW_MS).state, SpendState::Expired);
         gate.lock();
         assert_eq!(gate.check(0).unwrap_err().code, "spend_locked");
     }
@@ -1958,11 +1699,7 @@ mod tests {
         assert_eq!(view.state, SpendState::Unavailable);
         assert!(!view.pending.unwrap().owner_can_grant);
 
-        let hostile = ElevationReply {
-            op_id: "../x".into(),
-            expires_at: 1,
-            owner_action: String::new(),
-        };
+        let hostile = ElevationReply { op_id: "../x".into(), expires_at: 1, owner_action: String::new() };
         assert!(hostile.into_elevation(None).is_err());
         assert!(elevation_status_path("../../payments").is_err());
     }
@@ -1979,10 +1716,7 @@ mod tests {
         assert_eq!(gate.armed_by_request, None);
         assert_eq!(gate.generation(), generation + 1);
         let view = gate.view(0);
-        assert_eq!(
-            (view.state, view.lapse, view.pending),
-            (SpendState::Locked, None, None)
-        );
+        assert_eq!((view.state, view.lapse, view.pending), (SpendState::Locked, None, None));
     }
 
     #[test]
@@ -1997,32 +1731,20 @@ mod tests {
             assert_eq!(gate.armed_by_request, None);
             assert_eq!(gate.generation(), generation + 1);
             let view = gate.view(0);
-            assert_eq!(
-                (view.state, view.lapse, view.pending),
-                (SpendState::Expired, Some(lapse), None)
-            );
+            assert_eq!((view.state, view.lapse, view.pending), (SpendState::Expired, Some(lapse), None));
         }
     }
 
     #[test]
     fn a_lapsed_request_says_why_until_the_next_ask() {
-        let pending = |op: &str| {
-            ElevationReply {
-                op_id: op.into(),
-                expires_at: 100,
-                owner_action: format!("konsensus grant --op {op}"),
-            }
+        let pending = |op: &str| ElevationReply { op_id: op.into(), expires_at: 100, owner_action: format!("konsensus grant --op {op}") }
             .into_elevation(None)
-            .unwrap()
-        };
+            .unwrap();
         let mut gate = SpendGate::default();
         gate.set_pending(pending("ab12"));
         gate.pending_expired(Lapse::Lost);
         let view = gate.view(0);
-        assert_eq!(
-            (view.state, view.lapse),
-            (SpendState::Expired, Some(Lapse::Lost))
-        );
+        assert_eq!((view.state, view.lapse), (SpendState::Expired, Some(Lapse::Lost)));
         gate.set_pending(pending("ab13"));
         assert_eq!(gate.view(0).lapse, None);
         // Running out on the app's clock is an expiry too.
@@ -2031,13 +1753,9 @@ mod tests {
         assert_eq!(gate.view(100_000).lapse, None);
 
         // A sidecar request running out offers no Ask again: it can never be granted.
-        let sidecar = ElevationReply {
-            op_id: "cd34".into(),
-            expires_at: 100,
-            owner_action: "unavailable in this deployment".into(),
-        }
-        .into_elevation(None)
-        .unwrap();
+        let sidecar = ElevationReply { op_id: "cd34".into(), expires_at: 100, owner_action: "unavailable in this deployment".into() }
+            .into_elevation(None)
+            .unwrap();
         gate.set_pending(sidecar);
         let view = gate.view(100_000);
         assert_eq!((view.state, view.lapse), (SpendState::Expired, None));
@@ -2051,61 +1769,19 @@ mod tests {
 
     #[test]
     fn only_a_safe_absolute_config_is_added_to_the_owner_command() {
-        let reply = |action: &str| ElevationReply {
-            op_id: "ab12".into(),
-            expires_at: 1,
-            owner_action: action.into(),
-        };
-        let with = |action: &str, config: &str| {
-            reply(action)
-                .into_elevation(Some(std::path::Path::new(config)))
-                .unwrap()
-                .owner_action
-        };
-        assert_eq!(
-            with("konsensus grant --op ab12", "/n/konsensus.toml"),
-            "konsensus grant --op ab12 --config '/n/konsensus.toml'"
-        );
+        let reply = |action: &str| ElevationReply { op_id: "ab12".into(), expires_at: 1, owner_action: action.into() };
+        let with = |action: &str, config: &str| reply(action).into_elevation(Some(std::path::Path::new(config))).unwrap().owner_action;
+        assert_eq!(with("konsensus grant --op ab12", "/n/konsensus.toml"), "konsensus grant --op ab12 --config '/n/konsensus.toml'");
         // Relative, or with characters that could rewrite what the owner sees: left out.
-        assert_eq!(
-            with("konsensus grant --op ab12", "n/konsensus.toml"),
-            "konsensus grant --op ab12"
-        );
-        assert_eq!(
-            with("konsensus grant --op ab12", "/n/\u{202E}lmot.toml"),
-            "konsensus grant --op ab12"
-        );
-        assert_eq!(
-            with("konsensus grant --op ab12", "/n/\nx.toml"),
-            "konsensus grant --op ab12"
-        );
-        assert_eq!(
-            with("konsensus grant --op ab12", "/Users/o'neil/konsensus.toml"),
-            "konsensus grant --op ab12"
-        );
-        assert_eq!(
-            with(
-                "konsensus grant --op ab12",
-                r"/a\' ; touch /tmp/p ; \'/k.toml"
-            ),
-            "konsensus grant --op ab12"
-        );
-        assert_eq!(
-            with(
-                "konsensus grant --op ab12",
-                &format!("/{}", "n".repeat(500))
-            ),
-            "konsensus grant --op ab12"
-        );
+        assert_eq!(with("konsensus grant --op ab12", "n/konsensus.toml"), "konsensus grant --op ab12");
+        assert_eq!(with("konsensus grant --op ab12", "/n/\u{202E}lmot.toml"), "konsensus grant --op ab12");
+        assert_eq!(with("konsensus grant --op ab12", "/n/\nx.toml"), "konsensus grant --op ab12");
+        assert_eq!(with("konsensus grant --op ab12", "/Users/o'neil/konsensus.toml"), "konsensus grant --op ab12");
+        assert_eq!(with("konsensus grant --op ab12", r"/a\' ; touch /tmp/p ; \'/k.toml"), "konsensus grant --op ab12");
+        assert_eq!(with("konsensus grant --op ab12", &format!("/{}", "n".repeat(500))), "konsensus grant --op ab12");
         // Only the bare command of THIS request is extended.
-        assert_eq!(
-            with("konsensus grant --op cd34", "/n/konsensus.toml"),
-            "konsensus grant --op cd34"
-        );
-        assert_eq!(
-            with("unavailable in this deployment", "/n/konsensus.toml"),
-            "unavailable in this deployment"
-        );
+        assert_eq!(with("konsensus grant --op cd34", "/n/konsensus.toml"), "konsensus grant --op cd34");
+        assert_eq!(with("unavailable in this deployment", "/n/konsensus.toml"), "unavailable in this deployment");
     }
 
     #[test]
@@ -2124,58 +1800,24 @@ mod tests {
             json!({"recipient": A, "is_room": false, "kind": 0, "plaintext": "gm"})
         );
         assert_eq!(compose_body(ROOM, true, "hi").unwrap()["recipient"], ROOM);
-        assert!(
-            compose_body(ROOM, false, "hi").is_err(),
-            "a room id is not a node id"
-        );
+        assert!(compose_body(ROOM, false, "hi").is_err(), "a room id is not a node id");
         assert!(compose_body(A, true, "hi").is_err());
         assert!(compose_body(A, false, "  \n").is_err());
         assert!(compose_body(A, false, &"x".repeat(PLAINTEXT_MAX_BYTES + 1)).is_err());
     }
 
     fn peer(id: &str, connected: bool) -> control::Peer {
-        control::Peer {
-            ln_pubkey: None,
-            node_id: id.into(),
-            addr: None,
-            label: None,
-            connected,
-            fingerprint: None,
-            capabilities: None,
-            meetings: false,
-            rooms: false,
-            session: false,
-            porch: false,
-        }
+        control::Peer { ln_pubkey: None, node_id: id.into(), addr: None, label: None, connected, fingerprint: None, capabilities: None, meetings: false, rooms: false, session: false, porch: false }
     }
 
     #[test]
     fn room_cost_is_the_sum_of_each_members_own_price() {
         let tables = vec![
-            control::PeerPrice {
-                peer_id: A.into(),
-                prices: HashMap::from([("communication".into(), 2_000)]),
-                age_secs: 10,
-                stale: false,
-            },
-            control::PeerPrice {
-                peer_id: B.into(),
-                prices: HashMap::from([("communication".into(), 9_000)]),
-                age_secs: 9_000,
-                stale: true,
-            },
+            control::PeerPrice { peer_id: A.into(), prices: HashMap::from([("communication".into(), 2_000)]), age_secs: 10, stale: false },
+            control::PeerPrice { peer_id: B.into(), prices: HashMap::from([("communication".into(), 9_000)]), age_secs: 9_000, stale: true },
         ];
         let members = vec![OWN.into(), A.to_uppercase(), B.into(), A.into()];
-        let q = room_quote(
-            ROOM,
-            OWN,
-            500,
-            &members,
-            &[peer(A, true), peer(B, true)],
-            &tables,
-            RoutingFeePolicy::default(),
-        )
-        .unwrap();
+        let q = room_quote(ROOM, OWN, 500, &members, &[peer(A, true), peer(B, true)], &tables, RoutingFeePolicy::default()).unwrap();
         // A: advertised 2000. B: stale table, so own price 500, floored at 1 sat. Self and duplicates skipped.
         assert_eq!(q.members.len(), 2);
         assert_eq!((q.members[0].msat, q.members[0].advertised), (7_000, true));
@@ -2189,68 +1831,24 @@ mod tests {
 
     #[test]
     fn room_policy_proportional_and_maximum_allowances_and_overflow() {
-        let policy = RoutingFeePolicy {
-            minimum_msat: 7500,
-            proportional_millionths: 20_000,
-            maximum_msat: 20_000,
-        };
-        for (principal, total, fee) in [
-            (2000, 9500, 7500),
-            (750_000, 765_000, 15_000),
-            (2_000_000, 2_020_000, 20_000),
-        ] {
-            let quote = room_quote(
-                ROOM,
-                OWN,
-                principal,
-                &[A.into()],
-                &[peer(A, true)],
-                &[],
-                policy,
-            )
-            .unwrap();
+        let policy = RoutingFeePolicy { minimum_msat: 7500, proportional_millionths: 20_000, maximum_msat: 20_000 };
+        for (principal, total, fee) in [(2000, 9500, 7500), (750_000, 765_000, 15_000), (2_000_000, 2_020_000, 20_000)] {
+            let quote = room_quote(ROOM, OWN, principal, &[A.into()], &[peer(A, true)], &[], policy).unwrap();
             assert_eq!((quote.total_msat, quote.max_routing_fee_msat), (total, fee));
         }
         assert!(room_quote(ROOM, OWN, u64::MAX, &[A.into()], &[], &[], policy).is_err());
-        assert!(room_quote(
-            ROOM,
-            OWN,
-            u64::MAX / 2,
-            &[A.into(), B.into()],
-            &[],
-            &[],
-            policy
-        )
-        .is_err());
+        assert!(room_quote(ROOM, OWN, u64::MAX / 2, &[A.into(), B.into()], &[], &[], policy).is_err());
     }
 
     #[test]
     fn a_room_with_an_unconnected_member_is_not_sendable() {
         let members = vec![OWN.into(), A.into(), C.into()];
-        let q = room_quote(
-            ROOM,
-            OWN,
-            1_000,
-            &members,
-            &[peer(A, true), peer(C, false)],
-            &[],
-            RoutingFeePolicy::default(),
-        )
-        .unwrap();
+        let q = room_quote(ROOM, OWN, 1_000, &members, &[peer(A, true), peer(C, false)], &[], RoutingFeePolicy::default()).unwrap();
         assert_eq!(q.unreachable, vec![C.to_string()]);
         let err = room_sendable(&q).unwrap_err();
         assert_eq!(err.code, "room_unreachable");
         assert!(err.message.contains("1 member is not a connected peer"));
-        let alone = room_quote(
-            ROOM,
-            OWN,
-            1_000,
-            &[OWN.into()],
-            &[],
-            &[],
-            RoutingFeePolicy::default(),
-        )
-        .unwrap();
+        let alone = room_quote(ROOM, OWN, 1_000, &[OWN.into()], &[], &[], RoutingFeePolicy::default()).unwrap();
         assert_eq!(room_sendable(&alone).unwrap_err().code, "room_unreachable");
     }
 
@@ -2260,8 +1858,7 @@ mod tests {
     /// a leading zero word in the features). Read from their raw words, each
     /// names a different node.
     const CANONICAL: &str = "lnbcrt210n1p45n5sqdq2v35kumn9wgpp5vj92t3telvc08zhhgnvh6mkggrr6jynh5jv6p4uq70nnznk2py9ssp5qszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszq9qrsgqcqpjgpd0vndshg0682c4gpxyde0sr785uz9eqc36yjugphpzpkn55zmy6v4nszm0ym8vqwvgrp4jh9us9d593yftaz5sgxwyxyf9z0hmsnsqcufc8l";
-    const CANONICAL_PAYEE: &str =
-        "031b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f";
+    const CANONICAL_PAYEE: &str = "031b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f";
     const NONCANONICAL: [&str; 3] = [
         "lnbcrt210n1p45n5sqdq2v35kumn9wgpp5vj92t3telvc08zhhgnvh6mkggrr6jynh5jv6p4uq70nnznk2py93sp5qszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszq9qrsgqcqpjgpd0vndshg0682c4gpxyde0sr785uz9eqc36yjugphpzpkn55zmy6v4nszm0ym8vqwvgrp4jh9us9d593yftaz5sgxwyxyf9z0hmsnsq3ul59u",
         "lnbcrt210n1p45n5sqdq2v35kumn9wgpp5vj92t3telvc08zhhgnvh6mkggrr6jynh5jv6p4uq70nnznk2py9ssp5qszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszq9qrsgqcqzqjgpd0vndshg0682c4gpxyde0sr785uz9eqc36yjugphpzpkn55zmy6v4nszm0ym8vqwvgrp4jh9us9d593yftaz5sgxwyxyf9z0hmsnsq53y0av",
@@ -2277,71 +1874,41 @@ mod tests {
         assert_eq!(read.network, "regtest");
         assert_eq!(read.payee, CANONICAL_PAYEE);
         assert_eq!(read.bolt11, CANONICAL);
-        assert_eq!(
-            read.payment_hash,
-            "648aa5c579fb30f38af744d97d6ec840c7a91277a499a0d780f3e7314eca090b"
-        );
+        assert_eq!(read.payment_hash, "648aa5c579fb30f38af744d97d6ec840c7a91277a499a0d780f3e7314eca090b");
         assert_eq!(read.description.as_deref(), Some("dinner"));
         let parsed: Bolt11Invoice = CANONICAL.parse().unwrap();
-        assert_eq!(
-            read.expires_at_ms,
-            (parsed.duration_since_epoch().as_secs() + 3600) * 1000
-        );
+        assert_eq!(read.expires_at_ms, (parsed.duration_since_epoch().as_secs() + 3600) * 1000);
         // Case and a `lightning:` prefix are not re-encodings: the same invoice.
-        let upper =
-            invoice_amount(&format!("  LIGHTNING:{}\n", CANONICAL.to_ascii_uppercase())).unwrap();
+        let upper = invoice_amount(&format!("  LIGHTNING:{}\n", CANONICAL.to_ascii_uppercase())).unwrap();
         assert_eq!(upper, read);
         let t = invoice_amount(TEST_INVOICE_1000).unwrap();
         assert_eq!((t.amount_msat, t.network), (1_000, "testnet"));
-        assert_eq!(
-            t.payee,
-            "0324653eac434488002cc06bbfb7f10fe18991e35f9fe4302dbea6d2353dc0ab1c"
-        );
+        assert_eq!(t.payee, "0324653eac434488002cc06bbfb7f10fe18991e35f9fe4302dbea6d2353dc0ab1c");
     }
 
     #[test]
     fn a_non_canonical_encoding_is_refused_whatever_its_signer() {
         // The node's parser accepts each as the canonical invoice; the app does not.
         for bolt11 in NONCANONICAL {
-            assert_eq!(
-                bolt11
-                    .parse::<Bolt11Invoice>()
-                    .unwrap()
-                    .get_payee_pub_key()
-                    .to_string(),
-                CANONICAL_PAYEE
-            );
+            assert_eq!(bolt11.parse::<Bolt11Invoice>().unwrap().get_payee_pub_key().to_string(), CANONICAL_PAYEE);
             let err = invoice_amount(bolt11).unwrap_err();
             assert_eq!(err.code, "invalid");
             assert!(err.message.contains("standard encoding"), "{}", err.message);
-            assert!(pay_body(bolt11, 21_000)
-                .unwrap_err()
-                .message
-                .contains("standard encoding"));
+            assert!(pay_body(bolt11, 21_000).unwrap_err().message.contains("standard encoding"));
         }
         assert_eq!(invoice_amount(DUPLICATE_N).unwrap_err().code, "invalid");
         // One `n`: the signer's is read as the payee; anyone else's fails the signature.
         let pre = &CANONICAL[..CANONICAL.len() - 110];
         let single_match = format!("{pre}np4qvdcf32k0vfxgsyet5ldt246q4jaw8scx3sysx0lnstlt6w4m5rc7utvphkf0r6r8hqss2xsg5pa3k5094vr0szxcaq96z28ytekr7at380elc26wu0j6u7fzhxwwux67vsqs7jpyfk0dqar3y86qj3urrvqpvaf6md");
         let single_other = format!("{pre}np4qfx5kmx3xcgr9j5m62htnkgq4fx5tk02mq9vjs3nwnz9rfe9f5rkv8wux8u2ga730fxufdqte2kkh7vk2yu57uemxxguwr26kpwhh528qq36j5yrvjd0mgtvazaghc2svyvauk5u4sacaarg20n4upjk3jjsqa2gc5d");
-        assert_eq!(
-            invoice_amount(&single_match).unwrap().payee,
-            CANONICAL_PAYEE
-        );
+        assert_eq!(invoice_amount(&single_match).unwrap().payee, CANONICAL_PAYEE);
         assert_eq!(invoice_amount(&single_other).unwrap_err().code, "invalid");
         assert!(pay_body(DUPLICATE_N, 21_000).is_err());
     }
 
     #[test]
     fn malformed_and_amountless_invoices_are_refused() {
-        for bad in [
-            "hello",
-            "lnbc10n1abc",
-            "lntb10n1x",
-            "lnbc1pvjluez",
-            "",
-            &format!("{}q", CANONICAL),
-        ] {
+        for bad in ["hello", "lnbc10n1abc", "lntb10n1x", "lnbc1pvjluez", "", &format!("{}q", CANONICAL)] {
             assert_eq!(invoice_amount(bad).unwrap_err().code, "invalid", "{bad}");
         }
         // One changed character fails the checksum.
@@ -2354,45 +1921,24 @@ mod tests {
 
     #[test]
     fn pay_refuses_amountless_and_mismatched_invoices() {
-        assert_eq!(
-            pay_body(TEST_INVOICE_1000, 1_000).unwrap(),
-            json!({"bolt11": TEST_INVOICE_1000})
-        );
+        assert_eq!(pay_body(TEST_INVOICE_1000, 1_000).unwrap(), json!({"bolt11": TEST_INVOICE_1000}));
         let prefixed = format!("lightning:{}", TEST_INVOICE_1000.to_ascii_uppercase());
-        assert_eq!(
-            pay_body(&prefixed, 1_000).unwrap(),
-            json!({"bolt11": TEST_INVOICE_1000})
-        );
-        assert!(pay_body(TEST_INVOICE_1000, 999)
-            .unwrap_err()
-            .message
-            .contains("does not match"));
+        assert_eq!(pay_body(&prefixed, 1_000).unwrap(), json!({"bolt11": TEST_INVOICE_1000}));
+        assert!(pay_body(TEST_INVOICE_1000, 999).unwrap_err().message.contains("does not match"));
         assert!(pay_body("lnbc1abc", 0).is_err());
     }
 
     #[test]
     fn keysend_and_invoice_bodies_are_bounded() {
         let pk = format!("02{}", "ab".repeat(32));
-        assert_eq!(
-            keysend_body(&pk, 5_000, Some(" thanks ")).unwrap(),
-            json!({"dest_pubkey": pk, "amount_msat": 5_000, "memo": "thanks"})
-        );
-        assert_eq!(
-            keysend_body(&pk, 5_000, Some("")).unwrap()["memo"],
-            serde_json::Value::Null
-        );
+        assert_eq!(keysend_body(&pk, 5_000, Some(" thanks ")).unwrap(), json!({"dest_pubkey": pk, "amount_msat": 5_000, "memo": "thanks"}));
+        assert_eq!(keysend_body(&pk, 5_000, Some("")).unwrap()["memo"], serde_json::Value::Null);
         assert!(keysend_body(&pk, 999, None).is_err());
         assert!(keysend_body(A, 5_000, None).is_err());
         assert!(keysend_body(&pk, 5_000, Some("a\u{7}b")).is_err());
 
-        assert_eq!(
-            invoice_body(21_000, "coffee", 3600).unwrap(),
-            json!({"amount_msat": 21_000, "expiry_secs": 3600, "description": "coffee"})
-        );
-        assert!(invoice_body(21_000, "", 3600)
-            .unwrap()
-            .get("description")
-            .is_none());
+        assert_eq!(invoice_body(21_000, "coffee", 3600).unwrap(), json!({"amount_msat": 21_000, "expiry_secs": 3600, "description": "coffee"}));
+        assert!(invoice_body(21_000, "", 3600).unwrap().get("description").is_none());
         assert!(invoice_body(0, "", 3600).is_err());
         assert!(invoice_body(1_000, &"x".repeat(640), 3600).is_err());
         assert_eq!(invoice_body(1_000, "", 1).unwrap()["expiry_secs"], 60);
@@ -2400,18 +1946,10 @@ mod tests {
 
     #[test]
     fn receipts_drop_preimages_and_normalise_status() {
-        let pay: PayReply = serde_json::from_value(
-            json!({"payment_hash": "HASH", "amount_msat": 1000, "preimage": "PRE"}),
-        )
-        .unwrap();
+        let pay: PayReply = serde_json::from_value(json!({"payment_hash": "HASH", "amount_msat": 1000, "preimage": "PRE"})).unwrap();
         let out = serde_json::to_string(&pay.receipt(5)).unwrap();
-        assert!(
-            out.contains("\"status\":\"settled\"") && !out.contains("PRE") && !out.contains("HASH")
-        );
-        let pending: PayReply = serde_json::from_value(
-            json!({"payment_hash": "h", "amount_msat": 1000, "preimage": ""}),
-        )
-        .unwrap();
+        assert!(out.contains("\"status\":\"settled\"") && !out.contains("PRE") && !out.contains("HASH"));
+        let pending: PayReply = serde_json::from_value(json!({"payment_hash": "h", "amount_msat": 1000, "preimage": ""})).unwrap();
         assert_eq!(pending.receipt(5).status, "pending");
         let ks: KeysendReply = serde_json::from_value(json!({"payment_hash": "h", "amount_msat": 1000, "preimage": "p", "status": "InFlight"})).unwrap();
         assert_eq!(ks.receipt(5).status, "inflight");
@@ -2420,20 +1958,14 @@ mod tests {
     #[test]
     fn invites_are_bound_to_one_key_and_bounded_in_time() {
         let body = invite_body(A, "203.0.113.5:9735", 24, 1_000).unwrap();
-        assert_eq!(
-            body,
-            json!({"invitee_pubkey": A, "expiry_unix": 1_000 + 86_400, "addr": "203.0.113.5:9735"})
-        );
+        assert_eq!(body, json!({"invitee_pubkey": A, "expiry_unix": 1_000 + 86_400, "addr": "203.0.113.5:9735"}));
         assert!(invite_body(A, "nohost", 24, 0).is_err());
         assert!(invite_body(A, "host:0", 24, 0).is_err());
         assert!(invite_body(A, "a b:1", 24, 0).is_err());
         assert!(invite_body(A, "h:1", 0, 0).is_err());
         assert!(invite_body(A, "h:1", INVITE_MAX_HOURS + 1, 0).is_err());
         assert!(invite_body("x", "h:1", 1, 0).is_err());
-        assert_eq!(
-            invite_token("bitsov://invite/eyJ2Ijoy_-x").unwrap(),
-            "eyJ2Ijoy_-x"
-        );
+        assert_eq!(invite_token("bitsov://invite/eyJ2Ijoy_-x").unwrap(), "eyJ2Ijoy_-x");
         assert!(invite_token("bitsov://invite/a b").is_err());
         assert!(invite_token("").is_err());
     }
@@ -2445,25 +1977,16 @@ mod tests {
         assert_eq!(base64_decoded_len("aGk"), None);
         assert_eq!(base64_decoded_len("a-k="), None);
         assert!(file_upload_body("note.txt", "text/plain", "aGk=").is_ok());
-        assert_eq!(
-            file_upload_body("n.bin", "", "aGk=").unwrap()["mime_type"],
-            "application/octet-stream"
-        );
+        assert_eq!(file_upload_body("n.bin", "", "aGk=").unwrap()["mime_type"], "application/octet-stream");
         assert!(file_upload_body("../etc", "", "aGk=").is_err());
         assert!(file_upload_body("a/b", "", "aGk=").is_err());
         assert!(file_upload_body("a", "", "").is_err());
         let big = "A".repeat((FILE_MAX_BYTES / 3 + 1) * 4);
-        assert!(file_upload_body("big.bin", "", &big)
-            .unwrap_err()
-            .message
-            .contains("1.4 MB"));
+        assert!(file_upload_body("big.bin", "", &big).unwrap_err().message.contains("1.4 MB"));
         assert!(file_send_path("../x").is_err());
         assert_eq!(file_send_path(ROOM).unwrap(), format!("/files/{ROOM}/send"));
         // F1 (#83) stages paired uploads in memory as `stage-<uuid>`.
-        assert_eq!(
-            file_send_path(&format!("stage-{ROOM}")).unwrap(),
-            format!("/files/stage-{ROOM}/send")
-        );
+        assert_eq!(file_send_path(&format!("stage-{ROOM}")).unwrap(), format!("/files/stage-{ROOM}/send"));
         assert!(file_send_path("stage-../x").is_err());
         assert!(file_send_path("stage-").is_err());
         assert!(file_send_path(&format!("stage-{ROOM}/../x")).is_err());
@@ -2473,10 +1996,7 @@ mod tests {
     fn call_bodies_are_one_contact_one_signal() {
         let peer = "ab".repeat(32);
         let body = call_body(&peer.to_uppercase(), 400, r#"{"v":1}"#).unwrap();
-        assert_eq!(
-            body,
-            json!({"recipient": peer, "is_room": false, "kind": 400, "plaintext": r#"{"v":1}"#})
-        );
+        assert_eq!(body, json!({"recipient": peer, "is_room": false, "kind": 400, "plaintext": r#"{"v":1}"#}));
         assert!(call_body(&peer, 0, "{}").is_err());
         assert!(call_body(&peer, 404, "{}").is_err());
         assert!(call_body(&peer, 401, "hi").is_err());
@@ -2488,11 +2008,7 @@ mod tests {
 
     #[test]
     fn only_audio_files_resolve_as_voice_notes() {
-        let row = |id: &str, mime: &str, m: Option<&str>| FileRow {
-            id: id.into(),
-            mime_type: mime.into(),
-            message_id: m.map(Into::into),
-        };
+        let row = |id: &str, mime: &str, m: Option<&str>| FileRow { id: id.into(), mime_type: mime.into(), message_id: m.map(Into::into) };
         let rows = [
             row("a", "application/pdf", Some("AB")),
             row("b", "audio/webm", Some("ab")),
@@ -2507,10 +2023,7 @@ mod tests {
         assert!(is_voice_mime(" Audio/MP4"));
         assert!(!is_voice_mime("text/html"));
         assert_eq!(stored_file_for(&rows, "ab"), StoredLookup::Found(&rows[0]));
-        assert_eq!(
-            stored_file_for(&rows[1..], "ab"),
-            StoredLookup::Found(&rows[1])
-        );
+        assert_eq!(stored_file_for(&rows[1..], "ab"), StoredLookup::Found(&rows[1]));
         assert_eq!(stored_file_for(&rows, "zz"), StoredLookup::Missing);
     }
 
@@ -2557,64 +2070,26 @@ mod tests {
     #[test]
     fn settled_incomplete_reads_amount_and_admission_fields() {
         let got = settled_incomplete(502, &psi(2000, 0, 2000, SESSION_TIMEOUT)).unwrap();
-        assert_eq!(
-            got,
-            SettledIncomplete {
-                amount_msat: 2000,
-                prior_admission_msat: Some(0),
-                current_call_msat: Some(2000),
-                retry_safe: true
-            }
-        );
+        assert_eq!(got, SettledIncomplete { amount_msat: 2000, prior_admission_msat: Some(0), current_call_msat: Some(2000), retry_safe: true });
         // A retry on the same connection: the prior admission is not a new debit.
         let again = settled_incomplete(502, &psi(0, 2000, 0, SESSION_TIMEOUT)).unwrap();
-        assert_eq!(
-            (
-                again.amount_msat,
-                again.prior_admission_msat,
-                again.retry_safe
-            ),
-            (0, Some(2000), true)
-        );
+        assert_eq!((again.amount_msat, again.prior_admission_msat, again.retry_safe), (0, Some(2000), true));
         let envelope = "internal error: admission payment settled but delivering the admission envelope failed (a retry will re-send the paid proof, not pay again): closed";
-        assert!(
-            settled_incomplete(502, &psi(2000, 0, 2000, envelope))
-                .unwrap()
-                .retry_safe
-        );
+        assert!(settled_incomplete(502, &psi(2000, 0, 2000, envelope)).unwrap().retry_safe);
     }
 
     #[test]
     fn settled_incomplete_offers_no_retry_unless_the_node_says_so() {
         // A message paid, then not stored: sending again would pay again.
         let stored = serde_json::json!({"error":"file payment settled but storing message failed: disk","code":"payment_settled_send_incomplete","amount_msat":3000}).to_string();
-        assert_eq!(
-            settled_incomplete(502, &stored).unwrap(),
-            SettledIncomplete {
-                amount_msat: 3000,
-                prior_admission_msat: None,
-                current_call_msat: None,
-                retry_safe: false
-            }
-        );
-        assert!(
-            !settled_incomplete(502, &psi(4000, 0, 4000, "bad request: no route"))
-                .unwrap()
-                .retry_safe
-        );
+        assert_eq!(settled_incomplete(502, &stored).unwrap(), SettledIncomplete { amount_msat: 3000, prior_admission_msat: None, current_call_msat: None, retry_safe: false });
+        assert!(!settled_incomplete(502, &psi(4000, 0, 4000, "bad request: no route")).unwrap().retry_safe);
         // The reported total must be the current call the reason names.
-        assert!(
-            !settled_incomplete(502, &psi(4000, 0, 2000, SESSION_TIMEOUT))
-                .unwrap()
-                .retry_safe
-        );
+        assert!(!settled_incomplete(502, &psi(4000, 0, 2000, SESSION_TIMEOUT)).unwrap().retry_safe);
         // Not this error: the caller keeps its generic outcome-unknown path.
         assert!(settled_incomplete(500, &psi(2000, 0, 2000, SESSION_TIMEOUT)).is_none());
         assert!(settled_incomplete(502, r#"{"error":"no route","code":502}"#).is_none());
-        assert!(
-            settled_incomplete(502, r#"{"code":"payment_settled_send_incomplete"}"#).is_none(),
-            "no amount, no mapping"
-        );
+        assert!(settled_incomplete(502, r#"{"code":"payment_settled_send_incomplete"}"#).is_none(), "no amount, no mapping");
         assert!(settled_incomplete(502, "bad gateway").is_none());
     }
 
@@ -2622,82 +2097,30 @@ mod tests {
     fn undelivered_copy_never_says_not_sent() {
         let retry = ActionError::undelivered(2000, true);
         assert_eq!(retry.code, "payment_settled_undelivered");
-        assert_eq!(
-            retry.undelivered,
-            Some(UndeliveredView {
-                paid_msat: 2000,
-                retry: true
-            })
-        );
+        assert_eq!(retry.undelivered, Some(UndeliveredView { paid_msat: 2000, retry: true }));
         assert!(retry.message.starts_with("Payment settled (2000 msat paid), message not yet delivered. Do not send it again."), "{}", retry.message);
-        assert!(
-            retry.message.contains("Retry delivery pays nothing new")
-                && retry.message.contains("asks you first"),
-            "{}",
-            retry.message
-        );
-        assert!(
-            !retry.message.contains("no second admission"),
-            "never promise what the node does not enforce"
-        );
+        assert!(retry.message.contains("Retry delivery pays nothing new") && retry.message.contains("asks you first"), "{}", retry.message);
+        assert!(!retry.message.contains("no second admission"), "never promise what the node does not enforce");
         let stop = ActionError::undelivered(3000, false);
-        assert!(
-            stop.message.contains("Do not send it again") && !stop.message.contains("Retry"),
-            "{}",
-            stop.message
-        );
+        assert!(stop.message.contains("Do not send it again") && !stop.message.contains("Retry"), "{}", stop.message);
         let wire = serde_json::to_value(&stop).unwrap();
-        assert_eq!(
-            wire["undelivered"],
-            serde_json::json!({"paid_msat": 3000, "retry": false})
-        );
-        assert!(serde_json::to_value(ActionError::node("x"))
-            .unwrap()
-            .get("undelivered")
-            .is_none());
-        assert!(serde_json::to_value(ActionError::node("x"))
-            .unwrap()
-            .get("admission")
-            .is_none());
-        assert!(serde_json::to_value(ActionError::node("x"))
-            .unwrap()
-            .get("pending_id")
-            .is_none());
-        assert_eq!(
-            serde_json::to_value(retry.for_pending("r1")).unwrap()["pending_id"],
-            "r1"
-        );
+        assert_eq!(wire["undelivered"], serde_json::json!({"paid_msat": 3000, "retry": false}));
+        assert!(serde_json::to_value(ActionError::node("x")).unwrap().get("undelivered").is_none());
+        assert!(serde_json::to_value(ActionError::node("x")).unwrap().get("admission").is_none());
+        assert!(serde_json::to_value(ActionError::node("x")).unwrap().get("pending_id").is_none());
+        assert_eq!(serde_json::to_value(retry.for_pending("r1")).unwrap()["pending_id"], "r1");
     }
 
     #[test]
     fn needs_admission_shows_the_price_or_says_it_is_unknown() {
-        let v = AdmissionView {
-            admission_msat: 2000,
-            message_msat: 1000,
-            max_routing_fee_msat: 0,
-            total_msat: 3000,
-            quoted: true,
-        };
+        let v = AdmissionView { admission_msat: 2000, message_msat: 1000, max_routing_fee_msat: 0, total_msat: 3000, quoted: true };
         let e = ActionError::needs_admission(Some(v));
         assert_eq!((e.code, e.admission), ("retry_needs_admission", Some(v)));
-        assert!(
-            e.message.contains("Nothing was paid") && e.message.contains("3000 msat in all"),
-            "{}",
-            e.message
-        );
+        assert!(e.message.contains("Nothing was paid") && e.message.contains("3000 msat in all"), "{}", e.message);
         let estimate = ActionError::needs_admission(Some(AdmissionView { quoted: false, ..v }));
-        assert!(
-            estimate.message.contains("up to 3000 msat"),
-            "{}",
-            estimate.message
-        );
+        assert!(estimate.message.contains("up to 3000 msat"), "{}", estimate.message);
         let unknown = ActionError::needs_admission(None);
-        assert!(
-            unknown.admission.is_none() && unknown.message.contains("could not tell the price")
-        );
-        assert_eq!(
-            serde_json::to_value(&e).unwrap()["admission"],
-            serde_json::json!({"admission_msat": 2000, "message_msat": 1000, "max_routing_fee_msat": 0, "total_msat": 3000, "quoted": true})
-        );
+        assert!(unknown.admission.is_none() && unknown.message.contains("could not tell the price"));
+        assert_eq!(serde_json::to_value(&e).unwrap()["admission"], serde_json::json!({"admission_msat": 2000, "message_msat": 1000, "max_routing_fee_msat": 0, "total_msat": 3000, "quoted": true}));
     }
 }

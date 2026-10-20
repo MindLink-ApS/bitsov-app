@@ -20,9 +20,9 @@ use tokio::sync::{mpsc, watch, Semaphore};
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 
 use crate::at_rest::{self, Sealer};
-use crate::connection_retry::RemoteRetry;
-use crate::home_node::{BoxPin, BoxPinStore};
 use crate::pairing::{self, ClientKey};
+use crate::home_node::{BoxPin, BoxPinStore};
+use crate::connection_retry::RemoteRetry;
 
 /// Exact Noise protocol used by both app and node ingress.
 pub const NOISE_PROTOCOL: &str = "Noise_XX_25519_ChaChaPoly_BLAKE2s";
@@ -156,36 +156,16 @@ impl RemoteDescriptor {
     }
 
     pub fn box_pin(&self) -> Result<Option<BoxPin>, RemoteError> {
-        if self.node_id.is_empty() {
-            return Ok(None);
-        }
+        if self.node_id.is_empty() { return Ok(None); }
         if let Some(signature) = &self.box_transport_signature {
-            return BoxPin::verify(
-                &self.node_id,
-                &self.endpoint,
-                &self.box_transport_pubkey,
-                signature,
-            )
-            .map(Some);
+            return BoxPin::verify(&self.node_id, &self.endpoint, &self.box_transport_pubkey, signature).map(Some);
         }
-        let Some(store) = &self.pin_store else {
-            return Ok(None);
-        };
-        let Some(pin) = store.read(&self.node_id)? else {
-            return Ok(None);
-        };
+        let Some(store) = &self.pin_store else { return Ok(None); };
+        let Some(pin) = store.read(&self.node_id)? else { return Ok(None); };
         if pin.node_id != self.node_id || pin.endpoint != self.endpoint {
-            return Err(RemoteError::Invalid(
-                "box pin belongs to another node or endpoint".into(),
-            ));
+            return Err(RemoteError::Invalid("box pin belongs to another node or endpoint".into()));
         }
-        BoxPin::verify(
-            &self.node_id,
-            &self.endpoint,
-            &pin.public_key,
-            &pin.signature,
-        )
-        .map(Some)
+        BoxPin::verify(&self.node_id, &self.endpoint, &pin.public_key, &pin.signature).map(Some)
     }
 
     pub fn endpoint(&self) -> &str {
@@ -197,13 +177,9 @@ impl RemoteDescriptor {
     }
 
     pub fn bootstrap_box_key(&self) -> Option<&str> {
-        self.node_id
-            .is_empty()
-            .then_some(self.box_transport_pubkey.as_str())
+        self.node_id.is_empty().then_some(self.box_transport_pubkey.as_str())
     }
-    pub fn has_live_pin(&self) -> bool {
-        !self.transport_pubkey.is_empty()
-    }
+    pub fn has_live_pin(&self) -> bool { !self.transport_pubkey.is_empty() }
 
     pub fn has_code(&self) -> bool {
         self.code.is_some()
@@ -393,13 +369,8 @@ fn decode_hex<const N: usize>(value: &str, what: &str) -> Result<[u8; N], Remote
 fn validate_code(code: Option<&str>) -> Result<(), RemoteError> {
     if let Some(code) = code {
         if let Some(secret) = code.strip_prefix("owner_") {
-            return if crate::delegation::canonical_hex(secret, 32) {
-                Ok(())
-            } else {
-                Err(RemoteError::Invalid(
-                    "owner ticket code must contain 32 lowercase hex bytes".into(),
-                ))
-            };
+            return if crate::delegation::canonical_hex(secret, 32) { Ok(()) }
+                else { Err(RemoteError::Invalid("owner ticket code must contain 32 lowercase hex bytes".into())) };
         }
         let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(code)
@@ -484,51 +455,30 @@ fn validate_descriptor(stored: StoredDescriptor) -> Result<RemoteDescriptor, Rem
     validate_code(stored.code.as_deref())?;
     validate_endpoints(&stored)?;
     if stored.node_id.is_empty() {
-        if !stored.transport_pubkey.is_empty()
-            || !stored.transport_signature.is_empty()
-            || stored.box_transport_signature.is_some()
-            || stored.endpoints_signature.is_some()
-        {
-            return Err(RemoteError::Invalid(
-                "bootstrap ticket cannot claim identity proofs".into(),
-            ));
+        if !stored.transport_pubkey.is_empty() || !stored.transport_signature.is_empty()
+            || stored.box_transport_signature.is_some() || stored.endpoints_signature.is_some() {
+            return Err(RemoteError::Invalid("bootstrap ticket cannot claim identity proofs".into()));
         }
         let pin = decode_hex::<32>(&stored.box_transport_pubkey, "box_transport_pubkey")?;
-        if pin == [0; 32] {
-            return Err(RemoteError::Invalid("empty box pin".into()));
-        }
+        if pin == [0; 32] { return Err(RemoteError::Invalid("empty box pin".into())); }
         return Ok(descriptor_from_stored(stored, pin));
     }
     if let Some(signature) = &stored.box_transport_signature {
-        BoxPin::verify(
-            &stored.node_id,
-            &stored.endpoint,
-            &stored.box_transport_pubkey,
-            signature,
-        )?;
+        BoxPin::verify(&stored.node_id, &stored.endpoint, &stored.box_transport_pubkey, signature)?;
     } else if !stored.box_transport_pubkey.is_empty() {
-        return Err(RemoteError::Invalid(
-            "missing box transport signature".into(),
-        ));
+        return Err(RemoteError::Invalid("missing box transport signature".into()));
     }
     // Identity-bearing links and persisted receipts require both signed pins.
     if stored.transport_pubkey.is_empty() || stored.transport_signature.is_empty() {
         return Err(RemoteError::Invalid("missing live transport proof".into()));
     }
-    let transport_pubkey_bytes = verify_transport_proof(
-        &stored.node_id,
-        &stored.transport_pubkey,
-        &stored.transport_signature,
-    )?;
+    let transport_pubkey_bytes = verify_transport_proof(&stored.node_id, &stored.transport_pubkey, &stored.transport_signature)?;
     Ok(descriptor_from_stored(stored, transport_pubkey_bytes))
 }
 
 /// PR #287 / PairLink proof: exact UTF-8 domain, lowercase hex, unpadded base64url.
-pub fn verify_transport_proof(
-    node_id: &str,
-    transport_pubkey: &str,
-    transport_signature: &str,
-) -> Result<[u8; 32], RemoteError> {
+pub fn verify_transport_proof(node_id: &str, transport_pubkey: &str, transport_signature: &str)
+    -> Result<[u8; 32], RemoteError> {
     let node_id_bytes = decode_hex::<32>(node_id, "node_id")?;
     let transport_pubkey_bytes = decode_hex::<32>(transport_pubkey, "transport_pubkey")?;
     if transport_pubkey_bytes.iter().all(|byte| *byte == 0) {
@@ -567,96 +517,56 @@ pub fn verify_transport_proof(
     Ok(transport_pubkey_bytes)
 }
 
-fn descriptor_from_stored(
-    stored: StoredDescriptor,
-    transport_pubkey_bytes: [u8; 32],
-) -> RemoteDescriptor {
+fn descriptor_from_stored(stored: StoredDescriptor, transport_pubkey_bytes: [u8; 32]) -> RemoteDescriptor {
     RemoteDescriptor {
-        v: stored.v,
-        endpoint: stored.endpoint,
-        endpoints: stored.endpoints,
-        endpoints_signature: stored.endpoints_signature,
-        bootstrap_routes: stored.bootstrap_routes,
+        v: stored.v, endpoint: stored.endpoint, endpoints: stored.endpoints,
+        endpoints_signature: stored.endpoints_signature, bootstrap_routes: stored.bootstrap_routes,
         box_transport_pubkey: stored.box_transport_pubkey,
         box_transport_signature: stored.box_transport_signature,
-        node_id: stored.node_id,
-        transport_pubkey: stored.transport_pubkey,
-        transport_signature: stored.transport_signature,
-        code: stored.code,
+        node_id: stored.node_id, transport_pubkey: stored.transport_pubkey,
+        transport_signature: stored.transport_signature, code: stored.code,
         hosted_by: display_label(stored.hosted_by.as_deref()),
-        transport_pubkey_bytes,
-        pin_store: None,
+        transport_pubkey_bytes, pin_store: None,
     }
 }
 
 fn validate_endpoints(stored: &StoredDescriptor) -> Result<(), RemoteError> {
     if !stored.bootstrap_routes.is_empty() {
-        if stored.v != 1
-            || stored.node_id.is_empty()
-            || stored.box_transport_signature.is_none()
-            || stored.code.is_some()
-            || stored.bootstrap_routes.len() > 64
-        {
-            return Err(RemoteError::Invalid(
-                "invalid bootstrap routing hints".into(),
-            ));
+        if stored.v != 1 || stored.node_id.is_empty() || stored.box_transport_signature.is_none()
+            || stored.code.is_some() || stored.bootstrap_routes.len() > 64 {
+            return Err(RemoteError::Invalid("invalid bootstrap routing hints".into()));
         }
-        for endpoint in &stored.bootstrap_routes {
-            endpoint_parts(endpoint)?;
-        }
+        for endpoint in &stored.bootstrap_routes { endpoint_parts(endpoint)?; }
     }
     if stored.v == 1 {
         if !stored.endpoints.is_empty() || stored.endpoints_signature.is_some() {
-            return Err(RemoteError::Invalid(
-                "v1 cannot carry v2 endpoint fields".into(),
-            ));
+            return Err(RemoteError::Invalid("v1 cannot carry v2 endpoint fields".into()));
         }
         return Ok(());
     }
-    if stored.endpoints.is_empty()
-        || stored.endpoints.len() > 64
-        || stored.endpoints.first() != Some(&stored.endpoint)
-    {
+    if stored.endpoints.is_empty() || stored.endpoints.len() > 64
+        || stored.endpoints.first() != Some(&stored.endpoint) {
         return Err(RemoteError::Invalid("invalid ordered endpoints".into()));
     }
-    for endpoint in &stored.endpoints {
-        endpoint_parts(endpoint)?;
-    }
-    if stored.node_id.is_empty() {
-        return Ok(());
-    }
+    for endpoint in &stored.endpoints { endpoint_parts(endpoint)?; }
+    if stored.node_id.is_empty() { return Ok(()); }
     let message = serde_json::to_vec(&(
-        "bitsov-endpoints-v2",
-        2,
-        &stored.node_id,
-        &stored.transport_pubkey,
-        &stored.box_transport_pubkey,
-        &stored.endpoint,
-        &stored.endpoints,
-    ))
-    .map_err(|_| RemoteError::Invalid("invalid endpoints descriptor".into()))?;
-    let encoded = stored
-        .endpoints_signature
-        .as_ref()
+        "bitsov-endpoints-v2", 2, &stored.node_id, &stored.transport_pubkey,
+        &stored.box_transport_pubkey, &stored.endpoint, &stored.endpoints,
+    )).map_err(|_| RemoteError::Invalid("invalid endpoints descriptor".into()))?;
+    let encoded = stored.endpoints_signature.as_ref()
         .ok_or_else(|| RemoteError::Invalid("missing endpoints signature".into()))?;
-    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(encoded)
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(encoded)
         .map_err(|_| RemoteError::Invalid("invalid endpoints signature".into()))?;
     if base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&bytes) != *encoded {
-        return Err(RemoteError::Invalid(
-            "noncanonical endpoints signature".into(),
-        ));
+        return Err(RemoteError::Invalid("noncanonical endpoints signature".into()));
     }
     let signature = Signature::from_slice(&bytes)
         .map_err(|_| RemoteError::Invalid("invalid endpoints signature".into()))?;
     VerifyingKey::from_bytes(&decode_hex::<32>(&stored.node_id, "node_id")?)
         .map_err(|_| RemoteError::Invalid("invalid node identity".into()))?
         .verify_strict(&message, &signature)
-        .map_err(|_| {
-            RemoteError::Invalid(
-                "endpoints signature does not bind this ordered list and pins".into(),
-            )
-        })
+        .map_err(|_| RemoteError::Invalid("endpoints signature does not bind this ordered list and pins".into()))
 }
 
 fn is_invisible_format(c: char) -> bool {
@@ -679,11 +589,7 @@ fn is_invisible_format(c: char) -> bool {
 /// reorder or hide text.
 fn display_label(label: Option<&str>) -> Option<String> {
     let label = label?.trim();
-    if label.is_empty()
-        || label
-            .chars()
-            .any(|c| c.is_control() || is_invisible_format(c))
-    {
+    if label.is_empty() || label.chars().any(|c| c.is_control() || is_invisible_format(c)) {
         return None;
     }
     if label.chars().count() <= HOSTED_BY_MAX_CHARS {
@@ -767,11 +673,8 @@ fn parse_pairing_link_at(link: &str, now: i64) -> Result<RemoteDescriptor, Remot
     let fields: serde_json::Value = serde_json::from_slice(&json)
         .map_err(|_| RemoteError::Invalid("descriptor JSON has the wrong shape".into()))?;
     if fields.get("v").and_then(|v| v.as_u64()) == Some(1)
-        && (fields.get("endpoints").is_some() || fields.get("endpoints_signature").is_some())
-    {
-        return Err(RemoteError::Invalid(
-            "v1 cannot carry v2 endpoint fields".into(),
-        ));
+        && (fields.get("endpoints").is_some() || fields.get("endpoints_signature").is_some()) {
+        return Err(RemoteError::Invalid("v1 cannot carry v2 endpoint fields".into()));
     }
     let link: PairingLinkV1 = serde_json::from_slice(&json)
         .map_err(|_| RemoteError::Invalid("descriptor JSON has the wrong shape".into()))?;
@@ -803,10 +706,7 @@ fn stored_bytes(
         .as_deref()
         .map(|code| {
             sealer
-                .seal(
-                    &at_rest::pairing_code_purpose(&descriptor.node_id),
-                    code.as_bytes(),
-                )
+                .seal(&at_rest::pairing_code_purpose(&descriptor.node_id), code.as_bytes())
                 .map(|sealed| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sealed))
                 .map_err(|e| RemoteError::Local(format!("cannot protect the pairing code: {e}")))
         })
@@ -845,9 +745,7 @@ fn open_sealed_code(
         ));
     };
     if stored.code.is_some() {
-        return Err(RemoteError::Local(
-            "the remote access descriptor is corrupt".into(),
-        ));
+        return Err(RemoteError::Local("the remote access descriptor is corrupt".into()));
     }
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(&sealed)
@@ -899,17 +797,14 @@ fn persist_with(
             ));
         }
         std::io::Write::write_all(&mut file, &bytes)
-            .and_then(|()| file.sync_all())
-            .map_err(io_error)?;
+            .and_then(|()| file.sync_all()).map_err(io_error)?;
         if sealer.is_some() && descriptor.code.is_some() {
             let readback = std::fs::read(&tmp).map_err(io_error)?;
             let stored = serde_json::from_slice(&readback)
                 .map_err(|_| RemoteError::Local("cannot verify protected pairing code".into()))?;
             let (opened, _) = open_sealed_code(stored, sealer)?;
             if opened.code != descriptor.code {
-                return Err(RemoteError::Local(
-                    "protected pairing code does not reopen to the same code".into(),
-                ));
+                return Err(RemoteError::Local("protected pairing code does not reopen to the same code".into()));
             }
         }
         std::fs::rename(&tmp, path).map_err(io_error)
@@ -926,11 +821,7 @@ pub fn preview_pairing_link(link: &str) -> Result<RemotePreviewView, RemoteError
     let descriptor = parse_pairing_link(link)?;
     Ok(RemotePreviewView {
         endpoint: descriptor.endpoint.clone(),
-        node_id_fingerprint: node_id_fingerprint(
-            descriptor
-                .bootstrap_box_key()
-                .unwrap_or(&descriptor.node_id),
-        ),
+        node_id_fingerprint: node_id_fingerprint(descriptor.bootstrap_box_key().unwrap_or(&descriptor.node_id)),
         hosted_by: descriptor.hosted_by.clone(),
     })
 }
@@ -944,11 +835,7 @@ pub fn import_pairing_link(
     persist_at(&config_path(app_data_dir), &descriptor)?;
     Ok(RemoteImportView {
         endpoint: descriptor.endpoint.clone(),
-        node_id_fingerprint: node_id_fingerprint(
-            descriptor
-                .bootstrap_box_key()
-                .unwrap_or(&descriptor.node_id),
-        ),
+        node_id_fingerprint: node_id_fingerprint(descriptor.bootstrap_box_key().unwrap_or(&descriptor.node_id)),
         hosted_by: descriptor.hosted_by.clone(),
         restart_required: true,
     })
@@ -957,9 +844,7 @@ pub fn import_pairing_link(
 /// The identity a descriptor pins: its node id, or the box key of an
 /// identity-free bootstrap ticket.
 fn pinned_identity(descriptor: &RemoteDescriptor) -> &str {
-    descriptor
-        .bootstrap_box_key()
-        .unwrap_or(&descriptor.node_id)
+    descriptor.bootstrap_box_key().unwrap_or(&descriptor.node_id)
 }
 
 /// Whether `next` would replace `current` with a different node. Pure.
@@ -984,9 +869,7 @@ pub fn replace_pairing_link(
         RemoteError::Local("no saved remote node to replace; restart BitSov and try again".into())
     })?;
     if !replaces_another_node(&current, &next) {
-        return Err(RemoteError::Invalid(
-            "this ticket is for the node you already use".into(),
-        ));
+        return Err(RemoteError::Invalid("this ticket is for the node you already use".into()));
     }
     persist_with(&path, &next, sealer)?;
     Ok(RemoteImportView {
@@ -1011,17 +894,13 @@ pub fn forget_persisted(app_data_dir: &Path) -> Result<(), RemoteError> {
         } else {
             pairing::key::create_new_protected(&reset)
                 .and_then(|file| file.sync_all())
-                .map_err(|e| {
-                    RemoteError::Local(format!("cannot schedule local pairing reset: {e}"))
-                })?;
+                .map_err(|e| RemoteError::Local(format!("cannot schedule local pairing reset: {e}")))?;
         }
     }
     match std::fs::remove_file(descriptor) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(RemoteError::Local(format!(
-            "cannot forget remote descriptor: {error}"
-        ))),
+        Err(error) => Err(RemoteError::Local(format!("cannot forget remote descriptor: {error}"))),
     }
 }
 
@@ -1030,9 +909,7 @@ pub fn forget_persisted(app_data_dir: &Path) -> Result<(), RemoteError> {
 /// record here, after the previous process and its live session have exited.
 pub fn prepare_local_pairing(app_data_dir: &Path, pairing_store: &Path) -> Result<(), RemoteError> {
     let _config = REMOTE_CONFIG_LOCK.lock().unwrap();
-    let reset = app_data_dir
-        .join(REMOTE_CONFIG_DIR)
-        .join(LOCAL_PAIRING_RESET);
+    let reset = app_data_dir.join(REMOTE_CONFIG_DIR).join(LOCAL_PAIRING_RESET);
     if config_path(app_data_dir).exists() || !reset.exists() {
         return Ok(());
     }
@@ -1041,11 +918,7 @@ pub fn prepare_local_pairing(app_data_dir: &Path, pairing_store: &Path) -> Resul
     match std::fs::remove_file(pairing_store.join(pairing::RECORD_FILE)) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(RemoteError::Local(format!(
-                "cannot reset remote pairing record: {error}"
-            )))
-        }
+        Err(error) => return Err(RemoteError::Local(format!("cannot reset remote pairing record: {error}"))),
     }
     std::fs::remove_file(reset)
         .map_err(|error| RemoteError::Local(format!("cannot finish local pairing reset: {error}")))
@@ -1169,9 +1042,7 @@ async fn write_frame<W: AsyncWrite + Unpin>(
             .write_all(frame)
             .await
             .map_err(|e| RemoteError::Transport(format!("cannot write frame: {e}")))
-    })
-    .await
-    .map_err(|_| RemoteError::Transport("frame write timed out".into()))?
+    }).await.map_err(|_| RemoteError::Transport("frame write timed out".into()))?
 }
 
 async fn read_frame<R: AsyncRead + Unpin>(
@@ -1286,20 +1157,16 @@ fn retry_hint(message: &[u8]) -> Option<u64> {
 
 #[cfg(test)]
 async fn pinned_handshake<S: AsyncRead + AsyncWrite + Unpin>(
-    stream: &mut S,
-    descriptor: &RemoteDescriptor,
-    key: &ClientKey,
+    stream: &mut S, descriptor: &RemoteDescriptor, key: &ClientKey,
 ) -> Result<TransportState, RemoteError> {
-    pinned_handshake_bound(stream, descriptor, key)
-        .await
-        .map(|(noise, _)| noise)
+    pinned_handshake_bound(stream, descriptor, key).await.map(|(noise, _)| noise)
 }
 
 async fn pinned_handshake_bound<S: AsyncRead + AsyncWrite + Unpin>(
     stream: &mut S,
     descriptor: &RemoteDescriptor,
     key: &ClientKey,
-) -> Result<(TransportState, [u8; 32]), RemoteError> {
+) -> Result<(TransportState, [u8;32]), RemoteError> {
     tokio::time::timeout(CONNECT_TIMEOUT, async {
         let (secret, _) = derived_transport_key(key);
         let params = NOISE_PROTOCOL
@@ -1328,12 +1195,7 @@ async fn pinned_handshake_bound<S: AsyncRead + AsyncWrite + Unpin>(
             RemoteError::Transport("Noise responder did not present a static key".into())
         })?;
         if responder != descriptor.transport_pubkey_bytes
-            && !(descriptor.code.is_none()
-                && descriptor
-                    .box_pin()?
-                    .as_ref()
-                    .is_some_and(|pin| pin.matches(responder)))
-        {
+            && !(descriptor.code.is_none() && descriptor.box_pin()?.as_ref().is_some_and(|pin| pin.matches(responder))) {
             return Err(RemoteError::Transport(
                 "Noise responder static key does not match the pairing link".into(),
             ));
@@ -1343,17 +1205,12 @@ async fn pinned_handshake_bound<S: AsyncRead + AsyncWrite + Unpin>(
             .write_message(&[], &mut output)
             .map_err(|e| RemoteError::Transport(format!("Noise message 3 failed: {e}")))?;
         write_frame(stream, &output[..length]).await?;
-        let hash: [u8; 32] = noise
-            .get_handshake_hash()
-            .try_into()
+        let hash: [u8;32] = noise.get_handshake_hash().try_into()
             .map_err(|_| RemoteError::Invalid("invalid Noise transcript".into()))?;
         noise
-            .into_transport_mode()
-            .map(|noise| (noise, hash))
+            .into_transport_mode().map(|noise| (noise, hash))
             .map_err(|e| RemoteError::Transport(format!("Noise transport transition failed: {e}")))
-    })
-    .await
-    .map_err(|_| RemoteError::HandshakeUnavailable)?
+    }).await.map_err(|_| RemoteError::HandshakeUnavailable)?
 }
 
 async fn encrypted_auth<S: AsyncRead + AsyncWrite + Unpin>(
@@ -1858,37 +1715,18 @@ async fn write_proxy_error(local: &mut TcpStream, status: &str, code: &str, mess
     let _ = tokio::time::timeout(WRITE_TIMEOUT, async {
         local.write_all(response.as_bytes()).await?;
         local.shutdown().await
-    })
-    .await;
+    }).await;
 }
 
 async fn write_connection_error(local: &mut TcpStream, error: &RemoteError) {
     if let RemoteError::RateLimited(seconds) | RemoteError::Waiting(seconds) = error {
-        write_proxy_error(
-            local,
-            "503 Service Unavailable",
-            "remote_retry_wait",
-            &format!("Remote connection unavailable; waiting {seconds} s"),
-        )
-        .await;
+        write_proxy_error(local, "503 Service Unavailable", "remote_retry_wait", &format!("Remote connection unavailable; waiting {seconds} s")).await;
         return;
     }
     let (status, code, message) = match error {
-        RemoteError::HandshakeUnavailable => (
-            "503 Service Unavailable",
-            "remote_handshake_unavailable",
-            HANDSHAKE_UNAVAILABLE,
-        ),
-        RemoteError::Refused(_) => (
-            "403 Forbidden",
-            "remote_pairing_refused",
-            "remote node refused pairing",
-        ),
-        _ => (
-            "502 Bad Gateway",
-            "remote_transport_refused",
-            "remote transport validation failed",
-        ),
+        RemoteError::HandshakeUnavailable => ("503 Service Unavailable", "remote_handshake_unavailable", HANDSHAKE_UNAVAILABLE),
+        RemoteError::Refused(_) => ("403 Forbidden", "remote_pairing_refused", "remote node refused pairing"),
+        _ => ("502 Bad Gateway", "remote_transport_refused", "remote transport validation failed"),
     };
     write_proxy_error(local, status, code, message).await;
 }
@@ -1911,15 +1749,12 @@ fn finalize_authenticated_pairing(
         let stored = std::fs::read(config_path)
             .ok()
             .and_then(|bytes| saved_descriptor(&bytes));
-        if !stored.is_some_and(|saved| {
-            saved.node_id == current.node_id
-                && saved.endpoint == current.endpoint
-                && saved.transport_pubkey == current.transport_pubkey
-                && saved.code == current.code
-        }) {
-            return Err(RemoteError::Local(
-                "remote pairing link was forgotten or replaced; restart BitSov".into(),
-            ));
+        if !stored.is_some_and(|saved| saved.node_id == current.node_id
+            && saved.endpoint == current.endpoint
+            && saved.transport_pubkey == current.transport_pubkey
+            && saved.code == current.code)
+        {
+            return Err(RemoteError::Local("remote pairing link was forgotten or replaced; restart BitSov".into()));
         }
         current.code = None;
         if let Err(error) = persist_at(config_path, &current) {
@@ -1943,59 +1778,28 @@ async fn connect_authenticated(
     key: &ClientKey,
     client_name: &str,
 ) -> Result<(TcpStream, TransportState, String, Vec<String>), RemoteError> {
-    let (remote, noise, _, client_id, scopes, _) =
-        connect_bound(descriptor, key, client_name, None).await?;
+    let (remote, noise, _, client_id, scopes, _) = connect_bound(descriptor, key, client_name, None).await?;
     Ok((remote, noise, client_id, scopes))
 }
 
 async fn connect_bound(
-    descriptor: &RemoteDescriptor,
-    key: &ClientKey,
-    name: &str,
-    recovery_node: Option<&str>,
-) -> Result<
-    (
-        TcpStream,
-        TransportState,
-        [u8; 32],
-        String,
-        Vec<String>,
-        Option<TransportProofs>,
-    ),
-    RemoteError,
-> {
-    let routes = if descriptor.endpoints.is_empty() {
-        &descriptor.bootstrap_routes
-    } else {
-        &descriptor.endpoints
-    };
-    let endpoints = if routes.is_empty() {
-        vec![descriptor.endpoint.as_str()]
-    } else {
-        routes.iter().map(String::as_str).collect()
-    };
+    descriptor: &RemoteDescriptor, key: &ClientKey, name: &str, recovery_node: Option<&str>,
+) -> Result<(TcpStream, TransportState, [u8; 32], String, Vec<String>, Option<TransportProofs>), RemoteError> {
+    let routes = if descriptor.endpoints.is_empty() { &descriptor.bootstrap_routes } else { &descriptor.endpoints };
+    let endpoints = if routes.is_empty() { vec![descriptor.endpoint.as_str()] }
+        else { routes.iter().map(String::as_str).collect() };
     let mut last = RemoteError::HandshakeUnavailable;
     for endpoint in endpoints {
         let attempt = async {
             let mut stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(endpoint))
-                .await
-                .map_err(|_| RemoteError::HandshakeUnavailable)?
+                .await.map_err(|_| RemoteError::HandshakeUnavailable)?
                 .map_err(|_| RemoteError::HandshakeUnavailable)?;
             let (noise, hash) = pinned_handshake_bound(&mut stream, descriptor, key).await?;
             Ok::<_, RemoteError>((stream, noise, hash))
-        }
-        .await;
+        }.await;
         match attempt {
             Ok((mut remote, mut noise, hash)) => {
-                let (client, scopes, proofs) = encrypted_auth(
-                    &mut remote,
-                    &mut noise,
-                    descriptor,
-                    key,
-                    name,
-                    recovery_node,
-                )
-                .await?;
+                let (client, scopes, proofs) = encrypted_auth(&mut remote, &mut noise, descriptor, key, name, recovery_node).await?;
                 return Ok((remote, noise, hash, client, scopes, proofs));
             }
             Err(error @ RemoteError::RateLimited(_)) => return Err(error),
@@ -2006,63 +1810,28 @@ async fn connect_bound(
 }
 
 /// Re-pin a verified finalize receipt (or pinned LOCKED recovery) for the SAS box.
-pub fn commit_bootstrap(
-    app_dir: &Path,
-    previous: &RemoteDescriptor,
-    node: &str,
-    box_key: &str,
-    box_signature: &str,
-    live_key: &str,
-    live_signature: &str,
+pub fn commit_bootstrap(app_dir: &Path, previous: &RemoteDescriptor,
+    node: &str, box_key: &str, box_signature: &str, live_key: &str, live_signature: &str,
 ) -> Result<RemoteDescriptor, RemoteError> {
     verify_transport_proof(node, live_key, live_signature)?;
     let _config = REMOTE_CONFIG_LOCK.lock().unwrap();
-    let stored = std::fs::read(config_path(app_dir))
-        .ok()
-        .and_then(|bytes| saved_descriptor(&bytes));
-    if !stored.is_some_and(|saved| {
-        saved.node_id == previous.node_id
-            && saved.box_transport_pubkey == previous.box_transport_pubkey
-            && saved.endpoint == previous.endpoint
-            && saved.endpoints == previous.endpoints
-            && saved.code == previous.code
-    }) {
-        return Err(RemoteError::Local(
-            "the pairing link changed during setup; its replacement was not overwritten".into(),
-        ));
+    let stored = std::fs::read(config_path(app_dir)).ok().and_then(|bytes| saved_descriptor(&bytes));
+    if !stored.is_some_and(|saved| saved.node_id == previous.node_id
+        && saved.box_transport_pubkey == previous.box_transport_pubkey
+        && saved.endpoint == previous.endpoint && saved.endpoints == previous.endpoints
+        && saved.code == previous.code) {
+        return Err(RemoteError::Local("the pairing link changed during setup; its replacement was not overwritten".into()));
     }
-    if (!previous.node_id.is_empty() && previous.node_id != node)
-        || previous.box_transport_pubkey != box_key
-    {
-        return Err(RemoteError::Invalid(
-            "finalize changed the bootstrap box pin".into(),
-        ));
+    if (!previous.node_id.is_empty() && previous.node_id != node) || previous.box_transport_pubkey != box_key {
+        return Err(RemoteError::Invalid("finalize changed the bootstrap box pin".into()));
     }
     let descriptor = validate_descriptor(StoredDescriptor {
-        v: 1,
-        endpoint: previous.endpoint.clone(),
-        endpoints: vec![],
-        endpoints_signature: None,
-        bootstrap_routes: if previous.endpoints.is_empty() {
-            previous.bootstrap_routes.clone()
-        } else {
-            previous.endpoints.clone()
-        },
-        node_id: node.into(),
-        transport_pubkey: live_key.into(),
-        transport_signature: live_signature.into(),
-        box_transport_pubkey: box_key.into(),
-        box_transport_signature: Some(box_signature.into()),
-        code: None,
-        sealed_code: None,
-        hosted_by: previous.hosted_by.clone(),
-    })?
-    .with_pin_store(
-        previous
-            .pin_store
-            .clone()
-            .ok_or_else(|| RemoteError::Local("missing protected pin store".into()))?,
-    );
+        v: 1, endpoint: previous.endpoint.clone(), endpoints: vec![], endpoints_signature: None,
+        bootstrap_routes: if previous.endpoints.is_empty() { previous.bootstrap_routes.clone() } else { previous.endpoints.clone() },
+        node_id: node.into(), transport_pubkey: live_key.into(), transport_signature: live_signature.into(),
+        box_transport_pubkey: box_key.into(), box_transport_signature: Some(box_signature.into()),
+        code: None, sealed_code: None, hosted_by: previous.hosted_by.clone(),
+    })?.with_pin_store(previous.pin_store.clone().ok_or_else(|| RemoteError::Local("missing protected pin store".into()))?);
     persist_at(&config_path(app_dir), &descriptor)?;
     Ok(descriptor)
 }
@@ -2075,53 +1844,30 @@ pub struct TransportProofs {
 }
 
 pub async fn recover_bootstrap(
-    descriptor: &RemoteDescriptor,
-    key: &ClientKey,
-    name: &str,
-    trusted_node: &str,
-    expected_client: &str,
+    descriptor: &RemoteDescriptor, key: &ClientKey, name: &str,
+    trusted_node: &str, expected_client: &str,
 ) -> Result<Option<TransportProofs>, RemoteError> {
     if descriptor.bootstrap_box_key().is_none() || descriptor.has_code() {
-        return Err(RemoteError::Invalid(
-            "recovery requires the already paired bootstrap box".into(),
-        ));
+        return Err(RemoteError::Invalid("recovery requires the already paired bootstrap box".into()));
     }
     let (mut remote, mut noise, _, client_id, scopes, proofs) =
         connect_bound(descriptor, key, name, Some(trusted_node)).await?;
     if client_id != expected_client {
-        return Err(RemoteError::Invalid(
-            "recovery client binding changed".into(),
-        ));
+        return Err(RemoteError::Invalid("recovery client binding changed".into()));
     }
     let Some(proofs) = proofs else {
         // A crash just before send, or a definite precommit refusal, can leave
         // the same pinned box in SETUP. Keep the saved identity context, allow
         // bootstrap UI/cancellation, and never infer a new live pin.
         if scopes.iter().any(|s| s == "identity") {
-            let (status, body) = noise_http_request(
-                &mut remote,
-                &mut noise,
-                "GET",
-                "/api/v1/bootstrap/state",
-                b"",
-                None,
-            )
-            .await?;
+            let (status, body) = noise_http_request(&mut remote, &mut noise,
+                "GET", "/api/v1/bootstrap/state", b"", None).await?;
             let state: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
-            if status == 200 && state["state"] == "bootstrap" {
-                return Ok(None);
-            }
+            if status == 200 && state["state"] == "bootstrap" { return Ok(None); }
         }
-        return Err(RemoteError::Invalid(
-            "locked node omitted its signed live transport proof; no new pin was saved".into(),
-        ));
+        return Err(RemoteError::Invalid("locked node omitted its signed live transport proof; no new pin was saved".into()));
     };
-    let mut connection = LockedConnection {
-        remote,
-        noise,
-        client_id,
-        pin: proofs.pin.clone(),
-    };
+    let mut connection = LockedConnection { remote, noise, client_id, pin: proofs.pin.clone() };
     connection.status().await?;
     Ok(Some(proofs))
 }
@@ -2135,98 +1881,56 @@ pub struct LockedConnection {
     pub pin: BoxPin,
 }
 impl LockedConnection {
-    pub async fn connect(
-        descriptor: &RemoteDescriptor,
-        key: &ClientKey,
-        name: &str,
-    ) -> Result<Option<Self>, RemoteError> {
-        if descriptor.has_code() {
-            return Ok(None);
-        }
-        let Some(pin) = descriptor.box_pin()? else {
-            return Ok(None);
-        };
+    pub async fn connect(descriptor: &RemoteDescriptor, key: &ClientKey, name: &str) -> Result<Option<Self>, RemoteError> {
+        if descriptor.has_code() { return Ok(None); }
+        let Some(pin) = descriptor.box_pin()? else { return Ok(None); };
         let (remote, noise, client_id, _) = connect_authenticated(descriptor, key, name).await?;
-        if noise.get_remote_static() == Some(&descriptor.transport_pubkey_bytes[..]) {
-            return Ok(None);
-        }
+        if noise.get_remote_static() == Some(&descriptor.transport_pubkey_bytes[..]) { return Ok(None); }
         if !pin.matches(noise.get_remote_static().unwrap_or(&[])) {
-            return Err(RemoteError::Invalid(
-                "unlock requires the pinned box static".into(),
-            ));
+            return Err(RemoteError::Invalid("unlock requires the pinned box static".into()));
         }
-        Ok(Some(Self {
-            remote,
-            noise,
-            client_id,
-            pin,
-        }))
+        Ok(Some(Self { remote, noise, client_id, pin }))
     }
 
     pub async fn status(&mut self) -> Result<crate::home_node::LockStatus, RemoteError> {
         let (status, body) = self.request("GET", "/api/v1/node/lock", b"").await?;
-        if status != 200 {
-            return Err(RemoteError::Refused("lock status unavailable".into()));
-        }
+        if status != 200 { return Err(RemoteError::Refused("lock status unavailable".into())); }
         let lock: crate::home_node::LockStatus = serde_json::from_slice(&body)
             .map_err(|_| RemoteError::Invalid("invalid lock status".into()))?;
-        if lock.state != "locked"
-            || lock.node_id != self.pin.node_id
-            || lock.fingerprint != crate::home_node::identity_fingerprint(&self.pin.node_id)
-        {
-            return Err(RemoteError::Invalid(
-                "locked identity does not match the box pin".into(),
-            ));
+        if lock.state != "locked" || lock.node_id != self.pin.node_id
+            || lock.fingerprint != crate::home_node::identity_fingerprint(&self.pin.node_id) {
+            return Err(RemoteError::Invalid("locked identity does not match the box pin".into()));
         }
         Ok(lock)
     }
 
     pub async fn challenge(&mut self) -> Result<crate::home_node::UnlockChallenge, RemoteError> {
-        let (status, body) = self
-            .request("POST", "/api/v1/node/unlock/challenge", b"{}")
-            .await?;
+        let (status, body) = self.request("POST", "/api/v1/node/unlock/challenge", b"{}").await?;
         unlock_status(status, 200)?;
-        serde_json::from_slice(&body)
-            .map_err(|_| RemoteError::Invalid("invalid unlock challenge".into()))
+        serde_json::from_slice(&body).map_err(|_| RemoteError::Invalid("invalid unlock challenge".into()))
     }
 
     pub async fn unlock(&mut self, body: &crate::home_node::UnlockBody) -> Result<(), RemoteError> {
-        let bytes = zeroize::Zeroizing::new(
-            serde_json::to_vec(body)
-                .map_err(|_| RemoteError::Local("cannot encode unlock request".into()))?,
-        );
+        let bytes = zeroize::Zeroizing::new(serde_json::to_vec(body)
+            .map_err(|_| RemoteError::Local("cannot encode unlock request".into()))?);
         let (status, _) = self.request("POST", "/api/v1/node/unlock", &bytes).await?;
         unlock_status(status, 204)
     }
 
-    async fn request(
-        &mut self,
-        method: &str,
-        path: &str,
-        body: &[u8],
-    ) -> Result<(u16, zeroize::Zeroizing<Vec<u8>>), RemoteError> {
+    async fn request(&mut self, method: &str, path: &str, body: &[u8]) -> Result<(u16, zeroize::Zeroizing<Vec<u8>>), RemoteError> {
         noise_http_request(&mut self.remote, &mut self.noise, method, path, body, None).await
     }
 }
 
-async fn noise_http_request(
-    remote: &mut TcpStream,
-    noise: &mut TransportState,
-    method: &str,
-    path: &str,
-    body: &[u8],
-    token: Option<&str>,
+async fn noise_http_request(remote: &mut TcpStream, noise: &mut TransportState,
+    method: &str, path: &str, body: &[u8], token: Option<&str>,
 ) -> Result<(u16, zeroize::Zeroizing<Vec<u8>>), RemoteError> {
     if token.is_some_and(|t| t.bytes().any(|b| b <= 32 || b >= 127)) {
         return Err(RemoteError::Invalid("invalid bearer token".into()));
     }
-    let authorization = zeroize::Zeroizing::new(
-        token
-            .map(|t| format!("Authorization: Bearer {t}\r\n"))
-            .unwrap_or_default(),
-    );
-    let authorization = authorization.as_str();
-    tokio::time::timeout(Duration::from_secs(15), async {
+    let authorization = zeroize::Zeroizing::new(token.map(|t| format!("Authorization: Bearer {t}\r\n")).unwrap_or_default());
+        let authorization = authorization.as_str();
+        tokio::time::timeout(Duration::from_secs(15), async {
             let mut request = zeroize::Zeroizing::new(format!("{method} {path} HTTP/1.1\r\nHost: localhost\r\n{authorization}Content-Type: application/json\r\nContent-Length: {}\r\n\r\n", body.len()).into_bytes());
             request.extend_from_slice(body);
             for chunk in request.chunks(MAX_NOISE_PLAINTEXT) {
@@ -2272,97 +1976,46 @@ pub struct BootstrapConnection {
 impl BootstrapConnection {
     /// A fresh, already-paired device's enrollment uses one authenticated Noise
     /// transcript through both requests, without replaying its consumed ticket.
-    pub async fn connect_device(
-        descriptor: &RemoteDescriptor,
-        key: &ClientKey,
-        name: &str,
-    ) -> Result<Self, RemoteError> {
+    pub async fn connect_device(descriptor: &RemoteDescriptor, key: &ClientKey, name: &str) -> Result<Self, RemoteError> {
         if descriptor.node_id.is_empty() || descriptor.has_code() {
-            return Err(RemoteError::Invalid(
-                "an initialized, paired home node is required".into(),
-            ));
+            return Err(RemoteError::Invalid("an initialized, paired home node is required".into()));
         }
-        let pin = descriptor
-            .box_pin()?
-            .ok_or_else(|| RemoteError::Invalid("missing box pin".into()))?;
-        let (remote, noise, handshake_hash, client_id, scopes, _) =
-            connect_bound(descriptor, key, name, None).await?;
-        if !scopes.iter().any(|s| s == "read") {
-            return Err(RemoteError::Refused(
-                "device enrollment requires read scope".into(),
-            ));
-        }
-        Ok(Self {
-            remote,
-            noise,
-            client_id,
-            binding: crate::sas::NoiseBinding {
-                handshake_hash,
-                box_public_key: decode_hex(&pin.public_key, "box pin")?,
-                client_static: client_transport_public_key(key),
-            },
-        })
+        let pin = descriptor.box_pin()?.ok_or_else(|| RemoteError::Invalid("missing box pin".into()))?;
+        let (remote, noise, handshake_hash, client_id, scopes, _) = connect_bound(descriptor, key, name, None).await?;
+        if !scopes.iter().any(|s| s == "read") { return Err(RemoteError::Refused("device enrollment requires read scope".into())); }
+        Ok(Self {remote, noise, client_id, binding:crate::sas::NoiseBinding {
+            handshake_hash, box_public_key:decode_hex(&pin.public_key, "box pin")?, client_static:client_transport_public_key(key),
+        }})
     }
 
-    pub async fn connect(
-        descriptor: &RemoteDescriptor,
-        key: &ClientKey,
-        name: &str,
-    ) -> Result<Self, RemoteError> {
+    pub async fn connect(descriptor: &RemoteDescriptor, key: &ClientKey, name: &str) -> Result<Self, RemoteError> {
         if !descriptor.node_id.is_empty() || descriptor.has_code() {
-            return Err(RemoteError::Invalid(
-                "a paired empty box is required".into(),
-            ));
+            return Err(RemoteError::Invalid("a paired empty box is required".into()));
         }
-        let (remote, noise, handshake_hash, client_id, scopes, _) =
-            connect_bound(descriptor, key, name, None).await?;
+        let (remote, noise, handshake_hash, client_id, scopes, _) = connect_bound(descriptor, key, name, None).await?;
         if !scopes.iter().any(|s| s == "identity") {
             return Err(RemoteError::Refused("box setup is closed".into()));
         }
-        Ok(Self {
-            remote,
-            noise,
-            client_id,
-            binding: crate::sas::NoiseBinding {
-                handshake_hash,
-                box_public_key: decode_hex(&descriptor.box_transport_pubkey, "box pin")?,
-                client_static: client_transport_public_key(key),
-            },
-        })
+        Ok(Self { remote, noise, client_id, binding: crate::sas::NoiseBinding {
+            handshake_hash, box_public_key: decode_hex(&descriptor.box_transport_pubkey, "box pin")?,
+            client_static: client_transport_public_key(key),
+        }})
     }
-    pub async fn request(
-        &mut self,
-        method: &str,
-        path: &str,
-        body: &[u8],
-        token: &str,
-    ) -> Result<(u16, zeroize::Zeroizing<Vec<u8>>), RemoteError> {
-        noise_http_request(
-            &mut self.remote,
-            &mut self.noise,
-            method,
-            path,
-            body,
-            Some(token),
-        )
-        .await
+    pub async fn request(&mut self, method: &str, path: &str, body: &[u8], token: &str)
+        -> Result<(u16, zeroize::Zeroizing<Vec<u8>>), RemoteError> {
+        noise_http_request(&mut self.remote, &mut self.noise, method, path, body, Some(token)).await
     }
 }
 
 fn unlock_status(status: u16, expected: u16) -> Result<(), RemoteError> {
-    if status == expected {
-        return Ok(());
-    }
-    Err(RemoteError::Refused(
-        match status {
-            401 => "Unlock failed. No password was retained by the app.",
-            403 => "This device is not approved to unlock this node.",
-            409 => "Your node is already unlocking. Wait a few seconds.",
-            429 => "Unlock is rate limited. Wait before trying again.",
-            _ => "The node did not confirm unlock.",
-        }
-        .into(),
-    ))
+    if status == expected { return Ok(()); }
+    Err(RemoteError::Refused(match status {
+        401 => "Unlock failed. No password was retained by the app.",
+        403 => "This device is not approved to unlock this node.",
+        409 => "Your node is already unlocking. Wait a few seconds.",
+        429 => "Unlock is rate limited. Wait before trying again.",
+        _ => "The node did not confirm unlock.",
+    }.into()))
 }
 
 /// Complete the pinned Noise authentication before any paired HTTP token flow.
@@ -2433,13 +2086,7 @@ async fn serve_connection(
     };
 
     if noise.get_remote_static() != Some(&snapshot.transport_pubkey_bytes[..]) {
-        write_proxy_error(
-            &mut local,
-            "503 Service Unavailable",
-            "node_locked",
-            "Node is locked after restart",
-        )
-        .await;
+        write_proxy_error(&mut local, "503 Service Unavailable", "node_locked", "Node is locked after restart").await;
         return Ok(());
     }
     finalize_authenticated_pairing(
@@ -2474,12 +2121,8 @@ impl RemoteProxy {
         let mut current = self.descriptor.lock().unwrap();
         if current.box_transport_pubkey != descriptor.box_transport_pubkey
             || (!current.node_id.is_empty() && current.node_id != descriptor.node_id)
-            || descriptor.node_id.is_empty()
-            || descriptor.box_pin()?.is_none()
-        {
-            return Err(RemoteError::Invalid(
-                "cannot replace another box's proxy pins".into(),
-            ));
+            || descriptor.node_id.is_empty() || descriptor.box_pin()?.is_none() {
+            return Err(RemoteError::Invalid("cannot replace another box's proxy pins".into()));
         }
         *current = descriptor;
         Ok(())
@@ -2700,8 +2343,7 @@ mod tests {
 
     #[test]
     fn u1_auth_fixture_is_accepted() {
-        let fixture: serde_json::Value =
-            serde_json::from_str(include_str!("../tests/fixtures/home-node.json")).unwrap();
+        let fixture: serde_json::Value = serde_json::from_str(include_str!("../tests/fixtures/home-node.json")).unwrap();
         let response = serde_json::from_value::<RemoteAuthResponse>(fixture["auth"].clone());
         assert!(response.is_ok(), "U1 auth response rejected: {response:?}");
     }
@@ -2741,8 +2383,7 @@ mod tests {
     fn v1_identity_with_only_a_signed_box_pin_is_refused() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../tests/fixtures/remote-first-run-pr287.json"
-        ))
-        .unwrap();
+        )).unwrap();
         let receipt = &fixture["finalize"];
         let mut value = serde_json::json!({
             "v": 1, "endpoint": "box.local:9737", "code": test_code(1),
@@ -2750,23 +2391,15 @@ mod tests {
             "box_transport_pubkey": receipt["box_transport_pubkey"],
             "box_transport_signature": receipt["box_transport_signature"],
         });
-        let uri = |v: &serde_json::Value| {
-            format!(
-                "bitsov://pair/{}",
-                base64::engine::general_purpose::URL_SAFE_NO_PAD
-                    .encode(serde_json::to_vec(v).unwrap())
-            )
-        };
+        let uri = |v: &serde_json::Value| format!("bitsov://pair/{}",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(v).unwrap()));
         for empty in [false, true] {
             if empty {
                 value["transport_pubkey"] = "".into();
                 value["transport_signature"] = "".into();
             }
             let error = parse_pairing_link(&uri(&value)).unwrap_err();
-            assert!(
-                error.to_string().contains("missing live transport proof"),
-                "{error}"
-            );
+            assert!(error.to_string().contains("missing live transport proof"), "{error}");
         }
         value["transport_pubkey"] = receipt["transport_pubkey"].clone();
         value["transport_signature"] = receipt["transport_signature"].clone();
@@ -2778,63 +2411,26 @@ mod tests {
         let bootstrap = serde_json::json!({"v":2,"endpoint":"box.local:9737",
             "endpoints":["box.local:9737","192.168.1.2:9737"],
             "box_transport_pubkey":"22".repeat(32),"code":test_code(1)});
-        let uri = |v: &serde_json::Value| {
-            format!(
-                "bitsov://pair/{}",
-                base64::engine::general_purpose::URL_SAFE_NO_PAD
-                    .encode(serde_json::to_vec(v).unwrap())
-            )
-        };
+        let uri = |v: &serde_json::Value| format!("bitsov://pair/{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(v).unwrap()));
         assert!(parse_pairing_link(&uri(&bootstrap)).is_ok());
-        let node = SigningKey::from_bytes(&[7; 32]);
-        let legacy = signed_link("box.local:9737".into(), &node, [9; 32], &test_code(1));
-        let mut value: serde_json::Value = serde_json::from_slice(
-            &base64::engine::general_purpose::URL_SAFE_NO_PAD
-                .decode(legacy.strip_prefix("bitsov://pair/").unwrap())
-                .unwrap(),
-        )
-        .unwrap();
+        let node = SigningKey::from_bytes(&[7;32]);
+        let legacy = signed_link("box.local:9737".into(), &node, [9;32], &test_code(1));
+        let mut value: serde_json::Value = serde_json::from_slice(&base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(legacy.strip_prefix("bitsov://pair/").unwrap()).unwrap()).unwrap();
         value["v"] = 2.into();
         value["endpoints"] = bootstrap["endpoints"].clone();
         value["box_transport_pubkey"] = "22".repeat(32).into();
         let node_id = hex::encode(node.verifying_key().as_bytes());
-        value["box_transport_signature"] = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(
-                node.sign(
-                    format!("bitsov-box-transport-v1:{node_id}:{}", "22".repeat(32)).as_bytes(),
-                )
-                .to_bytes(),
-            )
-            .into();
-        let message = serde_json::to_vec(&serde_json::json!([
-            "bitsov-endpoints-v2",
-            2,
-            node_id,
-            "09".repeat(32),
-            "22".repeat(32),
-            "box.local:9737",
-            ["box.local:9737", "192.168.1.2:9737"]
-        ]))
-        .unwrap();
-        value["endpoints_signature"] = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(node.sign(&message).to_bytes())
-            .into();
+        value["box_transport_signature"] = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(node.sign(format!("bitsov-box-transport-v1:{node_id}:{}", "22".repeat(32)).as_bytes()).to_bytes()).into();
+        let message = serde_json::to_vec(&serde_json::json!(["bitsov-endpoints-v2",2,node_id,"09".repeat(32),"22".repeat(32),"box.local:9737",["box.local:9737","192.168.1.2:9737"]])).unwrap();
+        value["endpoints_signature"] = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(node.sign(&message).to_bytes()).into();
         assert!(parse_pairing_link(&uri(&value)).is_ok());
-        for field in [
-            "endpoint",
-            "transport_pubkey",
-            "box_transport_pubkey",
-            "node_id",
-        ] {
-            let mut bad = value.clone();
-            bad[field] = "changed".into();
+        for field in ["endpoint", "transport_pubkey", "box_transport_pubkey", "node_id"] {
+            let mut bad = value.clone(); bad[field] = "changed".into();
             assert!(parse_pairing_link(&uri(&bad)).is_err(), "{field}");
         }
-        let mut bad = value.clone();
-        bad["endpoints"][1] = "attacker:9737".into();
+        let mut bad = value.clone(); bad["endpoints"][1] = "attacker:9737".into();
         assert!(parse_pairing_link(&uri(&bad)).is_err());
-        bad = value.clone();
-        bad["v"] = 1.into();
+        bad = value.clone(); bad["v"] = 1.into();
         assert!(parse_pairing_link(&uri(&bad)).is_err());
     }
 
@@ -2885,29 +2481,19 @@ mod tests {
         let transport = X25519PublicKey::from(&StaticSecret::from([9u8; 32])).to_bytes();
         let link = signed_link("node.example:4242".into(), node, transport, &test_code(3));
         let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
-        let mut json: serde_json::Value = serde_json::from_slice(
-            &engine
-                .decode(link.strip_prefix("bitsov://pair/").unwrap())
-                .unwrap(),
-        )
-        .unwrap();
+        let mut json: serde_json::Value =
+            serde_json::from_slice(&engine.decode(link.strip_prefix("bitsov://pair/").unwrap()).unwrap()).unwrap();
         for (key, value) in extra.as_object().unwrap() {
             json[key] = value.clone();
         }
-        format!(
-            "bitsov://pair/{}",
-            engine.encode(serde_json::to_vec(&json).unwrap())
-        )
+        format!("bitsov://pair/{}", engine.encode(serde_json::to_vec(&json).unwrap()))
     }
 
     fn box_proof(node: &SigningKey) -> (String, String) {
         let node_id = hex::encode(node.verifying_key().as_bytes());
         let key = hex::encode([0x33u8; 32]);
         let signature = node.sign(format!("bitsov-box-transport-v1:{node_id}:{key}").as_bytes());
-        (
-            key,
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature.to_bytes()),
-        )
+        (key, base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature.to_bytes()))
     }
 
     #[test]
@@ -2917,24 +2503,13 @@ mod tests {
         let json = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(link.strip_prefix("bitsov://pair/").unwrap())
             .unwrap();
-        let mut keys: Vec<String> =
-            serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&json)
-                .unwrap()
-                .keys()
-                .cloned()
-                .collect();
+        let mut keys: Vec<String> = serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&json)
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
         keys.sort();
-        assert_eq!(
-            keys,
-            [
-                "code",
-                "endpoint",
-                "node_id",
-                "transport_pubkey",
-                "transport_signature",
-                "v"
-            ]
-        );
+        assert_eq!(keys, ["code", "endpoint", "node_id", "transport_pubkey", "transport_signature", "v"]);
 
         let descriptor = parse_pairing_link_at(&link, NOW).unwrap();
         assert!(descriptor.has_code());
@@ -2969,30 +2544,20 @@ mod tests {
         assert_eq!(descriptor.hosted_by(), Some("Rasmus's Pi"));
         assert!(descriptor.has_code());
         // The node writes `null` when `[node].hosted_by` is unset.
-        let unlabeled =
-            parse_pairing_link_at(&ticket(serde_json::json!({ "hosted_by": null })), NOW).unwrap();
+        let unlabeled = parse_pairing_link_at(&ticket(serde_json::json!({ "hosted_by": null })), NOW).unwrap();
         assert_eq!(unlabeled.hosted_by(), None);
 
         // Fields the node does not send are still refused.
         let unknown = ticket(serde_json::json!({ "ticket_version": 2 }));
-        assert!(matches!(
-            parse_pairing_link_at(&unknown, NOW),
-            Err(RemoteError::Invalid(_))
-        ));
+        assert!(matches!(parse_pairing_link_at(&unknown, NOW), Err(RemoteError::Invalid(_))));
         let other = SigningKey::from_bytes(&[8u8; 32]);
         let (_, foreign_signature) = box_proof(&other);
         let forged = ticket(serde_json::json!({ "box_transport_signature": foreign_signature }));
-        assert!(matches!(
-            parse_pairing_link_at(&forged, NOW),
-            Err(RemoteError::Invalid(_))
-        ));
-        let identityless = identityless_link(&node_ticket(
-            &node,
-            serde_json::json!({
-                "node_id": null, "transport_pubkey": null, "transport_signature": null,
-                "box_transport_pubkey": box_key, "expires_at": NOW + 60,
-            }),
-        ));
+        assert!(matches!(parse_pairing_link_at(&forged, NOW), Err(RemoteError::Invalid(_))));
+        let identityless = identityless_link(&node_ticket(&node, serde_json::json!({
+            "node_id": null, "transport_pubkey": null, "transport_signature": null,
+            "box_transport_pubkey": box_key, "expires_at": NOW + 60,
+        })));
         assert!(parse_pairing_link_at(&identityless, NOW).is_ok());
 
         let data = tempfile::tempdir().unwrap();
@@ -3007,75 +2572,42 @@ mod tests {
     /// Drop the identity fields entirely, as `pair-ticket` does before first unlock.
     fn identityless_link(link: &str) -> String {
         let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
-        let mut json: serde_json::Map<String, serde_json::Value> = serde_json::from_slice(
-            &engine
-                .decode(link.strip_prefix("bitsov://pair/").unwrap())
-                .unwrap(),
-        )
-        .unwrap();
+        let mut json: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_slice(&engine.decode(link.strip_prefix("bitsov://pair/").unwrap()).unwrap()).unwrap();
         json.retain(|_, value| !value.is_null());
-        format!(
-            "bitsov://pair/{}",
-            engine.encode(serde_json::to_vec(&json).unwrap())
-        )
+        format!("bitsov://pair/{}", engine.encode(serde_json::to_vec(&json).unwrap()))
     }
 
     #[test]
     fn expired_ticket_is_refused_with_a_clear_message() {
         let node = SigningKey::from_bytes(&[7u8; 32]);
-        let at =
-            |expires_at: i64| node_ticket(&node, serde_json::json!({ "expires_at": expires_at }));
+        let at = |expires_at: i64| node_ticket(&node, serde_json::json!({ "expires_at": expires_at }));
 
         let error = parse_pairing_link_at(&at(NOW - 7_200), NOW).unwrap_err();
         assert!(matches!(error, RemoteError::Expired(7_200)));
         let message = error.to_string();
-        assert!(
-            message.starts_with("This pairing link expired 2 h ago."),
-            "{message}"
-        );
+        assert!(message.starts_with("This pairing link expired 2 h ago."), "{message}");
         assert!(message.contains("konsensus pair-ticket"), "{message}");
-        assert!(matches!(
-            parse_pairing_link_at(&at(NOW), NOW),
-            Err(RemoteError::Expired(0))
-        ));
-        assert!(matches!(
-            parse_pairing_link_at(&at(-1), NOW),
-            Err(RemoteError::Invalid(_))
-        ));
+        assert!(matches!(parse_pairing_link_at(&at(NOW), NOW), Err(RemoteError::Expired(0))));
+        assert!(matches!(parse_pairing_link_at(&at(-1), NOW), Err(RemoteError::Invalid(_))));
         assert!(parse_pairing_link_at(&at(NOW + 1), NOW).is_ok());
         // Zero is the node's marker for a legacy link without an expiry.
         assert!(parse_pairing_link_at(&at(0), NOW).is_ok());
 
         let data = tempfile::tempdir().unwrap();
-        assert!(matches!(
-            import_pairing_link(data.path(), &at(unix_now() - 1)),
-            Err(RemoteError::Expired(_))
-        ));
+        assert!(matches!(import_pairing_link(data.path(), &at(unix_now() - 1)), Err(RemoteError::Expired(_))));
         assert!(!config_path(data.path()).exists());
     }
 
     #[test]
     fn owner_ticket_import_allows_only_thirty_seconds_of_clock_skew() {
         let node = SigningKey::from_bytes(&[7u8; 32]);
-        let at = |expires_at| {
-            node_ticket(
-                &node,
-                serde_json::json!({
-                    "code": format!("owner_{}", "ab".repeat(32)), "expires_at": expires_at
-                }),
-            )
-        };
-        for (expiry, accepted) in [
-            (NOW - 30, false),
-            (NOW - 29, true),
-            (NOW, true),
-            (NOW + 300, true),
-        ] {
-            assert_eq!(
-                parse_pairing_link_at(&at(expiry), NOW).is_ok(),
-                accepted,
-                "{expiry}"
-            );
+        let at = |expires_at| node_ticket(&node, serde_json::json!({
+            "code": format!("owner_{}", "ab".repeat(32)), "expires_at": expires_at
+        }));
+        for (expiry, accepted) in [(NOW - 30, false), (NOW - 29, true),
+            (NOW, true), (NOW + 300, true)] {
+            assert_eq!(parse_pairing_link_at(&at(expiry), NOW).is_ok(), accepted, "{expiry}");
         }
         let data = tempfile::tempdir().unwrap();
         assert!(import_pairing_link(data.path(), &at(unix_now() - 20)).is_ok());
@@ -3085,42 +2617,22 @@ mod tests {
     fn hosted_by_label_is_capped_and_odd_labels_are_not_shown() {
         let node = SigningKey::from_bytes(&[7u8; 32]);
         let label = |hosted_by: &str| {
-            parse_pairing_link_at(
-                &node_ticket(&node, serde_json::json!({ "hosted_by": hosted_by })),
-                NOW,
-            )
-            .unwrap()
-            .hosted_by()
-            .map(str::to_owned)
+            parse_pairing_link_at(&node_ticket(&node, serde_json::json!({ "hosted_by": hosted_by })), NOW)
+                .unwrap()
+                .hosted_by()
+                .map(str::to_owned)
         };
 
         let long = label(&"x".repeat(500)).unwrap();
         assert_eq!(long.chars().count(), HOSTED_BY_MAX_CHARS);
         assert!(long.ends_with('…'));
-        assert_eq!(
-            label(&format!("{} tail", "y".repeat(62))).unwrap(),
-            format!("{}…", "y".repeat(62))
-        );
+        assert_eq!(label(&format!("{} tail", "y".repeat(62))).unwrap(), format!("{}…", "y".repeat(62)));
         // The node's own longest label is kept whole.
-        assert_eq!(
-            label(&"𝔅".repeat(64)).as_deref(),
-            Some("𝔅".repeat(64).as_str())
-        );
+        assert_eq!(label(&"𝔅".repeat(64)).as_deref(), Some("𝔅".repeat(64).as_str()));
         assert_eq!(label("  My Pi  ").as_deref(), Some("My Pi"));
         // Markup stays literal; the renderer shows it as text.
-        assert_eq!(
-            label("<img src=x onerror=alert(1)>").as_deref(),
-            Some("<img src=x onerror=alert(1)>")
-        );
-        for odd in [
-            "Pi\u{202E}kcab",
-            "Rasmus\u{7}Pi",
-            "line\nbreak",
-            "zero\u{200B}width",
-            "\u{2066}Pi",
-            "   ",
-            "",
-        ] {
+        assert_eq!(label("<img src=x onerror=alert(1)>").as_deref(), Some("<img src=x onerror=alert(1)>"));
+        for odd in ["Pi\u{202E}kcab", "Rasmus\u{7}Pi", "line\nbreak", "zero\u{200B}width", "\u{2066}Pi", "   ", ""] {
             assert_eq!(label(odd), None, "{odd:?}");
         }
 
@@ -3128,21 +2640,14 @@ mod tests {
         let data = tempfile::tempdir().unwrap();
         import_pairing_link(data.path(), &node_ticket(&node, serde_json::json!({}))).unwrap();
         let path = config_path(data.path());
-        let mut stored: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let mut stored: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         stored["hosted_by"] = "Pi\u{202E}kcab".into();
         std::fs::write(&path, serde_json::to_vec(&stored).unwrap()).unwrap();
-        assert_eq!(
-            load_persisted(data.path()).unwrap().unwrap().hosted_by(),
-            None
-        );
+        assert_eq!(load_persisted(data.path()).unwrap().unwrap().hosted_by(), None);
         stored["hosted_by"] = "z".repeat(100).into();
         std::fs::write(&path, serde_json::to_vec(&stored).unwrap()).unwrap();
         let reloaded = load_persisted(data.path()).unwrap().unwrap();
-        assert_eq!(
-            reloaded.hosted_by().unwrap().chars().count(),
-            HOSTED_BY_MAX_CHARS
-        );
+        assert_eq!(reloaded.hosted_by().unwrap().chars().count(), HOSTED_BY_MAX_CHARS);
     }
 
     #[test]
@@ -3150,48 +2655,31 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let node = SigningKey::from_bytes(&[11u8; 32]);
         let transport = X25519PublicKey::from(&StaticSecret::from([12u8; 32])).to_bytes();
-        import_pairing_link(
-            dir.path(),
-            &signed_link("127.0.0.1:4242".into(), &node, transport, &test_code(2)),
-        )
-        .unwrap();
+        import_pairing_link(dir.path(), &signed_link("127.0.0.1:4242".into(), &node, transport, &test_code(2))).unwrap();
         let local = dir.path().join("mnemonic.txt");
         std::fs::write(&local, "local identity untouched").unwrap();
         forget_persisted(dir.path()).unwrap();
         assert!(load_persisted(dir.path()).unwrap().is_none());
         forget_persisted(dir.path()).unwrap();
-        assert_eq!(
-            std::fs::read_to_string(local).unwrap(),
-            "local identity untouched"
-        );
+        assert_eq!(std::fs::read_to_string(local).unwrap(), "local identity untouched");
     }
 
     fn link_for(seed: u8) -> String {
         let node = SigningKey::from_bytes(&[seed; 32]);
-        let transport =
-            X25519PublicKey::from(&StaticSecret::from([seed.wrapping_add(1); 32])).to_bytes();
+        let transport = X25519PublicKey::from(&StaticSecret::from([seed.wrapping_add(1); 32])).to_bytes();
         signed_link("127.0.0.1:4242".into(), &node, transport, &test_code(seed))
     }
 
     #[test]
     fn replacing_needs_a_saved_link_and_another_node() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(matches!(
-            replace_pairing_link(dir.path(), &link_for(21)),
-            Err(RemoteError::Local(_))
-        ));
+        assert!(matches!(replace_pairing_link(dir.path(), &link_for(21)), Err(RemoteError::Local(_))));
         assert!(load_persisted(dir.path()).unwrap().is_none());
 
         import_pairing_link(dir.path(), &link_for(21)).unwrap();
         let before = std::fs::read(config_path(dir.path())).unwrap();
-        assert!(matches!(
-            replace_pairing_link(dir.path(), &link_for(21)),
-            Err(RemoteError::Invalid(_))
-        ));
-        assert!(matches!(
-            replace_pairing_link(dir.path(), "bitsov://pair/not-a-ticket"),
-            Err(RemoteError::Invalid(_))
-        ));
+        assert!(matches!(replace_pairing_link(dir.path(), &link_for(21)), Err(RemoteError::Invalid(_))));
+        assert!(matches!(replace_pairing_link(dir.path(), "bitsov://pair/not-a-ticket"), Err(RemoteError::Invalid(_))));
         assert_eq!(std::fs::read(config_path(dir.path())).unwrap(), before);
     }
 
@@ -3205,10 +2693,7 @@ mod tests {
         let expected = parse_pairing_link(&link_for(31)).unwrap();
         assert_eq!(saved.node_id(), expected.node_id());
         assert!(saved.has_code());
-        assert_eq!(
-            view.node_id_fingerprint,
-            node_id_fingerprint(expected.node_id())
-        );
+        assert_eq!(view.node_id_fingerprint, node_id_fingerprint(expected.node_id()));
     }
 
     #[test]
@@ -3222,10 +2707,7 @@ mod tests {
         assert!(replace_pairing_link(dir.path(), &link_for(31)).is_err());
         assert_eq!(std::fs::read(config_path(dir.path())).unwrap(), before);
         let kept = load_persisted(dir.path()).unwrap().unwrap();
-        assert_eq!(
-            kept.node_id(),
-            parse_pairing_link(&link_for(21)).unwrap().node_id()
-        );
+        assert_eq!(kept.node_id(), parse_pairing_link(&link_for(21)).unwrap().node_id());
     }
 
     #[test]
@@ -3252,13 +2734,8 @@ mod tests {
         let store = dir.path().join("app-client");
         let key = ClientKey::load_or_create(&store).unwrap();
         let key_bytes = std::fs::read(store.join(pairing::KEY_FILE)).unwrap();
-        pairing::save_remote_record(
-            &store,
-            &key,
-            "0123456789abcdef0123456789abcdef".into(),
-            vec!["read".into()],
-        )
-        .unwrap();
+        pairing::save_remote_record(&store, &key,
+            "0123456789abcdef0123456789abcdef".into(), vec!["read".into()]).unwrap();
         let record = store.join(pairing::RECORD_FILE);
         prepare_local_pairing(dir.path(), &store).unwrap();
         assert!(record.exists(), "normal startup preserves its pairing");
@@ -3271,10 +2748,7 @@ mod tests {
         forget_persisted(dir.path()).unwrap();
         prepare_local_pairing(dir.path(), &store).unwrap();
         assert!(!record.exists());
-        assert_eq!(
-            std::fs::read(store.join(pairing::KEY_FILE)).unwrap(),
-            key_bytes
-        );
+        assert_eq!(std::fs::read(store.join(pairing::KEY_FILE)).unwrap(), key_bytes);
         // Consuming the marker is one-time: a later local pairing survives.
         std::fs::write(&record, "new local record").unwrap();
         prepare_local_pairing(dir.path(), &store).unwrap();
@@ -3286,24 +2760,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let node = SigningKey::from_bytes(&[11u8; 32]);
         let transport = X25519PublicKey::from(&StaticSecret::from([12u8; 32])).to_bytes();
-        import_pairing_link(
-            dir.path(),
-            &signed_link("127.0.0.1:4242".into(), &node, transport, &test_code(2)),
-        )
-        .unwrap();
+        import_pairing_link(dir.path(), &signed_link("127.0.0.1:4242".into(), &node, transport, &test_code(2))).unwrap();
         let descriptor = Mutex::new(load_persisted(dir.path()).unwrap().unwrap());
         let store = dir.path().join("pairing-client");
         let key = ClientKey::load_or_create(&store).unwrap();
         forget_persisted(dir.path()).unwrap();
-        finalize_authenticated_pairing(
-            &descriptor,
-            &config_path(dir.path()),
-            &store,
-            &key,
-            "client".into(),
-            vec!["read".into()],
-        )
-        .unwrap_err();
+        finalize_authenticated_pairing(&descriptor, &config_path(dir.path()), &store, &key, "client".into(), vec!["read".into()]).unwrap_err();
         assert!(load_persisted(dir.path()).unwrap().is_none());
     }
 
@@ -3348,18 +2810,11 @@ mod tests {
         assert!(!text.contains(&code), "{text}");
         assert!(!text.contains("\"code\""), "{text}");
         assert!(text.contains("\"sealed_code\""), "{text}");
-        assert!(
-            text.contains(&descriptor.transport_pubkey),
-            "public pins stay readable"
-        );
+        assert!(text.contains(&descriptor.transport_pubkey), "public pins stay readable");
 
         let loaded = load_with(&path, Some(&MemorySealer)).unwrap().unwrap();
         assert_eq!(loaded.code.as_deref(), Some(code.as_str()));
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            text,
-            "no rewrite once sealed"
-        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text, "no rewrite once sealed");
         assert!(
             load_with(&path, None).is_err(),
             "a sealed code never falls back to a plaintext read"
@@ -3369,10 +2824,7 @@ mod tests {
         stripped.code = None;
         persist_with(&path, &stripped, Some(&MemorySealer)).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(
-            !text.contains("\"code\"") && !text.contains("sealed_code"),
-            "{text}"
-        );
+        assert!(!text.contains("\"code\"") && !text.contains("sealed_code"), "{text}");
     }
 
     #[test]
@@ -3382,17 +2834,10 @@ mod tests {
         persist_with(&path, &descriptor, Some(&MemorySealer)).unwrap();
         let original = std::fs::read(&path).unwrap();
         // Sealing plus base64 expands a plaintext descriptor that fits at import.
-        let overhead = stored_bytes(&descriptor, Some(&MemorySealer))
-            .unwrap()
-            .len();
+        let overhead = stored_bytes(&descriptor, Some(&MemorySealer)).unwrap().len();
         descriptor.hosted_by = Some("x".repeat(8192 - overhead - ",\"hosted_by\":\"\"".len()));
         assert!(stored_bytes(&descriptor, None).unwrap().len() < 8192);
-        assert_eq!(
-            stored_bytes(&descriptor, Some(&MemorySealer))
-                .unwrap()
-                .len(),
-            8192
-        );
+        assert_eq!(stored_bytes(&descriptor, Some(&MemorySealer)).unwrap().len(), 8192);
         persist_with(&path, &descriptor, Some(&MemorySealer)).unwrap();
         assert!(load_with(&path, Some(&MemorySealer)).is_ok());
         let boundary = std::fs::read(&path).unwrap();
@@ -3401,9 +2846,7 @@ mod tests {
         let error = persist_with(&path, &descriptor, Some(&MemorySealer)).unwrap_err();
         assert!(error.to_string().contains("oversized"));
         assert_eq!(std::fs::read(&path).unwrap(), boundary);
-        assert!(!path
-            .with_file_name(format!("{REMOTE_CONFIG_FILE}.tmp"))
-            .exists());
+        assert!(!path.with_file_name(format!("{REMOTE_CONFIG_FILE}.tmp")).exists());
         std::fs::remove_file(&path).unwrap();
         assert!(persist_with(&path, &descriptor, Some(&MemorySealer)).is_err());
         assert!(!path.exists());
@@ -3430,37 +2873,21 @@ mod tests {
             .unwrap()
             .map(|entry| entry.unwrap().file_name())
             .collect();
-        assert_eq!(
-            names,
-            [REMOTE_CONFIG_FILE],
-            "only the migrated descriptor remains"
-        );
+        assert_eq!(names, [REMOTE_CONFIG_FILE], "only the migrated descriptor remains");
 
         load_with(&path, Some(&MemorySealer)).unwrap().unwrap();
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            migrated,
-            "migration runs once"
-        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), migrated, "migration runs once");
     }
 
     #[test]
     fn failed_optional_code_migration_preserves_plaintext_but_never_downgrades_sealed_code() {
         use crate::at_rest::test_sealer::MemorySealer;
-        struct FailingMigration {
-            fail_seal: bool,
-            fallback: bool,
-        }
+        struct FailingMigration { fail_seal: bool, fallback: bool }
         impl Sealer for FailingMigration {
-            fn allows_plaintext_fallback(&self) -> bool {
-                self.fallback
-            }
+            fn allows_plaintext_fallback(&self) -> bool { self.fallback }
             fn seal(&self, purpose: &str, plain: &[u8]) -> Result<Vec<u8>, String> {
-                if self.fail_seal {
-                    Err("Secure Enclave unavailable".into())
-                } else {
-                    MemorySealer.seal(purpose, plain)
-                }
+                if self.fail_seal { Err("Secure Enclave unavailable".into()) }
+                else { MemorySealer.seal(purpose, plain) }
             }
             fn open(&self, _: &str, _: &[u8]) -> Result<zeroize::Zeroizing<Vec<u8>>, String> {
                 Err("cannot open on this Mac".into())
@@ -3470,17 +2897,11 @@ mod tests {
             let (_dir, path, descriptor, code) = sealed_fixture(51);
             persist_with(&path, &descriptor, None).unwrap();
             let original = std::fs::read(&path).unwrap();
-            let optional = FailingMigration {
-                fail_seal,
-                fallback: true,
-            };
+            let optional = FailingMigration { fail_seal, fallback: true };
             let loaded = load_with(&path, Some(&optional)).unwrap().unwrap();
             assert_eq!(loaded.code.as_deref(), Some(code.as_str()));
             assert_eq!(std::fs::read(&path).unwrap(), original);
-            let strict = FailingMigration {
-                fail_seal,
-                fallback: false,
-            };
+            let strict = FailingMigration { fail_seal, fallback: false };
             assert!(load_with(&path, Some(&strict)).is_err());
             assert_eq!(std::fs::read(&path).unwrap(), original);
 
@@ -3750,35 +3171,17 @@ mod tests {
         let node = SigningKey::from_bytes(&[35u8; 32]);
         let public = X25519PublicKey::from(&StaticSecret::from([36u8; 32])).to_bytes();
         let descriptor = parse_pairing_link(&signed_link(
-            "example.invalid:8443".into(),
-            &node,
-            public,
-            &test_code(10),
-        ))
-        .unwrap();
+            "example.invalid:8443".into(), &node, public, &test_code(10),
+        )).unwrap();
         let store = tempfile::tempdir().unwrap();
         let key = ClientKey::load_or_create(store.path()).unwrap();
         let (mut app, _silent_node) = tokio::io::duplex(65536);
-        let result = tokio::time::timeout(
-            Duration::from_secs(6),
-            pinned_handshake(&mut app, &descriptor, &key),
-        )
-        .await;
-        assert!(
-            matches!(result, Ok(Err(_))),
-            "a silent handshake must release its connection slot"
-        );
+        let result = tokio::time::timeout(Duration::from_secs(6), pinned_handshake(&mut app, &descriptor, &key)).await;
+        assert!(matches!(result, Ok(Err(_))), "a silent handshake must release its connection slot");
         let (mut app, _silent_node) = tokio::io::duplex(65536);
         let (mut noise, _) = transport_pair();
-        let result = tokio::time::timeout(
-            Duration::from_secs(6),
-            encrypted_auth(&mut app, &mut noise, &descriptor, &key, "test", None),
-        )
-        .await;
-        assert!(
-            matches!(result, Ok(Err(_))),
-            "silent encrypted auth must also be bounded"
-        );
+        let result = tokio::time::timeout(Duration::from_secs(6), encrypted_auth(&mut app, &mut noise, &descriptor, &key, "test", None)).await;
+        assert!(matches!(result, Ok(Err(_))), "silent encrypted auth must also be bounded");
     }
 
     #[tokio::test(start_paused = true)]
@@ -3791,21 +3194,11 @@ mod tests {
             let permit = slots.clone().acquire_owned().await.unwrap();
             let connection = async {
                 let _permit = permit;
-                tunnel(
-                    local,
-                    remote,
-                    noise,
-                    LocalHttpSanitizer::new("test"),
-                    if blocked { vec![1; 1024] } else { Vec::new() },
-                )
-                .await
+                tunnel(local, remote, noise, LocalHttpSanitizer::new("test"),
+                    if blocked { vec![1; 1024] } else { Vec::new() }).await
             };
-            assert!(
-                tokio::time::timeout(Duration::from_secs(65), connection)
-                    .await
-                    .is_ok(),
-                "idle or blocked connections cannot retain a slot forever"
-            );
+            assert!(tokio::time::timeout(Duration::from_secs(65), connection).await.is_ok(),
+                "idle or blocked connections cannot retain a slot forever");
             assert_eq!(slots.available_permits(), MAX_LOCAL_CONNECTIONS);
         }
     }
@@ -3822,16 +3215,8 @@ mod tests {
         drop(node);
         let result = tokio::time::timeout(Duration::from_secs(6), async {
             let _permit = permit;
-            tunnel(
-                local,
-                remote,
-                noise,
-                LocalHttpSanitizer::new("test"),
-                Vec::new(),
-            )
-            .await
-        })
-        .await;
+            tunnel(local, remote, noise, LocalHttpSanitizer::new("test"), Vec::new()).await
+        }).await;
         assert!(matches!(result, Ok(Err(_))));
         assert_eq!(slots.available_permits(), 1);
     }
@@ -3850,14 +3235,7 @@ mod tests {
                 let permit = slots.clone().try_acquire_owned().unwrap();
                 tasks.push(tokio::spawn(async move {
                     let _permit = permit;
-                    tunnel(
-                        local,
-                        remote,
-                        noise,
-                        LocalHttpSanitizer::new("test"),
-                        Vec::new(),
-                    )
-                    .await
+                    tunnel(local, remote, noise, LocalHttpSanitizer::new("test"), Vec::new()).await
                 }));
                 let mut node = node;
                 let mut caller = caller;
@@ -3871,46 +3249,25 @@ mod tests {
             }
             assert_eq!(slots.available_permits(), 0);
             match cycle % 4 {
-                0 => nodes.clear(),   // Node restart / remote EOF.
+                0 => nodes.clear(), // Node restart / remote EOF.
                 1 => callers.clear(), // Short local connection / local EOF.
-                2 => {
-                    // Invalid ciphertext must tear down the session too.
-                    for node in &mut nodes {
-                        write_frame(node, &[0; 32]).await.unwrap();
-                    }
+                2 => { // Invalid ciphertext must tear down the session too.
+                    for node in &mut nodes { write_frame(node, &[0; 32]).await.unwrap(); }
                 }
-                _ => {
-                    for task in &tasks {
-                        task.abort();
-                    }
-                } // Proxy shutdown.
+                _ => { for task in &tasks { task.abort(); } } // Proxy shutdown.
             }
             for task in tasks {
-                let result = tokio::time::timeout(Duration::from_secs(1), task)
-                    .await
-                    .unwrap();
-                if cycle % 4 == 3 {
-                    assert!(result.unwrap_err().is_cancelled());
-                } else {
-                    assert_eq!(result.unwrap().is_ok(), cycle % 4 == 1);
-                }
+                let result = tokio::time::timeout(Duration::from_secs(1), task).await.unwrap();
+                if cycle % 4 == 3 { assert!(result.unwrap_err().is_cancelled()); }
+                else { assert_eq!(result.unwrap().is_ok(), cycle % 4 == 1); }
             }
-            assert_eq!(
-                slots.available_permits(),
-                MAX_LOCAL_CONNECTIONS,
-                "cycle {cycle}"
-            );
+            assert_eq!(slots.available_permits(), MAX_LOCAL_CONNECTIONS, "cycle {cycle}");
             // The framed reader must also release its half of the transport:
             // a returned permit alone is insufficient if a Noise socket lingers.
             for endpoint in nodes.iter_mut().chain(callers.iter_mut()) {
                 let mut byte = [0];
-                assert_eq!(
-                    tokio::time::timeout(Duration::from_secs(1), endpoint.read(&mut byte))
-                        .await
-                        .unwrap()
-                        .unwrap(),
-                    0
-                );
+                assert_eq!(tokio::time::timeout(Duration::from_secs(1), endpoint.read(&mut byte))
+                    .await.unwrap().unwrap(), 0);
             }
         }
     }
@@ -4154,10 +3511,8 @@ mod tests {
             v: 1,
             client_id: "0123456789abcdef0123456789abcdef".into(),
             scopes: vec!["read".into(), "receive".into()],
-            box_transport_pubkey: None,
-            box_transport_signature: None,
-            transport_pubkey: None,
-            transport_signature: None,
+            box_transport_pubkey: None, box_transport_signature: None,
+            transport_pubkey: None, transport_signature: None,
         })
         .unwrap();
         let encrypted = encode_transport(&mut noise, &response)?;
@@ -4169,9 +3524,7 @@ mod tests {
     // Count socket handshakes, not requests, so losing pooling fails this test.
     async fn polling_responder(mut stream: TcpStream, secret: [u8; 32]) -> Result<(), RemoteError> {
         let mut noise = Builder::new(NOISE_PROTOCOL.parse().unwrap())
-            .local_private_key(&secret)
-            .build_responder()
-            .unwrap();
+            .local_private_key(&secret).build_responder().unwrap();
         let mut output = vec![0u8; MAX_HANDSHAKE_FRAME];
         let message = read_frame(&mut stream, MAX_HANDSHAKE_FRAME).await?;
         noise.read_message(&message, &mut output).unwrap();
@@ -4184,31 +3537,20 @@ mod tests {
         let auth = decode_transport(&mut noise, &encrypted, MAX_AUTH_PLAINTEXT)?;
         let _: RemoteAuthRequest = serde_json::from_slice(&auth).unwrap();
         let response = serde_json::to_vec(&RemoteAuthResponse::Ok {
-            v: 1,
-            client_id: "0123456789abcdef0123456789abcdef".into(),
+            v: 1, client_id: "0123456789abcdef0123456789abcdef".into(),
             scopes: vec!["read".into(), "receive".into()],
-            box_transport_pubkey: None,
-            box_transport_signature: None,
-            transport_pubkey: None,
-            transport_signature: None,
-        })
-        .unwrap();
+            box_transport_pubkey: None, box_transport_signature: None,
+            transport_pubkey: None, transport_signature: None,
+        }).unwrap();
         let encrypted = encode_transport(&mut noise, &response)?;
         write_frame(&mut stream, &encrypted).await?;
         let mut request = Vec::new();
         loop {
             let encrypted = read_frame(&mut stream, MAX_TRANSPORT_FRAME).await?;
-            request.extend(decode_transport(
-                &mut noise,
-                &encrypted,
-                MAX_NOISE_PLAINTEXT,
-            )?);
+            request.extend(decode_transport(&mut noise, &encrypted, MAX_NOISE_PLAINTEXT)?);
             while let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
                 request.drain(..end + 4);
-                let response = encode_transport(
-                    &mut noise,
-                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}",
-                )?;
+                let response = encode_transport(&mut noise, b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}")?;
                 write_frame(&mut stream, &response).await?;
             }
         }
@@ -4222,12 +3564,8 @@ mod tests {
         let node = SigningKey::from_bytes(&[27u8; 32]);
         let public = X25519PublicKey::from(&StaticSecret::from(secret)).to_bytes();
         let descriptor = parse_pairing_link(&signed_link(
-            listener.local_addr().unwrap().to_string(),
-            &node,
-            public,
-            &test_code(11),
-        ))
-        .unwrap();
+            listener.local_addr().unwrap().to_string(), &node, public, &test_code(11),
+        )).unwrap();
         let attempts = Arc::new(AtomicUsize::new(0));
         let refuse = Arc::new(AtomicBool::new(false));
         let server = tokio::spawn({
@@ -4242,12 +3580,7 @@ mod tests {
                     sessions.spawn(async move {
                         if reject {
                             let _ = read_frame(&mut stream, MAX_HANDSHAKE_FRAME).await;
-                            write_frame(
-                                &mut stream,
-                                br#"{"v":1,"code":"rate_limited","retry_after_secs":1}"#,
-                            )
-                            .await
-                            .unwrap();
+                            write_frame(&mut stream, br#"{"v":1,"code":"rate_limited","retry_after_secs":1}"#).await.unwrap();
                         } else {
                             let _ = polling_responder(stream, secret).await;
                         }
@@ -4261,43 +3594,20 @@ mod tests {
         let auth: Arc<str> = Arc::from("b".repeat(64));
         let retry = Arc::new(RemoteRetry::default());
         let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let local_base = format!(
-            "http://127.0.0.1:{}/api/v1",
-            probe.local_addr().unwrap().port()
-        );
+        let local_base = format!("http://127.0.0.1:{}/api/v1", probe.local_addr().unwrap().port());
         drop(probe);
         persist_at(&config_path(app_dir.path()), &descriptor).unwrap();
-        let proxy = start_proxy(
-            &local_base,
-            app_dir.path(),
-            descriptor,
-            key,
-            "polling test",
-            store.path().to_path_buf(),
-            auth.clone(),
-            retry.clone(),
-        )
-        .await
-        .unwrap();
+        let proxy = start_proxy(&local_base, app_dir.path(), descriptor,
+            key, "polling test", store.path().to_path_buf(), auth.clone(), retry.clone()).await.unwrap();
         let client = http_client_builder().build().unwrap();
-        let url = format!(
-            "http://127.0.0.1:{}/api/v1/status",
-            proxy.local_addr().port()
-        );
+        let url = format!("http://127.0.0.1:{}/api/v1/status", proxy.local_addr().port());
         let read = || async {
-            let response = client
-                .get(&url)
-                .header(LOCAL_AUTH_HEADER, auth.as_ref())
-                .send()
-                .await
-                .unwrap();
+            let response = client.get(&url).header(LOCAL_AUTH_HEADER, auth.as_ref()).send().await.unwrap();
             assert_eq!(response.status(), 200);
             assert_eq!(response.text().await.unwrap(), "{}");
         };
         // The initial seven loads use the same two slots as periodic reads.
-        for _ in 0..4 {
-            tokio::join!(read(), read());
-        }
+        for _ in 0..4 { tokio::join!(read(), read()); }
         let warm = attempts.load(Ordering::SeqCst);
         assert!((1..=2).contains(&warm));
         let mut requests = 8;
@@ -4308,52 +3618,20 @@ mod tests {
             tokio::time::advance(Duration::from_millis(250)).await;
             tokio::time::resume(); // real loopback IO must not auto-advance timers
             let mut due = usize::from(tick % 12 == 0) * 2;
-            for (period, offset) in [
-                (40, 1),
-                (60, 2),
-                (60, 3),
-                (80, 4),
-                (120, 5),
-                (120, 6),
-                (120, 7),
-                (120, 8),
-            ] {
+            for (period, offset) in [(40, 1), (60, 2), (60, 3), (80, 4), (120, 5), (120, 6), (120, 7), (120, 8)] {
                 due += usize::from(tick % period == offset);
             }
-            while due >= 2 {
-                tokio::join!(read(), read());
-                due -= 2;
-                requests += 2;
-            }
-            if due == 1 {
-                read().await;
-                requests += 1;
-            }
+            while due >= 2 { tokio::join!(read(), read()); due -= 2; requests += 2; }
+            if due == 1 { read().await; requests += 1; }
         }
-        assert!(
-            requests >= 130,
-            "exercise the whole polling workload: {requests}"
-        );
-        assert!(
-            attempts.load(Ordering::SeqCst) <= 8,
-            "handshakes: {}",
-            attempts.load(Ordering::SeqCst)
-        );
-        assert_eq!(
-            attempts.load(Ordering::SeqCst),
-            warm,
-            "no handshake churn after warm-up"
-        );
+        assert!(requests >= 130, "exercise the whole polling workload: {requests}");
+        assert!(attempts.load(Ordering::SeqCst) <= 8, "handshakes: {}", attempts.load(Ordering::SeqCst));
+        assert_eq!(attempts.load(Ordering::SeqCst), warm, "no handshake churn after warm-up");
 
         // Refusing one new tunnel must leave established tunnels usable.
         refuse.store(true, Ordering::SeqCst);
         let extra = reqwest::Client::builder().no_proxy().build().unwrap();
-        let response = extra
-            .get(&url)
-            .header(LOCAL_AUTH_HEADER, auth.as_ref())
-            .send()
-            .await
-            .unwrap();
+        let response = extra.get(&url).header(LOCAL_AUTH_HEADER, auth.as_ref()).send().await.unwrap();
         assert_eq!(response.status(), 503);
         assert!(response.text().await.unwrap().contains("waiting 1 s"));
         assert!(retry.remaining().is_some());
@@ -4514,14 +3792,8 @@ mod tests {
         // Only the first handshake may be in flight. The remaining local
         // requests still occupy the bounded slots while awaiting its outcome.
         tokio::time::timeout(Duration::from_secs(1), accepted_rx.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(
-            tokio::time::timeout(Duration::from_millis(50), accepted_rx.recv())
-                .await
-                .is_err()
-        );
+            .await.unwrap().unwrap();
+        assert!(tokio::time::timeout(Duration::from_millis(50), accepted_rx.recv()).await.is_err());
 
         let mut refused = TcpStream::connect(proxy.local_addr()).await.unwrap();
         refused.write_all(request.as_bytes()).await.unwrap();

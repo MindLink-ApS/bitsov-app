@@ -171,14 +171,7 @@ pub fn save_password_for_device(
         return Err("Invalid seed password length.".into());
     }
     service(node, "seed-password")?;
-    android_store(
-        Some(device_blob),
-        node,
-        "seed-password",
-        password,
-        true,
-        reenroll,
-    )
+    android_store(Some(device_blob), node, "seed-password", password, true, reenroll)
 }
 
 pub fn password(node: &str, device_blob: Option<&[u8]>) -> Result<Zeroizing<String>, String> {
@@ -206,10 +199,8 @@ mod tests {
             service(&"ab".repeat(32), "seed-password").unwrap(),
             format!("bitsov.node.{}.seed-password", "ab".repeat(32))
         );
-        assert_ne!(
-            service(&"ab".repeat(32), "seed-password").unwrap(),
-            service(&"cd".repeat(32), "seed-password").unwrap()
-        );
+        assert_ne!(service(&"ab".repeat(32), "seed-password").unwrap(),
+            service(&"cd".repeat(32), "seed-password").unwrap());
         for node in ["", "../another", "ab\0cd", &"AB".repeat(32)] {
             assert!(service(node, "seed-password").is_err());
         }

@@ -15,8 +15,8 @@ use super::route::{PeerKey, ReadRoute};
 use super::schema::{
     Amount, BalanceReport, CategoryFeeTarget, CategoryPrice, ChainBackend, ChannelSummary,
     ChannelsReport, CopiedId, Direction, HealthReport, LightningBackend, Liveness, LocalPrices,
-    MessageMetadata, PaymentEntry, PaymentsReport, PriceCategory, PricingMode, Report, SenderCount,
-    SourceField, TargetFee, TrustLevel, UnavailableReason, Unit, WalletBalanceLabel,
+    MessageMetadata, PaymentEntry, PaymentsReport, PriceCategory, PricingMode, Report,
+    SenderCount, SourceField, TargetFee, TrustLevel, UnavailableReason, Unit, WalletBalanceLabel,
     MAX_PAYMENT_ENTRIES, MAX_PAYMENT_PEERS, PAYMENT_THREAD_LIMIT,
 };
 use super::{LogOutcome, NodeRead, RawRead, ReadFault, ReadLog};

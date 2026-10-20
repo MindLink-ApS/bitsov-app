@@ -87,8 +87,7 @@ pub fn resolve(_app_data_dir: &Path) -> Result<Option<DevNode>, String> {
 /// Absolute path to the data dir of a node the owner already runs (external mode).
 pub const EXTERNAL_ENV: &str = "BITSOV_DEV_EXTERNAL_NODE";
 /// Window title while attached to an external node.
-pub const EXTERNAL_WINDOW_TITLE: &str =
-    "BitSov — DEV, EXTERNAL NODE (127.0.0.1:3141, not started by the app)";
+pub const EXTERNAL_WINDOW_TITLE: &str = "BitSov — DEV, EXTERNAL NODE (127.0.0.1:3141, not started by the app)";
 /// The product API bind (`API_BASE` in main.rs). The only one outside dev builds.
 #[cfg_attr(not(all(debug_assertions, feature = "dev-node")), allow(dead_code))]
 const LOOPBACK_API: &str = "127.0.0.1:3141";
@@ -117,12 +116,7 @@ pub fn resolve_external(app_data_dir: &Path) -> Result<Option<ExternalNode>, Str
     ];
     let api = api_port_from(std::env::var(API_BASE_ENV).ok().as_deref())?
         .map(|port| format!("127.0.0.1:{port}"));
-    external_from(
-        external.as_deref(),
-        spawn_set,
-        &forbidden,
-        api.as_deref().unwrap_or(LOOPBACK_API),
-    )
+    external_from(external.as_deref(), spawn_set, &forbidden, api.as_deref().unwrap_or(LOOPBACK_API))
 }
 
 /// Release and ordinary debug builds: no external mode, and the environment is not read.
@@ -236,8 +230,9 @@ pub fn api_port_from(value: Option<&str>) -> Result<Option<u16>, String> {
     let Some(value) = non_empty(value) else {
         return Ok(None);
     };
-    let refuse =
-        || format!("{API_BASE_ENV} must be http://127.0.0.1:<port> (loopback only), got {value:?}");
+    let refuse = || {
+        format!("{API_BASE_ENV} must be http://127.0.0.1:<port> (loopback only), got {value:?}")
+    };
     let rest = value.strip_prefix("http://127.0.0.1:").ok_or_else(refuse)?;
     let port = ["/api/v1", "/", ""]
         .iter()
@@ -287,9 +282,7 @@ pub fn save_dir_from(value: Option<&str>, home: Option<&Path>) -> Result<Option<
         .ok_or_else(|| format!("{SAVE_DIR_ENV}: no directory at {}", dir.display()))?;
     let home = home.ok_or_else(|| format!("{SAVE_DIR_ENV}: HOME is required"))?;
     if is_within(&dir, &canonical_directory(home)?) {
-        return Err(format!(
-            "{SAVE_DIR_ENV} must not be the home directory or inside it"
-        ));
+        return Err(format!("{SAVE_DIR_ENV} must not be the home directory or inside it"));
     }
     Ok(Some(dir))
 }
@@ -679,11 +672,7 @@ mod tests {
         }
     }
 
-    fn attach(
-        f: &External,
-        dir: Option<&str>,
-        spawn_set: bool,
-    ) -> Result<Option<ExternalNode>, String> {
+    fn attach(f: &External, dir: Option<&str>, spawn_set: bool) -> Result<Option<ExternalNode>, String> {
         external_from(dir, spawn_set, std::slice::from_ref(&f.app), LOOPBACK_API)
     }
 
@@ -709,20 +698,12 @@ mod tests {
     fn external_refuses_the_spawn_variables_at_the_same_time() {
         let f = external_fixture(Some("127.0.0.1:3141"));
         let err = attach(&f, f.node.to_str(), true).unwrap_err();
-        assert!(
-            err.contains(SIDECAR_ENV) && err.contains(DATA_DIR_ENV),
-            "{err}"
-        );
+        assert!(err.contains(SIDECAR_ENV) && err.contains(DATA_DIR_ENV), "{err}");
     }
 
     #[test]
     fn external_refuses_other_api_binds() {
-        for api in [
-            "0.0.0.0:3141",
-            "127.0.0.1:3142",
-            "[::1]:3141",
-            "192.168.1.5:3141",
-        ] {
+        for api in ["0.0.0.0:3141", "127.0.0.1:3142", "[::1]:3141", "192.168.1.5:3141"] {
             let f = external_fixture(Some(api));
             let err = attach(&f, f.node.to_str(), false).unwrap_err();
             assert!(err.contains("127.0.0.1:3141"), "{api}: {err}");
@@ -735,22 +716,12 @@ mod tests {
     #[test]
     fn external_follows_a_moved_api_base() {
         let f = external_fixture(Some("127.0.0.1:47123"));
-        let moved = external_from(
-            f.node.to_str(),
-            false,
-            std::slice::from_ref(&f.app),
-            "127.0.0.1:47123",
-        );
+        let moved = external_from(f.node.to_str(), false, std::slice::from_ref(&f.app), "127.0.0.1:47123");
         assert!(moved.unwrap().is_some());
         // The pilot's 3141 config is refused while the app talks to another port.
         let f = external_fixture(Some("127.0.0.1:3141"));
-        let err = external_from(
-            f.node.to_str(),
-            false,
-            std::slice::from_ref(&f.app),
-            "127.0.0.1:47123",
-        )
-        .unwrap_err();
+        let err = external_from(f.node.to_str(), false, std::slice::from_ref(&f.app), "127.0.0.1:47123")
+            .unwrap_err();
         assert!(err.contains("127.0.0.1:47123"), "{err}");
     }
 
@@ -758,19 +729,11 @@ mod tests {
     fn api_override_accepts_only_loopback_http_with_a_port() {
         assert_eq!(api_port_from(None), Ok(None));
         assert_eq!(api_port_from(Some("  ")), Ok(None));
-        for ok in [
-            "http://127.0.0.1:47123",
-            "http://127.0.0.1:47123/",
-            "http://127.0.0.1:47123/api/v1",
-            " http://127.0.0.1:47123 ",
-        ] {
+        for ok in ["http://127.0.0.1:47123", "http://127.0.0.1:47123/", "http://127.0.0.1:47123/api/v1", " http://127.0.0.1:47123 "] {
             assert_eq!(api_port_from(Some(ok)), Ok(Some(47123)), "{ok}");
         }
         assert_eq!(api_port_from(Some("http://127.0.0.1:1")), Ok(Some(1)));
-        assert_eq!(
-            api_port_from(Some("http://127.0.0.1:65535/api/v1")),
-            Ok(Some(65535))
-        );
+        assert_eq!(api_port_from(Some("http://127.0.0.1:65535/api/v1")), Ok(Some(65535)));
         for bad in [
             "http://127.0.0.1",
             "http://127.0.0.1:",
@@ -900,11 +863,9 @@ mod tests {
         assert!(source.contains(external_stub));
         let api_stub = "#[cfg(not(all(debug_assertions, feature = \"dev-node\")))]\npub fn api_base(product: &str) -> Result<String, String> {\n    Ok(product.to_string())\n}";
         let save_stub = "#[cfg(not(all(debug_assertions, feature = \"dev-node\")))]\npub fn save_dir() -> Result<Option<PathBuf>, String> {\n    Ok(None)\n}";
-        assert!(source
-            .contains("#[cfg(all(debug_assertions, feature = \"dev-node\"))]\npub fn api_base("));
+        assert!(source.contains("#[cfg(all(debug_assertions, feature = \"dev-node\"))]\npub fn api_base("));
         assert!(source.contains(api_stub));
-        assert!(source
-            .contains("#[cfg(all(debug_assertions, feature = \"dev-node\"))]\npub fn save_dir("));
+        assert!(source.contains("#[cfg(all(debug_assertions, feature = \"dev-node\"))]\npub fn save_dir("));
         assert!(source.contains(save_stub));
         // Only the gated bodies read the environment.
         assert_eq!(source.matches("std::env::var").count(), 10);

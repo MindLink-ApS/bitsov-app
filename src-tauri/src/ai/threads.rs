@@ -300,12 +300,7 @@ pub fn watch_settings(
         let plain =
             Zeroizing::new(serde_json::to_vec(&disabled).map_err(|_| "Invalid watch settings.")?);
         write_sealed(
-            dir,
-            &path,
-            &sealer.seal(&purpose, &plain)?,
-            &purpose,
-            &plain,
-            sealer,
+            dir, &path, &sealer.seal(&purpose, &plain)?, &purpose, &plain, sealer,
         )?;
     }
     Ok(disabled)
@@ -320,16 +315,13 @@ impl LegacyMacSealer {
     const SERVICE: &'static str = "tech.mindlink.bitsov.ai-threads.v1";
     fn key(purpose: &str, create: bool) -> Result<Zeroizing<Vec<u8>>, String> {
         use bitsov_ffi::home_keychain::{add_item, read_item};
-        let read = || {
-            read_item(Self::SERVICE, purpose, 32)
-                .map_err(|_| "Invalid thread key name.".to_string())
-        };
+        let read =
+            || read_item(Self::SERVICE, purpose, 32).map_err(|_| "Invalid thread key name.".to_string());
         let (mut status, mut length, mut bytes) = read()?;
         if status == -25300 && create {
             let mut key = Zeroizing::new(vec![0; 32]);
             getrandom::getrandom(&mut key).map_err(|_| "Could not create the thread key.")?;
-            let added =
-                add_item(Self::SERVICE, purpose, &key).map_err(|_| "Invalid thread key name.")?;
+            let added = add_item(Self::SERVICE, purpose, &key).map_err(|_| "Invalid thread key name.")?;
             if added != 0 && added != -25299 {
                 return Err(format!("Keychain could not save the thread key ({added})."));
             }

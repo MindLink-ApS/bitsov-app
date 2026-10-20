@@ -7,10 +7,7 @@
 //! stored contact. Knock asks the node to dial unprivileged, then uses the
 //! existing first-contact quote path.
 
-use base64::{
-    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
-    Engine as _,
-};
+use base64::{engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}, Engine as _};
 use ed25519_dalek::{Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
@@ -188,14 +185,10 @@ fn node_key(hex_key: &str) -> Result<VerifyingKey, String> {
     let key = VerifyingKey::from_bytes(&bytes)
         .map_err(|_| "the card's node key is not a valid key".to_string())?;
     if key.is_weak() {
-        return Err(
-            "The card's node key is a weak (small-order) key. Do not use this front door.".into(),
-        );
+        return Err("The card's node key is a weak (small-order) key. Do not use this front door.".into());
     }
     if key.to_edwards().compress().to_bytes() != bytes {
-        return Err(
-            "The card's node key is not canonically encoded. Do not use this front door.".into(),
-        );
+        return Err("The card's node key is not canonically encoded. Do not use this front door.".into());
     }
     Ok(key)
 }
@@ -317,9 +310,7 @@ impl Card {
         if self.expires_at <= self.issued_at || self.expires_at - self.issued_at > LIFETIME_SECS {
             return Err("This front door claims to live longer than seven days.".into());
         }
-        if self.profile.display_name.is_empty()
-            || self.profile.display_name.len() > MAX_DISPLAY_NAME
-        {
+        if self.profile.display_name.is_empty() || self.profile.display_name.len() > MAX_DISPLAY_NAME {
             return Err("This front door's display name is not usable.".into());
         }
         if self.profile.tagline.len() > MAX_TAGLINE {
@@ -354,9 +345,9 @@ impl Card {
                 return Err("A media title on this front door is too long.".into());
             }
             if let Some(t) = &m.thumb_b64 {
-                let raw = STANDARD.decode(t).map_err(|_| {
-                    "A media thumbnail on this front door is not readable.".to_string()
-                })?;
+                let raw = STANDARD
+                    .decode(t)
+                    .map_err(|_| "A media thumbnail on this front door is not readable.".to_string())?;
                 if raw.len() > MAX_THUMB_INLINE {
                     return Err("A media thumbnail on this front door is too large.".into());
                 }
@@ -407,10 +398,7 @@ impl Card {
         let key = node_key(&self.node_id)?;
         let sig = decode_fixed::<64>(&self.sig).ok_or("the card's signature is malformed")?;
         key.verify_strict(&self.digest()?, &Signature::from_bytes(&sig))
-            .map_err(|_| {
-                "The signature does not match this node's key. Do not use this front door."
-                    .to_string()
-            })
+            .map_err(|_| "The signature does not match this node's key. Do not use this front door.".to_string())
     }
 
     pub fn to_link(&self) -> Result<String, String> {
@@ -461,8 +449,7 @@ pub fn parse(text: &str) -> Result<Card, String> {
         return Err("Paste a front-door link first.".into());
     }
     if text.starts_with('{') {
-        return serde_json::from_str(text)
-            .map_err(|_| "That is not a front-door card.".to_string());
+        return serde_json::from_str(text).map_err(|_| "That is not a front-door card.".to_string());
     }
     let payload = match text.split_once('#') {
         Some((prefix, frag)) if format!("{prefix}#") == LINK_PREFIX => frag,

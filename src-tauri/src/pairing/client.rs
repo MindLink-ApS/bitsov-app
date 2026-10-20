@@ -137,9 +137,7 @@ impl PairingClient {
         let bytes = std::fs::read(path)
             .map_err(|e| PairError::Local(format!("cannot read the challenge file: {e}")))?;
         if bytes.len() != CHALLENGE_LEN {
-            return Err(PairError::Local(
-                "the challenge file has the wrong length".into(),
-            ));
+            return Err(PairError::Local("the challenge file has the wrong length".into()));
         }
         Ok(bytes)
     }
@@ -164,11 +162,7 @@ impl PairingClient {
     }
 
     /// `GET /pair/challenge` then `POST /pair/token`.
-    pub(crate) async fn token(
-        &self,
-        key: &ClientKey,
-        client_id: &str,
-    ) -> Result<TokenReply, PairError> {
+    pub(crate) async fn token(&self, key: &ClientKey, client_id: &str) -> Result<TokenReply, PairError> {
         const CHALLENGE: &str = "/pair/challenge";
         const TOKEN: &str = "/pair/token";
         #[derive(Deserialize)]
@@ -238,24 +232,10 @@ fn decode<T: for<'de> Deserialize<'de>>(
 ) -> Result<T, PairError> {
     if !(200..300).contains(&status) {
         // These are process-local proxy states, not a refusal by the node.
-        if status == 503
-            && serde_json::from_str::<serde_json::Value>(body)
-                .ok()
-                .is_some_and(|v| {
-                    matches!(
-                        v["code"].as_str(),
-                        Some(
-                            "remote_handshake_unavailable"
-                                | "remote_proxy_busy"
-                                | "remote_proxy_auth_busy"
-                        )
-                    )
-                })
-        {
-            return Err(PairError::Transport {
-                step,
-                detail: "connecting to your node".into(),
-            });
+        if status == 503 && serde_json::from_str::<serde_json::Value>(body).ok()
+            .is_some_and(|v| matches!(v["code"].as_str(),
+                Some("remote_handshake_unavailable" | "remote_proxy_busy" | "remote_proxy_auth_busy"))) {
+            return Err(PairError::Transport { step, detail: "connecting to your node".into() });
         }
         let reason = serde_json::from_str::<serde_json::Value>(body)
             .ok()
@@ -281,20 +261,11 @@ mod resilience_tests {
     fn only_typed_proxy_unavailability_is_retryable_transport() {
         for code in ["remote_handshake_unavailable", "remote_proxy_busy"] {
             let body = serde_json::json!({ "code": code, "message": "connecting" }).to_string();
-            assert!(matches!(
-                decode::<serde_json::Value>("/pair/challenge", 503, &body),
-                Err(PairError::Transport { .. })
-            ));
+            assert!(matches!(decode::<serde_json::Value>("/pair/challenge", 503, &body), Err(PairError::Transport { .. })));
         }
         for status in [401, 403, 404, 503] {
-            assert!(matches!(
-                decode::<serde_json::Value>(
-                    "/pair/challenge",
-                    status,
-                    r#"{"code":"pairing_refused","error":"no"}"#
-                ),
-                Err(PairError::Refused { .. })
-            ));
+            assert!(matches!(decode::<serde_json::Value>("/pair/challenge", status,
+                r#"{"code":"pairing_refused","error":"no"}"#), Err(PairError::Refused { .. })));
         }
     }
 }

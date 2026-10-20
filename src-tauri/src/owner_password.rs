@@ -20,19 +20,12 @@ pub fn load(data_dir: &Path, allow_create: bool) -> Result<Zeroizing<Vec<u8>>, S
 
 const BINDING_FILE: &str = "seed-password-node.json";
 fn account(data_dir: &Path) -> String {
-    blake3::hash(data_dir.as_os_str().as_encoded_bytes())
-        .to_hex()
-        .to_string()
+    blake3::hash(data_dir.as_os_str().as_encoded_bytes()).to_hex().to_string()
 }
 fn bound_node(data_dir: &Path) -> Result<Option<String>, String> {
     let bytes = super::device::read_private(&data_dir.join(BINDING_FILE))
         .map_err(|_| "Cannot read the seed-password binding.")?;
-    bytes
-        .map(|bytes| {
-            serde_json::from_slice::<String>(&bytes)
-                .map_err(|_| "Invalid seed-password binding.".into())
-        })
-        .transpose()
+    bytes.map(|bytes| serde_json::from_slice::<String>(&bytes).map_err(|_| "Invalid seed-password binding.".into())).transpose()
 }
 
 /// Called only after the live node identity and owner device were verified.
@@ -42,31 +35,18 @@ pub fn bind_to_node(data_dir: &Path, node: &str) -> Result<(), String> {
     if bound_node(data_dir)?.as_deref() == Some(node) {
         // A previous rename may be visible even if its directory sync failed.
         // Re-verify and sync before retiring a legacy copy on a retry.
-        let Some(legacy) = read(&account(data_dir))? else {
-            return Ok(());
-        };
-        return migrate(
-            &legacy,
-            || Ok(()),
-            || {
-                super::home_keychain::password(node, None)
-                    .map(|s| Zeroizing::new(s.as_bytes().to_vec()))
-            },
-            || sync_binding(data_dir),
-            || remove(&account(data_dir)),
-        );
+        let Some(legacy) = read(&account(data_dir))? else { return Ok(()); };
+        return migrate(&legacy, || Ok(()),
+            || super::home_keychain::password(node, None).map(|s| Zeroizing::new(s.as_bytes().to_vec())),
+            || sync_binding(data_dir), || remove(&account(data_dir)));
     }
     let password = load(data_dir, false)?;
     migrate(
         &password,
         || super::home_keychain::save_password(node, &password),
+        || super::home_keychain::password(node, None).map(|s| Zeroizing::new(s.as_bytes().to_vec())),
         || {
-            super::home_keychain::password(node, None)
-                .map(|s| Zeroizing::new(s.as_bytes().to_vec()))
-        },
-        || {
-            let bytes =
-                serde_json::to_vec(node).map_err(|_| "Cannot encode seed-password binding.")?;
+            let bytes = serde_json::to_vec(node).map_err(|_| "Cannot encode seed-password binding.")?;
             super::device::write_private(&data_dir.join(BINDING_FILE), &bytes)
                 .map_err(|_| "Cannot save seed-password binding.")?;
             sync_binding(data_dir)
@@ -75,8 +55,7 @@ pub fn bind_to_node(data_dir: &Path, node: &str) -> Result<(), String> {
     )
 }
 fn sync_binding(data_dir: &Path) -> Result<(), String> {
-    std::fs::File::open(data_dir.join(BINDING_FILE))
-        .and_then(|file| file.sync_all())
+    std::fs::File::open(data_dir.join(BINDING_FILE)).and_then(|file| file.sync_all())
         .and_then(|()| std::fs::File::open(data_dir)?.sync_all())
         .map_err(|_| "Cannot sync seed-password binding.".into())
 }
@@ -90,11 +69,7 @@ fn migrate(
 ) -> Result<(), String> {
     save()?;
     let verified = verify()?;
-    if verified.as_slice() != password {
-        return Err(
-            "The protected seed password does not match; the launcher item was retained.".into(),
-        );
-    }
+    if verified.as_slice() != password { return Err("The protected seed password does not match; the launcher item was retained.".into()); }
     publish()?;
     retire()
 }
@@ -139,9 +114,7 @@ fn add(_: &str, _: &[u8]) -> Result<(), String> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn remove(_: &str) -> Result<(), String> {
-    Err("Local owner setup requires macOS Keychain.".into())
-}
+fn remove(_: &str) -> Result<(), String> { Err("Local owner setup requires macOS Keychain.".into()) }
 
 #[cfg(test)]
 mod tests {
@@ -153,26 +126,13 @@ mod tests {
         let attempts = Cell::new(0);
         let retired = Cell::new(false);
         for fail_sync in [true, false] {
-            let result = migrate(
-                b"secret",
-                || Ok(()),
-                || {
-                    attempts.set(attempts.get() + 1);
-                    Ok(Zeroizing::new(b"secret".to_vec()))
-                },
-                || {
-                    visible.set(true);
-                    if fail_sync {
-                        Err("directory sync failed".into())
-                    } else {
-                        Ok(())
-                    }
-                },
-                || {
-                    retired.set(true);
-                    Ok(())
-                },
-            );
+            let result = migrate(b"secret", || Ok(()), || {
+                attempts.set(attempts.get() + 1);
+                Ok(Zeroizing::new(b"secret".to_vec()))
+            }, || {
+                visible.set(true);
+                if fail_sync { Err("directory sync failed".into()) } else { Ok(()) }
+            }, || { retired.set(true); Ok(()) });
             assert!(visible.get());
             assert_eq!(result.is_err(), fail_sync);
             assert_eq!(retired.get(), !fail_sync);
@@ -183,48 +143,17 @@ mod tests {
     fn migration_never_retires_legacy_until_protected_copy_and_binding_are_verified() {
         use std::cell::RefCell;
         let events = RefCell::new(Vec::new());
-        migrate(
-            b"secret",
-            || {
-                events.borrow_mut().push("save");
-                Ok(())
-            },
-            || {
-                events.borrow_mut().push("biometry");
-                Ok(Zeroizing::new(b"secret".to_vec()))
-            },
-            || {
-                events.borrow_mut().push("bind");
-                Ok(())
-            },
-            || {
-                events.borrow_mut().push("retire");
-                Ok(())
-            },
-        )
-        .unwrap();
+        migrate(b"secret", || { events.borrow_mut().push("save"); Ok(()) },
+            || { events.borrow_mut().push("biometry"); Ok(Zeroizing::new(b"secret".to_vec())) },
+            || { events.borrow_mut().push("bind"); Ok(()) },
+            || { events.borrow_mut().push("retire"); Ok(()) }).unwrap();
         assert_eq!(*events.borrow(), ["save", "biometry", "bind", "retire"]);
-        for value in [
-            Err("cancelled".into()),
-            Ok(Zeroizing::new(b"wrong".to_vec())),
-        ] {
-            assert!(migrate(
-                b"secret",
-                || Ok(()),
-                || value,
-                || panic!("must not bind"),
-                || panic!("must not delete recovery copy")
-            )
-            .is_err());
+        for value in [Err("cancelled".into()), Ok(Zeroizing::new(b"wrong".to_vec()))] {
+            assert!(migrate(b"secret", || Ok(()), || value,
+                || panic!("must not bind"), || panic!("must not delete recovery copy")).is_err());
         }
-        assert!(migrate(
-            b"secret",
-            || Ok(()),
-            || Ok(Zeroizing::new(b"secret".to_vec())),
-            || Err("disk full".into()),
-            || panic!("must retain legacy item")
-        )
-        .is_err());
+        assert!(migrate(b"secret", || Ok(()), || Ok(Zeroizing::new(b"secret".to_vec())),
+            || Err("disk full".into()), || panic!("must retain legacy item")).is_err());
     }
     #[test]
     fn invalid_node_binding_never_falls_back_to_unprotected_keychain() {

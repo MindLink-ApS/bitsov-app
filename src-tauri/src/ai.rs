@@ -23,9 +23,9 @@
 //! keeps counts only. Each is a function of the broker output alone.
 
 pub mod assistants;
-pub mod threads;
-pub mod tool_loop;
 pub mod watches;
+pub mod tool_loop;
+pub mod threads;
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -134,13 +134,9 @@ pub fn summarize(routes: &[RouteFreshness], now: Instant) -> Freshness {
     let fresh_for = match state {
         FreshnessState::Unknown => None,
         FreshnessState::Stale => Some(Duration::ZERO),
-        FreshnessState::Fresh => routes
-            .iter()
-            .zip(&ages)
-            .filter_map(|(route, age)| {
-                age.map(|age| crate::jarvis::broker::stale_after(route.route).saturating_sub(age))
-            })
-            .min(),
+        FreshnessState::Fresh => routes.iter().zip(&ages).filter_map(|(route, age)| {
+            age.map(|age| crate::jarvis::broker::stale_after(route.route).saturating_sub(age))
+        }).min(),
     };
     Freshness {
         state: state.code(),
@@ -325,10 +321,7 @@ pub fn narrow(value: &Value, preset: Preset) -> Value {
         Value::Object(map) => {
             // `Amount`: {state, value?, unit, source_field, reason?}.
             if map.contains_key("unit") && map.contains_key("source_field") {
-                return match (
-                    map.get("state").and_then(Value::as_str),
-                    map.get("unit").and_then(Value::as_str),
-                ) {
+                return match (map.get("state").and_then(Value::as_str), map.get("unit").and_then(Value::as_str)) {
                     (Some("available"), Some("count")) => value.clone(),
                     (Some("available"), Some("msat")) if preset == Preset::Rounded => {
                         match map.get("value").and_then(Value::as_u64) {
@@ -351,9 +344,7 @@ pub fn narrow(value: &Value, preset: Preset) -> Value {
                 };
             }
             // `CopiedId`: {state: value, value}.
-            if map.get("state").and_then(Value::as_str) == Some("value")
-                && map.contains_key("value")
-            {
+            if map.get("state").and_then(Value::as_str) == Some("value") && map.contains_key("value") {
                 return json!({"state": "withheld"});
             }
             let mut out = Map::new();
@@ -500,8 +491,7 @@ fn remote_pays(host: &str, key_env: Option<&str>) -> Pays {
 pub fn endpoint_host(endpoint: &str) -> Option<String> {
     let (scheme, rest) = endpoint.split_once("://")?;
     let authority = rest.split(['/', '?', '#']).next()?;
-    if authority.is_empty() || authority.contains('@') || endpoint.chars().any(char::is_whitespace)
-    {
+    if authority.is_empty() || authority.contains('@') || endpoint.chars().any(char::is_whitespace) {
         return None;
     }
     let host = match authority.rsplit_once(':') {
@@ -585,10 +575,7 @@ pub fn providers(
         let enabled = note.is_none();
         // Off means nothing can leave and nobody is paid.
         let (pays, data_leaves) = match (enabled, host.as_deref()) {
-            (true, Some(host)) => (
-                remote_pays(host, entry.key_env.as_deref()),
-                Some(DEFAULT_PRESET),
-            ),
+            (true, Some(host)) => (remote_pays(host, entry.key_env.as_deref()), Some(DEFAULT_PRESET)),
             _ => (Pays::NOBODY, None),
         };
         views.push(ProviderView {
@@ -618,9 +605,7 @@ pub fn providers(
 fn valid_env_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 64
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+        && name.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
 }
 
 pub fn short(text: &str, max: usize) -> Option<String> {
@@ -737,13 +722,7 @@ fn new_id() -> Option<String> {
 impl Disclosures {
     /// Keep `body` for `remote` and describe it. The body in the result is the
     /// stored body.
-    pub fn hold(
-        &self,
-        remote: &Remote,
-        preset: Preset,
-        body: String,
-        now: Instant,
-    ) -> Option<Disclosure> {
+    pub fn hold(&self, remote: &Remote, preset: Preset, body: String, now: Instant) -> Option<Disclosure> {
         let id = new_id()?;
         let mut pending = self.pending.lock().unwrap();
         pending.retain(|_, held| now.saturating_duration_since(held.at) < DISCLOSURE_TTL);
@@ -780,8 +759,7 @@ impl Disclosures {
     /// Take a disclosure to send it. Gone afterwards, sent or not.
     pub fn take(&self, id: &str, now: Instant) -> Option<(Remote, String)> {
         let held = self.pending.lock().unwrap().remove(id)?;
-        (now.saturating_duration_since(held.at) < DISCLOSURE_TTL)
-            .then_some((held.remote, held.body))
+        (now.saturating_duration_since(held.at) < DISCLOSURE_TTL).then_some((held.remote, held.body))
     }
 
     /// Drop a disclosure without sending it.
@@ -823,11 +801,7 @@ pub fn answer_text(body: &[u8]) -> Option<String> {
 }
 
 /// Send the stored body once. The error text never quotes the response.
-pub async fn send(
-    remote: &Remote,
-    body: String,
-    key: Option<String>,
-) -> Result<RemoteAnswer, String> {
+pub async fn send(remote: &Remote, body: String, key: Option<String>) -> Result<RemoteAnswer, String> {
     let https = remote.endpoint.starts_with("https://");
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -850,16 +824,9 @@ pub async fn send(
         .map_err(|_| format!("{} did not answer.", remote.label))?;
     let status = response.status();
     if !status.is_success() {
-        return Err(format!(
-            "{} refused the request (http {}).",
-            remote.label,
-            status.as_u16()
-        ));
+        return Err(format!("{} refused the request (http {}).", remote.label, status.as_u16()));
     }
-    if response
-        .content_length()
-        .is_some_and(|length| length > MAX_REMOTE_BYTES as u64)
-    {
+    if response.content_length().is_some_and(|length| length > MAX_REMOTE_BYTES as u64) {
         return Err(format!("{}'s answer was too large to show.", remote.label));
     }
     // Bound accumulation before appending, including chunked/unknown-length
@@ -875,8 +842,7 @@ pub async fn send(
         }
         bytes.extend_from_slice(&chunk);
     }
-    let text =
-        answer_text(&bytes).ok_or_else(|| format!("{}'s answer had no text.", remote.label))?;
+    let text = answer_text(&bytes).ok_or_else(|| format!("{}'s answer had no text.", remote.label))?;
     Ok(RemoteAnswer {
         provider: remote.kind,
         label: remote.label.clone(),

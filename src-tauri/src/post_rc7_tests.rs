@@ -6,10 +6,7 @@ fn responses(
     replies: Vec<(&'static str, u16, serde_json::Value)>,
 ) -> (NodeState, std::thread::JoinHandle<()>) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let base = format!(
-        "http://127.0.0.1:{}/api/v1",
-        listener.local_addr().unwrap().port()
-    );
+    let base = format!("http://127.0.0.1:{}/api/v1", listener.local_addr().unwrap().port());
     let thread = std::thread::spawn(move || {
         for (expected, status, body) in replies {
             let (stream, _) = listener.accept().unwrap();
@@ -60,23 +57,11 @@ const PHRASE: &str =
 async fn restore_refuses_remote_before_any_request() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
-    let state = NodeState::for_api(format!(
-        "http://127.0.0.1:{}/api/v1",
-        listener.local_addr().unwrap().port()
-    ));
+    let state = NodeState::for_api(format!("http://127.0.0.1:{}/api/v1", listener.local_addr().unwrap().port()));
     state.remote_mode.store(true, Ordering::SeqCst);
-    let result = tokio::time::timeout(
-        Duration::from_millis(200),
-        request_identity_restore(&state, PHRASE),
-    )
-    .await;
-    assert!(
-        matches!(result, Ok(Err(ref e)) if e == "Identity restore is only available for the local supervised node.")
-    );
-    assert!(
-        matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock),
-        "no probe or phrase may reach the remote node"
-    );
+    let result = tokio::time::timeout(Duration::from_millis(200), request_identity_restore(&state, PHRASE)).await;
+    assert!(matches!(result, Ok(Err(ref e)) if e == "Identity restore is only available for the local supervised node."));
+    assert!(matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock), "no probe or phrase may reach the remote node");
 }
 
 #[tokio::test]
@@ -423,34 +408,10 @@ async fn price_floor_repair_requires_its_own_local_stopped_consent() {
     for (pending, stopped, confirmed, remote, external) in [
         (InitializationRepair::None, true, true, false, false),
         (InitializationRepair::Required, true, true, false, false),
-        (
-            InitializationRepair::PriceFloorRequired,
-            false,
-            true,
-            false,
-            false,
-        ),
-        (
-            InitializationRepair::PriceFloorRequired,
-            true,
-            false,
-            false,
-            false,
-        ),
-        (
-            InitializationRepair::PriceFloorRequired,
-            true,
-            true,
-            true,
-            false,
-        ),
-        (
-            InitializationRepair::PriceFloorRequired,
-            true,
-            true,
-            false,
-            true,
-        ),
+        (InitializationRepair::PriceFloorRequired, false, true, false, false),
+        (InitializationRepair::PriceFloorRequired, true, false, false, false),
+        (InitializationRepair::PriceFloorRequired, true, true, true, false),
+        (InitializationRepair::PriceFloorRequired, true, true, false, true),
     ] {
         *state.initialization_repair.lock().unwrap() = pending;
         state.sidecar_terminated.store(stopped, Ordering::SeqCst);
@@ -463,14 +424,8 @@ async fn price_floor_repair_requires_its_own_local_stopped_consent() {
     state.remote_mode.store(false, Ordering::SeqCst);
     *state.external_node.lock().unwrap() = None;
     assert!(repair_price_floor_files(&state, true).is_ok());
-    assert_eq!(
-        std::fs::read_to_string(&config).unwrap(),
-        original.replacen("=  50 #", "=  1000 #", 1)
-    );
-    assert_eq!(
-        std::fs::read_to_string(config.with_extension("toml.bak")).unwrap(),
-        original
-    );
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), original.replacen("=  50 #", "=  1000 #", 1));
+    assert_eq!(std::fs::read_to_string(config.with_extension("toml.bak")).unwrap(), original);
     assert!(repair_price_floor_files(&state, true).is_err());
 }
 
@@ -488,10 +443,8 @@ async fn retained_node_requires_two_separate_consents_then_authenticates_normall
     std::fs::write(&seed, "existing-identity").unwrap();
     let original = include_str!("../tests/fixtures/rc7-pricing.toml");
     std::fs::write(&config, &original).unwrap();
-    assert!(
-        !local_owner::launch_enabled(true, &config).unwrap(),
-        "a retained seed beside the config must not enable owner mode"
-    );
+    assert!(!local_owner::launch_enabled(true, &config).unwrap(),
+        "a retained seed beside the config must not enable owner mode");
     std::fs::write(&program, format!(r#"#!/bin/sh
 printf '%s\n' "$1" >> '{}'
 if [ "$1" = repair ]; then touch '{}'; exit 0; fi
@@ -510,32 +463,23 @@ exec sleep 30
     // covers the health request racing stderr/exit on the intermediate start.
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
-    let state = NodeState::for_api(format!(
-        "http://127.0.0.1:{}/api/v1",
-        listener.local_addr().unwrap().port()
-    ));
+    let state = NodeState::for_api(format!("http://127.0.0.1:{}/api/v1", listener.local_addr().unwrap().port()));
     let server_config = config.clone();
     let server = std::thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(15);
         let mut authenticated = false;
         loop {
-            assert!(
-                Instant::now() < deadline,
-                "node never finished authentication"
-            );
+            assert!(Instant::now() < deadline, "node never finished authentication");
             let (stream, _) = match listener.accept() {
                 Ok(pair) => pair,
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(Duration::from_millis(5));
-                    continue;
+                    std::thread::sleep(Duration::from_millis(5)); continue;
                 }
                 Err(e) => panic!("{e}"),
             };
             // macOS accepted sockets inherit the listener's O_NONBLOCK.
             stream.set_nonblocking(false).unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(2)))
-                .unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
             let mut reader = std::io::BufReader::new(stream);
             let mut request = String::new();
             // Health probes race sidecar exit and can be cancelled after TCP
@@ -543,37 +487,24 @@ exec sleep 30
             // the overall deadline still requires real authentication to finish.
             match reader.read_line(&mut request) {
                 Ok(0) => continue,
-                Ok(_) => {}
-                Err(e)
-                    if matches!(
-                        e.kind(),
-                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                    ) =>
-                {
-                    continue
-                }
+                Ok(_) => {},
+                Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => continue,
                 Err(e) => panic!("{e}"),
             }
             let mut length = 0;
             loop {
                 let mut header = String::new();
                 reader.read_line(&mut header).unwrap();
-                if header == "\r\n" || header.is_empty() {
-                    break;
-                }
+                if header == "\r\n" || header.is_empty() { break; }
                 if let Some(value) = header.to_ascii_lowercase().strip_prefix("content-length:") {
                     length = value.trim().parse::<usize>().unwrap();
                 }
             }
             reader.read_exact(&mut vec![0; length]).unwrap();
-            let repaired = std::fs::read_to_string(&server_config)
-                .unwrap()
-                .contains("=  1000 #");
+            let repaired = std::fs::read_to_string(&server_config).unwrap().contains("=  1000 #");
             let (status, body, done) = if request.starts_with("GET /api/v1/health ") {
                 (if repaired { 200 } else { 503 }, "{}", false)
-            } else if request.starts_with("GET /api/v1/bootstrap/state ")
-                || request.starts_with("POST /api/v1/pair/request ")
-            {
+            } else if request.starts_with("GET /api/v1/bootstrap/state ") || request.starts_with("POST /api/v1/pair/request ") {
                 (404, "{}", false)
             } else if request.starts_with("POST /api/v1/auth/local ") {
                 assert!(repaired, "must not authenticate before price consent");
@@ -585,93 +516,41 @@ exec sleep 30
                 (200, r#"{"node_id":"existing"}"#, true)
             };
             write!(reader.get_mut(), "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
-            if done {
-                break;
-            }
+            if done { break; }
         }
     });
-    state.owner.active.store(
-        local_owner::launch_enabled(true, &config).unwrap(),
-        Ordering::SeqCst,
-    );
-    assert!(
-        !state.status_snapshot().local_owner,
-        "upgrade must not request a new seed password"
-    );
+    state.owner.active.store(local_owner::launch_enabled(true, &config).unwrap(), Ordering::SeqCst);
+    assert!(!state.status_snapshot().local_owner, "upgrade must not request a new seed password");
     *state.config.lock().unwrap() = Some(config.clone());
     *state.dev_sidecar.lock().unwrap() = Some(program);
-    let app = tauri::test::mock_builder()
-        .manage(state)
-        .build(tauri::test::mock_context(tauri::test::noop_assets()))
-        .unwrap();
+    let app = tauri::test::mock_builder().manage(state)
+        .build(tauri::test::mock_context(tauri::test::noop_assets())).unwrap();
     let state = app.state::<NodeState>();
-    let window = tauri::WebviewWindowBuilder::new(&app, "main", tauri::WebviewUrl::default())
-        .build()
-        .unwrap();
+    let window = tauri::WebviewWindowBuilder::new(&app, "main", tauri::WebviewUrl::default()).build().unwrap();
     spawn_node(app.handle(), &config).unwrap();
     assert!(wait_for_health(&state).await.is_err());
-    assert_eq!(
-        state.status_snapshot().initialization_repair,
-        InitializationRepair::Required
-    );
-    assert!(
-        node_repair_price_floor(window.clone(), app.handle().clone(), app.state(), true)
-            .await
-            .is_err()
-    );
-    assert!(
-        node_repair_initialized(window.clone(), app.handle().clone(), app.state(), false)
-            .await
-            .is_err()
-    );
+    assert_eq!(state.status_snapshot().initialization_repair, InitializationRepair::Required);
+    assert!(node_repair_price_floor(window.clone(), app.handle().clone(), app.state(), true).await.is_err());
+    assert!(node_repair_initialized(window.clone(), app.handle().clone(), app.state(), false).await.is_err());
     assert!(!marker.exists(), "marker repair needs its own consent");
     assert_eq!(std::fs::read_to_string(&calls).unwrap(), "start\n");
     assert_eq!(std::fs::read_to_string(&config).unwrap(), original);
-    assert!(
-        node_repair_initialized(window.clone(), app.handle().clone(), app.state(), true)
-            .await
-            .is_err()
-    );
+    assert!(node_repair_initialized(window.clone(), app.handle().clone(), app.state(), true).await.is_err());
     assert!(marker.exists());
-    assert_eq!(
-        state.status_snapshot().initialization_repair,
-        InitializationRepair::PriceFloorRequired
-    );
+    assert_eq!(state.status_snapshot().initialization_repair, InitializationRepair::PriceFloorRequired);
     assert_eq!(std::fs::read_to_string(&config).unwrap(), original);
     assert!(!config.with_extension("toml.bak").exists());
-    assert!(
-        node_repair_initialized(window.clone(), app.handle().clone(), app.state(), true)
-            .await
-            .is_err()
-    );
-    assert!(
-        node_repair_price_floor(window.clone(), app.handle().clone(), app.state(), false)
-            .await
-            .is_err()
-    );
+    assert!(node_repair_initialized(window.clone(), app.handle().clone(), app.state(), true).await.is_err());
+    assert!(node_repair_price_floor(window.clone(), app.handle().clone(), app.state(), false).await.is_err());
     assert_eq!(std::fs::read_to_string(&config).unwrap(), original);
-    node_repair_price_floor(window, app.handle().clone(), app.state(), true)
-        .await
-        .unwrap();
-    assert_eq!(
-        std::fs::read_to_string(&calls).unwrap(),
-        "start\nrepair\nstart\nstart\n"
-    );
-    assert_eq!(
-        std::fs::read_to_string(config.with_extension("toml.bak")).unwrap(),
-        original
-    );
+    node_repair_price_floor(window, app.handle().clone(), app.state(), true).await.unwrap();
+    assert_eq!(std::fs::read_to_string(&calls).unwrap(), "start\nrepair\nstart\nstart\n");
+    assert_eq!(std::fs::read_to_string(config.with_extension("toml.bak")).unwrap(), original);
     assert!(state.status_snapshot().ready);
-    assert!(
-        !state.status_snapshot().local_owner,
-        "retained identity cannot reopen ceremony"
-    );
+    assert!(!state.status_snapshot().local_owner, "retained identity cannot reopen ceremony");
     assert_eq!(std::fs::read_to_string(seed).unwrap(), "existing-identity");
     assert_eq!(state.status_snapshot().node_id.as_deref(), Some("existing"));
-    assert_eq!(
-        state.status_snapshot().initialization_repair,
-        InitializationRepair::None
-    );
+    assert_eq!(state.status_snapshot().initialization_repair, InitializationRepair::None);
     state.stop_for_restart(Duration::from_secs(2));
     server.join().unwrap();
 }

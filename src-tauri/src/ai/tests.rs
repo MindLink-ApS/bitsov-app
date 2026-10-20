@@ -39,13 +39,7 @@ fn paired(scopes: &[&str]) -> NodeAuth {
 }
 
 fn read(server: &TestServer, topic: Topic) -> TopicRead {
-    read_topic(
-        paired(&["read", "receive"]),
-        &server.api_base(),
-        Arc::new(Quiet),
-        topic,
-        None,
-    )
+    read_topic(paired(&["read", "receive"]), &server.api_base(), Arc::new(Quiet), topic, None)
 }
 
 fn remote(endpoint: &str) -> Remote {
@@ -104,10 +98,7 @@ fn every_topic_reads_live_through_the_broker_with_freshness() {
         for line in &routes {
             assert!(line.starts_with("GET /api/v1/"), "{line}");
             // A peer id is never written into a route line.
-            assert!(
-                !line.contains(SENDER_A) && !line.contains(SENDER_B),
-                "{line}"
-            );
+            assert!(!line.contains(SENDER_A) && !line.contains(SENDER_B), "{line}");
         }
     }
     for request in server.seen() {
@@ -131,10 +122,7 @@ fn without_node_as_of_a_live_read_is_unknown_not_fresh() {
     let TopicRead::Live { freshness, .. } = read(&server, Topic::Node) else {
         panic!()
     };
-    assert_eq!(
-        freshness.state, "stale",
-        "the node's own Stale: 1 wins without an as-of"
-    );
+    assert_eq!(freshness.state, "stale", "the node's own Stale: 1 wins without an as-of");
     assert_eq!(freshness.fresh_for_ms, Some(0));
 }
 
@@ -177,18 +165,11 @@ fn node_as_of_headers_feed_freshness_and_stale_wins() {
 fn explicit_node_stale_survives_every_topic_and_disclosure_preset() {
     let server = TestServer::start(MockNode::canonical(), TOKEN);
     let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis();
+        .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
     let recent = (now - 1_000).to_string();
     let future = (now + 86_400_000).to_string();
     let shared = remote("https://a.org/v1");
-    for as_of in [
-        None,
-        Some("invalid"),
-        Some(future.as_str()),
-        Some(recent.as_str()),
-    ] {
+    for as_of in [None, Some("invalid"), Some(future.as_str()), Some(recent.as_str())] {
         let mut headers = vec![("BitSov-Data-Stale", "1")];
         if let Some(as_of) = as_of {
             headers.push(("BitSov-Data-As-Of", as_of));
@@ -202,8 +183,7 @@ fn explicit_node_stale_survives_every_topic_and_disclosure_preset() {
             for preset in [Preset::Counts, Preset::Rounded, Preset::Exact] {
                 let body = request_body(&shared, "How current is this?", &got, preset).unwrap();
                 let body: Value = serde_json::from_str(&body).unwrap();
-                let user: Value =
-                    serde_json::from_str(body["messages"][1]["content"].as_str().unwrap()).unwrap();
+                let user: Value = serde_json::from_str(body["messages"][1]["content"].as_str().unwrap()).unwrap();
                 assert_eq!(user["freshness"]["state"], "stale");
                 assert_eq!(user["freshness"]["node_stale"], true);
             }
@@ -220,53 +200,22 @@ fn mixed_route_freshness_keeps_the_earliest_actual_expiry() {
         (ReadRoute::PaymentsBalance, 70_000),
         (ReadRoute::PaymentsChannels, 70_000),
         (ReadRoute::Health, 0),
-    ]
-    .map(|(route, lag)| {
-        RouteFreshness::assess(
-            route,
-            &RawRead::new(200, b"{}".to_vec())
-                .marked(NodeMarks {
-                    as_of_ms: Some(wall - lag),
-                    stale: false,
-                })
-                .stamped(Fetched {
-                    at: now,
-                    wall_ms: Some(wall),
-                }),
-        )
-    });
-    for (elapsed, state, remaining) in [
-        (0, "fresh", 60_000),
-        (59_999, "fresh", 1),
-        (60_000, "stale", 0),
-    ] {
+    ].map(|(route, lag)| RouteFreshness::assess(route, &RawRead::new(200, b"{}".to_vec())
+        .marked(NodeMarks { as_of_ms: Some(wall - lag), stale: false })
+        .stamped(Fetched { at: now, wall_ms: Some(wall) })));
+    for (elapsed, state, remaining) in [(0, "fresh", 60_000), (59_999, "fresh", 1), (60_000, "stale", 0)] {
         let summary = summarize(&routes, now + Duration::from_millis(elapsed));
         assert_eq!(summary.state, state);
         assert_eq!(summary.age_ms, Some(70_000 + elapsed));
-        assert_eq!(
-            serde_json::to_value(summary).unwrap()["fresh_for_ms"],
-            remaining
-        );
+        assert_eq!(serde_json::to_value(summary).unwrap()["fresh_for_ms"], remaining);
     }
     // The wallet can expire first too; neither a hardcoded health bound nor
     // oldest-age/minimum-bound pairing gives the correct remaining lifetime.
-    let old_wallet = RouteFreshness::assess(
-        ReadRoute::PaymentsBalance,
-        &RawRead::new(200, b"{}".to_vec())
-            .marked(NodeMarks {
-                as_of_ms: Some(wall - 170_000),
-                stale: false,
-            })
-            .stamped(Fetched {
-                at: now,
-                wall_ms: Some(wall),
-            }),
-    );
+    let old_wallet = RouteFreshness::assess(ReadRoute::PaymentsBalance, &RawRead::new(200, b"{}".to_vec())
+        .marked(NodeMarks { as_of_ms: Some(wall - 170_000), stale: false })
+        .stamped(Fetched { at: now, wall_ms: Some(wall) }));
     let summary = summarize(&[old_wallet, routes[2]], now);
-    assert_eq!(
-        serde_json::to_value(summary).unwrap()["fresh_for_ms"],
-        10_000
-    );
+    assert_eq!(serde_json::to_value(summary).unwrap()["fresh_for_ms"], 10_000);
 }
 
 #[test]
@@ -288,26 +237,14 @@ fn without_a_paired_read_token_nothing_is_read() {
             }
         );
     }
-    assert!(
-        server.seen().is_empty(),
-        "a read happened without a paired read token"
-    );
+    assert!(server.seen().is_empty(), "a read happened without a paired read token");
 }
 
 #[test]
 fn a_refused_token_or_a_dead_node_is_unavailable() {
     let server = TestServer::start(MockNode::canonical(), "some-other-token");
     let got = read(&server, Topic::Balance);
-    assert!(
-        matches!(
-            got,
-            TopicRead::Unavailable {
-                reason: NoRead::NotPaired,
-                ..
-            }
-        ),
-        "{got:?}"
-    );
+    assert!(matches!(got, TopicRead::Unavailable { reason: NoRead::NotPaired, .. }), "{got:?}");
 
     let port = crate::jarvis::broker::test_server::closed_loopback_port();
     let got = read_topic(
@@ -317,32 +254,11 @@ fn a_refused_token_or_a_dead_node_is_unavailable() {
         Topic::Node,
         None,
     );
-    assert!(
-        matches!(
-            got,
-            TopicRead::Unavailable {
-                reason: NoRead::NodeUnreachable,
-                ..
-            }
-        ),
-        "{got:?}"
-    );
+    assert!(matches!(got, TopicRead::Unavailable { reason: NoRead::NodeUnreachable, .. }), "{got:?}");
 
     // A non-loopback base is refused before any socket opens.
-    let got = read_topic(
-        paired(&["read"]),
-        &format!("{}://10.0.0.1:3141/api/v1", "http"),
-        Arc::new(Quiet),
-        Topic::Node,
-        None,
-    );
-    assert!(matches!(
-        got,
-        TopicRead::Unavailable {
-            reason: NoRead::NodeUnreachable,
-            ..
-        }
-    ));
+    let got = read_topic(paired(&["read"]), &format!("{}://10.0.0.1:3141/api/v1", "http"), Arc::new(Quiet), Topic::Node, None);
+    assert!(matches!(got, TopicRead::Unavailable { reason: NoRead::NodeUnreachable, .. }));
 }
 
 #[test]
@@ -404,11 +320,7 @@ fn rounded_and_counts_withhold_every_id_and_counts_every_amount() {
     for output in sample_outputs() {
         let mut exact = Vec::new();
         leaves(&output, &mut exact);
-        let exact_numbers: Vec<u64> = exact
-            .iter()
-            .filter_map(Value::as_u64)
-            .filter(|n| *n > 999)
-            .collect();
+        let exact_numbers: Vec<u64> = exact.iter().filter_map(Value::as_u64).filter(|n| *n > 999).collect();
 
         for preset in [Preset::Rounded, Preset::Counts] {
             let narrowed = narrow(&output, preset);
@@ -431,10 +343,7 @@ fn rounded_and_counts_withhold_every_id_and_counts_every_amount() {
         let rounded = narrow(&output, Preset::Rounded).to_string();
         for msat in exact_numbers.iter().filter(|n| **n >= 100_000) {
             let needle = format!("\"value\":{msat}");
-            if output
-                .to_string()
-                .contains(&format!("\"value\":{msat},\"unit\":\"msat\""))
-            {
+            if output.to_string().contains(&format!("\"value\":{msat},\"unit\":\"msat\"")) {
                 assert!(!rounded.contains(&needle), "rounded kept {msat} msat");
             }
         }
@@ -462,17 +371,11 @@ fn round_sats_keeps_two_significant_figures() {
 fn payments_counts_keeps_the_count_of_entries_only() {
     let server = TestServer::start(MockNode::canonical(), TOKEN);
     let value = serde_json::to_value(outputs(&read(&server, Topic::Payments))).unwrap();
-    let entries = value[0]["report"]["value"]["entries"]
-        .as_array()
-        .unwrap()
-        .len();
+    let entries = value[0]["report"]["value"]["entries"].as_array().unwrap().len();
     assert!(entries > 0);
     // Each output is narrowed on its own, as `request_body` does.
     let counts = narrow(&value[0], Preset::Counts);
-    assert_eq!(
-        counts["report"]["value"]["entries"],
-        json!({ "withheld_items": entries })
-    );
+    assert_eq!(counts["report"]["value"]["entries"], json!({ "withheld_items": entries }));
     assert_eq!(counts["report"]["value"]["sent_total"]["state"], "withheld");
     let rounded = narrow(&value[0], Preset::Rounded);
     let first = &rounded["report"]["value"]["entries"][0];
@@ -501,9 +404,7 @@ fn only_local_is_on_without_a_settings_file() {
     assert_eq!(views.len(), 3);
     assert_eq!(views[0].kind, ProviderKind::Local);
     assert!(views[0].enabled);
-    assert!(views[1..]
-        .iter()
-        .all(|view| !view.enabled && view.host.is_none()));
+    assert!(views[1..].iter().all(|view| !view.enabled && view.host.is_none()));
 }
 
 #[test]
@@ -516,17 +417,10 @@ fn a_remote_turns_on_only_when_enabled_with_https_and_a_variable_name() {
         enabled,
     };
     let on = |shared: RemoteConfig| {
-        let file = ProvidersFile {
-            shared: Some(shared),
-            frontier: None,
-        };
+        let file = ProvidersFile { shared: Some(shared), frontier: None };
         providers(Some(&file), None)
     };
-    let (views, remotes) = on(entry(
-        "https://ai.example.org/v1/chat/completions",
-        true,
-        Some("BITSOV_SHARED_KEY"),
-    ));
+    let (views, remotes) = on(entry("https://ai.example.org/v1/chat/completions", true, Some("BITSOV_SHARED_KEY")));
     assert!(views[1].enabled);
     assert_eq!(views[1].host.as_deref(), Some("ai.example.org"));
     assert_eq!(remotes.len(), 1);
@@ -545,11 +439,7 @@ fn a_remote_turns_on_only_when_enabled_with_https_and_a_variable_name() {
         assert!(remotes.is_empty());
     }
     // A model server on this machine may be plain http.
-    let (_, remotes) = on(entry(
-        "http://127.0.0.1:11434/v1/chat/completions",
-        true,
-        None,
-    ));
+    let (_, remotes) = on(entry("http://127.0.0.1:11434/v1/chat/completions", true, None));
     assert_eq!(remotes[0].host, "127.0.0.1");
 }
 
@@ -565,56 +455,27 @@ fn the_badge_says_who_is_paid_and_what_leaves() {
     // Local, and remotes that are not set up: nobody is paid, nothing leaves.
     let (views, _) = providers(None, None);
     for view in &views {
-        assert_eq!(
-            view.pays,
-            Pays {
-                to: None,
-                rail: PayRail::None
-            },
-            "{:?}",
-            view.kind
-        );
+        assert_eq!(view.pays, Pays { to: None, rail: PayRail::None }, "{:?}", view.kind);
         assert_eq!(view.data_leaves, None, "{:?}", view.kind);
     }
 
     let file = ProvidersFile {
-        shared: Some(entry(
-            "http://127.0.0.1:11434/v1/chat/completions",
-            true,
-            None,
-        )),
-        frontier: Some(entry(
-            "https://api.vendor.example/v1/chat/completions",
-            true,
-            Some("BITSOV_FRONTIER_KEY"),
-        )),
+        shared: Some(entry("http://127.0.0.1:11434/v1/chat/completions", true, None)),
+        frontier: Some(entry("https://api.vendor.example/v1/chat/completions", true, Some("BITSOV_FRONTIER_KEY"))),
     };
     let (views, _) = providers(Some(&file), None);
     // A keyless model server: nobody is billed, but the preview still leaves the app.
     assert_eq!(views[1].kind, ProviderKind::Shared);
-    assert_eq!(
-        views[1].pays,
-        Pays {
-            to: None,
-            rail: PayRail::None
-        }
-    );
+    assert_eq!(views[1].pays, Pays { to: None, rail: PayRail::None });
     assert_eq!(views[1].data_leaves, Some(Preset::Counts));
     // A keyed vendor: its host's operator bills the owner's own account.
     assert_eq!(views[2].kind, ProviderKind::Frontier);
     assert_eq!(
         views[2].pays,
-        Pays {
-            to: Some("api.vendor.example".into()),
-            rail: PayRail::Fiat
-        }
+        Pays { to: Some("api.vendor.example".into()), rail: PayRail::Fiat }
     );
     assert_eq!(views[2].data_leaves, Some(DEFAULT_PRESET));
-    assert_eq!(
-        DEFAULT_PRESET,
-        Preset::Counts,
-        "a preview starts at the narrowest preset"
-    );
+    assert_eq!(DEFAULT_PRESET, Preset::Counts, "a preview starts at the narrowest preset");
 
     // Off in the file, or an address that is not allowed: nothing leaves, nobody paid.
     for (endpoint, enabled) in [
@@ -627,14 +488,7 @@ fn the_badge_says_who_is_paid_and_what_leaves() {
         };
         let (views, _) = providers(Some(&file), None);
         assert!(!views[2].enabled);
-        assert_eq!(
-            views[2].pays,
-            Pays {
-                to: None,
-                rail: PayRail::None
-            },
-            "{endpoint}"
-        );
+        assert_eq!(views[2].pays, Pays { to: None, rail: PayRail::None }, "{endpoint}");
         assert_eq!(views[2].data_leaves, None, "{endpoint}");
     }
 }
@@ -656,31 +510,14 @@ fn the_provider_view_carries_no_endpoint_path_key_or_spend() {
     let text = value.to_string();
     assert!(!text.contains("secret/path"), "{text}");
     assert!(!text.contains("BITSOV_SHARED_KEY"), "{text}");
-    let keys: Vec<&str> = value[1]
-        .as_object()
-        .unwrap()
-        .keys()
-        .map(String::as_str)
-        .collect();
+    let keys: Vec<&str> = value[1].as_object().unwrap().keys().map(String::as_str).collect();
     let mut keys = keys;
     keys.sort_unstable();
     assert_eq!(
         keys,
-        [
-            "data_leaves",
-            "enabled",
-            "host",
-            "kind",
-            "label",
-            "model",
-            "note",
-            "pays"
-        ]
+        ["data_leaves", "enabled", "host", "kind", "label", "model", "note", "pays"]
     );
-    assert_eq!(
-        value[1]["pays"],
-        json!({"to": "open.example.org", "rail": "fiat"})
-    );
+    assert_eq!(value[1]["pays"], json!({"to": "open.example.org", "rail": "fiat"}));
     assert_eq!(value[1]["data_leaves"], json!("counts"));
     assert_eq!(value[0]["pays"], json!({"to": null, "rail": "none"}));
     assert_eq!(value[0]["data_leaves"], Value::Null);
@@ -713,20 +550,9 @@ fn endpoint_hosts_are_parsed_strictly() {
 fn the_settings_file_rejects_unknown_fields() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ai-providers.json");
-    std::fs::write(
-        &path,
-        r#"{"shared":{"label":"x","endpoint":"https://a.org","model":"m","api_key":"sk-..."}}"#,
-    )
-    .unwrap();
-    assert!(
-        load_providers_file(&path).is_none(),
-        "a key inline in the file is refused"
-    );
-    std::fs::write(
-        &path,
-        r#"{"shared":{"label":"x","endpoint":"https://a.org","model":"m","enabled":true}}"#,
-    )
-    .unwrap();
+    std::fs::write(&path, r#"{"shared":{"label":"x","endpoint":"https://a.org","model":"m","api_key":"sk-..."}}"#).unwrap();
+    assert!(load_providers_file(&path).is_none(), "a key inline in the file is refused");
+    std::fs::write(&path, r#"{"shared":{"label":"x","endpoint":"https://a.org","model":"m","enabled":true}}"#).unwrap();
     assert!(load_providers_file(&path).unwrap().shared.unwrap().enabled);
     assert!(load_providers_file(&dir.path().join("missing.json")).is_none());
 }
@@ -748,30 +574,21 @@ fn the_body_carries_the_question_the_preset_and_the_fixed_instructions() {
     let server = TestServer::start(MockNode::canonical(), TOKEN);
     let got = read(&server, Topic::Balance);
     let shared = remote("https://a.org/v1");
-    let body: Value =
-        serde_json::from_str(&request_body(&shared, "How much?", &got, Preset::Rounded).unwrap())
-            .unwrap();
+    let body: Value = serde_json::from_str(&request_body(&shared, "How much?", &got, Preset::Rounded).unwrap()).unwrap();
     assert_eq!(body["model"], "open-model-8b");
     assert_eq!(body["messages"][0]["content"], SYSTEM_PROMPT);
-    let user: Value =
-        serde_json::from_str(body["messages"][1]["content"].as_str().unwrap()).unwrap();
+    let user: Value = serde_json::from_str(body["messages"][1]["content"].as_str().unwrap()).unwrap();
     assert_eq!(user["question"], "How much?");
     assert_eq!(user["shared"], "rounded");
     assert_eq!(user["topic"], "balance");
-    assert_eq!(
-        user["data"][0]["report"]["value"]["wallet_balance"]["state"],
-        "rounded"
-    );
+    assert_eq!(user["data"][0]["report"]["value"]["wallet_balance"]["state"], "rounded");
 }
 
 #[test]
 fn questions_are_cleaned_and_capped() {
     assert_eq!(clean_question("  hi\u{0}there\n "), Some("hi there".into()));
     assert_eq!(clean_question(" \n\t "), None);
-    assert_eq!(
-        clean_question(&"x".repeat(900)).unwrap().chars().count(),
-        MAX_QUESTION_CHARS
-    );
+    assert_eq!(clean_question(&"x".repeat(900)).unwrap().chars().count(), MAX_QUESTION_CHARS);
 }
 
 #[test]
@@ -779,9 +596,7 @@ fn a_disclosure_is_single_use_and_expires() {
     let store = Disclosures::default();
     let shared = remote("https://a.org/v1");
     let now = Instant::now();
-    let shown = store
-        .hold(&shared, Preset::Counts, "BODY".into(), now)
-        .unwrap();
+    let shown = store.hold(&shared, Preset::Counts, "BODY".into(), now).unwrap();
     assert_eq!(shown.body, "BODY");
     assert_eq!(shown.bytes, 4);
     assert_eq!(shown.id.len(), 32);
@@ -789,17 +604,10 @@ fn a_disclosure_is_single_use_and_expires() {
     assert_eq!((to.host.as_str(), body.as_str()), ("a.org", "BODY"));
     assert!(store.take(&shown.id, now).is_none(), "sent twice");
 
-    let late = store
-        .hold(&shared, Preset::Counts, "B".into(), now)
-        .unwrap();
-    assert!(
-        store.take(&late.id, now + DISCLOSURE_TTL).is_none(),
-        "expired disclosure sent"
-    );
+    let late = store.hold(&shared, Preset::Counts, "B".into(), now).unwrap();
+    assert!(store.take(&late.id, now + DISCLOSURE_TTL).is_none(), "expired disclosure sent");
 
-    let dropped = store
-        .hold(&shared, Preset::Counts, "B".into(), now)
-        .unwrap();
+    let dropped = store.hold(&shared, Preset::Counts, "B".into(), now).unwrap();
     assert!(store.cancel(&dropped.id));
     assert!(store.take(&dropped.id, now).is_none());
     assert!(store.take("not-an-id", now).is_none());
@@ -811,17 +619,7 @@ fn pending_disclosures_are_capped_oldest_first() {
     let shared = remote("https://a.org/v1");
     let start = Instant::now();
     let ids: Vec<String> = (0..10)
-        .map(|n| {
-            store
-                .hold(
-                    &shared,
-                    Preset::Counts,
-                    n.to_string(),
-                    start + Duration::from_millis(n),
-                )
-                .unwrap()
-                .id
-        })
+        .map(|n| store.hold(&shared, Preset::Counts, n.to_string(), start + Duration::from_millis(n)).unwrap().id)
         .collect();
     let later = start + Duration::from_millis(20);
     assert!(store.take(&ids[0], later).is_none());
@@ -848,11 +646,7 @@ fn one_shot(status: &str, reply: &str) -> (String, mpsc::Receiver<(String, Vec<u
                 let head = String::from_utf8_lossy(&buf[..split]).to_string();
                 let length: usize = head
                     .lines()
-                    .find_map(|line| {
-                        line.to_ascii_lowercase()
-                            .strip_prefix("content-length:")
-                            .map(|v| v.trim().parse().unwrap())
-                    })
+                    .find_map(|line| line.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse().unwrap()))
                     .unwrap_or(0);
                 while buf.len() < split + 4 + length {
                     let n = stream.read(&mut chunk).unwrap();
@@ -872,51 +666,32 @@ fn one_shot(status: &str, reply: &str) -> (String, mpsc::Receiver<(String, Vec<u
 }
 
 fn block_on<F: std::future::Future>(future: F) -> F::Output {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-        .block_on(future)
+    tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(future)
 }
 
 #[test]
 fn the_send_carries_exactly_the_disclosed_bytes_and_the_key() {
-    let reply =
-        json!({"choices": [{"message": {"content": "You spent 3 sats.\u{7}\nThat is all."}}]})
-            .to_string();
+    let reply = json!({"choices": [{"message": {"content": "You spent 3 sats.\u{7}\nThat is all."}}]}).to_string();
     let (endpoint, seen) = one_shot("200 OK", &reply);
     let shared = remote(&endpoint);
     let store = Disclosures::default();
     let body = "{\"exact\": \"bytes\", \"ü\": 1}".to_string();
-    let shown = store
-        .hold(&shared, Preset::Counts, body.clone(), Instant::now())
-        .unwrap();
+    let shown = store.hold(&shared, Preset::Counts, body.clone(), Instant::now()).unwrap();
     let (to, stored) = store.take(&shown.id, Instant::now()).unwrap();
     let answer = block_on(send(&to, stored, Some("sk-test".into()))).unwrap();
     assert_eq!(answer.text, "You spent 3 sats.\nThat is all.");
     assert_eq!(answer.sent_bytes, shown.bytes);
     let (head, got) = seen.recv_timeout(Duration::from_secs(5)).unwrap();
     assert_eq!(got, shown.body.as_bytes());
-    assert!(
-        head.starts_with("POST /v1/chat/completions HTTP/1.1"),
-        "{head}"
-    );
-    assert!(head
-        .to_ascii_lowercase()
-        .contains("authorization: bearer sk-test"));
+    assert!(head.starts_with("POST /v1/chat/completions HTTP/1.1"), "{head}");
+    assert!(head.to_ascii_lowercase().contains("authorization: bearer sk-test"));
 }
 
 #[test]
 fn a_refusal_or_redirect_is_an_error_that_quotes_nothing() {
-    let (endpoint, _seen) = one_shot(
-        "500 Internal Server Error",
-        "{\"error\":\"SECRET_BODY_TEXT\"}",
-    );
+    let (endpoint, _seen) = one_shot("500 Internal Server Error", "{\"error\":\"SECRET_BODY_TEXT\"}");
     let err = block_on(send(&remote(&endpoint), "{}".into(), None)).unwrap_err();
-    assert!(
-        err.contains("http 500") && !err.contains("SECRET_BODY_TEXT"),
-        "{err}"
-    );
+    assert!(err.contains("http 500") && !err.contains("SECRET_BODY_TEXT"), "{err}");
 
     let (endpoint, _seen) = one_shot("302 Found", "");
     let err = block_on(send(&remote(&endpoint), "{}".into(), None)).unwrap_err();
@@ -925,25 +700,15 @@ fn a_refusal_or_redirect_is_an_error_that_quotes_nothing() {
 
 /// Keep the response unfinished until the caller releases it. A size rejection
 /// must arrive without waiting for EOF or the provider's final chunk.
-fn unfinished_response(
-    headers: &str,
-    body: Vec<u8>,
-) -> (String, mpsc::Sender<()>, std::thread::JoinHandle<()>) {
+fn unfinished_response(headers: &str, body: Vec<u8>) -> (String, mpsc::Sender<()>, std::thread::JoinHandle<()>) {
     let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-    let endpoint = format!(
-        "http://{}/v1/chat/completions",
-        listener.local_addr().unwrap()
-    );
+    let endpoint = format!("http://{}/v1/chat/completions", listener.local_addr().unwrap());
     let headers = headers.to_string();
     let (release, wait) = mpsc::channel();
     let thread = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
-        stream
-            .set_write_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        stream.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
         let mut request = Vec::new();
         let mut chunk = [0; 4096];
         while !request.windows(4).any(|w| w == b"\r\n\r\n") {
@@ -951,9 +716,7 @@ fn unfinished_response(
             assert_ne!(n, 0);
             request.extend_from_slice(&chunk[..n]);
         }
-        stream
-            .write_all(format!("HTTP/1.1 200 OK\r\n{headers}\r\n\r\n").as_bytes())
-            .unwrap();
+        stream.write_all(format!("HTTP/1.1 200 OK\r\n{headers}\r\n\r\n").as_bytes()).unwrap();
         // An early header-based refusal is allowed to close before body writes.
         let _ = stream.write_all(&body);
         let _ = wait.recv_timeout(Duration::from_secs(5));
@@ -964,21 +727,14 @@ fn unfinished_response(
 #[test]
 fn remote_response_rejects_oversized_content_length_before_waiting_for_body() {
     let (endpoint, release, thread) = unfinished_response(
-        &format!("Content-Length: {}", MAX_REMOTE_BYTES + 1),
-        Vec::new(),
+        &format!("Content-Length: {}", MAX_REMOTE_BYTES + 1), Vec::new(),
     );
     let result = block_on(async {
-        tokio::time::timeout(
-            Duration::from_secs(3),
-            send(&remote(&endpoint), "{}".into(), None),
-        )
-        .await
+        tokio::time::timeout(Duration::from_secs(3), send(&remote(&endpoint), "{}".into(), None)).await
     });
     let _ = release.send(());
     thread.join().unwrap();
-    let error = result
-        .expect("must reject the headers without waiting for body/EOF")
-        .unwrap_err();
+    let error = result.expect("must reject the headers without waiting for body/EOF").unwrap_err();
     assert!(error.contains("answer was too large"), "{error}");
 }
 
@@ -993,25 +749,18 @@ fn remote_response_caps_chunked_bytes_before_eof_or_json_parsing() {
     }
     let (endpoint, release, thread) = unfinished_response("Transfer-Encoding: chunked", body);
     let result = block_on(async {
-        tokio::time::timeout(
-            Duration::from_secs(3),
-            send(&remote(&endpoint), "{}".into(), None),
-        )
-        .await
+        tokio::time::timeout(Duration::from_secs(3), send(&remote(&endpoint), "{}".into(), None)).await
     });
     let _ = release.send(());
     thread.join().unwrap();
-    let error = result
-        .expect("must reject while the response is still unfinished")
-        .unwrap_err();
+    let error = result.expect("must reject while the response is still unfinished").unwrap_err();
     assert!(error.contains("answer was too large"), "{error}");
 }
 
 #[test]
 fn remote_response_accepts_valid_json_up_to_the_byte_limit() {
     for size in [MAX_REMOTE_BYTES - 1, MAX_REMOTE_BYTES] {
-        let mut body =
-            json!({"choices": [{"message": {"content": "Within the limit."}}]}).to_string();
+        let mut body = json!({"choices": [{"message": {"content": "Within the limit."}}]}).to_string();
         body.extend(std::iter::repeat_n(' ', size - body.len()));
         let (endpoint, _seen) = one_shot("200 OK", &body);
         let answer = block_on(send(&remote(&endpoint), "{}".into(), None)).unwrap();
@@ -1022,18 +771,9 @@ fn remote_response_accepts_valid_json_up_to_the_byte_limit() {
 #[test]
 fn answer_text_takes_the_first_choice_and_caps_it() {
     let long = "a".repeat(MAX_ANSWER_CHARS + 50);
-    let body =
-        json!({"choices": [{"message": {"content": long}}, {"message": {"content": "second"}}]});
-    assert_eq!(
-        answer_text(body.to_string().as_bytes()).unwrap().len(),
-        MAX_ANSWER_CHARS
-    );
+    let body = json!({"choices": [{"message": {"content": long}}, {"message": {"content": "second"}}]});
+    assert_eq!(answer_text(body.to_string().as_bytes()).unwrap().len(), MAX_ANSWER_CHARS);
     assert!(answer_text(b"{\"choices\":[]}").is_none());
     assert!(answer_text(b"not json").is_none());
-    assert!(answer_text(
-        json!({"choices": [{"message": {"content": "  "}}]})
-            .to_string()
-            .as_bytes()
-    )
-    .is_none());
+    assert!(answer_text(json!({"choices": [{"message": {"content": "  "}}]}).to_string().as_bytes()).is_none());
 }

@@ -84,10 +84,7 @@ pub struct NodeGrant {
 /// reply without the `grant` key is unreadable, not "no grant".
 pub fn parse(body: &str) -> Result<Option<NodeGrant>, ActionError> {
     let v: serde_json::Value = serde_json::from_str(body).map_err(|_| unreadable())?;
-    let grant = v
-        .as_object()
-        .and_then(|o| o.get("grant"))
-        .ok_or_else(unreadable)?;
+    let grant = v.as_object().and_then(|o| o.get("grant")).ok_or_else(unreadable)?;
     serde_json::from_value(grant.clone()).map_err(|_| unreadable())
 }
 
@@ -117,12 +114,7 @@ impl NodeGrant {
     /// Refuse before any request what the node would refuse. `recipient` is the
     /// node id of a single-peer message or file; rooms and payments pass None
     /// (the node checks each member or payee itself).
-    pub fn check(
-        &self,
-        max_msat: u64,
-        recipient: Option<&str>,
-        now_ms: u64,
-    ) -> Result<(), ActionError> {
+    pub fn check(&self, max_msat: u64, recipient: Option<&str>, now_ms: u64) -> Result<(), ActionError> {
         if !self.live(now_ms) {
             return Err(ended());
         }
@@ -143,11 +135,7 @@ impl NodeGrant {
                     return Err(no_envelope());
                 }
                 // As the node: an envelope without a per-act maximum pays nothing.
-                let per_act = self
-                    .per_act_max_by_recipient
-                    .get(&r.to_ascii_lowercase())
-                    .copied()
-                    .unwrap_or(0);
+                let per_act = self.per_act_max_by_recipient.get(&r.to_ascii_lowercase()).copied().unwrap_or(0);
                 if max_msat > per_act {
                     return Err(per_call(per_act));
                 }
@@ -190,13 +178,8 @@ impl From<&NodeGrant> for GrantSummary {
         Self {
             breakers: g.breakers.clone(),
             envelope_id_by_recipient: g.envelope_id_by_recipient.clone(),
-            recipient_left_msat_by_recipient: g
-                .per_recipient_msat
-                .keys()
-                .filter_map(|peer| {
-                    g.recipient_left(peer)
-                        .map(|left| (peer.to_ascii_lowercase(), left))
-                })
+            recipient_left_msat_by_recipient: g.per_recipient_msat.keys()
+                .filter_map(|peer| g.recipient_left(peer).map(|left| (peer.to_ascii_lowercase(), left)))
                 .collect(),
             expires_at_ms: g.expires_at_ms(),
             budget_msat: g.budget_msat,
@@ -214,11 +197,7 @@ impl From<&NodeGrant> for GrantSummary {
 
 /// The `budget` proposal on `POST /pair/elevation-request`. Only a suggestion:
 /// the owner's flags at `konsensus grant` override it field by field.
-pub fn proposal(
-    budget_msat: u64,
-    ttl_secs: u64,
-    per_recipient: &BTreeMap<String, u64>,
-) -> serde_json::Value {
+pub fn proposal(budget_msat: u64, ttl_secs: u64, per_recipient: &BTreeMap<String, u64>) -> serde_json::Value {
     let ttl = ttl_secs.clamp(MIN_TTL_SECS, MAX_TTL_SECS);
     let mut out = serde_json::json!({ "budget_msat": budget_msat, "ttl_secs": ttl });
     // A proposal the node cannot enforce is a 400 and nothing is left pending,
@@ -229,9 +208,9 @@ pub fn proposal(
         .collect();
     let well_formed = !recipients.is_empty()
         && recipients.len() <= MAX_RECIPIENT_BUDGETS
-        && recipients.iter().all(|(k, v)| {
-            *v > 0 && matches!(k.len(), 64 | 66) && k.bytes().all(|c| c.is_ascii_hexdigit())
-        });
+        && recipients
+            .iter()
+            .all(|(k, v)| *v > 0 && matches!(k.len(), 64 | 66) && k.bytes().all(|c| c.is_ascii_hexdigit()));
     if well_formed {
         out["per_recipient_msat"] = serde_json::json!(recipients);
     }
@@ -257,12 +236,7 @@ pub fn refusal(status: u16, body: &str) -> Option<Refusal> {
         return None;
     }
     Some(Refusal {
-        reason: v["reason"]
-            .as_str()
-            .unwrap_or_default()
-            .chars()
-            .take(32)
-            .collect(),
+        reason: v["reason"].as_str().unwrap_or_default().chars().take(32).collect(),
         remaining_msat: v["remaining_msat"].as_u64(),
     })
 }
@@ -337,10 +311,7 @@ pub fn ended() -> ActionError {
 fn per_call(max_msat: u64) -> ActionError {
     ActionError::new(
         "grant_per_call",
-        format!(
-            "This is more than the {} per payment your node allows. Nothing was sent.",
-            amount(max_msat)
-        ),
+        format!("This is more than the {} per payment your node allows. Nothing was sent.", amount(max_msat)),
     )
 }
 
@@ -383,14 +354,9 @@ mod tests {
     fn summary_recipient_left_matches_grant_with_and_without_usage() {
         for (used, expected) in [(Some(4_000), 1_000), (None, 5_000)] {
             let mut g = grant(2_000_000_000);
-            g.used_by_recipient = used
-                .map(|v| BTreeMap::from([(A.into(), v)]))
-                .unwrap_or_default();
+            g.used_by_recipient = used.map(|v| BTreeMap::from([(A.into(), v)])).unwrap_or_default();
             let wire = serde_json::to_value(GrantSummary::from(&g)).unwrap();
-            assert_eq!(
-                wire["recipient_left_msat_by_recipient"],
-                serde_json::json!({A: expected})
-            );
+            assert_eq!(wire["recipient_left_msat_by_recipient"], serde_json::json!({A: expected}));
             assert_eq!(g.recipient_left(&A.to_ascii_uppercase()), Some(expected));
         }
     }
@@ -400,10 +366,7 @@ mod tests {
         let mut g = grant(2_000_000_000);
         g.used_by_recipient.insert(A.into(), 5_001);
         let wire = serde_json::to_value(GrantSummary::from(&g)).unwrap();
-        assert_eq!(
-            wire["recipient_left_msat_by_recipient"],
-            serde_json::json!({A: 0})
-        );
+        assert_eq!(wire["recipient_left_msat_by_recipient"], serde_json::json!({A: 0}));
         assert_eq!(g.recipient_left(A), Some(0));
     }
 
@@ -415,19 +378,13 @@ mod tests {
         g.recipient_expires_at.insert(B.into(), 2_000_000_000);
         g.recipients_only = true;
         let wire = serde_json::to_value(GrantSummary::from(&g)).unwrap();
-        assert_eq!(
-            wire["recipient_left_msat_by_recipient"],
-            serde_json::json!({A: 1_000})
-        );
+        assert_eq!(wire["recipient_left_msat_by_recipient"], serde_json::json!({A: 1_000}));
         assert!(wire["recipient_left_msat_by_recipient"].get(B).is_none());
         assert_eq!(g.recipient_left(B), None);
 
         g.per_recipient_msat.clear();
         let wire = serde_json::to_value(GrantSummary::from(&g)).unwrap();
-        assert_eq!(
-            wire["recipient_left_msat_by_recipient"],
-            serde_json::json!({})
-        );
+        assert_eq!(wire["recipient_left_msat_by_recipient"], serde_json::json!({}));
     }
 
     #[test]
@@ -441,26 +398,14 @@ mod tests {
         g.used_by_recipient = BTreeMap::new();
         assert!(g.has_envelope(A, 999_000) && !g.has_envelope(B, 0));
         g.check(500, Some(A), 999_000).unwrap();
-        assert_eq!(
-            g.check(501, Some(A), 999_000).unwrap_err().code,
-            "grant_per_call"
-        );
-        assert_eq!(
-            g.check(1, Some(B), 0).unwrap_err().code,
-            "grant_no_envelope"
-        );
+        assert_eq!(g.check(501, Some(A), 999_000).unwrap_err().code, "grant_per_call");
+        assert_eq!(g.check(1, Some(B), 0).unwrap_err().code, "grant_no_envelope");
         // No per-act maximum on record: nothing may be paid, as on the node.
         g.per_act_max_by_recipient.clear();
-        assert_eq!(
-            g.check(1, Some(A), 999_000).unwrap_err().code,
-            "grant_per_call"
-        );
+        assert_eq!(g.check(1, Some(A), 999_000).unwrap_err().code, "grant_per_call");
         g.per_act_max_by_recipient = BTreeMap::from([(A.into(), 500)]);
         // The envelope's own end, before the grant's.
-        assert_eq!(
-            g.check(1, Some(A), 1_000_000).unwrap_err().code,
-            "grant_no_envelope"
-        );
+        assert_eq!(g.check(1, Some(A), 1_000_000).unwrap_err().code, "grant_no_envelope");
     }
 
     #[test]
@@ -470,10 +415,7 @@ mod tests {
             "budget_msat": 10, "used_msat": 0, "remaining_msat": 10, "per_call_max_msat": 10,
             "per_recipient_msat": {}, "used_by_recipient": {}}});
         let g = parse(&body.to_string()).unwrap().unwrap();
-        assert_eq!(
-            (g.expires_at_ms(), g.remaining_msat),
-            (2_000_000_000_000, 10)
-        );
+        assert_eq!((g.expires_at_ms(), g.remaining_msat), (2_000_000_000_000, 10));
         for bad in ["", "{}", r#"{"grant":{"expires_at":"soon"}}"#, "[]"] {
             assert_eq!(parse(bad).unwrap_err().code, "grant_unknown", "{bad}");
         }
@@ -495,11 +437,8 @@ mod tests {
         let wire = serde_json::to_value(GrantSummary::from(&g)).unwrap();
         assert_eq!(wire["breakers"], breakers);
         for absent in [false, true] {
-            if absent {
-                body["grant"].as_object_mut().unwrap().remove("breakers");
-            } else {
-                body["grant"]["breakers"] = serde_json::Value::Null;
-            }
+            if absent { body["grant"].as_object_mut().unwrap().remove("breakers"); }
+            else { body["grant"]["breakers"] = serde_json::Value::Null; }
             let g = parse(&body.to_string()).unwrap().unwrap();
             let wire = serde_json::to_value(GrantSummary::from(&g)).unwrap();
             assert!(wire.get("breakers").is_none());
@@ -533,42 +472,19 @@ mod tests {
         let now = 1_000_000;
         let g = grant(2_000);
         g.check(1_000, Some(A), now).unwrap();
-        assert_eq!(
-            g.check(3_001, None, now).unwrap_err().code,
-            "grant_per_call"
-        );
-        assert_eq!(
-            g.check(1_001, Some(A), now).unwrap_err().code,
-            "grant_recipient"
-        );
-        assert_eq!(
-            g.check(1_001, Some(&A.to_ascii_uppercase()), now)
-                .unwrap_err()
-                .code,
-            "grant_recipient"
-        );
-        assert!(
-            g.check(3_000, None, now).is_ok(),
-            "an unbudgeted recipient is bounded by the total only"
-        );
+        assert_eq!(g.check(3_001, None, now).unwrap_err().code, "grant_per_call");
+        assert_eq!(g.check(1_001, Some(A), now).unwrap_err().code, "grant_recipient");
+        assert_eq!(g.check(1_001, Some(&A.to_ascii_uppercase()), now).unwrap_err().code, "grant_recipient");
+        assert!(g.check(3_000, None, now).is_ok(), "an unbudgeted recipient is bounded by the total only");
         let mut low = grant(2_000);
         low.remaining_msat = 500;
-        assert_eq!(
-            low.check(1_000, None, now).unwrap_err().code,
-            "grant_exhausted"
-        );
-        assert_eq!(
-            g.check(1, None, 2_000_000).unwrap_err().code,
-            "grant_ended",
-            "expiry is absolute"
-        );
+        assert_eq!(low.check(1_000, None, now).unwrap_err().code, "grant_exhausted");
+        assert_eq!(g.check(1, None, 2_000_000).unwrap_err().code, "grant_ended", "expiry is absolute");
     }
 
     #[test]
     fn refusals_map_per_reason_and_only_for_budget_exceeded() {
-        let r = |reason: &str| {
-            refusal(409, &serde_json::json!({"code": "budget_exceeded", "reason": reason, "remaining_msat": 500}).to_string()).unwrap()
-        };
+        let r = |reason: &str| refusal(409, &serde_json::json!({"code": "budget_exceeded", "reason": reason, "remaining_msat": 500}).to_string()).unwrap();
         let g = grant(2_000);
         assert_eq!(r("no_grant").error(None).code, "grant_ended");
         assert!(r("no_grant").ends_grant() && !r("total").ends_grant());
@@ -586,28 +502,14 @@ mod tests {
     #[test]
     fn a_proposal_is_bounded_and_drops_recipients_it_cannot_state() {
         let p = proposal(2_000, 999_999, &BTreeMap::new());
-        assert_eq!(
-            p,
-            serde_json::json!({"budget_msat": 2_000, "ttl_secs": MAX_TTL_SECS})
-        );
-        assert_eq!(
-            proposal(2_000, 1, &BTreeMap::new())["ttl_secs"],
-            MIN_TTL_SECS
-        );
+        assert_eq!(p, serde_json::json!({"budget_msat": 2_000, "ttl_secs": MAX_TTL_SECS}));
+        assert_eq!(proposal(2_000, 1, &BTreeMap::new())["ttl_secs"], MIN_TTL_SECS);
         let upper = A.to_ascii_uppercase();
         let p = proposal(2_000, 600, &BTreeMap::from([(upper, 5_000)]));
-        assert_eq!(
-            p["per_recipient_msat"],
-            serde_json::json!({A: 2_000}),
-            "lowercased and never above the total"
-        );
+        assert_eq!(p["per_recipient_msat"], serde_json::json!({A: 2_000}), "lowercased and never above the total");
         let p = proposal(2_000, 600, &BTreeMap::from([("not-hex".to_string(), 5)]));
         assert!(p.get("per_recipient_msat").is_none());
-        let many: BTreeMap<String, u64> = (0..=MAX_RECIPIENT_BUDGETS)
-            .map(|i| (format!("{i:064x}"), 1))
-            .collect();
-        assert!(proposal(2_000, 600, &many)
-            .get("per_recipient_msat")
-            .is_none());
+        let many: BTreeMap<String, u64> = (0..=MAX_RECIPIENT_BUDGETS).map(|i| (format!("{i:064x}"), 1)).collect();
+        assert!(proposal(2_000, 600, &many).get("per_recipient_msat").is_none());
     }
 }
