@@ -30,10 +30,10 @@ The Rust host spawns/supervises the node binary and authenticates over `127.0.0.
 
 ## CS-1 local run
 
-The bundled node is pinned to `MindLink-ApS/BitSov-bitsov@v0.3.0-rc14`
-(`d55a88e439fd80dae89e263bef8378fd22c9a103`). The release is published and
-GPG-signed per the supplied release facts; [the upgrade note](docs/NODE_RC14_UPGRADE.md)
-records the five binary hashes, with local release verification still pending.
+The bundled node is pinned to `MindLink-ApS/BitSov-bitsov@v0.3.0-rc18`
+(`20c6449ebec9d656595390ee1f1623fb6af1411f`). The release is a published,
+GPG-signed pre-release; [the upgrade note](docs/NODE_RC18_UPGRADE.md) records the
+five binary hashes and the local signature/byte verification for this pin.
 The release-key fingerprint pin is unchanged. Remote first run is implemented on
 main (app #192 + node rc13); runtime acceptance on real hardware (Touch ID + a
 fresh Pi) is still pending.

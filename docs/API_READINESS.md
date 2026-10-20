@@ -1,37 +1,42 @@
 # API_READINESS — the node contract CS-1..CS-6 build against
 
-**Pinned protocol:** release **`v0.3.0-rc14`**, source-ref
-**`d55a88e439fd80dae89e263bef8378fd22c9a103`**, repo `MindLink-ApS/BitSov-bitsov`.
-The supplied release facts identify rc14 as published and GPG-signed. Its
-five binary hashes are recorded without network access. The local rc14 tagged
-source was inspected; release signatures and bytes were not verified here.
-Live CS-1 and other runtime/package acceptance remain CI/operator checks.
+**Pinned protocol:** release **`v0.3.0-rc18`**, source-ref
+**`20c6449ebec9d656595390ee1f1623fb6af1411f`**, repo `MindLink-ApS/BitSov-bitsov`.
+rc18 is a published, GPG-signed pre-release. Its five binary hashes are recorded;
+the signed manifest and Darwin arm64 bytes were verified locally. Every MVP path
+below appears in the rc18 tagged source (static check). Live CS-1 and other
+runtime/package acceptance remain CI/operator checks.
 
-rc14 includes pairing, scoped tokens, freshness headers and the opt-in local owner
+rc18 includes pairing, scoped tokens, freshness headers and the opt-in local owner
 ceremony. The app retains rc7 fallback and fixture coverage. The table below is
 the historical CS route inventory, with the changed auth/restore boundaries
 called out; route presence does not grant spending or live identity authority.
-See [rc14 upgrade and release checks](NODE_RC14_UPGRADE.md) for the supplied
+See [rc18 upgrade and release checks](NODE_RC18_UPGRADE.md) for the supplied
 node changes and app integration limits. The rc12 enrolment source review remains
-[historical evidence](NODE_RC12_UPGRADE.md), not an rc14 wire-contract review.
+[historical evidence](NODE_RC12_UPGRADE.md), not an rc18 wire-contract review.
 rc13 introduced claim-code / four-word SAS enrolment (`sas_version: 1`) and box approval.
 Remote first run is implemented on main (app #192 + node rc13); runtime
 acceptance on real hardware (Touch ID + a fresh Pi) is still pending. The
 existing app does not display the node's `offline_safety` diagnostics.
 
-rc14 adds forward-only pairing file v6 and durable grant breakers. Breaker reset
+rc14 added forward-only pairing file v6 and durable grant breakers. Breaker reset
 and `konsensus recover` remain owner-console-only; CLN is a receive/read preview
-with no outgoing payments. See the upgrade note before replacing legacy grants.
+with no outgoing payments. rc15–rc18 add owner-device approvals and breaker reset
+(`owner_device_approval_v1`, `owner_device_approval_breaker_reset_v1`),
+`POST /messages/operations/{id}/abandon` (`message_operation_abandon_v1`),
+per-approval envelope IDs (`relation_envelope_id_v1`, pairing v8) and a
+`network` field on the funding address that follows the configured network.
+All are feature-detected by the app; see the upgrade note for forward-only fences.
 
 Base URL: `http://127.0.0.1:$PORT/api/v1` (loopback only — Gate G2). Auth: `Authorization: Bearer <jwt>`
 on REST; `bitsov.v1` + `bitsov.jwt.<token>` subprotocols on `/ws`.
 
-## MVP contract — "fund your node and start talking" (rc14 pin; rc7 compatibility retained)
+## MVP contract — "fund your node and start talking" (rc18 pin; rc7 compatibility retained)
 | MVP step | Method | Path | Purpose | Static |
 |---|---|---|---|---|
-| Boot/auth | POST | `/pair/request`, `/pair/confirm`, `/pair/token` | app pairing; `/auth/local` is only the rc7 404 fallback (rc14 smoke may use read/receive) | ✅ |
+| Boot/auth | POST | `/pair/request`, `/pair/confirm`, `/pair/token` | app pairing; `/auth/local` is only the rc7 404 fallback (rc18 smoke may use read/receive) | ✅ |
 | Identity | GET | `/identity` | node_id + x25519/secp256k1 pubkeys | ✅ |
-| Recovery | POST | `/identity/verify-mnemonic`, `/identity/restore` | verify needs identity scope; restore exists only on bootstrap in rc14 | ✅ |
+| Recovery | POST | `/identity/verify-mnemonic`, `/identity/restore` | verify needs identity scope; restore exists only on bootstrap in rc18 | ✅ |
 | Fund | POST | `/onboarding/start` | first-run funding state machine (tier full → funding_address) | ✅ |
 | Fund | GET | `/onboarding/state` | poll until `funding-seen` | ✅ |
 | Fund | GET | `/payments/balance`, `/payments/funding-address` | balance + deposit address (QR) | ✅ |
@@ -59,7 +64,7 @@ on REST; `bitsov.v1` + `bitsov.jwt.<token>` subprotocols on `/ws`.
 ## Verification
 **Static (no running node) — re-pin check:**
 ```bash
-git -C <BitSov-bitsov checkout> checkout d55a88e439fd80dae89e263bef8378fd22c9a103
+git -C <BitSov-bitsov checkout> checkout 20c6449ebec9d656595390ee1f1623fb6af1411f
 grep -rhoE '"/api/v1/[^"]+"' crates/konsensus-api/src | tr -d '"' | sort -u
 # every path in the MVP table above must appear. String-literal grep on purpose: the
 # room-member routes are declared across lines, which a single-line `.route("…")` grep misses.

@@ -5,14 +5,14 @@ local node**, not only from the in-process mock. The host decides which, and
 the window says which it got. Stacked on F1 pairing
 (`docs/ONBOARDING_PAIRING.md`): the broker reads with F1's paired token.
 
-## Status: rc14 pin, retained rc7 fixtures
+## Status: rc18 pin, retained rc7 fixtures
 
-The app pins `v0.3.0-rc14` (`d55a88e`), which includes pairing and freshness
+The app pins `v0.3.0-rc18` (`20c6449`), which includes pairing and freshness
 headers. The broker reads only with a paired token. An older rc7 node still
 uses mock rows: its `/auth/local` token never enters the broker. Historical
 rc7 route bodies and fixtures below remain compatibility evidence, not the
 current binary pin. Release-binary runtime checks remain listed in
-[the rc14 checklist](NODE_RC14_UPGRADE.md).
+[the rc18 checklist](NODE_RC18_UPGRADE.md).
 
 ## Live vs mock
 
@@ -269,7 +269,7 @@ choose the backend or cause a read.
   with its cached figure, and `LocalNodeRead` cannot tell. The test server
   carries mock-node's stale flag as a `503` so the fixture's stale rows stay
   `Unavailable`. Genome #78's `BitSov-Data-Stale` / `-As-Of` headers are
-  read (see above) but are available on the rc14 pin.
+  read (see above) but are available on the rc18 pin.
 - **Wallet sync vs. the bound.** Balance and channels allow 180 s for the
   80 s default on-chain wallet sync. A node configured with a much slower
   sync will read *Stale* between syncs; the node's own `Stale: 1` (LDK sync
@@ -281,7 +281,7 @@ choose the backend or cause a read.
 
 ## Release acceptance still pending
 
-CI must obtain release access, then fetch and verify rc14 and its signed
+CI must obtain release access, then fetch and verify rc18 and its signed
 checksum assets. Run the paired live-reader and freshness checks
 against that binary; retained rc7 mocks alone do not establish runtime evidence.
 

@@ -5,19 +5,19 @@ discipline for this feature, taken verbatim from the genome's
 `docs/security/pairing.md` (BitSov-bitsov `56c0ee0`, PR #77). Nothing here, in
 the app copy, or in release notes may be quoted as saying more.
 
-## Status: rc14 pinned; release-binary CI pending
+## Status: rc18 pinned; release-binary CI pending
 
-The app pins `v0.3.0-rc14` (`d55a88e`), which includes pairing and local owner
+The app pins `v0.3.0-rc18` (`20c6449`), which includes pairing and local owner
 bootstrap. Mock tests cover pairing, token refresh, restore refusal, explicit
 marker repair followed by separate price consent, and owner ceremony UI.
-The old rc7 404 fallback remains tested. rc14 is published and GPG-signed per
-the supplied release facts; its checksums are recorded but release signature/bytes
-remain unverified here.
-Config drift, owner lifecycle and CS-1 remain CI checks; a signed/hardened Mac
+The old rc7 404 fallback remains tested. rc18 is a published, GPG-signed
+pre-release; its signed checksums and Darwin arm64 bytes were verified locally.
+Config drift and owner lifecycle passed locally against that binary and remain
+CI checks, as does CS-1; a signed/hardened Mac
 interactive run remains separate
 acceptance. Remote first run is implemented on main (app #192 + node rc13);
 runtime acceptance on real hardware (Touch ID + a fresh Pi) is still pending.
-See [upgrade checks](NODE_RC14_UPGRADE.md) and [local owner ceremony](LOCAL_OWNER_CEREMONY.md).
+See [upgrade checks](NODE_RC18_UPGRADE.md) and [local owner ceremony](LOCAL_OWNER_CEREMONY.md).
 
 ## Node choices
 
@@ -156,7 +156,7 @@ retry. The successful marker removes the need for the prompt on later starts.
 The screen advises keeping a backup because normal startup can apply newer
 database migrations.
 
-The rc14 pin uses the existing first-run `init` flow when owner opt-in is off.
+The rc18 pin uses the existing first-run `init` flow when owner opt-in is off.
 With opt-in enabled, fresh installs use the two-phase owner ceremony; retained
 plaintext identities use ordinary startup and never enter that ceremony.
 Restore readiness applies when the managed node is already in bootstrap mode;

@@ -1,7 +1,7 @@
 # Bundled node rc13: upgrade from rc12
 
 Historical rc13 pin (app #193). The current pin and its changes are documented
-in [NODE_RC14_UPGRADE.md](NODE_RC14_UPGRADE.md).
+in [NODE_RC18_UPGRADE.md](NODE_RC18_UPGRADE.md).
 
 The app pinned `MindLink-ApS/BitSov-bitsov@v0.3.0-rc13`, source commit
 `d625e85a04886ac81f76f77a6ae41651dbb3e157`, replacing rc12

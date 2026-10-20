@@ -12,8 +12,9 @@ use std::process::{Command, Stdio};
 //   into the app config. Older pins can omit these fields too. New fields and
 //   changed defaults must fail until deliberately reviewed here. The three
 //   known rc7/owner-node web default differences are listed separately below.
-// rc14 (d55a88e) retains these serialized full-tier LDK defaults. LAN setup
+// rc18 (20c6449) retains these serialized full-tier LDK defaults. LAN setup
 // limits are internal constants; grant breakers live in pairing records, not TOML.
+// rc18's per-provider `trust_no_reserve` is absent because `providers = []`.
 const OMITTED_DEFAULTS: &str = r#"
 disk_free_floor_bytes = 2147483648
 peers = []

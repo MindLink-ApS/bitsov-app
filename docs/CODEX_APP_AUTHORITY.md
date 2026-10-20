@@ -106,14 +106,14 @@ Must-fix before next ship: <list>
 - **NO-GO** on any A violation or an unmet gate for the thing being shipped.
 
 ## G. Executable checks (run these — don't eyeball it)
-Pinned protocol: **release `v0.3.0-rc14`, source-ref `d55a88e439fd80dae89e263bef8378fd22c9a103`, repo `MindLink-ApS/BitSov-bitsov`**.
+Pinned protocol: **release `v0.3.0-rc18`, source-ref `20c6449ebec9d656595390ee1f1623fb6af1411f`, repo `MindLink-ApS/BitSov-bitsov`**.
 Five CLI targets: Linux x86_64/aarch64, Darwin aarch64/x86_64 and Windows x86_64.
 The fetcher requires `SHA256SUMS.asc` signed by release key `B299…EF6E`; a signed
-tag alone does not verify release bytes. rc14 is published and GPG-signed per
-the supplied release facts. The five binary hashes are recorded;
-no release assets were fetched or verified locally for this pin. Signature/byte
-verification and package/runtime acceptance remain gates. The app remains
-unpublished. See [rc14 upgrade checks](NODE_RC14_UPGRADE.md) and
+tag alone does not verify release bytes. rc18 is a published, GPG-signed
+pre-release. The five binary hashes are recorded; the signed manifest and
+Darwin arm64 bytes were verified locally for this pin. Linux bytes (Sidecar CI)
+and package/runtime acceptance remain gates. The app remains
+unpublished. See [rc18 upgrade checks](NODE_RC18_UPGRADE.md) and
 [API contract](API_READINESS.md). Existing operator identities are preserved.
 Machine form of these checks: `scripts/authority-check.sh` (CI "Authority Check"; the "Build" job
 is the compile gate, PR #9). Run from the app repo root; adjust the Website path to your checkout.
