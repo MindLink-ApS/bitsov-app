@@ -8163,6 +8163,10 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
         .plugin(device_key::init())
         .plugin(crate::pairing_link_mobile::init())
         .plugin(tauri_plugin_barcode_scanner::init());
+    // iOS: no Keystore or intent-inbox plugin yet (device keys fail closed, see
+    // device_key_mobile.rs); the QR scanner is the only native plugin.
+    #[cfg(target_os = "ios")]
+    let builder = builder.plugin(tauri_plugin_barcode_scanner::init());
     builder
         .manage(AiState::default())
         .invoke_handler(tauri::generate_handler![
