@@ -905,6 +905,13 @@ pub fn has_pending_recovery(store: &Path) -> Result<bool, String> {
 pub const PENDING_REPLACE_REFUSAL: &str = "BitSov is still finishing setup with your current node. \
     Unlock it with Touch ID once, or restart BitSov, then pair another node.";
 
+/// The attach retry loop holds the recovery lock while the current node is
+/// offline, so "try again" alone could repeat forever. Forgetting the link does
+/// not take that lock and is the way out.
+pub const BUSY_REPLACE_REFUSAL: &str = "BitSov is busy with your current node, so nothing was changed. \
+    Try again in a moment. If that node stays offline, choose “Use this Mac instead”, \
+    restart BitSov, then pair the other node from the setup screen.";
+
 /// Replace the saved remote link unless a first-run recovery journal for the
 /// current node is unresolved. The caller holds the first-run and recovery
 /// locks. Fails closed: any error keeps the old link.
@@ -917,6 +924,19 @@ pub fn replace_link_unless_pending(
         return Err(PENDING_REPLACE_REFUSAL.into());
     }
     remote_access::replace_pairing_link(app_data_dir, link.trim()).map_err(|error| error.to_string())
+}
+
+/// Replace the saved remote link only while neither the recovery lock nor the
+/// first-run lock is held. Busy fails closed and keeps the old link.
+pub fn replace_link_when_idle(
+    state: &NodeState,
+    store: &Path,
+    app_data_dir: &Path,
+    link: &str,
+) -> Result<remote_access::RemoteImportView, String> {
+    let _recovery = state.remote_recovery.try_lock().map_err(|_| BUSY_REPLACE_REFUSAL)?;
+    let _setup = state.remote_owner.try_lock().map_err(|_| BUSY_REPLACE_REFUSAL)?;
+    replace_link_unless_pending(store, app_data_dir, link)
 }
 
 #[cfg(test)]
@@ -976,29 +996,38 @@ mod tests {
         assert!(!has_pending_recovery(&store).unwrap());
     }
 
+    fn pairing_link(key: &str) -> String {
+        use base64::Engine;
+        let value = serde_json::json!({"v":1,"endpoint":"box.local:9737",
+            "box_transport_pubkey":key,"code":base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([3;32])});
+        format!("bitsov://pair/{}", base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&value).unwrap()))
+    }
+
+    /// Saves a link for a current node and returns the store and the descriptor path.
+    fn saved_link(dir: &Path, key: &str) -> (PathBuf, PathBuf) {
+        let store = dir.join("pairing");
+        std::fs::create_dir_all(&store).unwrap();
+        remote_access::import_pairing_link(dir, &pairing_link(key)).unwrap();
+        let descriptor = dir.join(remote_access::REMOTE_CONFIG_DIR)
+            .join(remote_access::REMOTE_CONFIG_FILE);
+        (store, descriptor)
+    }
+
     #[test]
     fn replace_is_refused_while_a_recovery_journal_is_pending() {
-        use base64::Engine;
-        let link_for = |key: &str| {
-            let value = serde_json::json!({"v":1,"endpoint":"box.local:9737",
-                "box_transport_pubkey":key,"code":base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([3;32])});
-            format!("bitsov://pair/{}", base64::engine::general_purpose::URL_SAFE_NO_PAD
-                .encode(serde_json::to_vec(&value).unwrap()))
-        };
         let dir = tempfile::tempdir().unwrap();
-        let store = dir.path().join("pairing");
-        std::fs::create_dir_all(&store).unwrap();
         let current = password_store::test_store::key();
-        remote_access::import_pairing_link(dir.path(), &link_for(&current)).unwrap();
-        let descriptor = dir.path().join(remote_access::REMOTE_CONFIG_DIR).join(remote_access::REMOTE_CONFIG_FILE);
+        let (store, descriptor) = saved_link(dir.path(), &current);
         let before = std::fs::read(&descriptor).unwrap();
-        Recovery {
+        let pending = Recovery {
             node_id: "ab".repeat(32), box_key: current.clone(), endpoint: "box.local:9737".into(),
             client_public_key: "33".repeat(32), device_public_key: "04".repeat(65),
             device_key_id: "key".into(), password_saved: false,
             binding: UnlockBinding { client_id: "client".into(), epoch: 7, fingerprint: "fp".into() },
-        }.save(&store).unwrap();
-        let other = link_for(&password_store::test_store::key());
+        };
+        pending.save(&store).unwrap();
+        let other = pairing_link(&password_store::test_store::key());
         let error = replace_link_unless_pending(&store, dir.path(), &other).unwrap_err();
         assert_eq!(error, PENDING_REPLACE_REFUSAL);
         assert_eq!(std::fs::read(&descriptor).unwrap(), before);
@@ -1006,6 +1035,33 @@ mod tests {
         Recovery::clear(&store).unwrap();
         assert!(replace_link_unless_pending(&store, dir.path(), &other).unwrap().restart_required);
         assert_ne!(std::fs::read(&descriptor).unwrap(), before);
+    }
+
+    #[test]
+    fn replace_is_busy_while_recovery_or_first_run_holds_its_lock() {
+        let state = NodeState::for_api("http://127.0.0.1:1/api/v1");
+        let dir = tempfile::tempdir().unwrap();
+        let (store, descriptor) = saved_link(dir.path(), &password_store::test_store::key());
+        let before = std::fs::read(&descriptor).unwrap();
+        let other = pairing_link(&password_store::test_store::key());
+        // An attach retry loop holds the recovery lock; first run or unlock holds setup.
+        {
+            let _recovery = state.remote_recovery.try_lock().unwrap();
+            let error = replace_link_when_idle(&state, &store, dir.path(), &other).unwrap_err();
+            assert_eq!(error, BUSY_REPLACE_REFUSAL);
+            assert_eq!(std::fs::read(&descriptor).unwrap(), before);
+        }
+        {
+            let _setup = state.remote_owner.try_lock().unwrap();
+            let error = replace_link_when_idle(&state, &store, dir.path(), &other).unwrap_err();
+            assert_eq!(error, BUSY_REPLACE_REFUSAL);
+            assert_eq!(std::fs::read(&descriptor).unwrap(), before);
+        }
+        // Neither lock is held: the same ticket replaces the link and frees both locks.
+        assert!(replace_link_when_idle(&state, &store, dir.path(), &other).unwrap().restart_required);
+        assert_ne!(std::fs::read(&descriptor).unwrap(), before);
+        assert!(state.remote_recovery.try_lock().is_ok());
+        assert!(state.remote_owner.try_lock().is_ok());
     }
 
     #[test]
