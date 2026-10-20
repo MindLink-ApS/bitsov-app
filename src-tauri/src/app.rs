@@ -6590,10 +6590,10 @@ fn device_error(e: device_key::DeviceKeyError) -> ActionError {
 #[cfg(not(target_os = "android"))]
 fn device_error(e: device_key::DeviceKeyError) -> ActionError {
     match e {
-        device_key::DeviceKeyError::Cancelled => ActionError::new("device_cancelled", "Touch ID was cancelled. Nothing was approved."),
-        device_key::DeviceKeyError::Unavailable => ActionError::new("device_unavailable", "This Mac has no Secure Enclave the app can use. Approve at the node instead."),
-        device_key::DeviceKeyError::BiometryUnavailable => ActionError::new("device_biometry", "Touch ID is not available on this Mac right now (no finger enrolled, or locked out after failed tries). Nothing was approved. Approve at the node instead, with the konsensus grant command."),
-        device_key::DeviceKeyError::Invalid => ActionError::new("device_invalid", "This Mac's approval key no longer works (for example, the enrolled fingerprints changed). Set up Touch ID approvals again."),
+        device_key::DeviceKeyError::Cancelled => ActionError::new("device_cancelled", "Biometric approval (Touch ID or Face ID) was cancelled. Nothing was approved."),
+        device_key::DeviceKeyError::Unavailable => ActionError::new("device_unavailable", "This device has no Secure Enclave the app can use. Approve at the node instead."),
+        device_key::DeviceKeyError::BiometryUnavailable => ActionError::new("device_biometry", "Touch ID or Face ID is not available on this device right now (not enrolled, or locked out after failed tries). Nothing was approved. Approve at the node instead, with the konsensus grant command."),
+        device_key::DeviceKeyError::Invalid => ActionError::new("device_invalid", "This device's approval key no longer works (for example, the enrolled fingerprints or face changed). Set up biometric approvals again."),
         device_key::DeviceKeyError::Other(code) => ActionError::new("device_key", format!("The Secure Enclave refused ({code}). Nothing was approved.")),
     }
 }
@@ -6605,7 +6605,7 @@ async fn device_sign(blob: Vec<u8>, message: String, reason: String) -> Result<S
         .map_err(|_| ActionError::new("device_key", if cfg!(target_os = "android") {
             "The biometric request stopped unexpectedly."
         } else {
-            "The Touch ID request stopped unexpectedly."
+            "The Touch ID or Face ID request stopped unexpectedly."
         }))?
         .map(hex::encode)
         .map_err(device_error)
