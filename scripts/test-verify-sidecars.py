@@ -134,6 +134,23 @@ class SidecarTests(unittest.TestCase):
         self.sidecar.write_bytes(b"stray binary")
         self.assert_refused(self.run_verify(["bash", "-c", hook]))
 
+    def test_default_tauri_hook_refuses_an_empty_sidecar_directory(self):
+        config = json.loads((ROOT / "src-tauri/tauri.conf.json").read_text())
+        self.sidecar.unlink()
+        result = self.run_verify(["bash", "-c", config["build"]["beforeBundleCommand"]])
+        self.assert_refused(result)
+        self.assertIn("no src-tauri/bin/konsensus-* sidecars", result.stdout)
+        self.assertEqual(list(self.bin.iterdir()), [])
+
+    def test_remote_test_bundle_hook_allows_an_empty_sidecar_directory(self):
+        overlay = ROOT / "src-tauri/tauri.remote-only.conf.json"
+        self.assertTrue(overlay.exists(), "remote-test overlay must be explicit")
+        config = json.loads(overlay.read_text())
+        self.sidecar.unlink()
+        result = self.run_verify(["bash", "-c", config["build"]["beforeBundleCommand"]])
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(list(self.bin.iterdir()), [])
+
 
 if __name__ == "__main__":
     unittest.main()
