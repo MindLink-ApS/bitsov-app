@@ -14,7 +14,8 @@
     "tauri": "tauri",
     "tauri:assistant": "BITSOV_ASSISTANT=1 tauri dev --features sit-mock",
     "tauri:dev:mainnode": "scripts/dev-node-from-main.sh",
-    "tauri:dev:external": "scripts/dev-external-node.sh"
+    "tauri:dev:external": "scripts/dev-external-node.sh",
+    "tauri:build:remote-test": "tauri build --debug --bundles app --config src-tauri/tauri.remote-only.conf.json"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

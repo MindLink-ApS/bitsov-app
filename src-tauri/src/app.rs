@@ -163,6 +163,8 @@ struct PairingCtx {
 }
 
 struct NodeState {
+    /// Fixed by the bundled identifier, never by an environment variable or pairing state.
+    remote_only: bool,
     #[cfg(all(desktop, not(feature = "mobile")))]
     owner: local_owner::OwnerState,
     ready: Mutex<bool>,
@@ -324,6 +326,21 @@ impl Default for NodeState {
 }
 
 impl NodeState {
+    fn for_identifier(identifier: &str) -> Self {
+        let mut state = Self::default();
+        state.remote_only = identifier == "tech.mindlink.bitsov.remotetest";
+        state.remote_mode.store(state.remote_only, Ordering::SeqCst);
+        state
+    }
+
+    #[cfg(all(desktop, not(feature = "mobile")))]
+    fn require_local_node(&self) -> Result<(), String> {
+        if self.remote_only {
+            return Err("BitSov Remote Test is remote pairing only; local nodes are disabled.".into());
+        }
+        Ok(())
+    }
+
     /// Export the running mode even before authentication, or after it fails.
     fn pairing_snapshot(&self) -> PairingView {
         let mut view = self.pairing_view.lock().unwrap().clone();
@@ -405,6 +422,7 @@ impl NodeState {
                 .expect("hex proxy authentication is a valid HTTP header"),
         );
         Self {
+            remote_only: false,
             api_base: api_base.into(),
             auth: Mutex::new(AuthMode::Unauthenticated),
             pairing: Mutex::new(None),
@@ -664,6 +682,7 @@ async fn init_node(
     data_dir: &Path,
     dev_sidecar: Option<&Path>,
 ) -> Result<(), String> {
+    app.state::<NodeState>().require_local_node()?;
     let cmd = match dev_sidecar {
         Some(program) => app.shell().command(program),
         None => app
@@ -1354,6 +1373,11 @@ async fn bootstrap_node(app: AppHandle) {
         }
         Ok(None) => {}
         Err(error) => return set_error(&state, error.to_string()),
+    }
+    // A fresh, forgotten or invalid remote pairing must never fall back to a
+    // local node, including when dev-node environment overrides are present.
+    if state.remote_only {
+        return set_error(&state, "Pair BitSov Remote Test with your remote node to continue.");
     }
     if let Err(error) = remote_access::prepare_local_pairing(&app_data_dir, &app_data_dir.join(PAIRING_STORE_DIR)) {
         return set_error(&state, error.to_string());
@@ -7966,6 +7990,7 @@ impl NodeState {
     /// is registered before quit looks (and quit stops it), or quit came first and
     /// nothing is spawned.
     fn spawn_child(&self, cmd: &mut std::process::Command) -> Result<Arc<SharedChild>, String> {
+        self.require_local_node()?;
         let mut slot = self.child.lock().unwrap();
         if self.quitting.load(Ordering::SeqCst) {
             return Err("the app is quitting; the node was not started".into());
@@ -8102,7 +8127,6 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
         .plugin(crate::pairing_link_mobile::init())
         .plugin(tauri_plugin_barcode_scanner::init());
     builder
-        .manage(NodeState::default())
         .manage(AiState::default())
         .invoke_handler(tauri::generate_handler![
             node_status,
@@ -8212,6 +8236,8 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             ai_local_clear
         ])
         .setup(|app| {
+            // Install the immutable profile policy before any commands or tasks run.
+            app.manage(NodeState::for_identifier(&app.config().identifier));
             #[cfg(all(desktop, not(feature = "mobile")))]
             if assistant_dev_enabled() || assistant_node_enabled() {
                 install_assistant_menu(app)?;
@@ -8250,6 +8276,33 @@ fn assistant_mock_builder() -> tauri::Builder<tauri::Wry> {
             }
             Ok(())
         })
+}
+
+#[cfg(all(test, desktop, not(feature = "mobile")))]
+mod remote_test_profile_tests {
+    use super::*;
+
+    #[test]
+    fn remote_test_is_unpaired_remote_and_refuses_local_processes() {
+        let state = NodeState::for_identifier("tech.mindlink.bitsov.remotetest");
+        assert!(state.pairing_snapshot().remote);
+        assert!(state.require_local_node().is_err());
+        // A missing command would give a spawn error if the profile guard were lost.
+        let error = state.spawn_child(&mut std::process::Command::new("/no-such-node"))
+            .unwrap_err();
+        assert!(error.contains("remote pairing only"), "{error}");
+        assert!(state.child.lock().unwrap().is_none());
+        assert!(state.config.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn other_profiles_keep_the_local_node_path() {
+        for identifier in ["tech.mindlink.bitsov", "tech.mindlink.bitsov.devexternal"] {
+            let state = NodeState::for_identifier(identifier);
+            assert!(!state.pairing_snapshot().remote);
+            assert!(state.require_local_node().is_ok());
+        }
+    }
 }
 
 /// Loopback mock harness shared with `tests/pairing.rs` (ephemeral port, test keys).
@@ -17774,7 +17827,7 @@ mod assistant_acl_tests {
         );
 
         let app = function_source(&source, "app_builder");
-        assert!(app.contains("NodeState::default()"));
+        assert!(app.contains("NodeState::for_identifier(&app.config().identifier)"));
         assert!(app.contains("bootstrap_node"));
         assert!(app.contains("tauri_plugin_shell"));
         for cmd in [

@@ -1,0 +1,25 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "identifier": "tech.mindlink.bitsov.remotetest",
+  "productName": "BitSov Remote Test",
+  "build": {
+    "beforeBundleCommand": "echo 'BitSov Remote Test: remote pairing only; no local sidecar bundled'"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "BitSov Remote Test — DEV, REMOTE ONLY",
+        "width": 1280,
+        "height": 820,
+        "resizable": true,
+        "minWidth": 360,
+        "minHeight": 560
+      }
+    ]
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app"],
+    "externalBin": []
+  }
+}

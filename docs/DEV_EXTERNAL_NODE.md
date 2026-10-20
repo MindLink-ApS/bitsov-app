@@ -3,6 +3,9 @@
 Use this when the owner already runs `konsensus start … --owner-control` on this Mac
 and wants the desktop app on that node, instead of the app starting its own sidecar.
 
+To bundle a separate debug `.app` for pairing a test Mac with a remote node, see
+[DEV_REMOTE_TEST.md](DEV_REMOTE_TEST.md).
+
 ```bash
 BITSOV_DEV_EXTERNAL_NODE=/abs/path/to/your/node-data-dir npm run tauri:dev:external
 ```
