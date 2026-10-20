@@ -22,7 +22,7 @@ import type { DeviceView, FundingAddress, FundState } from './control/types';
 import { androidQrScannerAvailable, scanPairingLink } from './pairingScanner';
 import { cameraQrScannerAvailable, scanPairingLinkWithCamera } from './cameraQrScanner';
 import { PairingActivityProvider, usePairingActivity, usePairingBlocked } from './pairingActivity';
-import { watchPairingLinks } from './pairingDeepLink';
+import { pairingLinkInboxAvailable, watchPairingLinks } from './pairingDeepLink';
 
 // The control center. First run (Start node → Pair this app → Create/restore
 // identity → Fund) is the shell's first state, shown in the centre track until
@@ -67,7 +67,8 @@ function AppScreen() {
   };
   let stopPairingLinks: (() => void) | undefined;
   onMount(() => {
-    if (canScanPairingQr) stopPairingLinks = watchPairingLinks(link => setQueuedPairing({ link }));
+    // Android intents and iOS opened URLs share one review-only queue.
+    if (pairingLinkInboxAvailable()) stopPairingLinks = watchPairingLinks(link => setQueuedPairing({ link }));
   });
   onCleanup(() => stopPairingLinks?.());
   // `?sample&organism=v2` shows the organism view against a node with N1/N2.
