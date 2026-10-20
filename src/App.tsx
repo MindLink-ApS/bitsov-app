@@ -434,6 +434,7 @@ function AppScreen() {
     >
       <ControlCenter
         remote={pairing().remote}
+        hostedBy={pairing().hosted_by ?? null}
         offline={offlineScreen()}
         retryAfterSecs={status().retry_after_secs}
         onReconnect={retryPairing}

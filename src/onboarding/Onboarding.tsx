@@ -58,6 +58,10 @@ export function Onboarding(props: {
   onCancelDevice?: () => Promise<unknown>;
   initialPairingLink?: string;
   pairingInputId?: string;
+  /** Only the ticket form (Settings → Node → Pair another node). */
+  formOnly?: boolean;
+  /** Asked after review, before anything is saved; false leaves everything as it was. */
+  confirmImport?: (view: RemotePreviewView) => Promise<boolean>;
 }) {
   // Runtime, opt-in only. This changes presentation, never node authority.
   const testNodes = (() => {
@@ -83,11 +87,12 @@ export function Onboarding(props: {
   const [importing, setImporting] = createSignal(false);
   const [scanning, setScanning] = createSignal(false);
   const [forgetting, setForgetting] = createSignal(false);
+  const [confirming, setConfirming] = createSignal(false);
   const [remoteRevision, setRemoteRevision] = createSignal(0);
   const [remoteChoiceEdited, setRemoteChoiceEdited] = createSignal(false);
   const [importResult, setImportResult] = createSignal<RemoteImportView | null>(null);
   const [importError, setImportError] = createSignal<string | null>(null);
-  const busy = () => importing() || previewing() || scanning() || forgetting();
+  const busy = () => importing() || previewing() || scanning() || forgetting() || confirming();
   usePairingActivity(() => busy() || remoteLink().length > 0 || preview() !== null || importResult() !== null);
   createEffect(() => props.onBusyChange?.(busy()));
   const editLink = (link: string) => {
@@ -136,6 +141,15 @@ export function Onboarding(props: {
       } finally { setPreviewing(false); }
       return;
     }
+    if (props.confirmImport) {
+      setConfirming(true);
+      let confirmed = false;
+      try { confirmed = await props.confirmImport(reviewed.view); }
+      catch { confirmed = false; }
+      finally { setConfirming(false); }
+      // Cancel, or a link edited meanwhile, saves nothing.
+      if (!confirmed || preview() !== reviewed || remoteLink() !== reviewed.link) return;
+    }
     setImporting(true);
     setRemoteLink('');
     setPreview(null);
@@ -180,7 +194,8 @@ export function Onboarding(props: {
   };
 
   return (
-    <section class="onboarding" aria-label="First-run setup" data-stage={stage()}>
+    <section class="onboarding" aria-label={props.formOnly ? 'Pair another node' : 'First-run setup'} data-stage={stage()}>
+      <Show when={!props.formOnly}>
       <ol class="steps stepper" aria-label="Setup progress">
         <For each={steps()}>
           {(step) => (
@@ -511,6 +526,7 @@ export function Onboarding(props: {
           onCancel={props.onCancelDevice!}
           onSkip={() => setApprovalsSkipped(true)}
         />
+      </Show>
       </Show>
 
       <Show when={target() !== 'local'}>
