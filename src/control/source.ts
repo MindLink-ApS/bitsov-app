@@ -96,6 +96,8 @@ export interface Source {
   remoteAccessForget(): Promise<void>;
   remoteAccessPreview(link: string): Promise<RemotePreviewView>;
   remoteAccessImport(link: string): Promise<RemoteImportView>;
+  /** Remote only: replace the saved link with a reviewed, confirmed ticket for another node (next start). */
+  remoteAccessReplace(link: string): Promise<RemoteImportView>;
   identityRestore(mnemonic: string): Promise<RestoreOutcome>;
   fundState(): Promise<FundState | null>;
   fundStart(sats: number): Promise<FundState>;
@@ -275,6 +277,7 @@ export const hostSource: Source = {
   remoteAccessForget: () => invoke<void>('remote_access_forget'),
   remoteAccessPreview: (link) => invoke<RemotePreviewView>('remote_access_preview', { link }),
   remoteAccessImport: (link) => invoke<RemoteImportView>('remote_access_import', { link }),
+  remoteAccessReplace: (link) => invoke<RemoteImportView>('remote_access_replace', { link }),
   nodeRepairInitialized: (confirmed) => invoke<void>('node_repair_initialized', { confirmed }),
   nodeRepairPriceFloor: (confirmed) => invoke<void>('node_repair_price_floor', { confirmed }),
   identityRestore: (mnemonic) => invoke<RestoreOutcome>('identity_restore', { mnemonic }),

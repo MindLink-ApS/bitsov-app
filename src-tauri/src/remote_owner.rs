@@ -895,6 +895,13 @@ fn bootstrap_binding(token: &str, client_id: &str, node: &str) -> Result<UnlockB
     })
 }
 
+/// True while a first-run recovery journal is unresolved for the saved node.
+/// Replacing the remote link then would make the next start check the new node
+/// against the old journal and refuse it, so callers must not replace.
+pub fn has_pending_recovery(store: &Path) -> Result<bool, String> {
+    Ok(Recovery::load(store)?.is_some())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -932,6 +939,24 @@ mod tests {
         finish_cancel(&state).unwrap();
         assert!(!password_store::test_store::contains(&key));
         assert!(Recovery::load(&store).unwrap().is_none());
+    }
+
+    #[test]
+    fn pending_recovery_is_reported_until_cleared() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("pairing");
+        std::fs::create_dir_all(&store).unwrap();
+        assert!(!has_pending_recovery(&store).unwrap());
+        let saved = Recovery {
+            node_id: "ab".repeat(32), box_key: "k".into(), endpoint: "box.local:9737".into(),
+            client_public_key: "33".repeat(32), device_public_key: "04".repeat(65),
+            device_key_id: "key".into(), password_saved: false,
+            binding: UnlockBinding { client_id: "client".into(), epoch: 7, fingerprint: "fp".into() },
+        };
+        saved.save(&store).unwrap();
+        assert!(has_pending_recovery(&store).unwrap());
+        Recovery::clear(&store).unwrap();
+        assert!(!has_pending_recovery(&store).unwrap());
     }
 
     #[test]

@@ -7,6 +7,9 @@ import { PendingApproval } from '../onboarding/LockedNode';
 import { usePairingActivity } from '../pairingActivity';
 import { createMessageEntrance } from './messageEntrance';
 import { LocalNodeSwitch } from '../onboarding/LocalNodeSwitch';
+import { PairAnotherNode } from '../onboarding/PairAnotherNode';
+import { cameraQrScannerAvailable, scanPairingLinkWithCamera } from '../cameraQrScanner';
+import { isMobilePlatform } from '../platform';
 import { DeviceApprovals } from '../onboarding/DeviceApprovals';
 import { approvalMemory, BreakerCard, breakerReason, OwnerApprovals, OwnerApprovalWait, type BreakerReason } from './OwnerApprovals';
 import { OWNER_DEVICE_APPROVAL, OWNER_DEVICE_BREAKER_RESET, refusalText, type ApprovalRequest, type ApprovalView, type DeviceKeysView } from './ownerApproval';
@@ -31,7 +34,7 @@ import { ContactPanel } from './ContactPanel';
 import { custodyBadge, CustodyBadgeView } from './custody';
 import { NO_CHANNELS, WalletPage, type WalletActions, type WalletTab } from './WalletPage';
 import { artifactActivity, logActivity, type LoggedActivity } from './wallet';
-import { androidQrScannerAvailable } from '../pairingScanner';
+import { androidQrScannerAvailable, scanPairingLink } from '../pairingScanner';
 import { callCost, createCallEngine, NO_MEDIA_DEVICES, IDLE as CALL_IDLE, isCallKind, signalCost, stunServer, type CallMedia, type CallView } from './call';
 import { createMeetingEngine, declineCost, inviteCost, joinCost, MAX_PARTICIPANTS, MEETING_IDLE, type LegState, type MeetingView, type ShownQuotes } from './meeting';
 import { admitRoom, leaveRoom, localRoom, localRooms, newRoom, rememberRoom, ROOM_CAPABILITY, ROOM_PAGE, roomOf, sameRoom, sendRoom, type LegPlan, type LocalRoom } from './room';
@@ -150,6 +153,8 @@ type Props = {
   watchUpdates?: WatchUpdates;
   watchError?: string | null;
   remote?: boolean;
+  /** The remote node's display label from its pairing link, if any. */
+  hostedBy?: string | null;
   retryAfterSecs?: number | null;
   offline?: JSX.Element;
   onReconnect?: () => Promise<void>;
@@ -2034,7 +2039,15 @@ export function ControlCenter(props: Props) {
                 onRegister={async () => { const r = await act(() => source.deviceKeyRegister()); if (r.ok) setDevice(r.value); else throw r.error.message; }}
                 onCancel={async () => { const r = await act(() => source.deviceKeyCancel()); if (r.ok) setDevice(r.value); else throw r.error.message; }}
               />
-            </>} onForgetRemote={props.remote ? () => source.remoteAccessForget() : undefined} overview={overview()} link={link()} peers={peers()} now={now()} error={props.error ?? errors.overview ?? errors.peers} onReconnect={async () => { await props.onReconnect?.(); await loadOverview(); await loadPeers(); }} />
+            </>} onForgetRemote={props.remote ? () => source.remoteAccessForget() : undefined} pairAnother={props.remote ? <PairAnotherNode
+              currentNodeId={() => overview()?.node_id ?? props.ownId}
+              currentHostedBy={() => props.hostedBy}
+              onPreview={link => source.remoteAccessPreview(link)}
+              onReplace={link => source.remoteAccessReplace(link)}
+              onScan={androidQrScannerAvailable() ? scanPairingLink : cameraQrScannerAvailable() ? scanPairingLinkWithCamera : undefined}
+              mobile={androidQrScannerAvailable()}
+              phone={isMobilePlatform()}
+            /> : undefined} overview={overview()} link={link()} peers={peers()} now={now()} error={props.error ?? errors.overview ?? errors.peers} onReconnect={async () => { await props.onReconnect?.(); await loadOverview(); await loadPeers(); }} />
           </Match>
           <Match when={tab() === 'devices'}>
             {/* The host offers Add a device only to a remote node (add_device::supported checks remote mode). */}
@@ -7351,7 +7364,7 @@ function NewTrack(props: {
 
 // ---- context panels ---------------------------------------------------------
 
-function NodePanel(props: { connection?: JSX.Element; deviceApprovals?: JSX.Element; onForgetRemote?: () => Promise<void>; overview: NodeOverview | null; link: LinkState | null; peers: Peer[]; now: number; error?: string; onReconnect: () => Promise<void> }) {
+function NodePanel(props: { connection?: JSX.Element; deviceApprovals?: JSX.Element; onForgetRemote?: () => Promise<void>; pairAnother?: JSX.Element; overview: NodeOverview | null; link: LinkState | null; peers: Peer[]; now: number; error?: string; onReconnect: () => Promise<void> }) {
   const fresh = () => freshness(props.overview?.read_at ?? null, props.now);
   const linkText = () =>
     props.link === 'open' ? 'Live' : props.link === 'connecting' ? 'Connecting' : props.link === 'closed' ? 'Reconnecting' : 'Waiting';
@@ -7360,6 +7373,7 @@ function NodePanel(props: { connection?: JSX.Element; deviceApprovals?: JSX.Elem
       <h2>Your node</h2>
       {props.deviceApprovals}
       <Show when={props.onForgetRemote}><LocalNodeSwitch onForget={() => props.onForgetRemote!()} /></Show>
+      {props.pairAnother}
       <HubTrustInfo level={3} />
       {props.connection}
       <Show when={props.overview} fallback={<Show when={!props.error}><DelayedSpinner /></Show>}>

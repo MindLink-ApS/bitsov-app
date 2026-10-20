@@ -37,6 +37,7 @@ fn main() {
             "remote_access_import",
             "pairing_link_take",
             "remote_access_forget",
+            "remote_access_replace",
             "node_overview",
             "live_link",
             "peers_list",

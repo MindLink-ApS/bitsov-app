@@ -2410,6 +2410,35 @@ fn remote_access_import(
         .map_err(|error| error.to_string())
 }
 
+/// Replace the saved remote link with a reviewed ticket for another node, after
+/// the owner confirmed it. Only for an app already using a remote node; like
+/// import, it changes the next start and never the live connection. Fails
+/// closed and keeps the old link on any error.
+#[tauri::command(rename_all = "snake_case")]
+fn remote_access_replace(
+    window: WebviewWindow<impl tauri::Runtime>,
+    app: AppHandle<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    link: String,
+) -> Result<RemoteImportView, String> {
+    reject_sealed_window(&window)?;
+    if !state.remote_mode.load(Ordering::SeqCst) {
+        return Err("this app is not using a remote node; pair one from the setup screen".into());
+    }
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("no app data dir: {error}"))?;
+    // An unresolved first-run recovery journal is bound to the current node; the
+    // next start would check the new node against it and refuse. Keep the old link.
+    #[cfg(all(desktop, not(feature = "mobile")))]
+    if remote_owner::has_pending_recovery(&app_data_dir.join(PAIRING_STORE_DIR))? {
+        return Err("BitSov is still finishing setup with your current node. Unlock it once, or restart BitSov, then pair another node.".into());
+    }
+    remote_access::replace_pairing_link(&app_data_dir, link.trim())
+        .map_err(|error| error.to_string())
+}
+
 /// Forget the saved remote link for the next startup. Do not switch a live
 /// connection (or its trust boundary) in place.
 #[tauri::command]
@@ -8128,6 +8157,7 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             remote_access_import,
             pairing_link_take,
             remote_access_forget,
+            remote_access_replace,
             node_overview,
             live_link,
             peers_list,
@@ -17224,6 +17254,7 @@ mod assistant_acl_tests {
                 "remote_access_import",
                 "pairing_link_take",
                 "remote_access_forget",
+                "remote_access_replace",
                 // Control center reads (main window only, ACL + reject_sealed_window).
                 "node_overview",
                 "live_link",
@@ -17937,6 +17968,7 @@ mod assistant_acl_tests {
                 super::remote_access_preview,
                 super::remote_access_import,
                 super::remote_access_forget,
+                super::remote_access_replace,
             ])
             // `test = true` skips the macOS Info.plist embed. A second plain
             // generate_context!() defines `_EMBED_INFO_PLIST` again and cargo
@@ -18057,7 +18089,7 @@ mod assistant_acl_tests {
         // Do not invoke forget against the user's real app-data directory in
         // this mock app. The persistence tests use isolated temporary folders.
         assert_handler_ran(invoke(&main, "node_unlock", serde_json::json!({})), "not locked");
-        for cmd in ["node_unlock", "pairing_status", "trust_acknowledge", "pairing_retry", "remote_access_preview", "remote_access_import", "remote_access_forget"] {
+        for cmd in ["node_unlock", "pairing_status", "trust_acknowledge", "pairing_retry", "remote_access_preview", "remote_access_import", "remote_access_forget", "remote_access_replace"] {
             assert_acl_denied(invoke(&assistant, cmd, serde_json::json!({})), cmd);
         }
     }

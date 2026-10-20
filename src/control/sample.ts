@@ -793,6 +793,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
     remoteAccessForget: () => Promise.reject('Remote access is not available with sample data.'),
     remoteAccessPreview: () => Promise.reject('Remote access is not available with sample data.'),
     remoteAccessImport: () => Promise.reject('Remote access is not available with sample data.'),
+    remoteAccessReplace: () => Promise.reject('Remote access is not available with sample data.'),
     nodeRepairInitialized: async () => {},
     nodeRepairPriceFloor: async () => {},
     identityRestore: () => Promise.reject('Restore is not available with sample data.'),
